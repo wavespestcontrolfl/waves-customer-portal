@@ -184,6 +184,7 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     ['has a send time', () => ({ scheduled_at: new Date(Date.now() + DAY) })],
     ['was claimed by auto-send', () => ({ estimate_data: JSON.stringify({ automation: { autoSend: { claimedAt: '2026-11-20T12:00:00.000Z' } } }) })],
     ['was claimed by auto-send (the older key)', () => ({ estimate_data: JSON.stringify({ automation: { autoSend: { claimed_at: '2026-11-20T12:00:00.000Z' } } }) })],
+    ['was claimed by auto-send (the older key, beside an empty newer key)', () => ({ estimate_data: JSON.stringify({ automation: { autoSend: { claimedAt: '', claimed_at: '2026-11-20T12:00:00.000Z' } } }) })],
     // A staff edit can leave every total at 0 and every delivery time empty.
     ['was written again after it was made', () => ({ updated_at: new Date() })],
     // Staff work that does not move updated_at (created_at = updated_at here).
@@ -216,11 +217,21 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     expect(await shellsOnly()).toBe(true);
   });
 
-  test('a street with no house number is not a door: it can be many homes', async () => {
-    const street = 'Sample St, Parrish, FL 34219';
+  test.each([
+    ['Sample St, Parrish, FL 34219'],
+    // A numbered street is not a house number.
+    ['49th St, Parrish, FL 34219'],
+  ])('a street with no house number is not a door, it can be many homes: %s', async (street) => {
     await estimate({ address: street });
 
     expect(await shellsOnly({ address: street })).toBe(false);
+  });
+
+  test('a house number on a numbered street is a door', async () => {
+    const door = '12 49th St, Parrish, FL 34219';
+    await estimate({ address: door });
+
+    expect(await shellsOnly({ address: door })).toBe(true);
   });
 
   // The run side of the same checks.

@@ -371,8 +371,10 @@ function untouchedWebFormShells(database, last10, { now = new Date() } = {}) {
     .whereRaw('COALESCE(monthly_total, 0) = 0')
     .whereRaw('COALESCE(onetime_total, 0) = 0')
     .whereRaw('COALESCE(annual_total, 0) = 0')
-    // Both keys lead-estimate-auto-send.js reads.
-    .whereRaw("COALESCE(estimate_data->'automation'->'autoSend'->>'claimedAt', estimate_data->'automation'->'autoSend'->>'claimed_at', '') = ''")
+    // Both keys lead-estimate-auto-send.js reads, each by itself: an empty
+    // one must not hide the other.
+    .whereRaw("COALESCE(estimate_data->'automation'->'autoSend'->>'claimedAt', '') = ''")
+    .whereRaw("COALESCE(estimate_data->'automation'->'autoSend'->>'claimed_at', '') = ''")
     // Any lead, soft-deleted ones too (the #6394 rule): the sweep's own
     // lead check skips a soft-deleted lead.
     .whereNotExists(function linkedToLead() {
@@ -396,9 +398,11 @@ function sameDoor(addressA, addressB) {
   if (!samePremiseDisplay(addressA, addressB, { requireLocality: true })) return false;
   const a = parseDisplayAddress(addressA);
   const b = parseDisplayAddress(addressB);
-  // A street with no house number can be many homes. The street keys are
-  // equal here, so one side answers for both.
-  if (!/^\d/.test(a.street)) return false;
+  // A street with no house number can be many homes: the key must start
+  // with a number of its own ("12 sample st", "12b sample st"), not with a
+  // numbered street ("49th st"). The street keys are equal here, so one
+  // side answers for both.
+  if (!/^\d+[a-z]?\s/.test(a.street)) return false;
   const unit = (parsed) => unitLineValueKey(normalizeUnitLine(parsed.unit));
   return unit(a) === unit(b);
 }
