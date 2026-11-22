@@ -826,6 +826,8 @@ const HAND_CHECK_MESSAGE = 'This one needs a quick hand-check before we can pric
 //   reuseOnly         optional true: a plain tap that re-opens a live offer quote. When reuseLiveQuote
 //                     answers null the core retires nothing and mints nothing: it throws
 //                     pricing_unavailable, and the live quote stays as it was. Plan offer only.
+//   reuseRowId        optional id, with reuseOnly: the live row the tap found and locked. It is judged even
+//                     when it is not among the ten newest rows of the lineage.
 //   logTag / logDetail / handMessage   wording that stays per-source
 // Returns { estimateId, token, url, reused }.
 async function mintPricedEstimate(args) {
@@ -882,6 +884,9 @@ async function mintPricedEstimate(args) {
     .whereNull('archived_at')
     .orderBy('created_at', 'desc')
     .limit(10);
+  // A tap's own candidate (reuseRowId: the live row it found and locked) is always among the rows the reuse
+  // locks and judges, however many newer ended quotes sit above it.
+  if (mint.reuseRowId && !priorRows.some((row) => String(row.id) === String(mint.reuseRowId))) priorRows.push({ id: mint.reuseRowId });
 
   const { propertyContext, propertySeed } = await resolvePropertyEvidence(mint, primaryStreet);
   const estimateData = buildEstimateData(mint, propertyContext, premisesStamp);
@@ -1608,7 +1613,7 @@ async function liveOfferOfTappedQuote(trx, fresh, { serviceKey, optionId, now })
   if (!stamp) return null;
   const planStart = parseJson(live.estimate_data, {})?.planStart;
   if (planStart?.serviceKey !== serviceKey || planStart?.optionId !== optionId) return null;
-  return { jobId: stamp.jobId, endsAt: new Date(stamp.endsAt), firstVisitFrom: stamp.firstVisitFrom };
+  return { jobId: stamp.jobId, endsAt: new Date(stamp.endsAt), firstVisitFrom: stamp.firstVisitFrom, estimateId: live.id };
 }
 
 // Plan start (GATE_PORTAL_PLAN_START, owner 2026-11-19) — a signed-in customer
@@ -1727,7 +1732,7 @@ async function mintPlanStartEstimate({
         operatorPriceAdjustment: require('../customer-moves').withMoveSetupWaiver({ internalReason: PLAN_OFFER_WAIVER_REASON }),
         expiresAt: offer.endsAt,
       } : {}),
-      ...(reopened ? { reuseOnly: true } : {}),
+      ...(reopened ? { reuseOnly: true, reuseRowId: reopened.estimateId } : {}),
       // Reuse only the quote for THIS option (the core adds today's-offer equality). An offer mint also
       // reuses only its own job's quote with the SAME dates: a plain quote, the offer of another job, or this
       // job's offer with an older end or first visit date (the offer day moved) is retired and re-minted.

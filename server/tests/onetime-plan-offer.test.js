@@ -797,7 +797,7 @@ describe('offerTerms', () => {
     expect(offerTerms('2026-11-10')).toEqual({
       offerDay: '2026-11-10',
       lastDay: '2026-12-10',
-      endsAt: new Date('2026-12-11T05:00:00.000Z'),
+      endsAt: new Date('2026-12-11T04:59:59.999Z'),
       firstVisitFrom: '2027-01-26',
       firstVisitTo: '2027-02-09',
     });
@@ -807,7 +807,7 @@ describe('offerTerms', () => {
     // The last day is Sunday, March 14, 2027, the day the clocks go forward: the next day starts at 04:00 UTC.
     const terms = offerTerms('2027-02-12');
     expect(terms.lastDay).toBe('2027-03-14');
-    expect(terms.endsAt).toEqual(new Date('2027-03-15T04:00:00.000Z'));
+    expect(terms.endsAt).toEqual(new Date('2027-03-15T03:59:59.999Z'));
   });
 
   test('the email states the same days', () => {

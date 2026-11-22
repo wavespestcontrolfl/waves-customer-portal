@@ -10983,7 +10983,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 <SlotPicker
                   website={websiteMode}
                   preview={readOnlyPreview}
-                  laterFirstVisit={data?.estimate?.planOffer === true}
+                  firstVisitFrom={data?.estimate?.planOffer === true ? data.estimate.planOfferFirstVisitFrom || null : null}
                   token={token}
                   askToken={estimate.askToken}
                   selectedSlotId={selectedSlotId}

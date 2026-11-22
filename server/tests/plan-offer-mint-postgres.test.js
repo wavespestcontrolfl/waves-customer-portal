@@ -125,7 +125,7 @@ postgres('plan offer quote (live Postgres)', () => {
   // The dates the offer must carry for a job whose service was performed `daysAgo` ET days ago, counted here by
   // hand: good through day 30 (it ends when the next ET day starts), the next visit from day 77.
   const termsFor = (daysAgo) => ({
-    endsAt: parseETDateTime(`${day(31 - daysAgo)}T00:00:00`),
+    endsAt: new Date(parseETDateTime(`${day(30 - daysAgo)}T23:59:59`).getTime() + 999),
     firstVisitFrom: day(77 - daysAgo),
   });
   // A date some tests set as a quote's expiry by hand.
@@ -438,23 +438,23 @@ postgres('plan offer quote (live Postgres)', () => {
       await intact(customer, offerQuote);
     });
 
-    // The tap reads and locks one row: the newest LIVE quote. A newer quote of the customer that has ended (still
-    // unarchived) is neither the answer nor a reason to miss the live offer behind it.
-    test('finds the live offer quote behind a newer quote that has ended', async () => {
+    // The tap reads and locks one row: the newest LIVE quote. Newer quotes of the customer that have ended (still
+    // unarchived) are neither the answer nor a reason to miss the live offer behind them: ten of them put the offer
+    // quote outside the ten rows the core reads by itself, and the tap's own row is judged all the same.
+    test('finds the live offer quote behind ten newer quotes that have ended', async () => {
       const { customer, offerQuote, plainTap } = await withLiveOffer();
-      const endedId = crypto.randomUUID();
-      await trx.raw(
+      const endedIds = Array.from({ length: 10 }, () => crypto.randomUUID());
+      for (const [index, endedId] of endedIds.entries()) await trx.raw(
         `INSERT INTO estimates
          SELECT (jsonb_populate_record(NULL::estimates, to_jsonb(e) || jsonb_build_object(
            'id', ?::text, 'token', ?::text, 'estimate_slug', ?::text, 'expires_at', ?::timestamptz, 'created_at', ?::timestamptz,
            'estimate_data', e.estimate_data #- '{planStart,offer}'))).*
          FROM estimates e WHERE e.id = ?`,
-        [endedId, crypto.randomBytes(16).toString('hex'), `ended-${endedId}`, new Date(Date.now() - DAY_MS), new Date(Date.now() + DAY_MS), offerQuote.estimateId],
+        [endedId, crypto.randomBytes(16).toString('hex'), `ended-${endedId}`, new Date(Date.now() - DAY_MS), new Date(Date.now() + (index + 1) * 60000), offerQuote.estimateId],
       );
       expect(await plainTap()).toMatchObject({ estimateId: offerQuote.estimateId, reused: true });
       expect((await rowOf(offerQuote.estimateId)).archived_at).toBeNull();
-      expect((await rowOf(endedId)).archived_at).toBeNull();
-      expect(await trx('estimates').where({ customer_id: customer.id, source: 'plan_start' })).toHaveLength(2);
+      expect(await trx('estimates').where({ customer_id: customer.id, source: 'plan_start' }).whereNull('archived_at')).toHaveLength(11);
     });
 
     test.each([

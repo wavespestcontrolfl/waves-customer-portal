@@ -8460,7 +8460,10 @@ always sends that default) and for a combo that is not the default one at the
 stored totals, each before any billing or booking; and `/data` carries
 `estimate.planOffer: true` (present only on an offer row) so the page draws the
 cadence as fixed text and omits the repricing controls, the add-a-service
-offer, the opt-out and the one-time toggle, as for `planRestart`. The portal pricing card's plain tap (`POST /api/requests/start-plan`)
+offer, the opt-out and the one-time toggle, as for `planRestart`, with
+`estimate.planOfferFirstVisitFrom` (YYYY-MM-DD, the quote's first bookable day)
+so the page's date box starts on that day and its "nothing in the next 7 days"
+line stays off. The portal pricing card's plain tap (`POST /api/requests/start-plan`)
 never retires a live offer quote of the same service and option: it re-opens the
 offer through the mint core (`reuseOnly`), which re-proves the single premises,
 today's price against the card with the setup fee taken as 0, the frozen page
@@ -8471,7 +8474,8 @@ archives nothing and frees no hold. A tap for another service or option, or for
 an offer quote that is expired, archived, accepted or changed by staff, takes the
 standard flow. No new route, token, header or rate limit; the only new response
 codes are `BEFORE_PLAN_VISIT_WINDOW`, `plan_offer_frozen` and the tap's two, and
-the only new response field is `estimate.planOffer`.
+the only new response fields are `estimate.planOffer` and
+`estimate.planOfferFirstVisitFrom`.
 `/api/public/inspection/:token` (GET + POST, plus `POST /:token/find-slots`,
 `POST /:token/availability`, `POST /:token/waitlist`; the lead-scoped "Book
 with Adam" consultation link — booking.js's free Waves Assessment (owner

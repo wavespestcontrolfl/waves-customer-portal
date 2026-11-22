@@ -200,14 +200,15 @@ function dueJobs(database, today) {
 // the offer estimate stores them (restart.js mintPlanStartEstimate `offer`): one function, so the estimate can
 // never end, or take a first visit, on another day than the email says.
 //   lastDay                         the last day the offer is good ("good through")
-//   endsAt                          the instant it ends: the start of the ET day after lastDay
+//   endsAt                          the instant it ends: the last millisecond of lastDay in ET, so every
+//                                   page that shows the estimate's expires_at as a day shows lastDay
 //   firstVisitFrom / firstVisitTo   the window of the next plan visit
 function offerTerms(offerDay) {
   const lastDay = shiftDay(offerDay, OFFER_DAYS);
   return {
     offerDay,
     lastDay,
-    endsAt: parseETDateTime(`${shiftDay(lastDay, 1)}T00:00:00`),
+    endsAt: new Date(parseETDateTime(`${lastDay}T23:59:59`).getTime() + 999),
     firstVisitFrom: shiftDay(offerDay, NEXT_VISIT_FROM_DAYS),
     firstVisitTo: shiftDay(offerDay, NEXT_VISIT_TO_DAYS),
   };

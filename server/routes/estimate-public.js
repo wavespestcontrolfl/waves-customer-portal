@@ -32687,7 +32687,9 @@ async function composeEstimateDataPayload(estimate, {
         ...(String(estimate.source || '') === 'plan_restart' ? { planRestart: true } : {}),
         // A plan offer's quote is frozen the same way (frozenOfferRefusal): the page draws it as fixed too.
         // Present only on an offer row.
-        ...(require('../services/plan-offer-estimate').planOfferOf(estimate.estimate_data) ? { planOffer: true } : {}),
+        // planOfferFirstVisitFrom: the first day the quote books (YYYY-MM-DD), where the page's date box starts.
+        ...((offer) => (offer ? { planOffer: true, planOfferFirstVisitFrom: offer.firstVisitFrom } : {}))(
+          require('../services/plan-offer-estimate').planOfferOf(estimate.estimate_data)),
         // Present only on a plan quote staff changed (staffChangedQuoteForData above): the accept's code and words.
         ...(staffChangedQuoteForData
           ? { quoteRefusal: { code: staffChangedQuoteForData.code, error: staffChangedQuoteForData.message } } : {}),
