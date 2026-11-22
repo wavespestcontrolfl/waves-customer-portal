@@ -167,6 +167,8 @@ async function pickByServiceLine(conn, techs, visit) {
 async function pickTechnicianForVisit({
   conn = defaultDb, date, windowStart, windowEnd, durationMinutes = DEFAULT_DURATION_MINUTES,
   lat = null, lng = null, zip = null, serviceType = null, serviceId = null, serviceKey = null, customerId = null, excludeServiceIds = [],
+  // The lead the visit is booked for, when the caller has it: a Waves Assessment's line (line-technician).
+  leadId = null,
   // Whose rows the availability probe skips. Default: the customer's own (a
   // fresh booking, where the caller's same-day guard owns same-customer
   // overlaps — parity with its save probe). A caller assigning an EXISTING
@@ -192,7 +194,7 @@ async function pickTechnicianForVisit({
   // The visit's place (customer, map position) rides along for GATE_TERRITORY_ROUTING.
   const linePick = await pickByServiceLine(conn, techs, {
     serviceId, serviceKey, serviceType, date, windowStart, windowEnd, durationMinutes, excludeCustomerId, excludeServiceIds,
-    zip, customerId, lat, lng,
+    zip, customerId, leadId, lat, lng,
   });
   if (linePick) return linePick;
 
