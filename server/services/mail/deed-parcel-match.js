@@ -37,8 +37,9 @@ const SEVERAL_LOTS = /^(AND|THRU|THROUGH|TO|&)(\s|$)/;
 // A deed that names a phase, unit, section or plat book itself ("... PH I", "... UNIT 3") is not handled. The map
 // spells such a part in several ways (PH and PHASE), and this module compares names letter by letter: two spellings
 // of one part would count as two names. The Clerk's text leaves these parts out (0 of 69 measured deeds have one).
-// The word alone, or written as one with its number ("PH2", "UNIT3A", "PHII", "PB81"). Not PHILLIPS, UNITY, SECOND.
-const PLAT_PART_WORD = /^(?:PH|PHASE|SUBPH|SUBPHASE|UNIT|SEC|SECTION|PB)(?:\d[0-9A-Z]*|[IVX]{1,4})?$/;
+// The word alone, or written as one with its number ("PH2", "UNIT3A", "PHII", "PHIIA", "PB81"). Not PHILLIPS,
+// UNITY, SECOND.
+const PLAT_PART_WORD = /^(?:PH|PHASE|SUBPH|SUBPHASE|UNIT|SEC|SECTION|PB)(?:\d[0-9A-Z]*|[IVX]{1,4}[A-Z]?[0-9]{0,2})?$/;
 const namesPlatPart = (words) => words.split(/[^A-Z0-9]+/).some((word) => PLAT_PART_WORD.test(word));
 // A lot or block number has one letter at most ("12A", "B"). The map writes a letter in either case, and the list
 // of forms (mapForms) covers both cases of one letter, not every mix of two ("12Ab"): such a deed is not handled.
@@ -55,7 +56,11 @@ function parseLegal(description) {
   const m = text.match(LEGAL_PATTERN);
   if (!m || SEVERAL_LOTS.test(m[3]) || namesPlatPart(m[3])) return null;
   if (!ONE_NUMBER.test(m[1]) || (m[2] && !ONE_NUMBER.test(m[2]))) return null;
-  return { lot: m[1], block: m[2] || null, subdivision: m[3] };
+  // "SAMPLE GROVE SUBDIVISION" is the plat "SAMPLE GROVE": the map adds that word to some names and leaves it out of
+  // others, and the plat-name grammar reads it as an optional part after the name.
+  const subdivision = m[3].replace(/( SUBDIVISION)+$/, '');
+  if (subdivision.length < 3) return null;
+  return { lot: m[1], block: m[2] || null, subdivision };
 }
 
 // The forms one deed lot or block number can have on the map: without leading zeros, zero-padded up to six
@@ -90,7 +95,8 @@ const lettersOf = (text) => text.replace(/[^A-Z0-9]/g, '');
 function parcelWhere(legal) {
   // The values parseLegal gives, and no other: capitals and digits for the numbers, LEGAL_PATTERN's signs in the name.
   const plain = (value, max) => typeof value === 'string' && value.length <= max && ONE_NUMBER.test(value);
-  const named = typeof legal.subdivision === 'string' && /^[A-Z0-9][A-Z0-9 &'.-]*$/.test(legal.subdivision) && !namesPlatPart(legal.subdivision);
+  const named = typeof legal.subdivision === 'string' && /^[A-Z0-9][A-Z0-9 &'.-]{2,}$/.test(legal.subdivision)
+    && !namesPlatPart(legal.subdivision) && !/ SUBDIVISION$/.test(legal.subdivision);
   if (!plain(legal.lot, 6) || !named || (legal.block && !plain(legal.block, 4))) throw new TypeError('parcelWhere needs the lot, block and subdivision of a parsed deed');
   const letters = lettersOf(legal.subdivision);
   const inList = (value) => mapForms(value).map((form) => `'${form}'`).join(', ');
@@ -145,11 +151,7 @@ const isPhaseWord = (token) => token === 'PH' || token === 'PHASE';
 const isSubphaseWord = (token) => token === 'SUBPH' || token === 'SUBPHASE';
 const platTokens = (text) => text.replace(/,/g, ' , ').split(' ').filter(Boolean);
 
-// How far the deed's own words already go into the grammar: 2 when they end the name with SUBDIVISION, else 0.
-// (A deed never names a phase here: parseLegal and parcelWhere refuse one.)
-const platStage = (deedWords) => (platTokens(deedWords).includes('SUBDIVISION') ? 2 : 0);
-
-function platRestKnown(rest, startStage) {
+function platRestKnown(rest) {
   const tokens = platTokens(rest);
   let i = 0;
   // One or more ids; between two ids a comma, AND, &, a comma and then AND or &, or nothing.
@@ -164,18 +166,15 @@ function platRestKnown(rest, startStage) {
       i = next + 1;
     }
   };
-  let stage = startStage;
-  if (stage === 0 && tokens[i] === 'SUBDIVISION') {
+  if (tokens[i] === 'SUBDIVISION') {
     i += 1;
-    stage = 2;
-  } else if (stage === 0 && isPhaseWord(tokens[i])) {
+  } else if (isPhaseWord(tokens[i])) {
     i += 1;
     if (!readIds()) return false;
-    stage = 1;
-  }
-  if (stage === 1 && isSubphaseWord(tokens[i])) {
-    i += 1;
-    if (!readIds()) return false;
+    if (isSubphaseWord(tokens[i])) {
+      i += 1;
+      if (!readIds()) return false;
+    }
   }
   const book = tokens[i] || '';
   if (book.startsWith('PB') && BOOK_PAGE.test(book.slice(2))) i += 1;
@@ -192,7 +191,7 @@ function platRelation(mapName, deedWords) {
   if (rest === null) return 'other';
   if (/^[A-Z0-9]/.test(rest)) return 'unknown'; // the deed's words end inside a word of the map's name
   const tail = rest.replace(/ +/g, ' ').trim();
-  return tail === '' || platRestKnown(tail, platStage(deedWords)) ? 'known' : 'unknown';
+  return tail === '' || platRestKnown(tail) ? 'known' : 'unknown';
 }
 
 const positiveOrNull = (value) => {

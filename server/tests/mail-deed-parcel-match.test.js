@@ -16,7 +16,8 @@ describe('parseLegal', () => {
     ['lot 9 sample grove', { lot: '9', block: null, subdivision: 'SAMPLE GROVE' }],
     ['LOT A1 BLK 2B SAMPLE GROVE', { lot: 'A1', block: '2B', subdivision: 'SAMPLE GROVE' }],
     ['LOT 9 PHILLIPS UNITY SECOND ADD', { lot: '9', block: null, subdivision: 'PHILLIPS UNITY SECOND ADD' }],
-    ['LOT 9 SAMPLE GROVE SUBDIVISION', { lot: '9', block: null, subdivision: 'SAMPLE GROVE SUBDIVISION' }],
+    ['LOT 9 SAMPLE GROVE SUBDIVISION', { lot: '9', block: null, subdivision: 'SAMPLE GROVE' }],
+    ['LOT 9 SAMPLE SUBDIVISION GROVE', { lot: '9', block: null, subdivision: 'SAMPLE SUBDIVISION GROVE' }],
     ['  LOT   9   BLK  2   SAMPLE   GROVE ', { lot: '9', block: '2', subdivision: 'SAMPLE GROVE' }],
   ])('%s', (text, expected) => {
     expect(parseLegal(text)).toEqual(expected);
@@ -42,6 +43,9 @@ describe('parseLegal', () => {
     'LOT 12 SAMPLE GROVE PH2',
     'LOT 12 SAMPLE GROVE PH2A',
     'LOT 12 SAMPLE GROVE PHII',
+    'LOT 12 SAMPLE GROVE PHIIA',
+    'LOT 12 SAMPLE GROVE PHASEIV',
+    'LOT 12 AB SUBDIVISION',
     'LOT 12 SAMPLE GROVE UNIT3',
     'LOT 12 SAMPLE GROVE SEC12',
     'LOT 12AB SAMPLE GROVE',
@@ -92,7 +96,8 @@ describe('parcelWhere', () => {
       { lot: '171', block: null, subdivision: 'RYE_RANCH' }, { lot: '171', block: null, subdivision: null },
       // A deed that names a phase, unit or section is not handled (parseLegal gives null for it).
       { lot: '171', block: null, subdivision: 'RYE RANCH PH I' }, { lot: '171', block: null, subdivision: 'RYE RANCH PHASE I' }, { lot: '171', block: null, subdivision: 'RYE RANCH UNIT 3' },
-      { lot: '171', block: null, subdivision: 'RYE RANCH PH2' }, { lot: '171', block: null, subdivision: 'RYE RANCH UNIT3' },
+      { lot: '171', block: null, subdivision: 'RYE RANCH PH2' }, { lot: '171', block: null, subdivision: 'RYE RANCH UNIT3' }, { lot: '171', block: null, subdivision: 'RYE RANCH PHIIA' },
+      { lot: '171', block: null, subdivision: 'RYE RANCH SUBDIVISION' }, { lot: '171', block: null, subdivision: 'RY' },
       // Two letters in a number: the forms would not cover every mix of capitals and lower case.
       { lot: '12AB', block: null, subdivision: 'RYE RANCH' }, { lot: '171', block: 'AB', subdivision: 'RYE RANCH' }];
     for (const legal of bad) expect(() => parcelWhere(legal)).toThrow(TypeError);
@@ -262,15 +267,24 @@ describe('queryParcels', () => {
     });
     test('a deed that names a phase is refused before any request: two spellings of one phase cannot be told apart here', async () => {
       const fetchImpl = jest.fn(answer({ features: [feature({ PAR_SUBDIV_NAME: 'RYE RANCH PH I' }), feature({ PARID: '513309060', PAR_SUBDIV_NAME: 'RYE RANCH PHASE I' })] }));
-      for (const subdivision of ['RYE RANCH PH I', 'RYE RANCH PHASE I', 'RYE RANCH PH I SUBPH A', 'RYE RANCH UNIT 3', 'RYE RANCH SEC 2', 'RYE RANCH PH2', 'RYE RANCH UNIT3']) {
+      for (const subdivision of ['RYE RANCH PH I', 'RYE RANCH PHASE I', 'RYE RANCH PH I SUBPH A', 'RYE RANCH UNIT 3', 'RYE RANCH SEC 2', 'RYE RANCH PH2', 'RYE RANCH UNIT3', 'RYE RANCH PHIIA']) {
         await expect(queryParcels({ lot: '171', block: null, subdivision }, { fetchImpl })).rejects.toThrow(TypeError);
       }
       expect(fetchImpl).not.toHaveBeenCalled();
     });
-    test('a deed that ends with SUBDIVISION: the plat book on the map is the same plat, a phase is not', async () => {
-      const named = { lot: '171', block: null, subdivision: 'RYE RANCH SUBDIVISION' };
-      expect(await flags(named, ['RYE RANCH SUBDIVISION', 'RYE RANCH SUBDIVISION PB81/1', 'RYE RANCH SUBDIVISION PH I PB81/1', 'RYE RANCH SUBDIVISION SUBDIVISION']))
-        .toEqual([true, true, false, false]);
+    test('a deed that ends with SUBDIVISION asks for the base name, so the plat with and without that word are both in the answer', async () => {
+      const named = parseLegal('LOT 171 RYE RANCH SUBDIVISION');
+      expect(named.subdivision).toBe('RYE RANCH');
+      const fetchImpl = jest.fn(answer({ features: [
+        feature({ PAR_SUBDIV_NAME: 'RYE RANCH SUBDIVISION PB81/1' }),
+        feature({ PARID: '513309060', PAR_SUBDIV_NAME: 'RYE RANCH PB81/2' }),
+      ] }));
+      const parcels = await queryParcels(named, { fetchImpl });
+      expect(new URL(fetchImpl.mock.calls[0][0]).searchParams.get('where')).toContain("LIKE 'R%Y%E%R%A%N%C%H%'");
+      expect(parcels.map((p) => p.platKnown)).toEqual([true, true]);
+      expect(chooseParcel({ sellerNames: [], parcels, permitsByParid: { 513309059: { permit_no: 'A' } } })).toEqual({ status: 'ambiguous' });
+      await expect(queryParcels({ lot: '171', block: null, subdivision: 'RYE RANCH SUBDIVISION' }, { fetchImpl })).rejects.toThrow(TypeError);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
     });
     // No clock in this test: a pattern that backtracks over these lists does not return before Jest's time limit.
     test('a very long list of phase ids is read token by token', async () => {
