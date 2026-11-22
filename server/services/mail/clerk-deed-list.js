@@ -7,10 +7,15 @@
  *
  * The parser FAILS CLOSED. Names from this page may end up on a postcard, so the page is read with a real HTML parser
  * (parse5, the tree a browser builds: a commented-out or templated table is not in it) and the tree must be the one
- * we studied: one results table in its studied place, a header row with the 11 studied names, data rows of the 11
- * studied cells, parties as one plain list, and pagers that say "page 1 of 1". Anything else (a bot wall, a redesign,
- * a second results page, rows loaded later by a script) throws a ClerkPageError instead of guessing. The caller
- * records the failed day and goes on with the others. What is proven is the HTML: no script or style sheet is run.
+ * we studied, from <html> down to each name:
+ *   - the day's panel in its studied place, holding a heading, then a pager, the one table of the page, and a pager;
+ *   - the heading's own words: first and last recording on the day asked for, and "Showing 1 to N of N" where N is
+ *     the number of rows read (so a cut-off answer, a second page, or rows that a script adds later cannot pass);
+ *   - a header row with the 11 studied names, data rows of the 11 studied cells, parties as one plain list;
+ *   - or, for a day with no recordings, the panel that says "Searched For: <the day>" and "We found 0 results".
+ * Anything else (a bot wall, a redesign, another page of the site) throws a ClerkPageError instead of guessing. The
+ * caller records the failed day and goes on with the others. What is proven is the HTML: no script or style sheet
+ * is run.
  *
  * From, To and Description are empty for about the first two days after a recording while the Clerk fills them in.
  * Such a row is returned as it is (empty arrays and an empty description); the caller skips it and reads it again
@@ -22,26 +27,30 @@ const { parse } = require('parse5');
 // Same style as manatee-permit-sync.js: a plain browser-like agent with the job's name in it.
 const USER_AGENT = 'Mozilla/5.0 (WavesPortal mail-new-home-list)';
 const BASE_URL = 'https://records.manateeclerk.com/OfficialRecords/Search/Day';
-const SEARCH_FORM_ACTION = '/OfficialRecords/Search/DoSearch';
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 30000;
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 // The studied page. Attributes are compared as a whole set, so a `hidden`, a `style` or a changed class is a
-// changed page, on the table, on a row, on a cell and on every element the table sits in.
+// changed page, on the table, on a row, on a cell and on every element the table sits in:
+//   html[lang=en] > body > div.mainContainer > div#content > div.day-listing > div#data-display.panel
+//     > div.panel-heading                      ("Showing First On: ...", "Showing 1 to N of N")
+//     > div.panel-body.table-responsive > [ pager, table#results, pager ]
 const HEADER_NAMES = ['View', 'Instrument', 'From', 'To', 'Type', 'Book', 'Page', 'Consideration', 'Description', 'Date', 'Pages'];
 const CELL_ATTRS = HEADER_NAMES.map((name) => ({ View: { class: 'no-print' }, Date: { style: 'white-space:nowrap;' } }[name] || {}));
 const ROW_ATTRS = { class: 'data-row' };
 const TABLE_ATTRS = { id: 'results', class: 'table table-primary' };
-const TABLE_ANCESTORS = [ // from the table's parent up to <html>
-  ['div', { class: 'panel-body table-responsive' }],
-  ['div', { id: 'data-display', class: 'panel panel-primary' }],
-  ['div', { class: 'day-listing' }],
+const LISTING_CLASS = 'day-listing';
+const LISTING_ANCESTORS = [ // from the day listing's parent up to <html>
   ['div', { id: 'content', class: 'container-fluid main-content' }],
   ['div', { class: 'mainContainer' }],
   ['body', {}],
   ['html', { lang: 'en' }],
 ];
+// One pager: <div class="small"><div class="pagination-container"><ul class="pagination"><li class="active"><a>1</a>
+const PAGER_PATH = [['div', { class: 'pagination-container' }], ['ul', { class: 'pagination' }], ['li', { class: 'active' }], ['a', {}]];
+// The heading of a day with rows, all its text in one line. Dates are M/D/YYYY, times are not read.
+const HEADING_PATTERN = /^Searched For: Showing First On: (\d{1,2})\/(\d{1,2})\/(\d{4}) \S+ [AP]M Showing Last On: (\d{1,2})\/(\d{1,2})\/(\d{4}) \S+ [AP]M Showing 1 to (\d+) of (\d+)$/;
 const COL = Object.fromEntries(HEADER_NAMES.map((name, i) => [name, i]));
 
 class ClerkPageError extends Error {
@@ -61,11 +70,14 @@ function dayListUrl(isoDate) {
 
 const isElement = (node) => typeof node.tagName === 'string';
 const attrOf = (node, name) => node.attrs.find((a) => a.name === name)?.value;
+const collapse = (text) => text.replace(/\s+/g, ' ').trim();
 
 function hasAttrs(node, expected) {
   return node.attrs.length === Object.keys(expected).length
     && node.attrs.every((a) => Object.hasOwn(expected, a.name) && expected[a.name] === a.value);
 }
+
+const is = (node, tag, attrs) => node.tagName === tag && hasAttrs(node, attrs);
 
 // The elements directly under a node. Anything else there must be blank text: a comment or loose text throws.
 function elementChildren(node, reason) {
@@ -86,38 +98,92 @@ function textOnly(node, reason) {
     if (child.nodeName !== '#text') throw new ClerkPageError(reason, 'Clerk page holds markup where only text is expected');
     text += child.value;
   }
-  return text.replace(/\s+/g, ' ').trim();
+  return collapse(text);
 }
 
-// Every table, form, pager and #data-display element of the live tree. A <template>'s content is not part of it.
+// All the text under a node, in page order, as one line.
+function allText(node) {
+  const pieces = [];
+  (function gather(n) {
+    for (const child of n.childNodes || []) {
+      if (child.nodeName === '#text') pieces.push(child.value);
+      else gather(child);
+    }
+  })(node);
+  return collapse(pieces.join(' '));
+}
+
+// The one element under a node when it is `tag` with exactly `attrs`; null for any other shape.
+function onlyChild(node, tag, attrs, reason) {
+  const children = elementChildren(node, reason);
+  return children.length === 1 && is(children[0], tag, attrs) ? children[0] : null;
+}
+
+// Every table, pager list and day listing of the live tree. A <template>'s content is not part of it.
 function collect(node, found) {
   for (const child of node.childNodes || []) {
     if (!isElement(child)) continue;
     if (child.tagName === 'table') found.tables.push(child);
-    if (child.tagName === 'form') found.forms.push(child);
     if (child.tagName === 'ul' && /(^|\s)pagination(\s|$)/.test(attrOf(child, 'class') || '')) found.pagers.push(child);
-    if (attrOf(child, 'id') === 'data-display') found.displays.push(child);
+    if (/(^|\s)day-listing(\s|$)/.test(attrOf(child, 'class') || '')) found.listings.push(child);
     collect(child, found);
   }
   return found;
 }
 
-// A day with no recordings (weekend, holiday) answers with the search form alone: no table, no pager and no results
-// panel. (A page that kept the panel and filled it later by script would have the panel, so it is not this page.)
-function isEmptyDay(found) {
-  return found.pagers.length === 0 && found.displays.length === 0
-    && found.forms.length === 1 && attrOf(found.forms[0], 'action') === SEARCH_FORM_ACTION;
-}
-
-function checkTablePlace(table) {
-  let node = table.parentNode;
-  const inPlace = hasAttrs(table, TABLE_ATTRS) && TABLE_ANCESTORS.every(([tag, attrs]) => {
-    const matches = Boolean(node) && node.tagName === tag && hasAttrs(node, attrs);
+// The one panel of the day listing, when the listing sits where the studied page has it; null for any other page.
+function dayPanel(found) {
+  const listing = found.listings.length === 1 && is(found.listings[0], 'div', { class: LISTING_CLASS }) ? found.listings[0] : null;
+  let node = listing && listing.parentNode;
+  const inPlace = Boolean(listing) && LISTING_ANCESTORS.every(([tag, attrs]) => {
+    const matches = Boolean(node) && is(node, tag, attrs);
     node = node && node.parentNode;
     return matches;
   });
-  if (!inPlace || !node || node.nodeName !== '#document') {
+  if (!inPlace || !node || node.nodeName !== '#document') return null;
+  const panels = elementChildren(listing, 'not_clerk_page');
+  return panels.length === 1 && panels[0].tagName === 'div' ? panels[0] : null; // its attributes: the two callers
+}
+
+// A day with no recordings (weekend, holiday) says so itself:
+// <div class="panel panel-primary"><div class="panel-heading"><strong>Searched For:</strong> 2026-11-15</div>
+// <div class="panel-body"><p class="lg">We found 0 results<span>. Please consider ...</span></p></div></div>
+function isEmptyDayPanel(panel, isoDate) {
+  if (!hasAttrs(panel, { class: 'panel panel-primary' })) return false;
+  const parts = elementChildren(panel, 'not_clerk_page');
+  return parts.length === 2
+    && is(parts[0], 'div', { class: 'panel-heading' }) && allText(parts[0]) === `Searched For: ${isoDate}`
+    && is(parts[1], 'div', { class: 'panel-body' }) && /^We found 0 results\b/.test(allText(parts[1]));
+}
+
+// The heading and the body of the panel of a day with rows; the body is a pager, the table, a pager.
+function resultsParts(panel, table) {
+  const parts = hasAttrs(panel, { id: 'data-display', class: 'panel panel-primary' }) ? elementChildren(panel, 'table_place') : [];
+  const [heading, body] = parts;
+  const inBody = parts.length === 2 && is(heading, 'div', { class: 'panel-heading' }) && is(body, 'div', { class: 'panel-body table-responsive' })
+    ? elementChildren(body, 'table_place') : [];
+  if (inBody.length !== 3 || inBody[1] !== table || !hasAttrs(table, TABLE_ATTRS)) {
     throw new ClerkPageError('table_place', 'Clerk results table is not where the studied page has it');
+  }
+  return { heading, pagers: [inBody[0], inBody[2]] };
+}
+
+// A second page of results would hide rows. Each pager must be exactly "page 1 of one".
+function isSinglePagePager(box) {
+  let node = is(box, 'div', { class: 'small' }) ? box : null;
+  for (const [tag, attrs] of PAGER_PATH) node = node && onlyChild(node, tag, attrs, 'pagination');
+  return Boolean(node) && textOnly(node, 'pagination') === '1';
+}
+
+// The heading's own account of the page: both recordings on the day asked for, and rows 1 to N of N.
+function checkHeading(heading, isoDate, rowCount) {
+  const m = allText(heading).match(HEADING_PATTERN);
+  const isoOf = (month, day, year) => `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+  if (!m || isoOf(m[1], m[2], m[3]) !== isoDate || isoOf(m[4], m[5], m[6]) !== isoDate) {
+    throw new ClerkPageError('heading', 'Clerk results heading is not the studied one for the day asked for');
+  }
+  if (Number(m[7]) !== rowCount || Number(m[8]) !== rowCount) {
+    throw new ClerkPageError('row_total', 'Clerk page does not hold all the rows its heading counts');
   }
 }
 
@@ -147,7 +213,8 @@ function partyNames(td) {
 
 function parseConsideration(text) {
   if (text === '') return null;
-  if (!/^\$[\d,]+\.\d{2}$/.test(text)) throw new ClerkPageError('consideration', 'Clerk consideration is not a dollar amount');
+  // "$425,000.00" or "$425000.00": digits, with commas only as full groups of three.
+  if (!/^\$(\d{1,3}(,\d{3})+|\d+)\.\d{2}$/.test(text)) throw new ClerkPageError('consideration', 'Clerk consideration is not a dollar amount');
   return Number(text.slice(1).replaceAll(',', ''));
 }
 
@@ -185,7 +252,7 @@ function readRows(table, isoDate) {
   }
   const [head, ...dataRows] = trs;
   checkHeader(head);
-  // A header with no rows is not an empty day (that one has no table): it is a page that gets its rows some other way.
+  // A day with no recordings has no table at all, so a header with no rows is not a page we know.
   if (dataRows.length === 0) throw new ClerkPageError('no_rows', 'Clerk results table has a header and no rows');
   const rows = dataRows.map((tr) => readDataRow(tr, isoDate));
   // The instrument number is a deed's identity for the caller: a repeat would let one row overwrite another.
@@ -195,30 +262,23 @@ function readRows(table, isoDate) {
   return rows;
 }
 
-// A second page of results would hide rows. The real page prints its pager above and below the table, each exactly
-// <ul class="pagination"><li class="active"><a>1</a></li></ul>: at least one pager, and every pager that one shape.
-function isSinglePagePager(ul) {
-  if (!hasAttrs(ul, { class: 'pagination' })) return false;
-  const items = elementChildren(ul, 'pagination');
-  if (items.length !== 1 || items[0].tagName !== 'li' || !hasAttrs(items[0], { class: 'active' })) return false;
-  const links = elementChildren(items[0], 'pagination');
-  return links.length === 1 && links[0].tagName === 'a' && links[0].attrs.length === 0 && textOnly(links[0], 'pagination') === '1';
-}
-
 function parseDayList(html, isoDate) {
   if (typeof isoDate !== 'string' || !ISO_DAY.test(isoDate)) throw new ClerkPageError('bad_day', 'parseDayList needs a date as YYYY-MM-DD');
-  const found = collect(parse(String(html || '')), { tables: [], forms: [], pagers: [], displays: [] });
+  const found = collect(parse(String(html || '')), { tables: [], pagers: [], listings: [] });
+  const panel = dayPanel(found);
+  if (!panel) throw new ClerkPageError('not_clerk_page', 'Page is not the Clerk day list');
   if (found.tables.length === 0) {
-    if (isEmptyDay(found)) return { rows: [] };
+    if (found.pagers.length === 0 && isEmptyDayPanel(panel, isoDate)) return { rows: [] };
     throw new ClerkPageError('not_clerk_page', 'Page is not the Clerk day list');
   }
   // One table on the whole page: a row can only live in a table, so no row is outside the one that is read.
   if (found.tables.length > 1) throw new ClerkPageError('multiple_tables', 'Clerk page has more than one table');
-  checkTablePlace(found.tables[0]);
-  const rows = readRows(found.tables[0], isoDate);
-  if (found.pagers.length === 0 || !found.pagers.every(isSinglePagePager)) {
+  const { heading, pagers } = resultsParts(panel, found.tables[0]);
+  if (found.pagers.length !== pagers.length || !pagers.every(isSinglePagePager)) {
     throw new ClerkPageError('pagination', 'Clerk results run over more than one page, or the pager changed');
   }
+  const rows = readRows(found.tables[0], isoDate);
+  checkHeading(heading, isoDate, rows.length);
   return { rows };
 }
 
