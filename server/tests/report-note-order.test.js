@@ -194,6 +194,13 @@ describe('the text is refused', () => {
     expect(orderRejection('I am treating outside.', 'treating outside tomorrow', timed)).toEqual({ reason: 'not_in_note', words: ['am'] });
     expect(orderRejection('I\'m treating outside.', 'treating outside tomorrow', timed)).toEqual({ reason: 'not_in_note', words: ['am'] });
     expect(orderRejection('You\'re treating outside.', 'customer treating outside tomorrow', timed)).toEqual({ reason: 'not_in_note', words: ['are'] });
+    // "I'm" may be added where "I" may, in a note with no word of time; "am" after no one else.
+    expect(orderRejection('I\'m seeing ants in the kitchen.', 'seeing ants in the kitchen', timed)).toBeNull();
+    expect(orderRejection('Ants am trailing.', 'ants trailing', timed)).toEqual({ reason: 'not_in_note', words: ['am'] });
+    // A part the screen refuses for a time has no one word of time, and carries a tense too.
+    const dated = { partGoes: (part) => /11\/22/.test(part) && 'time' };
+    expect(orderRejection('I was treating outside.', 'treating outside, on 11/22', dated)).toEqual({ reason: 'not_in_note', words: ['was'] });
+    expect(orderRejection('Treating outside.', 'treating outside, on 11/22', dated)).toBeNull();
     // A part that went whole with a word of time carries the tense of its sentence.
     const period = { wordGoes: (word) => word === 'weeks' && 'time', partGoes: (part) => /weeks/.test(part) };
     expect(orderRejection('I was treating outside.', 'treating outside, in two weeks', period)).toEqual({ reason: 'not_in_note', words: ['was'] });

@@ -17,7 +17,10 @@
  *                            tense of its part (addedTenseRejection).
  *   pairGoes(first, second)  do these two words go together, or not at all
  *                            ("no issues", a figure and its unit)?
- *   partGoes(part)           may this whole part of the note go?
+ *   partGoes(part)           may this whole part of the note go? The
+ *                            answer 'time' means it goes for a time the
+ *                            screen reads in more than one word ("on
+ *                            11/22", "on March 4"): it carried a tense too.
  *   names                    the product names the note holds
  * report-own-note.js builds it from the report's own screens (the next PR),
  * so what may go is what no report text may hold. Nothing calls this module
@@ -253,10 +256,12 @@ function leaveOutRules({ words, parts }, { wordGoes, pairGoes, partGoes, names }
   };
   const single = note.map((word, i) => named[i] || (!NEVER_LEFT_OUT.has(word) && SMALL.has(word) && !saysWhoWasTreated(i)));
   const timed = note.map((word) => wordGoes(word) === 'time');
-  const [whole, conditional] = [new Set(), new Set()];
+  const [whole, conditional, timedParts] = [new Set(), new Set(), new Set()];
   parts.forEach((raw, id) => {
     const partWords = words.filter((entry) => entry.part === id).map((entry) => entry.word);
-    if (partWords.length && partGoes(raw)) whole.add(id);
+    const goes = partWords.length && partGoes(raw);
+    if (goes) whole.add(id);
+    if (goes === 'time') timedParts.add(id);
     const opensWith = partWords.find((word) => !SMALL.has(word) && !CONDITION_LEADS.has(word));
     if (CONDITIONS.has(opensWith) || partWords.some((word) => QUALIFIERS.has(word))) conditional.add(id);
   });
@@ -264,7 +269,7 @@ function leaveOutRules({ words, parts }, { wordGoes, pairGoes, partGoes, names }
   // word before it: see placeInNote.
   const follows = new Map(groups.filter((group) => group.length > 1).map((group) => [group[0], group[1]]));
   const continues = new Map(groups.flatMap((group) => group.slice(1).map((at, n) => [at, group[n]])));
-  return { single, leans, groups, follows, continues, whole, conditional, timed };
+  return { single, leans, groups, follows, continues, whole, conditional, timed, timedParts };
 }
 
 // ── Same order ─────────────────────────────────────────────────────────
@@ -293,11 +298,14 @@ function noPlaceRejection(out, k, note, from, { continues }, taken) {
 
 // A word the text adds: a small word; "I" where a sentence starts (`opens`)
 // or after a joining word (walkNote then looks for a person before it);
+// "am" right after "I" ("I'm seeing ants": addedTenseRejection refuses it
+// where a word of time went);
 // "you" after a word of speech ("You said you"; walkNote then looks for
 // the customer). Never "me": "neighbor said" is not "Neighbor told me".
 function addedWordAllowed(out, k, opens) {
   const word = out[k];
   if (word === 'i') return opens || CLAUSE_OPENERS.has(out[k - 1]);
+  if (word === 'am') return out[k - 1] === 'i';
   if (ADDABLE.has(word)) return true;
   return word === 'you' && ['said', 'told', 'me'].includes(out[k - 1]);
 }
@@ -470,7 +478,9 @@ function leftOutRejection(usedIn, out, read, rules) {
 // "-ing" of that part ("I was treating outside." is past work, "I am
 // treating outside." is work now), also with words of the part between the
 // two ("I was spot treating outside."). A contracted form is a form too
-// ("I'm treating outside."). What a lost word of time speaks for:
+// ("I'm treating outside."). A part the screen refuses for a time counts
+// as words of time ("on 11/22", "on March 4"). What a lost word of time
+// speaks for:
 //   - its own part;
 //   - every part of its sentence, when its part went whole ("treating
 //     outside, in two weeks", "treating outside, hopefully tomorrow"). The
@@ -487,7 +497,7 @@ function addedTenseRejection(textWords, placedAt, read, rules) {
   const onlyTime = (part) => everyWordOf(part, (word, i) => rules.timed[i] || SMALL.has(word) || isCount(word) || LEADS_TO_A_TIME.has(word));
   const lostTime = new Set();
   read.words.forEach((entry, i) => {
-    if (!rules.timed[i] || placedAt[i] >= 0) return;
+    if (placedAt[i] >= 0 || !(rules.timed[i] || rules.timedParts.has(entry.part))) return;
     lostTime.add(entry.part);
     if (!wentWhole(entry.part)) return;
     read.words.filter((other) => other.sentence === entry.sentence).forEach((other) => lostTime.add(other.part));

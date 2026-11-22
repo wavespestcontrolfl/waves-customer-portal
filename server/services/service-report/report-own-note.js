@@ -148,14 +148,14 @@ const DATE_RE = new RegExp(`\\b(?:${MONTH_SRC}|may)\\.?\\s+${DAY_SRC}\\b|\\b${DA
 // a day after a word that leads to a day ("on 11/22", "on 3/4"). Figures
 // with a measure after them are a fraction ("mesh on 1/4 inch gaps"). "In"
 // is a measure only after a fraction of an inch (halves to sixty-fourths)
-// and before what it measures ("on 1/4 in vents", "on 3/8 in. hardware
-// cloth"): "on 11/22 in vents", "on 3/4 in the yard" and "on 3/4 in shaded
-// areas" are dates. The list is the safe side on purpose: a date in a
+// and before the thing it measures ("on 1/4 in vents", "on 3/8 in. hardware
+// cloth"): "on 11/22 in vents", "on 3/4 in the yard", "on 3/4 in shaded
+// areas" and "on 3/4 in deep shade" are dates. The list is the safe side on purpose: a date in a
 // report is a promise, and a measure before a thing that is not listed
 // costs the note one refusal.
 const MEASURE_SRC = '["\'″′]|(?:inch(?:es)?|ft|foot|feet|oz|ounces?|gal(?:lons?)?|cups?|lbs?|pounds?|acres?|yards?|of)\\b';
 const INCH_FRACTION_SRC = '(?:1\\/2|[13]\\/4|[1357]\\/8|(?:[13579]|1[135])\\/16|\\d{1,2}\\/(?:32|64))';
-const MEASURED_SRC = '(?:gaps?|holes?|cracks?|crevices?|openings?|vents?|mesh|screens?|screening|hardware|cloth|wire|pipes?|lines?|tubing|conduits?|weep|wide|long|deep|thick|or\\s+(?:less|more|smaller|larger|bigger|wider))';
+const MEASURED_SRC = '(?:gaps?|holes?|cracks?|crevices?|openings?|vents?|mesh|screens?|screening|hardware|cloth|wire|pipes?|lines?|tubing|conduits?|weep)';
 const INCHES_SRC = `${INCH_FRACTION_SRC}[\\s-]*in\\b\\.?\\s+${MEASURED_SRC}\\b`;
 const FIGURE_DATE_RE = new RegExp('\\b\\d{1,2}[/-]\\d{1,2}[/-]\\d{2,4}\\b'
   + `|\\b(?:on|by|until|till|after|before|since)\\s+(?:the\\s+)?(?!${INCHES_SRC})\\d{1,2}\\/\\d{1,2}\\b(?![\\s-]*(?:${MEASURE_SRC}))`, 'i');
@@ -238,9 +238,11 @@ function whatMayGo(screens, names) {
     },
     pairGoes: (first, second) => REFUSED_PAIRS.includes(`${first} ${second}`)
       || (isCount(first) && !isCount(second) && (PERIOD_RE.test(second) || reasonOf(`${figure(first)} ${second}`) === 'amount')),
+    // The reason is the answer here too: 'time' tells the order check that
+    // the part carried a tense ("on 11/22" has no one word of time).
     partGoes: (part) => {
       const reason = reasonOf(part);
-      return REDACTED_RE.test(part) || (Boolean(reason) && reason !== 'instruction') || orderToCustomer(noteWords(part));
+      return REDACTED_RE.test(part) || (reason !== 'instruction' && reason) || orderToCustomer(noteWords(part));
     },
     names,
   };
