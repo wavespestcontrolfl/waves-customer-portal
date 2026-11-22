@@ -204,7 +204,9 @@ function namingTier(raw, base, savings, { estimateTier, credited, serviceKey }) 
   const lineTier = (object(raw.discount).appliedDiscounts || []).find((item) => item.type === 'waveguard');
   const inferable = !credited && !!estimateTier && !lineFlagsBlockPercentDiscount(raw) && !staffAdjustedRow(raw)
     && !rowRateConflicts(raw, estimateTier.amount)
-    && require('../routes/estimate-public').recurringServiceReceivesTierDiscount({ ...raw, service: raw.service || serviceKey || undefined });
+    // The eligibility the row saved at the estimate wins over today's configuration (a false one is refused above).
+    && (raw.waveGuardDiscountEligible === true || require('../routes/estimate-public')
+      .recurringServiceReceivesTierDiscount({ ...raw, service: raw.service || serviceKey || undefined }));
   if (lineTier || !inferable) return lineTier || null;
   const tierSavings = tierSavingsOn(base, Number(estimateTier.amount));
   if (tierSavings === null) return null;

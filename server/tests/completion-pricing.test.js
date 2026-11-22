@@ -103,6 +103,11 @@ describe('completion estimate evidence', () => {
     expect(names(acceptedPricing(row(96, { service: 'rodent_bait' }), platinum))).toEqual(unnamed(24));
     expect(names(acceptedPricing(row(96, { service: 'rodent_bait', perApplicationBilled: true }), platinum)))
       .toEqual([['WaveGuard Platinum', 24, 20, true]]);
+    // The eligibility the row saved at the estimate wins over what today's rules say about its service.
+    expect(names(acceptedPricing(row(96, { service: 'rodent_bait', waveGuardDiscountEligible: true }), platinum)))
+      .toEqual([['WaveGuard Platinum', 24, 20, true]]);
+    expect(names(acceptedPricing(row(96, { service: 'rodent_bait', perApplicationBilled: true, waveGuardDiscountEligible: false }), platinum)))
+      .toEqual(unnamed(24));
     // A rate the row recorded for itself must be the tier's rate: a recorded 0% or another rate keeps one line.
     expect(names(acceptedPricing(row(96, { discount: { appliedDiscountPercent: 0, effectiveDiscount: 0 } }), platinum))).toEqual(unnamed(24));
     expect(names(acceptedPricing(row(96, { discount: { effectiveDiscount: 0.15 } }), platinum))).toEqual(unnamed(24));
