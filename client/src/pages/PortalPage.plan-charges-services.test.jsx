@@ -106,6 +106,34 @@ describe('resolvePlanServices — one service list for My Plan and Billing', () 
     expect(confirmedIds(bronze, row, [row])).toEqual([]);
   });
 
+  // The two reads return the same visit in two shapes: /schedule/next
+  // (all properties) is a thin projection with no coverage verdict, no
+  // family and no catalog name; the schedule row carries all three.
+  describe('the next visit and its own schedule row', () => {
+    const thinNext = { id: 'v-1', serviceType: 'Pest Control', date: '2026-12-01', status: 'pending', isRecurring: true, isCallback: false };
+
+    it('the schedule row\'s "not plan coverage" wins over the next visit\'s label', () => {
+      const scheduleRow = { ...thinNext, waveguardQualifying: false };
+      const { includedServices, confirmedServices } = resolvePlanServices(bronze, thinNext, [scheduleRow, LAWN]);
+      expect(includedServices.map((s) => s.id)).toEqual(['lawn_care']);
+      expect(confirmedServices.map((s) => s.id)).toEqual(['lawn_care']);
+    });
+
+    it('the schedule row\'s family and catalog name win over the next visit\'s label', () => {
+      const scheduleRow = {
+        ...thinNext, waveguardQualifying: true, serviceFamily: 'lawn_care', serviceDisplayName: 'Lawn Care Program',
+      };
+      const { confirmedServices } = resolvePlanServices(bronze, thinNext, [scheduleRow]);
+      expect(confirmedServices.map((s) => s.id)).toEqual(['lawn_care']);
+      expect(confirmedServices[0].displayName).toBe('Lawn Care Program');
+    });
+
+    it('a next visit the schedule does not list still counts, by its own label', () => {
+      expect(confirmedIds(bronze, thinNext, [])).toEqual(['pest_control']);
+      expect(confirmedIds({ ...bronze, tier: 'Silver' }, thinNext, [LAWN])).toEqual(['pest_control', 'lawn_care']);
+    });
+  });
+
   it('pest control is named by its last upcoming visit', () => {
     const monthly = visit('Monthly Pest Control', { id: 'v-later', date: '2027-01-10' });
     const { includedServices, pestPlanName } = resolvePlanServices(bronze, PEST, [PEST, monthly]);
@@ -157,6 +185,15 @@ describe('BillingTab — Plan Charges', () => {
     const box = await renderPlanCharges({ ...bronze, tier: 'Gold' });
     expect(await within(box).findByText('Lawn Care Program')).toBeInTheDocument();
     expect(within(box).queryByText(/Pest Control|Mosquito/)).not.toBeInTheDocument();
+  });
+
+  it('the box follows the schedule row when the next visit\'s label disagrees with it', async () => {
+    const thinNext = { id: 'v-1', serviceType: 'Pest Control', date: '2026-12-01', status: 'pending', isRecurring: true, isCallback: false };
+    api.getNextService.mockResolvedValue({ coverageOnly: true, next: thinNext });
+    api.getSchedule.mockResolvedValue({ upcoming: [{ ...thinNext, waveguardQualifying: false }, LAWN] });
+    const box = await renderPlanCharges(bronze);
+    expect(await within(box).findByText('Lawn Care Program')).toBeInTheDocument();
+    expect(within(box).queryByText(/Pest Control/)).not.toBeInTheDocument();
   });
 
   it('names no service when the schedule read fails; the plan line stays', async () => {

@@ -11246,7 +11246,15 @@ export function resolvePlanServices(customer, nextService, upcomingServices = []
     const realName = planRowName(service);
     if (realName && !detectedServiceNames[id]) detectedServiceNames[id] = realName;
   };
-  [nextService, ...upcomingServices].filter(isPlanCoverageRow).forEach(addDetectedService);
+  // One row per visit, and the schedule's row stands for a visit both reads
+  // return: the all-properties next-visit projection carries no
+  // waveguardQualifying, serviceFamily or serviceDisplayName, so on its own
+  // its label could confirm coverage the schedule row of the SAME visit rules
+  // out, or put it in another family (pre-push audit 2026-11-22).
+  const scheduleVisitIds = new Set(upcomingServices.map((row) => row?.id).filter((id) => id != null).map(String));
+  const nextIsOnSchedule = nextService?.id != null && scheduleVisitIds.has(String(nextService.id));
+  const coverageRows = nextIsOnSchedule ? upcomingServices : [nextService, ...upcomingServices];
+  coverageRows.filter(isPlanCoverageRow).forEach(addDetectedService);
   // The pest card names the plan as it goes on: its LAST upcoming visit (the
   // schedule read is in date order). After a frequency change the next visit
   // can be one that stays as booked on the old plan
