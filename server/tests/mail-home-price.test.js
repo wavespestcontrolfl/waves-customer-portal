@@ -372,7 +372,7 @@ describe('a price engine that is away', () => {
     priceHome.mockResolvedValue(ENGINE_FAILED);
     const t = setup({ rows });
     const failure = await t.run().catch((err) => err);
-    expect(failure.message).toBe('Mail home prices: stopped after 3 price engine failures in a row');
+    expect(failure.message).toBe('Mail home prices: stopped after 3 quote failures in a row (price engine or member check)');
     expect(priceHome).toHaveBeenCalledTimes(3);
     expect(saved(t.deps).map(([row]) => row)).toEqual(rows.slice(0, 3));
     expect(failure.summary).toMatchObject({ engineStop: true, quotes: 3, engineFailures: 3, priced: 0, byReason: { 'failed/engine': 3 } });
@@ -383,7 +383,7 @@ describe('a price engine that is away', () => {
     priceHome.mockResolvedValueOnce(PRICED).mockResolvedValue(ENGINE_FAILED);
     const t = setup({ rows });
     const failure = await t.run().catch((err) => err);
-    expect(failure.message).toBe('Mail home prices: stopped after 3 price engine failures in a row');
+    expect(failure.message).toBe('Mail home prices: stopped after 3 quote failures in a row (price engine or member check)');
     expect(saved(t.deps)).toHaveLength(4);
     expect(failure.summary).toMatchObject({ engineStop: true, quotes: 4, engineFailures: 3, priced: 1 });
   });
@@ -395,8 +395,18 @@ describe('a price engine that is away', () => {
     let saves = 0;
     const t = setup({ rows, savePriceResult: jest.fn(async () => { saves += 1; if (saves === 4) clockNow += BUDGET_MS; return { written: true }; }) });
     const failure = await runHomePrices({ now: () => clockNow, deps: t.deps }).catch((err) => err);
-    expect(failure.message).toBe('Mail home prices: stopped after 3 price engine failures in a row');
+    expect(failure.message).toBe('Mail home prices: stopped after 3 quote failures in a row (price engine or member check)');
     expect(failure.summary).toMatchObject({ engineStop: true, budgetSpent: false, quotes: 4 });
+  });
+
+  test('a member check that fails counts as a quote failure: three in a row stop the run, every home failed is a failed run', async () => {
+    const MEMBER_CHECK_FAILED = { status: 'failed', reason: 'member_check', ...FACTS };
+    priceHome.mockResolvedValue(MEMBER_CHECK_FAILED);
+    const stopped = await setup({ rows: Array.from({ length: 6 }, () => makeRow()) }).run().catch((err) => err);
+    expect(stopped.message).toBe('Mail home prices: stopped after 3 quote failures in a row (price engine or member check)');
+    expect(stopped.summary).toMatchObject({ engineStop: true, quotes: 3, engineFailures: 3, byReason: { 'failed/member_check': 3 } });
+    const short = await setup({ rows: [makeRow(), makeRow()] }).run().catch((err) => err);
+    expect(short.message).toBe('Mail home prices: the quote (price engine or member check) failed for every home it was asked (2)');
   });
 
   test('three errors in a row on the last rows of a batch set the stop too', async () => {
@@ -422,7 +432,7 @@ describe('a price engine that is away', () => {
     priceHome.mockResolvedValue(ENGINE_FAILED);
     const t = setup({ rows: [a, b] });
     const failure = await t.run().catch((err) => err);
-    expect(failure.message).toBe('Mail home prices: the price engine failed for every home it was asked (2)');
+    expect(failure.message).toBe('Mail home prices: the quote (price engine or member check) failed for every home it was asked (2)');
     expect(saved(t.deps)).toHaveLength(2);
     // A not-clean answer is an answer: a run of only not-clean homes is a good run.
     priceHome.mockResolvedValue({ status: 'not_clean', reason: 'engine_review', ...FACTS });

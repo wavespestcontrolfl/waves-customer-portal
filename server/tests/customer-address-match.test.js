@@ -77,6 +77,16 @@ describe('findCustomersAtAddress', () => {
     await expect(findCustomersAtAddress(db, '123 Palm Ave, Venice, FL 34285', { strict: true })).rejects.toThrow('connection reset');
   });
 
+  it('strict: a leg that fills its row cap throws, so a member past the cap is never read as no member', async () => {
+    const many = Array.from({ length: 2000 }, (_, i) => ROW(`r${i}`, '123 Other St'));
+    await expect(findCustomersAtAddress(fakeDb({ customers: many }), '123 Palm Ave, Venice, FL 34285', { strict: true }))
+      .rejects.toThrow('the primary leg filled its 2000-row cap');
+    await expect(findCustomersAtAddress(fakeDb({ customers: [], properties: many }), '123 Palm Ave, Venice, FL 34285', { strict: true }))
+      .rejects.toThrow('the property-address leg filled its 2000-row cap');
+    // Not strict: the old fail-soft read, no throw.
+    await expect(findCustomersAtAddress(fakeDb({ customers: many }), '123 Palm Ave, Venice, FL 34285')).resolves.toEqual([]);
+  });
+
   it('a failing property leg is skipped, not fatal', async () => {
     const db = fakeDb({ customers: [ROW('a', '123 Palm Ave')], propertyError: new Error('relation "customer_properties" does not exist') });
     const ids = (await findCustomersAtAddress(db, '123 Palm Ave, Venice, FL 34285')).map((r) => r.id);

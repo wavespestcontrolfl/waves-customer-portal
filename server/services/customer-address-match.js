@@ -29,6 +29,9 @@ const logger = require('./logger');
 const { sameStreetAddress, addressPremiseKey, addressUnitKey, canonicalizeLeadingUnit } = require('./estimator-engine/address-compare');
 
 const PER_LEG_LIMIT = 50;
+// strict: a far higher cap, and a leg that fills it throws (the search did
+// not see every row, so "no match" would not be an answer).
+const STRICT_LEG_LIMIT = 2000;
 
 // The complete leading house-number token, read from the street-first form
 // the comparator uses. "123A Main St", "123-125 Main St", "123/2 Main St"
@@ -49,7 +52,8 @@ function candidateAddressString(row) {
 
 /**
  * `strict: true` throws when the property-address leg fails, instead of
- *   returning the primary leg alone (the primary leg always throws).
+ *   returning the primary leg alone (the primary leg always throws), and
+ *   reads up to STRICT_LEG_LIMIT rows a leg, throwing when a leg fills it.
  * @returns {Promise<Array<object>>} customer rows (deduped by id) whose
  *   primary or property address is the same street address, each with
  *   `matchedVia: 'primary' | 'property'` and the matched address columns.
@@ -57,19 +61,24 @@ function candidateAddressString(row) {
 async function findCustomersAtAddress(database, address, { excludeCustomerId = null, strict = false } = {}) {
   const houseNumber = houseNumberOf(address);
   if (!houseNumber) return [];
+  const legLimit = strict ? STRICT_LEG_LIMIT : PER_LEG_LIMIT;
+  const complete = (rows, leg) => {
+    if (strict && rows.length >= legLimit) throw new Error(`customer-address-match: the ${leg} leg filled its ${legLimit}-row cap; the search is not complete`);
+    return rows;
+  };
 
   const primary = await database('customers')
     .where((q) => q.where('active', true).orWhereNull('active'))
     .whereNull('deleted_at')
     .where('address_line1', 'ilike', `${houseNumber} %`)
     .orderBy('id')
-    .limit(PER_LEG_LIMIT)
+    .limit(legLimit)
     .select(
       'id', 'account_id', 'first_name', 'last_name', 'phone', 'email',
       'address_line1', 'address_line2', 'city', 'state', 'zip',
       'waveguard_tier', 'monthly_rate', 'pipeline_stage',
     );
-  const candidates = primary.map((row) => ({ ...row, matchedVia: 'primary' }));
+  const candidates = complete(primary, 'primary').map((row) => ({ ...row, matchedVia: 'primary' }));
 
   try {
     const property = await database('customer_properties as cp')
@@ -79,13 +88,13 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
       .whereNull('c.deleted_at')
       .where('cp.address_line1', 'ilike', `${houseNumber} %`)
       .orderBy('cp.id')
-      .limit(PER_LEG_LIMIT)
+      .limit(legLimit)
       .select(
         'c.id', 'c.account_id', 'c.first_name', 'c.last_name', 'c.phone', 'c.email',
         'c.waveguard_tier', 'c.monthly_rate', 'c.pipeline_stage',
         'cp.address_line1', 'cp.address_line2', 'cp.city', 'cp.state', 'cp.zip',
       );
-    candidates.push(...property.map((row) => ({ ...row, matchedVia: 'property' })));
+    candidates.push(...complete(property, 'property-address').map((row) => ({ ...row, matchedVia: 'property' })));
   } catch (propErr) {
     // strict: a caller that must not read a partial list as "nobody else is here" gets the error instead.
     if (strict) throw propErr;
