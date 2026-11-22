@@ -1512,9 +1512,17 @@ other's probe.
 these routes byte-identical, with no extra query).** `/api/booking/availability`,
 `/find-slots` and the `/capture-intent` revalidation (all through
 `buildFunnelAvailability`) pass the funnel service's lines (`pest_control` →
-general pest, `lawn_care` / `tree_shrub` → lawn, `mosquito`, `rodent`,
-`termite` / `bora_care` → termite) to `buildBookingAvailability` as
-`serviceLines`. When at least one of those lines has a home or gap technician set
+general pest, `lawn_care` / `tree_shrub` → lawn, `mosquito`, `rodent` →
+exclusion, `termite` / `bora_care` → termite) to `buildBookingAvailability` as
+`serviceLines`. The `rodent` choice saves a general "Rodent Control" visit, the
+first look at a rodent problem (the booking-link text sends a rodent inspection
+here too); since 2026-11-21 that visit is on the `exclusion` line with the
+rodent inspection (`BOOKING_FUNNEL_SERVICE_LINES` in `routes/booking.js`; the
+saved visit's name reads the same line, alone or as one part of a two-service
+name such as "Mosquito Control + Rodent Control"), and the `rodent` line is
+only trapping and bait-station work. So `/availability`, `/find-slots` and the
+`/capture-intent` revalidation offer the rodent choice on the exclusion line's
+home or gap technician. When at least one of those lines has a home or gap technician set
 in `service_line_techs` (the Team tab "Service lines" card), the offer keeps only
 slots on a technician who is the home or gap technician of EVERY mapped line (a
 two-service key such as `pest_control+lawn_care` therefore needs one technician
@@ -1972,7 +1980,13 @@ value leave these routes byte-identical, with no extra query).**
 slots on the home or gap technician of the line(s) the held visit carries: the
 estimate's primary program's line (the program the hold stamps), or every
 program's line for a combined capacity hold, so only a technician on every one of
-those lines is offered. A line with no technician set in `service_line_techs`
+those lines is offered. Rodent exclusion work is its own line since 2026-11-21
+(`exclusion`: the sealing, wire mesh, roof-entry cover, sanitation and rodent
+inspection service keys, `CATALOG_KEY_LINES`, and the general rodent visit: a
+visit named only "Rodent Control", which is also what `/book`'s rodent choice
+saves and offers by); trapping and bait stations stay on
+`rodent`, so an exclusion estimate and a trapping estimate can list different
+technicians. A line with no technician set in `service_line_techs`
 adds no rule. At a date and start both have, the home technician's slot is the
 one listed; the gap technician's slots fill the starts the home technician has
 none for. Each listed slot stays a complete slot with its own `techId`,
@@ -3469,7 +3483,31 @@ report identity for any family in `GUARDED_OWNERSHIP_FAMILIES`
 though termite left the ladder itself) fails the WHOLE report card closed
 — the unseeded-next-visit gap and a just-cancelled plan are
 indistinguishable, so offering the family and advancing past it are each
-wrong in one of those worlds.
+wrong in one of those worlds. The same live render (`mode === 'live'`,
+under `GATE_REPORT_CROSS_SELL`) carries the `referral` card from
+`composeReferralCard` (`services/referral-share.js`); a callback report
+carries neither card while `GATE_RESERVICE_REPORT_COPY` is on, and with
+that gate off a callback report carries them like any other report:
+the static headline + CTA, and with `GATE_REFERRAL_STEP2` on an `offer`
+string whose amounts come from the live referral settings (the member
+sentence is dropped at the yearly limit; no card at all when the
+program is paused or its settings are unreadable). Read-only: a render
+enrolls no promoter, writes nothing and carries no personal data.
+Pest price photo facts (`GATE_PEST_PRICE_PHOTO_FACTS`, owner 2026-11-21, "1, 2";
+dark by default): the gate adds no field and removes none. On, the pest
+offer's per-application price (`crossSell.option.perVisit`, and the same
+price on the portal offer card, the portal pricing card, the plan start and
+the one-tap purchase) is computed with the photo's shrubs, complexity and
+near-water facts when the property lookup's only doubt is the lawn area,
+in place of the neutral defaults (a fact the vision providers disputed
+keeps its default). An estimate minted from that offer keeps the facts in
+`engineInputs`, so the estimate page (`GET /api/estimates/:token/data`)
+prices the same plan rate; when staff turn on its one-time choice, that
+amount is computed from the quarterly rate as before and so follows it.
+It can also add the engine's hand-check
+mark to a pest line (heavy shrubs with a complex landscape), and such an
+offer degrades to the quote CTA as any held price does. Off or unset: the
+price of today.
 
 The payload's `protocol.structuredObservations` contains only the saved
 completion-form observation snapshot, and a nonempty snapshot carries
@@ -7360,6 +7398,9 @@ Staff authentication (`server/routes/admin-auth.js`, mounted at
 15 min) and answers every failure with a generic 401 `Invalid credentials`;
 `/forgot-password` (5 per 15 min) and `/reset-password` (10 per 15 min) key
 on `unauthenticatedAuthLimitKey` with production-only limiters;
+`POST /login` issues a password session only for a row with its own stored
+password hash (the timing comparison against the fixed stand-in hash still
+runs for a row with none, and a match there is refused);
 `/change-password`, `/register` (requireAdmin), and `/me` require the staff
 bearer. Two-step sign-in (`GATE_ADMIN_MFA`, dark): for an enrolled account
 `/login` returns `{ mfaRequired, challengeToken }` (a 5-minute signed JWT of
@@ -9356,8 +9397,11 @@ Same composer as the service report's tap — `services/referral-share.js`
 `enrollPromoter` with the household 23505 fallback scoped to account_id,
 owner-voice share copy, exact-cents referee amount). The RENDER payloads
 (/data, the accept response, the already-accepted retry) carry only the
-static headline + CTA via `composeReferralCard`; enrollment happens on the
-tap only, never on a read. Guards: gate with a gate-aware limiter skip
+static headline + CTA via `composeReferralCard`, plus an `offer` string
+while `GATE_REFERRAL_STEP2` is on (amounts from the live referral
+settings; the member sentence is dropped at the yearly limit; no card
+when the program is paused or its settings are unreadable; read-only,
+no personal data); enrollment happens on the tap only, never on a read. Guards: gate with a gate-aware limiter skip
 (dark = generic 404), token format gate, 5/min shared IPv6-safe key, the
 durable call-side linkage verdict, full customer-viewability +
 accepted-only + linked-customer, inactive program = 404, `err.code`-only

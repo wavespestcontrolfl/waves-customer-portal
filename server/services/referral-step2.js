@@ -82,6 +82,15 @@ const friendShareClause = (refereeCents, code) => `they'll give you a ${dollars(
 // The friend's part of the member invitation email's reward line (referral.invite), after "you get a $25 referral reward and ".
 const memberInviteFriendClause = (refereeCents) => `they get a ${dollars(refereeCents)} credit after their first plan service`;
 
+// The share card's offer line (service report + accepted-estimate screens), gate on: "They get a $50 credit after their
+// first plan service. You get $25." Each sentence stands alone and drops when its amount is 0; the member sentence also
+// drops at the yearly limit (never promise a credit that will not post). '' when neither is left: the card keeps its
+// static words. The caller reads the live amounts and the limit (referralOfferDecision).
+const shareCardOffer = ({ refereeCents, memberCents, atLimit = false }) => [
+  Number(refereeCents) > 0 ? `They get a ${dollars(refereeCents)} credit after their first plan service.` : '',
+  !atLimit && Number(memberCents) > 0 ? `You get ${dollars(memberCents)}.` : '',
+].filter(Boolean).join(' ');
+
 // The member's credit email, account-credit destination (the same line with the gate on or off). Account credit is used
 // only after the customer turns the switch on, so the line says how. It names no invoice: even with the switch on, an
 // invoice another payer is billed for or one on a payment plan takes no credit. The caller passes true only for a
@@ -92,5 +101,5 @@ const memberCreditEmailLine = (rewardDollars, { canTurnOnAutomaticCredit = false
 
 module.exports = {
   STEP2_DEFAULTS, step2Settings, memberCredit, etYearBounds, capReached, ruleTerms, formatDollars,
-  friendInviteOfferLine, friendShareClause, memberInviteFriendClause, memberCreditEmailLine,
+  friendInviteOfferLine, friendShareClause, memberInviteFriendClause, shareCardOffer, memberCreditEmailLine,
 };

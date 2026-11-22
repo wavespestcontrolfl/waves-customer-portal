@@ -36,6 +36,19 @@ describe('callbackCreditByTechnician', () => {
     expect([...counts]).toEqual([['lawn-tech', 1]]);
   });
 
+  test('rodent trapping and rodent exclusion are one category for credit: a trap-check callback counts against the exclusion visit before it', async () => {
+    // Exclusion is its own service line since 2026-11-21, and the owner does the first visit of a job sold
+    // with both. The trap-check callback the second technician does still counts against that visit.
+    const conn = connReturning([
+      { callback_id: 'cb-1', callback_type: 'Rodent Trapping Follow-Up Visit Service', callback_tech_id: 'hire', source_tech_id: 'pest-tech', source_type: 'Quarterly Pest Control' },
+      { callback_id: 'cb-1', callback_type: 'Rodent Trapping Follow-Up Visit Service', callback_tech_id: 'hire', source_tech_id: 'owner', source_type: 'Rodent Exclusion & Trapping Service' },
+    ]);
+
+    const counts = await callbackCreditByTechnician(conn, { start: '2027-03-01', endDate: '2027-03-31' });
+
+    expect([...counts]).toEqual([['owner', 1]]);
+  });
+
   test('no earlier visit in the category: the callback stays with its own technician, as today', async () => {
     const conn = connReturning([
       { callback_id: 'cb-1', callback_type: 'Lawn Care Re-Service', callback_tech_id: 'owner', source_tech_id: 'hire', source_type: 'Quarterly Pest Control' },
