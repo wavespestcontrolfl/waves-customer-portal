@@ -116,6 +116,8 @@ test.each([
   ['gate off', {}, () => isEnabled.mockReturnValue(false)],
   ['visit not completed', { visit: { ...VISIT, status: 'en_route' } }, null],
   ['expired link', { visit: { ...VISIT, track_token_expires_at: new Date(Date.now() - 1000).toISOString() } }, null],
+  // The tracker page itself stays up for such a link; the cards do not.
+  ['a link with no expiry on record', { visit: { ...VISIT, track_token_expires_at: null } }, null],
   ['a service contact also gets this link', { visit: { ...VISIT, service_contact_name: 'Tenant Tina', service_contact_phone: '+19415550100' } }, null],
   ['third-party payer on the job', { visit: { ...VISIT, job_payer_id: 7 } }, null],
   ['third-party payer on the account', { visit: { ...VISIT, customer_payer_id: 7 } }, null],

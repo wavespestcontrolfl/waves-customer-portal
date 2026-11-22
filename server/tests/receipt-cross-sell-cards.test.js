@@ -2,9 +2,10 @@
 // 2026-11-21). The receipt reuses the service report's composer and tap;
 // what this suite pins is the RECEIPT's own decisions: only a PAID receipt
 // whose link reaches the account holder alone carries the cards (no
-// third-party payer, no service contact), the offer needs the visit the
-// invoice is for, the gate hides the routes entirely, and a tap is not
-// counted as a receipt view.
+// third-party payer, no service contact), for 7 days after its payment
+// (owner 2026-11-22, "week"), the offer needs the visit the invoice is for,
+// the gate hides the routes entirely, and a tap is not counted as a receipt
+// view.
 jest.mock('../models/db', () => jest.fn(() => {
   const query = {};
   for (const method of ['where', 'whereIn', 'orderBy', 'whereRaw', 'leftJoin']) query[method] = () => query;
@@ -39,8 +40,10 @@ const router = require('../routes/receipt-v2');
 
 const OFFER = { serviceKey: 'lawn_care', label: 'Lawn Care', mode: 'priced', option: { id: 'lawn-enhanced', perVisit: 62 }, fingerprint: 'fp' };
 const REFERRAL = { headline: 'Know someone who could use Waves?', cta: 'Send My Referral Link' };
+const DAY_MS = 24 * 60 * 60 * 1000;
+const paidAgo = (ms) => new Date(Date.now() - ms).toISOString();
 const INVOICE = {
-  id: 'inv-1', customer_id: 'cust-1', status: 'paid', payer_id: null, service_record_id: 'sr-1', total: 85, invoice_number: 'QA-1',
+  id: 'inv-1', customer_id: 'cust-1', status: 'paid', paid_at: paidAgo(60 * 1000), payer_id: null, service_record_id: 'sr-1', total: 85, invoice_number: 'QA-1',
 };
 
 function handlerFor(method, path) {
@@ -85,6 +88,8 @@ describe('GET /:token — the cards ride the receipt payload', () => {
     ['the job bills a third party (the service record\'s job link)', () => mockFirst.mockResolvedValue({ ...INVOICE, record_job_payer_id: 4 })],
     ['a service contact can also get this link', () => mockFirst.mockResolvedValue({ ...INVOICE, service_contact_name: 'Tenant Tina', service_contact_email: 't@example.com' })],
     ['not paid', () => mockFirst.mockResolvedValue({ ...INVOICE, status: 'refunded' })],
+    ['paid more than 7 days ago', () => mockFirst.mockResolvedValue({ ...INVOICE, paid_at: paidAgo(7 * DAY_MS + 60 * 1000) })],
+    ['no payment time on record', () => mockFirst.mockResolvedValue({ ...INVOICE, paid_at: null })],
     ['a distinct billing email gets this receipt', () => mockFirst.mockResolvedValue({ ...INVOICE, customer_email: 'pat@example.com', billing_email: 'books@example.com' })],
     ['a callback visit (the report\'s rule)', () => {
       process.env.GATE_RESERVICE_REPORT_COPY = 'true';
@@ -97,6 +102,12 @@ describe('GET /:token — the cards ride the receipt payload', () => {
     expect(payload).not.toHaveProperty('crossSell');
     expect(payload).not.toHaveProperty('referral');
     expect(tap.buildCrossSellForServiceRecord).not.toHaveBeenCalled();
+  });
+
+  test('a receipt paid almost 7 days ago still carries both cards', async () => {
+    mockFirst.mockResolvedValue({ ...INVOICE, paid_at: paidAgo(7 * DAY_MS - 60 * 1000) });
+    const { res } = await call('get', '/:token');
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ crossSell: OFFER, referral: REFERRAL }));
   });
 
   test('an invoice with no visit carries the referral card alone', async () => {
@@ -160,6 +171,7 @@ describe('POST /:token/cross-sell — the report tap, on the receipt', () => {
     ['gate off', () => isEnabled.mockReturnValue(false)],
     ['payer-billed', () => mockFirst.mockResolvedValue({ ...INVOICE, payer_id: 'payer-1' })],
     ['the job bills a third party', () => mockFirst.mockResolvedValue({ ...INVOICE, record_job_payer_id: 4 })],
+    ['paid more than 7 days ago', () => mockFirst.mockResolvedValue({ ...INVOICE, paid_at: paidAgo(8 * DAY_MS) })],
     ['no visit on the invoice', () => mockFirst.mockResolvedValue({ ...INVOICE, service_record_id: null })],
     ['unknown token', () => mockFirst.mockResolvedValue(undefined)],
   ])('%s → 404, nothing recorded', async (_label, arrange) => {
@@ -179,8 +191,11 @@ describe('POST /:token/referral-link — enrolls on the tap only', () => {
     expect(res.json).toHaveBeenCalledWith(share);
   });
 
-  test('a payer-billed receipt never enrolls anyone', async () => {
-    mockFirst.mockResolvedValue({ ...INVOICE, payer_id: 'payer-1' });
+  test.each([
+    ['a payer-billed receipt', { payer_id: 'payer-1' }],
+    ['a receipt paid more than 7 days ago', { paid_at: paidAgo(8 * DAY_MS) }],
+  ])('%s never enrolls anyone', async (_label, change) => {
+    mockFirst.mockResolvedValue({ ...INVOICE, ...change });
     const { res } = await call('post', '/:token/referral-link');
     expect(res.statusCode).toBe(404);
     expect(referralShare.buildReferralShareForCustomer).not.toHaveBeenCalled();
@@ -203,6 +218,15 @@ describe('the taps answer the generic 404 ahead of the limiter (a dark route nev
     expect(res.statusCode).toBe(404);
     expect(mockFirst).not.toHaveBeenCalled();
   });
+});
+
+// invoice-email.js names in its closing line only the cards this reader
+// returns, so a receipt re-sent after day 7 gets no card line.
+test('the receipt email\'s reader follows the same 7 days', async () => {
+  const { receiptCardsForInvoiceId } = require('../services/receipt-cards');
+  expect(await receiptCardsForInvoiceId('inv-1')).toEqual({ crossSell: OFFER, referral: REFERRAL });
+  mockFirst.mockResolvedValue({ ...INVOICE, paid_at: paidAgo(8 * DAY_MS) });
+  expect(await receiptCardsForInvoiceId('inv-1')).toEqual({});
 });
 
 test('a billing email that is the holder\'s own address keeps the cards', async () => {

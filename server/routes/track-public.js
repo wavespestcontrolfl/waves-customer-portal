@@ -1002,6 +1002,11 @@ async function loadTrackCardContext(token) {
       ...SERVICE_CONTACT_COLUMNS.map((col) => `c.${col}`),
     );
   if (!row?.customer_id || !isTrackTokenLive(row.track_token_expires_at)) return null;
+  // The cards live only as long as the link does (it expires a day after the
+  // visit's window). isTrackTokenLive reads a link with no expiry on record
+  // as live for good, so such a link carries no cards (owner 2026-11-22,
+  // "week": no card tap from a link months later).
+  if (!row.track_token_expires_at) return null;
   if (row.status !== 'completed') return null;
   const {
     linkReachesOnlyAccountHolder, reportSuppressedForCustomer,

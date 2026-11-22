@@ -4,7 +4,10 @@
  * receipt page (routes/receipt-v2.js) and the receipt email's pointer line
  * (invoice-email.js), so the email never promises a card the page won't show.
  *
- * Eligible: a PAID invoice whose link reaches the account holder alone (no
+ * Eligible: a PAID invoice, for 7 days after its payment (owner 2026-11-22,
+ * "week": a receipt link never expires, and the person who opens it in that
+ * first week is the person who paid; after day 7 it is a plain receipt, with
+ * no card, no tap and no email line), whose link reaches the account holder alone (no
  * third-party payer on the invoice, the job or the account, no service
  * contact on the account — linkReachesOnlyAccountHolder; and the receipt email's own
  * recipient resolver, getReceiptEmailRecipients, picks the account holder —
@@ -19,6 +22,18 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
+
+// Owner 2026-11-22, "week": how long after the payment a receipt carries its
+// cards and answers their taps.
+const RECEIPT_CARD_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+// No payment time on record reads as outside the window. A payment the
+// database clock stamped a moment ahead of this server's clock is inside it.
+function withinReceiptCardWindow(paidAt, now = Date.now()) {
+  if (!paidAt) return false;
+  const paid = new Date(paidAt).getTime();
+  return Number.isFinite(paid) && now - paid <= RECEIPT_CARD_WINDOW_MS;
+}
 
 // What eligibility needs, and nothing more. Never InvoiceService.getByToken,
 // whose default records a view (a tap is not a view).
@@ -35,7 +50,7 @@ function loadReceiptCardRow(where, database = db) {
     .leftJoin('notification_prefs as np', 'np.customer_id', 'i.customer_id')
     .where(where)
     .first(
-      'i.id', 'i.customer_id', 'i.status', 'i.payer_id', 'i.service_record_id',
+      'i.id', 'i.customer_id', 'i.status', 'i.paid_at', 'i.payer_id', 'i.service_record_id',
       'c.payer_id as customer_payer_id',
       'ij.payer_id as invoice_job_payer_id', 'rj.payer_id as record_job_payer_id',
       'sr.structured_notes as visit_structured_notes',
@@ -54,6 +69,7 @@ function loadReceiptCardInvoice(token, database = db) {
 
 function receiptCardsEligible(row) {
   if (!isEnabled('docCrossSell') || !row?.customer_id || row.status !== 'paid') return false;
+  if (!withinReceiptCardWindow(row.paid_at)) return false;
   const { reserviceReportCopyGateOn } = require('./service-report/reservice-report');
   if (reserviceReportCopyGateOn() && row.visit_is_callback === true) return false;
   // The receipt goes where the receipt email goes: the account holder, or a
@@ -123,6 +139,7 @@ async function receiptCardsForInvoiceId(invoiceId, database = db) {
 }
 
 module.exports = {
+  RECEIPT_CARD_WINDOW_MS,
   loadReceiptCardInvoice,
   receiptCardsEligible,
   receiptOfferRecordId,

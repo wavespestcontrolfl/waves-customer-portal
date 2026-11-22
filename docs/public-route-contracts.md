@@ -3481,6 +3481,25 @@ complaint-driven (callback) visit carries neither card and its taps 404 while
 a receipt tap never records a receipt view. The receipt page shows the
 per-application price; the report card stays price-free (owner 2026-10-05).
 
+Who may tap a receipt or tracker card (owner decision 2026-11-22, "week";
+decided, not an open risk): a tap needs no login, as on the service report
+card (owner 2026-08-13). The receipt link is a permanent bearer link, so the
+receipt's cards and both receipt taps exist only for 7 days after the
+payment: `receiptCardsEligible` requires `invoices.paid_at` within
+`RECEIPT_CARD_WINDOW_MS` (7 x 24 h; `services/receipt-cards.js`). After day
+7, or with no `paid_at` on record, `GET /api/receipt/:token` has neither
+key, both receipt taps are 404, and the receipt email (a re-send included)
+has no card line. The owner accepted that any holder of the link may tap
+inside those 7 days. The tracker needs no day count: its cards and taps live
+only while the link's own `track_token_expires_at` is in the future (one day
+after the visit's window), and a tracker link with no expiry on record
+carries no cards. What a tap can do is the report tap's own limit: one
+shared office request for the offer shown and, with
+`GATE_REPORT_CLICK_TO_ESTIMATE`, that offer's estimate link; the referral
+tap returns the account's own share link. Production, read-only,
+2026-11-22: 0 of 556 paid invoices have no `paid_at`; 0 of 839 completed
+visits with a tracker link have no expiry.
+
 Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the
 report payload's `crossSell` object offers the ONE next family the
