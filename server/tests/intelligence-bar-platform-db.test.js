@@ -41,7 +41,6 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     process.env.ANTHROPIC_API_KEY = 'scripted-model-only';
     process.env.GATE_IB_PLATFORM = 'true';
     process.env.GATE_IB_THREADS = 'false';
-    process.env.GATE_IB_TOOL_ACTIVITY = 'true';
     process.env.GATE_IB_WRITES_DISABLED = 'false';
     process.env.GATE_EDIT_APPT_ADDRESS = 'true';
     db = require('../models/db');

@@ -257,7 +257,7 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude besid
   });
 });
 
-// Under a stuck answer (GATE_IB_ANSWER_SEND_TO_CLAUDE): a gap line, a button, or nothing; and a tap sends only the owner's
+// Under a stuck answer: a gap line, a button, or nothing; and a tap sends only the owner's
 // own question for that answer, never the answer.
 describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude under a stuck answer (%s)', (_name, mobile) => {
   const stuck = (gapId) => ({ response: ANSWER, toolCalls: [], pendingActions: [], conversationHistory: [], answerClaude: { stuck: true, gapId } });
@@ -273,7 +273,6 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude under
   const ideaPosts = () => callsTo('/claude-ideas').filter(([, init]) => init?.method === 'POST').map(([, init]) => JSON.parse(init.body));
 
   it('shows "Claude has this as gap #N." and no button when a gap row was written', async () => {
-    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
     queryAnswer = () => reply(200, stuck(7));
     await mount({ mobile });
     await askQuestion();
@@ -282,7 +281,6 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude under
   });
 
   it('shows the button when no gap row was written, and a tap sends the typed question and the page, never the answer', async () => {
-    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
     queryAnswer = () => reply(200, stuck(null));
     await mount({ mobile });
     await askQuestion();
@@ -304,7 +302,6 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude under
   });
 
   it('an answer a thread keeps after the page changes sends the page and record ids of its own Ask', async () => {
-    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
     queryAnswer = () => reply(200, { ...stuck(null), threadId: THREAD, threadSeq: 1, threadsEnabled: true });
     await mount({ mobile });
     await askQuestion();
@@ -320,7 +317,6 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude under
   });
 
   it('a send that finishes after a newer answer arrived shows nothing under the newer answer', async () => {
-    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
     queryAnswer = () => reply(200, stuck(null));
     let finishSend = () => {};
     ideaAnswer = () => new Promise((resolve) => { finishSend = () => resolve(reply(200, { sent: true, id: IDEA_ID, at: AT, message: 'Sent to Claude.' })); });
@@ -343,7 +339,6 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude under
   });
 
   it('a pasted question gets no button: pasted text may be a customer\'s words', async () => {
-    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
     queryAnswer = () => reply(200, stuck(null));
     await mount({ mobile });
     await askQuestion(QUESTION, { paste: true });
@@ -353,7 +348,6 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude under
   });
 
   it('a pasted question that saved a gap still shows the gap line', async () => {
-    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
     queryAnswer = () => reply(200, stuck(7));
     await mount({ mobile });
     await askQuestion(QUESTION, { paste: true });
@@ -362,7 +356,6 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude under
   });
 
   it('an answer opened from History never shows the earlier exchange\'s button, even with the same text', async () => {
-    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
     queryAnswer = () => reply(200, stuck(null));
     const base = fetchMock.getMockImplementation();
     fetchMock.mockImplementation((url, init) => {
@@ -388,7 +381,6 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude under
   });
 
   it('Undo cancels with the send\'s time, says Cancelled, and brings the button back', async () => {
-    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
     queryAnswer = () => reply(200, stuck(null));
     await mount({ mobile });
     await askQuestion();
@@ -405,7 +397,6 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude under
   });
 
   it('answers a duplicate in plain words, and a failure with the button still there to try again', async () => {
-    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
     queryAnswer = () => reply(200, stuck(null));
     await mount({ mobile });
     await askQuestion();
@@ -421,7 +412,6 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude under
   it('keeps the button, the question and the send note when the task card is refreshed', async () => {
     const TASK = '00000000-0000-4000-8000-0000000000c3';
     const task = { ...stuck(null), taskId: TASK, taskState: 'responded', receipts: [] };
-    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
     queryAnswer = () => reply(200, task);
     await mount({ mobile });
     await askQuestion();
@@ -437,7 +427,8 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude under
     expect(ideaPosts()).toHaveLength(1);
   });
 
-  it('shows nothing when the status has no answerButton, even for a stuck reply', async () => {
+  it('shows nothing when the status is not enabled for this login, even for a stuck reply', async () => {
+    statusAnswer = () => reply(200, { enabled: false });
     queryAnswer = () => reply(200, stuck(7));
     await mount({ mobile });
     await askQuestion();
@@ -446,7 +437,6 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude under
   });
 
   it('shows nothing when the reply carries no answerClaude', async () => {
-    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
     await mount({ mobile });
     await askQuestion();
     expect(screen.queryByText(/Claude has this as gap/)).not.toBeInTheDocument();
@@ -454,7 +444,6 @@ describe.each([['desktop', false], ['phone sheet', true]])('Send to Claude under
   });
 
   it('a question that came from a tapped choice or quick action is not the owner\'s words: no button', async () => {
-    statusAnswer = () => reply(200, { enabled: true, answerButton: true });
     queryAnswer = () => reply(200, { ...stuck(null), choices: ['Annual prepay (model wrote this)', 'Monthly'] });
     await mount({ mobile });
     await askQuestion();
