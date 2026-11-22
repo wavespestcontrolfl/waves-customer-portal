@@ -240,7 +240,7 @@ describeDb('service-line map shadow on PostgreSQL', () => {
       expect(await lineTech.resolveLineTechnician(db, { serviceType: 'Mosquito Control', date: MONDAY }))
         .toMatchObject({ technicianId: ownerId, reason: 'gap_not_assignable' });
       await db('technician_capabilities').insert({ technician_id: hireId, service_category: 'rodent', active: false, capability_level: 'qualified' });
-      expect(await lineTech.resolveLineTechnician(db, { serviceType: 'Rodent Control', date: MONDAY }))
+      expect(await lineTech.resolveLineTechnician(db, { serviceType: 'Rodent Trapping Service', date: MONDAY }))
         .toMatchObject({ technicianId: ownerId, reason: 'gap_capability_off' });
       await db('technician_capabilities').where({ technician_id: hireId }).del();
       expect(await lineTech.resolveLineTechnician(db, { serviceType: 'Termite Inspection', date: MONDAY }))

@@ -83,26 +83,36 @@ describe('the catalog category table (one table, shared with the service-line ma
     expect(require('../services/scheduling/line-technician').CATALOG_CATEGORY_LINES).toBe(CATALOG_CATEGORY_LINES);
   });
 
-  test('lineForCatalogRow: an exclusion service key reads exclusion; trapping keys and other rows read their category', () => {
-    // Owner 2026-11-21 (rodent jobs = A): sealing, sanitation, the rodent inspection and the general
-    // first rodent visit are the owner's line.
-    expect(Object.keys(CATALOG_KEY_LINES).sort()).toEqual([
-      'rodent_bird_box', 'rodent_exclusion', 'rodent_exclusion_only', 'rodent_general_one_time', 'rodent_inspection',
-      'rodent_sanitation_heavy', 'rodent_sanitation_light', 'rodent_sanitation_standard',
+  test('lineForCatalogRow: the key decides the rodent line; an unlisted rodent row is rodent only when its name says trapping or bait', () => {
+    // Owner 2026-11-21 (rodent jobs = A): the second technician takes trapping and bait stations. Sealing,
+    // sanitation, the rodent inspection, dead-rodent removal and the general first visit are the owner's line.
+    const keysOf = (line) => Object.keys(CATALOG_KEY_LINES).filter((key) => CATALOG_KEY_LINES[key] === line).sort();
+    expect(keysOf('exclusion')).toEqual([
+      'rodent_bird_box', 'rodent_dead_animal_removal', 'rodent_exclusion', 'rodent_exclusion_only', 'rodent_general_one_time',
+      'rodent_inspection', 'rodent_sanitation_heavy', 'rodent_sanitation_light', 'rodent_sanitation_standard',
       'rodent_trapping_exclusion', 'rodent_trapping_exclusion_sanitation', 'rodent_trapping_sanitation', 'rodent_wire_mesh',
     ]);
-    expect(new Set(Object.values(CATALOG_KEY_LINES))).toEqual(new Set(['exclusion']));
+    expect(keysOf('rodent')).toEqual([
+      'rodent_bait_quarterly', 'rodent_bait_setup', 'rodent_monitoring', 'rodent_trap_check_additional', 'rodent_trapping',
+      'rodent_trapping_followup', 'trap_only_retainer_monthly', 'trap_only_retainer_plus', 'trap_only_retainer_standard',
+    ]);
+    expect(new Set(Object.values(CATALOG_KEY_LINES))).toEqual(new Set(['exclusion', 'rodent']));
     expect(lineForCatalogRow({ service_key: 'rodent_exclusion', category: 'rodent', name: 'Rodent Exclusion & Trapping Service' })).toBe('exclusion');
     expect(lineForCatalogRow({ service_key: 'rodent_inspection', category: 'inspection', name: 'Rodent Inspection Service' })).toBe('exclusion');
     expect(lineForCatalogRow({ service_key: 'rodent_general_one_time', category: 'rodent', name: 'Rodent Pest Control Service' })).toBe('exclusion');
-    // A general rodent row under another key reads its own name: only the whole name "Rodent Control" is general.
-    expect(lineForCatalogRow({ service_key: 'rodent_visit', category: 'rodent', name: 'Rodent Control Service' })).toBe('exclusion');
-    for (const key of ['rodent_trapping', 'rodent_trapping_followup', 'rodent_trap_check_additional', 'rodent_bait_quarterly', 'trap_only_retainer_monthly']) {
-      expect(lineForCatalogRow({ service_key: key, category: 'rodent', name: 'Rodent Trapping Service' })).toBe('rodent');
+    expect(lineForCatalogRow({ service_key: 'rodent_dead_animal_removal', category: 'rodent', name: 'Dead Rodent Removal & Odor Treatment' })).toBe('exclusion');
+    // A listed key keeps its line when staff rename the row to a general name, and the other way round.
+    for (const key of keysOf('rodent')) {
+      expect(lineForCatalogRow({ service_key: key, category: 'rodent', name: 'Rodent Control' })).toBe('rodent');
     }
-    // A rodent row added to the library later, with a key this list has not got: its own name decides.
-    expect(lineForCatalogRow({ service_key: 'rodent_exclusion_whole_home', category: 'rodent', name: 'Whole-Home Rodent Exclusion Service' })).toBe('exclusion');
+    expect(lineForCatalogRow({ service_key: 'rodent_inspection', category: 'inspection', name: 'Rodent Trap Check' })).toBe('exclusion');
+    // A rodent row added to the library later, with a key this list has not got: rodent only when its own name
+    // says trapping or bait; anything else (no name too) is exclusion, never the trapping line by default.
     expect(lineForCatalogRow({ service_key: 'rodent_new_trap_plan', category: 'rodent', name: 'Rodent Trap Plan' })).toBe('rodent');
+    expect(lineForCatalogRow({ service_key: 'rodent_bait_monthly', category: 'rodent', name: 'Monthly Rodent Bait Station Service' })).toBe('rodent');
+    expect(lineForCatalogRow({ service_key: 'rodent_exclusion_whole_home', category: 'rodent', name: 'Whole-Home Rodent Exclusion Service' })).toBe('exclusion');
+    expect(lineForCatalogRow({ service_key: 'rodent_visit', category: 'rodent', name: 'Rodent Control Service' })).toBe('exclusion');
+    expect(lineForCatalogRow({ service_key: 'rodent_unnamed', category: 'rodent' })).toBe('exclusion');
     // The name check is for rodent rows only: another category keeps its line whatever the name says.
     expect(lineForCatalogRow({ service_key: 'k', category: 'lawn_care', name: 'Rodent Exclusion' })).toBe('lawn');
     expect(lineForCatalogRow({ service_key: 'k', category: 'other', name: 'Rodent Exclusion' })).toBeNull();
@@ -134,7 +144,7 @@ describe('categoriesForServices', () => {
   test('gate on: a service_id wins, then the service key; a key alone resolves too', async () => {
     process.env.GATE_TECH_JOB_TYPE_CHECKS = 'true';
     const conn = fakeConn({ catalog: [
-      { id: SERVICE_ID, service_key: 'a', category: 'rodent' },
+      { id: SERVICE_ID, service_key: 'a', category: 'termite' },
       { id: SERVICE_ID_2, service_key: 'b', category: 'mosquito' },
     ] });
     const rows = [
@@ -142,7 +152,7 @@ describe('categoriesForServices', () => {
       { service_type: 'Visit', service_id: '33333333-3333-4333-8333-333333333333', service_key: 'b' },
       { service_type: 'Visit', service_key: 'a' },
     ];
-    expect(await capabilities.categoriesForServices(conn, rows)).toEqual(['rodent', 'mosquito', 'rodent']);
+    expect(await capabilities.categoriesForServices(conn, rows)).toEqual(['termite', 'mosquito', 'termite']);
   });
 
   test('gate on: a catalog row that names no category (other, inspection) falls to the name', async () => {

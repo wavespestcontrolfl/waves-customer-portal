@@ -111,7 +111,8 @@ const clean = (value, max = 200) => {
  * Which service line a visit belongs to: { line, lineFrom }.
  *  1. The catalog row first, found by `serviceId` (the scheduled_services.service_id),
  *     else by `serviceKey` (services.service_key), read by lineForCatalogRow: its key
- *     (the exclusion services: sealing, sanitation, the rodent inspection), else its
+ *     (the two rodent lines: trapping and bait are rodent; sealing, sanitation, the
+ *     rodent inspection and the general rodent visit are exclusion), else its
  *     category. A row that names a line wins, so "Palm Tree Nutritional Treatment"
  *     (tree_shrub) and "Top Dress" (lawn_care) read lawn, which the name alone
  *     (auto-dispatch's classifyServiceCategory falls back to general) gets wrong.
