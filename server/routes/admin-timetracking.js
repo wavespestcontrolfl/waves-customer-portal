@@ -917,10 +917,9 @@ async function listTechnicians(req, res, next) {
     // needs review / off / not set) — the editor itself lives at
     // GET /technicians/:id/capabilities.
     const summaries = await summarizeCapabilities(db, techs.map((t) => t.id));
-    // GATE_HIRED_PACKET: admins also get each row's hire action and link
-    // state (hire_action turns the Hired / Resend link buttons on). Gate off
-    // (or a technician caller) = the response is exactly what it was.
-    const hiredPacket = callerIsAdmin && featureGates.hiredPacketLive();
+    // Admins also get each row's hire action and link state (hire_action
+    // turns the Hired / Resend link buttons on): see hireStateFor. A
+    // technician caller gets none.
     const now = new Date();
     // A technician sees active coworkers only: no prospective hires, no staff
     // who left. Its own row always stays.
@@ -932,7 +931,7 @@ async function listTechnicians(req, res, next) {
         ...t,
         avatar_url: await resolveTechPhotoUrl(t.photo_s3_key, t.avatar_url),
         capability_summary: summaries.get(t.id),
-        ...(hiredPacket ? hireLinkState(t, now) : {}),
+        ...(callerIsAdmin ? hireStateFor(t, now) : {}),
       };
       return callerIsAdmin ? sanitizeTechForAdmin(row) : sanitizeTechForNonAdmin(row, req.technicianId);
     }));
@@ -1599,6 +1598,19 @@ function hireCredentialColumns({ google, tokenHash, now }) {
   };
 }
 
+// The hire fields an admin's list carries. GATE_HIRED_PACKET on: all of them.
+// Off: only what belongs to staff Google sign-in, which the Google press is
+// part of (it mails nothing): the Hired action where the press makes a
+// Google-only login, and how a Google-only row stands today.
+function hireStateFor(tech, now = new Date()) {
+  const state = hireLinkState(tech, now);
+  if (featureGates.hiredPacketLive()) return state;
+  return {
+    ...(state.hire_login === 'google' ? { hire_action: 'hire', hire_login: 'google' } : {}),
+    ...(state.hire_google_only ? { hire_google_only: state.hire_google_only } : {}),
+  };
+}
+
 // The updated row in the shape GET /technicians returns for an admin.
 async function hiredTechnicianResponse(tech) {
   const { resolveTechPhotoUrl } = require('../services/tech-photo');
@@ -1607,7 +1619,7 @@ async function hiredTechnicianResponse(tech) {
     ...tech,
     avatar_url: await resolveTechPhotoUrl(tech.photo_s3_key, tech.avatar_url),
     capability_summary: summaries.get(tech.id),
-    ...hireLinkState(tech),
+    ...hireStateFor(tech),
   });
 }
 
@@ -1658,7 +1670,12 @@ async function sendHireLink({ tech, token, tokenHash, firstDay }) {
 // emailed-link press (a rollback, or two versions live during a deploy).
 async function hireTechnician(req, res, next, variant) {
   try {
-    if (!featureGates.hiredPacketLive()) return hiredPacketOff(res);
+    // The emailed-link press is GATE_HIRED_PACKET. The Google press mails
+    // nothing and belongs to staff Google sign-in: it works with the packet
+    // gate off, and hireLoginFor then refuses it unless the row holds exactly
+    // the named address as its Google-only sign-in.
+    if (!featureGates.hiredPacketLive()
+      && !(variant === 'google' && googleSignin.googleSigninReady())) return hiredPacketOff(res);
     const parsed = parseHireBody(req.body || {}, variant);
     if (parsed.error) return res.status(400).json({ error: parsed.error });
 
