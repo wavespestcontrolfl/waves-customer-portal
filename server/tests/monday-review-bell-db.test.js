@@ -1,5 +1,5 @@
 /**
- * Monday review bell (owner 2026-11-02, B2) against live Postgres: the SQL of lists 1, 3 and 4, list 2's
+ * Monday review bell (owner 2026-11-02, B2) against live Postgres: the SQL of lists 3 and 4, list 2's
  * read-only query shape, and the row's whole life through the real notification service and alert episodes
  * under the production bell policy (GATE_ADMIN_BELL_POLICY on, so the row lands only because it asks to
  * ring). Counts are measured against a baseline read first, so rows other suites left behind never matter.
@@ -39,55 +39,6 @@ maybeDescribe('monday review bell (live Postgres)', () => {
     if (created.invoices.length) await db('invoices').whereIn('id', created.invoices).del();
     if (created.visits.length) await db('scheduled_services').whereIn('id', created.visits).del();
     if (created.customers.length) await db('customers').whereIn('id', created.customers).del();
-  });
-
-  const addNotification = async (over = {}) => {
-    const { metadata, ...rest } = over;
-    const [row] = await db('notifications').insert({
-      recipient_type: 'admin', category: 'billing', title: `Monday review fixture ${RUN.slice(0, 8)}`, body: 'fixture',
-      created_at: ago(20), metadata: JSON.stringify({ severity: 'needs-you', who: 'person', ...(metadata || {}) }), ...rest,
-    }).returning('id');
-    created.notifications.push(row.id);
-    return row.id;
-  };
-
-  describe('list 1: needs-you alerts unread 14+ days', () => {
-    test('counts one old unread needs-you row and none of the rows that do not belong', async () => {
-      const before = await Review._private.loadUnreadAlerts({ now: NOW });
-      await addNotification({ title: `Old unread ${RUN.slice(0, 8)}`, created_at: ago(30) });
-      await addNotification({ read_at: ago(1) }); // read
-      await addNotification({ done_at: ago(1), done_by: 'person', resolution: 'fixture' }); // done
-      await addNotification({ created_at: ago(5) }); // young
-      await addNotification({ metadata: { feed: 'activity' } }); // Activity only
-      await addNotification({ metadata: { claudeQueue: 'fixture', who: 'claude', feed: 'activity' } }); // Claude's queue
-      await addNotification({ metadata: { who: 'claude' } }); // Claude's
-      await addNotification({ metadata: { severity: 'fyi' } }); // information
-      await addNotification({ metadata: { severity: undefined } }); // unsorted
-      await addNotification({ created_at: ago(40), metadata: { rungAt: ago(2).toISOString() } }); // rung two days ago
-      await addNotification({ metadata: { dedupeKey: 'monday-review:2031-12-29' } }); // this bell never counts itself
-      const after = await Review._private.loadUnreadAlerts({ now: NOW });
-      expect(after.count - before.count).toBe(1);
-    });
-
-    test('pages past older rows that do not qualify (a 2-row page proves the keyset walk)', async () => {
-      const before = await Review._private.loadUnreadAlerts({ now: NOW, pageSize: 2, maxPages: 100000 });
-      for (let i = 0; i < 3; i += 1) await addNotification({ created_at: ago(60 + i), metadata: { severity: undefined } }); // unsorted, older
-      await addNotification({ title: `Paged ${RUN.slice(0, 8)}`, created_at: ago(30) });
-      const after = await Review._private.loadUnreadAlerts({ now: NOW, pageSize: 2, maxPages: 100000 });
-      expect(after.count - before.count).toBe(1);
-      expect(after.capped).toBe(false);
-    });
-
-    test('a page edge inside one microsecond-precise timestamp neither repeats nor skips a row', async () => {
-      const before = await Review._private.loadUnreadAlerts({ now: NOW, pageSize: 1, maxPages: 100000 });
-      // Three qualifying rows that share a millisecond but differ in microseconds: a millisecond cursor would re-read them.
-      for (const micros of ['123401', '123402', '123403']) {
-        await addNotification({ title: `Micro ${micros} ${RUN.slice(0, 8)}`, created_at: db.raw(`'2026-09-01 12:00:00.${micros}+00'::timestamptz`) });
-      }
-      const after = await Review._private.loadUnreadAlerts({ now: NOW, pageSize: 1, maxPages: 100000 });
-      expect(after.count - before.count).toBe(3);
-      expect(after.capped).toBe(false);
-    });
   });
 
   describe('list 3: completed visits whose only invoice is a draft', () => {
@@ -214,14 +165,14 @@ maybeDescribe('monday review bell (live Postgres)', () => {
     const MONDAY_1 = new Date('2031-01-06T14:20:00Z');
     const MONDAY_2 = new Date('2031-01-13T14:20:00Z');
     const busy = {
-      alerts: async () => ({ count: 2, oldestAt: ago(20), headlines: [{ headline: 'Fixture alert', at: ago(20) }] }),
+      alerts: async () => ({ kind: 'fell-off', count: 2, capped: false, entries: [{ name: 'Fixture Customer', title: 'Fixture alert', at: ago(20) }] }),
       promises: async () => ({ count: 4, oldestAt: ago(9) }),
       drafts: async () => ({ count: 0, total: 0 }),
       visits: async () => ({ count: 1, priced: 80, oldestDate: '2026-10-01' }),
       parked: async () => ({ count: 0, entries: [] }),
     };
     const empty = {
-      alerts: async () => ({ count: 0, headlines: [] }), promises: async () => ({ count: 0 }),
+      alerts: async () => ({ kind: 'fell-off', count: 0, entries: [] }), promises: async () => ({ count: 0 }),
       drafts: async () => ({ count: 0, total: 0 }), visits: async () => ({ count: 0, priced: 0 }),
       parked: async () => ({ count: 0, entries: [] }),
     };
@@ -235,10 +186,10 @@ maybeDescribe('monday review bell (live Postgres)', () => {
       const [row1, ...extra1] = await rowsFor('monday-review:2031-01-06');
       expect(extra1).toHaveLength(0);
       expect(row1).toMatchObject({ title: 'System — review 3 lists that sit', category: 'system', link: '/admin/dashboard', read_at: null, done_at: null });
-      expect(row1.body).toBe('Waiting for you: 2 unread alerts, 4 late promises, 1 open past visit.');
+      expect(row1.body).toBe('Waiting for you: 2 customer alerts fell off with no reply, 4 late promises, 1 open past visit.');
       expect(row1.detail).toContain('Page: /admin/communications#tab=owed');
       const meta1 = typeof row1.metadata === 'string' ? JSON.parse(row1.metadata) : row1.metadata;
-      expect(meta1).toMatchObject({ severity: 'needs-you', who: 'person', area: 'System', doneWhen: 'reviewed', counts: { alerts: 2, promises: 4, visits: 1 } });
+      expect(meta1).toMatchObject({ severity: 'needs-you', who: 'person', area: 'System', doneWhen: 'reviewed', counts: { fellOff: 2, promises: 4, visits: 1 } });
       expect(meta1.feed).toBeUndefined();
 
       // 2. The same Monday again writes nothing new and closes nothing.
@@ -264,15 +215,13 @@ maybeDescribe('monday review bell (live Postgres)', () => {
       expect(closed.resolution).toBe('Nothing to review');
     });
 
-    test('the retention sweep keeps this week\'s row (7 days old at most) and the list-1 query never counts it', async () => {
+    test('the retention sweep keeps this week\'s row (7 days old at most)', async () => {
       const { judgeRow } = require('../services/admin-alert-retention');
       const MONDAY_4 = new Date('2031-02-03T14:20:00Z');
       await run(busy, MONDAY_4);
       const [row] = await rowsFor('monday-review:2031-02-03');
       const weekLater = new Date(new Date(row.created_at).getTime() + 7 * DAY);
       expect(judgeRow(row, weekLater)).toMatchObject({ expire: false });
-      const counted = await Review._private.loadUnreadAlerts({ now: new Date(new Date(row.created_at).getTime() + 20 * DAY) });
-      expect(counted.headlines.every((h) => !h.headline.startsWith('System — review'))).toBe(true);
     });
   });
 });
