@@ -2,9 +2,9 @@
  * The newsletter Gmail check (services/newsletter-gmail-check.js): Gmail sends no spam reports, so
  * the one sign that Gmail filed an issue as spam is that Gmail readers opened far fewer copies
  * than all other readers. These cases pin the verdict rule (under half the other readers' rate,
- * and beyond chance), which issues a run judges, and the one alert it raises. The alert goes
+ * and beyond chance), the window a run asks for, and the one alert it raises. The alert goes
  * through the real composeAdminAlert, which throws under NODE_ENV=test on any break of
- * docs/admin-notifications.md. The counts query itself is proven on PostgreSQL in
+ * docs/admin-notifications.md. The counts query and the issue query are proven on PostgreSQL in
  * newsletter-gmail-check-postgres.test.js.
  */
 
@@ -14,13 +14,14 @@ jest.mock('../models/db', () => {
   const state = { sends: [], wheres: [] };
   const fn = jest.fn(() => {
     const q = {
-      where: jest.fn((...args) => { state.wheres.push(args); return q; }),
       whereIn: jest.fn((...args) => { state.wheres.push(args); return q; }),
-      orderBy: jest.fn(() => q),
+      whereRaw: jest.fn((...args) => { state.wheres.push(args); return q; }),
+      orderByRaw: jest.fn(() => q),
       select: jest.fn(async () => state.sends),
     };
     return q;
   });
+  fn.raw = jest.fn((sql) => sql);
   fn.state = state;
   return fn;
 });
@@ -33,7 +34,7 @@ const logger = require('../services/logger');
 const { gmailOpenCounts } = require('../services/newsletter-sender');
 const { notifyAdmin } = require('../services/notification-service');
 const {
-  runNewsletterGmailCheck, gmailGapVerdict, binomialAtMost, MIN_COPIES,
+  runNewsletterGmailCheck, gmailGapVerdict, chanceOfSoFewGmailOpens, MIN_COPIES,
 } = require('../services/newsletter-gmail-check');
 
 const counts = (gmailOpened, gmailDelivered, otherOpened, otherDelivered) => ({
@@ -44,7 +45,7 @@ const NOW = new Date('2026-12-05T12:00:00Z');
 const HOUR_MS = 60 * 60 * 1000;
 const issue = (over = {}) => ({
   id: 'send-1', subject: 'Native termites can swarm in winter', newsletter_type: 'pest-insider-monthly',
-  sent_at: new Date('2026-12-03T12:00:00Z'), ...over,
+  went_out_at: new Date('2026-12-03T12:00:00Z'), ...over,
 });
 
 beforeEach(() => {
@@ -65,9 +66,17 @@ describe('gmailGapVerdict', () => {
     expect(gmailGapVerdict(counts(13, 50, 20, 40))).toBe('ok');
   });
 
-  test('a gap that chance explains is ok: 1 of 20 against 4 of 20 happens about 7 times in 100', () => {
-    expect(binomialAtMost(1, 20, 0.2)).toBeCloseTo(0.0692, 3);
+  test('a gap that chance explains is ok: 1 of 20 against 4 of 20 happens about 17 times in 100', () => {
+    expect(chanceOfSoFewGmailOpens(counts(1, 20, 4, 20))).toBeCloseTo(0.1708, 4);
     expect(gmailGapVerdict(counts(1, 20, 4, 20))).toBe('ok');
+  });
+
+  test('neither rate is taken as exact: 0 of 20 against 5 of 20 is ok, 0 of 20 against 8 of 20 is a gap', () => {
+    // A binomial tail against an exact 25% reads the first as 3 in 1,000 and would ring.
+    expect(chanceOfSoFewGmailOpens(counts(0, 20, 5, 20))).toBeCloseTo(0.02356, 5);
+    expect(gmailGapVerdict(counts(0, 20, 5, 20))).toBe('ok');
+    expect(chanceOfSoFewGmailOpens(counts(0, 20, 8, 20))).toBeCloseTo(0.001638, 6);
+    expect(gmailGapVerdict(counts(0, 20, 8, 20))).toBe('gap');
   });
 
   test('either group under the minimum gives no verdict, whatever the rates', () => {
@@ -85,27 +94,26 @@ describe('gmailGapVerdict', () => {
   });
 });
 
-describe('binomialAtMost', () => {
-  test('matches the exact tail', () => {
-    expect(binomialAtMost(2, 20, 0.3)).toBeCloseTo(0.03548, 4);
-    expect(binomialAtMost(0, 10, 0.5)).toBeCloseTo(1 / 1024, 8);
-    expect(binomialAtMost(20, 20, 0.3)).toBe(1);
+describe('chanceOfSoFewGmailOpens', () => {
+  test('is 1 when Gmail holds every open it can, and when nobody opened', () => {
+    expect(chanceOfSoFewGmailOpens(counts(30, 30, 30, 30))).toBe(1);
+    expect(chanceOfSoFewGmailOpens(counts(0, 50, 0, 40))).toBe(1);
   });
 
-  test('a large issue does not underflow to 0: half of 2,000 at an even rate is about one half', () => {
-    expect(binomialAtMost(1000, 2000, 0.5)).toBeCloseTo(0.5089, 3);
+  test('a large issue does not overflow: 1,000 of 2,000 in each group is about one half', () => {
+    expect(chanceOfSoFewGmailOpens(counts(1000, 2000, 1000, 2000))).toBeCloseTo(0.5126, 4);
   });
 });
 
 describe('runNewsletterGmailCheck', () => {
-  test('judges only issues that went out 48 to 72 hours before now, a send that stopped part way included', async () => {
+  test('asks for the issues that went out 48 to 72 hours before now, a send that stopped part way included', async () => {
     await runNewsletterGmailCheck({ now: NOW });
 
     expect(db).toHaveBeenCalledWith('newsletter_sends');
     expect(db.state.wheres).toEqual([
       ['status', ['sent', 'failed']],
-      ['sent_at', '<=', new Date(NOW.getTime() - 48 * HOUR_MS)],
-      ['sent_at', '>', new Date(NOW.getTime() - 72 * HOUR_MS)],
+      [expect.stringMatching(/^coalesce\(newsletter_sends\.sent_at, .+\) <= \?$/), [new Date(NOW.getTime() - 48 * HOUR_MS)]],
+      [expect.stringMatching(/^coalesce\(newsletter_sends\.sent_at, .+\) > \?$/), [new Date(NOW.getTime() - 72 * HOUR_MS)]],
     ]);
     expect(gmailOpenCounts).not.toHaveBeenCalled();
     expect(notifyAdmin).not.toHaveBeenCalled();
@@ -175,6 +183,15 @@ describe('runNewsletterGmailCheck', () => {
     await runNewsletterGmailCheck({ now: NOW });
 
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  test('an alert that could not be written fails the run: it is not logged as raised', async () => {
+    db.state.sends = [issue()];
+    gmailOpenCounts.mockResolvedValue(counts(2, 50, 20, 40));
+    notifyAdmin.mockResolvedValueOnce(null);
+
+    await expect(runNewsletterGmailCheck({ now: NOW })).rejects.toThrow('the Gmail alert for send send-1 was not written');
     expect(logger.warn).not.toHaveBeenCalled();
   });
 

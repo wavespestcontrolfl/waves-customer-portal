@@ -862,15 +862,16 @@ paid, is archived or is gone, is billed to a payer now, whose receipt email or t
 
 **Newsletter Gmail check** (owner 2026-11-22, "gmail"; `server/services/newsletter-gmail-check.js`, hourly at :23, no gate). Gmail
 sends no spam reports, so the spam-report stop cannot see an issue that Gmail filed as spam. For each issue (status `sent`, or
-`failed` part way), 48 to 72 hours after it went out, the check compares the share of delivered copies that Gmail readers opened with the share that all other
+`failed` part way), 48 to 72 hours after it went out (its `sent_at`, or its newest mailed copy when the send has none), the check compares the share of delivered copies that Gmail readers opened with the share that all other
 readers opened (`gmailOpenCounts` in `newsletter-sender.js`: opens by a person only, read from the SendGrid event log, where a
 machine open is marked; a click is not an open). It raises one bell when Gmail's rate is under half of the other readers' rate
-and chance does not explain the gap (under 1 in 100); with fewer than 20 delivered copies in either group it gives no verdict.
+and chance does not explain the gap (under 1 in 100 by Fisher's exact test, which takes neither rate as exact); with fewer than 20
+delivered copies in either group it gives no verdict.
 Category `newsletter` with `bell: true` (newsletter is silenced by default), headline "Content — check Gmail delivery of the
 Waves Pest Insider" (or "the Waves Newsletter"), why "Gmail readers opened 2 of 50 copies (4%); all other readers opened 20 of 40
 (50%).", link `/admin/newsletter?tab=history`, done-when `report_read`, who `person`. dedupeKey `newsletter-gmail-check:<send id>`
 with neither `dedupeOpenOnly` nor `refreshOnDedupe`: one bell per issue, and a person's Done stays done, so no `RERING` entry is
-owed. A failed read throws, so `job_health` shows it. It holds no send and sends nothing to a customer.
+owed. A failed read or an alert that could not be written throws, so `job_health` shows it. It holds no send and sends nothing to a customer.
 
 ## 7. How to raise one
 
