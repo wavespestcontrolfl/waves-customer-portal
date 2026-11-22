@@ -97,9 +97,10 @@ postgres('mail prospect store on PostgreSQL', () => {
   // A permit and a parcel at the same made-up address, unless a test says otherwise.
   const permit = (no, extra = {}) => conn('construction_permit_records').insert({
     permit_no: no, permit_type: 'Residential', type_of_work: 'New Single Family', status: 'Permit Issued',
-    issued_date: dateAgo(200), parcel_pin: '5133090590', address_loose_key: '101example34212', ...extra,
+    issued_date: dateAgo(200), parcel_pin: '5133090590', address_loose_key: '101example34212',
+    address_raw: '101 EXAMPLE TRL  SAMPLETON 34212', ...extra,
   });
-  const parcel = (parid, extra = {}) => ({ parid, addressLine1: '101 EXAMPLE TRL', zip: '34212', ...extra });
+  const parcel = (parid, extra = {}) => ({ parid, addressLine1: '101 EXAMPLE TRL', city: 'SAMPLETON', zip: '34212', ...extra });
   const found = async (...parids) => Object.keys(await newHomePermitsForParcels(parids.map((id) => parcel(id)))).sort();
 
   test('migration: columns, the unique key, the two partial indexes, the checks, and a clean down', async () => {
@@ -183,6 +184,28 @@ postgres('mail prospect store on PostgreSQL', () => {
     expect(await refusedBy(prospect('202699000010', { status: 'not_eligible', reason: 'company_buyer' }))).toBe('saved');
   });
 
+  test('two saves of one deed never interleave: the second waits for the whole first save', async () => {
+    await saveProspect(live('202699000001', '5133090590')); // the parcel is live under another deed
+    const first = await conn.transaction(); // a caller's open transaction
+    let waited;
+    try {
+      // The first save is refused by the parcel index and falls back; its lock on the deed stays until the commit.
+      expect(await saveProspect(live('202699000002', '5133090590'), first)).toBe('not_eligible');
+      let done = false;
+      const second = saveProspect(live('202699000002', '6000000060')).then((status) => { done = true; return status; });
+      await new Promise((resolve) => { setTimeout(resolve, 400); });
+      waited = !done;
+      await first.commit();
+      expect(await second).toBe('eligible');
+    } finally {
+      if (!first.isCompleted()) await first.rollback();
+    }
+    expect(waited).toBe(true);
+    // The later, valid match stands: the first save's fallback did not overwrite it.
+    const row = await conn('mail_prospects').where({ source_ref: '202699000002' }).first();
+    expect(row).toMatchObject({ status: 'eligible', reason: null, parcel_pin: '6000000060' });
+  });
+
   test('the duplicate fallback works inside a caller transaction', async () => {
     await saveProspect(live('202699000001', '5133090590'));
     await conn.transaction(async (trx) => {
@@ -255,7 +278,7 @@ postgres('mail prospect store on PostgreSQL', () => {
 
   test('new-home permits: a number two parcels can share goes to the parcel at the permit\'s address, whoever is asked', async () => {
     // The pin of the 9-digit parcel 900000009 is 9000000090, which is also the 10-digit parcel 9000000090's own.
-    await permit('BLD9900-0020', { parcel_pin: '9000000090', address_loose_key: '900sample34219' });
+    await permit('BLD9900-0020', { parcel_pin: '9000000090', address_loose_key: '900sample34219', address_raw: '900 SAMPLE CT  SAMPLETON 34219' });
     const nine = parcel('900000009', { addressLine1: '900 SAMPLE CT', zip: '34219' });
     const ten = parcel('9000000090', { addressLine1: '12 OTHER WAY', zip: '34219' });
     const owners = async (...list) => Object.keys(await newHomePermitsForParcels(list));
@@ -264,13 +287,41 @@ postgres('mail prospect store on PostgreSQL', () => {
     expect(await owners(nine, ten)).toEqual(['900000009']);
     expect(await owners(ten, nine)).toEqual(['900000009']);
     // The other way round: the permit's address is the 10-digit parcel's.
-    await conn('construction_permit_records').update({ address_loose_key: '12other34219' });
+    await conn('construction_permit_records').update({ address_loose_key: '12other34219', address_raw: '12 OTHER WAY  SAMPLETON 34219' });
     expect(await owners(nine)).toEqual([]);
     expect(await owners(nine, ten)).toEqual(['9000000090']);
     // No address on one side proves nothing.
     expect(await owners(parcel('9000000090', { addressLine1: null }), parcel('900000009', { addressLine1: 'SAMPLE CT', zip: '34219' }), parcel('900000009', { addressLine1: '900 SAMPLE CT', zip: null }))).toEqual([]);
     await conn('construction_permit_records').update({ address_loose_key: null });
     expect(await owners(nine, ten)).toEqual([]);
+    await conn('construction_permit_records').update({ address_loose_key: '12other34219', address_raw: null });
+    expect(await owners(nine, ten)).toEqual([]);
+  });
+
+  test('new-home permits: the same house number, first street word and zip is not enough: the whole street address decides', async () => {
+    // "900 Sample Ct" and "900 Sample Dr" share the loose key 900sample34219, and the two parcels share the pin.
+    await permit('BLD9900-0021', { parcel_pin: '9000000090', address_loose_key: '900sample34219', address_raw: '900 SAMPLE CT  SAMPLETON 34219' });
+    const court = parcel('900000009', { addressLine1: '900 SAMPLE CT', zip: '34219' });
+    const drive = parcel('9000000090', { addressLine1: '900 SAMPLE DR', zip: '34219' });
+    const owners = async (...list) => Object.keys(await newHomePermitsForParcels(list));
+    expect(await owners(court)).toEqual(['900000009']);
+    expect(await owners(drive)).toEqual([]); // asked alone, it still gets nothing
+    expect(await owners(drive, court)).toEqual(['900000009']);
+    // A shorter or a longer street address is not the permit's address either.
+    expect(await owners(parcel('900000009', { addressLine1: '900 SAMPLE', zip: '34219' }))).toEqual([]);
+    expect(await owners(parcel('900000009', { addressLine1: '900 SAMPLE CT E', zip: '34219' }))).toEqual([]);
+    // Letter case and spacing are not part of an address.
+    expect(await owners(parcel('900000009', { addressLine1: ' 900  Sample ct ', zip: '34219' }))).toEqual(['900000009']);
+    // The report line with single spaces only: the whole line must be the parcel's street address, city and zip.
+    await conn('construction_permit_records').update({ address_raw: '900 SAMPLE CT SAMPLETON 34219' });
+    expect(await owners(court)).toEqual(['900000009']);
+    expect(await owners(drive)).toEqual([]);
+    expect(await owners(parcel('900000009', { addressLine1: '900 SAMPLE', zip: '34219' }))).toEqual([]);
+    expect(await owners(parcel('900000009', { addressLine1: '900 SAMPLE CT', zip: '34219', city: 'OTHERTON' }))).toEqual([]);
+    expect(await owners(parcel('900000009', { addressLine1: '900 SAMPLE CT', zip: '34219', city: null }))).toEqual([]);
+    // A line with two breaks is not a shape the report writes: no proof.
+    await conn('construction_permit_records').update({ address_raw: '900 SAMPLE CT  SAMPLETON  34219' });
+    expect(await owners(court)).toEqual([]);
   });
 
   test('addressKnownToWaves: same number, street word and zip is known; anything else is not', async () => {

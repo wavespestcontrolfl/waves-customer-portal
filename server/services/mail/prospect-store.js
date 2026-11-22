@@ -47,18 +47,40 @@ async function findBySourceRefs(listKey, source, refs, conn = db) {
     .select('id', 'source_ref', 'status', 'reason', 'last_checked_at');
 }
 
+const oneLine = (text) => String(text || '').toUpperCase().replace(/\s+/g, ' ').trim();
+
+/**
+ * True when the permit's address line names exactly the parcel's street address. The county report writes the line
+ * as street, two spaces, city, zip ("200 SAMPLE TRL  PARRISH 34219"); about one line in ten has single spaces only.
+ *   - with the two-space break: the street part is the parcel's whole street address (the caller's loose key has
+ *     already matched the zip);
+ *   - with single spaces only: the whole line is the parcel's street address, city and zip.
+ * Any other shape proves nothing. Counted 2026-11-22 on 529 recent permits whose loose key matched their parcel:
+ * 528 pass (490 by the street part, 38 by the whole line); the other one is a parcel with a unit number.
+ */
+function permitNamesParcelAddress(addressRaw, parcel) {
+  const street = oneLine(parcel.addressLine1);
+  if (!street) return false;
+  const parts = String(addressRaw || '').trim().split(/\s{2,}/);
+  if (parts.length === 2) return oneLine(parts[0]) === street;
+  if (parts.length === 1) return oneLine(parts[0]) === `${street} ${oneLine(parcel.city)} ${oneLine(parcel.zip)}`;
+  return false;
+}
+
 /**
  * The newest new-home permit of each parcel, as `{ [parid]: permit row }`. `parcels` are the county map's parcels:
- * `{ parid, addressLine1, zip }`.
+ * `{ parid, addressLine1, city, zip }`.
  *
- * A permit is the parcel's own when both agree:
- *   - its parcel number is a form of the parcel's number (permitPinForms), and
- *   - its address is the parcel's address (the permit sync's loose key: house number, first street word, zip).
+ * A permit is the parcel's own when all three agree:
+ *   - its parcel number is a form of the parcel's number (permitPinForms),
+ *   - its loose address key is the parcel's (the permit sync's key: house number, first street word, zip), and
+ *   - its address line names exactly the parcel's street address (permitNamesParcelAddress).
  * The number alone is not proof. The pin of a 9-digit parcel number P is P plus a 0, and P0 can be another parcel's
- * own 10-digit number (5 such pairs on the county map, counted 2026-11-22). The address settles it, and each parcel
- * is judged alone, so the answer does not depend on which other parcels are asked in the same call. A parcel or a
- * permit without an address key proves nothing: no permit. (On three real days, all 55 matched homes had the same
- * key on the permit and on the parcel.)
+ * own 10-digit number (5 such pairs on the county map, counted 2026-11-22). The loose key alone is not proof either:
+ * it drops the street's last words, so "101 Sample Ct" and "101 Sample Dr" share one. The whole street address
+ * settles it, and each parcel is judged alone, so the answer does not depend on which other parcels are asked in
+ * the same call. A parcel or a permit without an address proves nothing: no permit. Two parcels that share a number
+ * form and the whole address are one mailbox; the table's permit index then lets only one of them be live.
  *
  * A new-home permit is a residential permit whose work starts with "New", is not an accessory building or a guest
  * house, is not canceled or withdrawn, and is one of:
@@ -77,7 +99,7 @@ async function newHomePermitsForParcels(parcels, conn = db) {
     if (!key) continue;
     for (const pin of permitPinForms(parcel.parid)) {
       if (!wanted.has(pin)) wanted.set(pin, []);
-      wanted.get(pin).push({ parid: String(parcel.parid), key });
+      wanted.get(pin).push({ parid: String(parcel.parid), key, parcel });
     }
   }
   if (wanted.size === 0) return {};
@@ -100,11 +122,11 @@ async function newHomePermitsForParcels(parcels, conn = db) {
         .whereRaw("LOWER(COALESCE(status, '')) <> 'closed'")))
     .orderByRaw('issued_date DESC NULLS LAST, permit_no DESC')
     // Dates come back as YYYY-MM-DD text: a pg DATE read as a JS Date can slip a day with the server's time zone.
-    .select('permit_no', 'parcel_pin', 'address_loose_key', conn.raw("to_char(co_date, 'YYYY-MM-DD') AS co_date"), conn.raw("to_char(issued_date, 'YYYY-MM-DD') AS issued_date"));
+    .select('permit_no', 'parcel_pin', 'address_loose_key', 'address_raw', conn.raw("to_char(co_date, 'YYYY-MM-DD') AS co_date"), conn.raw("to_char(issued_date, 'YYYY-MM-DD') AS issued_date"));
   const out = {};
   for (const row of rows) { // newest first: a parcel keeps its first
-    for (const { parid, key } of wanted.get(row.parcel_pin) || []) {
-      if (row.address_loose_key === key && !out[parid]) out[parid] = row;
+    for (const { parid, key, parcel } of wanted.get(row.parcel_pin) || []) {
+      if (!out[parid] && row.address_loose_key === key && permitNamesParcelAddress(row.address_raw, parcel)) out[parid] = row;
     }
   }
   return out;
@@ -159,19 +181,26 @@ async function upsert(row, conn) {
  * Insert the row, or update the one with the same (list_key, source, source_ref). When the home is already live on
  * the list under another deed, or its permit already backs another live home, a unique index refuses the write; the
  * row is then kept as not_eligible with the reason duplicate_parcel or duplicate_permit, so the deed is never read
- * again and the run does not fail. The attempt runs in its own (nested) transaction so the refusal never poisons a
- * caller's transaction. Any other refusal (a live row without a parcel or a permit, an unknown status) is the
- * caller's error and is thrown. Returns the status that was saved.
+ * again and the run does not fail. Any other refusal (a live row without a parcel or a permit, an unknown status)
+ * is the caller's error and is thrown. Returns the status that was saved.
+ *
+ * The write and its fallback are one unit: one transaction (a savepoint inside a caller's transaction) that first
+ * takes a lock on the deed's identity. A second save of the same deed waits for the whole first save, so it can
+ * never land between the refused write and the fallback and then be overwritten by that fallback. The first write
+ * runs in its own savepoint, so a refusal rolls back only that write.
  */
 async function saveProspect(row, conn = db) {
-  try {
-    return await conn.transaction((trx) => upsert(row, trx));
-  } catch (err) {
-    const refused = err && err.code === '23505' ? String(err.constraint || err.message) : '';
-    const index = Object.keys(LIVE_INDEX_REASONS).find((name) => refused.includes(name));
-    if (!index) throw err;
-    return conn.transaction((trx) => upsert({ ...row, status: 'not_eligible', reason: LIVE_INDEX_REASONS[index] }, trx));
-  }
+  return conn.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`mail_prospects:${row.list_key}:${row.source}:${row.source_ref}`]);
+    try {
+      return await trx.transaction((attempt) => upsert(row, attempt));
+    } catch (err) {
+      const refused = err && err.code === '23505' ? String(err.constraint || err.message) : '';
+      const index = Object.keys(LIVE_INDEX_REASONS).find((name) => refused.includes(name));
+      if (!index) throw err;
+      return upsert({ ...row, status: 'not_eligible', reason: LIVE_INDEX_REASONS[index] }, trx);
+    }
+  });
 }
 
 module.exports = {
