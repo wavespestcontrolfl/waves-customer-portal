@@ -1,6 +1,6 @@
 'use strict';
 /**
- * Lawn lighting-aware color (GATE_LAWN_LIGHTING, owner 2026-10-04).
+ * Lawn lighting-aware color (owner 2026-10-04).
  *
  * Sun, shade and cloud change how green a lawn looks in a photo. A color score
  * from a full-sun photo with hard tree shadows and one from an overcast sky are

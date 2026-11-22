@@ -33,6 +33,13 @@ const V13_GRASSES = ['st_augustine', 'bermuda', 'zoysia'];
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const MONTHS = Array.from({ length: 12 }, (_, i) => i + 1);
 
+// The program the readers get carries the reclaimed-water wording in two sentences of each track (lawn-program.js); compare the rest.
+const withoutReclaimedWording = (programs) => Object.fromEntries(Object.entries(programs).map(([track, program]) => [track, {
+  ...program,
+  notes: program.notes.filter((line) => !/Reclaimed-water lawns \(purple pipes/.test(line)),
+  safety_rules: program.safety_rules.filter((line) => !/reclaimed-water lawns/.test(line)),
+}]));
+
 function withGate(value, fn) {
   const saved = process.env.GATE_LAWN_V13;
   try {
@@ -67,7 +74,7 @@ describe('gate and loader', () => {
     expect(withGate(undefined, () => lawnProtocols())).toBe(protocolsJson.lawn);
     // Gate on, bermuda removal gate off and the December swap gate off: v13 without the per-visit addOns and swaps blocks.
     const stripped = Object.fromEntries(Object.entries(v13).map(([track, program]) => [track, { ...program, visits: program.visits.map(({ addOns, swaps, ...visit }) => visit) }]));
-    expect(withGate('true', () => lawnProtocols())).toEqual(stripped);
+    expect(withoutReclaimedWording(withGate('true', () => lawnProtocols()))).toEqual(withoutReclaimedWording(stripped));
     expect(JSON.stringify(withGate('true', () => lawnProtocols()))).not.toContain('addOns');
     expect(JSON.stringify(withGate('true', () => lawnProtocols()))).not.toContain('"swaps":');
   });
@@ -88,12 +95,12 @@ describe('gate and loader', () => {
     }
   });
 
-  test('the December swaps block reaches the shared reader only while GATE_LAWN_DEC_LARGE_PATCH_K (and the trouble-area gates it needs) is on; both blocks on gives v13 itself', () => {
+  test('the December swaps block reaches the shared reader only while GATE_LAWN_DEC_LARGE_PATCH_K (and the trouble-area gates it needs) is on; both blocks on gives v13 itself (but for the reclaimed-water wording)', () => {
     const names = ['GATE_LAWN_BERMUDA_REMOVAL', 'GATE_LAWN_DEC_LARGE_PATCH_K', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET'];
     const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
     try {
       for (const name of names) process.env[name] = 'true';
-      expect(withGate('true', () => lawnProtocols())).toBe(v13);
+      expect(withoutReclaimedWording(withGate('true', () => lawnProtocols()))).toEqual(withoutReclaimedWording(v13));
       expect(JSON.stringify(withGate('true', () => lawnProtocols()))).toContain('largePatchPotassium');
       // The swap gate off, or one gate it needs off: no swaps, and the bermuda add-ons are unaffected.
       for (const name of ['GATE_LAWN_DEC_LARGE_PATCH_K', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET']) {
@@ -186,7 +193,7 @@ describe('gate off is byte-identical for the readers', () => {
         expect(got.visit.primary).toContain('LESCO 24-0-11 with PolyPlus OPTI');
         expect(got.track.name).toContain('v13');
       }
-      expect(protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'zoysia' }).protocol).toEqual({ ...v13.zoysia, visits: v13.zoysia.visits.map(({ addOns, swaps, ...visit }) => visit) });
+      expect(withoutReclaimedWording({ zoysia: protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'zoysia' }).protocol }).zoysia).toEqual(withoutReclaimedWording({ zoysia: { ...v13.zoysia, visits: v13.zoysia.visits.map(({ addOns, swaps, ...visit }) => visit) } }).zoysia);
     });
   });
 

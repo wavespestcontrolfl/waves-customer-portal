@@ -3252,8 +3252,7 @@ function applyEmailDisagreementHold(extracted, dictationEmailPayload) {
 }
 
 /**
- * Spelled letters settle a V1/V2 email disagreement (owner 2026-11-04, "A",
- * GATE_CALL_SPELLED_EMAIL_SETTLES). The hold above exists because neither
+ * Spelled letters settle a V1/V2 email disagreement (owner 2026-11-04, "A"). The hold above exists because neither
  * extractor's guess is trusted over the other. The transcript dictation
  * decoder is a third reading of the letters the caller spelled: when it heard
  * exactly ONE spelling, its own adopt (past its ownership gate) already put

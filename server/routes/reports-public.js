@@ -444,8 +444,7 @@ async function buildServiceReportV1ResponseData(service, token, {
   // only the /data render shows it, so only it pays for the city-wide
   // lawn-findings read.
   nearYou = false,
-  // OPT-IN likewise for the lawn lighting-aware color rule (GATE_LAWN_LIGHTING,
-  // owner 2026-10-04): only the /data render prints the "Since your last visit"
+  // OPT-IN likewise for the lawn lighting-aware color rule (owner 2026-10-04): only the /data render prints the "Since your last visit"
   // lines, so only it reads the two visits' stored light (one run read and one
   // photo read). The Q&A endpoint never does, so it never pays.
   lawnLighting = false,
