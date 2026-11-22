@@ -116,7 +116,8 @@ describe('planFormShellClear (GATE_WIZARD_SUPERSEDES_FORM_DRAFT)', () => {
     expect(lockUntouchedWebFormShellsInTx).toHaveBeenCalledWith(trx, { phone: '+19415550142', address: HOME });
 
     expect(await plan.archiveShells('draft-1')).toEqual(['shell-1']);
-    expect(archiveWebFormShellsInTx).toHaveBeenCalledWith(trx, { phone: '+19415550142', shellIds: ['shell-1'], leadId: 'lead-9' });
+    // The inserted draft's id goes with it: the final recheck must not count it as another open estimate.
+    expect(archiveWebFormShellsInTx).toHaveBeenCalledWith(trx, { phone: '+19415550142', shellIds: ['shell-1'], leadId: 'lead-9', replacementId: 'draft-1' });
   });
 
   test('gate on: with no draft written, nothing is archived', async () => {

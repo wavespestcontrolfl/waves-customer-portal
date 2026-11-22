@@ -2,6 +2,7 @@ const db = require('../models/db');
 const { normalizePhone } = require('../utils/phone');
 const { samePremiseDisplay, parseDisplayAddress } = require('./lead-address-unverified');
 const { normalizeUnitLine, unitLineValueKey } = require('../utils/address-normalizer');
+const { DRAFT_ELIGIBLE_SQL } = require('./estimate-draft-retire');
 
 const OPEN_ESTIMATE_STATUSES = ['draft', 'scheduled', 'sent', 'viewed'];
 const AUTOMATED_ESTIMATE_LOCK_NAMESPACE = 'estimate_automation_duplicate';
@@ -304,6 +305,13 @@ async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
  *   - nobody sent, viewed or scheduled it, auto-send did not claim it, and no
  *     lead points at it: the #6394 rule (retireSupersededLeadWebhookDrafts,
  *     admin-estimate-persistence.js);
+ *   - it passes the draft-retire sweep's own "safe to archive" rule
+ *     (DRAFT_ELIGIBLE_SQL, estimate-draft-retire.js): older than 30 minutes,
+ *     so the web form's background work on it is done, and no lead, booking
+ *     handoff, staged clarify text, group, price lock, send in flight or
+ *     hold marker;
+ *   - no office Sold-by action and no logged follow-up: staff work that does
+ *     not move updated_at;
  *   - no clarify ask for the phone is open or was sent in the last 7 days
  *     without an answer: the row may be waiting for the customer's reply;
  *   - its data is a JSON object (or empty), so it can carry the marker below;
@@ -324,8 +332,10 @@ async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
  *      estimate, the wizard's own older draft), and then no id is returned.
  *   2. archiveWebFormShellsInTx: after the wizard's draft was written in the
  *      same transaction, archives those ids, all or nothing. A planned shell
- *      that is no longer one (a lead linked it in between) makes it throw,
- *      so the caller's transaction rolls the wizard's draft back too.
+ *      that is no longer one (a lead linked it in between), or another open
+ *      estimate saved for the phone since the plan (the office does not take
+ *      the phone lock), makes it throw, so the caller's transaction rolls
+ *      the wizard's draft back too.
  *
  * Archived, not deleted: staff can unarchive the row, and every draft reader
  * (auto-send, clarify asks, measurements, lists) skips an archived row. The
@@ -360,20 +370,25 @@ function untouchedWebFormShells(trx, last10, { now = new Date() } = {}) {
       "right(regexp_replace(coalesce(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?",
       [last10]
     )
-    .whereNull('archived_at')
+    // The draft-retire sweep's own "safe to archive" rule: older than 30
+    // minutes (its creator's background work is done), no lead, no booking
+    // handoff, no staged clarify text, no group, no price lock, no scheduled
+    // send, no live or uncertain send, no hold marker.
+    .whereRaw(DRAFT_ELIGIBLE_SQL)
     .whereNull('sent_at')
     .whereNull('viewed_at')
-    .whereNull('scheduled_at')
     .whereRaw('updated_at = created_at')
+    // Staff work that does not move updated_at: Sold by, a logged follow-up.
+    .whereNull('sold_by_set_at')
+    .whereRaw('COALESCE(follow_up_count, 0) = 0')
     .whereRaw('COALESCE(monthly_total, 0) = 0')
     .whereRaw('COALESCE(onetime_total, 0) = 0')
     .whereRaw('COALESCE(annual_total, 0) = 0')
     .whereRaw("COALESCE(estimate_data->'automation'->'autoSend'->>'claimedAt', '') = ''")
     // Only an object can take the marker. A legacy scalar stays a blocker.
     .whereRaw("jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object'")
-    .whereNotExists(function linkedToLead() {
-      this.select(trx.raw('1')).from('leads').whereRaw('leads.estimate_id = estimates.id');
-    })
+    // By phone, and wider than the sweep's: a text sent in the last 7 days
+    // with no answer still holds the draft.
     .whereNotExists(function clarifyAskWaiting() {
       this.select(trx.raw('1')).from('message_drafts')
         .where({ intent: 'estimate_clarify', source_ref: `clarify:${last10}` })
@@ -423,7 +438,7 @@ async function lockUntouchedWebFormShellsInTx(trx, { phone, address, now = new D
   return open.every((row) => shellKeys.has(String(row.id))) ? shellIds : [];
 }
 
-async function archiveWebFormShellsInTx(trx, { phone, shellIds = [], leadId = null, now = new Date() } = {}) {
+async function archiveWebFormShellsInTx(trx, { phone, shellIds = [], leadId = null, replacementId = null, now = new Date() } = {}) {
   const values = phoneLookupValues(phone);
   if (!trx || !values.last10 || !shellIds.length) return [];
   const marker = JSON.stringify({ at: now.toISOString(), leadId: leadId == null ? null : String(leadId) });
@@ -442,10 +457,13 @@ async function archiveWebFormShellsInTx(trx, { phone, shellIds = [], leadId = nu
     .returning('id');
   const retiredIds = (Array.isArray(retired) ? retired : []).map((row) => (row && typeof row === 'object' ? row.id : row));
   // All or nothing. The row locks cover the estimate rows, not the leads
-  // table: a lead can link a planned shell before this update. The caller
-  // planned its write on "every shell goes", so it must not commit.
-  if (retiredIds.length !== shellIds.length) {
-    throw new Error(`web-form shell changed under the wizard run: planned ${shellIds.length}, archived ${retiredIds.length}`);
+  // table, and the phone lock serializes the automated writers only: since
+  // the plan, a lead can have linked a shell, and the office can have saved
+  // its own estimate for the phone. The caller planned its write on "the
+  // shells are every open estimate", so it must not commit.
+  const others = await listOpenEstimatesByPhone(phone, { database: trx, excludeEstimateId: replacementId || undefined });
+  if (retiredIds.length !== shellIds.length || others.length) {
+    throw new Error(`web-form shell changed under the wizard run: planned ${shellIds.length}, archived ${retiredIds.length}, other open estimates ${others.length}`);
   }
   return retiredIds;
 }

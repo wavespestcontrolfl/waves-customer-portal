@@ -45,6 +45,7 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
   let trx;
   let phone;
   let digits;
+  let customerId;
 
   beforeAll(async () => {
     const target = new URL(process.env.DATABASE_URL);
@@ -93,6 +94,8 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     mockConnection = trx;
     digits = await freshPhone();
     phone = `+1${digits}`;
+    // The web form makes its draft for a customer row, and the sweep's rule asks for one.
+    [{ id: customerId }] = await trx('customers').insert({ first_name: 'Sample', last_name: 'Person', phone }).returning('id');
   });
 
   afterEach(async () => {
@@ -106,6 +109,7 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     age += 1;
     const made = new Date(Date.now() - age * 3600000);
     const [row] = await trx('estimates').insert({
+      customer_id: customerId,
       customer_phone: phone,
       customer_name: 'Sample Person',
       address: HOME,
@@ -214,6 +218,11 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     ['was claimed by auto-send', () => ({ estimate_data: JSON.stringify({ automation: { autoSend: { claimedAt: '2026-11-20T12:00:00.000Z' } } }) })],
     // A staff edit can leave every total at 0 and every delivery time empty.
     ['was written again after it was made', () => ({ updated_at: new Date() })],
+    // Staff work that does not move updated_at (created_at = updated_at here).
+    ['has an office Sold-by action', () => ({ sold_by_source: 'cleared', sold_by_set_at: new Date() })],
+    ['has a logged follow-up', () => ({ follow_up_count: 1, last_follow_up_at: new Date() })],
+    // The web form's background work on a new draft is not done yet (the draft-retire sweep's settle time).
+    ['is younger than 30 minutes', () => { const made = new Date(Date.now() - 10 * 60000); return { created_at: made, updated_at: made }; }],
     // It could not carry the marker that parkClarifyAsk reads.
     ['has data that is not a JSON object', () => ({ estimate_data: JSON.stringify('legacy text') })],
     // One phone, two homes: this run does not replace the other home's draft.
@@ -282,8 +291,38 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
 
     // The caller's transaction rolls back on this throw, and its wizard draft with it.
     await expect(archiveWebFormShellsInTx(trx, { phone, shellIds, leadId: 'lead-1' }))
-      .rejects.toThrow('planned 2, archived 1');
+      .rejects.toThrow('planned 2, archived 1,');
     expect((await row(second)).archived_at).toBeNull();
+  });
+
+  const wizardDraft = async () => (await trx('estimates').insert({
+    customer_id: customerId, customer_phone: phone, customer_name: 'Sample Person', address: HOME, status: 'draft', source: 'quote_wizard', monthly_total: 59,
+  }).returning('id'))[0].id;
+
+  test('the draft the run just inserted is not "another open estimate": the shell goes with it', async () => {
+    const shell = await estimate();
+    const shellIds = await plan();
+    const replacementId = await wizardDraft();
+
+    expect(await archiveWebFormShellsInTx(trx, { phone, shellIds, leadId: 'lead-1', replacementId })).toEqual([shell]);
+    expect(await openIds()).toEqual([replacementId]);
+  });
+
+  test('all or nothing: an office estimate saved for the phone after the plan makes the archive throw (two transactions)', async () => {
+    await estimate();
+    const shellIds = await plan();
+    const replacementId = await wizardDraft();
+    // The office saves its own estimate on another connection. It does not take the phone lock.
+    const [office] = await database('estimates').insert({
+      customer_phone: phone, customer_name: 'Sample Person', address: HOME, status: 'draft', source: 'manual',
+    }).returning('id');
+    try {
+      // The caller's transaction rolls back on this throw, and its wizard draft with it.
+      await expect(archiveWebFormShellsInTx(trx, { phone, shellIds, leadId: 'lead-1', replacementId }))
+        .rejects.toThrow('other open estimates 1');
+    } finally {
+      await database('estimates').where({ id: office.id }).del();
+    }
   });
 
   test.each([

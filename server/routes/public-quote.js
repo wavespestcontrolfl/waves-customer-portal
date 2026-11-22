@@ -808,8 +808,9 @@ function shouldRefreshWizardDraft(duplicateBlock) {
 // nothing is archived (lockUntouchedWebFormShellsInTx holds the rule).
 // Returns the duplicate block the run must judge and `archiveShells`, which
 // the insert branch runs with the id of the draft it wrote in this
-// transaction. It throws when a planned shell is no longer one, so the
-// insert rolls back with it.
+// transaction. It throws when a planned shell is no longer one, or when
+// another open estimate appeared for the phone, so the insert rolls back
+// with it.
 // `lockContactPair` is the run's contact-pair lock: the estimate branches
 // take it before any estimate row lock, so it is taken first here too.
 // It has a gate because the unblocked run texts the person the booking link.
@@ -827,7 +828,7 @@ async function planFormShellClear(trx, duplicateBlock, { phone, address, leadId,
     duplicateBlock: null,
     archiveShells: async (writtenDraftId) => {
       if (!writtenDraftId) return [];
-      const retiredIds = await archiveWebFormShellsInTx(trx, { phone, shellIds, leadId });
+      const retiredIds = await archiveWebFormShellsInTx(trx, { phone, shellIds, leadId, replacementId: writtenDraftId });
       logger.info(`[public-quote] Archived ${retiredIds.length} untouched web-form draft(s) (${retiredIds.join(', ')}) that blocked the wizard estimate for lead ${leadId}`);
       return retiredIds;
     },

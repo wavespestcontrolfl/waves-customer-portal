@@ -6155,15 +6155,17 @@ estimate, so it returns no booking handoff and sends no booking text. On,
 when every open estimate of the phone is an untouched web-form shell for the
 run's own property, the run sets them aside. A shell is a `lead_webhook`
 draft for the same property as the run (same street, city, ZIP and unit;
-an address with no city or ZIP never matches) that was never written since
-it was made, has no monthly, one-time or annual total, was never sent,
-viewed or scheduled, has no auto-send claim and no lead pointing at it, on a
-phone with no clarify ask that is open or was sent in the last 7 days
-without an answer. The run then mirrors its estimate as for a new visitor,
+an address with no city or ZIP never matches) that is older than 30
+minutes, was never written since it was made, has no office Sold-by action
+and no logged follow-up, has no monthly, one-time or annual total, was never
+sent, viewed or scheduled, has no auto-send claim and no lead pointing at
+it, on a phone with no clarify ask that is open or was sent in the last 7
+days without an answer. The run then mirrors its estimate as for a new visitor,
 and the usual booking handoff, email link and `quote_wizard_booking_invite`
 text follow. The shells are archived in the same transaction as that
-estimate, all or nothing: when a shell changed in between, the estimate is
-not written and the run is blocked as before. Any other open estimate of
+estimate, all or nothing: when a shell changed in between, or the office
+saved its own estimate for the phone in between, the estimate is not written
+and the run is blocked as before. Any other open estimate of
 the phone still blocks (a draft with a price, a touched draft, a web-form
 draft for another property, an office or estimator estimate, the wizard's
 own older draft behind a shell), and so does a clarify ask that is being
