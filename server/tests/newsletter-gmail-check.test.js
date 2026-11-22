@@ -112,8 +112,8 @@ describe('runNewsletterGmailCheck', () => {
     expect(db).toHaveBeenCalledWith('newsletter_sends');
     expect(db.state.wheres).toEqual([
       ['status', ['sent', 'failed']],
-      [expect.stringMatching(/^coalesce\(newsletter_sends\.sent_at, .+\) <= \?$/), [new Date(NOW.getTime() - 48 * HOUR_MS)]],
-      [expect.stringMatching(/^coalesce\(newsletter_sends\.sent_at, .+\) > \?$/), [new Date(NOW.getTime() - 72 * HOUR_MS)]],
+      [expect.stringMatching(/^greatest\(newsletter_sends\.sent_at, .+\) <= \?$/), [new Date(NOW.getTime() - 48 * HOUR_MS)]],
+      [expect.stringMatching(/^greatest\(newsletter_sends\.sent_at, .+\) > \?$/), [new Date(NOW.getTime() - 72 * HOUR_MS)]],
     ]);
     expect(gmailOpenCounts).not.toHaveBeenCalled();
     expect(notifyAdmin).not.toHaveBeenCalled();
@@ -125,7 +125,8 @@ describe('runNewsletterGmailCheck', () => {
 
     const result = await runNewsletterGmailCheck({ now: NOW });
 
-    expect(gmailOpenCounts).toHaveBeenCalledWith(db, 'send-1');
+    // Opens count up to 48 hours after the issue went out, whichever hourly run reads them.
+    expect(gmailOpenCounts).toHaveBeenCalledWith(db, 'send-1', new Date('2026-12-05T12:00:00Z'));
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
     const [category, headline, why, opts] = notifyAdmin.mock.calls[0];
     expect(category).toBe('newsletter');
@@ -175,13 +176,14 @@ describe('runNewsletterGmailCheck', () => {
     expect(notifyAdmin.mock.calls[0][3].dedupeKey).toBe('newsletter-gmail-check:send-gap');
   });
 
-  test('the next hour finds the alert already written and logs nothing', async () => {
+  test('the next hour reads the same 48 hours of opens, finds the alert already written and logs nothing', async () => {
     db.state.sends = [issue()];
     gmailOpenCounts.mockResolvedValue(counts(2, 50, 20, 40));
     notifyAdmin.mockResolvedValueOnce({ id: 'notif-1', deduped: true });
 
-    await runNewsletterGmailCheck({ now: NOW });
+    await runNewsletterGmailCheck({ now: new Date(NOW.getTime() + HOUR_MS) });
 
+    expect(gmailOpenCounts).toHaveBeenCalledWith(db, 'send-1', new Date('2026-12-05T12:00:00Z'));
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
     expect(logger.warn).not.toHaveBeenCalled();
   });

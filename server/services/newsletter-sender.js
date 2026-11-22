@@ -2274,33 +2274,37 @@ async function spamReportCounts(db, sendId) {
 // The mailed address is a Gmail mailbox. A Google Workspace mailbox on its own domain is not one
 // here: nothing in the address tells it apart.
 const GMAIL_COPY_SQL = "lower(split_part(newsletter_send_deliveries.email, '@', 2)) in ('gmail.com', 'googlemail.com')";
-// A person opened the copy: an open event on this copy's own message that SendGrid did not mark as
-// a machine open (sg_machine_open: Apple Mail Privacy Protection fetched it, read or not). The
-// ledger's opened_at takes the first open of any kind, so it cannot tell the two apart; the webhook's
-// event log (sendgrid_webhook_events) keeps the flag. A row logged before the flag was kept has none
-// and counts, as in the Waves Pest Insider warm audience (pest-insider/audience.js).
+// A person opened the copy by a given time (one binding): an open event on this copy's own message
+// that SendGrid did not mark as a machine open (sg_machine_open: Apple Mail Privacy Protection
+// fetched it, read or not). The ledger's opened_at takes the first open of any kind, so it cannot
+// tell the two apart; the webhook's event log (sendgrid_webhook_events) keeps the flag and the time
+// the open happened. A row logged before the flag or the time was kept has none: it counts, by the
+// time it was logged, as in the Waves Pest Insider warm audience (pest-insider/audience.js).
 const PERSON_OPENED_COPY_SQL = `exists (select 1 from sendgrid_webhook_events person_open
   where person_open.event_type = 'open'
     and person_open.message_id = newsletter_send_deliveries.provider_message_id
     and lower(person_open.email) = lower(newsletter_send_deliveries.email)
-    and person_open.machine_open is not true)`;
+    and person_open.machine_open is not true
+    and coalesce(person_open.occurred_at, person_open.created_at) <= ?)`;
 
 /**
- * A send's delivered copies and the ones a person opened, for Gmail mailboxes and for all other
- * mailboxes, for the newsletter Gmail check (newsletter-gmail-check.js). A delivered copy is the
- * one spamReportCounts counts (DELIVERED_COPY_SQL, never a refused row). A click is not an open:
- * a mail scanner follows links, and mostly outside Gmail. One statement reads all four counts.
+ * A send's delivered copies and the ones a person opened by `openedBy`, for Gmail mailboxes and
+ * for all other mailboxes, for the newsletter Gmail check (newsletter-gmail-check.js). A delivered
+ * copy is the one spamReportCounts counts (DELIVERED_COPY_SQL, never a refused row). A click is
+ * not an open: a mail scanner follows links, and mostly outside Gmail. One statement reads all
+ * four counts. `openedBy` (a Date) is required: with a fixed time, a later read counts the same
+ * opens.
  */
-async function gmailOpenCounts(db, sendId) {
+async function gmailOpenCounts(db, sendId, openedBy) {
   const counts = await db('newsletter_send_deliveries')
     .where({ send_id: sendId })
     .whereNot(refusedDelivery)
     .whereRaw(`(${DELIVERED_COPY_SQL})`)
     .select(
       db.raw(`count(*) filter (where ${GMAIL_COPY_SQL}) as gmail_delivered`),
-      db.raw(`count(*) filter (where ${GMAIL_COPY_SQL} and ${PERSON_OPENED_COPY_SQL}) as gmail_opened`),
+      db.raw(`count(*) filter (where ${GMAIL_COPY_SQL} and ${PERSON_OPENED_COPY_SQL}) as gmail_opened`, [openedBy]),
       db.raw(`count(*) filter (where not (${GMAIL_COPY_SQL})) as other_delivered`),
-      db.raw(`count(*) filter (where not (${GMAIL_COPY_SQL}) and ${PERSON_OPENED_COPY_SQL}) as other_opened`),
+      db.raw(`count(*) filter (where not (${GMAIL_COPY_SQL}) and ${PERSON_OPENED_COPY_SQL}) as other_opened`, [openedBy]),
     )
     .first();
   const n = (value) => Number(value) || 0;

@@ -17,12 +17,13 @@
  * With fewer than MIN_COPIES delivered copies in either group there is no verdict.
  *
  * The job runs every hour (scheduler.js) and judges each issue from 48 to 72 hours after it went
- * out: most opens have arrived by then, and a day of hourly runs covers a restart. An issue that
- * stopped part way ('failed') is judged too: the copies it delivered reached readers. One alert
- * per issue, ever: the dedupe key holds the send id, with neither dedupeOpenOnly nor
- * refreshOnDedupe, so a later run stays silent, also after a person marked the row done
- * (admin-alert-retention.js, RE-RING RISK). The check reads the ledger only and emails no one, so
- * it ships with no gate; nothing here holds or stops a send.
+ * out. Every run counts the same opens, the ones of the issue's first 48 hours (most have arrived
+ * by then), so the day of hourly runs is one test that a restart or a failed run cannot skip, not
+ * 24 tests of a moving count. An issue that stopped part way ('failed') is judged too: the copies
+ * it delivered reached readers. One alert per issue, ever: the dedupe key holds the send id, with
+ * neither dedupeOpenOnly nor refreshOnDedupe, so a later run stays silent, also after a person
+ * marked the row done (admin-alert-retention.js, RE-RING RISK). The check reads the ledger only
+ * and emails no one, so it ships with no gate; nothing here holds or stops a send.
  */
 'use strict';
 
@@ -32,6 +33,7 @@ const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
 const { formatETDayDate } = require('../utils/datetime-et');
 
 const HOUR_MS = 60 * 60 * 1000;
+// Opens count up to JUDGE_FROM_MS after the issue went out; runs judge it from then to JUDGE_UNTIL_MS.
 const JUDGE_FROM_MS = 48 * HOUR_MS;
 const JUDGE_UNTIL_MS = 72 * HOUR_MS;
 const MIN_COPIES = 20;
@@ -73,16 +75,17 @@ function gmailGapVerdict({ gmail, other }) {
   return underHalf && chanceOfSoFewGmailOpens({ gmail, other }) < CHANCE_LIMIT ? 'gap' : 'ok';
 }
 
-// When an issue went out. The sender stamps sent_at at its final write, 'sent' or 'failed'. A send
-// that died before that write (a tick that threw part way, a stale claim) has none, so the time of
-// its newest mailed copy stands in.
-const WENT_OUT_SQL = 'coalesce(newsletter_sends.sent_at, (select max(copy.sent_at)'
+// When an issue went out: the later of the send's sent_at and its newest mailed copy (greatest
+// skips a NULL). The sender stamps sent_at at its final write, 'sent' or 'failed'. A send that
+// died before that write (a tick that threw part way, a stale claim) has none. A resumed send
+// keeps its first sent_at, and its newest readers need the same 48 hours to open.
+const WENT_OUT_SQL = 'greatest(newsletter_sends.sent_at, (select max(copy.sent_at)'
   + ' from newsletter_send_deliveries copy where copy.send_id = newsletter_sends.id))';
 
 /**
  * The issues one run judges: each one that went out 48 to 72 hours before `now`, oldest first.
- * 'failed' too: a send that stopped part way reached some readers. A send that mailed no copy has
- * no time here and is never judged.
+ * 'failed' too: a send that stopped part way reached some readers. A send with no sent_at and no
+ * mailed copy has no time here and is never judged.
  * @returns {Promise<Array<{ id: string, subject: string, newsletter_type: string, went_out_at: Date }>>}
  */
 function issuesToJudge(now) {
@@ -138,7 +141,7 @@ async function runNewsletterGmailCheck({ now = new Date() } = {}) {
   const { gmailOpenCounts } = require('./newsletter-sender');
   const judged = [];
   for (const send of await issuesToJudge(now)) {
-    const counts = await gmailOpenCounts(db, send.id);
+    const counts = await gmailOpenCounts(db, send.id, new Date(new Date(send.went_out_at).getTime() + JUDGE_FROM_MS));
     const verdict = gmailGapVerdict(counts);
     if (verdict === 'gap') {
       const raised = await raiseGmailGap(send, counts);

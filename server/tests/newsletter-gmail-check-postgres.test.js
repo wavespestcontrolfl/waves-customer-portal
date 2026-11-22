@@ -1,11 +1,12 @@
 /**
  * The newsletter Gmail check's two reads on real PostgreSQL.
  * - The counts (newsletter-sender gmailOpenCounts): which copies of one issue count as delivered
- *   and as opened by a person, for Gmail mailboxes and for all other mailboxes. The ledger rows are
- *   written by the SendGrid webhook's own event mapping (computeNewsletterEventUpdates), and the
- *   opens are rows of its event log (sendgrid_webhook_events), where the machine-open flag lives.
+ *   and as opened by a person by a given time, for Gmail mailboxes and for all other mailboxes.
+ *   The ledger rows are written by the SendGrid webhook's own event mapping
+ *   (computeNewsletterEventUpdates), and the opens are rows of its event log
+ *   (sendgrid_webhook_events), where the machine-open flag and the time of the open live.
  * - The issues a run judges (newsletter-gmail-check issuesToJudge): the ones that went out 48 to
- *   72 hours before, by the send's own time or, when it has none, by its newest mailed copy.
+ *   72 hours before, by the later of the send's own time and its newest mailed copy.
  * A fake query builder cannot show what the correlated subqueries, the FILTER clauses, a NULL flag
  * and a NULL time read as. Self-skips unless DATABASE_URL is set (CI's DB-gated suites run it).
  * The fixtures are synthetic (no subscriber, made-up local parts) and are removed in afterAll.
@@ -54,17 +55,22 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     }
   }
 
+  const hoursAgo = (hours) => new Date(Date.now() - hours * 60 * 60 * 1000);
+  // Opens count up to this time. The opens below happened 10 hours ago unless a case says otherwise.
+  const OPENED_BY = hoursAgo(2);
+
   let eventNo = 0;
-  // One row of the webhook's event log, as processWebhookEvent writes an open.
-  async function logOpen({ messageId, email, machineOpen }) {
+  // One row of the webhook's event log, as processWebhookEvent writes an open. `logged` = a row from
+  // before the log kept SendGrid's own event time: it has only the time it was written.
+  async function logOpen({ messageId, email, machineOpen, at = hoursAgo(10), logged = null }) {
     eventNo += 1;
     await db('sendgrid_webhook_events').insert({
       event_id: `${eventPrefix}${eventNo}`, event_type: 'open', message_id: messageId, email,
-      occurred_at: new Date(), machine_open: machineOpen, status: 'processed',
+      occurred_at: logged ? null : at, ...(logged ? { created_at: logged } : {}), machine_open: machineOpen, status: 'processed',
     });
   }
 
-  test('counts delivered copies and opens by a person, for Gmail and for all other mailboxes', async () => {
+  test('counts delivered copies and opens by a person by a given time, for Gmail and for all other mailboxes', async () => {
     const [send] = await db('newsletter_sends').insert({
       subject: 'Synthetic Gmail check', html_body: '<p>Body</p>', text_body: 'Body', status: 'sent', sent_at: new Date(), auto_share_social: false,
     }).returning(['id']);
@@ -74,8 +80,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
       gmailPerson: `person-${stamp}@gmail.com`,
       // Apple Mail fetched it by itself: the ledger gets opened_at, and no person read it.
       gmailMachine: `machine-${stamp}@Googlemail.com`,
-      // An open logged before the machine flag was kept.
+      // An open logged before the machine flag and the event time were kept.
       gmailOldFlag: `oldflag-${stamp}@gmail.com`,
+      // A person opened it, but after the time the count stops at.
+      gmailLate: `late-${stamp}@gmail.com`,
       // This reader's only open is on another issue's message.
       gmailOtherIssue: `otherissue-${stamp}@gmail.com`,
       // Accepted by SendGrid with no later event: not a delivered copy yet.
@@ -97,7 +105,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     await receive(id.gmailMachine, { event: 'delivered' }, { event: 'open', sg_machine_open: true });
     await logOpen({ messageId, email: copies.gmailMachine, machineOpen: true });
     await receive(id.gmailOldFlag, { event: 'delivered' }, { event: 'open' });
-    await logOpen({ messageId, email: copies.gmailOldFlag, machineOpen: null });
+    await logOpen({ messageId, email: copies.gmailOldFlag, machineOpen: null, logged: hoursAgo(10) });
+    await receive(id.gmailLate, { event: 'delivered' }, { event: 'open' });
+    await logOpen({ messageId, email: copies.gmailLate, machineOpen: false, at: hoursAgo(1) });
     await receive(id.gmailOtherIssue, { event: 'delivered' });
     await logOpen({ messageId: `other-${messageId}`, email: copies.gmailOtherIssue, machineOpen: false });
     await receive(id.gmailBounced, { event: 'bounce', type: 'bounce', reason: '550 5.1.1 mailbox does not exist' });
@@ -111,28 +121,35 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     const ledgerOpens = await db('newsletter_send_deliveries').whereIn('id', [id.gmailPerson, id.gmailMachine]).whereNotNull('opened_at');
     expect(ledgerOpens).toHaveLength(2);
 
-    expect(await gmailOpenCounts(db, send.id)).toEqual({
-      // person, machine, old flag, other issue. Not the accepted-only copy, not the bounce.
-      gmail: { delivered: 4, opened: 2 },
-      // person, click only, own spam report.
+    expect(await gmailOpenCounts(db, send.id, OPENED_BY)).toEqual({
+      // Delivered: person, machine, old flag, other issue, late. Not the accepted-only copy, not the
+      // bounce. Opened: person, old flag.
+      gmail: { delivered: 5, opened: 2 },
+      // Delivered: person, click only, own spam report. Opened: person.
       other: { delivered: 3, opened: 1 },
     });
+    // A read with a later time counts the late open too: the time is what fixes the count.
+    expect((await gmailOpenCounts(db, send.id, new Date())).gmail).toEqual({ delivered: 5, opened: 3 });
   });
 
-  test('a run judges the issues that went out 48 to 72 hours before, by the newest mailed copy when the send has no time', async () => {
+  test('a run judges the issues that went out 48 to 72 hours before, by the later of the send time and the newest mailed copy', async () => {
     const now = new Date();
-    const hoursAgo = (hours) => new Date(now.getTime() - hours * 60 * 60 * 1000);
+    // One fixed `now` for the rows and the read, so an exact time can be compared.
+    const ago = (hours) => new Date(now.getTime() - hours * 60 * 60 * 1000);
     // [name, status, the send's own sent_at, the times its copies were mailed]
     const cases = [
-      ['sent in the window', 'sent', hoursAgo(49), []],
-      ['sent too new', 'sent', hoursAgo(47), []],
-      ['sent too old', 'sent', hoursAgo(73), []],
-      ['still sending', 'sending', hoursAgo(50), []],
-      ['stopped part way, with a time', 'failed', hoursAgo(60), []],
+      ['sent in the window', 'sent', ago(49), []],
+      ['sent too new', 'sent', ago(47), []],
+      ['sent too old', 'sent', ago(73), []],
+      ['still sending', 'sending', ago(50), []],
+      ['stopped part way, with a time', 'failed', ago(60), []],
       // The tick threw before the final write: no sent_at on the send.
-      ['died, newest copy in the window', 'failed', null, [hoursAgo(56), hoursAgo(55)]],
-      ['died, newest copy too new', 'failed', null, [hoursAgo(55), hoursAgo(30)]],
+      ['died, newest copy in the window', 'failed', null, [ago(56), ago(55)]],
+      ['died, newest copy too new', 'failed', null, [ago(55), ago(30)]],
       ['died, no copy mailed', 'failed', null, []],
+      // A resume keeps the first sent_at: the newest readers need the same 48 hours.
+      ['resumed, newest copy in the window', 'sent', ago(120), [ago(119), ago(50)]],
+      ['resumed, newest copy too new', 'sent', ago(60), [ago(59), ago(10)]],
     ];
     const idOf = {};
     for (const [name, status, sentAt, mailed] of cases) {
@@ -152,12 +169,14 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     const mine = (await issuesToJudge(now)).filter((row) => Object.values(idOf).includes(row.id));
 
     expect(mine.map((row) => row.id)).toEqual([
-      idOf['stopped part way, with a time'], idOf['died, newest copy in the window'], idOf['sent in the window'],
+      idOf['stopped part way, with a time'], idOf['died, newest copy in the window'],
+      idOf['resumed, newest copy in the window'], idOf['sent in the window'],
     ]);
-    expect(new Date(mine[1].went_out_at).getTime()).toBe(hoursAgo(55).getTime());
+    expect(new Date(mine[1].went_out_at).getTime()).toBe(ago(55).getTime());
+    expect(new Date(mine[2].went_out_at).getTime()).toBe(ago(50).getTime());
     // The columns the alert reads.
-    expect(Object.keys(mine[2]).sort()).toEqual(['id', 'newsletter_type', 'subject', 'went_out_at']);
-    expect(mine[2].subject).toBe('Synthetic Gmail check: sent in the window');
+    expect(Object.keys(mine[3]).sort()).toEqual(['id', 'newsletter_type', 'subject', 'went_out_at']);
+    expect(mine[3].subject).toBe('Synthetic Gmail check: sent in the window');
   });
 
   test('an issue with no copies reads as zeros', async () => {
@@ -166,7 +185,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     }).returning(['id']);
     sendIds.push(send.id);
 
-    expect(await gmailOpenCounts(db, send.id)).toEqual({
+    expect(await gmailOpenCounts(db, send.id, new Date())).toEqual({
       gmail: { delivered: 0, opened: 0 }, other: { delivered: 0, opened: 0 },
     });
   });
