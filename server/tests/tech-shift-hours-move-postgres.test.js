@@ -6,6 +6,7 @@
  * and prove an automatic move cannot leave it outside the kept technician's
  * shift, while the office's own move still can.
  */
+const { randomUUID } = require('node:crypto');
 const { createCapacityDbFixture, describeDb } = require('./helpers/scheduling-capacity-db');
 
 jest.mock('../services/messaging/send-customer-message', () => ({
@@ -224,6 +225,140 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
       await setShift('10:00', '11:30');
       const long = await seed({ window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 120 });
       expect((await rainOptions(long)).length).toBeGreaterThan(0);
+    });
+  });
+
+  // A grouped stop (two or more services at one address) moves as one unit (visit-groups
+  // moveVisitAsUnit). The unit is judged before its first write: every member, as the move
+  // leaves it. So a stop is never moved in part by a refusal of one member.
+  describe('a grouped stop', () => {
+    beforeAll(async () => {
+      for (const table of ['service_visits', 'visit_effects', 'visit_completion_packets', 'service_completion_attempts', 'service_records', 'invoices']) {
+        await f.db.raw('CREATE TABLE ?? (LIKE public.?? INCLUDING ALL)', [table, table]);
+      }
+    });
+    afterEach(async () => { await f.db('service_visits').del(); });
+    // Two services at one address, back to back: a 09:00 to 10:00, then b 10:00 to 11:00.
+    const seedStop = async (b = {}) => {
+      const visitId = randomUUID();
+      await f.db('service_visits').insert({ id: visitId, customer_id: f.ids.customer, scheduled_date: f.date, window_start: '09:00', window_end: '11:00',
+        stop_base_key: `${f.ids.customer}:${f.date}`, status: 'open', technician_id: f.ids.technician, created_by: 'shift_hours_fixture' });
+      const a = f.baseStop({ visit_id: visitId, window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 });
+      const sibling = f.baseStop({ visit_id: visitId, window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 60, ...b });
+      await f.db('scheduled_services').insert([a, sibling]);
+      return { a: a.id, b: sibling.id, visitId };
+    };
+    const stopOf = async (stop) => [await rowOf(stop.a), await rowOf(stop.b)];
+    const whereSeeded = [
+      { day: f.date, window_start: '09:00:00', window_end: '10:00:00' },
+      { day: f.date, window_start: '10:00:00', window_end: '11:00:00' },
+    ];
+    // A technician's own rain-out move of the stop, from the first service.
+    const moveStop = (stop, window, by = 'tech') => move(stop.a, nextDay, window, by, { overlapAdvisory: true });
+
+    test('a technician\'s move that leaves the second service after the shift is refused, and neither service moves; one that fits moves both', async () => {
+      const stop = await seedStop();
+      // The first service fits 11:00 to 12:00. The second follows it and would end at 13:00.
+      await expect(moveStop(stop, { start: '11:00', end: '12:00' })).rejects.toMatchObject({ ...refused, memberId: stop.b });
+      expect(await stopOf(stop)).toMatchObject(whereSeeded);
+      expect(await f.db('service_visits').where({ id: stop.visitId }).first(f.db.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"))).toMatchObject({ day: f.date });
+
+      const moved = await moveStop(stop, { start: '10:00', end: '11:00' });
+      expect(moved.visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
+      expect(await stopOf(stop)).toMatchObject([
+        { day: nextDay, window_start: '10:00:00', window_end: '11:00:00' },
+        { day: nextDay, window_start: '11:00:00', window_end: '12:00:00' },
+      ]);
+    });
+
+    test('each service is judged with its own stored length', async () => {
+      // The second service is a two-hour job in a one-hour window: at 10:00 it ends at 12:00, at 11:00 at 13:00.
+      const stop = await seedStop({ estimated_duration_minutes: 120 });
+      await expect(moveStop(stop, { start: '10:00', end: '11:00' })).rejects.toMatchObject({ ...refused, memberId: stop.b });
+      expect(await stopOf(stop)).toMatchObject(whereSeeded);
+      expect((await moveStop(stop, { start: '09:00', end: '10:00' })).visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
+    });
+
+    test('each service is judged on its own technician', async () => {
+      // The second service is another technician's, who stops at 11:00.
+      await f.db('technicians').where({ id: f.ids.otherTech }).update({ shift_start: '08:00', shift_end: '11:00' });
+      try {
+        const stop = await seedStop({ technician_id: f.ids.otherTech });
+        await expect(moveStop(stop, { start: '10:00', end: '11:00' })).rejects.toMatchObject({ ...refused, memberId: stop.b });
+        expect(await stopOf(stop)).toMatchObject(whereSeeded);
+      } finally {
+        await f.db('technicians').where({ id: f.ids.otherTech }).update({ shift_start: null, shift_end: null });
+      }
+    });
+
+    test('the office\'s own move of the stop lands outside the shift: it is not checked here', async () => {
+      const stop = await seedStop();
+      expect((await moveStop(stop, { start: '11:00', end: '12:00' }, 'admin')).visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
+      expect(await stopOf(stop)).toMatchObject([
+        { day: nextDay, window_start: '11:00:00', window_end: '12:00:00' },
+        { day: nextDay, window_start: '12:00:00', window_end: '13:00:00' },
+      ]);
+    });
+
+    // The tech app's rain-out sheet lists days through findRescheduleOptions. Route check off: the
+    // list offers the visit type's fixed morning hour (09:00 here) and reads no shift of its own.
+    test('the rain-out day options are not offered an hour the stop\'s move refuses, though the first service alone fits', async () => {
+      const routeCheck = jest.spyOn(require('../services/scheduling/route-ranked-days'), 'routeRankedDaysLive').mockReturnValue(false);
+      const rainOptions = (id) => SmartRebooker.findRescheduleOptions(id, 'weather_rain', { probeSpanMinutes: 60 });
+      try {
+        // 09:00 to 10:00 fits a shift that ends at 10:30. The second service would end at 11:00.
+        await setShift('08:00', '10:30');
+        const stop = await seedStop();
+        const [forOffice] = await SmartRebooker.findRescheduleOptions(stop.a, 'weather_rain', { probeSpanMinutes: 60, initiatedBy: 'admin' });
+        expect(forOffice.suggestedWindow.start).toBe('09:00');
+        await expect(move(stop.a, forOffice.date, { start: '09:00', end: '10:00' }, 'tech', { overlapAdvisory: true })).rejects.toMatchObject({ ...refused, memberId: stop.b });
+        expect(await rainOptions(stop.a)).toEqual([]);
+        // A shift that holds both services: the same day is offered, and its move lands.
+        await setShift('08:00', '11:00');
+        const offered = await rainOptions(stop.a);
+        expect(offered.map((option) => option.date)).toContain(forOffice.date);
+        expect((await move(stop.a, offered[0].date, { start: '09:00', end: '10:00' }, 'tech', { overlapAdvisory: true })).visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
+      } finally {
+        routeCheck.mockRestore();
+      }
+    });
+
+    // The stop is judged under its lock, and each service then moves in its own write. A dispatch
+    // edit that lands in between (here: on another connection, at the first service's pre-move hook)
+    // must not be written over: each write pins the technician and the length its verdict used.
+    describe('a dispatch edit after the stop was judged', () => {
+      const lengthen = (id) => ({ overlapAdvisory: true, beforeMove: async () => { await f.db('scheduled_services').where({ id }).update({ estimated_duration_minutes: 240 }); } });
+
+      test('the first service made longer: the move is refused as a concurrent change, and neither service moves', async () => {
+        const stop = await seedStop();
+        // 10:00 to 11:00 fits the 12:00 shift end for the 60 minutes that were judged, not for 240.
+        await expect(move(stop.a, nextDay, { start: '10:00', end: '11:00' }, 'tech', lengthen(stop.a))).rejects.toMatchObject({ statusCode: 409 });
+        expect(await stopOf(stop)).toMatchObject(whereSeeded);
+      });
+
+      test('the second service made longer: it does not move, and the move reports it', async () => {
+        const stop = await seedStop();
+        const out = await move(stop.a, nextDay, { start: '10:00', end: '11:00' }, 'tech', lengthen(stop.b));
+        expect(out.visitMove.moved).toEqual([stop.a]);
+        expect(out.visitMove.failed.map((x) => x.id)).toEqual([stop.b]);
+        expect(await rowOf(stop.b)).toMatchObject(whereSeeded[1]);
+      });
+
+      test('gate off: the same edits do not stop the move, as before', async () => {
+        delete process.env.GATE_TECH_SHIFT_HOURS;
+        const first = await seedStop();
+        expect((await move(first.a, nextDay, { start: '10:00', end: '11:00' }, 'tech', lengthen(first.a))).visitMove).toMatchObject({ moved: [first.a, first.b], failed: [] });
+        await f.db('scheduled_services').del();
+        await f.db('service_visits').del();
+        const second = await seedStop();
+        expect((await move(second.a, nextDay, { start: '10:00', end: '11:00' }, 'tech', lengthen(second.b))).visitMove).toMatchObject({ moved: [second.a, second.b], failed: [] });
+      });
+    });
+
+    test('gate off: the same move of the stop lands, as before', async () => {
+      delete process.env.GATE_TECH_SHIFT_HOURS;
+      const stop = await seedStop();
+      expect((await moveStop(stop, { start: '11:00', end: '12:00' })).visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
     });
   });
 

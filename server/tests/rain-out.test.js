@@ -464,6 +464,36 @@ describe('rain-out service', () => {
         expect(await sameDayForOffice()).toEqual(['12:00', '14:00']);
       });
 
+      // A grouped stop commits through the unit mover, which judges every member (visit-groups unitShiftTest;
+      // its own cases are in visit-groups-unit-move.test.js). The sheet asks that test, not the single-visit one.
+      describe('a grouped stop', () => {
+        const vg = require('../services/visit-groups');
+        let unitShiftTest;
+        afterEach(() => unitShiftTest.mockRestore());
+
+        test('gate on: an hour the unit\'s check refuses is not offered, though the tapped visit alone fits; no single-visit shift read', async () => {
+          process.env.GATE_TECH_SHIFT_HOURS = 'true';
+          const refuses = jest.fn((date, start) => start === '13:00');
+          unitShiftTest = jest.spyOn(vg, 'unitShiftTest').mockResolvedValue(refuses);
+          finder.mockResolvedValue({ slots: [slot('11:00', 3), slot('12:00', 5), slot('13:00', 4)] });
+          SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
+          // No technicians queue is wired: a single-visit shift read would throw.
+          wireDb({ scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, status: 'confirmed' }) }), chain({ rows: [] })] });
+          const options = await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
+          expect(options.sameDay.map((o) => o.window.start)).toEqual(['11:00', '12:00']);
+          expect(unitShiftTest).toHaveBeenCalledWith(db, expect.objectContaining({ id: 'svc-1' }));
+          expect(refuses.mock.calls.map((c) => c.slice(1))).toEqual(expect.arrayContaining([['11:00', '12:00'], ['13:00', '14:00']]));
+        });
+
+        test('gate on: the dispatch board\'s sheet (it commits as the office) does not ask', async () => {
+          process.env.GATE_TECH_SHIFT_HOURS = 'true';
+          unitShiftTest = jest.spyOn(vg, 'unitShiftTest').mockResolvedValue(() => true);
+          finder.mockResolvedValue({ slots: [slot('11:00', 3), slot('14:00', 6)] });
+          expect(await sameDayForOffice()).toEqual(['11:00', '14:00']);
+          expect(unitShiftTest).not.toHaveBeenCalled();
+        });
+      });
+
       test('gate off: every hour stays, and no shift is read', async () => {
         finder.mockResolvedValue({ slots: [slot('11:00', 3), slot('14:00', 6)] });
         // `sameDay` wires no technicians queue: a read would throw.

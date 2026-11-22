@@ -1605,10 +1605,16 @@ class SmartRebooker {
     // that commits as the office (opts.initiatedBy 'admin': the dispatch
     // board's rain-out sheet) and the admin picker (no reason) keep every
     // window. Those two, gate off, or no technician: no read.
-    const keptShiftOf = reason && opts.initiatedBy !== 'admin' && service.technician_id
+    // A grouped stop commits as one unit, and the unit mover judges every
+    // member's landing on that member's technician: the same test here
+    // (visit-groups unitShiftTest; null for an ungrouped visit).
+    const shiftJudgedList = !!reason && opts.initiatedBy !== 'admin';
+    const unitRefuses = shiftJudgedList ? await require('./visit-groups').unitShiftTest(db, service) : null;
+    const keptShiftOf = shiftJudgedList && !unitRefuses && service.technician_id
       ? await require('./technician-eligibility').loadTechShifts(db, { technicianIds: [service.technician_id] })
       : null;
     const outsideKeptShift = (dateStr, windowStart, windowEnd) => {
+      if (unitRefuses) return unitRefuses(dateStr, windowStart, windowEnd);
       if (!keptShiftOf) return false;
       const { startMin, endMin } = require('./scheduling/window-rules').rowBlockMinutes({
         window_start: windowStart, window_end: windowEnd, estimated_duration_minutes: service.estimated_duration_minutes });

@@ -1179,3 +1179,210 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     expect(noop.visitMove).toMatchObject({ alreadyAtTarget: true, unchanged: ['a', 'b'] });
   });
 });
+
+// GATE_TECH_SHIFT_HOURS (D4 part 3b-2b). The shift loader is stubbed here: the
+// real one, over real rows, is in tech-shift-hours-move-postgres.test.js.
+describe('shift hours: a grouped stop is judged as one unit', () => {
+  const eligibility = require('../services/technician-eligibility');
+  const vg = require('../services/visit-groups');
+  const script = ({ visit = VISIT, members, landed = null }) => ({
+    service_visits: { first: (ops) => (ops.some((o) => o[0] === 'max') ? { max: 0 } : visit) },
+    scheduled_services: {
+      select: (ops) => (ops.some((o) => o[0] === 'orderBy') ? (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' })))
+        : ops.some((o) => o[0] === 'forUpdate') ? members
+          : ops.some((o) => o[0] === 'whereIn' && o[1] === 'id') ? members.map((m) => ({ ...m, visit_id: 'v1' }))
+            : (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' })))),
+    },
+  });
+  // Minutes after midnight: t1 works 08:00 to 15:00, t9 08:00 to 12:00.
+  let shifts;
+  let loadTechShifts;
+  beforeEach(() => {
+    shifts = { t1: { startMin: 480, endMin: 900 }, t9: { startMin: 480, endMin: 720 } };
+    loadTechShifts = jest.spyOn(eligibility, 'loadTechShifts')
+      .mockImplementation(async (conn, { technicianIds }) => (id) => (technicianIds.map(String).includes(String(id)) ? shifts[id] || null : null));
+  });
+  afterEach(() => { loadTechShifts.mockRestore(); delete process.env.GATE_TECH_SHIFT_HOURS; });
+
+  const pair = (b = {}, a = {}) => [member('a', a), member('b', { window_start: '10:00', window_end: '11:00', ...b })];
+  const landed = (aStart, bStart, tech = 't1') => [
+    { id: 'a', scheduled_date: '2026-09-02', window_start: aStart, window_end: `${String(Number(aStart.slice(0, 2)) + 1).padStart(2, '0')}:00`, technician_id: tech },
+    { id: 'b', scheduled_date: '2026-09-02', window_start: bStart, window_end: `${String(Number(bStart.slice(0, 2)) + 1).padStart(2, '0')}:00`, technician_id: tech },
+  ];
+  const unit = (rebooker, newWindow, initiatedBy = 'tech', options = {}) => moveVisitAsUnit({
+    rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow, reason: 'weather_rain', initiatedBy, options,
+  });
+  const refusedFor = (memberId) => ({ statusCode: 409, status: 409, code: 'SLOT_TAKEN', isOperational: true, memberId });
+  const nothingWritten = (rebooker) => {
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    expect(assignDispatchJob).not.toHaveBeenCalled();
+    expect(db.__calls.some((c) => c.op === 'update' || c.op === 'insert' || c.op === 'del')).toBe(false);
+  };
+
+  describe('moveVisitAsUnit', () => {
+    test('a technician\'s move: a sibling that would end after the shift refuses the whole stop before any write; a stop that fits moves', async () => {
+      // a 14:00 to 15:00 fits; its sibling follows an hour later and ends at 16:00.
+      db.__script = script({ members: pair() });
+      const refused = fakeRebooker();
+      await expect(unit(refused, '14:00-15:00')).rejects.toMatchObject(refusedFor('b'));
+      nothingWritten(refused);
+      expect(loadTechShifts.mock.calls[0][1]).toEqual({ technicianIds: ['t1'] });
+
+      db.__script = script({ members: pair({ estimated_duration_minutes: 45 }), landed: landed('13:00', '14:00') });
+      const moved = fakeRebooker();
+      expect((await unit(moved, '13:00-14:00')).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+      expect(moved.reschedule).toHaveBeenCalledTimes(2);
+      // Each judged member's own write pins the length the verdict used (a has none stored), beside its technician.
+      const [aCall, bCall] = moved.reschedule.mock.calls;
+      expect(aCall[5].expect).toMatchObject({ technician_id: 't1', estimated_duration_minutes: null });
+      expect(bCall[5].expect).toMatchObject({ technician_id: 't1', estimated_duration_minutes: 45 });
+      // The other members' contract carries no length: the rebooker's own read of them does not select it.
+      expect(aCall[5].excludeExpect.every((x) => !('estimated_duration_minutes' in x))).toBe(true);
+    });
+
+    test('a member\'s block is the later of its window end and its stored length', async () => {
+      // The sibling is a two-hour job in a one-hour window.
+      const members = pair({ estimated_duration_minutes: 120 });
+      db.__script = script({ members });
+      const refused = fakeRebooker();
+      // 14:00 + 120 minutes = 16:00, after the 15:00 shift end.
+      await expect(unit(refused, '13:00-14:00')).rejects.toMatchObject(refusedFor('b'));
+      nothingWritten(refused);
+      // 13:00 + 120 minutes = 15:00, the shift end.
+      db.__script = script({ members, landed: landed('12:00', '13:00') });
+      expect((await unit(fakeRebooker(), '12:00-13:00')).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+    });
+
+    test('a move of the day only keeps each member\'s own window, and a start before the shift is refused', async () => {
+      shifts.t1 = { startMin: 600, endMin: 900 }; // 10:00 to 15:00
+      db.__script = script({ members: pair() });
+      const refused = fakeRebooker();
+      await expect(unit(refused, undefined)).rejects.toMatchObject(refusedFor('a'));
+      nothingWritten(refused);
+      // A start at the shift start, and an end at the shift end, fit.
+      shifts.t1 = { startMin: 540, endMin: 660 }; // 09:00 to 11:00
+      db.__script = script({ members: pair(), landed: landed('09:00', '10:00') });
+      expect((await unit(fakeRebooker(), undefined)).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+    });
+
+    test('the office\'s own move is not judged, and no shift is read', async () => {
+      db.__script = script({ members: pair(), landed: landed('14:00', '15:00') });
+      const rebooker = fakeRebooker();
+      expect((await unit(rebooker, '14:00-15:00', 'admin')).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+      expect(loadTechShifts).not.toHaveBeenCalled();
+      expect(rebooker.reschedule.mock.calls.every((c) => !('estimated_duration_minutes' in c[5].expect))).toBe(true);
+    });
+
+    test('a unit that names a technician is judged on that technician, not on the one each member leaves', async () => {
+      // t9 stops at 12:00. The sibling lands 12:00 to 13:00: inside t1's shift, outside t9's.
+      db.__script = script({ members: pair() });
+      const refused = fakeRebooker();
+      await expect(unit(refused, '11:00-12:00', 'auto_dispatch', { technicianId: 't9' })).rejects.toMatchObject(refusedFor('b'));
+      nothingWritten(refused);
+      expect(loadTechShifts.mock.calls[0][1]).toEqual({ technicianIds: ['t9'] });
+      // The members' own technician stops at 10:00, and t9 holds both landings.
+      shifts.t1 = { startMin: 480, endMin: 600 };
+      db.__script = script({ members: pair(), landed: landed('10:00', '11:00', 't9') });
+      expect((await unit(fakeRebooker(), '10:00-11:00', 'auto_dispatch', { technicianId: 't9' })).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+    });
+
+    test('a member with no technician is not judged', async () => {
+      db.__script = script({ members: pair({ technician_id: null }), landed: [landed('14:00', '15:00')[0], { ...landed('14:00', '15:00')[1], technician_id: null }] });
+      const rebooker = fakeRebooker();
+      expect((await unit(rebooker, '14:00-15:00')).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+      // No verdict used its length, so its write pins none.
+      expect('estimated_duration_minutes' in rebooker.reschedule.mock.calls[1][5].expect).toBe(false);
+    });
+
+    test('a member the move does not change is not judged', async () => {
+      // The unit names t9 on the same day and hours. b is on t9 already and ends after t9's shift; only a changes, and a fits.
+      shifts.t9 = { startMin: 480, endMin: 630 }; // 08:00 to 10:30
+      const members = pair({ technician_id: 't9' });
+      db.__script = script({ members, landed: members.map((m) => ({ id: m.id, scheduled_date: '2026-08-30', window_start: m.window_start, window_end: m.window_end, technician_id: 't9' })) });
+      const rebooker = fakeRebooker();
+      const out = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-08-30', reason: 'auto_dispatch', initiatedBy: 'auto_dispatch', options: { technicianId: 't9' } });
+      expect(out.visitMove).toMatchObject({ moved: ['a'], unchanged: ['b'], failed: [] });
+      // Had b changed too, the same plan is refused: both members on t1, moved to t9.
+      jest.clearAllMocks(); db.__calls.length = 0;
+      db.__script = script({ members: pair() });
+      const refused = fakeRebooker();
+      await expect(moveVisitAsUnit({ rebooker: refused, serviceId: 'a', service: SERVICE, newDate: '2026-08-30', reason: 'auto_dispatch', initiatedBy: 'auto_dispatch', options: { technicianId: 't9' } }))
+        .rejects.toMatchObject(refusedFor('b'));
+      nothingWritten(refused);
+    });
+
+    test('gate off: the real loader reads nothing, and the stop moves as before', async () => {
+      loadTechShifts.mockRestore();
+      db.__script = script({ members: pair(), landed: landed('14:00', '15:00') });
+      const rebooker = fakeRebooker();
+      expect((await unit(rebooker, '14:00-15:00')).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+      expect(db.__calls.some((c) => c.table === 'technicians' && c.op === 'select')).toBe(false);
+      expect(db.__calls.some((c) => c.table === 'time_entries')).toBe(false);
+      expect(rebooker.reschedule.mock.calls.every((c) => !('estimated_duration_minutes' in c[5].expect))).toBe(true);
+    });
+  });
+
+  // The read-only twin for a list whose pick commits as that move (the tech app's rain-out sheets).
+  describe('unitShiftTest', () => {
+    const GROUPED = { id: 'a', visit_id: 'v1' };
+    const wire = (members, visit = VISIT) => {
+      db.__script = { service_visits: { first: () => visit }, scheduled_services: { select: () => members } };
+    };
+
+    test('no test when there is no unit to judge: gate off (no read), an ungrouped visit, a stop that is not open, one live member, a service that left the stop', async () => {
+      wire(pair());
+      expect(await vg.unitShiftTest(db, GROUPED)).toBe(null);
+      expect(db.__calls).toEqual([]);
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      expect(await vg.unitShiftTest(db, { id: 'a', visit_id: null })).toBe(null);
+      expect(db.__calls).toEqual([]);
+      wire(pair(), { ...VISIT, status: 'dissolved' });
+      expect(await vg.unitShiftTest(db, GROUPED)).toBe(null);
+      wire([member('a')]);
+      expect(await vg.unitShiftTest(db, GROUPED)).toBe(null);
+      wire([member('b'), member('c')]);
+      expect(await vg.unitShiftTest(db, GROUPED)).toBe(null);
+      expect(loadTechShifts).not.toHaveBeenCalled();
+    });
+
+    test('it refuses the placements the mover refuses: every member\'s landing, on that member\'s own technician, with its stored length', async () => {
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      // The live members only: the read leaves out a cancelled or completed row.
+      wire(pair());
+      const refuses = await vg.unitShiftTest(db, GROUPED);
+      const read = db.__calls.find((c) => c.table === 'scheduled_services' && c.op === 'select');
+      expect(read.ops).toEqual(expect.arrayContaining([['where', { visit_id: 'v1' }], ['whereNotIn', 'status', expect.arrayContaining(['cancelled', 'completed'])]]));
+      expect(loadTechShifts.mock.calls[0][1]).toEqual({ technicianIds: ['t1'] });
+      expect(refuses('2026-09-02', '13:00', '14:00')).toBe(false); // b lands 14:00 to 15:00
+      expect(refuses('2026-09-02', '14:00', '15:00')).toBe(true);  // b lands 15:00 to 16:00
+      expect(refuses('2026-09-02', '07:00', '08:00')).toBe(true);  // a starts before 08:00
+
+      // b is t9's (08:00 to 12:00): a fits t1 at 11:00, b lands 12:00 to 13:00.
+      wire(pair({ technician_id: 't9' }));
+      const mixed = await vg.unitShiftTest(db, GROUPED);
+      expect(loadTechShifts.mock.calls[1][1]).toEqual({ technicianIds: ['t1', 't9'] });
+      expect(mixed('2026-09-02', '11:00', '12:00')).toBe(true);
+      expect(mixed('2026-09-02', '10:00', '11:00')).toBe(false);
+
+      wire(pair({ estimated_duration_minutes: 120 }));
+      const long = await vg.unitShiftTest(db, GROUPED);
+      expect(long('2026-09-02', '13:00', '14:00')).toBe(true);  // b: 14:00 + 120 minutes
+      expect(long('2026-09-02', '12:00', '13:00')).toBe(false); // b: 13:00 + 120 minutes = 15:00
+    });
+
+    test('a member the placement leaves where it is, and a plan the mover refuses for another reason, are not this test\'s to drop', async () => {
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      // The stop as it stands: b already ends after the shift (the office placed it). The same day and hours change nothing.
+      shifts.t1 = { startMin: 480, endMin: 630 }; // 08:00 to 10:30
+      wire(pair());
+      const refuses = await vg.unitShiftTest(db, GROUPED);
+      expect(refuses('2026-08-30', '09:00', '10:00')).toBe(false);
+      expect(refuses('2026-09-02', '09:00', '10:00')).toBe(true); // another day: b moves, and is judged
+      // A sibling pushed across midnight: the mover's own refusal (VISIT_MEMBER_WINDOW_INVALID), not a shift verdict.
+      shifts.t1 = { startMin: 0, endMin: 1380 };
+      wire(pair({ window_start: '11:00', window_end: '12:00' }));
+      const late = await vg.unitShiftTest(db, GROUPED);
+      expect(late('2026-09-02', '22:00', '23:00')).toBe(false);
+    });
+  });
+});
