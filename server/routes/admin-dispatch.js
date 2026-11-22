@@ -3999,6 +3999,68 @@ router.post('/:serviceId/pest-recap/draft', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /:serviceId/pest-recap/report-note — the technician's own note as the customer's report will show it (report speed
+// plan step 2, owner 2026-11-19 *note I*, *read first*). One model call tidies the note, the report's checks read the answer,
+// and the fixed sentence stands in when no tidied note passes: { ok, text, source: 'cleaned' | 'fixed', reason? }. The
+// technician reads the text on the sheet before it is sent. Writes nothing, sends nothing; up to four paid provider calls
+// for a note (two tries, each with the fallback provider) unless the same note was tidied in the last 30 minutes. The
+// param is NAMED :reportNoteServiceId, not :serviceId, so router.param('serviceId') does not read the visit first (the
+// lawn-fast routes' reason): the dark gate (404 {enabled:false}, nothing read), the id must be a uuid, then the sibling
+// routes' ownership assertion. The fixed sentence names no area: the body's labels are not read, so no free text from
+// the request reaches the report. See services/service-report/report-own-note-writer.js.
+function reportNoteVisitRefusal({ ok, reason, svc, profile, eligible }) {
+  if (!ok) return reason;
+  // A failed profile lookup is an outage the sheet may retry (503), not an ineligible visit.
+  if (!profile) return 'profile_unavailable';
+  if (!eligible) return 'not_pest_control';
+  return svc.customer_id ? null : VISIT_NO_CUSTOMER_CODE;
+}
+// Dark gate ahead of the limiter: while off, a request is the 404 and never spends the staff bucket. Paid calls: a cap
+// per staff bucket (rate-limit-key.js), like the voice-fill reads.
+const reportOwnNoteGate = (req, res, next) => (
+  require('../config/feature-gates').reportOwnNoteLive() ? next() : res.status(404).json({ enabled: false })
+);
+const reportOwnNoteLimiter = require('express-rate-limit')({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many note previews. Type the report for now.' },
+});
+router.post('/:reportNoteServiceId/pest-recap/report-note', reportOwnNoteGate, reportOwnNoteLimiter, async (req, res, next) => {
+  try {
+    const id = req.params.reportNoteServiceId;
+    if (!require('../services/reservice-office-request').isUuid(id)) {
+      return res.status(404).json({ error: 'Service not found', code: 'not_found' });
+    }
+    req.params.serviceId = id;
+    if (!(await assertRecapOwnership(req, res))) return;
+    // Strict: a failed profile probe refuses (500), never a synthesized pest profile that reaches the paid call.
+    const visit = await PestRecap.resolveEligibility(req.params.serviceId, db, { strict: true });
+    // The row the writer reads is judged again, before any refusal names the visit: a visit reassigned since the
+    // ownership read is refused.
+    if (visit.ok && !technicianVisitRowInScope(req, visit.svc)) {
+      return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
+    }
+    const refusal = reportNoteVisitRefusal(visit);
+    if (refusal) {
+      return res.status(refusal === 'profile_unavailable' ? 503 : recapStatusForReason(refusal)).json({ error: refusal, code: refusal });
+    }
+    const { note } = req.body || {};
+    // The codes on the customer's file are read for this customer before any model reads the note.
+    const { text, source, reason } = await require('../services/service-report/report-own-note-writer').cleanReportNote({
+      note: typeof note === 'string' ? note : '',
+      serviceType: visit.svc.service_type,
+      db,
+      customerId: visit.svc.customer_id,
+    });
+    res.json({
+      ok: true, text, source, ...(reason ? { reason } : {}),
+    });
+  } catch (err) { next(err); }
+});
+
 // POST /:serviceId/pest-recap — commit the recap (complete, no bill).
 // Whether this recap must consume the kit: a first completion always; a
 // priorCompleted recap only when it is the RETRY of the completing recap —
