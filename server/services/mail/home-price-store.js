@@ -5,8 +5,8 @@
  * permit facts the pass may use, and the one write of a row's facts and price. Every function takes a knex handle or a
  * transaction as its last argument so a test can inject one; the default is the portal's shared handle.
  *
- * It writes only the price columns of mail_prospects (migration 20261122200000). The permit page result is stored by
- * the permit reader's own recordResult, not here.
+ * It writes only the price columns of mail_prospects (migrations 20261122200000 and 20261122200100). The permit page
+ * result is stored by the permit reader's own recordResult, not here.
  */
 
 const db = require('../../models/db');
@@ -21,10 +21,13 @@ const DAY_MS = 24 * HOUR_MS;
 
 const PRICE_STATUSES = ['priced', 'missing_fact', 'not_clean', 'failed'];
 const RETRY_STATUSES = ['failed', 'missing_fact'];
-// A row's version: its last check time to the microsecond, as text ('' = never checked). dueForPrice hands it to the
-// pass, and savePriceResult writes only while the row still has it. So a run that read a row before another run wrote
-// it cannot replace the newer result or restart its 20-hour wait.
-const PRICE_VERSION_SQL = "COALESCE(to_char(price_checked_at AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISSUS'), '')";
+// A row's version is price_attempts: how many times the pass wrote the row (0 = never). dueForPrice hands it to the
+// pass, and savePriceResult writes only while the row still has it, and adds one. So a run that read a row before
+// another run wrote it cannot replace the newer result or restart its 20-hour wait. (A check time would not do: inside
+// one transaction every write has the same now().)
+
+// The number fields of a result. Each is a finite number or absent.
+const NUMBERS = ['homeSqft', 'stories', 'lotSqft', 'priceAnnual', 'priceSetupFee'];
 
 function asDate(value, name) {
   const date = value === undefined ? new Date() : new Date(value);
@@ -65,7 +68,7 @@ async function dueForPrice(options, conn = db) {
     .select(
       'id', 'parcel_pin', 'permit_no', 'address_line1', 'city', 'state', 'zip', 'price_status',
       conn.raw("to_char(recorded_date, 'YYYY-MM-DD') AS recorded_date"),
-      conn.raw(`${PRICE_VERSION_SQL} AS price_version`),
+      'price_attempts as price_version',
     );
 }
 
@@ -92,25 +95,38 @@ async function permitFacts(permitNo, conn = db) {
 
 const orNull = (v) => (v === undefined ? null : v);
 
+function assertSaveArguments(row, result) {
+  if (typeof result === 'function') throw new TypeError('savePriceResult: the connection is the third argument');
+  if (!row || typeof row !== 'object' || !row.id || !Number.isInteger(row.price_version) || row.price_version < 0) {
+    throw new TypeError('savePriceResult: the first argument is a row of dueForPrice (its id and price_version)');
+  }
+  if (!result || !PRICE_STATUSES.includes(result.status)) throw new TypeError('savePriceResult: unknown status');
+  // A value that is not a finite number (NaN, Infinity, text) is no fact and no amount. PostgreSQL would store a NaN
+  // as a numeric that compares above every number.
+  for (const name of NUMBERS) {
+    const value = result[name];
+    if (value !== null && value !== undefined && !Number.isFinite(value)) {
+      throw new TypeError(`savePriceResult: ${name} is not a number`);
+    }
+  }
+}
+
 /**
  * Write one row's facts and result. `row` is a row of dueForPrice: its id and the version this run read. `result`:
  *   { status, reason, homeSqft, homeSqftSource, stories, lotSqft, priceAnnual, priceSetupFee, priceDigest }
  * status is priced | missing_fact | not_clean | failed; the facts are the ones the pass knew (a missing one is stored
  * as NULL, so an older read never leaves a stale fact). A priced row gets its price columns and priced_at; any other
- * row gets none, and price_checked_at is always set. The table's CHECKs refuse a half-written price (code 23514).
+ * row gets none; price_checked_at is always set and the version goes up by one. The table's CHECKs refuse a
+ * half-written price (code 23514).
  *
  * A row that is already priced or not_clean, that is no longer an eligible row of the list, or that another run wrote
  * after this run read it (its version changed) is left as it is. The test and the write are one statement, so two runs
  * cannot both write one read. Returns `{ written: true, price_status }`, or `{ written: false, why, price_status }`
- * with why = settled | changed | not_eligible | not_found.
+ * with why = settled | changed | not_eligible | not_found. A number field that is not a finite number is a TypeError.
  */
 async function savePriceResult(row, result, conn = db) {
-  if (typeof result === 'function') throw new TypeError('savePriceResult: the connection is the third argument');
-  if (!row || typeof row !== 'object' || !row.id || typeof row.price_version !== 'string') {
-    throw new TypeError('savePriceResult: the first argument is a row of dueForPrice (its id and price_version)');
-  }
+  assertSaveArguments(row, result);
   const { id } = row;
-  if (!result || !PRICE_STATUSES.includes(result.status)) throw new TypeError('savePriceResult: unknown status');
   const priced = result.status === 'priced';
   const now = conn.fn.now();
   const changes = {
@@ -125,12 +141,13 @@ async function savePriceResult(row, result, conn = db) {
     price_digest: priced ? orNull(result.priceDigest) : null,
     priced_at: priced ? now : null,
     price_checked_at: now,
+    price_attempts: conn.raw('price_attempts + 1'),
     updated_at: now,
   };
   const updated = await conn('mail_prospects')
     .where({ id, list_key: LIST_KEY, status: 'eligible' })
     .where((b) => b.whereNull('price_status').orWhereIn('price_status', RETRY_STATUSES))
-    .whereRaw(`${PRICE_VERSION_SQL} = ?`, [row.price_version])
+    .where({ price_attempts: row.price_version })
     .update(changes)
     .returning('price_status');
   if (updated.length) return { written: true, price_status: updated[0].price_status };
@@ -146,5 +163,4 @@ async function savePriceResult(row, result, conn = db) {
 
 module.exports = {
   dueForPrice, permitFacts, savePriceResult, LIST_KEY, DEFAULT_LIMIT, RETRY_AFTER_HOURS, RETRY_WINDOW_DAYS,
-  PRICE_VERSION_SQL,
 };

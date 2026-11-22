@@ -1,6 +1,6 @@
 /**
- * The home price store against real PostgreSQL (services/mail/home-price-store.js): the migration's columns and CHECKs
- * and a clean down, the due order and cap, the 20-hour and 21-day rules, only eligible rows of the new-home list, each
+ * The home price store against real PostgreSQL (services/mail/home-price-store.js): the two migrations' columns and
+ * CHECKs and a clean down, the due order and cap, the 20-hour and 21-day rules, only eligible rows of the new-home list, each
  * status write, a half-written price refused by the table, a settled row left alone, and the permit facts for each
  * detail status. Made-up rows in a throwaway schema of this worktree's own QA database or CI's database.
  */
@@ -25,7 +25,8 @@ const constructionMigration = require('../models/migrations/20260813000031_const
 const detailMigration = require('../models/migrations/20261002220000_construction_permit_detail');
 const mailMigration = require('../models/migrations/20261122160000_mail_prospects');
 const priceMigration = require('../models/migrations/20261122200000_mail_prospects_home_price');
-const { dueForPrice, permitFacts, savePriceResult, PRICE_VERSION_SQL } = require('../services/mail/home-price-store');
+const attemptsMigration = require('../models/migrations/20261122200100_mail_prospects_price_attempts');
+const { dueForPrice, permitFacts, savePriceResult } = require('../services/mail/home-price-store');
 
 jest.setTimeout(60000);
 
@@ -64,7 +65,7 @@ postgres('home price store on PostgreSQL', () => {
     await constructionMigration.up(conn);
     await detailMigration.up(conn);
     await mailMigration.up(conn);
-    await priceMigration.up(conn);
+    await upBoth();
   });
   afterAll(async () => {
     if (conn) await conn.destroy();
@@ -78,6 +79,23 @@ postgres('home price store on PostgreSQL', () => {
     await conn('construction_permit_records').del();
   });
 
+  // The two migrations in file order. A second run of the first one writes its own facts check again, so the second
+  // one always runs after it (knex never runs a migration twice; a test does).
+  const upBoth = async () => {
+    await priceMigration.up(conn);
+    await attemptsMigration.up(conn);
+  };
+  const checkNames = async () => (await conn.raw(
+    "SELECT conname FROM pg_constraint WHERE conrelid = to_regclass(?) AND contype = 'c'", [`${schema}.mail_prospects`],
+  )).rows.map((r) => r.conname);
+  const columnNames = async () => (await conn.raw(
+    "SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = 'mail_prospects'", [schema],
+  )).rows.map((c) => c.column_name);
+  const factsCheck = async () => (await conn.raw(
+    "SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conrelid = to_regclass(?) AND conname = 'mail_prospects_home_facts_positive'",
+    [`${schema}.mail_prospects`],
+  )).rows.map((r) => r.def);
+
   let seq = 0;
   // A live row of the new-home list, untried unless a test says otherwise.
   const row = (extra = {}) => {
@@ -90,10 +108,10 @@ postgres('home price store on PostgreSQL', () => {
     }).returning('id').then(([r]) => r.id);
   };
   const stored = (id) => conn('mail_prospects').where({ id }).first();
-  // The row as a run reads it: its id and its version (the store's own version text).
+  // The row as a run reads it: its id and its version (the attempt counter).
   const due = async (id) => {
-    const found = await conn('mail_prospects').where({ id }).first(conn.raw(`${PRICE_VERSION_SQL} AS price_version`));
-    return { id, price_version: found ? found.price_version : '' };
+    const found = await conn('mail_prospects').where({ id }).first('price_attempts');
+    return { id, price_version: found ? found.price_attempts : 0 };
   };
   const dueIds = async (options = {}) => (await dueForPrice({ now: NOW, ...options })).map((r) => r.id);
   const PRICED = {
@@ -101,7 +119,7 @@ postgres('home price store on PostgreSQL', () => {
     priceAnnual: 500, priceSetupFee: 0, priceDigest: 'digest-1',
   };
 
-  test('migration: the columns are nullable without a default, the checks exist, and down leaves the list table as it was', async () => {
+  test('migrations: the columns are nullable without a default (the attempt counter starts at 0), the checks exist, and down leaves the list table as it was', async () => {
     const cols = (await conn.raw(
       "SELECT column_name, is_nullable, column_default, data_type FROM information_schema.columns WHERE table_schema = ? AND table_name = 'mail_prospects'", [schema],
     )).rows;
@@ -111,36 +129,57 @@ postgres('home price store on PostgreSQL', () => {
       const col = cols.find((c) => c.column_name === name);
       expect(col).toMatchObject({ is_nullable: 'YES', column_default: null });
     }
-    const checks = async () => (await conn.raw(
-      "SELECT conname FROM pg_constraint WHERE conrelid = to_regclass(?) AND contype = 'c'", [`${schema}.mail_prospects`],
-    )).rows.map((r) => r.conname);
-    expect(await checks()).toEqual(expect.arrayContaining([
+    expect(cols.find((c) => c.column_name === 'price_attempts')).toMatchObject({ is_nullable: 'NO', column_default: '0', data_type: 'integer' });
+    added.push('price_attempts'); // down drops it with the others
+    expect(await checkNames()).toEqual(expect.arrayContaining([
       'mail_prospects_home_sqft_source_check', 'mail_prospects_price_status_check',
       'mail_prospects_price_only_when_priced', 'mail_prospects_home_facts_positive',
+      'mail_prospects_price_attempts_check',
     ]));
     const id = await row();
-    await priceMigration.up(conn); // second run: no-op, the row is kept
-    expect((await stored(id)).price_status).toBeNull();
+    await upBoth(); // second run: no-op, the row is kept
+    expect(await stored(id)).toMatchObject({ price_status: null, price_attempts: 0 });
+    await attemptsMigration.down(conn);
     await priceMigration.down(conn);
-    const after = (await conn.raw(
-      "SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = 'mail_prospects'", [schema],
-    )).rows.map((c) => c.column_name);
+    const after = await columnNames();
     for (const name of added) expect(after).not.toContain(name);
     expect(after).toContain('stories'); // the list's own column stays
-    expect(await checks()).toEqual(expect.arrayContaining(['mail_prospects_status_check']));
-    expect((await checks()).filter((n) => /price|home_/.test(n))).toEqual([]);
-    await priceMigration.up(conn);
-    expect((await stored(id)).price_status).toBeNull();
+    expect(await checkNames()).toEqual(expect.arrayContaining(['mail_prospects_status_check']));
+    expect((await checkNames()).filter((n) => /price|home_/.test(n))).toEqual([]);
+    await upBoth();
+    expect(await stored(id)).toMatchObject({ price_status: null, price_attempts: 0 });
+  });
+
+  test('the second migration: its down drops the counter and puts the first facts check back; a down in the wrong order is clean too', async () => {
+    const id = await row();
+    expect((await factsCheck())[0]).toMatch(/NaN/);
+    await attemptsMigration.down(conn);
+    await attemptsMigration.down(conn); // a second run is a no-op
+    expect(await columnNames()).not.toContain('price_attempts');
+    expect(await checkNames()).not.toContain('mail_prospects_price_attempts_check');
+    expect(await factsCheck()).toHaveLength(1);
+    expect((await factsCheck())[0]).not.toMatch(/NaN/); // the check as the first migration wrote it
+    expect(await columnNames()).toContain('price_annual');
+    await attemptsMigration.up(conn);
+    expect((await factsCheck())[0]).toMatch(/NaN/);
+    expect((await stored(id)).price_attempts).toBe(0);
+    // The first migration's down before the second's: the second's down has no facts columns to put a check on.
+    await priceMigration.down(conn);
+    await attemptsMigration.down(conn);
+    expect((await columnNames()).filter((n) => /^price_|^home_|^lot_sqft$/.test(n))).toEqual([]);
+    expect((await checkNames()).filter((n) => /price|home_/.test(n))).toEqual([]);
+    await upBoth();
+    expect(await stored(id)).toMatchObject({ price_status: null, price_attempts: 0 });
   });
 
   test('the table refuses a half-written price, a price on an unpriced row, a bad enum and a size of zero', async () => {
     const id = await row();
     const refused = (changes) => expect(conn('mail_prospects').where({ id }).update(changes)).rejects.toMatchObject({ code: '23514' });
-    const full = { price_status: 'priced', price_annual: 480, price_setup_fee: 0, price_digest: 'd', priced_at: conn.fn.now() };
+    const full = { price_status: 'priced', price_annual: 500, price_setup_fee: 0, price_digest: 'd', priced_at: conn.fn.now() };
     for (const missing of ['price_annual', 'price_setup_fee', 'price_digest', 'priced_at']) {
       await refused({ ...full, [missing]: null });
     }
-    await refused({ price_status: 'not_clean', price_reason: 'engine_review', price_annual: 480 });
+    await refused({ price_status: 'not_clean', price_reason: 'engine_review', price_annual: 500 });
     await refused({ price_status: null, price_digest: 'd' });
     await refused({ price_status: 'bogus' });
     await refused({ home_sqft_source: 'guess' });
@@ -148,6 +187,11 @@ postgres('home price store on PostgreSQL', () => {
     await refused({ lot_sqft: -5 });
     await refused({ home_stories: 0 });
     await refused({ ...full, price_annual: 0 });
+    // A numeric NaN compares above every number: refused by name.
+    await refused({ ...full, price_annual: 'NaN' });
+    await refused({ ...full, price_setup_fee: 'NaN' });
+    await refused({ home_stories: 'NaN' });
+    await refused({ price_attempts: -1 });
     await conn('mail_prospects').where({ id }).update({ ...full, home_sqft: 1800, home_sqft_source: 'permit_plan' });
     expect((await stored(id)).price_status).toBe('priced');
   });
@@ -166,9 +210,8 @@ postgres('home price store on PostgreSQL', () => {
       ['address_line1', 'city', 'id', 'parcel_pin', 'permit_no', 'price_status', 'price_version', 'recorded_date', 'state', 'zip'],
     );
     expect(first.recorded_date).toBe('2026-11-16');
-    // The version: '' for a row never checked, the check time to the microsecond for a checked one.
-    expect(first.price_version).toBe('');
-    expect((await dueForPrice({ now: NOW })).find((r) => r.id === retryOld).price_version).toMatch(/^\d{20}$/);
+    // The version is the attempt counter: 0 for a row the pass never wrote.
+    expect(first.price_version).toBe(0);
   });
 
   test('the cap defaults to 40 rows and a bad limit or a handle in the options place is refused', async () => {
@@ -211,7 +254,7 @@ postgres('home price store on PostgreSQL', () => {
     await row({ status: 'unmatched', reason: 'no_permit', parcel_pin: null, permit_no: null });
     await row({ price_status: 'not_clean', price_reason: 'engine_review', price_checked_at: hoursAgo(100) });
     await row({
-      price_status: 'priced', price_annual: 480, price_setup_fee: 0, price_digest: 'd', priced_at: hoursAgo(100), price_checked_at: hoursAgo(100),
+      price_status: 'priced', price_annual: 500, price_setup_fee: 0, price_digest: 'd', priced_at: hoursAgo(100), price_checked_at: hoursAgo(100),
     });
     expect(await dueIds()).toEqual([ok]);
   });
@@ -290,6 +333,11 @@ postgres('home price store on PostgreSQL', () => {
     // A bare id carries no version: refused, so no caller can write without the version it read.
     await expect(savePriceResult(id, PRICED)).rejects.toThrow(TypeError);
     await expect(savePriceResult({ id }, PRICED)).rejects.toThrow(TypeError);
+    await expect(savePriceResult({ id, price_version: '0' }, PRICED)).rejects.toThrow(TypeError);
+    // A value that is not a finite number never reaches the table.
+    for (const bad of [{ priceAnnual: NaN }, { priceSetupFee: Infinity }, { stories: NaN }, { homeSqft: '1800' }, { lotSqft: -Infinity }]) {
+      await expect(savePriceResult(await due(id), { ...PRICED, ...bad })).rejects.toThrow(TypeError);
+    }
     expect((await stored(id)).price_status).toBeNull();
   });
 
@@ -308,7 +356,7 @@ postgres('home price store on PostgreSQL', () => {
     const id = await row();
     const runA = await due(id);
     const runB = await due(id); // two runs read the row before either wrote
-    expect(runB.price_version).toBe('');
+    expect(runB.price_version).toBe(0);
     expect(await savePriceResult(runA, { status: 'missing_fact', reason: 'no_stories', homeSqft: 1500, homeSqftSource: 'parcel_map', lotSqft: 6000 }))
       .toEqual({ written: true, price_status: 'missing_fact' });
     const after = await stored(id);
@@ -317,8 +365,25 @@ postgres('home price store on PostgreSQL', () => {
     expect(await stored(id)).toEqual(after); // the first result's facts and its 20-hour wait stand
     // A later run reads the new version and may write.
     const next = await due(id);
-    expect(next.price_version).toMatch(/^\d{20}$/);
+    expect(next.price_version).toBe(1);
     expect((await savePriceResult(next, PRICED)).written).toBe(true);
+  });
+
+  test('every write advances the version, also inside one transaction', async () => {
+    const id = await row();
+    await conn.transaction(async (trx) => {
+      const read = async () => ({ id, price_version: (await trx('mail_prospects').where({ id }).first('price_attempts')).price_attempts });
+      const v0 = await read();
+      expect((await savePriceResult(v0, { status: 'failed', reason: 'parcel_map' }, trx)).written).toBe(true);
+      const v1 = await read();
+      expect((await savePriceResult(v1, { status: 'missing_fact', reason: 'no_lot_size' }, trx)).written).toBe(true);
+      const v2 = await read();
+      expect([v0.price_version, v1.price_version, v2.price_version]).toEqual([0, 1, 2]);
+      // A save that still carries an earlier version is refused, in the same transaction too.
+      expect(await savePriceResult(v1, PRICED, trx)).toEqual({ written: false, why: 'changed', price_status: 'missing_fact' });
+      expect(await savePriceResult(v0, PRICED, trx)).toEqual({ written: false, why: 'changed', price_status: 'missing_fact' });
+    });
+    expect(await stored(id)).toMatchObject({ price_status: 'missing_fact', price_reason: 'no_lot_size', price_attempts: 2 });
   });
 
   test('a save inside a caller\'s transaction uses that transaction', async () => {
