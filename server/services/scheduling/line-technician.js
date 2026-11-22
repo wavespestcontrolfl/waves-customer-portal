@@ -3,10 +3,12 @@
  * GATE_SERVICE_LINE_MAP=shadow records (owner 2026-10-25); =live records AND picks
  * (build 4, owner "DO THIS NOW" 2026-10-30).
  *
- * A second technician starts early 2027. The new technician is the HOME tech for
- * general pest, rodent and mosquito; the owner is the home tech for lawn / tree &
- * shrub and termite / WDO, and covers every gap (the new tech's days off,
- * absences). service_line_techs holds the home and gap technician per line.
+ * A second technician starts early 2027. Owner 2026-11-21: the new technician is the
+ * HOME tech for general pest, mosquito, rodent (trapping, bait stations) and termite /
+ * WDO in every ZIP; the owner is the home tech for lawn / tree & shrub and rodent
+ * exclusion (sealing, sanitation, the rodent inspection and the general first rodent
+ * visit), and covers every gap (the new tech's days off, absences).
+ * service_line_techs holds the home and gap technician per line.
  *
  * SHADOW. Six booking choice points call recordLinePickShadow AFTER their own
  * commit; it resolves what the map would pick and writes one
@@ -43,7 +45,7 @@ const defaultDb = require('../../models/db');
 const logger = require('../logger');
 const featureGates = require('../../config/feature-gates');
 const {
-  classifyServiceCategory, categoryForCatalogCategory, CATALOG_CATEGORY_LINES, CAPABILITY_CATEGORIES,
+  classifyServiceCategory, lineForCatalogRow, CATALOG_CATEGORY_LINES, CAPABILITY_CATEGORIES,
 } = require('../auto-dispatch/service-category');
 const { isAssignable, isOffDay, absentTechDays } = require('../technician-eligibility');
 const { stateOf } = require('../technician-capabilities');
@@ -107,28 +109,28 @@ const clean = (value, max = 200) => {
 
 /**
  * Which service line a visit belongs to: { line, lineFrom }.
- *  1. The catalog row first: services.category, found by `serviceId` (the
- *     scheduled_services.service_id), else by `serviceKey` (services.service_key).
- *     A category that names a line wins, so "Palm Tree Nutritional Treatment"
+ *  1. The catalog row first, found by `serviceId` (the scheduled_services.service_id),
+ *     else by `serviceKey` (services.service_key), read by lineForCatalogRow: its key
+ *     (the two rodent lines: trapping and bait are rodent; sealing, sanitation, the
+ *     rodent inspection and the general rodent visit are exclusion), else its
+ *     category. A row that names a line wins, so "Palm Tree Nutritional Treatment"
  *     (tree_shrub) and "Top Dress" (lawn_care) read lawn, which the name alone
  *     (auto-dispatch's classifyServiceCategory falls back to general) gets wrong.
- *  2. Otherwise the NAME, through classifyServiceCategory (unchanged).
+ *  2. Otherwise the NAME, through classifyServiceCategory.
  * lineFrom is 'catalog' or 'name'; { line: null, lineFrom: null } when there is
  * neither a usable catalog row nor a service name.
  */
 async function serviceLineFor(conn, { serviceId = null, serviceKey = null, serviceType = null } = {}) {
   const db = conn || defaultDb;
-  let category = null;
+  let row = null;
   try {
-    let row = null;
-    if (serviceId) row = await db('services').where({ id: serviceId }).first('category');
-    if (!row && serviceKey) row = await db('services').where({ service_key: String(serviceKey) }).first('category');
-    category = row ? String(row.category || '').trim().toLowerCase() : null;
+    if (serviceId) row = await db('services').where({ id: serviceId }).first('category', 'service_key', 'name');
+    if (!row && serviceKey) row = await db('services').where({ service_key: String(serviceKey) }).first('category', 'service_key', 'name');
   } catch (err) {
     // An unreadable catalog is not "no catalog": fall to the name, never throw.
     logger.warn(`[line-technician] catalog category lookup failed: ${err.message}`);
   }
-  const catalogLine = categoryForCatalogCategory(category);
+  const catalogLine = lineForCatalogRow(row);
   if (catalogLine) return { line: catalogLine, lineFrom: 'catalog' };
   const name = clean(serviceType, 300);
   if (name) return { line: classifyServiceCategory(name), lineFrom: 'name' };

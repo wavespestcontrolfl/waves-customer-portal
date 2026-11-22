@@ -1512,9 +1512,17 @@ other's probe.
 these routes byte-identical, with no extra query).** `/api/booking/availability`,
 `/find-slots` and the `/capture-intent` revalidation (all through
 `buildFunnelAvailability`) pass the funnel service's lines (`pest_control` →
-general pest, `lawn_care` / `tree_shrub` → lawn, `mosquito`, `rodent`,
-`termite` / `bora_care` → termite) to `buildBookingAvailability` as
-`serviceLines`. When at least one of those lines has a home or gap technician set
+general pest, `lawn_care` / `tree_shrub` → lawn, `mosquito`, `rodent` →
+exclusion, `termite` / `bora_care` → termite) to `buildBookingAvailability` as
+`serviceLines`. The `rodent` choice saves a general "Rodent Control" visit, the
+first look at a rodent problem (the booking-link text sends a rodent inspection
+here too); since 2026-11-21 that visit is on the `exclusion` line with the
+rodent inspection (`BOOKING_FUNNEL_SERVICE_LINES` in `routes/booking.js`; the
+saved visit's name reads the same line, alone or as one part of a two-service
+name such as "Mosquito Control + Rodent Control"), and the `rodent` line is
+only trapping and bait-station work. So `/availability`, `/find-slots` and the
+`/capture-intent` revalidation offer the rodent choice on the exclusion line's
+home or gap technician. When at least one of those lines has a home or gap technician set
 in `service_line_techs` (the Team tab "Service lines" card), the offer keeps only
 slots on a technician who is the home or gap technician of EVERY mapped line (a
 two-service key such as `pest_control+lawn_care` therefore needs one technician
@@ -1972,7 +1980,13 @@ value leave these routes byte-identical, with no extra query).**
 slots on the home or gap technician of the line(s) the held visit carries: the
 estimate's primary program's line (the program the hold stamps), or every
 program's line for a combined capacity hold, so only a technician on every one of
-those lines is offered. A line with no technician set in `service_line_techs`
+those lines is offered. Rodent exclusion work is its own line since 2026-11-21
+(`exclusion`: the sealing, wire mesh, roof-entry cover, sanitation and rodent
+inspection service keys, `CATALOG_KEY_LINES`, and the general rodent visit: a
+visit named only "Rodent Control", which is also what `/book`'s rodent choice
+saves and offers by); trapping and bait stations stay on
+`rodent`, so an exclusion estimate and a trapping estimate can list different
+technicians. A line with no technician set in `service_line_techs`
 adds no rule. At a date and start both have, the home technician's slot is the
 one listed; the gap technician's slots fill the starts the home technician has
 none for. Each listed slot stays a complete slot with its own `techId`,
@@ -3469,7 +3483,31 @@ report identity for any family in `GUARDED_OWNERSHIP_FAMILIES`
 though termite left the ladder itself) fails the WHOLE report card closed
 — the unseeded-next-visit gap and a just-cancelled plan are
 indistinguishable, so offering the family and advancing past it are each
-wrong in one of those worlds.
+wrong in one of those worlds. The same live render (`mode === 'live'`,
+under `GATE_REPORT_CROSS_SELL`) carries the `referral` card from
+`composeReferralCard` (`services/referral-share.js`); a callback report
+carries neither card while `GATE_RESERVICE_REPORT_COPY` is on, and with
+that gate off a callback report carries them like any other report:
+the static headline + CTA, and with `GATE_REFERRAL_STEP2` on an `offer`
+string whose amounts come from the live referral settings (the member
+sentence is dropped at the yearly limit; no card at all when the
+program is paused or its settings are unreadable). Read-only: a render
+enrolls no promoter, writes nothing and carries no personal data.
+Pest price photo facts (`GATE_PEST_PRICE_PHOTO_FACTS`, owner 2026-11-21, "1, 2";
+dark by default): the gate adds no field and removes none. On, the pest
+offer's per-application price (`crossSell.option.perVisit`, and the same
+price on the portal offer card, the portal pricing card, the plan start and
+the one-tap purchase) is computed with the photo's shrubs, complexity and
+near-water facts when the property lookup's only doubt is the lawn area,
+in place of the neutral defaults (a fact the vision providers disputed
+keeps its default). An estimate minted from that offer keeps the facts in
+`engineInputs`, so the estimate page (`GET /api/estimates/:token/data`)
+prices the same plan rate; when staff turn on its one-time choice, that
+amount is computed from the quarterly rate as before and so follows it.
+It can also add the engine's hand-check
+mark to a pest line (heavy shrubs with a complex landscape), and such an
+offer degrades to the quote CTA as any held price does. Off or unset: the
+price of today.
 
 The payload's `protocol.structuredObservations` contains only the saved
 completion-form observation snapshot, and a nonempty snapshot carries
@@ -4248,18 +4286,16 @@ existed is never served after it, and a visit with none keeps its key. Every par
 at most six one-sentence parts. No token, eligibility, privacy, rate-limit or header
 change; no new route.
 
-`GATE_LAWN_LIGHTING` (dark, owner 2026-10-04; off leaves every payload key,
-sentence, prompt and stored row unchanged, key for key) is ONE rule, "no color
+Lawn lighting-aware color (owner 2026-10-04) is ONE rule, "no color
 claim between visits shot in different or unknown light", with six independent
-effects. Each reads the gate at call time on its own; only effect 3 needs
-`GATE_LAWN_SINCE_LAST`. The gate reader `lawnLightingLive()` is true only when
-`GATE_LAWN_LIGHTING` AND `GATE_LAWN_VISIT_ASSESSMENT` are both on: the light read
+effects. Only effect 3 needs `GATE_LAWN_SINCE_LAST`. Every effect runs only while
+`GATE_LAWN_VISIT_ASSESSMENT` is on: the light read
 comes only from the one-call visit assessment (`/assess` stays on the legacy
 per-photo path without it), so without that gate no run would ever store a light,
-and no effect below can run without the reader that feeds it. It adds NO payload
+and no effect below can run without the read that feeds it. It adds NO payload
 key to `GET /api/reports/:token/data`; it only removes or never writes color
 wording (the one added key is `initialScores.colorHidden` on the portal route,
-effect 6). A visit assessed before the gate
+effect 6). A visit assessed before the rule
 has no light read, so its light is `unknown` and its color is never compared.
 Compatible light: full sun and sun with shadows (`mixed_sun_shade`) with each other
 (owner 2026-10-22, option B: under the lighting prompt the model reads sunlit and
@@ -4271,11 +4307,11 @@ comes from its usable photos whose shot has positive color weight in
 shade and hot-edge shots; detail shots do not count) when the visit was read under
 the shot-list prompt, and from EVERY usable photo when it was read under the legacy
 prompt (one whole-visit color score from all photos); which prompt is decided from
-the run's own stored prompt version, never from today's gate. A visit whose usable photos are all direct sun (full sun, sun with shadows) is sun with shadows; any other mix (sun beside cloud or shade, or any low light in the mix) is mixed light (`mixed_light`, never a model answer), compared with nothing. A photo read as overcast or open shade with hard shadows contradicts itself (a hard shadow needs direct sun), so that photo is mixed light too, and so is its visit. Any prompt position with no stored photo row (its insert failed) or no
+the run's own stored prompt version, never from today's setting. A visit whose usable photos are all direct sun (full sun, sun with shadows) is sun with shadows; any other mix (sun beside cloud or shade, or any low light in the mix) is mixed light (`mixed_light`, never a model answer), compared with nothing. A photo read as overcast or open shade with hard shadows contradicts itself (a hard shadow needs direct sun), so that photo is mixed light too, and so is its visit. Any prompt position with no stored photo row (its insert failed) or no
 light read makes the visit's light unknown.
 
-Every code path that reads the gate (`lawnLightingLive()` in
-`server/config/feature-gates.js`; nothing else reads `GATE_LAWN_LIGHTING`):
+Every code path that reads the visit assessment gate for this rule
+(`server/config/feature-gates.js` `gateEnvValue`; nothing else decides lighting):
 1. `server/services/lawn-visit-assessment.js` `analyzeVisit`: the visit assessment
    reads each photo's light under `lawn-visit-v1-lighting` /
    `lawn-visit-v1-shot-list-lighting` and the run stores it in
@@ -4359,10 +4395,8 @@ Every code path that reads the gate (`lawnLightingLive()` in
    `beforeAfter.improvement.colorHealth: null`, and `PortalPage.jsx` then shows
    today's color alone, with no "from" and no change. Every other number in that
    payload is a raw reading and is unchanged.
-7. `server/config/feature-gates.js` `logGateStatus` entry (`lawnLighting`): logging
-   only.
 
-What the gate does NOT cover (raw readings, unchanged; each is a score the visit
+What the rule does NOT cover (raw readings, unchanged; each is a score the visit
 earned, shown with its own date, not a sentence about color changing). Color is part
 of these overall numbers, so they can still move when only the light did:
 - the overall trend `reportV2.trends.overall` and the overall points on the
@@ -4381,7 +4415,7 @@ of these overall numbers, so they can still move when only the light did:
 time by `tsLightingLive()` in `server/config/feature-gates.js`, through
 `lightingLive()` in `server/services/tree-shrub-lighting.js`; off leaves every
 prompt, preview response, stored row and payload key unchanged, key for key) is the
-`GATE_LAWN_LIGHTING` rule for tree/shrub photos, with the same light words and the
+lawn lighting rule for tree/shrub photos, with the same light words and the
 same compatibility table (`lawn-lighting.js`, reused as is): full sun with sun and
 shadows, overcast with open shade; sun never with overcast or open shade; low
 light, mixed light and unknown never compatible. Every photo counts toward the
@@ -7386,6 +7420,9 @@ Staff authentication (`server/routes/admin-auth.js`, mounted at
 15 min) and answers every failure with a generic 401 `Invalid credentials`;
 `/forgot-password` (5 per 15 min) and `/reset-password` (10 per 15 min) key
 on `unauthenticatedAuthLimitKey` with production-only limiters;
+`POST /login` issues a password session only for a row with its own stored
+password hash (the timing comparison against the fixed stand-in hash still
+runs for a row with none, and a match there is refused);
 `/change-password`, `/register` (requireAdmin), and `/me` require the staff
 bearer. Two-step sign-in (`GATE_ADMIN_MFA`, dark): for an enrolled account
 `/login` returns `{ mfaRequired, challengeToken }` (a 5-minute signed JWT of
@@ -9382,8 +9419,11 @@ Same composer as the service report's tap — `services/referral-share.js`
 `enrollPromoter` with the household 23505 fallback scoped to account_id,
 owner-voice share copy, exact-cents referee amount). The RENDER payloads
 (/data, the accept response, the already-accepted retry) carry only the
-static headline + CTA via `composeReferralCard`; enrollment happens on the
-tap only, never on a read. Guards: gate with a gate-aware limiter skip
+static headline + CTA via `composeReferralCard`, plus an `offer` string
+while `GATE_REFERRAL_STEP2` is on (amounts from the live referral
+settings; the member sentence is dropped at the yearly limit; no card
+when the program is paused or its settings are unreadable; read-only,
+no personal data); enrollment happens on the tap only, never on a read. Guards: gate with a gate-aware limiter skip
 (dark = generic 404), token format gate, 5/min shared IPv6-safe key, the
 durable call-side linkage verdict, full customer-viewability +
 accepted-only + linked-customer, inactive program = 404, `err.code`-only

@@ -48,4 +48,16 @@ describe('ReferralShareCard', () => {
     expect(fetchLink).not.toHaveBeenCalled();
     expect(screen.getByText(/Staff view/)).toBeInTheDocument();
   });
+
+  it('shows the server-composed offer line under the headline, and nothing extra without one', () => {
+    const offer = 'They get a $50 credit after their first plan service. You get $25.';
+    const { rerender } = render(<ReferralShareCard referral={{ ...referral, offer }} fetchLink={vi.fn()} />);
+    const line = screen.getByText(offer);
+    expect(line.tagName).toBe('P');
+    expect(screen.getByRole('heading', { level: 2 }).nextElementSibling).toBe(line);
+    rerender(<ReferralShareCard referral={referral} fetchLink={vi.fn()} />);
+    expect(screen.queryByText(/credit after/)).not.toBeInTheDocument();
+    rerender(<ReferralShareCard referral={{ ...referral, offer: '' }} fetchLink={vi.fn()} />);
+    expect(document.querySelector('.referral-offer')).toBeNull();
+  });
 });

@@ -1906,7 +1906,7 @@ async function spelledEmailTrusted({ extracted, dictationEmailPayload, corrected
   return !ownedByAnyone;
 }
 
-// GATE_CALL_SPELLED_EMAIL_SETTLES: an active do-not-email row on EITHER spelling
+// An active do-not-email row on EITHER spelling
 // keeps the 2026-09-25 hold (a Google address matches a row under any dot
 // spelling of its mailbox). Fails closed: a failed lookup keeps the hold.
 async function eitherSpellingSuppressed({ email, otherSpelling }) {
@@ -13888,16 +13888,14 @@ const CallRecordingProcessor = {
     // candidates into dictationEmailPayload so the standard decoder-only
     // forced-card path below files ONE card with both spellings for the
     // office to read back, instead of either extractor's guess winning.
-    // GATE_CALL_SPELLED_EMAIL_SETTLES (owner 2026-11-04, "A"): when the letters
+    // Owner 2026-11-04, "A": when the letters
     // the caller spelled settle which pass was right, and neither spelling is on
     // the do-not-email list, the decoder's adopt stands. The spelled-email trust
     // below then drops the read-back card and the first-touch hold, as it does
     // when the passes agree. The extraction keeps both spellings, so a hard
     // bounce of the saved one can be traced to the other.
     if (Array.isArray(extracted.email_candidates) && extracted.email_candidates.length >= 2) {
-      const settled = isEnabled('callSpelledEmailSettles')
-        ? spelledLettersSettleEmailDisagreement(extracted, dictationEmailPayload)
-        : null;
+      const settled = spelledLettersSettleEmailDisagreement(extracted, dictationEmailPayload);
       if (settled && !(await eitherSpellingSuppressed(settled))) {
         const next = { ...extracted, email_spelling_settled: { email: settled.email, other_spelling: settled.otherSpelling } };
         delete next.email_candidates;

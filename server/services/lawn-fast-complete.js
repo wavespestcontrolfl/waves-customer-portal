@@ -547,7 +547,7 @@ function programRateFor(item, programRows) {
   return Number(row.ratePer1000) > 0 && row.rateUnit ? { ratePer1000: Number(row.ratePer1000), rateUnit: row.rateUnit } : {};
 }
 
-// Large patch November cut, GATE_LAWN_RECLAIMED_HALF_N: a nitrogen line the plan sized for a reduced target (or left at its full rate on
+// Large patch November cut and reclaimed water: a nitrogen line the plan sized for a reduced target (or left at its full rate on
 // a reclaimed lawn because it carries the pre-emergent or the winter potash) keeps the plan's note on the sheet (the planned row prints its
 // gateNotes). GATE_LAWN_CHINCH_TETRINO_RATE: the Tetrino line the plan sized at the raised chinch rate keeps its note the same way.
 // GATE_LAWN_DEC_LARGE_PATCH_K: so does the potassium bag the plan swapped in. Only those notes are carried: every other planned row is the

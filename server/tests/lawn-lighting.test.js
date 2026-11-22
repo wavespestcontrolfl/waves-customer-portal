@@ -1,4 +1,4 @@
-// Lawn lighting-aware color (GATE_LAWN_LIGHTING, owner 2026-10-04): the pure
+// Lawn lighting-aware color (owner 2026-10-04): the pure
 // rules. Which light reads may be compared on color, how a visit's one light is
 // taken from its photos, how the stored read is found again, and the color dead
 // band. Synthetic data only; no model, no database.
