@@ -148,6 +148,16 @@ describe('completion estimate evidence', () => {
       expect((await read(platinum({ tier: 'Platinum', discount: 0.2 }, { summary: estimate.estimate_data.summary }))).reason).toBe('discount_unnamed');
       expect((await read(platinum({ tier: 'Platinum', discount: 0.2, manualDiscount: { amount: 5 } }))).reason).toBe('discount_unnamed');
       expect((await read({ ...platinum({ tier: 'Platinum', discount: 0.2 }), waveguard_tier: 'Bronze' })).reason).toBe('discount_unnamed');
+      // The block is read from the saved result the lines come from: an engine result with no mapped result.
+      const engineOnly = (recurring) => ({ ...estimate, waveguard_tier: 'Platinum', estimate_data: { engineResult: { recurring } } });
+      expect((await read(engineOnly({ tier: 'Platinum', discount: 0.2 }))).breakdown.discounts)
+        .toEqual([{ name: 'WaveGuard Platinum', dollars: 22 }]);
+      expect((await read(engineOnly({ tier: 'Platinum', discount: 0.2, manualDiscount: { amount: 5 } }))).reason).toBe('discount_unnamed');
+      // The column and the block name different tiers: the block's rate is another tier's, so nothing is named.
+      expect((await read(platinum({ tier: 'Gold', discount: 0.2 }))).reason).toBe('discount_unnamed');
+      // A lower-case column still finds its rate in the send snapshot, whose keys are title case.
+      expect((await read({ ...platinum({ tier: 'Platinum' }, { sendSnapshot: { tierDiscounts: { Platinum: 0.2 } } }), waveguard_tier: 'platinum' }))
+        .breakdown.discounts).toEqual([{ name: 'WaveGuard Platinum', dollars: 22 }]);
     });
 
     // A multi-program accept leaves each first visit unpriced; the first bill covers it at the accepted price.

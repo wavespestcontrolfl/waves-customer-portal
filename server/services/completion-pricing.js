@@ -104,28 +104,43 @@ function waveGuardTierName(tier) {
   return word ? `WaveGuard ${word[0].toUpperCase()}${word.slice(1)}` : 'WaveGuard';
 }
 
+const DISCOUNTED_TIERS = ['silver', 'gold', 'platinum'];
+const tierWord = (value) => String(value || '').trim().toLowerCase();
+
+// The WaveGuard tier an accepted estimate saved for its recurring work, with the rate it saved for that tier. The
+// recurring block is the one on the saved result the service lines come from (estimate-public.js
+// acceptanceServiceLists). The tier is the accept's: the estimate's column, else that block's. The rate is
+// tierDiscountForEstimate's send snapshot (its keys are title case), else the block's own rate when the block names
+// the same tier; an estimate that saved neither has rate 0 here, never today's tier table. `tier` is null when the
+// column and the block name different tiers: the records conflict, so neither names a saving.
+function savedEstimateTier(estimate, data) {
+  const recurring = object(object(data.result || data.engineResult || data).recurring);
+  const savedTier = tierWord(recurring.waveGuardTier || recurring.tier);
+  const tier = tierWord(estimate.waveguard_tier) || savedTier;
+  const discounted = DISCOUNTED_TIERS.includes(tier) || DISCOUNTED_TIERS.includes(savedTier);
+  if (!DISCOUNTED_TIERS.includes(tier) || (savedTier && savedTier !== tier)) return { recurring, discounted, tier: null };
+  const { tierDiscountForEstimate } = require('../routes/estimate-public');
+  const savedRate = savedTier === tier ? Number(recurring.discount) || 0 : 0;
+  const amount = tierDiscountForEstimate(data, `${tier[0].toUpperCase()}${tier.slice(1)}`, savedRate);
+  return { recurring, discounted, tier: { tier, amount } };
+}
+
 // What names an accepted estimate's savings: its own staff discount (applied after the tier) when that reaches
-// recurring work, whether the estimate carries a WaveGuard tier saving at all, and that tier with the rate the estimate
-// itself saved. The tier is the accept's (estimate-public.js acceptTier): the estimate's column, else its saved
-// recurring block. The rate is tierDiscountForEstimate's send snapshot, else the recurring block's; an estimate that
-// saved neither has rate 0 here, never today's tier table. `estimateTier` is null when a staff discount reaches
-// recurring work in either saved shape: that discount shares each line's saving, so the tier alone cannot name it.
+// recurring work, whether the estimate carries a WaveGuard tier saving at all, and its saved tier with that tier's
+// rate (savedEstimateTier). `estimateTier` is null when a staff discount reaches recurring work in either saved shape:
+// that discount shares each line's saving, so the tier alone cannot name it.
 function estimateDiscountContext(estimate) {
   if (!estimate) return {};
-  const { normalizeManualDiscountSummary, tierDiscountForEstimate } = require('../routes/estimate-public');
+  const { normalizeManualDiscountSummary } = require('../routes/estimate-public');
   const { staffDiscountReachesRecurring } = require('../routes/admin-customers')._private;
   const data = object(estimate.estimate_data);
   const manual = normalizeManualDiscountSummary(data);
   const reachesRecurring = !!manual && Number(manual.recurringAmount ?? manual.amount) > 0;
-  const recurring = object(object(data.result || data).recurring);
-  const tierName = estimate.waveguard_tier || recurring.waveGuardTier || recurring.tier || '';
-  const tier = String(tierName).trim().toLowerCase();
-  const tierDiscounted = ['silver', 'gold', 'platinum'].includes(tier);
+  const saved = savedEstimateTier(estimate, data);
   return {
     manualName: reachesRecurring ? String(manual.label || '').trim() || null : null,
-    tierDiscounted,
-    estimateTier: tierDiscounted && !staffDiscountReachesRecurring(data)
-      ? { tier, amount: tierDiscountForEstimate(data, tierName, Number(recurring.discount) || 0) } : null,
+    tierDiscounted: saved.discounted,
+    estimateTier: staffDiscountReachesRecurring(data, saved.recurring) ? null : saved.tier,
   };
 }
 
