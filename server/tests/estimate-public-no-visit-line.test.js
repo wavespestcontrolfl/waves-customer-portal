@@ -389,8 +389,43 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
     expect(estimateIsRemoteMeasured({ result: plan('pest_control'), engineResult: { extras: [{ detail: { service: 'flea_package' } }] } }, {})).toBe(false);
     // A commercial mark at any depth.
     expect(estimateIsRemoteMeasured(saved({ addOnWork: { rows: [{ service: 'pest_control', isCommercial: true }] } }), {})).toBe(false);
-    // The frozen price inside the save is not a saved result: the served price is read by its own rule.
-    expect(estimateIsRemoteMeasured({ result: plan('pest_control'), sendSnapshot: { pricingBundle: { firstVisitFees: [{ service: 'pest_initial_roach' }] } } }, {})).toBe(true);
+    // A save with no result holds its rows itself: the same field counts there.
+    expect(estimateIsRemoteMeasured({ ...plan('pest_control'), marginWarnings: [{ service: 'pest_control' }] }, {})).toBe(true);
+    expect(estimateIsRemoteMeasured({ ...plan('pest_control'), marginWarnings: [{ service: 'rodent_bait' }] }, {})).toBe(false);
+    expect(estimateIsRemoteMeasured({ result: { ...plan('pest_control'), marginWarnings: [{ service: 'rodent_bait' }] } }, {})).toBe(false);
+    // Any other field of the saved estimate data, beside a saved result.
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control'), laterWork: [{ service: 'bed_bug' }] }, {})).toBe(false);
+    // The frozen send snapshot is the price and scope as sent, not the saved estimate: the served price is read by its own rule.
+    const sentWithRoach = { pricingBundle: { firstVisitFees: [{ service: 'pest_initial_roach' }] }, scope: { lines: [{ identity: { service: 'pest_initial_roach' } }] } };
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control'), sendSnapshot: sentWithRoach }, {})).toBe(true);
+    expect(estimateIsRemoteMeasured({ ...plan('pest_control'), sendSnapshot: sentWithRoach }, {})).toBe(true);
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control'), sendSnapshot: sentWithRoach }, sentWithRoach.pricingBundle)).toBe(false);
+  });
+
+  test('a row the rule cannot read gives no answer and never throws', () => {
+    const saved = (extra) => ({ result: { ...plan('pest_control'), ...extra } });
+    // A stored service that is not text is an identity nobody can read.
+    const notText = [{ toString: null }, { name: 'pest_control' }, ['pest_control'], 7, true];
+    for (const service of notText) {
+      const label = JSON.stringify(service);
+      expect([label, estimateIsRemoteMeasured(saved({ extras: [{ detail: { service } }] }), {})]).toEqual([label, false]);
+      expect([label, estimateIsRemoteMeasured({ result: plan('pest_control') }, { laterWork: [{ service }] })]).toEqual([label, false]);
+      expect([label, serviceMixIsRemoteMeasured([{ ...recurringRow('pest_control'), service }], [])]).toEqual([label, false]);
+    }
+    // An adjustment row whose amount nobody can read is not a discount.
+    const adjustment = (amount) => ({ oneTimeBreakdown: { items: [{ service: 'one_time_adjustment', name: 'Adjustment', amount }] } });
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control') }, adjustment(-20))).toBe(true);
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control') }, adjustment({ toString: null }))).toBe(false);
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control') }, adjustment(undefined))).toBe(false);
+    // A read that throws is caught: no answer, one warning.
+    const logger = require('../services/logger');
+    logger.warn.mockClear();
+    const throwing = {};
+    Object.defineProperty(throwing, 'service', { enumerable: true, get() { throw new Error('unreadable row'); } });
+    expect(estimateIsRemoteMeasured(saved({ extras: [throwing] }), {})).toBe(false);
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control') }, { laterWork: [throwing] })).toBe(false);
+    expect(logger.warn).toHaveBeenCalledTimes(2);
+    expect(logger.warn.mock.calls[0][0]).toContain('no-visit line rule could not read the estimate');
   });
 
   test('an inputs-only save is read from its replayed engine result, raw rows included', () => {
@@ -550,6 +585,12 @@ describe('GET /:token/data: noVisitLine', () => {
     expect(servedRoachFee.status).toBe(200);
     expect(servedRoachFee.body.cta.terminalState).toBeNull();
     expect(servedRoachFee.body).not.toHaveProperty('noVisitLine');
+
+    // A stored service nobody can read, in a field no reader lists: the page still loads, with no line.
+    const unreadable = await pageLoad(estimateRow({ estimateData: { laterWork: [{ detail: { service: { toString: null } } }] } }));
+    expect(unreadable.status).toBe(200);
+    expect(unreadable.body.cta.terminalState).toBeNull();
+    expect(unreadable.body).not.toHaveProperty('noVisitLine');
 
     // The general one-time pest service is on the list, so the same estimate with that row keeps the line.
     const oneTimePest = await pageLoad(estimateRow({ oneTime: [{ service: 'one_time_pest', name: 'One-Time Pest Control', amount: 199, price: 199 }] }));

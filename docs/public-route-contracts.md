@@ -7200,7 +7200,8 @@ Every saved row as it is stored can take the key away, also one the page's reade
 shapes, the bare save and an inputs-only save's replayed engine result: `recurring.services[]` and
 `results.recurring.services[]` (the recurring list), `lineItems[]` (either list), `oneTime.items[]`,
 `oneTime.specItems[]`, the nested `results.oneTime` copies, `specItems[]` and `quoteRequiredItems[]` (the one-time list),
-and then every row that stores a `service` at any depth of a saved result (either list). (3) The served price can take
+and then every row that stores a `service` at any depth of the saved estimate data and of the replay (either list; the
+frozen `sendSnapshot` is not scanned, the served price is read next). (3) The served price can take
 the key away and never grants it: `pricing.services[]` recurring sections by `memberKeys`, else `key`; every
 `perServiceTreatments[]` row of each `frequencies[]` and `serviceCadenceCombos[]` entry, on the price and on those
 sections (the recurring list); `pricing.oneTimeBreakdown.items[]`, the quote-required rows, `firstVisitFees[]`,
@@ -7208,8 +7209,9 @@ sections (the recurring list); `pricing.oneTimeBreakdown.items[]`, the quote-req
 (the one-time list); and then every row that stores a `service` at any depth of the price (either list). One row off its
 list (rodent work, a misting system, foam, trenching, pre-slab, Bora-Care, a WDO inspection, traps, a palm injection, a
 bed bug, roach, flea or stinging insect job, a first-visit cockroach treatment, a termite station rental or bond row, an
-area add-on, a row with a name, a key or a price and no stored `service`), no service row at all, or a failed replay, and
-the key is absent); and the estimate email's rule reads the row as a home
+area add-on, a row with a name, a key or a price and no stored `service`, a stored `service` that is not text), no service
+row at all, or a failed replay, and the key is absent; a row the rule cannot read gives no key and a warning, never a
+failed response); and the estimate email's rule reads the row as a home
 estimate (`noVisitLineFor`: category `RESIDENTIAL`, not a proposal, and no commercial mark by `isCommercialEstimateRow` at
 its strict reading, so a commercial estimate, a proposal and a condo carry none). A row the rule cannot read omits the key
 and logs a warning; it never fails the response. Every other response stays byte-identical. The interactive estimate
