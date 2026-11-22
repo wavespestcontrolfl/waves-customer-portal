@@ -12,6 +12,10 @@
  * status: eligible | held_back | not_eligible | unmatched. 'held_back' is the fixed one in five homes that never get
  * a card, so a later PR can compare them with the mailed ones. reason is null for eligible / held_back.
  *
+ * Text the county wrote (the deed's legal description, the parcel's address, city and subdivision) is stored in
+ * text columns: a long value must never make a deed fail on every run. The limited columns hold this feature's own
+ * codes and ids whose shape the readers check (instrument number, parcel number, permit number, zip).
+ *
  * One home can be on a list once: the partial unique index covers only live rows (eligible, held_back), so a second
  * deed for the same parcel is stored as not_eligible / duplicate_parcel instead of failing the run. Reading the same
  * deed again updates its row: (list_key, source, source_ref) is the identity.
@@ -30,18 +34,18 @@ exports.up = async function up(knex) {
     t.jsonb('recipient_names').notNullable().defaultTo('[]');
     t.string('buyer_kind', 20);
     t.decimal('consideration', 14, 2);
-    t.string('legal_description', 300);
+    t.text('legal_description');
     t.string('status', 20).notNullable();
     t.string('reason', 40);
     t.string('match_basis', 20);
     t.string('parcel_pin', 20);
     t.string('permit_no', 40);
     t.date('co_date');
-    t.string('address_line1', 200);
-    t.string('city', 80);
+    t.text('address_line1');
+    t.text('city');
     t.string('state', 2).defaultTo('FL');
     t.string('zip', 10);
-    t.string('subdivision', 160);
+    t.text('subdivision');
     t.integer('living_sqft');
     t.decimal('stories', 4, 1);
     t.integer('year_built');

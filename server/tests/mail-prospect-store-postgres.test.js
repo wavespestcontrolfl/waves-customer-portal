@@ -251,6 +251,38 @@ postgres('mail prospect store on PostgreSQL', () => {
     expect(await addressKnownToWaves('101 EXAMPLE TRL', null)).toBe(false);
   });
 
+  test('addressKnownToWaves finds a stored address whatever its spacing or zip form', async () => {
+    const stored = [
+      { address_line1: '  31 Leading Space Dr', zip: '34203' },
+      { address_line1: '32\tTabbed Way', zip: '34203' },
+      { address_line1: '33   Wide Gap Ct', zip: '34203-1234' },
+      { address_line1: '34 Plain Rd', zip: 'FL 34203' },
+    ];
+    await conn('customers').insert(stored);
+    expect(await addressKnownToWaves('31 LEADING SPACE DR', '34203')).toBe(true);
+    expect(await addressKnownToWaves('32 TABBED WAY', '34203')).toBe(true);
+    expect(await addressKnownToWaves('33 WIDE GAP CT', '34203')).toBe(true);
+    expect(await addressKnownToWaves('34 PLAIN RD', '34203')).toBe(true);
+    // The same digits inside another house number or another street are not this home.
+    expect(await addressKnownToWaves('3 LEADING SPACE DR', '34203')).toBe(false);
+    expect(await addressKnownToWaves('31 OTHER DR', '34203')).toBe(false);
+    expect(await addressKnownToWaves('31 LEADING SPACE DR', '34204')).toBe(false);
+  });
+
+  test('a long deed description, address, city and subdivision are saved whole', async () => {
+    const long = (word, size) => `${word} `.repeat(Math.ceil(size / (word.length + 1))).trim();
+    const row = live('202641990001', '4100000041', {
+      legal_description: long('LOT 1 EXAMPLE', 900), address_line1: long('101 EXAMPLE TRL', 500),
+      city: long('EXAMPLE', 200), subdivision: long('EXAMPLE LAKES', 400),
+    });
+    expect(await saveProspect(row)).toBe(row.status);
+    const saved = await conn('mail_prospects').where({ source_ref: '202641990001' }).first();
+    expect(saved).toMatchObject({
+      legal_description: row.legal_description, address_line1: row.address_line1, city: row.city, subdivision: row.subdivision,
+    });
+    expect(saved.legal_description.length).toBeGreaterThan(300);
+  });
+
   test('addressKnownToWaves reads every customer with that house number and zip, however many there are', async () => {
     const others = Array.from({ length: 450 }, (_, i) => ({ address_line1: `77 Street${i} Rd`, zip: '34221' }));
     await conn('customers').insert(others);

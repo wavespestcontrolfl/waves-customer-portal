@@ -107,19 +107,22 @@ async function newHomePermitsForParcels(parcels, conn = db) {
 }
 
 /**
- * True when any customers row (customer, lead or cancelled) has the same house number, first street word and zip.
- * The query narrows by zip and house number (the number is digits only and bound as a parameter); the street word
- * is compared in JS with the same loose key the permit sync uses.
+ * True when any customers row (customer, lead or cancelled) has the same house number, first street word and zip:
+ * the same loose key the permit sync uses, compared in JS.
+ *
+ * The query only narrows, and it cannot drop a row with the same key: a key is made from the house number and the
+ * zip's five digits, so such a row holds both (wherever the spaces, tabs or a ZIP+4 are). Both are digits only and
+ * bound as parameters. Every candidate is read: a cut-off list could hide the one row that is this home.
  */
 async function addressKnownToWaves(addressLine1, zip, conn = db) {
   const key = looseAddressKey(addressLine1, zip);
-  const number = String(addressLine1 || '').trim().match(/^(\d+)\s/);
+  const number = String(addressLine1 || '').trim().match(/^\d+/);
   const zip5 = String(zip || '').match(/\d{5}/);
   if (!key || !number || !zip5) return false;
   const rows = await conn('customers')
-    .where('zip', 'like', `${zip5[0]}%`)
-    .whereRaw('address_line1 ILIKE ?', [`${number[1]} %`])
-    .select('address_line1', 'zip'); // every candidate: a cut-off list could hide the one row that is this home
+    .where('zip', 'like', `%${zip5[0]}%`)
+    .where('address_line1', 'like', `%${number[0]}%`)
+    .select('address_line1', 'zip');
   return rows.some((r) => looseAddressKey(r.address_line1, r.zip) === key);
 }
 
