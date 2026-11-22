@@ -39,7 +39,7 @@ function ranInPeriod(c, period) {
 
 // --- SYNC HEALTH ---
 const SYNC_STALE_MS = 36 * 60 * 60 * 1000;
-const SYNC_PLATFORM_LABELS = { google_ads: "Google Ads", facebook: "Meta Ads" };
+const SYNC_PLATFORM_LABELS = { google_ads: "Google Ads", facebook: "Meta Ads", google_lsa: "Local Service Ads" };
 // One entry per configured platform from the per-job rows /sync-status returns
 // (Meta has two jobs: it shows the older success and any failure).
 function summarizeSyncs(syncs, now = Date.now()) {
