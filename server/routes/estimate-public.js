@@ -24235,8 +24235,8 @@ function estimateMakesNoGuaranteeClaim(estData = {}, pricingBundle = {}) {
 // quote. It does not read a quantity of product or work the office picks (mosquito stations, dunks), nor a pricing
 // decision the office makes (a discount, a price it sets by hand: `priceOverridden`): neither is a measurement of the
 // home or yard, and neither needs a visit. It does not read a fact the customer states that is no size (a roach type,
-// a grass type). And where the engine stores no mark, the rule cannot tell and does not try: a home size or a lawn
-// size somebody typed is stored like a measured one.
+// a grass type). And where the engine stores no mark, the rule cannot tell and does not try: outside a call draft, a
+// home size or a lawn size somebody typed is stored like a measured one.
 // Three reads, and each one fails closed (estimateIsRemoteMeasured):
 // 1. The saved estimate grants the answer: the rows the guarantee rule reads from it (guaranteeServiceRows with no
 //    served price: both saved result shapes, an inputs-only replay, an authored proposal's rows). At least one service
@@ -24366,18 +24366,33 @@ function storedObjects(value, found = [], seen = new WeakSet()) {
 const rowsThatMustPass = (value) => storedObjects(value)
   .filter((row) => serviceIdentity(row.service) || storedRowHasANotMeasuredSize(row));
 
-// A lawn price is built from the turf size, and the resolved turf basis is not always on the lawn row: a V1 save keeps
-// it beside the rows (`results.lawnMeta`), and the price card reads it from there. So when a lawn service is quoted, a
-// heuristic turf mark on ANY stored object takes the answer away (the engine's lineHasHeuristicTurf). With no lawn
-// service quoted the turf size prices nothing, and the mark is not read: the engine leaves it out the same way for an
-// object that is not a priced row.
+// Marks the engine keeps beside the service rows, read over every stored object of the saved data, the replay and the
+// served price (storedMarksBesideTheRowsSayNo):
+// - The office's review reasons for the whole estimate (`pricingMetadata.manualReviewReasons` and its copies), read
+//   like a row's reasons: only a large-size reason keeps the answer.
+// - A lawn price is built from the turf size, and the resolved turf basis is not always on the lawn row: a V1 save
+//   keeps it in `results.lawnMeta`, and the price card reads it from there. So when a lawn service is quoted, a
+//   heuristic turf mark on ANY stored object takes the answer away (the engine's lineHasHeuristicTurf). With no lawn
+//   service quoted the turf size prices nothing, and the mark is not read: the engine leaves it out the same way for
+//   an object that is not a priced row.
+// - A call draft keeps the source of the home size and the lot size it priced from
+//   (`estimatorEngine.propertyFacts`, source-arbitration). A size the caller stated, and each fallback source, is no
+//   measurement from records or images. Only the selected fact is read, never a rejected candidate.
 const LAWN_SERVICES = new Set(['lawn_care', 'one_time_lawn']);
-function lawnIsPricedFromAHeuristicTurf(estData, pricingBundle) {
+function callDraftSizesAreNotMeasured(estData) {
+  const { SQFT_SOURCES, FALLBACK_SQFT_SOURCES } = require('../services/estimator-engine/source-arbitration');
+  const facts = estData?.estimatorEngine?.propertyFacts;
+  return [facts?.home, facts?.lot].some((fact) => isStoredRow(fact) && fact.source != null
+    && (fact.source === SQFT_SOURCES.CALLER_STATED || FALLBACK_SQFT_SOURCES.has(fact.source)));
+}
+function storedMarksBesideTheRowsSayNo(estData, pricingBundle) {
   const { sendSnapshot: _sentPriceAndScope, ...savedData } = isStoredRow(estData) ? estData : {};
   const replay = persistedGuaranteeRoots(estData).length ? null : guaranteeReplayForInputsOnly(estData).result;
   const objects = storedObjects([savedData, replay, pricingBundle]);
-  return objects.some((stored) => LAWN_SERVICES.has(serviceIdentity(stored.service)))
-    && objects.some((stored) => engineChecks().lineHasHeuristicTurf(stored));
+  const lawnIsQuoted = objects.some((stored) => LAWN_SERVICES.has(serviceIdentity(stored.service)));
+  return objects.some(storedRowHasAnUnsureReview)
+    || (lawnIsQuoted && objects.some((stored) => engineChecks().lineHasHeuristicTurf(stored)))
+    || callDraftSizesAreNotMeasured(estData);
 }
 
 function serviceMixIsRemoteMeasured(recurringServices = [], oneTimeItems = []) {
@@ -24474,7 +24489,7 @@ function estimateIsRemoteMeasured(estData = {}, pricingBundle = {}) {
       && serviceMixIsRemoteMeasured(saved.recurring, saved.oneTime)
       && savedRowsAreAllListed(estData)
       && servedPriceIsAllListed(pricingBundle)
-      && !lawnIsPricedFromAHeuristicTurf(estData, pricingBundle);
+      && !storedMarksBesideTheRowsSayNo(estData, pricingBundle);
   } catch (err) {
     logger.warn(`[estimate-data] no-visit line rule could not read the estimate: ${err.message}`);
     return false;

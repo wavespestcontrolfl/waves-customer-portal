@@ -7206,10 +7206,15 @@ or an engine input flag that says a size is not measured or not verified for thi
 `buildingSizeMeasured: false`, `measuredTurfUnitVerified: false`, anywhere in the saved estimate data). When a lawn
 service is quoted (`lawn_care`, `one_time_lawn`), a heuristic turf mark on any stored object of the saved data, the
 replay or the served price takes the key away too (a V1 save keeps the resolved turf basis in `results.lawnMeta`, not
-on the lawn row); with no lawn service quoted that mark is not read. The rule reads marks about a size of the home or
+on the lawn row); with no lawn service quoted that mark is not read. The review reasons the engine keeps for the
+whole estimate (`pricingMetadata.manualReviewReasons` and its copies, on any stored object) are read like a row's
+reasons. A call draft's selected home or lot size whose `estimatorEngine.propertyFacts.{home,lot}.source` is
+`caller_stated` or a fallback source (`permit_plan`, `subdivision_median`, `property_lookup_estimate`, `unresolved`)
+takes the key away; a rejected candidate is not read. The rule reads marks about a size of the home or
 yard and marks that a price needs a visit. It does not read a quantity of product the office picks (mosquito stations,
-dunks) or a pricing decision the office makes (a discount, `priceOverridden`). Where the engine stores no mark (a home size or a lawn size somebody typed is
-stored like a measured one), the rule cannot tell and does not try. The office's review of a price (`requiresManualReview`, `manualReviewReasons`) is read by
+dunks) or a pricing decision the office makes (a discount, `priceOverridden`). Where the engine stores no mark (outside
+a call draft, a home size or a lawn size somebody typed is stored like a measured one), the rule cannot tell and does
+not try. The office's review of a price (`requiresManualReview`, `manualReviewReasons`) is read by
 its reasons. Only a reason that says a measured size is large keeps the key (`large_lot`,
 `pest_large_lot_manual_review`, `large_pool_cage`, `pest_large_or_oversized_pool_cage`): a reviewed price from measured
 sizes is still measured. Every other reason, a reason that is not text, and a review mark with no reason take the key

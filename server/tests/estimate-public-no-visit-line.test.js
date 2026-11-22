@@ -645,6 +645,47 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
     }
   });
 
+  test('the review reasons the engine keeps for the whole estimate, beside the rows', () => {
+    const pestPlan = { recurring: { services: [recurringRow('pest_control')] } };
+    const withMeta = (pricingMetadata) => ({ result: { ...pestPlan, pricingMetadata } });
+    expect(estimateIsRemoteMeasured(withMeta({ manualReviewReasons: [] }), {})).toBe(true);
+    expect(estimateIsRemoteMeasured(withMeta({ manualReviewReasons: ['large_lot', 'pest_large_lot_manual_review'] }), {})).toBe(true);
+    for (const manualReviewReasons of [['stories_estimated'], ['missing_lot_size'], ['large_lot', 'stories_estimated'], ['a_reason_added_next_year'], [null]]) {
+      const label = JSON.stringify(manualReviewReasons);
+      expect([label, estimateIsRemoteMeasured(withMeta({ manualReviewReasons }), {})]).toEqual([label, false]);
+      // In the second saved shape, in a nested diagnostics object, and on the served price.
+      expect([label, estimateIsRemoteMeasured({ result: pestPlan, engineResult: { routingMetadata: { manualReviewReasons } } }, {})]).toEqual([label, false]);
+      expect([label, estimateIsRemoteMeasured({ result: { ...pestPlan, lineItems: [{ service: 'pest_control', monthly: 40, productionDiagnostics: { manualReviewReasons } }] } }, {})]).toEqual([label, false]);
+      expect([label, estimateIsRemoteMeasured({ result: pestPlan }, { pricingMetadata: { manualReviewReasons } })]).toEqual([label, false]);
+    }
+    expect(estimateIsRemoteMeasured(withMeta({ requiresManualReview: true }), {})).toBe(false);
+    // The real engine keeps them there: a home with no story count on record.
+    const engineResult = generateEstimate({ homeSqFt: 2000, lotSqFt: 8000, storiesSource: 'default', services: { pest: { frequency: 'quarterly' } } });
+    expect(Array.isArray(engineResult.pricingMetadata.manualReviewReasons)).toBe(true);
+  });
+
+  test('a call draft keeps the source of its home and lot size: a caller-stated or fallback size is no measurement', () => {
+    const pestPlan = { recurring: { services: [recurringRow('pest_control')] } };
+    const draft = (propertyFacts) => ({ result: pestPlan, estimatorEngine: { callLogId: 1, propertyFacts } });
+    const { SQFT_SOURCES, FALLBACK_SQFT_SOURCES } = require('../services/estimator-engine/source-arbitration');
+    const county = { value: 2000, source: SQFT_SOURCES.COUNTY_ASSESSED, confidence: 'high', rejected: [] };
+    expect(estimateIsRemoteMeasured(draft({ home: county, lot: { ...county, value: 8000 } }), {})).toBe(true);
+    expect(estimateIsRemoteMeasured(draft({ home: county, lot: { ...county, source: SQFT_SOURCES.PROFILE } }), {})).toBe(true);
+    // The caller's own number, and every source the arbitration names a fallback (a permit plan, a subdivision
+    // median, a lookup estimate, no source at all).
+    expect([...FALLBACK_SQFT_SOURCES].sort()).toEqual(['permit_plan', 'property_lookup_estimate', 'subdivision_median', 'unresolved']);
+    for (const source of [SQFT_SOURCES.CALLER_STATED, ...FALLBACK_SQFT_SOURCES]) {
+      expect([source, estimateIsRemoteMeasured(draft({ home: { ...county, source }, lot: county }), {})]).toEqual([source, false]);
+      expect([source, estimateIsRemoteMeasured(draft({ home: county, lot: { ...county, source } }), {})]).toEqual([source, false]);
+    }
+    // A candidate the arbitration rejected is not the size the draft priced from.
+    const rejected = [{ value: 1800, source: SQFT_SOURCES.CALLER_STATED, reason: 'disagrees with the county-assessed living area' }];
+    expect(estimateIsRemoteMeasured(draft({ home: { ...county, rejected }, lot: { ...county, rejected } }), {})).toBe(true);
+    // A draft with no property facts, and an estimate that is no call draft.
+    expect(estimateIsRemoteMeasured({ result: pestPlan, estimatorEngine: { callLogId: 1 } }, {})).toBe(true);
+    expect(estimateIsRemoteMeasured({ result: pestPlan, estimatorEngine: true }, {})).toBe(true);
+  });
+
   test('a pricing decision the office makes is not a measurement of the home: it is not read', () => {
     // A price the office set by hand on a listed one-time service. The home is measured the same, and no visit is needed.
     const saved = (marks) => ({ result: { recurring: { services: [recurringRow('pest_control')] }, oneTime: { items: [{ service: 'one_time_pest', amount: 180, ...marks }] } } });
