@@ -29,6 +29,12 @@ vi.mock("./RestaurantProspectsPage", () => ({
   },
 }));
 
+vi.mock("./MailProspectsPage", () => ({
+  default: function MailStub({ embedded }) {
+    return <div data-testid="mail" data-embedded={String(Boolean(embedded))}>mail</div>;
+  },
+}));
+
 import BidsPage from "./BidsPage";
 import AdminTabRedirect from "../../components/admin/AdminTabRedirect";
 
@@ -139,4 +145,16 @@ it("opens the Restaurants tab for ?tab=restaurants; switching to it sets the par
   fireEvent.click(screen.getByRole("button", { name: "Restaurants" }));
   expect(new URLSearchParams(screen.getByTestId("where").textContent.split("?")[1]).get("tab")).toBe("restaurants");
   expect(screen.getByTestId("restaurants")).toBeInTheDocument();
+});
+
+it("opens the Mail tab for ?tab=mail; switching to it sets the param", () => {
+  renderAt("/admin/bids?tab=mail");
+  expect(screen.getByTestId("mail")).toHaveAttribute("data-embedded", "true");
+  expect(screen.queryByTestId("restaurants")).toBeNull();
+  expect(screen.getByRole("button", { name: "Mail" })).toHaveAttribute("aria-current", "page");
+  fireEvent.click(screen.getByRole("button", { name: "Restaurants" }));
+  expect(screen.getByTestId("restaurants")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Mail" }));
+  expect(new URLSearchParams(screen.getByTestId("where").textContent.split("?")[1]).get("tab")).toBe("mail");
+  expect(screen.getByTestId("mail")).toBeInTheDocument();
 });
