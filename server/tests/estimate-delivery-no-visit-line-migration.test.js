@@ -57,7 +57,7 @@ describe('estimate email "no visit needed" line migration plan', () => {
     expect(LINE).toBe('We measure your home and yard from county records and satellite images, so most quotes need no visit.');
     expect(NO_VISIT_QUOTE_LINE).toBe(LINE);
     expect(callScript.NO_VISIT_QUOTE_LINE).toBe(LINE);
-    expect(callScript.NO_VISIT_SCRIPT_LINE).toBe(`If the caller asks whether someone comes out to quote, say: "${LINE}"`);
+    expect(callScript.NO_VISIT_SCRIPT_LINE).toBe(`If a residential caller asks whether someone comes out to quote, say: "${LINE}"`);
     expect(VARIABLE).toBe('estimate_no_visit_line');
     expect(NO_VISIT_LINE_VARIABLE).toBe(VARIABLE);
     expect(NOTE).toBe('{{estimate_no_visit_line}}');

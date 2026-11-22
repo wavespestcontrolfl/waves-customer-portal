@@ -180,7 +180,7 @@ describe('formatWeeklyCallOutcomes', () => {
     expect(FIRST_VISIT_SCRIPT_LINE).toBe('Call script: offer the first open visit before you offer to send an estimate.');
     // The owner's exact sentence (2026-11-21), quoted for the office to say.
     expect(NO_VISIT_QUOTE_LINE).toBe('We measure your home and yard from county records and satellite images, so most quotes need no visit.');
-    expect(NO_VISIT_SCRIPT_LINE).toBe(`If the caller asks whether someone comes out to quote, say: "${NO_VISIT_QUOTE_LINE}"`);
+    expect(NO_VISIT_SCRIPT_LINE).toBe(`If a residential caller asks whether someone comes out to quote, say: "${NO_VISIT_QUOTE_LINE}"`);
     expect(formatWeeklyCallOutcomes({ newCustomerCallers: 40, callersWithOutcome: 30, bookedOnCall: 6, bookedPct: 20, estimateRequestedOrPromised: 20 }))
       .toBe(`New-customer callers: 40. Outcome known for 30. Booked on the call: 6 of 30 (20%). Estimate requested or promised, no booking recorded: 20. ${FIRST_VISIT_SCRIPT_LINE} ${NO_VISIT_SCRIPT_LINE}`);
   });

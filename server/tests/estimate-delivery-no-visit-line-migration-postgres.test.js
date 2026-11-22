@@ -214,13 +214,17 @@ postgres('estimate email "no visit needed" line migration (PostgreSQL)', () => {
         first,
         { name: 'Admin blank', payload: { ...first.payload, [VARIABLE]: '' } },
         { name: 'Admin words', payload: { ...first.payload, [VARIABLE]: 'Our own words.' } },
+        { name: 'Not an object', payload: ['x'] },
       ],
     });
+    const untouched = await db('email_template_fixtures').whereIn('name', ['Admin blank', 'Admin words', 'Not an object']).orderBy('name');
     await migration.up(db);
     const byName = Object.fromEntries((await db('email_template_fixtures')).map((f) => [f.name, f.payload]));
     expect(byName[first.name]).toEqual({ ...first.payload, [VARIABLE]: LINE });
     expect(byName['Admin blank'][VARIABLE]).toBe('');
     expect(byName['Admin words'][VARIABLE]).toBe('Our own words.');
+    // Rows that already have the key, or hold no object, are not written at all (updated_at included).
+    expect(await db('email_template_fixtures').whereIn('name', ['Admin blank', 'Admin words', 'Not an object']).orderBy('name')).toEqual(untouched);
     expect((await auditMetadata()).fixtures_seeded).toBe(1);
 
     const { template, version } = await active();

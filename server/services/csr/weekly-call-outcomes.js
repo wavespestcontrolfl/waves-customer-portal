@@ -153,7 +153,8 @@ const FIRST_VISIT_SCRIPT_LINE = 'Call script: offer the first open visit before 
 // the four weeks to Nov 15, 9 of 16 calls about how the estimate works asked this. The sentence has one home,
 // services/estimate-no-visit-line.js; the estimate email for a home carries the same words.
 const { NO_VISIT_QUOTE_LINE } = require('../estimate-no-visit-line');
-const NO_VISIT_SCRIPT_LINE = `If the caller asks whether someone comes out to quote, say: "${NO_VISIT_QUOTE_LINE}"`;
+// "A residential caller": the weekly count takes in commercial callers too, and the sentence speaks of a home and yard.
+const NO_VISIT_SCRIPT_LINE = `If a residential caller asks whether someone comes out to quote, say: "${NO_VISIT_QUOTE_LINE}"`;
 
 // "New-customer callers: 40. Outcome known for 30. Booked on the call: 8 of 30 (27%). Estimate requested or promised, no booking recorded: 20. Call script: offer the first open visit before you offer to send an estimate. If the caller asks whether someone comes out to quote, say: ..."
 function formatWeeklyCallOutcomes(o) {

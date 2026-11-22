@@ -82,17 +82,18 @@ function insertLine(blocksIn) {
 }
 
 // The preview and the admin test send read these. A key that is already there, even blank, is an admin's value.
+// One statement per run: the key is added to the payload each row holds at that moment, so an admin fixture edit
+// committed just before it is kept whole (the fixture editor does not take the template row lock).
 async function seedFixtures(knex, template) {
   if (!(await knex.schema.hasTable('email_template_fixtures'))) return 0;
-  let seeded = 0;
-  for (const fixture of await knex('email_template_fixtures').where({ template_id: template.id })) {
-    const payload = json(fixture.payload, null);
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload[VARIABLE] !== undefined) continue;
-    await knex('email_template_fixtures').where({ id: fixture.id })
-      .update({ payload: JSON.stringify({ ...payload, [VARIABLE]: LINE }), updated_at: new Date() });
-    seeded += 1;
-  }
-  return seeded;
+  return knex('email_template_fixtures')
+    .where({ template_id: template.id })
+    .whereRaw("jsonb_typeof(payload) = 'object'")
+    .whereRaw('NOT jsonb_exists(payload, ?)', [VARIABLE])
+    .update({
+      payload: knex.raw('payload || jsonb_build_object(?::text, ?::text)', [VARIABLE, LINE]),
+      updated_at: new Date(),
+    });
 }
 
 async function publish(knex) {
