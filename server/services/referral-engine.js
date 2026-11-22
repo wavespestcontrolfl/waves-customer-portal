@@ -706,6 +706,14 @@ function recentRewardCreditsQuery(conn, now) {
     .select('r.*', 'l.delta as credit_dollars', 'l.created_at as credited_at');
 }
 
+// The amount the credit email states. A Step 2 row records what the member was paid (referrer_credit_cents, 0 at the
+// yearly limit), and that is the amount: after the member's and the friend's profiles are merged, the friend's
+// credit row carries the member's customer id too, and it must not set the amount. Any other row: its own amount.
+function rewardCreditEmailDollars(row) {
+  const recorded = row.referrer_credit_cents;
+  return recorded === null || recorded === undefined ? Number(row.credit_dollars) : Number(recorded) / 100;
+}
+
 // Conversions paid at once (require_service_completion off) put the reward on
 // the promoter balance inside convertReferral's transaction and email after it
 // commits. A failure before that email exists is only logged, and a retried
@@ -732,7 +740,9 @@ async function sendDueReferralRewardEmails({ now = new Date() } = {}) {
   const credits = await recentRewardCreditsQuery(db, now);
   const immediate = await recentImmediateRewardsQuery(db, now);
   const due = [
-    ...credits.map((row) => ({ row, at: row.credited_at, dollars: Number(row.credit_dollars), destination: 'account_credit' })),
+    ...credits.map((row) => ({ row, at: row.credited_at, dollars: rewardCreditEmailDollars(row), destination: 'account_credit' }))
+      // A member who was paid nothing (the yearly limit) has no credit to announce.
+      .filter(({ dollars }) => dollars > 0),
     ...immediate.map((row) => ({ row, at: row.converted_at, dollars: Number(row.referrer_reward_amount), destination: 'referral_balance' })),
   ];
   let attempted = 0;
