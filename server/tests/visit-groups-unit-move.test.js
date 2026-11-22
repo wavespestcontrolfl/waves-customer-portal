@@ -1286,6 +1286,28 @@ describe('shift hours: a grouped stop is judged as one unit', () => {
       expect((await unit(fakeRebooker(), '10:00-11:00', 'auto_dispatch', { technicianId: 't9' })).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
     });
 
+    test('the caller\'s own fence on the first service must agree with what the verdict read: another technician or length is a stale request, refused before any write', async () => {
+      // A technician's rain-out pins the technician whose request it is. The plan reads t1 under the lock and judges t1's hours.
+      db.__script = script({ members: pair() });
+      const stale = fakeRebooker();
+      await expect(unit(stale, '13:00-14:00', 'tech', { expect: { technician_id: 't9' } })).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN', isOperational: true });
+      nothingWritten(stale);
+      await expect(unit(stale, '13:00-14:00', 'tech', { expect: { estimated_duration_minutes: 30 } })).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN' });
+      nothingWritten(stale);
+      // A fence that agrees rides the write, as before.
+      db.__script = script({ members: pair(), landed: landed('13:00', '14:00') });
+      const agrees = fakeRebooker();
+      expect((await unit(agrees, '13:00-14:00', 'tech', { expect: { technician_id: 't1', estimated_duration_minutes: null } })).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+      // No verdict, no check: the office's own move keeps the caller's fence for the write to judge, as before.
+      const office = fakeRebooker();
+      expect((await unit(office, '13:00-14:00', 'admin', { expect: { technician_id: 't9' } })).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+      expect(office.reschedule.mock.calls[0][5].expect).toMatchObject({ technician_id: 't9' });
+      // A first service no shift judges (its technician has no set hours): the same.
+      delete shifts.t1;
+      const unjudged = fakeRebooker();
+      expect((await unit(unjudged, '13:00-14:00', 'tech', { expect: { technician_id: 't9' } })).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+    });
+
     // A unit that names a technician assigns each member in a later write of its own, after the
     // member's move. The plan's verdict and the move's length pin do not reach that write.
     describe('the assignment to a named technician', () => {
@@ -1315,8 +1337,9 @@ describe('shift hours: a grouped stop is judged as one unit', () => {
         expect(out.visitMove.failed).toEqual([expect.objectContaining({ id: 'a', code: 'SLOT_TAKEN', movedButUnassigned: true })]);
         expect(assigned()).toEqual(['b']);
         expect(lockedReads().map((c) => c.ops.find((o) => o[0] === 'where')[1].id)).toEqual(['a', 'b']);
-        // The member's own technician-day is locked before its row: advisory locks first.
-        expect(ownDayLocked()).toBe(true);
+        // Both technician-days are locked in one call, in the canonical (sorted) order, before the row.
+        expect(db.__rawCalls.filter((c) => c[1][0] === 'slot-reserve').map((c) => c[1][1]))
+          .toEqual(['t1:2026-09-02', 't9:2026-09-02', 't1:2026-09-02', 't9:2026-09-02']);
         // The second verdict is on the named technician alone.
         expect(loadTechShifts.mock.calls.slice(1).map((c) => c[1])).toEqual([{ technicianIds: ['t9'] }, { technicianIds: ['t9'] }]);
       });
@@ -1359,7 +1382,7 @@ describe('shift hours: a grouped stop is judged as one unit', () => {
         withStanding(late, onT9);
         expect((await toT9('admin')).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
         expect(loadTechShifts).not.toHaveBeenCalled();
-        // t7 has no set hours: the hours are read, and nothing is locked or read for the row.
+        // t7 has no set hours: the hours are read, and the step is as before (the destination lock alone, a plain read).
         withStanding(late, landed('10:00', '11:00', 't7'));
         expect((await toT9('auto_dispatch', 't7')).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
         expect(lockedReads()).toEqual([]);
