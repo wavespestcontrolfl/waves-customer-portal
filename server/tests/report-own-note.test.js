@@ -146,6 +146,11 @@ describe('a code on the customer\'s file is found by its value, in any wording',
     expect(storedCodesOf({ lockbox_code: '12 34' })).toEqual(['1234', '12', '34']);
     expect(storedCodesOf({ garage_code: '  ' })).toEqual([]);
     expect(storedCodesOf(undefined)).toEqual([]);
+    // The access codes section and the gate directory: the code as a code
+    // field, and of the directions beside it only a run with a figure.
+    expect(storedCodesOf(undefined, [{ code: 'Rose 77', instructions: 'dial 4471 then press 2. Ask for Sam' }]).sort())
+      .toEqual(['4471', '77', 'rose', 'rose77']);
+    expect(storedCodesOf(undefined, [{ code: null, instructions: null }])).toEqual([]);
     // Another field of the file is no code field.
     expect(storedCodesOf({ parking_notes: 'park at 7788' })).toEqual([]);
   });
@@ -203,28 +208,48 @@ describe('a code on the customer\'s file is found by its value, in any wording',
       .rejects.toThrow('need a database and a customer');
   });
 
-  test('with a database and a customer, the codes are read from the customer\'s file', async () => {
+  test('with a database and a customer, the codes are read from the three places a code is filed', async () => {
     const asked = [];
-    const db = (table) => ({
-      where: (filter) => ({
-        first: async (...columns) => {
-          asked.push({ table, filter, columns });
-          return { lockbox_code: 'bluebird' };
-        },
-      }),
+    // The three reads, in the shape knex gives them.
+    const fileOf = (rows) => (table) => {
+      const read = { table };
+      asked.push(read);
+      const chain = {
+        join: (...on) => { read.join = on; return chain; },
+        where: (...filter) => { read.where = filter; return chain; },
+        first: async (...columns) => { read.columns = columns; return rows[table]; },
+        select: async (...columns) => { read.columns = columns; return rows[table] || []; },
+      };
+      return chain;
+    };
+    const db = fileOf({
+      property_preferences: { lockbox_code: 'bluebird' },
+      customer_access_codes: [{ code: '#9031', instructions: null }, { code: null, instructions: 'call box, dial 2040' }],
+      'neighborhood_access as gate': [{ code: '6612#', instructions: 'guard on weekends' }],
     });
-    expect(await readStoredCodes(db, 'customer-1')).toEqual(['bluebird']);
-    expect(await reportNoteRejection({
-      note: 'bluebird. treated shed', text: 'I treated the shed.', catalogRows: CATALOG, db, customerId: 'customer-1',
-    })).toEqual({ reason: 'stored_code' });
-    expect(asked[0]).toEqual({
-      table: 'property_preferences',
-      filter: { customer_id: 'customer-1' },
-      columns: ['neighborhood_gate_code', 'property_gate_code', 'garage_code', 'lockbox_code'],
-    });
-    // A customer with no row on file has no code.
-    const none = () => ({ where: () => ({ first: async () => undefined }) });
-    expect(await readStoredCodes(none, 'customer-2')).toEqual([]);
+    expect((await readStoredCodes(db, 'customer-1')).sort()).toEqual(['2040', '6612', '9031', 'bluebird']);
+    expect(asked).toEqual([
+      {
+        table: 'property_preferences',
+        where: [{ customer_id: 'customer-1' }],
+        columns: ['neighborhood_gate_code', 'property_gate_code', 'garage_code', 'lockbox_code'],
+      },
+      { table: 'customer_access_codes', where: [{ customer_id: 'customer-1' }], columns: ['code', 'instructions'] },
+      {
+        table: 'neighborhood_access as gate',
+        join: ['customer_properties as home', 'home.neighborhood_id', 'gate.neighborhood_id'],
+        where: ['home.customer_id', 'customer-1'],
+        columns: ['gate.code', 'gate.instructions'],
+      },
+    ]);
+    // A code of each place stops the note.
+    for (const note of ['bluebird. treated shed', 'treated shed. 9031', 'treated shed. 20 40 at the box', 'treated shed\n6612']) {
+      expect(await reportNoteRejection({
+        note, text: 'I treated the shed.', catalogRows: CATALOG, db, customerId: 'customer-1',
+      })).toEqual({ reason: 'stored_code' });
+    }
+    // A customer with nothing on file has no code.
+    expect(await readStoredCodes(fileOf({}), 'customer-2')).toEqual([]);
   });
 });
 
