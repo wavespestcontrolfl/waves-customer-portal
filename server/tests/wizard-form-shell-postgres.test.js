@@ -208,6 +208,8 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     // The shared street key drops the fraction; the typed house numbers differ.
     ['is for a house number with a fraction', () => ({ address: '12½ Sample St, Parrish, FL 34219' })],
     ['is for a house number with a fraction written as its own word', () => ({ address: '12 ½ Sample St, Parrish, FL 34219' })],
+    ['is for a house number with a fraction written with small digits', () => ({ address: '12 ¹⁄₂ Sample St, Parrish, FL 34219' })],
+    ['is for a house number with a fraction written with a slash', () => ({ address: '12 1/2 Sample St, Parrish, FL 34219' })],
     // No city or ZIP = no proof that it is the same home.
     ['has an address with no city or ZIP', () => ({ address: '12 Sample St' })],
     ['has no address', () => ({ address: '' })],

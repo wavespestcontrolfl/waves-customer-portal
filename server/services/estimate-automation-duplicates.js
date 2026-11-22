@@ -405,8 +405,9 @@ function untouchedWebFormShells(database, last10, { now = new Date() } = {}) {
     });
 }
 
-// "1/2", or one fraction sign (¼ ½ ¾ and the other single-sign fractions).
-const FRACTION_WORD = /^(?:\d+\/\d+|[\u00BC-\u00BE\u2150-\u215E])$/;
+// A word with a number sign in it and no letter: "1/2", "½", "¹⁄₂". After
+// the house number it is a part of that number, however it is spelled.
+const NUMBER_WORD_WITH_NO_LETTER = /^[^\p{L}]*\p{N}[^\p{L}]*$/u;
 
 function sameDoor(addressA, addressB) {
   // The web form and the wizard do not write a street the same way: a name
@@ -424,11 +425,14 @@ function sameDoor(addressA, addressB) {
   if (!/^\d+[a-z]?\s/.test(a.street)) return false;
   // The key drops what is not a letter or a digit, so "12½" and "12 ½"
   // read as "12". The house numbers as typed must be the same too: the
-  // first word, and a fraction that stands as the next word. The street
-  // name after it stays with the matcher ("12 49th-St" = "12 49th St").
+  // first word, and every number word with no letter that follows it (a
+  // fraction in any spelling). A word with a letter starts the street
+  // name, which stays with the matcher ("12 49th-St" = "12 49th St").
   const house = (parsed) => {
-    const [number = '', next = ''] = String(parsed.streetLine || '').trim().toLowerCase().split(/\s+/);
-    return FRACTION_WORD.test(next) ? `${number} ${next}` : number;
+    const words = String(parsed.streetLine || '').trim().toLowerCase().split(/\s+/);
+    let end = 1;
+    while (end < words.length && NUMBER_WORD_WITH_NO_LETTER.test(words[end])) end += 1;
+    return words.slice(0, end).join(' ');
   };
   if (house(a) !== house(b)) return false;
   const unit = (parsed) => unitLineValueKey(normalizeUnitLine(parsed.unit));
