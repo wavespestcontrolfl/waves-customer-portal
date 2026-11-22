@@ -227,8 +227,12 @@ async function ensurePrimaryCore(customerOrId, { occupancyType, source, lockWait
  * service address. Returns { created, propertyId }.
  */
 // A coordinate pair the picker selected: both finite numbers (or numeric strings) inside the globe; anything else is ignored, never an error
-// (the coordinates are a bonus on the address, not part of what staff typed). Rounded to the column's 7 decimals.
-const coordinateNumber = (value) => (value === null || value === '' || typeof value === 'boolean' ? NaN : Number(value));
+// (the coordinates are a bonus on the address, not part of what staff typed). Rounded to the column's 7 decimals. Only a number or a
+// non-blank string can be a coordinate: Number() reads a blank string, null, false and an empty list as 0, a point on the equator.
+const coordinateNumber = (value) => {
+  if (typeof value === 'number') return value;
+  return typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN;
+};
 const validCoordinates = (lat, lng) => Number.isFinite(coordinateNumber(lat)) && Number.isFinite(coordinateNumber(lng))
   && Math.abs(coordinateNumber(lat)) <= 90 && Math.abs(coordinateNumber(lng)) <= 180 && !(coordinateNumber(lat) === 0 && coordinateNumber(lng) === 0);
 const roundCoordinate = (value) => Math.round(coordinateNumber(value) * 1e7) / 1e7;

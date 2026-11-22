@@ -111,6 +111,8 @@ suite('reclaimed water edits against isolated Postgres', () => {
       ['out of range', { latitude: 127.5, longitude: -82.4 }],
       ['null, zero and booleans', { latitude: 0, longitude: 0 }],
       ['booleans', { latitude: true, longitude: false }],
+      ['a blank latitude string', { latitude: ' ', longitude: -82.4 }],
+      ['an empty longitude string', { latitude: 27.5, longitude: '' }],
     ])('%s: the address is saved without coordinates', async (_label, coords) => {
       const res = await post({ ...next(), ...coords });
       expect(res.status).toBe(201);
