@@ -9889,8 +9889,9 @@ function serviceCadenceMatch(re, text) {
 // this rule reads the transcript (recurringIntentEvidence): the program words,
 // the cadence words, the cadence ladder, the monthly veto and the agent offers
 // all read the same text, so no scan can count a word another scan set aside.
-// Only the plan words go. The clause's other words stay, so a pressure verb or
-// a negation in it still guards what follows.
+// Only the plan words go, each replaced by filler of its own length. The
+// clause's other words stay, so a pressure verb or a negation in it still
+// guards what follows, at the distance it had.
 //
 // The other company: "with another / a different / my current … company", or
 // "with them" right after an enrollment word ("service with them", "signed up
@@ -9902,24 +9903,55 @@ const OTHER_PROVIDER_RE = /\b(?:services?|plans?|contracts?|programs?|accounts?|
 // with them, BUT I want monthly with you"; "…with them AND I want…"; "…with
 // them, CAN YOU come today?".
 const CLAUSE_PIVOT_RE = /(\bbut\b|\b(?:and|so|because) (?=(?:i|we|you|they)\b)|,\s*(?=(?:i|we|can|could|would|will|do)\b))/i;
-// An ask BEFORE the other company in the same clause is an ask of Waves about
-// that plan ("can you do the quarterly service I get with my current
-// company?"): the clause keeps its plan words.
-const ASK_BEFORE_PROVIDER_RE = new RegExp(`${REQUEST_VERB_RE.source}|\\b(?:can|could|would|will|do) (?:you|y'all)\\b`, 'i');
+// Words that turn a clause toward Waves. Who speaks decides which words they
+// are. The CALLER asks ("I want", "I'd like", "can you": "you" is Waves). The
+// AGENT offers ("we can", "our plan", "I can": "you" there is the caller, so
+// an agent's "do you still have a plan with them?" is a question about the
+// other company and no offer).
+//   - Before the other company, they make the clause an ask or an offer about
+//     that plan ("can you do the quarterly service I get with my current
+//     company?"): the clause keeps its plan words.
+//   - After it, they start the Waves part of the clause ("after I cancel my
+//     service with them I'd like monthly with you"): the plan words from there
+//     on are kept.
+const TOWARD_WAVES_RE = Object.freeze({
+  caller: new RegExp(`${REQUEST_VERB_RE.source}|\\b(?:i|we)(?:'d| would) (?:like|love)\\b|\\b(?:can|could|would|will|do) (?:you|y'all)\\b`, 'i'),
+  other: /\b(?:we|our|ours|us|i can|i could|i'll|i will|i'd|let me)\b/i,
+});
 const PLAN_WORDS_RE = new RegExp(`${RECURRING_INTENT_STRONG_RE.source}|${RECURRING_CADENCE_RE.source}`, 'gi');
 
-function isOtherProviderClause(clause) {
+// One clause with the other company's plan words blanked.
+function blankOtherProviderClause(clause, towardWaves) {
   const provider = clause.match(OTHER_PROVIDER_RE);
-  return !!provider && !ASK_BEFORE_PROVIDER_RE.test(clause.slice(0, provider.index));
+  if (!provider || towardWaves.test(clause.slice(0, provider.index))) return clause;
+  const providerEnd = provider.index + provider[0].length;
+  const turn = clause.slice(providerEnd).search(towardWaves);
+  const theirs = turn < 0 ? clause.length : providerEnd + turn;
+  return clause.slice(0, theirs).replace(PLAN_WORDS_RE, (word) => '~'.repeat(word.length)) + clause.slice(theirs);
 }
 
-// The transcript with the plan words of another company's plan blanked. Line
-// breaks, speaker labels and sentence marks are untouched.
-function withoutOtherProviderPlans(transcription) {
-  return String(transcription || '').replace(/[^.?!;\n]+/g, (sentence) => sentence
+// One speaker's text with the other company's plan words blanked. `wraps`: the
+// text is ONE labelled turn, so its line breaks are a wrapped sentence ("…for
+// monthly service" / "with another company"), read as spaces and then put back.
+function blankOtherProviderPlans(text, speaker, wraps) {
+  const towardWaves = TOWARD_WAVES_RE[speaker] || TOWARD_WAVES_RE.caller;
+  const blanked = (wraps ? text.replace(/\n/g, ' ') : text).replace(/[^.?!;\n]+/g, (sentence) => sentence
     .split(CLAUSE_PIVOT_RE)
-    .map((clause) => (isOtherProviderClause(clause) ? clause.replace(PLAN_WORDS_RE, '~') : clause))
+    .map((clause) => blankOtherProviderClause(clause, towardWaves))
     .join(''));
+  // The filler keeps every length, so each line break is back at its own place.
+  return wraps ? blanked.replace(/ /g, (space, at) => (text[at] === '\n' ? '\n' : space)) : blanked;
+}
+
+// The transcript with the plan words of another company's plan blanked, turn
+// by turn. An unlabelled transcript is read as the caller's, line by line (its
+// lines may be two speakers), as callerOnlyText reads it. Lines before the
+// first label belong to no turn; the rule never reads them.
+function withoutOtherProviderPlans(transcription) {
+  const text = String(transcription || '');
+  const turns = speakerTurns(text);
+  if (!turns.length) return blankOtherProviderPlans(text, 'caller', false);
+  return turns.map((turn) => blankOtherProviderPlans(turn.text, turn.speaker, true)).join('\n');
 }
 
 // Transcribers emit curly apostrophes; every guard regex here uses ASCII

@@ -435,6 +435,35 @@ describe('applyRecurringIntentDefault', () => {
     // An ask that comes before the other company is an ask of Waves about that plan.
     expect(applyRecurringIntentDefault(lead(), 'Caller: Can you do the quarterly service I get with my current company?').matched_service)
       .toBe('Quarterly Pest Control Service');
+    // An ask that comes after it, in the same clause, starts the Waves part of the clause.
+    expect(applyRecurringIntentDefault(lead(), "Caller: After I cancel my service with them I'd like monthly with you.").matched_service)
+      .toBe('Monthly Pest Control Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: Once I am done with my current company I want monthly service.').matched_service)
+      .toBe('Monthly Pest Control Service');
+  });
+
+  // Who speaks decides what "you" means. An agent's "do you … with them?" asks the caller about
+  // the other company; only Waves words ("we", "our", "I can") make an agent's clause an offer.
+  test('an agent question about the other company\'s plan is no offer; an agent offer about it is', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Agent: Do you still have a service plan with them?\nCaller: Yes.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+    expect(applyRecurringIntentDefault(lead(), 'Agent: Do you want to keep your monthly service with them?\nCaller: Yes.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+    expect(applyRecurringIntentDefault(lead(), 'Agent: We can match the quarterly plan you have with them.\nCaller: Yes, that works.').matched_service)
+      .toBe('Quarterly Pest Control Service');
+  });
+
+  // A labelled turn can wrap onto unlabelled lines (speakerTurns): the wrap is one sentence.
+  test('a turn wrapped over two lines is read as one sentence, and keeps its line break', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I just signed up for monthly service\nwith another company, I only need this nest gone.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I just signed up for a monthly\nservice with them that I do not even use.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I was with them last year\nand I want quarterly from you now.').matched_service)
+      .toBe('Quarterly Pest Control Service');
+    // An unlabelled transcript is read line by line, as the caller's.
+    expect(applyRecurringIntentDefault(lead(), "I just signed up for a monthly service with them that I don't need. Can someone spray today?").matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
   });
 
   // Every scan of the rule reads the same text: program words, the cadence ladder and the
