@@ -60,6 +60,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     expect(after.unsubscribed_at).toEqual(row.unsubscribed_at);
     expect(after.resubscribed_at).toBeNull();
     expect(after.confirmed_at).toEqual(row.confirmed_at);
+    // The submit is no click: the reader-confirmed stamps stay empty until the link is used.
+    expect(after.reader_confirmed_at).toBeNull();
+    expect(after.reader_confirmed_email).toBeNull();
     expect(after.confirmation_token).not.toBe(row.confirmation_token);
     expect(after.confirmation_sent_at.getTime()).toBeGreaterThan(row.unsubscribed_at.getTime());
 
@@ -71,8 +74,34 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     expect(done.unsubscribed_at).toBeNull();
     expect(done.resubscribed_at).toBeInstanceOf(Date);
     expect(done.confirmed_at.getTime()).toBeGreaterThan(row.confirmed_at.getTime());
+    // The click wrote the reader's proof: one instant with confirmed_at, bound to this address.
+    expect(done.reader_confirmed_at.getTime()).toBe(done.confirmed_at.getTime());
+    expect(done.reader_confirmed_email).toBe(email.toLowerCase());
     // A second click on the same link is the idempotent already-active page.
     expect((await svc.confirmByToken(after.confirmation_token)).action).toBe('already_active');
+  });
+
+  test('a new public signup: the confirm click stamps the reader proof; a trusted add of a pending row stamps confirmed_at and nothing else', async () => {
+    const clicked = addr();
+    expect((await signup(clicked)).action).toBe('confirmation_sent');
+    const pending = await db('newsletter_subscribers').where({ email: clicked }).first();
+    expect(pending.status).toBe('pending');
+    expect(pending.reader_confirmed_at).toBeNull();
+    expect((await svc.confirmByToken(pending.confirmation_token)).action).toBe('confirmed');
+    const done = await reload(pending.id);
+    expect(done.status).toBe('active');
+    expect(done.reader_confirmed_at.getTime()).toBe(done.confirmed_at.getTime());
+    expect(done.reader_confirmed_email).toBe(clicked.toLowerCase());
+
+    const trusted = addr();
+    await signup(trusted);
+    const promoted = await svc.subscribeOrResubscribe({ email: trusted, source: 'admin_add', strict: true, requireConfirmation: false, linkCustomer: false });
+    expect(promoted.action).toBe('confirmed');
+    const row = await db('newsletter_subscribers').where({ email: trusted }).first();
+    expect(row.status).toBe('active');
+    expect(row.confirmed_at).toBeInstanceOf(Date);
+    expect(row.reader_confirmed_at).toBeNull();
+    expect(row.reader_confirmed_email).toBeNull();
   });
 
   test('inactive row: sunset markers and the re-engagement tag survive the submit and go at confirm', async () => {

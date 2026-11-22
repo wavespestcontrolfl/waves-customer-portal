@@ -323,6 +323,45 @@ describe('public signup on an unsubscribed/inactive row keeps the opt-out until 
   });
 });
 
+// reader_confirmed_at / reader_confirmed_email are the reader's own click and nothing else: the trusted
+// ways a row becomes active (a trusted add of a pending row, a trusted resubscribe, a waitlist promotion)
+// write confirmed_at only, so the Waves Pest Insider tool block (pest-insider/tool-block.js) can tell them apart.
+describe('the reader-confirmed stamps are written by the confirm click only', () => {
+  const PENDING_ROW = { ...UNSUB_ROW, id: 'sub-7', email: 'Mixed.Case@Example.com', status: 'pending', confirmed_at: null, unsubscribed_at: null, confirmation_token: 'pend-tok', confirmation_sent_at: new Date() };
+  const stamps = (payload) => Object.keys(payload).filter((k) => k.startsWith('reader_confirmed'));
+
+  test('confirmByToken on a pending row writes both, with one instant, and the row\'s address lowercased', async () => {
+    const queries = useRecordingDb({ firsts: [{ ...PENDING_ROW }, { ...PENDING_ROW, status: 'active' }] });
+    expect((await confirmByToken('pend-tok')).action).toBe('confirmed');
+    const flip = queries.find((r) => r.update && r.update.status === 'active');
+    expect(flip.wheres).toContainEqual({ id: 'sub-7', confirmation_token: 'pend-tok', status: 'pending' });
+    expect(flip.update.confirmed_at).toBeInstanceOf(Date);
+    expect(flip.update.reader_confirmed_at).toBe(flip.update.confirmed_at);
+    expect(flip.update.reader_confirmed_email).toBe('mixed.case@example.com');
+  });
+
+  test('a trusted add of a pending row, a trusted resubscribe and a waitlist promotion write neither', async () => {
+    let queries = useRecordingDb({ firsts: [{ ...PENDING_ROW }, { ...PENDING_ROW, status: 'active' }] });
+    expect((await subscribeOrResubscribe({ email: 'mixed.case@example.com', source: 'admin_add', requireConfirmation: false, linkCustomer: false })).action).toBe('confirmed');
+    let write = queries.find((r) => r.update);
+    expect(write.update.status).toBe('active');
+    expect(write.update.confirmed_at).toBeInstanceOf(Date);
+    expect(stamps(write.update)).toEqual([]);
+
+    queries = useRecordingDb({ firsts: [{ ...UNSUB_ROW }, { ...UNSUB_ROW, status: 'active' }] });
+    expect((await subscribeOrResubscribe({ email: 'reader@example.com', source: 'admin_add', requireConfirmation: false, linkCustomer: false })).action).toBe('resubscribed');
+    write = queries.find((r) => r.update);
+    expect(write.update.status).toBe('active');
+    expect(stamps(write.update)).toEqual([]);
+
+    queries = useRecordingDb({ firsts: [{ ...WAITLIST_ROW }, { ...WAITLIST_ROW, status: 'active' }] });
+    expect((await subscribeOrResubscribe({ email: 'pat@example.com', source: 'admin_manual', requireConfirmation: false, linkCustomer: false, promoteWaitlist: true })).action).toBe('resubscribed');
+    write = queries.find((r) => r.update);
+    expect(write.update.status).toBe('active');
+    expect(stamps(write.update)).toEqual([]);
+  });
+});
+
 describe('resend cooldown on a pending row', () => {
   const PENDING = { ...UNSUB_ROW, status: 'pending', confirmed_at: null, unsubscribed_at: null, confirmation_sent_at: new Date() };
 
@@ -391,6 +430,9 @@ describe('lookupByToken / confirmByToken for a public re-signup token', () => {
     });
     expect(flip.update.confirmed_at).toBeInstanceOf(Date);
     expect(flip.update.resubscribed_at).toBeInstanceOf(Date);
+    // The reader's own click: the proof stamp is the same instant as confirmed_at, bound to the row's address.
+    expect(flip.update.reader_confirmed_at).toBe(flip.update.confirmed_at);
+    expect(flip.update.reader_confirmed_email).toBe(row.email);
     expect(String(flip.update.tags)).toContain('COALESCE(tags');
     // The live-token ordering is enforced in the same statement.
     expect(flip.raws.join(' ')).toContain('confirmation_sent_at > unsubscribed_at');

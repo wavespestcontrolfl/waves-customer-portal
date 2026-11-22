@@ -59,6 +59,9 @@ test('the activation flip CASes on token AND pending status, not id alone', asyn
   expect(result.action).toBe('confirmed');
   const flip = mockNsUpdates.find((u) => u.patch.status === 'active');
   expect(flip.wheres).toContainEqual({ id: 41, confirmation_token: 'tok-old', status: 'pending' });
+  // The click is also the reader's own proof for this address (reader_confirmed_*), one instant with confirmed_at.
+  expect(flip.patch.reader_confirmed_at).toBe(flip.patch.confirmed_at);
+  expect(flip.patch.reader_confirmed_email).toBe('samtypo@example.com');
 });
 
 test('a token rotated between lookup and flip never activates the row', async () => {

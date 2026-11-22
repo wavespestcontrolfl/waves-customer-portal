@@ -551,16 +551,23 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
       const send = idOf(await db('newsletter_sends').insert({ subject: 'Synthetic tool block', html_body: '<p>x</p>', text_body: 'x', status: 'draft', auto_share_social: false }).returning('id'));
       await db('pest_insider_issues').insert({ issue_date: '2099-01-01', status: 'drafted', send_id: send, tool_id: 'acurite-glass-rain-gauge' });
       const tag = randomUUID().slice(0, 8);
-      const sent = new Date('2026-10-01T12:00:00Z');
+      const click = new Date('2026-10-01T12:05:00Z');
       const readers = {};
+      // A row the reader confirmed by link: both stamps and the address, as confirmByToken writes them.
       const add = async (name, over = {}) => {
         const email = `${name}-${tag}@example.invalid`;
-        const id = idOf(await db('newsletter_subscribers').insert({ email, status: 'active', confirmation_sent_at: sent, confirmed_at: new Date(sent.getTime() + 60000), ...over }).returning('id'));
+        const id = idOf(await db('newsletter_subscribers').insert({
+          email, status: 'active', confirmed_at: click, reader_confirmed_at: click, reader_confirmed_email: email, ...over,
+        }).returning('id'));
         readers[name] = { id, email };
       };
       await add('optedin');
-      await add('beehiiv', { confirmation_sent_at: null, source: 'beehiiv_migration' });
-      await add('early', { confirmed_at: new Date(sent.getTime() - 60000) });
+      await add('trusted', { reader_confirmed_at: null, reader_confirmed_email: null });
+      await add('beehiiv', { reader_confirmed_at: null, reader_confirmed_email: null, source: 'beehiiv_migration' });
+      await add('moved', { reader_confirmed_email: 'old-address@example.invalid' });
+      await add('reactivated', { confirmed_at: new Date(click.getTime() + 60000) });
+      await add('optedout', { unsubscribed_at: new Date(click.getTime() + 60000) });
+      await add('sunset', { deactivated_at: new Date(click.getTime() + 60000) });
       await add('gone', { status: 'unsubscribed' });
       await add('staff');
       await db('technicians').insert({ name: 'Fixture Tech', email: `LOGIN-${tag}@example.invalid`, google_email: readers.staff.email.toUpperCase() });
@@ -568,7 +575,7 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
       const batch = await run(Object.values(readers));
       const block = toolBlock(toolById('acurite-glass-rain-gauge')).html;
       expect(Object.fromEntries(Object.entries(readers).map(([name, r]) => [name, batch.forReader(r)[TOOL_TOKEN]]))).toEqual({
-        optedin: block, beehiiv: '', early: '', gone: '', staff: '',
+        optedin: block, trusted: '', beehiiv: '', moved: '', reactivated: '', optedout: '', sunset: '', gone: '', staff: '',
       });
       // The address on the row now must be the address mailed: a changed address gets ''.
       expect((await run([{ id: readers.optedin.id, email: 'old-address@example.invalid' }])).forReader(readers.optedin)[TOOL_TOKEN]).toBe('');

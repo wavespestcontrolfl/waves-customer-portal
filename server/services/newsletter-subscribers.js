@@ -620,12 +620,20 @@ async function confirmByToken(token) {
   // theirs). Zero rows means the token no longer owns the row; re-run the
   // lookup so the caller sees the current truth (the stale link reads
   // 'not_found'; a concurrent same-token confirm reads 'already_active').
+  // The reader's own click also stamps reader_confirmed_at and reader_confirmed_email
+  // (the row's address as read above, lowercased; the token CAS above fences a rotated
+  // row): the only writes of those two columns besides confirmResignupToken. A trusted
+  // add promotes a pending row without them, so the Waves Pest Insider tool block
+  // (pest-insider/tool-block.js) can tell a reader's click from a promotion.
+  const now = new Date();
   const flipped = await db('newsletter_subscribers')
     .where({ id: initial.subscriber.id, confirmation_token: token, status: 'pending' })
     .update({
       status: 'active',
-      confirmed_at: new Date(),
-      updated_at: new Date(),
+      confirmed_at: now,
+      reader_confirmed_at: now,
+      reader_confirmed_email: String(initial.subscriber.email || '').toLowerCase(),
+      updated_at: now,
     });
   if (!flipped) return lookupByToken(token);
   await linkToCustomer(initial.subscriber.email);
@@ -646,6 +654,9 @@ async function confirmResignupToken(token, sub) {
   ).update({
     status: 'active',
     confirmed_at: now,
+    // The reader's click, for the address on the row (see confirmByToken).
+    reader_confirmed_at: now,
+    reader_confirmed_email: String(sub.email || '').toLowerCase(),
     resubscribed_at: now,
     unsubscribed_at: null,
     // Sunset hygiene markers and the win-back tag go on every comeback — the

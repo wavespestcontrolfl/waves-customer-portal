@@ -40,32 +40,63 @@ const neutralizeToolToken = (content) => String(content || '').split(TOOL_TOKEN)
 
 const normalized = (value) => String(value ?? '').trim().toLowerCase();
 
-// Opt-in evidence on the subscriber's row NOW: active, a confirmation email
-// was sent, and the reader's confirm came after it, for the very address the
-// batch mails. The Beehiiv import rows (`beehiiv_migration`,
-// `beehiiv_migration_orphan`) have confirmed_at backfilled and no
-// confirmation_sent_at, so they never qualify: that is intended.
+const stampMs = (value) => (value ? new Date(value).getTime() : NaN);
+
+// Opt-in evidence on the subscriber's row NOW: proof that the READER clicked the
+// confirm link for the very address being mailed. Two stamps are written only by the
+// reader's own confirm click (newsletter-subscribers.js confirmByToken and
+// confirmResignupToken): reader_confirmed_at and reader_confirmed_email (the row's
+// address, lowercased, at that click). confirmation_sent_at and confirmed_at are not
+// proof: a trusted add promotes a pending row (confirmed_at, no click), and the email
+// fanout moves a row to a new address and keeps both stamps. The rule, all of:
+// - the row is active, and its address is the address mailed, and the address the
+//   reader confirmed (a moved row fails here);
+// - confirmed_at is set and reader_confirmed_at is not before it (a later trusted
+//   re-activation writes a later confirmed_at, which voids the click);
+// - no opt-out or sunset stamp (unsubscribed_at, deactivated_at) is at or after the
+//   click (an unreadable stamp fails closed).
+// Nothing is backfilled: history cannot tell a click from a trusted add, so a row has
+// the proof only from its first click after the columns shipped. The Beehiiv import
+// rows (`beehiiv_migration`, `beehiiv_migration_orphan`) never clicked, so they never
+// qualify. One accepted case: a sunset comeback (the reader answers the win-back quiz)
+// clears deactivated_at without a new confirm click. The reader's own click for this
+// address is still the evidence, and sunset is list hygiene, not an opt-out.
 function optedIn(row, subscriber) {
   if (!row || row.status !== 'active') return false;
-  const sent = row.confirmation_sent_at ? new Date(row.confirmation_sent_at).getTime() : NaN;
-  const confirmed = row.confirmed_at ? new Date(row.confirmed_at).getTime() : NaN;
-  return Number.isFinite(sent) && Number.isFinite(confirmed) && confirmed >= sent
-    && normalized(row.email) === normalized(subscriber.email);
+  const confirmedAt = stampMs(row.confirmed_at);
+  const readerAt = stampMs(row.reader_confirmed_at);
+  if (!Number.isFinite(confirmedAt) || !Number.isFinite(readerAt) || readerAt < confirmedAt) return false;
+  const address = normalized(subscriber.email);
+  if (!address || normalized(row.email) !== address || normalized(row.reader_confirmed_email) !== address) return false;
+  return [row.unsubscribed_at, row.deactivated_at].every((stamp) => !stamp || stampMs(stamp) < readerAt);
 }
 
-// Waves addresses: the internal domains and allowlist, the proof and approver
-// addresses (newsletter-proof.js), and the login email of every staff user
-// (technicians: `email`, and `google_email` for the Google sign-in). Nobody at
-// Waves may buy through these links, and the owner's copies must not carry
-// them. A family member's address cannot be told from data: such a reader who
-// opted in gets the block, and the owner keeps that rule by not buying.
-async function wavesAddresses(db) {
+// A mailbox as one key: a Google address is its mailbox identity (dots and the +tag
+// dropped, googlemail.com read as gmail.com: customer-comms-lock.js
+// googleMailboxIdentity), every other address is itself, trimmed and lowercased. A
+// plus tag on a non-Google address is a different mailbox. Required here, when it
+// runs: that module loads nothing at the top.
+function mailboxKey(value) {
+  const address = normalized(value);
+  return address ? (require('../../utils/customer-comms-lock').googleMailboxIdentity(address) || address) : '';
+}
+
+// Waves addresses as mailbox keys: the internal allowlist (internal-email-recipients.js),
+// the proof and approver addresses (newsletter-proof.js), and the login email of every
+// staff user (technicians: `email`, and `google_email` for the Google sign-in). Nobody
+// at Waves may buy through these links, and the owner's copies must not carry them. The
+// internal domains are matched by isInternalEmailRecipient. A family member's address
+// cannot be told from data: such a reader who opted in gets the block, and the owner
+// keeps that rule by not buying.
+async function wavesMailboxes(db) {
   const proof = require('../newsletter-proof');
+  const { internalEmailAllowlist } = require('../../utils/internal-email-recipients');
   const staff = await db('technicians').select('email', 'google_email');
   return new Set([
+    ...internalEmailAllowlist(),
     proof.proofRecipient(), proof.syncedApprovalMailbox(), ...proof.approvalSenders(),
     ...staff.flatMap((s) => [s.email, s.google_email]),
-  ].map(normalized).filter(Boolean));
+  ].map(mailboxKey).filter(Boolean));
 }
 
 // The readers of this batch who may have the block, and the block. A thrown
@@ -81,13 +112,13 @@ async function readersWithBlock({ send, subscribers, planned, db }) {
   if (!tool) return none;
   const [rows, waves] = await Promise.all([
     db('newsletter_subscribers').whereIn('id', subscribers.map((s) => s.id))
-      .select('id', 'email', 'status', 'confirmation_sent_at', 'confirmed_at'),
-    wavesAddresses(db),
+      .select('id', 'email', 'status', 'confirmed_at', 'reader_confirmed_at', 'reader_confirmed_email', 'unsubscribed_at', 'deactivated_at'),
+    wavesMailboxes(db),
   ]);
   const { isInternalEmailRecipient } = require('../../utils/internal-email-recipients');
   const byId = new Map(rows.map((r) => [r.id, r]));
   const ids = new Set(subscribers
-    .filter((s) => optedIn(byId.get(s.id), s) && !isInternalEmailRecipient(s.email) && !waves.has(normalized(s.email)))
+    .filter((s) => optedIn(byId.get(s.id), s) && !isInternalEmailRecipient(s.email) && !waves.has(mailboxKey(s.email)))
     .map((s) => s.id));
   if (!ids.size) return none;
   // Checked once for the batch, before any reader gets it.
@@ -108,8 +139,8 @@ async function readersWithBlock({ send, subscribers, planned, db }) {
  *    applies to every part, and the block is HTML only);
  * 2. a Waves Pest Insider send with a planned audience, GATE_PEST_INSIDER_AUTO_SEND on;
  * 3. the issue row of this send (pest_insider_issues.send_id) names a tool that is usable now;
- * 4. the reader has opt-in evidence now, for the address mailed (optedIn);
- * 5. the reader's address is not a Waves address (wavesAddresses);
+ * 4. the reader's own confirm click is on the row now, for the address mailed (optedIn);
+ * 5. the reader's mailbox is not a Waves mailbox (wavesMailboxes: Gmail aliases count as one mailbox);
  * and '' for any other. A read that throws, or a block the send check refuses,
  * logs one warning and gives every reader ''. Never throws.
  * @param {{ send: object, html: string, text?: string, subscribers: {id: *, email: string}[], planned: boolean, db: Function }} batch

@@ -22,15 +22,24 @@ const { POST_URLS } = require('../services/pest-insider/posts');
 const GAUGE = 'acurite-glass-rain-gauge';
 const SEND = { id: 'send-1', newsletter_type: 'pest-insider-monthly' };
 const HTML = `<p>body</p>\n${TOOL_TOKEN}`;
-const SENT = new Date('2026-10-01T12:00:00Z');
-const CONFIRMED = new Date('2026-10-01T12:05:00Z');
+// The reader's confirm click writes confirmed_at and reader_confirmed_at with one value.
+const CLICK = new Date('2026-10-01T12:05:00Z');
+const EARLIER = new Date(CLICK.getTime() - 60000);
+const LATER = new Date(CLICK.getTime() + 60000);
 const GATE = 'GATE_PEST_INSIDER_AUTO_SEND';
 const ENV = ['NEWSLETTER_PROOF_EMAIL', 'NEWSLETTER_PROOF_APPROVERS', 'GMAIL_USER_EMAIL', 'INTERNAL_EMAIL_ALLOWLIST', 'ADMIN_EMAIL_ALLOWLIST', GATE];
 const envBefore = Object.fromEntries(ENV.map((k) => [k, process.env[k]]));
 
 const sub = (id, email = `reader${id}@example.net`) => ({ id, email });
-// A subscriber row with opt-in evidence, or with the given change.
-const row = (id, over = {}) => ({ id, email: `reader${id}@example.net`, status: 'active', confirmation_sent_at: SENT, confirmed_at: CONFIRMED, ...over });
+// A subscriber row the reader confirmed by link for its own address (the click wrote both
+// stamps and the address), or with the given change.
+const row = (id, over = {}) => {
+  const email = over.email ?? `reader${id}@example.net`;
+  return {
+    id, email, status: 'active', confirmed_at: CLICK, reader_confirmed_at: CLICK, reader_confirmed_email: email.trim().toLowerCase(),
+    unsubscribed_at: null, deactivated_at: null, ...over,
+  };
+};
 
 // A fake knex: `db(table)` answers the three reads the helper makes. `failOn` names a table whose read throws.
 function fakeDb(opts = {}) {
@@ -123,15 +132,20 @@ describe('toolBlockForBatch: the key', () => {
     expect(mockWarn).not.toHaveBeenCalled();
   });
 
-  describe('rule 4: opt-in evidence on the subscriber\'s row, now, for the address mailed', () => {
-    const SOURCE = { source: 'beehiiv_migration' };
+  describe('rule 4: the reader\'s own confirm click is on the row now, for the address mailed', () => {
     test.each([
-      ['a Beehiiv import row: confirmed_at backfilled, no confirmation email sent', { confirmation_sent_at: null, ...SOURCE }],
-      ['a Beehiiv orphan import row', { confirmation_sent_at: null, source: 'beehiiv_migration_orphan' }],
-      ['a confirm that came before its confirmation email', { confirmed_at: new Date(SENT.getTime() - 1000) }],
-      ['no confirm', { confirmed_at: null }],
-      ['no date at all', { confirmed_at: null, confirmation_sent_at: null }],
-      ['an unreadable date', { confirmed_at: 'not a date' }],
+      ['a trusted add of a pending row: no reader click on record', { reader_confirmed_at: null, reader_confirmed_email: null }],
+      ['a Beehiiv import row: confirmed_at backfilled, no click', { reader_confirmed_at: null, reader_confirmed_email: null, source: 'beehiiv_migration' }],
+      ['a Beehiiv orphan import row', { reader_confirmed_at: null, reader_confirmed_email: null, source: 'beehiiv_migration_orphan' }],
+      ['a row moved to another address (the click was for the old one)', { reader_confirmed_email: 'old-address@example.net' }],
+      ['a click with no address recorded', { reader_confirmed_email: null }],
+      ['a later trusted re-activation (confirmed_at after the click)', { confirmed_at: LATER }],
+      ['no confirmed_at', { confirmed_at: null }],
+      ['an unsubscribe after the click', { unsubscribed_at: LATER }],
+      ['an unsubscribe at the moment of the click', { unsubscribed_at: CLICK }],
+      ['a sunset deactivation after the click', { deactivated_at: LATER }],
+      ['an unreadable date', { reader_confirmed_at: 'not a date' }],
+      ['an unreadable opt-out stamp', { unsubscribed_at: 'not a date' }],
       ['a subscriber who is no longer active', { status: 'unsubscribed' }],
       ['a pending subscriber', { status: 'pending' }],
       ['an address that changed since the batch was selected', { email: 'changed@example.net' }],
@@ -143,12 +157,19 @@ describe('toolBlockForBatch: the key', () => {
       expect(run2.forReader(sub(2))).toEqual(GOT);
     });
 
-    test('a confirm at the same moment as its email counts, the address compares in any letter case and spacing, and a reader with no row gets \'\'', async () => {
-      const db = fakeDb({ rows: [row(1, { confirmed_at: SENT }), row(2, { email: ' READER2@Example.NET ' })] });
-      const r = await run({ subscribers: [sub(1), sub(2), sub(3)], db });
+    test('a reader who confirmed by link for this address gets the block, also after an older opt-out or deactivation and with a click after confirmed_at', async () => {
+      const db = fakeDb({ rows: [
+        row(1),
+        row(2, { unsubscribed_at: EARLIER, deactivated_at: EARLIER, confirmed_at: EARLIER }),
+        row(3, { email: ' READER3@Example.NET ' }),
+      ] });
+      const r = await run({ subscribers: [sub(1), sub(2), sub(3), sub(4)], db });
       expect(r.forReader(sub(1))).toEqual(GOT);
       expect(r.forReader(sub(2))).toEqual(GOT);
-      expect(r.forReader(sub(3))).toEqual(NOT);
+      // The address compares in any letter case and spacing.
+      expect(r.forReader(sub(3))).toEqual(GOT);
+      // A reader with no row gets ''.
+      expect(r.forReader(sub(4))).toEqual(NOT);
       // The evidence is read for the batch's own subscriber ids, in one query.
       expect(db.mock.calls.filter(([t]) => t === 'newsletter_subscribers')).toHaveLength(1);
     });
@@ -181,6 +202,48 @@ describe('toolBlockForBatch: the key', () => {
       expect(r.forReader({ id: 1, email: bad.email })).toEqual(NOT);
       expect(r.forReader(sub(2))).toEqual(GOT);
       expect(db.mock.calls.filter(([t]) => t === 'technicians')).toHaveLength(1);
+    });
+  });
+
+  describe('rule 5: a Gmail alias of a Waves address is the same mailbox', () => {
+    const cases = [
+      ['a staff login (technicians.email)', 'staff', {}],
+      ['a staff Google sign-in (technicians.google_email)', 'google', {}],
+      ['the proof address', 'proof', { NEWSLETTER_PROOF_EMAIL: 'jdoe@gmail.com' }],
+      ['the synced approval mailbox', 'proof', { GMAIL_USER_EMAIL: 'jdoe@gmail.com' }],
+      ['an approver address', 'proof', { NEWSLETTER_PROOF_APPROVERS: 'jdoe@gmail.com' }],
+      ['an address on the internal allowlist', 'proof', { INTERNAL_EMAIL_ALLOWLIST: 'jdoe@gmail.com' }],
+    ];
+    const staffFor = (kind) => (kind === 'staff' ? [{ email: 'jdoe@gmail.com', google_email: null }]
+      : kind === 'google' ? [{ email: null, google_email: 'jdoe@gmail.com' }] : []);
+    test.each(cases)('%s: a dotted, plus-tagged or googlemail.com spelling gets \'\'', async (_label, kind, env) => {
+      Object.assign(process.env, env);
+      for (const alias of ['j.doe+x@googlemail.com', 'J.Doe@gmail.com', 'jdoe+news@gmail.com', ' jdoe@googlemail.com ']) {
+        const bad = row(1, { email: alias });
+        const db = fakeDb({ rows: [bad, row(2)], staff: staffFor(kind) });
+        const r = await run({ subscribers: [{ id: 1, email: alias }, sub(2)], db });
+        expect(r.forReader({ id: 1, email: alias })).toEqual(NOT);
+        expect(r.forReader(sub(2))).toEqual(GOT);
+      }
+    });
+
+    test('the alias on the Waves side counts too: a staff login j.doe+x@googlemail.com blocks jdoe@gmail.com', async () => {
+      const bad = row(1, { email: 'jdoe@gmail.com' });
+      const db = fakeDb({ rows: [bad, row(2)], staff: [{ email: 'j.doe+x@googlemail.com', google_email: null }] });
+      const r = await run({ subscribers: [{ id: 1, email: bad.email }, sub(2)], db });
+      expect(r.forReader({ id: 1, email: bad.email })).toEqual(NOT);
+      expect(r.forReader(sub(2))).toEqual(GOT);
+    });
+
+    test('a non-Gmail address is an exact match: a plus tag or dots make another mailbox', async () => {
+      const staff = [{ email: 'jdoe@example.net', google_email: null }];
+      const aliases = ['jdoe+x@example.net', 'j.doe@example.net'];
+      const db = fakeDb({ rows: aliases.map((email, i) => row(i + 1, { email })), staff });
+      const r = await run({ subscribers: aliases.map((email, i) => ({ id: i + 1, email })), db });
+      for (const [i] of aliases.entries()) expect(r.forReader({ id: i + 1 })).toEqual(GOT);
+      // The exact address is still blocked.
+      const exact = fakeDb({ rows: [row(1, { email: 'jdoe@example.net' })], staff });
+      expect((await run({ subscribers: [{ id: 1, email: 'jdoe@example.net' }], db: exact })).forReader({ id: 1 })).toEqual(NOT);
     });
   });
 
