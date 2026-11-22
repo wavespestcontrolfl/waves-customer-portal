@@ -14,9 +14,9 @@
  * the permit or the parcel may appear later; that goes on while its day is one of the days a run reads.
  *
  * One deed that cannot be judged or saved does not stop the deeds after it: it is counted, and the run throws at
- * its end. The run also throws at its end when a day could not be read or the parcel map did not answer, so a
- * site that is away for days is seen before its deeds leave the read. The log line and the thrown error hold
- * counts, dates and codes only, never a name or an address.
+ * its end. The run also throws at its end when a day could not be read, the parcel map did not answer, or a deed
+ * was left unjudged on the last day a run reads it, so a site that is away for days is seen before its deeds
+ * leave the read. The log line and the thrown error hold counts, dates and codes only, never a name or an address.
  */
 
 const crypto = require('node:crypto');
@@ -60,6 +60,9 @@ const spaced = (name) => String(name || '').toUpperCase().replace(/[^A-Z0-9]+/g,
 
 const isCompanyName = (name) => COMPANY_RE.test(spaced(name));
 const isTrustName = (name) => TRUST_RE.test(spaced(name));
+// A builder is a company that does not sell as a trust or a trustee. A person's capacity can hold a company word
+// ("TESTER ALEX CO-TRUSTEE" reads as "CO TRUSTEE"), and so can a trust's name ("TESTER HOME TRUST").
+const isBuilderName = (name) => isCompanyName(name) && !isTrustName(name);
 
 function buyerKind(toNames) {
   if (toNames.some(isCompanyName)) return 'company';
@@ -73,6 +76,7 @@ function candidateFromRow(row) {
   if (!row.from.length || !row.to.length || !row.description) return { skip: 'not_filled' };
   if (row.consideration === null || row.consideration < MIN_PRICE) return { skip: 'low_price' };
   if (!row.from.every(isCompanyName)) return { skip: 'person_seller' };
+  if (!row.from.every(isBuilderName)) return { skip: 'trust_seller' };
   return {
     candidate: {
       instrument: row.instrument,
@@ -248,7 +252,7 @@ function whyNotDue(existing, nowMs) {
 
 const needsMapQuery = (candidate) => candidate.buyerKind === 'person' && parseLegal(candidate.description) !== null;
 
-async function evaluateAndSave(candidates, d, summary) {
+async function evaluateAndSave(candidates, d, summary, readTomorrow) {
   const state = { queries: 0, failStreak: 0, errorStreak: 0 };
   // Counts and spaces the map queries, so the cap and the failure stop hold for any caller of evaluate.
   const countedDeps = {
@@ -272,6 +276,8 @@ async function evaluateAndSave(candidates, d, summary) {
     // Several errors in a row that are not a deed's own mean the database is away: every deed left waits.
     if (state.errorStreak >= MAX_ERRORS_IN_A_ROW || (mapStopped && needsMapQuery(candidate))) {
       bump(summary.skipped, 'waits_for_next_run'); // not saved: the next run asks again
+      // ...unless no later run reads its day: then the deed is lost, and the run must not end as a good run.
+      if (!readTomorrow.has(candidate.date)) bump(summary.leftOnLastDay, candidate.date);
       continue;
     }
     try {
@@ -305,7 +311,7 @@ async function runNewHomeList({ mode = 'night', now = Date.now, deps } = {}) {
   const days = daysToRead(mode, nowMs);
   const summary = {
     mode, days: days.length, daysRead: 0, daysFailed: 0, deeds: 0, skipped: {}, saved: {}, savedByReason: {}, errors: {},
-    keptAnswers: 0, mapQueries: 0, mapFailuresInARow: 0,
+    keptAnswers: 0, mapQueries: 0, mapFailuresInARow: 0, leftOnLastDay: {},
   };
   const { rows, failures } = await readDays(days, d, summary);
   const candidates = collectCandidates(rows, summary);
@@ -331,7 +337,9 @@ async function runNewHomeList({ mode = 'night', now = Date.now, deps } = {}) {
   // The map-query budget goes first to what cannot wait: a deed never judged before a retry, and an older day
   // before a newer one (the oldest day is the first to leave the read). The page order stays inside a day.
   due.sort((a, b) => (a.retry - b.retry) || a.candidate.date.localeCompare(b.candidate.date));
-  await evaluateAndSave(due.map((item) => item.candidate), d, summary);
+  // A day is on its last read when tomorrow's night run no longer reads it (the noon run reads less).
+  const readTomorrow = new Set(daysToRead('night', addETDays(new Date(nowMs), 1)));
+  await evaluateAndSave(due.map((item) => item.candidate), d, summary, readTomorrow);
   logger.info(`Mail new-home list (${mode}): ${JSON.stringify(summary)}`);
   const problems = [];
   if (failures.length) problems.push(`${failures.length} of ${days.length} days failed (${failures.join('; ')})`);
@@ -339,6 +347,11 @@ async function runNewHomeList({ mode = 'night', now = Date.now, deps } = {}) {
   if (errors.length) {
     const count = errors.reduce((sum, [, n]) => sum + n, 0);
     problems.push(`${count} deeds could not be judged or saved (${errors.map(([code, n]) => `${code}: ${n}`).join('; ')})`);
+  }
+  const left = Object.entries(summary.leftOnLastDay);
+  if (left.length) {
+    const count = left.reduce((sum, [, n]) => sum + n, 0);
+    problems.push(`${count} deeds were not judged on the last day a run reads them (${left.map(([day, n]) => `${day}: ${n}`).join('; ')})`);
   }
   // The parcel map did not answer: the stop tripped, or every query of this run failed. Its deeds are stored as
   // unmatched / lookup_failed and tried again, but a run that learned nothing from the map is not a good run.

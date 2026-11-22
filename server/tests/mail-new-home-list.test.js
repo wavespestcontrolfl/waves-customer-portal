@@ -68,6 +68,20 @@ describe('company endings written with dots or with spaces', () => {
   });
 });
 
+describe('a seller that reads as a trust or a trustee is not a builder', () => {
+  test.each([
+    [['TESTER ALEX CO-TRUSTEE']], [['TESTER ALEX CO TRUSTEE']], [['TESTER HOME TRUST']], [['SAMPLE BANK NA TRUSTEE']],
+    [['SAMPLE HOMES LLC', 'TESTER ALEX CO-TRUSTEE']], [['TESTER PROPERTIES REVOCABLE TRUST']],
+  ])('%j is skipped as trust_seller', (from) => {
+    expect(candidateFromRow(deed({ from }))).toEqual({ skip: 'trust_seller' });
+  });
+  test('a company with no trust word is still a builder, and a person is still a person seller', () => {
+    expect(candidateFromRow(deed({ from: ['SAMPLE HOMES LLC', 'EXAMPLE BUILDERS CO'] })).candidate.sellerNames).toHaveLength(2);
+    expect(candidateFromRow(deed({ from: ['TESTER ALEX J'] }))).toEqual({ skip: 'person_seller' });
+    expect(candidateFromRow(deed({ from: ['TESTER ALEX J TRUSTEE'] }))).toEqual({ skip: 'person_seller' });
+  });
+});
+
 describe('candidateFromRow', () => {
   test('a builder-to-person deed is a candidate with its buyer kind', () => {
     expect(candidateFromRow(deed())).toEqual({
@@ -336,6 +350,26 @@ describe('runNewHomeList', () => {
     expect(order).not.toContain('202699100700');
     // 120 queries: the 2 of the oldest day and 118 of the newest. Left for the next run: 2 new deeds and the retry.
     expect(summary.skipped.waits_for_next_run).toBe(3);
+  });
+
+  test('a deed left unjudged on the last day a run reads it makes the run throw, with the day and a count', async () => {
+    // Tuesday night reads 17, 16, 13 and 12 November; Wednesday night no longer reads the 12th.
+    const oldest = Array.from({ length: MAX_PARCEL_QUERIES + 5 }, (_, i) => person(i + 1, { date: '2026-11-12' }));
+    const deps = makeDeps({ rowsByDay: { '2026-11-12': oldest, '2026-11-17': [person(800), person(801)] } });
+    let thrown;
+    await run(deps).catch((err) => { thrown = err; });
+    expect(thrown.message).toBe('Mail new-home list: 5 deeds were not judged on the last day a run reads them (2026-11-12: 5)');
+    expect(deps.saveProspect).toHaveBeenCalledTimes(MAX_PARCEL_QUERIES);
+    // The two deeds of the 17th wait too, but a later run reads their day: they are not in the error.
+    expect(loggedSummary()).toMatchObject({ skipped: { waits_for_next_run: 7 }, leftOnLastDay: { '2026-11-12': 5 } });
+  });
+
+  test('a noon run that leaves deeds for later does not throw: the night run reads their days', async () => {
+    const many = Array.from({ length: MAX_PARCEL_QUERIES + 3 }, (_, i) => person(i + 1, { date: '2026-11-16' }));
+    const deps = makeDeps({ rowsByDay: { '2026-11-16': many } });
+    const summary = await run(deps, 'noon');
+    expect(summary.skipped.waits_for_next_run).toBe(3);
+    expect(summary.leftOnLastDay).toEqual({});
   });
 
   test('five map failures in a row stop the queries, leave the rest unsaved, and the run throws at its end', async () => {
