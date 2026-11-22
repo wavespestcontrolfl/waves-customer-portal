@@ -8,21 +8,23 @@
  * 30 days. The offer email goes out from day 3 after the job with the plan price, and one reminder on day 21.
  *
  * This file is the first step, and it sends NO customer anything. Its purpose is the WORDS. Each morning it
- * reads the jobs whose service was done 3 to 14 days ago, keeps the customers the offer is for (a live customer, by the
- * shared rule in customer-stages.js, with an email, who has not opted out: the offer's own opt-outs, and the
- * email division's standing answers, which are the staff do-not-contact list, the suppressions and the email
- * switch), prices the plan through the start offer pricing (service-report/cross-sell.js buildStartOffer:
- * saved property data only, no paid lookup, the price settings read whole for each price; it also answers
- * "has a plan" and "not a home the app may price"), and emails one sample of each email to the office inbox as
- * a template-library TEST send. It saves no estimate and writes no row of its own: the sample's idempotency
- * key in email_messages is the once-per-job record. It raises one office item, and only for an outage: a
- * morning on which the price settings stopped every price (reportPriceSettings).
+ * reads the jobs whose service was done 3 to 14 days ago, judges each customer by the offer's send rules,
+ * prices the plan through the start offer pricing (service-report/cross-sell.js buildStartOffer: saved property
+ * data only, no paid lookup, the price settings read whole for each price; it also answers "has a plan" and
+ * "not a home the app may price"), and emails one sample of each email to the office inbox as a template-library
+ * TEST send. It saves no estimate and writes no row of its own: the sample's idempotency key in email_messages
+ * is the once-per-job record. It raises one office item, and only for an outage: a morning on which the price
+ * settings stopped every price (reportPriceSettings).
  *
- * It does NOT judge the state of the account on the day: another visit booked or done since the job, the
- * job's invoice and an open balance, a review ask on its way, a complaint or an open request, an estimate
- * that is open, and the email division's checks for the day of the send (the same-day cap, recent human
- * contact). Those send rules, the real estimate and the customer email are the next step. So a sample does
- * not say that this customer will get the offer.
+ * The send rules (SEND_RULES, in order) hold the job when any of these is true: another visit is booked, or was
+ * done after the job; the customer is not a live customer with an email, or is a test contact; the customer
+ * opted out of the offer; the job has no paid invoice of its own, or any money is owed; a review ask is on its
+ * way or was sent in the last 72 hours; a low rating or a complaint came in since the job, or a service request
+ * is open; an estimate is open or on its way; or the email division says no to the email (staff do-not-contact
+ * list, suppressions, the email switch, the same-day cap, recent human contact). A job that passes the rules
+ * and whose home the app can price, with a setup fee above $0 and a plan visit price below the job's price,
+ * gets its two samples. So a sample means that this customer would get the offer today. The real estimate and
+ * the customer email are the next step.
  *
  * An answer of "not today" is not final. The job is read again each morning until day 14, so a home whose
  * property data is saved on day 5 gets its sample on day 5.
@@ -30,12 +32,16 @@
  * The days count from the day the service was DONE, which the visit's service record states. A visit can be
  * done days after its scheduled day, and a visit closed without the service (inspection only, declined by the
  * customer, incomplete) keeps status 'completed'. So a job is due only when a service record says the service
- * was performed, and the emails name that day.
+ * was performed. A cockroach job often includes one free follow-up visit (a scheduled_services row with
+ * followup_included, linked to the job). When that follow-up was DONE, the days count from its performed day:
+ * the window, the day the emails name, the 30 days of the offer and the next visit window (the offer day).
+ * A follow-up that is still open keeps the offer waiting (anotherVisit). A follow-up that was cancelled, or
+ * closed without the service, does not count: the days count from the job.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyString, formatDateOnly } = require('../utils/date-only');
 const { greetingFirstName } = require('../utils/greeting-first-name');
 const { portalUrl } = require('../utils/portal-url');
@@ -55,6 +61,22 @@ const NEXT_VISIT_FROM_DAYS = 77;
 const NEXT_VISIT_TO_DAYS = 91;
 // The due jobs are read a page at a time, so one read stays small and no job is cut off.
 const PAGE_SIZE = 50;
+
+// The executor's APPOINTMENT_CLOSED_STATUSES. A 'rescheduled' row is in that list, and it is judged by its day:
+// see PARKED_VISIT_STATUS. A row with no status is not closed: the column's default is pending.
+const CLOSED_VISIT_STATUSES = ['cancelled', 'completed', 'skipped', 'no_show', 'rescheduled'];
+// A visit parked for a new day keeps its old day until the office moves it. Dated today or later, it is still
+// to come. Once its day has passed it is history: a booking that was cancelled and made again leaves such a
+// row behind for good (customer-properties.js propertyRemovalDependents reads it the same way). A customer's
+// own request to move a visit stays an open service request until the office closes it, and that is a hold of
+// its own (open_request).
+const PARKED_VISIT_STATUS = 'rescheduled';
+// An estimate on the scheduler's send queue (scheduler.js claims it at its time): on its way, not yet open.
+const SCHEDULED_ESTIMATE_STATUS = 'scheduled';
+// Billing Recovery's record that an invoice made for other work also covers a visit (admin-billing-recovery.js).
+const BILLED_ELSEWHERE = 'billed_elsewhere';
+// The review flow's promoter line (review-request.js): 7 or more goes to Google. Below it, no offer.
+const PROMOTER_RATING = 7;
 
 const OFFER_TEMPLATE = 'nurture.plan_offer';
 const REMINDER_TEMPLATE = 'nurture.plan_offer_reminder';
@@ -80,6 +102,19 @@ function defaultDeps() {
     buildStartOffer: require('./service-report/cross-sell').buildStartOffer,
     channelFor: require('./email-division/eligibility').channelFor,
     eligibleForEmail: require('./email-division/eligibility').eligibleForEmail,
+    reviewAskOnItsWay: (customerId) => require('./review-request').reviewAskOnItsWay(customerId),
+    lastDeliveredAskAt: require('./review-ask-history').lastDeliveredAskAt,
+    lastManualAskAt: require('./review-ask-history').lastManualAskAt,
+    askSpacingMs: require('./review-ask-history').ASK_SPACING_MS,
+    liveEstimateStatuses: require('./pricing-authority-gate').LINK_VISIBLE_LIVE_STATUSES,
+    repricePendingAbsentSql: require('../utils/estimate-claim-sql').REPRICE_PENDING_ABSENT_SQL,
+    openBalanceExists: require('./open-balance').openBalanceExists,
+    partiallyPaidStatus: require('./invoice-helpers').PARTIALLY_PAID_STATUS,
+    isUncountedPartialDue: require('./invoice-helpers').isUncountedPartialDueInvoice,
+    invoicePayerOwnership: require('./invoice-payer-ownership').invoicePayerOwnership,
+    itemizedMemberIds: require('./estimate-first-application-invoice').itemizedMemberIdsFromInvoiceLines,
+    combinedFirstInvoiceOf: (job, database) => require('./estimate-first-application-invoice').readFirstApplicationStamp(job, database),
+    openRequestTerminalStatuses: require('./estimate-add-service-request').OPEN_REQUEST_TERMINAL_STATUSES,
     isInternalTestContact: require('./internal-test-customers').isInternalTestContact,
     activeSuppressionsFor: require('./email-template-library').activeSuppressionsFor,
     sendTemplate: require('./email-template-library').sendTemplate,
@@ -107,17 +142,40 @@ function sampleKey(templateKey, jobId) {
 // visit has two. The record must be of the visit's own customer, as in visit-completion-packets.js: a record of
 // another customer that names this visit proves nothing here. A visit with no such record has no day, so it is
 // never due: the offer says "that job is plan visit one", and only a record of the service proves there was one.
+const PERFORMED_RECORD_SQL = `r.customer_id = %VISIT%.customer_id
+      AND r.status = 'completed'
+      AND COALESCE(r.structured_notes->>'visitOutcome', '') NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})`;
 const PERFORMED_DAY_JOIN = `JOIN LATERAL (
     SELECT MAX(r.service_date) AS service_day
     FROM service_records r
     WHERE r.scheduled_service_id = s.id
-      AND r.customer_id = s.customer_id
-      AND r.status = 'completed'
-      AND COALESCE(r.structured_notes->>'visitOutcome', '') NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})
+      AND ${PERFORMED_RECORD_SQL.replace(/%VISIT%/g, 's')}
   ) AS done ON TRUE`;
 
-// One page of the completed one-time jobs whose service was done FIRST_DAY to LAST_DAY days ago (ET), oldest
-// first. `after` is the last job of the page before: the next page starts behind it in the same (day, id) order.
+// The day the job's included follow-up was done, if it was: a follow-up row of the same customer, linked to the
+// job by followup_source_service_id or parent_service_id (package-followup-booking.js sets both), closed
+// 'completed' with a service record that says the service was performed (the same test as PERFORMED_DAY_JOIN).
+// A cancelled follow-up, one closed without the service, one still open and a row of another customer or of
+// another job give no day. An open follow-up holds the job in anotherVisit, not here.
+const FOLLOWUP_DAY_JOIN = `LEFT JOIN LATERAL (
+    SELECT MAX(r.service_date) AS service_day
+    FROM scheduled_services f
+    JOIN service_records r ON r.scheduled_service_id = f.id
+    WHERE f.customer_id = s.customer_id
+      AND f.followup_included IS TRUE
+      AND (f.followup_source_service_id = s.id OR f.parent_service_id = s.id)
+      AND f.status = 'completed'
+      AND ${PERFORMED_RECORD_SQL.replace(/%VISIT%/g, 'f')}
+  ) AS follow ON TRUE`;
+
+// The offer day: the day the days count from. The follow-up's performed day when the job's included follow-up
+// was done, else the job's own performed day. GREATEST skips a NULL, so a job with no performed record must be
+// kept out by its own test (done.service_day IS NOT NULL in dueJobsPage), never by this expression.
+const OFFER_DAY_SQL = 'GREATEST(done.service_day, COALESCE(follow.service_day, done.service_day))';
+
+// One page of the completed one-time jobs whose offer day was FIRST_DAY to LAST_DAY days ago (ET), oldest first.
+// `after` is the last job of the page before: the next page starts behind it in the same (offer day, id) order.
+// The row's service_day is the offer day; job_day is the day the job itself was done.
 // The catalog identity is the row's own snapshot, else its services row: a text label alone is never a match.
 // One-time is read from the row by the repository's rule (the reverse of rate-review's PLAN_ROW_SQL, plus no
 // series parent): never a plan visit, a series extra, a free re-service or an included follow-up. A one-time
@@ -126,22 +184,53 @@ function dueJobsPage(database, today, after) {
   const page = database('scheduled_services as s')
     .leftJoin('services as sv', 's.service_id', 'sv.id')
     .joinRaw(PERFORMED_DAY_JOIN, [...NON_PERFORMED_VISIT_OUTCOMES])
+    .joinRaw(FOLLOWUP_DAY_JOIN, [...NON_PERFORMED_VISIT_OUTCOMES])
     .where('s.status', 'completed')
-    .whereBetween('done.service_day', [shiftDay(today, -LAST_DAY), shiftDay(today, -FIRST_DAY)])
+    .whereRaw('done.service_day IS NOT NULL')
+    .whereRaw(`${OFFER_DAY_SQL} BETWEEN ?::date AND ?::date`, [shiftDay(today, -LAST_DAY), shiftDay(today, -FIRST_DAY)])
     .whereIn(database.raw('COALESCE(s.service_key_snapshot, sv.service_key)'), JOB_SERVICE_KEYS)
     .whereRaw('s.is_recurring IS DISTINCT FROM true')
     .whereNull('s.recurring_parent_id')
     .whereRaw("COALESCE(s.recurring_pattern, '') IN ('', 'one_time')")
     .whereRaw('s.is_callback IS DISTINCT FROM true')
     .whereRaw('s.followup_included IS DISTINCT FROM true')
-    .orderBy('done.service_day', 'asc')
+    .orderByRaw(`${OFFER_DAY_SQL} ASC`)
     .orderBy('s.id', 'asc')
     .limit(PAGE_SIZE);
-  if (after) page.whereRaw('(done.service_day, s.id) > (?::date, ?::uuid)', [dateOnlyString(after.service_day), after.id]);
-  return page.select('s.id', 's.customer_id', 'done.service_day');
+  if (after) page.whereRaw(`(${OFFER_DAY_SQL}, s.id) > (?::date, ?::uuid)`, [dateOnlyString(after.service_day), after.id]);
+  return page.select('s.id', 's.customer_id', database.raw(`${OFFER_DAY_SQL} AS service_day`), 'done.service_day as job_day');
 }
 
-// ---- Who the offer is for. Each rule answers the reason the offer is not for this customer, or null. ----
+// ---- Send rules. Each answers the reason the offer does not go today, or null. They run in order. ----
+
+// A visit `o` that comes after the job `j` in the customer's order of work: the service day first, then the
+// completion time, then the id (it settles a tie or a missing time). Both rows are compared in the database,
+// at the stored precision.
+const LATER_THAN_JOB_SQL = "(o.scheduled_date, COALESCE(o.completed_at, 'epoch'::timestamptz), o.id)"
+  + " > (j.scheduled_date, COALESCE(j.completed_at, 'epoch'::timestamptz), j.id)";
+
+// The job's own included follow-up (the links FOLLOWUP_DAY_JOIN reads). Each link is NULL-safe: a row that
+// carries the flag and no link to the job is some other visit, and a NULL must never drop it from the test.
+const NOT_OWN_FOLLOWUP_SQL = 'NOT (o.followup_included IS TRUE AND (COALESCE(o.followup_source_service_id = j.id, FALSE)'
+  + ' OR COALESCE(o.parent_service_id = j.id, FALSE)))';
+
+// More work is booked, or a visit of any kind was completed after the job: the job is not the customer's last
+// visit. A re-service counts, also one later the same day. Of two one-time jobs on one day, only the last goes on.
+// The job's own included follow-up is the one exception, and only once it is completed: it is not "more work",
+// the offer day moves to it (FOLLOWUP_DAY_JOIN). While it is open or parked for a later day it holds the job
+// like any other visit. A follow-up closed without the service, or cancelled, is no hold either.
+async function anotherVisit({ job, now, deps }) {
+  const row = await deps.db('scheduled_services as o')
+    .join('scheduled_services as j', 'j.customer_id', 'o.customer_id')
+    .where('j.id', job.id)
+    .whereNot('o.id', job.id)
+    .where((q) => q.whereNotIn('o.status', CLOSED_VISIT_STATUSES)
+      .orWhere((unset) => unset.whereNull('o.status'))
+      .orWhere((parked) => parked.where('o.status', PARKED_VISIT_STATUS).where('o.scheduled_date', '>=', etDateString(now)))
+      .orWhere((later) => later.where('o.status', 'completed').whereRaw(LATER_THAN_JOB_SQL).whereRaw(NOT_OWN_FOLLOWUP_SQL)))
+    .first('o.id');
+  return row ? 'another_visit' : null;
+}
 
 async function customerReachable(ctx) {
   const account = () => ctx.deps.db('customers').where({ id: ctx.job.customer_id });
@@ -164,7 +253,7 @@ async function customerReachable(ctx) {
 }
 
 // The offer goes on an opt-out basis (owner 2026-11-19, "all"), so the opt-outs of Waves marketing count
-// beside the ones the email division reads for this stream (emailDivisionAllows): offers turned off in the
+// beside the ones the email division reads for this stream (emailAllowed): offers turned off in the
 // Waves app, marketing asked for by text only, and any active suppression that covers the Waves marketing
 // group (an unsubscribe, a bounce, a spam complaint).
 async function notOptedOut({ job, customer, deps }) {
@@ -176,20 +265,162 @@ async function notOptedOut({ job, customer, deps }) {
   return suppressed.length ? 'email_suppressed' : null;
 }
 
-// The email division decides who may get a Waves email, so the job asks it, for the stream the customer email
-// will go out on. The division runs its checks in a fixed order: the customer, the staff do-not-contact list,
-// the suppressions of the stream's own unsubscribe group, the customer's email switch, and then three checks
-// that only the day of the send can answer (an estimate on file, the same-day cap, recent human contact). So
-// an answer from one of those three proves that every standing check passed. The job holds on every other
-// answer. The three come with the customer email, which saves the estimate the first one asks for.
-const DAY_OF_SEND_VERDICTS = new Set([
-  EMAIL_VERDICT.RELATIONSHIP_NOT_ELIGIBLE, EMAIL_VERDICT.CAP_SAME_DAY, EMAIL_VERDICT.RECENT_HUMAN_CONTACT,
-]);
-async function emailDivisionAllows({ job, now, deps }) {
+// The invoices that bill the job, by the links invoice.js assertNoOtherLiveVisitInvoice lists for "one visit,
+// one live bill". An invoice belongs to a visit directly, or through its service record (invoice.js
+// linkedScheduledServiceId). One stop billed together keeps ONE invoice under the first billed visit and links
+// every billed visit through its completion-packet items. Billing Recovery can record that an invoice made for
+// other work covers the visit ("billed elsewhere"). And a line of any invoice names the visit it bills
+// (client_id scheduled_<visit>_primary, written by every service mint). The fifth link of that list, the
+// stamp of an estimate's combined first invoice, is read in sharesAnInvoice.
+function jobInvoices(database, job) {
+  const ownLine = JSON.stringify([{ client_id: `scheduled_${job.id}_primary` }]);
+  return database('invoices as i')
+    .leftJoin('service_records as r', 'r.id', 'i.service_record_id')
+    .where('i.customer_id', job.customer_id)
+    .where((q) => q.where('i.scheduled_service_id', job.id)
+      .orWhere('r.scheduled_service_id', job.id)
+      .orWhereIn('i.id', database('visit_completion_packet_items')
+        .where({ scheduled_service_id: job.id }).whereNotNull('invoice_id').select('invoice_id'))
+      .orWhereIn('i.id', database('visit_billing_dispositions')
+        .where({ scheduled_service_id: job.id, disposition: BILLED_ELSEWHERE }).whereNotNull('invoice_id').select('invoice_id'))
+      .orWhereRaw("CASE WHEN jsonb_typeof(i.line_items) = 'array' THEN i.line_items ELSE '[]'::jsonb END @> ?::jsonb", [ownLine]))
+    .select('i.id', 'i.status', 'i.total', 'i.scheduled_service_id', 'i.line_items', 'r.scheduled_service_id as record_visit_id');
+}
+
+// True when a paid invoice of the job also bills other work. Its total is then not the price of this job.
+// The repository links more work to an invoice six ways: the job is a member of an estimate's combined first
+// invoice (its accept stamp; such a group is always two visits or more), the invoice sits under another visit,
+// its service record belongs to another visit, one of its lines names another visit, its completion packet
+// links another visit, or Billing Recovery recorded a visit as "billed elsewhere" on it. That record means the
+// invoice was made for other work: when it names another visit, the job's invoice pays for two; when it names
+// the job, the total is more than the job.
+async function sharesAnInvoice({ job, deps }, paid) {
+  if (await deps.combinedFirstInvoiceOf(job, deps.db)) return true;
+  // Each link is read on its own: an invoice found by a line that names the job can sit under another visit,
+  // or carry another visit's service record.
+  const namesAnother = (invoice) => [invoice.scheduled_service_id, invoice.record_visit_id, ...deps.itemizedMemberIds(invoice.line_items)]
+    .some((visitId) => visitId && visitId !== job.id);
+  if (paid.some(namesAnother)) return true;
+  const paidIds = paid.map((invoice) => invoice.id);
+  const inAnotherPacket = await deps.db('visit_completion_packet_items')
+    .whereIn('invoice_id', paidIds)
+    .whereNot({ scheduled_service_id: job.id })
+    .first('id');
+  if (inAnotherPacket) return true;
+  const billedElsewhere = await deps.db('visit_billing_dispositions')
+    .whereIn('invoice_id', paidIds)
+    .where({ disposition: BILLED_ELSEWHERE })
+    .first('id');
+  return Boolean(billedElsewhere);
+}
+
+function balanceUnknown() {
+  return Object.assign(new Error('open balance could not be confirmed'), { code: 'OPEN_BALANCE_UNKNOWN' });
+}
+
+// What the customer still owes on an invoice of their own. open-balance.js answers for the invoices the Waves
+// app counts as the balance (sent, viewed, overdue). A part-paid invoice with an amount due is owed too, but
+// that balance does not count it (invoice-helpers isUncountedPartialDueInvoice), so it is read here, with the
+// pay page's live answer for whose debt it is (invoice-payer-ownership: a payer's invoice is not the
+// customer's). Only a plain "no" from each check lets the job go on. An answer that could not be decided (a
+// payer read failed) is an outage, not a rule: the job fails and the next morning reads it again.
+async function owesMoney({ job, deps }) {
+  const counted = await deps.openBalanceExists(job.customer_id, { database: deps.db });
+  if (counted === true) return true;
+  if (counted !== false) throw balanceUnknown();
+  const partPaid = await deps.db('invoices')
+    .where({ customer_id: job.customer_id, status: deps.partiallyPaidStatus })
+    .select('id', 'customer_id', 'status', 'total', 'credit_applied', 'amount_paid', 'payer_id', 'payer_statement_id',
+      'scheduled_send_error', 'scheduled_service_id', 'service_record_id');
+  for (const invoice of partPaid.filter((row) => deps.isUncountedPartialDue(row))) {
+    const owner = await deps.invoicePayerOwnership(invoice, deps.db);
+    if (owner === null) return true;
+    if (owner !== 'payer_owned') throw balanceUnknown();
+  }
+  return false;
+}
+
+// The job is paid, its price can be read, and nothing else is owed.
+async function jobPaid(ctx) {
+  const invoices = await jobInvoices(ctx.deps.db, ctx.job);
+  if (!invoices.length) return 'no_invoice';
+  const paid = invoices.filter((invoice) => invoice.status === 'paid');
+  if (!paid.length) return 'invoice_not_paid';
+  // No rule splits a shared total by visit, so the job's own price is not known: hold, never compare the total.
+  if (await sharesAnInvoice(ctx, paid)) return 'combined_invoice';
+  if (await owesMoney(ctx)) return 'open_balance';
+  // The largest paid invoice, not the sum: the lower figure is the harder test for "the plan costs less".
+  ctx.jobPrice = Math.max(...paid.map((invoice) => Number(invoice.total)));
+  return null;
+}
+
+// No offer while a review ask is still on its way (the review service's own answer: an ask queued, being sent
+// or left with no send result, a cadence with an ask still to come, or a follow-up text still to come; a
+// private check-in is not an ask), and 72 hours between a review ask and the offer. The two history readers
+// are the ones the review flow spaces its own asks with: the asks it sent, and an ask the office typed by hand.
+async function reviewAskClear({ job, now, deps }) {
+  if (await deps.reviewAskOnItsWay(job.customer_id)) return 'review_ask';
+  const [sentAt, typedAt] = await Promise.all([
+    deps.lastDeliveredAskAt(job.customer_id),
+    deps.lastManualAskAt(job.customer_id, { since: new Date(now.getTime() - deps.askSpacingMs) }),
+  ]);
+  const lastAskMs = Math.max(sentAt?.getTime() || 0, typedAt?.getTime() || 0);
+  return lastAskMs && now.getTime() - lastAskMs < deps.askSpacingMs ? 'review_ask' : null;
+}
+
+// Signs of an unhappy customer since the job: a rating below the promoter line, a logged complaint, an open request.
+async function noComplaint({ job, jobDay, deps }) {
+  // "Since the job" starts at midnight Eastern on the day the job itself was done (not the offer day: a signal
+  // that came before the follow-up still counts), not at midnight UTC (7 or 8 PM the evening before).
+  const since = parseETDateTime(`${jobDay}T00:00:00`);
+  const lowRating = await deps.db('review_requests')
+    .where({ customer_id: job.customer_id })
+    .where('rating', '<', PROMOTER_RATING)
+    .where('rated_at', '>=', since)
+    .first('id');
+  if (lowRating) return 'low_rating';
+  const complaint = await deps.db('customer_interactions')
+    .where({ customer_id: job.customer_id, interaction_type: 'complaint' })
+    .where('created_at', '>=', since)
+    .first('id');
+  if (complaint) return 'complaint';
+  const openRequest = await deps.db('service_requests')
+    .where({ customer_id: job.customer_id })
+    .whereNotIn('status', deps.openRequestTerminalStatuses)
+    .first('id');
+  return openRequest ? 'open_request' : null;
+}
+
+// Never a second price beside an estimate the customer can open now, or one that is on its way. Each kind has
+// its own test. "Can open now" is the public estimate page's rule (pricing-authority-gate
+// LINK_VISIBLE_LIVE_STATUSES: sending, sent or viewed, not archived, not expired; a row that is being sent can
+// have no expiry yet). "On its way" is the scheduler's queue test (scheduler.js claimDueScheduledEstimates:
+// scheduled, with a send time, not archived, not held for a new price). That test has no expiry: an estimate
+// whose send was late can carry a past expiry and still go out. An estimate held for a new price never goes
+// out as it is (estimate-clarify-asks repricePendingActive): its replacement is a row of its own. A draft may
+// never go out, so it is not a hold.
+async function noLiveEstimate({ job, now, deps }) {
+  const live = await deps.db('estimates')
+    .where({ customer_id: job.customer_id })
+    .whereNull('archived_at')
+    .where((q) => q
+      .where((open) => open.whereIn('status', deps.liveEstimateStatuses)
+        .where((unexpired) => unexpired.whereNull('expires_at').orWhere('expires_at', '>', now)))
+      .orWhere((queued) => queued.where('status', SCHEDULED_ESTIMATE_STATUS).whereNotNull('scheduled_at')
+        .whereRaw(deps.repricePendingAbsentSql)))
+    .first('id');
+  return live ? 'open_estimate' : null;
+}
+
+// The email division's own verdict for a marketing email on the nurture stream (unsubscribe, do-not-contact,
+// the same-day cap, recent human contact). The nurture stream wants an estimate on file, and the offer's
+// estimate is saved only after this verdict. So the job names its completed visit, and the division reads that
+// row as the relationship. Every check behind it runs as it will for the real send.
+async function emailAllowed({ job, now, deps }) {
   const verdict = await deps.eligibleForEmail({
-    customerId: job.customer_id, stream: OFFER_STREAM, emailKey: OFFER_TEMPLATE, now, conn: deps.db,
+    customerId: job.customer_id, stream: OFFER_STREAM, emailKey: OFFER_TEMPLATE, now, conn: deps.db, completedVisitId: job.id,
   });
-  if (verdict.ok || DAY_OF_SEND_VERDICTS.has(verdict.reason)) return null;
+  if (verdict.ok) return null;
   // eligibleForEmail turns a failed read into this verdict. Here it is an outage, not a rule: fail the job.
   if (verdict.reason === EMAIL_VERDICT.LOOKUP_FAILED) {
     throw Object.assign(new Error('email eligibility read failed'), { code: 'LOOKUP_FAILED' });
@@ -197,8 +428,9 @@ async function emailDivisionAllows({ job, now, deps }) {
   return String(verdict.reason || 'email_not_allowed').toLowerCase();
 }
 
-// The offer's audience. The send rules that judge the account on the day come with the customer email.
-const AUDIENCE_RULES = [customerReachable, notOptedOut, emailDivisionAllows];
+const SEND_RULES = [
+  anotherVisit, customerReachable, notOptedOut, jobPaid, reviewAskClear, noComplaint, noLiveEstimate, emailAllowed,
+];
 
 // The plan price, or the reason this home goes to the office to price by hand. The pricer gets the job: it
 // answers only for a visit of this customer, on an account whose every visit is at the home it prices. It is
@@ -210,33 +442,35 @@ async function pricePlan(ctx) {
   if (!option) return { verdict: 'office', reason };
   // A price came back: the price settings loaded whole this morning (reportPriceSettings).
   ctx.priceSettings.priced += 1;
-  // The offer's claim must be true for this home: there is a setup fee to remove.
+  // The offer's two claims must be true for this home: there is a setup fee to remove, and a plan visit costs
+  // less than the one-time job did.
   if (!(Number(option.setupFee) > 0)) return { verdict: 'office', reason: 'no_setup_fee' };
+  if (!(Number(option.perVisit) < ctx.jobPrice)) return { verdict: 'office', reason: 'plan_not_below_job' };
   return { verdict: 'sample', reason: null, option };
 }
 
 async function evaluateJob(ctx) {
-  for (const rule of AUDIENCE_RULES) {
+  for (const rule of SEND_RULES) {
     const reason = await rule(ctx);
     if (reason) return { verdict: 'held', reason };
   }
   return pricePlan(ctx);
 }
 
-function offerPayload({ customer, jobDate, option }) {
+function offerPayload({ customer, offerDay, option }) {
   const noYear = { year: undefined };
   const shortDay = (ymd) => formatDateOnly(ymd, { ...noYear, month: 'short' });
   return {
     first_name: greetingFirstName({
       customerName: [customer.first_name, customer.last_name].filter(Boolean).join(' '), customer,
     }),
-    visit_weekday: formatDateOnly(jobDate, { ...noYear, month: undefined, day: undefined, weekday: 'long' }),
-    visit_date_short: shortDay(jobDate),
+    visit_weekday: formatDateOnly(offerDay, { ...noYear, month: undefined, day: undefined, weekday: 'long' }),
+    visit_date_short: shortDay(offerDay),
     address_short: String(customer.address_line1 || '').trim(),
     price_per_application: money(option.perVisit),
     setup_fee: money(option.setupFee),
-    next_visit_window: `${shortDay(shiftDay(jobDate, NEXT_VISIT_FROM_DAYS))} to ${shortDay(shiftDay(jobDate, NEXT_VISIT_TO_DAYS))}`,
-    offer_end_date: formatDateOnly(shiftDay(jobDate, OFFER_DAYS), noYear),
+    next_visit_window: `${shortDay(shiftDay(offerDay, NEXT_VISIT_FROM_DAYS))} to ${shortDay(shiftDay(offerDay, NEXT_VISIT_TO_DAYS))}`,
+    offer_end_date: formatDateOnly(shiftDay(offerDay, OFFER_DAYS), noYear),
     // No estimate exists in shadow, so the button opens the estimate page's "not found" answer.
     estimate_url: portalUrl('/estimate/sample'),
   };
@@ -281,11 +515,11 @@ async function sentOfferValues(database, jobId) {
 async function sendSamples(ctx, option) {
   assertInternalEmailRecipient(SAMPLE_RECIPIENT);
   const payload = {
-    ...offerPayload({ customer: ctx.customer, jobDate: ctx.jobDate, option }),
+    ...offerPayload({ customer: ctx.customer, offerDay: ctx.offerDay, option }),
     ...await sentOfferValues(ctx.deps.db, ctx.job.id),
   };
-  const note = 'Sample only. No estimate was saved and the customer got no email. This step does not check the account'
-    + ` (open balance, other visits, review asks), so this customer may not get the offer. Job ${ctx.job.id}.`;
+  const note = 'Sample only. No estimate was saved and the customer got no email. This account passed the send rules today,'
+    + ` so this customer would get the offer. Job ${ctx.job.id}.`;
   // Both versions are read before the first send: a job never gets the offer sample when the reminder's
   // template has no version to sample.
   const versionIds = {};
@@ -317,8 +551,11 @@ async function alreadySampled(database, jobId) {
 
 async function shadowJob(job, { now, deps, priceSettings }) {
   if (await alreadySampled(deps.db, job.id)) return { verdict: 'done', reason: null };
-  // The emails name the day the service was done, and the offer's 30 days start there.
-  const ctx = { job, now, deps, priceSettings, jobDate: dateOnlyString(job.service_day) };
+  // The emails name the offer day, and the offer's 30 days start there. The complaint check starts at the
+  // job's own day, the earlier one.
+  const ctx = {
+    job, now, deps, priceSettings, offerDay: dateOnlyString(job.service_day), jobDay: dateOnlyString(job.job_day),
+  };
   const outcome = await evaluateJob(ctx);
   if (outcome.verdict === 'sample') await sendSamples(ctx, outcome.option);
   return outcome;

@@ -184,7 +184,7 @@ function isLiveCustomer(customer) {
 }
 
 // Whether the customer's standing relationship qualifies this stream.
-async function relationshipEligible(stream, emailKey, customer, database) {
+async function relationshipEligible(stream, emailKey, customer, database, completedVisitId = null) {
   if (stream === 'lifecycle') {
     // Win-back reads CURRENT pipeline stage, not the historical churned_at
     // timestamp (codex push-audit P1): churned_at can persist on a customer
@@ -203,7 +203,15 @@ async function relationshipEligible(stream, emailKey, customer, database) {
   }
   if (stream === 'nurture') {
     const row = await database('estimates').where({ customer_id: customer.id }).first('id');
-    return !!row;
+    if (row || !completedVisitId) return !!row;
+    // The plan offer after a one-time job (onetime-plan-offer.js) asks for this verdict BEFORE it saves its
+    // estimate, so the caps and the human-contact check below must still run for a customer with no estimate
+    // yet. A completed visit of this same customer is the relationship until then. The row is read here: the
+    // caller's word alone never widens the audience.
+    const visit = await database('scheduled_services')
+      .where({ id: completedVisitId, customer_id: customer.id, status: 'completed' })
+      .first('id');
+    return !!visit;
   }
   // Broadcast and alert audiences are CUSTOMERS (the plan's alert table:
   // "city customers", "lawn customers"). `active` alone is true for every
@@ -281,7 +289,7 @@ async function checkEmailSwitchStreamFlagAndChannel(ctx) {
 }
 
 async function checkRelationship(ctx) {
-  const eligible = await relationshipEligible(ctx.stream, ctx.emailKey, ctx.customer, ctx.database);
+  const eligible = await relationshipEligible(ctx.stream, ctx.emailKey, ctx.customer, ctx.database, ctx.completedVisitId);
   return eligible ? null : REASONS.RELATIONSHIP_NOT_ELIGIBLE;
 }
 
@@ -384,6 +392,7 @@ const CHECKS = [
 
 async function eligibleForEmail({
   customerId, stream, marketingClass: requestedClass, emailKey, pestKey = null, now = new Date(), conn,
+  completedVisitId = null,
 } = {}) {
   const checks = {};
   try {
@@ -392,7 +401,7 @@ async function eligibleForEmail({
     // Surfaced so the ledger stores the class that was actually judged.
     checks.marketingClass = marketingClass;
     const ctx = {
-      customerId, stream, marketingClass, emailKey, pestKey,
+      customerId, stream, marketingClass, emailKey, pestKey, completedVisitId,
       nowDate: now instanceof Date ? now : new Date(now),
       database: conn || db,
       checks,
