@@ -703,6 +703,10 @@ postgres('Hired button on migrated PostgreSQL', () => {
       await expect(mockDatabase('technicians').where({ id })
         .update({ password_reset_token_hash: null, google_only_login_at: new Date() }))
         .rejects.toMatchObject({ code: '23514', constraint: 'technicians_google_only_login_not_admin' });
+      // A row with no role cannot sign in at all (the column allows NULL): no Google press for it either.
+      const noRole = await linkedTech({ role: null });
+      expect(await listed(noRole.id)).toMatchObject({ hire_action: 'hire', hire_login: 'password' });
+      expect(await call(`/technicians/${noRole.id}/hire/google`, { body: hireBody({ googleEmail: noRole.google }) })).toEqual(CHANGED);
     });
 
     test("a row linked before the mailbox rule is refused at the press; a row's own email may be its Google address", async () => {
@@ -775,6 +779,10 @@ postgres('Hired button on migrated PostgreSQL', () => {
       expect(await call(`/technicians/${id}/hire/google`, { body: hireBody({ googleEmail: google }) })).toEqual(CHANGED);
       expect(await row(id)).toEqual(before);
       expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      // With staff Google sign-in off the link cannot be cleared: the row says so, and still offers no press.
+      process.env.GATE_STAFF_GOOGLE_SIGNIN = 'false';
+      expect(timetracking._test.hireLinkState(before)).toMatchObject({ hire_action: null, hire_google_only: 'off' });
+      process.env.GATE_STAFF_GOOGLE_SIGNIN = 'true';
 
       // The owner clears the Google sign-in on purpose, then presses Hired: an ordinary account.
       await mockDatabase('technicians').where({ id }).update({ google_email: null, google_sub: null });

@@ -835,7 +835,9 @@ router.get('/analytics/comparison', requireAdmin, async (req, res, next) => {
 //   get past it. The table refuses the mark on an admin row as well.
 function hireGoogleAddress(tech) {
   if (!tech.google_email || !googleSignin.googleSigninReady()) return null;
-  if (tech.role === 'admin') return null;
+  // A technician row only: an admin needs a password for two-step setup, and
+  // a row with no role cannot sign in at all (the column allows NULL).
+  if (tech.role !== 'technician') return null;
   if (tech.password_hash || tech.last_login_at || tech.google_sub || tech.mfa_enabled_at) return null;
   return googleSignin.normalizeLinkedGoogleEmail(tech.google_email).value || null;
 }
@@ -880,9 +882,10 @@ function hireLinkState(tech, now = new Date()) {
     // null, or how a Google-only account stands today: 'ready', 'unlinked'
     // (no address), 'bad_address' (outside the sign-in domains) or 'off'
     // (staff Google sign-in off or not set up). 'returning' = the prospective
-    // row above.
+    // row above; with staff Google sign-in off it reads 'off' (the link
+    // cannot be cleared until the gate is on again).
     hire_google_only: returning
-      ? 'returning'
+      ? (googleSignin.googleSigninReady() ? 'returning' : 'off')
       : (googleOnly && status === 'active' && tech.active === true ? googleOnlyState(tech) : null),
     hire_password_unset: passwordUnset,
     hire_link_pending: pending,
