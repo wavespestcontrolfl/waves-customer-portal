@@ -37,6 +37,7 @@ const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 //     > div.panel-heading                      ("Showing First On: ...", "Showing 1 to N of N")
 //     > div.panel-body.table-responsive > [ pager, table#results, pager ]
 const HEADER_NAMES = ['View', 'Instrument', 'From', 'To', 'Type', 'Book', 'Page', 'Consideration', 'Description', 'Date', 'Pages'];
+const HEADER_ATTRS = HEADER_NAMES.map((name) => ({ View: { class: 'no-print' }, From: { style: 'width:18em;' }, To: { style: 'width:18em;' } }[name] || {}));
 const CELL_ATTRS = HEADER_NAMES.map((name) => ({ View: { class: 'no-print' }, Date: { style: 'white-space:nowrap;' } }[name] || {}));
 const ROW_ATTRS = { class: 'data-row' };
 const TABLE_ATTRS = { id: 'results', class: 'table table-primary' };
@@ -205,12 +206,12 @@ function checkHeading(heading, isoDate, rowCount) {
   }
 }
 
+// The 11 header cells, each with its studied attributes (so no cell spans two columns) and its studied name.
 function checkHeader(tr) {
   const cells = tr.attrs.length === 0 ? elementChildren(tr, 'header') : [];
-  const names = cells.map((th) => (th.tagName === 'th' ? textOnly(th, 'header') : null));
-  if (names.length !== HEADER_NAMES.length || names.some((name, i) => name !== HEADER_NAMES[i])) {
-    throw new ClerkPageError('header', 'Clerk results table header changed');
-  }
+  const studied = cells.length === HEADER_NAMES.length
+    && cells.every((th, i) => is(th, 'th', HEADER_ATTRS[i]) && textOnly(th, 'header') === HEADER_NAMES[i]);
+  if (!studied) throw new ClerkPageError('header', 'Clerk results table header changed');
 }
 
 // A From or To cell is one plain list: <ol><li>NAME</li>...</ol>, or an empty <ol></ol> while the Clerk has not
@@ -300,30 +301,30 @@ function parseDayList(html, isoDate) {
   return { rows };
 }
 
-// Reads the body up to the cap, whatever the headers say (same form as bid-desk/charlotte-county.js readCapped).
+// Reads the body's bytes up to the cap, whatever the headers say (the capped read of bid-desk/charlotte-county.js),
+// then decodes them as strict UTF-8: a damaged byte is an error, never a replacement character inside a name.
 async function readCapped(res) {
   const tooLarge = () => new ClerkPageError('too_large', 'Clerk day list is over 8 MB');
   const declared = Number(res.headers?.get?.('content-length'));
   if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) throw tooLarge();
-  if (res.body && typeof res.body.getReader === 'function') {
-    const reader = res.body.getReader();
-    const chunks = [];
-    let size = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > MAX_BODY_BYTES) {
-        await reader.cancel().catch(() => {});
-        throw tooLarge();
-      }
-      chunks.push(Buffer.from(value));
+  const reader = res.body.getReader();
+  const chunks = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > MAX_BODY_BYTES) {
+      await reader.cancel().catch(() => {});
+      throw tooLarge();
     }
-    return Buffer.concat(chunks).toString('utf8');
+    chunks.push(Buffer.from(value));
   }
-  const body = await res.text();
-  if (Buffer.byteLength(body, 'utf8') > MAX_BODY_BYTES) throw tooLarge();
-  return body;
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
+  } catch {
+    throw new ClerkPageError('encoding', 'Clerk day list is not valid UTF-8');
+  }
 }
 
 async function fetchDayList(isoDate, { fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {

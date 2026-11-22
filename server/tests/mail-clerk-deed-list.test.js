@@ -27,7 +27,8 @@ const withViewCell = (viewCell) => row({ cells: [viewCell, '202699000001', ol(['
 
 const pager = (items = '<li class="active"><a>1</a></li>') => `<div class="small"><div class="pagination-container"><ul class="pagination">${items}</ul></div></div>`;
 const TWO_PAGES = '<li class="active"><a>1</a></li><li><a href="?page=2">2</a></li>';
-const header = (names = HEADER_NAMES) => `<tr>${names.map((h) => `<th>${h}</th>`).join('')}</tr>`;
+const TH_OPEN = { View: '<th class="no-print">', From: '<th style="width:18em;">', To: '<th style="width:18em;">' };
+const header = (names = HEADER_NAMES) => `<tr>${names.map((h, i) => `${TH_OPEN[HEADER_NAMES[i]] || '<th>'}${h}</th>`).join('')}</tr>`;
 const heading = ({ first = '11/18/2026', last = '11/18/2026', to = 1, of = to } = {}) => '<div class="panel-heading"><div class="row">'
   + '<div id="searchedfor" class="col-md-3"><strong>Searched For:</strong></div>'
   + `<div class="col-md-3"><strong>Showing First On:</strong> ${first} 8:34:52 AM</div>`
@@ -181,6 +182,9 @@ describe('parseDayList: pages that must throw', () => {
     ['a changed header', page({ head: header(HEADER_NAMES.map((h) => (h === 'To' ? 'Grantee' : h))) }), 'header'],
     ['a header with a missing column', page({ head: header(HEADER_NAMES.slice(0, 10)) }), 'header'],
     ['no header row', page({ head: '' }), 'header'],
+    ['a From header that spans two columns', page({ head: header().replace('<th style="width:18em;">From', '<th style="width:18em;" colspan="2">From') }), 'header'],
+    ['a header cell that spans two columns, one header cell less', page({ head: header().replace('<th>Book</th><th>Page</th>', '<th colspan="2">Book</th>') }), 'header'],
+    ['a header name inside a link', page({ head: header().replace('<th>Type</th>', '<th><a href="?sort=type">Type</a></th>') }), 'header'],
 
     ['a row with 10 cells', page({ rows: [row({ tds: '<td class="no-print"></td><td>202699000001</td><td><ol></ol></td><td><ol></ol></td><td>DEED</td><td></td><td></td><td>$10.00</td><td>LOT 1 X</td><td style="white-space:nowrap;">11-18-2026</td>' })] }), 'row_shape'],
     ['a row with 12 cells', page({ rows: [row().replace('</tr>', '<td>x</td></tr>')] }), 'row_shape'],
@@ -242,14 +246,12 @@ describe('parseDayList: pages that must throw', () => {
 });
 
 describe('fetchDayList', () => {
-  const response = (status, body) => ({ status, text: async () => body });
-  // A streamed answer, as the real fetch gives it: `chunks` byte arrays, then done. `canceled` counts cancel calls.
-  const streamed = (chunks, headers = {}) => {
+  // An answer as the real fetch gives it: a byte stream of `chunks`, then done. `canceled` counts cancel calls.
+  const streamed = (chunks, headers = {}, status = 200) => {
     const state = { reads: 0, canceled: 0 };
     const res = {
-      status: 200,
+      status,
       headers: { get: (name) => headers[name.toLowerCase()] ?? null },
-      text: async () => { throw new Error('text() must not be used on a streamed answer'); },
       body: {
         getReader: () => ({
           read: async () => {
@@ -263,6 +265,7 @@ describe('fetchDayList', () => {
     };
     return { res, state };
   };
+  const response = (status, body) => streamed([Buffer.from(body)], {}, status).res;
   // Keeps the request's abort signal so a test can see that a refused answer was let go.
   const capture = (res) => {
     const seen = {};
@@ -292,18 +295,27 @@ describe('fetchDayList', () => {
   });
 
   test('a redirect is refused, not followed', async () => {
-    const { fetchImpl, seen } = capture({ status: 302, headers: { get: () => 'https://elsewhere.example/day' }, text: async () => page() });
+    const { fetchImpl, seen } = capture(streamed([Buffer.from(page())], { location: 'https://elsewhere.example/day' }, 302).res);
     const err = await fetchDayList(DAY, { fetchImpl }).catch((e) => e);
     expect(err.reason).toBe('http_status');
     expect(err.message).toMatch(/302/);
     expect(seen.signal.aborted).toBe(true);
   });
 
-  test('a body over 8 MB throws', async () => {
-    const big = 'a'.repeat(8 * 1024 * 1024 + 1);
-    const err = await fetchDayList(DAY, { fetchImpl: async () => response(200, big) }).catch((e) => e);
+  test('bytes that are not UTF-8 are refused, never turned into a replacement character in a name', async () => {
+    const bytes = Buffer.from(page());
+    const at = bytes.indexOf('TESTER ALEX J');
+    const damaged = Buffer.concat([bytes.subarray(0, at), Buffer.from([0xff]), bytes.subarray(at + 1)]);
+    const err = await fetchDayList(DAY, { fetchImpl: async () => streamed([damaged]).res }).catch((e) => e);
     expect(err).toBeInstanceOf(ClerkPageError);
-    expect(err.reason).toBe('too_large');
+    expect(err.reason).toBe('encoding');
+  });
+
+  test('a name with an accent, split across two pieces of the stream, reads whole', async () => {
+    const bytes = Buffer.from(page({ rows: [row({ to: ['TESTÉR ALEX J'] })] }));
+    const at = bytes.indexOf(Buffer.from('É')) + 1; // between the two bytes of the letter
+    const { res } = streamed([bytes.subarray(0, at), bytes.subarray(at)]);
+    expect((await fetchDayList(DAY, { fetchImpl: async () => res })).rows[0].to).toEqual(['TESTÉR ALEX J']);
   });
 
   test('a streamed answer is read in pieces and parsed', async () => {
