@@ -79,21 +79,59 @@ describe('fixedReason with the day-told context', () => {
     expect(_internals.fixedReason(stop(), base({ personPlaced: new Set(['s1']) }))).toBe('person_placed');
   });
 
-  test('audit case: a confirmed stop the customer was told only the day for may move (owner 2026-11-22: a confirmation does not matter)', () => {
+  test('a confirmed stop the customer was told only the day for, that nobody placed, may move (owner 2026-11-22: a confirmation does not matter)', () => {
     expect(_internals.fixedReason(stop({ customer_confirmed: true }), base({ dayTold: day }))).toBeNull();
+  });
+
+  test('audit case: a confirmed day-told stop a person re-timed after the notice stays fixed (customer_confirmed): the hour may have been given by phone', () => {
+    expect(_internals.fixedReason(stop({ customer_confirmed: true }), base({ dayTold: day, personPlaced: day }))).toBe('customer_confirmed');
+  });
+
+  test('audit case: a confirmed day-told stop with no person-placed fact stays fixed (customer_confirmed, fail closed)', () => {
+    expect(_internals.fixedReason(stop({ customer_confirmed: true }), base({ dayTold: day, personPlaced: undefined }))).toBe('customer_confirmed');
+  });
+
+  // The rule before 2026-11-22 (main), written out as the oracle: a day-only notice frees first_or_one_time and
+  // person_placed; this change touches only the confirmed line.
+  const mainRule = (row, { told, personPlaced, dayTold }) => {
+    const dayOnly = !!dayTold && dayTold.has(row.id);
+    if (row.customer_confirmed === true) return 'customer_confirmed';
+    if (!dayOnly && (row.is_recurring !== true || row.recurring_parent_id == null)) return 'first_or_one_time';
+    if (!dayOnly && (!personPlaced || personPlaced.has(row.id))) return 'person_placed';
+    if (!told || told.has(row.id)) return 'time_told';
+    return null;
+  };
+
+  test('table: for a stop that is not confirmed, every combination of day-only notice, first-or-one-time, person-placed (yes / no / missing) and told (yes / no / missing) gives main\'s answer, with and without askRecorded', () => {
+    let cases = 0;
+    for (const dayTold of [day, new Set(), undefined]) {
+      for (const firstOrOneTime of [true, false]) {
+        for (const personPlaced of [day, new Set(), undefined]) {
+          for (const told of [day, new Set(), undefined]) {
+            for (const ask of [{}, { askRecorded: true, customerTime: new Map() }]) {
+              const ctx = base({ dayTold, personPlaced, told, ...ask });
+              const row = stop(firstOrOneTime ? { is_recurring: false, recurring_parent_id: null } : {});
+              expect(_internals.fixedReason(row, ctx)).toBe(mainRule(row, ctx));
+              cases += 1;
+            }
+          }
+        }
+      }
+    }
+    expect(cases).toBe(3 * 2 * 3 * 3 * 2);
   });
 
   test('audit case: a confirmed stop with no day-only notice stays fixed (customer_confirmed)', () => {
     expect(_internals.fixedReason(stop({ customer_confirmed: true }), base())).toBe('customer_confirmed');
-    expect(_internals.fixedReason(stop({ customer_confirmed: true }), base({ askRecorded: true, customerTime: new Set() }))).toBe('customer_confirmed');
+    expect(_internals.fixedReason(stop({ customer_confirmed: true }), base({ askRecorded: true, customerTime: new Map() }))).toBe('customer_confirmed');
   });
 
   test('audit case: a staff-placed stop with no day-only notice stays fixed (person_placed), also with the ask recorded', () => {
-    expect(_internals.fixedReason(stop(), base({ askRecorded: true, customerTime: new Set(), personPlaced: new Set(['s1']) }))).toBe('person_placed');
+    expect(_internals.fixedReason(stop(), base({ askRecorded: true, customerTime: new Map(), personPlaced: new Set(['s1']) }))).toBe('person_placed');
   });
 
   test('audit case: a first or one-time stop with no day-only notice stays fixed (first_or_one_time), also with the ask recorded', () => {
-    expect(_internals.fixedReason(stop({ is_recurring: false, recurring_parent_id: null }), base({ askRecorded: true, customerTime: new Set() }))).toBe('first_or_one_time');
+    expect(_internals.fixedReason(stop({ is_recurring: false, recurring_parent_id: null }), base({ askRecorded: true, customerTime: new Map() }))).toBe('first_or_one_time');
   });
 
   test('an hour-told visit stays fixed time_told; the day mark does not outrank an hour', () => {
@@ -108,23 +146,25 @@ describe('fixedReason with the day-told context', () => {
   });
 
   test('askRecorded: customer_time fixes a stop FIRST, also a day-told stop, and before every other told-lock reason', () => {
-    const ask = (extra = {}) => base({ askRecorded: true, customerTime: day, ...extra });
+    const ask = (extra = {}) => base({ askRecorded: true, customerTime: new Map([['s1', 'customer_time']]), ...extra });
     expect(_internals.fixedReason(stop(), ask())).toBe('customer_time');
     expect(_internals.fixedReason(stop(), ask({ dayTold: day }))).toBe('customer_time');
     expect(_internals.fixedReason(stop({ customer_confirmed: true, is_recurring: false }), ask({ personPlaced: day, told: day }))).toBe('customer_time');
-    expect(_internals.fixedReason(stop(), ask({ customerTime: new Set(['other']), dayTold: day }))).toBeNull();
+    expect(_internals.fixedReason(stop(), ask({ customerTime: new Map([['other', 'customer_time']]), dayTold: day }))).toBeNull();
+    expect(_internals.fixedReason(stop(), ask({ customerTime: new Map([['s1', 'customer_time_unread']]), dayTold: day }))).toBe('customer_time_unread');
     // The earlier reasons still win.
     expect(_internals.fixedReason(stop({ status: 'dispatched' }), ask())).toBe('status');
     expect(_internals.fixedReason(stop(), ask({ sent24: day }))).toBe('reminder_24h_sent');
   });
 
-  test('askRecorded with no customerTime fact keeps the stop fixed (fail closed)', () => {
-    expect(_internals.fixedReason(stop(), base({ askRecorded: true, customerTime: undefined, dayTold: day }))).toBe('customer_time');
+  test('askRecorded with no customerTime fact keeps the stop fixed as customer_time_unread (fail closed)', () => {
+    expect(_internals.fixedReason(stop(), base({ askRecorded: true, customerTime: undefined, dayTold: day }))).toBe('customer_time_unread');
   });
 
   test('without askRecorded (gate off, or a hand-built context) a customerTime fact is ignored', () => {
-    expect(_internals.fixedReason(stop(), base({ customerTime: day }))).toBeNull();
-    expect(_internals.fixedReason(stop({ is_recurring: false }), base({ customerTime: day }))).toBe('first_or_one_time');
+    const own = new Map([['s1', 'customer_time']]);
+    expect(_internals.fixedReason(stop(), base({ customerTime: own }))).toBeNull();
+    expect(_internals.fixedReason(stop({ is_recurring: false }), base({ customerTime: own }))).toBe('first_or_one_time');
   });
 
   test('a visit with level none keeps today\'s rules', () => {
@@ -141,20 +181,26 @@ describe('fixedReason with the day-told context', () => {
 });
 
 describe('loadCustomerTime', () => {
-  const rows = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+  const rows = [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }];
 
-  test('a visit that is not eligible, and one with no verdict, are the customer\'s time; an eligible one is not; one bulk read, the told level ignored', async () => {
-    dayOnlyEligibility.mockResolvedValue(new Map([['a', { eligible: false, level: 'none' }], ['b', { eligible: true, level: 'none' }]]));
-    const set = await _internals.loadCustomerTime({}, rows, NOW);
-    expect([...set].sort()).toEqual(['a', 'c']);
+  test('not eligible is customer_time; eligible is absent; a missing verdict and a failed-read verdict are customer_time_unread; one bulk read, the told level ignored', async () => {
+    dayOnlyEligibility.mockResolvedValue(new Map([
+      ['a', { eligible: false, level: 'none' }],
+      ['b', { eligible: true, level: 'none' }],
+      ['c', { eligible: false, level: 'hour', failed: true }],
+    ]));
+    const fixed = await _internals.loadCustomerTime({}, rows, NOW);
+    expect(fixed).toBeInstanceOf(Map);
+    expect([...fixed].sort()).toEqual([['a', 'customer_time'], ['c', 'customer_time_unread'], ['d', 'customer_time_unread']]);
+    expect(fixed.has('b')).toBe(false);
     expect(dayOnlyEligibility).toHaveBeenCalledTimes(1);
-    expect(dayOnlyEligibility).toHaveBeenCalledWith({}, ['a', 'b', 'c'], NOW, { ignoreLevel: true });
+    expect(dayOnlyEligibility).toHaveBeenCalledWith({}, ['a', 'b', 'c', 'd'], NOW, { ignoreLevel: true });
   });
 
-  test('a failed read returns every id and warns (fail closed)', async () => {
+  test('a thrown read returns every id as customer_time_unread and warns (fail closed)', async () => {
     dayOnlyEligibility.mockRejectedValue(new Error('verdict read down'));
-    const set = await _internals.loadCustomerTime({}, rows, NOW);
-    expect([...set].sort()).toEqual(['a', 'b', 'c']);
+    const fixed = await _internals.loadCustomerTime({}, rows, NOW);
+    expect([...fixed].sort()).toEqual([['a', 'customer_time_unread'], ['b', 'customer_time_unread'], ['c', 'customer_time_unread'], ['d', 'customer_time_unread']]);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('customer-time read failed'));
   });
 });
@@ -181,7 +227,7 @@ describe('loadDayContext', () => {
     expect([...ctx.dayTold]).toEqual(['a']);
     // The ask is recorded only with the gate on: customerTime from one bulk read, and the person-placed read as before.
     expect(ctx.askRecorded).toBe(true);
-    expect([...ctx.customerTime]).toEqual([]);
+    expect(ctx.customerTime).toEqual(new Map());
     expect(dayOnlyEligibility).toHaveBeenCalledTimes(1);
     expect(dayOnlyEligibility.mock.calls[0][3]).toEqual({ ignoreLevel: true });
     expect(ctx.personPlaced).toBeInstanceOf(Set);
@@ -219,11 +265,11 @@ describe('loadDayContext', () => {
     loadPromiseLevels.mockImplementation(levelsOf({ a: 'day', b: 'day', c: 'day' }));
     dayOnlyEligibility.mockImplementation(async (_conn, ids) => new Map(ids.map((id) => [id, { eligible: id !== 'b', level: 'none' }])));
     const ctx = await load();
-    expect([...ctx.customerTime]).toEqual(['b']);
+    expect([...ctx.customerTime]).toEqual([['b', 'customer_time']]);
     expect(dayRows().map((r) => _internals.fixedReason({ ...r, customer_confirmed: false }, ctx))).toEqual([null, 'customer_time', null]);
     dayOnlyEligibility.mockRejectedValue(new Error('verdict read down'));
     const failed = await load();
-    expect(dayRows().map((r) => _internals.fixedReason({ ...r, customer_confirmed: false }, failed))).toEqual(['customer_time', 'customer_time', 'customer_time']);
+    expect(dayRows().map((r) => _internals.fixedReason({ ...r, customer_confirmed: false }, failed))).toEqual(['customer_time_unread', 'customer_time_unread', 'customer_time_unread']);
   });
 });
 
@@ -259,7 +305,7 @@ describe('recheckVisit inside the move transaction (apply mode)', () => {
   const deps = ({ dayOnly = true, levels = {}, placed = false, customerTime = [] } = {}) => ({
     dayOnlyOn: () => dayOnly,
     isPersonPlacedVisit: jest.fn(async () => ({ placed })),
-    loadCustomerTime: jest.fn(async (_conn, rows) => new Set(rows.map((r) => r.id).filter((id) => customerTime.includes(id)))),
+    loadCustomerTime: jest.fn(async (_conn, rows) => new Map(rows.map((r) => r.id).filter((id) => customerTime.includes(id)).map((id) => [id, 'customer_time']))),
     loadToldIds: jest.fn(async () => new Set()),
     loadPromiseLevels: jest.fn(levelsOf(levels)),
   });
@@ -285,6 +331,15 @@ describe('recheckVisit inside the move transaction (apply mode)', () => {
     expect(w.rowWrites()).toEqual([]);
     // Read with the transaction handle, for the one visit.
     expect(over.loadCustomerTime.mock.calls[0][1]).toEqual([{ id: expect.any(String) }]);
+  });
+
+  test('this gate on: the real customer-time read that fails stops the write as customer_time_unread', async () => {
+    dayOnlyEligibility.mockRejectedValue(new Error('verdict read down'));
+    const over = deps({ levels: { a: 'day', b: 'day' } });
+    over.loadCustomerTime = _internals.loadCustomerTime;
+    const w = world({ rowExtra: recurring, over });
+    expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:customer_time_unread', moved: 0 });
+    expect(w.rowWrites()).toEqual([]);
   });
 
   test('this gate on: a customer-time read that throws stops the write (fail closed)', async () => {

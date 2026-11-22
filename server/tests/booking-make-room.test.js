@@ -63,7 +63,7 @@ function makeDeps({
       const allRows = rows.filter((r) => r.scheduled_date === dateStr);
       const ctx = { dateStr, now, allRows, visitCounts: countBy(allRows, 'visit_id'), customerCounts: countBy(allRows, 'customer_id'), sent24: new Set(), toldLock: true, told: new Set(told), personPlaced: new Set() };
       // GATE_DAY_ONLY_PROMISE on (the ask is recorded): the customer's own time is also a fact of the day.
-      return customerTime ? { ...ctx, askRecorded: true, customerTime: new Set(customerTime) } : ctx;
+      return customerTime ? { ...ctx, askRecorded: true, customerTime: new Map(customerTime.map((id) => [id, 'customer_time'])) } : ctx;
     }),
     fixedReason,
     skipReason,

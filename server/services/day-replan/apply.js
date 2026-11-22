@@ -173,7 +173,8 @@ async function toldLockFacts(trx, deps, { row, id, dateStr }) {
   const dayOnly = typeof deps.dayOnlyOn === 'function' && deps.dayOnlyOn() === true;
   const levels = dayOnly ? await promiseLevelFacts(trx, deps, id) : { told: new Set(await deps.loadToldIds(trx, [id], deps.now())) };
   // askRecorded: only while GATE_DAY_ONLY_PROMISE is on does the app record whether the customer asked for the time
-  // (owner 2026-11-22): then a time that is the customer's own stops the write as customer_time (fails closed too).
+  // (owner 2026-11-22): then a time that is the customer's own stops the write as customer_time, and an answer that cannot
+  // be read (a thrown read included) as customer_time_unread.
   const ask = dayOnly ? { askRecorded: true, customerTime: await deps.loadCustomerTime(trx, [{ id }], deps.now()) } : {};
   const verdict = await deps.isPersonPlacedVisit({ ...row, scheduled_date: dateStr }, trx);
   return { toldLock: true, ...levels, ...ask, personPlaced: new Set(!verdict || verdict.placed !== false ? [id] : []) };
