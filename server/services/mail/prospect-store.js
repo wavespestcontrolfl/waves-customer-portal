@@ -49,21 +49,39 @@ async function findBySourceRefs(listKey, source, refs, conn = db) {
 
 const oneLine = (text) => String(text || '').toUpperCase().replace(/\s+/g, ' ').trim();
 
+// Zips where the county permit report and the parcel map write two names for the same place. Counted 2026-11-22
+// on 1,040 permits whose street and zip were the parcel's: 1,029 had the parcel's city name and the other 11 were
+// these pairs (PARRISH for PALMETTO in 34221 and 34219, BRADENTON for LAKEWOOD RANCH in 34211). New homes are
+// built mostly in these zips, so without the pairs 2 of 55 real matched homes were lost. Any other name: no proof.
+const SAME_PLACE_CITY_NAMES = {
+  34211: ['BRADENTON', 'LAKEWOOD RANCH'],
+  34219: ['PALMETTO', 'PARRISH'],
+  34221: ['PALMETTO', 'PARRISH'],
+};
+
+function cityNamesOf(city, zip) {
+  const names = SAME_PLACE_CITY_NAMES[zip] || [];
+  return names.includes(city) ? names : [city];
+}
+
 /**
- * True when the permit's address line names exactly the parcel's street address. The county report writes the line
- * as street, two spaces, city, zip ("200 SAMPLE TRL  PARRISH 34219"); about one line in ten has single spaces only.
- *   - with the two-space break: the street part is the parcel's whole street address (the caller's loose key has
- *     already matched the zip);
+ * True when the permit's address line is exactly the parcel's address: its street address, its city and its zip.
+ * The county report writes the line as street, two spaces, city, zip ("200 SAMPLE TRL  PARRISH 34219"); about one
+ * line in ten has single spaces only.
+ *   - with the two-space break: the first part is the parcel's whole street address and the second part is its city
+ *     and zip (so a line "900 SAMPLE CT  E PARRISH 34219" is not the parcel "900 SAMPLE CT");
  *   - with single spaces only: the whole line is the parcel's street address, city and zip.
- * Any other shape proves nothing. Counted 2026-11-22 on 529 recent permits whose loose key matched their parcel:
- * 528 pass (490 by the street part, 38 by the whole line); the other one is a parcel with a unit number.
+ * The city is the parcel's own name or its other name in SAME_PLACE_CITY_NAMES. Any other shape, another city name
+ * or a missing part proves nothing. Counted 2026-11-22 on 529 recent permits whose loose key matched their parcel:
+ * 528 pass; the other one is a parcel with a unit number.
  */
 function permitNamesParcelAddress(addressRaw, parcel) {
-  const street = oneLine(parcel.addressLine1);
-  if (!street) return false;
-  const parts = String(addressRaw || '').trim().split(/\s{2,}/);
-  if (parts.length === 2) return oneLine(parts[0]) === street;
-  if (parts.length === 1) return oneLine(parts[0]) === `${street} ${oneLine(parcel.city)} ${oneLine(parcel.zip)}`;
+  const [street, city, zip] = [oneLine(parcel.addressLine1), oneLine(parcel.city), oneLine(parcel.zip)];
+  if (!street || !city || !zip) return false;
+  const parts = String(addressRaw || '').trim().split(/\s{2,}/).map(oneLine);
+  const cityAndZip = cityNamesOf(city, zip).map((name) => `${name} ${zip}`);
+  if (parts.length === 2) return parts[0] === street && cityAndZip.includes(parts[1]);
+  if (parts.length === 1) return cityAndZip.some((tail) => parts[0] === `${street} ${tail}`);
   return false;
 }
 
@@ -74,10 +92,10 @@ function permitNamesParcelAddress(addressRaw, parcel) {
  * A permit is the parcel's own when all three agree:
  *   - its parcel number is a form of the parcel's number (permitPinForms),
  *   - its loose address key is the parcel's (the permit sync's key: house number, first street word, zip), and
- *   - its address line names exactly the parcel's street address (permitNamesParcelAddress).
+ *   - its address line is exactly the parcel's street address, city and zip (permitNamesParcelAddress).
  * The number alone is not proof. The pin of a 9-digit parcel number P is P plus a 0, and P0 can be another parcel's
  * own 10-digit number (5 such pairs on the county map, counted 2026-11-22). The loose key alone is not proof either:
- * it drops the street's last words, so "101 Sample Ct" and "101 Sample Dr" share one. The whole street address
+ * it drops the street's last words, so "101 Sample Ct" and "101 Sample Dr" share one. The whole address
  * settles it, and each parcel is judged alone, so the answer does not depend on which other parcels are asked in
  * the same call. A parcel or a permit without an address proves nothing: no permit. Two parcels that share a number
  * form and the whole address are one mailbox; the table's permit index then lets only one of them be live.
@@ -132,9 +150,13 @@ async function newHomePermitsForParcels(parcels, conn = db) {
   return out;
 }
 
+const houseNumberOf = (line1) => (String(line1 || '').trim().match(/^\d+(?=\s)/) || [null])[0];
+
 /**
  * True when any customers row (customer, lead or cancelled) has the same house number, first street word and zip:
- * the same loose key the permit sync uses, compared in JS.
+ * the same loose key the permit sync uses, compared in JS, and the same house number. The key joins the number and
+ * the street word with nothing between them ("12 34th St" and "123 4th St" share one), so the number is compared
+ * by itself too.
  *
  * The query only narrows, and it cannot drop a row with the same key: a key is made from the house number and the
  * zip's five digits, so such a row holds both (wherever the spaces, tabs or a ZIP+4 are). Both are digits only and
@@ -142,14 +164,14 @@ async function newHomePermitsForParcels(parcels, conn = db) {
  */
 async function addressKnownToWaves(addressLine1, zip, conn = db) {
   const key = looseAddressKey(addressLine1, zip);
-  const number = String(addressLine1 || '').trim().match(/^\d+/);
+  const number = houseNumberOf(addressLine1);
   const zip5 = String(zip || '').match(/\d{5}/);
   if (!key || !number || !zip5) return false;
   const rows = await conn('customers')
     .where('zip', 'like', `%${zip5[0]}%`)
-    .where('address_line1', 'like', `%${number[0]}%`)
+    .where('address_line1', 'like', `%${number}%`)
     .select('address_line1', 'zip');
-  return rows.some((r) => looseAddressKey(r.address_line1, r.zip) === key);
+  return rows.some((r) => houseNumberOf(r.address_line1) === number && looseAddressKey(r.address_line1, r.zip) === key);
 }
 
 function writableFields(row) {

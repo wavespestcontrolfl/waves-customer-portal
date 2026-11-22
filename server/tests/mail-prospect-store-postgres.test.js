@@ -307,6 +307,28 @@ postgres('mail prospect store on PostgreSQL', () => {
     expect(await owners(court)).toEqual(['900000009']);
     expect(await owners(drive)).toEqual([]); // asked alone, it still gets nothing
     expect(await owners(drive, court)).toEqual(['900000009']);
+    // The part after the break must be the parcel's city and zip: "CT  E SAMPLETON" is not "900 Sample Ct".
+    await conn('construction_permit_records').update({ address_raw: '900 SAMPLE CT  E SAMPLETON 34219' });
+    expect(await owners(court)).toEqual([]);
+    expect(await owners(parcel('900000009', { addressLine1: '900 SAMPLE CT E', zip: '34219' }))).toEqual([]);
+    // Another city name for the same street and zip is not proof,
+    await conn('construction_permit_records').update({ address_raw: '900 SAMPLE CT  OTHERTON 34219' });
+    expect(await owners(court)).toEqual([]);
+    expect(await owners(parcel('900000009', { addressLine1: '900 SAMPLE CT', zip: '34219', city: 'OTHERTON' }))).toEqual(['900000009']);
+    // except the two names the county uses for one place in that zip (the report says Parrish, the map Palmetto).
+    await conn('construction_permit_records').update({ address_raw: '900 SAMPLE CT  PARRISH 34219' });
+    const palmetto = (extra = {}) => parcel('900000009', { addressLine1: '900 SAMPLE CT', zip: '34219', city: 'PALMETTO', ...extra });
+    expect(await owners(palmetto())).toEqual(['900000009']);
+    expect(await owners(court)).toEqual([]); // SAMPLETON is not one of the two names
+    expect(await owners(palmetto({ addressLine1: '900 SAMPLE DR' }))).toEqual([]);
+    await conn('construction_permit_records').update({ address_raw: '900 SAMPLE CT PARRISH 34219' }); // single spaces
+    expect(await owners(palmetto())).toEqual(['900000009']);
+    // The pair holds in its own zip only.
+    await conn('construction_permit_records').update({ address_raw: '900 SAMPLE CT  PARRISH 34208', address_loose_key: '900sample34208' });
+    expect(await owners(palmetto({ zip: '34208' }))).toEqual([]);
+    await conn('construction_permit_records').update({ address_loose_key: '900sample34219' });
+    await conn('construction_permit_records').update({ address_raw: '900 SAMPLE CT  SAMPLETON 34219' });
+    expect(await owners(parcel('900000009', { addressLine1: '900 SAMPLE CT', zip: '34219', city: null }))).toEqual([]);
     // A shorter or a longer street address is not the permit's address either.
     expect(await owners(parcel('900000009', { addressLine1: '900 SAMPLE', zip: '34219' }))).toEqual([]);
     expect(await owners(parcel('900000009', { addressLine1: '900 SAMPLE CT E', zip: '34219' }))).toEqual([]);
@@ -351,6 +373,10 @@ postgres('mail prospect store on PostgreSQL', () => {
     expect(await addressKnownToWaves('32 TABBED WAY', '34203')).toBe(true);
     expect(await addressKnownToWaves('33 WIDE GAP CT', '34203')).toBe(true);
     expect(await addressKnownToWaves('34 PLAIN RD', '34203')).toBe(true);
+    // The key joins the number and the street word, so "12 34th" and "123 4th" share one: the number decides.
+    await conn('customers').insert({ address_line1: '123 4th St', zip: '34203' });
+    expect(await addressKnownToWaves('12 34TH ST', '34203')).toBe(false);
+    expect(await addressKnownToWaves('123 4TH ST', '34203')).toBe(true);
     // The same digits inside another house number or another street are not this home.
     expect(await addressKnownToWaves('3 LEADING SPACE DR', '34203')).toBe(false);
     expect(await addressKnownToWaves('31 OTHER DR', '34203')).toBe(false);
