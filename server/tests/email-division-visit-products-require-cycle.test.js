@@ -31,14 +31,16 @@ const VISIT = {
   technician_notes: null, client_pest_rating: null,
 };
 
-function loadInOrder(first, second) {
-  let visitProducts;
-  jest.isolateModules(() => {
+// The read runs INSIDE the isolated registry: the call-time require of report-data must resolve to the module
+// of this same cycle, as in production, not to a second copy loaded after the registry closed.
+async function readInOrder(first, second) {
+  let summary;
+  await jest.isolateModulesAsync(async () => {
     require(first);
     require(second);
-    visitProducts = require(VISIT_PRODUCTS);
+    summary = await require(VISIT_PRODUCTS).readVisitSummary('visit-1', { conn: fakeConn(VISIT) });
   });
-  return visitProducts;
+  return summary;
 }
 
 describe('visit-products inside the require cycle with service-report/report-data', () => {
@@ -46,8 +48,7 @@ describe('visit-products inside the require cycle with service-report/report-dat
     ['report-data loads first (the production boot order)', REPORT_DATA, VISIT_PRODUCTS],
     ['visit-products loads first', VISIT_PRODUCTS, REPORT_DATA],
   ])('%s: readVisitSummary reaches the four report helpers', async (_name, first, second) => {
-    const { readVisitSummary } = loadInOrder(first, second);
-    const summary = await readVisitSummary('visit-1', { conn: fakeConn(VISIT) });
+    const summary = await readInOrder(first, second);
     // uniqueStrings + applicationAreaValues: one spelling per area, the first one seen.
     expect(summary.areasTreated).toEqual(['Perimeter', 'Garage']);
     // normalizeAdvisoryForTreatmentScope + resolveTracedExteriorZone: the advisory block is built, not thrown.
