@@ -149,11 +149,12 @@ const catalogRow = (extra = {}) => ({
 });
 
 // A catalog winner at another vendor's price, backed by that vendor's approved row: Step P corrects the SiteOne row, which may now
-// be the cheapest.
+// be the cheapest. The other row states free shipping: the catalog ranks vendors on the delivered price, and a row that states no
+// shipping takes its vendor's shipping rule, which would put this $45.00 row above the $58.42 SiteOne row.
 const OTHER_WINNER = { best_vendor_pricing_id: 'other', best_vendor: 'Other Vendor', best_price: '45.00', best_price_amount_cached: '45.0000' };
 const OTHER_VENDOR = vendorRow({
   id: 'other', vendor_id: 'ven9', vendor_sku: 'OTHER45', price: '45.00', price_amount: '45.0000', landed_cost: '45.00', price_per_oz: '0.3516',
-  normalized_unit_price: '0.3516', landed_unit_price: '0.3516', is_best_price: true,
+  normalized_unit_price: '0.3516', landed_unit_price: '0.3516', is_best_price: true, shipping_cost: '0.00',
 });
 const OTHER_WINNER_WORLD = { catalog: [catalogRow(OTHER_WINNER)], vendors: [vendorRow({ is_best_price: false }), OTHER_VENDOR] };
 // A second vendor row on the Crosscheck Plus product: Step P must leave the stale price alone.
