@@ -200,17 +200,12 @@ describe('the /query proposal', () => {
     expect(loopbackCalls).toHaveLength(0);
   });
 
-  test('a reply that searched and then proposed a card carries no stuck-answer mark, even with the answer send-to-Claude gate on', async () => {
-    process.env.GATE_IB_ANSWER_SEND_TO_CLAUDE = 'true';
-    try {
-      const { answer } = await proposeThroughQuery();
-      expect(answer.status).toBe(200);
-      const saved = require('../services/intelligence-bar/tasks').checkpoint.mock.calls.map(call => call[2].response).filter(Boolean).pop();
-      expect(saved.pendingActions).toHaveLength(1);
-      expect('answerClaude' in saved).toBe(false);
-    } finally {
-      delete process.env.GATE_IB_ANSWER_SEND_TO_CLAUDE;
-    }
+  test('a reply that searched and then proposed a card carries no stuck-answer mark', async () => {
+    const { answer } = await proposeThroughQuery();
+    expect(answer.status).toBe(200);
+    const saved = require('../services/intelligence-bar/tasks').checkpoint.mock.calls.map(call => call[2].response).filter(Boolean).pop();
+    expect(saved.pendingActions).toHaveLength(1);
+    expect('answerClaude' in saved).toBe(false);
   });
 
   test('an admin login without full access never gets the tools, and a forced call mints no card', async () => {

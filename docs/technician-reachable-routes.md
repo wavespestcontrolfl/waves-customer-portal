@@ -62,6 +62,7 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/admin/discounts/stacking` | admin-discounts |
 | GET | `/api/admin/dispatch/:date?` | admin-dispatch |
 | GET | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/context` | admin-dispatch |
+| POST | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/prepare-recommendations` | admin-dispatch |
 | POST | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/sod-rooted` | admin-dispatch |
 | GET | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/treatment-guide` | admin-dispatch |
 | POST | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/trouble-areas/:areaId/clear` | admin-dispatch |

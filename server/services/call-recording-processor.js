@@ -21021,6 +21021,28 @@ const CallRecordingProcessor = {
                           followUpTechId = null;
                         }
                       }
+                      // GATE_TECH_SHIFT_HOURS: the child's planned block (rowBlockMinutes: the later
+                      // of its window's end and the job's length) against its technician's shift,
+                      // BEFORE its fence and its hour search, so both run for the technician the
+                      // child keeps. A shift that does not hold it seeds the child unassigned, as
+                      // a day off does for a package visit 2; a copied hour that moves below stays
+                      // inside the shift (callFollowUpWindow). The read has its own nested
+                      // savepoint, as the fence below has: a failed read must not abort THIS
+                      // savepoint and lose the promised child. Hours that cannot be read never
+                      // assign: the child is seeded unassigned. No technician, or the gate off:
+                      // nothing runs (no savepoint, no read), and the child keeps its technician.
+                      const fuDurationMin = callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES;
+                      const fuBlock = require('./scheduling/window-rules').rowBlockMinutes({ window_start: fuStart, window_end: fuWindowEnd, estimated_duration_minutes: fuDurationMin });
+                      const fuOffShift = followUpTechId && require('../config/feature-gates').techShiftHoursLive?.()
+                        && await sp.transaction((shiftSp) => require('./technician-eligibility').shiftExcluding(shiftSp, followUpTechId, fuPlan.scheduledDate, fuBlock))
+                        .catch((shiftErr) => {
+                          logger.warn(`[call-proc] follow-up shift hours read failed for ${maskSid(callSid)} (seeding unassigned): ${shiftErr.message}`);
+                          return true;
+                        });
+                      if (fuOffShift) {
+                        logger.warn(`[call-proc] follow-up technician ${followUpTechId} is outside the shift on ${fuPlan.scheduledDate}, or its hours are unread; seeding unassigned`);
+                        followUpTechId = null;
+                      }
                       // Same bounded fence for the child's own date + tech
                       // (the child usually lands on a different date than the
                       // primary, so the primary's fence does not cover it).
@@ -21047,7 +21069,6 @@ const CallRecordingProcessor = {
                       // a package visit 2 keep theirs; the idempotency key
                       // below stays on the planned hour. A moved visit 2
                       // keeps its job length (Codex #6495 r1 P1).
-                      const fuDurationMin = callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES;
                       const fuWindow = await require('./scheduling/plan-taken-hour').callFollowUpWindow(sp, {
                         visit1: primaryRow,
                         customerId,
@@ -22176,7 +22197,10 @@ const CallRecordingProcessor = {
                 // triage note already says who was auto-assigned (or nobody).
                 if (insertData.technician_id) {
                   try {
-                    await assertAssignableTechnician(insertData.technician_id, { conn: trx, date: String(scheduledDate).slice(0, 10), workDays: true });
+                    // `hours` (GATE_TECH_SHIFT_HOURS): the new visit's own block. A shift that
+                    // does not hold it books the visit unassigned, as a day off does.
+                    await assertAssignableTechnician(insertData.technician_id, { conn: trx, date: String(scheduledDate).slice(0, 10), workDays: true,
+                      hours: require('./scheduling/window-rules').rowBlockMinutes(insertData) });
                     // A PICKED technician passed the capability filter on a
                     // plain read; re-read it under the technician share lock
                     // so an Off saved since cannot receive this visit. The line map's
