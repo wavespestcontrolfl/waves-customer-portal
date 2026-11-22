@@ -329,6 +329,20 @@ describe('Refer tab Step 2 words', () => {
     expect(screen.queryByText(/credit is applied after/)).not.toBeInTheDocument();
   });
 
+  it('a paused program promises nothing to a member at the yearly limit: no limit line, no note, no January restart', async () => {
+    // The server's paused answer keeps capReached and creditsThisYear, with every amount at 0.
+    api.getReferrals.mockResolvedValue(step2({
+      rewardPerReferral: 0, standardReward: 0, friendReward: 0, programPaused: true, capReached: true, creditsThisYear: 10,
+    }));
+    render(<ReferTab customer={customer} onSwitchTab={() => {}} />);
+
+    expect(await screen.findByText('Share your Waves link with neighbors who could use a hand with pest or lawn care.')).toBeInTheDocument();
+    expect(screen.queryByText(/the most we give/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/thank-you note/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/January 1/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\$\d+ credit/)).not.toBeInTheDocument();
+  });
+
   it('a paused program names no amount', async () => {
     api.getReferrals.mockResolvedValue(step2({ rewardPerReferral: 0, standardReward: 0, friendReward: 0, programPaused: true }));
     render(<ReferTab customer={customer} onSwitchTab={() => {}} />);

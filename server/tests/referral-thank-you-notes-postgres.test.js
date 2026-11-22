@@ -261,7 +261,9 @@ postgres('referral thank-you notes (live Postgres)', () => {
       '2027-02-03T25:00:00.000000Z,00000000-0000-4000-8000-000000000001',
       "2027-02-03T15:00:00.000000Z,00000000-0000-4000-8000-000000000001'; --",
       '2027-02-03t15:00:00.000000z,00000000-0000-4000-8000-000000000001', '[object Object]',
-    ])('a position the server did not write is refused before any query: %s', async (after) => {
+      // What a query string can parse to: an array, an object, an object whose toString is not a function.
+      ['2027-02-03T15:00:00.000000Z,00000000-0000-4000-8000-000000000001'], { x: '1' }, { toString: 'x' }, 7, true,
+    ])('a position the server did not write is refused before any query: %p', async (after) => {
       await expect(notes.listThankYouNotes({ after })).rejects.toMatchObject({ statusCode: 400, code: 'BAD_CURSOR' });
       // The transaction is still usable: nothing reached PostgreSQL.
       expect((await notes.listThankYouNotes()).total).toBeGreaterThanOrEqual(0);

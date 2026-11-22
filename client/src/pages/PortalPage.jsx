@@ -14071,9 +14071,13 @@ const PENDING_REFERRAL_STATUSES = ['pending', 'contacted', 'estimated', 'sms_fai
 // the friend's first performed recurring plan service, so every line says "first plan service" (not "paid", not any
 // one-time service).
 function referTabStep2Words({ data, rewardPerReferral, earnsCredit, money, shareLink }) {
-  if (data?.annualCap == null) return { heading: null, intro: null, earnStep: null, shareText: null };
+  if (data?.annualCap == null) return { heading: null, intro: null, limitLine: null, earnStep: null, shareText: null };
   const friendReward = Number(data.friendReward) || 0;
   const cap = Number(data.annualCap);
+  // A member at the yearly limit reads how many credits the year brought, and that the note still comes. A paused
+  // program promises nothing (the server then sends programPaused and every amount at 0): no line, since it
+  // promises the note and the January restart while no friend can use a link.
+  const atLimit = data.capReached === true && Number(data.creditsThisYear) > 0 && data.programPaused !== true;
   const amounts = [
     friendReward > 0 && `They get a ${money(friendReward)} credit after their first plan service.`,
     earnsCredit && `You earn a ${money(rewardPerReferral)} credit after their first plan service. Up to ${cap} credit${cap === 1 ? '' : 's'} a year.`,
@@ -14081,6 +14085,9 @@ function referTabStep2Words({ data, rewardPerReferral, earnsCredit, money, share
   return {
     heading: 'Friends & Neighbors',
     intro: amounts.length ? ['Share your link.', ...amounts].join(' ') : null,
+    limitLine: atLimit
+      ? `You earned ${Number(data.creditsThisYear)} credits this year, the most we give. Thank you! Credits start again January 1. We still send a thank-you note for every friend who books.`
+      : null,
     earnStep: `Your ${money(rewardPerReferral)} credit is applied after their first plan service.`,
     shareText: friendReward > 0
       ? `I use Waves and thought you might want their info. You get a ${money(friendReward)} credit after your first plan service with my link: ${shareLink}`
@@ -14410,11 +14417,9 @@ function ReferTab({ customer, onSwitchTab }) {
               {step2Words.heading || (earnsCredit ? 'Refer and Earn' : 'Refer a Neighbor')}
             </h1>
             <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
-              {atYearlyLimit && Number(data.creditsThisYear) > 0
-                ? `You earned ${Number(data.creditsThisYear)} credits this year, the most we give. Thank you! Credits start again January 1. We still send a thank-you note for every friend who books.`
-                : step2Words.intro || (earnsCredit
-                  ? `Share your Waves link with neighbors. You earn ${money(rewardPerReferral)} account credit when a referral starts service.`
-                  : 'Share your Waves link with neighbors who could use a hand with pest or lawn care.')}
+              {step2Words.limitLine || step2Words.intro || (earnsCredit
+                ? `Share your Waves link with neighbors. You earn ${money(rewardPerReferral)} account credit when a referral starts service.`
+                : 'Share your Waves link with neighbors who could use a hand with pest or lawn care.')}
             </div>
           </div>
           <div style={{

@@ -39,7 +39,9 @@ const CURSOR_RE = /^((?!0000)\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d{6})Z,([0-
 
 // The cursor's two parts as PostgreSQL takes them. Anything else is a 400: a hand-made value never reaches a cast.
 function readCursor(after) {
-  const match = CURSOR_RE.exec(String(after));
+  // Only a string can be a cursor. A query string can also arrive as an array or an object (?after[x]=1), and
+  // String() of some objects throws: those are refused here like any other value the server did not write.
+  const match = typeof after === 'string' ? CURSOR_RE.exec(after) : null;
   const second = match ? `${match[1]}.000Z` : '';
   const time = new Date(second);
   // A real calendar second: "Feb 30" parses in JS and rolls over, and PostgreSQL refuses it.
