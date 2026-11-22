@@ -709,6 +709,15 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
     expect(estimateIsRemoteMeasured(saved({ priceOverridden: true }), {})).toBe(true);
   });
 
+  test('the boxes the office changed in the admin estimator are form state: they are not read', () => {
+    // The estimator saves which boxes the office edited. Most edits are the office reading the same aerial image, a
+    // typed home size is the office confirming it, and no edit says a visit took place. The engine prices them unmarked.
+    const formState = { homeSqFt: 2400, lotSqFt: 9000, _homeSqFtEdited: true, _lotSqFtEdited: true, _manualFields: ['homeSqFt', 'lotSqFt', 'poolCageSize', 'measuredTurfSf'] };
+    const pestPlan = { recurring: { services: [recurringRow('pest_control')] } };
+    expect(estimateIsRemoteMeasured({ result: pestPlan, inputs: formState }, {})).toBe(true);
+    expect(estimateIsRemoteMeasured({ result: pestPlan, inputs: { ...formState, _homeSqFtEdited: false, _lotSqFtEdited: false, _manualFields: [] } }, {})).toBe(true);
+  });
+
   test('a quantity of product the office picks is not a measurement of the home: it is not read', () => {
     // Mosquito stations and dunks raise the price. They are no size of the home or yard, and they need no visit.
     const inputs = (oneTimeMosquito) => ({ homeSqFt: 2000, lotSqFt: 8000, services: { oneTimeMosquito } });

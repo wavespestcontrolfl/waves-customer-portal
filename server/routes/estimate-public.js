@@ -24235,8 +24235,11 @@ function estimateMakesNoGuaranteeClaim(estData = {}, pricingBundle = {}) {
 // quote. It does not read a quantity of product or work the office picks (mosquito stations, dunks), nor a pricing
 // decision the office makes (a discount, a price it sets by hand: `priceOverridden`): neither is a measurement of the
 // home or yard, and neither needs a visit. It does not read a fact the customer states that is no size (a roach type,
-// a grass type). And where the engine stores no mark, the rule cannot tell and does not try: outside a call draft, a
-// home size or a lawn size somebody typed is stored like a measured one.
+// a grass type). It does not read the admin estimator's form state either (`inputs._manualFields`, `_homeSqFtEdited`,
+// `_lotSqFtEdited`). Those name the boxes the office changed. Most are the office reading the same aerial image (pool
+// cage size, tree density, turf), the estimator treats a typed home size as the office confirming it
+// (`_homeSqFtManuallyEdited`), and none says that a visit took place. So outside a call draft, a home size or a lawn
+// size the office typed counts like a measured one: the engine prices it with no mark.
 // Three reads, and each one fails closed (estimateIsRemoteMeasured):
 // 1. The saved estimate grants the answer: the rows the guarantee rule reads from it (guaranteeServiceRows with no
 //    served price: both saved result shapes, an inputs-only replay, an authored proposal's rows). At least one service

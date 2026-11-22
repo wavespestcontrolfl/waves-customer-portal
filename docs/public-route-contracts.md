@@ -7216,9 +7216,10 @@ Assessment in the look window (`hadCompletedAssessmentLook`, the one rule the fr
 made only for an estimate that would carry the key; a failed read leaves the key as the rule decided it). The rule
 reads marks about a size of the home or
 yard and marks that a price needs a visit. It does not read a quantity of product the office picks (mosquito stations,
-dunks) or a pricing decision the office makes (a discount, `priceOverridden`). Where the engine stores no mark (outside
-a call draft, a home size or a lawn size somebody typed is stored like a measured one), the rule cannot tell and does
-not try. The office's review of a price (`requiresManualReview`, `manualReviewReasons`) is read by
+dunks) or a pricing decision the office makes (a discount, `priceOverridden`). It does not read the admin estimator's
+form state (`inputs._manualFields`, `_homeSqFtEdited`, `_lotSqFtEdited`: the boxes the office changed, most often from
+the same aerial image). So outside a call draft, a home size or a lawn size the office typed counts like a measured
+one: the engine prices it with no mark. The office's review of a price (`requiresManualReview`, `manualReviewReasons`) is read by
 its reasons. Only a reason that says a measured size is large keeps the key (`large_lot`,
 `pest_large_lot_manual_review`, `large_pool_cage`, `pest_large_or_oversized_pool_cage`): a reviewed price from measured
 sizes is still measured. Every other reason, a reason that is not text, and a review mark with no reason take the key
