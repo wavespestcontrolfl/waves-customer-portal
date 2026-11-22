@@ -1043,8 +1043,21 @@ code. Each route's 409 body, unchanged:
 
 A self-booked plan's first visit is lengthened to the program's length only
 when the longer block fits the shift too; otherwise it keeps its signed end,
-as when the next time is taken. Not yet checked at a commit: public
-reschedule moves, and the day as the route would run it (capacity mode). Gate
+as when the next time is taken.
+A public reschedule that moves one visit is checked too (D4 part 3b-2a;
+`POST /api/public/reschedule/:token`, `SmartRebooker.reschedule`): the visit as
+the move leaves it (the picked start, and the later of the picked end and the
+start plus the visit's stored length) against the picked technician's shift. A
+shift that does not hold it answers the 409 this route already gives when the
+mover finds the time taken or the technician off that day:
+`{ error, code: 'SLOT_TAKEN' }` (the mover's body: no `availability`; the page
+clears the picked time and reloads its list). The move's write also pins the
+technician and the length it judged, so a dispatch edit that lands between the
+move's read and its write answers this route's existing concurrent-change 409
+(`{ error, code: null }`) instead of being written over. No new status, field
+or code. Not yet checked at a commit: a public reschedule that moves a visit
+group as one unit or shifts a recurring series with it (the grouped moves, the
+next D4 part), and the day as the route would run it (capacity mode). Gate
 off: byte-identical.
 `GET /api/public/estimates/:token/available-slots?date=` with a date past the
 browse horizon answers `400 { error: 'date is beyond the booking horizon',

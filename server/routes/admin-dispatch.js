@@ -4670,6 +4670,8 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
     const options = await RainOut.getOptions(req.params.serviceId, {
       caller: { isAdmin: req.techRole === 'admin', technicianId: req.technicianId },
       reasonCode: typeof req.query.reasonCode === 'string' ? req.query.reasonCode : null,
+      // POST /rain-out below commits as the office for every caller of this route.
+      initiatedBy: 'admin',
     });
     if (!options.ok) {
       return res.status(options.reason === 'not_found' ? 404 : 409).json({ error: options.reason });
