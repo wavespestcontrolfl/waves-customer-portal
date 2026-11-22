@@ -1559,67 +1559,80 @@ describe('_gatherSignals: the search step retries a transient DataForSEO error o
 // draft. Three such waits made a refresh "likely loop" for good (2026-11). Only briefs whose run got
 // as far as a draft count toward that review.
 describe('loop review counts only briefs whose run got as far as a draft', () => {
-  const { countLoopBriefs, NO_DRAFT_OUTCOMES } = require('../services/content/content-brief-builder')._internals;
+  const { countLoopBriefs, NO_DRAFT_OUTCOMES, NO_DRAFT_TERMINAL_WAITS } = require('../services/content/content-brief-builder')._internals;
   const terminalWriter = require('../services/content/terminal-writer');
   const db = require('../models/db');
+  const capWait = (brief_id) => ({ brief_id, outcome: 'deferred_publish_cap', skip_reason: 'canary_daily_publish_cap', has_draft: false });
+  const terminalWait = (brief_id, skip_reason = 'terminal_draft_missing') => ({ brief_id, outcome: 'deferred_terminal_draft', skip_reason, has_draft: false });
+  const ended = (brief_id, outcome) => ({ brief_id, outcome, skip_reason: null, has_draft: true });
 
-  test('the waiting outcomes are the publish-cap wait and the terminal-draft wait', () => {
+  test('the waits are the publish-cap wait and the two terminal waits that have no draft file', () => {
     expect([...NO_DRAFT_OUTCOMES].sort()).toEqual(['deferred_publish_cap', terminalWriter.AWAITING_OUTCOME].sort());
+    expect([...NO_DRAFT_TERMINAL_WAITS].sort()).toEqual([terminalWriter.MISSING, terminalWriter.AWAITS_MAC].sort());
   });
 
   test('a brief counts unless every one of its runs waited without a draft', () => {
     // The shape that parked a service-page refresh: four briefs, two real tries.
     expect(countLoopBriefs([
-      { brief_id: 'b1', outcome: 'deferred_publish_cap' },
-      { brief_id: 'b2', outcome: 'deferred_terminal_draft' },
-      { brief_id: 'b2', outcome: 'completed_pending_review' },
-      { brief_id: 'b3', outcome: 'deferred_publish_cap' },
-      { brief_id: 'b4', outcome: 'deferred_terminal_draft' },
-      { brief_id: 'b4', outcome: 'deferred_terminal_hold' },
+      capWait('b1'),
+      terminalWait('b2'),
+      ended('b2', 'completed_pending_review'),
+      capWait('b3'),
+      terminalWait('b4', 'terminal_draft_awaits_mac'),
+      { brief_id: 'b4', outcome: 'deferred_terminal_hold', skip_reason: 'terminal_hold:needs_owner', has_draft: true },
     ])).toBe(2);
     // Twelve waits for the terminal across three briefs are not one try.
-    expect(countLoopBriefs([
-      ...Array.from({ length: 12 }, (_, i) => ({ brief_id: `b${1 + (i % 3)}`, outcome: 'deferred_terminal_draft' })),
-    ])).toBe(0);
+    expect(countLoopBriefs(Array.from({ length: 12 }, (_, i) => terminalWait(`b${1 + (i % 3)}`)))).toBe(0);
     // Three gate failures are a loop.
     expect(countLoopBriefs([
-      { brief_id: 'b1', outcome: 'deferred_gate_retry' },
-      { brief_id: 'b2', outcome: 'skipped_gate_fail' },
-      { brief_id: 'b3', outcome: 'completed_pending_review' },
+      ended('b1', 'deferred_gate_retry'),
+      ended('b2', 'skipped_gate_fail'),
+      ended('b3', 'completed_pending_review'),
+    ])).toBe(3);
+  });
+
+  test('the same outcomes count when the run had a draft', () => {
+    expect(countLoopBriefs([
+      // The cap filled between the claim and the publish: the run drafted, then deferred.
+      { brief_id: 'b1', outcome: 'deferred_publish_cap', skip_reason: 'canary_weekly_publish_cap', has_draft: true },
+      // The editorial review could not run on a draft the terminal wrote.
+      { brief_id: 'b2', outcome: 'deferred_terminal_draft', skip_reason: terminalWriter.REVIEW_UNAVAILABLE, has_draft: false },
+      // The terminal's draft file was there and was invalid.
+      { brief_id: 'b3', outcome: 'deferred_terminal_draft', skip_reason: terminalWriter.INVALID, has_draft: false },
     ])).toBe(3);
   });
 
   test('a brief with no run, or a run with no outcome yet, counts', () => {
     expect(countLoopBriefs([
-      { brief_id: 'b1', outcome: null },
-      { brief_id: 'b2', outcome: 'deferred_publish_cap' },
-      { brief_id: 'b2', outcome: null },
+      { brief_id: 'b1', outcome: null, skip_reason: null, has_draft: null },
+      capWait('b2'),
+      { brief_id: 'b2', outcome: null, skip_reason: null, has_draft: false },
     ])).toBe(2);
     expect(countLoopBriefs([])).toBe(0);
     expect(countLoopBriefs(undefined)).toBe(0);
   });
 
-  test('_countLoopBriefs reads each brief with its run outcomes, and a failed read gives the full count', async () => {
+  test('_countLoopBriefs reads each brief with its runs, and a failed read gives the full count', async () => {
     const chain = {
       leftJoin: jest.fn(() => chain),
       where: jest.fn(() => chain),
-      select: jest.fn(async () => [
-        { brief_id: 'b1', outcome: 'deferred_publish_cap' },
-        { brief_id: 'b2', outcome: 'skipped_gate_fail' },
-      ]),
+      select: jest.fn(async () => [capWait('b1'), ended('b2', 'skipped_gate_fail')]),
     };
     db.mockImplementation(() => chain);
+    db.raw = jest.fn((sql) => ({ sql }));
     try {
       const builder = new ContentBriefBuilder();
       await expect(builder._countLoopBriefs('opp-1', 2)).resolves.toBe(1);
       expect(db).toHaveBeenCalledWith('content_briefs as b');
       expect(chain.leftJoin).toHaveBeenCalledWith('autonomous_runs as r', 'r.brief_id', 'b.id');
       expect(chain.where).toHaveBeenCalledWith('b.opportunity_id', 'opp-1');
+      expect(chain.select).toHaveBeenCalledWith('b.id as brief_id', 'r.outcome', 'r.skip_reason', { sql: expect.stringMatching(/draft_payload.* as has_draft$/) });
 
       chain.select.mockRejectedValueOnce(new Error('relation does not exist'));
       await expect(builder._countLoopBriefs('opp-1', 4)).resolves.toBe(4);
     } finally {
       db.mockReset();
+      delete db.raw;
     }
   });
 

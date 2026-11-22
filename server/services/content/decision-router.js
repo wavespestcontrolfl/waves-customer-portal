@@ -181,8 +181,8 @@ function route(opportunity, signals = {}) {
   }
 
   const { serp_profile, customer_signal, conversion_feedback, existing_brief_versions = 0 } = signals;
-  // A claim that waited for a publish cap or for the terminal's draft composed a brief and wrote no
-  // draft. Such a brief is not a try, so it does not count toward the loop review.
+  // A claim that waited for a publish cap or for the terminal's draft, before any draft existed, still
+  // composed a brief. Such a brief is not a try, so it does not count toward the loop review.
   const loopBriefVersions = Number.isInteger(signals.loop_brief_versions)
     ? signals.loop_brief_versions
     : existing_brief_versions;

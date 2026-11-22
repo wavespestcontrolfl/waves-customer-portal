@@ -469,17 +469,27 @@ function briefTargetKeyword(opportunity) {
   return opportunity?.query || opportunity?.signal_metadata?.representative_query || null;
 }
 
-// Run outcomes that end before any draft exists: the publish-cap wait (autonomous-runner) and the wait
-// for the terminal's draft (terminal-writer AWAITING_OUTCOME).
+// A run that ended before any draft existed: the publish-cap pre-check (autonomous-runner step 2c) and the
+// wait for the terminal's draft file (terminal-writer AWAITING_OUTCOME with MISSING or AWAITS_MAC). The
+// same two outcomes can also end a run that had a draft (the cap filled between claim and publish; the
+// editorial review could not run; the draft file was invalid). Those runs are tries: the stored draft
+// or the skip reason tells them apart.
 const NO_DRAFT_OUTCOMES = new Set(['deferred_publish_cap', 'deferred_terminal_draft']);
+const NO_DRAFT_TERMINAL_WAITS = new Set(['terminal_draft_missing', 'terminal_draft_awaits_mac']);
 
-// rows: one per (brief, run) pair, `outcome` null when the brief has no run. A brief counts toward the
+function isNoDraftWait(row) {
+  if (row.has_draft) return false;
+  if (row.outcome === 'deferred_publish_cap') return true;
+  return row.outcome === 'deferred_terminal_draft' && NO_DRAFT_TERMINAL_WAITS.has(row.skip_reason);
+}
+
+// rows: one per (brief, run) pair; `outcome` is null when the brief has no run. A brief counts toward the
 // loop review unless it has runs and every one of them ended before a draft.
 function countLoopBriefs(rows) {
   const waitedOnly = new Map();
   for (const row of rows || []) {
-    const onlyWaits = NO_DRAFT_OUTCOMES.has(row.outcome);
-    waitedOnly.set(row.brief_id, waitedOnly.has(row.brief_id) ? waitedOnly.get(row.brief_id) && onlyWaits : onlyWaits);
+    const wait = isNoDraftWait(row);
+    waitedOnly.set(row.brief_id, waitedOnly.has(row.brief_id) ? waitedOnly.get(row.brief_id) && wait : wait);
   }
   let n = 0;
   for (const onlyWaits of waitedOnly.values()) if (!onlyWaits) n += 1;
@@ -728,15 +738,21 @@ class ContentBriefBuilder {
   }
 
   // The briefs that count toward the router's "likely loop" review. Every claim composes a new brief,
-  // also a claim that then waits for a publish cap or for the terminal's draft. Those runs wrote no
-  // draft, so their briefs are not tries (2026-11: three waits parked a refresh for good, and an
-  // operator requeue could not free it). A failed read gives the full count, which is the old rule.
+  // also a claim that then waits for a publish cap or for the terminal's draft before any draft exists.
+  // Such a brief is not a try (2026-11: three waits parked a refresh for good, and an operator requeue
+  // could not free it). A failed read gives the full count, which is the old rule.
   async _countLoopBriefs(opportunityId, allBriefs) {
     try {
       const rows = await db('content_briefs as b')
         .leftJoin('autonomous_runs as r', 'r.brief_id', 'b.id')
         .where('b.opportunity_id', opportunityId)
-        .select('b.id as brief_id', 'r.outcome');
+        .select(
+          'b.id as brief_id',
+          'r.outcome',
+          'r.skip_reason',
+          // finalize() stores '{}' for a run that had no draft.
+          db.raw("(r.draft_payload is not null and r.draft_payload::text not in ('{}', 'null')) as has_draft"),
+        );
       return countLoopBriefs(rows);
     } catch {
       return allBriefs;
@@ -1375,6 +1391,7 @@ module.exports.ContentBriefBuilder = ContentBriefBuilder;
 module.exports._internals = {
   countLoopBriefs,
   NO_DRAFT_OUTCOMES,
+  NO_DRAFT_TERMINAL_WAITS,
   CITABILITY_GAP_SECTIONS,
   REQUIRED_SECTIONS,
   SCHEMA_TYPES,
