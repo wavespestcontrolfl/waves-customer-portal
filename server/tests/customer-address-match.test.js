@@ -22,7 +22,7 @@ function fakeDb({ customers = [], properties = [], propertyError = null } = {}) 
     calls.push(table);
     const isProperty = String(table).startsWith('customer_properties');
     const builder = {};
-    for (const m of ['where', 'whereNull', 'orWhereNull', 'join', 'orderBy', 'limit', 'select']) {
+    for (const m of ['where', 'whereNull', 'orWhereNull', 'orWhere', 'join', 'orderBy', 'limit', 'select']) {
       builder[m] = () => builder;
     }
     // A where(fn) group runs fn on the builder, so the filters it adds are recorded.
@@ -147,6 +147,17 @@ describe('findCustomersAtAddress', () => {
     const plain = await findCustomersAtAddress(db, '123-2 Palm Ave, Venice, FL 34285');
     expect(plain.every((r) => !('exactMatch' in r))).toBe(true);
     expect(plain.map((r) => r.id)).not.toContain('no-zip');
+  });
+
+  it('strict with a zip: only that zip or no zip is read; a street only in line 2 is compared', async () => {
+    const db = fakeDb({ properties: [ROW('line2-only', null, '123 Palm Ave', { waveguard_tier: 'Gold' })] });
+    const rows = await findCustomersAtAddress(db, '123 Palm Ave, Venice, FL 34285', { strict: true, zip: '34285' });
+    expect(rows.map((r) => r.id)).toEqual(['line2-only']);
+    // Default: a row with no line 1 is skipped, as before.
+    expect(await findCustomersAtAddress(db, '123 Palm Ave, Venice, FL 34285')).toEqual([]);
+    // Each leg's zip group (fakeDb records the inner where calls).
+    expect(db.calls).toContainEqual(['where', 'customers', 'zip', 'like', '34285%']);
+    expect(db.calls).toContainEqual(['where', 'customer_properties as cp', 'cp.zip', 'like', '34285%']);
   });
 
   it('a failing property leg is skipped, not fatal', async () => {

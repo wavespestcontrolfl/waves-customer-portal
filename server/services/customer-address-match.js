@@ -94,6 +94,11 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
     return !own || own.match(/^\d+/)[0] === leadingDigits;
   };
   const nearZip = strict && /^\d{5}$/.test(String(zip || '')) ? String(zip) : null;
+  // strict with a zip: only rows with that zip or no zip on file. The comparator rejects any other zip, and rows
+  // from other zips would only fill the cap.
+  const zipFilter = (column) => (q) => (nearZip
+    ? q.where((z) => z.where(column, 'like', `${nearZip}%`).orWhereNull(column).orWhere(column, ''))
+    : q);
   const zip5 = (value) => String(value || '').trim().slice(0, 5);
   const complete = (rows, leg) => {
     if (strict && rows.length >= legLimit) throw uncheckable(`the ${leg} leg filled its ${legLimit}-row cap`);
@@ -104,6 +109,7 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
     .where((q) => q.where('active', true).orWhereNull('active'))
     .whereNull('deleted_at')
     .where(houseNumberFilter('address_line1', 'address_line2'))
+    .where(zipFilter('zip'))
     .orderBy('id')
     .limit(legLimit)
     .select(
@@ -120,6 +126,7 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
       .where((q) => q.where('c.active', true).orWhereNull('c.active'))
       .whereNull('c.deleted_at')
       .where(houseNumberFilter('cp.address_line1', 'cp.address_line2'))
+      .where(zipFilter('cp.zip'))
       .orderBy('cp.id')
       .limit(legLimit)
       .select(
@@ -136,8 +143,10 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
 
   const seen = new Set();
   const matches = [];
+  // strict: a row with the street only in line 2 is still compared.
+  const hasLine = (row) => row.address_line1 || (strict && row.address_line2);
   for (const row of candidates) {
-    if (!row.address_line1) continue;
+    if (!hasLine(row)) continue;
     if (excludeCustomerId != null && String(row.id) === String(excludeCustomerId)) continue;
     if (seen.has(String(row.id))) continue;
     if (!sameStreetAddress(candidateAddressString(row), address)) continue;
@@ -146,7 +155,7 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
   }
   if (!nearZip) return matches;
   for (const row of candidates) {
-    if (!row.address_line1 || seen.has(String(row.id))) continue;
+    if (!hasLine(row) || seen.has(String(row.id))) continue;
     if (excludeCustomerId != null && String(row.id) === String(excludeCustomerId)) continue;
     // A row with no zip on file cannot be told apart: near too.
     if (zip5(row.zip) && zip5(row.zip) !== nearZip) continue;
