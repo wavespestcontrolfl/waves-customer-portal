@@ -250,9 +250,15 @@ const PERFORMANCE_MAX_REFUSAL = 'this sync reads standalone Local Services campa
 
 async function readCampaigns(customer) {
   const all = await customer.query(`
-    SELECT campaign.id, campaign.status, campaign.advertising_channel_type, campaign_budget.amount_micros
+    SELECT customer.currency_code, campaign.id, campaign.status, campaign.advertising_channel_type, campaign_budget.amount_micros
     FROM campaign
   `);
+  // The portal's ad numbers are US dollars. The cost and the budget of an
+  // account in another currency would enter them at face value.
+  const foreign = all.find((r) => r.customer?.currency_code !== 'USD');
+  if (foreign) {
+    throw new Error(`the account bills in ${foreign.customer?.currency_code || 'an unknown currency'}, not USD, so nothing was written`);
+  }
   const performanceMax = all.filter((r) => PERFORMANCE_MAX.has(r.campaign?.advertising_channel_type) && !REMOVED.has(r.campaign?.status));
   if (performanceMax.length) {
     throw new Error(`the account has ${performanceMax.length} Performance Max campaign(s); ${PERFORMANCE_MAX_REFUSAL}`);
@@ -262,11 +268,12 @@ async function readCampaigns(customer) {
 
 // The account's cost and leads per day inside the window.
 async function readDays(customer, { since, until }) {
-  // Google answers a metrics row only for a campaign-day with numbers, so any
-  // row here is a Performance Max campaign (removed ones included) that ran
-  // inside the window.
+  // Google leaves out a campaign-day on which every selected metric is zero, so
+  // any row here is a Performance Max campaign (removed ones included) that ran
+  // inside the window. Impressions and clicks are selected too: a day that
+  // served at no cost can still have brought a lead.
   const performanceMaxDays = await customer.query(`
-    SELECT campaign.id, segments.date, metrics.cost_micros
+    SELECT campaign.id, segments.date, metrics.impressions, metrics.clicks, metrics.cost_micros
     FROM campaign
     WHERE segments.date BETWEEN '${since}' AND '${until}'
       AND campaign.advertising_channel_type = 'PERFORMANCE_MAX'

@@ -11,6 +11,10 @@
  *   sync owns (it carries the sync's account mark); one entered by hand keeps it.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
+// The Local Services cases need the sync to read its default account, whatever
+// the developer's own environment holds.
+delete process.env.GOOGLE_LSA_CUSTOMER_ID;
+delete process.env.GOOGLE_ADS_CUSTOMER_ID;
 jest.setTimeout(30000);
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));

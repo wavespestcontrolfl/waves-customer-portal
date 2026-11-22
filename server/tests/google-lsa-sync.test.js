@@ -68,7 +68,8 @@ const GOOGLE_ENV = {
   GOOGLE_ADS_CUSTOMER_ID: '1112223333',
 };
 // channel 11 = LOCAL_SERVICES, 10 = PERFORMANCE_MAX, 2 = SEARCH (AdvertisingChannelType).
-const googleCampaign = (id, status, micros, channel = 11) => ({
+const googleCampaign = (id, status, micros, channel = 11, currency = 'USD') => ({
+  customer: { currency_code: currency },
   campaign: { id, status, advertising_channel_type: channel },
   campaign_budget: micros == null ? {} : { amount_micros: micros },
 });
@@ -250,7 +251,7 @@ describe('runDailySync', () => {
     answerGoogle({ campaigns: [googleCampaign(555, 3, 25500000), googleCampaign(900, 2, 99000000, 2)] }); // a paused LSA + an enabled Search campaign
     await expect(GoogleLsa.runDailySync()).resolves.toEqual({ configured: true, synced: { campaigns: 1, performanceRows: 0 } });
     expect(accountUpdate()).toMatchObject({ status: 'paused', daily_budget_current: 25.5 });
-    const costQuery = mockQuery.mock.calls.map((c) => c[0]).find((q) => /metrics\.impressions/.test(q));
+    const costQuery = mockQuery.mock.calls.map((c) => c[0]).find((q) => /metrics\.conversions_value/.test(q));
     expect(costQuery).toContain("campaign.advertising_channel_type = 'LOCAL_SERVICES'");
     // No status filter anywhere: a removed campaign must still give its last days.
     for (const [q] of mockQuery.mock.calls) expect(q).not.toMatch(/campaign\.status\s*(!=|=|IN)/);
@@ -259,6 +260,20 @@ describe('runDailySync', () => {
   test('a Performance Max campaign in the account fails the run with nothing written: its Local Services cost cannot be told apart', async () => {
     answerGoogle({ campaigns: [CAMPAIGN_ROW, googleCampaign(901, 2, 40000000, 10)] });
     await expect(GoogleLsa.runDailySync()).rejects.toThrow('read: the account has 1 Performance Max campaign(s)');
+    expect(insertCalls).toEqual([]);
+    expect(updateCalls).toEqual([]);
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+
+  test('the Performance Max check reads impressions and clicks too: a day that served at no cost still counts as a day it ran', async () => {
+    await GoogleLsa.runDailySync();
+    const probe = mockQuery.mock.calls.map((c) => c[0]).find((q) => /'PERFORMANCE_MAX'/.test(q));
+    for (const field of ['metrics.impressions', 'metrics.clicks', 'metrics.cost_micros']) expect(probe).toContain(field);
+  });
+
+  test('an account that does not bill in US dollars fails the run with nothing written', async () => {
+    answerGoogle({ campaigns: [googleCampaign(555, 2, 25500000, 11, 'CAD')] });
+    await expect(GoogleLsa.runDailySync()).rejects.toThrow('read: the account bills in CAD, not USD');
     expect(insertCalls).toEqual([]);
     expect(updateCalls).toEqual([]);
     expect(mockQuery).toHaveBeenCalledTimes(1);
@@ -471,8 +486,8 @@ describe('runDailySync', () => {
 
   test('a failed cost read fails the run before anything is written, the account row included', async () => {
     mockQuery.mockImplementation(async (gaql) => {
-      if (/metrics\.impressions/.test(gaql)) throw new Error('quota');
       if (/'PERFORMANCE_MAX'/.test(gaql)) return [];
+      if (/metrics\.conversions_value/.test(gaql)) throw new Error('quota');
       return /FROM local_services_lead/.test(gaql) ? [] : [CAMPAIGN_ROW];
     });
     await expect(GoogleLsa.runDailySync()).rejects.toThrow('read: quota');
