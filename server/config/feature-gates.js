@@ -6,6 +6,7 @@
  * Adam manually enables them after verifying each one works.
  *
  * Set these as environment variables on Railway:
+ *   GATE_INVOICE_ESTIMATE_DISCOUNT_LINES=true (owner 2026-11-22, "yes, it should": a visit booked from an accepted estimate is invoiced at its full price with the WaveGuard tier discount and the estimate's own discount (for example Military Discount) as their own lines, instead of one line at the already-discounted price, so the invoice, pay page, receipt and PDF show the savings. Only while the visit still costs exactly the estimate's price for each application and has no price, discount, add-on or prepayment of its own, and only when the estimate names every dollar of the saving; otherwise the invoice keeps one line. The total never changes. It has a gate because it changes what invoices list. Read at call time via invoiceEstimateDiscountLinesLive(), strict 'true', dark by default. Off = visit invoices are built exactly as before; invoices already written keep their lines. Kill = unset.)
  *   GATE_EXCLUSION_ROOF_STYLE_PRICING=true (owner 2026-11-19, choice 2A: the technician confirms the roof style on site with one tap in the rodent exclusion estimate (Shingle, Flat tile, Barrel tile, Metal, Other) and the quote uses only his answer; the county roof words and the photo read show beside the control as a suggestion and never set a price. Any tile roof (Flat tile or Barrel tile) multiplies the roof/high wire-mesh points by 1.25 (never bird boxes, mesh or ground points). Barrel tile also adds a "Barrel tile eave closure" line at $12 per foot of eave the technician measures, $395 minimum for that line; zero feet adds no line. Nothing tapped = today's price. It changes prices, so the owner flips it. Read at call time via exclusionRoofStylePricingLive(), strict 'true', dark by default. Off = every estimate without a roof-style pick prices and reads exactly as before, the admin estimate tool hides the control, and a NEW request that still carries a roof-style pick is refused (the estimate engine, fail closed); an estimate already quoted with a roof style keeps its multiplier and per-foot rate. Kill = unset.)
  *   GATE_ROOF_ENTRY_READ=true (owner 2026-11-19: staff-only roof read. From a free county aerial photo of the home, one vision model call flags the likely rodent entry-point types on the roof (returns, vent stacks, vents, chimney, utility lines, eaves, trees touching) so the technician knows where to look and the estimate is not short. It has a gate because every read is a paid vision call; a read of the same property is reused for 90 days. Off, POST /api/admin/roof-entry-read and PATCH /api/admin/roof-entry-read/:id/tech-count answer 404 {enabled:false} from the router, after the portal's global API middleware (rate limit, body parsing), with no route-level database read, staff login, image fetch or model call. Nothing reaches a customer. Strict `=== 'true'`, read at call time via roofEntryReadLive(); dark by default. Kill: unset)
  *   GATE_EXCLUSION_WHOLE_HOME=true (owner 2026-11-19: the rodent exclusion estimate offers a "Whole home" seal beside the usual spot seal. A whole-home seal replaces the $195 / $295 job floor with the home-size minimum from Settings (today $395 up to 1,500 sq ft, $595 up to 2,500, $895 up to 4,000, $1,295 above) and includes a 1-year re-entry guarantee in the price; renewing it costs the usual guarantee tier price ($199 / $249 / $299). The customer estimate then states the included guarantee. It changes prices, so the owner flips it. Read at call time via exclusionWholeHomeLive(), strict 'true', dark by default. Off = every estimate without a whole-home pick prices and reads exactly as before, the admin estimate tool hides the seal scope choice, and a NEW request that still asks for a whole-home seal is refused (the estimate engine, fail closed); an estimate already quoted as whole-home keeps its terms. Kill = unset.)
@@ -6184,6 +6185,12 @@ function discountStackingLive() {
   return process.env.GATE_DISCOUNT_STACKING === 'true';
 }
 
+// GATE_INVOICE_ESTIMATE_DISCOUNT_LINES read at CALL time (strict 'true'):
+// buildScheduledServiceInvoiceLines (services/invoice.js) asks it per visit.
+function invoiceEstimateDiscountLinesLive() {
+  return process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES === 'true';
+}
+
 // GATE_EMAIL_AREA_INTEL read at CALL time. Unset = the scheduler tick
 // (server/services/scheduler.js) returns immediately.
 function emailAreaIntelLive() {
@@ -8311,6 +8318,8 @@ module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimesta
 // (these three read undefined, so off, from #7911 and #7929 until 2026-11-18). feature-gates-own-line-exports.test.js checks it.
 // GATE_RESERVICE_FOLD reader, on its own line so gate PRs never conflict.
 module.exports.reserviceFoldLive = reserviceFoldLive;
+// GATE_INVOICE_ESTIMATE_DISCOUNT_LINES reader, on its own line so gate PRs never conflict.
+module.exports.invoiceEstimateDiscountLinesLive = invoiceEstimateDiscountLinesLive;
 // GATE_RESERVICE_FOLD_LINK reader, on its own line so gate PRs never conflict.
 module.exports.reserviceFoldLinkLive = reserviceFoldLinkLive;
 // GATE_LIVE_CALL_UPSET_ALERT reader (bell-banners.js, kind live_call_upset), on its own line so gate PRs never conflict.

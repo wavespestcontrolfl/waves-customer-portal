@@ -7440,8 +7440,11 @@ the mint is caught). RESPONSE (2026-10-31, Waves Admin pay screens): beside
 surcharge fields, a successful burn returns what the customer pays for:
 `invoice_number`, `items` (`{ description, amount_cents }`, the invoice's
 visible service lines via `visibleInvoiceLines` / `invoiceLineParts`) and
-`adjustments` (`{ label, amount_cents }`: discount, commercial tax, deposit paid
-at acceptance, account credit applied, paid so far, via `invoiceTotalsFacts`) —
+`adjustments` (`{ label, amount_cents }`: each discount as its own row (since
+2026-11-22, `invoiceDiscountRows` in `@waves/invoice-property-groups`; one
+combined row when the discount lines cannot be told apart), commercial tax,
+deposit paid at acceptance, account credit applied, paid so far, via
+`invoiceTotalsFacts`) —
 the rows the invoice PDF prints, down to the amount due. When items plus
 adjustments do not add up to the handoff amount, every item carries
 `amount_cents: null` and `adjustments` is empty (names only), so the screen

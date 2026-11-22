@@ -99,7 +99,7 @@ import SaveCardConsent from '../components/billing/SaveCardConsent';
 import PropertyLineGroups from '../components/billing/PropertyLineGroups';
 import PayPromoCode from '../components/billing/PayPromoCode';
 import PayPlanChoice from '../components/billing/PayPlanChoice';
-import { groupInvoiceLinesByProperty } from '@waves/invoice-property-groups';
+import { groupInvoiceLinesByProperty, invoiceDiscountRows } from '@waves/invoice-property-groups';
 import { computeCardTotal, DEFAULT_CARD_SURCHARGE_RATE, CARD_SURCHARGE_NOTICE } from '../lib/cardSurcharge';
 import { formatInvoiceDate, isInvoiceDueDateOverdue } from '../lib/invoiceDates';
 import { microdepositDetailFromNextAction, microdepositGuidance, microdepositSavedPhrases } from '../lib/microdeposit';
@@ -2715,6 +2715,7 @@ export default function PayPageV2() {
   const visibleLineItems = (invoice.lineItems || []).filter(item => !isDiscountLineItem(item));
   // Multi-property invoice (lines at 2+ saved properties): grouped rows; else null.
   const propertyGroups = groupInvoiceLinesByProperty(invoice.lineItems);
+  const discountRows = invoiceDiscountRows(invoice.lineItems, invoice.discountAmount, invoice.discountLabel);
   const depositCreditTotal = depositCreditTotalFromLineItems(invoice.lineItems);
   const invoiceAttachments = invoice.attachments || [];
   const annualPrepay = invoice.annualPrepay || null;
@@ -3045,9 +3046,9 @@ export default function PayPageV2() {
               return (
             <div data-glass="soft" style={{ ...subtlePanel, padding: SP.md, marginBottom: SP.xl }}>
               <SummaryRow label="Subtotal" value={fmtCurrency(invoice.subtotal)} />
-              {invoice.discountAmount > 0 && (
-                <SummaryRow label={invoice.discountLabel || 'Discount'} value={`− ${fmtCurrency(invoice.discountAmount)}`} />
-              )}
+              {discountRows.map((row) => (
+                <SummaryRow key={row.label} label={row.label} value={`− ${fmtCurrency(row.amount)}`} />
+              ))}
               {invoice.taxAmount > 0 && customer?.isCommercial && (
                 <SummaryRow label={`Tax (${(Number(invoice.taxRate || 0) * 100).toFixed(2)}%)`} value={fmtCurrency(invoice.taxAmount)} />
               )}
