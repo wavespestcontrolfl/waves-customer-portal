@@ -157,6 +157,18 @@ describe('toolBlockForBatch: the key', () => {
       expect(run2.forReader(sub(2))).toEqual(GOT);
     });
 
+    // A trusted add of a pending row in the same instant as the reader's click: its promotion
+    // updates by id with its own timestamp, and the click's proof stays on the row. No opt-out
+    // is involved, so the click counts unless the promotion's confirmed_at is later.
+    test('a trusted add in the same instant as the click: the click counts with a confirmed_at that is equal or earlier, and not with a later one', async () => {
+      const ms = (n) => new Date(CLICK.getTime() + n);
+      const db = fakeDb({ rows: [row(1, { confirmed_at: ms(0) }), row(2, { confirmed_at: ms(-1) }), row(3, { confirmed_at: ms(1) })] });
+      const r = await run({ subscribers: [sub(1), sub(2), sub(3)], db });
+      expect(r.forReader(sub(1))).toEqual(GOT);
+      expect(r.forReader(sub(2))).toEqual(GOT);
+      expect(r.forReader(sub(3))).toEqual(NOT);
+    });
+
     test('a reader who confirmed by link for this address gets the block, also after an older opt-out or deactivation and with a click after confirmed_at', async () => {
       const db = fakeDb({ rows: [
         row(1),

@@ -51,20 +51,28 @@ const stampMs = (value) => (value ? new Date(value).getTime() : NaN);
 // fanout moves a row to a new address and keeps both stamps. The rule, all of:
 // - the row is active, and its address is the address mailed, and the address the
 //   reader confirmed (a moved row fails here);
-// - confirmed_at is set and reader_confirmed_at is not before it (a later trusted
-//   re-activation writes a later confirmed_at, which voids the click);
+// - confirmed_at is set and reader_confirmed_at is not before it. This is the trace of
+//   an opt-out that a trusted resubscribe wiped: that write clears unsubscribed_at and
+//   sets a later confirmed_at, so a click from before the opt-out no longer counts;
 // - no opt-out or sunset stamp (unsubscribed_at, deactivated_at) is at or after the
 //   click (an unreadable stamp fails closed).
 // Nothing is backfilled: history cannot tell a click from a trusted add, so a row has
 // the proof only from its first click after the columns shipped. The Beehiiv import
 // rows (`beehiiv_migration`, `beehiiv_migration_orphan`) never clicked, so they never
-// qualify. Two accepted cases. A sunset comeback (the reader answers the win-back quiz)
-// clears deactivated_at without a new confirm click: the reader's own click for this
-// address is still the evidence, and sunset is list hygiene, not an opt-out. And a
-// trusted add that makes a pending row active before the reader uses the link, or in
-// the same instant as the click (it then writes a later confirmed_at): no proof counts,
-// so that reader gets no block. That is the safe side (newsletter-subscribers.js
-// confirmByToken says why the trusted promotion is not changed).
+// qualify. Accepted cases:
+// - A sunset comeback (the reader answers the win-back quiz) clears deactivated_at
+//   without a new confirm click. The reader's own click for this address is still the
+//   evidence, and sunset is list hygiene, not an opt-out.
+// - A trusted add that makes a pending row active BEFORE the reader uses the link. The
+//   link then writes no proof, so that reader gets no block (the safe side).
+// - A trusted add of a pending row in the same instant as the reader's click (it read
+//   the row as pending, and its promotion updates by id with its own timestamp). The
+//   click and its proof stay on the row, and no opt-out is involved. When the
+//   promotion's confirmed_at is later than the click, this rule reads the click as
+//   void and the reader gets no block (the safe side). When it is not later, the click
+//   counts, and that is right: the reader clicked the link for this address.
+// newsletter-subscribers.js confirmByToken says why the trusted promotion and the
+// confirm page are not changed for these cases.
 function optedIn(row, subscriber) {
   if (!row || row.status !== 'active') return false;
   const confirmedAt = stampMs(row.confirmed_at);

@@ -627,15 +627,18 @@ async function confirmByToken(token) {
   // address is LOWER(email) of the row this UPDATE flips, taken in SQL: it is the
   // address on the row at that instant, and no address is bound into the query (knex
   // puts bound values in a failed query's message, which a caller may log).
-  // Accepted cases, both on the safe side (the reader gets no tool block). A trusted add
-  // that makes a pending row active BEFORE the reader uses the link: the link then reads
-  // 'already_active' (above), the page says so, and no proof is written. Recording a
-  // click on an already-active row would need a confirm button and new reader-facing
-  // words on that page, which is the owner's decision and not part of this change. And a
-  // trusted add that read the row as pending and writes just AFTER this click (its
-  // promotion updates by id): it writes a later confirmed_at, which the tool block's
-  // rule reads as a re-activation after the click. The trusted promotion is not changed
-  // here: it is a live staff path with its own callers.
+  // Accepted cases (the tool block's rule, optedIn, lists them too). A trusted add that
+  // makes a pending row active BEFORE the reader uses the link: the link then reads
+  // 'already_active' (above), the page says so, and no proof is written, so that reader
+  // gets no tool block (the safe side). Recording a click on an already-active row would
+  // need a confirm button and new reader-facing words on that page, which is the owner's
+  // decision and not part of this change. And a trusted add that read the row as pending
+  // and writes in the same instant as this click (its promotion updates by id, with its
+  // own timestamp): this click and its proof stay on the row. A promotion timestamp later
+  // than the click makes the rule drop the click (the safe side); one that is not later
+  // lets the click count, which is right, because the reader clicked for this address and
+  // no opt-out is involved. The trusted promotion is not changed here: it is a live staff
+  // path with its own callers.
   const now = new Date();
   const flipped = await db('newsletter_subscribers')
     .where({ id: initial.subscriber.id, confirmation_token: token, status: 'pending' })
