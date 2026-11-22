@@ -139,9 +139,12 @@ function agreedOneTimeJobRows(p) {
   const price = typeof j.stated_price === "number" ? fmtMoney(j.stated_price) : null;
   return [
     // No price: the booking resolved to another service (a covered re-service, say), or none was clear.
-    { label: "Why", value: price
-      ? "Staff priced a one-time job on the call, so the AI did not book it. Book it with its price."
-      : "Staff priced a one-time job on the call, so the AI did not book it. Check the service and its billing terms on the call, then book it." },
+    j.kept_visit_id
+      // Under the hold this pass kept a visit the call already had, and booked nothing more.
+      ? { label: "Why", value: `Staff priced a one-time job on the call. The call already has visit ${j.kept_visit_id}, so the AI booked nothing more. Check that visit, then book what the call still needs.` }
+      : { label: "Why", value: price
+        ? "Staff priced a one-time job on the call, so the AI did not book it. Book it with its price."
+        : "Staff priced a one-time job on the call, so the AI did not book it. Check the service and its billing terms on the call, then book it." },
     // The card holds what the call said. Nothing later rewrites it, as on every approved-but-unbooked card.
     { label: "Before you book", value: "Check the customer's schedule. Staff or a later pass may have booked, moved or cancelled a visit for this call: never book a second one." },
     p.service && { label: "Book", value: p.service },
