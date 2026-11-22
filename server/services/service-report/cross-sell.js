@@ -233,7 +233,7 @@ function pickOption(options = [], targetKey) {
 // authority for the property-equality proof, shared with filterRowsToStreet.
 const { scopeKeysShareLocality } = require('../estimate-property-linkage');
 const { hasPresenceValue } = require('../pricing-engine/property-calculator');
-const { hasGlobalVerifyFlag } = require('../lookup-confidence');
+const { hasGlobalVerifyFlag, hasHighPriorityDimensionFlag } = require('../lookup-confidence');
 // Moved to visit-property-scope.js (codex round-5 P1) so the upcoming-visits
 // card can share this exact single-premises proof instead of re-deriving
 // its own (a legacy no-evidence row on a multi-property account must not
@@ -357,9 +357,15 @@ function positiveOrNull(value) {
 //   - what was fed INTO the pricer:
 //       a. the stored requests (SEED_INPUT_KEYS), at any depth: the estimator
 //          also attaches the request to the result it saves. The lookup
-//          profile kept there lists verify flags for most properties. The
-//          check never read it, and reading it would end nearly every seeded
-//          price;
+//          profile kept there lists verify flags for most properties, and
+//          reading all of them would end nearly every seeded price. ONE kind
+//          is read (owner 2026-11-22): a HIGH flag on home size, lot size,
+//          stories or the whole lookup (lookup-confidence's
+//          hasHighPriorityDimensionFlag), the lookup's own "verify before
+//          pricing" grade on a dimension a seed replays. It counts whether or
+//          not the office corrected the number afterwards: the stored request
+//          does not say, and the office prices such a home by hand. On
+//          2026-11-22, 12 of 165 production seeds read as clean and held one;
 //       b. the service picks at the root (`services` as an object keyed by
 //          service). The quote wizard stores the request body's picks there
 //          as submitted, beside the normalized engineInput, and the lead
@@ -452,19 +458,30 @@ function estimateRequiresFieldVerification(estData, { replaysLawnSize = true } =
   const slimResult = (key, value) => key === 'engineResult' && isKeyed(value) && !Array.isArray(value.fieldVerify);
   // The stored JSON is a finite tree, so the walk needs no depth limit; a
   // limit would be a place where a marker reads as clean.
-  const pending = [{ node: estData, turfCounts: true }];
+  // `request` marks a node below a stored request: only the lookup's HIGH
+  // dimension flags are read there.
+  const pending = [{ node: estData, turfCounts: true, request: false }];
   while (pending.length) {
-    const { node, turfCounts } = pending.pop();
+    const { node, turfCounts, request } = pending.pop();
     if (!node || typeof node !== 'object') continue;
     if (Array.isArray(node)) {
-      for (const item of node) pending.push({ node: item, turfCounts });
+      for (const item of node) pending.push({ node: item, turfCounts, request });
+      continue;
+    }
+    if (request) {
+      if (hasHighPriorityDimensionFlag(node)) return true;
+      for (const child of Object.values(node)) pending.push({ node: child, turfCounts, request });
       continue;
     }
     if (markedForReview(node, turfCounts)) return true;
     for (const [childKey, child] of Object.entries(node)) {
-      if (SEED_INPUT_KEYS.has(childKey) || servicePicks(node, childKey, child)) continue;
+      if (servicePicks(node, childKey, child)) continue;
+      if (SEED_INPUT_KEYS.has(childKey)) {
+        pending.push({ node: child, turfCounts, request: true });
+        continue;
+      }
       if (slimResult(childKey, child)) return true;
-      pending.push({ node: child, turfCounts: childKey !== 'property' || turfSummaryCounts(node) });
+      pending.push({ node: child, turfCounts: childKey !== 'property' || turfSummaryCounts(node), request });
     }
   }
   return false;

@@ -233,6 +233,22 @@ function lookupDimensionIsTrustworthy(enriched, dimension) {
   return !hasVerifyFlagMatching(enriched, (field) => names.some((name) => field.includes(name)));
 }
 
+// A HIGH-priority verify flag on a core dimension (home size, lot size,
+// stories) or on the whole lookup ('address', 'all'): the lookup's own
+// "verify before pricing" grade. The priority is part of the test here, where
+// lookupDimensionIsTrustworthy above takes a flag of any priority: this one
+// reads a profile that was stored with a quote the office then priced, and
+// the MEDIUM form of 'all' marks a record for the right address.
+function hasHighPriorityDimensionFlag(enriched) {
+  const flags = Array.isArray(enriched?.fieldVerifyFlags) ? enriched.fieldVerifyFlags : [];
+  const names = Object.values(DIMENSION_FLAG_MATCHERS).flat();
+  return flags.some((flag) => {
+    if (String(flag?.priority || '').trim().toUpperCase() !== 'HIGH') return false;
+    const field = String(flag?.field || '').trim().toLowerCase();
+    return GLOBAL_VERIFY_FIELDS.has(field) || names.some((name) => field.includes(name));
+  });
+}
+
 // applyVisionPropertyTypeEvidence MUTATES the property record itself
 // (rc.propertyType = <satellite type>, rc._propertyTypeSource = 'satellite',
 // fieldVerify kept on rc._fieldEvidence.propertyType) — it only ever fires
@@ -383,6 +399,7 @@ module.exports = {
   lookupFeaturesAreTrustworthy,
   lookupPropertyTypeIsTrustworthy,
   lookupDimensionIsTrustworthy,
+  hasHighPriorityDimensionFlag,
   recordPropertyTypeIsTrustworthy,
   lookupTurfEstimateIsTrustworthy,
   // Value-agnostic turf trust: a consumer distinguishing "the lookup
