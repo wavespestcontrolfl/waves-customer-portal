@@ -324,7 +324,11 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
 
   test('the stay bonus window ends the day before the anniversary and prorates a check that spans that day', async () => {
     await seed();
-    const [delta] = await db('technicians').insert({ name: 'Sample Delta', hire_date: '2025-12-01' }).returning('id');
+    const fieldTech = { employment_type: 'w2', role: 'technician', employment_status: 'active', field_dispatchable: true };
+    const [delta, office] = await db('technicians').insert([
+      { name: 'Sample Delta', hire_date: '2025-12-01', ...fieldTech },
+      { name: 'Sample Office', hire_date: '2025-12-01', ...fieldTech, role: 'admin' }, // payroll writes an office account no line
+    ]).returning('id');
     const [run] = await db('payroll_runs').insert({ status: 'finalized', week_start: '2026-11-30', pay_date: '2026-12-11' }).returning('id');
     await insertChecks([{ run_id: run.id, technician_id: delta.id, status: 'finalized', week_start: '2026-11-30', gross_cents: 70000 }]);
     await db('time_entry_daily_summary').insert([
@@ -333,6 +337,10 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     ]);
     const board = await service.getScoreboard(delta.id, { now: new Date('2026-12-01T15:00:00Z') });
     expect(board.stayBonus).toMatchObject({ dueDate: '2026-12-01', earningsStart: '2025-12-01', estimateCents: Math.round(35000 * 0.02) });
+    // the anniversary day is the first day a pay run can carry the bonus, so payroll answers for it: an office account sees
+    // the milestone the day before (it is ahead, and shows for everyone) and the next one from the day itself
+    expect((await service.getScoreboard(office.id, { now: new Date('2026-11-30T15:00:00Z') })).stayBonus).toMatchObject({ dueDate: '2026-12-01', years: 1 });
+    expect((await service.getScoreboard(office.id, { now: new Date('2026-12-01T15:00:00Z') })).stayBonus).toMatchObject({ dueDate: '2028-12-01', years: 3 });
   });
 
   test('after the anniversary the stay bonus stays on the board until it is paid, worked out from the 12 months that ended', async () => {

@@ -123,7 +123,8 @@ function seasonBonusBlock(score, multiplier, grossCents) {
 const stayWindow = (dueDate) => ({ earningsStart: yearBefore(dueDate), earningsEnd: addStaffWorkDays(dueDate, -1) });
 
 // The stay bonus the board shows: the first milestone that no pay run has settled and that is still ahead, or that payroll
-// can still pay. Both lists are payroll's own answers, as years of service in text (tech-rewards-pay-lines.js stayBonusStatus):
+// can pay from today (the anniversary day is the first day a pay run can carry it, so that day is payroll's to answer, not
+// "ahead"). Both lists are payroll's own answers, as years of service in text (tech-rewards-pay-lines.js stayBonusStatus):
 //   settledKeys  the milestones a pay run has settled. Payroll never pays one again, so after a hire date correction that
 //                moves a paid anniversary ahead of today the board shows the next milestone, not that one.
 //   payableKeys  the milestones a pay run dated today could still write for this technician: from the anniversary to 60 days
@@ -134,7 +135,7 @@ const stayWindow = (dueDate) => ({ earningsStart: yearBefore(dueDate), earningsE
 function stayBonusBlock(hireDate, today, priorPayCents, { settledKeys = [], payableKeys = [] } = {}) {
   if (!hireDate || hireDate > today) return null;
   const next = calc.stayBonusSchedule(hireDate).find(({ years, dueDate }) => !settledKeys.includes(String(years))
-    && (dueDate >= today || payableKeys.includes(String(years))));
+    && (dueDate > today || payableKeys.includes(String(years))));
   if (!next) return null;
   const { years, rateBps, dueDate } = next;
   // the 12 months of pay end the day before the anniversary: that is the day the estimate is final
