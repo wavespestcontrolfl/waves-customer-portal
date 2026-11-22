@@ -2,7 +2,11 @@
 // "already there", who gets the sentence (a home estimate only), and that the migration's preview sample, the live
 // sentence and the call script say the same words. The published-version behavior is proved by the opt-in
 // PostgreSQL suite beside it.
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
 const migration = require('../models/migrations/20261122030000_estimate_delivery_no_visit_line');
+const logger = require('../services/logger');
 const { NO_VISIT_QUOTE_LINE, NO_VISIT_LINE_VARIABLE, noVisitLineFor } = require('../services/estimate-no-visit-line');
 const callScript = require('../services/csr/weekly-call-outcomes');
 
@@ -79,13 +83,27 @@ describe('who gets the "no visit needed" line', () => {
     expect(noVisitLineFor(HOME, { proposalMode: true })).toBe('');
   });
 
-  test('it fails closed: no category, or commercial marks inside a residential row, gets nothing', () => {
+  test('it fails closed: no category, or a commercial mark anywhere in a residential row, gets nothing', () => {
     expect(noVisitLineFor({})).toBe('');
     expect(noVisitLineFor()).toBe('');
     expect(noVisitLineFor({ category: null, estimate_data: HOME.estimate_data })).toBe('');
     expect(noVisitLineFor({ category: 'RESIDENTIAL', estimate_data: { propertyType: 'Commercial' } })).toBe('');
     expect(noVisitLineFor({ category: 'RESIDENTIAL', estimate_data: JSON.stringify({ lines: [{ service: 'commercial_pest' }] }) })).toBe('');
+    // The shape the booking path reads as commercial: a commercial service key on a recurring row, nothing else.
+    expect(noVisitLineFor({ category: 'RESIDENTIAL', estimate_data: { result: { recurring: { services: [{ serviceKey: 'commercial_lawn_monthly' }] } } } })).toBe('');
+    expect(noVisitLineFor({ category: 'RESIDENTIAL', estimate_data: JSON.stringify({ commercialEstimatedPricing: true }) })).toBe('');
+    // A proposal scaffold that is not enabled yet, the commercial tier, and a commercial service label.
+    expect(noVisitLineFor({ category: 'RESIDENTIAL', estimate_data: { proposal: { scaffold: true } } })).toBe('');
+    expect(noVisitLineFor({ ...HOME, waveguard_tier: 'commercial' })).toBe('');
+    expect(noVisitLineFor({ ...HOME, service_interest: 'Commercial Pest Control' })).toBe('');
     // Unreadable estimate data is not proof of a business: the row still says RESIDENTIAL.
     expect(noVisitLineFor({ category: 'RESIDENTIAL', estimate_data: '{not json' })).toBe(LINE);
+  });
+
+  test('a row that cannot be read gets no line and no error: the estimate email still sends', () => {
+    const broken = { id: 'estimate-7', category: 'RESIDENTIAL' };
+    Object.defineProperty(broken, 'service_interest', { enumerable: true, get() { throw new Error('boom'); } });
+    expect(noVisitLineFor(broken)).toBe('');
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('estimate estimate-7 could not be read as home or commercial; no line: boom'));
   });
 });

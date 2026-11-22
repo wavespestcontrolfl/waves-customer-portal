@@ -171,6 +171,13 @@ describe('admin estimate email delivery', () => {
       expect(sent().payload).not.toHaveProperty('estimate_no_visit_line');
     });
 
+    test('a residential row whose only commercial mark is a service key gets no line', async () => {
+      // The shape the booking path reads as commercial (isCommercialAutoAcceptEstimate).
+      await send(estimateOf({ estimate_data: JSON.stringify({ result: { recurring: { services: [{ serviceKey: 'commercial_lawn_monthly' }] } } }) }));
+      expect(sent().templateKey).toBe('estimate.delivery');
+      expect(sent().payload).not.toHaveProperty('estimate_no_visit_line');
+    });
+
     test('a commercial proposal sends its own email with no line', async () => {
       await send(estimateOf({ category: 'COMMERCIAL' }), { proposalMode: true });
       expect(sent().templateKey).toBe('estimate.proposal_delivery');

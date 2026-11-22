@@ -14,6 +14,8 @@
  * blank, so an estimate that is not a home estimate gets the email it got before.
  */
 
+const logger = require('./logger');
+
 const NO_VISIT_QUOTE_LINE = 'We measure your home and yard from county records and satellite images, so most quotes need no visit.';
 const NO_VISIT_LINE_VARIABLE = 'estimate_no_visit_line';
 
@@ -23,14 +25,24 @@ function parsed(value) {
   try { return JSON.parse(value); } catch { return null; }
 }
 
-// The sentence for a home estimate, '' for every other one. Fails closed: a row that does not say RESIDENTIAL
-// (the column default), a proposal, or estimate data that carries any commercial marker gets no line.
+// The sentence for a home estimate, '' for every other one. Fails closed, in three steps:
+// - a proposal gets none;
+// - a row whose category is not RESIDENTIAL (the column default) gets none;
+// - a row that says commercial anywhere gets none. isCommercialEstimateRow (plan-start-eligibility.js) is the one
+//   full reading of that: the tier, the service label, a proposal or its scaffold, and every commercial mark or
+//   commercial service key in the estimate data (the scans of the save and of the booking path are inside it).
+// The line is optional and the estimate email is not: a row that cannot be read gets no line, never a failed send.
 function noVisitLineFor(estimate = {}, { proposalMode = false } = {}) {
   if (proposalMode) return '';
   if (String(estimate?.category || '').trim().toUpperCase() !== 'RESIDENTIAL') return '';
-  const { isCommercialEstimateData } = require('./estimate-delivery-options');
-  if (isCommercialEstimateData(parsed(estimate.estimate_data ?? estimate.estimateData))) return '';
-  return NO_VISIT_QUOTE_LINE;
+  try {
+    const { isCommercialEstimateRow } = require('./plan-start-eligibility');
+    const row = { ...estimate, estimate_data: parsed(estimate.estimate_data ?? estimate.estimateData) };
+    return isCommercialEstimateRow(row, false) ? '' : NO_VISIT_QUOTE_LINE;
+  } catch (err) {
+    logger.warn(`[estimate-no-visit-line] estimate ${estimate?.id || '(no id)'} could not be read as home or commercial; no line: ${err.message}`);
+    return '';
+  }
 }
 
 module.exports = { NO_VISIT_QUOTE_LINE, NO_VISIT_LINE_VARIABLE, noVisitLineFor };
