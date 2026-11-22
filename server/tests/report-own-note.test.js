@@ -106,6 +106,7 @@ describe('the wordings the reader lets stand are refused where the note is writt
     'Foot traffic can resume on 3/4 in the yard.',
     'Foot traffic can resume on 11/22 in vents.',
     'Foot traffic can resume on 3/4 in all rooms.',
+    'Foot traffic can resume on 3/4 in shaded areas.',
     'Foot traffic can resume on 3/4 in 2027.',
     'I treated the patio on 11/22/26.',
     'Do not enter the yard.',
@@ -260,5 +261,8 @@ describe('the stored text and the fixed sentence', () => {
     await expect(refusal('treating outside tomorrow', 'Treating outside.')).resolves.toBeNull();
     expect(await refusal('spot treating outside tomorrow', 'I was spot treating outside.')).toEqual({ reason: 'not_in_note', words: ['was'] });
     expect(await refusal('treating outside, tomorrow', 'I was treating outside.')).toEqual({ reason: 'not_in_note', words: ['was'] });
+    expect(await refusal('treating outside tomorrow', 'I\'m treating outside.')).toEqual({ reason: 'not_in_note', words: ['am'] });
+    expect(await refusal('treating outside, in two weeks', 'I was treating outside.')).toEqual({ reason: 'not_in_note', words: ['was'] });
+    await expect(refusal('treating outside, in two weeks', 'Treating outside.')).resolves.toBeNull();
   });
 });

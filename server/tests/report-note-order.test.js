@@ -190,8 +190,18 @@ describe('the text is refused', () => {
     // A word of the part between the two hides nothing.
     expect(orderRejection('I was spot treating outside.', 'spot treating outside tomorrow', timed)).toEqual({ reason: 'not_in_note', words: ['was'] });
     expect(orderRejection('Spot treating outside.', 'spot treating outside tomorrow', timed)).toBeNull();
-    // "Am" sets a tense too: work now is no plan.
+    // "Am" sets a tense too, also contracted: work now is no plan.
     expect(orderRejection('I am treating outside.', 'treating outside tomorrow', timed)).toEqual({ reason: 'not_in_note', words: ['am'] });
+    expect(orderRejection('I\'m treating outside.', 'treating outside tomorrow', timed)).toEqual({ reason: 'not_in_note', words: ['am'] });
+    expect(orderRejection('You\'re treating outside.', 'customer treating outside tomorrow', timed)).toEqual({ reason: 'not_in_note', words: ['are'] });
+    // A part that went whole with a word of time carries the tense of its sentence.
+    const period = { wordGoes: (word) => word === 'weeks' && 'time', partGoes: (part) => /weeks/.test(part) };
+    expect(orderRejection('I was treating outside.', 'treating outside, in two weeks', period)).toEqual({ reason: 'not_in_note', words: ['was'] });
+    expect(orderRejection('I was treating outside.', 'treating outside. in two weeks.', period)).toEqual({ reason: 'not_in_note', words: ['was'] });
+    expect(orderRejection('Ants were trailing in kitchen.', 'ants trailing in kitchen, back in 2 weeks', period)).toEqual({ reason: 'not_in_note', words: ['were'] });
+    expect(orderRejection('Ants trailing in kitchen.', 'ants trailing in kitchen, back in 2 weeks', period)).toBeNull();
+    // A sentence of its own that says more than the time speaks for itself.
+    expect(orderRejection('Ants were trailing in kitchen.', 'ants trailing in kitchen. back in 2 weeks', period)).toBeNull();
     // A word of time alone in its part carries the tense of the parts beside it.
     expect(orderRejection('I was treating outside.', 'treating outside, tomorrow', timed)).toEqual({ reason: 'not_in_note', words: ['was'] });
     expect(orderRejection('I was treating outside.', 'tomorrow, treating outside', timed)).toEqual({ reason: 'not_in_note', words: ['was'] });

@@ -163,7 +163,7 @@ function noteWords(text) {
     .replace(/\b(she|he|it|that|there|what|who|where|here)'s (been|got)\b/g, '$1 has $2')
     .replace(/\b(she|he|it|that|there|what|who|where|here)'s\b/g, '$1 is')
     .replace(/\b(you|we|they|i)'ve\b/g, '$1 have')
-    .replace(/(\p{L})'s\b/gu, (_, letter) => ownerForm(letter)).replace(/'(?:ve|re|m)\b/g, ' ')
+    .replace(/(\p{L})'s\b/gu, (_, letter) => ownerForm(letter)).replace(/'m\b/g, ' am').replace(/'re\b/g, ' are').replace(/'ve\b/g, ' ')
     .match(/[\p{L}\p{N}]+/gu) || [];
 }
 const isCount = (word) => /\p{N}/u.test(word) || NUMBER_WORDS.includes(word);
@@ -469,17 +469,30 @@ function leftOutRejection(usedIn, out, read, rules) {
 // is a plan. Where one went, the text adds no form of "is" before a word in
 // "-ing" of that part ("I was treating outside." is past work, "I am
 // treating outside." is work now), also with words of the part between the
-// two ("I was spot treating outside."). A word of time alone in its part
-// carries the tense of the parts beside it ("treating outside, tomorrow").
+// two ("I was spot treating outside."). A contracted form is a form too
+// ("I'm treating outside."). What a lost word of time speaks for:
+//   - its own part;
+//   - every part of its sentence, when its part went whole ("treating
+//     outside, in two weeks", "treating outside, hopefully tomorrow"). The
+//     safe side: after "ants trailing in kitchen, back in 2 weeks" the text
+//     may say "Ants trailing in the kitchen." and not "Ants were trailing";
+//   - the parts beside its part, across a sentence mark too, when the part
+//     holds nothing but the time ("treating outside. In two weeks.").
 const SETS_A_TENSE = new Set([...FORMS_OF_IS, 'am']);
+const LEADS_TO_A_TIME = new Set('in on at by for next this last until till after before within about around every each coming following'.split(' '));
 function addedTenseRejection(textWords, placedAt, read, rules) {
   const parts = [...new Set(read.words.map((entry) => entry.part))];
-  const alone = (part) => read.words.every((entry, i) => entry.part !== part || rules.timed[i] || SMALL.has(entry.word));
+  const everyWordOf = (part, test) => read.words.every((entry, i) => entry.part !== part || test(entry.word, i));
+  const wentWhole = (part) => everyWordOf(part, (_, i) => placedAt[i] < 0);
+  const onlyTime = (part) => everyWordOf(part, (word, i) => rules.timed[i] || SMALL.has(word) || isCount(word) || LEADS_TO_A_TIME.has(word));
   const lostTime = new Set();
   read.words.forEach((entry, i) => {
     if (!rules.timed[i] || placedAt[i] >= 0) return;
+    lostTime.add(entry.part);
+    if (!wentWhole(entry.part)) return;
+    read.words.filter((other) => other.sentence === entry.sentence).forEach((other) => lostTime.add(other.part));
     const at = parts.indexOf(entry.part);
-    (alone(entry.part) ? [parts[at - 1], entry.part, parts[at + 1]] : [entry.part]).forEach((part) => lostTime.add(part));
+    if (onlyTime(entry.part)) [parts[at - 1], parts[at + 1]].forEach((part) => lostTime.add(part));
   });
   // The part of the note each text word took; a text word with none was added.
   const partOf = new Map(read.words.map((entry, i) => [placedAt[i], entry.part]));
