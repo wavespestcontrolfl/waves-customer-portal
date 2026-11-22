@@ -1046,29 +1046,6 @@ function authoredProposalScheduleLines(estimate) {
   return lines;
 }
 
-// Whether a staff (manual) discount reaches the estimate's recurring work, in either persisted shape. One reading for
-// the schedule lines below and for completion-pricing.js, which must not name a line's whole saving after the tier
-// when a staff discount shares it (it also passes the recurring block its tier comes from as `tierBlock`).
-function staffDiscountReachesRecurring(estData, tierBlock = null) {
-  // Manual discounts persist at result.manualDiscount /
-  // result.totals.manualDiscount / summary.manualDiscount (Codex #3173
-  // r4) — resolve them through the SAME normalizer the estimate page
-  // uses, plus the recurring-scoped legacy spots.
-  const { normalizeManualDiscountSummary } = require('./estimate-public');
-  // Only the discount's RECURRING slice suppresses recurring provenance
-  // (Codex #3173 r3): a fixed discount redirected entirely to one-time
-  // work persists amount > 0 with recurringAmount: 0, and the recurring
-  // lines' charges are unchanged. Same fallback rule as
-  // manualDiscountMonthlyAmount: recurringAmount ?? amount.
-  const manual = normalizeManualDiscountSummary(estData);
-  const manualHitsRecurring = !!manual && Number(manual.recurringAmount ?? manual.amount) > 0;
-  const recManualHitsRecurring = [estData?.result?.recurring || estData?.recurring, tierBlock].some((rec) => {
-    const recManual = rec?.manualDiscount || null;
-    return !!recManual && Number(recManual.recurringAmount ?? recManual.amount ?? recManual.value) > 0;
-  });
-  return manualHitsRecurring || recManualHitsRecurring;
-}
-
 function scheduleLinesFromEstimate(estimate, serviceIndex, { includeSourceLines = false } = {}) {
   const authoredLines = authoredProposalScheduleLines(estimate);
   if (authoredLines) return authoredLines;
@@ -1091,7 +1068,24 @@ function scheduleLinesFromEstimate(estimate, serviceIndex, { includeSourceLines 
   let parentRecurringDiscounted = false;
   try {
     const rec = estData?.result?.recurring || estData?.recurring || {};
-    parentRecurringDiscounted = Number(rec?.discount) > 0 || staffDiscountReachesRecurring(estData);
+    // Manual discounts persist at result.manualDiscount /
+    // result.totals.manualDiscount / summary.manualDiscount (Codex #3173
+    // r4) — resolve them through the SAME normalizer the estimate page
+    // uses, plus the recurring-scoped legacy spots.
+    const { normalizeManualDiscountSummary } = require('./estimate-public');
+    const recManual = rec?.manualDiscount || null;
+    // Only the discount's RECURRING slice suppresses recurring provenance
+    // (Codex #3173 r3): a fixed discount redirected entirely to one-time
+    // work persists amount > 0 with recurringAmount: 0, and the recurring
+    // lines' charges are unchanged. Same fallback rule as
+    // manualDiscountMonthlyAmount: recurringAmount ?? amount.
+    const manual = normalizeManualDiscountSummary(estData);
+    const manualHitsRecurring = !!manual && Number(manual.recurringAmount ?? manual.amount) > 0;
+    const recManualHitsRecurring = !!recManual
+      && Number(recManual.recurringAmount ?? recManual.amount ?? recManual.value) > 0;
+    parentRecurringDiscounted = Number(rec?.discount) > 0
+      || manualHitsRecurring
+      || recManualHitsRecurring;
   } catch { parentRecurringDiscounted = false; }
   const schedulableOneTimeList = oneTimeList.filter(isSchedulableOneTimeEstimateLine);
   const monthlyTotal = Number(estimate.monthly_total || 0);
@@ -7188,7 +7182,6 @@ router._private = {
   adminMembershipStartIdempotencyKey,
   adminNotificationPrefsDbUpdates,
   addMonthsDateOnly,
-  staffDiscountReachesRecurring,
   cadenceFromEstimateLine,
   compactServiceContactSlots,
   customerSearchTerms,

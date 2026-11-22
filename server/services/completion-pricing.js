@@ -128,25 +128,25 @@ function savedEstimateTier(estimate, data) {
   return { recurring, discounted, tier: { tier, amount } };
 }
 
-// Whether a stored staff discount record can reach recurring work. Its saved recurring share decides when it has one
-// (exactly 0 = one-time only). A record with no share saved (an older or value-only shape, replayed onto recurring
-// work) reaches it whenever it carries any positive figure.
+// Whether a stored staff discount record can reach recurring work. A saved recurring share of exactly 0 proves it is
+// one-time only. Any other record (a positive share, no share saved, a blank or unreadable share, a value-only older
+// shape that replays onto recurring work) reaches it whenever it carries a positive figure.
 function staffRecordReachesRecurring(manual) {
-  if (!manual || typeof manual !== 'object') return false;
-  if (manual.recurringAmount != null) return Number(manual.recurringAmount) !== 0;
-  return [manual.amount, manual.value].some((figure) => Number(figure) > 0);
+  if (!manual || typeof manual !== 'object' || money(manual.recurringAmount) === 0) return false;
+  return [manual.recurringAmount, manual.amount, manual.value].some((figure) => Number(figure) > 0);
 }
 
 // A staff discount on recurring work in any place the estimate persisted one: every stored summary spot
-// (estimate-manual-discount-replay.js storedManualDiscountCandidates, not only the first positive one), the recurring
-// blocks, and all of these again on the engine's own result beside a mapped result, which the readers otherwise skip.
+// (estimate-manual-discount-replay.js storedManualDiscountCandidates, not only the first positive one), on the mapped
+// result and again on the engine's own result beside it, plus the record each recurring block may carry (the legacy
+// recurring-scoped shape the schedule mapper also reads).
 function staffDiscountOnRecurring(data, tierBlock) {
-  const { staffDiscountReachesRecurring } = require('../routes/admin-customers')._private;
   const { storedManualDiscountCandidates } = require('./estimate-manual-discount-replay');
-  const engineView = { ...data, result: undefined };
-  return [data, engineView].some((view) => storedManualDiscountCandidates(view).some(staffRecordReachesRecurring))
-    || staffDiscountReachesRecurring(data, tierBlock)
-    || staffDiscountReachesRecurring(engineView, object(object(data.engineResult).recurring));
+  const blocks = [object(data.result).recurring, data.recurring, object(data.engineResult).recurring, tierBlock];
+  return [
+    ...storedManualDiscountCandidates(data), ...storedManualDiscountCandidates({ ...data, result: undefined }),
+    ...blocks.map((block) => object(block).manualDiscount),
+  ].some(staffRecordReachesRecurring);
 }
 
 // What names an accepted estimate's savings: its own staff discount (applied after the tier) when that reaches
@@ -200,7 +200,9 @@ function namingTier(raw, base, savings, { estimateTier, credited, serviceKey }) 
     && require('../routes/estimate-public').recurringServiceReceivesTierDiscount({ ...raw, service: raw.service || serviceKey || undefined });
   if (lineTier || !inferable) return lineTier || null;
   const tierSavings = tierSavingsOn(base, Number(estimateTier.amount));
-  return tierSavings !== null && Math.abs(Math.round((savings - tierSavings) * 100)) <= TIER_ROUNDING_CENTS ? estimateTier : null;
+  // The rounding allowance is for a net derived from the annual; a row with its own per-application net is exact.
+  const allowance = money(raw.priceAfterDiscount) !== null ? 0 : TIER_ROUNDING_CENTS;
+  return tierSavings !== null && Math.abs(Math.round((savings - tierSavings) * 100)) <= allowance ? estimateTier : null;
 }
 
 // One line's accepted saving split into the discounts that made it: the WaveGuard tier (namingTier), then the

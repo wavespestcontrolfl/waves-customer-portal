@@ -81,6 +81,9 @@ describe('completion estimate evidence', () => {
     expect(names(acceptedPricing(row(95.96), platinum))).toEqual([['WaveGuard Platinum', 24.04, 20, true]]);
     // A saving that is not the tier's rate, a service credit, or an estimate with no tier rate stays unnamed.
     const unnamed = (dollars) => [['Accepted estimate discount', dollars, undefined, false]];
+    // A row with its own per-application net has no annual rounding: it must match to the cent.
+    expect(names(acceptedPricing(row(96, { priceAfterDiscount: 96 }), platinum))).toEqual([['WaveGuard Platinum', 24, 20, true]]);
+    expect(names(acceptedPricing(row(96.04, { priceAfterDiscount: 96.04 }), platinum))).toEqual(unnamed(23.96));
     expect(names(acceptedPricing(row(108), platinum))).toEqual(unnamed(12));
     expect(names(acceptedPricing(row(90), platinum))).toEqual(unnamed(30));
     expect(names(acceptedPricing(row(96, { serviceSpecificDiscounts: [{ amount: 24 }] }), platinum))).toEqual(unnamed(24));
@@ -183,6 +186,7 @@ describe('completion estimate evidence', () => {
       const withStaff = (manualDiscount) => ({ ...estimate, waveguard_tier: 'Platinum',
         estimate_data: { result: { recurring: { tier: 'Platinum', discount: 0.2 }, manualDiscount } } });
       expect((await read(withStaff({ type: 'FIXED', value: 50, oneTimeAmount: 0 }))).reason).toBe('discount_unnamed');
+      expect((await read(withStaff({ amount: 10, recurringAmount: '' }))).reason).toBe('discount_unnamed');
       expect((await read(withStaff({ type: 'FIXED', value: 0, amount: 0 }))).breakdown.discounts).toEqual([{ name: 'WaveGuard Platinum', dollars: 22 }]);
       expect((await read(withStaff({ amount: 10, recurringAmount: 0 }))).breakdown.discounts).toEqual([{ name: 'WaveGuard Platinum', dollars: 22 }]);
       // The legacy nested block also supplies rows: which block priced the line is unknown, so nothing is named.
