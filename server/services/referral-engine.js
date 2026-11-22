@@ -783,10 +783,12 @@ async function conversionSettings(conn) {
   if (!isEnabled('referralStep2')) return getSettings();
   const live = await liveSettingsOrThrow(conn || db);
   // `stagedMark`: written on the referral so its settlement takes the Step 2 bookkeeping even if the gate has been
-  // switched off by then; the settlement replaces it with the final reason.
+  // switched off by then; the settlement replaces it with the final reason. thank_you_note_due_at: the member is
+  // owed a handwritten thank-you note for this booking (referral-thank-you-notes.js). It is written here and
+  // nowhere else, so the note follows the booking and never the settlement.
   return {
     ...live, require_service_completion: true, referrer_reward_cents: step2.step2Settings(live).step2_referrer_reward_cents,
-    stagedMark: { referrer_reward_reason: 'staged' },
+    stagedMark: { referrer_reward_reason: 'staged', thank_you_note_due_at: new Date() },
   };
 }
 

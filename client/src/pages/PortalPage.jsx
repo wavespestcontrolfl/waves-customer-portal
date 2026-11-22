@@ -14411,7 +14411,7 @@ function ReferTab({ customer, onSwitchTab }) {
             </h1>
             <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
               {atYearlyLimit && Number(data.creditsThisYear) > 0
-                ? `You earned ${Number(data.creditsThisYear)} credits this year, the most we give. Thank you! Credits start again January 1.`
+                ? `You earned ${Number(data.creditsThisYear)} credits this year, the most we give. Thank you! Credits start again January 1. We still send a thank-you note for every friend who books.`
                 : step2Words.intro || (earnsCredit
                   ? `Share your Waves link with neighbors. You earn ${money(rewardPerReferral)} account credit when a referral starts service.`
                   : 'Share your Waves link with neighbors who could use a hand with pest or lawn care.')}

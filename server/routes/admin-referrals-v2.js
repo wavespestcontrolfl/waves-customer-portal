@@ -9,6 +9,7 @@ const logger = require('../services/logger');
 const engine = require('../services/referral-engine');
 const { isEnabled } = require('../config/feature-gates');
 const inbound = require('../services/referral-inbound');
+const thankYouNotes = require('../services/referral-thank-you-notes');
 const { form1099ThresholdCents } = require('../services/form-1099-threshold');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -209,6 +210,30 @@ router.post('/inbound/:customerId/dismiss', async (req, res, next) => {
     const result = await inbound.dismissInboundReferral({
       customerId,
       reviewedBy: UUID_RE.test(String(req.technicianId || '')) ? req.technicianId : null,
+    });
+    res.json({ success: true, ...result });
+  } catch (err) { sendInboundError(res, err, next); }
+});
+
+// =========================================================================
+// Thank-you notes (Step 2): one handwritten note to the member for every friend who books. The rule is in
+// services/referral-thank-you-notes.js. The list is the member's name and mailing address; it never carries the
+// friend. Nothing is sent from here.
+// =========================================================================
+router.get('/thank-you-notes', async (req, res, next) => {
+  try {
+    res.json({ notes: await thankYouNotes.listThankYouNotes() });
+  } catch (err) { next(err); }
+});
+
+// POST /thank-you-notes/:referralId/written — the office wrote the note; it leaves the list.
+router.post('/thank-you-notes/:referralId/written', async (req, res, next) => {
+  try {
+    const { referralId } = req.params;
+    if (!UUID_RE.test(referralId)) return res.status(400).json({ error: 'referralId is required' });
+    const result = await thankYouNotes.markThankYouNoteWritten({
+      referralId,
+      writtenBy: UUID_RE.test(String(req.technicianId || '')) ? req.technicianId : null,
     });
     res.json({ success: true, ...result });
   } catch (err) { sendInboundError(res, err, next); }

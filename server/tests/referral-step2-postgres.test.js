@@ -289,6 +289,9 @@ const DAY = 86400000;
     await migration.up(db);
     refereeMigration = require('../models/migrations/20261120160000_referral_referee_customer');
     await refereeMigration.up(db);
+    // The thank-you note columns: a booking under Step 2 stamps thank_you_note_due_at, and the office's list of
+    // notes to write (services/referral-thank-you-notes.js) reads them.
+    await require('../models/migrations/20261122180000_referral_thank_you_notes').up(db);
 
     gates = require('../config/feature-gates').gates;
     engine = require('../services/referral-engine');
@@ -463,7 +466,7 @@ const DAY = 86400000;
       gates.referralStep2 = false;
       await db('referral_program_settings').where({ id: 1 }).update({ bonus_silver_cents: 1000 });
       const ctx = await performed(); // staged $25 + $10 tier bonus = $35 on the promoter
-      expect(await row(ctx.ref.id)).toMatchObject({ referrer_reward_reason: null });
+      expect(await row(ctx.ref.id)).toMatchObject({ referrer_reward_reason: null, thank_you_note_due_at: null });
       expect(await db('referral_promoters').where({ id: ctx.ref.promoter_id }).first()).toMatchObject({ pending_earnings_cents: 3500, total_earned_cents: 3500 });
       await firstService(ctx.friend, ctx.visit);
       expect(await amounts(ctx.member.id)).toEqual([25]);
@@ -1124,10 +1127,86 @@ const DAY = 86400000;
       expect(await db('customer_credit_ledger').where({ customer_id: member.id }).count('* as n').first()).toEqual({ n: '11' });
       expect(await row(ref.id)).toMatchObject({
         status: 'credited', referee_credited: true, referrer_credited: true,
-        referrer_credit_cents: null, referrer_reward_reason: null,
+        referrer_credit_cents: null, referrer_reward_reason: null, thank_you_note_due_at: null,
       });
       // Total earned keeps the staged amount, exactly as today.
       expect(await db('referral_promoters').where({ id: ref.promoter_id }).first()).toMatchObject({ total_earned_cents: 2500, pending_earnings_cents: 0 });
+    });
+  });
+
+  // The handwritten thank-you note (owner 2026-11-20: one to the member for every friend who books). The REAL
+  // conversion and settlement with the REAL list: the note follows the booking under Step 2, never the settlement.
+  describe('thank-you notes: the booking under Step 2 decides', () => {
+    const noteList = () => require('../services/referral-thank-you-notes').listThankYouNotes();
+    const owed = async (...refs) => {
+      const ids = new Set((await noteList()).map((n) => n.referralId));
+      return refs.map((ref) => ids.has(ref.id));
+    };
+    const ADDRESS = { address_line1: '12 Sample Way', city: 'Parrish', state: 'FL', zip: '34219' };
+
+    test('a booking under Step 2 puts the member on the list at once, before any plan service, and the settlement changes nothing', async () => {
+      const ctx = await performed({ memberFields: ADDRESS });
+      const stamped = (await row(ctx.ref.id)).thank_you_note_due_at;
+      expect(stamped).toBeInstanceOf(Date);
+
+      const [note] = (await noteList()).filter((n) => n.referralId === ctx.ref.id);
+      expect(note).toEqual({
+        referralId: ctx.ref.id, bookedAt: stamped,
+        memberName: `Fixture ${ctx.member.last_name}`, addressLines: ['12 Sample Way', 'Parrish, FL 34219'],
+      });
+      // Never the friend.
+      expect(JSON.stringify(note)).not.toContain('Fixture Friend');
+      expect(JSON.stringify(note)).not.toContain(ctx.friend.phone);
+
+      await firstService(ctx.friend, ctx.visit);
+      expect((await row(ctx.ref.id)).thank_you_note_due_at).toEqual(stamped);
+      expect(await owed(ctx.ref)).toEqual([true]);
+    });
+
+    test('a friend who booked before Step 2 earns no note, also when the first plan service is settled under Step 2', async () => {
+      gates.referralStep2 = false;
+      const ctx = await performed(); // booked with the gate off
+      expect((await row(ctx.ref.id)).thank_you_note_due_at).toBeNull();
+
+      gates.referralStep2 = true; // the owner turns Step 2 on; the first plan service is settled under it
+      await firstService(ctx.friend, ctx.visit);
+      expect(await row(ctx.ref.id)).toMatchObject({ status: 'credited', referrer_reward_reason: 'standard', thank_you_note_due_at: null });
+      expect(await owed(ctx.ref)).toEqual([false]);
+    });
+
+    test('two members who referred the same friend under Step 2 are both owed a note, before and after the settlement retires one referral', async () => {
+      const friend = await planFriend();
+      const visit = await recurringVisit(friend.id, { status: 'completed' });
+      const first = await referral(await customer(), friend, { ageDays: 3 });
+      const second = await referral(await customer(), friend, { ageDays: 2 });
+      await convert(first, friend);
+      await convert(second, friend);
+      expect(await owed(first, second)).toEqual([true, true]);
+
+      await firstService(friend, visit);
+      const states = [(await row(first.id)).referrer_reward_status, (await row(second.id)).referrer_reward_status].sort();
+      expect(states).toEqual(['earned', 'superseded']);
+      expect(await owed(first, second)).toEqual([true, true]);
+    });
+
+    test('two members who referred the same friend before Step 2: neither is owed a note after a Step 2 settlement', async () => {
+      gates.referralStep2 = false;
+      const friend = await planFriend();
+      const visit = await recurringVisit(friend.id, { status: 'completed' });
+      const first = await referral(await customer(), friend, { ageDays: 3 });
+      const second = await referral(await customer(), friend, { ageDays: 2 });
+      await convert(first, friend);
+      await convert(second, friend);
+
+      gates.referralStep2 = true;
+      await firstService(friend, visit);
+      expect(await owed(first, second)).toEqual([false, false]);
+    });
+
+    test('a note owed from a booking under Step 2 stays owed when the gate goes off', async () => {
+      const ctx = await performed();
+      gates.referralStep2 = false;
+      expect(await owed(ctx.ref)).toEqual([true]);
     });
   });
 });
