@@ -987,6 +987,9 @@ const includesReentryGuarantee = (result) => result?.includesReentryGuarantee ==
 // Known values only: anything else leaves the feature as it was. The key is
 // no new power for a caller that controls the input: `features` already
 // carries the same three facts.
+// The one-time pest price anchors on the recurring line's quarterly rate, so
+// generateEstimate re-prices that anchor on the plain property when the facts
+// applied (recurringPestPlainBasePrice): a one-time price does not move.
 const PEST_PHOTO_FACT_VALUES = {
   shrubs: ['light', 'moderate', 'heavy'],
   complexity: ['simple', 'moderate', 'complex'],
@@ -1267,6 +1270,9 @@ function generateEstimate(input) {
     }
   };
   let recurringPestRoachType = 'none';
+  // The recurring pest line's quarterly base price WITHOUT input.pestPhotoFacts,
+  // set only when those facts priced the line. The one-time pest anchor reads it.
+  let recurringPestPlainBasePrice;
   if (profileIsCommercial) property.isCommercial = true;
   else if (hasExplicitCommercialFlag) property.isCommercial = inputIsCommercial;
   if (commercialSubtype) property.commercialSubtype = commercialSubtype;
@@ -1357,18 +1363,8 @@ function generateEstimate(input) {
         requestedFrequency: services.pest.frequency || 'quarterly',
         roachType: services.pest.roachType || 'none',
       });
-      const result = bandVerdict.status === 'trusted'
-        ? pricePestControlUnitBand(property, {
-          band: bandVerdict.band,
-          frequency: services.pest.frequency || 'quarterly',
-          bedroomCount: input.unitBandPricing.bedroomCount,
-        })
-        : bandVerdict.status === 'untrusted'
-        // Fail CLOSED: a snapshot that no longer verifies must not
-        // re-price on the footprint ladder (stored quotes keep their
-        // dollars or visibly stop).
-        ? unitBandQuoteRequiredLine('pest_control', bandVerdict.reason)
-        : pricePestControl(pestPropertyWithPhotoFacts(property, input.pestPhotoFacts), {
+      const pestProperty = pestPropertyWithPhotoFacts(property, input.pestPhotoFacts);
+      const pestLadderOptions = {
         frequency: services.pest.frequency || 'quarterly',
         // No caller-provided version → defer to pricePestControl's own live
         // default (v2 curve). The old `|| 'v1'` fallback silently pinned
@@ -1380,7 +1376,22 @@ function generateEstimate(input) {
         modifiers,
         pestProgramFloorArmed,
         pestProgramFloorPerVisit: pestProgramFloorPerVisitResolved,
-      });
+      };
+      const result = bandVerdict.status === 'trusted'
+        ? pricePestControlUnitBand(property, {
+          band: bandVerdict.band,
+          frequency: services.pest.frequency || 'quarterly',
+          bedroomCount: input.unitBandPricing.bedroomCount,
+        })
+        : bandVerdict.status === 'untrusted'
+        // Fail CLOSED: a snapshot that no longer verifies must not
+        // re-price on the footprint ladder (stored quotes keep their
+        // dollars or visibly stop).
+        ? unitBandQuoteRequiredLine('pest_control', bandVerdict.reason)
+        : pricePestControl(pestProperty, pestLadderOptions);
+      if (pestProperty !== property && bandVerdict.status !== 'trusted' && bandVerdict.status !== 'untrusted') {
+        recurringPestPlainBasePrice = pricePestControl(property, pestLadderOptions).basePrice;
+      }
       result.annual = Math.round(result.annual * 100) / 100;
       result.monthly = Math.round(result.annual / 12 * 100) / 100;
       result.perApp = Math.round(result.annual / result.visitsPerYear * 100) / 100;
@@ -1980,7 +1991,11 @@ function generateEstimate(input) {
         // Anchor on the QUARTERLY rate (basePrice), never the selected-frequency
         // perApp — a monthly/bimonthly perApp is discounted and would understate
         // the one-time price.
-        recurringPestPerApp: services.pest ? lineItems.find(l => l.service === 'pest_control')?.basePrice : null,
+        // Photo facts price the recurring line alone: when they applied, the
+        // anchor is that line's base price without them.
+        recurringPestPerApp: services.pest
+          ? (recurringPestPlainBasePrice ?? lineItems.find(l => l.service === 'pest_control')?.basePrice)
+          : null,
         roachType: services.oneTimePest.roachType || 'none',
       });
       lineItems.push(result);

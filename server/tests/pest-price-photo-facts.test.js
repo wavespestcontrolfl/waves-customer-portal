@@ -9,7 +9,9 @@
  * mosquito price would move by a whole tier); (2) a photo that conflicts with
  * county records, a weak or unscored photo, a photo with no lawn number of
  * its own, a flagged feature read, or a fact the vision providers disputed
- * starts to price; (3) the gate off changes any price.
+ * starts to price; (3) the gate off changes any price; (4) a one-time pest
+ * price on the same estimate moves with the recurring line; (5) a "no water"
+ * word the map does not know adds the near-water charge.
  *
  * Gap in existing proof: customer-pricing-ai.test.js proves a flagged read
  * drops every feature; nothing covered a per-line exception.
@@ -143,6 +145,36 @@ describe('resolvePropertyContext: pestPhotoFacts', () => {
     expect(ctx.propertyInput.pestPhotoFacts).toBeUndefined();
   });
 
+  test.each([
+    ['NONE', false],
+    ['NO', false],
+    ['CANAL_ADJACENT', true],
+    ['retention_nearby', true],
+  ])('gate on: a near-water reading of %s is the fact %s', async (word, expected) => {
+    process.env[GATE] = 'true';
+    const ctx = await resolve(photoRead({ nearWater: word, fieldVerifyFlags: [LAWN_FLAG] }));
+    expect(ctx.propertyInput.pestPhotoFacts).toEqual({ shrubs: 'light', complexity: 'simple', nearWater: expected });
+  });
+
+  // A word outside the lookup's own list is not a read: it must not add the
+  // near-water charge, and it must not stand for "no water" either.
+  test.each(['YES', 'UNKNOWN', 'POSSIBLE'])('gate on: a near-water reading of %s is no fact', async (word) => {
+    process.env[GATE] = 'true';
+    const ctx = await resolve(photoRead({ nearWater: word, shrubDensity: 'UNKNOWN', fieldVerifyFlags: [LAWN_FLAG] }));
+    expect(ctx.propertyInput.pestPhotoFacts).toEqual({ complexity: 'simple' });
+  });
+
+  // A new value in the lookup must be sorted into a fact map, or it is
+  // silently never a fact. 'NO' is the one legacy word the maps add.
+  test('the fact maps cover exactly the values the lookup allows', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../routes/property-lookup-v2.js'), 'utf8');
+    for (const [, field, known] of _private.PEST_PHOTO_FACT_READS) {
+      const allowed = source.match(new RegExp(`\\n    ${field}: \\[([^\\]]+)\\],`))[1]
+        .split(',').map((value) => value.trim().replace(/'/g, ''));
+      expect(Object.keys(known).filter((word) => word !== 'NO').sort()).toEqual(allowed.sort());
+    }
+  });
+
   // The dispute list is read by field name. The lookup must keep recording
   // these three under the names the profile uses.
   test('the lookup records a dispute on each of the three facts by these names', () => {
@@ -191,6 +223,16 @@ describe('pricing engine: input.pestPhotoFacts', () => {
     const base = generateEstimate(input);
     const withFacts = generateEstimate({ ...input, pestPhotoFacts: facts });
     expect(line(withFacts, 'mosquito')).toEqual(line(base, 'mosquito'));
+  });
+
+  // The one-time pest price anchors on the recurring line's quarterly rate.
+  // Photo facts are for the recurring line alone.
+  test.each(['quarterly', 'monthly'])('a one-time pest price on the same estimate does not move (%s plan)', (frequency) => {
+    const mixed = { ...input, services: { pest: { frequency }, oneTimePest: {} } };
+    const base = generateEstimate(mixed);
+    const withFacts = generateEstimate({ ...mixed, pestPhotoFacts: facts });
+    expect(line(withFacts, 'one_time_pest')).toEqual(line(base, 'one_time_pest'));
+    expect(line(withFacts, 'pest_control').perApp).not.toBe(line(base, 'pest_control').perApp);
   });
 
   test('an unknown value leaves the feature as it was', () => {

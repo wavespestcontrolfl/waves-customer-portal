@@ -446,10 +446,23 @@ const {
 //     read off the lookup's aiAnalysis). No aiAnalysis to check keeps none.
 // Undefined when the gate is off, the doubt is wider than the lawn area, or no
 // fact passes.
+// Each fact maps the lookup's own values (the enums of
+// normalizeSatelliteAnalysis in routes/property-lookup-v2.js) to the engine's.
+// A value outside the map is not a read, and the fact is left out: an old
+// cached analysis can carry 'NO' for no water (turfRiskReasons reads it as a
+// negative too) or a word this map has never seen.
 const PEST_PHOTO_FACT_READS = [
-  ['shrubs', 'shrubDensity', (value) => String(value).toLowerCase()],
-  ['complexity', 'landscapeComplexity', (value) => String(value).toLowerCase()],
-  ['nearWater', 'nearWater', (value) => value !== 'NONE'],
+  ['shrubs', 'shrubDensity', { LIGHT: 'light', MODERATE: 'moderate', HEAVY: 'heavy' }],
+  ['complexity', 'landscapeComplexity', { SIMPLE: 'simple', MODERATE: 'moderate', COMPLEX: 'complex' }],
+  ['nearWater', 'nearWater', {
+    NONE: false,
+    NO: false,
+    CANAL_ADJACENT: true,
+    POND_ON_PROPERTY: true,
+    RETENTION_NEARBY: true,
+    LAKE_ADJACENT: true,
+    WETLAND_ADJACENT: true,
+  }],
 ];
 function pestPhotoFactsFor(p, lookup) {
   // Optional call: hundreds of suites mock feature-gates whole.
@@ -460,8 +473,9 @@ function pestPhotoFactsFor(p, lookup) {
   if (!observed || typeof observed !== 'object' || !aiAnalysis || typeof aiAnalysis !== 'object') return undefined;
   const disputed = lookupDisputedPhotoFields(aiAnalysis);
   const facts = {};
-  for (const [fact, field, read] of PEST_PHOTO_FACT_READS) {
-    if (p[field] && observed[field] === true && !disputed.has(field)) facts[fact] = read(p[field]);
+  for (const [fact, field, known] of PEST_PHOTO_FACT_READS) {
+    const word = String(p[field] ?? '').trim().toUpperCase();
+    if (Object.hasOwn(known, word) && observed[field] === true && !disputed.has(field)) facts[fact] = known[word];
   }
   return Object.keys(facts).length ? facts : undefined;
 }
@@ -1753,5 +1767,5 @@ module.exports = {
   missingPropertyFor,
   // Test hook (T&S reprice lane 2026-08-09): property-context resolution,
   // where bed-area provenance is decided.
-  _private: { resolvePropertyContext, missingPropertyFor },
+  _private: { resolvePropertyContext, missingPropertyFor, PEST_PHOTO_FACT_READS },
 };
