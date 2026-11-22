@@ -27,6 +27,8 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
   const zipRows = [];
   const START = '2099-07-06';
   const TODAY = '2099-06-30';
+  // A run that leaves termite out: bait customers stay whole with the owner (the 2026-10-25 rule). A default run moves them (owner 2026-11-21).
+  const NO_TERMITE = ['general', 'rodent', 'mosquito'];
 
   const tech = (id, extra = {}) => ({
     id, name: `Synthetic ${run} ${id.slice(0, 4)}`, email: `${id}@example.invalid`, password_hash: 'synthetic-not-a-login-hash',
@@ -73,7 +75,7 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
     await knex.destroy();
   });
 
-  test('plans a pest series, skips lawn, a catalog tree & shrub row, a bait customer and grouped rows; reads nothing it should not', async () => {
+  test('plans a pest series, skips lawn, a catalog tree & shrub row, a bait customer (a run that leaves termite out) and grouped rows; reads nothing it should not', async () => {
     // Pest series: Mon-Thu open, a Friday after the 13-week weekend-customer window (dates before 2099-10-05 are
     // inside it), a completed one, one before start, one grouped, one in a dissolved group.
     const pestCustomer = await customer();
@@ -109,7 +111,7 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
     const baitPest = await series(baitCustomer);
     await child(baitPest, '2099-07-08');
 
-    const plan = await handover.planHandover(knex, { from: ownerId, to: hireId, start: START, today: TODAY });
+    const plan = await handover.planHandover(knex, { from: ownerId, to: hireId, start: START, today: TODAY, lines: NO_TERMITE });
 
     expect(plan.target).toBe(hireId);
     expect(plan.target_work_days_source).toBe('technician_row');
@@ -163,14 +165,14 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
       return mod;
     };
 
-    const current = await loadWith('true').planHandover(knex, { from: ownerB, start: START, today: TODAY });
+    const current = await loadWith('true').planHandover(knex, { from: ownerB, start: START, today: TODAY, lines: NO_TERMITE });
     expect(current.template_overrides).toBe('applied');
     expect(current.would_change.visits).toBe(0);
     expect(current.skipped.other_line).toEqual({ series: 2, visits: 2 }); // the lawn change and the bait series
     expect(current.skipped.termite_bait_customer).toEqual({ series: 1, visits: 1, customers: 1 });
 
     // Gate off: the app ignores the overrides, and so does the plan.
-    const historical = await loadWith('false').planHandover(knex, { from: ownerB, start: START, today: TODAY });
+    const historical = await loadWith('false').planHandover(knex, { from: ownerB, start: START, today: TODAY, lines: NO_TERMITE });
     expect(historical.template_overrides).toBe('not_applied_gate_off');
     expect(new Set(historical.ids.series)).toEqual(new Set([changed.id, pest.id]));
     expect(historical.skipped.other_line).toEqual({ series: 1, visits: 1 }); // the WDO inspection (termite line)
@@ -188,7 +190,7 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
     const pest = await series(baitCustomer, on());
     await child(pest, '2099-07-06', on());
 
-    const plan = await handover.planHandover(knex, { from: ownerC, start: START, today: TODAY });
+    const plan = await handover.planHandover(knex, { from: ownerC, start: START, today: TODAY, lines: NO_TERMITE });
     expect(plan.series.on_from).toBe(2); // the bait series counts as active only through its live row
     expect(plan.skipped.termite_bait_customer).toEqual({ series: 1, visits: 1, customers: 1 });
     expect(plan.would_change.visits).toBe(0);
@@ -212,13 +214,13 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
     const cancelledFirst = await series(await customer(), on({ status: 'cancelled' }));
     const liveChild = await child(cancelledFirst, '2099-07-08', on());
 
-    const plan = await handover.planHandover(knex, { from: ownerD, start: START, today: TODAY });
+    const plan = await handover.planHandover(knex, { from: ownerD, start: START, today: TODAY, lines: NO_TERMITE });
     expect(plan.skipped.termite_bait_customer).toEqual({ series: 1, visits: 1, customers: 1 });
     expect(new Set(plan.ids.series)).toEqual(new Set([rodentPest.id, cancelledFirst.id]));
     expect(plan.ids.visits).toContain(liveChild.id);
   });
 
-  test('a --zips run plans termite and WDO series too (and not without --zips); bait and lawn still stay; --to Off refuses', async () => {
+  test('termite and WDO series move in every run, bait customers too; lawn stays; --zips limits; --to Off refuses', async () => {
     const ownerE = randomUUID();
     const hireE = randomUUID();
     await knex('technicians').insert([tech(ownerE), tech(hireE, { work_days: [1, 2, 3, 4] })]);
@@ -232,39 +234,49 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
     const spotVisit = await child(spot, '2099-07-08', on({ service_type: spot.service_type }));
     const baitCustomer = await customer();
     const bait = await series(baitCustomer, on({ service_type: 'Quarterly Termite Active Bait Station Service' }));
-    await child(bait, '2099-07-07', on({ service_type: bait.service_type }));
+    const baitVisit = await child(bait, '2099-07-07', on({ service_type: bait.service_type }));
     const lawn = await series(await customer(), on({ service_type: 'Lawn Care Program' }));
     await child(lawn, '2099-07-07', on({ service_type: 'Lawn Care Program' }));
     const args = { from: ownerE, to: hireE, start: START, today: TODAY };
 
-    // Territory run, default lines: both termite series move; the bait series and lawn do not.
-    const zipLines = handover.TERRITORY_MOVABLE_LINES;
-    const territoryPlan = await handover.planHandover(knex, { ...args, zips: ['99901'], lines: zipLines });
-    expect(new Set(territoryPlan.ids.series)).toEqual(new Set([wdo.id, spot.id]));
-    expect(territoryPlan.would_change.by_line).toEqual({ termite: { series: 2, visits: 2 } });
-    expect(territoryPlan.skipped.termite_bait_customer).toEqual({ series: 1, visits: 1, customers: 1 });
+    // Default lines with --zips: both termite series and the bait series move; lawn does not.
+    const territoryPlan = await handover.planHandover(knex, { ...args, zips: ['99901'] });
+    expect(new Set(territoryPlan.ids.series)).toEqual(new Set([wdo.id, spot.id, bait.id]));
+    expect(territoryPlan.would_change.by_line).toEqual({ termite: { series: 3, visits: 3 } });
+    expect(territoryPlan.skipped.termite_bait_customer).toBeUndefined();
+    expect(territoryPlan.bait_customers_moving).toBe(1);
     expect(territoryPlan.skipped.other_line).toEqual({ series: 1, visits: 1 }); // lawn
 
-    // The same rows without --zips: termite stays (other_line), as before; naming termite is refused.
+    // The same rows without --zips: the same series move (owner 2026-11-21); naming termite alone is accepted.
     const plain = await handover.planHandover(knex, args);
-    expect(plain.ids.series).toEqual([]);
-    expect(plain.skipped.other_line.series).toBe(4); // wdo, spot, bait, lawn
-    await expect(handover.planHandover(knex, { ...args, lines: zipLines })).rejects.toMatchObject({ code: 'LINES_NEED_ZIPS' });
+    expect(new Set(plain.ids.series)).toEqual(new Set([wdo.id, spot.id, bait.id]));
+    expect(plain.ids.visits).toContain(baitVisit.id);
+    expect(plain.bait_customers_moving).toBe(1);
+    const termiteOnly = await handover.planHandover(knex, { ...args, lines: ['termite'] });
+    expect(new Set(termiteOnly.ids.series)).toEqual(new Set([wdo.id, spot.id, bait.id]));
+
+    // A run that leaves termite out: all three termite series stay (other_line), and the plan id differs.
+    const noTermite = await handover.planHandover(knex, { ...args, lines: NO_TERMITE });
+    expect(noTermite.ids.series).toEqual([]);
+    expect(noTermite.skipped.other_line.series).toBe(4); // wdo, spot, bait, lawn
+    expect(noTermite.bait_customers_moving).toBe(0);
+    expect(noTermite.planId).not.toBe(plain.planId);
 
     // --to set to Off for termite: refused with a clear code. Other states, and an Off line with nothing to move, are not.
     const cap = (category, o) => knex('technician_capabilities').insert({ technician_id: hireE, service_category: category, ...o });
     await cap('mosquito', { capability_level: 'review_required', active: false });
     await cap('rodent', { capability_level: 'qualified', active: true });
-    const withMosquitoOff = await handover.planHandover(knex, { ...args, zips: ['99901'], lines: zipLines });
+    const withMosquitoOff = await handover.planHandover(knex, { ...args, zips: ['99901'] });
     expect(withMosquitoOff.planId).toBe(territoryPlan.planId); // the Off mosquito line has no series to move: no refusal, same plan
     await cap('termite', { capability_level: 'review_required', active: false });
-    await expect(handover.planHandover(knex, { ...args, zips: ['99901'], lines: zipLines })).rejects.toMatchObject({ code: 'TARGET_CAPABILITY_OFF' });
+    await expect(handover.planHandover(knex, { ...args, zips: ['99901'] })).rejects.toMatchObject({ code: 'TARGET_CAPABILITY_OFF' });
+    await expect(handover.planHandover(knex, args)).rejects.toMatchObject({ code: 'TARGET_CAPABILITY_OFF' });
     // Leaving the line out of --lines is the way past it.
     const generalOnly = await handover.planHandover(knex, { ...args, zips: ['99901'], lines: ['general'] });
     expect(generalOnly.ids.series).toEqual([]);
     // A termite line set to review_required (the new-hire default) is allowed.
     await knex('technician_capabilities').where({ technician_id: hireE, service_category: 'termite' }).update({ active: true });
-    const allowed = await handover.planHandover(knex, { ...args, zips: ['99901'], lines: zipLines });
+    const allowed = await handover.planHandover(knex, { ...args, zips: ['99901'] });
     expect(allowed.ids.visits).toContain(spotVisit.id);
   });
 

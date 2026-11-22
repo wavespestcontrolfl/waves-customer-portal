@@ -5,8 +5,9 @@
 // new technician (second-tech plan, build 6; owner 2026-10-25: "move every pest,
 // rodent and mosquito series to the new tech the weekend before the first solo
 // week ... skip lawn, the termite-bait customers and any old grouped visits").
-// Owner 2026-10-30 (corrected the same day): "termite and WDO follow the territory",
-// so a --zips (territory) run also moves termite and WDO series; see --lines.
+// Owner 2026-10-30: "termite and WDO follow the territory". Owner 2026-11-21 ("all rec"):
+// termite and WDO work goes to the second technician in every ZIP, bait-station customers
+// too, so a plain run moves termite as well; see --lines and BAIT.
 //
 // WITHOUT `--execute` THIS SCRIPT ONLY PLANS. This file has no write path: every
 // query here is a SELECT inside a read-only transaction on a read-only session. The
@@ -17,7 +18,7 @@
 //   railway run --service Postgres -- railway run --service waves-customer-portal \
 //     node ops/agents/second-tech-handover.js \
 //     --from <technician uuid> [--to <technician uuid>] [--start YYYY-MM-DD] \
-//     [--lines general,rodent,mosquito[,termite]] [--zips 34293,34285] [--weekend-move] [--list] [--json]
+//     [--lines general,rodent,mosquito,termite] [--zips 34293,34285] [--weekend-move] [--list] [--json]
 //   node ops/agents/second-tech-handover.js --list-techs     # id, role, work days only
 //   ... --to <hire> --start <day> --lines <...> --execute --plan <PLAN ID from the dry run>
 //   ... --rollback <file the execute wrote> [--out-dir <dir>]
@@ -27,16 +28,15 @@
 //            plan says "target: not set" and assumes Mon-Thu (1,2,3,4).
 //   --start  first solo day (default: next Monday, Eastern time). Visits dated
 //            before it are never touched.
-//   --lines  subset of general,rodent,mosquito (default all three). Lawn / tree &
-//            shrub are never movable here. `termite` (termite and WDO series: the
-//            catalog category first, then the name, serviceLineFor) is movable ONLY in a
-//            --zips run, where the default is general,rodent,mosquito,termite
-//            (services/territory.js TERRITORY_LINES). Naming termite without --zips is
-//            refused; a run without --zips is exactly what it was. Termite BAIT customers
-//            stay with the owner in every run (the owner has not ruled whether bait follows
-//            the territory; the dry run prints their count). One-time visits (a WDO
-//            inspection booked once) are not series and stay as booked: new bookings
-//            already route by territory.
+//   --lines  subset of general,rodent,mosquito,termite (default all four, with or without
+//            --zips; the same four lines as services/territory.js TERRITORY_LINES). Lawn /
+//            tree & shrub are never movable here. `termite` is termite and WDO series
+//            (the catalog category first, then the name, serviceLineFor). Owner 2026-11-21:
+//            the default run moves termite too, and termite BAIT customers move with it
+//            (see BAIT). A run with --lines general,rodent,mosquito leaves termite out and
+//            keeps every bait customer whole with the owner, as the 2026-10-25 run did.
+//            One-time visits (a WDO inspection booked once) are not series and stay as
+//            booked: new bookings already route by territory.
 //            Capability: when --to's technician_capabilities row for a line that has a
 //            series to move reads Off (technician-capabilities stateOf), the run is refused
 //            (TARGET_CAPABILITY_OFF) before any write, for every line alike.
@@ -111,12 +111,17 @@
 //            pest-plus-bait customers are sold). Series: a termite-line series that is a bait or
 //            monitoring program: its catalog key (services.service_key by
 //            service_id) or key snapshot in TERMITE_BAIT_KEYS, or the label
-//            matches /bait|monitor/. Every series of that customer is skipped.
+//            matches /bait|monitor/. A run that includes termite (the default, owner 2026-11-21)
+//            moves these customers like any other: their bait series, their pest series, the
+//            combined pest + bait plan, and the pest series whose visits carry a bait add-on;
+//            the plan counts them as bait_customers_moving. A run that leaves termite out
+//            (--lines without termite) skips every series of that customer
+//            (termite_bait_customer), the 2026-10-25 rule.
 //   OFF DAY  the target's work_days (or Mon-Thu when --to is not set). Owner
 //            2026-10-28 (Tech 2 & 3 Roadmap, question 1 = C): the weekend customers stay
 //            with the owner for 60 days, then a second handover run moves them. A WEEKEND
 //            CUSTOMER = a customer with a visit this run would otherwise move (open, dated
-//            >= --start, held by --from, in --lines, not grouped, not bait) on a target day
+//            >= --start, held by --from, in --lines, not grouped, not kept as a bait customer) on a target day
 //            off within OFF_DAY_CUSTOMER_DAYS (13 weeks) of --start: the window the roadmap
 //            counted its 80 weekend pest customers over. That customer stays WHOLE with
 //            --from: no series of theirs changes template and none of their visits move
@@ -144,9 +149,8 @@ const { normalizeZip } = require(path.join(root, 'services', 'territory'));
 const { stateOf } = require(path.join(root, 'services', 'technician-capabilities'));
 const weekendMoves = require('./second-tech-handover-weekend');
 
-const MOVABLE_LINES = ['general', 'rodent', 'mosquito'];
-// A --zips run also moves termite / WDO series (owner 2026-10-30); the same four lines as services/territory.js TERRITORY_LINES.
-const TERRITORY_MOVABLE_LINES = [...MOVABLE_LINES, 'termite'];
+// The default for every run, with or without --zips (owner 2026-11-21, "all rec"): the same four lines as services/territory.js TERRITORY_LINES.
+const MOVABLE_LINES = ['general', 'rodent', 'mosquito', 'termite'];
 const OPEN_STATUSES = ['pending', 'confirmed', 'rescheduled'];
 const STOPPED_TRACK_STATES = ['en_route', 'on_property', 'complete', 'cancelled'];
 const ASSUMED_WORK_DAYS = [1, 2, 3, 4];
@@ -185,15 +189,12 @@ function defaultStart(now = new Date()) {
   return etDateString(addETDays(parseETDateTime(`${etWeekStart(now)}T12:00:00`), 7));
 }
 
-const USAGE = 'usage: node ops/agents/second-tech-handover.js --from <uuid> [--to <uuid>] [--start YYYY-MM-DD] [--lines general,rodent,mosquito[,termite: with --zips only]] [--zips 34293,34285] [--weekend-move] [--list] [--json]\n'
+const USAGE = 'usage: node ops/agents/second-tech-handover.js --from <uuid> [--to <uuid>] [--start YYYY-MM-DD] [--lines general,rodent,mosquito,termite] [--zips 34293,34285] [--weekend-move] [--list] [--json]\n'
   + '       node ops/agents/second-tech-handover.js --from <uuid> --to <uuid> [--start ...] [--lines ...] [--zips ...] --execute --plan <PLAN ID> [--out-dir <dir>]\n'
   + '       node ops/agents/second-tech-handover.js --rollback <rollback file> [--out-dir <dir>]\n'
   + '       node ops/agents/second-tech-handover.js --list-techs';
 const BOOLEAN_FLAGS = { '--list': 'list', '--list-techs': 'listTechs', '--json': 'json', '--execute': 'execute', '--weekend-move': 'weekendMove' };
 const PLAN_ID = /^[0-9a-f]{64}$/;
-// termite / WDO are movable only by territory (owner 2026-10-30): no --zips, no termite.
-const LINES_NEED_ZIPS = '--lines termite needs --zips: termite and WDO series move only in a territory run';
-const linesNeedZips = (lines, zips) => !zips && Array.isArray(lines) && lines.includes('termite');
 const technicianFlag = (name) => (v) => (UUID.test(v)
   ? { [name]: v.toLowerCase() }
   : `--${name} needs a technician uuid, got ${JSON.stringify(v)}`);
@@ -204,8 +205,8 @@ const VALUE_FLAGS = {
   '--start': (v) => (validCalendarDate(v) ? { start: v } : `--start needs a real YYYY-MM-DD calendar date, got ${JSON.stringify(v)}`),
   '--lines': (v) => {
     const lines = [...new Set(v.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean))];
-    const ok = lines.length && lines.every((l) => TERRITORY_MOVABLE_LINES.includes(l));
-    return ok ? { lines, linesGiven: true } : `--lines takes ${TERRITORY_MOVABLE_LINES.join(', ')} only (lawn is never handed over; termite needs --zips), got ${JSON.stringify(v)}`;
+    const ok = lines.length && lines.every((l) => MOVABLE_LINES.includes(l));
+    return ok ? { lines } : `--lines takes ${MOVABLE_LINES.join(', ')} only (lawn is never handed over), got ${JSON.stringify(v)}`;
   },
   '--zips': (v) => {
     const zips = [...new Set(v.split(',').map((x) => x.trim()).filter(Boolean))].sort();
@@ -221,7 +222,6 @@ const ARG_RULES = [
   [(a) => a.rollback && (a.execute || a.plan), '--rollback stands alone: do not combine it with --execute or --plan'],
   [(a) => !a.listTechs && !a.rollback && !a.from, '--from <technician uuid> is required (use --list-techs to see ids)'],
   [(a) => a.from && a.to && a.from === a.to, '--from and --to are the same technician'],
-  [(a) => linesNeedZips(a.lines, a.zips), LINES_NEED_ZIPS],
   [(a) => a.execute && !a.to, '--execute needs --to <the hire\'s technician uuid>'],
   [(a) => a.execute && !a.plan, '--execute needs --plan <PLAN ID>: run the dry run first and pass the id it printed'],
   [(a) => a.plan && !a.execute, '--plan only goes with --execute'],
@@ -231,7 +231,7 @@ const ARG_RULES = [
 
 function parseArgs(argv) {
   const args = {
-    from: null, to: null, start: null, lines: [...MOVABLE_LINES], linesGiven: false, zips: null, list: false, listTechs: false, json: false,
+    from: null, to: null, start: null, lines: [...MOVABLE_LINES], zips: null, list: false, listTechs: false, json: false,
     execute: false, weekendMove: false, plan: null, rollback: null, outDir: null,
   };
   const fail = (msg) => { console.error(msg); process.exit(2); };
@@ -249,8 +249,6 @@ function parseArgs(argv) {
     if (typeof out === 'string') fail(out);
     Object.assign(args, out);
   }
-  // A territory run also hands over termite and WDO unless --lines narrows it.
-  if (args.zips && !args.linesGiven) args.lines = [...TERRITORY_MOVABLE_LINES];
   const broken = ARG_RULES.find(([bad]) => bad(args));
   if (broken) fail(broken[1]);
   return args;
@@ -288,7 +286,7 @@ const isTermiteBaitAddon = (a) => hasBaitKey([a.catalog_key, a.service_key_snaps
 
 const bump = (map, key, n = 1) => { map[key] = (map[key] || 0) + n; };
 
-/** Customers whose every series stays with the owner: an active bait plan, or a bait add-on on an active series. */
+/** Customers with an active bait plan, or a bait add-on on an active series. A run that leaves termite out keeps every series of theirs with the owner. */
 function baitCustomerIds(active, baitAddonSeriesIds) {
   const addon = new Set(baitAddonSeriesIds);
   return new Set(active.filter((p) => isBaitSeries(p) || addon.has(p.id)).map((p) => p.customer_id));
@@ -435,6 +433,7 @@ function buildPlan({
     date_changes: { visits: 0, customers: 0, by_change: {} },
     skipped: {},
     notices_to_suppress: 0,
+    bait_customers_moving: 0,
     ids: { retemplate: [], series: [], visits: [], moves: [], anchors: [], kept: [] },
   };
   const bucket = (reason) => plan.skipped[reason] || (plan.skipped[reason] = { series: 0, visits: 0, _ids: new Set(), _customers: new Set() });
@@ -456,7 +455,8 @@ function buildPlan({
     ['other_line', (p) => !lines.includes(p.line)],
     // After the line rules, so `in_lines` below still counts every series of these lines.
     ['outside_zips', outsideZips(zips)],
-    ['termite_bait_customer', (p) => baitCustomers.has(p.customer_id)],
+    // Owner 2026-11-21: bait customers move with termite. Only a run that leaves termite out keeps them whole (2026-10-25 rule).
+    ['termite_bait_customer', (p) => !lines.includes('termite') && baitCustomers.has(p.customer_id)],
   ];
   // Why an in-scope visit stays where it is: the first rule it meets. None = it moves
   // (or stays with --from on a target day off).
@@ -532,6 +532,9 @@ function buildPlan({
     delete s._ids;
     delete s._customers;
   }
+  // Owner 2026-11-21: how many bait customers this run hands over (0 when it leaves termite out).
+  const retemplated = new Set(plan.ids.retemplate);
+  plan.bait_customers_moving = new Set(inScope.filter(({ p }) => retemplated.has(p.id) && baitCustomers.has(p.customer_id)).map(({ p }) => p.customer_id)).size;
   // One per-visit technician notice would fire for each visit whose technician changes.
   plan.notices_to_suppress = plan.would_change.visits;
   plan.date_changes.customers = dateMoveCustomers.size;
@@ -657,8 +660,7 @@ async function assertTargetTakesLines(db, toId, plan) {
 }
 
 /** Flag combinations the planner cannot plan, refused before any read. */
-function assertRunFlags({ lines, zips, weekendMove, start, today }) {
-  if (linesNeedZips(lines, zips)) throw new PlanError('LINES_NEED_ZIPS', LINES_NEED_ZIPS);
+function assertRunFlags({ weekendMove, start, today }) {
   // The day-60 run moves dates, so every new date must clear the 73 h reminder freeze: --start is at least 4 days out.
   if (weekendMove && start < etDateString(addETDays(parseETDateTime(`${today}T12:00:00`), weekendMoves.MIN_DAYS_OUT))) {
     throw new PlanError('START_TOO_SOON', `--weekend-move moves dates: --start must be at least ${weekendMoves.MIN_DAYS_OUT} days after today (${today}), outside the 73 h freeze`);
@@ -680,7 +682,7 @@ async function planWithWeekend(db, input, { weekendMove, now, lockNeighbors }) {
 async function planHandover(db, {
   from, to = null, start, today = etDateString(), lines = MOVABLE_LINES, zips, weekendMove, now, lockNeighbors,
 }) {
-  assertRunFlags({ lines, zips, weekendMove, start, today });
+  assertRunFlags({ weekendMove, start, today });
   const fromRow = await loadTechnician(db, from);
   if (!fromRow) throw new Error('--from: no technician row with that id');
   let toRow = null;
@@ -775,7 +777,11 @@ function printPlan(plan, { list }) {
   out.push(`Weekend customers kept whole with the owner until ${plan.off_day_customer_until} (question 1 = C): `
     + `${weekend ? `${weekend.customers} customers, ${weekend.series} series, ${weekend.visits} visits` : 'none'}`);
   const bait = plan.skipped.termite_bait_customer;
-  out.push(`Termite bait customers kept with the owner in every run (owner has not ruled on bait): ${bait ? `${bait.customers} customers, ${bait.series} series, ${bait.visits} visits` : 'none'}`);
+  if (plan.lines.includes('termite')) {
+    out.push(`Termite bait customers that move with this run (owner 2026-11-21): ${plan.bait_customers_moving} customers`);
+  } else {
+    out.push(`Termite bait customers kept whole with the owner (this run leaves termite out): ${bait ? `${bait.customers} customers, ${bait.series} series, ${bait.visits} visits` : 'none'}`);
+  }
   out.push(`Later visits on a target day off, kept with the owner (stays_off_day): ${plan.stays_off_day.visits}`);
   out.push(`  by weekday: ${weekdayLine(plan.stays_off_day.by_weekday)}`);
   out.push('  (the second handover run, --weekend-move, moves these customers and their dates)');
@@ -924,7 +930,7 @@ async function main() {
 }
 
 module.exports = {
-  assertRunFlags, MOVABLE_LINES, TERRITORY_MOVABLE_LINES, PlanError, offCapabilityLines, OPEN_STATUSES, STOPPED_TRACK_STATES, TERMITE_BAIT_KEYS,
+  assertRunFlags, MOVABLE_LINES, PlanError, offCapabilityLines, OPEN_STATUSES, STOPPED_TRACK_STATES, TERMITE_BAIT_KEYS,
   parseArgs, defaultStart, seriesTechnicianId, isOpenVisit, isGroupedVisit, isBaitSeries, isTermiteBaitAddon,
   buildPlan, planIdOf, planHandover, printPlan, readOnlyConn, tlsFor, connectionFields, scramPlusOnly,
 };
