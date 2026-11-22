@@ -110,7 +110,9 @@ const CAP_SPEC = {
 // The production row, read 2026-11-21. Inserted only where no row has this exact name and no alias spells it.
 // Customer-copy and approval columns (content_status, customer_visibility, approved_for_service_report, ...)
 // keep their column defaults: production has them already and the approval is the owner's.
-// The label water-in rule has the shape 20261022120000 gave every pre-emergent row. The analysis is the bag's name.
+// The label water-in rule is the one 20261022120000 stores for this name. analysis_n/p/k is the bag's guaranteed
+// analysis (18-0-10, in its name): the production row does not hold it (nor does production's Dimension granular row),
+// but the Dimension row of a migration-built database does (20261005130000), so the two bags read alike there.
 const CATALOG_ROW = {
   name: NEW_NAME,
   category: 'herbicide',
