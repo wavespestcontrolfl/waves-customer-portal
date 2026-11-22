@@ -7180,6 +7180,25 @@ It is absent (the key is not sent) when staff hid the points, when any roof read
 another customer, when the points were saved for another address, and when no point is confirmed. When the customer block
 exists, a staff preview gets that same block with no `preview` key. A request that is not a verified staff preview, the emailed
 document and the intelligence bar never get the `preview` key, and their responses are byte-identical to before.
+`/data` (the normal page load only, never the `?mode=pdf` document render pass) may carry an optional top-level
+`noVisitLine` string (owner 2026-11-22, option B; no gate): the owner's sentence "We measure your home and yard from
+county records and satellite images, so most quotes need no visit." (`NO_VISIT_QUOTE_LINE` in
+`services/estimate-no-visit-line.js`, the same sentence as the `estimate.delivery` email paragraph and the office call
+script line). Copy only: no customer or pricing data. ABSENT unless all of these hold: the estimate is open (the same
+`cta.terminalState === null` the page reads, so an accepted, declined, expired or quote-required estimate carries none);
+every service row on the estimate is one Waves prices from the home and yard measured remotely (`serviceMixIsRemoteMeasured`
+in `routes/estimate-public.js`, over the rows `serviceCategory` is derived from: pest control, lawn care, tree and shrub,
+barrier mosquito and termite bait stations qualify; one row of rodent work, a misting system, foam, trenching, pre-slab,
+Bora-Care, a WDO inspection or traps, one service row that cannot be classified, or no service row at all, and the key is
+absent; setup, discount and membership rows are not services); and the estimate email's rule reads the row as a home
+estimate (`noVisitLineFor`: category `RESIDENTIAL`, not a proposal, and no commercial mark by `isCommercialEstimateRow` at
+its strict reading, so a commercial estimate, a proposal and a condo carry none). A row the rule cannot read omits the key
+and logs a warning; it never fails the response. Every other response stays byte-identical. The interactive estimate
+page (`EstimateViewPage`, Waves AI card) prints the string under the satellite photo, above the "Red outline" caption,
+only while the satellite photo itself is the picture on the card (not when the card has no photo, and not while a
+misting layout or roof points take the photo's place). The legacy server-rendered page (`renderPage`) and
+`EstimateProposalDocument` (the emailed PDF) do not print it. The Intelligence Bar's estimate detail composes the same
+page payload, so its page projection carries the key for the same estimates.
 `/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
 `copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
 and rodent-trapping rows may carry the sold allowance used to render that
