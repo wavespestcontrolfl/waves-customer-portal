@@ -1,5 +1,5 @@
 // Real PostgreSQL transactions (rolled back): the yearly pay statement (Tech Rewards Plan D5-6) sums a technician's
-// FINALIZED checks of finalized pay runs by PAY DATE, splits the Tech Rewards pay by the paid lines those checks hold,
+// FINALIZED checks of finalized pay runs by PAY DATE, splits the Tech Rewards pay by the lines each check froze,
 // agrees with Form W-2 box 5 for the same year, and shows a technician only their own. Goes through both routers
 // with the session from headers. All names are synthetic. DATABASE_URL-gated like the other *-postgres suites.
 // CI runs a DB suite only when it carries this exact line (tests.yml greps for it).
@@ -48,8 +48,11 @@ postgres('yearly pay statement', () => {
   // and its run to their final status. Gross is always the sum of its parts, as payroll-calc.js stores it. A pay line
   // figure a check does not hold is null, as on a check made with GATE_PAYROLL_PAY_LINES off.
   const addCheck = async (weekStart, payDate, parts = {}, { status = 'finalized', runStatus = status, tech = techId, patch = {} } = {}) => {
-    const pay = { regular: 100000, overtime: 0, pto: 0, holiday: 0, commission: null, reviewBonus: null, healthAllowance: null, techRewards: null, linePremium: null, ...parts };
+    // `lines`: the pay lines the check froze when it was priced, in the shape payroll-pay-lines.js openLinesFor gives buildCheck
+    const { lines = null, ...amounts } = parts;
+    const pay = { regular: 100000, overtime: 0, pto: 0, holiday: 0, commission: null, reviewBonus: null, healthAllowance: null, techRewards: null, linePremium: null, ...amounts };
     const gross = Object.values(pay).reduce((total, value) => total + (value || 0), 0);
+    const snapshot = lines ? { payLines: lines.map(([kind, amountCents]) => ({ id: randomUUID(), kind, amountCents, earnedWeekStart: weekStart, coversFrom: null, coversTo: null })) } : {};
     const taxes = { federal_income_tax_cents: 10000, social_security_cents: 6200, medicare_cents: 1450, additional_medicare_cents: 0 };
     const deferral = patch.simple_deferral_cents || 0;
     const runId = randomUUID();
@@ -63,7 +66,7 @@ postgres('yearly pay statement', () => {
       health_allowance_cents: pay.healthAllowance, tech_rewards_cents: pay.techRewards, line_overtime_premium_cents: pay.linePremium,
       ...taxes, net_cents: gross - 17650 - deferral,
       employer_social_security_cents: 6200, employer_medicare_cents: 1450, futa_cents: 600, fl_reemployment_cents: 2700,
-      ytd_gross_before_cents: 0, w4_election_id: tech === techId ? w4Id : otherW4Id, calc_snapshot: {},
+      ytd_gross_before_cents: 0, w4_election_id: tech === techId ? w4Id : otherW4Id, calc_snapshot: snapshot,
       pay_method: 'check', status: 'draft', ...patch,
     }).returning('id');
     if (status !== 'draft') await trx('payroll_checks').where({ id: saved.id }).update({ status });
@@ -151,19 +154,13 @@ postgres('yearly pay statement', () => {
     const [{ id: electionId }] = await trx('payroll_simple_ira_elections')
       .insert({ technician_id: techId, participant: true, deferral_bp: 300, signed_on: '2026-01-02', effective_on: '2026-01-02' }).returning('id');
     const simple = { simple_election_id: electionId, simple_deferral_cents: 3000, simple_employer_cents: 2000 };
-    await addCheck('2026-03-02', '2026-03-13', { regular: 100000, overtime: 7500, pto: 20000, holiday: 10000, commission: 6000, reviewBonus: 1500, healthAllowance: 30000, linePremium: 450 }, { patch: { ...simple, hsa_employer_cents: 5000 } });
-    const bonusCheck = await addCheck('2026-09-14', '2026-09-25', { regular: 100000, techRewards: 150000, linePremium: 1200 }, { patch: simple });
-    await paidLine(bonusCheck, 'season_bonus', 120000, '2026-09-14');
-    await paidLine(bonusCheck, 'stay_bonus', 30000, '2026-09-14');
-    const giftCheck = await addCheck('2026-12-07', '2026-12-18', { regular: 100000, techRewards: 30000 });
-    await paidLine(giftCheck, 'december_gift', 30000, '2026-12-07');
-    // lines that must not count: a commission line (its own stored column covers it), an open line, another year's and another person's
-    await paidLine(giftCheck, 'commission', 999, '2026-12-07');
-    await trx('payroll_pay_lines').insert({ technician_id: techId, kind: 'stay_bonus', amount_cents: 777, earned_week_start: '2026-12-14', status: 'open' });
-    const nextYear = await addCheck('2026-12-28', '2027-01-08', { regular: 100000, techRewards: 5000 });
-    await paidLine(nextYear, 'stay_bonus', 5000, '2026-12-28');
-    const others = await addCheck('2026-10-05', '2026-10-16', { regular: 100000, techRewards: 8000 }, { tech: otherTechId });
-    await paidLine(others, 'season_bonus', 8000, '2026-10-05', otherTechId);
+    // a commission or review bonus line on a check is not a bonus row: its own stored column covers it
+    await addCheck('2026-03-02', '2026-03-13', { regular: 100000, overtime: 7500, pto: 20000, holiday: 10000, commission: 6000, reviewBonus: 1500, healthAllowance: 30000, linePremium: 450, lines: [['commission', 6000], ['review_bonus', 1500], ['health_allowance', 30000]] }, { patch: { ...simple, hsa_employer_cents: 5000 } });
+    await addCheck('2026-09-14', '2026-09-25', { regular: 100000, techRewards: 150000, linePremium: 1200, lines: [['season_bonus', 120000], ['stay_bonus', 30000]] }, { patch: simple });
+    await addCheck('2026-12-07', '2026-12-18', { regular: 100000, techRewards: 30000, lines: [['december_gift', 30000]] });
+    // checks that must not count: another year's and another person's
+    await addCheck('2026-12-28', '2027-01-08', { regular: 100000, techRewards: 5000, lines: [['stay_bonus', 5000]] });
+    await addCheck('2026-10-05', '2026-10-16', { regular: 100000, techRewards: 8000, lines: [['season_bonus', 8000]] }, { tech: otherTechId });
 
     const { statement } = (await own()).body;
     expect(statement.pay).toEqual({
@@ -179,6 +176,25 @@ postgres('yearly pay statement', () => {
     expect(statement.pay.grossCents - statement.withheld.totalCents - statement.simpleSavingsCents).toBe(statement.netCents);
     // every year with a paycheck, newest first (and the year the test runs in, whatever it is)
     expect(statement.years.filter((year) => year <= 2027)).toEqual([2027, 2026]);
+  });
+
+  it('names a bonus only from the lines the check itself froze: a check whose lines do not add up shows that pay as other pay, whatever the ledger says', async () => {
+    // the check stored 50.00 of Tech Rewards pay and froze a 40.00 stay bonus line; the ledger holds a paid 50.00 line for it
+    const short = await addCheck('2026-04-06', '2026-04-17', { regular: 100000, techRewards: 5000, lines: [['stay_bonus', 4000]] });
+    await paidLine(short, 'stay_bonus', 5000, '2026-04-06');
+    // a check with Tech Rewards pay and no frozen line at all, and a paid ledger line of another amount
+    const bare = await addCheck('2026-05-04', '2026-05-15', { regular: 100000, techRewards: 7000 });
+    await paidLine(bare, 'season_bonus', 9000, '2026-05-04');
+    // a check whose lines add up is named, beside them
+    await addCheck('2026-12-07', '2026-12-18', { regular: 100000, techRewards: 30000, lines: [['december_gift', 30000]] });
+    // a paid ledger line on a check that stored no Tech Rewards pay changes nothing
+    const plain = await addCheck('2026-06-08', '2026-06-19', { regular: 100000 });
+    await paidLine(plain, 'stay_bonus', 2500, '2026-06-08');
+
+    const { statement } = (await own()).body;
+    expect(statement.pay).toMatchObject({ seasonBonusCents: 0, stayBonusCents: 0, decemberGiftCents: 30000, otherCents: 12000, grossCents: 442000 });
+    expect(Object.entries(statement.pay).filter(([key]) => key !== 'grossCents').reduce((total, [, value]) => total + value, 0)).toBe(442000);
+    expect(Object.values(statement.pay).every((value) => value >= 0)).toBe(true);
   });
 
   it('gross pay is the year\'s Form W-2 box 5 for the same technician', async () => {
@@ -218,8 +234,9 @@ postgres('yearly pay statement', () => {
     // 11:30 PM Eastern on Dec 31 is still the old year
     expect((await getYearStatement(techId, undefined, { now: new Date('2027-01-01T04:30:00Z') })).year).toBe(2026);
     expect((await getYearStatement(techId, undefined, { now: new Date('2027-01-01T05:30:00Z') }))).toMatchObject({ year: 2027, checkCount: 0, years: [2027, 2026] });
-    for (const bad of ['26', '2019', '2101', 'abcd']) {
-      const result = await own(`?year=${bad}`);
+    // a year that is not one plain value (an array, an object) is a 400 too, never a 500 and never a read
+    for (const bad of ['year=26', 'year=2019', 'year=2101', 'year=abcd', 'year[]=2026', 'year=2026&year=2025', 'year[toString]=x', 'year[a]=2026']) {
+      const result = await own(`?${bad}`);
       expect(result.status).toBe(400);
       expect(result.body).toEqual({ error: 'Year must be a four-digit year, 2020 or later.' });
     }

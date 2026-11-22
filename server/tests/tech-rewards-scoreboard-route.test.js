@@ -136,6 +136,15 @@ describe('tech yearly pay statement (same gate, own numbers only)', () => {
     expect(getYearStatement).toHaveBeenCalledWith(OWN, undefined);
   });
 
+  test('a technician id that is not one plain value is 403 before any read, on both routes, never a 500', async () => {
+    for (const query of [`technicianId[]=${OWN}`, `technicianId=${OWN}&technicianId=${OTHER}`, 'technicianId[toString]=x', `technicianId[id]=${OWN}`]) {
+      expect((await get(techBase, `?${query}`)).status).toBe(403);
+      expect((await get(techBase, `/year-statement?${query}`)).status).toBe(403);
+    }
+    expect(scoreboard.getScoreboard).not.toHaveBeenCalled();
+    expect(getYearStatement).not.toHaveBeenCalled();
+  });
+
   test('a bad year answers 400 with the service message; any other failure 500 with a code logged, never the error text', async () => {
     getYearStatement.mockRejectedValueOnce(new scoreboard.ScoreboardError(400, 'INVALID_YEAR', 'Year must be a four-digit year, 2020 or later.'));
     const bad = await get(techBase, '/year-statement?year=27');

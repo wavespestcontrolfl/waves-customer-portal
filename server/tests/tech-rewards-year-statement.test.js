@@ -3,7 +3,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { composeStatement, parseYear } = require('../services/tech-rewards-year-statement');
+const { composeStatement, rewardsByKind, parseYear } = require('../services/tech-rewards-year-statement');
 const { ScoreboardError } = require('../services/tech-rewards-scoreboard');
 const { TECH_REWARD_KINDS } = require('../services/payroll-pay-lines');
 
@@ -55,18 +55,14 @@ describe('composeStatement', () => {
   });
 
   test('the rows of pay add up to gross pay: a part no row names goes to "other", never away', () => {
-    // the bonus lines on file name 110,000 of the 120,000 the checks stored as Tech Rewards pay
+    // the checks' own lines name 110,000 of the 120,000 the checks stored as Tech Rewards pay
     const short = compose(SUMS, { season_bonus: '80000', december_gift: '30000' });
     expect(short.pay.otherCents).toBe(10000);
     expect(payRowsTotal(short)).toBe(short.pay.grossCents);
-    // no line on file at all
+    // no check names any of it
     const none = compose(SUMS);
     expect(none.pay).toMatchObject({ seasonBonusCents: 0, stayBonusCents: 0, decemberGiftCents: 0, otherCents: 120000 });
     expect(payRowsTotal(none)).toBe(none.pay.grossCents);
-    // lines on file for more than the checks stored: the difference shows as a negative "other", and the rows still add up
-    const over = compose(SUMS, { ...REWARDS, stay_bonus: '15000' });
-    expect(over.pay.otherCents).toBe(-5000);
-    expect(payRowsTotal(over)).toBe(over.pay.grossCents);
   });
 
   test('every Tech Rewards pay line kind has its own row', () => {
@@ -97,6 +93,47 @@ describe('composeStatement', () => {
   });
 });
 
+describe('rewardsByKind', () => {
+  const line = (kind, amountCents) => ({ id: 'line', kind, amountCents, earnedWeekStart: '2027-09-13', coversFrom: null, coversTo: null });
+
+  test('names the bonuses of each check whose own lines add up to the figure it stored', () => {
+    expect(rewardsByKind([
+      { techRewardsCents: '150000', payLines: [line('season_bonus', 120000), line('stay_bonus', 30000), line('commission', 6000)] },
+      { techRewardsCents: 30000, payLines: [line('december_gift', 30000)] },
+      { techRewardsCents: 20000, payLines: [line('stay_bonus', 12000), line('stay_bonus', 8000)] },
+    ])).toEqual({ season_bonus: 120000, stay_bonus: 50000, december_gift: 30000 });
+  });
+
+  test('a check whose lines are short of, or over, the figure it stored names nothing: no bonus row is ever overstated', () => {
+    const good = { techRewardsCents: 30000, payLines: [line('december_gift', 30000)] };
+    for (const payLines of [
+      [line('stay_bonus', 4000)], // short
+      [line('stay_bonus', 5000), line('season_bonus', 1)], // over
+      [], null, undefined, 'x', { kind: 'stay_bonus', amountCents: 5000 }, // no list of lines
+      [line('commission', 5000)], // no bonus line at all
+      [line('stay_bonus', '5000')], [line('stay_bonus', 5000.5)], [line('stay_bonus', -5000), line('season_bonus', 10000)], // not whole positive cents
+      [null, line('stay_bonus', 4999)],
+    ]) {
+      expect(rewardsByKind([{ techRewardsCents: 5000, payLines }, good])).toEqual({ december_gift: 30000 });
+    }
+  });
+
+  test('the unnamed part shows as "other" on the statement, and the rows add up to gross pay', () => {
+    const rewards = rewardsByKind([{ techRewardsCents: 5000, payLines: [line('stay_bonus', 4000)] }, { techRewardsCents: 30000, payLines: [line('december_gift', 30000)] }]);
+    const s = compose({ gross: '135000', regularPay: '100000', techRewards: '35000' }, rewards);
+    expect(s.pay).toMatchObject({ stayBonusCents: 0, decemberGiftCents: 30000, otherCents: 5000, grossCents: 135000 });
+    expect(payRowsTotal(s)).toBe(135000);
+  });
+
+  test('a kind that is not a pay line kind is never a row (an inherited object key is not a kind)', () => {
+    expect(rewardsByKind([{ techRewardsCents: 5000, payLines: [line('constructor', 5000)] }, { techRewardsCents: 5000, payLines: [line('toString', 5000)] }])).toEqual({});
+  });
+
+  test('no check, no bonus', () => {
+    expect(rewardsByKind([])).toEqual({});
+  });
+});
+
 describe('parseYear', () => {
   test('no year is the current year in Eastern time', () => {
     for (const none of [undefined, null, '']) expect(parseYear(none, '2027-01-01')).toBe(2027);
@@ -109,7 +146,8 @@ describe('parseYear', () => {
   });
 
   test('anything else is a 400, never a read', () => {
-    for (const bad of ['2019', '2101', '27', '20270', '2027.0', ' 2027', '2027-01-01', 'abcd', '2e3', ['2027', '2026'], {}]) {
+    const noText = { toString: 'x' }; // ?year[toString]=x: String() of it throws
+    for (const bad of ['2019', '2101', '27', '20270', '2027.0', ' 2027', '2027-01-01', 'abcd', '2e3', 2027.5, NaN, true, ['2027', '2026'], ['2027'], {}, { year: '2027' }, noText]) {
       expect(() => parseYear(bad, '2027-06-01')).toThrow(ScoreboardError);
       try { parseYear(bad, '2027-06-01'); } catch (err) { expect(err).toMatchObject({ status: 400, code: 'INVALID_YEAR' }); }
     }

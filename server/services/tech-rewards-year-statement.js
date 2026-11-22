@@ -17,8 +17,10 @@
  * "amounts from finalized paychecks", never "paid".
  *
  * The season bonus, stay bonus and December gift are one stored figure on a check (tech_rewards_cents). The statement splits
- * it by the kind of the paid pay lines the check holds (payroll_pay_lines), the rows payroll paid it from. The rows of
- * `pay` always add up to grossCents: a part no row names (a split that does not add up) goes to otherCents, never away.
+ * it by the pay lines the check itself froze when it was priced (calc_snapshot.payLines, payroll-runs.js buildCheck), not by
+ * the pay line ledger. A check's split counts only when it adds up to the figure the check stored (rewardsByKind); a check
+ * whose lines do not add up names nothing, and its Tech Rewards pay shows as otherCents. So no bonus row is ever more than
+ * the paychecks hold, and the rows of `pay` always add up to grossCents.
  *
  * Not on the statement: the value of benefits Waves buys (dental, vision, disability). Payroll holds no record of them.
  *
@@ -56,7 +58,7 @@ const CHECK_SUMS = Object.freeze({
   additional_medicare_cents: 'additionalMedicare',
   net_cents: 'net',
 });
-// payroll_pay_lines kind -> its row in `pay`.
+// Pay line kind -> its row in `pay`.
 const REWARD_ROWS = Object.freeze({ season_bonus: 'seasonBonusCents', stay_bonus: 'stayBonusCents', december_gift: 'decemberGiftCents' });
 
 const cents = (value) => Number(value) || 0;
@@ -64,7 +66,8 @@ const cents = (value) => Number(value) || 0;
 /** The year asked for: none = the current year in Eastern time. Anything but a four-digit year from 2020 to 2100 is a 400. */
 function parseYear(input, today) {
   if (input === undefined || input === null || input === '') return Number(today.slice(0, 4));
-  const text = String(input);
+  // A query string can carry an array or an object (?year[]=2027, ?year[a]=b): only one plain value is a year.
+  const text = typeof input === 'string' || typeof input === 'number' ? String(input) : '';
   if (!/^\d{4}$/.test(text) || Number(text) < FIRST_YEAR || Number(text) > LAST_YEAR) {
     throw new ScoreboardError(400, 'INVALID_YEAR', 'Year must be a four-digit year, 2020 or later.');
   }
@@ -72,8 +75,27 @@ function parseYear(input, today) {
 }
 
 /**
+ * The year's Tech Rewards pay by pay line kind, from the checks that hold some: [{ techRewardsCents, payLines }], payLines
+ * being the lines a check froze (calc_snapshot.payLines: { kind, amountCents }). Pure. A check counts only when its season
+ * bonus, stay bonus and December gift lines are whole positive cents that add up to exactly the figure it stored; any
+ * other check (no lines, lines that are short or over, a line that is not a number) names nothing.
+ */
+function rewardsByKind(checks) {
+  const totals = {};
+  for (const check of checks) {
+    const lines = (Array.isArray(check.payLines) ? check.payLines : []).filter((line) => line && Object.hasOwn(REWARD_ROWS, line.kind));
+    const sound = lines.every((line) => Number.isSafeInteger(line.amountCents) && line.amountCents > 0);
+    const split = sound ? lines.reduce((total, line) => total + line.amountCents, 0) : null;
+    if (split !== null && split === cents(check.techRewardsCents)) {
+      for (const line of lines) totals[line.kind] = (totals[line.kind] || 0) + line.amountCents;
+    }
+  }
+  return totals;
+}
+
+/**
  * The statement from the year's sums. Pure. `sums` holds the CHECK_SUMS names plus checkCount, firstPayDate and
- * lastPayDate; `rewards` is cents by pay line kind; `years` the years the technician has a paycheck in.
+ * lastPayDate; `rewards` is cents by pay line kind (rewardsByKind); `years` the years the technician has a paycheck in.
  */
 function composeStatement({ technician, year, currentYear, sums, rewards = {}, years = [] }) {
   const pay = {
@@ -128,12 +150,9 @@ async function readStatement(conn, technicianId, year, currentYear) {
     conn.raw(`to_char(MAX(c.pay_date), 'YYYY-MM-DD') AS "lastPayDate"`),
     ...Object.entries(CHECK_SUMS).map(([column, name]) => conn.raw('COALESCE(SUM(c.??), 0) AS ??', [column, name])),
   );
-  const rewardRows = await inYear(finalChecks(conn, technicianId), year)
-    .join('payroll_pay_lines as l', 'l.check_id', 'c.id')
-    .where('l.status', 'paid')
-    .whereIn('l.kind', Object.keys(REWARD_ROWS))
-    .groupBy('l.kind')
-    .select('l.kind', conn.raw('SUM(l.amount_cents) AS cents'));
+  const rewardChecks = await inYear(finalChecks(conn, technicianId), year)
+    .where('c.tech_rewards_cents', '>', 0)
+    .select('c.tech_rewards_cents', conn.raw("c.calc_snapshot->'payLines' AS pay_lines"));
   const yearRows = await finalChecks(conn, technicianId)
     .distinct(conn.raw('EXTRACT(YEAR FROM c.pay_date)::int AS year'));
   return composeStatement({
@@ -141,7 +160,7 @@ async function readStatement(conn, technicianId, year, currentYear) {
     year,
     currentYear,
     sums,
-    rewards: Object.fromEntries(rewardRows.map((row) => [row.kind, row.cents])),
+    rewards: rewardsByKind(rewardChecks.map((row) => ({ techRewardsCents: row.tech_rewards_cents, payLines: row.pay_lines }))),
     years: yearRows.map((row) => row.year),
   });
 }
@@ -157,4 +176,4 @@ async function getYearStatement(technicianId, year, { now = new Date() } = {}) {
   return db.transaction((trx) => readStatement(trx, technicianId.toLowerCase(), asked, Number(today.slice(0, 4))), { isolationLevel: 'repeatable read', readOnly: true });
 }
 
-module.exports = { getYearStatement, composeStatement, parseYear };
+module.exports = { getYearStatement, composeStatement, rewardsByKind, parseYear };

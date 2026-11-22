@@ -37,10 +37,11 @@ router.use((req, res, next) => {
 });
 router.use((req, res, next) => { res.set('Cache-Control', 'private, no-store'); next(); });
 
-// Own numbers only: a technicianId that names anyone but the caller is refused before any read.
+// Own numbers only: a technicianId that names anyone but the caller is refused before any read. So is one that is not a
+// single plain value (a query string can carry an array or an object).
 router.use((req, res, next) => {
   const asked = req.query.technicianId;
-  if (asked !== undefined && String(asked).toLowerCase() !== String(req.technicianId).toLowerCase()) {
+  if (asked !== undefined && (typeof asked !== 'string' || asked.toLowerCase() !== String(req.technicianId).toLowerCase())) {
     return res.status(403).json({ error: 'You can view only your own scoreboard.' });
   }
   return next();
