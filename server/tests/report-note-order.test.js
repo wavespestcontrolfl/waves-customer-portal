@@ -38,11 +38,16 @@ describe('the text may go out', () => {
     ['a decimal stays a decimal', 'found 1.5 nests by the shed', 'I found 1.5 nests by the shed.'],
     ['a decimal with no zero before the point', 'found .5 nests by the shed', 'I found 0.5 nests by the shed.'],
     ['a sign on a number stays', 'found <5 nests, 10% of the eaves', 'I found < 5 nests, 10% of the eaves.'],
+    ['a foot mark and an inch mark stay, straight or not', 'found 5\' gap, 1/4" hole', 'I found a 5′ gap, 1/4″ hole.'],
     ['a list with commas', 'treated kitchen, garage, and lanai', 'I treated the kitchen, garage and lanai.'],
     ['the customer\'s own thing is "your"', 'customer\'s dog was in the yard, skipped the back', 'Your dog was in the yard, and I skipped the back.'],
     ['a pronoun for the customer, named a sentence before', 'talked to customer. she said ants are back', 'I talked to you. You said ants are back.'],
     ['the second word of a pair that goes, said again', 'no issues, issues remain by the shed', 'Issues remain by the shed.'],
+    ['two words that go together, said again in the next sentence', 'no issues. no issues found', 'No issues found.'],
     ['a word that goes in one sentence stays in the next', 'treated outside with Borlux SC. Borlux SC applied inside', 'I treated outside. Borlux SC was applied inside.'],
+    ['"you" after "said", when the customer spoke last', 'cust said seeing roaches in the kitchen', 'You said you are seeing roaches in the kitchen.'],
+    ['"and" between a place that ends in "ed" and the next action', 'treated shed sealed gap', 'I treated the shed and sealed the gap.'],
+    ['a form of "is" after a person, before a word that is no treatment', 'cust advised of the treatment', 'You were advised of the treatment.'],
     ['"I" after a joining word, where the note names no one', 'swept the eaves so treated the lanai', 'I swept the eaves so I treated the lanai.'],
     ['"I" in the part after the one that names a person', 'customer was not home, treated outside', 'You were not home, and I treated outside.'],
     ['a range stays a range, with any dash', 'set 2 - 3 traps in the attic', 'I set 2–3 traps in the attic.'],
@@ -81,12 +86,17 @@ describe('the text is refused', () => {
     ['a decimal with no zero read as a whole number', 'applied .5 oz', 'I applied 5 oz.', 'not_in_note', '5'],
     ['a bound read as an exact amount', 'applied ≤5 oz', 'I applied 5 oz.', 'not_in_note', '5'],
     ['an upper bound made a lower bound', 'applied <=5 oz', 'I applied >=5 oz.', 'not_in_note', 'mark62markmark61mark5'],
+    ['feet made inches', 'found 5′ gap', 'I found a 5″ gap.', 'not_in_note', '5mark34mark'],
     ['a bound in brackets read as an exact amount', 'applied (≤5 oz)', 'I applied 5 oz.', 'not_in_note', '5'],
     ['"I" added beside the person who did the work', 'the neighbor sprayed the fence line', 'I and the neighbor sprayed the fence line.', 'not_in_note', 'i'],
     ['"I" added before the customer', 'customer sprayed the fence line', 'I and you sprayed the fence line.', 'not_in_note', 'i'],
     ['"you" added as the last word', 'neighbor said', 'Neighbor said you.', 'not_in_note', 'you'],
     ['"me" added', 'neighbor said traps were empty', 'Neighbor said me traps were empty.', 'not_in_note', 'me'],
     ['"said" made "told"', 'neighbor said traps were empty', 'Neighbor told traps were empty.', 'not_in_note', 'told'],
+    ['"you" added after the technician spoke', 'customer called. I said treated shed', 'You called. I said you treated the shed.', 'not_in_note', 'you'],
+    ['"you" added beside the person the note names', 'customer said I treated the shed', 'You said you and I treated the shed.', 'not_in_note', 'you'],
+    ['"and" added between an action and what it was done to', 'inspected damaged traps', 'I inspected and damaged traps.', 'not_in_note', 'and'],
+    ['a person made the thing treated', 'neighbor sprayed outside', 'The neighbor was sprayed outside.', 'not_in_note', 'was'],
     ['"you" added where the note names no customer', 'I said treated shed', 'I said you treated the shed.', 'not_in_note', 'you'],
     ['a possessive made a second person', 'the customer\'s neighbor treated the shed', 'The customer and neighbor treated the shed.', 'not_in_note', 'customer'],
     ['a pronoun after the customer\'s neighbor made the customer', 'customer\'s neighbor said he treated the shed', 'Your neighbor said you treated the shed.', 'not_in_note', 'you'],
@@ -172,5 +182,6 @@ describe('the words the check reads', () => {
     expect(noteWords('1/2, 1-2, 1 – 2')).toEqual(['1mark47mark2', '1mark45mark2', '1mark45mark2']);
     expect(noteWords('≤5 oz, < 5 oz, (≤5), 5% and .5')).toEqual(['mark8804mark5', 'oz', 'mark60mark5', 'oz', 'mark8804mark5', '5mark37mark', 'and', '0point5']);
     expect(noteWords("the customer's dog")).toEqual(['the', 'customermark39marks', 'dog']);
+    expect(noteWords('5′ gap, 1/4″ and 6\' 2"')).toEqual(['5mark39mark', 'gap', '1mark47mark4mark34mark', 'and', '6mark39mark', '2mark34mark']);
   });
 });
