@@ -317,7 +317,7 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
     ...estimate,
     estimateData: estimate.estimate_data,
   });
-  // The send passes the line it decided (for a reviewed send, the one the office reviewed: noVisitLineForSend).
+  // The send passes the line it decided (for a reviewed send, the one the review recorded: noVisitLineForSend).
   // With no decision the row decides.
   const noVisitLine = decidedNoVisitLine ?? require('../services/estimate-no-visit-line').noVisitLineFor(estimate, { proposalMode });
   return {
@@ -1121,8 +1121,8 @@ async function buildEstimateSendPreview(estimate) {
   // The reviewed average copy is recorded with the review (and with a schedule built from it) so the send can
   // refuse a changed one; absent = none (like pdfCopy, present only when there is one).
   const averageText = require('../services/estimate-monthly-average').averageText(average);
-  // The "no visit needed" line of this email. The review records it when the email shows it (below), and the send
-  // refuses a reviewed line that no longer fits the estimate (estimate-no-visit-line.js). Absent = none.
+  // The "no visit needed" line of this email, recorded with the review: a reviewed or scheduled send puts this
+  // same value back and does not read the row again (noVisitLineForSend). Absent = none.
   const noVisitLine = require('../services/estimate-no-visit-line').noVisitLineFor(estimate, { proposalMode });
   // GATE_ESTIMATE_UPDATED_WORDING: a corrected estimate's text and email say "updated". Each channel falls back to its
   // normal template when the updated one is off or missing, and the email carries `updated` only when it used the
@@ -1147,20 +1147,11 @@ async function buildEstimateSendPreview(estimate) {
       template: library.template, version: library.activeVersion,
       payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode, pdfNote, average, noVisitLine }),
     });
-    // The review keeps the "no visit needed" line only when this email shows it: when the version uses the line's
-    // variable anywhere, by the template library's own list (subject, preview text, text body, every block). The
-    // updated-estimate email, and a template an admin rewrote, do not use it: a record there would let a later
-    // change of the row refuse a send whose reviewed email never had the sentence.
-    const shownNoVisitLine = noVisitLine
-      && EmailTemplateLibrary.validationFor(library.template, library.activeVersion).referenced_variables
-        .includes(require('../services/estimate-no-visit-line').NO_VISIT_LINE_VARIABLE)
-      ? noVisitLine
-      : '';
     // `pdfCopy` is the reviewed PDF decision, kept with the review (and with a
     // schedule built from it). Present only when true, so a send with no PDF
     // keeps its review byte-identical to before; a review without it means "no
     // PDF" (sendEstimateNowInner).
-    email = { provider: 'sendgrid', subject: rendered.subject, text: rendered.text, versionId: library.activeVersion.id, contentHash: EmailTemplateLibrary.templateContentHash(library.template, library.activeVersion), ...(pdfCopy ? { pdfCopy: true } : {}), ...(averageText ? { monthlyAverage: averageText } : {}), ...(shownNoVisitLine ? { noVisitLine: shownNoVisitLine } : {}), ...(delivery.updated ? { updated: true } : {}) };
+    email = { provider: 'sendgrid', subject: rendered.subject, text: rendered.text, versionId: library.activeVersion.id, contentHash: EmailTemplateLibrary.templateContentHash(library.template, library.activeVersion), ...(pdfCopy ? { pdfCopy: true } : {}), ...(averageText ? { monthlyAverage: averageText } : {}), ...(noVisitLine ? { noVisitLine } : {}), ...(delivery.updated ? { updated: true } : {}) };
   } else if (smtpFallbackAllowed()) {
     const rendered = estimateSmtpContent({ firstName, viewUrl, priceLine, proposalMode, updated });
     // The content hash is of the SMTP content alone (no note), so it is unchanged.
@@ -3038,14 +3029,6 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       // drop the file. Reviews that carry no decision mean "no PDF" and are not
       // stale (codex #6343 r6).
       if (reviewedAverageStale || reviewedWordingStale) return 'saved_offer_changed';
-      // The reviewed "no visit needed" line must still fit the row as locked here (its category, tier or service
-      // label can change with no change to the saved offer). A mismatch refuses the send before any channel.
-      if (sendMethod !== 'sms') {
-        const noVisit = require('../services/estimate-no-visit-line');
-        if (noVisit.noVisitLineStale(options.reviewedMessages, noVisit.noVisitLineFor(verdictRow, { proposalMode: normalizeProposal(verdictRow).enabled }))) {
-          return 'saved_offer_changed';
-        }
-      }
       if (sendMethod !== 'sms' && emailPdfCopy().reviewedPdfDecisionStale(options.reviewedMessages, await emailPdfCopy().deliveryPdfCopyDecision(verdictRow, trx))) {
         return 'saved_offer_changed';
       }
@@ -3427,14 +3410,6 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           if (averageService.averageDiffersFromReview(options.reviewedMessages, average)) {
             throw Object.assign(new Error(REVIEW_STALE_MESSAGE), { statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
           }
-          // The "no visit needed" line, from the same fresh row. The check in the claim covers the text too; this one
-          // covers an edit between it and this build. The send then carries the reviewed line, or for an unreviewed
-          // send the line of the row now.
-          const noVisit = require('../services/estimate-no-visit-line');
-          const noVisitNow = noVisit.noVisitLineFor(freshEstimate, { proposalMode });
-          if (noVisit.noVisitLineStale(options.reviewedMessages, noVisitNow)) {
-            throw Object.assign(new Error(REVIEW_STALE_MESSAGE), { statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
-          }
           // The updated email: the reviewed choice, or for an unreviewed update the updated template when it can send
           // (the SMTP copy always can). A proposal never takes it.
           const emailUpdated = options.reviewedMessages
@@ -3446,7 +3421,8 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             viewUrl: emailViewUrl,
             priceLine: proposalMode ? freshPriceLine : priceLine,
             average,
-            noVisitLine: noVisit.noVisitLineForSend(options.reviewedMessages, noVisitNow),
+            // The reviewed line for a reviewed or scheduled send; else the line of the row read just before this send.
+            noVisitLine: require('../services/estimate-no-visit-line').noVisitLineForSend(options.reviewedMessages, freshEstimate, { proposalMode }),
             idempotencyKey: options.idempotencyKey || options.emailIdempotencyKey || null,
             attachments: pdfCopy.attachment ? [pdfCopy.attachment] : proposalAttachments,
             pdf: pdfCopy,

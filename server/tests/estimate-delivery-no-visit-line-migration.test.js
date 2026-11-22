@@ -7,7 +7,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const migration = require('../models/migrations/20261122030000_estimate_delivery_no_visit_line');
 const logger = require('../services/logger');
-const { NO_VISIT_QUOTE_LINE, NO_VISIT_LINE_VARIABLE, noVisitLineFor, noVisitLineStale, noVisitLineForSend } = require('../services/estimate-no-visit-line');
+const { NO_VISIT_QUOTE_LINE, NO_VISIT_LINE_VARIABLE, noVisitLineFor, noVisitLineForSend } = require('../services/estimate-no-visit-line');
 const callScript = require('../services/csr/weekly-call-outcomes');
 
 const { LINE, NOTE, VARIABLE, insertLine, carriesLine } = migration._private;
@@ -128,40 +128,32 @@ describe('who gets the "no visit needed" line', () => {
 
 describe('a reviewed or scheduled send keeps the line the office reviewed', () => {
   const reviewed = (record) => ({ sms: null, email: record });
+  const HOME_ROW = { category: 'RESIDENTIAL', estimate_data: { services: [{ service: 'pest_control' }] } };
+  const COMMERCIAL_ROW = { ...HOME_ROW, category: 'COMMERCIAL' };
 
-  test('no review: the send carries the line of the row as it reads now', () => {
-    expect(noVisitLineForSend(null, LINE)).toBe(LINE);
-    expect(noVisitLineForSend(undefined, '')).toBe('');
-    expect(noVisitLineStale(null, LINE)).toBe(false);
-    expect(noVisitLineStale(undefined, '')).toBe(false);
+  test('no review: the send reads the row', () => {
+    expect(noVisitLineForSend(null, HOME_ROW)).toBe(LINE);
+    expect(noVisitLineForSend(undefined, COMMERCIAL_ROW)).toBe('');
+    expect(noVisitLineForSend(null, HOME_ROW, { proposalMode: true })).toBe('');
   });
 
-  test('the review kept the line: it sends while it fits, and the send is stale once it does not', () => {
+  test('the review kept the line: the send carries that value, and does not read the row again', () => {
     const kept = reviewed({ provider: 'sendgrid', noVisitLine: LINE });
-    expect(noVisitLineStale(kept, LINE)).toBe(false);
-    expect(noVisitLineForSend(kept, LINE)).toBe(LINE);
-    // The estimate turned commercial after the review.
-    expect(noVisitLineStale(kept, '')).toBe(true);
-    expect(noVisitLineForSend(kept, '')).toBe('');
-    // The sentence itself changed after the review.
-    const older = reviewed({ provider: 'sendgrid', noVisitLine: 'Older words.' });
-    expect(noVisitLineStale(older, LINE)).toBe(true);
-    expect(noVisitLineForSend(older, LINE)).toBe('');
+    expect(noVisitLineForSend(kept, HOME_ROW)).toBe(LINE);
+    // The row changed after the review: the reviewed email is still the one that goes out.
+    expect(noVisitLineForSend(kept, COMMERCIAL_ROW)).toBe(LINE);
+    // A sentence reviewed before a later change of the words stays the reviewed one.
+    expect(noVisitLineForSend(reviewed({ provider: 'sendgrid', noVisitLine: 'Older words.' }), HOME_ROW)).toBe('Older words.');
   });
 
-  test('the review kept no line: none is sent and nothing is stale, whatever the row reads now', () => {
+  test('the review kept no line: none is sent, whatever the row reads now', () => {
     // A review or a schedule made before the line existed has no record of it.
-    const none = reviewed({ provider: 'sendgrid' });
-    expect(noVisitLineStale(none, LINE)).toBe(false);
-    expect(noVisitLineForSend(none, LINE)).toBe('');
-    expect(noVisitLineStale({ sms: 'x', email: null }, LINE)).toBe(false);
-    expect(noVisitLineForSend({ sms: 'x', email: null }, LINE)).toBe('');
-    expect(noVisitLineForSend(reviewed({ provider: 'sendgrid', noVisitLine: true }), LINE)).toBe('');
+    expect(noVisitLineForSend(reviewed({ provider: 'sendgrid' }), HOME_ROW)).toBe('');
+    expect(noVisitLineForSend({ sms: 'x', email: null }, HOME_ROW)).toBe('');
+    expect(noVisitLineForSend(reviewed({ provider: 'sendgrid', noVisitLine: true }), HOME_ROW)).toBe('');
   });
 
-  test('the SMTP copy has no line, so an SMTP review is never stale and sends none', () => {
-    const smtp = reviewed({ provider: 'smtp', noVisitLine: LINE });
-    expect(noVisitLineStale(smtp, '')).toBe(false);
-    expect(noVisitLineForSend(smtp, LINE)).toBe('');
+  test('the SMTP copy has no line', () => {
+    expect(noVisitLineForSend(reviewed({ provider: 'smtp', noVisitLine: LINE }), HOME_ROW)).toBe('');
   });
 });
