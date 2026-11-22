@@ -95,4 +95,46 @@ describe('spreadPins', () => {
     const [p] = spreadPins([{ x: 1.4, y: -0.2 }], 294);
     expect([p.x, p.y]).toEqual([1, 0]);
   });
+  it('spreads a row of pins that is longer than the photo: the row cannot fit on its own line', () => {
+    // 12 pins in one line need 11 gaps of 28 px = 308 px, and a 294 px photo has 268 px between its edge positions.
+    const row = Array.from({ length: 12 }, (_, i) => ({ x: 0.12 + 0.035 * i, y: 0.5 }));
+    for (const size of [294, 480]) {
+      const out = spreadPins(row, size);
+      expect(minPairGap(out, size)).toBeGreaterThanOrEqual(MIN - 0.05);
+      expect(insidePhoto(out, size)).toBe(true);
+    }
+    const edge = Array.from({ length: 12 }, (_, i) => ({ x: 0.03 * i, y: 0 }));
+    const out = spreadPins(edge, 294);
+    expect(minPairGap(out, 294)).toBeGreaterThanOrEqual(MIN - 0.05);
+    expect(insidePhoto(out, 294)).toBe(true);
+  });
+
+  it('leaves no two badges overlapping for 400 generated layouts of 2 to 20 pins (lines, clusters and scattered)', () => {
+    // A fixed sequence (no Math.random): the same layouts on every run.
+    let seed = 20261121;
+    const next = () => {
+      seed = (seed * 1664525 + 1013904223) % 4294967296;
+      return seed / 4294967296;
+    };
+    const shapes = [
+      () => ({ x: 0.5 + (next() - 0.5) * 0.1, y: 0.5 + (next() - 0.5) * 0.1 }),
+      () => ({ x: next(), y: 0.3 }),
+      () => ({ x: 0.97, y: next() }),
+      () => ({ x: next(), y: next() }),
+    ];
+    for (let layout = 0; layout < 400; layout += 1) {
+      const count = 2 + Math.floor(next() * 19);
+      const shape = shapes[layout % shapes.length];
+      const pins = Array.from({ length: count }, shape);
+      const size = layout % 2 ? 294 : 480;
+      const out = spreadPins(pins, size);
+      const overlapped = minPairGap(pins.map((p) => ({ x: p.x, y: p.y })), size) < MIN;
+      if (!overlapped) {
+        expect(out.every((p) => !p.moved)).toBe(true);
+      } else {
+        expect(minPairGap(out, size)).toBeGreaterThanOrEqual(MIN - 0.05);
+        expect(insidePhoto(out, size)).toBe(true);
+      }
+    }
+  });
 });
