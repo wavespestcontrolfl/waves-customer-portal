@@ -324,7 +324,7 @@ describe('a tap', () => {
     const failed = { referralId: 'r-1', converted: true, creditsNow: true, credited: null, error: 'credit_failed' };
     inbound.confirmInboundReferral.mockResolvedValue(failed);
     await expect(run(CONFIRM)).resolves.toEqual({
-      ok: true, message: "Lea Quill is confirmed as Ames Fenn's referrer. The $25 credits did not post. They post at the next plan visit.", resolution: 'Referrer confirmed',
+      ok: true, message: "Lea Quill is confirmed as Ames Fenn's referrer. The credits did not post. They post at the next plan visit.", resolution: 'Referrer confirmed',
     });
     gates.isEnabled.mockImplementation((gate) => gate === 'referralStep2');
     await expect(run(CONFIRM)).resolves.toMatchObject({

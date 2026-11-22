@@ -321,11 +321,10 @@ const STEPS = {
         ? `${formatDollars(result.credited.referrerDollars)} credited to the member and ${formatDollars(result.credited.refereeDollars)} to the friend for the plan visit that just finished.`
         : `${termsText(card)}.`;
     }
-    // The confirm is saved, but the credit for a plan visit that finished meanwhile did not post: the Queue's own
-    // words for it (ReferralsPageV2 inboundConfirmedMessage), never "after the first plan visit".
-    if (result.error === 'credit_failed') {
-      after = `The ${step2Live() ? '' : '$25 '}credits did not post. They post at the next plan visit.`;
-    }
+    // The confirm is saved, but the credit for a plan visit that finished meanwhile did not post: say so (as the
+    // Queue does, ReferralsPageV2 inboundConfirmedMessage), never "after the first plan visit". No amount: the two
+    // credits are settings, and they can differ.
+    if (result.error === 'credit_failed') after = 'The credits did not post. They post at the next plan visit.';
     return { ok: true, message: `${tidyName(sure.name)} is confirmed as ${name}'s referrer. ${after}`, resolution: CLOSE_RESOLUTIONS.confirmed };
   },
 };
