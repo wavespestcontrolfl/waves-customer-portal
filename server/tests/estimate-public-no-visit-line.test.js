@@ -273,13 +273,13 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
     expect(estimateIsRemoteMeasured({ result: plan('pest_control', 'rodent_bait'), engineResult: plan('pest_control') }, {})).toBe(false);
   });
 
-  test('the price snapshot\'s one-time rows count', () => {
+  test('a one-time row of the served price can take the answer away', () => {
     const estData = { result: plan('pest_control') };
     expect(estimateIsRemoteMeasured(estData, { oneTimeBreakdown: { items: [{ service: 'one_time_pest', name: 'One-Time Pest', amount: 199 }] } })).toBe(true);
     expect(estimateIsRemoteMeasured(estData, { oneTimeBreakdown: { items: [{ service: 'german_roach', name: 'German Roach Cleanout Service', amount: 450 }] } })).toBe(false);
   });
 
-  test('a saved row the page resolves to a listed plan must store that plan as its own service', () => {
+  test('a saved plan row or raw engine line must store a listed service: a name is not an identity', () => {
     // A raw engine line reaches the page's rows with the key the page resolves from its name or from a part of its key.
     const line = (fields) => ({ monthly: 42, annual: 504, visitsPerYear: 4, ...fields });
     const lines = (...items) => ({ engineResult: { lineItems: items } });
@@ -300,6 +300,34 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
       { result: { ...plan('pest_control'), lineItems: [line({ service: 'pest_control' }), oneTimeLine] } },
       { oneTimeBreakdown: { items: [{ service: 'one_time_pest', label: 'One-Time Pest Control', amount: 199 }] } },
     )).toBe(true);
+  });
+
+  test('every saved row counts as it is stored, also one the page skips or drops', () => {
+    const line = (fields) => ({ monthly: 42, annual: 504, visitsPerYear: 4, ...fields });
+    const saved = (extra) => ({ result: { ...plan('pest_control'), ...extra } });
+    expect(estimateIsRemoteMeasured(saved({}), {})).toBe(true);
+    // A raw engine line with a recurring price and a key the page's readers do not know: they skip it.
+    expect(estimateIsRemoteMeasured(saved({ lineItems: [line({ service: 'pest_control' }), line({ service: 'attic_dusting_plan', label: 'Attic dusting' })] }), {})).toBe(false);
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control'), engineResult: { lineItems: [line({ service: 'attic_dusting_plan' })] } }, {})).toBe(false);
+    // Specialty work a plan includes at no charge: the page's one-time reader drops it.
+    const included = { service: 'stinging_insect', name: 'Stinging Insect', price: 0, onProg: true };
+    expect(estimateIsRemoteMeasured(saved({ specItems: [included] }), {})).toBe(false);
+    expect(estimateIsRemoteMeasured(saved({ oneTime: { items: [{ ...included, onProg: undefined, includedOnProgram: true }] } }), {})).toBe(false);
+    expect(estimateIsRemoteMeasured(saved({ results: { oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout Service', price: 0 }] } } }), {})).toBe(false);
+    expect(estimateIsRemoteMeasured(saved({ specItems: [{ name: 'Attic inspection' }] }), {})).toBe(false);
+    // A listed one-time service, a fee, a discount and a blank row do not take the answer away.
+    expect(estimateIsRemoteMeasured(saved({
+      oneTime: { items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 199 }, { service: 'waveguard_setup', name: 'WaveGuard Setup', price: 99 }] },
+      specItems: [{}],
+      lineItems: [line({ service: 'pest_control' }), { service: 'manual_discount', label: 'Discount', price: -20 }, { service: 'one_time_pest', price: 199 }],
+    }), {})).toBe(true);
+  });
+
+  test('the served price never grants the answer by a one-time row either', () => {
+    const servedOneTime = { oneTimeBreakdown: { items: [{ service: 'one_time_pest', name: 'One-Time Pest', amount: 199 }] } };
+    expect(estimateIsRemoteMeasured({}, servedOneTime)).toBe(false);
+    expect(estimateIsRemoteMeasured({ result: {} }, servedOneTime)).toBe(false);
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control') }, servedOneTime)).toBe(true);
   });
 
   test('a recurring service that only the price the customer is served lists takes the answer away', () => {

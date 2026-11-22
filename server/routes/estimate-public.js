@@ -24207,19 +24207,20 @@ function estimateMakesNoGuaranteeClaim(estData = {}, pricingBundle = {}) {
 // exact lists of service identities, the programs priced from the measured property alone: the recurring pest, lawn,
 // tree and shrub, barrier mosquito and termite bait plans, the general one-time pest, lawn and mosquito services, and
 // the termite bait plan's own install charge.
-// - A row's identity is its own stored `service`, compared whole. Never its name or label, and never a part of a key:
-//   a name is free text, and the display categories also hold work priced from facts a technician or the customer
-//   gives (a palm injection sits under tree and shrub; bed bug rooms, a roach cleanout, a flea package and a stinging
-//   insect job sit under pest control). A row with no stored `service` has no identity.
-// - The saved estimate decides: the rows the guarantee rule reads (guaranteeServiceRows: both saved result shapes, an
-//   inputs-only replay, the price's one-time rows, an authored proposal's rows). One row off its list or with no
-//   identity, a commercial row, no service row at all, or a failed replay, and the answer is false. Setup, discount
-//   and credit rows are not services and never count.
-// - Those rows come through the page's own readers, and one of them resolves a recurring row with recurringServiceKey,
-//   which also reads a name and matches parts of a key. savedRecurringRowsStoreTheirIdentity closes that: it reads the
-//   saved rows as they are stored.
-// - The price the customer is served can only take the answer away (servedRecurringIdentities): a frozen send
-//   snapshot is served as it is, so a recurring service it lists counts even when the saved result does not hold it.
+// A row's identity is its own stored `service`, compared whole. Never its name or label, and never a part of a key: a
+// name is free text, and the display categories also hold work priced from facts a technician or the customer gives (a
+// palm injection sits under tree and shrub; bed bug rooms, a roach cleanout, a flea package and a stinging insect job
+// sit under pest control). A row with no stored `service` has no identity.
+// Three reads, and each one fails closed (estimateIsRemoteMeasured):
+// 1. The saved estimate grants the answer: the rows the guarantee rule reads from it (guaranteeServiceRows with no
+//    served price: both saved result shapes, an inputs-only replay, an authored proposal's rows). At least one service
+//    row, every one on its list, none commercial, and no failed replay. Setup, discount and credit rows are not
+//    services and never count.
+// 2. Every saved row, as it is stored, can take the answer away (savedRowsAreAllListed). The page's readers resolve a
+//    recurring row from its name, skip a raw engine line whose key they do not know, and drop work a plan includes at
+//    no charge. So the stored rows are read before any of that.
+// 3. The price the customer is served can take the answer away, and never grants it (servedPriceIsAllListed): a
+//    frozen send snapshot is served as it is, so a service it lists counts even when the saved result does not hold it.
 const REMOTE_MEASURED_RECURRING_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait']);
 // `termite_bait_installation` is the install charge of the termite bait plan itself: the same station count, from the
 // same measured perimeter.
@@ -24236,49 +24237,59 @@ function serviceMixIsRemoteMeasured(recurringServices = [], oneTimeItems = []) {
     && oneTime.every((item) => REMOTE_MEASURED_ONE_TIME_SERVICES.has(serviceIdentity(item.service)));
 }
 
-// The saved recurring rows as they are stored: `recurring.services[]`, the nested `results.recurring.services[]`, and
-// the raw engine lines (`lineItems[]`), in each saved result shape. A row the page resolves to a listed plan must store
-// that plan's key as its own `service`. A line that stores a listed one-time service is that service (its key holds a
-// plan's name: one_time_pest), and the one-time rows above read it.
-function savedRecurringRowsStoreTheirIdentity(estData = {}) {
+// Every saved row as it is stored, in each saved result shape. A row is fine when its stored `service` is on the list
+// for its container, or when it is a fee, discount or blank row (isNonServiceOneTimeItem). Any other row, priced or
+// not, takes the answer away.
+// - Plan rows (`recurring.services[]`, the nested `results.recurring.services[]`): the recurring list.
+// - Raw engine lines (`lineItems[]`) hold plans and one-time work together: either list.
+// - One-time and specialty rows (`oneTime.items[]`, the nested `results.oneTime.items[]`, `specItems[]`): the one-time
+//   list. A row a plan includes at no charge is still work on the estimate.
+function savedRowsAreAllListed(estData = {}) {
   const isRow = (row) => Boolean(row) && typeof row === 'object';
   const list = (value) => (Array.isArray(value) ? value : []);
   const roots = [estData?.result, estData?.engineResult].filter(isRow);
   if (!roots.length && isRow(estData)) roots.push(estData);
-  return roots
-    .flatMap((root) => [...list(root.recurring?.services), ...list(root.results?.recurring?.services), ...list(root.lineItems)])
-    .filter(isRow)
-    .every((row) => {
-      const resolved = recurringServiceKey(row);
-      const stored = serviceIdentity(row.service);
-      return !REMOTE_MEASURED_RECURRING_SERVICES.has(resolved) || stored === resolved || REMOTE_MEASURED_ONE_TIME_SERVICES.has(stored);
-    });
+  const allListed = (rows, ...lists) => rows.filter(isRow)
+    .every((row) => isNonServiceOneTimeItem(row) || lists.some((listed) => listed.has(serviceIdentity(row.service))));
+  return roots.every((root) => (
+    allListed([...list(root.recurring?.services), ...list(root.results?.recurring?.services)], REMOTE_MEASURED_RECURRING_SERVICES)
+    && allListed(list(root.lineItems), REMOTE_MEASURED_RECURRING_SERVICES, REMOTE_MEASURED_ONE_TIME_SERVICES)
+    && allListed(
+      [...list(root.oneTime?.items), ...list(root.results?.oneTime?.items), ...list(root.specItems)],
+      REMOTE_MEASURED_ONE_TIME_SERVICES,
+    )
+  ));
 }
 
-// The recurring service identities of the price the customer is served. Its sections (`services[]`): a recurring
-// section names its services in `memberKeys` (a plan that does not split is one 'bundle' section), else in `key`; a
-// one-time section is not read here, because its key is a display category and its rows are the one-time rows above.
-// Its per-service rows (`perServiceTreatments[].service`), on the price and on each recurring section: every cadence
-// (`frequencies[]`) and every cadence combination the customer can pick (`serviceCadenceCombos[]`).
-function servedRecurringIdentities(pricingBundle = {}) {
+// The price the customer is served.
+// - Its sections (`services[]`): a recurring section names its services in `memberKeys` (a plan that does not split is
+//   one 'bundle' section), else in `key`. A one-time section is not read: its key is a display category, and its rows
+//   are the one-time rows below.
+// - Its per-service rows (`perServiceTreatments[].service`), on the price and on each recurring section: every cadence
+//   (`frequencies[]`) and every cadence combination the customer can pick (`serviceCadenceCombos[]`).
+// - Its one-time rows (`oneTimeBreakdown.items[]`).
+function servedPriceIsAllListed(pricingBundle = {}) {
   const list = (value) => (Array.isArray(value) ? value : []);
-  const sections = list(pricingBundle?.services)
-    .filter((section) => section && typeof section === 'object' && section.isRecurring !== false);
+  const isRow = (row) => Boolean(row) && typeof row === 'object';
+  const sections = list(pricingBundle?.services).filter((section) => isRow(section) && section.isRecurring !== false);
   const perServiceRows = [pricingBundle, ...sections]
     .flatMap((holder) => [...list(holder?.frequencies), ...list(holder?.serviceCadenceCombos)])
     .flatMap((cadence) => list(cadence?.perServiceTreatments));
-  return [
+  const recurring = [
     ...sections.flatMap((section) => (list(section.memberKeys).length ? section.memberKeys : [section.key])),
     ...perServiceRows.map((row) => row?.service),
   ].map(serviceIdentity).filter((identity) => !NON_SERVICE_RECURRING_KEY_RX.test(identity));
+  return recurring.every((identity) => REMOTE_MEASURED_RECURRING_SERVICES.has(identity))
+    && list(pricingBundle?.oneTimeBreakdown?.items).filter(isRow)
+      .every((item) => isNonServiceOneTimeItem(item) || REMOTE_MEASURED_ONE_TIME_SERVICES.has(serviceIdentity(item.service)));
 }
 
 function estimateIsRemoteMeasured(estData = {}, pricingBundle = {}) {
-  const rows = guaranteeServiceRows(estData, pricingBundle);
-  return Boolean(rows)
-    && serviceMixIsRemoteMeasured(rows.recurring, rows.oneTime)
-    && savedRecurringRowsStoreTheirIdentity(estData)
-    && servedRecurringIdentities(pricingBundle).every((identity) => REMOTE_MEASURED_RECURRING_SERVICES.has(identity));
+  const saved = guaranteeServiceRows(estData, {});
+  return Boolean(saved)
+    && serviceMixIsRemoteMeasured(saved.recurring, saved.oneTime)
+    && savedRowsAreAllListed(estData)
+    && servedPriceIsAllListed(pricingBundle);
 }
 
 // Whether a guarantee line may cover the whole estimate: every service
