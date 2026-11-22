@@ -282,4 +282,5 @@ async function saveProspect(row, conn = db) {
 
 module.exports = {
   findBySourceRefs, newHomePermitsForParcels, addressKnownToWaves, saveProspect, permitPinForms, NEW_HOME_CO_MONTHS,
+  cityNamesOf,
 };

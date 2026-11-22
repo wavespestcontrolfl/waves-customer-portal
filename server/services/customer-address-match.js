@@ -32,6 +32,11 @@ const PER_LEG_LIMIT = 50;
 // strict: a far higher cap, and a leg that fills it throws (the search did
 // not see every row, so "no match" would not be an answer).
 const STRICT_LEG_LIMIT = 2000;
+// strict: an address the search can never answer for (no readable house
+// number, a leg that fills its cap). Its code tells it from a database error,
+// which a caller may try again.
+const UNCHECKABLE = 'ADDRESS_UNCHECKABLE';
+const uncheckable = (why) => Object.assign(new Error(`customer-address-match: ${why}; the search is not complete`), { code: UNCHECKABLE });
 
 // The complete leading house-number token, read from the street-first form
 // the comparator uses. "123A Main St", "123-125 Main St", "123/2 Main St"
@@ -54,16 +59,20 @@ function candidateAddressString(row) {
  * `strict: true` throws when the property-address leg fails, instead of
  *   returning the primary leg alone (the primary leg always throws), and
  *   reads up to STRICT_LEG_LIMIT rows a leg, throwing when a leg fills it.
+ *   An address it can never answer for throws with code ADDRESS_UNCHECKABLE.
  * @returns {Promise<Array<object>>} customer rows (deduped by id) whose
  *   primary or property address is the same street address, each with
  *   `matchedVia: 'primary' | 'property'` and the matched address columns.
  */
 async function findCustomersAtAddress(database, address, { excludeCustomerId = null, strict = false } = {}) {
   const houseNumber = houseNumberOf(address);
-  if (!houseNumber) return [];
+  if (!houseNumber) {
+    if (strict) throw uncheckable('no house number the search can read');
+    return [];
+  }
   const legLimit = strict ? STRICT_LEG_LIMIT : PER_LEG_LIMIT;
   const complete = (rows, leg) => {
-    if (strict && rows.length >= legLimit) throw new Error(`customer-address-match: the ${leg} leg filled its ${legLimit}-row cap; the search is not complete`);
+    if (strict && rows.length >= legLimit) throw uncheckable(`the ${leg} leg filled its ${legLimit}-row cap`);
     return rows;
   };
 
@@ -199,4 +208,4 @@ function rankByContact(rows, { phone = null, email = null } = {}) {
   return [...tagged.filter((r) => r.contactMatch), ...tagged.filter((r) => !r.contactMatch)];
 }
 
-module.exports = { findCustomersAtAddress, rankByContact, pairCustomersAtSameAddress, _private: { houseNumberOf, candidateAddressString } };
+module.exports = { findCustomersAtAddress, rankByContact, pairCustomersAtSameAddress, ADDRESS_UNCHECKABLE: UNCHECKABLE, _private: { houseNumberOf, candidateAddressString } };

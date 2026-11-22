@@ -16,7 +16,8 @@
  * review before its price stands as exact (draft-builder lineNeedsReviewBeforeExactPrice, the shared test), an annual
  * total above 0 and a setup fee the table can hold. A clean price is priced; anything else is not_clean with one reason
  * code; a save the server refuses (4xx) is not_clean / save_refused; any other failure is failed / engine (tried again
- * later). A member check that cannot finish is failed / member_check (tried again later), never a price.
+ * later). A member check that cannot finish is failed / member_check (tried again later), never a price; an address
+ * the check can never answer for (no readable house number, too many rows) is not_clean / member_unchecked.
  *
  * One database read of its own (the member check: customers and their properties at this address), no paid or AI
  * service, no logging.
@@ -39,6 +40,8 @@ const REAL = {
     const rows = await findCustomersAtAddress(require('../../models/db'), address, { strict: true });
     return rows.some(isMembershipCustomerRow);
   },
+  // The names the list counts as one place in a zip (prospect-store SAME_PLACE_CITY_NAMES), or the city alone.
+  cityNamesOf: () => require('./prospect-store').cityNamesOf,
 };
 
 const httpStatus = (err) => Number(err?.statusCode || err?.status) || 0;
@@ -71,6 +74,16 @@ function engineInputFor(facts, buildEngineInput) {
 
 /** The estimate save's body for the home: its own address, no customer. */
 const addressOf = (row) => [row.address_line1, [row.city, row.state, row.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+const upperLine = (text) => String(text || '').toUpperCase().replace(/\s+/g, ' ').trim();
+
+// The home's address once for each name of its place: a member may have it on file under the other name of the same
+// zip (BRADENTON for LAKEWOOD RANCH in 34211), and the strict match compares cities.
+function memberCheckAddresses(row, cityNamesOf) {
+  const city = upperLine(row.city);
+  const zip = upperLine(row.zip).slice(0, 5);
+  if (!city || !zip) return [addressOf(row)];
+  return cityNamesOf(city, zip).map((name) => addressOf({ ...row, city: name }));
+}
 
 function estimateBody(row, facts, engineInputs) {
   const address = addressOf(row);
@@ -140,22 +153,29 @@ function judge(prepared) {
  * The result to save for a home with every fact (`facts`: homeSqft, homeSqftSource, stories, lotSqft):
  *   { status: 'priced', ...facts, priceAnnual, priceSetupFee, priceDigest }
  *   { status: 'not_clean', reason, ...facts }     reason: not_server_price | member_address | not_one_line |
- *                                                  engine_review | no_amount | save_refused
+ *                                                  engine_review | no_amount | save_refused | member_unchecked
  *   { status: 'failed', reason: 'engine' | 'member_check', ...facts }
- * `deps` may replace buildEngineInput, dryRunEstimate and memberAtAddress (tests).
+ * `deps` may replace buildEngineInput, dryRunEstimate, memberAtAddress and cityNamesOf (tests).
  */
 async function priceHome(row, facts, deps = {}) {
   const buildEngineInput = deps.buildEngineInput || REAL.buildEngineInput();
   const dryRunEstimate = deps.dryRunEstimate || REAL.dryRunEstimate();
   const memberAtAddress = deps.memberAtAddress || REAL.memberAtAddress();
+  const cityNamesOf = deps.cityNamesOf || REAL.cityNamesOf();
   const known = {
     homeSqft: facts.homeSqft, homeSqftSource: facts.homeSqftSource, stories: facts.stories, lotSqft: facts.lotSqft,
   };
   // Before the save: a home whose member check cannot finish is tried again later, never priced on new-customer terms.
-  let member;
+  // An address the search can never answer for is settled without a price (member_unchecked); any other error is
+  // tried again later (member_check).
+  let member = false;
   try {
-    member = await memberAtAddress(addressOf(row));
-  } catch {
+    for (const address of memberCheckAddresses(row, cityNamesOf)) {
+      if (await memberAtAddress(address)) { member = true; break; }
+    }
+  } catch (err) {
+    const { ADDRESS_UNCHECKABLE } = require('../customer-address-match');
+    if (err?.code === ADDRESS_UNCHECKABLE) return { status: 'not_clean', reason: 'member_unchecked', ...known };
     return { status: 'failed', reason: 'member_check', ...known };
   }
   if (member) return { status: 'not_clean', reason: 'member_address', ...known };

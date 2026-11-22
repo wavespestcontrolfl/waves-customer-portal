@@ -34,6 +34,7 @@ function setup(over = {}) {
     buildEngineInput: jest.fn((input) => ({ built: input })),
     dryRunEstimate: jest.fn(async () => prepared()),
     memberAtAddress: jest.fn(async () => false),
+    cityNamesOf: jest.requireActual('../services/mail/prospect-store').cityNamesOf,
     ...over,
   };
   return { deps, price: (f = facts) => priceHome(row, f, deps) };
@@ -209,6 +210,32 @@ describe('the strict member check, before the save', () => {
   test('a member check that fails: failed / member_check (tried again later), never a price', async () => {
     const t = setup({ memberAtAddress: jest.fn(async () => { throw new Error('connection reset'); }) });
     expect(await t.price()).toEqual({ status: 'failed', reason: 'member_check', ...facts });
+    expect(t.deps.dryRunEstimate).not.toHaveBeenCalled();
+  });
+});
+
+describe('the member check: every name of the place, and an address it can never answer for', () => {
+  const bradenton = { id: 'row-2', address_line1: '7 SAMPLE CV', city: 'BRADENTON', state: 'FL', zip: '34211' };
+
+  test('a home in a zip with two names is checked under both: a member on file under the other name is found', async () => {
+    const t = setup({ memberAtAddress: jest.fn(async (address) => address.includes('LAKEWOOD RANCH')) });
+    expect(await priceHome(bradenton, facts, t.deps)).toEqual({ status: 'not_clean', reason: 'member_address', ...facts });
+    expect(t.deps.memberAtAddress.mock.calls.map(([a]) => a)).toEqual([
+      '7 SAMPLE CV, BRADENTON FL 34211', '7 SAMPLE CV, LAKEWOOD RANCH FL 34211',
+    ]);
+    expect(t.deps.dryRunEstimate).not.toHaveBeenCalled();
+  });
+
+  test('a home in a zip with one name is checked once', async () => {
+    const t = setup();
+    await t.price();
+    expect(t.deps.memberAtAddress).toHaveBeenCalledTimes(1);
+  });
+
+  test('an address the search can never answer for is settled without a price: not_clean / member_unchecked', async () => {
+    const { ADDRESS_UNCHECKABLE } = require('../services/customer-address-match');
+    const t = setup({ memberAtAddress: jest.fn(async () => { throw Object.assign(new Error('x'), { code: ADDRESS_UNCHECKABLE }); }) });
+    expect(await t.price()).toEqual({ status: 'not_clean', reason: 'member_unchecked', ...facts });
     expect(t.deps.dryRunEstimate).not.toHaveBeenCalled();
   });
 });
