@@ -16,8 +16,8 @@
  * proposal: the sentence speaks of a home and yard).
  *
  * Publish pattern of 20261019200000 (estimate PDF note): read-modify-write of the live template, so admin edits are
- * kept. The template row is locked first, ONE new active version is published by compare-and-swap on the active
- * version, and only the version it replaces is archived. Older versions are never edited: a reviewed send pins a
+ * kept. The template row is locked first (the lock the admin editor takes before it numbers a draft), ONE new active
+ * version is published, and only the version it replaces is archived. Older versions are never edited: a reviewed send pins a
  * version's content (email-template-reviewed-content.test.js), and an in-place edit would make that send refuse.
  * A template that already carries the sentence in any block (a paragraph, a note, a list item, a details row), has
  * no active version, or has a custom plain-text body (the renderer's generated text would not carry the line) is left
@@ -88,37 +88,26 @@ async function publish(knex) {
     console.warn(`[${MARKER}] ${TEMPLATE_KEY}: new version failed variable validation; template left as-is`);
     return 'skipped';
   }
+  // The template row lock above is the one the admin editor takes before it numbers a draft (createDraftVersion),
+  // so no other writer can take this number or move the active version while this runs. An insert conflict or a
+  // missed swap is therefore unexpected: it throws, the transaction rolls back, and the migration stays unrecorded
+  // and runs again on the next deploy. An unexpected conflict is never recorded as a finished migration.
   const latest = await knex('email_template_versions').where({ template_id: template.id }).orderBy('version_number', 'desc').first();
-  let created;
-  try {
-    // Savepoint: the admin editor allocates draft numbers the same way (max + 1, no lock), so a concurrent draft
-    // can take this number.
-    created = await knex.transaction(async (sp) => {
-      const [row] = await sp('email_template_versions').insert({
-        template_id: template.id,
-        version_number: (latest?.version_number || 0) + 1,
-        status: 'active',
-        subject: prior.subject,
-        preview_text: prior.preview_text,
-        blocks: JSON.stringify(nextBlocks),
-        text_body: null,
-        validation_snapshot: JSON.stringify({ ...validation, source: MARKER, supersedes_version: prior.version_number }),
-        published_at: now,
-      }).returning('*');
-      return row;
-    });
-  } catch (err) {
-    if (err?.code !== '23505') throw err;
-    console.warn(`[${MARKER}] ${TEMPLATE_KEY}: version number taken by a concurrent draft; template left as-is`);
-    return 'raced';
-  }
+  const [created] = await knex('email_template_versions').insert({
+    template_id: template.id,
+    version_number: (latest?.version_number || 0) + 1,
+    status: 'active',
+    subject: prior.subject,
+    preview_text: prior.preview_text,
+    blocks: JSON.stringify(nextBlocks),
+    text_body: null,
+    validation_snapshot: JSON.stringify({ ...validation, source: MARKER, supersedes_version: prior.version_number }),
+    published_at: now,
+  }).returning('*');
   const moved = await knex('email_templates')
     .where({ id: template.id, active_version_id: prior.id })
     .update({ active_version_id: created.id, last_published_at: now, updated_at: now });
-  if (!moved) {
-    await knex('email_template_versions').where({ id: created.id }).update({ status: 'archived', updated_at: now });
-    return 'raced';
-  }
+  if (!moved) throw new Error(`[${MARKER}] ${TEMPLATE_KEY}: the active version changed under the template row lock`);
   await knex('email_template_versions').where({ id: prior.id, status: 'active' }).update({ status: 'archived', updated_at: now });
   return { outcome: 'published', template_id: template.id, from_version: prior.version_number, to_version: created.version_number };
 }

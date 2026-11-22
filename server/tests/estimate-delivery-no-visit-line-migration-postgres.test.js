@@ -107,7 +107,7 @@ postgres('estimate email "no visit needed" line migration (PostgreSQL)', () => {
     expect(JSON.stringify(pre.version.blocks)).not.toContain(LINE);
   });
 
-  test('publishes one new active version: compare-and-swap on the active version, only the replaced one archived', async () => {
+  test('publishes one new active version, and archives only the version it replaces', async () => {
     await cloneTemplate();
     await migration.up(db);
 
