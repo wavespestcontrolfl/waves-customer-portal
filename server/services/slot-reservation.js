@@ -748,7 +748,15 @@ function slotDateRefusal(date, todayEt, offerArrivalGrace) {
 // (lockMoveForConversion, the rule every accept runs): a stale move books
 // nothing (the stale-call-link answer). The move-in limit applies while
 // GATE_MOVING_ESTIMATE is on. Returns the error to throw, or null.
+// A plan offer's quote (owner 2026-11-19: the one-time job is the first plan visit) books no slot before
+// its own firstVisitFrom, the stamp on the estimate; that is a plain read of the estimate data.
 async function moveBookingRefusal(conn, estimateData, date) {
+  const offerFrom = require('./plan-offer-estimate').planOfferOf(estimateData)?.firstVisitFrom;
+  if (offerFrom && date < offerFrom) {
+    const err = new Error("slot is before the offer's first visit date");
+    err.code = 'SLOT_UNAVAILABLE';
+    return err;
+  }
   if (!estimateData?.move?.moveId) return null;
   let move = null;
   try {

@@ -141,6 +141,26 @@ describe('findEstimateSlots — customer-facing day end', () => {
     }
   });
 
+  // The picker opens a plan offer's quote on its first visit date (moveInWindow). The debug surface must list the
+  // same days, or staff see slots weeks before the first day the customer can book.
+  test('the debug surface (getSlotDebug) opens a plan offer quote on its first visit date, and a plain estimate on today', async () => {
+    await getSlotDebug('est-dayend-1', { windowDays: 7 });
+    expect(findAvailableSlots.mock.calls[0][0]).toMatchObject({ dateFrom: '2027-05-14' });
+
+    findAvailableSlots.mockClear();
+    const plain = ESTIMATE_ROW.estimate_data;
+    ESTIMATE_ROW.estimate_data = JSON.stringify({ planStart: { offer: { jobId: 'job-1', endsAt: '2027-06-10T04:00:00.000Z', firstVisitFrom: '2027-06-20' } } });
+    try {
+      await getSlotDebug('est-dayend-1', { windowDays: 7 });
+      expect(findAvailableSlots).toHaveBeenCalled();
+      for (const call of findAvailableSlots.mock.calls) {
+        expect(call[0]).toMatchObject({ dateFrom: '2027-06-20', dateTo: '2027-06-27' });
+      }
+    } finally {
+      ESTIMATE_ROW.estimate_data = plain;
+    }
+  });
+
   test('the debug surface (getSlotDebug) also marks itself customerFacing — it mirrors what the customer sees', async () => {
     await getSlotDebug('est-dayend-1', { windowDays: 1 });
     expect(findAvailableSlots).toHaveBeenCalled();

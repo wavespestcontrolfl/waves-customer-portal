@@ -173,6 +173,66 @@ const FOLLOWUP_DAY_JOIN = `LEFT JOIN LATERAL (
 // kept out by its own test (done.service_day IS NOT NULL in dueJobsPage), never by this expression.
 const OFFER_DAY_SQL = 'GREATEST(done.service_day, COALESCE(follow.service_day, done.service_day))';
 
+// The jobs the offer can follow, on any day: a completed one-time pest or cockroach visit with the record that
+// its service was performed. dueJobsPage adds the day window; planOfferJobOf asks about one job.
+function qualifyingJobs(database) {
+  return database('scheduled_services as s')
+    .leftJoin('services as sv', 's.service_id', 'sv.id')
+    .joinRaw(PERFORMED_DAY_JOIN, [...NON_PERFORMED_VISIT_OUTCOMES])
+    .joinRaw(FOLLOWUP_DAY_JOIN, [...NON_PERFORMED_VISIT_OUTCOMES])
+    .where('s.status', 'completed')
+    .whereRaw('done.service_day IS NOT NULL')
+    .whereIn(database.raw('COALESCE(s.service_key_snapshot, sv.service_key)'), JOB_SERVICE_KEYS)
+    .whereRaw('s.is_recurring IS DISTINCT FROM true')
+    .whereNull('s.recurring_parent_id')
+    .whereRaw("COALESCE(s.recurring_pattern, '') IN ('', 'one_time')")
+    .whereRaw('s.is_callback IS DISTINCT FROM true')
+    .whereRaw('s.followup_included IS DISTINCT FROM true');
+}
+
+// The qualifying jobs that are due their offer today: the offer day was FIRST_DAY to LAST_DAY days ago (ET).
+function dueJobs(database, today) {
+  return qualifyingJobs(database)
+    .whereRaw(`${OFFER_DAY_SQL} BETWEEN ?::date AND ?::date`, [shiftDay(today, -LAST_DAY), shiftDay(today, -FIRST_DAY)]);
+}
+
+// The offer's dates, counted in ET calendar days from its offer day. The email states them (offerPayload) and
+// the offer estimate stores them (restart.js mintPlanStartEstimate `offer`): one function, so the estimate can
+// never end, or take a first visit, on another day than the email says.
+//   lastDay                         the last day the offer is good ("good through")
+//   endsAt                          the instant it ends: the last millisecond of lastDay in ET, so every
+//                                   page that shows the estimate's expires_at as a day shows lastDay
+//   firstVisitFrom / firstVisitTo   the window of the next plan visit
+function offerTerms(offerDay) {
+  const lastDay = shiftDay(offerDay, OFFER_DAYS);
+  return {
+    offerDay,
+    lastDay,
+    endsAt: new Date(parseETDateTime(`${lastDay}T23:59:59`).getTime() + 999),
+    firstVisitFrom: shiftDay(offerDay, NEXT_VISIT_FROM_DAYS),
+    firstVisitTo: shiftDay(offerDay, NEXT_VISIT_TO_DAYS),
+  };
+}
+
+// The offer this job is due today, with its dates, or null. The offer estimate's mint asks it under the
+// customer's locks before it waives the setup fee: the waiver stands on "that job was plan visit one", and the
+// estimate's end date and first visit date count from the day that service was performed. So the job must be a
+// qualifying job of THIS customer whose offer day is in today's window (the same rows as dueJobsPage), and the
+// dates are read here, never taken from the caller. A job of another customer, a cancelled one, a plan visit, a
+// visit with no performed record, or one whose window is not open or is over, has no offer. An id that is not
+// a uuid is no job.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+async function dueOfferOfJob(database, { jobId, customerId, now }) {
+  if (!UUID.test(String(jobId || '')) || !customerId || !(now instanceof Date)) return null;
+  const row = await dueJobs(database, etDateString(now))
+    .where('s.id', jobId)
+    .where('s.customer_id', customerId)
+    .first('s.id', database.raw(`${OFFER_DAY_SQL} AS service_day`));
+  // The id as the database spells it: the estimate stores it and a retry compares it (samePlanOffer), so a
+  // caller's other spelling of the same uuid (upper case) must not read as another job.
+  return row ? { jobId: String(row.id), ...offerTerms(dateOnlyString(row.service_day)) } : null;
+}
+
 // One page of the completed one-time jobs whose offer day was FIRST_DAY to LAST_DAY days ago (ET), oldest first.
 // `after` is the last job of the page before: the next page starts behind it in the same (offer day, id) order.
 // The row's service_day is the offer day; job_day is the day the job itself was done.
@@ -181,19 +241,7 @@ const OFFER_DAY_SQL = 'GREATEST(done.service_day, COALESCE(follow.service_day, d
 // series parent): never a plan visit, a series extra, a free re-service or an included follow-up. A one-time
 // visit stores no pattern, or the 'one_time' marker.
 function dueJobsPage(database, today, after) {
-  const page = database('scheduled_services as s')
-    .leftJoin('services as sv', 's.service_id', 'sv.id')
-    .joinRaw(PERFORMED_DAY_JOIN, [...NON_PERFORMED_VISIT_OUTCOMES])
-    .joinRaw(FOLLOWUP_DAY_JOIN, [...NON_PERFORMED_VISIT_OUTCOMES])
-    .where('s.status', 'completed')
-    .whereRaw('done.service_day IS NOT NULL')
-    .whereRaw(`${OFFER_DAY_SQL} BETWEEN ?::date AND ?::date`, [shiftDay(today, -LAST_DAY), shiftDay(today, -FIRST_DAY)])
-    .whereIn(database.raw('COALESCE(s.service_key_snapshot, sv.service_key)'), JOB_SERVICE_KEYS)
-    .whereRaw('s.is_recurring IS DISTINCT FROM true')
-    .whereNull('s.recurring_parent_id')
-    .whereRaw("COALESCE(s.recurring_pattern, '') IN ('', 'one_time')")
-    .whereRaw('s.is_callback IS DISTINCT FROM true')
-    .whereRaw('s.followup_included IS DISTINCT FROM true')
+  const page = dueJobs(database, today)
     .orderByRaw(`${OFFER_DAY_SQL} ASC`)
     .orderBy('s.id', 'asc')
     .limit(PAGE_SIZE);
@@ -460,6 +508,7 @@ async function evaluateJob(ctx) {
 function offerPayload({ customer, offerDay, option }) {
   const noYear = { year: undefined };
   const shortDay = (ymd) => formatDateOnly(ymd, { ...noYear, month: 'short' });
+  const terms = offerTerms(offerDay);
   return {
     first_name: greetingFirstName({
       customerName: [customer.first_name, customer.last_name].filter(Boolean).join(' '), customer,
@@ -469,8 +518,8 @@ function offerPayload({ customer, offerDay, option }) {
     address_short: String(customer.address_line1 || '').trim(),
     price_per_application: money(option.perVisit),
     setup_fee: money(option.setupFee),
-    next_visit_window: `${shortDay(shiftDay(offerDay, NEXT_VISIT_FROM_DAYS))} to ${shortDay(shiftDay(offerDay, NEXT_VISIT_TO_DAYS))}`,
-    offer_end_date: formatDateOnly(shiftDay(offerDay, OFFER_DAYS), noYear),
+    next_visit_window: `${shortDay(terms.firstVisitFrom)} to ${shortDay(terms.firstVisitTo)}`,
+    offer_end_date: formatDateOnly(terms.lastDay, noYear),
     // No estimate exists in shadow, so the button opens the estimate page's "not found" answer.
     estimate_url: portalUrl('/estimate/sample'),
   };
@@ -658,6 +707,8 @@ async function runOnetimePlanOfferJob({ now = new Date(), deps: overrides = {} }
 
 module.exports = {
   runOnetimePlanOfferJob,
+  dueOfferOfJob,
+  offerTerms,
   JOB_SERVICE_KEYS,
   OFFER_TEMPLATE,
   REMINDER_TEMPLATE,

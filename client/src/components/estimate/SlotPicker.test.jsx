@@ -354,6 +354,30 @@ function ymdFromToday(days) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+// A plan offer's quote books no visit before its own first day: the date box starts there.
+describe('date before a quote\'s first visit day', () => {
+  it('starts the date box on that day, names it for an earlier typed date, and never calls the slots API', async () => {
+    const first = ymdFromToday(40);
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ primary: [slot('initial', first)], expander: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SlotPicker token="synthetic-token" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} firstVisitFrom={first} />);
+    const box = await screen.findByLabelText(/pick one that works for you/i);
+    expect(box).toHaveAttribute('min', first);
+    const firstDay = new Date(`${first}T12:00:00Z`)
+      .toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+    fireEvent.change(box, { target: { value: ymdFromToday(10) } });
+    expect(await screen.findByRole('alert')).toHaveTextContent(`Your next visit can be on or after ${firstDay}. Pick that date or a later one.`);
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a first day already behind today leaves the box starting today', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(jsonResponse({ primary: [slot('initial', '2099-06-01')], expander: [] })));
+    render(<SlotPicker token="synthetic-token" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} firstVisitFrom={ymdFromToday(-5)} />);
+    expect(await screen.findByLabelText(/pick one that works for you/i)).toHaveAttribute('min', ymdFromToday(0));
+  });
+});
+
 describe('date past the booking limit', () => {
   it('names the last day and never calls the slots API for a date beyond the box limit', async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ primary: [slot('initial', '2099-06-01')], expander: [] }));
@@ -798,6 +822,14 @@ describe('SlotPicker look-ahead (the next 2 weeks are full)', () => {
       expect(screen.getByTestId(NOTE)).toHaveStyle({ fontSize: '16px' });
       expect(screen.getByRole('link', { name: 'Text (941) 297-5749' })).toHaveAttribute('href', 'sms:+19412975749');
       expect(screen.getAllByRole('link', { name: 'Call (941) 297-5749' })[0]).toHaveAttribute('href', 'tel:+19412975749');
+    });
+
+    // A plan offer's quote opens weeks out by design: the line would show on every one and offer a visit it does not sell.
+    it('stays away on a quote whose first visit is later by design', async () => {
+      stubFetch({ list: { primary: [OPEN('late', '2099-12-17')], expander: [], metadata: { firstDayAvailability: { date: '2099-12-17' } } } });
+      renderPicker({ firstVisitFrom: '2099-12-17' });
+      await screen.findAllByText(/Arrival window|Pick/);
+      expect(screen.queryByTestId(NOTE)).not.toBeInTheDocument();
     });
 
     // 08:00 ET: today's 09:00 opening is inside the 2-hour booking lead, so the glass picker drops it.

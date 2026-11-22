@@ -972,11 +972,14 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
 // Moving PR B1 (GATE_MOVING_ESTIMATE): a new-home estimate offers no first
 // visit before the move-in date, which the customer can still change. Only
 // a stamped estimate reads its move; every other estimate skips the lookup.
+// A plan offer's quote (owner 2026-11-19: the one-time job is the first plan
+// visit) offers none before its own firstVisitFrom, the stamp on the estimate.
 // The page's read and the 07:05 fill list's (scheduling/gap-candidates.js).
 async function estimateMoveInDate(estimate) {
-  return parseEstimateData(estimate.estimate_data)?.move?.moveId
+  const data = parseEstimateData(estimate.estimate_data);
+  return data?.move?.moveId
     ? (await require('./customer-moves').moveForEstimate(estimate.id))?.move_in_date || null
-    : null;
+    : require('./plan-offer-estimate').planOfferOf(data)?.firstVisitFrom || null;
 }
 
 function appointmentServicesFor(profile = {}) {
@@ -2993,7 +2996,15 @@ async function getSlotDebug(estimateId, userOpts = {}) {
     };
   }
 
-  const { dateFrom, dateTo } = etDateRange(opts.windowDays);
+  // Same first bookable day as the live path (moveInWindow): a new-home estimate's move-in date, or a plan
+  // offer's first visit date. Without it this view lists slots before the first day the customer can book.
+  const { dateFrom, dateTo } = moveInWindow({
+    moveInDate: await estimateMoveInDate(estimate),
+    ...etDateRange(opts.windowDays),
+    explicit: false,
+    seasonal: !!seasonalSelectionProfile(serviceProfile),
+    windowDays: opts.windowDays,
+  });
 
   // Same zone-route-day lift as the live path (GATE_ZONE_ROUTE_DAYS), from
   // coordinates only — this debug view has no resolved estimateZone.

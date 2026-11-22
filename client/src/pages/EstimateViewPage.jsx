@@ -6726,7 +6726,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   const acceptance = data?.estimate?.acceptance || { mode: 'standard_slot_pick' };
   // C4 plan-restart quote: server-frozen offer (see /data planRestart) —
   // the repricing controls and the one-time mode toggle are omitted.
-  const restartQuote = data?.estimate?.planRestart === true;
+  // A plan offer's quote (/data planOffer: the quarterly plan with the setup fee waived) is frozen the same way.
+  const restartQuote = data?.estimate?.planRestart === true || data?.estimate?.planOffer === true;
   const existingAppointment = acceptance.mode === 'existing_appointment' ? acceptance.appointment : null;
   // Payment-only accept (guarantee-only renewal): no slot picker, no
   // reservation — accept goes straight to review, then invoice.
@@ -10982,6 +10983,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 <SlotPicker
                   website={websiteMode}
                   preview={readOnlyPreview}
+                  firstVisitFrom={data?.estimate?.planOffer === true ? data.estimate.planOfferFirstVisitFrom || null : null}
                   token={token}
                   askToken={estimate.askToken}
                   selectedSlotId={selectedSlotId}
@@ -11078,7 +11080,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     return (
       <WebsiteEstimateFlow
         services={services} selected={selected} onFrequencyChange={handleFrequencyChange}
-        lockedSection={isLockedMirrorSection} oneTime={serviceMode === 'one_time'}
+        // A fixed quote (a restart, a plan offer) has no cadence step: the accept refuses any other cadence.
+        lockedSection={(section) => restartQuote || isLockedMirrorSection(section)} oneTime={serviceMode === 'one_time'}
         oneTimeBreakdown={pricing.oneTimeBreakdown} combinedFrequency={combinedFrequency}
         fees={(pricing.firstVisitFees?.length ? pricing.firstVisitFees : (setupFeeEffective ? [setupFeeEffective] : [])).map(tierAwareFee).filter(fee => Number(fee.amount) > 0)}
         bookingContent={<>{slotIssueBanner}{bookingContent}{paymentContent}</>} reviewContent={reviewContent}
@@ -11231,8 +11234,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           {/* Pest visit-preference toggles ("Skip parts you don't need")
               live BELOW the schedule card (owner directive). Glass removes
               the customize section entirely — zero lifetime toggle clicks
-              (owner directive); pre-checked defaults still apply. */}
-          {serviceMode === 'recurring' && !glassContent && renderFlags.showPestRecurringAddOns === true
+              (owner directive); pre-checked defaults still apply. A fixed quote
+              (a restart, a plan offer) shows none: PUT /preferences refuses it. */}
+          {serviceMode === 'recurring' && !glassContent && !restartQuote && renderFlags.showPestRecurringAddOns === true
             ? services
               .filter((section) => section.isPest && section.isRecurring)
               .map((section) => {

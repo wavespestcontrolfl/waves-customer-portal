@@ -17,7 +17,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const fs = require('fs');
 const path = require('path');
 const logger = require('../services/logger');
-const { runOnetimePlanOfferJob, TEMPLATE_VARIABLES, OFFER_TEMPLATE, REMINDER_TEMPLATE, _test } = require('../services/onetime-plan-offer');
+const {
+  runOnetimePlanOfferJob, dueOfferOfJob, offerTerms, TEMPLATE_VARIABLES, OFFER_TEMPLATE, REMINDER_TEMPLATE, _test,
+} = require('../services/onetime-plan-offer');
 const { CUSTOMER_STAGES } = require('../services/customer-stages');
 
 // 11:30 PM ET on March 12 (already March 13 in UTC): the day window must come from the ET day.
@@ -785,5 +787,52 @@ describe('the default wiring', () => {
 
   test('the sample recipient is an internal address', () => {
     expect(require('../utils/internal-email-recipients').isInternalEmailRecipient(OFFICE)).toBe(true);
+  });
+});
+
+// The offer's dates, counted in ET calendar days from the offer day. The email states them and the offer estimate
+// stores them, from this one function.
+describe('offerTerms', () => {
+  test('good through day 30, ends at the start of the next ET day, next visit from day 77 to day 91', () => {
+    expect(offerTerms('2026-11-10')).toEqual({
+      offerDay: '2026-11-10',
+      lastDay: '2026-12-10',
+      endsAt: new Date('2026-12-11T04:59:59.999Z'),
+      firstVisitFrom: '2027-01-26',
+      firstVisitTo: '2027-02-09',
+    });
+  });
+
+  test('the end instant follows the ET clock across the March clock change', () => {
+    // The last day is Sunday, March 14, 2027, the day the clocks go forward: the next day starts at 04:00 UTC.
+    const terms = offerTerms('2027-02-12');
+    expect(terms.lastDay).toBe('2027-03-14');
+    expect(terms.endsAt).toEqual(new Date('2027-03-15T03:59:59.999Z'));
+  });
+
+  test('the email states the same days', () => {
+    const payload = _test.offerPayload({
+      customer: { first_name: 'Jordan', last_name: 'Example', address_line1: '12 Sample Way' },
+      offerDay: '2026-11-10',
+      option: { perVisit: 123, setupFee: 0 },
+    });
+    expect(payload.offer_end_date).toBe('December 10');
+    expect(payload.next_visit_window).toBe('Jan 26 to Feb 9');
+  });
+});
+
+// The mint of the offer estimate asks this before it waives the setup fee. The query itself runs on real Postgres
+// (plan-offer-mint-postgres.test.js); here, what never reaches the database.
+describe('dueOfferOfJob', () => {
+  const NOW = new Date('2026-11-22T15:00:00Z');
+  test.each([
+    ['an id that is not a uuid', { jobId: 'job-1', customerId: 'c1', now: NOW }],
+    ['no job id', { jobId: '', customerId: 'c1', now: NOW }],
+    ['no customer', { jobId: '3f0c8a52-6f0e-4d5e-9a57-0d2a1c3b4e5f', customerId: null, now: NOW }],
+    ['no clock', { jobId: '3f0c8a52-6f0e-4d5e-9a57-0d2a1c3b4e5f', customerId: 'c1' }],
+  ])('%s is no offer, and nothing is read', async (_label, args) => {
+    const database = jest.fn(() => { throw new Error('must not be read'); });
+    expect(await dueOfferOfJob(database, args)).toBe(null);
+    expect(database).not.toHaveBeenCalled();
   });
 });

@@ -34,6 +34,7 @@ const logger = require('../logger');
 const { FAMILY_LABELS } = require('./templates');
 const { lockCustomerComms } = require('../../utils/customer-comms-lock');
 const { holdLockSlot } = require('../../utils/cron-lock');
+const { planOfferOf, samePlanOffer, PLAN_OFFER_WAIVER_REASON } = require('../plan-offer-estimate');
 
 const SOURCE = 'plan_restart';
 const HAND_PRICED_RESTART = 'This restart needs to be set up by hand — please call or text us and we will take care of it.';
@@ -684,6 +685,10 @@ function resolveMintDeps(deps) {
     // The scheduler's hold release, for the quotes a replacement archives.
     releaseEstimateHolds: deps.releaseEstimateHolds
       || ((args) => require('../slot-reservation').releaseEstimateHolds(args)),
+    // The offer a job is due today, with its dates, by the job module's own rule (plan offer only; loaded
+    // on first call).
+    dueOfferOfJob: deps.dueOfferOfJob
+      || ((...args) => require('../onetime-plan-offer').dueOfferOfJob(...args)),
   };
 }
 
@@ -814,6 +819,15 @@ const HAND_CHECK_MESSAGE = 'This one needs a quick hand-check before we can pric
 //                     (pricingBundleMatchesEstimateTotals); a fresh mint that
 //                     fails the default is a publication failure
 //   note              (estimateId) => { subject, body } for the timeline
+//   operatorPriceAdjustment   optional object, stored as estimate_data.operatorPriceAdjustment before
+//                     the recompute (a waiveSetupFee:true one zeroes the setup fee there). Plan offer only.
+//   expiresAt         optional Date for the new row's expires_at, in place of the standard send expiry.
+//                     Plan offer only. Both omitted = the mint as before.
+//   reuseOnly         optional true: a plain tap that re-opens a live offer quote. When reuseLiveQuote
+//                     answers null the core retires nothing and mints nothing: it throws
+//                     pricing_unavailable, and the live quote stays as it was. Plan offer only.
+//   reuseRowId        optional id, with reuseOnly: the live row the tap found and locked. It is judged even
+//                     when it is not among the ten newest rows of the lineage.
 //   logTag / logDetail / handMessage   wording that stays per-source
 // Returns { estimateId, token, url, reused }.
 async function mintPricedEstimate(args) {
@@ -870,6 +884,9 @@ async function mintPricedEstimate(args) {
     .whereNull('archived_at')
     .orderBy('created_at', 'desc')
     .limit(10);
+  // A tap's own candidate (reuseRowId: the live row it found and locked) is always among the rows the reuse
+  // locks and judges, however many newer ended quotes sit above it.
+  if (mint.reuseRowId && !priorRows.some((row) => String(row.id) === String(mint.reuseRowId))) priorRows.push({ id: mint.reuseRowId });
 
   const { propertyContext, propertySeed } = await resolvePropertyEvidence(mint, primaryStreet);
   const estimateData = buildEstimateData(mint, propertyContext, premisesStamp);
@@ -880,9 +897,24 @@ async function mintPricedEstimate(args) {
 
   const reused = await reuseLiveQuote(mint, { priorRows, offer, estimateData, primaryStreet, premisesStamp });
   if (reused) return reused;
+  if (mint.reuseOnly) throw new RestartUnavailableError('pricing_unavailable', handMessage);
+  // An offer's own end date (expiresAt), read again on the clock as it stands NOW. The entry checked it before
+  // the customer locks and the recompute, and it can pass during that work, or during the publication itself
+  // (the retire, the hold release, the snapshot, the timeline row). So it is read before the prior quote is
+  // retired and once more after the new one is published, inside the transaction: a passed one rolls both back,
+  // the prior quote stays, and no link is handed out already expired. A caller that asks this late has a bug,
+  // as for the offer's other bounds: a plain Error.
+  const assertOfferOpen = () => {
+    if (mint.expiresAt && !(mint.expiresAt.getTime() > (mint.now ? mint.now() : nowDate).getTime())) {
+      throw new Error('mintPlanStartEstimate offer needs an end date that is still ahead when the quote is published');
+    }
+  };
+  assertOfferOpen();
 
   await retireLineage({ trx, fresh, source, nowDate, releaseEstimateHolds: mintDeps.releaseEstimateHolds });
-  return publishMintedEstimate(mint, { offer, estimateData });
+  const published = await publishMintedEstimate(mint, { offer, estimateData });
+  assertOfferOpen();
+  return published;
 }
 
 // Evidence the price depends on is read once, under the entry's policy
@@ -999,7 +1031,7 @@ async function resolvePropertyEvidence(mint, primaryStreet) {
 // the residual qualifiers.
 function buildEstimateData(mint, propertyContext, premisesStamp) {
   const {
-    toPrice, ownedFamilies, optionFor, estimateBlock, mintDeps: { pricingAi },
+    toPrice, ownedFamilies, optionFor, estimateBlock, operatorPriceAdjustment, mintDeps: { pricingAi },
   } = mint;
   const context = { grassType: propertyContext.grassType, palmCount: propertyContext.palmCount };
   const services = Object.assign({}, ...toPrice.flatMap((key) => {
@@ -1023,6 +1055,9 @@ function buildEstimateData(mint, propertyContext, premisesStamp) {
   // estimate_data.priorQualifyingServices — omitting them recomputes the
   // partial-residual case standalone and fails the totals-match check.
   if (ownedFamilies.length) estimateData.priorQualifyingServices = [...ownedFamilies];
+  // The plan offer's fee waiver: the recompute reads it (serverRecomputeFromEstimateData), the converter
+  // and the page read it back from the stored data.
+  if (operatorPriceAdjustment) estimateData.operatorPriceAdjustment = operatorPriceAdjustment;
   return estimateData;
 }
 
@@ -1289,7 +1324,7 @@ async function lineageUnarchiveBlock(dbh, estimate) {
 // timeline note. Returns { estimateId, token, url, reused: false }.
 async function publishMintedEstimate(mint, { offer, estimateData }) {
   const {
-    trx, fresh, source, families, snapshotSells, sells, note, logTag, logDetail, handMessage,
+    trx, fresh, source, families, snapshotSells, sells, note, logTag, logDetail, handMessage, expiresAt,
     nowDate, now, randomBytes, mintDeps: { persistence, pricingAi, buildEstimateSendSnapshot },
   } = mint;
   const { monthlyTotal, annualTotal, onetimeTotal } = offer.totals;
@@ -1307,7 +1342,7 @@ async function publishMintedEstimate(mint, { offer, estimateData }) {
     onetime_total: onetimeTotal,
     waveguard_tier: offer.serverTier,
     token,
-    expires_at: persistence.estimateExpiresAt(now),
+    expires_at: expiresAt || persistence.estimateExpiresAt(now),
     notes: null,
     // Publish without delivery (click-mint pattern): viewable + acceptable
     // now, every follow-up flag pre-burned.
@@ -1529,6 +1564,58 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
 }
 
 
+// The caller's part of an offer (mintPlanStartEstimate `offer`), checked before anything is read: the offer is
+// the standard quarterly pest plan with the setup fee waived (owner 2026-11-19), for one named job.
+function assertPlanOfferArgs({ offer, serviceKey, shown }) {
+  const problem = (typeof offer?.jobId !== 'string' || !offer.jobId) ? 'a job id'
+    : serviceKey !== 'pest_control' ? 'the pest_control service'
+      : (shown?.setupFee != null && Number(shown.setupFee) !== 0) ? 'a setup fee of 0 in shown'
+        : null;
+  if (problem) throw new Error(`mintPlanStartEstimate offer needs ${problem}`);
+}
+
+// The offer's dates as the job module gave them (dueOfferOfJob), checked before they are stored: an end date
+// ahead of now and at most 31 days out, and a real calendar day for the first visit. A belt on that module's
+// answer: the estimate would otherwise end, or open its picker, on a date nobody stated.
+const PLAN_OFFER_MAX_DAYS = 31;
+function assertPlanOfferDates({ endsAt, firstVisitFrom }, nowDate) {
+  const dateOnly = typeof firstVisitFrom === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(firstVisitFrom)
+    && new Date(`${firstVisitFrom}T12:00:00Z`).toISOString().slice(0, 10) === firstVisitFrom;
+  const endsMs = endsAt instanceof Date ? endsAt.getTime() : NaN;
+  const problem = !(endsMs > nowDate.getTime() && endsMs - nowDate.getTime() <= PLAN_OFFER_MAX_DAYS * 86400000) ? `an end date within ${PLAN_OFFER_MAX_DAYS} days`
+    : !dateOnly ? 'a YYYY-MM-DD first visit date'
+      : null;
+  if (problem) throw new Error(`mintPlanStartEstimate offer needs ${problem}`);
+}
+
+// A plain portal tap never retires a live offer quote of the same option. The emailed offer is a
+// delivered price promise until its end date, and the standard flow would archive it and mint the same
+// plan WITH the setup fee, so the customer would lose the offer by tapping the card. Under the
+// customer's locks, the live plan-start quote (the same liveness the core applies) is read; when it
+// carries an offer, staff did not change it, and it is the tapped service and option, this answers
+// that quote's own offer, and the tap re-opens it through the core (reuseOnly): the core re-proves the
+// home, today's price against the card, the frozen page and the accept's checks, and hands the quote
+// back only if all hold. Else it answers null and the standard flow runs, which retires the whole
+// lineage, the offer quote included: that limit stands for a tap of another service or option.
+async function liveOfferOfTappedQuote(trx, fresh, { serviceKey, optionId, now }) {
+  // Only the newest live quote is read and locked: the core's liveness (liveRestartEstimate) as SQL, so the
+  // customer's accepted and expired quotes stay free for other writers while this transaction prices.
+  const newest = await trx('estimates')
+    .where({ customer_id: fresh.id, source: PLAN_START_SOURCE })
+    .whereNull('archived_at')
+    .whereIn('status', ['sent', 'viewed'])
+    .where((live) => live.whereNull('expires_at').orWhere('expires_at', '>', now()))
+    .orderBy('created_at', 'desc')
+    .forUpdate()
+    .first();
+  const live = liveRestartEstimate(newest ? [newest] : [], now());
+  const stamp = live && !staffChangedDeliveryOptions(live) ? planOfferOf(live.estimate_data) : null;
+  if (!stamp) return null;
+  const planStart = parseJson(live.estimate_data, {})?.planStart;
+  if (planStart?.serviceKey !== serviceKey || planStart?.optionId !== optionId) return null;
+  return { jobId: stamp.jobId, endsAt: new Date(stamp.endsAt), firstVisitFrom: stamp.firstVisitFrom, estimateId: live.id };
+}
+
 // Plan start (GATE_PORTAL_PLAN_START, owner 2026-11-19) — a signed-in customer
 // with NO live recurring service prices ONE option on the portal pricing card
 // and opens a normal, server-priced estimate for it, which they book through
@@ -1538,13 +1625,24 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
 // priced online keep the request flow: every refusal is a RestartUnavailableError
 // (the route maps it to 409 { error, code }). `shownMonthly` is only COMPARED
 // with the server's own recompute (offer_changed on drift) — never persisted.
+//
+// `offer` (the one-time job to plan offer, owner 2026-11-19 "build"; a job mints it and sends it with
+// no person tapping, owner 2026-11-20 "i want auto"): { jobId }. The same quote with the WaveGuard setup
+// fee waived (shown.setupFee is 0), its own end date as expires_at, and the stamp planStart.offer =
+// { jobId, endsAt, firstVisitFrom }, which the slot picker, the booking checks and the extension check
+// read (plan-offer-estimate.js). The caller names the job only: the job module proves it and gives both
+// dates from the day its service was performed (dueOfferOfJob, the dates the offer email states). The
+// one-time job counts as the first plan visit, so the customer books the next one on or after
+// firstVisitFrom. A caller that breaks the offer's own bounds has a bug: a plain Error, never a customer
+// answer.
 async function mintPlanStartEstimate({
-  customer, serviceKey, optionId, shown, now = () => new Date(), randomBytes = crypto.randomBytes, deps = {},
+  customer, serviceKey, optionId, shown: cardShown, offer: callerOffer = null, now = () => new Date(), randomBytes = crypto.randomBytes, deps = {},
 }) {
   if (!customer || !customer.id) throw new Error('mintPlanStartEstimate requires a customer row');
+  if (callerOffer) assertPlanOfferArgs({ offer: callerOffer, serviceKey, shown: cardShown });
   const notEligible = () => new RestartUnavailableError('not_eligible', 'This plan cannot be priced online right now.');
   // `shown` = the amounts the card displayed (PLAN_START_SHOWN_KEYS); a plan has a monthly price.
-  const shownMonthly = Number(shown?.monthly);
+  const shownMonthly = Number(cardShown?.monthly);
   if (!PLAN_START_SERVICE_KEYS.includes(serviceKey) || !Number.isFinite(shownMonthly) || !(shownMonthly > 0)) throw notEligible();
   const mintDeps = resolveMintDeps(deps);
   // The exact option the card showed: only a member of today's offered ladder
@@ -1578,6 +1676,40 @@ async function mintPlanStartEstimate({
     }
     if (ownsPlan) throw notEligible();
 
+    // A caller's offer names a job, nothing else. The waiver stands on "that one-time job was plan visit one",
+    // and the estimate's end date and first visit date count from the day that service was performed. So the
+    // job module proves the job and gives the dates (dueOfferOfJob), here, under the customer's locks and before
+    // anything is priced, retired or minted: a completed one-time pest or cockroach job of THIS customer, with
+    // the record that its service was performed, whose offer window is open today. The dates are the ones the
+    // offer email states (offerTerms), never the caller's. A job of another customer, a cancelled job, a plan
+    // visit, a job too old or too new, or an unreadable one grants no waiver. As for the offer's other bounds,
+    // a caller that asks for one has a bug: a plain Error.
+    let callerTerms = null;
+    if (callerOffer) {
+      let due = null;
+      try {
+        due = await mintDeps.dueOfferOfJob(trx, { jobId: callerOffer.jobId, customerId: fresh.id, now: now() });
+      } catch (err) {
+        logger.warn(`[${logTag}] plan offer job lookup failed for ${fresh.id} — refusing: ${err.message}`);
+      }
+      if (!due) throw new Error('mintPlanStartEstimate offer needs a completed one-time pest job of this customer that is due its offer');
+      // The estimate holds the earliest day only. The email's window (offerTerms firstVisitTo) is the 14 days
+      // the page's slot search opens on from that day. A wider search (the route's windowDays or date range)
+      // or a visit already on the books may land later, as on every estimate: a later plan visit changes no
+      // price and no charge, so nothing refuses it.
+      callerTerms = { jobId: due.jobId, endsAt: due.endsAt, firstVisitFrom: due.firstVisitFrom };
+      assertPlanOfferDates(callerTerms, now());
+    }
+
+    // A plain tap that finds the live offer quote of this service and option re-opens that offer through the
+    // core, never an early hand-back (liveOfferOfTappedQuote). Its job and its dates were proven when it was
+    // minted (dueOfferOfJob), and a live one is unexpired, so they are not asked again. The card
+    // shows the standard setup fee, the offer waives it: every amount the closures compare is the card's, with
+    // the fee at 0, as an offer mint's own shown.
+    const reopened = callerOffer ? null : await liveOfferOfTappedQuote(trx, fresh, { serviceKey, optionId, now });
+    const offer = callerTerms || reopened;
+    const shown = reopened ? { ...cardShown, setupFee: 0 } : cardShown;
+
     return mintPricedEstimate({
       trx,
       fresh,
@@ -1593,11 +1725,21 @@ async function mintPlanStartEstimate({
           serviceKey,
           optionId: option.id,
           mintedAt: nowDate.toISOString(),
+          ...(offer ? { offer: { jobId: offer.jobId, endsAt: offer.endsAt.toISOString(), firstVisitFrom: offer.firstVisitFrom } } : {}),
         },
       },
-      // Reuse only the quote for THIS option (the core adds today's-offer equality).
+      ...(offer ? {
+        operatorPriceAdjustment: require('../customer-moves').withMoveSetupWaiver({ internalReason: PLAN_OFFER_WAIVER_REASON }),
+        expiresAt: offer.endsAt,
+      } : {}),
+      ...(reopened ? { reuseOnly: true, reuseRowId: reopened.estimateId } : {}),
+      // Reuse only the quote for THIS option (the core adds today's-offer equality). An offer mint also
+      // reuses only its own job's quote with the SAME dates: a plain quote, the offer of another job, or this
+      // job's offer with an older end or first visit date (the offer day moved) is retired and re-minted.
+      // The core's fingerprint carries neither date, and the booking checks read the stored one.
       matchesLive: (liveData) => liveData?.planStart?.serviceKey === serviceKey
-        && liveData?.planStart?.optionId === option.id,
+        && liveData?.planStart?.optionId === option.id
+        && (!offer || samePlanOffer(planOfferOf(liveData), offer)),
       // Every amount the card showed, to the cent (codex pre-push P0; AGENTS.md:
       // the recompute matches the shown price or the mint refuses): the
       // estimate's monthly total, and the card's own derivation
@@ -1632,12 +1774,15 @@ async function mintPlanStartEstimate({
         if (mismatch) logger.warn(`[plan-start] estimate ${row?.id || 'new'} does not sell option ${option.id} as shown: ${mismatch}`);
         return !mismatch;
       },
-      note: (estimateId) => ({
+      note: (estimateId) => (offer ? {
+        subject: `Plan offer estimate made after a one-time job — ${FAMILY_LABELS[family] || family}`,
+        body: `A plan estimate (${estimateId}) was made for the offer after the one-time job: no setup fee, good through ${require('../../utils/datetime-et').etDateString(new Date(offer.endsAt.getTime() - 1))}. Accepting it books the next plan visit.`,
+      } : {
         subject: `Plan estimate opened from portal — ${FAMILY_LABELS[family] || family}`,
         body: `Customer opened a plan estimate (${estimateId}) priced at today's rates. Accepting it books the first visit.`,
       }),
       logTag,
-      logDetail: `option ${option.id}`,
+      logDetail: offer ? `option ${option.id} (offer for job ${offer.jobId})` : `option ${option.id}`,
       handMessage: HAND_PRICED_PLAN_START,
       strictEvidence: true,
       assertNotCommercial,
