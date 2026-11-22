@@ -966,14 +966,18 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
     const catalogJson = async () => JSON.stringify(await catalogRow());
     const otherRows = () => knex('lawn_protocol_products as p').join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id')
       .whereNot({ 'w.window_key': 'oct_v13_spreader_fall' }).orderBy('p.id').select('p.id', 'p.product_name', 'p.product_id', 'p.rate_per_1000', 'p.rate_unit', 'p.gates', 'p.annual_counter');
+    // The whole staged row as the migrations leave it, the same on all four tracks and in production (read 2026-11-22).
+    const ROW_GATES = { targetN: '0.73 lb N/1000', targetK2O: '0.4 lb K2O/1000', fertilizerSafety: true, blackoutSensitive: true };
     const DIMENSION_OCTOBER = {
-      product_name: DIMENSION, rate_per_1000: 4.04, rate_unit: 'lb', default_in_plan: true, gates: { targetN: '0.73 lb N/1000', targetK2O: '0.4 lb K2O/1000', annualCounter: 'dithiopyr_lb_per_1000' }, annual_counter: { counter: 'dithiopyr_lb_per_1000' },
+      product_name: DIMENSION, role: 'fall_pre_emergent_nutrition', application_mode: 'broadcast', rate_per_1000: 4.04, rate_unit: 'lb', carrier_gal_per_1000: null, default_in_plan: true,
+      gates: { ...ROW_GATES, annualCounter: 'dithiopyr_lb_per_1000' }, annual_counter: { counter: 'dithiopyr_lb_per_1000' }, mixing: {}, report_copy: { role: 'fall_pre_emergent_nutrition' },
     };
     // The fixture as 20261007120500 leaves it: the Dimension row, its goal, no Stonewall 0.37% limit row, no audit row of ours.
     async function resetToDimension() {
       const row = await octoberRow();
       await knex('lawn_protocol_products').where({ id: row.id }).update({
         ...DIMENSION_OCTOBER, product_id: dimensionId(), gates: JSON.stringify(DIMENSION_OCTOBER.gates), annual_counter: JSON.stringify(DIMENSION_OCTOBER.annual_counter),
+        mixing: JSON.stringify(DIMENSION_OCTOBER.mixing), report_copy: JSON.stringify(DIMENSION_OCTOBER.report_copy),
       });
       await knex('lawn_protocol_windows').where({ id: row.lawn_protocol_window_id }).update({ goal: stonewallMigration.OLD_GOAL });
       // A row the migration inserted (no other row had the name): gone, once the protocol row points back at Dimension.
@@ -1007,7 +1011,9 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       const row = await octoberRow();
       expect(row).toMatchObject({ product_name: STW_037, product_id: stonewallId(), role: 'fall_pre_emergent_nutrition', rate_unit: 'lb', goal: stonewallMigration.NEW_GOAL });
       expect(Number(row.rate_per_1000)).toBe(4.04);
-      expect(row.gates).toEqual({ targetN: '0.73 lb N/1000', targetK2O: '0.4 lb K2O/1000', annualCounter: 'prodiamine_lb_per_1000' });
+      expect(row.gates).toEqual({ ...ROW_GATES, annualCounter: 'prodiamine_lb_per_1000' });
+      // Nothing else of the row moves: role, mode, carrier, mixing, report copy.
+      expect(row).toMatchObject({ application_mode: 'broadcast', carrier_gal_per_1000: null, default_in_plan: true, mixing: {}, report_copy: { role: 'fall_pre_emergent_nutrition' } });
       expect(row.annual_counter).toEqual({ counter: 'prodiamine_lb_per_1000' });
       expect(stonewallMigration.NEW_GOAL).toBe('Stonewall 18-0-10 fall feeding with pre-emergent; mapped large patch, take-all, grub and weed spots.');
       // Out of scope, exactly as before: every other window's rows (the 9x April Dimension row, January 4FL), the catalog row, the Dimension limit rows.
@@ -1060,29 +1066,16 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       expect((await ours()).map((log) => log.action).sort()).toEqual([stonewallMigration.ACTION, stonewallMigration.CATALOG_ACTION].sort());
     });
 
-    test('down puts back only the keys this wrote: a member added to the annual counter or the gates since stays on the Dimension row', async () => {
-      const row = await octoberRow();
-      await knex('lawn_protocol_products').where({ id: row.id }).update({
-        annual_counter: JSON.stringify({ ...row.annual_counter, maxApplications: 1 }), gates: JSON.stringify({ ...row.gates, officeGate: 'kept' }),
-      });
-      try {
-        await stonewallMigration.down(knex);
-        const after = await octoberRow();
-        expect(after).toMatchObject({ product_name: DIMENSION, product_id: dimensionId() });
-        expect(after.annual_counter).toEqual({ counter: 'dithiopyr_lb_per_1000', maxApplications: 1 });
-        expect(after.gates).toEqual({ ...DIMENSION_OCTOBER.gates, officeGate: 'kept' });
-      } finally {
-        await resetToDimension();
-        await stonewallMigration.up(knex);
-      }
-    });
-
     // Identity, dose and counter are one rollback decision: an edited Stonewall dose never ends on the Dimension row.
     test.each([
       ['re-rated', (row) => ({ rate_per_1000: 3.9 })],
       ['on another N target', (row) => ({ gates: JSON.stringify({ ...row.gates, targetN: '0.7 lb N/1000' }) })],
       ['turned off', () => ({ default_in_plan: false })],
       ['renamed', () => ({ product_name: 'Renamed by the office' })],
+      ['switched to a spot treatment', () => ({ application_mode: 'spot' })],
+      // Nothing written since can be erased: the row is not put back in part.
+      ['given another member in its annual counter', (row) => ({ annual_counter: JSON.stringify({ ...row.annual_counter, maxApplications: 1 }) })],
+      ['given another gate', (row) => ({ gates: JSON.stringify({ ...row.gates, officeGate: 'kept' }) })],
     ])('a swapped row %s since is not the row this wrote: down leaves the whole row, its goal and both audit rows', async (_label, edit) => {
       const log = jest.spyOn(console, 'log').mockImplementation(() => {});
       const row = await octoberRow();
@@ -1131,6 +1124,12 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
         ['on another K2O target', { gates: JSON.stringify({ ...DIMENSION_OCTOBER.gates, targetK2O: '0.2 lb K2O/1000' }) }],
         ['on another counter', { annual_counter: JSON.stringify({ counter: 'office_counter' }) }],
         ['turned off (not in the plan by default)', { default_in_plan: false }],
+        ['applied as a spot treatment (the plan would size no whole-lawn amount)', { application_mode: 'spot' }],
+        ['on another role', { role: 'fall_nutrition' }],
+        ['given a carrier volume', { carrier_gal_per_1000: 1 }],
+        ['given another gate', { gates: JSON.stringify({ ...DIMENSION_OCTOBER.gates, officeGate: true }) }],
+        ['given another member in its annual counter', { annual_counter: JSON.stringify({ counter: 'dithiopyr_lb_per_1000', maxApplications: 1 }) }],
+        ['given mixing notes', { mixing: JSON.stringify({ note: 'office' }) }],
       ])('a row that is %s: up throws, names the protocol and writes nothing', async (_label, change) => {
         await withReset(async () => {
           const row = await octoberRow();
@@ -1318,6 +1317,27 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
           await knex('product_aliases').insert({ product_id: stonewallId(), alias_name: STW_037.toLowerCase() });
           await stonewallMigration.up(knex);
           expect(await octoberRow()).toMatchObject({ product_name: STW_037, product_id: stonewallId() });
+        });
+      });
+
+      test('the Dimension product known only through an alias (the path 20261007120500 supports): its id is still the row link, and the row swaps', async () => {
+        await withReset(async () => {
+          await knex('products_catalog').where({ id: dimensionId() }).update({ name: 'Dimension 0.21% Bag (SiteOne)' });
+          const [alias] = await knex('product_aliases').insert({ product_id: dimensionId(), alias_name: DIMENSION }).returning('id');
+          try {
+            await stonewallMigration.up(knex);
+            expect(await octoberRow()).toMatchObject({ product_name: STW_037, product_id: stonewallId() });
+          } finally {
+            await knex('product_aliases').where({ id: alias.id ?? alias }).del();
+            await knex('products_catalog').where({ id: dimensionId() }).update({ name: DIMENSION });
+          }
+        });
+      });
+
+      test('an active ingredient with a leading space is not found by the yearly cap check (ILIKE \'prodiamine%\'): up throws and writes nothing', async () => {
+        await withReset(async () => {
+          await knex('products_catalog').where({ id: stonewallId() }).update({ active_ingredient: ' Prodiamine 0.37% + 18-0-10' });
+          await refuses('does not state prodiamine first as its active ingredient');
         });
       });
 

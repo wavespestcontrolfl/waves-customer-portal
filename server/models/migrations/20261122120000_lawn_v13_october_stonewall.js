@@ -38,27 +38,31 @@
  * second cap row, an alias on another product, a blank ingredient), so the states are not handled
  * one by one: every fact the swap relies on is checked in one place, and anything else THROWS
  * and names what to correct. Nothing is written then. Known states:
- *   - The October window of each v13 protocol is SWAPPED (its one bag row is exactly the row this
- *     migration writes: Stonewall 0.37% by name and product id, in the plan by default, 4.04 lb,
- *     the N and K2O targets, the prodiamine counter; no Dimension bag row beside it) or TO SWAP
- *     (its one bag row is EXACTLY the row 20261007120500 wrote: the Dimension granular by name
- *     and product id, in the plan by default, 4.04 lb, its N and K2O targets, its dithiopyr
- *     counter; no Stonewall row beside it). A row renamed, re-rated, in another unit, on another
- *     product id or counter, turned off, both bags in one window, or no bag row: throws. The
- *     recipe in lawn-protocol-v13.json says Stonewall for every track, so a track this could
- *     not swap would leave the recipe and the staged protocol apart (AGENTS.md, lawn protocol
- *     data fan-out); an office edit is never overwritten either.
+ *   - The October window of each v13 protocol is TO SWAP (its one bag row is EXACTLY the row the
+ *     migrations up to 20261007120500 leave: the Dimension granular by name and product id, and
+ *     the WHOLE row beside that: role, broadcast, 4.04 lb, no carrier, in the plan by default,
+ *     its five gate keys, its dithiopyr counter and nothing else in it, mixing, report copy; no
+ *     Stonewall row beside it) or SWAPPED (the same whole row with the Stonewall name, product
+ *     id and prodiamine counter; no Dimension bag row beside it). The row is compared column for
+ *     column and key for key (ROW_SHAPE, ROW_JSON, ROW_GATES), so a row edited in ANY way
+ *     (renamed, re-rated, another unit or mode, another product id or counter, turned off, a key
+ *     added), both bags in one window, or no bag row: throws. The recipe in
+ *     lawn-protocol-v13.json says Stonewall for every track, so a track this could not swap
+ *     would leave the recipe and the staged protocol apart (AGENTS.md, lawn protocol data
+ *     fan-out); an office edit is never overwritten either. The Dimension product id is the one
+ *     catalog row with that exact name, else the one product an alias spells that way (the
+ *     upgrade path 20261007120500 supports); it is only compared, never written.
  *   - The Stonewall catalog row is the production row (exactly ONE row with this exact name, no
- *     alias that spells the name on another product, active, prodiamine first in its active
- *     ingredient (the yearly cap check finds an application by that word), EPA 10404-114, rates
- *     in pounds), or the database has NO row and no alias for the name (CI, a dev copy) and the
+ *     alias that spells the name on another product, active, an active ingredient that BEGINS
+ *     with prodiamine as the yearly cap check reads it (ILIKE 'prodiamine%', so a leading space
+ *     fails here too), EPA 10404-114, rates in pounds), or the database has NO row and no alias for the name (CI, a dev copy) and the
  *     row is inserted. Two rows, a row known only through an alias, another ingredient,
  *     registration or unit: throws.
  *   - The bag has NO yearly prodiamine cap row, or exactly ONE that is a hard block in lb per
  *     1,000 sq ft per year. Two rows (the check would count one application twice), another
  *     unit or a warning-only row (it cannot be compared with the label): throws.
- * Production, read 2026-11-22: four tracks TO SWAP, one catalog row with the production facts,
- * one hard-block cap row. A database with no v13 October window gets no check and no write.
+ * Production, read 2026-11-22: four tracks TO SWAP (each whole row equal to a migrations-built
+ * one), one catalog row with the production facts, no alias, one hard-block cap row. A database with no v13 October window gets no check and no write.
  * The window, its rows, the catalog row and the cap row are read FOR UPDATE, and each write repeats
  * the values it checked in its WHERE: an edit made while the migration runs waits, or stops the
  * migration; it is never overwritten from an older read.
@@ -116,13 +120,11 @@
  * standard rate, the filled watering rule and the inserted or lowered cap row.
  *
  * down():
- *   - a staged row goes back only while it is still EXACTLY the row this wrote (name, product
- *     id, in the plan, 4.04 lb, targets, counter). Identity, dose and counter are one decision:
- *     a row edited since (say, re-rated for Stonewall) stays whole, with its goal and its audit
- *     row, so an edited Stonewall dose never ends on the Dimension row. Only the keys this wrote
- *     go back (the counter key, the three gate keys): a member someone added to the row's
- *     annual counter or gates since stays. The window goal goes back only while it reads the
- *     new text;
+ *   - a staged row goes back only while it is still EXACTLY the row this wrote, the whole row
+ *     as in the gate. Identity, dose and counter are one decision: a row edited since in any way
+ *     (re-rated for Stonewall, a key added to its counter or gates) stays whole, with its goal
+ *     and its audit row, so an edited Stonewall dose never ends on the Dimension row and nothing
+ *     written since is erased. The window goal goes back only while it reads the new text;
  *   - a protocol that a scheduled visit or a completion references is NOT touched (the staging
  *     migration's guard): the rollback logs and leaves it and its audit row;
  *   - the catalog row, its analysis, standard rate and watering rule, and the cap row are NEVER rolled back, on purpose. They are
@@ -242,7 +244,8 @@ async function catalogMatches(knex, name) {
 // What the production Stonewall row must state for the swap to be safe: [is it so, what is wrong].
 const BAG_CHECKS = [
   [(bag) => bag.active !== false, () => 'is not active'],
-  [(bag) => /^prodiamine\b/i.test(String(bag.active_ingredient || '').trim()),
+  // application-limits.js finds a prodiamine application by `active_ingredient ILIKE 'prodiamine%'`: the same test, no trim.
+  [(bag) => /^prodiamine/i.test(String(bag.active_ingredient ?? '')),
     (bag) => `does not state prodiamine first as its active ingredient (${JSON.stringify(bag.active_ingredient)}); the yearly cap check finds an application by that word`],
   [(bag) => String(bag.epa_reg_number || '').trim() === CATALOG_ROW.epa_reg_number,
     (bag) => `holds EPA registration ${JSON.stringify(bag.epa_reg_number)}, not ${CATALOG_ROW.epa_reg_number}`],
@@ -293,8 +296,8 @@ async function patchRow(knex, row, columns, gateKeys) {
   return record;
 }
 
-// Puts a staged row back to the values the record holds, only while the row is still EXACTLY the row up() wrote
-// (identity, dose, unit, targets and counter are one decision). Returns false, and writes nothing, when it is not.
+// Puts a staged row back to the values the record holds, only while the row is still EXACTLY the row up() wrote (the
+// whole row: nothing written since can be erased). Returns false, and writes nothing, when it is not.
 async function revertRow(knex, record) {
   // FOR UPDATE, and the write repeats the guard: an edit made while the rollback runs waits; it is never overwritten from an older read.
   const row = await knex('lawn_protocol_products').where({ id: record.rowId }).forUpdate().first();
@@ -302,8 +305,7 @@ async function revertRow(knex, record) {
   if (!row || !isOctoberBagRow(row, name, productId, NEW_COUNTER_KEY)) return false;
   const update = { updated_at: knex.fn.now() };
   for (const [column, change] of Object.entries(record.columns || {})) {
-    // A JSON column: only the counter key is this migration's; a member added to the object since stays.
-    update[column] = JSON_COLUMNS.has(column) ? JSON.stringify({ ...asObject(row[column]), counter: asObject(change.before).counter }) : change.before;
+    update[column] = JSON_COLUMNS.has(column) ? JSON.stringify(change.before) : change.before;
   }
   const gates = asObject(row.gates);
   for (const [key, change] of Object.entries(record.gates || {})) {
@@ -315,15 +317,22 @@ async function revertRow(knex, record) {
   return changed === 1;
 }
 
-// Is this staged row exactly the October bag row for `name`? Name, product id, in the plan by default, 4.04 in POUNDS
-// (the planner sizes the dose from the unit), the N and K2O targets (the same text for both bags) and the counter.
+// The whole staged October bag row, as the migrations leave it: the same on all four tracks, and in production on
+// 2026-11-22. The swap and the rollback act only on a row that is EXACTLY this, column for column and key for key.
+const ROW_COLUMNS = ['id', 'product_id', 'product_name', 'role', 'application_mode', 'rate_per_1000', 'rate_unit', 'carrier_gal_per_1000', 'default_in_plan', 'gates', 'annual_counter', 'mixing', 'report_copy'];
+const ROW_SHAPE = Object.freeze({ role: 'fall_pre_emergent_nutrition', application_mode: 'broadcast', rate_unit: 'lb', carrier_gal_per_1000: null, default_in_plan: true });
+const ROW_JSON = Object.freeze({ mixing: {}, report_copy: { role: 'fall_pre_emergent_nutrition' } });
+const ROW_GATES = Object.freeze({ targetN: OLD_GATES.targetN, targetK2O: OLD_GATES.targetK2O, fertilizerSafety: true, blackoutSensitive: true });
+
+// Is this staged row exactly the October bag row for `name`? Name and product id, 4.04, every ROW_SHAPE column, the
+// two JSON columns, and gates and annual counter that hold the counter key and NOTHING else beside the fixed keys.
 function isOctoberBagRow(row, name, productId, counterKey) {
   if (row.product_name !== name || !productId || String(row.product_id) !== String(productId)) return false;
-  if (row.default_in_plan === false) return false;
-  if (!same(row.rate_per_1000, OCT_RATE) || !isLb(row.rate_unit)) return false;
-  const gates = asObject(row.gates);
-  if (gates.targetN !== OLD_GATES.targetN || gates.targetK2O !== OLD_GATES.targetK2O) return false;
-  return asObject(row.annual_counter).counter === counterKey && gates.annualCounter === counterKey;
+  if (!same(row.rate_per_1000, OCT_RATE)) return false;
+  if (!Object.entries(ROW_SHAPE).every(([column, value]) => (row[column] ?? null) === value)) return false;
+  if (!Object.entries(ROW_JSON).every(([column, value]) => isDeepStrictEqual(asObject(row[column]), value))) return false;
+  return isDeepStrictEqual(asObject(row.gates), { ...ROW_GATES, annualCounter: counterKey })
+    && isDeepStrictEqual(asObject(row.annual_counter), { counter: counterKey });
 }
 
 // The October windows of the v13 protocols, read FOR UPDATE, each with its protocol key.
@@ -339,8 +348,7 @@ async function readOctober(knex, windows, dimensionId, stonewallId) {
   const swaps = [];
   const unresolved = [];
   for (const window of windows) {
-    const rows = await knex('lawn_protocol_products').where({ lawn_protocol_window_id: window.id })
-      .select('id', 'product_id', 'product_name', 'rate_per_1000', 'rate_unit', 'default_in_plan', 'gates', 'annual_counter').forUpdate();
+    const rows = await knex('lawn_protocol_products').where({ lawn_protocol_window_id: window.id }).select(ROW_COLUMNS).forUpdate();
     const oldRows = rows.filter((row) => row.product_name === OLD_NAME);
     const newRows = rows.filter((row) => row.product_name === NEW_NAME);
     const toSwap = oldRows.length === 1 && !newRows.length && isOctoberBagRow(oldRows[0], OLD_NAME, dimensionId, OLD_COUNTER_KEY);
@@ -435,7 +443,9 @@ async function readState(knex) {
   if (!windows.length) return null;
   const bag = await readBag(knex);
   const dimension = await catalogMatches(knex, OLD_NAME);
-  const dimensionId = dimension.rows.length === 1 ? dimension.rows[0].id : null;
+  // Only compared with the staged row's product id, never written: one row with the name, else the one product an alias spells so.
+  const dimensionIds = dimension.rows.length ? dimension.rows.map((row) => row.id) : dimension.aliasIds;
+  const dimensionId = dimensionIds.length === 1 ? dimensionIds[0] : null;
   const { swaps, unresolved } = await readOctober(knex, windows, dimensionId, bag ? bag.id : null);
   // A track that cannot be swapped would leave the recipe (Stonewall on every track) and its staged row apart.
   if (unresolved.length) {
