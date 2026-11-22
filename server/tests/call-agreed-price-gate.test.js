@@ -348,7 +348,7 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
   const count = (text) => source.split(text).length - 1;
   const held = 'const agreedJobHeldForOffice = agreedJobAtAdoption\n              && (agreedServiceFields.length > 0 || agreedJobRewriteHeld || agreedJobHoldChangesService(extracted, transcription, bookableServiceNames));';
   const txAt = source.indexOf('const svc = await db.transaction(async (trx) => {');
-  const guard = "if (agreedJobHeldForOffice) {\n                  // A street-only address match (the visit would have booked\n                  // pending with an address card) rides on the office card.\n                  return { __held: { reason: 'agreed_one_time_job_office_books', streetLevelAddress: streetLevelPending ? String(v2StreetLevelHold?.address_on_file || '') : null } };\n                }";
+  const guard = "if (agreedJobHeldForOffice && !agreedJobPriorByKey) {\n                  // A street-only address match (the visit would have booked\n                  // pending with an address card) rides on the office card.\n                  return { __held: { reason: 'agreed_one_time_job_office_books', streetLevelAddress: streetLevelPending ? String(v2StreetLevelHold?.address_on_file || '') : null } };\n                }";
 
   test('the visit price call is unchanged, and the processor never reads a price staff only stated', () => {
     expect(at).toBeGreaterThan(-1);
@@ -365,9 +365,10 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
 
   test('the booking is held when the hold changed its service: a label at adoption, or the rule on the booking\'s own view', () => {
     expect(count(held)).toBe(1);
-    // Set once, read once (by the guard below); nothing else writes it.
+    // Set once, read by the key check and the guard below; nothing else writes it.
     expect(count('agreedJobHeldForOffice =')).toBe(1);
-    expect(count('if (agreedJobHeldForOffice)')).toBe(1);
+    expect(count('const agreedJobPriorByKey = agreedJobHeldForOffice\n')).toBe(1);
+    expect(count('if (agreedJobHeldForOffice && !agreedJobPriorByKey) {')).toBe(1);
     // Set next to the price call, before the booking transaction opens.
     expect(source.indexOf(held)).toBeGreaterThan(at);
     expect(source.indexOf(held)).toBeLessThan(txAt);
@@ -447,6 +448,33 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(buildTriageItem({ callLogId: 1, flag: 'agreed_one_time_job_office_books', extraction: {} }).category).toBe('service_unknown');
   });
 
+  // The lookups before the hold skip a cancelled visit, so the hold reads the booking's own key first, as the
+  // insert's conflict path does: a cancelled booking keeps its own hold and visit, a live row is reused.
+  test('the hold reads the booking key first: a cancelled booking keeps its hold, a row with the key is reused', () => {
+    const at = source.indexOf('const agreedJobPriorByKey = agreedJobHeldForOffice');
+    expect(at).toBeGreaterThan(-1);
+    const block = source.slice(at, source.indexOf("return { __held: { reason: 'agreed_one_time_job_office_books'", at));
+    expect(block).toContain("? await trx('scheduled_services').where({ idempotency_key: insertData.idempotency_key }).first('id', 'status')");
+    expect(block).toContain("if (agreedJobPriorByKey && ['cancelled', 'rescheduled'].includes(agreedJobPriorByKey.status)) {");
+    expect(block).toContain("return { __held: { reason: 'auto_booking_previously_cancelled', existingId: agreedJobPriorByKey.id, existingStatus: agreedJobPriorByKey.status } };");
+    expect(block).toContain('if (agreedJobHeldForOffice && !agreedJobPriorByKey) {');
+    // insertData (and its key) exists before the read.
+    expect(source.lastIndexOf('const insertData = {', at)).toBeGreaterThan(source.lastIndexOf('const svc = await db.transaction(async (trx) => {', at));
+  });
+
+  // A held pass that found a visit (to reconcile, or cancelled) names it on an open agreed-job card as a candidate,
+  // never re-binding the card's customer.
+  test('a held pass with a found visit notes it on the open agreed-job card as a candidate', () => {
+    const at = source.indexOf("if (svc.__held.existingId && svc.__held.reason !== 'agreed_one_time_job_office_books') {");
+    expect(at).toBeGreaterThan(-1);
+    const call = source.slice(at, source.indexOf('});', at));
+    expect(call).toContain('call, procToken, customerId: null, visitId: svc.__held.existingId, visitService: svc.__held.existingService || null,');
+    expect(call).toContain('visitStatus: svc.__held.existingStatus || null, candidate: true, callSid,');
+    const helper = source.slice(source.indexOf('async function noteAgreedJobCardVisit('), source.indexOf('function agreedOneTimeJobCardPrice('));
+    expect(helper).toContain('visit_candidate: candidate === true,');
+    expect(helper).toContain('visit_status: visitStatus || null,');
+  });
+
   // A later pass that finds or books the visit (staff booked it by hand, or the gate is off now) tells the open
   // card, so staff check the visit's price and never book a second one.
   test('a later booking names its visit on the open agreed-job card, under the call lock and the claim', () => {
@@ -469,7 +497,7 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     // Called once, on the booked path, whatever the gate reads now.
     const site = 'scheduledServiceId = svc.id;';
     expect(count('await noteAgreedJobCardVisit({ call, procToken, customerId: svc.customer_id || customerId, visitId: svc.id, visitService: svc.service_type || serviceType, callSid });')).toBe(1);
-    const at = source.indexOf('await noteAgreedJobCardVisit(');
+    const at = source.indexOf('await noteAgreedJobCardVisit({ call, procToken, customerId: svc.customer_id');
     expect(source.lastIndexOf(site, at)).toBeGreaterThan(source.lastIndexOf('if (svc && svc.__held) {', at));
     expect(source.slice(source.lastIndexOf(site, at), at)).not.toContain('agreedJobAtAdoption');
   });

@@ -2036,7 +2036,10 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
 // re-bound to the visit's customer, as a refile would, so a relinked call's
 // verdict is not refused. Staff check the visit instead of booking another. Matches nothing on any other call: one unlocked read finds
 // no such card, and nothing more runs. Best-effort.
-async function noteAgreedJobCardVisit({ call, procToken, customerId, visitId, visitService, callSid }) {
+// `candidate`: a held pass found the visit (it may be this job, or the office
+// cancelled it), so staff reconcile it; only a booked or attached visit
+// re-binds the card's customer.
+async function noteAgreedJobCardVisit({ call, procToken, customerId, visitId, visitService, visitStatus = null, candidate = false, callSid }) {
   const agreedJobCard = (conn) => conn('triage_items')
     .where({ call_log_id: call.id, reason_code: 'auto_booking_skipped_after_approval' })
     .whereIn('status', ['open', 'in_progress'])
@@ -2054,6 +2057,8 @@ async function noteAgreedJobCardVisit({ call, procToken, customerId, visitId, vi
           visit_id: String(visitId),
           visit_service: visitService || null,
           visit_is_priced_service: !!visitService && !!card.card_service && serviceNameKey(visitService) === serviceNameKey(card.card_service),
+          visit_status: visitStatus || null,
+          visit_candidate: candidate === true,
         };
         await ttrx('triage_items').where({ id: card.id }).update({
           payload: ttrx.raw(
@@ -22532,7 +22537,18 @@ const CallRecordingProcessor = {
                 // so ending here writes nothing. The shared __held handler files
                 // the office's booking card: no visit, no text. A visit this
                 // call already has was found above and is kept.
-                if (agreedJobHeldForOffice) {
+                // The lookups above skip a cancelled or rescheduled visit, so
+                // the booking's own key is read first, as the insert's conflict
+                // path reads it: the office cancelled this exact booking (that
+                // hold and its visit win), or a row already holds the key (the
+                // insert below reuses it, so the call keeps its visit).
+                const agreedJobPriorByKey = agreedJobHeldForOffice
+                  ? await trx('scheduled_services').where({ idempotency_key: insertData.idempotency_key }).first('id', 'status')
+                  : null;
+                if (agreedJobPriorByKey && ['cancelled', 'rescheduled'].includes(agreedJobPriorByKey.status)) {
+                  return { __held: { reason: 'auto_booking_previously_cancelled', existingId: agreedJobPriorByKey.id, existingStatus: agreedJobPriorByKey.status } };
+                }
+                if (agreedJobHeldForOffice && !agreedJobPriorByKey) {
                   // A street-only address match (the visit would have booked
                   // pending with an address card) rides on the office card.
                   return { __held: { reason: 'agreed_one_time_job_office_books', streetLevelAddress: streetLevelPending ? String(v2StreetLevelHold?.address_on_file || '') : null } };
@@ -22791,6 +22807,17 @@ const CallRecordingProcessor = {
                 // fired (deduped, so on_file_house_number_conflict's own
                 // dedicated push elsewhere is never doubled).
                 if (!bridgeNeedsConfirmation.includes(svc.__held.reason)) bridgeNeedsConfirmation.push(svc.__held.reason);
+                // GATE_CALL_AGREED_ONE_TIME_JOB: this pass held on a visit it
+                // found (one to reconcile, or one the office cancelled), so an
+                // open agreed-job card from an earlier pass names it and stops
+                // saying "book it". Not re-bound: the visit may be another
+                // customer's. Whatever the gate reads now.
+                if (svc.__held.existingId && svc.__held.reason !== 'agreed_one_time_job_office_books') {
+                  await noteAgreedJobCardVisit({
+                    call, procToken, customerId: null, visitId: svc.__held.existingId, visitService: svc.__held.existingService || null,
+                    visitStatus: svc.__held.existingStatus || null, candidate: true, callSid,
+                  });
+                }
               } else if (svc && svc.__makeup) {
                 // The booking transaction found a missed recurring visit and
                 // inserted nothing: move it now, or hold (never a new visit).

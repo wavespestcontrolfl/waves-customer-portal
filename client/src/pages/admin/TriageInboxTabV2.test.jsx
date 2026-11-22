@@ -1593,14 +1593,26 @@ describe('ConfirmEvidence — agreed one-time job the AI did not book', () => {
   });
 
   it('names the visit once a later pass found or booked one, and stops asking for a booking', () => {
-    show(payload({}, { visit_id: 'visit-42', visit_service: 'One-Time Pest Control Service', visit_is_priced_service: true, follow_up: { scheduled_date: '2026-12-05', window_start: '10:00', suggested: false } }));
+    show(payload({}, { visit_id: 'visit-42', visit_service: 'One-Time Pest Control Service', visit_is_priced_service: true, price_basis: 'agreed_total', follow_up: { scheduled_date: '2026-12-05', window_start: '10:00', suggested: false } }));
     expect(screen.getByText(/The call now has visit visit-42 \(One-Time Pest Control Service\)\. Do not book another one/)).toBeInTheDocument();
     expect(screen.queryByText(/so the AI did not book it/)).not.toBeInTheDocument();
     expect(screen.queryByText('Book:')).not.toBeInTheDocument();
-    expect(screen.getByText(/\$250\.00 one-time\. Check that the visit carries it/)).toBeInTheDocument();
+    expect(screen.getByText(/\$250\.00 one-time, the total the caller accepted\. Check that the visit carries it/)).toBeInTheDocument();
     // Visit 2 may be booked already: check the schedule, never "book it".
     expect(screen.getByText(/Visit 2 may already be booked\. Check the schedule/)).toBeInTheDocument();
     expect(screen.queryByText('Promised follow-up:')).not.toBeInTheDocument();
+  });
+
+  it('keeps a stated price to check against the call after a visit is found', () => {
+    show(payload({}, { visit_id: 'visit-42', visit_service: 'One-Time Pest Control Service', visit_is_priced_service: true, price_basis: 'stated' }));
+    expect(screen.getByText(/\$250\.00 one-time, as staff said it\. Check the terms on the call/)).toBeInTheDocument();
+    expect(screen.queryByText(/Check that the visit carries it/)).not.toBeInTheDocument();
+  });
+
+  it('names a visit a held pass found as possible, with its status', () => {
+    show(payload({}, { visit_id: 'visit-7', visit_service: 'One-Time Pest Control Service', visit_status: 'cancelled', visit_is_priced_service: true, visit_candidate: true }));
+    expect(screen.getByText(/A later pass found visit visit-7 \(One-Time Pest Control Service, cancelled\), which may be this job/)).toBeInTheDocument();
+    expect(screen.queryByText('Visit on file:')).not.toBeInTheDocument();
   });
 
   it('says the price does not apply when the visit is another service', () => {

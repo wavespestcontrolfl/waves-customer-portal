@@ -138,11 +138,17 @@ function agreedOneTimeJobRows(p) {
   const price = typeof j.stated_price === "number" ? fmtMoney(j.stated_price) : null;
   // A later pass found or booked the call's visit: staff check it, and book nothing from this card.
   if (j.visit_id) {
+    const about = [j.visit_service, j.visit_status].filter(Boolean).join(", ");
     return [
-      { label: "Visit on file", value: `The call now has visit ${j.visit_id}${j.visit_service ? ` (${j.visit_service})` : ""}. Do not book another one: check the visit, then resolve this card.` },
-      price && (j.visit_is_priced_service === true
-        ? { label: "Price on the call", value: `${price} one-time${j.price_basis === "agreed_total" ? ", the total the caller accepted" : ""}. Check that the visit carries it.` }
-        : { label: "Price on the call", value: `${price} was for ${p.service || "the job priced on the call"}. The visit is for another service, so this price does not apply to it.` }),
+      j.visit_candidate === true
+        ? { label: "Possible visit", value: `A later pass found visit ${j.visit_id}${about ? ` (${about})` : ""}, which may be this job. Check it before you book: do not book a second one.` }
+        : { label: "Visit on file", value: `The call now has visit ${j.visit_id}${about ? ` (${about})` : ""}. Do not book another one: check the visit, then resolve this card.` },
+      price && (j.visit_is_priced_service !== true
+        ? { label: "Price on the call", value: `${price} was for ${p.service || "the job priced on the call"}. The visit is for another service, so this price does not apply to it.` }
+        : j.price_basis === "agreed_total"
+          ? { label: "Price on the call", value: `${price} one-time, the total the caller accepted. Check that the visit carries it.` }
+          // A stated price can carry a hedge or an added fee: a found visit does not settle it.
+          : { label: "Price on the call", value: `${price} one-time, as staff said it. Check the terms on the call before you set the visit's price.` }),
       j.follow_up && j.follow_up.scheduled_date && { label: "Follow-up", value: "Visit 2 may already be booked. Check the schedule before you book one." },
     ];
   }
