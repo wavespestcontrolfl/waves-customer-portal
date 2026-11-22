@@ -128,12 +128,17 @@ function savedEstimateTier(estimate, data) {
   return { recurring, discounted, tier: { tier, amount } };
 }
 
-// A staff discount on recurring work in any result the estimate persisted: the mapped result (with the tier's block)
-// and the engine's own result beside it, which the mapped result otherwise hides from the summary reader.
+// A staff discount on recurring work in any place the estimate persisted one: every stored summary spot
+// (estimate-manual-discount-replay.js storedManualDiscountCandidates, not only the first positive one), the recurring
+// blocks, and all of these again on the engine's own result beside a mapped result, which the readers otherwise skip.
 function staffDiscountOnRecurring(data, tierBlock) {
   const { staffDiscountReachesRecurring } = require('../routes/admin-customers')._private;
-  return staffDiscountReachesRecurring(data, tierBlock)
-    || staffDiscountReachesRecurring({ ...data, result: undefined }, object(object(data.engineResult).recurring));
+  const { storedManualDiscountCandidates } = require('./estimate-manual-discount-replay');
+  const engineView = { ...data, result: undefined };
+  const reaches = (manual) => !!manual && Number(manual.recurringAmount ?? manual.amount) > 0;
+  return [data, engineView].some((view) => storedManualDiscountCandidates(view).some(reaches))
+    || staffDiscountReachesRecurring(data, tierBlock)
+    || staffDiscountReachesRecurring(engineView, object(object(data.engineResult).recurring));
 }
 
 // What names an accepted estimate's savings: its own staff discount (applied after the tier) when that reaches
@@ -170,11 +175,12 @@ function staffAdjustedRow(raw) {
 // that tier's rate on the list price is the whole saving (to the engine's rounding), no service credit shares it, the
 // row's service takes the tier percentage (estimate-public.js recurringServiceReceivesTierDiscount: not palm
 // injection's flat credit, not a legacy rodent row), the row is not flagged out of percentage discounts and staff did
-// not move the row's own price.
-function namingTier(raw, base, savings, estimateTier, credited) {
+// not move the row's own price. The service is the row's own key, else the key the schedule matched the line to
+// (`serviceKey`), the order the schedule mapper uses.
+function namingTier(raw, base, savings, { estimateTier, credited, serviceKey }) {
   const lineTier = (object(raw.discount).appliedDiscounts || []).find((item) => item.type === 'waveguard');
   const inferable = !credited && !!estimateTier && !lineFlagsBlockPercentDiscount(raw) && !staffAdjustedRow(raw)
-    && require('../routes/estimate-public').recurringServiceReceivesTierDiscount(raw);
+    && require('../routes/estimate-public').recurringServiceReceivesTierDiscount({ ...raw, service: raw.service || serviceKey || undefined });
   if (lineTier || !inferable) return lineTier || null;
   const tierSavings = tierSavingsOn(base, Number(estimateTier.amount));
   return tierSavings !== null && Math.abs(Math.round((savings - tierSavings) * 100)) <= TIER_ROUNDING_CENTS ? estimateTier : null;
@@ -184,11 +190,11 @@ function namingTier(raw, base, savings, estimateTier, credited) {
 // estimate's staff discount. `named` is false for a part the estimate does not name (a service credit, a list-price
 // row's saving that is not the estimate's tier rate, anything else unexplained): the card shows it, an invoice never
 // prints it.
-function acceptedDiscountRows(raw, base, savings, { manualName = null, tierDiscounted = false, estimateTier = null } = {}) {
+function acceptedDiscountRows(raw, base, savings, { manualName = null, tierDiscounted = false, estimateTier = null, serviceKey = null } = {}) {
   if (!(savings > 0)) return [];
   const credited = (Array.isArray(raw.serviceSpecificDiscounts) ? raw.serviceSpecificDiscounts : [])
     .some((credit) => Number(credit?.amount) > 0);
-  const tier = namingTier(raw, base, savings, estimateTier, credited);
+  const tier = namingTier(raw, base, savings, { estimateTier, credited, serviceKey });
   const tierRate = Number(tier?.amount);
   const tierSavings = tierSavingsOn(base, tierRate);
   const rows = [];
@@ -223,7 +229,7 @@ function acceptedPricing(line, discountContext = {}) {
   return {
     amount, unit, base, savings, breakdownAvailable: complete,
     // The staff discount is named only on recurring applications, the work it reaches.
-    discounts: acceptedDiscountRows(raw, base, savings, unit === 'application' ? discountContext : {}),
+    discounts: acceptedDiscountRows(raw, base, savings, unit === 'application' ? { ...discountContext, serviceKey: line.serviceKey } : {}),
     // A bare list figure cannot justify another percentage on a legacy net.
     provenUndiscounted: complete && savings === 0 && !line.parentRecurringDiscounted
       && money(raw.manualFinalAnnual) === null

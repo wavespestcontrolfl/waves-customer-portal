@@ -92,6 +92,10 @@ describe('completion estimate evidence', () => {
     expect(names(acceptedPricing(row(96, { service: 'rodent_bait' }), platinum))).toEqual(unnamed(24));
     expect(names(acceptedPricing(row(96, { service: 'rodent_bait', perApplicationBilled: true }), platinum)))
       .toEqual([['WaveGuard Platinum', 24, 20, true]]);
+    // A row with a custom label and no key of its own takes the service the schedule matched it to.
+    const custom = row(96, { service: undefined, name: 'Exterior program' });
+    expect(names(acceptedPricing(custom, platinum))).toEqual(unnamed(24));
+    expect(names(acceptedPricing({ ...custom, serviceKey: 'pest_control_quarterly' }, platinum))).toEqual([['WaveGuard Platinum', 24, 20, true]]);
     // Staff moved this row's own price (its final annual is under its tier annual): part of the saving is theirs.
     expect(names(acceptedPricing(row(96, { annualAfterDiscount: 400, manualFinalAnnual: 384 }), platinum))).toEqual(unnamed(24));
     expect(names(acceptedPricing(row(96, { annualAfterDiscount: undefined, manualFinalAnnual: 384 }), platinum))).toEqual(unnamed(24));
@@ -164,6 +168,11 @@ describe('completion estimate evidence', () => {
       expect((await read(engineOnly({ tier: 'Platinum', discount: 0.2, manualDiscount: { amount: 5 } }))).reason).toBe('discount_unnamed');
       // A staff discount kept only on the engine's own result, beside the mapped result, still shares the saving.
       expect((await read(platinum({ tier: 'Platinum', discount: 0.2 }, { engineResult: { summary: { manualDiscount: { amount: 5 } } } }))).reason)
+        .toBe('discount_unnamed');
+      // Every stored staff discount spot counts, not only the first one with an amount.
+      expect((await read(platinum({ tier: 'Platinum', discount: 0.2 }))).breakdown.discounts).toHaveLength(1);
+      expect((await read({ ...estimate, waveguard_tier: 'Platinum', estimate_data: { result: { recurring: { tier: 'Platinum', discount: 0.2 },
+        manualDiscount: { amount: 10, recurringAmount: 0 }, totals: { manualDiscount: { amount: 5, recurringAmount: 5 } } } } })).reason)
         .toBe('discount_unnamed');
       // The legacy nested block also supplies rows: which block priced the line is unknown, so nothing is named.
       expect((await read({ ...estimate, waveguard_tier: 'Platinum', estimate_data: { result: { recurring: { tier: 'Platinum', discount: 0.2 },
