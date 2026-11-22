@@ -107,8 +107,9 @@ maybeDescribe('call booking check (live Postgres)', () => {
 
   const run = (now = NOW) => Check.runCallBookingCheck({ now });
 
+  // A price bell's key ends with the number it shows, so a visit can hold more than one over time.
   const priceRowsFor = (visitId) => trx('notifications').where({ recipient_type: 'admin' })
-    .whereRaw("metadata->>'dedupeKey' = ?", [`${Check.OWN_PREFIX}price:${visitId}`]);
+    .whereRaw("starts_with(metadata->>'dedupeKey', ?)", [`${Check.OWN_PREFIX}price:${visitId}:`]).orderBy('created_at');
   // The 2026-11-21 reading: the one-time service, and the one-time price staff stated and the caller accepted
   // ("One-time service is $250, but it varies"), with no strict total.
   const statedTerm = { amount_usd: 250, amount_max_usd: null, unit: 'one_time', accepted: true, stated_by: 'agent' };
@@ -193,7 +194,8 @@ maybeDescribe('call booking check (live Postgres)', () => {
     expect(row.detail).toContain('Set the visit\'s price before it is billed. Nothing was changed and the customer was not contacted.');
     expect(row.metadata).toMatchObject({
       area: 'Schedule', severity: 'needs-you', who: 'person', doneWhen: 'visit_priced', subject: { type: 'visit', id: b.visitId },
-      scheduledServiceId: b.visitId, customerId: b.customerId, callLogId: b.callId, problem: 'price',
+      scheduledServiceId: b.visitId, customerId: b.customerId, callLogId: b.callId, problem: 'price', priceMark: '25000s',
+      dedupeKey: `${Check.OWN_PREFIX}price:${b.visitId}:25000s`,
     });
     // The visit is the service the call named: no service bell.
     expect(await rowsFor(b.visitId)).toHaveLength(0);
@@ -219,6 +221,30 @@ maybeDescribe('call booking check (live Postgres)', () => {
     await trx('scheduled_services').where({ id: b.visitId }).update({ estimated_price: null });
     await run(new Date('2026-11-21T22:30:00Z'));
     expect(await priceRowsFor(b.visitId)).toHaveLength(1);
+  });
+
+  test('the call is read again and holds another number: the bell with the old number closes and one with the new number rings', async () => {
+    const b = await booking({ row: oneTime, callOver: pricedCall() });
+    await run();
+    const corrected = { ...statedTerm, amount_usd: 300 };
+    await trx('call_log').where({ id: b.callId }).update(pricedCall({ price: corrected, prices: [corrected] }));
+    const next = await run(new Date('2026-11-21T22:15:00Z'));
+    expect(next.closed).toBeGreaterThanOrEqual(1);
+    expect(next.raised).toBeGreaterThanOrEqual(1);
+    const rows = await priceRowsFor(b.visitId);
+    expect(rows).toHaveLength(2);
+    const old = rows.find((row) => row.metadata.priceMark === '25000s');
+    const fresh = rows.find((row) => row.metadata.priceMark === '30000s');
+    expect(old.done_at).not.toBeNull();
+    expect(old.resolution).toBe('The reading of the call holds another price now');
+    expect(old.metadata).toMatchObject({ autoCleared: true, autoClearedReason: 'price_reading_changed' });
+    expect(fresh.done_at).toBeNull();
+    expect(fresh.body).toBe('Staff said $300 on the call, not confirmed as final; the visit has no price.');
+
+    // The same reading again: nothing closes, nothing rings.
+    const again = await run(new Date('2026-11-21T22:30:00Z'));
+    expect(again.raised).toBe(0);
+    expect(await priceRowsFor(b.visitId)).toHaveLength(2);
   });
 
   test('a price bell stays open while the reading cannot be read; a visit changed to a plan closes it', async () => {
@@ -253,6 +279,7 @@ maybeDescribe('call booking check (live Postgres)', () => {
     ['the visit has a price', { visitOver: { estimated_price: 250 } }, pricedCall()],
     ['the visit has a price on its primary line', { visitOver: { primary_line_price: 250 } }, pricedCall()],
     ['the reading disputes its own total', {}, pricedCall({ quoted_price_usd: 350, price_accepted_by_caller: false })],
+    ['the call spoke of a second service', {}, pricedCall({ secondary_categories: ['lawn_care'] })],
     ['the visit is a free callback', { visitOver: { is_callback: true } }, pricedCall()],
     ['the call holds no price', {}, {}],
     ['the call spoke of a second property', {}, pricedCall({}, { property: { additional_properties: [{ city: 'Venice' }] } })],

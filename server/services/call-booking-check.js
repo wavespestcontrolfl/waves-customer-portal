@@ -16,7 +16,8 @@
 //            marks a hedge and an added charge the same way. So the bell shows the number to the office, and a
 //            person sets the price.
 // A visit has one problem at a time: `service` needs a plan visit and `price` a one-time visit. A bell's key and
-// metadata carry the problem's name.
+// metadata carry the problem's name. A price bell's key also carries the number it shows: when the call is read
+// again and holds another number, the bell with the old number closes and one with the new number rings.
 //
 // CLOSE: each run first judges every open bell again from the visit as it stands now. A bell closes itself only
 // on evidence: its problem is gone (the visit and the reading agree on the service; the visit has a price or is
@@ -61,6 +62,7 @@ const CLOSED = Object.freeze({
   service: { reason: 'service_agrees', text: 'The visit and the call now agree on the service' },
   price: { reason: 'price_set', text: 'The visit has a price now' },
   noPriceNeeded: { reason: 'price_not_needed', text: 'The visit is no longer a visit that takes a price from the call' },
+  priceChanged: { reason: 'price_reading_changed', text: 'The reading of the call holds another price now' },
   visitClosed: { reason: 'visit_closed', text: 'The visit is done or cancelled' },
   gone: { reason: 'visit_gone', text: 'The visit is gone' },
 });
@@ -124,18 +126,33 @@ function takesNoCallPrice(visit) {
 // The price the reading holds for the job it names, as the booking's own price rule would put it on this
 // service (resolveCallBookingPrice: its bounds and its refusals): the total the call agreed, else the one-time
 // price staff stated and the caller accepted. null when it holds neither. A $0 total is a free booking, not a
-// missing price. `agreed` is true only for a total the reading does not mark as changed after it was accepted
-// (price_is_final false); a total the reading itself disputes (staff did not offer it, or the caller did not
-// accept it) is no price to show.
+// missing price.
+//
+// A reading that contradicts its own price is no price to show: it says no price was discussed
+// (price_discussed false), or it holds a total while one of its proofs of that total (staff offered it, the
+// caller accepted it, it was final) is false or null. The schema writes null there when no price was discussed;
+// an older reading has no proof fields at all (undefined), and its total stands. The proofs speak of the total
+// only, so the stated price does not read them. `agreed` is true only for a total the reading does not mark as
+// changed after it was accepted (price_is_final false): that one is shown as "not confirmed as final".
 function readingPrice(reading, catalogRow) {
   const request = reading.service_request;
   const strict = request.quoted_price_usd;
-  if (strict != null && (request.price_offered_by_staff === false || request.price_accepted_by_caller === false)) return null;
+  if (request.price_discussed === false) return null;
+  const proofStands = (proof) => proof === true || proof === undefined;
+  if (strict != null && !(proofStands(request.price_offered_by_staff) && proofStands(request.price_accepted_by_caller)
+    && (proofStands(request.price_is_final) || request.price_is_final === false))) return null;
   const { price, source } = require('./call-booking-catalog').resolveCallBookingPrice({
     quotedPrice: strict != null ? strict : resolveStatedOneTimeCallPrice(reading), catalogRow,
   });
   return source === 'transcript' ? { amount: price, agreed: strict != null && request.price_is_final !== false } : null;
 }
+
+// What a price bell shows, as one token: the amount in cents and whether the call agreed it. It is part of the
+// bell's key and metadata.
+const priceMark = ({ amount, agreed }) => `${Math.round(amount * 100)}${agreed ? 'a' : 's'}`;
+
+// A bell's dedupe key. One bell for a visit and a problem; a price bell also for the number it shows.
+const bellKey = (visitId, problem) => `${OWN_PREFIX}${problem.kind}:${visitId}${problem.kind === 'price' ? `:${priceMark(problem)}` : ''}`;
 
 // What the visit and the reading of its call say about the price, as they stand now:
 //   problem  a one-time visit with no price, and the reading holds a price for that same job
@@ -143,9 +160,9 @@ function readingPrice(reading, catalogRow) {
 //   agrees   the visit needs no price from the call: it has one, or a call booking never prices it (not a
 //            one-time service, a free re-service, a Waves Assessment, a free callback);
 //   unknown  the visit has no catalog row, the reading cannot be read, holds no price or disputes its own
-//            total, or the price cannot be tied to this visit: the reading names another service than the
-//            visit's, or the call spoke of more than one property (the reading's price block does not say
-//            which job a price covers).
+//            price, or the price cannot be tied to this visit: the reading names another service than the
+//            visit's, or the call spoke of a second service or a second property (the reading's price block
+//            does not say which job a price covers).
 function judgePrice(visit) {
   if (!visit.row_billing_type) return { verdict: 'unknown' };
   if (takesNoCallPrice(visit) || visitHasPrice(visit)) return { verdict: 'agrees' };
@@ -153,8 +170,8 @@ function judgePrice(visit) {
   const request = reading && reading.service_request;
   if (!request || typeof request !== 'object') return { verdict: 'unknown' };
   if (!nameKey(visit.row_name) || nameKey(request.specific_service_name) !== nameKey(visit.row_name)) return { verdict: 'unknown' };
-  const others = reading.property && reading.property.additional_properties;
-  if (Array.isArray(others) && others.length) return { verdict: 'unknown' };
+  const others = [request.secondary_categories, reading.property && reading.property.additional_properties];
+  if (others.some((list) => Array.isArray(list) && list.length)) return { verdict: 'unknown' };
   const price = readingPrice(reading, catalogRowOf(visit));
   return price ? { verdict: 'problem', ...price } : { verdict: 'unknown' };
 }
@@ -167,13 +184,16 @@ function problemOf(visit, billingByName) {
   return verdict === 'problem' ? { kind: 'price', ...facts } : null;
 }
 
-// What an open bell should do now: a CLOSED key, or null to stay open.
-function closeKeyFor(kind, visit, billingByName) {
+// What an open bell should do now: a CLOSED key, or null to stay open. `mark` is the number an open price bell
+// shows (its metadata.priceMark).
+function closeKeyFor(kind, visit, billingByName, mark = null) {
   if (!visit) return 'gone';
   if (CLOSED_VISIT_STATUSES.has(String(visit.status))) return 'visitClosed';
   if (kind === 'price') {
-    if (judgePrice(visit).verdict !== 'agrees') return null;
-    return visitHasPrice(visit) ? 'price' : 'noPriceNeeded';
+    const judged = judgePrice(visit);
+    if (judged.verdict === 'agrees') return visitHasPrice(visit) ? 'price' : 'noPriceNeeded';
+    // The reading holds another number now, so this bell shows the old one. The raise pass rings the new one.
+    return judged.verdict === 'problem' && mark && mark !== priceMark(judged) ? 'priceChanged' : null;
   }
   return judgeService(visit, billingByName).verdict === 'agrees' ? kind : null;
 }
@@ -284,24 +304,27 @@ async function loadBillingByName() {
 
 // ------------------------------------------------------------------ passes
 
-// Judge each open bell again, from its visit read by id; close the ones evidence closes. Returns { closed, failed }.
+// Judge each open bell again, from its visit read by id; close the ones evidence closes. Returns
+// { closed, failed, failedVisits }: the raise pass leaves a visit alone when a close for it failed, so a visit
+// never holds a bell with the old number and one with the new number.
 async function closePass(episodes, billingByName, now) {
   const bells = (await episodes.openAdminAlertMetadata(db, OWN_PREFIX))
     .filter((meta) => meta.scheduledServiceId && KINDS.includes(meta.problem));
-  const tally = { closed: 0, failed: 0 };
+  const tally = { closed: 0, failed: 0, failedVisits: new Set() };
   if (!bells.length) return tally;
   const ids = [...new Set(bells.map((meta) => String(meta.scheduledServiceId)))];
   const visits = new Map((await visitRows().whereIn('ss.id', ids)).map((visit) => [String(visit.id), visit]));
   for (const meta of bells) {
     try {
-      const key = closeKeyFor(meta.problem, visits.get(String(meta.scheduledServiceId)), billingByName);
+      const key = closeKeyFor(meta.problem, visits.get(String(meta.scheduledServiceId)), billingByName, meta.priceMark);
       if (key) {
         tally.closed += Number(await episodes.closeAdminAlertKeys(
-          db, [`${OWN_PREFIX}${meta.problem}:${meta.scheduledServiceId}`], CLOSED[key].reason, { now, resolution: CLOSED[key].text },
+          db, [meta.dedupeKey], CLOSED[key].reason, { now, resolution: CLOSED[key].text },
         )) || 0;
       }
     } catch (err) {
       tally.failed += 1;
+      tally.failedVisits.add(String(meta.scheduledServiceId));
       logger.warn(`[call-booking-check] close check failed for visit ${meta.scheduledServiceId}: ${err.message}`);
     }
   }
@@ -316,22 +339,24 @@ async function raiseBell(visit, { kind, ...facts }) {
   const name = await lookupCustomerName(db, visit.customer_id);
   const result = await raiseAdminAlert('schedule', COPY[kind].spec({ visit, ...facts, name }), {
     bell: true,
-    dedupeKey: `${OWN_PREFIX}${kind}:${visit.id}`,
+    dedupeKey: bellKey(visit.id, { kind, ...facts }),
     detail: COPY[kind].detail({ visit, ...facts, name }),
     metadata: {
       scheduledServiceId: String(visit.id), customerId: visit.customer_id && String(visit.customer_id),
       callLogId: String(visit.source_call_log_id), problem: kind,
+      ...(kind === 'price' ? { priceMark: priceMark(facts) } : {}),
     },
   });
   if (!result) throw new Error('call booking check bell was not written');
   return result.suppressed || result.deduped ? 0 : 1;
 }
 
-// Judge every open call-booked visit of the last 7 days; raise a bell for each one with a problem.
-async function raisePass(billingByName, now) {
+// Judge every open call-booked visit of the last 7 days; raise a bell for each one with a problem. `skip` holds
+// the visits whose bell the close pass could not close in this run.
+async function raisePass(billingByName, now, skip = new Set()) {
   const since = new Date(now.getTime() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
   const visits = (await callBookedVisits().where('ss.created_at', '>=', since).whereIn('ss.status', OPEN_STATUSES))
-    .filter((visit) => !isInternalTestCustomerId(visit.customer_id));
+    .filter((visit) => !isInternalTestCustomerId(visit.customer_id) && !skip.has(String(visit.id)));
   const tally = { raised: 0, failed: 0, candidates: visits.length };
   for (const visit of visits) {
     try {
@@ -358,7 +383,7 @@ async function runCallBookingCheck({ now = new Date() } = {}) {
   if (typeof gates.alertEpisodesLive === 'function' && !gates.alertEpisodesLive()) return { skipped: 'episodes_off' };
   const billingByName = await loadBillingByName();
   const closed = await closePass(require('./admin-alert-episodes'), billingByName, now);
-  const raised = await raisePass(billingByName, now);
+  const raised = await raisePass(billingByName, now, closed.failedVisits);
   const failed = closed.failed + raised.failed;
   if (failed) throw new Error(`${failed} call booking check${failed === 1 ? '' : 's'} failed`);
   return {
@@ -370,5 +395,5 @@ async function runCallBookingCheck({ now = new Date() } = {}) {
 module.exports = {
   runCallBookingCheck,
   OWN_PREFIX,
-  _private: { judgeService, judgePrice, problemOf, closeKeyFor, specFor, detailFor, priceSpecFor, priceDetailFor, CLOSED },
+  _private: { judgeService, judgePrice, problemOf, closeKeyFor, bellKey, specFor, detailFor, priceSpecFor, priceDetailFor, CLOSED },
 };
