@@ -2086,7 +2086,13 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         const planned = planMemberTargets({ members, primary, visitWindowStart: visit.window_start, win, newDateStr });
         const targets = members.map((m, index) => {
           const { isPrimary, start: targetStart, end: targetEnd, shifted } = planned[index];
-          const window = shifted ? (targetEnd ? `${targetStart}-${targetEnd}` : { start: targetStart, end: null }) : null;
+          // The range a member's own move takes is minute-precision (the
+          // rebooker's parseWindow reads no other range, and then keeps the
+          // row's stored hours). A bound sent with seconds ("09:00:00") is
+          // written as its minutes, so the write takes the window the plan
+          // validated and the shift check judged.
+          const hm = (v) => { const minutes = String(v).match(/^\d{1,2}:\d{2}/); return minutes ? minutes[0] : v; };
+          const window = shifted ? (targetEnd ? `${hm(targetStart)}-${hm(targetEnd)}` : { start: targetStart, end: null }) : null;
           const norm = (v) => (v ? String(v).slice(0, 5) : null);
           const techMatches = options.technicianId === undefined || String(m.technician_id || '') === String(options.technicianId || '');
           // No-op only when EVERY requested field already holds (codex r2):

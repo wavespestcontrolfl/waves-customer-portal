@@ -271,6 +271,17 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
       ]);
     });
 
+    test('a time sent with seconds lands where it was judged: both services take the new hours', async () => {
+      const stop = await seedStop();
+      await expect(moveStop(stop, { start: '11:00:00', end: '12:00:00' })).rejects.toMatchObject({ ...refused, memberId: stop.b });
+      expect(await stopOf(stop)).toMatchObject(whereSeeded);
+      expect((await moveStop(stop, { start: '10:00:00', end: '11:00:00' })).visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
+      expect(await stopOf(stop)).toMatchObject([
+        { day: nextDay, window_start: '10:00:00', window_end: '11:00:00' },
+        { day: nextDay, window_start: '11:00:00', window_end: '12:00:00' },
+      ]);
+    });
+
     test('each service is judged with its own stored length', async () => {
       // The second service is a two-hour job in a one-hour window: at 10:00 it ends at 12:00, at 11:00 at 13:00.
       const stop = await seedStop({ estimated_duration_minutes: 120 });

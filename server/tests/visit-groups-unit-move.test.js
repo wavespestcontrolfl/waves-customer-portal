@@ -1240,6 +1240,18 @@ describe('shift hours: a grouped stop is judged as one unit', () => {
       expect(aCall[5].excludeExpect.every((x) => !('estimated_duration_minutes' in x))).toBe(true);
     });
 
+    test('a time sent with seconds is written as it was judged: the first service\'s own move takes the range in minutes', async () => {
+      // The rebooker reads a range in minutes only. "13:00:00-14:00:00" would leave the first service at its old hours.
+      db.__script = script({ members: pair(), landed: landed('13:00', '14:00') });
+      const moved = fakeRebooker();
+      expect((await unit(moved, { start: '13:00:00', end: '14:00:00' })).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+      expect(moved.reschedule.mock.calls.map((c) => c[2])).toEqual(['13:00-14:00', '14:00-15:00']);
+      // The same request an hour later is judged at those hours: the sibling would end at 16:00.
+      db.__script = script({ members: pair() });
+      const refused = fakeRebooker();
+      await expect(unit(refused, { start: '14:00:00', end: '15:00:00' })).rejects.toMatchObject(refusedFor('b'));
+    });
+
     test('a member\'s block is the later of its window end and its stored length', async () => {
       // The sibling is a two-hour job in a one-hour window.
       const members = pair({ estimated_duration_minutes: 120 });
