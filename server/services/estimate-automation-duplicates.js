@@ -344,6 +344,12 @@ async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
  * office or estimator estimate, a sent estimate, an estimate that is being
  * sent or whose send failed.
  *
+ * Contact and property are a "same request" test for dropping the block.
+ * They are not proof of identity (the wizard has none) and they are not
+ * kept on the wizard's draft: after the run, a same-phone wizard run
+ * refreshes that draft like every wizard draft (routes/public-quote.js,
+ * owner-hit 2026-06-12).
+ *
  * No lock beyond the caller's phone lock (the web form creates its shell
  * under the same lock). A shell that changes after the read costs nothing
  * here: nothing is taken from it. An office estimate saved for the phone

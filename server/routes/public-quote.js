@@ -805,6 +805,11 @@ function shouldRefreshWizardDraft(duplicateBlock) {
 // of the phone, the block is dropped and the run writes its own estimate as
 // for a new visitor (onlyUntouchedWebFormShellsOpen holds the rule). The old
 // draft is only read, never changed. Any other open estimate still blocks.
+// The contact and property tests answer "is this run the same request as
+// the old form?". They are not proof of identity: this route has none. Once
+// the run wrote its draft, the phone is in the wizard's normal state, and a
+// later same-phone run refreshes that draft like every wizard draft (the
+// branch below, owner-hit 2026-06-12). This rule does not change that.
 // It has a gate because the unblocked run texts the person the booking link.
 async function withoutFormShellBlock(trx, duplicateBlock, { phone, address, customerId, email }) {
   if (!duplicateBlock || shouldRefreshWizardDraft(duplicateBlock)) return duplicateBlock;

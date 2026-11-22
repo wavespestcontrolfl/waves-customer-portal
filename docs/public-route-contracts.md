@@ -6168,8 +6168,12 @@ never writes, archives or locks an estimate it did not make, because the
 caller's phone, email and address are typed, not proven. Any other open
 estimate of the phone still blocks (a draft with a price, a touched draft, a
 web-form draft of another contact or for another property, an office or
-estimator estimate, a sent estimate). No new request field, no new response
-field, no new auth surface, no migration.
+estimator estimate, a sent estimate). The contact and property tests are a
+same-request test, not proof of identity. After the run the phone holds the
+wizard's own draft, and a later same-phone run refreshes it under the
+wizard's existing refresh rule (2026-06-12), which this gate does not
+change. No new request field, no new response field, no new auth surface,
+no migration.
 
 Repeat-run dedupe (#3834 split, PR A′; DARK behind `GATE_WIZARD_LEAD_DEDUPE`,
 read at call time, default off in every environment — off, every run
