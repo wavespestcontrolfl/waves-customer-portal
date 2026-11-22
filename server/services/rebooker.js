@@ -1587,14 +1587,16 @@ class SmartRebooker {
       keptTechWorkDays = await db('technicians').where({ id: service.technician_id }).first('id', 'work_days');
     }
 
-    // Shift hours (GATE_TECH_SHIFT_HOURS): as for work days. A non-admin commit
-    // of one of these options refuses a window the kept technician's shift does
-    // not hold (rescheduleOnce, shiftLive), so that flow is not offered one:
-    // clashesAt below answers true for it. The block is the commit's
-    // (rowBlockMinutes: the offered start, and the later of the offered end and
-    // the start plus the stored length). Gate off, no technician or the admin
-    // picker: no read, and no window is refused.
-    const keptShiftOf = reason && service.technician_id
+    // Shift hours (GATE_TECH_SHIFT_HOURS). A non-admin commit of one of these
+    // options refuses a window the kept technician's shift does not hold
+    // (rescheduleOnce, shiftLive), so that flow is not offered one: clashesAt
+    // below answers true for it. The block is the commit's (rowBlockMinutes:
+    // the offered start, and the later of the offered end and the start plus
+    // the stored length). The office's own commit is not checked, so a caller
+    // that commits as the office (opts.initiatedBy 'admin': the dispatch
+    // board's rain-out sheet) and the admin picker (no reason) keep every
+    // window. Those two, gate off, or no technician: no read.
+    const keptShiftOf = reason && opts.initiatedBy !== 'admin' && service.technician_id
       ? await require('./technician-eligibility').loadTechShifts(db, { technicianIds: [service.technician_id] })
       : null;
     const outsideKeptShift = (dateStr, windowStart, windowEnd) => {

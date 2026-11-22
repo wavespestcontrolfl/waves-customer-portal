@@ -410,6 +410,19 @@ describe('rain-out service', () => {
         expect(options.ok).toBe(true);
         return options.sameDay.map((o) => o.window.start);
       };
+      // The dispatch board's sheet: it commits as the office. No technicians queue is wired, so a shift read would throw.
+      const sameDayForOffice = async () => {
+        SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
+        wireDb({
+          scheduled_services: [
+            chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, status: 'confirmed' }) }),
+            chain({ rows: [] }),
+          ],
+        });
+        const options = await RainOut.getOptions('svc-1', { caller: { isAdmin: true, technicianId: 'admin-1' }, initiatedBy: 'admin' });
+        expect(options.ok).toBe(true);
+        return options.sameDay.map((o) => o.window.start);
+      };
 
       test('gate on: a route-checked hour that starts before the shift, or ends after it, is not offered', async () => {
         process.env.GATE_TECH_SHIFT_HOURS = 'true';
@@ -427,6 +440,28 @@ describe('rain-out service', () => {
         process.env.GATE_TECH_SHIFT_HOURS = 'true';
         finder.mockRejectedValue(new Error('finder down'));
         expect(await sameDayOnShift(['08:00', '13:00'])).toEqual(['12:00']);
+      });
+
+      test('gate on: an hour the shift drops does not take a place from the next-best hour (at most 4, after the shift)', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        // Lowest drive first: 15:00, 14:00, 13:00, 12:00, then 11:00. A 90-minute visit at 15:00 ends at 16:30.
+        finder.mockResolvedValue({ slots: [slot('11:00', 5), slot('12:00', 4), slot('13:00', 3), slot('14:00', 2), slot('15:00', 1)] });
+        expect(await sameDayOnShift(['08:00', '16:00'], { estimated_duration_minutes: 90 })).toEqual(['14:00', '13:00', '12:00', '11:00']);
+      });
+
+      test('gate on: the route keeps hours and the shift holds none of them: no hour, not a guess', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        // The 12:00 guess fits the shift, but the route did not keep 12:00.
+        finder.mockResolvedValue({ slots: [slot('15:00', 1)] });
+        expect(await sameDayOnShift(['08:00', '13:00'])).toEqual([]);
+      });
+
+      test('gate on, the dispatch board\'s sheet (it commits as the office): every hour stays, and no shift is read', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        finder.mockResolvedValue({ slots: [slot('11:00', 3), slot('14:00', 6)] });
+        expect(await sameDayForOffice()).toEqual(['11:00', '14:00']);
+        finder.mockRejectedValue(new Error('finder down'));
+        expect(await sameDayForOffice()).toEqual(['12:00', '14:00']);
       });
 
       test('gate off: every hour stays, and no shift is read', async () => {
@@ -2343,7 +2378,9 @@ describe('rain-out service', () => {
         // admin reschedule-options stay overlap-only (advisory saves).
         // caller: the route-checked day list buys Google road times for an
         // admin caller only; this tech caller stays on the estimate.
-        'svc-1', 'weather_rain', { probeSpanMinutes: 60, travelGap: true, caller: { isAdmin: false, technicianId: 'tech-1' } },
+        // initiatedBy: who the sheet's commit records (default 'tech'); the day
+        // options are held to the technician's shift unless it is the office.
+        'svc-1', 'weather_rain', { probeSpanMinutes: 60, travelGap: true, caller: { isAdmin: false, technicianId: 'tech-1' }, initiatedBy: 'tech' },
       );
       expect(options.days).toHaveLength(2);
       expect(options.days[0]).toMatchObject({ date: '2026-06-12', rainChance: 65 });
@@ -2384,6 +2421,11 @@ describe('rain-out service', () => {
       wire();
       await RainOut.getOptions('svc-1');
       expect(SmartRebooker.findRescheduleOptions.mock.calls[0][2].caller).toBeNull();
+      expect(SmartRebooker.findRescheduleOptions.mock.calls[0][2].initiatedBy).toBe('tech');
+      // The dispatch board's sheet commits as the office and says so.
+      wire();
+      await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' }, initiatedBy: 'admin' });
+      expect(SmartRebooker.findRescheduleOptions.mock.calls[0][2].initiatedBy).toBe('admin');
     });
 
     // The customer-pick offer rides the options payload.

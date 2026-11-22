@@ -946,6 +946,14 @@ describe('findRescheduleOptions — candidate days are probed on the visit\'s te
       expect(await rainOptions()).toHaveLength(3);
     });
 
+    test('gate on, a sheet that commits as the office (initiatedBy admin): no shift read, and every day is probed', async () => {
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      wire(['10:00', '14:00']);
+      expect(await SmartRebooker.findRescheduleOptions('svc-1', 'weather_rain', { probeSpanMinutes: 60, initiatedBy: 'admin' })).toHaveLength(3);
+      expect(findConflictingVisits).toHaveBeenCalledTimes(10);
+      expect(db.mock.calls.some(([table]) => table === 'technicians')).toBe(false);
+    });
+
     test('gate on, no reason (the admin picker): no shift read, and every day is probed', async () => {
       process.env.GATE_TECH_SHIFT_HOURS = 'true';
       wire(['10:00', '14:00']);

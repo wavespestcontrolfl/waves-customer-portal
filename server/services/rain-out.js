@@ -1018,7 +1018,9 @@ function slotDriveMinutes(slot) {
 
 // The feasible on-the-hour starts for today, one per hour (lowest added drive
 // wins a shared hour), lowest drive first, ties earlier start, at most 4.
-function pickRouteHours(slots, { todayStr, firstStart }) {
+// `fits(start)` (optional) drops an hour before the cap, so an hour it drops
+// does not take a place from the next-best hour.
+function pickRouteHours(slots, { todayStr, firstStart, fits = null }) {
   const byStart = new Map();
   for (const slot of slots) {
     const start = hhmmToMinutes(slot.start_time);
@@ -1029,6 +1031,7 @@ function pickRouteHours(slots, { todayStr, firstStart }) {
     if (!kept || (drive ?? Infinity) < (kept.drive ?? Infinity)) byStart.set(start, { start, drive });
   }
   return [...byStart.values()]
+    .filter(({ start }) => !fits || fits(start))
     .sort((a, b) => ((a.drive ?? Infinity) - (b.drive ?? Infinity)) || a.start - b.start)
     .slice(0, TECH_MOVE_ROUTE_MAX_OPTIONS);
 }
@@ -1071,8 +1074,9 @@ function routeJudgedFull(result, todayStr) {
 // null = no route answer (an active target, the finder threw or answered
 // with an error, or it could not verify the route): the caller falls back to
 // sameDayOptions(). [] = the route was judged and keeps no hour today, so the
-// sheet offers no same-day hour rather than an unchecked guess.
-async function routeSameDayOptions(service, now = new Date()) {
+// sheet offers no same-day hour rather than an unchecked guess. `holds`
+// (keptShiftHolds, optional) drops an hour the technician's shift does not hold.
+async function routeSameDayOptions(service, now = new Date(), holds = null) {
   if (ACTIVE_TARGET_STATUSES.has(service.status)) return null;
   const parts = etParts(now);
   const todayStr = etDateString(now);
@@ -1115,8 +1119,14 @@ async function routeSameDayOptions(service, now = new Date()) {
       logger.warn(`[rain-out] tech route hours unavailable for ${service.id}, using the +2h/+4h guesses: ${result.error}`);
       return null;
     }
-    const picked = pickRouteHours(Array.isArray(result?.slots) ? result.slots : [], { todayStr, firstStart });
+    const slots = Array.isArray(result?.slots) ? result.slots : [];
+    const fits = holds
+      ? (start) => holds(todayStr, { start: minutesToHHMM(start), end: minutesToHHMM(start + RESCHEDULE_WINDOW_MINUTES) })
+      : null;
+    const picked = pickRouteHours(slots, { todayStr, firstStart, fits });
     if (picked.length) return picked.map((hour) => routeHourOption(hour, todayStr));
+    // The route keeps hours and the shift holds none of them: no hour, not a guess.
+    if (fits && pickRouteHours(slots, { todayStr, firstStart }).length) return [];
     return routeJudgedFull(result, todayStr) ? [] : null;
   } catch (err) {
     logger.warn(`[rain-out] tech route hours failed for ${service.id}, using the +2h/+4h guesses: ${err.message}`);
@@ -1126,30 +1136,34 @@ async function routeSameDayOptions(service, now = new Date()) {
 
 // The +2h/+4h guesses stand in only when there is no route answer
 // (routeSameDayOptions returns null). A route judged full offers no hour.
-async function sameDayChoices(service) {
-  const routed = await routeSameDayOptions(service);
-  return withinKeptShift(service, routed === null ? sameDayOptions() : routed);
+// `shiftChecked`: the sheet's commit obeys the technician's shift hours (every
+// commit but the office's), so its hours are held to the shift (keptShiftHolds).
+async function sameDayChoices(service, { shiftChecked = true } = {}) {
+  const holds = shiftChecked ? await keptShiftHolds(service) : null;
+  const routed = await routeSameDayOptions(service, new Date(), holds);
+  if (routed !== null) return routed;
+  return sameDayOptions().filter((opt) => !holds || holds(opt.date, opt.window));
 }
 
 // GATE_TECH_SHIFT_HOURS: a technician's own move refuses an hour the visit's
-// technician's shift today does not hold (rebooker.js rescheduleOnce,
-// shiftLive), so the sheet does not offer one. The block is the commit's: the
-// offered hour, and the later of its end and the start plus the visit's stored
-// length (rowBlockMinutes); the route-checked hours above are judged for one
-// hour only. Gate off, no technician or no hour to judge: no read, and every
-// hour stays. A failed read of the hours fails the list (no hour on a guess).
-async function withinKeptShift(service, options) {
-  if (!service.technician_id || !options.length) return options;
+// technician's shift does not hold (rebooker.js rescheduleOnce, shiftLive), so
+// the sheet does not offer one. Answers (date, window) => true when the shift
+// holds the commit's block: the offered hour, and the later of its end and the
+// start plus the visit's stored length (rowBlockMinutes); the route check
+// judges one hour only. null = no technician, nothing to judge. Gate off: no
+// read, and every hour is held. A failed read of the hours fails the list.
+async function keptShiftHolds(service) {
+  if (!service.technician_id) return null;
   const { loadTechShifts, shiftBounds } = require('./technician-eligibility');
   const shiftOf = await loadTechShifts(db, { technicianIds: [service.technician_id] });
   const { rowBlockMinutes } = require('./scheduling/window-rules');
-  return options.filter((opt) => {
+  return (date, window) => {
     const { startMin, endMin } = rowBlockMinutes({
-      window_start: opt.window.start, window_end: opt.window.end, estimated_duration_minutes: service.estimated_duration_minutes });
+      window_start: window.start, window_end: window.end, estimated_duration_minutes: service.estimated_duration_minutes });
     if (startMin == null) return true;
-    const held = shiftBounds(shiftOf(service.technician_id, opt.date), startMin, endMin);
+    const held = shiftBounds(shiftOf(service.technician_id, date), startMin, endMin);
     return held.openMin <= startMin && held.closeMin >= endMin;
-  });
+  };
 }
 
 // Advisory overlap probe for the Quick Move sheets (owner ask 2026-08-12:
@@ -1618,9 +1632,12 @@ async function checkSlots({ targets, caller = null } = {}) {
  * route-scored day options with rain badges, the remaining-route count
  * for the scope toggle, and today's outlook for the header. The sheet fetches
  * this before the dispatcher picks a reason, so `reasonCode` is optional; none
- * means the full route list (only a rain move is filtered).
+ * means the full route list (only a rain move is filtered). `initiatedBy` is the
+ * actor the sheet's commit will record (as in commit(): 'tech', or 'admin' from
+ * the dispatch board). The office's commit does not obey the technician's shift
+ * hours, so only a sheet that commits as someone else is held to them.
  */
-async function getOptions(serviceId, { caller = null, reasonCode } = {}) {
+async function getOptions(serviceId, { caller = null, reasonCode, initiatedBy = 'tech' } = {}) {
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
 
@@ -1629,7 +1646,7 @@ async function getOptions(serviceId, { caller = null, reasonCode } = {}) {
   // not be offered (findRescheduleOptions covers tomorrow onward; same-day
   // candidates are built here). Fail-open helper.
   const { isBlackoutDate } = require('./scheduling/blackout-dates');
-  const sameDay = (await isBlackoutDate(todayStr)) ? [] : await sameDayChoices(service);
+  const sameDay = (await isBlackoutDate(todayStr)) ? [] : await sameDayChoices(service, { shiftChecked: initiatedBy !== 'admin' });
 
   // probeSpanMinutes: 60 — the sheet OFFERS what commit() actually BOOKS
   // (the on-the-hour one-hour block), not the visit's stored span: a 2h
@@ -1642,6 +1659,9 @@ async function getOptions(serviceId, { caller = null, reasonCode } = {}) {
     // only for an admin caller; the tech route (isAdmin: false) and a call
     // with no caller stay on the estimate.
     caller,
+    // GATE_TECH_SHIFT_HOURS: the options are held to the kept technician's
+    // shift unless the commit is the office's.
+    initiatedBy,
   });
 
   // Rain badges — best effort, never blocking. Customer coords first,

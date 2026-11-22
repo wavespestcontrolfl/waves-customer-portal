@@ -180,7 +180,7 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
     // The route-checked list places the visit with its stored length, inside the shift. The day list it
     // replaces (arrival-window routing off, or a day the check could not judge) offers the visit type's
     // fixed morning hour and reads no shift of its own.
-    test('route check off: a fixed morning hour before the shift is not offered to a rain-out; the admin picker still lists it', async () => {
+    test('route check off: a fixed morning hour before the shift is not offered to a technician\'s rain-out; the office still lists it', async () => {
       const routeCheck = jest.spyOn(require('../services/scheduling/route-ranked-days'), 'routeRankedDaysLive').mockReturnValue(false);
       try {
         await setShift('10:00', '14:00');
@@ -190,6 +190,9 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
         // A technician's own move to that hour is refused, so the rain-out sheet is not offered it.
         await expect(move(id, forOffice.date, oneHour(forOffice), 'tech')).rejects.toMatchObject(refused);
         expect(await rainOptions(id)).toEqual([]);
+        // The dispatch board's rain-out sheet commits as the office, which may place the visit there.
+        const forBoard = await SmartRebooker.findRescheduleOptions(id, 'weather_rain', { probeSpanMinutes: 60, initiatedBy: 'admin' });
+        expect(forBoard.map((option) => option.date)).toContain(forOffice.date);
       } finally {
         routeCheck.mockRestore();
       }
