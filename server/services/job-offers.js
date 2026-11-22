@@ -1720,13 +1720,14 @@ const FIRST_DAYS_ITEMS = [
 // The hire's login (owner 2026-11-22 "press"): a person turns it on with the Team tab's Hired button, on a row with a
 // linked Waves Google address, and no job does it. This item is the reminder: first in the list, due before the first
 // day, marked by hand like the others (`note`: what to do, on the card; the alert's why holds 110 characters, so the
-// bell's words are short). It is in the checklist while staff Google sign-in is live; with it off no press makes that
-// login, and the checklist is the four items above. A stored mark is kept either way.
+// bell's words are short). The words fit a row with no Hired button too (a hire who is already active). It is in the
+// checklist while staff Google sign-in is live; with it off no press makes that login, and the checklist is the four
+// items above. A stored mark is kept either way.
 const LOGIN_ITEM = {
   key: 'google_login',
   label: 'Waves Google login',
-  inBell: 'Waves Google login (link the address, press Hired)',
-  note: 'On the Team tab, link the Waves Google address, then press Hired.',
+  inBell: 'the Waves Google login on the Team tab',
+  note: 'On the Team tab, link the Waves Google address, and press Hired if the row shows it.',
 };
 const ALL_FIRST_DAYS_ITEMS = [LOGIN_ITEM, ...FIRST_DAYS_ITEMS];
 // The items of the checklist today.

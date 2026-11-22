@@ -2333,7 +2333,7 @@ jest.setTimeout(120000);
             const keys = async () => (await checklistOf(made.app)).items.map((item) => item.key);
             expect(await keys()).toEqual(['google_login', 'driving_record', 'license', 'workers_comp', 'i9']);
             expect((await checklistOf(made.app)).items[0]).toEqual({
-              key: 'google_login', label: 'Waves Google login', note: 'On the Team tab, link the Waves Google address, then press Hired.',
+              key: 'google_login', label: 'Waves Google login', note: 'On the Team tab, link the Waves Google address, and press Hired if the row shows it.',
               due: `Due before the first day, ${JobOffers.fmtDay(made.firstDay, { year: true })}`, dueOn: made.firstDay, doneAt: null, doneByName: null,
             });
             const when = new Date('2026-12-01T15:00:00.000Z');
@@ -2366,10 +2366,10 @@ jest.setTimeout(120000);
               .update({ checklist: root.raw('checklist || ?::jsonb', [JSON.stringify({ driving_record: stamp, license: stamp, workers_comp: stamp, i9: stamp })]) });
             expect(await ring(morning(1))).toEqual({ ...NONE, rung: 2 });
             const [first] = await bellsOf(fresh.app.id);
-            expect(first).toMatchObject({ done_at: null, body: `5 of 5 items are open; next: Waves Google login (link the address, press Hired), due before ${before}.` });
+            expect(first).toMatchObject({ done_at: null, body: `5 of 5 items are open; next: the Waves Google login on the Team tab, due before ${before}.` });
             expect(first.metadata.itemKeys).toEqual(['driving_record', 'google_login', 'license', 'workers_comp']);
             const [row] = await bellsOf(made.app.id);
-            expect(row).toMatchObject({ done_at: null, body: `1 of 5 items is open; next: Waves Google login (link the address, press Hired), due before ${before}.` });
+            expect(row).toMatchObject({ done_at: null, body: `1 of 5 items is open; next: the Waves Google login on the Team tab, due before ${before}.` });
             expect(row.metadata.itemKeys).toEqual(['google_login']);
 
             // The owner marks it done: nothing is left, and the row closes with the mark.
@@ -2380,7 +2380,7 @@ jest.setTimeout(120000);
             // The first day comes with the login still open: the row rings again, and its longest words fit the alert.
             expect(await ring(at(fresh.firstDay, '07:00'))).toEqual({ ...NONE, rung: 1 });
             expect(await openBellsOf(fresh.app.id)).toMatchObject([{
-              id: first.id, body: `5 of 5 items are open; next: Waves Google login (link the address, press Hired), was due before ${before}.` }]);
+              id: first.id, body: `5 of 5 items are open; next: the Waves Google login on the Team tab, was due before ${before}.` }]);
           });
         });
       });
