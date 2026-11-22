@@ -58,7 +58,7 @@ const { isAssignable, isOffDay, absentTechDays } = require('../technician-eligib
 const { stateOf } = require('../technician-capabilities');
 const { dateOnlyString } = require('../../utils/datetime-et');
 const { commitPromiseOf } = require('../../utils/trx-commit-promise');
-const { requestedFamiliesIn } = require('../../utils/lead-service-interest');
+const { requestedFamiliesIn, unnamedRequestParts } = require('../../utils/lead-service-interest');
 const territory = require('../territory');
 
 const SOURCES = Object.freeze(['book', 'phone_live', 'after_call', 'estimate_accept', 'office_auto', 'night_run']);
@@ -159,11 +159,17 @@ const ASSESSMENT_TECH_LINES = Object.freeze({
  * The line a lead's service-interest text sends a Waves Assessment to; no service family recognized reads lawn (the
  * owner). The text is free text too (web forms, call notes), so it is read as a REQUEST (requestedFamiliesIn): "ants
  * in the lawn" names pest, "pest control, no lawn care" names pest, "pest control and lawn care" names both.
+ * A quote intake stores a catalog label the request reader may have no word for ("Roof-Entry Cover / Bird Box
+ * Service", "Core Aeration"). Each part of the cleaned request that names no family is read as a service NAME
+ * (classifyServiceCategory): lawn or exclusion there is the owner's too. A declined or compared-away service was
+ * cleaned out before, and a part with a family ("ants in the lawn") is never read by name.
  */
 function assessmentLineForInterest(text) {
   const keys = requestedFamiliesIn(text).map((fam) => fam.key);
   const owner = keys.find((key) => ASSESSMENT_OWNER_LINES[key]);
   if (owner) return ASSESSMENT_OWNER_LINES[owner];
+  const named = unnamedRequestParts(text).map((part) => classifyServiceCategory(part)).find((line) => line === 'lawn' || line === 'exclusion');
+  if (named) return named;
   const tech = keys.find((key) => ASSESSMENT_TECH_LINES[key]);
   return tech ? ASSESSMENT_TECH_LINES[tech] : 'lawn';
 }

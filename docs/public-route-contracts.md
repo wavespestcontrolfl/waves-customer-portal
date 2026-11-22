@@ -1581,6 +1581,11 @@ is (the sentence on `/confirm` above):
 - *The phone agent's booking request.* It reads the line at its slot re-check
   for the call's own lead, and again when the call's lead id arrived in
   between; it does not read the lead inside the save.
+- *A booking with no lead in hand (an estimate with no one linked lead).* The
+  line comes from the customer's newest lead with a service interest, and the
+  re-check holds that row. The lead writers take no per-customer lock, so a
+  lead created, or a blank newer lead filled in, after that read is not seen,
+  as one written just after the save is not.
 
 **Territory routing (`GATE_TERRITORY_ROUTING=true`, owner 2026-10-30; ships dark:
 unset, and every value other than exactly `true`, leaves these routes as described

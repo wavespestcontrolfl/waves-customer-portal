@@ -531,6 +531,16 @@ describe('assessmentLineFor (owner 2026-11-21, choice 4 = A)', () => {
     ['chinch bugs', 'lawn'],
     ['need an exterminator', 'general'],
     ['Mosquito / No-See-Um Control', 'mosquito'],
+    // A stored catalog label the request reader has no word for is read as a service name: the owner's lines win.
+    ['Roof-Entry Cover / Bird Box Service', 'exclusion'],
+    ['Pest Control Service + Roof-Entry Cover / Bird Box Service', 'exclusion'],
+    ['Attic Sanitation + Mosquito Control Service', 'exclusion'],
+    ['Pest Control + Dethatching', 'lawn'],
+    ['Core Aeration', 'lawn'],
+    // A declined service is cleaned out before the name read, and a word neither reader knows names nothing.
+    ['pest control, no rodent exclusion', 'general'],
+    ['pest control, no attic sanitation', 'general'],
+    ['Pest Control Service + Top Dressing', 'general'],
   ])('interest %j goes to the %s line', (text, line) => {
     expect(lineOf(text)).toBe(line);
   });

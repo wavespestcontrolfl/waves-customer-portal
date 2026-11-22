@@ -242,6 +242,18 @@ function requestedFamiliesIn(text) {
   return requested ? familiesIn(requestScanText(requested)) : [];
 }
 
+// The parts of a request ("a + b", "a, b", "a and b"), after the same clean-up, that name NO family this composer
+// knows: a stored catalog label with no family word ("Roof-Entry Cover / Bird Box Service", "Core Aeration"). A
+// caller that routes by the request reads these as service NAMES (line-technician assessmentLineForInterest).
+const REQUEST_PART_SPLIT_RE = /\s*(?:\+|,|;|&|\band\b)\s*/i;
+function unnamedRequestParts(text) {
+  const requested = cleanText(text);
+  if (!requested) return [];
+  return requestScanText(requested).split(REQUEST_PART_SPLIT_RE)
+    .map((part) => part.trim())
+    .filter((part) => part && !familiesIn(part).length);
+}
+
 // V2 service categories → words this composer can scan. Deliberately NOT
 // mapServiceCategoryToLegacy: that legacy-routing map collapses
 // palm_injection into "Tree & Shrub Care" and hard-labels termite as
@@ -425,6 +437,7 @@ function v2InexpressibleFamilyWords(callerText) {
 module.exports = {
   familiesIn,
   requestedFamiliesIn,
+  unnamedRequestParts,
   composeServiceInterest,
   composeWordsForV2Category,
   v2PrimaryLabelForCategory,

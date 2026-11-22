@@ -16,6 +16,7 @@ const {
   primaryServiceInterest,
   v2InexpressibleFamilyWords,
   requestedFamiliesIn,
+  unnamedRequestParts,
 } = require('../utils/lead-service-interest');
 
 describe('composeServiceInterest', () => {
@@ -709,6 +710,18 @@ describe('composeServiceInterest', () => {
     expect(keys('Mosquito / No-See-Um Control')).toEqual(['mosquito']);
     expect(keys('')).toEqual([]);
     expect(keys(null)).toEqual([]);
+  });
+
+  // The parts of a request that name no family, after the same clean-up: a stored catalog label with no family word.
+  test('unnamedRequestParts: the parts of a request that name no family', () => {
+    expect(unnamedRequestParts('Pest Control Service + Roof-Entry Cover / Bird Box Service')).toEqual(['Roof-Entry Cover / Bird Box Service']);
+    expect(unnamedRequestParts('Core Aeration')).toEqual(['Core Aeration']);
+    expect(unnamedRequestParts('Lawn Care Service + Pest Control Service')).toEqual([]);
+    // A declined service and a pest's location are cleaned out first, so they are never a part.
+    expect(unnamedRequestParts('pest control, no attic sanitation')).toEqual([]);
+    expect(unnamedRequestParts('ants in the lawn')).toEqual([]);
+    expect(unnamedRequestParts('')).toEqual([]);
+    expect(unnamedRequestParts(null)).toEqual([]);
   });
 
   test('V2-inexpressible families come from caller text only (codex r14)', () => {
