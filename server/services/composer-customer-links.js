@@ -341,15 +341,18 @@ async function buildReferralLink(customerId) {
     return { url: null, line: '', reason: 'Could not build a referral link for this customer' };
   }
   // GATE_REFERRAL_STEP2: the friend's credit from the live row read above (0 = today's line: gate off, paused, or no
-  // amount). The line states it only for a code with an owner the Referrals queue can name (referral-inbound
-  // customerForCode, the same rule as the friend page in routes/referral-links.js): a household promoter can belong
-  // to an archived sibling profile, and the office could then confirm no referrer for the friend. A failed lookup
-  // is a no. Gate off: no lookup.
+  // amount). The line states it only when the link in the line leads to a member the office can confirm:
+  //  - the code is read from the link itself, as the send check reads a referral link (an owned portal host and
+  //    /r/<code>). getPromoterReferralLink can keep a stored link that is not an /r/ link, which names nobody;
+  //  - that code has an owner the Referrals queue can name (referral-inbound customerForCode, the same rule as
+  //    the friend page in routes/referral-links.js). A household promoter can belong to an archived sibling profile.
+  // A failed lookup is a no. Gate off: no lookup.
   let friendCents = step2FriendCreditCentsOf(liveSettings);
   if (friendCents > 0) {
     try {
+      const code = canonicalPortalToken(promoter.referral_link, ownedPortalHosts(), REFERRAL_LINK_PATH_RE, ANY_SCHEME);
       const { customerForCode } = require('./referral-inbound');
-      if (!promoter.referral_code || !(await customerForCode(promoter.referral_code))) friendCents = 0;
+      if (!code || !(await customerForCode(code))) friendCents = 0;
     } catch (err) {
       logger.warn(`[composer-links] referral code owner lookup failed (customerId=${customerId}, code=${err?.code || 'none'})`);
       friendCents = 0;
@@ -2154,6 +2157,8 @@ async function visitCardRequestLinked(runs, hosts, conn) {
 // The moving page (routes/moving-public.js, 48 lowercase hex). A pasted
 // upper-case token is looked up lower-cased, so it is judged, never skipped.
 const MOVING_PATH_RE = /^\/moving\/([a-f0-9]{48})$/i;
+// A member's referral link: /r/<code> (routes/referral-links.js). buildReferralLink reads the code with it too.
+const REFERRAL_LINK_PATH_RE = /^\/r\/([A-Za-z0-9_-]+)$/i;
 const ownedBearerShapes = () => [
   ['reschedule', /\/reschedule\//i, RESCHEDULE_PATH_RE,
     async (conn, t) => (await conn('scheduled_services').where({ reschedule_token: t }).first('customer_id'))?.customer_id],
@@ -2165,7 +2170,7 @@ const ownedBearerShapes = () => [
     async (conn, t) => (await conn('invoices').where({ token: t }).first('customer_id'))?.customer_id],
   ['estimate', /\/estimate\//i, /^\/estimate\/([A-Za-z0-9_-]{8,})$/i,
     async (conn, t) => (await conn('estimates').where({ token: t }).first('customer_id'))?.customer_id],
-  ['referral', /\/r\//i, /^\/r\/([A-Za-z0-9_-]+)$/i, referralLinkOwner],
+  ['referral', /\/r\//i, REFERRAL_LINK_PATH_RE, referralLinkOwner],
   ['moving', /\/moving\//i, MOVING_PATH_RE,
     // A closed move's link is a 404: unresolved, so the caller fails closed.
     async (conn, t) => (await conn('customer_moves').where({ token: String(t).toLowerCase() }).whereNot({ status: 'closed' }).first('customer_id'))?.customer_id],

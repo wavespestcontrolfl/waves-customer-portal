@@ -509,10 +509,11 @@ describe('buildReferralLink', () => {
 
   test('GATE_REFERRAL_STEP2 on: the insert names the friend\'s credit from the live amount, on one line, with no STOP line', async () => {
     const link = 'https://portal.wavespestcontrol.com/r/WAVES-ABC12345';
-    resolvePromoter.mockResolvedValue({ promoter: { id: 'p1', referral_code: 'WAVES-ABC12345', referral_link: link }, alreadyEnrolled: true });
+    resolvePromoter.mockResolvedValue({ promoter: { id: 'p1', referral_link: link }, alreadyEnrolled: true });
     step2FriendCreditCentsOf.mockReturnValueOnce(5000);
     customerForCode.mockClear();
     const r = await buildReferralLink('c1');
+    // The owner is looked up by the code the link carries, not by a column of the promoter row.
     expect(customerForCode).toHaveBeenCalledWith('WAVES-ABC12345');
     expect(r.url).toBe(link);
     expect(r.line).toBe(`Know someone who needs pest or lawn care? They get a $50 credit after their first plan service with your link: ${link}\n\n`);
@@ -522,20 +523,36 @@ describe('buildReferralLink', () => {
     expect(r.line.trimEnd().split('\n')).toHaveLength(1);
   });
 
-  // A household promoter can belong to an archived sibling profile (resolvePromoter's household fallback reads
-  // archived profiles too). The Referrals queue names no referrer for such a code, so nothing would pay the credit.
+  // The credit is stated only when the link in the line leads to a member the office can confirm. A household
+  // promoter can belong to an archived sibling profile (resolvePromoter's household fallback reads archived profiles
+  // too), and getPromoterReferralLink can keep a stored link that is not an /r/ link.
+  const MEMBER_LINK = 'https://portal.wavespestcontrol.com/r/WAVES-ABC12345';
   test.each([
-    ['the code has no owner the Referrals queue can name', 'WAVES-ABC12345', () => customerForCode.mockResolvedValueOnce(null)],
-    ['the owner lookup fails', 'WAVES-ABC12345', () => customerForCode.mockRejectedValueOnce(new Error('db down'))],
-    ['the promoter row has no code', null, () => {}],
-  ])('GATE_REFERRAL_STEP2 on, %s: the link with today\'s line, which promises nothing', async (_name, code, arrange) => {
-    const link = 'https://portal.wavespestcontrol.com/r/WAVES-ABC12345';
-    resolvePromoter.mockResolvedValue({ promoter: { id: 'p1', referral_code: code, referral_link: link }, alreadyEnrolled: true, household: true });
+    ['the code has no owner the Referrals queue can name', MEMBER_LINK, () => customerForCode.mockResolvedValueOnce(null), 1],
+    ['the owner lookup fails', MEMBER_LINK, () => customerForCode.mockRejectedValueOnce(new Error('db down')), 1],
+    ['the stored link is a page with no code', 'https://wavespestcontrol.com/', () => {}, 0],
+    ['the stored link has the code only in its query', 'https://wavespestcontrol.com/?ref=WAVES-ABC12345', () => {}, 0],
+    ['the stored link is an /r/ link on a host that is not the portal', 'https://example.com/r/WAVES-ABC12345', () => {}, 0],
+  ])('GATE_REFERRAL_STEP2 on, %s: the link with today\'s line, which promises nothing', async (_name, link, arrange, lookups) => {
+    resolvePromoter.mockResolvedValue({ promoter: { id: 'p1', referral_code: 'WAVES-ABC12345', referral_link: link }, alreadyEnrolled: true, household: true });
     step2FriendCreditCentsOf.mockReturnValueOnce(5000);
+    customerForCode.mockClear();
     arrange();
     const r = await buildReferralLink('c2');
     expect(r.url).toBe(link);
     expect(r.line).toBe(`Know someone who needs pest control? Share Waves here: ${link}\n\n`);
+    expect(customerForCode).toHaveBeenCalledTimes(lookups);
+  });
+
+  test('GATE_REFERRAL_STEP2 on: a member link on the short-link host, or with a trailing slash, is read the same', async () => {
+    for (const link of ['https://wavespest.co/r/WAVES-ABC12345', 'https://portal.wavespestcontrol.com/r/WAVES-ABC12345/']) {
+      resolvePromoter.mockResolvedValue({ promoter: { id: 'p1', referral_link: link }, alreadyEnrolled: true });
+      step2FriendCreditCentsOf.mockReturnValueOnce(5000);
+      customerForCode.mockClear();
+      const r = await buildReferralLink('c1');
+      expect(customerForCode).toHaveBeenCalledWith('WAVES-ABC12345');
+      expect(r.line).toContain('They get a $50 credit');
+    }
   });
 
   test('a non-conflict enroll failure answers the plain reason', async () => {
