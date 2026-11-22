@@ -723,7 +723,7 @@ describe('referral_nudge at delivery (GATE_REFERRAL_STEP2)', () => {
   });
   afterEach(() => { gates.referralStep2 = savedGate; jest.restoreAllMocks(); });
 
-  function nudgeQueues({ sendUpdate = chain(), enrollmentUpdate = chain(), stepBodies = {}, enrollmentPatch = {} } = {}) {
+  function nudgeQueues({ sendUpdate = chain(), enrollmentUpdate = chain(), stepBodies = {}, enrollmentPatch = {}, sendInsert = chain({ returning: [{ id: 'send-n' }] }) } = {}) {
     const enrollment = {
       id: 'enrollment-n', template_key: 'referral_nudge', customer_id: 'cust-n', status: 'active',
       current_step: 0, email: 'member@example.com', first_name: 'Sam', last_name: 'Member',
@@ -735,10 +735,10 @@ describe('referral_nudge at delivery (GATE_REFERRAL_STEP2)', () => {
       automation_templates: [chain({ first: { key: 'referral_nudge', name: 'Referral Nudge', asm_group: 'service' } })],
       automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, subject: 'Share Waves, {{first_name}}',
         html_body: '<p>Share it.</p>', text_body: 'Share it.', from_email: 'automations@wavespestcontrol.com', enabled: true, ...stepBodies }] })],
-      automation_step_sends: [chain({ returning: [{ id: 'send-n' }] }), sendUpdate],
+      automation_step_sends: [sendInsert, sendUpdate],
       email_suppressions: [chain({ result: [] })],
     });
-    return { sendUpdate, enrollmentUpdate };
+    return { sendUpdate, enrollmentUpdate, sendInsert };
   }
 
   test('a member who reached the yearly limit is cancelled, not sent', async () => {
@@ -788,11 +788,13 @@ describe('referral_nudge at delivery (GATE_REFERRAL_STEP2)', () => {
 
     test('gate on: the seeded sentence becomes the approved words in both bodies, from ONE decision read that also decides delivery', async () => {
       const spy = decide(ON);
-      nudgeQueues({ stepBodies: { html_body: SEED('html_body'), text_body: SEED('text_body') } });
+      const { sendInsert } = nudgeQueues({ stepBodies: { html_body: SEED('html_body'), text_body: SEED('text_body') } });
       sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-words' });
       await expect(sendStep('enrollment-n')).resolves.toMatchObject({ sent: true });
       expect(spy).toHaveBeenCalledTimes(1);
       expect(spy).toHaveBeenCalledWith(db, 'cust-n');
+      // The read stays at the delivery check: after the send row is written, never before it.
+      expect(spy.mock.invocationCallOrder[0]).toBeGreaterThan(sendInsert.insert.mock.invocationCallOrder[0]);
       expect(sentMail().html).toContain('When a neighbor, friend or family member starts a recurring plan with your link, they get a <strong>$50 account credit</strong> after their first service. After we complete their first service, you get a <strong>$25 account credit</strong>.');
       expect(sentMail().text).toContain('Share your referral link from the Refer tab in your portal. When a neighbor, friend or family member starts a recurring plan with your link, they get a $50 account credit after their first service. After we complete their first service, you get a $25 account credit. Or reply with their name');
     });

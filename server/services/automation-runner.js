@@ -283,7 +283,7 @@ function estimateEndedStop(estimate) {
   return null;
 }
 
-async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient, billingSend, retryNotBound = false, handedOffStep = null, step = null, nudgeDecision }) {
+async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient, billingSend, retryNotBound = false, handedOffStep = null, step = null, nudge }) {
   if (testRecipient) return null;
   if (handedOffStep) return completeHandedOffRetry(enrollment, handedOffStep);
   if (retryNotBound) return blockStoppedRetry({ enrollment, sendId, recipient, verdict: 'not_bound' });
@@ -315,7 +315,7 @@ async function automationDeliveryBlock({ enrollment, template, recipient, sendId
     const stop = await estimateSentStop(enrollment, step);
     if (stop) return blockSendAndCancelEnrollment({ enrollment, sendId, ...stop });
   }
-  if (template.key === 'referral_nudge') return referralNudgeBlock({ enrollment, sendId, nudgeDecision });
+  if (template.key === 'referral_nudge') return referralNudgeBlock({ enrollment, sendId, nudge });
   return null;
 }
 
@@ -324,8 +324,8 @@ const REFERRAL_NUDGE_STOPS = Object.freeze({
   no_member: { reason: 'No customer on file for the referral nudge', cancelReason: 'referral_no_member' },
 });
 
-async function referralNudgeBlock({ enrollment, sendId, nudgeDecision }) {
-  const verdict = await referralNudgeVerdict(enrollment.customer_id, nudgeDecision);
+async function referralNudgeBlock({ enrollment, sendId, nudge }) {
+  const verdict = await referralNudgeVerdict(enrollment.customer_id, nudge);
   if (verdict === 'defer') {
     // Standing unknown (settings or ledger unreadable) or the program paused: try again later; the once-ever
     // enrollment is never cancelled on a doubt.
@@ -340,10 +340,12 @@ async function referralNudgeBlock({ enrollment, sendId, nudgeDecision }) {
 // yearly limit is cancelled; one whose standing cannot be read, or a paused program, is deferred. Gate off: never withheld.
 // An enrollment with no customer (the customer record was deleted; the enrollment keeps its email): under the gate there
 // is no member to credit and no standing to read, so the promise cannot be kept and the enrollment is cancelled.
-// `decision`: the one the send already read to choose its words (sendStepLocked); without it this reads its own.
-async function referralNudgeVerdict(customerId, decision) {
+// `nudge`: the send's holder. The decision read here, at the delivery check, is left in it, so the email that goes out
+// is worded from the same read that let it go.
+async function referralNudgeVerdict(customerId, nudge = {}) {
   if (!customerId) return require('../config/feature-gates').isEnabled('referralStep2') ? 'no_member' : 'send';
-  const offer = decision || await require('./referral-engine').referralOfferDecision(db, customerId);
+  const offer = await require('./referral-engine').referralOfferDecision(db, customerId);
+  nudge.decision = offer;
   if (offer.skip) return 'defer';
   return offer.atLimit ? 'cap' : 'send';
 }
@@ -352,18 +354,18 @@ async function referralNudgeVerdict(customerId, decision) {
 // sentence; with the gate on that sentence is swapped for the approved Step 2 words at render time (referral-step2.js),
 // with the live amounts. A step an admin rewrote no longer holds it and renders as stored. Gate off: the decision answers
 // at once, reads nothing, and nothing is swapped.
-// A real send reads the member's decision ONCE: the same decision picks the words and, in automationDeliveryBlock, decides
-// whether the email goes (limit: cancelled; unreadable or paused: deferred). A real send with no customer on the
-// enrollment reads nothing and is not swapped: under the gate the delivery check cancels it. A test send, the test
-// sequence and the preview page have no member: they show what a member under the limit gets (a null member id).
+// A real send reads the member's decision ONCE, where it always did: at the delivery check, after the send row and the
+// suppression checks (referralNudgeVerdict). That decision decides whether the email goes (limit: cancelled; unreadable
+// or paused: deferred) and, once it may go, picks its words: the step is rendered after the check. A real send with no
+// customer on the enrollment reads nothing and is not swapped: under the gate the delivery check cancels it. A test
+// send, the test sequence and the preview page have no member and no delivery check: they show what a member under
+// the limit gets (a null member id).
 function memberlessNudgeDecision(templateKey) {
   return templateKey === 'referral_nudge' ? require('./referral-engine').referralOfferDecision(db, null) : null;
 }
 
-async function referralNudgeDecision({ template, enrollment, testRecipient }) {
-  if (testRecipient) return memberlessNudgeDecision(template.key);
-  if (template.key !== 'referral_nudge' || !enrollment.customer_id) return null;
-  return require('./referral-engine').referralOfferDecision(db, enrollment.customer_id);
+function testSendNudgeDecision(templateKey, testRecipient) {
+  return testRecipient ? memberlessNudgeDecision(templateKey) : null;
 }
 
 // Gate off, or no decision: the body as stored. Gate on: the seeded sentence is always swapped. A decision that can
@@ -1228,16 +1230,6 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
   if (routed.blocked) return routed.blocked;
   const { recipient } = routed;
   const consultationBlock = await resolveConsultationBlock(step, enrollment, recipient);
-  const nudgeDecision = await referralNudgeDecision({ template, enrollment, testRecipient });
-  const { html, text } = renderAutomationStepContent({
-    template,
-    htmlBody: nudgeBody(step.html_body, nudgeDecision, true),
-    textBody: nudgeBody(step.text_body, nudgeDecision, false),
-    customer: personal,
-    asmGroupId,
-    consultationHtml: consultationBlock.html,
-    consultationText: consultationBlock.text,
-  });
 
   const billingSend = template.key === 'payment_failed' && !!enrollment.customer_id && !testRecipient;
   // Collections DISPUTE hold: read BEFORE the step-send row is inserted, so a held step leaves no
@@ -1252,11 +1244,23 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
   }
 
   const sendRow = await insertStepSend({ enrollment, step, recipient, testRecipient });
+  const nudge = { decision: await testSendNudgeDecision(template.key, testRecipient) };
 
   const deliveryBlock = await automationDeliveryBlock({ enrollment, template, recipient,
     sendId: sendRow.id, testRecipient, billingSend, retryNotBound: sendRow.retryNotBound,
-    handedOffStep: sendRow.retryHandedOff ? step : null, step, nudgeDecision });
+    handedOffStep: sendRow.retryHandedOff ? step : null, step, nudge });
   if (deliveryBlock) return deliveryBlock;
+
+  // Rendered once delivery is allowed, so a referral_nudge is worded from the decision the delivery check just read.
+  const { html, text } = renderAutomationStepContent({
+    template,
+    htmlBody: nudgeBody(step.html_body, nudge.decision, true),
+    textBody: nudgeBody(step.text_body, nudge.decision, false),
+    customer: personal,
+    asmGroupId,
+    consultationHtml: consultationBlock.html,
+    consultationText: consultationBlock.text,
+  });
 
   const handoff = { started: false, accepted: null };
   const dispatch = (providerBoundaryCheck) => sendgrid.sendOne({
