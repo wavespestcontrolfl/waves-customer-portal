@@ -3,13 +3,15 @@
  * families of the customer's plan, for the two portal places that NAME them
  * (Billing's Plan Charges, the Learn sentence; owner 2026-11-22, "fix box").
  *
- * The list is the tier alignment's own row rule
- * (upcomingRecurringPlanKeysFromRows in self-booking-plan-sync.js, reduced
- * by uniqueServiceFamilies), applied to the visits the customer's schedule
- * shows. This file runs the REAL alignment module against fake rows and
- * pins: which rows count, that the list comes from the schedule's own rows
- * with no second read, and that only the plan-coverage projection carries
- * it (never the house-scoped list, never a contact session).
+ * Two existing server rules build it, on the rows of the schedule's own
+ * list query: the tier alignment's row rule decides which visits count
+ * (serviceRowCountsTowardWaveGuard), and the verdict the answer already
+ * gives each visit decides its families (waveguardQualifying /
+ * serviceFamily). This file runs the REAL modules against fake rows and
+ * pins: which rows count, that the list and a visit's own verdict agree,
+ * that a visit in progress still counts without entering the visit list,
+ * that there is no second read, and that only the plan-coverage projection
+ * carries the list (never the house-scoped list, never a contact session).
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -39,10 +41,11 @@ const db = require('../models/db');
 const scheduleRouter = require('../routes/schedule');
 
 function chain(rows) {
-  const c = {};
+  const c = { calls: [] };
   for (const m of ['where', 'whereIn', 'whereNull', 'whereNot', 'whereNotIn', 'orWhere', 'orWhereNot', 'orWhereNotIn', 'orWhereNull', 'orWhereNotNull', 'whereRaw', 'leftJoin', 'select', 'orderBy', 'limit']) {
     c[m] = jest.fn((...args) => {
       if (typeof args[0] === 'function') { const inner = chain([]); args[0].call(inner, inner); }
+      else c.calls.push([m, ...args]);
       return c;
     });
   }
@@ -73,6 +76,11 @@ const planRow = (extra = {}) => ({
 });
 const PEST = { service_type: 'Quarterly Pest Control', catalog_service_key: 'pest_general_quarterly', catalog_service_name: 'Quarterly Pest Control' };
 const visitReads = () => db.mock.calls.filter((c) => String(c[0]).startsWith('scheduled_services')).length;
+// The statuses the visit list query asked for.
+const statusesAsked = () => {
+  const idx = db.mock.calls.findIndex((c) => c[0] === 'scheduled_services');
+  return db.mock.results[idx].value.calls.find((c) => c[0] === 'whereIn' && c[1] === 'scheduled_services.status')[2];
+};
 
 describe('GET /api/schedule?allProperties=1: planFamilies', () => {
   // The rows the schedule's list query returns: the visits the customer's
@@ -115,12 +123,12 @@ describe('GET /api/schedule?allProperties=1: planFamilies', () => {
   });
 
   // Each row below is a pest visit beside the member's lawn plan. None of
-  // them is plan coverage for the tier, so none names pest control.
+  // them is plan coverage for the tier, so none names pest control. (The
+  // date window is the list query's own SQL, as for the visit list.)
   test.each([
     ['a visit booked through a one-time source', { source: 'quote-wizard-onetime' }],
     ['a re-service visit', { is_callback: true }],
     ['a visit that is not recurring', { is_recurring: false }],
-    ['a visit in the past', { scheduled_date: '2020-01-10' }],
     ['a rescheduled row', { status: 'rescheduled' }],
     ['a commercial visit', { service_type: 'Commercial Pest Control', catalog_service_key: 'commercial_pest_monthly', catalog_service_name: 'Commercial Pest Control' }],
   ])('%s does not name a service', async (_label, extra) => {
@@ -129,12 +137,41 @@ describe('GET /api/schedule?allProperties=1: planFamilies', () => {
     expect(body.planFamilies).toEqual(['lawn_care']);
   });
 
-  // The catalog identity decides, as in the tier alignment: a lawn visit
-  // under a stale "Pest Control" label is one lawn service.
+  // The catalog identity decides: a lawn visit under a stale "Pest Control"
+  // label is one lawn service.
   test('the linked catalog service names the family, not a stale label', async () => {
     scheduleRows = [planRow({ service_type: 'Pest Control' })];
     const { body } = await getSchedule('?days=365&allProperties=1');
     expect(body.planFamilies).toEqual(['lawn_care']);
+    expect(body.upcoming[0].serviceFamily).toBe('lawn_care');
+  });
+
+  test('a combined visit counts for each of its services', async () => {
+    scheduleRows = [planRow({ service_type: 'Lawn + Tree & Shrub Service', catalog_service_key: null, catalog_service_name: null })];
+    const { body } = await getSchedule('?days=365&allProperties=1');
+    expect([...body.planFamilies].sort()).toEqual(['lawn_care', 'tree_shrub']);
+  });
+
+  // The list never names a service for a visit whose own verdict in the
+  // same answer says "not plan coverage". A misting system service is not
+  // the Mosquito Control program.
+  test('a mosquito misting service does not name Mosquito Control, as its own visit verdict says', async () => {
+    scheduleRows = [planRow(), planRow({
+      id: 'svc-9', service_type: 'Mosquito Misting System Service', catalog_service_key: 'mosquito_misting_service', catalog_service_name: 'Mosquito Misting System Service',
+    })];
+    const { body } = await getSchedule('?days=365&allProperties=1');
+    expect(body.planFamilies).toEqual(['lawn_care']);
+    expect(body.upcoming.find((v) => v.id === 'svc-9').waveguardQualifying).toBe(false);
+  });
+
+  // A visit the technician has started is not on the visit list, but the
+  // plan still includes its service until the visit completes.
+  test.each(['en_route', 'on_site'])('a visit in progress (%s) still counts, and stays off the visit list', async (status) => {
+    scheduleRows = [planRow(), planRow({ id: 'svc-9', ...PEST, status })];
+    const { body } = await getSchedule('?days=365&allProperties=1');
+    expect([...body.planFamilies].sort()).toEqual(['lawn_care', 'pest_control']);
+    expect(body.upcoming.map((v) => v.id)).toEqual(['svc-1']);
+    expect(statusesAsked()).toEqual(['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site']);
   });
 
   test('no coming plan visit: an empty list', async () => {
@@ -143,11 +180,12 @@ describe('GET /api/schedule?allProperties=1: planFamilies', () => {
     expect(body.planFamilies).toEqual([]);
   });
 
-  test('the house-scoped list does not carry it', async () => {
+  test('the house-scoped list does not carry it, and asks for the same statuses as before', async () => {
     scheduleRows = [];
     const { status, body } = await getSchedule('?days=365');
     expect(status).toBe(200);
     expect(body).not.toHaveProperty('planFamilies');
+    expect(statusesAsked()).toEqual(['pending', 'confirmed', 'rescheduled']);
   });
 
   test('a contact session never gets it: the allProperties flag reads as unset', async () => {
