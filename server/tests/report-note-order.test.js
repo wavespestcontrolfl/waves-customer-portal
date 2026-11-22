@@ -37,6 +37,10 @@ describe('the text may go out', () => {
     ['a count as a word', 'checked all rodent stations. feeding in 2 of 6. replaced bait', 'I checked all the rodent stations. Feeding was in two of six. I replaced the bait.'],
     ['a decimal stays a decimal', 'found 1.5 nests by the shed', 'I found 1.5 nests by the shed.'],
     ['a decimal with no zero before the point', 'found .5 nests by the shed', 'I found 0.5 nests by the shed.'],
+    ['a sign on a number stays', 'found <5 nests, 10% of the eaves', 'I found < 5 nests, 10% of the eaves.'],
+    ['a list with commas', 'treated kitchen, garage, and lanai', 'I treated the kitchen, garage and lanai.'],
+    ['a pronoun for the customer, named a sentence before', 'talked to customer. she said ants are back', 'I talked to you. You said ants are back.'],
+    ['a word that goes in one sentence stays in the next', 'treated outside with Borlux SC. Borlux SC applied inside', 'I treated outside. Borlux SC was applied inside.'],
     ['"I" after a joining word, where the note names no one', 'swept the eaves so treated the lanai', 'I swept the eaves so I treated the lanai.'],
     ['"I" in the part after the one that names a person', 'customer was not home, treated outside', 'You were not home, and I treated outside.'],
     ['a range stays a range, with any dash', 'set 2 - 3 traps in the attic', 'I set 2–3 traps in the attic.'],
@@ -73,6 +77,8 @@ describe('the text is refused', () => {
     ['a changed count', '3 rodent stations checked 2 had feeding', 'Three rodent stations were checked and four had feeding.', 'not_in_note', 'four'],
     ['a decimal read as a whole number', 'found 1.5 nests', 'I found 15 nests.', 'not_in_note', '15'],
     ['a decimal with no zero read as a whole number', 'applied .5 oz', 'I applied 5 oz.', 'not_in_note', '5'],
+    ['a bound read as an exact amount', 'applied ≤5 oz', 'I applied 5 oz.', 'not_in_note', '5'],
+    ['another person made the customer', 'neighbor said he treated shed', 'Neighbor said you treated shed.', 'not_in_note', 'you'],
     ['a fraction read as a range', 'applied 1/2 bag', 'I applied 1-2 bag.', 'not_in_note', '1mark45mark2'],
     ['an added reason', 'treated the garage', 'I treated the garage because of ants.', 'not_in_note', 'because'],
     ['one letter changed', 'mouse in the shed', 'A house was in the shed.', 'not_in_note', 'house'],
@@ -100,6 +106,8 @@ describe('the text is refused', () => {
     ['the person who did the work left out', 'customer treated the shed himself', 'Treated the shed.', 'left_out', 'customer'],
     ['a condition left out', 'will come back if activity continues', 'I will come back.', 'left_out', 'if'],
     ['a condition left out with the refused part that opens with it', 'treated kitchen, if customer paid', 'I treated the kitchen.', 'left_out', 'if'],
+    ['a condition of time left out with the refused part that opens with it', 'when gate is open, treat shed', 'Treat shed.', 'left_out', 'when'],
+    ['two parts run together', 'no, ants were found', 'No ants were found.', 'run_together', 'ants'],
     ['a count left out', 'set 4 traps in attic', 'I set traps in the attic.', 'left_out', '4'],
     ['a word that leads into a word the text keeps left out', 'treated by the gate', 'I treated the gate.', 'left_out', 'by'],
     ['half of a product name kept', 'treated Borlux SC around shed', 'I treated SC around the shed.', 'left_out', 'borlux'],
@@ -147,5 +155,6 @@ describe('the words the check reads', () => {
       ['i', 'would', 'say', 'she', 'has', 'been', 'here', 'did', 'not', 'see', '1point5', 'or', '1200'],
     );
     expect(noteWords('1/2, 1-2, 1 – 2')).toEqual(['1mark47mark2', '1mark45mark2', '1mark45mark2']);
+    expect(noteWords('≤5 oz, < 5 oz, 5% and .5')).toEqual(['mark8804mark5', 'oz', 'mark60mark5', 'oz', '5mark37mark', 'and', '0point5']);
   });
 });

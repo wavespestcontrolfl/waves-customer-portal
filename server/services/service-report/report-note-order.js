@@ -64,9 +64,10 @@ const LEAD_INS = new Set('in for at on by with of about within every per each'.s
 // without a comma the text puts in.
 const CLAUSE_OPENERS = new Set('and so but then because when while since'.split(' '));
 // A part that opens with a condition qualifies the rest of its sentence
-// ("if ants return, ...", "..., unless it rains"). A condition further in
-// belongs to its own part ("keep pets off until dry").
-const CONDITIONS = new Set(['if', 'unless', 'until', 'except']);
+// ("if ants return, ...", "when the gate is open, ...", "..., unless it
+// rains"). A condition further in belongs to its own part ("keep pets off
+// until dry").
+const CONDITIONS = new Set('if unless until except when whenever once while after before since because provided'.split(' '));
 const CONDITION_LEADS = new Set('but only or even not so'.split(' '));
 // The parts tried out of sight one set at a time (64 walks at most).
 const MAX_HIDDEN_PARTS = 6;
@@ -76,6 +77,11 @@ const NOTHING_GOES = () => false;
 const PERSONS = new Set(`customer cust you she he they we her his them their homeowner client tenant owner resident wife husband son
 daughter mom dad kid kids neighbor neighbors landlord manager guy lady man woman contractor housekeeper office tech technician
 company crew`.split(/\s+/));
+// A pronoun of the note is "you" in the text only when the last person the
+// note names before it is the customer: "neighbor said he treated shed" is
+// not "Neighbor said you treated shed".
+const CUSTOMER = new Set(['customer', 'cust', 'homeowner', 'client', 'tenant']);
+const PRONOUNS = new Set(['she', 'he', 'they', 'them', 'her', 'his', 'their']);
 // A word of the note and what the text may write for it: a technician's short
 // form and its full word, the customer as "you" with the verb form "you"
 // takes, and what phone dictation writes for a word of the trade. Every
@@ -94,9 +100,11 @@ const NUMBER_TWINS = new Map(NUMBER_WORDS.flatMap((word, n) => [[word, String(n)
 // Words as the check reads them: lower case, "didn't" as "did not", "she's
 // been" as "she has been", "I'd" as "I would" (never dropped: "I'd treat" is
 // not "I treated"), a possessive dropped, "1,200" as 1200, split on anything
-// that is not a letter or a digit. A mark between two digits stays in the
-// word: "1.5" is not 15, and "1/2" is not "1-2".
-const numberMark = (_, digit, mark) => `${digit}${mark === '.' ? 'point' : `mark${mark.codePointAt(0)}mark`}`;
+// that is not a letter or a digit. A mark on a number stays in the word:
+// "1.5" is not 15, "1/2" is not "1-2", "≤5" and "5%" are not 5.
+const markWord = (mark) => `mark${mark.codePointAt(0)}mark`;
+const numberMark = (_, digit, mark) => `${digit}${mark === '.' ? 'point' : markWord(mark)}`;
+const SIGN_BEFORE_NUMBER = /(^|\s)(?:([<>≤≥≈~±+=#$])\s*|(-))(?=\p{N})/gu;
 // ".5 oz" is 0.5 oz: without the zero the point reads as a sentence end and
 // the figure as 5.
 const leadingZero = (text) => String(text || '').replace(/(^|[^\p{L}\p{N}.])\.(?=\p{N})/gu, '$10.');
@@ -104,6 +112,8 @@ function noteWords(text) {
   return leadingZero(text).normalize('NFKC').toLowerCase().replace(/[‘’]/g, "'").replace(/[\u2010-\u2015\u2212]/g, '-')
     .replace(/(\p{N}),(?=\p{N}{3}(?!\p{N}))/gu, '$1').replace(/(\p{N})\s*([/-])\s*(?=\p{N})/gu, '$1$2')
     .replace(/(\p{N})([^\p{L}\p{N}\s])(?=\p{N})/gu, numberMark)
+    .replace(SIGN_BEFORE_NUMBER, (_, lead, sign, minus) => `${lead}${markWord(sign || minus)}`)
+    .replace(/(\p{N})([+%°])/gu, (_, digit, mark) => `${digit}${markWord(mark)}`)
     .replace(/\bcan't\b|\bcannot\b/g, 'can not').replace(/\bwon't\b/g, 'will not').replace(/n't\b/g, ' not')
     .replace(/'ll\b/g, ' will').replace(/'d\b/g, ' would')
     .replace(/\b(she|he|it|that|there|what|who|where|here)'s (been|got)\b/g, '$1 has $2')
@@ -149,9 +159,14 @@ function readNote(note) {
   return { words, parts };
 }
 // Each word of the text with its sentence (`id`), whether the sentence asks,
-// and whether the word opens the sentence.
-const readText = (text) => sentencesOf(text)
-  .flatMap(({ text: sentence, asks }, id) => noteWords(sentence).map((word, at) => ({ word, id, asks, opens: at === 0 })));
+// whether the word opens the sentence, and whether a comma comes before it.
+const readText = (text) => sentencesOf(text).flatMap(({ text: sentence, asks }, id) => {
+  let seen = 0;
+  return hideNumberMarks(sentence).split(PART_MARKS).flatMap((piece, pieceAt) => noteWords(showNumberMarks(piece)).map((word, at) => {
+    seen += 1;
+    return { word, id, asks, opens: seen === 1, afterMark: pieceAt > 0 && at === 0 };
+  }));
+});
 
 // What the text may leave out: `single[i]` for one word of the note, `leans`
 // for a word that goes only when the word it leans on goes, `groups` for
@@ -193,12 +208,16 @@ function leaveOutRules({ words, parts }, { wordGoes, pairGoes, partGoes, names }
 }
 
 // ── Same order ─────────────────────────────────────────────────────────
-// Where word `k` of the text sits in the note at or after `from`: the first
-// place that holds the same word, or -1. The first of the words that go
-// together is no place unless the text goes on with the second ("no issues,
-// no ants": "No ants." takes the second "no").
-const placeInNote = (out, k, note, from, follows) => note.findIndex((word, j) => j >= from && sameWord(out[k], word)
-  && !(follows.has(j) && !sameWord(out[k + 1] || '', note[follows.get(j)])));
+// Where word `k` of the text sits in the note at or after `from`, or -1: the
+// first place that holds the same word in a sentence of the note this
+// sentence of the text may take (`fits`), else the first place at all. The
+// first of the words that go together is no place unless the text goes on
+// with the second ("no issues, no ants": "No ants." takes the second "no").
+function placeInNote(out, k, note, from, follows, fits) {
+  const places = note.flatMap((word, j) => (j >= from && sameWord(out[k], word)
+    && !(follows.has(j) && !sameWord(out[k + 1] || '', note[follows.get(j)])) ? [j] : []));
+  return places.find(fits) ?? places[0] ?? -1;
+}
 
 // A word the text adds: a small word; "I" where a sentence starts (`opens`)
 // or after a joining word (walkNote then looks for a person before it);
@@ -211,6 +230,27 @@ function addedWordAllowed(out, k, opens) {
   return word === 'you' && ['said', 'told', 'me'].includes(out[k - 1]);
 }
 
+// Why word `k` of the text may not take the note's word at `place`, or null.
+// `last` is the place and the text word the walk found before this one.
+function placeReason(textWords, k, place, last, read, { noteSentenceOf, textSentenceOf }) {
+  const { word, id, asks, afterMark } = textWords[k];
+  const { word: noteWord, sentence, part } = read.words[place];
+  // A pronoun is "you" only when the last person named before it is the
+  // customer.
+  const named = read.words.slice(0, place).map((entry) => entry.word).filter((earlier) => PERSONS.has(earlier) && !PRONOUNS.has(earlier));
+  if (PRONOUNS.has(noteWord) && word !== noteWord && !CUSTOMER.has(named.pop())) return 'not_in_note';
+  // Two parts of one sentence of the note meet in the text with a comma or a
+  // joining word between them: "No, ants were found" is not "No ants were
+  // found".
+  const before = last && last.k === k - 1 ? read.words[last.place] : null;
+  const meets = Boolean(before) && before.sentence === sentence && before.part !== part;
+  if (meets && !afterMark && !CLAUSE_OPENERS.has(word) && word !== 'or') return 'run_together';
+  // One sentence of the text for one sentence of the note, both ways.
+  if ((noteSentenceOf.get(id) ?? sentence) !== sentence) return 'joined';
+  if ((textSentenceOf.get(sentence) ?? id) !== id) return 'split';
+  return read.words[place].asks === asks ? null : 'question';
+}
+
 // The text walked along the note: the text's sentence that uses each word
 // of the note (-1 = not used), or the rejection that stops the walk. The
 // walk does not see the words of the `hidden` parts.
@@ -218,7 +258,6 @@ function walkNote(textWords, read, rules, hidden) {
   const out = textWords.map((entry) => entry.word);
   const noteList = read.words.map((entry) => (hidden.has(entry.part) ? '' : entry.word));
   const usedIn = noteList.map(() => -1);
-  // One sentence of the text for one sentence of the note, both ways.
   const [noteSentenceOf, textSentenceOf, saysSomething] = [new Map(), new Map(), new Set()];
   const stop = (reason, k) => ({ rejection: { reason, words: [out[k]] } });
   // A person the note names before place `at`, in the same part.
@@ -226,8 +265,13 @@ function walkNote(textWords, read, rules, hidden) {
   let from = 0;
   // The "I" the text added last, until the walk finds the word it goes with.
   let addedI = -1;
+  // The place and the text word of the last word the walk found.
+  let last = null;
   for (let k = 0; k < out.length; k += 1) {
-    const place = placeInNote(out, k, noteList, from, rules.follows);
+    const { id } = textWords[k];
+    const fits = (j) => (textSentenceOf.get(read.words[j].sentence) ?? id) === id
+      && (noteSentenceOf.get(id) ?? read.words[j].sentence) === read.words[j].sentence;
+    const place = placeInNote(out, k, noteList, from, rules.follows, fits);
     // A small word that sits further on in the note, past words the text may
     // not leave out, is a word the text added here.
     const jumpsOver = place >= 0 && noteList.slice(from, place)
@@ -239,11 +283,10 @@ function walkNote(textWords, read, rules, hidden) {
     if (place < 0) return stop(noteList.some((word) => sameWord(out[k], word)) ? 'out_of_order' : 'not_in_note', k);
     if (addedI >= 0 && personBefore(place)) return stop('not_in_note', addedI);
     addedI = -1;
-    const { sentence, asks } = read.words[place];
-    const { id } = textWords[k];
-    if ((noteSentenceOf.get(id) ?? sentence) !== sentence) return stop('joined', k);
-    if ((textSentenceOf.get(sentence) ?? id) !== id) return stop('split', k);
-    if (asks !== textWords[k].asks) return stop('question', k);
+    const reason = placeReason(textWords, k, place, last, read, { noteSentenceOf, textSentenceOf });
+    if (reason) return stop(reason, k);
+    last = { place, k };
+    const { sentence } = read.words[place];
     noteSentenceOf.set(id, sentence);
     textSentenceOf.set(sentence, id);
     if (!SMALL.has(noteList[place])) saysSomething.add(id);
@@ -283,6 +326,8 @@ function leftOutRejection(usedIn, out, read, rules) {
  *   'out_of_order' the text uses a word of the note out of its place,
  *   'left_out'     the text leaves out a word it may not leave out,
  *   'joined'       one sentence of the text holds two sentences of the note,
+ *   'run_together' two parts of the note meet in the text with no comma and
+ *                  no joining word between them,
  *   'split'        two sentences of the text hold one sentence of the note,
  *   'question'     a question became a statement, or a statement a question.
  * `screen` is what the report's own screens say may go (see leaveOutRules).
