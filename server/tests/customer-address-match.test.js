@@ -179,6 +179,30 @@ describe('findCustomersAtAddress', () => {
     expect(await findCustomersAtAddress(db, '123 Palm Ave, Venice, FL 34285')).toEqual([]);
   });
 
+  it('strict membersOnly: both legs apply the shared SQL member rule before the cap', async () => {
+    const { notMembershipCustomerSql } = jest.requireActual('../services/waveguard-existing-services');
+    const db = fakeDb();
+    await findCustomersAtAddress(db, '123 Palm Ave, Venice, FL 34285', { strict: true, zip: '34285', membersOnly: true });
+    const raws = db.calls.filter((c) => Array.isArray(c) && c[0] === 'whereRaw').map((c) => [c[1], c[2]]);
+    expect(raws).toContainEqual(['customers', `NOT ${notMembershipCustomerSql('customers')}`]);
+    expect(raws).toContainEqual(['customer_properties as cp', `NOT ${notMembershipCustomerSql('c')}`]);
+    const plain = fakeDb();
+    await findCustomersAtAddress(plain, '123 Palm Ave, Venice, FL 34285', { strict: true, zip: '34285' });
+    expect(plain.calls.some((c) => Array.isArray(c) && String(c[2]).startsWith('NOT '))).toBe(false);
+  });
+
+  it('strict: a numberless row on a street with a direction is near by the street name, not the direction', async () => {
+    const db = fakeDb({ properties: [ROW('dir', 'N Palm Ave'), ROW('other-street', 'N Oak St')] });
+    const rows = await findCustomersAtAddress(db, '123 N Palm Ave, Venice, FL 34285', { strict: true, zip: '34285' });
+    expect(rows.map((r) => [r.id, r.exactMatch])).toEqual([['dir', false]]);
+  });
+
+  it('strict: a row whose house number is another number is neither exact nor near', async () => {
+    const db = fakeDb({ customers: [ROW('other-number', '456 Palm Ave'), ROW('same', '123 Palm Ave')] });
+    const rows = await findCustomersAtAddress(db, '123 Palm Ave, Venice, FL 34285', { strict: true, zip: '34285' });
+    expect(rows.map((r) => r.id)).toEqual(['same']);
+  });
+
   it('a failing property leg is skipped, not fatal', async () => {
     const db = fakeDb({ customers: [ROW('a', '123 Palm Ave')], propertyError: new Error('relation "customer_properties" does not exist') });
     const ids = (await findCustomersAtAddress(db, '123 Palm Ave, Venice, FL 34285')).map((r) => r.id);

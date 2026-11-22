@@ -40,7 +40,7 @@ const REAL = {
   memberAtAddress: () => async (address, zip) => {
     const { findCustomersAtAddress } = require('../customer-address-match');
     const { isMembershipCustomerRow } = require('../waveguard-existing-services');
-    const members = (await findCustomersAtAddress(require('../../models/db'), address, { strict: true, zip }))
+    const members = (await findCustomersAtAddress(require('../../models/db'), address, { strict: true, zip, membersOnly: true }))
       .filter(isMembershipCustomerRow);
     if (members.some((r) => r.exactMatch)) return 'exact';
     return members.length ? 'near' : null;

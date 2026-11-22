@@ -82,6 +82,7 @@ function defaultPlan(houseNumber) {
     legLimit: PER_LEG_LIMIT,
     lineFilter: (line1) => (q) => q.where(line1, 'ilike', `${houseNumber} %`),
     zipFilter: () => (q) => q,
+    mayMatch: () => true,
     complete: (rows) => rows,
     hasLine: (row) => !!row.address_line1,
     isNear: () => false,
@@ -92,17 +93,36 @@ function defaultPlan(houseNumber) {
 // test read every row, so no stored spelling (a tab, a unit first, the number in line 2, "123/2" for "123-2", no
 // number) is dropped before them. Only rows whose zip column holds the home's 5-digit zip, or no zip: the comparator
 // rejects any other zip, and those rows would only fill the cap. A leg that fills the cap throws.
-function strictPlan(address, houseNumber, zip) {
+// The first word of the home's street name after the house number that is not a direction ("123 N Palm Ave": palm).
+const DIRECTION_WORDS = new Set(['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw', 'north', 'south', 'east', 'west',
+  'northeast', 'northwest', 'southeast', 'southwest']);
+function streetWordOf(address) {
+  const words = String(address).split(',')[0].trim().split(/\s+/).slice(1)
+    .map((w) => w.toLowerCase().replace(/[^a-z0-9]/g, ''));
+  return words.find((w) => w.length >= 2 && !DIRECTION_WORDS.has(w)) || '';
+}
+
+// membersOnly: only customers who hold a plan (the shared SQL rule, before the cap), for a caller that asks only
+// "is a member here?".
+function strictPlan(address, houseNumber, zip, membersOnly) {
   const nearZip = /^\d{5}$/.test(String(zip || '')) ? String(zip) : null;
   if (!nearZip) throw uncheckable('strict needs the home\'s 5-digit zip');
   const leadingDigits = digitsOf(houseNumber);
-  // The first word of the home's street name (after the house number), for a row with no house number.
-  const streetWord = (String(address).split(',')[0].trim().split(/\s+/)[1] || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const streetWord = streetWordOf(address);
   const streetWordRe = new RegExp(`(^|[^a-z0-9])${streetWord}([^a-z0-9]|$)`, 'i');
+  const ownDigits = (row) => {
+    const own = houseNumberOf(candidateAddressString(row));
+    return own ? digitsOf(own) : null;
+  };
   return {
     strict: true,
     legLimit: STRICT_LEG_LIMIT,
-    lineFilter: (line1, line2) => (q) => q.whereRaw("btrim(concat_ws(' ', ??, ??)) <> ''", [line1, line2]),
+    lineFilter: (line1, line2, customersAlias) => (q) => {
+      q.whereRaw("btrim(concat_ws(' ', ??, ??)) <> ''", [line1, line2]);
+      if (membersOnly) q.whereRaw(`NOT ${require('./waveguard-existing-services').notMembershipCustomerSql(customersAlias)}`);
+    },
+    // A row whose readable house number is another number cannot be the same address: skip the full parse.
+    mayMatch: (row) => [null, leadingDigits].includes(ownDigits(row)),
     zipFilter: (column) => (q) => q.whereRaw("coalesce(substring(?? from '[0-9]{5}'), '') in (?, '')", [column, nearZip]),
     complete: (rows, leg) => {
       if (rows.length >= STRICT_LEG_LIMIT) throw uncheckable(`the ${leg} leg filled its ${STRICT_LEG_LIMIT}-row cap`);
@@ -114,10 +134,9 @@ function strictPlan(address, houseNumber, zip) {
     // search can read but has the home's zip on file and names the home's street word. A row with neither (a PO box
     // with no zip) links nothing to this home: not near.
     isNear: (row) => {
-      const text = candidateAddressString(row);
-      const own = houseNumberOf(text);
-      if (own) return digitsOf(own) === leadingDigits && [nearZip, ''].includes(zip5(row.zip));
-      return zip5(row.zip) === nearZip && streetWord.length >= 2 && streetWordRe.test(text);
+      const own = ownDigits(row);
+      if (own) return own === leadingDigits && [nearZip, ''].includes(zip5(row.zip));
+      return zip5(row.zip) === nearZip && streetWord !== '' && streetWordRe.test(candidateAddressString(row));
     },
   };
 }
@@ -129,7 +148,7 @@ function collectMatches(candidates, address, plan, excludeCustomerId) {
   const usable = (row) => plan.hasLine(row) && !seen.has(String(row.id))
     && !(excludeCustomerId != null && String(row.id) === String(excludeCustomerId));
   for (const row of candidates) {
-    if (!usable(row) || !sameStreetAddress(candidateAddressString(row), address)) continue;
+    if (!usable(row) || !plan.mayMatch(row) || !sameStreetAddress(candidateAddressString(row), address)) continue;
     seen.add(String(row.id));
     matches.push(plan.strict ? { ...row, exactMatch: true } : row);
   }
@@ -141,18 +160,18 @@ function collectMatches(candidates, address, plan, excludeCustomerId) {
   return matches;
 }
 
-async function findCustomersAtAddress(database, address, { excludeCustomerId = null, strict = false, zip = null } = {}) {
+async function findCustomersAtAddress(database, address, { excludeCustomerId = null, strict = false, zip = null, membersOnly = false } = {}) {
   const houseNumber = houseNumberOf(address);
   if (!houseNumber) {
     if (strict) throw uncheckable('no house number the search can read');
     return [];
   }
-  const plan = strict ? strictPlan(address, houseNumber, zip) : defaultPlan(houseNumber);
+  const plan = strict ? strictPlan(address, houseNumber, zip, membersOnly) : defaultPlan(houseNumber);
 
   const primary = await database('customers')
     .where((q) => q.where('active', true).orWhereNull('active'))
     .whereNull('deleted_at')
-    .where(plan.lineFilter('address_line1', 'address_line2'))
+    .where(plan.lineFilter('address_line1', 'address_line2', 'customers'))
     .where(plan.zipFilter('zip'))
     .orderBy('id')
     .limit(plan.legLimit)
@@ -169,7 +188,7 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
       .where('cp.active', true)
       .where((q) => q.where('c.active', true).orWhereNull('c.active'))
       .whereNull('c.deleted_at')
-      .where(plan.lineFilter('cp.address_line1', 'cp.address_line2'))
+      .where(plan.lineFilter('cp.address_line1', 'cp.address_line2', 'c'))
       .where(plan.zipFilter('cp.zip'))
       .orderBy('cp.id')
       .limit(plan.legLimit)
