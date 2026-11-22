@@ -23,7 +23,7 @@ const {
   copyCategoryForEstimate,
   followupEmailVars,
   followupSmsHook,
-  _private: { PACKS, RECURRING_TERMS_BENEFIT, REPORT_TOUR_VIDEOS_LIVE },
+  _private: { PACKS, RECURRING_TERMS_BENEFIT, REPORT_TOUR_VIDEOS_LIVE, REPORT_TOURS_HELD },
 } = require('../services/estimate-followup-copy');
 
 const EMAIL_VAR_KEYS = [
@@ -197,7 +197,22 @@ describe('report-tour video slots (owner 2026-07-23 marketing videos)', () => {
     expect(REPORT_TOUR_VIDEOS_LIVE).toBe(true);
   });
 
-  test.each(Object.entries(VIDEO_SLUGS))('%s pack links its %s tour: preview, mp4 and caption', (category, slug) => {
+  // The lawn cut is held (its draft shows a re-entry countdown on camera):
+  // the lawn pack keeps its config and emits empty slots, so no email links
+  // the first lawn cut, which still carries the 90-day card.
+  test('only the lawn tour is held, and the lawn pack emits empty slots', () => {
+    expect([...REPORT_TOURS_HELD]).toEqual(['lawn']);
+    lanes('lawn');
+    const vars = followupEmailVars({ id: 'e1' });
+    expect(PACKS.lawn.video.slug).toBe('lawn');
+    expect(vars.report_video_preview).toBe('');
+    expect(vars.report_video_url).toBe('');
+    expect(vars.report_video_caption).toBe('');
+  });
+
+  const LIVE_SLUGS = Object.entries(VIDEO_SLUGS).filter(([, slug]) => !REPORT_TOURS_HELD.has(slug));
+
+  test.each(LIVE_SLUGS)('%s pack links its %s tour: preview, mp4 and caption', (category, slug) => {
     lanes(category);
     const vars = followupEmailVars({ id: 'e1' });
     expect(PACKS[category].video.slug).toBe(slug);

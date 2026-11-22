@@ -83,13 +83,19 @@ const FAQ_PRICE =
 //
 // History: the report tours were off in emails from 2026-09-26, because
 // the first cuts said "90-day money-back guarantee" on camera and the owner
-// removed that promise. All four files were re-cut 2026-11-22 from the
-// current UI with no day count on the guarantee, no price and no star
-// line; the owner watched the four cuts and approved them (2026-11-22,
-// "videos ok"). A later cut that changes an on-camera claim needs the
-// owner's OK again; to take the report tours out of the emails, set this
-// back to false.
+// removed that promise. The files were re-cut 2026-11-22 from the current
+// UI with no day count on the guarantee, no price and no star line; the
+// owner watched the cuts and approved them (2026-11-22, "videos ok"). A
+// later cut that changes an on-camera claim needs the owner's OK again; to
+// take the report tours out of the emails, set this back to false.
 const REPORT_TOUR_VIDEOS_LIVE = true;
+// Held slugs keep empty slots while the switch is on. Lawn: the 2026-11-22
+// lawn draft shows a re-entry countdown on camera, and a fixed re-entry
+// time is banned on every customer surface (AGENTS.md, compliance
+// language). Its file under VIDEO_BASE is therefore still the first cut
+// with the 90-day card. Take 'lawn' out of this set in the PR that ships
+// the corrected lawn cut, after the owner's OK on that cut.
+const REPORT_TOURS_HELD = new Set(['lawn']);
 const VIDEO_BASE = 'https://portal.wavespestcontrol.com/app-email/videos';
 
 // smsHook completes the phrase "your Waves {smsHook}" so brand
@@ -334,7 +340,7 @@ function followupEmailVars(estimate) {
   // `bundle`, bait monitoring to `commercial`, and all three carry
   // "satisfaction guaranteed".
   const hasTermite = (keys || []).some((k) => TERMITE_LANES.has(k));
-  const video = REPORT_TOUR_VIDEOS_LIVE ? pack.video : null;
+  const video = REPORT_TOUR_VIDEOS_LIVE && pack.video && !REPORT_TOURS_HELD.has(pack.video.slug) ? pack.video : null;
   return {
     service_label: pack.label,
     category_headline: pack.headline,
@@ -371,5 +377,5 @@ module.exports = {
   copyCategoryForEstimate,
   followupEmailVars,
   followupSmsHook,
-  _private: { PACKS, RECURRING_TERMS_BENEFIT, NEUTRAL_BENEFIT, NO_GUARANTEE_BENEFIT, REPORT_TOUR_VIDEOS_LIVE },
+  _private: { PACKS, RECURRING_TERMS_BENEFIT, NEUTRAL_BENEFIT, NO_GUARANTEE_BENEFIT, REPORT_TOUR_VIDEOS_LIVE, REPORT_TOURS_HELD },
 };
