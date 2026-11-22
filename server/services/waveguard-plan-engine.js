@@ -896,9 +896,10 @@ async function fungusNitrogenCut(knex, service, { targetN, monthNumber, v13Activ
   return rule.targetNPer1000;
 }
 
-// The catalog names of the combination pre-emergent plus fertilizer bags (LESCO Dimension 0.21% 18-0-10 ... Pre-Emergent Plus
-// Fertilizer; Stonewall 15-0-15 ... Pre-Emergent Plus Fertilizer). The bag is sized by the pre-emergent rate, not by its nitrogen.
-const PRE_EMERGENT_BAG = /\bPre-?Emergent Plus Fertilizer\b/i;
+// The catalog names of the combination pre-emergent plus fertilizer bags: LESCO Dimension 0.21% 18-0-10 ... Pre-Emergent Plus
+// Fertilizer (the 9x April step) and LESCO Stonewall 0.37% 18-0-10, whose catalog name does not say "Pre-Emergent Plus Fertilizer"
+// (the October step, owner 2026-11-21). The bag is sized by the pre-emergent rate, not by its nitrogen.
+const PRE_EMERGENT_BAG = /\bPre-?Emergent Plus Fertilizer\b|\bStonewall 0\.37% 18-0-10\b/i;
 const isPreEmergentBag = (text) => PRE_EMERGENT_BAG.test(String(text ?? ''));
 
 // What keeps a bag at its full rate on a reclaimed lawn: a bag whose rate is set by something other than its
@@ -2992,6 +2993,7 @@ module.exports = {
   fungusNitrogenNotes,
   nitrogenCutNotes,
   nitrogenCutWhy,
+  isPreEmergentBag,
   CUT_WHY_NOTE,
   nitrogenDecision,
   tetrinoScoutDecision,

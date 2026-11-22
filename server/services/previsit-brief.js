@@ -409,13 +409,13 @@ const NO_LAWN_GUIDANCE = Object.freeze({
 // STRICT like the brief's other reads: the sweep stores the brief, so a failed read aborts the generation (the prior brief
 // survives) instead of storing the normal target the live plan would not use once the database is back.
 async function projectNitrogenCut(dbh, svc, entries, summary) {
-  const { nitrogenDecision } = require('./waveguard-plan-engine');
+  const { nitrogenDecision, isPreEmergentBag } = require('./waveguard-plan-engine');
   const v13Active = require('../config/feature-gates').lawnV13Live?.() === true && summary.version === require('./lawn-program').LAWN_V13_VERSION;
   for (const entry of entries) {
     const stated = String(entry.gates.targetN || '').match(/^\s*(\d+(?:\.\d+)?)\s*lb N\/1000/i);
     const decision = stated ? await nitrogenDecision(dbh, svc, {
       targetN: Number(stated[1]), monthNumber: Number(summary.window?.month), v13Active, strict: true,
-      keep: /\bPre-?Emergent Plus Fertilizer\b/i.test(entry.shapedEntry?.name || '') ? 'pre_emergent'
+      keep: isPreEmergentBag(entry.shapedEntry?.name) ? 'pre_emergent'
         : (Number(String(entry.gates.targetK2O || '').match(/^\s*(\d+(?:\.\d+)?)/)?.[1]) > 0 ? 'potash' : null),
     }) : null;
     if (decision?.cut != null) {

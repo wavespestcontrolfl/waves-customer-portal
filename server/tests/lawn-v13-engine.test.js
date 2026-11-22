@@ -22,6 +22,7 @@ const { getActiveLawnProtocol } = require('../services/lawn-protocol-operating-l
 const protocolReader = require('../services/protocol-reader');
 const migration = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
 const octoberMigration = require('../models/migrations/20261007120500_lawn_v13_october_dimension');
+const stonewallMigration = require('../models/migrations/20261122120000_lawn_v13_october_stonewall');
 const decemberMigration = require('../models/migrations/20261008130000_lawn_v13_december_potash');
 const aprilPolymerMigration = require('../models/migrations/20261022195000_lawn_v13_april_polymer_n_v3');
 // August and September hose visits: the liquid potassium (20261029170000), one more whole-lawn tool beside Nutra-TECH.
@@ -311,9 +312,11 @@ describe('mixed or unknown grass under GATE_LAWN_V13', () => {
 // ── Every line resolves to the intended catalog row ──────────────────────────
 // Blindside is added by migration 20261005140000 (the staged rows of 120000 have none).
 const BLINDSIDE = 'Blindside Herbicide';
-// October's whole-lawn bag is the Dimension 0.21% 18-0-10 row (20261007120500 swaps it in for
-// the staged Stonewall 15-0-15 line).
+// The Dimension 0.21% 18-0-10 row: the 9x April step still names it (20261007120500 swapped it into October
+// for the staged Stonewall 15-0-15 line; 20261122120000 moved October on to Stonewall 0.37% 18-0-10).
 const DIMENSION_18 = octoberMigration.NEW_NAME;
+// October's whole-lawn bag since owner ruling 2026-11-21: the same 4.04 lb per 1,000 sq ft, prodiamine instead of dithiopyr.
+const STONEWALL_18 = stonewallMigration.NEW_NAME;
 const matrixMigration = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
 const granuleMigration = require('../models/migrations/20261009100000_lawn_v13_fire_ant_granule');
 // June and July mole cricket nymph spots: the Advion Insect Granule catalog row (20261023140000).
@@ -324,7 +327,7 @@ const F10_22 = decemberMigration.NEW_NAME;
 const F44_0_0 = aprilPolymerMigration.NEW_NAME;
 // The house bifenthrin since owner ruling 2026-11-18 (migration 20261119010000 links the staged Talak rows to it); Talak stays a catalog row.
 const HOUSE_BIFENTHRIN = 'LESCO Crosscheck Plus';
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, F10_22, F44_0_0, potassiumMigration.NAME, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE, advionMigration.NAME, HOUSE_BIFENTHRIN];
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, STONEWALL_18, F10_22, F44_0_0, potassiumMigration.NAME, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE, advionMigration.NAME, HOUSE_BIFENTHRIN];
 const DECOYS = ['Dylox 420 SL T&O Insecticide', 'LESCO 24-2-11 with PolyPlus OPTI', 'Talstar P', 'Prodiamine 65 WDG', 'Acelepryn Xtra', 'Celsius WG Herbicide Pack', 'Velista Pro Kit', 'Three-Way Herbicide'];
 function buildCatalog(price) {
   // price(name) -> { cost_per_unit, needs_pricing }
@@ -516,7 +519,7 @@ describe('completion defaults with the v13 protocol resolved', () => {
     7: [],
     8: [migration.NAMES.NT, potassiumMigration.NAME],
     9: [migration.NAMES.NT, potassiumMigration.NAME],
-    10: [DIMENSION_18],
+    10: [STONEWALL_18],
     11: [migration.NAMES.F24],
     12: [F10_22],
   };
@@ -530,9 +533,9 @@ describe('completion defaults with the v13 protocol resolved', () => {
     const parsed = [...engine.parseProtocolLines(visit.primary, 'base', { exactName }), ...engine.parseProtocolLines(visit.secondary, 'conditional', { exactName })];
     const resolved = engine.resolveProtocolItems(parsed, catalog, {}, {});
     const [, windowKey] = migration.WINDOWS.find((w) => w[0] === month);
-    // The staged rows as 20261007120500 leaves them: October's bag is Dimension 18-0-10 at 4.04 lb.
+    // The staged rows as 20261007120500 and 20261122120000 leave them: October's bag is Stonewall 0.37% 18-0-10 at 4.04 lb.
     const swapped = (spec) => (spec[0] === octoberMigration.OLD_NAME
-      ? [DIMENSION_18, spec[1], spec[2], octoberMigration.OCT_RATE, spec[4], spec[5], spec[6], { ...spec[7], ...octoberMigration.NEW_GATES }]
+      ? [STONEWALL_18, spec[1], spec[2], stonewallMigration.OCT_RATE, spec[4], spec[5], spec[6], { ...spec[7], ...stonewallMigration.NEW_GATES }]
       : spec);
     // 20261008130000 swaps December's 24-0-11 row for the 10-0-22 (still a lb_n row; the target is 0.45 lb N).
     const decSwapped = (spec) => (spec[0] === decemberMigration.OLD_NAME && windowKey === decemberMigration.DECEMBER_WINDOW
@@ -937,19 +940,29 @@ describe('lb_n nutrition rows derive from the visit target (v13)', () => {
     expect(amountFor(f10, 12, { ratePer1000: null, rateUnit: null })).toMatchObject({ amount: 4.5 });
   });
 
-  test('October Dimension 18-0-10 is its stated 4.04 lb (0.73 lb N, 0.40 lb K2O, the commercial Coastal South rate)', () => {
-    const row = { ratePer1000: octoberMigration.OCT_RATE, rateUnit: 'lb' };
-    const result = amountFor(dim18, 10, row);
+  test('October Stonewall 0.37% 18-0-10 is its stated 4.04 lb (0.73 lb N, 0.40 lb K2O)', () => {
+    const stonewall18 = { ...dim18, id: 's18', name: STONEWALL_18 };
+    const row = { ratePer1000: stonewallMigration.OCT_RATE, rateUnit: 'lb' };
+    const result = amountFor(stonewall18, 10, row);
     expect(result).toMatchObject({ rateSource: 'protocol_rate', amount: 4.04 });
     expect(result.amount * 0.18).toBeCloseTo(0.7272, 4);
     expect(result.amount * 0.10).toBeCloseTo(0.404, 4);
-    // 4.04 lb x 0.21% = 0.0085 lb ai per 1,000 sq ft = 0.37 lb ai per acre, under the 5.46 lb per-application maximum.
-    expect((result.amount * 0.0021) * 43.56).toBeCloseTo(0.37, 2);
-    expect(result.amount).toBeLessThan(octoberMigration.MAX_LABEL);
+    // 4.04 lb x 0.37% = 0.0149 lb ai per 1,000 sq ft = 0.65 lb prodiamine per acre; with January 4FL (0.68) the year is 1.33, under 1.5.
+    expect((result.amount * 0.0037) * 43.56).toBeCloseTo(0.65, 2);
+    expect(0.68 + (result.amount * 0.0037) * 43.56).toBeLessThan(1.5);
     // The recipe's own October notes and primary line state the same figures.
     const targets = engine.parseVisitNutrientTargets(visitFor(10).notes);
     expect(targets).toMatchObject({ targetNPer1000: 0.73, targetKPer1000: 0.4 });
     expect(visitFor(10).primary).toContain('4.04 lb per 1,000 sq ft (0.73 lb N, 0.4 lb K2O)');
+  });
+
+  test('both combination bags are pre-emergent bags that keep their rate on reclaimed water: the Dimension granular by its name, Stonewall 0.37% 18-0-10 by its own', () => {
+    expect(engine.isPreEmergentBag(DIMENSION_18)).toBe(true);
+    expect(engine.isPreEmergentBag(STONEWALL_18)).toBe(true);
+    expect(engine.isPreEmergentBag(visitFor(10).primary)).toBe(true);
+    // Stonewall 4FL (the January liquid) and the plain nitrogen bags are not.
+    expect(engine.isPreEmergentBag('LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide')).toBe(false);
+    expect(engine.isPreEmergentBag(migration.NAMES.F24)).toBe(false);
   });
 
   test('without a v13 row (gate off or no match) the catalog default still applies, unchanged', () => {
