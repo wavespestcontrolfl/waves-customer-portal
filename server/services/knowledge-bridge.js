@@ -1238,10 +1238,17 @@ const KnowledgeBridge = {
   // One prompt is asked once in 30 minutes (answered, running or failed), and
   // one assessment gets at most PREPARED_CALLS_MAX calls. Writes nothing.
   async prepareAssessmentRecommendations(assessmentId, plannedProducts) {
+    // A linked assessment's grounded run has started or finished: a call
+    // started now would serve no run.
+    const before = await db('lawn_assessments').where({ id: assessmentId }).first('customer_id', 'service_record_id');
+    if (!before || before.service_record_id) return { started: false };
+    const context = await loadRecommendationContext(before);
+    // Read again after the context reads, which take time: a completion may
+    // have linked the assessment meanwhile. From this read to the held answer
+    // nothing waits, so a completion that links it later finds the answer
+    // when its grounded run looks.
     const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
-    // A linked assessment's grounded run has started or finished.
     if (!assessment || assessment.service_record_id) return { started: false };
-    const context = await loadRecommendationContext(assessment);
     const { systemPrompt, userPrompt, promptKey } = recommendationPrompt({ assessment, appliedProducts: plannedProducts }, context);
     const held = _preparedAnswers.get(assessmentId) || { calls: 0, answers: new Map() };
     if (heldPreparedAnswer(held, promptKey)) return { started: true };

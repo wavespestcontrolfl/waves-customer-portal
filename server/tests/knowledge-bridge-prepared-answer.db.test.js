@@ -17,6 +17,12 @@ jest.mock('../services/llm/call', () => {
   const actual = jest.requireActual('../services/llm/call');
   return { ...actual, dispatch: jest.fn(), rejectCall: jest.fn() };
 });
+// The context read of the early call can be held open (mockContextHold), to place a completion inside it.
+let mockContextHold = null;
+jest.mock('../services/lawn-grass-context', () => {
+  const actual = jest.requireActual('../services/lawn-grass-context');
+  return { ...actual, loadCustomerGrassContext: async (...args) => { if (mockContextHold) await mockContextHold; return actual.loadCustomerGrassContext(...args); } };
+});
 const mockCreate = jest.fn();
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ messages: { create: mockCreate } })));
 
@@ -314,6 +320,21 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     const evening = prompt([FUNGICIDE, FERTILIZER], { now: new Date('2026-12-01T02:00:00Z') });
     expect(evening.userPrompt).toContain('Month: November (Season: fall)');
     expect(evening.promptKey).toBe(saved.promptKey);
+  });
+
+  test("the visit's rows are saved while the early call reads its context: no early call starts", async () => {
+    const assessment = await seedAssessment();
+    const hold = deferred();
+    mockContextHold = hold.promise;
+    const early = KnowledgeBridge.prepareAssessmentRecommendations(assessment.id, [FERTILIZER]);
+    await new Promise((resolve) => { setTimeout(resolve, 200); });
+    await saveVisitRows(assessment.id, [FERTILIZER]);
+    mockContextHold = null;
+    hold.resolve();
+
+    await expect(early).resolves.toEqual({ started: false });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(KnowledgeBridge._test.preparedAnswers.has(assessment.id)).toBe(false);
   });
 
   test('an assessment whose visit rows are saved gets no early call', async () => {
