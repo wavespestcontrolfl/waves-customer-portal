@@ -36,7 +36,9 @@ const db = require('../../models/db');
 const { CUSTOMER_STAGES } = require('../customer-stages');
 const { etDateString } = require('../../utils/datetime-et');
 const { toE164 } = require('../../utils/phone');
-const { activeSuppressionsFor, GLOBAL_SUPPRESSION_TYPES } = require('../email-template-library');
+const {
+  activeSuppressionsFor, activeSuppressionRows, suppressionsBlocking, GLOBAL_SUPPRESSION_TYPES,
+} = require('../email-template-library');
 
 // call-bridge.js sources a person dials from (admin click-to-call, the
 // callback card, a technician's line) and the statuses meaning the call
@@ -248,8 +250,17 @@ async function checkStaffDnc(ctx) {
   return dnc ? REASONS.STAFF_DNC : null;
 }
 
+// The active suppression rows that block a send in this group. The pipeline
+// reads them per check. The embedded line (embeddedLineContext) reads the
+// address's rows ONCE and every check of that evaluation classifies those
+// same rows, so a row that lands between two checks cannot split the verdict.
+async function blockingSuppressions(ctx, groupKey) {
+  if (ctx.suppressionRows) return suppressionsBlocking(ctx.suppressionRows, null, groupKey);
+  return activeSuppressionsFor(null, ctx.customer.email, groupKey, ctx.database);
+}
+
 async function checkSuppression(ctx) {
-  const { customer, stream, emailKey, database } = ctx;
+  const { stream, emailKey } = ctx;
   // Reuse the canonical classifier (email-template-library.js) rather than
   // re-derive it: a bounce/spam_complaint/do_not_email row blocks every
   // stream even when it carries an unrelated group_key, not just a
@@ -257,7 +268,7 @@ async function checkSuppression(ctx) {
   // the classifier's template-only branches (transactional-bypass) never
   // trigger for a real send_stream group key like ours.
   const groupKey = groupKeyFor(stream, emailKey, ctx.marketingClass);
-  const suppressions = await activeSuppressionsFor(null, customer.email, groupKey, database);
+  const suppressions = await blockingSuppressions(ctx, groupKey);
   if (!suppressions.length) return null;
   const isGlobal = suppressions.some((row) => (
     !row.group_key || GLOBAL_SUPPRESSION_TYPES.has(String(row.suppression_type || '').toLowerCase())
@@ -266,8 +277,7 @@ async function checkSuppression(ctx) {
 }
 
 async function marketingSuppressed(ctx) {
-  const rows = await activeSuppressionsFor(null, ctx.customer.email, 'marketing_newsletter', ctx.database);
-  return rows.length > 0;
+  return (await blockingSuppressions(ctx, 'marketing_newsletter')).length > 0;
 }
 
 // The prefs half of the embedded-pitch rule: the customer takes marketing
@@ -296,6 +306,10 @@ async function embeddedLineContext({ customerId, email, conn } = {}) {
   const ctx = { ...EMBEDDED_LINE_HOST, customerId, database: conn || db, checks: {} };
   if (await checkCustomer(ctx)) return null;
   if (!sameAddress(ctx.customer.email, email)) return null;
+  // One read of the address's suppression rows for the whole evaluation: the
+  // contact check, the marketing unsubscribe and the referral unsubscribe
+  // all judge these rows (blockingSuppressions).
+  ctx.suppressionRows = await activeSuppressionRows(ctx.customer.email, ctx.database);
   for (const check of [checkStaffDnc, checkSuppression, checkEmailSwitchStreamFlagAndChannel]) {
     if (await check(ctx)) return null;
   }
@@ -311,7 +325,7 @@ async function referralAskAllowed(ctx) {
   if (!streamFlagOk('lifecycle', REFERRAL_ASK_KEY, ctx.prefs)) return false;
   if (streamChannelBlocksEmail('lifecycle', REFERRAL_ASK_KEY, ctx.prefs)) return false;
   const group = groupKeyFor('lifecycle', REFERRAL_ASK_KEY);
-  return (await activeSuppressionsFor(null, ctx.customer.email, group, ctx.database)).length === 0;
+  return (await blockingSuppressions(ctx, group)).length === 0;
 }
 
 // → { pitch, referralAsk }: the customer's choices for the whole line, from

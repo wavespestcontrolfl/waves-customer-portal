@@ -459,17 +459,19 @@ describe('email-division eligibility', () => {
       prefs = ALL_ON, suppressions = [], email = 'sandy@example.test', customerId = 'cust-1',
       customer = customerRow(), dnc,
     } = {}) => {
-      reads = { customers: 0, notification_prefs: 0 };
+      reads = { customers: 0, messaging_suppression: 0, notification_prefs: 0, email_suppressions: 0 };
       db.mockImplementation((table) => {
-        const map = {
+        if (!(table in reads)) throw new Error(`Unexpected db table ${table}`);
+        reads[table] += 1;
+        // `suppressions` may be a function of the read's number, for a row
+        // that lands while the evaluation runs.
+        const rows = typeof suppressions === 'function' ? suppressions(reads.email_suppressions) : suppressions;
+        return {
           customers: chain({ first: customer }),
           messaging_suppression: chain({ first: dnc }),
           notification_prefs: chain({ first: prefs }),
-          email_suppressions: chain({ result: suppressions }),
-        };
-        if (!map[table]) throw new Error(`Unexpected db table ${table}`);
-        if (table in reads) reads[table] += 1;
-        return map[table];
+          email_suppressions: chain({ result: rows }),
+        }[table];
       });
       return embeddedLineConsent({ customerId, email });
     };
@@ -481,11 +483,23 @@ describe('email-division eligibility', () => {
       expect(await consent({ prefs: { marketing_offers: true, marketing_channel: 'both', referral_nudge: true, referral_channel: 'both' } })).toEqual(YES);
     });
 
-    // One read of the customer and of the choices decides both parts: a
-    // second read could see another state than the first.
-    test('both parts come from one read of the customer row and of the choices', async () => {
+    // One read of each table decides both parts: a second read could see
+    // another state than the first.
+    test('both parts come from one read of each table', async () => {
       expect(await consent()).toEqual(YES);
-      expect(reads).toEqual({ customers: 1, notification_prefs: 1 });
+      expect(reads).toEqual({ customers: 1, messaging_suppression: 1, notification_prefs: 1, email_suppressions: 1 });
+    });
+
+    // A do-not-email row that lands while the evaluation runs (pre-push audit
+    // P1 2026-11-22): with a read per check, the referral check saw it and
+    // the marketing check did not, and the offer part rode a line the helper
+    // itself had seen blocked. All checks judge the first read's rows.
+    test('a suppression that lands during the evaluation cannot split the verdict', async () => {
+      const DO_NOT_EMAIL = { email: 'sandy@example.test', group_key: null, suppression_type: 'do_not_email', status: 'active' };
+      expect(await consent({ suppressions: (read) => (read === 1 ? [] : [DO_NOT_EMAIL]) })).toEqual(YES);
+      expect(reads.email_suppressions).toBe(1);
+      // The same row on the one read: no line at all.
+      expect(await consent({ suppressions: [DO_NOT_EMAIL] })).toEqual(NO);
     });
 
     // The whole line is a pitch: with the marketing choice off there is no
