@@ -81,6 +81,17 @@ describe('promotion bar (pure)', () => {
     expect(decide({ n: 30, newlyUnsafe: 12 })).toMatchObject({ promote: false, reason: 'unsafe_rose' });
   });
 
+  test('with one sitting a side an allowance never lets a significant McNemar regression through', () => {
+    process.env.PROMPT_AUTOPROMOTE_UNSAFE_ALLOWANCE = '20';
+    try {
+      // 2 newly unsafe: inside the allowance and not significant. 12 newly unsafe: inside the allowance, significant.
+      expect(decide({ n: 30, newlyUnsafe: 2 })).toMatchObject({ promote: true, detail: { unsafeRise: 2, unsafeAllowance: 20 } });
+      expect(decide({ n: 30, newlyUnsafe: 12 })).toMatchObject({ promote: false, reason: 'unsafe_rose', detail: { newlyUnsafe: 12, unsafeRise: 12 } });
+    } finally {
+      delete process.env.PROMPT_AUTOPROMOTE_UNSAFE_ALLOWANCE;
+    }
+  });
+
   test('an improvement in unsafe verdicts is not penalized', () => {
     expect(decide({ n: 30, newlySafe: 5 }).promote).toBe(true);
   });

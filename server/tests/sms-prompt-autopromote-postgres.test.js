@@ -883,6 +883,44 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
         expect((await rowOf(patch.id)).decision_detail).toMatchObject({ sittings: { candidate: 2, baseline: 2 } });
       });
 
+      test('a finished sitting the attempt counter never recorded (the process exited between the two) buys no extra paid sitting', async () => {
+        process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = '2';
+        const items = await seedItems();
+        const patch = await insertPatch();
+        // Left by a crash: the first sitting finished, and neither exam_attempts nor an audit row was written.
+        const baseline = await insertRun({ items, version: drafter.currentPromptVersion(), over: { finished_at: new Date(NOW.getTime() - 7200_000) } });
+        await insertRun({
+          items, version: patchLib.stampPatchVersion(baseVersion(), patch.version_tag), patchId: patch.id, baselineId: baseline.id, overall: 7, actions: 6.5,
+          over: { started_at: new Date(NOW.getTime() - 3 * 3600_000) },
+        });
+        // The second sitting fails, and fails again when it is resumed: the limit of 2 is reached.
+        const { runner } = stubRunner({ items, candidateStatus: 'failed' });
+        expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough })).toEqual({ failed: 'exam_not_complete' });
+        expect(await auto.examineCandidate({ dbi: trx, now: new Date(NOW.getTime() + DAY), runner, lock: lockThrough })).toEqual({ failed: 'exam_not_complete' });
+        expect(await rowOf(patch.id)).toMatchObject({ status: 'candidate', exam_attempts: 2 });
+        runner.mockClear();
+        expect(await auto.examineCandidate({ dbi: trx, now: new Date(NOW.getTime() + 2 * DAY), runner, lock: lockThrough })).toEqual({ rejected: patch.id, reason: 'exam_unavailable' });
+        expect(runner).not.toHaveBeenCalled();
+      });
+
+      test('the sittings that earned a promotion are never rollback evidence, even when one of them alone is past the rollback margin', async () => {
+        process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = '2';
+        process.env.PROMPT_AUTOPROMOTE_UNSAFE_ALLOWANCE = '1.5';
+        const items = await seedItems();
+        const patch = await insertPatch();
+        // 3 and 0 unsafe against 0 and 0: the average rise is 1.5 (inside the allowance), yet the first sitting alone
+        // is 3 of 24 above its own baseline, past the monitor's 5-point margin.
+        const { runner } = sittingRunner({ items, candidates: [{ unsafe: 3 }, { unsafe: 0 }] });
+        expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough, notify: jest.fn() })).toMatchObject({ promoted: patch.id });
+        // As finalizeRun stamps a finished run that it compared with its baseline.
+        await trx('sms_sealed_eval_runs').where({ prompt_patch_id: patch.id })
+          .update({ significance: JSON.stringify({ significant: false, direction: 'regressed', pairedItems: 24, newlyUnsafe: 3, newlySafe: 0, pValue: 0.25 }) });
+        const notify = jest.fn();
+        expect(await auto.runRollbackMonitor({ dbi: trx, now: NOW, notify })).toEqual({ checked: patch.id });
+        expect((await rowOf(patch.id)).status).toBe('active');
+        expect(notify).not.toHaveBeenCalled();
+      });
+
       test('the sitting count is capped at 3 a side, whatever the setting says', async () => {
         process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = '9';
         const items = await seedItems();

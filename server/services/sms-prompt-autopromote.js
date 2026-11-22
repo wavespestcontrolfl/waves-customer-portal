@@ -350,10 +350,10 @@ function decidePromotion({ candidateSittings = [], baselineSittings = [] } = {})
   if (tally.pairedItems < MIN_PAIRED_ITEMS) return reject('too_few_items', detail);
   // Whole counts on both sides (each side's unsafe verdicts times the OTHER side's sitting count), so a rise that
   // only equals the allowance never reads as above it. With one sitting a side and no allowance this is the net
-  // rule "more newly unsafe items than newly safe ones", which also rules out a McNemar regression.
-  if (tally.candidateUnsafe * sittings.baseline - tally.baselineUnsafe * sittings.candidate > allowance * sittings.candidate * sittings.baseline) {
-    return reject('unsafe_rose', detail);
-  }
+  // rule "more newly unsafe items than newly safe ones", which also rules out a McNemar regression; an allowance
+  // never lets a significant one through.
+  const aboveAllowance = tally.candidateUnsafe * sittings.baseline - tally.baselineUnsafe * sittings.candidate > allowance * sittings.candidate * sittings.baseline;
+  if (aboveAllowance || (sig && sig.significant && sig.direction === 'regressed')) return reject('unsafe_rose', detail);
   if (deltas.overall == null || deltas.actions == null) return reject('scores_missing', detail);
   if (deltas.overall < MIN_OVERALL_GAIN) return reject('overall_not_improved', detail);
   if (deltas.actions < MIN_ACTIONS_GAIN) return reject('actions_not_improved', detail);
@@ -510,9 +510,12 @@ async function obtainBaseline({ dbi, patch, runner, lock, now, exclude }) {
 // baseline no finished sitting of this candidate has used. { run } (finished) | { skipped } | { failed } | { rejected }.
 async function sitCandidate({ dbi, patch, runner, lock, now, open, complete, firstSitting }) {
   // The attempt limit guards another paid sitting, never a finished exam: a sitting that completed
-  // before the process exited is decided without one. A finished sitting used an attempt too, so only
-  // the sittings that did not finish count against the limit.
-  if (patch.exam_attempts - complete.length >= MAX_EXAM_ATTEMPTS) return recordRejection({ dbi, patch, reason: 'exam_unavailable', detail: { attempts: patch.exam_attempts }, now });
+  // before the process exited is decided without one. It counts the sittings that did NOT finish, from
+  // their own audit rows: exam_attempts also counts every finished sitting, and a run that finished just
+  // before the process exited is in neither count, so "attempts minus finished runs" would hand out one
+  // more paid sitting than the limit.
+  const [{ count: failedSittings }] = await dbi(EVENTS).where({ patch_id: patch.id, event: 'exam_failed' }).count('* as count');
+  if (Number(failedSittings) >= MAX_EXAM_ATTEMPTS) return recordRejection({ dbi, patch, reason: 'exam_unavailable', detail: { attempts: patch.exam_attempts }, now });
   const closed = firstSitting ? await examWindowReason({ dbi, patch, now }) : null;
   if (closed) return { skipped: closed };
   let baselineId = open && open.baseline_run_id;
@@ -791,8 +794,12 @@ async function outcomeCheck({ dbi, patch, now, voicePin }) {
 async function examCheck({ dbi, patch }) {
   if (!patch.active_version) return null;
   const { LIVE_EXAM_LEGS, parseScores } = require('./sms-sealed-eval');
+  // Never the exam-only sittings that earned the promotion (prompt_patch_id set; they carry the same version):
+  // the bar already judged them, and with more than one sitting a side one of them alone can sit past this
+  // check's margin while the average cleared the bar. Only exams of the version once it is live count here.
   const runs = await dbi('sms_sealed_eval_runs')
     .where({ prompt_version: patch.active_version, status: 'complete' })
+    .whereNull('prompt_patch_id')
     .whereNotNull('baseline_run_id')
     .whereIn('provider_leg', LIVE_EXAM_LEGS);
   for (const r of runs) {
