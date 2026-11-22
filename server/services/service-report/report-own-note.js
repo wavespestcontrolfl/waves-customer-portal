@@ -8,7 +8,8 @@
  * call tidies the note (a later PR). This module decides whether a tidied
  * text may go out:
  *   - shape: plain text on one line, no sign-off, at most 600 characters
- *     (no sentence limit: the text has the note's sentences);
+ *     (no sentence limit: the text has the note's sentences), its letters
+ *     and marks in one form;
  *   - the report's own word screens: the screen the report reader runs again
  *     on every read (noteRecordCopyViolations), product, brand and
  *     active-ingredient names, the writer rules, a line that asks for contact;
@@ -18,8 +19,10 @@
  * A text that fails gets the fixed sentence (fixedReportNote).
  *
  * Known limits: report-note-order.js lists them. One more: a code that is a
- * plain word has no shape, so the stored-code check belongs to the code that
- * writes the note.
+ * plain word has no shape. A part of the note that speaks of getting in is
+ * masked whole with the word beside it ("Gate: bluebird"), but a code said
+ * as a sentence of its own is not, so the stored-code check belongs to the
+ * code that writes the note.
  *
  * The checks read the note, the text and the product catalog, and nothing
  * else about the visit, so a completion can run them again on the text the
@@ -27,7 +30,7 @@
  */
 const { redactAccessCodes } = require('../context-aggregator');
 const CompletionRecap = require('../completion-recap');
-const { noteRecordCopyViolations, CODE_SHAPED_NUMBER_RE } = require('./technician-report-copy');
+const { noteRecordCopyViolations, heldAccessCode, CODE_SHAPED_NUMBER_RE } = require('./technician-report-copy');
 const { writerRulesRejectionDetail, lowercaseGermanRoach } = require('./report-writer-rules');
 const {
   orderRejection, noteWords, isCount, hideNumberMarks, showNumberMarks,
@@ -80,12 +83,29 @@ const passPhraseAsOneWord = (text) => text.replace(/\b(pass)[ -](phrases?|words?
 // ("used 4471 at the side"): the reader refuses it in any text, so no text
 // loses a word it could keep, and no model reads it.
 const CODE_SHAPED_RE = new RegExp(CODE_SHAPED_NUMBER_RE.source, 'giu');
-const noteAsRead = (note) => dollarweedAsOneWord(redactAccessCodes(passPhraseAsOneWord(String(note || '')
-  .replace(/[^\S\n]+/g, ' ').replace(/ ?\n[\n ]*/g, '\n').trim()))).replace(CODE_SHAPED_RE, '[redacted]');
+// A part that speaks of getting in is masked whole (the reader's own access
+// screen, heldAccessCode): a code can be a plain word beside the access word
+// ("Gate: bluebird"), so the word never goes alone. Where the screen reads
+// two parts of a sentence together (a door and a word in capitals), the
+// sentence is masked whole.
+const maskWhole = (piece) => piece.replace(/^(\s*)[\s\S]*?(\s*)$/, '$1[redacted]$2');
+const eachPiece = (text, marks, change) => text.split(marks).map((piece, i) => (i % 2 ? piece : change(piece))).join('');
+const speaksOfAccess = (piece) => heldAccessCode(showNumberMarks(piece).replace(/\[redacted\]/g, ' '));
+function maskAccessParts(note) {
+  return showNumberMarks(eachPiece(hideNumberMarks(note), /([.;!?\n]+)/, (sentence) => {
+    if (!speaksOfAccess(sentence)) return sentence;
+    const masked = eachPiece(sentence, /(,+)/, (part) => (speaksOfAccess(part) ? maskWhole(part) : part));
+    return speaksOfAccess(masked) ? maskWhole(sentence) : masked;
+  }));
+}
+const noteAsRead = (note) => maskAccessParts(dollarweedAsOneWord(redactAccessCodes(passPhraseAsOneWord(String(note || '')
+  .replace(/[^\S\n]+/g, ' ').replace(/ ?\n[\n ]*/g, '\n').trim()))).replace(CODE_SHAPED_RE, '[redacted]'));
 // The tidied note as stored and screened. A line break stays in, so the
 // shape screen refuses it.
 function ownNoteText(value) {
-  const text = String(value || '').trim().replace(/[^\S\r\n]+/g, ' ').replace(/^["“”']+|["“”']+$/g, '').trim();
+  // Only a pair of quotation marks around the whole text goes: an inch mark
+  // at the end stays ('The gap was 5"').
+  const text = String(value || '').trim().replace(/[^\S\r\n]+/g, ' ').replace(/^["“”']([\s\S]*)["“”']$/, '$1').trim();
   return dollarweedAsOneWord(lowercaseGermanRoach(text));
 }
 
@@ -111,9 +131,18 @@ function writeTimeRejection(text) {
   return order ? { reason: 'instruction', words: [order[0]] } : null;
 }
 
+// Letters and marks in one form only: a full-width "ｓａｆｅ" or "？" reads
+// one way to the word screens and another to the order check. A fraction
+// sign and a prime (feet, inches) stay.
+const OWN_FORM_RE = /[′″\u00BC-\u00BE\u2150-\u215E]/g;
+function inOneForm(text) {
+  const rest = text.replace(OWN_FORM_RE, '');
+  return rest === rest.normalize('NFKC') && !/\u3002/.test(rest);
+}
+
 function shapeRejection(text) {
   if (!text) return { reason: 'empty' };
-  if (/[\r\n]/.test(text) || SIGN_OFF_RE.test(text)) return { reason: 'shape' };
+  if (/[\r\n]/.test(text) || SIGN_OFF_RE.test(text) || !inOneForm(text)) return { reason: 'shape' };
   if (text.length > MAX_OWN_NOTE_CHARS) return { reason: 'too_long' };
   return REDACTED_RE.test(text) ? { reason: 'access_code' } : null;
 }
@@ -137,16 +166,17 @@ function wordRejection(text, { namesProduct, activeIngredients }) {
 // What the text may leave out of the note is what no report text may hold:
 // the same screens, asked about one word, two words, or one whole part.
 //   - One word goes when it names a thing the report never names: a product,
-//     an active ingredient, a word of access, a word of time. A word that
-//     states a result ("gone", "eliminated", "safe") never goes alone:
-//     "roaches eliminated in kitchen" is not "roaches in kitchen". Its part
-//     goes whole.
+//     an active ingredient, a word of time. A word that states a result
+//     ("gone", "eliminated", "safe") never goes alone: "roaches eliminated
+//     in kitchen" is not "roaches in kitchen". Its part goes whole. So does
+//     the part of a word of access (noteAsRead masks it): the word beside it
+//     can be the code.
 //   - Two words go together: a refused pair, a figure with its unit or period.
 //   - A part goes whole when the screens refuse it as a text, when it holds a
 //     removed code, or when it is an order to the customer. Not for the
 //     screen that reads how a part opens: "open gap under the sink" is a
 //     finding.
-const GOES_ALONE = new Set(['trade_name', 'active_ingredient', 'access_code', 'time']);
+const GOES_ALONE = new Set(['trade_name', 'active_ingredient', 'time']);
 // The words of a product name that go together. A name that ends in plain
 // report words the product screen lets stand ("Advion Gel") goes by its own
 // words, and the plain word stays: "put down some advion gel" may be "I put
@@ -199,8 +229,13 @@ async function reportNoteRejection({ note, text, catalogRows = null, db = null }
 // The sentence code writes when there is no note to send: today's fallback
 // recap, from the service name, the areas and the visit outcome on the record
 // (an inspection or a declined visit never reads as a treatment).
+// A sentence of the recap the reader's screen refuses is left out, so the
+// reader shows the rest ("We checked the accessible areas": "accessible"
+// reads as a word of access).
 function fixedReportNote({ serviceType, areasServiced, visitOutcome } = {}) {
-  return CompletionRecap.deterministicRecap({ serviceType, areasTreated: areasServiced, visitOutcome });
+  const recap = CompletionRecap.deterministicRecap({ serviceType, areasTreated: areasServiced, visitOutcome });
+  const shown = (text) => !noteRecordCopyViolations(text).length;
+  return shown(recap) ? recap : recap.split(/(?<=\.)\s+/).filter(shown).join(' ');
 }
 
 module.exports = {

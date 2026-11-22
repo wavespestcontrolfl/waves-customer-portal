@@ -40,7 +40,8 @@ describe('same order, with the report\'s own screens', () => {
     ['a period of time is left out with its figure', 'set 4 traps in the attic will recheck in two weeks', 'I set four traps in the attic and will recheck.'],
     ['a refused pair of words is left out together', 'quiet visit no issues sprayed outside', 'It was a quiet visit and I sprayed outside.'],
     ['a part for the office is left out whole', 'billing: charge extra for the wasp nest. customer was rude. treated outside', 'I treated outside.'],
-    ['a word the reader refuses is left out', 'treated around the gate and the fence', 'I treated around the fence.'],
+    ['a part that names a gate goes whole', 'treated around the gate and the fence, swept the eaves', 'I swept the eaves.'],
+    ['an inch mark as the last character stays', 'gap under the door was 5"', 'The gap under the door was 5"'],
     ['a note of four sentences keeps four sentences', 'checked the kitchen. checked the shed. checked the attic. checked the yard',
       'I checked the kitchen. I checked the shed. I checked the attic. I checked the yard.'],
   ])('%s', async (_label, note, text) => {
@@ -72,6 +73,8 @@ describe('the report\'s word screens run on the text', () => {
     ['a word for the office', 'treated outside. customer paid by check', 'I treated outside. You paid by check.', 'not_for_customer'],
     ['a remark about the customer', 'customer was rude. treated outside', 'You were rude. I treated outside.', 'not_for_customer'],
     ['a line break', 'treated outside. swept webs', 'I treated outside.\nI swept webs.', 'shape'],
+    ['a banned word in full-width letters', 'spray is safe', 'Spray is ｓａｆｅ.', 'shape'],
+    ['a full-width sentence mark', 'treated outside. use rose at the back', 'I treated outside。Use rose at the back.', 'shape'],
     ['a sign-off', 'treated outside', 'I treated outside. - Marcus', 'shape'],
     ['no text', 'treated outside', '  ', 'empty'],
     ['a text that is too long', 'treated outside', `I treated outside. ${'I treated outside. '.repeat(40)}`, 'too_long'],
@@ -119,6 +122,17 @@ describe('the note a model reads holds no access code', () => {
     await expect(refusal('used 4471 at the side. treated shed', 'I treated the shed.')).resolves.toBeNull();
   });
 
+  test('a word of access never goes alone: its part is masked with the word beside it', async () => {
+    const note = 'Gate: bluebird. Treated shed.';
+    expect(noteAsRead(note)).toBe('[redacted]. Treated shed.');
+    await expect(refusal(note, 'I treated the shed.')).resolves.toBeNull();
+    expect(await refusal(note, 'Bluebird. I treated the shed.')).not.toBeNull();
+    // Two parts the reader's screen reads together: the sentence is masked whole.
+    expect(noteAsRead('set traps in the garage, by the AC unit. swept eaves')).toBe('[redacted]. swept eaves');
+    // A number inside a part keeps its mark.
+    expect(noteAsRead('found 2.5 inch gap, side gate open')).toBe('found 2.5 inch gap, [redacted]');
+  });
+
   test('a pass phrase', async () => {
     const note = 'the pass phrase is bluebird. treated shed';
     expect(noteAsRead(note)).not.toContain('bluebird');
@@ -145,6 +159,16 @@ describe('the stored text and the fixed sentence', () => {
     expect(text).toMatch(/inspection/i);
     expect(text).not.toMatch(/we treated/i);
     expect(reportNoteCustomerCopy({ reportNote: { v: 1, text, source: 'fixed' } }).body).toBe(text);
+  });
+
+  test('the fixed sentence is one the reader shows, for every visit outcome with and with no areas', () => {
+    const outcomes = [undefined, 'completed', 'inspection_only', 'customer_declined', 'follow_up_needed', 'customer_concern', 'incomplete'];
+    outcomes.forEach((visitOutcome) => [['kitchen'], []].forEach((areasServiced) => {
+      const text = fixedReportNote({ serviceType: 'Pest Control', areasServiced, visitOutcome });
+      expect(text).toMatch(/Pest Control/);
+      expect(reportNoteCustomerCopy({ reportNote: { v: 1, text, source: 'fixed' } }).body).toBe(text);
+    }));
+    expect(fixedReportNote({ serviceType: 'Pest Control', areasServiced: [], visitOutcome: 'inspection_only' })).not.toMatch(/accessible/);
   });
 
   test('a catalog that cannot be read throws: the caller uses the fixed sentence', async () => {
