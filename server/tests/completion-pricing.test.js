@@ -38,6 +38,16 @@ describe('completion estimate evidence', () => {
   test('another property never matches the same customer service', () => {
     expect(propertyMatches({ property_id: 'a' }, { property_id: 'b' })).toBe(false);
   });
+  // An accept at the customer's own address leaves its visits unstamped; they were refused as "another property".
+  test('a visit with no property or stamped address is at the customer\'s primary address', () => {
+    const estimate = { address: '12 Palm Way, Bradenton, FL 34205' };
+    const unstamped = { property_id: null, service_address_line1: null };
+    expect(propertyMatches(unstamped, estimate, { address_line1: '12 Palm Way', city: 'Bradenton', zip: '34205' })).toBe(true);
+    expect(propertyMatches(unstamped, estimate, { address_line1: '40 Gulf Dr', city: 'Bradenton', zip: '34205' })).toBe(false);
+    expect(propertyMatches(unstamped, estimate)).toBe(false);
+    const stampedElsewhere = { service_address_line1: '40 Gulf Dr', service_address_city: 'Bradenton', service_address_zip: '34205' };
+    expect(propertyMatches(stampedElsewhere, estimate, { address_line1: '12 Palm Way' })).toBe(false);
+  });
   test('the accepted saving is named by the tier on the line and the estimate\'s own discount', () => {
     const silver = (sourceLine = {}, perApplicationPrice = 94.05) => ({ ...line, perApplicationPrice, sourceLine: { perTreatment: 110, priceAfterDiscount: perApplicationPrice,
       discount: { effectiveDiscount: 0.1, appliedDiscounts: [{ type: 'waveguard', tier: 'silver', amount: 0.1 }] }, ...sourceLine } });
@@ -88,6 +98,22 @@ describe('completion estimate evidence', () => {
       expect(await reason(visit, fakeDb({ addons: [{ id: 'a1' }] }))).toBe('add_ons');
       expect(await reason(visit, fakeDb({ estimateRow: { ...estimate, status: 'sent' } }))).toBe('estimate_not_accepted');
       expect(await reason(visit, fakeDb({ estimateRow: { ...estimate, estimate_data: {} } }))).toBe('discount_unnamed');
+    });
+
+    // A multi-program accept leaves each first visit unpriced; the first bill covers it at the accepted price.
+    test('the first bill prices a visit the accept left unpriced; a priced visit must still match', async () => {
+      const unpriced = { ...visit, estimated_price: null };
+      expect((await acceptedVisitBreakdown(unpriced, { database: fakeDb() })).reason).toBe('not_priced');
+      expect((await acceptedVisitBreakdown(unpriced, { database: fakeDb(), firstApplication: true })).breakdown)
+        .toMatchObject({ base: 110, amount: 94.05 });
+      expect((await acceptedVisitBreakdown({ ...visit, estimated_price: 99 }, { database: fakeDb(), firstApplication: true })).reason)
+        .toBe('price_changed');
+      // A program with no saving still bills its own price there, so it does not keep a bundle's discounts off.
+      adminCustomers.scheduleLinesFromEstimate.mockReturnValue([{ ...estimateLine, perApplicationPrice: 110,
+        sourceLine: { perTreatment: 110, priceAfterDiscount: 110 } }]);
+      expect((await acceptedVisitBreakdown({ ...visit, estimated_price: 110 }, { database: fakeDb() })).reason).toBe('no_discount');
+      expect((await acceptedVisitBreakdown(unpriced, { database: fakeDb(), firstApplication: true })).breakdown)
+        .toEqual({ base: 110, amount: 110, discounts: [] });
     });
   });
 

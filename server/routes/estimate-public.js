@@ -14359,7 +14359,8 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
               const manualSlice = acceptManualDiscountItemization?.perApplication > 0
                 ? acceptManualDiscountItemization.perApplication
                 : 0;
-              lineItems.push(...await require('../services/estimate-first-application-invoice').itemizeFirstApplication({
+              const { itemizeFirstApplication, itemizeFirstApplicationDiscounts } = require('../services/estimate-first-application-invoice');
+              const applicationLines = await itemizeFirstApplication({
                 estimateId: estimate.id, customerId,
                 scheduledServiceId: standardConversionResult.firstScheduledServiceId,
                 rowAmounts: firstApplicationRowAmounts,
@@ -14371,9 +14372,9 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
                     ? Math.round((standardFirstApplicationAmount + manualSlice) * 100) / 100
                     : standardFirstApplicationAmount,
                 },
-              }, trx));
+              }, trx);
               if (manualSlice > 0) {
-                lineItems.push({
+                applicationLines.push({
                   // _kind tags the row for the admin invoice editor's
                   // discount accounting (codex 2652 r1: the editor only
                   // counts _kind==='discount' rows toward lineDiscountAmt);
@@ -14384,6 +14385,13 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
                   unit_price: -manualSlice,
                 });
               }
+              // GATE_INVOICE_ESTIMATE_DISCOUNT_LINES: the WaveGuard tier and the
+              // estimate's own discount as their own lines (same total).
+              lineItems.push(...await itemizeFirstApplicationDiscounts({
+                estimateId: estimate.id, customerId,
+                scheduledServiceId: standardConversionResult.firstScheduledServiceId,
+                lines: applicationLines,
+              }, trx));
             }
             const anySetupLine = setupFeeApplies || acceptedRodentSetupAmount > 0 || acceptedMistingInstallAmount > 0;
             const setupTitleWord = acceptedMistingInstallAmount > 0 && !setupFeeApplies && !(acceptedRodentSetupAmount > 0)
