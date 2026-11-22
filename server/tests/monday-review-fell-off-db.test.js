@@ -1,5 +1,5 @@
 /**
- * Monday review bell, list 1 as "customer alerts that fell off with no reply" (GATE_MONDAY_FELL_OFF_LINE; owner
+ * Monday review bell, list 1 as "customer alerts that fell off with no reply" (owner
  * 2026-11-05, decision D3) against live Postgres: the loader's SQL, the customer-contact test, the name read and the
  * relevance sweep's own verdicts (admin-alert-relevance.js classify / loadSubjects / subjectFor / judge) on real rows. Every fixture carries this run's marker,
  * so counts never depend on rows other suites left behind and cleanup touches only what this suite wrote. It
