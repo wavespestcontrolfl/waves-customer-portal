@@ -10,14 +10,13 @@
  */
 
 const db = require('../../models/db');
-const { etDateString } = require('../../utils/datetime-et');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 const LIST_KEY = 'new_home';
 const DEFAULT_LIMIT = 40;
 const RETRY_AFTER_HOURS = 20; // a failed or missing_fact row is read again after this many hours
 const RETRY_WINDOW_DAYS = 21; // and only while its deed is no older than this
 const HOUR_MS = 60 * 60 * 1000;
-const DAY_MS = 24 * HOUR_MS;
 
 const PRICE_STATUSES = ['priced', 'missing_fact', 'not_clean', 'failed'];
 const RETRY_STATUSES = ['failed', 'missing_fact'];
@@ -51,8 +50,7 @@ async function dueForPrice(options, conn = db) {
   if (!Number.isInteger(limit) || limit < 1) throw new TypeError('dueForPrice: limit must be a positive integer');
   const at = asDate(now, 'dueForPrice');
   const retryBefore = new Date(at.getTime() - RETRY_AFTER_HOURS * HOUR_MS);
-  const [y, m, d] = etDateString(at).split('-').map(Number);
-  const oldestDeed = new Date(Date.UTC(y, m - 1, d) - RETRY_WINDOW_DAYS * DAY_MS).toISOString().slice(0, 10);
+  const oldestDeed = etDateString(addETDays(at, -RETRY_WINDOW_DAYS));
   return conn('mail_prospects')
     .where({ list_key: LIST_KEY, status: 'eligible' })
     .where((b) => b
