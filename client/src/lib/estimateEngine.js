@@ -739,7 +739,9 @@ export function rodentBaitWaveguardFlags() {
 // cleared). Tree density does NOT move a pest price (owner directive
 // 2026-07-30), nor mosquito one-time, misting, palm injection, termite or
 // rodent. What does read it (server pricing-engine/service-pricing.js):
-//   Tree & Shrub: no-count fallback tree estimate (svcTs).
+//   Tree & Shrub: the tree estimate it falls back to while the Tree Count
+//     box is blank (svcTs). A typed count, zero included, is the count, and
+//     the density is not read.
 //   Mosquito: tree pressure factor and the heavy-trees monthly recommendation (svcMosquito).
 //   Lawn family: the turf estimate's complexity score when no measured or
 //     lookup turf exists, plus the "heavy tree canopy" turf-review reason
@@ -747,7 +749,7 @@ export function rodentBaitWaveguardFlags() {
 //   Flea: the exterior-spray tree adjustment (svcFleaExterior).
 export function treeDensityAffectsPrice(form = {}) {
   return !!(
-    form.svcTs ||
+    (form.svcTs && String(form.treeCount ?? "").trim() === "") ||
     form.svcMosquito ||
     form.svcLawn ||
     form.svcOnetimeLawn ||

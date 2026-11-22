@@ -191,5 +191,16 @@ describe("tree density box", () => {
       expect(container.querySelector("#estimate-treeDensity")).toBeTruthy();
     });
     expect(container.querySelector("#estimate-treeDensity").value).toBe("HEAVY");
+
+    // A typed tree count is the count: Tree & Shrub no longer reads the density.
+    fireEvent.change(container.querySelector("#estimate-treeCount"), { target: { value: "4" } });
+    await waitFor(() => {
+      expect(container.querySelector("#estimate-treeDensity")).toBeNull();
+    });
+    fireEvent.change(container.querySelector("#estimate-treeCount"), { target: { value: "" } });
+    await waitFor(() => {
+      expect(container.querySelector("#estimate-treeDensity")).toBeTruthy();
+    });
+    expect(container.querySelector("#estimate-treeDensity").value).toBe("HEAVY");
   });
 });

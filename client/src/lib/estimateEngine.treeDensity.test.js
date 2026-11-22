@@ -20,6 +20,14 @@ describe("treeDensityAffectsPrice", () => {
     expect(treeDensityAffectsPrice({ svcMosquito: true })).toBe(true);
   });
 
+  it("is false for Tree & Shrub once a tree count is typed, zero included: the count replaces the density", () => {
+    expect(treeDensityAffectsPrice({ svcTs: true, treeCount: "6" })).toBe(false);
+    expect(treeDensityAffectsPrice({ svcTs: true, treeCount: "0" })).toBe(false);
+    expect(treeDensityAffectsPrice({ svcTs: true, treeCount: 0 })).toBe(false);
+    expect(treeDensityAffectsPrice({ svcTs: true, treeCount: "  " })).toBe(true);
+    expect(treeDensityAffectsPrice({ svcTs: true, treeCount: "6", svcMosquito: true })).toBe(true);
+  });
+
   it("stays true when pest is picked alongside a service that reads it", () => {
     expect(treeDensityAffectsPrice({ svcPest: true, svcMosquito: true })).toBe(true);
     expect(treeDensityAffectsPrice({ svcPest: true, svcTs: true })).toBe(true);
