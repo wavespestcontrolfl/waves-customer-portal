@@ -1196,6 +1196,11 @@ test('bond terms: the 1-, 5- and 10-year terms count in every wording, one term 
     'Waves offers three warranty terms:\n- **10 years**\n- **5 years**\n- **1 year**',
     // A pronoun sentence after the warranty sentence still names its terms.
     'Waves offers an optional termite warranty. It comes in 1-, 5- or 10-year terms.',
+    'These agreements come in 1-, 5-, or 10-year terms.',
+    // A financing mention beside the bond's own terms takes nothing away.
+    'Waves offers an optional termite bond in 1-, 5- or 10-year terms, with financing available.',
+    'Waves offers financing, and its termite bond comes in 1-, 5- or 10-year terms.',
+    'The warranty contract runs for 1, 5 or 10 years.',
   ];
   for (const text of stated) expect([text, score('E7', text).expected.bond_term_options]).toEqual([text, true]);
   const notStated = [
@@ -1203,6 +1208,11 @@ test('bond terms: the 1-, 5- and 10-year terms count in every wording, one term 
     'Waves offers termite treatment and an optional bond. Financing options run for 1, 5 or 10 years.',
     'Waves offers an optional bond. Financing terms of 1, 5 or 10 years are available.',
     'Waves offers an optional bond, and 1-, 5- or 10-year financing terms.',
+    'Financing is available on 1-, 5- or 10-year terms.',
+    // Another service's contract owns its own durations, also beside a bond.
+    'Waves offers an optional termite bond. Monitoring contracts run for 1, 5 or 10 years.',
+    'Waves offers an optional termite bond, and monitoring contracts run for 1, 5 or 10 years.',
+    'Waves offers an optional termite bond and 1-, 5- or 10-year monitoring contracts.',
     // All three lengths must be there: a repeated length is not the set.
     'The warranty has 1-, 5- or 5-year terms.',
     'The warranty has 1-, 10- or 10-year terms.',
