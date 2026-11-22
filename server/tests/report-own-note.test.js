@@ -161,10 +161,13 @@ describe('a code on the customer\'s file is found by its value, in any wording',
     // The link ends where the visit card's pass link ends.
     expect(storedCodesOf(undefined, [{ code: null, instructions: 'https://passes.example/p/abcdef<br>Show it' }]))
       .toEqual(['passesexamplepabcdef']);
-    // A gate directory row of the type "instructions" is a customer's gate-code
-    // field, as filed: a code field, word by word. Other directions are not.
-    expect(storedCodesOf(undefined, [{ code: null, instructions: 'Bluebird', access_type: 'instructions' }])).toEqual(['bluebird']);
-    expect(storedCodesOf(undefined, [{ code: '6612', instructions: 'Bluebird lane side', access_type: 'keypad' }])).toEqual(['6612']);
+    // Directions of one word are a code. The words of a sentence are not:
+    // the other notes of the neighborhood are read as before.
+    expect(storedCodesOf(undefined, [{ code: null, instructions: ' Bluebird. ' }])).toEqual(['bluebird']);
+    expect(storedCodesOf(undefined, [{ code: '6612', instructions: 'Bluebird lane side' }])).toEqual(['6612']);
+    const prose = storedCodesOf(undefined, [{ code: null, instructions: 'Use the side entrance' }]);
+    expect(prose).toEqual([]);
+    expect(noteAsRead('treated the shed', prose)).toBe('treated the shed');
     // Of a neighbor's pass only the link is a code: its words and figures are not this customer's.
     expect(storedCodesOf(undefined, [], [{ instructions: 'Show this at gate 4471: https://passes.example/p/qrstuv' }]))
       .toEqual(['passesexamplepqrstuv']);
@@ -243,8 +246,8 @@ describe('a code on the customer\'s file is found by its value, in any wording',
       property_preferences: { lockbox_code: 'bluebird' },
       customer_access_codes: [{ code: '#9031', instructions: null }, { code: null, instructions: 'call box, dial 2040' }],
       'neighborhood_access as gate': [
-        { code: '6612#', instructions: 'guard on weekends', access_type: 'keypad' },
-        { code: null, instructions: 'Kingfisher', access_type: 'instructions' },
+        { code: '6612#', instructions: 'guard on weekends' },
+        { code: null, instructions: 'Kingfisher' },
       ],
       'customer_access_codes as pass': [{ instructions: 'Gate 5150. https://passes.example/p/qrstuv' }],
     });
@@ -260,7 +263,7 @@ describe('a code on the customer\'s file is found by its value, in any wording',
         table: 'neighborhood_access as gate',
         join: [['customer_properties as home', 'home.neighborhood_id', 'gate.neighborhood_id']],
         where: ['home.customer_id', 'customer-1'],
-        columns: ['gate.code', 'gate.instructions', 'gate.access_type'],
+        columns: ['gate.code', 'gate.instructions'],
       },
       {
         table: 'customer_access_codes as pass',
