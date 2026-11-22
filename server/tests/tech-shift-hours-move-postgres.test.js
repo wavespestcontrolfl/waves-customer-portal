@@ -348,9 +348,10 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
       // later write of its own. The edit lands on another connection inside that assignment (the
       // caller's own guard hook), after the service's move and before the assignment's locked read.
       describe('a unit that names a technician', () => {
-        const lengthenAtAssignment = (id) => async ({ service }) => {
-          if (String(service.id) === id && (await rowOf(id)).day === nextDay) await f.db('scheduled_services').where({ id }).update({ estimated_duration_minutes: 240 });
+        const editAtAssignment = (id, patch) => async ({ service }) => {
+          if (String(service.id) === id && (await rowOf(id)).day === nextDay) await f.db('scheduled_services').where({ id }).update(patch);
         };
+        const lengthenAtAssignment = (id) => editAtAssignment(id, { estimated_duration_minutes: 240 });
         const toOtherTech = (stop, moveGuard) => move(stop.a, nextDay, { start: '10:00', end: '11:00' }, 'auto_dispatch',
           { overlapAdvisory: true, technicianId: f.ids.otherTech, ...(moveGuard ? { moveGuard } : {}) });
         // The fixture's stand-in for the technician cards lacks the "visit moved" card, which a refused assignment sends to the technician who keeps the service.
@@ -378,11 +379,28 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
           ]);
         });
 
-        test('gate off: the same edit does not stop the assignment, as before', async () => {
+        test('a service dispatch moved to another hour after its move is not assigned: the plan is stale', async () => {
+          const stop = await seedStop();
+          // 08:00 to 09:00 fits the named technician's shift, but the verdict and the clash checks were for 10:00.
+          const out = await toOtherTech(stop, editAtAssignment(stop.a, { window_start: '08:00', window_end: '09:00' }));
+          expect(out.visitMove.failed).toMatchObject([{ id: stop.a, code: 'ASSIGNMENT_STALE', movedButUnassigned: true }]);
+          expect(await stopOf(stop)).toMatchObject([
+            { day: nextDay, window_start: '08:00:00', technician_id: f.ids.technician },
+            { day: nextDay, window_start: '11:00:00', technician_id: f.ids.otherTech },
+          ]);
+        });
+
+        test('gate off: the same edits do not stop the assignment, as before', async () => {
           delete process.env.GATE_TECH_SHIFT_HOURS;
           const stop = await seedStop();
           expect((await toOtherTech(stop, lengthenAtAssignment(stop.a))).visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
           expect((await stopOf(stop)).map((r) => r.technician_id)).toEqual([f.ids.otherTech, f.ids.otherTech]);
+          await f.db('scheduled_services').del();
+          await f.db('service_visits').del();
+          const second = await seedStop();
+          // The moved service is still assigned at this step; the stop's later steps report the stale plan, as before.
+          await toOtherTech(second, editAtAssignment(second.a, { window_start: '08:00', window_end: '09:00' }));
+          expect(await rowOf(second.a)).toMatchObject({ day: nextDay, window_start: '08:00:00', technician_id: f.ids.otherTech });
         });
       });
 
