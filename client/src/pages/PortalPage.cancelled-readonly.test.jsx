@@ -54,8 +54,8 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
-async function renderBilling(customer) {
-  render(<BillingTab customer={customer} refreshCustomer={vi.fn()} />);
+async function renderBilling(customer, props = {}) {
+  render(<BillingTab customer={customer} refreshCustomer={vi.fn()} {...props} />);
   await waitFor(() => expect(api.getBalance).toHaveBeenCalled());
   // The loading copy also mentions payment history; wait for the section title.
   await screen.findByText(/^Payment History$/i);
@@ -110,7 +110,9 @@ describe('BillingTab — add-a-service and refer cards', () => {
 
   it('a cancelled account sees neither and never asks for recommendations', async () => {
     api.getPropertyRecommendations.mockResolvedValue(RECS);
-    await renderBilling({ ...baseCustomer, cancelled: true, cancelledAt: '2026-08-22' });
+    // onSwitchTab is passed, as the page passes it. Without it the refer card
+    // never renders, and this test would pass with the cancelled guard removed.
+    await renderBilling({ ...baseCustomer, cancelled: true, cancelledAt: '2026-08-22' }, { onSwitchTab: vi.fn() });
     expect(api.getPropertyRecommendations).not.toHaveBeenCalled();
     expect(screen.queryByText('Lawn Care')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Refer a friend' })).not.toBeInTheDocument();
