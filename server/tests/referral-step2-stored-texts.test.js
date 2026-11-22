@@ -50,28 +50,28 @@ describe('inviteSmsWithOffer (the invite text, column and referral_invite row)',
 
   test('gate on with no friend credit to state: the seeded "You\'ll both save" becomes the neutral words, never a reward', () => {
     for (const refereeCents of [0, undefined, null, -5, NaN]) {
-      expect(step2.inviteSmsWithOffer(fillColumn(COLUMN_SEED), { step2On: true, refereeCents })).toBe(
+      expect(step2.inviteSmsWithOffer(fillColumn(COLUMN_SEED), { step2On: true, refereeCents, link: LINK })).toBe(
         `Hi Jo! Your neighbor Sam recommended Waves. Get a free quote: ${LINK}`,
       );
       // The referral_invite row already names no reward: unchanged.
-      expect(step2.inviteSmsWithOffer(fillRow(ROW_SEED), { step2On: true, refereeCents })).toBe(fillRow(ROW_SEED));
+      expect(step2.inviteSmsWithOffer(fillRow(ROW_SEED), { step2On: true, refereeCents, link: LINK })).toBe(fillRow(ROW_SEED));
     }
   });
 
   test('the column text gets the approved words with the live amount', () => {
-    expect(step2.inviteSmsWithOffer(fillColumn(COLUMN_SEED), { step2On: true, refereeCents: 5000 })).toBe(
+    expect(step2.inviteSmsWithOffer(fillColumn(COLUMN_SEED), { step2On: true, refereeCents: 5000, link: LINK })).toBe(
       `Hi Jo! Your neighbor Sam recommended Waves. Start a plan and get a $50 credit after your first plan service: ${LINK}`,
     );
   });
 
   test('the referral_invite row gets the approved words and keeps its STOP line', () => {
-    expect(step2.inviteSmsWithOffer(fillRow(ROW_SEED), { step2On: true, refereeCents: 5000 })).toBe(
+    expect(step2.inviteSmsWithOffer(fillRow(ROW_SEED), { step2On: true, refereeCents: 5000, link: LINK })).toBe(
       `Hi Jo, Sam recommended Waves to you. Start a plan and get a $50 credit after your first plan service: ${LINK}\n\nReply STOP to opt out.`,
     );
   });
 
   test('cents are shown to the cent', () => {
-    expect(step2.inviteSmsWithOffer(fillColumn(COLUMN_SEED), { step2On: true, refereeCents: 2550 })).toContain('get a $25.50 credit after');
+    expect(step2.inviteSmsWithOffer(fillColumn(COLUMN_SEED), { step2On: true, refereeCents: 2550, link: LINK })).toContain('get a $25.50 credit after');
   });
 
   test('a text an admin rewrote is left as it is', () => {
@@ -79,15 +79,23 @@ describe('inviteSmsWithOffer (the invite text, column and referral_invite row)',
       `Hi Jo, Sam says Waves is great: ${LINK}`,
       `Hi Jo! Sam recommended Waves. You'll both save $10 when you sign up: ${LINK}`,
       `Hi Jo! Your neighbor Sam recommended Waves. You'll both save when you sign up, so call us: ${LINK} Thanks!`,
-    ]) for (const refereeCents of [5000, 0]) expect(step2.inviteSmsWithOffer(edited, { step2On: true, refereeCents })).toBe(edited);
+    ]) for (const refereeCents of [5000, 0]) expect(step2.inviteSmsWithOffer(edited, { step2On: true, refereeCents, link: LINK })).toBe(edited);
+  });
+
+  test('a text an admin pointed at something else than the referral link is not swapped, and neither is a text with no link to match', () => {
+    const phone = COLUMN_SEED.replace('{referee_name}', 'Jo').replace('{referrer_name}', 'Sam').replace('{referral_link}', '9415550100');
+    expect(step2.inviteSmsWithOffer(phone, { step2On: true, refereeCents: 5000, link: LINK })).toBe(phone);
+    const rowPhone = `Hi Jo, Sam recommended Waves to you. Get a free quote: 9415550100\n\nReply STOP to opt out.`;
+    expect(step2.inviteSmsWithOffer(rowPhone, { step2On: true, refereeCents: 5000, link: LINK })).toBe(rowPhone);
+    expect(step2.inviteSmsWithOffer(fillColumn(COLUMN_SEED), { step2On: true, refereeCents: 5000 })).toBe(fillColumn(COLUMN_SEED));
   });
 
   test('a name that holds the seeded sentence is not swapped: only the stretch before the link counts', () => {
     const name = "Pat recommended Waves. You'll both save when you sign up: ";
     const rewritten = `Hi Jo, ${name}recommended Waves to you. Call us: ${LINK}`;
-    expect(step2.inviteSmsWithOffer(rewritten, { step2On: true, refereeCents: 5000 })).toBe(rewritten);
+    expect(step2.inviteSmsWithOffer(rewritten, { step2On: true, refereeCents: 5000, link: LINK })).toBe(rewritten);
     const seeded = fillColumn(COLUMN_SEED, { referee: 'Jo', referrer: name });
-    expect(step2.inviteSmsWithOffer(seeded, { step2On: true, refereeCents: 5000 })).toBe(
+    expect(step2.inviteSmsWithOffer(seeded, { step2On: true, refereeCents: 5000, link: LINK })).toBe(
       `Hi Jo! Your neighbor ${name} recommended Waves. Start a plan and get a $50 credit after your first plan service: ${LINK}`,
     );
   });

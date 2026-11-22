@@ -109,28 +109,29 @@ const memberCreditEmailLine = (rewardDollars, { canTurnOnAutomaticCredit = false
 // The referral invite text submitReferral sends (the Referral Settings column, or the referral_invite row when the
 // column is empty). submitReferral refuses a phone that is already a Waves customer; POST /referrals/invite does not
 // check the recipient, so that route sends the row as stored and promises no credit.
-// head = the words before the offer; legacy = the seeded offer. The seeded text ends "<stretch><link>" with an optional
-// STOP line, so a name that happens to hold the stretch does not match.
+// head = the words before the offer; legacy = the seeded offer. The seeded text ends "<stretch><the referral link>"
+// with an optional STOP line. The match needs that exact link, so a name that happens to hold the stretch does not
+// match, and neither does a text an admin pointed at something else (a phone number in place of the link).
 const SEEDED_INVITE_OFFERS = Object.freeze([
   { head: ' recommended Waves. ', legacy: "You'll both save when you sign up" },
   { head: ' recommended Waves to you. ', legacy: 'Get a free quote' },
 ]);
-const INVITE_TAIL = /^\S+(?:\n\nReply STOP to opt out\.)?$/;
+const INVITE_STOP_LINE = '\n\nReply STOP to opt out.';
 const friendInviteSmsOffer = (refereeCents) => `Start a plan and get a ${dollars(refereeCents)} credit after your first plan service`;
 // With the gate on and no friend credit to state (a $0 setting, the program paused, the settings unreadable), a seeded
 // invite promises nothing: the referral_invite row's own words, which name no reward.
 const NEUTRAL_INVITE_OFFER = 'Get a free quote';
 
-// `body` is the RENDERED text (names and link filled in). step2On false (the gate is off): exactly as rendered.
-function inviteSmsWithOffer(body, { step2On = false, refereeCents = 0 } = {}) {
+// `body` is the RENDERED text (names and link filled in); `link` is the referral link the caller rendered it with.
+// step2On false (the gate is off), or no link to match: exactly as rendered.
+function inviteSmsWithOffer(body, { step2On = false, refereeCents = 0, link = '' } = {}) {
   const text = String(body ?? '');
-  if (!step2On) return text;
+  if (!step2On || !link) return text;
   const offer = Number(refereeCents) > 0 ? friendInviteSmsOffer(refereeCents) : NEUTRAL_INVITE_OFFER;
   for (const { head, legacy } of SEEDED_INVITE_OFFERS) {
-    const seeded = `${head}${legacy}: `;
-    const at = text.lastIndexOf(seeded);
-    if (at >= 0 && INVITE_TAIL.test(text.slice(at + seeded.length))) {
-      return `${text.slice(0, at)}${head}${offer}: ${text.slice(at + seeded.length)}`;
+    for (const tail of [link, `${link}${INVITE_STOP_LINE}`]) {
+      const seeded = `${head}${legacy}: ${tail}`;
+      if (text.endsWith(seeded)) return `${text.slice(0, text.length - seeded.length)}${head}${offer}: ${tail}`;
     }
   }
   return text;

@@ -590,7 +590,7 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
     workflow: 'referral_invite',
     entity_type: 'referral',
     entity_id: referral.id,
-  }), { step2On: isEnabled('referralStep2'), refereeCents: await step2FriendCreditCents() });
+  }), { step2On: isEnabled('referralStep2'), refereeCents: await step2FriendCreditCents(), link: referralLink });
   const smsSent = await sendSMS(normalizedPhone || phone.trim(), smsBody, {
     messageType: 'referral_invite',
     referralId: referral.id,
