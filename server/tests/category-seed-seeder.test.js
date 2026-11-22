@@ -859,7 +859,8 @@ describe('customer-question manifest 2026-11-18', () => {
 // A separate manifest, like the two above. Seed it with
 // `--file=server/data/pest-insider-briefs-v1.json`. Each brief gives a blog
 // post to one fact in server/data/pest-insider-facts-v1.json that no post on
-// the Waves blog states yet (owner 2026-11-22, "queue": at most two a month).
+// the Waves blog states yet (owner 2026-11-22, "queue"). The drip windows open
+// two a month; the queue has no cap for one series.
 // The email links a fact to its post by copying a passage, so each brief
 // requires one sentence that states the fact as the bank's quotes do.
 describe('pest insider fact manifest v1', () => {
@@ -872,7 +873,7 @@ describe('pest insider fact manifest v1', () => {
   const byId = (id) => manifest.briefs.find((b) => b.id === id);
   const claims = (b) => [b.thesis, ...b.outline].join(' ');
 
-  test('loads eight briefs, at most two a month, whose ids, slugs and drip windows are unique, also against the other shipped manifests', () => {
+  test('loads eight briefs whose drip windows open at most two a month, and whose ids, slugs and windows are unique, also against the other shipped manifests', () => {
     expect(ids).toEqual(ALL);
     const windows = manifest.briefs.map((b) => b.window);
     expect(new Set(windows).size).toBe(windows.length);
