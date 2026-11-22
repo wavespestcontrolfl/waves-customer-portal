@@ -1,5 +1,5 @@
 /**
- * /api/admin/prospects: staff-only, read-only Builders and Restaurants lists. Input is checked before the service runs.
+ * /api/admin/prospects: staff-only, read-only Builders, Restaurants and Mail lists. Input is checked before the service runs.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.setTimeout(30000);
@@ -8,6 +8,7 @@ let mockRole = 'admin';
 const mockList = jest.fn();
 const mockPermits = jest.fn();
 const mockRestaurants = jest.fn();
+const mockMail = jest.fn();
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => {
@@ -32,6 +33,10 @@ jest.mock('../services/prospects/restaurant-list', () => ({
   PERIODS: [30, 90],
   listRestaurants: (...args) => mockRestaurants(...args),
 }));
+jest.mock('../services/prospects/mail-list', () => ({
+  VIEWS: ['live', 'not_eligible', 'unmatched'],
+  listMailProspects: (...args) => mockMail(...args),
+}));
 
 const express = require('express');
 const logger = require('../services/logger');
@@ -48,7 +53,7 @@ beforeAll((done) => {
   });
 });
 afterAll((done) => { server.close(done); });
-beforeEach(() => { mockRole = 'admin'; mockList.mockReset(); mockPermits.mockReset(); mockRestaurants.mockReset(); });
+beforeEach(() => { mockRole = 'admin'; mockList.mockReset(); mockPermits.mockReset(); mockRestaurants.mockReset(); mockMail.mockReset(); });
 
 async function get(path) {
   const res = await fetch(`${baseUrl}${path}`);
@@ -154,5 +159,46 @@ describe('GET /restaurants', () => {
     const res = await get('/api/admin/prospects/restaurants');
     expect(res.status).toBe(403);
     expect(mockRestaurants).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /mail', () => {
+  test('defaults to the live view and returns the service answer', async () => {
+    mockMail.mockResolvedValue({ view: 'live', counts: { eligible: 4, heldBack: 1, notEligible: 2, unmatched: 0 }, reasons: [], newestRecordedDate: '2026-11-20', lastCheckedAt: null, rows: [], truncated: false });
+    const res = await get('/api/admin/prospects/mail');
+    expect(res.status).toBe(200);
+    expect(mockMail).toHaveBeenCalledWith({ view: 'live' });
+    expect(res.body.counts).toEqual({ eligible: 4, heldBack: 1, notEligible: 2, unmatched: 0 });
+  });
+
+  test.each(['live', 'not_eligible', 'unmatched'])('passes view=%s through', async (view) => {
+    mockMail.mockResolvedValue({ view, rows: [] });
+    const res = await get(`/api/admin/prospects/mail?view=${view}`);
+    expect(res.status).toBe(200);
+    expect(mockMail).toHaveBeenCalledWith({ view });
+  });
+
+  test.each(['view=held_back', 'view=', 'view=live&extra=1', 'extra=1'])('%s is a 400 and the service never runs', async (query) => {
+    const res = await get(`/api/admin/prospects/mail?${query}`);
+    expect(res.status).toBe(400);
+    expect(mockMail).not.toHaveBeenCalled();
+  });
+
+  test('a service failure is a 500 with a plain sentence; the log carries the error code, not the error text', async () => {
+    logger.error.mockClear();
+    mockMail.mockRejectedValue(Object.assign(new Error("select ... where names = 'TESTER ALEX J' - relation does not exist"), { code: '42P01' }));
+    const res = await get('/api/admin/prospects/mail');
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Could not load the mail list.');
+    expect(JSON.stringify(res.body)).not.toMatch(/relation|TESTER/);
+    expect(logger.error).toHaveBeenCalledWith('[admin-prospects] mail list failed (42P01)');
+    expect(JSON.stringify(logger.error.mock.calls)).not.toMatch(/TESTER/);
+  });
+
+  test('a technician who is not an admin is refused', async () => {
+    mockRole = 'technician';
+    const res = await get('/api/admin/prospects/mail');
+    expect(res.status).toBe(403);
+    expect(mockMail).not.toHaveBeenCalled();
   });
 });
