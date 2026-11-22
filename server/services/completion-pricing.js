@@ -112,27 +112,37 @@ const tierWord = (value) => String(value || '').trim().toLowerCase();
 // acceptanceServiceLists). The tier is the accept's: the estimate's column, else that block's. The rate is
 // tierDiscountForEstimate's send snapshot (its keys are title case), else the block's own rate when the block names
 // the same tier; an estimate that saved neither has rate 0 here, never today's tier table. `tier` is null when the
-// column and the block name different tiers: the records conflict, so neither names a saving.
+// column and the block name different tiers (the records conflict, so neither names a saving), and when the legacy
+// nested block (result.results.recurring) also supplies service rows: which block priced a line is then unknown.
 function savedEstimateTier(estimate, data) {
   const recurring = object(object(data.result || data.engineResult || data).recurring);
+  const nested = object(object(object(data.result || data).results).recurring);
   const savedTier = tierWord(recurring.waveGuardTier || recurring.tier);
   const tier = tierWord(estimate.waveguard_tier) || savedTier;
-  const discounted = DISCOUNTED_TIERS.includes(tier) || DISCOUNTED_TIERS.includes(savedTier);
-  if (!DISCOUNTED_TIERS.includes(tier) || (savedTier && savedTier !== tier)) return { recurring, discounted, tier: null };
+  const discounted = [tier, savedTier, tierWord(nested.waveGuardTier || nested.tier)].some((word) => DISCOUNTED_TIERS.includes(word));
+  const oneBlock = !(Array.isArray(nested.services) && nested.services.length);
+  if (!oneBlock || !DISCOUNTED_TIERS.includes(tier) || (savedTier && savedTier !== tier)) return { recurring, discounted, tier: null };
   const { tierDiscountForEstimate } = require('../routes/estimate-public');
   const savedRate = savedTier === tier ? Number(recurring.discount) || 0 : 0;
   const amount = tierDiscountForEstimate(data, `${tier[0].toUpperCase()}${tier.slice(1)}`, savedRate);
   return { recurring, discounted, tier: { tier, amount } };
 }
 
+// A staff discount on recurring work in any result the estimate persisted: the mapped result (with the tier's block)
+// and the engine's own result beside it, which the mapped result otherwise hides from the summary reader.
+function staffDiscountOnRecurring(data, tierBlock) {
+  const { staffDiscountReachesRecurring } = require('../routes/admin-customers')._private;
+  return staffDiscountReachesRecurring(data, tierBlock)
+    || staffDiscountReachesRecurring({ ...data, result: undefined }, object(object(data.engineResult).recurring));
+}
+
 // What names an accepted estimate's savings: its own staff discount (applied after the tier) when that reaches
 // recurring work, whether the estimate carries a WaveGuard tier saving at all, and its saved tier with that tier's
-// rate (savedEstimateTier). `estimateTier` is null when a staff discount reaches recurring work in either saved shape:
+// rate (savedEstimateTier). `estimateTier` is null when a staff discount reaches recurring work in any saved shape:
 // that discount shares each line's saving, so the tier alone cannot name it.
 function estimateDiscountContext(estimate) {
   if (!estimate) return {};
   const { normalizeManualDiscountSummary } = require('../routes/estimate-public');
-  const { staffDiscountReachesRecurring } = require('../routes/admin-customers')._private;
   const data = object(estimate.estimate_data);
   const manual = normalizeManualDiscountSummary(data);
   const reachesRecurring = !!manual && Number(manual.recurringAmount ?? manual.amount) > 0;
@@ -140,7 +150,7 @@ function estimateDiscountContext(estimate) {
   return {
     manualName: reachesRecurring ? String(manual.label || '').trim() || null : null,
     tierDiscounted: saved.discounted,
-    estimateTier: staffDiscountReachesRecurring(data, saved.recurring) ? null : saved.tier,
+    estimateTier: staffDiscountOnRecurring(data, saved.recurring) ? null : saved.tier,
   };
 }
 

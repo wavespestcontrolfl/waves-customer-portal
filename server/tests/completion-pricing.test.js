@@ -162,6 +162,12 @@ describe('completion estimate evidence', () => {
       expect((await read(engineOnly({ tier: 'Platinum', discount: 0.2 }))).breakdown.discounts)
         .toEqual([{ name: 'WaveGuard Platinum', dollars: 22 }]);
       expect((await read(engineOnly({ tier: 'Platinum', discount: 0.2, manualDiscount: { amount: 5 } }))).reason).toBe('discount_unnamed');
+      // A staff discount kept only on the engine's own result, beside the mapped result, still shares the saving.
+      expect((await read(platinum({ tier: 'Platinum', discount: 0.2 }, { engineResult: { summary: { manualDiscount: { amount: 5 } } } }))).reason)
+        .toBe('discount_unnamed');
+      // The legacy nested block also supplies rows: which block priced the line is unknown, so nothing is named.
+      expect((await read({ ...estimate, waveguard_tier: 'Platinum', estimate_data: { result: { recurring: { tier: 'Platinum', discount: 0.2 },
+        results: { recurring: { tier: 'Gold', discount: 0.15, services: [{ service: 'pest_control' }] } } } } })).reason).toBe('discount_unnamed');
       // The column and the block name different tiers: the block's rate is another tier's, so nothing is named.
       expect((await read(platinum({ tier: 'Gold', discount: 0.2 }))).reason).toBe('discount_unnamed');
       // A lower-case column still finds its rate in the send snapshot, whose keys are title case.
