@@ -404,6 +404,10 @@ function sameDoor(addressA, addressB) {
   // numbered street ("49th st"). The street keys are equal here, so one
   // side answers for both.
   if (!/^\d+[a-z]?\s/.test(a.street)) return false;
+  // The key drops what is not a letter or a digit, so "12½" reads as "12".
+  // The house numbers as typed must be the same too.
+  const house = (parsed) => String(parsed.streetLine || '').trim().split(/\s+/)[0].toLowerCase();
+  if (house(a) !== house(b)) return false;
   const unit = (parsed) => unitLineValueKey(normalizeUnitLine(parsed.unit));
   return unit(a) === unit(b);
 }

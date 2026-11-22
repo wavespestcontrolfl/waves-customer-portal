@@ -205,6 +205,8 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     ['is for another property', () => ({ address: '88 Other Ave, Parrish, FL 34219' })],
     ['is for the same street in another town', () => ({ address: '12 Sample St, Bradenton, FL 34205' })],
     ['is for another unit of the building', () => ({ address: '12 Sample St Apt 4, Parrish, FL 34219' })],
+    // The shared street key drops the fraction; the typed house numbers differ.
+    ['is for a house number with a fraction', () => ({ address: '12½ Sample St, Parrish, FL 34219' })],
     // No city or ZIP = no proof that it is the same home.
     ['has an address with no city or ZIP', () => ({ address: '12 Sample St' })],
     ['has no address', () => ({ address: '' })],
