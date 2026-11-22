@@ -60,8 +60,9 @@ describeDb('New-home mail list (PostgreSQL)', () => {
     // transaction that is rolled back) and its writes blocked until the rollback. The URL carries no query options: one
     // there (?host=, ?sslmode=) could move the connection or change its TLS where this check cannot see.
     const url = new URL(process.env.DATABASE_URL);
-    const ownedQa = process.env.WAVES_LOCAL_DEV === '1'
-      && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
+    // The ID must be the full 32 hex characters: a missing or cut-off ID would admit "/waves_qa_" or a look-alike name.
+    const worktreeId = String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '');
+    const ownedQa = process.env.WAVES_LOCAL_DEV === '1' && /^[a-f0-9]{32}$/.test(worktreeId) && url.pathname === `/waves_qa_${worktreeId}`;
     const ciTest = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/waves_test';
     if ((!ownedQa && !ciTest) || url.search) {
       throw new Error('Use this worktree\'s private QA database or the isolated CI database, with no query options');
