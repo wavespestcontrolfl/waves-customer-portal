@@ -5,7 +5,7 @@ const db = require('../models/db');
 const RULES = require('../config/reschedule-rules');
 const logger = require('./logger');
 const { assertAssignableTechnician, NOT_ASSIGNABLE } = require('./technician-eligibility');
-const { techWorkDaysLive } = require('../config/feature-gates');
+const { techWorkDaysLive, techShiftHoursLive } = require('../config/feature-gates');
 
 // A caller-chosen slot technician who became ineligible between availability
 // and this commit is a "pick another slot" outcome for the customer, not an
@@ -16,10 +16,16 @@ const { techWorkDaysLive } = require('../config/feature-gates');
 // rain-out, auto-dispatch, AI), so a kept technician who does not work that
 // weekday is refused the same way. An admin move only warns: the line is added
 // to `warnings` (a Set the caller reads) and the move proceeds.
-async function assertAssignableSlotTechnician(technicianId, trx, date, { initiatedBy = null, warnings = null } = {}) {
+//
+// Shift hours (GATE_TECH_SHIFT_HOURS, D4): `block` is the visit as the move will
+// leave it: its window and its stored length. The caller passes it only for a
+// move that must obey the hours (reschedule: `shiftLive`). A kept technician
+// whose shift that day does not hold the block is refused the same way.
+async function assertAssignableSlotTechnician(technicianId, trx, date, { initiatedBy = null, warnings = null, block = null } = {}) {
   const staffMove = initiatedBy === 'admin';
   try {
-    await assertAssignableTechnician(technicianId, { conn: trx, date, workDays: !staffMove });
+    await assertAssignableTechnician(technicianId, { conn: trx, date, workDays: !staffMove,
+      hours: block ? require('./scheduling/window-rules').rowBlockMinutes(block) : undefined });
     if (staffMove && warnings && technicianId && techWorkDaysLive()) {
       const line = await require('./technician-eligibility').offDayWarningFor(technicianId, String(date).slice(0, 10), { conn: trx });
       if (line) warnings.add(line);
@@ -2388,10 +2394,28 @@ class SmartRebooker {
       // (tech-out P1) — keptTechId is the tech the row will actually carry
       // after this commit either way. A same-date, same-tech window-only
       // edit stays untouched: no new query.
+      // GATE_TECH_SHIFT_HOURS (shiftLive): an automatic (non-admin) move obeys
+      // the kept technician's shift hours. The office's own move does not: the
+      // office decides (D4 part 3c warns it). A visit group moves its members
+      // through this function one by one (skipVisitSeam), and may name a
+      // technician this call does not see, so a member is not judged alone
+      // here: the group is judged as one unit (D4 part 3b-2b).
+      // With shiftLive, a move that changes only the hours is checked too. The
+      // day and the technician are the same, but the new hours may be outside
+      // the shift.
       const techChangeForEligibility = Object.prototype.hasOwnProperty.call(updates, 'technician_id');
-      if (techChangeForEligibility || !sameDayTarget) {
-        await assertAssignableSlotTechnician(keptTechId, trx, newDateStr, { initiatedBy, warnings: offDayWarnings });
+      const shiftLive = initiatedBy !== 'admin' && options.skipVisitSeam !== true && techShiftHoursLive();
+      const hoursMoveForShift = shiftLive
+        && (hhmm(updates.window_start) !== hhmm(service.window_start) || hhmm(updates.window_end) !== hhmm(service.window_end));
+      const eligibilityChecked = techChangeForEligibility || !sameDayTarget || hoursMoveForShift;
+      if (eligibilityChecked) {
+        await assertAssignableSlotTechnician(keptTechId, trx, newDateStr, { initiatedBy, warnings: offDayWarnings,
+          block: shiftLive ? { window_start: updates.window_start, window_end: updates.window_end, estimated_duration_minutes: service.estimated_duration_minutes } : null });
       }
+      // The shift check judged the technician and the length of the unlocked
+      // pre-read. The write below pins both (shiftJudged), so a reassignment or
+      // a length edit that landed since misses, as every other pinned field does.
+      const shiftJudged = shiftLive && eligibilityChecked;
       // Caller-supplied guard for THIS row on the move transaction (auto-dispatch
       // re-reads the receiving tech's capabilities here; the unit mover runs the
       // matching options.memberGuard for grouped members). Refuses before the
@@ -2464,12 +2488,13 @@ class SmartRebooker {
       // committed before this move's locks would have the probe check A's route
       // while the row is saved on B — so while the scope is in effect the CAS pins
       // the observed technician too (the same concurrent-change 409). Gate off or
-      // an unscoped probe: no extra predicate, byte for byte.
+      // an unscoped probe: no extra predicate, byte for byte. A shift check
+      // (shiftJudged above) judged the observed technician the same way.
       const scopedProbeInEffect = !!(keptTechId && updates.window_start && occupancyGateEnd
         && options.occupancyTechBlind !== true && techScopedConfirmActive());
       const committedRows = await applyTrackLifecycleCas(
         trx('scheduled_services')
-          .where(techChangeRequested || scopedProbeInEffect
+          .where(techChangeRequested || scopedProbeInEffect || shiftJudged
             || Object.prototype.hasOwnProperty.call(options, 'expectConflictSnapshot')
             ? { technician_id: service.technician_id ?? null } : {})
           // The full observed tracker/lifecycle snapshot is in the CAS (see
@@ -2521,7 +2546,9 @@ class SmartRebooker {
         // P1). The advisory locks can't serialize this: the duration editor
         // doesn't take them. A raced edit makes the write miss and surface
         // the concurrent-change 409 below, same as every other CAS field.
-        .where((!windowEnd && occupancyGateEnd)
+        // The shift check's block ends at the later of the stored end and the
+        // start plus this length, so it pins the length too (shiftJudged).
+        .where((!windowEnd && occupancyGateEnd) || shiftJudged
           ? { estimated_duration_minutes: service.estimated_duration_minutes ?? null }
           : {})
         .update({

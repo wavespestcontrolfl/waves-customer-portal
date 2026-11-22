@@ -118,7 +118,7 @@ function service(overrides = {}) {
   };
 }
 
-function wireRescheduleMocks(svc, { absentTechRow = undefined, techWorkDays = null } = {}) {
+function wireRescheduleMocks(svc, { absentTechRow = undefined, techWorkDays = null, techShift = null } = {}) {
   const serviceLookup = chain({ first: jest.fn().mockResolvedValue(svc) });
   const trxScheduled = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
   const historyInsert = chain();
@@ -138,9 +138,14 @@ function wireRescheduleMocks(svc, { absentTechRow = undefined, techWorkDays = nu
     // a test that wants the "marked out on the new date" 422 supplies the
     // uncleared technician_absences row the real query would find.
     if (table === 'technicians') {
-      return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ id: svc.technician_id || 'tech-1', name: 'Tech', employment_status: 'active', field_dispatchable: true, work_days: techWorkDays }) });
+      return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue({ id: svc.technician_id || 'tech-1', name: 'Tech', employment_status: 'active', field_dispatchable: true, work_days: techWorkDays }),
+        // GATE_TECH_SHIFT_HOURS: loadTechShifts' own read, the set hours as a list (`techShift`: [start, end]).
+        whereNotNull: jest.fn().mockReturnThis(),
+        select: jest.fn().mockResolvedValue(techShift ? [{ id: svc.technician_id, shift_start: techShift[0], shift_end: techShift[1] }] : []) });
     }
     if (table === 'technician_absences') return chain({ whereNull: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(absentTechRow) });
+    // GATE_TECH_SHIFT_HOURS: loadTechShifts reads today's clock-ins once a technician has set hours. None here.
+    if (table === 'time_entries') return chain({ groupBy: jest.fn().mockReturnThis(), min: jest.fn().mockResolvedValue([]) });
     throw new Error(`Unexpected trx table ${table}`);
   });
   trx.raw = rawFactory('trx.raw');
@@ -270,6 +275,100 @@ describe('reschedule — shared occupancy conflict gate', () => {
         );
         expect(result.success).toBe(true);
         expect(result.warnings).toBeUndefined();
+      });
+    });
+
+    // GATE_TECH_SHIFT_HOURS (D4 part 3b-2a): a non-admin move is automatic, and its kept
+    // technician's shift on the target date must hold the visit as the move leaves it. The rows,
+    // the hours and the races run on PostgreSQL in tech-shift-hours-move-postgres.test.js; these
+    // pin what the move reads and what its write pins, with the gate on and off.
+    describe('shift hours: the kept technician\'s shift and the moved visit', () => {
+      const tech = { technician_id: 'tech-1', scheduled_date: BASE, estimated_duration_minutes: 45 };
+      const reads = (trx, table) => trx.mock.calls.some(([name]) => name === table);
+      afterEach(() => { delete process.env.GATE_TECH_SHIFT_HOURS; });
+
+      test('gate on, a non-admin move outside the shift is refused SLOT_TAKEN and writes nothing; inside it, the move commits', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        const outside = wireRescheduleMocks(service(tech), { techShift: ['08:00', '10:30'] });
+        await expect(SmartRebooker.reschedule(
+          'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'tech', {},
+        )).rejects.toMatchObject({ status: 409, statusCode: 409, code: 'SLOT_TAKEN' });
+        expect(outside.trxScheduled.update).not.toHaveBeenCalled();
+
+        const inside = wireRescheduleMocks(service(tech), { techShift: ['08:00', '11:00'] });
+        expect(await SmartRebooker.reschedule(
+          'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'tech', {},
+        )).toMatchObject({ success: true });
+        expect(inside.trxScheduled.update).toHaveBeenCalled();
+      });
+
+      test('gate on, a non-admin move that changes only the hours is checked, and the write pins the technician and the length it judged', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        const refused = wireRescheduleMocks(service(tech), { techShift: ['08:00', '12:00'] });
+        await expect(SmartRebooker.reschedule(
+          'svc-1', BASE, { start: '13:00', end: '15:00' }, 'customer_request', 'customer', {},
+        )).rejects.toMatchObject({ status: 409, statusCode: 409, code: 'SLOT_TAKEN' });
+        expect(refused.trxScheduled.update).not.toHaveBeenCalled();
+
+        const { trx, trxScheduled } = wireRescheduleMocks(service(tech), { techShift: ['08:00', '16:00'] });
+        expect(await SmartRebooker.reschedule(
+          'svc-1', BASE, { start: '13:00', end: '15:00' }, 'customer_request', 'customer', {},
+        )).toMatchObject({ success: true });
+        expect(reads(trx, 'technicians')).toBe(true);
+        expect(trxScheduled.where).toHaveBeenCalledWith({ technician_id: 'tech-1' });
+        expect(trxScheduled.where).toHaveBeenCalledWith({ estimated_duration_minutes: 45 });
+      });
+
+      test('gate on, a non-admin move that changes neither the day, the technician nor the hours reads nothing and pins nothing more', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        const { trx, trxScheduled } = wireRescheduleMocks(service(tech), { techShift: ['12:00', '16:00'] });
+        expect(await SmartRebooker.reschedule(
+          'svc-1', BASE, { start: '09:00', end: '11:00' }, 'customer_request', 'customer', {},
+        )).toMatchObject({ success: true });
+        expect(reads(trx, 'technicians')).toBe(false);
+        expect(trxScheduled.where).not.toHaveBeenCalledWith({ technician_id: 'tech-1' });
+        expect(trxScheduled.where).not.toHaveBeenCalledWith({ estimated_duration_minutes: 45 });
+      });
+
+      test('gate on, the office\'s own move outside the shift commits: no shift read, no extra pin', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        const { trx, trxScheduled } = wireRescheduleMocks(service(tech), { techShift: ['08:00', '10:00'] });
+        expect(await SmartRebooker.reschedule(
+          'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', { overlapAdvisory: true },
+        )).toMatchObject({ success: true });
+        expect(reads(trx, 'time_entries')).toBe(false);
+        expect(trxScheduled.where).not.toHaveBeenCalledWith({ technician_id: 'tech-1' });
+        expect(trxScheduled.where).not.toHaveBeenCalledWith({ estimated_duration_minutes: 45 });
+      });
+
+      // A visit group moves each member through reschedule (skipVisitSeam) and judges the group as one unit.
+      test('gate on, a visit group\'s member move is not judged alone: it commits with no shift read and no extra pin', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        const { trx, trxScheduled } = wireRescheduleMocks(service(tech), { techShift: ['08:00', '10:00'] });
+        expect(await SmartRebooker.reschedule(
+          'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'customer_request', 'customer', { visitPolicy: 'single', skipVisitSeam: true },
+        )).toMatchObject({ success: true });
+        expect(reads(trx, 'time_entries')).toBe(false);
+        expect(trxScheduled.where).not.toHaveBeenCalledWith({ technician_id: 'tech-1' });
+        expect(trxScheduled.where).not.toHaveBeenCalledWith({ estimated_duration_minutes: 45 });
+      });
+
+      test('gate off: a non-admin move outside the set hours commits as before, an hours-only move reads nothing, and neither pins more', async () => {
+        const dated = wireRescheduleMocks(service(tech), { techShift: ['08:00', '10:00'] });
+        expect(await SmartRebooker.reschedule(
+          'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'weather_rain', 'tech', {},
+        )).toMatchObject({ success: true });
+        expect(reads(dated.trx, 'time_entries')).toBe(false);
+        expect(dated.trxScheduled.where).not.toHaveBeenCalledWith({ technician_id: 'tech-1' });
+        expect(dated.trxScheduled.where).not.toHaveBeenCalledWith({ estimated_duration_minutes: 45 });
+
+        const hoursOnly = wireRescheduleMocks(service(tech), { techShift: ['08:00', '10:00'] });
+        expect(await SmartRebooker.reschedule(
+          'svc-1', BASE, { start: '13:00', end: '15:00' }, 'customer_request', 'customer', {},
+        )).toMatchObject({ success: true });
+        expect(reads(hoursOnly.trx, 'technicians')).toBe(false);
+        expect(hoursOnly.trxScheduled.where).not.toHaveBeenCalledWith({ technician_id: 'tech-1' });
+        expect(hoursOnly.trxScheduled.where).not.toHaveBeenCalledWith({ estimated_duration_minutes: 45 });
       });
     });
 
