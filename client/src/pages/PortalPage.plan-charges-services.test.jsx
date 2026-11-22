@@ -155,8 +155,7 @@ describe('LearnTab: "Your plan includes ..."', () => {
     expect(screen.getByText(/2 included services in your guidance/)).toBeInTheDocument();
   });
 
-  // The count line is the tier's size, and never fewer than the names
-  // beside it: Platinum is "four or more", and a tier can trail the schedule.
+  // The count line counts the names beside it, never the tier's size.
   it('a Platinum member with five services: five names and "5 included services"', async () => {
     api.getSchedule.mockResolvedValue(schedule(['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait']));
     render(<LearnTab customer={{ ...bronze, tier: 'Platinum' }} />);
@@ -164,10 +163,12 @@ describe('LearnTab: "Your plan includes ..."', () => {
     expect(screen.getByText(/5 included services in your guidance/)).toBeInTheDocument();
   });
 
-  it('a Platinum member with two services on the schedule: the count stays the tier\'s 4', async () => {
+  it('a Platinum member with two services on the schedule: two names and "2 included services"', async () => {
     api.getSchedule.mockResolvedValue(schedule(['pest_control', 'lawn_care']));
     render(<LearnTab customer={{ ...bronze, tier: 'Platinum' }} />);
-    expect(await screen.findByText(/4 included services in your guidance/)).toBeInTheDocument();
+    expect(await screen.findByText('Your Platinum plan includes Pest Control, Lawn Care.')).toBeInTheDocument();
+    expect(screen.getByText(/2 included services in your guidance/)).toBeInTheDocument();
+    expect(screen.queryByText(/4 included services/)).not.toBeInTheDocument();
   });
 
   it('a Bronze member the schedule shows two services for: two names and "2 included services"', async () => {
@@ -180,21 +181,29 @@ describe('LearnTab: "Your plan includes ..."', () => {
   it.each([
     ['an empty list', () => api.getSchedule.mockResolvedValue(schedule([]))],
     ['a failed read', () => api.getSchedule.mockRejectedValue(new Error('offline'))],
-  ])('%s: no sentence, never a tier guess; the tip stays', async (_label, arrange) => {
+  ])('%s: no sentence and no count, never a tier guess; the plan name and the tip stay', async (_label, arrange) => {
     arrange();
     render(<LearnTab customer={bronze} />);
     expect(await screen.findByText(TIP.tip)).toBeInTheDocument();
     await settled();
     expect(screen.queryByText(/plan includes/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/included service/)).not.toBeInTheDocument();
+    expect(screen.getByText('WaveGuard Bronze')).toBeInTheDocument();
   });
 
   it.each([
     ['a customer with no plan', { ...bronze, tier: null, monthlyRate: 0 }],
     ['a cancelled account', { ...bronze, cancelled: true }],
-  ])('%s: no sentence and no schedule read', async (_label, customer) => {
+  ])('%s: no sentence, no count and no schedule read', async (_label, customer) => {
     render(<LearnTab customer={customer} />);
     expect(await screen.findByText(TIP.tip)).toBeInTheDocument();
     expect(api.getSchedule).not.toHaveBeenCalled();
     expect(screen.queryByText(/plan includes/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/included service/)).not.toBeInTheDocument();
+  });
+
+  it('a customer with no plan keeps the "after activation" line', async () => {
+    render(<LearnTab customer={{ ...bronze, tier: null, monthlyRate: 0 }} />);
+    expect(await screen.findByText('Plan-specific guidance appears after activation.')).toBeInTheDocument();
   });
 });

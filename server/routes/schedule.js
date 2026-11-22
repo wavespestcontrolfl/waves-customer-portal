@@ -24,21 +24,19 @@ function portalRowQualifiesForWaveGuard(row) {
   return portalRowWaveGuardFamily(row) !== null;
 }
 // The service families of the customer's plan, for the two portal places
-// that NAME them (Billing's Plan Charges, the Learn sentence). This is the
-// tier alignment's own evidence (detectUpcomingRecurringPlanKeys: coming,
+// that NAME them (Billing's Plan Charges, the Learn sentence). The tier
+// alignment's own row rule (upcomingRecurringPlanKeysFromRows: coming,
 // recurring, live rows that are not a re-service, a one-time booking, a
 // commercial row or a non-bait rodent row), reduced to families the way the
-// tier count reduces it. The portal never rebuilds that rule from labels.
-// null when the read fails: the caller then names no service, and the
-// schedule answer itself (My Plan's evidence) still goes out.
-async function portalPlanFamilies(customerId) {
-  const { detectUpcomingRecurringPlanKeys, uniqueServiceFamilies } = require('../services/self-booking-plan-sync');
-  try {
-    return uniqueServiceFamilies(await detectUpcomingRecurringPlanKeys(db, customerId, etDateString()));
-  } catch (err) {
-    logger.warn(`[schedule] plan family read failed for ${customerId}: ${err.message}`);
-    return null;
-  }
+// tier count reduces it, applied to the visits THIS customer's schedule
+// shows. So the portal never rebuilds the rule from labels, a booking the
+// office has not reviewed (hidden by customerVisibleBookingWhere) names
+// nothing, and the catalog identity is the list query's own join: there is
+// no second read to fail or to fall back to a stale label.
+function portalPlanFamilies(upcoming) {
+  const { upcomingRecurringPlanKeysFromRows, uniqueServiceFamilies } = require('../services/self-booking-plan-sync');
+  const rows = upcoming.map((s) => ({ ...s, service_key: s.catalog_service_key, service_name: s.catalog_service_name }));
+  return uniqueServiceFamilies(upcomingRecurringPlanKeysFromRows(rows, etDateString()));
 }
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyStamp } = require('../services/service-report/time-format');
@@ -239,9 +237,6 @@ router.get('/', async (req, res, next) => {
     const hidden = await dayOnlyIds(db, upcoming);
 
     if (allProperties) {
-      // The plan's service families (portalPlanFamilies). In this projection
-      // only: a contact session never takes this branch.
-      const planFamilies = await portalPlanFamilies(req.customerId);
       // Coverage projection only (see listQuerySchema): nothing actionable —
       // returned BEFORE the re-service tie-in and the per-row grouped-visit /
       // calendar verdicts below, which cost one or two queries per visit and
@@ -251,7 +246,10 @@ router.get('/', async (req, res, next) => {
         hasCancellableWork: cancellable,
         reservice: null,
         overlayHandoff: false,
-        planFamilies,
+        // The plan's service families. In this projection only: the
+        // house-scoped list holds one house's visits, and a contact session
+        // never takes this branch.
+        planFamilies: portalPlanFamilies(upcoming),
         upcoming: upcoming.map((s) => ({
           id: s.id,
           date: s.scheduled_date,

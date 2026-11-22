@@ -1171,7 +1171,15 @@ function catalogResolvesNonRodentQualifyingFamily(catalogText) {
 // recurring qualifying rows — the basis for both enrollment and demotion, so
 // the two directions can never disagree about what counts as coverage.
 async function detectUpcomingRecurringPlanKeys(database, customerId, today) {
-  const rows = await scheduledServiceRowsForCustomer(database, customerId);
+  return upcomingRecurringPlanKeysFromRows(await scheduledServiceRowsForCustomer(database, customerId), today);
+}
+
+// The row rule of the evidence above, with no read of its own, so a second
+// reader of scheduled_services rows (the customer portal's plan-coverage
+// read) applies the SAME rule to the rows it already holds. `rows` carry
+// the joined catalog identity as service_key / service_name /
+// catalog_billing_type, as scheduledServiceRowsForCustomer returns them.
+function upcomingRecurringPlanKeysFromRows(rows, today) {
   const detectedPlanKeys = [];
   for (const row of rows) {
     if (!serviceRowCountsTowardWaveGuard(row)) continue;
@@ -1620,7 +1628,6 @@ module.exports = {
   buildLabelOnlyTierRealignmentUpdates,
   buildNoPlanTierEnrollmentUpdates,
   buildRecurringOccurrenceDates,
-  detectUpcomingRecurringPlanKeys,
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
   isAutoDerivedTierLabelRow,
@@ -1647,4 +1654,5 @@ module.exports = {
   tierLabelStatus,
   syncCustomerWaveGuardPlanFromScheduledServices,
   uniqueServiceFamilies,
+  upcomingRecurringPlanKeysFromRows,
 };

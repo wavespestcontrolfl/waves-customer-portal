@@ -10642,9 +10642,9 @@ function LearnTab({ customer, onOpenPhotoId = null, scope = null }) {
   const planServices = usePlanServices(customer?.cancelled !== true && !!activeTierName);
   const customerServiceNames = (planServices || [])
     .map(s => s.name.replace(/ Program| Barrier Treatment/g, '').replace('Quarterly ', ''));
-  // The tier's size, and never fewer than the services the sentence names
-  // (Platinum is "four or more"; a stale tier can trail the schedule).
-  const numServices = activeTierName ? Math.max(TIER_SERVICES[tierName] || 1, customerServiceNames.length) : 0;
+  // The count is the number of services the sentence names. No count while
+  // the list is not known: never the tier's size as a guess.
+  const numServices = customerServiceNames.length;
 
   const filteredFaq = faqSearch.trim()
     ? faq.map(cat => ({
@@ -10744,11 +10744,13 @@ function LearnTab({ customer, onOpenPhotoId = null, scope = null }) {
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
               {activeTierName ? `WaveGuard ${tierName}` : 'No active WaveGuard plan'}
             </div>
-            <div style={{ marginTop: 4, fontSize: 14, color: muted }}>
-              {activeTierName
-                ? `${numServices} included service${numServices === 1 ? '' : 's'} in your guidance.`
-                : 'Plan-specific guidance appears after activation.'}
-            </div>
+            {(!activeTierName || numServices > 0) && (
+              <div style={{ marginTop: 4, fontSize: 14, color: muted }}>
+                {activeTierName
+                  ? `${numServices} included service${numServices === 1 ? '' : 's'} in your guidance.`
+                  : 'Plan-specific guidance appears after activation.'}
+              </div>
+            )}
           </div>
         </div>
 
