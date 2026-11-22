@@ -251,7 +251,7 @@
  *   GATE_REPORT_CROSS_SELL=true (live service-report cross-sell offer card with estimator pricing)
  *   GATE_REPORT_CLICK_TO_ESTIMATE=true (priced cross-sell tap mints a real estimate and redirects into it)
  *   GATE_CALL_SPOKEN_NOTES=true (owner 2026-11-16 "ok build all, use haiku", live-call suite part 12: when staff say "make a note" or "remind me" on a live-transcribed call, a Claude Haiku 5.5 read of those staff lines saves the note on the call record and rings an admin bell at the reminder time said. It never texts, emails or calls anyone. Spends on Haiku calls when on: owner flip only. Kill: unset)
- *   GATE_PROPERTY_RECOMMENDATIONS=true (customer app Home, owner rulings 2026-08-13: the "Recommendations, For your property" card. It shows at most one service offer, chosen by what the customer already has (pest, then lawn, then tree and shrub), and the mosquito note in season. Its button files a request and rings the office; nothing is sold. Off = no card. Kill = unset.)
+ *   GATE_PROPERTY_RECOMMENDATIONS=true (customer app Home, owner rulings 2026-08-13: the "Recommendations, For your property" card; since owner 2026-11-21 the Billing tab shows its service offer too. It shows at most one service offer, chosen by what the customer already has (pest or lawn; tree and shrub is never pushed, owner 2026-11-21), and the mosquito note in season. Its button files a request and rings the office; nothing is sold. Off = no card. Kill = unset.)
  *   GATE_ONE_TAP_PURCHASE=true (customer app, owner rulings 2026-08-13, 2026-11-11 and 2026-11-12: the Recommendations offer's button becomes "Add now", and My Plan gains an "Add a service" card with one such button for each service the customer does not have (pest, lawn, tree and shrub, mosquito, rodent bait stations; never termite). The customer agrees to the terms, picks a first visit and confirms; the visit and the recurring series are booked, nothing is charged at confirm, and the customer gets a confirmation email and an app notification, never a text. The screens show the WaveGuard discount on the new service and, when GATE_WAVEGUARD_EXTEND_EXISTING is on, the new price of the services the customer already has, which confirm applies. Needs GATE_PROPERTY_RECOMMENDATIONS. Refused for monthly-billed and payer-billed accounts. Off = the button files a request as before and every /api/one-tap route answers 404. Kill = unset.)
  *   GATE_REPORT_PLAN_SUMMARY=true ("Your plan" section on the LIVE report: an active plan member's visit/re-service COUNTS for this year — never prices, owner ruling 2026-09-28; live view only, stripped from PDF/static like nextAppointment; dark = report payload carries no planSummary)
  *   GATE_REPORT_NEAR_YOU=true  ("Near you" line on the LIVE LAWN report only: the lawn pest most often found among other lawn customers in the same city over the last 30 ET days, shown only at/above the NEAR_YOU_MIN_CUSTOMERS distinct-customer floor — owner ruling 2026-09-28, "lawn only"; live view only, stripped from PDF/static like planSummary; dark = report payload carries no nearYou)
@@ -867,8 +867,8 @@ const gates = {
   separateComboVisits: process.env.GATE_SEPARATE_COMBO_VISITS === 'true',
 
   // Service-report cross-sell (owner-approved 2026-08-11): the LIVE web
-  // report offers the next service family the customer lacks (pest ↔ lawn,
-  // then tree & shrub, then termite) with estimator-backed pricing, falling
+  // report offers the next service family the customer lacks (pest ↔ lawn
+  // only, owner 2026-11-21) with estimator-backed pricing, falling
   // back to an unpriced request-a-quote CTA when property data can't support
   // a real number. Customer-facing pricing surface — fail-closed ==='true'
   // in EVERY environment. Gate off: report payloads carry no crossSell key

@@ -726,15 +726,21 @@ function usePropertyScore() {
 // GATE_PROPERTY_RECOMMENDATIONS; gate-off answers available:false and the
 // card renders nothing). Best-effort: a failed load just hides the card.
 // =========================================================================
-function usePropertyRecommendations() {
+// reloadKey: a host that changes it reads the stack again (Billing does,
+// after a purchase from its offer card). A reload starts from an empty
+// stack: what was shown is out of date (it offers the service just bought),
+// and only a read that succeeds may show cards again.
+function usePropertyRecommendations(enabled = true, reloadKey = 0) {
   const [data, setData] = useState(null);
   useEffect(() => {
+    if (!enabled) return undefined;
     let cancelled = false;
+    if (reloadKey > 0) setData(null);
     api.getPropertyRecommendations()
-      .then(d => { if (!cancelled && d?.available && d.cards?.length) setData(d); })
+      .then(d => { if (!cancelled) setData(d?.available && d.cards?.length ? d : null); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, []);
+  }, [enabled, reloadKey]);
   return data;
 }
 
@@ -1100,7 +1106,7 @@ const ADD_SERVICE_HEADING = {
   subtitle: 'Priced for this property. You pay per application, after each visit.',
 };
 
-function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING }) {
+function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING, surface = 'home', onCardSaved = null, onPurchased = null }) {
   // Per-card request state: idle → sending → sent | stale | failed.
   const [requestStates, setRequestStates] = useState({});
   // One-tap purchase overlay target (bet 3) — a priced offer card while the
@@ -1111,6 +1117,12 @@ function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING }) {
   // reopens the overlay at the right step.
   const [purchaseResume, setPurchaseResume] = useState(null);
   const resumeProcessedRef = useRef(false);
+  // The host tab's "a payment method was saved here" hook (Billing reloads
+  // its card list). A ref, so the mount-only resume effect below calls the
+  // current one.
+  const onCardSavedRef = useRef(onCardSaved);
+  onCardSavedRef.current = onCardSaved;
+  const notifyCardSaved = () => { onCardSavedRef.current?.(); };
   useEffect(() => {
     if (resumeProcessedRef.current) return;
     const returned = getReturnedSetupIntent('one_tap_card');
@@ -1124,6 +1136,10 @@ function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING }) {
         await api.saveStripeCard(null, returned.setupIntentId);
         cardJustSaved = true;
       } catch { /* state fetch below reports hasCardOnFile either way */ }
+      // After the attempt, saved or not: the host tab read its card list
+      // before this save, and a failed call can still be a card that an
+      // earlier try already saved.
+      notifyCardSaved();
       let resolved = false;
       try {
         const state = await api.oneTapGet(resumeId);
@@ -1149,17 +1165,25 @@ function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING }) {
   // is empty or failed transiently — the resume fetch succeeding is the
   // customer's only automatic path back to the held purchase (the return
   // URL params are cleared once the state loads).
-  if (!data?.cards?.length) {
-    if (!purchaseResume) return null;
-    return (
-      <OneTapPurchaseOverlay
-        open
-        card={null}
-        resume={purchaseResume}
-        onClose={() => setPurchaseResume(null)}
-      />
-    );
-  }
+  //
+  // ONE overlay element at ONE place in this component's tree, whatever the
+  // card list does (not loaded yet, empty, advice only, loaded): every return
+  // below is a fragment whose second child is this element. A purchase
+  // resumed before the cards arrive keeps its instance when they do; an
+  // overlay that unmounts releases the held visit time. The overlay draws
+  // through a portal, so its place here is not its place on the screen.
+  const overlay = (purchaseCard || purchaseResume) ? (
+    <OneTapPurchaseOverlay
+      open
+      card={purchaseCard}
+      resume={purchaseCard ? null : purchaseResume}
+      onClose={() => { setPurchaseCard(null); setPurchaseResume(null); }}
+      onCardSaved={notifyCardSaved}
+      onPurchased={onPurchased}
+    />
+  ) : null;
+  const overlayOnly = <>{null}{overlay}</>;
+  if (!data?.cards?.length) return overlayOnly;
   const muted = PORTAL_SHELL.muted;
   const setCardState = (id, value) => setRequestStates((prev) => ({ ...prev, [id]: value }));
 
@@ -1177,6 +1201,8 @@ function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING }) {
         // Server-issued digest of everything this card rendered — the
         // request path rejects any drift from what the customer saw.
         fingerprint: card.fingerprint || null,
+        // Which tab the card is on, so the office request names it.
+        surface,
       } : { cardId: card.id });
       setCardState(card.id, 'sent');
     } catch (err) {
@@ -1207,19 +1233,10 @@ function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING }) {
   const visibleCards = (data?.cards || []).filter((c) => c.kind !== 'advice');
   // Same rule as the empty-payload guard above: a restored purchase must
   // still render when only advice cards came back (pre-push P1).
-  if (visibleCards.length === 0) {
-    if (!purchaseResume) return null;
-    return (
-      <OneTapPurchaseOverlay
-        open
-        card={null}
-        resume={purchaseResume}
-        onClose={() => setPurchaseResume(null)}
-      />
-    );
-  }
+  if (visibleCards.length === 0) return overlayOnly;
 
   return (
+    <>
     <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: 20 }}>
       <div data-glass="chip" style={CUSTOMER_SECTION_LABEL}>
         <Icon name={heading.icon} size={14} strokeWidth={2} />{heading.label}
@@ -1317,15 +1334,9 @@ function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING }) {
           );
         })}
       </div>
-      {(purchaseCard || purchaseResume) && (
-        <OneTapPurchaseOverlay
-          open
-          card={purchaseCard}
-          resume={purchaseCard ? null : purchaseResume}
-          onClose={() => { setPurchaseCard(null); setPurchaseResume(null); }}
-        />
-      )}
     </section>
+    {overlay}
+    </>
   );
 }
 
@@ -1355,7 +1366,7 @@ function oneTapDayLabel(date) {
   return dt.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
-function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
+function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved = null, onPurchased = null }) {
   useLockBodyScroll(open);
   // Close is LOCKED while a confirmation is in flight (same guard as
   // "Change time"): unmounting races the in-flight /confirm — a commit
@@ -1595,6 +1606,9 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
       }
       if (setupIntent.payment_method) {
         await api.saveStripeCard(setupIntent.payment_method, setupIntent.id);
+        // The card is on the account now, whether or not the customer
+        // finishes this purchase: the host tab reloads what it shows.
+        if (onCardSaved) onCardSaved();
       }
       setCardSaved(true);
       setNeedsCard(false);
@@ -1616,6 +1630,8 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
       const r = await api.oneTapConfirm(init.purchaseId, { termsAccepted: true });
       setResult(r);
       setStep('done');
+      // The plan changed on the server: a host that shows the plan reloads.
+      if (onPurchased) onPurchased();
     } catch (err) {
       if (err?.status === 402) {
         setNeedsCard(true);
@@ -6459,13 +6475,26 @@ function BillingChannelSelect({ field, channels, usable, saving, onChange }) {
   );
 }
 
-function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) {
+// The Billing tab's root column: one style for its loading, error and loaded
+// views, so the root stays the same <div> across them.
+const BILLING_COLUMN = { display: 'flex', flexDirection: 'column', gap: 16 };
+
+function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, onSwitchTab = null }) {
   const portalGlass = usePortalGlass();
   // C4: a cancelled account keeps billing READS (balance, invoices, history,
   // credits) and the tokenized Pay now hand-off; every management surface
   // whose writes the middleware now 401s (cards, Auto Pay, credit toggle,
   // recipients) is hidden rather than shown broken.
   const cancelledAccount = customer?.cancelled === true;
+  // Home's add-a-service offer, on Billing too (owner 2026-11-21): the same
+  // card, data and one-tap purchase as Home, offers only — the seasonal
+  // mosquito note stays on Home. Pest or lawn only (the shared offer ladder).
+  const [offersReloadKey, setOffersReloadKey] = useState(0);
+  const homeRecommendations = usePropertyRecommendations(!cancelledAccount, offersReloadKey);
+  const billingOffers = useMemo(() => {
+    const cards = (homeRecommendations?.cards || []).filter((c) => c.kind === 'offer');
+    return cards.length ? { ...homeRecommendations, cards } : null;
+  }, [homeRecommendations]);
   const [payments, setPayments] = useState([]);
   // "Apply my credit automatically" slider (owner ruling 2026-08-28): the
   // balance stays on the account until the customer turns this on. Server-
@@ -6614,6 +6643,28 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         // instead of failing the action.
         if (seq === cardsSeqRef.current) setStripeError(CARD_REFRESH_MISS_MSG);
       });
+  };
+
+  // A payment method saved from the add-a-service offer's purchase overlay.
+  // The same two steps as the add-payment flow below: a consented save can
+  // enroll Auto Pay server-side, so the AutopayCard remounts after the card
+  // list reloads.
+  const handleOfferCardSaved = async () => {
+    await refreshCards();
+    setAutopayRefreshKey((k) => k + 1);
+  };
+
+  // A purchase confirmed from the offer card changed the plan. Billing shows
+  // the plan (WaveGuard tier, discount, services under Plan Charges), so the
+  // customer record reloads; and the offers read again, so the service just
+  // bought is no longer offered here.
+  // The purchase can also change how the account is billed (per visit to
+  // per application); Plan Charges reads that from the Auto Pay data, so
+  // that reloads too.
+  const handleOfferPurchased = () => {
+    if (typeof refreshCustomer === 'function') Promise.resolve(refreshCustomer()).catch(() => {});
+    setOffersReloadKey((k) => k + 1);
+    handleOfferCardSaved();
   };
 
   const loadBilling = useCallback(() => {
@@ -7003,30 +7054,47 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
     return `${cardBrandLabel(method.brand)}${last4 ? ` ending in ${last4}` : ''}`;
   };
 
+  // The add-a-service card owns its purchase overlay and the return from a
+  // bank page for it (it saves the returned method and reopens the held
+  // purchase). It is the same keyed child of the same root <div> in every
+  // branch below, so React keeps the one instance: the return is resumed
+  // while Billing loads or fails to load, and the reopened purchase stays
+  // open when Billing then renders. Before Billing has loaded it gets no
+  // offers, so it shows nothing but a resumed purchase.
+  const offerCard = (offers) => (cancelledAccount ? null : (
+    <RecommendationsCard key="billing-offer" data={offers} surface="billing" onCardSaved={handleOfferCardSaved} onPurchased={handleOfferPurchased} />
+  ));
+
   if (loading) {
     return (
-      <PortalStatePanel
-        icon="card"
-        eyebrow="Billing"
-        titleAs="h1"
-        title="Loading billing"
-        message="Checking your balance, saved methods, autopay status, and payment history."
-      />
+      <div style={BILLING_COLUMN}>
+        <PortalStatePanel
+          icon="card"
+          eyebrow="Billing"
+          titleAs="h1"
+          title="Loading billing"
+          message="Checking your balance, saved methods, autopay status, and payment history."
+        />
+        {offerCard(null)}
+      </div>
     );
   }
 
   if (loadError) {
     return (
-      <PortalStatePanel
-        icon="warning"
-        tone="danger"
-        eyebrow="Billing"
-        titleAs="h1"
-        title="Could not load billing"
-        message={loadError}
-        actionLabel="Try Again"
-        onAction={loadBilling}
-      />
+      <div style={BILLING_COLUMN}>
+        <PortalStatePanel
+          icon="warning"
+          tone="danger"
+          eyebrow="Billing"
+          titleAs="h1"
+          title="Could not load billing"
+          message={loadError}
+          actionLabel="Try Again"
+          onAction={loadBilling}
+        />
+        {offerCard(null)}
+      </div>
     );
   }
 
@@ -7459,7 +7527,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <div style={BILLING_COLUMN}>
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0 }}>
@@ -8312,6 +8380,17 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         )}
         </>}
       </form>
+      )}
+
+      {offerCard(billingOffers)}
+      {!cancelledAccount && onSwitchTab && (
+        <section data-glass="card" data-section="billing-refer" style={{ ...card, padding: 20, marginTop: 16, textAlign: 'center' }}>
+          <h2 style={{ fontSize: 18, fontWeight: 700, color: B.glassNavy, margin: '0 0 6px' }}>Know someone who could use Waves?</h2>
+          <p style={{ fontSize: 14, color: muted, margin: '0 0 12px' }}>Share your referral link from the Refer tab.</p>
+          <button type="button" data-glass-accent="" onClick={() => onSwitchTab('refer')} style={primaryButton}>
+            Refer a friend
+          </button>
+        </section>
       )}
     </div>
   );
@@ -18927,7 +19006,7 @@ export default function PortalPage() {
           // history entries.
           navigate(sub === 'completed' ? '/?tab=services' : '/?tab=schedule', { replace: true });
         }} onRequestVisit={cancelledAccount || contactSession ? null : () => setShowReportIssue(true)} onSelectProperty={(id) => selectProperty(id, { tab: 'visits' })} switchingPropertyId={switchingPropertyId} />}
-        {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} focusPaymentMethods={new URLSearchParams(location.search).get('focus') === 'payment-methods'} />}
+        {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} onSwitchTab={switchTab} focusPaymentMethods={new URLSearchParams(location.search).get('focus') === 'payment-methods'} />}
         {activeTab === 'refer' && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'property' && (savedSecondarySelection

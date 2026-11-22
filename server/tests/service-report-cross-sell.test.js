@@ -140,8 +140,9 @@ describe('offer target matrix (owner ruling 2026-08-13, one test per approved ce
   const { pickOfferTarget, startFamilyForIdentity, OFFER_LADDER } = _private;
 
   test('offer vocabulary is unchanged', () => {
-    // owner 2026-09-28: the three pillars only — termite left the ladder
-    expect(OFFER_LADDER).toEqual(['pest_control', 'lawn_care', 'tree_shrub']);
+    // owner 2026-09-28: termite left the ladder; 2026-11-21: tree & shrub
+    // left it too — the ladder pushes pest and lawn only.
+    expect(OFFER_LADDER).toEqual(['pest_control', 'lawn_care']);
   });
 
   // Every ownership combination of {pest, lawn, T&S, termite}, exactly as
@@ -153,14 +154,14 @@ describe('offer target matrix (owner ruling 2026-08-13, one test per approved ce
     [[L], P, 'lawn only → pest'],
     [[T], L, 'T&S only → lawn (08-13: T&S-without-lawn beats the pest rung)'],
     [[X], P, 'termite only → pest'],
-    [[P, L], T, 'pest+lawn → T&S'],
+    [[P, L], null, 'pest+lawn → NO card (owner 2026-11-21: tree & shrub is never pushed)'],
     [[P, T], L, 'pest+T&S → lawn (pest→lawn and T&S→lawn agree)'],
     [[P, X], L, 'pest+termite → lawn'],
     [[L, T], P, 'lawn+T&S → pest (lawn owned, so the T&S rule is inert)'],
     [[L, X], P, 'lawn+termite → pest'],
     [[T, X], L, 'T&S+termite → lawn (approved: the T&S rule beats termite→pest)'],
     [[P, L, T], null, 'pest+lawn+T&S → NO card (owner 2026-09-28: termite is no longer a rung)'],
-    [[P, L, X], T, 'pest+lawn+termite → T&S'],
+    [[P, L, X], null, 'pest+lawn+termite → NO card'],
     [[P, T, X], L, 'pest+T&S+termite → lawn'],
     [[L, T, X], P, 'lawn+T&S+termite → pest'],
     [[P, L, T, X], null, 'everything → NO card (the referral card fills the slot)'],
@@ -198,14 +199,14 @@ describe('identity-start rules (owner matrix 2026-08-13: nothing recurring → s
     [{ service_type: 'Termite Inspection' }, 'pest_control', 'termite anything → start pest'],
     [{ service_type: 'WDO Inspection' }, 'pest_control', 'WDO → start pest'],
     [{ service_type: 'One-Time Mosquito Treatment' }, 'pest_control', 'one-time mosquito → start pest (approved rec)'],
-    [{ service_type: 'Tree & Shrub Treatment' }, 'tree_shrub', 'one-time T&S → start recurring T&S (approved rec)'],
+    [{ service_type: 'Tree & Shrub Treatment' }, 'lawn_care', 'one-time T&S → start recurring lawn (owner 2026-11-21: T&S is never pushed)'],
     [{ service_key: 'palm_injection', service_name: 'Palm Tree Injections' }, 'pest_control', 'palm vetoes the tree token — assessment-first, never offered, falls to the anchor'],
     [{ service_type: 'Palm Treatment' }, 'pest_control', 'palm wording alone → pest'],
-    [{ service_type: 'Trees & Shrubs Treatment' }, 'tree_shrub', 'plural T&S wording (codex r1 P2)'],
-    [{ service_name: 'Ornamentals Care' }, 'tree_shrub', 'plural ornamentals'],
+    [{ service_type: 'Trees & Shrubs Treatment' }, 'lawn_care', 'plural T&S wording (codex r1 P2)'],
+    [{ service_name: 'Ornamentals Care' }, 'lawn_care', 'plural ornamentals'],
     [{ service_type: 'Palm Trees Injection' }, 'pest_control', 'plural palm trees still vetoes the tree match'],
-    [{ service_name: 'Ornamental Care Visit' }, 'tree_shrub', 'ornamental wording is T&S'],
-    [{ service_type: 'Lawn, Tree & Shrub Package' }, 'tree_shrub', 'combined wording → the more specific family'],
+    [{ service_name: 'Ornamental Care Visit' }, 'lawn_care', 'ornamental wording is T&S → lawn'],
+    [{ service_type: 'Lawn, Tree & Shrub Package' }, 'lawn_care', 'combined wording → lawn'],
     [{ service_type: 'Mystery Legacy Row' }, 'pest_control', 'unknown identity → pest, the anchor'],
     [{}, 'pest_control', 'no identity at all → pest'],
   ])('%j → %s (%s)', (identity, expected) => {
@@ -1427,15 +1428,13 @@ describe('buildReportCrossSell', () => {
     expect(result.option.perVisit).toBeGreaterThan(0);
   });
 
-  test('pest + lawn customer is offered tree & shrub', async () => {
+  test('pest + lawn customer gets no card (owner 2026-11-21: tree & shrub is never pushed)', async () => {
     const db = dbFor({
       customer: CUSTOMER({ bed_sqft: 1200 }),
       serviceTypes: ['Pest Control', 'Lawn Care'],
       turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500 },
     });
-    const result = await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup });
-    expect(result).not.toBeNull();
-    expect(result.serviceKey).toBe('tree_shrub');
+    expect(await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup })).toBeNull();
   });
 
   test('pest + lawn + tree & shrub customer gets no card (owner 2026-09-28: termite is not pitched from a report)', async () => {
@@ -2032,37 +2031,6 @@ describe('buildReportCrossSell', () => {
     });
     const service = SERVICE({ service_type: 'Quarterly Pest Control', service_date: '2026-01-05' });
     expect(await buildReportCrossSell(service, db, { propertyLookup: missLookup })).toBeNull();
-  });
-
-  test('a seeded synthetic zero tree count is dropped — it never reads as an explicit count', async () => {
-    // The v1 lookup adapter stores treeCount: 0 when nothing was observed;
-    // replayed as explicit it would let priceTreeShrub skip its density
-    // fallback and price zero trees. With the zero dropped, the seed with
-    // and without the synthetic count must price identically.
-    const estimateWith = (features) => [{
-      id: 'est-1',
-      address: '123 Gulf Dr, Sarasota, FL 34236',
-      status: 'accepted',
-      estimate_data: JSON.stringify({
-        engineInputs: {
-          homeSqFt: 2400, lotSqFt: 8000, stories: 1, storiesSource: 'lookup',
-          bedArea: 3000, bedAreaSource: 'explicit', features,
-        },
-      }),
-    }];
-    const run = async (features) => buildReportCrossSell(SERVICE(), dbFor({
-      serviceTypes: ['Pest Control', 'Lawn Care'],
-      turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
-      estimates: estimateWith(features),
-    }), { propertyLookup: missLookup });
-    const withSyntheticZero = await run({ trees: 'moderate', treeCount: 0 });
-    expect(withSyntheticZero).not.toBeNull();
-    expect(withSyntheticZero.serviceKey).toBe('tree_shrub');
-    // r10: a zero count has no provenance (operator-confirmed vs adapter
-    // synthetic), so a tree & shrub offer built on it NEVER prices —
-    // neither replaying zero trees nor a phantom density fallback is safe.
-    expect(withSyntheticZero.mode).toBe('quote_cta');
-    expect(withSyntheticZero.option).toBeNull();
   });
 
   test('report-family guard: a RECENT uncorroborated report identity suppresses the card entirely', async () => {
