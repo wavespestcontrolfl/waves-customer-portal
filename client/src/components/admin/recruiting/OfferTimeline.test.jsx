@@ -247,6 +247,27 @@ describe("OfferTimeline", () => {
       expect(screen.queryByRole("button", { name: /^(Mark done|Undo):/ })).toBeNull();
     });
 
+    // The Waves Google login is not marked by hand: the server says when it is done and what to do next.
+    it("shows the login item with its next step and no button, then that the login is on", () => {
+      const login = (over) => ({
+        key: "google_login", label: "Waves Google login", due: "Due before the first day, Mon, Jan 4, 2027", doneAt: null, doneByName: null,
+        auto: true, done: false, note: "Link the Waves Google address on the Team tab, then press Hired.", ...over,
+      });
+      const { rerender } = render(card({ offer: signed(), firstDays: firstDays({ items: [login(), ...firstDays().items] }) }));
+      const row = () => within(rowOf("Waves Google login"));
+      expect(row().getByText("Due before the first day, Mon, Jan 4, 2027")).toBeInTheDocument();
+      expect(row().getByText("Link the Waves Google address on the Team tab, then press Hired.")).toBeInTheDocument();
+      expect(row().queryByRole("button")).toBeNull();
+      // The other items keep their buttons.
+      expect(screen.getByRole("button", { name: "Mark done: Form I-9" })).toBeInTheDocument();
+
+      const on = login({ done: true, note: "The login is on: the hire signs in with Google." });
+      rerender(card({ offer: signed(), firstDays: firstDays({ items: [on, ...firstDays().items] }) }));
+      expect(row().getByText("The login is on: the hire signs in with Google.")).toBeInTheDocument();
+      expect(row().queryByText(/Due before/)).toBeNull();
+      expect(row().queryByRole("button")).toBeNull();
+    });
+
     it("shows no checklist when the read has none", () => {
       render(card({ offer: signed(), firstDays: null }));
       expect(screen.queryByTestId("offer-first-days")).toBeNull();
