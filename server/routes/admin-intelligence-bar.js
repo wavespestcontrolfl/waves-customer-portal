@@ -25,7 +25,7 @@ const IbThreads = require('../services/intelligence-bar/threads');
 const PriceReadBack = require('../services/intelligence-bar/price-read-back');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
-const { gateEnvValue, ibCancelAppointmentLive, ibCancelWithEffectsLive, ibAcceptEstimateLive, ibAnswerSendToClaudeLive, dictationMoneyNormalizeLive, ibOpenaiBackupLive } = require('../config/feature-gates');
+const { gateEnvValue, ibCancelAppointmentLive, ibCancelWithEffectsLive, ibAcceptEstimateLive, ibOpenaiBackupLive } = require('../config/feature-gates');
 const ModelFailure = require('../services/intelligence-bar/model-failure');
 const { dictatedAmountsNote } = require('../utils/spoken-money');
 const IbOpenaiBackup = require('../services/intelligence-bar/ib-openai-backup');
@@ -3775,7 +3775,7 @@ async function runQuery(req, res, next) {
         thread_id: UUID_RE.test(String(req.body.thread_id || '')) ? req.body.thread_id : null,
         thread_seq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null,
         // kept with the saved task so a customer pick or a resume still asks about the dictated amount
-        ...(dictationMoneyNormalizeLive() && req.body.dictation_used === true ? { dictation_used: true } : {}),
+        ...(req.body.dictation_used === true ? { dictation_used: true } : {}),
         // …and still cards every write after pasted text (owner-direct.js, PASTED TEXT)
         ...(req.body.pasted_text === true ? { pasted_text: true } : {}) };
       const started = req.ibResumedTask ? { task: req.ibResumedTask, created: true } : await IbTasks.begin({ actorId: getAdminActorId(req), sessionId: req.body.session_id,
@@ -3898,8 +3898,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     if (ownerDirectCommits) systemPrompt += OwnerDirect.ownerDirectPrompt();
     else if (ownerDirect) systemPrompt += OwnerDirect.OWNER_DIRECT_CARDED_PROMPT;
     if (ownerDirectCommits) systemPrompt += OwnerDirect.OWNER_DIRECT_TARGET_RULES_PROMPT;
-    // GATE_DICTATION_MONEY_NORMALIZE: a dictated message's amounts are read back (clear) or asked ($61.33 or $6,133).
-    if (dictationMoneyNormalizeLive() && req.body.dictation_used === true) systemPrompt += dictatedAmountsNote(prompt);
+    // A dictated message's amounts are read back (clear) or asked ($61.33 or $6,133).
+    if (req.body.dictation_used === true) systemPrompt += dictatedAmountsNote(prompt);
     // Live page data (current date, schedule stats, etc.) is injected on the
     // current user turn by buildUserMessageContent, NOT here — appending it to
     // the system prompt made the prefix unique per request and defeated
@@ -4018,10 +4018,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     const gapCollector = platformEnabled
       ? createGapCollector({ source: 'intelligence-bar', isRegisteredTool: name => ActionRegistry.actions.has(name) })
       : context === 'tech' ? createGapCollector({ source: 'tech-bar' }) : null;
-    // GATE_IB_TOOL_ACTIVITY (read at call time): operator-facing activity
-    // lines — label + outcome + duration per tool call, never inputs or
-    // results. Returned only when the gate is on; off = today's payload.
-    const toolActivityOn = gateEnvValue('GATE_IB_TOOL_ACTIVITY');
+    // Operator-facing activity lines — label + outcome + duration per tool
+    // call, never inputs or results.
     const toolActivity = [];
     // Knowledge searches that found nothing this request. Returned to the
     // client only, so the operator can choose to add one to the weekly
@@ -4355,15 +4353,13 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         // later round; an unrelated or sibling call succeeding does not answer it.
         if (result?.code === 'target_clarification_required') unresolvedClarifications.set(callKey(toolUse), { operation: operationKey(toolUse), round });
         else if (!isToolFailure(result)) settleClarification(toolUse, round);
-        if (toolActivityOn) {
-          toolActivity.push({
-            tool: toolUse.name,
-            label: AuthorizationContract.activityLabel(toolUse.name),
-            status: failed ? 'error' : proposedCard ? 'proposed' : 'done',
-            durationMs: Date.now() - toolStartedAt,
-            round,
-          });
-        }
+        toolActivity.push({
+          tool: toolUse.name,
+          label: AuthorizationContract.activityLabel(toolUse.name),
+          status: failed ? 'error' : proposedCard ? 'proposed' : 'done',
+          durationMs: Date.now() - toolStartedAt,
+          round,
+        });
       }
 
       currentMessages = ToolSearch.appendRoundMessages(currentMessages, response, results);
@@ -4526,9 +4522,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     const payload = {
       response: finalResponse,
       toolCalls,
-      // Operator-facing activity lines (GATE_IB_TOOL_ACTIVITY). Absent when
-      // the gate is off so the payload stays byte-identical.
-      ...(toolActivityOn ? { toolActivity } : {}),
+      // Operator-facing activity lines.
+      toolActivity,
       // Knowledge searches that came back empty, for the "add to knowledge
       // gaps" prompt. Absent when there were none.
       ...(knowledgeMisses.size ? { knowledgeMisses: [...knowledgeMisses] } : {}),
@@ -4537,9 +4532,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       // none, and dropped when this turn made a card or committed a direct
       // edit: a button must never sit beside a Confirm control or a receipt.
       ...(offeredChoices && !pendingProposals.length && !directActionIds.length ? { choices: offeredChoices } : {}),
-      // GATE_IB_ANSWER_SEND_TO_CLAUDE: the bar searched its tools and changed nothing. Owner login on the admin platform
+      // The bar searched its tools and changed nothing. Owner login on the admin platform
       // only; the palette shows "Claude has this as gap #N." or a Send to Claude button. Absent otherwise.
-      ...(platformEnabled && ibAnswerSendToClaudeLive() && ibFullAccess(req) && gapCollector?.searched()
+      ...(platformEnabled && ibFullAccess(req) && gapCollector?.searched()
         && !pendingProposals.length && !directActionIds.length
         ? { answerClaude: { stuck: true, gapId: firstOpenGapId(savedGaps) } } : {}),
       // Return the structured data from the last tool call for UI rendering

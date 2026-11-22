@@ -2,7 +2,7 @@ import React from "react";
 
 /**
  * Intelligence Bar activity list — what the bar checked or did on this
- * exchange, one line per tool call (GATE_IB_TOOL_ACTIVITY). Rendered above
+ * exchange, one line per tool call. Rendered above
  * the answer so a confirmation card is read next to the steps that produced
  * it. Labels and outcomes only: never tool inputs, results, or reasoning.
  *
