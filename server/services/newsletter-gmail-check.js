@@ -16,10 +16,11 @@
  *      on a difference of two readers.
  * With fewer than MIN_COPIES delivered copies in either group there is no verdict.
  *
- * The job runs every hour (scheduler.js) and judges each issue from 48 to 72 hours after it went
+ * The job runs every hour (scheduler.js) and judges each issue from 50 to 72 hours after it went
  * out. Every run counts the same copies and opens, the ones of the issue's first 48 hours (most
- * opens have arrived by then), so the day of hourly runs is one test that a restart or a failed
- * run cannot skip, not 24 tests of a moving count. An issue that stopped part way ('failed') is judged too: the copies
+ * opens have arrived by then; the 2 hours between let SendGrid's last events come in), so the
+ * hourly runs are one test that a restart or a failed run cannot skip, not 22 tests of a moving
+ * count. An issue that stopped part way ('failed') is judged too: the copies
  * it delivered reached readers. One alert per issue, ever: the dedupe key holds the send id, with
  * neither dedupeOpenOnly nor refreshOnDedupe, so a later run stays silent, also after a person
  * marked the row done (admin-alert-retention.js, RE-RING RISK). The check reads the ledger only
@@ -33,9 +34,11 @@ const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
 const { formatETDayDate } = require('../utils/datetime-et');
 
 const HOUR_MS = 60 * 60 * 1000;
-// Copies and opens count up to JUDGE_FROM_MS after the issue went out; runs judge it from then to
-// JUDGE_UNTIL_MS.
-const JUDGE_FROM_MS = 48 * HOUR_MS;
+// Copies and opens count up to COUNT_UNTIL_MS after the issue went out. Runs judge the issue from
+// JUDGE_FROM_MS to JUDGE_UNTIL_MS: SendGrid posts an event some seconds to minutes after it
+// happens, so the first run waits 2 hours for the last ones.
+const COUNT_UNTIL_MS = 48 * HOUR_MS;
+const JUDGE_FROM_MS = 50 * HOUR_MS;
 const JUDGE_UNTIL_MS = 72 * HOUR_MS;
 // A run mails its copies in minutes. A day is a wide margin for the longest one.
 const RUN_MARGIN_MS = 24 * HOUR_MS;
@@ -86,7 +89,7 @@ const WENT_OUT_SQL = 'greatest(newsletter_sends.sent_at, (select max(copy.sent_a
   + ' from newsletter_send_deliveries copy where copy.send_id = newsletter_sends.id))';
 
 /**
- * The issues one run judges: each one that went out 48 to 72 hours before `now`, oldest first.
+ * The issues one run judges: each one that went out 50 to 72 hours before `now`, oldest first.
  * 'failed' too: a send that stopped part way reached some readers. A send with no sent_at and no
  * mailed copy has no time here and is never judged.
  * @returns {Promise<Array<{ id: string, subject: string, newsletter_type: string, went_out_at: Date }>>}
@@ -138,7 +141,7 @@ function raiseGmailGap(send, counts) {
 }
 
 /**
- * One run: judges every issue that went out 48 to 72 hours before `now`, and raises the alert
+ * One run: judges every issue that went out 50 to 72 hours before `now`, and raises the alert
  * for each one where Gmail is far behind. A failed read or a failed alert write is thrown, so
  * job_health records the failed run; the next hour judges the same issues again.
  * @returns {Promise<{ judged: Array<{ sendId: string, verdict: string, gmail: object, other: object }> }>}
@@ -148,7 +151,7 @@ async function runNewsletterGmailCheck({ now = new Date() } = {}) {
   const { gmailOpenCounts } = require('./newsletter-sender');
   const judged = [];
   for (const send of await issuesToJudge(now)) {
-    const counts = await gmailOpenCounts(db, send.id, new Date(new Date(send.went_out_at).getTime() + JUDGE_FROM_MS));
+    const counts = await gmailOpenCounts(db, send.id, new Date(new Date(send.went_out_at).getTime() + COUNT_UNTIL_MS));
     const verdict = gmailGapVerdict(counts);
     if (verdict === 'gap') {
       const raised = await raiseGmailGap(send, counts);
@@ -166,5 +169,5 @@ async function runNewsletterGmailCheck({ now = new Date() } = {}) {
 
 module.exports = {
   runNewsletterGmailCheck, issuesToJudge, gmailGapVerdict, chanceOfSoFewGmailOpens,
-  MIN_COPIES, CHANCE_LIMIT, JUDGE_FROM_MS, JUDGE_UNTIL_MS,
+  MIN_COPIES, CHANCE_LIMIT, COUNT_UNTIL_MS, JUDGE_FROM_MS, JUDGE_UNTIL_MS,
 };

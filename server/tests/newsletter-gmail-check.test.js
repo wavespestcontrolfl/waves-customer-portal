@@ -42,7 +42,8 @@ const counts = (gmailOpened, gmailDelivered, otherOpened, otherDelivered) => ({
   gmail: { delivered: gmailDelivered, opened: gmailOpened },
   other: { delivered: otherDelivered, opened: otherOpened },
 });
-const NOW = new Date('2026-12-05T12:00:00Z');
+// 51 hours after the issue below went out.
+const NOW = new Date('2026-12-05T15:00:00Z');
 const HOUR_MS = 60 * 60 * 1000;
 const issue = (over = {}) => ({
   id: 'send-1', subject: 'Native termites can swarm in winter', newsletter_type: 'pest-insider-monthly',
@@ -107,7 +108,7 @@ describe('chanceOfSoFewGmailOpens', () => {
 });
 
 describe('runNewsletterGmailCheck', () => {
-  test('asks for the issues that went out 48 to 72 hours before now, a send that stopped part way included', async () => {
+  test('asks for the issues that went out 50 to 72 hours before now, a send that stopped part way included', async () => {
     await runNewsletterGmailCheck({ now: NOW });
 
     expect(db).toHaveBeenCalledWith('newsletter_sends');
@@ -115,7 +116,7 @@ describe('runNewsletterGmailCheck', () => {
       ['status', ['sent', 'failed']],
       // Only a send row changed in the last 96 hours is read for its newest copy.
       ['newsletter_sends.updated_at', '>', new Date(NOW.getTime() - 96 * HOUR_MS)],
-      [expect.stringMatching(/^greatest\(newsletter_sends\.sent_at, .+\) <= \?$/), [new Date(NOW.getTime() - 48 * HOUR_MS)]],
+      [expect.stringMatching(/^greatest\(newsletter_sends\.sent_at, .+\) <= \?$/), [new Date(NOW.getTime() - 50 * HOUR_MS)]],
       [expect.stringMatching(/^greatest\(newsletter_sends\.sent_at, .+\) > \?$/), [new Date(NOW.getTime() - 72 * HOUR_MS)]],
     ]);
     expect(gmailOpenCounts).not.toHaveBeenCalled();
@@ -128,7 +129,8 @@ describe('runNewsletterGmailCheck', () => {
 
     const result = await runNewsletterGmailCheck({ now: NOW });
 
-    // Copies and opens count up to 48 hours after the issue went out, whichever hourly run reads them.
+    // Copies and opens count up to 48 hours after the issue went out, whichever hourly run reads
+    // them. The first run comes 2 hours later, when SendGrid's last events are in.
     expect(gmailOpenCounts).toHaveBeenCalledWith(db, 'send-1', new Date('2026-12-05T12:00:00Z'));
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
     const [category, headline, why, opts] = notifyAdmin.mock.calls[0];

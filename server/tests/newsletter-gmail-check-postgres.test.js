@@ -5,7 +5,7 @@
  *   mailboxes. The ledger rows are written by the SendGrid webhook's own event mapping
  *   (computeNewsletterEventUpdates), and the opens are rows of its event log
  *   (sendgrid_webhook_events), where the machine-open flag and the time of the open live.
- * - The issues a run judges (newsletter-gmail-check issuesToJudge): the ones that went out 48 to
+ * - The issues a run judges (newsletter-gmail-check issuesToJudge): the ones that went out 50 to
  *   72 hours before, by the later of the send's own time and its newest mailed copy.
  * A fake query builder cannot show what the correlated subqueries, the FILTER clauses, a NULL flag
  * and a NULL time read as. Self-skips unless DATABASE_URL is set (CI's DB-gated suites run it).
@@ -139,23 +139,24 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     expect((await gmailOpenCounts(db, send.id, new Date())).gmail).toEqual({ delivered: 6, opened: 3 });
   });
 
-  test('a run judges the issues that went out 48 to 72 hours before, by the later of the send time and the newest mailed copy', async () => {
+  test('a run judges the issues that went out 50 to 72 hours before, by the later of the send time and the newest mailed copy', async () => {
     const now = new Date();
     // One fixed `now` for the rows and the read, so an exact time can be compared.
     const ago = (hours) => new Date(now.getTime() - hours * 60 * 60 * 1000);
     // [name, status, the send's own sent_at, the times its copies were mailed]
     const cases = [
-      ['sent in the window', 'sent', ago(49), []],
-      ['sent too new', 'sent', ago(47), []],
+      ['sent in the window', 'sent', ago(51), []],
+      // Past hour 48, but SendGrid's last events may not be in yet.
+      ['sent too new', 'sent', ago(49), []],
       ['sent too old', 'sent', ago(73), []],
-      ['still sending', 'sending', ago(50), []],
+      ['still sending', 'sending', ago(60), []],
       ['stopped part way, with a time', 'failed', ago(60), []],
       // The tick threw before the final write: no sent_at on the send.
       ['died, newest copy in the window', 'failed', null, [ago(56), ago(55)]],
       ['died, newest copy too new', 'failed', null, [ago(55), ago(30)]],
       ['died, no copy mailed', 'failed', null, []],
       // A resume keeps the first sent_at: the newest readers need the same 48 hours.
-      ['resumed, newest copy in the window', 'sent', ago(120), [ago(119), ago(50)]],
+      ['resumed, newest copy in the window', 'sent', ago(120), [ago(119), ago(52)]],
       ['resumed, newest copy too new', 'sent', ago(60), [ago(59), ago(10)]],
     ];
     const idOf = {};
@@ -180,7 +181,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
       idOf['resumed, newest copy in the window'], idOf['sent in the window'],
     ]);
     expect(new Date(mine[1].went_out_at).getTime()).toBe(ago(55).getTime());
-    expect(new Date(mine[2].went_out_at).getTime()).toBe(ago(50).getTime());
+    expect(new Date(mine[2].went_out_at).getTime()).toBe(ago(52).getTime());
     // The columns the alert reads.
     expect(Object.keys(mine[3]).sort()).toEqual(['id', 'newsletter_type', 'subject', 'went_out_at']);
     expect(mine[3].subject).toBe('Synthetic Gmail check: sent in the window');

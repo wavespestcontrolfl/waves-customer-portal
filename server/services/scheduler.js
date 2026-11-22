@@ -3443,7 +3443,7 @@ function initScheduledJobs() {
 
   // =========================================================================
   // NEWSLETTER GMAIL CHECK (owner 2026-11-22; no gate: reads only, emails no one)
-  // Every hour at :23. For each issue that went out 48 to 72 hours ago, it
+  // Every hour at :23. For each issue that went out 50 to 72 hours ago, it
   // compares how many delivered copies Gmail readers opened with all other
   // readers, and raises one admin alert per issue when Gmail is far behind
   // (Gmail sends no spam reports, so no other check sees a Gmail spam
