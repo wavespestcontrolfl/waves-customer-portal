@@ -165,6 +165,15 @@ beforeEach(() => {
         savedOutcomes.set(outcomePath[1], callOutcome);
         return response({ callOutcome });
       }
+      // The Follow Up modal: the ready-text read, then the send, which stamps last_follow_up_at on the row.
+      const followUpDraft = /^\/api\/admin\/estimates\/([^/]+)\/follow-up-draft$/.exec(parsed.pathname);
+      if (followUpDraft && !init.method) return response({ message: `Ready text for ${followUpDraft[1]}` });
+      const followUpSend = /^\/api\/admin\/estimates\/([^/]+)\/follow-up$/.exec(parsed.pathname);
+      if (init.method === "POST" && followUpSend) {
+        posts.push({ path: parsed.pathname, body: JSON.parse(init.body) });
+        listRows = listRows.map((r) => (r.id === followUpSend[1] ? { ...r, lastFollowUpAt: new Date().toISOString() } : r));
+        return response({ success: true });
+      }
       if (init.method === "POST" && parsed.pathname === "/api/admin/communications/call") {
         posts.push({ path: parsed.pathname, body: JSON.parse(init.body) });
         return response({ success: true });
@@ -427,16 +436,33 @@ it.each([
   const { container } = renderPage(width, "?tab=estimates&view=call_today");
   await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
   const buttons = within(rowOf(container, "v-5h")).getByRole("group", { name: "Call outcome for Five Hours" });
+  // The mobile row adds its Follow up tap after the four outcomes (the desktop card has its own Follow Up button).
   expect(within(buttons).getAllByRole("button").map((b) => b.textContent)).toEqual([
     "Booked",
     "Call back",
     "Not interested",
     "No answer",
+    ...(width === 390 ? ["Follow up"] : []),
   ]);
   fireEvent.click(within(buttons).getByRole("button", { name: "No answer" }));
   await waitFor(() => expect(rowIds(container)).toEqual(["v-30h"]));
   expect(posts).toEqual([{ path: "/api/admin/estimates/v-5h/call-outcome", body: { outcome: "no_answer" } }]);
   expect(screen.queryByText("Mark as lost")).not.toBeInTheDocument();
+});
+
+it.each([
+  ["desktop", 1440, "Follow Up"],
+  ["mobile", 390, "Follow up"],
+])("(%s) a Call today row's follow-up opens the ready text, sends the box's text and takes the row off", async (_label, width, name) => {
+  const { container } = renderPage(width, "?tab=estimates&view=call_today");
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+  fireEvent.click(within(rowOf(container, "v-5h")).getByRole("button", { name }));
+  const box = await screen.findByRole("textbox");
+  await waitFor(() => expect(box).toHaveValue("Ready text for v-5h"));
+  fireEvent.click(screen.getByRole("button", { name: /send follow-up sms/i }));
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h"]));
+  expect(posts).toEqual([{ path: "/api/admin/estimates/v-5h/follow-up", body: { message: "Ready text for v-5h" } }]);
+  expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
 });
 
 it.each([
@@ -469,6 +495,23 @@ it.each([
   fireEvent.click(within(rowOf(container, "v-5h")).getByRole("button", { name: "Booked" }));
   await waitFor(() => expect(rowIds(container)).toEqual(["v-30h"]));
   expect(posts.at(-1)).toEqual({ path: "/api/admin/estimates/v-5h/call-outcome", body: { outcome: "booked" } });
+});
+
+it.each([
+  ["desktop", 1440, "Follow Up"],
+  ["mobile", 390, "Follow up"],
+])("(%s) a follow-up text sent after a call from the list ends the hold: the row leaves", async (_label, width, name) => {
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  const { container } = renderPage(width, "?tab=estimates&view=call_today");
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h", "v-5h"]));
+  fireEvent.click(within(rowOf(container, "v-5h")).getByRole("button", { name: /via Waves$/ }));
+  await waitFor(() => expect(posts.map((p) => p.path)).toEqual(["/api/admin/communications/call"]));
+  fireEvent.click(within(rowOf(container, "v-5h")).getByRole("button", { name }));
+  const box = await screen.findByRole("textbox");
+  await waitFor(() => expect(box).toHaveValue("Ready text for v-5h"));
+  fireEvent.click(screen.getByRole("button", { name: /send follow-up sms/i }));
+  await waitFor(() => expect(rowIds(container)).toEqual(["v-30h"]));
+  expect(posts.at(-1)).toEqual({ path: "/api/admin/estimates/v-5h/follow-up", body: { message: "Ready text for v-5h" } });
 });
 
 // The hold is for the caller to log the call they placed from Call today, so a call from any other list holds nothing,
