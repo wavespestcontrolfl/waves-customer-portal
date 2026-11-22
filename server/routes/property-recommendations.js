@@ -34,6 +34,10 @@ const { accountCanOneTap } = require('../services/one-tap-purchase');
 
 router.use(authenticate);
 
+// The offer card's two tabs, in the words the office reads (owner 2026-11-21:
+// the Billing tab shows the card too).
+const OFFER_TAB_PLACES = { home: 'portal home', billing: 'portal Billing' };
+
 // Same posture as the customer requests route: per-customer, low ceiling —
 // a tap-through is a staff-bell write, not a browsing action.
 const requestLimiter = rateLimit({
@@ -126,13 +130,14 @@ router.post('/request', requestLimiter, async (req, res, next) => {
     const requestedService = normalizeRequestedServiceKey(offer.serviceKey) || offer.serviceKey;
     const perApplication = Number(offer.option?.perVisit);
     // The same card also shows on the Billing tab (owner 2026-11-21). The
-    // office text and the stored snapshot name the tab the customer tapped
-    // on. The `source` column stays 'portal_home': it is the card's shared
-    // open-request slot (CTA_REQUEST_SOURCES), so one offer tapped on both
-    // tabs refreshes one request and never files two. A Home tap stores
-    // exactly what it stored before.
-    const onBilling = metadata.surface === 'billing';
-    const place = onBilling ? 'portal Billing' : 'portal home';
+    // office text (subject, description, bell) names the tab the customer
+    // tapped on. The `source` column and the price-lock snapshot stay
+    // 'portal_home': they name the card and its shared open-request slot
+    // (CTA_REQUEST_SOURCES), not the tab. So a Home tap stores exactly what
+    // it stored before, and the identical offer tapped on the second tab is
+    // the writer's no-op: one request, one bell (sameAskSubjects).
+    const place = metadata.surface === 'billing' ? OFFER_TAB_PLACES.billing : OFFER_TAB_PLACES.home;
+    const subjectFor = (tabPlace) => `Add ${offer.label} — requested from ${tabPlace}`;
     const priceText = Number.isFinite(perApplication) && perApplication > 0
       ? `(shown $${perApplication.toFixed(2)} per application on ${place})`
       : `(quote requested from ${place})`;
@@ -140,11 +145,12 @@ router.post('/request', requestLimiter, async (req, res, next) => {
       customerId: req.customerId,
       requestedService,
       source: 'portal_home',
-      subject: `Add ${offer.label} — requested from ${place}`,
+      subject: subjectFor(place),
+      sameAskSubjects: Object.values(OFFER_TAB_PLACES).map(subjectFor),
       description: `Customer tapped "${offer.label}" on the ${place} recommendations ${priceText}. Review and follow up — no customer message has been sent.`,
       // The server-computed offer snapshot — the shown price is the honored
       // price (sent-quote price-lock doctrine).
-      revisionSnapshot: { source: 'portal_home', ...(onBilling ? { surface: 'billing' } : {}), offer },
+      revisionSnapshot: { source: 'portal_home', offer },
     });
     await ringBell(req.customerId, [offer.label, priceText].join(' '), offer.relationship, outcome);
     return res.json({ success: true, deduped: !!outcome.deduped });
