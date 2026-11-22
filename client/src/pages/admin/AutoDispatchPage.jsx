@@ -39,7 +39,7 @@ function ErrorNotice({ children }) {
 // carry only routeTiersEnabled, so that is the fallback.
 function policyText(config) {
   const mode = config.guardMode || (config.routeTiersEnabled ? "tiers" : "legacy");
-  if (mode === "flex") return "Flexible rule: checks plan visits from tomorrow. A visit is frozen 73 hours before it, or once its 72-hour reminder is sent. A move to another day lands at least 5 days out, within 5 days of the visit's date.";
+  if (mode === "flex") return "Flexible rule: checks plan visits from tomorrow. A visit is frozen 73 hours before it, or once its 72-hour reminder is sent. A move to another day lands at least 5 days out, within 5 days of the visit's date. A visit on a plan of 2 months or longer may move up to 7 days when its plan's nearest other visit is 56 days away or more.";
   if (mode === "tiers") return "Tiered routing: evaluates visits from 7 days out, with reminder freezes and a five-day destination floor.";
   return `Evaluates visits more than ${config.lockWindowDays} days out.`;
 }
