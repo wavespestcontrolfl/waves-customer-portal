@@ -14,9 +14,11 @@
  * count. Until then every slot change counted, and most same-day changes were
  * forced repairs of a double booking that a new booking or a staff move made:
  * on 2026-11-22, 9 of the 12 visits at the limit had reached it that way, and
- * the run could then not repair their next conflict. A forced move (an
- * unplaced due date, a conflict) still counts when it changes the day. The
- * told-time and person-placed locks are separate and unchanged.
+ * the run could then not repair their next conflict. A forced move of a
+ * placed visit (a conflict, a closed day) still counts when it changes the
+ * day. The first placement of a visit that had no arrival window never
+ * counted and does not count now (DAY_MOVE_SQL). The told-time and
+ * person-placed locks are separate and unchanged.
  *
  * ONE EXCEPTION (owner 2026-11-17, "pick limit"): a pick fallback row. Quick
  * Move's "let the customer pick a day" text promises that if the customer does

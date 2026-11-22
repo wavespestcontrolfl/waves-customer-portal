@@ -182,7 +182,9 @@ function moveRuleConfig(overrides) {
     // The most automatic DAY moves one visit may have (owner 2026-10-09: "at
     // most two"), counted from the durable reschedule_log (move-limit.js). A
     // same-day change of the hour does not count (owner 2026-11-22, "days");
-    // a forced move counts when it changes the day. 0 = no limit.
+    // a forced move of a placed visit counts when it changes the day; the
+    // first placement of a visit with no arrival window never counts.
+    // 0 = no limit.
     maxAutoMovesPerVisit: overrides.maxAutoMovesPerVisit
       ?? intEnv('AUTO_DISPATCH_MAX_MOVES_PER_VISIT', 2, { min: 0, max: 20 }),
     // ROAD CHECK (GATE_AUTO_DISPATCH_ROAD_CHECK, road-check.js): an ordinary
