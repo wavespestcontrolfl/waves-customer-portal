@@ -5,6 +5,28 @@ const { etParts, etDateString, addETDays } = require('../../utils/datetime-et');
 
 const TRACKED_COMPETITORS = ['turnerpest.com', 'hoskinspest.com', 'hometeampestdefense.com', 'orkin.com', 'terminix.com', 'trulynolen.com', 'nozzlenolen.com'];
 
+// What one result page held, stored with each rank row (serp_features.page). Counts and public result
+// domains only. From 2026-11-06 no check found Waves or a tracked rival, also with DataForSEO's
+// poisoned-page repair on (GATE_DATAFORSEO_RESOLVE_POISONED), and the row did not say why: a page with
+// no organic results, with unrelated results, or with repaired ones. `repaired` counts organic results
+// DataForSEO read again from the live web (their `checks` value names `from_web`).
+function pageFacts(items) {
+  const list = Array.isArray(items) ? items.filter(Boolean) : [];
+  const types = {};
+  for (const item of list) {
+    const type = String(item.type || 'unknown').slice(0, 40);
+    types[type] = (types[type] || 0) + 1;
+  }
+  const organic = list.filter(i => i.type === 'organic');
+  return {
+    items: list.length,
+    types,
+    organic: organic.length,
+    repaired: organic.filter(i => JSON.stringify(i.checks ?? '').includes('from_web')).length,
+    top_domains: organic.slice(0, 5).map(i => String(i.domain || '').toLowerCase().slice(0, 80)),
+  };
+}
+
 class RankTracker {
   /**
    * Run daily rank check for priority-1 keywords (or all if weekly).
@@ -105,6 +127,7 @@ class RankTracker {
           video: items.some(i => i.type === 'video'),
           featured_snippet: items.some(i => i.type === 'featured_snippet'),
         };
+        serpFeatures.page = pageFacts(items);
 
         // Check AI Overview
         const aio = items.find(i => i.type === 'ai_overview');
@@ -182,3 +205,4 @@ class RankTracker {
 }
 
 module.exports = new RankTracker();
+module.exports._private = { pageFacts };
