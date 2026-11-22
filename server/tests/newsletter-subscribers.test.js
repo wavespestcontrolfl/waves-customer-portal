@@ -355,17 +355,21 @@ describe('the reader-confirmed stamps are written by the confirm click only', ()
     write = queries.find((r) => r.update);
     expect(write.update.status).toBe('active');
     // The comeback is not the reader's click. It clears unsubscribed_at, and in the same write the
-    // reader's earlier proof: a click from before the opt-out is gone from the row, whatever
-    // order this write and a later click or opt-out land in.
+    // reader's earlier proof when the row is opted out at that instant (SQL reads the status
+    // before the update): a click from before the opt-out is gone, and a click that made the row
+    // active just before this write stays. db.raw is a passthrough here, so the value is the SQL.
+    const clearedUnlessActive = (column) => `CASE WHEN status IN ('unsubscribed', 'inactive') THEN NULL ELSE ${column} END`;
     expect(write.update.unsubscribed_at).toBeNull();
-    expect(write.update).toMatchObject({ reader_confirmed_at: null, reader_confirmed_email: null });
+    expect(write.update.reader_confirmed_at).toBe(clearedUnlessActive('reader_confirmed_at'));
+    expect(write.update.reader_confirmed_email).toBe(clearedUnlessActive('reader_confirmed_email'));
 
     // The same for a comeback that waits for a new confirm click (a non-public double-opt-in caller).
     queries = useRecordingDb({ firsts: [{ ...UNSUB_ROW }, { ...UNSUB_ROW, status: 'pending' }] });
     expect((await subscribeOrResubscribe({ email: 'reader@example.com', source: 'call_recording', requireConfirmation: true, linkCustomer: false })).action).toBe('confirmation_sent');
     write = queries.find((r) => r.update);
     expect(write.update.status).toBe('pending');
-    expect(write.update).toMatchObject({ reader_confirmed_at: null, reader_confirmed_email: null });
+    expect(write.update.reader_confirmed_at).toBe(clearedUnlessActive('reader_confirmed_at'));
+    expect(write.update.reader_confirmed_email).toBe(clearedUnlessActive('reader_confirmed_email'));
 
     queries = useRecordingDb({ firsts: [{ ...WAITLIST_ROW }, { ...WAITLIST_ROW, status: 'active' }] });
     expect((await subscribeOrResubscribe({ email: 'pat@example.com', source: 'admin_manual', requireConfirmation: false, linkCustomer: false, promoteWaitlist: true })).action).toBe('resubscribed');

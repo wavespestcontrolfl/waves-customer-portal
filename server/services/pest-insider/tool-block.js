@@ -53,9 +53,9 @@ const stampMs = (value) => (value ? new Date(value).getTime() : NaN);
 //   reader confirmed (a moved row fails here);
 // - confirmed_at is set and reader_confirmed_at is not before it. A trusted resubscribe
 //   after an opt-out clears unsubscribed_at; it also clears both reader stamps in that
-//   same write (newsletter-subscribers.js), so a click from before the opt-out is gone
-//   from the row. This order check is the second line: such a write also sets a later
-//   confirmed_at;
+//   same write when the row is opted out at that instant (newsletter-subscribers.js),
+//   so a click from before the opt-out is gone from the row. This order check is the
+//   second line: such a write also sets a later confirmed_at;
 // - no opt-out or sunset stamp (unsubscribed_at, deactivated_at) is at or after the
 //   click (an unreadable stamp fails closed).
 // Nothing is backfilled: history cannot tell a click from a trusted add, so a row has
@@ -73,11 +73,8 @@ const stampMs = (value) => (value ? new Date(value).getTime() : NaN);
 //   promotion's confirmed_at is later than the click, this rule reads the click as
 //   void and the reader gets no block (the safe side). When it is not later, the click
 //   counts, and that is right: the reader clicked the link for this address.
-// - A trusted comeback on an opted-out row in the same instant as the reader's click on a
-//   live re-signup link: the comeback's write (by id) can land last and clear the click's
-//   proof. That reader gets no block until the next confirm click (the safe side).
-// newsletter-subscribers.js (confirmByToken, and the comeback write) says why the trusted
-// writes and the confirm page are not changed for these cases.
+// newsletter-subscribers.js confirmByToken says why the trusted promotion and the
+// confirm page are not changed for these cases.
 function optedIn(row, subscriber) {
   if (!row || row.status !== 'active') return false;
   const confirmedAt = stampMs(row.confirmed_at);

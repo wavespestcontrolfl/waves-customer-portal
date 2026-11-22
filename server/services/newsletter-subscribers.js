@@ -19,6 +19,9 @@ const { EMAIL_RE } = require('../utils/workable-lead-signal');
 // purgeStalePendingSubscribers() after a longer window so the table (and the
 // email's eligibility for a fresh signup) doesn't accrue dead pending rows.
 const CONFIRM_TTL_MS = 7 * 24 * 60 * 60 * 1000;       // 7 days — link still confirms
+// A reader-proof column's value in a comeback write: NULL when the row the UPDATE changes is
+// opted out at that instant, else the column as it is (see the comeback in subscribeOrResubscribeOnce).
+const READER_PROOF_UNLESS_OPTED_OUT = (column) => `CASE WHEN status IN ('unsubscribed', 'inactive') THEN NULL ELSE ${column} END`;
 const PENDING_PURGE_MS = 30 * 24 * 60 * 60 * 1000;    // 30 days — then delete the row
 // Sweep #7765 B5: a public signup form may not trigger another confirmation
 // email for the same address while the last one is younger than this. The
@@ -233,17 +236,17 @@ async function subscribeOrResubscribeOnce({
         resubscribed_at: new Date(),
         unsubscribed_at: null,
         // This comeback is not the reader's click, so it drops the reader's earlier proof
-        // (confirmByToken). The opt-out it overrides came after that click, and this same
-        // write clears unsubscribed_at: with the proof left on the row, only a timestamp
-        // order would still say the click is void (pest-insider/tool-block.js optedIn), and
-        // this write's timestamps are taken before it lands. The reader's next confirm
-        // click writes the proof again. Accepted: this write is by id, as it was, so a
-        // reader's click on a live re-signup link that lands between this function's read
-        // and this write loses its proof to these NULLs. That reader gets no tool block
-        // until the next confirm click: the safe side. A status guard here would need a
-        // new answer for every caller of this staff path, which is not part of this change.
-        reader_confirmed_at: null,
-        reader_confirmed_email: null,
+        // (confirmByToken) when the row is still opted out at the instant of the write. The
+        // opt-out it overrides came after that click, and this same write clears
+        // unsubscribed_at: with the proof left on the row, only a timestamp order would
+        // still say the click is void (pest-insider/tool-block.js optedIn), and this
+        // write's timestamps are taken before it lands. `status` in the CASE is the row's
+        // status BEFORE this update (SQL evaluates SET against the old row). So a row that
+        // the reader's own click on a live re-signup link made active between this
+        // function's read and this write (the write is by id, as it was) keeps that new
+        // proof. After a clear, the reader's next confirm click writes the proof again.
+        reader_confirmed_at: conn.raw(READER_PROOF_UNLESS_OPTED_OUT('reader_confirmed_at')),
+        reader_confirmed_email: conn.raw(READER_PROOF_UNLESS_OPTED_OUT('reader_confirmed_email')),
         updated_at: new Date(),
       };
       // Sunset hygiene markers (newsletter-sunset.js) are cleared on EVERY
