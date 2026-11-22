@@ -137,7 +137,10 @@ async function main() {
     if (result.ok) {
       console.log(`   subject: ${result.issue.subject}\n   preview: ${result.issue.preview}`);
       console.log(`   wrote ${saveIssue(sendDate, result.issue)}.html and .txt`);
-      if (result.tool) console.log(`   wrote ${saveIssue(`${sendDate}.optin`, result.issue, { toolHtml: toolBlock(toolById(result.tool.productId)).html })}.html and .txt (opted-in readers: + "A tool we'd use" in the HTML part)`);
+      // The tool as the sender reads it: looked up again, so a row paused since the build gives no opted-in copy.
+      const tool = result.tool ? toolById(result.tool.productId) : null;
+      if (tool) console.log(`   wrote ${saveIssue(`${sendDate}.optin`, result.issue, { toolHtml: toolBlock(tool).html })}.html and .txt (opted-in readers: + "A tool we'd use" in the HTML part)`);
+      else if (result.tool) console.log(`   no opted-in copy: tool ${result.tool.productId} is not usable now`);
       // Only a built issue counts toward the rotation, like a sent one will.
       recent.factIds.push(d.factId);
       recent.speciesSlugs.push(d.speciesSlug);

@@ -1341,6 +1341,7 @@ module.exports = {
   proofRecipient,
   syncedApprovalMailbox,
   approvalSenders,
+  issueFyiAddresses,
   resolveFlagshipCalendarContext,
   maskEmail,
   parseProofToken,

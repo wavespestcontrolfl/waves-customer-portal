@@ -82,19 +82,23 @@ function mailboxKey(value) {
 }
 
 // Waves addresses as mailbox keys: the internal allowlist (internal-email-recipients.js),
-// the proof and approver addresses (newsletter-proof.js), and the login email of every
-// staff user (technicians: `email`, and `google_email` for the Google sign-in). Nobody
-// at Waves may buy through these links, and the owner's copies must not carry them. The
-// internal domains are matched by isInternalEmailRecipient. A family member's address
-// cannot be told from data: such a reader who opted in gets the block, and the owner
-// keeps that rule by not buying.
-async function wavesMailboxes(db) {
+// the proof and approver addresses as they are now, every address a copy of THIS issue's
+// FYI went to (the issue row's diagnostics.fyiTo, newsletter-proof.js issueFyiAddresses:
+// the proof address can change between the FYI copy and the send or a resume, and a
+// mailbox that got the owner's copy stays a Waves mailbox for this issue), and the login
+// email of every staff user (technicians: `email`, and `google_email` for the Google
+// sign-in). Nobody at Waves may buy through these links, and the owner's copies must not
+// carry them. The internal domains are matched by isInternalEmailRecipient. A family
+// member's address cannot be told from data: such a reader who opted in gets the block,
+// and the owner keeps that rule by not buying.
+async function wavesMailboxes(db, issue) {
   const proof = require('../newsletter-proof');
   const { internalEmailAllowlist } = require('../../utils/internal-email-recipients');
   const staff = await db('technicians').select('email', 'google_email');
   return new Set([
     ...internalEmailAllowlist(),
     proof.proofRecipient(), proof.syncedApprovalMailbox(), ...proof.approvalSenders(),
+    ...proof.issueFyiAddresses(issue),
     ...staff.flatMap((s) => [s.email, s.google_email]),
   ].map(mailboxKey).filter(Boolean));
 }
@@ -106,14 +110,14 @@ async function readersWithBlock({ send, subscribers, planned, db }) {
   // The block rides the same gate as "Your home": an issue a person sends or resumes by
   // hand while GATE_PEST_INSIDER_AUTO_SEND is off carries no tool.
   if (!planned || send?.newsletter_type !== PEST_INSIDER_TYPE || !require('../../config/feature-gates').pestInsiderAutoSendLive()) return none;
-  const issue = await db('pest_insider_issues').where({ send_id: send.id }).first('tool_id');
+  const issue = await db('pest_insider_issues').where({ send_id: send.id }).first('tool_id', 'diagnostics');
   // Usable NOW: registry row active, green, Amazon, every tools.js check.
   const tool = issue?.tool_id ? require('./tools').toolById(issue.tool_id) : null;
   if (!tool) return none;
   const [rows, waves] = await Promise.all([
     db('newsletter_subscribers').whereIn('id', subscribers.map((s) => s.id))
       .select('id', 'email', 'status', 'confirmed_at', 'reader_confirmed_at', 'reader_confirmed_email', 'unsubscribed_at', 'deactivated_at'),
-    wavesMailboxes(db),
+    wavesMailboxes(db, issue),
   ]);
   const { isInternalEmailRecipient } = require('../../utils/internal-email-recipients');
   const byId = new Map(rows.map((r) => [r.id, r]));

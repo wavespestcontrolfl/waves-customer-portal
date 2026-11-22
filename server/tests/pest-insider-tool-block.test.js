@@ -203,6 +203,29 @@ describe('toolBlockForBatch: the key', () => {
       expect(r.forReader(sub(2))).toEqual(GOT);
       expect(db.mock.calls.filter(([t]) => t === 'technicians')).toHaveLength(1);
     });
+
+    // The proof address can change between the FYI copy and the send (or a resume). The issue row
+    // records every address a copy of its FYI went to (diagnostics.fyiTo, newsletter-proof.js).
+    test.each([
+      ['as an object', (fyiTo) => ({ fyiTo })],
+      ['as the JSON text a driver may hand back', (fyiTo) => JSON.stringify({ fyiTo })],
+    ])('a mailbox that got this issue\'s FYI copy gets \'\' after the proof address changed (diagnostics %s), and so does its Gmail alias', async (_label, diagnostics) => {
+      process.env.NEWSLETTER_PROOF_EMAIL = 'new-proof@example.net';
+      const issue = { tool_id: GAUGE, diagnostics: diagnostics({ 'old-proof@example.net': true, 'jdoe@gmail.com': true }) };
+      const old = row(1, { email: 'old-proof@example.net' });
+      const alias = row(3, { email: 'j.doe+x@googlemail.com' });
+      const db = fakeDb({ issue, rows: [old, row(2), alias] });
+      const r = await run({ subscribers: [{ id: 1, email: old.email }, sub(2), { id: 3, email: alias.email }], db });
+      expect(r.forReader({ id: 1, email: old.email })).toEqual(NOT);
+      expect(r.forReader({ id: 3, email: alias.email })).toEqual(NOT);
+      expect(r.forReader(sub(2))).toEqual(GOT);
+    });
+
+    test('an issue row with no recorded FYI address, or an unreadable record, excludes nobody more', async () => {
+      for (const diagnostics of [undefined, null, {}, { fyiTo: null }, { fyiTo: ['reader1@example.net'] }, '{not json']) {
+        expect(await keyOf({ db: fakeDb({ issue: { tool_id: GAUGE, diagnostics }, rows: [row(1)] }) })).toEqual(GOT);
+      }
+    });
   });
 
   describe('rule 5: a Gmail alias of a Waves address is the same mailbox', () => {

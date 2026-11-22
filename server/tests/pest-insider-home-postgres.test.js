@@ -23,7 +23,11 @@ jest.mock('../models/db', () => {
 });
 
 // The tool block resolves the proof and approver addresses through newsletter-proof.js; its own load chain is not under test here.
-jest.mock('../services/newsletter-proof', () => ({ proofRecipient: () => 'contact@wavespestcontrol.com', syncedApprovalMailbox: () => 'contact@wavespestcontrol.com', approvalSenders: () => [] }));
+jest.mock('../services/newsletter-proof', () => ({
+  proofRecipient: () => 'contact@wavespestcontrol.com', syncedApprovalMailbox: () => 'contact@wavespestcontrol.com', approvalSenders: () => [],
+  // The addresses the issue row recorded for its FYI copies (the real reader is unit-tested in pest-insider-tool-block.test.js).
+  issueFyiAddresses: (issue) => Object.keys(issue?.diagnostics?.fyiTo || {}),
+}));
 
 const { randomUUID } = require('crypto');
 
@@ -540,7 +544,7 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
 
   // "A tool we'd use" at send time (services/pest-insider/tool-block.js): the three reads are real SQL here: the
   // send's issue row (pest_insider_issues.send_id), the batch's subscriber rows (opt-in evidence) and the staff logins.
-  test('the tool block goes only to the reader with opt-in evidence who is no Waves address: real issue, subscriber and staff rows', async () => {
+  test('the tool block goes only to the reader with opt-in evidence who is no Waves address and got no FYI copy of the issue: real issue, subscriber and staff rows', async () => {
     const { toolBlockForBatch, TOOL_TOKEN } = require('../services/pest-insider/tool-block');
     const { toolBlock } = require('../services/pest-insider/render');
     const { toolById } = require('../services/pest-insider/tools');
@@ -549,8 +553,12 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
     try {
       const idOf = (inserted) => (typeof inserted[0] === 'object' ? inserted[0].id : inserted[0]);
       const send = idOf(await db('newsletter_sends').insert({ subject: 'Synthetic tool block', html_body: '<p>x</p>', text_body: 'x', status: 'draft', auto_share_social: false }).returning('id'));
-      await db('pest_insider_issues').insert({ issue_date: '2099-01-01', status: 'drafted', send_id: send, tool_id: 'acurite-glass-rain-gauge' });
       const tag = randomUUID().slice(0, 8);
+      // The issue row names its tool and the one address a copy of its FYI went to (diagnostics.fyiTo).
+      await db('pest_insider_issues').insert({
+        issue_date: '2099-01-01', status: 'drafted', send_id: send, tool_id: 'acurite-glass-rain-gauge',
+        diagnostics: JSON.stringify({ fyiTo: { [`fyi-${tag}@example.invalid`]: true } }),
+      });
       const click = new Date('2026-10-01T12:05:00Z');
       const readers = {};
       // A row the reader confirmed by link: both stamps and the address, as confirmByToken writes them.
@@ -570,12 +578,13 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
       await add('sunset', { deactivated_at: new Date(click.getTime() + 60000) });
       await add('gone', { status: 'unsubscribed' });
       await add('staff');
+      await add('fyi');
       await db('technicians').insert({ name: 'Fixture Tech', email: `LOGIN-${tag}@example.invalid`, google_email: readers.staff.email.toUpperCase() });
       const run = (subscribers) => toolBlockForBatch({ send: { id: send, newsletter_type: 'pest-insider-monthly' }, html: TOOL_TOKEN, text: '', subscribers, planned: true, db });
       const batch = await run(Object.values(readers));
       const block = toolBlock(toolById('acurite-glass-rain-gauge')).html;
       expect(Object.fromEntries(Object.entries(readers).map(([name, r]) => [name, batch.forReader(r)[TOOL_TOKEN]]))).toEqual({
-        optedin: block, trusted: '', beehiiv: '', moved: '', reactivated: '', optedout: '', sunset: '', gone: '', staff: '',
+        optedin: block, trusted: '', beehiiv: '', moved: '', reactivated: '', optedout: '', sunset: '', gone: '', staff: '', fyi: '',
       });
       // The address on the row now must be the address mailed: a changed address gets ''.
       expect((await run([{ id: readers.optedin.id, email: 'old-address@example.invalid' }])).forReader(readers.optedin)[TOOL_TOKEN]).toBe('');
