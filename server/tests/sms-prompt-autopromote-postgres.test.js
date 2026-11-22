@@ -939,13 +939,31 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
 
       test('a first pair with too few shared items ends the exam: no further sitting is paid for', async () => {
         process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = '3';
-        // A pool above the minimum where the sittings graded one item fewer than it.
+        const items = await seedItems(auto.MIN_PAIRED_ITEMS + 4);
+        const patch = await insertPatch();
+        const { runner: sit, calls } = sittingRunner({ items });
+        // The baseline graded every item; the judge could not grade 5 of the candidate's.
+        const runner = jest.fn(async (args) => {
+          const out = await sit(args);
+          if (args.promptPatch) await trx('sms_sealed_eval_results').where({ run_id: out.runId }).whereIn('item_id', items.slice(0, 5)).update({ verdict: 'ungradable', scores: null });
+          return out;
+        });
+        expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough, notify: jest.fn() })).toEqual({ rejected: patch.id, reason: 'too_few_items' });
+        expect(calls).toHaveLength(2);
+        expect((await rowOf(patch.id)).decision_detail).toMatchObject({ pairedItems: 19, sittings: { candidate: 1, baseline: 1 } });
+      });
+
+      test.each(['1', '3'])('a first baseline that graded too few items settles the exam before any candidate sitting is paid for (%s sitting(s) a side)', async (sittings) => {
+        process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = sittings;
+        // A pool above the minimum where the baseline graded one item fewer than it.
         const items = await seedItems(auto.MIN_PAIRED_ITEMS + 4);
         const patch = await insertPatch();
         const { runner, calls } = sittingRunner({ items: items.slice(0, auto.MIN_PAIRED_ITEMS - 1) });
         expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough, notify: jest.fn() })).toEqual({ rejected: patch.id, reason: 'too_few_items' });
-        expect(calls).toHaveLength(2);
-        expect((await rowOf(patch.id)).decision_detail).toMatchObject({ pairedItems: 19, sittings: { candidate: 1, baseline: 1 } });
+        expect(calls).toHaveLength(1);
+        expect(calls.filter((c) => c.promptPatch)).toHaveLength(0);
+        expect(await rowOf(patch.id)).toMatchObject({ exam_attempts: 0 });
+        expect((await rowOf(patch.id)).decision_detail).toMatchObject({ pairedItems: 19 });
       });
 
       test('a pair that only misses the unsafe or score rule does not end the exam early: later sittings can average it out', async () => {

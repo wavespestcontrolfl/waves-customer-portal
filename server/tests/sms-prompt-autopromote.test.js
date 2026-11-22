@@ -199,6 +199,20 @@ describe('promotion bar with more than one sitting a side', () => {
     expect(decide([better()], [sitting()])).toEqual({ promote: true, reason: 'bar_met', detail: expect.any(Object) });
   });
 
+  test('each side is sittings of one prompt: two baselines drafted under different live rules are never averaged', () => {
+    const live = (version) => ({ run: { prompt_version: version } });
+    // The candidate is rule B on the base identity x+ev; the live prompt carried rule A for one baseline sitting only.
+    const candidate = [better(live('house_voice_v13_x+evB')), better(live('house_voice_v13_x+evB'))];
+    const withRule = sitting(live('house_voice_v13_x+evA'));
+    const without = sitting(live('house_voice_v13_x+ev'));
+    // Pair by pair each baseline has the candidate's base identity...
+    expect(decide([candidate[0]], [withRule])).toMatchObject({ promote: true });
+    expect(decide([candidate[0]], [without])).toMatchObject({ promote: true });
+    // ...side by side they are two prompts.
+    expect(decide(candidate, [withRule, without])).toMatchObject({ promote: false, reason: 'run_mismatch', final: true });
+    expect(decide(candidate, [withRule, sitting(live('house_voice_v13_x+evA'))])).toMatchObject({ promote: true, reason: 'bar_met' });
+  });
+
   test('every sitting must be comparable with every sitting on the other side', () => {
     expect(decide([better(), better()], [sitting(), sitting({ run: { model: 'other-model' } })])).toMatchObject({ promote: false, reason: 'run_mismatch' });
     expect(decide([better(), better({ run: { status: 'failed' } })])).toMatchObject({ promote: false, reason: 'exam_incomplete' });

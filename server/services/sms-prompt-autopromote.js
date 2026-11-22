@@ -313,6 +313,11 @@ const unsafeAbove = (totals, sittings, allowance) => totals.candidate * sittings
 function sittingsMismatch(candidateSittings, baselineSittings) {
   if (!candidateSittings.length) return { reason: 'exam_incomplete', detail: {} };
   if (!baselineSittings.length) return { reason: 'baseline_incomplete', detail: {} };
+  // Each side is sittings of ONE prompt. examRunsMismatch reads a pair by its base identity (a candidate carries
+  // one more rule letter than its baseline), so two baselines drafted under different live rules (the loop's mode
+  // changed between two sittings) would each pass it and then be averaged as if they were one prompt.
+  const onePrompt = (side) => side.every((s) => (s.run.prompt_version ?? null) === (side[0].run.prompt_version ?? null));
+  if (!onePrompt(candidateSittings) || !onePrompt(baselineSittings)) return { reason: 'run_mismatch', detail: {} };
   for (const c of candidateSittings) {
     for (const b of baselineSittings) {
       const mismatch = examRunsMismatch({ run: c.run, baselineRun: b.run, runResults: c.results, baselineResults: b.results });
@@ -320,6 +325,17 @@ function sittingsMismatch(candidateSittings, baselineSittings) {
     }
   }
   return null;
+}
+
+// Before the FIRST candidate sitting there is no pair to judge, yet a baseline can already rule the exam out:
+// fewer graded items than the minimum can never pair enough, and a baseline graded by more than one judge ruler
+// can never be compared (examRunsMismatch). { reason, detail } | null.
+function baselineRulesOut(baselineSittings) {
+  const { judgeRulerOf } = require('./sms-sealed-eval');
+  const mixed = baselineSittings.map((b) => judgeRulerOf(b.results)).find((ruler) => ruler.includes('+'));
+  if (mixed) return { reason: 'judge_mismatch', detail: { baselineRuler: mixed } };
+  const pairedItems = pairedTally([], baselineSittings.map((b) => b.results), []).pairedItems;
+  return pairedItems < MIN_PAIRED_ITEMS ? { reason: 'too_few_items', detail: { pairedItems } } : null;
 }
 
 /**
@@ -533,7 +549,7 @@ async function obtainBaseline({ dbi, patch, runner, lock, now, exclude }) {
 
 // One more sitting of the candidate: resume the run an earlier sitting left unfinished, else a new run against a
 // baseline no finished sitting of this candidate has used. { run } (finished) | { skipped } | { failed } |
-// { rejected } | { decide: sittings } (the baseline it would use already settles the exam).
+// { rejected } | { refused: { reason, detail } } (the baseline it would use already settles the exam).
 async function sitCandidate({ dbi, patch, runner, lock, now, open, complete, finished, firstSitting }) {
   // The attempt limit guards another paid sitting, never a finished exam: a sitting that completed
   // before the process exited is decided without one. It counts the sittings that did NOT finish, from
@@ -550,12 +566,13 @@ async function sitCandidate({ dbi, patch, runner, lock, now, open, complete, fin
     if (!got.baseline) return got;
     baselineId = got.baseline.id;
     // A candidate sitting is the one spend nobody else can use (a baseline is the live prompt's own exam). Before
-    // it is paid for, the finished sittings are read together with the baseline this one would use: a baseline
-    // they may not be compared with (another judge ruler, say) already settles the exam.
-    if (finished) {
-      const next = { candidateSittings: finished.candidateSittings, baselineSittings: [await withResults(dbi, got.baseline), ...finished.baselineSittings] };
-      if (decidePromotion(next).final) return { decide: next };
-    }
+    // ANY of them is paid for, the baseline it would use is read: with the finished sittings when there are some
+    // (a baseline they may not be compared with, another judge ruler say, already settles the exam), and alone
+    // before the first (a baseline that graded too few items can never pair enough).
+    const baselineSittings = [await withResults(dbi, got.baseline), ...(finished ? finished.baselineSittings : [])];
+    const verdict = finished ? decidePromotion({ candidateSittings: finished.candidateSittings, baselineSittings }) : null;
+    const refused = finished ? (verdict.final && { reason: verdict.reason, detail: verdict.detail }) : baselineRulesOut(baselineSittings);
+    if (refused) return { refused };
   }
   const sitting = open
     ? { runId: open.id }
@@ -582,7 +599,8 @@ async function loadSittings(dbi, runs) {
 
 /**
  * { candidateSittings, baselineSittings } for a decision (newest sitting first, each run's own baseline beside
- * it), or { skipped } / { failed } / { rejected } (attempts used up). One sitting a pass, until the candidate has
+ * it), or { refused: { reason, detail } } (settled before a candidate sitting was paid for), or { skipped } /
+ * { failed } / { rejected } (attempts used up). One sitting a pass, until the candidate has
  * examSittings() finished runs. A pass that does not finish its sitting ends the tick, and the next tick goes on
  * from the rows it left. Two rules hold at every pass, whatever a crash or a changed setting left behind:
  *  - Before any paid step (a resumed run, a baseline, a candidate sitting) the decision is taken if the finished
@@ -610,7 +628,7 @@ async function runCandidateExam({ dbi, patch, runner, lock, now }) {
     }
     const current = pass ? await dbi(PATCHES).where({ id: patch.id }).first() : patch;
     const sat = await sitCandidate({ dbi, patch: current, runner, lock, now, open, complete, finished, firstSitting: !rows.length });
-    if (sat.decide) return decideOn(sat.decide);
+    if (sat.refused) return decideOn({ refused: sat.refused });
     if (!sat.run) return sat;
   }
   return { failed: 'exam_not_complete' };
@@ -652,6 +670,7 @@ async function examineCandidate({ dbi = db, now = new Date(), runner, lock, noti
   if (ran.rejected) return ran;
   if (ran.skipped) return { skipped: ran.skipped };
   if (ran.failed) return { failed: ran.failed };
+  if (ran.refused) return recordRejection({ dbi, patch, reason: ran.refused.reason, detail: ran.refused.detail, now });
   const decision = decidePromotion(ran);
   if (!decision.promote) return recordRejection({ dbi, patch, reason: decision.reason, detail: decision.detail, now });
   await dbi.transaction(async (trx) => {
