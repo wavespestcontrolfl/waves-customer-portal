@@ -6,6 +6,7 @@ jest.mock('../services/logger', () => ({
 
 const {
   step2Settings, memberCredit, etYearBounds, capReached, ruleTerms, formatDollars, STEP2_DEFAULTS,
+  friendInviteOfferLine, friendShareClause, memberInviteFriendClause, memberCreditEmailLine,
 } = require('../services/referral-step2');
 
 describe('step2Settings', () => {
@@ -61,5 +62,22 @@ describe('ruleTerms (what staff read before confirming a referral)', () => {
       atCap: true, text: 'Member is at the yearly limit: $0; friend: $25 credit', short: 'member at the yearly limit: $0; friend $25',
       conditional: 'Member: $25, unless at the yearly limit; friend: $25 credit',
     });
+  });
+});
+
+describe('the friend and credit-email words (gate on)', () => {
+  test('a whole-dollar amount reads $50, an amount with cents reads $32.50', () => {
+    expect(friendInviteOfferLine(5000)).toBe('Start a Waves plan through their referral link and get a $50 credit on your Waves account after your first service. Our way of saying welcome.');
+    expect(friendInviteOfferLine(3250)).toBe('Start a Waves plan through their referral link and get a $32.50 credit on your Waves account after your first service. Our way of saying welcome.');
+    expect(friendShareClause(5000, 'ABC123')).toBe("they'll give you a $50 credit after your first plan service with my code ABC123");
+    expect(friendShareClause(3250, 'ABC123')).toBe("they'll give you a $32.50 credit after your first plan service with my code ABC123");
+    expect(memberInviteFriendClause(5000)).toBe('they get a $50 credit after their first plan service');
+    expect(memberInviteFriendClause(3250)).toBe('they get a $32.50 credit after their first plan service');
+  });
+  test('the member credit email line says how to use the credit, for whole dollars and cents', () => {
+    expect(memberCreditEmailLine(25, { canTurnOnAutomaticCredit: true })).toBe('Your $25 referral reward has been added to your Waves account as a credit. To use it, turn on "Apply my credit to invoices automatically" in the Waves app.');
+    // No switch to turn on (an inactive or unknown account): the credit sentence alone.
+    expect(memberCreditEmailLine(25)).toBe('Your $25 referral reward has been added to your Waves account as a credit.');
+    expect(memberCreditEmailLine(25.5, { canTurnOnAutomaticCredit: true })).toContain('Your $25.50 referral reward');
   });
 });

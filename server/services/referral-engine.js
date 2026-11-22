@@ -74,6 +74,8 @@ function centsToDollars(cents) {
 // exported so the copy is unit-testable without a DB.
 function buildRefereeOfferLine(settings = {}) {
   const refereeCents = Number(settings.referee_discount_cents || 0);
+  // GATE_REFERRAL_STEP2: the friend gets an account credit after the first plan service (owner 2026-11-21).
+  if (refereeCents > 0 && isEnabled('referralStep2')) return step2.friendInviteOfferLine(refereeCents);
   return refereeCents > 0
     ? `Book your first service through their referral link and you’ll get ${centsToDollars(refereeCents)} off — our way of saying welcome.`
     : 'Book your first service through their referral link and you’ll be in great hands from your very first visit.';
@@ -618,6 +620,18 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
 // Best-effort and idempotent per referral, so the call sites can never
 // double-send. Promoters aren't always customers, so
 // the send goes straight to promoter.customer_email.
+// The credited member's account, read when the credit email goes out (the morning after the credit). The billing tab
+// shows the automatic-credit switch only on an active account with a credit balance or the switch already on
+// (PortalPage: (totalCredits > 0 || autoApplyCredit) && !cancelledAccount). True only for a member who can see the
+// switch and still has it off. Unknown or unreadable = false: the email then gives no switch instruction.
+async function memberCanTurnOnAutomaticCredit(referral, promoter) {
+  const memberId = referral?.referrer_customer_id || promoter?.customer_id;
+  if (!memberId) return false;
+  const member = await db('customers').where({ id: memberId }).whereNull('deleted_at')
+    .first('active', 'account_credits', 'auto_apply_account_credit').catch(() => null);
+  return member?.active === true && member.auto_apply_account_credit !== true && Number(member.account_credits) > 0;
+}
+
 async function sendRewardEarnedEmail(promoter, referral, rewardDollars, destination = 'referral_balance') {
   try {
     const email = String(promoter?.customer_email || '').trim();
@@ -633,7 +647,7 @@ async function sendRewardEarnedEmail(promoter, referral, rewardDollars, destinat
         // credit (postCreditMovement), not referral balance — the email must
         // point the promoter at the right ledger.
         reward_line: destination === 'account_credit'
-          ? `Your ${step2.formatDollars(rewardDollars)} referral reward has been added to your account as a credit — it applies automatically to your next invoice.`
+          ? step2.memberCreditEmailLine(rewardDollars, { canTurnOnAutomaticCredit: await memberCanTurnOnAutomaticCredit(referral, promoter) })
           : `Your ${step2.formatDollars(rewardDollars)} referral reward has been added to your referral balance.`,
         // CTA points at the ledger the reward actually landed in: account
         // credits live on the billing tab, referral balance on the refer tab.
@@ -1585,6 +1599,20 @@ async function getLiveSettings(conn = db) {
   return row ? { ...row, base_url: normalizeReferralBaseUrl(row.base_url) } : null;
 }
 
+// GATE_REFERRAL_STEP2: the friend's credit in cents, from the live settings row only, for a line that must never state
+// a code default (the invitation email). 0 = say nothing new: gate off, program paused, no amount, or the live row
+// unreadable.
+async function step2FriendCreditCents() {
+  if (!isEnabled('referralStep2')) return 0;
+  try {
+    const live = await getLiveSettings();
+    if (!live?.program_active) return 0;
+    return Math.max(0, Math.trunc(Number(live.referee_discount_cents) || 0));
+  } catch {
+    return 0;
+  }
+}
+
 async function getSettings() {
   try {
     const row = await getLiveSettings();
@@ -1843,6 +1871,7 @@ module.exports = {
   milestoneLevelEarned,
   getSettings,
   getLiveSettings,
+  step2FriendCreditCents,
   updateSettings,
   getPromoterStats,
   getProgramAnalytics,

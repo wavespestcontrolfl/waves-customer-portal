@@ -803,7 +803,8 @@ describe('POST /reports/:token/referral-link (owner ruling 2026-08-13: share mod
   });
 
   test('tap enrolls through the portal mechanism and composes owner-voice share copy', async () => {
-    isEnabled.mockReturnValue(true);
+    // Every gate but Step 2: today's "off" wording.
+    isEnabled.mockImplementation((gate) => gate !== 'referralStep2');
     mockDbWithService();
     await withServer(async (baseUrl) => {
       const response = await fetch(`${baseUrl}/reports/${tokenFor('c')}/referral-link`, { method: 'POST' });
@@ -825,7 +826,7 @@ describe('POST /reports/:token/referral-link (owner ruling 2026-08-13: share mod
   });
 
   test('fractional referee discounts format EXACTLY — never rounded up a dollar (pre-push P0)', async () => {
-    isEnabled.mockReturnValue(true);
+    isEnabled.mockImplementation((gate) => gate !== 'referralStep2');
     mockReferralEngine.getLiveSettings.mockResolvedValue({ program_active: true, referee_discount_cents: 4999 });
     mockDbWithService();
     await withServer(async (baseUrl) => {
@@ -835,6 +836,19 @@ describe('POST /reports/:token/referral-link (owner ruling 2026-08-13: share mod
       expect(body.smsBody).toContain('$49.99 off');
       expect(body.smsBody).not.toContain('$50');
       expect(body.emailSubject).toBe('$49.99 off Waves Pest Control');
+    });
+  });
+
+  test('GATE_REFERRAL_STEP2 on: the tap states a credit after the first plan service, exact to the cent, and no "off"', async () => {
+    isEnabled.mockReturnValue(true);
+    mockReferralEngine.getLiveSettings.mockResolvedValue({ program_active: true, referee_discount_cents: 4999 });
+    mockDbWithService();
+    await withServer(async (baseUrl) => {
+      const body = await (await fetch(`${baseUrl}/reports/${tokenFor('5')}/referral-link`, { method: 'POST' })).json();
+      expect(body.smsBody).toBe("We use Waves and they'll give you a $49.99 credit after your first plan service with my code WAVES-TEST01. wavespestcontrol.com/r/WAVES-TEST01");
+      expect(body.emailBody).toContain("they'll give you a $49.99 credit after your first plan service with my code WAVES-TEST01.");
+      expect(body.smsBody + body.emailBody + body.emailSubject).not.toMatch(/ off|\$50/);
+      expect(body.emailSubject).toBe('Waves Pest Control');
     });
   });
 

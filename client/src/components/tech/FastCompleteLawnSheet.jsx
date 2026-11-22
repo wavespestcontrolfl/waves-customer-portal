@@ -242,7 +242,7 @@ const RETRYABLE_REASONS = new Set(['profile_unavailable']);
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', handoff: false, visit: null, raw: null,
   visitType: null, turfHeightCapture: false, planned: [], addOns: [], addOnsMonth: null, plannedUnavailable: null, assessment: null, methods: [],
-  findingsType: null, stockAdvisory: undefined, wrapUp: false, carpetgrassCelsiusWarning: '', spotRules: false, weedMix: null, treatmentGuide: false, lawnReportTies: false, lawnReportFacts: false, chinch: null, tetrinoScout: null, guidedProductIds: [], takeAllProductIds: [], group11HeldProductIds: [], troubleAreas: null, newSod: null,
+  findingsType: null, stockAdvisory: undefined, wrapUp: false, carpetgrassCelsiusWarning: '', spotRules: false, weedMix: null, treatmentGuide: false, recPrepare: false, lawnReportTies: false, lawnReportFacts: false, chinch: null, tetrinoScout: null, guidedProductIds: [], takeAllProductIds: [], group11HeldProductIds: [], troubleAreas: null, newSod: null,
 };
 
 // Why the live context can't be completed here, or '' when it can.
@@ -351,6 +351,8 @@ const optionalContextFields = (data) => ({
   weedMix: weedMixOf(data),
   // The treatment guide: the server says the cards are on, and offers the chinch tap.
   treatmentGuide: data?.treatmentGuide === true,
+  // GATE_LAWN_REC_PREPARE: the server takes the product list before the Complete tap (usePrepareRecommendations).
+  recPrepare: data?.recPrepare === true,
   // The report ties are live (GATE_LAWN_REPORT_FACTS): the standing chinch tap is recorded as a find.
   lawnReportTies: data?.lawnReportTies === true,
   // The report facts are live: the spot rows whose area the technician recorded are named on the submit.
@@ -508,6 +510,25 @@ function useTreatmentGuide({ base, request, enabled, assessmentId, refreshKey = 
   if (!enabled || !assessmentId) return { guide: null, status: 'idle' };
   // An answer for an earlier plan is not shown while the new read is on its way: the guide is pending until it settles.
   return state.for === assessmentId && state.plan === planKey ? { guide: state.guide, status: state.status } : { guide: null, status: 'pending' };
+}
+
+// GATE_LAWN_REC_PREPARE (the context's `recPrepare`; report speed plan step 4, owner 2026-11-19): once the sheet can be
+// completed, name the products on it to the server, so the completion's lawn recommendation call runs before the Complete
+// tap. The server keeps the answer in memory and the completion uses it only when the saved visit has the same scores and
+// products; else it makes the call itself, as it always did. Sent again when the product list changes, each time after
+// the list has stood still for PREPARE_SETTLE_MS, and never while the sheet is locked (a completion is being sent). A
+// failed request shows nothing: only the head start is lost.
+const PREPARE_SETTLE_MS = 1500;
+function usePrepareRecommendations({ base, request, ctx, missingReason, locked, assessmentId, rows }) {
+  const productIds = useMemo(() => [...new Set(rows.map((row) => String(row.productId).toLowerCase()))].sort().join(','), [rows]);
+  const on = ctx.recPrepare && !missingReason && !locked && !!assessmentId;
+  useEffect(() => {
+    if (!on) return undefined;
+    const timer = setTimeout(() => {
+      request(`${base}/lawn-fast/prepare-recommendations`, { method: 'POST', body: JSON.stringify({ assessmentId, productIds: productIds ? productIds.split(',') : [] }) }).catch(() => {});
+    }, PREPARE_SETTLE_MS);
+    return () => clearTimeout(timer);
+  }, [base, request, on, assessmentId, productIds]);
 }
 
 // The guide's cards and the tech's checks on them; a new assessment starts with nothing checked.
@@ -2019,6 +2040,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   const barAction = barActionFor({ missingReason, dictationPending, progress, block });
   const limitWarnings = limitWarningsOf(rows);
   const buildBody = () => completionBody({ newSod, form, rows, ctx: sheetCtx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable, guideCards: guideCardsOf(guide), guideChecks, chinchTap, tetrinoScout: sheetCtx.tetrinoScout && tetrinoRecorded ? tetrinoScout : null, customerText: wrapUp.fields(CUSTOMER_TEXT_FLAGS) });
+  usePrepareRecommendations({ base, request, ctx: sheetCtx, missingReason, locked, assessmentId, rows });
   const submit = async () => {
     if (missingReason && !submission.hasPendingBody()) return;
     // The Wrap-up's review checks (the full form's); a stored attempt replays its body unchanged, so they skip it.

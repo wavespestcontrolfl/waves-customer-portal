@@ -125,7 +125,7 @@ describe('Intelligence Bar mic context', () => {
   });
 });
 
-// GATE_DICTATION_MONEY_NORMALIZE: the server reads a dictated question for amounts, so the bar only
+// The server reads a dictated question for amounts, so the bar only
 // says that dictation went into the message (dictation_used); no heard words or amounts are sent.
 describe('Intelligence Bar dictation flag', () => {
   const queryBody = () => {

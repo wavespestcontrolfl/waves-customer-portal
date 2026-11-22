@@ -1,4 +1,4 @@
-// Banking → Cash forecast (owner only, GATE_CASH_FORECAST; owner 2026-11-04 "A A A A").
+// Banking → Cash forecast (owner only; owner 2026-11-04 "A A A A").
 // The next 13 weeks for both checking accounts as one pool: money in, money out, and two end balances
 // each week (booked work only; booked plus expected new money once last year's months are set). The
 // numbers come from GET /admin/banking/cash-forecast; the owner types planned items, the floor and last
@@ -10,8 +10,8 @@ import { ActionFeedback, Button, Card, Field, Input, Select, Table, THead, TBody
 import { adminFetch } from "../../lib/adminFetch";
 import { formatETDateOnly, formatETDateTime } from "../../lib/timezone";
 
-// Is the tab available? Owner only, while GATE_CASH_FORECAST is on: the Banking page asks once per load,
-// and the forecast inputs read answers 200 (other staff get 403; a gate that is off answers 404).
+// Is the tab available? Owner only: the Banking page asks once per load, and the forecast inputs read
+// answers 200 (other staff get 403).
 export function useCashForecastAvailable() {
   const [available, setAvailable] = useState(false);
   useEffect(() => {

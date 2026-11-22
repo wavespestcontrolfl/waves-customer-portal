@@ -1,5 +1,5 @@
 /**
- * Rain fit for booking (owner 2026-10-06, GATE_BOOKING_RAIN_RANK, dark).
+ * Rain fit for booking (owner 2026-10-06).
  *
  * Outdoor visits (pest exterior, lawn, tree & shrub, mosquito, termite
  * treatment) avoid wet hours; rain-OK visits (WaveGuard assessments and
@@ -18,7 +18,7 @@
  * catalog identity (owner 2026-10-08: ten Codex rounds on #6102 each found
  * another name the words sorted wrong).
  *
- * bookingRainFit reads the gate; withCatalogKeys reads the catalog.
+ * withCatalogKeys reads the catalog.
  */
 const logger = require('../logger');
 const RAIN_PCT = 60;
@@ -144,15 +144,15 @@ const OVERFLOW_SERVICE = Object.freeze({ name: 'More services', serviceKey: 'boo
 // catalog key and findings type the completion-profile resolver gives a
 // visit. `items` are names or { name, serviceKey }; a key the screen sent
 // (the selected catalog row) settles the identity ahead of the name, which
-// is not unique in the catalog. Only while the caller's gate is on (the
-// picker's by default; `gate: null` always reads, for a rule with no gate of
-// its own: the 07:05 fill list, day-replan/fill-list.js); read one at a
+// is not unique in the catalog. Only while the caller's `gate` is on; the
+// default `gate: null` always reads (the booking picker, and the 07:05 fill
+// list, day-replan/fill-list.js, whose rule has no gate of its own); read one at a
 // time; an entry that cannot be resolved (or a failed read) keeps its name
 // and takes the word rules. With `strict`, a failed read throws instead, the
 // resolver's own included (its strict mode), for a caller that keeps a job it
 // cannot read out of rain (the fill list): a name alone can read as rain-safe
 // work when the key says otherwise.
-async function withCatalogKeys(items, db, { gate = 'GATE_BOOKING_RAIN_RANK', strict = false } = {}) {
+async function withCatalogKeys(items, db, { gate = null, strict = false } = {}) {
   const list = (Array.isArray(items) ? items : [])
     .map((item) => ({ name: String((item && item.name) ?? item ?? '').trim(), serviceKey: (item && item.serviceKey) || null }))
     .filter((item) => item.name);
@@ -378,13 +378,6 @@ function boundedHourlyRain(la, ln, ranking = false) {
   ]).finally(() => clearTimeout(timer));
 }
 
-// The booking's fit with the gate applied: 'neutral' (drive-only) while
-// GATE_BOOKING_RAIN_RANK is off. Read at call time.
-function bookingRainFit(serviceTypes) {
-  const { gateEnvValue } = require('../../config/feature-gates');
-  return gateEnvValue('GATE_BOOKING_RAIN_RANK') ? rainFitFor(serviceTypes) : 'neutral';
-}
-
 function toMin(hhmm) {
   const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm || ''));
   return m ? Number(m[1]) * 60 + Number(m[2]) : null;
@@ -453,4 +446,4 @@ function rainTierOf(fit, hourly, today, span = null) {
   return (chip) => rainTier(fit, isWetWindow(hourly, widenToSpan(chip, span), today), inRainHorizon(chip.date, today));
 }
 
-module.exports = { RAIN_OK_KEYS, boundedHourlyRain, rainFitFor, bookingRainFit, withCatalogKeys, bookingServiceList, OVERFLOW_SERVICE, bookingServices, bookingRainPlan, storedVisitServices, widenToSpan, outdoorStopRows, rainClassOf, rainTierOf, rankingNeedsForecast, inRainHorizon, isWetWindow, rainTier, RAIN_PCT, RAIN_AFTER_HOURS, RAIN_DAYS };
+module.exports = { RAIN_OK_KEYS, boundedHourlyRain, rainFitFor, withCatalogKeys, bookingServiceList, OVERFLOW_SERVICE, bookingServices, bookingRainPlan, storedVisitServices, widenToSpan, outdoorStopRows, rainClassOf, rainTierOf, rankingNeedsForecast, inRainHorizon, isWetWindow, rainTier, RAIN_PCT, RAIN_AFTER_HOURS, RAIN_DAYS };

@@ -5016,6 +5016,28 @@ router.get('/:lawnFastServiceId/lawn-fast/treatment-guide', async (req, res, nex
   } catch (err) { next(err); }
 });
 
+// POST /api/admin/dispatch/:lawnFastServiceId/lawn-fast/prepare-recommendations
+// body: { assessmentId, productIds: [catalog product ids] } (the products of the rows the sheet is about to send to /complete)
+// Starts the completion's lawn recommendation call before the Complete tap, so the completion does not wait on it (report
+// speed plan step 4, owner 2026-11-19). Answers 202 once the call is running; the answer stays in the server's memory and
+// the completion uses it only when the saved visit matches. Writes nothing, sends nothing; one paid model call unless an
+// answer for the same scores and products is already held. Dark behind GATE_LAWN_REC_PREPARE (404 {enabled:false} while
+// off, nothing read). See services/lawn-fast-complete.js prepareLawnRecommendations.
+const PREPARE_RECOMMENDATIONS_STATUS = { invalid_assessment: 400, invalid_products: 400, not_found: 404, not_eligible: 409, not_confirmed: 409, not_usable: 409 };
+router.post('/:lawnFastServiceId/lawn-fast/prepare-recommendations', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').lawnRecPrepareLive()) return res.status(404).json({ enabled: false });
+    const serviceId = await lawnFastRequestId(req, res);
+    if (!serviceId) return;
+    const result = await require('../services/lawn-fast-complete').prepareLawnRecommendations({ serviceId, assessmentId: req.body?.assessmentId, productIds: req.body?.productIds });
+    if (!result.ok) {
+      const status = PREPARE_RECOMMENDATIONS_STATUS[result.reason] || recapStatusForReason(result.reason);
+      return res.status(status).json({ error: result.reason, code: result.reason });
+    }
+    res.status(202).json({ enabled: true, started: result.started });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/dispatch/:lawnFastServiceId/lawn-fast/trouble-areas/:areaId/clear
 // A technician clears one known trouble area of the visit's lawn (the sheet's Clear, after its confirm). Dark behind
 // GATE_LAWN_TROUBLE_AREAS (404 {enabled:false} while off, nothing read or written). The area must be an ACTIVE one of the

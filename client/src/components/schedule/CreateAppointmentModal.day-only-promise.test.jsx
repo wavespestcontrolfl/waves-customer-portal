@@ -54,7 +54,7 @@ function installFetch({ serviceKey = 'pest_re_service', serviceName = 'Pest Re-S
       return probeFails ? Promise.reject(new Error('boom')) : Promise.resolve(json(probe));
     }
     if (url.endsWith('/admin/schedule') && options.method === 'POST') return Promise.resolve(json({ id: 'appt-1' }));
-    if (url.includes('/properties?context=appointment_address')) return Promise.resolve(json({ properties: [], canChangeAppointmentAddress: false }));
+    if (url.includes('/properties?context=appointment_address')) return Promise.resolve(json({ properties: [] }));
     if (url.includes('/schedule-estimates')) return Promise.resolve(json(estimatesBody(reminder24hOn, omitReminder)));
     if (url.endsWith('/admin/technicians')) return Promise.resolve(json({ technicians: [] }));
     if (url.endsWith('/admin/discounts')) return Promise.resolve(json([]));

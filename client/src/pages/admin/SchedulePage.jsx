@@ -2390,7 +2390,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       .then((data) => {
         if (cancelled) return;
         setAddressOptions(data.properties || []);
-        setAddressState(data.canChangeAppointmentAddress === true ? "ready" : "disabled");
+        setAddressState("ready");
       })
       .catch(() => { if (!cancelled) setAddressState("error"); });
     return () => { cancelled = true; };
@@ -6885,7 +6885,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
 
 const JOB_CARD_CHIP = {
   ok: { label: "OK", bg: "#F4F4F5", fg: "#3F3F46" },
-  // GATE_SPRAY_RAIN_RULES: rain likely but the dose stays on the card; neutral, as red is for a hold.
+  // Rain likely but the dose stays on the card; neutral, as red is for a hold.
   caution: { label: "Caution", bg: "#F4F4F5", fg: "#3F3F46" },
   // Rain very likely (owner 2026-10-29, step 2): the dose still shows. Dark, not red: the admin stays monochrome.
   warning: { label: "Warning", bg: "#18181B", fg: "#FFFFFF" },

@@ -7336,18 +7336,15 @@ router.get('/', async (req, res, next) => {
       byTech[key].zones[s.zone] = (byTech[key].zones[s.zone] || 0) + 1;
     });
 
-    // Schedule tie-proximity display order (owner ruling 2026-09-26, dark by
-    // default): DISPLAY ONLY — attaches a `displayOrder` index to each of a
+    // Schedule tie-proximity display order (owner ruling 2026-09-26): DISPLAY ONLY — attaches a `displayOrder` index to each of a
     // tech's stops so the mobile day list and the desktop day board's route-
     // order badge can break a window-start tie by drive-time proximity to
     // the previous stop, instead of booking order. Nothing is written to the
     // DB and no stop is physically reordered here — `enriched` (and every
     // response field built from it) keeps its DB-query order; only the new
     // `displayOrder` field is added, in place, on the SAME objects `enriched`
-    // holds. Off = no field, byte-identical to before this gate existed.
-    if (require('../config/feature-gates').gateEnvValue('GATE_SCHEDULE_TIE_PROXIMITY')) {
-      Object.values(byTech).forEach((tech) => require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(tech.services));
-    }
+    // holds.
+    Object.values(byTech).forEach((tech) => require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(tech.services));
 
     // Drive legs, the stop each leg comes from, and late risk against the
     // 2-hour arrival window, for the day list (display only). Today's risk
@@ -7555,7 +7552,7 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.weekend_shift',
           'scheduled_services.source_estimate_id',
           'scheduled_services.annual_prepay_term_id',
-          // Tie-proximity display order (GATE_SCHEDULE_TIE_PROXIMITY) needs
+          // Tie-proximity display order needs
           // each stop's point — same stamped-vs-customer rule as the day feed.
           db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as visit_lat`),
           db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as visit_lng`),
@@ -7924,9 +7921,7 @@ router.get('/week', async (req, res, next) => {
       // Same display-only tie-proximity order as the day feed, per tech per
       // day, so week mode and day mode agree. Coordinates come from the raw
       // rows; only `displayOrder` is added to the payload.
-      if (require('../config/feature-gates').gateEnvValue('GATE_SCHEDULE_TIE_PROXIMITY')) {
-        require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(servicePayloads, services);
-      }
+      require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(servicePayloads, services);
 
       days.push({
         date: dateStr,
@@ -8779,7 +8774,7 @@ async function scheduleCreateHandler(req, res, next) {
     // transaction, so it cannot stop two concurrent creates on its own. The
     // race-safe backstop is the locked re-check inside the transaction below.
     // Explicit service address (New Appointment "Service address" picker).
-    // Same gate as the Edit-appointment address dropdown: both are "the
+    // Same as the Edit-appointment address dropdown: both are "the
     // office chooses which of the customer's properties a visit lands on".
     // Resolved to the scheduled_services stamp up front so the duplicate-
     // series guards, zone, tech matching and the insert all see the chosen
@@ -8788,7 +8783,6 @@ async function scheduleCreateHandler(req, res, next) {
     let bookingProperty = null;
     let bookingSeriesScope = null;
     if (propertyId !== undefined && propertyId !== null && propertyId !== '') {
-      if (!isEnabled('editApptAddress')) throw httpError(409, 'Appointment address changes are not enabled.');
       bookingProperty = await require('../services/customer-properties').bookingPropertyStamp({ customerId, propertyId });
       // Per-property duplicate-series scope (codex #3998 r2 P1): the same
       // shape the estimate converter hands the guards, so an active pest
@@ -9354,13 +9348,12 @@ async function scheduleCreateHandler(req, res, next) {
     const resolvedIsCallback = isCallback
       || isReService({ serviceKey: serviceRecord?.service_key, serviceName: serviceRecord?.name, serviceType });
 
-    // Office "Customer's words" on a pest/lawn re-service (GATE_RESERVICE
-    // _OFFICE_REQUEST): trimmed + capped here, source decided by re-reading
+    // Office "Customer's words" on a pest/lawn re-service:
+    // trimmed + capped here, source decided by re-reading
     // the suggestion the client named — never taken from the client. Only the
-    // primary row below is stamped; null = nothing saved (gate off, not a
+    // primary row below is stamped; null = nothing saved (not a
     // pest/lawn re-service, or empty words).
-    const officeCustomerRequest = (isEnabled('reserviceOfficeRequest')
-      && resolvedIsCallback
+    const officeCustomerRequest = (resolvedIsCallback
       && reserviceOfficeRequest.isOfficeRequestServiceKey(serviceRecord?.service_key)
       && req.body.customerRequest && typeof req.body.customerRequest === 'object')
       ? await reserviceOfficeRequest.resolveCustomerRequest(db, customerId, req.body.customerRequest)
@@ -14480,7 +14473,6 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
     }
     const propertyId = req.body.propertyId;
     if (propertyId !== undefined) {
-      if (!isEnabled('editApptAddress')) throw httpError(409, 'Appointment address changes are not enabled.');
       if (typeof propertyId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(propertyId)) {
         throw httpError(422, 'Choose a saved customer address.');
       }
@@ -25224,37 +25216,35 @@ router.get('/annual-prepay-availability', requireAdmin, async (_req, res, next) 
 
 // GET /api/admin/schedule/reservice-request-suggestion?customerId= — the
 // New Appointment modal's "Customer's words" suggestion for a pest/lawn
-// re-service (GATE_RESERVICE_OFFICE_REQUEST): this customer's latest inbound
+// re-service: this customer's latest inbound
 // text or call note from the last 72 hours, whichever is newer, with its kind
-// and time so the modal can label it ("Text, 3 h ago"). Read-only. Gate off
-// answers {enabled:false, suggestion:null} — the modal renders nothing new.
+// and time so the modal can label it ("Text, 3 h ago"). Read-only.
 // requireAdmin like the booking route the suggestion feeds.
 router.get('/reservice-request-suggestion', requireAdmin, async (req, res, next) => {
   try {
-    if (!isEnabled('reserviceOfficeRequest')) return res.json({ enabled: false, suggestion: null });
     const customerId = String(req.query.customerId || '');
     if (!reserviceOfficeRequest.isUuid(customerId)) {
       return res.status(400).json({ error: 'customerId required' });
     }
     const suggestion = await reserviceOfficeRequest.pickSuggestion(db, customerId);
+    // enabled stays true for Schedule tabs opened before the gate came out (they hide the box without it).
     res.json({ enabled: true, suggestion });
   } catch (err) { next(err); }
 });
 
 // GET /api/admin/schedule/cancel-call-notice?customerId= — the New Appointment
-// modal's "Canceled on a call" notice (GATE_CALL_CANCEL_GUARD): this customer's
+// modal's "Canceled on a call" notice: this customer's
 // latest real conversation from the last 14 days, when that call filed a
 // cancellation card, with its time and the card's summary. Read-only and a
-// warning only: the booking route never reads it. Gate off answers
-// {enabled:false, call:null}, so the modal renders nothing new.
+// warning only: the booking route never reads it.
 router.get('/cancel-call-notice', requireAdmin, async (req, res, next) => {
   try {
-    if (!require('../config/feature-gates').callCancelGuardLive()) return res.json({ enabled: false, call: null });
     const customerId = String(req.query.customerId || '');
     if (!reserviceOfficeRequest.isUuid(customerId)) {
       return res.status(400).json({ error: 'customerId required' });
     }
     const call = await require('../services/call-cancel-guard').latestCancelCall(customerId);
+    // enabled stays true for Schedule tabs opened before the gate came out (they hide the notice without it).
     res.json({ enabled: true, call });
   } catch (err) { next(err); }
 });

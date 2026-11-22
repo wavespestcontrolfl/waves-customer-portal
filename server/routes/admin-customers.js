@@ -3108,15 +3108,12 @@ router.delete('/:id/multi-home-family', requireAdmin, async (req, res, next) => 
 
 router.get('/:id/properties', requireAdmin, async (req, res, next) => {
   try {
-    const canChangeAppointmentAddress = require('../config/feature-gates').isEnabled('editApptAddress');
-    if (req.query?.context === 'appointment_address' && !canChangeAppointmentAddress) {
-      return res.json({ properties: [], canChangeAppointmentAddress: false });
-    }
     const customerProperties = require('../services/customer-properties');
     await customerProperties.ensurePrimaryProperty(req.params.id).catch(() => {});
     const properties = await customerProperties.listProperties(req.params.id);
     res.json({
-      properties, canChangeAppointmentAddress, canChangePrimary: require('../config/feature-gates').gateEnvValue('GATE_IB_PLATFORM'),
+      // canChangeAppointmentAddress stays true for Schedule tabs opened before the gate came out (they hide the picker without it).
+      properties, canChangeAppointmentAddress: true, canChangePrimary: require('../config/feature-gates').gateEnvValue('GATE_IB_PLATFORM'),
       // Read once here so the panel mounts per-row area editors only when on.
       propertyServiceAreas: require('../services/property-service-areas').propertyServiceAreasEnabled(),
     });
@@ -3184,13 +3181,10 @@ router.get('/:id/timeline', requireAdmin, async (req, res, next) => {
 });
 
 // GET /api/admin/customers/:id/activity — read-only "what they were sent and
-// what they did" feed (GATE_CUSTOMER_ACTIVITY_TIMELINE, dark by default).
-// requireAdmin: it shows message previews, link clicks and page views.
-// Dark = 200 { enabled: false } so the panel hides itself; no other read or
-// write happens. Query: before (ISO cursor from the previous page), limit.
+// what they did" feed. requireAdmin: it shows message previews, link clicks
+// and page views. Read-only. Query: before (ISO cursor from the previous page), limit.
 router.get('/:id/activity', requireAdmin, async (req, res, next) => {
   try {
-    if (!require('../config/feature-gates').customerActivityTimelineLive()) return res.json({ enabled: false });
     const { getCustomerActivity } = require('../services/customer-activity-timeline');
     const { before, limit } = req.query || {};
     const result = await getCustomerActivity(req.params.id, {
@@ -3198,6 +3192,7 @@ router.get('/:id/activity', requireAdmin, async (req, res, next) => {
       limit,
     });
     if (!result) return res.status(404).json({ error: 'Customer not found' });
+    // `enabled: true` stays for admin tabs opened before this deploy: their old bundle drops the feed without it.
     res.json({ enabled: true, ...result });
   } catch (err) {
     if (err?.status === 400) return res.status(400).json({ error: err.message });

@@ -9,7 +9,6 @@ jest.mock('../services/notification-service', () => ({
   getAdminNotificationForExplainer: jest.fn(),
   markAdminIdeaCancelled: jest.fn(),
 }));
-jest.mock('../config/feature-gates', () => ({ ibAnswerSendToClaudeLive: jest.fn(() => false) }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     const users = {
@@ -28,7 +27,6 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 
 const NotificationService = require('../services/notification-service');
-const { ibAnswerSendToClaudeLive } = require('../config/feature-gates');
 const { cleanIdea, ideaDedupeKey } = require('../services/admin-claude-ideas');
 const router = require('../routes/admin-claude-ideas');
 
@@ -54,7 +52,6 @@ const call = (base, path, { who = 'admin', method = 'POST', body } = {}) => fetc
 
 beforeEach(() => {
   jest.clearAllMocks();
-  ibAnswerSendToClaudeLive.mockReturnValue(false);
   NotificationService.notifyAdmin.mockResolvedValue({ id: ID, deduped: false });
 });
 
@@ -83,22 +80,11 @@ describe('dedupe key', () => {
   });
 });
 
-describe('answerButton on the status (GATE_IB_ANSWER_SEND_TO_CLAUDE)', () => {
-  test('present only while the answer gate is on and the login is the owner', async () => {
-    ibAnswerSendToClaudeLive.mockReturnValue(true);
+describe('status for the owner and another admin login (answerButton keeps older open tabs working)', () => {
+  test('the owner is enabled and another admin login is not', async () => {
     await withServer(async (base) => {
       expect((await call(base, '/status', { method: 'GET' })).body).toEqual({ enabled: true, answerButton: true });
-      // Another admin login: not enabled, so no answerButton either.
       expect((await call(base, '/status', { method: 'GET', who: 'office' })).body).toEqual({ enabled: false });
-    });
-  });
-  test('absent while the answer gate is off, and for a missing reader', async () => {
-    await withServer(async (base) => {
-      expect((await call(base, '/status', { method: 'GET' })).body).toEqual({ enabled: true });
-    });
-    ibAnswerSendToClaudeLive.mockReturnValue(undefined);
-    await withServer(async (base) => {
-      expect((await call(base, '/status', { method: 'GET' })).body).toEqual({ enabled: true });
     });
   });
 });
@@ -106,7 +92,7 @@ describe('answerButton on the status (GATE_IB_ANSWER_SEND_TO_CLAUDE)', () => {
 describe('routes', () => {
   test('status answers enabled:true for an admin; a technician is refused; no login is refused', async () => {
     await withServer(async (base) => {
-      expect(await call(base, '/status', { method: 'GET' })).toEqual({ status: 200, body: { enabled: true } });
+      expect(await call(base, '/status', { method: 'GET' })).toEqual({ status: 200, body: { enabled: true, answerButton: true } });
       expect((await call(base, '/status', { method: 'GET', who: 'tech' })).status).toBe(403);
       expect((await call(base, '/', { who: 'tech', body: { text: 'x' } })).status).toBe(403);
       expect((await call(base, '/status', { method: 'GET', who: 'nobody' })).status).toBe(401);

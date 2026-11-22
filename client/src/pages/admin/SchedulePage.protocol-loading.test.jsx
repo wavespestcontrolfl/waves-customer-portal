@@ -325,7 +325,7 @@ describe("Job card chemical area add-on", () => {
     expect(screen.getByText(/^Limit:/)).toBeVisible();
   });
 
-  // GATE_SPRAY_RAIN_RULES: a rain caution keeps the dose; the chip says Caution, never Unknown.
+  // A rain caution keeps the dose; the chip says Caution, never Unknown.
   it("names a rain caution and shows its reason", async () => {
     const body = card();
     body.products = [{ ...body.products[0], verdict: "caution", verdictReason: "rain 65% at 2 pm — label: no spraying during rain" }];
