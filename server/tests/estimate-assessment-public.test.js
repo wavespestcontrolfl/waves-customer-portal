@@ -364,12 +364,21 @@ describe('the assessment line reads the estimate\'s own lead', () => {
     expect(mockInspection.buildAvailabilityForLead.mock.calls[0][1]).toMatchObject({ customer: expect.objectContaining({ id: 'cust-1' }), leadId: null });
   });
 
-  test('map in shadow: the lead is read so the booking\'s shadow row compares with it (no line is passed until live: the builder decides)', async () => {
+  test('map in shadow: no request reads the lead; the booking hands the shadow recorder a read to run after it', async () => {
     process.env.GATE_SERVICE_LINE_MAP = 'shadow';
+    // A lead lookup that fails must not fail a public request in shadow: nothing routes by it yet.
+    linked.mockRejectedValue(new Error('lead read failed'));
+    expect((await call(TOKEN)).status).toBe(200);
     const res = await call(TOKEN, { method: 'POST', body: { date: '2026-11-03', time: '09:00' } });
     expect(res.status).toBe(200);
+    expect(linked).not.toHaveBeenCalled();
+    expect(mockInspection.buildAvailabilityForLead.mock.calls[0][1]).toMatchObject({ leadId: null });
+    // The recorder runs this after the booking, best-effort (line-technician shadowLeadId).
+    const { lineLeadId } = mockInspection.bookAssessmentVisit.mock.calls[0][0];
+    expect(lineLeadId).toEqual(expect.any(Function));
+    linked.mockResolvedValue('lead-9');
+    await expect(lineLeadId()).resolves.toBe('lead-9');
     expect(linked).toHaveBeenCalledWith('est-1', expect.anything());
-    expect(mockInspection.bookAssessmentVisit.mock.calls[0][0]).toMatchObject({ lineLeadId: 'lead-9' });
   });
 
   test('the commit reads its line once and re-checks it on the booking transaction', async () => {
@@ -381,15 +390,28 @@ describe('the assessment line reads the estimate\'s own lead', () => {
     expect(mockInspection.assessmentServiceLines).toHaveBeenCalledWith(expect.objectContaining({ id: 'cust-1' }), 'lead-9');
     // The slot is found in a build for that scope.
     expect(mockInspection.buildAvailabilityForLead.mock.calls[0][1]).toMatchObject({ lineScope: scope, leadId: 'lead-9' });
-    // The booking gets a slot guard that reads the same scope, lead and customer on ITS transaction.
+    // The booking gets a slot guard for that scope. On ITS transaction the guard reads the estimate's link again
+    // (the pointing leads held) and checks the line of the lead linked THEN.
     const args = mockInspection.bookAssessmentVisit.mock.calls[0][0];
     expect(args).toMatchObject({ lineLeadId: 'lead-9', slotGuard: expect.any(Function) });
-    const trx = { the: 'booking transaction' };
+    const stamped = { lead_id: 'lead-stamp', lead_linkage: 'strong' };
+    const first = jest.fn(async () => ({ estimate_data: stamped }));
+    const trx = jest.fn(() => ({ where: jest.fn(() => ({ first })) }));
+    linked.mockClear();
     await expect(args.slotGuard(trx)).resolves.toBe(true);
+    expect(trx).toHaveBeenCalledWith('estimates');
+    expect(linked).toHaveBeenCalledWith('est-1', stamped, trx, { lock: true });
     expect(mockInspection.assessmentLineUnchanged).toHaveBeenCalledWith(trx, { lineScope: scope, customer: expect.objectContaining({ id: 'cust-1' }), leadId: 'lead-9' });
-    // The lead's interest changed since the build: the guard refuses, and createSelfBooking answers SLOT_TAKEN.
+    // Staff linked the estimate to another lead since the request started: the guard checks THAT lead.
+    linked.mockResolvedValue('lead-relinked');
     mockInspection.assessmentLineUnchanged.mockResolvedValue(false);
     await expect(args.slotGuard(trx)).resolves.toBe(false);
+    expect(mockInspection.assessmentLineUnchanged).toHaveBeenLastCalledWith(trx, expect.objectContaining({ leadId: 'lead-relinked' }));
+    // The map went off live in between: no line was read for a build then, and the guard reads nothing.
+    process.env.GATE_SERVICE_LINE_MAP = 'shadow';
+    trx.mockClear();
+    await expect(args.slotGuard(trx)).resolves.toBe(true);
+    expect(trx).not.toHaveBeenCalled();
   });
 
   test('map live: the offer, the search, the commit check and the 409 refresh all pass the linked lead', async () => {

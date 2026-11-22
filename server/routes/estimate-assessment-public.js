@@ -142,10 +142,11 @@ async function bookingLocationFor(customer) {
 
 // The estimate's OWN lead, for the assessment's service line (owner 2026-11-21, line-technician assessmentLineFor):
 // the one unambiguous lead linked to it (linkedLeadIdFor), else null and the customer's newest lead is read. A
-// customer with a newer inquiry for another service keeps this estimate's line. Read only while the line map records
-// (shadow: the shadow row of a booking compares with this lead) or is live (the offers and the commit route by it).
+// customer with a newer inquiry for another service keeps this estimate's line. Read on the request only while the
+// line map is live (the offers and the commit route by it). In shadow only a booking's shadow row needs it, and the
+// recorder reads it after the booking (shadowLeadFor), so a failed lookup never fails a public request.
 async function lineLeadIdFor(estimate, data) {
-  if (!require('../services/scheduling/line-technician').lineMapRecords()) return null;
+  if (!require('../services/scheduling/line-technician').lineMapLive()) return null;
   return require('../services/estimate-consultation-offer').linkedLeadIdFor(estimate.id, data);
 }
 
@@ -180,7 +181,7 @@ async function resolveRequest(token) {
   if (eligibility.state === 'gone') return { body: { state: 'gone' } };
   const lead = customerPayload(eligibility.customer);
   if (eligibility.state === 'already_booked') return { body: await alreadyBookedBody(eligibility.visit, lead) };
-  return { estimate: found.estimate, customer: eligibility.customer, lead, leadId: await lineLeadIdFor(found.estimate, found.data) };
+  return { estimate: found.estimate, data: found.data, customer: eligibility.customer, lead, leadId: await lineLeadIdFor(found.estimate, found.data) };
 }
 
 // A POST that cannot reach times: the page's terminal state for an estimate that cannot book (gone), else the
@@ -295,6 +296,25 @@ function estimateGuardFor(estimate, customerId) {
   };
 }
 
+// The booking transaction's line re-check (pre-push P0). The slot was built for the line of the lead linked when the
+// request started. The estimate guard holds the estimate row on this transaction; here the link is resolved again on
+// it (the pointing lead rows held: a relink waits) and that lead's line is read on it (inspection
+// assessmentLineUnchanged: strict, the lead row held). Another lead with another line, or a changed interest,
+// refuses the slot: 409 SLOT_TAKEN and fresh times. Not live: no line was read for the build, nothing is read here.
+async function lineUnchangedUnderLock(conn, { estimate, customer, lineScope }) {
+  if (!require('../services/scheduling/line-technician').lineMapLive()) return true;
+  const fresh = await conn('estimates').where({ id: estimate.id }).first('estimate_data');
+  const leadId = await require('../services/estimate-consultation-offer')
+    .linkedLeadIdFor(estimate.id, parseEstimateData(fresh?.estimate_data), conn, { lock: true });
+  return inspection().assessmentLineUnchanged(conn, { lineScope, customer, leadId });
+}
+
+// The lead a booking's shadow row compares with: the request's own (live), else a read the recorder runs after the
+// booking, best-effort (line-technician shadowLeadId).
+function shadowLeadFor(resolved, leadId) {
+  return leadId || (() => require('../services/estimate-consultation-offer').linkedLeadIdFor(resolved.estimate.id, resolved.data));
+}
+
 // The estimate the visit was booked from, for the office (internal notes, never customer-visible).
 function officeNote(estimate, customerNote) {
   const number = String(estimate.estimate_slug || '').replace(/[^A-Za-z0-9-]/g, '') || String(estimate.id).split('-')[0].toUpperCase();
@@ -332,10 +352,10 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       source: SOURCE,
       alertLabel: ALERT_LABEL,
       estimateGuard: estimateGuardFor(resolved.estimate, resolved.customer.id),
-      // The line this slot was built for, read again on the booking transaction: a lead whose service interest
-      // changed since refuses the slot (409 SLOT_TAKEN, fresh times below).
-      slotGuard: (conn) => inspection().assessmentLineUnchanged(conn, { lineScope, customer: resolved.customer, leadId: setup.leadId }),
-      lineLeadId: setup.leadId,
+      // The line this slot was built for, read again on the booking transaction for the lead linked THEN: a relink
+      // or a changed service interest since refuses the slot (409 SLOT_TAKEN, fresh times below).
+      slotGuard: (conn) => lineUnchangedUnderLock(conn, { estimate: resolved.estimate, customer: resolved.customer, lineScope }),
+      lineLeadId: shadowLeadFor(resolved, setup.leadId),
     });
     if (!result.ok) {
       if (result.code === 'ESTIMATE_CHANGED') {

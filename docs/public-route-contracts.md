@@ -1555,9 +1555,13 @@ line, pest-only, termite and mosquito to that line, no lead to the owner. So
 offers come from that line's home or gap technician; not live, no line is
 read and any active field technician is offered. Each commit reads its line
 once, finds its slot in a build for that line, and reads the line again inside
-the booking transaction: a lead whose service interest changed in between
-answers the existing `409 SLOT_TAKEN` with fresh times for the line as it is
-now. No response shape changes.
+the booking transaction with the lead row held (`FOR UPDATE`); the estimate
+page first resolves the estimate's linked lead again on that transaction. A
+lead whose service interest changed in between, or an estimate linked to
+another lead with another line, answers the existing `409 SLOT_TAKEN` with
+fresh times for the line as it is now. While the map is in shadow no request
+reads a lead: the shadow recorder reads the estimate's linked lead after the
+booking, best-effort. No response shape changes.
 
 **Territory routing (`GATE_TERRITORY_ROUTING=true`, owner 2026-10-30; ships dark:
 unset, and every value other than exactly `true`, leaves these routes as described

@@ -280,6 +280,16 @@ describeDb('service-line map shadow on PostgreSQL', () => {
         expect(await lineTech.assessmentLineFor(trx, { leadId: blankLeadId, customerId })).toEqual({ line: 'lawn', lineFrom: 'lead' });
         // A deleted lead in hand is no lead: the customer is read.
         expect(await lineTech.assessmentLineFor(trx, { leadId: deletedLeadId, customerId })).toEqual({ line: 'general', lineFrom: 'lead' });
+        // strict (a booking transaction's re-check) holds the lead row it reads: FOR UPDATE on the lead in hand, and
+        // with ORDER BY + LIMIT on the newest-lead read. Same answers.
+        expect(await lineTech.assessmentLineFor(trx, { leadId: blankLeadId, customerId, strict: true })).toEqual({ line: 'lawn', lineFrom: 'lead' });
+        expect(await lineTech.assessmentLineFor(trx, { customerId, strict: true })).toEqual({ line: 'general', lineFrom: 'lead' });
+        // The estimate page's re-check reads the estimate's link the same way: the pointing lead rows held.
+        const { linkedLeadIdFor } = require('../services/estimate-consultation-offer');
+        const estimateId = randomUUID();
+        await trx('leads').where({ id: blankLeadId }).update({ estimate_id: estimateId });
+        expect(await linkedLeadIdFor(estimateId, {}, trx, { lock: true })).toBe(blankLeadId);
+        expect(await linkedLeadIdFor(estimateId, {}, trx)).toBe(blankLeadId);
         throw ROLLBACK;
       }).catch((err) => { if (err !== ROLLBACK) throw err; });
     });

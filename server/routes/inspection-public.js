@@ -954,8 +954,9 @@ async function assessmentServiceLines(customer, leadId, { conn = db, strict = fa
 }
 // The booking transaction's line re-check (pre-push P0): the commit found its slot, and so its technician, in a build
 // for `lineScope`, read before the transaction. Staff can change the lead's service interest in between. Read again
-// on the booking's own transaction: another line refuses the slot (createSelfBooking's slotGuard: 409 SLOT_TAKEN, and
-// the page gets fresh times for the line as it is now). Not live: both are empty and nothing is read.
+// on the booking's own transaction, the lead row held until it ends: another line refuses the slot
+// (createSelfBooking's slotGuard: 409 SLOT_TAKEN, and the page gets fresh times for the line as it is now). Not
+// live: both are empty and nothing is read.
 async function assessmentLineUnchanged(conn, { lineScope, customer, leadId }) {
   const now = await assessmentServiceLines(customer, leadId, { conn, strict: true });
   return String(now.serviceLines || '') === String((lineScope || {}).serviceLines || '');

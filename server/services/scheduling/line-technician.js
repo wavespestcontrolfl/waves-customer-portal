@@ -169,16 +169,19 @@ function assessmentLineForInterest(text) {
 }
 
 /** The service-interest text of a Waves Assessment's lead, or null: see assessmentLineFor for the order. Deleted leads are not read. */
-async function assessmentInterestText(db, { leadId, customerId }) {
+async function assessmentInterestText(db, { leadId, customerId, lock = false }) {
   const filled = (text) => (String(text || '').trim() ? text : null);
+  // `lock` (a booking transaction's re-check): the lead row the answer comes from is held FOR UPDATE until that
+  // transaction ends (the lead link's own commit holds its lead the same way), so a staff edit waits for the save.
+  const held = (q) => (lock ? q.forUpdate() : q);
   if (leadId) {
-    const own = await db('leads').where({ id: leadId }).whereNull('deleted_at').first('service_interest');
+    const own = await held(db('leads').where({ id: leadId }).whereNull('deleted_at')).first('service_interest');
     if (own) return filled(own.service_interest);
   }
   if (!customerId) return null;
-  const lead = await db('leads').where({ customer_id: customerId }).whereNull('deleted_at')
+  const lead = await held(db('leads').where({ customer_id: customerId }).whereNull('deleted_at')
     .whereRaw("btrim(coalesce(service_interest, '')) <> ''")
-    .orderBy('created_at', 'desc').first('service_interest');
+    .orderBy('created_at', 'desc')).first('service_interest');
   if (lead) return lead.service_interest;
   return filled(((await db('customers').where({ id: customerId }).first('lead_service_interest')) || {}).lead_service_interest);
 }
@@ -191,15 +194,16 @@ async function assessmentInterestText(db, { leadId, customerId }) {
  *   Without it, or when that lead is gone: the customer's newest lead with an interest (leads.service_interest by
  *   `customerId`), else the customer row's lead_service_interest.
  * No lead and no customer, nothing recorded or an unreadable read gives lawn (the read failure is logged; `strict`
- * rethrows it instead).
+ * rethrows it instead, and holds the lead row it read FOR UPDATE on `conn`'s transaction).
  */
 async function assessmentLineFor(conn, { customerId = null, leadId = null, strict = false } = {}) {
   const db = conn || defaultDb;
   let text = null;
   try {
-    text = await assessmentInterestText(db, { leadId, customerId });
+    text = await assessmentInterestText(db, { leadId, customerId, lock: strict });
   } catch (err) {
-    // `strict`: a caller inside a write transaction (the booking's own re-check) must see the failure, not a default.
+    // `strict`: a caller inside a write transaction (the booking's own re-check) holds the lead row it reads and
+    // must see a failure, not a default.
     if (strict) throw err;
     logger.warn(`[line-technician] assessment lead read failed (read as no service recorded): ${err.message}`);
   }
@@ -540,6 +544,18 @@ async function shadowPlace(db, row) {
   };
 }
 
+// The booking's own lead for a shadow row: an id, or a function that reads it here (the estimate page while the map
+// is in shadow: its request path reads no lead, so a failed lookup costs the row its lead, never the booking).
+async function shadowLeadId(row) {
+  if (typeof row.leadId !== 'function') return row.leadId || null;
+  try {
+    return (await row.leadId()) || null;
+  } catch (err) {
+    logger.warn(`[line-technician] shadow lead read failed (the customer's newest inquiry is read): ${err.message}`);
+    return null;
+  }
+}
+
 async function writeShadowRow(row) {
   const db = defaultDb;
   const date = row.date ? dateOnlyString(row.date) : null;
@@ -548,7 +564,7 @@ async function writeShadowRow(row) {
     pick = await resolveLineTechnician(db, {
       serviceId: row.serviceId, serviceKey: row.serviceKey, serviceType: row.serviceType, customerId: row.customerId,
       // The booking's own lead, when its caller had one: the row then compares with the inquiry that booked.
-      leadId: row.leadId || null, date,
+      leadId: await shadowLeadId(row), date,
       place: await shadowPlace(db, row),
     });
   } catch (err) {
@@ -631,7 +647,6 @@ module.exports = {
   resolveLineTechnician,
   recordLinePickShadow,
   lineMapLive,
-  lineMapRecords: shadowOn,
   lineOfferRanking,
   pickLineTechnician,
   liveServiceLine,

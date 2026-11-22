@@ -32,6 +32,7 @@ function fakeDb(state = {}) {
   };
   const inserts = [];
   const queries = [];
+  const locks = [];
   const db = jest.fn((table) => {
     queries.push(table);
     let filters = [];
@@ -48,6 +49,8 @@ function fakeDb(state = {}) {
       // The one raw predicate the assessment lead read uses: a non-blank service_interest.
       whereRaw() { filters.push((r) => String(r.service_interest || '').trim() !== ''); return c; },
       orderBy(col, dir) { order = { col, dir }; return c; },
+      // A row lock a strict read asks for: recorded by table.
+      forUpdate() { locks.push(table); return c; },
       select() { return Promise.resolve(rows()); },
       first() { return Promise.resolve(rows()[0]); },
       insert(row) {
@@ -60,6 +63,7 @@ function fakeDb(state = {}) {
     return c;
   });
   db.inserts = inserts;
+  db.locks = locks;
   db.queries = queries;
   return db;
 }
@@ -584,6 +588,13 @@ describe('assessmentLineFor (owner 2026-11-21, choice 4 = A)', () => {
     expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('assessment lead read failed'));
     // strict (the booking transaction's re-check): the failure is the caller's, never a default line.
     await expect(assessmentLineFor(broken, { customerId: 'c1', strict: true })).rejects.toThrow('boom');
+    // strict also holds the lead row it decides on until that transaction ends; a plain read holds nothing.
+    const held = fakeDb({ leads: [{ id: 'lead-1', customer_id: 'c1', service_interest: 'Pest Control Service', created_at: '2026-11-01' }] });
+    expect(await assessmentLineFor(held, { leadId: 'lead-1', customerId: 'c1' })).toEqual({ line: 'general', lineFrom: 'lead' });
+    expect(held.locks).toEqual([]);
+    expect(await assessmentLineFor(held, { leadId: 'lead-1', customerId: 'c1', strict: true })).toEqual({ line: 'general', lineFrom: 'lead' });
+    expect(await assessmentLineFor(held, { customerId: 'c1', strict: true })).toEqual({ line: 'general', lineFrom: 'lead' });
+    expect(held.locks).toEqual(['leads', 'leads']);
   });
 });
 
@@ -650,6 +661,12 @@ describe('recordLinePickShadow', () => {
     // Without the booking's lead the newest inquiry is read.
     await recordLinePickShadow({ ...base, serviceType: 'Waves Assessment' });
     expect(db.inserts[1].row).toMatchObject({ service_line: 'lawn', line_from: 'lead', would_technician_id: OWNER.id });
+    // A caller with no lead on its request path (the estimate page in shadow) hands over a read: it runs here.
+    await recordLinePickShadow({ ...base, serviceType: 'Waves Assessment', leadId: async () => 'lead-pest' });
+    expect(db.inserts[2].row).toMatchObject({ service_line: 'general', would_technician_id: HIRE.id });
+    // That read failing costs the row its lead only: the newest inquiry is read and the row is still written.
+    await recordLinePickShadow({ ...base, serviceType: 'Waves Assessment', leadId: async () => { throw new Error('lead read failed'); } });
+    expect(db.inserts[3].row).toMatchObject({ service_line: 'lawn', would_technician_id: OWNER.id });
   });
 
   test('a Date value for the visit date is written as the calendar date', async () => {

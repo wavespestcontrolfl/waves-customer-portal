@@ -21295,6 +21295,8 @@ const CallRecordingProcessor = {
                       lat: existing.lat ?? null,
                       lng: existing.lng ?? null,
                       customerId: existing.customer_id || null,
+                      // This call's own lead: a Waves Assessment goes by the inquiry that booked it.
+                      leadId,
                     });
                     if (reuseLineTech) {
                       reuseCandidateTechId = reuseLineTech.id;
@@ -21862,6 +21864,8 @@ const CallRecordingProcessor = {
                   lat: propertyLinkage.lat ?? null,
                   lng: propertyLinkage.lng ?? null,
                   customerId,
+                  // This call's own lead: a Waves Assessment goes by the inquiry that booked it.
+                  leadId,
                 });
                 if (bookingLineTech) {
                   bookingTechnicianId = bookingLineTech.id;
@@ -22567,6 +22571,7 @@ const CallRecordingProcessor = {
                   source: 'after_call', scheduledServiceId: svc.id, customerId: svc.customer_id, date: svc.scheduled_date,
                   windowStart: svc.window_start, windowEnd: svc.window_end, serviceId: svc.service_id,
                   serviceType: svc.service_type, durationMinutes: svc.estimated_duration_minutes, actualTechnicianId: svc.technician_id,
+                  leadId,
                 });
               }
               if (scheduleWasReused && !disputeHeldReuse && !(await isStreetLevelHoldRow(db, svc))) {
