@@ -2,14 +2,13 @@
 
 /**
  * Turns a Clerk deed's legal description ("LOT 171 BLK 48 RYE RANCH") into the parcel it names, using the county
- * parcel map the portal already reads, and picks the one parcel that is a brand-new home.
+ * parcel map the portal already reads, and says whether that parcel is one brand-new home.
  *
- * The parcel map still shows the builder as owner for weeks after the deed, and one lot number exists in several
- * phases of a subdivision, so a lot query often returns 2 to 6 parcels. The new-home permit is the proof that a
- * parcel is a new home (a parcel with no such permit is never matched). The owner on the map says which phase the
- * seller conveyed. A match needs positive proof only: one parcel with a permit, and either the seller's exact name
- * on it or no other parcel in the answer. Two names that look different prove nothing (spellings vary), so no rule
- * here reads "this parcel is not the seller's".
+ * One lot number exists in several phases of a subdivision, and the Clerk's text leaves the phase out, so a lot query
+ * often returns 2 to 13 parcels. Which of them the deed means cannot be proven from owner names: spellings vary, the
+ * map shows the seller for weeks after the deed, and a builder can hold the same lot number twice. So a deed matches
+ * only when the query returns exactly one parcel, that parcel's plat name is the deed's subdivision by an exact
+ * grammar, and it has a new-home permit. Everything else is "not matched", with the reason.
  */
 
 const { countyParcelGisDisabled } = require('../property-lookup/county-parcel-gis');
@@ -58,16 +57,21 @@ function parcelWhere(legal) {
   return where;
 }
 
-// The map's subdivision name is the deed's words, or those words and then a phase, unit, section or plat-book part
-// ("SAMPLE GROVE" on the deed, "SAMPLE GROVE PH IIA PB81/1" on the map). Measured on three real days: every parcel
-// of a deed's lot continues with PH, PHASE, PB<book>/<page> or SUBDIVISION (96 of 96); UNIT, SEC and SECTION are the
-// other plat words county-parcel-gis.js knows (subdivisionBaseName). Any other continuation is another plat
-// ("SAMPLE GROVE ESTATES", "SAMPLE GROVE WEST PH I", "... PH II" for a deed that says "... PH I"). The query returns
-// those too (a LIKE cannot ask for this), and queryParcels drops them.
-const PLAT_PART = /^(PH|PHASE|UNIT|SEC|SECTION|SUBDIVISION|PB)(?![A-Z])/;
+// The map's plat name is the deed's subdivision words, or those words and then a phase and plat-book part: "SAMPLE
+// GROVE" on the deed, "SAMPLE GROVE PH IIA PB81/1" on the map. The whole rest of the name must fit this grammar,
+// taken from the 126 plat names of 32 real subdivisions (2026-11-22):
+//   [PH|PHASE <ids> [SUBPH|SUBPHASE <ids>]] [PB<book>/<page>]   or   SUBDIVISION [PB<book>/<page>]
+//   <ids> = phase ids joined by ", ", " AND ", " & " or a space; an id = IIA, ID9, IV-C1, II-B-9, 9A, N9A, A-D ...
+// A name that does not fit ("SAMPLE GROVE ESTATES", "... WEST PB1/2", "... PH II REPLAT OF LOT 4", "... PH III-A
+// TOWNHOMES") may be another subdivision or another piece of land: its parcel is marked platKnown false, and
+// chooseParcel matches nothing while one is in the answer.
+const PHASE_ID = '(?:[IVX]{1,4}[A-Z]?[0-9]{0,2}|[A-Z]?[0-9]{1,2}[A-Z]?|[A-Z])(?:-(?:[IVX]{1,4}|[0-9]{1,2}[A-Z]?|[A-Z][0-9]{0,2}))*';
+const PHASE_IDS = `${PHASE_ID}(?:(?:, ?| (?:AND|&) | )${PHASE_ID})*`;
+const PLAT_BOOK = 'PB ?[0-9]{1,4}/[0-9]{1,4}';
+const PLAT_REST = new RegExp(`^(?:(?:PH|PHASE) ${PHASE_IDS}(?: (?:SUBPH|SUBPHASE) ${PHASE_IDS})?(?: ${PLAT_BOOK})?|SUBDIVISION(?: ${PLAT_BOOK})?|${PLAT_BOOK})$`);
 const namesSubdivision = (mapName, deedWords) => {
-  const name = String(mapName || '').toUpperCase();
-  return name === deedWords || (name.startsWith(`${deedWords} `) && PLAT_PART.test(name.slice(deedWords.length + 1).trimStart()));
+  const name = String(mapName || '').toUpperCase().replace(/ +/g, ' ').trim();
+  return name === deedWords || (name.startsWith(`${deedWords} `) && PLAT_REST.test(name.slice(deedWords.length + 1)));
 };
 
 const positiveOrNull = (value) => {
@@ -114,6 +118,7 @@ function toParcel(attrs, legal) {
   const asked = parcel.lot === legal.lot && (parcel.subdivision || '').toUpperCase().startsWith(legal.subdivision)
     && (!legal.block || parcel.block === legal.block);
   if (!asked) throw new Error('parcel map sent a parcel that is not the lot asked for');
+  parcel.platKnown = namesSubdivision(parcel.subdivision, legal.subdivision);
   return parcel;
 }
 
@@ -182,7 +187,7 @@ async function queryParcels(legal, { fetchImpl = fetch, timeoutMs = DEFAULT_TIME
   if (body.exceededTransferLimit || body.features.length >= RESULT_LIMIT) throw new Error('parcel map answer was cut off (too many parcels)');
   const parcels = body.features.map((f) => toParcel(f?.attributes || {}, legal));
   if (new Set(parcels.map((p) => p.parid)).size !== parcels.length) throw new Error('parcel map sent one parcel twice');
-  return parcels.filter((p) => namesSubdivision(p.subdivision, legal.subdivision));
+  return parcels;
 }
 
 // A name's compare key: accents folded (GARCÍA = GARCIA), "&" read as AND, then capitals and digits only (the map
@@ -193,34 +198,33 @@ function nameKey(name) {
   return /[^\x00-\x7F]/.test(folded) ? '' : folded.replace(/[^A-Z0-9]/g, '');
 }
 
-// True when one of the map's two owner fields is exactly a seller's name (by compare key). Measured on three real
-// days: 64 of 65 parcels still under the seller's name are this form; the map does not cut names short. A spelling
-// that differs more is not the seller's here, and that only ever costs a match.
+// True when one of the map's two owner fields is exactly a seller's name (by compare key). It only labels a match
+// (the map still shows the seller: the deed and the map agree). It never decides one.
 function sellerOwns(parcel, sellerNames) {
   const sellers = new Set((sellerNames || []).map(nameKey).filter(Boolean));
   return [parcel.ownerName, parcel.ownerName2].map(nameKey).some((key) => key && sellers.has(key));
 }
 
 /**
- * The one new home among the parcels a lot query returned, or why there is none. Only a parcel with a new-home
- * permit can be the home, and there must be exactly one.
- *   owner_permit  that parcel is under the seller's exact name on the map.
- *   permit        that parcel is the only parcel the query returned: it is the lot the deed names (the map already
- *                 shows the next owner, or spells the seller another way).
- * Everything else is ambiguous: two parcels with a permit (the same lot number in two phases; who owns the other
- * one cannot be proven from a name), or several parcels where the one with the permit is not under the seller's
- * exact name. The owners of the other parcels are never read. Measured on three real days: 60 of 78 deeds match
- * (56 owner_permit, 4 permit); 6 more would need a second proof, such as the buyer's name on the map later.
+ * Whether the parcels a lot query returned are one new home: { status: 'matched', basis, parcel, permit }, or the
+ * reason they are not.
+ *   no_parcel     the map has no such lot.
+ *   no_permit     no parcel of the answer has a new-home permit.
+ *   unknown_plat  a parcel of the answer has a plat name that is not the deed's subdivision by the grammar.
+ *   ambiguous     the lot number exists in more than one phase. (Which one the deed means is not proven here.)
+ *   matched       exactly one parcel, and it has a permit. basis = owner_permit when the map still shows the seller
+ *                 on it, else permit (the map already shows the next owner, or spells the seller another way).
+ * Measured on three real days: 56 of 78 builder-to-person deeds match. 10 more have the lot in several phases; a
+ * later check (the buyer's name on the map) could prove those.
  */
 function chooseParcel({ sellerNames, parcels, permitsByParid }) {
   if (!parcels || parcels.length === 0) return { status: 'no_parcel' };
-  const withPermit = parcels.filter((p) => Boolean(permitsByParid && permitsByParid[p.parid]));
-  if (withPermit.length === 0) return { status: 'no_permit' };
-  if (withPermit.length > 1) return { status: 'ambiguous' };
-  const [home] = withPermit;
-  const pick = (basis) => ({ status: 'matched', basis, parcel: home, permit: permitsByParid[home.parid] });
-  if (sellerOwns(home, sellerNames)) return pick('owner_permit');
-  return parcels.length === 1 ? pick('permit') : { status: 'ambiguous' };
+  const permitOf = (p) => (permitsByParid && permitsByParid[p.parid]) || null;
+  if (!parcels.some(permitOf)) return { status: 'no_permit' };
+  if (!parcels.every((p) => p.platKnown === true)) return { status: 'unknown_plat' };
+  if (parcels.length > 1) return { status: 'ambiguous' };
+  const [parcel] = parcels;
+  return { status: 'matched', basis: sellerOwns(parcel, sellerNames) ? 'owner_permit' : 'permit', parcel, permit: permitOf(parcel) };
 }
 
 module.exports = {

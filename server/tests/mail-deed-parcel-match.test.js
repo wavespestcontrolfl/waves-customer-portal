@@ -78,9 +78,8 @@ describe('sellerOwns', () => {
 
 describe('chooseParcel', () => {
   const sellerNames = ['EXAMPLE BUILDERS LLC'];
-  const parcel = (parid, ownerName, ownerName2 = null) => ({ parid, ownerName, ownerName2, addressLine1: `${parid.slice(-3)} EXAMPLE TRL` });
+  const parcel = (parid, ownerName, extra = {}) => ({ parid, ownerName, ownerName2: null, platKnown: true, addressLine1: `${parid.slice(-3)} EXAMPLE TRL`, ...extra });
   const permit = (no) => ({ permit_no: no });
-  const AMBIGUOUS = { status: 'ambiguous' };
 
   test('no parcels', () => {
     expect(chooseParcel({ sellerNames, parcels: [], permitsByParid: {} })).toEqual({ status: 'no_parcel' });
@@ -91,13 +90,15 @@ describe('chooseParcel', () => {
     expect(chooseParcel({ sellerNames, parcels: [p], permitsByParid: {} })).toEqual({ status: 'no_permit' });
     expect(chooseParcel({ sellerNames, parcels: [p, parcel('100000002', 'TESTER ALEX J')], permitsByParid: undefined })).toEqual({ status: 'no_permit' });
   });
-  test('one parcel with a permit under the seller\'s name: owner_permit', () => {
+  test('one parcel with a permit, still under the seller\'s name: matched, owner_permit', () => {
     const p = parcel('100000001', 'EXAMPLE BUILDERS LLC');
     expect(chooseParcel({ sellerNames, parcels: [p], permitsByParid: { 100000001: permit('A') } }))
       .toEqual({ status: 'matched', basis: 'owner_permit', parcel: p, permit: permit('A') });
+    const second = parcel('100000001', 'EXAMPLE LAND TRUST', { ownerName2: 'EXAMPLE BUILDERS LLC' });
+    expect(chooseParcel({ sellerNames, parcels: [second], permitsByParid: { 100000001: permit('A') } })).toMatchObject({ status: 'matched', basis: 'owner_permit' });
   });
-  test('the only parcel of the answer has a permit and another owner: permit basis', () => {
-    for (const owner of ['TESTER ALEX J', 'EXAMPLE BUILDERS', null, 'S\u00D8REN HOMES LLC']) {
+  test('one parcel with a permit and any other owner: matched, permit basis', () => {
+    for (const owner of ['TESTER ALEX J', 'EXAMPLE BUILDERS', 'SAMPLE HOMESTEAD LLC', null, 'S\u00D8REN HOMES LLC']) {
       const p = parcel('100000001', owner);
       expect(chooseParcel({ sellerNames, parcels: [p], permitsByParid: { 100000001: permit('A') } }))
         .toEqual({ status: 'matched', basis: 'permit', parcel: p, permit: permit('A') });
@@ -105,46 +106,31 @@ describe('chooseParcel', () => {
     const p = parcel('100000001', 'TESTER ALEX J');
     expect(chooseParcel({ sellerNames: [], parcels: [p], permitsByParid: { 100000001: permit('A') } })).toMatchObject({ status: 'matched', basis: 'permit' });
   });
-  test('several phases, one permit, on the parcel under the seller\'s name: owner_permit, in either order', () => {
-    const home = parcel('100000001', 'EXAMPLE BUILDERS LLC');
-    const others = [parcel('100000002', 'TESTER ALEX J'), parcel('100000003', null), parcel('100000004', 'EXAMPLE BUILDERS LLC'), parcel('100000005', 'SAMPLE HOMESTEAD LLC')];
-    for (const parcels of [[home, ...others], [...others, home]]) {
-      expect(chooseParcel({ sellerNames, parcels, permitsByParid: { 100000001: permit('A') } }))
-        .toEqual({ status: 'matched', basis: 'owner_permit', parcel: home, permit: permit('A') });
-    }
-  });
-  test('the seller in the second owner field counts', () => {
-    const home = parcel('100000001', 'EXAMPLE LAND TRUST', 'EXAMPLE BUILDERS LLC');
-    expect(chooseParcel({ sellerNames, parcels: [home, parcel('100000002', 'TESTER ALEX J')], permitsByParid: { 100000001: permit('A') } }))
-      .toMatchObject({ status: 'matched', basis: 'owner_permit', parcel: home });
-  });
-  test('several phases, and the one permit is not on a parcel under the seller\'s exact name: ambiguous', () => {
-    const permitsByParid = { 100000001: permit('A') };
-    // The seller still holds this lot number in another phase; the permit is on another owner's parcel.
-    expect(chooseParcel({ sellerNames, parcels: [parcel('100000001', 'TESTER ALEX J'), parcel('100000002', 'EXAMPLE BUILDERS LLC')], permitsByParid })).toEqual(AMBIGUOUS);
-    // No parcel is under the seller's name: nothing says which phase the deed means.
-    expect(chooseParcel({ sellerNames, parcels: [parcel('100000001', 'TESTER ALEX J'), parcel('100000002', 'SAMPLE PAT Q')], permitsByParid })).toEqual(AMBIGUOUS);
-    // A name that only looks like the seller's is not proof.
-    expect(chooseParcel({ sellerNames: ['SAMPLE HOMES'], parcels: [parcel('100000001', 'SAMPLE HOMESTEAD LLC'), parcel('100000002', 'TESTER ALEX J')], permitsByParid })).toEqual(AMBIGUOUS);
-    expect(chooseParcel({ sellerNames: [], parcels: [parcel('100000001', 'TESTER ALEX J'), parcel('100000002', 'SAMPLE PAT Q')], permitsByParid })).toEqual(AMBIGUOUS);
-  });
-  test('two parcels with a permit are always ambiguous, whoever the map names as owner', () => {
-    const both = { 100000001: permit('A'), 100000002: permit('B') };
-    const sellers = parcel('100000001', 'EXAMPLE BUILDERS LLC');
-    const rivals = ['TESTER ALEX J', 'EXAMPLE BUILDERS LLC', 'EXAMPLE BUILDERS LLC OF SAMPLETON', 'A AND B HOMES LLC', 'OTHER BUILDERS LLC', null, '', ' - '];
-    for (const owner of rivals) {
-      const rival = parcel('100000002', owner);
-      for (const parcels of [[sellers, rival], [rival, sellers]]) {
-        expect(chooseParcel({ sellerNames, parcels, permitsByParid: both })).toEqual(AMBIGUOUS);
+  test('the same lot number in two phases is never matched, whoever owns them and whichever has a permit', () => {
+    const owners = ['EXAMPLE BUILDERS LLC', 'TESTER ALEX J', 'EXAMPLE BUILDERS LLC OF SAMPLETON', 'A AND B HOMES LLC', 'OTHER BUILDERS LLC', null, ' - '];
+    for (const first of owners) {
+      for (const second of owners) {
+        const parcels = [parcel('100000001', first), parcel('100000002', second)];
+        for (const permitsByParid of [{ 100000001: permit('A') }, { 100000002: permit('B') }, { 100000001: permit('A'), 100000002: permit('B') }]) {
+          expect(chooseParcel({ sellerNames, parcels, permitsByParid })).toEqual({ status: 'ambiguous' });
+        }
       }
     }
-    // A rival whose second owner field was the seller is covered by the same rule.
-    expect(chooseParcel({ sellerNames, parcels: [sellers, parcel('100000002', 'TESTER ALEX J', 'EXAMPLE BUILDERS LLC')], permitsByParid: both })).toEqual(AMBIGUOUS);
+    // The case the first rule matched wrongly: the seller holds the lot number in two phases, one with a permit.
+    const built = parcel('100000001', 'EXAMPLE BUILDERS LLC');
+    const vacant = parcel('100000002', 'EXAMPLE BUILDERS LLC');
+    expect(chooseParcel({ sellerNames, parcels: [vacant, built], permitsByParid: { 100000001: permit('A') } })).toEqual({ status: 'ambiguous' });
   });
-  test('an accent or an "&" on one side does not hide the seller\'s parcel', () => {
-    const home = parcel('100000001', 'GARCIA & SONS HOMES LLC');
-    expect(chooseParcel({ sellerNames: ['GARC\u00CDA AND SONS HOMES LLC'], parcels: [home, parcel('100000002', 'TESTER ALEX J')], permitsByParid: { 100000001: permit('A') } }))
-      .toMatchObject({ status: 'matched', basis: 'owner_permit', parcel: home });
+  test('a parcel whose plat name is not the deed\'s subdivision by the grammar: unknown_plat', () => {
+    const permitsByParid = { 100000001: permit('A') };
+    // Alone with a permit it would otherwise match.
+    expect(chooseParcel({ sellerNames, parcels: [parcel('100000001', 'EXAMPLE BUILDERS LLC', { platKnown: false })], permitsByParid })).toEqual({ status: 'unknown_plat' });
+    // Next to the deed's own plat it is not dropped: it may be the same subdivision under another name.
+    const known = parcel('100000001', 'EXAMPLE BUILDERS LLC');
+    for (const other of [parcel('100000002', 'TESTER ALEX J', { platKnown: false }), { parid: '100000002', ownerName: 'TESTER ALEX J', ownerName2: null }]) {
+      expect(chooseParcel({ sellerNames, parcels: [known, other], permitsByParid })).toEqual({ status: 'unknown_plat' });
+      expect(chooseParcel({ sellerNames, parcels: [other, known], permitsByParid })).toEqual({ status: 'unknown_plat' });
+    }
   });
 });
 
@@ -180,7 +166,7 @@ describe('queryParcels', () => {
     const parcels = await queryParcels(legal, { fetchImpl });
     expect(parcels).toEqual([{
       parid: '513309059', addressLine1: '101 EXAMPLE TRL', city: 'SAMPLETON', zip: '34212', subdivision: 'RYE RANCH PH IIA PB81/1',
-      lot: '171', block: null, ownerName: 'EXAMPLE BUILDERS LLC', ownerName2: null, livingSqft: 2210, stories: 1.5, yearBuilt: 2026,
+      lot: '171', block: null, ownerName: 'EXAMPLE BUILDERS LLC', ownerName2: null, platKnown: true, livingSqft: 2210, stories: 1.5, yearBuilt: 2026,
     }]);
     const url = new URL(fetchImpl.mock.calls[0][0]);
     expect(url.searchParams.get('where')).toBe("PAR_SUBDIV_LOT = '171' AND PAR_SUBDIV_NAME LIKE 'RYE RANCH%'");
@@ -191,27 +177,39 @@ describe('queryParcels', () => {
     expect(url.searchParams.get('outFields')).toContain('PARID');
     expect(fetchImpl.mock.calls[0][1].redirect).toBe('manual');
   });
-  test('a phase on the deed is not the phase that only starts with it: the query returns it, the result drops it', async () => {
-    const phaseOne = { lot: '171', block: null, subdivision: 'RYE RANCH PH I' };
-    const same = [feature({ PAR_SUBDIV_NAME: 'RYE RANCH PH I' }), feature({ PARID: '513309060', PAR_SUBDIV_NAME: 'Rye Ranch Ph I PB81/1' })];
-    const others = ['RYE RANCH PH II', 'RYE RANCH PH IA PB81/1', 'RYE RANCH PH I-A', 'RYE RANCH PH IV']
-      .map((name, i) => feature({ PARID: String(513309070 + i), PAR_SUBDIV_NAME: name }));
-    const parcels = await queryParcels(phaseOne, { fetchImpl: answer({ features: [others[0], same[0], others[1], same[1], others[2], others[3]] }) });
-    expect(parcels.map((p) => p.parid)).toEqual(['513309059', '513309060']);
-    expect(await queryParcels(phaseOne, { fetchImpl: answer({ features: others }) })).toEqual([]);
-    // The dropped parcels still count for the cut-off check: 25 rows are a full page.
-    const full = Array.from({ length: 25 }, (_, i) => feature({ PARID: String(513309100 + i), PAR_SUBDIV_NAME: 'RYE RANCH PH II' }));
-    await expect(queryParcels(phaseOne, { fetchImpl: answer({ features: full }) })).rejects.toThrow(/cut off/);
-  });
-  test('only a phase, unit, section or plat-book part may follow the deed\'s subdivision words', async () => {
-    const named = (names) => answer({ features: names.map((name, i) => feature({ PARID: String(513309200 + i), PAR_SUBDIV_NAME: name })) });
-    const same = ['RYE RANCH', 'RYE RANCH PH IIA PB81/1', 'RYE RANCH PHASE 2', 'RYE RANCH PB81/1', 'RYE RANCH PB 81/1', 'RYE RANCH UNIT 3',
-      'RYE RANCH SEC 2', 'RYE RANCH SECTION 2', 'RYE RANCH SUBDIVISION PB81/1', 'RYE RANCH  PH I', 'Rye Ranch Ph I'];
-    expect(await queryParcels(legal, { fetchImpl: named(same) })).toHaveLength(same.length);
-    // Another subdivision that starts with the same words. With one parcel and a permit it would otherwise match.
-    const others = ['RYE RANCH ESTATES', 'RYE RANCH ESTATES PH I', 'RYE RANCH WEST PH I', 'RYE RANCH VILLAS', 'RYE RANCH III', 'RYE RANCH IA PB81/1',
-      'RYE RANCHES PH I', 'RYE RANCH PHILLIPS ADD', 'RYE RANCH UNITED PB1/1', 'RYE RANCH PBX'];
-    expect(await queryParcels(legal, { fetchImpl: named(others) })).toEqual([]);
+  describe('platKnown: the plat name is the deed\'s subdivision by the grammar', () => {
+    // One answer per name: an answer of 25 parcels or more is a cut-off answer.
+    const flags = (deed, names) => Promise.all(names.map(async (name) => {
+      const [p] = await queryParcels(deed, { fetchImpl: answer({ features: [feature({ PAR_SUBDIV_NAME: name })] }) });
+      return p.platKnown;
+    }));
+    test('real forms of the rest of the name (digits changed)', async () => {
+      const names = ['RYE RANCH', 'RYE RANCH PB81/1', 'RYE RANCH PB 81/1', 'RYE RANCH SUBDIVISION PB81/1', 'RYE RANCH SUBDIVISION', 'RYE RANCH PH I PB81/1',
+        'RYE RANCH PH IIA PB81/1', 'RYE RANCH PH IV-A PB81/1', 'RYE RANCH PH IA-1 AND IA-2 PB81/1', 'RYE RANCH PH ID2 PB81/1', 'RYE RANCH PH N1A AND N1B PB81/1',
+        'RYE RANCH PH IIA IIB & IIC PB81/1', 'RYE RANCH PH IIB-1, IIB-2 AND IIB-3 PB81/1', 'RYE RANCH PH IV-C1 PB81/1', 'RYE RANCH PH IVC, IVD AND IVE PB81/1',
+        'RYE RANCH PH I SUBPH IA AND IB-1 PB81/1', 'RYE RANCH PH II SUBPH II-B-1, II-B-2, II-B-3 & II-B-4 PB81/1', 'RYE RANCH PH VIB AND VB SUBPH V1B-2 AND VB-1 PB81/1',
+        'RYE RANCH PH II SUBPHASE B-D PB81/1', 'RYE RANCH PH II-A-1A PB81/1', 'RYE RANCH PH IA-I PB81/1', 'RYE RANCH PH IV-B', 'RYE RANCH PH V-A, V-B AND V-C',
+        'RYE RANCH PHASE IIIC PB81/1', 'RYE RANCH PH 2 PB81/1', 'RYE RANCH PH 2A PB81/1', 'RYE RANCH PH I & II PB81/1', 'RYE RANCH  PH IV SUBPH IV-B-1, IV-B-2 AND  IV-B-3 PB81/1',
+        'Rye Ranch Ph I PB81/1'];
+      expect(await flags(legal, names)).toEqual(names.map(() => true));
+    });
+    test('another subdivision, another piece of land, or a form that was never seen', async () => {
+      const names = ['RYE RANCH ESTATES', 'RYE RANCH ESTATES PH I PB81/1', 'RYE RANCH WEST PB81/1', 'RYE RANCH VILLAS PH VA-1 PB81/1', 'RYE RANCH IA PB81/1',
+        'RYE RANCH III SUBDIVISION PB81/1', 'RYE RANCHES PH I', 'RYE RANCH PH II REPLAT OF LOT 4', 'RYE RANCH PH III-A TOWNHOMES PB81/1', 'RYE RANCH PH IC & ID WEST PB81/1',
+        'RYE RANCH PH I LOTS 1-40 PB81/1', 'RYE RANCH PH I FKA SAMPLE ASSEMBLAGE PH I-A', 'RYE RANCH PH IB, IC, ID AND COLLECTOR ROAD II PB81/1', 'RYE RANCH PHILLIPS ADD',
+        'RYE RANCH PH', 'RYE RANCH PH I PB81', 'RYE RANCH PH I PB81/1 EXTRA', 'RYE RANCH UNIT 3', 'RYE RANCH PB81/1 PH I'];
+      expect(await flags(legal, names)).toEqual(names.map(() => false));
+    });
+    test('a phase on the deed is not the phase that only starts with it', async () => {
+      const phaseOne = { lot: '171', block: null, subdivision: 'RYE RANCH PH I' };
+      expect(await flags(phaseOne, ['RYE RANCH PH I', 'Rye Ranch Ph I PB81/1', 'RYE RANCH PH II', 'RYE RANCH PH IA PB81/1', 'RYE RANCH PH I-A', 'RYE RANCH PH IV']))
+        .toEqual([true, true, false, false, false, false]);
+    });
+    test('no parcel of the answer is dropped, so a full page is still a cut-off answer', async () => {
+      const full = Array.from({ length: 25 }, (_, i) => feature({ PARID: String(513309100 + i), PAR_SUBDIV_NAME: 'RYE RANCH ESTATES' }));
+      await expect(queryParcels(legal, { fetchImpl: answer({ features: full }) })).rejects.toThrow(/cut off/);
+      expect(await queryParcels(legal, { fetchImpl: answer({ features: full.slice(0, 24) }) })).toHaveLength(24);
+    });
   });
   test('a field that was asked for must come back, even when it is null', async () => {
     const without = (key) => { const f = feature(); delete f.attributes[key]; return f; };
