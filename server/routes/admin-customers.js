@@ -3116,6 +3116,9 @@ router.get('/:id/properties', requireAdmin, async (req, res, next) => {
       properties, canChangeAppointmentAddress: true, canChangePrimary: require('../config/feature-gates').gateEnvValue('GATE_IB_PLATFORM'),
       // Read once here so the panel mounts per-row area editors only when on.
       propertyServiceAreas: require('../services/property-service-areas').propertyServiceAreasEnabled(),
+      // Always true. A staff tab opened before the reclaimed-water gate left the code still reads this key to show the
+      // reclaimed-water control and to send the picker's coordinates. The current panel does not read it.
+      reclaimedWater: true,
     });
   } catch (err) { next(err); }
 });

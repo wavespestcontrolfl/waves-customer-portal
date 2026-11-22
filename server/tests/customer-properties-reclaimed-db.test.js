@@ -73,10 +73,10 @@ suite('reclaimed water edits against isolated Postgres', () => {
     expect((await primaryOf()).reclaimed_water).toBeNull();
   }, 30000);
 
-  test('the list and edit answers carry the three reclaimed columns and no reclaimedWater key', async () => {
+  test('the list and edit answers carry the three reclaimed columns, and the list carries reclaimedWater: true', async () => {
     const list = await api(`/api/admin/customers/${customerA}/properties`);
     expect(list.status).toBe(200);
-    expect(list.body).not.toHaveProperty('reclaimedWater');
+    expect(list.body.reclaimedWater).toBe(true);
     expect(list.body.properties[0]).toHaveProperty('reclaimed_water');
     const edited = await api(`/api/admin/customers/${customerA}/properties/${list.body.properties[0].id}`, { label: 'Fixture label' }, 'PATCH');
     expect(edited.status).toBe(200);

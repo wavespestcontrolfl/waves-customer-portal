@@ -68,10 +68,10 @@ test('a property the writer does not find is its 404, passed through', async () 
   await withServer(async (baseUrl) => { expect((await put(baseUrl, { reclaimed: true })).status).toBe(404); });
 });
 
-test('the list answer is the old body: no reclaimedWater flag', async () => {
+test('the list answer always carries reclaimedWater: true, for a staff tab opened before the gate left the code', async () => {
   await withServer(async (baseUrl) => {
     const body = await (await fetch(`${baseUrl}/admin/customers/cust-1/properties`)).json();
-    expect(body).not.toHaveProperty('reclaimedWater');
-    expect(Object.keys(body).sort()).toEqual(['canChangeAppointmentAddress', 'canChangePrimary', 'properties', 'propertyServiceAreas']);
+    expect(body.reclaimedWater).toBe(true);
+    expect(Object.keys(body).sort()).toEqual(['canChangeAppointmentAddress', 'canChangePrimary', 'properties', 'propertyServiceAreas', 'reclaimedWater']);
   });
 });
