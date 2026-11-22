@@ -140,14 +140,9 @@ function lookupTurfZeroIsObserved(enriched) {
 // fills the rest), while a flag means "verify this before pricing".
 function lookupFeatureReadIsFlagged(enriched) {
   return hasVerifyFlagMatching(enriched, (field) => (
-    field.includes('estimatedturf') || isFeatureReadField(field)
+    field.includes('estimatedturf') || field.includes('pool') || field.includes('shrub')
+    || field.includes('tree') || field.includes('landscape')
   ));
-}
-
-// A verify flag on one of the photo's own feature reads (not on the lawn area).
-function isFeatureReadField(field) {
-  return field.includes('pool') || field.includes('shrub')
-    || field.includes('tree') || field.includes('landscape');
 }
 
 // GATE_PEST_PRICE_PHOTO_FACTS (owner 2026-11-21, reply "1, 2"): is the lawn
@@ -159,28 +154,45 @@ function isFeatureReadField(field) {
 // or without the flag.
 //
 // A NEW consumption, so it fails closed, and it reads machine fields only,
-// never a flag's prose. Still refused:
-//   - no grade, a low grade, or a whole-lookup flag (unscored or weak photo,
-//     wrong premise);
+// never a flag's prose. Refused:
+//   - no grade or a low grade (unscored or weak photo);
 //   - turfObservation 'unobservable': the photo conflicts with county records
 //     (an old photo of bare land), so every read off it is of the wrong scene;
 //   - turfSource other than 'vision': the photo gave no lawn number of its
 //     own (a county prior, or no basis), so nothing shows it read the yard;
-//   - a flag on a pool, shrub, tree or landscape read.
-// Every flag the lookup raises on estimatedTurfSf is one of those cases or a
-// doubt about the lawn number alone; a new kind of estimatedTurfSf flag must
+//   - ANY flag outside the allow-list below. The list is closed on purpose:
+//     a flag this rule has never sorted refuses. That covers a wrong premise
+//     ('address', 'all'), a lot shared by a whole development ('lotSize',
+//     scope 'unit_parcel': the photo shows the development's landscaping, not
+//     this home's), a doubted home size or property type, and a flag on any
+//     vision read (pool, shrubs, trees, palms, bed area, the analysis itself).
+// Every flag the lookup raises on estimatedTurfSf is one of the cases above or
+// a doubt about the lawn number alone; a new kind of estimatedTurfSf flag must
 // be sorted here (pest-price-photo-facts.test.js counts them).
 // One fact can still be in doubt by itself: see lookupDisputedPhotoFields.
+//
+// The allow-list, by exact field name:
+//   estimatedTurfSf       the lawn-area doubt itself;
+//   constructionMaterial  unknown or wood-frame structure: a termite note
+//                         from the records;
+//   foundationType        unknown, raised or flood-zone foundation: a termite
+//                         note from the records;
+//   vegetation            plants touch the structure: a note for the
+//                         technician. The photo saw it; it doubts nothing.
+// The three notes say nothing against the photo or the premises it shows, and
+// a lookup with no lawn-area flag prices on the photo facts with them today.
+const LAWN_AREA_DOUBT_ALLOWED_FLAG_FIELDS = new Set([
+  'estimatedturfsf', 'constructionmaterial', 'foundationtype', 'vegetation',
+]);
 function lookupLawnAreaIsTheOnlyFeatureDoubt(enriched) {
   if (!enriched) return false;
   if (!lookupConfidenceIsAdequate(enriched, { requireExplicitScore: true })) return false;
-  if (hasGlobalVerifyFlag(enriched)) return false;
   if (String(enriched.turfObservation || '').trim().toLowerCase() === 'unobservable') return false;
   if (String(enriched.turfSource || '').trim().toLowerCase() !== 'vision') return false;
   const fields = (Array.isArray(enriched.fieldVerifyFlags) ? enriched.fieldVerifyFlags : [])
-    .map((flag) => String(flag?.field || '').toLowerCase());
-  if (fields.some(isFeatureReadField)) return false;
-  return fields.some((field) => field.includes('estimatedturf'));
+    .map((flag) => String(flag?.field || '').trim().toLowerCase());
+  if (!fields.every((field) => LAWN_AREA_DOUBT_ALLOWED_FLAG_FIELDS.has(field))) return false;
+  return fields.includes('estimatedturfsf');
 }
 
 // The fields the vision providers DISAGREED on. mergeAiAnalyses

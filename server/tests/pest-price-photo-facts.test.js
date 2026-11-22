@@ -8,7 +8,8 @@
  * Regression this guards: (1) the facts reach a line other than pest (a
  * mosquito price would move by a whole tier); (2) a photo that conflicts with
  * county records, a weak or unscored photo, a photo with no lawn number of
- * its own, a flagged feature read, or a fact the vision providers disputed
+ * its own, a lookup with any flag outside the short allow-list (a shared
+ * parcel, a flagged feature read), or a fact the vision providers disputed
  * starts to price; (3) the gate off changes any price; (4) the one-time pest
  * price beside a plan stops following the plan's quarterly rate, or a
  * one-time job priced alone starts to read the facts; (5) a "no water" word
@@ -65,6 +66,15 @@ describe('lookupLawnAreaIsTheOnlyFeatureDoubt', () => {
     expect(lookupLawnAreaIsTheOnlyFeatureDoubt(photoRead({ fieldVerifyFlags: [LAWN_FLAG] }))).toBe(true);
   });
 
+  // Notes that say nothing against the photo or the premises it shows.
+  test.each(['constructionMaterial', 'foundationType', 'vegetation'])(
+    'a %s note beside the lawn-area flag does not widen the doubt', (field) => {
+      expect(lookupLawnAreaIsTheOnlyFeatureDoubt(photoRead({
+        fieldVerifyFlags: [LAWN_FLAG, { field, reason: 'x', priority: 'MEDIUM' }],
+      }))).toBe(true);
+    },
+  );
+
   test.each([
     ['no flag at all (the read is trusted, nothing to except)', photoRead()],
     ['a weak photo (grade under 60)', photoRead({ aiConfidence: 52, fieldVerifyFlags: [LAWN_FLAG] })],
@@ -81,6 +91,15 @@ describe('lookupLawnAreaIsTheOnlyFeatureDoubt', () => {
     ['a flag on the shrub read', photoRead({ fieldVerifyFlags: [LAWN_FLAG, { field: 'shrubDensity', reason: 'x' }] })],
     ['a flag on the pool read', photoRead({ fieldVerifyFlags: [LAWN_FLAG, { field: 'poolCage', reason: 'x' }] })],
     ['a flag on the landscape read', photoRead({ fieldVerifyFlags: [{ field: 'landscapeComplexity', reason: 'x' }] })],
+    // The photo of a shared parcel shows the whole development's landscaping.
+    ['a lot shared by a development', photoRead({
+      fieldVerifyFlags: [LAWN_FLAG, { field: 'lotSize', scope: 'unit_parcel', reason: 'x' }],
+    })],
+    ['a flag on the vision analysis itself', photoRead({ fieldVerifyFlags: [LAWN_FLAG, { field: 'aiAnalysis', reason: 'x' }] })],
+    ['a flag on the palm count', photoRead({ fieldVerifyFlags: [LAWN_FLAG, { field: 'estimatedPalmCount', reason: 'x' }] })],
+    ['a doubted home size', photoRead({ fieldVerifyFlags: [LAWN_FLAG, { field: 'squareFootage', reason: 'x' }] })],
+    ['a flag the rule has never sorted', photoRead({ fieldVerifyFlags: [LAWN_FLAG, { field: 'somethingNew', reason: 'x' }] })],
+    ['a flag with no field', photoRead({ fieldVerifyFlags: [LAWN_FLAG, { reason: 'x' }] })],
     ['no lookup', null],
   ])('refuses %s', (_label, enriched) => {
     expect(lookupLawnAreaIsTheOnlyFeatureDoubt(enriched)).toBe(false);
