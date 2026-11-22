@@ -67,6 +67,11 @@ describe('company endings written with dots or with spaces', () => {
     expect(buyerKind(['ONE TWO THREE FOUR FIVE SIX'])).toBe('unclear'); // six words
     expect(buyerKind(['SAMPLE 2020 EXAMPLE'])).toBe('unclear'); // a digit
     expect(buyerKind(['TESTER ALEX J', 'UNITED STATES OF AMERICA'])).toBe('unclear'); // one unclear name is enough
+    // "&" is "AND", however the Clerk writes it.
+    expect(buyerKind(['SAMPLE & SAMPLE'])).toBe('unclear');
+    expect(buyerKind(['SAMPLE&SAMPLE'])).toBe('unclear');
+    expect(buyerKind(['SAMPLE AND SAMPLE'])).toBe('unclear');
+    expect(buyerKind(['TESTER ALEX & ROBIN'])).toBe('unclear');
     expect(buyerKind(['TESTER ALEX', "O'TESTER MARY ANN", 'TESTER-SAMPLE ROBIN M JR', 'DE LA TESTER ALEX J'])).toBe('person');
     // A company or a trust word still decides first.
     expect(buyerKind(['UNITED STATES OF AMERICA', 'SAMPLE HOLDINGS LLC'])).toBe('company');

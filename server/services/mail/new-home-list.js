@@ -82,7 +82,9 @@ const isBuilderName = (name) => isCompanyName(name) && !isTrustName(name);
 // company or trust word. A name without it can be an organization with no listed word ("UNITED STATES OF AMERICA").
 const NOT_IN_A_PERSONS_NAME = new Set(['OF', 'THE', 'FOR', 'AND']);
 function hasPersonShape(name) {
-  const words = spaced(name).split(' ');
+  // "&" is "AND". spaced() alone drops it, and "SAMPLE & SAMPLE" would read as two plain words. On the four real
+  // days 24 of those party names hold "&"; none is a buyer of a candidate deed.
+  const words = spaced(String(name || '').replace(/&/g, ' AND ')).split(' ');
   return words.length >= 2 && words.length <= 5
     && words.every((word) => /^[A-Z]+$/.test(word) && !NOT_IN_A_PERSONS_NAME.has(word));
 }
