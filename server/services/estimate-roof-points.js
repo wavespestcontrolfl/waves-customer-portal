@@ -115,18 +115,23 @@ const timeMs = (v) => (v ? new Date(v).getTime() : NaN);
  * Freeze (or clear) one estimate's roof points for the send handed off at `deliveredAt` (the lastDeliveredAt that send
  * stamps on the estimate). `estimate` is the row that send read, as it stood BEFORE this handoff's delivery state.
  * Returns 'frozen', 'kept', 'cleared' or 'skipped' (never throws; a storage error is logged and reported as 'skipped',
- * and the page then omits the older copy: see copyIsCurrent; a keep that found its copy replaced by another send is
- * 'skipped' too: see keepOrFreeze).
+ * and the page then omits the older copy: see copyIsCurrent).
+ *
+ * A send never undoes a later one. Sends of one estimate take no common lock here, so a send can reach its write
+ * after a send with a later handoff. Every write therefore names only a copy that no later handoff wrote
+ * (copyNotNewer, and the same test in writeCopy): the newer copy is not replaced, re-timed or deleted. A freeze or a
+ * keep that loses that way is 'skipped'; a clear leaves the newer copy and is still 'cleared'.
  */
 async function freezeRoofPointsForEstimate(estimate, { deliveredAt, knex = db } = {}) {
   if (!estimate?.id || !Number.isFinite(timeMs(deliveredAt))) return 'skipped';
   try {
+    const at = new Date(deliveredAt).toISOString();
     const next = await nextSendPoints(estimate, knex);
-    if (next.points) return await writeCopy(estimate, next, deliveredAt, knex);
+    if (next.points) return await writeCopy(estimate, next, at, knex);
     // No points of the holder's own. `next.row` is a points read of theirs (no points, hidden, another address): it
     // decides, and the copy goes. With none, the lead's copy of a first customer may stay (keepOrFreeze).
-    if (!next.row && (await holdsLeadCopy(estimate, knex))) return await keepOrFreeze(estimate, deliveredAt, knex);
-    await knex(TABLE).where({ estimate_id: estimate.id }).del();
+    if (!next.row && (await holdsLeadCopy(estimate, knex))) return await keepOrFreeze(estimate, at, knex);
+    await copyNotNewer(knex, estimate, at).del();
     return 'cleared';
   } catch (err) {
     logger.warn(`[estimate-roof-points] freeze skipped for estimate ${estimate.id}: ${errCode(err)}`);
@@ -134,8 +139,11 @@ async function freezeRoofPointsForEstimate(estimate, { deliveredAt, knex = db } 
   }
 }
 
-// Write (or replace) the estimate's copy with these points, for the send handed off at `deliveredAt`.
-async function writeCopy(estimate, { row, points }, deliveredAt, knex) {
+// The estimate's copy, unless a handoff later than `at` (an ISO time) wrote it.
+const copyNotNewer = (knex, estimate, at) => knex(TABLE).where({ estimate_id: estimate.id }).where('delivered_at', '<=', at);
+
+// Write the estimate's copy with these points for the send handed off at `at`, or replace a copy that is not newer.
+async function writeCopy(estimate, { row, points }, at, knex) {
   const record = {
     estimate_id: estimate.id,
     read_id: row.id,
@@ -149,11 +157,14 @@ async function writeCopy(estimate, { row, points }, deliveredAt, knex) {
     // A lead's copy carries the estimate's count of customer changes as that send read it (copyForHolder). Null for a
     // customer's copy, and when the row has no count.
     lead_changes: !estimate.customer_id && Number.isInteger(estimate.customer_changes) ? estimate.customer_changes : null,
-    delivered_at: new Date(deliveredAt).toISOString(),
+    delivered_at: at,
     frozen_at: knex.fn.now(),
   };
-  await knex(TABLE).insert(record).onConflict('estimate_id').merge();
-  return 'frozen';
+  // The update half of the upsert applies only to a copy that is not newer. It then answers no row.
+  const written = await knex(TABLE).insert(record).onConflict('estimate_id').merge()
+    .where(`${TABLE}.delivered_at`, '<=', at)
+    .returning('estimate_id');
+  return written.length ? 'frozen' : 'skipped';
 }
 
 /**
@@ -296,25 +307,23 @@ async function holdsLeadCopy(estimate, knex) {
  * customer's), and the send would clear points it must keep or freeze. The wait is 5 seconds; past that the caller
  * reports 'skipped' and the page omits the older copy until the next send.
  *
- * Other sends take no lock, so one may replace the copy while this one decides. The keep and the clear therefore name
- * only a copy that no later handoff wrote (delivered_at not after this handoff): this send never takes a newer copy's
- * time back and never deletes it. A keep that finds its copy replaced reports 'skipped' and leaves that copy alone.
+ * Other sends take no lock, so one may replace the copy while this one decides. Like every write of a send, the keep
+ * and the clear name only a copy that no later handoff wrote (copyNotNewer). A keep that finds its copy replaced
+ * reports 'skipped' and leaves that copy alone.
  */
-async function keepOrFreeze(estimate, deliveredAt, knex) {
+async function keepOrFreeze(estimate, at, knex) {
   return knex.transaction(async (trx) => {
     await trx.raw("SET LOCAL lock_timeout = '5s'");
     await trx('estimates').where({ id: estimate.id }).forShare().first('id');
     const next = await nextSendPoints(estimate, trx);
-    if (next.points) return writeCopy(estimate, next, deliveredAt, trx);
-    const at = new Date(deliveredAt).toISOString();
-    const notNewer = () => trx(TABLE).where({ estimate_id: estimate.id }).where('delivered_at', '<=', at);
+    if (next.points) return writeCopy(estimate, next, at, trx);
     const copy = next.row ? null : await leadCopyToKeep(estimate, trx);
     if (!copy) {
-      await notNewer().del();
+      await copyNotNewer(trx, estimate, at).del();
       return 'cleared';
     }
     // Only the handoff time is written: the snapshot stays the one the lead received, also when the read was edited since.
-    const kept = await notNewer().where({ read_id: copy.read_id, lead_changes: copy.lead_changes }).whereNull('customer_id').update({ delivered_at: at });
+    const kept = await copyNotNewer(trx, estimate, at).where({ read_id: copy.read_id, lead_changes: copy.lead_changes }).whereNull('customer_id').update({ delivered_at: at });
     return kept === 1 ? 'kept' : 'skipped';
   });
 }

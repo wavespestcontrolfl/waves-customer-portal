@@ -278,6 +278,29 @@ jest.setTimeout(60000);
     expect(await copyOf(est)).toBeUndefined();
   });
 
+  test('any send that a later handoff overtook leaves the newer copy: it does not replace it and does not delete it', async () => {
+    const est = await insertId('estimates', { address: ADDRESS });
+    const read = await leadRead(est);
+    // The handoff at T3 froze the lead's points. A send handed off at T2 reaches its freeze after that.
+    expect(await send(est, null, T3)).toBe('frozen');
+    await svc.saveTechCount(read.id, { ...list(pin('rear, edited')), expectedPins: pin('front left') });
+    expect(await send(est, null, T2)).toBe('skipped');
+    expect(await copyOf(est)).toMatchObject({ read_id: read.id, delivered_at: new Date(T3) });
+    expect(await shown(est, T3)).toEqual([label('front left')]);
+    // The same late send once the points are cleared: it does not delete the T3 copy.
+    await svc.saveTechCount(read.id, { pins: null, expectedPins: pin('rear, edited') });
+    expect(await send(est, null, T2)).toBe('cleared');
+    expect(await copyOf(est)).toMatchObject({ read_id: read.id, delivered_at: new Date(T3) });
+    // A send at that handoff's time or later does: a clear deletes the copy, and new points replace it.
+    expect(await send(est, T3, T3)).toBe('cleared');
+    expect(await copyOf(est)).toBeUndefined();
+    await svc.saveTechCount(read.id, list(pin('side')));
+    expect(await send(est, T3, T3)).toBe('frozen');
+    await svc.saveTechCount(read.id, { ...list(pin('side, again')), expectedPins: pin('side') });
+    expect(await send(est, T3, T3)).toBe('frozen');
+    expect(await shown(est, T3)).toEqual([label('side, again')]);
+  });
+
   test('the count of customer changes goes up by one with each change of the estimate\'s customer, and an UPDATE cannot write it', async () => {
     const [custA, custB] = [await insertId('customers'), await insertId('customers')];
     const [est, other] = [await insertId('estimates'), await insertId('estimates')];
