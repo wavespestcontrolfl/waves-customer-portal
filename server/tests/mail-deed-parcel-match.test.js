@@ -14,6 +14,7 @@ describe('parseLegal', () => {
     ['LOT 12A SAMPLE GROVE', { lot: '12A', block: null, subdivision: 'SAMPLE GROVE' }],
     ["LOT 5 O'NEIL ESTATES", { lot: '5', block: null, subdivision: "O'NEIL ESTATES" }],
     ['lot 9 sample grove', { lot: '9', block: null, subdivision: 'SAMPLE GROVE' }],
+    ['LOT A1 BLK 2B SAMPLE GROVE', { lot: 'A1', block: '2B', subdivision: 'SAMPLE GROVE' }],
     ['LOT 9 PHILLIPS UNITY SECOND ADD', { lot: '9', block: null, subdivision: 'PHILLIPS UNITY SECOND ADD' }],
     ['LOT 9 SAMPLE GROVE SUBDIVISION', { lot: '9', block: null, subdivision: 'SAMPLE GROVE SUBDIVISION' }],
     ['  LOT   9   BLK  2   SAMPLE   GROVE ', { lot: '9', block: '2', subdivision: 'SAMPLE GROVE' }],
@@ -38,6 +39,14 @@ describe('parseLegal', () => {
     'LOT 12 SAMPLE GROVE SECTION 4',
     'LOT 12 SAMPLE GROVE PB 81',
     'LOT 12 SAMPLE GROVE PB81',
+    'LOT 12 SAMPLE GROVE PH2',
+    'LOT 12 SAMPLE GROVE PH2A',
+    'LOT 12 SAMPLE GROVE PHII',
+    'LOT 12 SAMPLE GROVE UNIT3',
+    'LOT 12 SAMPLE GROVE SEC12',
+    'LOT 12AB SAMPLE GROVE',
+    'LOT A1B SAMPLE GROVE',
+    'LOT 12 BLK AB SAMPLE GROVE',
     "LOT 1 SAMPLE'; DROP TABLE x --",
     '',
     null,
@@ -82,7 +91,10 @@ describe('parcelWhere', () => {
       { lot: '1234567', block: null, subdivision: 'RYE RANCH' }, { lot: '12a', block: null, subdivision: 'RYE RANCH' }, { lot: '171', block: null, subdivision: 'Rye Ranch' },
       { lot: '171', block: null, subdivision: 'RYE_RANCH' }, { lot: '171', block: null, subdivision: null },
       // A deed that names a phase, unit or section is not handled (parseLegal gives null for it).
-      { lot: '171', block: null, subdivision: 'RYE RANCH PH I' }, { lot: '171', block: null, subdivision: 'RYE RANCH PHASE I' }, { lot: '171', block: null, subdivision: 'RYE RANCH UNIT 3' }];
+      { lot: '171', block: null, subdivision: 'RYE RANCH PH I' }, { lot: '171', block: null, subdivision: 'RYE RANCH PHASE I' }, { lot: '171', block: null, subdivision: 'RYE RANCH UNIT 3' },
+      { lot: '171', block: null, subdivision: 'RYE RANCH PH2' }, { lot: '171', block: null, subdivision: 'RYE RANCH UNIT3' },
+      // Two letters in a number: the forms would not cover every mix of capitals and lower case.
+      { lot: '12AB', block: null, subdivision: 'RYE RANCH' }, { lot: '171', block: 'AB', subdivision: 'RYE RANCH' }];
     for (const legal of bad) expect(() => parcelWhere(legal)).toThrow(TypeError);
   });
 });
@@ -250,7 +262,7 @@ describe('queryParcels', () => {
     });
     test('a deed that names a phase is refused before any request: two spellings of one phase cannot be told apart here', async () => {
       const fetchImpl = jest.fn(answer({ features: [feature({ PAR_SUBDIV_NAME: 'RYE RANCH PH I' }), feature({ PARID: '513309060', PAR_SUBDIV_NAME: 'RYE RANCH PHASE I' })] }));
-      for (const subdivision of ['RYE RANCH PH I', 'RYE RANCH PHASE I', 'RYE RANCH PH I SUBPH A', 'RYE RANCH UNIT 3', 'RYE RANCH SEC 2']) {
+      for (const subdivision of ['RYE RANCH PH I', 'RYE RANCH PHASE I', 'RYE RANCH PH I SUBPH A', 'RYE RANCH UNIT 3', 'RYE RANCH SEC 2', 'RYE RANCH PH2', 'RYE RANCH UNIT3']) {
         await expect(queryParcels({ lot: '171', block: null, subdivision }, { fetchImpl })).rejects.toThrow(TypeError);
       }
       expect(fetchImpl).not.toHaveBeenCalled();

@@ -37,18 +37,24 @@ const SEVERAL_LOTS = /^(AND|THRU|THROUGH|TO|&)(\s|$)/;
 // A deed that names a phase, unit, section or plat book itself ("... PH I", "... UNIT 3") is not handled. The map
 // spells such a part in several ways (PH and PHASE), and this module compares names letter by letter: two spellings
 // of one part would count as two names. The Clerk's text leaves these parts out (0 of 69 measured deeds have one).
-const PLAT_PART_WORDS = new Set(['PH', 'PHASE', 'SUBPH', 'SUBPHASE', 'UNIT', 'SEC', 'SECTION']);
-const namesPlatPart = (words) => words.split(/[^A-Z0-9]+/).some((word) => PLAT_PART_WORDS.has(word) || /^PB\d*$/.test(word));
+// The word alone, or written as one with its number ("PH2", "UNIT3A", "PHII", "PB81"). Not PHILLIPS, UNITY, SECOND.
+const PLAT_PART_WORD = /^(?:PH|PHASE|SUBPH|SUBPHASE|UNIT|SEC|SECTION|PB)(?:\d[0-9A-Z]*|[IVX]{1,4})?$/;
+const namesPlatPart = (words) => words.split(/[^A-Z0-9]+/).some((word) => PLAT_PART_WORD.test(word));
+// A lot or block number has one letter at most ("12A", "B"). The map writes a letter in either case, and the list
+// of forms (mapForms) covers both cases of one letter, not every mix of two ("12Ab"): such a deed is not handled.
+const ONE_NUMBER = /^(?=.)[0-9]*[A-Z]?[0-9]*$/;
 
 /**
  * Lot, block and subdivision words from a deed description, or null when it is not one plain lot (a condo unit,
- * metes and bounds, several lots) or names a phase, unit, section or plat book itself. The character set is narrow, and parcelWhere lets only its capitals and digits
+ * metes and bounds, several lots), names a phase, unit, section or plat book itself, or has a lot or block number
+ * with two letters. The character set is narrow, and parcelWhere lets only its capitals and digits
  * reach the where string (no quote, no % or _ wildcard, no semicolon or parenthesis).
  */
 function parseLegal(description) {
   const text = String(description || '').toUpperCase().replace(/\s+/g, ' ').trim();
   const m = text.match(LEGAL_PATTERN);
   if (!m || SEVERAL_LOTS.test(m[3]) || namesPlatPart(m[3])) return null;
+  if (!ONE_NUMBER.test(m[1]) || (m[2] && !ONE_NUMBER.test(m[2]))) return null;
   return { lot: m[1], block: m[2] || null, subdivision: m[3] };
 }
 
@@ -83,7 +89,7 @@ const lettersOf = (text) => text.replace(/[^A-Z0-9]/g, '');
 // an outage, never "no parcel". Only capitals and digits of the deed's text reach the where string.
 function parcelWhere(legal) {
   // The values parseLegal gives, and no other: capitals and digits for the numbers, LEGAL_PATTERN's signs in the name.
-  const plain = (value, max) => typeof value === 'string' && value.length <= max && /^[0-9A-Z]+$/.test(value);
+  const plain = (value, max) => typeof value === 'string' && value.length <= max && ONE_NUMBER.test(value);
   const named = typeof legal.subdivision === 'string' && /^[A-Z0-9][A-Z0-9 &'.-]*$/.test(legal.subdivision) && !namesPlatPart(legal.subdivision);
   if (!plain(legal.lot, 6) || !named || (legal.block && !plain(legal.block, 4))) throw new TypeError('parcelWhere needs the lot, block and subdivision of a parsed deed');
   const letters = lettersOf(legal.subdivision);
