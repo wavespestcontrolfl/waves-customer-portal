@@ -211,13 +211,6 @@ function noteToSend(note, storedCodes) {
   return allMasked(said) ? { skip: 'nothing_for_customer' } : { said };
 }
 
-// What every check of one note reads: the codes on the customer's file
-// first (the note is read with them), then the catalog. One after the other:
-// inside a completion's transaction the two reads share a connection.
-async function readForChecks({ storedCodes, customerId, catalogRows, db }) {
-  const codes = storedCodes || await readStoredCodes(db, customerId);
-  return { codes, rows: catalogRows || await CompletionRecap.readCatalogScreenRows(db) };
-}
 
 /**
  * The report text for a note: { text, source: 'cleaned' } when a tidied note
@@ -242,19 +235,17 @@ async function cleanReportNote({
   const deadline = Date.now() + OWN_NOTE_BUDGET_MS;
   let refused = null;
   try {
-    // One read of the codes and of the catalog for every check of this note.
-    // Inside a transaction the reads are awaited whole: a read left running
-    // would share the connection with the caller's next write.
-    const reads = readForChecks({ storedCodes, customerId, catalogRows, db });
-    const read = db?.isTransaction ? await reads : await within(reads, OWN_NOTE_BUDGET_MS);
-    if (read === LATE) {
-      logger.warn('[report-own-note] the reads for the checks outlasted the wait, fixed sentence used');
-      return fixed('timeout');
-    }
-    ({ codes } = read);
-    const { rows } = read;
+    // A read the wait gives up on keeps running, so it must not share a
+    // caller's transaction: the writer is called before any write begins.
+    if (db?.isTransaction) throw new Error('called inside a transaction');
+    // The codes on the customer's file first (the note is read with them),
+    // then the catalog, only for a note that will be sent.
+    if (!codes) codes = await within(readStoredCodes(db, customerId), deadline - Date.now());
+    if (codes === LATE) { codes = null; return fixed('timeout'); }
     const { said, skip } = noteToSend(note, codes);
     if (skip) return fixed(skip);
+    const rows = catalogRows || await within(CompletionRecap.readCatalogScreenRows(db), deadline - Date.now());
+    if (rows === LATE) return fixed('timeout');
     const rejection = (text) => reportNoteRejection({
       note, text, catalogRows: rows, storedCodes: codes,
     });

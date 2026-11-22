@@ -129,24 +129,26 @@ describe('a model reads the masked note only', () => {
     expect(result.text).not.toMatch(/bluebird/i);
   });
 
-  test('inside a transaction the reads finish before the answer, whatever the wait', async () => {
-    jest.useFakeTimers();
+  test('a call inside a transaction reads nothing and gets the fixed sentence', async () => {
     const read = jest.spyOn(CompletionRecap, 'readCatalogScreenRows');
     try {
-      let done = false;
-      read.mockReturnValueOnce(new Promise((resolve) => {
-        setTimeout(() => { done = true; resolve(CATALOG); }, OWN_NOTE_BUDGET_MS + 5000);
-      }));
-      const pending = cleanReportNote({
+      await expect(cleanReportNote({
         note: 'treated the patio', ...VISIT, db: { isTransaction: true }, storedCodes: [],
-      });
-      await jest.advanceTimersByTimeAsync(OWN_NOTE_BUDGET_MS + 5000);
-      await expect(pending).resolves.toEqual({ text: FIXED, source: 'fixed', reason: 'timeout' });
-      expect(done).toBe(true);
+      })).resolves.toEqual({ text: FIXED, source: 'fixed', reason: 'screen_unavailable' });
+      expect(read).not.toHaveBeenCalled();
       expect(dispatchWithFallback).not.toHaveBeenCalled();
     } finally {
       read.mockRestore();
-      jest.useRealTimers();
+    }
+  });
+
+  test('a note that gets no call reads no catalog', async () => {
+    const read = jest.spyOn(CompletionRecap, 'readCatalogScreenRows');
+    try {
+      await clean('', { catalogRows: null, db: {} });
+      expect(read).not.toHaveBeenCalled();
+    } finally {
+      read.mockRestore();
     }
   });
 
