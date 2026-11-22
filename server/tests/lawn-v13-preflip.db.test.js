@@ -10,6 +10,8 @@
 // 3. October is Dimension 0.21% 18-0-10 at 4.04 lb (20261007120500): the staged October
 //    row swaps in, the catalog max, the 3-a-year and 60-day limits and the yearly dithiopyr
 //    cap rows are written only where absent, and the limit reader scopes product history.
+// 4. October moves on to LESCO Stonewall 0.37% 18-0-10 at the same 4.04 lb (20261122120000): the Dimension
+//    row swaps in place, only while it is exactly what 20261007120500 wrote; the 9x April step stays Dimension.
 const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
 const { buildPlanForService, lawnVisitsPerYear } = require('../services/waveguard-plan-engine');
 const applicationLimits = require('../services/application-limits');
@@ -19,6 +21,7 @@ const reconcileMigration = require('../models/migrations/20261006160000_lawn_v13
 const labelMaxMigration = require('../models/migrations/20261006170000_lawn_v13_prodiamine_cap_label_max');
 const ownershipMigration = require('../models/migrations/20261006180000_lawn_v13_april_9x_ownership');
 const octoberMigration = require('../models/migrations/20261007120500_lawn_v13_october_dimension');
+const stonewallMigration = require('../models/migrations/20261122120000_lawn_v13_october_stonewall');
 const v13Recipe = require('../config/lawn-protocol-v13.json');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
 const { randomUUID } = require('crypto');
@@ -52,7 +55,7 @@ describe('prodiamine cap derivation (no database)', () => {
     expect(aiPerRateUnit({ name: 'Prodiamine 4L', active_ingredient: 'Prodiamine', rate_unit: 'gal' })).toBeNull();
   });
 
-  test('the v13 prodiamine season is January 4FL alone (October is dithiopyr now): 45% of the cap', () => {
+  test('the January 4FL step alone is 45% of the prodiamine cap', () => {
     expect(0.5 / 1.1019).toBeLessThan(0.5);
   });
 });
@@ -80,11 +83,33 @@ describe('the v13 dithiopyr season against the yearly cap (no database)', () => 
     expect(CAP_2EW.description).not.toMatch(/16\.38/);
   });
 
-  test('12x and 9x seasons stay under the cap (70.0% and 87.0%); October is 4.04 lb, under the 5.46 lb per-application maximum', () => {
-    expect(Math.round(season(12) * 1000) / 10).toBe(70);
-    expect(Math.round(season(9) * 1000) / 10).toBe(87);
+  // October moved to Stonewall 0.37% 18-0-10 (20261122120000): the dithiopyr season is March and June 2EW, plus the 9x April granular.
+  test('12x and 9x dithiopyr seasons stay under the cap (45.4% and 62.3%); the 9x April granular is the only Dimension step left', () => {
+    expect(Math.round(season(12) * 1000) / 10).toBe(45.4);
+    expect(Math.round(season(9) * 1000) / 10).toBe(62.3);
     expect(octoberMigration.OCT_RATE).toBeLessThan(octoberMigration.MAX_LABEL);
-    expect(octoberMigration.OCT_RATE * 0.0021 * 43.56).toBeCloseTo(0.37, 2);
+  });
+});
+
+describe('the v13 prodiamine season against the yearly cap (no database)', () => {
+  const { CAP_VALUE } = stonewallMigration;
+  const rateOf = (line) => Number(/^([\d.]+) (fl oz|lb)\b/.exec(line.split(' — ')[1] || '')[1]);
+  // The recipe's prodiamine lines as shares of their own product's derived cap row (1.5 lb ai per acre).
+  const season = (visitsPerYear) => v13Recipe.st_augustine.visits.reduce((total, visit) => {
+    const step = visit.cadenceVariants?.[String(visitsPerYear)] || visit;
+    return String(step.primary).split('\n').reduce((sum, line) => {
+      const name = line.split(' — ')[0];
+      if (name === STW_4FL) return sum + rateOf(line) / 1.1019;
+      if (name === stonewallMigration.NEW_NAME) return sum + rateOf(line) / CAP_VALUE;
+      return sum;
+    }, total);
+  }, 0);
+
+  test('January 4FL (45.4%) plus October Stonewall 0.37% (43.4%) is 88.8% of the yearly cap on both plans, under it', () => {
+    expect(Math.round(season(12) * 1000) / 10).toBe(88.8);
+    expect(Math.round(season(9) * 1000) / 10).toBe(88.8);
+    // 0.68 + 0.65 = 1.33 lb prodiamine per acre; the 9x April step is the Dimension granular (dithiopyr), so it adds none.
+    expect(0.5 * (4 / 128) * 43.56 + stonewallMigration.OCT_RATE * 0.0037 * 43.56).toBeCloseTo(1.33, 2);
   });
 });
 
@@ -893,28 +918,8 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       });
     });
 
-    describe('the plan counts the Dimension step against the yearly dithiopyr cap', () => {
-      test('October: the stated 4.04 lb computes 40.4 lb on 10,000 sq ft; March and June 2EW history keeps it a plain plan at 70.0% of the cap', async () => {
-        setGates();
-        const { scheduled, customerId } = await visit('2026-10-12');
-        await applied(customerId, DIM_2EW, '2026-03-10', 0.5, 'fl oz');
-        await applied(customerId, DIM_2EW, '2026-06-10', 0.5, 'fl oz');
-        const result = await plan(scheduled);
-        expect(codes(result)).not.toContain('lawn_v13_annual_limit');
-        expect(item(result, DIMENSION).mix).toMatchObject({ amount: 40.4, amountUnit: 'lb' });
-        expect(result.propertyGate.warnings.find((w) => w.code === 'lawn_v13_limit_warning' && /yearly label cap/.test(w.message))).toBeUndefined();
-      });
-
-      test('October: 2EW history of 2.0 fl oz (90.7%) plus the planned 24.7% would exceed the cap: no amount, a block naming it', async () => {
-        setGates();
-        const { scheduled, customerId } = await visit('2026-10-12');
-        await applied(customerId, DIM_2EW, '2026-03-10', 2, 'fl oz');
-        const result = await plan(scheduled);
-        expect(result.propertyGate.blocks.find((b) => b.code === 'lawn_v13_annual_limit').message)
-          .toMatch(/dithiopyr across all products this year is 90\.7% of the yearly label cap; this application brings it to 115\.4% — THIS APPLICATION WOULD EXCEED IT/);
-        expect(item(result, DIMENSION).mix).toBeNull();
-      });
-
+    // October no longer plans the Dimension granular (20261122120000): only the 9x April step counts against the dithiopyr cap.
+    describe('the plan counts the 9x April Dimension step against the yearly dithiopyr cap', () => {
       test.each([
         ['at 68.1% (1.5 fl oz)', 1.5, 'warn', /is 68\.1% of the yearly label cap; this application brings it to 85%/],
         ['at 90.7% (2.0 fl oz)', 2, 'block', /is 90\.7% of the yearly label cap; this application brings it to 107\.7% — THIS APPLICATION WOULD EXCEED IT/],
@@ -942,18 +947,345 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
         expect(item(result, F44).mix).toMatchObject({ amount: 22.727 });
       });
 
-      test('a plan for property B ignores the Dimension applications at property A', async () => {
+    });
+  });
+
+  // The October step moves on from the Dimension granular to Stonewall 0.37% 18-0-10 (owner 2026-11-21). The describe above
+  // leaves the fixture on the Dimension row 20261007120500 wrote, which is exactly this migration's starting state.
+  describe('October Stonewall 0.37% 18-0-10 (20261122120000)', () => {
+    const STW_037 = stonewallMigration.NEW_NAME;
+    const stonewallId = () => catalog[STW_037].id;
+    const dimensionId = () => catalog[DIMENSION].id;
+    const octoberRow = () => knex('lawn_protocol_products as p').join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id')
+      .where({ 'w.window_key': 'oct_v13_spreader_fall' }).select('p.*', 'w.goal').first();
+    const limitRows = (productId) => knex('product_limits').where({ product_id: productId }).orderBy(['limit_type', 'match_type']);
+    const shape = (rows) => rows.map((r) => [r.limit_type, r.match_type, r.match_value, Number(r.limit_value), r.limit_unit, r.severity]);
+    const ours = () => knex('lawn_protocol_audit_log').whereIn('action', [stonewallMigration.ACTION, stonewallMigration.CATALOG_ACTION]).orderBy('id');
+    const catalogRow = () => knex('products_catalog').where({ id: stonewallId() }).first();
+    // Every catalog column but the one the migration may fill (hrac_group, only where empty) and the stamp.
+    const catalogJson = async () => { const { hrac_group: _g, updated_at: _u, ...rest } = await catalogRow(); return JSON.stringify(rest); };
+    const otherRows = () => knex('lawn_protocol_products as p').join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id')
+      .whereNot({ 'w.window_key': 'oct_v13_spreader_fall' }).orderBy('p.id').select('p.id', 'p.product_name', 'p.product_id', 'p.rate_per_1000', 'p.rate_unit', 'p.gates', 'p.annual_counter');
+    const DIMENSION_OCTOBER = {
+      product_name: DIMENSION, rate_per_1000: 4.04, gates: { targetN: '0.73 lb N/1000', targetK2O: '0.4 lb K2O/1000', annualCounter: 'dithiopyr_lb_per_1000' }, annual_counter: { counter: 'dithiopyr_lb_per_1000' },
+    };
+    // The fixture as 20261007120500 leaves it: the Dimension row, its goal, no Stonewall 0.37% limit row, no audit row of ours.
+    async function resetToDimension() {
+      const row = await octoberRow();
+      await knex('lawn_protocol_products').where({ id: row.id }).update({
+        ...DIMENSION_OCTOBER, product_id: dimensionId(), gates: JSON.stringify(DIMENSION_OCTOBER.gates), annual_counter: JSON.stringify(DIMENSION_OCTOBER.annual_counter),
+      });
+      await knex('lawn_protocol_windows').where({ id: row.lawn_protocol_window_id }).update({ goal: stonewallMigration.OLD_GOAL });
+      // A row the migration inserted (no other row had the name): gone, once the protocol row points back at Dimension.
+      const inserted = await knex('products_catalog').where({ name: STW_037 }).whereNot({ id: stonewallId() }).select('id');
+      for (const { id } of inserted) await knex('product_limits').where({ product_id: id }).del();
+      if (inserted.length) await knex('products_catalog').whereIn('id', inserted.map((r) => r.id)).del();
+      await knex('products_catalog').where({ id: stonewallId() }).update({ name: STW_037, hrac_group: null });
+      await knex('product_limits').where({ product_id: stonewallId() }).del();
+      await knex('product_aliases').where({ product_id: stonewallId() }).del();
+      await knex('lawn_protocol_audit_log').whereIn('action', [stonewallMigration.ACTION, stonewallMigration.CATALOG_ACTION]).del();
+    }
+    const withReset = async (run) => {
+      await resetToDimension();
+      try { await run(); } finally { await resetToDimension(); }
+    };
+
+    beforeAll(async () => {
+      const [row] = await knex('products_catalog').insert({
+        name: STW_037, category: 'herbicide', label_verified_at: new Date(), inventory_on_hand: 100000, inventory_unit: 'lb', active: true,
+        active_ingredient: 'Prodiamine 0.37% + 18-0-10', formulation: 'granular', default_rate_per_1000: 4.04, rate_unit: 'lb', analysis_n: 18, analysis_p: 0, analysis_k: 10,
+        min_label_rate_per_1000: 3.1, max_label_rate_per_1000: 9.3, best_price: 33.46, best_vendor: 'Fixture vendor',
+      }).returning('*');
+      catalog[STW_037] = row;
+      await resetToDimension();
+    });
+
+    test('up: the October row is Stonewall 0.37% 18-0-10 at the same 4.04 lb, with its product id, the same N and K2O gate text, the prodiamine counter and the new goal', async () => {
+      const before = { other: JSON.stringify(await otherRows()), catalog: await catalogJson(), dimension: JSON.stringify(await limitRows(dimensionId())) };
+      await stonewallMigration.up(knex);
+      const row = await octoberRow();
+      expect(row).toMatchObject({ product_name: STW_037, product_id: stonewallId(), role: 'fall_pre_emergent_nutrition', rate_unit: 'lb', goal: stonewallMigration.NEW_GOAL });
+      expect(Number(row.rate_per_1000)).toBe(4.04);
+      expect(row.gates).toEqual({ targetN: '0.73 lb N/1000', targetK2O: '0.4 lb K2O/1000', annualCounter: 'prodiamine_lb_per_1000' });
+      expect(row.annual_counter).toEqual({ counter: 'prodiamine_lb_per_1000' });
+      expect(stonewallMigration.NEW_GOAL).toBe('Stonewall 18-0-10 fall feeding with pre-emergent; mapped large patch, take-all, grub and weed spots.');
+      // Out of scope, exactly as before: every other window's rows (the 9x April Dimension row, January 4FL), the catalog row, the Dimension limit rows.
+      expect(JSON.stringify(await otherRows())).toBe(before.other);
+      expect(await catalogJson()).toBe(before.catalog);
+      expect(JSON.stringify(await limitRows(dimensionId()))).toBe(before.dimension);
+      const april = await knex('lawn_protocol_products as p').join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id')
+        .where({ 'w.window_key': aprilMigration.APRIL_WINDOW, 'p.product_name': DIMENSION }).select('p.rate_per_1000', 'p.rate_unit', 'p.gates').first();
+      expect([april.rate_per_1000, april.rate_unit, april.gates.targetN, april.gates.planVisitsPerYear]).toEqual([null, 'lb_n', '0.5 lb N/1000', 9]);
+    });
+
+    test('up inserts the yearly prodiamine cap (1.5 lb ai per acre = 9.3068 lb of the bag per 1,000 sq ft) where the product has none, and audits it once', async () => {
+      expect(shape(await limitRows(stonewallId()))).toEqual([['annual_max_rate', 'active_ingredient', 'prodiamine', 9.3068, 'lb/1000sf/year', 'hard_block']]);
+      expect(stonewallMigration.CAP_VALUE).toBe(9.3068);
+      const audits = await ours();
+      expect(audits.map((log) => log.action).sort()).toEqual([stonewallMigration.ACTION, stonewallMigration.CATALOG_ACTION].sort());
+      expect(audits.find((log) => log.action === stonewallMigration.ACTION).after_snapshot.rows[0].columns.product_name).toEqual({ before: DIMENSION, after: STW_037 });
+      expect(audits.find((log) => log.action === stonewallMigration.CATALOG_ACTION).after_snapshot).toMatchObject({ insertedProductId: null, hracFilled: true, caps: [expect.objectContaining({ limit_value: 9.3068 })] });
+    });
+
+    test('a second up changes nothing', async () => {
+      const stateOf = async () => JSON.stringify([await octoberRow(), await catalogRow(), await limitRows(stonewallId()), await otherRows(), await ours()]);
+      const before = await stateOf();
+      await stonewallMigration.up(knex);
+      expect(await stateOf()).toBe(before);
+    });
+
+    test('down puts the Dimension row, its goal and counter back, removes the cap row it inserted and its audit rows; up swaps again', async () => {
+      const stamped = async () => { const { updated_at: _u, ...rest } = await octoberRow(); return JSON.stringify(rest); };
+      const swapped = await stamped();
+      await stonewallMigration.down(knex);
+      try {
+        const row = await octoberRow();
+        expect(row).toMatchObject({ product_name: DIMENSION, product_id: dimensionId(), goal: stonewallMigration.OLD_GOAL });
+        expect(Number(row.rate_per_1000)).toBe(4.04);
+        expect(row.gates).toEqual(DIMENSION_OCTOBER.gates);
+        expect(row.annual_counter).toEqual(DIMENSION_OCTOBER.annual_counter);
+        expect(await limitRows(stonewallId())).toEqual([]);
+        expect(await ours()).toEqual([]);
+      } finally {
+        await stonewallMigration.up(knex);
+      }
+      expect(await stamped()).toBe(swapped);
+    });
+
+    test('a value changed since stays: the October rate, a gate someone edited, a cap row the office edited', async () => {
+      const row = await octoberRow();
+      const [cap] = await limitRows(stonewallId());
+      await knex('lawn_protocol_products').where({ id: row.id }).update({ rate_per_1000: 3.9, gates: JSON.stringify({ ...row.gates, targetN: '0.7 lb N/1000' }) });
+      await knex('product_limits').where({ id: cap.id }).update({ description: 'Edited by the office' });
+      try {
+        await stonewallMigration.down(knex);
+        const after = await octoberRow();
+        expect(after).toMatchObject({ product_name: DIMENSION, goal: stonewallMigration.OLD_GOAL });
+        expect(Number(after.rate_per_1000)).toBe(3.9);
+        expect(after.gates).toEqual({ ...DIMENSION_OCTOBER.gates, targetN: '0.7 lb N/1000' });
+        expect((await knex('product_limits').where({ id: cap.id }).first()).description).toBe('Edited by the office');
+      } finally {
+        await resetToDimension();
+        await stonewallMigration.up(knex);
+      }
+    });
+
+    test('a row renamed since is not the Stonewall row this wrote: down leaves it whole', async () => {
+      const row = await octoberRow();
+      await knex('lawn_protocol_products').where({ id: row.id }).update({ product_name: 'Renamed by the office' });
+      try {
+        await stonewallMigration.down(knex);
+        expect(await knex('lawn_protocol_products').where({ id: row.id }).first()).toMatchObject({ product_name: 'Renamed by the office', product_id: stonewallId() });
+      } finally {
+        await resetToDimension();
+        await stonewallMigration.up(knex);
+      }
+    });
+
+    test('a visit pinned to the protocol makes the rollback a no-op: the Stonewall row, its audit rows and the cap row stay', async () => {
+      const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+      const { scheduled } = await visit('2026-10-13', { lawn_protocol_key: KEY, lawn_protocol_version: LAWN_V13_VERSION });
+      try {
+        const stateOf = async () => JSON.stringify([await octoberRow(), await limitRows(stonewallId()), await ours()]);
+        const before = await stateOf();
+        await stonewallMigration.down(knex);
+        expect(await stateOf()).toBe(before);
+        expect(log).toHaveBeenCalledWith(expect.stringContaining(`rollback skipped for protocol ${KEY}`));
+      } finally {
+        log.mockRestore();
+        await knex('scheduled_services').where({ id: scheduled.id }).update({ lawn_protocol_key: null, lawn_protocol_version: null });
+      }
+      await stonewallMigration.down(knex);
+      expect(await octoberRow()).toMatchObject({ product_name: DIMENSION });
+      await stonewallMigration.up(knex);
+      expect(await octoberRow()).toMatchObject({ product_name: STW_037 });
+    });
+
+    describe('only the exact Dimension October row is swapped', () => {
+      const quiet = () => jest.spyOn(console, 'log').mockImplementation(() => {});
+      test.each([
+        ['renamed', { product_name: 'Renamed by the office' }],
+        ['another product id', { product_id: null }],
+        ['re-rated', { rate_per_1000: 3.9 }],
+        ['another counter', { annual_counter: JSON.stringify({ counter: 'office_counter' }) }],
+      ])('a row that is %s is left as it is and logged', async (label, change) => {
+        await withReset(async () => {
+          const log = quiet();
+          const row = await octoberRow();
+          await knex('lawn_protocol_products').where({ id: row.id }).update(change);
+          const before = JSON.stringify([await octoberRow(), await limitRows(stonewallId())]);
+          try {
+            await stonewallMigration.up(knex);
+            expect(JSON.stringify([await octoberRow(), await limitRows(stonewallId())])).toBe(before);
+            expect(await ours()).toEqual([]);
+            if (label !== 'renamed') expect(log).toHaveBeenCalledWith(expect.stringContaining('not the Dimension row 20261007120500 wrote'));
+          } finally { log.mockRestore(); }
+        });
+      });
+
+      test('a window that already holds a Stonewall 0.37% row is left alone', async () => {
+        await withReset(async () => {
+          const row = await octoberRow();
+          const [extra] = await knex('lawn_protocol_products').insert({
+            lawn_protocol_window_id: row.lawn_protocol_window_id, product_id: stonewallId(), product_name: STW_037, application_mode: 'broadcast', default_in_plan: false, role: 'fall_pre_emergent_nutrition', rate_per_1000: 4.04, rate_unit: 'lb',
+          }).returning('id');
+          try {
+            await stonewallMigration.up(knex);
+            expect(await knex('lawn_protocol_products').where({ lawn_protocol_window_id: row.lawn_protocol_window_id, product_name: DIMENSION }).first()).toBeTruthy();
+            expect(await ours()).toEqual([]);
+          } finally { await knex('lawn_protocol_products').where({ id: extra.id ?? extra }).del(); }
+        });
+      });
+
+      test('a goal the office rewrote is kept; the row still swaps', async () => {
+        await withReset(async () => {
+          const row = await octoberRow();
+          await knex('lawn_protocol_windows').where({ id: row.lawn_protocol_window_id }).update({ goal: 'Office goal' });
+          await stonewallMigration.up(knex);
+          expect(await octoberRow()).toMatchObject({ product_name: STW_037, goal: 'Office goal' });
+          await stonewallMigration.down(knex);
+          expect(await octoberRow()).toMatchObject({ product_name: DIMENSION, goal: 'Office goal' });
+        });
+      });
+    });
+
+    describe('limit rows that exist are never changed', () => {
+      test('a prodiamine cap row the product already has (any value or severity) is kept, no catalog audit row is written, and down leaves it', async () => {
+        await withReset(async () => {
+          await knex('product_limits').insert({ product_id: stonewallId(), match_type: 'active_ingredient', match_value: 'prodiamine', limit_type: 'annual_max_rate', limit_value: 9.3068, limit_unit: 'lb/1000sf/year', severity: 'hard_block', description: 'Existing production row' });
+          const before = (await limitRows(stonewallId())).map((r) => JSON.stringify(r));
+          const catalogBefore = await catalogJson();
+          await stonewallMigration.up(knex);
+          expect((await limitRows(stonewallId())).map((r) => JSON.stringify(r))).toEqual(before);
+          expect(await catalogJson()).toBe(catalogBefore);
+          // The protocol audit row, and a catalog audit row for the hrac_group fill alone (no cap inserted).
+          expect((await ours()).map((log) => log.action).sort()).toEqual([stonewallMigration.CATALOG_ACTION, stonewallMigration.ACTION].sort());
+          expect((await ours()).find((log) => log.action === stonewallMigration.CATALOG_ACTION).after_snapshot).toMatchObject({ caps: [], hracFilled: true, insertedProductId: null });
+          await stonewallMigration.down(knex);
+          expect((await limitRows(stonewallId())).map((r) => JSON.stringify(r))).toEqual(before);
+          expect(await octoberRow()).toMatchObject({ product_name: DIMENSION });
+        });
+      });
+
+      test('the January 4FL cap row and the Dimension limit rows are not touched', async () => {
+        await withReset(async () => {
+          const rows4fl = JSON.stringify(await limitRows(catalog[STW_4FL].id));
+          const rowsDim = JSON.stringify(await limitRows(dimensionId()));
+          await stonewallMigration.up(knex);
+          expect(JSON.stringify(await limitRows(catalog[STW_4FL].id))).toBe(rows4fl);
+          expect(JSON.stringify(await limitRows(dimensionId()))).toBe(rowsDim);
+        });
+      });
+    });
+
+    describe('the Stonewall product id', () => {
+      test('a product that exists only behind an alias gets the row link and the cap', async () => {
+        await withReset(async () => {
+          await knex('products_catalog').where({ id: stonewallId() }).update({ name: 'Stonewall 0.37% Bag (SiteOne)' });
+          await knex('product_aliases').insert({ product_id: stonewallId(), alias_name: STW_037 });
+          await stonewallMigration.up(knex);
+          expect(await octoberRow()).toMatchObject({ product_name: STW_037, product_id: stonewallId() });
+          expect(shape(await limitRows(stonewallId()))).toHaveLength(1);
+        });
+      });
+
+      const insertedRow = () => knex('products_catalog').where({ name: STW_037 }).whereNot({ id: stonewallId() }).first();
+      const awayFromCatalog = () => knex('products_catalog').where({ id: stonewallId() }).update({ name: 'Renamed away' });
+
+      test('no catalog row or alias (a database built from migrations alone): the row is inserted with the production values and the protocol rows link to it', async () => {
+        await withReset(async () => {
+          await awayFromCatalog();
+          await stonewallMigration.up(knex);
+          const made = await insertedRow();
+          expect(made).toMatchObject({
+            name: STW_037, category: 'herbicide', subcategory: 'Pre-emergent + fertilizer combo', active_ingredient: 'Prodiamine 0.37% + 18-0-10', moa_group: 'Group 3',
+            formulation: 'granular', container_size: '50 lb', epa_reg_number: '10404-114', rate_unit: 'lb', service_lines: ['lawn'], active: true,
+            approved_for_service_report: false, content_status: 'draft', customer_visibility: 'internal_only',
+          });
+          expect([Number(made.unit_size_oz), Number(made.default_rate_per_1000), Number(made.min_label_rate_per_1000), Number(made.max_label_rate_per_1000)]).toEqual([800, 3.1, 3.1, 9.3]);
+          expect(made.post_application_watering).toMatchObject({ mode: 'water_in', source: 'label', water_in_inches: 0.5, water_in_by_hours: 336 });
+          expect(made.post_application_watering.label_note).toContain('activated by at least 0.5 inch of rainfall or irrigation prior to weed seed germination and within 14 days following application.');
+          expect(await octoberRow()).toMatchObject({ product_name: STW_037, product_id: made.id });
+          expect(shape(await limitRows(made.id))).toEqual([['annual_max_rate', 'active_ingredient', 'prodiamine', 9.3068, 'lb/1000sf/year', 'hard_block']]);
+          expect((await ours()).find((log) => log.action === stonewallMigration.CATALOG_ACTION).after_snapshot).toMatchObject({ insertedProductId: made.id, productId: made.id });
+        });
+      });
+
+      test('down deletes a catalog row this migration inserted when nothing references it, and keeps it when something does', async () => {
+        await withReset(async () => {
+          await awayFromCatalog();
+          await stonewallMigration.up(knex);
+          const made = await insertedRow();
+          await stonewallMigration.down(knex);
+          expect(await octoberRow()).toMatchObject({ product_name: DIMENSION });
+          expect(await insertedRow()).toBeUndefined();
+          // Referenced by an application: the row stays (and the protocol row is back on Dimension).
+          await stonewallMigration.up(knex);
+          const again = await insertedRow();
+          const { customerId } = await visit('2026-10-14');
+          await knex('property_application_history').insert({ customer_id: customerId, product_id: again.id, application_date: '2026-10-14', application_rate: 4.04, rate_unit: 'lb', active_ingredient: 'Prodiamine' });
+          await stonewallMigration.down(knex);
+          expect(await insertedRow()).toMatchObject({ id: again.id });
+          await knex('property_application_history').where({ product_id: again.id }).del();
+          expect(made.id).not.toBe(again.id);
+        });
+      });
+
+      test('a catalog row that exists is never updated: not one column of it moves, but an empty hrac_group is filled with 3 (the pre-emergent Group 3 rotation exemption reads it)', async () => {
+        await withReset(async () => {
+          const before = await catalogRow();
+          await stonewallMigration.up(knex);
+          const after = await catalogRow();
+          expect(after.hrac_group).toBe('3');
+          const strip = ({ hrac_group: _g, updated_at: _u, ...rest }) => JSON.stringify(rest);
+          expect(strip(after)).toBe(strip(before));
+          expect(after.moa_group).toBe(before.moa_group);
+          await stonewallMigration.down(knex);
+          expect((await catalogRow()).hrac_group).toBeNull();
+        });
+      });
+
+      test('an hrac_group an administrator wrote is never overwritten, and down leaves it', async () => {
+        await withReset(async () => {
+          await knex('products_catalog').where({ id: stonewallId() }).update({ hrac_group: '3 + 11' });
+          await stonewallMigration.up(knex);
+          expect((await catalogRow()).hrac_group).toBe('3 + 11');
+          await stonewallMigration.down(knex);
+          expect((await catalogRow()).hrac_group).toBe('3 + 11');
+        });
+      });
+    });
+
+    describe('the plan for an October visit', () => {
+      beforeAll(async () => { await resetToDimension(); await stonewallMigration.up(knex); });
+      afterAll(async () => { await resetToDimension(); await stonewallMigration.up(knex); });
+
+      test('plans Stonewall 0.37% 18-0-10 at 4.04 lb per 1,000 sq ft (40.4 lb on 10,000 sq ft) with January 4FL history: 88.8% of the yearly prodiamine cap, no block', async () => {
         setGates();
         const { scheduled, customerId } = await visit('2026-10-12');
-        const [propertyB] = await knex('customer_properties').insert({ customer_id: customerId, address_line1: '300 Fixture Street', city: 'Fixture City', zip: '34201', is_primary: false }).returning('*');
-        const [visitB] = await knex('scheduled_services').insert({ customer_id: customerId, property_id: propertyB.id, scheduled_date: '2026-10-12', service_type: 'Lawn fixture' }).returning('*');
-        const [past] = await knex('scheduled_services').insert({ customer_id: customerId, property_id: scheduled.property_id, scheduled_date: '2026-09-20', service_type: 'Lawn fixture' }).returning('*');
-        const [record] = await knex('service_records').insert({ customer_id: customerId, scheduled_service_id: past.id, service_date: '2026-09-20', service_type: 'Lawn fixture' }).returning('*');
-        await applied(customerId, DIMENSION, '2026-09-20', 4.04, 'lb', { service_record_id: record.id });
-        expect(codes(await plan(scheduled))).toContain('lawn_v13_annual_limit');
-        const resultB = await plan(visitB);
-        expect(codes(resultB)).not.toContain('lawn_v13_annual_limit');
-        expect(item(resultB, DIMENSION).mix).toMatchObject({ amount: 40.4 });
+        await applied(customerId, STW_4FL, '2026-01-20', 0.5, 'fl oz');
+        const result = await plan(scheduled);
+        expect(codes(result)).not.toContain('lawn_v13_annual_limit');
+        expect(item(result, STW_037).mix).toMatchObject({ amount: 40.4, amountUnit: 'lb' });
+        expect(item(result, DIMENSION)).toBeUndefined();
+      });
+
+      test('a season with 1.0 fl oz of 4FL already (90.7%) would pass the cap with this step: no amount, a block naming prodiamine', async () => {
+        setGates();
+        const { scheduled, customerId } = await visit('2026-10-12');
+        await applied(customerId, STW_4FL, '2026-01-20', 1, 'fl oz');
+        const result = await plan(scheduled);
+        expect(result.propertyGate.blocks.find((b) => b.code === 'lawn_v13_annual_limit').message)
+          .toMatch(/prodiamine across all products this year is 90\.\d% of the yearly label cap; this application brings it to 134\.\d% — THIS APPLICATION WOULD EXCEED IT/);
+        expect(item(result, STW_037).mix).toBeNull();
+      });
+
+      test('the 9x April step still plans the Dimension granular (dithiopyr), not Stonewall', async () => {
+        setGates();
+        const { scheduled } = await visit('2026-04-14', { service_type: 'Every 6 Weeks Lawn Care Service' });
+        const result = await plan(scheduled);
+        expect(item(result, DIMENSION).mix).toMatchObject({ amount: 27.778 });
+        expect(item(result, STW_037)).toBeUndefined();
       });
     });
   });

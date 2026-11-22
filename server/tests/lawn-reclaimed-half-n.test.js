@@ -146,17 +146,17 @@ describe('the pre-emergent plus fertilizer bags keep their rate (the pre-emergen
   const OCT = () => visitOf('Oct');
   const APRIL_9X = () => visitOf('Apr').cadenceVariants[9];
 
-  test.each([['October Dimension 18-0-10 at 4.04 lb', OCT], ['the 9x April Dimension at 2.78 lb', APRIL_9X]])('%s: not halved, the visit is returned as it is, and it says so', async (_label, pick) => {
+  test.each([['October Stonewall 0.37% 18-0-10 at 4.04 lb', OCT], ['the 9x April Dimension at 2.78 lb', APRIL_9X]])('%s: not halved, the visit is returned as it is, and it says so', async (_label, pick) => {
     const knex = REC();
     const visit = pick();
-    expect(visit.primary).toMatch(/Pre-Emergent Plus Fertilizer/);
+    expect(engine.isPreEmergentBag(visit.primary)).toBe(true); // by the catalog name: "Pre-Emergent Plus Fertilizer" (Dimension) or Stonewall 0.37% 18-0-10
     const found = await engine.visitNutrientTargets(knex, service, { visit, month: visit === OCT() ? 'Oct' : 'Apr', v13Active: true });
     expect(found.nitrogenCut).toBeNull();
     expect(found.reclaimedWater).toBe('kept');
     expect(found.keptFor).toBe('pre_emergent');
     expect(found.visit).toBe(visit);
     expect(found.targets.targetNPer1000).toBe(engine.parseVisitNutrientTargets(visit.notes).targetNPer1000);
-    const dimension = { analysis_k: 10, name: 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer' };
+    const dimension = { analysis_k: 10, name: pick === OCT ? 'LESCO Stonewall 0.37% 18-0-10' : 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer' };
     expect(engine.nitrogenCutNotes({ rateSource: 'protocol_rate' }, dimension, found)).toEqual([{
       key: RECLAIMED_NITROGEN_NOTE_KEY, severity: 'note', text: 'Reclaimed water: this bag carries the pre-emergent, so its full rate stays today.',
     }]);

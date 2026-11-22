@@ -40,6 +40,9 @@ const { addMonthsSameDay } = require('../utils/date-only');
 // to an ingredient or a formulation. An application with any other number, or none, gets NOTE_TEXT: the app never
 // states a wait it does not hold.
 //   - 10404-87 (LESCO Dimension 0.21% Plus Fertilizer): "delayed until 12 weeks from the time of application".
+//   - 10404-114 (LESCO Stonewall 0.37% 18-0-10, the October step since 2026-11-21) is NOT held on purpose: its label (read
+//     2026-11-21) has an overseeding table (4 months in the South at 4.0 lb per 1,000 sq ft) and says nothing about laying sod,
+//     so it gets NOTE_TEXT below, like any registration this table does not hold.
 //   - 62719-542 (Dimension 2EW): "within 3 months after a single application of this product, or within 4 months
 //     after a sequential application program totaling more than 2 pints per acre". This lookup does not know the
 //     program, so the warning states both waits and stays for the longer one.
