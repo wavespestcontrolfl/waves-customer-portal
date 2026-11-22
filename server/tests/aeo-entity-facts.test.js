@@ -1175,6 +1175,10 @@ test('a wh-complement hands back to a Waves alias, `as` after the pest opens a c
   expect(score('E6', 'Waves technicians eliminate termites. They remove rodents too.').expected.rodent).toBe(true);
 });
 
+// bond_term_options reads who owns the three lengths at the three places grammar can attach them: the noun
+// the list modifies ("10-year termite bonds" / "10-year financing terms"), an owner word that governs the list
+// through a preposition ("payment over 1, 5 or 10 years"), and an owner word that opens the clause
+// ("Monitoring is offered for ..."). A bond word must be in the sentence, or a pronoun sentence must follow one.
 test('bond terms: the 1-, 5- and 10-year terms count in every wording, one term or an unrelated number does not (owner 2026-11-21)', () => {
   const stated = [
     'The warranty is renewable on a 1-, 5-, or 10-year term basis.',
@@ -1203,6 +1207,14 @@ test('bond terms: the 1-, 5- and 10-year terms count in every wording, one term 
     'The warranty contract runs for 1, 5 or 10 years.',
     // A pronoun sentence right after the warranty sentence needs no "terms" word.
     'Waves offers an optional termite warranty. It is available for 1, 5, or 10 years.',
+    // The noun the list modifies owns it, whatever stands earlier in the sentence.
+    'Waves offers financing and a choice of 1-, 5-, or 10-year termite bonds.',
+    // Another product named in passing (not the subject, not through a preposition) owns nothing.
+    'The warranty, which requires current payments, comes in 1-, 5- or 10-year terms.',
+    'The bond includes monitoring and comes in 1-, 5- or 10-year terms.',
+    'Waves offers an optional termite bond with financing available, in 1-, 5- or 10-year terms.',
+    'The warranty comes in terms of 1, 5 or 10 years and financing is available.',
+    'The bond runs 1, 5 or 10 years with payment plans available.',
   ];
   for (const text of stated) expect([text, score('E7', text).expected.bond_term_options]).toEqual([text, true]);
   const notStated = [
@@ -1213,6 +1225,11 @@ test('bond terms: the 1-, 5- and 10-year terms count in every wording, one term 
     'Financing is available on 1-, 5- or 10-year terms.',
     'Waves offers an optional termite bond. Payment can be spread over 1-, 5- or 10-year terms.',
     'Waves treats termites. It has been in business for 1, 5 or 10 years.',
+    // Another product that opens the clause, or governs the list through a preposition, owns it.
+    'The termite bond is optional. Monitoring is offered for 1-, 5- or 10-year terms.',
+    'The bond is optional, and termite monitoring is offered for 1-, 5- or 10-year terms.',
+    'The bond is optional. You can spread payment over 1-, 5- or 10-year terms.',
+    'Lawn care plans come in 1-, 5- or 10-year terms.',
     // Another service's contract owns its own durations, also beside a bond.
     'Waves offers an optional termite bond. Monitoring contracts run for 1, 5 or 10 years.',
     'Waves offers an optional termite bond, and monitoring contracts run for 1, 5 or 10 years.',
