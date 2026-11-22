@@ -55,11 +55,12 @@ const SYNCED_STATUS_REFUSALS = new Map([
   ['google_ads', "Use /pause or /enable to change a Google campaign's status — they sync Google Ads."],
   ['facebook', "A Meta campaign's status comes from Meta Ads Manager. Change it there; the daily Meta sync brings it in."],
 ]);
-// A Local Services campaign the daily sync owns (it carries the sync's account
-// mark, see ads/google-lsa.js ownsCampaign) takes its status from Google. One
-// entered by hand has no mark and stays editable here. The sync marks a row
-// only when it inserts it and never takes over an existing one, so a row's
-// owner cannot change between the read and the write below. google-lsa.js
+// The Local Services row the daily sync owns (one row for the account; it
+// carries the sync's account mark, see ads/google-lsa.js ownsCampaign) takes
+// its status from Google. A campaign entered by hand has no mark and stays
+// editable here. The sync marks a row only when it inserts it and never takes
+// over an existing one, so a row's owner cannot change between the read and
+// the write below. google-lsa.js
 // loads the Google Ads SDK only when a sync runs, so the require is cheap.
 const LSA_SYNCED_STATUS_REFUSAL = "A synced Local Services campaign's status comes from Google. Change it there; the daily Local Services sync brings it in.";
 function syncedStatusRefusal(campaign) {

@@ -14,6 +14,15 @@ const { hasCredentials, errorText } = require('./google-ads-config');
 // platform = 'google_lsa' and campaign_type = 'google_lsa' (the value the Ads
 // page's "Local Service Ads" card filters on).
 //
+// ONE portal row stands for the account, not one row per Google campaign.
+// Google buys and bills Local Services by the account: a lead names no
+// campaign, and Google makes and replaces the campaign under the account by
+// itself. With one row, the account's history stays in one place when Google
+// replaces the campaign, a day's leads have exactly one row to be counted on,
+// and the row is never 'removed' (the Ads page leaves removed rows out). No
+// reader needs the Google campaigns apart: the Ads page, the spend reads and
+// the cost allocation all add the channel up.
+//
 // Google charges Local Services by the lead, not by the click, so a day's
 // `conversions` here is ALWAYS its number of leads Google charged and did not
 // credit back (local_services_lead), never Google's conversions number. That
@@ -24,13 +33,11 @@ const { hasCredentials, errorText } = require('./google-ads-config');
 // no call attribution and messages no one. Budget and status stay with Google:
 // the budget loop only acts on platform 'google_ads'.
 //
-// A row this sync owns carries metadata.lsa_customer_id = the account it came
-// from. The sync writes the mark only on a row it inserts, and generic campaign
-// writes can neither set nor erase it (routes/admin-ads.js
-// RESERVED_METADATA_KEYS), so a row's owner never changes. Every read and write
-// below is scoped to the mark: a campaign entered by hand is never taken over,
-// even when it carries the same Google campaign id, and a row from an account
-// the sync no longer reads is left as it is.
+// The row carries metadata.lsa_customer_id = the account it mirrors. The sync
+// finds its row by that mark only, writes the mark only on the row it inserts,
+// and generic campaign writes can neither set nor erase it (routes/admin-ads.js
+// RESERVED_METADATA_KEYS). So a campaign entered by hand is never taken over,
+// and a row from an account the sync no longer reads is left as it is.
 // ---------------------------------------------------------------------------
 
 const PLATFORM = 'google_lsa';
@@ -100,38 +107,57 @@ function getCustomer() {
 // Pure mappers (exported for tests). The SDK answers enums as numbers; a string
 // name is accepted too.
 // ---------------------------------------------------------------------------
-const CAMPAIGN_STATUS = { 2: 'active', 3: 'paused', 4: 'removed', ENABLED: 'active', PAUSED: 'paused', REMOVED: 'removed' };
-function mapStatus(googleStatus) {
-  return CAMPAIGN_STATUS[googleStatus] || 'unknown';
-}
+const ENABLED = new Set([2, 'ENABLED']);
+const REMOVED = new Set([4, 'REMOVED']);
+// Google names the campaign it makes for a Local Services account
+// "LocalServicesCampaign:SystemGenerated:<hex>". That name means nothing on the
+// Ads page, so the row is named with the page's own label for the channel.
+const DISPLAY_NAME = 'Local Service Ads';
 
 const LEAD_TYPE = { 2: 'messages', 3: 'calls', 4: 'bookings', MESSAGE: 'messages', PHONE_CALL: 'calls', BOOKING: 'bookings' };
 // LocalServicesCreditState: Google gave the charge for the lead back.
 const CREDITED = new Set([3, 'CREDITED']);
 
-// Google names the campaign it makes for a Local Services account
-// "LocalServicesCampaign:SystemGenerated:<hex>". That name means nothing on the
-// Ads page, so it is shown under the page's own label for the channel.
-const DISPLAY_NAME = 'Local Service Ads';
-function campaignName(googleName) {
-  const name = String(googleName || '').trim();
-  return !name || /^LocalServicesCampaign:/i.test(name) ? DISPLAY_NAME : name;
-}
-
-function mapCampaign(row) {
-  const micros = row.campaign_budget?.amount_micros;
-  const dailyBudget = micros != null && micros !== '' ? Number(micros) / 1_000_000 : null;
-  const budget = Number.isFinite(dailyBudget) ? dailyBudget : null;
+// The account row's status and daily budget from the account's Local Services
+// campaigns. Active while Google has one enabled; else paused, also when every
+// campaign is removed, so the row and its history stay on the Ads page. The
+// budget is what the enabled campaigns can spend; with none enabled, what the
+// paused ones would. null = Google gave no budget to read.
+function accountState(campaignRows) {
+  const enabled = campaignRows.filter((r) => ENABLED.has(r.campaign?.status));
+  const pool = enabled.length ? enabled : campaignRows.filter((r) => !REMOVED.has(r.campaign?.status));
+  const micros = pool
+    .map((r) => r.campaign_budget?.amount_micros)
+    .filter((m) => m != null && m !== '' && Number.isFinite(Number(m)));
+  const budget = micros.length ? micros.reduce((sum, m) => sum + Number(m), 0) / 1_000_000 : null;
   return {
-    platform: PLATFORM,
-    platform_campaign_id: String(row.campaign.id),
-    campaign_name: campaignName(row.campaign.name),
-    status: mapStatus(row.campaign.status),
-    campaign_type: CAMPAIGN_TYPE,
+    status: enabled.length ? 'active' : 'paused',
     daily_budget_base: budget,
     daily_budget_current: budget,
-    updated_at: new Date(),
   };
+}
+
+function emptyMetricDay() {
+  return { impressions: 0, clicks: 0, costMicros: 0, conversions: 0, conversionValue: 0 };
+}
+
+// Google answers one metrics row for each campaign and day. The portal keeps
+// one row a day for the account, so a day's rows are added up.
+function sumMetricsByDay(metricRows) {
+  const byDay = new Map();
+  for (const row of metricRows) {
+    const day = row.segments?.date;
+    if (!day) continue;
+    const m = row.metrics || {};
+    const t = byDay.get(day) || emptyMetricDay();
+    t.impressions += Number(m.impressions || 0);
+    t.clicks += Number(m.clicks || 0);
+    t.costMicros += Number(m.cost_micros || 0);
+    t.conversions += Number(m.conversions || 0);
+    t.conversionValue += Number(m.conversions_value || 0);
+    byDay.set(day, t);
+  }
+  return byDay;
 }
 
 function emptyLeadDay() {
@@ -165,25 +191,20 @@ function tallyLeadsByDay(leadRows) {
   return byDay;
 }
 
-// One ad_performance_daily row for a campaign-day. `leads` is the account's
-// tally for the day on the row that carries the day's leads (leadCarrier), and
-// an empty tally on every other row.
-function mapPerformanceRow(metrics, leads) {
-  const m = metrics || {};
-  const cost = Number(m.cost_micros || 0) / 1_000_000;
-  const googleConversions = Number(m.conversions || 0);
-  const conversionValue = Number(m.conversions_value || 0);
-  const roas = cost > 0 ? conversionValue / cost : 0;
+// One ad_performance_daily row for an account-day, from the day's added-up
+// metrics and its lead tally.
+function mapPerformanceRow(metricDay, leads) {
+  const cost = metricDay.costMicros / 1_000_000;
   return {
-    impressions: Number(m.impressions || 0),
-    clicks: Number(m.clicks || 0),
+    impressions: metricDay.impressions,
+    clicks: metricDay.clicks,
     cost,
     conversions: leads.charged,
-    conversion_value: conversionValue,
-    ctr: Math.round(Number(m.ctr || 0) * 10000) / 100, // fraction -> percentage
-    avg_cpc: Number(m.average_cpc || 0) / 1_000_000,
-    roas: Math.round(roas * 100) / 100,
-    metadata: JSON.stringify({ google_conversions: googleConversions, lsa_leads: leads }),
+    conversion_value: metricDay.conversionValue,
+    ctr: metricDay.impressions > 0 ? Math.round((metricDay.clicks / metricDay.impressions) * 10000) / 100 : 0, // percentage
+    avg_cpc: metricDay.clicks > 0 ? cost / metricDay.clicks : 0,
+    roas: cost > 0 ? Math.round((metricDay.conversionValue / cost) * 100) / 100 : 0,
+    metadata: JSON.stringify({ google_conversions: metricDay.conversions, lsa_leads: leads }),
     updated_at: new Date(),
   };
 }
@@ -196,63 +217,62 @@ function dateRange(days, now = new Date()) {
 }
 
 // ---------------------------------------------------------------------------
-// syncCampaigns: upsert the account's Local Services campaigns into
-// ad_campaigns, each marked with the account id.
+// syncAccount: keep the account's one row in ad_campaigns.
 //
-// The query has no status filter: Google keeps answering a removed campaign
-// with status REMOVED, so its row follows to 'removed' through the same upsert
-// and no "not returned any more" pass is needed. The channel filter keeps any
-// other campaign type in the account (Search, Display) out of google_lsa.
+// The channel filter keeps any other campaign type in the account (Search,
+// Display) out of google_lsa. There is no status filter: a removed campaign
+// must still be seen, so an account whose only campaign Google removed reads
+// paused, not unknown.
 // ---------------------------------------------------------------------------
 const CHANNEL_FILTER = "campaign.advertising_channel_type = 'LOCAL_SERVICES'";
 
-// This account's campaign rows, removed ones included.
-function accountCampaigns(account) {
+// The row this sync owns for the account: found by the mark only, never by a
+// Google id, so a row entered by hand is never taken for it.
+function accountRow(account) {
   return db('ad_campaigns')
     .where({ platform: PLATFORM })
-    .whereRaw(`metadata ->> '${ACCOUNT_KEY}' = ?`, [account]);
+    .whereRaw(`metadata ->> '${ACCOUNT_KEY}' = ?`, [account])
+    .orderBy('created_at')
+    .first();
 }
 
-async function syncCampaigns(customer, account) {
-  logger.info('[google-lsa] Syncing campaigns');
-  const rows = await customer.query(`
-    SELECT campaign.id, campaign.name, campaign.status, campaign_budget.amount_micros
+async function syncAccount(customer, account) {
+  logger.info('[google-lsa] Syncing the account row');
+  const campaigns = await customer.query(`
+    SELECT campaign.id, campaign.status, campaign_budget.amount_micros
     FROM campaign
     WHERE ${CHANNEL_FILTER}
   `);
 
-  const mark = JSON.stringify({ [ACCOUNT_KEY]: account });
-  const results = [];
-  for (const row of rows) {
-    const data = mapCampaign(row);
-    // Only a row this sync inserted (it carries the mark) is ever updated. A
-    // row entered by hand with the same Google id is not this sync's: it stays
-    // untouched, and the campaign gets its own marked row.
-    const existing = await accountCampaigns(account)
-      .where({ platform_campaign_id: data.platform_campaign_id })
-      .first();
-    if (existing) {
-      // Google owns the status and the budget. The name and the type are set
-      // once, at insert: PUT /campaigns/:id lets the office edit them, and a
-      // nightly overwrite would undo that edit.
-      const { status, daily_budget_base, daily_budget_current, updated_at } = data;
-      const refreshed = { status, daily_budget_base, daily_budget_current, updated_at };
-      await db('ad_campaigns').where({ id: existing.id }).update(refreshed);
-      results.push({ ...existing, ...refreshed });
-    } else {
-      const [inserted] = await db('ad_campaigns')
-        .insert({ id: uuidv4(), ...data, metadata: mark, created_at: new Date() })
-        .returning('*');
-      results.push(inserted);
-    }
-  }
+  const existing = await accountRow(account);
+  // An account that never had a Local Services campaign has nothing to mirror.
+  if (!campaigns.length && !existing) return { row: null, campaigns: 0 };
 
-  logger.info(`[google-lsa] Synced ${results.length} campaigns`);
-  return results;
+  // Google owns the status and the budget. The name and the type are written
+  // once, at insert: PUT /campaigns/:id lets the office rename the row, and a
+  // nightly overwrite would undo that.
+  const state = { ...accountState(campaigns), updated_at: new Date() };
+  if (existing) {
+    await db('ad_campaigns').where({ id: existing.id }).update(state);
+    return { row: { ...existing, ...state }, campaigns: campaigns.length };
+  }
+  const [row] = await db('ad_campaigns')
+    .insert({
+      id: uuidv4(),
+      platform: PLATFORM,
+      platform_campaign_id: account,
+      campaign_name: DISPLAY_NAME,
+      campaign_type: CAMPAIGN_TYPE,
+      ...state,
+      metadata: JSON.stringify({ [ACCOUNT_KEY]: account }),
+      created_at: new Date(),
+    })
+    .returning('*');
+  return { row, campaigns: campaigns.length };
 }
 
 // ---------------------------------------------------------------------------
-// syncDailyPerformance: cost and leads per campaign-day into
+// syncDailyPerformance: the account's cost and leads per day into
 // ad_performance_daily. Each run rebuilds a whole window of days, so a day is
 // always the result of the newest read: Google credits a disputed lead back
 // days later, and the day's charged count and cost then change.
@@ -276,80 +296,17 @@ async function windowStart(customer, since, earliest) {
   return start < earliest ? earliest : start;
 }
 
-// A lead names no campaign, and the account's leads of a day must be counted
-// exactly once. The row that carries them is the campaign with a metrics row
-// that day; with none, the campaign that is not removed; with none, any
-// campaign of the account. So a removed campaign keeps the leads of the days it
-// ran, and they never move to the campaign that replaced it. When a rule leaves
-// more than one candidate, the first (lowest Google id) carries the leads and
-// the tally says `shared: true`: the count is the account's for the day, not
-// proven to be that campaign's. Pure. null = the account has no campaign row.
-function leadCarrier(date, campaigns, metricIdsByDay) {
-  const ran = metricIdsByDay.get(date);
-  const withMetrics = campaigns.filter((c) => ran?.has(String(c.platform_campaign_id)));
-  const live = campaigns.filter((c) => c.status !== 'removed');
-  const candidates = [withMetrics, live, campaigns].find((list) => list.length);
-  if (!candidates) return null;
-  const first = candidates.reduce((a, c) => (Number(c.platform_campaign_id) < Number(a.platform_campaign_id) ? c : a));
-  return { campaignId: first.id, shared: candidates.length > 1 };
-}
-
-// The days this sync already holds in the window: 'campaign id|YYYY-MM-DD' -> row id.
-async function storedDays(campaignIds, since, until) {
-  if (!campaignIds.length) return new Map();
+// The days the row already holds in the window: 'YYYY-MM-DD' -> row id.
+async function storedDays(campaignId, since, until) {
   const rows = await db('ad_performance_daily')
-    .whereIn('campaign_id', campaignIds)
+    .where({ campaign_id: campaignId })
     .where('date', '>=', since)
     .where('date', '<=', until)
-    .select('id', 'campaign_id', db.raw("to_char(date, 'YYYY-MM-DD') AS day"));
-  return new Map(rows.map((r) => [`${r.campaign_id}|${r.day}`, r.id]));
+    .select('id', db.raw("to_char(date, 'YYYY-MM-DD') AS day"));
+  return new Map(rows.map((r) => [r.day, r.id]));
 }
 
-// Which campaign-days to write (pure), keyed 'campaign id|date':
-// - each Google metrics row for a campaign the portal holds;
-// - the row that carries a day's leads, also when Google has no metrics row
-//   for it (Google leaves a zero-metric day out);
-// - a day stored by an earlier run that neither of the above covers now. It is
-//   written again as a zero day, so numbers Google no longer reports do not
-//   stay behind.
-// `uncounted` = leads that no row could carry (the account has no campaign row).
-// `unknown` = Google ids in the metrics rows that the portal holds no row for.
-function planPerformanceDays({ metricRows, leadsByDay, campaigns, storedKeys }) {
-  const localId = new Map(campaigns.map((c) => [String(c.platform_campaign_id), c.id]));
-  const metricIdsByDay = new Map();
-  const planned = new Map();
-  const unknown = new Set();
-  for (const row of metricRows) {
-    const platformId = String(row.campaign.id);
-    const date = row.segments.date;
-    if (!localId.has(platformId)) {
-      unknown.add(platformId);
-      continue;
-    }
-    planned.set(`${localId.get(platformId)}|${date}`, { campaignId: localId.get(platformId), date, metrics: row.metrics });
-    metricIdsByDay.set(date, (metricIdsByDay.get(date) || new Set()).add(platformId));
-  }
-  const carried = new Map();
-  let uncounted = 0;
-  for (const [date, tally] of leadsByDay) {
-    const carrier = leadCarrier(date, campaigns, metricIdsByDay);
-    if (!carrier) {
-      uncounted += tally.total;
-      continue;
-    }
-    const key = `${carrier.campaignId}|${date}`;
-    carried.set(key, carrier.shared ? { ...tally, shared: true } : tally);
-    if (!planned.has(key)) planned.set(key, { campaignId: carrier.campaignId, date, metrics: null });
-  }
-  for (const key of storedKeys) {
-    const [campaignId, date] = key.split('|');
-    if (!planned.has(key)) planned.set(key, { campaignId, date, metrics: null });
-  }
-  const days = [...planned.entries()].map(([key, day]) => ({ key, ...day, leads: carried.get(key) || emptyLeadDay() }));
-  return { days, uncounted, unknown: [...unknown] };
-}
-
-async function syncDailyPerformance(customer, account, days = DEFAULT_DAYS) {
+async function syncDailyPerformance(customer, campaignId, days = DEFAULT_DAYS) {
   logger.info(`[google-lsa] Syncing daily performance (last ${days} days)`);
   const { since: normalSince, until } = dateRange(days);
   const since = await windowStart(customer, normalSince, dateRange(MAX_LOOKBACK_DAYS).since);
@@ -362,9 +319,7 @@ async function syncDailyPerformance(customer, account, days = DEFAULT_DAYS) {
       metrics.clicks,
       metrics.cost_micros,
       metrics.conversions,
-      metrics.conversions_value,
-      metrics.ctr,
-      metrics.average_cpc
+      metrics.conversions_value
     FROM campaign
     WHERE segments.date BETWEEN '${since}' AND '${until}'
       AND ${CHANNEL_FILTER}
@@ -380,38 +335,26 @@ async function syncDailyPerformance(customer, account, days = DEFAULT_DAYS) {
     WHERE local_services_lead.creation_date_time >= '${since} 00:00:00'
   `);
 
-  // Removed campaigns stay in the list: the metrics query has no status
-  // filter, so a campaign removed since the last run still gets its last days
-  // of cost and any later correction.
-  const campaigns = await accountCampaigns(account).select('id', 'platform_campaign_id', 'status');
-  const stored = await storedDays(campaigns.map((c) => c.id), since, until);
-  const plan = planPerformanceDays({
-    metricRows,
-    leadsByDay: tallyLeadsByDay(leadRows),
-    campaigns,
-    storedKeys: [...stored.keys()],
-  });
-  // Both campaign queries read the same set, so cost for a campaign the portal
-  // does not hold means Google made the campaign after the campaign step read
-  // the list. Writing now would drop its cost and could put its leads on
-  // another row, so the step fails with nothing written; the next run reads it.
-  if (plan.unknown.length) {
-    throw new Error(`Google reports cost for ${plan.unknown.length} campaign(s) the portal does not hold yet`);
-  }
-  // Leads with no row to carry them would be dropped while the job reads as a
-  // success, so the step fails and job_health shows it.
-  if (plan.uncounted) {
-    throw new Error(`${plan.uncounted} lead(s) not counted: the portal holds no campaign row for the account`);
-  }
+  const metricsByDay = sumMetricsByDay(metricRows);
+  const leadsByDay = tallyLeadsByDay(leadRows);
+  const stored = await storedDays(campaignId, since, until);
+  // A day with cost, a day with only a lead (Google leaves a zero-metric day
+  // out of the metrics), and a day an earlier run stored that Google no longer
+  // reports. That last one is written again as a zero day, so numbers Google
+  // took back do not stay behind.
+  const dates = [...new Set([...metricsByDay.keys(), ...leadsByDay.keys(), ...stored.keys()])].sort();
 
-  // One transaction: when a day's leads move from one row to another, a reader
-  // never sees them on both rows, and a failure leaves the earlier state whole.
+  // One transaction: a failure leaves the days as the last good run wrote them.
   const results = [];
   await db.transaction(async (trx) => {
-    for (const { key, campaignId, date, metrics, leads } of plan.days) {
-      const data = { campaign_id: campaignId, date, ...mapPerformanceRow(metrics, leads) };
-      if (stored.has(key)) {
-        await trx('ad_performance_daily').where({ id: stored.get(key) }).update(data);
+    for (const date of dates) {
+      const data = {
+        campaign_id: campaignId,
+        date,
+        ...mapPerformanceRow(metricsByDay.get(date) || emptyMetricDay(), leadsByDay.get(date) || emptyLeadDay()),
+      };
+      if (stored.has(date)) {
+        await trx('ad_performance_daily').where({ id: stored.get(date) }).update(data);
       } else {
         await trx('ad_performance_daily').insert({ id: uuidv4(), ...data, created_at: new Date() });
       }
@@ -425,27 +368,26 @@ async function syncDailyPerformance(customer, account, days = DEFAULT_DAYS) {
 
 // ---------------------------------------------------------------------------
 // The daily job body (the scheduler wraps it in runExclusive('google-lsa-sync')).
-// The performance step runs only after the campaign step succeeded: it decides
-// which row carries a day's leads from the campaign rows, so it must not run on
-// a list that may miss a new campaign. A failure throws an Error with Google's
-// reason, so job_health records it instead of a success.
+// The performance step needs the account row, so it runs only after the account
+// step succeeded. A failure throws an Error with Google's reason, so job_health
+// records it instead of a success.
 // ---------------------------------------------------------------------------
 async function runDailySync({ days = DEFAULT_DAYS } = {}) {
   const customer = getCustomer();
   if (!customer) return { configured: false, synced: {} };
-  const account = customerId();
   const step = async (name, run) => {
     try {
-      return (await run()).length;
+      return await run();
     } catch (err) {
       const reason = errorText(err);
       logger.error(`[google-lsa] ${name} failed: ${reason}`);
       throw new Error(`${name}: ${reason}`);
     }
   };
-  const campaigns = await step('syncCampaigns', () => syncCampaigns(customer, account));
-  const performanceRows = await step('syncDailyPerformance', () => syncDailyPerformance(customer, account, days));
-  return { configured: true, synced: { campaigns, performanceRows } };
+  const { row, campaigns } = await step('syncAccount', () => syncAccount(customer, customerId()));
+  if (!row) return { configured: true, synced: { campaigns: 0, performanceRows: 0 } };
+  const written = await step('syncDailyPerformance', () => syncDailyPerformance(customer, row.id, days));
+  return { configured: true, synced: { campaigns, performanceRows: written.length } };
 }
 
 module.exports = {
@@ -455,15 +397,13 @@ module.exports = {
   runDailySync,
   _private: {
     customerId,
-    mapStatus,
-    mapCampaign,
-    mapPerformanceRow,
+    accountState,
+    sumMetricsByDay,
     tallyLeadsByDay,
-    leadCarrier,
+    mapPerformanceRow,
     windowStart,
-    planPerformanceDays,
     dateRange,
-    syncCampaigns,
+    syncAccount,
     syncDailyPerformance,
     DEFAULT_CUSTOMER_ID,
   },
