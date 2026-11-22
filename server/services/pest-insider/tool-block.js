@@ -58,9 +58,14 @@ const stampMs = (value) => (value ? new Date(value).getTime() : NaN);
 // Nothing is backfilled: history cannot tell a click from a trusted add, so a row has
 // the proof only from its first click after the columns shipped. The Beehiiv import
 // rows (`beehiiv_migration`, `beehiiv_migration_orphan`) never clicked, so they never
-// qualify. One accepted case: a sunset comeback (the reader answers the win-back quiz)
-// clears deactivated_at without a new confirm click. The reader's own click for this
-// address is still the evidence, and sunset is list hygiene, not an opt-out.
+// qualify. Two accepted cases. A sunset comeback (the reader answers the win-back quiz)
+// clears deactivated_at without a new confirm click: the reader's own click for this
+// address is still the evidence, and sunset is list hygiene, not an opt-out. And a
+// trusted add that makes a pending row active before the reader uses the link: the link
+// then reads 'already_active' and writes no proof, so that reader gets no block (the
+// safe side). A trusted add promotes only a row that is still pending
+// (newsletter-subscribers.js promotePendingRow), so it never writes a later
+// confirmed_at over a click that landed first.
 function optedIn(row, subscriber) {
   if (!row || row.status !== 'active') return false;
   const confirmedAt = stampMs(row.confirmed_at);
