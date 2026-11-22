@@ -146,11 +146,21 @@ describe('resolvePlanServices — one service list for My Plan and Billing', () 
     });
   });
 
+  // Pre-push audit 2026-11-22: a visit cancelled between the two reads left
+  // /next naming pest control while the schedule confirmed lawn care alone.
+  // On a one-service tier the stale row took the slot and lawn care was lost.
+  it('a next visit the schedule no longer lists never takes a confirmed service\'s place', () => {
+    const staleNext = { id: 'v-gone', serviceType: 'Pest Control', date: '2026-11-25', status: 'pending', isRecurring: true, isCallback: false };
+    expect(ids(bronze, staleNext, [LAWN])).toEqual(['pest_control']);
+    expect(confirmedIds(bronze, staleNext, [LAWN])).toEqual(['lawn_care']);
+  });
+
   it('pest control is named by its last upcoming visit', () => {
     const monthly = visit('Monthly Pest Control', { id: 'v-later', date: '2027-01-10' });
-    const { includedServices, pestPlanName } = resolvePlanServices(bronze, PEST, [PEST, monthly]);
+    const { includedServices, confirmedServices, pestPlanName } = resolvePlanServices(bronze, PEST, [PEST, monthly]);
     expect(pestPlanName).toBe('Monthly Pest Control');
     expect(includedServices[0].displayName).toBe('Monthly Pest Control');
+    expect(confirmedServices.map((s) => s.displayName)).toEqual(['Monthly Pest Control']);
   });
 });
 
@@ -178,8 +188,9 @@ describe('BillingTab — Plan Charges', () => {
     expect(await within(box).findByText('Lawn Care Program')).toBeInTheDocument();
     expect(within(box).queryByText(/Pest Control/)).not.toBeInTheDocument();
     // My Plan's own reads: every property, a year ahead.
-    expect(api.getNextService).toHaveBeenCalledWith({ allProperties: true });
+    // One read, the schedule. The next-visit read is not made.
     expect(api.getSchedule).toHaveBeenCalledWith(365, { allProperties: true });
+    expect(api.getNextService).not.toHaveBeenCalled();
   });
 
   // Pre-push audit 2026-11-22: tier padding named "Pest Control" here.
@@ -203,6 +214,13 @@ describe('BillingTab — Plan Charges', () => {
     const thinNext = { id: 'v-1', serviceType: 'Pest Control', date: '2026-12-01', status: 'pending', isRecurring: true, isCallback: false };
     api.getNextService.mockResolvedValue({ coverageOnly: true, next: thinNext });
     api.getSchedule.mockResolvedValue({ upcoming: [{ ...thinNext, waveguardQualifying: false }, LAWN] });
+    const box = await renderPlanCharges(bronze);
+    expect(await within(box).findByText('Lawn Care Program')).toBeInTheDocument();
+    expect(within(box).queryByText(/Pest Control/)).not.toBeInTheDocument();
+  });
+
+  it('a failed or stale next-visit read changes nothing: the box lists what the schedule confirms', async () => {
+    api.getNextService.mockRejectedValue(new Error('offline'));
     const box = await renderPlanCharges(bronze);
     expect(await within(box).findByText('Lawn Care Program')).toBeInTheDocument();
     expect(within(box).queryByText(/Pest Control/)).not.toBeInTheDocument();

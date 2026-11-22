@@ -779,12 +779,12 @@ function usePlanOffers(enabled) {
 }
 
 // =========================================================================
-// The member's plan services for Billing's Plan Charges: My Plan's own two
-// schedule reads (all properties) and its own derivation
-// (resolvePlanServices), so the two tabs list the same services. null while
-// the reads load and after a failed read: the box then names no service
-// rather than guess one from the tier. `enabled` is false for a cancelled
-// account (its session may not read the schedule) and for a non-member.
+// The member's plan services for Billing's Plan Charges and the Learn
+// sentence: My Plan's schedule read (all properties) and My Plan's own row
+// rules (confirmedPlanServices). One read, the schedule: null while it loads
+// and after it fails, and the box then names no service rather than guess
+// one from the tier. `enabled` is false for a cancelled account (its
+// session may not read the schedule) and for a non-member.
 // =========================================================================
 function usePlanServices(customer, enabled, reloadKey = 0) {
   const [rows, setRows] = useState(null);
@@ -794,17 +794,12 @@ function usePlanServices(customer, enabled, reloadKey = 0) {
       return undefined;
     }
     let cancelled = false;
-    Promise.all([
-      api.getNextService({ allProperties: true }),
-      api.getSchedule(365, { allProperties: true }),
-    ])
-      .then(([nextData, scheduleData]) => {
-        if (!cancelled) setRows({ next: nextData?.next || null, upcoming: scheduleData?.upcoming || [] });
-      })
+    api.getSchedule(365, { allProperties: true })
+      .then((scheduleData) => { if (!cancelled) setRows(scheduleData?.upcoming || []); })
       .catch(() => { if (!cancelled) setRows(null); });
     return () => { cancelled = true; };
   }, [enabled, reloadKey]);
-  return rows ? resolvePlanServices(customer, rows.next, rows.upcoming).confirmedServices : null;
+  return rows ? confirmedPlanServices(customer, rows) : null;
 }
 
 // =========================================================================
@@ -11225,10 +11220,11 @@ function isPlanCoverageRow(s) {
   return true;
 }
 
-// → { includedServices, pestPlanName } from the
+// → { includedServices, confirmedServices, pestPlanName } from the
 // customer's next visit and upcoming schedule (both read for ALL the
-// customer's properties). Each included service carries `displayName`, the
-// name both tabs list it under.
+// customer's properties). Each service carries `displayName`, the name it is
+// listed under. includedServices is My Plan's list (tier placeholders
+// included); confirmedServices is confirmedPlanServices below.
 export function resolvePlanServices(customer, nextService, upcomingServices = []) {
   const detectedServiceIds = [];
   // Real catalog name of the visit that matched each card ("Seasonal Mosquito
@@ -11258,14 +11254,6 @@ export function resolvePlanServices(customer, nextService, upcomingServices = []
     ? scheduleCoverageRows
     : [nextService, ...scheduleCoverageRows];
   coverageRows.forEach(addDetectedService);
-  // What the SCHEDULE confirms, by family, with the schedule row's name. A
-  // next visit the schedule does not list (more than a year out) has only its
-  // label, with no server verdict, so it never confirms a service.
-  const scheduleConfirmedNames = new Map();
-  scheduleCoverageRows.forEach((row) => {
-    const id = detectCatalogServiceId(row);
-    if (id && !scheduleConfirmedNames.has(id)) scheduleConfirmedNames.set(id, planRowName(row));
-  });
   // The pest card names the plan as it goes on: its LAST upcoming visit (the
   // schedule read is in date order). After a frequency change the next visit
   // can be one that stays as booked on the old plan
@@ -11301,20 +11289,38 @@ export function resolvePlanServices(customer, nextService, upcomingServices = []
       ...svc,
       displayName: (svc.id === 'pest_control' && pestPlanName) || detectedServiceNames[svc.id] || svc.name,
     }));
-  // My Plan's list without the tier placeholders and without a label-only
-  // next visit: only the services a plan visit ON THE SCHEDULE confirms (its
-  // rows carry the server's coverage verdict and family). A tier gives a
-  // count, never which service is missing, so a surface that NAMES what the
-  // member pays for (Billing's Plan Charges, the Learn sentence) reads this
-  // list. A lawn-only Bronze member with no coming visit is named no
-  // service, not "Pest Control".
-  const confirmedServices = includedServices
-    .filter(svc => scheduleConfirmedNames.has(svc.id))
-    .map(svc => ({
-      ...svc,
-      displayName: (svc.id === 'pest_control' && pestPlanName) || scheduleConfirmedNames.get(svc.id) || svc.name,
-    }));
-  return { includedServices, confirmedServices, pestPlanName };
+  return { includedServices, confirmedServices: confirmedPlanServices(customer, upcomingServices), pestPlanName };
+}
+
+// The services a plan visit ON THE SCHEDULE confirms, for a surface that
+// NAMES what the member pays for (Billing's Plan Charges, the Learn
+// sentence). It reads the schedule rows alone:
+//   - no tier placeholder: a tier gives a count, never which service is
+//     missing, so a lawn-only Bronze member with no coming visit is named no
+//     service, not "Pest Control";
+//   - no next-visit read: that projection carries no coverage verdict, no
+//     family and no catalog name, has no upper date bound, and is a second
+//     read that can disagree with the schedule (a visit cancelled between the
+//     two) or fail by itself.
+// The tier's size still cuts the list, in schedule order, as on My Plan.
+// Pest control takes the name of its LAST upcoming visit, as on My Plan.
+export function confirmedPlanServices(customer, upcomingServices = []) {
+  const names = new Map();
+  let lastPestName = null;
+  upcomingServices.filter(isPlanCoverageRow).forEach((row) => {
+    const id = detectCatalogServiceId(row);
+    if (!id) return;
+    if (!names.has(id)) names.set(id, planRowName(row));
+    if (id === 'pest_control' && planRowName(row)) lastPestName = planRowName(row);
+  });
+  if (lastPestName) names.set('pest_control', lastPestName);
+  const activeTierName = resolveActiveTierName(customer);
+  const ids = [...names.keys()];
+  return (activeTierName ? ids.slice(0, TIER_SERVICES[activeTierName] || 1) : ids)
+    .map((id) => {
+      const svc = SERVICE_CATALOG.find((entry) => entry.id === id);
+      return { ...svc, displayName: names.get(id) || svc.name };
+    });
 }
 
 const TIER_SERVICE_NAMES = {
