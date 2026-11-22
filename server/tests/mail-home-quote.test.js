@@ -94,11 +94,23 @@ describe('the result', () => {
     expect(out.priceDigest).toBe(agentEngineResultDigest({ lineItems: [{ ...line, pricingConfidence: 'medium' }] }));
   });
 
-  test('the setup fee is 0 when the result has none, or a fee that is not a positive number', async () => {
-    for (const fee of [0, null, undefined, -5, 'n/a']) {
+  test('the setup fee is 0 when the result has none; a fee that is no amount, or one the column cannot hold, is not a price', async () => {
+    for (const fee of [0, null, undefined, '']) {
       const t = setup({ dryRunEstimate: jest.fn(async () => withLines([line], fee)) });
-      expect((await t.price()).priceSetupFee).toBe(0);
+      expect(await t.price()).toMatchObject({ status: 'priced', priceSetupFee: 0 });
     }
+    for (const fee of [-5, 'n/a', 5e8, 1e8]) {
+      const t = setup({ dryRunEstimate: jest.fn(async () => withLines([line], fee)) });
+      expect(await t.price()).toEqual({ status: 'not_clean', reason: 'no_amount', ...facts });
+    }
+  });
+
+  test('a member of Waves at the address is not a clean price, and nothing of the warning reaches the result', async () => {
+    const warning = { customerId: 'cust-1', name: 'TESTER ALEX J', message: 'An active member lives at this address' };
+    const t = setup({ dryRunEstimate: jest.fn(async () => ({ ...prepared(), memberLinkageWarning: warning })) });
+    const out = await t.price();
+    expect(out).toEqual({ status: 'not_clean', reason: 'member_address', ...facts });
+    expect(JSON.stringify(out)).not.toMatch(/TESTER|cust-1|active member/);
   });
 
   test('the estimate data may come back as an object', async () => {
@@ -128,6 +140,10 @@ describe('the verdict (judge)', () => {
     ['a review reason', withLines([{ ...line, manualReviewReasons: ['lot size missing'] }]), 'engine_review'],
     ['a low confidence line', withLines([{ ...line, pricingConfidence: 'low' }]), 'engine_review'],
     ['a heuristic turf grade', withLines([{ ...line, turfConfidence: 'low' }]), 'engine_review'],
+    ['a footprint the engine guessed (the marker alone)', withLines([{ ...line, footprintWasDefaulted: true }]), 'engine_review'],
+    ['a fallback footprint source (the marker alone)', withLines([{ ...line, footprintSource: 'default_fallback' }]), 'engine_review'],
+    ['a fallback fpSource (the marker alone)', withLines([{ ...line, fpSource: 'fallback' }]), 'engine_review'],
+    ['a member of Waves at the address', { ...prepared(), memberLinkageWarning: { customerId: 'cust-1' } }, 'member_address'],
     ['an amount of 0', prepared({ annual_total: 0 }), 'no_amount'],
     ['an amount that is not a number', prepared({ annual_total: 'n/a' }), 'no_amount'],
     ['no amount at all', prepared({ annual_total: null }), 'no_amount'],

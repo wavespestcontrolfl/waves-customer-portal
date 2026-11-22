@@ -11,10 +11,12 @@
  * come from the county data. The body carries the home's own address and no customer, phone or email; the dry run
  * needs none. Nothing is saved.
  *
- * The verdict is the one of moving-auto-estimate cleanPrice: a server price, exactly one engine line and it is the
- * pest line, no quote-required line, an annual total above 0, and no line a person must review. A clean price is
- * priced; anything else is not_clean with one reason code; a save the server refuses (4xx) is not_clean / save_refused;
- * any other failure is failed / engine (tried again later).
+ * The verdict: a server price, no member of Waves at the address (the save's own warning: its price would be on
+ * new-customer terms), exactly one engine line and it is the pest line, no quote-required line, no line a person must
+ * review before its price stands as exact (draft-builder lineNeedsReviewBeforeExactPrice, the shared test), an annual
+ * total above 0 and a setup fee the table can hold. A clean price is priced; anything else is not_clean with one reason
+ * code; a save the server refuses (4xx) is not_clean / save_refused; any other failure is failed / engine (tried again
+ * later).
  *
  * No database access of its own, no paid or AI service, no logging.
  */
@@ -82,30 +84,40 @@ function estimateBody(row, facts, engineInputs) {
   };
 }
 
-// A line a person must look at before its price stands (the same test as cleanPrice / judgePrepared).
+// A line a person must look at before its price stands: the shared exact-price test (a review marker, a heuristic turf
+// grade, LOW confidence, a footprint the engine guessed), or a line the engine could not price.
 function lineFlagged(line) {
-  const { lineRequiresReview, lineHasHeuristicTurf } = require('../estimator-engine/draft-builder');
-  return !!(lineRequiresReview(line) || line.quoteRequired || line.requiresQuote || lineHasHeuristicTurf(line)
-    || String(line.pricingConfidence || '').toUpperCase() === 'LOW');
+  const { lineNeedsReviewBeforeExactPrice } = require('../estimator-engine/draft-builder');
+  return !!(lineNeedsReviewBeforeExactPrice(line) || line.quoteRequired || line.requiresQuote);
 }
 
-// The annual total, the setup fee (0 when none) and the engine digest of a priced estimate, or null.
+// The setup fee: 0 when the result has none; null for a value that is no amount or that the column cannot hold.
+function setupFeeOf(value) {
+  if (value === null || value === undefined || value === '') return 0;
+  const fee = moneyOrNull(value);
+  return fee !== null && fee >= 0 && fee < MAX_AMOUNT ? fee : null;
+}
+
+// The annual total, the setup fee and the engine digest of a priced estimate, or null.
 function priceOf(estimate, data) {
   const { agentEngineResultDigest } = require('../agent-estimate-preview');
   const annual = moneyOrNull(estimate.annual_total);
   const digest = agentEngineResultDigest(data.engineResult);
-  if (!(annual > 0) || annual >= MAX_AMOUNT || !digest) return null;
-  const setup = moneyOrNull(data.result && data.result.oneTime && data.result.oneTime.membershipFee);
-  return { annual, setupFee: setup > 0 && setup < MAX_AMOUNT ? setup : 0, digest };
+  const setupFee = setupFeeOf(data.result && data.result.oneTime && data.result.oneTime.membershipFee);
+  if (!(annual > 0) || annual >= MAX_AMOUNT || !digest || setupFee === null) return null;
+  return { annual, setupFee, digest };
 }
 
 /**
  * The dry run's verdict: { price } for a clean server price of one pest line, or { reason }
- * (not_server_price | not_one_line | engine_review | no_amount).
+ * (not_server_price | member_address | not_one_line | engine_review | no_amount).
  */
 function judge(prepared) {
   const estimate = prepared && prepared.estimate;
   if (!estimate || estimate.pricing_authority !== 'SERVER') return { reason: 'not_server_price' };
+  // The save found a member of Waves at this address: its price is on new-customer terms. Only the code is kept, never
+  // the warning (it names the member).
+  if (prepared.memberLinkageWarning) return { reason: 'member_address' };
   const data = parseJson(estimate.estimate_data) || {};
   const lines = (data.engineResult && data.engineResult.lineItems) || [];
   if (lines.length !== 1 || !lines[0] || lines[0].service !== 'pest_control') return { reason: 'not_one_line' };
@@ -117,8 +129,8 @@ function judge(prepared) {
 /**
  * The result to save for a home with every fact (`facts`: homeSqft, homeSqftSource, stories, lotSqft):
  *   { status: 'priced', ...facts, priceAnnual, priceSetupFee, priceDigest }
- *   { status: 'not_clean', reason, ...facts }     reason: not_server_price | not_one_line | engine_review | no_amount |
- *                                                  save_refused
+ *   { status: 'not_clean', reason, ...facts }     reason: not_server_price | member_address | not_one_line |
+ *                                                  engine_review | no_amount | save_refused
  *   { status: 'failed', reason: 'engine', ...facts }
  * `deps` may replace buildEngineInput and dryRunEstimate (tests).
  */
