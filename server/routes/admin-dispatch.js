@@ -4008,8 +4008,10 @@ router.post('/:serviceId/pest-recap/draft', async (req, res, next) => {
 // lawn-fast routes' reason): the dark gate (404 {enabled:false}, nothing read), the id must be a uuid, then the sibling
 // routes' ownership assertion. The fixed sentence names no area: the body's labels are not read, so no free text from
 // the request reaches the report. See services/service-report/report-own-note-writer.js.
-function reportNoteVisitRefusal({ ok, reason, svc, eligible }) {
+function reportNoteVisitRefusal({ ok, reason, svc, profile, eligible }) {
   if (!ok) return reason;
+  // A failed profile lookup is an outage the sheet may retry (503), not an ineligible visit.
+  if (!profile) return 'profile_unavailable';
   if (!eligible) return 'not_pest_control';
   return svc.customer_id ? null : VISIT_NO_CUSTOMER_CODE;
 }
@@ -4042,7 +4044,9 @@ router.post('/:reportNoteServiceId/pest-recap/report-note', reportOwnNoteGate, r
       return res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' });
     }
     const refusal = reportNoteVisitRefusal(visit);
-    if (refusal) return res.status(recapStatusForReason(refusal)).json({ error: refusal, code: refusal });
+    if (refusal) {
+      return res.status(refusal === 'profile_unavailable' ? 503 : recapStatusForReason(refusal)).json({ error: refusal, code: refusal });
+    }
     const { note } = req.body || {};
     // The codes on the customer's file are read for this customer before any model reads the note.
     const { text, source, reason } = await require('../services/service-report/report-own-note-writer').cleanReportNote({

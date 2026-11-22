@@ -61,7 +61,7 @@ const visitOf = (technician_id) => jest.fn(() => {
   };
   return read;
 });
-const PEST_VISIT = { ok: true, eligible: true, svc: {
+const PEST_VISIT = { ok: true, eligible: true, profile: { serviceLine: 'pest' }, svc: {
   id: VISIT_ID, customer_id: 'customer-1', service_type: 'Quarterly Pest Control', technician_id: 'tech-1', status: 'confirmed', scheduled_date: etDateString(new Date()),
 } };
 
@@ -151,6 +151,8 @@ describe('POST pest-recap/report-note', () => {
     };
     expect(await refused({ ok: false, reason: 'not_found' })).toEqual([404, { error: 'not_found', code: 'not_found' }]);
     expect(await refused({ ...PEST_VISIT, eligible: false })).toEqual([409, { error: 'not_pest_control', code: 'not_pest_control' }]);
+    expect(await refused({ ...PEST_VISIT, profile: null, eligible: false }))
+      .toEqual([503, { error: 'profile_unavailable', code: 'profile_unavailable' }]);
     expect(await refused({ ...PEST_VISIT, svc: { ...PEST_VISIT.svc, customer_id: null } }))
       .toEqual([409, { error: VISIT_NO_CUSTOMER_CODE, code: VISIT_NO_CUSTOMER_CODE }]);
     expect(cleanReportNote).not.toHaveBeenCalled();
