@@ -3442,6 +3442,23 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // NEWSLETTER GMAIL CHECK (owner 2026-11-22; no gate: reads only, emails no one)
+  // Every hour at :23. For each issue that went out 50 to 72 hours ago, it
+  // compares how many delivered copies Gmail readers opened with all other
+  // readers, and raises one admin alert per issue when Gmail is far behind
+  // (Gmail sends no spam reports, so no other check sees a Gmail spam
+  // placement). The rule lives in newsletter-gmail-check.js.
+  // =========================================================================
+  cron.schedule('23 * * * *', async () => {
+    try {
+      // runExclusive: a deploy overlap must not judge the same issue twice at once.
+      await runExclusive('newsletter-gmail-check', () => require('./newsletter-gmail-check').runNewsletterGmailCheck());
+    } catch (err) {
+      logger.error(`[newsletter-gmail-check] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY BACKLINK PROFILE → ASTRO sameAs SYNC (gated: cronJobs AND backlinkProfileSync)
   // Opens a PR adding verifier-confirmed (status='live') directory/citation/social
   // profile URLs from seo_link_prospects to the marketing site's
