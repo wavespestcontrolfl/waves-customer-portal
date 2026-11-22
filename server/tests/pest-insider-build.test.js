@@ -270,6 +270,71 @@ describe('buildIssue', () => {
     }
   });
 
+  test("the last poll's result line is in both parts, named in the diagnostics, and read by the send check with the rest", () => {
+    usePlan(A01);
+    validateNewsletterDraft.mockClear();
+    const lastPoll = { quizId: PEST_INSIDER_POLL_IDS[0], counts: { shoe: 2 } };
+    const line = 'Last poll: Spider in the house. What happens next? The top answer was Shoe.';
+    const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, lastPoll });
+    expect(r.ok).toBe(true);
+    expect(r.issue.html_body).toContain(line);
+    expect(r.issue.text_body).toContain(line);
+    expect(r.diagnostics.lastPollId).toBe(PEST_INSIDER_POLL_IDS[0]);
+    expect(r.diagnostics).not.toHaveProperty('lastPollLineBlocked');
+    const checked = validateNewsletterDraft.mock.calls.map(([draft]) => draft);
+    expect(checked).toHaveLength(1);
+    expect(checked[0].html_body).toContain(line);
+    expect(checked[0].text_body).toContain(line);
+    // No result (or no votes): the issue and its diagnostics are the plain ones.
+    for (const none of [undefined, null, { quizId: PEST_INSIDER_POLL_IDS[0], counts: {} }]) {
+      const plain = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, lastPoll: none });
+      expect(plain.issue.html_body).not.toContain('Last poll:');
+      expect(plain.issue.text_body).not.toContain('Last poll:');
+      expect(plain.diagnostics).toEqual({ sendDate: '2026-12-03', factId: 'A01', speciesSlug: 'white-footed-ant', toolId: null, pollId: null, problems: [] });
+    }
+  });
+
+  test('a result line the send check refuses is left out, and the issue still builds', () => {
+    usePlan(A01);
+    const lastPoll = { quizId: PEST_INSIDER_POLL_IDS[0], counts: { shoe: 2 } };
+    const quiz = getQuiz(lastPoll.quizId);
+    const approved = quiz.question;
+    try {
+      // The line prints the poll's question, so a question that makes a safety claim blocks the line.
+      quiz.question = 'Is it harmless to pets?';
+      const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, lastPoll });
+      expect(r.ok).toBe(true);
+      expect(r.issue.html_body).not.toContain('Last poll:');
+      expect(r.issue.text_body).not.toContain('Last poll:');
+      expect(r.diagnostics.lastPollLineBlocked).toMatch(/harmless/);
+      expect(r.diagnostics).not.toHaveProperty('lastPollId');
+    } finally {
+      quiz.question = approved;
+    }
+  });
+
+  test('an issue the send check refuses without the line too does not blame the line', () => {
+    // The species text is the cause (see the second-swarm test above): the issue fails with the
+    // result line and without it, so the diagnostics name the issue's error and no blocked line.
+    const formosan = { ...SPECIES.find((s) => s.slug === 'formosan-termite'), fact: 'They swarm again in June.' };
+    usePlan(factById('T02'), formosan);
+    const r = buildIssue({ sendDate: '2027-05-06', livePostFactIds: LIVE, lastPoll: { quizId: PEST_INSIDER_POLL_IDS[0], counts: { shoe: 2 } } });
+    expect(r).toMatchObject({ ok: false, issue: null, reason: expect.stringMatching(/^send_validator_blocked: Unverified claim \(termite_second_swarm\)/) });
+    expect(r.diagnostics).not.toHaveProperty('lastPollLineBlocked');
+    expect(r.diagnostics).not.toHaveProperty('lastPollId');
+  });
+
+  test('every approved poll gives a result line the send check accepts', () => {
+    usePlan(A01);
+    for (const quizId of PEST_INSIDER_POLL_IDS) {
+      const [first, second] = getQuiz(quizId).answers.map((a) => a.key);
+      for (const counts of [{ [first]: 3 }, { [first]: 2, [second]: 2 }]) {
+        const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, lastPoll: { quizId, counts } });
+        expect({ quizId, ok: r.ok, id: r.diagnostics.lastPollId, blocked: r.diagnostics.lastPollLineBlocked }).toEqual({ quizId, ok: true, id: quizId, blocked: undefined });
+      }
+    }
+  });
+
   test('a planner passed by the caller is ignored (pre-push round 17)', () => {
     const plan = jest.fn(() => ({ leadFact: { ...A01, lead: ['Colonies hold 9 million ants.', 'They are everywhere.'] }, idItem: WFA }));
     const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, plan });

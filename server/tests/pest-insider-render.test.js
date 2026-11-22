@@ -333,7 +333,7 @@ describe('renderIssue', () => {
   });
 
   test('a Waves Pest Insider poll goes after "What\'s this?", once in each part, and a reader\'s tool block after it', () => {
-    const poll = PEST_INSIDER_POLL_IDS[1];
+    const poll = 'pi-poll-lizards-v1';
     const r = renderIssue({ ...BASE, pollQuizId: poll });
     const html = r.html_body;
     expect(html.split(`{{quiz:${poll}}}`)).toHaveLength(2);
@@ -352,8 +352,8 @@ describe('renderIssue', () => {
     expect(archive).toContain('Lizards on the lanai: friend or foe?');
     expect(archive).toContain('What lizards?');
     expect(archive).not.toMatch(/\/api\/public\/newsletter\/quiz|\{\{quiz/);
-    // Any other id adds nothing: the same body as no poll.
-    for (const other of [NEWSLETTER_POLL_IDS[0], 'pest-pressure-v1', 'pi-poll-unknown-v1', null, 7]) {
+    // Any other id adds nothing: the same body as no poll. A retired poll (pi-poll-bugging-you-v1) is one of them.
+    for (const other of [NEWSLETTER_POLL_IDS[0], 'pest-pressure-v1', 'pi-poll-unknown-v1', 'pi-poll-bugging-you-v1', null, 7]) {
       expect(renderIssue({ ...BASE, pollQuizId: other })).toEqual(renderIssue(BASE));
     }
   });
@@ -745,5 +745,48 @@ describe('wrapIssueHtml', () => {
     expect(html).toContain('Look &lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;see&quot;');
     expect(html).toContain(issue.html_body);
     expect(html).toContain('{{unsubscribe_url}}');
+  });
+});
+
+describe('the last poll result line', () => {
+  const lastPoll = { quizId: PEST_INSIDER_POLL_IDS[0], counts: { 'cup-and-card': 3, shoe: 1 } };
+  const LINE = 'Last poll: Spider in the house. What happens next? The top answer was Cup and card.';
+  const PARAGRAPH = `<p style="margin:0 0 12px 0;font-size:16px;line-height:1.6;">${LINE}</p>`;
+  const INTRO_TEXT = "Here's one thing we learned about Southwest Florida homes and yards, plus one critter worth knowing.";
+  const INTRO_HTML = INTRO_TEXT.replace("'", '&#39;');
+
+  test('goes under the greeting and before the intro, in both parts', () => {
+    const r = renderIssue({ ...BASE, lastPoll });
+    const html = r.html_body;
+    expect(html.split(LINE)).toHaveLength(2);
+    expect(html).toContain(PARAGRAPH);
+    expect(html.indexOf('Hey there!')).toBeLessThan(html.indexOf(LINE));
+    expect(html.indexOf(LINE)).toBeLessThan(html.indexOf(INTRO_HTML));
+    expect(r.text_body).toContain(`Hey there!\n${LINE}\n${INTRO_TEXT}`);
+    // It joins the paragraph the greeting is in: the blocks that follow it do not move.
+    expect(wordsOf(html)).toContain(`Hey there! ${LINE} ${INTRO_TEXT}`);
+  });
+
+  test.each([
+    ['no poll given', undefined],
+    ['null', null],
+    ['no votes', { quizId: PEST_INSIDER_POLL_IDS[0], counts: {} }],
+    ['an unknown poll', { quizId: 'pi-poll-unknown-v1', counts: { shoe: 4 } }],
+    ['a Waves Newsletter poll', { quizId: NEWSLETTER_POLL_IDS[0], counts: { beach: 4 } }],
+  ])('with %s the issue is byte for byte the issue with no line', (_name, value) => {
+    for (const pollQuizId of [null, PEST_INSIDER_POLL_IDS[1]]) {
+      const plain = renderIssue({ ...BASE, pollQuizId });
+      const r = renderIssue({ ...BASE, pollQuizId, lastPoll: value });
+      expect(r).toEqual(plain);
+    }
+  });
+
+  test('the line is the only difference, and the caller cannot hand the renderer its own line', () => {
+    const plain = renderIssue(BASE);
+    const r = renderIssue({ ...BASE, lastPoll });
+    expect(r.html_body.replace(`\n${PARAGRAPH}`, '')).toBe(plain.html_body);
+    expect(r.text_body.replace(`${LINE}\n`, '')).toBe(plain.text_body);
+    const own = renderIssue({ ...BASE, lastPollLine: 'Last poll: write what you like here.' });
+    expect(own).toEqual(plain);
   });
 });

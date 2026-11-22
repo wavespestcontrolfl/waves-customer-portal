@@ -32,6 +32,10 @@
  * its send row exists, so the next issue never repeats it. A failed read leaves the issue without a
  * poll; it never stops it.
  *
+ * The issue right after a poll issue opens with that poll's result under the greeting (newsletter-quiz.js
+ * newsletterLastPoll + pollResultLine; only when the newest issue readers got held a poll, at most 45
+ * days before this issue). A failed read leaves the line out, never the issue.
+ *
  * Calendar dates here are 'YYYY-MM-DD' strings. The date math is the shared ET helpers in
  * utils/datetime-et.js (validCalendarDate, etNthWeekdayOfMonth, addETDays, etDateString);
  * this module keeps only the 1st-and-3rd-Thursday rule, which the table's CHECK also enforces.
@@ -447,6 +451,20 @@ async function issuePoll(db) {
   }
 }
 
+// The last poll's votes for this issue's result line ({ quizId, counts }), or null: the newest
+// issue readers got held a poll, and it is at most 45 days old (newsletter-quiz.js newsletterLastPoll).
+// A failed read leaves the issue without the line; it never stops it.
+async function lastPollResult(db, issueDate) {
+  try {
+    const { newsletterLastPoll, pollResultLine } = require('../newsletter-quiz');
+    const last = await newsletterLastPoll({ newsletterType: PEST_INSIDER_TYPE, sendDate: issueDate, knex: db });
+    return pollResultLine(last || undefined) ? last : null;
+  } catch (err) {
+    require('../logger').warn(`[pest-insider] last poll result failed (${err.message}); this issue has no result line`);
+    return null;
+  }
+}
+
 // One build: the spam-report stop, post check, history, poll, builder, then the row (and, with the
 // switch on, the draft and the proof step). Returns the run's result plus the proof step's raw answer.
 async function buildAndRecord(db, { issueDate, existing, autoSend, now, fetchImpl, proofStep }) {
@@ -463,7 +481,7 @@ async function buildAndRecord(db, { issueDate, existing, autoSend, now, fetchImp
   if (!spamStop) {
     const livePostFactIds = await checkLivePosts({ fetchImpl: probe });
     const recent = await recentHistory(issueDate, { database: db });
-    built = buildIssue({ sendDate: issueDate, recent, recheckedFactIds: [], livePostFactIds, liveToolUrls: [], pollQuizId: await issuePoll(db) });
+    built = buildIssue({ sendDate: issueDate, recent, recheckedFactIds: [], livePostFactIds, liveToolUrls: [], pollQuizId: await issuePoll(db), lastPoll: await lastPollResult(db, issueDate) });
   }
   let row = rowFor(issueDate, built, now, failures);
 

@@ -62,7 +62,7 @@ const { heroFor, HERO_WIDTH, HERO_HEIGHT } = require('./heroes');
 const { partPictureForFact, partPictureForSpecies, PART_WIDTH, PART_HEIGHT } = require('./parts');
 const { SERVICE_EMOJI } = require('./claim-check');
 const { toolById, toolLinkText, AMAZON_DISCLOSURE } = require('./tools');
-const { isPestInsiderPoll } = require('../newsletter-quiz');
+const { isPestInsiderPoll, pollResultLine } = require('../newsletter-quiz');
 const { validateNewsletterDraft } = require('../newsletter-validator');
 const { PEST_INSIDER_TYPE } = require('../../config/newsletter-types');
 const { etDateString } = require('../../utils/datetime-et');
@@ -231,16 +231,23 @@ function datelineText(sendDate, minutes) {
   return ['Waves Pest Insider', date, `${minutes}-min read`].filter(Boolean).join(' · ');
 }
 
+// The last poll's result under the greeting, in the intro's own style. The
+// words are newsletter-quiz.js pollResultLine's, made here from a poll id and
+// its counts, never taken from the caller. Nothing when there is no line.
+const resultParagraph = (line) => `<p style="margin:0 0 12px 0;font-size:16px;line-height:1.6;">${escapeHtml(line)}</p>`;
+
 function openingBlock(issue, minutes) {
   const palette = newsletterPalette();
   const dateline = datelineText(issue.sendDate, minutes);
+  const result = pollResultLine(issue.lastPoll || undefined);
   const html = [
     `<p class="dm-muted" style="margin:0 0 14px 0;text-align:center;font-size:12px;line-height:1.5;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:${palette.muted};">${escapeHtml(dateline)}</p>`,
     heroHtml(issue.lead),
     `<p style="margin:0 0 8px 0;font-size:22px;line-height:1.4;">👋 <strong><em>${escapeHtml(GREETING)}</em></strong></p>`,
+    result && resultParagraph(result),
     `<p style="margin:0 0 26px 0;font-size:16px;line-height:1.6;">${escapeHtml(INTRO)}</p>`,
   ].filter(Boolean).join('\n');
-  return { html, text: `${dateline}\n\n${GREETING}\n${INTRO}` };
+  return { html, text: `${dateline}\n\n${GREETING}\n${result ? `${result}\n` : ''}${INTRO}` };
 }
 
 // The lead fact, when the lead names one whose own post is the lead's post.
@@ -458,8 +465,10 @@ function homeSubstitutions(home, { now = new Date(), errorsOf = homeBlockErrors 
  *   fact whose top picture, card and sources the issue shows (only when that
  *   fact's own post is lead.postUrl) and whose service picks the band's emoji. sendDate (YYYY-MM-DD)
  *   goes in the dateline. pollQuizId, a Waves Pest Insider poll id, adds that
- *   poll after "What's this?" (pollBlock). Any other field is ignored: the
- *   shared body takes no caller text.
+ *   poll after "What's this?" (pollBlock). lastPoll, { quizId, counts } of the
+ *   last issue's poll, puts that poll's result line (pollResultLine) under the
+ *   greeting, before the intro: one paragraph in the HTML, its own line in the
+ *   text; no line when the poll has no votes. Any other field is ignored: the shared body takes no caller text.
  */
 function renderIssue(issue) {
   const lead = leadBlock(issue);
