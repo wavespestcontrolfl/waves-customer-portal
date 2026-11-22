@@ -142,6 +142,9 @@ describe('findCustomersAtAddress', () => {
         ROW('unit-first', 'Unit 7', '123 Palm Ave'),
         ROW('state-zip', '123/2 Palm Ave', null, { zip: 'FL 34285' }),
         ROW('numberless', 'Palm Ave'),
+        ROW('numberless-no-zip', 'Palm Ave', null, { zip: null }),
+        ROW('po-box', 'PO Box 12', null, { zip: '' }),
+        ROW('zero-padded', '00123 Palm Avenue Unit', 'x'),
       ],
     });
     const rows = await findCustomersAtAddress(db, '123-2 Palm Ave, Venice, FL 34285', { strict: true, zip: '34285' });
@@ -152,6 +155,11 @@ describe('findCustomersAtAddress', () => {
     // A zip stored with its state is read; a line with no house number is near.
     expect(byId['state-zip'] === true || byId['state-zip'] === false).toBe(true);
     expect(byId.numberless).toBe(false);
+    // No house number and no zip, or a PO box: nothing links it to this home.
+    expect(byId['numberless-no-zip']).toBeUndefined();
+    expect(byId['po-box']).toBeUndefined();
+    // Leading zeros are dropped: house 00123 is house 123.
+    expect(byId['zero-padded'] === true || byId['zero-padded'] === false).toBe(true);
     // The street number in line 2 of a unit-first line 1 is read.
     expect(byId['unit-first'] === true || byId['unit-first'] === false).toBe(true);
     expect(byId['no-zip']).toBe(false);
