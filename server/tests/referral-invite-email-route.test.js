@@ -361,42 +361,32 @@ describe('household sibling on the Refer tab (GH codex #3850 r2)', () => {
       referral_link: 'https://portal.wavespestcontrol.com/r/WAVES-J4KM',
     }), expect.objectContaining({ entity_id: 'promo-h' }));
   });
-  describe('/invite text (GATE_REFERRAL_STEP2): the seeded referral_invite row, swapped only while the gate is on', () => {
+  // POST /invite does not check that the phone belongs to a new customer (submitReferral does), so it promises no
+  // credit: the saved text goes out as rendered in both gate states.
+  describe('/invite text: the referral_invite row is sent as rendered, with GATE_REFERRAL_STEP2 on or off', () => {
     const SEED = require('../models/migrations/20261006220000_sms_template_tighten')._SWAPS.find(([key]) => key === 'referral_invite')[2];
     const LINK = 'https://portal.wavespestcontrol.com/r/WAVES-J4KM';
     const rendered = () => SEED.replace('{referee_name}', 'Jo').replace('{referrer_name}', 'Sam').replace('{referral_link}', LINK);
     const { gates } = require('../config/feature-gates');
-    async function sendInvite(cents, { gateOn }) {
+
+    test.each([false, true])('gate %s: no credit is promised and no amount is read', async (gateOn) => {
       const saved = gates.referralStep2;
       gates.referralStep2 = gateOn;
       try {
         installDb({ firstResults: { customers: { id: 'cust-1', first_name: 'Sam', email: 'sam@example.com' } } });
         referralEngine.resolvePromoter.mockResolvedValueOnce({ promoter: household, household: true });
-        referralEngine.step2FriendCreditCents.mockResolvedValueOnce(cents);
+        referralEngine.step2FriendCreditCents.mockClear();
         const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
         const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
         renderRequiredSmsTemplate.mockResolvedValueOnce(rendered());
         sendCustomerMessage.mockResolvedValueOnce({ sent: true });
         const res = await post('/api/referrals/invite', { phone: '(941) 555-0123', friendName: 'Jo' });
         expect(res.status).toBe(200);
-        return sendCustomerMessage.mock.calls[0][0].body;
+        expect(sendCustomerMessage.mock.calls[0][0].body).toBe(rendered());
+        expect(referralEngine.step2FriendCreditCents).not.toHaveBeenCalled();
       } finally {
         gates.referralStep2 = saved;
       }
-    }
-
-    test('gate off: the stored text is sent exactly as rendered, even if an amount came back', async () => {
-      expect(await sendInvite(5000, { gateOn: false })).toBe(rendered());
-    });
-
-    test('gate on: the approved words with the live amount, STOP line kept', async () => {
-      expect(await sendInvite(5000, { gateOn: true })).toBe(
-        `Hi Jo, Sam recommended Waves to you. Start a plan and get a $50 credit after your first plan service: ${LINK}\n\nReply STOP to opt out.`,
-      );
-    });
-
-    test('gate on, no friend credit to state: the row names no reward and is sent as rendered', async () => {
-      expect(await sendInvite(0, { gateOn: true })).toBe(rendered());
     });
   });
 

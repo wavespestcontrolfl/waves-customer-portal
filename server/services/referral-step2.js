@@ -106,7 +106,9 @@ const memberCreditEmailLine = (rewardDollars, { canTurnOnAutomaticCredit = false
 // the gate on a seeded reward sentence is never sent as stored. Swaps use string slicing, never a replacement
 // string, because the words hold "$".
 
-// The referral invite text (the Referral Settings column, and the referral_invite row the app does not call today).
+// The referral invite text submitReferral sends (the Referral Settings column, or the referral_invite row when the
+// column is empty). submitReferral refuses a phone that is already a Waves customer; POST /referrals/invite does not
+// check the recipient, so that route sends the row as stored and promises no credit.
 // head = the words before the offer; legacy = the seeded offer. The seeded text ends "<stretch><link>" with an optional
 // STOP line, so a name that happens to hold the stretch does not match.
 const SEEDED_INVITE_OFFERS = Object.freeze([
