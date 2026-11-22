@@ -227,14 +227,20 @@ async function readDays(days, d, summary) {
   return { rows, failures };
 }
 
-function collectCandidates(rows, summary) {
+function collectCandidates(rows, summary, readTomorrow) {
   const seen = new Set();
   const candidates = [];
   for (const row of rows) {
     summary.deeds += 1;
     const { skip, candidate } = candidateFromRow(row);
-    if (skip) bump(summary.skipped, skip);
-    else if (!seen.has(candidate.instrument)) {
+    if (skip) {
+      bump(summary.skipped, skip);
+      // A deed the Clerk has still not filled in on the last day a run reads it is never judged. That is the
+      // Clerk's delay, not a defect or an outage, so it is not an error; it is counted by day, so the log shows
+      // how many deeds leave the read this way. A deed with a price below the limit would not be kept anyway.
+      const mayQualify = row.consideration === null || row.consideration >= MIN_PRICE;
+      if (skip === 'not_filled' && mayQualify && !readTomorrow.has(row.date)) bump(summary.unfilledOnLastDay, row.date);
+    } else if (!seen.has(candidate.instrument)) {
       seen.add(candidate.instrument);
       candidates.push(candidate);
     }
@@ -290,6 +296,10 @@ async function evaluateAndSave(candidates, d, summary, readTomorrow) {
       bump(summary.saved, stored.status);
       if (stored.reason) bump(summary.savedByReason, `${stored.status}/${stored.reason}`);
       if (!stored.written) summary.keptAnswers += 1;
+      // A deed the map did not answer for, on the last day a run reads it, is lost like a deed that waited.
+      if (stored.status === 'unmatched' && stored.reason === 'lookup_failed' && !readTomorrow.has(candidate.date)) {
+        bump(summary.leftOnLastDay, candidate.date);
+      }
     } catch (err) {
       // One deed that cannot be judged or saved must not stop the deeds after it. It is not saved, so the next
       // run tries it again, and this run throws at its end. Only an error that is not the deed's own counts
@@ -311,10 +321,12 @@ async function runNewHomeList({ mode = 'night', now = Date.now, deps } = {}) {
   const days = daysToRead(mode, nowMs);
   const summary = {
     mode, days: days.length, daysRead: 0, daysFailed: 0, deeds: 0, skipped: {}, saved: {}, savedByReason: {}, errors: {},
-    keptAnswers: 0, mapQueries: 0, mapFailuresInARow: 0, leftOnLastDay: {},
+    keptAnswers: 0, mapQueries: 0, mapFailuresInARow: 0, leftOnLastDay: {}, unfilledOnLastDay: {},
   };
+  // A day is on its last read when tomorrow's night run no longer reads it (the noon run reads less).
+  const readTomorrow = new Set(daysToRead('night', addETDays(new Date(nowMs), 1)));
   const { rows, failures } = await readDays(days, d, summary);
-  const candidates = collectCandidates(rows, summary);
+  const candidates = collectCandidates(rows, summary, readTomorrow);
   let existingRows = [];
   if (candidates.length) {
     try {
@@ -337,8 +349,6 @@ async function runNewHomeList({ mode = 'night', now = Date.now, deps } = {}) {
   // The map-query budget goes first to what cannot wait: a deed never judged before a retry, and an older day
   // before a newer one (the oldest day is the first to leave the read). The page order stays inside a day.
   due.sort((a, b) => (a.retry - b.retry) || a.candidate.date.localeCompare(b.candidate.date));
-  // A day is on its last read when tomorrow's night run no longer reads it (the noon run reads less).
-  const readTomorrow = new Set(daysToRead('night', addETDays(new Date(nowMs), 1)));
   await evaluateAndSave(due.map((item) => item.candidate), d, summary, readTomorrow);
   logger.info(`Mail new-home list (${mode}): ${JSON.stringify(summary)}`);
   const problems = [];

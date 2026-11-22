@@ -364,6 +364,45 @@ describe('runNewHomeList', () => {
     expect(loggedSummary()).toMatchObject({ skipped: { waits_for_next_run: 7 }, leftOnLastDay: { '2026-11-12': 5 } });
   });
 
+  test('a map failure on the last day a run reads the deed makes the run throw; on an earlier day it does not', async () => {
+    const rows = { '2026-11-12': [person(1, { date: '2026-11-12' }), person(2, { date: '2026-11-12' })], '2026-11-17': [person(3), person(4)] };
+    const failFor = (lots) => async (legal) => { if (lots.includes(legal.lot)) throw new Error('busy'); return []; };
+    // Lot 3 is on a day that tomorrow's run reads again: stored as unmatched / lookup_failed, tried again, no error.
+    const later = makeDeps({ rowsByDay: rows });
+    later.queryParcels.mockImplementation(failFor(['3']));
+    expect((await run(later)).leftOnLastDay).toEqual({});
+    // Lot 1 is on the 12th, which no later run reads.
+    const last = makeDeps({ rowsByDay: rows });
+    last.queryParcels.mockImplementation(failFor(['1']));
+    await expect(run(last)).rejects.toThrow('Mail new-home list: 1 deeds were not judged on the last day a run reads them (2026-11-12: 1)');
+    expect(last.saveProspect).toHaveBeenCalledTimes(4);
+    // Another run answered that deed in the meantime: the store kept the answer, so the deed is not lost.
+    const kept = makeDeps({ rowsByDay: rows });
+    kept.queryParcels.mockImplementation(failFor(['1']));
+    kept.saveProspect.mockImplementation(async (row) => (row.reason === 'lookup_failed'
+      ? { status: 'eligible', reason: null, written: false }
+      : stored(row)));
+    expect((await run(kept)).leftOnLastDay).toEqual({});
+  });
+
+  test('a deed the Clerk has not filled in on its last read is counted by day, and the run does not throw', async () => {
+    const unfilled = (n, extra) => deed({ instrument: String(202699300000 + n), to: [], ...extra });
+    const deps = makeDeps({
+      rowsByDay: {
+        '2026-11-12': [
+          unfilled(1, { date: '2026-11-12' }),
+          unfilled(2, { date: '2026-11-12', to: ['TESTER ALEX J'], description: '', consideration: null }),
+          unfilled(3, { date: '2026-11-12', consideration: 90000 }), // a known low price: it would not be kept
+        ],
+        '2026-11-17': [unfilled(4)], // read again tomorrow
+      },
+    });
+    const summary = await run(deps);
+    expect(summary.skipped).toEqual({ not_filled: 4 });
+    expect(summary.unfilledOnLastDay).toEqual({ '2026-11-12': 2 });
+    expect(deps.saveProspect).not.toHaveBeenCalled();
+  });
+
   test('a noon run that leaves deeds for later does not throw: the night run reads their days', async () => {
     const many = Array.from({ length: MAX_PARCEL_QUERIES + 3 }, (_, i) => person(i + 1, { date: '2026-11-16' }));
     const deps = makeDeps({ rowsByDay: { '2026-11-16': many } });
