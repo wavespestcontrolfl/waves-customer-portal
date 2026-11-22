@@ -22,9 +22,12 @@ function escapeHtml(value) {
 function docOfferEmailLine({ crossSell = null, referral = null, url, place }) {
   if (!require('../config/feature-gates').isEnabled('docCrossSellEmail') || !url || !place) return null;
   const label = crossSell?.serviceKey ? String(crossSell.label || '').toLowerCase() : '';
+  // relationship 'start': the customer has no recurring plan to add to (the
+  // page's card says the same).
+  const ask = label && (crossSell.relationship === 'start' ? `Start ${label}` : `Add ${label} to your plan`);
   let lead;
-  if (label && referral) lead = `Add ${label} to your plan or refer a friend from your ${place}`;
-  else if (label) lead = `Add ${label} to your plan from your ${place}`;
+  if (ask && referral) lead = `${ask} or refer a friend from your ${place}`;
+  else if (ask) lead = `${ask} from your ${place}`;
   else if (referral) lead = `Know someone who could use Waves? Share your referral link from your ${place}`;
   else return null;
   return {

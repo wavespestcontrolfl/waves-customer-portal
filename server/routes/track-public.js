@@ -962,8 +962,8 @@ router.post('/:token/view', async (req, res) => {
 // link also goes to the account's service contacts (tenant, home buyer,
 // property manager — see the identity block above), so the cards show only
 // when the account holder is the only person this link reaches: no service
-// contact on the account and no third-party payer on the job or the
-// account. Otherwise a tenant could start a plan, or enroll as the
+// contact on the account and no third-party payer on the job, the visit's
+// invoice or the account. Otherwise a tenant could start a plan, or enroll as the
 // homeowner's promoter. The offer is the report's own composer over the
 // visit's service record, and the tap is the report's own tap.
 const TRACK_CARD_SURFACE = Object.freeze({ source: 'tracker', noun: 'page', title: 'visit tracker' });
@@ -1003,25 +1003,32 @@ async function loadTrackCardContext(token) {
     );
   if (!row?.customer_id || !isTrackTokenLive(row.track_token_expires_at)) return null;
   if (row.status !== 'completed') return null;
-  const { linkReachesOnlyAccountHolder } = require('../services/service-report/cross-sell-tap');
+  const {
+    linkReachesOnlyAccountHolder, reportSuppressedForCustomer,
+  } = require('../services/service-report/cross-sell-tap');
   if (!linkReachesOnlyAccountHolder(row, [row.job_payer_id, row.customer_payer_id])) return null;
   const record = await db('service_records')
     .where({ scheduled_service_id: row.id })
     .orderBy('created_at', 'desc')
     .first('id', 'structured_notes', 'is_callback');
+  // An invoice can bill a third party by itself, with no payer on the job
+  // or the account (buildSummary hides the pay link for the same reason).
+  // Any invoice of this visit counts, by either link an invoice carries.
+  const payerInvoice = await db('invoices')
+    .where((q) => {
+      q.where({ scheduled_service_id: row.id });
+      if (record?.id) q.orWhere({ service_record_id: record.id });
+    })
+    .whereNotNull('payer_id')
+    .first('id');
+  if (payerInvoice) return null;
   // A complaint-driven visit gets neither card (owner 2026-08-30, the
   // report's rule): no upsell and no referral ask after a callback.
   const { reserviceReportCopyGateOn } = require('../services/service-report/reservice-report');
   if (reserviceReportCopyGateOn() && record?.is_callback === true) return null;
-  let notes = {};
-  try {
-    notes = typeof record?.structured_notes === 'string'
-      ? JSON.parse(record.structured_notes)
-      : (record?.structured_notes || {});
-  } catch { notes = {}; }
   // Same rule as the summary above: a visit whose report never reaches the
   // customer gets no report-derived offer either.
-  const deliverable = !(notes.typedReportDelivery && notes.typedReportDelivery !== 'auto_send');
+  const deliverable = !reportSuppressedForCustomer(record?.structured_notes);
   return { customerId: row.customer_id, serviceRecordId: record?.id && deliverable ? record.id : null };
 }
 

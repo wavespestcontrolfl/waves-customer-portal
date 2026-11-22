@@ -16,6 +16,7 @@ jest.mock('../config/feature-gates', () => ({
 jest.mock('../services/service-report/cross-sell-tap', () => ({
   // The real who-may-see-it rule; only the offer and the tap are stubbed.
   linkReachesOnlyAccountHolder: jest.requireActual('../services/service-report/cross-sell-tap').linkReachesOnlyAccountHolder,
+  reportSuppressedForCustomer: jest.requireActual('../services/service-report/cross-sell-tap').reportSuppressedForCustomer,
   buildCrossSellForServiceRecord: jest.fn(),
   handleCrossSellTap: jest.fn(),
 }));
@@ -40,9 +41,32 @@ const VISIT = {
 };
 const RECORD = { id: 'sr-1', structured_notes: {} };
 
-function install({ visit = VISIT, record = RECORD } = {}) {
+// invoices: the visit's invoices, as { scheduled_service_id | service_record_id,
+// payer_id } rows. The fake applies the route's own filter (either link to
+// the visit, payer set), so a wrong filter in the route fails here.
+function install({ visit = VISIT, record = RECORD, invoices = [] } = {}) {
   mockDb.mockImplementation((table) => {
-    const row = String(table).startsWith('scheduled_services') ? visit : record;
+    const name = String(table);
+    if (name === 'invoices') {
+      let rows = invoices;
+      const chain = {
+        where: jest.fn((arg) => {
+          if (typeof arg !== 'function') throw new Error('invoices: expected the grouped visit filter');
+          const alternatives = [];
+          const group = {
+            where: (criteria) => { alternatives.push(criteria); return group; },
+            orWhere: (criteria) => { alternatives.push(criteria); return group; },
+          };
+          arg(group);
+          rows = rows.filter((r) => alternatives.some((c) => Object.entries(c).every(([k, v]) => r[k] === v)));
+          return chain;
+        }),
+        whereNotNull: jest.fn((col) => { rows = rows.filter((r) => r[col] != null); return chain; }),
+        first: jest.fn(async () => rows[0]),
+      };
+      return chain;
+    }
+    const row = name.startsWith('scheduled_services') ? visit : record;
     const chain = {
       where: jest.fn(() => chain),
       leftJoin: jest.fn(() => chain),
@@ -95,6 +119,10 @@ test.each([
   ['a service contact also gets this link', { visit: { ...VISIT, service_contact_name: 'Tenant Tina', service_contact_phone: '+19415550100' } }, null],
   ['third-party payer on the job', { visit: { ...VISIT, job_payer_id: 7 } }, null],
   ['third-party payer on the account', { visit: { ...VISIT, customer_payer_id: 7 } }, null],
+  // An invoice can bill a third party with no payer on the job or the account.
+  ['the visit\'s invoice bills a third party (linked by the visit)', { invoices: [{ scheduled_service_id: 'ss-1', payer_id: 9 }] }, null],
+  ['the visit\'s invoice bills a third party (linked by the service record)', { invoices: [{ service_record_id: 'sr-1', payer_id: 9 }] }, null],
+  ['an older invoice of the visit bills a third party', { invoices: [{ scheduled_service_id: 'ss-1', payer_id: null }, { scheduled_service_id: 'ss-1', payer_id: 9 }] }, null],
 ])('%s → 404 for both taps, nothing recorded or enrolled', async (_label, fixture, arrange) => {
   install(fixture);
   if (arrange) arrange();
@@ -102,6 +130,16 @@ test.each([
   expect((await drive('/:token/referral-link')).statusCode).toBe(404);
   expect(tap.handleCrossSellTap).not.toHaveBeenCalled();
   expect(referralShare.buildReferralShareForCustomer).not.toHaveBeenCalled();
+});
+
+test('invoices that bill the customer, or belong to another visit, keep the cards', async () => {
+  install({ invoices: [
+    { scheduled_service_id: 'ss-1', payer_id: null },
+    { scheduled_service_id: 'ss-other', payer_id: 9 },
+    { service_record_id: 'sr-other', payer_id: 9 },
+  ] });
+  expect((await drive('/:token/cross-sell', { metadata: {} })).statusCode).toBe(200);
+  expect((await drive('/:token/referral-link')).statusCode).toBe(200);
 });
 
 test('a report that never reaches the customer gives no offer, but the referral still works', async () => {
@@ -152,8 +190,8 @@ test('gate off: more than the router budget of card taps all answer 404, never 4
   const express = require('express');
   const app = express();
   app.use(express.json());
-  const { docCardTapDarkGuard } = require('../middleware/doc-card-tap-dark-guard');
-  app.use('/t', (req, res, next) => docCardTapDarkGuard({ error: 'Not found' }, req, res, next));
+  const { docCardTapDarkGuard, CARD_TAP_SURFACES } = require('../middleware/doc-card-tap-dark-guard');
+  app.use('/t', (req, res, next) => docCardTapDarkGuard(CARD_TAP_SURFACES.track, req, res, next));
   app.use('/t', router);
   const server = await new Promise((resolve) => { const s = app.listen(0, () => resolve(s)); });
   try {

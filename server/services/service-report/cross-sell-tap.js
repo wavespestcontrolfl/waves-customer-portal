@@ -60,6 +60,20 @@ function linkReachesOnlyAccountHolder(row, payerIds = []) {
   return !getServiceContactSlots(row).some((slot) => slot.phone || slot.email);
 }
 
+// A visit whose report never reaches the customer (a typed completion with
+// typedReportDelivery other than auto_send: internal-only, or disabled)
+// gives no report-derived offer on any other surface either. The rule the
+// report route (suppressedTypedReport) and the recap sender apply to the
+// report itself; the receipt and the tracker read it here.
+function reportSuppressedForCustomer(structuredNotes) {
+  let notes = structuredNotes;
+  if (typeof notes === 'string') {
+    try { notes = JSON.parse(notes); } catch { notes = null; }
+  }
+  const mode = notes && typeof notes === 'object' ? notes.typedReportDelivery : null;
+  return Boolean(mode) && mode !== 'auto_send';
+}
+
 // The card a non-report surface renders for a visit: the report's own
 // composer over the same row the tap recomputes from, with the report's
 // complaint-visit suppression (owner 2026-08-30: no upsell after a
@@ -302,4 +316,5 @@ async function handleCrossSellTap({ db, serviceRecordId, metadata = {}, surface,
 
 module.exports = {
   handleCrossSellTap, loadCrossSellService, buildCrossSellForServiceRecord, linkReachesOnlyAccountHolder,
+  reportSuppressedForCustomer,
 };

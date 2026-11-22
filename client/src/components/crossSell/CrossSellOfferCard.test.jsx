@@ -43,6 +43,15 @@ describe('CrossSellOfferCard', () => {
     expect(document.body.textContent).not.toMatch(/\/mo|a month|per visit/i);
   });
 
+  // A one-time customer has no plan to add to: the server marks that offer
+  // relationship 'start', and the priced heading follows it.
+  it('a priced offer for a customer with no plan says "Start", not "Add … to your plan"', () => {
+    render(<CrossSellOfferCard offer={{ ...priced, relationship: 'start' }} submit={vi.fn()} />);
+    expect(screen.getByRole('heading', { name: 'Start lawn care' })).toBeInTheDocument();
+    expect(screen.getByText('$62.50 per application, priced for your home')).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/to your plan/i);
+  });
+
   it('showPrice={false} keeps the report\'s price-free copy', () => {
     render(<CrossSellOfferCard offer={priced} submit={vi.fn()} showPrice={false} />);
     expect(screen.getByRole('heading', { name: 'Want a quote for lawn care?' })).toBeInTheDocument();

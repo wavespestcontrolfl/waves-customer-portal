@@ -3450,8 +3450,17 @@ reaches the account holder alone (`linkReachesOnlyAccountHolder`: no
 third-party payer on the invoice, job or account, no service contact on the
 account; for the receipt also no distinct `notification_prefs.billing_email`,
 via the receipt email's own `getReceiptEmailRecipients`); otherwise, and with the gate off, the keys are absent and the
-payload is unchanged. A receipt with no `service_record_id`, or a visit whose
-report is not customer-deliverable, carries `referral` alone. The taps
+payload is unchanged. The payer check reads every place a payer can sit: the
+receipt reads its invoice, the account, and the job by both links an invoice
+carries (`invoices.scheduled_service_id` and the service record's); the
+tracker reads the job, the account, and any invoice of the visit (by
+`scheduled_service_id` or by the visit's service record). A receipt with no
+`service_record_id`, or (receipt and tracker alike) a visit whose report is
+not customer-deliverable (`structured_notes.typedReportDelivery` other than
+`auto_send`; `reportSuppressedForCustomer`), carries `referral` alone and its
+cross-sell tap is 404. A priced card for a customer with no recurring plan
+(`relationship: 'start'`) is headed "Start {service}", never "Add {service}
+to your plan"; the email line says the same. The taps
 (`POST /api/receipt/:token/cross-sell` | `/referral-link`, `POST
 /api/public/track/:token/cross-sell` | `/referral-link`; body
 `{ metadata }` for cross-sell, the report card's metadata shape) run the
@@ -3460,10 +3469,13 @@ one shared `service_requests` row with source `invoice_receipt` / `tracker`,
 `estimateUrl` with `GATE_REPORT_CLICK_TO_ESTIMATE`) and its referral composer
 (enrolls on the tap only). 404 when off or ineligible; a dark gate or a
 malformed token (receipt: the pay route's `^[A-Za-z0-9_-]{20,64}$`; tracker:
-64-hex) is the generic 404 AHEAD of the limiter and any DB read; while the
-gate is dark, `middleware/doc-card-tap-dark-guard.js` (mounted in
-`server/index.js` ahead of the global `/api/` limiter) answers both taps'
-generic 404 with the privacy headers, so the dark routes never answer 429; 5 a minute per token; a
+64-hex) is the generic 404 AHEAD of every limiter, the body parsers and any
+DB read: `middleware/doc-card-tap-dark-guard.js` (mounted in
+`server/index.js` ahead of the global `/api/` limiter) answers it for both
+taps, in any letter case of the route name and with or without a closing
+slash (Express's own route matching), so a dark route never answers 429 and
+a malformed token never reaches a limiter; the same guard puts the privacy
+headers on every answer to a tap, a limiter 429 included; 5 a minute per token; a
 complaint-driven (callback) visit carries neither card and its taps 404 while
 `GATE_RESERVICE_REPORT_COPY` is on (the report's rule);
 a receipt tap never records a receipt view. The receipt page shows the

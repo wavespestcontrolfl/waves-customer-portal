@@ -18,8 +18,9 @@ const { customerVisibleInvoiceNotes } = require('../services/invoice-notes');
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const {
-  loadReceiptCardInvoice, receiptCardsEligible, receiptCardsForToken,
+  loadReceiptCardInvoice, receiptCardsEligible, receiptOfferRecordId, receiptCardsForToken,
 } = require('../services/receipt-cards');
+const { CARD_TAP_SURFACES } = require('../middleware/doc-card-tap-dark-guard');
 
 // ── Add-a-service + referral cards (GATE_DOC_CROSS_SELL, owner 2026-11-21) ──
 // The service report's two cards on a paid receipt; who may see them lives
@@ -30,13 +31,13 @@ const RECEIPT_SURFACE = Object.freeze({ source: 'invoice_receipt', noun: 'receip
 
 // Ahead of the limiter on both taps: a dark gate or a malformed token is the
 // generic 404 before any limiter count or DB read, so a probe can never tell
-// the dark routes from missing ones by a 429. Token shape = the pay route's
-// (current 64-hex, legacy 25-32 url-safe).
-const RECEIPT_TOKEN_RE = /^[A-Za-z0-9_-]{20,64}$/;
+// the dark routes from missing ones by a 429. The same check, with the same
+// token shape, runs first in middleware/doc-card-tap-dark-guard.js ahead of
+// the global /api/ limiter; this one keeps the router safe by itself.
 function receiptCardRouteOpen(req, res, next) {
   if (!require('../config/feature-gates').isEnabled('docCrossSell')
-    || !RECEIPT_TOKEN_RE.test(String(req.params.token || ''))) {
-    return res.status(404).json({ error: 'Receipt not found' });
+    || !CARD_TAP_SURFACES.receipt.tokenRe.test(String(req.params.token || ''))) {
+    return res.status(404).json(CARD_TAP_SURFACES.receipt.notFoundBody);
   }
   return next();
 }
@@ -241,14 +242,16 @@ router.get('/:token/pdf', async (req, res, next) => {
 router.post('/:token/cross-sell', receiptCardRouteOpen, receiptCardActionLimiter, async (req, res, next) => {
   try {
     const data = await loadReceiptCardInvoice(req.params.token);
-    if (!receiptCardsEligible(data) || !data.service_record_id) {
+    // The same answer the page used to show (or not show) the offer.
+    const offerRecordId = receiptOfferRecordId(data);
+    if (!offerRecordId) {
       return res.status(404).json({ error: 'Receipt not found' });
     }
     const { handleCrossSellTap } = require('../services/service-report/cross-sell-tap');
     const metadata = req.body && typeof req.body.metadata === 'object' && req.body.metadata ? req.body.metadata : {};
     const { status, body } = await handleCrossSellTap({
       db,
-      serviceRecordId: data.service_record_id,
+      serviceRecordId: offerRecordId,
       metadata,
       surface: RECEIPT_SURFACE,
     });

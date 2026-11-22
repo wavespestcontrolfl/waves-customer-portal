@@ -5,15 +5,16 @@
  * (invoice-email.js), so the email never promises a card the page won't show.
  *
  * Eligible: a PAID invoice whose link reaches the account holder alone (no
- * third-party payer on the invoice or the account, no service contact on the
- * account — linkReachesOnlyAccountHolder; and the receipt email's own
+ * third-party payer on the invoice, the job or the account, no service
+ * contact on the account — linkReachesOnlyAccountHolder; and the receipt email's own
  * recipient resolver, getReceiptEmailRecipients, picks the account holder —
  * a distinct notification_prefs.billing_email means the receipt goes to
  * someone else), and not for a complaint-driven
  * visit (owner 2026-08-30, the report's rule: no upsell or referral ask after
  * a callback). The offer is the service report's
- * own composer over the visit the invoice is for; an invoice with no visit
- * carries the referral card alone.
+ * own composer over the visit the invoice is for; an invoice with no visit,
+ * or for a visit whose report never reaches the customer
+ * (receiptOfferRecordId), carries the referral card alone.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -26,11 +27,18 @@ function loadReceiptCardRow(where, database = db) {
   return database('invoices as i')
     .leftJoin('customers as c', 'i.customer_id', 'c.id')
     .leftJoin('service_records as sr', 'i.service_record_id', 'sr.id')
+    // The job, by either link an invoice carries: its own
+    // scheduled_service_id (an invoice made before completion) or the
+    // service record's. A job can bill a third party by itself.
+    .leftJoin('scheduled_services as ij', 'i.scheduled_service_id', 'ij.id')
+    .leftJoin('scheduled_services as rj', 'sr.scheduled_service_id', 'rj.id')
     .leftJoin('notification_prefs as np', 'np.customer_id', 'i.customer_id')
     .where(where)
     .first(
       'i.id', 'i.customer_id', 'i.status', 'i.payer_id', 'i.service_record_id',
       'c.payer_id as customer_payer_id',
+      'ij.payer_id as invoice_job_payer_id', 'rj.payer_id as record_job_payer_id',
+      'sr.structured_notes as visit_structured_notes',
       'c.email as customer_email', 'c.phone as customer_phone',
       'c.first_name as customer_first_name', 'c.company_name as customer_company_name',
       'np.billing_email', 'np.billing_contact_name',
@@ -59,7 +67,19 @@ function receiptCardsEligible(row) {
   const prefs = { billing_email: row.billing_email, billing_contact_name: row.billing_contact_name };
   if (getReceiptEmailRecipients(holder, prefs).some((r) => r.role !== 'primary')) return false;
   const { linkReachesOnlyAccountHolder } = require('./service-report/cross-sell-tap');
-  return linkReachesOnlyAccountHolder(row, [row.payer_id, row.customer_payer_id]);
+  return linkReachesOnlyAccountHolder(row, [
+    row.payer_id, row.customer_payer_id, row.invoice_job_payer_id, row.record_job_payer_id,
+  ]);
+}
+
+// The visit the receipt's OFFER is built from and tapped against, or null:
+// an eligible receipt, for a visit, whose report reaches the customer (an
+// office-only report gives no offer; the referral card still shows). One
+// answer for the page, the email line and the tap.
+function receiptOfferRecordId(row) {
+  if (!receiptCardsEligible(row) || !row.service_record_id) return null;
+  const { reportSuppressedForCustomer } = require('./service-report/cross-sell-tap');
+  return reportSuppressedForCustomer(row.visit_structured_notes) ? null : row.service_record_id;
 }
 
 // Best-effort: any failure answers {} and the receipt renders without cards.
@@ -67,9 +87,10 @@ async function cardsForReceiptRow(row, database = db) {
   try {
     if (!receiptCardsEligible(row)) return {};
     const cards = {};
-    if (row.service_record_id) {
+    const offerRecordId = receiptOfferRecordId(row);
+    if (offerRecordId) {
       const { buildCrossSellForServiceRecord } = require('./service-report/cross-sell-tap');
-      const crossSell = await buildCrossSellForServiceRecord(database, row.service_record_id);
+      const crossSell = await buildCrossSellForServiceRecord(database, offerRecordId);
       if (crossSell) cards.crossSell = crossSell;
     }
     const referral = await require('./referral-share').composeReferralCard();
@@ -104,6 +125,7 @@ async function receiptCardsForInvoiceId(invoiceId, database = db) {
 module.exports = {
   loadReceiptCardInvoice,
   receiptCardsEligible,
+  receiptOfferRecordId,
   receiptCardsForToken,
   receiptCardsForInvoiceId,
 };

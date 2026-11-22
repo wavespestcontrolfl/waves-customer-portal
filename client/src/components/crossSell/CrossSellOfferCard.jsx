@@ -46,6 +46,9 @@ export default function CrossSellOfferCard({ offer, submit, showPrice = true, cl
   const option = offer.option || {};
   const priceLine = showPrice ? crossSellPriceLine(offer) : null;
   const label = String(offer.label || '').toLowerCase();
+  // relationship 'start': the customer has no recurring plan (the offer
+  // follows a one-time visit), so there is no plan to add to.
+  const pricedHeading = offer.relationship === 'start' ? `Start ${label}` : `Add ${label} to your plan`;
   const handleRequest = async () => {
     if (requestState === 'sending' || requestState === 'sent') return;
     setRequestState('sending');
@@ -80,7 +83,7 @@ export default function CrossSellOfferCard({ offer, submit, showPrice = true, cl
   return (
     <section data-glass="card" className={className} data-section={dataSection} style={style || undefined}>
       <h2 style={styles.heading || undefined}>
-        {priceLine ? `Add ${label} to your plan` : `Want a quote for ${label}?`}
+        {priceLine ? pricedHeading : `Want a quote for ${label}?`}
       </h2>
       {priceLine && (
         <p className="cross-sell-price" style={styles.price || undefined}>

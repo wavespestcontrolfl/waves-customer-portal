@@ -15,6 +15,11 @@ test.each([
   [{ crossSell: OFFER, referral: REFERRAL }, 'Add lawn care to your plan or refer a friend from your receipt'],
   [{ crossSell: OFFER }, 'Add lawn care to your plan from your receipt'],
   [{ referral: REFERRAL }, 'Know someone who could use Waves? Share your referral link from your receipt'],
+  // A customer with no recurring plan has no plan to add to (the page's
+  // card says "Start lawn care" for the same offer).
+  [{ crossSell: { ...OFFER, relationship: 'start' }, referral: REFERRAL }, 'Start lawn care or refer a friend from your receipt'],
+  [{ crossSell: { ...OFFER, relationship: 'start' } }, 'Start lawn care from your receipt'],
+  [{ crossSell: { ...OFFER, relationship: 'add' } }, 'Add lawn care to your plan from your receipt'],
 ])('names only what the page shows: %j', (cards, lead) => {
   const line = docOfferEmailLine({ ...cards, url: URL, place: 'receipt' });
   expect(line.text).toBe(`${lead}: ${URL}`);

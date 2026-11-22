@@ -21,6 +21,7 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn() }));
 jest.mock('../services/service-report/cross-sell-tap', () => ({
   // The real who-may-see-it rule; only the offer and the tap are stubbed.
   linkReachesOnlyAccountHolder: jest.requireActual('../services/service-report/cross-sell-tap').linkReachesOnlyAccountHolder,
+  reportSuppressedForCustomer: jest.requireActual('../services/service-report/cross-sell-tap').reportSuppressedForCustomer,
   buildCrossSellForServiceRecord: jest.fn(),
   handleCrossSellTap: jest.fn(),
 }));
@@ -78,6 +79,10 @@ describe('GET /:token — the cards ride the receipt payload', () => {
     ['gate off', () => isEnabled.mockReturnValue(false)],
     ['payer-billed (the link goes to a third party)', () => mockFirst.mockResolvedValue({ ...INVOICE, payer_id: 'payer-1' })],
     ['account billed to a third-party payer', () => mockFirst.mockResolvedValue({ ...INVOICE, customer_payer_id: 3 })],
+    // A job can bill a third party by itself; the invoice reaches its job by
+    // its own link or by the service record's.
+    ['the job bills a third party (the invoice\'s own job link)', () => mockFirst.mockResolvedValue({ ...INVOICE, invoice_job_payer_id: 4 })],
+    ['the job bills a third party (the service record\'s job link)', () => mockFirst.mockResolvedValue({ ...INVOICE, record_job_payer_id: 4 })],
     ['a service contact can also get this link', () => mockFirst.mockResolvedValue({ ...INVOICE, service_contact_name: 'Tenant Tina', service_contact_email: 't@example.com' })],
     ['not paid', () => mockFirst.mockResolvedValue({ ...INVOICE, status: 'refunded' })],
     ['a distinct billing email gets this receipt', () => mockFirst.mockResolvedValue({ ...INVOICE, customer_email: 'pat@example.com', billing_email: 'books@example.com' })],
@@ -103,6 +108,38 @@ describe('GET /:token — the cards ride the receipt payload', () => {
   });
 });
 
+// An office-only report (a typed completion that is not auto_send) never
+// reaches the customer, so the receipt builds no offer from it and its tap
+// is closed; the referral card and its tap do not depend on the report.
+describe('a visit whose report never reaches the customer', () => {
+  beforeEach(() => mockFirst.mockResolvedValue({
+    ...INVOICE, visit_structured_notes: JSON.stringify({ typedReportDelivery: 'internal_only' }),
+  }));
+
+  test('the receipt carries the referral card alone', async () => {
+    const { res } = await call('get', '/:token');
+    const payload = res.json.mock.calls[0][0];
+    expect(payload).not.toHaveProperty('crossSell');
+    expect(payload.referral).toEqual(REFERRAL);
+    expect(tap.buildCrossSellForServiceRecord).not.toHaveBeenCalled();
+  });
+
+  test('the offer tap is 404 and records nothing; the referral tap still works', async () => {
+    const offerTap = await call('post', '/:token/cross-sell', { body: { metadata: { serviceKey: 'lawn_care', fingerprint: 'fp' } } });
+    expect(offerTap.res.statusCode).toBe(404);
+    expect(tap.handleCrossSellTap).not.toHaveBeenCalled();
+    referralShare.buildReferralShareForCustomer.mockResolvedValue({ code: 'WAVES-1' });
+    const referralTap = await call('post', '/:token/referral-link');
+    expect(referralTap.res.json).toHaveBeenCalledWith({ code: 'WAVES-1' });
+  });
+
+  test('an auto_send typed report keeps the offer', async () => {
+    mockFirst.mockResolvedValue({ ...INVOICE, visit_structured_notes: { typedReportDelivery: 'auto_send' } });
+    const { res } = await call('get', '/:token');
+    expect(res.json.mock.calls[0][0]).toEqual(expect.objectContaining({ crossSell: OFFER, referral: REFERRAL }));
+  });
+});
+
 describe('POST /:token/cross-sell — the report tap, on the receipt', () => {
   test('hands the visit and what was shown to the shared tap and relays its answer', async () => {
     tap.handleCrossSellTap.mockResolvedValue({ status: 200, body: { ok: true, estimateUrl: '/estimate/x' } });
@@ -122,6 +159,7 @@ describe('POST /:token/cross-sell — the report tap, on the receipt', () => {
   test.each([
     ['gate off', () => isEnabled.mockReturnValue(false)],
     ['payer-billed', () => mockFirst.mockResolvedValue({ ...INVOICE, payer_id: 'payer-1' })],
+    ['the job bills a third party', () => mockFirst.mockResolvedValue({ ...INVOICE, record_job_payer_id: 4 })],
     ['no visit on the invoice', () => mockFirst.mockResolvedValue({ ...INVOICE, service_record_id: null })],
     ['unknown token', () => mockFirst.mockResolvedValue(undefined)],
   ])('%s → 404, nothing recorded', async (_label, arrange) => {

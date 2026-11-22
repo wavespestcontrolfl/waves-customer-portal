@@ -902,12 +902,14 @@ const gates = {
   // same tap (services/service-report/cross-sell-tap.js), same click-to-
   // estimate gate. Customer-facing pricing surface on public token pages —
   // fail-closed ==='true'. Off: neither payload carries the keys and the
-  // new tap routes 404.
-  docCrossSell: process.env.GATE_DOC_CROSS_SELL === 'true',
+  // new tap routes 404. Read at call time, so unsetting it stops the cards
+  // and the taps in a running process.
+  get docCrossSell() { return process.env.GATE_DOC_CROSS_SELL === 'true'; },
 
   // One unpriced line in the receipt and service-report emails pointing at
   // those cards (owner 2026-11-21). Changes customer email copy — dark.
-  docCrossSellEmail: process.env.GATE_DOC_CROSS_SELL_EMAIL === 'true',
+  // Read at call time.
+  get docCrossSellEmail() { return process.env.GATE_DOC_CROSS_SELL_EMAIL === 'true'; },
 
   // "Your plan" section on the LIVE report (owner ask 2026-09-28): an active
   // plan member's completed-visit + re-service COUNTS for this calendar year
