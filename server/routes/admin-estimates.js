@@ -6011,16 +6011,22 @@ async function followUpLinkViewable(estimate) {
 }
 
 // The ready text says "your estimate is here: <link>": only for an open sent estimate (sent or viewed, where the Follow
-// Up button shows) whose expiry date, when it has one, is readable and still ahead.
+// Up button shows) whose expiry date, when it has one, is readable and still ahead. Never for a self-serve quote that
+// staff did not deliver: it gets no follow-up prompt anywhere (AGENTS.md, zero delivery), so no ready text either.
 async function followUpDraftOffersLink(estimate, now = Date.now()) {
   if (!['sent', 'viewed'].includes(estimate.status)) return false;
   if (estimate.expires_at && !(new Date(estimate.expires_at).getTime() > now)) return false;
+  const { isUndeliveredSelfServe } = require('../services/self-serve-estimates');
+  if (isUndeliveredSelfServe(estimate.source, parseEstimateData(estimate.estimate_data))) return false;
   return followUpLinkViewable(estimate);
 }
 
 // The send: a text that carries this estimate's link is refused when the link no longer opens (the estimate expired or
-// was pulled while the box was open). A text without the link is not judged here.
+// was pulled while the box was open). A text without the link is not judged here. Nor is a multi-property group: the
+// public page can still open a group link whose anchor expired (it leads to a live sibling), so a group keeps today's
+// send unchanged.
 async function followUpDeadLinkRefusal(estimate, message) {
+  if (estimate.estimate_group_id) return null;
   if (typeof message !== 'string' || !estimate.token || !message.includes(followUpLongUrl(estimate))) return null;
   if (await followUpLinkViewable(estimate)) return null;
   return {

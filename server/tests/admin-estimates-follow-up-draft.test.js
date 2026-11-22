@@ -217,6 +217,18 @@ describe('GET /:id/follow-up-draft', () => {
     expect(callSideBlockForEstimateData).toHaveBeenCalledWith(db, expect.anything(), { estimateStatus: 'viewed' });
   });
 
+  test('a self-serve quote that staff did not deliver gets no ready text; a delivered one does', async () => {
+    const undelivered = await draft(estimateRow({ source: 'plan_start', estimate_data: {} }));
+    expect(undelivered.res.json).toHaveBeenCalledWith({ message: null });
+    const delivered = await draft(estimateRow({
+      source: 'plan_start',
+      estimate_data: { deliveryState: { firstDeliveredAt: '2026-11-20T15:00:00.000Z' } },
+    }));
+    expect(delivered.res.json).toHaveBeenCalledWith({
+      message: `Hi Dana, it's Waves. Your Waves estimate is here: ${LONG} Any questions? Just reply to this text.`,
+    });
+  });
+
   test('a viewed estimate with an expiry date still ahead gets the ready text', async () => {
     const { res } = await draft(estimateRow({ status: 'viewed', expires_at: new Date(Date.now() + 86400000).toISOString() }));
     expect(res.json).toHaveBeenCalledWith({
@@ -298,6 +310,13 @@ describe('POST /:id/follow-up', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(shortenOrPassthrough).not.toHaveBeenCalled();
     expect(query.update).not.toHaveBeenCalled();
+  });
+
+  test('a multi-property group keeps today\'s send: the link check does not judge it', async () => {
+    isEstimateCustomerViewable.mockReturnValue(false);
+    const { res } = await send(estimateRow({ estimate_group_id: 'group-fixture' }), { message: `Here it is: ${LONG}` });
+    expect(res.status).not.toHaveBeenCalledWith(409);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 
   test('a text without the link is not judged by the link check', async () => {
