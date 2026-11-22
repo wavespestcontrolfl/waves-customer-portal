@@ -92,6 +92,11 @@ describe('completion estimate evidence', () => {
     expect(names(acceptedPricing(row(96, { service: 'rodent_bait' }), platinum))).toEqual(unnamed(24));
     expect(names(acceptedPricing(row(96, { service: 'rodent_bait', perApplicationBilled: true }), platinum)))
       .toEqual([['WaveGuard Platinum', 24, 20, true]]);
+    // A rate the row recorded for itself must be the tier's rate: a recorded 0% or another rate keeps one line.
+    expect(names(acceptedPricing(row(96, { discount: { appliedDiscountPercent: 0, effectiveDiscount: 0 } }), platinum))).toEqual(unnamed(24));
+    expect(names(acceptedPricing(row(96, { discount: { effectiveDiscount: 0.15 } }), platinum))).toEqual(unnamed(24));
+    expect(names(acceptedPricing(row(96, { discount: { appliedDiscountPercent: 0.2, effectiveDiscount: 0.2 } }), platinum)))
+      .toEqual([['WaveGuard Platinum', 24, 20, true]]);
     // A row with a custom label and no key of its own takes the service the schedule matched it to.
     const custom = row(96, { service: undefined, name: 'Exterior program' });
     expect(names(acceptedPricing(custom, platinum))).toEqual(unnamed(24));

@@ -170,16 +170,25 @@ function staffAdjustedRow(raw) {
   return adjusted !== null && adjusted !== money(raw.annualAfterDiscount);
 }
 
+// A discount rate the row itself recorded (the legacy mapper writes one on lawn rows, with no tier record) that is not
+// the estimate's tier rate: the row says it took another rate, or none.
+function rowRateConflicts(raw, rate) {
+  const discount = object(raw.discount);
+  return [discount.appliedDiscountPercent, discount.effectiveDiscount]
+    .some((recorded) => recorded != null && Number(recorded) !== Number(rate));
+}
+
 // The tier record that names a line's saving. The one on the line wins. Saved engine rows keep the tier on the
 // estimate's recurring block instead, with the list price on the row: such a line takes the estimate's tier only when
 // that tier's rate on the list price is the whole saving (to the engine's rounding), no service credit shares it, the
 // row's service takes the tier percentage (estimate-public.js recurringServiceReceivesTierDiscount: not palm
 // injection's flat credit, not a legacy rodent row), the row is not flagged out of percentage discounts and staff did
-// not move the row's own price. The service is the row's own key, else the key the schedule matched the line to
-// (`serviceKey`), the order the schedule mapper uses.
+// not move the row's own price, and a rate the row recorded for itself is the tier's rate. The service is the row's
+// own key, else the key the schedule matched the line to (`serviceKey`), the order the schedule mapper uses.
 function namingTier(raw, base, savings, { estimateTier, credited, serviceKey }) {
   const lineTier = (object(raw.discount).appliedDiscounts || []).find((item) => item.type === 'waveguard');
   const inferable = !credited && !!estimateTier && !lineFlagsBlockPercentDiscount(raw) && !staffAdjustedRow(raw)
+    && !rowRateConflicts(raw, estimateTier.amount)
     && require('../routes/estimate-public').recurringServiceReceivesTierDiscount({ ...raw, service: raw.service || serviceKey || undefined });
   if (lineTier || !inferable) return lineTier || null;
   const tierSavings = tierSavingsOn(base, Number(estimateTier.amount));
