@@ -51,8 +51,13 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     ({ dispatch } = require('../services/llm/call'));
     KnowledgeBridge = require('../services/knowledge-bridge');
   }, 60000);
-  afterAll(async () => { if (db) await db.dispose(); });
+  const savedGate = process.env.GATE_LAWN_REC_PREPARE;
+  afterAll(async () => {
+    if (savedGate === undefined) delete process.env.GATE_LAWN_REC_PREPARE; else process.env.GATE_LAWN_REC_PREPARE = savedGate;
+    if (db) await db.dispose();
+  });
   beforeEach(async () => {
+    process.env.GATE_LAWN_REC_PREPARE = 'true';
     dispatch.mockReset();
     mockCreate.mockReset();
     KnowledgeBridge._test.preparedAnswers.clear();
@@ -206,6 +211,20 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
 
     expect(dispatch).toHaveBeenCalledTimes(2);
     expect((await stored(assessment.id)).summary).toBe('Completion summary.');
+  });
+
+  test.each([undefined, 'false', '1'])('GATE_LAWN_REC_PREPARE = %p at completion: an answer held from before is not used', async (value) => {
+    const assessment = await seedAssessment();
+    answersWith('Prepared summary.', 'Completion summary.');
+    await KnowledgeBridge.prepareAssessmentRecommendations(assessment.id, [FERTILIZER]);
+    await saveVisitRows(assessment.id, [FERTILIZER]);
+    if (value === undefined) delete process.env.GATE_LAWN_REC_PREPARE; else process.env.GATE_LAWN_REC_PREPARE = value;
+
+    await KnowledgeBridge.generateAssessmentRecommendations(assessment.id);
+
+    expect(dispatch).toHaveBeenCalledTimes(2);
+    expect((await stored(assessment.id)).summary).toBe('Completion summary.');
+    expect(KnowledgeBridge._test.preparedAnswers.has(assessment.id)).toBe(false);
   });
 
   test('one answer is used once: a later regeneration asks the model again', async () => {

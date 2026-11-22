@@ -779,7 +779,10 @@ function heldPreparedAnswer(held, promptKey) {
 async function preparedAnswer(assessmentId, promptKey) {
   const one = heldPreparedAnswer(_preparedAnswers.get(assessmentId), promptKey);
   _preparedAnswers.delete(assessmentId);
-  if (!one) return null;
+  // GATE_LAWN_REC_PREPARE is the off switch for the use too: with it off, an
+  // answer held from before the flip is dropped and the run makes its own call.
+  // `?.`: a suite that mocks the whole gate module reads as off.
+  if (!one || require('../config/feature-gates').lawnRecPrepareLive?.() !== true) return null;
   const answer = await one.answer;
   if (answer) logger.info(`[knowledge-bridge] grounded recommendations for ${assessmentId} use the answer prepared before completion`);
   return answer;
