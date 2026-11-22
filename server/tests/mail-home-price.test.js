@@ -165,6 +165,8 @@ describe('one row', () => {
     expect(resultOf(t.deps, a)).toMatchObject({ status: 'not_clean', reason: 'engine_review' });
     expect(resultOf(t.deps, b)).toMatchObject({ status: 'failed', reason: 'engine' });
     expect(summary.byReason).toEqual({ 'not_clean/engine_review': 1, 'failed/engine': 1 });
+    // One engine failure among answers is a row's result, not a failed run.
+    expect(summary).toMatchObject({ quotes: 2, engineFailures: 1, engineStop: false });
   });
 
   test('a row whose source is stopped is left as it is: not saved, counted as left, and the run is still good', async () => {
@@ -234,10 +236,23 @@ describe('limits that do not fail the run', () => {
     expect(summary).toMatchObject({ due: 6, budgetSpent: true, left: 0, capReached: false });
   });
 
-  test('the run takes a time in ms as well as a clock function', async () => {
-    const t = setup({ rows: [makeRow()] });
-    await runHomePrices({ now: NOW, deps: t.deps });
-    expect(t.deps.dueForPrice).toHaveBeenCalledWith({ limit: 40, now: new Date(NOW) });
+  test('a time in ms is the run\'s start: the clock still advances, so the budget and the elapsed time are real', async () => {
+    const realNow = jest.spyOn(Date, 'now');
+    try {
+      let real = 5000000;
+      realNow.mockImplementation(() => real);
+      const rows = Array.from({ length: 6 }, () => makeRow());
+      const t = setup({ rows, savePriceResult: jest.fn(async () => { real += BUDGET_MS / 3; return { written: true }; }) });
+      const summary = await runHomePrices({ now: NOW, deps: t.deps });
+      expect(t.deps.dueForPrice).toHaveBeenCalledWith({ limit: 40, now: new Date(NOW) });
+      expect(saved(t.deps)).toHaveLength(3);
+      expect(summary).toMatchObject({ due: 6, budgetSpent: true, ms: BUDGET_MS });
+      // The facts reader's clock is the same advancing one.
+      const [options] = homeFacts.createFactsContext.mock.calls[0];
+      expect(options.clock()).toBe(NOW + BUDGET_MS);
+    } finally {
+      realNow.mockRestore();
+    }
   });
 
   test('no due row is an empty run', async () => {
@@ -289,6 +304,23 @@ describe('errors that are not a source being away', () => {
     expect(refused.deps.permitFacts).toHaveBeenCalledTimes(6);
   });
 
+  test('a row the table refused is an answer from the database: it starts the count of errors in a row again', async () => {
+    const rows = Array.from({ length: 8 }, () => makeRow());
+    const away = () => { throw Object.assign(new Error('x'), { code: 'ECONNRESET' }); };
+    const refused = () => { throw Object.assign(new Error('x'), { code: '23514' }); };
+    const answers = [away, away, refused, away, away, refused, away, away];
+    const t = setup({ rows, savePriceResult: jest.fn(async () => answers.shift()()) });
+    const failure = await t.run().catch((err) => err);
+    expect(t.deps.savePriceResult).toHaveBeenCalledTimes(8);
+    expect(failure.summary).toMatchObject({ errorStop: false, errors: { ECONNRESET: 6, 23514: 2 } });
+    // A TypeError between two connection errors says nothing about the database: the count goes on.
+    const mixed = [away, away, () => { throw new TypeError('x'); }, away, away];
+    const stopped = setup({ rows, savePriceResult: jest.fn(async () => mixed.shift()()) });
+    const stop = await stopped.run().catch((err) => err);
+    expect(stopped.deps.savePriceResult).toHaveBeenCalledTimes(4);
+    expect(stop.summary.errorStop).toBe(true);
+  });
+
   test('a TypeError from the save (a bare id, a bad result) is the row\'s own error and does not stop the run', async () => {
     const t = setup({ rows: Array.from({ length: 5 }, () => makeRow()), savePriceResult: jest.fn(async () => { throw new TypeError('x'); }) });
     await expect(t.run()).rejects.toThrow(/TypeError: 5/);
@@ -299,6 +331,47 @@ describe('errors that are not a source being away', () => {
     const t = setup({ dueForPrice: jest.fn(async () => { throw Object.assign(new Error('select * from mail_prospects where x = 101 EXAMPLE TRL'), { code: '57P01' }); }) });
     const failure = await t.run().catch((err) => err);
     expect(failure.message).toBe('Mail home prices: the due rows could not be read (57P01)');
+  });
+});
+
+describe('a price engine that is away', () => {
+  const ENGINE_FAILED = { status: 'failed', reason: 'engine', ...FACTS };
+
+  test('three price engine failures in a row stop the run: the three rows are saved as failed, the rest waits, and the run throws', async () => {
+    const rows = Array.from({ length: 6 }, () => makeRow());
+    priceHome.mockResolvedValue(ENGINE_FAILED);
+    const t = setup({ rows });
+    const failure = await t.run().catch((err) => err);
+    expect(failure.message).toBe('Mail home prices: stopped after 3 price engine failures in a row');
+    expect(priceHome).toHaveBeenCalledTimes(3);
+    expect(saved(t.deps).map(([row]) => row)).toEqual(rows.slice(0, 3));
+    expect(failure.summary).toMatchObject({ engineStop: true, quotes: 3, engineFailures: 3, priced: 0, byReason: { 'failed/engine': 3 } });
+  });
+
+  test('an answer from the engine starts the count again: two failures, a price, two failures do not stop the run or fail it', async () => {
+    const rows = Array.from({ length: 5 }, () => makeRow());
+    priceHome
+      .mockResolvedValueOnce(ENGINE_FAILED).mockResolvedValueOnce(ENGINE_FAILED)
+      .mockResolvedValueOnce(PRICED)
+      .mockResolvedValueOnce(ENGINE_FAILED).mockResolvedValueOnce(ENGINE_FAILED);
+    const summary = await setup({ rows }).run();
+    expect(summary).toMatchObject({ engineStop: false, quotes: 5, engineFailures: 4, priced: 1 });
+  });
+
+  test('a short run where the engine failed for every home it was asked is a failed run', async () => {
+    const [a, b] = [makeRow(), makeRow()];
+    priceHome.mockResolvedValue(ENGINE_FAILED);
+    const t = setup({ rows: [a, b] });
+    const failure = await t.run().catch((err) => err);
+    expect(failure.message).toBe('Mail home prices: the price engine failed for every home it was asked (2)');
+    expect(saved(t.deps)).toHaveLength(2);
+    // A not-clean answer is an answer: a run of only not-clean homes is a good run.
+    priceHome.mockResolvedValue({ status: 'not_clean', reason: 'engine_review', ...FACTS });
+    expect(await setup({ rows: [makeRow()] }).run()).toMatchObject({ quotes: 1, engineFailures: 0 });
+    // A run that asked for no price (a townhouse) is a good run.
+    const town = makeRow();
+    expect(await setup({ rows: [town], permits: { [town.permit_no]: permitOf({ type_of_work: 'New Townhouse' }) } }).run())
+      .toMatchObject({ quotes: 0, engineFailures: 0 });
   });
 });
 

@@ -16,10 +16,12 @@
  * writes are the price columns of mail_prospects and the permit page result (through the permit reader's recordResult).
  * Nothing calls runHomePrices yet: the cron tick is the next PR.
  *
- * Limits: strictly sequential; a 20 minute budget; at most 40 rows. Several errors in a row that are not a row's own
- * stop the run. The run THROWS at its end, after logging, when a source was away (the facts reader says so), when a row
- * could not be read or saved, or when the database was away, so the job's health row records a failure. Rows left only
- * by the row cap or the budget do not make it throw.
+ * Limits: strictly sequential; a 20 minute budget; at most 40 rows. Three errors in a row that are not a row's own
+ * stop the run (the database is away), and so do three price engine failures in a row (the engine or the live price
+ * list is away). The run THROWS at its end, after logging, when a source was away (the facts reader says so), when the
+ * price engine failed for every home it was asked or three times in a row, when a row could not be read or saved, or
+ * when the database was away, so the job's health row records a failure. Rows left only by the row cap or the budget do
+ * not make it throw.
  *
  * The log line holds counts and codes only: never a name, an address, a parcel number or a permit number.
  */
@@ -31,6 +33,7 @@ const { priceHome } = require('./home-quote');
 const BUDGET_MS = 20 * 60 * 1000;
 const ROW_CAP = 40;
 const MAX_ERRORS_IN_A_ROW = 3;
+const MAX_ENGINE_FAILURES_IN_A_ROW = 3;
 const SINGLE_FAMILY_WORK = 'new single family';
 
 // The store, loaded here, not at the top: a test that injects the three calls never opens the database module.
@@ -61,7 +64,15 @@ async function resultFor(row, ctx) {
   if (read.left) return null;
   if (read.failed) return { status: 'failed', reason: read.failed, ...read.facts };
   if (read.missing) return { status: 'missing_fact', reason: read.missing, ...read.facts };
-  return priceHome(row, read.facts, ctx.deps);
+  const result = await priceHome(row, read.facts, ctx.deps);
+  // The price engine's own failures are counted: a row's failed / engine result is saved (tried again later), but an
+  // engine that is away must fail the run and must not be asked 40 times.
+  const { state } = ctx;
+  const engineFailed = result.status === 'failed' && result.reason === 'engine';
+  state.quotes += 1;
+  state.engineFailures += engineFailed ? 1 : 0;
+  state.engineStreak = engineFailed ? state.engineStreak + 1 : 0;
+  return result;
 }
 
 async function handleRow(row, ctx) {
@@ -81,21 +92,33 @@ async function handleRow(row, ctx) {
   if (result.reason) bump(state.byReason, `${result.status}/${result.reason}`);
 }
 
-// An error of this row's own data (a TypeError, a value the table refused) says nothing about the database.
-const isRowsOwnError = (err) => err?.name === 'TypeError' || err?.name === 'RangeError' || /^2[23][0-9A-Z]{3}$/.test(String(err?.code || ''));
+// A value the table refused (SQLSTATE class 22 or 23) is this row's own error, and it is an answer from the database.
+const tableRefused = (err) => /^2[23][0-9A-Z]{3}$/.test(String(err?.code || ''));
+// A TypeError or RangeError is this row's own error too, but it says nothing about the database (the store throws it
+// before any query).
+const isArgumentError = (err) => err?.name === 'TypeError' || err?.name === 'RangeError';
 
-// The due rows, one at a time, until the budget is spent or the database is away.
+// The streak of errors that are not a row's own, after one more error: an answer from the database starts it again,
+// an argument error leaves it as it is, anything else adds one.
+function nextErrorStreak(streak, err) {
+  if (tableRefused(err)) return 0;
+  return isArgumentError(err) ? streak : streak + 1;
+}
+
+// The due rows, one at a time, until the budget is spent, the database is away or the price engine is away.
 async function handleDueRows(due, ctx, startedAt, summary) {
   let errorStreak = 0;
   for (const row of due) {
     if (ctx.clock() - startedAt >= BUDGET_MS) { summary.budgetSpent = true; return; }
     // Several errors in a row that are not a row's own mean the database is away: the rest waits.
     if (errorStreak >= MAX_ERRORS_IN_A_ROW) { summary.errorStop = true; return; }
+    // Several price engine failures in a row mean the engine or the live price list is away: the rest waits.
+    if (ctx.state.engineStreak >= MAX_ENGINE_FAILURES_IN_A_ROW) { summary.engineStop = true; return; }
     try {
       await handleRow(row, ctx);
       errorStreak = 0;
     } catch (err) {
-      if (!isRowsOwnError(err)) errorStreak += 1;
+      errorStreak = nextErrorStreak(errorStreak, err);
       bump(ctx.state.errors, errorCode(err));
     }
   }
@@ -112,8 +135,11 @@ async function readDueRows(d, startedAt) {
 
 // Why the run is a failed run: what the facts reader reports, and this run's own errors. Counts and codes only.
 function problemsOf(ctx, summary) {
-  const problems = homeFacts.factsProblems(ctx.facts);
+  const problems = [...homeFacts.factsProblems(ctx.facts)]; // a copy: the reader's own list is not this function's to change
   if (summary.errorStop) problems.push('stopped after errors in a row');
+  const { quotes, engineFailures } = ctx.state;
+  if (summary.engineStop) problems.push(`stopped after ${MAX_ENGINE_FAILURES_IN_A_ROW} price engine failures in a row`);
+  else if (quotes > 0 && engineFailures === quotes) problems.push(`the price engine failed for every home it was asked (${quotes})`);
   const errors = Object.entries(ctx.state.errors);
   if (errors.length) {
     const count = errors.reduce((sum, [, n]) => sum + n, 0);
@@ -122,22 +148,32 @@ function problemsOf(ctx, summary) {
   return problems;
 }
 
+// The run's clock. A function is used as it is. A time in ms is the run's START: the clock then advances with real
+// time from it, so the budget and the 20-hour page rule still measure elapsed time.
+function clockOf(now) {
+  if (typeof now === 'function') return () => Number(now());
+  const start = Number(now);
+  const realStart = Date.now();
+  return () => start + (Date.now() - realStart);
+}
+
 /**
- * One run of the pass. `now` is a clock function or a time in ms. `deps` replaces an outside call (tests): the three
- * store calls here (dueForPrice, permitFacts, savePriceResult), and the ones home-facts and home-quote take. Returns the
- * summary; throws after logging it when the run is a failed run (see the top of the file).
+ * One run of the pass. `now` is a clock function, or the run's start time in ms. `deps` replaces an outside call
+ * (tests): the three store calls here (dueForPrice, permitFacts, savePriceResult), and the ones home-facts and home-quote
+ * take. Returns the summary; throws after logging it when the run is a failed run (see the top of the file).
  */
 async function runHomePrices({ now = Date.now, deps } = {}) {
   const d = resolveDeps(deps);
-  const clock = typeof now === 'function' ? () => Number(now()) : () => Number(now);
+  const clock = clockOf(now);
   const startedAt = clock();
-  const state = { left: 0, kept: 0, byStatus: {}, byReason: {}, errors: {} };
+  const state = { left: 0, kept: 0, byStatus: {}, byReason: {}, errors: {}, quotes: 0, engineFailures: 0, engineStreak: 0 };
   const ctx = { d, deps: d, state, clock, facts: homeFacts.createFactsContext({ deps: d, clock }) };
   const due = await readDueRows(d, startedAt);
-  const summary = { due: due.length, capReached: due.length >= ROW_CAP, budgetSpent: false, errorStop: false };
+  const summary = { due: due.length, capReached: due.length >= ROW_CAP, budgetSpent: false, errorStop: false, engineStop: false };
   await handleDueRows(due, ctx, startedAt, summary);
   Object.assign(summary, {
     priced: state.byStatus.priced || 0, byStatus: state.byStatus, byReason: state.byReason, left: state.left, kept: state.kept,
+    quotes: state.quotes, engineFailures: state.engineFailures,
     ...homeFacts.factsSummary(ctx.facts), errors: state.errors, ms: clock() - startedAt,
   });
   logger.info(`Mail home prices: ${JSON.stringify(summary)}`);
@@ -146,4 +182,4 @@ async function runHomePrices({ now = Date.now, deps } = {}) {
   return summary;
 }
 
-module.exports = { runHomePrices, BUDGET_MS, ROW_CAP, MAX_ERRORS_IN_A_ROW };
+module.exports = { runHomePrices, BUDGET_MS, ROW_CAP, MAX_ERRORS_IN_A_ROW, MAX_ENGINE_FAILURES_IN_A_ROW };
