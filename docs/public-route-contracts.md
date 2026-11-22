@@ -3474,7 +3474,7 @@ under `GATE_REPORT_CROSS_SELL`, not on a callback report) carries the
 `referral` card from `composeReferralCard` (`services/referral-share.js`):
 the static headline + CTA, and with `GATE_REFERRAL_STEP2` on an `offer`
 string whose amounts come from the live referral settings (the member
-sentence is dropped at the yearly limit; no sentence at all when the
+sentence is dropped at the yearly limit; no card at all when the
 program is paused or its settings are unreadable). Read-only: a render
 enrolls no promoter, writes nothing and carries no personal data.
 
@@ -9365,7 +9365,8 @@ owner-voice share copy, exact-cents referee amount). The RENDER payloads
 (/data, the accept response, the already-accepted retry) carry only the
 static headline + CTA via `composeReferralCard`, plus an `offer` string
 while `GATE_REFERRAL_STEP2` is on (amounts from the live referral
-settings; the member sentence is dropped at the yearly limit; read-only,
+settings; the member sentence is dropped at the yearly limit; no card
+when the program is paused or its settings are unreadable; read-only,
 no personal data); enrollment happens on the tap only, never on a read. Guards: gate with a gate-aware limiter skip
 (dark = generic 404), token format gate, 5/min shared IPv6-safe key, the
 durable call-side linkage verdict, full customer-viewability +

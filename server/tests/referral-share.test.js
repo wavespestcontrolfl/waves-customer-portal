@@ -76,12 +76,17 @@ describe('composeReferralCard with GATE_REFERRAL_STEP2 (the offer line)', () => 
     mockEngine.referralOfferDecision.mockResolvedValue(decision({ refereeCents: 0 }));
     expect((await composeReferralCard({ customerId: 'cust-1' })).offer).toBe('You get $25.');
   });
-  test('gate on, no sentence left or a skipped decision: the static copy, no offer key', async () => {
+  test('gate on, no sentence left: the static copy, no offer key', async () => {
     gates.referralStep2 = true;
     mockEngine.referralOfferDecision.mockResolvedValue(decision({ refereeCents: 0, memberCents: 0 }));
     expect(await composeReferralCard({ customerId: 'cust-1' })).toEqual(REFERRAL_CARD_COPY);
+  });
+  test('gate on, a skipped decision (program paused or settings unreadable after the first read): no card, so no button that would answer 404', async () => {
+    gates.referralStep2 = true;
     mockEngine.referralOfferDecision.mockResolvedValue({ gateOn: true, skip: true, atLimit: false, reason: 'program paused' });
-    expect(await composeReferralCard({ customerId: 'cust-1' })).toEqual(REFERRAL_CARD_COPY);
+    expect(await composeReferralCard({ customerId: 'cust-1' })).toBeNull();
+    mockEngine.referralOfferDecision.mockResolvedValue({ gateOn: true, skip: true, atLimit: false, reason: 'settings unavailable' });
+    expect(await composeReferralCard({ customerId: 'cust-1' })).toBeNull();
   });
   test('gate on, no customer id: the static copy and no decision read', async () => {
     gates.referralStep2 = true;

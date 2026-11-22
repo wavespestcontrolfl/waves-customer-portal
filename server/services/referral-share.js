@@ -32,13 +32,16 @@ const REFERRAL_CARD_COPY = Object.freeze({
 // referralOfferDecision (the one place that reads the gate, the amounts and the
 // yearly limit). `headline` stays as it is: cached client builds print it in an h2.
 // A read: nothing here enrolls a promoter or writes. Gate off, or no customer id,
-// or no promise to make: the static copy exactly.
+// or no sentence left: the static copy exactly. A skipped decision (the program
+// paused or the settings unreadable since the read above): no card, as for an
+// inactive program, because the card's button would answer 404.
 async function composeReferralCard({ referralEngine = require('./referral-engine'), customerId = null, conn = null } = {}) {
   const settings = conn ? await referralEngine.getLiveSettings(conn) : await referralEngine.getLiveSettings();
   if (!settings?.program_active) return null;
   if (!customerId || !isEnabled('referralStep2')) return { ...REFERRAL_CARD_COPY };
   const decision = await referralEngine.referralOfferDecision(conn || require('../models/db'), customerId);
-  const offer = decision.skip ? '' : step2.shareCardOffer(decision);
+  if (decision.skip) return null;
+  const offer = step2.shareCardOffer(decision);
   return offer ? { ...REFERRAL_CARD_COPY, offer } : { ...REFERRAL_CARD_COPY };
 }
 
