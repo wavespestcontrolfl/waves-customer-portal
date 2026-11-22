@@ -224,8 +224,15 @@ describe('samePremiseDisplay', () => {
     const fold = { requireLocality: true, foldStreetWords: true };
 
     expect(samePremiseDisplay(short, '1260 Example Port Dr, Parrish, FL 34219', fold)).toBe(false);
-    // "St" for Saint is not "Saint": only street-type words fold.
+    // Inside a street name "St" is also Saint and "Dr" is also Doctor:
+    // those two never fold there, short or in full.
     expect(samePremiseDisplay('1260 St Example Dr, Parrish, FL 34219', '1260 Saint Example Dr, Parrish, FL 34219', fold)).toBe(false);
+    expect(samePremiseDisplay('1260 St Example Dr, Parrish, FL 34219', '1260 Street Example Dr, Parrish, FL 34219', fold)).toBe(false);
+    expect(samePremiseDisplay('1260 Dr Example Blvd, Parrish, FL 34219', '1260 Drive Example Blvd, Parrish, FL 34219', fold)).toBe(false);
+    expect(samePremiseDisplay('1260 Port St Example Blvd, Parrish, FL 34219', '1260 Port Street Example Blvd, Parrish, FL 34219', fold)).toBe(false);
+    // The word that ends the street still folds, as without the option.
+    expect(samePremiseDisplay('1260 St Example Dr, Parrish, FL 34219', '1260 St Example Drive, Parrish, FL 34219', fold)).toBe(true);
+    expect(samePremiseDisplay('1260 Example Pt St, Parrish, FL 34219', '1260 Example Point Street, Parrish, FL 34219', fold)).toBe(true);
     expect(samePremiseDisplay(short, '1250 Example Point Dr, Parrish, FL 34219', fold)).toBe(false);
     expect(samePremiseDisplay(short, '1260 Example Point Dr, Bradenton, FL 34219', fold)).toBe(false);
     expect(samePremiseDisplay(short, '1260 Example Point Dr, Parrish, FL 34221', fold)).toBe(false);

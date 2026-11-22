@@ -60,10 +60,18 @@ const streetKeyNoUnit = (v) => {
 // ("12 sample point dr" = "12 sample pt dr", "12 state road 64" = "12 state
 // rd 64"). streetKeyNoUnit folds only the word that ends the street. Same
 // table. Only for a caller that asks (samePremiseDisplay `foldStreetWords`).
+// Not folded: "st" and "dr". Inside a street name they are also Saint and
+// Doctor ("12 St George Dr" is not "12 Street George Dr"), so those two
+// stay as typed (pre-push audit P1). The word that ends the street is
+// already folded by streetKeyNoUnit.
+const TWO_MEANINGS_INSIDE_A_STREET_NAME = new Set(['ST', 'DR']);
 const streetKeyWordsFolded = (key) => {
   const { STREET_SUFFIX_ALIASES } = require('../utils/address-normalizer');
   return String(key || '').split(' ')
-    .map((word) => (Object.hasOwn(STREET_SUFFIX_ALIASES, word) ? STREET_SUFFIX_ALIASES[word].toLowerCase() : word))
+    .map((word) => {
+      const alias = Object.hasOwn(STREET_SUFFIX_ALIASES, word) ? STREET_SUFFIX_ALIASES[word] : null;
+      return alias && !TWO_MEANINGS_INSIDE_A_STREET_NAME.has(alias) ? alias.toLowerCase() : word;
+    })
     .join(' ');
 };
 const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
@@ -138,7 +146,8 @@ function flagCoversAddress(flag, address) {
 // so a street-only submission can never match a published estimate for
 // that street in some other town (pre-push audit P1).
 // `foldStreetWords`: a street-type word written short or in full INSIDE the
-// street name is the same street too ("Sample Point Dr" = "Sample Pt Dr").
+// street name is the same street too ("Sample Point Dr" = "Sample Pt Dr";
+// not "St" or "Dr", which are also Saint and Doctor there).
 // Off unless asked: the wizard's web-form-draft rule asks
 // (estimate-automation-duplicates.js sameDoor, with its own contact, house
 // number and unit tests). Every other caller keeps the key it had.

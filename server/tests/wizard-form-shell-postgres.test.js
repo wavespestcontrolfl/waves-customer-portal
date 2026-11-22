@@ -246,6 +246,16 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     expect(await shellsOnly({ address: onRun })).toBe(false);
   });
 
+  // "St" is also Saint and "Dr" is also Doctor inside a street name.
+  test.each([
+    ['St', '12 St Sample Dr, Parrish, FL 34219', '12 Street Sample Dr, Parrish, FL 34219'],
+    ['Dr', '12 Dr Sample Blvd, Parrish, FL 34219', '12 Drive Sample Blvd, Parrish, FL 34219'],
+  ])('"%s" inside the street name is not folded: the draft still blocks', async (_word, onDraft, onRun) => {
+    await estimate({ address: onDraft });
+
+    expect(await shellsOnly({ address: onRun })).toBe(false);
+  });
+
   test.each([
     ['Sample St, Parrish, FL 34219'],
     // A numbered street is not a house number.
