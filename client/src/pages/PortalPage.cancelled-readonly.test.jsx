@@ -188,9 +188,11 @@ describe('BillingTab — add-a-service and refer cards', () => {
   it('a purchase confirmed from the Billing offer reloads the customer and the offers', async () => {
     window.history.replaceState({}, '', '/?stripe_setup_flow=one_tap_card&setup_intent=si_1&redirect_status=succeeded&one_tap_resume=p-7');
     try {
+      // The second read fails: the offer for the service just bought must
+      // still go away, and must not come back.
       api.getPropertyRecommendations
         .mockResolvedValueOnce(RECS)
-        .mockResolvedValue({ available: true, oneTap: false, cards: [] });
+        .mockRejectedValue(new Error('recommendations read failed'));
       api.saveStripeCard.mockResolvedValue({});
       api.oneTapGet.mockResolvedValue(heldPurchase());
       api.oneTapConfirm.mockResolvedValue({

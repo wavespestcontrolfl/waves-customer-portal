@@ -727,14 +727,15 @@ function usePropertyScore() {
 // card renders nothing). Best-effort: a failed load just hides the card.
 // =========================================================================
 // reloadKey: a host that changes it reads the stack again (Billing does,
-// after a purchase from its offer card). A read that comes back with no
-// cards clears the stack, so a bought service is no longer offered; a failed
-// read keeps what is shown.
+// after a purchase from its offer card). A reload starts from an empty
+// stack: what was shown is out of date (it offers the service just bought),
+// and only a read that succeeds may show cards again.
 function usePropertyRecommendations(enabled = true, reloadKey = 0) {
   const [data, setData] = useState(null);
   useEffect(() => {
     if (!enabled) return undefined;
     let cancelled = false;
+    if (reloadKey > 0) setData(null);
     api.getPropertyRecommendations()
       .then(d => { if (!cancelled) setData(d?.available && d.cards?.length ? d : null); })
       .catch(() => {});
