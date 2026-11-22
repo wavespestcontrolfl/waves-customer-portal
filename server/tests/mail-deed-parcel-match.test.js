@@ -37,13 +37,19 @@ describe('parseLegal', () => {
 describe('parcelWhere', () => {
   test('lot and subdivision prefix, block when there is one', () => {
     expect(parcelWhere({ lot: '171', block: null, subdivision: 'RYE RANCH' }))
-      .toBe("PAR_SUBDIV_LOT = '171' AND (PAR_SUBDIV_NAME = 'RYE RANCH' OR PAR_SUBDIV_NAME LIKE 'RYE RANCH %')");
+      .toBe("PAR_SUBDIV_LOT = '171' AND PAR_SUBDIV_NAME LIKE 'RYE RANCH%'");
     expect(parcelWhere({ lot: '171', block: '48', subdivision: 'RYE RANCH' }))
-      .toBe("PAR_SUBDIV_LOT = '171' AND (PAR_SUBDIV_NAME = 'RYE RANCH' OR PAR_SUBDIV_NAME LIKE 'RYE RANCH %') AND PAR_SUBDIV_BLOCK = '48'");
+      .toBe("PAR_SUBDIV_LOT = '171' AND PAR_SUBDIV_NAME LIKE 'RYE RANCH%' AND PAR_SUBDIV_BLOCK = '48'");
   });
   test('an apostrophe is doubled so it cannot end the string', () => {
-    expect(parcelWhere(parseLegal("LOT 5 O'NEIL ESTATES")))
-      .toBe("PAR_SUBDIV_LOT = '5' AND (PAR_SUBDIV_NAME = 'O''NEIL ESTATES' OR PAR_SUBDIV_NAME LIKE 'O''NEIL ESTATES %')");
+    expect(parcelWhere(parseLegal("LOT 5 O'NEIL ESTATES"))).toBe("PAR_SUBDIV_LOT = '5' AND PAR_SUBDIV_NAME LIKE 'O''NEIL ESTATES%'");
+  });
+  test('plain field comparisons joined by AND only: the shape the county firewall answers', () => {
+    for (const text of ['LOT 171 RYE RANCH', 'LOT 36 BLK 48 NORTH RIVER RANCH', "LOT 5 O'NEIL ESTATES PH I-A", 'LOT 12A TOWN & COUNTRY ESTATES']) {
+      const where = parcelWhere(parseLegal(text));
+      expect(where).not.toMatch(/\bOR\b|\(|\)|UPPER|LOWER|;|--/);
+      expect(where.split(' AND ').every((part) => /^PAR_SUBDIV_(LOT|BLOCK) = '[^']+'$|^PAR_SUBDIV_NAME LIKE '([^']|'')+%'$/.test(part))).toBe(true);
+    }
   });
 });
 
@@ -59,6 +65,11 @@ describe('ownerRelation', () => {
     ['a longer name that starts with the seller\'s', owned('SAMPLE HOMESTEAD LLC'), ['SAMPLE HOMES'], 'unclear'],
     ['a shorter form of the seller\'s name', owned('EXAMPLE BUILDERS'), sellers, 'unclear'],
     ['a look-alike in the second field only', owned('TESTER ALEX J', 'EXAMPLE BUILDERS LLC OF SAMPLETON'), sellers, 'unclear'],
+    ['an accent on the deed only', owned('GARCIA HOMES LLC'), ['GARC\u00CDA HOMES LLC'], 'same'],
+    ['an accent as a separate mark', owned('GARCI\u0301A HOMES LLC'), ['GARCIA HOMES LLC'], 'same'],
+    ['a seller name with a letter that cannot be compared', owned('TESTER ALEX J'), ['S\u00D8REN HOMES LLC'], 'unclear'],
+    ['an owner name with a letter that cannot be compared', owned('S\u00D8REN HOMES LLC', 'TESTER ALEX J'), sellers, 'unclear'],
+    ['the seller exactly, next to a name that cannot be compared', owned('S\u00D8REN HOMES LLC', 'EXAMPLE BUILDERS LLC'), sellers, 'same'],
     ['no owner on the map', owned(null), sellers, 'unclear'],
     ['an owner of signs only', owned(' - ', ''), sellers, 'unclear'],
     ['no seller to compare', owned('TESTER ALEX J'), [], 'unclear'],
@@ -174,6 +185,15 @@ describe('chooseParcel', () => {
     expect(chooseParcel({ sellerNames: ['SAMPLE HOMES'], parcels: [lookAlike], permitsByParid: both }))
       .toMatchObject({ status: 'matched', basis: 'permit', parcel: lookAlike });
   });
+  test('an accent on the deed does not hide the seller\'s parcel', () => {
+    // The seller still owns this lot in another phase (no permit there); the permit is on another owner's parcel.
+    const sellers = parcel('100000001', 'GARCIA HOMES LLC');
+    const permitted = parcel('100000002', 'TESTER ALEX J');
+    expect(chooseParcel({ sellerNames: ['GARC\u00CDA HOMES LLC'], parcels: [sellers, permitted], permitsByParid: { 100000002: permit('A') } }))
+      .toEqual({ status: 'ambiguous' });
+    expect(chooseParcel({ sellerNames: ['GARC\u00CDA HOMES LLC'], parcels: [sellers, permitted], permitsByParid: { 100000001: permit('A'), 100000002: permit('B') } }))
+      .toMatchObject({ status: 'matched', basis: 'owner_permit', parcel: sellers });
+  });
   test('a look-alike name on a rival parcel blocks both bases', () => {
     const lookAlike = parcel('100000002', 'EXAMPLE BUILDERS LLC OF SAMPLETON');
     const owned = parcel('100000001', 'EXAMPLE BUILDERS LLC');
@@ -224,7 +244,7 @@ describe('queryParcels', () => {
       lot: '171', block: null, ownerName: 'EXAMPLE BUILDERS LLC', ownerName2: null, livingSqft: 2210, stories: 1.5, yearBuilt: 2026,
     }]);
     const url = new URL(fetchImpl.mock.calls[0][0]);
-    expect(url.searchParams.get('where')).toBe("PAR_SUBDIV_LOT = '171' AND (PAR_SUBDIV_NAME = 'RYE RANCH' OR PAR_SUBDIV_NAME LIKE 'RYE RANCH %')");
+    expect(url.searchParams.get('where')).toBe("PAR_SUBDIV_LOT = '171' AND PAR_SUBDIV_NAME LIKE 'RYE RANCH%'");
     expect(url.searchParams.get('outFields')).toContain('PAR_OWNER_NAME2');
     expect(url.searchParams.get('returnGeometry')).toBe('false');
     expect(url.searchParams.get('resultRecordCount')).toBe('25');
@@ -232,13 +252,17 @@ describe('queryParcels', () => {
     expect(url.searchParams.get('outFields')).toContain('PARID');
     expect(fetchImpl.mock.calls[0][1].redirect).toBe('manual');
   });
-  test('a phase on the deed is not the phase that only starts with it', async () => {
+  test('a phase on the deed is not the phase that only starts with it: the query returns it, the result drops it', async () => {
     const phaseOne = { lot: '171', block: null, subdivision: 'RYE RANCH PH I' };
     const same = [feature({ PAR_SUBDIV_NAME: 'RYE RANCH PH I' }), feature({ PARID: '513309060', PAR_SUBDIV_NAME: 'Rye Ranch Ph I PB81/1' })];
-    expect(await queryParcels(phaseOne, { fetchImpl: answer({ features: same }) })).toHaveLength(2);
-    for (const other of ['RYE RANCH PH II', 'RYE RANCH PH IA PB81/1', 'RYE RANCH PH I-A', 'RYE RANCH PH IV']) {
-      await expect(queryParcels(phaseOne, { fetchImpl: answer({ features: [feature({ PAR_SUBDIV_NAME: other })] }) })).rejects.toThrow(/not the lot asked for/);
-    }
+    const others = ['RYE RANCH PH II', 'RYE RANCH PH IA PB81/1', 'RYE RANCH PH I-A', 'RYE RANCH PH IV']
+      .map((name, i) => feature({ PARID: String(513309070 + i), PAR_SUBDIV_NAME: name }));
+    const parcels = await queryParcels(phaseOne, { fetchImpl: answer({ features: [others[0], same[0], others[1], same[1], others[2], others[3]] }) });
+    expect(parcels.map((p) => p.parid)).toEqual(['513309059', '513309060']);
+    expect(await queryParcels(phaseOne, { fetchImpl: answer({ features: others }) })).toEqual([]);
+    // The dropped parcels still count for the cut-off check: 25 rows are a full page.
+    const full = Array.from({ length: 25 }, (_, i) => feature({ PARID: String(513309100 + i), PAR_SUBDIV_NAME: 'RYE RANCH PH II' }));
+    await expect(queryParcels(phaseOne, { fetchImpl: answer({ features: full }) })).rejects.toThrow(/cut off/);
   });
   test('the second owner field is read', async () => {
     const [p] = await queryParcels(legal, { fetchImpl: answer({ features: [feature({ PAR_OWNER_NAME1: 'EXAMPLE LAND TRUST', PAR_OWNER_NAME2: ' EXAMPLE BUILDERS LLC ' })] }) });
@@ -302,7 +326,7 @@ describe('queryParcels', () => {
     ['a full list of 25 parcels with no cut-off mark', answer({ features: Array.from({ length: 25 }, (_, i) => feature({ PARID: String(513309000 + i) })) })],
     ['a parcel of another lot', answer({ features: [feature({ PAR_SUBDIV_LOT: '172' })] })],
     ['a parcel of another subdivision', answer({ features: [feature({ PAR_SUBDIV_NAME: 'OTHER RANCH PH I' })] })],
-    ['a subdivision that only starts with the same letters', answer({ features: [feature({ PAR_SUBDIV_NAME: 'RYE RANCHES PH I' })] })],
+    ['the firewall page instead of JSON', answer('<html><head><title>Request Rejected</title></head><body>Request Rejected</body></html>')],
     ['a second owner name with a replacement character', answer({ features: [feature({ PAR_OWNER_NAME2: 'EXAMPLE BUILD\uFFFDRS LLC' })] })],
     ['a parcel with no subdivision', answer({ features: [feature({ PAR_SUBDIV_NAME: null })] })],
     ['an owner name with a replacement character', answer({ features: [feature({ PAR_OWNER_NAME1: 'EXAMPLE BUILD\uFFFDRS LLC' })] })],

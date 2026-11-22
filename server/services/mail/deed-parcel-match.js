@@ -42,15 +42,21 @@ function parseLegal(description) {
 
 const quote = (value) => value.replaceAll("'", "''");
 
-// The map's subdivision name is the deed's words, or those words and then more after a space ("... PH I" on the deed,
-// "... PH I PB 70/12" on the map). A name that only starts with the same letters ("... PH II") is another plat.
+// Plain field comparisons joined by AND, and nothing else. The county's firewall answers that shape and rejects
+// others with an HTML "Request Rejected" page (measured 2026-11-22, the same in two rounds: two UPPER(...) calls
+// joined by AND or OR are rejected; see also the 10-02 notes in county-parcel-gis.js). Production gets answers for an
+// AND query on this layer too (the estimator's subdivision query, logged 11-11 and 11-18). The map stores these
+// names in capitals (plain and UPPER() counts are equal for 32 real subdivisions), so no function is needed. A
+// rejected request is not JSON: it throws below, an outage, never "no parcel".
 function parcelWhere(legal) {
-  const name = quote(legal.subdivision);
-  let where = `PAR_SUBDIV_LOT = '${quote(legal.lot)}' AND (PAR_SUBDIV_NAME = '${name}' OR PAR_SUBDIV_NAME LIKE '${name} %')`;
+  let where = `PAR_SUBDIV_LOT = '${quote(legal.lot)}' AND PAR_SUBDIV_NAME LIKE '${quote(legal.subdivision)}%'`;
   if (legal.block) where += ` AND PAR_SUBDIV_BLOCK = '${quote(legal.block)}'`;
   return where;
 }
 
+// The map's subdivision name is the deed's words, or those words and then more after a space ("... PH I" on the deed,
+// "... PH I PB 70/12" on the map). A name that only starts with the same letters ("... PH II") is another plat: the
+// query returns it (a LIKE cannot ask for a word boundary without an OR), and queryParcels drops it.
 const namesSubdivision = (mapName, deedWords) => {
   const name = String(mapName || '').toUpperCase();
   return name === deedWords || name.startsWith(`${deedWords} `);
@@ -92,8 +98,8 @@ function toParcel(attrs, legal) {
     stories: positiveOrNull(attrs.BLDG_R1_STORIES),
     yearBuilt: yearBuilt === null ? null : Math.round(yearBuilt),
   };
-  // The answer must be the answer to this question: the lot, the subdivision and (when asked) the block.
-  const asked = parcel.lot === legal.lot && namesSubdivision(parcel.subdivision, legal.subdivision)
+  // The answer must be the answer to this question: the lot, the subdivision prefix and (when asked) the block.
+  const asked = parcel.lot === legal.lot && (parcel.subdivision || '').toUpperCase().startsWith(legal.subdivision)
     && (!legal.block || parcel.block === legal.block);
   if (!asked) throw new Error('parcel map sent a parcel that is not the lot asked for');
   return parcel;
@@ -164,26 +170,34 @@ async function queryParcels(legal, { fetchImpl = fetch, timeoutMs = DEFAULT_TIME
   if (body.exceededTransferLimit || body.features.length >= RESULT_LIMIT) throw new Error('parcel map answer was cut off (too many parcels)');
   const parcels = body.features.map((f) => toParcel(f?.attributes || {}, legal));
   if (new Set(parcels.map((p) => p.parid)).size !== parcels.length) throw new Error('parcel map sent one parcel twice');
-  return parcels;
+  return parcels.filter((p) => namesSubdivision(p.subdivision, legal.subdivision));
 }
 
-const alnum = (name) => String(name || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+// A name's compare key: accents folded (GARCÍA = GARCIA), then capitals and digits only. '' for no name. null for a
+// name with a letter that is still not plain ASCII: it cannot be compared.
+function nameKey(name) {
+  const folded = String(name || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+  return /[^\x00-\x7F]/.test(folded) ? null : folded.replace(/[^A-Z0-9]/g, '');
+}
 
 /**
  * How a parcel's owner on the map (two fields) relates to the deed's sellers:
- *   same     a field is a seller's name once signs and spaces are removed (the map writes "M/I HOMES OF SARASOTA
- *            LLC" where the deed says "M I HOMES OF SARASOTA LLC"). Measured on three real days: 64 of 65 parcels
- *            still under the seller's name are this form, and the map does not cut names short (240 characters).
- *   unclear  the map names no owner, there is no seller name to compare, or one name only starts with the other
- *            ("SAMPLE HOMES" and "SAMPLE HOMESTEAD LLC", or a short form of the same company): it may or may not
- *            be the seller, so it proves nothing either way.
+ *   same     a field is a seller's name once accents, signs and spaces are removed (the map writes "M/I HOMES OF
+ *            SARASOTA LLC" where the deed says "M I HOMES OF SARASOTA LLC"). Measured on three real days: 64 of 65
+ *            parcels still under the seller's name are this form, and the map does not cut names short (240
+ *            characters).
+ *   unclear  the map names no owner, there is no seller name to compare, a name cannot be compared, or one name
+ *            only starts with the other ("SAMPLE HOMES" and "SAMPLE HOMESTEAD LLC", or a short form of the same
+ *            company): it may or may not be the seller, so it proves nothing either way.
  *   other    the map names an owner and no field is like a seller's name.
  */
 function ownerRelation(parcel, sellerNames) {
-  const owners = [parcel.ownerName, parcel.ownerName2].map(alnum).filter(Boolean);
-  const sellers = (sellerNames || []).map(alnum).filter(Boolean);
-  if (owners.some((o) => sellers.includes(o))) return 'same';
-  if (owners.length === 0 || sellers.length === 0) return 'unclear';
+  const keysOf = (names) => (names || []).map(nameKey).filter((key) => key !== '');
+  const owners = keysOf([parcel.ownerName, parcel.ownerName2]);
+  const sellers = keysOf(sellerNames);
+  const known = (keys) => keys.filter((key) => key !== null);
+  if (known(owners).some((o) => known(sellers).includes(o))) return 'same';
+  if (known(owners).length === 0 || known(sellers).length === 0 || owners.includes(null) || sellers.includes(null)) return 'unclear';
   const alike = owners.some((o) => sellers.some((s) => o.startsWith(s) || s.startsWith(o)));
   return alike ? 'unclear' : 'other';
 }
