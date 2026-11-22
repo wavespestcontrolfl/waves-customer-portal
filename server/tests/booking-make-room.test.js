@@ -50,7 +50,7 @@ const ROUTE_DETOUR_MIN = 20;
 const TEXTS = { smsEnabled: true, serviceReminder72h: true, serviceReminder24h: true, reminder72hChannel: 'sms', reminder24hChannel: 'sms' };
 
 function makeDeps({
-  rows = exampleDay(), told = ['visit-e'], prefs = {}, pref = {}, feasible = true, blocks = [], holdIds = [], techBlind = true,
+  rows = exampleDay(), told = ['visit-e'], customerTime = ['visit-a'], prefs = {}, pref = {}, feasible = true, blocks = [], holdIds = [], techBlind = true,
   channel72 = {}, assignable = [TECH], absent = [], blackout = [], inactive = [], pushRoute = 'push_and_sms', device = null,
   travelGap = false, multiTech = false,
 } = {}) {
@@ -58,10 +58,10 @@ function makeDeps({
   return {
     evaluated,
     loadDayStops: jest.fn(async (_conn, dateStr) => rows.filter((r) => r.scheduled_date === dateStr)),
-    // The full day facts (the night told-lock reads): E was told its hour; nobody else was told or placed by a person.
+    // The full day facts (the night told-lock reads): E was told its hour; A's time is the customer's own; nobody else.
     loadDayContext: jest.fn(async (_conn, dateStr, now) => {
       const allRows = rows.filter((r) => r.scheduled_date === dateStr);
-      return { dateStr, now, allRows, visitCounts: countBy(allRows, 'visit_id'), customerCounts: countBy(allRows, 'customer_id'), sent24: new Set(), toldLock: true, told: new Set(told), personPlaced: new Set() };
+      return { dateStr, now, allRows, visitCounts: countBy(allRows, 'visit_id'), customerCounts: countBy(allRows, 'customer_id'), sent24: new Set(), toldLock: true, told: new Set(told), customerTime: new Set(customerTime) };
     }),
     fixedReason,
     skipReason,
@@ -163,10 +163,10 @@ describe('the plan page example', () => {
     expect(JSON.parse(inserted[0].report).passed[0].moves).toHaveLength(3);
   });
 
-  test('the confirmed stop A never moves: 8 AM, whose chain starts with A, is not found', async () => {
+  test('stop A, whose time is the customer\'s own, never moves: 8 AM, whose chain starts with A, is not found', async () => {
     const { report } = await check();
     expect(starts(report)).not.toContain('08:00');
-    expect(report.byReason.fixed_customer_confirmed).toBeGreaterThanOrEqual(1);
+    expect(report.byReason.fixed_customer_time).toBeGreaterThanOrEqual(1);
   });
 
   test('a stop the customer was told the hour of never moves (read with the full day facts)', async () => {
@@ -410,7 +410,7 @@ describe('the chain', () => {
 
 describe('the 2-hour move (owner 2026-11-07 "B": a moved visit may shift up to 2 hours, not 1)', () => {
   const { buildChain, shiftsFor, MAX_SHIFT_MIN } = _internals;
-  // Room after the chain: A (confirmed) 8, B 9, C 10, nothing 11 AM-2 PM, E 2 PM, F 3 PM. Nobody was told an hour.
+  // Room after the chain: A (the customer's own time) 8, B 9, C 10, nothing 11 AM-2 PM, E 2 PM, F 3 PM. Nobody was told an hour.
   const roomyDay = () => [
     stop('a', 8, 10, { customer_confirmed: true }), stop('b', 9, 20), stop('c', 10, 30), stop('e', 14, 50), stop('f', 15, 60),
   ];
@@ -447,9 +447,9 @@ describe('the 2-hour move (owner 2026-11-07 "B": a moved visit may shift up to 2
     const routes = deps.evaluated.filter((e) => e.placement.windowStart === '09:00');
     expect(routes).toHaveLength(1);
     expect(routes[0].context.rows.find((r) => r.id === 'visit-b').window_start).toBe('11:00');
-    // 8 AM tries 2 hours too (its confirmed stop A is a full-day fact, read after the page's rules) and then fails on A.
+    // 8 AM tries 2 hours too (its customer-time stop A is a full-day fact, read after the page's rules) and then fails on A.
     expect(report.twoHourTried).toBe(3);
-    expect(report.byReason).toEqual({ fixed_customer_confirmed: 1, saving_below_bar: 2 });
+    expect(report.byReason).toEqual({ fixed_customer_time: 1, saving_below_bar: 2 });
     const logged = JSON.parse(inserted[0].report);
     expect(logged.twoHourTried).toBe(3);
     expect(logged.passed.map((p) => p.shiftMin)).toEqual([120, 120]);
@@ -1003,7 +1003,7 @@ describe('findMakeRoomOffers (the page awaits it, mode on)', () => {
     const { hours, report, deps } = await offers();
     expect(hours.map((h) => `${h.date} ${h.start}`)).toEqual([`${DAY} 09:00`]);
     expect(hours[0]).toMatchObject({ techId: TECH, shiftMin: 60 });
-    // 8 AM (stop A, confirmed) fails its full check; 9 AM passes: the walk ends there and never checks 10 AM or later.
+    // 8 AM (stop A, the customer's own time) fails its full check; 9 AM passes: the walk ends there and never checks 10 AM or later.
     expect(report.sooner.checked).toBe(2);
     expect(report.mode).toBe('on');
   });
@@ -1200,8 +1200,8 @@ describe('verifyMakeRoomHour (the hold\'s proof, inside the reserve transaction)
   test('a stop that was locked since the offer refuses it', async () => {
     const told = await prove({ deps: makeDeps({ told: ['visit-e', 'visit-c'] }) });
     expect(told.reason).toBe('fixed_time_told');
-    const confirmed = await prove({ startMin: 8 * 60 });
-    expect(confirmed.reason).toBe('fixed_customer_confirmed');
+    const customerOwn = await prove({ startMin: 8 * 60 });
+    expect(customerOwn.reason).toBe('fixed_customer_time');
   });
 
   test('a stop whose customer turned reminder texts off since the offer refuses it', async () => {

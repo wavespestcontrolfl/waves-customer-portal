@@ -156,28 +156,20 @@ function finalRoute(fresh, env, techId) {
 
 // ---- inside the transaction -------------------------------------------------------------------------------------
 
-// Night told-lock (owner 2026-11-05, "D1 a"): the columns the told-lock reasons read inside the move transaction,
-// the same facts loadDayContext gives the planner (day-replan/index.js TOLD_LOCK_SELECT + the reason's own fields).
-const TOLD_ROW_COLUMNS = [
-  'customer_confirmed', 'is_recurring', 'recurring_parent_id', 'scheduled_date', 'recurring_dispatch_due_date',
-  'date_exception', 'date_exception_source', 'date_exception_at',
-];
-
 /**
- * The told-lock facts for one visit, read inside its move transaction, so a time told to the customer or a person
- * placement made after the fresh plan still stops the write. The told read is the no-show detector's promise reader (a
- * 72-hour flag with no real promise does not stop the write); a read that throws stops the write (fail closed).
- * isPersonPlacedVisit fails closed too (an unreadable history = placed).
+ * The told-lock facts for one visit, read inside its move transaction, so a time told to the customer, or a time that
+ * became the customer's own (owner 2026-11-22), after the fresh plan still stops the write. The told read is the
+ * no-show detector's promise reader (a 72-hour flag with no real promise does not stop the write); a read that throws
+ * stops the write (fail closed). loadCustomerTime fails closed too.
  */
-async function toldLockFacts(trx, deps, { row, id, dateStr }) {
+async function toldLockFacts(trx, deps, { id }) {
   const dayOnly = typeof deps.dayOnlyOn === 'function' && deps.dayOnlyOn() === true;
   const levels = dayOnly ? await promiseLevelFacts(trx, deps, id) : { told: new Set(await deps.loadToldIds(trx, [id], deps.now())) };
-  const verdict = await deps.isPersonPlacedVisit({ ...row, scheduled_date: dateStr }, trx);
-  return { toldLock: true, ...levels, personPlaced: new Set(!verdict || verdict.placed !== false ? [id] : []) };
+  return { toldLock: true, ...levels, customerTime: await deps.loadCustomerTime(trx, [{ id }], deps.now()) };
 }
 
 /**
- * GATE_DAY_ONLY_PROMISE: the visit's promise level, re-read inside its move transaction. 'hour' = told, 'day' = dayTold.
+ * GATE_DAY_ONLY_PROMISE: the visit's promise level, re-read inside its move transaction. 'hour' = told.
  * A read that throws fails CLOSED: the visit counts as told an hour, so the write stops (time_told).
  */
 async function promiseLevelFacts(trx, deps, id) {
@@ -188,7 +180,7 @@ async function promiseLevelFacts(trx, deps, id) {
   } catch (_) {
     level = 'hour';
   }
-  return { told: new Set(level === 'hour' ? [id] : []), dayTold: new Set(level === 'day' ? [id] : []) };
+  return { told: new Set(level === 'hour' ? [id] : []) };
 }
 
 /**
@@ -198,7 +190,7 @@ async function promiseLevelFacts(trx, deps, id) {
 async function recheckVisit(trx, deps, { id, dateStr, toStart }) {
   const row = await trx('scheduled_services').where({ id }).first(
     'id', 'status', 'window_start', 'customer_id', 'property_id', 'visit_id', 'reservation_expires_at', 'auto_dispatch_locked', 'auto_dispatch_excluded',
-    ...TOLD_ROW_COLUMNS,
+    'customer_confirmed',
   );
   if (!row) throw coded('NOT_MOVABLE', 'the visit no longer exists');
   const live = (q) => q.whereNotIn('status', deps.excludedStatuses);
@@ -217,7 +209,7 @@ async function recheckVisit(trx, deps, { id, dateStr, toStart }) {
     sent24: new Set(reminder && reminder.reminder_24h_sent === true ? [id] : []),
     // Whether the 24-hour reminder will still go out (it carries the new hour), read with the transaction; fails closed.
     ...(typeof deps.loadReminder24hOffIds === 'function' ? { reminder24hOff: await deps.loadReminder24hOffIds(trx, [row]) } : {}),
-    ...(await toldLockFacts(trx, deps, { row, id, dateStr })),
+    ...(await toldLockFacts(trx, deps, { id })),
   };
   const why = deps.fixedReason(row, ctx) || deps.fixedReason({ ...row, window_start: minToHhmm(toStart) }, ctx);
   if (why) throw Object.assign(coded('NOT_MOVABLE', `the visit is no longer movable: ${why}`), { why });

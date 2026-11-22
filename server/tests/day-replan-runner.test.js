@@ -18,11 +18,11 @@ jest.mock('../services/scheduling/occupancy', () => ({ techScopedConfirmActive: 
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ DAY_OPEN: 8 * 60, DAY_CLOSE: 17 * 60 }));
 jest.mock('../services/route-reorder', () => ({ _internals: { LIVE_HOLD_SQL: '(live-hold)' }, CUSTOMER_PREMISE_ALIASES: [{ customer_address_line1: 'customers.address_line1' }] }));
 jest.mock('../services/auto-dispatch/preferences', () => ({ getCustomerSchedulingPreferences: jest.fn() }));
-// The night told-lock's reads (its own suite: night-told-lock-day-replan.test.js): nobody was told anything, no person placed any visit.
+// The night told-lock's reads (its own suite: night-told-lock-day-replan.test.js): nobody was told anything, no time is the customer's own.
 jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: jest.fn(async () => new Set()) }));
-jest.mock('../services/auto-dispatch/eligibility', () => ({
-  ...jest.requireActual('../services/auto-dispatch/eligibility'),
-  isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
+jest.mock('../services/time-promise', () => ({
+  ...jest.requireActual('../services/time-promise'),
+  dayOnlyEligibility: jest.fn(async (_conn, ids) => new Map(ids.map((id) => [id, { eligible: true, level: 'none' }]))),
 }));
 
 const logger = require('../services/logger');
@@ -87,7 +87,7 @@ function row(id, lngOffset, hour, extra = {}) {
     estimated_duration_minutes: 60,
     service_type: 'Quarterly Pest Control Service',
     is_recurring: true,
-    // A recurring child, so the night told-lock's first_or_one_time reason does not fix it.
+    // A recurring child: not a new booking for the close-gaps replay.
     recurring_parent_id: `parent-${id}`,
     is_callback: false,
     auto_dispatch_locked: false,

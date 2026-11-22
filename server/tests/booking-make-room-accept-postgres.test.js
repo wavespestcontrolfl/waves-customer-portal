@@ -101,7 +101,7 @@ maybeDescribe('make-room accept on real PostgreSQL', () => {
       await mockConn('scheduled_services').insert({
         id: v.id, customer_id: v.customerId, technician_id: techId, scheduled_date: DAY, service_type: 'Quarterly Pest Control Service',
         status: 'pending', window_start: `${pad(v.hour)}:00`, window_end: `${pad(v.hour + 1)}:00`, estimated_duration_minutes: 60,
-        // A recurring child: the night told-lock keeps a first or one-time visit fixed.
+        // A recurring child: judged by who placed its slot (customer_time), and not a new booking for the close-gaps replay.
         is_recurring: true, recurring_parent_id: randomUUID(),
         lat: HQ.lat + v.dLat, lng: HQ.lng + v.dLng, route_order: i + 1,
       });

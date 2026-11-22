@@ -290,7 +290,7 @@ describe('a moved visit must still be movable under the fence', () => {
     c: { route_order: 3, is_recurring: true, recurring_parent_id: 'p-c' }, d: { route_order: 4, is_recurring: true, recurring_parent_id: 'p-d' } };
   // loadToldIds is the no-show detector's promise reader (a known-slot promise = told); `told` is the set of ids it answers with.
   const toldLockOver = (told = []) => ({
-    isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
+    loadCustomerTime: jest.fn(async () => new Set()),
     loadToldIds: jest.fn(async (_conn, ids) => new Set(ids.filter((id) => told.includes(id)))),
   });
 
@@ -302,11 +302,21 @@ describe('a moved visit must still be movable under the fence', () => {
     expect(w.rowWrites()).toEqual([]);
   });
 
-  test('a person placed it meanwhile (an unreadable history counts as placed)', async () => {
+  test('its time became the customer\'s own meanwhile (customer_time, read with the transaction handle)', async () => {
     const over = toldLockOver();
-    over.isPersonPlacedVisit = jest.fn(async () => ({ placed: true, degraded: true, reason_code: 'PERSON_PLACED_UNKNOWN' }));
     const w = plan4({ rowExtra: recurring, over });
-    expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:person_placed', moved: 0 });
+    w.lockDayRows.mockImplementationOnce(async () => { over.loadCustomerTime.mockImplementation(async (_conn, rows) => new Set(rows.filter((r) => r.id === 'b').map((r) => r.id))); });
+    expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:customer_time', moved: 0 });
+    expect(w.rowWrites()).toEqual([]);
+    expect(over.loadCustomerTime.mock.calls[0][0]).toBe(w.acquireOccupancyLock.mock.calls[0][0]);
+    expect(over.loadCustomerTime.mock.calls[0][1]).toEqual([{ id: expect.any(String) }]);
+  });
+
+  test('a customer-time read that fails stops the write (fail closed)', async () => {
+    const over = toldLockOver();
+    over.loadCustomerTime = jest.fn(async () => { throw new Error('verdict read down'); });
+    const w = plan4({ rowExtra: recurring, over });
+    expect(await w.run()).toEqual({ status: 'failed', reason: 'write_failed:error', moved: 0 });
     expect(w.rowWrites()).toEqual([]);
   });
 

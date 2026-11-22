@@ -166,6 +166,17 @@ describe('apply mode', () => {
     expect(out.status).toBe('completed_with_errors');
     expect(out.apply[0]).toMatchObject({ status: 'failed' });
   });
+
+  test('a moved stop whose time became the customer\'s own after the plan stops the write (visit_not_movable:customer_time)', async () => {
+    // The re-plan read every stop as movable; inside the move transaction the first moved visit reads as the customer's own.
+    const w = setup({ rows: zigzagRows(), over: { loadCustomerTime: jest.fn(async (_conn, rows) => new Set(rows.map((r) => r.id))) } });
+    const before = w.windows();
+    const out = await w.run();
+    expect(out.apply).toEqual([expect.objectContaining({ status: 'skipped', reason: 'visit_not_movable:customer_time', moved: 0 })]);
+    expect(w.windows()).toEqual(before);
+    expect(w.db.inserts.filter((i) => i.table === 'reschedule_log')).toEqual([]);
+    expect(w.syncMovedReminders).not.toHaveBeenCalled();
+  });
 });
 
 describe('repairing a day committed on an earlier run', () => {

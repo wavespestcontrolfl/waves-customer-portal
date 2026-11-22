@@ -1,9 +1,9 @@
 /**
- * Night told-lock on the nightly day re-plan (services/day-replan/index.js, owner 2026-11-05 "D1 a"):
- * four more kinds of stop stay fixed at their hour: customer_confirmed, first_or_one_time,
- * person_placed (a person chose the date or time; an unreadable history keeps the stop fixed) and
- * time_told (a known-slot promise, by the no-show detector's promise reader in auto-dispatch/told-visits.js, mocked
- * here; a reminder_72h_sent flag alone is not told).
+ * Night told-lock on the nightly day re-plan (services/day-replan/index.js, owner 2026-11-05 "D1 a", rewritten by the
+ * owner 2026-11-22): two more kinds of stop stay fixed at their hour: customer_time (the customer's own time, by
+ * time-promise.dayOnlyEligibility, mocked here; an unreadable answer keeps the stop fixed) and time_told (a known-slot
+ * promise, by the no-show detector's promise reader in auto-dispatch/told-visits.js, mocked here; a reminder_72h_sent
+ * flag alone is not told). Staff placement, a confirmation and a first or one-time visit no longer fix a stop.
  * Same fake knex as day-replan-runner.test.js, synthetic ids only.
  */
 jest.mock('../models/db', () => jest.fn());
@@ -17,14 +17,12 @@ jest.mock('../services/auto-dispatch/candidate-slots', () => ({ DAY_OPEN: 8 * 60
 jest.mock('../services/route-reorder', () => ({ _internals: { LIVE_HOLD_SQL: '(live-hold)' }, CUSTOMER_PREMISE_ALIASES: [{ customer_address_line1: 'customers.address_line1' }] }));
 jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: jest.fn() }));
 jest.mock('../services/auto-dispatch/preferences', () => ({ getCustomerSchedulingPreferences: jest.fn() }));
-jest.mock('../services/auto-dispatch/eligibility', () => ({
-  ...jest.requireActual('../services/auto-dispatch/eligibility'),
-  isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
-}));
+jest.mock('../services/time-promise', () => ({ ...jest.requireActual('../services/time-promise'), dayOnlyEligibility: jest.fn() }));
 
+const logger = require('../services/logger');
 const { techScopedConfirmActive } = require('../services/scheduling/occupancy');
 const { getCustomerSchedulingPreferences } = require('../services/auto-dispatch/preferences');
-const { isPersonPlacedVisit } = require('../services/auto-dispatch/eligibility');
+const { dayOnlyEligibility } = require('../services/time-promise');
 const { loadToldVisitIds } = require('../services/auto-dispatch/told-visits');
 const { runDayReplanIfEnabled, _internals } = require('../services/day-replan');
 
@@ -120,7 +118,8 @@ beforeEach(() => {
   delete process.env.GATE_AUTO_DISPATCH_DAY_RULES;
   getCustomerSchedulingPreferences.mockResolvedValue({ preferred_time_window: null });
   techScopedConfirmActive.mockReturnValue(false);
-  isPersonPlacedVisit.mockImplementation(async () => ({ placed: false }));
+  dayOnlyEligibility.mockReset();
+  dayOnlyEligibility.mockImplementation(async (_conn, ids) => new Map(ids.map((id) => [id, { eligible: true, level: 'none' }])));
   loadToldVisitIds.mockReset();
   loadToldVisitIds.mockResolvedValue(new Set());
 });
@@ -129,57 +128,73 @@ afterAll(() => { process.env = savedEnv; });
 describe('fixedReason with the told-lock context', () => {
   const base = (extra = {}) => ({
     dateStr: TOMORROW, now: NOW, visitCounts: new Map(), customerCounts: new Map(), sent24: new Set(),
-    toldLock: true, told: new Set(), personPlaced: new Set(), ...extra,
+    toldLock: true, told: new Set(), customerTime: new Set(), ...extra,
   });
   const stop = (extra = {}) => ({
     id: 's1', status: 'confirmed', window_start: '09:00:00', visit_id: null, customer_id: 'c1',
     is_recurring: true, recurring_parent_id: 'p1', customer_confirmed: false, ...extra,
   });
 
-  test('a recurring child nobody told or placed may move', () => {
+  test('a recurring child nobody told, and whose time is not the customer\'s, may move', () => {
     expect(_internals.fixedReason(stop(), base())).toBeNull();
   });
 
-  test('customer_confirmed', () => {
-    expect(_internals.fixedReason(stop({ customer_confirmed: true }), base())).toBe('customer_confirmed');
+  test('a confirmed stop, a first or one-time stop and a staff-placed stop may move: who set the time no longer fixes it', () => {
+    expect(_internals.fixedReason(stop({ customer_confirmed: true }), base())).toBeNull();
+    expect(_internals.fixedReason(stop({ is_recurring: false }), base())).toBeNull();
+    expect(_internals.fixedReason(stop({ is_recurring: null }), base())).toBeNull();
+    expect(_internals.fixedReason(stop({ recurring_parent_id: null }), base())).toBeNull();
+    // The removed person-placed fact, were a caller to still send it, is not read.
+    expect(_internals.fixedReason(stop(), base({ personPlaced: new Set(['s1']) }))).toBeNull();
   });
 
-  test('first_or_one_time: not recurring, or no parent series', () => {
-    expect(_internals.fixedReason(stop({ is_recurring: false }), base())).toBe('first_or_one_time');
-    expect(_internals.fixedReason(stop({ is_recurring: null }), base())).toBe('first_or_one_time');
-    expect(_internals.fixedReason(stop({ recurring_parent_id: null }), base())).toBe('first_or_one_time');
-    expect(_internals.fixedReason(stop({ recurring_parent_id: undefined }), base())).toBe('first_or_one_time');
-  });
-
-  test('person_placed', () => {
-    expect(_internals.fixedReason(stop(), base({ personPlaced: new Set(['s1']) }))).toBe('person_placed');
-    expect(_internals.fixedReason(stop(), base({ personPlaced: new Set(['other']) }))).toBeNull();
+  test('customer_time: the stop is in the customer-time set', () => {
+    expect(_internals.fixedReason(stop(), base({ customerTime: new Set(['s1']) }))).toBe('customer_time');
+    expect(_internals.fixedReason(stop(), base({ customerTime: new Set(['other']) }))).toBeNull();
   });
 
   test('time_told', () => {
     expect(_internals.fixedReason(stop(), base({ told: new Set(['s1']) }))).toBe('time_told');
   });
 
-  test('the existing reasons keep their order and values; the new ones come after', () => {
-    const all = base({ sent24: new Set(['s1']), told: new Set(['s1']), personPlaced: new Set(['s1']) });
-    expect(_internals.fixedReason(stop({ customer_confirmed: true, is_recurring: false }), all)).toBe('reminder_24h_sent');
-    expect(_internals.fixedReason(stop({ customer_confirmed: true, is_recurring: false, status: 'dispatched' }), all)).toBe('status');
-    expect(_internals.fixedReason(stop({ customer_confirmed: true, is_recurring: false }), { ...all, sent24: new Set() })).toBe('customer_confirmed');
-    expect(_internals.fixedReason(stop({ is_recurring: false }), { ...all, sent24: new Set() })).toBe('first_or_one_time');
-    expect(_internals.fixedReason(stop(), { ...all, sent24: new Set() })).toBe('person_placed');
-    expect(_internals.fixedReason(stop(), { ...all, sent24: new Set(), personPlaced: new Set() })).toBe('time_told');
+  test('the existing reasons keep their order and values; customer_time comes before time_told', () => {
+    const all = base({ sent24: new Set(['s1']), told: new Set(['s1']), customerTime: new Set(['s1']) });
+    expect(_internals.fixedReason(stop(), all)).toBe('reminder_24h_sent');
+    expect(_internals.fixedReason(stop({ status: 'dispatched' }), all)).toBe('status');
+    expect(_internals.fixedReason(stop({ auto_dispatch_excluded: true }), all)).toBe('staff_lock');
+    expect(_internals.fixedReason(stop(), { ...all, sent24: new Set() })).toBe('customer_time');
+    expect(_internals.fixedReason(stop(), { ...all, sent24: new Set(), customerTime: new Set() })).toBe('time_told');
   });
 
-  test('a context without the told-lock facts (the quick screen) skips the new reasons', () => {
-    const off = base({ toldLock: undefined, told: new Set(['s1']), personPlaced: new Set(['s1']) });
-    expect(_internals.fixedReason(stop({ customer_confirmed: true, is_recurring: false, recurring_parent_id: null }), off)).toBeNull();
+  test('a context without the told-lock facts (the quick screen) skips both reasons', () => {
+    const off = base({ toldLock: undefined, told: new Set(['s1']), customerTime: new Set(['s1']) });
+    expect(_internals.fixedReason(stop(), off)).toBeNull();
     const bare = { dateStr: TOMORROW, now: NOW, visitCounts: new Map(), customerCounts: new Map(), sent24: new Set() };
-    expect(_internals.fixedReason(stop({ customer_confirmed: true, is_recurring: false }), bare)).toBeNull();
+    expect(_internals.fixedReason(stop(), bare)).toBeNull();
   });
 
   test('a told-lock fact the day load did not provide keeps the stop fixed (fail closed)', () => {
-    expect(_internals.fixedReason(stop(), base({ personPlaced: undefined }))).toBe('person_placed');
+    expect(_internals.fixedReason(stop(), base({ customerTime: undefined }))).toBe('customer_time');
     expect(_internals.fixedReason(stop(), base({ told: undefined }))).toBe('time_told');
+  });
+});
+
+describe('loadCustomerTime', () => {
+  const rows = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+
+  test('a visit that is not eligible, and one with no verdict, are the customer\'s time; an eligible one is not; the told level is ignored', async () => {
+    dayOnlyEligibility.mockResolvedValue(new Map([['a', { eligible: false, level: 'none' }], ['b', { eligible: true, level: 'none' }]]));
+    const set = await _internals.loadCustomerTime({}, rows, NOW);
+    expect([...set].sort()).toEqual(['a', 'c']);
+    expect(dayOnlyEligibility).toHaveBeenCalledTimes(1);
+    expect(dayOnlyEligibility).toHaveBeenCalledWith({}, ['a', 'b', 'c'], NOW, { ignoreLevel: true });
+  });
+
+  test('a failed read returns every id and warns (fail closed)', async () => {
+    dayOnlyEligibility.mockRejectedValue(new Error('verdict read down'));
+    const set = await _internals.loadCustomerTime({}, rows, NOW);
+    expect([...set].sort()).toEqual(['a', 'b', 'c']);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('customer-time read failed'));
   });
 });
 
@@ -189,29 +204,28 @@ describe('loadDayContext', () => {
     { ...row('b', 0.02, 9), recurring_parent_id: 'p1' },
   ];
 
-  test('the told set comes from one bulk promise read, a 72-hour flag alone is not told; person-placed ids come from the auto-dispatch rule', async () => {
+  test('the told set comes from one bulk promise read, a 72-hour flag alone is not told; customer-time ids come from one bulk read', async () => {
     const reminders = [{ scheduled_service_id: 'a', reminder_24h_sent: false, reminder_72h_sent: true, windows_preclosed: false, cancelled: false }];
     loadToldVisitIds.mockResolvedValue(new Set(['b']));
-    isPersonPlacedVisit.mockImplementation(async (r) => ({ placed: r.id === 'b' }));
+    dayOnlyEligibility.mockImplementation(async (_conn, ids) => new Map(ids.map((id) => [id, { eligible: id !== 'b', level: 'none' }])));
     const { conn } = fakeConn({ stopsByDate: { [TOMORROW]: dayRows() }, reminders });
     const ctx = await _internals.loadDayContext(conn, TOMORROW, NOW);
     expect(ctx.toldLock).toBe(true);
     expect([...ctx.told]).toEqual(['b']);
-    expect([...ctx.personPlaced]).toEqual(['b']);
+    expect([...ctx.customerTime]).toEqual(['b']);
+    expect(ctx).not.toHaveProperty('personPlaced');
     expect(loadToldVisitIds).toHaveBeenCalledTimes(1);
     expect(loadToldVisitIds).toHaveBeenCalledWith(conn, ['a', 'b'], NOW);
-    expect(isPersonPlacedVisit).toHaveBeenCalledTimes(2);
+    expect(dayOnlyEligibility).toHaveBeenCalledTimes(1);
+    expect(dayOnlyEligibility).toHaveBeenCalledWith(conn, ['a', 'b'], NOW, { ignoreLevel: true });
   });
 
-  test('a failed person-placed read (degraded verdict) keeps the stop fixed', async () => {
-    isPersonPlacedVisit.mockImplementation(async () => ({ placed: true, degraded: true, reason_code: 'PERSON_PLACED_UNKNOWN' }));
+  test('a failed customer-time read keeps every stop fixed as customer_time', async () => {
+    dayOnlyEligibility.mockRejectedValue(new Error('verdict read down'));
     const { conn } = fakeConn({ stopsByDate: { [TOMORROW]: dayRows() } });
     const ctx = await _internals.loadDayContext(conn, TOMORROW, NOW);
-    expect(_internals.fixedReason({ ...dayRows()[0], customer_confirmed: false }, ctx)).toBe('person_placed');
-    // A verdict that is not even an object also fails closed.
-    isPersonPlacedVisit.mockImplementation(async () => undefined);
-    const again = await _internals.loadDayContext(fakeConn({ stopsByDate: { [TOMORROW]: dayRows() } }).conn, TOMORROW, NOW);
-    expect([...again.personPlaced].sort()).toEqual(['a', 'b']);
+    expect([...ctx.customerTime].sort()).toEqual(['a', 'b']);
+    for (const r of dayRows()) expect(_internals.fixedReason({ ...r, customer_confirmed: false }, ctx)).toBe('customer_time');
   });
 
   test('a failed promise read keeps every stop fixed (the told set marks every row)', async () => {
@@ -236,20 +250,20 @@ describe('shadow run: the fixed list records each reason', () => {
   });
   const fixedOf = (inserts) => JSON.parse(inserts[0].row.fixed).map((f) => [f.id, f.why]).sort();
 
-  test('each new reason shows up in the fixed list', async () => {
-    isPersonPlacedVisit.mockImplementation(async (r) => ({ placed: r.id === 'c' }));
+  test('each reason shows up in the fixed list; a confirmed, a first or one-time and a staff-placed stop stay movable', async () => {
+    dayOnlyEligibility.mockImplementation(async (_conn, ids) => new Map(ids.map((id) => [id, { eligible: id !== 'c', level: 'none' }])));
     loadToldVisitIds.mockResolvedValue(new Set(['d']));
-    const rows = withParent({ a: { customer_confirmed: true }, b: { recurring_parent_id: null } });
+    const rows = withParent({ a: { customer_confirmed: true }, b: { recurring_parent_id: null, is_recurring: false } });
     const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: rows } });
     await runDayReplanIfEnabled({ now: NOW, conn });
-    expect(fixedOf(inserts)).toEqual([['a', 'customer_confirmed'], ['b', 'first_or_one_time'], ['c', 'person_placed'], ['d', 'time_told']]);
+    expect(fixedOf(inserts)).toEqual([['c', 'customer_time'], ['d', 'time_told']]);
   });
 
-  test('a person-placed history that cannot be read keeps every stop fixed', async () => {
-    isPersonPlacedVisit.mockImplementation(async () => ({ placed: true, degraded: true }));
+  test('a customer-time read that cannot be read keeps every stop fixed', async () => {
+    dayOnlyEligibility.mockRejectedValue(new Error('verdict read down'));
     const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: withParent() } });
     await runDayReplanIfEnabled({ now: NOW, conn });
-    expect(fixedOf(inserts).every(([, why]) => why === 'person_placed')).toBe(true);
+    expect(fixedOf(inserts).every(([, why]) => why === 'customer_time')).toBe(true);
   });
 });
 
@@ -274,8 +288,8 @@ describe('reminder_24h_off', () => {
     const off = new Set(['s1']);
     expect(_internals.fixedReason(stop(), ctxWith({ sent24: new Set(['s1']), reminder24hOff: off }))).toBe('reminder_24h_sent');
     expect(_internals.fixedReason(stop({ window_start: '05:00:00' }), ctxWith({ reminder24hOff: off }))).toBe('within_24h');
-    const told = ctxWith({ reminder24hOff: off, toldLock: true, told: new Set(['s1']), personPlaced: new Set(['s1']) });
-    expect(_internals.fixedReason(stop({ customer_confirmed: true }), told)).toBe('reminder_24h_off');
+    const told = ctxWith({ reminder24hOff: off, toldLock: true, told: new Set(['s1']), customerTime: new Set(['s1']) });
+    expect(_internals.fixedReason(stop(), told)).toBe('reminder_24h_off');
   });
 
   test('loadDayContext: a customer who turned the 24-hour reminder off fixes that visit only', async () => {

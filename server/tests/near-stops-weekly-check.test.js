@@ -664,10 +664,11 @@ describe('what holds each visit, in plain words', () => {
   });
 
   test("a same-day visit: the re-plan's own reason, no lock listed, no plan, or no technician", () => {
-    const replan = new Map([['2027-03-01|tech-1', new Map([['svc-1', 'within_24h'], ['svc-2', 'new_reason']])]]);
+    const replan = new Map([['2027-03-01|tech-1', new Map([['svc-1', 'within_24h'], ['svc-2', 'new_reason'], ['svc-4', 'customer_time']])]]);
     const visit = (id, tech = 'tech-1') => ({ id, date: '2027-03-01', tech });
     expect(replanHoldFor(visit('svc-1'), replan)).toBe('less than 24 hours away');
     expect(replanHoldFor(visit('svc-2'), replan)).toBe('new reason');
+    expect(replanHoldFor(visit('svc-4'), replan)).toBe("the customer's own time");
     // The plan lists only the stops it fixed: an unlisted visit is never called free to move.
     expect(replanHoldFor(visit('svc-3'), replan)).toBe('no lock listed in the last re-plan');
     expect(replanHoldFor(visit('svc-1', 'tech-2'), replan)).toBe('the re-plan did not plan this day');
