@@ -21351,12 +21351,34 @@ const CallRecordingProcessor = {
                         { techId: reuseCandidateTechId, date: dayRow.day },
                       ]);
                     }
+                    // GATE_TECH_SHIFT_HOURS: the row as it stands NOW, under the day locks and its
+                    // own row lock (lockVisitAsRead). `existing` was read before them with no lock,
+                    // and the technician above was picked for that read: its day, its window, its
+                    // length, its service and its place. While this transaction waited, dispatch
+                    // may have moved the visit, changed any of those, or assigned it. The second
+                    // read decides one thing: whether this block assigns the technician. A row that
+                    // differs from the first read on a field an assignment is judged on, or that
+                    // is not on the fenced day, takes this block's own refusal: no technician is
+                    // written, as when the technician is no longer assignable. An unchanged row is
+                    // the one the pick and the checks below read, so they hold.
+                    // Gate off: no second read, and this block is as it was.
+                    const reuseLock = require('../config/feature-gates').techShiftHoursLive?.()
+                      ? await require('./scheduling/visit-row-lock').lockVisitAsRead(trx, existing, dayRow?.day)
+                      : null;
                     // Re-checked FOR SHARE on the writing trx: the default tech was
                     // resolved before this transaction opened. If eligibility
                     // changed, leave the reused row unassigned rather than assign.
                     let reuseTechId = reuseCandidateTechId;
+                    if (reuseLock?.changed.length) {
+                      logger.info(`[call-proc] reused booking for ${maskSid(callSid)} changed while this booking waited (${reuseLock.changed.join(', ')}); leaving it as it is`);
+                      reuseTechId = null;
+                    }
                     try {
-                      await assertAssignableTechnician(reuseTechId, { conn: trx, date: dayRow?.day, workDays: true });
+                      // `hours` (GATE_TECH_SHIFT_HOURS): the locked row's own block. A shift that
+                      // does not hold it leaves the row unassigned (a windowless row has no block).
+                      // No technician: both checks below return with no read.
+                      await assertAssignableTechnician(reuseTechId, { conn: trx, date: dayRow?.day, workDays: true,
+                        hours: require('./scheduling/window-rules').rowBlockMinutes(reuseLock?.row) });
                       // A PICKED technician passed the capability filter on a
                       // plain read; re-read it under the technician share lock
                       // so an Off saved since cannot receive this visit. The line map's
