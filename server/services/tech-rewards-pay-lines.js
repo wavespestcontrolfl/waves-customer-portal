@@ -1,15 +1,18 @@
 /**
- * Tech Rewards pay lines (Plan D5-5, owner rulings 2026-11-20): the pay run writes the December gift and the stay bonus as
- * open payroll pay lines (payroll-pay-lines.js). Each kind is dark behind its own gate, and both need GATE_PAYROLL_PAY_LINES:
- * GATE_TECH_REWARDS_PAY_LINES for the gift, GATE_TECH_REWARDS_STAY_BONUS for the stay bonus (KIND_GATES). The season bonus is
- * not written here yet. The text below describes the gift; THE STAY BONUS, at the end, says what differs. Nothing here invents
- * a rule; each one lives in one place:
+ * Tech Rewards pay lines (Plan D5-5, owner rulings 2026-11-20): the pay run writes the December gift, the stay bonus and the
+ * season bonus as open payroll pay lines (payroll-pay-lines.js). Each kind is dark behind its own gate, and all need
+ * GATE_PAYROLL_PAY_LINES: GATE_TECH_REWARDS_PAY_LINES for the gift, GATE_TECH_REWARDS_STAY_BONUS for the stay bonus,
+ * GATE_TECH_REWARDS_SEASON_BONUS for the season bonus (KIND_GATES). The text below describes the gift; THE STAY BONUS and THE
+ * SEASON BONUS, at the end, say what differs. Nothing here invents a rule; each one lives in one place:
  *
  *   who is a technician                         recipients() here: W-2, the technician role, and technician-eligibility.js
  *                                               applyAssignable (active, field dispatchable). An admin account gets none.
  *   the stay bonus milestones, rates and math   tech-rewards-calc.js stayBonusSchedule, stayBonus
- *   the 12 months of a stay bonus, and the pay  tech-rewards-scoreboard.js stayWindow, readStayPay (the board's own figures,
+ *   the 12 months of a stay bonus, and the pay  tech-rewards-scoreboard.js stayWindow, readBonusPay (the board's own figures,
  *   a stay bonus is worked out from             so the board and the pay line never differ)
+ *   the season, its pay date and the bonus math tech-rewards-calc.js seasonWindow, seasonBonusPayDate, seasonBonusCents
+ *   the score, review rate, multiplier and pay  tech-rewards-scoreboard.js readSeasonScoreFigures, readSeasonPay,
+ *   a season bonus is worked out from           seasonBonusOf (the board's own figures and its own arithmetic)
  *   which weeks hold recorded work              payroll-runs.js workedWeeks (the test the pay run itself uses)
  *   which covered week would hold a pay run     payroll-runs.js lineGuardWeek (the two guards a run applies to every pay line)
  *   whether a check can be worked out at all    payroll-runs.js lineOnlyCheckProblem (buildCheck, the pay run's own builder)
@@ -78,7 +81,7 @@
  *   - WHAT IT COVERS. The 12 months (staySpanOf), spread over their workweeks like every line that has a span, so it adds
  *     overtime premium to the weeks it covers.
  *   - THE AMOUNT is the rate times the pay earned in the 12 months on the FINALIZED checks of those pay weeks, as the board
- *     reads it (readStayPay). A check for a later pay week never counts. So it is written only when those checks are all
+ *     reads it (readBonusPay). A check for a later pay week never counts. So it is written only when those checks are all
  *     final (priceStay): by a run for a week AFTER the last week of the 12 months, when every week of them that holds work
  *     has a finalized check. From then on every run works out the same amount. The line's note says the rate, the base and
  *     the period. An open line is worked out again at every sync; finalize pays what its own sync worked out, and a PAID
@@ -88,29 +91,64 @@
  *     (paidBonusCounting, in payroll-runs.js voidRun). A check of one of those pay weeks that is finalized AFTER the bonus
  *     was paid (an old week paid late) does not change the paid bonus: the office corrects that by voiding the run that paid
  *     it, which works it out again.
- *   - ONE GATE EACH. A kind's gate off takes that kind's open lines off and leaves the other kind's.
+ *   - ONE GATE EACH. A kind's gate off takes that kind's open lines off and leaves the other kinds'.
+ *
+ * THE SEASON BONUS (owner 2026-11-20, plan D1): the band rate of the season score (4%, 2.5%, 1%, or none under the lowest cut
+ * line) times the pay earned Mar 1 - Aug 31 times the season multiplier, paid the last Friday of September. It runs through
+ * the same sync, with the same recipients, ownership, drafts, waits, notes, void and finalize rules, and the same 60 days. What
+ * differs:
+ *   - WHICH RUN. Due from the last Friday of September of the season's year (seasonDueInRun), for every technician, as the
+ *     gift is due by its date. No season before FIRST_SEASON_YEAR has one. The key is the season's year
+ *     ('season_bonus:<technician id>:2027'), and a key for an earlier year is not the sync's own (payroll-pay-lines.js
+ *     TECH_REWARDS_KEYS): such a row is a hand-made line, never moved or removed here.
+ *   - WHO. A technician hired after the season ended gets none (skipped, no note). One with no hire date on file, or one that
+ *     is not a calendar date, waits: the multiplier counts years of service, and no money goes out on a guess.
+ *   - WHAT IT COVERS. The season, from the hire date for a technician hired during it (seasonSpanOf), spread over its
+ *     workweeks like every line that has a span.
+ *   - THE AMOUNT is worked out by the board's own code from the board's own reads (readSeasonScores and priceSeason:
+ *     readSeasonScoreFigures, readSeasonPay, seasonBonusOf), as of the season's last day: the score and its settings, the
+ *     review rate, the multiplier (the level part is the entry level until the career ladder has a source, as on the board;
+ *     these are read in one snapshot, as the board reads them, BEFORE the pay run's transaction opens, and read again
+ *     under the payroll lock: readSeasonScores, seasonScoreOf), and the pay earned in the season on the
+ *     FINALIZED checks for the pay weeks before the bonus's own (tech-rewards-scoreboard.js seasonLastPayWeek: through the
+ *     week before the one a run dated the last Friday of September pays; a check for a later pay week never counts, as for
+ *     the stay bonus). So it is written by a run for a week AFTER that week, when every week from the season's start that
+ *     holds work has a finalized check. It waits while a score part has no data (score_incomplete) or no score settings are in force for the
+ *     season (score_settings_missing), when the read itself fails (score_read_failed: the error is logged and the pay
+ *     run goes on), for a technician the read before the run did not cover (score_not_read: the next sync reads them),
+ *     and when the score changed between that read and the payroll lock (score_changed: a finalize then pays no bonus from
+ *     the old score, and the office sees the run again). A complete score under the lowest cut line earns no bonus: no line and no note
+ *     (score_below_bonus_line, in the audit event), whatever else is not ready: the band is asked before every wait. The line's note says the rate, the base, the multiplier and the score. An
+ *     open line is worked out again at every sync (a score part corrected since moves it); a PAID line never changes.
+ *   - A PAID season bonus holds the pay runs it counted, exactly as a paid stay bonus does (counted_check_ids).
  */
 const { recordAuditEvent } = require('./audit-log');
+const { isDeepStrictEqual } = require('node:util');
+const logger = require('./logger');
 const calc = require('./tech-rewards-calc');
 const { applyAssignable } = require('./technician-eligibility');
 const {
   KIND_WORDS, TECH_REWARDS_SOURCE, techRewardsSourceId, techRewardsOwnKey, techRewardsOwnedSql,
 } = require('./payroll-pay-lines');
 const {
-  payrollPayLinesLive, techRewardsPayLinesLive, techRewardsStayBonusLive, payrollTimeOffLive,
+  payrollPayLinesLive, techRewardsPayLinesLive, techRewardsStayBonusLive, techRewardsSeasonBonusLive, payrollTimeOffLive,
 } = require('../config/feature-gates');
 const { addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
 
 // payroll-runs.js loads this file, so its helpers are read on first use.
 const payrollRuns = () => require('./payroll-runs');
-// The board is the one home of the pay a stay bonus is worked out from (readStayPay) and of its 12 months (stayWindow).
-// It pulls in the score and review modules, so it loads on first use: a pay run that has no stay bonus to look at never reads it.
+// The board is the one home of the pay a stay bonus is worked out from (readBonusPay) and of its 12 months (stayWindow), and of
+// every figure of a season bonus (readSeasonScoreFigures, readSeasonPay, seasonBonusOf). It pulls in the score and review modules, so it loads on
+// first use: a pay run that has no stay bonus and no season bonus to look at never reads it.
 const scoreboard = () => require('./tech-rewards-scoreboard');
+// The score module is the home of the score settings lock (lockSettingsForRead). Loaded on first use, as the board is.
+const scoreSettings = () => require('./tech-rewards-scores');
 
 // The one home of the value is payroll-pay-lines.js, which pays these lines in their own week only (openLinesFor).
 const SOURCE_TYPE = TECH_REWARDS_SOURCE;
 const GIFT = 'december_gift';
 const STAY = 'stay_bonus';
+const SEASON = 'season_bonus';
 // The December gift: $300 per technician (owner 2026-11-20), due the last Friday on or before this day of December.
 // A constant, not a tech_reward_settings value: that table is versioned score weights and cut lines only.
 const DECEMBER_GIFT_CENTS = 30000;
@@ -122,6 +160,8 @@ const FRIDAY = 5;
 // The first hire anniversary that has a stay bonus: the day the owner approved the plan. A pay run for an old week, dated before
 // it, never writes a bonus for an anniversary from before the plan.
 const FIRST_STAY_DATE = '2026-11-20';
+// The first season that has a bonus: the plan was approved in November 2026, after the 2026 season (Mar 1 - Aug 31) was over.
+const FIRST_SEASON_YEAR = 2027;
 // A line is looked for in a run dated up to this many days after its due date: the first ready run writes it, and a gate turned
 // on later does not reach back further.
 const LOOKBACK_DAYS = 60;
@@ -133,8 +173,9 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 const payLinesOn = () => typeof payrollPayLinesLive === 'function' && payrollPayLinesLive();
 const techRewardsOn = () => typeof techRewardsPayLinesLive === 'function' && techRewardsPayLinesLive();
 const stayBonusOn = () => typeof techRewardsStayBonusLive === 'function' && techRewardsStayBonusLive();
-// Each kind has its own gate, and both need GATE_PAYROLL_PAY_LINES. A gate that is off takes only its own kind's open lines off.
-const KIND_GATES = { [GIFT]: techRewardsOn, [STAY]: stayBonusOn };
+const seasonBonusOn = () => typeof techRewardsSeasonBonusLive === 'function' && techRewardsSeasonBonusLive();
+// Each kind has its own gate, and all need GATE_PAYROLL_PAY_LINES. A gate that is off takes only its own kind's open lines off.
+const KIND_GATES = { [GIFT]: techRewardsOn, [STAY]: stayBonusOn, [SEASON]: seasonBonusOn };
 const kindOn = (kind) => Boolean(KIND_GATES[kind]) && KIND_GATES[kind]();
 // GATE_PAYROLL_TIME_OFF, as the pay run reads it: with it off a run pays no time off, so time off needs no check.
 const timeOffOn = () => typeof payrollTimeOffLive === 'function' && payrollTimeOffLive();
@@ -230,6 +271,37 @@ function staySpanOf(dueDate, weekStart) {
 
 // What a stay bonus line says it was worked out from: "2% of $52,300.00, the pay earned Jan 12, 2027 to Jan 11, 2028".
 const stayNote = (milestone, span, baseCents) => `${milestone.rateBps / 100}% of ${dollars(baseCents)}, the pay earned ${dayLabel(span.coversFrom)} to ${dayLabel(span.coversTo)}`;
+
+// ---- The season bonus (pure)
+
+/** The last pay date a run can carry the season bonus of `year` on: LOOKBACK_DAYS after its pay date. Pure. */
+const seasonLastPayDate = (year) => addStaffWorkDays(calc.seasonBonusPayDate(year), LOOKBACK_DAYS);
+
+/**
+ * The season bonus a run dated `payDate` may write: [{ kind, key }], at most one. Pure. The bonus of a season (Mar 1 - Aug 31)
+ * is due from the last Friday of September of its year (tech-rewards-calc.js seasonBonusPayDate) to LOOKBACK_DAYS after it,
+ * which is in the same year, and its key is that year. No season before FIRST_SEASON_YEAR has a bonus.
+ */
+function seasonDueInRun(payDate) {
+  const year = yearOf(payDate);
+  const due = year >= FIRST_SEASON_YEAR && calc.seasonBonusPayDate(year) <= payDate && payDate <= seasonLastPayDate(year);
+  return due ? [{ kind: SEASON, key: String(year) }] : [];
+}
+
+/**
+ * What the season bonus of `year` covers for a technician hired on `hireDate`, as the pay line of the run of the pay week
+ * starting `weekStart`. Pure. { earnedWeekStart, coversFrom, coversTo }: the season, from the hire date for a technician hired
+ * during it (the weeks before they started take no share of the bonus from the weeks they worked, 29 CFR 778.209). The same
+ * whichever run pays it.
+ */
+function seasonSpanOf(year, weekStart, hireDate) {
+  const { start, end } = calc.seasonWindow(year);
+  return { earnedWeekStart: weekStart, coversFrom: hireDate > start ? hireDate : start, coversTo: end };
+}
+
+// What a season bonus line says it was worked out from: "4% of $31,200.00, the pay earned Mar 1, 2027 to Aug 31, 2027, times
+// 1.75 (season score 92.5)". The dates are the season's: the base is the pay earned in the season, whatever the span.
+const seasonNote = (season, bonus, score) => `${bonus.rateBps / 100}% of ${dollars(bonus.grossCents)}, the pay earned ${dayLabel(season.start)} to ${dayLabel(season.end)}, times ${bonus.multiplierE4 / 10000} (season score ${score.value})`;
 
 /**
  * Who gets a Tech Rewards line, as a technicians query: a W-2 employee (pay lines are for W-2 employees) whose role is
@@ -359,7 +431,7 @@ async function priceGift(trx, cand, tech, run) {
 /**
  * The stay bonus of one candidate: { amountCents, span, note } or { wait: { reason, week } } (not on this run). The amount is
  * the milestone's rate times the pay EARNED in its 12 months on the checks of those pay weeks, exactly as the board reads it
- * (tech-rewards-scoreboard.js readStayPay: the finalized checks, by the day the pay was earned; no Tech Rewards line and none
+ * (tech-rewards-scoreboard.js readBonusPay: the finalized checks, by the day the pay was earned; no Tech Rewards line and none
  * of the overtime one caused; no check for a later pay week), worked out by tech-rewards-calc.js stayBonus. So the bonus is
  * worked out only when those checks are all final, and it is the same on every run after that:
  *   pay_week_too_early  this run pays the last week of the 12 months or an earlier one. Its own check is not final, so the
@@ -383,7 +455,7 @@ async function priceStay(trx, cand, tech, run) {
   if (run.week_start <= lastWeek) return { wait: { reason: 'pay_week_too_early', week: lastWeek } };
   const wait = await spanWaitOf(trx, run, tech.id, span, 1);
   if (wait) return { wait };
-  const { cents: baseCents, checkIds, unsplitWeeks } = await scoreboard().readStayPay(trx, tech.id, span.coversFrom, span.coversTo);
+  const { cents: baseCents, checkIds, unsplitWeeks } = await scoreboard().readBonusPay(trx, tech.id, span.coversFrom, span.coversTo);
   if (unsplitWeeks.length) return { wait: { reason: 'base_needs_review', week: unsplitWeeks[0] } };
   const amountCents = baseCents > 0
     ? calc.stayBonus({ hireDate: tech.hire_date, asOf: milestone.dueDate, priorTwelveMonthsPayCents: baseCents }).cents
@@ -393,9 +465,155 @@ async function priceStay(trx, cand, tech, run) {
   return noCheck ? { wait: noCheck } : { amountCents, span, note: stayNote(milestone, span, baseCents), countedCheckIds: checkIds };
 }
 
-const PRICE = { [GIFT]: priceGift, [STAY]: priceStay };
+/**
+ * One technician's score figures of a season (tech-rewards-scoreboard.js readSeasonScoreFigures: the score and its settings,
+ * the review asks and reviews), or null when the read failed. The read runs in a savepoint of the snapshot: the readers read
+ * field records that payroll does not own (reports, audits, callbacks, truck checks, ratings), and an error in one
+ * technician's read must not end the snapshot the others are read in. The error is logged and that bonus waits
+ * (score_read_failed).
+ */
+async function readSeasonScoreOrNull(snapshot, technicianId, season) {
+  try {
+    return await snapshot.transaction((savepoint) => scoreboard().readSeasonScoreFigures(savepoint, technicianId, season));
+  } catch (err) {
+    logger.error(`[tech-rewards-pay-lines] season ${season.year} score could not be read for technician ${technicianId}: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * The season score figures a pay run dated `payDate` may need, read BEFORE the pay run's transaction opens (payroll-runs.js
+ * draftRun, recomputeRun, finalizeRun), or null when the run is dated for no season bonus or a gate is off (then nothing is
+ * read). { figures: Map(source key -> the figures, or null for a read that failed), failed }.
+ *   - ONE SNAPSHOT. A score has five parts, its settings and two review counts. They are read in one read-only REPEATABLE
+ *     READ transaction, as the board reads them (tech-rewards-scoreboard.js getScoreboard), for every technician at once: a
+ *     closeout that commits between two parts cannot count in one and not the other and move a score across a band. The pay
+ *     run's own transaction is READ COMMITTED, so the read is not in it.
+ *   - ONE CONNECTION AT A TIME. The snapshot is taken, and its connection given back, before the pay run asks for its own:
+ *     a pay run never holds two connections. A read made from inside the pay run's transaction would hold the payroll lock
+ *     and wait for a second connection, while the pay runs that wait for that lock hold the rest of a small pool.
+ *   - WHO. Every technician who gets Tech Rewards lines now (recipients), less the ones whose season bonus is settled (a line
+ *     that is no longer open, as loadState reads it). The sync reads its own list under the lock afterwards: a technician it
+ *     finds who was not read here waits with a note (score_not_read), and the next sync reads them.
+ *   - A BONUS NEVER HOLDS A PAY RUN. A read that fails is logged and that bonus waits (score_read_failed): one technician's
+ *     (readSeasonScoreOrNull), or every one when the snapshot itself fails (`failed`).
+ *   - NOT THE LAST WORD. The pay run takes the payroll lock after this read, and may wait for it. seasonScoreOf reads each
+ *     score again under the lock and uses these figures only when nothing changed.
+ */
+async function readSeasonScores(conn, payDate) {
+  const due = payLinesOn() && kindOn(SEASON) ? seasonDueInRun(payDate) : [];
+  if (!due.length) return null;
+  const figures = new Map();
+  try {
+    await conn.transaction(async (snapshot) => {
+      const settled = new Set((await closedLines(snapshot, { kind: SEASON })).filter(ownKeyOf).map((line) => line.source_id));
+      const ids = (await recipients(snapshot).orderBy('technicians.id').select('technicians.id')).map((row) => row.id);
+      for (const { key } of due) {
+        const season = scoreboard().closedSeason(Number(key));
+        for (const id of ids) {
+          const sourceId = sourceIdOf(SEASON, id, key);
+          if (!settled.has(sourceId)) figures.set(sourceId, await readSeasonScoreOrNull(snapshot, id, season));
+        }
+      }
+    }, { isolationLevel: 'repeatable read', readOnly: true });
+  } catch (err) {
+    logger.error(`[tech-rewards-pay-lines] season scores could not be read for a pay run dated ${payDate}: ${err.message}`);
+    return { figures: new Map(), failed: true };
+  }
+  return { figures, failed: false };
+}
+
+/** readSeasonScores for a pay run that is on file (a recompute, a finalize): a run's pay date never changes. Null for no such run. */
+async function readSeasonScoresOfRun(conn, runId) {
+  if (!payLinesOn() || !kindOn(SEASON)) return null;
+  const run = await conn('payroll_runs').where({ id: runId }).first(conn.raw("to_char(pay_date, 'YYYY-MM-DD') as pay_date"));
+  return run ? readSeasonScores(conn, run.pay_date) : null;
+}
+
+/**
+ * The score figures one season bonus is worked out from, or { wait }: the figures read before the pay run's transaction
+ * opened (readSeasonScores), once the pay run has checked them UNDER THE PAYROLL LOCK. The pay run waits for that lock after
+ * the first read, so a score part corrected in between (an owner rating, a closeout) would be paid from the old score, and
+ * a finalize would pay it with the draft the office approved. So the figures are read a second time here, on the pay run's
+ * own connection, in a savepoint (readSeasonScoreOrNull: no second connection, and an error does not end the pay run's
+ * transaction), and compared with the first:
+ *   the same      the snapshot's figures are one moment's data AND still the data under the lock: they are used
+ *   not the same  the bonus waits (score_changed). Its open line comes off, so a finalize sees a run that differs from the
+ *                 draft, pays nothing from the old score and gives the office the new numbers; the next sync reads again
+ * The second read alone is not used: it is READ COMMITTED, and its parts can be from two moments. The sync holds the score
+ * settings lock by now (syncTechRewardLines), so the settings read here are the settings until the pay run ends.
+ */
+async function seasonScoreOf(trx, technicianId, key, season, seasonScores) {
+  const wait = (reason) => ({ wait: { reason, week: null } });
+  const read = seasonScores ? seasonScores.figures.get(sourceIdOf(SEASON, technicianId, key)) : undefined;
+  if (read === undefined && !(seasonScores && seasonScores.failed)) return wait('score_not_read');
+  if (!read) return wait('score_read_failed');
+  const underLock = await readSeasonScoreOrNull(trx, technicianId, season);
+  if (!underLock) return wait('score_read_failed');
+  return isDeepStrictEqual(underLock, read) ? read : wait('score_changed');
+}
+
+/**
+ * The season bonus of one candidate: { amountCents, span, note, countedCheckIds }, { skip: reason } (no bonus for them) or
+ * { wait: { reason, week } } (not on this run). Every figure is the board's own, read as of the season's last day
+ * (tech-rewards-scoreboard.js readSeasonScoreFigures, readSeasonPay: the two reads the board's readSeasonFigures is made of)
+ * and put together by the board's own code (seasonBonusOf), so the line is the figure the board shows for the closed season.
+ * The score figures are the ones read before the pay run's transaction opened (`seasonScores`, readSeasonScores), checked
+ * again under the payroll lock (seasonScoreOf). `conflict`: the wait for a season bonus line that the sync did not write
+ * (applyCandidate), or null.
+ * The pay is the pay EARNED in the season on the finalized checks for the pay weeks through seasonLastPayWeek (readBonusPay:
+ * no check for a later pay week), read in the pay run's transaction under the payroll lock, so, as for the stay bonus, the
+ * line is worked out only when those checks are all final. In this order:
+ *   hired_after_season      (skip) hired after the season's last day: no bonus for that season
+ *   score_not_read          the read before the run did not cover this technician (a recipient since that read, or a gate
+ *                           turned on since): the next sync reads them
+ *   score_read_failed       the score could not be read (readSeasonScores, seasonScoreOf): the error is logged and the run
+ *                           goes on
+ *   score_changed           the score is not what it was before the pay run took the payroll lock (seasonScoreOf)
+ *                           (while the score is not known, a line the sync did not write comes first: `conflict`)
+ *   score_below_bonus_line  (skip) the score is complete and under the lowest cut line: the season earns no bonus on any
+ *                           run. Asked BEFORE every wait below, so no run says a bonus waits (for a hire date, for an unpaid
+ *                           week, for a line somebody made by hand) that no run will pay
+ *   other_season_line       a season bonus line that the sync did not write is on file (`conflict`): check that line first
+ *   hire_date_missing,      no hire date on file, or one that is not a calendar date: the multiplier counts years of service,
+ *   hire_date_invalid       so the bonus waits, with a note, until the date is entered or corrected
+ *   pay_week_too_early      this run pays the last week the base counts or an earlier one: its own check is not final, so
+ *                           its pay is not in the base yet (week = that last week)
+ *   (spanWaitOf)            later_check_final, week_not_paid, week_needs_review, as for the gift
+ *   base_needs_review       as for the stay bonus (week = the oldest week with no proven split)
+ *   score_settings_missing  no score settings are in force for the season's last day (rows exist, and all start later)
+ *   score_incomplete        a score part has no data for the season: a bonus is never worked out from a partial score
+ *   no_pay_on_file, no_paycheck  as for the stay bonus
+ * An open line is worked out again at every sync, so a score part or a setting corrected before the run is finalized moves it.
+ */
+async function priceSeason(trx, cand, tech, run, { seasonScores, conflict }) {
+  const season = scoreboard().closedSeason(Number(cand.key));
+  if (tech.hire_date && tech.hire_date > season.end) return { skip: 'hired_after_season' };
+  const scored = await seasonScoreOf(trx, tech.id, cand.key, season, seasonScores);
+  if (scored.wait) return conflict || scored;
+  // the band is the score module's own (buildSeasonScore: scoreBand with the settings in force on the season's last day)
+  if (scored.seasonScore && scored.seasonScore.complete && scored.seasonScore.rateBps === 0) return { skip: 'score_below_bonus_line' };
+  if (conflict) return conflict;
+  if (!tech.hire_date) return { wait: { reason: tech.hire_date_bad ? 'hire_date_invalid' : 'hire_date_missing', week: null } };
+  const span = seasonSpanOf(season.year, run.week_start, tech.hire_date);
+  const lastWeek = scoreboard().seasonLastPayWeek(season.year);
+  if (run.week_start <= lastWeek) return { wait: { reason: 'pay_week_too_early', week: lastWeek } };
+  const wait = await spanWaitOf(trx, run, tech.id, span, 1);
+  if (wait) return { wait };
+  const seasonPay = await scoreboard().readSeasonPay(trx, tech.id, season);
+  if (seasonPay.unsplitWeeks.length) return { wait: { reason: 'base_needs_review', week: seasonPay.unsplitWeeks[0] } };
+  const { score, seasonBonus } = scoreboard().seasonBonusOf(tech.hire_date, season, { ...scored, grossSeasonCents: seasonPay.cents });
+  if (score.unavailable) return { wait: { reason: 'score_settings_missing', week: null } };
+  if (!score.complete) return { wait: { reason: 'score_incomplete', week: null } };
+  const amountCents = seasonBonus.estimateCents;
+  if (!amountCents) return { wait: { reason: 'no_pay_on_file', week: null } };
+  const noCheck = await checkWaitOf(trx, run, tech.id, { kind: SEASON, amountCents });
+  return noCheck ? { wait: noCheck } : { amountCents, span, note: seasonNote(season, seasonBonus, score), countedCheckIds: seasonPay.checkIds };
+}
+
+const PRICE = { [GIFT]: priceGift, [STAY]: priceStay, [SEASON]: priceSeason };
 // A line of the kind that this sync did not write is on file for the technician: the reason the automatic line waits.
-const OTHER_LINE = { [GIFT]: 'other_gift_line', [STAY]: 'other_stay_line' };
+const OTHER_LINE = { [GIFT]: 'other_gift_line', [STAY]: 'other_stay_line', [SEASON]: 'other_season_line' };
 
 // ---- Sync
 
@@ -422,6 +640,27 @@ async function stayBonusStatus(conn, technicianId, hireDate, today) {
   return { settledKeys, payableKeys: recipient ? dated : [] };
 }
 
+/**
+ * The season bonus payroll has PAID a technician for a season year, in cents, or null: the sync's own line for that year
+ * (ownKeyOf: its whole source key, for a season that has a bonus) that is paid on a FINALIZED check of a FINALIZED pay run. A
+ * row marked paid that is not the sync's own (a hand-made line, a key for a season before the first one) or that no finalized
+ * check holds is not money payroll paid, and never shows as paid. The scoreboard shows the amount in place of its estimate
+ * for a closed season (tech-rewards-scoreboard.js seasonBonusBlock): a paid line never changes, and the figures behind an
+ * estimate can (a score part corrected later, an old week paid late). Not behind a gate: a paid line is a fact with the gate
+ * off too.
+ */
+async function seasonBonusPaidCents(conn, technicianId, year) {
+  const row = await conn('payroll_pay_lines as line')
+    .join('payroll_checks as paid', 'paid.id', 'line.check_id')
+    .join('payroll_runs as run', 'run.id', 'paid.run_id')
+    .where({
+      'line.technician_id': technicianId, 'line.kind': SEASON, 'line.status': 'paid', 'line.source_type': SOURCE_TYPE,
+      'line.source_id': sourceIdOf(SEASON, technicianId, String(year)), 'paid.status': 'finalized', 'run.status': 'finalized',
+    })
+    .first('line.technician_id', 'line.kind', 'line.source_type', 'line.source_id', 'line.amount_cents');
+  return row && ownKeyOf(row) ? Number(row.amount_cents) : null;
+}
+
 const lineColumns = (trx) => ['id', 'technician_id', 'kind', 'status', 'amount_cents', 'note', 'counted_check_ids', 'source_type', 'source_id',
   trx.raw("to_char(earned_week_start, 'YYYY-MM-DD') as earned_week_start"),
   trx.raw("to_char(covers_from, 'YYYY-MM-DD') as covers_from"),
@@ -435,14 +674,23 @@ const WAIT_WORDS = {
   week_needs_review: (w) => `the week of ${dayLabel(w.week)} has a timesheet to approve or an automatic clock-out to review`,
   no_paycheck: () => 'no paycheck can be worked out for them on this pay run (check their pay rate, and the tax tables for the pay date)',
   later_check_final: () => 'a later paycheck of theirs is already final, so this pay run cannot hold one for them',
-  hire_date_missing: () => 'their hire date is not on file, so the pay run cannot tell whether they were hired by the gift date',
+  hire_date_missing: (w) => (w.kind === SEASON
+    ? 'their hire date is not on file, so the pay run cannot count their years of service'
+    : 'their hire date is not on file, so the pay run cannot tell whether they were hired by the gift date'),
   hire_date_invalid: () => 'their hire date on file is not a date the pay run can read, so correct it on their staff profile',
-  pay_week_too_early: (w) => (w.kind === STAY
-    ? `the 12 months it is worked out from end in the week of ${dayLabel(w.week)}, and only a pay run for a later week can add it`
-    : `this pay run pays an earlier week than the week of ${dayLabel(w.week)}, the last week the gift covers`),
+  pay_week_too_early: (w) => ({
+    [STAY]: `the 12 months it is worked out from end in the week of ${dayLabel(w.week)}, and only a pay run for a later week can add it`,
+    [SEASON]: `the pay it is worked out from is counted through the pay week of ${dayLabel(w.week)}, and only a pay run for a later week can add it`,
+  }[w.kind] || `this pay run pays an earlier week than the week of ${dayLabel(w.week)}, the last week the gift covers`),
   other_gift_line: () => 'a December gift line that the pay run did not write is already on file for them, so check that line first',
   other_stay_line: () => 'a stay bonus line that the pay run did not write is already on file for them, so check that line first',
-  no_pay_on_file: () => 'no finalized paycheck holds pay of theirs for the 12 months it is worked out from',
+  other_season_line: () => 'a season bonus line that the pay run did not write is already on file for them, so check that line first',
+  no_pay_on_file: (w) => `no finalized paycheck holds pay of theirs for the ${w.kind === SEASON ? 'season' : '12 months'} it is worked out from`,
+  score_incomplete: () => 'a part of their season score has no data (their scoreboard names it), and a bonus is never worked out from a partial score',
+  score_settings_missing: () => 'no score settings are in force for the last day of the season, so set them first',
+  score_read_failed: () => 'the pay run could not read their season score because of an error, so report it',
+  score_not_read: () => 'their season score was not read for this pay run, so recompute it',
+  score_changed: () => 'their season score changed while this pay run was worked out, so recompute it',
   base_needs_review: (w) => `an older paycheck paid a bonus line and other line pay for the week of ${dayLabel(w.week)} and kept no split of that week's overtime between them, so work this bonus out by hand`,
 };
 
@@ -489,15 +737,16 @@ async function dropRewardLinesOfWeek(trx, weekStart) {
   return rows.map((row) => (row && row.id ? row.id : row));
 }
 
-// The technicians a run may write a line for (recipients), with their hire dates. A run dated for a gift reads all of them. Any
+// The technicians a run may write a line for (recipients), with their hire dates. A run dated for a gift or a season bonus
+// (`dateDue`: due by the pay date alone, the same for every technician) reads all of them. Any
 // other run reads only the ones a stay bonus is dated for and the ones whose stay bonus line is already open on it: most runs
 // of the year read and lock no technician row. With lock the rows are read FOR SHARE, as payroll-family-employee.js
 // familyExemptIds reads them: a change to one of these technicians waits for the pay run's transaction, so a finalize never
 // pays a line the change took away. The stay bonus is looked for in a plain read first; only the locked rows are used after it.
 // A technician whose hire date on file is not a calendar date is read too (readTech): the run notes it.
-async function loadTechs(trx, run, lock, giftDue, openHere) {
+async function loadTechs(trx, run, lock, dateDue, openHere) {
   let ids = null;
-  if (!giftDue.length) {
+  if (!dateDue.length) {
     const dated = kindOn(STAY)
       ? (await recipients(trx).whereNotNull('technicians.hire_date').select(techColumns(trx))).map(readTech)
         .filter((row) => row.hire_date_bad || stayDueInRun(run.pay_date, row.hire_date).length)
@@ -527,28 +776,29 @@ async function loadState(trx, run, lock) {
   const openHere = ownOpen.filter((line) => line.earned_week_start === run.week_start);
   // paid (or voided) lines are evidence: their keys are never read or written again
   const settled = new Set(closed.filter((line) => ownKeyOf(line)).map((line) => line.source_id));
-  // What the run's pay date is for. The gift is the same for every technician; a stay bonus depends on the hire date.
-  const giftDue = kindOn(GIFT) ? dueInRun(run.pay_date) : [];
-  const techs = await loadTechs(trx, run, lock, giftDue, openHere);
+  // What the run's pay date is for. The gift and the season bonus are the same for every technician; a stay bonus depends on
+  // the hire date.
+  const dateDue = [...(kindOn(GIFT) ? dueInRun(run.pay_date) : []), ...(kindOn(SEASON) ? seasonDueInRun(run.pay_date) : [])];
+  const techs = await loadTechs(trx, run, lock, dateDue, openHere);
   const techById = new Map(techs.map((row) => [row.id, row]));
   const candidates = new Map();
   for (const tech of techs) {
-    const due = [...giftDue, ...(kindOn(STAY) ? stayDueInRun(run.pay_date, tech.hire_date) : [])];
+    const due = [...dateDue, ...(kindOn(STAY) ? stayDueInRun(run.pay_date, tech.hire_date) : [])];
     for (const { kind, key } of due) {
       candidates.set(sourceIdOf(kind, tech.id, key), { kind, key, technicianId: tech.id, due: true });
     }
   }
   // An open line of this week whose technician is not a recipient now, or that the run is no longer dated for. `due` says
-  // which of the two took the line off, for the audit event. A gift is due by the run's pay date alone, whoever the
-  // technician is. A stay bonus is due by the hire date: a recipient who is read and has no candidate is not due here, and
-  // one who is not read is no longer a recipient (applyCandidate, not_active).
-  const giftKeys = new Set(giftDue.map((d) => d.key));
+  // which of the two took the line off, for the audit event. A gift or a season bonus is due by the run's pay date alone,
+  // whoever the technician is. A stay bonus is due by the hire date: a recipient who is read and has no candidate is not due
+  // here, and one who is not read is no longer a recipient (applyCandidate, not_active).
+  const dateKeys = new Set(dateDue.map((d) => `${d.kind}:${d.key}`));
   for (const line of openHere) {
     const own = ownKeyOf(line);
     if (own && !candidates.has(line.source_id)) {
       candidates.set(line.source_id, {
         kind: line.kind, key: own.key, technicianId: line.technician_id,
-        due: line.kind === GIFT ? giftKeys.has(own.key) : !techById.has(line.technician_id),
+        due: line.kind === STAY ? !techById.has(line.technician_id) : dateKeys.has(`${line.kind}:${own.key}`),
       });
     }
   }
@@ -556,7 +806,7 @@ async function loadState(trx, run, lock) {
   // whatever its source type says. No code path makes one (the add form and its route offer the four manual kinds only, with
   // no source), so it is a row somebody put in the database by hand: that technician's automatic line of the kind is held for
   // review, and never paid beside it. Any key, open or paid; a voided row does not count. One small read: a technician has one
-  // gift line a year and three stay bonus lines in all.
+  // gift line and one season bonus line a year, and three stay bonus lines in all.
   const dueKinds = [...new Set([...candidates.values()].filter((cand) => cand.due).map((cand) => cand.kind))];
   const kindLines = dueKinds.length
     ? await trx('payroll_pay_lines').whereIn('kind', dueKinds).whereNot({ status: 'voided' })
@@ -601,11 +851,16 @@ async function applyCandidate(trx, run, sourceId, cand, state) {
   const open = state.openBySource.get(sourceId);
   const here = Boolean(open) && open.earned_week_start === run.week_start;
   const tech = state.techById.get(cand.technicianId);
+  // A line of the kind that the sync did not write (loadState, handMade and foreignKeys): the automatic line waits for it. A
+  // season bonus asks first whether the season earns a bonus at all (priceSeason: hired after the season, a score under the
+  // lowest cut line), so nobody is asked to check a hand-made line against an automatic bonus that no run will write.
+  const conflict = state.handMade.has(`${cand.kind}:${cand.technicianId}`) || state.foreignKeys.has(sourceId)
+    ? { wait: { reason: OTHER_LINE[cand.kind], week: null } } : null;
   let priced;
   if (!cand.due) priced = { skip: 'not_due_in_this_run' };
   else if (!tech) priced = { skip: 'not_active' };
-  else if (state.handMade.has(`${cand.kind}:${cand.technicianId}`) || state.foreignKeys.has(sourceId)) priced = { wait: { reason: OTHER_LINE[cand.kind], week: null } };
-  else priced = await PRICE[cand.kind](trx, cand, tech, run);
+  else if (conflict && cand.kind !== SEASON) priced = conflict;
+  else priced = await PRICE[cand.kind](trx, cand, tech, run, { seasonScores: state.seasonScores, conflict });
   if (priced.skip || priced.wait) {
     if (here) await trx('payroll_pay_lines').where({ id: open.id }).del();
     return { skip: priced.skip, wait: priced.wait, removed: here ? open.id : null };
@@ -632,13 +887,29 @@ async function applyCandidate(trx, run, sourceId, cand, state) {
 }
 
 /**
+ * When this sync is about to work a season bonus out: from here to the end of the pay run's transaction no score settings
+ * version can be saved (tech-rewards-scores.js lockSettingsForRead, the lock saveSettings takes). The settings move every
+ * technician's band at once, so a save must not land between the check of a score under the payroll lock (seasonScoreOf) and
+ * the bonus this run pays. Taken after the payroll lock, and a settings save takes no payroll lock: the two cannot lock
+ * each other. A sync with no season bonus to work out takes nothing, and so does one that takes no locks (`lock` false).
+ * The field records behind the score parts (reports, audits, callbacks, truck checks, ratings) are not locked: a pay run
+ * never stops a technician closing a report. A record written after the check is after this pay run, and a paid bonus is the
+ * one worked out from the records on file when payroll finalized.
+ */
+async function holdScoreSettings(trx, state, lock) {
+  const pricesSeason = lock && [...state.candidates].some(([sourceId, cand]) => cand.kind === SEASON && cand.due && !state.settled.has(sourceId));
+  if (pricesSeason) await scoreSettings().lockSettingsForRead(trx);
+}
+
+/**
  * Makes the open Tech Rewards pay lines match the plan, for the pay run `run` ({ id, week_start, pay_date } as
  * payroll-runs.js loadRun reads it). Take it inside the pay run's transaction, after the payroll lock and before the run is
  * worked out. Pay lines off: no pay line is read or written. A kind's gate off: its open lines are removed and none is written.
  * With pay lines off, or every kind's gate off, the run's stored waits are cleared. Never blocks a check.
+ * `seasonScores`: what readSeasonScores read for this run before the transaction opened (null: nothing was read).
  * Returns { added, updated, removed, skipped: [{ technicianId, kind, reason }], waits: [{ technicianId, kind, sourceId, reason, week }] }.
  */
-async function syncTechRewardLines(run, trx, { lock = true, actorId = null } = {}) {
+async function syncTechRewardLines(run, trx, { lock = true, actorId = null, seasonScores = null } = {}) {
   const result = { added: 0, updated: 0, removed: 0, skipped: [], waits: [] };
   if (!payLinesOn()) {
     await clearWaits(trx, run);
@@ -651,7 +922,8 @@ async function syncTechRewardLines(run, trx, { lock = true, actorId = null } = {
   const dropped = offKinds.length ? await dropOpenLines(trx, lock, offKinds) : [];
   if (dropped.length) await audit(trx, actorId, run, { gate: 'off', removed_count: dropped.length, removed_line_ids: dropped });
   if (allOff) return { ...result, removed: dropped.length };
-  const state = await loadState(trx, run, lock);
+  const state = { ...(await loadState(trx, run, lock)), seasonScores };
+  await holdScoreSettings(trx, state, lock);
   const ids = { added: [], updated: [], removed: [] };
   let examined = 0;
   let unchanged = 0;
@@ -727,6 +999,11 @@ async function waitNotes(conn, runId) {
       const year = Number(key);
       return tech.hire_date && tech.hire_date > decemberGiftDate(year) ? null : { what: KIND_WORDS[GIFT], limit: lastPayDate(year) };
     }
+    // a season bonus: none for a technician hired after the season (priceSeason), so no run says one waits
+    if (w.kind === SEASON) {
+      const year = Number(key);
+      return tech.hire_date && tech.hire_date > calc.seasonWindow(year).end ? null : { what: `${KIND_WORDS[SEASON]} (${key})`, limit: seasonLastPayDate(year) };
+    }
     const milestone = stayDueInRun(row.pay_date, tech.hire_date).some((due) => due.key === key) && stayMilestone(key, tech.hire_date);
     return milestone
       ? { what: `${KIND_WORDS[STAY]} (${key} ${key === '1' ? 'year' : 'years'})`, limit: addStaffWorkDays(milestone.dueDate, LOOKBACK_DAYS) }
@@ -745,8 +1022,9 @@ async function waitNotes(conn, runId) {
 }
 
 /**
- * True when a PAID line on another pay run was worked out from a check of this finalized run (counted_check_ids: the checks
- * that put pay into a stay bonus's base, each one for a pay week of its 12 months, kept on the line by the sync that priced it.
+ * The kind of a PAID line on another pay run that was worked out from a check of this finalized run ('stay_bonus',
+ * 'season_bonus'), or null (counted_check_ids: the checks that put pay into a bonus's base, each one for a pay week its base
+ * counts, kept on the line by the sync that priced it.
  * A check that was read and added nothing is not one, so it is voided as before;
  * finalize syncs first, so they are the checks the paid amount came from). payroll-runs.js voidRun asks it and refuses the void: the bonus would stay on its check, worked
  * out from pay that is gone. Voiding the run that paid the bonus first takes the bonus line off (dropRewardLinesOfWeek), and
@@ -762,8 +1040,8 @@ async function paidBonusCounting(trx, run) {
     .where({ 'b.status': 'paid', 'bc.status': 'finalized' })
     .whereNot('bc.run_id', run.id)
     .whereRaw("b.counted_check_ids && ARRAY(SELECT c.id FROM payroll_checks AS c WHERE c.run_id = ? AND c.status = 'finalized')", [run.id])
-    .first('b.id');
-  return Boolean(found);
+    .first('b.kind');
+  return found ? found.kind : null;
 }
 
 module.exports = {
@@ -776,6 +1054,12 @@ module.exports = {
   FIRST_STAY_DATE,
   stayDueInRun,
   staySpanOf,
+  FIRST_SEASON_YEAR,
+  seasonDueInRun,
+  seasonSpanOf,
+  seasonBonusPaidCents,
+  readSeasonScores,
+  readSeasonScoresOfRun,
   sourceIdOf,
   syncTechRewardLines,
   dropRewardLinesOfWeek,

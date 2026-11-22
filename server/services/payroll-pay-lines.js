@@ -36,11 +36,15 @@ const KINDS = ['review_bonus', 'commission', 'health_allowance', 'hsa_employer']
 const TECH_REWARD_KINDS = ['season_bonus', 'stay_bonus', 'december_gift'];
 // source_type of the lines the pay run's Tech Rewards sync writes (tech-rewards-pay-lines.js).
 const TECH_REWARDS_SOURCE = 'tech_rewards';
-// The kinds that sync writes, each with the form of its key (the last part of the source id). The season bonus comes later.
+// The kinds that sync writes, each with the form of its key (the last part of the source id).
 //   december_gift   the year of the gift, 4 digits
+//   season_bonus    the year of the season (Mar 1 - Aug 31), 4 digits, 2027 or later: no earlier season has a bonus
+//                   (tech-rewards-pay-lines.js FIRST_SEASON_YEAR), so a row keyed for one is somebody's hand-made line
 //   stay_bonus      the years of service of the milestone: 1, 3 or 5. One key for a milestone whatever its date, so a hire
 //                   date corrected after the bonus was paid never pays the same milestone again.
-const TECH_REWARDS_KEYS = { december_gift: { length: 4, pattern: '^[0-9]{4}$' }, stay_bonus: { length: 1, pattern: '^[135]$' } };
+const TECH_REWARDS_KEYS = {
+  december_gift: { length: 4, pattern: '^[0-9]{4}$' }, season_bonus: { length: 4, pattern: '^(202[7-9]|20[3-9][0-9]|2[1-9][0-9]{2}|[3-9][0-9]{3})$' }, stay_bonus: { length: 1, pattern: '^[135]$' },
+};
 const TECH_REWARDS_SYNC_KINDS = Object.keys(TECH_REWARDS_KEYS);
 // The source id of the sync's line for one technician and one key.
 const techRewardsSourceId = (kind, technicianId, key) => `${kind}:${technicianId}:${key}`;

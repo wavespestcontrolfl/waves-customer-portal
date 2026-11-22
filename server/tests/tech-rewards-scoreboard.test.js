@@ -2,8 +2,12 @@
 // with synthetic fixtures. The reads run against Postgres in tech-rewards-scoreboard-postgres.test.js.
 jest.mock('../models/db', () => jest.fn());
 
-const { composeScoreboard, pickSeason, reviewRateBps, earnedGrossCents, checkComponents, ordinaryPremium } = require('../services/tech-rewards-scoreboard');
+const {
+  composeScoreboard, pickSeason, reviewRateBps, earnedGrossCents, checkComponents, ordinaryPremium, closedSeason, seasonLastPayWeek, seasonBonusOf,
+} = require('../services/tech-rewards-scoreboard');
 const { priceCheckLines } = require('../services/payroll-pay-lines');
+const { defaultPayDate } = require('../services/payroll-runs');
+const { addStaffWorkDays } = require('../utils/staff-time-work-date');
 
 const WEIGHTS = { onTime: 25, audit: 25, callbacks: 20, truck: 10, ownerRating: 20 };
 const CUTS = { top: 90, mid: 80, low: 70 };
@@ -50,6 +54,24 @@ describe('pickSeason (the off-season choice)', () => {
 
   test('the bonus pay date is the last Friday of September', () => {
     expect(pickSeason('2026-11-20').payDate).toBe('2026-09-25');
+  });
+
+  test('a season that is over is the closed season the pay line asks for: the whole season, as of its last day', () => {
+    expect(closedSeason(2027)).toEqual({ year: 2027, start: '2027-03-01', end: '2027-08-31', status: 'final', asOf: '2027-08-31', payDate: '2027-09-24' });
+    expect(pickSeason('2027-11-02')).toEqual(closedSeason(2027));
+    expect(pickSeason('2028-02-29')).toEqual(closedSeason(2027));
+  });
+});
+
+describe('seasonLastPayWeek: the last pay week whose check counts in a season bonus base', () => {
+  test.each([
+    [2026, '2026-09-07'], [2027, '2027-09-06'], [2028, '2028-09-11'], [2029, '2029-09-10'], [2030, '2030-09-09'],
+  ])('%i: the week of %s, the week before the one a pay run dated the last Friday of September pays', (year, week) => {
+    expect(seasonLastPayWeek(year)).toBe(week);
+    // the pay run for the next week is dated the bonus's pay date: it is the first run that can carry the bonus
+    expect(defaultPayDate(addStaffWorkDays(week, 7))).toBe(closedSeason(year).payDate);
+    // every pay week that holds a day of the season is counted
+    expect(week > closedSeason(year).end).toBe(true);
   });
 });
 
@@ -371,6 +393,24 @@ describe('composeScoreboard', () => {
     const board = composeScoreboard(inputs({ reviews: 0, asks: 0 }));
     expect(board.reviews).toEqual({ count: 0, asks: 0, rateBps: null, multiplierPartE4: 0 });
     expect(board.multiplier.multiplierE4).toBe(10000);
+  });
+
+  test('a season bonus payroll has paid shows the paid amount, with no estimate beside it', () => {
+    const board = composeScoreboard(inputs({ seasonBonusPaidCents: 53300 }));
+    expect(board.seasonBonus).toEqual({ grossCents: 1000000, estimate: false, estimateCents: null, paidCents: 53300 });
+    // the score and the multiplier still show what the season was
+    expect(board.score).toMatchObject({ complete: true, value: 91.5 });
+    expect(board.multiplier).toMatchObject({ multiplierE4: 13333 });
+    // nothing paid: the estimate, as before
+    expect(composeScoreboard(inputs({ seasonBonusPaidCents: null })).seasonBonus).toMatchObject({ estimate: true, estimateCents: 53332 });
+  });
+
+  test('seasonBonusOf is the board\'s own arithmetic: the pay line takes the season bonus from the same figures', () => {
+    const given = inputs();
+    const board = composeScoreboard(given);
+    const figures = { seasonScore: given.seasonScore, settings: null, reviews: 6, asks: 30, grossSeasonCents: 1000000 };
+    const { rateBps, score, multiplier, seasonBonus } = seasonBonusOf('2025-04-01', given.season, figures);
+    expect([rateBps, score, multiplier, seasonBonus]).toEqual([board.reviews.rateBps, board.score, board.multiplier, board.seasonBonus]);
   });
 
   test('a score below the lowest band estimates $0', () => {

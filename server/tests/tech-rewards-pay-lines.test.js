@@ -1,5 +1,5 @@
-// Tech Rewards Plan D5-5: the pure parts of the December gift and stay bonus pay line sync (which pay date each is due on,
-// what it covers, its source key) and the gate behavior that needs no database. Synthetic fixtures only.
+// Tech Rewards Plan D5-5: the pure parts of the December gift, stay bonus and season bonus pay line sync (which pay date each
+// is due on, what it covers, its source key) and the gate behavior that needs no database. Synthetic fixtures only.
 // The sync against Postgres is in tech-rewards-pay-lines-postgres.test.js.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => 'audit-1') }));
@@ -7,7 +7,7 @@ const { recordAuditEvent } = require('../services/audit-log');
 
 const {
   decemberGiftDate, dueInRun, lastPayDate, spanOf, sourceIdOf, syncTechRewardLines, DECEMBER_GIFT_CENTS, SOURCE_TYPE,
-  FIRST_STAY_DATE, stayDueInRun, staySpanOf,
+  FIRST_STAY_DATE, stayDueInRun, staySpanOf, FIRST_SEASON_YEAR, seasonDueInRun, seasonSpanOf,
 } = require('../services/tech-rewards-pay-lines');
 const { weeksOfLine } = require('../services/payroll-regular-rate');
 const { techRewardsOwnKey, techRewardsOwnedSql } = require('../services/payroll-pay-lines');
@@ -153,6 +153,52 @@ describe('staySpanOf: what the stay bonus covers (the 12 months before the anniv
   });
 });
 
+describe('seasonDueInRun: the season bonus a run dated that day may write', () => {
+  const keys = (payDate) => seasonDueInRun(payDate).map((d) => `${d.kind}:${d.key}`);
+
+  test('due from the last Friday of September to 60 days after it, and its key is the season year', () => {
+    expect(keys('2027-09-23')).toEqual([]); // the day before the last Friday of September 2027
+    expect(keys('2027-09-24')).toEqual(['season_bonus:2027']);
+    expect(keys('2027-10-08')).toEqual(['season_bonus:2027']); // a later run may write it when the first was not ready
+    expect(keys('2027-11-23')).toEqual(['season_bonus:2027']); // 60 days after
+    expect(keys('2027-11-24')).toEqual([]);
+    expect(keys('2027-08-31')).toEqual([]); // the season's own last day
+    expect(keys('2028-09-29')).toEqual(['season_bonus:2028']); // the last Friday of September 2028
+    expect(keys('2028-01-07')).toEqual([]); // never over the new year: the 60 days end in November
+  });
+
+  test('no season before 2027 has a bonus: the plan was approved after the 2026 season was over', () => {
+    expect(FIRST_SEASON_YEAR).toBe(2027);
+    // the last Friday of September 2026 and the 60 days after it, and 2025
+    for (const payDate of ['2026-09-25', '2026-10-09', '2026-11-24', '2025-09-26']) expect([payDate, keys(payDate)]).toEqual([payDate, []]);
+  });
+
+  test('the gift and the season bonus are never due on the same pay date', () => {
+    for (const payDate of ['2027-09-24', '2027-11-23']) expect(dueInRun(payDate)).toEqual([]);
+    for (const payDate of ['2027-12-17', '2028-02-15']) expect(seasonDueInRun(payDate)).toEqual([]);
+  });
+});
+
+describe('seasonSpanOf: what the season bonus covers (the season, whichever run pays it)', () => {
+  test('Mar 1 to Aug 31 of the season year, and from the hire date for a technician hired during the season', () => {
+    expect(seasonSpanOf(2027, '2027-09-13', '2027-01-04')).toEqual({ earnedWeekStart: '2027-09-13', coversFrom: '2027-03-01', coversTo: '2027-08-31' });
+    expect(seasonSpanOf(2027, '2027-10-04', '2025-06-02')).toEqual({ earnedWeekStart: '2027-10-04', coversFrom: '2027-03-01', coversTo: '2027-08-31' });
+    expect(seasonSpanOf(2027, '2027-09-13', '2027-03-01')).toMatchObject({ coversFrom: '2027-03-01' });
+    expect(seasonSpanOf(2027, '2027-09-13', '2027-05-10')).toMatchObject({ coversFrom: '2027-05-10', coversTo: '2027-08-31' });
+    expect(seasonSpanOf(2027, '2027-09-13', '2027-08-31')).toMatchObject({ coversFrom: '2027-08-31', coversTo: '2027-08-31' });
+  });
+
+  test('the period spreads over its whole workweeks, and the run of the last Friday of September pays a later week', () => {
+    const payDate = '2027-09-24';
+    // the pay week whose default pay date is that Friday
+    const weekStart = ['2027-09-06', '2027-09-13', '2027-09-20'].find((week) => defaultPayDate(week) === payDate);
+    const span = seasonSpanOf(2027, weekStart, '2027-01-04');
+    // Mar 1, 2027 is a Monday and Aug 31, 2027 a Tuesday (the week of Aug 30): 27 weeks
+    expect(weeksOfLine({ coversFrom: span.coversFrom, coversTo: span.coversTo, weekStart: span.earnedWeekStart })).toHaveLength(27);
+    expect(staffWeekStartForWorkDate(span.coversTo) < span.earnedWeekStart).toBe(true);
+  });
+});
+
 describe('source key', () => {
   test('is december_gift:<technician>:<year>', () => {
     expect(sourceIdOf('december_gift', 'abc', '2026')).toBe('december_gift:abc:2026');
@@ -176,6 +222,31 @@ describe('ownership: the sync owns a line only by its whole source key, compared
   test('a stay bonus line is keyed by its years of service: 1, 3 or 5', () => {
     for (const key of ['1', '3', '5']) expect(techRewardsOwnKey(stay(key))).toEqual({ kind: 'stay_bonus', key });
     expect(techRewardsOwnKey(row({ kind: 'stay_bonus', source_id: sourceIdOf('stay_bonus', TECH, '3') }))).toEqual({ kind: 'stay_bonus', key: '3' });
+  });
+
+  test('a season bonus line is keyed by its season year, 4 digits', () => {
+    const season = (key, patch) => row({ kind: 'season_bonus', source_id: `season_bonus:${TECH}:${key}`, ...patch });
+    expect(techRewardsOwnKey(season('2027'))).toEqual({ kind: 'season_bonus', key: '2027' });
+    expect(techRewardsOwnKey(row({ kind: 'season_bonus', source_id: sourceIdOf('season_bonus', TECH, '2031') }))).toEqual({ kind: 'season_bonus', key: '2031' });
+    for (const line of [season('27'), season('12027'), season('2027 '), season('1'), season('2027', { source_id: `season_bonus:${OTHER}:2027` }),
+      season('2027', { source_id: `december_gift:${TECH}:2027` }), season('2027', { source_type: null, source_id: null }),
+      season('2027', { source_type: 'commission_payment' })]) {
+      expect([line.source_id, techRewardsOwnKey(line)]).toEqual([line.source_id, null]);
+    }
+  });
+
+  test('a season bonus row keyed for a season before the first one (2027) is not the sync\'s: it is a hand-made line, never moved or removed', () => {
+    const season = (year) => row({ kind: 'season_bonus', source_id: `season_bonus:${TECH}:${year}` });
+    expect(techRewardsOwnKey(season(FIRST_SEASON_YEAR - 1))).toBeNull(); // 2026: the season that ended before the plan was approved
+    expect(techRewardsOwnKey(season(FIRST_SEASON_YEAR))).toEqual({ kind: 'season_bonus', key: '2027' });
+    // every 4-digit year: the sync's own from the first season on, and never before it
+    const wrong = [];
+    for (let year = 1000; year <= 9999; year += 1) {
+      if (Boolean(techRewardsOwnKey(season(year))) !== (year >= FIRST_SEASON_YEAR)) wrong.push(year);
+    }
+    expect(wrong).toEqual([]);
+    // the SQL form carries the same bound (one pattern for both)
+    expect(techRewardsOwnedSql()).toContain("kind = 'season_bonus' AND right(source_id, 4) ~ '^(202[7-9]|20[3-9][0-9]|2[1-9][0-9]{2}|[3-9][0-9]{3})$'");
   });
 
   test.each([
@@ -204,7 +275,7 @@ describe('ownership: the sync owns a line only by its whole source key, compared
     ['text after the year', { source_id: `december_gift:${TECH}:2026 ` }],
     ['text before the kind', { source_id: ` december_gift:${TECH}:2026` }],
     ['another kind in the id', { source_id: `stay_bonus:${TECH}:2026` }],
-    ['a kind the sync does not write', { kind: 'season_bonus', source_id: `season_bonus:${TECH}:2026` }],
+    ['a kind the sync does not write', { kind: 'review_bonus', source_id: `review_bonus:${TECH}:2026` }],
     ['a manual kind', { kind: 'commission', source_id: `commission:${TECH}:2026` }],
     ['an empty id', { source_id: '' }],
   ])('a row with %s is not the sync\'s', (_, patch) => {
@@ -214,6 +285,7 @@ describe('ownership: the sync owns a line only by its whole source key, compared
   test('the SQL form names only constants and columns, and is never null for a row with no source', () => {
     expect(techRewardsOwnedSql()).toBe("(source_type IS NOT NULL AND source_type = 'tech_rewards' AND ("
       + "(kind = 'december_gift' AND right(source_id, 4) ~ '^[0-9]{4}$' AND source_id = kind || ':' || technician_id::text || ':' || right(source_id, 4))"
+      + " OR (kind = 'season_bonus' AND right(source_id, 4) ~ '^(202[7-9]|20[3-9][0-9]|2[1-9][0-9]{2}|[3-9][0-9]{3})$' AND source_id = kind || ':' || technician_id::text || ':' || right(source_id, 4))"
       + " OR (kind = 'stay_bonus' AND right(source_id, 1) ~ '^[135]$' AND source_id = kind || ':' || technician_id::text || ':' || right(source_id, 1))))");
     expect(techRewardsOwnedSql('l')).toContain("l.source_id = l.kind || ':' || l.technician_id::text || ':' || right(l.source_id, 4)");
     expect(techRewardsOwnedSql('l')).toContain("l.kind = 'stay_bonus' AND right(l.source_id, 1) ~ '^[135]$'");
@@ -222,14 +294,16 @@ describe('ownership: the sync owns a line only by its whole source key, compared
 });
 
 describe('the gates', () => {
-  const OLD = { pay: process.env.GATE_PAYROLL_PAY_LINES, rewards: process.env.GATE_TECH_REWARDS_PAY_LINES, stay: process.env.GATE_TECH_REWARDS_STAY_BONUS };
+  const NAMES = ['GATE_PAYROLL_PAY_LINES', 'GATE_TECH_REWARDS_PAY_LINES', 'GATE_TECH_REWARDS_STAY_BONUS', 'GATE_TECH_REWARDS_SEASON_BONUS'];
+  const OLD = Object.fromEntries(NAMES.map((name) => [name, process.env[name]]));
   beforeEach(() => {
     recordAuditEvent.mockClear();
     delete process.env.GATE_TECH_REWARDS_STAY_BONUS;
+    delete process.env.GATE_TECH_REWARDS_SEASON_BONUS;
   });
   afterEach(() => {
-    for (const [name, value] of [['GATE_PAYROLL_PAY_LINES', OLD.pay], ['GATE_TECH_REWARDS_PAY_LINES', OLD.rewards], ['GATE_TECH_REWARDS_STAY_BONUS', OLD.stay]]) {
-      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    for (const name of NAMES) {
+      if (OLD[name] === undefined) delete process.env[name]; else process.env[name] = OLD[name];
     }
   });
   const run = { id: 'run-1', week_start: '2026-12-07', pay_date: '2026-12-18' };
@@ -276,7 +350,7 @@ describe('the gates', () => {
     expect(result.removed).toBe(1);
     expect(calls.slice(0, 3)).toEqual(CLEAR_WAITS);
     expect(calls).toContainEqual(['where', 'payroll_pay_lines', { source_type: 'tech_rewards', status: 'open' }]);
-    expect(calls).toContainEqual(['whereIn', 'payroll_pay_lines', ['december_gift', 'stay_bonus']]); // every kind's gate is off
+    expect(calls).toContainEqual(['whereIn', 'payroll_pay_lines', ['december_gift', 'stay_bonus', 'season_bonus']]); // every kind's gate is off
     expect(calls).toContainEqual(['whereRaw', 'payroll_pay_lines', techRewardsOwnedSql()]); // only the lines the sync owns
     expect(calls).toContainEqual(['del', 'payroll_pay_lines']);
     expect(calls.filter(([method, table]) => method === 'update' && table !== 'payroll_runs')).toEqual([]);
