@@ -1160,18 +1160,24 @@ function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING, surface 
   // is empty or failed transiently — the resume fetch succeeding is the
   // customer's only automatic path back to the held purchase (the return
   // URL params are cleared once the state loads).
-  if (!data?.cards?.length) {
-    if (!purchaseResume) return null;
-    return (
-      <OneTapPurchaseOverlay
-        open
-        card={null}
-        resume={purchaseResume}
-        onClose={() => setPurchaseResume(null)}
-        onCardSaved={notifyCardSaved}
-      />
-    );
-  }
+  //
+  // ONE overlay element at ONE place in this component's tree, whatever the
+  // card list does (not loaded yet, empty, advice only, loaded): every return
+  // below is a fragment whose second child is this element. A purchase
+  // resumed before the cards arrive keeps its instance when they do; an
+  // overlay that unmounts releases the held visit time. The overlay draws
+  // through a portal, so its place here is not its place on the screen.
+  const overlay = (purchaseCard || purchaseResume) ? (
+    <OneTapPurchaseOverlay
+      open
+      card={purchaseCard}
+      resume={purchaseCard ? null : purchaseResume}
+      onClose={() => { setPurchaseCard(null); setPurchaseResume(null); }}
+      onCardSaved={notifyCardSaved}
+    />
+  ) : null;
+  const overlayOnly = <>{null}{overlay}</>;
+  if (!data?.cards?.length) return overlayOnly;
   const muted = PORTAL_SHELL.muted;
   const setCardState = (id, value) => setRequestStates((prev) => ({ ...prev, [id]: value }));
 
@@ -1221,19 +1227,10 @@ function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING, surface 
   const visibleCards = (data?.cards || []).filter((c) => c.kind !== 'advice');
   // Same rule as the empty-payload guard above: a restored purchase must
   // still render when only advice cards came back (pre-push P1).
-  if (visibleCards.length === 0) {
-    if (!purchaseResume) return null;
-    return (
-      <OneTapPurchaseOverlay
-        open
-        card={null}
-        resume={purchaseResume}
-        onClose={() => setPurchaseResume(null)}
-      />
-    );
-  }
+  if (visibleCards.length === 0) return overlayOnly;
 
   return (
+    <>
     <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: 20 }}>
       <div data-glass="chip" style={CUSTOMER_SECTION_LABEL}>
         <Icon name={heading.icon} size={14} strokeWidth={2} />{heading.label}
@@ -1331,16 +1328,9 @@ function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING, surface 
           );
         })}
       </div>
-      {(purchaseCard || purchaseResume) && (
-        <OneTapPurchaseOverlay
-          open
-          card={purchaseCard}
-          resume={purchaseCard ? null : purchaseResume}
-          onClose={() => { setPurchaseCard(null); setPurchaseResume(null); }}
-          onCardSaved={notifyCardSaved}
-        />
-      )}
     </section>
+    {overlay}
+    </>
   );
 }
 
@@ -6477,6 +6467,10 @@ function BillingChannelSelect({ field, channels, usable, saving, onChange }) {
   );
 }
 
+// The Billing tab's root column: one style for its loading, error and loaded
+// views, so the root stays the same <div> across them.
+const BILLING_COLUMN = { display: 'flex', flexDirection: 'column', gap: 16 };
+
 function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, onSwitchTab = null }) {
   const portalGlass = usePortalGlass();
   // C4: a cancelled account keeps billing READS (balance, invoices, history,
@@ -7038,30 +7032,47 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
     return `${cardBrandLabel(method.brand)}${last4 ? ` ending in ${last4}` : ''}`;
   };
 
+  // The add-a-service card owns its purchase overlay and the return from a
+  // bank page for it (it saves the returned method and reopens the held
+  // purchase). It is the same keyed child of the same root <div> in every
+  // branch below, so React keeps the one instance: the return is resumed
+  // while Billing loads or fails to load, and the reopened purchase stays
+  // open when Billing then renders. Before Billing has loaded it gets no
+  // offers, so it shows nothing but a resumed purchase.
+  const offerCard = (offers) => (cancelledAccount ? null : (
+    <RecommendationsCard key="billing-offer" data={offers} surface="billing" onCardSaved={handleOfferCardSaved} />
+  ));
+
   if (loading) {
     return (
-      <PortalStatePanel
-        icon="card"
-        eyebrow="Billing"
-        titleAs="h1"
-        title="Loading billing"
-        message="Checking your balance, saved methods, autopay status, and payment history."
-      />
+      <div style={BILLING_COLUMN}>
+        <PortalStatePanel
+          icon="card"
+          eyebrow="Billing"
+          titleAs="h1"
+          title="Loading billing"
+          message="Checking your balance, saved methods, autopay status, and payment history."
+        />
+        {offerCard(null)}
+      </div>
     );
   }
 
   if (loadError) {
     return (
-      <PortalStatePanel
-        icon="warning"
-        tone="danger"
-        eyebrow="Billing"
-        titleAs="h1"
-        title="Could not load billing"
-        message={loadError}
-        actionLabel="Try Again"
-        onAction={loadBilling}
-      />
+      <div style={BILLING_COLUMN}>
+        <PortalStatePanel
+          icon="warning"
+          tone="danger"
+          eyebrow="Billing"
+          titleAs="h1"
+          title="Could not load billing"
+          message={loadError}
+          actionLabel="Try Again"
+          onAction={loadBilling}
+        />
+        {offerCard(null)}
+      </div>
     );
   }
 
@@ -7494,7 +7505,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <div style={BILLING_COLUMN}>
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0 }}>
@@ -8351,12 +8362,11 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
 
       {/* A card saved in the offer's purchase overlay is on the account at
           once: the same refresh as Billing's own add-payment flow.
-          Two things are the shared card's own, the same on Home and My
-          Plan, and are not handled per host: the card keeps a bought offer
-          until the tab loads again (purchase init rejects the stale one
-          with a 409, the card's refresh state), and it resumes a bank-page
-          return when its host renders it. */}
-      {!cancelledAccount && <RecommendationsCard data={billingOffers} surface="billing" onCardSaved={handleOfferCardSaved} />}
+          One thing is the shared card's own, the same on Home and My Plan,
+          and is not handled per host: the card keeps a bought offer until
+          the tab loads again (purchase init rejects the stale one with a
+          409, the card's refresh state). */}
+      {offerCard(billingOffers)}
       {!cancelledAccount && onSwitchTab && (
         <section data-glass="card" data-section="billing-refer" style={{ ...card, padding: 20, marginTop: 16, textAlign: 'center' }}>
           <h2 style={{ fontSize: 18, fontWeight: 700, color: B.glassNavy, margin: '0 0 6px' }}>Know someone who could use Waves?</h2>

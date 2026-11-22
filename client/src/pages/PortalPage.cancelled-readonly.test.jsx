@@ -6,7 +6,7 @@
 // active account renders all of them unchanged.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../utils/api', () => ({
@@ -16,6 +16,7 @@ vi.mock('../utils/api', () => ({
     requestPropertyRecommendation: vi.fn(),
     saveStripeCard: vi.fn(),
     oneTapGet: vi.fn(),
+    oneTapRelease: vi.fn(),
     getSchedule: vi.fn(),
     getNotificationPrefs: vi.fn(),
     getPropertyNotificationPrefs: vi.fn(),
@@ -133,6 +134,43 @@ describe('BillingTab — add-a-service and refer cards', () => {
       // "Turn on" button of the off state is gone.
       await waitFor(() => expect(screen.queryByRole('button', { name: 'Turn on Auto Pay' })).not.toBeInTheDocument());
       expect(screen.getAllByText('Auto Pay is on').length).toBeGreaterThan(0);
+    } finally {
+      window.history.replaceState({}, '', '/');
+    }
+  });
+
+  // The card owns the return from a bank page for its purchase. Billing has a
+  // loading view and an error view; the return must be resumed in both, or a
+  // failed balance read leaves the held visit time to expire. And the card
+  // must be the same instance when Billing then loads, or the reopened
+  // purchase closes by itself.
+  it('a bank-page return is resumed while Billing fails to load, and stays open when Billing loads', async () => {
+    window.history.replaceState({}, '', '/?stripe_setup_flow=one_tap_card&setup_intent=si_1&redirect_status=succeeded&one_tap_resume=p-7');
+    try {
+      api.getPropertyRecommendations.mockResolvedValue(RECS);
+      api.saveStripeCard.mockResolvedValue({});
+      api.oneTapGet.mockResolvedValue({
+        purchaseId: 'p-7', estimateId: 'est-1', status: 'reserved', open: true,
+        serviceKey: 'lawn_care', label: 'Lawn Care', perVisit: 84,
+        cadenceLabel: '9 applications/yr', visitsPerYear: 9,
+        terms: { version: 'v1', text: 'Server terms text.' },
+        hasCardOnFile: true, holdLive: true, holdMinutes: 15,
+        slot: { date: '2026-08-20', windowStart: '08:00', windowEnd: '10:00', holdExpiresAt: new Date(Date.now() + 900000).toISOString() },
+      });
+      api.getBalance.mockRejectedValueOnce(new Error('balance read failed'));
+      render(<BillingTab customer={{ ...baseCustomer, cancelled: false }} refreshCustomer={vi.fn()} onSwitchTab={vi.fn()} />);
+
+      expect(await screen.findByText('Could not load billing')).toBeInTheDocument();
+      expect(await screen.findByRole('dialog', { name: /Add Lawn Care/ })).toBeInTheDocument();
+      expect(api.saveStripeCard).toHaveBeenCalledWith(null, 'si_1');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Try Again' }));
+      await screen.findByText(/^Payment History$/i);
+      expect(screen.getByRole('dialog', { name: /Add Lawn Care/ })).toBeInTheDocument();
+      // One instance: the return was read once, and no card unmounted on
+      // the way (an unmounted overlay releases the held purchase).
+      expect(api.oneTapGet).toHaveBeenCalledTimes(1);
+      expect(api.oneTapRelease).not.toHaveBeenCalled();
     } finally {
       window.history.replaceState({}, '', '/');
     }
