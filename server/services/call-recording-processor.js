@@ -10049,9 +10049,11 @@ function undoRecurringDefaultForAgreedOneTimeJob(extracted, serviceBefore, v2Ext
   return { ...extracted, matched_service: serviceBefore.matched_service, specific_service_name: serviceBefore.specific_service_name };
 }
 
-// The rule from the caller's words alone: `extracted` itself when nothing
-// changes, else a copy with the recurring program.
-function recurringProgramFromCallerWords(extracted, transcription, bookableServiceNames) {
+// The rule from the caller's words: `extracted` itself when nothing changes,
+// else a copy with the recurring program. `holdSingular` keeps a field that
+// names a singular service as it is; a field that already names a program
+// still gets the caller's cadence.
+function recurringProgramFromCallerWords(extracted, transcription, bookableServiceNames, holdSingular) {
   if (!extracted || extracted.is_lead !== true) return extracted;
   // specific_service_name outranks matched_service in catalog booking
   // resolution (call-booking-catalog.js), so a singular value THERE would
@@ -10096,7 +10098,7 @@ function recurringProgramFromCallerWords(extracted, transcription, bookableServi
   const programName = (family) => resolveProgramName(family.key, family.fallback, bookableServiceNames);
 
   const retarget = (isSingular, isRecurring, current) => {
-    if (isSingular) return programName(chosen);
+    if (isSingular) return holdSingular ? current : programName(chosen);
     // Already a recurring program: retarget ONLY on one unambiguous caller
     // cadence (the model can default to quarterly over an explicit
     // bi-monthly ask); ambiguity keeps the model's pick.
@@ -10119,20 +10121,20 @@ function recurringProgramFromCallerWords(extracted, transcription, bookableServi
 
 // `v2Extraction`: the validated V2 extraction when the caller of this function
 // has one (every pass after V2-primary adoption), else null. An agreed one-time
-// job holds the rewrite of a singular service (callAgreedOneTimeJob); a view
-// that already names a program keeps the rule's cadence choice.
+// job (callAgreedOneTimeJob) holds the rewrite of each field that names a
+// singular service; a field that already names a program keeps the rule's
+// cadence choice.
 function applyRecurringIntentDefault(extracted, transcription, bookableServiceNames = [], v2Extraction = null) {
-  const out = recurringProgramFromCallerWords(extracted, transcription, bookableServiceNames);
+  const label = (view) => view.specific_service_name || view.matched_service;
+  const out = recurringProgramFromCallerWords(extracted, transcription, bookableServiceNames, false);
   if (out === extracted) return extracted;
-  const label = extracted.specific_service_name || extracted.matched_service;
-  const singular = [extracted.matched_service, extracted.specific_service_name]
-    .some((name) => RECURRING_OVERRIDE_SOURCES.has(normalizeServiceKey(name)));
-  if (singular && callAgreedOneTimeJob(v2Extraction)) {
-    logger.info(`[call-proc] recurring-intent default held: the call agreed a one-time price for "${label}"`);
-    return extracted;
+  if (!callAgreedOneTimeJob(v2Extraction)) {
+    logger.info(`[call-proc] recurring-intent default: "${label(extracted)}" -> "${label(out)}"`);
+    return out;
   }
-  logger.info(`[call-proc] recurring-intent default: "${label}" -> "${out.specific_service_name || out.matched_service}"`);
-  return out;
+  const held = recurringProgramFromCallerWords(extracted, transcription, bookableServiceNames, true);
+  logger.info(`[call-proc] recurring-intent default held, the call agreed a one-time price: "${label(extracted)}" stays${held === extracted ? '' : `, cadence -> "${label(held)}"`}`);
+  return held;
 }
 
 // ── AI extraction via Gemini ──
@@ -12935,6 +12937,10 @@ const CallRecordingProcessor = {
     // two fields back when the extraction shows one.
     const serviceBeforeRecurringRule = { matched_service: extracted.matched_service, specific_service_name: extracted.specific_service_name };
     if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
+    // True while a program this pass wrote is what ai_extraction and the lead
+    // are persisted with (nothing undid it).
+    let firstPassProgramStands = extracted.matched_service !== serviceBeforeRecurringRule.matched_service
+      || extracted.specific_service_name !== serviceBeforeRecurringRule.specific_service_name;
 
     // ── Shadow v2 extraction (records alongside v1, no side effects) ──
     let v2Result = null;
@@ -13111,6 +13117,7 @@ const CallRecordingProcessor = {
       if (restored !== extracted) {
         logger.info(`[call-proc] recurring-intent default undone for ${maskSid(callSid)}: the call agreed a one-time price`);
         extracted = restored;
+        firstPassProgramStands = false;
       }
     }
     const preAdoptionExtracted = { ...extracted };
@@ -19918,8 +19925,14 @@ const CallRecordingProcessor = {
       const preReassertMatched = extracted.matched_service;
       const preReassertSpecific = extracted.specific_service_name;
       if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames, v2ApprovedExtraction);
+      // With V2-primary adoption off (CALL_EXTRACTION_V2_PRIMARY=false) nothing
+      // undid the first pass. When the hold keeps the one-time service here,
+      // ai_extraction and the lead still carry that pass's program: backfill
+      // them too (owner 2026-11-22).
+      const heldOverPersistedProgram = firstPassProgramStands && callAgreedOneTimeJob(v2ApprovedExtraction);
       if (extracted.matched_service !== preReassertMatched
-        || extracted.specific_service_name !== preReassertSpecific) {
+        || extracted.specific_service_name !== preReassertSpecific
+        || heldOverPersistedProgram) {
         // ai_extraction and the lead's service_interest were persisted BEFORE
         // this V2 merge ran — backfill them so pipeline reporting shows the
         // same program the appointment books. Fail-open: booking proceeds

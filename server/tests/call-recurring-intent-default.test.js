@@ -538,6 +538,16 @@ describe('an agreed one-time job holds the rule (owner 2026-11-22)', () => {
       .toBe('Monthly Pest Control Service');
   });
 
+  test('a mixed view: the singular field stays and the program field takes the caller\'s cadence', () => {
+    const mixed = () => lead({ matched_service: 'Pest Control Service', specific_service_name: 'Quarterly Pest Control Service' });
+    const t = 'Caller: I want the monthly plan.';
+    // The specific label wins in booking, so the cadence the caller chose must reach it.
+    expect(applyRecurringIntentDefault(mixed(), t, [], v2()))
+      .toMatchObject({ matched_service: 'Pest Control Service', specific_service_name: 'Monthly Pest Control Service' });
+    expect(applyRecurringIntentDefault(mixed(), t))
+      .toMatchObject({ matched_service: 'Monthly Pest Control Service', specific_service_name: 'Monthly Pest Control Service' });
+  });
+
   test('a caller with no recurring words is untouched either way', () => {
     const view = oneTime();
     expect(applyRecurringIntentDefault(view, 'Caller: Can someone spray for ants today?', [], v2())).toBe(view);
@@ -592,6 +602,22 @@ describe('an agreed one-time job holds the rule (owner 2026-11-22)', () => {
       const gate = "if (callExtractionV2PrimaryEnabled() && v2Result?.status === 'valid') {\n      const restored = ";
       expect(src.indexOf(gate)).toBeGreaterThan(firstPass);
       expect(src.indexOf(gate) + gate.length).toBe(undone);
+    });
+
+    test('with V2-primary adoption off, a hold over the first pass\'s program still backfills ai_extraction and the lead', () => {
+      // Nothing undid the first pass there, so what was persisted names the program the hold then refuses.
+      const flag = src.indexOf('let firstPassProgramStands = extracted.matched_service !== serviceBeforeRecurringRule.matched_service');
+      const cleared = src.indexOf('extracted = restored;\n        firstPassProgramStands = false;');
+      const backfill = src.indexOf([
+        '      const heldOverPersistedProgram = firstPassProgramStands && callAgreedOneTimeJob(v2ApprovedExtraction);',
+        '      if (extracted.matched_service !== preReassertMatched',
+        '        || extracted.specific_service_name !== preReassertSpecific',
+        '        || heldOverPersistedProgram) {',
+      ].join('\n'));
+      expect(flag).toBeGreaterThan(-1);
+      expect(cleared).toBeGreaterThan(flag);
+      expect(backfill).toBeGreaterThan(cleared);
+      expect(src.slice(backfill, backfill + 1200)).toContain('ai_extraction: JSON.stringify(extracted),');
     });
   });
 });
