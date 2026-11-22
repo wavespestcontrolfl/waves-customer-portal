@@ -270,7 +270,7 @@ function staleAnchorReason(reason, tierMeta) {
   if (reason.code !== 'NO_VALID_SLOT' || !(tierMeta && tierMeta.anchor_stale)) return reason;
   return {
     code: 'DRIFT_ANCHOR_STALE',
-    description: `Day moves are blocked: the visit was re-dated after an earlier auto move and is now more than ${2 * flexTier.FLEX_TIER_RADIUS_DAYS} days from its original date ${tierMeta.anchor}; no same-day re-time found either`,
+    description: `Day moves are blocked: the visit was re-dated after an earlier auto move and is now more than ${2 * (tierMeta.radius_days || flexTier.FLEX_TIER_RADIUS_DAYS)} days from its original date ${tierMeta.anchor}; no same-day re-time found either`,
   };
 }
 
@@ -750,7 +750,7 @@ function frozenReminderLabel() {
 // Bulk per-run guard context for the active mode. ROUTE-TIERS needs the
 // reminder freeze (its 24.25h band) + drift-anchor evidence; FLEX-TIER needs
 // the reminder freeze (its own, tighter 25h band) + the SAME drift-anchor
-// evidence (its ±5 days are measured from the durable original date too) +
+// evidence (its ±5 or ±7 days are measured from the durable original date too) +
 // each visit's series neighbors. Both FAIL CLOSED: a failed read must
 // freeze/guard-unknown every visit rather than move without the check.
 // Pulled out of runAutoDispatch to keep its complexity budget (see
@@ -801,10 +801,10 @@ function frozenSkipReason(service) {
 // from its anchor after an earlier auto move — the two ±radius bands cannot
 // overlap beyond twice the radius). The same-day re-time search still runs on
 // that one-day window; this only records why a day move cannot exist.
-function staleAnchorMeta(window, origDate, anchor) {
+function staleAnchorMeta(window, origDate, anchor, radius = flexTier.FLEX_TIER_RADIUS_DAYS) {
   const orig = toDateStr(origDate);
   const collapsed = window.dateFrom === orig && window.dateTo === orig;
-  const apart = Math.abs(routeTiers.daysBetween(anchor, orig)) > 2 * flexTier.FLEX_TIER_RADIUS_DAYS;
+  const apart = Math.abs(routeTiers.daysBetween(anchor, orig)) > 2 * radius;
   return collapsed && apart ? { anchor_stale: true } : {};
 }
 
@@ -816,8 +816,8 @@ function staleAnchorMeta(window, origDate, anchor) {
 // reminder row at all is invisible to that check, and the flex ctx skips
 // eligibility.js's days-out lock entirely, so the 25h cutoff is ALSO
 // enforced directly from the visit's own canonical arrival (Codex pre-push
-// P1; an unreadable arrival throws, and the run records it). The ±5-day
-// window is anchored to the durable original date (route-tiers'
+// P1; an unreadable arrival throws, and the run records it). The ±5-day (±7 for a
+// plan of 2 months or longer) window is anchored to the durable original date (route-tiers'
 // resolveAnchor), so it is never reset by an earlier move. A null neighbor
 // map is a failed read — skip.degraded, so the caller folds it into the
 // run's health (Codex #4995 r6 P2); a visit merely missing from the map is
@@ -834,13 +834,17 @@ async function flexWindowFor(service, {
   const neighbors = neighborMap.get(service.id);
   if (!neighbors) return skip('SERIES_NEIGHBORS_UNKNOWN', 'Visit missing from its own series read — no move (fail closed)');
   if (!anchor) return skip('DRIFT_ANCHOR_UNKNOWN', 'Recurrence anchor could not be derived — no move (fail closed)');
-  const window = flexTier.flexTierMoveWindow({ origDate: service.scheduled_date, anchorDate: anchor, today, neighbors });
+  // The band is this visit's own (±7 for a plan of 2 months or longer, else ±5), read off its own row.
+  const radius = flexTier.flexRadiusDaysFor(service);
+  const window = flexTier.flexTierMoveWindow({
+    origDate: service.scheduled_date, anchorDate: anchor, today, neighbors, radiusDays: radius,
+  });
   if (!window) {
-    return skip('FLEX_WINDOW_EXHAUSTED', `No legal candidate dates left within ±${flexTier.FLEX_TIER_RADIUS_DAYS} days of the visit's date and its original date ${anchor}, clamped by the series' adjacent occurrence`);
+    return skip('FLEX_WINDOW_EXHAUSTED', `No legal candidate dates left within ±${radius} days of the visit's date and its original date ${anchor}, clamped by the series' adjacent occurrence`);
   }
   return {
     window, meta: {
-      mode: 'flex', radius_days: flexTier.FLEX_TIER_RADIUS_DAYS, anchor, neighbors, window, ...staleAnchorMeta(window, service.scheduled_date, anchor),
+      mode: 'flex', radius_days: radius, anchor, neighbors, window, ...staleAnchorMeta(window, service.scheduled_date, anchor, radius),
     }, skip: null,
   };
 }

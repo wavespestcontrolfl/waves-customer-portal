@@ -13,7 +13,8 @@
  *                 IS the series' first visit, so a "child" (recurring_parent_id
  *                 set) is always a 2nd+ occurrence.
  *   Flexible tier = everything eligibility.js lets through. May re-time SAME
- *                 DAY, or move up to ±FLEX_TIER_RADIUS_DAYS days, SILENTLY —
+ *                 DAY, or move up to ±5 days (±7 for a plan that runs every
+ *                 2 months or longer, see flexRadiusDaysFor), SILENTLY —
  *                 no customer comms (apply.js's rebooker call is unchanged;
  *                 it already sends none) — until FLEX_TIER_FREEZE_HOURS
  *                 before the visit (25 h for the night pass, owner 2026-11-03:
@@ -29,12 +30,13 @@
  *                 included, and the cron's own SELECT re-reads the table
  *                 fresh each 15-minute tick) — always carries the FINAL
  *                 window.
- *   Anchor      = the ±FLEX_TIER_RADIUS_DAYS allowance is measured from the
- *                 visit's DURABLE original date as well as its current one:
- *                 route-tiers' cumulative drift anchor (loadAnchorMap /
- *                 resolveAnchor — the earliest pre-auto-dispatch date on
- *                 record), so successive nightly moves can never add up past
- *                 ±5 days of the date the series gave the visit.
+ *   Anchor      = the band's allowance (that visit's own radius, 5 or 7) is
+ *                 measured from the visit's DURABLE original date as well as
+ *                 its current one: route-tiers' cumulative drift anchor
+ *                 (loadAnchorMap / resolveAnchor — the earliest
+ *                 pre-auto-dispatch date on record), so successive nightly
+ *                 moves can never add up past that radius from the date the
+ *                 series gave the visit.
  *   Guard       = a move must never cross the series' adjacent occurrence:
  *                 series order is COALESCE(date_exception_cadence_date,
  *                 scheduled_date) among the parent row and its live children
@@ -52,6 +54,12 @@ const { etParts, etDateString } = require('../../utils/datetime-et');
 // numbers themselves are the approved policy, same convention as
 // route-tiers.js's tier ladder).
 const FLEX_TIER_RADIUS_DAYS = 5;
+// Owner 2026-11-22: "i think we can do safely a 7 day range for recurring
+// services". The wide band is for a visit whose plan runs every 2 months or
+// longer (flexRadiusDaysFor). Monthly stays at 5: ±7 each way could put two
+// neighbouring monthly visits about 16 days apart.
+const FLEX_TIER_WIDE_RADIUS_DAYS = 7;
+const FLEX_TIER_WIDE_MIN_INTERVAL_DAYS = 56;
 const FLEX_TIER_FREEZE_HOURS = 73;
 // Owner 2026-11-03: the night pass's lock is the 24-hour
 // reminder. 25 = 24 plus the same 1-hour margin 73 has over 72, and it must
@@ -59,6 +67,33 @@ const FLEX_TIER_FREEZE_HOURS = 73;
 // 24-hour reminder can still claim. 73 above is the 09-25 rule, kept for
 // callers that do not pass `lock24h`.
 const FLEX_TIER_FREEZE_HOURS_24H = 25;
+
+/**
+ * The band radius (days) for ONE visit, from its OWN row: 7 when
+ * `recurring_pattern` is a month-based pattern of 2 months or more
+ * (rebooker.js MONTH_RECURRENCE_INTERVALS, the one table) or `custom` with
+ * `recurring_interval_days` >= FLEX_TIER_WIDE_MIN_INTERVAL_DAYS; 5 for
+ * everything else. Unknown, null or malformed reads the narrow band (fail
+ * closed). Pure. rebooker is required lazily: it is a large module and
+ * apply.js already loads it.
+ */
+function flexRadiusDaysFor(service) {
+  const pattern = service && service.recurring_pattern;
+  if (typeof pattern !== 'string') return FLEX_TIER_RADIUS_DAYS;
+  if (pattern === 'custom') {
+    const days = Number(service.recurring_interval_days);
+    return Number.isFinite(days) && days >= FLEX_TIER_WIDE_MIN_INTERVAL_DAYS ? FLEX_TIER_WIDE_RADIUS_DAYS : FLEX_TIER_RADIUS_DAYS;
+  }
+  const { MONTH_RECURRENCE_INTERVALS } = require('../rebooker');
+  const months = Object.prototype.hasOwnProperty.call(MONTH_RECURRENCE_INTERVALS, pattern) ? MONTH_RECURRENCE_INTERVALS[pattern] : 0;
+  return months >= 2 ? FLEX_TIER_WIDE_RADIUS_DAYS : FLEX_TIER_RADIUS_DAYS;
+}
+
+// A caller's radius is used only when it is exactly one of the two approved
+// bands; anything else reads the default.
+function approvedRadius(radiusDays) {
+  return radiusDays === FLEX_TIER_WIDE_RADIUS_DAYS ? FLEX_TIER_WIDE_RADIUS_DAYS : FLEX_TIER_RADIUS_DAYS;
+}
 
 /** The flex tier's freeze, in hours. The night pass passes `lock24h`
  *  true (owner 2026-11-03). */
@@ -102,6 +137,29 @@ function adjacentBounds(positioned, idx) {
   return { prev, next };
 }
 
+// A row joins each requested series it belongs to — as the parent row
+// (id) and/or as a child (recurring_parent_id) — the same membership
+// the per-series id-or-child predicate selects.
+function joinFamilies(familyRows, rows) {
+  for (const r of rows) {
+    if (familyRows.has(String(r.id))) familyRows.get(String(r.id)).push(r);
+    const parentKey = r.recurring_parent_id ? String(r.recurring_parent_id) : null;
+    if (parentKey && familyRows.has(parentKey)) familyRows.get(parentKey).push(r);
+  }
+}
+
+// One live series row as the neighbor read orders it; `radiusDays` only on the apply-time read.
+function positionedRow(r, withRadius) {
+  const row = { id: String(r.id), position: seriesPosition(r), actual: toDateStr(r.scheduled_date) };
+  return withRadius ? { ...row, radiusDays: flexRadiusDaysFor(r) } : row;
+}
+
+// The map entry for positioned[idx]: its bounds, plus its own radius on the apply-time read.
+function neighborEntry(positioned, idx, withRadius) {
+  const bounds = adjacentBounds(positioned, idx);
+  return withRadius ? { ...bounds, radiusDays: positioned[idx].radiusDays } : bounds;
+}
+
 /**
  * Bulk-load the adjacent occurrence dates for each of `services` (assumed
  * already Flexible-tier eligible — is_recurring, recurring_parent_id set): a
@@ -115,6 +173,11 @@ function adjacentBounds(positioned, idx) {
  * route-tiers' loadAnchorMap takes). A service missing from its own
  * series' read gets NO entry, which callers treat the same way.
  *
+ * `withRadius` (the apply-time read only): each entry also carries
+ * `radiusDays`, flexRadiusDaysFor of the visit's OWN row as this read saw it
+ * (under `lock`, so the pattern the move commits against, not a pass-1 value).
+ * Off, entries are exactly {prev, next}.
+ *
  * `lock` (the apply-time authoritative read only): FOR SHARE NOWAIT on every
  * live row read (Codex #4995 P1). The series fence (apply.js
  * fenceFlexSeries) serializes series writers, but an ordinary single-
@@ -125,7 +188,7 @@ function adjacentBounds(positioned, idx) {
  * at once (fail closed, retried next run) rather than waiting behind the
  * move's own locks.
  */
-async function loadSeriesNeighbors(db, services, { lock = false } = {}) {
+async function loadSeriesNeighbors(db, services, { lock = false, withRadius = false } = {}) {
   const map = new Map();
   const byParent = new Map();
   for (const s of services || []) {
@@ -146,24 +209,17 @@ async function loadSeriesNeighbors(db, services, { lock = false } = {}) {
         .whereNotIn('status', TERMINAL_STATUSES);
       if (lock) query = query.forShare().noWait();
       const rows = await query
-        .select('id', 'recurring_parent_id', 'scheduled_date', 'date_exception', 'date_exception_cadence_date');
-      // A row joins each requested series it belongs to — as the parent row
-      // (id) and/or as a child (recurring_parent_id) — the same membership
-      // the per-series id-or-child predicate selects.
-      for (const r of rows) {
-        if (familyRows.has(String(r.id))) familyRows.get(String(r.id)).push(r);
-        const parentKey = r.recurring_parent_id ? String(r.recurring_parent_id) : null;
-        if (parentKey && familyRows.has(parentKey)) familyRows.get(parentKey).push(r);
-      }
+        .select('id', 'recurring_parent_id', 'scheduled_date', 'date_exception', 'date_exception_cadence_date', 'recurring_pattern', 'recurring_interval_days');
+      joinFamilies(familyRows, rows);
     }
     for (const [parentId, members] of byParent) {
       const positioned = familyRows.get(parentId)
-        .map((r) => ({ id: String(r.id), position: seriesPosition(r), actual: toDateStr(r.scheduled_date) }))
+        .map((r) => positionedRow(r, withRadius))
         .filter((r) => r.position)
         .sort((a, b) => (a.position < b.position ? -1 : (a.position > b.position ? 1 : 0)));
       for (const s of members) {
         const idx = positioned.findIndex((r) => r.id === String(s.id));
-        if (idx > -1) map.set(s.id, adjacentBounds(positioned, idx));
+        if (idx > -1) map.set(s.id, neighborEntry(positioned, idx, withRadius));
       }
     }
     return map;
@@ -174,7 +230,7 @@ async function loadSeriesNeighbors(db, services, { lock = false } = {}) {
 
 /**
  * The Flexible-tier candidate-date window for one visit. A DAY move lands in
- * one band: ±FLEX_TIER_RADIUS_DAYS of its current date AND of its durable
+ * one band: ±radius of its current date AND of its durable
  * anchor (`anchorDate`, route-tiers' resolveAnchor — the earliest
  * pre-auto-dispatch date on record; the current date when never moved), the
  * same intersection route-tiers' tierMoveWindow takes, so the allowance is
@@ -192,11 +248,16 @@ async function loadSeriesNeighbors(db, services, { lock = false } = {}) {
  * behind its next one — leaves no legal move at all: every day move would
  * cross it (Codex #4995 r7 P1). The lookahead horizon is the caller's
  * (candidate-slots.js caps any ctx.tierWindow).
+ * The band is the visit's own radius (`radiusDays`, flexRadiusDaysFor: 5, or 7
+ * for a plan of 2 months or longer); a missing or unapproved value reads 5.
  * Returns {dateFrom, dateTo[, dayMoveFrom][, dayMoveTo]} — the span to
  * generate candidates in — or null when nothing is legal, or the anchor is
  * unknown (fail closed — never guess a budget).
  */
-function flexTierMoveWindow({ origDate, anchorDate, today, neighbors }) {
+function flexTierMoveWindow({
+  origDate, anchorDate, today, neighbors, radiusDays,
+}) {
+  const radius = approvedRadius(radiusDays);
   const orig = toDateStr(origDate);
   const anchor = toDateStr(anchorDate);
   if (!orig || !anchor || !today) return null;
@@ -204,9 +265,9 @@ function flexTierMoveWindow({ origDate, anchorDate, today, neighbors }) {
   if ((prev && prev > orig) || (next && next < orig)) return null;
   const prevFloor = prev ? shiftDateStr(prev, 1) : null;
   const nextCeil = next ? shiftDateStr(next, -1) : null;
-  const from = latestDate(shiftDateStr(orig, -FLEX_TIER_RADIUS_DAYS), shiftDateStr(anchor, -FLEX_TIER_RADIUS_DAYS),
+  const from = latestDate(shiftDateStr(orig, -radius), shiftDateStr(anchor, -radius),
     shiftDateStr(today, MIN_DESTINATION_DAYS_OUT), prevFloor);
-  const to = earliestDate(shiftDateStr(orig, FLEX_TIER_RADIUS_DAYS), shiftDateStr(anchor, FLEX_TIER_RADIUS_DAYS), nextCeil);
+  const to = earliestDate(shiftDateStr(orig, radius), shiftDateStr(anchor, radius), nextCeil);
   if (from > to) return { dateFrom: orig, dateTo: orig };
   const window = { dateFrom: earliestDate(from, orig), dateTo: latestDate(to, orig) };
   if (from > shiftDateStr(orig, 1)) window.dayMoveFrom = from;
@@ -363,6 +424,9 @@ function flexCandidateRules(service, ctx) {
 
 module.exports = {
   FLEX_TIER_RADIUS_DAYS,
+  FLEX_TIER_WIDE_RADIUS_DAYS,
+  FLEX_TIER_WIDE_MIN_INTERVAL_DAYS,
+  flexRadiusDaysFor,
   FLEX_TIER_FREEZE_HOURS,
   FLEX_TIER_FREEZE_HOURS_24H,
   flexFreezeHoursFor,

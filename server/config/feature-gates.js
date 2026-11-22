@@ -4620,7 +4620,8 @@ const gates = {
   // are somehow on): every Flexible-tier visit (a series' 2nd+ occurrence —
   // eligibility.js's existing recurring-child-only checks already exclude a
   // series' first visit and one-time/first-time customers, the Fixed tier)
-  // may re-time SAME DAY or move up to ±5 days, clamped so it can never
+  // may re-time SAME DAY or move up to ±5 days (±7 for a plan of 2 months or
+  // longer, flex-tier.js flexRadiusDaysFor), clamped so it can never
   // cross the series' adjacent occurrence (COALESCE(
   // date_exception_cadence_date, scheduled_date) among the parent's
   // children — auto-dispatch/flex-tier.js's loadSeriesNeighbors), until 73

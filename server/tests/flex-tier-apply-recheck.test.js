@@ -382,6 +382,89 @@ describe('stale drift anchor (visit re-dated far from its original date)', () =>
   });
 });
 
+// Owner 2026-11-22: a visit whose plan runs every 2 months or longer gets a
+// ±7-day band; every other visit keeps ±5. The band is read off the visit's
+// own row (recurring_pattern / recurring_interval_days).
+describe('the band is the visit\'s own radius (pass 1)', () => {
+  const withPlan = (plan) => ({ ...svc(), ...plan });
+  const useRows = (rows, anchor) => db.mockImplementation((table) => {
+    if (table === 'appointment_reminders') return buildChain([]);
+    if (table === 'reschedule_log' && anchor) return buildChain([{ scheduled_service_id: 's1', original_date: anchor, created_at: '2026-01-01T00:00:00Z' }]);
+    if (table === 'scheduled_services') return buildChain(rows);
+    return buildChain([]);
+  });
+
+  test.each([
+    ['quarterly', { recurring_pattern: 'quarterly' }, 7],
+    ['bimonthly', { recurring_pattern: 'bimonthly' }, 7],
+    ['custom 56 days', { recurring_pattern: 'custom', recurring_interval_days: 56 }, 7],
+    ['monthly', { recurring_pattern: 'monthly' }, 5],
+    ['custom 55 days', { recurring_pattern: 'custom', recurring_interval_days: 55 }, 5],
+    ['a row with no pattern', {}, 5],
+  ])('%s: window reaches +/-%i days and the audit records it', async (_name, plan, radius) => {
+    useRows([withPlan(plan)]);
+    const res = await runAutoDispatch({ mode: 'apply', flexTierEnabled: true });
+    expect(res.changed).toBe(1);
+    const meta = decisions('changed')[0].constraints.route_tiers;
+    expect(meta.radius_days).toBe(radius);
+    expect(meta.window).toEqual({ dateFrom: shiftDateStr(VISIT_DATE, -radius), dateTo: shiftDateStr(VISIT_DATE, radius) });
+    const ctx = candidateSlots.findValidCandidateSlots.mock.calls[0][2];
+    expect(ctx.tierWindow.dateTo).toBe(shiftDateStr(VISIT_DATE, radius));
+  });
+
+  test('FLEX_WINDOW_EXHAUSTED names the visit\'s own radius', async () => {
+    // A date-exception visit sitting ahead of its previous occurrence's slot leaves no legal move at all.
+    const exception = withPlan({
+      recurring_pattern: 'quarterly', date_exception: true, date_exception_cadence_date: shiftDateStr(VISIT_DATE, 10),
+    });
+    let calls = 0;
+    db.mockImplementation((table) => {
+      if (table === 'appointment_reminders') return buildChain([]);
+      if (table === 'scheduled_services') {
+        calls += 1;
+        return buildChain(calls === 1 ? [exception]
+          : [exception, { id: 'p1', scheduled_date: shiftDateStr(VISIT_DATE, 3), status: 'confirmed' }]);
+      }
+      return buildChain([]);
+    });
+    await runAutoDispatch({ mode: 'apply', flexTierEnabled: true });
+    const reasons = [...decisions('skipped'), ...decisions('no_change')];
+    const exhausted = reasons.find((d) => d.reason_code === 'FLEX_WINDOW_EXHAUSTED');
+    expect(exhausted.reason_description).toContain('within ±7 days');
+  });
+
+  test('stale-anchor label: a quarterly visit is stale past 14 days from its original date, and says 14', async () => {
+    useRows([withPlan({ recurring_pattern: 'quarterly' })], shiftDateStr(VISIT_DATE, -15));
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [] });
+    await runAutoDispatch({ mode: 'apply', flexTierEnabled: true });
+    const [noChange] = decisions('no_change');
+    expect(noChange.reason_code).toBe('DRIFT_ANCHOR_STALE');
+    expect(noChange.reason_description).toContain('more than 14 days');
+    expect(noChange.constraints.route_tiers).toMatchObject({ radius_days: 7, anchor_stale: true });
+  });
+
+  test('stale-anchor label: a monthly visit is stale past 10 days, and says 10', async () => {
+    useRows([withPlan({ recurring_pattern: 'monthly' })], shiftDateStr(VISIT_DATE, -15));
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [] });
+    await runAutoDispatch({ mode: 'apply', flexTierEnabled: true });
+    const [noChange] = decisions('no_change');
+    expect(noChange.reason_code).toBe('DRIFT_ANCHOR_STALE');
+    expect(noChange.reason_description).toContain('more than 10 days');
+    expect(noChange.constraints.route_tiers).toMatchObject({ radius_days: 5, anchor_stale: true });
+  });
+
+  test('12 days from the original date: stale for a monthly visit (past 10), not for a quarterly one (within 14)', async () => {
+    candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [] });
+    useRows([withPlan({ recurring_pattern: 'monthly' })], shiftDateStr(VISIT_DATE, -12));
+    await runAutoDispatch({ mode: 'apply', flexTierEnabled: true });
+    expect(decisions('no_change')[0].reason_code).toBe('DRIFT_ANCHOR_STALE');
+    audit.logDecision.mockClear();
+    useRows([withPlan({ recurring_pattern: 'quarterly' })], shiftDateStr(VISIT_DATE, -12));
+    await runAutoDispatch({ mode: 'apply', flexTierEnabled: true });
+    expect(decisions('no_change')[0].reason_code).toBe('NO_VALID_SLOT');
+  });
+});
+
 test('gate off (neither flexTierEnabled nor routeTiersEnabled): legacy flat lock, no tier window in the audit', async () => {
   reminderResults = [];
   const res = await runAutoDispatch({ mode: 'apply' });
