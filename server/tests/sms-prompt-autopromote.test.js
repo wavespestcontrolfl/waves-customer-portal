@@ -172,6 +172,32 @@ describe('promotion bar with more than one sitting a side', () => {
     expect(decide([better({ unsafe: 1 }), better()], [sitting(), sitting({ ungradable: [0] })])).toMatchObject({ promote: true, detail: { pairedItems: 29, unsafeRise: 0 } });
   });
 
+  test('a score gain that is the margin exactly meets it, though the float mean falls a hair short', () => {
+    // 18 of 30 items one point up in one of three sittings: (18 x 1/3) / 30 = 0.2, computed as 0.1999...
+    const lifted = better({ overall: 6 });
+    lifted.results = lifted.results.map((r, i) => (i < 18 ? { ...r, scores: scores(7, 6.5) } : r));
+    const candidate = [lifted, better({ overall: 6 }), better({ overall: 6 })];
+    const baseline = [sitting(), sitting(), sitting()];
+    const raw = auto.pairedTally(candidate.map((s) => s.results), baseline.map((s) => s.results), ['overall']).deltas.overall;
+    expect(raw).toBeLessThan(0.2);
+    expect(raw).toBeCloseTo(0.2, 12);
+    expect(decide(candidate, baseline)).toMatchObject({ promote: true, reason: 'bar_met', detail: { overallDelta: 0.2 } });
+    // One item fewer is under the margin.
+    lifted.results[17] = { ...lifted.results[17], scores: scores(6, 6.5) };
+    expect(decide(candidate, baseline)).toMatchObject({ promote: false, reason: 'overall_not_improved' });
+  });
+
+  test('a rejection no further sitting can change is marked final; one that more sittings could change is not', () => {
+    // Not comparable, and too few shared items: adding sittings never repairs either.
+    expect(decide([better()], [sitting({ run: { model: 'other-model' } })])).toMatchObject({ promote: false, reason: 'run_mismatch', final: true });
+    expect(decide([better({ n: 19 })], [sitting({ n: 19 })])).toMatchObject({ promote: false, reason: 'too_few_items', final: true });
+    // A rise or a thin score gain on one pair can still average out.
+    expect(decide([better({ unsafe: 2 })], [sitting()])).toEqual(expect.not.objectContaining({ final: true }));
+    expect(decide([better({ unsafe: 2 })], [sitting()])).toMatchObject({ promote: false, reason: 'unsafe_rose' });
+    expect(decide([better({ overall: 6.1 })], [sitting()])).toEqual(expect.not.objectContaining({ final: true }));
+    expect(decide([better()], [sitting()])).toEqual({ promote: true, reason: 'bar_met', detail: expect.any(Object) });
+  });
+
   test('every sitting must be comparable with every sitting on the other side', () => {
     expect(decide([better(), better()], [sitting(), sitting({ run: { model: 'other-model' } })])).toMatchObject({ promote: false, reason: 'run_mismatch' });
     expect(decide([better(), better({ run: { status: 'failed' } })])).toMatchObject({ promote: false, reason: 'exam_incomplete' });

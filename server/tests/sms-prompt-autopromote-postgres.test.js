@@ -921,6 +921,44 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
         expect(notify).not.toHaveBeenCalled();
       });
 
+      test('a first pair graded by different judge rulers ends the exam: no further sitting is paid for', async () => {
+        process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = '3';
+        const items = await seedItems();
+        const patch = await insertPatch();
+        const { runner: sit, calls } = sittingRunner({ items });
+        // The candidate's sitting is graded by a newer judge than its baseline was.
+        const runner = jest.fn(async (args) => {
+          const out = await sit(args);
+          if (args.promptPatch) await trx('sms_sealed_eval_results').where({ run_id: out.runId }).update({ scores: JSON.stringify({ safety: 8, voice: 8, overall: 7, actions: 6.5, judge_version: 'j2' }) });
+          return out;
+        });
+        expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough, notify: jest.fn() })).toEqual({ rejected: patch.id, reason: 'judge_mismatch' });
+        expect(calls).toHaveLength(2);
+        expect(await candidateRuns(patch.id)).toHaveLength(1);
+      });
+
+      test('a first pair with too few shared items ends the exam: no further sitting is paid for', async () => {
+        process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = '3';
+        // A pool above the minimum where the sittings graded one item fewer than it.
+        const items = await seedItems(auto.MIN_PAIRED_ITEMS + 4);
+        const patch = await insertPatch();
+        const { runner, calls } = sittingRunner({ items: items.slice(0, auto.MIN_PAIRED_ITEMS - 1) });
+        expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough, notify: jest.fn() })).toEqual({ rejected: patch.id, reason: 'too_few_items' });
+        expect(calls).toHaveLength(2);
+        expect((await rowOf(patch.id)).decision_detail).toMatchObject({ pairedItems: 19, sittings: { candidate: 1, baseline: 1 } });
+      });
+
+      test('a pair that only misses the unsafe or score rule does not end the exam early: later sittings can average it out', async () => {
+        process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = '2';
+        process.env.PROMPT_AUTOPROMOTE_UNSAFE_ALLOWANCE = '1.5';
+        const items = await seedItems();
+        const patch = await insertPatch();
+        // 3 unsafe on the first sitting alone is above the allowance; with 0 on the second the average is 1.5.
+        const { runner, calls } = sittingRunner({ items, candidates: [{ unsafe: 3 }, { unsafe: 0 }] });
+        expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough, notify: jest.fn() })).toMatchObject({ promoted: patch.id });
+        expect(calls).toHaveLength(4);
+      });
+
       test('the sitting count is capped at 3 a side, whatever the setting says', async () => {
         process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = '9';
         const items = await seedItems();
