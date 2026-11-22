@@ -32,8 +32,8 @@ const trackBody = (state, extra = {}) => ({
   ...extra,
 });
 const CARDS = {
-  crossSell: { label: 'Lawn Care', relationship: 'add', perApplication: 62 },
-  referral: { headline: 'Know someone who could use Waves?', cta: 'Send My Referral Link' },
+  crossSell: { label: 'Lawn Care', relationship: 'add', perApplication: 62, href: '/?tab=billing&notificationProperty=cust-1' },
+  referral: { headline: 'Know someone who could use Waves?', cta: 'Send My Referral Link', href: '/?tab=refer&notificationProperty=cust-1' },
 };
 
 let body;
@@ -62,8 +62,9 @@ describe('TrackPage — add-a-service and referral cards on a completed visit', 
     renderTrack();
     expect(await screen.findByRole('heading', { name: 'Add lawn care to your plan' })).toBeInTheDocument();
     expect(screen.getByText('$62 per application, priced for your home')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Open the Waves app' })).toHaveAttribute('href', '/?tab=billing');
-    expect(screen.getByRole('link', { name: 'Send My Referral Link' })).toHaveAttribute('href', '/?tab=refer');
+    // The server's links: each names the customer profile, and no token.
+    expect(screen.getByRole('link', { name: 'Open the Waves app' })).toHaveAttribute('href', '/?tab=billing&notificationProperty=cust-1');
+    expect(screen.getByRole('link', { name: 'Send My Referral Link' })).toHaveAttribute('href', '/?tab=refer&notificationProperty=cust-1');
     // The page's only write is its view beacon: no card request leaves it.
     const posts = global.fetch.mock.calls.filter(([, init]) => init?.method === 'POST').map(([url]) => String(url));
     expect(posts.filter((url) => /cross-sell|referral/.test(url))).toEqual([]);

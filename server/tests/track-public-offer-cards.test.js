@@ -19,10 +19,12 @@ jest.mock('../config/feature-gates', () => ({
 // composer are pinned in app-link-cards.test.js.
 jest.mock('../services/property-recommendations', () => ({ appOfferForCustomer: jest.fn() }));
 jest.mock('../services/referral-share', () => ({ composeReferralCard: jest.fn() }));
+jest.mock('../services/one-tap-purchase', () => ({ oneTapShownTo: jest.fn() }));
 
 const logger = require('../services/logger');
 const { isEnabled } = require('../config/feature-gates');
 const { appOfferForCustomer } = require('../services/property-recommendations');
+const { oneTapShownTo } = require('../services/one-tap-purchase');
 const referralShare = require('../services/referral-share');
 const router = require('../routes/track-public');
 
@@ -43,8 +45,12 @@ const APP_OFFER = {
   serviceKey: 'pest_control', label: 'Pest Control', mode: 'priced', relationship: 'add',
   option: { id: 'pest-quarterly', perVisit: 45 }, fingerprint: 'fp',
 };
-const CARD = { label: 'Pest Control', relationship: 'add', perApplication: 45 };
-const REFERRAL = { headline: 'Know someone who could use Waves?', cta: 'Send My Referral Link' };
+// Each card carries the link of its tab in the app, naming the visit's
+// customer profile: the app opens that profile, not the one last used.
+const OFFER_HREF = '/?tab=billing&notificationProperty=cust-1';
+const CARD = { label: 'Pest Control', relationship: 'add', perApplication: 45, href: OFFER_HREF };
+const REFERRAL_WORDS = { headline: 'Know someone who could use Waves?', cta: 'Send My Referral Link' };
+const REFERRAL = { ...REFERRAL_WORDS, href: '/?tab=refer&notificationProperty=cust-1' };
 
 // One fake database handle over a set of rows.
 // records: the visit's service records. invoices: the visit's invoices, as
@@ -93,7 +99,8 @@ beforeEach(() => {
   mockDb.mockReset();
   isEnabled.mockImplementation((key) => key === 'docCrossSell');
   appOfferForCustomer.mockResolvedValue(APP_OFFER);
-  referralShare.composeReferralCard.mockResolvedValue(REFERRAL);
+  oneTapShownTo.mockResolvedValue(true);
+  referralShare.composeReferralCard.mockResolvedValue(REFERRAL_WORDS);
 });
 
 test('a completed visit on an account with no payer and no service contact shows both cards, built for its own customer', async () => {
@@ -103,6 +110,14 @@ test('a completed visit on an account with no payer and no service contact shows
   expect(referralShare.composeReferralCard).toHaveBeenCalledWith({ customerId: 'cust-1' });
   // A read: nothing is locked or written.
   expect(mockDb.transaction).not.toHaveBeenCalled();
+});
+
+// The app shows a price only on its one-tap purchase button; without one-tap
+// its card asks for an estimate and names no price.
+test('the app only takes a request from this customer: the offer card names no price', async () => {
+  install();
+  oneTapShownTo.mockResolvedValue(false);
+  expect(await trackCards(TOKEN)).toEqual({ crossSell: { label: 'Pest Control', relationship: 'add', href: OFFER_HREF }, referral: REFERRAL });
 });
 
 test.each([

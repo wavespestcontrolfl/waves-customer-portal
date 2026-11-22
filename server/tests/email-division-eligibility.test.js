@@ -463,6 +463,8 @@ describe('email-division eligibility', () => {
 
     test('offers on, a marketing channel that includes email, no marketing unsubscribe: yes', async () => {
       expect(await allowed()).toBe(true);
+      // The same address in another letter case is the same address.
+      expect(await allowed({ email: ' Sandy@Example.test ' })).toBe(true);
       expect(await allowed({ prefs: { marketing_offers: true, marketing_channel: 'both' } })).toBe(true);
     });
 
@@ -479,6 +481,9 @@ describe('email-division eligibility', () => {
       ['a staff do-not-contact on the customer\'s phone', { dnc: { phone: '+19415550100' } }],
       ['a removed customer', { customer: customerRow({ deleted_at: '2026-11-01T00:00:00Z' }) }],
       ['no customer row', { customer: null }],
+      // The holder changed their address while the email was being built: the
+      // old inbox gets the operational email, never promotional copy.
+      ['an address that is no longer the customer\'s address on file', { customer: customerRow({ email: 'new@example.test' }) }],
       ['a bounce on the address', { suppressions: [{ email: 'sandy@example.test', group_key: 'service_operational', suppression_type: 'bounce', status: 'active' }] }],
       ['no address', { email: '' }],
       ['no customer', { customerId: null }],
@@ -548,6 +553,9 @@ describe('email-division eligibility', () => {
       ['a staff do-not-contact on the customer\'s phone', { dnc: { phone: '+19415550100' } }],
       ['a removed customer', { customer: customerRow({ deleted_at: '2026-11-01T00:00:00Z' }) }],
       ['no customer row', { customer: null }],
+      // The holder changed their address while the email was being built: the
+      // old inbox gets the operational email, never promotional copy.
+      ['an address that is no longer the customer\'s address on file', { customer: customerRow({ email: 'new@example.test' }) }],
       ['a bounce on the address', { suppressions: [BOUNCE] }],
       ['no address', { email: '' }],
       ['no customer', { customerId: null }],

@@ -24,6 +24,7 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn() }));
 // composer are pinned in app-link-cards.test.js.
 jest.mock('../services/property-recommendations', () => ({ appOfferForCustomer: jest.fn() }));
 jest.mock('../services/referral-share', () => ({ composeReferralCard: jest.fn() }));
+jest.mock('../services/one-tap-purchase', () => ({ oneTapShownTo: jest.fn() }));
 
 const mockFirst = jest.fn();
 const db = require('../models/db');
@@ -31,6 +32,7 @@ const logger = require('../services/logger');
 const InvoiceService = require('../services/invoice');
 const { isEnabled } = require('../config/feature-gates');
 const { appOfferForCustomer } = require('../services/property-recommendations');
+const { oneTapShownTo } = require('../services/one-tap-purchase');
 const referralShare = require('../services/referral-share');
 const router = require('../routes/receipt-v2');
 const { receiptCardsForInvoiceId } = require('../services/receipt-cards');
@@ -41,8 +43,12 @@ const APP_OFFER = {
   option: { id: 'lawn-enhanced', perVisit: 62 }, fingerprint: 'fp',
 };
 // What the receipt page gets of it.
-const CARD = { label: 'Lawn Care', relationship: 'add', perApplication: 62 };
-const REFERRAL = { headline: 'Know someone who could use Waves?', cta: 'Send My Referral Link' };
+// Each card carries the link of its tab in the app, naming this customer's
+// profile: the app opens that profile, not the one the holder last used.
+const OFFER_HREF = '/?tab=billing&notificationProperty=cust-1';
+const CARD = { label: 'Lawn Care', relationship: 'add', perApplication: 62, href: OFFER_HREF };
+const REFERRAL_WORDS = { headline: 'Know someone who could use Waves?', cta: 'Send My Referral Link' };
+const REFERRAL = { ...REFERRAL_WORDS, href: '/?tab=refer&notificationProperty=cust-1' };
 const DAY_MS = 24 * 60 * 60 * 1000;
 const paidAgo = (ms) => new Date(Date.now() - ms).toISOString();
 const INVOICE = {
@@ -68,7 +74,8 @@ beforeEach(() => {
   InvoiceService.getByToken.mockResolvedValue({ ...INVOICE });
   mockFirst.mockResolvedValue({ ...INVOICE });
   appOfferForCustomer.mockResolvedValue(APP_OFFER);
-  referralShare.composeReferralCard.mockResolvedValue(REFERRAL);
+  oneTapShownTo.mockResolvedValue(true);
+  referralShare.composeReferralCard.mockResolvedValue(REFERRAL_WORDS);
 });
 
 describe('GET /:token — the cards ride the receipt payload', () => {
@@ -77,8 +84,9 @@ describe('GET /:token — the cards ride the receipt payload', () => {
     expect(appOfferForCustomer).toHaveBeenCalledWith('cust-1', expect.anything());
     expect(referralShare.composeReferralCard).toHaveBeenCalledWith({ customerId: 'cust-1' });
     expect(payload.referral).toEqual(REFERRAL);
-    // Only what the page prints: the page has nothing to send back, so no
-    // option id, fingerprint or service key leaves the server.
+    // Only what the page prints, and the card's link: the page has nothing
+    // to send back, so no option id, fingerprint or service key leaves the
+    // server.
     expect(payload.crossSell).toEqual(CARD);
   });
 
@@ -141,7 +149,16 @@ describe('GET /:token — the cards ride the receipt payload', () => {
 
   test('a quote-only offer carries no price', async () => {
     appOfferForCustomer.mockResolvedValue({ ...APP_OFFER, mode: 'quote_cta', option: null });
-    expect((await getReceipt()).crossSell).toEqual({ label: 'Lawn Care', relationship: 'add' });
+    expect((await getReceipt()).crossSell).toEqual({ label: 'Lawn Care', relationship: 'add', href: OFFER_HREF });
+  });
+
+  // The app shows a price only on its one-tap purchase button; without
+  // one-tap its card asks for an estimate and names no price.
+  test('the app only takes a request from this customer → the offer card names no price', async () => {
+    oneTapShownTo.mockResolvedValue(false);
+    const payload = await getReceipt();
+    expect(payload.crossSell).toEqual({ label: 'Lawn Care', relationship: 'add', href: OFFER_HREF });
+    expect(oneTapShownTo).toHaveBeenCalledWith('cust-1', expect.anything());
   });
 
   test('the app shows this customer no offer → the referral card alone', async () => {

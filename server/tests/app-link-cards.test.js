@@ -11,12 +11,16 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
 jest.mock('../services/service-report/cross-sell', () => ({ buildPortalOffer: jest.fn() }));
 jest.mock('../services/referral-share', () => ({ composeReferralCard: jest.fn() }));
+jest.mock('../services/one-tap-purchase', () => ({ oneTapShownTo: jest.fn() }));
 
 const db = require('../models/db');
 const { buildPortalOffer } = require('../services/service-report/cross-sell');
 const referralShare = require('../services/referral-share');
+const { oneTapShownTo } = require('../services/one-tap-purchase');
 const { appOfferForCustomer } = require('../services/property-recommendations');
-const { linkReachesOnlyAccountHolder, appOpensForCustomer, publicOfferCard, appLinkCardsForCustomer } = require('../services/app-link-cards');
+const {
+  linkReachesOnlyAccountHolder, appOpensForCustomer, appLinksForCustomer, publicOfferCard, appLinkCardsForCustomer,
+} = require('../services/app-link-cards');
 
 const APP_OFFER = {
   serviceKey: 'lawn_care', label: 'Lawn Care', mode: 'priced', relationship: 'add',
@@ -29,6 +33,7 @@ beforeEach(() => {
   process.env.GATE_PROPERTY_RECOMMENDATIONS = 'true';
   buildPortalOffer.mockResolvedValue(APP_OFFER);
   referralShare.composeReferralCard.mockResolvedValue(REFERRAL);
+  oneTapShownTo.mockResolvedValue(true);
 });
 afterAll(() => { delete process.env.GATE_PROPERTY_RECOMMENDATIONS; });
 
@@ -54,9 +59,19 @@ describe('appOfferForCustomer — the offer the app shows', () => {
 });
 
 describe('publicOfferCard — only what the page prints', () => {
-  test('a priced offer: the service, add or start, and the per-application price', () => {
-    expect(publicOfferCard(APP_OFFER)).toEqual({ label: 'Lawn Care', relationship: 'add', perApplication: 62 });
-    expect(publicOfferCard({ ...APP_OFFER, relationship: 'start' }).relationship).toBe('start');
+  test('a priced offer the app sells in one tap: the service, add or start, and the per-application price', () => {
+    expect(publicOfferCard(APP_OFFER, { oneTap: true })).toEqual({ label: 'Lawn Care', relationship: 'add', perApplication: 62 });
+    expect(publicOfferCard({ ...APP_OFFER, relationship: 'start' }, { oneTap: true }).relationship).toBe('start');
+  });
+
+  // Without one-tap the app's card asks for an estimate and names no price
+  // (owner 2026-08-28), so the page's card must not name one either.
+  test.each([
+    ['one-tap off', { oneTap: false }],
+    ['no one-tap answer', undefined],
+    ['a truthy value that is not the answer', { oneTap: 'yes' }],
+  ])('a priced offer the app only takes a request for (%s) carries no price', (_label, opts) => {
+    expect(publicOfferCard(APP_OFFER, opts)).toEqual({ label: 'Lawn Care', relationship: 'add' });
   });
 
   test.each([
@@ -64,7 +79,7 @@ describe('publicOfferCard — only what the page prints', () => {
     ['a priced offer with no usable price', { ...APP_OFFER, option: { id: 'x', perVisit: 0 } }],
     ['a price on an offer that is not priced', { ...APP_OFFER, mode: 'quote_cta' }],
   ])('%s carries no price', (_label, offer) => {
-    expect(publicOfferCard(offer)).toEqual({ label: 'Lawn Care', relationship: 'add' });
+    expect(publicOfferCard(offer, { oneTap: true })).toEqual({ label: 'Lawn Care', relationship: 'add' });
   });
 
   test.each([
@@ -72,23 +87,64 @@ describe('publicOfferCard — only what the page prints', () => {
     ['an offer with no service', { ...APP_OFFER, serviceKey: '' }],
     ['an offer with no label', { ...APP_OFFER, label: '' }],
   ])('%s → no card', (_label, offer) => {
-    expect(publicOfferCard(offer)).toBeNull();
+    expect(publicOfferCard(offer, { oneTap: true })).toBeNull();
+  });
+});
+
+// A login account can hold more than one customer profile, and the app opens
+// on the profile the holder last used. Each link names the profile the card
+// was composed for, in the shape the app's route guard reads
+// (client App.jsx resolveNotificationTarget: `notificationProperty`).
+describe('appLinksForCustomer', () => {
+  const PROFILE = '0b9d3b0e-6f0a-4c56-9d55-0d3f3f0f6a11';
+
+  test('each tab link names the customer profile', () => {
+    expect(appLinksForCustomer(PROFILE)).toEqual({
+      offer: `/?tab=billing&notificationProperty=${PROFILE}`,
+      referral: `/?tab=refer&notificationProperty=${PROFILE}`,
+    });
+  });
+
+  test('the two links name the same profile and different tabs', () => {
+    const { offer, referral } = appLinksForCustomer(PROFILE);
+    const read = (href) => new URL(href, 'https://portal.example.test').searchParams;
+    expect(read(offer).get('tab')).toBe('billing');
+    expect(read(referral).get('tab')).toBe('refer');
+    expect(read(offer).get('notificationProperty')).toBe(PROFILE);
+    expect(read(referral).get('notificationProperty')).toBe(PROFILE);
+    // No token of any kind: the app's sign-in is the only authorization.
+    expect([...read(offer).keys()]).toEqual(['tab', 'notificationProperty']);
+    expect([...read(referral).keys()]).toEqual(['tab', 'notificationProperty']);
   });
 });
 
 describe('appLinkCardsForCustomer', () => {
-  test('both cards, each built for the same customer', async () => {
+  const OFFER_HREF = '/?tab=billing&notificationProperty=cust-1';
+  const REFERRAL_CARD = { ...REFERRAL, href: '/?tab=refer&notificationProperty=cust-1' };
+
+  test('both cards, each built for the same customer and linked to that customer\'s profile', async () => {
     expect(await appLinkCardsForCustomer('cust-1')).toEqual({
-      crossSell: { label: 'Lawn Care', relationship: 'add', perApplication: 62 },
-      referral: REFERRAL,
+      crossSell: { label: 'Lawn Care', relationship: 'add', perApplication: 62, href: OFFER_HREF },
+      referral: REFERRAL_CARD,
     });
     expect(buildPortalOffer).toHaveBeenCalledWith('cust-1', db);
+    expect(oneTapShownTo).toHaveBeenCalledWith('cust-1', db);
     expect(referralShare.composeReferralCard).toHaveBeenCalledWith({ customerId: 'cust-1' });
   });
 
-  test('the app\'s offer gate off: the referral card alone', async () => {
+  // The app shows a price only on its one-tap purchase button.
+  test('the app only takes a request from this customer: the offer card names no price', async () => {
+    oneTapShownTo.mockResolvedValue(false);
+    expect(await appLinkCardsForCustomer('cust-1')).toEqual({
+      crossSell: { label: 'Lawn Care', relationship: 'add', href: OFFER_HREF },
+      referral: REFERRAL_CARD,
+    });
+  });
+
+  test('the app\'s offer gate off: the referral card alone, and one-tap is never asked', async () => {
     delete process.env.GATE_PROPERTY_RECOMMENDATIONS;
-    expect(await appLinkCardsForCustomer('cust-1')).toEqual({ referral: REFERRAL });
+    expect(await appLinkCardsForCustomer('cust-1')).toEqual({ referral: REFERRAL_CARD });
+    expect(oneTapShownTo).not.toHaveBeenCalled();
   });
 
   test('no offer and no referral program: no cards', async () => {

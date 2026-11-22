@@ -1182,9 +1182,12 @@ async function sendReceiptEmail(invoiceId, options = {}) {
         // The referral part is a referral ask too: the customer's referral
         // email choice decides it, apart from the service offer.
         const referral = cards.referral && await embeddedReferralAskAllowed(who) ? cards.referral : null;
+        // The same links as the receipt page's cards: each names this
+        // customer's profile, so the app opens the right one.
+        const links = require('./app-link-cards').appLinksForCustomer(invoice.customer_id);
         offerLine = require('./doc-offer-email-line').docOfferEmailLine({
           crossSell: cards.crossSell, referral,
-          appUrls: { offer: `${domain}/?tab=billing`, referral: `${domain}/?tab=refer` },
+          appUrls: { offer: `${domain}${links.offer}`, referral: `${domain}${links.referral}` },
         });
       }
     } catch (err) {

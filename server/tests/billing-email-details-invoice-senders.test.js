@@ -337,10 +337,14 @@ describe('invoice.receipt: the add-a-service line follows the marketing email ch
     const { result, args } = await sendPaidReceipt();
     expect(result.ok).toBe(true);
     expect(pitchSpy).toHaveBeenCalledWith({ customerId: 'cust-1', email: 'customer@example.com' });
-    // One link for each card, each to its own tab of the app; no receipt
-    // token and no price in the line.
-    expect(args.bodyAppend.text).toMatch(/^Add lawn care to your plan in the Waves app: https?:\/\/[^\s/]+\/\?tab=billing\nTo refer a friend, get your referral link: https?:\/\/[^\s/]+\/\?tab=refer$/);
+    // One link for each card, each to its own tab of the app and naming
+    // this customer's profile (the app opens that one, not the profile the
+    // holder last used); no receipt token and no price in the line.
+    expect(args.bodyAppend.text).toMatch(/^Add lawn care to your plan in the Waves app: https?:\/\/[^\s/]+\/\?tab=billing&notificationProperty=cust-1\nTo refer a friend, get your referral link: https?:\/\/[^\s/]+\/\?tab=refer&notificationProperty=cust-1$/);
     expect(`${args.bodyAppend.text}${args.bodyAppend.html}`).not.toMatch(/\/receipt\/|\$|62/);
+    // In the HTML part the link's `&` is escaped.
+    expect(args.bodyAppend.html).toContain('/?tab=billing&amp;notificationProperty=cust-1"');
+    expect(args.bodyAppend.html).toContain('/?tab=refer&amp;notificationProperty=cust-1"');
     expect(referralAskSpy).toHaveBeenCalledWith({ customerId: 'cust-1', email: 'customer@example.com' });
   });
 
@@ -352,7 +356,7 @@ describe('invoice.receipt: the add-a-service line follows the marketing email ch
     referralAskSpy.mockResolvedValue(false);
     const { result, args } = await sendPaidReceipt();
     expect(result.ok).toBe(true);
-    expect(args.bodyAppend.text).toMatch(/^Add lawn care to your plan in the Waves app: https?:\/\/[^\s/]+\/\?tab=billing$/);
+    expect(args.bodyAppend.text).toMatch(/^Add lawn care to your plan in the Waves app: https?:\/\/[^\s/]+\/\?tab=billing&notificationProperty=cust-1$/);
     expect(`${args.bodyAppend.text}${args.bodyAppend.html}`).not.toMatch(/refer|tab=refer/i);
   });
 
@@ -372,7 +376,7 @@ describe('invoice.receipt: the add-a-service line follows the marketing email ch
     cardsSpy.mockResolvedValue({ crossSell: { label: 'Lawn Care', relationship: 'add' } });
     const { result, args } = await sendPaidReceipt();
     expect(result.ok).toBe(true);
-    expect(args.bodyAppend.text).toMatch(/^Get a quote for lawn care in the Waves app: https?:\/\/[^\s/]+\/\?tab=billing$/);
+    expect(args.bodyAppend.text).toMatch(/^Get a quote for lawn care in the Waves app: https?:\/\/[^\s/]+\/\?tab=billing&notificationProperty=cust-1$/);
     expect(`${args.bodyAppend.text}${args.bodyAppend.html}`).not.toMatch(/Add |Start |see your offer/);
   });
 

@@ -284,14 +284,18 @@ function prefsAllowPitch(prefs) {
 // operational suppression, the email switch. The last check also gives the
 // pipeline's embedded-pitch verdict (checks.allowPitch: marketing offers on,
 // a marketing channel that includes email, no marketing unsubscribe).
-// → the checked context, or null when a check says no. The suppression reads
-// cover `email`, the address the line rides.
+// → the checked context, or null when a check says no. `email` is the
+// address the line rides: it must still be the customer's address on file.
+// A holder who changed their address while the email was being built keeps
+// the operational email at the old address, without the line; the old inbox
+// never gets promotional copy on the new address's choices.
+const sameAddress = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
 const EMBEDDED_LINE_HOST = { stream: 'lifecycle', marketingClass: 'relationship', emailKey: 'embedded-line-host' };
 async function embeddedLineContext({ customerId, email, conn } = {}) {
   if (!customerId || !email) return null;
   const ctx = { ...EMBEDDED_LINE_HOST, customerId, database: conn || db, checks: {} };
   if (await checkCustomer(ctx)) return null;
-  ctx.customer = { ...ctx.customer, email };
+  if (!sameAddress(ctx.customer.email, email)) return null;
   for (const check of [checkStaffDnc, checkSuppression, checkEmailSwitchStreamFlagAndChannel]) {
     if (await check(ctx)) return null;
   }

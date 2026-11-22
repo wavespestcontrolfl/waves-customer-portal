@@ -18,8 +18,9 @@
  * tracked.
  *
  * The offer is the app's own (appOfferForCustomer): the page names an offer
- * only when the app's Billing tab shows one, and the same one. A card carries
- * only what the page prints.
+ * only when the app's Billing tab shows one, and the same one, on the same
+ * profile (appLinksForCustomer). A card carries only what the page prints,
+ * and its link.
  */
 const db = require('../models/db');
 
@@ -43,13 +44,31 @@ function appOpensForCustomer(row) {
   return row?.customer_active === true && !row.customer_deleted_at;
 }
 
+// Where each card goes in the app. A login account can hold more than one
+// customer profile (one login, several homes), and the app opens on the
+// profile the holder last used. So each link names the profile the card was
+// composed for, in the app's own way (qualifyNotificationLink): the app's
+// route guard switches to that profile before the tab opens, and
+// /auth/select-property refuses a profile the signed-in account does not
+// own. The id is no credential: nothing answers to it without a session.
+function appLinksForCustomer(customerId) {
+  const { qualifyNotificationLink } = require('./notification-links');
+  return {
+    offer: qualifyNotificationLink('/?tab=billing', customerId),
+    referral: qualifyNotificationLink('/?tab=refer', customerId),
+  };
+}
+
 // What the link page prints of the app's offer: the service, start or add,
-// and the per-application price of a priced offer. No option id and no
-// fingerprint: the page has nothing to send back.
-function publicOfferCard(offer) {
+// and the per-application price when the APP shows that price. The app
+// prints a price only on its one-tap purchase button; without one-tap its
+// card asks for an estimate and names no price (owner 2026-08-28), so the
+// page's card is then a quote request too. No option id and no fingerprint:
+// the page has nothing to send back.
+function publicOfferCard(offer, { oneTap = false } = {}) {
   if (!offer?.serviceKey || !offer.label) return null;
   const perVisit = Number(offer.option?.perVisit);
-  const priced = offer.mode === 'priced' && Number.isFinite(perVisit) && perVisit > 0;
+  const priced = oneTap === true && offer.mode === 'priced' && Number.isFinite(perVisit) && perVisit > 0;
   return {
     label: offer.label,
     relationship: offer.relationship === 'start' ? 'start' : 'add',
@@ -58,17 +77,23 @@ function publicOfferCard(offer) {
 }
 
 // → { crossSell?, referral? } for a customer whose link page may show the
-// cards. Reads only: nothing here enrolls a promoter or files a request.
+// cards, each with the `href` of its tab in the app. Reads only: nothing
+// here enrolls a promoter or files a request.
 async function appLinkCardsForCustomer(customerId, database = db) {
   const cards = {};
+  const links = appLinksForCustomer(customerId);
   const { appOfferForCustomer } = require('./property-recommendations');
-  const crossSell = publicOfferCard(await appOfferForCustomer(customerId, { knex: database }));
-  if (crossSell) cards.crossSell = crossSell;
+  const offer = await appOfferForCustomer(customerId, { knex: database });
+  const oneTap = offer ? await require('./one-tap-purchase').oneTapShownTo(customerId, database) : false;
+  const crossSell = publicOfferCard(offer, { oneTap });
+  if (crossSell) cards.crossSell = { ...crossSell, href: links.offer };
   // The customer's own card: with GATE_REFERRAL_STEP2 on, the per-customer
   // reward line. No card while the program is off.
   const referral = await require('./referral-share').composeReferralCard({ customerId });
-  if (referral) cards.referral = referral;
+  if (referral) cards.referral = { ...referral, href: links.referral };
   return cards;
 }
 
-module.exports = { linkReachesOnlyAccountHolder, appOpensForCustomer, publicOfferCard, appLinkCardsForCustomer };
+module.exports = {
+  linkReachesOnlyAccountHolder, appOpensForCustomer, appLinksForCustomer, publicOfferCard, appLinkCardsForCustomer,
+};

@@ -30,8 +30,8 @@ const receiptBody = (extra = {}) => ({
   ...extra,
 });
 const CARDS = {
-  crossSell: { label: 'Lawn Care', relationship: 'add', perApplication: 62 },
-  referral: { headline: 'Know someone who could use Waves?', cta: 'Send My Referral Link' },
+  crossSell: { label: 'Lawn Care', relationship: 'add', perApplication: 62, href: '/?tab=billing&notificationProperty=cust-1' },
+  referral: { headline: 'Know someone who could use Waves?', cta: 'Send My Referral Link', href: '/?tab=refer&notificationProperty=cust-1' },
 };
 
 let body;
@@ -55,8 +55,9 @@ describe('ReceiptPage — add-a-service and referral cards', () => {
     expect(await screen.findByRole('heading', { name: 'Add lawn care to your plan' })).toBeInTheDocument();
     expect(screen.getByText('$62 per application, priced for your home')).toBeInTheDocument();
     const offer = screen.getByRole('link', { name: 'Open the Waves app' });
-    expect(offer).toHaveAttribute('href', '/?tab=billing');
-    expect(screen.getByRole('link', { name: 'Send My Referral Link' })).toHaveAttribute('href', '/?tab=refer');
+    // The server's links: each names the customer profile, and no token.
+    expect(offer).toHaveAttribute('href', '/?tab=billing&notificationProperty=cust-1');
+    expect(screen.getByRole('link', { name: 'Send My Referral Link' })).toHaveAttribute('href', '/?tab=refer&notificationProperty=cust-1');
     // Screen only: the receipt prints as a record.
     expect(offer.closest('.waves-no-print')).not.toBeNull();
     // The page's one request is its own read: nothing is posted for a card.

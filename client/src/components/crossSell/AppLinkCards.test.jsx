@@ -8,7 +8,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import AppLinkCards, { APP_OFFER_PATH, APP_REFERRAL_PATH, appOfferPriceLine } from './AppLinkCards';
+import AppLinkCards, { APP_OFFER_PATH, APP_REFERRAL_PATH, appCardHref, appOfferPriceLine } from './AppLinkCards';
 
 const OFFER = { label: 'Lawn Care', relationship: 'add', perApplication: 62 };
 const REFERRAL = { headline: 'Know someone who could use Waves?', cta: 'Send My Referral Link' };
@@ -47,6 +47,33 @@ describe('AppLinkCards', () => {
     const link = screen.getByRole('link', { name: 'Send My Referral Link' });
     expect(link).toHaveAttribute('href', '/?tab=refer');
     expect(APP_REFERRAL_PATH).toBe('/?tab=refer');
+  });
+
+  // One login can hold more than one customer profile, and the app opens on
+  // the profile the holder last used. The server's link names the profile
+  // the card was composed for; the app's route guard switches to it.
+  it('each card uses the server\'s link, which names the customer profile', () => {
+    render(
+      <AppLinkCards
+        offer={{ ...OFFER, href: '/?tab=billing&notificationProperty=cust-1' }}
+        referral={{ ...REFERRAL, href: '/?tab=refer&notificationProperty=cust-1' }}
+      />,
+    );
+    expect(screen.getByRole('link', { name: 'Open the Waves app' })).toHaveAttribute('href', '/?tab=billing&notificationProperty=cust-1');
+    expect(screen.getByRole('link', { name: 'Send My Referral Link' })).toHaveAttribute('href', '/?tab=refer&notificationProperty=cust-1');
+  });
+
+  it.each([
+    ['no link in the payload', undefined],
+    ['another site', 'https://example.test/?tab=billing&notificationProperty=cust-1'],
+    ['another page of this site', '/pay/tok-1'],
+    ['the other card\'s tab', '/?tab=refer&notificationProperty=cust-1'],
+    ['a tab link with something else than a profile', '/?tab=billing&next=/pay/tok-1'],
+    ['not a string', { toString: () => '/?tab=billing&notificationProperty=cust-1' }],
+  ])('a card link that is not this tab\'s own profile link (%s) falls back to the bare tab', (_label, href) => {
+    expect(appCardHref({ href }, APP_OFFER_PATH)).toBe('/?tab=billing');
+    render(<AppLinkCards offer={{ ...OFFER, href }} />);
+    expect(screen.getByRole('link', { name: 'Open the Waves app' })).toHaveAttribute('href', '/?tab=billing');
   });
 
   it('both cards: the offer first, then the referral', () => {

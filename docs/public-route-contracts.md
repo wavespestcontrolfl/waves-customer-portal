@@ -3516,17 +3516,30 @@ Receipt and tracker add-a-service + referral cards (owner 2026-11-21,
 `GATE_DOC_CROSS_SELL`, dark; owner 2026-11-22: the cards open the Waves app):
 `GET /api/receipt/:token` (a PAID invoice) and `GET /api/public/track/:token`
 (a COMPLETED visit) may carry two additive keys. `crossSell` is
-`{ label, relationship: 'add' | 'start', perApplication? }`: the plan offer
-the Waves app shows that customer now
+`{ label, relationship: 'add' | 'start', perApplication?, href }`: the plan
+offer the Waves app shows that customer now
 (`services/property-recommendations.js#appOfferForCustomer`: the app route's
 own gate, `GATE_PROPERTY_RECOMMENDATIONS`, then the app's composer), cut to
 what the page prints (`services/app-link-cards.js#publicOfferCard`; no option
-id, no fingerprint). `perApplication` is present only for a priced offer.
+id, no fingerprint). `perApplication` is present only for a priced offer the
+app sells that customer in one tap
+(`services/one-tap-purchase.js#oneTapShownTo`, the same answer as the app
+route's `oneTap` field): without one-tap the app's card asks for an estimate
+and names no price, so the page's card is a quote request too.
 `referral` is `composeReferralCard({ customerId })`'s `{ headline, cta,
-offer? }`, as on the report. With the gate off, or for a link that may not
-show them, both keys are absent and the payload is unchanged.
+offer? }`, as on the report, plus `href`. With the gate off, or for a link
+that may not show them, both keys are absent and the payload is unchanged.
+Each `href` is the card's tab in the app with the customer profile named
+(`services/app-link-cards.js#appLinksForCustomer`, through
+`qualifyNotificationLink`: `/?tab=billing&notificationProperty=<customer
+id>`, `/?tab=refer&notificationProperty=<customer id>`). One login can hold
+more than one profile and the app opens on the profile last used; the app's
+route guard switches to the named profile and `/auth/select-property`
+refuses a profile the signed-in account does not own. The customer id is no
+credential: nothing answers to it without a session. The page falls back to
+the bare tab for any other `href` (`appCardHref`).
 NO WRITE ROUTE: the receipt and the tracker have no card tap. Each card is a
-plain link into the Waves app (`/?tab=billing` for the offer, `/?tab=refer`
+plain link into the Waves app (the Billing tab for the offer, the Refer tab
 for the referral) with no token, so nothing on a link page files a request,
 mints an estimate or enrolls a promoter, and the app's sign-in decides who may
 act. A receipt link is the pay link and a tracker link is texted to the

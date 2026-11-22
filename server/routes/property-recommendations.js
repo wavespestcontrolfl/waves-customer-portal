@@ -30,7 +30,7 @@ const { buildPropertyRecommendations, mosquitoNoteCard } = require('../services/
 const { buildPortalOffer } = require('../services/service-report/cross-sell');
 const { normalizeRequestedServiceKey } = require('../services/estimate-add-service-request');
 const { writeOrRefreshCtaRequest } = require('../services/cta-service-request');
-const { accountCanOneTap } = require('../services/one-tap-purchase');
+const { oneTapShownTo } = require('../services/one-tap-purchase');
 
 router.use(authenticate);
 
@@ -61,7 +61,7 @@ router.get('/', async (req, res, next) => {
     // refusals (monthly-membership lanes, non-members, payer-billed
     // accounts), so the button never renders for an account init would
     // deterministically 409. The write side re-checks each.
-    const oneTap = gateEnvValue('GATE_ONE_TAP_PURCHASE') && await accountCanOneTap(req.customerId);
+    const oneTap = await oneTapShownTo(req.customerId);
     return res.json({ available: true, oneTap, ...result });
   } catch (err) {
     next(err);
