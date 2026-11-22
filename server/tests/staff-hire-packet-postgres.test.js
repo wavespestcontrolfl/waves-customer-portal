@@ -750,6 +750,87 @@ postgres('Hired button on migrated PostgreSQL', () => {
       expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
     });
 
+    test('a reset request never creates the first password of a row with a linked Google address', async () => {
+      const put = (techId, path, body) => call(`/technicians/${techId}${path}`, { method: 'PUT', body });
+      const REFUSED = { status: 400, payload: { error: 'Reset link is invalid or expired' } };
+      const redeem = async (token) => {
+        const out = { status: 200 };
+        const res = { status(code) { out.status = code; return this; }, json(value) { out.payload = value; return this; }, cookie() { return this; } };
+        await authHandlers.resetPassword({ body: { token, newPassword: 'Fixture-Pass-4821-xq' }, headers: {}, get: () => null }, res, (e) => { throw e; });
+        return out;
+      };
+      const pastCooldown = (techId) => mockDatabase('technicians').where({ id: techId }).update({
+        password_reset_requested_at: mockDatabase.raw("password_reset_requested_at - interval '10 minutes'"),
+        password_reset_expires_at: mockDatabase.raw("password_reset_expires_at - interval '10 minutes'"),
+      });
+      // Activate and the edit form make a row active with no Google-only mark. Activate after the link:
+      const first = await linkedTech();
+      const firstEmail = address();
+      expect((await put(first.id, '', { active: true, email: firstEmail })).status).toBe(200);
+      // The link after the edit form. While the row has no Google address a reset request is main's manual path:
+      const second = await addTech();
+      const secondEmail = address();
+      expect((await put(second, '', { employmentStatus: 'active', email: secondEmail })).status).toBe(200);
+      await expect(authHandlers.issuePasswordReset(secondEmail)).resolves.toEqual({ issued: true });
+      const { token } = tokenFromLastEmail();
+      expect((await put(second, '/google-signin', { googleEmail: address() })).status).toBe(200);
+      // No request issues a link for either row, and the link that was stored before the Google address was linked
+      // (as a link stored by an older build would be) sets no password.
+      for (const mailbox of [firstEmail, secondEmail]) {
+        await expect(authHandlers.issuePasswordReset(mailbox)).resolves.toEqual({ issued: false });
+      }
+      expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect(await redeem(token)).toEqual(REFUSED);
+      expect(await row(second)).toMatchObject({ employment_status: 'active', google_only_login_at: null, password_hash: null });
+      // Resend link on that row is an admin's own act: its link sets the password.
+      await pastCooldown(second);
+      expect((await call(`/technicians/${second}/hire/resend`, { body: {} })).status).toBe(200);
+      expect((await redeem(tokenFromLastEmail().token)).status).toBe(200);
+      expect((await row(second)).password_hash).not.toBeNull();
+
+      // An admin's Hired link stays good when the Google address is linked after it, and a reset request for that
+      // row sends nothing and leaves the admin's link.
+      const hired = await addTech();
+      const hiredBody = hireBody();
+      await call(`/technicians/${hired}/hire`, { body: hiredBody });
+      const sent = tokenFromLastEmail();
+      expect((await put(hired, '/google-signin', { googleEmail: address() })).status).toBe(200);
+      await pastCooldown(hired);
+      await expect(authHandlers.issuePasswordReset(hiredBody.email)).resolves.toEqual({ issued: false });
+      expect((await row(hired)).password_reset_token_hash).toBe(hashResetToken(sent.token));
+      expect((await redeem(sent.token)).status).toBe(200);
+
+      // A reset request that replaced an admin's link (the row had no Google address then) does not inherit its
+      // standing: the stored link is the request's own.
+      const replaced = await addTech();
+      const replacedBody = hireBody();
+      await call(`/technicians/${replaced}/hire`, { body: replacedBody });
+      await pastCooldown(replaced);
+      await expect(authHandlers.issuePasswordReset(replacedBody.email)).resolves.toEqual({ issued: true });
+      const requested = tokenFromLastEmail();
+      expect((await put(replaced, '/google-signin', { googleEmail: address() })).status).toBe(200);
+      expect(await redeem(requested.token)).toEqual(REFUSED);
+      expect((await row(replaced)).password_hash).toBeNull();
+
+      // A row that has a password keeps the ordinary reset with a Google address linked.
+      const settled = address();
+      const withPassword = await addTech({ employment_status: 'active', active: true, email: settled, password_hash: 'fixture-not-a-real-hash' });
+      expect((await put(withPassword, '/google-signin', { googleEmail: address() })).status).toBe(200);
+      await expect(authHandlers.issuePasswordReset(settled)).resolves.toEqual({ issued: true });
+      expect((await redeem(tokenFromLastEmail().token)).status).toBe(200);
+
+      // An empty password value is no password, as the Team tab reads it: the same rule at both ends.
+      const blank = address();
+      const blankRow = await addTech({ employment_status: 'active', active: true, email: blank, password_hash: '' });
+      await expect(authHandlers.issuePasswordReset(blank)).resolves.toEqual({ issued: true });
+      const early = tokenFromLastEmail();
+      expect((await put(blankRow, '/google-signin', { googleEmail: address() })).status).toBe(200);
+      await pastCooldown(blankRow);
+      await expect(authHandlers.issuePasswordReset(blank)).resolves.toEqual({ issued: false });
+      expect(await redeem(early.token)).toEqual(REFUSED);
+      expect((await row(blankRow)).password_hash).toBe('');
+    }, 30000); // real password hashes: slow on a loaded machine
+
     test('the table refuses a token or a password on a Google-only row, whatever code writes it', async () => {
       const { id } = await googleHire();
       const refused = { code: '23514', constraint: 'technicians_google_only_login_no_password' };

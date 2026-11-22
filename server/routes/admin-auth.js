@@ -610,6 +610,29 @@ function disconnectRevokedStaffSessions(technicianId, reason) {
   }
 }
 
+// A staff row with a linked Google address and no password signs in with
+// Google (owner 2026-11-21 "GOOGLE"). The email on it can be one typed on a
+// job application, which nobody proved, so a reset request never creates its
+// first password, whatever made the row active (the Team tab's Activate or
+// its edit form).
+// - The request (issuePasswordReset) issues no link for such a row.
+// - The redeem (resetPassword) lets only a link an admin sent set that first
+//   password: the Team tab's Hired press or Resend link. The stored link
+//   itself says which it is. Every issuer writes the link's request time and
+//   expiry in the UPDATE that stores its hash: a reset request's link lives
+//   RESET_LINK_TTL_MINUTES, an admin's lives days (HIRE_LINK_TTL_MS). So the
+//   rule also holds for a link stored before this rule shipped or by an older
+//   build, and a reset request that replaced an admin's link replaced its
+//   lifetime with it. A link with no request time reads as a reset request's.
+// "No password" is NULL or an empty value, as the Team tab reads it.
+const resetClosed = (row) => row.google_email != null && !row.password_hash;
+const adminSentLink = (row) => Boolean(row.password_reset_requested_at && row.password_reset_expires_at)
+  && new Date(row.password_reset_expires_at) - new Date(row.password_reset_requested_at) > RESET_LINK_TTL_MINUTES * 60 * 1000;
+const redeemClosed = (row) => resetClosed(row) && !adminSentLink(row);
+// The same rule for the redeem's UPDATE; its one binding is RESET_LINK_TTL_MINUTES.
+const REDEEM_CLOSED_SQL = `(google_email IS NOT NULL AND COALESCE(password_hash, '') = '' AND (password_reset_requested_at IS NULL
+  OR password_reset_expires_at - password_reset_requested_at <= make_interval(mins => ?)))`;
+
 async function issuePasswordReset(email) {
   const normalizedEmail = normalizeStaffEmail(email);
   if (!normalizedEmail) return { issued: false };
@@ -627,7 +650,7 @@ async function issuePasswordReset(email) {
     const matches = await canonicalStaffEmailQuery(trx, normalizedEmail)
       .where({ active: true })
       .whereIn('role', ['admin', 'technician'])
-      .select('id', 'email', 'google_only_login_at');
+      .select('id', 'email', 'google_only_login_at', 'google_email', 'password_hash');
     if (matches.length !== 1) {
       if (matches.length > 1) {
         logger.error(`[staff-auth] Password reset blocked by canonical email collision (matches=${matches.length})`);
@@ -638,6 +661,9 @@ async function issuePasswordReset(email) {
     // password by design. The email on that row can be one typed on a job application, which nobody proved, so a
     // reset request sends it nothing. The table's CHECK refuses a token on such a row as well.
     if (matches[0].google_only_login_at) return null;
+    // The same for any row that has a linked Google address and no password (resetClosed, above). An admin who
+    // wants this person on a password presses Resend link, or clears the Google sign-in.
+    if (resetClosed(matches[0])) return null;
 
     const [updated] = await trx('technicians')
       .where({ id: matches[0].id, active: true })
@@ -717,7 +743,7 @@ async function resetPassword(req, res, next) {
       .whereIn('role', ['admin', 'technician'])
       .where('password_reset_expires_at', '>', db.fn.now())
       .first();
-    if (!tech) return res.status(400).json({ error: 'Reset link is invalid or expired' });
+    if (!tech || redeemClosed(tech)) return res.status(400).json({ error: 'Reset link is invalid or expired' });
     if (tech.password_hash && await bcrypt.compare(newPassword, tech.password_hash)) {
       return res.status(400).json({ error: 'New password must be different from the current password' });
     }
@@ -733,6 +759,8 @@ async function resetPassword(req, res, next) {
           password_reset_token_hash: tokenHash,
         })
         .where('password_reset_expires_at', '>', trx.fn.now())
+        // The Google address can be linked between the read above and this write.
+        .whereRaw(`NOT ${REDEEM_CLOSED_SQL}`, [RESET_LINK_TTL_MINUTES])
         .update({
           password_hash: passwordHash,
           auth_token_version: currentVersion + 1,
