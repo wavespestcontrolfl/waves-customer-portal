@@ -617,7 +617,9 @@ function callServiceBooksAtPrice(services, serviceName, price) {
   const { serviceNameKey } = require('./call-one-time-job');
   const row = findServiceByName(services, serviceName);
   if (!row || serviceNameKey(row.name) !== serviceNameKey(serviceName)) return false;
-  return resolveCallBookingPrice({ quotedPrice: price, catalogRow: row }).price === price;
+  // The quote itself must pass: a fixed row's list price that equals a rejected quote is not that price.
+  const priced = resolveCallBookingPrice({ quotedPrice: price, catalogRow: row });
+  return priced.source === 'transcript' && priced.price === price;
 }
 
 /**

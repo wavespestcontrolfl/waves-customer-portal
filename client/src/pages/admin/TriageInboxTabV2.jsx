@@ -17,6 +17,7 @@ import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudi
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
 import HeldLinesPanel, { HeldLinesChip, useHeldLines } from "./HeldLinesPanel";
 import { fmtMoney } from "../../lib/money";
+import { formatETDateTime } from "../../lib/timezone";
 
 const STATUS_TABS = [
   { key: "open", label: "Open" },
@@ -76,6 +77,7 @@ const REASON_LABELS = {
   name_spelling_differs: "Caller spelled their name — check it",
   call_prepay_choice: "Caller chose annual prepay — accept the estimate",
   call_phone_yes: "Call booked a visit on an open estimate",
+  agreed_one_time_job_office_books: "One-time job not booked — book it with its price",
   property_role_confirm: "Property roles",
   reschedule_link_promise: "Promised reschedule link",
   attached_booking_followup_unbooked: "Follow-up visit not booked — book by hand",
@@ -250,6 +252,17 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
     // A recovery task books at its PRESERVED requested premise when that
     // differs from the primary on file (a cleared dispute whose stated
     // address is a saved secondary property) — codex r36 P1.
+    // GATE_CALL_AGREED_ONE_TIME_JOB: the AI booked no visit for a one-time job staff priced on the call. The
+    // office books it from here: the service, the time the caller agreed, and the price staff stated.
+    p.flag === "agreed_one_time_job_office_books" && p.service && { label: "Book", value: p.service },
+    p.flag === "agreed_one_time_job_office_books" && p.scheduling_window?.confirmed_start_at && {
+      label: "Agreed time",
+      value: `${formatETDateTime(p.scheduling_window.confirmed_start_at, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} ET`,
+    },
+    p.flag === "agreed_one_time_job_office_books" && typeof p.stated_one_time_price === "number" && {
+      label: "Staff said",
+      value: `${fmtMoney(p.stated_one_time_price)} one-time, and it can vary. Set the visit's price when you book it.`,
+    },
     p.skipped_reason && p.scheduling_window?.requested_address?.street_line_1 && {
       label: "Book at",
       value: [p.scheduling_window.requested_address.street_line_1, p.scheduling_window.requested_address.street_line_2, p.scheduling_window.requested_address.city, p.scheduling_window.requested_address.postal_code].filter((v) => String(v || "").trim()).join(", "),

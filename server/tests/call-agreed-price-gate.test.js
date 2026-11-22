@@ -397,9 +397,25 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     });
     expect(item.category).toBe('time_ambiguous');
     expect(JSON.parse(item.payload).scheduling_window).toEqual(expect.objectContaining({ status: 'confirmed', confirmed_start_at: '2026-11-21T17:00:00-05:00' }));
-    // The generic held-booking handler files the card; the approved-but-unbooked fallback skips this reason.
+    // The card shows the price staff stated (the office sets the visit's).
+    const priced = buildTriageItem({ callLogId: 42, flag: 'agreed_one_time_job_office_books', extraction: {
+      meta: { schema_version: '1.13.0' },
+      service_request: { quoted_price_usd: null, price: { amount_usd: 250, amount_max_usd: null, unit: 'one_time', accepted: true, stated_by: 'agent' }, prices: [] },
+    } });
+    expect(JSON.parse(priced.payload).stated_one_time_price).toBe(250);
+    expect(JSON.parse(item.payload).stated_one_time_price).toBeNull();
+  });
+
+  // The generic held-booking handler files the card. The approved-but-unbooked fallback skips this reason only
+  // when that card landed: a failed insert leaves the fallback card as the call's one scheduling trace.
+  test('the fallback card is skipped only after the hold\'s own card landed', () => {
     const heldReasons = source.match(/const heldReasons = new Set\(\[[^\]]*\]\);/);
     expect(heldReasons).not.toBeNull();
-    expect(heldReasons[0]).toContain("'agreed_one_time_job_office_books'");
+    expect(heldReasons[0]).not.toContain("'agreed_one_time_job_office_books'");
+    expect(count("if (agreedJobCardFiled) heldReasons.add('agreed_one_time_job_office_books');")).toBe(1);
+    const landed = ".ignore()\n                  .then(() => { if (svc.__held.reason === 'agreed_one_time_job_office_books') agreedJobCardFiled = true; })\n                  .catch((triageErr) =>";
+    expect(count(landed)).toBe(1);
+    expect(count('agreedJobCardFiled = true')).toBe(1);
+    expect(source.indexOf(landed)).toBeLessThan(source.indexOf('const heldReasons = new Set('));
   });
 });

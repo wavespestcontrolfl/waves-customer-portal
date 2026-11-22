@@ -10073,16 +10073,18 @@ function callAgreedOneTimeJob(v2Extraction, services) {
 // persisted after it, so this is the one place where the booking and every
 // stored label still agree. The caller keeps V1's own labels in the
 // pre-adoption view. `agreedJob`: callAgreedOneTimeJob for this extraction.
-// Returns `extracted` itself when there is nothing to change; a change means
-// the hold changed the service, so the booking is held for the office.
+// When either label names a recurring program, both labels take the service
+// the extraction named. Returns `extracted` itself when no label names one; a
+// change means the hold changed the service, so the booking is held for the
+// office.
 function adoptAgreedOneTimeService(extracted, v2Extraction, agreedJob) {
   if (!extracted || agreedJob !== true) return extracted;
   const service = v2Extraction.service_request.specific_service_name;
-  const label = (name) => (RECURRING_PEST_PROGRAMS.has(normalizeServiceKey(name)) ? service : name);
-  const matched = label(extracted.matched_service);
-  const specific = label(extracted.specific_service_name);
-  if (matched === extracted.matched_service && specific === extracted.specific_service_name) return extracted;
-  return { ...extracted, matched_service: matched, specific_service_name: specific };
+  const namesProgram = (name) => RECURRING_PEST_PROGRAMS.has(normalizeServiceKey(name));
+  if (!namesProgram(extracted.matched_service) && !namesProgram(extracted.specific_service_name)) return extracted;
+  // Both labels take the service the extraction named: adoption keeps a label
+  // that is set, so a second singular label (another job) would stay beside it.
+  return { ...extracted, matched_service: service, specific_service_name: service };
 }
 
 // The rule from the caller's words: `extracted` itself when nothing changes,
@@ -13814,6 +13816,10 @@ const CallRecordingProcessor = {
     // do-not-contact beside it): that hold keeps the call's promises, label and one alert.
     let v2OutOfAreaOnlyHold = false;
     let v2ApprovedExtraction = null;
+    // GATE_CALL_AGREED_ONE_TIME_JOB: the held booking's own review card landed
+    // (inserted, or an open one stood). Until then the approved-but-unbooked
+    // fallback card still files, so a held call never ends with no card.
+    let agreedJobCardFiled = false;
     let v2UsesOnFileAddress = false;
     let v2StreetLevelHold = null;
     // True when the booking landed on the office-review pending path (street-level web-form address).
@@ -22639,6 +22645,7 @@ const CallRecordingProcessor = {
                   }))
                   .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
                   .ignore()
+                  .then(() => { if (svc.__held.reason === 'agreed_one_time_job_office_books') agreedJobCardFiled = true; })
                   .catch((triageErr) => logger.warn(`[call-proc] held-booking triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
                 // codex #4919 round-8 P2: this generic handler files a
                 // review card for every __held reason it sees (or, for
@@ -24410,12 +24417,14 @@ const CallRecordingProcessor = {
     if (CALL_EXTRACTION_V2_DRIVES_ROUTING && v2ApprovedExtraction && extracted.appointment_confirmed) {
       const bookedServiceId = appointmentResult?.scheduledServiceId || null;
       // Held bookings already opened their own reason-specific card above.
-      const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled', 'open_reservice_callback_exists', 'reservice_eligibility_lapsed', 'reservice_property_uncovered', 'on_file_proof_customer_mismatch', 'arranger_slot_elapsed_pre_insert', 'agreed_one_time_job_office_books', 'makeup_move_applied']);
+      const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled', 'open_reservice_callback_exists', 'reservice_eligibility_lapsed', 'reservice_property_uncovered', 'on_file_proof_customer_mismatch', 'arranger_slot_elapsed_pre_insert', 'makeup_move_applied']);
       // The house-number hold has its own card only when that card actually
       // landed (a thrown insert or a lost claim holds the booking without
       // one) — otherwise the fallback card below is the call's only
       // scheduling trace and must file (pre-push audit P1).
       if (houseNumberConflictFiled && !disputeClaimedUnrecorded) heldReasons.add('on_file_house_number_conflict');
+      // The agreed one-time job's hold likewise, only when its own card landed.
+      if (agreedJobCardFiled) heldReasons.add('agreed_one_time_job_office_books');
       if (!bookedServiceId && !heldReasons.has(appointmentResult?.skippedReason)) {
         const skipReason = appointmentResult?.skippedReason
           || appointmentResult?.scheduleError

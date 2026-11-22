@@ -703,12 +703,15 @@ describe('an agreed one-time job keeps its one-time service (owner 2026-11-22, G
       expect(adopt(after, v2())).toEqual({ ...after, matched_service: SERVICE, specific_service_name: SERVICE });
     });
 
-    test('the V1 model wrote the program itself: the same, field by field', () => {
-      // Only the label that names a program changes; an empty label or another service stays.
+    test('the V1 model wrote the program itself: both labels take the service the extraction named', () => {
       expect(adopt(lead({ matched_service: 'Quarterly Pest Control Service', specific_service_name: null }), v2()))
-        .toMatchObject({ matched_service: SERVICE, specific_service_name: null });
-      expect(adopt(lead({ matched_service: 'Monthly Pest Control Service', specific_service_name: 'Bee / Wasp Nest Removal Service' }), v2({ specific_service_name: 'Bee / Wasp Nest Removal Service' })))
-        .toMatchObject({ matched_service: 'Bee / Wasp Nest Removal Service', specific_service_name: 'Bee / Wasp Nest Removal Service' });
+        .toMatchObject({ matched_service: SERVICE, specific_service_name: SERVICE });
+      // A second singular label beside the program never stays: adoption would keep it, and the stored call
+      // would name another job than the office card (pre-push audit P1).
+      expect(adopt(lead({ matched_service: 'Monthly Pest Control Service', specific_service_name: 'Bee / Wasp Nest Removal Service' }), v2()))
+        .toMatchObject({ matched_service: SERVICE, specific_service_name: SERVICE });
+      expect(adopt(lead({ matched_service: 'Bee / Wasp Nest Removal Service', specific_service_name: 'Quarterly Pest Control Service' }), v2()))
+        .toMatchObject({ matched_service: SERVICE, specific_service_name: SERVICE });
     });
 
     test('nothing to change returns the same object', () => {

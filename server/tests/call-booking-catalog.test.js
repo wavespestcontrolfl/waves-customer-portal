@@ -903,6 +903,10 @@ describe('resolveCallBookingPrice', () => {
     expect(callServiceBooksAtPrice(CATALOG, roach.name, null)).toBe(false);
     expect(callServiceBooksAtPrice(CATALOG, roach.name, 3.5)).toBe(false);
     expect(callServiceBooksAtPrice(CATALOG, roach.name, 250.004)).toBe(false);
+    // A fixed row's list price that equals a rejected quote is not the quote (the fallback, not the call's price).
+    const fixedAtBound = { ...roach, pricing_type: 'fixed', base_price: 3.5 };
+    expect(resolveCallBookingPrice({ quotedPrice: 3.5, catalogRow: fixedAtBound })).toEqual({ price: 3.5, source: 'catalog' });
+    expect(callServiceBooksAtPrice([fixedAtBound], roach.name, 3.5)).toBe(false);
     // No catalog.
     expect(callServiceBooksAtPrice(null, roach.name, 250)).toBe(false);
     expect(callServiceBooksAtPrice([], roach.name, 250)).toBe(false);

@@ -1551,3 +1551,27 @@ describe('call_phone_yes card tap', () => {
     expect(screen.queryByText('Accepting needs an admin.')).toBeNull();
   });
 });
+
+// GATE_CALL_AGREED_ONE_TIME_JOB: the AI booked no visit for a one-time job staff priced on the call; the office
+// books it from the card, so the card shows the service, the agreed time in Eastern time, and the stated price.
+describe('ConfirmEvidence — agreed one-time job the AI did not book', () => {
+  const payload = {
+    flag: 'agreed_one_time_job_office_books',
+    service: 'One-Time Pest Control Service',
+    scheduling_window: { status: 'confirmed', confirmed_start_at: '2026-11-21T22:00:00.000Z' },
+    stated_one_time_price: 250,
+  };
+  it('shows what to book, when, and the price staff stated', () => {
+    render(<ConfirmEvidence reasonCode="agreed_one_time_job_office_books" payload={payload} />);
+    expect(screen.getByText('One-Time Pest Control Service')).toBeInTheDocument();
+    expect(screen.getByText('Sat, Nov 21, 5:00 PM ET')).toBeInTheDocument();
+    expect(screen.getByText(/\$250\.00 one-time, and it can vary/)).toBeInTheDocument();
+  });
+  it('shows no price row when the card holds no price, and the rows stay off other cards', () => {
+    render(<ConfirmEvidence reasonCode="agreed_one_time_job_office_books" payload={{ ...payload, stated_one_time_price: null }} />);
+    expect(screen.queryByText(/one-time, and it can vary/)).not.toBeInTheDocument();
+    cleanup();
+    render(<ConfirmEvidence reasonCode="ambiguous_scheduling" payload={{ ...payload, flag: 'ambiguous_scheduling' }} />);
+    expect(screen.queryByText('Sat, Nov 21, 5:00 PM ET')).not.toBeInTheDocument();
+  });
+});
