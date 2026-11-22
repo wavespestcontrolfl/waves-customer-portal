@@ -18,11 +18,13 @@ jest.mock('../services/scheduling/occupancy', () => ({ techScopedConfirmActive: 
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ DAY_OPEN: 8 * 60, DAY_CLOSE: 17 * 60 }));
 jest.mock('../services/route-reorder', () => ({ _internals: { LIVE_HOLD_SQL: '(live-hold)' }, CUSTOMER_PREMISE_ALIASES: [{ customer_address_line1: 'customers.address_line1' }] }));
 jest.mock('../services/auto-dispatch/preferences', () => ({ getCustomerSchedulingPreferences: jest.fn() }));
-// The night told-lock's reads (its own suite: night-told-lock-day-replan.test.js): nobody was told anything, no time is the customer's own.
-jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: jest.fn(async () => new Set()) }));
-jest.mock('../services/time-promise', () => ({
-  ...jest.requireActual('../services/time-promise'),
-  dayOnlyEligibility: jest.fn(async (_conn, ids) => new Map(ids.map((id) => [id, { eligible: true, level: 'none' }]))),
+// The night told-lock's reads (its own suite: night-told-lock-day-replan.test.js): nobody was told anything, no person placed any visit.
+jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: jest.fn(async () => new Set()), loadPromiseLevels: jest.fn() }));
+// GATE_DAY_ONLY_PROMISE on (the ask is recorded): the customer's own time comes from time-promise.dayOnlyEligibility.
+jest.mock('../services/time-promise', () => ({ ...jest.requireActual('../services/time-promise'), dayOnlyEligibility: jest.fn() }));
+jest.mock('../services/auto-dispatch/eligibility', () => ({
+  ...jest.requireActual('../services/auto-dispatch/eligibility'),
+  isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
 }));
 
 const logger = require('../services/logger');
@@ -87,7 +89,7 @@ function row(id, lngOffset, hour, extra = {}) {
     estimated_duration_minutes: 60,
     service_type: 'Quarterly Pest Control Service',
     is_recurring: true,
-    // A recurring child: not a new booking for the close-gaps replay.
+    // A recurring child, so the night told-lock's first_or_one_time reason does not fix it.
     recurring_parent_id: `parent-${id}`,
     is_callback: false,
     auto_dispatch_locked: false,
@@ -169,6 +171,30 @@ describe('shadow run', () => {
     // Nothing but reads, plus the one plan insert.
     const writes = calls.filter(([, method]) => ['insert', 'update', 'del', 'delete', 'upsert', 'merge'].includes(method));
     expect(writes).toEqual([['day_replan_plans', 'insert']]);
+  });
+
+  describe('GATE_DAY_ONLY_PROMISE: the customer\'s own time is recorded only while it is on', () => {
+    const { dayOnlyEligibility } = require('../services/time-promise');
+    const { loadPromiseLevels } = require('../services/auto-dispatch/told-visits');
+    const fixedOf = (inserts) => JSON.parse(inserts[0].row.fixed).map((f) => [f.id, f.why]).sort();
+    afterEach(() => { delete process.env.GATE_DAY_ONLY_PROMISE; });
+
+    test('gate on: a customer-time stop and an hour-told stop are fixed in the plan row; the rest still move', async () => {
+      process.env.GATE_DAY_ONLY_PROMISE = 'true';
+      dayOnlyEligibility.mockImplementation(async (_conn, ids) => new Map(ids.map((id) => [id, { eligible: id !== 'c', level: 'none' }])));
+      loadPromiseLevels.mockImplementation(async (_conn, ids) => new Map(ids.map((id) => [id, id === 'd' ? 'hour' : 'none'])));
+      const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: zigzagRows() } });
+      await runDayReplanIfEnabled({ now: NOW, conn });
+      expect(fixedOf(inserts)).toEqual([['c', 'customer_time'], ['d', 'time_told']]);
+    });
+
+    test('gate off: the customer-time read never runs and no stop is fixed for it', async () => {
+      dayOnlyEligibility.mockReset();
+      const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: zigzagRows() } });
+      await runDayReplanIfEnabled({ now: NOW, conn });
+      expect(dayOnlyEligibility).not.toHaveBeenCalled();
+      expect(fixedOf(inserts)).toEqual([]);
+    });
   });
 
   describe('the current route savings are measured against', () => {

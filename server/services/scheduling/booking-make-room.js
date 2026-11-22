@@ -20,9 +20,10 @@
  *      rule). The module does not re-code them.
  *   2. Every stop in the chain may move under the 4:40 re-plan's own rules: day-replan fixedReason, read again with
  *      the day's full facts (status, hold, staff lock, office review, group, same customer twice, the 24-hour lock,
- *      the 24-hour text, the customer's own time and told visits; owner 2026-11-22: staff placement, a
- *      confirmation and a first or one-time visit no longer fix a stop). Its customer also has both reminder tiers on and sent BY TEXT (the plan: "the customer gets reminder
- *      texts"), read with the sender's own channel and app routing rules. The lock is the re-plan's 24 hours (owner
+ *      the 24-hour text, and the told-lock reasons: with GATE_DAY_ONLY_PROMISE on, the customer's own time and told
+ *      visits (owner 2026-11-22: staff placement, a confirmation and a first or one-time visit no longer fix a stop);
+ *      with it off, confirmed, first or one-time, person-placed and told visits, as before 2026-11-22). Its customer
+ *      also has both reminder tiers on and sent BY TEXT (the plan: "the customer gets reminder texts"), read with the sender's own channel and app routing rules. The lock is the re-plan's 24 hours (owner
  *      2026-11-03): the 24-hour text always carries the new time; a new time inside 72 hours gets no new 72-hour
  *      text, and a stop whose time was already told never moves at all. Its time
  *      preference (the re-plan's loadPref) allows the new hour, and it still ends by the night tools' day close.

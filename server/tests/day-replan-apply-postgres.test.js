@@ -124,7 +124,7 @@ maybeDescribe('day re-plan apply (real PostgreSQL, real rebooker and reminders)'
         window_start: `${pad(v.hour)}:00`,
         window_end: `${pad(v.hour + 1)}:00`,
         estimated_duration_minutes: 60,
-        // A recurring child: judged by who placed its slot (customer_time), and not a new booking for the close-gaps replay.
+        // A recurring child: the night told-lock keeps a first or one-time visit fixed.
         is_recurring: true,
         recurring_parent_id: randomUUID(),
         lat: HQ.lat,

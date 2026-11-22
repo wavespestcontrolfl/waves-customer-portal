@@ -20,7 +20,7 @@ function row(id, lngOffset, hour, extra = {}) {
     estimated_duration_minutes: 60,
     service_type: 'Quarterly Pest Control Service',
     is_recurring: true,
-    // A recurring child: not a new booking for the close-gaps replay.
+    // A recurring child, so the night told-lock's first_or_one_time reason does not fix it.
     recurring_parent_id: `parent-${id}`,
     is_callback: false,
     auto_dispatch_locked: false,
@@ -162,9 +162,11 @@ function makeApplyDeps(db, { now, blocks = [], over = {} } = {}) {
     isBlackoutDate: jest.fn(async () => false),
     findConflicts: fakeFindConflicts(db),
     loadBlocks: jest.fn(async () => blocks),
-    // The night told-lock's reads inside the move transaction: nobody was told anything, no time is the customer's own.
+    // The night told-lock's reads inside the move transaction: nobody was told anything, no person placed any visit.
     loadToldIds: jest.fn(async () => new Set()),
     loadPromiseLevels: jest.fn(async () => new Map()),
+    isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
+    // With GATE_DAY_ONLY_PROMISE on: no time is the customer's own.
     loadCustomerTime: jest.fn(async () => new Set()),
   };
   const liveRows = (dateStr) => db.rows.filter((r) => String(r.scheduled_date).slice(0, 10) === dateStr && !excludedStatuses.includes(r.status) && !r.reservation_expires_at);
