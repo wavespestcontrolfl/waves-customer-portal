@@ -7284,6 +7284,81 @@ It is absent (the key is not sent) when staff hid the points, when any roof read
 another customer, when the points were saved for another address, and when no point is confirmed. When the customer block
 exists, a staff preview gets that same block with no `preview` key. A request that is not a verified staff preview, the emailed
 document and the intelligence bar never get the `preview` key, and their responses are byte-identical to before.
+`/data` (the normal page load only, never the `?mode=pdf` document render pass) may carry an optional top-level
+`noVisitLine` string (owner 2026-11-22, option B; no gate): the owner's sentence "We measure your home and yard from
+county records and satellite images, so most quotes need no visit." (`NO_VISIT_QUOTE_LINE` in
+`services/estimate-no-visit-line.js`, the same sentence as the `estimate.delivery` email paragraph and the office call
+script line). Copy only: no customer or pricing data. ABSENT unless all of these hold: the estimate is open (the same
+`cta.terminalState === null` the page reads, so an accepted, declined, expired or quote-required estimate carries none);
+every service row on the estimate is one Waves prices from the measured home and yard alone (`estimateIsRemoteMeasured`
+in `routes/estimate-public.js`). The rule is two exact lists of service identities, not the page's display categories. A
+row's identity is its own stored `service`, compared whole; a name, a label, a `key` or a part of a key never counts.
+Recurring: `pest_control`, `lawn_care`, `mosquito` or `termite_bait`. One-time: `one_time_pest`, `one_time_lawn`,
+`one_time_mosquito` or `termite_bait_installation` (the termite bait plan's own install charge). `tree_shrub` is off
+the list on purpose: its price is built from a tree count, a palm count and a bed area that a person often gives, and
+the engine cannot always tell a counted number from a stated one. A row
+is not a service only by its stored `service`: `waveguard_setup`, `manual_discount`, `rodent_bundle_discount`, or a
+`one_time_adjustment` whose stated `amount` / `price` are readable numbers and none is above zero; an empty row is
+nothing. Every other row must store a listed service, priced or not, must not be commercial, and must not carry one of
+the engine's not-measured marks: a dwelling unit priced from the bedroom count the caller gave (`pricingBasis:
+'caller_stated_bedroom_count'`, `footprintSource` or `sizeBasis` `'bedroom_band'`; such a unit stores `pest_control` or
+`one_time_pest` too); or any mark of the engine's predicate for a priced row whose price is not exact yet
+(`lineNeedsReviewBeforeExactPrice` in `estimator-engine/draft-builder.js`: a fallback footprint, a low
+`pricingConfidence`, a heuristic or low-grade turf size, `requiresMeasurement`, `quoteRequired`, a custom quote flag,
+a row priced with no count on record); or a mosquito area taken from a lot-category proxy (`missingAreaData: true`);
+or an engine input flag that says a size is not measured or not verified for this unit (`lotSizeMeasured: false`,
+`buildingSizeMeasured: false`, `measuredTurfUnitVerified: false`, anywhere in the saved estimate data). When a lawn
+service is quoted (`lawn_care`, `one_time_lawn`), a heuristic turf mark on any stored object of the saved data, the
+replay or the served price takes the key away too (a V1 save keeps the resolved turf basis in `results.lawnMeta`, not
+on the lawn row); with no lawn service quoted that mark is not read. The review reasons the engine keeps for the
+whole estimate (`pricingMetadata.manualReviewReasons` and its copies, on any stored object) are read like a row's
+reasons. A call draft's selected home or lot size whose `estimatorEngine.propertyFacts.{home,lot}.source` is anything
+but `county_assessed` takes the key away (a caller-stated size, a fallback source, a saved profile value, the
+`property_facts_v2` label, a size with no source); a rejected candidate is not read. An estimate drafted from a visit
+(`estimate_data.scheduled_service_id`) carries no key, and neither does an estimate whose customer completed a Waves
+Assessment in the look window (`hadCompletedAssessmentLook`, the one rule the free-assessment offers use; one read,
+made only for an estimate that would carry the key; a failed read leaves the key as the rule decided it). The rule
+reads marks about a size of the home or
+yard and marks that a price needs a visit. It does not read a quantity of product the office picks (mosquito stations,
+dunks) or a pricing decision the office makes (a discount, `priceOverridden`). It does not read the admin estimator's
+form state (`inputs._manualFields`, `_homeSqFtEdited`, `_lotSqFtEdited`: the boxes the office changed, most often from
+the same aerial image). So outside a call draft, a home size or a lawn size the office typed counts like a measured
+one: the engine prices it with no mark. The office's review of a price (`requiresManualReview`, `manualReviewReasons`) is read by
+its reasons. Only a reason that says a measured size is large keeps the key (`large_lot`,
+`pest_large_lot_manual_review`, `large_pool_cage`, `pest_large_or_oversized_pool_cage`): a reviewed price from measured
+sizes is still measured. Every other reason, a reason that is not text, and a review mark with no reason take the key
+away (for example `stories_estimated`, `mosquito_treatable_area_unverified`,
+`termite_measurement_manual_override_used`, and any reason added later). A row
+container that is there and is not a list, or an entry that is there and is not a row, cannot be read and takes the key
+away. Three reads, each failing closed. (1)
+The saved estimate grants the key: the rows of `guaranteeServiceRows` without the served price (both saved result shapes,
+an inputs-only replay, an authored proposal's rows) hold at least one service row and every one is on its list. (2)
+Every saved row as it is stored can take the key away, also one the page's readers skip or drop, in both saved result
+shapes, the bare save and an inputs-only save's replayed engine result: `recurring.services[]` and
+`results.recurring.services[]` (the recurring list), `lineItems[]` (either list), `oneTime.items[]`,
+`oneTime.specItems[]`, the nested `results.oneTime` copies, `specItems[]` and `quoteRequiredItems[]` (the one-time list),
+and then every row that stores a `service` or a not-measured size mark at any depth of the saved estimate data and of
+the replay (either list; the frozen `sendSnapshot` is not scanned, the served price is read next). At least one stored row
+must be a service row: a saved amount the page turns into a row (a termite install amount) grants nothing. (3) The served price can take
+the key away and never grants it: `pricing.services[]` recurring sections by `memberKeys`, else `key`; every
+`perServiceTreatments[]` row of each `frequencies[]` and `serviceCadenceCombos[]` entry, on the price and on those
+sections (the recurring list); `pricing.oneTimeBreakdown.items[]`, the quote-required rows, `firstVisitFees[]`,
+`setupFee`, `rodentBaitSetupFee`, `mistingInstallFee` and each section's `oneTimeContribution.items[]` and `setupFee`
+(the one-time list); and then every row that stores a `service` or a not-measured size mark at any depth of the price
+(either list). One row off its
+list (tree and shrub, rodent work, a misting system, foam, trenching, pre-slab, Bora-Care, a WDO inspection, traps, a palm
+injection, a bed bug, roach, flea or stinging insect job, a first-visit cockroach treatment, a termite station rental or bond row, an
+area add-on, a row with a name, a key or a price and no stored `service`, a stored `service` that is not text), no service
+row at all, or a failed replay, and the key is absent; a row the rule cannot read gives no key and a warning, never a
+failed response); and the estimate email's rule reads the row as a home
+estimate (`noVisitLineFor`: category `RESIDENTIAL`, not a proposal, and no commercial mark by `isCommercialEstimateRow` at
+its strict reading, so a commercial estimate, a proposal and a condo carry none). A row the rule cannot read omits the key
+and logs a warning; it never fails the response. Every other response stays byte-identical. The interactive estimate
+page (`EstimateViewPage`, Waves AI card) prints the string under the satellite photo, above the "Red outline" caption,
+only while the satellite photo itself is the picture on the card (not when the card has no photo, and not while a
+misting layout or roof points take the photo's place). The legacy server-rendered page (`renderPage`) and
+`EstimateProposalDocument` (the emailed PDF) do not print it. The Intelligence Bar's estimate detail composes the same
+page payload, so its page projection carries the key for the same estimates.
 `/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
 `copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
 and rodent-trapping rows may carry the sold allowance used to render that

@@ -979,7 +979,7 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
   );
 }
 
-function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork = null, lockInCta = null, mistingLayout = null, roofPoints }) {
+function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork = null, lockInCta = null, mistingLayout = null, roofPoints, noVisitLine }) {
   const phone = useIsMobile(560);
   // GATE_MISTING_LAYOUT_DESIGNER: the staff-drawn misting layout (/data `mistingLayout`) takes the satellite photo's
   // place. A picture that fails to load puts the satellite photo back, so there is never a hole.
@@ -988,6 +988,8 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
   // satellite photo's place too, unless a misting layout is showing (misting wins). A photo that fails to load puts the
   // satellite photo back.
   const [roofPointsFailed, setRoofPointsFailed] = useState(false);
+  // The satellite photo that failed to load, by its URL, so a card that later gets another photo starts clean.
+  const [failedSatelliteUrl, setFailedSatelliteUrl] = useState(null);
   if (!intelligence) return null;
   const showMisting = Boolean(mistingLayout?.imageUrl) && !mistingFailed;
   const showRoofPoints = !showMisting && !roofPointsFailed && hasRoofPoints(roofPoints);
@@ -998,6 +1000,12 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
   // "Show your work" (estimateShowYourWork gate): the parcel-outline
   // satellite image replaces the plain one when the server resolved it.
   const satelliteUrl = showYourWork?.overlaySatelliteUrl || intelligence.satelliteUrl;
+  // The owner's "no visit needed" sentence (2026-11-22, option B) sits under the satellite photo. The server decides who
+  // gets it and sends the words (/data `noVisitLine`): an open home estimate whose every service Waves prices from the
+  // measured home and yard alone. The card adds one condition of its own: the satellite photo itself is the picture on the
+  // card. A staff-made picture in its place (misting layout, roof points) means a visit happened, and a photo that did
+  // not load leaves the sentence with nothing to describe.
+  const showNoVisitLine = Boolean(noVisitLine) && Boolean(satelliteUrl) && !photoReplaced && failedSatelliteUrl !== satelliteUrl;
   const showYourWorkFacts = Array.isArray(showYourWork?.facts) ? showYourWork.facts : [];
 
   return (
@@ -1037,6 +1045,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
           src={resolveApiAssetUrl(satelliteUrl)}
           alt={`Satellite view of ${address || 'your property'}`}
           loading="lazy"
+          onError={() => setFailedSatelliteUrl(satelliteUrl)}
           style={{
             display: 'block',
             width: '100%',
@@ -1047,6 +1056,12 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
             background: '#F7F5EE',
           }}
         />
+      ) : null}
+
+      {showNoVisitLine ? (
+        <div data-testid="no-visit-line" style={{ marginTop: 8, fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
+          {noVisitLine}
+        </div>
       ) : null}
 
       {showYourWork?.overlaySatelliteUrl && !photoReplaced ? (
@@ -9444,6 +9459,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   }
 
   const { estimate, pricing, cta } = data;
+  // The owner's "no visit needed" sentence for the Waves AI card: the words the server sent (/data `noVisitLine`), or ''.
+  const noVisitLine = typeof data.noVisitLine === 'string' ? data.noVisitLine.trim() : '';
   const canAccept = cta?.canAccept === true;
   // Review-before-booking (e.g. priced termite trenching) is NOT terminal: the
   // price + Ask-Waves stay visible and only self-booking is gated. A genuine
@@ -10431,7 +10448,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             not for an authored commercial proposal — the PDF document drops
             `intelligence` for it the same way. */}
         {authoredProposalOnPage ? null : (
-          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} mistingLayout={data.mistingLayout || null} roofPoints={data.roofPoints || null} />
+          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} mistingLayout={data.mistingLayout || null} roofPoints={data.roofPoints || null} noVisitLine={noVisitLine} />
         )}
         {showAskBar && !isRegulatedCertificateSurface ? (
           <EstimateAskBar
@@ -10521,7 +10538,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     <>
       {!isRegulatedCertificateSurface ? (
         <>
-          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} mistingLayout={data.mistingLayout || null} roofPoints={data.roofPoints || null} />
+          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} mistingLayout={data.mistingLayout || null} roofPoints={data.roofPoints || null} noVisitLine={noVisitLine} />
           <EstimateAskBar
             preview={readOnlyPreview}
             token={token}
@@ -11265,6 +11282,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 showYourWork={data.showYourWork || null}
                 mistingLayout={data.mistingLayout || null}
                 roofPoints={data.roofPoints || null}
+                noVisitLine={noVisitLine}
                 lockInCta={canShowSlotPicker
                   ? <GlassSectionCta label="This price fits my home — lock it in →" onClick={promptPickTime} style={{ justifyContent: 'center' }} />
                   : null}
