@@ -8,6 +8,10 @@
  * call, a follow-up child, a visit a person made, a call with no valid reading, a reading that heard a plan ask, a
  * completed visit, a visit older than 7 days and a visit that agrees with its call all raise nothing.
  *
+ * The price problem the same way: a one-time visit with no price, for a call whose reading holds the price staff
+ * stated for that service, gets ONE Schedule bell; setting the price closes it and it does not ring again; and once
+ * the office corrects a plan visit's service and sets no price, the service bell closes and the price bell rings.
+ *
  * The run reads every candidate visit in the database and writes bells for the ones it names. So each test runs
  * in ONE transaction that the reads and the notification writer share, and that rolls back: nothing this suite
  * reads or rings for another suite's rows stays. It refuses any database but a private QA one or CI's.
@@ -103,6 +107,20 @@ maybeDescribe('call booking check (live Postgres)', () => {
 
   const run = (now = NOW) => Check.runCallBookingCheck({ now });
 
+  const priceRowsFor = (visitId) => trx('notifications').where({ recipient_type: 'admin' })
+    .whereRaw("metadata->>'dedupeKey' = ?", [`${Check.OWN_PREFIX}price:${visitId}`]);
+  // The 2026-11-21 reading: the one-time service, and the one-time price staff stated and the caller accepted
+  // ("One-time service is $250, but it varies"), with no strict total.
+  const statedTerm = { amount_usd: 250, amount_max_usd: null, unit: 'one_time', accepted: true, stated_by: 'agent' };
+  const pricedCall = (request = {}, top = {}) => ({
+    ai_extraction_enriched: JSON.stringify({
+      service_request: {
+        specific_service_name: oneTime.name, service_intent: 'active_infestation_treatment', quoted_price_usd: null, price: statedTerm, prices: [statedTerm], ...request,
+      },
+      ...top,
+    }),
+  });
+
   test('a plan visit for a call that named a one-time service raises one Schedule bell, and a repeat run adds nothing', async () => {
     const b = await booking();
     const first = await run();
@@ -158,6 +176,116 @@ maybeDescribe('call booking check (live Postgres)', () => {
     const [row] = await rowsFor(b.visitId);
     expect(row.done_at).not.toBeNull();
     expect(row.resolution).toBe('The visit is done or cancelled');
+  });
+
+  test('a one-time visit with no price, for a call that holds the price staff stated, raises one price bell, and a repeat run adds nothing', async () => {
+    const b = await booking({ row: oneTime, callOver: pricedCall() });
+    const first = await run();
+    expect(first.raised).toBeGreaterThanOrEqual(1);
+    const rows = await priceRowsFor(b.visitId);
+    expect(rows).toHaveLength(1);
+    const [row] = rows;
+    expect(row.category).toBe('schedule');
+    expect(row.title).toBe("Schedule — set the price on Pat Synthetic's visit");
+    expect(row.body).toBe('The visit has no price; when this bell rang, its call held a price for the service it had then.');
+    expect(row.link).toBe(`/admin/dispatch?tab=schedule&date=2026-11-21&appointment=${b.visitId}`);
+    expect(row.done_at).toBeNull();
+    expect(row.detail).toContain('When this bell rang, the reading of the call held $250 for that service');
+    expect(row.detail).toContain('Check the call and the visit as it is now, then set the visit\'s price before it is billed. "Create invoice on completion" is off on this visit: check how the visit bills when you set the price. Nothing was changed and the customer was not contacted.');
+    expect(row.metadata).toMatchObject({
+      area: 'Schedule', severity: 'needs-you', who: 'person', doneWhen: 'visit_priced', subject: { type: 'visit', id: b.visitId },
+      scheduledServiceId: b.visitId, customerId: b.customerId, callLogId: b.callId, problem: 'price',
+    });
+    // The visit is the service the call named: no service bell.
+    expect(await rowsFor(b.visitId)).toHaveLength(0);
+    // The check changed nothing on the visit.
+    expect((await trx('scheduled_services').where({ id: b.visitId }).first()).estimated_price).toBeNull();
+
+    const second = await run();
+    expect(second.raised).toBe(0);
+    expect(await priceRowsFor(b.visitId)).toHaveLength(1);
+  });
+
+  test('setting the price closes the price bell, and it does not ring again when the price is taken off', async () => {
+    const b = await booking({ row: oneTime, callOver: pricedCall() });
+    await run();
+    await trx('scheduled_services').where({ id: b.visitId }).update({ estimated_price: 275 });
+    const next = await run(new Date('2026-11-21T22:15:00Z'));
+    expect(next.closed).toBeGreaterThanOrEqual(1);
+    const [row] = await priceRowsFor(b.visitId);
+    expect(row.done_at).not.toBeNull();
+    expect(row.resolution).toBe('The visit has a price now');
+    expect(row.metadata).toMatchObject({ autoCleared: true, autoClearedReason: 'price_set' });
+
+    await trx('scheduled_services').where({ id: b.visitId }).update({ estimated_price: null });
+    await run(new Date('2026-11-21T22:30:00Z'));
+    expect(await priceRowsFor(b.visitId)).toHaveLength(1);
+  });
+
+  test('the call is read again and holds another number, or an agreed total: the one bell stays open and nothing new rings', async () => {
+    const b = await booking({ row: oneTime, callOver: pricedCall() });
+    await run();
+    const corrected = { ...statedTerm, amount_usd: 300 };
+    await trx('call_log').where({ id: b.callId }).update(pricedCall({ price: corrected, prices: [corrected] }));
+    const next = await run(new Date('2026-11-21T22:15:00Z'));
+    expect(next.raised).toBe(0);
+    await trx('call_log').where({ id: b.callId }).update(pricedCall({ quoted_price_usd: 250 }));
+    await run(new Date('2026-11-21T22:30:00Z'));
+    const rows = await priceRowsFor(b.visitId);
+    expect(rows).toHaveLength(1);
+    // The row says the visit has no price, with no number, and that is still so.
+    expect(rows[0].done_at).toBeNull();
+    expect(rows[0].body).toBe('The visit has no price; when this bell rang, its call held a price for the service it had then.');
+  });
+
+  test('a price bell stays open while the reading cannot be read; a visit changed to a plan closes it', async () => {
+    const b = await booking({ row: oneTime, callOver: pricedCall() });
+    await run();
+    await trx('call_log').where({ id: b.callId }).update({ v2_extraction_status: 'schema_failed' });
+    await run(new Date('2026-11-21T22:15:00Z'));
+    expect((await priceRowsFor(b.visitId))[0].done_at).toBeNull();
+
+    await trx('scheduled_services').where({ id: b.visitId }).update({ service_id: plan.id, service_type: plan.name });
+    await run(new Date('2026-11-21T22:30:00Z'));
+    const [row] = await priceRowsFor(b.visitId);
+    expect(row.done_at).not.toBeNull();
+    expect(row.resolution).toBe('The visit is no longer a visit that takes a price from the call');
+  });
+
+  test('the office corrects a plan visit\'s service and sets no price: the service bell closes and the price bell rings', async () => {
+    const b = await booking({ callOver: pricedCall() });
+    await run();
+    expect(await rowsFor(b.visitId)).toHaveLength(1);
+    expect(await priceRowsFor(b.visitId)).toHaveLength(0);
+
+    await trx('scheduled_services').where({ id: b.visitId }).update({ service_id: oneTime.id, service_type: oneTime.name });
+    await run(new Date('2026-11-21T22:15:00Z'));
+    expect((await rowsFor(b.visitId))[0].done_at).not.toBeNull();
+    const [price] = await priceRowsFor(b.visitId);
+    expect(price.done_at).toBeNull();
+    expect(price.metadata).toMatchObject({ problem: 'price' });
+  });
+
+  test.each([
+    ['the visit has a price', { visitOver: { estimated_price: 250 } }, pricedCall()],
+    ['the visit is free on purpose (a stamped $0 next to a line price)', { visitOver: { estimated_price: 0, primary_line_price: 250 } }, pricedCall()],
+    ['the call holds an agreed total (the booking\'s own price rule reads it)', {}, pricedCall({ quoted_price_usd: 250 })],
+    ['the reading names a plan bundle', {}, pricedCall({ primary_service_category: 'bundled_waveguard' })],
+    ['the reading does not say the call was about a one-time job', {}, pricedCall({ service_intent: 'quote_only' })],
+    ['the call spoke of a second service', {}, pricedCall({ secondary_categories: ['lawn_care'] })],
+    ['the reading records the caller\'s choice of a plan\'s billing', {}, pricedCall({ billing_choice: 'per_application' })],
+    ['the visit is a free callback', { visitOver: { is_callback: true } }, pricedCall()],
+    ['the office made the visit recurring', { visitOver: { is_recurring: true } }, pricedCall()],
+    ['the visit\'s label names another service than its catalog row', { visitOver: { service_type: 'Another One-Time Service' } }, pricedCall()],
+    ['the call holds no price', {}, {}],
+    ['the call spoke of a second property', {}, pricedCall({}, { property: { additional_properties: [{ city: 'Venice' }] } })],
+    ['the call named another service than the visit has', {}, pricedCall({ specific_service_name: 'Another One-Time Service' })],
+    ['staff stated a range', {}, pricedCall({ price: { ...statedTerm, amount_max_usd: 300 }, prices: [{ ...statedTerm, amount_max_usd: 300 }] })],
+  ])('no price bell when %s', async (_name, shape, callOver) => {
+    const b = await booking({ row: oneTime, ...shape, callOver });
+    await run();
+    expect(await priceRowsFor(b.visitId)).toHaveLength(0);
+    expect(await rowsFor(b.visitId)).toHaveLength(0);
   });
 
   test.each(['ai_call_outbound_review', 'voice_agent'])('a booking that waits for the office (%s) rings the same way', async (sourceAction) => {

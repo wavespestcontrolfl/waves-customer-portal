@@ -142,6 +142,30 @@ describe('GET /:token/data — navigation after the anchor offer expires', () =>
     });
   });
 
+  // A plan offer's quote (owner 2026-11-19) ends on its own date and is never a group member
+  // (ensureEstimateGroupId refuses it). Even a row that carries a group and a stored navigation promise answers
+  // the generic 404 once it has expired: the group link never opens it.
+  test('an expired plan offer token with a live sibling answers the generic 404, with no navigation and no extension offer', async () => {
+    const base = anchor();
+    const row = { ...base, source: 'plan_start', status: 'expired', estimate_data: {
+      ...base.estimate_data,
+      planStart: { serviceKey: 'pest_control', offer: { jobId: 'job-1', endsAt: past, firstVisitFrom: '2027-02-15' } },
+    } };
+    const sibling = estimateRow({ id: 'fixed-sibling', token: 'fixedsiblingtoken', estimate_group_id: row.estimate_group_id, sent_at: past, expires_at: future });
+    dbRows = { estimates: row, siblings: [row, sibling] };
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/${row.token}/data?refresh=1`);
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: 'Estimate not found' });
+    });
+    // The same row without the offer stamp is the group's entry link (the first case above): only the stamp closes it.
+    dbRows = { estimates: { ...row, estimate_data: base.estimate_data }, siblings: [row, sibling] };
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/${row.token}/data?refresh=1`);
+      expect(res.status).toBe(200);
+    });
+  });
+
   test('shows only published expired siblings as nonactionable summaries', async () => {
     const row = anchor();
     const expiredByDate = estimateRow({ id: 'expired-date', token: 'expireddatetoken', estimate_group_id: row.estimate_group_id,

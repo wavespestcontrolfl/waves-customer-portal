@@ -251,6 +251,8 @@
  *   GATE_CONTACT_CORRECTION=true (auto-apply customer-stated name/email/address corrections from inbound SMS and processed calls)
  *   GATE_REPORT_CROSS_SELL=true (live service-report cross-sell offer card with estimator pricing)
  *   GATE_REPORT_CLICK_TO_ESTIMATE=true (priced cross-sell tap mints a real estimate and redirects into it)
+ *   GATE_DOC_CROSS_SELL=true (owner 2026-11-21: an "add a service" card (pest or lawn, the offer the Waves app shows that customer, with its per-application price) and a referral card show on a paid invoice's receipt page for 7 days after the payment (owner 2026-11-22) and on the tracker once the visit is complete. Each card only opens the Waves app (Billing tab or Refer tab); the customer signs in there to act. Nothing on the receipt or the tracker files a request, and no text or email is sent. Payer-billed invoices and accounts with a service contact never show them. Off = neither page changes. Kill = unset.)
+ *   GATE_DOC_CROSS_SELL_EMAIL=true (owner 2026-11-21: the paid-invoice receipt email and the service-report email gain one line inviting the customer to add a service or share their referral link; no price in the email. The receipt email's line opens the Waves app and needs GATE_DOC_CROSS_SELL on too; the report email's line opens the report page. Only for a customer who takes marketing email: offers on, not text-only, not unsubscribed. Changes customer email wording. Off = emails unchanged. Kill = unset.)
  *   GATE_CALL_SPOKEN_NOTES=true (owner 2026-11-16 "ok build all, use haiku", live-call suite part 12: when staff say "make a note" or "remind me" on a live-transcribed call, a Claude Haiku 5.5 read of those staff lines saves the note on the call record and rings an admin bell at the reminder time said. It never texts, emails or calls anyone. Spends on Haiku calls when on: owner flip only. Kill: unset)
  *   GATE_PROPERTY_RECOMMENDATIONS=true (customer app Home, owner rulings 2026-08-13: the "Recommendations, For your property" card; since owner 2026-11-21 the Billing tab shows its service offer too. It shows at most one service offer, chosen by what the customer already has (pest or lawn; tree and shrub is never pushed, owner 2026-11-21), and the mosquito note in season. Its button files a request and rings the office; nothing is sold. Off = no card. Kill = unset.)
  *   GATE_ONE_TAP_PURCHASE=true (customer app, owner rulings 2026-08-13, 2026-11-11 and 2026-11-12: the Recommendations offer's button becomes "Add now", and My Plan gains an "Add a service" card with one such button for each service the customer does not have (pest, lawn, tree and shrub, mosquito, rodent bait stations; never termite). The customer agrees to the terms, picks a first visit and confirms; the visit and the recurring series are booked, nothing is charged at confirm, and the customer gets a confirmation email and an app notification, never a text. The screens show the WaveGuard discount on the new service and, when GATE_WAVEGUARD_EXTEND_EXISTING is on, the new price of the services the customer already has, which confirm applies. Needs GATE_PROPERTY_RECOMMENDATIONS. Refused for monthly-billed and payer-billed accounts. Off = the button files a request as before and every /api/one-tap route answers 404. Kill = unset.)
@@ -898,6 +900,21 @@ const gates = {
   // and the response carries no estimate URL. Quote-mode (CTA) taps keep the
   // request flow at ANY setting.
   reportClickToEstimate: process.env.GATE_REPORT_CLICK_TO_ESTIMATE === 'true',
+
+  // The add-a-service + referral cards on the paid-invoice receipt page and
+  // the completed-visit tracker (owner 2026-11-21). Each card is a link into
+  // the Waves app (owner 2026-11-22); neither page has a card tap route
+  // (services/app-link-cards.js). Customer-facing pricing surface on public
+  // token pages — fail-closed ==='true'. Off: neither payload carries the
+  // keys. Read at call time, so unsetting it stops the cards in a running
+  // process.
+  get docCrossSell() { return process.env.GATE_DOC_CROSS_SELL === 'true'; },
+
+  // One unpriced line in the receipt email (opens the Waves app) and the
+  // service-report email (opens the report page) about those cards (owner
+  // 2026-11-21). Changes customer email copy — dark.
+  // Read at call time.
+  get docCrossSellEmail() { return process.env.GATE_DOC_CROSS_SELL_EMAIL === 'true'; },
 
   // "Your plan" section on the LIVE report (owner ask 2026-09-28): an active
   // plan member's completed-visit + re-service COUNTS for this calendar year

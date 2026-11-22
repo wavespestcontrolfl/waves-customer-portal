@@ -172,8 +172,12 @@ const TOLD_ROW_COLUMNS = [
 async function toldLockFacts(trx, deps, { row, id, dateStr }) {
   const dayOnly = typeof deps.dayOnlyOn === 'function' && deps.dayOnlyOn() === true;
   const levels = dayOnly ? await promiseLevelFacts(trx, deps, id) : { told: new Set(await deps.loadToldIds(trx, [id], deps.now())) };
+  // askRecorded: only while GATE_DAY_ONLY_PROMISE is on does the app record whether the customer asked for the time
+  // (owner 2026-11-22): then a set time (the visit may not be promised as a day only) stops the write as set_time, and
+  // an answer that cannot be read (a thrown read included) as set_time_unread.
+  const ask = dayOnly ? { askRecorded: true, setTime: await deps.loadSetTime(trx, [{ id }], deps.now()) } : {};
   const verdict = await deps.isPersonPlacedVisit({ ...row, scheduled_date: dateStr }, trx);
-  return { toldLock: true, ...levels, personPlaced: new Set(!verdict || verdict.placed !== false ? [id] : []) };
+  return { toldLock: true, ...levels, ...ask, personPlaced: new Set(!verdict || verdict.placed !== false ? [id] : []) };
 }
 
 /**

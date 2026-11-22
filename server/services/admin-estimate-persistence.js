@@ -1605,6 +1605,16 @@ async function ensureEstimateGroupId(trx, anchorEstimateId, sibling = {}, random
   if (expectUngrouped && anchor.estimate_group_id) {
     throw errorWithStatus('Estimate group changed; refresh and try again.', 409);
   }
+  // A plan offer's quote (plan-offer-estimate.js; owner 2026-11-19) is never a member of a multi-property group.
+  // It is a fixed offer for one home with its own end date, and a group shares one link: the group's extension
+  // and its expired-link navigation would show or revive the offer past that date. This function holds the only
+  // write that puts an EXISTING estimate into a group (a staff revise of a customer's own plan quote is refused,
+  // REVISE_REFUSED_MINT_SOURCES), so the refusal here, on the locked anchor, keeps every offer quote ungrouped.
+  if (require('./plan-offer-estimate').planOfferOf(anchor.estimate_data)) {
+    const err = errorWithStatus('A plan offer estimate cannot be part of a multi-property group. Start a normal estimate for the other property.', 400);
+    err.code = 'plan_offer_grouped';
+    throw err;
+  }
   const normPhone = (v) => String(v || '').replace(/\D/g, '').slice(-10);
   const normEmail = (v) => String(v || '').trim().toLowerCase();
   const anchorCustomerId = anchor.customer_id ? String(anchor.customer_id) : null;

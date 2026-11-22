@@ -193,6 +193,7 @@ function builder(table) {
     if (op === 'like') { const prefix = String(val).replace(/%$/, ''); return (r) => String(r[norm(a)] || '').startsWith(prefix); }
     if (op === '>=') return (r) => (r[norm(a)] ?? '') >= val;
     if (op === '<=') return (r) => (r[norm(a)] ?? '') <= val;
+    if (op === '>') return (r) => new Date(r[norm(a)]).getTime() > new Date(val).getTime();
     return (r) => String(r[norm(a)]) === String(val);
   };
   // Grouped predicate with knex's real AND/OR semantics (the reason group,
@@ -312,6 +313,8 @@ const CUSTOMER = {
 };
 const recompute = jest.fn();
 const releaseHolds = jest.fn(async () => ({ released: 0 }));
+// The offer a job is due (the job module's dueOfferOfJob): none by default; mintOffer and the refusal tests set it.
+const planOfferJob = jest.fn();
 // The frozen bundle in the real builder's shape (frequencies[] plus services[], each section with
 // defaultFrequencyKey and frequencies[]): one section for the minted family whose opening entry
 // carries the row's own totals and one treatment row at the per-application price the card
@@ -364,6 +367,7 @@ function deps(overrides = {}) {
     crossSell: { loadEstimateSeed: async () => null },
     // The scheduler's hold release, recorded: the replace step frees each archived quote's holds.
     releaseEstimateHolds: releaseHolds,
+    dueOfferOfJob: planOfferJob,
     propertyLookup: null,
     // Single-premises proof + verified-override probe (codex GH r4): green
     // by default here; the refusal tests override them.
@@ -382,6 +386,8 @@ beforeEach(() => {
   db.mockImplementation((table) => builder(table));
   recompute.mockReset();
   releaseHolds.mockClear();
+  planOfferJob.mockReset();
+  planOfferJob.mockImplementation(async () => null);
   recompute.mockResolvedValue({
     recomputed: true,
     serverResult: { engineVersion: 'v9.9', lineItems: [] },
@@ -917,6 +923,299 @@ describe('mintPlanStartEstimate', () => {
       recompute.mockResolvedValue(quote);
       await expect(mint(option, { buildEstimateSendSnapshot: snapshotWith({}, pageOneTime) }))
         .rejects.toMatchObject({ code: 'pricing_unavailable', restartUnavailable: true });
+    });
+  });
+
+  // The one-time job to plan offer's quote (owner 2026-11-19 "build"): the same mint with `offer`. The recompute is the
+  // mock above, so this block pins what the mint hands the core and stores; plan-offer-mint-postgres.test.js runs the
+  // real recompute, snapshot and accept re-check on the same quote.
+  describe('plan offer quote', () => {
+    const ENDS = new Date(FIXED_NOW().getTime() + 20 * 24 * 3600 * 1000);
+    const OFFER = { jobId: 'job-1', endsAt: ENDS, firstVisitFrom: '2027-02-17' };
+    const OFFER_SHOWN = { ...shownOf(PEST_LINE), setupFee: 0 };
+    // The mint takes the job id only. The job module proves the job and gives the offer's dates (dueOfferOfJob);
+    // here its answer for the job is `offer`, so `offer` holds the dates the mint must store.
+    const mintOffer = (offer = OFFER, overrides = {}, depOverrides = {}) => {
+      planOfferJob.mockImplementation(async (_trx, { jobId }) => ({ jobId, endsAt: offer.endsAt, firstVisitFrom: offer.firstVisitFrom }));
+      return mint({ shown: OFFER_SHOWN, offer: { jobId: offer.jobId }, ...overrides }, depOverrides);
+    };
+    const SECOND_TOKEN = () => Buffer.from('0123456789abcdef');
+
+    test('stores the stamp, the fee waiver and its own end date, and writes its own timeline note', async () => {
+      const result = await mintOffer();
+      expect(result.reused).toBe(false);
+      // The job was proven for this customer, on the mint's transaction, before anything was priced.
+      expect(planOfferJob).toHaveBeenCalledTimes(1);
+      expect(planOfferJob.mock.calls[0][1]).toEqual({ jobId: 'job-1', customerId: LEAD.id, now: FIXED_NOW() });
+      expect(planOfferJob.mock.invocationCallOrder[0]).toBeLessThan(recompute.mock.invocationCallOrder[0]);
+      // The waiver is on the data the server prices, so the recompute zeroes the setup fee.
+      const [estimateData] = recompute.mock.calls[0];
+      expect(estimateData.operatorPriceAdjustment).toEqual({
+        type: null, value: 0, label: null, internalReason: 'One-time job to plan offer: setup fee waived (owner 2026-11-19)',
+        floorBreachAcknowledged: false, waiveSetupFee: true,
+      });
+      const row = tables.estimates[0];
+      expect(row.expires_at).toEqual(ENDS);
+      const stored = JSON.parse(row.estimate_data);
+      expect(stored.planStart).toEqual({
+        families: ['pest_control'], serviceKey: 'pest_control', optionId: 'pest-quarterly', mintedAt: '2026-11-19T12:00:00.000Z', premisesKey: HOME_KEY,
+        offer: { jobId: 'job-1', endsAt: ENDS.toISOString(), firstVisitFrom: '2027-02-17' },
+      });
+      expect(stored.operatorPriceAdjustment.waiveSetupFee).toBe(true);
+      expect(require('../services/plan-offer-estimate').planOfferOf(row.estimate_data)).toEqual(stored.planStart.offer);
+      expect(tables.customer_interactions).toHaveLength(1);
+      expect(tables.customer_interactions[0]).toMatchObject({
+        customer_id: 'cust-1', interaction_type: 'note', subject: 'Plan offer estimate made after a one-time job — Pest Control',
+        body: `A plan estimate (${row.id}) was made for the offer after the one-time job: no setup fee, good through 2026-12-09. Accepting it books the next plan visit.`,
+      });
+    });
+
+    test('a plain mint stores none of it: the standard expiry, no waiver, no stamp (the mint as before)', async () => {
+      await mint();
+      const [estimateData] = recompute.mock.calls[0];
+      expect(estimateData.operatorPriceAdjustment).toBeUndefined();
+      expect(JSON.parse(tables.estimates[0].estimate_data).planStart.offer).toBeUndefined();
+      expect(tables.estimates[0].expires_at).not.toEqual(ENDS);
+    });
+
+    test('a second offer mint for the same job hands the quote back; the offer of another job retires it and mints again', async () => {
+      const first = await mintOffer();
+      const again = await mintOffer();
+      expect(again).toEqual({ estimateId: first.estimateId, token: first.token, url: first.url, reused: true });
+      expect(tables.estimates).toHaveLength(1);
+      const next = await mintOffer({ ...OFFER, jobId: 'job-2' }, { randomBytes: SECOND_TOKEN });
+      expect(next.reused).toBe(false);
+      expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).toBeTruthy();
+      expect(JSON.parse(tables.estimates.find((r) => r.id === next.estimateId).estimate_data).planStart.offer.jobId).toBe('job-2');
+    });
+
+    // The offer day of one job can move (a follow-up visit done later). The core's fingerprint holds no date and the
+    // booking checks read the stored one, so the same job with other dates is never handed the old quote.
+    test.each([
+      ['a later first visit date', { firstVisitFrom: '2027-02-24' }],
+      ['another end date', { endsAt: new Date(ENDS.getTime() - 24 * 3600 * 1000) }],
+    ])('the same job with %s retires the old quote and mints again with the new dates', async (_label, change) => {
+      const first = await mintOffer();
+      const asked = { ...OFFER, ...change };
+      const moved = await mintOffer(asked, { randomBytes: SECOND_TOKEN });
+      expect(moved.reused).toBe(false);
+      expect(tables.estimates.find((r) => r.id === first.estimateId).archived_at).toBeTruthy();
+      const movedRow = tables.estimates.find((r) => r.id === moved.estimateId);
+      expect(JSON.parse(movedRow.estimate_data).planStart.offer).toEqual({
+        jobId: 'job-1', endsAt: asked.endsAt.toISOString(), firstVisitFrom: asked.firstVisitFrom,
+      });
+      expect(movedRow.expires_at).toEqual(asked.endsAt);
+    });
+
+    test('an offer mint never reuses a plain portal quote of the same option: that quote is retired', async () => {
+      const plain = await mint();
+      const offered = await mintOffer({ ...OFFER }, { randomBytes: SECOND_TOKEN });
+      expect(offered.reused).toBe(false);
+      expect(tables.estimates.find((r) => r.id === plain.estimateId).archived_at).toBeTruthy();
+    });
+
+    // A caller that breaks the offer's own bounds, or a job module answer with dates the estimate cannot hold,
+    // is a bug: a plain Error, nothing priced, nothing minted.
+    test.each([
+      ['a service other than pest control', { serviceKey: 'lawn_care', optionId: 'lawn-enhanced' }, OFFER],
+      ['an end date in the past', {}, { ...OFFER, endsAt: new Date(FIXED_NOW().getTime() - 1000) }],
+      ['an end date that is now', {}, { ...OFFER, endsAt: FIXED_NOW() }],
+      ['an end date more than 31 days out', {}, { ...OFFER, endsAt: new Date(FIXED_NOW().getTime() + 31 * 24 * 3600 * 1000 + 1000) }],
+      ['an end date that is not a Date', {}, { ...OFFER, endsAt: '2026-12-09T12:00:00Z' }],
+      ['a first visit date that is not a date', {}, { ...OFFER, firstVisitFrom: 'soon' }],
+      ['a first visit date that is not on the calendar', {}, { ...OFFER, firstVisitFrom: '2027-02-30' }],
+      ['no job id', {}, { ...OFFER, jobId: '' }],
+      ['a setup fee in shown', { shown: { ...OFFER_SHOWN, setupFee: 99 } }, OFFER],
+    ])('refuses %s with a plain Error', async (_label, overrides, offer) => {
+      await expect(mintOffer(offer, overrides)).rejects.toThrow(/offer needs/);
+      await expect(mintOffer(offer, overrides)).rejects.not.toMatchObject({ restartUnavailable: true });
+      expect(tables.estimates).toHaveLength(0);
+      expect(recompute).not.toHaveBeenCalled();
+    });
+
+    // The waiver stands on "that one-time job was plan visit one". A job the job module does not know as a
+    // completed one-time pest job of THIS customer that is due its offer today (another customer's, a cancelled
+    // one, a plan visit, one too old or too new), or one it cannot read, grants none: a caller bug, a plain
+    // Error, with nothing priced, retired or minted.
+    test.each([
+      ['is not due an offer for this customer', async () => null],
+      ['cannot be read', async () => { throw new Error('boom'); }],
+    ])('a job that %s refuses with a plain Error: the prior quote stays, nothing is priced or minted', async (_label, lookup) => {
+      const plain = await mint();
+      recompute.mockClear();
+      const attempt = mintOffer(OFFER, { randomBytes: SECOND_TOKEN }, { dueOfferOfJob: lookup });
+      await expect(attempt).rejects.toThrow(/offer needs a completed one-time pest job of this customer that is due its offer/);
+      await expect(attempt).rejects.not.toMatchObject({ restartUnavailable: true });
+      expect(recompute).not.toHaveBeenCalled();
+      expect(tables.estimates).toHaveLength(1);
+      expect(tables.estimates.find((r) => r.id === plain.estimateId).archived_at).toBeFalsy();
+      expect(releaseHolds).not.toHaveBeenCalled();
+    });
+
+    // The caller cannot set the dates: only the job module's answer is stored.
+    test('dates in the caller\'s offer are ignored: the estimate stores the job module\'s dates', async () => {
+      planOfferJob.mockImplementation(async (_trx, { jobId }) => ({ jobId, endsAt: ENDS, firstVisitFrom: '2027-02-17' }));
+      const minted = await mint({
+        shown: OFFER_SHOWN,
+        offer: { jobId: 'job-1', endsAt: new Date(FIXED_NOW().getTime() + 29 * 24 * 3600 * 1000), firstVisitFrom: '2026-11-20' },
+      });
+      const row = tables.estimates.find((r) => r.id === minted.estimateId);
+      expect(JSON.parse(row.estimate_data).planStart.offer).toEqual({ jobId: 'job-1', endsAt: ENDS.toISOString(), firstVisitFrom: '2027-02-17' });
+      expect(row.expires_at).toEqual(ENDS);
+    });
+
+    test('a plain mint, and a plain tap that re-opens the offer, never ask for a job', async () => {
+      await mint();
+      expect(planOfferJob).not.toHaveBeenCalled();
+      await mintOffer(OFFER, { randomBytes: SECOND_TOKEN });
+      planOfferJob.mockClear();
+      const tapped = await mint();
+      expect(tapped.reused).toBe(true);
+      expect(planOfferJob).not.toHaveBeenCalled();
+    });
+
+    // The entry checks the end date before the customer locks and the recompute. It is read again on the clock
+    // before the old quote is retired: an end date that passed during the work retires nothing and mints nothing.
+    test('an end date that passes while the mint works is a plain Error: the prior quote stays, nothing is minted', async () => {
+      const plain = await mint();
+      let worked = false;
+      const priced = recompute.getMockImplementation();
+      recompute.mockImplementationOnce(async (...args) => { worked = true; return priced(...args); });
+      const now = () => (worked ? new Date(ENDS.getTime() + 1000) : FIXED_NOW());
+      await expect(mintOffer(OFFER, { randomBytes: SECOND_TOKEN, now })).rejects.toThrow(/offer needs an end date that is still ahead/);
+      expect(worked).toBe(true);
+      expect(tables.estimates).toHaveLength(1);
+      expect(tables.estimates.find((r) => r.id === plain.estimateId).archived_at).toBeFalsy();
+    });
+
+    // ...and once more after the new quote is published (the retire, the hold release, the snapshot and the
+    // timeline row take time too): the throw rolls the transaction back. The rollback itself is proven on real
+    // Postgres (plan-offer-mint-postgres.test.js); this fake keeps no transaction.
+    test('an end date that passes while the quote is published is a plain Error', async () => {
+      let published = false;
+      const snapshot = snapshotWith({});
+      const buildEstimateSendSnapshot = async (...args) => { published = true; return snapshot(...args); };
+      const now = () => (published ? new Date(ENDS.getTime() + 1000) : FIXED_NOW());
+      await expect(mintOffer(OFFER, { now }, { buildEstimateSendSnapshot })).rejects.toThrow(/offer needs an end date that is still ahead/);
+      expect(published).toBe(true);
+    });
+
+    test('an end date exactly 31 days out is allowed', async () => {
+      await expect(mintOffer({ ...OFFER, endsAt: new Date(FIXED_NOW().getTime() + 31 * 24 * 3600 * 1000) })).resolves.toMatchObject({ reused: false });
+    });
+
+    // The emailed offer is a delivered price promise until its end date. The standard flow would archive it and mint
+    // the same plan with the setup fee, so a plain tap of the same option hands the offer quote back.
+    describe('a plain portal tap', () => {
+      // The tap re-opens the offer through the core: the home, today's price against the card (the setup fee at 0, as
+      // the offer waives it), the frozen page and the accept's checks all run, and the live quote is handed back only
+      // when they hold. A refusal leaves the emailed quote as it was.
+      const untouched = (offered) => {
+        expect(tables.estimates).toHaveLength(1);
+        expect(tables.estimates[0].archived_at).toBeFalsy();
+        expect(tables.estimates[0].id).toBe(offered.estimateId);
+        expect(releaseHolds).not.toHaveBeenCalled();
+        expect(tables.customer_interactions).toHaveLength(1);
+      };
+
+      test('of the same option at the same price hands back the live offer quote: nothing archived, nothing minted', async () => {
+        const offered = await mintOffer();
+        recompute.mockClear();
+        // The card shows the standard setup fee; the offer's re-open compares everything else and takes the fee as 0.
+        const tap = await mint({ shown: { ...shownOf(PEST_LINE), setupFee: 99 } });
+        expect(tap).toEqual({ estimateId: offered.estimateId, token: offered.token, url: offered.url, reused: true });
+        // Today's price was re-computed, with the waiver on the data.
+        expect(recompute).toHaveBeenCalledTimes(1);
+        expect(recompute.mock.calls[0][0].operatorPriceAdjustment.waiveSetupFee).toBe(true);
+        untouched(offered);
+      });
+
+      test('after the plan price changed since the offer mint is refused pricing_unavailable, the offer quote untouched', async () => {
+        const offered = await mintOffer();
+        const dearer = engineLine('pest_control', 35);
+        recompute.mockResolvedValue(pricedAs(dearer));
+        await expect(mint({ shown: shownOf(dearer) })).rejects.toMatchObject({ code: 'pricing_unavailable', restartUnavailable: true });
+        untouched(offered);
+      });
+
+      test('with the page snapshot cleared is refused pricing_unavailable, the offer quote untouched', async () => {
+        const offered = await mintOffer();
+        const stored = JSON.parse(tables.estimates[0].estimate_data);
+        delete stored.sendSnapshot.pricingBundle;
+        tables.estimates[0].estimate_data = JSON.stringify(stored);
+        await expect(mint()).rejects.toMatchObject({ code: 'pricing_unavailable', restartUnavailable: true });
+        untouched(offered);
+      });
+
+      test('after the account\'s home changed is refused pricing_unavailable, never the old home\'s quote, the offer quote untouched', async () => {
+        const offered = await mintOffer();
+        // The home the offer was priced for is no longer the account's: the quote's address and its priced-home key name another street.
+        tables.estimates[0].address = '9 Oak Ave, Parrish, FL 34219';
+        const stored = JSON.parse(tables.estimates[0].estimate_data);
+        stored.planStart.premisesKey = require('../services/estimate-property-linkage').normalizedStampedStreet('9 Oak Ave', null, 'Parrish', '34219');
+        tables.estimates[0].estimate_data = JSON.stringify(stored);
+        await expect(mint()).rejects.toMatchObject({ code: 'pricing_unavailable', restartUnavailable: true });
+        untouched(offered);
+      });
+
+      test('runs the strict home proof before anything is handed back: a home that cannot be proven refuses, the offer quote untouched', async () => {
+        const offered = await mintOffer();
+        await expect(mint({}, { customerHasOnlyPrimaryPremises: async () => false })).rejects.toMatchObject({ code: 'pricing_unavailable' });
+        untouched(offered);
+      });
+
+      test('reads the lineage under FOR UPDATE, after the ownership check, before the price work', async () => {
+        await mintOffer();
+        recompute.mockClear();
+        const ops = [];
+        const trx = fakeTrx(ops);
+        await mint({}, { db: { transaction: async (fn) => fn(trx) } });
+        expect(ops.indexOf('read:estimates:forUpdate')).toBeGreaterThan(ops.indexOf('read:customers:forUpdate'));
+        expect(ops.indexOf('read:estimates:forUpdate')).toBeGreaterThan(-1);
+        expect(recompute).toHaveBeenCalledTimes(1);
+      });
+
+      test('for another option takes the standard flow: the lineage, the offer quote included, is retired', async () => {
+        const offered = await mintOffer();
+        recompute.mockResolvedValue(pricedAs(LAWN_LINE));
+        const tap = await mint({ serviceKey: 'lawn_care', optionId: 'lawn-enhanced', shown: shownOf(LAWN_LINE), randomBytes: SECOND_TOKEN });
+        expect(tap.reused).toBe(false);
+        expect(tables.estimates.find((r) => r.id === offered.estimateId).archived_at).toBeTruthy();
+      });
+
+      test.each([
+        ['expired', { expires_at: '2026-11-18T00:00:00.000Z' }],
+        ['archived', { archived_at: '2026-11-18T00:00:00.000Z' }],
+        ['accepted', { status: 'accepted' }],
+        ['changed by staff (the one-time option)', { show_one_time_option: true }],
+        ['changed by staff (bill by invoice)', { bill_by_invoice: true }],
+      ])('with an offer quote that is %s takes the standard flow: a plain quote', async (_label, change) => {
+        const offered = await mintOffer();
+        Object.assign(tables.estimates[0], change);
+        const tap = await mint({ randomBytes: SECOND_TOKEN });
+        expect(tap.reused).toBe(false);
+        expect(tap.estimateId).not.toBe(offered.estimateId);
+        const minted = tables.estimates.find((r) => r.id === tap.estimateId);
+        expect(JSON.parse(minted.estimate_data).planStart.offer).toBeUndefined();
+        expect(minted.expires_at).not.toEqual(ENDS);
+      });
+
+      test('with a live plain quote and no offer behaves as before: handed back by the core, same single read of the lineage', async () => {
+        const first = await mint();
+        const again = await mint();
+        expect(again).toEqual({ estimateId: first.estimateId, token: first.token, url: first.url, reused: true });
+        expect(recompute).toHaveBeenCalledTimes(2);
+      });
+
+      test('an offer quote with a mangled stamp is no offer: the tap goes through the standard flow, never the early hand-back', async () => {
+        await mintOffer();
+        const stored = JSON.parse(tables.estimates[0].estimate_data);
+        stored.planStart.offer.firstVisitFrom = 'soon';
+        tables.estimates[0].estimate_data = JSON.stringify(stored);
+        recompute.mockClear();
+        await mint({ randomBytes: SECOND_TOKEN });
+        expect(recompute).toHaveBeenCalledTimes(1);
+      });
     });
   });
 

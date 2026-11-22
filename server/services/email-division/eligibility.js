@@ -270,6 +270,61 @@ async function marketingSuppressed(ctx) {
   return rows.length > 0;
 }
 
+// The prefs half of the embedded-pitch rule: the customer takes marketing
+// offers, and their marketing channel includes email.
+function prefsAllowPitch(prefs) {
+  return prefs?.marketing_offers === true && channelFor(prefs, 'marketing_channel') !== 'sms';
+}
+
+// May an OPERATIONAL email to this customer carry a promotional line? For a
+// sender outside the eligibleForEmail pipeline (the receipt and
+// service-report emails' add-a-service line). It runs the pipeline's own
+// contact checks, in the pipeline's order, as an operational email of this
+// customer meets them: the customer row, a staff do-not-contact, a global or
+// operational suppression, the email switch. The last check also gives the
+// pipeline's embedded-pitch verdict (checks.allowPitch: marketing offers on,
+// a marketing channel that includes email, no marketing unsubscribe).
+// → the checked context, or null when a check says no. `email` is the
+// address the line rides: it must still be the customer's address on file.
+// A holder who changed their address while the email was being built keeps
+// the operational email at the old address, without the line; the old inbox
+// never gets promotional copy on the new address's choices.
+const sameAddress = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+const EMBEDDED_LINE_HOST = { stream: 'lifecycle', marketingClass: 'relationship', emailKey: 'embedded-line-host' };
+async function embeddedLineContext({ customerId, email, conn } = {}) {
+  if (!customerId || !email) return null;
+  const ctx = { ...EMBEDDED_LINE_HOST, customerId, database: conn || db, checks: {} };
+  if (await checkCustomer(ctx)) return null;
+  if (!sameAddress(ctx.customer.email, email)) return null;
+  for (const check of [checkStaffDnc, checkSuppression, checkEmailSwitchStreamFlagAndChannel]) {
+    if (await check(ctx)) return null;
+  }
+  return ctx;
+}
+
+// The add-a-service part of that line: the pipeline's embedded-pitch verdict.
+// Any other answer, a missing prefs row included, is no.
+async function embeddedPitchAllowed(who = {}) {
+  const ctx = await embeddedLineContext(who);
+  return Boolean(ctx?.checks.allowPitch);
+}
+
+// The referral part of that line is also a referral ask by email, so it
+// answers to the rules the referral email ('lc.referral*') answers to as
+// well: referral nudges not turned off, a referral channel that includes
+// email (the column's schema default is 'sms') and no referral unsubscribe.
+// Asked after embeddedPitchAllowed said yes; a no here drops the referral
+// part only, so an allowed service offer still rides the line.
+const REFERRAL_ASK_KEY = 'lc.referral';
+async function embeddedReferralAskAllowed(who = {}) {
+  const ctx = await embeddedLineContext(who);
+  if (!ctx) return false;
+  if (!streamFlagOk('lifecycle', REFERRAL_ASK_KEY, ctx.prefs)) return false;
+  if (streamChannelBlocksEmail('lifecycle', REFERRAL_ASK_KEY, ctx.prefs)) return false;
+  const group = groupKeyFor('lifecycle', REFERRAL_ASK_KEY);
+  return (await activeSuppressionsFor(null, who.email, group, ctx.database)).length === 0;
+}
+
 async function checkEmailSwitchStreamFlagAndChannel(ctx) {
   const { customerId, stream, emailKey, database, checks } = ctx;
   const prefs = await database('notification_prefs').where({ customer_id: customerId }).first();
@@ -281,8 +336,7 @@ async function checkEmailSwitchStreamFlagAndChannel(ctx) {
   // …and the customer's marketing channel must include email: an SMS-only
   // marketing choice keeps promotional copy out of an operational email too
   // (codex GitHub round P1).
-  const marketingChannelIsSmsOnly = channelFor(prefs, 'marketing_channel') === 'sms';
-  checks.allowPitch = prefs?.marketing_offers === true && !marketingChannelIsSmsOnly && !(await marketingSuppressed(ctx));
+  checks.allowPitch = prefsAllowPitch(prefs) && !(await marketingSuppressed(ctx));
   if (!streamFlagOk(stream, emailKey, prefs, ctx.marketingClass)) return REASONS.STREAM_FLAG_OFF;
   if (streamChannelBlocksEmail(stream, emailKey, prefs, ctx.marketingClass)) return REASONS.STREAM_CHANNEL_NOT_EMAIL;
   return null;
@@ -419,7 +473,7 @@ async function eligibleForEmail({
 }
 
 module.exports = {
-  eligibleForEmail, resolveMarketingClass, REASONS, groupKeyFor,
+  eligibleForEmail, resolveMarketingClass, REASONS, groupKeyFor, embeddedPitchAllowed, embeddedReferralAskAllowed,
   // Exported for callers outside the eligibility pipeline that need the
   // SAME channel-resolution semantics against a notification_prefs row
   // they've already read (e.g. newsletter-list-reconcile.js's SMS-only

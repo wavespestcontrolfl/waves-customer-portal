@@ -293,5 +293,24 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
     const today = require('../utils/date-only').dateOnlyString(job.scheduled_date);
     expect((await upcomingEstimateVisits(trx, { today, days: 1 })).map((row) => row.id)).toContain(jobId);
   }));
+  // The saved engine shape (v1-legacy-mapper): the row keeps its list price and the after-discount annual, and the
+  // tier with its rate sits on the recurring block. Before, this saving had no name and the invoice kept one net line.
+  test('a saved engine estimate with the tier on its recurring block invoices that tier discount behind the gate', () => rollbackTest(async (trx) => {
+    const { jobId, estimateId } = await fixture(trx, { jobPrice: 85 });
+    await trx('scheduled_services').where({ id: jobId }).update({ primary_line_price: null });
+    await trx('estimates').where({ id: estimateId }).update({ estimate_data: { result: { recurring: { tier: 'Gold', waveGuardTier: 'Gold', discount: 0.15,
+      services: [{ service: 'pest_control', name: 'Pest Control', mo: 33.33, monthly: 33.33, basePrice: 100, perTreatment: 100, visitsPerYear: 4, annualAfterDiscount: 340 }] } } } });
+    const job = await trx('scheduled_services').where({ id: jobId }).first();
+    expect(await pricing.acceptedVisitBreakdown(job, { database: trx })).toEqual({ breakdown: {
+      base: 100, amount: 85, discounts: [{ name: 'WaveGuard Gold', dollars: 15 }] } });
+    process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES = 'true';
+    try {
+      const { lineItems } = await Invoice.buildLineItemsForScheduledService(jobId, { database: trx, fallbackAmount: 85 });
+      expect(lineItems.map((row) => [row.description, Number(row.amount)])).toEqual([['Pest Control', 100], ['WaveGuard Gold', -15]]);
+    } finally { delete process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES; }
+    // An empty tier column reads the saved recurring block, as the accept does.
+    await trx('estimates').where({ id: estimateId }).update({ waveguard_tier: null });
+    expect((await pricing.acceptedVisitBreakdown(job, { database: trx })).breakdown.discounts).toEqual([{ name: 'WaveGuard Gold', dollars: 15 }]);
+  }));
 
 });

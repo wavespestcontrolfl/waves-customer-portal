@@ -1785,6 +1785,36 @@ function initScheduledJobs() {
   }
 
   // =========================================================================
+  // 9:31 PM ET daily + 12:31 PM ET weekdays — New-home mail list, shadow only
+  // (services/mail/new-home-list.js): reads the Manatee Clerk's public deed
+  // list, keeps builder-to-person home sales, matches each to a parcel and a
+  // new-home permit and stores one mail_prospects row per home. Nothing is
+  // sent and nothing reads the table yet. The Clerk fills in names and legal
+  // descriptions over about two days, so the night run re-reads six days and
+  // the noon run (a short two-day read) picks up the same morning's fills.
+  // ONE lease for both ticks and the deploy-kill retry: two runs must never
+  // ask the Clerk site or the parcel map at once. A second run is harmless
+  // (settled deeds are never asked again). A retry after a deploy kill runs
+  // the full night read: the killed run can be the last one that reads its
+  // oldest day, and a short read would leave that day's deeds unjudged.
+  // A run that throws (a day or the parcel map did not answer, a deed
+  // failed, a deed left its last read unjudged) is logged here and recorded
+  // as a failed run by the lease.
+  // Minute 31 at hours 12 and 21: no other job names it (checked against
+  // every cron.schedule in this repo; the nearest are the :30 and :33 / :37
+  // groups, and the hourly :20 jobs stay clear). Only the every-minute and
+  // every-N-minute pollers share it. The run takes 1 to 3 minutes: one page
+  // per day 4 s apart and a map query every 0.6 s, capped at 120.
+  // =========================================================================
+  const runMailNewHomeListTick = async (mode) => {
+    await runExclusive('mail-new-home-list', () => require('./mail/new-home-list').runNewHomeList({ mode }))
+      .catch((err) => logger.error(`Mail new-home list failed: ${err.message}`));
+  };
+  cron.schedule('31 21 * * *', () => runMailNewHomeListTick('night'), { timezone: 'America/New_York' });
+  cron.schedule('31 12 * * 1-5', () => runMailNewHomeListTick('noon'), { timezone: 'America/New_York' });
+  registerDeployKillRetry('mail-new-home-list', () => runMailNewHomeListTick('night'));
+
+  // =========================================================================
   // MONDAY 10:36 AM ET — Weekly restaurant prospect list (owner 2026-11-19):
   // new food licenses, ownership changes and violation-35 inspections in
   // Manatee / Sarasota / Charlotte, less Punta Gorda (not served), from

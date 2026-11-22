@@ -7,6 +7,7 @@ import { io } from 'socket.io-client';
 import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api';
 import { WavesShell, CustomerColumn, PublicStateCard } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
+import AppLinkCards from '../components/crossSell/AppLinkCards';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_SUPPORT_PHONE_TEL,
@@ -803,8 +804,36 @@ function CompleteCard({ data }) {
           >View invoice</a>
         ) : null}
       </div>
+
+      <TrackOfferCards data={data} />
     </>
   );
+}
+
+// Add-a-service + referral cards (GATE_DOC_CROSS_SELL, owner 2026-11-21), on
+// a completed visit. Each card only opens the Waves app; nothing on the
+// tracker acts. The server decides when they show; absent keys render
+// nothing.
+const trackOfferCardStyle = {
+  background: TRACK_SURFACE.surface,
+  borderRadius: 8,
+  padding: 24,
+  border: `1px solid ${TRACK_SURFACE.border}`,
+  textAlign: 'center',
+  marginTop: 16,
+};
+const trackOfferStyles = {
+  heading: { fontSize: 20, fontWeight: 600, lineHeight: 1.35, margin: '0 0 8px', color: TRACK_SURFACE.text },
+  price: { fontSize: 16, fontWeight: 600, margin: '0 0 8px', color: TRACK_SURFACE.text },
+  copy: { fontSize: 16, lineHeight: 1.5, margin: '0 0 14px', color: TRACK_SURFACE.body },
+  button: {
+    display: 'inline-block', padding: '14px 20px', background: COLORS.glassNavy, color: COLORS.white,
+    borderRadius: 8, fontWeight: 600, fontSize: 16, textDecoration: 'none',
+  },
+};
+
+function TrackOfferCards({ data }) {
+  return <AppLinkCards offer={data?.crossSell} referral={data?.referral} style={trackOfferCardStyle} styles={trackOfferStyles} />;
 }
 
 function CancelledCard({ data }) {

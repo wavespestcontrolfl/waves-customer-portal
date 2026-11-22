@@ -33,7 +33,7 @@
 //   does the recipient see the same invoice? That's intended (it's
 //   a receipt) but should NOT expose card details.
 import { CUSTOMER_SURFACE } from '../theme-customer';
-import { DOC, DOC_FONT, DOC_EYEBROW, FS, FW, LH, SP, RADIUS } from '../theme-doc';
+import { DOC, DOC_FONT, DOC_EYEBROW, FS, FW, LH, SP, RADIUS, docButton } from '../theme-doc';
 import { useGlassSurface } from '../glass/glass-engine';
 import DocumentActionBar from '../components/DocumentActionBar';
 import PropertyLineGroups from '../components/billing/PropertyLineGroups';
@@ -41,6 +41,7 @@ import { groupInvoiceLinesByProperty, invoiceDiscountRows } from '@waves/invoice
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import Icon from '../components/Icon';
+import AppLinkCards from '../components/crossSell/AppLinkCards';
 import {
   WavesShell,
   CustomerColumn,
@@ -142,6 +143,27 @@ function SummaryRow({ label, value, strong, danger }) {
   );
 }
 
+
+// Typography for the shared cards on a page without the report stylesheet.
+// The card section carries BrandCard's own surface (one card, not a card
+// inside a card).
+const receiptCardStyle = {
+  background: 'var(--surface)',
+  border: '1px solid var(--border)',
+  borderRadius: 'var(--radius-xl)',
+  boxShadow: 'var(--shadow-card)',
+  padding: 'clamp(20px, 4vw, 24px)',
+  boxSizing: 'border-box',
+  width: '100%',
+  textAlign: 'center',
+  marginBottom: SP.lg,
+};
+const receiptCardStyles = {
+  heading: { fontSize: 20, lineHeight: 1.35, fontWeight: FW.semibold, color: DOC.ink, margin: '0 0 8px' },
+  price: { fontSize: FS.bodyLg, fontWeight: FW.semibold, color: DOC.ink, margin: '0 0 8px' },
+  copy: { fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.muted, margin: '0 0 14px' },
+  button: { ...docButton('primary'), display: 'inline-block', fontSize: FS.bodyLg, textDecoration: 'none' },
+};
 
 export default function ReceiptPage() {
   // Full liquid-glass scene (owner 2026-07-09 — the quiet 'pro' wash is
@@ -658,6 +680,14 @@ export default function ReceiptPage() {
             </div>
           ) : null}
         </BrandCard>
+
+        {/* Add-a-service + referral cards (GATE_DOC_CROSS_SELL, owner
+            2026-11-21). Each card only opens the Waves app; nothing on the
+            receipt acts. The server decides when they show; absent keys
+            render nothing. Screen only — the receipt prints as a record. */}
+        <div className="waves-no-print">
+          <AppLinkCards offer={data.crossSell} referral={data.referral} style={receiptCardStyle} styles={receiptCardStyles} />
+        </div>
 
         <div className="waves-no-print waves-customer-help">
           Questions about this receipt? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.

@@ -737,6 +737,50 @@ async function sendServiceReportV1Email(recordId, {
     disposition: 'attachment',
   }] : undefined;
 
+  // GATE_DOC_CROSS_SELL_EMAIL (owner 2026-11-21): one closing line pointing
+  // at the report page's add-a-service / referral cards, on the ACCOUNT
+  // HOLDER's copy only — service contacts on this send must not be invited
+  // to start the homeowner's plan. Names only the cards the live report
+  // shows (GATE_REPORT_CROSS_SELL, complaint visits suppressed), never a
+  // price. The line is a pitch inside an operational email, so it follows
+  // the account holder's marketing choices (email-division's embedded-pitch
+  // rule). Best-effort: no line on any failure.
+  // Composed HERE, before the two send fences below: its reads (offer
+  // pricing, the referral decision) must not run inside the re-entry send
+  // seal's window, where a slow read could outlive the seal.
+  let offerLine = null;
+  const gates = require('../../config/feature-gates');
+  if (gates.isEnabled('docCrossSellEmail') && gates.isEnabled('reportCrossSell')) {
+    try {
+      const holder = recipients.find((r) => r.role === 'primary');
+      const { embeddedPitchAllowed, embeddedReferralAskAllowed } = require('../email-division/eligibility');
+      const who = { customerId: service.customer_id, email: holder?.email };
+      if (holder && await embeddedPitchAllowed(who)) {
+        const { reserviceReportCopyGateOn } = require('./reservice-report');
+        const callback = reserviceReportCopyGateOn() && service.is_callback === true;
+        // The card the live report shows: the report route's own composer,
+        // on the row this sender loaded with the report's frozen identity
+        // applied (loadServiceRecord), as the report route does. So the line
+        // and the report read the same premises. Best-effort by contract:
+        // null on any failure. A complaint visit's report carries no card.
+        const crossSell = callback ? null : await require('./cross-sell').buildReportCrossSell(service, db);
+        // The customer's own card: with GATE_REFERRAL_STEP2 on, the
+        // report page's per-customer reward decision.
+        // The referral part is a referral ask too: the customer's referral
+        // email choice decides it, apart from the service offer.
+        const referral = callback || !(await embeddedReferralAskAllowed(who))
+          ? null
+          : await require('../referral-share').composeReferralCard({ customerId: service.customer_id });
+        offerLine = require('../doc-offer-email-line').docOfferEmailLine({
+          crossSell, referral, url: fullReportUrl, place: 'report',
+        });
+      }
+    } catch (err) {
+      logger.warn(`[report-email] offer line skipped (code=${err?.code || 'none'})`);
+    }
+  }
+  const { joinBodyAppends } = require('../doc-offer-email-line');
+
   // Post-render fence (codex P1 #3093 r36): a recommendation run that
   // starts after the worker's one-time sanitize check can overwrite the
   // assessment while the attachment renders. The caller re-verifies the
@@ -814,7 +858,7 @@ async function sendServiceReportV1Email(recordId, {
           inspectionCreditNote,
           firstReport,
         }),
-        bodyAppend: followUsLine(),
+        bodyAppend: joinBodyAppends(recipient.role === 'primary' ? offerLine : null, followUsLine()),
         recipientType: 'customer',
         recipientId: service.customer_id || null,
         triggerEventId: `service_report_ready:${recordId}:${recipient.role || 'recipient'}`,
