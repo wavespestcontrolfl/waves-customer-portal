@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const { normalizePhone } = require('../utils/phone');
-const { sameStreetAddress } = require('./estimator-engine/address-compare');
+const { samePremiseDisplay, parseDisplayAddress } = require('./lead-address-unverified');
+const { normalizeUnitLine, unitLineValueKey } = require('../utils/address-normalizer');
 
 const OPEN_ESTIMATE_STATUSES = ['draft', 'scheduled', 'sent', 'viewed'];
 const AUTOMATED_ESTIMATE_LOCK_NAMESPACE = 'estimate_automation_duplicate';
@@ -308,19 +309,23 @@ async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
  *   - its data is a JSON object (or empty), so it can carry the marker below;
  *   - it is for the wizard run's own property: one phone can ask for quotes
  *     on two homes, and a draft for the other home is not replaced by this
- *     run. Same street line and the same unit (sameStreetAddress with
- *     requireExactUnit); a draft with no address is never a shell.
+ *     run. Same door by the test the draft-retire sweep uses
+ *     (estimate-draft-retire.js sameProperty): the shared premise matcher
+ *     with street, city and ZIP on both sides, plus the same unit. A missing
+ *     or incomplete address fails closed: the draft is not a shell.
  *
  * Two steps that bracket the wizard's own estimate write, like
  * lockSupersededDraftInTx / archiveSupersededDraftInTx above, so a shell is
  * never lost without its replacement:
  *   1. lockUntouchedWebFormShellsInTx: row-locks the phone's shells and
- *      answers which ids may go. `stillBlocks` gets EVERY other open estimate
- *      of the phone (a web-form draft for another property included); when
- *      one of them still blocks, no id is returned.
+ *      returns their ids, but only when they are EVERY open estimate of the
+ *      phone. Any other open estimate still blocks (a draft with a price, a
+ *      touched draft, a draft for another property, an office or estimator
+ *      estimate, the wizard's own older draft), and then no id is returned.
  *   2. archiveWebFormShellsInTx: after the wizard's draft was written in the
- *      same transaction, archives those ids. When the write is refused or
- *      never happens, the caller does not call it and the shells stand.
+ *      same transaction, archives those ids, all or nothing. A planned shell
+ *      that is no longer one (a lead linked it in between) makes it throw,
+ *      so the caller's transaction rolls the wizard's draft back too.
  *
  * Archived, not deleted: staff can unarchive the row, and every draft reader
  * (auto-send, clarify asks, measurements, lists) skips an archived row. The
@@ -381,20 +386,27 @@ function untouchedWebFormShells(trx, last10, { now = new Date() } = {}) {
     });
 }
 
-async function lockUntouchedWebFormShellsInTx(trx, { phone, address, stillBlocks, now = new Date() } = {}) {
-  const none = { shellIds: [], newestRemaining: null, blockedById: null };
-  if (!trx || typeof stillBlocks !== 'function') return none;
+// Same door, by the test the draft-retire sweep uses for "a draft another
+// estimate replaced" (estimate-draft-retire.js sameProperty): the shared
+// premise matcher with locality required, plus the same unit.
+function sameDoor(addressA, addressB) {
+  if (!samePremiseDisplay(addressA, addressB, { requireLocality: true })) return false;
+  const unit = (text) => unitLineValueKey(normalizeUnitLine(parseDisplayAddress(text).unit));
+  return unit(addressA) === unit(addressB);
+}
+
+async function lockUntouchedWebFormShellsInTx(trx, { phone, address, now = new Date() } = {}) {
   const values = phoneLookupValues(phone);
-  if (!values.last10) return none;
+  if (!trx || !values.last10) return [];
 
   const locked = await trx.raw(
     'select pg_try_advisory_xact_lock(hashtext(?), hashtext(?)) as got',
     [CLARIFY_LOCK_NAMESPACE, values.last10]
   );
-  if (locked?.rows?.[0]?.got !== true) return none;
+  if (locked?.rows?.[0]?.got !== true) return [];
 
   const open = await listOpenEstimatesByPhone(phone, { database: trx });
-  if (!open.length) return none;
+  if (!open.length) return [];
 
   // Row locks, so the verdict below is read on rows no other writer can
   // promote, price or claim before the archive lands.
@@ -402,18 +414,13 @@ async function lockUntouchedWebFormShellsInTx(trx, { phone, address, stillBlocks
     .whereIn('id', open.map((row) => row.id))
     .forUpdate()
     .select('id', 'address');
-  // A draft for another property of this phone is not this run's shell: it
-  // stays in `remaining`, where stillBlocks judges it like any other estimate.
   const shellIds = (Array.isArray(shells) ? shells : [])
-    .filter((row) => sameStreetAddress(row.address, address, { requireExactUnit: true }))
+    .filter((row) => sameDoor(row.address, address))
     .map((row) => row.id);
-  if (!shellIds.length) return none;
-
+  // Every open estimate of the phone must be one of this run's shells.
+  // Anything else still blocks the run, and then no shell goes.
   const shellKeys = new Set(shellIds.map(String));
-  const remaining = open.filter((row) => !shellKeys.has(String(row.id)));
-  const blocker = remaining.find((row) => stillBlocks(row));
-  if (blocker) return { ...none, blockedById: blocker.id };
-  return { shellIds, newestRemaining: remaining[0] || null, blockedById: null };
+  return open.every((row) => shellKeys.has(String(row.id))) ? shellIds : [];
 }
 
 async function archiveWebFormShellsInTx(trx, { phone, shellIds = [], leadId = null, now = new Date() } = {}) {
@@ -433,7 +440,14 @@ async function archiveWebFormShellsInTx(trx, { phone, shellIds = [], leadId = nu
       updated_at: now,
     })
     .returning('id');
-  return (Array.isArray(retired) ? retired : []).map((row) => (row && typeof row === 'object' ? row.id : row));
+  const retiredIds = (Array.isArray(retired) ? retired : []).map((row) => (row && typeof row === 'object' ? row.id : row));
+  // All or nothing. The row locks cover the estimate rows, not the leads
+  // table: a lead can link a planned shell before this update. The caller
+  // planned its write on "every shell goes", so it must not commit.
+  if (retiredIds.length !== shellIds.length) {
+    throw new Error(`web-form shell changed under the wizard run: planned ${shellIds.length}, archived ${retiredIds.length}`);
+  }
+  return retiredIds;
 }
 
 module.exports = {

@@ -157,7 +157,6 @@ const { normalizeWebsiteQuoteContact, applyContactNormalization, normalizeContac
 const { isHoneypotTripped } = require('../utils/lead-abuse');
 const {
   archiveWebFormShellsInTx,
-  automatedDuplicateBlock,
   blockIfAutomatedEstimateDuplicate,
   lockUntouchedWebFormShellsInTx,
   withAutomatedEstimatePhoneLock,
@@ -802,15 +801,15 @@ function shouldRefreshWizardDraft(duplicateBlock) {
 
 // Owner 2026-11-21, "build" (GATE_WIZARD_SUPERSEDES_FORM_DRAFT, off unless
 // exactly 'true'): an old web-form draft with no price that nobody touched
-// must not cost a wizard visitor the booking link. When such shells are all
-// that blocks this run, the run goes on as for a new visitor (or refreshes
-// the wizard's own draft) and the shells are archived AFTER its draft was
-// written. Any other open estimate still blocks, and then nothing is
-// archived (lockUntouchedWebFormShellsInTx holds the rule).
+// must not cost a wizard visitor the booking link. When such shells, for
+// this run's own property, are EVERY open estimate of the phone, the run
+// goes on as for a new visitor and the shells are archived together with
+// the draft it inserts. Any other open estimate still blocks, and then
+// nothing is archived (lockUntouchedWebFormShellsInTx holds the rule).
 // Returns the duplicate block the run must judge and `archiveShells`, which
-// the caller runs with the id of the draft its own write landed on in this
-// transaction. No id (a refused or skipped write) archives nothing, so the
-// shells stay as they were.
+// the insert branch runs with the id of the draft it wrote in this
+// transaction. It throws when a planned shell is no longer one, so the
+// insert rolls back with it.
 // `lockContactPair` is the run's contact-pair lock: the estimate branches
 // take it before any estimate row lock, so it is taken first here too.
 // It has a gate because the unblocked run texts the person the booking link.
@@ -822,20 +821,14 @@ async function planFormShellClear(trx, duplicateBlock, { phone, address, leadId,
   if (duplicateBlock.existingSource !== 'lead_webhook' || duplicateBlock.existingStatus !== 'draft') return asBefore;
   if (require('../config/feature-gates').wizardSupersedesFormDraftLive?.() !== true) return asBefore;
   await lockContactPair(trx);
-  const { shellIds, newestRemaining } = await lockUntouchedWebFormShellsInTx(trx, {
-    phone,
-    address,
-    stillBlocks: (existing) => !shouldRefreshWizardDraft(automatedDuplicateBlock(existing)),
-  });
+  const shellIds = await lockUntouchedWebFormShellsInTx(trx, { phone, address });
   if (!shellIds.length) return asBefore;
   return {
-    // Only the wizard's own open drafts can remain: the newest one is the
-    // draft this run refreshes. None left = a new visitor.
-    duplicateBlock: automatedDuplicateBlock(newestRemaining),
+    duplicateBlock: null,
     archiveShells: async (writtenDraftId) => {
       if (!writtenDraftId) return [];
       const retiredIds = await archiveWebFormShellsInTx(trx, { phone, shellIds, leadId });
-      if (retiredIds.length) logger.info(`[public-quote] Archived ${retiredIds.length} untouched web-form draft(s) (${retiredIds.join(', ')}) that blocked the wizard estimate for lead ${leadId}`);
+      logger.info(`[public-quote] Archived ${retiredIds.length} untouched web-form draft(s) (${retiredIds.join(', ')}) that blocked the wizard estimate for lead ${leadId}`);
       return retiredIds;
     },
   };
@@ -3728,11 +3721,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               status: 'draft',
               source: 'quote_wizard',
             }).returning('id');
-            draftEstimateId = inserted?.id || inserted || null;
+            const insertedId = inserted?.id || inserted || null;
+            // The shells go together with the draft this transaction wrote,
+            // all or nothing. A throw here rolls the insert back, so the id
+            // is assigned only after it.
+            await shellPlan.archiveShells(insertedId);
+            draftEstimateId = insertedId;
           }
-          // The shells go only together with a wizard draft this
-          // transaction wrote: a refused refresh leaves them standing.
-          await shellPlan.archiveShells(draftEstimateId);
         });
       }
     } catch (e) {

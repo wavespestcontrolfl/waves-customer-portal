@@ -7384,9 +7384,9 @@ function leadDraftPropertyLookupLive() {
 }
 
 // GATE_WIZARD_SUPERSEDES_FORM_DRAFT read at CALL time; strict 'true', dark by default (owner 2026-11-21, "build").
-// On, the quote wizard archives a phone's untouched web-form shell drafts (no price, never written again, never sent,
-// viewed, scheduled, claimed or linked to a lead, no clarify ask waiting) when they are all that blocks its own
-// estimate, so the person gets the booking link and the booking text. Rule: lockUntouchedWebFormShellsInTx +
+// On, the quote wizard archives a phone's untouched web-form shell drafts (same property, no price, never written
+// again, never sent, viewed, scheduled, claimed or linked to a lead, no clarify ask waiting) when they are every
+// open estimate of the phone, so the person gets the booking link and the booking text. Rule: lockUntouchedWebFormShellsInTx +
 // archiveWebFormShellsInTx (services/estimate-automation-duplicates.js); reader: routes/public-quote.js.
 // parkClarifyAsk (services/estimate-clarify-asks.js) reads the archive marker, never this gate: an archive
 // outlives the gate. It has a gate because the booking text is a text to a customer. Off = the shell blocks

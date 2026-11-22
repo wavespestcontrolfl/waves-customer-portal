@@ -38,9 +38,6 @@ const { parkClarifyAsk } = require('../services/estimate-clarify-asks');
 const DAY = 86400000;
 // The property the wizard run is for. Every fixture is for it unless a test says otherwise.
 const HOME = '12 Sample St, Parrish, FL 34219';
-// The wizard's rule (routes/public-quote.js planFormShellClear): only its own
-// open draft may remain beside the shells.
-const wizardRule = (existing) => !(existing.source === 'quote_wizard' && existing.status === 'draft');
 
 postgres('untouched web-form shell drafts and the quote wizard (live Postgres)', () => {
   jest.setTimeout(60000);
@@ -103,8 +100,8 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
   });
 
   let age = 0;
-  // An open estimate for the test phone. Default: an untouched web-form shell,
-  // never written since it was made. Each call is older than the one before it.
+  // An open estimate for the test phone. Default: an untouched web-form shell
+  // for HOME, never written since it was made. Each call is older than the one before it.
   async function estimate(fields = {}) {
     age += 1;
     const made = new Date(Date.now() - age * 3600000);
@@ -136,21 +133,16 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
 
   const row = (id) => trx('estimates').where({ id }).first('id', 'status', 'archived_at', 'estimate_data');
   const openIds = async () => (await listOpenEstimatesByPhone(phone, { database: trx })).map((r) => r.id);
-  // Step 1: which shells may go.
-  const plan = (address = HOME) => lockUntouchedWebFormShellsInTx(trx, { phone, address, stillBlocks: wizardRule });
+  // Step 1: the shells that may go ([] = the run stays blocked).
+  const plan = (address = HOME) => lockUntouchedWebFormShellsInTx(trx, { phone, address });
   // Both steps, as a wizard run whose own draft write landed.
-  const retire = async () => {
-    const planned = await plan();
-    const retiredIds = await archiveWebFormShellsInTx(trx, { phone, shellIds: planned.shellIds, leadId: 'lead-1' });
-    return { retiredIds, blockedById: planned.blockedById };
-  };
+  const retire = async () => archiveWebFormShellsInTx(trx, { phone, shellIds: await plan(), leadId: 'lead-1' });
 
   test('archives the untouched shell that is the phone\'s only open estimate, and records which wizard lead replaced it', async () => {
     const shell = await estimate({ estimate_data: JSON.stringify({ automation: { gate: 'disabled' } }) });
 
-    const result = await retire();
+    expect(await retire()).toEqual([shell]);
 
-    expect(result).toEqual({ retiredIds: [shell], blockedById: null });
     const after = await row(shell);
     expect(after.archived_at).toBeInstanceOf(Date);
     // Archived, not deleted and not promoted: staff can unarchive the same draft.
@@ -162,10 +154,10 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     expect(await openIds()).toEqual([]);
   });
 
-  test('step 1 alone archives nothing: a wizard run whose own draft write was refused leaves the shell standing', async () => {
+  test('step 1 alone archives nothing: a wizard run whose own draft write did not land leaves the shell standing', async () => {
     const shell = await estimate();
 
-    expect(await plan()).toEqual({ shellIds: [shell], newestRemaining: null, blockedById: null });
+    expect(await plan()).toEqual([shell]);
 
     expect((await row(shell)).archived_at).toBeNull();
     expect(await openIds()).toEqual([shell]);
@@ -179,53 +171,36 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
       customer_phone: `+1${otherDigits}`, customer_name: 'Other Person', address: HOME, status: 'draft', source: 'lead_webhook',
     }).returning('id');
 
-    const result = await retire();
-
-    expect([...result.retiredIds].sort()).toEqual([first, second].sort());
+    expect([...(await retire())].sort()).toEqual([first, second].sort());
     expect((await row(other.id)).archived_at).toBeNull();
   });
 
-  test('an office estimate still blocks, and then no shell is archived', async () => {
+  // The shells must be EVERY open estimate of the phone.
+  test.each([
+    ['an office estimate', () => ({ source: 'manual' })],
+    ['a sent office estimate', () => ({ source: 'manual', status: 'sent', sent_at: new Date() })],
+    ['a web-form draft with a price', () => ({ monthly_total: 59 })],
+    // A refresh of it could overwrite a wizard draft that is for another property.
+    ['the wizard\'s own older draft', () => ({ source: 'quote_wizard', monthly_total: 59 })],
+    ['a wizard estimate that was already sent', () => ({ source: 'quote_wizard', status: 'sent', sent_at: new Date(), monthly_total: 59 })],
+    ['a web-form draft for another property', () => ({ address: '88 Other Ave, Parrish, FL 34219' })],
+  ])('%s beside the shell still blocks, and then the shell stays', async (_label, fields) => {
     const shell = await estimate();
-    const office = await estimate({ source: 'manual' });
+    const other = await estimate(fields());
 
-    const result = await retire();
+    expect(await retire()).toEqual([]);
 
-    expect(result).toEqual({ retiredIds: [], blockedById: office });
     expect((await row(shell)).archived_at).toBeNull();
-    expect(await openIds()).toEqual([shell, office]);
+    expect((await row(other)).archived_at).toBeNull();
+    expect(await openIds()).toEqual([shell, other]);
   });
 
-  test('the wizard\'s own older draft does not block: it is the draft the run refreshes, the shell is archived', async () => {
+  test('every open estimate is judged, not only the newest: an older office estimate behind two shells still blocks', async () => {
     const shell = await estimate();
-    const wizard = await estimate({ source: 'quote_wizard', monthly_total: 59 });
+    await estimate();
+    await estimate({ source: 'manual', status: 'sent', sent_at: new Date() });
 
-    const planned = await plan();
-    expect(planned.shellIds).toEqual([shell]);
-    expect(planned.newestRemaining).toMatchObject({ id: wizard, source: 'quote_wizard', status: 'draft' });
-
-    await archiveWebFormShellsInTx(trx, { phone, shellIds: planned.shellIds, leadId: 'lead-1' });
-    expect(await openIds()).toEqual([wizard]);
-  });
-
-  test('every other open estimate is judged, not only the newest: an older office estimate behind the wizard\'s draft still blocks', async () => {
-    const shell = await estimate();
-    await estimate({ source: 'quote_wizard', monthly_total: 59 });
-    const office = await estimate({ source: 'manual', status: 'sent', sent_at: new Date() });
-
-    const result = await retire();
-
-    expect(result).toEqual({ retiredIds: [], blockedById: office });
-    expect((await row(shell)).archived_at).toBeNull();
-  });
-
-  test('a wizard estimate that was already sent blocks like an office estimate', async () => {
-    const shell = await estimate();
-    const sent = await estimate({ source: 'quote_wizard', status: 'sent', sent_at: new Date(), monthly_total: 59 });
-
-    const result = await retire();
-
-    expect(result).toEqual({ retiredIds: [], blockedById: sent });
+    expect(await retire()).toEqual([]);
     expect((await row(shell)).archived_at).toBeNull();
   });
 
@@ -243,65 +218,72 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     ['has data that is not a JSON object', () => ({ estimate_data: JSON.stringify('legacy text') })],
     // One phone, two homes: this run does not replace the other home's draft.
     ['is for another property', () => ({ address: '88 Other Ave, Parrish, FL 34219' })],
+    ['is for the same street in another town', () => ({ address: '12 Sample St, Bradenton, FL 34205' })],
     ['is for another unit of the building', () => ({ address: '12 Sample St Apt 4, Parrish, FL 34219' })],
+    // No city or ZIP = no proof that it is the same home.
+    ['has an address with no city or ZIP', () => ({ address: '12 Sample St' })],
     ['has no address', () => ({ address: '' })],
   ])('a web-form draft that %s is not a shell: it stays, and it still blocks', async (_label, fields) => {
     const touched = await estimate(fields());
 
-    const result = await retire();
+    expect(await retire()).toEqual([]);
 
-    expect(result.retiredIds).toEqual([]);
     expect((await row(touched)).archived_at).toBeNull();
     expect(await openIds()).toEqual([touched]);
   });
 
   test('the same property written another way is the same property', async () => {
-    const shell = await estimate({ address: '12 sample street, parrish fl' });
+    const shell = await estimate({ address: '12 sample street, parrish, fl 34219' });
 
-    expect((await retire()).retiredIds).toEqual([shell]);
+    expect(await retire()).toEqual([shell]);
   });
 
-  test('a draft for another property blocks the run, and then this property\'s shell stays too', async () => {
-    const shell = await estimate();
-    const otherHome = await estimate({ address: '88 Other Ave, Parrish, FL 34219' });
-
-    const result = await retire();
-
-    expect(result).toEqual({ retiredIds: [], blockedById: otherHome });
-    expect((await row(shell)).archived_at).toBeNull();
-    expect((await row(otherHome)).archived_at).toBeNull();
-  });
-
-  test('a run that gives no address takes no shell', async () => {
+  test.each([
+    ['no address', ''],
+    ['an address with no city or ZIP', '12 Sample St'],
+  ])('a run that gives %s takes no shell', async (_label, runAddress) => {
     const shell = await estimate();
 
-    expect((await plan('')).shellIds).toEqual([]);
+    expect(await plan(runAddress)).toEqual([]);
     expect((await row(shell)).archived_at).toBeNull();
   });
 
   test('a shell that staff restored after the wizard archived it is never archived again', async () => {
     const shell = await estimate();
-    expect((await retire()).retiredIds).toEqual([shell]);
+    expect(await retire()).toEqual([shell]);
     // The unarchive route (routes/admin-estimates.js): archived_at back to null, updated_at now.
     await trx('estimates').where({ id: shell }).update({ archived_at: null, updated_at: trx.fn.now() });
 
-    const again = await retire();
+    expect(await retire()).toEqual([]);
 
-    expect(again.retiredIds).toEqual([]);
     expect((await row(shell)).archived_at).toBeNull();
     expect(await openIds()).toEqual([shell]);
   });
 
+  const linkLead = (estimateId) => trx('leads').insert({
+    id: randomUUID(), status: 'new', first_name: 'Sample', last_name: 'Person', phone, estimate_id: estimateId,
+  });
+
   test('a web-form draft that a lead points at is not a shell', async () => {
     const linked = await estimate();
-    await trx('leads').insert({
-      id: randomUUID(), status: 'new', first_name: 'Sample', last_name: 'Person', phone, estimate_id: linked,
-    });
+    await linkLead(linked);
 
-    const result = await retire();
-
-    expect(result.retiredIds).toEqual([]);
+    expect(await retire()).toEqual([]);
     expect((await row(linked)).archived_at).toBeNull();
+  });
+
+  test('all or nothing: a lead that links a planned shell before the archive makes the archive throw', async () => {
+    const shell = await estimate();
+    const second = await estimate();
+    const shellIds = await plan();
+    expect([...shellIds].sort()).toEqual([shell, second].sort());
+    // The row locks do not cover the leads table.
+    await linkLead(second);
+
+    // The caller's transaction rolls back on this throw, and its wizard draft with it.
+    await expect(archiveWebFormShellsInTx(trx, { phone, shellIds, leadId: 'lead-1' }))
+      .rejects.toThrow('planned 2, archived 1');
+    expect((await row(second)).archived_at).toBeNull();
   });
 
   test.each([
@@ -312,9 +294,7 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     const shell = await estimate();
     await clarifyAsk(fields);
 
-    const result = await retire();
-
-    expect(result.retiredIds).toEqual([]);
+    expect(await retire()).toEqual([]);
     expect((await row(shell)).archived_at).toBeNull();
   });
 
@@ -326,9 +306,7 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     const shell = await estimate();
     await clarifyAsk(fields);
 
-    const result = await retire();
-
-    expect(result.retiredIds).toEqual([shell]);
+    expect(await retire()).toEqual([shell]);
   });
 
   test('while a clarify writer holds the phone\'s clarify lock, no shell goes on this run', async () => {
@@ -338,12 +316,12 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     try {
       await writer.raw('select pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['estimate_clarify', digits]);
 
-      expect(await plan()).toEqual({ shellIds: [], newestRemaining: null, blockedById: null });
+      expect(await plan()).toEqual([]);
     } finally {
       await writer.rollback();
     }
     // The writer is done: the next run may take the shell.
-    expect((await plan()).shellIds).toEqual([shell]);
+    expect(await plan()).toEqual([shell]);
   });
 
   test('a clarify ask is not parked for a shell the wizard archived, and an ask parked first holds its shell', async () => {
@@ -356,20 +334,20 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     // The wizard's gate is not set here: the marker is honored with the gate
     // off too, because an archive outlives the gate.
     const gone = await estimate();
-    expect((await retire()).retiredIds).toEqual([gone]);
+    expect(await retire()).toEqual([gone]);
     expect(await ask(gone)).toEqual({ parked: false, skipped: 'estimate_superseded_by_wizard' });
     expect(await asks()).toHaveLength(0);
 
     // The question was parked first: it holds the next shell.
     const held = await estimate();
     expect(await ask(held)).toMatchObject({ parked: true });
-    expect((await retire()).retiredIds).toEqual([]);
+    expect(await retire()).toEqual([]);
     expect((await row(held)).archived_at).toBeNull();
   });
 
   test('a draft that staff restored can get its clarify ask again', async () => {
     const shell = await estimate();
-    expect((await retire()).retiredIds).toEqual([shell]);
+    expect(await retire()).toEqual([shell]);
     await trx('estimates').where({ id: shell }).update({ archived_at: null, updated_at: trx.fn.now() });
 
     const parked = await parkClarifyAsk({
@@ -379,31 +357,11 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     expect(parked).toMatchObject({ parked: true });
   });
 
-  test('a priced web-form draft beside an untouched shell still blocks: nothing is archived', async () => {
-    const shell = await estimate();
-    const priced = await estimate({ monthly_total: 59 });
-
-    const result = await retire();
-
-    expect(result).toEqual({ retiredIds: [], blockedById: priced });
-    expect((await row(shell)).archived_at).toBeNull();
-  });
-
-  test('the archive step re-checks the rule: an id that is no longer a shell is not archived', async () => {
-    const shell = await estimate();
-    const planned = await plan();
-    await trx('estimates').where({ id: shell }).update({ monthly_total: 59 });
-
-    expect(await archiveWebFormShellsInTx(trx, { phone, shellIds: planned.shellIds, leadId: 'lead-1' })).toEqual([]);
-    expect((await row(shell)).archived_at).toBeNull();
-  });
-
-  test('an archived shell and a phone with no open estimate give nothing to do', async () => {
+  test('an archived shell, a phone with no open estimate and an empty plan give nothing to do', async () => {
     await estimate({ archived_at: new Date() });
-    const nothing = { shellIds: [], newestRemaining: null, blockedById: null };
 
-    expect(await plan()).toEqual(nothing);
-    expect(await lockUntouchedWebFormShellsInTx(trx, { phone: '555', address: HOME, stillBlocks: wizardRule })).toEqual(nothing);
+    expect(await plan()).toEqual([]);
+    expect(await lockUntouchedWebFormShellsInTx(trx, { phone: '555', address: HOME })).toEqual([]);
     expect(await archiveWebFormShellsInTx(trx, { phone, shellIds: [], leadId: 'lead-1' })).toEqual([]);
   });
 });

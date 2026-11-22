@@ -14,7 +14,7 @@
  *
  * Owner 2026-11-21, "build" (GATE_WIZARD_SUPERSEDES_FORM_DRAFT): one more
  * case. An old web-form draft with no price that nobody touched no longer
- * blocks: the wizard goes on and archives it once its own draft is written.
+ * blocks: the wizard goes on and archives it together with the draft it inserts.
  * planFormShellClear decides WHEN the wizard may try that; which rows count
  * as untouched is one SQL rule, proven on real Postgres in
  * wizard-form-shell-retire-postgres.test.js.
@@ -71,20 +71,17 @@ describe('shouldRefreshWizardDraft', () => {
 describe('planFormShellClear (GATE_WIZARD_SUPERSEDES_FORM_DRAFT)', () => {
   const GATE = 'GATE_WIZARD_SUPERSEDES_FORM_DRAFT';
   const trx = { name: 'trx' };
+  const HOME = '12 Sample St, Parrish, FL 34219';
   const formShell = { blocked: true, reason: 'duplicate_phone', existingEstimateId: 'shell-1', existingStatus: 'draft', existingSource: 'lead_webhook' };
   const wizardDraft = { blocked: true, reason: 'duplicate_phone', existingEstimateId: 'wiz-1', existingStatus: 'draft', existingSource: 'quote_wizard' };
   let calls;
   let lockContactPair;
-  const HOME = '12 Sample St, Parrish, FL 34219';
   const run = (block) => planFormShellClear(trx, block, { phone: '+19415550142', address: HOME, leadId: 'lead-9', lockContactPair });
 
   beforeEach(() => {
     calls = [];
     lockContactPair = jest.fn(async () => { calls.push('contact lock'); });
-    lockUntouchedWebFormShellsInTx.mockReset().mockImplementation(async () => {
-      calls.push('shell locks');
-      return { shellIds: ['shell-1'], newestRemaining: null, blockedById: null };
-    });
+    lockUntouchedWebFormShellsInTx.mockReset().mockImplementation(async () => { calls.push('shell locks'); return ['shell-1']; });
     archiveWebFormShellsInTx.mockReset().mockImplementation(async () => { calls.push('archive'); return ['shell-1']; });
     process.env[GATE] = 'true';
   });
@@ -108,7 +105,7 @@ describe('planFormShellClear (GATE_WIZARD_SUPERSEDES_FORM_DRAFT)', () => {
     expect(calls).toEqual([]);
   });
 
-  test('gate on: the run goes on as for a new visitor, and the shells are archived only after its own draft was written', async () => {
+  test('gate on: the run goes on as for a new visitor, and the shells are archived with the draft it inserted', async () => {
     const plan = await run(formShell);
 
     expect(plan.duplicateBlock).toBeNull();
@@ -116,13 +113,13 @@ describe('planFormShellClear (GATE_WIZARD_SUPERSEDES_FORM_DRAFT)', () => {
     expect(calls).toEqual(['contact lock', 'shell locks']);
     expect(lockContactPair).toHaveBeenCalledWith(trx);
     // The run's own address goes with it: a draft for another property is not its shell.
-    expect(lockUntouchedWebFormShellsInTx).toHaveBeenCalledWith(trx, { phone: '+19415550142', address: HOME, stillBlocks: expect.any(Function) });
+    expect(lockUntouchedWebFormShellsInTx).toHaveBeenCalledWith(trx, { phone: '+19415550142', address: HOME });
 
     expect(await plan.archiveShells('draft-1')).toEqual(['shell-1']);
     expect(archiveWebFormShellsInTx).toHaveBeenCalledWith(trx, { phone: '+19415550142', shellIds: ['shell-1'], leadId: 'lead-9' });
   });
 
-  test('gate on: a run whose own draft write was refused archives nothing', async () => {
+  test('gate on: with no draft written, nothing is archived', async () => {
     const plan = await run(formShell);
 
     expect(await plan.archiveShells(null)).toEqual([]);
@@ -130,19 +127,15 @@ describe('planFormShellClear (GATE_WIZARD_SUPERSEDES_FORM_DRAFT)', () => {
     expect(archiveWebFormShellsInTx).not.toHaveBeenCalled();
   });
 
-  test('gate on: when the wizard\'s own draft is what remains, that draft is the block the run refreshes', async () => {
-    lockUntouchedWebFormShellsInTx.mockImplementation(async () => ({
-      shellIds: ['shell-1'], newestRemaining: { id: 'wiz-1', source: 'quote_wizard', status: 'draft' }, blockedById: null,
-    }));
-
+  test('gate on: a planned shell that changed makes the archive throw, so the insert rolls back with it', async () => {
+    archiveWebFormShellsInTx.mockRejectedValue(new Error('web-form shell changed under the wizard run: planned 1, archived 0'));
     const plan = await run(formShell);
 
-    expect(plan.duplicateBlock).toMatchObject({ existingEstimateId: 'wiz-1', existingSource: 'quote_wizard', existingStatus: 'draft' });
-    expect(shouldRefreshWizardDraft(plan.duplicateBlock)).toBe(true);
+    await expect(plan.archiveShells('draft-1')).rejects.toThrow('planned 1, archived 0');
   });
 
   test('gate on: when no shell may go (another estimate still blocks, or a clarify writer is busy), the first block stands', async () => {
-    lockUntouchedWebFormShellsInTx.mockImplementation(async () => ({ shellIds: [], newestRemaining: null, blockedById: 'office-1' }));
+    lockUntouchedWebFormShellsInTx.mockImplementation(async () => []);
 
     const plan = await run(formShell);
 
@@ -159,19 +152,8 @@ describe('planFormShellClear (GATE_WIZARD_SUPERSEDES_FORM_DRAFT)', () => {
     expect((await run(wizardDraft)).duplicateBlock).toBe(wizardDraft);
     expect((await run(office)).duplicateBlock).toBe(office);
     expect((await run(sentForm)).duplicateBlock).toBe(sentForm);
-    // No lock taken, no row read: these runs are blocked exactly as before.
+    // No lock taken, no row read: these runs go on exactly as before.
     expect(calls).toEqual([]);
-  });
-
-  test('only the wizard\'s own open drafts may remain: every other open estimate still blocks', async () => {
-    await run(formShell);
-    const { stillBlocks } = lockUntouchedWebFormShellsInTx.mock.calls[0][1];
-
-    expect(stillBlocks({ id: 'w', source: 'quote_wizard', status: 'draft' })).toBe(false);
-    expect(stillBlocks({ id: 'w', source: 'quote_wizard', status: 'sent' })).toBe(true);
-    expect(stillBlocks({ id: 'm', source: 'manual', status: 'draft' })).toBe(true);
-    expect(stillBlocks({ id: 'e', source: 'estimator_engine', status: 'viewed' })).toBe(true);
-    expect(stillBlocks({ id: 'l', source: 'lead_webhook', status: 'draft' })).toBe(true);
   });
 });
 
@@ -202,11 +184,12 @@ describe('mirror refresh wiring', () => {
     expect(routeSource.match(/blockIfAutomatedEstimateDuplicate\(contactPhone/g)).toHaveLength(1);
   });
 
-  test('the shells are archived last, inside the same transaction, with the id of the draft the run wrote', () => {
-    // After the insert branch closes and before the phone-lock callback ends:
-    // a refused refresh leaves draftEstimateId null, and then nothing is archived.
+  test('the shells are archived in the insert branch, before the draft id leaves the transaction', () => {
+    // archiveShells throws when a planned shell changed. The insert then rolls
+    // back, so draftEstimateId (which mints the booking handoff) must be
+    // assigned only after the archive.
     expect(routeSource).toMatch(
-      /draftEstimateId = inserted\?\.id \|\| inserted \|\| null;\s*\}\s*(?:\/\/[^\n]*\s*)*await shellPlan\.archiveShells\(draftEstimateId\);\s*\}\);/
+      /const insertedId = inserted\?\.id \|\| inserted \|\| null;\s*(?:\/\/[^\n]*\s*)*await shellPlan\.archiveShells\(insertedId\);\s*draftEstimateId = insertedId;\s*\}\s*\}\);/
     );
     expect(routeSource.match(/shellPlan\.archiveShells\(/g)).toHaveLength(1);
   });
