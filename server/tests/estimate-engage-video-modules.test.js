@@ -141,19 +141,18 @@ describe('placement plan', () => {
 describe('render QA', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  // Report tours retired from emails 2026-09-26 (they state the removed
-  // 90-day money-back claim on camera): the module must drop cleanly even
-  // for the packs that carry a tour config.
+  // Report tours are back on with the 2026-11-22 re-cut (no 90-day claim on
+  // camera): a pack that carries a tour config renders the whole module.
   for (const packKey of ['pest', 'lawn', 'tree_shrub']) {
-    test(`unopened drops the retired ${packKey} report tour cleanly`, () => {
+    test(`unopened renders the ${packKey} report tour: preview linked to the mp4, with its caption`, () => {
       const rendered = renderWith(byKey.get('estimate.engage_unopened'), packKey);
       expect(rendered.validation.ok).toBe(true);
       expect(rendered.missingPayload).toEqual([]);
       expect(rendered.html).not.toMatch(/\{\{|\}\}/);
-      const slug = copyPrivate.PACKS[packKey].video.slug;
-      expect(rendered.html).not.toContain(`/app-email/videos/waves-${slug}-tour-preview.gif`);
-      expect(rendered.html).not.toContain(`/app-email/videos/waves-${slug}-tour.mp4`);
-      expect(rendered.text).not.toContain('Tap to watch — what a real Waves');
+      const { slug, caption } = copyPrivate.PACKS[packKey].video;
+      expect(rendered.html).toContain(`/app-email/videos/waves-${slug}-tour-preview.gif`);
+      expect(rendered.html).toContain(`/app-email/videos/waves-${slug}-tour.mp4`);
+      expect(rendered.text).toContain(caption);
     });
   }
 
