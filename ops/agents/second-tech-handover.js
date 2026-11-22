@@ -114,9 +114,12 @@
 //            matches /bait|monitor/. A run that includes termite (the default, owner 2026-11-21)
 //            moves these customers like any other: their bait series, their pest series, the
 //            combined pest + bait plan, and the pest series whose visits carry a bait add-on;
-//            the plan counts them as bait_customers_moving. A run that leaves termite out
-//            (--lines without termite) skips every series of that customer
-//            (termite_bait_customer), the 2026-10-25 rule.
+//            the plan counts them as bait_customers_moving. A moving series of another line
+//            that carries bait work (the combined plan, a bait add-on) is termite work too:
+//            --to set to Off for termite refuses the run (plan.capability_lines). A run that
+//            leaves termite out (--lines without termite) skips every series of that customer
+//            (termite_bait_customer), the 2026-10-25 rule, and counts every bait customer it
+//            keeps as bait_customers_kept (a bait-only customer stays as other_line).
 //   OFF DAY  the target's work_days (or Mon-Thu when --to is not set). Owner
 //            2026-10-28 (Tech 2 & 3 Roadmap, question 1 = C): the weekend customers stay
 //            with the owner for 60 days, then a second handover run moves them. A WEEKEND
@@ -286,10 +289,10 @@ const isTermiteBaitAddon = (a) => hasBaitKey([a.catalog_key, a.service_key_snaps
 
 const bump = (map, key, n = 1) => { map[key] = (map[key] || 0) + n; };
 
-/** Customers with an active bait plan, or a bait add-on on an active series. A run that leaves termite out keeps every series of theirs with the owner. */
-function baitCustomerIds(active, baitAddonSeriesIds) {
+/** Is this series termite bait WORK: a bait plan in any line (the combined pest + bait plan reads general), or a bait add-on on its visits. */
+function baitSeriesTest(baitAddonSeriesIds) {
   const addon = new Set(baitAddonSeriesIds);
-  return new Set(active.filter((p) => isBaitSeries(p) || addon.has(p.id)).map((p) => p.customer_id));
+  return (p) => isBaitSeries(p) || addon.has(p.id);
 }
 
 /** The weekdays the target works, and where that came from (no --to = the ruled Mon-Thu). */
@@ -396,6 +399,26 @@ const zipFields = (zips, territory) => (zips
   : { zips: null, territory: [] });
 const outsideZips = (zips) => (p) => Array.isArray(zips) && !zips.includes(p.zip);
 
+/**
+ * The bait figures of a plan (owner 2026-11-21: bait customers move with termite).
+ *   bait_customers_moving  bait customers with a series this run hands over (0 when it leaves termite out).
+ *   bait_customers_kept    bait customers a run WITHOUT termite keeps, whatever rule their series met first: a customer
+ *                          whose only series is the bait plan itself stays as other_line, and is kept all the same.
+ *                          A --zips run counts its ZIPs only.
+ *   capability_lines       the lines --to must be able to take: each line with a series to move, and termite when a
+ *                          moving series of another line carries bait work (the combined pest + bait plan and a pest
+ *                          series with a bait add-on move as general).
+ */
+function baitFigures({ onFrom, moving, carriesBait, baitCustomers, termiteOut, zips, movingLines }) {
+  const baitCustomerCount = (rows) => new Set(rows.filter((p) => baitCustomers.has(p.customer_id)).map((p) => p.customer_id)).size;
+  const outside = outsideZips(zips);
+  return {
+    bait_customers_moving: baitCustomerCount(moving),
+    bait_customers_kept: termiteOut ? baitCustomerCount(onFrom.filter((p) => !outside(p))) : 0,
+    capability_lines: [...new Set([...movingLines, ...(moving.some(carriesBait) ? ['termite'] : [])])].sort(),
+  };
+}
+
 function buildPlan({
   from, to = null, start, today, lines = MOVABLE_LINES, parents, visits, liveSeriesIds, baitAddonSeriesIds, zips, territory,
   weekendMove, weekend,
@@ -409,7 +432,12 @@ function buildPlan({
   const isActive = (p) => (p.recurring_ongoing === true && p.status !== 'cancelled') || live.has(p.id);
   const active = parents.filter(isActive);
 
-  const baitCustomers = baitCustomerIds(active, baitAddonSeriesIds);
+  // Customers with an active bait plan, or a bait add-on on an active series. A run that leaves termite out keeps every
+  // series of theirs with the owner.
+  const carriesBait = baitSeriesTest(baitAddonSeriesIds);
+  const baitCustomers = new Set(active.filter(carriesBait).map((p) => p.customer_id));
+  const termiteOut = !lines.includes('termite');
+  const onFrom = active.filter((series) => seriesTechnicianId(series) === from);
 
   const { workDays, workDaysSource } = targetWorkDays(to);
 
@@ -434,6 +462,8 @@ function buildPlan({
     skipped: {},
     notices_to_suppress: 0,
     bait_customers_moving: 0,
+    bait_customers_kept: 0,
+    capability_lines: [],
     ids: { retemplate: [], series: [], visits: [], moves: [], anchors: [], kept: [] },
   };
   const bucket = (reason) => plan.skipped[reason] || (plan.skipped[reason] = { series: 0, visits: 0, _ids: new Set(), _customers: new Set() });
@@ -456,7 +486,7 @@ function buildPlan({
     // After the line rules, so `in_lines` below still counts every series of these lines.
     ['outside_zips', outsideZips(zips)],
     // Owner 2026-11-21: bait customers move with termite. Only a run that leaves termite out keeps them whole (2026-10-25 rule).
-    ['termite_bait_customer', (p) => !lines.includes('termite') && baitCustomers.has(p.customer_id)],
+    ['termite_bait_customer', (p) => termiteOut && baitCustomers.has(p.customer_id)],
   ];
   // Why an in-scope visit stays where it is: the first rule it meets. None = it moves
   // (or stays with --from on a target day off).
@@ -478,7 +508,7 @@ function buildPlan({
   const inScope = [];
 
   // Pass 1: each series on --from gets its skip reason, or joins the in-scope list with its visits' outcomes.
-  for (const p of active.filter((series) => seriesTechnicianId(series) === from)) {
+  for (const p of onFrom) {
     plan.series.on_from += 1;
     const members = bySeries.get(p.id) || [];
     // What this series would have moved if it were in scope: open, on/after start, held by --from.
@@ -532,9 +562,10 @@ function buildPlan({
     delete s._ids;
     delete s._customers;
   }
-  // Owner 2026-11-21: how many bait customers this run hands over (0 when it leaves termite out).
   const retemplated = new Set(plan.ids.retemplate);
-  plan.bait_customers_moving = new Set(inScope.filter(({ p }) => retemplated.has(p.id) && baitCustomers.has(p.customer_id)).map(({ p }) => p.customer_id)).size;
+  Object.assign(plan, baitFigures({
+    onFrom, moving: onFrom.filter((p) => retemplated.has(p.id)), carriesBait, baitCustomers, termiteOut, zips, movingLines: Object.keys(plan.retemplate_by_line),
+  }));
   // One per-visit technician notice would fire for each visit whose technician changes.
   plan.notices_to_suppress = plan.would_change.visits;
   plan.date_changes.customers = dateMoveCustomers.size;
@@ -651,9 +682,12 @@ async function offCapabilityLines(db, toId, lines) {
   return rows.filter((r) => stateOf(r) === 'off').map((r) => r.service_category).sort();
 }
 
-/** Refuse when the hire is set to Off for a line that has a series to move (a line with nothing to move does not count). */
+/**
+ * Refuse when the hire is set to Off for a line this run hands over (plan.capability_lines: a line with a series to
+ * move, and termite when a moving pest series carries bait work). A line with nothing to move does not count.
+ */
 async function assertTargetTakesLines(db, toId, plan) {
-  const off = await offCapabilityLines(db, toId, Object.keys(plan.retemplate_by_line));
+  const off = await offCapabilityLines(db, toId, plan.capability_lines);
   if (off.length) {
     throw new PlanError('TARGET_CAPABILITY_OFF', `--to is set to Off for ${off.join(', ')} (Team tab, capabilities): turn it on, or leave the line out with --lines. Nothing was changed.`);
   }
@@ -742,6 +776,16 @@ function printWeekendMove(plan, out) {
   out.push('');
 }
 
+/** The dry run's bait line: the customers a run with termite hands over, or every bait customer a run without it keeps. */
+function baitLine(plan) {
+  if (plan.lines.includes('termite')) return `Termite bait customers that move with this run (owner 2026-11-21): ${plan.bait_customers_moving} customers`;
+  const head = 'Termite bait customers kept whole with the owner (this run leaves termite out): ';
+  if (!plan.bait_customers_kept) return `${head}none`;
+  // Then what the bait rule alone held back: a bait-only customer's series stays as other_line and is not in these counts.
+  const held = plan.skipped.termite_bait_customer;
+  return `${head}${plan.bait_customers_kept} customers${held ? `; held back by this rule: ${held.series} series, ${held.visits} visits` : ''}`;
+}
+
 function printPlan(plan, { list }) {
   const out = [];
   out.push('Second-technician handover plan (DRY RUN: nothing was changed)');
@@ -776,12 +820,7 @@ function printPlan(plan, { list }) {
   const weekend = plan.skipped.off_day_customer;
   out.push(`Weekend customers kept whole with the owner until ${plan.off_day_customer_until} (question 1 = C): `
     + `${weekend ? `${weekend.customers} customers, ${weekend.series} series, ${weekend.visits} visits` : 'none'}`);
-  const bait = plan.skipped.termite_bait_customer;
-  if (plan.lines.includes('termite')) {
-    out.push(`Termite bait customers that move with this run (owner 2026-11-21): ${plan.bait_customers_moving} customers`);
-  } else {
-    out.push(`Termite bait customers kept whole with the owner (this run leaves termite out): ${bait ? `${bait.customers} customers, ${bait.series} series, ${bait.visits} visits` : 'none'}`);
-  }
+  out.push(baitLine(plan));
   out.push(`Later visits on a target day off, kept with the owner (stays_off_day): ${plan.stays_off_day.visits}`);
   out.push(`  by weekday: ${weekdayLine(plan.stays_off_day.by_weekday)}`);
   out.push('  (the second handover run, --weekend-move, moves these customers and their dates)');

@@ -216,8 +216,26 @@ describeDb('second-tech-handover readers on PostgreSQL', () => {
 
     const plan = await handover.planHandover(knex, { from: ownerD, start: START, today: TODAY, lines: NO_TERMITE });
     expect(plan.skipped.termite_bait_customer).toEqual({ series: 1, visits: 1, customers: 1 });
+    expect(plan.bait_customers_kept).toBe(1);
     expect(new Set(plan.ids.series)).toEqual(new Set([rodentPest.id, cancelledFirst.id]));
     expect(plan.ids.visits).toContain(liveChild.id);
+
+    // The default run moves that pest series, bait add-on and all, under the GENERAL line. No termite series exists
+    // here, and the bait add-on is still termite work: a hire set to Off for termite refuses the run.
+    const hireD = randomUUID();
+    await knex('technicians').insert(tech(hireD));
+    extraTechIds.push(hireD);
+    const args = { from: ownerD, to: hireD, start: START, today: TODAY };
+    const moving = await handover.planHandover(knex, args);
+    expect(moving.ids.series).toContain(pest.id);
+    expect(moving.retemplate_by_line.termite).toBeUndefined();
+    expect(moving.capability_lines).toEqual(['general', 'termite']);
+    await knex('technician_capabilities').insert({ technician_id: hireD, service_category: 'termite', capability_level: 'review_required', active: false });
+    await expect(handover.planHandover(knex, args)).rejects.toMatchObject({ code: 'TARGET_CAPABILITY_OFF' });
+    // Leaving termite out keeps the bait customer whole, so nothing of the Off line moves: allowed.
+    const without = await handover.planHandover(knex, { ...args, lines: NO_TERMITE });
+    expect(without.capability_lines).toEqual(['general']);
+    expect(without.ids.series).not.toContain(pest.id);
   });
 
   test('termite and WDO series move in every run, bait customers too; lawn stays; --zips limits; --to Off refuses', async () => {
