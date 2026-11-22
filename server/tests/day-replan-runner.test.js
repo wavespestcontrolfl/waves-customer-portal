@@ -9,10 +9,10 @@ jest.mock('../services/day-replan/planner', () => {
   const actual = jest.requireActual('../services/day-replan/planner');
   return { planDay: jest.fn(actual.planDay), DEFAULT_OPTIONS: actual.DEFAULT_OPTIONS };
 });
-// The close-gaps measurement runs for real; one test makes it throw.
+// The close-gaps measurement runs for real; one test makes it throw, one forces the pack verdict.
 jest.mock('../services/day-replan/close-gaps', () => {
   const actual = jest.requireActual('../services/day-replan/close-gaps');
-  return { ...actual, openTime: jest.fn(actual.openTime), planSims: jest.fn(actual.planSims) };
+  return { ...actual, openTime: jest.fn(actual.openTime), planSims: jest.fn(actual.planSims), packVerdict: jest.fn(actual.packVerdict) };
 });
 jest.mock('../services/scheduling/occupancy', () => ({ techScopedConfirmActive: jest.fn(() => false) }));
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ DAY_OPEN: 8 * 60, DAY_CLOSE: 17 * 60 }));
@@ -281,7 +281,7 @@ describe('shadow run', () => {
     test('a planner plan the app simulation rejects is not accepted and lists no changes', async () => {
       // The planner (stubbed) claims a big saving by booking every stop at 08:00; the app simulation sees the van
       // reach the later stops far past their promise.
-      planDay.mockImplementationOnce(() => ({
+      const claim = () => ({
         current: { driveMin: 200, endMin: 900, order: ['a', 'b', 'c', 'd'], baseline: 'clock', baselineDrives: { clock: 200 } },
         best: { driveMin: 20, endMin: 800, order: ['a', 'b', 'c', 'd'], slots: { a: 480, b: 480, c: 480, d: 480 } },
         accepted: true,
@@ -289,13 +289,16 @@ describe('shadow run', () => {
         savedMin: 180,
         grandfathered: [],
         changes: [{ id: 'b', fromMin: 540, toMin: 480 }],
-      }));
+      });
+      // The pack plan (the second planDay call) claims the same plan, and the pack step refuses it for the same reason.
+      planDay.mockImplementationOnce(claim).mockImplementationOnce(claim);
       const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: zigzagRows() } });
       const out = await runDayReplanIfEnabled({ now: NOW, conn });
       expect(inserts[0].row).toMatchObject({ accepted: false, reason: 'app_sim_rejects', changes: '[]' });
       expect(out.accepted).toBe(0);
       expect(out.changedVisits).toBe(0);
       expect(out.plans[0].app_sim.planned.kept).toBe(false);
+      expect(JSON.parse(inserts[0].row.close_gaps).p1).toMatchObject({ plan: 'pack', wouldAccept: false, reason: 'promise_missed' });
     });
   });
 
@@ -525,26 +528,39 @@ describe('close-gaps measurement (owner 2026-11-18): measured on every plan row,
   beforeEach(() => { process.env.GATE_DAY_REPLAN = 'shadow'; });
   const record = (insert) => JSON.parse(insert.row.close_gaps);
 
-  test('a packed plan at the same drive is rejected by the drive rule, and the packed-day rule would take it', async () => {
+  test('a day the drive rule refuses and the pack rule takes is the pack plan: reason packed, its hour changes, p1 matching (owner 2026-11-22)', async () => {
     // Three stops side by side at 8 AM, 11 AM and 3 PM: the same drive in any hour order, so only the hours move.
     const rows = [row('a', 0.020, 8), row('b', 0.021, 11), row('c', 0.022, 15)];
     const { conn, inserts, calls } = fakeConn({ stopsByDate: { [TOMORROW]: rows } });
-    await runDayReplanIfEnabled({ now: NOW, conn });
+    const out = await runDayReplanIfEnabled({ now: NOW, conn });
     expect(inserts).toHaveLength(1);
-    expect(inserts[0].row).toMatchObject({ accepted: false, reason: 'saving_below_floor', changes: '[]' });
+    const plan = inserts[0].row;
+    expect(plan).toMatchObject({ accepted: true, reason: 'packed' });
     const rec = record(inserts[0]);
     expect(rec.v).toBe(2);
-    // P1's plan is the pack plan (ends earliest at no extra drive), not the drive-best one.
+    // The plan is the pack plan (ends earliest at no extra drive), not the drive-best one.
     expect(rec.p1).toMatchObject({ plan: 'pack', wouldAccept: true, reason: 'bigger_block', lunchLost: false });
     expect(rec.p1.packed.driveMin).toBeLessThanOrEqual(rec.now.driveMin);
     expect(rec.p1.packed.endMin).toBeLessThan(rec.now.endMin);
     expect(rec.p1.packed.biggestMin).toBeGreaterThanOrEqual(rec.now.biggestMin + 30);
     expect(rec.p1.packed.slots).toBeGreaterThan(rec.now.slots);
+    // `packed` is the plan the live apply writes: here the pack plan.
+    expect(rec.packed).toEqual(rec.p1.packed);
+    const byId = (list) => [...list].sort((x, y) => x.id.localeCompare(y.id));
     expect(rec.p1.changes.map((c) => c.id).sort()).toEqual(['b', 'c']);
+    expect(byId(JSON.parse(plan.changes))).toEqual(byId(rec.p1.changes));
+    for (const c of JSON.parse(plan.changes)) expect(c.to < c.from).toBe(true);
+    expect(plan.planned_drive_min).toBeLessThanOrEqual(plan.current_drive_min);
+    expect(plan.planned_end_min).toBeLessThan(plan.current_end_min);
+    expect(plan.saved_min).toBe(plan.current_drive_min - plan.planned_drive_min);
     expect(rec.gaps.map((g) => [g.before, g.why])).toEqual([['b', null], ['c', null]]);
     expect(rec).not.toHaveProperty('p2');
     expect(rec.s1).toEqual([]);
-    // Measuring only: the run never wrote a visit.
+    // The run counts the packed day.
+    expect(out).toMatchObject({ days: 1, accepted: 1, packed: 1, changedVisits: 2 });
+    expect(out.plans[0].packed).toBe(true);
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('packed=1'));
+    // Shadow: the run never wrote a visit.
     expect(calls.filter(([table, op]) => table === 'scheduled_services' && ['update', 'insert', 'del'].includes(op))).toEqual([]);
   });
 
@@ -556,19 +572,93 @@ describe('close-gaps measurement (owner 2026-11-18): measured on every plan row,
     const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: rows }, blocks: [block] });
     await runDayReplanIfEnabled({ now: NOW, conn });
     expect(record(inserts[0]).p1.plan).toBe('pack');
-    // One call for the drive-best plan, one for the pack plan.
-    expect(planSims).toHaveBeenCalledTimes(2);
+    // The drive-best plan, the pack plan, and the record of the plan the night writes (the pack plan again).
+    expect(planSims).toHaveBeenCalledTimes(3);
     for (const [args] of planSims.mock.calls) expect(args.blocks).toEqual([expect.objectContaining({ startMin: 720, endMin: 780 })]);
   });
 
-  test('a day the drive rule takes is not re-planned for P1: the drive-best plan is the one the live rule writes', async () => {
+  describe('every refusal leaves the drive plan, with the drive rule\'s reason, and records why P1 refused', () => {
+    const { packVerdict } = require('../services/day-replan/close-gaps');
+    const actualPlanDay = jest.requireActual('../services/day-replan/planner').planDay;
+    // Two stops near the office then two far ones: the booked order is already the shortest, so the drive rule refuses.
+    const nearFar = () => [row('a', 0.02, 8), row('b', 0.03, 9), row('c', 0.30, 10), row('d', 0.31, 11)];
+    // The first planDay call is the drive plan (real); the second is the pack plan, rewritten by `pack`.
+    const withPack = (pack) => {
+      planDay.mockImplementationOnce((input) => actualPlanDay(input));
+      planDay.mockImplementationOnce((input) => {
+        const real = actualPlanDay(input);
+        return { ...real, best: { ...real.best, ...pack(real) } };
+      });
+    };
+    const run = async () => {
+      const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: nearFar() } });
+      const out = await runDayReplanIfEnabled({ now: NOW, conn });
+      return { out, plan: inserts[0].row, p1: record(inserts[0]).p1, rec: record(inserts[0]) };
+    };
+    const refused = ({ out, plan, p1 }, reason) => {
+      expect(plan).toMatchObject({ accepted: false, reason: 'saving_below_floor', changes: '[]' });
+      expect(p1).toMatchObject({ plan: 'pack', wouldAccept: false, reason, changes: [] });
+      expect(out).toMatchObject({ accepted: 0, packed: 0, changedVisits: 0 });
+      expect(out.plans[0]).not.toHaveProperty('packed');
+    };
+    // Far stops first, then the near ones: more drive than the booked order.
+    const alternating = { order: ['a', 'c', 'b', 'd'], slots: { a: 480, c: 600, b: 660, d: 720 } };
+
+    test('small_gain: nothing can start earlier, the pack plan changes no hour (real planner)', async () => {
+      refused(await run(), 'small_gain');
+    });
+
+    test('more_drive', async () => {
+      withPack(() => alternating);
+      refused(await run(), 'more_drive');
+    });
+
+    test('ends_later', async () => {
+      withPack(() => ({ order: ['a', 'b', 'c', 'd'], slots: { a: 480, b: 540, c: 600, d: 900 } }));
+      refused(await run(), 'ends_later');
+    });
+
+    test('promise_missed: every stop at 8 AM reaches the last ones long after their window', async () => {
+      withPack(() => ({ order: ['a', 'b', 'c', 'd'], slots: { a: 480, b: 480, c: 480, d: 480 } }));
+      refused(await run(), 'promise_missed');
+    });
+
+    test('app_sim_rejects: P1 would accept, but the app\'s own simulation sees more drive', async () => {
+      packVerdict.mockImplementationOnce(() => ({ wouldAccept: true, reason: 'bigger_block', gainMin: 45 }));
+      withPack(() => alternating);
+      const result = await run();
+      refused(result, 'app_sim_rejects');
+      expect(result.p1.gainMin).toBe(45);
+    });
+
+    test('a pack step that throws leaves the drive plan, logs a warning and the run continues', async () => {
+      planDay.mockImplementationOnce((input) => actualPlanDay(input));
+      planDay.mockImplementationOnce(() => { throw new Error('pack boom'); });
+      const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: nearFar() } });
+      const out = await runDayReplanIfEnabled({ now: NOW, conn });
+      expect(out).toMatchObject({ status: 'completed', days: 1, accepted: 0, packed: 0, failed: [] });
+      expect(inserts).toHaveLength(1);
+      expect(inserts[0].row).toMatchObject({ accepted: false, reason: 'saving_below_floor' });
+      // The close-gaps record is still written, with no P1 record.
+      const rec = record(inserts[0]);
+      expect(rec.now).toBeTruthy();
+      expect(rec.p1).toBeNull();
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('the pack plan failed (pack boom)'));
+    });
+  });
+
+  test('a day the drive rule takes never computes P1: the drive-best plan is the one the live rule writes', async () => {
     const { planSims } = require('../services/day-replan/close-gaps');
     planSims.mockClear();
     const { conn, inserts } = fakeConn({ stopsByDate: { [TOMORROW]: zigzagRows() } });
     await runDayReplanIfEnabled({ now: NOW, conn });
     expect(inserts[0].row.accepted).toBe(true);
+    expect(inserts[0].row.reason).toBe('accepted');
     expect(record(inserts[0]).p1).toMatchObject({ plan: 'drive', wouldAccept: false, reason: 'drive_rule_accepts', changes: [] });
     expect(planSims).toHaveBeenCalledTimes(1);
+    // One planner call only: the pack plan (packAllowanceMin 0) is never computed for a drive-accepted day.
+    expect(planDay).toHaveBeenCalledTimes(1);
+    expect(planDay.mock.calls[0][0].options.packAllowanceMin).toBeUndefined();
   });
 
   test('a stop booked in the last 24 hours is replayed over its day\'s hours', async () => {

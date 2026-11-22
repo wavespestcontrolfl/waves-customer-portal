@@ -14,6 +14,10 @@
  * straight-line model (no Google, no AI, no paid call). 'apply' (GATE_DAY_REPLAN=true) behaves
  * exactly like 'shadow' until a later PR writes the new hours.
  *
+ * The plan written is the drive-best plan when the drive rule takes the day. When it does not, the PACK plan (the
+ * plan that ends earliest with no more drive; planner option packAllowanceMin 0) is the day's plan when the close-gaps
+ * P1 rule accepts it (owner 2026-11-22; ./close-gaps.js packVerdict, plus the app's own simulation agreeing).
+ *
  * A stop is MOVABLE only when all hold; everything else stays FIXED at its hour:
  *   status pending or confirmed, not an estimate-slot hold, no staff lock (auto_dispatch_locked or
  *   auto_dispatch_excluded), not part of a grouped visit (another live row shares its visit_id), no
@@ -468,7 +472,8 @@ async function computeTechDay(conn, env, { dateStr, techId, rows, dayContext }) 
   const entries = rows.map((row) => ({ row, why: fixedReason(row, dayContext), pref: null }));
   await attachPrefs(conn, entries);
   const planned = planEntries(env, { rows, entries, blocks, origin, techId, dayContext });
-  return { entries, blocks, origin, dayContext, ...planned, hash: versionHash(dayContext.allRows) };
+  const plan = { entries, blocks, origin, dayContext, ...planned, hash: versionHash(dayContext.allRows) };
+  return planned.verdict.accepted ? plan : withPackPlan(env, plan, { rows, techId });
 }
 
 /**
@@ -537,21 +542,68 @@ function packPlan(env, plan, { rows, techId }) {
   return { ...planned, origin: plan.origin, blocks: plan.blocks };
 }
 
+const lunchLost = (nowFig, fig) => !!(nowFig && nowFig.lunch && fig && !fig.lunch);
+
 /**
- * P1: the drive rule on the drive-best plan first (the live rule); else the pack plan, which P1 would accept when it
- * keeps every promise, drives no more, ends no later and grows the biggest block by P1_MIN_GAIN.
+ * P1 for a plan the drive rule did not take: the pack plan and its record. It is accepted when it keeps every promise,
+ * drives no more, ends no later and grows the biggest open block by P1_MIN_GAIN (packVerdict), and the app's own
+ * simulation without the schedule blocks (the one apply.js finalRoute compares with) agrees: no more drive, no later end.
  */
-function measurePack(env, plan, { rows, techId, nowFig, packed, sims, bounds }) {
-  const lunchLost = (fig) => !!(nowFig && nowFig.lunch && fig && !fig.lunch);
-  if (plan.verdict.accepted) {
-    const v = packVerdict({ now: nowFig, packed, kept: keptWithBlocks(plan, sims), driveRuleAccepts: true });
-    return { ...v, plan: 'drive', packed, lunchLost: lunchLost(packed), changes: [] };
-  }
+function packProposal(env, plan, { rows, techId }) {
+  const bounds = boundsOf(env, plan, techId);
+  const nowFig = openTime(simsOf(env, plan).current, bounds);
   const alt = packPlan(env, plan, { rows, techId });
   const altSims = simsOf(env, alt);
   const fig = openTime(altSims.planned, bounds);
-  const v = packVerdict({ now: nowFig, packed: fig, kept: keptWithBlocks(alt, altSims), driveRuleAccepts: false });
-  return { ...v, plan: 'pack', packed: fig, lunchLost: lunchLost(fig), changes: v.wouldAccept ? hourChanges(alt.rowGroups, alt.result.best) : [] };
+  let verdict = packVerdict({ now: nowFig, packed: fig, kept: keptWithBlocks(alt, altSims), driveRuleAccepts: false });
+  const { current, planned } = alt.check;
+  if (verdict.wouldAccept && !(current && planned && planned.driveMin <= current.driveMin && planned.endMin <= current.endMin)) {
+    verdict = { wouldAccept: false, reason: 'app_sim_rejects', gainMin: verdict.gainMin };
+  }
+  const changes = verdict.wouldAccept ? hourChanges(alt.rowGroups, alt.result.best) : [];
+  return { alt, p1: { ...verdict, plan: 'pack', packed: fig, lunchLost: lunchLost(nowFig, fig), changes } };
+}
+
+/**
+ * The day's plan when the drive rule did not take it (owner 2026-11-22): the pack plan when P1 accepts it (the same
+ * plan object shape, `packed: true`, verdict reason 'packed'), else the drive plan with the P1 record. A pack step that
+ * throws never fails the night: the drive plan stands, not accepted, with no P1 record.
+ */
+function withPackPlan(env, plan, { rows, techId }) {
+  let proposal;
+  try {
+    proposal = packProposal(env, plan, { rows, techId });
+  } catch (err) {
+    logger.warn(`[day-replan] ${plan.dayContext.dateStr} tech ${techId}: the pack plan failed (${err.message}); the drive plan stands`);
+    return { ...plan, p1: null };
+  }
+  const { alt, p1 } = proposal;
+  if (!p1.wouldAccept) return { ...plan, p1 };
+  const changes = alt.stops
+    .map((s) => ({ id: s.id, fromMin: s.slotStartMin, toMin: alt.result.best.slots[s.id] }))
+    .filter((c) => c.toMin != null && c.toMin !== c.fromMin);
+  return {
+    ...plan,
+    rowGroups: alt.rowGroups,
+    stops: alt.stops,
+    staleReasons: alt.staleReasons,
+    check: alt.check,
+    plannerResult: alt.plannerResult,
+    result: { ...alt.result, changes },
+    verdict: { accepted: true, reason: 'packed', savedMin: alt.check.current.driveMin - alt.check.planned.driveMin },
+    p1,
+    packed: true,
+  };
+}
+
+/**
+ * The day's P1 record: the pack plan's when the drive rule did not take the day (computeTechDay computed it, null when
+ * that step failed); a drive-accepted day never computes P1, since the drive rule already takes it.
+ */
+function measurePack(plan, { nowFig, packed, sims }) {
+  if (!plan.verdict.accepted || plan.packed) return plan.p1 ?? null;
+  const v = packVerdict({ now: nowFig, packed, kept: keptWithBlocks(plan, sims), driveRuleAccepts: true });
+  return { ...v, plan: 'drive', packed, lunchLost: lunchLost(nowFig, packed), changes: [] };
 }
 
 /**
@@ -575,21 +627,23 @@ async function replayPrefs(conn, plan) {
 }
 
 /**
- * The close-gaps measurement for one planned tech-day (./close-gaps.js; owner 2026-11-18). It measures only and never
- * throws: a failure leaves the row's close_gaps null, and the night's plan row is written either way.
+ * The close-gaps record for one planned tech-day (./close-gaps.js; owner 2026-11-18). P1 is the plan the night writes
+ * since 2026-11-22; the rest only measures. It never throws: a failure leaves the row's close_gaps null, and the
+ * night's plan row is written either way.
  */
-async function measureCloseGaps(conn, env, plan, { rows, techId }) {
+async function measureCloseGaps(conn, env, plan, { techId }) {
   try {
     const bounds = boundsOf(env, plan, techId);
     const sims = simsOf(env, plan);
     const nowFig = openTime(sims.current, bounds);
-    // The drive-best plan: the one the live apply writes (the morning notification reads it for an applied day).
+    // The plan the live apply writes (the morning notification reads it for an applied day): the drive-best plan, or
+    // the pack plan on a packed day (the plan is then the pack plan, so this is its open time).
     const packed = openTime(sims.planned, bounds);
     return {
       v: 2,
       now: nowFig,
       packed,
-      p1: measurePack(env, plan, { rows, techId, nowFig, packed, sims, bounds }),
+      p1: measurePack(plan, { nowFig, packed, sims }),
       s1: replayRecentBookings({
         groups: plan.rowGroups, prefById: await replayPrefs(conn, plan), now: plan.dayContext.now, origin: plan.origin,
         marginMin: DEFAULT_OPTIONS.marginMin, bounds, rowHours,
@@ -646,7 +700,7 @@ async function planTechDay(conn, env, { dateStr, techId, rows, dayContext }, sum
   const { entries, check, verdict, staleReasons, result, plannerResult } = plan;
   const apply = env.mode === 'apply';
   const planId = apply ? crypto.randomUUID() : null;
-  const closeGaps = await measureCloseGaps(conn, env, plan, { rows, techId });
+  const closeGaps = await measureCloseGaps(conn, env, plan, { techId });
   await conn(PLAN_TABLE).insert(planRow({
     runId: env.runId, techId, dateStr, entries, result, check, verdict, closeGaps, ...(apply ? { mode: 'apply', planId } : {}),
   }));
@@ -661,9 +715,11 @@ async function planTechDay(conn, env, { dateStr, techId, rows, dayContext }, sum
     stored_order_stale: staleReasons,
     planner: { accepted: plannerResult.accepted, reason: plannerResult.reason, saved_min: plannerResult.savedMin },
     app_sim: check,
+    ...(plan.packed ? { packed: true } : {}),
   });
   if (verdict.accepted) {
     summary.accepted += 1;
+    if (plan.packed) summary.packed += 1;
     summary.savedMin += verdict.savedMin;
     summary.changedVisits += result.changes.length;
   }
@@ -728,7 +784,7 @@ async function planDate(conn, env, dateStr, now, summary) {
 }
 
 /**
- * @returns {Promise<{status: string, runId?: string, days?: number, accepted?: number, savedMin?: number,
+ * @returns {Promise<{status: string, runId?: string, days?: number, accepted?: number, packed?: number, savedMin?: number,
  *   changedVisits?: number, skipped?: object[], failed?: object[]}>}
  */
 /** The run's environment: start points, the departure minute, the occupancy rule, the night pass's day bounds. */
@@ -754,7 +810,7 @@ async function runDayReplanIfEnabled({ now = new Date(), conn = db, deps = null 
   if (mode === 'off') return { status: 'off' };
   const apply = mode === 'apply';
   const runId = crypto.randomUUID();
-  const summary = { status: 'completed', runId, days: 0, accepted: 0, savedMin: 0, changedVisits: 0, plans: [], skipped: [], failed: [] };
+  const summary = { status: 'completed', runId, days: 0, accepted: 0, packed: 0, savedMin: 0, changedVisits: 0, plans: [], skipped: [], failed: [] };
   // Apply mode only: what the writer did, per tech-day.
   if (apply) Object.assign(summary, { apply: [], appliedVisits: 0 });
   let env;
@@ -775,7 +831,7 @@ async function runDayReplanIfEnabled({ now = new Date(), conn = db, deps = null 
   const byStatus = apply ? summary.apply.reduce((counts, a) => ({ ...counts, [a.status]: (counts[a.status] || 0) + 1 }), {}) : {};
   const applied = apply ? ` apply=${JSON.stringify(byStatus)} appliedVisits=${summary.appliedVisits}` : '';
   const recovered = summary.repaired ? ` repaired=${summary.repaired}` : '';
-  logger.info(`[day-replan] ${env.mode} run ${runId}: days=${summary.days} accepted=${summary.accepted} savedMin=${summary.savedMin} changedVisits=${summary.changedVisits} baselines=${JSON.stringify(baselines)} skipped=${summary.skipped.length} failed=${summary.failed.length}${applied}${recovered}`);
+  logger.info(`[day-replan] ${env.mode} run ${runId}: days=${summary.days} accepted=${summary.accepted} packed=${summary.packed} savedMin=${summary.savedMin} changedVisits=${summary.changedVisits} baselines=${JSON.stringify(baselines)} skipped=${summary.skipped.length} failed=${summary.failed.length}${applied}${recovered}`);
   return summary;
 }
 
