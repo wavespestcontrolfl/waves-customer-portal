@@ -222,14 +222,14 @@ maybeDescribe('call booking check (live Postgres)', () => {
     expect(await priceRowsFor(b.visitId)).toHaveLength(1);
   });
 
-  test('the call is read again and holds another number, or disputes its total: the one bell stays open and nothing new rings', async () => {
+  test('the call is read again and holds another number, or an agreed total: the one bell stays open and nothing new rings', async () => {
     const b = await booking({ row: oneTime, callOver: pricedCall() });
     await run();
     const corrected = { ...statedTerm, amount_usd: 300 };
     await trx('call_log').where({ id: b.callId }).update(pricedCall({ price: corrected, prices: [corrected] }));
     const next = await run(new Date('2026-11-21T22:15:00Z'));
     expect(next.raised).toBe(0);
-    await trx('call_log').where({ id: b.callId }).update(pricedCall({ quoted_price_usd: 250, price_accepted_by_caller: false }));
+    await trx('call_log').where({ id: b.callId }).update(pricedCall({ quoted_price_usd: 250 }));
     await run(new Date('2026-11-21T22:30:00Z'));
     const rows = await priceRowsFor(b.visitId);
     expect(rows).toHaveLength(1);
@@ -268,9 +268,10 @@ maybeDescribe('call booking check (live Postgres)', () => {
 
   test.each([
     ['the visit has a price', { visitOver: { estimated_price: 250 } }, pricedCall()],
-    ['the visit has a price on its primary line', { visitOver: { primary_line_price: 250 } }, pricedCall()],
-    ['the reading disputes its own total', {}, pricedCall({ quoted_price_usd: 250, price_accepted_by_caller: false })],
-    ['the total is a plan rate', {}, pricedCall({ quoted_price_usd: 250, price: { ...statedTerm, unit: 'per_quarter' }, prices: [{ ...statedTerm, unit: 'per_quarter' }] })],
+    ['the visit is free on purpose (a stamped $0 next to a line price)', { visitOver: { estimated_price: 0, primary_line_price: 250 } }, pricedCall()],
+    ['the call holds an agreed total (the booking\'s own price rule reads it)', {}, pricedCall({ quoted_price_usd: 250 })],
+    ['the reading names a plan bundle', {}, pricedCall({ primary_service_category: 'bundled_waveguard' })],
+    ['the reading does not say the call was about a one-time job', {}, pricedCall({ service_intent: 'quote_only' })],
     ['the call spoke of a second service', {}, pricedCall({ secondary_categories: ['lawn_care'] })],
     ['the reading records the caller\'s choice of a plan\'s billing', {}, pricedCall({ billing_choice: 'per_application' })],
     ['the visit is a free callback', { visitOver: { is_callback: true } }, pricedCall()],

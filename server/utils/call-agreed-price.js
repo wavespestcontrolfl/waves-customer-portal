@@ -159,6 +159,5 @@ module.exports = {
   resolveCallAgreedPrice,
   resolveStatedOneTimeCallPrice,
   statedPriceTerms,
-  exactOneTimeAmount,
   formatAgreedPriceLabel,
 };
