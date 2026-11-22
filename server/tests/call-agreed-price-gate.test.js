@@ -388,42 +388,43 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(source).not.toContain('raisePriceBellForBooking');
   });
 
-  test('the hold reason files its own review card in the scheduling lane, with the agreed time, and no second fallback card', () => {
-    const { buildTriageItem } = require('../services/call-routing-gates');
-    const item = buildTriageItem({
-      callLogId: 42,
-      flag: 'agreed_one_time_job_office_books',
-      extraction: { meta: { call_summary: 'Same-day one-time job.' }, scheduling: { status: 'confirmed', confirmed_start_at: '2026-11-21T17:00:00-05:00' } },
-    });
-    expect(item.category).toBe('time_ambiguous');
-    expect(JSON.parse(item.payload).scheduling_window).toEqual(expect.objectContaining({ status: 'confirmed', confirmed_start_at: '2026-11-21T17:00:00-05:00' }));
-  });
-
-  // The card is filed by its own writer: the call locked, the claim checked, a standing card REFRESHED (a
-  // reprocess that corrects the time, service or price must reach the office), its status kept.
-  test('the held booking files its card through the refresh-safe writer, never the generic insert-or-ignore', () => {
-    const filer = source.slice(source.indexOf('async function fileAgreedOneTimeJobCard('), source.indexOf('function agreedOneTimeJobCardPrice('));
-    expect(filer).toContain('await lockTriageCall(ttrx, call.id);');
-    expect(filer).toContain("const stillOwner = await ttrx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id');");
-    expect(filer).toContain('if (!stillOwner) return false;');
-    expect(filer).toContain(".merge({\n          payload: ttrx.raw(\"COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload\"),");
-    expect(filer).not.toContain('status:');
-    // A refresh with no price clears an older price: the keys are always written.
-    expect(filer).toContain('stated_one_time_price: cardPrice ? cardPrice.amount : null,');
-    expect(filer).toContain('stated_one_time_price_basis: cardPrice ? cardPrice.basis : null,');
-    const site = "if (svc.__held.reason === 'agreed_one_time_job_office_books') {\n                  agreedJobCardFiled = await fileAgreedOneTimeJobCard({";
+  // The office's booking task is the approved-but-unbooked card: a reprocess refreshes it under the call lock,
+  // a call verdict never closes it, and every action on it is version-checked (admin-triage.js). The pre-push
+  // audit asked a new card reason for each of these; the existing card already has them.
+  test('the held booking files the approved-but-unbooked card with its price, its basis and the promised follow-up', () => {
+    const site = "if (svc.__held.reason === 'agreed_one_time_job_office_books') {\n                  await fileSkippedBookingCard({";
     expect(count(site)).toBe(1);
-    expect(source.slice(source.indexOf(site)).split('\n')[5].trim()).toBe("} else if (svc.__held.reason !== 'on_file_house_number_conflict') await db('triage_items')");
+    const call = source.slice(source.indexOf(site), source.indexOf("} else if (svc.__held.reason !== 'on_file_house_number_conflict') await db('triage_items')"));
+    expect(call).toContain("skippedReason: 'agreed_one_time_job_office_books', preferredDateTime: extracted.preferred_date_time,");
+    // A refresh with no price clears an older price: the keys are always written.
+    expect(call).toContain('stated_one_time_price: agreedJobCardPrice ? agreedJobCardPrice.amount : null,');
+    expect(call).toContain('stated_one_time_price_basis: agreedJobCardPrice ? agreedJobCardPrice.basis : null,');
+    expect(call).toContain('? { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null }');
+    // The card writer: the skip's own evidence first, so it can never replace a shared field.
+    const writer = source.slice(source.indexOf('async function fileSkippedBookingCard('), source.indexOf('function agreedOneTimeJobCardPrice('));
+    expect(writer).toContain("extraPayload: {\n            ...(extraPayload && typeof extraPayload === 'object' ? extraPayload : {}),\n            skipped_reason: skippedReason,");
+    expect(writer).toContain("flag: 'auto_booking_skipped_after_approval',");
+    expect(writer).toContain('.merge({');
+    // The protections the card relies on.
+    const triage = require('fs').readFileSync(require.resolve('../routes/admin-triage'), 'utf8');
+    expect(triage).toMatch(/const VERSION_BOUND_REASONS = \[[^\]]*'auto_booking_skipped_after_approval'/);
+    const { buildTriageItem } = require('../services/call-routing-gates');
+    const card = buildTriageItem({ callLogId: 1, flag: 'auto_booking_skipped_after_approval', extraction: { scheduling: { status: 'confirmed', confirmed_start_at: '2026-11-21T17:00:00-05:00' } } });
+    expect(card.category).toBe('time_ambiguous');
+    expect(JSON.parse(card.payload).scheduling_window).toEqual(expect.objectContaining({ confirmed_start_at: '2026-11-21T17:00:00-05:00' }));
   });
 
-  // The approved-but-unbooked fallback skips this reason only when that card is on file: a failed write leaves
-  // the fallback card as the call's one scheduling trace.
-  test('the fallback card is skipped only after the hold\'s own card is on file', () => {
+  // The approved-but-unbooked fallback writes the same card (one reason code), so it is not skipped for this
+  // hold: it refreshes the card, and a failed first write still leaves the call one card.
+  test('the fallback is not skipped for this hold', () => {
     const heldReasons = source.match(/const heldReasons = new Set\(\[[^\]]*\]\);/);
     expect(heldReasons).not.toBeNull();
-    expect(heldReasons[0]).not.toContain("'agreed_one_time_job_office_books'");
-    expect(count("if (agreedJobCardFiled) heldReasons.add('agreed_one_time_job_office_books');")).toBe(1);
-    expect(count('agreedJobCardFiled = ')).toBe(2); // false at the start, the writer's answer
+    expect(heldReasons[0]).not.toContain('agreed_one_time_job_office_books');
+    expect(source).not.toContain("heldReasons.add('agreed_one_time_job_office_books')");
+    expect(source).not.toContain('agreedJobCardFiled');
+    const { buildTriageItem } = require('../services/call-routing-gates');
+    // No card reason of its own.
+    expect(buildTriageItem({ callLogId: 1, flag: 'agreed_one_time_job_office_books', extraction: {} }).category).toBe('service_unknown');
   });
 
   // The card's price belongs to the service the call priced, with what kind of price it is.

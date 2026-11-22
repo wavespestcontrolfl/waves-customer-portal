@@ -77,7 +77,6 @@ const REASON_LABELS = {
   name_spelling_differs: "Caller spelled their name — check it",
   call_prepay_choice: "Caller chose annual prepay — accept the estimate",
   call_phone_yes: "Call booked a visit on an open estimate",
-  agreed_one_time_job_office_books: "One-time job not booked — book it with its price",
   property_role_confirm: "Property roles",
   reschedule_link_promise: "Promised reschedule link",
   attached_booking_followup_unbooked: "Follow-up visit not booked — book by hand",
@@ -254,12 +253,13 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
     // address is a saved secondary property) — codex r36 P1.
     // GATE_CALL_AGREED_ONE_TIME_JOB: the AI booked no visit for a one-time job staff priced on the call. The
     // office books it from here: the service, the time the caller agreed, and the price staff stated.
-    p.flag === "agreed_one_time_job_office_books" && p.service && { label: "Book", value: p.service },
-    p.flag === "agreed_one_time_job_office_books" && p.scheduling_window?.confirmed_start_at && {
+    p.skipped_reason === "agreed_one_time_job_office_books" && { label: "Why", value: "Staff priced a one-time job on the call, so the AI did not book it. Book it with its price." },
+    p.skipped_reason === "agreed_one_time_job_office_books" && p.service && { label: "Book", value: p.service },
+    p.skipped_reason === "agreed_one_time_job_office_books" && p.scheduling_window?.confirmed_start_at && {
       label: "Agreed time",
       value: `${formatETDateTime(p.scheduling_window.confirmed_start_at, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} ET`,
     },
-    p.flag === "agreed_one_time_job_office_books" && typeof p.stated_one_time_price === "number" && (p.stated_one_time_price_basis === "agreed_total"
+    p.skipped_reason === "agreed_one_time_job_office_books" && typeof p.stated_one_time_price === "number" && (p.stated_one_time_price_basis === "agreed_total"
       ? { label: "Agreed price", value: `${fmtMoney(p.stated_one_time_price)} one-time, the total the caller accepted on the call.` }
       : { label: "Staff said", value: `${fmtMoney(p.stated_one_time_price)} one-time. Check the terms on the call before you set the visit's price.` }),
     p.skipped_reason && p.scheduling_window?.requested_address?.street_line_1 && {

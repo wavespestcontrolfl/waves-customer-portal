@@ -1956,7 +1956,9 @@ function callEmailCheckCardPayload(callEmailCheck) {
 // review-state marker so review_status opens. The two copies differed ONLY
 // in their skippedReason string. One helper, called from both sites — never
 // awaited from inside the caller's own db.transaction (this opens its own).
-async function fileSkippedBookingCard({ call, procToken, customerId, extraction, skippedReason, preferredDateTime, serviceType, bridgeNeedsConfirmation, callSid }) {
+// `extraPayload`: the skip's own evidence, merged under the shared fields (the
+// agreed one-time job's price and promised follow-up, for one).
+async function fileSkippedBookingCard({ call, procToken, customerId, extraction, skippedReason, preferredDateTime, serviceType, bridgeNeedsConfirmation, callSid, extraPayload = null }) {
   try {
     const filed = await db.transaction(async (ttrx) => {
       await lockTriageCall(ttrx, call.id);
@@ -1971,6 +1973,7 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
           flag: 'auto_booking_skipped_after_approval',
           extraction: extraction || undefined,
           extraPayload: {
+            ...(extraPayload && typeof extraPayload === 'object' ? extraPayload : {}),
             skipped_reason: skippedReason,
             preferred_date_time: preferredDateTime || null,
             service: serviceType,
@@ -2011,48 +2014,9 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
   }
 }
 
-// GATE_CALL_AGREED_ONE_TIME_JOB: the review card for an agreed one-time job the
-// AI did not book. Like fileSkippedBookingCard: the call is locked, the claim is
-// checked, and a standing card is refreshed, not kept, so a reprocess that
-// corrects the time, the service or the price never leaves the office booking
-// from old details (its workflow status stays). `cardPrice`: { amount, basis }
-// (agreedOneTimeJobCardPrice) or null; null clears a price an older pass wrote.
-// Returns true when the card is on file. Never awaited inside the caller's own
-// db.transaction (this opens its own).
-async function fileAgreedOneTimeJobCard({ call, procToken, extraction, preferredDateTime, serviceType, cardPrice, callSid }) {
-  try {
-    return await db.transaction(async (ttrx) => {
-      await lockTriageCall(ttrx, call.id);
-      const stillOwner = await ttrx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id');
-      if (!stillOwner) return false;
-      await ttrx('triage_items')
-        .insert(buildTriageItem({
-          callLogId: call.id,
-          flag: 'agreed_one_time_job_office_books',
-          extraction: extraction || undefined,
-          extraPayload: {
-            preferred_date_time: preferredDateTime || null,
-            service: serviceType || null,
-            stated_one_time_price: cardPrice ? cardPrice.amount : null,
-            stated_one_time_price_basis: cardPrice ? cardPrice.basis : null,
-          },
-        }))
-        .onConflict(ttrx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-        .merge({
-          payload: ttrx.raw("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"),
-          summary: ttrx.raw('EXCLUDED.summary'),
-          updated_at: new Date(),
-        });
-      return true;
-    });
-  } catch (err) {
-    logger.warn(`[call-proc] agreed one-time job card failed for ${maskSid(callSid)}: ${err.code || err.name || 'db_error'}`);
-    return false;
-  }
-}
-
-// The price the office card shows for an agreed one-time job the AI did not
-// book: { amount, basis } or null. Only for the service the call priced: when
+// The price the office card (auto_booking_skipped_after_approval, skipped_reason
+// agreed_one_time_job_office_books) shows for an agreed one-time job the AI did
+// not book: { amount, basis } or null. Only for the service the call priced: when
 // the booking resolved to another catalog row (a plan customer's free
 // re-service, say), the card names that row and shows no price, so staff never
 // book one service at another's price. `basis`: 'agreed_total' when the
@@ -10099,8 +10063,8 @@ function recurringIntentEvidence(transcription) {
 //     the reading carries that row's own name (callServiceBooksAtPrice).
 // THE AI BOOKS NO VISIT FOR A JOB THE HOLD CHANGED (owner 2026-11-22, "card").
 // The lead and the stored reading carry the one-time service, but the booking
-// is held for the office (review card agreed_one_time_job_office_books, with
-// the agreed time): no visit, no text. The office books the visit with its
+// is held for the office (the approved-but-unbooked review card, skipped_reason
+// agreed_one_time_job_office_books, with the agreed time): no visit, no text. The office books the visit with its
 // price. Why: a price staff only stated ("$250, but it varies") cannot go on
 // the visit (the extraction marks a hedge and an added charge the same way),
 // and a one-time visit with no price takes a plan's fee at completion if the
@@ -13871,10 +13835,6 @@ const CallRecordingProcessor = {
     // do-not-contact beside it): that hold keeps the call's promises, label and one alert.
     let v2OutOfAreaOnlyHold = false;
     let v2ApprovedExtraction = null;
-    // GATE_CALL_AGREED_ONE_TIME_JOB: the held booking's own review card is on
-    // file (fileAgreedOneTimeJobCard). Until then the approved-but-unbooked
-    // fallback card still files, so a held call never ends with no card.
-    let agreedJobCardFiled = false;
     let v2UsesOnFileAddress = false;
     let v2StreetLevelHold = null;
     // True when the booking landed on the office-review pending path (street-level web-form address).
@@ -20590,8 +20550,8 @@ const CallRecordingProcessor = {
             // agreed-one-time-job hold changed this booking's service (a label
             // at adoption, or the rule's rewrite of the booking's own view), so
             // the AI books no visit. The office books it with its price from
-            // the review card (agreed_one_time_job_office_books, in the booking
-            // transaction below). Off, or a call the hold does not change,
+            // review card (held in the booking transaction below; the card is
+            // auto_booking_skipped_after_approval with this skipped_reason). Off, or a call the hold does not change,
             // books as before.
             const agreedJobHeldForOffice = agreedJobAtAdoption
               && (agreedServiceFields.length > 0 || agreedJobHoldChangesService(extracted, transcription, bookableServiceNames));
@@ -22491,8 +22451,8 @@ const CallRecordingProcessor = {
                 // GATE_CALL_AGREED_ONE_TIME_JOB (agreedJobHeldForOffice above):
                 // every booking guard passed and nothing on this path wrote,
                 // so ending here writes nothing. The shared __held handler files
-                // the review card with the agreed time: no visit, no text. A
-                // visit this call already has was found above and is kept.
+                // the office's booking card: no visit, no text. A visit this
+                // call already has was found above and is kept.
                 if (agreedJobHeldForOffice) {
                   return { __held: { reason: 'agreed_one_time_job_office_books' } };
                 }
@@ -22683,10 +22643,23 @@ const CallRecordingProcessor = {
                 // operator resolved it, nor outside those locks; when that
                 // writer could not persist its card, the approved-but-
                 // unbooked fallback below files instead (pre-push audit P1).
+                // GATE_CALL_AGREED_ONE_TIME_JOB: the office's booking task is the
+                // approved-but-unbooked card (fileSkippedBookingCard), which a
+                // reprocess refreshes under the call lock, a call verdict never
+                // closes, and every action version-checks. It carries the price
+                // for the priced service only, and a promised follow-up visit.
                 if (svc.__held.reason === 'agreed_one_time_job_office_books') {
-                  agreedJobCardFiled = await fileAgreedOneTimeJobCard({
-                    call, procToken, extraction: v2ApprovedExtraction || v2CanonicalExtraction,
-                    preferredDateTime: extracted.preferred_date_time, serviceType, cardPrice: agreedJobCardPrice, callSid,
+                  await fileSkippedBookingCard({
+                    call, procToken, customerId, extraction: v2ApprovedExtraction || v2CanonicalExtraction,
+                    skippedReason: 'agreed_one_time_job_office_books', preferredDateTime: extracted.preferred_date_time,
+                    serviceType, bridgeNeedsConfirmation, callSid,
+                    extraPayload: {
+                      stated_one_time_price: agreedJobCardPrice ? agreedJobCardPrice.amount : null,
+                      stated_one_time_price_basis: agreedJobCardPrice ? agreedJobCardPrice.basis : null,
+                      follow_up_plan: callFollowUpPlan
+                        ? { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null }
+                        : null,
+                    },
                   });
                 } else if (svc.__held.reason !== 'on_file_house_number_conflict') await db('triage_items')
                   .insert(buildTriageItem({
@@ -22721,8 +22694,7 @@ const CallRecordingProcessor = {
                 // reservice_eligibility_lapsed,
                 // reservice_property_uncovered,
                 // on_file_proof_customer_mismatch,
-                // arranger_slot_elapsed_pre_insert,
-                // agreed_one_time_job_office_books), so the gap is the
+                // arranger_slot_elapsed_pre_insert), so the gap is the
                 // shared handler's, not any one reason's — fixed here for
                 // all of them rather than one at a time. Runs in both
                 // modes (this handler is unconditional on mode) and
@@ -24483,8 +24455,9 @@ const CallRecordingProcessor = {
       // one) — otherwise the fallback card below is the call's only
       // scheduling trace and must file (pre-push audit P1).
       if (houseNumberConflictFiled && !disputeClaimedUnrecorded) heldReasons.add('on_file_house_number_conflict');
-      // The agreed one-time job's hold likewise, only when its own card landed.
-      if (agreedJobCardFiled) heldReasons.add('agreed_one_time_job_office_books');
+      // agreed_one_time_job_office_books is not in the set: its card IS this
+      // fallback's card (same reason code), so the fallback refreshes it, and a
+      // failed first write still leaves the call one card.
       if (!bookedServiceId && !heldReasons.has(appointmentResult?.skippedReason)) {
         const skipReason = appointmentResult?.skippedReason
           || appointmentResult?.scheduleError

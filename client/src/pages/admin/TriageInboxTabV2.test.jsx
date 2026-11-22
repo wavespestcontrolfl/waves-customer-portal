@@ -1556,30 +1556,32 @@ describe('call_phone_yes card tap', () => {
 // books it from the card, so the card shows the service, the agreed time in Eastern time, and the stated price.
 describe('ConfirmEvidence — agreed one-time job the AI did not book', () => {
   const payload = {
-    flag: 'agreed_one_time_job_office_books',
+    flag: 'auto_booking_skipped_after_approval',
+    skipped_reason: 'agreed_one_time_job_office_books',
     service: 'One-Time Pest Control Service',
     scheduling_window: { status: 'confirmed', confirmed_start_at: '2026-11-21T22:00:00.000Z' },
     stated_one_time_price: 250,
     stated_one_time_price_basis: 'stated',
   };
-  it('shows what to book, when, and the price staff stated', () => {
-    render(<ConfirmEvidence reasonCode="agreed_one_time_job_office_books" payload={payload} />);
+  it('shows why, what to book, when, and the price staff stated', () => {
+    render(<ConfirmEvidence reasonCode="auto_booking_skipped_after_approval" payload={payload} />);
+    expect(screen.getByText(/so the AI did not book it/)).toBeInTheDocument();
     expect(screen.getByText('One-Time Pest Control Service')).toBeInTheDocument();
     expect(screen.getByText('Sat, Nov 21, 5:00 PM ET')).toBeInTheDocument();
     expect(screen.getByText('Staff said:')).toBeInTheDocument();
     expect(screen.getByText(/\$250\.00 one-time\. Check the terms on the call/)).toBeInTheDocument();
   });
   it('labels a total the caller accepted as agreed, without asking staff to change it', () => {
-    render(<ConfirmEvidence reasonCode="agreed_one_time_job_office_books" payload={{ ...payload, stated_one_time_price_basis: 'agreed_total' }} />);
+    render(<ConfirmEvidence reasonCode="auto_booking_skipped_after_approval" payload={{ ...payload, stated_one_time_price_basis: 'agreed_total' }} />);
     expect(screen.getByText('Agreed price:')).toBeInTheDocument();
     expect(screen.getByText(/\$250\.00 one-time, the total the caller accepted/)).toBeInTheDocument();
     expect(screen.queryByText(/Check the terms/)).not.toBeInTheDocument();
   });
-  it('shows no price row when the card holds no price, and the rows stay off other cards', () => {
-    render(<ConfirmEvidence reasonCode="agreed_one_time_job_office_books" payload={{ ...payload, stated_one_time_price: null }} />);
+  it('shows no price row when the card holds no price, and the rows stay off other skipped bookings', () => {
+    render(<ConfirmEvidence reasonCode="auto_booking_skipped_after_approval" payload={{ ...payload, stated_one_time_price: null }} />);
     expect(screen.queryByText(/\$250\.00 one-time/)).not.toBeInTheDocument();
     cleanup();
-    render(<ConfirmEvidence reasonCode="ambiguous_scheduling" payload={{ ...payload, flag: 'ambiguous_scheduling' }} />);
+    render(<ConfirmEvidence reasonCode="auto_booking_skipped_after_approval" payload={{ ...payload, skipped_reason: 'start_before_call' }} />);
     expect(screen.queryByText('Sat, Nov 21, 5:00 PM ET')).not.toBeInTheDocument();
   });
 });

@@ -2351,7 +2351,6 @@ describe('the generic __held handler pushes its reason onto bridgeNeedsConfirmat
       'reservice_property_uncovered',
       'on_file_proof_customer_mismatch',
       'arranger_slot_elapsed_pre_insert',
-      'agreed_one_time_job_office_books',
       'on_file_house_number_conflict',
     ];
     const bridgeNeedsConfirmation = [];
