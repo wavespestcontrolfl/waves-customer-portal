@@ -834,8 +834,10 @@ async function flexWindowFor(service, {
   const neighbors = neighborMap.get(service.id);
   if (!neighbors) return skip('SERIES_NEIGHBORS_UNKNOWN', 'Visit missing from its own series read — no move (fail closed)');
   if (!anchor) return skip('DRIFT_ANCHOR_UNKNOWN', 'Recurrence anchor could not be derived — no move (fail closed)');
-  // The band is this visit's own (±7 for a plan of 2 months or longer whose nearest live sibling is 56 days away or more, else ±5).
-  const radius = flexTier.flexBandRadius({ radiusDays: flexTier.flexRadiusDaysFor(service), neighbors });
+  // The band is this visit's own (±7 for a plan of 2 months or longer whose nearest live sibling is 56 days away or more, else ±5),
+  // from the pattern THIS series read saw (`neighbors.radiusDays`), never the pass-1 snapshot: the pass-2 recheck
+  // must rank moves by the band the move transaction will enforce (apply.js assertFlexWindows reads the same fact).
+  const radius = flexTier.flexBandRadius({ radiusDays: neighbors.radiusDays, neighbors });
   const window = flexTier.flexTierMoveWindow({
     origDate: service.scheduled_date, anchorDate: anchor, today, neighbors, radiusDays: radius,
   });

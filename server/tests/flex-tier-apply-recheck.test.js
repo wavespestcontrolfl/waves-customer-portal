@@ -433,6 +433,44 @@ describe('the band is the visit\'s own radius (pass 1)', () => {
     expect(exhausted.reason_description).toContain('within ±5 days');
   });
 
+  test('pass 2 takes the band from its own fresh series read: a plan changed from quarterly to monthly between the passes is re-searched at ±5', async () => {
+    // Every read before the scoring pass sees quarterly; the office changes the plan to monthly while pass 1 scores.
+    let pattern = 'quarterly';
+    db.mockImplementation((table) => {
+      if (table === 'appointment_reminders') return buildChain([]);
+      if (table === 'scheduled_services') return buildChain([withPlan({ recurring_pattern: pattern })]);
+      return buildChain([]);
+    });
+    // pass 2 refreshes the same ctx object, so keep a copy of each search's window as it was asked.
+    const windows = [];
+    candidateSlots.findValidCandidateSlots.mockImplementation(async (_svc, _prefs, ctx) => {
+      windows.push({ ...ctx.tierWindow });
+      pattern = 'monthly';
+      return { current: CURRENT, candidates: [CAND] };
+    });
+    const res = await runAutoDispatch({ mode: 'apply', flexTierEnabled: true });
+    expect(res.changed).toBe(1);
+    expect(windows.length).toBeGreaterThanOrEqual(2);
+    expect(windows[0].dateTo).toBe(shiftDateStr(VISIT_DATE, 7));
+    expect(windows[windows.length - 1]).toEqual({ dateFrom: shiftDateStr(VISIT_DATE, -5), dateTo: shiftDateStr(VISIT_DATE, 5) });
+    expect(decisions('changed')[0].constraints.route_tiers.radius_days).toBe(5);
+  });
+
+  test('the band never comes from the pass-1 snapshot alone: a series read that lacks the fact reads ±5', async () => {
+    let calls = 0;
+    db.mockImplementation((table) => {
+      if (table === 'appointment_reminders') return buildChain([]);
+      if (table === 'scheduled_services') {
+        calls += 1;
+        // The eligible set says quarterly; the series read's own row carries no pattern.
+        return buildChain([calls === 1 ? withPlan({ recurring_pattern: 'quarterly' }) : svc()]);
+      }
+      return buildChain([]);
+    });
+    await runAutoDispatch({ mode: 'apply', flexTierEnabled: true });
+    expect(candidateSlots.findValidCandidateSlots.mock.calls[0][2].tierWindow.dateTo).toBe(shiftDateStr(VISIT_DATE, 5));
+  });
+
   test('stale-anchor label: a quarterly visit is stale past 14 days from its original date, and says 14', async () => {
     useRows([withPlan({ recurring_pattern: 'quarterly' })], shiftDateStr(VISIT_DATE, -15));
     candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [] });
