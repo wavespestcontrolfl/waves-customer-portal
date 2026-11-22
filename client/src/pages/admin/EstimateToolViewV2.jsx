@@ -29,6 +29,7 @@ import {
   normalizePreSlabProductKey,
   normalizeTrenchingProductKey,
   normalizeTrenchingRate,
+  treeDensityAffectsPrice,
 } from "../../lib/estimateEngine";
 import { useNavigate } from "react-router-dom";
 import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
@@ -7027,16 +7028,18 @@ export default function EstimateToolViewV2({
                     ]}
                   />
                 </Field>{" "}
-                <Field label="Tree Density" id="estimate-treeDensity" className="mb-4">
-                  <SelectV2
-                    k="treeDensity"
-                    options={[
-                      { value: "LIGHT", label: "Light" },
-                      { value: "MODERATE", label: "Moderate" },
-                      { value: "HEAVY", label: "Heavy" },
-                    ]}
-                  />
-                </Field>{" "}
+                {treeDensityAffectsPrice(form) && (
+                  <Field label="Tree Density" id="estimate-treeDensity" className="mb-4">
+                    <SelectV2
+                      k="treeDensity"
+                      options={[
+                        { value: "LIGHT", label: "Light" },
+                        { value: "MODERATE", label: "Moderate" },
+                        { value: "HEAVY", label: "Heavy" },
+                      ]}
+                    />
+                  </Field>
+                )}{" "}
                 <Field label="Complexity" id="estimate-landscapeComplexity" className="mb-4">
                   <SelectV2
                     k="landscapeComplexity"

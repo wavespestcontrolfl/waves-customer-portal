@@ -733,6 +733,30 @@ export function rodentBaitWaveguardFlags() {
   return { tierQualifier: RODENT_BAIT.tierQualifier, excludeFromPctDiscount: RODENT_BAIT.excludeFromPctDiscount };
 }
 
+// True when a service picked on the estimate form has a price (or a review
+// reason) that reads Tree density. The estimate tool shows the Tree density
+// box only then; the form value itself always flows unchanged (hidden, never
+// cleared). Tree density does NOT move a pest price (owner directive
+// 2026-07-30), nor mosquito one-time, misting, palm injection, termite or
+// rodent. What does read it (server pricing-engine/service-pricing.js):
+//   Tree & Shrub: no-count fallback tree estimate (svcTs).
+//   Mosquito: tree pressure factor and the heavy-trees monthly recommendation (svcMosquito).
+//   Lawn family: the turf estimate's complexity score when no measured or
+//     lookup turf exists, plus the "heavy tree canopy" turf-review reason
+//     (svcLawn, svcOnetimeLawn, svcDethatch, and top dressing priced from turf).
+//   Flea: the exterior-spray tree adjustment (svcFleaExterior).
+export function treeDensityAffectsPrice(form = {}) {
+  return !!(
+    form.svcTs ||
+    form.svcMosquito ||
+    form.svcLawn ||
+    form.svcOnetimeLawn ||
+    form.svcDethatch ||
+    (form.svcTopdress && !(parseInt(form.topDressArea, 10) > 0)) ||
+    form.svcFleaExterior
+  );
+}
+
 // Estimator panel note for the rodent bait row, derived from the EMITTED
 // result (row-level tier/discount posture + whether the setup line fired)
 // and the live setup fee — never the migration-default literals (codex
