@@ -122,24 +122,30 @@ function maskAccessSentences(note) {
 // the four code fields the pre-visit brief shows the technician. A note that
 // holds one of them is not read at all (no model reads it, and no text
 // passes for it), and a text that holds one is refused.
+// A code field can hold more than the code ("use bluebird", "gate 1234,
+// door 5678#"), and nothing tells the code from the words beside it. So
+// every word and every run with a figure of a code field is a code, and the
+// field as a whole is one too ("12 34", "Blue Bird").
 // A code is compared in small letters with every space and mark taken out:
 // "12 34#" on file is "1234" in a note, and "Blue Bird" is "bluebird". That
-// reads some honest figures as a code ("used 12. 34 traps set" beside "1234"
-// on file): the safe side. Fewer than three characters is no code to look
-// for: it would hide most notes. A code in a free-text field of the file
+// reads some honest words and figures as a code ("used 12. 34 traps set"
+// beside "1234" on file; "then" in a note beside "1234 then #"): the safe
+// side. A short code (a word under four letters, a run with a figure under
+// three characters) is looked for as a whole word only: anywhere in the
+// note, it would hide most notes. A code in a free-text field of the file
 // (the access notes) is not on this list.
 const STORED_CODE_COLUMNS = ['neighborhood_gate_code', 'property_gate_code', 'garage_code', 'lockbox_code'];
-const MIN_STORED_CODE_CHARS = 3;
 const squeezed = (text) => oneForm(text).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
-// From each field: the field as a whole (a code written with a space, or a
-// word), each run that holds a figure ("gate 1234, door 5678#"), and each
-// group of figures in it ("c1234").
+// From each field: the field as a whole, each run of letters, figures and
+// keypad marks in it ("#12*34" is "1234"), and each group of three or more
+// figures in a run ("c1234").
 function storedCodesOf(prefs) {
   const forms = STORED_CODE_COLUMNS.flatMap((column) => {
     const value = oneForm(prefs?.[column]);
-    return [value, ...(value.match(/[\p{L}\p{N}#*]*\p{Nd}[\p{L}\p{N}#*]*/gu) || []), ...(value.match(/\p{Nd}+/gu) || [])].map(squeezed);
+    const runs = (value.match(/[\p{L}\p{N}#*]+/gu) || []).map(squeezed);
+    return [squeezed(value), ...runs, ...runs.flatMap((run) => run.match(/\p{Nd}{3,}/gu) || [])];
   });
-  return [...new Set(forms.filter((form) => form.length >= MIN_STORED_CODE_CHARS))];
+  return [...new Set(forms.filter(Boolean))];
 }
 // Throws when the file cannot be read: the caller then uses the fixed sentence.
 async function readStoredCodes(db, customerId) {
@@ -152,7 +158,9 @@ async function readStoredCodes(db, customerId) {
 function holdsStoredCode(text, storedCodes) {
   if (!Array.isArray(storedCodes)) throw new TypeError('report note: the codes on the customer\'s file were not read');
   const plain = squeezed(text);
-  return storedCodes.some((code) => plain.includes(code));
+  const words = new Set(oneForm(text).toLowerCase().split(/[^\p{L}\p{N}]+/u));
+  const anywhere = (code) => code.length >= (/\p{Nd}/u.test(code) ? 3 : 4);
+  return storedCodes.some((code) => (anywhere(code) ? plain.includes(code) : words.has(code)));
 }
 
 function noteAsRead(note, storedCodes) {

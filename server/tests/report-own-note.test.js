@@ -138,13 +138,13 @@ describe('a code on the customer\'s file is found by its value, in any wording',
     neighborhood_gate_code: '#4471', property_gate_code: 'Blue Bird', garage_code: null, lockbox_code: 'box c902, then 55 12',
   });
 
-  test('the forms of the four code fields: the field, each run with a figure, each group of figures', () => {
-    expect(onFile).toEqual(expect.arrayContaining(['4471', 'bluebird', 'c902', '902', 'boxc902then5512']));
-    // Fewer than three characters is no code to look for.
-    expect(onFile).not.toContain('55');
-    expect(onFile).not.toContain('12');
-    expect(storedCodesOf({ lockbox_code: '12 34' })).toEqual(['1234']);
-    expect(storedCodesOf({ lockbox_code: 'no', garage_code: '  ' })).toEqual([]);
+  test('the forms of the four code fields: the field, each word and run in it, each group of figures', () => {
+    expect([...onFile].sort()).toEqual([
+      '12', '4471', '55', '902', 'bird', 'blue', 'bluebird', 'box', 'boxc902then5512', 'c902', 'then',
+    ]);
+    expect(storedCodesOf({ lockbox_code: '#12*34' })).toEqual(['1234']);
+    expect(storedCodesOf({ lockbox_code: '12 34' })).toEqual(['1234', '12', '34']);
+    expect(storedCodesOf({ garage_code: '  ' })).toEqual([]);
     expect(storedCodesOf(undefined)).toEqual([]);
     // Another field of the file is no code field.
     expect(storedCodesOf({ parking_notes: 'park at 7788' })).toEqual([]);
@@ -160,7 +160,9 @@ describe('a code on the customer\'s file is found by its value, in any wording',
       'treated shed. 4-4-7-1',
       'ｔｒｅａｔｅｄ shed. ４４７１',
       'treated shed. blue\u200Bbird',
-      'treated shed. C902 opens the box',
+      'treated shed. C902 opens the pad',
+      // A word of a code field is a code: nothing tells it from the words beside it.
+      'treated shed. bird nest in the eaves',
     ];
     for (const note of notes) {
       expect(noteAsRead(note, onFile)).toBe('[redacted]');
@@ -173,10 +175,24 @@ describe('a code on the customer\'s file is found by its value, in any wording',
     expect(await refusal('treated shed', 'I treated the shed, 44 71.', onFile)).toEqual({ reason: 'stored_code' });
   });
 
+  test('a word code beside an instruction, and a short code', async () => {
+    const annotated = storedCodesOf({ lockbox_code: 'use bluebird', garage_code: '#12' });
+    for (const note of ['Bluebird. Treated shed.', 'treated shed. b l u e b i r d', 'treated shed. #12', 'treated shed\n12']) {
+      expect(noteAsRead(note, annotated)).toBe('[redacted]');
+      expect(await refusal(note, 'I treated the shed.', annotated)).toEqual({ reason: 'stored_code' });
+    }
+    // A short code is a whole word of the note: "used" is not "use", and 21 is not 12.
+    const note = 'swept 21 webs and used a brush on the eaves. treated shed';
+    expect(noteAsRead(note, annotated)).toBe(note);
+    await expect(refusal(note, 'I swept 21 webs and used a brush on the eaves. I treated the shed.', annotated)).resolves.toBeNull();
+    // The same count as the short code is the code: the safe side.
+    expect(noteAsRead('swept 12 webs. treated shed', annotated)).toBe('[redacted]');
+  });
+
   test('a note with no code of this customer is read as before', async () => {
-    const note = 'saw a blue jay by the bird bath. treated shed';
+    const note = 'saw a jay by the bath. treated shed';
     expect(noteAsRead(note, onFile)).toBe(note);
-    await expect(refusal(note, 'I saw a blue jay by the bird bath. I treated the shed.', onFile)).resolves.toBeNull();
+    await expect(refusal(note, 'I saw a jay by the bath. I treated the shed.', onFile)).resolves.toBeNull();
     // The same words for a customer with no code on file.
     expect(noteAsRead('bluebird nest in the eaves. treated shed')).toBe('bluebird nest in the eaves. treated shed');
   });
