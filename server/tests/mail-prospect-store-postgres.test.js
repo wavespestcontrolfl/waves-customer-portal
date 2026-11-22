@@ -1,7 +1,8 @@
 /**
  * mail_prospects store against real PostgreSQL: the migration, insert-then-update by the same key, the one-live-row-
- * per-parcel index with its duplicate_parcel fallback, the new-home permit read (both pin forms; canceled,
- * alteration, ADU and long-finished homes left out) and the known-address read. Made-up rows in a throwaway schema
+ * per-parcel index with its duplicate_parcel fallback, the new-home permit read (both pin forms, the address proof,
+ * the open-permit rule, the Eastern 24-month limit; canceled, alteration, ADU and long-finished homes left out) and
+ * the known-address read. Made-up rows in a throwaway schema
  * of this worktree's own QA database or CI's database.
  */
 // CI runs a DB suite only when it carries this exact line (tests.yml greps for it).
@@ -24,8 +25,9 @@ const db = require('../models/db');
 const constructionMigration = require('../models/migrations/20260813000031_construction_permit_records');
 const mailMigration = require('../models/migrations/20261122160000_mail_prospects');
 const {
-  findBySourceRefs, newHomePermitsByParid, addressKnownToWaves, saveProspect,
+  findBySourceRefs, newHomePermitsForParcels, addressKnownToWaves, saveProspect,
 } = require('../services/mail/prospect-store');
+const { monthsAgoIso } = require('../services/property-lookup/manatee-permit-sync');
 
 jest.setTimeout(60000);
 
@@ -91,10 +93,13 @@ postgres('mail prospect store on PostgreSQL', () => {
   });
   // Dates count back from today, so the 24-month bound holds on any run date.
   const dateAgo = (days) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  // A permit and a parcel at the same made-up address, unless a test says otherwise.
   const permit = (no, extra = {}) => conn('construction_permit_records').insert({
     permit_no: no, permit_type: 'Residential', type_of_work: 'New Single Family', status: 'Permit Issued',
-    issued_date: '2026-05-01', parcel_pin: '5133090590', ...extra,
+    issued_date: dateAgo(200), parcel_pin: '5133090590', address_loose_key: '101example34212', ...extra,
   });
+  const parcel = (parid, extra = {}) => ({ parid, addressLine1: '101 EXAMPLE TRL', zip: '34212', ...extra });
+  const found = async (...parids) => Object.keys(await newHomePermitsForParcels(parids.map((id) => parcel(id)))).sort();
 
   test('migration: columns, the unique key, the partial index, and a clean down', async () => {
     const idx = (await conn.raw('SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = ? AND tablename = ?', [schema, 'mail_prospects'])).rows;
@@ -158,10 +163,10 @@ postgres('mail prospect store on PostgreSQL', () => {
     expect(await findBySourceRefs('new_home', 'manatee_clerk_deed', [])).toEqual([]);
   });
 
-  test('newHomePermitsByParid: 9-digit and 10-digit forms, newest permit, and the permits that do not count', async () => {
-    await permit('BLD9900-0001', { parcel_pin: '5133090590', issued_date: '2026-03-01' });
-    await permit('BLD9900-0002', { parcel_pin: '5133090590', issued_date: '2026-05-01', co_date: dateAgo(20) });
-    await permit('BLD9900-0003', { parcel_pin: '1000000010', issued_date: '2026-05-01' });
+  test('new-home permits: 9-digit and 10-digit forms, the newest permit, and the permits that do not count', async () => {
+    await permit('BLD9900-0001', { parcel_pin: '5133090590', issued_date: dateAgo(260) });
+    await permit('BLD9900-0002', { parcel_pin: '5133090590', issued_date: dateAgo(200), co_date: dateAgo(20), status: 'Closed' });
+    await permit('BLD9900-0003', { parcel_pin: '1000000010' });
     await permit('BLD9900-0004', { parcel_pin: '2000000010', status: 'Canceled' });
     await permit('BLD9900-0005', { parcel_pin: '3000000010', type_of_work: 'Alteration Single Family' });
     await permit('BLD9900-0006', { parcel_pin: '4000000010', type_of_work: 'New Accessory Dwelling Unit' });
@@ -169,23 +174,66 @@ postgres('mail prospect store on PostgreSQL', () => {
     await permit('BLD9900-0008', { parcel_pin: '6000000010', permit_type: 'Commercial' });
     await permit('BLD9900-0009', { parcel_pin: '7000000010', status: 'Withdrawn' });
     // Finished more than 24 months ago: a company that sells it now is not its builder.
-    await permit('BLD9900-0010', { parcel_pin: '8000000010', issued_date: '2023-01-10', co_date: dateAgo(800) });
-    const found = await newHomePermitsByParid(['513309059', '1000000010', '200000001', '300000001', '400000001', '500000001', '600000001', '700000001', '800000001', 'bad']);
-    expect(Object.keys(found).sort()).toEqual(['1000000010', '513309059']);
-    expect(found['513309059']).toMatchObject({ permit_no: 'BLD9900-0002', co_date: dateAgo(20) });
-    expect(found['1000000010'].permit_no).toBe('BLD9900-0003');
-    expect(await newHomePermitsByParid([])).toEqual({});
+    await permit('BLD9900-0010', { parcel_pin: '8000000010', issued_date: dateAgo(1200), co_date: dateAgo(800) });
+    const parids = ['513309059', '1000000010', '200000001', '300000001', '400000001', '500000001', '600000001', '700000001', '800000001', 'bad'];
+    const permits = await newHomePermitsForParcels(parids.map((id) => parcel(id)));
+    expect(Object.keys(permits).sort()).toEqual(['1000000010', '513309059']);
+    // A finished home's permit is closed: it counts by its certificate. The newest permit of the parcel wins.
+    expect(permits['513309059']).toMatchObject({ permit_no: 'BLD9900-0002', co_date: dateAgo(20) });
+    expect(permits['1000000010'].permit_no).toBe('BLD9900-0003');
+    expect(await newHomePermitsForParcels([])).toEqual({});
+    expect(await newHomePermitsForParcels(null)).toEqual({});
   });
 
-  test('newHomePermitsByParid: a 10-digit parcel keeps its own permit when a 9-digit parcel pads to the same number', async () => {
-    await permit('BLD9900-0020', { parcel_pin: '9000000090' });
-    const found = await newHomePermitsByParid(['900000009', '9000000090']);
-    // The permit row says 9000000090: that IS the 10-digit parcel, whichever order the two were asked in.
-    expect(found['9000000090'].permit_no).toBe('BLD9900-0020');
-    expect(found['900000009']).toBeUndefined();
-    const reversed = await newHomePermitsByParid(['9000000090', '900000009']);
-    expect(reversed['9000000090'].permit_no).toBe('BLD9900-0020');
-    expect(reversed['900000009']).toBeUndefined();
+  test('new-home permits: with no certificate yet, only a permit the county still lists as open counts', async () => {
+    await permit('BLD9900-0011', { parcel_pin: '1100000011' });
+    await permit('BLD9900-0012', { parcel_pin: '1200000011', issued_date: dateAgo(800) }); // issued over 24 months ago
+    await permit('BLD9900-0013', { parcel_pin: '1300000011', status: 'Closed' }); // closed with no certificate
+    await permit('BLD9900-0014', { parcel_pin: '1400000011' });
+    await permit('BLD9900-0015', { parcel_pin: '1500000011', issued_date: null });
+    // Left the county's report 40 days ago: it keeps its last status, and must not count for ever.
+    await conn('construction_permit_records').where({ permit_no: 'BLD9900-0014' }).update({ last_seen_at: new Date(Date.now() - 40 * 24 * 60 * 60 * 1000) });
+    expect(await found('1100000011', '1200000011', '1300000011', '1400000011', '1500000011')).toEqual(['1100000011']);
+    // The same four with a recent certificate all count: a finished home needs no open permit.
+    await conn('construction_permit_records').whereIn('permit_no', ['BLD9900-0012', 'BLD9900-0013', 'BLD9900-0014', 'BLD9900-0015']).update({ co_date: dateAgo(30) });
+    expect(await found('1100000011', '1200000011', '1300000011', '1400000011', '1500000011')).toEqual(['1100000011', '1200000011', '1300000011', '1400000011', '1500000011']);
+  });
+
+  test('new-home permits: the 24-month limit counts back from today in Eastern time', async () => {
+    const limit = monthsAgoIso(24);
+    const dayBefore = new Date(Date.parse(`${limit}T00:00:00Z`) - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    await permit('BLD9900-0016', { parcel_pin: '1600000011', issued_date: dateAgo(900), co_date: limit });
+    await permit('BLD9900-0017', { parcel_pin: '1700000011', issued_date: dateAgo(900), co_date: dayBefore });
+    expect(await found('1600000011', '1700000011')).toEqual(['1600000011']);
+    // 03:00 UTC on Nov 23 is 22:00 on Nov 22 in Florida, so the limit is Nov 22, 2024, not Nov 23.
+    await permit('BLD9900-0018', { parcel_pin: '1800000011', issued_date: '2024-03-01', co_date: '2024-11-22' });
+    await permit('BLD9900-0019', { parcel_pin: '1900000011', issued_date: '2024-03-01', co_date: '2024-11-21' });
+    jest.useFakeTimers({ now: new Date('2026-11-23T03:00:00Z'), doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask', 'hrtime', 'performance'] });
+    try {
+      expect(await found('1800000011', '1900000011')).toEqual(['1800000011']);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('new-home permits: a number two parcels can share goes to the parcel at the permit\'s address, whoever is asked', async () => {
+    // The pin of the 9-digit parcel 900000009 is 9000000090, which is also the 10-digit parcel 9000000090's own.
+    await permit('BLD9900-0020', { parcel_pin: '9000000090', address_loose_key: '900sample34219' });
+    const nine = parcel('900000009', { addressLine1: '900 SAMPLE CT', zip: '34219' });
+    const ten = parcel('9000000090', { addressLine1: '12 OTHER WAY', zip: '34219' });
+    const owners = async (...list) => Object.keys(await newHomePermitsForParcels(list));
+    expect(await owners(nine)).toEqual(['900000009']);
+    expect(await owners(ten)).toEqual([]);
+    expect(await owners(nine, ten)).toEqual(['900000009']);
+    expect(await owners(ten, nine)).toEqual(['900000009']);
+    // The other way round: the permit's address is the 10-digit parcel's.
+    await conn('construction_permit_records').update({ address_loose_key: '12other34219' });
+    expect(await owners(nine)).toEqual([]);
+    expect(await owners(nine, ten)).toEqual(['9000000090']);
+    // No address on one side proves nothing.
+    expect(await owners(parcel('9000000090', { addressLine1: null }), parcel('900000009', { addressLine1: 'SAMPLE CT', zip: '34219' }), parcel('900000009', { addressLine1: '900 SAMPLE CT', zip: null }))).toEqual([]);
+    await conn('construction_permit_records').update({ address_loose_key: null });
+    expect(await owners(nine, ten)).toEqual([]);
   });
 
   test('addressKnownToWaves: same number, street word and zip is known; anything else is not', async () => {
@@ -201,5 +249,13 @@ postgres('mail prospect store on PostgreSQL', () => {
     expect(await addressKnownToWaves('101 ELSEWHERE TRL', '34212')).toBe(false); // different street
     expect(await addressKnownToWaves('EXAMPLE TRL', '34212')).toBe(false); // no house number
     expect(await addressKnownToWaves('101 EXAMPLE TRL', null)).toBe(false);
+  });
+
+  test('addressKnownToWaves reads every customer with that house number and zip, however many there are', async () => {
+    const others = Array.from({ length: 450 }, (_, i) => ({ address_line1: `77 Street${i} Rd`, zip: '34221' }));
+    await conn('customers').insert(others);
+    await conn('customers').insert({ address_line1: '77 Lastone Ln', zip: '34221' });
+    expect(await addressKnownToWaves('77 LASTONE LN', '34221')).toBe(true);
+    expect(await addressKnownToWaves('77 MISSING LN', '34221')).toBe(false);
   });
 });

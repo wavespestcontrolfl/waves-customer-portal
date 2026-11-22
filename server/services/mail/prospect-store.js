@@ -7,10 +7,11 @@
  */
 
 const db = require('../../models/db');
-const { looseAddressKey } = require('../property-lookup/manatee-permit-sync');
+const {
+  looseAddressKey, monthsAgoIso, CONSTRUCTION_ACTIVE_MONTHS, ACTIVE_SEEN_WITHIN_DAYS,
+} = require('../property-lookup/manatee-permit-sync');
 
 const LIVE_PARCEL_INDEX = 'mail_prospects_one_live_per_parcel';
-const KNOWN_ADDRESS_LIMIT = 200;
 const NEW_HOME_CO_MONTHS = 24;
 
 // Every writable column. A save writes all of them, so a row that was `unmatched` and is now matched (or the other
@@ -43,37 +44,64 @@ async function findBySourceRefs(listKey, source, refs, conn = db) {
 }
 
 /**
- * The newest new-home permit for each parcel number, as `{ [parid]: permit row }`. A new-home permit is a
- * residential permit whose work starts with "New", is not an accessory building or a guest house, is not
- * canceled or withdrawn, and has no certificate of occupancy older than NEW_HOME_CO_MONTHS.
+ * The newest new-home permit of each parcel, as `{ [parid]: permit row }`. `parcels` are the county map's parcels:
+ * `{ parid, addressLine1, zip }`.
+ *
+ * A permit is the parcel's own when both agree:
+ *   - its parcel number is a form of the parcel's number (permitPinForms), and
+ *   - its address is the parcel's address (the permit sync's loose key: house number, first street word, zip).
+ * The number alone is not proof. The pin of a 9-digit parcel number P is P plus a 0, and P0 can be another parcel's
+ * own 10-digit number (5 such pairs on the county map, counted 2026-11-22). The address settles it, and each parcel
+ * is judged alone, so the answer does not depend on which other parcels are asked in the same call. A parcel or a
+ * permit without an address key proves nothing: no permit. (On three real days, all 55 matched homes had the same
+ * key on the permit and on the parcel.)
+ *
+ * A new-home permit is a residential permit whose work starts with "New", is not an accessory building or a guest
+ * house, is not canceled or withdrawn, and is one of:
+ *   - finished: a certificate of occupancy in the last NEW_HOME_CO_MONTHS months. A home finished long ago is not a
+ *     new home any more: a company that sells it now is an investor, not its builder.
+ *   - still open: no certificate yet (some builders close before the county files it), by the permit sync's own
+ *     rule for "under construction": issued in the last CONSTRUCTION_ACTIVE_MONTHS months, seen in the county's
+ *     report in the last ACTIVE_SEEN_WITHIN_DAYS days, not closed. A permit that left the report keeps its last
+ *     status for ever; it must not count for ever.
+ * Months count back from today in Eastern time (monthsAgoIso), not from the database session's date.
  */
-async function newHomePermitsByParid(parids, conn = db) {
-  // A permit number keyed by the parcel it belongs to. The padded form of a 9-digit parcel can equal another
-  // parcel's own 10-digit number, so the padded forms go in first and each parcel's exact number then wins.
-  const parOfPin = new Map();
-  const known = (parids || []).filter((parid) => permitPinForms(parid).length > 0);
-  for (const parid of known) {
-    for (const pin of permitPinForms(parid)) if (pin !== parid) parOfPin.set(pin, parid);
+async function newHomePermitsForParcels(parcels, conn = db) {
+  const wanted = new Map(); // pin form -> the parcels that could own a permit under it
+  for (const parcel of parcels || []) {
+    const key = looseAddressKey(parcel?.addressLine1, parcel?.zip);
+    if (!key) continue;
+    for (const pin of permitPinForms(parcel.parid)) {
+      if (!wanted.has(pin)) wanted.set(pin, []);
+      wanted.get(pin).push({ parid: String(parcel.parid), key });
+    }
   }
-  for (const parid of known) parOfPin.set(String(parid), parid);
-  if (parOfPin.size === 0) return {};
+  if (wanted.size === 0) return {};
+  const coFloor = monthsAgoIso(NEW_HOME_CO_MONTHS);
+  const issuedFloor = monthsAgoIso(CONSTRUCTION_ACTIVE_MONTHS);
+  const seenAfter = new Date(Date.now() - ACTIVE_SEEN_WITHIN_DAYS * 24 * 60 * 60 * 1000);
   const rows = await conn('construction_permit_records')
-    .whereIn('parcel_pin', [...parOfPin.keys()])
+    .whereIn('parcel_pin', [...wanted.keys()])
     .whereRaw("LOWER(COALESCE(permit_type, '')) = 'residential'")
     .whereRaw("type_of_work ILIKE 'New%'")
     .whereRaw("type_of_work NOT ILIKE '%accessory%'")
     .whereRaw("type_of_work NOT ILIKE '%guest%'")
     .whereRaw("LOWER(COALESCE(status, '')) NOT IN ('canceled', 'withdrawn')")
-    // A home finished long ago is not a new home any more: a company that sells it now is an investor, not its
-    // builder. No certificate of occupancy yet still counts (some builders close before the county files it).
-    .whereRaw('(co_date IS NULL OR co_date >= CURRENT_DATE - make_interval(months => ?))', [NEW_HOME_CO_MONTHS])
+    .where((b) => b
+      .where('co_date', '>=', coFloor)
+      .orWhere((open) => open
+        .whereNull('co_date')
+        .where('issued_date', '>=', issuedFloor)
+        .where('last_seen_at', '>=', seenAfter)
+        .whereRaw("LOWER(COALESCE(status, '')) <> 'closed'")))
     .orderByRaw('issued_date DESC NULLS LAST, permit_no DESC')
     // Dates come back as YYYY-MM-DD text: a pg DATE read as a JS Date can slip a day with the server's time zone.
-    .select('permit_no', 'parcel_pin', conn.raw("to_char(co_date, 'YYYY-MM-DD') AS co_date"), conn.raw("to_char(issued_date, 'YYYY-MM-DD') AS issued_date"));
+    .select('permit_no', 'parcel_pin', 'address_loose_key', conn.raw("to_char(co_date, 'YYYY-MM-DD') AS co_date"), conn.raw("to_char(issued_date, 'YYYY-MM-DD') AS issued_date"));
   const out = {};
-  for (const row of rows) {
-    const parid = parOfPin.get(row.parcel_pin);
-    if (parid && !out[parid]) out[parid] = row; // rows come newest first: keep the first
+  for (const row of rows) { // newest first: a parcel keeps its first
+    for (const { parid, key } of wanted.get(row.parcel_pin) || []) {
+      if (row.address_loose_key === key && !out[parid]) out[parid] = row;
+    }
   }
   return out;
 }
@@ -91,8 +119,7 @@ async function addressKnownToWaves(addressLine1, zip, conn = db) {
   const rows = await conn('customers')
     .where('zip', 'like', `${zip5[0]}%`)
     .whereRaw('address_line1 ILIKE ?', [`${number[1]} %`])
-    .limit(KNOWN_ADDRESS_LIMIT)
-    .select('address_line1', 'zip');
+    .select('address_line1', 'zip'); // every candidate: a cut-off list could hide the one row that is this home
   return rows.some((r) => looseAddressKey(r.address_line1, r.zip) === key);
 }
 
@@ -139,5 +166,5 @@ async function saveProspect(row, conn = db) {
 }
 
 module.exports = {
-  findBySourceRefs, newHomePermitsByParid, addressKnownToWaves, saveProspect, permitPinForms, NEW_HOME_CO_MONTHS,
+  findBySourceRefs, newHomePermitsForParcels, addressKnownToWaves, saveProspect, permitPinForms, NEW_HOME_CO_MONTHS,
 };
