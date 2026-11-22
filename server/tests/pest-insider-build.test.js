@@ -313,6 +313,17 @@ describe('buildIssue', () => {
     }
   });
 
+  test('an issue the send check refuses without the line too does not blame the line', () => {
+    // The species text is the cause (see the second-swarm test above): the issue fails with the
+    // result line and without it, so the diagnostics name the issue's error and no blocked line.
+    const formosan = { ...SPECIES.find((s) => s.slug === 'formosan-termite'), fact: 'They swarm again in June.' };
+    usePlan(factById('T02'), formosan);
+    const r = buildIssue({ sendDate: '2027-05-06', livePostFactIds: LIVE, lastPoll: { quizId: PEST_INSIDER_POLL_IDS[0], counts: { shoe: 2 } } });
+    expect(r).toMatchObject({ ok: false, issue: null, reason: expect.stringMatching(/^send_validator_blocked: Unverified claim \(termite_second_swarm\)/) });
+    expect(r.diagnostics).not.toHaveProperty('lastPollLineBlocked');
+    expect(r.diagnostics).not.toHaveProperty('lastPollId');
+  });
+
   test('every approved poll gives a result line the send check accepts', () => {
     usePlan(A01);
     for (const quizId of PEST_INSIDER_POLL_IDS) {

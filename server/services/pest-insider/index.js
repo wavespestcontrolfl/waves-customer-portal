@@ -76,19 +76,21 @@ function sendGateErrors(issue) {
 }
 
 // The issue as rendered, with the send check's errors. The last poll's result
-// line is a nice-to-have: a line the check refuses is left out, the reason is
-// noted in the diagnostics, and the issue is checked again without it. A line
-// the issue keeps is named in diagnostics.lastPollId.
+// line is a nice-to-have: a line the check refuses is left out and the issue is
+// checked again without it. The diagnostics name the reason only when the issue
+// passes without the line: an issue that fails either way did not fail on the
+// line. A line the issue keeps is named in diagnostics.lastPollId.
 function renderChecked(draft, lastPoll, diagnostics) {
   const withLine = pollResultLine(lastPoll || undefined) ? renderIssue({ ...draft, lastPoll }) : null;
-  const errors = withLine ? sendGateErrors(withLine) : [];
-  if (withLine && !errors.length) {
+  const lineErrors = withLine ? sendGateErrors(withLine) : [];
+  if (withLine && !lineErrors.length) {
     diagnostics.lastPollId = lastPoll.quizId;
-    return { issue: withLine, errors };
+    return { issue: withLine, errors: lineErrors };
   }
-  if (withLine) diagnostics.lastPollLineBlocked = errors[0];
   const issue = renderIssue(draft);
-  return { issue, errors: sendGateErrors(issue) };
+  const errors = sendGateErrors(issue);
+  if (withLine && !errors.length) diagnostics.lastPollLineBlocked = lineErrors[0];
+  return { issue, errors };
 }
 
 /**
