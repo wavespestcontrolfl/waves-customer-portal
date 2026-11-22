@@ -244,7 +244,7 @@ describe('PUT /campaigns/:id status on synced platforms', () => {
     expect(updates).toEqual([]);
   });
 
-  test('a Meta campaign still takes non-status edits, and its unchanged status', async () => {
+  test('a Meta campaign still takes non-status edits; its unchanged status is accepted but never written back', async () => {
     campaignRow = { id: 'c-1', platform: 'facebook', status: 'active', campaign_name: 'Meta' };
     let res = await call('PUT', '/campaigns/c-1', { campaign_name: 'Meta - Renamed' });
     expect(res.status).toBe(200);
@@ -252,7 +252,8 @@ describe('PUT /campaigns/:id status on synced platforms', () => {
     expect(res.status).toBe(200);
     expect(updates.map(({ updated_at: _ignored, ...rest }) => rest)).toEqual([
       { campaign_name: 'Meta - Renamed' },
-      { status: 'active', target_area: 'Parrish' },
+      // No status in the write: a sync that changed it since the read is not undone.
+      { target_area: 'Parrish' },
     ]);
   });
 
@@ -276,8 +277,9 @@ describe('PUT /campaigns/:id status on synced platforms', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/comes from Google/);
     expect(updates).toEqual([]);
-    res = await call('PUT', '/campaigns/c-4', { target_area: 'Bradenton' });
+    res = await call('PUT', '/campaigns/c-4', { status: 'active', target_area: 'Bradenton' });
     expect(res.status).toBe(200);
+    expect(updates.map(({ updated_at: _ignored, ...rest }) => rest)).toEqual([{ target_area: 'Bradenton' }]);
   });
 
   test('a campaign marked by an account the sync no longer reads is editable again', async () => {

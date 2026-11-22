@@ -57,8 +57,10 @@ const SYNCED_STATUS_REFUSALS = new Map([
 ]);
 // A Local Services campaign the daily sync owns (it carries the sync's account
 // mark, see ads/google-lsa.js ownsCampaign) takes its status from Google. One
-// entered by hand has no mark and stays editable here. google-lsa.js loads the
-// Google Ads SDK only when a sync runs, so the require is cheap.
+// entered by hand has no mark and stays editable here. The sync marks a row
+// only when it inserts it and never takes over an existing one, so a row's
+// owner cannot change between the read and the write below. google-lsa.js
+// loads the Google Ads SDK only when a sync runs, so the require is cheap.
 const LSA_SYNCED_STATUS_REFUSAL = "A synced Local Services campaign's status comes from Google. Change it there; the daily Local Services sync brings it in.";
 function syncedStatusRefusal(campaign) {
   if (campaign.platform === 'google_lsa') {
@@ -258,8 +260,12 @@ router.put('/campaigns/:id', requireAdmin, async (req, res, next) => {
       const existing = await db('ad_campaigns').where({ id: req.params.id }).first();
       if (!existing) return res.status(404).json({ error: 'Campaign not found' });
       const refusal = syncedStatusRefusal(existing);
-      if (refusal && clean.value.status !== existing.status) {
-        return res.status(400).json({ error: refusal });
+      if (refusal) {
+        if (clean.value.status !== existing.status) return res.status(400).json({ error: refusal });
+        // The platform owns this status, so an unchanged one is not written
+        // back: a sync that changes it between this read and the update below
+        // must not be undone by the echo.
+        delete clean.value.status;
       }
     }
     let campaign;

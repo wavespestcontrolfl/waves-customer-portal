@@ -25,24 +25,33 @@ const { hasCredentials } = require('./google-ads-config');
 // the budget loop only acts on platform 'google_ads'.
 //
 // A row this sync owns carries metadata.lsa_customer_id = the account it came
-// from. The mark scopes every read of "this account's campaigns" below and the
-// status rule in routes/admin-ads.js, so a campaign entered by hand, or one
-// from an account the sync no longer reads, is never treated as synced.
+// from. The sync writes the mark only on a row it inserts, and generic campaign
+// writes can neither set nor erase it (routes/admin-ads.js
+// RESERVED_METADATA_KEYS), so a row's owner never changes. Every read and write
+// below is scoped to the mark: a campaign entered by hand is never taken over,
+// even when it carries the same Google campaign id, and a row from an account
+// the sync no longer reads is left as it is.
 // ---------------------------------------------------------------------------
 
 const PLATFORM = 'google_lsa';
 const CAMPAIGN_TYPE = 'google_lsa';
 // The Waves Local Services account. An account id is not a secret; the env var
-// can point the sync at another account, and a value that is not a 10-digit id
-// (GOOGLE_LSA_CUSTOMER_ID=off) turns the sync off.
+// can point the sync at another account, and a value that is not an account id
+// (GOOGLE_LSA_CUSTOMER_ID=off, or empty) turns the sync off.
 const DEFAULT_CUSTOMER_ID = '7636809139';
 const DEFAULT_DAYS = 30;
+// How far back a late credit can move the start of the rebuild. It equals the
+// window the 6:25 AM cost allocation recomputes (scheduler.js: today - 90 days),
+// so no day this sync changes is outside the months that job spreads again.
+const MAX_LOOKBACK_DAYS = 90;
 const ACCOUNT_KEY = 'lsa_customer_id'; // also reserved in routes/admin-ads.js RESERVED_METADATA_KEYS
 
+// The WHOLE value must be an account id, plain or dashed: "off-1234567890" is
+// off, not account 1234567890.
 function customerId() {
   const raw = process.env.GOOGLE_LSA_CUSTOMER_ID;
-  const digits = String(raw === undefined ? DEFAULT_CUSTOMER_ID : raw).replace(/\D/g, '');
-  return digits.length === 10 ? digits : null;
+  const value = String(raw === undefined ? DEFAULT_CUSTOMER_ID : raw).trim();
+  return /^\d{3}-?\d{3}-?\d{4}$/.test(value) ? value.replace(/-/g, '') : null;
 }
 
 // The OAuth credentials are shared with the Search sync; the account id is this
@@ -134,12 +143,17 @@ function emptyLeadDay() {
 // segments.date). A lead with no readable date is left out. lead_charged stays
 // true on a lead Google later credits back, so a credited lead counts in
 // `credited` and `total`, not in `charged`.
+function leadDay(lead) {
+  const day = String(lead.creation_date_time || '').slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : null;
+}
+
 function tallyLeadsByDay(leadRows) {
   const byDay = new Map();
   for (const row of leadRows) {
     const lead = row.local_services_lead;
-    const day = String(lead.creation_date_time || '').slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
+    const day = leadDay(lead);
+    if (!day) continue;
     const t = byDay.get(day) || emptyLeadDay();
     t.total += 1;
     if (CREDITED.has(lead.credit_details?.credit_state)) t.credited += 1;
@@ -177,6 +191,9 @@ function mapPerformanceRow(metrics, leads) {
   };
 }
 
+// The window's edges are Eastern calendar days. Each day inside it is keyed by
+// Google's own account-local date (segments.date, the lead's creation day), so
+// an account in another time zone would move only the edges, never a day's data.
 function dateRange(days, now = new Date()) {
   return { since: etDateString(addETDays(now, -days)), until: etDateString(now) };
 }
@@ -191,9 +208,6 @@ function dateRange(days, now = new Date()) {
 // other campaign type in the account (Search, Display) out of google_lsa.
 // ---------------------------------------------------------------------------
 const CHANNEL_FILTER = "campaign.advertising_channel_type = 'LOCAL_SERVICES'";
-
-// metadata with the mark merged in; a metadata value that is not an object is replaced.
-const MERGE_MARK_SQL = "(CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END) || ?::jsonb";
 
 // This account's campaign rows, removed ones included.
 function accountCampaigns(account) {
@@ -214,14 +228,14 @@ async function syncCampaigns(customer, account) {
   const results = [];
   for (const row of rows) {
     const data = mapCampaign(row);
-    const existing = await db('ad_campaigns')
-      .where({ platform: PLATFORM, platform_campaign_id: data.platform_campaign_id })
+    // Only a row this sync inserted (it carries the mark) is ever updated. A
+    // row entered by hand with the same Google id is not this sync's: it stays
+    // untouched, and the campaign gets its own marked row.
+    const existing = await accountCampaigns(account)
+      .where({ platform_campaign_id: data.platform_campaign_id })
       .first();
     if (existing) {
-      // Merge the mark in SQL: every other metadata key stays, and a metadata
-      // write that lands between the read and this update is not erased.
-      await db('ad_campaigns').where({ id: existing.id })
-        .update({ ...data, metadata: db.raw(MERGE_MARK_SQL, [mark]) });
+      await db('ad_campaigns').where({ id: existing.id }).update(data);
       results.push({ ...existing, ...data });
     } else {
       const [inserted] = await db('ad_campaigns')
@@ -237,10 +251,28 @@ async function syncCampaigns(customer, account) {
 
 // ---------------------------------------------------------------------------
 // syncDailyPerformance: cost and leads per campaign-day into
-// ad_performance_daily. The 30-day window is longer than the Google sync's 7:
-// Google credits a disputed lead back days later, and the day's charged count
-// and cost then change.
+// ad_performance_daily. Each run rebuilds a whole window of days, so a day is
+// always the result of the newest read: Google credits a disputed lead back
+// days later, and the day's charged count and cost then change.
 // ---------------------------------------------------------------------------
+
+// The first day to rebuild: 30 days back, or earlier when Google changed the
+// credit of an older lead inside those 30 days. The window then starts at that
+// lead's creation day, so a late credit still reaches the day it belongs to,
+// but never before `earliest` (MAX_LOOKBACK_DAYS).
+async function windowStart(customer, since, earliest) {
+  const rows = await customer.query(`
+    SELECT local_services_lead.creation_date_time
+    FROM local_services_lead
+    WHERE local_services_lead.credit_details.credit_state_last_update_date_time >= '${since} 00:00:00'
+  `);
+  let start = since;
+  for (const row of rows) {
+    const day = leadDay(row.local_services_lead);
+    if (day && day < start) start = day;
+  }
+  return start < earliest ? earliest : start;
+}
 
 // A lead names no campaign. The leads in the window belong to a campaign only
 // when it is the one campaign in play there: every campaign of the account that
@@ -253,39 +285,51 @@ function leadOwner(campaigns, metricRows) {
   return inPlay.size === 1 ? [...inPlay][0] : null;
 }
 
-// Which campaign-days to write (pure): each Google metrics row for a campaign
-// the portal holds, plus a day in the window that has a lead and no metrics row
-// (Google leaves a zero-metric day out). `leads` is the day's tally on the
-// campaign the leads belong to, else null.
-function planPerformanceDays({ metricRows, leadsByDay, leadCampaign, known, since, until }) {
-  const planned = new Map();
-  for (const row of metricRows) {
-    const platformId = String(row.campaign.id);
-    const date = row.segments.date;
-    if (known.has(platformId)) planned.set(`${platformId}|${date}`, { platformId, date, metrics: row.metrics });
-  }
-  for (const date of leadsByDay.keys()) {
-    const key = `${leadCampaign}|${date}`;
-    if (date >= since && date <= until && !planned.has(key)) planned.set(key, { platformId: leadCampaign, date, metrics: null });
-  }
-  return [...planned.values()].map((day) => ({
-    ...day,
-    leads: day.platformId === leadCampaign ? (leadsByDay.get(day.date) || emptyLeadDay()) : null,
-  }));
+// The days this sync already holds in the window: 'campaign id|YYYY-MM-DD' -> row id.
+async function storedDays(campaignIds, since, until) {
+  if (!campaignIds.length) return new Map();
+  const rows = await db('ad_performance_daily')
+    .whereIn('campaign_id', campaignIds)
+    .where('date', '>=', since)
+    .where('date', '<=', until)
+    .select('id', 'campaign_id', db.raw("to_char(date, 'YYYY-MM-DD') AS day"));
+  return new Map(rows.map((r) => [`${r.campaign_id}|${r.day}`, r.id]));
 }
 
-async function upsertPerformanceDay(data) {
-  const existing = await db('ad_performance_daily').where({ campaign_id: data.campaign_id, date: data.date }).first();
-  if (existing) {
-    await db('ad_performance_daily').where({ id: existing.id }).update(data);
-  } else {
-    await db('ad_performance_daily').insert({ id: uuidv4(), ...data, created_at: new Date() });
+// Which campaign-days to write (pure), keyed 'campaign id|date':
+// - each Google metrics row for a campaign the portal holds;
+// - a day in the window with a lead and no metrics row (Google leaves a
+//   zero-metric day out);
+// - a day stored by an earlier run that neither of the above covers now. It is
+//   written again as a zero day, so numbers Google no longer reports, or leads
+//   that no longer have a known campaign, do not stay behind.
+// `leads` is the day's tally on the campaign that owns the leads, else null.
+function planPerformanceDays({ metricRows, leadsByDay, leadCampaignId, localId, storedKeys, since, until }) {
+  const planned = new Map();
+  for (const row of metricRows) {
+    const campaignId = localId.get(String(row.campaign.id));
+    const date = row.segments.date;
+    if (campaignId) planned.set(`${campaignId}|${date}`, { campaignId, date, metrics: row.metrics });
   }
+  for (const date of leadsByDay.keys()) {
+    const key = `${leadCampaignId}|${date}`;
+    if (date >= since && date <= until && !planned.has(key)) planned.set(key, { campaignId: leadCampaignId, date, metrics: null });
+  }
+  for (const key of storedKeys) {
+    const [campaignId, date] = key.split('|');
+    if (!planned.has(key)) planned.set(key, { campaignId, date, metrics: null });
+  }
+  return [...planned.entries()].map(([key, day]) => ({
+    key,
+    ...day,
+    leads: day.campaignId === leadCampaignId ? (leadsByDay.get(day.date) || emptyLeadDay()) : null,
+  }));
 }
 
 async function syncDailyPerformance(customer, account, days = DEFAULT_DAYS) {
   logger.info(`[google-lsa] Syncing daily performance (last ${days} days)`);
-  const { since, until } = dateRange(days);
+  const { since: normalSince, until } = dateRange(days);
+  const since = await windowStart(customer, normalSince, dateRange(MAX_LOOKBACK_DAYS).since);
 
   const metricRows = await customer.query(`
     SELECT
@@ -321,24 +365,29 @@ async function syncDailyPerformance(customer, account, days = DEFAULT_DAYS) {
 
   // With the owner unknown the lead counts are left out, and each row keeps
   // Google's own conversions number.
-  const owner = leadOwner(campaigns, metricRows);
-  const leadCampaign = owner && localId.has(owner) ? owner : null;
-  if (!leadCampaign && leadRows.length) {
+  const leadCampaignId = localId.get(leadOwner(campaigns, metricRows)) || null;
+  if (!leadCampaignId && leadRows.length) {
     logger.warn(`[google-lsa] ${leadRows.length} lead(s) not counted: no single campaign owns the leads in the window`);
   }
 
+  const stored = await storedDays([...localId.values()], since, until);
   const planned = planPerformanceDays({
     metricRows,
-    leadsByDay: leadCampaign ? tallyLeadsByDay(leadRows) : new Map(),
-    leadCampaign,
-    known: localId,
+    leadsByDay: leadCampaignId ? tallyLeadsByDay(leadRows) : new Map(),
+    leadCampaignId,
+    localId,
+    storedKeys: [...stored.keys()],
     since,
     until,
   });
   const results = [];
-  for (const { platformId, date, metrics, leads } of planned) {
-    const data = { campaign_id: localId.get(platformId), date, ...mapPerformanceRow(metrics, leads) };
-    await upsertPerformanceDay(data);
+  for (const { key, campaignId, date, metrics, leads } of planned) {
+    const data = { campaign_id: campaignId, date, ...mapPerformanceRow(metrics, leads) };
+    if (stored.has(key)) {
+      await db('ad_performance_daily').where({ id: stored.get(key) }).update(data);
+    } else {
+      await db('ad_performance_daily').insert({ id: uuidv4(), ...data, created_at: new Date() });
+    }
     results.push(data);
   }
 
@@ -385,6 +434,7 @@ module.exports = {
     mapPerformanceRow,
     tallyLeadsByDay,
     leadOwner,
+    windowStart,
     planPerformanceDays,
     dateRange,
     syncCampaigns,

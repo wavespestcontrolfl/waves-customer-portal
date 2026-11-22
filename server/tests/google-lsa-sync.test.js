@@ -9,15 +9,19 @@
 
 let firstByTable = {};
 let lsaCampaignRows = [];
+let storedPerfRows = [];
 const insertCalls = [];
 const updateCalls = [];
 const whereRawCalls = [];
+const whereCalls = [];
 
 const mockDb = jest.fn((table) => {
   const b = {};
-  b.where = jest.fn(() => b);
-  b.whereRaw = jest.fn((sql, bindings) => { whereRawCalls.push({ table, sql, bindings }); return b; });
-  b.select = jest.fn(() => Promise.resolve(lsaCampaignRows));
+  let marked = false; // this builder already carries the account-mark filter
+  b.where = jest.fn((...args) => { whereCalls.push({ table, args, afterMark: marked }); return b; });
+  b.whereIn = jest.fn(() => b);
+  b.whereRaw = jest.fn((sql, bindings) => { marked = true; whereRawCalls.push({ table, sql, bindings }); return b; });
+  b.select = jest.fn(() => Promise.resolve(table === 'ad_campaigns' ? lsaCampaignRows : storedPerfRows));
   b.first = jest.fn(() => Promise.resolve(firstByTable[table]));
   b.update = jest.fn((row) => { updateCalls.push({ table, row }); return Promise.resolve(1); });
   b.insert = jest.fn((row) => {
@@ -62,9 +66,11 @@ const lead = (createdAt, type, charged, creditState) => ({
   },
 });
 
-// Answers each GAQL query by the resource it reads.
-function answerGoogle({ campaigns = [CAMPAIGN_ROW], metrics = [], leads = [] } = {}) {
+// Answers each GAQL query by the resource it reads. `creditChanges` = the leads
+// whose credit Google changed inside the window (the window-start query).
+function answerGoogle({ campaigns = [CAMPAIGN_ROW], metrics = [], leads = [], creditChanges = [] } = {}) {
   mockQuery.mockImplementation(async (gaql) => {
+    if (/credit_state_last_update_date_time/.test(gaql)) return creditChanges;
     if (/FROM local_services_lead/.test(gaql)) return leads;
     if (/segments\.date/.test(gaql)) return metrics;
     return campaigns;
@@ -76,9 +82,11 @@ beforeEach(() => {
   jest.clearAllMocks();
   firstByTable = {};
   lsaCampaignRows = [{ id: 'local-1', platform_campaign_id: '555', status: 'active' }];
+  storedPerfRows = [];
   insertCalls.length = 0;
   updateCalls.length = 0;
   whereRawCalls.length = 0;
+  whereCalls.length = 0;
   process.env = { ...env, ...GOOGLE_ENV };
   delete process.env.GOOGLE_LSA_CUSTOMER_ID;
   answerGoogle();
@@ -96,6 +104,11 @@ describe('configuration', () => {
     process.env.GOOGLE_LSA_CUSTOMER_ID = 'off';
     expect(customerId()).toBeNull();
     expect(GoogleLsa.isConfigured()).toBe(false);
+    // The whole value must be an id: digits inside other text never switch it on.
+    for (const bad of ['off-1234567890', 'x1234567890', '12345678901', '123-456-789', '']) {
+      process.env.GOOGLE_LSA_CUSTOMER_ID = bad;
+      expect(customerId()).toBeNull();
+    }
   });
 
   test('needs the Google Ads OAuth credentials, not the Search account id', () => {
@@ -237,14 +250,23 @@ describe('runDailySync', () => {
     expect(out).toEqual({ configured: true, synced: { campaigns: 1, performanceRows: 0 } });
   });
 
-  test('a campaign that already exists is updated in place, and the mark is merged into its metadata', async () => {
-    firstByTable.ad_campaigns = { id: 'local-1', platform: 'google_lsa', platform_campaign_id: '555', status: 'paused', metadata: { note: 'kept' } };
+  test('a campaign row the sync owns is updated in place, and its metadata is left alone', async () => {
+    firstByTable.ad_campaigns = { id: 'local-1', platform: 'google_lsa', platform_campaign_id: '555', status: 'paused', metadata: { lsa_customer_id: '7636809139', note: 'kept' } };
     await GoogleLsa.runDailySync();
     expect(insertCalls.filter((c) => c.table === 'ad_campaigns')).toEqual([]);
     const update = updateCalls.find((c) => c.table === 'ad_campaigns');
     expect(update.row).toMatchObject({ status: 'active' });
-    expect(update.row.metadata.rawSql).toMatch(/\|\| \?::jsonb$/); // merged in SQL, never replaced
-    expect(JSON.parse(update.row.metadata.bindings[0])).toEqual({ lsa_customer_id: '7636809139' });
+    expect(update.row).not.toHaveProperty('metadata');
+  });
+
+  test('the lookup for an existing campaign is scoped to the account mark: a hand-entered row with the same Google id is never taken over', async () => {
+    await GoogleLsa.runDailySync();
+    // The mock answers no marked row, so the campaign is inserted as its own
+    // marked row; the lookup that could have found a row carried the mark filter.
+    const lookup = whereCalls.find((w) => w.table === 'ad_campaigns' && w.args[0]?.platform_campaign_id === '555');
+    expect(lookup.afterMark).toBe(true);
+    expect(insertCalls.filter((c) => c.table === 'ad_campaigns')).toHaveLength(1);
+    expect(updateCalls.filter((c) => c.table === 'ad_campaigns')).toEqual([]);
   });
 
   test('a campaign Google reports as removed is stored as removed', async () => {
@@ -253,9 +275,12 @@ describe('runDailySync', () => {
     expect(insertCalls.find((c) => c.table === 'ad_campaigns').row).toMatchObject({ status: 'removed' });
   });
 
-  test('the performance step reads only campaigns marked with this account', async () => {
+  test('every read of campaign rows carries the account mark (the lookup and the performance step)', async () => {
     await GoogleLsa.runDailySync();
-    expect(whereRawCalls).toEqual([{ table: 'ad_campaigns', sql: "metadata ->> 'lsa_customer_id' = ?", bindings: ['7636809139'] }]);
+    expect(whereRawCalls).toEqual([
+      { table: 'ad_campaigns', sql: "metadata ->> 'lsa_customer_id' = ?", bindings: ['7636809139'] },
+      { table: 'ad_campaigns', sql: "metadata ->> 'lsa_customer_id' = ?", bindings: ['7636809139'] },
+    ]);
   });
 
   test('a day\'s cost and charged leads land on one row; a lead-only day still gets a row', async () => {
@@ -327,12 +352,55 @@ describe('runDailySync', () => {
     expect(perfInserts()).toEqual([]);
   });
 
-  test('an existing day is updated, not inserted again', async () => {
-    firstByTable.ad_performance_daily = { id: 'perf-1' };
+  test('a stored day is updated, not inserted again', async () => {
+    storedPerfRows = [{ id: 'perf-1', campaign_id: 'local-1', day: '2026-11-20' }];
     answerGoogle({ metrics: [{ campaign: { id: 555 }, segments: { date: '2026-11-20' }, metrics: { cost_micros: 31000000 } }] });
     await GoogleLsa.runDailySync();
     expect(perfInserts()).toEqual([]);
-    expect(updateCalls.find((c) => c.table === 'ad_performance_daily').row).toMatchObject({ date: '2026-11-20', cost: 31 });
+    expect(updateCalls.filter((c) => c.table === 'ad_performance_daily').map((c) => c.row)).toEqual([
+      expect.objectContaining({ campaign_id: 'local-1', date: '2026-11-20', cost: 31 }),
+    ]);
+  });
+
+  test('a stored day Google no longer reports is written again as a zero day', async () => {
+    storedPerfRows = [{ id: 'perf-9', campaign_id: 'local-1', day: '2026-11-19' }];
+    await GoogleLsa.runDailySync(); // Google answers no metrics row and no lead
+    const [reset] = updateCalls.filter((c) => c.table === 'ad_performance_daily').map((c) => c.row);
+    expect(reset).toMatchObject({ campaign_id: 'local-1', date: '2026-11-19', cost: 0, impressions: 0, conversions: 0 });
+    expect(JSON.parse(reset.metadata).lsa_leads).toMatchObject({ total: 0, charged: 0 });
+  });
+
+  test('a stored lead-only day loses its lead count when no single campaign owns the leads any more', async () => {
+    lsaCampaignRows = [{ id: 'local-1', platform_campaign_id: '555', status: 'active' }, { id: 'local-2', platform_campaign_id: '556', status: 'active' }];
+    storedPerfRows = [{ id: 'perf-7', campaign_id: 'local-1', day: '2026-11-19' }];
+    answerGoogle({ leads: [lead('2026-11-19 09:15:00', 3, true)] });
+    await GoogleLsa.runDailySync();
+    const [reset] = updateCalls.filter((c) => c.table === 'ad_performance_daily').map((c) => c.row);
+    expect(reset).toMatchObject({ campaign_id: 'local-1', date: '2026-11-19', conversions: 0 });
+    expect(JSON.parse(reset.metadata)).toEqual({ google_conversions: 0 });
+  });
+
+  test('a late credit moves the start of the window back to the lead\'s own day', async () => {
+    answerGoogle({ creditChanges: [lead('2026-10-01 14:00:00', 3, true, 3), lead('2026-11-10 14:00:00', 3, true, 2)] });
+    jest.useFakeTimers({ now: new Date('2026-11-21T15:00:00Z') });
+    try {
+      await GoogleLsa.runDailySync();
+    } finally { jest.useRealTimers(); }
+    const queries = mockQuery.mock.calls.map(([gaql]) => gaql);
+    expect(queries.find((q) => /credit_state_last_update_date_time/.test(q))).toContain(">= '2026-10-22 00:00:00'");
+    expect(queries.find((q) => /segments\.date/.test(q))).toContain("BETWEEN '2026-10-01' AND '2026-11-21'");
+    expect(queries.find((q) => /lead_charged/.test(q))).toContain("creation_date_time >= '2026-10-01 00:00:00'");
+    expect(whereCalls).toContainEqual({ table: 'ad_performance_daily', args: ['date', '>=', '2026-10-01'], afterMark: false });
+  });
+
+  test('the window never starts before the 90 days the cost allocation recomputes', async () => {
+    answerGoogle({ creditChanges: [lead('2026-06-03 14:00:00', 3, true, 3)] });
+    jest.useFakeTimers({ now: new Date('2026-11-21T15:00:00Z') });
+    try {
+      await GoogleLsa.runDailySync();
+    } finally { jest.useRealTimers(); }
+    const queries = mockQuery.mock.calls.map(([gaql]) => gaql);
+    expect(queries.find((q) => /segments\.date/.test(q))).toContain("BETWEEN '2026-08-23' AND '2026-11-21'");
   });
 
   test('a failed campaign step fails the run after the performance step ran', async () => {
@@ -341,6 +409,7 @@ describe('runDailySync', () => {
       if (/segments\.date/.test(gaql)) return [{ campaign: { id: 555 }, segments: { date: '2026-11-20' }, metrics: { cost_micros: 31000000 } }];
       throw new Error('invalid_grant');
     });
+
     await expect(GoogleLsa.runDailySync()).rejects.toThrow('invalid_grant');
     expect(perfInserts()).toHaveLength(1);
   });
@@ -348,7 +417,7 @@ describe('runDailySync', () => {
   test('a failed performance step fails the run', async () => {
     mockQuery.mockImplementation(async (gaql) => {
       if (/segments\.date/.test(gaql)) throw new Error('quota');
-      return [CAMPAIGN_ROW];
+      return /FROM local_services_lead/.test(gaql) ? [] : [CAMPAIGN_ROW];
     });
     await expect(GoogleLsa.runDailySync()).rejects.toThrow('quota');
   });
