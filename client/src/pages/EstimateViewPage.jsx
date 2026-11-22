@@ -11079,7 +11079,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     return (
       <WebsiteEstimateFlow
         services={services} selected={selected} onFrequencyChange={handleFrequencyChange}
-        lockedSection={isLockedMirrorSection} oneTime={serviceMode === 'one_time'}
+        // A fixed quote (a restart, a plan offer) has no cadence step: the accept refuses any other cadence.
+        lockedSection={(section) => restartQuote || isLockedMirrorSection(section)} oneTime={serviceMode === 'one_time'}
         oneTimeBreakdown={pricing.oneTimeBreakdown} combinedFrequency={combinedFrequency}
         fees={(pricing.firstVisitFees?.length ? pricing.firstVisitFees : (setupFeeEffective ? [setupFeeEffective] : [])).map(tierAwareFee).filter(fee => Number(fee.amount) > 0)}
         bookingContent={<>{slotIssueBanner}{bookingContent}{paymentContent}</>} reviewContent={reviewContent}
