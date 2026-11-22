@@ -518,7 +518,10 @@ async function renderSendPreview(send, toEmail) {
   // of a hand-composed campaign shows the footer the broadcast will carry
   // (neutralized to inert chips below — no per-recipient token here).
   const { ensureFeedbackToken } = require('./newsletter-feedback');
-  const ensured = ensureFeedbackToken({ html: send.html_body || '', text: send.text_body });
+  // A Waves Pest Insider issue's referral line reads as a reader would get it now (the
+  // stored body names no amount; the send puts the live one in).
+  const { referralLineAsOfNow } = require('./pest-insider/referral-line');
+  const ensured = await referralLineAsOfNow(send, ensureFeedbackToken({ html: send.html_body || '', text: send.text_body }));
   // Event click-tracking tokens resolve to the DIRECT event URLs in
   // proofs/tests — the reader clicks straight through, untracked.
   const { resolveEvclickDirect, eventUrlMapForSend } = require('./newsletter-event-clicks');

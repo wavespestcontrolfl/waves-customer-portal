@@ -45,8 +45,10 @@
  *
  * No line asks the reader to forward the email: a forwarded copy carries
  * the subscriber's own unsubscribe link, and its page shows their address
- * (pre-push round 11). The plan's referral line comes in PR 4, linked to the
- * issue's web page (the send's archive link).
+ * (pre-push round 11). The referral line stands above the sign-off and links
+ * the Waves referral page. The stored body never names an amount: the sender
+ * and the owner's copy put the line's amount words in their own copies
+ * (referral-line.js).
  *
  * Every piece of text is escaped.
  */
@@ -66,6 +68,7 @@ const { validateNewsletterDraft } = require('../newsletter-validator');
 const { PEST_INSIDER_TYPE } = require('../../config/newsletter-types');
 const { etDateString } = require('../../utils/datetime-et');
 const { HOME_TOKEN, HOME_TEXT_TOKEN, hasHomeToken, neutralizeHomeTokens } = require('./home');
+const { REFERRAL_URL, REFERRAL_ASK, REFERRAL_LINK_TEXT, REFERRAL_TAIL } = require('./referral-line');
 
 const IDENTIFIER_URL = `${SITE}/pest-identifier/`;
 const POST_LINK_TEXT = 'Read the full story on the Waves blog';
@@ -163,6 +166,16 @@ const SIGNOFF_HTML = `<div class="dm-text">
 <p style="margin:0;font-size:16px;line-height:1.6;">${escapeHtml(SIGNOFF_NAME)} 🌊</p>
 </div>`;
 const SIGNOFF_TEXT = `${SIGNOFF_LINE}\n${SIGNOFF_NAME}\n`;
+
+// The referral line (referral-line.js has its words and the reason the
+// stored line names no amount). referral-line.js finds the line's end by the
+// link's close and the paragraph's close in HTML, and by the address on the
+// next line in text: keep those when this changes.
+const REFERRAL_HTML = `<div class="dm-text">\n${paragraph(`${escapeHtml(REFERRAL_ASK)} ${link(REFERRAL_URL, REFERRAL_LINK_TEXT)}${escapeHtml(REFERRAL_TAIL)}`)}\n</div>\n`;
+const REFERRAL_TEXT = `${REFERRAL_ASK} ${REFERRAL_LINK_TEXT}${REFERRAL_TAIL}\n${REFERRAL_URL}\n\n`;
+// What closes every issue: a reader's own block goes in before it.
+const CLOSING_HTML = `${REFERRAL_HTML}${SIGNOFF_HTML}`;
+const CLOSING_TEXT = `${REFERRAL_TEXT}${SIGNOFF_TEXT}`;
 
 // A Waves picture as wide as the column on a desktop screen (582px in
 // wrapNewsletter's card), with its size in the tag. A picture that moves
@@ -464,10 +477,11 @@ function renderIssue(issue) {
   const minutes = readMinutes([GREETING, INTRO, ...sections, SIGNOFF_TEXT].join(' '));
   const opening = openingBlock(issue, minutes);
   const pollHtml = poll ? [DIVIDER_HTML, wrapBlock(poll)] : [];
-  // The "Your home" tokens stand alone, glued to the sign-off by no join of
-  // their own: a reader whose value is '' gets exactly the issue without the block.
-  const html = `${[wrapBlock(opening), wrapBlock(lead), DIVIDER_HTML, wrapBlock(id), ...pollHtml].join('\n')}\n${HOME_TOKEN}${SIGNOFF_HTML}`;
-  const text = `${[opening.text, ...sections, ...(poll ? [poll.text] : [])].join('\n\n')}\n\n${HOME_TEXT_TOKEN}${SIGNOFF_TEXT}`;
+  // The "Your home" tokens stand alone, glued to the closing (the referral
+  // line, then the sign-off) by no join of their own: a reader whose value is
+  // '' gets exactly the issue without the block.
+  const html = `${[wrapBlock(opening), wrapBlock(lead), DIVIDER_HTML, wrapBlock(id), ...pollHtml].join('\n')}\n${HOME_TOKEN}${CLOSING_HTML}`;
+  const text = `${[opening.text, ...sections, ...(poll ? [poll.text] : [])].join('\n\n')}\n\n${HOME_TEXT_TOKEN}${CLOSING_TEXT}`;
   return { subject: issue.subject, preview: issue.preview, html_body: html, text_body: text };
 }
 
@@ -487,23 +501,24 @@ function wrapIssueHtml(issue, { unsubscribeUrl }) {
   });
 }
 
-// Puts `block` in front of the sign-off that closes `body`; a body with no
-// sign-off (one rendered before it existed) gets the block at its end.
-function beforeSignoff(body, block, signoff) {
-  if (body.endsWith(signoff)) return `${body.slice(0, body.length - signoff.length)}${block}\n${signoff}`;
+// Puts `block` in front of the closing (the referral line, then the
+// sign-off) that ends `body`; a body that does not end with it gets the block
+// at its end.
+function beforeClosing(body, block, closing) {
+  if (body.endsWith(closing)) return `${body.slice(0, body.length - closing.length)}${block}\n${closing}`;
   return `${body}\n${block}`;
 }
 
 /**
  * One reader's block ({ html, text }) after the shared sections, behind the
- * Waves badge and before the sign-off. A new object comes back; `issue` is
+ * Waves badge and before the closing. A new object comes back; `issue` is
  * not changed.
  */
 function addReaderBlock(issue, block) {
   return {
     ...issue,
-    html_body: beforeSignoff(issue.html_body, `${DIVIDER_HTML}\n${wrapBlock(block)}`, SIGNOFF_HTML),
-    text_body: beforeSignoff(issue.text_body, `${block.text}\n`, SIGNOFF_TEXT),
+    html_body: beforeClosing(issue.html_body, `${DIVIDER_HTML}\n${wrapBlock(block)}`, CLOSING_HTML),
+    text_body: beforeClosing(issue.text_body, `${block.text}\n`, CLOSING_TEXT),
   };
 }
 
@@ -532,4 +547,5 @@ module.exports = {
   renderIssue, withToolBlock, addReaderBlock, wrapIssueHtml, escapeHtml, speciesEmoji,
   homeBlock, homeBlockErrors, homeSubstitutions, hasHomeToken, neutralizeHomeTokens, HOME_LINE_LABELS, HOME_TOKEN, HOME_TEXT_TOKEN,
   IDENTIFIER_URL, POST_LINK_TEXT, PHOTO_ID_TEXT, VERDICTS, SIGNOFF_TEXT, CATEGORY_EMOJI, SPECIES_EMOJI,
+  CLOSING_TEXT,
 };

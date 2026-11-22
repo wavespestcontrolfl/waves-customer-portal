@@ -37,6 +37,7 @@ const { selectAudience, SELLABLE_LINES } = require('./newsletter-audience-profil
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { hasQuizToken, buildQuizSubstitutions } = require('./newsletter-quiz');
 const { hasHomeToken, loadHomeFacts } = require('./pest-insider/home');
+const { referralTokenCopy, referralTailSubstitution } = require('./pest-insider/referral-line');
 const { hasFeedbackToken, ensureFeedbackToken, buildFeedbackSubstitutions } = require('./newsletter-feedback');
 const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds, isFlagshipSend } = require('./newsletter-event-selection');
@@ -1212,10 +1213,13 @@ async function sendCampaign(sendId, opts = {}) {
   // show the footer the broadcast will carry. Local copies only: the
   // persisted html_body stays the operator's content; deterministic, so
   // resumes rebuild identically.
-  const { html: bodyHtml, text: bodyText } = ensureFeedbackToken({
+  // A Waves Pest Insider issue's referral line gets a token for its end in these copies; each
+  // batch fills it from the live setting (pest-insider/referral-line.js).
+  const referral = referralTokenCopy(send, ensureFeedbackToken({
     html: send.html_body || '',
     text: send.text_body,
-  });
+  }));
+  const { html: bodyHtml, text: bodyText } = referral.body;
 
   // Wrap the operator-written body in branded chrome (header + footer
   // + Waves logo). The unsubscribe URL is the SendGrid substitution
@@ -1402,6 +1406,7 @@ async function sendCampaign(sendId, opts = {}) {
       // takes this mailbox inside that moment changes nothing a send one second earlier would
       // not have sent: the block states the visit of the customer whose own address it is.
       const homeFacts = homePlanned && pestInsiderAutoSendLive() ? await loadHomeFactsSafe(chunkToSend.map((s) => s.id), send.id) : null;
+      const referralSubs = await referralTailSubstitution(referral.token);
       const recipients = chunkToSend.map((s) => {
         const attemptToken = attemptTokenBySub.get(s.id);
         const pctx = s.customer_id ? personalizationByCustomer.get(s.customer_id) : null;
@@ -1426,6 +1431,7 @@ async function sendCampaign(sendId, opts = {}) {
             ...(feedbackEnabled ? buildFeedbackSubstitutions(quizBody, { token: deliveryBySub.get(s.id)?.engagement_token }) : {}),
             ...(evclickEnabled ? buildEvclickSubstitutions(quizBody, { token: deliveryBySub.get(s.id)?.engagement_token, urlById: evclickUrlById }) : {}),
             ...(homeEnabled ? homeSubs.forReader(s, homeFacts, mailboxBySub.get(s.id)) : {}),
+            ...referralSubs,
           },
           // delivery_id rides on every SendGrid event webhook for this
           // recipient, so the handler can resolve back to the right row

@@ -2,7 +2,9 @@
 const {
   renderIssue, withToolBlock, addReaderBlock, wrapIssueHtml, speciesEmoji, escapeHtml, POST_LINK_TEXT, VERDICTS, SIGNOFF_TEXT, CATEGORY_EMOJI, SPECIES_EMOJI,
   homeBlock, homeBlockErrors, homeSubstitutions, HOME_LINE_LABELS, HOME_TOKEN, HOME_TEXT_TOKEN,
+  CLOSING_TEXT,
 } = require('../services/pest-insider/render');
+const { REFERRAL_URL, REFERRAL_TAIL_TOKEN, withReferralTail, referralTail } = require('../services/pest-insider/referral-line');
 const { neutralizeHomeTokens, hasHomeToken } = require('../services/pest-insider/home');
 const { SPECIES } = require('../services/pest-insider/plan');
 const { cardFor } = require('../services/pest-insider/cards');
@@ -25,6 +27,10 @@ const BASE = {
 };
 const DIVIDER = 'https://d2riygw2ap9mi.cloudfront.net/social-media/waves-divider-2026-v2.gif';
 const imgSrcs = (html) => [...html.matchAll(/<img [^>]*src="([^"]+)"/g)].map((m) => m[1]);
+// What closes every issue: the referral line, then the sign-off (the last two text blocks).
+const closingHtmlOf = (html) => html.slice(html.lastIndexOf('<div class="dm-text">', html.lastIndexOf('<div class="dm-text">') - 1));
+// The words a reader sees in a piece of HTML.
+const wordsOf = (html) => html.replace(/<[^>]+>/g, '').replace(/&#39;/g, "'").replace(/\s+/g, ' ').trim();
 // A lead for a real fact: its own post and its reviewed lines.
 const leadFor = (factId) => ({ ...BASE.lead, postUrl: postUrl(factId), factId });
 // The same, under the fact's own title as the headline, as buildIssue sends it.
@@ -51,7 +57,9 @@ describe('renderIssue', () => {
     // Links: the post (its text link) and the identifier pages, nothing else.
     const hrefs = [...r.html_body.matchAll(/href="([^"]+)"/g)].map((m) => m[1]);
     expect(hrefs.filter((h) => h === POST)).toHaveLength(1);
-    hrefs.filter((h) => h !== POST).forEach((h) => expect(h).toMatch(/^https:\/\/www\.wavespestcontrol\.com\/pest-identifier\//));
+    // The referral line's link, once; every other link opens the pest identifier.
+    expect(hrefs.filter((h) => h === REFERRAL_URL)).toHaveLength(1);
+    hrefs.filter((h) => h !== POST && h !== REFERRAL_URL).forEach((h) => expect(h).toMatch(/^https:\/\/www\.wavespestcontrol\.com\/pest-identifier\//));
     // Pictures: with no lead fact, only the Waves badge (no top picture, no card).
     expect(imgSrcs(r.html_body)).toEqual([DIVIDER]);
     // With the lead fact: its top picture, linked to the post too, then its
@@ -259,7 +267,8 @@ describe('renderIssue', () => {
     expect(r.subject).toBe(shared.subject);
     expect(r.preview).toBe(shared.preview);
     // the shared copy, unchanged, then the badge and the tool block, then the sign-off
-    const signoffHtml = shared.html_body.slice(shared.html_body.lastIndexOf('<div class="dm-text">'));
+    const signoffHtml = closingHtmlOf(shared.html_body);
+    expect(signoffHtml).toContain('Know a neighbor fighting the same bugs?');
     expect(signoffHtml).toContain('Catch you next time.');
     const sharedSections = shared.html_body.slice(0, shared.html_body.length - signoffHtml.length);
     expect(r.html_body.startsWith(`${sharedSections}<div style="text-align:center;margin:28px 0;"><img src="${DIVIDER}"`)).toBe(true);
@@ -274,11 +283,11 @@ describe('renderIssue', () => {
     expect(sentenceAt).toBeGreaterThan(linkAt);
     // in normal body text, not the muted small print
     expect(html.slice(html.lastIndexOf('<p', sentenceAt), sentenceAt)).not.toMatch(/dm-muted/);
-    const sharedText = shared.text_body.slice(0, shared.text_body.length - SIGNOFF_TEXT.length);
+    const sharedText = shared.text_body.slice(0, shared.text_body.length - CLOSING_TEXT.length);
     // The "Your home" token stands right before the sign-off; the tool block goes between them.
-    expect(shared.text_body.endsWith(`\n\n${HOME_TEXT_TOKEN}${SIGNOFF_TEXT}`)).toBe(true);
+    expect(shared.text_body.endsWith(`\n\n${HOME_TEXT_TOKEN}${CLOSING_TEXT}`)).toBe(true);
     expect(r.text_body)
-      .toBe(`${sharedText}A TOOL WE'D USE\n${gauge.lines.join(' ')}\n\n${toolLinkText(gauge)}: ${gauge.url}\n${AMAZON_DISCLOSURE}\n\n${SIGNOFF_TEXT}`);
+      .toBe(`${sharedText}A TOOL WE'D USE\n${gauge.lines.join(' ')}\n\n${toolLinkText(gauge)}: ${gauge.url}\n${AMAZON_DISCLOSURE}\n\n${CLOSING_TEXT}`);
   });
 
   test('withToolBlock puts the tool at the end of a body with no sign-off', () => {
@@ -333,7 +342,7 @@ describe('renderIssue', () => {
     // The band stands alone: no small label over it, as in the Waves Newsletter.
     expect(html).toContain('<div class="dm-text">\n<h2 class="dm-chip"');
     expect(renderIssue(BASE).html_body).not.toContain('<div class="dm-text">\n<h2 class="dm-chip"');
-    expect(r.text_body).toContain(`\n\nQUICK POLL\n{{quiz-text:${poll}}}\n\n${HOME_TEXT_TOKEN}${SIGNOFF_TEXT}`);
+    expect(r.text_body).toContain(`\n\nQUICK POLL\n{{quiz-text:${poll}}}\n\n${HOME_TEXT_TOKEN}${CLOSING_TEXT}`);
     // The tool is added per reader before the sign-off, so after the poll.
     const withTool = withToolBlock(r, toolById('acurite-glass-rain-gauge'));
     expect(withTool.html_body.indexOf('A tool we&#39;d use')).toBeGreaterThan(withTool.html_body.indexOf(`{{quiz:${poll}}}`));
@@ -393,7 +402,7 @@ describe('"Your home": the tokens in the shared body and the per-reader block', 
   const NOW = new Date('2026-11-21T15:00:00Z');
   const HOME = { lastVisit: { date: '2026-11-10', line: 'pest' }, sinceDate: '2024-03-05' };
   const POLL = PEST_INSIDER_POLL_IDS[0];
-  const signoffHtmlOf = (html) => html.slice(html.lastIndexOf('<div class="dm-text">'));
+  const signoffHtmlOf = closingHtmlOf;
 
   test('both tokens stand alone right before the sign-off, after "What\'s this?" and the poll, in both parts', () => {
     for (const pollQuizId of [null, POLL]) {
@@ -404,7 +413,7 @@ describe('"Your home": the tokens in the shared body and the per-reader block', 
       expect(r.html_body.split(HOME_TOKEN)).toHaveLength(2);
       expect(r.html_body.indexOf(HOME_TOKEN)).toBeGreaterThan(r.html_body.indexOf('Aedes Mosquito'));
       if (pollQuizId) expect(r.html_body.indexOf(HOME_TOKEN)).toBeGreaterThan(r.html_body.indexOf(`{{quiz:${pollQuizId}}}`));
-      expect(r.text_body.endsWith(`\n\n${HOME_TEXT_TOKEN}${SIGNOFF_TEXT}`)).toBe(true);
+      expect(r.text_body.endsWith(`\n\n${HOME_TEXT_TOKEN}${CLOSING_TEXT}`)).toBe(true);
       expect(r.text_body.split(HOME_TEXT_TOKEN)).toHaveLength(2);
       expect(r.text_body.indexOf(HOME_TEXT_TOKEN)).toBeGreaterThan(r.text_body.indexOf('WHAT\'S THIS?'));
       if (pollQuizId) expect(r.text_body.indexOf(HOME_TEXT_TOKEN)).toBeGreaterThan(r.text_body.indexOf(`{{quiz-text:${pollQuizId}}}`));
@@ -425,7 +434,7 @@ describe('"Your home": the tokens in the shared body and the per-reader block', 
       expect(html.split('\n\n')).toHaveLength(r.html_body.split('\n\n').length);
       expect(html.endsWith(signoffHtmlOf(r.html_body))).toBe(true);
       expect(text).not.toMatch(/\n\n\n/);
-      expect(text.endsWith(`\n\n${SIGNOFF_TEXT}`)).toBe(true);
+      expect(text.endsWith(`\n\n${CLOSING_TEXT}`)).toBe(true);
       expect(text).not.toContain('{{pi-home');
       // The substitution a reader with no block gets is exactly that.
       const empty = homeSubstitutions(null).substitutions;
@@ -441,22 +450,22 @@ describe('"Your home": the tokens in the shared body and the per-reader block', 
     const filledText = r.text_body.split(HOME_TEXT_TOKEN).join(subs[HOME_TEXT_TOKEN]);
     expect(filledHtml.indexOf('Your home')).toBeGreaterThan(filledHtml.indexOf(`{{quiz:${POLL}}}`));
     expect(filledHtml.indexOf('Your home')).toBeLessThan(filledHtml.indexOf('Catch you next time.'));
-    expect(filledText).toContain(`{{quiz-text:${POLL}}}\n\nYOUR HOME\nLast visit: November 10 (pest control).\nWith Waves since March 2024.\n\n${SIGNOFF_TEXT}`);
+    expect(filledText).toContain(`{{quiz-text:${POLL}}}\n\nYOUR HOME\nLast visit: November 10 (pest control).\nWith Waves since March 2024.\n\n${CLOSING_TEXT}`);
     expect(filledHtml.split('<h2 class="dm-chip"').length - 1).toBe(4);
     // addReaderBlock / withToolBlock still put their block before the sign-off, and the body still ends with it.
     const gauge = toolById('acurite-glass-rain-gauge');
     const withTool = withToolBlock(r, gauge);
     expect(withTool.html_body.endsWith(signoffHtmlOf(r.html_body))).toBe(true);
-    expect(withTool.text_body.endsWith(SIGNOFF_TEXT)).toBe(true);
+    expect(withTool.text_body.endsWith(CLOSING_TEXT)).toBe(true);
     expect(withTool.html_body.indexOf(HOME_TOKEN)).toBeLessThan(withTool.html_body.indexOf('A tool we&#39;d use'));
     expect(withTool.html_body.indexOf('A tool we&#39;d use')).toBeLessThan(withTool.html_body.indexOf('Catch you next time.'));
     const added = addReaderBlock(r, { html: '<p>mine</p>', text: 'MINE' });
     expect(added.html_body.endsWith(signoffHtmlOf(r.html_body))).toBe(true);
     expect(added.html_body).toContain('<p>mine</p>\n</div>\n<div class="dm-text">');
-    expect(added.text_body).toBe(`${r.text_body.slice(0, r.text_body.length - SIGNOFF_TEXT.length)}MINE\n\n${SIGNOFF_TEXT}`);
+    expect(added.text_body).toBe(`${r.text_body.slice(0, r.text_body.length - CLOSING_TEXT.length)}MINE\n\n${CLOSING_TEXT}`);
     // A tool block after an empty home value reads as it does today: one blank line between the sections.
     const toolText = neutralizeHomeTokens(withTool.text_body);
-    expect(toolText).toContain(`${AMAZON_DISCLOSURE}\n\n${SIGNOFF_TEXT}`);
+    expect(toolText).toContain(`${AMAZON_DISCLOSURE}\n\n${CLOSING_TEXT}`);
     expect(toolText).not.toMatch(/\n\n\n/);
   });
 
@@ -591,6 +600,84 @@ describe('"Your home": the tokens in the shared body and the per-reader block', 
     expect(neutralizeHomeTokens(null)).toBe('');
     // Repeated calls keep working (no sticky regex state).
     for (let i = 0; i < 3; i += 1) expect(hasHomeToken('{{pi-home}}')).toBe(true);
+  });
+});
+
+describe('the referral line', () => {
+  // The owner's approved words (2026-11-21 "words ok"): the line until the new referral rules are on, and after.
+  const TODAY = 'Know a neighbor fighting the same bugs? Send them our way — referrals are the nicest compliment we get.';
+  const NEW_50 = 'Know a neighbor fighting the same bugs? Send them our way. They get a $50 credit after their first plan service.';
+  const bodies = (r) => ({ html: r.html_body, text: r.text_body });
+
+  test('every issue closes with the line and then the sign-off, with no amount and no token in the stored body', () => {
+    for (const pollQuizId of [null, PEST_INSIDER_POLL_IDS[0]]) {
+      const r = renderIssue({ ...BASE, pollQuizId });
+      const closing = closingHtmlOf(r.html_body);
+      expect(wordsOf(closing)).toBe(`${TODAY} Catch you next time. — The Waves Team 🌊`);
+      // The link text is the ask, and it opens the Waves referral page.
+      expect(closing).toContain(`href="${REFERRAL_URL}"`);
+      expect(closing).toMatch(/>Send them our way<\/a> — referrals/);
+      expect(REFERRAL_URL).toBe('https://www.wavespestcontrol.com/referral/');
+      expect(r.text_body.endsWith(CLOSING_TEXT)).toBe(true);
+      expect(CLOSING_TEXT).toBe(`${TODAY}\n${REFERRAL_URL}\n\n${SIGNOFF_TEXT}`);
+      // Once in each part, and the archive's copy can never state a credit.
+      expect(r.html_body.split('Know a neighbor')).toHaveLength(2);
+      expect(r.text_body.split('Know a neighbor')).toHaveLength(2);
+      for (const part of [r.html_body, r.text_body]) {
+        expect(part).not.toContain(REFERRAL_TAIL_TOKEN);
+        expect(part).not.toMatch(/\$\s?\d/);
+        expect(part).not.toMatch(/credit/i);
+      }
+    }
+  });
+
+  test('referralTail gives the amount sentence only for a whole, positive number of cents, in words HTML shows as written', () => {
+    expect(referralTail(5000)).toBe('. They get a $50 credit after their first plan service.');
+    expect(referralTail(2500)).toBe('. They get a $25 credit after their first plan service.');
+    expect(referralTail(2550)).toBe('. They get a $25.50 credit after their first plan service.');
+    const stored = ' — referrals are the nicest compliment we get.';
+    for (const none of [0, -5000, NaN, null, undefined, '5000', 50.5, Infinity]) expect(referralTail(none)).toBe(stored);
+    for (const cents of [0, 2500, 2550, 5000]) expect(escapeHtml(referralTail(cents))).toBe(referralTail(cents));
+    // The member is promised nothing: a member at the yearly limit earns no credit.
+    expect(referralTail(5000)).not.toMatch(/\byou\b|\byour\b|\bwe\b/i);
+  });
+
+  test('withReferralTail puts the amount sentence in a copy of both parts, and the stored end gives the stored body back', () => {
+    const r = renderIssue({ ...BASE, pollQuizId: PEST_INSIDER_POLL_IDS[0] });
+    const paid = withReferralTail(bodies(r), referralTail(5000));
+    expect(wordsOf(closingHtmlOf(paid.html))).toBe(`${NEW_50} Catch you next time. — The Waves Team 🌊`);
+    expect(closingHtmlOf(paid.html)).toMatch(/>Send them our way<\/a>\. They get a \$50 credit/);
+    expect(paid.text.endsWith(`${NEW_50}\n${REFERRAL_URL}\n\n${SIGNOFF_TEXT}`)).toBe(true);
+    // Nothing but the line's end changed.
+    expect(paid.html.split('. They get a $50 credit after their first plan service.').join(' — referrals are the nicest compliment we get.')).toBe(r.html_body);
+    expect(paid.text.split('. They get a $50 credit after their first plan service.').join(' — referrals are the nicest compliment we get.')).toBe(r.text_body);
+    expect(withReferralTail(bodies(r), referralTail(0))).toEqual(bodies(r));
+    expect(bodies(r)).toEqual({ html: r.html_body, text: r.text_body });
+  });
+
+  test('withReferralTail puts the sender\'s token once in each part, and leaves a body without the line alone', () => {
+    const r = renderIssue(BASE);
+    const copy = withReferralTail(bodies(r), REFERRAL_TAIL_TOKEN);
+    expect(copy.html.split(REFERRAL_TAIL_TOKEN)).toHaveLength(2);
+    expect(copy.text.split(REFERRAL_TAIL_TOKEN)).toHaveLength(2);
+    expect(copy.html).toContain(`>Send them our way</a>${REFERRAL_TAIL_TOKEN}</p>`);
+    expect(copy.text).toContain(`Send them our way${REFERRAL_TAIL_TOKEN}\n${REFERRAL_URL}\n`);
+    for (const part of [copy.html, copy.text]) expect(part).not.toContain('nicest compliment');
+    // A reader who gets the stored end back gets the stored body.
+    expect(copy.html.split(REFERRAL_TAIL_TOKEN).join(referralTail(0))).toBe(r.html_body);
+    expect(copy.text.split(REFERRAL_TAIL_TOKEN).join(referralTail(0))).toBe(r.text_body);
+    // Another body, a line edited by hand, and a send with no text part.
+    const edited = { html: r.html_body.replace('nicest compliment', 'best compliment'), text: r.text_body.replace('nicest compliment', 'best compliment') };
+    expect(withReferralTail(edited, REFERRAL_TAIL_TOKEN)).toEqual(edited);
+    expect(withReferralTail({ html: '<p>Know a neighbor? Send them our way.</p>', text: null }, REFERRAL_TAIL_TOKEN)).toEqual({ html: '<p>Know a neighbor? Send them our way.</p>', text: null });
+    expect(withReferralTail({ html: r.html_body, text: undefined }, REFERRAL_TAIL_TOKEN).text).toBeUndefined();
+  });
+
+  test('the stored line passes the send check, and the amount sentence would not: it never goes in a stored body', () => {
+    const r = renderIssue(BASE);
+    const check = (b) => validateNewsletterDraft({ html_body: neutralizeHomeTokens(b.html), text_body: neutralizeHomeTokens(b.text), subject: r.subject, newsletter_type: 'pest-insider-monthly' }, { recipientCount: 1 }).errors;
+    expect(check(bodies(r))).toEqual([]);
+    expect(check(withReferralTail(bodies(r), referralTail(5000))).join(' ')).toMatch(/dollar amount/);
   });
 });
 
