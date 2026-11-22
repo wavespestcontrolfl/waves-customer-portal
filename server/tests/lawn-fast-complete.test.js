@@ -1615,6 +1615,7 @@ describe('prepare recommendations (GATE_LAWN_REC_PREPARE)', () => {
     ['a product id that is not a uuid', { productIds: [P_HERB, 'nope'] }, {}, 'invalid_products'],
     ['more than 40 products', { productIds: Array.from({ length: 41 }, (_, n) => uuid(500 + n)) }, {}, 'invalid_products'],
     ['a product the catalog does not hold', { productIds: [P_HERB, P_GRAN, P_MISSING] }, {}, 'invalid_products'],
+    ['an inactive product (the completion refuses it)', {}, { products_catalog: [herbicide, { ...granular, active: false }] }, 'invalid_products'],
     ["an assessment that is not this visit's", {}, { lawn_assessments: undefined }, 'not_found'],
     ['an assessment not yet confirmed', {}, { lawn_assessments: assessmentRow({ confirmed_by_tech: false }) }, 'not_confirmed'],
     ['a visit that does not exist', {}, { scheduled_services: undefined }, 'not_found'],

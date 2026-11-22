@@ -1506,7 +1506,7 @@ async function assertLawnFastVisitTypeUnderLock({ trx, lockedCustomer, lockedSvc
 // uses it only when the saved rows match (knowledge-bridge.js prepareAssessmentRecommendations). The checks are the
 // treatment guide's: the visit is one the sheet can complete, and the assessment is this visit's, confirmed and usable
 // for its report. Each product reads as the completion saves a sheet row: the catalog's name and category. A product
-// the catalog does not hold fails the request (the completion refuses it too). Writes nothing and sends nothing.
+// the completion would refuse (not in the catalog, or inactive) fails the request. Writes nothing and sends nothing.
 const recPrepareContextKey = () => (featureGates.lawnRecPrepareLive() ? { recPrepare: true } : {});
 const MAX_PREPARE_PRODUCTS = 40;
 async function prepareLawnRecommendations({ serviceId, assessmentId, productIds, knex = db }) {
@@ -1522,8 +1522,9 @@ async function prepareLawnRecommendations({ serviceId, assessmentId, productIds,
   if (assessment.confirmed_by_tech !== true) return { ok: false, reason: 'not_confirmed' };
   if (!(await assessmentUsableForReport(svc, assessment, knex))) return { ok: false, reason: 'not_usable' };
   const ids = [...new Set(productIds.map((id) => id.toLowerCase()))];
-  const catalog = ids.length ? await knex('products_catalog').whereIn('id', ids).select('id', 'name', 'category') : [];
-  if (catalog.length !== ids.length) return { ok: false, reason: 'invalid_products' };
+  const catalog = ids.length ? await knex('products_catalog').whereIn('id', ids).select('id', 'name', 'category', 'active') : [];
+  // The completion's own two refusals: a product the catalog does not hold, and an inactive one.
+  if (catalog.length !== ids.length || catalog.some((product) => product.active === false)) return { ok: false, reason: 'invalid_products' };
   const planned = catalog.map((product) => ({ product_name: product.name, product_category: product.category || null }));
   const { started } = await require('./knowledge-bridge').prepareAssessmentRecommendations(assessment.id, planned);
   return { ok: true, started };
