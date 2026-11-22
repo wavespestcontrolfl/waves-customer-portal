@@ -49,8 +49,8 @@ function noVisitLineFor(estimate = {}, { proposalMode = false } = {}) {
   }
 }
 
-// A reviewed or scheduled send carries the email the office reviewed. The review keeps the line its email had
-// (messages.email.noVisitLine, present only when there was one, like the monthly average copy). At the send,
+// A reviewed or scheduled send carries the email the office reviewed. The review keeps the line its email showed
+// (messages.email.noVisitLine, present only when the rendered email had it: buildEstimateSendPreview). At the send,
 // `lineNow` is the line as the row reads at that moment:
 // - no review: the send carries lineNow;
 // - the review kept the line and the row still gets it: the send carries it;
@@ -58,10 +58,11 @@ function noVisitLineFor(estimate = {}, { proposalMode = false } = {}) {
 //   edit that does not change the saved offer): STALE. The send is refused before any channel and the office
 //   reviews again; the approved words are never sent to an estimate they no longer fit, and never dropped in
 //   silence;
-// - the review kept no line: the send carries none, whatever the row reads now. A review or a schedule made
-//   before this line existed has no record, and the template version it pinned has no paragraph for the line.
-//   A refusal there would fail every send scheduled before the deploy. A sentence the office did not see is
-//   left out, never added.
+// - the review kept no line: the send carries none, whatever the row reads now. That is a review of an email with
+//   no paragraph for the line (the updated-estimate email, a template an admin rewrote), and a review or a
+//   schedule made before this line existed: it has no record, and the template version it pinned has no
+//   paragraph. A refusal there would fail every send scheduled before the deploy. A sentence the office did not
+//   see is left out, never added.
 // The SMTP copy has no line, so an SMTP review is never stale.
 function reviewedNoVisitLine(reviewedMessages) {
   const reviewedEmail = reviewedMessages?.email;

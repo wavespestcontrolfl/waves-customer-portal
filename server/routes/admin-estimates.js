@@ -1121,8 +1121,8 @@ async function buildEstimateSendPreview(estimate) {
   // The reviewed average copy is recorded with the review (and with a schedule built from it) so the send can
   // refuse a changed one; absent = none (like pdfCopy, present only when there is one).
   const averageText = require('../services/estimate-monthly-average').averageText(average);
-  // The "no visit needed" line of this email, recorded with the review the same way: the send refuses a reviewed
-  // line that no longer fits the estimate (estimate-no-visit-line.js). Absent = none.
+  // The "no visit needed" line of this email. The review records it when the email shows it (below), and the send
+  // refuses a reviewed line that no longer fits the estimate (estimate-no-visit-line.js). Absent = none.
   const noVisitLine = require('../services/estimate-no-visit-line').noVisitLineFor(estimate, { proposalMode });
   // GATE_ESTIMATE_UPDATED_WORDING: a corrected estimate's text and email say "updated". Each channel falls back to its
   // normal template when the updated one is off or missing, and the email carries `updated` only when it used the
@@ -1147,11 +1147,17 @@ async function buildEstimateSendPreview(estimate) {
       template: library.template, version: library.activeVersion,
       payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode, pdfNote, average, noVisitLine }),
     });
+    // The review keeps the "no visit needed" line only when this email shows it. The updated-estimate email, and a
+    // template an admin rewrote, have no paragraph for it: a record there would let a later change of the row
+    // refuse a send whose reviewed email never had the sentence.
+    const shownNoVisitLine = noVisitLine && [rendered.text, rendered.html].some((part) => String(part || '').includes(noVisitLine))
+      ? noVisitLine
+      : '';
     // `pdfCopy` is the reviewed PDF decision, kept with the review (and with a
     // schedule built from it). Present only when true, so a send with no PDF
     // keeps its review byte-identical to before; a review without it means "no
     // PDF" (sendEstimateNowInner).
-    email = { provider: 'sendgrid', subject: rendered.subject, text: rendered.text, versionId: library.activeVersion.id, contentHash: EmailTemplateLibrary.templateContentHash(library.template, library.activeVersion), ...(pdfCopy ? { pdfCopy: true } : {}), ...(averageText ? { monthlyAverage: averageText } : {}), ...(noVisitLine ? { noVisitLine } : {}), ...(delivery.updated ? { updated: true } : {}) };
+    email = { provider: 'sendgrid', subject: rendered.subject, text: rendered.text, versionId: library.activeVersion.id, contentHash: EmailTemplateLibrary.templateContentHash(library.template, library.activeVersion), ...(pdfCopy ? { pdfCopy: true } : {}), ...(averageText ? { monthlyAverage: averageText } : {}), ...(shownNoVisitLine ? { noVisitLine: shownNoVisitLine } : {}), ...(delivery.updated ? { updated: true } : {}) };
   } else if (smtpFallbackAllowed()) {
     const rendered = estimateSmtpContent({ firstName, viewUrl, priceLine, proposalMode, updated });
     // The content hash is of the SMTP content alone (no note), so it is unchanged.
