@@ -43,10 +43,12 @@ describe('company endings written with dots or with spaces', () => {
   test.each([
     'EXAMPLE L.P.', 'EXAMPLE L.L.P.', 'EXAMPLE L.L.C.', 'EXAMPLE N.A.', 'EXAMPLE L.P', 'EXAMPLE, L.L.C', 'EXAMPLE P.A.',
     'EXAMPLE L P', 'EXAMPLE L L P', 'EXAMPLE L L L P', 'EXAMPLE P A', 'EXAMPLE N A', 'EXAMPLE L. L. C.',
+    'A B L.L.C.', 'A B L L C', 'A.B. L.P.', 'J K L LLC', 'EXAMPLE P.L.L.C.',
   ])('%s is a company', (name) => {
     expect(isCompanyName(name)).toBe(true);
   });
-  test('single letters in a row are one word, and they stay apart from the word next to them', () => {
+  test('initials before an ending do not hide it, and an initial stays apart from the word after it', () => {
+    expect(buyerKind(['A B L.L.C.'])).toBe('company');
     expect(isCompanyName('A.B.CONSTRUCTION')).toBe(true);
     expect(isCompanyName('TESTER A. J.')).toBe(false);
     expect(isCompanyName('TESTER A J')).toBe(false);
@@ -495,6 +497,21 @@ describe('runNewHomeList', () => {
     expect(deps.queryParcels).toHaveBeenCalledTimes(8);
     expect(loggedSummary().saved).toEqual({ unmatched: 2 });
     expect(loggedSummary().skipped.waits_for_next_run).toBeUndefined();
+  });
+
+  test('stored deeds that cannot be read: the run throws a code only, and no deed is judged', async () => {
+    const deps = makeDeps({ rowsByDay: { '2026-11-17': [person(1), person(2)] } });
+    deps.findBySourceRefs.mockRejectedValue(Object.assign(
+      new Error('select * from "mail_prospects" where "source_ref" in (202699100001) - TESTER ALEX J'), { code: '57P01' },
+    ));
+    let thrown;
+    await run(deps).catch((err) => { thrown = err; });
+    expect(thrown.message).toBe('Mail new-home list: the stored deeds could not be read (57P01)');
+    expect(deps.queryParcels).not.toHaveBeenCalled();
+    expect(deps.saveProspect).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledTimes(1);
+    expect(loggedSummary()).toMatchObject({ daysRead: 4, deeds: 2, saved: {} });
+    expect(logger.info.mock.calls[0][0]).not.toContain('202699100001');
   });
 
   test('a failed day throws after the other days were saved, naming the day and the reason', async () => {

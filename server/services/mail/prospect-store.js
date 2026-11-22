@@ -192,6 +192,20 @@ function writableFields(row) {
 
 // How careful a stored answer is (see saveProspect). `unmatched` is no answer and has no rank.
 const ANSWER_RANK = { eligible: 1, held_back: 1, not_eligible: 2 };
+const KNOWN_STATUSES = ['unmatched', ...Object.keys(ANSWER_RANK)];
+
+// The table's two CHECKs, for a row that is not written because a stored answer is kept: the table never sees
+// that row. The refusal has the code and the constraint name PostgreSQL gives, so a caller sees one kind of
+// refusal whether or not the deed already has an answer.
+function refuseRowTheTableWouldRefuse(row) {
+  const blank = (value) => String(value ?? '').trim() === '';
+  let constraint = null;
+  if (!KNOWN_STATUSES.includes(row.status)) constraint = 'mail_prospects_status_check';
+  else if (ANSWER_RANK[row.status] === ANSWER_RANK.eligible && (blank(row.parcel_pin) || blank(row.permit_no))) {
+    constraint = 'mail_prospects_live_has_parcel_and_permit';
+  }
+  if (constraint) throw Object.assign(new Error(`mail_prospects refuses the row: ${constraint}`), { code: '23514', constraint });
+}
 
 async function upsert(row, conn) {
   const fields = writableFields(row);
@@ -223,7 +237,8 @@ async function upsert(row, conn) {
  * A save never replaces a stored answer with a less careful one. `unmatched` is "no answer yet"; a live home
  * (eligible, held_back) is an answer; not_eligible is the most careful answer. A stored answer is replaced only by
  * a more careful one: a live home by not_eligible, and nothing replaces not_eligible. Else nothing is written and
- * the stored status and reason are returned with `written: false`. Two runs can judge one deed at the same time. The run that could not reach the
+ * the stored status and reason are returned with `written: false`; a row the table would refuse is still refused,
+ * with the same code and constraint name. Two runs can judge one deed at the same time. The run that could not reach the
  * parcel map must not undo the other's result, and a home one run found to be a known address must stay
  * not_eligible whichever run saves last. The stored row is read under the same lock.
  */
@@ -235,6 +250,7 @@ async function saveProspect(row, conn = db) {
       .first('status', 'reason');
     const storedRank = stored ? ANSWER_RANK[stored.status] : undefined;
     if (storedRank && !(ANSWER_RANK[row.status] > storedRank)) {
+      refuseRowTheTableWouldRefuse(row);
       return { status: stored.status, reason: stored.reason, written: false };
     }
     try {

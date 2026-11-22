@@ -39,25 +39,24 @@ const MAX_ERRORS_IN_A_ROW = 3;
 const HOLD_BACK_ONE_IN = 5;
 const SETTLED_STATUSES = new Set(['eligible', 'held_back', 'not_eligible']);
 
+// Endings that are also written letter by letter ("L.L.C.", "L L C", "L.P."): each is matched in both forms.
+const LETTER_ENDINGS = ['LLC', 'LC', 'LP', 'LLP', 'LLLP', 'PLLC', 'PA', 'NA'];
 const COMPANY_WORDS = [
-  'LLC', 'LC', 'INC', 'INCORPORATED', 'CORP', 'CORPORATION', 'CO', 'COMPANY', 'LP', 'LLP', 'LLLP', 'LTD',
-  'LIMITED', 'PLLC', 'PA', 'HOMES', 'HOME', 'BUILDERS', 'CONSTRUCTION', 'DEVELOPMENT', 'COMMUNITIES', 'PROPERTIES',
-  'HOLDINGS', 'INVESTMENTS', 'PARTNERS', 'PARTNERSHIP', 'GROUP', 'VENTURES', 'ENTERPRISES', 'FUND', 'BANK', 'NA',
+  ...LETTER_ENDINGS, ...LETTER_ENDINGS.map((ending) => ending.split('').join(' ')),
+  'INC', 'INCORPORATED', 'CORP', 'CORPORATION', 'CO', 'COMPANY', 'LTD',
+  'LIMITED', 'HOMES', 'HOME', 'BUILDERS', 'CONSTRUCTION', 'DEVELOPMENT', 'COMMUNITIES', 'PROPERTIES',
+  'HOLDINGS', 'INVESTMENTS', 'PARTNERS', 'PARTNERSHIP', 'GROUP', 'VENTURES', 'ENTERPRISES', 'FUND', 'BANK',
   'REALTY', 'RENTALS', 'CAPITAL', 'ASSOCIATES', 'MANAGEMENT', 'SERVICES', 'HOUSING', 'MINISTRIES',
   'ASSOCIATION', 'ASSN', 'CHURCH', 'FOUNDATION', 'COUNTY', 'CITY', 'STATE', 'DEPARTMENT', 'AUTHORITY',
 ];
 const TRUST_WORDS = ['TRUST', 'TRUSTEE', 'TRUSTEES', 'TR', 'TRS', 'REVOCABLE', 'IRREVOCABLE', 'ESTATE'];
 
-// Whole words only, after punctuation turns into spaces. Single letters in a row are then one word, so a company
-// ending reads the same however it is written: "L.L.C.", "L L C" and "LLC"; "L.P.", "L P" and "LP"; "N.A." and "NA".
-// "M/I HOMES" reads as "MI HOMES".
+// Whole words only, after punctuation turns into spaces ("L.L.C." reads as "L L C", "M/I HOMES" as "M I HOMES").
+// A letter-by-letter ending is matched as its own words, so initials before it do not hide it ("A B L.L.C.").
 const wordMatcher = (words) => new RegExp(`(?:^| )(?:${words.join('|')})(?: |$)`);
 const COMPANY_RE = wordMatcher(COMPANY_WORDS);
 const TRUST_RE = wordMatcher(TRUST_WORDS);
-const spaced = (name) => String(name || '').toUpperCase()
-  .replace(/[^A-Z0-9]+/g, ' ')
-  .trim()
-  .replace(/\b[A-Z](?: [A-Z])+\b/g, (letters) => letters.replaceAll(' ', ''));
+const spaced = (name) => String(name || '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
 
 const isCompanyName = (name) => COMPANY_RE.test(spaced(name));
 const isTrustName = (name) => TRUST_RE.test(spaced(name));
@@ -310,9 +309,17 @@ async function runNewHomeList({ mode = 'night', now = Date.now, deps } = {}) {
   };
   const { rows, failures } = await readDays(days, d, summary);
   const candidates = collectCandidates(rows, summary);
-  const existingRows = candidates.length
-    ? await d.findBySourceRefs(LIST_KEY, SOURCE, candidates.map((c) => c.instrument))
-    : [];
+  let existingRows = [];
+  if (candidates.length) {
+    try {
+      existingRows = await d.findBySourceRefs(LIST_KEY, SOURCE, candidates.map((c) => c.instrument));
+    } catch (err) {
+      // No deed can be judged without the stored rows. A database error can quote the query and its values, so
+      // only its code leaves the module, like every other error here.
+      logger.info(`Mail new-home list (${mode}): ${JSON.stringify(summary)}`);
+      throw new Error(`Mail new-home list: the stored deeds could not be read (${errorCode(err)})`);
+    }
+  }
   const bySourceRef = new Map(existingRows.map((r) => [r.source_ref, r]));
   const due = [];
   for (const candidate of candidates) {

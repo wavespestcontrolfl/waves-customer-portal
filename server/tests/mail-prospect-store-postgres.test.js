@@ -232,6 +232,17 @@ postgres('mail prospect store on PostgreSQL', () => {
     // A row that is not live needs neither.
     expect(await refusedBy(prospect('202699000009'))).toBe('saved');
     expect(await refusedBy(prospect('202699000010', { status: 'not_eligible', reason: 'company_buyer' }))).toBe('saved');
+    // The same refusals when the deed already has an answer: the row would be kept, not written, so the table
+    // never sees it and the store refuses it by the same two rules.
+    const answered = (extra) => live('202699000010', '6000000060', extra);
+    expect(await refusedBy(answered({ parcel_pin: null }))).toBe('23514 mail_prospects_live_has_parcel_and_permit');
+    expect(await refusedBy(answered({ parcel_pin: '  ' }))).toBe('23514 mail_prospects_live_has_parcel_and_permit');
+    expect(await refusedBy(answered({ status: 'held_back', permit_no: '' }))).toBe('23514 mail_prospects_live_has_parcel_and_permit');
+    expect(await refusedBy(answered({ status: 'Eligible' }))).toBe('23514 mail_prospects_status_check');
+    expect(await refusedBy(prospect('202699000010', { status: 'mailed' }))).toBe('23514 mail_prospects_status_check');
+    expect(await refusedBy(prospect('202699000010', { status: undefined }))).toBe('23514 mail_prospects_status_check');
+    // A good row for that deed is kept as before.
+    expect(await saveProspect(answered())).toEqual({ status: 'not_eligible', reason: 'company_buyer', written: false });
   });
 
   test('two saves of one deed never interleave: a second save cannot land between the refused write and the fallback', async () => {
