@@ -622,6 +622,7 @@ postgres('Hired button on migrated PostgreSQL', () => {
 
     test.each([
       ['an old password', { password_hash: 'fixture-old-hash' }],
+      ['an empty password value (not NULL, so the table CHECK would refuse the mark)', { password_hash: '' }],
       // Changing a Google link clears the pinned id, so the sign-in on record is what remains of it.
       ['a sign-in on record', { last_login_at: new Date('2026-06-01T12:00:00Z') }],
       ['a Google account id an earlier sign-in pinned', { google_sub: `fixture-sub-${randomUUID()}` }],

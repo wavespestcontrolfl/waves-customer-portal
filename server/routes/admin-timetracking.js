@@ -838,7 +838,8 @@ function hireGoogleAddress(tech) {
   // A technician row only: an admin needs a password for two-step setup, and
   // a row with no role cannot sign in at all (the column allows NULL).
   if (tech.role !== 'technician') return null;
-  if (tech.password_hash || tech.last_login_at || tech.google_sub || tech.mfa_enabled_at) return null;
+  // (password_hash: any value, as the table CHECK reads it; an empty string is not NULL.)
+  if (tech.password_hash != null || tech.last_login_at || tech.google_sub || tech.mfa_enabled_at) return null;
   return googleSignin.normalizeLinkedGoogleEmail(tech.google_email).value || null;
 }
 
