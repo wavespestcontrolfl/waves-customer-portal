@@ -33,10 +33,16 @@
  * plus this step (0.65) = 1.33 lb prodiamine per acre, under 1.5. October no longer carries
  * dithiopyr.
  *
- * What this writes. It acts only on a row that is still EXACTLY the October row 20261007120500
- * wrote: the Dimension granular by name and product id, at 4.04 lb, with its dithiopyr counter.
- * Any other state (renamed, re-rated, already Stonewall, no Stonewall catalog row)
- * is left as it is and logged.
+ * What this writes. Each v13 protocol's October window is in one of three states:
+ *   - it already holds a Stonewall 0.37% row: nothing to do (a second run, or a row set by hand);
+ *   - it holds EXACTLY the row 20261007120500 wrote (the Dimension granular by name and product
+ *     id, 4.04 lb, its N and K2O targets, its dithiopyr counter): the row is swapped;
+ *   - anything else (renamed, re-rated, another unit, another product id, another counter, no
+ *     bag row): up() THROWS before it writes anything and names the protocols. The recipe in
+ *     lawn-protocol-v13.json says Stonewall for every track, so a track this could not swap
+ *     would leave the recipe and the staged protocol apart (AGENTS.md, lawn protocol data
+ *     fan-out); an office edit is never overwritten either. Reconcile the row, then deploy.
+ * Production, read 2026-11-22: all four tracks hold the exact 10-07 row.
  *   1. The row: product name, product id, the N and K2O gate text (values unchanged), the
  *      annual counter (prodiamine_lb_per_1000, the granular's own unit; the staged Stonewall
  *      4FL rows count prodiamine_oz_per_1000). report_copy holds only the row's role, never a
@@ -45,32 +51,41 @@
  *   3. The Stonewall product id is resolved ONCE (exact catalog name, else an exact alias). The
  *      row exists in production but not in a database built from migrations alone (CI, a dev
  *      copy): where neither a name nor an alias matches, the catalog row is INSERTED with the
- *      production values (the insert style of 20261005130000), so every database ends on the
- *      same October product. Customer-copy and approval columns keep their defaults (the owner
- *      approves them). A catalog row that exists is NEVER updated.
- *      No row to swap = no lookup and no write.
- *   4. The yearly prodiamine cap row (annual_max_rate, active_ingredient prodiamine, 1.5 lb ai
+ *      production label values (the insert style of 20261005130000), so every database ends on
+ *      the same October product. Customer-copy and approval columns keep their defaults (the
+ *      owner approves them). No row to swap = no lookup and no write.
+ *   4. Fertilizer analysis. The production row holds no analysis_n/p/k. The new-sod sheet
+ *      (lawn-sod-sheet) and two completion checks read analysis_n from the row, so a bag
+ *      without it is not treated as a fertilizer there. The bag's guaranteed analysis
+ *      (18-0-10, in its name) is filled by ONE guarded UPDATE, only where all three columns
+ *      are NULL; a value an administrator wrote is never overwritten. No other column of an
+ *      existing catalog row is written.
+ *   5. The yearly prodiamine cap row (annual_max_rate, active_ingredient prodiamine, 1.5 lb ai
  *      per acre written as 9.3068 lb of this bag per 1,000 sq ft) is inserted only where the
  *      Stonewall product has none. Production has it; a database that lacks it gets it. The
  *      4FL cap and every other limit row are never changed.
+ *
  * Chemical group: no write. The production Stonewall row holds its group in the older free-text
  * column (moa_group 'Group 3', hrac_group NULL), as the liquid pre-emergents do. The rotation
  * check's pre_emergent_group_3 exemption (waveguard-approval-engine) reads the group from either
  * column, so the October bag after a Group 3 pre-emergent raises no approval block.
  *
- * Idempotent: a second run finds no Dimension row to swap and writes nothing. One
+ * Idempotent: a second run finds the Stonewall rows and writes nothing. One
  * 'v13_october_stonewall' audit row per protocol records each value before and after; one
- * 'v13_october_stonewall_catalog' row records the inserted catalog row and the inserted cap row.
+ * 'v13_october_stonewall_catalog' row records the inserted catalog row, the filled analysis and
+ * the inserted cap row.
  *
- * down(), exact-equality guarded:
- *   - a row goes back only while it is still the Stonewall row this wrote (name and product id),
- *     and each column and gate key only while it holds the written value; the window goal only
- *     while it reads the new text;
+ * down():
+ *   - a staged row goes back only while it is still the Stonewall row this wrote (name and
+ *     product id), and each column and gate key only while it holds the written value; the
+ *     window goal only while it reads the new text;
  *   - a protocol that a scheduled visit or a completion references is NOT touched (the staging
- *     migration's guard): the rollback logs and leaves it, its audit row and the cap row;
- *   - when no protocol was left: an inserted cap row goes only while every field still equals
- *     what was inserted; a catalog row this migration INSERTED is deleted only while nothing
- *     references it (no foreign key, no protocol row, no application).
+ *     migration's guard): the rollback logs and leaves it and its audit row;
+ *   - the catalog row, its analysis and the cap row are NEVER rolled back, on purpose. They are
+ *     label facts that an administrator can edit after up() ran (a price, inventory, an
+ *     approval), an application made with the bag still counts against the cap, and equality
+ *     of a value cannot prove who wrote it. Their audit row stays as the record. A second up()
+ *     finds them and writes nothing.
  */
 
 const crypto = require('crypto');
@@ -91,7 +106,8 @@ const NEW_GOAL = 'Stonewall 18-0-10 fall feeding with pre-emergent; mapped large
 const OLD_COUNTER_KEY = octoberDimension.NEW_GATES.annualCounter; // 'dithiopyr_lb_per_1000'
 const NEW_COUNTER_KEY = 'prodiamine_lb_per_1000';
 // The N and K2O text is the same bag analysis at the same rate (4.04 lb x 18% = 0.73 lb N; x 10% = 0.40 lb K2O).
-const NEW_GATES = { targetN: octoberDimension.NEW_GATES.targetN, targetK2O: octoberDimension.NEW_GATES.targetK2O, annualCounter: NEW_COUNTER_KEY };
+const OLD_GATES = octoberDimension.NEW_GATES; // what 20261007120500 wrote: the same N and K2O targets, the dithiopyr counter
+const NEW_GATES = { targetN: OLD_GATES.targetN, targetK2O: OLD_GATES.targetK2O, annualCounter: NEW_COUNTER_KEY };
 const JSON_COLUMNS = new Set(['annual_counter']);
 
 // Label: 1.5 lb ai per acre per year. 1.5 / 43.56 = 0.034435 lb ai per 1,000 sq ft; the bag holds 0.37% prodiamine.
@@ -142,6 +158,9 @@ const CATALOG_ROW = {
   }),
   active: true,
 };
+
+const ANALYSIS_COLUMNS = ['analysis_n', 'analysis_p', 'analysis_k'];
+const ANALYSIS = Object.fromEntries(ANALYSIS_COLUMNS.map((column) => [column, CATALOG_ROW[column]])); // 18-0-10
 
 const normalize = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
@@ -216,34 +235,34 @@ async function revertRow(knex, record) {
   await knex('lawn_protocol_products').where({ id: row.id }).update(update);
 }
 
-// Is this staged row exactly the October row 20261007120500 wrote?
+// Is this staged row exactly the October row 20261007120500 wrote? Name, product id, 4.04 in POUNDS (the planner
+// sizes the dose from the unit), the N and K2O targets and the dithiopyr counter.
 function isDimensionOctoberRow(row, dimensionId) {
   if (row.product_name !== OLD_NAME || !dimensionId || String(row.product_id) !== String(dimensionId)) return false;
-  if (!same(row.rate_per_1000, OCT_RATE)) return false;
-  return asObject(row.annual_counter).counter === OLD_COUNTER_KEY && asObject(row.gates).annualCounter === OLD_COUNTER_KEY;
+  if (!same(row.rate_per_1000, OCT_RATE) || String(row.rate_unit || '').trim().toLowerCase() !== 'lb') return false;
+  const gates = asObject(row.gates);
+  if (gates.targetN !== OLD_GATES.targetN || gates.targetK2O !== OLD_GATES.targetK2O) return false;
+  return asObject(row.annual_counter).counter === OLD_COUNTER_KEY && gates.annualCounter === OLD_COUNTER_KEY;
 }
 
-// The October rows to swap: { protocolId, window, row } per v13 protocol. A protocol whose row is
-// anything else is logged and left.
+// The October rows to swap ({ protocolId, window, row } per v13 protocol) and the protocol keys whose October window
+// is neither the exact 10-07 row nor already a Stonewall row.
 async function findSwaps(knex, dimensionId) {
   const protocols = await knex('lawn_protocols').where({ version: V13_VERSION }).select('id', 'protocol_key');
   const known = new Map(protocols.map((protocol) => [String(protocol.id), protocol]));
   const windows = (await knex('lawn_protocol_windows').where({ window_key: OCTOBER_WINDOW }).select('id', 'lawn_protocol_id', 'goal'))
     .filter((window) => known.has(String(window.lawn_protocol_id)));
   const swaps = [];
+  const unresolved = [];
   for (const window of windows) {
     const rows = await knex('lawn_protocol_products').where({ lawn_protocol_window_id: window.id })
-      .select('id', 'product_id', 'product_name', 'rate_per_1000', 'gates', 'annual_counter');
+      .select('id', 'product_id', 'product_name', 'rate_per_1000', 'rate_unit', 'gates', 'annual_counter');
     if (rows.some((row) => row.product_name === NEW_NAME)) continue;
     const candidates = rows.filter((row) => row.product_name === OLD_NAME);
-    const exact = candidates.length === 1 && isDimensionOctoberRow(candidates[0], dimensionId) ? candidates[0] : null;
-    if (!exact) {
-      console.log(`[lawn-v13-october-stonewall] protocol ${known.get(String(window.lawn_protocol_id)).protocol_key}: the October row is not the Dimension row 20261007120500 wrote; left as it is`);
-      continue;
-    }
-    swaps.push({ protocolId: window.lawn_protocol_id, window, row: exact });
+    if (candidates.length === 1 && isDimensionOctoberRow(candidates[0], dimensionId)) swaps.push({ protocolId: window.lawn_protocol_id, window, row: candidates[0] });
+    else unresolved.push(known.get(String(window.lawn_protocol_id)).protocol_key);
   }
-  return swaps;
+  return { swaps, unresolved };
 }
 
 // Inserts the yearly prodiamine cap for `productId` only where it has none; returns what it inserted.
@@ -264,6 +283,16 @@ async function insertCatalogRow(knex) {
   return made && typeof made === 'object' ? made.id : made;
 }
 
+// The bag's guaranteed analysis by ONE guarded UPDATE, only where the row holds none of the three. Returns true when it wrote.
+async function fillAnalysis(knex, productId) {
+  const columns = await knex('products_catalog').columnInfo();
+  if (!ANALYSIS_COLUMNS.every((column) => column in columns)) return false;
+  const changed = await knex('products_catalog').where({ id: productId })
+    .whereNull('analysis_n').whereNull('analysis_p').whereNull('analysis_k')
+    .update({ ...ANALYSIS, updated_at: knex.fn.now() });
+  return changed === 1;
+}
+
 const REQUIRED_TABLES = [
   'products_catalog', 'product_limits', 'lawn_protocols', 'lawn_protocol_windows', 'lawn_protocol_products', 'lawn_protocol_audit_log',
 ];
@@ -276,7 +305,13 @@ async function hasAll(knex, tables) {
 exports.up = async function up(knex) {
   if (!(await hasAll(knex, REQUIRED_TABLES))) return;
   const dimensionId = await resolveProductId(knex, OLD_NAME);
-  const swaps = dimensionId ? await findSwaps(knex, dimensionId) : [];
+  const { swaps, unresolved } = await findSwaps(knex, dimensionId);
+  // Before any write: a track that cannot be swapped would leave the recipe (Stonewall on every track) and its staged row apart.
+  if (unresolved.length) {
+    throw new Error(`lawn v13 October Stonewall: the October step of ${unresolved.join(', ')} is not the row 20261007120500 wrote `
+      + `(${OLD_NAME} at ${OCT_RATE} lb with its N, K2O and dithiopyr values) and is not ${NEW_NAME}. Nothing was written. `
+      + 'Reconcile that row in Protocols, then run the migration again.');
+  }
   if (!swaps.length) return;
   let stonewallId = await resolveProductId(knex, NEW_NAME);
   let insertedProductId = null;
@@ -308,7 +343,8 @@ exports.up = async function up(knex) {
   }
 
   const caps = await insertCapIfMissing(knex, stonewallId);
-  if (caps.length || insertedProductId) {
+  const analysisFilled = insertedProductId ? false : await fillAnalysis(knex, stonewallId);
+  if (caps.length || insertedProductId || analysisFilled) {
     await knex('lawn_protocol_audit_log').insert({
       lawn_protocol_id: null,
       actor_name: 'migration 20261122120000',
@@ -317,7 +353,7 @@ exports.up = async function up(knex) {
       action: CATALOG_ACTION,
       changed_fields: JSON.stringify(['catalog', 'limits']),
       before_snapshot: JSON.stringify({}),
-      after_snapshot: JSON.stringify({ productId: stonewallId, insertedProductId, caps }),
+      after_snapshot: JSON.stringify({ productId: stonewallId, insertedProductId, analysisFilled: analysisFilled ? ANALYSIS : null, caps }),
       metadata: JSON.stringify({ migration: '20261122120000_lawn_v13_october_stonewall' }),
     });
   }
@@ -339,13 +375,13 @@ async function protocolReferenced(knex, protocol) {
   return Boolean(completion);
 }
 
-// Reverts one protocol's audit record; returns true when the protocol was left because it is referenced.
+// Reverts one protocol's audit record; a protocol that is referenced is logged and left.
 async function revertProtocol(knex, log) {
   const after = asObject(log.after_snapshot);
   const protocol = log.lawn_protocol_id ? await knex('lawn_protocols').where({ id: log.lawn_protocol_id }).first('id', 'protocol_key') : null;
   if (protocol && await protocolReferenced(knex, protocol)) {
     console.log(`[lawn-v13-october-stonewall] rollback skipped for protocol ${protocol.protocol_key}: a visit or completion references ${V13_VERSION}`);
-    return true;
+    return;
   }
   for (const record of after.rows || []) await revertRow(knex, record);
   if (after.goalWindowId) {
@@ -353,56 +389,13 @@ async function revertProtocol(knex, log) {
     if (window && window.goal === after.newGoal) await knex('lawn_protocol_windows').where({ id: window.id }).update({ goal: after.oldGoal, updated_at: knex.fn.now() });
   }
   await knex('lawn_protocol_audit_log').where({ id: log.id }).del();
-  return false;
-}
-
-// Deletes an inserted limit row only while every field still equals what was inserted.
-async function removeInsertedLimit(knex, written) {
-  const row = await knex('product_limits').where({ id: written.id }).first();
-  if (!row) return;
-  const fields = ['product_id', 'match_type', 'match_value', 'limit_type', 'limit_value', 'limit_unit', 'severity', 'description'];
-  if (fields.every((field) => same(row[field] ?? null, written[field] ?? null))) await knex('product_limits').where({ id: written.id }).del();
-}
-
-// Is any row pointing at the product? Every foreign key to products_catalog, plus the tables a test schema clones without keys.
-async function productReferenced(knex, productId) {
-  const keys = (await knex.raw(`SELECT c.conrelid::regclass::text AS tbl, a.attname AS col FROM pg_constraint c
-    JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
-    WHERE c.contype = 'f' AND c.confrelid = 'products_catalog'::regclass`)).rows;
-  const spots = new Map(keys.map((key) => [`${key.tbl}.${key.col}`, key]));
-  for (const key of [{ tbl: 'lawn_protocol_products', col: 'product_id' }, { tbl: 'property_application_history', col: 'product_id' },
-    { tbl: 'service_products', col: 'product_id' }, { tbl: 'product_limits', col: 'product_id' }, { tbl: 'product_aliases', col: 'product_id' }]) spots.set(`${key.tbl}.${key.col}`, key);
-  for (const { tbl, col } of spots.values()) {
-    const table = String(tbl).replace(/^"?[^".]+"?\./, '').replace(/"/g, '');
-    if (!(await knex.schema.hasTable(table))) continue;
-    if (await knex(table).where({ [col]: productId }).first(col)) return true;
-  }
-  return false;
-}
-
-async function revertCatalog(knex) {
-  const logs = await knex('lawn_protocol_audit_log').where({ action: CATALOG_ACTION }).select('id', 'after_snapshot');
-  for (const log of logs) {
-    const { insertedProductId, caps = [] } = asObject(log.after_snapshot);
-    for (const written of caps) await removeInsertedLimit(knex, written);
-    if (insertedProductId) {
-      const row = await knex('products_catalog').where({ id: insertedProductId }).first('id', 'name');
-      if (row && row.name === NEW_NAME && !(await productReferenced(knex, insertedProductId))) await knex('products_catalog').where({ id: insertedProductId }).del();
-    }
-    await knex('lawn_protocol_audit_log').where({ id: log.id }).del();
-  }
 }
 
 exports.down = async function down(knex) {
   if (!(await hasAll(knex, REQUIRED_TABLES))) return;
   const logs = await knex('lawn_protocol_audit_log').where({ action: ACTION }).select('id', 'lawn_protocol_id', 'after_snapshot');
-  let kept = 0;
-  for (const log of logs) if (await revertProtocol(knex, log)) kept += 1;
-  if (kept) {
-    console.log('[lawn-v13-october-stonewall] catalog row and cap row kept: a protocol still uses the Stonewall row');
-    return;
-  }
-  await revertCatalog(knex);
+  for (const log of logs) await revertProtocol(knex, log);
+  // The catalog row, its analysis and the cap row stay, with their audit row: see the header.
 };
 
 exports.ACTION = ACTION;
@@ -418,3 +411,5 @@ exports.NEW_GATES = NEW_GATES;
 exports.CAP_SPEC = CAP_SPEC;
 exports.CATALOG_ROW = CATALOG_ROW;
 exports.CAP_VALUE = CAP_VALUE;
+exports.ANALYSIS = ANALYSIS;
+exports.OLD_GATES = OLD_GATES;

@@ -962,12 +962,12 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
     const shape = (rows) => rows.map((r) => [r.limit_type, r.match_type, r.match_value, Number(r.limit_value), r.limit_unit, r.severity]);
     const ours = () => knex('lawn_protocol_audit_log').whereIn('action', [stonewallMigration.ACTION, stonewallMigration.CATALOG_ACTION]).orderBy('id');
     const catalogRow = () => knex('products_catalog').where({ id: stonewallId() }).first();
-    // Every catalog column, the stamp included: the migration never updates a catalog row that exists.
+    // Every catalog column, the stamp included: a catalog row that already holds its analysis is never written.
     const catalogJson = async () => JSON.stringify(await catalogRow());
     const otherRows = () => knex('lawn_protocol_products as p').join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id')
       .whereNot({ 'w.window_key': 'oct_v13_spreader_fall' }).orderBy('p.id').select('p.id', 'p.product_name', 'p.product_id', 'p.rate_per_1000', 'p.rate_unit', 'p.gates', 'p.annual_counter');
     const DIMENSION_OCTOBER = {
-      product_name: DIMENSION, rate_per_1000: 4.04, gates: { targetN: '0.73 lb N/1000', targetK2O: '0.4 lb K2O/1000', annualCounter: 'dithiopyr_lb_per_1000' }, annual_counter: { counter: 'dithiopyr_lb_per_1000' },
+      product_name: DIMENSION, rate_per_1000: 4.04, rate_unit: 'lb', gates: { targetN: '0.73 lb N/1000', targetK2O: '0.4 lb K2O/1000', annualCounter: 'dithiopyr_lb_per_1000' }, annual_counter: { counter: 'dithiopyr_lb_per_1000' },
     };
     // The fixture as 20261007120500 leaves it: the Dimension row, its goal, no Stonewall 0.37% limit row, no audit row of ours.
     async function resetToDimension() {
@@ -1034,22 +1034,26 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       expect(await stateOf()).toBe(before);
     });
 
-    test('down puts the Dimension row, its goal and counter back, removes the cap row it inserted and its audit rows; up swaps again', async () => {
+    test('down puts the Dimension row, its goal and counter back and removes the protocol audit row; the cap row and its audit row stay (label facts); up swaps again', async () => {
       const stamped = async () => { const { updated_at: _u, ...rest } = await octoberRow(); return JSON.stringify(rest); };
       const swapped = await stamped();
+      const caps = JSON.stringify(await limitRows(stonewallId()));
       await stonewallMigration.down(knex);
       try {
         const row = await octoberRow();
-        expect(row).toMatchObject({ product_name: DIMENSION, product_id: dimensionId(), goal: stonewallMigration.OLD_GOAL });
+        expect(row).toMatchObject({ product_name: DIMENSION, product_id: dimensionId(), rate_unit: 'lb', goal: stonewallMigration.OLD_GOAL });
         expect(Number(row.rate_per_1000)).toBe(4.04);
         expect(row.gates).toEqual(DIMENSION_OCTOBER.gates);
         expect(row.annual_counter).toEqual(DIMENSION_OCTOBER.annual_counter);
-        expect(await limitRows(stonewallId())).toEqual([]);
-        expect(await ours()).toEqual([]);
+        // An application made with the bag still counts against the cap, so the cap row is never rolled back.
+        expect(JSON.stringify(await limitRows(stonewallId()))).toBe(caps);
+        expect((await ours()).map((log) => log.action)).toEqual([stonewallMigration.CATALOG_ACTION]);
       } finally {
         await stonewallMigration.up(knex);
       }
       expect(await stamped()).toBe(swapped);
+      // The second up found the cap row: one catalog audit row, not two.
+      expect((await ours()).map((log) => log.action).sort()).toEqual([stonewallMigration.ACTION, stonewallMigration.CATALOG_ACTION].sort());
     });
 
     test('a value changed since stays: the October rate, a gate someone edited, a cap row the office edited', async () => {
@@ -1101,25 +1105,24 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       expect(await octoberRow()).toMatchObject({ product_name: STW_037 });
     });
 
-    describe('only the exact Dimension October row is swapped', () => {
-      const quiet = () => jest.spyOn(console, 'log').mockImplementation(() => {});
+    describe('only the exact Dimension October row is swapped; any other state stops the migration before it writes', () => {
+      // The recipe says Stonewall on every track: a track left on another row would put the recipe and the staged protocol apart.
       test.each([
         ['renamed', { product_name: 'Renamed by the office' }],
-        ['another product id', { product_id: null }],
+        ['on another product id', { product_id: null }],
         ['re-rated', { rate_per_1000: 3.9 }],
-        ['another counter', { annual_counter: JSON.stringify({ counter: 'office_counter' }) }],
-      ])('a row that is %s is left as it is and logged', async (label, change) => {
+        ['in another unit (4.04 oz is not 4.04 lb)', { rate_unit: 'oz' }],
+        ['on another N target', { gates: JSON.stringify({ ...DIMENSION_OCTOBER.gates, targetN: '0.5 lb N/1000' }) }],
+        ['on another K2O target', { gates: JSON.stringify({ ...DIMENSION_OCTOBER.gates, targetK2O: '0.2 lb K2O/1000' }) }],
+        ['on another counter', { annual_counter: JSON.stringify({ counter: 'office_counter' }) }],
+      ])('a row that is %s: up throws, names the protocol and writes nothing', async (_label, change) => {
         await withReset(async () => {
-          const log = quiet();
           const row = await octoberRow();
           await knex('lawn_protocol_products').where({ id: row.id }).update(change);
-          const before = JSON.stringify([await octoberRow(), await limitRows(stonewallId())]);
-          try {
-            await stonewallMigration.up(knex);
-            expect(JSON.stringify([await octoberRow(), await limitRows(stonewallId())])).toBe(before);
-            expect(await ours()).toEqual([]);
-            if (label !== 'renamed') expect(log).toHaveBeenCalledWith(expect.stringContaining('not the Dimension row 20261007120500 wrote'));
-          } finally { log.mockRestore(); }
+          const stateOf = async () => JSON.stringify([await octoberRow(), await catalogJson(), await limitRows(stonewallId()), await otherRows(), await ours()]);
+          const before = await stateOf();
+          await expect(stonewallMigration.up(knex)).rejects.toThrow(`the October step of ${KEY} is not the row 20261007120500 wrote`);
+          expect(await stateOf()).toBe(before);
         });
       });
 
@@ -1206,31 +1209,31 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
           expect(made.post_application_watering.label_note).toContain('activated by at least 0.5 inch of rainfall or irrigation prior to weed seed germination and within 14 days following application.');
           expect(await octoberRow()).toMatchObject({ product_name: STW_037, product_id: made.id });
           expect(shape(await limitRows(made.id))).toEqual([['annual_max_rate', 'active_ingredient', 'prodiamine', 9.3068, 'lb/1000sf/year', 'hard_block']]);
-          expect((await ours()).find((log) => log.action === stonewallMigration.CATALOG_ACTION).after_snapshot).toMatchObject({ insertedProductId: made.id, productId: made.id });
+          expect((await ours()).find((log) => log.action === stonewallMigration.CATALOG_ACTION).after_snapshot).toMatchObject({ insertedProductId: made.id, productId: made.id, analysisFilled: null });
         });
       });
 
-      test('down deletes a catalog row this migration inserted when nothing references it, and keeps it when something does', async () => {
+      test('down never deletes the catalog row or the cap row this migration inserted (an administrator may have edited them since); up again finds them and inserts nothing', async () => {
         await withReset(async () => {
           await awayFromCatalog();
           await stonewallMigration.up(knex);
           const made = await insertedRow();
+          expect([Number(made.analysis_n), Number(made.analysis_p), Number(made.analysis_k)]).toEqual([18, 0, 10]);
+          await knex('products_catalog').where({ id: made.id }).update({ best_price: 35.98, best_vendor: 'Set by the office', approved_for_service_report: true });
           await stonewallMigration.down(knex);
-          expect(await octoberRow()).toMatchObject({ product_name: DIMENSION });
-          expect(await insertedRow()).toBeUndefined();
-          // Referenced by an application: the row stays (and the protocol row is back on Dimension).
+          expect(await octoberRow()).toMatchObject({ product_name: DIMENSION, product_id: dimensionId() });
+          expect(await insertedRow()).toMatchObject({ id: made.id, best_vendor: 'Set by the office', approved_for_service_report: true });
+          expect(shape(await limitRows(made.id))).toHaveLength(1);
+          expect((await ours()).map((log) => log.action)).toEqual([stonewallMigration.CATALOG_ACTION]);
           await stonewallMigration.up(knex);
-          const again = await insertedRow();
-          const { customerId } = await visit('2026-10-14');
-          await knex('property_application_history').insert({ customer_id: customerId, product_id: again.id, application_date: '2026-10-14', application_rate: 4.04, rate_unit: 'lb', active_ingredient: 'Prodiamine' });
-          await stonewallMigration.down(knex);
-          expect(await insertedRow()).toMatchObject({ id: again.id });
-          await knex('property_application_history').where({ product_id: again.id }).del();
-          expect(made.id).not.toBe(again.id);
+          expect(await octoberRow()).toMatchObject({ product_name: STW_037, product_id: made.id });
+          expect((await knex('products_catalog').where({ name: STW_037 }).select('id')).map((row) => row.id)).toEqual([made.id]);
+          expect(shape(await limitRows(made.id))).toHaveLength(1);
+          expect((await ours()).filter((log) => log.action === stonewallMigration.CATALOG_ACTION)).toHaveLength(1);
         });
       });
 
-      test('a catalog row that exists is never updated: not one column of it moves, the chemical group columns and the stamp included, up or down', async () => {
+      test('a catalog row that already holds its analysis is never written: not one column of it moves, the chemical group columns and the stamp included, up or down', async () => {
         await withReset(async () => {
           const before = await catalogJson();
           expect(await catalogRow()).toMatchObject({ hrac_group: null });
@@ -1238,6 +1241,38 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
           expect(await catalogJson()).toBe(before);
           await stonewallMigration.down(knex);
           expect(await catalogJson()).toBe(before);
+        });
+      });
+
+      // Production, read 2026-11-22: the row holds no analysis, so the new-sod sheet and the completion checks would not read the bag as a fertilizer.
+      const setAnalysis = (values) => knex('products_catalog').where({ id: stonewallId() }).update(values);
+      const analysisOf = async () => { const row = await catalogRow(); return [row.analysis_n, row.analysis_p, row.analysis_k].map((value) => (value == null ? null : Number(value))); };
+
+      test('a catalog row with no analysis (the production row) gets 18-0-10 and nothing else; the fill is audited and down leaves it', async () => {
+        await withReset(async () => {
+          await setAnalysis({ analysis_n: null, analysis_p: null, analysis_k: null });
+          try {
+            const strip = ({ analysis_n: _n, analysis_p: _p, analysis_k: _k, updated_at: _u, ...rest }) => JSON.stringify(rest);
+            const before = strip(await catalogRow());
+            await stonewallMigration.up(knex);
+            expect(await analysisOf()).toEqual([18, 0, 10]);
+            expect(strip(await catalogRow())).toBe(before);
+            expect((await ours()).find((log) => log.action === stonewallMigration.CATALOG_ACTION).after_snapshot)
+              .toMatchObject({ insertedProductId: null, analysisFilled: { analysis_n: 18, analysis_p: 0, analysis_k: 10 } });
+            await stonewallMigration.down(knex);
+            expect(await analysisOf()).toEqual([18, 0, 10]);
+          } finally { await setAnalysis({ analysis_n: 18, analysis_p: 0, analysis_k: 10 }); }
+        });
+      });
+
+      test('an analysis an administrator wrote, even one figure of it, is never overwritten', async () => {
+        await withReset(async () => {
+          await setAnalysis({ analysis_n: 16, analysis_p: null, analysis_k: null });
+          try {
+            await stonewallMigration.up(knex);
+            expect(await analysisOf()).toEqual([16, null, null]);
+            expect((await ours()).find((log) => log.action === stonewallMigration.CATALOG_ACTION).after_snapshot).toMatchObject({ analysisFilled: null });
+          } finally { await setAnalysis({ analysis_n: 18, analysis_p: 0, analysis_k: 10 }); }
         });
       });
     });
