@@ -800,6 +800,14 @@ describe('SlotPicker look-ahead (the next 2 weeks are full)', () => {
       expect(screen.getAllByRole('link', { name: 'Call (941) 297-5749' })[0]).toHaveAttribute('href', 'tel:+19412975749');
     });
 
+    // A plan offer's quote opens weeks out by design: the line would show on every one and offer a visit it does not sell.
+    it('stays away on a quote whose first visit is later by design', async () => {
+      stubFetch({ list: { primary: [OPEN('late', '2099-12-17')], expander: [], metadata: { firstDayAvailability: { date: '2099-12-17' } } } });
+      renderPicker({ laterFirstVisit: true });
+      await screen.findAllByText(/Arrival window|Pick/);
+      expect(screen.queryByTestId(NOTE)).not.toBeInTheDocument();
+    });
+
     // 08:00 ET: today's 09:00 opening is inside the 2-hour booking lead, so the glass picker drops it.
     // The capped list cannot show that days 2-7 are empty, so the line makes no claim.
     it('stays away after the glass picker drops a stale today slot while the first open day is today', async () => {

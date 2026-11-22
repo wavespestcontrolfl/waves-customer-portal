@@ -188,6 +188,11 @@ postgres('plan offer quote (live Postgres)', () => {
     const first = await mintFor({ customer, option, shown: shownOf(option, 0), offer: offerOf(job) });
     const again = await mintFor({ customer, option, shown: shownOf(option, 0), offer: offerOf(job) });
     expect(again).toMatchObject({ estimateId: first.estimateId, token: first.token, reused: true });
+    // The same job in another spelling of its id (upper case) is the same offer: the quote is handed back, and the
+    // estimate stores the id as the database spells it.
+    const spelled = await mintFor({ customer, option, shown: shownOf(option, 0), offer: { jobId: String(job.id).toUpperCase() } });
+    expect(spelled).toMatchObject({ estimateId: first.estimateId, reused: true });
+    expect(parse((await rowOf(first.estimateId)).estimate_data).planStart.offer.jobId).toBe(String(job.id));
 
     const otherJob = await seedJob(customer, { daysAgo: 4 });
     const next = await mintFor({ customer, option, shown: shownOf(option, 0), offer: offerOf(otherJob) });

@@ -158,6 +158,9 @@ export default function SlotPicker({
   // A 409 the page owns (its refused plan-quote banner): every slot read hands the 409 body up first, and shows
   // nothing more when the page answers true.
   onRefusal = null,
+  // A plan offer's quote books no visit before its own first day, weeks out by design. The "nothing in the next
+  // 7 days, call for a sooner visit" line would show on every one and offer a visit the quote does not sell.
+  laterFirstVisit = false,
 }) {
   // The page's transition is async: its rejection must never surface as an unhandled one from a slot read.
   const reportContactReview = (body) => {
@@ -496,7 +499,7 @@ export default function SlotPicker({
   const picker = (
     <>
       {view.notice ? <div style={{ fontSize: 14, color: W.textBody, marginBottom: 12 }}>{view.notice}</div> : null}
-      <NoTimeSoonNote blocked={blocked} searching={!!activePayload} answer={data} slots={shownSlots} />
+      <NoTimeSoonNote blocked={blocked || laterFirstVisit} searching={!!activePayload} answer={data} slots={shownSlots} />
       <SchedulePicker
         frame="inner"
         availability={availability}

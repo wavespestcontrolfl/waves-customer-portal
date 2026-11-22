@@ -1692,7 +1692,7 @@ async function mintPlanStartEstimate({
       // the page's slot search opens on from that day. A wider search (the route's windowDays or date range)
       // or a visit already on the books may land later, as on every estimate: a later plan visit changes no
       // price and no charge, so nothing refuses it.
-      callerTerms = { jobId: callerOffer.jobId, endsAt: due.endsAt, firstVisitFrom: due.firstVisitFrom };
+      callerTerms = { jobId: due.jobId, endsAt: due.endsAt, firstVisitFrom: due.firstVisitFrom };
       assertPlanOfferDates(callerTerms, now());
     }
 

@@ -422,6 +422,8 @@ describe('refuseFrozenRestartMutation (PR #3671 GH r21 P1 — restart quotes are
       expect(src).toContain("planOfferOf(estimate.estimate_data) ? { planOffer: true } : {}");
       const page = require('fs').readFileSync(require.resolve('../../client/src/pages/EstimateViewPage.jsx'), 'utf8');
       expect(page).toContain('data?.estimate?.planRestart === true || data?.estimate?.planOffer === true');
+      // The picker's "nothing in the next 7 days, call for a sooner visit" line stays off an offer quote.
+      expect(page).toContain('laterFirstVisit={data?.estimate?.planOffer === true}');
       // The website view (?website=1) draws its own cadence step: a fixed quote gets none.
       expect(page).toContain('lockedSection={(section) => restartQuote || isLockedMirrorSection(section)}');
     });

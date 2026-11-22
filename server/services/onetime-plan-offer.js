@@ -226,8 +226,10 @@ async function dueOfferOfJob(database, { jobId, customerId, now }) {
   const row = await dueJobs(database, etDateString(now))
     .where('s.id', jobId)
     .where('s.customer_id', customerId)
-    .first(database.raw(`${OFFER_DAY_SQL} AS service_day`));
-  return row ? { jobId: String(jobId), ...offerTerms(dateOnlyString(row.service_day)) } : null;
+    .first('s.id', database.raw(`${OFFER_DAY_SQL} AS service_day`));
+  // The id as the database spells it: the estimate stores it and a retry compares it (samePlanOffer), so a
+  // caller's other spelling of the same uuid (upper case) must not read as another job.
+  return row ? { jobId: String(row.id), ...offerTerms(dateOnlyString(row.service_day)) } : null;
 }
 
 // One page of the completed one-time jobs whose offer day was FIRST_DAY to LAST_DAY days ago (ET), oldest first.
