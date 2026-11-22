@@ -5,15 +5,17 @@
 // Owner 2026-11-21, "build" (GATE_WIZARD_SUPERSEDES_FORM_DRAFT): an old web-form
 // draft estimate with no price that nobody touched must not block the quote
 // wizard's own estimate. The rule is one SQL predicate (jsonb paths, two NOT
-// EXISTS reads, an advisory try-lock, a guarded UPDATE), so only a real database
-// can prove which rows it archives and which rows it must leave alone. The
+// EXISTS reads, an advisory try-lock, a guarded UPDATE) plus the street
+// comparison, so only a real database can prove which rows it archives and
+// which rows it must leave alone. The
 // route's own wiring is pinned in public-quote-mirror-refresh.test.js.
 // No network, no spend, no customer.
 // CI runs a DB suite only when it carries this exact line (tests.yml greps for it).
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
-// Both gates are read from the environment: the clarify one when feature-gates
-// loads, the wizard one at call time. Set before any module loads.
+// The clarify gate is read when feature-gates loads: set it before any module
+// loads. The wizard's own gate is read by the route only (planFormShellClear),
+// never by the two steps or by parkClarifyAsk, so this suite does not set it.
 process.env.GATE_ESTIMATE_CLARIFY_ASKS = 'true';
 let mockConnection;
 jest.mock('../models/db', () => new Proxy((...args) => mockConnection(...args), {
@@ -34,7 +36,8 @@ const {
 const { parkClarifyAsk } = require('../services/estimate-clarify-asks');
 
 const DAY = 86400000;
-const WIZARD_GATE = 'GATE_WIZARD_SUPERSEDES_FORM_DRAFT';
+// The property the wizard run is for. Every fixture is for it unless a test says otherwise.
+const HOME = '12 Sample St, Parrish, FL 34219';
 // The wizard's rule (routes/public-quote.js planFormShellClear): only its own
 // open draft may remain beside the shells.
 const wizardRule = (existing) => !(existing.source === 'quote_wizard' && existing.status === 'draft');
@@ -96,7 +99,6 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
   });
 
   afterEach(async () => {
-    delete process.env[WIZARD_GATE];
     await trx.rollback();
   });
 
@@ -109,6 +111,7 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     const [row] = await trx('estimates').insert({
       customer_phone: phone,
       customer_name: 'Sample Person',
+      address: HOME,
       status: 'draft',
       source: 'lead_webhook',
       created_at: made,
@@ -134,7 +137,7 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
   const row = (id) => trx('estimates').where({ id }).first('id', 'status', 'archived_at', 'estimate_data');
   const openIds = async () => (await listOpenEstimatesByPhone(phone, { database: trx })).map((r) => r.id);
   // Step 1: which shells may go.
-  const plan = () => lockUntouchedWebFormShellsInTx(trx, { phone, stillBlocks: wizardRule });
+  const plan = (address = HOME) => lockUntouchedWebFormShellsInTx(trx, { phone, address, stillBlocks: wizardRule });
   // Both steps, as a wizard run whose own draft write landed.
   const retire = async () => {
     const planned = await plan();
@@ -173,7 +176,7 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     const second = await estimate();
     const otherDigits = digits === '9415550000' ? '9415550001' : '9415550000';
     const [other] = await trx('estimates').insert({
-      customer_phone: `+1${otherDigits}`, customer_name: 'Other Person', status: 'draft', source: 'lead_webhook',
+      customer_phone: `+1${otherDigits}`, customer_name: 'Other Person', address: HOME, status: 'draft', source: 'lead_webhook',
     }).returning('id');
 
     const result = await retire();
@@ -236,6 +239,12 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     ['was claimed by auto-send', () => ({ estimate_data: JSON.stringify({ automation: { autoSend: { claimedAt: '2026-11-20T12:00:00.000Z' } } }) })],
     // A staff edit can leave every total at 0 and every delivery time empty.
     ['was written again after it was made', () => ({ updated_at: new Date() })],
+    // It could not carry the marker that parkClarifyAsk reads.
+    ['has data that is not a JSON object', () => ({ estimate_data: JSON.stringify('legacy text') })],
+    // One phone, two homes: this run does not replace the other home's draft.
+    ['is for another property', () => ({ address: '88 Other Ave, Parrish, FL 34219' })],
+    ['is for another unit of the building', () => ({ address: '12 Sample St Apt 4, Parrish, FL 34219' })],
+    ['has no address', () => ({ address: '' })],
   ])('a web-form draft that %s is not a shell: it stays, and it still blocks', async (_label, fields) => {
     const touched = await estimate(fields());
 
@@ -244,6 +253,30 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     expect(result.retiredIds).toEqual([]);
     expect((await row(touched)).archived_at).toBeNull();
     expect(await openIds()).toEqual([touched]);
+  });
+
+  test('the same property written another way is the same property', async () => {
+    const shell = await estimate({ address: '12 sample street, parrish fl' });
+
+    expect((await retire()).retiredIds).toEqual([shell]);
+  });
+
+  test('a draft for another property blocks the run, and then this property\'s shell stays too', async () => {
+    const shell = await estimate();
+    const otherHome = await estimate({ address: '88 Other Ave, Parrish, FL 34219' });
+
+    const result = await retire();
+
+    expect(result).toEqual({ retiredIds: [], blockedById: otherHome });
+    expect((await row(shell)).archived_at).toBeNull();
+    expect((await row(otherHome)).archived_at).toBeNull();
+  });
+
+  test('a run that gives no address takes no shell', async () => {
+    const shell = await estimate();
+
+    expect((await plan('')).shellIds).toEqual([]);
+    expect((await row(shell)).archived_at).toBeNull();
   });
 
   test('a shell that staff restored after the wizard archived it is never archived again', async () => {
@@ -314,13 +347,14 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
   });
 
   test('a clarify ask is not parked for a shell the wizard archived, and an ask parked first holds its shell', async () => {
-    process.env[WIZARD_GATE] = 'true';
     const ask = (estimateId) => parkClarifyAsk({
       missing: ['specific_service'], phone, firstName: 'Sample', estimateId, source: 'lead_webhook_blocked', channelProvenance: 'web_form',
     });
     const asks = () => trx('message_drafts').where({ source_ref: `clarify:${digits}` });
 
     // The wizard archived the shell before the web form parked its question.
+    // The wizard's gate is not set here: the marker is honored with the gate
+    // off too, because an archive outlives the gate.
     const gone = await estimate();
     expect((await retire()).retiredIds).toEqual([gone]);
     expect(await ask(gone)).toEqual({ parked: false, skipped: 'estimate_superseded_by_wizard' });
@@ -333,12 +367,13 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     expect((await row(held)).archived_at).toBeNull();
   });
 
-  test('gate off: the park step reads nothing new and parks as before, even for an archived draft', async () => {
-    const gone = await estimate();
-    expect((await retire()).retiredIds).toEqual([gone]);
+  test('a draft that staff restored can get its clarify ask again', async () => {
+    const shell = await estimate();
+    expect((await retire()).retiredIds).toEqual([shell]);
+    await trx('estimates').where({ id: shell }).update({ archived_at: null, updated_at: trx.fn.now() });
 
     const parked = await parkClarifyAsk({
-      missing: ['specific_service'], phone, estimateId: gone, source: 'lead_webhook_blocked', channelProvenance: 'web_form',
+      missing: ['specific_service'], phone, estimateId: shell, source: 'lead_webhook_blocked', channelProvenance: 'web_form',
     });
 
     expect(parked).toMatchObject({ parked: true });
@@ -352,17 +387,6 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
 
     expect(result).toEqual({ retiredIds: [], blockedById: priced });
     expect((await row(shell)).archived_at).toBeNull();
-  });
-
-  test('a shell whose data is not a JSON object is archived with its data unchanged', async () => {
-    const shell = await estimate({ estimate_data: JSON.stringify('legacy text') });
-
-    const result = await retire();
-
-    expect(result.retiredIds).toEqual([shell]);
-    const after = await row(shell);
-    expect(after.archived_at).toBeInstanceOf(Date);
-    expect(after.estimate_data).toBe('legacy text');
   });
 
   test('the archive step re-checks the rule: an id that is no longer a shell is not archived', async () => {
@@ -379,7 +403,7 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     const nothing = { shellIds: [], newestRemaining: null, blockedById: null };
 
     expect(await plan()).toEqual(nothing);
-    expect(await lockUntouchedWebFormShellsInTx(trx, { phone: '555', stillBlocks: wizardRule })).toEqual(nothing);
+    expect(await lockUntouchedWebFormShellsInTx(trx, { phone: '555', address: HOME, stillBlocks: wizardRule })).toEqual(nothing);
     expect(await archiveWebFormShellsInTx(trx, { phone, shellIds: [], leadId: 'lead-1' })).toEqual([]);
   });
 });

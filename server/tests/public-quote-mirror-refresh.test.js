@@ -75,7 +75,8 @@ describe('planFormShellClear (GATE_WIZARD_SUPERSEDES_FORM_DRAFT)', () => {
   const wizardDraft = { blocked: true, reason: 'duplicate_phone', existingEstimateId: 'wiz-1', existingStatus: 'draft', existingSource: 'quote_wizard' };
   let calls;
   let lockContactPair;
-  const run = (block) => planFormShellClear(trx, block, { phone: '+19415550142', leadId: 'lead-9', lockContactPair });
+  const HOME = '12 Sample St, Parrish, FL 34219';
+  const run = (block) => planFormShellClear(trx, block, { phone: '+19415550142', address: HOME, leadId: 'lead-9', lockContactPair });
 
   beforeEach(() => {
     calls = [];
@@ -114,7 +115,8 @@ describe('planFormShellClear (GATE_WIZARD_SUPERSEDES_FORM_DRAFT)', () => {
     // The contact-pair lock comes before any estimate row lock, and nothing is archived yet.
     expect(calls).toEqual(['contact lock', 'shell locks']);
     expect(lockContactPair).toHaveBeenCalledWith(trx);
-    expect(lockUntouchedWebFormShellsInTx).toHaveBeenCalledWith(trx, { phone: '+19415550142', stillBlocks: expect.any(Function) });
+    // The run's own address goes with it: a draft for another property is not its shell.
+    expect(lockUntouchedWebFormShellsInTx).toHaveBeenCalledWith(trx, { phone: '+19415550142', address: HOME, stillBlocks: expect.any(Function) });
 
     expect(await plan.archiveShells('draft-1')).toEqual(['shell-1']);
     expect(archiveWebFormShellsInTx).toHaveBeenCalledWith(trx, { phone: '+19415550142', shellIds: ['shell-1'], leadId: 'lead-9' });
@@ -190,11 +192,11 @@ describe('mirror refresh wiring', () => {
     );
   });
 
-  test('the same-phone duplicate read goes through planFormShellClear, with the run\'s contact-pair lock', () => {
+  test('the same-phone duplicate read goes through planFormShellClear, with the run\'s address and contact-pair lock', () => {
     // The duplicate branch (refresh, block or insert) must judge the block
     // the plan returns, never the first read.
     expect(routeSource).toMatch(
-      /const shellPlan = await planFormShellClear\(\s*trx,\s*await blockIfAutomatedEstimateDuplicate\(contactPhone, \{ database: trx \}\),\s*\{ phone: contactPhone, leadId: lead\.id, lockContactPair: draftVerdictLock \},?\s*\);\s*const \{ duplicateBlock \} = shellPlan;\s*if \(duplicateBlock\) \{/
+      /const shellPlan = await planFormShellClear\(\s*trx,\s*await blockIfAutomatedEstimateDuplicate\(contactPhone, \{ database: trx \}\),\s*\{ phone: contactPhone, address: quoteFullAddress, leadId: lead\.id, lockContactPair: draftVerdictLock \},?\s*\);\s*const \{ duplicateBlock \} = shellPlan;\s*if \(duplicateBlock\) \{/
     );
     // No second, unguarded duplicate read in the wizard's estimate mirror.
     expect(routeSource.match(/blockIfAutomatedEstimateDuplicate\(contactPhone/g)).toHaveLength(1);

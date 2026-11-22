@@ -12,6 +12,11 @@
 let mockState;
 jest.mock('../models/db', () => {
   const makeBuilder = (table) => {
+    // parkClarifyAsk's archive-marker read (supersededByWizard). Its real SQL
+    // is proven in wizard-form-shell-retire-postgres.test.js; no draft in
+    // this suite is archived, so the read finds no row and takes nothing
+    // from the queues below.
+    let wizardMarkerRead = false;
     const builder = {
       where() { return builder; },
       whereIn() { return builder; },
@@ -21,10 +26,15 @@ jest.mock('../models/db', () => {
       orWhere() { return builder; },
       orderBy() { return builder; },
       orderByRaw() { return builder; },
-      whereRaw(sql, params) { mockState.raws.push({ sql: String(sql), params }); return builder; },
+      whereRaw(sql, params) {
+        mockState.raws.push({ sql: String(sql), params });
+        if (/supersededByWizard/.test(String(sql))) wizardMarkerRead = true;
+        return builder;
+      },
       forUpdate() { return builder; },
       modify(fn) { fn(builder); return builder; },
       first: async () => {
+        if (wizardMarkerRead) return undefined;
         mockState.firsts.push(table);
         const v = mockState.firstQueue.length ? mockState.firstQueue.shift() : mockState.existingDraft;
         if (v instanceof Error) throw v;

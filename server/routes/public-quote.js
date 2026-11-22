@@ -814,7 +814,7 @@ function shouldRefreshWizardDraft(duplicateBlock) {
 // `lockContactPair` is the run's contact-pair lock: the estimate branches
 // take it before any estimate row lock, so it is taken first here too.
 // It has a gate because the unblocked run texts the person the booking link.
-async function planFormShellClear(trx, duplicateBlock, { phone, leadId, lockContactPair }) {
+async function planFormShellClear(trx, duplicateBlock, { phone, address, leadId, lockContactPair }) {
   const asBefore = { duplicateBlock, archiveShells: async () => [] };
   if (!duplicateBlock || shouldRefreshWizardDraft(duplicateBlock)) return asBefore;
   // Only a web-form draft can be a shell. Any other newest estimate still
@@ -824,6 +824,7 @@ async function planFormShellClear(trx, duplicateBlock, { phone, leadId, lockCont
   await lockContactPair(trx);
   const { shellIds, newestRemaining } = await lockUntouchedWebFormShellsInTx(trx, {
     phone,
+    address,
     stillBlocks: (existing) => !shouldRefreshWizardDraft(automatedDuplicateBlock(existing)),
   });
   if (!shellIds.length) return asBefore;
@@ -3640,7 +3641,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           const shellPlan = await planFormShellClear(
             trx,
             await blockIfAutomatedEstimateDuplicate(contactPhone, { database: trx }),
-            { phone: contactPhone, leadId: lead.id, lockContactPair: draftVerdictLock },
+            { phone: contactPhone, address: quoteFullAddress, leadId: lead.id, lockContactPair: draftVerdictLock },
           );
           const { duplicateBlock } = shellPlan;
           if (duplicateBlock) {

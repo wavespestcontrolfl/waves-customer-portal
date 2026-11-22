@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const { normalizePhone } = require('../utils/phone');
+const { sameStreetAddress } = require('./estimator-engine/address-compare');
 
 const OPEN_ESTIMATE_STATUSES = ['draft', 'scheduled', 'sent', 'viewed'];
 const AUTOMATED_ESTIMATE_LOCK_NAMESPACE = 'estimate_automation_duplicate';
@@ -303,14 +304,20 @@ async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
  *     lead points at it: the #6394 rule (retireSupersededLeadWebhookDrafts,
  *     admin-estimate-persistence.js);
  *   - no clarify ask for the phone is open or was sent in the last 7 days
- *     without an answer: the row may be waiting for the customer's reply.
+ *     without an answer: the row may be waiting for the customer's reply;
+ *   - its data is a JSON object (or empty), so it can carry the marker below;
+ *   - it is for the wizard run's own property: one phone can ask for quotes
+ *     on two homes, and a draft for the other home is not replaced by this
+ *     run. Same street line and the same unit (sameStreetAddress with
+ *     requireExactUnit); a draft with no address is never a shell.
  *
  * Two steps that bracket the wizard's own estimate write, like
  * lockSupersededDraftInTx / archiveSupersededDraftInTx above, so a shell is
  * never lost without its replacement:
  *   1. lockUntouchedWebFormShellsInTx: row-locks the phone's shells and
  *      answers which ids may go. `stillBlocks` gets EVERY other open estimate
- *      of the phone; when one of them still blocks, no id is returned.
+ *      of the phone (a web-form draft for another property included); when
+ *      one of them still blocks, no id is returned.
  *   2. archiveWebFormShellsInTx: after the wizard's draft was written in the
  *      same transaction, archives those ids. When the write is refused or
  *      never happens, the caller does not call it and the shells stand.
@@ -330,7 +337,8 @@ async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
  * A try, never a wait: the clarify writers take other locks under theirs, and
  * waiting here could deadlock with them. When a clarify writer holds the lock
  * right now, no shell goes on this run. parkClarifyAsk reads the marker under
- * the same lock and does not park an ask for a shell the wizard archived.
+ * the same lock and does not park an ask for a shell the wizard archived. It
+ * reads the marker with the gate on or off: an archive outlives the gate.
  */
 const WEB_FORM_SHELL_SOURCE = 'lead_webhook';
 // Same window as estimate-clarify-asks.js RECENT_SENT_WINDOW_MS: a sent ask
@@ -356,6 +364,8 @@ function untouchedWebFormShells(trx, last10, { now = new Date() } = {}) {
     .whereRaw('COALESCE(onetime_total, 0) = 0')
     .whereRaw('COALESCE(annual_total, 0) = 0')
     .whereRaw("COALESCE(estimate_data->'automation'->'autoSend'->>'claimedAt', '') = ''")
+    // Only an object can take the marker. A legacy scalar stays a blocker.
+    .whereRaw("jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object'")
     .whereNotExists(function linkedToLead() {
       this.select(trx.raw('1')).from('leads').whereRaw('leads.estimate_id = estimates.id');
     })
@@ -371,7 +381,7 @@ function untouchedWebFormShells(trx, last10, { now = new Date() } = {}) {
     });
 }
 
-async function lockUntouchedWebFormShellsInTx(trx, { phone, stillBlocks, now = new Date() } = {}) {
+async function lockUntouchedWebFormShellsInTx(trx, { phone, address, stillBlocks, now = new Date() } = {}) {
   const none = { shellIds: [], newestRemaining: null, blockedById: null };
   if (!trx || typeof stillBlocks !== 'function') return none;
   const values = phoneLookupValues(phone);
@@ -391,8 +401,12 @@ async function lockUntouchedWebFormShellsInTx(trx, { phone, stillBlocks, now = n
   const shells = await untouchedWebFormShells(trx, values.last10, { now })
     .whereIn('id', open.map((row) => row.id))
     .forUpdate()
-    .select('id');
-  const shellIds = (Array.isArray(shells) ? shells : []).map((row) => row.id);
+    .select('id', 'address');
+  // A draft for another property of this phone is not this run's shell: it
+  // stays in `remaining`, where stillBlocks judges it like any other estimate.
+  const shellIds = (Array.isArray(shells) ? shells : [])
+    .filter((row) => sameStreetAddress(row.address, address, { requireExactUnit: true }))
+    .map((row) => row.id);
   if (!shellIds.length) return none;
 
   const shellKeys = new Set(shellIds.map(String));
@@ -412,11 +426,8 @@ async function archiveWebFormShellsInTx(trx, { phone, shellIds = [], leadId = nu
     .whereIn('id', shellIds)
     .update({
       archived_at: now,
-      // A jsonb scalar cannot take a key; such a row keeps its data as is.
       estimate_data: trx.raw(
-        "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object'"
-        + " THEN jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{supersededByWizard}', ?::jsonb, true)"
-        + ' ELSE estimate_data END',
+        "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{supersededByWizard}', ?::jsonb, true)",
         [marker]
       ),
       updated_at: now,

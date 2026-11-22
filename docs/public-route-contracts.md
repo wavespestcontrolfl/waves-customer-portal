@@ -6120,17 +6120,19 @@ whose phone already has an open estimate (`draft`, `scheduled`, `sent` or
 estimate, so it returns no booking handoff and sends no booking text. On,
 when the newest open estimate for the phone is a web-form draft (`source`
 `lead_webhook`), the run may set the phone's untouched shells aside: a
-`lead_webhook` draft that was never written since it was made, has no
-monthly, one-time or annual total, was never sent, viewed or scheduled, has
-no auto-send claim and no lead pointing at it, on a phone with no clarify ask
-that is open or was sent in the last 7 days without an answer. The run then
+`lead_webhook` draft for the same property as the run (same street line and
+unit) that was never written since it was made, has no monthly, one-time or
+annual total, was never sent, viewed or scheduled, has no auto-send claim
+and no lead pointing at it, on a phone with no clarify ask that is open or
+was sent in the last 7 days without an answer. The run then
 mirrors its estimate as for a new visitor, or refreshes the wizard's own
 older draft, and the usual booking handoff, email link and
 `quote_wizard_booking_invite` text follow. The shells are archived in the
 same transaction, only after that draft write landed. No shell goes when any
 other open estimate of the phone still blocks (a draft with a price, a
-touched draft, an office or estimator estimate, a wizard estimate past
-draft), or while a clarify ask is being written for the phone. The archived
+touched draft, a web-form draft for another property, an office or estimator
+estimate, a wizard estimate past draft), or while a clarify ask is being
+written for the phone. The archived
 row keeps status `draft`, gets
 `estimate_data.supersededByWizard = { at, leadId }` and can be unarchived by
 staff; a restored row is never archived again. Request and response shapes

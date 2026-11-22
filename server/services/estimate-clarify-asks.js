@@ -693,9 +693,10 @@ async function mergePendingClarify(trx, existing, { askable, firstName, linkage 
 // while it does (lockUntouchedWebFormShellsInTx,
 // estimate-automation-duplicates.js), so under that lock the marker is
 // committed. The person then has the wizard's own quote and the question is
-// obsolete. Gate off = no read, and no row carries the marker.
+// obsolete. The gate controls new archives only: an archive outlives the
+// gate, so this read does not ask the gate. No archive = no marker = no skip.
 async function supersededByWizard(trx, estimateId) {
-  if (!estimateId || require('../config/feature-gates').wizardSupersedesFormDraftLive?.() !== true) return false;
+  if (!estimateId) return false;
   const row = await trx('estimates')
     .where({ id: estimateId })
     .whereNotNull('archived_at')
