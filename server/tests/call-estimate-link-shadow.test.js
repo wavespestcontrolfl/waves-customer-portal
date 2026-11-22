@@ -54,6 +54,12 @@ const KEY = 'call_estimate_link_shadow';
 const NOW = new Date('2026-11-20T17:30:00.000Z'); // 12:30 ET
 const CALL_START = new Date('2026-11-20T15:00:00.000Z'); // 10:00 ET, 120 s long: ends 15:02, send_at 17:02Z
 const SEND_AT = '2026-11-20T17:02:00.000Z';
+// 48 h after send_at at noon ET: in the send window, past the give-up (24 h + a night).
+const LATE = new Date('2026-11-22T17:00:00.000Z');
+// 25 h after send_at at 1 PM ET: in the window, past 24 h, inside the give-up.
+const A_DAY_LATER = new Date('2026-11-21T18:02:00.000Z');
+// 8:30 PM ET: outside the window.
+const NIGHT = new Date('2026-11-21T01:30:00.000Z');
 const HOUR = 60 * 60 * 1000;
 
 // A knex stand-in: every builder method records its call and returns the builder; a function given to
@@ -271,12 +277,14 @@ const STOPS = [
   ['estimate_accepted', (w) => { w.estimate = { ...w.estimate, status: 'accepted' }; }],
   ['estimate_closed', (w) => { w.estimate = { ...w.estimate, archived_at: new Date('2026-11-20T16:00:00.000Z') }; }],
   ['estimate_expired', (w) => { w.estimate = { ...w.estimate, expires_at: new Date('2026-11-20T17:00:00.000Z') }; }],
+  ['follow_ups_off', (w) => { w.estimate = { ...w.estimate, estimate_data: { ...w.estimate.estimate_data, noEngagementAutomation: true } }; }],
   ['several_open_estimates', (w) => { w.openRows = [candidate('est-1'), candidate('est-9', '2026-11-20T16:30:00.000Z')]; }],
   ['booked', () => { bookedSinceCall.mockResolvedValue(true); }],
   ['contact_since_call', (w) => { w.sms = { id: 'sms-1' }; }],
   ['customer_replied_since_call', () => { hasRepliedSince.mockResolvedValue(true); }],
   ['no_textable_phone', (w) => { w.customer = { id: 'cust-1', phone: null, deleted_at: null }; }],
   ['number_on_hold', () => { disclaimedNumberHeld.mockResolvedValue(true); }],
+  ['texts_declined_on_call', (w) => { w.call = { ...w.call, sms_declined: 'true' }; }],
   ['sms_opted_out', () => { checkSuppression.mockResolvedValue({ ok: false, code: 'SUPPRESSED_OPT_OUT' }); }],
   ['link_not_viewable', () => { isEstimateCustomerViewable.mockReturnValue(false); }],
   ['pricing_not_verified', () => { estimateDeliverableUnderGate.mockResolvedValue(false); }],
@@ -382,6 +390,72 @@ describe('decide: the first stop that applies is recorded', () => {
     }
   });
 
+  test.each([
+    ['the durable zero-comms stamp, stored as a JSON string', { estimate_data: JSON.stringify({ noEngagementAutomation: true }) }, 'follow_ups_off'],
+    ['a self-serve quote staff never delivered', { source: 'plan_restart', estimate_data: {} }, 'follow_ups_off'],
+    ['a self-serve quote staff delivered', { source: 'plan_restart', estimate_data: { deliveryState: { firstDeliveredAt: BEFORE_CALL } } }, 'would_send'],
+    ['an ordinary estimate with no stamp', { source: 'estimator', estimate_data: {} }, 'would_send'],
+    ['the stamp set to false', { estimate_data: { noEngagementAutomation: false } }, 'would_send'],
+  ])('follow_ups_off: %s', async (_label, over, expected) => {
+    const world = decideWorld({ estimate: baseEstimate(over) });
+    await shadow.decide(world.conn, { now: NOW });
+    expect(decided(world).status === 'would_send' ? 'would_send' : decided(world).reason).toBe(expected);
+  });
+
+  test.each([
+    ['texts declined', { sms_declined: 'true' }, 'texts_declined_on_call'],
+    ['do not contact asked', { do_not_contact_request: 'true' }, 'texts_declined_on_call'],
+    ['both said no', { sms_declined: 'false', do_not_contact_request: 'false' }, 'would_send'],
+    ['never asked (no value)', { sms_declined: null, do_not_contact_request: null }, 'would_send'],
+  ])('texts_declined_on_call: %s', async (_label, fields, expected) => {
+    const world = decideWorld();
+    world.call = { ...world.call, ...fields };
+    await shadow.decide(world.conn, { now: NOW });
+    expect(decided(world).status === 'would_send' ? 'would_send' : decided(world).reason).toBe(expected);
+  });
+
+  test('the fresh call read also asks for updated_at as text and the two consent values, not the extraction body', async () => {
+    const world = decideWorld();
+    await shadow.decide(world.conn, { now: NOW });
+    expect(world.conn.raw).toHaveBeenCalledWith('updated_at::text AS updated_at_key');
+    expect(world.conn.raw).toHaveBeenCalledWith("ai_extraction_enriched->'consent'->>'sms_declined' AS sms_declined");
+    expect(world.conn.raw).toHaveBeenCalledWith("ai_extraction_enriched->'consent'->>'do_not_contact_request' AS do_not_contact_request");
+    const read = world.conn.queried('call_log').find((q) => q.calls.some((c) => c[0] === 'first')).calls.find((c) => c[0] === 'first');
+    expect(read).not.toContain('ai_extraction_enriched');
+  });
+
+  test('a verdict from a read is written only while the call is the row the read saw (updated_at as text, no reprocess token)', async () => {
+    const world = decideWorld();
+    await shadow.decide(world.conn, { now: NOW });
+    const write = world.conn.queried('call_log').find((q) => q.calls.some((c) => c[0] === 'update')).calls;
+    expect(has(write, 'whereNull', 'processing_token')).toBe(true);
+    expect(has(write, 'whereRaw', 'updated_at::text = ?', ['2026-11-20 15:05:00.123456+00'])).toBe(true);
+  });
+
+  test('a write that loses to a changed call row leaves the row pending (nothing counted)', async () => {
+    const world = decideWorld({ updateCount: 0 });
+    expect(await shadow.decide(world.conn, { now: NOW })).toEqual({ decided: 0, wouldSend: 0 });
+  });
+
+  test('the give-up write has no read to protect: it carries no updated_at or token guard', async () => {
+    hasRepliedSince.mockRejectedValue(new Error('down'));
+    const world = decideWorld();
+    await shadow.decide(world.conn, { now: LATE });
+    const write = world.conn.queried('call_log').find((q) => q.calls.some((c) => c[0] === 'update')).calls;
+    expect(has(write, 'whereNull', 'processing_token')).toBe(false);
+    expect(write.some((c) => c[0] === 'whereRaw' && String(c[1]).startsWith('updated_at::text'))).toBe(false);
+    expect(decided(world).reason).toBe('undecided_after_24h');
+  });
+
+  test('a verdict reached before any later failing read keeps its guard', async () => {
+    hasRepliedSince.mockRejectedValue(new Error('down'));
+    const world = decideWorld({ estimate: baseEstimate({ status: 'accepted' }) });
+    await shadow.decide(world.conn, { now: NOW });
+    const write = world.conn.queried('call_log').find((q) => q.calls.some((c) => c[0] === 'update')).calls;
+    expect(has(write, 'whereNull', 'processing_token')).toBe(true);
+    expect(decided(world).reason).toBe('estimate_accepted');
+  });
+
   test('answer_changed carries the answer now: the call was read again and is no longer a yes (or no longer valid)', async () => {
     for (const [change, answerNow] of [
       [{ estimate_answer: 'declined' }, 'declined'], [{ estimate_answer: null }, null], [{ estimate_answer: 'undecided' }, 'undecided'],
@@ -416,7 +490,7 @@ describe('decide: the first stop that applies is recorded', () => {
     expect(await shadow.decide(world.conn, { now: NOW })).toEqual({ decided: 0, wouldSend: 0 });
     expect(world.conn.written).toHaveLength(0);
     expect(logger.warn.mock.calls.map((c) => c[0]).join('\n')).toContain('call_reprocessing');
-    const late = new Date(new Date(SEND_AT).getTime() + shadow.UNDECIDED_GIVE_UP_MS + 60 * 1000);
+    const late = LATE;
     await shadow.decide(world.conn, { now: late });
     expect(decided(world)).toMatchObject({ reason: 'undecided_after_24h' });
   });
@@ -458,7 +532,7 @@ describe('decide: the first stop that applies is recorded', () => {
     expect(await shadow.decide(world.conn, { now: NOW })).toEqual({ decided: 0, wouldSend: 0 });
     expect(world.conn.written).toHaveLength(0);
     expect(logger.warn.mock.calls.map((c) => c[0]).join('\n')).toContain('call_verdict_unavailable');
-    const late = new Date(new Date(SEND_AT).getTime() + shadow.UNDECIDED_GIVE_UP_MS + 60 * 1000);
+    const late = LATE;
     await shadow.decide(world.conn, { now: late });
     expect(decided(world)).toMatchObject({ reason: 'undecided_after_24h' });
   });
@@ -551,20 +625,52 @@ describe('decide: a read that throws', () => {
     expect(decided(world).reason).toBe('estimate_accepted');
   });
 
-  test('24 hours past the send time: undecided_after_24h, terminal', async () => {
+  test('past the give-up (24 h and a night) the row ends undecided_after_24h, terminal', async () => {
     hasRepliedSince.mockRejectedValue(new Error('down'));
     const world = decideWorld();
-    const late = new Date(new Date(SEND_AT).getTime() + shadow.UNDECIDED_GIVE_UP_MS + 60 * 1000);
+    const late = LATE;
     expect(await shadow.decide(world.conn, { now: late })).toEqual({ decided: 1, wouldSend: 0 });
     expect(decided(world)).toMatchObject({ status: 'skipped', reason: 'undecided_after_24h', estimate_id: 'est-1', send_at: SEND_AT });
   });
 
-  test('just inside 24 hours it is still retried', async () => {
+  test('a night does not count against the retry: 25 h past the send time, in the window, it is still retried', async () => {
     hasRepliedSince.mockRejectedValue(new Error('down'));
     const world = decideWorld();
-    const early = new Date(new Date(SEND_AT).getTime() + shadow.UNDECIDED_GIVE_UP_MS - 60 * 1000);
-    await shadow.decide(world.conn, { now: early });
+    await shadow.decide(world.conn, { now: A_DAY_LATER });
     expect(world.conn.written).toHaveLength(0);
+  });
+});
+
+describe('decide: the send window', () => {
+  test('a tick outside the window decides nothing and reads nothing', async () => {
+    const world = decideWorld();
+    expect(await shadow.decide(world.conn, { now: NIGHT })).toEqual({ decided: 0, wouldSend: 0 });
+    expect(world.conn.written).toHaveLength(0);
+    expect(world.conn.queried('call_log')).toHaveLength(0);
+  });
+
+  test('the first tick back inside the window decides the row, counting what landed overnight', async () => {
+    const world = decideWorld();
+    await shadow.decide(world.conn, { now: NIGHT });
+    bookedSinceCall.mockResolvedValue(true);
+    const morning = new Date('2026-11-21T13:00:00.000Z'); // 8:00 AM ET
+    expect(await shadow.decide(world.conn, { now: morning })).toEqual({ decided: 1, wouldSend: 0 });
+    expect(decided(world)).toMatchObject({ reason: 'booked', decided_at: morning.toISOString() });
+  });
+
+  test('7:59 PM ET is inside, 8:00 PM ET is outside', async () => {
+    const inside = decideWorld();
+    expect((await shadow.decide(inside.conn, { now: new Date('2026-11-21T00:59:00.000Z') })).decided).toBe(1);
+    const outside = decideWorld();
+    expect((await shadow.decide(outside.conn, { now: new Date('2026-11-21T01:00:00.000Z') })).decided).toBe(0);
+  });
+
+  test('staging still runs outside the window (only the verdict waits)', async () => {
+    // A call that ended at 6:02 PM ET waits for 8 AM ET: staged at 8:30 PM ET, decided at the opening.
+    const conn = stageWorld({ call: baseCall({ created_at: new Date('2026-11-20T23:00:00.000Z') }) });
+    const out = await shadow.sweep(conn, { now: NIGHT });
+    expect(out).toEqual({ staged: 1, ineligible: 0, decided: 0, wouldSend: 0 });
+    expect(conn.written[0].send_at).toBe('2026-11-21T13:00:00.000Z');
   });
 });
 

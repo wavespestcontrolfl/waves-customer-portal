@@ -22,9 +22,14 @@
  * Reasons at staging: no_customer, no_open_estimate, several_open_estimates, stale_at_staging, no_call_end_time.
  * Stops at decide, first one that applies wins, in this order: answer_changed (the call was read again: no longer
  * valid or no longer a yes; `answer_now` holds the new answer), customer_changed, estimate_accepted, estimate_closed,
- * estimate_expired, several_open_estimates, booked, contact_since_call (`contact` = text | call | follow_up | resent),
+ * estimate_expired, follow_ups_off (the estimate's zero-comms stamp, or a self-serve quote staff never delivered),
+ * several_open_estimates, booked, contact_since_call (`contact` = text | call | follow_up | resent),
  * customer_replied_since_call, no_textable_phone, number_on_hold (the disclaimed-number hold the send pipeline reads),
- * sms_opted_out, link_not_viewable, pricing_not_verified; undecided_after_24h when a read keeps failing.
+ * texts_declined_on_call (this call's own extraction: sms_declined or do_not_contact_request), sms_opted_out,
+ * link_not_viewable, pricing_not_verified; undecided_after_24h when a read keeps failing.
+ * Decide runs only inside the 8 AM to 8 PM ET send window: a tick outside it decides nothing, so a booking or reply
+ * that lands overnight is counted before the verdict. The terminal write is guarded: it lands only if the call row
+ * still has the `updated_at` the reads saw and no reprocess token, else the row stays pending for the next tick.
  *
  * Known limits (each on purpose, each the safe side for a recorder):
  *  - "The estimate" is matched by `call_log.customer_id` only, never by phone. A caller the call
@@ -41,6 +46,11 @@
  *    settings) with no send and no write. A read that cannot be answered leaves the row pending.
  *  - The reply check (`customer_replied_since_call`) uses the engagement engine's reply reader on
  *    the shared connection, and it also counts an authenticated email reply, as that reader does.
+ *  - `texts_declined_on_call` reads this call only (consent.sms_declined, consent.do_not_contact_request). The booking-link
+ *    lane's read of an EARLIER call's refusal is not reused: it counts any older call with no recorded answer as a
+ *    refusal (an owner ruling for that lane), which would hide most real customers here.
+ *  - The give-up is 36 h after send_at, not 24: no tick decides outside the window, so a night (at most 12 h) is not
+ *    counted against a read that keeps failing.
  *  - `pricing_not_verified`: pricing-authority-gate swallows a failed link-visible sibling read into `false`, and no
  *    variant surfaces the failure, so a read failure there is recorded as this reason, not retried.
  *  - A call whose stored extraction is a JSON string rather than an object is not seen by the
@@ -54,6 +64,8 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { callStartedAt } = require('../utils/call-timeline');
 const { isWithinSendWindowET, nextSendWindowOpenET } = require('./messaging/send-window');
+const { estimateOptedOutOfEngagement } = require('./estimate-comms-eligibility');
+const { isUndeliveredSelfServe } = require('./self-serve-estimates');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
@@ -70,8 +82,10 @@ const YES_FAMILY = ['accepted', 'accepted_with_condition'];
 const OPEN_STATUSES = ['sent', 'viewed'];
 const STAGING_BATCH = 200;
 const DECIDE_BATCH = 100;
-// A decide that keeps failing to read is given up on this long after its send time.
+// A decide that keeps failing to read is given up on this long after its send time, plus a night: no tick decides
+// outside the send window, so up to 12 hours of the 24 are not tries.
 const UNDECIDED_GIVE_UP_MS = 24 * 60 * 60 * 1000;
+const NIGHT_MS = 12 * 60 * 60 * 1000;
 // An outbound text that never reached the customer is not contact.
 const UNDELIVERED_SMS_STATUSES = ['failed', 'undelivered', 'blocked'];
 // The send pipeline purpose the later text would ride; only used to read consent and suppression.
@@ -339,6 +353,9 @@ const DECIDE_CHECKS = [
     ? { reason: 'estimate_closed' } : null),
   async ({ estimate, now }) => (estimate.expires_at && new Date(estimate.expires_at).getTime() <= now.getTime()
     ? { reason: 'estimate_expired' } : null),
+  // Zero follow-up: the durable opt-out stamp, or a self-serve quote staff never delivered (it promises no text at all).
+  async ({ estimate }) => (estimateOptedOutOfEngagement(estimate) || isUndeliveredSelfServe(estimate.source, parseObject(estimate.estimate_data))
+    ? { reason: 'follow_ups_off' } : null),
   async ({ conn, estimate, call, now }) => ((await countOpenEstimates(conn, call.customer_id || estimate.customer_id, now)) >= 2
     ? { reason: 'several_open_estimates' } : null),
   async ({ conn, call, customer, callStart }) => ((await bookedSinceCall(conn, call.customer_id, callStart, customer?.phone))
@@ -360,6 +377,8 @@ const DECIDE_CHECKS = [
   // on a failed read, so the row stays pending.
   async ({ conn, customer }) => ((await require('./disclaimed-number-holds').disclaimedNumberHeld(customer.phone, conn))
     ? { reason: 'number_on_hold' } : null),
+  // The caller can say yes to the estimate and decline texts on the same call.
+  async ({ call }) => (call.sms_declined === 'true' || call.do_not_contact_request === 'true' ? { reason: 'texts_declined_on_call' } : null),
   async (ctx) => ((await consentBlock(ctx)) ? { reason: 'sms_opted_out' } : null),
   async (ctx) => ((await linkNotViewable(ctx)) ? { reason: 'link_not_viewable' } : null),
   async ({ conn, estimate }) => {
@@ -379,7 +398,10 @@ async function firstStop(ctx) {
 // Everything the checks read, read FRESH.
 async function loadContext(conn, callId, entry, now) {
   const call = await conn('call_log').where({ id: callId })
-    .first(...CALL_COLUMNS, 'v2_extraction_status', 'processing_token', conn.raw(`${ANSWER_PATH_SQL} AS estimate_answer`));
+    .first(...CALL_COLUMNS, 'v2_extraction_status', 'processing_token', conn.raw('updated_at::text AS updated_at_key'),
+      conn.raw(`${ANSWER_PATH_SQL} AS estimate_answer`),
+      conn.raw("ai_extraction_enriched->'consent'->>'sms_declined' AS sms_declined"),
+      conn.raw("ai_extraction_enriched->'consent'->>'do_not_contact_request' AS do_not_contact_request"));
   if (!call) throw coded('call_missing');
   // Mid-reprocess: the row is being rewritten, so its answer and customer are not settled. Retry next tick.
   if (call.processing_token) throw coded('call_reprocessing');
@@ -392,10 +414,14 @@ async function loadContext(conn, callId, entry, now) {
   return { conn, call, entry, estimate, customer, callStart, callEnd, now };
 }
 
-// The decision lands only if the row is still pending with the same send_at: two replicas cannot both decide.
-async function recordDecision(conn, callId, entry, value) {
+// The decision lands only if the row is still pending with the same send_at: two replicas cannot both decide. A verdict
+// from a successful read also lands only if the call row is still the one that read saw (`guard` = its updated_at as
+// text, no reprocess token): a reprocess keeps the pending marker and send_at, so those alone cannot tell. A lost write
+// leaves the row pending for the next tick. The give-up write has no read to protect and passes no guard.
+async function recordDecision(conn, callId, entry, value, guard = null) {
   const changed = await conn('call_log').where({ id: callId })
     .whereRaw("metadata->:key->>'status' = 'pending' AND metadata->:key->>'send_at' = :sendAt", { key: METADATA_KEY, sendAt: entry.send_at })
+    .modify((q) => { if (guard) q.whereNull('processing_token').whereRaw('updated_at::text = ?', [guard]); })
     .update({ metadata: metadataPatch(conn, value) });
   return changed > 0;
 }
@@ -403,17 +429,21 @@ async function recordDecision(conn, callId, entry, value) {
 async function decideOne(conn, callId, entry, now) {
   const base = { estimate_id: entry.estimate_id, answer: entry.answer, send_at: entry.send_at, staged_at: entry.staged_at };
   let verdict;
+  let guard = null;
   try {
-    const stop = await firstStop(await loadContext(conn, callId, entry, now));
+    const ctx = await loadContext(conn, callId, entry, now);
+    guard = ctx.call.updated_at_key;
+    const stop = await firstStop(ctx);
     verdict = stop ? { status: 'skipped', ...stop } : { status: 'would_send' };
   } catch (err) {
     logger.warn(`[call-estimate-link-shadow] decide failed for call ${callId} (${errCode(err)})`);
-    // A read that threw stays pending and is retried next tick, until 24 h past its send time.
-    if (now.getTime() - new Date(entry.send_at).getTime() <= UNDECIDED_GIVE_UP_MS) return null;
+    // A read that threw stays pending and is retried next tick, until 24 h (and a night) past its send time.
+    if (now.getTime() - new Date(entry.send_at).getTime() <= UNDECIDED_GIVE_UP_MS + NIGHT_MS) return null;
     verdict = { status: 'skipped', reason: 'undecided_after_24h' };
+    guard = null;
   }
   const value = { ...verdict, ...base, decided_at: now.toISOString() };
-  return (await recordDecision(conn, callId, entry, value)) ? value : null;
+  return (await recordDecision(conn, callId, entry, value, guard)) ? value : null;
 }
 
 // Pending rows whose time has come, oldest first. Bounded by the call's age (the booking-link lane's own queue
@@ -430,6 +460,9 @@ function duePending(conn, now) {
 }
 
 async function decide(conn = db, { now = new Date() } = {}) {
+  // Outside the send window no text could go: decide nothing, so an overnight booking or reply counts at the opening.
+  // The wait is not an error and not a failed try (see NIGHT_MS).
+  if (!isWithinSendWindowET(now)) return { decided: 0, wouldSend: 0 };
   const rows = await duePending(conn, now);
   let decided = 0;
   let wouldSend = 0;
@@ -462,12 +495,15 @@ module.exports = {
   METADATA_KEY,
   YES_FAMILY,
   UNDECIDED_GIVE_UP_MS,
+  NIGHT_MS,
   DECIDE_CHECKS,
   sweep,
   stage,
   decide,
   stageOne,
   decideOne,
+  loadContext,
+  recordDecision,
   stagingScan,
   firstStop,
 };

@@ -269,6 +269,53 @@ postgres('call-estimate-link-shadow against PostgreSQL', () => {
       expect((await metadataOf(reprocessing))[KEY].status).toBe('pending');
     });
 
+    test('the guarded write: a call row whose updated_at moved, or that got a reprocess token, between the read and the write keeps its pending row', async () => {
+      const customerId = await insertCustomer(mockPg);
+      const estimateId = await insertEstimate(mockPg, customerId, { status: 'accepted' });
+      const sendAt = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+      const entry = pendingEntry(estimateId, sendAt);
+      const callId = await insertCall(mockPg, { customer_id: customerId, metadata: { [KEY]: entry }, updated_at: '2027-01-15 15:55:00.123456+00' });
+      const verdict = { status: 'skipped', reason: 'estimate_accepted', ...entry, decided_at: NOW.toISOString() };
+      const { updated_at_key: key } = await shadow.loadContext(mockPg, callId, entry, NOW).then((ctx) => ctx.call);
+
+      // Reprocess began after the read: a token is set.
+      await mockPg('call_log').where({ id: callId }).update({ processing_token: randomUUID() });
+      expect(await shadow.recordDecision(mockPg, callId, entry, verdict, key)).toBe(false);
+      await mockPg('call_log').where({ id: callId }).update({ processing_token: null });
+      // The row was written after the read: updated_at moved.
+      await mockPg('call_log').where({ id: callId }).update({ updated_at: new Date('2027-01-15T17:00:00.000Z') });
+      expect(await shadow.recordDecision(mockPg, callId, entry, verdict, key)).toBe(false);
+      expect((await metadataOf(callId))[KEY].status).toBe('pending');
+
+      // Read again, nothing moved: it lands. The give-up write (no guard) lands regardless of either change.
+      const fresh = (await shadow.loadContext(mockPg, callId, entry, NOW)).call.updated_at_key;
+      expect(await shadow.recordDecision(mockPg, callId, entry, verdict, fresh)).toBe(true);
+    });
+
+    test('the give-up write carries no guard: it lands on a row with a token and a moved updated_at', async () => {
+      const customerId = await insertCustomer(mockPg);
+      const estimateId = await insertEstimate(mockPg, customerId);
+      const sendAt = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+      const entry = pendingEntry(estimateId, sendAt);
+      const callId = await insertCall(mockPg, { customer_id: customerId, metadata: { [KEY]: entry }, processing_token: randomUUID() });
+      expect(await shadow.recordDecision(mockPg, callId, entry, { status: 'skipped', reason: 'undecided_after_24h', ...entry })).toBe(true);
+    });
+
+    test('the two consent values are read from the call\'s own extraction as text, and nothing else of it', async () => {
+      const customerId = await insertCustomer(mockPg);
+      const estimateId = await insertEstimate(mockPg, customerId);
+      const entry = pendingEntry(estimateId, new Date(NOW.getTime() - 60 * 60 * 1000).toISOString());
+      const make = (consent) => insertCall(mockPg, { customer_id: customerId, metadata: { [KEY]: entry }, ai_extraction_enriched: { ...extraction({ estimate_response: 'accepted' }), consent } });
+      const declined = await make({ sms_declined: true, do_not_contact_request: false });
+      const doNotContact = await make({ sms_declined: false, do_not_contact_request: true });
+      const never = await make({});
+      const readOf = async (id) => (await shadow.loadContext(mockPg, id, entry, NOW)).call;
+      expect(await readOf(declined)).toMatchObject({ sms_declined: 'true', do_not_contact_request: 'false', estimate_answer: 'accepted' });
+      expect(await readOf(doNotContact)).toMatchObject({ sms_declined: 'false', do_not_contact_request: 'true' });
+      expect(await readOf(never)).toMatchObject({ sms_declined: null, do_not_contact_request: null });
+      expect(await readOf(declined)).not.toHaveProperty('ai_extraction_enriched');
+    });
+
     test('a row whose send time is still ahead is not read or decided', async () => {
       const customerId = await insertCustomer(mockPg);
       const estimateId = await insertEstimate(mockPg, customerId, { status: 'accepted' });
