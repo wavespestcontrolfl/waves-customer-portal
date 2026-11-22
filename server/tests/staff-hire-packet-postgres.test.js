@@ -128,14 +128,16 @@ postgres('Hired button on migrated PostgreSQL', () => {
 
   afterAll(async () => {
     for (const [k, v] of Object.entries(savedEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
-    await new Promise((resolve) => server?.close(resolve));
+    // close() waits for fetch's keep-alive sockets to go idle, which took this hook past its 5 seconds on a
+    // busy machine: end them.
+    await new Promise((resolve) => { server?.close(resolve); server?.closeAllConnections?.(); });
     await mockDatabase('audit_log').where({ action: 'staff.hired' }).whereIn('resource_id', created).del();
     await mockDatabase('time_entries').whereIn('technician_id', created).del();
     await mockDatabase('technician_capabilities').whereIn('technician_id', created).del().catch(() => {});
     await mockDatabase('push_subscriptions').whereIn('admin_user_id', created).del().catch(() => {});
     await mockDatabase('technicians').whereIn('id', created).del();
     await mockDatabase?.destroy();
-  });
+  }, 30000);
 
   test('gate off refuses both endpoints before any write or email', async () => {
     delete process.env.GATE_HIRED_PACKET;
@@ -467,6 +469,64 @@ postgres('Hired button on migrated PostgreSQL', () => {
         hire_password_unset: true, hire_link_pending: false, hire_link_expires_at: null,
       });
       expect((await call(`/technicians/${id}/hire/resend`, { body: {} })).body).toMatchObject({ resent: true, emailed: true });
+    });
+  });
+
+  // One mailbox belongs to one staff row. A staff email gets that row's password reset mail, and a linked Google
+  // address signs in to its row, so no writer of either column takes an address another row holds in either.
+  describe('one mailbox, one staff row', () => {
+    const GOOGLE_ENV = {
+      GATE_STAFF_GOOGLE_SIGNIN: 'true',
+      GOOGLE_STAFF_SIGNIN_CLIENT_ID: 'fixture-client-id',
+      GOOGLE_STAFF_SIGNIN_CLIENT_SECRET: 'fixture-client-secret',
+      GOOGLE_STAFF_SIGNIN_DOMAINS: 'company.test',
+    };
+    const savedGoogleEnv = {};
+    const address = () => `staff-${randomUUID().slice(0, 12)}@company.test`;
+    const onStaff = (overrides = {}) => addTech({ employment_status: 'active', active: true, email: address(), ...overrides });
+    const EMAIL_IN_USE = { status: 409, body: { error: 'Email already in use' } };
+
+    beforeEach(() => {
+      for (const [k, v] of Object.entries(GOOGLE_ENV)) {
+        savedGoogleEnv[k] = process.env[k];
+        process.env[k] = v;
+      }
+    });
+    afterEach(() => {
+      for (const [k, v] of Object.entries(savedGoogleEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    });
+
+    test("no staff email writer takes another row's linked Google address", async () => {
+      const google = address();
+      const linked = await onStaff({ google_email: google });
+      // The edit form, in any letter case.
+      const other = await onStaff();
+      const otherEmail = (await row(other)).email;
+      expect(await call(`/technicians/${other}`, { method: 'PUT', body: { email: ` ${google.toUpperCase()} ` } })).toEqual(EMAIL_IN_USE);
+      expect((await row(other)).email).toBe(otherEmail);
+      // The Hired form.
+      const prospective = await addTech();
+      expect(await call(`/technicians/${prospective}/hire`, { body: hireBody({ email: google }) })).toEqual(EMAIL_IN_USE);
+      expect(await row(prospective)).toMatchObject({ employment_status: 'prospective', active: false, email: null });
+      // A new row.
+      expect(await call('/technicians', { body: { name: 'Second Fixture', email: google } })).toEqual(EMAIL_IN_USE);
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      // A row's own staff email may be its own Google address.
+      expect((await call(`/technicians/${linked}`, { method: 'PUT', body: { email: google } })).status).toBe(200);
+      expect((await row(linked)).email).toBe(google);
+    });
+
+    test("the Google link writer does not take another row's staff email", async () => {
+      const mailbox = address();
+      await onStaff({ email: mailbox });
+      const target = await onStaff();
+      expect(await call(`/technicians/${target}/google-signin`, { method: 'PUT', body: { googleEmail: mailbox.toUpperCase() } }))
+        .toEqual({ status: 409, body: { error: "That address is another staff member's email" } });
+      expect((await row(target)).google_email).toBeNull();
+      // A row's own staff email may be its own Google address.
+      const own = (await row(target)).email;
+      expect((await call(`/technicians/${target}/google-signin`, { method: 'PUT', body: { googleEmail: own } })).status).toBe(200);
+      expect((await row(target)).google_email).toBe(own);
     });
   });
 });

@@ -33,7 +33,9 @@ const {
 const {
   MAX_STAFF_EMAIL_LENGTH,
   canonicalStaffEmail,
-  findStaffByCanonicalEmail: findTechnicianByCanonicalEmail,
+  findStaffByCanonicalEmail,
+  // One mailbox, one staff row: another row's staff email or linked Google address.
+  findStaffByLoginEmail: findTechnicianByMailbox,
   lockStaffIdentityWrites: lockTechnicianMutations,
 } = require('../utils/staff-identity');
 const { assertMayChangeFullAccessEmail, ibFullAccess, isFullAccessEmail } = require('../services/intelligence-bar/ib-access');
@@ -1136,7 +1138,7 @@ async function createTechnician(req, res, next) {
 
     const outcome = await db.transaction(async (trx) => {
       await lockTechnicianMutations(trx);
-      if (insertRow.email && await findTechnicianByCanonicalEmail(trx, insertRow.email)) {
+      if (insertRow.email && await findTechnicianByMailbox(trx, insertRow.email)) {
         return { conflict: true };
       }
       if (await techLineHeldByAnother(trx, insertRow.twilio_number)) return { lineTaken: true };
@@ -1245,7 +1247,7 @@ async function updateTechnician(req, res, next) {
           .first('id');
         if (activeTimer) return { activeTimer: true };
       }
-      if (normalizedEmail.value && await findTechnicianByCanonicalEmail(
+      if (normalizedEmail.value && await findTechnicianByMailbox(
         trx,
         normalizedEmail.value,
         target.id,
@@ -1384,6 +1386,8 @@ async function putTechnicianGoogleSignin(req, res, next) {
         .first('id')) {
         return { conflict: true };
       }
+      // Nor another staff member's email: that mailbox gets their password reset mail.
+      if (parsed.value && await findStaffByCanonicalEmail(trx, parsed.value, target.id)) return { emailConflict: true };
       const revoke = Boolean(current);
       await trx('technicians').where({ id: target.id }).update({
         google_email: parsed.value,
@@ -1398,6 +1402,7 @@ async function putTechnicianGoogleSignin(req, res, next) {
     if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
     if (outcome.ownerOnly) return res.status(403).json({ error: 'Only the owner account can change this Google sign-in.' });
     if (outcome.conflict) return res.status(409).json({ error: 'That Google account is linked to another staff member' });
+    if (outcome.emailConflict) return res.status(409).json({ error: "That address is another staff member's email" });
     if (outcome.revoke) disconnectRevokedStaffSessions(outcome.tech.id, 'google_signin_changed');
     logger.info(`[team] Google sign-in ${outcome.tech.google_email ? 'linked' : 'cleared'} for technician id=${outcome.tech.id} (sessions revoked: ${Boolean(outcome.revoke)})`);
     return res.json({ success: true, technician: sanitizeTechForAdmin(outcome.tech) });
@@ -1538,7 +1543,7 @@ async function hireTechnician(req, res, next) {
         const fullAccessEmailGuard = assertMayChangeFullAccessEmail(req, { fromEmail: storedEmail, toEmail: parsed.email });
         if (fullAccessEmailGuard) return { fullAccessEmailGuard };
       }
-      if (await findTechnicianByCanonicalEmail(trx, parsed.email, target.id)) return { conflict: true };
+      if (await findTechnicianByMailbox(trx, parsed.email, target.id)) return { conflict: true };
       // A placeholder with history is a person, not a slot (same rule as PUT).
       if (parsed.name !== target.name && await technicianHasHistory(trx, target.id)) {
         return { renameLocked: true };
