@@ -726,16 +726,20 @@ function usePropertyScore() {
 // GATE_PROPERTY_RECOMMENDATIONS; gate-off answers available:false and the
 // card renders nothing). Best-effort: a failed load just hides the card.
 // =========================================================================
-function usePropertyRecommendations(enabled = true) {
+// reloadKey: a host that changes it reads the stack again (Billing does,
+// after a purchase from its offer card). A read that comes back with no
+// cards clears the stack, so a bought service is no longer offered; a failed
+// read keeps what is shown.
+function usePropertyRecommendations(enabled = true, reloadKey = 0) {
   const [data, setData] = useState(null);
   useEffect(() => {
     if (!enabled) return undefined;
     let cancelled = false;
     api.getPropertyRecommendations()
-      .then(d => { if (!cancelled && d?.available && d.cards?.length) setData(d); })
+      .then(d => { if (!cancelled) setData(d?.available && d.cards?.length ? d : null); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [enabled]);
+  }, [enabled, reloadKey]);
   return data;
 }
 
@@ -1101,7 +1105,7 @@ const ADD_SERVICE_HEADING = {
   subtitle: 'Priced for this property. You pay per application, after each visit.',
 };
 
-function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING, surface = 'home', onCardSaved = null }) {
+function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING, surface = 'home', onCardSaved = null, onPurchased = null }) {
   // Per-card request state: idle → sending → sent | stale | failed.
   const [requestStates, setRequestStates] = useState({});
   // One-tap purchase overlay target (bet 3) — a priced offer card while the
@@ -1174,6 +1178,7 @@ function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING, surface 
       resume={purchaseCard ? null : purchaseResume}
       onClose={() => { setPurchaseCard(null); setPurchaseResume(null); }}
       onCardSaved={notifyCardSaved}
+      onPurchased={onPurchased}
     />
   ) : null;
   const overlayOnly = <>{null}{overlay}</>;
@@ -1360,7 +1365,7 @@ function oneTapDayLabel(date) {
   return dt.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
-function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved = null }) {
+function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved = null, onPurchased = null }) {
   useLockBodyScroll(open);
   // Close is LOCKED while a confirmation is in flight (same guard as
   // "Change time"): unmounting races the in-flight /confirm — a commit
@@ -1624,6 +1629,8 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved
       const r = await api.oneTapConfirm(init.purchaseId, { termsAccepted: true });
       setResult(r);
       setStep('done');
+      // The plan changed on the server: a host that shows the plan reloads.
+      if (onPurchased) onPurchased();
     } catch (err) {
       if (err?.status === 402) {
         setNeedsCard(true);
@@ -6481,7 +6488,8 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
   // Home's add-a-service offer, on Billing too (owner 2026-11-21): the same
   // card, data and one-tap purchase as Home, offers only — the seasonal
   // mosquito note stays on Home. Pest or lawn only (the shared offer ladder).
-  const homeRecommendations = usePropertyRecommendations(!cancelledAccount);
+  const [offersReloadKey, setOffersReloadKey] = useState(0);
+  const homeRecommendations = usePropertyRecommendations(!cancelledAccount, offersReloadKey);
   const billingOffers = useMemo(() => {
     const cards = (homeRecommendations?.cards || []).filter((c) => c.kind === 'offer');
     return cards.length ? { ...homeRecommendations, cards } : null;
@@ -6643,6 +6651,15 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
   const handleOfferCardSaved = async () => {
     await refreshCards();
     setAutopayRefreshKey((k) => k + 1);
+  };
+
+  // A purchase confirmed from the offer card changed the plan. Billing shows
+  // the plan (WaveGuard tier, discount, services under Plan Charges), so the
+  // customer record reloads; and the offers read again, so the service just
+  // bought is no longer offered here.
+  const handleOfferPurchased = () => {
+    if (typeof refreshCustomer === 'function') Promise.resolve(refreshCustomer()).catch(() => {});
+    setOffersReloadKey((k) => k + 1);
   };
 
   const loadBilling = useCallback(() => {
@@ -7040,7 +7057,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
   // open when Billing then renders. Before Billing has loaded it gets no
   // offers, so it shows nothing but a resumed purchase.
   const offerCard = (offers) => (cancelledAccount ? null : (
-    <RecommendationsCard key="billing-offer" data={offers} surface="billing" onCardSaved={handleOfferCardSaved} />
+    <RecommendationsCard key="billing-offer" data={offers} surface="billing" onCardSaved={handleOfferCardSaved} onPurchased={handleOfferPurchased} />
   ));
 
   if (loading) {
@@ -8360,12 +8377,6 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
       </form>
       )}
 
-      {/* A card saved in the offer's purchase overlay is on the account at
-          once: the same refresh as Billing's own add-payment flow.
-          One thing is the shared card's own, the same on Home and My Plan,
-          and is not handled per host: the card keeps a bought offer until
-          the tab loads again (purchase init rejects the stale one with a
-          409, the card's refresh state). */}
       {offerCard(billingOffers)}
       {!cancelledAccount && onSwitchTab && (
         <section data-glass="card" data-section="billing-refer" style={{ ...card, padding: 20, marginTop: 16, textAlign: 'center' }}>

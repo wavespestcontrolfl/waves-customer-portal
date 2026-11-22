@@ -17,6 +17,7 @@ vi.mock('../utils/api', () => ({
     saveStripeCard: vi.fn(),
     oneTapGet: vi.fn(),
     oneTapRelease: vi.fn(),
+    oneTapConfirm: vi.fn(),
     getSchedule: vi.fn(),
     getNotificationPrefs: vi.fn(),
     getPropertyNotificationPrefs: vi.fn(),
@@ -95,6 +96,17 @@ describe('BillingTab — add-a-service and refer cards', () => {
     ],
   };
 
+  // A purchase the server holds for this customer, at its confirm step (what
+  // the card reads back after a return from a bank page).
+  const heldPurchase = () => ({
+    purchaseId: 'p-7', estimateId: 'est-1', status: 'reserved', open: true,
+    serviceKey: 'lawn_care', label: 'Lawn Care', perVisit: 84,
+    cadenceLabel: '9 applications/yr', visitsPerYear: 9,
+    terms: { version: 'v1', text: 'Server terms text.' },
+    hasCardOnFile: true, holdLive: true, holdMinutes: 15,
+    slot: { date: '2026-08-20', windowStart: '08:00', windowEnd: '10:00', holdExpiresAt: new Date(Date.now() + 900000).toISOString() },
+  });
+
   it('an active account sees the offer (offers only) and the refer card', async () => {
     api.getPropertyRecommendations.mockResolvedValue(RECS);
     const onSwitchTab = vi.fn();
@@ -149,14 +161,7 @@ describe('BillingTab — add-a-service and refer cards', () => {
     try {
       api.getPropertyRecommendations.mockResolvedValue(RECS);
       api.saveStripeCard.mockResolvedValue({});
-      api.oneTapGet.mockResolvedValue({
-        purchaseId: 'p-7', estimateId: 'est-1', status: 'reserved', open: true,
-        serviceKey: 'lawn_care', label: 'Lawn Care', perVisit: 84,
-        cadenceLabel: '9 applications/yr', visitsPerYear: 9,
-        terms: { version: 'v1', text: 'Server terms text.' },
-        hasCardOnFile: true, holdLive: true, holdMinutes: 15,
-        slot: { date: '2026-08-20', windowStart: '08:00', windowEnd: '10:00', holdExpiresAt: new Date(Date.now() + 900000).toISOString() },
-      });
+      api.oneTapGet.mockResolvedValue(heldPurchase());
       api.getBalance.mockRejectedValueOnce(new Error('balance read failed'));
       render(<BillingTab customer={{ ...baseCustomer, cancelled: false }} refreshCustomer={vi.fn()} onSwitchTab={vi.fn()} />);
 
@@ -171,6 +176,39 @@ describe('BillingTab — add-a-service and refer cards', () => {
       // the way (an unmounted overlay releases the held purchase).
       expect(api.oneTapGet).toHaveBeenCalledTimes(1);
       expect(api.oneTapRelease).not.toHaveBeenCalled();
+    } finally {
+      window.history.replaceState({}, '', '/');
+    }
+  });
+
+  // Billing shows the plan (tier, discount, services under Plan Charges). A
+  // purchase confirmed from its offer card changes the plan, so Billing
+  // reloads the customer, and reads the offers again so the service just
+  // bought is no longer offered. The confirmation stays open through both.
+  it('a purchase confirmed from the Billing offer reloads the customer and the offers', async () => {
+    window.history.replaceState({}, '', '/?stripe_setup_flow=one_tap_card&setup_intent=si_1&redirect_status=succeeded&one_tap_resume=p-7');
+    try {
+      api.getPropertyRecommendations
+        .mockResolvedValueOnce(RECS)
+        .mockResolvedValue({ available: true, oneTap: false, cards: [] });
+      api.saveStripeCard.mockResolvedValue({});
+      api.oneTapGet.mockResolvedValue(heldPurchase());
+      api.oneTapConfirm.mockResolvedValue({
+        success: true, perVisit: 84, label: 'Lawn Care', emailQueued: true,
+        firstVisit: { date: '2026-08-20', windowStart: '08:00', windowEnd: '10:00' },
+      });
+      const refreshCustomer = vi.fn();
+      render(<BillingTab customer={{ ...baseCustomer, cancelled: false }} refreshCustomer={refreshCustomer} onSwitchTab={vi.fn()} />);
+      expect(await screen.findByText('Not on your plan yet.')).toBeInTheDocument();
+      expect(refreshCustomer).not.toHaveBeenCalled();
+
+      fireEvent.click(await screen.findByText('Confirm'));
+      expect(await screen.findByText('Lawn Care is confirmed')).toBeInTheDocument();
+      expect(api.oneTapConfirm).toHaveBeenCalledWith('p-7', { termsAccepted: true });
+      expect(refreshCustomer).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(screen.queryByText('Not on your plan yet.')).not.toBeInTheDocument());
+      expect(api.getPropertyRecommendations).toHaveBeenCalledTimes(2);
+      expect(screen.getByText('Lawn Care is confirmed')).toBeInTheDocument();
     } finally {
       window.history.replaceState({}, '', '/');
     }
