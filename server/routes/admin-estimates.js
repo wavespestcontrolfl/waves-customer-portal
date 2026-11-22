@@ -15,6 +15,7 @@ const logger = require('../services/logger');
 // Real handoffs kept in deliveryState.deliveredAt (oldest dropped first).
 const DELIVERY_HISTORY_MAX = 25;
 const { shortenOrPassthrough } = require('../services/short-url');
+const { buildFollowUpText, followUpServiceNameFor, swapLongLinkForShort } = require('../services/estimate-follow-up-text');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { leadIdForEstimate } = require('../services/estimate-lead-linkage');
 const { estimateGreetingFirstName, estimateGreetingFirstToken } = require('../utils/greeting-first-name');
@@ -6011,30 +6012,100 @@ router.post('/:id/call-outcome', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// The refusals both follow-up routes judge before anything is sent, so the ready text (GET draft) and the send (POST)
+// never disagree. Returns { status, body } for a refusal, or null. assertEstimateSendable throws its own statusCode.
+async function followUpRefusal(estimate) {
+  if (!estimate.customer_phone) return { status: 400, body: { error: 'No phone on file' } };
+  const smsProblem = estimateSmsPhoneProblem(estimate);
+  if (smsProblem) return { status: 400, body: { error: smsProblem, code: 'INVALID_SMS_PHONE' } };
+  if (estimate.status === 'accepted') return { status: 400, body: { error: 'Already accepted' } };
+  assertEstimateSendable(estimate);
+  // Group-aware pricing-authority verdict (#3750, uncapped codex P0 r24):
+  // this text carries the estimate link, and the link renders every
+  // viewable sibling — a SERVER anchor beside an unverified sibling is
+  // refused like any other send while the gate is on.
+  if (!(await estimateDeliverableUnderGate(db, estimate))) {
+    return {
+      status: 409,
+      body: {
+        error: 'A property on this estimate\'s link has no engine-verified price — re-save it from the estimate tool before sending this follow-up.',
+        code: 'PRICING_AUTHORITY_NOT_SERVER',
+      },
+    };
+  }
+  return null;
+}
+
+const followUpLongUrl = (estimate) => `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
+
+// Does this estimate's link open the estimate for the customer? Judged as the proposal PDF route judges it: the public
+// page's own predicate, then the call-side verdict (a pending linkage invalidation, a call-side block).
+async function followUpLinkViewable(estimate) {
+  if (!estimate.token || !isEstimateCustomerViewable(estimate)) return false;
+  const data = parseEstimateData(estimate.estimate_data);
+  return !(await callSideBlockForEstimateData(db, data, { estimateStatus: estimate.status }));
+}
+
+// The ready text says "your estimate is here: <link>": only for an open sent estimate (sent or viewed, where the Follow
+// Up button shows) whose expiry date, when it has one, is readable and still ahead. Never for a self-serve quote that
+// staff did not deliver: it gets no follow-up prompt anywhere (AGENTS.md, zero delivery), so no ready text either.
+async function followUpDraftOffersLink(estimate, now = Date.now()) {
+  if (!['sent', 'viewed'].includes(estimate.status)) return false;
+  if (estimate.expires_at && !(new Date(estimate.expires_at).getTime() > now)) return false;
+  const { isUndeliveredSelfServe } = require('../services/self-serve-estimates');
+  if (isUndeliveredSelfServe(estimate.source, parseEstimateData(estimate.estimate_data))) return false;
+  return followUpLinkViewable(estimate);
+}
+
+// The send: a text that carries this estimate's link is refused when the link no longer opens (the estimate expired or
+// was pulled while the box was open). A text without the link is not judged here. Nor is a multi-property group: the
+// public page can still open a group link whose anchor expired (it leads to a live sibling), so a group keeps today's
+// send unchanged.
+async function followUpDeadLinkRefusal(estimate, message) {
+  if (estimate.estimate_group_id) return null;
+  if (typeof message !== 'string' || !estimate.token || !message.includes(followUpLongUrl(estimate))) return null;
+  if (await followUpLinkViewable(estimate)) return null;
+  return {
+    status: 409,
+    body: {
+      error: 'The estimate link in this text no longer opens for the customer. Remove the link, or send the estimate again first.',
+      code: 'ESTIMATE_LINK_NOT_VIEWABLE',
+    },
+  };
+}
+
+// GET /api/admin/estimates/:id/follow-up-draft — the ready text for the Follow Up button. Read only: it sends nothing,
+// mints no short link and writes no row. { message: null } = the box keeps its own default words, which carry no link:
+// the send would be refused, or the link would not open the estimate for the customer (followUpDraftOffersLink).
+router.get('/:id/follow-up-draft', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    let refused;
+    try {
+      refused = !!(await followUpRefusal(estimate));
+    } catch (err) {
+      if (!err.statusCode) throw err;
+      refused = true;
+    }
+    if (refused || !(await followUpDraftOffersLink(estimate))) return res.json({ message: null });
+    const [firstName, serviceName] = await Promise.all([
+      estimateGreetingFirstName(db, estimate),
+      followUpServiceNameFor(estimate),
+    ]);
+    res.json({ message: buildFollowUpText({ firstName, serviceName, link: followUpLongUrl(estimate) }) });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/estimates/:id/follow-up — manually send a follow-up SMS
 router.post('/:id/follow-up', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
-    if (!estimate.customer_phone) return res.status(400).json({ error: 'No phone on file' });
-    {
-      const smsProblem = estimateSmsPhoneProblem(estimate);
-      if (smsProblem) return res.status(400).json({ error: smsProblem, code: 'INVALID_SMS_PHONE' });
-    }
-    if (estimate.status === 'accepted') return res.status(400).json({ error: 'Already accepted' });
-    assertEstimateSendable(estimate);
-    // Group-aware pricing-authority verdict (#3750, uncapped codex P0 r24):
-    // this text carries the estimate link, and the link renders every
-    // viewable sibling — a SERVER anchor beside an unverified sibling is
-    // refused like any other send while the gate is on.
-    if (!(await estimateDeliverableUnderGate(db, estimate))) {
-      return res.status(409).json({
-        error: 'A property on this estimate\'s link has no engine-verified price — re-save it from the estimate tool before sending this follow-up.',
-        code: 'PRICING_AUTHORITY_NOT_SERVER',
-      });
-    }
+    const refusal = (await followUpRefusal(estimate)) || (await followUpDeadLinkRefusal(estimate, req.body.message));
+    if (refusal) return res.status(refusal.status).json(refusal.body);
 
-    const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
+    const longUrl = followUpLongUrl(estimate);
     const viewUrl = await shortenOrPassthrough(longUrl, {
       kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
       leadId: await leadIdForEstimate(estimate),
@@ -6042,14 +6113,17 @@ router.post('/:id/follow-up', async (req, res, next) => {
     });
     const firstName = await estimateGreetingFirstName(db, estimate);
 
-    const msg = req.body.message || await renderTemplate('estimate_followup_unviewed', {
-      first_name: firstName,
-      estimate_url: viewUrl,
-    }, {
-      workflow: 'admin_estimate_followup',
-      entity_type: 'estimate',
-      entity_id: estimate.id,
-    });
+    // The ready text carries the long link; the send swaps in the short one. A message without it goes as typed.
+    const msg = req.body.message
+      ? swapLongLinkForShort(req.body.message, longUrl, viewUrl)
+      : await renderTemplate('estimate_followup_unviewed', {
+        first_name: firstName,
+        estimate_url: viewUrl,
+      }, {
+        workflow: 'admin_estimate_followup',
+        entity_type: 'estimate',
+        entity_id: estimate.id,
+      });
     if (!msg) return res.status(422).json({ error: 'SMS template estimate_followup_unviewed is missing or inactive' });
 
     const smsResult = await sendCustomerMessage({

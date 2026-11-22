@@ -5,7 +5,7 @@
 //   - Default SMS copy (first name + first address segment)
 //   - DECLINE_REASONS list (imported from EstimatePage.jsx)
 // Reskinned with Dialog primitive, zinc ramp, alert-fg on destructive confirm.
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Button,
   Checkbox,
@@ -36,6 +36,22 @@ export function FollowUpModalV2({ estimate, onClose, onSent }) {
     `Hi ${firstName}, just checking in on the estimate I sent for ${addrShort}. Any questions?`,
   );
   const [sending, setSending] = useState(false);
+  // The server's ready text (service name + estimate link) replaces the default words only while the person has
+  // not typed. A failed or null draft changes nothing: the default words stay and no error shows.
+  const typedRef = useRef(false);
+  useEffect(() => {
+    let live = true;
+    adminFetch(`/admin/estimates/${estimate.id}/follow-up-draft`)
+      .then((r) => {
+        if (live && !typedRef.current && typeof r?.message === "string" && r.message) {
+          setMessage(r.message);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [estimate.id]);
 
   const handleSend = async () => {
     setSending(true);
@@ -69,7 +85,10 @@ export function FollowUpModalV2({ estimate, onClose, onSent }) {
         >
           <Textarea
             value={message}
-            onChange={(ev) => setMessage(ev.target.value)}
+            onChange={(ev) => {
+              typedRef.current = true;
+              setMessage(ev.target.value);
+            }}
             rows={4}
             className="min-h-[96px]"
           />

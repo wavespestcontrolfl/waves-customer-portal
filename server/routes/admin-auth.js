@@ -23,7 +23,7 @@ const {
   validateStaffPassword,
 } = require('../utils/staff-password-policy');
 const { validDateOnly } = require('../utils/date-only');
-const { canonicalStaffEmail } = require('../utils/staff-identity');
+const { canonicalStaffEmail, findStaffByLoginEmail } = require('../utils/staff-identity');
 const { hashResetToken, mintResetToken } = require('../services/staff-reset-token');
 const { employmentPatch } = require('../services/technician-eligibility');
 const { seedNewHireCapabilities } = require('../services/technician-capabilities');
@@ -862,7 +862,8 @@ async function register(req, res, next) {
     const hash = await bcrypt.hash(password, 12);
     const outcome = await db.transaction(async (trx) => {
       await lockStaffAccountMutations(trx);
-      const existing = await canonicalStaffEmailQuery(trx, normalizedEmail).first('id');
+      // One mailbox, one staff row: not another row's email and not another row's linked Google address.
+      const existing = await findStaffByLoginEmail(trx, normalizedEmail);
       if (existing) return { conflict: true };
       const [tech] = await trx('technicians').insert({
         name: normalizedName,
