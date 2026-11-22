@@ -939,7 +939,17 @@ async function listFallbackCity(conn, customer, address, coords) {
   }
   return zoneFallbackCity(customer, address, coords, { retained: Boolean(row) && profileMatchesAddress(row, address, coords) });
 }
-async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null, customer, fallbackCity }) {
+// Service-line map LIVE (owner 2026-11-21): a Waves Assessment is offered the home and gap technician of the
+// line its lead asked for. The page's own lead is read first (`leadId`: a new lead has no customer yet, and the
+// offer and the commit must read the same line), then the customer's. Not live: nothing read, nothing named (any
+// active field tech, as before).
+async function assessmentServiceLines(customer, leadId) {
+  const lineTechnician = require('../services/scheduling/line-technician');
+  if (!lineTechnician.lineMapLive()) return {};
+  const { line } = await lineTechnician.assessmentLineFor(db, { customerId: customer?.id || null, leadId: leadId || null });
+  return { serviceLines: [line] };
+}
+async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null, customer, leadId = null, fallbackCity }) {
   const booking = require('./booking');
   const { buildBookingAvailability, bookInsertionOffersLive } = booking._internals;
   const zoneInputs = zoneFunnelInputs(address);
@@ -951,9 +961,11 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     // createSelfBooking's commit probe measures with (callbackVisit), so the
     // offered travel gap and the commit-time check always agree. No funnel
     // key → no service-type filter: any active field tech (owner decision —
-    // all active techs, scope doc §7).
+    // all active techs, scope doc §7); while GATE_SERVICE_LINE_MAP is live, the
+    // technicians of the line the lead asked for (assessmentServiceLines).
     serviceKey: ASSESSMENT_SERVICE_KEY,
     serviceIdentity: ASSESSMENT_EXPECTED_IDENTITY,
+    ...(await assessmentServiceLines(customer, leadId)),
     rangeFrom,
     rangeTo,
     config,
@@ -1039,7 +1051,7 @@ async function computeConsultationSlotsForLead(leadId, { count = 3 } = {}) {
     const booking = require('./booking');
     const config = await booking._internals.loadBookingConfig();
     const range = bookingRange(config);
-    const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, address: resolved.address, customer: custRow });
+    const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, address: resolved.address, customer: custRow, leadId: lead.id });
     return {
       ok: true, slots: flattenNextSlots(built, count), needsAddress: false, address: resolved.address,
       addressInputs: bookingAddressInputs(lead, custRow),
@@ -1978,7 +1990,7 @@ router.get('/:token', async (req, res, next) => {
     let availability = null;
     if (resolved.location) {
       try {
-        const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, offer: true, address: resolved.address, customer: custRow });
+        const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, offer: true, address: resolved.address, customer: custRow, leadId: lead.id });
         availability = built ? shapeAvailability(built, range) : null;
       } catch (err) {
         logger.error(`[inspection-public] availability failed for lead ${lead.id}: ${err.message}`);
@@ -2035,7 +2047,7 @@ router.post('/:token/availability', findSlotsLimiter, async (req, res, next) => 
     if (!catalog.serviceId) return res.status(503).json({ error: 'booking_unavailable' });
     let availability = null;
     try {
-      const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, offer: true, address: resolved.address, customer: custRow });
+      const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, offer: true, address: resolved.address, customer: custRow, leadId: lead.id });
       availability = built ? shapeAvailability(built, range) : null;
     } catch (err) {
       logger.error(`[inspection-public] address availability failed for lead ${lead.id}: ${err.message}`);
@@ -2106,7 +2118,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     try {
       availability = await buildAvailabilityForLead(resolved.location, {
         rangeFrom: when.dateFrom, rangeTo: when.dateTo, config,
-        duration: catalog.durationMinutes, timeOfDay: when.timeOfDay, offer: true, address: resolved.address, customer: custRow,
+        duration: catalog.durationMinutes, timeOfDay: when.timeOfDay, offer: true, address: resolved.address, customer: custRow, leadId: lead.id,
       });
     } catch (err) {
       logger.error(`[inspection-public] find-slots availability failed for lead ${lead.id}: ${err.message}`);
@@ -2378,7 +2390,7 @@ async function sendSlotTaken(res, { location, address = null, customer, range, c
   if (failure) return sendLocationFailure(res, failure, null, leadId);
   let refreshed = null;
   try {
-    if (location) refreshed = await buildAvailabilityForLead(location, { ...range, config, duration: catalog.durationMinutes, address, customer });
+    if (location) refreshed = await buildAvailabilityForLead(location, { ...range, config, duration: catalog.durationMinutes, address, customer, leadId });
   } catch (err) {
     logger.warn(`[inspection-public] refresh availability failed for lead ${leadId}: ${err.message}`);
   }
@@ -2414,7 +2426,7 @@ async function revalidateSlotAt(location, { slot, moved, zoneMoved, zone, date, 
   let refreshedDay = null;
   try {
     refreshedDay = await buildAvailabilityForLead(location, {
-      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes, address, fallbackCity: customer.city ?? null,
+      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes, address, customer, leadId, fallbackCity: customer.city ?? null,
     });
   } catch (err) {
     logger.warn(`[inspection-public] slot re-validation failed for lead ${leadId}: ${err.message}`);
@@ -2825,7 +2837,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // (listFallbackCity), and the zone re-check below compares with it.
     const firstCity = await listFallbackCity(db, custRow, resolved.address, resolved.location);
     const dayAvailability = await buildAvailabilityForLead(resolved.location, {
-      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes, address: resolved.address, fallbackCity: firstCity,
+      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes, address: resolved.address, customer: custRow, leadId: lead.id, fallbackCity: firstCity,
     });
     const slot = findSlotIn(dayAvailability, date, time);
     if (!slot) return sendSlotTaken(res, { location: resolved.location, address: resolved.address, customer: custRow, range, config, catalog, leadId: lead.id });

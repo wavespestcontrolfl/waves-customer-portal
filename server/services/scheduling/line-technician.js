@@ -26,6 +26,13 @@
  * A line with no technician set adds no rule: while service_line_techs is empty
  * (as on 2026-10-30) live picks exactly what today's code picks.
  *
+ * A WAVES ASSESSMENT (the free sales visit) goes by what its lead asked for (owner
+ * 2026-11-21, choice 4 = A; assessmentLineFor): a lead that names lawn, tree & shrub
+ * (palm work too), rodents, wildlife or rodent sealing goes to the owner's line for it,
+ * also when it names pest too; a lead that names only pest, termite / WDO or mosquito goes
+ * to that line; a lead with no service recorded goes to the owner (lawn). The visit itself
+ * records no request, so the lead record is read.
+ *
  * TERRITORY (GATE_TERRITORY_ROUTING, owner 2026-10-30): each technician owns a ZIP
  * list (territory_zips, services/territory.js). On, a pest, mosquito, rodent or
  * termite line's home technician is the one who owns the visit's ZIP, and the line's
@@ -51,6 +58,7 @@ const { isAssignable, isOffDay, absentTechDays } = require('../technician-eligib
 const { stateOf } = require('../technician-capabilities');
 const { dateOnlyString } = require('../../utils/datetime-et');
 const { commitPromiseOf } = require('../../utils/trx-commit-promise');
+const { familiesIn } = require('../../utils/lead-service-interest');
 const territory = require('../territory');
 
 const SOURCES = Object.freeze(['book', 'phone_live', 'after_call', 'estimate_accept', 'office_auto', 'night_run']);
@@ -118,7 +126,8 @@ const clean = (value, max = 200) => {
  *     (auto-dispatch's classifyServiceCategory falls back to general) gets wrong.
  *  2. Otherwise the NAME, through classifyServiceCategory.
  * lineFrom is 'catalog' or 'name'; { line: null, lineFrom: null } when there is
- * neither a usable catalog row nor a service name.
+ * neither a usable catalog row nor a service name. A Waves Assessment is not read here:
+ * it goes by its lead (visitLineFor).
  */
 async function serviceLineFor(conn, { serviceId = null, serviceKey = null, serviceType = null } = {}) {
   const db = conn || defaultDb;
@@ -135,6 +144,57 @@ async function serviceLineFor(conn, { serviceId = null, serviceKey = null, servi
   const name = clean(serviceType, 300);
   if (name) return { line: classifyServiceCategory(name), lineFrom: 'name' };
   return { line: null, lineFrom: null };
+}
+
+// A Waves Assessment's line by the first service family its lead names (owner 2026-11-21,
+// choice 4 = A): any owner family wins over the technician families.
+const ASSESSMENT_OWNER_LINES = Object.freeze({
+  lawn: 'lawn', tree_shrub: 'lawn', palm_injection: 'lawn', exclusion: 'exclusion', rodent: 'exclusion', wildlife: 'exclusion',
+});
+const ASSESSMENT_TECH_LINES = Object.freeze({
+  pest: 'general', flea: 'general', stinging: 'general', bed_bug: 'general', termite: 'termite', wdo: 'termite', mosquito: 'mosquito',
+});
+
+/** The line a lead's service-interest text sends a Waves Assessment to; no service family recognized reads lawn (the owner). */
+function assessmentLineForInterest(text) {
+  const keys = familiesIn(text).map((fam) => fam.key);
+  const owner = keys.find((key) => ASSESSMENT_OWNER_LINES[key]);
+  if (owner) return ASSESSMENT_OWNER_LINES[owner];
+  const tech = keys.find((key) => ASSESSMENT_TECH_LINES[key]);
+  return tech ? ASSESSMENT_TECH_LINES[tech] : 'lawn';
+}
+
+/** The service-interest text of a Waves Assessment's lead, or null: see assessmentLineFor for the order. */
+async function assessmentInterestText(db, { leadId, customerId }) {
+  const filled = (text) => (String(text || '').trim() ? text : null);
+  if (leadId) {
+    const own = filled(((await db('leads').where({ id: leadId }).first('service_interest')) || {}).service_interest);
+    if (own) return own;
+  }
+  if (!customerId) return null;
+  const lead = await db('leads').where({ customer_id: customerId })
+    .whereRaw("btrim(coalesce(service_interest, '')) <> ''")
+    .orderBy('created_at', 'desc').first('service_interest');
+  if (lead) return lead.service_interest;
+  return filled(((await db('customers').where({ id: customerId }).first('lead_service_interest')) || {}).lead_service_interest);
+}
+
+/**
+ * The line a Waves Assessment goes to: { line, lineFrom: 'lead' }. The text read, first one with a
+ * service interest: the lead itself (`leadId`: the booking page's own lead, which may have no
+ * customer yet), the customer's newest lead (leads.service_interest by `customerId`), the customer
+ * row's lead_service_interest. No lead and no customer, nothing recorded or an unreadable read
+ * gives lawn (the read failure is logged).
+ */
+async function assessmentLineFor(conn, { customerId = null, leadId = null } = {}) {
+  const db = conn || defaultDb;
+  let text = null;
+  try {
+    text = await assessmentInterestText(db, { leadId, customerId });
+  } catch (err) {
+    logger.warn(`[line-technician] assessment lead read failed (read as no service recorded): ${err.message}`);
+  }
+  return { line: assessmentLineForInterest(text), lineFrom: 'lead' };
 }
 
 /**
@@ -185,11 +245,12 @@ async function shadowLineEntry(db, line, place) {
  *           suffix is why the home tech could not) | 'none' (neither can) |
  *           'no_map' (no line, or the line has no technician set).
  * `date` is the visit's YYYY-MM-DD ET calendar date; without one the absence and
- * off-day tests are skipped. Reads only; throws only on an unreadable database.
+ * off-day tests are skipped. A Waves Assessment resolves by its lead's line (lineFrom 'lead',
+ * assessmentLineFor), which reads `customerId`. Reads only; throws only on an unreadable database.
  */
-async function resolveLineTechnician(conn, { serviceId = null, serviceKey = null, serviceType = null, date = null, place = null } = {}) {
+async function resolveLineTechnician(conn, { serviceId = null, serviceKey = null, serviceType = null, customerId = null, date = null, place = null } = {}) {
   const db = conn || defaultDb;
-  const { line, lineFrom } = await serviceLineFor(db, { serviceId, serviceKey, serviceType });
+  const { line, lineFrom } = await visitLineFor(db, { serviceId, serviceKey, serviceType, customerId });
   const base = { line, lineFrom, homeId: null, gapId: null, technicianId: null, reason: 'no_map' };
   if (!line || !LINES.includes(line)) return base;
   const entry = await shadowLineEntry(db, line, place);
@@ -322,7 +383,8 @@ async function lineOfferRanking(conn, { lines = [], place = null, strict = false
  *                busy | not_listed | unset (the line has no home technician);
  *   'none'       neither can: technicianId null, and the caller takes its own
  *                "nobody" path (the visit is saved unassigned).
- * A Waves Assessment is { mapped: false, reason: 'assessment' } (isAssessmentIdentity).
+ * A Waves Assessment takes the line its lead asked for (assessmentLineFor, from `customerId`);
+ * everything after the line is the same.
  * A technician is tried only when fit (unfitReason) and, when `candidateIds` is
  * given, listed in it (the caller's own eligible list). `checkFree` adds the
  * save probe (pick-technician.technicianFreeAt) for a visit with a time; a
@@ -332,9 +394,9 @@ async function lineOfferRanking(conn, { lines = [], place = null, strict = false
 async function pickLineTechnician(conn, opts = {}) {
   if (!lineMapLive()) return { mapped: false, line: null, technicianId: null, reason: 'off' };
   const db = conn || defaultDb;
-  const identity = { serviceId: opts.serviceId, serviceKey: opts.serviceKey, serviceType: opts.serviceType };
-  if (await isAssessmentIdentity(db, identity)) return { mapped: false, line: null, technicianId: null, reason: 'assessment' };
-  const { line } = await serviceLineFor(db, identity);
+  const line = await liveServiceLine(db, {
+    serviceId: opts.serviceId, serviceKey: opts.serviceKey, serviceType: opts.serviceType, customerId: opts.customerId,
+  });
   const mapEntry = line ? (await loadLineMap(db, [line])).get(line) || null : null;
   const entry = line ? withTerritory(mapEntry, line, await territoryTechnicianOf(db, placeOf(opts))) : null;
   if (!entry) return { mapped: false, line, technicianId: null, reason: 'no_map' };
@@ -360,10 +422,9 @@ async function pickLineTechnician(conn, opts = {}) {
 /**
  * Whether the visit is a Waves Assessment: the free sales visit (catalog key
  * lawn_inspection, name "Waves Assessment"; services/assessment-booking.js).
- * Live mode routes no assessment: which line an inspection belongs to is still
- * an open owner decision (build-4 trace, decision 1), and the name alone reads
- * general pest, which would hand a sales visit to the new pest technician. The
- * caller keeps today's choice for it. An unreadable catalog row reads "no".
+ * Its line is not the catalog's or the name's (the name alone reads general
+ * pest): it is the line its lead asked for (assessmentLineFor, owner 2026-11-21).
+ * An unreadable catalog row reads "no".
  */
 async function isAssessmentIdentity(db, { serviceId = null, serviceKey = null, serviceType = null } = {}) {
   const { ASSESSMENT_SERVICE_KEY, isAssessmentServiceType, isAssessmentServiceRow } = require('../assessment-booking');
@@ -378,13 +439,19 @@ async function isAssessmentIdentity(db, { serviceId = null, serviceKey = null, s
 }
 
 /**
- * LIVE: the line a booked service routes by, or null (no line rule): a Waves
- * Assessment belongs to no line (isAssessmentIdentity); otherwise serviceLineFor.
+ * The { line, lineFrom } a booked service routes by: a Waves Assessment goes by its lead
+ * (identity.customerId; assessmentLineFor), anything else by serviceLineFor.
+ */
+async function visitLineFor(db, identity) {
+  return (await isAssessmentIdentity(db, identity)) ? assessmentLineFor(db, identity) : serviceLineFor(db, identity);
+}
+
+/**
+ * LIVE: the line a booked service routes by, or null (no line): visitLineFor.
+ * `identity` is { serviceId, serviceKey, serviceType, customerId }.
  */
 async function liveServiceLine(conn, identity = {}) {
-  const db = conn || defaultDb;
-  if (await isAssessmentIdentity(db, identity)) return null;
-  return (await serviceLineFor(db, identity)).line;
+  return (await visitLineFor(conn || defaultDb, identity)).line;
 }
 
 /** The save-probe arguments for a visit with a day and a start, or null (no probe). */
@@ -465,7 +532,7 @@ async function writeShadowRow(row) {
   let pick = null;
   try {
     pick = await resolveLineTechnician(db, {
-      serviceId: row.serviceId, serviceKey: row.serviceKey, serviceType: row.serviceType, date,
+      serviceId: row.serviceId, serviceKey: row.serviceKey, serviceType: row.serviceType, customerId: row.customerId, date,
       place: await shadowPlace(db, row),
     });
   } catch (err) {
@@ -544,11 +611,12 @@ module.exports = {
   CATALOG_CATEGORY_LINES,
   SOURCES,
   serviceLineFor,
+  assessmentLineFor,
   resolveLineTechnician,
   recordLinePickShadow,
   lineMapLive,
   lineOfferRanking,
   pickLineTechnician,
   liveServiceLine,
-  _internals: { loadLineMap, windowEndOf, isAssessmentIdentity, withTerritory, shadowPlace },
+  _internals: { loadLineMap, windowEndOf, isAssessmentIdentity, withTerritory, shadowPlace, assessmentLineForInterest },
 };

@@ -211,12 +211,12 @@ async function revalidateSlot({ offer, durationMinutes = null, serviceLines }) {
 
 // The booked service's line as `serviceLines` for the recheck: [line] while the
 // service-line map is LIVE and the catalog row has a line, else undefined (no read at
-// all with the gate off). A Waves Assessment has no line (liveServiceLine): today's recheck.
-async function bookingServiceLines(db, catalogRow) {
+// all with the gate off). A Waves Assessment takes the line its lead asked for (liveServiceLine).
+async function bookingServiceLines(db, catalogRow, customerId = null) {
   const { lineMapLive, liveServiceLine } = require('../scheduling/line-technician');
   if (!lineMapLive() || !catalogRow) return undefined;
   const line = await liveServiceLine(db, {
-    serviceId: catalogRow.id || null, serviceKey: catalogRow.service_key || null, serviceType: catalogRow.name || null,
+    serviceId: catalogRow.id || null, serviceKey: catalogRow.service_key || null, serviceType: catalogRow.name || null, customerId,
   });
   return line ? [line] : undefined;
 }
@@ -754,7 +754,7 @@ async function requestBookingText(input = {}, ctx = {}) {
   const recheck = await revalidateSlot({
     offer: { ...offer, lat: bookingCoords.lat, lng: bookingCoords.lng },
     durationMinutes: bookingDurationMinutes,
-    serviceLines: await bookingServiceLines(db, catalogRow),
+    serviceLines: await bookingServiceLines(db, catalogRow, customerId),
   });
   if (recheck.status === 'engine_unavailable') {
     return 'Live scheduling is not available right now, so no booking request can be placed. '

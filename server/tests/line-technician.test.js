@@ -7,7 +7,7 @@ jest.mock('../models/db', () => jest.fn());
 
 const defaultDb = require('../models/db');
 const {
-  serviceLineFor, resolveLineTechnician, recordLinePickShadow, lineOfferRanking, pickLineTechnician, lineMapLive, liveServiceLine, _internals,
+  serviceLineFor, assessmentLineFor, resolveLineTechnician, recordLinePickShadow, lineOfferRanking, pickLineTechnician, lineMapLive, liveServiceLine, _internals,
 } = require('../services/scheduling/line-technician');
 const pickTechnician = require('../services/scheduling/pick-technician');
 const territoryService = require('../services/territory');
@@ -27,19 +27,29 @@ function fakeDb(state = {}) {
     technician_absences: state.absences || [],
     territory_zips: state.zips || [],
     scheduled_services: state.visits || [{ id: 'visit-1' }],
+    leads: state.leads || [],
+    customers: state.customers || [],
   };
   const inserts = [];
   const queries = [];
   const db = jest.fn((table) => {
     queries.push(table);
     let filters = [];
+    let order = null;
+    const rows = () => {
+      const found = (data[table] || []).filter((r) => filters.every((f) => f(r)));
+      return order ? [...found].sort((a, b) => (a[order.col] < b[order.col] ? 1 : -1) * (order.dir === 'desc' ? 1 : -1)) : found;
+    };
     const c = {
       where(arg, val) { filters.push(typeof arg === 'object' ? (r) => Object.entries(arg).every(([k, v]) => r[k] === v) : (r) => r[arg] === val); return c; },
       whereIn(col, vals) { filters.push((r) => vals.includes(r[col])); return c; },
       whereBetween(col, [a, b]) { filters.push((r) => r[col] >= a && r[col] <= b); return c; },
       whereNull(col) { filters.push((r) => r[col] == null); return c; },
-      select() { return Promise.resolve((data[table] || []).filter((r) => filters.every((f) => f(r)))); },
-      first() { return Promise.resolve((data[table] || []).filter((r) => filters.every((f) => f(r)))[0]); },
+      // The one raw predicate the assessment lead read uses: a non-blank service_interest.
+      whereRaw() { filters.push((r) => String(r.service_interest || '').trim() !== ''); return c; },
+      orderBy(col, dir) { order = { col, dir }; return c; },
+      select() { return Promise.resolve(rows()); },
+      first() { return Promise.resolve(rows()[0]); },
       insert(row) {
         if (state.failInsert) return Promise.reject(new Error('insert failed'));
         inserts.push({ table, row });
@@ -240,6 +250,17 @@ describe('resolveLineTechnician', () => {
     await ask(db);
     expect(db.inserts).toEqual([]);
   });
+
+  test('a Waves Assessment resolves by its lead, lineFrom lead; any other visit reads no lead', async () => {
+    const leads = [{ customer_id: 'cust-1', service_interest: 'Pest Control Service', created_at: '2026-11-01' }];
+    const db = fakeDb({ lines: LINES, leads });
+    expect(await ask(db, { serviceType: 'Waves Assessment', customerId: 'cust-1' }))
+      .toMatchObject({ line: 'general', lineFrom: 'lead', technicianId: HIRE.id, reason: 'home' });
+    expect(await ask(db, { serviceType: 'Waves Assessment' })).toMatchObject({ line: 'lawn', lineFrom: 'lead', technicianId: OWNER.id });
+    const plain = fakeDb({ lines: LINES, leads });
+    expect(await ask(plain, { customerId: 'cust-1' })).toMatchObject({ line: 'general', lineFrom: 'name' });
+    expect(plain.queries).not.toContain('leads');
+  });
 });
 
 describe('live mode (GATE_SERVICE_LINE_MAP=live, build 4)', () => {
@@ -393,29 +414,132 @@ describe('live mode (GATE_SERVICE_LINE_MAP=live, build 4)', () => {
       expect(db.inserts).toEqual([]);
     });
 
-    test('a Waves Assessment is never routed: by name, by catalog key, or by its catalog row', async () => {
+    // Owner 2026-11-21 (choice 4 = A): a Waves Assessment goes by what its lead asked for.
+    describe('a Waves Assessment', () => {
+      const ASSESS_LINES = [...LINES, { service_category: 'termite', home_technician_id: HIRE.id, gap_technician_id: OWNER.id }];
+      const assess = (db, extra = {}) => pickLineTechnician(db, { serviceType: 'Waves Assessment', date: MONDAY, customerId: 'cust-1', ...extra });
+      const lead = (service_interest, created_at = '2026-11-01') => ({ customer_id: 'cust-1', service_interest, created_at });
+
+      test('a pest-only lead goes to the general line\'s home technician; a lawn lead to the lawn line\'s home (by name, catalog key and catalog row)', async () => {
+        live();
+        const services = [{ id: 'svc-assess', service_key: 'lawn_inspection', name: 'Waves Assessment', category: 'inspection' }];
+        const pest = fakeDb({ lines: ASSESS_LINES, services, leads: [lead('Pest Control Service')] });
+        expect(await assess(pest)).toEqual({ mapped: true, line: 'general', technicianId: HIRE.id, reason: 'home' });
+        expect(await assess(pest, { serviceType: null, serviceKey: 'lawn_inspection' })).toMatchObject({ line: 'general', technicianId: HIRE.id });
+        expect(await assess(pest, { serviceType: 'Consultation', serviceId: 'svc-assess' })).toMatchObject({ line: 'general', technicianId: HIRE.id });
+        const lawn = fakeDb({ lines: ASSESS_LINES, leads: [lead('Waves Assessment + Lawn Care Service + Pest Control Service')] });
+        expect(await assess(lawn)).toEqual({ mapped: true, line: 'lawn', technicianId: OWNER.id, reason: 'home' });
+      });
+
+      test('no customer id reads lawn without a lead query; the gap technician still covers the line\'s home', async () => {
+        live();
+        const db = fakeDb({ lines: ASSESS_LINES, leads: [lead('Pest Control Service')] });
+        expect(await assess(db, { customerId: null })).toMatchObject({ line: 'lawn', technicianId: OWNER.id, reason: 'home' });
+        expect(db.queries).not.toContain('leads');
+        process.env.GATE_TECH_WORK_DAYS = 'true';
+        const off = fakeDb({ lines: ASSESS_LINES, leads: [lead('Termite Service')] });
+        expect(await assess(off, { date: FRIDAY })).toMatchObject({ line: 'termite', technicianId: OWNER.id, reason: 'gap_off_day' });
+      });
+
+      test('a line with no technician set adds no rule', async () => {
+        live();
+        expect(await assess(fakeDb({ lines: [], leads: [lead('Pest Control Service')] }))).toMatchObject({ mapped: false, line: 'general', reason: 'no_map' });
+      });
+    });
+
+    test('a visit that is not an assessment reads no lead', async () => {
       live();
-      const db = fakeDb({ lines: LINES, services: [{ id: 'svc-assess', service_key: 'lawn_inspection', name: 'Waves Assessment', category: 'inspection' }] });
-      const none = { mapped: false, line: null, technicianId: null, reason: 'assessment' };
-      expect(await pick(db, { serviceType: 'Waves Assessment' })).toEqual(none);
-      expect(await pick(db, { serviceType: null, serviceKey: 'lawn_inspection' })).toEqual(none);
-      expect(await pick(db, { serviceType: 'Consultation', serviceId: 'svc-assess' })).toEqual(none);
+      const db = fakeDb({ lines: LINES, leads: [{ customer_id: 'cust-1', service_interest: 'Lawn Care Service', created_at: '2026-11-01' }] });
+      expect(await pick(db, { customerId: 'cust-1' })).toMatchObject({ line: 'general', technicianId: HIRE.id });
+      expect(db.queries).not.toContain('leads');
+      expect(db.queries).not.toContain('customers');
     });
   });
 
   describe('liveServiceLine', () => {
-    test('a Waves Assessment has no line; anything else reads serviceLineFor', async () => {
-      const db = fakeDb({ services: [{ id: 'svc-lawn', service_key: 'lawn_x', name: 'Lawn Care', category: 'lawn_care' }] });
-      expect(await liveServiceLine(db, { serviceType: 'Waves Assessment' })).toBeNull();
-      expect(await liveServiceLine(db, { serviceKey: 'lawn_inspection' })).toBeNull();
-      expect(await liveServiceLine(db, { serviceId: 'svc-lawn', serviceType: 'Anything' })).toBe('lawn');
-      expect(await liveServiceLine(db, { serviceType: 'General Pest Control' })).toBe('general');
+    test('a Waves Assessment reads the line its lead asked for (lawn without one); anything else reads serviceLineFor', async () => {
+      const db = fakeDb({
+        services: [{ id: 'svc-lawn', service_key: 'lawn_x', name: 'Lawn Care', category: 'lawn_care' }],
+        leads: [{ customer_id: 'cust-1', service_interest: 'Mosquito Control Service', created_at: '2026-11-01' }],
+      });
+      expect(await liveServiceLine(db, { serviceType: 'Waves Assessment', customerId: 'cust-1' })).toBe('mosquito');
+      expect(await liveServiceLine(db, { serviceKey: 'lawn_inspection', customerId: 'cust-1' })).toBe('mosquito');
+      expect(await liveServiceLine(db, { serviceKey: 'lawn_inspection' })).toBe('lawn');
+      expect(await liveServiceLine(db, { serviceId: 'svc-lawn', serviceType: 'Anything', customerId: 'cust-1' })).toBe('lawn');
+      expect(await liveServiceLine(db, { serviceType: 'General Pest Control', customerId: 'cust-1' })).toBe('general');
     });
 
     test('an unreadable catalog row is not an assessment: the name decides', async () => {
       const db = jest.fn(() => { throw new Error('boom'); });
       expect(await liveServiceLine(db, { serviceId: 'x', serviceType: 'Mosquito Control' })).toBe('mosquito');
     });
+  });
+});
+
+describe('assessmentLineFor (owner 2026-11-21, choice 4 = A)', () => {
+  const lineOf = _internals.assessmentLineForInterest;
+
+  test.each([
+    ['Waves Assessment + Lawn Care Service + Pest Control Service', 'lawn'],
+    ['Pest Control Service', 'general'],
+    ['Rodent Control Service', 'exclusion'],
+    ['Mosquito Control Service + Termite Service', 'mosquito'],
+    ['', 'lawn'],
+    [null, 'lawn'],
+    ['pest control and lawn care', 'lawn'],
+    ['lawn care after the pest control', 'lawn'],
+    ['pest control and rodent control', 'exclusion'],
+    ['Tree & Shrub Care Service + Termite Service', 'lawn'],
+    ['Palm Injection', 'lawn'],
+    ['Wildlife Control Service', 'exclusion'],
+    ['seal entry points', 'exclusion'],
+    ['WDO Inspection Service', 'termite'],
+    ['Bed Bug Treatment Service', 'general'],
+    ['Flea Control Service + Mosquito Control Service', 'general'],
+    ['asdf qwer', 'lawn'],
+  ])('interest %j goes to the %s line', (text, line) => {
+    expect(lineOf(text)).toBe(line);
+  });
+
+  const lead = (customer_id, service_interest, created_at) => ({ customer_id, service_interest, created_at });
+
+  test('the newest lead with a service interest wins; a blank newer lead is skipped; the customer row is the fallback', async () => {
+    const db = fakeDb({
+      leads: [lead('c1', 'Lawn Care Service', '2026-10-01'), lead('c1', 'Pest Control Service', '2026-11-01'), lead('c1', '  ', '2026-11-10'), lead('c2', 'Lawn Care Service', '2026-11-20')],
+      customers: [{ id: 'c1', lead_service_interest: 'Rodent Control Service' }, { id: 'c3', lead_service_interest: 'Mosquito Control Service' }],
+    });
+    expect(await assessmentLineFor(db, { customerId: 'c1' })).toEqual({ line: 'general', lineFrom: 'lead' });
+    expect(await assessmentLineFor(db, { customerId: 'c3' })).toEqual({ line: 'mosquito', lineFrom: 'lead' });
+    expect(await assessmentLineFor(db, { customerId: 'nobody' })).toEqual({ line: 'lawn', lineFrom: 'lead' });
+  });
+
+  test('the lead itself is read first (a new lead has no customer yet); a blank one falls back to the customer', async () => {
+    const db = fakeDb({
+      leads: [
+        { id: 'l-pest', customer_id: null, service_interest: 'Pest Control Service', created_at: '2026-11-01' },
+        { id: 'l-blank', customer_id: 'c1', service_interest: ' ', created_at: '2026-11-10' },
+        { id: 'l-lawn', customer_id: 'c1', service_interest: 'Lawn Care Service', created_at: '2026-10-01' },
+      ],
+      customers: [{ id: 'c1', lead_service_interest: 'Mosquito Control Service' }],
+    });
+    // A pest-only lead with no customer goes to the technician's line, not to the no-lead default.
+    expect(await assessmentLineFor(db, { leadId: 'l-pest' })).toEqual({ line: 'general', lineFrom: 'lead' });
+    // The page's own lead wins over the customer's other leads.
+    expect(await assessmentLineFor(db, { leadId: 'l-pest', customerId: 'c1' })).toEqual({ line: 'general', lineFrom: 'lead' });
+    // A blank lead: the customer's newest lead with an interest.
+    expect(await assessmentLineFor(db, { leadId: 'l-blank', customerId: 'c1' })).toEqual({ line: 'lawn', lineFrom: 'lead' });
+    // A blank or unknown lead and no customer: the default.
+    expect(await assessmentLineFor(db, { leadId: 'l-blank' })).toEqual({ line: 'lawn', lineFrom: 'lead' });
+    expect(await assessmentLineFor(db, { leadId: 'nobody' })).toEqual({ line: 'lawn', lineFrom: 'lead' });
+  });
+
+  test('no customer id: lawn with no query; an unreadable read: lawn, logged, never thrown', async () => {
+    const quiet = fakeDb();
+    expect(await assessmentLineFor(quiet, {})).toEqual({ line: 'lawn', lineFrom: 'lead' });
+    expect(quiet.queries).toEqual([]);
+    const broken = jest.fn(() => { throw new Error('boom'); });
+    expect(await assessmentLineFor(broken, { customerId: 'c1' })).toEqual({ line: 'lawn', lineFrom: 'lead' });
+    expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('assessment lead read failed'));
   });
 });
 
@@ -459,6 +583,14 @@ describe('recordLinePickShadow', () => {
     } });
     // The multi-tech occupancy scope is off here, so "free" cannot be told: left null.
     expect(db.inserts[0].row.would_free).toBeNull();
+  });
+
+  test('a Waves Assessment row is written with the lead\'s line and line_from lead', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'shadow';
+    const db = fakeDb({ lines: LINES, leads: [{ customer_id: 'cust-1', service_interest: 'Pest Control Service', created_at: '2026-11-01' }] });
+    defaultDb.mockImplementation(db);
+    await recordLinePickShadow({ ...base, serviceType: 'Waves Assessment' });
+    expect(db.inserts[0].row).toMatchObject({ service_type: 'Waves Assessment', service_line: 'general', line_from: 'lead', would_technician_id: HIRE.id });
   });
 
   test('a Date value for the visit date is written as the calendar date', async () => {

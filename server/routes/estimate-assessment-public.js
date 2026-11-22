@@ -159,7 +159,7 @@ async function bookingSetup(customer, lead) {
   if (!catalog.serviceId) {
     return { blocked: { state: 'ok', lead, availability: null, needs_address: false, selfServeNotice: true, booking_unavailable: true } };
   }
-  return { booking, location, config, range, catalog };
+  return { booking, location, config, range, catalog, customer };
 }
 
 // One request's resolution: the generic 404, a terminal page state, or the eligible estimate, customer and lead.
@@ -193,7 +193,7 @@ router.get('/:token', readLimiter, async (req, res, next) => {
     if (setup.blocked) return res.json(setup.blocked);
     let availability = null;
     try {
-      const built = await inspection().buildAvailabilityForLead(setup.location, { ...setup.range, config: setup.config, duration: setup.catalog.durationMinutes, offer: true });
+      const built = await inspection().buildAvailabilityForLead(setup.location, { ...setup.range, config: setup.config, duration: setup.catalog.durationMinutes, offer: true, customer: setup.customer });
       availability = built ? inspection().shapeAvailability(built, setup.range) : null;
     } catch (err) {
       logger.error(`[estimate-assessment] availability failed for estimate ${resolved.estimate.id}: ${err.code || err.name || 'error'}`);
@@ -227,7 +227,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     try {
       availability = await inspection().buildAvailabilityForLead(setup.location, {
         rangeFrom: when.dateFrom, rangeTo: when.dateTo, config: setup.config,
-        duration: setup.catalog.durationMinutes, timeOfDay: when.timeOfDay, offer: true,
+        duration: setup.catalog.durationMinutes, timeOfDay: when.timeOfDay, offer: true, customer: setup.customer,
       });
     } catch (err) {
       logger.error(`[estimate-assessment] find-slots availability failed for estimate ${resolved.estimate.id}: ${err.code || err.name || 'error'}`);
@@ -253,7 +253,7 @@ async function sendSlotTaken(res, setup, error) {
   let refreshed = null;
   if (!setup.blocked) {
     try {
-      refreshed = await inspection().buildAvailabilityForLead(setup.location, { ...setup.range, config: setup.config, duration: setup.catalog.durationMinutes });
+      refreshed = await inspection().buildAvailabilityForLead(setup.location, { ...setup.range, config: setup.config, duration: setup.catalog.durationMinutes, customer: setup.customer });
     } catch (err) {
       logger.warn(`[estimate-assessment] refresh availability failed: ${err.code || err.name || 'error'}`);
     }
@@ -306,7 +306,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
 
     // Anti-forgery: the slot must be in a fresh single-day build at the catalog duration.
     const day = await inspection().buildAvailabilityForLead(setup.location, {
-      rangeFrom: date, rangeTo: date, config: setup.config, duration: setup.catalog.durationMinutes,
+      rangeFrom: date, rangeTo: date, config: setup.config, duration: setup.catalog.durationMinutes, customer: setup.customer,
     });
     const slot = inspection().findSlotIn(day, date, time);
     if (!slot) return sendSlotTaken(res, setup);

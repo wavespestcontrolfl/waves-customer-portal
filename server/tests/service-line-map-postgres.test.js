@@ -206,17 +206,41 @@ describeDb('service-line map shadow on PostgreSQL', () => {
       expect(await exclusionRow()).toMatchObject({ home_technician_id: hireId, gap_technician_id: ownerId });
     });
 
-    test('service_line_pick_shadow: the six sources and the two line_from values only; ids carry no foreign keys', async () => {
+    test('service_line_pick_shadow: the six sources and the three line_from values only; ids carry no foreign keys', async () => {
       for (const source of ['book', 'phone_live', 'after_call', 'estimate_accept', 'office_auto', 'night_run']) {
         await db('service_line_pick_shadow').insert({ source, run_id: run });
       }
       await expect(db('service_line_pick_shadow').insert({ source: 'elsewhere', run_id: run })).rejects.toThrow(/service_line_pick_shadow_source_check/);
-      await expect(db('service_line_pick_shadow').insert({ source: 'book', line_from: 'guess', run_id: run })).rejects.toThrow(/service_line_pick_shadow_line_from_check/);
+      await expect(db('service_line_pick_shadow').insert({ source: 'book', line_from: 'elsewhere', run_id: run })).rejects.toThrow(/service_line_pick_shadow_line_from_check/);
       await db('service_line_pick_shadow').insert({
         source: 'book', run_id: run, line_from: 'catalog', scheduled_service_id: randomUUID(), customer_id: randomUUID(),
         actual_technician_id: randomUUID(), would_technician_id: randomUUID(), home_technician_id: randomUUID(),
       });
-      expect(await shadowRows()).toHaveLength(7);
+      // A Waves Assessment resolves by its lead (owner 2026-11-21): line_from 'lead'.
+      await db('service_line_pick_shadow').insert({ source: 'book', run_id: run, line_from: 'lead', service_line: 'lawn' });
+      expect(await shadowRows()).toHaveLength(8);
+    });
+
+    // Migration 20261121232000: line_from gains 'lead'. One rolled-back transaction, as the exclusion case above.
+    test('the line_from migration: a second up changes nothing, and its down sets lead rows to NULL before restoring the two values', async () => {
+      const migration = require('../models/migrations/20261121232000_line_pick_shadow_line_from_lead');
+      const ROLLBACK = new Error('rollback');
+      // A failed statement aborts a PostgreSQL transaction, so each refused insert rides a savepoint.
+      const refused = (trx, line_from) => expect(trx.transaction((sp) => sp('service_line_pick_shadow').insert({ source: 'book', run_id: run, line_from })))
+        .rejects.toThrow(/service_line_pick_shadow_line_from_check/);
+      await db.transaction(async (trx) => {
+        await migration.up(trx);
+        await migration.up(trx);
+        await trx('service_line_pick_shadow').insert({ source: 'book', run_id: run, line_from: 'lead' });
+        await refused(trx, 'elsewhere');
+        await migration.down(trx);
+        expect(await trx('service_line_pick_shadow').where({ run_id: run }).first()).toMatchObject({ line_from: null });
+        await refused(trx, 'lead');
+        await trx('service_line_pick_shadow').insert({ source: 'book', run_id: run, line_from: 'name' });
+        await migration.up(trx);
+        await trx('service_line_pick_shadow').insert({ source: 'book', run_id: run, line_from: 'lead' });
+        throw ROLLBACK;
+      }).catch((err) => { if (err !== ROLLBACK) throw err; });
     });
   });
 
@@ -233,6 +257,23 @@ describeDb('service-line map shadow on PostgreSQL', () => {
       await db('technician_absences').insert({ technician_id: hireId, absence_date: MONDAY, reason: 'sick' });
       expect(await lineTech.resolveLineTechnician(db, { ...pest, date: MONDAY })).toMatchObject({ technicianId: ownerId, reason: 'gap_absent' });
       await db('technician_absences').where({ technician_id: hireId }).del();
+    });
+
+    // The lead read of a Waves Assessment (owner 2026-11-21): the raw blank-interest filter and the newest-first order on real rows.
+    test('a Waves Assessment reads the newest lead with a service interest; a customer with no lead reads lawn', async () => {
+      const customerId = randomUUID();
+      const ROLLBACK = new Error('rollback');
+      await db.transaction(async (trx) => {
+        await trx('leads').insert([
+          { customer_id: customerId, service_interest: 'Lawn Care Service', created_at: '2026-10-01T12:00:00Z' },
+          { customer_id: customerId, service_interest: 'Pest Control Service', created_at: '2026-11-01T12:00:00Z' },
+          { customer_id: customerId, service_interest: '  ', created_at: '2026-11-10T12:00:00Z' },
+          { customer_id: customerId, service_interest: null, created_at: '2026-11-15T12:00:00Z' },
+        ]);
+        expect(await lineTech.assessmentLineFor(trx, { customerId })).toEqual({ line: 'general', lineFrom: 'lead' });
+        expect(await lineTech.assessmentLineFor(trx, { customerId: randomUUID() })).toEqual({ line: 'lawn', lineFrom: 'lead' });
+        throw ROLLBACK;
+      }).catch((err) => { if (err !== ROLLBACK) throw err; });
     });
 
     test('a prospective home tech is not assignable; capability Off reads gap_capability_off; an empty map reads no_map', async () => {
