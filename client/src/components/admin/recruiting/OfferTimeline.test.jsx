@@ -247,25 +247,20 @@ describe("OfferTimeline", () => {
       expect(screen.queryByRole("button", { name: /^(Mark done|Undo):/ })).toBeNull();
     });
 
-    // The Waves Google login is not marked by hand: the server says when it is done and what to do next.
-    it("shows the login item with its next step and no button, then that the login is on", () => {
+    it("shows an open item's note (what to do), and not once the item is done", () => {
       const login = (over) => ({
-        key: "google_login", label: "Waves Google login", due: "Due before the first day, Mon, Jan 4, 2027", doneAt: null, doneByName: null,
-        auto: true, done: false, note: "Link the Waves Google address on the Team tab, then press Hired.", ...over,
+        key: "google_login", label: "Waves Google login", note: "On the Team tab, link the Waves Google address, then press Hired.",
+        due: "Due before the first day, Mon, Jan 4, 2027", doneAt: null, doneByName: null, ...over,
       });
       const { rerender } = render(card({ offer: signed(), firstDays: firstDays({ items: [login(), ...firstDays().items] }) }));
       const row = () => within(rowOf("Waves Google login"));
       expect(row().getByText("Due before the first day, Mon, Jan 4, 2027")).toBeInTheDocument();
-      expect(row().getByText("Link the Waves Google address on the Team tab, then press Hired.")).toBeInTheDocument();
-      expect(row().queryByRole("button")).toBeNull();
-      // The other items keep their buttons.
-      expect(screen.getByRole("button", { name: "Mark done: Form I-9" })).toBeInTheDocument();
+      expect(row().getByText("On the Team tab, link the Waves Google address, then press Hired.")).toBeInTheDocument();
+      expect(row().getByRole("button", { name: "Mark done: Waves Google login" })).toBeInTheDocument();
 
-      const on = login({ done: true, note: "The login is on: the hire signs in with Google." });
-      rerender(card({ offer: signed(), firstDays: firstDays({ items: [on, ...firstDays().items] }) }));
-      expect(row().getByText("The login is on: the hire signs in with Google.")).toBeInTheDocument();
-      expect(row().queryByText(/Due before/)).toBeNull();
-      expect(row().queryByRole("button")).toBeNull();
+      rerender(card({ offer: signed(), firstDays: firstDays({ items: [login({ doneAt: "2026-12-20T15:00:00Z", doneByName: "Sam Carter" }), ...firstDays().items] }) }));
+      expect(row().getByText(/^Done .*Dec 20.* by Sam Carter$/)).toBeInTheDocument();
+      expect(row().queryByText(/On the Team tab/)).toBeNull();
     });
 
     it("shows no checklist when the read has none", () => {

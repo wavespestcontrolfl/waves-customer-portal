@@ -3,19 +3,12 @@
  * marks done after the offer is signed. The server sends each item's label and
  * due line (job-offers.js firstDaysOf). Only the owner account gets the
  * buttons; another admin reads the list.
- *
- * An `auto` item (the Waves Google login) has no button: the server says when
- * it is `done` and sends its `note`, what to do next or that the login is on.
  */
 import React from "react";
 import { Button } from "../../ui";
 import { formatTimelineTime } from "./offerLogic";
 
 const doneLine = (item) => `Done ${formatTimelineTime(item.doneAt)}${item.doneByName ? ` by ${item.doneByName}` : ""}`;
-const statusLine = (item) => {
-  if (item.auto) return item.done ? item.note : item.due;
-  return item.doneAt ? doneLine(item) : item.due;
-};
 
 export default function OfferFirstDays({ firstDays, busy, canAct, onSet }) {
   if (!firstDays?.items?.length) return null;
@@ -27,10 +20,11 @@ export default function OfferFirstDays({ firstDays, busy, canAct, onSet }) {
           <li key={item.key} className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
             <div className="min-w-0">
               <div className="text-14 text-zinc-800 break-words">{item.label}</div>
-              <div className="text-14 text-zinc-500">{statusLine(item)}</div>
-              {item.auto && !item.done && <div className="text-14 text-zinc-500">{item.note}</div>}
+              <div className="text-14 text-zinc-500">{item.doneAt ? doneLine(item) : item.due}</div>
+              {/* What to do, for an item that needs a step elsewhere (the Waves Google login). */}
+              {!item.doneAt && item.note && <div className="text-14 text-zinc-500">{item.note}</div>}
             </div>
-            {canAct && !item.auto && (
+            {canAct && (
               <Button
                 size="sm"
                 variant={item.doneAt ? "ghost" : "secondary"}
