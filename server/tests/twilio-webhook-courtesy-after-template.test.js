@@ -1,10 +1,9 @@
 /**
- * GATE_SMS_COURTESY_AFTER_TEMPLATE (owner 2026-10-14).
+ * Courtesy replies after an automated visit text (owner 2026-10-14).
  *
  * A bare courtesy reply ("Ok", "Thanks", a thumbs-up) to an AUTOMATED visit text
  * (confirmation, reminder, en route, arrival, completion) must not ring the admin
- * bell. Gate off: a template with a "reply"/"confirm" line still counts as a
- * question, as before. A person's text ('manual') keeps counting as a question.
+ * bell, even when the template carries a "reply"/"confirm" line. A person's text ('manual') keeps counting as a question.
  * The webhook computes courtesyOnly as
  *   isCourtesyOnly(Body, { awaitingAnswer: await lastOutboundAskedQuestion(From, To) })
  * so these tests run that exact composition against a mocked sms_log read.
@@ -37,7 +36,6 @@ const path = require('path');
 const { lastOutboundAskedQuestion, isAffirmativeReactionToAutomatedText, AUTOMATED_VISIT_TEXT_TYPES } = require('../routes/twilio-webhook')._internals;
 const { isCourtesyOnly, isQuietSmsReaction } = require('../services/sms-intent');
 
-const GATE = 'GATE_SMS_COURTESY_AFTER_TEMPLATE';
 const CUSTOMER = '+19415550100';
 const WAVES = '+19415550199';
 
@@ -51,42 +49,18 @@ async function wouldBeCourtesy(body) {
   return isCourtesyOnly(body, { awaitingAnswer: await lastOutboundAskedQuestion(CUSTOMER, WAVES) });
 }
 
-let savedGate;
 beforeEach(() => {
   jest.clearAllMocks();
-  savedGate = process.env[GATE];
-  delete process.env[GATE];
   mockState.last = null;
   mockState.throwOnRead = false;
   mockState.wheres = [];
 });
-afterEach(() => {
-  if (savedGate === undefined) delete process.env[GATE]; else process.env[GATE] = savedGate;
-});
 
-describe('gate off: today\'s behavior exactly', () => {
-  test('"Ok" after a confirmation template is NOT courtesy (the template asks to confirm)', async () => {
-    mockState.last = { status: 'delivered', message_type: 'confirmation', message_body: CONFIRMATION };
-    expect(await wouldBeCourtesy('Ok')).toBe(false);
-    expect(await lastOutboundAskedQuestion(CUSTOMER, WAVES)).toBe(true);
-  });
-
-  test('a gate value other than exactly "true" stays off', async () => {
-    mockState.last = { status: 'delivered', message_type: 'confirmation', message_body: CONFIRMATION };
-    for (const v of ['1', 'on', 'TRUE', 'false', '']) {
-      process.env[GATE] = v;
-      expect([v, await wouldBeCourtesy('Ok')]).toEqual([v, false]);
-    }
-  });
-
-  test('a statement-only template stays quiet, as before', async () => {
+describe('courtesy replies after an automated visit text', () => {
+  test('a statement-only template stays quiet', async () => {
     mockState.last = { status: 'delivered', message_type: 'tech_en_route', message_body: 'Sam is on the way and will arrive soon.' };
     expect(await wouldBeCourtesy('Thanks!')).toBe(true);
   });
-});
-
-describe('gate on', () => {
-  beforeEach(() => { process.env[GATE] = 'true'; });
 
   test('"Ok" and friends after an automated visit text are courtesy', async () => {
     for (const type of ['confirmation', 'appointment_confirmation', 'appointment_reminder', 'appointment_reminder_72h', 'reminder_72h', 'reminder_24h', 'tech_en_route', 'tech_arrived', 'service_complete']) {
@@ -157,21 +131,13 @@ describe('tapbacks on an automated visit text', () => {
   // What the webhook does for a reaction.
   const quiet = async (body) => isQuietSmsReaction(body) || isAffirmativeReactionToAutomatedText(body, CUSTOMER, WAVES);
 
-  test('the confirmation template asks for a reply, so a plain tapback on it rings today', async () => {
+  test('the confirmation template asks for a reply, so a plain tapback on it rings', async () => {
     mockState.last = { status: 'delivered', message_type: 'confirmation', message_body: CONFIRMATION };
     expect(isQuietSmsReaction(android('👍', CONFIRMATION))).toBe(false);
-    process.env[GATE] = 'true';
     expect(isQuietSmsReaction(android('👍', CONFIRMATION))).toBe(false); // the recognizer itself is unchanged
   });
 
-  test('gate off: unchanged (loud)', async () => {
-    mockState.last = { status: 'delivered', message_type: 'confirmation', message_body: CONFIRMATION };
-    expect(await quiet(android('👍', CONFIRMATION))).toBe(false);
-    expect(mockState.wheres).toEqual([]); // no thread read at all
-  });
-
-  test('gate on: an affirmative tapback is quiet when the last Waves text was automated', async () => {
-    process.env[GATE] = 'true';
+  test('an affirmative tapback is quiet when the last Waves text was automated', async () => {
     mockState.last = { status: 'delivered', message_type: 'confirmation', message_body: CONFIRMATION };
     expect(await quiet(android('👍', CONFIRMATION))).toBe(true);
     mockState.last = { status: 'delivered', message_type: 'appointment_reminder', message_body: REMINDER };
@@ -179,15 +145,13 @@ describe('tapbacks on an automated visit text', () => {
     expect(await quiet(`Reacted ❤️ to "${REMINDER}"`)).toBe(true);
   });
 
-  test('gate on: a tapback on an EARLIER staff question stays loud when a reminder went out after it', async () => {
-    process.env[GATE] = 'true';
+  test('a tapback on an EARLIER staff question stays loud when a reminder went out after it', async () => {
     mockState.last = { status: 'delivered', message_type: 'appointment_reminder', message_body: REMINDER };
     expect(await quiet(android('👍', PERSON_ASK))).toBe(false);
     expect(await quiet(android('👍', 'Can you do Thursday morning instead? Reply with a time.'))).toBe(false);
   });
 
-  test('gate on: a staff clause that also sits mid-text in the newest reminder stays loud (codex #6331 r3)', async () => {
-    process.env[GATE] = 'true';
+  test('a staff clause that also sits mid-text in the newest reminder stays loud (codex #6331 r3)', async () => {
     mockState.last = { status: 'delivered', message_type: 'appointment_reminder', message_body: REMINDER }; // contains "Reply C to confirm"
     expect(REMINDER).toContain('Reply C to confirm');
     expect(await quiet(android('👍', 'Reply C to confirm'))).toBe(false);
@@ -195,16 +159,14 @@ describe('tapbacks on an automated visit text', () => {
     expect(await quiet('Reacted 👍 to "Reply C to confirm"')).toBe(false);
   });
 
-  test('gate on: an earlier staff text that is itself a prefix of the newest reminder stays loud (codex #6331 r4)', async () => {
-    process.env[GATE] = 'true';
+  test('an earlier staff text that is itself a prefix of the newest reminder stays loud (codex #6331 r4)', async () => {
     const staff = 'Reply C to confirm your Thursday visit between 8 and 10 AM';
     mockState.last = { status: 'delivered', message_type: 'appointment_reminder', message_body: `${staff}, or reschedule: https://wav.es/ab12c` };
     expect(staff.length).toBeGreaterThan(20);
     expect(await quiet(android('👍', staff))).toBe(false);
   });
 
-  test('gate on: only the whole text counts; a truncated quote rings, whitespace and case differences do not matter', async () => {
-    process.env[GATE] = 'true';
+  test('only the whole text counts; a truncated quote rings, whitespace and case differences do not matter', async () => {
     const body = 'Reply C to confirm your Thursday visit between 8 and 10 AM, or reschedule: https://wav.es/ab12c';
     mockState.last = { status: 'delivered', message_type: 'appointment_reminder', message_body: body };
     expect(isQuietSmsReaction(android('👍', body))).toBe(false); // asks for a reply, so the recognizer alone rings
@@ -215,16 +177,14 @@ describe('tapbacks on an automated visit text', () => {
     expect(await quiet(android('👍', `${body} extra`))).toBe(false);
   });
 
-  test('gate on: ❓ / 👎 / disliked stay loud even after an automated text', async () => {
-    process.env[GATE] = 'true';
+  test('❓ / 👎 / disliked stay loud even after an automated text', async () => {
     mockState.last = { status: 'delivered', message_type: 'confirmation', message_body: CONFIRMATION };
     for (const body of [android('❓', CONFIRMATION), android('👎', CONFIRMATION), android('🚨', CONFIRMATION), `Disliked \u201c${REMINDER}\u201d`, `Questioned \u201c${REMINDER}\u201d`]) {
       expect([body, await quiet(body)]).toEqual([body, false]);
     }
   });
 
-  test('gate on: after a person\'s text, or with no row or a failed read, a tapback on a reply-asking text rings', async () => {
-    process.env[GATE] = 'true';
+  test('after a person\'s text, or with no row or a failed read, a tapback on a reply-asking text rings', async () => {
     mockState.last = { status: 'delivered', message_type: 'manual', message_body: PERSON_ASK };
     expect(await quiet(android('👍', 'Reply YES to confirm Thursday'))).toBe(false);
     mockState.last = null;
@@ -257,8 +217,7 @@ describe('automated type list matches what the code persists', () => {
     }
   });
 
-  test('a completion text with an invoice or receipt is courtesy-eligible after the gate', async () => {
-    process.env[GATE] = 'true';
+  test('a completion text with an invoice or receipt is courtesy-eligible ', async () => {
     for (const type of ['service_complete_with_invoice', 'service_complete_paid_receipt', 'service_complete_prepaid', 'service_complete_annual_prepay', 'service_complete_annual_prepay_after_first_visit', 'service_report_v1', 'service_report_v1_with_invoice']) {
       mockState.last = { status: 'delivered', message_type: type, message_body: 'Your report is ready. Pay here: https://wav.es/ab12c' };
       expect([type, await wouldBeCourtesy('Thanks')]).toEqual([type, true]);

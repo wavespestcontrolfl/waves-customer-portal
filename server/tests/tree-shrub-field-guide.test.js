@@ -2,11 +2,8 @@ const { treeShrubFieldGuide } = require('../services/tree-shrub-field-guide');
 const { treeShrubDueReason } = require('../services/tree-shrub-completion-defaults');
 const { tree_shrub: program } = require('../config/protocols.json');
 const visit = month => program.visits.find(row => row.month === month);
-afterEach(() => { delete process.env.GATE_TREE_SHRUB_FIELD_GUIDE; });
-
-test('dark guide stays off; scheduled month projects only its own product details and equipment', () => {
-  expect(treeShrubFieldGuide(visit('Jan'))).toBeNull();
-  process.env.GATE_TREE_SHRUB_FIELD_GUIDE = 'true';
+test('scheduled month projects only its own product details and equipment', () => {
+  expect(treeShrubFieldGuide({ month: 'Jan' })).toBeNull();
   const january = treeShrubFieldGuide(visit('Jan'));
   expect(january.products.snapshot.equipment).toEqual(['hand', 'push']);
   expect(january.products.merit.equipment).toEqual(['soil']);
@@ -471,7 +468,6 @@ describe('palm-type table (owner 2026-10-23; every fact from UF/IFAS)', () => {
   });
 
   test('the visit payload carries the table only where it carries the palm chart', () => {
-    process.env.GATE_TREE_SHRUB_FIELD_GUIDE = 'true';
     let withPalm = 0;
     for (const row of program.visits) {
       const guide = treeShrubFieldGuide(row);
