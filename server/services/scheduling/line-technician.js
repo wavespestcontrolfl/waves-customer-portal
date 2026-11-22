@@ -58,7 +58,7 @@ const { isAssignable, isOffDay, absentTechDays } = require('../technician-eligib
 const { stateOf } = require('../technician-capabilities');
 const { dateOnlyString } = require('../../utils/datetime-et');
 const { commitPromiseOf } = require('../../utils/trx-commit-promise');
-const { familiesIn } = require('../../utils/lead-service-interest');
+const { requestedFamiliesIn } = require('../../utils/lead-service-interest');
 const territory = require('../territory');
 
 const SOURCES = Object.freeze(['book', 'phone_live', 'after_call', 'estimate_accept', 'office_auto', 'night_run']);
@@ -155,24 +155,28 @@ const ASSESSMENT_TECH_LINES = Object.freeze({
   pest: 'general', flea: 'general', stinging: 'general', bed_bug: 'general', termite: 'termite', wdo: 'termite', mosquito: 'mosquito',
 });
 
-/** The line a lead's service-interest text sends a Waves Assessment to; no service family recognized reads lawn (the owner). */
+/**
+ * The line a lead's service-interest text sends a Waves Assessment to; no service family recognized reads lawn (the
+ * owner). The text is free text too (web forms, call notes), so it is read as a REQUEST (requestedFamiliesIn): "ants
+ * in the lawn" names pest, "pest control, no lawn care" names pest, "pest control and lawn care" names both.
+ */
 function assessmentLineForInterest(text) {
-  const keys = familiesIn(text).map((fam) => fam.key);
+  const keys = requestedFamiliesIn(text).map((fam) => fam.key);
   const owner = keys.find((key) => ASSESSMENT_OWNER_LINES[key]);
   if (owner) return ASSESSMENT_OWNER_LINES[owner];
   const tech = keys.find((key) => ASSESSMENT_TECH_LINES[key]);
   return tech ? ASSESSMENT_TECH_LINES[tech] : 'lawn';
 }
 
-/** The service-interest text of a Waves Assessment's lead, or null: see assessmentLineFor for the order. */
+/** The service-interest text of a Waves Assessment's lead, or null: see assessmentLineFor for the order. Deleted leads are not read. */
 async function assessmentInterestText(db, { leadId, customerId }) {
   const filled = (text) => (String(text || '').trim() ? text : null);
   if (leadId) {
-    const own = filled(((await db('leads').where({ id: leadId }).first('service_interest')) || {}).service_interest);
-    if (own) return own;
+    const own = await db('leads').where({ id: leadId }).whereNull('deleted_at').first('service_interest');
+    if (own) return filled(own.service_interest);
   }
   if (!customerId) return null;
-  const lead = await db('leads').where({ customer_id: customerId })
+  const lead = await db('leads').where({ customer_id: customerId }).whereNull('deleted_at')
     .whereRaw("btrim(coalesce(service_interest, '')) <> ''")
     .orderBy('created_at', 'desc').first('service_interest');
   if (lead) return lead.service_interest;
@@ -180,11 +184,13 @@ async function assessmentInterestText(db, { leadId, customerId }) {
 }
 
 /**
- * The line a Waves Assessment goes to: { line, lineFrom: 'lead' }. The text read, first one with a
- * service interest: the lead itself (`leadId`: the booking page's own lead, which may have no
- * customer yet), the customer's newest lead (leads.service_interest by `customerId`), the customer
- * row's lead_service_interest. No lead and no customer, nothing recorded or an unreadable read
- * gives lawn (the read failure is logged).
+ * The line a Waves Assessment goes to: { line, lineFrom: 'lead' }.
+ *   With `leadId` (the booking page's own lead, an estimate's linked lead): that lead decides ALONE. Its blank
+ *   interest is "no service recorded" = lawn (the owner), whatever the customer's other leads say. So an offer and
+ *   its commit read one row and agree, also when the commit links or creates the customer in between.
+ *   Without it, or when that lead is gone: the customer's newest lead with an interest (leads.service_interest by
+ *   `customerId`), else the customer row's lead_service_interest.
+ * No lead and no customer, nothing recorded or an unreadable read gives lawn (the read failure is logged).
  */
 async function assessmentLineFor(conn, { customerId = null, leadId = null } = {}) {
   const db = conn || defaultDb;
@@ -449,9 +455,13 @@ async function visitLineFor(db, identity) {
 /**
  * LIVE: the line a booked service routes by, or null (no line): visitLineFor.
  * `identity` is { serviceId, serviceKey, serviceType, customerId }.
+ * A Waves Assessment has a line only while the map is live. Until then it has none, as before 2026-11-21: the one
+ * reader that is not behind the map's gate, the territory night run (GATE_TERRITORY_NIGHT_RUN), keeps it exempt.
  */
 async function liveServiceLine(conn, identity = {}) {
-  return (await visitLineFor(conn || defaultDb, identity)).line;
+  const db = conn || defaultDb;
+  if (await isAssessmentIdentity(db, identity)) return lineMapLive() ? (await assessmentLineFor(db, identity)).line : null;
+  return (await serviceLineFor(db, identity)).line;
 }
 
 /** The save-probe arguments for a visit with a day and a start, or null (no probe). */

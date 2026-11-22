@@ -140,9 +140,17 @@ async function bookingLocationFor(customer) {
   return require('./booking')._internals.customerBookingLocation(customer);
 }
 
+// The estimate's OWN lead, for the assessment's service line (owner 2026-11-21, line-technician assessmentLineFor):
+// the one unambiguous lead linked to it (linkedLeadIdFor), else null and the customer's newest lead is read. A
+// customer with a newer inquiry for another service keeps this estimate's line. Read only while the line map is live.
+async function lineLeadIdFor(estimate, data) {
+  if (!require('../services/scheduling/line-technician').lineMapLive()) return null;
+  return require('../services/estimate-consultation-offer').linkedLeadIdFor(estimate.id, data);
+}
+
 // Everything a request needs once the estimate and customer are eligible: the location, the config, the window and
-// the catalog. `blocked` is the GET-shaped answer when times cannot be offered.
-async function bookingSetup(customer, lead) {
+// the catalog. `blocked` is the GET-shaped answer when times cannot be offered. `leadId` rides along for the line.
+async function bookingSetup(customer, lead, leadId = null) {
   const location = await bookingLocationFor(customer);
   const areaHold = { blocked: { state: 'ok', lead, availability: null, needs_address: false, selfServeNotice: true, service_area_unavailable: true } };
   if (!location) return areaHold;
@@ -159,7 +167,7 @@ async function bookingSetup(customer, lead) {
   if (!catalog.serviceId) {
     return { blocked: { state: 'ok', lead, availability: null, needs_address: false, selfServeNotice: true, booking_unavailable: true } };
   }
-  return { booking, location, config, range, catalog, customer };
+  return { booking, location, config, range, catalog, customer, leadId };
 }
 
 // One request's resolution: the generic 404, a terminal page state, or the eligible estimate, customer and lead.
@@ -171,7 +179,7 @@ async function resolveRequest(token) {
   if (eligibility.state === 'gone') return { body: { state: 'gone' } };
   const lead = customerPayload(eligibility.customer);
   if (eligibility.state === 'already_booked') return { body: await alreadyBookedBody(eligibility.visit, lead) };
-  return { estimate: found.estimate, customer: eligibility.customer, lead };
+  return { estimate: found.estimate, customer: eligibility.customer, lead, leadId: await lineLeadIdFor(found.estimate, found.data) };
 }
 
 // A POST that cannot reach times: the page's terminal state for an estimate that cannot book (gone), else the
@@ -189,11 +197,11 @@ router.get('/:token', readLimiter, async (req, res, next) => {
   try {
     const resolved = await resolveRequest(req.params.token);
     if (resolved.body) return send(res, resolved);
-    const setup = await bookingSetup(resolved.customer, resolved.lead);
+    const setup = await bookingSetup(resolved.customer, resolved.lead, resolved.leadId);
     if (setup.blocked) return res.json(setup.blocked);
     let availability = null;
     try {
-      const built = await inspection().buildAvailabilityForLead(setup.location, { ...setup.range, config: setup.config, duration: setup.catalog.durationMinutes, offer: true, customer: setup.customer });
+      const built = await inspection().buildAvailabilityForLead(setup.location, { ...setup.range, config: setup.config, duration: setup.catalog.durationMinutes, offer: true, customer: setup.customer, leadId: setup.leadId });
       availability = built ? inspection().shapeAvailability(built, setup.range) : null;
     } catch (err) {
       logger.error(`[estimate-assessment] availability failed for estimate ${resolved.estimate.id}: ${err.code || err.name || 'error'}`);
@@ -219,7 +227,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
   try {
     const resolved = await resolveRequest(req.params.token);
     if (resolved.body) return send(res, resolved);
-    const setup = await bookingSetup(resolved.customer, resolved.lead);
+    const setup = await bookingSetup(resolved.customer, resolved.lead, resolved.leadId);
     if (setup.blocked) return sendBlocked(res, setup.blocked);
     const { parseWhen, summarizeWindow } = require('../services/scheduling/parse-when');
     const when = await parseWhen(query, inspection().searchParseOpts(setup.config));
@@ -227,7 +235,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     try {
       availability = await inspection().buildAvailabilityForLead(setup.location, {
         rangeFrom: when.dateFrom, rangeTo: when.dateTo, config: setup.config,
-        duration: setup.catalog.durationMinutes, timeOfDay: when.timeOfDay, offer: true, customer: setup.customer,
+        duration: setup.catalog.durationMinutes, timeOfDay: when.timeOfDay, offer: true, customer: setup.customer, leadId: setup.leadId,
       });
     } catch (err) {
       logger.error(`[estimate-assessment] find-slots availability failed for estimate ${resolved.estimate.id}: ${err.code || err.name || 'error'}`);
@@ -253,7 +261,7 @@ async function sendSlotTaken(res, setup, error) {
   let refreshed = null;
   if (!setup.blocked) {
     try {
-      refreshed = await inspection().buildAvailabilityForLead(setup.location, { ...setup.range, config: setup.config, duration: setup.catalog.durationMinutes, customer: setup.customer });
+      refreshed = await inspection().buildAvailabilityForLead(setup.location, { ...setup.range, config: setup.config, duration: setup.catalog.durationMinutes, customer: setup.customer, leadId: setup.leadId });
     } catch (err) {
       logger.warn(`[estimate-assessment] refresh availability failed: ${err.code || err.name || 'error'}`);
     }
@@ -299,14 +307,14 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
   try {
     const resolved = await resolveRequest(req.params.token);
     if (resolved.body) return send(res, resolved);
-    const setup = await bookingSetup(resolved.customer, resolved.lead);
+    const setup = await bookingSetup(resolved.customer, resolved.lead, resolved.leadId);
     if (setup.blocked) return sendBlocked(res, setup.blocked);
     const windowFailure = inspection().commitWindowFailure(date, setup.range, setup.catalog);
     if (windowFailure) return res.status(windowFailure.status).json({ error: windowFailure.error });
 
     // Anti-forgery: the slot must be in a fresh single-day build at the catalog duration.
     const day = await inspection().buildAvailabilityForLead(setup.location, {
-      rangeFrom: date, rangeTo: date, config: setup.config, duration: setup.catalog.durationMinutes, customer: setup.customer,
+      rangeFrom: date, rangeTo: date, config: setup.config, duration: setup.catalog.durationMinutes, customer: setup.customer, leadId: setup.leadId,
     });
     const slot = inspection().findSlotIn(day, date, time);
     if (!slot) return sendSlotTaken(res, setup);
@@ -335,7 +343,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         if (visit) return res.json(await alreadyBookedBody(visit, resolved.lead));
       }
       // A slot race, or the customer's pin moved under the booking fence: fresh times at the current pin.
-      if (result.status === 409) return sendSlotTaken(res, await bookingSetup(resolved.customer, resolved.lead), result.error);
+      if (result.status === 409) return sendSlotTaken(res, await bookingSetup(resolved.customer, resolved.lead, resolved.leadId), result.error);
       return res.status(result.status || 500).json({ error: result.error || 'Booking is temporarily unavailable — please text or call us.' });
     }
     return res.json(await inspection().finishCommittedBooking({

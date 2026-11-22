@@ -260,18 +260,26 @@ describeDb('service-line map shadow on PostgreSQL', () => {
     });
 
     // The lead read of a Waves Assessment (owner 2026-11-21): the raw blank-interest filter and the newest-first order on real rows.
-    test('a Waves Assessment reads the newest lead with a service interest; a customer with no lead reads lawn', async () => {
+    test('a Waves Assessment reads the newest lead with a service interest, never a deleted one; the lead in hand decides alone; a customer with no lead reads lawn', async () => {
       const customerId = randomUUID();
+      const blankLeadId = randomUUID();
+      const deletedLeadId = randomUUID();
       const ROLLBACK = new Error('rollback');
       await db.transaction(async (trx) => {
         await trx('leads').insert([
           { customer_id: customerId, service_interest: 'Lawn Care Service', created_at: '2026-10-01T12:00:00Z' },
           { customer_id: customerId, service_interest: 'Pest Control Service', created_at: '2026-11-01T12:00:00Z' },
-          { customer_id: customerId, service_interest: '  ', created_at: '2026-11-10T12:00:00Z' },
+          { id: blankLeadId, customer_id: customerId, service_interest: '  ', created_at: '2026-11-10T12:00:00Z' },
           { customer_id: customerId, service_interest: null, created_at: '2026-11-15T12:00:00Z' },
+          // Entered by mistake and deleted: it is the newest, and it must not decide.
+          { id: deletedLeadId, customer_id: customerId, service_interest: 'Lawn Care Service', created_at: '2026-11-20T12:00:00Z', deleted_at: '2026-11-21T12:00:00Z' },
         ]);
         expect(await lineTech.assessmentLineFor(trx, { customerId })).toEqual({ line: 'general', lineFrom: 'lead' });
         expect(await lineTech.assessmentLineFor(trx, { customerId: randomUUID() })).toEqual({ line: 'lawn', lineFrom: 'lead' });
+        // The lead in hand with no service recorded is the owner's, whatever the customer's other leads say.
+        expect(await lineTech.assessmentLineFor(trx, { leadId: blankLeadId, customerId })).toEqual({ line: 'lawn', lineFrom: 'lead' });
+        // A deleted lead in hand is no lead: the customer is read.
+        expect(await lineTech.assessmentLineFor(trx, { leadId: deletedLeadId, customerId })).toEqual({ line: 'general', lineFrom: 'lead' });
         throw ROLLBACK;
       }).catch((err) => { if (err !== ROLLBACK) throw err; });
     });

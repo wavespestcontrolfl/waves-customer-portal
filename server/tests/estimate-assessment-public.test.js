@@ -346,6 +346,43 @@ describe('POST /:token (book)', () => {
 
 // Pre-push audit rule (AGENTS.md): the commit re-checks the preflight read on the locked row, inside the booking
 // transaction createSelfBooking runs the guard in.
+// Owner 2026-11-21 (assessments go by the lead's service interest): the estimate's OWN lead decides the line, so a
+// customer's newer inquiry for another service does not move this estimate's assessment to another technician.
+describe('the assessment line reads the estimate\'s own lead', () => {
+  const offer = require('../services/estimate-consultation-offer');
+  let linked;
+  beforeEach(() => { linked = jest.spyOn(offer, 'linkedLeadIdFor').mockResolvedValue('lead-9'); });
+  afterEach(() => { linked.mockRestore(); delete process.env.GATE_SERVICE_LINE_MAP; });
+
+  test.each([undefined, 'shadow'])('map %s: the lead is not read and no lead id is passed', async (mode) => {
+    if (mode) process.env.GATE_SERVICE_LINE_MAP = mode;
+    await call(TOKEN);
+    expect(linked).not.toHaveBeenCalled();
+    expect(mockInspection.buildAvailabilityForLead.mock.calls[0][1]).toMatchObject({ customer: expect.objectContaining({ id: 'cust-1' }), leadId: null });
+  });
+
+  test('map live: the offer, the search, the commit check and the 409 refresh all pass the linked lead', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'live';
+    estimateRow = estimate({ estimate_data: { lead_id: 'lead-9', lead_linkage: 'created' } });
+    await call(TOKEN);
+    await call(`${TOKEN}/find-slots`, { method: 'POST', body: { query: 'next tuesday morning' } });
+    // A time that is not in the build: the commit check, then the refresh.
+    const res = await call(TOKEN, { method: 'POST', body: { date: '2026-11-03', time: '13:00' } });
+    expect(res.status).toBe(409);
+    expect(linked).toHaveBeenCalledWith('est-1', expect.objectContaining({ lead_id: 'lead-9' }));
+    const calls = mockInspection.buildAvailabilityForLead.mock.calls;
+    expect(calls).toHaveLength(4);
+    for (const [, opts] of calls) expect(opts).toMatchObject({ customer: expect.objectContaining({ id: 'cust-1' }), leadId: 'lead-9' });
+  });
+
+  test('map live, no unambiguous lead for the estimate: no lead id, so the customer is read', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'live';
+    linked.mockResolvedValue(null);
+    await call(TOKEN);
+    expect(mockInspection.buildAvailabilityForLead.mock.calls[0][1]).toMatchObject({ customer: expect.objectContaining({ id: 'cust-1' }), leadId: null });
+  });
+});
+
 describe('the in-transaction estimate guard', () => {
   const { estimateGuardFor } = router._internals;
   // A booking transaction stub: answers like db, and records which tables it read and whether the estimate was locked.

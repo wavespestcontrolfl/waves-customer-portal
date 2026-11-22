@@ -1543,7 +1543,9 @@ Waves Assessment offer list and commit rebuild (`GET`, `/availability` and
 `/find-slots` of `/api/public/inspection/:token` and of
 `/api/public/estimate-assessment/:token`) passes one line while
 `GATE_SERVICE_LINE_MAP=live` (owner 2026-11-21: the line the page's own lead
-asked for, else the customer's newest lead with a service interest,
+asked for, where the estimate page's own lead is the one lead linked to the
+estimate; that lead decides alone, and its blank interest is the owner's line.
+With no such lead, the customer's newest lead with a service interest is read,
 `line-technician assessmentLineFor`;
 lawn, tree & shrub, rodent and wildlife go to the owner's line, pest-only,
 termite and mosquito to that line, no lead to the owner), so offers come from

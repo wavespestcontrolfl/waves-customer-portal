@@ -15,6 +15,7 @@ const {
   hasTermiteWorkCue,
   primaryServiceInterest,
   v2InexpressibleFamilyWords,
+  requestedFamiliesIn,
 } = require('../utils/lead-service-interest');
 
 describe('composeServiceInterest', () => {
@@ -693,6 +694,21 @@ describe('composeServiceInterest', () => {
       matched_service: 'Quarterly Pest Control Service',
       requested_service: 'rodent trapping and exclusion',
     })).toBe('Quarterly Pest Control Service + Rodent Control Service + Rodent Exclusion');
+  });
+
+  // The one request clean-up the composer uses, exported for readers of a stored service interest (the Waves
+  // Assessment line, line-technician.js): a pest's location and a declined or compared-away service are not requests.
+  test('requestedFamiliesIn: the families a request asks for, in the order said', () => {
+    const keys = (text) => requestedFamiliesIn(text).map((fam) => fam.key);
+    expect(keys('ants in the lawn')).toEqual(['pest']);
+    expect(keys('pest control, no lawn care')).toEqual(['pest']);
+    expect(keys('pest control and lawn care')).toEqual(['pest', 'lawn']);
+    expect(keys('Lawn Care Service + Pest Control Service')).toEqual(['lawn', 'pest']);
+    expect(keys('chinch bugs')).toEqual(['lawn']);
+    expect(keys('need an exterminator')).toEqual(['pest']);
+    expect(keys('Mosquito / No-See-Um Control')).toEqual(['mosquito']);
+    expect(keys('')).toEqual([]);
+    expect(keys(null)).toEqual([]);
   });
 
   test('V2-inexpressible families come from caller text only (codex r14)', () => {

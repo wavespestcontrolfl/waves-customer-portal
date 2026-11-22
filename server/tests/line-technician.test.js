@@ -457,11 +457,27 @@ describe('live mode (GATE_SERVICE_LINE_MAP=live, build 4)', () => {
   });
 
   describe('liveServiceLine', () => {
-    test('a Waves Assessment reads the line its lead asked for (lawn without one); anything else reads serviceLineFor', async () => {
-      const db = fakeDb({
-        services: [{ id: 'svc-lawn', service_key: 'lawn_x', name: 'Lawn Care', category: 'lawn_care' }],
-        leads: [{ customer_id: 'cust-1', service_interest: 'Mosquito Control Service', created_at: '2026-11-01' }],
-      });
+    const assessDb = () => fakeDb({
+      services: [{ id: 'svc-lawn', service_key: 'lawn_x', name: 'Lawn Care', category: 'lawn_care' }, { id: 'svc-assess', service_key: 'lawn_inspection', name: 'Waves Assessment', category: 'inspection' }],
+      leads: [{ customer_id: 'cust-1', service_interest: 'Mosquito Control Service', created_at: '2026-11-01' }],
+    });
+
+    test.each([undefined, 'off', 'shadow'])('map %s: a Waves Assessment has no line (as before the lead rule) and its lead is not read; other visits keep theirs', async (mode) => {
+      // The territory night run reads liveServiceLine behind its own gate only: until the map is live an assessment stays
+      // exempt from the territory rule there.
+      if (mode) process.env.GATE_SERVICE_LINE_MAP = mode;
+      const db = assessDb();
+      expect(await liveServiceLine(db, { serviceType: 'Waves Assessment', customerId: 'cust-1' })).toBeNull();
+      expect(await liveServiceLine(db, { serviceKey: 'lawn_inspection', customerId: 'cust-1' })).toBeNull();
+      expect(await liveServiceLine(db, { serviceId: 'svc-assess', customerId: 'cust-1' })).toBeNull();
+      expect(db.queries).not.toContain('leads');
+      expect(await liveServiceLine(db, { serviceId: 'svc-lawn', serviceType: 'Anything', customerId: 'cust-1' })).toBe('lawn');
+      expect(await liveServiceLine(db, { serviceType: 'General Pest Control', customerId: 'cust-1' })).toBe('general');
+    });
+
+    test('map live: a Waves Assessment reads the line its lead asked for (lawn without one); anything else reads serviceLineFor', async () => {
+      process.env.GATE_SERVICE_LINE_MAP = 'live';
+      const db = assessDb();
       expect(await liveServiceLine(db, { serviceType: 'Waves Assessment', customerId: 'cust-1' })).toBe('mosquito');
       expect(await liveServiceLine(db, { serviceKey: 'lawn_inspection', customerId: 'cust-1' })).toBe('mosquito');
       expect(await liveServiceLine(db, { serviceKey: 'lawn_inspection' })).toBe('lawn');
@@ -497,6 +513,14 @@ describe('assessmentLineFor (owner 2026-11-21, choice 4 = A)', () => {
     ['Bed Bug Treatment Service', 'general'],
     ['Flea Control Service + Mosquito Control Service', 'general'],
     ['asdf qwer', 'lawn'],
+    // Free text (web forms, call notes) is read as a request: a pest's location and a declined service name nothing.
+    ['ants in the lawn', 'general'],
+    ['pest control, no lawn care', 'general'],
+    ['roaches inside, not interested in lawn service', 'general'],
+    ['lawn care, not pest control', 'lawn'],
+    ['chinch bugs', 'lawn'],
+    ['need an exterminator', 'general'],
+    ['Mosquito / No-See-Um Control', 'mosquito'],
   ])('interest %j goes to the %s line', (text, line) => {
     expect(lineOf(text)).toBe(line);
   });
@@ -513,24 +537,42 @@ describe('assessmentLineFor (owner 2026-11-21, choice 4 = A)', () => {
     expect(await assessmentLineFor(db, { customerId: 'nobody' })).toEqual({ line: 'lawn', lineFrom: 'lead' });
   });
 
-  test('the lead itself is read first (a new lead has no customer yet); a blank one falls back to the customer', async () => {
+  test('the lead in hand decides alone (a new lead has no customer yet); its blank interest is "no service recorded"', async () => {
     const db = fakeDb({
       leads: [
         { id: 'l-pest', customer_id: null, service_interest: 'Pest Control Service', created_at: '2026-11-01' },
         { id: 'l-blank', customer_id: 'c1', service_interest: ' ', created_at: '2026-11-10' },
-        { id: 'l-lawn', customer_id: 'c1', service_interest: 'Lawn Care Service', created_at: '2026-10-01' },
+        { id: 'l-old-pest', customer_id: 'c1', service_interest: 'Pest Control Service', created_at: '2026-10-01' },
       ],
       customers: [{ id: 'c1', lead_service_interest: 'Mosquito Control Service' }],
     });
     // A pest-only lead with no customer goes to the technician's line, not to the no-lead default.
     expect(await assessmentLineFor(db, { leadId: 'l-pest' })).toEqual({ line: 'general', lineFrom: 'lead' });
-    // The page's own lead wins over the customer's other leads.
+    // The lead in hand wins over the customer's other leads.
     expect(await assessmentLineFor(db, { leadId: 'l-pest', customerId: 'c1' })).toEqual({ line: 'general', lineFrom: 'lead' });
-    // A blank lead: the customer's newest lead with an interest.
-    expect(await assessmentLineFor(db, { leadId: 'l-blank', customerId: 'c1' })).toEqual({ line: 'lawn', lineFrom: 'lead' });
-    // A blank or unknown lead and no customer: the default.
+    // A blank lead in hand is "no service recorded" = the owner, with or without a customer: the customer's older
+    // pest lead is not read. So a booking that links or creates the customer between the offer and the commit
+    // keeps its line.
     expect(await assessmentLineFor(db, { leadId: 'l-blank' })).toEqual({ line: 'lawn', lineFrom: 'lead' });
+    expect(await assessmentLineFor(db, { leadId: 'l-blank', customerId: 'c1' })).toEqual({ line: 'lawn', lineFrom: 'lead' });
+    // No lead in hand: the customer's newest lead with an interest.
+    expect(await assessmentLineFor(db, { customerId: 'c1' })).toEqual({ line: 'general', lineFrom: 'lead' });
+    // A lead id that names no row: the customer is read; nobody at all is the default.
+    expect(await assessmentLineFor(db, { leadId: 'nobody', customerId: 'c1' })).toEqual({ line: 'general', lineFrom: 'lead' });
     expect(await assessmentLineFor(db, { leadId: 'nobody' })).toEqual({ line: 'lawn', lineFrom: 'lead' });
+  });
+
+  test('a deleted lead is never read: not the lead in hand, not the customer\'s newest', async () => {
+    const db = fakeDb({
+      leads: [
+        { id: 'l-pest', customer_id: 'c1', service_interest: 'Pest Control Service', created_at: '2026-10-01' },
+        // An inquiry entered by mistake and deleted: it must not send a pest assessment to the lawn line.
+        { id: 'l-deleted-lawn', customer_id: 'c1', service_interest: 'Lawn Care Service', created_at: '2026-11-10', deleted_at: '2026-11-11' },
+      ],
+    });
+    expect(await assessmentLineFor(db, { customerId: 'c1' })).toEqual({ line: 'general', lineFrom: 'lead' });
+    expect(await assessmentLineFor(db, { leadId: 'l-deleted-lawn', customerId: 'c1' })).toEqual({ line: 'general', lineFrom: 'lead' });
+    expect(await assessmentLineFor(db, { leadId: 'l-deleted-lawn' })).toEqual({ line: 'lawn', lineFrom: 'lead' });
   });
 
   test('no customer id: lawn with no query; an unreadable read: lawn, logged, never thrown', async () => {

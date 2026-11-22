@@ -230,6 +230,18 @@ function familiesIn(text) {
     .map((hit) => hit.fam);
 }
 
+// A caller's request text, cleaned for the family scan: a service compared away or negated is not a request, a
+// pest's location is context ("ants in the lawn"), turf pests are lawn, an exterminator is pest control.
+const requestScanText = (requested) => normalizeExterminator(normalizePalmInjection(normalizeLawnPests(
+  stripLocationPhrases(stripNegatedClauses(stripComparedAway(requested))),
+)));
+
+// The families a free-text request ASKS for (familiesIn after requestScanText), in the order said.
+function requestedFamiliesIn(text) {
+  const requested = cleanText(text);
+  return requested ? familiesIn(requestScanText(requested)) : [];
+}
+
 // V2 service categories → words this composer can scan. Deliberately NOT
 // mapServiceCategoryToLegacy: that legacy-routing map collapses
 // palm_injection into "Tree & Shrub Care" and hard-labels termite as
@@ -310,9 +322,7 @@ function composeServiceInterest(extracted = {}, opts = {}) {
   }
 
   const requested = cleanText(extracted.requested_service);
-  const scanText = requested
-    ? normalizeExterminator(normalizePalmInjection(normalizeLawnPests(stripLocationPhrases(stripNegatedClauses(stripComparedAway(requested))))))
-    : null;
+  const scanText = requested ? requestScanText(requested) : null;
   // Order-independent wdo↔termite: whether the WDO shows up in the match OR
   // anywhere in the request, non-treatment termite wording is the same lane
   // (the lender's "termite inspection" IS the WDO) — suppress it regardless
@@ -406,10 +416,7 @@ const V2_INEXPRESSIBLE_FAMILY_KEYS = new Set(['tree_shrub', 'wildlife', 'flea'])
 function v2InexpressibleFamilyWords(callerText) {
   const requested = cleanText(callerText);
   if (!requested) return null;
-  const scan = normalizeExterminator(normalizePalmInjection(normalizeLawnPests(
-    stripLocationPhrases(stripNegatedClauses(stripComparedAway(requested))),
-  )));
-  const words = familiesIn(scan)
+  const words = familiesIn(requestScanText(requested))
     .filter((fam) => V2_INEXPRESSIBLE_FAMILY_KEYS.has(fam.key))
     .map((fam) => fam.label);
   return words.length ? words.join(' and ') : null;
@@ -417,6 +424,7 @@ function v2InexpressibleFamilyWords(callerText) {
 
 module.exports = {
   familiesIn,
+  requestedFamiliesIn,
   composeServiceInterest,
   composeWordsForV2Category,
   v2PrimaryLabelForCategory,

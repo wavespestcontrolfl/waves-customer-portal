@@ -1126,8 +1126,9 @@ function searchSummary(dateFrom, dateTo, slots, searchedDates) {
  * an UNASSIGNED pest, mosquito, rodent or termite visit's ZIP, or null: gate off, a visit
  * with a technician, a lawn visit, a Waves Assessment, a ZIP with no territory technician,
  * or an unreadable territory (logged). The line is the line map's own catalog-first read
- * (line-technician liveServiceLine: "Top Dress" is lawn by its catalog row, a Waves Assessment
- * takes the line its lead asked for), never the name-only scheduling category. The place is the visit's service
+ * (line-technician liveServiceLine: "Top Dress" is lawn by its catalog row; a Waves Assessment
+ * has no line until GATE_SERVICE_LINE_MAP is live, then the line its lead asked for), never the
+ * name-only scheduling category. The place is the visit's service
  * ZIP, else its map position, else the customer row. Gates are read off the module at call
  * time: a partial feature-gates mock reads off.
  */
