@@ -2,7 +2,8 @@
  * Owner preview of a technician's rewards scoreboard (Tech Rewards Plan D5-4). Admin only, NOT behind
  * GATE_TECH_REWARDS_SCOREBOARD: the owner checks the numbers here before he turns the technician view on.
  *
- * GET /                    { technicians: [{ id, name }] }  active technicians for the picker.
+ * GET /                    { technicians: [{ id, name }] }  for the picker: active technicians, and a former one who has a
+ *                          finalized paycheck (that one carries active: false), so their pay statement stays reachable.
  * GET /:technicianId       { scoreboard }  exactly what that technician would see (same service, same numbers).
  * GET /:technicianId/year-statement?year=YYYY  { statement }  that technician's pay statement for one calendar year
  *                          (services/tech-rewards-year-statement.js, Plan D5-6). No year = this year.

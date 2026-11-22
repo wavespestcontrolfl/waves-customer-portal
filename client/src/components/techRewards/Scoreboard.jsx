@@ -158,7 +158,8 @@ async function call(path) {
 }
 
 // Staff page, Team > Scoreboard preview (admin only, works with the gate off): the owner opens any one technician's
-// board to check the numbers before technicians see them.
+// board to check the numbers before technicians see them, and their yearly pay statement. The picker also lists a former
+// technician who has a finalized paycheck, so that statement stays reachable after they leave.
 export function ScoreboardPreview() {
   const [technicians, setTechnicians] = useState(null);
   const [technicianId, setTechnicianId] = useState('');
@@ -187,7 +188,8 @@ export function ScoreboardPreview() {
       <Field label="Technician">
         <Select value={technicianId} onChange={event => setTechnicianId(event.target.value)} disabled={!technicians}>
           <option value="">Choose a technician</option>
-          {(technicians || []).map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+          {/* a former technician is listed only when payroll holds a finalized paycheck for them (active: false) */}
+          {(technicians || []).map(t => <option key={t.id} value={t.id}>{t.active === false ? `${t.name} (no longer active)` : t.name}</option>)}
         </Select>
       </Field>
     </div>

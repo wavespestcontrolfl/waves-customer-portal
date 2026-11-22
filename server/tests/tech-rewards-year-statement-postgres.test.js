@@ -227,6 +227,20 @@ postgres('yearly pay statement', () => {
     expect(JSON.stringify(preview.body)).not.toMatch(/employer(Social|Medicare)|futa|reemployment|ssn/i);
   });
 
+  it('the office still reaches a former technician: the picker lists them once they have a finalized paycheck, and their statement opens', async () => {
+    await addCheck('2026-06-08', '2026-06-19', { regular: 100000 });
+    await addCheck('2026-06-15', '2026-06-26', { regular: 55500 }, { tech: otherTechId });
+    const neverPaid = randomUUID();
+    await trx('technicians').insert({ id: neverPaid, name: 'Sample Never Paid', employment_type: 'w2', employment_status: 'inactive', active: false, pay_rate: '25.00' });
+    await trx('technicians').where({ id: otherTechId }).update({ active: false, employment_status: 'inactive' });
+    const picker = (await api(adminUrl, { role: 'admin' })).body.technicians;
+    expect(picker.filter((t) => [techId, otherTechId, neverPaid].includes(t.id)).sort((a, b) => (a.name < b.name ? -1 : 1)))
+      .toEqual([{ id: techId, name: 'Sample Employee' }, { id: otherTechId, name: 'Sample Other', active: false }]);
+    const former = await api(`${adminUrl}/${otherTechId}/year-statement?year=2026`, { role: 'admin' });
+    expect(former.status).toBe(200);
+    expect(former.body.statement).toMatchObject({ technician: { id: otherTechId, name: 'Sample Other' }, checkCount: 1, pay: { grossCents: 55500 } });
+  });
+
   it('no year is this year; a bad year is 400 and an unknown technician 404, with no statement', async () => {
     await addCheck('2026-06-08', '2026-06-19', { regular: 100000 });
     const now = new Date('2026-07-01T16:00:00Z');

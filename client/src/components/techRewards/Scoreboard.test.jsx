@@ -192,6 +192,18 @@ describe('Admin scoreboard preview', () => {
     expect(await screen.findByTestId('year-statement')).toHaveTextContent(/^\/admin\/tech-rewards-scoreboard\/tech%202\/year-statement$/);
   });
 
+  it('lists a former technician with a finalized paycheck, marked, and opens their pay statement', async () => {
+    adminFetch.mockImplementation(path => (path === '/admin/tech-rewards-scoreboard'
+      ? reply({ technicians: [{ id: 'tech-1', name: 'Sample Alpha' }, { id: 'tech-9', name: 'Sample Former', active: false }] })
+      : reply({ scoreboard: { ...BOARD, technician: { id: 'tech-9', name: 'Sample Former' } } })));
+    render(<ScoreboardPreview />);
+    const select = await screen.findByLabelText('Technician');
+    await waitFor(() => expect(select).not.toBeDisabled());
+    expect(within(select).getAllByRole('option').map(option => option.textContent)).toEqual(['Choose a technician', 'Sample Alpha', 'Sample Former (no longer active)']);
+    fireEvent.change(select, { target: { value: 'tech-9' } });
+    expect(await screen.findByTestId('year-statement')).toHaveTextContent(/^\/admin\/tech-rewards-scoreboard\/tech-9\/year-statement$/);
+  });
+
   it('shows a server error', async () => {
     adminFetch.mockImplementation(() => reply({ error: 'Technician not found.' }, false, 404));
     render(<ScoreboardPreview />);
