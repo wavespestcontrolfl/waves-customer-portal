@@ -17,6 +17,7 @@ jest.mock('../services/referral-engine', () => ({
   getSettings: jest.fn(async () => ({ referee_discount_cents: 2500 })),
   getPromoterReferralLink: jest.fn(() => 'https://portal.wavespestcontrol.com/r/WAVES-J4KM'),
   buildRefereeOfferLine: jest.fn(() => 'Book your first service through their referral link and you’ll get $25 off — our way of saying welcome.'),
+  step2FriendCreditCents: jest.fn(async () => 0),
 }));
 
 jest.mock('../services/email-template-library', () => ({
@@ -144,6 +145,31 @@ describe('POST /api/referrals/invite-email — atomic dedupe', () => {
     expect(recordedDeletes).toHaveLength(0);
     // Successful real send bumps the share timestamp.
     expect(recordedUpdates.some((u) => u.table === 'referral_promoters')).toBe(true);
+  });
+
+  test('the offer line reads the fallback settings with the gate off and only the live amount with GATE_REFERRAL_STEP2 on', async () => {
+    const engine = require('../services/referral-engine');
+    const { gates } = require('../config/feature-gates');
+    installDb();
+    EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true });
+
+    await post('/api/referrals/invite-email', { email: 'friend-off@example.com', friendName: 'Jordan' });
+    expect(engine.buildRefereeOfferLine).toHaveBeenLastCalledWith({ referee_discount_cents: 2500 });
+    expect(engine.step2FriendCreditCents).not.toHaveBeenCalled();
+
+    gates.referralStep2 = true;
+    try {
+      installDb();
+      engine.step2FriendCreditCents.mockResolvedValueOnce(5000);
+      await post('/api/referrals/invite-email', { email: 'friend-on@example.com', friendName: 'Jordan' });
+      expect(engine.buildRefereeOfferLine).toHaveBeenLastCalledWith({ referee_discount_cents: 5000 });
+      // The live row unreadable or the program paused: 0, so the line states no amount.
+      installDb();
+      await post('/api/referrals/invite-email', { email: 'friend-none@example.com', friendName: 'Jordan' });
+      expect(engine.buildRefereeOfferLine).toHaveBeenLastCalledWith({ referee_discount_cents: 0 });
+    } finally {
+      gates.referralStep2 = false;
+    }
   });
 
   test('idempotency key stays within varchar(260) even for a maximum-length address', async () => {

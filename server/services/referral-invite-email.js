@@ -28,6 +28,12 @@ function dollars(cents) {
   return Number.isInteger(n) ? `$${n}` : `$${n.toFixed(2)}`;
 }
 
+// The friend's part of the reward line. GATE_REFERRAL_STEP2: the friend gets an account credit after the first plan
+// service (owner 2026-11-21), not "off".
+const friendClause = (offer) => (offer.gateOn
+  ? require('./referral-step2').memberInviteFriendClause(offer.refereeCents)
+  : `they get ${dollars(offer.refereeCents)} off their first service`);
+
 async function sendReferralInviteEmail({ customerId, trigger = 'positive_review' } = {}) {
   try {
     if (!customerId) return null;
@@ -116,7 +122,7 @@ async function sendReferralInviteEmail({ customerId, trigger = 'positive_review'
     }
     const parts = [];
     if (!offer.atLimit) parts.push(`you get a ${dollars(offer.memberCents)} referral reward`);
-    if (offer.refereeCents > 0) parts.push(`they get ${dollars(offer.refereeCents)} off their first service`);
+    if (offer.refereeCents > 0) parts.push(friendClause(offer));
     if (!parts.length) {
       logger.info(`[referral-invite-email] customer ${customerId} is at the yearly limit and no friend discount is set; invite skipped`);
       return null;
