@@ -76,7 +76,10 @@ describe('planFormShellClear (GATE_WIZARD_SUPERSEDES_FORM_DRAFT)', () => {
   const wizardDraft = { blocked: true, reason: 'duplicate_phone', existingEstimateId: 'wiz-1', existingStatus: 'draft', existingSource: 'quote_wizard' };
   let calls;
   let lockContactPair;
-  const run = (block) => planFormShellClear(trx, block, { phone: '+19415550142', address: HOME, leadId: 'lead-9', lockContactPair });
+  const EMAIL = 'sample.person@example.com';
+  const run = (block) => planFormShellClear(trx, block, {
+    phone: '+19415550142', address: HOME, customerId: 'cust-1', email: EMAIL, leadId: 'lead-9', lockContactPair,
+  });
 
   beforeEach(() => {
     calls = [];
@@ -112,8 +115,9 @@ describe('planFormShellClear (GATE_WIZARD_SUPERSEDES_FORM_DRAFT)', () => {
     // The contact-pair lock comes before any estimate row lock, and nothing is archived yet.
     expect(calls).toEqual(['contact lock', 'shell locks']);
     expect(lockContactPair).toHaveBeenCalledWith(trx);
-    // The run's own address goes with it: a draft for another property is not its shell.
-    expect(lockUntouchedWebFormShellsInTx).toHaveBeenCalledWith(trx, { phone: '+19415550142', address: HOME });
+    // The run's own customer, email and address go with it: a draft of another
+    // contact or for another property is not its shell.
+    expect(lockUntouchedWebFormShellsInTx).toHaveBeenCalledWith(trx, { phone: '+19415550142', address: HOME, customerId: 'cust-1', email: EMAIL });
 
     expect(await plan.archiveShells('draft-1')).toEqual(['shell-1']);
     // The inserted draft's id goes with it: the final recheck must not count it as another open estimate.
@@ -175,11 +179,11 @@ describe('mirror refresh wiring', () => {
     );
   });
 
-  test('the same-phone duplicate read goes through planFormShellClear, with the run\'s address and contact-pair lock', () => {
+  test('the same-phone duplicate read goes through planFormShellClear, with the run\'s customer, email, address and contact-pair lock', () => {
     // The duplicate branch (refresh, block or insert) must judge the block
     // the plan returns, never the first read.
     expect(routeSource).toMatch(
-      /const shellPlan = await planFormShellClear\(\s*trx,\s*await blockIfAutomatedEstimateDuplicate\(contactPhone, \{ database: trx \}\),\s*\{ phone: contactPhone, address: quoteFullAddress, leadId: lead\.id, lockContactPair: draftVerdictLock \},?\s*\);\s*const \{ duplicateBlock \} = shellPlan;\s*if \(duplicateBlock\) \{/
+      /const shellPlan = await planFormShellClear\(\s*trx,\s*await blockIfAutomatedEstimateDuplicate\(contactPhone, \{ database: trx \}\),\s*\{\s*phone: contactPhone, address: quoteFullAddress, customerId, email: contactEmail,\s*leadId: lead\.id, lockContactPair: draftVerdictLock,\s*\},?\s*\);\s*const \{ duplicateBlock \} = shellPlan;\s*if \(duplicateBlock\) \{/
     );
     // No second, unguarded duplicate read in the wizard's estimate mirror.
     expect(routeSource.match(/blockIfAutomatedEstimateDuplicate\(contactPhone/g)).toHaveLength(1);

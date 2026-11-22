@@ -801,8 +801,9 @@ function shouldRefreshWizardDraft(duplicateBlock) {
 
 // Owner 2026-11-21, "build" (GATE_WIZARD_SUPERSEDES_FORM_DRAFT, off unless
 // exactly 'true'): an old web-form draft with no price that nobody touched
-// must not cost a wizard visitor the booking link. When such shells, for
-// this run's own property, are EVERY open estimate of the phone, the run
+// must not cost a wizard visitor the booking link. When such shells, of
+// this run's own contact (customer row and email) and for this run's own
+// property, are EVERY open estimate of the phone, the run
 // goes on as for a new visitor and the shells are archived together with
 // the draft it inserts. Any other open estimate still blocks, and then
 // nothing is archived (lockUntouchedWebFormShellsInTx holds the rule).
@@ -814,7 +815,7 @@ function shouldRefreshWizardDraft(duplicateBlock) {
 // `lockContactPair` is the run's contact-pair lock: the estimate branches
 // take it before any estimate row lock, so it is taken first here too.
 // It has a gate because the unblocked run texts the person the booking link.
-async function planFormShellClear(trx, duplicateBlock, { phone, address, leadId, lockContactPair }) {
+async function planFormShellClear(trx, duplicateBlock, { phone, address, customerId, email, leadId, lockContactPair }) {
   const asBefore = { duplicateBlock, archiveShells: async () => [] };
   if (!duplicateBlock || shouldRefreshWizardDraft(duplicateBlock)) return asBefore;
   // Only a web-form draft can be a shell. Any other newest estimate still
@@ -822,7 +823,7 @@ async function planFormShellClear(trx, duplicateBlock, { phone, address, leadId,
   if (duplicateBlock.existingSource !== 'lead_webhook' || duplicateBlock.existingStatus !== 'draft') return asBefore;
   if (require('../config/feature-gates').wizardSupersedesFormDraftLive?.() !== true) return asBefore;
   await lockContactPair(trx);
-  const shellIds = await lockUntouchedWebFormShellsInTx(trx, { phone, address });
+  const shellIds = await lockUntouchedWebFormShellsInTx(trx, { phone, address, customerId, email });
   if (!shellIds.length) return asBefore;
   return {
     duplicateBlock: null,
@@ -3635,7 +3636,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           const shellPlan = await planFormShellClear(
             trx,
             await blockIfAutomatedEstimateDuplicate(contactPhone, { database: trx }),
-            { phone: contactPhone, address: quoteFullAddress, leadId: lead.id, lockContactPair: draftVerdictLock },
+            {
+              phone: contactPhone, address: quoteFullAddress, customerId, email: contactEmail,
+              leadId: lead.id, lockContactPair: draftVerdictLock,
+            },
           );
           const { duplicateBlock } = shellPlan;
           if (duplicateBlock) {

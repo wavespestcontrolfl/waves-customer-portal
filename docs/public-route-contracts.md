@@ -6152,10 +6152,12 @@ Web-form shell drafts (owner 2026-11-21, "build"; DARK behind
 whose phone already has an open estimate (`draft`, `scheduled`, `sent` or
 `viewed`, not archived) other than the wizard's own draft mirrors no
 estimate, so it returns no booking handoff and sends no booking text. On,
-when every open estimate of the phone is an untouched web-form shell for the
-run's own property, the run sets them aside. A shell is a `lead_webhook`
-draft for the same property as the run (same street, city, ZIP and unit;
-an address with no city or ZIP never matches) that is older than 30
+when every open estimate of the phone is an untouched web-form shell of the
+run's own contact and for the run's own property, the run sets them aside.
+A shell is a `lead_webhook` draft with the customer row the run resolved
+for itself and the same email (a typed phone and address alone never move a
+draft), for the same property as the run (same street, city, ZIP and unit;
+an address with no city or ZIP never matches), that is older than 30
 minutes, was never written since it was made, has no office Sold-by action
 and no logged follow-up, has no monthly, one-time or annual total, was never
 sent, viewed or scheduled, has no auto-send claim and no lead pointing at

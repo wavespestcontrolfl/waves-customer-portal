@@ -38,6 +38,8 @@ const { parkClarifyAsk } = require('../services/estimate-clarify-asks');
 const DAY = 86400000;
 // The property the wizard run is for. Every fixture is for it unless a test says otherwise.
 const HOME = '12 Sample St, Parrish, FL 34219';
+// The person the wizard run is by: this email, and the customer row made in beforeEach.
+const EMAIL = 'sample.person@example.com';
 
 postgres('untouched web-form shell drafts and the quote wizard (live Postgres)', () => {
   jest.setTimeout(60000);
@@ -111,6 +113,7 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     const [row] = await trx('estimates').insert({
       customer_id: customerId,
       customer_phone: phone,
+      customer_email: EMAIL,
       customer_name: 'Sample Person',
       address: HOME,
       status: 'draft',
@@ -138,7 +141,7 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
   const row = (id) => trx('estimates').where({ id }).first('id', 'status', 'archived_at', 'estimate_data');
   const openIds = async () => (await listOpenEstimatesByPhone(phone, { database: trx })).map((r) => r.id);
   // Step 1: the shells that may go ([] = the run stays blocked).
-  const plan = (address = HOME) => lockUntouchedWebFormShellsInTx(trx, { phone, address });
+  const plan = (run = {}) => lockUntouchedWebFormShellsInTx(trx, { phone, address: HOME, customerId, email: EMAIL, ...run });
   // Both steps, as a wizard run whose own draft write landed.
   const retire = async () => archiveWebFormShellsInTx(trx, { phone, shellIds: await plan(), leadId: 'lead-1' });
 
@@ -172,7 +175,7 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     const second = await estimate();
     const otherDigits = digits === '9415550000' ? '9415550001' : '9415550000';
     const [other] = await trx('estimates').insert({
-      customer_phone: `+1${otherDigits}`, customer_name: 'Other Person', address: HOME, status: 'draft', source: 'lead_webhook',
+      customer_id: customerId, customer_phone: `+1${otherDigits}`, customer_email: EMAIL, customer_name: 'Other Person', address: HOME, status: 'draft', source: 'lead_webhook',
     }).returning('id');
 
     expect([...(await retire())].sort()).toEqual([first, second].sort());
@@ -225,6 +228,12 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     ['is younger than 30 minutes', () => { const made = new Date(Date.now() - 10 * 60000); return { created_at: made, updated_at: made }; }],
     // It could not carry the marker that parkClarifyAsk reads.
     ['has data that is not a JSON object', () => ({ estimate_data: JSON.stringify('legacy text') })],
+    // Two people can share a phone and a home. The run moves only its own contact's draft.
+    ['belongs to another customer row', async () => ({
+      customer_id: (await trx('customers').insert({ first_name: 'Other', last_name: 'Person', phone }).returning('id'))[0].id,
+    })],
+    ['has another email', () => ({ customer_email: 'other.person@example.com' })],
+    ['has no email', () => ({ customer_email: null })],
     // One phone, two homes: this run does not replace the other home's draft.
     ['is for another property', () => ({ address: '88 Other Ave, Parrish, FL 34219' })],
     ['is for the same street in another town', () => ({ address: '12 Sample St, Bradenton, FL 34205' })],
@@ -233,7 +242,7 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     ['has an address with no city or ZIP', () => ({ address: '12 Sample St' })],
     ['has no address', () => ({ address: '' })],
   ])('a web-form draft that %s is not a shell: it stays, and it still blocks', async (_label, fields) => {
-    const touched = await estimate(fields());
+    const touched = await estimate(await fields());
 
     expect(await retire()).toEqual([]);
 
@@ -247,14 +256,25 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     expect(await retire()).toEqual([shell]);
   });
 
+  // The run side of the same checks: the caller is a public route.
   test.each([
-    ['no address', ''],
-    ['an address with no city or ZIP', '12 Sample St'],
-  ])('a run that gives %s takes no shell', async (_label, runAddress) => {
+    ['no address', { address: '' }],
+    ['an address with no city or ZIP', { address: '12 Sample St' }],
+    ['no resolved customer', { customerId: null }],
+    ['another customer', { customerId: randomUUID() }],
+    ['another email', { email: 'other.person@example.com' }],
+    ['no email', { email: '' }],
+  ])('a run that gives %s takes no shell', async (_label, run) => {
     const shell = await estimate();
 
-    expect(await plan(runAddress)).toEqual([]);
+    expect(await plan(run)).toEqual([]);
     expect((await row(shell)).archived_at).toBeNull();
+  });
+
+  test('the email compares without case or outer spaces', async () => {
+    const shell = await estimate();
+
+    expect(await plan({ email: '  Sample.Person@Example.com ' })).toEqual([shell]);
   });
 
   test('a shell that staff restored after the wizard archived it is never archived again', async () => {
@@ -269,13 +289,17 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     expect(await openIds()).toEqual([shell]);
   });
 
-  const linkLead = (estimateId) => trx('leads').insert({
-    id: randomUUID(), status: 'new', first_name: 'Sample', last_name: 'Person', phone, estimate_id: estimateId,
+  const linkLead = (estimateId, fields = {}) => trx('leads').insert({
+    id: randomUUID(), status: 'new', first_name: 'Sample', last_name: 'Person', phone, estimate_id: estimateId, ...fields,
   });
 
-  test('a web-form draft that a lead points at is not a shell', async () => {
+  test.each([
+    ['a lead', {}],
+    // The draft-retire sweep's rule skips a soft-deleted lead; this rule does not.
+    ['a soft-deleted lead', { deleted_at: new Date() }],
+  ])('a web-form draft that %s points at is not a shell', async (_label, leadFields) => {
     const linked = await estimate();
-    await linkLead(linked);
+    await linkLead(linked, leadFields);
 
     expect(await retire()).toEqual([]);
     expect((await row(linked)).archived_at).toBeNull();
@@ -400,7 +424,7 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     await estimate({ archived_at: new Date() });
 
     expect(await plan()).toEqual([]);
-    expect(await lockUntouchedWebFormShellsInTx(trx, { phone: '555', address: HOME })).toEqual([]);
+    expect(await plan({ phone: '555' })).toEqual([]);
     expect(await archiveWebFormShellsInTx(trx, { phone, shellIds: [], leadId: 'lead-1' })).toEqual([]);
   });
 });

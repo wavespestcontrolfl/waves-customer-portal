@@ -315,6 +315,10 @@ async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
  *   - no clarify ask for the phone is open or was sent in the last 7 days
  *     without an answer: the row may be waiting for the customer's reply;
  *   - its data is a JSON object (or empty), so it can carry the marker below;
+ *   - it belongs to the wizard run's own contact: the same customer row the
+ *     run resolved for itself and the same email. A public caller who types
+ *     someone's phone and address must not move that person's draft, and two
+ *     people can share a phone and a home;
  *   - it is for the wizard run's own property: one phone can ask for quotes
  *     on two homes, and a draft for the other home is not replaced by this
  *     run. Same door by the test the draft-retire sweep uses
@@ -371,9 +375,9 @@ function untouchedWebFormShells(trx, last10, { now = new Date() } = {}) {
       [last10]
     )
     // The draft-retire sweep's own "safe to archive" rule: older than 30
-    // minutes (its creator's background work is done), no lead, no booking
-    // handoff, no staged clarify text, no group, no price lock, no scheduled
-    // send, no live or uncertain send, no hold marker.
+    // minutes (its creator's background work is done), no live lead, no
+    // booking handoff, no staged clarify text, no group, no price lock, no
+    // scheduled send, no live or uncertain send, no hold marker.
     .whereRaw(DRAFT_ELIGIBLE_SQL)
     .whereNull('sent_at')
     .whereNull('viewed_at')
@@ -387,6 +391,11 @@ function untouchedWebFormShells(trx, last10, { now = new Date() } = {}) {
     .whereRaw("COALESCE(estimate_data->'automation'->'autoSend'->>'claimedAt', '') = ''")
     // Only an object can take the marker. A legacy scalar stays a blocker.
     .whereRaw("jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object'")
+    // Any lead, soft-deleted ones too (the #6394 rule): the sweep's own
+    // lead check skips a soft-deleted lead.
+    .whereNotExists(function linkedToLead() {
+      this.select(trx.raw('1')).from('leads').whereRaw('leads.estimate_id = estimates.id');
+    })
     // By phone, and wider than the sweep's: a text sent in the last 7 days
     // with no answer still holds the draft.
     .whereNotExists(function clarifyAskWaiting() {
@@ -410,7 +419,18 @@ function sameDoor(addressA, addressB) {
   return unit(addressA) === unit(addressB);
 }
 
-async function lockUntouchedWebFormShellsInTx(trx, { phone, address, now = new Date() } = {}) {
+// The draft belongs to the wizard run's own contact: the customer row the
+// run resolved for itself (findExistingCustomerByContact) and the same email.
+// The caller is a public route. A typed phone and address alone must never
+// archive a draft: two people can share a phone and a home.
+function sameContact(row, { customerId, email }) {
+  const runEmail = String(email || '').trim().toLowerCase();
+  if (!customerId || !runEmail) return false;
+  return String(row.customer_id || '') === String(customerId)
+    && String(row.customer_email || '').trim().toLowerCase() === runEmail;
+}
+
+async function lockUntouchedWebFormShellsInTx(trx, { phone, address, customerId, email, now = new Date() } = {}) {
   const values = phoneLookupValues(phone);
   if (!trx || !values.last10) return [];
 
@@ -428,9 +448,9 @@ async function lockUntouchedWebFormShellsInTx(trx, { phone, address, now = new D
   const shells = await untouchedWebFormShells(trx, values.last10, { now })
     .whereIn('id', open.map((row) => row.id))
     .forUpdate()
-    .select('id', 'address');
+    .select('id', 'address', 'customer_id', 'customer_email');
   const shellIds = (Array.isArray(shells) ? shells : [])
-    .filter((row) => sameDoor(row.address, address))
+    .filter((row) => sameContact(row, { customerId, email }) && sameDoor(row.address, address))
     .map((row) => row.id);
   // Every open estimate of the phone must be one of this run's shells.
   // Anything else still blocks the run, and then no shell goes.
