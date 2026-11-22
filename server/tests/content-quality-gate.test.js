@@ -386,6 +386,21 @@ describe('customer-question: answer-in-first-paragraph / link / redaction', () =
     expect(body.ok).toBe(false);
     expect(body.reason).toBe('unredacted_name_in_body');
   });
+  test('redaction: "Lethal Bronzing" clears as a palm disease name pair, a first name next to either word still blocks', () => {
+    // A post about lethal bronzing carries the name in its title; unlisted,
+    // the pair read as a First+Last name there.
+    expect(checkRedactionPassed({
+      body: '## What lethal bronzing is\n\nUF/IFAS says Lethal Bronzing Disease is caused by a phytoplasma. It is found in Sarasota palms.',
+      frontmatter: { title: 'Lethal Bronzing in Southwest Florida Palms: How It Spreads' },
+    }).ok).toBe(true);
+    const title = checkRedactionPassed({
+      body: 'Plain text for the check. It names Sarasota once.',
+      frontmatter: { title: 'James Bronzing in Southwest Florida Palms' },
+    });
+    expect(title).toMatchObject({ ok: false, reason: 'unredacted_name_in_title' });
+    const heading = checkRedactionPassed({ body: '## Lethal Smith\n\nOur treatment schedule is weekly.' });
+    expect(heading).toMatchObject({ ok: false, reason: 'unredacted_name_in_heading' });
+  });
   test('redaction: "Hammerhead Worms" and "Mud Daubers" clear as animal name pairs, a first name in front of either still blocks', () => {
     // A post about hammerhead worms carries the name in its title and in
     // most headings; unlisted, the pair read as a First+Last name there.

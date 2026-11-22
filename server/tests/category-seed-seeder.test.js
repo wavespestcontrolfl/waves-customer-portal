@@ -953,17 +953,20 @@ describe('pest insider fact manifest v1', () => {
     expect(failures).toEqual([]);
   });
 
-  // The name check reads the two capitalized words of the disease name as a
-  // person. The pair is not on the redactor's domain-term list, so the title
-  // carries the hyphenated form and no heading names the disease.
-  test('PI-P05 keeps the two-word disease name out of the title and headings in the form the name check holds', () => {
+  // The name check reads two capitalized words in a row as a person. The
+  // disease name is on the redactor's domain-term list as that exact pair
+  // (pii-redactor.js DOMAIN_TERM_PAIRS), so the title carries the real name.
+  test('PI-P05 names the disease in its title and in one heading, and the name check still holds a person name next to either word', () => {
     const b = byId('PI-P05');
-    expect(b.working_title).toContain('Lethal-Bronzing');
+    expect(b.working_title).toBe('Lethal Bronzing in Southwest Florida Palms: How It Spreads');
     const labels = b.outline.map((item) => item.slice(0, item.indexOf(':')));
-    expect(labels.join(' ')).not.toMatch(/lethal|bronzing/i);
+    expect(labels.filter((label) => /lethal|bronzing/i.test(label))).toEqual(['What lethal bronzing is']);
     expect(b.verify_notes.join(' ')).toContain('write lethal bronzing in lowercase');
-    // Control: the plain title form holds the draft.
-    expect(checkRedactionPassed({ body: 'Plain text for the check. It names Sarasota once.', frontmatter: { title: 'Lethal Bronzing in Southwest Florida Palms' } }).ok).toBe(false);
+    const titleOk = (title) => checkRedactionPassed({ body: 'Plain text for the check. It names Sarasota once.', frontmatter: { title } }).ok;
+    expect(titleOk(b.working_title)).toBe(true);
+    // Control: only the exact pair is cleared.
+    expect(titleOk('James Bronzing in Southwest Florida Palms')).toBe(false);
+    expect(titleOk('Lethal Smith in Southwest Florida Palms')).toBe(false);
   });
 
   // Tree and shrub posts are FAQ-blocked by service, and PI-T04 by its topic
