@@ -675,6 +675,29 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     const list = await service.listTechnicians();
     expect(list.map((t) => t.name)).toEqual(expect.arrayContaining(['Sample Alpha', 'Sample Beta']));
     expect(list.map((t) => t.id)).not.toContain(gone);
-    expect(Object.keys(list[0]).sort()).toEqual(['id', 'name']);
+    expect(Object.keys(list.find((t) => t.id === alpha)).sort()).toEqual(['id', 'name']);
+  });
+
+  test('also lists a former technician who has a finalized paycheck of a finalized run, marked not active, once', async () => {
+    const add = async (name) => (await db('technicians').insert({ name, active: false }).returning('id'))[0].id;
+    const [paid, never, draftOnly, voidedOnly, voidedRun] = [await add('Sample Former Paid'), await add('Sample Former Never'), await add('Sample Former Draft'), await add('Sample Former Voided'), await add('Sample Former Voided Run')];
+    const [final, draft, voided] = (await db('payroll_runs').insert([
+      { status: 'finalized', week_start: '2026-05-04', pay_date: '2026-05-15' },
+      { status: 'draft', week_start: '2026-05-11', pay_date: '2026-05-22' },
+      { status: 'voided', week_start: '2026-05-18', pay_date: '2026-05-29' },
+    ]).returning('id')).map((r) => r.id);
+    await insertChecks([
+      { run_id: final, technician_id: paid, status: 'finalized', week_start: '2026-05-04', gross_cents: 100000 },
+      { run_id: final, technician_id: paid, status: 'finalized', week_start: '2026-04-27', gross_cents: 100000 }, // two checks: still listed once
+      { run_id: draft, technician_id: draftOnly, status: 'draft', week_start: '2026-05-11', gross_cents: 100000 },
+      { run_id: final, technician_id: voidedOnly, status: 'voided', week_start: '2026-05-04', gross_cents: 100000 },
+      { run_id: voided, technician_id: voidedRun, status: 'finalized', week_start: '2026-05-18', gross_cents: 100000 },
+    ]);
+    const list = await service.listTechnicians();
+    expect(list.filter((t) => t.id === paid)).toEqual([{ id: paid, name: 'Sample Former Paid', active: false }]);
+    for (const id of [never, draftOnly, voidedOnly, voidedRun]) expect(list.map((t) => t.id)).not.toContain(id);
+    // an active technician is listed as before, with or without a paycheck, and never marked
+    expect(list.filter((t) => t.id === alpha)).toEqual([{ id: alpha, name: 'Sample Alpha' }]);
+    expect(list.map((t) => t.name)).toEqual([...list.map((t) => t.name)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)));
   });
 });
