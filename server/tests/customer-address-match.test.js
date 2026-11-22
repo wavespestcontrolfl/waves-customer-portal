@@ -81,15 +81,15 @@ describe('findCustomersAtAddress', () => {
 
   it('strict: a failing property leg throws, so a partial list never reads as nobody else here', async () => {
     const db = fakeDb({ customers: [ROW('a', '123 Palm Ave')], propertyError: new Error('connection reset') });
-    await expect(findCustomersAtAddress(db, '123 Palm Ave, Venice, FL 34285', { strict: true })).rejects.toThrow('connection reset');
+    await expect(findCustomersAtAddress(db, '123 Palm Ave, Venice, FL 34285', { strict: true, zip: '34285' })).rejects.toThrow('connection reset');
   });
 
   it('strict: a leg that fills its row cap throws, so a member past the cap is never read as no member', async () => {
-    const many = Array.from({ length: 2000 }, (_, i) => ROW(`r${i}`, '123 Other St'));
-    await expect(findCustomersAtAddress(fakeDb({ customers: many }), '123 Palm Ave, Venice, FL 34285', { strict: true }))
-      .rejects.toMatchObject({ code: 'ADDRESS_UNCHECKABLE', message: expect.stringContaining('the primary leg filled its 2000-row cap') });
-    await expect(findCustomersAtAddress(fakeDb({ customers: [], properties: many }), '123 Palm Ave, Venice, FL 34285', { strict: true }))
-      .rejects.toThrow('the property-address leg filled its 2000-row cap');
+    const many = Array.from({ length: 10000 }, (_, i) => ROW(`r${i}`, '123 Other St'));
+    await expect(findCustomersAtAddress(fakeDb({ customers: many }), '123 Palm Ave, Venice, FL 34285', { strict: true, zip: '34285' }))
+      .rejects.toMatchObject({ code: 'ADDRESS_UNCHECKABLE', message: expect.stringContaining('the primary leg filled its 10000-row cap') });
+    await expect(findCustomersAtAddress(fakeDb({ customers: [], properties: many }), '123 Palm Ave, Venice, FL 34285', { strict: true, zip: '34285' }))
+      .rejects.toThrow('the property-address leg filled its 10000-row cap');
     // Not strict: the old fail-soft read, no throw.
     await expect(findCustomersAtAddress(fakeDb({ customers: many }), '123 Palm Ave, Venice, FL 34285')).resolves.toEqual([]);
   });
@@ -101,18 +101,27 @@ describe('findCustomersAtAddress', () => {
     await expect(findCustomersAtAddress(db, 'Lot 12 Palm Ave, Venice, FL 34285')).resolves.toEqual([]);
   });
 
-  it('strict: the leading house digits are a whole digit run anywhere in the line, on both legs; default keeps the prefix', async () => {
+  it('strict: no address test in SQL, only a line on file and the zip, on both legs; default keeps the prefix', async () => {
     const strictDb = fakeDb();
     await findCustomersAtAddress(strictDb, '123-125 Palm Ave, Venice, FL 34285', { strict: true, zip: '34285' });
-    const raws = strictDb.calls.filter((c) => Array.isArray(c) && c[0] === 'whereRaw' && c[2].includes('concat_ws'));
-    expect(raws.map((c) => c[3])).toEqual([
-      ['address_line1', 'address_line2', '(^|[^0-9])123([^0-9]|$)', 'address_line1', 'address_line2'],
-      ['cp.address_line1', 'cp.address_line2', '(^|[^0-9])123([^0-9]|$)', 'cp.address_line1', 'cp.address_line2'],
+    const raws = strictDb.calls.filter((c) => Array.isArray(c) && c[0] === 'whereRaw').map((c) => [c[2], c[3]]);
+    expect(raws).toEqual([
+      ["btrim(concat_ws(' ', ??, ??)) <> ''", ['address_line1', 'address_line2']],
+      ["coalesce(substring(?? from '[0-9]{5}'), '') in (?, '')", ['zip', '34285']],
+      ["btrim(concat_ws(' ', ??, ??)) <> ''", ['cp.address_line1', 'cp.address_line2']],
+      ["coalesce(substring(?? from '[0-9]{5}'), '') in (?, '')", ['cp.zip', '34285']],
     ]);
+    expect(strictDb.calls.some((c) => Array.isArray(c) && c[3] === 'ilike')).toBe(false);
     const plainDb = fakeDb();
     await findCustomersAtAddress(plainDb, '123 Palm Ave, Venice, FL 34285');
     expect(plainDb.calls.filter((c) => Array.isArray(c) && c[0] === 'whereRaw')).toEqual([]);
     expect(plainDb.calls).toContainEqual(['where', 'customers', 'address_line1', 'ilike', '123 %']);
+  });
+
+  it('strict without a 5-digit zip throws ADDRESS_UNCHECKABLE and reads nothing', async () => {
+    const db = fakeDb();
+    await expect(findCustomersAtAddress(db, '123 Palm Ave, Venice, FL', { strict: true })).rejects.toMatchObject({ code: 'ADDRESS_UNCHECKABLE' });
+    expect(db.calls).toEqual([]);
   });
 
   it('strict: a member on file through the property leg with a tab after the house number is an exact match', async () => {
@@ -160,10 +169,6 @@ describe('findCustomersAtAddress', () => {
     expect(rows.map((r) => r.id)).toEqual(['line2-only']);
     // Default: a row with no line 1 is skipped, as before.
     expect(await findCustomersAtAddress(db, '123 Palm Ave, Venice, FL 34285')).toEqual([]);
-    // Each leg's zip group (fakeDb records the inner where calls).
-    const zipSql = "coalesce(substring(?? from '[0-9]{5}'), '') in (?, '')";
-    expect(db.calls).toContainEqual(['whereRaw', 'customers', zipSql, ['zip', '34285']]);
-    expect(db.calls).toContainEqual(['whereRaw', 'customer_properties as cp', zipSql, ['cp.zip', '34285']]);
   });
 
   it('a failing property leg is skipped, not fatal', async () => {

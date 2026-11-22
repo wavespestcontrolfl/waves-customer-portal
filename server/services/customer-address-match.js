@@ -31,7 +31,7 @@ const { sameStreetAddress, addressPremiseKey, addressUnitKey, canonicalizeLeadin
 const PER_LEG_LIMIT = 50;
 // strict: a far higher cap, and a leg that fills it throws (the search did
 // not see every row, so "no match" would not be an answer).
-const STRICT_LEG_LIMIT = 2000;
+const STRICT_LEG_LIMIT = 10000;
 // strict: an address the search can never answer for (no readable house
 // number, a leg that fills its cap). Its code tells it from a database error,
 // which a caller may try again.
@@ -78,25 +78,23 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
     return [];
   }
   const legLimit = strict ? STRICT_LEG_LIMIT : PER_LEG_LIMIT;
-  // The candidate filter. Default: the line starts with the house number and a space. strict: the house number's
-  // leading digits are a whole digit run anywhere in the line (a tab after it, a unit before it, "123/2" for
-  // "123-2"), so the comparator and the near test see every row they could keep; the wider set is why strict has
-  // the higher cap.
+  const nearZip = strict && /^\d{5}$/.test(String(zip || '')) ? String(zip) : null;
+  if (strict && !nearZip) throw uncheckable('strict needs the home\'s 5-digit zip');
   const leadingDigits = houseNumber.match(/^\d+/)[0];
-  // strict reads line 1 and line 2 together: a unit-first address can keep the street number in line 2.
-  const digitRun = `(^|[^0-9])${leadingDigits}([^0-9]|$)`;
+  // The candidate filter. Default: the line starts with the house number and a space. strict: no address test in
+  // SQL at all, only a line on file and the zip (below); the comparator and the near test read every row, so no
+  // stored spelling (a tab, a unit first, the number in line 2, "123/2" for "123-2", no number) is dropped
+  // before them. The wider set is why strict has the higher cap.
   const houseNumberFilter = (line1, line2) => (q) => (strict
-    // Also a line with no digit at all: a member's address on file without its house number (near, never exact).
-    ? q.whereRaw("(concat_ws(' ', ??, ??) ~ ? or concat_ws(' ', ??, ??) !~ '[0-9]')", [line1, line2, digitRun, line1, line2])
+    ? q.whereRaw("btrim(concat_ws(' ', ??, ??)) <> ''", [line1, line2])
     : q.where(line1, 'ilike', `${houseNumber} %`));
   // A near row names the same leading house digits, or has no house number the search can read.
   const nearDigits = (row) => {
     const own = houseNumberOf(candidateAddressString(row));
     return !own || own.match(/^\d+/)[0] === leadingDigits;
   };
-  const nearZip = strict && /^\d{5}$/.test(String(zip || '')) ? String(zip) : null;
-  // strict with a zip: only rows with that zip or no zip on file. The comparator rejects any other zip, and rows
-  // from other zips would only fill the cap.
+  // strict: only rows whose zip column holds the home's 5-digit zip, or no zip. The comparator rejects any other
+  // zip, and rows from other zips would only fill the cap.
   const zipFilter = (column) => (q) => (nearZip
     ? q.whereRaw("coalesce(substring(?? from '[0-9]{5}'), '') in (?, '')", [column, nearZip])
     : q);
