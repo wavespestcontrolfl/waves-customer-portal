@@ -118,10 +118,15 @@ function maskAccessSentences(note) {
 }
 
 // ── The codes on the customer's file ───────────────────────────────────
-// No word rule knows a code that is a plain word. The customer's file does:
-// the four code fields the pre-visit brief shows the technician. A note that
-// holds one of them is not read at all (no model reads it, and no text
-// passes for it), and a text that holds one is refused.
+// No word rule knows a code that is a plain word. The customer's file does.
+// A code is filed in three places, and the technician's visit card reads all
+// three: the four code fields of the profile (property_preferences), the
+// access codes section (customer_access_codes: a code found in a message,
+// accepted by the office, or retired), and the gate directory of the
+// neighborhood of each of the customer's homes (neighborhood_access). The
+// card also shows the visitor pass links of the neighbors in those
+// neighborhoods. A note that holds one of them is not read at all (no model
+// reads it, and no text passes for it), and a text that holds one is refused.
 // A code field can hold more than the code ("use bluebird", "gate 1234,
 // door 5678#"), and nothing tells the code from the words beside it. So
 // every word and every run with a figure of a code field is a code, and the
@@ -132,26 +137,66 @@ function maskAccessSentences(note) {
 // beside "1234" on file; "then" in a note beside "1234 then #"): the safe
 // side. A short code (a word under four letters, a run with a figure under
 // three characters) is looked for as a whole word only: anywhere in the
-// note, it would hide most notes. A code in a free-text field of the file
-// (the access notes) is not on this list.
+// note, it would hide most notes.
+// The directions filed beside a code ("dial 4471 then #") are sentences, not
+// a code field: only their runs with a figure, of three or more characters,
+// are codes, and each link in them (a visitor pass is a link, filed with no
+// code; the link counts with or without its "https://"). Of a neighbor's
+// pass only the link is a code here: the card shows the technician nothing
+// else of it. Directions as a whole are a code too: the gate directory
+// files "bluebird" or "Blue Heron" as directions when a customer's
+// gate-code field holds it. A word code inside a sentence of directions
+// ("Tell the guard Bluebird") is found only with its sentence: which word
+// of a sentence is the code has no rule that holds, and with every word a
+// code, every customer of a guarded neighborhood would get the fixed
+// sentence. A code in another free-text field of the file (the access
+// notes) is not on this list.
 const STORED_CODE_COLUMNS = ['neighborhood_gate_code', 'property_gate_code', 'garage_code', 'lockbox_code'];
 const squeezed = (text) => oneForm(text).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
-// From each field: the field as a whole, each run of letters, figures and
+// From a code field: the field as a whole, each run of letters, figures and
 // keypad marks in it ("#12*34" is "1234"), and each group of three or more
 // figures in a run ("c1234").
-function storedCodesOf(prefs) {
-  const forms = STORED_CODE_COLUMNS.flatMap((column) => {
-    const value = oneForm(prefs?.[column]);
-    const runs = (value.match(/[\p{L}\p{N}#*]+/gu) || []).map(squeezed);
-    return [squeezed(value), ...runs, ...runs.flatMap((run) => run.match(/\p{Nd}{3,}/gu) || [])];
-  });
+const runsOf = (value) => (oneForm(value).match(/[\p{L}\p{N}#*]+/gu) || []).map(squeezed);
+const withFigureGroups = (runs) => [...runs, ...runs.flatMap((run) => run.match(/\p{Nd}{3,}/gu) || [])];
+const codeFieldForms = (field) => [squeezed(field), ...withFigureGroups(runsOf(field))];
+// A link ends where the visit card's pass link ends (URL_RE in
+// access-code-capture.js): at a space, an angle bracket or a quote.
+const LINK_RE = /https?:\/\/(?:www\.)?([^\s<>"']+)/giu;
+const linkForms = (directions) => [...oneForm(directions).matchAll(LINK_RE)].map((link) => squeezed(link[1]));
+const directionForms = (directions) => [
+  squeezed(directions),
+  ...withFigureGroups(runsOf(directions)).filter((form) => form.length >= 3 && /\p{Nd}/u.test(form)),
+  ...linkForms(directions),
+];
+// `prefs` is the profile row; `filed` are rows of the access codes section
+// and of the gate directory ({ code, instructions }); `neighborPasses` are
+// the pass rows of the customer's neighborhoods ({ instructions }).
+function storedCodesOf(prefs, filed = [], neighborPasses = []) {
+  const forms = [
+    ...STORED_CODE_COLUMNS.flatMap((column) => codeFieldForms(prefs?.[column])),
+    ...filed.flatMap((row) => [...codeFieldForms(row?.code), ...directionForms(row?.instructions)]),
+    ...neighborPasses.flatMap((row) => linkForms(row?.instructions)),
+  ];
   return [...new Set(forms.filter(Boolean))];
 }
+// Every code filed for the customer, whatever its state: a code the office
+// has not accepted yet, or has retired, is still a code. One read after the
+// other: inside a completion's transaction they share a connection.
 // Throws when the file cannot be read: the caller then uses the fixed sentence.
 async function readStoredCodes(db, customerId) {
   if (!db || !customerId) throw new Error('report note: the codes on the customer\'s file need a database and a customer');
-  return storedCodesOf(await savepointRead(db, (k) => k('property_preferences').where({ customer_id: customerId })
-    .first(...STORED_CODE_COLUMNS)));
+  const prefs = await savepointRead(db, (k) => k('property_preferences').where({ customer_id: customerId })
+    .first(...STORED_CODE_COLUMNS));
+  const section = await savepointRead(db, (k) => k('customer_access_codes').where({ customer_id: customerId })
+    .select('code', 'instructions'));
+  const gates = await savepointRead(db, (k) => k('neighborhood_access as gate')
+    .join('customer_properties as home', 'home.neighborhood_id', 'gate.neighborhood_id')
+    .where('home.customer_id', customerId).select('gate.code', 'gate.instructions'));
+  const passes = await savepointRead(db, (k) => k('customer_access_codes as pass')
+    .join('customer_properties as theirs', 'theirs.id', 'pass.property_id')
+    .join('customer_properties as home', 'home.neighborhood_id', 'theirs.neighborhood_id')
+    .where({ 'home.customer_id': customerId, 'pass.kind': 'pass' }).select('pass.instructions'));
+  return storedCodesOf(prefs, [...section, ...gates], passes);
 }
 // The codes are a list a caller read (readStoredCodes, storedCodesOf): with
 // none given, nothing is read or let out.

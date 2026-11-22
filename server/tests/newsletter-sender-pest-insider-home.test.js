@@ -25,6 +25,13 @@ jest.mock('../services/pest-insider/home', () => ({
   ...jest.requireActual('../services/pest-insider/home'),
   loadHomeFacts: (...args) => mockLoadHomeFacts(...args),
 }));
+// "A tool we'd use" has its own rules and its own suite (newsletter-sender-pest-insider-tool.test.js): here every
+// reader of a body with the token gets '' and nothing is read, so these cases keep their database queues.
+const mockToolBatch = jest.fn();
+jest.mock('../services/pest-insider/tool-block', () => ({
+  ...jest.requireActual('../services/pest-insider/tool-block'),
+  toolBlockForBatch: (...args) => mockToolBatch(...args),
+}));
 // The friend's credit in cents, as the referral program's live setting gives it (0 = no amount to state).
 jest.mock('../services/referral-engine', () => ({
   step2FriendCreditCentsOf: (...args) => mockFriendCents(...args),
@@ -39,6 +46,7 @@ const render = require('../services/pest-insider/render');
 const { renderIssue, HOME_TOKEN, HOME_TEXT_TOKEN, homeBlock } = render;
 const { REFERRAL_TAIL, REFERRAL_TOKEN, REFERRAL_TEXT_TOKEN, referralTail, referralLine } = require('../services/pest-insider/referral-line');
 const { POST_URLS } = require('../services/pest-insider/posts');
+const { loadTools } = require('../services/pest-insider/tools');
 const { isHeldOut, addressKey } = require('../services/pest-insider/audience');
 
 const [POST] = [...POST_URLS];
@@ -192,6 +200,8 @@ const GATE = 'GATE_PEST_INSIDER_AUTO_SEND';
 const gateBefore = process.env[GATE];
 beforeEach(() => {
   jest.clearAllMocks();
+  mockToolBatch.mockReset();
+  mockToolBatch.mockImplementation(async ({ html }) => ({ forReader: () => (html.includes('{{pi-tool}}') ? { '{{pi-tool}}': '' } : {}) }));
   mockLoadHomeFacts.mockReset();
   mockFriendCents.mockReset();
   mockFriendCents.mockReturnValue(0);
@@ -457,7 +467,7 @@ describe('sendCampaign: the "Your home" tokens', () => {
     for (const r of recipients()) expect(Object.keys(r.substitutions).filter((k) => /pi-home/i.test(k))).toEqual([]);
   });
 
-  test('one reader\'s substitutions with a poll, the reaction footer and the block stay under SendGrid\'s 10,000 bytes', () => {
+  test('one reader\'s substitutions with a poll, the reaction footer, the home block, the referral line and the longest tool block stay under 9,000 bytes (SendGrid\'s cap is 10,000)', () => {
     const { PEST_INSIDER_POLL_IDS, buildQuizSubstitutions } = require('../services/newsletter-quiz');
     const { buildFeedbackSubstitutions, ensureFeedbackToken } = require('../services/newsletter-feedback');
     const poll = renderIssue({
@@ -470,6 +480,8 @@ describe('sendCampaign: the "Your home" tokens', () => {
     const ensured = ensureFeedbackToken({ html: poll.html_body, text: poll.text_body });
     const body = `${ensured.html}\n${ensured.text}`;
     const token = '00000000-0000-4000-8000-000000000000';
+    const bytesOf = (b) => Buffer.byteLength(b.html);
+    const longestToolBlock = loadTools().tools.map((t) => render.toolBlock(t)).sort((a, b) => bytesOf(b) - bytesOf(a))[0];
     const block = render.homeSubstitutions({ lastVisit: { date: '2025-12-02', line: 'tree_shrub' }, sinceDate: '2024-03-05' }).substitutions;
     const feedback = buildFeedbackSubstitutions(body, { token });
     expect(Object.keys(feedback).length).toBeGreaterThan(0);
@@ -479,11 +491,77 @@ describe('sendCampaign: the "Your home" tokens', () => {
       // The referral line, at its longest: the amount form.
       [REFERRAL_TOKEN]: referralLine(referralTail(123456)).html,
       [REFERRAL_TEXT_TOKEN]: referralLine(referralTail(123456)).text,
+      // The tool block (one HTML key), at its longest over every tool the registry can name.
+      [render.TOOL_TOKEN]: longestToolBlock.html,
       '{{unsubscribe_url}}': `https://portal/unsub/${token}`,
     };
+    expect(longestToolBlock.html).toContain('amazon.com');
     expect(block[HOME_TOKEN]).not.toBe('');
     const bytes = Object.entries(subs).reduce((n, [k, v]) => n + Buffer.byteLength(k) + Buffer.byteLength(String(v)), 0);
-    expect(bytes).toBeLessThan(10000);
+    expect(bytes).toBeLessThan(9000);
+  });
+});
+
+describe('sendCampaign: the "A tool we\'d use" token', () => {
+  const TOOL = '{{pi-tool}}';
+  const mailed = (batch = 0) => mockSendBroadcast.mock.calls[batch][0];
+  const three = (over = {}) => ({ send: sendRow(), subscribers: SUBS, deliveries: DELIVERIES, mailbox: { 1: [C1], 3: [C3] }, ...over });
+  const { recordTouchpoint } = require('../services/conversations');
+
+  test('the HTML part holds the token as stored and the text part none; the helper is asked once for the batch and its value reaches only the reader it names', async () => {
+    buildDb(three());
+    mockLoadHomeFacts.mockResolvedValue(new Map());
+    mockToolBatch.mockImplementation(async () => ({ forReader: (s) => ({ [TOOL]: s.id === 1 ? '<p>BLOCK</p>' : '' }) }));
+
+    const result = await sendCampaign('send-1');
+
+    expect(result.accepted).toBe(3);
+    expect(mailed().html.split(TOOL)).toHaveLength(2);
+    expect(mailed().text).not.toMatch(/pi-tool|amazon/i);
+    expect(mockToolBatch).toHaveBeenCalledTimes(1);
+    const arg = mockToolBatch.mock.calls[0][0];
+    expect(arg).toMatchObject({ send: expect.objectContaining({ id: 'send-1', newsletter_type: 'pest-insider-monthly' }), planned: true, db });
+    expect(arg.html).toContain(TOOL);
+    expect(arg.text).not.toContain(TOOL);
+    expect(arg.subscribers.map((s) => s.id)).toEqual([1, 2, 3]);
+    const [first, ...others] = recipients();
+    expect(first.substitutions[TOOL]).toBe('<p>BLOCK</p>');
+    for (const r of others) expect(r.substitutions[TOOL]).toBe('');
+    // No tool key in the text part's substitutions of its own: one key, for the HTML token.
+    expect(Object.keys(first.substitutions).filter((k) => /pi-tool/.test(k))).toEqual([TOOL]);
+  });
+
+  test('each batch asks for its own readers, and a send with no planned audience says so', async () => {
+    buildDb({ send: sendRow({ segment_filter: MANY_PLAN }), subscribers: MANY, deliveries: MANY_DELIVERIES, mailbox: { 1: [C1], 501: [C_LAST] }, chunks: 2 });
+    mockLoadHomeFacts.mockResolvedValue(new Map());
+
+    await sendCampaign('send-1');
+
+    expect(mockToolBatch).toHaveBeenCalledTimes(2);
+    const [first, second] = mockToolBatch.mock.calls.map((c) => c[0].subscribers.map((s) => s.id));
+    expect(first).toHaveLength(500);
+    expect(second).toEqual([501]);
+    expect(mockSendBroadcast.mock.invocationCallOrder[0]).toBeLessThan(mockToolBatch.mock.invocationCallOrder[1]);
+
+    jest.clearAllMocks();
+    buildDb({ send: sendRow({ segment_filter: null, newsletter_type: 'free-form' }), subscribers: SUBS, deliveries: DELIVERIES });
+    await sendCampaign('send-1');
+    expect(mockToolBatch.mock.calls[0][0].planned).toBe(false);
+  });
+
+  test('a body with no token gets no tool key; the touchpoint body shows no token and no tool', async () => {
+    buildDb(three({ send: sendRow({ html_body: '<p>Body</p>', text_body: 'Body' }) }));
+    mockLoadHomeFacts.mockResolvedValue(new Map());
+
+    await sendCampaign('send-1');
+
+    for (const r of recipients()) expect(r.substitutions).not.toHaveProperty(TOOL);
+
+    jest.clearAllMocks();
+    buildDb(three());
+    mockToolBatch.mockImplementation(async () => ({ forReader: () => ({ [TOOL]: '<p>BLOCK</p>' }) }));
+    await sendCampaign('send-1');
+    for (const t of recordTouchpoint.mock.calls.map((c) => c[0])) expect(JSON.stringify(t)).not.toMatch(/pi-tool|BLOCK|amazon/i);
   });
 });
 
@@ -666,18 +744,21 @@ describe('every surface without a reader strips both tokens', () => {
   const { stripPersonalizationTokens } = require('../services/newsletter-draft');
   const { renderSendPreview } = require('../services/newsletter-proof');
   const { neutralizeHomeTokens } = require('../services/pest-insider/home');
+  const { neutralizeToolToken } = require('../services/pest-insider/tool-block');
 
   test('stripPersonalizationTokens (archive, RSS feed, touchpoint body) leaves the issue as it reads with no block', () => {
     for (const [part, token] of [[ISSUE.html_body, HOME_TOKEN], [ISSUE.text_body, HOME_TEXT_TOKEN]]) {
       expect(part).toContain(token);
       const stripped = stripPersonalizationTokens(part);
       expect(stripped).not.toContain('{{pi-');
-      // The "Your home" tokens go, and the referral line stands in its form with no amount.
+      // The "A tool we'd use" and "Your home" tokens go, and the referral line stands in its form with no amount.
       const first = referralLine(REFERRAL_TAIL);
-      expect(stripped).toBe(neutralizeHomeTokens(part).split(REFERRAL_TOKEN).join(first.html).split(REFERRAL_TEXT_TOKEN).join(first.text));
+      expect(stripped).toBe(neutralizeToolToken(neutralizeHomeTokens(part)).split(REFERRAL_TOKEN).join(first.html).split(REFERRAL_TEXT_TOKEN).join(first.text));
       expect(stripped.split('referrals are the nicest compliment we get.')).toHaveLength(2);
     }
     expect(stripPersonalizationTokens(`a ${HOME_TOKEN} b ${HOME_TEXT_TOKEN} {{city}}`)).toBe('a  b  your area');
+    expect(ISSUE.html_body).toContain('{{pi-tool}}');
+    expect(stripPersonalizationTokens(`a {{pi-tool}} b`)).toBe('a  b');
   });
 
   test('a variant spelling is no token: every surface keeps it visible, so it is never hidden behind a clean-looking copy', async () => {
@@ -692,7 +773,8 @@ describe('every surface without a reader strips both tokens', () => {
     db.mockImplementation(() => chain({ first: null, result: [] }));
     const { html, text } = await renderSendPreview(sendRow({ status: 'draft', segment_filter: null }), 'owner@example.com');
     for (const part of [html, text]) {
-      expect(part).not.toMatch(/pi-home/);
+      expect(part).not.toMatch(/pi-home|pi-tool/);
+      expect(part).not.toMatch(/amazon|A tool we/i);
       expect(part).not.toContain('Your home');
       expect(part).toContain('Aedes Mosquito');
     }

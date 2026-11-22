@@ -1153,6 +1153,10 @@ async function sameDayChoices(service, { shiftChecked = true } = {}) {
 // judges one hour only. null = no technician, nothing to judge. Gate off: no
 // read, and every hour is held. A failed read of the hours fails the list.
 async function keptShiftHolds(service) {
+  // A grouped stop commits as one unit: every member's landing is judged on
+  // that member's technician (visit-groups unitShiftTest; null when ungrouped).
+  const unitRefuses = await require('./visit-groups').unitShiftTest(db, service);
+  if (unitRefuses) return (date, window) => !unitRefuses(date, window.start, window.end);
   if (!service.technician_id) return null;
   const { loadTechShifts, shiftBounds } = require('./technician-eligibility');
   const shiftOf = await loadTechShifts(db, { technicianIds: [service.technician_id] });

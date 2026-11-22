@@ -2,7 +2,8 @@
  * mail_prospects store against real PostgreSQL: the migration, insert-then-update by the same key, the one-live-row-
  * per-parcel index with its duplicate_parcel fallback, the new-home permit read (both pin forms, the address proof,
  * the open-permit rule, the Eastern 24-month limit; canceled, alteration, ADU and long-finished homes left out) and
- * the known-address read. Made-up rows in a throwaway schema
+ * the known-address read. One test runs the new-home list through this store end to end (a made-up Clerk page and
+ * a made-up parcel map; the real permit read, known-address read and table). Made-up rows in a throwaway schema
  * of this worktree's own QA database or CI's database.
  */
 // CI runs a DB suite only when it carries this exact line (tests.yml greps for it).
@@ -28,6 +29,7 @@ const {
   findBySourceRefs, newHomePermitsForParcels, addressKnownToWaves, saveProspect,
 } = require('../services/mail/prospect-store');
 const { monthsAgoIso } = require('../services/property-lookup/manatee-permit-sync');
+const { runNewHomeList, daysToRead, holdBack, LIST_KEY } = require('../services/mail/new-home-list');
 
 jest.setTimeout(60000);
 
@@ -124,11 +126,11 @@ postgres('mail prospect store on PostgreSQL', () => {
   });
 
   test('insert, then an update by the same key keeps one row and keeps first_seen_at', async () => {
-    expect(await saveProspect(prospect('202699000001'))).toBe('unmatched');
+    expect((await saveProspect(prospect('202699000001'))).status).toBe('unmatched');
     const [first] = await conn('mail_prospects').select('*');
     expect(first.state).toBe('FL');
     await conn('mail_prospects').update({ first_seen_at: '2026-11-01T12:00:00Z', last_checked_at: '2026-11-01T12:00:00Z' });
-    expect(await saveProspect(live('202699000001', '5133090590'))).toBe('eligible');
+    expect((await saveProspect(live('202699000001', '5133090590'))).status).toBe('eligible');
     const rows = await conn('mail_prospects').select('*');
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ status: 'eligible', reason: null, parcel_pin: '5133090590', address_line1: '101 EXAMPLE TRL' });
@@ -140,14 +142,62 @@ postgres('mail prospect store on PostgreSQL', () => {
 
   test('an update clears fields the new read no longer has', async () => {
     await saveProspect(live('202699000001', '5133090590'));
-    await saveProspect(prospect('202699000001'));
+    expect((await saveProspect(prospect('202699000001', { status: 'not_eligible', reason: 'known_address' }))).status).toBe('not_eligible');
     const [row] = await conn('mail_prospects').select('*');
-    expect(row).toMatchObject({ status: 'unmatched', parcel_pin: null, permit_no: null, address_line1: null });
+    expect(row).toMatchObject({ status: 'not_eligible', reason: 'known_address', parcel_pin: null, permit_no: null, address_line1: null });
+  });
+
+  test('unmatched is "no answer yet": it never replaces a row that has an answer', async () => {
+    await saveProspect(live('202699000001', '5133090590'));
+    await saveProspect(prospect('202699000002', { status: 'not_eligible', reason: 'company_buyer' }));
+    await saveProspect(prospect('202699000003', { reason: 'no_permit' }));
+    await conn('mail_prospects').update({ last_checked_at: '2026-11-01T12:00:00Z' });
+    // A second run that could not reach the map saves "unmatched" for all three.
+    expect(await saveProspect(prospect('202699000001', { reason: 'lookup_failed' }))).toEqual({ status: 'eligible', reason: null, written: false });
+    expect(await saveProspect(prospect('202699000002', { reason: 'lookup_failed' }))).toEqual({ status: 'not_eligible', reason: 'company_buyer', written: false });
+    expect(await saveProspect(prospect('202699000003', { reason: 'lookup_failed' }))).toEqual({ status: 'unmatched', reason: 'lookup_failed', written: true });
+    const rows = await conn('mail_prospects').orderBy('source_ref');
+    expect(rows.map((r) => [r.status, r.reason, r.parcel_pin])).toEqual([
+      ['eligible', null, '5133090590'], ['not_eligible', 'company_buyer', null], ['unmatched', 'lookup_failed', null],
+    ]);
+    // The two kept rows were not written at all; the unmatched one was checked again.
+    expect(rows.map((r) => r.last_checked_at.toISOString() === '2026-11-01T12:00:00.000Z')).toEqual([true, true, false]);
+    // Inside a caller's transaction too.
+    await conn.transaction(async (trx) => {
+      expect((await saveProspect(prospect('202699000001'), trx)).status).toBe('eligible');
+    });
+  });
+
+  test('a save never replaces a stored answer with a less careful one, in both write orders', async () => {
+    const known = (ref) => prospect(ref, { status: 'not_eligible', reason: 'known_address' });
+    // Two runs judged deed 1 at the same time: one found a known address, the other a live home.
+    expect(await saveProspect(known('202699000001'))).toEqual({ status: 'not_eligible', reason: 'known_address', written: true });
+    expect(await saveProspect(live('202699000001', '5133090590'))).toEqual({ status: 'not_eligible', reason: 'known_address', written: false });
+    // The other order, deed 2: the live home is saved first, then the known address.
+    expect((await saveProspect(live('202699000002', '6000000060'))).status).toBe('eligible');
+    expect(await saveProspect(known('202699000002'))).toEqual({ status: 'not_eligible', reason: 'known_address', written: true });
+    // A live home keeps its first match (deed 3), and not_eligible keeps its first reason (deed 4).
+    expect((await saveProspect(live('202699000003', '7000000070', { status: 'held_back' }))).status).toBe('held_back');
+    await conn('mail_prospects').update({ last_checked_at: '2026-11-01T12:00:00Z' });
+    expect((await saveProspect(live('202699000003', '8000000080'))).status).toBe('held_back');
+    expect((await saveProspect(prospect('202699000004', { status: 'not_eligible', reason: 'company_buyer' }))).status).toBe('not_eligible');
+    expect(await saveProspect(prospect('202699000004', { status: 'not_eligible', reason: 'trust_buyer' }))).toEqual({ status: 'not_eligible', reason: 'company_buyer', written: false });
+    const rows = await conn('mail_prospects').orderBy('source_ref');
+    expect(rows.map((r) => [r.status, r.reason, r.parcel_pin, r.permit_no])).toEqual([
+      ['not_eligible', 'known_address', null, null],
+      ['not_eligible', 'known_address', null, null],
+      ['held_back', null, '7000000070', 'BLD-7000000070'],
+      ['not_eligible', 'company_buyer', null, null],
+    ]);
+    // The kept live home was not written at all.
+    expect(rows[2].last_checked_at.toISOString()).toBe('2026-11-01T12:00:00.000Z');
+    // The parcel of deed 2 is free again for another deed.
+    expect((await saveProspect(live('202699000005', '6000000060'))).status).toBe('eligible');
   });
 
   test('a second live row for the same parcel is saved as not_eligible / duplicate_parcel', async () => {
-    expect(await saveProspect(live('202699000001', '5133090590'))).toBe('eligible');
-    expect(await saveProspect(live('202699000002', '5133090590', { status: 'held_back' }))).toBe('not_eligible');
+    expect((await saveProspect(live('202699000001', '5133090590'))).status).toBe('eligible');
+    expect(await saveProspect(live('202699000002', '5133090590', { status: 'held_back' }))).toEqual({ status: 'not_eligible', reason: 'duplicate_parcel', written: true });
     const rows = await conn('mail_prospects').orderBy('source_ref');
     expect(rows.map((r) => [r.source_ref, r.status, r.reason])).toEqual([
       ['202699000001', 'eligible', null], ['202699000002', 'not_eligible', 'duplicate_parcel'],
@@ -155,16 +205,16 @@ postgres('mail prospect store on PostgreSQL', () => {
   });
 
   test('a permit that already backs a live home cannot back a second one: not_eligible / duplicate_permit', async () => {
-    expect(await saveProspect(live('202699000001', '900000009', { permit_no: 'BLD9900-0020' }))).toBe('eligible');
-    expect(await saveProspect(live('202699000002', '9000000090', { permit_no: 'BLD9900-0020' }))).toBe('not_eligible');
+    expect((await saveProspect(live('202699000001', '900000009', { permit_no: 'BLD9900-0020' }))).status).toBe('eligible');
+    expect((await saveProspect(live('202699000002', '9000000090', { permit_no: 'BLD9900-0020' }))).status).toBe('not_eligible');
     const rows = await conn('mail_prospects').orderBy('source_ref');
     expect(rows.map((r) => [r.source_ref, r.status, r.reason])).toEqual([
       ['202699000001', 'eligible', null], ['202699000002', 'not_eligible', 'duplicate_permit'],
     ]);
     // The same deed read again keeps its own row and its own permit.
-    expect(await saveProspect(live('202699000001', '900000009', { permit_no: 'BLD9900-0020' }))).toBe('eligible');
+    expect((await saveProspect(live('202699000001', '900000009', { permit_no: 'BLD9900-0020' }))).status).toBe('eligible');
     // Another list is another list.
-    expect(await saveProspect(live('202699000003', '9000000090', { permit_no: 'BLD9900-0020', list_key: 'other_list' }))).toBe('eligible');
+    expect((await saveProspect(live('202699000003', '9000000090', { permit_no: 'BLD9900-0020', list_key: 'other_list' }))).status).toBe('eligible');
   });
 
   test('a live row must name its parcel and its permit, and a status must be a known one', async () => {
@@ -182,6 +232,17 @@ postgres('mail prospect store on PostgreSQL', () => {
     // A row that is not live needs neither.
     expect(await refusedBy(prospect('202699000009'))).toBe('saved');
     expect(await refusedBy(prospect('202699000010', { status: 'not_eligible', reason: 'company_buyer' }))).toBe('saved');
+    // The same refusals when the deed already has an answer: the row would be kept, not written, so the table
+    // never sees it and the store refuses it by the same two rules.
+    const answered = (extra) => live('202699000010', '6000000060', extra);
+    expect(await refusedBy(answered({ parcel_pin: null }))).toBe('23514 mail_prospects_live_has_parcel_and_permit');
+    expect(await refusedBy(answered({ parcel_pin: '  ' }))).toBe('23514 mail_prospects_live_has_parcel_and_permit');
+    expect(await refusedBy(answered({ status: 'held_back', permit_no: '' }))).toBe('23514 mail_prospects_live_has_parcel_and_permit');
+    expect(await refusedBy(answered({ status: 'Eligible' }))).toBe('23514 mail_prospects_status_check');
+    expect(await refusedBy(prospect('202699000010', { status: 'mailed' }))).toBe('23514 mail_prospects_status_check');
+    expect(await refusedBy(prospect('202699000010', { status: undefined }))).toBe('23514 mail_prospects_status_check');
+    // A good row for that deed is kept as before.
+    expect(await saveProspect(answered())).toEqual({ status: 'not_eligible', reason: 'company_buyer', written: false });
   });
 
   test('two saves of one deed never interleave: a second save cannot land between the refused write and the fallback', async () => {
@@ -211,26 +272,28 @@ postgres('mail prospect store on PostgreSQL', () => {
     try {
       const first = saveProspect(live('202699000002', '5133090590')); // refused by the parcel index, then falls back
       await until(async () => (await deedLocks(true)) === 1, 'the first save holds the lock on the deed');
-      // A second read of the same deed finds a valid match while the first save is still in its fallback.
+      // A second read of the same deed finds another match while the first save is still in its fallback.
       const second = saveProspect(live('202699000002', '6000000060'));
       await until(async () => (await deedLocks(false)) === 1, 'the second save waits for the lock on the deed');
-      expect(await first).toBe('not_eligible');
-      expect(await second).toBe('eligible');
+      expect((await first).status).toBe('not_eligible');
+      // The second save reads the first one's answer under the lock and keeps it: it says what the row holds.
+      expect(await second).toEqual({ status: 'not_eligible', reason: 'duplicate_parcel', written: false });
     } finally {
       await conn.raw('DROP TRIGGER IF EXISTS mail_test_pause_fallback ON mail_prospects');
       await conn.raw('DROP FUNCTION IF EXISTS mail_test_pause_fallback()');
     }
-    // The later, valid match stands. Without the lock the second save would be written during the pause, and the
-    // first save's fallback would then overwrite it with not_eligible.
+    // Without the lock the second save would be written during the pause and answer "eligible"; the first save's
+    // fallback would then overwrite it with not_eligible, so the answer would not be what the row holds.
     const row = await conn('mail_prospects').where({ source_ref: '202699000002' }).first();
-    expect(row).toMatchObject({ status: 'eligible', reason: null, parcel_pin: '6000000060' });
+    expect(row).toMatchObject({ status: 'not_eligible', reason: 'duplicate_parcel' });
+    expect(row.parcel_pin).not.toBe('6000000060');
   });
 
   test('the duplicate fallback works inside a caller transaction', async () => {
     await saveProspect(live('202699000001', '5133090590'));
     await conn.transaction(async (trx) => {
-      expect(await saveProspect(live('202699000002', '5133090590'), trx)).toBe('not_eligible');
-      expect(await saveProspect(prospect('202699000003'), trx)).toBe('unmatched');
+      expect((await saveProspect(live('202699000002', '5133090590'), trx)).status).toBe('not_eligible');
+      expect((await saveProspect(prospect('202699000003'), trx)).status).toBe('unmatched');
     });
     expect(await conn('mail_prospects').count('* as n').first()).toMatchObject({ n: '3' });
   });
@@ -279,6 +342,32 @@ postgres('mail prospect store on PostgreSQL', () => {
     expect(await found('1100000011', '1200000011', '1300000011', '1400000011', '1500000011')).toEqual(['1100000011', '1200000011', '1300000011', '1400000011', '1500000011']);
   });
 
+  test('new-home permits: with the sale day, a permit issued after it does not count', async () => {
+    await permit('BLD9900-0040', { parcel_pin: '4000000041', issued_date: dateAgo(3) }); // the buyer of a lot got it
+    const forSale = async (soldOn) => Object.keys(await newHomePermitsForParcels([parcel('4000000041')], { soldOn }));
+    expect(await forSale(dateAgo(5))).toEqual([]); // sold five days ago: the permit came after
+    expect(await forSale(dateAgo(3))).toEqual(['4000000041']); // issued on the sale day
+    expect(await forSale(dateAgo(1))).toEqual(['4000000041']);
+    // No sale day, or one that is not a date: today is the bound, as before.
+    expect(await forSale(undefined)).toEqual(['4000000041']);
+    expect(await forSale('not a date')).toEqual(['4000000041']);
+    expect(Object.keys(await newHomePermitsForParcels([parcel('4000000041')]))).toEqual(['4000000041']);
+    // The later permit does not take the place of the home's real one.
+    await permit('BLD9900-0041', { parcel_pin: '4000000041', issued_date: dateAgo(300), co_date: dateAgo(20) });
+    const atSale = await newHomePermitsForParcels([parcel('4000000041')], { soldOn: dateAgo(5) });
+    expect(atSale['4000000041'].permit_no).toBe('BLD9900-0041');
+    // A connection in the options' place (the call form before this change) is refused, not ignored.
+    await expect(newHomePermitsForParcels([parcel('4000000041')], conn)).rejects.toThrow('the connection is the third argument');
+    expect(Object.keys(await newHomePermitsForParcels([parcel('4000000041')], undefined, conn))).toEqual(['4000000041']);
+    // No issue date: the certificate must be there by the sale day.
+    await permit('BLD9900-0042', { parcel_pin: '4200000041', issued_date: null, co_date: dateAgo(2) });
+    const noIssueDate = async (soldOn) => Object.keys(await newHomePermitsForParcels([parcel('4200000041')], { soldOn }));
+    expect(await noIssueDate(dateAgo(5))).toEqual([]); // sold before the certificate
+    expect(await noIssueDate(dateAgo(2))).toEqual(['4200000041']); // sold on the certificate's day
+    expect(await noIssueDate(dateAgo(1))).toEqual(['4200000041']); // sold after it
+    expect(await noIssueDate(undefined)).toEqual(['4200000041']); // no sale day: as before
+  });
+
   test('new-home permits: a certificate or an issue date after today does not count', async () => {
     const tomorrow = new Date(Date.parse(`${monthsAgoIso(0)}T00:00:00Z`) + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     await permit('BLD9900-0030', { parcel_pin: '3000000031', co_date: tomorrow }); // "finished" tomorrow
@@ -286,6 +375,14 @@ postgres('mail prospect store on PostgreSQL', () => {
     await permit('BLD9900-0032', { parcel_pin: '3200000031', co_date: monthsAgoIso(0) }); // finished today
     await permit('BLD9900-0033', { parcel_pin: '3300000031', issued_date: monthsAgoIso(0) }); // issued today
     expect(await found('3000000031', '3100000031', '3200000031', '3300000031')).toEqual(['3200000031', '3300000031']);
+    // A recent certificate with an issue date of tomorrow does not count, and it does not take the place of the
+    // parcel's real permit. A finished home's permit with no issue date still counts.
+    await permit('BLD9900-0034', { parcel_pin: '3400000031', issued_date: tomorrow, co_date: dateAgo(10) });
+    expect(await found('3400000031')).toEqual([]);
+    await permit('BLD9900-0035', { parcel_pin: '3400000031', issued_date: dateAgo(300), co_date: dateAgo(20) });
+    expect((await newHomePermitsForParcels([parcel('3400000031')]))['3400000031'].permit_no).toBe('BLD9900-0035');
+    await permit('BLD9900-0036', { parcel_pin: '3600000031', issued_date: null, co_date: dateAgo(10) });
+    expect(await found('3600000031')).toEqual(['3600000031']);
   });
 
   test('new-home permits: the 24-month limit counts back from today in Eastern time', async () => {
@@ -418,7 +515,7 @@ postgres('mail prospect store on PostgreSQL', () => {
       legal_description: long('LOT 1 EXAMPLE', 900), address_line1: long('101 EXAMPLE TRL', 500),
       city: long('EXAMPLE', 200), subdivision: long('EXAMPLE LAKES', 400),
     });
-    expect(await saveProspect(row)).toBe(row.status);
+    expect((await saveProspect(row)).status).toBe(row.status);
     const saved = await conn('mail_prospects').where({ source_ref: '202641990001' }).first();
     expect(saved).toMatchObject({
       legal_description: row.legal_description, address_line1: row.address_line1, city: row.city, subdivision: row.subdivision,
@@ -432,5 +529,64 @@ postgres('mail prospect store on PostgreSQL', () => {
     await conn('customers').insert({ address_line1: '77 Lastone Ln', zip: '34221' });
     expect(await addressKnownToWaves('77 LASTONE LN', '34221')).toBe(true);
     expect(await addressKnownToWaves('77 MISSING LN', '34221')).toBe(false);
+  });
+
+  test('the new-home run saves through this store: a new home, a known address and a deed with no parcel', async () => {
+    // One clock for the run and the table (the 20-hour wait compares them): now, and the newest day a night
+    // run reads today.
+    const now = Date.now();
+    const [day] = daysToRead('night', now);
+    const deedRow = (lot) => ({
+      instrument: String(202699200000 + lot), from: ['SAMPLE HOMES LLC'], to: ['TESTER ALEX J'], type: 'DEED',
+      consideration: 425000, description: `LOT ${lot} SAMPLE GROVE`, date: day,
+    });
+    const mapParcel = (extra = {}) => ({
+      parid: '513309059', addressLine1: '101 EXAMPLE TRL', city: 'SAMPLETON', zip: '34212', subdivision: 'SAMPLE GROVE',
+      lot: '12', block: null, ownerName: 'SAMPLE HOMES LLC', ownerName2: null, livingSqft: 2100, stories: 2, yearBuilt: 2026,
+      platKnown: true, ...extra,
+    });
+    const parcelsByLot = {
+      12: [mapParcel()],
+      13: [mapParcel({ parid: '777000111', lot: '13', addressLine1: '202 KNOWN RD' })],
+      14: [],
+    };
+    const deps = {
+      fetchDayList: jest.fn(async (asked) => ({ rows: asked === day ? [deedRow(12), deedRow(13), deedRow(14)] : [] })),
+      queryParcels: jest.fn(async (legal) => parcelsByLot[legal.lot]),
+      sleep: async () => {},
+    };
+    await permit('BLD9900-0040', { parcel_pin: '5133090590', co_date: dateAgo(15) });
+    await permit('BLD9900-0041', { parcel_pin: '7770001110', address_loose_key: '202known34212', address_raw: '202 KNOWN RD  SAMPLETON 34212' });
+    await conn('customers').insert({ address_line1: '202 Known Rd', zip: '34212' });
+    const live = holdBack(LIST_KEY, '513309059') ? 'held_back' : 'eligible';
+
+    const first = await runNewHomeList({ mode: 'night', now, deps });
+    expect(first.saved).toEqual({ [live]: 1, not_eligible: 1, unmatched: 1 });
+    expect(first.savedByReason).toEqual({ 'not_eligible/known_address': 1, 'unmatched/no_parcel': 1 });
+    expect(first.errors).toEqual({});
+    const rows = (await conn.raw(
+      `SELECT source_ref, status, reason, match_basis, parcel_pin, permit_no, to_char(co_date, 'YYYY-MM-DD') AS co_date,
+              address_line1, city, state, zip, subdivision, living_sqft, stories::float AS stories, year_built,
+              legal_description, recipient_names, to_char(recorded_date, 'YYYY-MM-DD') AS recorded_date
+         FROM mail_prospects ORDER BY source_ref`,
+    )).rows;
+    expect(rows.map((r) => [r.source_ref, r.status, r.reason])).toEqual([
+      ['202699200012', live, null], ['202699200013', 'not_eligible', 'known_address'], ['202699200014', 'unmatched', 'no_parcel'],
+    ]);
+    expect(rows[0]).toMatchObject({
+      match_basis: 'owner_permit', parcel_pin: '513309059', permit_no: 'BLD9900-0040', co_date: dateAgo(15),
+      address_line1: '101 EXAMPLE TRL', city: 'SAMPLETON', state: 'FL', zip: '34212', subdivision: 'SAMPLE GROVE',
+      living_sqft: 2100, stories: 2, year_built: 2026, legal_description: 'LOT 12 SAMPLE GROVE',
+      recipient_names: ['TESTER ALEX J'], recorded_date: day,
+    });
+    expect(rows[1]).toMatchObject({ parcel_pin: null, permit_no: null, address_line1: null });
+
+    // A second run asks the map about nothing: two deeds are settled, and the third waits 20 hours.
+    deps.queryParcels.mockClear();
+    const second = await runNewHomeList({ mode: 'night', now, deps });
+    expect(second.skipped).toMatchObject({ settled: 2, retry_wait: 1 });
+    expect(second.saved).toEqual({});
+    expect(deps.queryParcels).not.toHaveBeenCalled();
+    expect(await conn('mail_prospects').count('* as n').first()).toMatchObject({ n: '3' });
   });
 });

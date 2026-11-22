@@ -1055,8 +1055,12 @@ clears the picked time and reloads its list). The move's write also pins the
 technician and the length it judged, so a dispatch edit that lands between the
 move's read and its write answers this route's existing concurrent-change 409
 (`{ error, code: null }`) instead of being written over. No new status, field
-or code. Not yet checked at a commit: a public reschedule that moves a visit
-group as one unit or shifts a recurring series with it (the grouped moves, the
+or code. A grouped stop (two or more services at one address) is not moved
+from this route, gate on or off: the page answers its `grouped` verdict and the
+mover refuses a customer's move of the stop before any shift check, as before.
+So the stop's own shift check (D4 part 3b-2b: a technician's rain-out,
+auto-dispatch) adds no answer to a public route. Not yet
+checked at a commit: a public reschedule that shifts a recurring series (the
 next D4 part), and the day as the route would run it (capacity mode). Gate
 off: byte-identical.
 `GET /api/public/estimates/:token/available-slots?date=` with a date past the
@@ -5158,7 +5162,13 @@ emailed link is clicked), so an anonymous post cannot retag an already-confirmed
 best-effort: a failure never fails the signup, and the zip/city values are never logged. The
 same B5 rule shapes the rest of subscribe: a repeat submit for an address whose last confirmation
 is under 10 minutes old sends no second email and answers exactly the same, and an `unsubscribed`/
-`inactive` address is only changed by the confirm POST, never by the subscribe POST. An unsubscribe
+`inactive` address is only changed by the confirm POST, never by the subscribe POST. The confirm
+POST's flip (a `pending` row, or a live re-signup token) also records the reader's own click on the
+row it flips: `reader_confirmed_at` and `reader_confirmed_email` (the row's address, lowercased in
+SQL). No other route or writer sets those columns (a comeback that is not the reader's click clears
+them); the confirm GET stays read-only; a link on a row
+that is already `active` still answers `already_active` and writes nothing; the responses are
+unchanged; and a failed confirm POST logs an error code, never the failed query's text. An unsubscribe
 (one-click POST or a SendGrid unsubscribe event) that lands on an already-`unsubscribed` row holding
 a live re-signup token advances `unsubscribed_at`, which revokes that emailed link; the unsubscribe
 GET page shows its confirm form for such a row); the quiz and feedback tokens are the same

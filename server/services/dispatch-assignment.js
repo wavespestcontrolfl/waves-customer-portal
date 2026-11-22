@@ -5,7 +5,7 @@ const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { stampedDivergesSql, stampedLine2Sql } = require('./stamped-address');
 const { assertAssignableTechnician } = require('./technician-eligibility');
-const { techWorkDaysLive } = require('../config/feature-gates');
+const { techWorkDaysLive, techShiftHoursLive } = require('../config/feature-gates');
 
 const ADMIN_ROOM = 'dispatch:admins';
 const ADMIN_EVENT = 'dispatch:job_update';
@@ -159,7 +159,11 @@ async function flushDispatchQualityDates(qualityDates) {
   return require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates });
 }
 
-async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, trx = null, skipVisitSeam = false, expectTechnicianId, noticeSnapshot = null, noticeActorId, noticePrevious = null, place } = {}) {
+// The columns a job's own block is read from (window-rules rowBlockMinutes):
+// what the shift check judges, and what the assignment write then pins.
+const SHIFT_BLOCK_COLUMNS = ['window_start', 'window_end', 'estimated_duration_minutes'];
+
+async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, trx = null, skipVisitSeam = false, expectTechnicianId, noticeSnapshot = null, noticeActorId, noticePrevious = null, place, shiftHours } = {}) {
   if (!jobId) throw httpError(400, 'jobId is required');
   if (technicianId === undefined) throw httpError(400, 'technicianId required');
   if (technicianId !== null && typeof technicianId !== 'string') {
@@ -242,7 +246,7 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
     const { lockTechDays } = require('./scheduling/tech-day-lock');
     const dayRow = await assignmentTrx('scheduled_services')
       .where({ id: jobId })
-      .first(assignmentTrx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+      .first(assignmentTrx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"), ...SHIFT_BLOCK_COLUMNS);
     if (dayRow?.day) {
       await lockTechDays(assignmentTrx, [
         { techId: fromTechId, date: dayRow.day },
@@ -259,7 +263,24 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
     // re-check must agree with the pre-check on which day is authoritative,
     // or a caller moving the date could pass the pre-check against the new
     // day and then get silently re-checked against the old one here.
-    if (newTechId) await assertAssignableTechnician(newTechId, { conn: assignmentTrx, date: dateOnly(noticeSnapshot?.date) || dayRow?.day });
+    //
+    // Shift hours (GATE_TECH_SHIFT_HOURS, D4): `shiftHours` is passed by an
+    // AUTOMATIC assignment only (a grouped stop's unit move that the office
+    // did not start). The same re-check then also refuses a technician whose
+    // shift that day does not hold the job's own block, as the row has it now
+    // (422 TECH_NOT_ASSIGNABLE with `outsideShift`). The write below pins that
+    // block, so an edit of the hours or the length that landed after the day
+    // read above is a concurrent change, never an unjudged assignment. Office
+    // paths never pass it. Not passed, or with the gate off: nothing is
+    // judged, no hours are read and nothing more is pinned (the day read
+    // returns the row's three block columns either way).
+    const shiftBlock = shiftHours && techShiftHoursLive() ? dayRow : null;
+    if (newTechId) {
+      await assertAssignableTechnician(newTechId, {
+        conn: assignmentTrx, date: dateOnly(noticeSnapshot?.date) || dayRow?.day,
+        hours: shiftBlock ? require('./scheduling/window-rules').rowBlockMinutes(shiftBlock) : undefined,
+      });
+    }
     // CAS on the PRE-LOCK tech + day (uncapped audit r29 P1): job and
     // fromTechId were read before the advisory locks, so a writer that
     // committed while we waited may have already assigned this job (its
@@ -271,6 +292,7 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
       .whereNotIn('status', TERMINAL_STATUSES)
       .whereRaw('technician_id IS NOT DISTINCT FROM ?', [fromTechId])
       .modify((q) => { if (dayRow?.day) q.whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ?", [dayRow.day]); })
+      .modify((q) => { if (shiftBlock) SHIFT_BLOCK_COLUMNS.forEach((column) => q.whereRaw('?? IS NOT DISTINCT FROM ?', [column, shiftBlock[column] ?? null])); })
       .update({ technician_id: newTechId, route_order: null, updated_at: assignmentTrx.fn.now() })
       .returning('*');
     if (rows.length === 0) {

@@ -38,6 +38,7 @@ const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { hasQuizToken, buildQuizSubstitutions } = require('./newsletter-quiz');
 const { hasHomeToken, loadHomeFacts } = require('./pest-insider/home');
 const { referralLineForBatch } = require('./pest-insider/referral-line');
+const { toolBlockForBatch } = require('./pest-insider/tool-block');
 const { hasFeedbackToken, ensureFeedbackToken, buildFeedbackSubstitutions } = require('./newsletter-feedback');
 const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds, isFlagshipSend } = require('./newsletter-event-selection');
@@ -1408,6 +1409,10 @@ async function sendCampaign(sendId, opts = {}) {
       // The referral line ({{pi-referral}} / {{pi-referral-text}}, pest-insider/referral-line.js):
       // read once for this batch, the same for every reader of it, and for its touchpoints.
       const referral = await referralLineForBatch(send, quizBody);
+      // "A tool we'd use" ({{pi-tool}}, HTML part only, pest-insider/tool-block.js): read once for this
+      // batch, for the readers whose opt-in evidence, address and tool pass its rules; every other
+      // reader of a body with the token gets ''. A body with no token reads nothing and adds no key.
+      const toolBlock = await toolBlockForBatch({ send, html: bodyHtml, text: bodyText, subscribers: chunkToSend, planned: Boolean(plan), db });
       const touchpointBody = stripPersonalizationTokens(send.text_body ? referral.fill(send.text_body) : stripHtml(referral.fill(send.html_body)));
       const recipients = chunkToSend.map((s) => {
         const attemptToken = attemptTokenBySub.get(s.id);
@@ -1434,6 +1439,7 @@ async function sendCampaign(sendId, opts = {}) {
             ...(evclickEnabled ? buildEvclickSubstitutions(quizBody, { token: deliveryBySub.get(s.id)?.engagement_token, urlById: evclickUrlById }) : {}),
             ...(homeEnabled ? homeSubs.forReader(s, homeFacts, mailboxBySub.get(s.id)) : {}),
             ...referral.substitutions,
+            ...toolBlock.forReader(s),
           },
           // delivery_id rides on every SendGrid event webhook for this
           // recipient, so the handler can resolve back to the right row

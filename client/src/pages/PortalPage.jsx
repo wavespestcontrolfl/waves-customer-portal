@@ -779,6 +779,41 @@ function usePlanOffers(enabled) {
 }
 
 // =========================================================================
+// The member's plan services, for the two places that NAME them: Billing's
+// Plan Charges and the Learn sentence (owner 2026-11-22, "fix box"). The
+// server builds the list (planFamilies on the all-properties schedule read,
+// from the tier alignment's own rules); this hook only maps each family to
+// its catalog entry, in catalog order. It never guesses from the tier: both
+// places listed the first N catalog services for an N-service tier, so a
+// lawn-only Bronze member read "Pest Control".
+// null while the read loads, after a failed read, and from a server that
+// does not send the list: the caller then names no service. `enabled` is
+// false for a cancelled account (its session may not read the schedule) and
+// for a non-member.
+// =========================================================================
+const PLAN_FAMILY_CATALOG_IDS = { termite_bait: 'termite' };
+function planServicesFromFamilies(families) {
+  if (!Array.isArray(families)) return null;
+  const ids = new Set(families.map((family) => PLAN_FAMILY_CATALOG_IDS[family] || family));
+  return SERVICE_CATALOG.filter((svc) => ids.has(svc.id));
+}
+function usePlanServices(enabled, reloadKey = 0) {
+  const [families, setFamilies] = useState(null);
+  useEffect(() => {
+    if (!enabled) {
+      setFamilies(null);
+      return undefined;
+    }
+    let cancelled = false;
+    api.getSchedule(365, { allProperties: true })
+      .then((data) => { if (!cancelled) setFamilies(Array.isArray(data?.planFamilies) ? data.planFamilies : null); })
+      .catch(() => { if (!cancelled) setFamilies(null); });
+    return () => { cancelled = true; };
+  }, [enabled, reloadKey]);
+  return useMemo(() => planServicesFromFamilies(families), [families]);
+}
+
+// =========================================================================
 // PROPERTY ALERTS HOOK — recent advisories from the daily alerts sweep
 // (dark behind GATE_PROPERTY_ALERTS; gate-off answers available:false and
 // the card renders nothing). Best-effort: a failed load just hides the card.
@@ -6491,6 +6526,10 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
   // mosquito note stays on Home. Pest or lawn only (the shared offer ladder).
   const [offersReloadKey, setOffersReloadKey] = useState(0);
   const homeRecommendations = usePropertyRecommendations(!cancelledAccount, offersReloadKey);
+  // The services Plan Charges lists, from the server (usePlanServices). A
+  // purchase from the offer card changes the plan, so the list reads again
+  // with the offers.
+  const planServices = usePlanServices(!cancelledAccount && !!resolveActiveTierName(customer), offersReloadKey);
   const billingOffers = useMemo(() => {
     const cards = (homeRecommendations?.cards || []).filter((c) => c.kind === 'offer');
     return cards.length ? { ...homeRecommendations, cards } : null;
@@ -7146,7 +7185,6 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
   const tierName = activeTierName || 'No Plan';
   const tier = activeTierName ? TIER[tierName] : null;
   const monthlyRate = customer?.monthlyRate || 0;
-  const numServices = activeTierName ? (TIER_SERVICES[tierName] || 1) : 0;
   const discount = activeTierName ? (TIER_DISCOUNTS[tierName] || 0) : 0;
 
   // Card expiry check — already expired, or expiring within 60 days. An
@@ -7354,7 +7392,10 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
   // figures (static catalog basePrice × 12 × discount) were fabricated
   // annual totals — the card now speaks in the tier's real percentage
   // (owner 2026-07-11: no per-year totals, no invented per-service rates).
-  const includedServices = SERVICE_CATALOG.slice(0, numServices);
+  // The member's own plan services (planServices, read above): never the
+  // first N catalog services for an N-service tier. No row while the read
+  // loads or after it fails.
+  const includedServices = planServices || [];
 
   const currentBalance = Number(balance?.currentBalance || 0);
   const balanceState = currentBalance > 0 ? 'Balance due' : 'Current';
@@ -10595,10 +10636,15 @@ function LearnTab({ customer, onOpenPhotoId = null, scope = null }) {
 
   const activeTierName = resolveActiveTierName(customer);
   const tierName = activeTierName || 'No Plan';
-  const numServices = activeTierName ? (TIER_SERVICES[tierName] || 1) : 0;
-  const customerServiceNames = SERVICE_CATALOG
-    .slice(0, numServices)
+  // The member's own plan services, from the server (usePlanServices): never
+  // the first N catalog services for an N-service tier. No name while the
+  // read loads or after it fails: the sentence below stays out.
+  const planServices = usePlanServices(customer?.cancelled !== true && !!activeTierName);
+  const customerServiceNames = (planServices || [])
     .map(s => s.name.replace(/ Program| Barrier Treatment/g, '').replace('Quarterly ', ''));
+  // The count is the number of services the sentence names. No count while
+  // the list is not known: never the tier's size as a guess.
+  const numServices = customerServiceNames.length;
 
   const filteredFaq = faqSearch.trim()
     ? faq.map(cat => ({
@@ -10698,11 +10744,13 @@ function LearnTab({ customer, onOpenPhotoId = null, scope = null }) {
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
               {activeTierName ? `WaveGuard ${tierName}` : 'No active WaveGuard plan'}
             </div>
-            <div style={{ marginTop: 4, fontSize: 14, color: muted }}>
-              {activeTierName
-                ? `${numServices} included service${numServices === 1 ? '' : 's'} in your guidance.`
-                : 'Plan-specific guidance appears after activation.'}
-            </div>
+            {(!activeTierName || numServices > 0) && (
+              <div style={{ marginTop: 4, fontSize: 14, color: muted }}>
+                {activeTierName
+                  ? `${numServices} included service${numServices === 1 ? '' : 's'} in your guidance.`
+                  : 'Plan-specific guidance appears after activation.'}
+              </div>
+            )}
           </div>
         </div>
 
@@ -19114,4 +19162,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { buildArticles, useLearnArticles, ScoreRing, LawnHealthCard, ChatWidget, LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, PropertyScopeSelect, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ReferTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };
+export { buildArticles, useLearnArticles, ScoreRing, LawnHealthCard, ChatWidget, LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, LearnTab, PropertyScopeSelect, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ReferTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };
