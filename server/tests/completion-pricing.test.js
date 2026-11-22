@@ -88,6 +88,11 @@ describe('completion estimate evidence', () => {
     const gold = { tierDiscounted: true, estimateTier: { tier: 'gold', amount: 0.15 } };
     expect(names(acceptedPricing(row(28.33, { perTreatment: 33.33, visitsPerYear: 9, annualAfterDiscount: 254.97 }), gold)))
       .toEqual([['WaveGuard Gold', 5, 15, true]]);
+    // A program priced from its annual: the list price is the rounded per-visit share of the saved annual list, which
+    // is then the basis. A saved annual that is not the list price's basis is not used.
+    expect(names(acceptedPricing(row(85, { perTreatment: 100, annual: 400.01, annualAfterDiscount: 340.01 }), gold)))
+      .toEqual([['WaveGuard Gold', 15, 15, true]]);
+    expect(names(acceptedPricing(row(85, { perTreatment: 100, annual: 500, annualAfterDiscount: 340.01 }), gold))).toEqual(unnamed(15));
     // A row with its own per-application net has no annual rounding: it must match to the cent.
     expect(names(acceptedPricing(row(96, { priceAfterDiscount: 96 }), platinum))).toEqual([['WaveGuard Platinum', 24, 20, true]]);
     expect(names(acceptedPricing(row(96.04, { priceAfterDiscount: 96.04 }), platinum))).toEqual(unnamed(23.96));

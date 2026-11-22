@@ -178,26 +178,32 @@ function staffAdjustedRow(raw) {
   return adjusted !== null && adjusted !== money(raw.annualAfterDiscount);
 }
 
-// The cents a tier rate leaves on a list price over a number of visits: the exact cents, or either neighbour when
-// they land on a half cent (the engine and applyDiscount round a half cent in opposite directions).
-function tierNetCents(base, visits, rate) {
-  const cents = Math.round(base * 100) * visits * (1 - rate);
+// The cents a tier rate leaves on a list price in cents: the exact cents, or either neighbour when they land on a
+// half cent (the engine and applyDiscount round a half cent in opposite directions).
+function tierNetCents(listCents, rate) {
+  const cents = listCents * (1 - rate);
   return [Math.round(cents - 1e-6), Math.round(cents + 1e-6)];
 }
 
 // Whether a list-price row's own saved figures prove the tier's rate priced it, to the cent. A row with its own
 // per-application net must be billed at that net, and it must be the tier's net on the list price. Any other row is
 // billed from its saved annual (public-quote.js perApplicationForLine, same visit count): that annual must be the
-// tier's annual on list price x visits, and the billed net its per-visit share. A row with neither proves nothing.
+// tier's annual on the annual list price, and the billed net its per-visit share. The annual list price is list price
+// x visits, or the row's own saved annual list when the list price is its rounded per-visit share (the engine prices
+// lawn and tree programs from the annual). A row with neither proves nothing.
 function tierPricedRow(raw, base, savings, rate) {
   if (!(rate > 0 && rate <= 1)) return false;
+  const baseCents = Math.round(base * 100);
   const netCents = Math.round((base - savings) * 100);
   const ownNet = money(raw.priceAfterDiscount);
-  if (ownNet !== null) return Math.round(ownNet * 100) === netCents && tierNetCents(base, 1, rate).includes(netCents);
+  if (ownNet !== null) return Math.round(ownNet * 100) === netCents && tierNetCents(baseCents, rate).includes(netCents);
   const visits = [raw.visitsPerYear, raw.visits, raw.appsPerYear, raw.frequency].map(Number).find((count) => count > 0);
   const annual = money(raw.annualAfterDiscount);
-  if (!visits || !(annual > 0)) return false;
-  return tierNetCents(base, visits, rate).includes(Math.round(annual * 100)) && Math.round((annual / visits) * 100) === netCents;
+  if (!visits || !(annual > 0) || Math.round((annual / visits) * 100) !== netCents) return false;
+  const savedLists = [raw.annualBeforeDiscount, raw.annual].map(money)
+    .filter((list) => list !== null && Math.round((list / visits) * 100) === baseCents);
+  return [baseCents * visits, ...savedLists.map((list) => Math.round(list * 100))]
+    .some((listCents) => tierNetCents(listCents, rate).includes(Math.round(annual * 100)));
 }
 
 // A discount rate the row itself recorded (the legacy mapper writes one on lawn rows, with no tier record) that is not
