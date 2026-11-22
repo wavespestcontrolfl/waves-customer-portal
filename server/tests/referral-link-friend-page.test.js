@@ -1,15 +1,17 @@
 /**
  * /r/:code landing (GATE_REFERRAL_FRIEND_PAGE, referral plan part 4): a member's link goes to the website's
- * friend page only while the gate is on AND the live Step 2 friend credit equals the amount that page states.
- * In every other state it goes to the homepage, as before. The engine's own reader (step2FriendCreditCents)
- * runs for real over a fake settings row, so the route and the reader are tested together.
+ * friend page only while the gate is on, the live Step 2 friend credit equals the amount that page states, and
+ * the code has an owner the office can confirm. In every other state it goes to the homepage, as before.
+ *
+ * The engine's own reader (step2FriendCreditCents) and the queue's own owner lookup (customerForCode) run for
+ * real over small in-memory tables, so the route and the two rules are tested together.
  */
 const state = {
   gates: {},
   settings: null,
-  settingsThrows: false,
-  promoter: null,
-  legacyCustomer: null,
+  failingTable: null,
+  promoters: [],
+  customers: [],
   tables: [],
   inserts: [],
   increments: [],
@@ -21,26 +23,35 @@ jest.mock('../config/feature-gates', () => {
 });
 
 jest.mock('../models/db', () => {
+  const rowsOf = (table) => {
+    if (table === 'referral_program_settings') return state.settings ? [state.settings] : [];
+    if (table === 'referral_promoters') return state.promoters;
+    if (table === 'customers') return state.customers;
+    return []; // referral_clicks: no click in the last 24 hours
+  };
   const builder = (table) => {
     state.tables.push(table);
+    const tests = [];
     const b = {
-      where: () => b,
-      whereNotNull: () => b,
+      // where({ col: value }) filters; the 3-argument form (a date range on referral_clicks) is not modelled.
+      where: (cond) => {
+        if (cond && typeof cond === 'object') tests.push((row) => Object.entries(cond).every(([k, v]) => row[k] === v));
+        return b;
+      },
+      whereNull: (col) => { tests.push((row) => row[col] == null); return b; },
+      whereNotNull: (col) => { tests.push((row) => row[col] != null); return b; },
       first: async () => {
-        if (table === 'referral_program_settings') {
-          if (state.settingsThrows) throw new Error('settings row cannot be read');
-          return state.settings;
-        }
-        if (table === 'referral_promoters') return state.promoter;
-        if (table === 'customers') return state.legacyCustomer;
-        return null; // referral_clicks: no click in the last 24 hours
+        if (state.failingTable === table) throw new Error(`${table} cannot be read`);
+        return rowsOf(table).find((row) => tests.every((t) => t(row))) || null;
       },
       insert: async (row) => { state.inserts.push(row); return [1]; },
       increment: async (cols) => { state.increments.push(cols); return 1; },
     };
     return b;
   };
-  return jest.fn(builder);
+  const db = jest.fn(builder);
+  db.raw = (sql) => sql;
+  return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
@@ -75,13 +86,16 @@ const liveStep2 = () => {
   state.gates = { referralFriendPage: true, referralStep2: true };
   state.settings = { id: 1, program_active: true, referee_discount_cents: 5000 };
 };
+const member = () => state.customers[0];
+const promoter = () => state.promoters[0];
 
 beforeEach(() => {
   state.gates = { referralFriendPage: false, referralStep2: false };
   state.settings = { id: 1, program_active: true, referee_discount_cents: 2500 };
-  state.settingsThrows = false;
-  state.promoter = { id: 'promoter-1', referral_code: CODE, status: 'active' };
-  state.legacyCustomer = null;
+  state.failingTable = null;
+  // A member with an active promoter row that owns the code.
+  state.customers = [{ id: 'customer-1', referral_code: null, deleted_at: null }];
+  state.promoters = [{ id: 1, referral_code: CODE, status: 'active', customer_id: 'customer-1', merged_into_promoter_id: null }];
   state.tables.length = 0;
   state.inserts.length = 0;
   state.increments.length = 0;
@@ -92,10 +106,11 @@ test('the page states $50', () => {
 });
 
 describe('gate off (production today)', () => {
-  test('a member link goes to the homepage, and the settings row is not read', async () => {
+  test('a member link goes to the homepage, with no settings read and no owner lookup', async () => {
     const res = await click();
     expect(res).toEqual({ status: 302, location: HOME });
-    expect(state.tables).not.toContain('referral_program_settings');
+    // The route's own reads only: the promoter, the recent click, the click row, the click count.
+    expect(state.tables).toEqual(['referral_promoters', 'referral_clicks', 'referral_clicks', 'referral_promoters']);
     expect(state.inserts).toHaveLength(1);
     expect(state.increments).toEqual([{ total_clicks: 1 }]);
   });
@@ -109,17 +124,16 @@ describe('gate off (production today)', () => {
 });
 
 describe('gate on', () => {
-  test('Step 2 live and paying what the page states: the friend page, with the code', async () => {
+  test('Step 2 pays what the page states and the code has a live owner: the friend page, with the code', async () => {
     liveStep2();
-    const res = await click();
-    expect(res).toEqual({ status: 302, location: FRIEND_PAGE });
+    expect(await click()).toEqual({ status: 302, location: FRIEND_PAGE });
   });
 
   test('the click is recorded and counted exactly as before', async () => {
     liveStep2();
     await click();
     expect(state.inserts).toHaveLength(1);
-    expect(state.inserts[0]).toMatchObject({ promoter_id: 'promoter-1', referral_code: CODE, is_unique: true, device_type: 'mobile' });
+    expect(state.inserts[0]).toMatchObject({ promoter_id: 1, referral_code: CODE, is_unique: true, device_type: 'mobile' });
     expect(state.increments).toEqual([{ total_clicks: 1 }]);
   });
 
@@ -131,45 +145,64 @@ describe('gate on', () => {
     expect(state.increments).toEqual([]);
   });
 
-  test('a code that lives only on the customer row: the friend page, and no click row', async () => {
+  test('a code of a promoter merged into another: the friend page, by the surviving promoter\'s member', async () => {
     liveStep2();
-    state.promoter = null;
-    state.legacyCustomer = { id: 'customer-1', referral_code: CODE };
-    const res = await click();
-    expect(res.location).toBe(FRIEND_PAGE);
+    state.promoters = [
+      { id: 1, referral_code: CODE, status: 'merged', customer_id: 'customer-old', merged_into_promoter_id: 2 },
+      { id: 2, referral_code: 'WAVES-KEPT01', status: 'active', customer_id: 'customer-1', merged_into_promoter_id: null },
+    ];
+    expect((await click()).location).toBe(FRIEND_PAGE);
+    expect(state.inserts[0]).toMatchObject({ promoter_id: 2 });
+  });
+
+  test('a code that lives only on a live customer row: the friend page, and no click row', async () => {
+    liveStep2();
+    state.promoters = [];
+    member().referral_code = CODE;
+    expect((await click()).location).toBe(FRIEND_PAGE);
     expect(state.inserts).toHaveLength(0);
   });
 
-  test.each([
-    ['Step 2 is off', () => { state.gates.referralStep2 = false; }],
-    ['the program is paused', () => { state.settings.program_active = false; }],
-    ['the setting pays less than the page states', () => { state.settings.referee_discount_cents = 2500; }],
-    ['the setting pays more than the page states', () => { state.settings.referee_discount_cents = 7500; }],
-    ['the setting has no amount', () => { state.settings.referee_discount_cents = null; }],
-    ['there is no settings row', () => { state.settings = null; }],
-    ['the settings row cannot be read', () => { state.settingsThrows = true; }],
-  ])('%s: the homepage, with the code, and the click still recorded', async (_name, arrange) => {
+  describe('the homepage, with the code, and the click still recorded', () => {
+    test.each([
+      ['Step 2 is off', () => { state.gates.referralStep2 = false; }],
+      ['the program is paused', () => { state.settings.program_active = false; }],
+      ['the setting pays less than the page states', () => { state.settings.referee_discount_cents = 2500; }],
+      ['the setting pays more than the page states', () => { state.settings.referee_discount_cents = 7500; }],
+      ['the setting has no amount', () => { state.settings.referee_discount_cents = null; }],
+      ['there is no settings row', () => { state.settings = null; }],
+      ['the settings row cannot be read', () => { state.failingTable = 'referral_program_settings'; }],
+      ['the member is archived', () => { member().deleted_at = new Date(); }],
+      ['the promoter has no customer', () => { promoter().customer_id = null; }],
+      ['the owner lookup fails', () => { state.failingTable = 'customers'; }],
+    ])('%s', async (_name, arrange) => {
+      liveStep2();
+      arrange();
+      expect(await click()).toEqual({ status: 302, location: HOME });
+      expect(state.inserts).toHaveLength(1);
+      expect(state.increments).toEqual([{ total_clicks: 1 }]);
+    });
+  });
+
+  test('a code that lives only on an archived customer row: the homepage with the code, as before', async () => {
     liveStep2();
-    arrange();
-    const res = await click();
-    expect(res).toEqual({ status: 302, location: HOME });
-    expect(state.inserts).toHaveLength(1);
-    expect(state.increments).toEqual([{ total_clicks: 1 }]);
+    state.promoters = [];
+    Object.assign(member(), { referral_code: CODE, deleted_at: new Date() });
+    expect((await click()).location).toBe(HOME);
+    expect(state.inserts).toHaveLength(0);
   });
 
   test('an unknown code goes home with no code, and the settings row is not read', async () => {
     liveStep2();
-    state.promoter = null;
-    const res = await click();
-    expect(res.location).toBe('https://wavespestcontrol.com');
+    state.promoters = [];
+    expect((await click()).location).toBe('https://wavespestcontrol.com');
     expect(state.tables).not.toContain('referral_program_settings');
     expect(state.inserts).toHaveLength(0);
   });
 
   test('a malformed code goes home before any read', async () => {
     liveStep2();
-    const res = await click('a%20b');
-    expect(res.location).toBe('https://wavespestcontrol.com');
+    expect((await click('a%20b')).location).toBe('https://wavespestcontrol.com');
     expect(state.tables).toEqual([]);
   });
 });

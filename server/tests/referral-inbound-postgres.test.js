@@ -313,6 +313,41 @@ jest.mock('../services/customer-credit', () => ({
     });
   });
 
+  // The owner of a code is who the queue names for a link lead, and who the /r/ route must find before it sends
+  // a friend to the page that promises the credit (routes/referral-links.js friendPageApplies).
+  describe('the owner of a code (customerForCode)', () => {
+    const promoterRow = async (fields) => (await db('referral_promoters').insert({
+      customer_phone: freshPhone(), first_name: 'Fixture', last_name: 'Promoter', ...fields,
+    }).returning('*'))[0];
+
+    test('an active promoter: its customer; an archived customer or none: nobody', async () => {
+      const jane = await customer({ first_name: 'Jane' });
+      await promoterRow({ referral_code: 'WAVES-JANE', customer_id: jane.id });
+      expect((await inbound.customerForCode('WAVES-JANE')).id).toBe(jane.id);
+
+      await db('customers').where({ id: jane.id }).update({ deleted_at: new Date() });
+      expect(await inbound.customerForCode('WAVES-JANE')).toBeFalsy();
+
+      await promoterRow({ referral_code: 'WAVES-ALONE', customer_id: null });
+      expect(await inbound.customerForCode('WAVES-ALONE')).toBeFalsy();
+    });
+
+    test('a merged promoter code: the customer of the promoter it was merged into', async () => {
+      const kept = await customer({ first_name: 'Kept' });
+      const survivor = await promoterRow({ referral_code: 'WAVES-KEPT', customer_id: kept.id });
+      await promoterRow({ referral_code: 'WAVES-OLD', status: 'merged', merged_into_promoter_id: survivor.id });
+      expect((await inbound.customerForCode('WAVES-OLD')).id).toBe(kept.id);
+    });
+
+    test('a code on the customer row alone: that customer, unless archived; a code nobody holds: nobody', async () => {
+      const jane = await customer({ first_name: 'Jane', referral_code: 'WAVES-JANE' });
+      expect((await inbound.customerForCode('WAVES-JANE')).id).toBe(jane.id);
+      await db('customers').where({ id: jane.id }).update({ deleted_at: new Date() });
+      expect(await inbound.customerForCode('WAVES-JANE')).toBeFalsy();
+      expect(await inbound.customerForCode('WAVES-NONE')).toBeFalsy();
+    });
+  });
+
   test("a link code from the customer's own household is flagged, never suggested", async () => {
     const accountId = randomUUID();
     await customer({ account_id: accountId, referral_code: 'WAVES-SELF' });
