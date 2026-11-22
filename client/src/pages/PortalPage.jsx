@@ -779,6 +779,35 @@ function usePlanOffers(enabled) {
 }
 
 // =========================================================================
+// The member's plan services for Billing's Plan Charges: My Plan's own two
+// schedule reads (all properties) and its own derivation
+// (resolvePlanServices), so the two tabs list the same services. null while
+// the reads load and after a failed read: the box then names no service
+// rather than guess one from the tier. `enabled` is false for a cancelled
+// account (its session may not read the schedule) and for a non-member.
+// =========================================================================
+function usePlanServices(customer, enabled, reloadKey = 0) {
+  const [rows, setRows] = useState(null);
+  useEffect(() => {
+    if (!enabled) {
+      setRows(null);
+      return undefined;
+    }
+    let cancelled = false;
+    Promise.all([
+      api.getNextService({ allProperties: true }),
+      api.getSchedule(365, { allProperties: true }),
+    ])
+      .then(([nextData, scheduleData]) => {
+        if (!cancelled) setRows({ next: nextData?.next || null, upcoming: scheduleData?.upcoming || [] });
+      })
+      .catch(() => { if (!cancelled) setRows(null); });
+    return () => { cancelled = true; };
+  }, [enabled, reloadKey]);
+  return rows ? resolvePlanServices(customer, rows.next, rows.upcoming).includedServices : null;
+}
+
+// =========================================================================
 // PROPERTY ALERTS HOOK — recent advisories from the daily alerts sweep
 // (dark behind GATE_PROPERTY_ALERTS; gate-off answers available:false and
 // the card renders nothing). Best-effort: a failed load just hides the card.
@@ -6495,6 +6524,10 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
     const cards = (homeRecommendations?.cards || []).filter((c) => c.kind === 'offer');
     return cards.length ? { ...homeRecommendations, cards } : null;
   }, [homeRecommendations]);
+  // Plan Charges lists the member's own services, as My Plan does. A
+  // purchase from the offer card above adds visits, so it reloads them too
+  // (handleOfferPurchased moves offersReloadKey).
+  const planServices = usePlanServices(customer, !cancelledAccount && !!resolveActiveTierName(customer), offersReloadKey);
   const [payments, setPayments] = useState([]);
   // "Apply my credit automatically" slider (owner ruling 2026-08-28): the
   // balance stays on the account until the customer turns this on. Server-
@@ -7146,7 +7179,6 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
   const tierName = activeTierName || 'No Plan';
   const tier = activeTierName ? TIER[tierName] : null;
   const monthlyRate = customer?.monthlyRate || 0;
-  const numServices = activeTierName ? (TIER_SERVICES[tierName] || 1) : 0;
   const discount = activeTierName ? (TIER_DISCOUNTS[tierName] || 0) : 0;
 
   // Card expiry check — already expired, or expiring within 60 days. An
@@ -7354,7 +7386,10 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
   // figures (static catalog basePrice × 12 × discount) were fabricated
   // annual totals — the card now speaks in the tier's real percentage
   // (owner 2026-07-11: no per-year totals, no invented per-service rates).
-  const includedServices = SERVICE_CATALOG.slice(0, numServices);
+  // The member's own services, as My Plan lists them (usePlanServices). Was
+  // the first N catalog services for an N-service tier, which named Pest
+  // Control for a lawn-only Bronze member (owner 2026-11-22, "fix box").
+  const includedServices = planServices || [];
 
   const currentBalance = Number(balance?.currentBalance || 0);
   const balanceState = currentBalance > 0 ? 'Balance due' : 'Current';
@@ -7724,7 +7759,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
               color: B.grayDark,
             }}>
               <Icon name={svc.icon} size={16} strokeWidth={1.8} style={{ color: B.glassNavy }} />
-              <span style={{ minWidth: 0, flex: 1 }}>{svc.name}</span>
+              <span style={{ minWidth: 0, flex: 1 }}>{svc.displayName}</span>
             </div>
           ))}
         </div>
@@ -11114,6 +11149,138 @@ function resolveActiveTierName(customer = {}) {
   return null;
 }
 
+// ── The plan's service list (My Plan cards, Billing's Plan Charges) ────────
+// One derivation for both tabs (owner 2026-11-22, "fix box"): Billing listed
+// the first N catalog services for an N-service tier, so a lawn-only Bronze
+// member read "Pest Control" under Plan Charges.
+
+// Does a schedule row belong to a catalog service?
+function planServiceMatches(svcId, service = {}) {
+  // Server-resolved family wins when present (codex #3591 r58 P1):
+  // catalog-over-label, so a bait row wearing a stale 'Rodent Trapping'
+  // label lands on the bait plan card instead of being dropped or
+  // reclassified from text.
+  const fam = String(service.serviceFamily || '').toLowerCase();
+  if (fam) {
+    if (svcId === 'termite') return fam === 'termite_bait' || fam === 'termite';
+    return fam === svcId;
+  }
+  const svcType = (service.serviceType || service.service_type || service.type || '').toLowerCase();
+  return (
+    (svcId === 'pest_control' && (svcType.includes('pest') || svcType.includes('general'))) ||
+    (svcId === 'lawn_care' && (svcType.includes('lawn') || svcType.includes('fertiliz') || svcType.includes('turf'))) ||
+    (svcId === 'mosquito' && svcType.includes('mosquito')) ||
+    (svcId === 'tree_shrub' && (svcType.includes('tree') || svcType.includes('shrub') || svcType.includes('palm'))) ||
+    (svcId === 'termite' && svcType.includes('termite')) ||
+    // Powers the schedule/calendar helpers for the standalone rodent row.
+    // Plan-coverage detection still never sees rodent rows — the
+    // PLAN_NON_QUALIFIER_RE filter runs upstream of detection. Narrowed to
+    // bait/station/monitoring labels: serviceHistory carries no recurring
+    // signal, so a bare /rodent/ match would count a one-time "Rodent
+    // Exclusion" project as a completed bait application (codex P2).
+    (svcId === 'rodent_bait' && svcType.includes('rodent')
+      && (svcType.includes('bait') || svcType.includes('station') || svcType.includes('monitor')))
+  );
+}
+
+function detectCatalogServiceId(service) {
+  for (const svc of SERVICE_CATALOG) {
+    if (planServiceMatches(svc.id, service)) return svc.id;
+  }
+  return null;
+}
+
+const planRowName = (service) => service.serviceDisplayName || service.serviceType || service.service_type || service.type;
+
+// Only recurring, non-callback visits represent WaveGuard plan coverage. One-time
+// visits (e.g. a single termite inspection) and free re-service callbacks must not
+// drive the included-services list, or under the tier-limit slice they could
+// displace the customer's real plan. Service history (service_records) carries no
+// is_recurring signal, so it is not used for detection. We also exclude
+// non-qualifying families — palm injection, rodent, and one-time work — to match the
+// server classifier (toQualifyingKey), so e.g. a recurring palm row never shows as
+// Tree & Shrub coverage. When nothing qualifies we fall back to the tier defaults.
+const PLAN_NON_QUALIFIER_RE = /palm|one[\s_-]?time|onetime/;
+const PLAN_TERMINAL_STATUSES = new Set(['rescheduled', 'cancelled', 'canceled', 'completed', 'skipped', 'no_show']);
+function isPlanCoverageRow(s) {
+  if (!s || s.isRecurring !== true || s.isCallback === true) return false;
+  // A rescheduled/terminal recurring row is a phantom for coverage — it must not be
+  // detected and, under the tier-limit slice, displace the customer's real plan.
+  if (PLAN_TERMINAL_STATUSES.has((s.status || '').toLowerCase())) return false;
+  // Server-derived qualification wins when present (schedule route,
+  // codex #3591 r19 P1): it follows the live rodent_waveguard flag through
+  // the same classifier alignment uses, so a rodent-only account whose
+  // tier was cleared server-side never lists bait stations as coverage.
+  if (typeof s.waveguardQualifying === 'boolean') return s.waveguardQualifying;
+  const text = (s.serviceType || s.service_type || s.type || '').toLowerCase();
+  if (PLAN_NON_QUALIFIER_RE.test(text)) return false;
+  // Legacy payloads (no server flag): rodent BAIT stations are WaveGuard
+  // plan coverage since 2026-08-29 — mirrors the server classifier;
+  // non-bait rodent work (trapping, exclusion, one-time) never qualifies.
+  if (/rodent|rat\b|mice|mouse/.test(text) && !/bait|station|monitor/.test(text)) return false;
+  return true;
+}
+
+// → { includedServices, pestPlanName } from the
+// customer's next visit and upcoming schedule (both read for ALL the
+// customer's properties). Each included service carries `displayName`, the
+// name both tabs list it under.
+export function resolvePlanServices(customer, nextService, upcomingServices = []) {
+  const detectedServiceIds = [];
+  // Real catalog name of the visit that matched each card ("Seasonal Mosquito
+  // Control Service"), so the card never states the wrong program — the
+  // SERVICE_CATALOG names are family placeholders for tier padding only.
+  const detectedServiceNames = {};
+  const addDetectedService = (service) => {
+    const id = detectCatalogServiceId(service);
+    if (!id) return;
+    if (!detectedServiceIds.includes(id)) detectedServiceIds.push(id);
+    // serviceDisplayName is the server's resolved CATALOG name, set only
+    // when catalog identity overrode a stale label's family (codex #3591
+    // r79 P2) — prefer it so the card title matches the card's program
+    // (a repointed "Rodent Trapping" label never titles the bait card).
+    const realName = planRowName(service);
+    if (realName && !detectedServiceNames[id]) detectedServiceNames[id] = realName;
+  };
+  [nextService, ...upcomingServices].filter(isPlanCoverageRow).forEach(addDetectedService);
+  // The pest card names the plan as it goes on: its LAST upcoming visit (the
+  // schedule read is in date order). After a frequency change the next visit
+  // can be one that stays as booked on the old plan
+  // (pest-frequency-change.js), and a card titled by it would still read
+  // "Quarterly" right after the customer chose monthly. The other cards keep
+  // the name of their first visit.
+  const lastPestVisit = upcomingServices.filter(isPlanCoverageRow)
+    .filter((service) => detectCatalogServiceId(service) === 'pest_control').pop();
+  const pestPlanName = (lastPestVisit && planRowName(lastPestVisit)) || detectedServiceNames.pest_control;
+
+  // For a tier'd member, the included-services list reflects the tier ENTITLEMENT, not
+  // just the rows that happen to be on the visible schedule: surface detected recurring
+  // coverage first, then pad with tier-default catalog services so a Gold/Platinum member
+  // with only a partial future schedule still shows the full count, savings, and copy.
+  // Non-tier customers only ever show what was actually detected (no entitlement padding).
+  const activeTierName = resolveActiveTierName(customer);
+  const tierServiceLimit = activeTierName ? (TIER_SERVICES[activeTierName] || 1) : 0;
+  let includedServiceIds;
+  if (activeTierName) {
+    includedServiceIds = [...detectedServiceIds];
+    for (const svc of SERVICE_CATALOG) {
+      if (includedServiceIds.length >= tierServiceLimit) break;
+      if (!includedServiceIds.includes(svc.id)) includedServiceIds.push(svc.id);
+    }
+    includedServiceIds = includedServiceIds.slice(0, tierServiceLimit);
+  } else {
+    includedServiceIds = detectedServiceIds;
+  }
+  const includedServices = includedServiceIds
+    .map(id => SERVICE_CATALOG.find(svc => svc.id === id))
+    .filter(Boolean)
+    .map(svc => ({
+      ...svc,
+      displayName: (svc.id === 'pest_control' && pestPlanName) || detectedServiceNames[svc.id] || svc.name,
+    }));
+  return { includedServices, pestPlanName };
+}
+
 const TIER_SERVICE_NAMES = {
   Bronze: ['Pest Control'],
   Silver: ['Pest Control', 'Lawn Care'],
@@ -12188,33 +12355,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
     loadTermiteAnnualPlan();
   }, [loadPlan, cancelledAccount, loadTermiteAnnualPlan, loadStationMaps]);
 
-  const serviceMatches = (svcId, service = {}) => {
-    // Server-resolved family wins when present (codex #3591 r58 P1):
-    // catalog-over-label, so a bait row wearing a stale 'Rodent Trapping'
-    // label lands on the bait plan card instead of being dropped or
-    // reclassified from text.
-    const fam = String(service.serviceFamily || '').toLowerCase();
-    if (fam) {
-      if (svcId === 'termite') return fam === 'termite_bait' || fam === 'termite';
-      return fam === svcId;
-    }
-    const svcType = (service.serviceType || service.service_type || service.type || '').toLowerCase();
-    return (
-      (svcId === 'pest_control' && (svcType.includes('pest') || svcType.includes('general'))) ||
-      (svcId === 'lawn_care' && (svcType.includes('lawn') || svcType.includes('fertiliz') || svcType.includes('turf'))) ||
-      (svcId === 'mosquito' && svcType.includes('mosquito')) ||
-      (svcId === 'tree_shrub' && (svcType.includes('tree') || svcType.includes('shrub') || svcType.includes('palm'))) ||
-      (svcId === 'termite' && svcType.includes('termite')) ||
-      // Powers the schedule/calendar helpers for the standalone rodent row.
-      // Plan-coverage detection still never sees rodent rows — the
-      // PLAN_NON_QUALIFIER_RE filter runs upstream of detection. Narrowed to
-      // bait/station/monitoring labels: serviceHistory carries no recurring
-      // signal, so a bare /rodent/ match would count a one-time "Rodent
-      // Exclusion" project as a completed bait application (codex P2).
-      (svcId === 'rodent_bait' && svcType.includes('rodent')
-        && (svcType.includes('bait') || svcType.includes('station') || svcType.includes('monitor')))
-    );
-  };
+  const serviceMatches = planServiceMatches;
 
   const activeTierName = resolveActiveTierName(customer);
   const tier = activeTierName ? TIER[activeTierName] : null;
@@ -12224,7 +12365,6 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
   const memberMonths = customer.memberSince
     ? Math.max(1, Math.round((new Date() - parseDate(customer.memberSince)) / (1000 * 60 * 60 * 24 * 30)))
     : 0;
-  const tierServiceLimit = activeTierName ? (TIER_SERVICES[activeTierName] || 1) : 0;
   // Pause/Cancel are only offered when there is something to pause or cancel.
   // When the schedule payload carries the server's nothing_to_cancel verdict
   // (same shared predicate POST /api/requests enforces), it is AUTHORITATIVE
@@ -12243,87 +12383,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
   // while Account Options can render: a cancelled account's read-only portal never calls the route.
   const movingEntryEnabled = useMovingEntry(hasCancellableAccount && !cancelledAccount);
 
-  const detectCatalogServiceId = (service) => {
-    for (const svc of SERVICE_CATALOG) {
-      if (serviceMatches(svc.id, service)) return svc.id;
-    }
-    return null;
-  };
-  const detectedServiceIds = [];
-  const planRowName = (service) => service.serviceDisplayName || service.serviceType || service.service_type || service.type;
-  // Real catalog name of the visit that matched each card ("Seasonal Mosquito
-  // Control Service"), so the card never states the wrong program — the
-  // SERVICE_CATALOG names are family placeholders for tier padding only.
-  const detectedServiceNames = {};
-  const addDetectedService = (service) => {
-    const id = detectCatalogServiceId(service);
-    if (!id) return;
-    if (!detectedServiceIds.includes(id)) detectedServiceIds.push(id);
-    // serviceDisplayName is the server's resolved CATALOG name, set only
-    // when catalog identity overrode a stale label's family (codex #3591
-    // r79 P2) — prefer it so the card title matches the card's program
-    // (a repointed "Rodent Trapping" label never titles the bait card).
-    const realName = planRowName(service);
-    if (realName && !detectedServiceNames[id]) detectedServiceNames[id] = realName;
-  };
-  // Only recurring, non-callback visits represent WaveGuard plan coverage. One-time
-  // visits (e.g. a single termite inspection) and free re-service callbacks must not
-  // drive the included-services list, or under the tier-limit slice they could
-  // displace the customer's real plan. Service history (service_records) carries no
-  // is_recurring signal, so it is not used for detection. We also exclude
-  // non-qualifying families — palm injection, rodent, and one-time work — to match the
-  // server classifier (toQualifyingKey), so e.g. a recurring palm row never shows as
-  // Tree & Shrub coverage. When nothing qualifies we fall back to the tier defaults.
-  const PLAN_NON_QUALIFIER_RE = /palm|one[\s_-]?time|onetime/;
-  const PLAN_TERMINAL_STATUSES = new Set(['rescheduled', 'cancelled', 'canceled', 'completed', 'skipped', 'no_show']);
-  const isPlanCoverageRow = (s) => {
-    if (!s || s.isRecurring !== true || s.isCallback === true) return false;
-    // A rescheduled/terminal recurring row is a phantom for coverage — it must not be
-    // detected and, under the tier-limit slice, displace the customer's real plan.
-    if (PLAN_TERMINAL_STATUSES.has((s.status || '').toLowerCase())) return false;
-    // Server-derived qualification wins when present (schedule route,
-    // codex #3591 r19 P1): it follows the live rodent_waveguard flag through
-    // the same classifier alignment uses, so a rodent-only account whose
-    // tier was cleared server-side never lists bait stations as coverage.
-    if (typeof s.waveguardQualifying === 'boolean') return s.waveguardQualifying;
-    const text = (s.serviceType || s.service_type || s.type || '').toLowerCase();
-    if (PLAN_NON_QUALIFIER_RE.test(text)) return false;
-    // Legacy payloads (no server flag): rodent BAIT stations are WaveGuard
-    // plan coverage since 2026-08-29 — mirrors the server classifier;
-    // non-bait rodent work (trapping, exclusion, one-time) never qualifies.
-    if (/rodent|rat\b|mice|mouse/.test(text) && !/bait|station|monitor/.test(text)) return false;
-    return true;
-  };
-  [nextService, ...upcomingServices].filter(isPlanCoverageRow).forEach(addDetectedService);
-  // The pest card names the plan as it goes on: its LAST upcoming visit (the
-  // schedule read is in date order). After a frequency change the next visit
-  // can be one that stays as booked on the old plan
-  // (pest-frequency-change.js), and a card titled by it would still read
-  // "Quarterly" right after the customer chose monthly. The other cards keep
-  // the name of their first visit.
-  const lastPestVisit = upcomingServices.filter(isPlanCoverageRow)
-    .filter((service) => detectCatalogServiceId(service) === 'pest_control').pop();
-  const pestPlanName = (lastPestVisit && planRowName(lastPestVisit)) || detectedServiceNames.pest_control;
-
-  // For a tier'd member, the included-services list reflects the tier ENTITLEMENT, not
-  // just the rows that happen to be on the visible schedule: surface detected recurring
-  // coverage first, then pad with tier-default catalog services so a Gold/Platinum member
-  // with only a partial future schedule still shows the full count, savings, and copy.
-  // Non-tier customers only ever show what was actually detected (no entitlement padding).
-  let includedServiceIds;
-  if (activeTierName) {
-    includedServiceIds = [...detectedServiceIds];
-    for (const svc of SERVICE_CATALOG) {
-      if (includedServiceIds.length >= tierServiceLimit) break;
-      if (!includedServiceIds.includes(svc.id)) includedServiceIds.push(svc.id);
-    }
-    includedServiceIds = includedServiceIds.slice(0, tierServiceLimit);
-  } else {
-    includedServiceIds = detectedServiceIds;
-  }
-  const includedServices = includedServiceIds
-    .map(id => SERVICE_CATALOG.find(svc => svc.id === id))
-    .filter(Boolean);
+  const { includedServices, pestPlanName } = resolvePlanServices(customer, nextService, upcomingServices);
   const numServices = includedServices.length;
 
   // Rodent bait stations joined WaveGuard 2026-08-29 (owner directive) —
@@ -12724,7 +12784,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
                           <span style={{ minWidth: 0 }}>
                             <span data-glass="chip" style={{ ...CUSTOMER_SECTION_LABEL, marginLeft: 0 }}>
                               <Icon name={iconName(svc.icon)} size={15} strokeWidth={1.8} />
-                              {(svc.id === 'pest_control' && pestPlanName) || detectedServiceNames[svc.id] || svc.name}
+                              {svc.displayName}
                             </span>
                             <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: muted }}>
                               {svc.id === 'pest_control' ? pestCadenceLine(pestPlanName, svc.frequencies) : svc.frequencies[0]}
