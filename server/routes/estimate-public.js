@@ -23,7 +23,7 @@ const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-fo
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { groupLinkStillViewable } = require('../services/proposal-bid');
-const { isAssessmentVisit, excludeAssessmentBookings } = require('../services/assessment-booking');
+const { isAssessmentVisit, excludeAssessmentBookings, hadCompletedAssessmentLook } = require('../services/assessment-booking');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 const { UNISSUED_ESTIMATE, estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estimate-bahia-review');
 const { storedEstimateContainer } = require('../services/estimate-result-container');
@@ -24379,14 +24379,15 @@ const rowsThatMustPass = (value) => storedObjects(value)
 //   (`estimatorEngine.propertyFacts`, source-arbitration). Only the county record counts as measured. Every other
 //   source takes the answer away: a size the caller stated, each fallback source, a saved profile value, and the
 //   `property_facts_v2` label (its evidence can be a technician's field correction; this rule does not read that
-//   evidence, so it does not trust the label). Only the selected fact is read, never a rejected candidate.
+//   evidence, so it does not trust the label), and a size with no source at all. Only the selected fact is read,
+//   never a rejected candidate.
 // - An estimate drafted from a visit (`scheduled_service_id`, the marker the consultation offer reads): a technician
 //   looked at this home, so the page must not say the quote needed no visit.
 const LAWN_SERVICES = new Set(['lawn_care', 'one_time_lawn']);
 function callDraftSizesAreNotMeasured(estData) {
   const { SQFT_SOURCES } = require('../services/estimator-engine/source-arbitration');
   const facts = estData?.estimatorEngine?.propertyFacts;
-  return [facts?.home, facts?.lot].some((fact) => isStoredRow(fact) && fact.source != null
+  return [facts?.home, facts?.lot].some((fact) => isStoredRow(fact) && (fact.value != null || fact.source != null)
     && fact.source !== SQFT_SOURCES.COUNTY_ASSESSED);
 }
 const estimateWasDraftedFromAVisit = (estData) => Boolean(estData?.scheduled_service_id);
@@ -24499,6 +24500,23 @@ function estimateIsRemoteMeasured(estData = {}, pricingBundle = {}) {
   } catch (err) {
     logger.warn(`[estimate-data] no-visit line rule could not read the estimate: ${err.message}`);
     return false;
+  }
+}
+
+// The page block for the "no visit needed" line. One more reason to withhold it needs a read: a technician already
+// looked at this home (a completed Waves Assessment in the look window, with or without a link to this estimate).
+// hadCompletedAssessmentLook is the ONE rule the free-assessment offers use for that. Its contract: a failed read
+// warns and answers "no look". Here that leaves the line as the rule above decided it; the read never grants the line.
+// It runs last, and only for an estimate that would carry the line.
+async function noVisitLineDocBlock(estimate, estData, pricingBundle) {
+  if (!estimateIsRemoteMeasured(estData, pricingBundle)) return {};
+  try {
+    const block = noVisitLinePageBlock(estimate);
+    if (!block.noVisitLine) return {};
+    return (await hadCompletedAssessmentLook(db, estimate)) ? {} : block;
+  } catch (err) {
+    logger.warn(`[estimate-data] no-visit line block skipped: ${err.message}`);
+    return {};
   }
 }
 
@@ -32302,10 +32320,11 @@ async function composeEstimateDataPayload(estimate, {
       // "No visit needed" line (owner 2026-11-22, option B): the owner's sentence, printed under the satellite photo in
       // the Waves AI card. Page load only. The key is absent on the document render pass, on an accepted, declined,
       // expired or quote-required estimate, when any service on the estimate is not one Waves prices from the measured
-      // home and yard alone (estimateIsRemoteMeasured), and for an estimate the estimate email's rule does not read as a
-      // home estimate (commercial, a proposal, a condo), so those responses stay byte-identical. Copy only: no prices.
-      ...(!isPdfRenderPass && ctaTerminalState === null && estimateIsRemoteMeasured(estimateDataForIntelligence, pricingBundle)
-        ? noVisitLinePageBlock(estimate)
+      // home and yard alone (estimateIsRemoteMeasured), for an estimate the estimate email's rule does not read as a
+      // home estimate (commercial, a proposal, a condo), and after a completed Waves Assessment (noVisitLineDocBlock),
+      // so those responses stay byte-identical. Copy only: no prices.
+      ...(!isPdfRenderPass && ctaTerminalState === null
+        ? await noVisitLineDocBlock(estimate, estimateDataForIntelligence, pricingBundle)
         : {}),
       // Authored commercial proposal, rendered on-page under the commercial
       // glass gate. Key only exists for gated proposal estimates so every

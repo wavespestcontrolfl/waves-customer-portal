@@ -7210,8 +7210,11 @@ on the lawn row); with no lawn service quoted that mark is not read. The review 
 whole estimate (`pricingMetadata.manualReviewReasons` and its copies, on any stored object) are read like a row's
 reasons. A call draft's selected home or lot size whose `estimatorEngine.propertyFacts.{home,lot}.source` is anything
 but `county_assessed` takes the key away (a caller-stated size, a fallback source, a saved profile value, the
-`property_facts_v2` label); a rejected candidate is not read. An estimate drafted from a visit
-(`estimate_data.scheduled_service_id`) carries no key. The rule reads marks about a size of the home or
+`property_facts_v2` label, a size with no source); a rejected candidate is not read. An estimate drafted from a visit
+(`estimate_data.scheduled_service_id`) carries no key, and neither does an estimate whose customer completed a Waves
+Assessment in the look window (`hadCompletedAssessmentLook`, the one rule the free-assessment offers use; one read,
+made only for an estimate that would carry the key; a failed read leaves the key as the rule decided it). The rule
+reads marks about a size of the home or
 yard and marks that a price needs a visit. It does not read a quantity of product the office picks (mosquito stations,
 dunks) or a pricing decision the office makes (a discount, `priceOverridden`). Where the engine stores no mark (outside
 a call draft, a home size or a lawn size somebody typed is stored like a measured one), the rule cannot tell and does

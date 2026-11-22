@@ -11,6 +11,10 @@ jest.mock('../models/db', () => {
   mock.raw = jest.fn((sql) => sql);
   return mock;
 });
+jest.mock('../services/assessment-booking', () => ({
+  ...jest.requireActual('../services/assessment-booking'),
+  hadCompletedAssessmentLook: jest.fn(async () => false),
+}));
 jest.mock('../services/estimate-proposal-billing', () => ({
   ...jest.requireActual('../services/estimate-proposal-billing'),
   resolveProposalBillingContext: jest.fn(async () => ({ billsPerApplication: true, livePricing: null })),
@@ -681,6 +685,10 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
     // A candidate the arbitration rejected is not the size the draft priced from.
     const rejected = [{ value: 1800, source: SQFT_SOURCES.CALLER_STATED, reason: 'disagrees with the county-assessed living area' }];
     expect(estimateIsRemoteMeasured(draft({ home: { ...county, rejected }, lot: { ...county, rejected } }), {})).toBe(true);
+    // A selected size with no source has no provenance at all.
+    expect(estimateIsRemoteMeasured(draft({ home: { value: 2000, source: null }, lot: county }), {})).toBe(false);
+    expect(estimateIsRemoteMeasured(draft({ home: county, lot: { value: 8000 } }), {})).toBe(false);
+    expect(estimateIsRemoteMeasured(draft({ home: county, lot: { value: null, source: null } }), {})).toBe(true);
     // A draft with no property facts, and an estimate that is no call draft.
     expect(estimateIsRemoteMeasured({ result: pestPlan, estimatorEngine: { callLogId: 1 } }, {})).toBe(true);
     expect(estimateIsRemoteMeasured({ result: pestPlan, estimatorEngine: true }, {})).toBe(true);
@@ -860,6 +868,31 @@ describe('GET /:token/data: noVisitLine', () => {
     expect(body.cta.terminalState).toBeNull();
     expect(body.noVisitLine).toBe('We measure your home and yard from county records and satellite images, so most quotes need no visit.');
     expect(body.noVisitLine).toBe(NO_VISIT_QUOTE_LINE);
+  });
+
+  test('after a completed Waves Assessment the page carries none: a technician already looked at this home', async () => {
+    const { hadCompletedAssessmentLook } = require('../services/assessment-booking');
+    const estimate = estimateRow({ id: 'est-look', customer_id: 'cust-look' });
+    try {
+      const before = await pageLoad(estimate);
+      expect(before.body.noVisitLine).toBe(NO_VISIT_QUOTE_LINE);
+      // The one rule the free-assessment offers use, asked for this estimate.
+      expect(hadCompletedAssessmentLook.mock.calls.some(([, row]) => row?.id === 'est-look')).toBe(true);
+
+      hadCompletedAssessmentLook.mockImplementation(async (_conn, row) => row?.id === 'est-look');
+      const after = await pageLoad(estimate);
+      expect(after.status).toBe(200);
+      expect(after.body.cta.terminalState).toBeNull();
+      expect(after.body).not.toHaveProperty('noVisitLine');
+
+      // The read is asked only for an estimate that would carry the line.
+      hadCompletedAssessmentLook.mockClear();
+      const offList = await pageLoad(estimateRow({ id: 'est-off-list', services: ['pest_control', 'rodent_bait'] }));
+      expect(offList.body).not.toHaveProperty('noVisitLine');
+      expect(hadCompletedAssessmentLook.mock.calls.some(([, row]) => row?.id === 'est-off-list')).toBe(false);
+    } finally {
+      hadCompletedAssessmentLook.mockImplementation(async () => false);
+    }
   });
 
   test('a bundle of remotely measured services carries it; a bundle with one on-site service does not', async () => {
