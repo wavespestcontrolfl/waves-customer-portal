@@ -479,25 +479,25 @@ function leftOutRejection(usedIn, out, read, rules) {
 // pest free on March 4", "tomorrow, treating outside". The cost is the safe
 // side: after "ants trailing in kitchen. back in 2 weeks" the text says
 // "Ants trailing in the kitchen.", not "Ants were trailing".
-// Only a verb form counts. After an article or a place word, a word in
+// Only a verb form counts. Right after an article or its like, a word in
 // "-ing" names a thing ("Ants were active in the building.", "all over the
-// ceiling"), and a few words in "-ing" are never a verb form.
+// ceiling"), and a few words in "-ing" are never a verb form. A place word
+// is no such sign: "I was inside checking traps." is work.
 const SETS_A_TENSE = new Set([...FORMS_OF_IS, 'am']);
-const OPENS_A_THING = new Set([...LEAD_INS, ...`the a an this that these those my your his her its their our some any no all both
-  near under behind around along from to into onto over through across against above below beside between inside outside`.split(/\s+/)]);
+const BEFORE_A_THING = new Set('the a an this that these those my your his her its their our some any no all both each every'.split(' '));
 const NO_VERB_FORM = new Set('nothing something anything everything during including'.split(' '));
 function addedTenseRejection(textWords, placedAt, read) {
   // The part of the note each text word took; a text word with none was added.
   const partOf = new Map(read.words.map((entry, i) => [placedAt[i], entry.part]));
   const addedIsBefore = (at, part) => {
     for (let k = at - 1; k >= 0 && (!partOf.has(k) || partOf.get(k) === part); k -= 1) {
-      if (OPENS_A_THING.has(textWords[k].word)) return -1;
       if (!partOf.has(k) && SETS_A_TENSE.has(textWords[k].word)) return k;
     }
     return -1;
   };
   for (const [i, entry] of read.words.entries()) {
-    const verbForm = placedAt[i] >= 0 && entry.word.endsWith('ing') && !NO_VERB_FORM.has(entry.word);
+    const verbForm = placedAt[i] >= 0 && entry.word.endsWith('ing') && !NO_VERB_FORM.has(entry.word)
+      && !BEFORE_A_THING.has(textWords[placedAt[i] - 1]?.word);
     const wrong = verbForm ? addedIsBefore(placedAt[i], entry.part) : -1;
     if (wrong >= 0) return { reason: 'not_in_note', words: [textWords[wrong].word] };
   }
