@@ -472,11 +472,18 @@ describe('booking conflict wiring (source-level — behavior needs a live DB)', 
     // the child keeps its technician.
     const child = new RegExp(`const fuOffShift = followUpTechId && require\\('\\.\\./config/feature-gates'\\)\\.techShiftHoursLive\\?\\.\\(\\)\\s*&& await sp\\.transaction\\(\\(shiftSp\\) => require\\('\\./technician-eligibility'\\)\\.shiftExcluding\\(shiftSp, followUpTechId, fuPlan\\.scheduledDate, fuBlock\\)\\)\\s*\\.catch\\(\\(shiftErr\\) => \\{`);
     for (const site of [created, childBlock, child]) expect(src).toMatch(site);
-    const at = (text) => src.indexOf(text, src.search(child));
+    // Each anchor must exist: a missing one would read as position -1 and pass an order check.
+    const at = (text) => {
+      const index = src.indexOf(text, src.search(child));
+      expect(index).toBeGreaterThan(-1);
+      return index;
+    };
     const failedRead = src.slice(src.search(child), at('if (fuOffShift) {'));
     expect(failedRead).toContain('return true;');
     expect(failedRead).not.toContain('throw ');
-    expect(src.indexOf('if (followUpTechId && packageFollowUp) {')).toBeLessThan(src.search(child));
+    const dayCheck = src.indexOf('if (followUpTechId && packageFollowUp) {');
+    expect(dayCheck).toBeGreaterThan(-1);
+    expect(dayCheck).toBeLessThan(src.search(child));
     expect(src.search(childBlock)).toBeLessThan(src.search(child));
     expect(at('fenceBookingDay(fenceSp, { date: fuPlan.scheduledDate, techId: followUpTechId })')).toBeGreaterThan(at('if (fuOffShift) {'));
     expect(at("callFollowUpWindow(sp, {")).toBeGreaterThan(at('fenceBookingDay(fenceSp, { date: fuPlan.scheduledDate, techId: followUpTechId })'));
