@@ -69,6 +69,7 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/treatment-guide` | admin-dispatch |
 | POST | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/trouble-areas/:areaId/clear` | admin-dispatch |
 | POST | `/api/admin/dispatch/:lawnFastServiceId/lawn-fast/watering-preview` | admin-dispatch |
+| POST | `/api/admin/dispatch/:reportNoteServiceId/pest-recap/report-note` | admin-dispatch |
 | GET | `/api/admin/dispatch/:reserviceAsksServiceId/reservice-asks` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/blog-posts` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/card-hold` | admin-dispatch |
@@ -87,7 +88,6 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | POST | `/api/admin/dispatch/:serviceId/pest-recap` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/pest-recap/context` | admin-dispatch |
 | POST | `/api/admin/dispatch/:serviceId/pest-recap/draft` | admin-dispatch |
-| POST | `/api/admin/dispatch/:serviceId/pest-recap/report-note` | admin-dispatch |
 | POST | `/api/admin/dispatch/:serviceId/photo-analysis/draft` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/promises` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/property-map` | admin-dispatch |

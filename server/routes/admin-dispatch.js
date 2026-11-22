@@ -4002,27 +4002,34 @@ router.post('/:serviceId/pest-recap/draft', async (req, res, next) => {
 // POST /:serviceId/pest-recap/report-note — the technician's own note as the customer's report will show it (report speed
 // plan step 2, owner 2026-11-19 *note I*, *read first*). One model call tidies the note, the report's checks read the answer,
 // and the fixed sentence stands in when no tidied note passes: { ok, text, source: 'cleaned' | 'fixed', reason? }. The
-// technician reads the text on the sheet before it is sent. Writes nothing, sends nothing; one paid model call for a note
-// (two with the retry) unless the same note was tidied in the last 30 minutes. Dark behind GATE_REPORT_OWN_NOTE (404
-// {enabled:false} while off, nothing read). See services/service-report/report-own-note-writer.js.
+// technician reads the text on the sheet before it is sent. Writes nothing, sends nothing; up to four paid provider calls
+// for a note (two tries, each with the fallback provider) unless the same note was tidied in the last 30 minutes. The
+// param is NAMED :reportNoteServiceId, not :serviceId, so router.param('serviceId') does not read the visit first (the
+// lawn-fast routes' reason): the dark gate (404 {enabled:false}, nothing read), the id must be a uuid, then the sibling
+// routes' ownership assertion. The fixed sentence names no area: the body's labels are not read, so no free text from
+// the request reaches the report. See services/service-report/report-own-note-writer.js.
 function reportNoteVisitRefusal({ ok, reason, svc, eligible }) {
   if (!ok) return reason;
   if (!eligible) return 'not_pest_control';
   return svc.customer_id ? null : VISIT_NO_CUSTOMER_CODE;
 }
-router.post('/:serviceId/pest-recap/report-note', async (req, res, next) => {
+router.post('/:reportNoteServiceId/pest-recap/report-note', async (req, res, next) => {
   try {
     if (!require('../config/feature-gates').reportOwnNoteLive()) return res.status(404).json({ enabled: false });
+    const id = req.params.reportNoteServiceId;
+    if (!require('../services/reservice-office-request').isUuid(id)) {
+      return res.status(404).json({ error: 'Service not found', code: 'not_found' });
+    }
+    req.params.serviceId = id;
     if (!(await assertRecapOwnership(req, res))) return;
     const visit = await PestRecap.resolveEligibility(req.params.serviceId);
     const refusal = reportNoteVisitRefusal(visit);
     if (refusal) return res.status(recapStatusForReason(refusal)).json({ error: refusal, code: refusal });
-    const { note, areasServiced } = req.body || {};
+    const { note } = req.body || {};
     // The codes on the customer's file are read for this customer before any model reads the note.
     const { text, source, reason } = await require('../services/service-report/report-own-note-writer').cleanReportNote({
       note: typeof note === 'string' ? note : '',
       serviceType: visit.svc.service_type,
-      areasServiced: Array.isArray(areasServiced) ? areasServiced : [],
       db,
       customerId: visit.svc.customer_id,
     });

@@ -1,5 +1,5 @@
 /**
- * POST /admin/dispatch/:serviceId/pest-recap/report-note (GATE_REPORT_OWN_NOTE, report speed plan step 2): the pest
+ * POST /admin/dispatch/:reportNoteServiceId/pest-recap/report-note (GATE_REPORT_OWN_NOTE, report speed plan step 2): the pest
  * Fast Complete sheet asks for the technician's own note as the customer's report will show it. The route names the
  * visit's customer to the clean-up call (the codes on that customer's file are read before any model reads the
  * note), answers only for the visit's own technician or the office, and reads nothing while the gate is off.
@@ -26,10 +26,11 @@ const { cleanReportNote } = require('../services/service-report/report-own-note-
 const { VISIT_NO_CUSTOMER_CODE } = require('../services/invoice-helpers');
 const { etDateString } = require('../utils/datetime-et');
 
-const REPORT_NOTE = '/:serviceId/pest-recap/report-note';
+const REPORT_NOTE = '/:reportNoteServiceId/pest-recap/report-note';
+const VISIT_ID = '0b9f4c1e-2a3d-4e5f-8a6b-7c8d9e0f1a2b';
 const TECHNICIAN = { techRole: 'technician', technicianId: 'tech-1' };
 
-function invoke(body, actor = TECHNICIAN) {
+function invoke(body, actor = TECHNICIAN, id = VISIT_ID) {
   const layer = router.stack.find((l) => l.route && l.route.path === REPORT_NOTE && l.route.methods.post);
   const { handle } = layer.route.stack[layer.route.stack.length - 1];
   const res = {
@@ -40,7 +41,7 @@ function invoke(body, actor = TECHNICIAN) {
   };
   return new Promise((resolve, reject) => {
     handle({
-      params: { serviceId: 'visit-1' }, body, query: {}, ...actor,
+      params: { reportNoteServiceId: id }, body, query: {}, ...actor,
     }, res, reject).then(() => resolve(res)).catch(reject);
   });
 }
@@ -53,7 +54,7 @@ const visitOf = (technician_id) => jest.fn(() => {
   };
   return read;
 });
-const PEST_VISIT = { ok: true, eligible: true, svc: { id: 'visit-1', customer_id: 'customer-1', service_type: 'Quarterly Pest Control' } };
+const PEST_VISIT = { ok: true, eligible: true, svc: { id: VISIT_ID, customer_id: 'customer-1', service_type: 'Quarterly Pest Control' } };
 
 beforeEach(() => {
   process.env.GATE_REPORT_OWN_NOTE = 'true';
@@ -66,25 +67,25 @@ afterEach(() => {
 });
 
 describe('POST pest-recap/report-note', () => {
-  test('the clean-up call gets the note, the visit\'s service and the visit\'s customer; the answer is its text', async () => {
-    const res = await invoke({ note: 'treated shed', areasServiced: ['Shed'] });
+  test('the clean-up call gets the note, the visit\'s service and the visit\'s customer, never the body\'s areas; the answer is its text', async () => {
+    const res = await invoke({ note: 'treated shed', areasServiced: ['Borlux room'] });
     expect(res.statusCode).toBe(200);
     expect(res.body).toEqual({ ok: true, text: 'I treated the shed. — Sam', source: 'cleaned' });
-    expect(PestRecap.resolveEligibility).toHaveBeenCalledWith('visit-1');
+    expect(PestRecap.resolveEligibility).toHaveBeenCalledWith(VISIT_ID);
     expect(cleanReportNote.mock.calls).toEqual([[{
-      note: 'treated shed', serviceType: 'Quarterly Pest Control', areasServiced: ['Shed'], db, customerId: 'customer-1',
+      note: 'treated shed', serviceType: 'Quarterly Pest Control', db, customerId: 'customer-1',
     }]]);
   });
 
-  test('the fixed sentence comes with its reason, and a body with no note or no list of areas is read as none', async () => {
+  test('the fixed sentence comes with its reason, and a body with no note is read as none', async () => {
     cleanReportNote.mockResolvedValue({ text: 'We completed your pest control service.', source: 'fixed', reason: 'stored_code', words: ['x'] });
-    const res = await invoke({ note: 12, areasServiced: 'Shed' });
+    const res = await invoke({ note: 12 });
     expect(res.body).toEqual({
       ok: true, text: 'We completed your pest control service.', source: 'fixed', reason: 'stored_code',
     });
-    expect(cleanReportNote.mock.calls[0][0]).toMatchObject({ note: '', areasServiced: [] });
+    expect(cleanReportNote.mock.calls[0][0]).toMatchObject({ note: '' });
     await invoke(undefined);
-    expect(cleanReportNote.mock.calls[1][0]).toMatchObject({ note: '', areasServiced: [] });
+    expect(cleanReportNote.mock.calls[1][0]).toMatchObject({ note: '' });
   });
 
   test('while the gate is off the route answers 404 and reads nothing', async () => {
@@ -96,6 +97,14 @@ describe('POST pest-recap/report-note', () => {
     expect((await invoke({ note: 'treated shed' })).statusCode).toBe(404);
     expect(mockDbCurrent).not.toHaveBeenCalled();
     expect(PestRecap.resolveEligibility).not.toHaveBeenCalled();
+    expect(cleanReportNote).not.toHaveBeenCalled();
+  });
+
+  test('the visit is not read before the gate: the path skips the serviceId lookup, and a malformed id reads nothing', async () => {
+    expect(REPORT_NOTE).not.toMatch(/:serviceId\b/);
+    const res = await invoke({ note: 'treated shed' }, TECHNICIAN, 'not-a-uuid');
+    expect([res.statusCode, res.body]).toEqual([404, { error: 'Service not found', code: 'not_found' }]);
+    expect(mockDbCurrent).not.toHaveBeenCalled();
     expect(cleanReportNote).not.toHaveBeenCalled();
   });
 
