@@ -244,12 +244,11 @@ async function loadSwapRow(knex) {
 
 const round2 = (n) => Math.round(n * 100) / 100;
 
-// GATE_LAWN_RECLAIMED_HALF_N: the swap bag is plain 24-0-11, which carries no pre-emergent, so on a reclaimed lawn it takes the same half
+// The swap bag is plain 24-0-11, which carries no pre-emergent, so on a reclaimed lawn it takes the same half
 // nitrogen as any other N line. The decision is the plan engine's ONE nitrogenDecision (the bag's stated nitrogen is the target; the rate
-// scales with it), never a second copy. Gate off, not reclaimed or a failed read: the bag as it was (the engine is not even loaded).
+// scales with it), never a second copy. Not reclaimed or a failed read: the bag as it was.
 // Returns the swap bag (the baseline for the plan window when it could be resolved, else the visit day's), with `reclaimedNote` (the line note the plan writes for a halved bag) when it was halved.
 async function reclaimedSwapBag({ swapBag, swapRow, visitDay, knex, svc, grass }) {
-  if (!featureGates.lawnReclaimedHalfNLive()) return swapBag;
   const engine = require('./waveguard-plan-engine');
   // v13 is the visit's actual protocol, decided the way the planner decides it: GATE_LAWN_V13 live AND the visit not pinned to another
   // version (or unresolvable). An older pinned protocol, or the v13 gate off, keeps the bag as it was.

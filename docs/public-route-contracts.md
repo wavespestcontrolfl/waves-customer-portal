@@ -4286,18 +4286,16 @@ existed is never served after it, and a visit with none keeps its key. Every par
 at most six one-sentence parts. No token, eligibility, privacy, rate-limit or header
 change; no new route.
 
-`GATE_LAWN_LIGHTING` (dark, owner 2026-10-04; off leaves every payload key,
-sentence, prompt and stored row unchanged, key for key) is ONE rule, "no color
+Lawn lighting-aware color (owner 2026-10-04) is ONE rule, "no color
 claim between visits shot in different or unknown light", with six independent
-effects. Each reads the gate at call time on its own; only effect 3 needs
-`GATE_LAWN_SINCE_LAST`. The gate reader `lawnLightingLive()` is true only when
-`GATE_LAWN_LIGHTING` AND `GATE_LAWN_VISIT_ASSESSMENT` are both on: the light read
+effects. Only effect 3 needs `GATE_LAWN_SINCE_LAST`. Every effect runs only while
+`GATE_LAWN_VISIT_ASSESSMENT` is on: the light read
 comes only from the one-call visit assessment (`/assess` stays on the legacy
 per-photo path without it), so without that gate no run would ever store a light,
-and no effect below can run without the reader that feeds it. It adds NO payload
+and no effect below can run without the read that feeds it. It adds NO payload
 key to `GET /api/reports/:token/data`; it only removes or never writes color
 wording (the one added key is `initialScores.colorHidden` on the portal route,
-effect 6). A visit assessed before the gate
+effect 6). A visit assessed before the rule
 has no light read, so its light is `unknown` and its color is never compared.
 Compatible light: full sun and sun with shadows (`mixed_sun_shade`) with each other
 (owner 2026-10-22, option B: under the lighting prompt the model reads sunlit and
@@ -4309,11 +4307,11 @@ comes from its usable photos whose shot has positive color weight in
 shade and hot-edge shots; detail shots do not count) when the visit was read under
 the shot-list prompt, and from EVERY usable photo when it was read under the legacy
 prompt (one whole-visit color score from all photos); which prompt is decided from
-the run's own stored prompt version, never from today's gate. A visit whose usable photos are all direct sun (full sun, sun with shadows) is sun with shadows; any other mix (sun beside cloud or shade, or any low light in the mix) is mixed light (`mixed_light`, never a model answer), compared with nothing. A photo read as overcast or open shade with hard shadows contradicts itself (a hard shadow needs direct sun), so that photo is mixed light too, and so is its visit. Any prompt position with no stored photo row (its insert failed) or no
+the run's own stored prompt version, never from today's setting. A visit whose usable photos are all direct sun (full sun, sun with shadows) is sun with shadows; any other mix (sun beside cloud or shade, or any low light in the mix) is mixed light (`mixed_light`, never a model answer), compared with nothing. A photo read as overcast or open shade with hard shadows contradicts itself (a hard shadow needs direct sun), so that photo is mixed light too, and so is its visit. Any prompt position with no stored photo row (its insert failed) or no
 light read makes the visit's light unknown.
 
-Every code path that reads the gate (`lawnLightingLive()` in
-`server/config/feature-gates.js`; nothing else reads `GATE_LAWN_LIGHTING`):
+Every code path that reads the visit assessment gate for this rule
+(`server/config/feature-gates.js` `gateEnvValue`; nothing else decides lighting):
 1. `server/services/lawn-visit-assessment.js` `analyzeVisit`: the visit assessment
    reads each photo's light under `lawn-visit-v1-lighting` /
    `lawn-visit-v1-shot-list-lighting` and the run stores it in
@@ -4397,10 +4395,8 @@ Every code path that reads the gate (`lawnLightingLive()` in
    `beforeAfter.improvement.colorHealth: null`, and `PortalPage.jsx` then shows
    today's color alone, with no "from" and no change. Every other number in that
    payload is a raw reading and is unchanged.
-7. `server/config/feature-gates.js` `logGateStatus` entry (`lawnLighting`): logging
-   only.
 
-What the gate does NOT cover (raw readings, unchanged; each is a score the visit
+What the rule does NOT cover (raw readings, unchanged; each is a score the visit
 earned, shown with its own date, not a sentence about color changing). Color is part
 of these overall numbers, so they can still move when only the light did:
 - the overall trend `reportV2.trends.overall` and the overall points on the
@@ -4419,7 +4415,7 @@ of these overall numbers, so they can still move when only the light did:
 time by `tsLightingLive()` in `server/config/feature-gates.js`, through
 `lightingLive()` in `server/services/tree-shrub-lighting.js`; off leaves every
 prompt, preview response, stored row and payload key unchanged, key for key) is the
-`GATE_LAWN_LIGHTING` rule for tree/shrub photos, with the same light words and the
+lawn lighting rule for tree/shrub photos, with the same light words and the
 same compatibility table (`lawn-lighting.js`, reused as is): full sun with sun and
 shadows, overcast with open shade; sun never with overcast or open shade; low
 light, mixed light and unknown never compatible. Every photo counts toward the

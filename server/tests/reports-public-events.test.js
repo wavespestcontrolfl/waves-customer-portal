@@ -661,7 +661,7 @@ describe('nearYou opt-in (lawn "Near you" line, GATE_REPORT_NEAR_YOU)', () => {
   });
 });
 
-describe('lawnLighting opt-in (lawn lighting-aware color, GATE_LAWN_LIGHTING)', () => {
+describe('lawnLighting opt-in (lawn lighting-aware color)', () => {
   // Same shape as nearYou: the two visits' stored-light read runs only for the
   // /data render, the one caller that prints the "Since your last visit" lines.
   const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/reports-public.js'), 'utf8');
