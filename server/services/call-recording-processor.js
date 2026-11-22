@@ -9863,20 +9863,9 @@ const NEGATED_CADENCE_BEFORE_RE = /(?:\b(?:not|no|never|without|rather than|inst
 // Billing cadence is not service cadence: "can I PAY MONTHLY for the one-time
 // treatment?" is a payment-terms question.
 const PAYMENT_CONTEXT_BEFORE_RE = /\b(?:pay(?:ing)?|billed?|billing|charged?|payments?|installments?|invoiced?)\b[^.?!]{0,15}$/i;
-// A cadence the same sentence places WITH SOMEONE ELSE is that company's plan,
-// not an ask of Waves: "I just signed up for a monthly service with them that
-// I don't even need" booked a same-day one-time ant job as Monthly Pest Control
-// (2026-11-21). The marker may follow the cadence word or come before it
-// ("signed up with another company for monthly service"). A caller speaking to
-// Waves says "with you", which is not here.
-const OTHER_PROVIDER = String.raw`\bwith (?:them|another|a different|some other|the other|my (?:current|other|old|last|previous))\b`;
-const OTHER_PROVIDER_AFTER_RE = new RegExp(`^[^.?!;]{0,40}${OTHER_PROVIDER}`, 'i');
-const OTHER_PROVIDER_BEFORE_RE = new RegExp(`${OTHER_PROVIDER}[^.?!;]{0,40}$`, 'i');
-
 // True when `re` (global) matches somewhere that reads as SERVICE cadence:
-// not negated, not another company's plan, and not preceded by a pest-pressure
-// verb in the same clause — unless a request verb after the pressure verb
-// turned the clause into an ask.
+// not negated, and not preceded by a pest-pressure verb in the same clause —
+// unless a request verb after the pressure verb turned the clause into an ask.
 function serviceCadenceMatch(re, text) {
   const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
   let m;
@@ -9884,15 +9873,53 @@ function serviceCadenceMatch(re, text) {
     const before = text.slice(Math.max(0, m.index - 60), m.index);
     const after = text.slice(m.index + m[0].length, m.index + m[0].length + 20);
     const billingNounAfter = /^\s{0,2}(?:payments?|installments?|billing|invoices?|price|pricing|cost)\b/i.test(after);
-    const otherProvider = OTHER_PROVIDER_BEFORE_RE.test(before)
-      || OTHER_PROVIDER_AFTER_RE.test(text.slice(m.index + m[0].length, m.index + m[0].length + 70));
-    if (!billingNounAfter && !otherProvider && !NEGATED_CADENCE_BEFORE_RE.test(before) && !PAYMENT_CONTEXT_BEFORE_RE.test(before)) {
+    if (!billingNounAfter && !NEGATED_CADENCE_BEFORE_RE.test(before) && !PAYMENT_CONTEXT_BEFORE_RE.test(before)) {
       const pressure = before.match(PEST_PRESSURE_BEFORE_RE);
       if (!pressure || REQUEST_VERB_RE.test(before.slice(pressure.index))) return true;
     }
     if (scan.lastIndex === m.index) scan.lastIndex++;
   }
   return false;
+}
+
+// A plan the caller has WITH SOMEONE ELSE is that company's plan, not an ask of
+// Waves: "I just signed up for, like, a monthly service with them now that I
+// don't even need" booked a same-day one-time ant job as Monthly Pest Control
+// (2026-11-21). The plan words of such a clause are blanked before ANY scan of
+// this rule reads the transcript (recurringIntentEvidence): the program words,
+// the cadence words, the cadence ladder, the monthly veto and the agent offers
+// all read the same text, so no scan can count a word another scan set aside.
+// Only the plan words go. The clause's other words stay, so a pressure verb or
+// a negation in it still guards what follows.
+//
+// The other company: "with another / a different / my current … company", or
+// "with them" right after an enrollment word ("service with them", "signed up
+// with them", "was with them"). A bare "with them" is usually the pests ("a
+// problem with them", "help with them") and is not here; "with my current ant
+// problem" names no company.
+const OTHER_PROVIDER_RE = /\b(?:services?|plans?|contracts?|programs?|accounts?|treatments?|(?:bi[- ]?)?monthly|quarterly|semi[- ]?annual(?:ly)?|signed(?: up)?|sign(?:ing)? up|was|were|am|i'm|we're|been|went|going|gone|go|stay(?:ed|ing)?) with them\b|\bwith (?:another|a different|some other|the other|(?:my|our) (?:current|other|old|last|previous)) (?:pest (?:control )?|bug |lawn )?(?:company|companies|provider|service|guys?|people|exterminator|outfit|place)\b/i;
+// A clause ends at a sentence end, and at a turn to a new statement: "I was
+// with them, BUT I want monthly with you"; "…with them AND I want…"; "…with
+// them, CAN YOU come today?".
+const CLAUSE_PIVOT_RE = /(\bbut\b|\b(?:and|so|because) (?=(?:i|we|you|they)\b)|,\s*(?=(?:i|we|can|could|would|will|do)\b))/i;
+// An ask BEFORE the other company in the same clause is an ask of Waves about
+// that plan ("can you do the quarterly service I get with my current
+// company?"): the clause keeps its plan words.
+const ASK_BEFORE_PROVIDER_RE = new RegExp(`${REQUEST_VERB_RE.source}|\\b(?:can|could|would|will|do) (?:you|y'all)\\b`, 'i');
+const PLAN_WORDS_RE = new RegExp(`${RECURRING_INTENT_STRONG_RE.source}|${RECURRING_CADENCE_RE.source}`, 'gi');
+
+function isOtherProviderClause(clause) {
+  const provider = clause.match(OTHER_PROVIDER_RE);
+  return !!provider && !ASK_BEFORE_PROVIDER_RE.test(clause.slice(0, provider.index));
+}
+
+// The transcript with the plan words of another company's plan blanked. Line
+// breaks, speaker labels and sentence marks are untouched.
+function withoutOtherProviderPlans(transcription) {
+  return String(transcription || '').replace(/[^.?!;\n]+/g, (sentence) => sentence
+    .split(CLAUSE_PIVOT_RE)
+    .map((clause) => (isOtherProviderClause(clause) ? clause.replace(PLAN_WORDS_RE, '~') : clause))
+    .join(''));
 }
 
 // Transcribers emit curly apostrophes; every guard regex here uses ASCII
@@ -9998,7 +10025,7 @@ function resolveProgramName(cadenceKey, fallback, catalogNames) {
 // forcedAssessmentBooking (to know a recurring program is the caller's, not the
 // model's guess).
 function recurringIntentEvidence(transcription) {
-  const normalized = normalizeApostrophes(transcription);
+  const normalized = withoutOtherProviderPlans(normalizeApostrophes(transcription));
   const turns = speakerTurns(normalized);
   const callerText = callerOnlyText(normalized);
   // A decline only vetoes when nothing recurring FOLLOWS it — a caller who

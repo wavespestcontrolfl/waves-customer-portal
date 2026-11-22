@@ -417,15 +417,54 @@ describe('applyRecurringIntentDefault', () => {
       .toBe('Bee / Wasp Nest Removal Service');
     expect(applyRecurringIntentDefault(lead(), 'Caller: we get monthly service with my current company, but they will not come out for wasps.').matched_service)
       .toBe('Bee / Wasp Nest Removal Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I signed up for monthly with them, can you guys come spray today?').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
   });
 
   test('another company\'s plan does not hide a real ask of Waves in the same call', () => {
-    // The ask carries its own cadence word, in its own sentence or after the marker's sentence ends.
+    // The ask carries its own cadence word, in its own sentence or after the clause turns.
     expect(applyRecurringIntentDefault(lead(), 'Caller: I have monthly service with them. Can you set me up on quarterly?').matched_service)
       .toBe('Quarterly Pest Control Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I was with them, but I want monthly with you.').matched_service)
+      .toBe('Monthly Pest Control Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I signed up for monthly with them, I want monthly with you instead.').matched_service)
+      .toBe('Monthly Pest Control Service');
     // "with you" is Waves, never the other company.
     expect(applyRecurringIntentDefault(lead(), 'Caller: I would like to start monthly service with you guys.').matched_service)
       .toBe('Monthly Pest Control Service');
+    // An ask that comes before the other company is an ask of Waves about that plan.
+    expect(applyRecurringIntentDefault(lead(), 'Caller: Can you do the quarterly service I get with my current company?').matched_service)
+      .toBe('Quarterly Pest Control Service');
+  });
+
+  // Every scan of the rule reads the same text: program words, the cadence ladder and the
+  // monthly veto must not count a word of the other company's plan (pre-push audit, 4 cases).
+  test('another company\'s plan is out of every scan: program words, the cadence ladder and the monthly veto', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I signed up for a monthly service plan with them. Please remove this nest.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+    // Their cadence is not a cadence the caller refused: the default stays quarterly.
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I was quarterly with them. I want a package from you.').matched_service)
+      .toBe('Quarterly Pest Control Service');
+    // Their bi-monthly does not cancel the caller's own monthly.
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I was bi-monthly with them. I want monthly with you.').matched_service)
+      .toBe('Monthly Pest Control Service');
+    // An agent asking about the other company's plan made no offer; a real offer in the same turn still counts.
+    expect(applyRecurringIntentDefault(lead(), 'Agent: Are you still on quarterly with them?\nCaller: Yes.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+    expect(applyRecurringIntentDefault(lead(), 'Agent: I can set you up on our quarterly plan so you can stop service with them.\nCaller: Yes, sounds good.').matched_service)
+      .toBe('Quarterly Pest Control Service');
+  });
+
+  test('"with them" about the pests, or "my current" with no company, is not another company', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I need help with them, do you do monthly service?').matched_service)
+      .toBe('Monthly Pest Control Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: We have ants and I am having a problem with them every month, I would like a plan.').matched_service)
+      .toBe('Quarterly Pest Control Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: With my current ant problem I think I need a monthly service.').matched_service)
+      .toBe('Monthly Pest Control Service');
+    // Only the plan words are blanked: "have" still marks the later "monthly" as a description.
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I have service with them, I think, monthly.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
   });
 
   test('an agent NEGATIVE plan statement plus "yes" is not an accepted offer', () => {
