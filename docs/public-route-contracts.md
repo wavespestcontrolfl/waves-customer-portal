@@ -7194,9 +7194,11 @@ with no stored `service` has no identity. Recurring: `pest_control`, `lawn_care`
 `termite_bait_installation` (the termite bait plan's own install charge). Three reads, each failing closed. (1) The saved
 estimate grants the key: the rows of `guaranteeServiceRows` without the served price (both saved result shapes, an
 inputs-only replay, an authored proposal's rows) hold at least one service row and every one is on its list. (2) Every
-saved row as it is stored can take the key away, priced or not, also one the page's readers skip or drop:
-`recurring.services[]` and `results.recurring.services[]` (the recurring list), `lineItems[]` (either list), and
-`oneTime.items[]`, `results.oneTime.items[]` and `specItems[]` (the one-time list). (3) The served price can take the key
+saved row as it is stored can take the key away, priced or not, also one the page's readers skip or drop, in both saved
+result shapes, the bare save and an inputs-only save's replayed engine result: `recurring.services[]` and
+`results.recurring.services[]` (the recurring list), `lineItems[]` (either list), and `oneTime.items[]`,
+`oneTime.specItems[]`, the nested `results.oneTime` copies, `specItems[]` and `quoteRequiredItems[]` (the one-time list); a
+commercial row takes the key away whatever its key. (3) The served price can take the key
 away and never grants it: `pricing.services[]` recurring sections by `memberKeys`, else `key`; every
 `perServiceTreatments[].service` of each `frequencies[]` and `serviceCadenceCombos[]` entry, on the price and on those
 sections; and `pricing.oneTimeBreakdown.items[]`. One row off its list (rodent work, a misting system, foam, trenching,

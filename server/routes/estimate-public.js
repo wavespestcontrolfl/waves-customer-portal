@@ -24237,27 +24237,34 @@ function serviceMixIsRemoteMeasured(recurringServices = [], oneTimeItems = []) {
     && oneTime.every((item) => REMOTE_MEASURED_ONE_TIME_SERVICES.has(serviceIdentity(item.service)));
 }
 
-// Every saved row as it is stored, in each saved result shape. A row is fine when its stored `service` is on the list
-// for its container, or when it is a fee, discount or blank row (isNonServiceOneTimeItem). Any other row, priced or
-// not, takes the answer away.
+// Every saved row as it is stored. A row is fine when its stored `service` is on the list for its container, or when
+// it is a fee, discount or blank row (isNonServiceOneTimeItem). Any other row, priced or not, and any commercial row,
+// takes the answer away.
+// - The roots are the ones estimateHasCommercialRow reads: both saved result shapes, the bare save, and for an
+//   inputs-only save the replayed engine result (the same memoized replay the guarantee rows classify).
 // - Plan rows (`recurring.services[]`, the nested `results.recurring.services[]`): the recurring list.
 // - Raw engine lines (`lineItems[]`) hold plans and one-time work together: either list.
-// - One-time and specialty rows (`oneTime.items[]`, the nested `results.oneTime.items[]`, `specItems[]`): the one-time
-//   list. A row a plan includes at no charge is still work on the estimate.
+// - One-time and specialty rows: the one-time list. The containers are the ones the stored-row readers of
+//   estimate-result-container.js read (`oneTime.items[]`, `oneTime.specItems[]`, the nested `results.oneTime` copies,
+//   `specItems[]`, `quoteRequiredItems[]`). A row a plan includes at no charge is still work on the estimate.
 function savedRowsAreAllListed(estData = {}) {
   const isRow = (row) => Boolean(row) && typeof row === 'object';
   const list = (value) => (Array.isArray(value) ? value : []);
-  const roots = [estData?.result, estData?.engineResult].filter(isRow);
-  if (!roots.length && isRow(estData)) roots.push(estData);
-  const allListed = (rows, ...lists) => rows.filter(isRow)
-    .every((row) => isNonServiceOneTimeItem(row) || lists.some((listed) => listed.has(serviceIdentity(row.service))));
+  const roots = [estData?.result, estData?.engineResult, estData].filter(isRow);
+  if (!persistedGuaranteeRoots(estData).length) {
+    const replay = guaranteeReplayForInputsOnly(estData);
+    if (replay.result) roots.push(replay.result);
+  }
+  const allListed = (rows, ...lists) => rows.filter(isRow).every((row) => row.isCommercial !== true
+    && (isNonServiceOneTimeItem(row) || lists.some((listed) => listed.has(serviceIdentity(row.service)))));
   return roots.every((root) => (
     allListed([...list(root.recurring?.services), ...list(root.results?.recurring?.services)], REMOTE_MEASURED_RECURRING_SERVICES)
     && allListed(list(root.lineItems), REMOTE_MEASURED_RECURRING_SERVICES, REMOTE_MEASURED_ONE_TIME_SERVICES)
-    && allListed(
-      [...list(root.oneTime?.items), ...list(root.results?.oneTime?.items), ...list(root.specItems)],
-      REMOTE_MEASURED_ONE_TIME_SERVICES,
-    )
+    && allListed([
+      ...list(root.oneTime?.items), ...list(root.oneTime?.specItems),
+      ...list(root.results?.oneTime?.items), ...list(root.results?.oneTime?.specItems),
+      ...list(root.specItems), ...list(root.quoteRequiredItems),
+    ], REMOTE_MEASURED_ONE_TIME_SERVICES)
   ));
 }
 

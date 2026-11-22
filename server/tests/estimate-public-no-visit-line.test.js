@@ -43,6 +43,11 @@ jest.mock('../middleware/admin-auth', () => ({
   verifyStaffBearer: jest.fn(async (req) => (req.headers.authorization === 'Bearer staff-ok' ? { id: 'tech-1', role: 'admin' } : null)),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The real engine, wrapped so one test can hand an inputs-only save the replay it needs.
+jest.mock('../services/pricing-engine', () => {
+  const actual = jest.requireActual('../services/pricing-engine');
+  return { ...actual, generateEstimate: jest.fn(actual.generateEstimate) };
+});
 
 jest.setTimeout(60000);
 const express = require('express');
@@ -76,6 +81,7 @@ db.mockImplementation((table) => chainFor(dbRows[table]));
 
 const { NO_VISIT_QUOTE_LINE, noVisitLinePageBlock } = require('../services/estimate-no-visit-line');
 const { serviceMixIsRemoteMeasured, estimateIsRemoteMeasured } = estimatePublicRouter;
+const { generateEstimate } = require('../services/pricing-engine');
 
 const SENT = '2026-11-20T16:00:00.000Z';
 const recurringRow = (service) => ({ service, name: service, visitsPerYear: 6 });
@@ -315,12 +321,37 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
     expect(estimateIsRemoteMeasured(saved({ oneTime: { items: [{ ...included, onProg: undefined, includedOnProgram: true }] } }), {})).toBe(false);
     expect(estimateIsRemoteMeasured(saved({ results: { oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout Service', price: 0 }] } } }), {})).toBe(false);
     expect(estimateIsRemoteMeasured(saved({ specItems: [{ name: 'Attic inspection' }] }), {})).toBe(false);
+    // The same in every container a specialty row rides in.
+    expect(estimateIsRemoteMeasured(saved({ oneTime: { specItems: [included] } }), {})).toBe(false);
+    expect(estimateIsRemoteMeasured(saved({ results: { oneTime: { specItems: [included] } } }), {})).toBe(false);
+    expect(estimateIsRemoteMeasured(saved({ quoteRequiredItems: [{ service: 'rodent_exclusion', name: 'Rodent Exclusion' }] }), {})).toBe(false);
+    // A commercial row takes the answer away, also with a listed key.
+    expect(estimateIsRemoteMeasured(saved({ oneTime: { items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 199, isCommercial: true }] } }), {})).toBe(false);
+    expect(estimateIsRemoteMeasured(saved({ lineItems: [{ service: 'pest_control', monthly: 40, isCommercial: true }] }), {})).toBe(false);
     // A listed one-time service, a fee, a discount and a blank row do not take the answer away.
     expect(estimateIsRemoteMeasured(saved({
       oneTime: { items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 199 }, { service: 'waveguard_setup', name: 'WaveGuard Setup', price: 99 }] },
       specItems: [{}],
       lineItems: [line({ service: 'pest_control' }), { service: 'manual_discount', label: 'Discount', price: -20 }, { service: 'one_time_pest', price: 199 }],
     }), {})).toBe(true);
+  });
+
+  test('an inputs-only save is read from its replayed engine result, raw rows included', () => {
+    const inputsOnly = () => ({ engineInputs: { homeSqFt: 2000, lotSqFt: 8000, services: { pest: { frequency: 'quarterly' } } } });
+    // The real engine: one pest control line.
+    expect(estimateIsRemoteMeasured(inputsOnly(), {})).toBe(true);
+    expect(estimateIsRemoteMeasured({ ...inputsOnly(), result: {} }, {})).toBe(true);
+    // The engine adds a specialty line the plan includes at no charge: the page's one-time reader drops it.
+    generateEstimate.mockImplementationOnce(() => ({
+      lineItems: [
+        { service: 'pest_control', name: 'Pest Control', monthly: 45, annual: 540, visitsPerYear: 4 },
+        { service: 'stinging_insect', name: 'Stinging Insect', price: 0, includedOnProgram: true },
+      ],
+    }));
+    expect(estimateIsRemoteMeasured(inputsOnly(), {})).toBe(false);
+    // A replay that fails is no answer.
+    generateEstimate.mockImplementationOnce(() => { throw new Error('engine down'); });
+    expect(estimateIsRemoteMeasured(inputsOnly(), {})).toBe(false);
   });
 
   test('the served price never grants the answer by a one-time row either', () => {
