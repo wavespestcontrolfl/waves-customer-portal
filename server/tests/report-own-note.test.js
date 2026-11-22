@@ -11,7 +11,8 @@
  *    the note is written (owner 2026-11-20, *A*);
  *  - the same-order check (report-note-order.test.js has its cases) runs with
  *    these screens, and what passes is a note the report reader shows;
- *  - the note a model reads holds no access code.
+ *  - the note a model reads holds no access code, and no code on the
+ *    customer's file, in any wording.
  * Regression they guard: a customer report, signed with the technician's
  * name, that says something the technician did not say or may not say.
  * Gap in existing proof: no other suite reads this module. Synthetic data only.
@@ -19,9 +20,13 @@
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
+const OwnNote = require('../services/service-report/report-own-note');
+
 const {
-  reportNoteRejection, fixedReportNote, ownNoteText, noteAsRead, MAX_OWN_NOTE_CHARS,
-} = require('../services/service-report/report-own-note');
+  reportNoteRejection, fixedReportNote, ownNoteText, storedCodesOf, readStoredCodes, MAX_OWN_NOTE_CHARS,
+} = OwnNote;
+// A customer with no code on file, unless a test gives one.
+const noteAsRead = (note, storedCodes = []) => OwnNote.noteAsRead(note, storedCodes);
 const { reportNoteCustomerCopy } = require('../services/service-report/technician-report-copy');
 
 // Synthetic catalog rows in the shape readCatalogScreenRows returns.
@@ -29,7 +34,9 @@ const CATALOG = [
   { id: 1, name: 'Borlux SC', display_name: 'Borlux', active_ingredient: 'Zentrathrin', category: 'insecticide', manufacturer: 'Norvane', aliases: [] },
   { id: 2, name: 'Vexion Cockroach Gel Bait', display_name: 'Vexion Gel', active_ingredient: 'Indoxacarb', category: 'bait', manufacturer: 'Norvane', aliases: [] },
 ];
-const refusal = (note, text) => reportNoteRejection({ note, text, catalogRows: CATALOG });
+const refusal = (note, text, storedCodes = []) => reportNoteRejection({
+  note, text, catalogRows: CATALOG, storedCodes,
+});
 
 describe('same order, with the report\'s own screens', () => {
   test.each([
@@ -123,6 +130,101 @@ describe('the wordings the reader lets stand are refused where the note is writt
 
   test('a part that orders the customer names the order', async () => {
     await expect(refusal('use rose at the back', 'Use rose at the back.')).resolves.toEqual({ reason: 'instruction', words: ['use'] });
+  });
+});
+
+describe('a code on the customer\'s file is found by its value, in any wording', () => {
+  const onFile = storedCodesOf({
+    neighborhood_gate_code: '#4471', property_gate_code: 'Blue Bird', garage_code: null, lockbox_code: 'box c902, then 55 12',
+  });
+
+  test('the forms of the four code fields: the field, each word and run in it, each group of figures', () => {
+    expect([...onFile].sort()).toEqual([
+      '12', '4471', '55', '902', 'bird', 'blue', 'bluebird', 'box', 'boxc902then5512', 'c902', 'then',
+    ]);
+    expect(storedCodesOf({ lockbox_code: '#12*34' })).toEqual(['1234']);
+    expect(storedCodesOf({ lockbox_code: '12 34' })).toEqual(['1234', '12', '34']);
+    expect(storedCodesOf({ garage_code: '  ' })).toEqual([]);
+    expect(storedCodesOf(undefined)).toEqual([]);
+    // Another field of the file is no code field.
+    expect(storedCodesOf({ parking_notes: 'park at 7788' })).toEqual([]);
+  });
+
+  test('a note that holds one is not read at all, and no text passes for it', async () => {
+    const notes = [
+      'bluebird. treated shed',
+      'treated shed. ask for Blue-Bird at the desk',
+      'side door, then b l u e b i r d. treated shed',
+      'treated shed\n4471',
+      'treated shed. 44 71 on the pad',
+      'treated shed. 4-4-7-1',
+      'ｔｒｅａｔｅｄ shed. ４４７１',
+      'treated shed. blue\u200Bbird',
+      'treated shed. C902 opens the pad',
+      // A word of a code field is a code: nothing tells it from the words beside it.
+      'treated shed. bird nest in the eaves',
+    ];
+    for (const note of notes) {
+      expect(noteAsRead(note, onFile)).toBe('[redacted]');
+      expect(await refusal(note, 'I treated the shed.', onFile)).toEqual({ reason: 'stored_code' });
+    }
+  });
+
+  test('a text that holds one is refused', async () => {
+    expect(await refusal('treated shed', 'I treated the shed. Bluebird.', onFile)).toEqual({ reason: 'stored_code' });
+    expect(await refusal('treated shed', 'I treated the shed, 44 71.', onFile)).toEqual({ reason: 'stored_code' });
+  });
+
+  test('a word code beside an instruction, and a short code', async () => {
+    const annotated = storedCodesOf({ lockbox_code: 'use bluebird', garage_code: '#12' });
+    for (const note of ['Bluebird. Treated shed.', 'treated shed. b l u e b i r d', 'treated shed. #12', 'treated shed\n12']) {
+      expect(noteAsRead(note, annotated)).toBe('[redacted]');
+      expect(await refusal(note, 'I treated the shed.', annotated)).toEqual({ reason: 'stored_code' });
+    }
+    // A short code is a whole word of the note: "used" is not "use", and 21 is not 12.
+    const note = 'swept 21 webs and used a brush on the eaves. treated shed';
+    expect(noteAsRead(note, annotated)).toBe(note);
+    await expect(refusal(note, 'I swept 21 webs and used a brush on the eaves. I treated the shed.', annotated)).resolves.toBeNull();
+    // The same count as the short code is the code: the safe side.
+    expect(noteAsRead('swept 12 webs. treated shed', annotated)).toBe('[redacted]');
+  });
+
+  test('a note with no code of this customer is read as before', async () => {
+    const note = 'saw a jay by the bath. treated shed';
+    expect(noteAsRead(note, onFile)).toBe(note);
+    await expect(refusal(note, 'I saw a jay by the bath. I treated the shed.', onFile)).resolves.toBeNull();
+    // The same words for a customer with no code on file.
+    expect(noteAsRead('bluebird nest in the eaves. treated shed')).toBe('bluebird nest in the eaves. treated shed');
+  });
+
+  test('codes that were not read stop the check: nothing is read or let out', async () => {
+    expect(() => OwnNote.noteAsRead('treated shed')).toThrow('the codes on the customer\'s file were not read');
+    await expect(reportNoteRejection({ note: 'treated shed', text: 'I treated the shed.', catalogRows: CATALOG }))
+      .rejects.toThrow('need a database and a customer');
+  });
+
+  test('with a database and a customer, the codes are read from the customer\'s file', async () => {
+    const asked = [];
+    const db = (table) => ({
+      where: (filter) => ({
+        first: async (...columns) => {
+          asked.push({ table, filter, columns });
+          return { lockbox_code: 'bluebird' };
+        },
+      }),
+    });
+    expect(await readStoredCodes(db, 'customer-1')).toEqual(['bluebird']);
+    expect(await reportNoteRejection({
+      note: 'bluebird. treated shed', text: 'I treated the shed.', catalogRows: CATALOG, db, customerId: 'customer-1',
+    })).toEqual({ reason: 'stored_code' });
+    expect(asked[0]).toEqual({
+      table: 'property_preferences',
+      filter: { customer_id: 'customer-1' },
+      columns: ['neighborhood_gate_code', 'property_gate_code', 'garage_code', 'lockbox_code'],
+    });
+    // A customer with no row on file has no code.
+    const none = () => ({ where: () => ({ first: async () => undefined }) });
+    expect(await readStoredCodes(none, 'customer-2')).toEqual([]);
   });
 });
 
@@ -232,7 +334,7 @@ describe('the stored text and the fixed sentence', () => {
   });
 
   test('a catalog that cannot be read throws: the caller uses the fixed sentence', async () => {
-    await expect(reportNoteRejection({ note: 'treated outside', text: 'I treated outside.' }))
+    await expect(reportNoteRejection({ note: 'treated outside', text: 'I treated outside.', storedCodes: [] }))
       .rejects.toThrow('catalog-wide trade-name screen needs a catalog read');
   });
 
@@ -244,8 +346,12 @@ describe('the stored text and the fixed sentence', () => {
         return table === 'products_catalog' ? CATALOG.map(({ aliases, ...row }) => row) : [];
       },
     });
-    await expect(reportNoteRejection({ note: 'treated outside', text: 'I treated outside.', db })).resolves.toBeNull();
-    expect((await reportNoteRejection({ note: 'sprayed Borlux outside', text: 'I sprayed Borlux outside.', db }))?.reason).toBe('trade_name');
+    await expect(reportNoteRejection({
+      note: 'treated outside', text: 'I treated outside.', db, storedCodes: [],
+    })).resolves.toBeNull();
+    expect((await reportNoteRejection({
+      note: 'sprayed Borlux outside', text: 'I sprayed Borlux outside.', db, storedCodes: [],
+    }))?.reason).toBe('trade_name');
     expect(tables).toEqual(['products_catalog', 'product_aliases', 'products_catalog', 'product_aliases']);
   });
 
