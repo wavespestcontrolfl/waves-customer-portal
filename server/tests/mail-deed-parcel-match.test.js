@@ -83,12 +83,20 @@ describe('chooseParcel', () => {
 
   test('no parcels', () => {
     expect(chooseParcel({ sellerNames, parcels: [], permitsByParid: {} })).toEqual({ status: 'no_parcel' });
-    expect(chooseParcel({ sellerNames, parcels: undefined, permitsByParid: {} })).toEqual({ status: 'no_parcel' });
   });
   test('no parcel with a new-home permit: no_permit (the seller\'s name on a parcel is not enough)', () => {
     const p = parcel('100000001', 'EXAMPLE BUILDERS LLC');
     expect(chooseParcel({ sellerNames, parcels: [p], permitsByParid: {} })).toEqual({ status: 'no_permit' });
-    expect(chooseParcel({ sellerNames, parcels: [p, parcel('100000002', 'TESTER ALEX J')], permitsByParid: undefined })).toEqual({ status: 'no_permit' });
+    expect(chooseParcel({ sellerNames, parcels: [p, parcel('100000002', 'TESTER ALEX J')], permitsByParid: { 100000009: permit('Z') } })).toEqual({ status: 'no_permit' });
+  });
+  test('a lookup that was never done is an error, not "nothing found"', () => {
+    const p = parcel('100000001', 'EXAMPLE BUILDERS LLC');
+    for (const parcels of [undefined, null, 'x', {}]) {
+      expect(() => chooseParcel({ sellerNames, parcels, permitsByParid: {} })).toThrow(TypeError);
+    }
+    for (const permitsByParid of [undefined, null, 'x', []]) {
+      expect(() => chooseParcel({ sellerNames, parcels: [p], permitsByParid })).toThrow(TypeError);
+    }
   });
   test('one parcel with a permit, still under the seller\'s name: matched, owner_permit', () => {
     const p = parcel('100000001', 'EXAMPLE BUILDERS LLC');
@@ -204,6 +212,20 @@ describe('queryParcels', () => {
       const phaseOne = { lot: '171', block: null, subdivision: 'RYE RANCH PH I' };
       expect(await flags(phaseOne, ['RYE RANCH PH I', 'Rye Ranch Ph I PB81/1', 'RYE RANCH PH II', 'RYE RANCH PH IA PB81/1', 'RYE RANCH PH I-A', 'RYE RANCH PH IV']))
         .toEqual([true, true, false, false, false, false]);
+    });
+    test('a deed that already names the phase: its subphase and plat book on the map are the same plat', async () => {
+      const phaseOne = { lot: '171', block: null, subdivision: 'RYE RANCH PH I' };
+      expect(await flags(phaseOne, ['RYE RANCH PH I SUBPH A PB81/1', 'RYE RANCH PH I SUBPHASE IA AND IB', 'RYE RANCH PH I PB 81/1',
+        'RYE RANCH PH I PH II', 'RYE RANCH PH I AND II PB81/1', 'RYE RANCH PH I SUBDIVISION', 'RYE RANCH PH I ESTATES']))
+        .toEqual([true, true, true, false, false, false, false]);
+      const subphase = { lot: '171', block: null, subdivision: 'RYE RANCH PH I SUBPH A' };
+      expect(await flags(subphase, ['RYE RANCH PH I SUBPH A', 'RYE RANCH PH I SUBPH A PB81/1', 'RYE RANCH PH I SUBPH A SUBPH B', 'RYE RANCH PH I SUBPH A AND B']))
+        .toEqual([true, true, false, false]);
+    });
+    // No clock in this test: a pattern that backtracks over these lists does not return before Jest's time limit.
+    test('a very long list of phase ids is read token by token', async () => {
+      const long = `RYE RANCH PH ${'I '.repeat(400)}${'IV-A-1-B, '.repeat(400)}NOT A PHASE`;
+      expect(await flags(legal, [long, `RYE RANCH PH ${'I AND '.repeat(400)}I PB81/1`])).toEqual([false, true]);
     });
     test('no parcel of the answer is dropped, so a full page is still a cut-off answer', async () => {
       const full = Array.from({ length: 25 }, (_, i) => feature({ PARID: String(513309100 + i), PAR_SUBDIV_NAME: 'RYE RANCH ESTATES' }));

@@ -61,17 +61,65 @@ function parcelWhere(legal) {
 // GROVE" on the deed, "SAMPLE GROVE PH IIA PB81/1" on the map. The whole rest of the name must fit this grammar,
 // taken from the 126 plat names of 32 real subdivisions (2026-11-22):
 //   [PH|PHASE <ids> [SUBPH|SUBPHASE <ids>]] [PB<book>/<page>]   or   SUBDIVISION [PB<book>/<page>]
-//   <ids> = phase ids joined by ", ", " AND ", " & " or a space; an id = IIA, ID9, IV-C1, II-B-9, 9A, N9A, A-D ...
+//   <ids> = phase ids joined by ",", "AND", "&" or a space; an id = IIA, ID9, IV-C1, II-B-9, 9A, N9A, A-D ...
 // A name that does not fit ("SAMPLE GROVE ESTATES", "... WEST PB1/2", "... PH II REPLAT OF LOT 4", "... PH III-A
 // TOWNHOMES") may be another subdivision or another piece of land: its parcel is marked platKnown false, and
 // chooseParcel matches nothing while one is in the answer.
-const PHASE_ID = '(?:[IVX]{1,4}[A-Z]?[0-9]{0,2}|[A-Z]?[0-9]{1,2}[A-Z]?|[A-Z])(?:-(?:[IVX]{1,4}|[0-9]{1,2}[A-Z]?|[A-Z][0-9]{0,2}))*';
-const PHASE_IDS = `${PHASE_ID}(?:(?:, ?| (?:AND|&) | )${PHASE_ID})*`;
-const PLAT_BOOK = 'PB ?[0-9]{1,4}/[0-9]{1,4}';
-const PLAT_REST = new RegExp(`^(?:(?:PH|PHASE) ${PHASE_IDS}(?: (?:SUBPH|SUBPHASE) ${PHASE_IDS})?(?: ${PLAT_BOOK})?|SUBDIVISION(?: ${PLAT_BOOK})?|${PLAT_BOOK})$`);
+// The rest is read token by token (no pattern runs over the whole list, so a long name costs linear time).
+const PHASE_ID = /^(?:[IVX]{1,4}[A-Z]?[0-9]{0,2}|[A-Z]?[0-9]{1,2}[A-Z]?|[A-Z])(?:-(?:[IVX]{1,4}|[0-9]{1,2}[A-Z]?|[A-Z][0-9]{0,2})){0,3}$/;
+const isPhaseId = (token) => typeof token === 'string' && token.length <= 12 && PHASE_ID.test(token);
+const BOOK_PAGE = /^[0-9]{1,4}\/[0-9]{1,4}$/;
+const isPhaseWord = (token) => token === 'PH' || token === 'PHASE';
+const isSubphaseWord = (token) => token === 'SUBPH' || token === 'SUBPHASE';
+const platTokens = (text) => text.replace(/,/g, ' , ').split(' ').filter(Boolean);
+
+// How far the deed's own words already go into the grammar: 0 no phase, 1 a phase, 2 a subphase or SUBDIVISION.
+// (The Clerk's text leaves the phase out in all 69 measured deeds; this keeps "... PH I" on a deed from refusing
+// "... PH I SUBPH A PB1/2" on the map.)
+function platStage(deedWords) {
+  const tokens = platTokens(deedWords);
+  if (tokens.some((token) => isSubphaseWord(token) || token === 'SUBDIVISION')) return 2;
+  return tokens.some(isPhaseWord) ? 1 : 0;
+}
+
+function platRestKnown(rest, startStage) {
+  const tokens = platTokens(rest);
+  let i = 0;
+  // One or more ids; between two ids a comma, AND, &, a comma and then AND or &, or nothing.
+  const readIds = () => {
+    if (!isPhaseId(tokens[i])) return false;
+    i += 1;
+    for (;;) {
+      let next = i;
+      if (tokens[next] === ',') next += 1;
+      if (tokens[next] === 'AND' || tokens[next] === '&') next += 1;
+      if (!isPhaseId(tokens[next])) return true;
+      i = next + 1;
+    }
+  };
+  let stage = startStage;
+  if (stage === 0 && tokens[i] === 'SUBDIVISION') {
+    i += 1;
+    stage = 2;
+  } else if (stage === 0 && isPhaseWord(tokens[i])) {
+    i += 1;
+    if (!readIds()) return false;
+    stage = 1;
+  }
+  if (stage === 1 && isSubphaseWord(tokens[i])) {
+    i += 1;
+    if (!readIds()) return false;
+  }
+  const book = tokens[i] || '';
+  if (book.startsWith('PB') && BOOK_PAGE.test(book.slice(2))) i += 1;
+  else if (book === 'PB' && BOOK_PAGE.test(tokens[i + 1] || '')) i += 2;
+  return i > 0 && i === tokens.length;
+}
+
 const namesSubdivision = (mapName, deedWords) => {
   const name = String(mapName || '').toUpperCase().replace(/ +/g, ' ').trim();
-  return name === deedWords || (name.startsWith(`${deedWords} `) && PLAT_REST.test(name.slice(deedWords.length + 1)));
+  if (name === deedWords) return true;
+  return name.startsWith(`${deedWords} `) && platRestKnown(name.slice(deedWords.length + 1), platStage(deedWords));
 };
 
 const positiveOrNull = (value) => {
@@ -207,19 +255,25 @@ function sellerOwns(parcel, sellerNames) {
 
 /**
  * Whether the parcels a lot query returned are one new home: { status: 'matched', basis, parcel, permit }, or the
- * reason they are not.
+ * reason they are not. `parcels` is the list queryParcels resolved with; `permitsByParid` is the permit read for
+ * those parcels (an object, empty when none has a permit). A missing input throws.
  *   no_parcel     the map has no such lot.
  *   no_permit     no parcel of the answer has a new-home permit.
  *   unknown_plat  a parcel of the answer has a plat name that is not the deed's subdivision by the grammar.
  *   ambiguous     the lot number exists in more than one phase. (Which one the deed means is not proven here.)
  *   matched       exactly one parcel, and it has a permit. basis = owner_permit when the map still shows the seller
  *                 on it, else permit (the map already shows the next owner, or spells the seller another way).
- * Measured on three real days: 56 of 78 builder-to-person deeds match. 10 more have the lot in several phases; a
+ * Measured on three real days: 55 of 78 builder-to-person deeds match. 10 more have the lot in several phases; a
  * later check (the buyer's name on the map) could prove those.
  */
 function chooseParcel({ sellerNames, parcels, permitsByParid }) {
-  if (!parcels || parcels.length === 0) return { status: 'no_parcel' };
-  const permitOf = (p) => (permitsByParid && permitsByParid[p.parid]) || null;
+  // A lookup that was never done is not "nothing found": both inputs must be the results of completed lookups.
+  if (!Array.isArray(parcels)) throw new TypeError('chooseParcel needs the parcel list of a completed lookup');
+  if (parcels.length === 0) return { status: 'no_parcel' };
+  if (permitsByParid === null || typeof permitsByParid !== 'object' || Array.isArray(permitsByParid)) {
+    throw new TypeError('chooseParcel needs the permits of a completed lookup');
+  }
+  const permitOf = (p) => permitsByParid[p.parid] || null;
   if (!parcels.some(permitOf)) return { status: 'no_permit' };
   if (!parcels.every((p) => p.platKnown === true)) return { status: 'unknown_plat' };
   if (parcels.length > 1) return { status: 'ambiguous' };
