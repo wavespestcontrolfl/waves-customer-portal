@@ -2,7 +2,7 @@ jest.mock('../models/db', () => jest.fn());
 
 const {
   loadWeeklyCallOutcomes, formatWeeklyCallOutcomes, completedWeekDates, PROSPECT_OUTCOMES, STAFF_NEW_LEAD_TAGS,
-  FIRST_VISIT_SCRIPT_LINE,
+  FIRST_VISIT_SCRIPT_LINE, NO_VISIT_QUOTE_LINE, NO_VISIT_SCRIPT_LINE,
 } = require('../services/csr/weekly-call-outcomes');
 const { callStartedAtSql } = require('../services/sms-pending-conversations');
 
@@ -163,7 +163,7 @@ describe('loadWeeklyCallOutcomes', () => {
     const out = await loadWeeklyCallOutcomes({ now: new Date('2026-11-20T13:00:00Z'), conn: fakeConn({ total: 12, known: 0, booked: 0, estimates: 3 }) });
     expect(out.bookedPct).toBeNull();
     expect(out.estimateRequestedOrPromised).toBe(3);
-    expect(formatWeeklyCallOutcomes(out)).toBe(`New-customer callers: 12. No call outcomes recorded yet, so no booking rate. Estimate requested or promised, no booking recorded: 3. ${FIRST_VISIT_SCRIPT_LINE}`);
+    expect(formatWeeklyCallOutcomes(out)).toBe(`New-customer callers: 12. No call outcomes recorded yet, so no booking rate. Estimate requested or promised, no booking recorded: 3. ${FIRST_VISIT_SCRIPT_LINE} ${NO_VISIT_SCRIPT_LINE}`);
   });
 
   test('a caller with no disposition on any call (booked NULL, not false) still counts toward the estimate figure', async () => {
@@ -176,10 +176,13 @@ describe('loadWeeklyCallOutcomes', () => {
 });
 
 describe('formatWeeklyCallOutcomes', () => {
-  test('reads as the one-line summary the Friday tip and the overview show, then the call script line', () => {
+  test('reads as the one-line summary the Friday tip and the overview show, then the two call script lines', () => {
     expect(FIRST_VISIT_SCRIPT_LINE).toBe('Call script: offer the first open visit before you offer to send an estimate.');
+    // The owner's exact sentence (2026-11-21), quoted for the office to say.
+    expect(NO_VISIT_QUOTE_LINE).toBe('We measure your home and yard from county records and satellite images, so most quotes need no visit.');
+    expect(NO_VISIT_SCRIPT_LINE).toBe(`If the caller asks whether someone comes out to quote, say: "${NO_VISIT_QUOTE_LINE}"`);
     expect(formatWeeklyCallOutcomes({ newCustomerCallers: 40, callersWithOutcome: 30, bookedOnCall: 6, bookedPct: 20, estimateRequestedOrPromised: 20 }))
-      .toBe(`New-customer callers: 40. Outcome known for 30. Booked on the call: 6 of 30 (20%). Estimate requested or promised, no booking recorded: 20. ${FIRST_VISIT_SCRIPT_LINE}`);
+      .toBe(`New-customer callers: 40. Outcome known for 30. Booked on the call: 6 of 30 (20%). Estimate requested or promised, no booking recorded: 20. ${FIRST_VISIT_SCRIPT_LINE} ${NO_VISIT_SCRIPT_LINE}`);
   });
 
   test('a week where no caller was left with only an estimate shows no script line', () => {
