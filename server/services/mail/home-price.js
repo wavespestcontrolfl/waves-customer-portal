@@ -189,6 +189,8 @@ async function runHomePrices({ now = Date.now, deps } = {}) {
     quotes: state.quotes, engineFailures: state.engineFailures,
     ...homeFacts.factsSummary(ctx.facts), errors: state.errors, ms: clock() - startedAt,
   });
+  // A permit page read the deadline cut is the budget too, also when it was the run's last row.
+  if (summary.permitBudgetStop) summary.budgetSpent = true;
   logger.info(`Mail home prices: ${JSON.stringify(summary)}`);
   const problems = problemsOf(ctx, summary);
   if (problems.length) throw Object.assign(new Error(`Mail home prices: ${problems.join('; ')}`), { summary });

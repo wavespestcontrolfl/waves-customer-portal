@@ -544,5 +544,9 @@ describe('the run with the real facts reader and the real quote (their outside c
     expect(summary).toMatchObject({ due: 2, left: 1, priced: 0, budgetSpent: true, permitBudgetStop: true, permitFailuresInARow: 0, permitStopped: false });
     expect(t.deps.recordPermitResult).not.toHaveBeenCalled();
     expect(t.deps.savePriceResult).not.toHaveBeenCalled();
+    // On the run's only row too: the summary says the budget was spent.
+    clockNow = NOW;
+    t.deps.dueForPrice.mockResolvedValue([needs]);
+    expect(await runHomePrices({ now: () => clockNow, deps: t.deps })).toMatchObject({ due: 1, left: 1, budgetSpent: true, permitBudgetStop: true });
   });
 });
