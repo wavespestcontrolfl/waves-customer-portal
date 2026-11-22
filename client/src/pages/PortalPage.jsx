@@ -10631,8 +10631,12 @@ function LearnTab({ customer, onOpenPhotoId = null, scope = null }) {
   const activeTierName = resolveActiveTierName(customer);
   const tierName = activeTierName || 'No Plan';
   const numServices = activeTierName ? (TIER_SERVICES[tierName] || 1) : 0;
-  const customerServiceNames = SERVICE_CATALOG
-    .slice(0, numServices)
+  // The member's own plan services (My Plan's list), by family name. Never
+  // the first N catalog services for an N-service tier: a lawn-only Bronze
+  // member read "includes Pest Control" (owner 2026-11-22, "fix box"). No
+  // name while the reads load or after they fail: the sentence stays out.
+  const planServices = usePlanServices(customer, customer?.cancelled !== true && !!activeTierName);
+  const customerServiceNames = (planServices || [])
     .map(s => s.name.replace(/ Program| Barrier Treatment/g, '').replace('Quarterly ', ''));
 
   const filteredFaq = faqSearch.trim()
@@ -19174,4 +19178,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { buildArticles, useLearnArticles, ScoreRing, LawnHealthCard, ChatWidget, LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, PropertyScopeSelect, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ReferTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };
+export { buildArticles, useLearnArticles, ScoreRing, LawnHealthCard, ChatWidget, LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, LearnTab, PropertyScopeSelect, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ReferTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };
