@@ -18,6 +18,8 @@ const deed = (extra = {}) => ({
   description: 'LOT 12 SAMPLE GROVE', date: '2026-11-17', ...extra,
 });
 const candidate = (extra = {}) => candidateFromRow(deed(extra)).candidate;
+// What the store answers for a row it wrote as asked.
+const stored = (row) => ({ status: row.status, reason: row.reason ?? null, written: true });
 
 describe('company, trust and buyer kind', () => {
   test.each([
@@ -37,19 +39,29 @@ describe('company, trust and buyer kind', () => {
   });
 });
 
-describe('company endings written with dots', () => {
-  test.each(['EXAMPLE L.P.', 'EXAMPLE L.L.P.', 'EXAMPLE L.L.C.', 'EXAMPLE N.A.', 'EXAMPLE L.P', 'EXAMPLE, L.L.C', 'EXAMPLE P.A.'])('%s is a company', (name) => {
+describe('company endings written with dots or with spaces', () => {
+  test.each([
+    'EXAMPLE L.P.', 'EXAMPLE L.L.P.', 'EXAMPLE L.L.C.', 'EXAMPLE N.A.', 'EXAMPLE L.P', 'EXAMPLE, L.L.C', 'EXAMPLE P.A.',
+    'EXAMPLE L P', 'EXAMPLE L L P', 'EXAMPLE L L L P', 'EXAMPLE P A', 'EXAMPLE N A', 'EXAMPLE L. L. C.',
+  ])('%s is a company', (name) => {
     expect(isCompanyName(name)).toBe(true);
   });
-  test('letters joined by dots stay apart from the word after them', () => {
+  test('single letters in a row are one word, and they stay apart from the word next to them', () => {
     expect(isCompanyName('A.B.CONSTRUCTION')).toBe(true);
     expect(isCompanyName('TESTER A. J.')).toBe(false);
+    expect(isCompanyName('TESTER A J')).toBe(false);
     expect(isCompanyName('TESTER ALEX J')).toBe(false);
+    expect(isCompanyName('TESTER L PAT')).toBe(false); // "L" then a word that starts with P is not "LP"
+    expect(isTrustName('TESTER ALEX J TR')).toBe(true);
+    expect(isTrustName('TESTER ALEX J')).toBe(false);
   });
   test('both roles: such a buyer is a company, and such a seller is a builder', () => {
     expect(buyerKind(['EXAMPLE L.P.'])).toBe('company');
+    expect(buyerKind(['EXAMPLE L P'])).toBe('company');
     expect(candidateFromRow(deed({ to: ['EXAMPLE L.L.P.'] })).candidate.buyerKind).toBe('company');
+    expect(candidateFromRow(deed({ to: ['EXAMPLE L L P'] })).candidate.buyerKind).toBe('company');
     expect(candidateFromRow(deed({ from: ['SAMPLE L.P.'] })).candidate).toMatchObject({ sellerNames: ['SAMPLE L.P.'], buyerKind: 'person' });
+    expect(candidateFromRow(deed({ from: ['SAMPLE L P'] })).candidate).toMatchObject({ sellerNames: ['SAMPLE L P'], buyerKind: 'person' });
     expect(candidateFromRow(deed({ from: ['SAMPLE L.P.', 'TESTER ROBIN K'] }))).toEqual({ skip: 'person_seller' });
   });
 });
@@ -218,7 +230,7 @@ describe('runNewHomeList', () => {
       findBySourceRefs: jest.fn(async () => existing),
       newHomePermitsForParcels: jest.fn(async () => permits),
       addressKnownToWaves: jest.fn(async () => false),
-      saveProspect: jest.fn(async (row) => row.status),
+      saveProspect: jest.fn(async (row) => stored(row)),
       sleep: jest.fn(async () => {}),
     };
   }
@@ -360,18 +372,19 @@ describe('runNewHomeList', () => {
   test('a duplicate fallback (the home or its permit is live under another deed) is counted under its own reason', async () => {
     // Only a live home can be refused as a duplicate, so the deed matches a parcel and a permit.
     const deps = makeDeps({ rowsByDay: { '2026-11-17': [person(12)] }, ...HOME });
-    deps.saveProspect.mockResolvedValue('not_eligible');
+    deps.saveProspect.mockResolvedValue({ status: 'not_eligible', reason: 'duplicate_parcel', written: true });
     const summary = await run(deps);
     expect(LIVE).toContain(deps.saveProspect.mock.calls[0][0].status);
     expect(summary.saved).toEqual({ not_eligible: 1 });
-    expect(summary.savedByReason).toEqual({ 'not_eligible/duplicate': 1 });
+    expect(summary.savedByReason).toEqual({ 'not_eligible/duplicate_parcel': 1 });
+    expect(summary.keptAnswers).toBe(0);
   });
 
   test('a deed that cannot be saved does not stop the deeds after it; the run throws at its end with codes only', async () => {
     const deps = makeDeps({ rowsByDay: { '2026-11-17': [person(1), person(2), person(3)] } });
     deps.saveProspect.mockImplementation(async (row) => {
       if (row.source_ref === '202699100002') throw Object.assign(new Error('value too long: TESTER ALEX J, 101 EXAMPLE TRL'), { code: '22003' });
-      return row.status;
+      return stored(row);
     });
     let thrown;
     await run(deps).catch((err) => { thrown = err; });
@@ -409,7 +422,7 @@ describe('runNewHomeList', () => {
   test('a save that works resets the error count', async () => {
     const deps = makeDeps({ rowsByDay: { '2026-11-17': Array.from({ length: 9 }, (_, i) => person(i + 1)) } });
     let n = 0;
-    deps.saveProspect.mockImplementation(async (row) => { n += 1; if (n % 3 !== 0) throw new Error('x'); return row.status; });
+    deps.saveProspect.mockImplementation(async (row) => { n += 1; if (n % 3 !== 0) throw new Error('x'); return stored(row); });
     await expect(run(deps)).rejects.toThrow('6 deeds could not be judged or saved (Error: 6)');
     expect(deps.saveProspect).toHaveBeenCalledTimes(9);
   });
@@ -424,14 +437,46 @@ describe('runNewHomeList', () => {
     await expect(run(deps)).rejects.toThrow('Mail new-home list: 2 of 4 days failed (2026-11-16: Error; 2026-11-13: party_cell)');
   });
 
-  test('a live home that another run stored first under the other group is counted as kept, not as a duplicate', async () => {
-    const deps = makeDeps({ rowsByDay: { '2026-11-17': [person(12)] }, ...HOME });
-    const asked = holdBack(LIST_KEY, '513309059') ? 'held_back' : 'eligible';
-    const other = asked === 'eligible' ? 'held_back' : 'eligible';
-    deps.saveProspect.mockResolvedValue(other);
+  test('an answer that another run saved first is counted as the table holds it, not as this run judged it', async () => {
+    // Deed 12 is a live home in this run; deed 1 has no parcel in this run. Another run answered both first.
+    const deps = makeDeps({ rowsByDay: { '2026-11-17': [person(12), person(1)] }, ...HOME });
+    deps.queryParcels.mockImplementation(async (legal) => (legal.lot === '12' ? HOME.parcels : []));
+    deps.saveProspect.mockImplementation(async (row) => (row.source_ref === '202699100012'
+      ? { status: 'not_eligible', reason: 'known_address', written: false }
+      : { status: 'eligible', reason: null, written: false }));
     const summary = await run(deps);
-    expect(deps.saveProspect.mock.calls[0][0].status).toBe(asked);
-    expect(summary.savedByReason).toEqual({ [`${other}/kept`]: 1 });
+    const asked = Object.fromEntries(deps.saveProspect.mock.calls.map(([row]) => [row.source_ref, row.status]));
+    expect(LIVE).toContain(asked['202699100012']);
+    expect(asked['202699100001']).toBe('unmatched');
+    expect(summary.saved).toEqual({ not_eligible: 1, eligible: 1 });
+    expect(summary.savedByReason).toEqual({ 'not_eligible/known_address': 1 });
+    expect(summary.keptAnswers).toBe(2);
+  });
+
+  test('a refused row shows that the database answered: the errors-in-a-row count starts again', async () => {
+    const deps = makeDeps({ rowsByDay: { '2026-11-17': Array.from({ length: 7 }, (_, i) => person(i + 1)) } });
+    const away = () => Object.assign(new Error('away'), { code: 'ECONNRESET' });
+    const refused = () => Object.assign(new Error('refused'), { code: '23514' });
+    const outcomes = [away, refused, away, away, refused, away]; // the seventh save works
+    deps.saveProspect.mockImplementation(async (row) => { const next = outcomes.shift(); if (next) throw next(); return stored(row); });
+    let thrown;
+    await run(deps).catch((err) => { thrown = err; });
+    expect(thrown.message).toBe('Mail new-home list: 6 deeds could not be judged or saved (23514: 2; ECONNRESET: 4)');
+    expect(deps.saveProspect).toHaveBeenCalledTimes(7); // never three in a row with no answer between them
+    expect(loggedSummary().saved).toEqual({ unmatched: 1 });
+  });
+
+  test('an error of the code on one deed leaves the errors-in-a-row count as it is', async () => {
+    const deps = makeDeps({ rowsByDay: { '2026-11-17': Array.from({ length: 5 }, (_, i) => person(i + 1)) } });
+    deps.saveProspect.mockRejectedValue(Object.assign(new Error('away'), { code: 'ECONNRESET' }));
+    let judged = 0;
+    deps.newHomePermitsForParcels.mockImplementation(async () => { judged += 1; if (judged === 2) throw new TypeError('x'); return {}; });
+    let thrown;
+    await run(deps).catch((err) => { thrown = err; });
+    // Deed 1: away. Deed 2: TypeError. Deeds 3 and 4: away, the third in a row. Deed 5 waits.
+    expect(thrown.message).toBe('Mail new-home list: 4 deeds could not be judged or saved (ECONNRESET: 3; TypeError: 1)');
+    expect(deps.saveProspect).toHaveBeenCalledTimes(3);
+    expect(loggedSummary().skipped.waits_for_next_run).toBe(1);
   });
 
   test('errors that belong to one deed never stop the run: the deeds after three refused rows are still saved', async () => {
@@ -439,7 +484,7 @@ describe('runNewHomeList', () => {
     deps.saveProspect.mockImplementation(async (row) => {
       const n = Number(row.source_ref) - 202699100000;
       if (n <= 3) throw Object.assign(new Error('refused: TESTER ALEX J'), { code: n === 1 ? '22003' : '23514' });
-      return row.status;
+      return stored(row);
     });
     deps.newHomePermitsForParcels.mockImplementation(async (parcels) => { if (parcels.length) throw new TypeError('TESTER ALEX J'); return {}; });
     deps.queryParcels.mockImplementation(async (legal) => (Number(legal.lot) >= 6 ? [{ parid: '513309059' }] : []));
@@ -450,14 +495,6 @@ describe('runNewHomeList', () => {
     expect(deps.queryParcels).toHaveBeenCalledTimes(8);
     expect(loggedSummary().saved).toEqual({ unmatched: 2 });
     expect(loggedSummary().skipped.waits_for_next_run).toBeUndefined();
-  });
-
-  test('an unmatched deed that another run settled in the meantime is counted as kept', async () => {
-    const deps = makeDeps({ rowsByDay: { '2026-11-17': [person(1)] } });
-    deps.saveProspect.mockResolvedValue('eligible'); // the store kept the answer it already had
-    const summary = await run(deps);
-    expect(summary.saved).toEqual({ eligible: 1 });
-    expect(summary.savedByReason).toEqual({ 'eligible/kept': 1 });
   });
 
   test('a failed day throws after the other days were saved, naming the day and the reason', async () => {

@@ -38,10 +38,9 @@ const MAX_LOOKUP_FAILURES_IN_A_ROW = 5;
 const MAX_ERRORS_IN_A_ROW = 3;
 const HOLD_BACK_ONE_IN = 5;
 const SETTLED_STATUSES = new Set(['eligible', 'held_back', 'not_eligible']);
-const LIVE_STATUSES = new Set(['eligible', 'held_back']);
 
 const COMPANY_WORDS = [
-  'LLC', 'L L C', 'LC', 'INC', 'INCORPORATED', 'CORP', 'CORPORATION', 'CO', 'COMPANY', 'LP', 'LLP', 'LLLP', 'LTD',
+  'LLC', 'LC', 'INC', 'INCORPORATED', 'CORP', 'CORPORATION', 'CO', 'COMPANY', 'LP', 'LLP', 'LLLP', 'LTD',
   'LIMITED', 'PLLC', 'PA', 'HOMES', 'HOME', 'BUILDERS', 'CONSTRUCTION', 'DEVELOPMENT', 'COMMUNITIES', 'PROPERTIES',
   'HOLDINGS', 'INVESTMENTS', 'PARTNERS', 'PARTNERSHIP', 'GROUP', 'VENTURES', 'ENTERPRISES', 'FUND', 'BANK', 'NA',
   'REALTY', 'RENTALS', 'CAPITAL', 'ASSOCIATES', 'MANAGEMENT', 'SERVICES', 'HOUSING', 'MINISTRIES',
@@ -49,16 +48,16 @@ const COMPANY_WORDS = [
 ];
 const TRUST_WORDS = ['TRUST', 'TRUSTEE', 'TRUSTEES', 'TR', 'TRS', 'REVOCABLE', 'IRREVOCABLE', 'ESTATE'];
 
-// Whole words only, after punctuation turns into spaces ("M/I HOMES" reads as "M I HOMES").
+// Whole words only, after punctuation turns into spaces. Single letters in a row are then one word, so a company
+// ending reads the same however it is written: "L.L.C.", "L L C" and "LLC"; "L.P.", "L P" and "LP"; "N.A." and "NA".
+// "M/I HOMES" reads as "MI HOMES".
 const wordMatcher = (words) => new RegExp(`(?:^| )(?:${words.join('|')})(?: |$)`);
 const COMPANY_RE = wordMatcher(COMPANY_WORDS);
 const TRUST_RE = wordMatcher(TRUST_WORDS);
-// Letters joined by dots are one word first ("L.P." is LP, "N.A." is NA, "L.L.C" is LLC): a mark between them
-// would otherwise split a company ending into single letters.
 const spaced = (name) => String(name || '').toUpperCase()
-  .replace(/\b[A-Z](?:\.[A-Z])+\b\.?/g, (letters) => `${letters.replaceAll('.', '')} `)
   .replace(/[^A-Z0-9]+/g, ' ')
-  .trim();
+  .trim()
+  .replace(/\b[A-Z](?: [A-Z])+\b/g, (letters) => letters.replaceAll(' ', ''));
 
 const isCompanyName = (name) => COMPANY_RE.test(spaced(name));
 const isTrustName = (name) => TRUST_RE.test(spaced(name));
@@ -199,11 +198,13 @@ const bump = (counts, key) => { counts[key] = (counts[key] || 0) + 1; };
 const codeOf = (value) => (typeof value === 'string' && /^[A-Za-z0-9_]{1,40}$/.test(value) ? value : null);
 const errorCode = (err) => codeOf(err?.reason) || codeOf(err?.code) || codeOf(err?.name) || 'error';
 
-// An error that belongs to one deed, not to something every deed needs: PostgreSQL refused the row (SQLSTATE class
-// 22, a value that does not fit; class 23, a constraint), or the code failed on this deed's data (TypeError,
-// RangeError). Any other error can be a dependency that is away (the database, its pool).
-const ROW_ERROR_CLASSES = new Set(['TypeError', 'RangeError']);
-const isRowError = (err) => /^2[23][0-9A-Z]{3}$/.test(String(err?.code || '')) || ROW_ERROR_CLASSES.has(err?.name);
+// Errors that belong to one deed, not to something every deed needs. They are counted, and they never add to the
+// errors-in-a-row stop; any other error can be a dependency that is away (the database, its pool).
+// A row PostgreSQL refused (SQLSTATE class 22, a value that does not fit; class 23, a constraint) also shows that
+// the database answered, so the count starts again. An error of the code on this deed's data (TypeError,
+// RangeError) says nothing about the database, so the count stays as it is.
+const isRefusedRow = (err) => /^2[23][0-9A-Z]{3}$/.test(String(err?.code || ''));
+const isCodeError = (err) => err?.name === 'TypeError' || err?.name === 'RangeError';
 
 // A day that cannot be read is recorded and the run goes on with the other days.
 async function readDays(days, d, summary) {
@@ -269,32 +270,27 @@ async function evaluateAndSave(candidates, d, summary) {
   };
   for (const candidate of candidates) {
     const mapStopped = state.queries >= MAX_PARCEL_QUERIES || state.failStreak >= MAX_LOOKUP_FAILURES_IN_A_ROW;
-    // Several errors in a row that are not a deed's own (isRowError) mean the database is away: every deed left
-    // waits.
+    // Several errors in a row that are not a deed's own mean the database is away: every deed left waits.
     if (state.errorStreak >= MAX_ERRORS_IN_A_ROW || (mapStopped && needsMapQuery(candidate))) {
       bump(summary.skipped, 'waits_for_next_run'); // not saved: the next run asks again
       continue;
     }
     try {
       const row = await evaluate(candidate, countedDeps);
-      const saved = await d.saveProspect(row);
+      const stored = await d.saveProspect(row);
       state.errorStreak = 0;
-      bump(summary.saved, saved);
-      // The store can keep another status than the one asked for. A live home becomes not_eligible when the
-      // home or its permit is already live under another deed (duplicate). Any other difference is an answer
-      // another run stored for this deed in the meantime, which the store kept (kept). A not_eligible answer of
-      // another run for a home this run found live reads as duplicate too; the row's reason has the cause.
-      if (saved === row.status) {
-        if (row.reason) bump(summary.savedByReason, `${row.status}/${row.reason}`);
-      } else {
-        const duplicate = LIVE_STATUSES.has(row.status) && saved === 'not_eligible';
-        bump(summary.savedByReason, `${saved}/${duplicate ? 'duplicate' : 'kept'}`);
-      }
+      // Counted as the table holds it, not as this run judged it. The store saves a home that is already live
+      // under another deed as not_eligible / duplicate_parcel or duplicate_permit, and it keeps a more careful
+      // answer that another run saved for this deed in the meantime (written: false).
+      bump(summary.saved, stored.status);
+      if (stored.reason) bump(summary.savedByReason, `${stored.status}/${stored.reason}`);
+      if (!stored.written) summary.keptAnswers += 1;
     } catch (err) {
       // One deed that cannot be judged or saved must not stop the deeds after it. It is not saved, so the next
       // run tries it again, and this run throws at its end. Only an error that is not the deed's own counts
       // toward the stop: three refused rows in a row must not make every deed after them wait.
-      if (!isRowError(err)) state.errorStreak += 1;
+      if (isRefusedRow(err)) state.errorStreak = 0;
+      else if (!isCodeError(err)) state.errorStreak += 1;
       bump(summary.errors, errorCode(err));
     }
   }
@@ -310,7 +306,7 @@ async function runNewHomeList({ mode = 'night', now = Date.now, deps } = {}) {
   const days = daysToRead(mode, nowMs);
   const summary = {
     mode, days: days.length, daysRead: 0, daysFailed: 0, deeds: 0, skipped: {}, saved: {}, savedByReason: {}, errors: {},
-    mapQueries: 0, mapFailuresInARow: 0,
+    keptAnswers: 0, mapQueries: 0, mapFailuresInARow: 0,
   };
   const { rows, failures } = await readDays(days, d, summary);
   const candidates = collectCandidates(rows, summary);

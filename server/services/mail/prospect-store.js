@@ -203,8 +203,8 @@ async function upsert(row, conn) {
     })
     .onConflict(['list_key', 'source', 'source_ref'])
     .merge({ ...fields, last_checked_at: now, updated_at: now }) // first_seen_at and created_at stay as they were
-    .returning('status');
-  return saved.status;
+    .returning(['status', 'reason']);
+  return { status: saved.status, reason: saved.reason, written: true };
 }
 
 /**
@@ -212,7 +212,8 @@ async function upsert(row, conn) {
  * the list under another deed, or its permit already backs another live home, a unique index refuses the write; the
  * row is then kept as not_eligible with the reason duplicate_parcel or duplicate_permit, so the deed is never read
  * again and the run does not fail. Any other refusal (a live row without a parcel or a permit, an unknown status)
- * is the caller's error and is thrown. Returns the status that was saved.
+ * is the caller's error and is thrown. Returns `{ status, reason, written }`: the status and the reason the row
+ * holds after the call, and whether this call wrote them.
  *
  * The write and its fallback are one unit: one transaction (a savepoint inside a caller's transaction) that first
  * takes a lock on the deed's identity. A second save of the same deed waits for the whole first save, so it can
@@ -222,7 +223,7 @@ async function upsert(row, conn) {
  * A save never replaces a stored answer with a less careful one. `unmatched` is "no answer yet"; a live home
  * (eligible, held_back) is an answer; not_eligible is the most careful answer. A stored answer is replaced only by
  * a more careful one: a live home by not_eligible, and nothing replaces not_eligible. Else nothing is written and
- * the stored status is returned. Two runs can judge one deed at the same time. The run that could not reach the
+ * the stored status and reason are returned with `written: false`. Two runs can judge one deed at the same time. The run that could not reach the
  * parcel map must not undo the other's result, and a home one run found to be a known address must stay
  * not_eligible whichever run saves last. The stored row is read under the same lock.
  */
@@ -231,9 +232,11 @@ async function saveProspect(row, conn = db) {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`mail_prospects:${row.list_key}:${row.source}:${row.source_ref}`]);
     const stored = await trx('mail_prospects')
       .where({ list_key: row.list_key, source: row.source, source_ref: row.source_ref })
-      .first('status');
+      .first('status', 'reason');
     const storedRank = stored ? ANSWER_RANK[stored.status] : undefined;
-    if (storedRank && !(ANSWER_RANK[row.status] > storedRank)) return stored.status;
+    if (storedRank && !(ANSWER_RANK[row.status] > storedRank)) {
+      return { status: stored.status, reason: stored.reason, written: false };
+    }
     try {
       return await trx.transaction((attempt) => upsert(row, attempt));
     } catch (err) {
