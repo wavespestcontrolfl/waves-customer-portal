@@ -136,6 +136,11 @@ export default function RoofPointsCard({ points, address, onImageError }) {
       {points.imageYear ? (
         <p style={{ margin: '8px 0 0', fontSize: 14, lineHeight: 1.5, color: CUSTOMER_SURFACE.muted }}>Photo: county aerial, {points.imageYear}.</p>
       ) : null}
+      {points.preview === true ? (
+        <p data-testid="roof-points-preview-note" style={{ margin: '8px 0 0', fontSize: 14, lineHeight: 1.5, color: CUSTOMER_SURFACE.muted }}>
+          Staff preview: the customer sees these points after the next send.
+        </p>
+      ) : null}
     </div>
   );
 }
