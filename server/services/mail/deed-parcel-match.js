@@ -186,13 +186,16 @@ const sellerOwns = (parcel, sellerNames) => ownerMatchesSeller(parcel.ownerName,
 const ownerKnown = (parcel) => Boolean(alnum(parcel.ownerName) || alnum(parcel.ownerName2));
 
 /**
- * The one new home among the parcels a lot query returned, or why there is none.
- *   owner_permit  exactly one parcel has a new-home permit AND is still under the seller's name on the map.
- *   permit        exactly one parcel has a permit and no parcel at all is under the seller's name (the map already
- *                 shows the next owner). With more than one parcel this needs proof that no other parcel is the
- *                 seller's: a seller name to compare, and an owner on the map for every other parcel.
- * A parcel under the seller's name without a permit, next to a permit on another owner's parcel, is two pieces of
- * evidence that point at different parcels: ambiguous, like every other mix.
+ * The one new home among the parcels a lot query returned, or why there is none. Only a parcel with a new-home
+ * permit can be the home. Each parcel is the seller's, another owner's, or of unknown owner (the map names none).
+ *   owner_permit  exactly one parcel with a permit is the seller's, and every other parcel with a permit is
+ *                 another owner's.
+ *   permit        exactly one parcel has a permit, it is not the seller's, and no parcel at all is the seller's
+ *                 (the map already shows the next owner). With more than one parcel this needs a seller name to
+ *                 compare, and every other parcel must be another owner's.
+ * A parcel of unknown owner could be the seller's, so it never counts as proof. A parcel under the seller's name
+ * without a permit, next to a permit on another owner's parcel, is two pieces of evidence that point at different
+ * parcels. Both are ambiguous, like every other mix.
  */
 function chooseParcel({ sellerNames, parcels, permitsByParid }) {
   if (!parcels || parcels.length === 0) return { status: 'no_parcel' };
@@ -202,11 +205,15 @@ function chooseParcel({ sellerNames, parcels, permitsByParid }) {
   const sellerOwned = parcels.filter((p) => sellerOwns(p, sellerNames));
   const sellerOwnedWithPermit = sellerOwned.filter(hasPermit);
   const pick = (parcel, basis) => ({ status: 'matched', basis, parcel, permit: permitsByParid[parcel.parid] });
-  if (sellerOwnedWithPermit.length === 1) return pick(sellerOwnedWithPermit[0], 'owner_permit');
+  const allOtherOwners = (rivals) => rivals.every(ownerKnown); // none is the seller's where this is used
+  if (sellerOwnedWithPermit.length === 1) {
+    const home = sellerOwnedWithPermit[0];
+    return allOtherOwners(withPermit.filter((p) => p !== home)) ? pick(home, 'owner_permit') : { status: 'ambiguous' };
+  }
   if (withPermit.length !== 1 || sellerOwned.length !== 0) return { status: 'ambiguous' };
   const others = parcels.filter((p) => p !== withPermit[0]);
-  const othersAreNotTheSellers = (sellerNames || []).some((name) => alnum(name)) && others.every(ownerKnown);
-  if (others.length === 0 || othersAreNotTheSellers) return pick(withPermit[0], 'permit');
+  const sellerNamed = (sellerNames || []).some((name) => alnum(name));
+  if (others.length === 0 || (sellerNamed && allOtherOwners(others))) return pick(withPermit[0], 'permit');
   return { status: 'ambiguous' };
 }
 

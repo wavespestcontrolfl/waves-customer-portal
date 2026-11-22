@@ -123,6 +123,19 @@ describe('chooseParcel', () => {
     expect(chooseParcel({ sellerNames, parcels: [permitted, parcel('100000004', 'EXAMPLE LAND TRUST', 'EXAMPLE BUILDERS LLC')], permitsByParid: { 100000003: permit('A') } }))
       .toEqual({ status: 'ambiguous' });
   });
+  test('owner_permit needs an owner on the map for every other parcel with a permit', () => {
+    const owned = parcel('100000001', 'EXAMPLE BUILDERS LLC');
+    const both = { 100000001: permit('A'), 100000002: permit('B') };
+    // The same lot in another phase also has a permit, and the map names no owner for it: the seller could own both.
+    for (const unknown of [parcel('100000002', null), parcel('100000002', '', ''), parcel('100000002', ' ', '-')]) {
+      for (const parcels of [[owned, unknown], [unknown, owned]]) {
+        expect(chooseParcel({ sellerNames, parcels, permitsByParid: both })).toEqual({ status: 'ambiguous' });
+      }
+    }
+    // Without a permit that parcel cannot be the home, so its unknown owner changes nothing.
+    expect(chooseParcel({ sellerNames, parcels: [owned, parcel('100000002', null)], permitsByParid: { 100000001: permit('A') } }))
+      .toMatchObject({ status: 'matched', basis: 'owner_permit', parcel: owned });
+  });
   test('permit basis needs an owner on the map for every other parcel', () => {
     const permitted = parcel('100000001', 'TESTER ALEX J');
     const permitsByParid = { 100000001: permit('A') };
