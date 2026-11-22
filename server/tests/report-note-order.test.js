@@ -39,6 +39,7 @@ describe('the text may go out', () => {
     ['a decimal with no zero before the point', 'found .5 nests by the shed', 'I found 0.5 nests by the shed.'],
     ['a sign on a number stays', 'found <5 nests, 10% of the eaves', 'I found < 5 nests, 10% of the eaves.'],
     ['a list with commas', 'treated kitchen, garage, and lanai', 'I treated the kitchen, garage and lanai.'],
+    ['the customer\'s own thing is "your"', 'customer\'s dog was in the yard, skipped the back', 'Your dog was in the yard, and I skipped the back.'],
     ['a pronoun for the customer, named a sentence before', 'talked to customer. she said ants are back', 'I talked to you. You said ants are back.'],
     ['a word that goes in one sentence stays in the next', 'treated outside with Borlux SC. Borlux SC applied inside', 'I treated outside. Borlux SC was applied inside.'],
     ['"I" after a joining word, where the note names no one', 'swept the eaves so treated the lanai', 'I swept the eaves so I treated the lanai.'],
@@ -78,6 +79,12 @@ describe('the text is refused', () => {
     ['a decimal read as a whole number', 'found 1.5 nests', 'I found 15 nests.', 'not_in_note', '15'],
     ['a decimal with no zero read as a whole number', 'applied .5 oz', 'I applied 5 oz.', 'not_in_note', '5'],
     ['a bound read as an exact amount', 'applied ≤5 oz', 'I applied 5 oz.', 'not_in_note', '5'],
+    ['a bound in brackets read as an exact amount', 'applied (≤5 oz)', 'I applied 5 oz.', 'not_in_note', '5'],
+    ['"I" added beside the person who did the work', 'the neighbor sprayed the fence line', 'I and the neighbor sprayed the fence line.', 'not_in_note', 'i'],
+    ['"I" added before the customer', 'customer sprayed the fence line', 'I and you sprayed the fence line.', 'not_in_note', 'i'],
+    ['"you" added where the note names no customer', 'I said treated shed', 'I said you treated the shed.', 'not_in_note', 'you'],
+    ['a possessive made a second person', 'the customer\'s neighbor treated the shed', 'The customer and neighbor treated the shed.', 'not_in_note', 'customer'],
+    ['a pronoun after the customer\'s neighbor made the customer', 'customer\'s neighbor said he treated the shed', 'Your neighbor said you treated the shed.', 'not_in_note', 'you'],
     ['another person made the customer', 'neighbor said he treated shed', 'Neighbor said you treated shed.', 'not_in_note', 'you'],
     ['a fraction read as a range', 'applied 1/2 bag', 'I applied 1-2 bag.', 'not_in_note', '1mark45mark2'],
     ['an added reason', 'treated the garage', 'I treated the garage because of ants.', 'not_in_note', 'because'],
@@ -108,11 +115,13 @@ describe('the text is refused', () => {
     ['a condition left out with the refused part that opens with it', 'treated kitchen, if customer paid', 'I treated the kitchen.', 'left_out', 'if'],
     ['a condition of time left out with the refused part that opens with it', 'when gate is open, treat shed', 'Treat shed.', 'left_out', 'when'],
     ['two parts run together', 'no, ants were found', 'No ants were found.', 'run_together', 'ants'],
+    ['a comma the text adds after a denial', 'no ants were found', 'No, ants were found.', 'cut', 'ants'],
+    ['a comma the text adds inside a part', 'found ants treated kitchen', 'I found ants, and treated the kitchen.', 'cut', 'treated'],
     ['a count left out', 'set 4 traps in attic', 'I set traps in the attic.', 'left_out', '4'],
     ['a word that leads into a word the text keeps left out', 'treated by the gate', 'I treated the gate.', 'left_out', 'by'],
     ['half of a product name kept', 'treated Borlux SC around shed', 'I treated SC around the shed.', 'left_out', 'borlux'],
     ['a unit left out and its figure kept', 'applied 2 gallons of bait', 'I applied 2 bait.', 'out_of_order', '2'],
-    ['half of two words that go together kept', 'quiet visit no issues sprayed outside', 'It was a quiet visit, issues and I sprayed outside.', 'left_out', 'no'],
+    ['half of two words that go together kept', 'quiet visit no issues sprayed outside', 'It was a quiet visit issues and I sprayed outside.', 'left_out', 'no'],
     ['a plain word left out', 'left the shed window open', 'I left the shed window.', 'left_out', 'open'],
     ['a finding the screens do not refuse left out', 'open gap under the sink, treated shed', 'I treated the shed.', 'left_out', 'open'],
     ['a finding left out with a denial beside it', 'found a nest and did not treat it. checked the shed', 'I checked the shed.', 'left_out', 'found'],
@@ -155,6 +164,7 @@ describe('the words the check reads', () => {
       ['i', 'would', 'say', 'she', 'has', 'been', 'here', 'did', 'not', 'see', '1point5', 'or', '1200'],
     );
     expect(noteWords('1/2, 1-2, 1 – 2')).toEqual(['1mark47mark2', '1mark45mark2', '1mark45mark2']);
-    expect(noteWords('≤5 oz, < 5 oz, 5% and .5')).toEqual(['mark8804mark5', 'oz', 'mark60mark5', 'oz', '5mark37mark', 'and', '0point5']);
+    expect(noteWords('≤5 oz, < 5 oz, (≤5), 5% and .5')).toEqual(['mark8804mark5', 'oz', 'mark60mark5', 'oz', 'mark8804mark5', '5mark37mark', 'and', '0point5']);
+    expect(noteWords("the customer's dog")).toEqual(['the', 'customermark39marks', 'dog']);
   });
 });
