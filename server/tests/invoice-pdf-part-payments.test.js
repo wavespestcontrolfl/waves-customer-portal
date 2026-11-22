@@ -108,8 +108,9 @@ describe('invoice PDF totals block', () => {
     const inv = invoice({ credit_applied: 10 });
     const texts = await renderedText(() => buildInvoicePDFBuffer(inv));
     expect(valueAfter(texts, 'TOTAL')).toBe('$100.00');
-    expect(valueAfter(texts, 'Account credit applied')).toBe('− $10.00');
-    expect(valueAfter(texts, 'Paid so far')).toBe('− $40.00');
+    // The PDF's Helvetica has no U+2212 minus sign (it printed a quote mark), so deductions print a hyphen.
+    expect(valueAfter(texts, 'Account credit applied')).toBe('- $10.00');
+    expect(valueAfter(texts, 'Paid so far')).toBe('- $40.00');
     expect(valueAfter(texts, 'Amount due')).toBe('$50.00');
     expect(texts).not.toContain('$90.00');
   });
@@ -118,7 +119,7 @@ describe('invoice PDF totals block', () => {
     const texts = await renderedText(() => buildInvoicePDFBuffer(invoice()));
     expect(valueAfter(texts, 'TOTAL')).toBe('$100.00');
     expect(texts).not.toContain('Account credit applied');
-    expect(valueAfter(texts, 'Paid so far')).toBe('− $40.00');
+    expect(valueAfter(texts, 'Paid so far')).toBe('- $40.00');
     expect(valueAfter(texts, 'Amount due')).toBe('$60.00');
   });
 

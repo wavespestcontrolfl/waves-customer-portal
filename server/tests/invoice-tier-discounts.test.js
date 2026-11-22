@@ -20,6 +20,7 @@ jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn(async (url) => url),
   invoiceShortCodePrefix: jest.fn(() => 'INV'),
 }));
+jest.mock('../services/completion-pricing', () => ({ acceptedVisitBreakdown: jest.fn() }));
 
 const db = require('../models/db');
 
@@ -550,6 +551,57 @@ describe('invoice tier discounts', () => {
       service_type: 'Quarterly Pest Control',
       technician_id: 'tech-1',
       tech_name: 'Taylor',
+    });
+  });
+
+  describe('estimate discount lines (GATE_INVOICE_ESTIMATE_DISCOUNT_LINES)', () => {
+    const { acceptedVisitBreakdown } = require('../services/completion-pricing');
+    const logger = require('../services/logger');
+    const customer = { id: 'customer-1', waveguard_tier: 'Silver', property_type: 'residential' };
+    const visit = { id: 'scheduled-9', customer_id: 'customer-1', service_type: 'Pest Control', estimated_price: 94.05, primary_line_price: null, source_estimate_id: 'estimate-1' };
+    const breakdown = { base: 110, amount: 94.05, discounts: [{ name: 'WaveGuard Silver', dollars: 11 }, { name: 'Military Discount', dollars: 4.95 }] };
+    const build = (options = {}) => InvoiceService.buildLineItemsForScheduledService('scheduled-9', { fallbackAmount: 94.05, fallbackDescription: 'Pest Control', ...options });
+    afterEach(() => {
+      delete process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES;
+      acceptedVisitBreakdown.mockReset();
+    });
+
+    test('bills the estimate price with each named discount as its own line; the invoice total is unchanged', async () => {
+      process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES = 'true';
+      acceptedVisitBreakdown.mockResolvedValue({ breakdown });
+      const ctx = setupDb({ customer, scheduledServices: [visit] });
+      const built = await build();
+      const primary = 'scheduled_scheduled-9_primary';
+      expect(built.lineItems).toEqual([
+        expect.objectContaining({ client_id: primary, description: 'Pest Control', unit_price: 110, amount: 110 }),
+        expect.objectContaining({ client_id: `discount_estimate_0_${primary}`, discount_for: primary, discount_id: null, description: 'WaveGuard Silver', amount: -11, discount_dollars: 11, stored_discount_source: 'scheduled_service' }),
+        expect.objectContaining({ client_id: `discount_estimate_1_${primary}`, discount_for: primary, discount_id: null, description: 'Military Discount', amount: -4.95, discount_dollars: 4.95 }),
+      ]);
+      const invoice = await InvoiceService.create({
+        customerId: 'customer-1', title: 'Pest Control', lineItems: built.lineItems, discountIds: built.discountIds, trustedStoredDiscountSources: ['scheduled_service'],
+      });
+      expect(invoice.total).toBe(94.05);
+      expect(invoice.discount_amount).toBe(15.95);
+      expect(ctx.getInsertedInvoice()).toMatchObject({ subtotal: 110, discount_label: 'WaveGuard Silver + Military Discount' });
+    });
+
+    test('switch off, or a breakdown that does not price the amount billed, keeps today\'s lines', async () => {
+      acceptedVisitBreakdown.mockResolvedValue({ breakdown });
+      setupDb({ customer, scheduledServices: [visit] });
+      expect((await build()).lineItems).toEqual([expect.objectContaining({ description: 'Pest Control', amount: 94.05 })]);
+      expect(acceptedVisitBreakdown).not.toHaveBeenCalled();
+      process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES = 'true';
+      const otherAmount = await build({ fallbackAmount: 97.2 });
+      expect(otherAmount.lineItems.map((line) => line.description)).not.toContain('WaveGuard Silver');
+    });
+
+    test('a failed read inside the mint transaction logs and keeps the one net line', async () => {
+      process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES = 'true';
+      acceptedVisitBreakdown.mockRejectedValue(new Error('estimate read failed'));
+      setupDb({ customer, scheduledServices: [visit] });
+      const built = await db.transaction((trx) => build({ database: trx }));
+      expect(built.lineItems).toEqual([expect.objectContaining({ description: 'Pest Control', amount: 94.05 })]);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('estimate discount lines skipped for visit scheduled-9'));
     });
   });
 

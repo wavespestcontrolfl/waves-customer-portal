@@ -86,22 +86,54 @@ function matchServiceLine(job, lines) {
   return { status: 'matched', line };
 }
 
-function acceptedDiscountRows(discount, base, savings) {
+// The engine discounts the annual, so a tier-only line's saving can sit a few cents off rate × list price.
+const TIER_ROUNDING_CENTS = 5;
+
+function waveGuardTierName(tier) {
+  const word = String(tier || '').trim().toLowerCase();
+  return word ? `WaveGuard ${word[0].toUpperCase()}${word.slice(1)}` : 'WaveGuard';
+}
+
+// What names an accepted estimate's savings: its own staff discount (applied after the tier) when that reaches
+// recurring work, and whether the estimate carries a WaveGuard tier saving at all.
+function estimateDiscountContext(estimate) {
+  if (!estimate) return {};
+  const { normalizeManualDiscountSummary } = require('../routes/estimate-public');
+  const manual = normalizeManualDiscountSummary(object(estimate.estimate_data));
+  const reachesRecurring = !!manual && Number(manual.recurringAmount ?? manual.amount) > 0;
+  return {
+    manualName: reachesRecurring ? String(manual.label || '').trim() || null : null,
+    tierDiscounted: ['silver', 'gold', 'platinum'].includes(String(estimate.waveguard_tier || '').trim().toLowerCase()),
+  };
+}
+
+// One line's accepted saving split into the discounts that made it: the WaveGuard tier recorded on the line, then the
+// estimate's staff discount. `named` is false for a part the estimate does not name (a service credit, a tier saving on
+// a list-price row with no per-line record, anything else unexplained): the card shows it, an invoice never prints it.
+function acceptedDiscountRows(raw, base, savings, { manualName = null, tierDiscounted = false } = {}) {
   if (!(savings > 0)) return [];
-  const tier = (discount.appliedDiscounts || []).find((item) => item.type === 'waveguard');
+  const tier = (object(raw.discount).appliedDiscounts || []).find((item) => item.type === 'waveguard');
   const tierRate = Number(tier?.amount);
   const tierSavings = tierRate > 0 && tierRate <= 1
     ? money(base - applyDiscount(base, 'percentage', tierRate * 100)) : null;
+  const credited = (Array.isArray(raw.serviceSpecificDiscounts) ? raw.serviceSpecificDiscounts : [])
+    .some((credit) => Number(credit?.amount) > 0);
   const rows = [];
-  if (tierSavings !== null && tierSavings <= savings) {
-    rows.push({ name: `WaveGuard ${tier.tier || ''}`.trim(), percent: tierRate * 100, dollars: tierSavings });
+  let rest = savings;
+  if (tierSavings !== null) {
+    const tierOnly = !manualName && !credited && Math.round((savings - tierSavings) * 100) <= TIER_ROUNDING_CENTS;
+    const dollars = tierOnly ? savings : Math.min(tierSavings, savings);
+    rows.push({ name: waveGuardTierName(tier.tier), percent: tierRate * 100, dollars, named: true });
+    rest = money(savings - dollars);
   }
-  const remaining = money(savings - (rows[0]?.dollars || 0));
-  if (remaining > 0) rows.push({ name: rows.length ? 'Other accepted discount' : 'Accepted estimate discount', dollars: remaining });
+  if (rest > 0) {
+    const named = !!manualName && !credited && !(tierDiscounted && !raw.discount);
+    rows.push({ name: named ? manualName : rows.length ? 'Other accepted discount' : 'Accepted estimate discount', dollars: rest, named });
+  }
   return rows;
 }
 
-function acceptedPricing(line) {
+function acceptedPricing(line, discountContext = {}) {
   const raw = line.sourceLine || {};
   const recurring = line.source === 'recurring';
   const unit = line.monthlyPrice != null ? 'month' : recurring ? 'application' : 'one_time';
@@ -117,7 +149,8 @@ function acceptedPricing(line) {
   const savings = complete ? money(base - amount) : null;
   return {
     amount, unit, base, savings, breakdownAvailable: complete,
-    discounts: acceptedDiscountRows(discount, base, savings),
+    // The staff discount is named only on recurring applications, the work it reaches.
+    discounts: acceptedDiscountRows(raw, base, savings, unit === 'application' ? discountContext : {}),
     // A bare list figure cannot justify another percentage on a legacy net.
     provenUndiscounted: complete && savings === 0 && !line.parentRecurringDiscounted
       && money(raw.manualFinalAnnual) === null
@@ -195,6 +228,13 @@ async function readEstimate(service, database) {
   if (estimate.status !== 'accepted') return { status: 'not_accepted', estimate: null, parent };
   if (!propertyMatches(service, estimate)) return { status: 'property_mismatch', estimate: null, parent };
   return { status: 'linked', estimate, parent };
+}
+
+// The estimate's lines in schedule terms, matched to the catalog the way the schedule maps them.
+async function estimateScheduleLines(database, estimate) {
+  const catalog = await database('services').select('id', 'service_key', 'name', 'short_name', 'category', 'billing_type', 'frequency', 'visits_per_year', 'default_duration_minutes');
+  const { indexServicesForSchedule, scheduleLinesFromEstimate } = require('../routes/admin-customers')._private;
+  return scheduleLinesFromEstimate(estimate, indexServicesForSchedule(catalog), { includeSourceLines: true });
 }
 
 async function discountedVisit(service, addons, proposals, database) {
@@ -276,9 +316,8 @@ async function loadCompletionPricing(serviceId, { database = db, role = 'technic
   });
   const { tierRate, rateRow, savedDiscount, activeMember, canStack, tierRulesAvailable } =
     await completionDiscountRules(database, customer, service, lockRules);
-  const catalog = await database('services').select('id', 'service_key', 'name', 'short_name', 'category', 'billing_type', 'frequency', 'visits_per_year', 'default_duration_minutes');
-  const { indexServicesForSchedule, scheduleLinesFromEstimate } = require('../routes/admin-customers')._private;
-  const lines = source.estimate ? scheduleLinesFromEstimate(source.estimate, indexServicesForSchedule(catalog), { includeSourceLines: true }) : [];
+  const lines = source.estimate ? await estimateScheduleLines(database, source.estimate) : [];
+  const discountContext = estimateDiscountContext(source.estimate);
   const appointmentDiscount = storedDiscount(service);
   const unavailable = [
     role !== 'admin',
@@ -292,7 +331,7 @@ async function loadCompletionPricing(serviceId, { database = db, role = 'technic
   const proposals = [];
   const matchedLines = scheduledLines(service, addons).map((entry) => {
     const match = matchServiceLine(entry.job, lines);
-    const quote = match.line ? acceptedPricing(match.line) : null;
+    const quote = match.line ? acceptedPricing(match.line, discountContext) : null;
     const proposal = quote ? discountProposal({ entry, quote, line: match.line, service, estimate: source.estimate,
       tierRate, activeMember, blocked: blocked || ((!!service.discount_id || !!service.discount_type) && !canStack) }) : null;
     if (proposal) proposals.push({ ...proposal, jobLineId: entry.id });
@@ -393,5 +432,30 @@ function visitPriceDecisionRecorded(service) {
     || [service.discount_id, service.discount_type, storedDiscount(service)].some(Boolean);
 }
 
+// The accepted estimate's discounts for ONE visit's invoice (owner 2026-11-22: a visit booked from an accepted estimate
+// prints its WaveGuard tier and the estimate's own discount as their own lines). { breakdown: { base, amount,
+// discounts: [{ name, dollars }] } } only while the visit still bills exactly the accepted per-application price with
+// nothing recorded of its own (no primary price, discount, add-on or prepayment) and the estimate names every dollar of
+// the saving; otherwise { breakdown: null, reason }. Read-only. base − Σ dollars = amount = the visit's own price.
+async function acceptedVisitBreakdown(service, { database = db } = {}) {
+  const none = (reason) => ({ breakdown: null, reason });
+  if (!(money(service.estimated_price) > 0)) return none('not_priced');
+  if (visitPriceDecisionRecorded(service)) return none('own_price_or_discount');
+  if (Number(service.prepaid_amount) > 0 || service.annual_prepay_term_id) return none('prepaid');
+  if (await database('scheduled_service_addons').where({ scheduled_service_id: service.id }).first('id')) return none('add_ons');
+  const source = await readEstimate(service, database);
+  if (source.status !== 'linked') return none(`estimate_${source.status}`);
+  const match = matchServiceLine(service, await estimateScheduleLines(database, source.estimate));
+  if (match.status !== 'matched') return none(`line_${match.status}`);
+  const quote = acceptedPricing(match.line, estimateDiscountContext(source.estimate));
+  if (quote.unit !== 'application') return none('not_per_application');
+  if (!quote.breakdownAvailable) return none('no_breakdown');
+  if (!(quote.savings > 0)) return none('no_discount');
+  if (!sameMoney(service.estimated_price, quote.amount)) return none('price_changed');
+  if (!quote.discounts.every((row) => row.named)) return none('discount_unnamed');
+  return { breakdown: { base: quote.base, amount: quote.amount, discounts: quote.discounts.map(({ name, dollars }) => ({ name, dollars })) } };
+}
+
 module.exports = { MONEY_FIELDS, visitPriceDecisionRecorded, loadCompletionPricing, prepareCompletionPricingReview, lockCompletionPricingEstimate,
-  commitCompletionPricingReview, lockCompletionPricingParent, committedCompletionPrice, acceptedPricing, matchServiceLine, propertyMatches, money };
+  commitCompletionPricingReview, lockCompletionPricingParent, committedCompletionPrice, acceptedPricing, acceptedVisitBreakdown,
+  matchServiceLine, propertyMatches, money };

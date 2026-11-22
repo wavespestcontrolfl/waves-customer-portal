@@ -44,6 +44,21 @@ describe('terminalInvoiceLines', () => {
     });
   });
 
+  test('lists each discount as its own row, as the invoice PDF does', () => {
+    const invoice = {
+      line_items: [
+        line('Quarterly Pest Control Service', 110),
+        line('WaveGuard Silver', -11, { _kind: 'discount' }),
+        line('Military Discount', -4.95, { _kind: 'discount' }),
+      ],
+      subtotal: 110, discount_amount: 15.95, discount_label: 'WaveGuard Silver + Military Discount', total: 94.05,
+    };
+    expect(terminalInvoiceLines(invoice, null, 9405).adjustments).toEqual([
+      { label: 'WaveGuard Silver', amount_cents: -1100 },
+      { label: 'Military Discount', amount_cents: -495 },
+    ]);
+  });
+
   test('shows tax for a commercial customer and the quantity on a multi-unit line', () => {
     const invoice = {
       line_items: [{ description: 'Bait Station Service', quantity: 3, unit_price: 25, amount: 75 }],
