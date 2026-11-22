@@ -290,7 +290,7 @@ function getAutoDispatchConfig(overrides = {}) {
     // runs — behavior is the legacy flat lock, byte for byte.
     routeTiersEnabled,
     // FLEX-TIER: when true, auto-dispatch's day-move guard is the Flexible
-    // tier (flex-tier.js: 73h freeze, a ±5-day radius (±7 for a plan of 2 months or longer) clamped by the
+    // tier (flex-tier.js: 25h night freeze, a ±5-day radius (±7 for a visit that repeats every 2 months or less often) clamped by the
     // series' adjacent occurrence) instead of the route-tiers days-out
     // ladder. Independent of routeTiersEnabled; guardMode below gives this
     // one precedence when both are somehow on.
@@ -302,7 +302,18 @@ function getAutoDispatchConfig(overrides = {}) {
     // this same config object — a grouped move's siblings are always
     // checked under the identical mode as the tapped row that triggered it.
     guardMode: flexTierEnabled ? 'flex' : (routeTiersEnabled ? 'tiers' : 'legacy'),
+    ...flexPolicyFacts(flexTierEnabled),
   };
+}
+
+// What the admin page states for a flex run (AutoDispatchPage policyText), saved in config_snapshot so a run keeps
+// the rule it ran under: the night freeze in hours (the run always passes lock24h, owner 2026-11-03) and the widest
+// band (±7, owner 2026-11-22; flexBandRadius decides which visits get it). A run saved before these fields existed
+// has neither, and the page then states only what every flex run had in common.
+function flexPolicyFacts(flexTierEnabled) {
+  if (!flexTierEnabled) return {};
+  const flexTier = require('./flex-tier');
+  return { flexFreezeHours: flexTier.flexFreezeHoursFor(true), flexWideRadiusDays: flexTier.FLEX_TIER_WIDE_RADIUS_DAYS };
 }
 
 module.exports = {
