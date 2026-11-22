@@ -7187,16 +7187,19 @@ county records and satellite images, so most quotes need no visit." (`NO_VISIT_Q
 script line). Copy only: no customer or pricing data. ABSENT unless all of these hold: the estimate is open (the same
 `cta.terminalState === null` the page reads, so an accepted, declined, expired or quote-required estimate carries none);
 every service row on the estimate is one Waves prices from the measured home and yard alone (`estimateIsRemoteMeasured`
-in `routes/estimate-public.js`). The saved estimate decides: the rows of `guaranteeServiceRows` (both saved result shapes,
-an inputs-only replay, the price's one-time rows and an authored proposal's rows). The served price can only take the key
-away: a recurring service it lists counts too (`pricing.services[]` recurring sections by `memberKeys`, else `key`, and
-every `frequencies[].perServiceTreatments[]` row on the price and on those sections). The rule is two exact lists of stored
-service identities, not the page's display categories. A row's identity is its own `service` (else `key`), compared whole;
-a name or label never counts. Recurring: `pest_control`, `lawn_care`, `tree_shrub`, `mosquito` or `termite_bait`, and not
-commercial. One-time: `one_time_pest`, `one_time_lawn`, `one_time_mosquito` or `termite_bait_installation` (the termite bait
-plan's own install charge). One row off its list (rodent work, a misting system, foam, trenching, pre-slab, Bora-Care, a WDO
+in `routes/estimate-public.js`). The rule is two exact lists of service identities, not the page's display categories. A
+row's identity is its own stored `service`, compared whole; a name, a label or a part of a key never counts, and a row
+with no stored `service` has no identity. Recurring: `pest_control`, `lawn_care`, `tree_shrub`, `mosquito` or
+`termite_bait`, and not commercial. One-time: `one_time_pest`, `one_time_lawn`, `one_time_mosquito` or
+`termite_bait_installation` (the termite bait plan's own install charge). The saved estimate decides: the rows of
+`guaranteeServiceRows` (both saved result shapes, an inputs-only replay, the price's one-time rows and an authored
+proposal's rows), and the saved recurring rows as they are stored (`recurring.services[]`, `results.recurring.services[]`,
+`lineItems[]`): a row the page resolves to a listed plan must store that plan's key. The served price can only take the
+key away: a recurring service it lists counts too (`pricing.services[]` recurring sections by `memberKeys`, else `key`, and
+every `perServiceTreatments[].service` of each `frequencies[]` and `serviceCadenceCombos[]` entry, on the price and on
+those sections). One row off its list (rodent work, a misting system, foam, trenching, pre-slab, Bora-Care, a WDO
 inspection, traps, a palm injection, a bed bug, roach, flea or stinging insect job, a termite station rental or bond row,
-an area add-on, a row with no stored identity), no service row at all, or a failed replay, and the key is
+an area add-on, a row with no stored `service`), no service row at all, or a failed replay, and the key is
 absent; setup, discount and membership rows are not services); and the estimate email's rule reads the row as a home
 estimate (`noVisitLineFor`: category `RESIDENTIAL`, not a proposal, and no commercial mark by `isCommercialEstimateRow` at
 its strict reading, so a commercial estimate, a proposal and a condo carry none). A row the rule cannot read omits the key

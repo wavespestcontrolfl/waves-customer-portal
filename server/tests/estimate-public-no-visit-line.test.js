@@ -212,16 +212,15 @@ describe('serviceMixIsRemoteMeasured: is every service on the estimate priced fr
     }
   });
 
-  test('a row counts by its stored identity, compared whole: never by its name, never by a part of a key', () => {
-    // A saved row names its service in `service`; a row with only `key` is read by that key.
-    expect(serviceMixIsRemoteMeasured([{ key: 'pest_control', label: 'Pest Control' }], [])).toBe(true);
+  test('a row counts by its stored service, compared whole: never by its name, never by a part of a key', () => {
     expect(serviceMixIsRemoteMeasured([{ service: ' Pest_Control ', name: 'Pest Control' }], [])).toBe(true);
     const noIdentity = [
       { name: 'Pest Control', visitsPerYear: 4 },
       { label: 'Lawn Care' },
+      { key: 'pest_control', label: 'Pest Control' },
       { serviceKey: 'pest_control', name: 'Pest Control' },
       { service: null, name: 'Mosquito' },
-      { service: '', key: '', name: 'Pest Control' },
+      { service: '', key: 'pest_control', name: 'Pest Control' },
       { service: 'Pest Control' },
     ];
     for (const row of noIdentity) {
@@ -232,6 +231,8 @@ describe('serviceMixIsRemoteMeasured: is every service on the estimate priced fr
     for (const key of ['lawn_care_plus', 'new_lawn_program', 'pest_control_commercial', 'mosquito_event', 'termite_bait_monitoring']) {
       expect([key, serviceMixIsRemoteMeasured([recurringRow(key)], [])]).toEqual([key, false]);
     }
+    // A one-time row is read the same way: a key with no stored service is no identity.
+    expect(serviceMixIsRemoteMeasured([pest], [{ key: 'one_time_pest', name: 'One-Time Pest Control', amount: 199 }])).toBe(false);
     // Each list is for its own kind of row: a plan key on a one-time row, or a one-time key on a plan row, is not on it.
     expect(serviceMixIsRemoteMeasured([], [{ service: 'pest_control', name: 'Pest Control', amount: 120 }])).toBe(false);
     expect(serviceMixIsRemoteMeasured([recurringRow('one_time_pest')], [])).toBe(false);
@@ -278,14 +279,42 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
     expect(estimateIsRemoteMeasured(estData, { oneTimeBreakdown: { items: [{ service: 'german_roach', name: 'German Roach Cleanout Service', amount: 450 }] } })).toBe(false);
   });
 
+  test('a saved row the page resolves to a listed plan must store that plan as its own service', () => {
+    // A raw engine line reaches the page's rows with the key the page resolves from its name or from a part of its key.
+    const line = (fields) => ({ monthly: 42, annual: 504, visitsPerYear: 4, ...fields });
+    const lines = (...items) => ({ engineResult: { lineItems: items } });
+    expect(estimateIsRemoteMeasured(lines(line({ service: 'pest_control', label: 'Pest Control' })), {})).toBe(true);
+    expect(estimateIsRemoteMeasured(lines(line({ label: 'Pest Control' })), {})).toBe(false);
+    expect(estimateIsRemoteMeasured(lines(line({ name: 'Quarterly lawn program' })), {})).toBe(false);
+    expect(estimateIsRemoteMeasured(lines(line({ key: 'pest_control', label: 'Pest Control' })), {})).toBe(false);
+    expect(estimateIsRemoteMeasured(lines(line({ service: 'lawn_aeration_plan', label: 'Aeration plan' })), {})).toBe(false);
+    // One unidentified line beside a real plan row takes the answer away, in either saved shape.
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control'), engineResult: { lineItems: [line({ label: 'Lawn care' })] } }, {})).toBe(false);
+    expect(estimateIsRemoteMeasured({ result: { ...plan('pest_control'), lineItems: [line({ label: 'Pest Control' })] } }, {})).toBe(false);
+    // The same for a stored plan row, and for the nested results shape.
+    expect(estimateIsRemoteMeasured({ result: { recurring: { services: [recurringRow('pest_control'), { name: 'Pest Control', mo: 40 }] } } }, {})).toBe(false);
+    expect(estimateIsRemoteMeasured({ result: { ...plan('pest_control'), results: { recurring: { services: [{ name: 'Lawn Care', mo: 60 }] } } } }, {})).toBe(false);
+    // A line that stores a listed one-time service is that service: its key holds a plan's name, and that is not a miss.
+    const oneTimeLine = { service: 'one_time_pest', label: 'One-Time Pest Control', price: 199 };
+    expect(estimateIsRemoteMeasured(
+      { result: { ...plan('pest_control'), lineItems: [line({ service: 'pest_control' }), oneTimeLine] } },
+      { oneTimeBreakdown: { items: [{ service: 'one_time_pest', label: 'One-Time Pest Control', amount: 199 }] } },
+    )).toBe(true);
+  });
+
   test('a recurring service that only the price the customer is served lists takes the answer away', () => {
     const estData = { result: plan('pest_control', 'mosquito') };
     const cadence = (...keys) => ({ key: 'quarterly', perServiceTreatments: keys.map((service) => ({ service, label: service })) });
     const section = (key, extra = {}) => ({ key, isRecurring: true, memberKeys: [key], frequencies: [], ...extra });
-    // Cadence rows of the price, any cadence.
+    // Per-service rows of the price, any cadence.
     expect(estimateIsRemoteMeasured(estData, { frequencies: [cadence('pest_control', 'mosquito')] })).toBe(true);
     expect(estimateIsRemoteMeasured(estData, { frequencies: [cadence('pest_control', 'mosquito', 'rodent_bait')] })).toBe(false);
     expect(estimateIsRemoteMeasured(estData, { frequencies: [cadence('pest_control'), cadence('pest_control', 'rodent_bait')] })).toBe(false);
+    // Cadence combinations the customer can pick.
+    expect(estimateIsRemoteMeasured(estData, { frequencies: [cadence('pest_control', 'mosquito')], serviceCadenceCombos: [cadence('pest_control', 'mosquito')] })).toBe(true);
+    expect(estimateIsRemoteMeasured(estData, { frequencies: [cadence('pest_control', 'mosquito')], serviceCadenceCombos: [cadence('pest_control', 'mosquito'), cadence('pest_control', 'rodent_bait')] })).toBe(false);
+    // A per-service row with no stored service fails closed.
+    expect(estimateIsRemoteMeasured(estData, { frequencies: [{ key: 'quarterly', perServiceTreatments: [{ label: 'Pest Control' }] }] })).toBe(false);
     // Sections: one per service, or one 'bundle' section that names its services in memberKeys.
     expect(estimateIsRemoteMeasured(estData, { services: [section('pest_control'), section('mosquito')] })).toBe(true);
     expect(estimateIsRemoteMeasured(estData, { services: [section('pest_control'), section('rodent_bait')] })).toBe(false);
