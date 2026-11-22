@@ -5887,25 +5887,6 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 15 MIN, 7AM-8PM — Call booking check (owner 2026-11-22, "fix"). One
-  // Schedule bell for each open visit the call agent booked whose service is a
-  // plan while the call named a one-time service. The bell closes itself when
-  // the visit is corrected, done or cancelled. Read-only; nothing goes to a
-  // customer. Minutes 13, 28, 43 and 58 as a list: node-cron 3 reads a stepped
-  // range as the range values divisible by the step.
-  // =========================================================================
-  cron.schedule('0 13,28,43,58 7-20 * * *', async () => {
-    try {
-      await runExclusive('call-booking-check', async () => {
-        const result = await require('./call-booking-check').runCallBookingCheck();
-        logger.info(`Call booking check: ${result.raised ?? 0} raised, ${result.closed ?? 0} closed (${result.outcome || result.skipped})`);
-      });
-    } catch (err) {
-      logger.error(`Call booking check failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
   // DAILY 7:35AM — Estimate no-time-soon check (owner 2026-11-09, option C). One
   // Estimates bell per open estimate whose booking page shows no time within 7
   // days; it closes itself when the problem is gone. Read-only: no paid call

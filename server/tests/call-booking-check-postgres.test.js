@@ -4,10 +4,13 @@
  * only because it asks to ring). Proves the SQL side: a plan visit the call agent booked for a call that named a
  * one-time service gets ONE Schedule bell (with the right key, headline, link, subject and done-when) and a repeat
  * run adds nothing; correcting the service closes it; a cancelled visit closes it; a closed bell does not ring
- * again; and a voice sandbox call, a follow-up child, a visit a person made, a call with no valid reading, a
- * completed visit, a visit older than 7 days and a visit that agrees with its call all raise nothing. It reads
- * every candidate visit in the database, so it asserts on its own rows only. It refuses any database but a private
- * QA one or CI's.
+ * again; a bell stays open while the reading cannot be read or the visit waits for a new time; and a voice sandbox
+ * call, a follow-up child, a visit a person made, a call with no valid reading, a reading that heard a plan ask, a
+ * completed visit, a visit older than 7 days and a visit that agrees with its call all raise nothing.
+ *
+ * The run reads every candidate visit in the database and writes bells for the ones it names. So each test runs
+ * in ONE transaction that the reads and the notification writer share, and that rolls back: nothing this suite
+ * reads or rings for another suite's rows stays. It refuses any database but a private QA one or CI's.
  */
 // Read once, when feature-gates loads; put back after the suite so a later suite in the same worker sees its own env.
 const ENV_BEFORE = { GATE_ADMIN_BELL_POLICY: process.env.GATE_ADMIN_BELL_POLICY };
@@ -35,10 +38,10 @@ afterAll(() => {
 
 maybeDescribe('call booking check (live Postgres)', () => {
   let db;
+  let trx;
   let Check;
   const NOW = new Date('2026-11-21T22:00:00Z'); // 5:00 PM Eastern, Saturday
   const BOOKED_AT = '2026-11-21T21:33:00Z'; // 4:33 PM Eastern
-  const ids = { customers: [], calls: [], visits: [], services: [] };
   const tag = randomUUID().slice(0, 8);
   // Two catalog rows of this suite's own, so no seeded catalog name can change the result.
   const oneTime = { id: randomUUID(), name: `Check One-Time Pest ${tag}`, service_key: `check_one_time_${tag}`, billing_type: 'one_time' };
@@ -67,45 +70,34 @@ maybeDescribe('call booking check (live Postgres)', () => {
       },
       pool: { min: 0, max: 2 },
     });
-    mockConnection = db;
     Check = require('../services/call-booking-check');
-    await db('services').insert([oneTime, plan]);
-    ids.services.push(oneTime.id, plan.id);
   });
-
-  const keyFor = (visitId) => `${Check.OWN_PREFIX}service:${visitId}`;
-  const rowsFor = (visitId) => db('notifications').where({ recipient_type: 'admin' })
-    .whereRaw("metadata->>'dedupeKey' = ?", [keyFor(visitId)]);
-
-  afterAll(async () => {
-    if (!db) return;
-    await db('notifications').where({ recipient_type: 'admin' })
-      .whereRaw("metadata->>'dedupeKey' = ANY(?::text[])", [ids.visits.map(keyFor)]).del();
-    await db('scheduled_services').whereIn('id', ids.visits).del();
-    await db('call_log').whereIn('id', ids.calls).del();
-    await db('customers').whereIn('id', ids.customers).del();
-    await db('services').whereIn('id', ids.services).del();
-    await db.destroy();
+  beforeEach(async () => {
+    trx = await db.transaction();
+    mockConnection = trx;
+    await trx('services').insert([oneTime, plan]);
   });
+  afterEach(async () => { await trx.rollback(); });
+  afterAll(async () => { if (db) await db.destroy(); });
+
+  const rowsFor = (visitId) => trx('notifications').where({ recipient_type: 'admin' })
+    .whereRaw("metadata->>'dedupeKey' = ?", [`${Check.OWN_PREFIX}service:${visitId}`]);
 
   // One synthetic caller, the call (its stored reading names `heard`), and the visit booked from it.
-  async function booking({ row = plan, heard = oneTime.name, status = 'confirmed', createdAt = BOOKED_AT, callOver = {}, visitOver = {} } = {}) {
+  async function booking({ row = plan, heard = oneTime.name, intent = 'active_infestation_treatment', status = 'confirmed', createdAt = BOOKED_AT, callOver = {}, visitOver = {} } = {}) {
     const customerId = randomUUID();
     const callId = randomUUID();
     const visitId = randomUUID();
-    await db('customers').insert({ id: customerId, first_name: 'Pat', last_name: 'Synthetic', phone: `+1941${String(Math.floor(Math.random() * 1e7)).padStart(7, '0')}` });
-    ids.customers.push(customerId);
-    await db('call_log').insert({
+    await trx('customers').insert({ id: customerId, first_name: 'Pat', last_name: 'Synthetic', phone: `+1941${String(Math.floor(Math.random() * 1e7)).padStart(7, '0')}` });
+    await trx('call_log').insert({
       id: callId, direction: 'inbound', from_phone: '+19415550101', to_phone: '+19415550000', twilio_call_sid: `CA${randomUUID().replace(/-/g, '')}`,
       status: 'completed', duration_seconds: 240, customer_id: customerId, created_at: createdAt, updated_at: createdAt,
-      v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ service_request: { specific_service_name: heard } }), ...callOver,
+      v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ service_request: { specific_service_name: heard, service_intent: intent } }), ...callOver,
     });
-    ids.calls.push(callId);
-    await db('scheduled_services').insert({
+    await trx('scheduled_services').insert({
       id: visitId, customer_id: customerId, scheduled_date: '2026-11-21', service_type: row.name, service_id: row.id, status,
       booking_source: 'phone_call', source_call_log_id: callId, source_action: 'ai_call_pipeline', created_at: createdAt, ...visitOver,
     });
-    ids.visits.push(visitId);
     return { customerId, callId, visitId };
   }
 
@@ -138,7 +130,7 @@ maybeDescribe('call booking check (live Postgres)', () => {
   test('correcting the service closes the bell, and it does not ring again when the problem comes back', async () => {
     const b = await booking();
     await run();
-    await db('scheduled_services').where({ id: b.visitId }).update({ service_id: oneTime.id, service_type: oneTime.name });
+    await trx('scheduled_services').where({ id: b.visitId }).update({ service_id: oneTime.id, service_type: oneTime.name });
     const next = await run(new Date('2026-11-21T22:15:00Z'));
     expect(next.closed).toBeGreaterThanOrEqual(1);
     const [row] = await rowsFor(b.visitId);
@@ -146,16 +138,23 @@ maybeDescribe('call booking check (live Postgres)', () => {
     expect(row.resolution).toBe('The visit and the call now agree on the service');
     expect(row.metadata).toMatchObject({ autoCleared: true, autoClearedReason: 'service_agrees' });
 
-    await db('scheduled_services').where({ id: b.visitId }).update({ service_id: plan.id, service_type: plan.name });
+    await trx('scheduled_services').where({ id: b.visitId }).update({ service_id: plan.id, service_type: plan.name });
     await run(new Date('2026-11-21T22:30:00Z'));
     expect(await rowsFor(b.visitId)).toHaveLength(1);
   });
 
-  test('a cancelled visit closes its bell', async () => {
+  test('a bell stays open while the reading cannot be read and while the visit waits for a new time; a cancelled visit closes it', async () => {
     const b = await booking();
     await run();
-    await db('scheduled_services').where({ id: b.visitId }).update({ status: 'cancelled' });
+    // The call is being processed again: its reading is not valid for now.
+    await trx('call_log').where({ id: b.callId }).update({ v2_extraction_status: 'schema_failed' });
+    // A reschedule request parks the same visit row until the office books it again.
+    await trx('scheduled_services').where({ id: b.visitId }).update({ status: 'rescheduled' });
     await run(new Date('2026-11-21T22:15:00Z'));
+    expect((await rowsFor(b.visitId))[0].done_at).toBeNull();
+
+    await trx('scheduled_services').where({ id: b.visitId }).update({ status: 'cancelled' });
+    await run(new Date('2026-11-21T22:30:00Z'));
     const [row] = await rowsFor(b.visitId);
     expect(row.done_at).not.toBeNull();
     expect(row.resolution).toBe('The visit is done or cancelled');
@@ -164,6 +163,7 @@ maybeDescribe('call booking check (live Postgres)', () => {
   test.each([
     ['the call was a voice sandbox call', { callOver: { source: 'voice_relay_sandbox' } }],
     ['the call has no valid reading', { callOver: { v2_extraction_status: 'schema_failed' } }],
+    ['the reading says the caller asked about a plan', { intent: 'recurring_membership_inquiry' }],
     ['a person made the visit from the call', { visitOver: { source_action: 'admin' } }],
     ['the visit is the follow-up of a call booking', { visitOver: { source_action: 'ai_call_pipeline_followup' } }],
     ['the visit is already done', { status: 'completed' }],
