@@ -15,14 +15,14 @@
  * leads only when the caller names it in `livePostFactIds`: the facts whose
  * post answered as live for this send (posts.checkLivePosts). With no list,
  * no issue builds. "A tool we'd use" is a reviewed tool (tools.js) whose
- * link passed this send's live check (the caller names those links in
- * `liveToolUrls`). It is not in `issue`: the result's `tool` names it (its
- * productId and the checked link `url`), and the send path adds it per
- * recipient, for opted-in readers only (render.withToolBlock, which renders
- * it only while the tool's link is still the checked one), so the shared
- * body, which the archive serves, never carries an Amazon link. The send
- * path records one `recent.toolIds` entry per issue: the tool's product id,
- * or null for an issue without one.
+ * registry row is active at build time (the caller names those links in
+ * `liveToolUrls`; no Amazon page is read). It is not in `issue`: the result's
+ * `tool` names it (its productId and link `url`), and the send path fills it
+ * per recipient, for opted-in readers only, in the HTML part only
+ * (tool-block.js {{pi-tool}}, which looks the tool up again at send time), so
+ * the shared body, which the archive serves, never carries an Amazon link. The
+ * send path records one `recent.toolIds` entry per issue: the tool's product
+ * id, or null for an issue without one.
  * `pollQuizId` is the issue's poll, which the planner picks
  * (newsletter-quiz.js chooseNewsletterPoll); the renderer shows only a Waves
  * Pest Insider poll, and the send check reads its words.
@@ -60,9 +60,10 @@ const copyFailReason = (copy) => `copy_check_failed: ${copy.problems.map((p) => 
 // The send validator itself, on the issue as rendered. It reads the whole
 // email, where a pronoun opening one block reads the sentence before it, so
 // an issue this returns errors for would be refused at send anyway. A poll
-// is read as its words (the archive's render), not as its token. The "Your
-// home" tokens are removed: the shared body is that block's absence, and each
-// reader's block is checked on its own at send time (render.js homeBlockErrors).
+// is read as its words (the archive's render), not as its token. The "A tool
+// we'd use" and "Your home" tokens are removed: the shared body is those blocks'
+// absence, and each reader's block is checked on its own at send time (render.js
+// toolBlockErrors, homeBlockErrors).
 // The referral line is read in its form with no amount (referral-line.js).
 function sendGateErrors(issue) {
   const { errors } = validateNewsletterDraft({
@@ -125,7 +126,7 @@ function buildIssue({ sendDate, recent = {}, recheckedFactIds = [], livePostFact
   if (!post || !livePostFactIds.includes(leadFact.id)) {
     return { ok: false, reason: `no_live_post: ${leadFact.id}`, issue: null, diagnostics };
   }
-  // The same for the tool: the planner picks only a tool whose link is live.
+  // The same for the tool: the planner picks only a tool whose link was named.
   if (tool && !liveToolUrls.includes(tool.url)) {
     return { ok: false, reason: `no_live_tool: ${tool.productId}`, issue: null, diagnostics };
   }

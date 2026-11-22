@@ -118,9 +118,9 @@ function pickLeadFact(dateET, recentFactIds, recheckedFactIds, livePostFactIds) 
 }
 
 // "A tool we'd use": only a tool that is usable in the registry now and
-// whose link, as it is now, passed this send's live check (the check reads a
-// page, so its proof is the link, not the product: pre-push PR 3 r4), and
-// not one of the last two issues' tools. A tool for the lead fact's service
+// whose link, as it is now, is one the caller named in `liveToolUrls` (the
+// links of the tools whose registry row is active at build time: no page of
+// Amazon is read, owner 2026-11-22), and not one of the last two issues' tools. A tool for the lead fact's service
 // comes first, then any such tool; the send date picks inside that pool.
 // None: the issue has no tool item (it still builds).
 function pickTool({ dateET, fact, recentToolIds, liveToolUrls }) {
@@ -143,9 +143,9 @@ function pickTool({ dateET, fact, recentToolIds, liveToolUrls }) {
  *   never repeats, and the last fact id names the previous issue's service.
  *   recheckedFactIds names the recheck_before_send facts a person re-read
  *   for this send; any other flagged fact is never picked.
- *   liveToolUrls names the tool links whose product page passed this send's
- *   live check; a tool counts only while its link is one of them, and with
- *   none the issue has no tool item. recentToolIds holds one entry for each
+ *   liveToolUrls names the links of the tools whose registry row is active at
+ *   build time (no product page is read); a tool counts only while its link is
+ *   one of them, and with none the issue has no tool item. recentToolIds holds one entry for each
  *   past issue, oldest first: its tool's product id, or null when it had no
  *   tool. The last two issues' tools are skipped.
  * @returns {{ leadFact: object|null, idItem: object|null, tool?: object|null, reason?: string }}

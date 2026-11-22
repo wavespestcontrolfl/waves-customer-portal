@@ -22,6 +22,9 @@ jest.mock('../models/db', () => {
   return db;
 });
 
+// The tool block resolves the proof and approver addresses through newsletter-proof.js; its own load chain is not under test here.
+jest.mock('../services/newsletter-proof', () => ({ proofRecipient: () => 'contact@wavespestcontrol.com', syncedApprovalMailbox: () => 'contact@wavespestcontrol.com', approvalSenders: () => [] }));
+
 const { randomUUID } = require('crypto');
 
 postgres('Pest Insider "Your home" facts (real Postgres)', () => {
@@ -533,5 +536,49 @@ postgres('Pest Insider "Your home" facts (real Postgres)', () => {
     expect((await loadHomeFacts(db, [], NOW)).size).toBe(0);
     expect([...(await loadHomeFacts(db, [asked.s], NOW)).keys()]).toEqual([asked.s]);
     expect(other.s).not.toBe(asked.s);
+  });
+
+  // "A tool we'd use" at send time (services/pest-insider/tool-block.js): the three reads are real SQL here: the
+  // send's issue row (pest_insider_issues.send_id), the batch's subscriber rows (opt-in evidence) and the staff logins.
+  test('the tool block goes only to the reader with opt-in evidence who is no Waves address: real issue, subscriber and staff rows', async () => {
+    const { toolBlockForBatch, TOOL_TOKEN } = require('../services/pest-insider/tool-block');
+    const { toolBlock } = require('../services/pest-insider/render');
+    const { toolById } = require('../services/pest-insider/tools');
+    const gate = process.env.GATE_PEST_INSIDER_AUTO_SEND;
+    process.env.GATE_PEST_INSIDER_AUTO_SEND = 'true';
+    try {
+      const idOf = (inserted) => (typeof inserted[0] === 'object' ? inserted[0].id : inserted[0]);
+      const send = idOf(await db('newsletter_sends').insert({ subject: 'Synthetic tool block', html_body: '<p>x</p>', text_body: 'x', status: 'draft', auto_share_social: false }).returning('id'));
+      await db('pest_insider_issues').insert({ issue_date: '2099-01-01', status: 'drafted', send_id: send, tool_id: 'acurite-glass-rain-gauge' });
+      const tag = randomUUID().slice(0, 8);
+      const sent = new Date('2026-10-01T12:00:00Z');
+      const readers = {};
+      const add = async (name, over = {}) => {
+        const email = `${name}-${tag}@example.invalid`;
+        const id = idOf(await db('newsletter_subscribers').insert({ email, status: 'active', confirmation_sent_at: sent, confirmed_at: new Date(sent.getTime() + 60000), ...over }).returning('id'));
+        readers[name] = { id, email };
+      };
+      await add('optedin');
+      await add('beehiiv', { confirmation_sent_at: null, source: 'beehiiv_migration' });
+      await add('early', { confirmed_at: new Date(sent.getTime() - 60000) });
+      await add('gone', { status: 'unsubscribed' });
+      await add('staff');
+      await db('technicians').insert({ name: 'Fixture Tech', email: `LOGIN-${tag}@example.invalid`, google_email: readers.staff.email.toUpperCase() });
+      const run = (subscribers) => toolBlockForBatch({ send: { id: send, newsletter_type: 'pest-insider-monthly' }, html: TOOL_TOKEN, text: '', subscribers, planned: true, db });
+      const batch = await run(Object.values(readers));
+      const block = toolBlock(toolById('acurite-glass-rain-gauge')).html;
+      expect(Object.fromEntries(Object.entries(readers).map(([name, r]) => [name, batch.forReader(r)[TOOL_TOKEN]]))).toEqual({
+        optedin: block, beehiiv: '', early: '', gone: '', staff: '',
+      });
+      // The address on the row now must be the address mailed: a changed address gets ''.
+      expect((await run([{ id: readers.optedin.id, email: 'old-address@example.invalid' }])).forReader(readers.optedin)[TOOL_TOKEN]).toBe('');
+      // A send with no issue row names no tool.
+      const other = idOf(await db('newsletter_sends').insert({ subject: 'Synthetic other', html_body: '<p>x</p>', text_body: 'x', status: 'draft', auto_share_social: false }).returning('id'));
+      const noIssue = await toolBlockForBatch({ send: { id: other, newsletter_type: 'pest-insider-monthly' }, html: TOOL_TOKEN, text: '', subscribers: [readers.optedin], planned: true, db });
+      expect(noIssue.forReader(readers.optedin)[TOOL_TOKEN]).toBe('');
+    } finally {
+      if (gate === undefined) delete process.env.GATE_PEST_INSIDER_AUTO_SEND;
+      else process.env.GATE_PEST_INSIDER_AUTO_SEND = gate;
+    }
   });
 });

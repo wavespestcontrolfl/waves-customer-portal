@@ -13,7 +13,8 @@ const escapeHtml = (text) => String(text ?? '')
   .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
 const paragraph = (html) => `<p style="margin:0 0 14px 0;font-size:16px;line-height:1.6;">${html}</p>`;
-const link = (href, label) => `<a class="dm-link" href="${escapeHtml(href)}" style="color:${newsletterPalette().blue};text-decoration:underline;font-weight:600;">${escapeHtml(label)}</a>`;
+// `untracked` writes SendGrid's per-link `clicktracking=off`, which it honors only BEFORE href.
+const link = (href, label, { untracked = false } = {}) => `<a ${untracked ? 'clicktracking=off ' : ''}class="dm-link" href="${escapeHtml(href)}" style="color:${newsletterPalette().blue};text-decoration:underline;font-weight:600;">${escapeHtml(label)}</a>`;
 // One block of the body ({ html }) in the wrapper that follows dark mode.
 const wrapBlock = (b) => `<div class="dm-text">\n${b.html}\n</div>`;
 

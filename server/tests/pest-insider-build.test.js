@@ -33,7 +33,7 @@ const { buildIssue, NEWSLETTER_TYPE } = require('../services/pest-insider');
 const { FACTS, factById, factsForSend } = require('../services/pest-insider/facts');
 const { SPECIES, planIssue } = require('../services/pest-insider/plan');
 const { postUrl } = require('../services/pest-insider/posts');
-const { POST_LINK_TEXT, withToolBlock, escapeHtml } = require('../services/pest-insider/render');
+const { POST_LINK_TEXT, toolBlock, toolBlockErrors, TOOL_TOKEN, escapeHtml } = require('../services/pest-insider/render');
 const { validateNewsletterDraft } = require('../services/newsletter-validator');
 const { loadTools, toolById, toolLinkText, AMAZON_DISCLOSURE } = require('../services/pest-insider/tools');
 const { HEROES, heroFor } = require('../services/pest-insider/heroes');
@@ -122,22 +122,30 @@ describe('buildIssue', () => {
     expect(missing).toEqual([]);
   });
 
-  test('a live tool comes back as `tool`, outside the shared body; its opted-in copy still fails the send check until PR 4', () => {
+  test('a named tool comes back as `tool`, outside the shared body; its HTML block fails the shared send check but passes the tool block check', () => {
     const mesh = toolById('stuff-it-copper-mesh');
     usePlan(A01, WFA, mesh);
     const r = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, liveToolUrls: [mesh.url] });
     expect(r).toMatchObject({ ok: true, reason: null, tool: { productId: 'stuff-it-copper-mesh', url: mesh.url } });
     expect(r.diagnostics.toolId).toBe('stuff-it-copper-mesh');
-    // the shared body, which the archive serves, has no Amazon link (pre-push PR 3 r1)
+    // the shared body, which the archive serves, has no Amazon link (pre-push PR 3 r1); it holds the token only
     for (const part of [r.issue.html_body, r.issue.text_body]) expect(part).not.toMatch(/amazon/i);
-    const optedIn = withToolBlock(r.issue, r.tool);
+    expect(r.issue.html_body).toContain(TOOL_TOKEN);
+    // A tool in the plan changes only the diagnostics and `tool`: the text part is the text part of an issue with no tool.
+    usePlan(A01, WFA, null);
+    const bare = buildIssue({ sendDate: '2026-12-03', livePostFactIds: LIVE, liveToolUrls: [mesh.url] });
+    expect(r.issue).toEqual(bare.issue);
+    // The opted-in reader's HTML (the sender fills the token): the link and Amazon's sentence; the text part is unchanged.
+    const optedIn = { ...r.issue, html_body: r.issue.html_body.split(TOOL_TOKEN).join(toolBlock(mesh).html) };
     expect(optedIn.html_body).toContain(`>${toolLinkText(mesh)}</a>`);
-    expect(optedIn.text_body).toContain(`${mesh.lines.join(' ')}\n\n${toolLinkText(mesh)}: ${mesh.url}\n${AMAZON_DISCLOSURE}`);
-    // No newsletter type may carry it yet: PR 4 adds the per-recipient check with opt-in evidence.
+    expect(optedIn.html_body).toContain(AMAZON_DISCLOSURE);
+    expect(optedIn.text_body).toBe(r.issue.text_body);
+    // The shared send check refuses that copy by design; the block check (the sender's) tolerates only that one error.
     const { errors } = validateNewsletterDraft({
       subject: optedIn.subject, preview_text: optedIn.preview, html_body: optedIn.html_body, text_body: optedIn.text_body, newsletter_type: NEWSLETTER_TYPE,
     });
     expect(errors.join(' ')).toMatch(/AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL/);
+    expect(toolBlockErrors(toolBlock(mesh), mesh)).toEqual([]);
   });
 
   test('the builder refuses a tool the planner returns without a live check of its link', () => {
@@ -398,7 +406,13 @@ describe('the sample script (ops/agents/pest-insider-sample.js)', () => {
       const go = (...flags) => spawnSync(process.execPath, [SCRIPT, dir, '2026-12-03', '--assume-live', ...flags], { encoding: 'utf8', timeout: 60000 }).status;
       expect(go('--assume-tools')).toBe(0);
       expect(fs.readdirSync(dir).sort()).toEqual(['.html', '.optin.html', '.optin.txt', '.txt'].map((ext) => `pest-insider-2026-12-03${ext}`));
-      expect(fs.readFileSync(path.join(dir, 'pest-insider-2026-12-03.optin.txt'), 'utf8')).toContain(AMAZON_DISCLOSURE);
+      // The tool block is HTML only: the opted-in text is the shared text, and only the opted-in HTML has the link.
+      const read = (ext) => fs.readFileSync(path.join(dir, `pest-insider-2026-12-03${ext}`), 'utf8');
+      expect(read('.optin.html')).toContain(AMAZON_DISCLOSURE);
+      expect(read('.optin.html')).toContain('<a clicktracking=off class="dm-link" href="https://www.amazon.com/dp/');
+      expect(read('.optin.txt')).toBe(read('.txt'));
+      expect(read('.optin.txt')).not.toMatch(/amazon/i);
+      expect(read('.html')).not.toMatch(/amazon/i);
       // A sample file shows an issue as the archive does: no token of the issue's own is left, and the referral line has no amount.
       for (const f of fs.readdirSync(dir)) {
         const file = fs.readFileSync(path.join(dir, f), 'utf8');
