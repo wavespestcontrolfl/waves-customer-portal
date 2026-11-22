@@ -71,6 +71,12 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
     return [];
   }
   const legLimit = strict ? STRICT_LEG_LIMIT : PER_LEG_LIMIT;
+  // The candidate filter. Default: the line starts with the house number and a space. strict: the house number is a
+  // whole token anywhere in the line (a tab after it, a unit before it), so the comparator sees every row it could
+  // match; the wider set is why strict has the higher cap.
+  const houseNumberFilter = (column) => (q) => (strict
+    ? q.whereRaw('?? ~* ?', [column, `(^|[^0-9a-z])${houseNumber.replace(/[^0-9a-z]/gi, (ch) => `\\${ch}`)}([^0-9a-z]|$)`])
+    : q.where(column, 'ilike', `${houseNumber} %`));
   const complete = (rows, leg) => {
     if (strict && rows.length >= legLimit) throw uncheckable(`the ${leg} leg filled its ${legLimit}-row cap`);
     return rows;
@@ -79,7 +85,7 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
   const primary = await database('customers')
     .where((q) => q.where('active', true).orWhereNull('active'))
     .whereNull('deleted_at')
-    .where('address_line1', 'ilike', `${houseNumber} %`)
+    .where(houseNumberFilter('address_line1'))
     .orderBy('id')
     .limit(legLimit)
     .select(
@@ -95,7 +101,7 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
       .where('cp.active', true)
       .where((q) => q.where('c.active', true).orWhereNull('c.active'))
       .whereNull('c.deleted_at')
-      .where('cp.address_line1', 'ilike', `${houseNumber} %`)
+      .where(houseNumberFilter('cp.address_line1'))
       .orderBy('cp.id')
       .limit(legLimit)
       .select(

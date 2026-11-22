@@ -25,6 +25,13 @@ function fakeDb({ customers = [], properties = [], propertyError = null } = {}) 
     for (const m of ['where', 'whereNull', 'orWhereNull', 'join', 'orderBy', 'limit', 'select']) {
       builder[m] = () => builder;
     }
+    // A where(fn) group runs fn on the builder, so the filters it adds are recorded.
+    builder.where = (arg, ...rest) => {
+      if (typeof arg === 'function') arg(builder);
+      else calls.push(['where', table, arg, ...rest]);
+      return builder;
+    };
+    builder.whereRaw = (sql, bindings) => { calls.push(['whereRaw', table, sql, bindings]); return builder; };
     builder.then = (resolve, reject) => {
       if (isProperty && propertyError) return Promise.reject(propertyError).then(resolve, reject);
       return Promise.resolve(isProperty ? properties : customers).then(resolve, reject);
@@ -92,6 +99,26 @@ describe('findCustomersAtAddress', () => {
     await expect(findCustomersAtAddress(db, 'Lot 12 Palm Ave, Venice, FL 34285', { strict: true })).rejects.toMatchObject({ code: 'ADDRESS_UNCHECKABLE' });
     expect(db.calls).toEqual([]);
     await expect(findCustomersAtAddress(db, 'Lot 12 Palm Ave, Venice, FL 34285')).resolves.toEqual([]);
+  });
+
+  it('strict: the house number is a whole token anywhere in the line, on both legs; default keeps the prefix', async () => {
+    const strictDb = fakeDb();
+    await findCustomersAtAddress(strictDb, '123-125 Palm Ave, Venice, FL 34285', { strict: true });
+    const raws = strictDb.calls.filter((c) => Array.isArray(c) && c[0] === 'whereRaw');
+    expect(raws.map((c) => c[3])).toEqual([
+      ['address_line1', '(^|[^0-9a-z])123\\-125([^0-9a-z]|$)'],
+      ['cp.address_line1', '(^|[^0-9a-z])123\\-125([^0-9a-z]|$)'],
+    ]);
+    const plainDb = fakeDb();
+    await findCustomersAtAddress(plainDb, '123 Palm Ave, Venice, FL 34285');
+    expect(plainDb.calls.filter((c) => Array.isArray(c) && c[0] === 'whereRaw')).toEqual([]);
+    expect(plainDb.calls).toContainEqual(['where', 'customers', 'address_line1', 'ilike', '123 %']);
+  });
+
+  it('strict: a member on file through the property leg with a tab after the house number is found', async () => {
+    const db = fakeDb({ properties: [ROW('member', '123\tPalm Ave', null, { waveguard_tier: 'Gold' })] });
+    const ids = (await findCustomersAtAddress(db, '123 Palm Ave, Venice, FL 34285', { strict: true })).map((r) => r.id);
+    expect(ids).toEqual(['member']);
   });
 
   it('a failing property leg is skipped, not fatal', async () => {
