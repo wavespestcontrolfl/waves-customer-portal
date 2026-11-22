@@ -256,30 +256,29 @@ function estimateCreatedMs(est, now) {
   return Number.isFinite(ms) && ms <= now ? ms : null;
 }
 
-// Is there another estimate that went out to the same person before this one was made? Same person = the same
-// customer_id, a phone in one of the stored forms or with the same last ten digits in any format, or the same trimmed
-// lower-cased email. A missed match shortens the pause, so the phone match is generous: a false match only keeps today's
-// window, the safe side. A person with no identifier at all matches nothing (the reply arms cannot match them either),
-// so no read is made for them.
-// Why creation order is enough: any reply the clamp drops is older than this estimate's creation, and an estimate that
-// reply could be about went out before the reply, so it was made earlier still and this lookup finds it.
-async function hasEarlierSentEstimate(est, createdMs) {
+// Is there another estimate that was sent to the same person, made before OR after this one? Same person = the same
+// customer_id, a phone in one of the stored forms or with the same last ten digits in any format, or an address a reply
+// can come from (expectedReplyAddresses: the estimate's own address and the customer's address on file, never ours).
+// A missed match shortens the pause, so the match is generous: a false match only keeps today's window, the safe side.
+// A person with no identifier at all matches nothing (the reply arms cannot match them either), so no read is made.
+// The window moves only for a person whose only sent estimate is this one; anyone who was sent another estimate at any
+// time is in a conversation with the office and keeps the full pause. The customers read can throw: the caller catches it.
+async function hasOtherSentEstimate(est) {
   const customerId = est.customer_id || null;
   const phones = replyPhoneForms(est.customer_phone);
   const digits = String(est.customer_phone || "").replace(/\D/g, "");
-  const email = String(est.customer_email || "").trim().toLowerCase();
-  if (!customerId && !phones.length && !email) return false;
+  const addresses = await expectedReplyAddresses(est);
+  if (!customerId && !phones.length && !addresses.length) return false;
   const row = await db("estimates")
     .whereNot("id", est.id)
     .whereNotNull("sent_at")
-    .where("created_at", "<", new Date(createdMs))
     .andWhere(function () {
       if (customerId) this.where("customer_id", customerId);
       for (const phone of phones) this.orWhere("customer_phone", phone);
       if (digits.length >= 10) {
         this.orWhereRaw("RIGHT(REGEXP_REPLACE(COALESCE(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits.slice(-10)]);
       }
-      if (email) this.orWhereRaw("LOWER(TRIM(customer_email)) = ?", [email]);
+      if (addresses.length) this.orWhereRaw("LOWER(TRIM(customer_email)) = ANY(?)", [addresses]);
     })
     .first("id");
   return !!row;
@@ -287,20 +286,20 @@ async function hasEarlierSentEstimate(est, createdMs) {
 
 // Reply-pause window start, gate on (owner 2026-11-21, option A). The 14 days also reach back BEFORE the estimate
 // existed, so the inquiry text a new prospect sent ("can I get a quote?") switched off every follow-up for that
-// estimate. For a person's FIRST sent estimate the window starts at the estimate's creation instead, when that is
-// later than the 14-day start. A person who already had an estimate out is in a live conversation with the office
-// (a re-quote), so for them the deliberate 14-day pause keeps covering their earlier replies.
+// estimate. For a person's ONLY sent estimate the window starts at the estimate's creation instead, when that is
+// later than the 14-day start. A person who has been sent another estimate, before or after this one, is in a live
+// conversation with the office (a re-quote), so for them the deliberate 14-day pause keeps covering their earlier replies.
 // created_at, never sent_at: a resend overwrites estimates.sent_at, so sent_at would forget a reply made between the
 // first send and the resend. created_at never moves and is never later than any send.
 // Any doubt keeps today's window (it pauses more and sends less): an unreadable or future created_at, a created_at
-// older than the window (nothing to clamp, no extra read), or a failed earlier-estimate read. The failed read falls
+// older than the window (nothing to clamp, no extra read), or a failed other-estimate read. The failed read falls
 // back on the replay path too: today's window is the safe side there, so it never throws. Only the error code or
 // name is logged (a knex message carries phone numbers and addresses).
 async function replyPauseWindowStart(est, windowStart, now) {
   const createdMs = estimateCreatedMs(est, now);
   if (createdMs === null || createdMs <= windowStart.getTime()) return windowStart;
   try {
-    if (await hasEarlierSentEstimate(est, createdMs)) return windowStart;
+    if (await hasOtherSentEstimate(est)) return windowStart;
   } catch (e) {
     const reason = (e && (e.code || e.name)) || "error";
     logger.warn(`[est-followup] reply-pause window check skipped for estimate ${est && est.id}: ${reason}`);
