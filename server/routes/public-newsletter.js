@@ -693,7 +693,9 @@ router.post('/confirm/:token', async (req, res) => {
 
     res.type('html').send(renderConfirmPage(heading, bodyHtml));
   } catch (err) {
-    logger.error(`[newsletter] confirm POST failed: ${err.message}`);
+    // A code, not the message: knex puts a failed query's bound values in its message, and this
+    // path binds the confirmation token and the subscriber's address (AGENTS.md: no PII in logs).
+    logger.error(`[newsletter] confirm POST failed: code=${err.code || err.name || 'unknown'}`);
     res.status(500).json({ error: 'confirm failed' });
   }
 });

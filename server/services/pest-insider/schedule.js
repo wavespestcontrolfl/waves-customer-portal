@@ -465,6 +465,19 @@ async function lastPollResult(db, issueDate) {
   }
 }
 
+// The links of the tools whose registry row is active now (tools.js loadTools), for the planner's
+// `liveToolUrls`. No Amazon page is read: Amazon's Conditions of Use and Associates policies forbid
+// robot reads of its pages (owner decision 2026-11-22, "A"). A registry that cannot be read gives none,
+// and the issue builds with no tool.
+function activeToolUrls() {
+  try {
+    return require('./tools').loadTools().tools.map((t) => t.url);
+  } catch (err) {
+    require('../logger').warn(`[pest-insider] tool registry could not be read (${err.message}); this issue has no tool`);
+    return [];
+  }
+}
+
 // One build: the spam-report stop, post check, history, poll, builder, then the row (and, with the
 // switch on, the draft and the proof step). Returns the run's result plus the proof step's raw answer.
 async function buildAndRecord(db, { issueDate, existing, autoSend, now, fetchImpl, proofStep }) {
@@ -481,7 +494,7 @@ async function buildAndRecord(db, { issueDate, existing, autoSend, now, fetchImp
   if (!spamStop) {
     const livePostFactIds = await checkLivePosts({ fetchImpl: probe });
     const recent = await recentHistory(issueDate, { database: db });
-    built = buildIssue({ sendDate: issueDate, recent, recheckedFactIds: [], livePostFactIds, liveToolUrls: [], pollQuizId: await issuePoll(db), lastPoll: await lastPollResult(db, issueDate) });
+    built = buildIssue({ sendDate: issueDate, recent, recheckedFactIds: [], livePostFactIds, liveToolUrls: activeToolUrls(), pollQuizId: await issuePoll(db), lastPoll: await lastPollResult(db, issueDate) });
   }
   let row = rowFor(issueDate, built, now, failures);
 

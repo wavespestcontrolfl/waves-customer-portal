@@ -9,6 +9,11 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/pest-insider/index', () => ({ buildIssue: jest.fn() }));
 jest.mock('../services/pest-insider/posts', () => ({ checkLivePosts: jest.fn() }));
+// The tool registry is the real one, wrapped so a case can pause a row or make it unreadable.
+jest.mock('../services/pest-insider/tools', () => {
+  const actual = jest.requireActual('../services/pest-insider/tools');
+  return { ...actual, loadTools: jest.fn(actual.loadTools) };
+});
 jest.mock('../services/pest-insider/audience', () => ({
   ...jest.requireActual('../services/pest-insider/audience'),
   selectIssueAudience: jest.fn(),
@@ -28,6 +33,7 @@ jest.mock('../services/newsletter-quiz', () => {
 
 const { buildIssue } = require('../services/pest-insider/index');
 const { checkLivePosts } = require('../services/pest-insider/posts');
+const { loadTools } = require('../services/pest-insider/tools');
 const { selectIssueAudience } = require('../services/pest-insider/audience');
 const { triggerNotification } = require('../services/notification-triggers');
 const { spamReportCounts } = require('../services/newsletter-sender');
@@ -192,6 +198,9 @@ describe('recentHistory', () => {
   });
 });
 
+// The links of every tool whose registry row is active (no Amazon page is read: owner 2026-11-22).
+const REGISTRY_URLS = jest.requireActual('../services/pest-insider/tools').loadTools().tools.map((t) => t.url);
+
 describe('runIssuePlanner', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -252,7 +261,7 @@ describe('runIssuePlanner', () => {
       recent: { factIds: ['f1', 'f2'], speciesSlugs: ['s1', 's2'], toolIds: ['tool-a', null] },
       recheckedFactIds: [],
       livePostFactIds: ['fact-live-1', 'fact-live-2'],
-      liveToolUrls: [],
+      liveToolUrls: REGISTRY_URLS,
       pollQuizId: PEST_INSIDER_POLL_IDS[0],
       lastPoll: null,
     });
@@ -271,6 +280,40 @@ describe('runIssuePlanner', () => {
     expect(row).not.toHaveProperty('html_body');
     expect(database.calls.onConflict).toBe('issue_date');
     expect(logger.info).toHaveBeenCalledTimes(1);
+  });
+
+  test('the build names the links of the tools whose registry row is active now; a paused row is left out, and an unreadable registry names none', async () => {
+    expect(REGISTRY_URLS.length).toBeGreaterThan(1);
+    buildIssue.mockReturnValue(GOOD_BUILD);
+    const urlsOf = () => buildIssue.mock.calls[buildIssue.mock.calls.length - 1][0].liveToolUrls;
+    await runIssuePlanner({ now: WED_BUILD_DAY, database: fakeDb({}), fetchImpl: jest.fn() });
+    expect(urlsOf()).toEqual(REGISTRY_URLS);
+
+    // One row paused since: the registry's loadTools leaves it out, and so does the build.
+    const actual = jest.requireActual('../services/pest-insider/tools');
+    const [paused, ...rest] = actual.loadTools().tools;
+    loadTools.mockReturnValueOnce({ tools: rest, problems: [`${paused.productId}: its registry row is inactive, not active`] });
+    await runIssuePlanner({ now: WED_BUILD_DAY, database: fakeDb({}), fetchImpl: jest.fn() });
+    expect(urlsOf()).toEqual(rest.map((t) => t.url));
+    expect(urlsOf()).not.toContain(paused.url);
+
+    // A registry that cannot be read: no tool, one warning, and the issue still builds.
+    loadTools.mockImplementationOnce(() => { throw new Error('registry file unreadable'); });
+    const result = await runIssuePlanner({ now: WED_BUILD_DAY, database: fakeDb({}), fetchImpl: jest.fn() });
+    expect(urlsOf()).toEqual([]);
+    expect(result).toMatchObject({ status: 'shadow', written: true });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('registry file unreadable'));
+  });
+
+  test('an issue built with a tool records its id on the row, and the next issue\'s history carries it', async () => {
+    buildIssue.mockReturnValue({ ...GOOD_BUILD, tool: { productId: 'acurite-glass-rain-gauge' }, diagnostics: { ...GOOD_BUILD.diagnostics, toolId: 'acurite-glass-rain-gauge' } });
+    const database = fakeDb({});
+    await runIssuePlanner({ now: WED_BUILD_DAY, database, fetchImpl: jest.fn() });
+    const row = database.calls.inserts[0];
+    expect(row.tool_id).toBe('acurite-glass-rain-gauge');
+    // The next issue reads it back as one entry for this issue, in the planner's `recent.toolIds`.
+    const next = fakeDb({ history: [{ issue_date: row.issue_date, fact_id: row.fact_id, species_slug: row.species_slug, tool_id: row.tool_id }] });
+    expect((await recentHistory('2026-12-17', { database: next })).toolIds).toEqual(['acurite-glass-rain-gauge']);
   });
 
   test.each([

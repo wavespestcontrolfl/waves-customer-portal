@@ -5158,7 +5158,13 @@ emailed link is clicked), so an anonymous post cannot retag an already-confirmed
 best-effort: a failure never fails the signup, and the zip/city values are never logged. The
 same B5 rule shapes the rest of subscribe: a repeat submit for an address whose last confirmation
 is under 10 minutes old sends no second email and answers exactly the same, and an `unsubscribed`/
-`inactive` address is only changed by the confirm POST, never by the subscribe POST. An unsubscribe
+`inactive` address is only changed by the confirm POST, never by the subscribe POST. The confirm
+POST's flip (a `pending` row, or a live re-signup token) also records the reader's own click on the
+row it flips: `reader_confirmed_at` and `reader_confirmed_email` (the row's address, lowercased in
+SQL). No other route or writer sets those columns (a comeback that is not the reader's click clears
+them); the confirm GET stays read-only; a link on a row
+that is already `active` still answers `already_active` and writes nothing; the responses are
+unchanged; and a failed confirm POST logs an error code, never the failed query's text. An unsubscribe
 (one-click POST or a SendGrid unsubscribe event) that lands on an already-`unsubscribed` row holding
 a live re-signup token advances `unsubscribed_at`, which revokes that emailed link; the unsubscribe
 GET page shows its confirm form for such a row); the quiz and feedback tokens are the same
