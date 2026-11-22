@@ -153,7 +153,7 @@ test('markdown table rows score as label/value assertions', () => {
   expect(score('E6', '| Fumigation | Yes |').forbidden.fumigation_offered).toBe(true);
   expect(score('E6', '| Fumigation | Not offered |').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', '| Service | Status | Notes |\n|:--|:--:|--:|\n| Fumigation | No | Referred out |').forbidden.fumigation_offered).toBe(false);
-  expect(score('E7', '| Termite bond | Optional, renews annually |').expected).toMatchObject({ bond_optional: true, bond_renewable: true });
+  expect(score('E7', '| Termite bond | Optional, 1-, 5- or 10-year terms |').expected).toMatchObject({ bond_optional: true, bond_term_options: true });
 });
 
 test('a denial in the same clause is not a wrong claim, whether it comes before or after the claim', () => {
@@ -282,9 +282,9 @@ test('facts need their relation or context; forbidden claims cover equivalent wo
   expect(score('E10', 'Do not call tel:+19412975749; that is not Waves.').expected.phone).toBe(false);
   expect(score('E10', 'Orkin lists https://wavespestcontrol.com as a competitor.').expected.website).toBe(false);
   expect(score('E10', 'Call [(941) 297-5749](tel:+19412975749) or [visit the site](https://www.wavespestcontrol.com/).')).toMatchObject({ right: 2 });
-  expect(score('E7', 'The annual inspection is separate from the warranty.').expected.bond_renewable).toBe(false);
-  expect(score('E7', 'The warranty is an optional, annually renewable bond.').expected).toMatchObject({ bond_optional: true, bond_renewable: true });
-  expect(score('E7', 'The bond is valid for one year.').expected.bond_renewable).toBe(true);
+  expect(score('E7', 'The annual inspection is separate from the warranty.').expected.bond_term_options).toBe(false);
+  expect(score('E7', 'The warranty is an optional bond sold in 1-, 5- or 10-year terms.').expected).toMatchObject({ bond_optional: true, bond_term_options: true });
+  expect(score('E7', 'The bond is valid for one year.').expected.bond_term_options).toBe(false);
   expect(score('E7', 'The bond repairs termite damage.').forbidden.damage_repair_coverage).toBe(true);
   expect(score('E7', 'Waves will repair any termite damage under the bond.').forbidden.damage_repair_coverage).toBe(true);
   expect(score('E7', 'Under the bond, damage caused by termites will be repaired.').forbidden.damage_repair_coverage).toBe(true);
@@ -467,12 +467,10 @@ test('service facts need an offer context; hedges assert nothing; a modifier "no
   expect(score('E3', 'You can verify the office address on Google Maps; its FDACS license is JB351547.').expected.license_verifiable).toBe(false);
   expect(score('E3', 'The license is JB351547 and you can verify the address on Google Maps.').expected.license_verifiable).toBe(false);
   expect(score('E3', 'License JB351547, which you can verify at FDACS.').expected.license_verifiable).toBe(true);
-  // An annual term or a renewing agreement counts only when it is the bond.
-  expect(score('E7', 'Termite treatment has an annual term; the bond itself does not renew.').expected.bond_renewable).toBe(false);
-  expect(score('E7', 'The inspection agreement is valid for one year, but the bond is nonrenewable.').expected.bond_renewable).toBe(false);
-  expect(score('E7', 'The inspection renews annually, but the bond does not.').expected.bond_renewable).toBe(false);
-  expect(score('E7', 'The bond has an annual term.').expected.bond_renewable).toBe(true);
-  expect(score('E7', 'The termite agreement is valid for one year.').expected.bond_renewable).toBe(true);
+  // One term alone is not the three bond terms.
+  expect(score('E7', 'Termite treatment has an annual term; the bond itself does not renew.').expected.bond_term_options).toBe(false);
+  expect(score('E7', 'The bond has an annual term.').expected.bond_term_options).toBe(false);
+  expect(score('E7', 'The termite agreement is valid for one year.').expected.bond_term_options).toBe(false);
   // A number attributed to another company after it is not the Waves line.
   expect(score('E10', '(941) 297-5749 belongs to Orkin, not Waves.').expected.phone).toBe(false);
   expect(score('E10', 'The number (941) 297-5749 is listed for Orkin; Waves has no published number.').expected.phone).toBe(false);
@@ -612,9 +610,9 @@ test('coordinated predicates and colon lists scope negation to the assertion it 
 });
 
 test('a negation inside the match denies it unless the pattern matched the negated phrase itself, and curly apostrophes count', () => {
-  expect(score('E7', 'The termite bond is not optional and is not renewable.').expected).toMatchObject({ bond_optional: false, bond_renewable: false });
-  expect(score('E7', 'The termite bond is optional and renews annually.').expected).toMatchObject({ bond_optional: true, bond_renewable: true });
-  expect(score('E7', 'The bond is not optional but renews annually.').expected).toMatchObject({ bond_optional: false, bond_renewable: true });
+  expect(score('E7', 'The termite bond is not optional and has no 1-, 5- or 10-year terms.').expected).toMatchObject({ bond_optional: false, bond_term_options: false });
+  expect(score('E7', 'The termite bond is optional and comes in 1-, 5- or 10-year terms.').expected).toMatchObject({ bond_optional: true, bond_term_options: true });
+  expect(score('E7', 'The bond is not optional but comes in 1-, 5- or 10-year terms.').expected).toMatchObject({ bond_optional: false, bond_term_options: true });
   expect(score('E8', 'Waves is not a franchise.').expected.independent).toBe(true);
   expect(score('E6', 'Waves doesn\u2019t offer fumigation.').forbidden.fumigation_offered).toBe(false);
   expect(score('E8', 'Waves isn\u2019t a franchise.').forbidden.franchise).toBe(false);
@@ -672,12 +670,12 @@ test('fumigation: excluded-service phrasing passes, offered-service phrasing fai
   expect(score('E6', 'They provide tent fumigation for drywood termites.').forbidden.fumigation_offered).toBe(true);
 });
 
-test('termite bond: optional AND annual renewal are separate facts; repair coverage, free re-treat and first-year inclusion are wrong', () => {
-  const good = score('E7', 'Waves offers termite treatment; the warranty is an optional bond that renews annually.');
-  expect(good).toMatchObject({ expected: { termite: true, bond_optional: true, bond_renewable: true }, missing: 0, wrong: 0 });
-  expect(score('E7', 'The termite bond is annual.')).toMatchObject({ expected: { bond_optional: false, bond_renewable: true }, missing: 1 });
-  expect(score('E7', 'The termite bond is renewable every five years.').expected.bond_renewable).toBe(false);
-  expect(score('E7', 'The bond renews annually.').expected.bond_renewable).toBe(true);
+test('termite bond: optional AND the 1-, 5- or 10-year terms are separate facts; repair coverage, free re-treat and first-year inclusion are wrong', () => {
+  const good = score('E7', 'Waves offers termite treatment; the warranty is an optional bond sold in 1-, 5- or 10-year renewable terms.');
+  expect(good).toMatchObject({ expected: { termite: true, bond_optional: true, bond_term_options: true }, missing: 0, wrong: 0 });
+  expect(score('E7', 'The termite bond is annual.')).toMatchObject({ expected: { bond_optional: false, bond_term_options: false }, missing: 2 });
+  expect(score('E7', 'The termite bond is renewable every five years.').expected.bond_term_options).toBe(false);
+  expect(score('E7', 'The bond renews annually.').expected.bond_term_options).toBe(false);
   const bad = score('E7', 'The termite bond covers termite damage repairs and comes with a free bond in the first year with a lifetime guarantee.');
   expect(bad.forbidden).toMatchObject({ damage_repair_coverage: true, free_retreat_guarantee: true, bond_included_first_year: true });
   expect(bad.wrong).toBe(3);
@@ -783,10 +781,10 @@ test('a subordinate generic party is its own subject; inflected verification, di
   expect(score('E7', 'Re-treatment is included with the separately purchased annual bond.').forbidden.free_retreat_guarantee).toBe(false);
   expect(score('E7', 'Re-treatment is included.').forbidden.free_retreat_guarantee).toBe(true);
   expect(score('E7', 'Under the bond, re-treatments are included at no additional cost.').forbidden.free_retreat_guarantee).toBe(true);
-  // Ordinary annual-renewal cadence.
-  expect(score('E7', 'The termite bond is optional and must be renewed once a year.')).toMatchObject({ expected: { bond_optional: true, bond_renewable: true } });
-  expect(score('E7', 'The bond renews every 12 months.').expected.bond_renewable).toBe(true);
-  expect(score('E7', 'The bond is renewed on an annual basis.').expected.bond_renewable).toBe(true);
+  // An annual renewal cadence alone is no longer the bond-term fact (owner 2026-11-21).
+  expect(score('E7', 'The termite bond is optional and must be renewed once a year.')).toMatchObject({ expected: { bond_optional: true, bond_term_options: false } });
+  expect(score('E7', 'The bond renews every 12 months.').expected.bond_term_options).toBe(false);
+  expect(score('E7', 'The bond is renewed on an annual basis.').expected.bond_term_options).toBe(false);
   // Separately purchased bond wording.
   for (const text of ['The termite bond is available for an additional charge.', 'Customers can purchase the bond for an extra fee.', 'The bond can be added to treatment if desired.']) {
     expect([text, score('E7', text).expected.bond_optional]).toEqual([text, true]);
@@ -841,9 +839,9 @@ test('ended coverage, a non-renewable bond, a prospective offering, a City suffi
   expect(score('E5', 'Waves stopped serving Manatee, Sarasota, and Charlotte counties.').right).toBe(0);
   expect(score('E5', 'Waves served Manatee County until 2024.').expected.manatee).toBe(false);
   expect(score('E5', 'Waves serves Manatee, Sarasota, and Charlotte counties.').right).toBe(3);
-  // An explicitly non-renewable bond earns no renewal credit.
-  for (const text of ['The annual bond is non-renewable.', 'The bond is a non-renewable annual agreement.', 'The bond lasts one year but is not renewable.']) {
-    expect([text, score('E7', text).expected.bond_renewable]).toEqual([text, false]);
+  // A denied or hedged bond-term statement earns no credit.
+  for (const text of ['The bond is not available in 1-, 5- or 10-year terms.', 'Waves does not offer 1-, 5-, or 10-year warranty terms.', 'The bond may come in 1-, 5- or 10-year terms.']) {
+    expect([text, score('E7', text).expected.bond_term_options]).toEqual([text, false]);
   }
   // A prospective offering is not a current one.
   for (const text of ['Waves plans to offer fumigation next year.', 'Waves is considering offering fumigation.', 'Waves hopes to offer fumigation.']) {
@@ -1175,4 +1173,55 @@ test('a wh-complement hands back to a Waves alias, `as` after the pest opens a c
   expect(score('E6', 'Waves serves homeowners. They eliminate termites.').expected.termite).toBe(true);
   expect(score('E6', 'Homeowners call Waves. Its technicians eliminate termites.').expected.termite).toBe(true);
   expect(score('E6', 'Waves technicians eliminate termites. They remove rodents too.').expected.rodent).toBe(true);
+});
+
+test('bond terms: the 1-, 5- and 10-year terms count in every wording, one term or an unrelated number does not (owner 2026-11-21)', () => {
+  const stated = [
+    'The warranty is renewable on a 1-, 5-, or 10-year term basis.',
+    'The warranty is available in 1-, 5-, or 10-year terms.',
+    'The warranty is available in **1-, 5-, or 10-year terms**.',
+    'The warranty has flexible timeframes (such as 1, 5, or 10-year renewable terms).',
+    'The warranty comes in 1-, 5-, or 10-year terms.',
+    'The warranty has 1-year, 5-year and 10-year terms.',
+    'The warranty has one-, five- or ten-year terms.',
+    'renewable on a 1-, 5-, or 10-year term basis',
+    'available in 1-, 5-, or 10-year terms',
+    'such as 1, 5, or 10-year renewable terms',
+    'one-, five- or ten-year terms',
+    'Waves offers three warranty terms:\n- **1 year**\n- **5 years**\n- **10 years**',
+  ];
+  for (const text of stated) expect([text, score('E7', text).expected.bond_term_options]).toEqual([text, true]);
+  const notStated = [
+    'The bond renews annually.',
+    'The warranty is a 1-year bond.',
+    'The warranty renews every five years.',
+    'Subterranean colonies take 5 to 10 years to mature.',
+    'Waves has 10 years in business.',
+    'Waves does not offer 1-, 5-, or 10-year warranty terms.',
+    'The warranty is not sold in 1-, 5-, or 10-year terms.',
+  ];
+  for (const text of notStated) expect([text, score('E7', text).expected.bond_term_options]).toEqual([text, false]);
+});
+
+test('E7 answer excerpts: five state the bond terms, a monitoring-only bullet does not (owner 2026-11-21)', () => {
+  const stated = [
+    '**Optional and Renewable:** A termite bond or warranty is optional, sold separately, and renewable on a 1-, 5-, or 10-year term basis.',
+    'Waves offers three warranty terms:\n- **1 year**\n- **5 years**\n- **10 years**\nThe warranty is optional and priced separately from the initial termite treatment or bait-station installation.',
+    '**Waves Pest Control offers termite bonds**, described as an optional, renewable warranty available in **1-, 5-, or 10-year terms**.',
+    '- **Renewable Warranty Options:** Structured with flexible warranty timeframes (such as 1, 5, or 10-year renewable terms) to keep structural coverage active year after year.',
+    'Waves says its optional renewable warranty comes in 1-, 5-, or 10-year terms.',
+  ];
+  for (const text of stated) expect([text, score('E7', text).expected.bond_term_options]).toEqual([text, true]);
+  const monitoring = '- **Ongoing Monitoring & Inspections:** Scheduled annual or periodic inspections to check for termite presence or movement past treatment barriers.';
+  expect(score('E7', monitoring).expected.bond_term_options).toBe(false);
+  expect(score('E7', stated[1]).expected).toMatchObject({ termite: true, bond_optional: true, bond_term_options: true });
+});
+
+test('the owner-approved termite warranty statement states all three E7 facts and trips no forbidden claim (owner 2026-11-21)', () => {
+  const approved = byId('E7').approved_answer;
+  expect(approved).toContain('1-, 5- or 10-year renewable terms');
+  const result = score('E7', approved);
+  expect(result.expected).toEqual({ termite: true, bond_optional: true, bond_term_options: true });
+  expect(Object.entries(result.forbidden).filter(([, hit]) => hit)).toEqual([]);
+  expect(byId('E7').expect).toEqual(['termite', 'bond_optional', 'bond_term_options']);
 });
