@@ -1,6 +1,6 @@
 const db = require('../models/db');
 const { normalizePhone } = require('../utils/phone');
-const { samePremiseDisplay, parseDisplayAddress, loadContactVerdicts } = require('./lead-address-unverified');
+const { samePremiseDisplay, parseDisplayAddress } = require('./lead-address-unverified');
 const { normalizeUnitLine, unitLineValueKey } = require('../utils/address-normalizer');
 const { DRAFT_ELIGIBLE_SQL } = require('./estimate-draft-retire');
 
@@ -334,10 +334,15 @@ async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
  *     Point Dr"): the web form and the wizard write it so. That is one step
  *     wider than the draft-retire sweep's test, which folds only the word
  *     that ends the street. A missing or incomplete address, or a street
- *     with no house number, fails closed: the draft is not a shell. So does
- *     a draft matched only by that fold while this contact has a county-roll
- *     address warning under the draft's spelling that no newer clean
- *     verdict answers: the address hold would not see it for the run.
+ *     with no house number, fails closed: the draft is not a shell.
+ *
+ * Not this rule's work: the county-roll address hold. The route decides it
+ * for the run's own address, as for every visitor, and matches a stored
+ * warning to the run by the hold's own street key (no name-word fold). A
+ * warning stored under one spelling does not reach a run in the other
+ * spelling, with or without a draft. This rule does not read warnings: a
+ * part read here would only look like a guard (pre-push audit, rounds 4
+ * and 5 of the follow-up).
  *
  * Not a condition, on purpose: the SMS intake state of the customer
  * (customers.lead_intake_status). A lead who never answers keeps
@@ -464,26 +469,10 @@ async function onlyUntouchedWebFormShellsOpen(database, { phone, address, custom
   const shells = await untouchedWebFormShells(database, values.last10, { now })
     .whereIn('id', open.map((row) => row.id))
     .select('id', 'address', 'customer_id', 'customer_email');
-  const mine = (Array.isArray(shells) ? shells : [])
-    .filter((row) => sameContact(row, { customerId, email }) && sameDoor(row.address, address));
-  const shellKeys = new Set(mine.map((row) => String(row.id)));
-  if (!open.every((row) => shellKeys.has(String(row.id)))) return false;
-  // A draft that is the run's door only by the name-word fold ("Pt",
-  // "Point"). The address hold compares its own street key, with no fold: a
-  // county-roll warning of this contact that was stored under the DRAFT's
-  // spelling does not reach a run that types the other spelling. While
-  // such a warning is the contact's newest verdict for the draft's address,
-  // the draft keeps blocking (pre-push audit P1). Read with the hold's own
-  // loader. A run in the draft's own spelling needs no such read: the
-  // route's hold sees the warning.
-  for (const shell of mine) {
-    if (samePremiseDisplay(shell.address, address, { requireLocality: true })) continue;
-    const { line1, city, state, zip } = parseDisplayAddress(shell.address);
-    // One read for each such draft; a phone has one or two.
-    const verdicts = await loadContactVerdicts(database, { email, phone, premise: { line1, city, state, zip } });
-    if (verdicts.newestFlag && verdicts.newestFlagAt >= verdicts.newestCleanAt) return false;
-  }
-  return true;
+  const shellKeys = new Set((Array.isArray(shells) ? shells : [])
+    .filter((row) => sameContact(row, { customerId, email }) && sameDoor(row.address, address))
+    .map((row) => String(row.id)));
+  return open.every((row) => shellKeys.has(String(row.id)));
 }
 
 module.exports = {
