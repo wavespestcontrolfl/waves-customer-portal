@@ -55,6 +55,14 @@ const SYNCED_STATUS_REFUSALS = new Map([
   ['google_ads', "Use /pause or /enable to change a Google campaign's status — they sync Google Ads."],
   ['facebook', "A Meta campaign's status comes from Meta Ads Manager. Change it there; the daily Meta sync brings it in."],
 ]);
+// A Local Services campaign the daily sync brought in carries Google's campaign
+// id, and its status comes from Google. One entered by hand has no id and stays
+// editable here.
+const LSA_SYNCED_STATUS_REFUSAL = "A synced Local Services campaign's status comes from Google. Change it there; the daily Local Services sync brings it in.";
+function syncedStatusRefusal(campaign) {
+  if (campaign.platform === 'google_lsa') return campaign.platform_campaign_id ? LSA_SYNCED_STATUS_REFUSAL : undefined;
+  return SYNCED_STATUS_REFUSALS.get(campaign.platform);
+}
 // Campaign metadata keys only the hold routes write: the owner's hold and its
 // release record. Generic campaign writes refuse them and keep the stored ones.
 const HOLD_METADATA_KEYS = ['budget_hold', 'budget_hold_cleared'];
@@ -81,10 +89,10 @@ function sanitizeCampaignWrite(body, isUpdate) {
   }
 
   // status is settable on create (honored rather than defaulted to active) and
-  // on update (the only route to pause/remove a manual or google_lsa campaign —
+  // on update (the only route to pause/remove a campaign entered by hand —
   // /pause + /enable reject non-google_ads; the route additionally steers a
   // Google campaign's status change to those synced endpoints and refuses one
-  // on a synced Meta campaign).
+  // on a synced Meta or Local Services campaign).
   const allow = isUpdate
     ? ['status', ...CAMPAIGN_META_FIELDS]
     : [...CAMPAIGN_CREATE_ONLY_FIELDS, 'status', ...CAMPAIGN_META_FIELDS];
@@ -230,14 +238,14 @@ router.put('/campaigns/:id', requireAdmin, async (req, res, next) => {
   try {
     const clean = sanitizeCampaignWrite(req.body, true);
     if (!clean.ok) return res.status(400).json({ error: clean.error });
-    // A synced platform owns its campaign's status (SYNCED_STATUS_REFUSALS); a
+    // A synced platform owns its campaign's status (syncedStatusRefusal); a
     // direct local flip here would drift from the platform until the next sync.
-    // Manual / google_lsa campaigns have no synced status route, so PUT is the
-    // way to retire them.
+    // A campaign entered by hand has no synced status route, so PUT is the way
+    // to retire it.
     if (clean.value.status !== undefined) {
       const existing = await db('ad_campaigns').where({ id: req.params.id }).first();
       if (!existing) return res.status(404).json({ error: 'Campaign not found' });
-      const refusal = SYNCED_STATUS_REFUSALS.get(existing.platform);
+      const refusal = syncedStatusRefusal(existing);
       if (refusal && clean.value.status !== existing.status) {
         return res.status(400).json({ error: refusal });
       }
@@ -656,6 +664,8 @@ const SYNC_JOBS = [
   { platform: 'google_ads', job: 'google-ads-sync', configured: () => require('../services/ads/google-ads-config').isConfigured() },
   { platform: 'facebook', job: 'meta-ads-campaigns', configured: () => getMetaAds().isConfigured() },
   { platform: 'facebook', job: 'meta-ads-performance', configured: () => getMetaAds().isConfigured() },
+  // google-lsa.js loads the Google Ads SDK only when a sync runs, not here.
+  { platform: 'google_lsa', job: 'google-lsa-sync', configured: () => require('../services/ads/google-lsa').isConfigured() },
 ];
 router.get('/sync-status', async (req, res, next) => {
   try {

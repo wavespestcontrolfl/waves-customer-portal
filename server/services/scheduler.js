@@ -8585,6 +8585,28 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:10AM — Google Local Services Ads sync (campaigns, cost, leads)
+  // Local Services runs in its own Google Ads account. The sync mirrors it into
+  // ad_campaigns / ad_performance_daily (platform='google_lsa'), so the Ads page
+  // shows its cost and its charged leads. Read-only; it runs before the 6:25
+  // cost allocation. runExclusive records job_health ('google-lsa-sync'). Both
+  // steps run even if one fails, then the run throws the first failure.
+  // =========================================================================
+  cron.schedule('10 6 * * *', async () => {
+    try {
+      const googleLsa = require('./ads/google-lsa');
+      if (!googleLsa.isConfigured()) return;
+      await runExclusive('google-lsa-sync', async () => {
+        logger.info('Running: Google Local Services daily sync');
+        await googleLsa.runDailySync();
+        logger.info('Google Local Services daily sync complete');
+      });
+    } catch (err) {
+      logger.error(`Google Local Services sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:15AM — Meta (Facebook/Instagram) Ads sync (campaigns + insights)
   // Pulls Meta ad spend/performance into the same ad_campaigns /
   // ad_performance_daily tables (platform='facebook'); the PPC dashboard then

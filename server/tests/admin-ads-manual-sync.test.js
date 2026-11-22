@@ -7,7 +7,8 @@
  * - POST /sync/meta runs both steps with throwOnError + throwOnSkip: a failed
  *   step answers 502, a lock another sync holds answers 409.
  * - PUT /campaigns/:id refuses a status change on a synced Meta campaign, as it
- *   already does on a Google one; manual / google_lsa campaigns keep it.
+ *   already does on a Google one, and on a Local Services campaign the daily
+ *   sync brought in (it carries Google's id); a campaign entered by hand keeps it.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.setTimeout(30000);
@@ -255,11 +256,21 @@ describe('PUT /campaigns/:id status on synced platforms', () => {
     ]);
   });
 
-  test('a google_lsa campaign can still be retired through PUT', async () => {
+  test('a google_lsa campaign entered by hand can still be retired through PUT', async () => {
     campaignRow = { id: 'c-2', platform: 'google_lsa', status: 'active', campaign_name: 'LSA' };
     const res = await call('PUT', '/campaigns/c-2', { status: 'removed' });
     expect(res.status).toBe(200);
     expect(res.body.campaign.status).toBe('removed');
+  });
+
+  test('a synced Local Services campaign refuses a status change but takes other edits', async () => {
+    campaignRow = { id: 'c-4', platform: 'google_lsa', platform_campaign_id: '555', status: 'active', campaign_name: 'Local Service Ads' };
+    let res = await call('PUT', '/campaigns/c-4', { status: 'paused' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/comes from Google/);
+    expect(updates).toEqual([]);
+    res = await call('PUT', '/campaigns/c-4', { target_area: 'Bradenton' });
+    expect(res.status).toBe(200);
   });
 
   test('a Google campaign still points to /pause and /enable', async () => {
