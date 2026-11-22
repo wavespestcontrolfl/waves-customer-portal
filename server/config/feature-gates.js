@@ -317,6 +317,7 @@
  *   GATE_CALL_TRANSCRIPT_SYNC=true (admin call log: diarized transcript segments render as a clickable, audio-synced list — click a line to seek the recording; off = today's plain-text transcript)
  *   GATE_CALL_EARLY_SUMMARY=true (owner 2026-11-16 "ok build all, use haiku": when a call's live text stops, Claude Haiku 5.5 writes a 2-3 sentence summary of it into call_log.metadata.live_transcription.early_summary, and the Calls tab shows it until the recording pipeline's own summary lands; never writes call_summary, ai_extraction or commitments; one Haiku call per call; needs GATE_LIVE_CALL_TRANSCRIPTION; kill: unset)
  *   GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT=true (call routing: a call with a confirmed on-the-hour time and a trusted address is no longer held only because the service is unclear — ambiguous_pest_or_service fails open so the Waves Assessment fallback books it; needs GATE_CALL_FAIL_OPEN_BOOKING; the office still gets the advisory card; off = byte-identical today)
+ *   GATE_CALL_AGREED_ONE_TIME_JOB=true (call booker, owner 2026-11-22 "fix", then "card": a call on which staff priced ONE one-time job keeps the one-time service the V2 extraction named on the lead and the call record. The recurring-intent rule no longer turns the job into a plan visit because of a cadence word (the 2026-11-21 caller spoke of a monthly plan with another company and was booked Monthly Pest Control). When the rule would have changed the service, the AI books no visit and sends no text: the office gets a Needs Review card with the agreed time and books the visit with its price. Inbound calls only. It changes what the AI books, so the flip is the owner's. Off = byte-identical; kill: unset)
  *   GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT=true (call booker: a business address (Google addressUse.business) given with no unit is not held for the missing unit when the caller says they own/lease/occupy the WHOLE building; the extraction judges it and the code verifies the pinned caller quote; suite/unit/strip-mall wording keeps the hold)
  *   GATE_CALL_FIRST_NAME_ADVISORY=true (call booker: a new caller who gave a last name but no first name still becomes a customer and books; the missing first name files an advisory office card instead of holding the booking; strict opt-in, read at call time)
  *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
@@ -2274,6 +2275,20 @@ const gates = {
   // isEnabled('callUnclearServiceAssessment') by the call processor, which
   // hands canAutoRoute the boolean as opts.unclearServiceAssessment.
   callUnclearServiceAssessment: process.env.GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT === 'true',
+  // Agreed one-time job on a call (owner 2026-11-22, "fix", then "card"). On
+  // 2026-11-21 a caller booked a same-day one-time ant job at the one-time
+  // price staff stated ("One-time service is $250, but it varies"); she had
+  // spoken of a monthly plan with another company, and the booker made a
+  // Monthly Pest Control visit. On, a call on which staff priced ONE one-time
+  // job keeps the one-time service the V2 extraction named on the lead and
+  // the call record. When the recurring-intent rule would have changed the
+  // service, the AI books no visit and sends no text: the office gets a Needs
+  // Review card (agreed_one_time_job_office_books) and books the visit with
+  // its price. Inbound calls only. It changes what the AI books, so the flip
+  // is the owner's. Ships DARK: strict `=== 'true'`. Off = byte-identical.
+  // This entry is for logGateStatus only: the canonical CALL-TIME reader is
+  // callAgreedOneTimeJobLive() below.
+  callAgreedOneTimeJob: process.env.GATE_CALL_AGREED_ONE_TIME_JOB === 'true',
   // Companion trust gate for callAgentCommitBooking: the Agent:/Caller:
   // transcript labels the commitment-grounding relies on are LLM-inferred
   // today (labelTranscriptWithOpenAI infers unclear identities; its integrity
@@ -7544,6 +7559,15 @@ function callFirstNameAdvisoryLive() {
   return process.env.GATE_CALL_FIRST_NAME_ADVISORY === 'true';
 }
 
+// GATE_CALL_AGREED_ONE_TIME_JOB read at CALL time: strict `=== 'true'`, dark by
+// default (owner 2026-11-22, "fix"). The canonical reader for
+// call-recording-processor.js (callAgreedOneTimeJob; the booking's hold reads
+// its answer). Off, byte-identical to before. The `callAgreedOneTimeJob` gates-map
+// entry above is for logGateStatus only.
+function callAgreedOneTimeJobLive() {
+  return process.env.GATE_CALL_AGREED_ONE_TIME_JOB === 'true';
+}
+
 // GATE_CALLBACK_SPOKEN_NUMBER_LINK read at CALL time — strict `=== 'true'`, dark by
 // default. The canonical reader for call-recording-processor.js
 // findCustomerViaCallbackSpokenNumber. The `callbackSpokenNumberLink` gates-map
@@ -8511,6 +8535,7 @@ module.exports.callCommercialAssessmentBookingLive = callCommercialAssessmentBoo
 module.exports.callExtractionSystemPromptLive = callExtractionSystemPromptLive;
 module.exports.callExtractionV1FallbackLive = callExtractionV1FallbackLive;
 module.exports.callFirstNameAdvisoryLive = callFirstNameAdvisoryLive;
+module.exports.callAgreedOneTimeJobLive = callAgreedOneTimeJobLive;
 module.exports.callbackSpokenNumberLinkLive = callbackSpokenNumberLinkLive;
 module.exports.callLeadFormAddressStreetLevelLive = callLeadFormAddressStreetLevelLive;
 module.exports.bookPreferredTimeLive = bookPreferredTimeLive;

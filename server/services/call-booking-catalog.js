@@ -603,6 +603,24 @@ function resolveCallBookingPrice({ quotedPrice, catalogRow } = {}) {
 }
 
 /**
+ * Whether a call booking can put `price` on `serviceName`: the name is a
+ * bookable catalog row that takes a call price (a one_time row that is not a
+ * re-service or an assessment), and the price is inside the booking's bounds.
+ * The call booker's agreed-one-time-job hold asks this before it keeps a
+ * one-time service. The name must be the row's own current name
+ * (serviceNameKey): the lookup a booking starts with also bridges a short
+ * name, a key and a renamed label, and the call booking check ties a price
+ * to a visit by the name alone, so a bridged name is no hold.
+ */
+function callServiceBooksAtPrice(services, serviceName, price) {
+  if (price == null || !Array.isArray(services)) return false;
+  const { serviceNameKey } = require('./call-one-time-job');
+  const row = findServiceByName(services, serviceName);
+  if (!row || serviceNameKey(row.name) !== serviceNameKey(serviceName)) return false;
+  return resolveCallBookingPrice({ quotedPrice: price, catalogRow: row }).price === price;
+}
+
+/**
  * Whether the booking should flag create_invoice_on_complete. A priced
  * one-time booking must bill at completion: without the flag the completion
  * auto-invoice skips priced, self-pay, non-WaveGuard visits
@@ -1130,6 +1148,7 @@ module.exports = {
   callBookingDateOnly,
   followUpProbeEnd,
   sanitizeQuotedCallPrice,
+  callServiceBooksAtPrice,
   shiftCallFollowUpsForParentMove,
   planCallFollowUpShift,
   cancelCallFollowUpsForParentCancel,

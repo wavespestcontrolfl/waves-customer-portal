@@ -15,8 +15,27 @@ jest.mock('../config/twilio-numbers', () => ({
   getLeadSourceFromNumber: jest.fn(() => ({ source: 'phone_call' })),
 }));
 
+// The agreed-one-time-job hold is part of V2-primary adoption, so the processor loads in that mode (the two
+// flags are read once, at load). The older cases pass no hold, and the mode does not touch them. The hold's own
+// gate is read at call time; its describe block turns it on.
+const ENV_BEFORE = {
+  CALL_EXTRACTION_V2_ENABLED: process.env.CALL_EXTRACTION_V2_ENABLED,
+  CALL_EXTRACTION_V2_DRIVES_ROUTING: process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING,
+  CALL_EXTRACTION_V2_PRIMARY: process.env.CALL_EXTRACTION_V2_PRIMARY,
+  GATE_CALL_AGREED_ONE_TIME_JOB: process.env.GATE_CALL_AGREED_ONE_TIME_JOB,
+};
+process.env.CALL_EXTRACTION_V2_ENABLED = 'true';
+process.env.CALL_EXTRACTION_V2_DRIVES_ROUTING = 'true';
+delete process.env.CALL_EXTRACTION_V2_PRIMARY;
+afterAll(() => {
+  for (const [key, value] of Object.entries(ENV_BEFORE)) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  }
+});
+
+const fs = require('fs');
 const { _test } = require('../services/call-recording-processor');
-const { applyRecurringIntentDefault } = _test;
+const { applyRecurringIntentDefault, callAgreedOneTimeJob, agreedJobHoldChangesService, adoptAgreedOneTimeService } = _test;
 
 const lead = (over = {}) => ({ is_lead: true, matched_service: 'Bee / Wasp Nest Removal Service', ...over });
 
@@ -475,5 +494,296 @@ describe('applyRecurringIntentDefault', () => {
       .toBe('Quarterly Pest Control Service');
     const already = lead({ matched_service: 'Quarterly Pest Control Service' });
     expect(applyRecurringIntentDefault(already, 'Caller: quarterly package please')).toBe(already);
+  });
+});
+
+// Owner 2026-11-22 ("fix", then "yes" to the service-only cut): the rule keeps the AI's one-time
+// service when staff priced ONE one-time job on the call. 2026-11-21: a same-day one-time ant job
+// booked as Monthly Pest Control, because the caller's only cadence word named the plan another
+// company had sold her. The AI books no visit for a job the hold changed (owner 2026-11-22, "card"): the
+// booking's hold is pinned in call-agreed-price-gate.test.js.
+describe('an agreed one-time job keeps its one-time service (owner 2026-11-22, GATE_CALL_AGREED_ONE_TIME_JOB)', () => {
+  const TRANSCRIPT = [
+    'Caller: Do you have anyone that could come out and spray today?',
+    'Agent: One-time service is $250, but it varies.',
+    'Caller: Okay. I just signed up for a monthly service with another company that I do not even need.',
+  ].join('\n');
+  const price = (over = {}) => ({ amount_usd: 250, amount_max_usd: null, unit: 'one_time', accepted: true, stated_by: 'agent', tier_mentioned: null, prepay_term: null, ...over });
+  // The validated V2 extraction: the service it named, what the call was about, and the prices of the call.
+  // `over` changes service_request; `top` changes the extraction's own fields.
+  const v2 = (over = {}, top = {}) => ({
+    meta: { schema_version: '1.13.0' },
+    triage_flags: ['no_sms_consent_captured'],
+    property: { additional_properties: [] },
+    ...top,
+    service_request: {
+      specific_service_name: 'One-Time Pest Control Service', service_intent: 'active_infestation_treatment',
+      primary_service_category: 'pest_general', secondary_categories: [], waveguard_tier_mentioned: null, billing_choice: null,
+      price_discussed: true, quoted_price_usd: null, price: price(), prices: [price()], ...over,
+    },
+  });
+  const onePrice = (over) => ({ price: price(over), prices: [price(over)] });
+  const oneTime = () => lead({ matched_service: 'One-Time Pest Control Service', specific_service_name: 'One-Time Pest Control Service' });
+  // The bookable catalog rows, as loadBookableCallServices reads them.
+  const row = (name, key, billing = 'one_time', base = null) => ({ id: key, service_key: key, name, billing_type: billing, pricing_type: 'variable', base_price: base });
+  const ONE_TIME_ROW = row('One-Time Pest Control Service', 'pest_one_time', 'one_time', 250);
+  const SERVICES = [
+    ONE_TIME_ROW,
+    row('Bee / Wasp Nest Removal Service', 'bee_wasp_nest_removal'),
+    row('Monthly Pest Control Service', 'pest_general_monthly', 'recurring'),
+    row('Quarterly Pest Control Service', 'pest_general_quarterly', 'recurring'),
+  ];
+  const agreed = (extraction, services = SERVICES) => callAgreedOneTimeJob(extraction, services);
+  const booked = (view, extraction, services) => applyRecurringIntentDefault(view, TRANSCRIPT, [], agreed(extraction, services)).specific_service_name;
+
+  beforeEach(() => { process.env.GATE_CALL_AGREED_ONE_TIME_JOB = 'true'; });
+  afterEach(() => { delete process.env.GATE_CALL_AGREED_ONE_TIME_JOB; });
+
+  test('with no hold the rule reads the cadence word, as before', () => {
+    expect(applyRecurringIntentDefault(oneTime(), TRANSCRIPT).specific_service_name).toBe('Monthly Pest Control Service');
+    expect(applyRecurringIntentDefault(oneTime(), TRANSCRIPT, [], false).specific_service_name).toBe('Monthly Pest Control Service');
+    // Only `true` holds: an extraction handed over by mistake is not a hold.
+    expect(applyRecurringIntentDefault(oneTime(), TRANSCRIPT, [], v2()).specific_service_name).toBe('Monthly Pest Control Service');
+  });
+
+  test('V2 named a one-time service and staff priced one one-time job on the call: the service stays', () => {
+    expect(agreed(v2())).toBe(true);
+    expect(booked(oneTime(), v2())).toBe('One-Time Pest Control Service');
+    const view = oneTime();
+    expect(applyRecurringIntentDefault(view, TRANSCRIPT, [], true)).toBe(view);
+    // Any singular service in the view is kept, not only the one V2 named.
+    const nest = lead({ specific_service_name: 'Bee / Wasp Nest Removal Service' });
+    expect(applyRecurringIntentDefault(nest, TRANSCRIPT, [], true)).toBe(nest);
+    // The strict agreed total with its one-time entry reads the same.
+    expect(agreed(v2({ quoted_price_usd: 250 }))).toBe(true);
+    // A one-time preventative job is a one-time job too.
+    expect(agreed(v2({ service_intent: 'preventative_one_time' }))).toBe(true);
+    // A reading with no word on whether a price was discussed still holds its accepted price.
+    expect(agreed(v2({ price_discussed: null }))).toBe(true);
+  });
+
+  test('each part of the hold is needed: without it the rule applies', () => {
+    const noHold = [
+      v2({ specific_service_name: 'Quarterly Pest Control Service' }), // V2 named a program
+      v2({ specific_service_name: null }),
+      { service_request: v2().service_request }, // not a validated V2 extraction
+      // Staff did not price ONE one-time job.
+      v2({ price: null, prices: [] }), // no price on the call
+      v2({ price_discussed: false }), // the reading says no price was discussed
+      v2(onePrice({ accepted: false })), // a price nobody accepted
+      v2(onePrice({ accepted: null })),
+      v2(onePrice({ unit: 'per_month' })), // an agreed plan rate
+      v2(onePrice({ unit: 'unknown' })), // an agreed price with no unit
+      v2({ prices: [price(), price({ amount_usd: 31, unit: 'per_month' })] }), // a one-time price and a plan rate
+      v2({ quoted_price_usd: 250, price: null, prices: [] }), // a strict total with no unit
+      v2(onePrice({ amount_max_usd: 300 })), // a range
+      v2({ prices: [price(), price({ amount_usd: 99 })] }), // two agreed one-time prices
+      v2(onePrice({ stated_by: 'caller' })), // the caller's own number, no strict total
+      v2(onePrice({ amount_usd: 3 })), // under the booking's price bounds
+      v2(onePrice({ amount_max_usd: 200 })), // a malformed range (high end under the low end) is not exact
+      v2({ quoted_price_usd: 0 }), // a strict $0 total: the booking is free
+      v2({ quoted_price_usd: 200 }), // a strict total that is not the accepted price
+      v2({ prices: [price(), price({ amount_usd: 0, accepted: false })] }), // a second staff term: a waived fee
+      v2({ prices: [price(), price({ amount_usd: 0 })] }), // the waived fee was accepted too
+      v2({ prices: [price(), price({ amount_usd: null })] }), // a second accepted term with no number
+      // The reading does not say the call was about a one-time job.
+      ...['recurring_membership_inquiry', 'inspection_only', 'quote_only', 'follow_up_existing_service', 'complaint_or_callback', 'cancellation_request', null, undefined]
+        .map((intent) => v2({ service_intent: intent })),
+      // A plan on the call.
+      v2({ billing_choice: 'per_application' }), // a plan billed per application, with a one-time start fee
+      v2({ billing_choice: 'annual_prepay' }),
+      v2({ primary_service_category: 'bundled_waveguard' }),
+      v2({ waveguard_tier_mentioned: 'silver' }),
+      v2(onePrice({ tier_mentioned: 'silver' })), // the price is a plan's
+      v2(onePrice({ prepay_term: 'annual' })),
+      v2({ prices: [price(), price({ amount_usd: 99, accepted: false, stated_by: 'caller', tier_mentioned: 'gold' })] }), // a tier on another entry
+      // A second job, a second property, or a job the reading could not settle.
+      v2({ secondary_categories: ['lawn'] }),
+      v2({}, { property: { additional_properties: [{ label: 'rental' }] } }),
+      v2({}, { triage_flags: ['multi_property_call'] }),
+      v2({}, { triage_flags: ['no_sms_consent_captured', 'ambiguous_pest_or_service'] }),
+    ];
+    for (const extraction of noHold) {
+      expect(agreed(extraction)).toBe(false);
+      expect(booked(oneTime(), extraction)).toBe('Monthly Pest Control Service');
+    }
+    // Other flags and an absent property block do not stop the hold.
+    expect(agreed(v2({}, { triage_flags: ['quote_promised'], property: null }))).toBe(true);
+  });
+
+  test('the hold needs a one-time catalog row that a call booking can price', () => {
+    const without = SERVICES.filter((s) => s !== ONE_TIME_ROW);
+    const noRow = [
+      null, [], without, // no catalog, or no row with that name
+      [...without, { ...ONE_TIME_ROW, billing_type: 'recurring' }], // a plan row never takes a visit price
+    ];
+    for (const services of noRow) {
+      expect(agreed(v2(), services)).toBe(false);
+      expect(booked(oneTime(), v2(), services)).toBe('Monthly Pest Control Service');
+    }
+    expect(callAgreedOneTimeJob(v2())).toBe(false); // a caller that hands over no catalog
+    // A singular name the catalog does not sell (an older label) has no row to price.
+    expect(agreed(v2({ specific_service_name: 'General Pest Control' }))).toBe(false);
+  });
+
+  test('the gate is off by default: no hold at any site', () => {
+    delete process.env.GATE_CALL_AGREED_ONE_TIME_JOB;
+    expect(agreed(v2())).toBe(false);
+    expect(booked(oneTime(), v2())).toBe('Monthly Pest Control Service');
+    const program = lead({ matched_service: 'Monthly Pest Control Service', specific_service_name: 'Monthly Pest Control Service' });
+    expect(adoptAgreedOneTimeService(program, v2(), agreed(v2()))).toBe(program);
+    // Strict opt-in: only the exact word turns it on.
+    process.env.GATE_CALL_AGREED_ONE_TIME_JOB = '1';
+    expect(agreed(v2())).toBe(false);
+  });
+
+  test('the hold never changes a view that already names a program', () => {
+    const program = lead({ matched_service: 'Quarterly Pest Control Service', specific_service_name: 'Quarterly Pest Control Service' });
+    expect(applyRecurringIntentDefault(program, 'Caller: I want the monthly plan.', [], true).specific_service_name)
+      .toBe('Monthly Pest Control Service');
+  });
+
+  test('a mixed view: the singular field stays and the program field takes the caller\'s cadence', () => {
+    const mixed = () => lead({ matched_service: 'Pest Control Service', specific_service_name: 'Quarterly Pest Control Service' });
+    const t = 'Caller: I want the monthly plan.';
+    // The specific label wins in booking, so the cadence the caller chose must reach it.
+    expect(applyRecurringIntentDefault(mixed(), t, [], true))
+      .toMatchObject({ matched_service: 'Pest Control Service', specific_service_name: 'Monthly Pest Control Service' });
+    expect(applyRecurringIntentDefault(mixed(), t))
+      .toMatchObject({ matched_service: 'Monthly Pest Control Service', specific_service_name: 'Monthly Pest Control Service' });
+  });
+
+  test('a caller with no recurring words is untouched either way', () => {
+    const view = oneTime();
+    expect(applyRecurringIntentDefault(view, 'Caller: Can someone spray for ants today?', [], true)).toBe(view);
+  });
+
+  test('the hold is part of V2-primary adoption: the kill switch turns it off at every site', () => {
+    process.env.CALL_EXTRACTION_V2_PRIMARY = 'false';
+    try {
+      expect(agreed(v2())).toBe(false);
+      expect(booked(oneTime(), v2())).toBe('Monthly Pest Control Service');
+      const program = lead({ matched_service: 'Monthly Pest Control Service', specific_service_name: 'Monthly Pest Control Service' });
+      expect(adoptAgreedOneTimeService(program, v2(), agreed(v2()))).toBe(program);
+    } finally {
+      delete process.env.CALL_EXTRACTION_V2_PRIMARY;
+    }
+  });
+
+  // The booking asks this of its own view: a booking the hold changed is held for the office.
+  describe('agreedJobHoldChangesService: whether the hold changed the view', () => {
+    test('a singular service the caller\'s cadence word would turn into a program: changed', () => {
+      expect(agreedJobHoldChangesService(oneTime(), TRANSCRIPT)).toBe(true);
+      expect(agreedJobHoldChangesService(lead({ matched_service: 'Pest Control Service', specific_service_name: 'One-Time Pest Control Service' }), TRANSCRIPT)).toBe(true);
+    });
+
+    test('no cadence word, a view that already names a program, or no lead: unchanged', () => {
+      expect(agreedJobHoldChangesService(oneTime(), 'Caller: Can someone spray for ants today?')).toBe(false);
+      // The program field takes the caller's cadence with or without the hold.
+      expect(agreedJobHoldChangesService(lead({ matched_service: 'Quarterly Pest Control Service', specific_service_name: 'Quarterly Pest Control Service' }), 'Caller: I want the monthly plan.')).toBe(false);
+      expect(agreedJobHoldChangesService({ ...oneTime(), is_lead: false }, TRANSCRIPT)).toBe(false);
+    });
+
+    test('it changes nothing itself', () => {
+      const view = oneTime();
+      const before = { ...view };
+      agreedJobHoldChangesService(view, TRANSCRIPT);
+      expect(view).toEqual(before);
+    });
+  });
+
+  describe('before adoption, an agreed one-time job never carries a program label', () => {
+    const SERVICE = 'One-Time Pest Control Service';
+    // `hold`: callAgreedOneTimeJob for the extraction.
+    const adopt = (view, extraction, hold = agreed(extraction)) => adoptAgreedOneTimeService(view, extraction, hold);
+
+    test('the first pass wrote the program: both labels take the service the extraction named, every other field stays', () => {
+      const after = { ...applyRecurringIntentDefault(oneTime(), TRANSCRIPT), phone: '+19415550101' };
+      expect(after).toMatchObject({ matched_service: 'Monthly Pest Control Service', specific_service_name: 'Monthly Pest Control Service' });
+      expect(adopt(after, v2())).toEqual({ ...after, matched_service: SERVICE, specific_service_name: SERVICE });
+    });
+
+    test('the V1 model wrote the program itself: the same, field by field', () => {
+      // Only the label that names a program changes; an empty label or another service stays.
+      expect(adopt(lead({ matched_service: 'Quarterly Pest Control Service', specific_service_name: null }), v2()))
+        .toMatchObject({ matched_service: SERVICE, specific_service_name: null });
+      expect(adopt(lead({ matched_service: 'Monthly Pest Control Service', specific_service_name: 'Bee / Wasp Nest Removal Service' }), v2({ specific_service_name: 'Bee / Wasp Nest Removal Service' })))
+        .toMatchObject({ matched_service: 'Bee / Wasp Nest Removal Service', specific_service_name: 'Bee / Wasp Nest Removal Service' });
+    });
+
+    test('nothing to change returns the same object', () => {
+      const program = () => lead({ matched_service: 'Monthly Pest Control Service', specific_service_name: 'Monthly Pest Control Service' });
+      // No program label on the view.
+      const untouched = oneTime();
+      expect(adopt(untouched, v2())).toBe(untouched);
+      // No agreed one-time job: no extraction, an agreed plan rate, a program named by V2, a plan choice.
+      for (const extraction of [null, v2(onePrice({ unit: 'per_month' })), v2({ specific_service_name: 'Quarterly Pest Control Service' }), v2({ billing_choice: 'per_application' })]) {
+        const view = program();
+        expect(adopt(view, extraction)).toBe(view);
+      }
+      // No hold: the labels stay. Only `true` is a hold.
+      for (const hold of [false, undefined, null, 1]) {
+        const view = program();
+        expect(adoptAgreedOneTimeService(view, v2(), hold)).toBe(view);
+      }
+    });
+
+    test('after it, no later pass of the rule moves the service', () => {
+      const adopted = adopt(applyRecurringIntentDefault(oneTime(), TRANSCRIPT), v2());
+      expect(applyRecurringIntentDefault(adopted, TRANSCRIPT, [], agreed(v2()))).toBe(adopted);
+    });
+  });
+
+  // The processor is too large to run here; these pin where it asks for the hold and hands it to the rule.
+  describe('processRecording wiring', () => {
+    const src = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const count = (text) => src.split(text).length - 1;
+
+    test('the first pass and both commercial judges run the rule with no hold; the three later passes hand it the hold', () => {
+      expect(count('applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);')).toBe(1);
+      // After adoption, and at the approved booking.
+      expect(count('applyRecurringIntentDefault(extracted, transcription, bookableServiceNames, agreedJobAtAdoption);')).toBe(2);
+      // The voicemail lead promotion: the hold only when adoption ran for this pass.
+      expect(count('applyRecurringIntentDefault(extracted, transcription, bookableServiceNames, adoptedV2Extraction ? agreedJobAtAdoption : false);')).toBe(1);
+      // The commercial judges read as before: they run before the customer is resolved.
+      expect(count('views.map((view) => applyRecurringIntentDefault(view, transcription, serviceNames)).every(')).toBe(2);
+      expect(count('applyRecurringIntentDefault(')).toBe(7); // the six calls and the definition
+    });
+
+    test('the hold is asked once, inbound, at adoption, of the reading alone', () => {
+      expect(src).toContain("const agreedJobAtAdoption = !isOutboundCall(call) && v2Result?.status === 'valid'\n      && callAgreedOneTimeJob(v2Result.extraction, bookableCallServices);");
+      expect(count('callAgreedOneTimeJob(')).toBe(2); // this call and the definition
+      expect(count('agreedJobHoldChangesService(')).toBe(2); // the booking's call and the definition
+    });
+
+    test('the hold and the price bell of the call booking check read one rule for "one one-time job"', () => {
+      expect(count("require('./call-one-time-job').readsAsOneOneTimeJob(v2Extraction)")).toBe(1);
+      const check = fs.readFileSync(require.resolve('../services/call-booking-check'), 'utf8');
+      expect(check).toContain("const { readsAsOneOneTimeJob, serviceNameKey: nameKey } = require('./call-one-time-job');");
+      // The same name key too: the hold keeps a service only under the name the bell would tie a price to.
+      expect(check).not.toContain('const nameKey = (name)');
+      const catalog = fs.readFileSync(require.resolve('../services/call-booking-catalog'), 'utf8');
+      expect(catalog).toContain('if (!row || serviceNameKey(row.name) !== serviceNameKey(serviceName)) return false;');
+      expect(check).not.toContain('function readsAsOneOneTimeJob');
+    });
+
+    test('the canonical view is put right once: after the pre-adoption snapshot, before adoption reads or anything stores it', () => {
+      const firstPass = src.indexOf('applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);');
+      const snapshot = src.indexOf('const preAdoptionExtracted = { ...extracted };');
+      const put = '    if (agreedJobAtAdoption) {\n      const agreedService = adoptAgreedOneTimeService(extracted, v2Result.extraction, agreedJobAtAdoption);';
+      const adoption = src.indexOf('adoptV2PrimaryFields(extracted, v2Result.extraction, {');
+      expect(count(put)).toBe(1);
+      expect(count('adoptAgreedOneTimeService(')).toBe(2); // this call and the definition
+      // The pre-adoption view is V1's own: the checks that need both extractors to agree read it.
+      expect(snapshot).toBeGreaterThan(firstPass);
+      expect(src.indexOf(put)).toBeGreaterThan(snapshot);
+      expect(adoption).toBeGreaterThan(src.indexOf(put));
+      // The labels replaced here are recorded with the fields adoption replaces, for the offline audits.
+      expect(src.slice(src.indexOf(put), adoption))
+        .toContain("agreedServiceFields = ['matched_service', 'specific_service_name'].filter((key) => agreedService[key] !== extracted[key]);");
+      expect(count('serviceFieldsAdopted = [...new Set([...adoption.adoptedFields, ...agreedServiceFields])];')).toBe(1);
+      // Nothing stores the V1 view between the first pass and adoption.
+      expect(src.slice(firstPass, adoption)).not.toContain('ai_extraction: JSON.stringify(extracted)');
+    });
   });
 });

@@ -137,6 +137,30 @@ function resolveStatedOneTimeCallPrice(v2Extraction = null) {
   return exactOneTimeAmount(accepted[0]);
 }
 
+/**
+ * The ONE exact one-time price a call agreed, or null: the evidence that staff
+ * priced a one-time job on the call (the call booker's agreed-one-time-job
+ * hold, call-recording-processor.js callAgreedOneTimeJob). Null for anything
+ * that is not one number for one job: a range, two agreed terms, an agreed
+ * term that is not one-time (a plan rate, a price with no unit) or that a plan
+ * claims (a tier, an annual prepay). The call must hold exactly one accepted
+ * term, exact and one-time. Then:
+ *   - no strict total: the price staff stated (resolveStatedOneTimeCallPrice);
+ *   - a strict total (quoted_price_usd, "the total the caller accepted for the
+ *     service being booked"): that total, only when it is the same number as
+ *     the accepted term. A $0 total, or one that differs, is not this price.
+ * This is evidence, not a price to bill: see resolveStatedOneTimeCallPrice.
+ */
+function resolveAgreedOneTimeJobPrice(v2Extraction = null) {
+  const svc = v2Extraction?.service_request;
+  if (!svc || typeof svc !== 'object') return null;
+  const accepted = statedPriceTerms(svc).filter((entry) => entry.accepted === true);
+  const amount = accepted.length === 1 ? exactOneTimeAmount(accepted[0]) : null;
+  if (amount === null) return null;
+  if (svc.quoted_price_usd == null) return resolveStatedOneTimeCallPrice(v2Extraction);
+  return svc.quoted_price_usd === amount ? amount : null;
+}
+
 function formatAgreedTerm(term) {
   const amount = term?.amount;
   if (typeof amount !== 'number' || !Number.isFinite(amount)) return '$0.00';
@@ -158,5 +182,6 @@ function formatAgreedPriceLabel(agreedPrice) {
 module.exports = {
   resolveCallAgreedPrice,
   resolveStatedOneTimeCallPrice,
+  resolveAgreedOneTimeJobPrice,
   formatAgreedPriceLabel,
 };

@@ -338,3 +338,68 @@ describe('processRecording — failed quarantines never ride the retry lane alon
     expect(block).toContain('if (!queued) pendingQuarantineMarker = { reason: rejectionReason, procGeneration };');
   });
 });
+
+// 2026-11-21: a one-time job booked as a plan visit. With GATE_CALL_AGREED_ONE_TIME_JOB on, the booker keeps
+// the one-time service on the record, and the AI books no visit for a job the hold changed (owner 2026-11-22,
+// "card"): the office books it with its price from a review card.
+describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE_TIME_JOB)', () => {
+  const at = source.indexOf('const priceInfo = resolveCallBookingPrice({');
+  const call = source.slice(at, source.indexOf('});', at));
+  const count = (text) => source.split(text).length - 1;
+  const held = 'const agreedJobHeldForOffice = agreedJobAtAdoption\n              && (agreedServiceFields.length > 0 || agreedJobHoldChangesService(extracted, transcription, bookableServiceNames));';
+  const txAt = source.indexOf('const svc = await db.transaction(async (trx) => {');
+  const guard = "if (agreedJobHeldForOffice) {\n                  return { __held: { reason: 'agreed_one_time_job_office_books' } };\n                }";
+
+  test('the visit price call is unchanged, and the processor never reads a price staff only stated', () => {
+    expect(at).toBeGreaterThan(-1);
+    expect(source.indexOf('const priceInfo = resolveCallBookingPrice({', at + 1)).toBe(-1);
+    expect(call).toContain('quotedPrice: bookingExtracted.quoted_price,');
+    expect(call).toContain('catalogRow: callBookingCatalogRow,');
+    expect(call).not.toContain('agreedOnCall');
+    expect(source).not.toContain('resolveStatedOneTimeCallPrice');
+    expect(source).not.toContain('statedPrice');
+    // The gate has one call-time reader, and a mock of feature-gates without it reads as off.
+    expect(source).toContain("return typeof gates.callAgreedOneTimeJobLive === 'function' && gates.callAgreedOneTimeJobLive();");
+    expect(count('callAgreedOneTimeJobLive')).toBe(2);
+  });
+
+  test('the booking is held when the hold changed its service: a label at adoption, or the rule on the booking\'s own view', () => {
+    expect(count(held)).toBe(1);
+    // Set once, read once (by the guard below); nothing else writes it.
+    expect(count('agreedJobHeldForOffice =')).toBe(1);
+    expect(count('if (agreedJobHeldForOffice)')).toBe(1);
+    // Set next to the price call, before the booking transaction opens.
+    expect(source.indexOf(held)).toBeGreaterThan(at);
+    expect(source.indexOf(held)).toBeLessThan(txAt);
+  });
+
+  test('inside the transaction the hold returns before the make-up decision and the insert, after every booking guard', () => {
+    const guardAt = source.indexOf(guard);
+    expect(count(guard)).toBe(1);
+    expect(guardAt).toBeGreaterThan(txAt);
+    // After the slot-elapsed recheck, the last booking guard.
+    expect(guardAt).toBeGreaterThan(source.indexOf("return { __held: { reason: 'arranger_slot_elapsed_pre_insert' } };", txAt));
+    const hook = source.indexOf("require('./call-reschedule-apply').planCallMakeupForBooking(trx, {", guardAt);
+    expect(hook).toBeGreaterThan(guardAt);
+    expect(source.indexOf('.insert(insertData)', hook)).toBeGreaterThan(hook);
+    // Option A's parts are gone: no plan read, no row lock for the hold, no price bell from the booker.
+    expect(source).not.toContain('agreedOneTimeJobForCaller');
+    expect(source).not.toContain('planSettlesUnpricedVisit');
+    expect(source).not.toContain('raisePriceBellForBooking');
+  });
+
+  test('the hold reason files its own review card in the scheduling lane, with the agreed time, and no second fallback card', () => {
+    const { buildTriageItem } = require('../services/call-routing-gates');
+    const item = buildTriageItem({
+      callLogId: 42,
+      flag: 'agreed_one_time_job_office_books',
+      extraction: { meta: { call_summary: 'Same-day one-time job.' }, scheduling: { status: 'confirmed', confirmed_start_at: '2026-11-21T17:00:00-05:00' } },
+    });
+    expect(item.category).toBe('time_ambiguous');
+    expect(JSON.parse(item.payload).scheduling_window).toEqual(expect.objectContaining({ status: 'confirmed', confirmed_start_at: '2026-11-21T17:00:00-05:00' }));
+    // The generic held-booking handler files the card; the approved-but-unbooked fallback skips this reason.
+    const heldReasons = source.match(/const heldReasons = new Set\(\[[^\]]*\]\);/);
+    expect(heldReasons).not.toBeNull();
+    expect(heldReasons[0]).toContain("'agreed_one_time_job_office_books'");
+  });
+});

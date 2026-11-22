@@ -838,6 +838,10 @@ const SCHEDULING_PAYLOAD_FLAGS = new Set([
   // office needs the agreed time it can no longer book (codex #4890
   // post-merge review P2).
   'arranger_slot_elapsed_pre_insert',
+  // An agreed one-time job the AI does not book (call-recording-processor,
+  // GATE_CALL_AGREED_ONE_TIME_JOB): the office books the agreed time itself,
+  // with the job's price.
+  'agreed_one_time_job_office_books',
 ]);
 
 // Address-review cards carry the address the call NAMED, snapshotted at
@@ -986,6 +990,12 @@ function buildTriageItem({
     // holds; the office re-books the agreed appointment (codex #4890
     // post-merge review P2).
     arranger_slot_elapsed_pre_insert: 'time_ambiguous',
+    // A one-time job staff priced on the call, which the recurring-intent
+    // rule would have booked as a plan visit: the AI books no visit
+    // (GATE_CALL_AGREED_ONE_TIME_JOB, owner 2026-11-22 "card"). The office
+    // books the job with its price: the same review lane as the other
+    // scheduling holds.
+    agreed_one_time_job_office_books: 'time_ambiguous',
     // Several live bookings plausibly match the call (same service line
     // within a day of the discussed date) — a human picks which one the
     // call belongs to instead of the AI inserting a duplicate.
