@@ -139,12 +139,36 @@ describe('tierSavingsLeftOffInvoices', () => {
     expect(await tierFor({ tier: 'Bronze', recurring: { tier: 'Bronze' }, lineItems: [pestItem({ discount: waveguard(0.15, 'bronze') })] })).toEqual([]);
   });
 
-  test('a rate the estimate saved for its tier must be the engine line\'s rate', async () => {
+  // Pre-push audit P1: a saved 0 is a rate, and the invoice reads the send snapshot first.
+  test('the rate the estimate saved for its tier, as the invoice reads it, must be the engine line\'s rate', async () => {
     const withData = (extra, recurring = gold) => findingsOn({ data: { engineResult: { lineItems: [pestItem()] }, result: { recurring }, ...extra } });
+    const snapshot = (tierDiscounts) => ({ sendSnapshot: { tierDiscounts } });
     expect(await withData({}, { ...gold, discount: 0.15 })).toHaveLength(1);
     expect(await withData({}, { ...gold, discount: 0.1 })).toEqual([]);
-    expect(await withData({ sendSnapshot: { tierDiscounts: { Gold: 0.15 } } })).toHaveLength(1);
-    expect(await withData({ sendSnapshot: { tierDiscounts: { Gold: 0.1 } } })).toEqual([]);
+    expect(await withData({}, { ...gold, discount: 0 })).toEqual([]);
+    expect(await withData(snapshot({ Gold: 0.15 }))).toHaveLength(1);
+    expect(await withData(snapshot({ Gold: 0.1 }))).toEqual([]);
+    expect(await withData(snapshot({ Gold: 0 }))).toEqual([]);
+    expect(await withData(snapshot({ gold: 0 }))).toEqual([]);
+    // The snapshot wins over the block's rate; a block that names no tier saved no rate for it.
+    expect(await withData(snapshot({ Gold: 0.15 }), { ...gold, discount: 0 })).toHaveLength(1);
+    expect(await withData(snapshot({ Gold: 0 }), { ...gold, discount: 0.15 })).toEqual([]);
+    expect(await withData({}, { discount: 0.1 })).toHaveLength(1);
+  });
+
+  // Pre-push audit P1: a row with its own per-visit net proves the tier to the cent, as the invoice requires.
+  test('a row with its own per-visit net bills the tier\'s net only to the cent', async () => {
+    const own = (net, price = net, records = {}, row = {}) => findingsOn(records,
+      { visit: { estimated_price: price }, decision: { line: { ...pestRow, priceAfterDiscount: net, ...row } } });
+    expect(await own(85)).toHaveLength(1);
+    expect(await own(85.04)).toEqual([]);
+    expect(await own(85, 85.04)).toEqual([]);
+    // $100.10 at 15% is $85.085: either neighbour is the tier's net.
+    const halfCent = { lineItems: [pestItem({ perApp: 100.1, annualBeforeDiscount: 400.4, annualAfterDiscount: 340.34 })] };
+    const halfRow = { perTreatment: 100.1, annualAfterDiscount: 340.34 };
+    expect(await own(85.08, 85.08, halfCent, halfRow)).toHaveLength(1);
+    expect(await own(85.09, 85.09, halfCent, halfRow)).toHaveLength(1);
+    expect(await own(85.1, 85.1, halfCent, halfRow)).toEqual([]);
   });
 
   // The engine discounts the annual, so a few cents off the tier's share is its rounding; more is not the tier alone.
@@ -167,6 +191,8 @@ describe('tierSavingsLeftOffInvoices', () => {
     expect(await billed('84.99', {}, { ...pestRow, serviceSpecificDiscounts: [{ presetKey: 'credit', amount: 0.04 }] })).toEqual([]);
     // A floor raised the lawn net to $1,008.36 ($112.04 a visit): 4 cents off the share, but not the tier's rate.
     expect(await billed('112.04', { lineItems: [lawnItem({ annualAfterDiscount: 1008.36 })] }, { ...lawnRow, annualAfterDiscount: 1008.36 })).toEqual([]);
+    // The tier's annual is exact to the cent (a half cent rounds either way): 1 cent over is not the tier alone either.
+    expect(await billed('112.00', { lineItems: [lawnItem({ annualAfterDiscount: 1008.01 })] }, { ...lawnRow, annualAfterDiscount: 1008.01 })).toEqual([]);
     expect(await billed('112.00', { lineItems: [lawnItem()] }, lawnRow)).toHaveLength(1);
   });
 

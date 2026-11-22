@@ -345,6 +345,10 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
       await save([item], {}, {}, { summary: { manualDiscount: { amount: 0.04, recurringAmount: 0.04, label: 'Courtesy' } } });
       expect(await reason(job)).toBe('discount_unnamed');
       expect(await findingsFor()).toEqual([]);
+      // The block saved a Gold rate of 0: the records disagree with the engine's 15%, so one line by design.
+      await save([item], { discount: 0 });
+      expect(await reason(job)).toBe('discount_unnamed');
+      expect(await findingsFor()).toEqual([]);
       // The block saved the Gold rate, but the row recorded another rate for itself: one line by design.
       await save([item], { discount: 0.15, services: [{ ...row, discount: { effectiveDiscount: 0.1 } }] });
       expect(await reason(job)).toBe('discount_unnamed');

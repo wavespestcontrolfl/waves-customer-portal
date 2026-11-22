@@ -36,6 +36,9 @@ const parsed = (value) => {
 const object = (value) => (value && typeof value === 'object' ? value : {});
 const list = (value) => (Array.isArray(value) ? value : []);
 const word = (value) => String(value || '').trim().toLowerCase();
+// The cents a tier rate leaves on a list price in cents: the exact cents, or either neighbour at a half cent (the engine
+// and the invoice round a half cent in opposite directions; completion-pricing.js tierNetCents).
+const tierNets = (listCents, rate) => [Math.round(listCents * (1 - rate) - 1e-6), Math.round(listCents * (1 - rate) + 1e-6)];
 
 // Every upcoming live visit (today in Eastern time through `days` ahead, callbacks left out) of a live customer that
 // traces to an estimate: its own source_estimate_id or its series parent's.
@@ -103,7 +106,7 @@ function engineTierRecord(lineItems, row, serviceKey) {
   const credited = [row, item].some((r) => list(r.serviceSpecificDiscounts).some((credit) => Number(credit?.amount) > 0));
   const before = cents(item.annualBeforeDiscount);
   const after = cents(item.annualAfterDiscount);
-  if (credited || after === null || Math.abs(after - Math.round(before * (1 - rate))) > 1) return null;
+  if (credited || !tierNets(before, rate).includes(after)) return null;
   const visits = [item.visitsPerYear, item.visits, item.frequency, item.appsPerYear].map(Number).find((n) => n > 0);
   // The line's own per-visit price (the one the saved row copies; the engine keeps it equal to the selected program's),
   // else its list annual over its visits (no visit count: NaN, skipped).
@@ -114,16 +117,29 @@ function engineTierRecord(lineItems, row, serviceKey) {
 
 // The tier the estimate's records name for its recurring work, when they agree with the engine's line: the column and
 // the saved recurring block name no other tier (an empty column falls back to the block, as completion-pricing.js
-// savedEstimateTier does), and no rate the estimate saved for it (the send snapshot, the block's) is another rate.
-// Records that disagree name no saving: the invoice keeps one line by design. Null unless Silver, Gold or Platinum.
+// savedEstimateTier does), and the rate the estimate saved for it is the engine line's rate. That rate is the one the
+// invoice reads (savedEstimateTier): the send snapshot's, else the rate of a block that names the tier. A saved 0 is a
+// rate; an estimate that saved none leaves the engine's. Records that disagree name no saving: the invoice keeps one
+// line by design. Null unless Silver, Gold or Platinum.
 function recordsTier(estimate, data, block, record) {
-  const words = [record.tier, estimate.waveguard_tier, block.waveGuardTier || block.tier].map(word).filter(Boolean);
+  const blockTier = word(block.waveGuardTier || block.tier);
+  const words = [record.tier, word(estimate.waveguard_tier), blockTier].filter(Boolean);
   const [tier] = words;
   if (!DISCOUNTED_TIERS.includes(tier) || words.some((w) => w !== tier)) return null;
-  const { tierDiscountForEstimate } = require('../routes/estimate-public');
-  // Fallback 0: the snapshot's rate or none, never today's tier table.
-  const savedRates = [tierDiscountForEstimate(data, `${tier[0].toUpperCase()}${tier.slice(1)}`, 0), Number(block.discount)];
-  return savedRates.some((rate) => rate > 0 && Math.abs(rate - record.rate) > 1e-9) ? null : tier;
+  const { snapshotTierDiscount } = require('../routes/estimate-public');
+  const blockRate = blockTier && block.discount != null && block.discount !== '' ? Number(block.discount) : null;
+  const saved = snapshotTierDiscount(data, `${tier[0].toUpperCase()}${tier.slice(1)}`) ?? blockRate;
+  return saved === null || Math.abs(saved - record.rate) <= 1e-9 ? tier : null;
+}
+
+// Whether the visit bills the tier's net on the line's list price. A row with its own per-visit net must bill that net,
+// and it must be the tier's net to the cent, as the invoice requires (completion-pricing.js tierPricedRow). Any other
+// row bills a share of its annual, so its saving may sit a few cents off the tier's share of the list price.
+function billsTierNet(row, { listCents, rate }, amountCents) {
+  if (!(amountCents < listCents)) return false;
+  const ownNet = cents(row.priceAfterDiscount);
+  if (ownNet !== null) return ownNet === amountCents && tierNets(listCents, rate).includes(amountCents);
+  return Math.abs(listCents - amountCents - Math.round(listCents * rate)) <= ROUNDING_CENTS;
 }
 
 const printsTier = (breakdown) => breakdown.discounts.some((row) => /^WaveGuard\b/.test(String(row.name || '')));
@@ -147,10 +163,7 @@ async function visitFinding(conn, visit) {
   const tier = record ? recordsTier(estimate, data, block, record) : null;
   // For discount_unnamed the visit bills the accepted per-visit price (acceptedVisitBreakdown checks it first).
   const amountCents = cents(breakdown ? breakdown.amount : visit.estimated_price);
-  if (!tier || amountCents === null) return null;
-  const savingCents = record.listCents - amountCents;
-  const tierCents = Math.round(record.listCents * record.rate);
-  if (!(savingCents > 0) || Math.abs(savingCents - tierCents) > ROUNDING_CENTS) return null;
+  if (!tier || amountCents === null || !billsTierNet(line, record, amountCents)) return null;
   return { visitId: String(visit.id), estimateId: String(estimate.id), serviceKey, tier };
 }
 
