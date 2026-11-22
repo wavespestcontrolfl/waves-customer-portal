@@ -46,6 +46,9 @@ function evalWith({
     email_enabled: true, marketing_offers: true, weather_alerts: true, referral_nudge: true, weather_alert_channel: 'email', referral_channel: 'email',
   },
   estimates, ledger = [], smsOutbound, smsInbound, callInbound, callOutbound, tables,
+  // The scheduled_services read of the completed-visit relationship. Not wired by default: a verdict that
+  // reads the table without a caller-named visit fails the test as an unexpected table.
+  visits,
 } = {}, args = {}) {
   db.mockImplementation((table) => {
     const map = tables || {
@@ -57,6 +60,7 @@ function evalWith({
       marketing_email_ledger: ledger,
       sms_log: [chain({ first: smsOutbound }), chain({ first: smsInbound })],
       call_log: [chain({ first: callInbound }), chain({ first: callOutbound })],
+      ...(visits ? { scheduled_services: visits } : {}),
     };
     const supply = map[table];
     if (!supply) throw new Error(`Unexpected db table ${table}`);
@@ -221,6 +225,38 @@ describe('email-division eligibility', () => {
   test('RELATIONSHIP_NOT_ELIGIBLE for nurture with no estimates on file', async () => {
     const r = await evalWith({}, { stream: 'nurture', marketingClass: 'marketing', emailKey: 'nur.tip1' });
     expect(r.reason).toBe(REASONS.RELATIONSHIP_NOT_ELIGIBLE);
+  });
+
+  // The plan offer after a one-time job asks for the verdict BEFORE it saves its estimate. If the missing
+  // estimate ended the verdict there, the caps and the human-contact check behind it would never be judged.
+  describe('nurture with no estimate yet: a completed visit of the same customer is the relationship', () => {
+    const OFFER = { stream: 'nurture', emailKey: 'nurture.plan_offer', completedVisitId: 'visit-1' };
+    const visitFound = () => chain({ first: { id: 'visit-1' } });
+
+    test('the visit is read for THIS customer in completed status, and the verdict is ok', async () => {
+      const visits = visitFound();
+      const r = await evalWith({ visits, ledger: [chain({ result: [] })] }, OFFER);
+      expect(r).toMatchObject({ ok: true, reason: null });
+      expect(visits.where).toHaveBeenCalledWith({ id: 'visit-1', customer_id: 'cust-1', status: 'completed' });
+    });
+
+    test("the caller's word alone widens nothing: no such visit row is RELATIONSHIP_NOT_ELIGIBLE", async () => {
+      const r = await evalWith({ visits: chain({ first: undefined }) }, OFFER);
+      expect(r).toMatchObject({ ok: false, reason: REASONS.RELATIONSHIP_NOT_ELIGIBLE });
+    });
+
+    test('the same-day cap and the human-contact check still run behind it', async () => {
+      const capped = await evalWith({ visits: visitFound(), ledger: [chain({ result: [{ sent_at: NOW.toISOString() }] })] }, OFFER);
+      expect(capped.reason).toBe(REASONS.CAP_SAME_DAY);
+      const contacted = await evalWith({ visits: visitFound(), ledger: [chain({ result: [] })], smsOutbound: { id: 'sms-1' } }, OFFER);
+      expect(contacted.reason).toBe(REASONS.RECENT_HUMAN_CONTACT);
+    });
+
+    test('an estimate on file is still the first answer: the visit table is not read', async () => {
+      // No scheduled_services table is wired here, so a read of it would end as LOOKUP_FAILED.
+      const r = await evalWith({ estimates: { id: 'est-1' }, ledger: [chain({ result: [] })] }, OFFER);
+      expect(r).toMatchObject({ ok: true, reason: null });
+    });
   });
 
   test.each([

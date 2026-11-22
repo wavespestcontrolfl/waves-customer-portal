@@ -1280,7 +1280,7 @@ async function evaluateServiceForRun(service, run) {
     // gate is off — candidate-slots then runs its legacy window math).
     ...(guard.window ? { tierWindow: guard.window, tierMeta: guard.meta } : {}),
   };
-  // At most N automatic moves per visit: decided before any candidate search.
+  // At most N automatic day moves per visit: decided before any candidate search.
   const limited = await moveLimitGate(service, ctx, run, run.moveCounts);
   if (limited) return logSkip(run, service, limited);
 

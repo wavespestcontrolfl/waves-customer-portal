@@ -15,7 +15,7 @@ const {
   drawFieldFooter,
   drawFieldMasthead,
 } = require('./field-pdf');
-const { groupInvoiceLinesByProperty, propertyStreetLine } = require('@waves/invoice-property-groups');
+const { groupInvoiceLinesByProperty, invoiceDiscountRows, propertyStreetLine } = require('@waves/invoice-property-groups');
 const { invoiceAmountDue } = require('../invoice-helpers');
 const { customerVisibleInvoiceNotes } = require('../invoice-notes');
 const {
@@ -349,7 +349,8 @@ function invoiceTotalsFacts(invoice, customer = null) {
   return {
     subtotal,
     discount,
-    discountLabel: invoice.discount_label || 'Discount',
+    // Each discount its own row; one combined row when they cannot be told apart (@waves/invoice-property-groups).
+    discountRows: invoiceDiscountRows(invoice.line_items, discount, invoice.discount_label),
     tax,
     showTax: tax > 0 && isCommercial,
     taxLabel: `Tax (${(Number(invoice.tax_rate || 0) * 100).toFixed(2)}%)`,
@@ -368,7 +369,7 @@ function invoiceBreakdownRows(invoice, customer = null) {
   const f = invoiceTotalsFacts(invoice, customer);
   return [
     ['Subtotal', currency(f.subtotal)],
-    f.discount > 0 ? [f.discountLabel, `− ${currency(f.discount)}`] : null,
+    ...f.discountRows.map((row) => [row.label, `− ${currency(row.amount)}`]),
     f.showTax ? [f.taxLabel, currency(f.tax)] : null,
     f.depositCredit > 0 ? ['Deposit paid at acceptance', `− ${currency(f.depositCredit)}`] : null,
     ['Total', currency(f.total)],
@@ -378,11 +379,17 @@ function invoiceBreakdownRows(invoice, customer = null) {
   ].filter(Boolean).map(([label, value]) => `${label}: ${value}`);
 }
 
+// totalsBlock prints each totals row this tall. A grouped table reserves the block's usual height; a receipt's surcharge row
+// and every discount row past the first are extra.
+const TOTALS_ROW_HEIGHT = 14;
+function extraDiscountRowsHeight(invoice, customer) {
+  return Math.max(0, invoiceTotalsFacts(invoice, customer).discountRows.length - 1) * TOTALS_ROW_HEIGHT;
+}
+
 // A receipt's credit card surcharge row (Visa Core Rules: shown separately on the front of the receipt, same type and size as the
 // other wording), from the payment row's OWN surcharge: a combined payment stamps it on the anchor invoice only, so a sibling's 0
 // prints no row. The label matches the web receipt. includedInTotal: the single-invoice pay paths store the surcharged cash on
 // invoice.total; a combined payment leaves total at the base, so the receipt's TOTAL adds the surcharge back to reconcile.
-const SURCHARGE_ROW_HEIGHT = 14;
 function receiptSurchargeFacts(payment) {
   const cents = Math.round(Number(payment?.surcharge_amount_cents) || 0);
   if (!(cents > 0)) return null;
@@ -404,13 +411,17 @@ function invoiceWithSurchargedTotal(invoice, surcharge) {
   return { ...invoice, total: Math.round((Number(invoice.total || 0) + surcharge.amount) * 100) / 100 };
 }
 
+// PDFKit's built-in Helvetica has no U+2212 minus sign (it printed as a quote mark: `" $11.00`), so the PDF writes a
+// hyphen before a deduction, as its grouped table always has. The send card's text keeps the minus sign.
+const deduction = (amount) => `- ${currency(amount)}`;
+
 // The rows above the rule and TOTAL, in print order; a receipt's surcharge row sits last, just before the total.
 function totalsRowsAboveTotal(facts, surcharge) {
   return [
     ['Subtotal', currency(facts.subtotal)],
-    facts.discount > 0 ? [facts.discountLabel, `− ${currency(facts.discount)}`] : null,
+    ...facts.discountRows.map((row) => [row.label, deduction(row.amount)]),
     facts.showTax ? [facts.taxLabel, currency(facts.tax)] : null,
-    facts.depositCredit > 0 ? ['Deposit paid at acceptance', `− ${currency(facts.depositCredit)}`] : null,
+    facts.depositCredit > 0 ? ['Deposit paid at acceptance', deduction(facts.depositCredit)] : null,
     surcharge ? [surcharge.label, currency(surcharge.amount)] : null,
   ].filter(Boolean);
 }
@@ -433,7 +444,7 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
     doc.fontSize(PDF_TYPE.body).font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(color);
     doc.text(label, labelX, y, { width: 160, align: 'right' });
     doc.text(value, valueX, y, { width: 70, align: 'right' });
-    y += 14;
+    y += TOTALS_ROW_HEIGHT;
   };
 
   for (const [label, value] of totalsRowsAboveTotal(facts, opts.surcharge)) row(label, value);
@@ -458,8 +469,8 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
   // (paid/refunded rows) keep their credit-only rows.
   const creditApplied = facts.creditApplied;
   const amountPaid = partPayments ? facts.amountPaid : 0;
-  if (creditApplied > 0) row('Account credit applied', `− ${currency(creditApplied)}`);
-  if (amountPaid > 0) row('Paid so far', `− ${currency(amountPaid)}`);
+  if (creditApplied > 0) row('Account credit applied', deduction(creditApplied));
+  if (amountPaid > 0) row('Paid so far', deduction(amountPaid));
   if (creditApplied > 0 || amountPaid > 0) {
     row('Amount due', currency(partPayments ? facts.amountDue : Math.max(0, total - creditApplied)), NAVY, true);
   }
@@ -470,7 +481,7 @@ function totalsBlock(doc, invoice, x, y, width, opts = {}) {
     // credit-applied invoice, and a full refund zeroes credit_applied so amount
     // due can't be reconstructed from the invoice here.
     const netBasis = cashPaid > 0 ? cashPaid : total;
-    row('Refunded', `− ${currency(refundAmount)}`, RED, true);
+    row('Refunded', deduction(refundAmount), RED, true);
     row('Net paid', currency(Math.max(0, netBasis - refundAmount)), NAVY, true);
   }
   doc.restore();
@@ -600,7 +611,7 @@ function generateInvoicePDF(invoice, res) {
 
   let y = Math.max(yLeft, yRight) + 16;
   y = annualPrepayCallout(doc, invoice.annual_prepay, L, y, W);
-  y = lineItemsTable(doc, invoice.line_items, L, y, W);
+  y = lineItemsTable(doc, invoice.line_items, L, y, W, extraDiscountRowsHeight(invoice, customer));
   y = totalsBlock(doc, invoice, L, y + 8, W, { highlightTotal: true, paidStamp: isPaid, customer, partPayments: true });
   if (!isSettled) y = previousBalanceBlock(doc, invoice.previous_balance, L, y, W);
 
@@ -648,7 +659,8 @@ function generateReceiptPDF(invoice, payment, res) {
 
   let y = Math.max(yLeft, yRight) + 16;
   const surcharge = receiptSurchargeFacts(payment);
-  y = lineItemsTable(doc, invoice.line_items, L, y, W, surcharge ? SURCHARGE_ROW_HEIGHT : 0);
+  y = lineItemsTable(doc, invoice.line_items, L, y, W,
+    (surcharge ? TOTALS_ROW_HEIGHT : 0) + extraDiscountRowsHeight(invoice, customer));
   y = totalsBlock(doc, invoiceWithSurchargedTotal(invoice, surcharge), L, y + 8, W, {
     highlightTotal: true,
     paidStamp: !refundAmount,

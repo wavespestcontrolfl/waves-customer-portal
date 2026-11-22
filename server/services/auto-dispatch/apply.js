@@ -356,7 +356,7 @@ function makeMoveGuard({ service, best, config = {} }) {
     if (row.customer_confirmed === true) {
       throw refuse(row.id, 'was confirmed by the customer');
     }
-    // At most N automatic moves per visit, counted on this transaction so a
+    // At most N automatic day moves per visit, counted on this transaction so a
     // move another run landed minutes ago is seen (move-limit.js).
     await moveLimit.assertUnderLimit(trx, [row], config, refuse);
     // GATE_AUTO_DISPATCH_PROOFREADER: what the approval stood on still stands.

@@ -163,12 +163,33 @@ function readsBuilder() {
 function pointsBuilder() {
   const q = {};
   let key = null;
-  q.where = jest.fn((w) => { key = w.estimate_id; return q; });
+  // A send's write names only a copy that no later handoff wrote (`delivered_at <= ?`); the upsert carries the same test.
+  let notAfter = null;
+  const newer = (id, at) => id in store && at != null && new Date(store[id].delivered_at) > new Date(at);
+  q.where = jest.fn((...args) => {
+    if (args.length === 1) key = args[0].estimate_id;
+    else [, , notAfter] = args;
+    return q;
+  });
   q.first = jest.fn(async () => store[key]);
-  q.del = jest.fn(async () => { if (failOn === 'write') throw new Error('write down'); const had = key in store; delete store[key]; return had ? 1 : 0; });
+  q.del = jest.fn(async () => {
+    if (failOn === 'write') throw new Error('write down');
+    const had = key in store && !newer(key, notAfter);
+    if (had) delete store[key];
+    return had ? 1 : 0;
+  });
   q.insert = jest.fn((rec) => ({
     onConflict: () => ({
-      merge: async () => { if (failOn === 'write') throw new Error('write down'); store[rec.estimate_id] = { ...rec, snapshot: JSON.parse(rec.snapshot) }; },
+      merge: () => ({
+        where: (_column, _op, at) => ({
+          returning: async () => {
+            if (failOn === 'write') throw new Error('write down');
+            if (newer(rec.estimate_id, at)) return [];
+            store[rec.estimate_id] = { ...rec, snapshot: JSON.parse(rec.snapshot) };
+            return [{ estimate_id: rec.estimate_id }];
+          },
+        }),
+      }),
     }),
   }));
   return q;

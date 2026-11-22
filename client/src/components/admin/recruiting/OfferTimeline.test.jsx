@@ -247,6 +247,22 @@ describe("OfferTimeline", () => {
       expect(screen.queryByRole("button", { name: /^(Mark done|Undo):/ })).toBeNull();
     });
 
+    it("shows an open item's note (what to do), and not once the item is done", () => {
+      const login = (over) => ({
+        key: "google_login", label: "Waves Google login", note: "On the Team tab, link the Waves Google address, and press Hired if the row shows it.",
+        due: "Due before the first day, Mon, Jan 4, 2027", doneAt: null, doneByName: null, ...over,
+      });
+      const { rerender } = render(card({ offer: signed(), firstDays: firstDays({ items: [login(), ...firstDays().items] }) }));
+      const row = () => within(rowOf("Waves Google login"));
+      expect(row().getByText("Due before the first day, Mon, Jan 4, 2027")).toBeInTheDocument();
+      expect(row().getByText("On the Team tab, link the Waves Google address, and press Hired if the row shows it.")).toBeInTheDocument();
+      expect(row().getByRole("button", { name: "Mark done: Waves Google login" })).toBeInTheDocument();
+
+      rerender(card({ offer: signed(), firstDays: firstDays({ items: [login({ doneAt: "2026-12-20T15:00:00Z", doneByName: "Sam Carter" }), ...firstDays().items] }) }));
+      expect(row().getByText(/^Done .*Dec 20.* by Sam Carter$/)).toBeInTheDocument();
+      expect(row().queryByText(/On the Team tab/)).toBeNull();
+    });
+
     it("shows no checklist when the read has none", () => {
       render(card({ offer: signed(), firstDays: null }));
       expect(screen.queryByTestId("offer-first-days")).toBeNull();

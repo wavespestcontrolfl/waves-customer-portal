@@ -1953,12 +1953,18 @@ jest.setTimeout(120000);
           return offer;
         }
 
+        // The checklist has four items while staff Google sign-in is off: these tests run that way whatever the
+        // environment holds, and the nested suite at the end turns it on.
+        let signinGate;
+        beforeAll(() => { signinGate = process.env.GATE_STAFF_GOOGLE_SIGNIN; process.env.GATE_STAFF_GOOGLE_SIGNIN = 'false'; });
+        afterAll(() => { if (signinGate === undefined) delete process.env.GATE_STAFF_GOOGLE_SIGNIN; else process.env.GATE_STAFF_GOOGLE_SIGNIN = signinGate; });
+
         beforeEach(async () => {
           // The suite keeps its rows (one root transaction): the hires of earlier tests are not this test's. Their
           // items are done and their bells are closed. Only rows of the suite's own applications are written.
           const mark = { at: '2026-01-01T00:00:00.000Z' };
           await root('job_offers').whereIn('application_id', suiteApplications).where({ status: 'accepted' }).update({
-            checklist: root.raw('checklist || ?::jsonb', [JSON.stringify({ driving_record: mark, license: mark, workers_comp: mark, i9: mark })]),
+            checklist: root.raw('checklist || ?::jsonb', [JSON.stringify({ driving_record: mark, license: mark, workers_comp: mark, i9: mark, google_login: mark })]),
           });
           // The bell rows are real (the alert writer's own rules decide a ring, a rewrite and a close).
           await root('notifications').whereRaw("metadata->>'dedupeKey' = ANY(?::text[])", [suiteApplications.map((id) => `job-offer-checklist:${id}`)])
@@ -2309,6 +2315,73 @@ jest.setTimeout(120000);
           // The time is read once for the hire, after its locks: a run that started before midnight follows the new day.
           expect(clockReadsAtLock).toBe(0);
           expect(clock).toHaveBeenCalledTimes(1);
+        });
+
+        // The hire's login (owner 2026-11-22 "press"): the item is in the checklist while staff Google sign-in is live.
+        describe('with staff Google sign-in live: the Waves Google login item', () => {
+          const GOOGLE = { GATE_STAFF_GOOGLE_SIGNIN: 'true', GOOGLE_STAFF_SIGNIN_CLIENT_ID: 'fixture-client', GOOGLE_STAFF_SIGNIN_CLIENT_SECRET: 'fixture-secret' };
+          const saved = {};
+          beforeEach(() => {
+            for (const [name, value] of Object.entries(GOOGLE)) { saved[name] = process.env[name]; process.env[name] = value; }
+          });
+          afterEach(() => {
+            for (const name of Object.keys(GOOGLE)) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
+          });
+
+          test('the item comes first and is marked by hand; with sign-in off the checklist has four items and keeps the mark', async () => {
+            const made = await hire();
+            const keys = async () => (await checklistOf(made.app)).items.map((item) => item.key);
+            expect(await keys()).toEqual(['google_login', 'driving_record', 'license', 'workers_comp', 'i9']);
+            expect((await checklistOf(made.app)).items[0]).toEqual({
+              key: 'google_login', label: 'Waves Google login', note: 'On the Team tab, link the Waves Google address, and press Hired if the row shows it.',
+              due: `Due before the first day, ${JobOffers.fmtDay(made.firstDay, { year: true })}`, dueOn: made.firstDay, doneAt: null, doneByName: null,
+            });
+            const when = new Date('2026-12-01T15:00:00.000Z');
+            const { firstDays } = await mark(made, 'google_login', true, when);
+            expect(firstDays.items[0]).toMatchObject({ key: 'google_login', doneAt: when.toISOString(), doneByName: 'Test Owner' });
+            const row = await offerRow(made.offer.id);
+            expect(row.checklist.google_login).toEqual({ at: when.toISOString(), by: owner.id, by_name: 'Test Owner' });
+            expect(JobOffers.timelineOf(row)).toContainEqual({ at: when.toISOString(), kind: 'checklist_done', label: 'Waves Google login marked done by Test Owner' });
+
+            // Sign-in off: four items, the login item takes no mark, and a mark of another item keeps the stored one.
+            process.env.GATE_STAFF_GOOGLE_SIGNIN = 'false';
+            expect(await keys()).toEqual(['driving_record', 'license', 'workers_comp', 'i9']);
+            await expect(mark(made, 'google_login')).rejects.toMatchObject({ status: 400, code: 'INVALID_CHECKLIST_ITEM' });
+            await mark(made, 'license');
+            expect((await offerRow(made.offer.id)).checklist.google_login.at).toBe(when.toISOString());
+            process.env.GATE_STAFF_GOOGLE_SIGNIN = 'true';
+            expect((await checklistOf(made.app)).items.map((item) => Boolean(item.doneAt))).toEqual([true, false, true, false, false]);
+            // An undo, as for the other items.
+            await mark(made, 'google_login', false);
+            expect((await offerRow(made.offer.id)).checklist.google_login).toBeUndefined();
+          });
+
+          test('the bell names the login first, finds a hire whose other items are all done, and the mark closes it', async () => {
+            const fresh = await hire();
+            const made = await hire();
+            const before = JobOffers.fmtDay(made.firstDay);
+            // The four other items are done before any bell: the run still finds this hire, for the login alone.
+            const stamp = { at: '2026-01-01T00:00:00.000Z' };
+            await root('job_offers').where({ id: made.offer.id })
+              .update({ checklist: root.raw('checklist || ?::jsonb', [JSON.stringify({ driving_record: stamp, license: stamp, workers_comp: stamp, i9: stamp })]) });
+            expect(await ring(morning(1))).toEqual({ ...NONE, rung: 2 });
+            const [first] = await bellsOf(fresh.app.id);
+            expect(first).toMatchObject({ done_at: null, body: `5 of 5 items are open; next: the Waves Google login on the Team tab, due before ${before}.` });
+            expect(first.metadata.itemKeys).toEqual(['driving_record', 'google_login', 'license', 'workers_comp']);
+            const [row] = await bellsOf(made.app.id);
+            expect(row).toMatchObject({ done_at: null, body: `1 of 5 items is open; next: the Waves Google login on the Team tab, due before ${before}.` });
+            expect(row.metadata.itemKeys).toEqual(['google_login']);
+
+            // The owner marks it done: nothing is left, and the row closes with the mark.
+            await mark(made, 'google_login', true, morning(1, '09:00')());
+            expect(await bellsOf(made.app.id)).toMatchObject([{ id: row.id, resolution: 'Every first-days item is marked done' }]);
+            expect(await ring(morning(1, '09:15'))).toEqual(NONE);
+
+            // The first day comes with the login still open: the row rings again, and its longest words fit the alert.
+            expect(await ring(at(fresh.firstDay, '07:00'))).toEqual({ ...NONE, rung: 1 });
+            expect(await openBellsOf(fresh.app.id)).toMatchObject([{
+              id: first.id, body: `5 of 5 items are open; next: the Waves Google login on the Team tab, was due before ${before}.` }]);
+          });
         });
       });
     });
