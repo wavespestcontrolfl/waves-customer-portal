@@ -106,6 +106,7 @@ const ALSO_WRITTEN = new Map(Object.entries({
   cust: ['customer', 'you', 'your'], customer: ['you', 'your'], homeowner: ['you'], client: ['you'], tenant: ['you'],
   she: ['you'], he: ['you'], they: ['you'], them: ['you'], her: ['you', 'your'], his: ['your'], their: ['your'],
   has: ['have'], does: ['do'], wants: ['want'], needs: ['need'], thinks: ['think'], sees: ['see'], says: ['say', 'said'],
+  was: ['were'], is: ['are'],
   ext: ['exterior', 'outside'], int: ['interior', 'inside'], perim: ['perimeter'],
   roach: ['cockroach'], roaches: ['cockroaches'], cockroach: ['roach'], cockroaches: ['roaches'],
   bath: ['bathroom'], baths: ['bathrooms'], fridge: ['refrigerator'],
@@ -117,8 +118,8 @@ const NUMBER_TWINS = new Map(NUMBER_WORDS.flatMap((word, n) => [[word, String(n)
 // been" as "she has been", "I'd" as "I would" (never dropped: "I'd treat" is
 // not "I treated"), "1,200" as 1200, split on anything that is not a letter
 // or a digit. A mark on a number stays in the word: "1.5" is not 15, "1/2"
-// is not "1-2", "≤5" and "5%" are not 5, and 5' (feet) is not 5" (inches),
-// with a straight mark, a curly one or a prime. So does the 's of a word that
+// is not "1-2", "≤5", "5%" and "5 %" are not 5, "1½" is not "11/2", and 5'
+// (feet) is not 5" (inches), with a straight mark, a curly one or a prime. So does the 's of a word that
 // is no pronoun: "the customer's neighbor" is not "the customer and neighbor".
 const markWord = (mark) => `mark${mark.codePointAt(0)}mark`;
 const OWNER_FORM = `${markWord("'")}s`;
@@ -127,6 +128,12 @@ const ownerForm = (word) => `${word}${OWNER_FORM}`;
 const personOf = (word) => (word.endsWith(OWNER_FORM) ? word.slice(0, -OWNER_FORM.length) : word);
 CUSTOMER.forEach((word) => ALSO_WRITTEN.set(ownerForm(word), ['your', ownerForm('customer')]));
 const numberMark = (_, digit, mark) => `${digit}${mark === '.' ? 'point' : markWord(mark)}`;
+// A text with its letter forms made one, before anything is read: a
+// full-width "？" is a question mark, a prime is a foot mark, "½" is 1/2.
+// A fraction sign after a digit stays on it first: "1½" is not "11/2".
+const FRACTION_ON_DIGIT = /(\p{Nd})\s?([\u00BC-\u00BE\u2150-\u215E])/gu;
+const plain = (text) => String(text || '').replace(FRACTION_ON_DIGIT, (_, digit, mark) => `${digit}${markWord(mark)}`)
+  .replace(/[″“”]/g, '"').replace(/′/g, "'").normalize('NFKC').replace(/\u2044/g, '/').replace(/\u3002/g, '.');
 const SIGN_BEFORE_NUMBER = /([<>≤≥≈~±+=#$]+)\s*(-?)(?=\p{N})|(^|[^\p{L}\p{N}])(-)(?=\p{N})/gu;
 // Every sign of a run stays: "<=5" is not ">=5".
 const signWords = (_, run, runMinus, lead, minus) => (run ? [...run, ...runMinus].map(markWord).join('') : `${lead}${markWord(minus)}`);
@@ -134,12 +141,11 @@ const signWords = (_, run, runMinus, lead, minus) => (run ? [...run, ...runMinus
 // the figure as 5.
 const leadingZero = (text) => String(text || '').replace(/(^|[^\p{L}\p{N}.])\.(?=\p{N})/gu, '$10.');
 function noteWords(text) {
-  return leadingZero(text).replace(/[″“”]/g, '"').replace(/′/g, "'")
-    .normalize('NFKC').toLowerCase().replace(/[‘’]/g, "'").replace(/[\u2010-\u2015\u2212]/g, '-')
+  return leadingZero(plain(text)).toLowerCase().replace(/[‘’]/g, "'").replace(/[\u2010-\u2015\u2212]/g, '-')
     .replace(/(\p{N}),(?=\p{N}{3}(?!\p{N}))/gu, '$1').replace(/(\p{N})\s*([/-])\s*(?=\p{N})/gu, '$1$2')
     .replace(/(\p{N})([^\p{L}\p{N}\s])(?=\p{N})/gu, numberMark)
     .replace(SIGN_BEFORE_NUMBER, signWords)
-    .replace(/(\p{N})([+%°'"])/gu, (_, digit, mark) => `${digit}${markWord(mark)}`)
+    .replace(/(\p{N})\s+(?=%)/gu, '$1').replace(/(\p{N})([+%°'"])/gu, (_, digit, mark) => `${digit}${markWord(mark)}`)
     .replace(/\bcan't\b|\bcannot\b/g, 'can not').replace(/\bwon't\b/g, 'will not').replace(/n't\b/g, ' not')
     .replace(/'ll\b/g, ' will').replace(/'d\b/g, ' would')
     .replace(/\b(she|he|it|that|there|what|who|where|here)'s (been|got)\b/g, '$1 has $2')
@@ -167,7 +173,7 @@ const showNumberMarks = (piece) => piece.replace(/\u0001/g, '.').replace(/\u0002
 
 // The sentences of a text, each with whether it asks ("?").
 function sentencesOf(text) {
-  const pieces = hideNumberMarks(text).split(/([.;!?\n]+)/);
+  const pieces = hideNumberMarks(plain(text)).split(/([.;!?\n]+)/);
   return pieces.filter((_, i) => i % 2 === 0)
     .map((piece, i) => ({ text: showNumberMarks(piece), asks: (pieces[2 * i + 1] || '').includes('?') }));
 }
@@ -221,7 +227,18 @@ function leaveOutRules({ words, parts }, { wordGoes, pairGoes, partGoes, names }
     if (LEAD_INS.has(word) && samePart(i, next) && named[next]) leans.set(i, next);
     else if (word === 'of' && samePart(i, i - 1) && named[i - 1]) leans.set(i, i - 1);
   });
-  const single = note.map((word, i) => named[i] || (!NEVER_LEFT_OUT.has(word) && SMALL.has(word)));
+  // A form of "is" between a person and a word of treatment says who was
+  // treated, so it stays: "customer was sprayed outside" is not "You sprayed
+  // outside".
+  const saysWhoWasTreated = (i) => {
+    const near = (step) => {
+      let j = i + step;
+      while (samePart(i, j) && SMALL.has(note[j])) j += step;
+      return samePart(i, j) ? note[j] : '';
+    };
+    return FORMS_OF_IS.has(note[i]) && TREATMENTS.has(near(1)) && isActor(near(-1));
+  };
+  const single = note.map((word, i) => named[i] || (!NEVER_LEFT_OUT.has(word) && SMALL.has(word) && !saysWhoWasTreated(i)));
   const [whole, conditional] = [new Set(), new Set()];
   parts.forEach((raw, id) => {
     const partWords = words.filter((entry) => entry.part === id).map((entry) => entry.word);
@@ -298,16 +315,18 @@ function addedActorRefused(added, place, read, sameSentence) {
 // The small word the text added between the word the walk found last
 // (`last`) and the note's word at `place`, and the note does not bear out:
 // its place in the text, or -1.
-//   - "and" between two words of the note that stand side by side and both
-//     say an action done. The second may be what the first was done to:
-//     "inspected damaged traps" is not "I inspected and damaged traps".
+//   - "and" between two words of the note that stand side by side (a small
+//     word between them or none) and both say an action done. The second
+//     may be what the first was done to: "inspected damaged traps" is not
+//     "I inspected and damaged traps".
 //   - a form of "is" between a person and a word of treatment (TREATMENTS).
 function addedSmallRefused(textWords, k, place, last, read) {
   if (!last) return -1;
   const added = (words) => textWords.findIndex((entry, at) => at > last.k && at < k && words.has(entry.word));
   const [before, here] = [read.words[last.place], read.words[place]];
   const done = (word) => word.endsWith('ed') && !NOT_DONE.has(word);
-  if (last.place === place - 1 && before.part === here.part && done(before.word) && done(here.word) && added(AND) >= 0) return added(AND);
+  const sideBySide = read.words.slice(last.place + 1, place).every((entry) => SMALL.has(entry.word));
+  if (sideBySide && before.part === here.part && done(before.word) && done(here.word) && added(AND) >= 0) return added(AND);
   const named = read.words.slice(0, place).filter((entry) => entry.part === here.part && !SMALL.has(entry.word)).pop();
   return TREATMENTS.has(here.word) && named && isActor(named.word) ? added(FORMS_OF_IS) : -1;
 }

@@ -902,6 +902,7 @@ module.exports = {
   containsReportAccessCode,
   customerCopyViolations,
   heldAccessCode,
+  CODE_SHAPED_NUMBER_RE,
   noteRecordCopyViolations,
   summaryCopySignature,
   renderWriterRulesState,
