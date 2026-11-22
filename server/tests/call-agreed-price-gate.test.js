@@ -346,7 +346,7 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
   const at = source.indexOf('const priceInfo = resolveCallBookingPrice({');
   const call = source.slice(at, source.indexOf('});', at));
   const count = (text) => source.split(text).length - 1;
-  const held = 'const agreedJobHeldForOffice = agreedJobAtAdoption\n              && (agreedServiceFields.length > 0 || agreedJobHoldChangesService(extracted, transcription, bookableServiceNames));';
+  const held = 'const agreedJobHeldForOffice = agreedJobAtAdoption\n              && (agreedServiceFields.length > 0 || agreedJobRewriteHeld || agreedJobHoldChangesService(extracted, transcription, bookableServiceNames));';
   const txAt = source.indexOf('const svc = await db.transaction(async (trx) => {');
   const guard = "if (agreedJobHeldForOffice) {\n                  return { __held: { reason: 'agreed_one_time_job_office_books' } };\n                }";
 
@@ -392,19 +392,27 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
   // a call verdict never closes it, and every action on it is version-checked (admin-triage.js). The pre-push
   // audit asked a new card reason for each of these; the existing card already has them.
   test('the held booking files the approved-but-unbooked card with its price, its basis and the promised follow-up', () => {
-    const site = "if (svc.__held.reason === 'agreed_one_time_job_office_books') {\n                  await fileSkippedBookingCard({";
+    const site = "if (svc.__held.reason === 'agreed_one_time_job_office_books') {\n                  agreedJobCardEvidence = {";
     expect(count(site)).toBe(1);
     const call = source.slice(source.indexOf(site), source.indexOf("} else if (svc.__held.reason !== 'on_file_house_number_conflict') await db('triage_items')"));
     expect(call).toContain("skippedReason: 'agreed_one_time_job_office_books', preferredDateTime: extracted.preferred_date_time,");
     // A refresh with no price clears an older price: the keys are always written.
     expect(call).toContain('stated_one_time_price: agreedJobCardPrice ? agreedJobCardPrice.amount : null,');
     expect(call).toContain('stated_one_time_price_basis: agreedJobCardPrice ? agreedJobCardPrice.basis : null,');
-    expect(call).toContain('? { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null }');
+    expect(call).toContain('? { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null,');
+    // A follow-up time the call did not set is a suggestion on the card, not a promise.
+    expect(call).toContain('suggested: callFollowUpPlan.hourStated !== true || callFollowUpPlan.packageOnly === true }');
+    expect(call).toContain('agreedJobCardFiled = await fileSkippedBookingCard({');
+    expect(call).toContain('extraPayload: agreedJobCardEvidence,');
     // The card writer: the skip's own evidence first, so it can never replace a shared field.
     const writer = source.slice(source.indexOf('async function fileSkippedBookingCard('), source.indexOf('function agreedOneTimeJobCardPrice('));
     expect(writer).toContain("extraPayload: {\n            ...(extraPayload && typeof extraPayload === 'object' ? extraPayload : {}),\n            skipped_reason: skippedReason,");
     expect(writer).toContain("flag: 'auto_booking_skipped_after_approval',");
     expect(writer).toContain('.merge({');
+    // It says whether this pass wrote the card.
+    expect(writer).toContain('if (!filed) return false;');
+    expect(writer).toContain("bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval');\n    return true;\n  } catch (e) {");
+    expect(writer).toContain("bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval');\n    return false;\n  }\n}");
     // The protections the card relies on.
     const triage = require('fs').readFileSync(require.resolve('../routes/admin-triage'), 'utf8');
     expect(triage).toMatch(/const VERSION_BOUND_REASONS = \[[^\]]*'auto_booking_skipped_after_approval'/);
@@ -414,14 +422,16 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(JSON.parse(card.payload).scheduling_window).toEqual(expect.objectContaining({ confirmed_start_at: '2026-11-21T17:00:00-05:00' }));
   });
 
-  // The approved-but-unbooked fallback writes the same card (one reason code), so it is not skipped for this
-  // hold: it refreshes the card, and a failed first write still leaves the call one card.
-  test('the fallback is not skipped for this hold', () => {
+  // The approved-but-unbooked fallback writes the same card (one reason code). One write per pass: the
+  // fallback runs only after a failed write, and then with the card's full evidence.
+  test('the fallback writes the card only after a failed write, with the same evidence', () => {
     const heldReasons = source.match(/const heldReasons = new Set\(\[[^\]]*\]\);/);
     expect(heldReasons).not.toBeNull();
     expect(heldReasons[0]).not.toContain('agreed_one_time_job_office_books');
-    expect(source).not.toContain("heldReasons.add('agreed_one_time_job_office_books')");
-    expect(source).not.toContain('agreedJobCardFiled');
+    expect(count("if (agreedJobCardFiled) heldReasons.add('agreed_one_time_job_office_books');")).toBe(1);
+    expect(count('agreedJobCardFiled = ')).toBe(2); // false at the start, the writer's answer
+    const fallback = source.slice(source.indexOf('const heldReasons = new Set('));
+    expect(fallback).toContain("...(skipReason === 'agreed_one_time_job_office_books' && agreedJobCardEvidence ? agreedJobCardEvidence : {}),\n                  skipped_reason: String(skipReason).slice(0, 300),");
     const { buildTriageItem } = require('../services/call-routing-gates');
     // No card reason of its own.
     expect(buildTriageItem({ callLogId: 1, flag: 'agreed_one_time_job_office_books', extraction: {} }).category).toBe('service_unknown');

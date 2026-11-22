@@ -1571,6 +1571,15 @@ describe('ConfirmEvidence — agreed one-time job the AI did not book', () => {
     expect(screen.getByText('Staff said:')).toBeInTheDocument();
     expect(screen.getByText(/\$250\.00 one-time\. Check the terms on the call/)).toBeInTheDocument();
   });
+  it('shows a follow-up the call did not set as a suggestion, and a set one as promised', () => {
+    render(<ConfirmEvidence reasonCode="auto_booking_skipped_after_approval" payload={{ ...payload, follow_up_plan: { scheduled_date: '2026-12-05', window_start: '17:00', suggested: true } }} />);
+    expect(screen.getByText('Suggested follow-up:')).toBeInTheDocument();
+    expect(screen.getByText(/Visit 2 around 2026-12-05 at 17:00\. The call did not set this time/)).toBeInTheDocument();
+    expect(screen.queryByText('Promised follow-up:')).not.toBeInTheDocument();
+    cleanup();
+    render(<ConfirmEvidence reasonCode="auto_booking_skipped_after_approval" payload={{ ...payload, follow_up_plan: { scheduled_date: '2026-12-05', window_start: '10:00', suggested: false } }} />);
+    expect(screen.getByText('Promised follow-up:')).toBeInTheDocument();
+  });
   it('labels a total the caller accepted as agreed, without asking staff to change it', () => {
     render(<ConfirmEvidence reasonCode="auto_booking_skipped_after_approval" payload={{ ...payload, stated_one_time_price_basis: 'agreed_total' }} />);
     expect(screen.getByText('Agreed price:')).toBeInTheDocument();

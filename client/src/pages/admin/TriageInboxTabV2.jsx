@@ -279,10 +279,17 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
       : "Accept = the address on file is correct. Accept judges the WHOLE call — every other open card on it resolves too, so review those first. If the caller's number is right, edit the customer's address to it; the card closes once the record matches." },
     // A promised follow-up (visit 2) the dispute hold kept from being
     // booked with the primary — book both, not just the recovered primary.
-    p.follow_up_plan && (p.follow_up_plan.scheduled_date || p.follow_up_plan.window_start) && {
-      label: "Promised follow-up",
-      value: `Visit 2 was promised${p.follow_up_plan.scheduled_date ? ` for ${String(p.follow_up_plan.scheduled_date).slice(0, 10)}` : ""}${p.follow_up_plan.window_start ? ` at ${String(p.follow_up_plan.window_start).slice(0, 5)}` : ""} — book it with the primary appointment.`,
-    },
+    p.follow_up_plan && (p.follow_up_plan.scheduled_date || p.follow_up_plan.window_start) && (p.follow_up_plan.suggested === true
+      // GATE_CALL_AGREED_ONE_TIME_JOB: the call did not set this visit's time (the catalog interval, visit 1's
+      // hour, or a two-treatment package), so it is a suggestion to confirm, not a promise.
+      ? {
+        label: "Suggested follow-up",
+        value: `Visit 2${p.follow_up_plan.scheduled_date ? ` around ${String(p.follow_up_plan.scheduled_date).slice(0, 10)}` : ""}${p.follow_up_plan.window_start ? ` at ${String(p.follow_up_plan.window_start).slice(0, 5)}` : ""}. The call did not set this time: confirm it with the customer before you book it.`,
+      }
+      : {
+        label: "Promised follow-up",
+        value: `Visit 2 was promised${p.follow_up_plan.scheduled_date ? ` for ${String(p.follow_up_plan.scheduled_date).slice(0, 10)}` : ""}${p.follow_up_plan.window_start ? ` at ${String(p.follow_up_plan.window_start).slice(0, 5)}` : ""} — book it with the primary appointment.`,
+      }),
     // Street-level address hold: the visit is booked pending on the address the
     // lead typed into their web form (Google matched only the street). It is
     // settled by the visit itself, so the card shows what to confirm and where.

@@ -1958,9 +1958,12 @@ function callEmailCheckCardPayload(callEmailCheck) {
 // awaited from inside the caller's own db.transaction (this opens its own).
 // `extraPayload`: the skip's own evidence, merged under the shared fields (the
 // agreed one-time job's price and promised follow-up, for one).
+// Returns true when this pass wrote the card (false: a superseded worker, or a
+// failed write).
 async function fileSkippedBookingCard({ call, procToken, customerId, extraction, skippedReason, preferredDateTime, serviceType, bridgeNeedsConfirmation, callSid, extraPayload = null }) {
+  let filed = false;
   try {
-    const filed = await db.transaction(async (ttrx) => {
+    filed = await db.transaction(async (ttrx) => {
       await lockTriageCall(ttrx, call.id);
       // A superseded worker leaves the current task untouched (codex r38 P1).
       // forUpdate makes the claim check and the card merge atomic against a
@@ -1998,12 +2001,13 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
     });
     // A superseded worker filed no card, so it must not mark the call for
     // review either (codex #4919 round-10 P2).
-    if (!filed) return;
+    if (!filed) return false;
     // The task rides the call's review state (codex #4919 round-7 P2):
     // review_status and the lead's confirm-before-dispatch note derive from
     // bridgeNeedsConfirmation, not from open triage rows, so a stale-start
     // call never shows as needing review without this push.
     if (!bridgeNeedsConfirmation.includes('auto_booking_skipped_after_approval')) bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval');
+    return true;
   } catch (e) {
     logger.warn(`[call-proc] ${skippedReason} triage insert failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
     // The caller already dropped the booking, so a failed card write must
@@ -2011,6 +2015,7 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
     // (codex #4919 round-12 P1). The finalizer is ownership-fenced, so a
     // superseded worker's marker never lands.
     if (!bridgeNeedsConfirmation.includes('auto_booking_skipped_after_approval')) bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval');
+    return false;
   }
 }
 
@@ -13191,6 +13196,21 @@ const CallRecordingProcessor = {
         extracted = agreedService;
       }
     }
+    // The rule's later passes for an inbound call. For an agreed one-time job,
+    // when the hold keeps a singular service the rule would rewrite, both
+    // labels take the service the extraction named (a V1 non-lead that adoption
+    // promoted can still carry another job's label), so the lead, the call
+    // record and the office card name one job. agreedJobRewriteHeld records it:
+    // the booking is then held for the office.
+    let agreedJobRewriteHeld = false;
+    const recurringRulePass = (view) => {
+      if (agreedJobAtAdoption && agreedJobHoldChangesService(view, transcription, bookableServiceNames)) {
+        agreedJobRewriteHeld = true;
+        const service = v2Result.extraction.service_request.specific_service_name;
+        view = { ...view, matched_service: service, specific_service_name: service };
+      }
+      return applyRecurringIntentDefault(view, transcription, bookableServiceNames, agreedJobAtAdoption);
+    };
     let serviceFieldsAdopted = [];
     // The V2 extraction when primary adoption ran for this pass, else null (stampCallerIdReachback).
     let adoptedV2Extraction = null;
@@ -13210,7 +13230,7 @@ const CallRecordingProcessor = {
         // fields (a stub call had nothing to upgrade). Re-assert it over the
         // adopted service labels BEFORE any lead write consumes them, exactly
         // like the enforce path's approved-booking re-assert (codex P2).
-        if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames, agreedJobAtAdoption);
+        if (!isOutboundCall(call)) extracted = recurringRulePass(extracted);
       }
       serviceFieldsAdopted = [...new Set([...adoption.adoptedFields, ...agreedServiceFields])];
       adoptedV2Extraction = v2Result.extraction;
@@ -13455,7 +13475,8 @@ const CallRecordingProcessor = {
       // promotion — a "wasp nest, and I'd like the quarterly package"
       // voicemail was still is_lead=false then. Re-run it now that the
       // deterministic signals made this a lead (idempotent, no-op otherwise).
-      if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames, adoptedV2Extraction ? agreedJobAtAdoption : false);
+      // agreedJobAtAdoption implies adoption ran for this pass (the same V2-primary checks).
+      if (!isOutboundCall(call)) extracted = recurringRulePass(extracted);
     }
 
     // Skip spam and non-workable voicemail
@@ -13835,6 +13856,11 @@ const CallRecordingProcessor = {
     // do-not-contact beside it): that hold keeps the call's promises, label and one alert.
     let v2OutOfAreaOnlyHold = false;
     let v2ApprovedExtraction = null;
+    // GATE_CALL_AGREED_ONE_TIME_JOB: the office card's own evidence (price,
+    // basis, follow-up) and whether this pass wrote the card. The fallback
+    // below writes it again, with that same evidence, only after a failed write.
+    let agreedJobCardEvidence = null;
+    let agreedJobCardFiled = false;
     let v2UsesOnFileAddress = false;
     let v2StreetLevelHold = null;
     // True when the booking landed on the office-review pending path (street-level web-form address).
@@ -19994,7 +20020,7 @@ const CallRecordingProcessor = {
       // the merged fields; no-op when nothing singular survived.
       const preReassertMatched = extracted.matched_service;
       const preReassertSpecific = extracted.specific_service_name;
-      if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames, agreedJobAtAdoption);
+      if (!isOutboundCall(call)) extracted = recurringRulePass(extracted);
       if (extracted.matched_service !== preReassertMatched
         || extracted.specific_service_name !== preReassertSpecific) {
         // ai_extraction and the lead's service_interest were persisted BEFORE
@@ -20548,13 +20574,14 @@ const CallRecordingProcessor = {
             });
             // GATE_CALL_AGREED_ONE_TIME_JOB (owner 2026-11-22, "card"): the
             // agreed-one-time-job hold changed this booking's service (a label
-            // at adoption, or the rule's rewrite of the booking's own view), so
+            // at adoption, a rewrite it held at a later pass, or the rule on the
+            // booking's own view), so
             // the AI books no visit. The office books it with its price from
             // review card (held in the booking transaction below; the card is
             // auto_booking_skipped_after_approval with this skipped_reason). Off, or a call the hold does not change,
             // books as before.
             const agreedJobHeldForOffice = agreedJobAtAdoption
-              && (agreedServiceFields.length > 0 || agreedJobHoldChangesService(extracted, transcription, bookableServiceNames));
+              && (agreedServiceFields.length > 0 || agreedJobRewriteHeld || agreedJobHoldChangesService(extracted, transcription, bookableServiceNames));
             const agreedJobCardPrice = agreedJobHeldForOffice ? agreedOneTimeJobCardPrice(v2Result?.extraction, serviceType) : null;
             const smsPhone = customerValidation.details.phone;
             // Implied-consent recipient scope: implied consent is PERSONAL to
@@ -22649,17 +22676,20 @@ const CallRecordingProcessor = {
                 // closes, and every action version-checks. It carries the price
                 // for the priced service only, and a promised follow-up visit.
                 if (svc.__held.reason === 'agreed_one_time_job_office_books') {
-                  await fileSkippedBookingCard({
+                  agreedJobCardEvidence = {
+                    stated_one_time_price: agreedJobCardPrice ? agreedJobCardPrice.amount : null,
+                    stated_one_time_price_basis: agreedJobCardPrice ? agreedJobCardPrice.basis : null,
+                    // A follow-up the call did not set (the catalog interval, visit 1's
+                    // hour, or a two-treatment package nobody discussed) is a suggestion.
+                    follow_up_plan: callFollowUpPlan
+                      ? { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null,
+                        suggested: callFollowUpPlan.hourStated !== true || callFollowUpPlan.packageOnly === true }
+                      : null,
+                  };
+                  agreedJobCardFiled = await fileSkippedBookingCard({
                     call, procToken, customerId, extraction: v2ApprovedExtraction || v2CanonicalExtraction,
                     skippedReason: 'agreed_one_time_job_office_books', preferredDateTime: extracted.preferred_date_time,
-                    serviceType, bridgeNeedsConfirmation, callSid,
-                    extraPayload: {
-                      stated_one_time_price: agreedJobCardPrice ? agreedJobCardPrice.amount : null,
-                      stated_one_time_price_basis: agreedJobCardPrice ? agreedJobCardPrice.basis : null,
-                      follow_up_plan: callFollowUpPlan
-                        ? { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null }
-                        : null,
-                    },
+                    serviceType, bridgeNeedsConfirmation, callSid, extraPayload: agreedJobCardEvidence,
                   });
                 } else if (svc.__held.reason !== 'on_file_house_number_conflict') await db('triage_items')
                   .insert(buildTriageItem({
@@ -24455,9 +24485,10 @@ const CallRecordingProcessor = {
       // one) — otherwise the fallback card below is the call's only
       // scheduling trace and must file (pre-push audit P1).
       if (houseNumberConflictFiled && !disputeClaimedUnrecorded) heldReasons.add('on_file_house_number_conflict');
-      // agreed_one_time_job_office_books is not in the set: its card IS this
-      // fallback's card (same reason code), so the fallback refreshes it, and a
-      // failed first write still leaves the call one card.
+      // The agreed one-time job's card IS this fallback's card (one reason
+      // code): written once per pass, so the fallback runs only after a failed
+      // write, and then with the card's full evidence.
+      if (agreedJobCardFiled) heldReasons.add('agreed_one_time_job_office_books');
       if (!bookedServiceId && !heldReasons.has(appointmentResult?.skippedReason)) {
         const skipReason = appointmentResult?.skippedReason
           || appointmentResult?.scheduleError
@@ -24480,6 +24511,7 @@ const CallRecordingProcessor = {
                 flag: 'auto_booking_skipped_after_approval',
                 extraction: v2ApprovedExtraction,
                 extraPayload: {
+                  ...(skipReason === 'agreed_one_time_job_office_books' && agreedJobCardEvidence ? agreedJobCardEvidence : {}),
                   skipped_reason: String(skipReason).slice(0, 300),
                   missing_fields: appointmentResult?.missingFields || null,
                   existing_scheduled_service_id: appointmentResult?.existingScheduledServiceId || null,

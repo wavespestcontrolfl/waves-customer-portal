@@ -744,19 +744,25 @@ describe('an agreed one-time job keeps its one-time service (owner 2026-11-22, G
 
     test('the first pass and both commercial judges run the rule with no hold; the three later passes hand it the hold', () => {
       expect(count('applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);')).toBe(1);
-      // After adoption, and at the approved booking.
-      expect(count('applyRecurringIntentDefault(extracted, transcription, bookableServiceNames, agreedJobAtAdoption);')).toBe(2);
-      // The voicemail lead promotion: the hold only when adoption ran for this pass.
-      expect(count('applyRecurringIntentDefault(extracted, transcription, bookableServiceNames, adoptedV2Extraction ? agreedJobAtAdoption : false);')).toBe(1);
+      // After adoption, at the voicemail lead promotion, and at the approved booking: one pass helper.
+      expect(count('extracted = recurringRulePass(extracted);')).toBe(3);
+      expect(count('return applyRecurringIntentDefault(view, transcription, bookableServiceNames, agreedJobAtAdoption);')).toBe(1);
+      // When the hold keeps a singular service the rule would rewrite, both labels take the extraction's service
+      // (a promoted V1 non-lead can carry another job's label), and the booking is held.
+      const helper = src.slice(src.indexOf('const recurringRulePass = (view) => {'), src.indexOf('let serviceFieldsAdopted = [];'));
+      expect(helper).toContain('if (agreedJobAtAdoption && agreedJobHoldChangesService(view, transcription, bookableServiceNames)) {');
+      expect(helper).toContain('agreedJobRewriteHeld = true;');
+      expect(helper).toContain("const service = v2Result.extraction.service_request.specific_service_name;\n        view = { ...view, matched_service: service, specific_service_name: service };");
+      expect(src).toContain('&& (agreedServiceFields.length > 0 || agreedJobRewriteHeld || agreedJobHoldChangesService(extracted, transcription, bookableServiceNames));');
       // The commercial judges read as before: they run before the customer is resolved.
       expect(count('views.map((view) => applyRecurringIntentDefault(view, transcription, serviceNames)).every(')).toBe(2);
-      expect(count('applyRecurringIntentDefault(')).toBe(7); // the six calls and the definition
+      expect(count('applyRecurringIntentDefault(')).toBe(5); // the first pass, two judges, the pass helper, the definition
     });
 
     test('the hold is asked once, inbound, at adoption, of the reading alone', () => {
       expect(src).toContain("const agreedJobAtAdoption = !isOutboundCall(call) && v2Result?.status === 'valid'\n      && callAgreedOneTimeJob(v2Result.extraction, bookableCallServices);");
       expect(count('callAgreedOneTimeJob(')).toBe(2); // this call and the definition
-      expect(count('agreedJobHoldChangesService(')).toBe(2); // the booking's call and the definition
+      expect(count('agreedJobHoldChangesService(')).toBe(3); // the pass helper, the booking's call and the definition
     });
 
     test('the hold and the price bell of the call booking check read one rule for "one one-time job"', () => {
