@@ -1828,12 +1828,16 @@ function initScheduledJobs() {
   // ask the parcel map or the county permit site at once. A second run is
   // harmless: a settled home is never read again, and the store refuses a
   // write from a run that read an older version of the row.
-  // Inside it, the permit sync's lease too (same session, no health row of
-  // its own): the weekly permit sync is the other reader of the county
-  // permit site and the other writer of a permit's page result. With both
-  // leases the two never run at once, so neither can store a page result
-  // over the other's newer one. When the permit sync holds its lease, this
-  // tick does nothing and the next tick prices the homes. By schedule they
+  // Around it, the permit sync's lease (no health row of its own): the
+  // weekly permit sync is the other reader of the county permit site and
+  // the other writer of a permit's page result. With both leases the two
+  // never run at once, so neither can store a page result over the other's
+  // newer one. The permit sync's lease is the OUTER one, so when the permit
+  // sync holds it, the mail-home-price lease is never taken: its health row
+  // and a deploy-kill retry mark stay as they were (an inner skip would read
+  // as a good run). The tick logs one line and the next tick prices the
+  // homes. A permit sync tick that comes while this run holds the lease
+  // skips, as it would for its own run. By schedule they
   // do not meet: the permit sync's detail step runs Mondays from 7:41 AM for
   // at most 60 minutes and its catch-up slots (7:41 AM, 9:11 AM, 1:41 PM,
   // 5:41 PM) take about 3 minutes; this run has a 20 minute budget.
@@ -1845,11 +1849,17 @@ function initScheduledJobs() {
   // Only the every-minute and every-N-minute pollers share it.
   // =========================================================================
   const runMailHomePriceTick = async () => {
-    await runExclusive('mail-home-price', async () => {
-      const out = await runExclusive('permit-sync', () => require('./mail/home-price').runHomePrices(), { recordHealth: false });
-      if (out && out.skipped) logger.info(`Mail home prices: not run, the permit sync holds its lease (${out.reason})`);
-      return out;
-    }).catch((err) => logger.error(`Mail home prices failed: ${err.message}`));
+    try {
+      const out = await runExclusive(
+        'permit-sync',
+        () => runExclusive('mail-home-price', () => require('./mail/home-price').runHomePrices()),
+        { recordHealth: false },
+      );
+      // A skip here is a lease the permit sync or another instance holds.
+      if (out && out.skipped === true) logger.info(`Mail home prices: not run, a lease is held (${out.reason})`);
+    } catch (err) {
+      logger.error(`Mail home prices failed: ${err.message}`);
+    }
   };
   cron.schedule('51 21 * * *', () => runMailHomePriceTick(), { timezone: 'America/New_York' });
   cron.schedule('51 12 * * 1-5', () => runMailHomePriceTick(), { timezone: 'America/New_York' });

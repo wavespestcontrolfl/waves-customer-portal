@@ -1,7 +1,7 @@
 /**
  * New-home price ticks (server/services/scheduler.js): every day at 9:51 PM ET and weekdays at 12:51 PM ET, twenty
- * minutes after the list ticks, both under ONE `mail-home-price` lease, plus the deploy-kill retry. Inside that lease the
- * run also takes the permit sync's lease (no health row of its own), so the two readers of the county permit site never
+ * minutes after the list ticks, both under ONE `mail-home-price` lease, plus the deploy-kill retry. Around that lease the
+ * run first takes the permit sync's lease (no health row of its own), so the two readers of the county permit site never
  * run at once. A failed run is logged, never thrown out of the tick. Mock baseline copied from
  * scheduler-mail-new-home-list-cron.test.js.
  */
@@ -57,16 +57,16 @@ beforeEach(() => {
   runHomePrices.mockResolvedValue({ due: 0 });
 });
 
-test('the night run: every day at 9:51 PM ET, under the mail-home-price lease and, inside it, the permit sync lease with no health row', async () => {
+test('the night run: every day at 9:51 PM ET, under the permit sync lease with no health row and, inside it, the mail-home-price lease', async () => {
   await registered('51 21 * * *')();
-  expect(leases()).toEqual([['mail-home-price', undefined], ['permit-sync', { recordHealth: false }]]);
+  expect(leases()).toEqual([['permit-sync', { recordHealth: false }], ['mail-home-price', undefined]]);
   expect(runHomePrices).toHaveBeenCalledTimes(1);
   expect(runHomePrices).toHaveBeenCalledWith();
 });
 
 test('the noon run: weekdays at 12:51 PM ET, under the same two leases', async () => {
   await registered('51 12 * * 1-5')();
-  expect(leases()).toEqual([['mail-home-price', undefined], ['permit-sync', { recordHealth: false }]]);
+  expect(leases()).toEqual([['permit-sync', { recordHealth: false }], ['mail-home-price', undefined]]);
   expect(runHomePrices).toHaveBeenCalledTimes(1);
 });
 
@@ -77,31 +77,36 @@ test('each price tick is 20 minutes after a list tick', () => {
   expect(expressions).toEqual(expect.arrayContaining(['31 21 * * *', '51 21 * * *', '31 12 * * 1-5', '51 12 * * 1-5']));
 });
 
-test('a mail-home-price lease another instance holds runs nothing', async () => {
-  runExclusive.mockImplementationOnce(async () => ({ skipped: true, reason: 'lease_held' }));
-  await registered('51 21 * * *')();
-  expect(runExclusive).toHaveBeenCalledTimes(1);
-  expect(runHomePrices).not.toHaveBeenCalled();
-});
-
-test('the permit sync holds its lease: no home is priced, the tick says so and is not a failed run', async () => {
+test('a mail-home-price lease another instance holds runs nothing and is not a failed run', async () => {
   runExclusive
     .mockImplementationOnce(async (_key, task) => task())
     .mockImplementationOnce(async () => ({ skipped: true, reason: 'lease_held' }));
   await expect(registered('51 21 * * *')()).resolves.toBeUndefined();
   expect(runHomePrices).not.toHaveBeenCalled();
-  expect(logger.info).toHaveBeenCalledWith('Mail home prices: not run, the permit sync holds its lease (lease_held)');
+  expect(logger.info).toHaveBeenCalledWith('Mail home prices: not run, a lease is held (lease_held)');
+  expect(logger.error).not.toHaveBeenCalled();
+});
+
+test('the permit sync holds its lease: the mail-home-price lease is never taken, so its health row and retry mark stay', async () => {
+  runExclusive.mockImplementationOnce(async () => ({ skipped: true, reason: 'lease_held' }));
+  await expect(registered('51 21 * * *')()).resolves.toBeUndefined();
+  // Only the outer permit-sync call: the health-recording mail-home-price lease never starts, so no good run is recorded.
+  expect(leases()).toEqual([['permit-sync', { recordHealth: false }]]);
+  expect(runHomePrices).not.toHaveBeenCalled();
+  expect(logger.info).toHaveBeenCalledWith('Mail home prices: not run, a lease is held (lease_held)');
   expect(logger.error).not.toHaveBeenCalled();
 });
 
 test('a failed run is logged, never thrown out of the tick, and it fails the mail-home-price lease', async () => {
   const failure = new Error('Mail home prices: the permit page did not answer (5 failures in a row)');
   runHomePrices.mockRejectedValueOnce(failure);
-  let outer;
-  runExclusive.mockImplementationOnce(async (_key, task) => { outer = task(); return outer; });
+  let priceLeaseBody;
+  runExclusive
+    .mockImplementationOnce(async (_key, task) => task())
+    .mockImplementationOnce(async (_key, task) => { priceLeaseBody = task(); return priceLeaseBody; });
   await expect(registered('51 21 * * *')()).resolves.toBeUndefined();
-  // The error leaves the inner lease and the outer task, so the outer lease records the failed run.
-  await expect(outer).rejects.toBe(failure);
+  // The error leaves the mail-home-price lease's body, so that lease records the failed run.
+  await expect(priceLeaseBody).rejects.toBe(failure);
   expect(logger.error).toHaveBeenCalledWith('Mail home prices failed: Mail home prices: the permit page did not answer (5 failures in a row)');
 });
 
@@ -111,6 +116,6 @@ test('a run a deploy killed is retried under the same two leases', async () => {
   const call = registerDeployKillRetry.mock.calls.find(([name]) => name === 'mail-home-price');
   expect(call).toBeDefined();
   await call[1]();
-  expect(leases()).toEqual([['mail-home-price', undefined], ['permit-sync', { recordHealth: false }]]);
+  expect(leases()).toEqual([['permit-sync', { recordHealth: false }], ['mail-home-price', undefined]]);
   expect(runHomePrices).toHaveBeenCalledTimes(1);
 });
