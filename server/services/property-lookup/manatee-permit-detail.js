@@ -554,6 +554,8 @@ module.exports = {
     fetchPermitDetail,
     selectCandidates,
     recordResult,
+    countResult,
+    minGapMs,
     NEW_DWELLING_TYPES,
     STOP_AFTER,
     RETRY_DAYS,
