@@ -2092,20 +2092,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         const planned = planMemberTargets({ members, primary, visitWindowStart: visit.window_start, win, newDateStr });
         const targets = members.map((m, index) => {
           const { isPrimary, start: targetStart, end: targetEnd, shifted } = planned[index];
-          // The range a member's own move takes is minute-precision (the
-          // rebooker's parseWindow reads no other range, and then keeps the
-          // row's stored hours). A bound in another form the shift check
-          // reads (window-rules parseHHMM: "09:00:00") is written as its
-          // minutes, so the write takes the window the plan validated and
-          // the shift check judged. A bound already in minutes, and one
-          // that is no clock time, go as they came.
-          const hm = (v) => {
-            if (/^\d{1,2}:\d{2}$/.test(String(v))) return v;
-            const { parseHHMM, minutesToHHMM } = require('./scheduling/window-rules');
-            const minutes = parseHHMM(v);
-            return minutes == null ? v : minutesToHHMM(minutes);
-          };
-          const window = shifted ? (targetEnd ? `${hm(targetStart)}-${hm(targetEnd)}` : { start: targetStart, end: null }) : null;
+          const window = shifted ? (targetEnd ? `${targetStart}-${targetEnd}` : { start: targetStart, end: null }) : null;
           const norm = (v) => (v ? String(v).slice(0, 5) : null);
           const techMatches = options.technicianId === undefined || String(m.technician_id || '') === String(options.technicianId || '');
           // No-op only when EVERY requested field already holds (codex r2):
@@ -2187,8 +2174,14 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         // read here under the stop lock. That member's own move pins it.
         const shiftJudgedLengths = {};
         if (initiatedBy !== 'admin') {
+          // A member's own move takes its new window as a range in minutes
+          // (the rebooker's parseWindow reads no other range string); for any
+          // other range string it keeps the row's stored hours, as on main (a
+          // requested time sent with seconds, "09:00:00"). So such a member
+          // is judged where its write leaves it: at its stored hours.
+          const keepsStored = (index) => typeof targets[index].window === 'string' && !/^\d{1,2}:\d{2}-\d{1,2}:\d{2}$/.test(targets[index].window);
           const landings = members.map((m, index) => ({
-            id: m.id, start: planned[index].start, end: planned[index].end, durationMinutes: m.estimated_duration_minutes,
+            id: m.id, start: keepsStored(index) ? m.window_start : planned[index].start, end: keepsStored(index) ? m.window_end : planned[index].end, durationMinutes: m.estimated_duration_minutes,
             technicianId: options.technicianId !== undefined ? (options.technicianId || null) : (m.technician_id || null),
           })).filter((landing, index) => !targets[index].alreadyAtTarget);
           const shiftOf = await require('./technician-eligibility').loadTechShifts(t, { technicianIds: [...new Set(landings.map((x) => x.technicianId).filter(Boolean).map(String))] });

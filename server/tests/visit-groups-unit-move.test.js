@@ -1240,52 +1240,55 @@ describe('shift hours: a grouped stop is judged as one unit', () => {
       expect(aCall[5].excludeExpect.every((x) => !('estimated_duration_minutes' in x))).toBe(true);
     });
 
-    test('a time sent with seconds is written as it was judged: the first service\'s own move takes the range in minutes', async () => {
-      // The rebooker reads a range in minutes only. "13:00:00-14:00:00" would leave the first service at its old hours.
-      db.__script = script({ members: pair(), landed: landed('13:00', '14:00') });
-      const moved = fakeRebooker();
-      expect((await unit(moved, { start: '13:00:00', end: '14:00:00' })).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
-      expect(moved.reschedule.mock.calls.map((c) => c[2])).toEqual(['13:00-14:00', '14:00-15:00']);
-      // The same request an hour later is judged at those hours: the sibling would end at 16:00.
+    test('a member is judged where its own write leaves it: a range the rebooker cannot read (a time sent with seconds) keeps the stored hours, and those are judged', async () => {
+      // The rebooker reads a range in minutes only. For "13:00:00-14:00:00" the first service keeps 09:00 to 10:00 on the
+      // new day, as on main, while its sibling shifts to 14:00. The shift starts at 10:00: the requested hours fit, the write's do not.
+      shifts.t1 = { startMin: 600, endMin: 900 };
       db.__script = script({ members: pair() });
       const refused = fakeRebooker();
-      await expect(unit(refused, { start: '14:00:00', end: '15:00:00' })).rejects.toMatchObject(refusedFor('b'));
-      // Any form the shift check reads is written as the minutes it judged; a range already in minutes goes as it came.
+      await expect(unit(refused, { start: '13:00:00', end: '14:00:00' })).rejects.toMatchObject(refusedFor('a'));
+      nothingWritten(refused);
+      // The same request in minutes is written as asked, and judged as asked.
       db.__script = script({ members: pair(), landed: landed('13:00', '14:00') });
-      const fractional = fakeRebooker();
-      await unit(fractional, { start: '13:00:00', end: '14:00:00.000' });
-      expect(fractional.reschedule.mock.calls[0][2]).toBe('13:00-14:00');
-      const asSent = fakeRebooker();
-      await unit(asSent, { start: '9:00', end: '10:00' }).catch(() => null);
-      expect(asSent.reschedule.mock.calls[0][2]).toBe('9:00-10:00');
+      const moved = fakeRebooker();
+      expect((await unit(moved, { start: '13:00', end: '14:00' })).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+      // Stored hours the shift holds: the move goes on, and the range goes to the rebooker as it came, as on main.
+      shifts.t1 = { startMin: 480, endMin: 900 };
+      db.__script = script({ members: pair() });
+      const asOnMain = fakeRebooker();
+      await unit(asOnMain, { start: '13:00:00', end: '14:00:00' }).catch(() => null);
+      expect(asOnMain.reschedule.mock.calls[0][2]).toBe('13:00:00-14:00:00');
+      // A start-only window goes to the rebooker as an object, which it takes as given: judged at the asked start.
+      shifts.t1 = { startMin: 480, endMin: 870 }; // 08:00 to 14:30
+      jest.clearAllMocks(); db.__calls.length = 0;
+      db.__script = script({ members: pair({ window_start: null, window_end: null }, { window_end: null, estimated_duration_minutes: 60 }) });
+      const startOnly = fakeRebooker();
+      await expect(unit(startOnly, { start: '14:00', end: null })).rejects.toMatchObject(refusedFor('a'));
+      nothingWritten(startOnly);
     });
 
-    test('a requested time that is no clock time is not judged, so it is refused for a member a shift judges; with no shift to judge, the move goes on as before', async () => {
-      // An end that is no clock time: the planner shifts the sibling by the start and accepts the plan. The shift check
-      // cannot read the first service's block, and its write could still take a time from the range: neither was judged.
-      db.__script = script({ members: pair() });
-      const badEnd = fakeRebooker();
-      await expect(unit(badEnd, { start: '13:00', end: '14:00x' })).rejects.toMatchObject(refusedFor('a'));
-      nothingWritten(badEnd);
-      // A start that is no clock time, beside a sibling with no window (the planner refuses one with a window itself).
-      db.__script = script({ members: pair({ window_start: null, window_end: null }) });
+    test('a requested start that is no clock time is not judged, so it is refused for a member a shift judges; with no shift to judge, the move goes on as before', async () => {
+      // A start-only request beside a sibling with no window (the planner refuses a windowed sibling itself). The
+      // rebooker takes the start as given, and the shift check cannot read a block from it.
+      db.__script = script({ members: pair({ window_start: null, window_end: null }, { window_end: null }) });
       const badStart = fakeRebooker();
-      await expect(unit(badStart, { start: '13:00x', end: '14:00' })).rejects.toMatchObject(refusedFor('a'));
+      await expect(unit(badStart, { start: '13:00x', end: null })).rejects.toMatchObject(refusedFor('a'));
       nothingWritten(badStart);
-      await expect(unit(badStart, { start: '25:00', end: '26:00' })).rejects.toMatchObject(refusedFor('a'));
+      await expect(unit(badStart, { start: '25:00', end: null })).rejects.toMatchObject(refusedFor('a'));
       nothingWritten(badStart);
       // A stored end of 24:00:00 is a clock time for an end, not for a start.
       const allDay = () => ({ startMin: 0, endMin: 1440 });
       expect(vg._test.memberOutsideShift(allDay, '2026-09-02', [{ id: 'a', technicianId: 't1', start: '23:00', end: '24:00:00', durationMinutes: 60 }])).toBe(null);
       expect(vg._test.memberOutsideShift(allDay, '2026-09-02', [{ id: 'a', technicianId: 't1', start: '24:00:00', end: null, durationMinutes: 60 }])).toBe('a');
+      expect(vg._test.memberOutsideShift(allDay, '2026-09-02', [{ id: 'a', technicianId: 't1', start: '09:00', end: '10:00x', durationMinutes: 60 }])).toBe('a');
       // No bound at all is a member with no window: not judged, as before.
       expect(vg._test.memberOutsideShift(allDay, '2026-09-02', [{ id: 'a', technicianId: 't1', start: null, end: null, durationMinutes: 60 }])).toBe(null);
       // No technician with set hours: nothing judges the request, and the mover hands it on as on main.
       delete shifts.t1;
-      db.__script = script({ members: pair() });
+      db.__script = script({ members: pair({ window_start: null, window_end: null }, { window_end: null }) });
       const unjudged = fakeRebooker();
-      await unit(unjudged, { start: '13:00', end: '14:00x' }).catch(() => null);
-      expect(unjudged.reschedule.mock.calls[0][2]).toBe('13:00-14:00x');
+      await unit(unjudged, { start: '13:00x', end: null }).catch(() => null);
+      expect(unjudged.reschedule.mock.calls[0][2]).toEqual({ start: '13:00x', end: null });
     });
 
     test('a member\'s block is the later of its window end and its stored length', async () => {

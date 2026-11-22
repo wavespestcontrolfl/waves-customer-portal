@@ -271,11 +271,15 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
       ]);
     });
 
-    test('a time sent with seconds lands where it was judged: both services take the new hours', async () => {
+    test('a time sent with seconds: the first service\'s write keeps its stored hours, so those are judged', async () => {
+      // The shift starts at 10:00. The rebooker reads a range in minutes only: asked "10:00:00" to "11:00:00", the
+      // first service would stay at 09:00 on the new day, before the shift, while the second moved.
+      await setShift('10:00', '13:00');
       const stop = await seedStop();
-      await expect(moveStop(stop, { start: '11:00:00', end: '12:00:00' })).rejects.toMatchObject({ ...refused, memberId: stop.b });
+      await expect(moveStop(stop, { start: '10:00:00', end: '11:00:00' })).rejects.toMatchObject({ ...refused, memberId: stop.a });
       expect(await stopOf(stop)).toMatchObject(whereSeeded);
-      expect((await moveStop(stop, { start: '10:00:00', end: '11:00:00' })).visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
+      // The same request in minutes is written as asked.
+      expect((await moveStop(stop, { start: '10:00', end: '11:00' })).visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
       expect(await stopOf(stop)).toMatchObject([
         { day: nextDay, window_start: '10:00:00', window_end: '11:00:00' },
         { day: nextDay, window_start: '11:00:00', window_end: '12:00:00' },
