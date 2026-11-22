@@ -274,7 +274,12 @@ async function sendNewRecurringWelcome({
 //                             couldn't be VERIFIED — this sender exists to
 //                             enforce that opt-out, so an unreadable pref
 //                             fails closed and retries rather than sending)
-async function sendWelcomeEmail(customer) {
+//
+// `resend` is the operator's "send it again" from Quick Links (owner
+// 2026-11-21): the customer already had, or should have had, this email, so
+// the once-ever key gets a per-click suffix. Every other check is unchanged.
+async function sendWelcomeEmail(customer, { resend = false } = {}) {
+  const sendKey = resend ? `${TEMPLATE_EMAIL_KEY}:${customer.id}:resend:${Date.now()}` : `${TEMPLATE_EMAIL_KEY}:${customer.id}`;
   const email = String(customer.email || '').trim();
   if (!email) return { outcome: 'skipped' };
   const sendgrid = require('./sendgrid-mail');
@@ -316,8 +321,8 @@ async function sendWelcomeEmail(customer) {
     },
     recipientType: 'customer',
     recipientId: customer.id,
-    triggerEventId: `${TEMPLATE_EMAIL_KEY}:${customer.id}`,
-    idempotencyKey: `${TEMPLATE_EMAIL_KEY}:${customer.id}`,
+    triggerEventId: sendKey,
+    idempotencyKey: sendKey,
     categories: ['welcome_new_recurring'],
     // SendGrid rejection bodies can echo the recipient address — keep them
     // out of the provider log; the caller's catch redacts too.
@@ -753,6 +758,7 @@ module.exports = {
   isNewRecurringSignupCandidate,
   findFirstPlansWithoutWelcome,
   sendNewRecurringWelcome,
+  sendWelcomeEmail,
   processDueWelcomes,
   _internals: {
     isNewRecurringSignupCandidate,

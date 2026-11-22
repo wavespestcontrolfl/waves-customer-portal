@@ -43,7 +43,7 @@ describe('territoryTechnicianForVisit', () => {
     lineTech.liveServiceLine.mockResolvedValue('general');
     territory.territoryTechnicianFor.mockResolvedValue('tech-south');
     await expect(territoryTechnicianForVisit(unassigned, geo)).resolves.toBe('tech-south');
-    expect(lineTech.liveServiceLine).toHaveBeenCalledWith(null, { serviceId: 'svc-1', serviceKey: 'pest_quarterly', serviceType: 'Quarterly Pest Control' });
+    expect(lineTech.liveServiceLine).toHaveBeenCalledWith(null, { serviceId: 'svc-1', serviceKey: 'pest_quarterly', serviceType: 'Quarterly Pest Control', customerId: 'cust-1' });
     expect(territory.territoryTechnicianFor).toHaveBeenCalledWith(null, { zip: '34293', lat: 27.05, lng: -82.4, customerId: 'cust-1' });
   });
 

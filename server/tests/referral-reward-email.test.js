@@ -93,6 +93,27 @@ describe('sendDueReferralRewardEmails', () => {
     expect(sent.payload.reward_line).toBe('Your $25.50 referral reward has been added to your Waves account as a credit. To use it, turn on "Apply my credit to invoices automatically" in the Waves app.');
   });
 
+  test('a Step 2 row states what the member was paid, not the ledger row that matched (the friend\'s row after a profile merge)', async () => {
+    // After the member's and the friend's profiles are merged, both credit rows carry the member's customer id.
+    mockState.credits = [credit({ credit_dollars: '50.00', referrer_credit_cents: 2500 })];
+    await engine.sendDueReferralRewardEmails({ now: new Date('2026-11-05T14:00:00.000Z') });
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    expect(mockSendTemplate.mock.calls[0][0].payload.reward_line).toMatch(/^Your \$25 referral reward has been added/);
+  });
+
+  test('a Step 2 member who was paid nothing (the yearly limit) gets no credit email, whatever row matched', async () => {
+    mockState.credits = [credit({ credit_dollars: '50.00', referrer_credit_cents: 0 })];
+    const out = await engine.sendDueReferralRewardEmails({ now: new Date('2026-11-05T14:00:00.000Z') });
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+    expect(out).toEqual({ credits: 1, immediate: 0, attempted: 0 });
+  });
+
+  test('a row with no recorded member credit (settled before Step 2) states its own amount, as before', async () => {
+    mockState.credits = [credit({ credit_dollars: '25.00', referrer_credit_cents: null })];
+    await engine.sendDueReferralRewardEmails({ now: new Date('2026-11-05T14:00:00.000Z') });
+    expect(mockSendTemplate.mock.calls[0][0].payload.reward_line).toMatch(/^Your \$25 referral reward/);
+  });
+
   test('a credit from yesterday afternoon sends one email at 9:00 AM: the referrer, account-credit wording, keyed by referral', async () => {
     mockState.credits = [credit()];
     const out = await engine.sendDueReferralRewardEmails({ now: new Date('2026-11-05T14:00:00.000Z') });
@@ -273,5 +294,18 @@ describe('step2FriendCreditCents (GATE_REFERRAL_STEP2: the live amount for the i
     expect(await engine.step2FriendCreditCents()).toBe(0);
     mockState.settings = { get program_active() { throw new Error('db down'); } };
     expect(await engine.step2FriendCreditCents()).toBe(0);
+  });
+  test('step2FriendCreditCentsOf gives the same amount from a row the caller already read, with no read of its own', () => {
+    const row = { program_active: true, referee_discount_cents: 5000 };
+    // gate off: 0, whatever the row holds
+    expect(engine.step2FriendCreditCentsOf(row)).toBe(0);
+    gates.referralStep2 = true;
+    expect(engine.step2FriendCreditCentsOf(row)).toBe(5000);
+    expect(engine.step2FriendCreditCentsOf({ program_active: true, referee_discount_cents: '2550.9' })).toBe(2550);
+    for (const none of [
+      { program_active: false, referee_discount_cents: 5000 }, { program_active: null, referee_discount_cents: 5000 },
+      { program_active: true, referee_discount_cents: 0 }, { program_active: true, referee_discount_cents: -500 },
+      { program_active: true, referee_discount_cents: null }, { program_active: true }, null, undefined,
+    ]) expect(engine.step2FriendCreditCentsOf(none)).toBe(0);
   });
 });

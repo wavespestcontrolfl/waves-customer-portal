@@ -580,7 +580,9 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
   }
 
   // --- Send invite SMS ---
-  const smsBody = await renderReferralSms('referral_invite', {
+  // GATE_REFERRAL_STEP2: the seeded sentence becomes the approved Step 2 words, or neutral words when there is no
+  // friend credit to state (referral-step2.js); gate off, no read and the text is exactly as stored.
+  const smsBody = step2.inviteSmsWithOffer(await renderReferralSms('referral_invite', {
     referee_name: firstName,
     referrer_name: referrerName || promoter.first_name || 'your neighbor',
     referral_link: referralLink,
@@ -588,7 +590,7 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
     workflow: 'referral_invite',
     entity_type: 'referral',
     entity_id: referral.id,
-  });
+  }), { step2On: isEnabled('referralStep2'), refereeCents: await step2FriendCreditCents(), link: referralLink });
   const smsSent = await sendSMS(normalizedPhone || phone.trim(), smsBody, {
     messageType: 'referral_invite',
     referralId: referral.id,
@@ -704,6 +706,14 @@ function recentRewardCreditsQuery(conn, now) {
     .select('r.*', 'l.delta as credit_dollars', 'l.created_at as credited_at');
 }
 
+// The amount the credit email states. A Step 2 row records what the member was paid (referrer_credit_cents, 0 at the
+// yearly limit), and that is the amount: after the member's and the friend's profiles are merged, the friend's
+// credit row carries the member's customer id too, and it must not set the amount. Any other row: its own amount.
+function rewardCreditEmailDollars(row) {
+  const recorded = row.referrer_credit_cents;
+  return recorded === null || recorded === undefined ? Number(row.credit_dollars) : Number(recorded) / 100;
+}
+
 // Conversions paid at once (require_service_completion off) put the reward on
 // the promoter balance inside convertReferral's transaction and email after it
 // commits. A failure before that email exists is only logged, and a retried
@@ -730,7 +740,9 @@ async function sendDueReferralRewardEmails({ now = new Date() } = {}) {
   const credits = await recentRewardCreditsQuery(db, now);
   const immediate = await recentImmediateRewardsQuery(db, now);
   const due = [
-    ...credits.map((row) => ({ row, at: row.credited_at, dollars: Number(row.credit_dollars), destination: 'account_credit' })),
+    ...credits.map((row) => ({ row, at: row.credited_at, dollars: rewardCreditEmailDollars(row), destination: 'account_credit' }))
+      // A member who was paid nothing (the yearly limit) has no credit to announce.
+      .filter(({ dollars }) => dollars > 0),
     ...immediate.map((row) => ({ row, at: row.converted_at, dollars: Number(row.referrer_reward_amount), destination: 'referral_balance' })),
   ];
   let attempted = 0;
@@ -1431,7 +1443,8 @@ async function memberCreditsThisYear(conn, memberId) {
 async function step2OfferFor(conn, memberId, settings) {
   const s = step2.step2Settings(settings);
   // The count is for the customer the credit is paid to (a household shares its promoter's customer).
-  const creditsThisYear = await memberCreditsThisYear(conn, await creditedMemberFor(conn, memberId));
+  // No member (the Automations preview page, which shows what a member gets): nothing earned yet, never at the limit.
+  const creditsThisYear = memberId ? await memberCreditsThisYear(conn, await creditedMemberFor(conn, memberId)) : 0;
   const capReached = step2.capReached(creditsThisYear, settings);
   return {
     // The existing field: nothing is promised to a member at the yearly limit (a cached portal build reads this field
@@ -1599,15 +1612,21 @@ async function getLiveSettings(conn = db) {
   return row ? { ...row, base_url: normalizeReferralBaseUrl(row.base_url) } : null;
 }
 
+// GATE_REFERRAL_STEP2: the friend's credit in cents that a line may state, from ONE live settings row the caller read
+// (getLiveSettings). A text that also follows the program's state (the Waves Pest Insider's referral line) decides
+// both from the same row, so the two cannot disagree. 0 = say nothing new: gate off, program paused, no amount, no row.
+function step2FriendCreditCentsOf(live) {
+  if (!isEnabled('referralStep2') || !live?.program_active) return 0;
+  return Math.max(0, Math.trunc(Number(live.referee_discount_cents) || 0));
+}
+
 // GATE_REFERRAL_STEP2: the friend's credit in cents, from the live settings row only, for a line that must never state
 // a code default (the invitation email). 0 = say nothing new: gate off, program paused, no amount, or the live row
 // unreadable.
 async function step2FriendCreditCents() {
   if (!isEnabled('referralStep2')) return 0;
   try {
-    const live = await getLiveSettings();
-    if (!live?.program_active) return 0;
-    return Math.max(0, Math.trunc(Number(live.referee_discount_cents) || 0));
+    return step2FriendCreditCentsOf(await getLiveSettings());
   } catch {
     return 0;
   }
@@ -1872,6 +1891,7 @@ module.exports = {
   getSettings,
   getLiveSettings,
   step2FriendCreditCents,
+  step2FriendCreditCentsOf,
   updateSettings,
   getPromoterStats,
   getProgramAnalytics,

@@ -24,7 +24,7 @@ const { lawnScoreScaleV2Live } = require('../config/feature-gates');
 const MODELS = require('../config/models');
 const { photo, answer } = require('./helpers/lawn-visit-fixtures');
 
-const ENV = ['GATE_LAWN_SCORE_SCALE_V2', 'GATE_LAWN_VISIT_ASSESSMENT', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_LAWN_LIGHTING', 'GATE_LAWN_ASSESSMENT_REFEREE'];
+const ENV = ['GATE_LAWN_SCORE_SCALE_V2', 'GATE_LAWN_VISIT_ASSESSMENT', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_LAWN_ASSESSMENT_REFEREE'];
 const saved = {};
 beforeEach(() => {
   dispatchWithFallback.mockReset();
@@ -210,7 +210,7 @@ describe('analyzeVisit', () => {
   test('gate on: reads under the scale-2 variant, checks its shape, and returns the ratings as read', async () => {
     on();
     dispatchWithFallback.mockResolvedValue(okOutcome(scale2Answer()));
-    const out = await analyzeVisit({ photos: [photo('YQ==', 'front'), photo('Yg==')] });
+    const out = await analyzeVisit({ photos: [photo('YQ==', 'front'), photo('Yg==')], lighting: false });
     const variant = input.promptFor({ scale2: true });
     const [, payload, options] = dispatchWithFallback.mock.calls[0];
     expect(payload).toMatchObject({ system: variant.system, jsonSchema: variant.schema, promptVersion: 'lawn-visit-v1-scale2' });
@@ -223,7 +223,7 @@ describe('analyzeVisit', () => {
   test('gate on, both providers miss: the unavailable read still carries scale 2', async () => {
     on();
     dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'gemini_timeout', failures: [{ provider: 'gemini', reason: 'gemini_timeout' }] });
-    const out = await analyzeVisit({ photos: [photo('YQ==', 'front'), photo('Yg==')] });
+    const out = await analyzeVisit({ photos: [photo('YQ==', 'front'), photo('Yg==')], lighting: false });
     expect(out).toMatchObject({ status: 'unavailable', promptVersion: 'lawn-visit-v1-scale2', scoreScale: 2 });
   });
 
@@ -232,7 +232,7 @@ describe('analyzeVisit', () => {
     expect((await analyzeVisit({ photos: [photo('YQ==', 'front'), photo('Yg==')] })).promptVersion).toBe('lawn-visit-v1');
     on();
     delete process.env.GATE_LAWN_PROPERTY_HISTORY;
-    const out = await analyzeVisit({ photos: [photo('YQ==', 'front'), photo('Yg==')] });
+    const out = await analyzeVisit({ photos: [photo('YQ==', 'front'), photo('Yg==')], lighting: false });
     expect(out.promptVersion).toBe('lawn-visit-v1');
     expect(out).not.toHaveProperty('scoreScale');
   });

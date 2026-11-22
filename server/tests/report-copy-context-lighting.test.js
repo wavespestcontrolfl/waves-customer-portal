@@ -1,8 +1,8 @@
-// The lawn assessment line the report writer is grounded on, under
-// GATE_LAWN_LIGHTING (owner 2026-10-04): the color health delta against the prior
+// The lawn assessment line the report writer is grounded on, with
+// lawn lighting-aware color (owner 2026-10-04): the color health delta against the prior
 // visit reaches the writer only when both visits' photos were taken in known,
 // compatible light AND the move is at least COLOR_NO_CHANGE_POINTS; every other
-// category keeps its delta. Gate off: the line is what it always was.
+// category keeps its delta. Visit assessment gate off: the line is what it always was.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 
@@ -86,10 +86,9 @@ const run = (assessmentId, photoId, light) => ({ assessment_id: assessmentId, ph
 const SUN = { lighting: 'full_sun', hard_shadows: 'no' };
 const CLOUD = { lighting: 'overcast', hard_shadows: 'no' };
 
-const GATE = 'GATE_LAWN_LIGHTING';
 const ASSESS = 'GATE_LAWN_VISIT_ASSESSMENT';
-const saved = { [GATE]: process.env[GATE], [ASSESS]: process.env[ASSESS] };
-afterEach(() => { for (const name of [GATE, ASSESS]) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; } });
+const saved = { [ASSESS]: process.env[ASSESS] };
+afterEach(() => { for (const name of [ASSESS]) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; } });
 
 async function context({ color = 74, runs = [], runsFail = false, baseline = false } = {}) {
   const knex = makeKnexStub({ customers: [CUSTOMER], linked: { ...row('a-today', '2026-07-28', color), is_baseline: baseline }, prior: row('a-prior', '2026-06-20', 64, 64), runs, runsFail });
@@ -98,7 +97,7 @@ async function context({ color = 74, runs = [], runsFail = false, baseline = fal
 }
 const COLOR_WITH_DELTA = /color health \d+\/100 \(/;
 
-describe('gate off', () => {
+describe('visit assessment gate off', () => {
   test('every category keeps its delta, the color delta included, and no run is read', async () => {
     const { text, tables } = await context({ color: 66 });
     expect(text).toContain('color health 66/100 (+2 vs Jun 20, 2026)');
@@ -107,8 +106,8 @@ describe('gate off', () => {
   });
 });
 
-describe('gate on', () => {
-  beforeEach(() => { process.env[GATE] = 'true'; process.env[ASSESS] = 'true'; });
+describe('visit assessment gate on', () => {
+  beforeEach(() => { process.env[ASSESS] = 'true'; });
 
   test('compatible light and a real move: the color delta is given, as before', async () => {
     const { text } = await context({ color: 74, runs: [run('a-today', 'pt', SUN), run('a-prior', 'pp', SUN)] });

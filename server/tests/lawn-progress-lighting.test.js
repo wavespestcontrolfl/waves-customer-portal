@@ -1,5 +1,5 @@
 // Lawn progress engine and the "Since your last visit" copy under
-// GATE_LAWN_LIGHTING (owner 2026-10-04). Pure, synthetic data only.
+// lawn lighting-aware color (owner 2026-10-04). Pure, synthetic data only.
 //   - no colorGuard: the engine is exactly what it was (pinned across a sweep)
 //   - color is compared only in known, compatible light; otherwise `unclear`
 //     and so no sentence says color improved or declined
@@ -281,7 +281,7 @@ describe('the customer sentences ("Since your last visit")', () => {
   });
 });
 
-// THE RULE of GATE_LAWN_LIGHTING: the gate may only REMOVE a sentence gate-off would
+// THE RULE of the lighting rules: they may only REMOVE a sentence gate-off would
 // have printed, never print a different one. Property check over a grid of score
 // moves, days, seasons, photo confidence, treatments and light combinations.
 describe('property: with the gate on, the customer lines are always a subset of the gate-off lines', () => {

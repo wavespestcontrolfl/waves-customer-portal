@@ -12,7 +12,7 @@ const PROMPT_VERSION = 'lawn-visit-v1';
 // prompt plus the shot guide and the shot-key zone enum. Its own version so a
 // replay never mixes the two modes (lawn report rebuild P19a).
 const SHOT_LIST_PROMPT_VERSION = `${PROMPT_VERSION}-shot-list`;
-// The variants a visit is read under while GATE_LAWN_LIGHTING is live (owner
+// The variants a visit is read under the lighting rule (owner
 // 2026-10-04): the same prompt (and shot guide, for a shot-list capture) plus the
 // LIGHT block and a light read on every photo's quality row. Their own versions so
 // a replay never mixes a read that recorded the light with one that did not.
@@ -370,7 +370,7 @@ const SHOT_LIST_SYSTEM_PROMPT = SYSTEM_PROMPT
 const SHOT_LIST_RESPONSE_SCHEMA = JSON.parse(JSON.stringify(RESPONSE_SCHEMA));
 SHOT_LIST_RESPONSE_SCHEMA.properties.findings.items.properties.zone = enumOf([...shotList.SHOT_KEYS, 'unknown']);
 
-// The lighting variants (GATE_LAWN_LIGHTING): each existing variant plus a LIGHT
+// The lighting variants: each existing variant plus a LIGHT
 // block before the findings, and a lighting + hard_shadows read on every photo's
 // quality row. Enums only (no numeric bounds), every key required, no nullable
 // types: "cannot tell" is the word unknown, and storage turns it into null. The
@@ -477,7 +477,7 @@ const SCALE2_VARIANTS = Object.freeze({
 
 // Everything a call needs that differs by capture mode: the version label, the
 // system prompt, the schema and the digest the context hash seeds with.
-// `lighting: true` (GATE_LAWN_LIGHTING, decided by the caller) selects the variant
+// `lighting: true` (decided by the caller) selects the variant
 // that also reads each photo's light; off, the two original variants are returned
 // exactly as before.
 function promptFor({ shotList: shotListOn = false, lighting = false, scale2 = false } = {}) {

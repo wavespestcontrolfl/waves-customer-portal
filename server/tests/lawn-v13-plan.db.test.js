@@ -142,13 +142,13 @@ describeDb('the v13 plan through PostgreSQL', () => {
     });
   });
 
-  // The inactive-row and alias notices (round 12) on a base line of the plan: the October Dimension bag stands in
+  // The inactive-row and alias notices (round 12) on a base line of the plan: the October Stonewall 0.37% 18-0-10 bag stands in
   // (the July potash step is gone: 20261007189000).
   describe('a recipe base product whose catalog row is inactive or under another name', () => {
-    const BAG = 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer';
+    const BAG = 'LESCO Stonewall 0.37% 18-0-10';
     beforeAll(async () => {
       await knex('products_catalog').insert({
-        name: BAG, category: 'fertilizer', product_type: 'fertilizer', default_rate_per_1000: 2.78, rate_unit: 'lb', analysis_n: 18, analysis_p: 0, analysis_k: 10,
+        name: BAG, category: 'herbicide', product_type: 'pesticide', default_rate_per_1000: 4.04, rate_unit: 'lb', analysis_n: 18, analysis_p: 0, analysis_k: 10,
         label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'lb', active: true,
       });
       const staged = await knex('lawn_protocols').where({ protocol_key: KEY, version: LAWN_V13_VERSION }).first();

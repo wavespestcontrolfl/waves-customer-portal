@@ -2301,7 +2301,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
         {metrics.map((m) => {
           const current = scores[m.key] || 0;
           // The server flags the first-visit color as hidden when the first and latest
-          // photos were not taken in known, compatible light (GATE_LAWN_LIGHTING):
+          // photos were not taken in known, compatible light:
           // today's color shows alone, with no "from" and no change.
           const compareHidden = m.key === 'colorHealth' && initialScores?.colorHidden === true;
           const initial = compareHidden ? 0 : (initialScores?.[m.initialKey] || 0);

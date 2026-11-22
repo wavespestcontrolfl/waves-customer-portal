@@ -1,8 +1,8 @@
-// Customer portal lawn health card under GATE_LAWN_LIGHTING (owner 2026-10-04): the
+// Customer portal lawn health card with lawn lighting-aware color (owner 2026-10-04): the
 // card's "Color / Nutrients: +N from X%" compares the latest visit with the FIRST
 // one, so the server flags it hidden (initialScores.colorHidden, improvement.colorHealth
 // null) unless both visits were photographed in known, compatible light. Every other
-// number is a raw reading and is untouched. Gate off: the payload is what it was.
+// number is a raw reading and is untouched. Without the visit assessment gate the payload is what it was.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/lawn-assessment-history', () => ({
   visitEligibility: jest.fn().mockResolvedValue({ propertyId: 'fixture-property' }),
@@ -24,7 +24,7 @@ const history = require('../services/lawn-assessment-history');
 const router = require('../routes/lawn-health');
 const dashboard = router.stack.find((layer) => layer.route?.path === '/:customerId').route.stack[0].handle;
 
-const ENV = ['GATE_LAWN_PROPERTY_HISTORY', 'GATE_LAWN_LIGHTING', 'GATE_LAWN_VISIT_ASSESSMENT'];
+const ENV = ['GATE_LAWN_PROPERTY_HISTORY', 'GATE_LAWN_VISIT_ASSESSMENT'];
 const saved = {};
 beforeEach(() => { ENV.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; }); process.env.GATE_LAWN_PROPERTY_HISTORY = 'true'; });
 afterEach(() => { ENV.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }); });
@@ -62,23 +62,23 @@ async function payload({ runs = [], runsFail = false } = {}) {
   expect(next).not.toHaveBeenCalled();
   return { body: res.json.mock.calls[0][0], tables };
 }
-const live = () => { process.env.GATE_LAWN_LIGHTING = 'true'; process.env.GATE_LAWN_VISIT_ASSESSMENT = 'true'; };
+const live = () => { process.env.GATE_LAWN_VISIT_ASSESSMENT = 'true'; };
 
-test('gate off: no run read, the color comparison is what it was', async () => {
+test('visit assessment off: no run read, the color comparison is what it was', async () => {
   const { body, tables } = await payload({ runs: [run('first', SUN), run('last', CLOUD)] });
   expect(tables).not.toContain('lawn_assessment_runs');
   expect(body.initialScores).not.toHaveProperty('colorHidden');
   expect(body.beforeAfter.improvement.colorHealth).toBe(20);
 });
 
-test('gate on, compatible light on the first and latest visit: unchanged', async () => {
+test('visit assessment on, compatible light on the first and latest visit: unchanged', async () => {
   live();
   const { body } = await payload({ runs: [run('first', SUN), run('last', SUN)] });
   expect(body.initialScores).not.toHaveProperty('colorHidden');
   expect(body.beforeAfter.improvement.colorHealth).toBe(20);
 });
 
-test('gate on, different / unknown / unreadable light: the color comparison is hidden, every other reading is untouched', async () => {
+test('visit assessment on, different / unknown / unreadable light: the color comparison is hidden, every other reading is untouched', async () => {
   const off = (await payload({ runs: [] })).body;
   live();
   for (const input of [
@@ -95,11 +95,4 @@ test('gate on, different / unknown / unreadable light: the color comparison is h
     expect(body.scores).toEqual(off.scores);
     expect(body.trend).toEqual(off.trend);
   }
-});
-
-test('the gate needs the visit assessment gate too (no light is ever stored without it)', async () => {
-  process.env.GATE_LAWN_LIGHTING = 'true';
-  const { body, tables } = await payload({ runs: [run('first', SUN), run('last', CLOUD)] });
-  expect(tables).not.toContain('lawn_assessment_runs');
-  expect(body.initialScores).not.toHaveProperty('colorHidden');
 });

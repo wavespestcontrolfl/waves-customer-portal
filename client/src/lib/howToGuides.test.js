@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { HOW_TO_GUIDE_LINKS, howToGuideText } from "./howToGuides";
 import { STATIC_COMPOSER_LINKS, appendStaticLinkClause, libraryLinkClause, staticLinkPresent } from "./composerLinks";
+import emailSeed from "../../../server/models/migrations/20261120200000_seed_how_to_guide_email_templates";
 
 const guide = (key) => HOW_TO_GUIDE_LINKS.find((link) => link.key === `howto:${key}`);
 const insert = (body, link) => appendStaticLinkClause(body, { url: link.url, clause: libraryLinkClause(link), guide: link });
@@ -20,6 +21,21 @@ describe("how-to guide rows", () => {
       expect(link.category).toBe("howto");
       // Texts go out as GSM-7; a curly quote or dash would switch the segment encoding.
       expect(howToGuideText(link)).toMatch(/^[\x20-\x7E\n]+$/);
+    }
+  });
+
+  // The emailed guide and the pasted one must tell the customer the same
+  // thing. When a step changes here, publish the new wording in Email
+  // Templates and point this test at the migration that carries it.
+  it("carries the same steps as the emailed guide", () => {
+    for (const link of HOW_TO_GUIDE_LINKS) {
+      const emailed = emailSeed.GUIDES.find((g) => `howto:${g.key}` === link.key);
+      expect(emailed.title).toBe(link.title);
+      expect(emailed.after).toBe(link.after);
+      // The pasted "get the app" step holds the store links; the email has a button.
+      const from = link.key === "howto:get_app" ? 1 : 0;
+      expect(emailed.steps.slice(from)).toEqual(link.steps.slice(from));
+      expect(link.url).toBe(`portal.wavespestcontrol.com/login?next=${encodeURIComponent(emailed.path)}`);
     }
   });
 

@@ -7,6 +7,10 @@
  */
 const { createCapacityDbFixture, describeDb } = require('./helpers/scheduling-capacity-db');
 const { reserveSlot, commitReservation, extendReservation } = require('../services/slot-reservation');
+const { lockVisitAsRead, ASSIGNMENT_FIELDS } = require('../services/scheduling/visit-row-lock');
+const { assertAssignableTechnician } = require('../services/technician-eligibility');
+const { rowBlockMinutes } = require('../services/scheduling/window-rules');
+const { randomUUID } = require('crypto');
 jest.setTimeout(30000);
 
 describeDb('technician shift hours at a commit (PostgreSQL)', () => {
@@ -167,6 +171,100 @@ describeDb('technician shift hours at a commit (PostgreSQL)', () => {
       delete process.env.GATE_TECH_SHIFT_HOURS;
       const { expiresAt } = await extendReservation({ estimateId: first, scheduledServiceId: held.scheduledServiceId });
       expect(new Date(expiresAt).getTime()).toBeGreaterThan(Date.now());
+    });
+  });
+
+  // The after-call booking reads the visit it reuses early, with no lock, picks a technician for
+  // that read, and assigns it later. After its day locks it reads the row again (lockVisitAsRead)
+  // and leaves a row that changed since the first read as it is.
+  describe('a visit read again after the fences (the after-call booking\'s reused visit)', () => {
+    // The first read: the full row, as the booking reads it.
+    const seed = async (extra = {}) => {
+      const stop = f.baseStop({ technician_id: null, window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 60, ...extra });
+      await f.db('scheduled_services').insert(stop);
+      return holdRow(stop.id);
+    };
+    const patch = (id, values) => f.db('scheduled_services').where({ id }).update(values);
+    const reread = (early, day = f.date) => f.db.transaction((trx) => lockVisitAsRead(trx, early, day));
+    const nextDay = new Date(Date.parse(`${f.date}T12:00:00Z`) + 86400000).toISOString().slice(0, 10);
+    // Another writer, which gives up after a quarter second when it must wait for a lock.
+    const other = (work) => f.db.transaction(async (trx) => {
+      await trx.raw("SET LOCAL lock_timeout = '250ms'");
+      return work(trx);
+    });
+
+    test('an unchanged row reads as unchanged, and the row returned is the table\'s own', async () => {
+      const early = await seed();
+      expect(await reread(early)).toEqual({ row: early, changed: [] });
+    });
+
+    test('a change since the first read to a field an assignment is judged on is named; another field is not', async () => {
+      const changes = { scheduled_date: nextDay, window_start: '10:30', window_end: '11:30', estimated_duration_minutes: 90,
+        technician_id: f.ids.otherTech, customer_id: randomUUID(), service_id: randomUUID(), service_key_snapshot: 'lawn_care_recurring',
+        service_type: 'Lawn Care', service_address_zip: '34209', lat: 27.5, lng: -82.6, status: 'en_route' };
+      expect(Object.keys(changes)).toEqual(ASSIGNMENT_FIELDS);
+      for (const [field, value] of Object.entries(changes)) {
+        const early = await seed();
+        await patch(early.id, { [field]: value });
+        const { row, changed } = await reread(early);
+        // A visit on another day is also off the day the caller fenced.
+        expect({ field, changed }).toEqual({ field, changed: field === 'scheduled_date' ? [field, 'fenced day'] : [field] });
+        expect(row.id).toBe(early.id);
+        await f.db('scheduled_services').where({ id: early.id }).del();
+      }
+      const early = await seed();
+      await patch(early.id, { notes: 'a note the office added' });
+      expect(await reread(early)).toMatchObject({ changed: [], row: { id: early.id, notes: 'a note the office added' } });
+    });
+
+    test('each new state of the visit is a change: cancelled, rescheduled, skipped, completed', async () => {
+      for (const status of ['cancelled', 'rescheduled', 'skipped', 'completed']) {
+        const early = await seed();
+        await patch(early.id, { status });
+        expect({ status, ...(await reread(early)) }).toMatchObject({ status, changed: ['status'], row: { id: early.id, status } });
+        await f.db('scheduled_services').where({ id: early.id }).del();
+      }
+    });
+
+    test('a row that is not on the fenced day, or is gone, is reported', async () => {
+      const early = await seed();
+      expect(await reread(early, nextDay)).toEqual({ changed: ['fenced day'], row: early });
+      // No fenced day at all (the path took no day locks): never "unchanged".
+      expect(await f.db.transaction((trx) => lockVisitAsRead(trx, early, undefined))).toMatchObject({ changed: ['fenced day'] });
+      await f.db('scheduled_services').where({ id: early.id }).del();
+      expect(await reread(early)).toEqual({ row: null, changed: ['gone'] });
+    });
+
+    test('it holds the row lock an update takes: a move waits for this transaction, a row that references the visit does not', async () => {
+      const early = await seed();
+      const move = (trx) => patch(early.id, { window_start: '15:00', window_end: '16:00' }).transacting(trx);
+      await f.db.transaction(async (trx) => {
+        await lockVisitAsRead(trx, early, f.date);
+        await expect(other(move)).rejects.toMatchObject({ code: '55P03' });
+        // A foreign key to the visit takes FOR KEY SHARE. It does not wait.
+        await expect(other((o) => o('scheduled_services').where({ id: early.id }).forKeyShare().first('id'))).resolves.toEqual({ id: early.id });
+      });
+      // The transaction ended: the move goes through.
+      await other(move);
+      expect(await holdRow(early.id)).toMatchObject({ window_start: '15:00:00', window_end: '16:00:00' });
+    });
+
+    test('the shift check judges the locked row\'s own block, the stored length included', async () => {
+      const short = await seed({ window_start: '08:00', window_end: '09:00' });
+      // The after-call booking stores a one-hour window for a longer job: 10:00 plus 150 minutes ends at 12:30.
+      const long = await seed({ estimated_duration_minutes: 150 });
+      await f.db.transaction(async (trx) => {
+        const check = async (early) => {
+          const { row, changed } = await lockVisitAsRead(trx, early, f.date);
+          expect(changed).toEqual([]);
+          return assertAssignableTechnician(f.ids.technician, { conn: trx, date: f.date, workDays: true, hours: rowBlockMinutes(row) });
+        };
+        expect(await check(short)).toMatchObject({ id: f.ids.technician });
+        await expect(check(long)).rejects.toMatchObject({ code: 'TECH_NOT_ASSIGNABLE', outsideShift: true });
+        // Gate off: no rule, and the same row is assignable.
+        delete process.env.GATE_TECH_SHIFT_HOURS;
+        expect(await check(long)).toMatchObject({ id: f.ids.technician });
+      });
     });
   });
 });

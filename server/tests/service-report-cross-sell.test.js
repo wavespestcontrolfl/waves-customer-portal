@@ -711,6 +711,41 @@ describe('buildReportCrossSell', () => {
       }
     });
 
+    test('a HIGH lookup flag on a core dimension in a stored request demotes (owner 2026-11-22)', () => {
+      const profileWith = (...flags) => ({ fieldVerifyFlags: flags });
+      // The lookup's own "verify before pricing" grade on a dimension a seed
+      // replays, or on the whole lookup. 12 production seeds read as clean
+      // with one on 2026-11-22.
+      for (const field of ['lotSize', 'squareFootage', 'homeSqFt', 'stories', 'address', 'all']) {
+        const profile = profileWith({ field: 'aiAnalysis', priority: 'MEDIUM' }, { field, priority: 'HIGH', reason: 'x' });
+        expect([field, flagged({ engineRequest: { profile } })]).toEqual([field, true]);
+      }
+      // Each place a request is stored: the lookup copy at the root, the
+      // request the estimator attaches to the result it saves, and a row's
+      // own inputs.
+      const profile = profileWith({ field: 'lotSize', priority: 'HIGH' });
+      expect(flagged({ enriched: profile })).toBe(true);
+      expect(flagged({ result: { fieldVerify: [], engineRequest: { profile, options: {} } } })).toBe(true);
+      expect(flagged({ result: { fieldVerify: [], lineItems: [{ service: 'pest_control', inputs: profile }] } })).toBe(true);
+      // The priority is a word, in any case.
+      expect(flagged({ engineRequest: { profile: profileWith({ field: 'stories', priority: 'high' }) } })).toBe(true);
+      // Not read: a lower priority on the same field (the MEDIUM form of 'all'
+      // marks a record for the right address), a flag with no priority, and a
+      // HIGH flag on a field outside the ruling. Reading every flag would end
+      // nearly every seeded price.
+      for (const flag of [
+        { field: 'all', priority: 'MEDIUM' },
+        { field: 'homeSqFt', priority: 'MEDIUM' },
+        { field: 'lotSize' },
+        { field: 'foundationType', priority: 'HIGH' },
+        { field: 'estimatedTurfSf', priority: 'HIGH' },
+        { field: 'propertyType', priority: 'HIGH' },
+      ]) {
+        const stored = profileWith(flag);
+        expect([flag, flagged({ engineRequest: { profile: stored }, enriched: stored })]).toEqual([flag, false]);
+      }
+    });
+
     test('what was fed into the pricer is not a marker of the price', () => {
       // The lookup profile lists verify flags for most properties (117 of 165
       // seeds on production). The check never read it; reading it would end
@@ -984,6 +1019,20 @@ describe('buildReportCrossSell', () => {
       );
       expect(priced.mode).toBe('priced');
       expect(priced.option.perVisit).toBeGreaterThan(0);
+
+      // A HIGH lookup flag on the lot size in the stored request (owner
+      // 2026-11-22): the same seed is a quote button.
+      const lookupDoubted = await buildReportCrossSell(
+        SERVICE(),
+        dbFor(args({
+          engineRequest: { profile: { fieldVerifyFlags: [{ field: 'lotSize', priority: 'HIGH', reason: 'x' }] } },
+          result: { fieldVerify: [], recurring: { services: [{ service: 'pest_control' }] } },
+        })),
+        { propertyLookup: missLookup },
+      );
+      expect(lookupDoubted).not.toBeNull();
+      expect(lookupDoubted.mode).toBe('quote_cta');
+      expect(lookupDoubted.option).toBeNull();
 
       // The quote wizard's stored shape: the submitted picks at the root and a
       // slim result with no fieldVerify list. The offer is a quote button,

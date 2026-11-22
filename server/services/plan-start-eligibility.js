@@ -1055,4 +1055,6 @@ async function resolvedPropertyTypeBlocker(database, customerId, propertyType) {
   return isCommercialPropertyType(propertyType, managed) ? 'commercial' : null;
 }
 
-module.exports = { planStartBlocker, resolvedPropertyTypeBlocker, PLAN_START_BLOCKERS };
+// isCommercialEstimateRow: also read by the estimate email's "no visit needed" line (estimate-no-visit-line.js), which
+// goes to a home estimate only. One reading of "this estimate says commercial" for both.
+module.exports = { planStartBlocker, resolvedPropertyTypeBlocker, PLAN_START_BLOCKERS, isCommercialEstimateRow };

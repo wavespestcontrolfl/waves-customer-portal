@@ -8,6 +8,7 @@
  * nothing reads, writes or shows them.)
  */
 const { parseETDateTime, etParts } = require('../utils/datetime-et');
+const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
 
 // The owner's numbers, also the values the migration puts on the settings row. A settings row read before that
 // migration ran has none of the columns, so each falls back here.
@@ -82,6 +83,15 @@ const friendShareClause = (refereeCents, code) => `they'll give you a ${dollars(
 // The friend's part of the member invitation email's reward line (referral.invite), after "you get a $25 referral reward and ".
 const memberInviteFriendClause = (refereeCents) => `they get a ${dollars(refereeCents)} credit after their first plan service`;
 
+// The share card's offer line (service report + accepted-estimate screens), gate on: "They get a $50 credit after their
+// first plan service. You get $25." Each sentence stands alone and drops when its amount is 0; the member sentence also
+// drops at the yearly limit (never promise a credit that will not post). '' when neither is left: the card keeps its
+// static words. The caller reads the live amounts and the limit (referralOfferDecision).
+const shareCardOffer = ({ refereeCents, memberCents, atLimit = false }) => [
+  Number(refereeCents) > 0 ? `They get a ${dollars(refereeCents)} credit after their first plan service.` : '',
+  !atLimit && Number(memberCents) > 0 ? `You get ${dollars(memberCents)}.` : '',
+].filter(Boolean).join(' ');
+
 // The member's credit email, account-credit destination (the same line with the gate on or off). Account credit is used
 // only after the customer turns the switch on, so the line says how. It names no invoice: even with the switch on, an
 // invoice another payer is billed for or one on a payment plan takes no credit. The caller passes true only for a
@@ -90,7 +100,100 @@ const memberInviteFriendClause = (refereeCents) => `they get a ${dollars(referee
 const memberCreditEmailLine = (rewardDollars, { canTurnOnAutomaticCredit = false } = {}) => `Your ${formatDollars(rewardDollars)} referral reward has been added to your Waves account as a credit.${
   canTurnOnAutomaticCredit ? ' To use it, turn on "Apply my credit to invoices automatically" in the Waves app.' : ''}`;
 
+// The stored texts (words: owner 2026-11-21). The texts in the database stay as they are; with the gate on, the SEEDED
+// sentence inside a rendered text is swapped for the approved Step 2 words, so nothing is edited by hand on flip day and
+// the amounts are always the live setting. A text an admin rewrote no longer holds the seeded sentence and is returned
+// as stored. Every swap takes the amounts in cents from the caller and states a credit only when it is above 0: with
+// the gate on a seeded reward sentence is never sent as stored. Swaps use string slicing, never a replacement
+// string, because the words hold "$".
+
+// The referral invite text submitReferral sends (the Referral Settings column, or the referral_invite row when the
+// column is empty). submitReferral refuses a phone that is already a Waves customer; POST /referrals/invite does not
+// check the recipient, so that route sends the row as stored and promises no credit.
+// head = the words before the offer; legacy = the seeded offer. The seeded text ends "<stretch><the referral link>"
+// with an optional STOP line. The match needs that exact link, so a name that happens to hold the stretch does not
+// match, and neither does a text an admin pointed at something else (a phone number in place of the link).
+const SEEDED_INVITE_OFFERS = Object.freeze([
+  { head: ' recommended Waves. ', legacy: "You'll both save when you sign up" },
+  { head: ' recommended Waves to you. ', legacy: 'Get a free quote' },
+]);
+const INVITE_STOP_LINE = '\n\nReply STOP to opt out.';
+const friendInviteSmsOffer = (refereeCents) => `Start a plan and get a ${dollars(refereeCents)} credit after your first plan service`;
+// With the gate on and no friend credit to state (a $0 setting, the program paused, the settings unreadable), a seeded
+// invite promises nothing: the referral_invite row's own words, which name no reward.
+const NEUTRAL_INVITE_OFFER = 'Get a free quote';
+
+// `body` is the RENDERED text (names and link filled in); `link` is the referral link the caller rendered it with.
+// The settings column is filled with the link as given; the saved-text renderer shows it without https://
+// (stripSmsUrlScheme), so both forms match. step2On false (the gate is off), or no link to match: exactly as rendered.
+// The swapped text always ends in the STOP line, once (docs/sms-stop-line-policy.md: the first text to someone who is
+// not a customer, and copy that offers a referral reward, both keep it). The seeded settings-column text has none.
+function inviteSmsWithOffer(body, { step2On = false, refereeCents = 0, link = '' } = {}) {
+  const text = String(body ?? '');
+  if (!step2On || !link) return text;
+  const offer = Number(refereeCents) > 0 ? friendInviteSmsOffer(refereeCents) : NEUTRAL_INVITE_OFFER;
+  for (const { head, legacy } of SEEDED_INVITE_OFFERS) {
+    for (const shown of new Set([link, stripSmsUrlScheme(link)])) {
+      for (const stop of ['', INVITE_STOP_LINE]) {
+        const seeded = `${head}${legacy}: ${shown}${stop}`;
+        if (text.endsWith(seeded)) return `${text.slice(0, text.length - seeded.length)}${head}${offer}: ${shown}${INVITE_STOP_LINE}`;
+      }
+    }
+  }
+  return text;
+}
+
+// The referral_nudge email (Automations tab). The seeded sentence differs in the two bodies: the HTML body has it as a
+// sentence of its own, the text body after a dash.
+const NUDGE_SEEDED = Object.freeze({
+  html: 'When a neighbor, friend, or family member signs up for a recurring plan with it and we complete their first service, you each get a <strong>$25 account credit</strong>.',
+  text: ' — when a neighbor signs up for a recurring plan with it and we complete their first service, you each get a $25 account credit.',
+  preview: 'Refer a neighbor: you each get a $25 account credit.',
+});
+
+// The credits a nudge may state, in cents: each one only when it is paid. The member's is 0 at the yearly limit, so a
+// member at the limit is never promised a credit. The email body and the preview summary both read this.
+const nudgeCredits = ({ refereeCents, memberCents, atLimit = false }) => ({
+  friend: Math.max(0, Number(refereeCents) || 0),
+  member: atLimit ? 0 : Math.max(0, Number(memberCents) || 0),
+});
+
+// The approved sentences: the friend's credit, then the member's. One of them at $0: the other alone (the member's
+// alone is today's sentence without "each"). Neither: no sentence, so nothing is promised.
+const nudgeEmailOffer = (offer, html) => {
+  const { friend, member } = nudgeCredits(offer);
+  const credit = (cents) => (html ? `<strong>${dollars(cents)} account credit</strong>` : `${dollars(cents)} account credit`);
+  const start = 'When a neighbor, friend or family member starts a recurring plan with your link';
+  if (!friend) return member ? `${start} and we complete their first service, you get a ${credit(member)}.` : '';
+  return `${start}, they get a ${credit(friend)} after their first service.${member ? ` After we complete their first service, you get a ${credit(member)}.` : ''}`;
+};
+
+// `body` is the stored step body (html or text); `offer` = { refereeCents, memberCents, atLimit } from a decision made
+// with the gate on. A body without the seeded sentence is returned as stored. EVERY occurrence is swapped (a body
+// with the seeded paragraph pasted twice must not keep one copy of the old promise); split/join, never a replacement
+// string, because the words hold "$".
+function nudgeEmailWithOffer(body, { html = false, ...offer }) {
+  const text = String(body ?? '');
+  const seeded = html ? NUDGE_SEEDED.html : NUDGE_SEEDED.text;
+  if (!text.includes(seeded)) return text;
+  const words = nudgeEmailOffer(offer, html);
+  // The text body's seeded stretch starts at a dash: it becomes the end of the sentence before it.
+  if (!html) return text.split(seeded).join(`.${words ? ` ${words}` : ''}`);
+  // No sentence left: the space before the seeded sentence goes too.
+  return words ? text.split(seeded).join(words) : text.split(` ${seeded}`).join('').split(seeded).join('');
+}
+
+// The Automations preview page's one-line summary (never sent), from the same credits as the body.
+function nudgePreviewWithOffer(line, offer) {
+  if (line !== NUDGE_SEEDED.preview) return line;
+  const { friend, member } = nudgeCredits(offer);
+  const parts = [friend ? `they get a ${dollars(friend)} credit` : '', member ? `you get a ${dollars(member)} credit` : ''].filter(Boolean);
+  return parts.length ? `Refer a neighbor: ${parts.join(', ')}.` : 'Refer a neighbor.';
+}
+
 module.exports = {
   STEP2_DEFAULTS, step2Settings, memberCredit, etYearBounds, capReached, ruleTerms, formatDollars,
-  friendInviteOfferLine, friendShareClause, memberInviteFriendClause, memberCreditEmailLine,
+  friendInviteOfferLine, friendShareClause, memberInviteFriendClause, shareCardOffer, memberCreditEmailLine,
+  inviteSmsWithOffer, nudgeEmailWithOffer, nudgePreviewWithOffer,
+  SEEDED_INVITE_OFFERS, NUDGE_SEEDED,
 };

@@ -1,12 +1,10 @@
 /**
- * PUT /admin/customers/:id/properties/:propertyId/reclaimed-water (GATE_LAWN_RECLAIMED_HALF_N): the office says a property's water is
- * reclaimed (true), not (false), or hands it back to the county meter match (null). Dark while the gate is off (404, nothing written);
- * the list answer carries the gate so the panel mounts its control only while it is on.
+ * PUT /admin/customers/:id/properties/:propertyId/reclaimed-water: the office says a property's water is
+ * reclaimed (true), not (false), or hands it back to the county meter match (null).
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
-const mockGate = { on: true };
 jest.mock('../config/feature-gates', () => ({
-  isEnabled: jest.fn(() => false), gateEnvValue: jest.fn(() => false), lawnReclaimedHalfNLive: jest.fn(() => mockGate.on),
+  isEnabled: jest.fn(() => false), gateEnvValue: jest.fn(() => false),
 }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => { req.technicianId = 'admin-1'; req.techRole = 'admin'; next(); },
@@ -45,7 +43,7 @@ const put = (baseUrl, body) => fetch(`${baseUrl}/admin/customers/cust-1/properti
   method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
 });
 
-beforeEach(() => { jest.clearAllMocks(); mockGate.on = true; });
+beforeEach(() => { jest.clearAllMocks(); });
 
 test.each([[true], [false], [null]])('saves %s as the office answer and answers with the property list', async (value) => {
   await withServer(async (baseUrl) => {
@@ -70,18 +68,10 @@ test('a property the writer does not find is its 404, passed through', async () 
   await withServer(async (baseUrl) => { expect((await put(baseUrl, { reclaimed: true })).status).toBe(404); });
 });
 
-test('the gate off: 404 and nothing is written', async () => {
-  mockGate.on = false;
-  await withServer(async (baseUrl) => { expect((await put(baseUrl, { reclaimed: true })).status).toBe(404); });
-  expect(mockEdit).not.toHaveBeenCalled();
-});
-
-test('the list answer carries the gate for the panel while it is on; off, the key is not sent and the body is the old one', async () => {
+test('the list answer always carries reclaimedWater: true, for a staff tab opened before the gate left the code', async () => {
   await withServer(async (baseUrl) => {
-    expect((await (await fetch(`${baseUrl}/admin/customers/cust-1/properties`)).json()).reclaimedWater).toBe(true);
-    mockGate.on = false;
-    const off = await (await fetch(`${baseUrl}/admin/customers/cust-1/properties`)).json();
-    expect(off).not.toHaveProperty('reclaimedWater');
-    expect(Object.keys(off).sort()).toEqual(['canChangeAppointmentAddress', 'canChangePrimary', 'properties', 'propertyServiceAreas']);
+    const body = await (await fetch(`${baseUrl}/admin/customers/cust-1/properties`)).json();
+    expect(body.reclaimedWater).toBe(true);
+    expect(Object.keys(body).sort()).toEqual(['canChangeAppointmentAddress', 'canChangePrimary', 'properties', 'propertyServiceAreas', 'reclaimedWater']);
   });
 });

@@ -939,7 +939,31 @@ async function listFallbackCity(conn, customer, address, coords) {
   }
   return zoneFallbackCity(customer, address, coords, { retained: Boolean(row) && profileMatchesAddress(row, address, coords) });
 }
-async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null, customer, fallbackCity }) {
+// Service-line map LIVE (owner 2026-11-21): a Waves Assessment is offered the home and gap technician of the
+// line its lead asked for. The lead in hand decides alone (`leadId`: the page's own lead, which may have no customer
+// yet; the estimate page's linked lead), so the offer and the commit read the same row; without one the customer's
+// leads are read. Not live: nothing read, nothing named (any active field tech, as before). The answer is the
+// builder's `serviceLines` option, spread as it is: a LINE SCOPE.
+//   conn + strict: the booking transaction's own re-check reads on that transaction and must not turn a failed read
+//   into the default line (assessmentLineUnchanged).
+async function assessmentServiceLines(customer, leadId, { conn = db, strict = false } = {}) {
+  const lineTechnician = require('../services/scheduling/line-technician');
+  if (!lineTechnician.lineMapLive()) return {};
+  const { line } = await lineTechnician.assessmentLineFor(conn, { customerId: customer?.id || null, leadId: leadId || null, strict });
+  return { serviceLines: [line] };
+}
+// The booking transaction's line re-check (pre-push P0): the commit found its slot, and so its technician, in a build
+// for `lineScope`, read before the transaction. Staff can change the lead's service interest in between. Read again
+// on the booking's own transaction, the lead row held until it ends: another line refuses the slot
+// (createSelfBooking's slotGuard: 409 SLOT_TAKEN, and the page gets fresh times for the line as it is now). Not
+// live: both are empty and nothing is read.
+async function assessmentLineUnchanged(conn, { lineScope, customer, leadId }) {
+  const now = await assessmentServiceLines(customer, leadId, { conn, strict: true });
+  return String(now.serviceLines || '') === String((lineScope || {}).serviceLines || '');
+}
+// `lineScope`: a commit passes the scope it read once (assessmentServiceLines), so every build of that commit and its
+// transaction re-check agree on it; a list reads its own.
+async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay, offer = false, address = null, customer, leadId = null, lineScope = null, fallbackCity }) {
   const booking = require('./booking');
   const { buildBookingAvailability, bookInsertionOffersLive } = booking._internals;
   const zoneInputs = zoneFunnelInputs(address);
@@ -951,9 +975,11 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     // createSelfBooking's commit probe measures with (callbackVisit), so the
     // offered travel gap and the commit-time check always agree. No funnel
     // key → no service-type filter: any active field tech (owner decision —
-    // all active techs, scope doc §7).
+    // all active techs, scope doc §7); while GATE_SERVICE_LINE_MAP is live, the
+    // technicians of the line the lead asked for (assessmentServiceLines).
     serviceKey: ASSESSMENT_SERVICE_KEY,
     serviceIdentity: ASSESSMENT_EXPECTED_IDENTITY,
+    ...(lineScope || await assessmentServiceLines(customer, leadId)),
     rangeFrom,
     rangeTo,
     config,
@@ -1039,7 +1065,7 @@ async function computeConsultationSlotsForLead(leadId, { count = 3 } = {}) {
     const booking = require('./booking');
     const config = await booking._internals.loadBookingConfig();
     const range = bookingRange(config);
-    const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, address: resolved.address, customer: custRow });
+    const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, address: resolved.address, customer: custRow, leadId: lead.id });
     return {
       ok: true, slots: flattenNextSlots(built, count), needsAddress: false, address: resolved.address,
       addressInputs: bookingAddressInputs(lead, custRow),
@@ -1978,7 +2004,7 @@ router.get('/:token', async (req, res, next) => {
     let availability = null;
     if (resolved.location) {
       try {
-        const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, offer: true, address: resolved.address, customer: custRow });
+        const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, offer: true, address: resolved.address, customer: custRow, leadId: lead.id });
         availability = built ? shapeAvailability(built, range) : null;
       } catch (err) {
         logger.error(`[inspection-public] availability failed for lead ${lead.id}: ${err.message}`);
@@ -2035,7 +2061,7 @@ router.post('/:token/availability', findSlotsLimiter, async (req, res, next) => 
     if (!catalog.serviceId) return res.status(503).json({ error: 'booking_unavailable' });
     let availability = null;
     try {
-      const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, offer: true, address: resolved.address, customer: custRow });
+      const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes, offer: true, address: resolved.address, customer: custRow, leadId: lead.id });
       availability = built ? shapeAvailability(built, range) : null;
     } catch (err) {
       logger.error(`[inspection-public] address availability failed for lead ${lead.id}: ${err.message}`);
@@ -2106,7 +2132,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     try {
       availability = await buildAvailabilityForLead(resolved.location, {
         rangeFrom: when.dateFrom, rangeTo: when.dateTo, config,
-        duration: catalog.durationMinutes, timeOfDay: when.timeOfDay, offer: true, address: resolved.address, customer: custRow,
+        duration: catalog.durationMinutes, timeOfDay: when.timeOfDay, offer: true, address: resolved.address, customer: custRow, leadId: lead.id,
       });
     } catch (err) {
       logger.error(`[inspection-public] find-slots availability failed for lead ${lead.id}: ${err.message}`);
@@ -2378,7 +2404,7 @@ async function sendSlotTaken(res, { location, address = null, customer, range, c
   if (failure) return sendLocationFailure(res, failure, null, leadId);
   let refreshed = null;
   try {
-    if (location) refreshed = await buildAvailabilityForLead(location, { ...range, config, duration: catalog.durationMinutes, address, customer });
+    if (location) refreshed = await buildAvailabilityForLead(location, { ...range, config, duration: catalog.durationMinutes, address, customer, leadId });
   } catch (err) {
     logger.warn(`[inspection-public] refresh availability failed for lead ${leadId}: ${err.message}`);
   }
@@ -2409,12 +2435,12 @@ async function sendSlotTaken(res, { location, address = null, customer, range, c
 // lookups (pre-push P1s on 2b747741a9, 5fc5e4d648 and 4eb9c11d2a). It reads
 // the customer's city on file as phase 1 left it (`fallbackCity`), the city the
 // booking falls back to, so a reused sibling's city on file decides here too.
-async function revalidateSlotAt(location, { slot, moved, zoneMoved, zone, date, time, config, catalog, leadId, address, customer }) {
+async function revalidateSlotAt(location, { slot, moved, zoneMoved, zone, date, time, config, catalog, leadId, lineScope = null, address, customer }) {
   if (!moved && !(zoneMoved && perTruckLive() && isFunnelZone(zone))) return slot;
   let refreshedDay = null;
   try {
     refreshedDay = await buildAvailabilityForLead(location, {
-      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes, address, fallbackCity: customer.city ?? null,
+      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes, address, customer, leadId, lineScope, fallbackCity: customer.city ?? null,
     });
   } catch (err) {
     logger.warn(`[inspection-public] slot re-validation failed for lead ${leadId}: ${err.message}`);
@@ -2483,7 +2509,7 @@ function parseCommitBody(body) {
 async function bookAssessmentVisit({
   booking, date, bookingSlot, custRow, catalog, bookingLocation, leadDedupe,
   source = 'inspection_link', alertLabel = '🔁 Free consultation self-booked:', estimateGuard = null, slotGuard = null,
-  zoneAddress = null,
+  zoneAddress = null, lineLeadId = null,
 }) {
   const { createSelfBooking } = booking._internals;
   return createSelfBooking({
@@ -2519,8 +2545,11 @@ async function bookAssessmentVisit({
       leadDedupe,
       // The estimate-token page's in-transaction re-check (estimate-assessment-public.js); absent for a lead link.
       ...(estimateGuard ? { estimateGuard } : {}),
-      // The lead link's far-south truck re-check under the booking's date lock (owner rule B per truck).
+      // The page's slot re-check on the booking transaction: the lead link's far-south truck check under the date lock
+      // (owner rule B per truck), and both pages' line check (assessmentLineUnchanged).
       ...(slotGuard ? { slotGuard } : {}),
+      // The lead this assessment is booked for: the shadow log compares with that inquiry (line-technician).
+      ...(lineLeadId ? { lineLeadId } : {}),
       // The lead link's booking address, as its list resolved the zone (zoneFunnelInputs), given the booking's own
       // customer row: the visit's zone, and so the slot guard's, resolves the same way.
       ...(zoneAddress ? { zoneAddress } : {}),
@@ -2824,8 +2853,10 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // It reads that city once, before phase 1 can write the row
     // (listFallbackCity), and the zone re-check below compares with it.
     const firstCity = await listFallbackCity(db, custRow, resolved.address, resolved.location);
+    // The line this commit books on, read once: both builds below and the transaction's re-check use it.
+    const lineScope = await assessmentServiceLines(custRow, lead.id);
     const dayAvailability = await buildAvailabilityForLead(resolved.location, {
-      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes, address: resolved.address, fallbackCity: firstCity,
+      rangeFrom: date, rangeTo: date, config, duration: catalog.durationMinutes, address: resolved.address, customer: custRow, leadId: lead.id, lineScope, fallbackCity: firstCity,
     });
     const slot = findSlotIn(dayAvailability, date, time);
     if (!slot) return sendSlotTaken(res, { location: resolved.location, address: resolved.address, customer: custRow, range, config, catalog, leadId: lead.id });
@@ -2910,7 +2941,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     const nextCommit = { lead, verified, resolved, custRow, bookingAddress, bookingLocation, locationMoved };
     const bookingSlot = await revalidateSlotAt(bookingLocation, {
       slot, moved: locationMoved, zoneMoved: fromCustomer && custRow.city !== firstCity, zone: bookingZone,
-      date, time, config, catalog, leadId: lead.id, address: bookingAddress, customer: custRow,
+      date, time, config, catalog, leadId: lead.id, lineScope, address: bookingAddress, customer: custRow,
     });
     if (!bookingSlot) return sendSlotTaken(res, { ...(await nextCommitRefresh(nextCommit)), range, config, catalog, leadId: lead.id });
 
@@ -2944,16 +2975,17 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // before either inserts, each with a different truck; the second finds the first's stop and gets SLOT_TAKEN.
     // createSelfBooking hands over the zone it stamps on the visit, resolved from the booking address as this link's
     // list resolved it (zoneAddress: its city decides, its text only without one), so the list, the check and the row agree.
-    const slotGuard = (conn, { zone = null } = {}) => truckMayTakeDate(conn, {
+    // And the line re-check, on the same transaction: the lead's service interest as it is at the save.
+    const slotGuard = async (conn, { zone = null } = {}) => (await truckMayTakeDate(conn, {
       estimateZone: zone, date, technicianId: bookingSlot.technician_id ?? null,
-    });
+    })) && assessmentLineUnchanged(conn, { lineScope, customer: custRow, leadId: lead.id });
     // That address, given createSelfBooking's own customer row: the typed (or the lead's) address, or, when the
     // booking uses the profile's own address, the row's address as the booking reads it, which its lock fences
     // (pre-push P1 on 5fc5e4d648: a copy of the profile read here could be stale by then).
     const zoneAddress = (cust) => zoneFunnelInputs(
       locationMoved || resolved.source === 'customer' ? customerAddressFields(cust) : bookingAddress,
     );
-    const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, slotGuard, zoneAddress, leadDedupe: { leadId: lead.id, resolveCustomerIds: (conn) => resolveCustomerIds(conn, { includeMergedWinners: true }), fenceIds: async (conn) => { fencedUniverse = await leadFenceIds(conn, lead.id, verified, custRow.id); return fencedUniverse; }, revalidate: (conn) => commitVerdict(conn, lead.id, verified, custRow.id, fencedUniverse) } });
+    const result = await bookAssessmentVisit({ booking, date, bookingSlot, custRow, catalog, bookingLocation, slotGuard, zoneAddress, lineLeadId: lead.id, leadDedupe: { leadId: lead.id, resolveCustomerIds: (conn) => resolveCustomerIds(conn, { includeMergedWinners: true }), fenceIds: async (conn) => { fencedUniverse = await leadFenceIds(conn, lead.id, verified, custRow.id); return fencedUniverse; }, revalidate: (conn) => commitVerdict(conn, lead.id, verified, custRow.id, fencedUniverse) } });
 
     if (!result.ok) {
       return sendBookingFailure(res, result, { lead, custRow, leadPayload, nextCommit, range, config, catalog, verified });
@@ -3079,6 +3111,8 @@ router._internals = {
   searchParseOpts,
   loadAssessmentCatalog,
   buildAvailabilityForLead,
+  assessmentServiceLines,
+  assessmentLineUnchanged,
   shapeAvailability,
   findSlotIn,
   commitWindowFailure,

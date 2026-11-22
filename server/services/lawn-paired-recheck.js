@@ -40,7 +40,7 @@
  * Perception hygiene: the model gets the photos, the view name and the watch
  * topic's plain name. No score, no product, no prior verdict or status.
  *
- * Lighting (GATE_LAWN_LIGHTING, owner 2026-10-04): read under lawn-paired-recheck-v3.
+ * Lighting (owner 2026-10-04): read under lawn-paired-recheck-v3.
  * Each photo's stored light read (the visit assessment's, never a new model call)
  * rides the request, and a pair whose two photos are not in compatible light
  * (lawn-lighting.js: full_sun and mixed_sun_shade with each other, overcast and
@@ -59,11 +59,11 @@ const { dispatchWithFallback } = require('./llm/call');
 const shotList = require('./lawn-photo-shots');
 const { photoIsUsable } = require('./service-report/lawn-progress');
 const { recordPairedRecheck } = require('./service-report/lawn-visit-memory');
-const { lawnPairedRecheckLive, lawnLightingLive } = require('../config/feature-gates');
+const { lawnPairedRecheckLive, gateEnvValue } = require('../config/feature-gates');
 const lighting = require('./lawn-lighting');
 
 const PROMPT_VERSION = 'lawn-paired-recheck-v2';
-// The version a read is stamped with while GATE_LAWN_LIGHTING is live.
+// The version a read is stamped with under the lighting rule.
 const LIGHTING_PROMPT_VERSION = 'lawn-paired-recheck-v3';
 const LANE_ID = 'lawn_paired_recheck';
 const RECHECK_SOURCE = 'photo_pair';
@@ -131,7 +131,7 @@ Rules:
 - For an item, answer only whether the affected areas look better, the same or worse in AFTER than in BEFORE. Never say which direction the problem runs (for example too dry versus too wet) or what caused it.
 Return JSON only, matching the schema.`;
 
-// v3 (GATE_LAWN_LIGHTING): v2 plus the light rule. Appended to the v2 text, so v2
+// v3: v2 plus the light rule. Appended to the v2 text, so v2
 // stays exactly as it was and v3 differs from it only by this block.
 const LIGHTING_RULE = `
 
@@ -312,7 +312,7 @@ function answerProblem(json, { pairCount, itemKeys } = {}) {
  */
 function normalizeAnswer(json, { pairs, items, promptVersion = PROMPT_VERSION }) {
   // A pair whose two photos are not in compatible light (`colorComparable === false`,
-  // only ever set while GATE_LAWN_LIGHTING is live) cannot speak to color: color is
+  // only ever set under the lighting rule) cannot speak to color: color is
   // dropped from its what_changed, and a better / worse verdict that rested on
   // color alone is read as cannot_tell. Pairs with no such mark are untouched.
   const colorBlocked = (n) => pairs[n - 1]?.colorComparable === false;
@@ -368,7 +368,7 @@ async function loadInputs({ knex, assessmentId, priorAssessmentId }) {
   };
 }
 
-// GATE_LAWN_LIGHTING: the stored light of each of the two visits' photos, by
+// Lighting: the stored light of each of the two visits' photos, by
 // photo row id (a photo with no read, or from a run before the gate, is
 // 'unknown'). THROWS on a failed read; runPairedRecheck's catch then writes
 // nothing, so a degraded read is never frozen as a healthy one.
@@ -477,9 +477,9 @@ async function runPairedRecheck(ctx = {}, deps = {}) {
     const { done, priorAssessmentId, items } = preflight(ctx);
     if (done) return done;
     const { assessmentId } = ctx;
-    // GATE_LAWN_LIGHTING, read at call time: v3 prompt, each photo's stored light,
-    // and no color claim across different light. Off, none of this runs.
-    const lightingOn = lawnLightingLive();
+    // Lawn lighting-aware color (needs the visit assessment, GATE_LAWN_VISIT_ASSESSMENT): v3 prompt, each photo's stored light,
+    // and no color claim across different light.
+    const lightingOn = gateEnvValue('GATE_LAWN_VISIT_ASSESSMENT');
     const inputs = await loadInputs({ knex, assessmentId, priorAssessmentId });
     const lightByPhotoId = lightingOn ? await loadPhotoLights({ knex, assessmentId, priorAssessmentId }) : null;
     const formed = formPairs(inputs).map((pair) => (lightByPhotoId ? markPairLight(pair, lightByPhotoId) : pair));

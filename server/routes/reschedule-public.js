@@ -814,8 +814,8 @@ function searchParseOpts(config, now = new Date()) {
 // times only, and the commit saves the technician of its own anti-forgery
 // rebuild (this same builder), so it keeps that one. A visit with no technician, or one whose
 // technician can no longer take work, gets /book's line and territory ranking
-// while GATE_SERVICE_LINE_MAP=live (serviceLines; a Waves Assessment has no
-// line; not live = no line read, as funnelServiceLines). With one assignable
+// while GATE_SERVICE_LINE_MAP=live (serviceLines; a Waves Assessment takes the
+// line its lead asked for; not live = no line read, as funnelServiceLines). With one assignable
 // technician the offers are the same as before.
 async function offerTechnicianScope(svc) {
   if (svc.technician_id) {
@@ -826,6 +826,7 @@ async function offerTechnicianScope(svc) {
   if (!lineMapLive()) return {};
   const line = await liveServiceLine(db, {
     serviceId: svc.service_id || null, serviceKey: svc.service_key_snapshot || null, serviceType: svc.service_type || null,
+    customerId: svc.customer_id || null,
   });
   return line ? { serviceLines: [line] } : {};
 }
