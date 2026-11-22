@@ -81,11 +81,14 @@ The office composer's referral insert (`server/services/composer-customer-links.
 `composerReferralLine`) states the friend's referral credit while
 `GATE_REFERRAL_STEP2` is on, which test 1 would keep. The owner ruled on
 2026-11-22 ("no line") that it goes without the disclosure: a person in the
-office puts the line into a message to one customer and sends it (the
-Communications composer's Insert Link sheet, or the Intelligence Bar's
-`create_customer_link`, which sends only on the operator's confirm). Recorded
-here so the line is not "fixed" onto it by accident. The texts Waves sends by
-itself about the reward (`referral_invite`, `referral_nudge`) keep the line.
+office puts the line into a message to one customer and sends it. The line
+comes from the Communications composer's Insert Link sheet, or from the
+Intelligence Bar's `create_customer_link`, which builds the line on the
+operator's confirm and sends nothing; the text then goes out through
+`send_sms` on the operator's confirm, or as a draft the operator sends.
+Recorded here so the line is not "fixed" onto it by accident. The texts Waves
+sends by itself about the reward (`referral_invite`, `referral_nudge`) keep
+the line.
 
 ## Adding a template
 

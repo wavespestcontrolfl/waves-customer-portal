@@ -144,8 +144,9 @@ function inviteSmsWithOffer(body, { step2On = false, refereeCents = 0, link = ''
 }
 
 // The office composer's referral insert (composer-customer-links.js buildReferralLink): a line a person in the
-// office puts into a message to one customer (the Insert Link sheet, or the Intelligence Bar's create_customer_link,
-// sent on the operator's confirm). Today's line while there is no new amount; the approved Step 2 words with one.
+// office puts into a message to one customer (from the Insert Link sheet, or built by the Intelligence Bar's
+// create_customer_link; the operator sends the text). Today's line while there is no new amount; the approved Step 2
+// words with one.
 // No STOP line in either state (owner 2026-11-22 "no line": a deliberate exception, docs/sms-stop-line-policy.md).
 // The client removes the line by its link (stripLinkLines), so it stays one line.
 const composerReferralLine = (link, refereeCents) => (Number(refereeCents) > 0
