@@ -112,10 +112,18 @@ jest.mock('../services/service-report/application-conditions', () => ({ fetchRec
     const legacy = await request({ customerId: await customer(), photos });
     expect((await mockKnex('lawn_assessments').where({ id: legacy.body.assessment.id }).first()).score_scale).toBeNull();
     // GATE_LAWN_SCORE_SCALE_V2 needs GATE_LAWN_PROPERTY_HISTORY, which this suite keeps off: the read is forced to scale 2.
-    const spy = jest.spyOn(visitAssessment, 'analyzeVisit').mockImplementation((args) => real({ ...args, scale2: true, lighting: false }));
+    const spy = jest.spyOn(visitAssessment, 'analyzeVisit').mockImplementation((args) => real({ ...args, scale2: true }));
+    // A live read carries each photo's light (the visit assessment is on), so scale 2 runs under the lighting variant.
     dispatch.mockResolvedValue({
       ok: true, provider: 'gemini', model: 'fixture-model', usage: {}, failures: [],
-      json: complete({ scores: { turf_density: rating(82), weed_control: rating(78), color_health: rating(85), condition: rating(90) } }),
+      json: complete({
+        scores: { turf_density: rating(82), weed_control: rating(78), color_health: rating(85), condition: rating(90) },
+        photo_quality: [
+          { photo: 1, quality: 'adequate', issue: '', lighting: 'full_sun', hard_shadows: 'no' },
+          { photo: 2, quality: 'poor', issue: 'blurred', lighting: 'overcast', hard_shadows: 'unknown' },
+          { photo: 3, quality: 'limited', issue: 'glare', lighting: 'full_sun', hard_shadows: 'yes' },
+        ],
+      }),
     });
     try {
       const scale2Customer = await customer();
@@ -125,7 +133,14 @@ jest.mock('../services/service-report/application-conditions', () => ({ fetchRec
       expect(stored).toMatchObject({ score_scale: 2, turf_density: 82, weed_suppression: 78, color_health: 85, stress_damage: 90, confirmed_by_tech: false });
       // The screen's Last visit row on this read's scale comes back with the read (none here).
       expect(body).toHaveProperty('lastVisit', null);
-      expect((await runs.loadRun(body.assessment.id, mockKnex)).prompt_version).toBe('lawn-visit-v1-scale2');
+      const run = await runs.loadRun(body.assessment.id, mockKnex);
+      expect(run.prompt_version).toBe('lawn-visit-v1-lighting-scale2');
+      // The run keeps each photo's light for the report's color comparison; the technician's answer leaves it out.
+      const storedQuality = typeof run.photo_quality === 'string' ? JSON.parse(run.photo_quality) : run.photo_quality;
+      expect(storedQuality.map((row) => [row.photo, row.quality, row.lighting, row.hard_shadows])).toEqual([
+        [1, 'adequate', 'full_sun', false], [2, 'poor', 'overcast', null], [3, 'limited', 'full_sun', true],
+      ]);
+      expect(body.visitAssessment.photoQuality.map((row) => Object.keys(row).sort())).toEqual([['issue', 'photo', 'quality'], ['issue', 'photo', 'quality'], ['issue', 'photo', 'quality']]);
       // Both providers miss: the technician scores this visit by hand, on scale 2 too.
       dispatch.mockResolvedValue({ ok: false, reason: 'gemini_timeout', failures: [] });
       const missed = await request({ customerId: await customer(), photos });
