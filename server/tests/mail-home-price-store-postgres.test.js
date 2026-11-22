@@ -408,7 +408,7 @@ postgres('home price store on PostgreSQL', () => {
       const facts = await permitFacts('PMT-1');
       expect(facts).toMatchObject({
         permit_no: 'PMT-1', type_of_work: 'New Single Family', detail_status: 'ok', conditioned_sqft: 2100, stories: 2, co_date: '2026-10-30',
-        detail_stale: false,
+        detail_stale: false, canceled: false,
       });
       expect(facts.detail_fetched_at.getTime()).toBe(hoursAgo(5).getTime());
     });
@@ -444,6 +444,16 @@ postgres('home price store on PostgreSQL', () => {
       const stale = async (no) => (await permitFacts(no)).detail_stale;
       expect([await stale('PMT-6'), await stale('PMT-7'), await stale('PMT-8'), await stale('PMT-9'), await stale('PMT-10')])
         .toEqual([false, true, true, false, true]);
+    });
+
+    test('canceled: true for a canceled or withdrawn permit, whatever the letter case; false for a live one or a blank status', async () => {
+      await permit('PMT-11', { status: 'Withdrawn' });
+      await permit('PMT-12', { status: 'CANCELED' });
+      await permit('PMT-13', { status: 'CO Issued' });
+      await permit('PMT-14', { status: null });
+      const canceled = async (no) => (await permitFacts(no)).canceled;
+      expect([await canceled('PMT-11'), await canceled('PMT-12'), await canceled('PMT-13'), await canceled('PMT-14')])
+        .toEqual([true, true, false, false]);
     });
 
     test('the row can be handed to the permit reader as its candidate (it needs permit_no, co_date, detail_status)', async () => {
