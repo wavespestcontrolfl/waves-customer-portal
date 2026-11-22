@@ -76,6 +76,17 @@ owner ruled on 2026-09-26 that a caller who dialed US first is different from
 a lead form or a referrer's name: "they called us." No disclosure line.
 Recorded here so it is not "fixed" onto the keep-list by accident.
 
+The office composer's referral insert (`server/services/composer-customer-links.js`
+`buildReferralLink`; words in `server/services/referral-step2.js`
+`composerReferralLine`) states the friend's referral credit while
+`GATE_REFERRAL_STEP2` is on, which test 1 would keep. The owner ruled on
+2026-11-22 ("no line") that it goes without the disclosure: a person in the
+office puts the line into a message to one customer and sends it (the
+Communications composer's Insert Link sheet, or the Intelligence Bar's
+`create_customer_link`, which sends only on the operator's confirm). Recorded
+here so the line is not "fixed" onto it by accident. The texts Waves sends by
+itself about the reward (`referral_invite`, `referral_nudge`) keep the line.
+
 ## Adding a template
 
 Seed it without the line unless one of the two tests above says otherwise.
