@@ -824,8 +824,9 @@ router.get('/analytics/comparison', requireAdmin, async (req, res, next) => {
 // no link, no email. It needs:
 // - staff Google sign-in ready (gate and Google client) and a linked address
 //   the Team tab's link writer takes today;
-// - a row that never held a sign-in: no password, no Google account id an
-//   earlier sign-in pinned, no two-step enrollment. So this press only adds a
+// - a row that never held a sign-in: no password, no sign-in on record
+//   (last_login_at; changing a Google link clears the pinned id), no Google
+//   account id pinned, no two-step enrollment. So this press only adds a
 //   sign-in. It has nothing of an earlier account to carry over or to remove;
 //   a person who had an account before is turned on again from the edit form;
 // - a row that is not an office (admin) login: two-step sign-in setup asks
@@ -834,7 +835,8 @@ router.get('/analytics/comparison', requireAdmin, async (req, res, next) => {
 //   get past it. The table refuses the mark on an admin row as well.
 function hireGoogleAddress(tech) {
   if (!tech.google_email || !googleSignin.googleSigninReady()) return null;
-  if (tech.role === 'admin' || tech.password_hash || tech.google_sub || tech.mfa_enabled_at) return null;
+  if (tech.role === 'admin') return null;
+  if (tech.password_hash || tech.last_login_at || tech.google_sub || tech.mfa_enabled_at) return null;
   return googleSignin.normalizeLinkedGoogleEmail(tech.google_email).value || null;
 }
 
@@ -857,6 +859,11 @@ function hireLinkState(tech, now = new Date()) {
   const status = tech.employment_status || (tech.active ? 'active' : 'inactive');
   const googleOnly = Boolean(tech.google_only_login_at);
   const hireGoogle = status === 'prospective' ? hireGoogleAddress(tech) : null;
+  // A prospective row that was made Google-only, still has a Google address
+  // and is past the Google press (the person signed in before, or the address
+  // cannot sign in today): no press applies (the emailed-link press answers
+  // HIRE_GOOGLE_ONLY_ROW), so the row offers none and says what to do.
+  const returning = status === 'prospective' && googleOnly && Boolean(tech.google_email) && !hireGoogle;
   const passwordUnset = status === 'active' && tech.active === true && !googleOnly
     && !tech.password_hash && !tech.password_changed_at;
   const expires = tech.password_reset_expires_at ? new Date(tech.password_reset_expires_at) : null;
@@ -865,15 +872,18 @@ function hireLinkState(tech, now = new Date()) {
   return {
     // The one action the Team tab offers on this row: hire a prospective
     // placeholder, or resend the link to a hire who has no password yet.
-    hire_action: status === 'prospective' ? 'hire' : (passwordUnset ? 'resend' : null),
+    hire_action: status === 'prospective' ? (returning ? null : 'hire') : (passwordUnset ? 'resend' : null),
     // Which sign-in the Hired press turns on for this row. For 'google' the
     // Hired form sends back the address it showed, and the press is refused
     // when the row no longer holds that address.
-    hire_login: status === 'prospective' ? (hireGoogle ? 'google' : 'password') : null,
+    hire_login: status === 'prospective' && !returning ? (hireGoogle ? 'google' : 'password') : null,
     // null, or how a Google-only account stands today: 'ready', 'unlinked'
     // (no address), 'bad_address' (outside the sign-in domains) or 'off'
-    // (staff Google sign-in off or not set up).
-    hire_google_only: googleOnly && status === 'active' && tech.active === true ? googleOnlyState(tech) : null,
+    // (staff Google sign-in off or not set up). 'returning' = the prospective
+    // row above.
+    hire_google_only: returning
+      ? 'returning'
+      : (googleOnly && status === 'active' && tech.active === true ? googleOnlyState(tech) : null),
     hire_password_unset: passwordUnset,
     hire_link_pending: pending,
     hire_link_expires_at: pending ? expires.toISOString() : null,

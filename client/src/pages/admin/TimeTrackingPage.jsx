@@ -4835,6 +4835,7 @@ const GOOGLE_ONLY_LABELS = {
   unlinked: "No sign-in. Link a Google address.",
   bad_address: "No sign-in. Link a company Google address.",
   off: "No sign-in. Staff Google sign-in is off or not set up.",
+  returning: "Google-only account. Turn it on from the edit form, or clear its Google sign-in first.",
 };
 
 // GATE_HIRED_PACKET: one click turns a prospective placeholder into an active

@@ -49,8 +49,8 @@ function stubApi({ live = true, technicians = [PROSPECTIVE, WAITING, SETTLED], o
     // The server adds hire_action (and the link state) only while the gate is on.
     const rows = live
       ? technicians.map((t) => ({
-        ...t,
         hire_action: t.employment_status === 'prospective' ? 'hire' : (t.hire_password_unset ? 'resend' : null),
+        ...t, // a fixture that names its own hire_action keeps it
       }))
       : technicians.map(({ hire_password_unset, hire_link_pending, hire_link_expires_at, ...rest }) => rest);
     return json({ technicians: rows });
@@ -177,6 +177,8 @@ describe('TeamTab Hired button (GATE_HIRED_PACKET)', () => {
         row('tech-u', 'Unlinked Hire', 'unlinked'),
         { ...row('tech-b', 'Outside Hire', 'bad_address'), google_email: 'b.hire@elsewhere.test' },
         row('tech-o', 'Off Hire', 'off'),
+        // A prospective row past both presses: the server sends no hire_action for it.
+        { ...row('tech-r', 'Returning Hire', 'returning'), employment_status: 'prospective', active: false, hire_action: null },
       ],
     });
     render(<TeamTab showToast={vi.fn()} />);
@@ -185,6 +187,8 @@ describe('TeamTab Hired button (GATE_HIRED_PACKET)', () => {
     expect(screen.getByText('No sign-in. Link a Google address.')).toBeInTheDocument();
     expect(screen.getByText('No sign-in. Link a company Google address.')).toBeInTheDocument();
     expect(screen.getByText('No sign-in. Staff Google sign-in is off or not set up.')).toBeInTheDocument();
+    expect(screen.getByText('Google-only account. Turn it on from the edit form, or clear its Google sign-in first.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Hired' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Resend link' })).not.toBeInTheDocument();
     expect(screen.queryByText('Link expired or not sent')).not.toBeInTheDocument();
   });

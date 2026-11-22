@@ -622,6 +622,8 @@ postgres('Hired button on migrated PostgreSQL', () => {
 
     test.each([
       ['an old password', { password_hash: 'fixture-old-hash' }],
+      // Changing a Google link clears the pinned id, so the sign-in on record is what remains of it.
+      ['a sign-in on record', { last_login_at: new Date('2026-06-01T12:00:00Z') }],
       ['a Google account id an earlier sign-in pinned', { google_sub: `fixture-sub-${randomUUID()}` }],
       ['a two-step enrollment', { mfa_enabled_at: new Date('2026-06-01T12:00:00Z') }],
     ])('a row that held a sign-in before is not offered the Google press: %s', async (_name, held) => {
@@ -760,7 +762,8 @@ postgres('Hired button on migrated PostgreSQL', () => {
       // Google press no longer applies to a row that held a sign-in, and the address is still linked and usable.
       await mockDatabase('technicians').where({ id })
         .update({ employment_status: 'prospective', active: false, google_sub: `fixture-sub-${randomUUID()}` });
-      expect(await listed(id)).toMatchObject({ hire_action: 'hire', hire_login: 'password', hire_google_only: null });
+      // No press applies, so the row offers none and says what to do.
+      expect(await listed(id)).toMatchObject({ hire_action: null, hire_login: null, hire_google_only: 'returning' });
       const before = await row(id);
       expect(await call(`/technicians/${id}/hire`, { body: hireBody() })).toEqual({
         status: 409,
