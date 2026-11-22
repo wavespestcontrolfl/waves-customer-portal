@@ -36,7 +36,10 @@ const router = require('../routes/admin-referrals-v2');
 
 const STAFF = '00000000-0000-4000-8000-0000000000a1';
 const REFERRAL = '00000000-0000-4000-8000-0000000000b2';
-const NOTE = { referralId: REFERRAL, bookedAt: '2027-02-03T15:00:00.000Z', memberName: 'Fixture Member', addressLines: ['12 Sample Way', 'Parrish, FL 34219'] };
+const NOTE = {
+  referralId: REFERRAL, owedSince: '2027-02-03T15:00:00.000Z', memberCustomerId: '00000000-0000-4000-8000-0000000000c3',
+  memberName: 'Fixture Member', addressLines: ['12 Sample Way', 'Parrish, FL 34219'], addressComplete: true,
+};
 
 async function request(method, path) {
   const app = express();

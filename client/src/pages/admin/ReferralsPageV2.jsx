@@ -725,7 +725,7 @@ function ThankYouNotes({ flash }) {
         </div>
         <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
           Write one note by hand to each member below. Each row is one friend who booked. Do not name the friend in
-          the note.
+          the note. Open the member to correct an address.
         </div>
       </div>
       {notes.map((note) => (
@@ -745,14 +745,22 @@ function ThankYouNotes({ flash }) {
           }}
         >
           <div>
-            <div style={{ color: D.heading, fontWeight: 500 }}>{note.memberName || "(no name)"}</div>
-            {note.addressLines.length > 0 ? (
-              note.addressLines.map((line, i) => <div key={i}>{line}</div>)
-            ) : (
-              <div style={{ color: D.muted }}>No mailing address on file</div>
+            <a
+              href={`/admin/customers?customerId=${encodeURIComponent(note.memberCustomerId)}`}
+              style={{ color: D.heading, fontWeight: 500 }}
+            >
+              {note.memberName || "(no name)"}
+            </a>
+            {note.addressLines.map((line, i) => (
+              <div key={i}>{line}</div>
+            ))}
+            {!note.addressComplete && (
+              <div style={{ color: D.heading, fontWeight: 500 }}>
+                {note.addressLines.length > 0 ? "Mailing address is not complete" : "No mailing address on file"}
+              </div>
             )}
             <div style={{ color: D.muted }}>
-              Friend booked {formatETDate(note.bookedAt, { month: "short", day: "numeric", year: "numeric" })}
+              Owed since {formatETDate(note.owedSince, { month: "short", day: "numeric", year: "numeric" })}
             </div>
           </div>
           <button

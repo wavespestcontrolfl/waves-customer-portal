@@ -1151,8 +1151,8 @@ const DAY = 86400000;
 
       const [note] = (await noteList()).filter((n) => n.referralId === ctx.ref.id);
       expect(note).toEqual({
-        referralId: ctx.ref.id, bookedAt: stamped,
-        memberName: `Fixture ${ctx.member.last_name}`, addressLines: ['12 Sample Way', 'Parrish, FL 34219'],
+        referralId: ctx.ref.id, owedSince: stamped, memberCustomerId: ctx.member.id,
+        memberName: `Fixture ${ctx.member.last_name}`, addressLines: ['12 Sample Way', 'Parrish, FL 34219'], addressComplete: true,
       });
       // Never the friend.
       expect(JSON.stringify(note)).not.toContain('Fixture Friend');
@@ -1201,6 +1201,25 @@ const DAY = 86400000;
       gates.referralStep2 = true;
       await firstService(friend, visit);
       expect(await owed(first, second)).toEqual([false, false]);
+    });
+
+    test('the stamp is the conversion, not the day the friend signed up: a friend from before Step 2 whose referral is converted under it is a Step 2 referral, note included', async () => {
+      gates.referralStep2 = false;
+      const member = await customer();
+      const friend = await planFriend({ created_at: new Date(Date.now() - 40 * DAY) }); // signed up long before the gate
+      const visit = await recurringVisit(friend.id, { status: 'completed' });
+      const ref = await referral(member, friend, { ageDays: 40 });
+
+      gates.referralStep2 = true; // the owner turns Step 2 on, then the office converts the referral
+      const before = Date.now();
+      await convert(ref, friend);
+      const converted = await row(ref.id);
+      expect(converted).toMatchObject({ status: 'signed_up', referrer_reward_reason: 'staged' });
+      expect(converted.thank_you_note_due_at.getTime()).toBeGreaterThanOrEqual(before - 1000);
+      expect(await owed(ref)).toEqual([true]);
+
+      await firstService(friend, visit);
+      expect(await row(ref.id)).toMatchObject({ status: 'credited', referrer_reward_reason: 'standard' });
     });
 
     test('a note owed from a booking under Step 2 stays owed when the gate goes off', async () => {

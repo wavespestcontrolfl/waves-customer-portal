@@ -4,10 +4,14 @@
  * notes and marks each one written. Nothing here sends anything.
  *
  * A referral owes a note when all of this holds (one test, `owedNotes`, for the list and for the mark):
- *   - the friend booked under Step 2: thank_you_note_due_at is set. The referral engine stamps it with the
- *     conversion when GATE_REFERRAL_STEP2 is on (conversionSettings), and nothing else writes it. So the note
- *     follows the booking: a referral booked before Step 2 never owes one, whenever it is settled, and a note owed
- *     from a booking under the gate stays owed if the gate goes off;
+ *   - the referral was converted under Step 2: thank_you_note_due_at is set. The referral engine stamps it with
+ *     the conversion when GATE_REFERRAL_STEP2 is on (conversionSettings), and nothing else writes it. The
+ *     conversion is the moment the system records that the friend booked through this member: the office's
+ *     Convert, the office's confirm of an inbound referral, or the estimate sweep. It can be later than the day
+ *     the friend signed up, so the stamp is "owed since", never "booked on". A conversion under the gate is a
+ *     Step 2 referral in every respect (the engine stages it by the Step 2 rules), also when the friend signed up
+ *     before the gate went on. A referral converted before the gate never owes a note, whenever it is settled,
+ *     and a note owed from a conversion under the gate stays owed if the gate goes off;
  *   - the booking stands: the status is signed_up or credited. A referral the office rejected afterwards owes none;
  *   - the office has not marked it written (thank_you_note_at is null);
  *   - the member's account is not archived.
@@ -45,7 +49,11 @@ function addressLines(row) {
   return [clean(row.address_line1), clean(row.address_line2), cityLine].filter(Boolean);
 }
 
-// Oldest booking first, at most LIST_LIMIT rows: the page reads the list again after every answer to a mark, so
+// An envelope needs the street, the city, the state and the ZIP. A profile from a lead can hold a state alone
+// (the column defaults to FL), so "some line is present" does not mean the note can be mailed.
+const addressComplete = (row) => ['address_line1', 'city', 'state', 'zip'].every((part) => clean(row[part]));
+
+// Oldest first, at most LIST_LIMIT rows: the page reads the list again after every answer to a mark, so
 // the rows past the limit come up as the first ones are written.
 async function listThankYouNotes(conn = db) {
   const rows = await owedNotes(conn)
@@ -55,14 +63,16 @@ async function listThankYouNotes(conn = db) {
     .limit(LIST_LIMIT)
     .select(
       'referrals.id', 'referrals.thank_you_note_due_at',
-      'customers.first_name', 'customers.last_name',
+      'customers.id as member_customer_id', 'customers.first_name', 'customers.last_name',
       'customers.address_line1', 'customers.address_line2', 'customers.city', 'customers.state', 'customers.zip',
     );
   return rows.map((row) => ({
     referralId: row.id,
-    bookedAt: row.thank_you_note_due_at,
+    owedSince: row.thank_you_note_due_at,
+    memberCustomerId: row.member_customer_id,
     memberName: [clean(row.first_name), clean(row.last_name)].filter(Boolean).join(' '),
     addressLines: addressLines(row),
+    addressComplete: addressComplete(row),
   }));
 }
 

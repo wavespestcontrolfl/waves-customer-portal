@@ -10,9 +10,10 @@ import ReferralsPageV2 from "./ReferralsPageV2";
 
 const FIRST = "00000000-0000-4000-8000-000000000031";
 const SECOND = "00000000-0000-4000-8000-000000000032";
+const MEMBER = "00000000-0000-4000-8000-000000000041";
 const NOTES = [
-  { referralId: FIRST, bookedAt: "2027-02-03T15:00:00.000Z", memberName: "Fixture Member", addressLines: ["12 Sample Way", "Unit 4", "Parrish, FL 34219"] },
-  { referralId: SECOND, bookedAt: "2027-02-05T15:00:00.000Z", memberName: "Second Member", addressLines: [] },
+  { referralId: FIRST, owedSince: "2027-02-03T15:00:00.000Z", memberCustomerId: MEMBER, memberName: "Fixture Member", addressLines: ["12 Sample Way", "Unit 4", "Parrish, FL 34219"], addressComplete: true },
+  { referralId: SECOND, owedSince: "2027-02-05T15:00:00.000Z", memberCustomerId: "00000000-0000-4000-8000-000000000042", memberName: "Second Member", addressLines: [], addressComplete: false },
 ];
 const response = (body, status = 200) => ({ ok: status < 400, status, json: async () => body });
 
@@ -52,19 +53,34 @@ async function openQueue() {
 }
 
 describe("Referrals queue: thank-you notes to write", () => {
-  it("lists each member with the mailing lines and the day the friend booked, and tells the office not to name the friend", async () => {
+  it("lists each member with the mailing lines and the day the note became owed, and tells the office not to name the friend", async () => {
     await openQueue();
 
     expect(await screen.findByText("Thank-you notes to write (2)")).toBeInTheDocument();
     expect(screen.getByText(/Do not name the friend in\s+the note\./)).toBeInTheDocument();
-    expect(screen.getByText("Fixture Member")).toBeInTheDocument();
+    // The name opens the member's profile, where an address is corrected.
+    expect(screen.getByRole("link", { name: "Fixture Member" })).toHaveAttribute("href", `/admin/customers?customerId=${MEMBER}`);
     expect(screen.getByText("12 Sample Way")).toBeInTheDocument();
     expect(screen.getByText("Unit 4")).toBeInTheDocument();
     expect(screen.getByText("Parrish, FL 34219")).toBeInTheDocument();
-    expect(screen.getByText("Friend booked Feb 3, 2027")).toBeInTheDocument();
+    // The day is when the referral was converted, which can be later than the day the friend signed up.
+    expect(screen.getByText("Owed since Feb 3, 2027")).toBeInTheDocument();
+    expect(screen.queryByText(/Friend booked/)).not.toBeInTheDocument();
     // A member with no address on file is still owed a note; the row says what is missing.
     expect(screen.getByText("Second Member")).toBeInTheDocument();
     expect(screen.getByText("No mailing address on file")).toBeInTheDocument();
+    expect(screen.queryByText("Mailing address is not complete")).not.toBeInTheDocument();
+  });
+
+  it("a row with some address lines but not a full mailing address says so, and can still be marked", async () => {
+    // A profile made from a lead: no street, no ZIP, the state at its default.
+    owed = [{ ...NOTES[0], addressLines: ["FL"], addressComplete: false }];
+    await openQueue();
+
+    expect(await screen.findByText("FL")).toBeInTheDocument();
+    expect(screen.getByText("Mailing address is not complete")).toBeInTheDocument();
+    expect(screen.queryByText("No mailing address on file")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Mark written" })).toBeEnabled();
   });
 
   it("Mark written posts that referral once, takes the row off the card and keeps the other row", async () => {

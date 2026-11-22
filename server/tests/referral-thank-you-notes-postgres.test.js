@@ -103,15 +103,17 @@ postgres('referral thank-you notes (live Postgres)', () => {
     return (await notes.listThankYouNotes()).filter((n) => ids.has(n.referralId));
   };
 
-  test('a friend who booked under Step 2 puts the member on the list, with the mailing lines and the booking day', async () => {
+  test('a referral converted under Step 2 puts the member on the list, with the mailing lines and the day the note became owed', async () => {
     const m = await member({ last_name: 'Listed', address_line2: 'Unit 4' });
     const r = await referral(m);
 
     expect(await listFor(r)).toEqual([{
       referralId: r.id,
-      bookedAt: new Date('2027-02-03T15:00:00.000Z'),
+      owedSince: BOOKED,
+      memberCustomerId: m.id,
       memberName: 'Fixture Listed',
       addressLines: ['12 Sample Way', 'Unit 4', 'Parrish, FL 34219'],
+      addressComplete: true,
     }]);
   });
 
@@ -189,15 +191,21 @@ postgres('referral thank-you notes (live Postgres)', () => {
     expect((await listFor(later, first)).map((n) => n.referralId)).toEqual([first.id, later.id]);
   });
 
-  test('a missing address part leaves no empty line and no stray comma', async () => {
+  test('a missing address part leaves no empty line and no stray comma, and the row says the address is not complete', async () => {
     const noState = await referral(await member({ last_name: 'Nostate', state: null }));
     const blank = await referral(await member({ last_name: 'Blank', address_line1: ' ', city: '', state: null, zip: '' }));
+    // A profile made from a lead: no street and no ZIP, the state column at its default.
+    const stateOnly = await referral(await member({ last_name: 'Stateonly', address_line1: '', city: '', state: 'FL', zip: '' }));
+    const noZip = await referral(await member({ last_name: 'Nozip', zip: ' ' }));
 
     const [a] = await listFor(noState);
     const [b] = await listFor(blank);
-    expect(a.addressLines).toEqual(['12 Sample Way', 'Parrish, 34219']);
-    expect(b.addressLines).toEqual([]);
-    expect(b.memberName).toBe('Fixture Blank');
+    const [c] = await listFor(stateOnly);
+    const [d] = await listFor(noZip);
+    expect(a).toMatchObject({ addressLines: ['12 Sample Way', 'Parrish, 34219'], addressComplete: false });
+    expect(b).toMatchObject({ addressLines: [], addressComplete: false, memberName: 'Fixture Blank' });
+    expect(c).toMatchObject({ addressLines: ['FL'], addressComplete: false });
+    expect(d).toMatchObject({ addressLines: ['12 Sample Way', 'Parrish, FL'], addressComplete: false });
   });
 
   test('Mark written stamps the time and the staff login, and the note leaves the list', async () => {
