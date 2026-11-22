@@ -7201,9 +7201,12 @@ the engine's not-measured marks: a dwelling unit priced from the bedroom count t
 `one_time_pest` too); or any mark of the engine's predicate for a priced row whose price is not exact yet
 (`lineNeedsReviewBeforeExactPrice` in `estimator-engine/draft-builder.js`: a fallback footprint, a low
 `pricingConfidence`, a heuristic or low-grade turf size, `requiresMeasurement`, `quoteRequired`, a custom quote flag,
-a row priced with no count on record); or a mosquito area taken from a lot-category proxy (`missingAreaData: true`).
-The rule reads the marks the engine stores on a row; where the engine stores no mark (a home size or a lawn size
-somebody typed is stored like a measured one), the rule cannot tell and does not try. The office's review of a price (`requiresManualReview`, `manualReviewReasons`) is read by
+a row priced with no count on record); or a mosquito area taken from a lot-category proxy (`missingAreaData: true`);
+or an engine input flag that says a size is not measured or not verified for this unit (`lotSizeMeasured: false`,
+`buildingSizeMeasured: false`, `measuredTurfUnitVerified: false`, anywhere in the saved estimate data). The rule reads
+marks about a size of the home or yard and marks that a price needs a visit. It does not read a quantity of product the
+office picks (mosquito stations, dunks). Where the engine stores no mark (a home size or a lawn size somebody typed is
+stored like a measured one), the rule cannot tell and does not try. The office's review of a price (`requiresManualReview`, `manualReviewReasons`) is read by
 its reasons. Only a reason that says a measured size is large keeps the key (`large_lot`,
 `pest_large_lot_manual_review`, `large_pool_cage`, `pest_large_or_oversized_pool_cage`): a reviewed price from measured
 sizes is still measured. Every other reason, a reason that is not text, and a review mark with no reason take the key

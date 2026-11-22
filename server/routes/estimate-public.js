@@ -24229,10 +24229,13 @@ function estimateMakesNoGuaranteeClaim(estData = {}, pricingBundle = {}) {
 // says a measured size is large (a large lot, a large pool cage) keeps the answer: a sent estimate has had that review,
 // and a reviewed price from measured sizes is still measured. Every other reason, known or new, takes the answer away:
 // most of them say a size is unsure (stories estimated, a mosquito area nobody verified, an office-entered measurement).
-// The rule reads the marks the engine stores on a row. Where the engine stores no mark, the rule cannot tell and does
-// not try: a home size or a lawn size somebody typed is stored like a measured one. A fact the customer states that is
-// no size and no count (a roach type, a grass type) is not read: it needs no visit, and the sentence does not speak
-// of it.
+// What the rule reads, and what it does not. The sentence makes two claims: Waves measured this home and yard from
+// records and images, and the quote needs no visit. So the rule reads (1) the marks that say a size of the home or yard
+// is not measured or not verified, and (2) the marks that say a price needs a visit, a field measurement or a custom
+// quote. It does not read a quantity of product or work the office picks (mosquito stations, dunks): that is no
+// measurement of the home or yard, and it needs no visit. It does not read a fact the customer states that is no size
+// (a roach type, a grass type). And where the engine stores no mark, the rule cannot tell and does not try: a home
+// size or a lawn size somebody typed is stored like a measured one.
 // Three reads, and each one fails closed (estimateIsRemoteMeasured):
 // 1. The saved estimate grants the answer: the rows the guarantee rule reads from it (guaranteeServiceRows with no
 //    served price: both saved result shapes, an inputs-only replay, an authored proposal's rows). At least one service
@@ -24281,12 +24284,16 @@ function storedRowIsNotAService(row) {
 // The size marks, on any stored object (a priced row, a pricer's result, the unit-scope audit):
 // - a unit priced from the bedroom count a caller gave;
 // - a home priced from a fallback footprint (`footprintWasDefaulted`, a *fallback `footprintSource` or `fpSource`);
-// - a mosquito area from a lot-category proxy, not from a lot size (`missingAreaData`).
+// - a mosquito area from a lot-category proxy, not from a lot size (`missingAreaData`);
+// - an engine input flag that says a size is not measured, or not verified for this unit (NOT_MEASURED_INPUT_FLAGS: the
+//   saved engine inputs carry them, and not every pricer puts a mark on its row for them).
+const NOT_MEASURED_INPUT_FLAGS = ['lotSizeMeasured', 'buildingSizeMeasured', 'measuredTurfUnitVerified'];
 const storedRowHasANotMeasuredSize = (row) => row.pricingBasis === UNIT_BAND_PRICING_BASIS
   || row.footprintSource === UNIT_BAND_SIZE_BASIS || row.sizeBasis === UNIT_BAND_SIZE_BASIS
   || row.footprintWasDefaulted === true
   || [row.footprintSource, row.fpSource].some((source) => typeof source === 'string' && /fallback/i.test(source))
-  || row.missingAreaData === true;
+  || row.missingAreaData === true
+  || NOT_MEASURED_INPUT_FLAGS.some((flag) => row[flag] === false);
 
 // Review reasons that say a measured size is large, not that a size is unsure.
 const MEASURED_SIZE_IS_LARGE_REASONS = new Set(['large_lot', 'pest_large_lot_manual_review', 'large_pool_cage', 'pest_large_or_oversized_pool_cage']);

@@ -604,6 +604,35 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
     expect(estimateIsRemoteMeasured({ result: plan('pest_control') }, { frequencies: [{ key: 'quarterly', perServiceTreatments: [{ service: 'pest_control', manualReviewReasons: ['large_lot'] }] }] })).toBe(true);
   });
 
+  test('an engine input flag that says a size is not measured or not verified for this unit', () => {
+    const home = { homeSqFt: 2000, lotSqFt: 8000 };
+    const pestAndLawn = { pest: { frequency: 'quarterly' }, lawn: { frequency: 'premium' } };
+    const ruleFor = (inputs) => estimateIsRemoteMeasured({ engineInputs: inputs }, {});
+    // A turf size from the saved profile that the draft builder could not tie to the quoted unit.
+    expect(ruleFor({ ...home, measuredTurfSf: 3500, services: pestAndLawn })).toBe(true);
+    expect(ruleFor({ ...home, measuredTurfSf: 3500, measuredTurfUnitVerified: true, services: pestAndLawn })).toBe(true);
+    expect(ruleFor({ ...home, measuredTurfSf: 3500, measuredTurfUnitVerified: false, services: pestAndLawn })).toBe(false);
+    // A synthetic lot or building size, on a service whose pricer puts no mark on its row for it.
+    expect(ruleFor({ ...home, services: { pest: { frequency: 'quarterly' } } })).toBe(true);
+    expect(ruleFor({ ...home, lotSizeMeasured: false, services: { pest: { frequency: 'quarterly' } } })).toBe(false);
+    expect(ruleFor({ ...home, buildingSizeMeasured: false, services: { pest: { frequency: 'quarterly' } } })).toBe(false);
+    // The flag counts wherever the save keeps its inputs, beside a saved result too.
+    const saved = { result: { recurring: { services: [recurringRow('pest_control')] } } };
+    expect(estimateIsRemoteMeasured(saved, {})).toBe(true);
+    expect(estimateIsRemoteMeasured({ ...saved, inputs: { lotSizeMeasured: false } }, {})).toBe(false);
+    expect(estimateIsRemoteMeasured({ ...saved, engineRequest: { options: { measuredTurfUnitVerified: false } } }, {})).toBe(false);
+    expect(estimateIsRemoteMeasured({ ...saved, inputs: { lotSizeMeasured: true, buildingSizeMeasured: true } }, {})).toBe(true);
+  });
+
+  test('a quantity of product the office picks is not a measurement of the home: it is not read', () => {
+    // Mosquito stations and dunks raise the price. They are no size of the home or yard, and they need no visit.
+    const inputs = (oneTimeMosquito) => ({ homeSqFt: 2000, lotSqFt: 8000, services: { oneTimeMosquito } });
+    const priceOf = (oneTimeMosquito) => generateEstimate(inputs(oneTimeMosquito)).lineItems.find((line) => line.service === 'one_time_mosquito').price;
+    expect(priceOf({ stationCount: 3, dunkCount: 2 })).toBeGreaterThan(priceOf({}));
+    expect(estimateIsRemoteMeasured({ engineInputs: inputs({}) }, {})).toBe(true);
+    expect(estimateIsRemoteMeasured({ engineInputs: inputs({ stationCount: 3, dunkCount: 2 }) }, {})).toBe(true);
+  });
+
   test('a mosquito area nobody measured, on the real engine', () => {
     const lineOf = (inputs, service) => generateEstimate(inputs).lineItems.find((line) => line.service === service);
     const ruleFor = (inputs) => estimateIsRemoteMeasured({ engineInputs: inputs }, {});
