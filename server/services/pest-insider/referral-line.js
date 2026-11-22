@@ -23,8 +23,16 @@
  * reader, and a member at the yearly limit earns no credit.
  *
  * Only an issue of the Waves Pest Insider's own type is touched, and only
- * where its body holds the line's end as render.js wrote it. Any other
- * newsletter, and an issue whose line was edited by hand, keeps its body.
+ * when its body holds the whole line as render.js wrote it: the question,
+ * the link to the Waves referral page, the link's words and the stored end,
+ * in the HTML part and in the text part. Any other newsletter, and an issue
+ * whose line was edited by hand in either part, keeps its whole body: an
+ * edited line never gets an amount.
+ *
+ * The link opens the Waves website's referral page. That page is one of the
+ * static texts of the Step 2 flip day (docs/gates-and-env.md,
+ * GATE_REFERRAL_STEP2): it names the old, smaller amount until its own words
+ * change, last.
  *
  * This file loads no renderer (like home.js), so the sender and the owner's
  * copy can load it for every newsletter.
@@ -42,24 +50,34 @@ const REFERRAL_TAIL = ' — referrals are the nicest compliment we get.';
 // which HTML shows as written.
 const REFERRAL_TAIL_TOKEN = '{{pi-referral-tail}}';
 
-// The line's end as each part of a rendered issue holds it: in HTML from the
-// link's close to the paragraph's close, in text up to the address on the
-// line below.
-const htmlEnd = (tail) => `>${REFERRAL_LINK_TEXT}</a>${tail}</p>`;
-const textEnd = (tail) => `${REFERRAL_LINK_TEXT}${tail}\n${REFERRAL_URL}\n`;
+// The whole line as each part of a rendered issue holds it. HTML: the
+// paragraph with the question, the link to REFERRAL_URL with its words, and
+// the stored end (render.js styles the two tags, so any attributes pass;
+// nothing else does). Text: the same words, then the address on the next line.
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const HTML_LINE = new RegExp(
+  `(<p[^>]*>${escapeRegExp(REFERRAL_ASK)} <a [^>]*\\bhref="${escapeRegExp(REFERRAL_URL)}"[^>]*>${escapeRegExp(REFERRAL_LINK_TEXT)}</a>)${escapeRegExp(REFERRAL_TAIL)}(</p>)`,
+  'g',
+);
+const textLine = (tail) => `${REFERRAL_ASK} ${REFERRAL_LINK_TEXT}${tail}\n${REFERRAL_URL}\n`;
+const isPart = (part) => typeof part === 'string' && part !== '';
 
 /**
  * A copy of an issue's bodies with `tail` as the end of the referral line, in
  * the place of the stored one. `tail` is a referralTail value, or
- * REFERRAL_TAIL_TOKEN for the sender. A body without the stored end comes
- * back with the same parts. The stored body is never changed.
+ * REFERRAL_TAIL_TOKEN for the sender. Both parts change or neither: the HTML
+ * part must hold the whole line, and so must the text part when the issue
+ * has one. Otherwise the body comes back as given. The stored body is never
+ * changed.
  * @param {{ html: string, text?: string|null }} body
  * @param {string} tail
  */
 function withReferralTail({ html, text }, tail) {
+  const whole = isPart(html) && html.search(HTML_LINE) !== -1 && (!isPart(text) || text.includes(textLine(REFERRAL_TAIL)));
+  if (!whole) return { html, text };
   return {
-    html: String(html || '').split(htmlEnd(REFERRAL_TAIL)).join(htmlEnd(tail)),
-    text: typeof text === 'string' ? text.split(textEnd(REFERRAL_TAIL)).join(textEnd(tail)) : text,
+    html: html.replace(HTML_LINE, (line, head, close) => `${head}${tail}${close}`),
+    text: isPart(text) ? text.split(textLine(REFERRAL_TAIL)).join(textLine(tail)) : text,
   };
 }
 

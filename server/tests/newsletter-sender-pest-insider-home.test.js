@@ -555,15 +555,21 @@ describe('sendCampaign: the end of the referral line', () => {
     expect(mockFriendCents).not.toHaveBeenCalled();
   });
 
-  test('an issue whose line was edited by hand is mailed as stored: no token, no key, no read', async () => {
-    const edit = (part) => part.replace('nicest compliment', 'best compliment');
+  test.each([
+    ['its words', (part) => part.replace('nicest compliment', 'best compliment'), 'best compliment we get.'],
+    ['its link address in both parts', (part) => part.split('/referral/').join('/refer-a-friend/'), '/refer-a-friend/'],
+  ])('an issue whose line was edited by hand (%s) is mailed as stored: no token, no amount, no key, no read', async (name, edit, kept) => {
     buildDb(three({ send: sendRow({ html_body: edit(ISSUE.html_body), text_body: edit(ISSUE.text_body) }) }));
     mockLoadHomeFacts.mockResolvedValue(new Map());
     mockFriendCents.mockResolvedValue(5000);
 
     await sendCampaign('send-1');
 
-    expect(mailed().html).toContain('best compliment we get.');
+    for (const part of [mailed().html, mailed().text]) {
+      expect(part).toContain(kept);
+      expect(part).not.toContain(REFERRAL_TAIL_TOKEN);
+      expect(part).not.toMatch(/\$\s?\d/);
+    }
     for (const r of recipients()) expect(r.substitutions).not.toHaveProperty(REFERRAL_TAIL_TOKEN);
     expect(mockFriendCents).not.toHaveBeenCalled();
   });

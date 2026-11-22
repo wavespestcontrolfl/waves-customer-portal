@@ -666,11 +666,33 @@ describe('the referral line', () => {
     // A reader who gets the stored end back gets the stored body.
     expect(copy.html.split(REFERRAL_TAIL_TOKEN).join(referralTail(0))).toBe(r.html_body);
     expect(copy.text.split(REFERRAL_TAIL_TOKEN).join(referralTail(0))).toBe(r.text_body);
-    // Another body, a line edited by hand, and a send with no text part.
-    const edited = { html: r.html_body.replace('nicest compliment', 'best compliment'), text: r.text_body.replace('nicest compliment', 'best compliment') };
-    expect(withReferralTail(edited, REFERRAL_TAIL_TOKEN)).toEqual(edited);
+    // Another body, and an issue with no text part.
     expect(withReferralTail({ html: '<p>Know a neighbor? Send them our way.</p>', text: null }, REFERRAL_TAIL_TOKEN)).toEqual({ html: '<p>Know a neighbor? Send them our way.</p>', text: null });
-    expect(withReferralTail({ html: r.html_body, text: undefined }, REFERRAL_TAIL_TOKEN).text).toBeUndefined();
+    const htmlOnly = withReferralTail({ html: r.html_body, text: undefined }, REFERRAL_TAIL_TOKEN);
+    expect(htmlOnly.html).toBe(copy.html);
+    expect(htmlOnly.text).toBeUndefined();
+  });
+
+  // The whole line must stand as rendered, in both parts, or neither part changes: an edited line never gets an amount.
+  const EDITS = {
+    'the end': (part) => part.replace('nicest compliment', 'best compliment'),
+    'the question': (part) => part.replace('Know a neighbor fighting', 'Know a friend fighting'),
+    'the link\'s words': (part) => part.replace('Send them our way', 'Send them to Waves'),
+    'the link\'s address': (part) => part.split('/referral/').join('/refer-a-friend/'),
+  };
+  test.each(Object.keys(EDITS))('a line with %s edited by hand keeps its whole body, in both parts or in one', (name) => {
+    const r = renderIssue(BASE);
+    const edit = EDITS[name];
+    expect(edit(r.html_body)).not.toBe(r.html_body);
+    expect(edit(r.text_body)).not.toBe(r.text_body);
+    for (const body of [
+      { html: edit(r.html_body), text: edit(r.text_body) },
+      { html: edit(r.html_body), text: r.text_body },
+      { html: r.html_body, text: edit(r.text_body) },
+    ]) {
+      expect(withReferralTail(body, REFERRAL_TAIL_TOKEN)).toEqual(body);
+      expect(withReferralTail(body, referralTail(5000))).toEqual(body);
+    }
   });
 
   test('the stored line passes the send check, and the amount sentence would not: it never goes in a stored body', () => {

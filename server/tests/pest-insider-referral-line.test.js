@@ -46,12 +46,28 @@ describe('referralTokenCopy: the sender\'s copy', () => {
     expect(mockFriendCents).not.toHaveBeenCalled();
   });
 
-  test('an issue with no text part still gets its token; an issue whose line was edited by hand gets none', () => {
+  test('an issue with no text part still gets its token', () => {
     expect(referralTokenCopy(PEST_INSIDER, { html: BODY.html, text: null })).toEqual({
       body: { html: referralTokenCopy(PEST_INSIDER, BODY).body.html, text: null }, token: REFERRAL_TAIL_TOKEN,
     });
-    const edited = { html: BODY.html.replace('nicest compliment', 'best compliment'), text: BODY.text.replace('nicest compliment', 'best compliment') };
-    expect(referralTokenCopy(PEST_INSIDER, edited)).toEqual({ body: edited, token: null });
+  });
+
+  test('an issue whose line was edited by hand gets no token in either part: its words, or its link address in both parts or in one', () => {
+    const words = (part) => part.replace('nicest compliment', 'best compliment');
+    const address = (part) => part.split('/referral/').join('/refer-a-friend/');
+    for (const edited of [
+      { html: words(BODY.html), text: words(BODY.text) },
+      { html: address(BODY.html), text: address(BODY.text) },
+      { html: address(BODY.html), text: BODY.text },
+      { html: BODY.html, text: address(BODY.text) },
+    ]) {
+      expect(referralTokenCopy(PEST_INSIDER, edited)).toEqual({ body: edited, token: null });
+    }
+  });
+
+  test('a token typed into an issue by hand still gets its key, so it is never mailed raw', () => {
+    const typed = { html: `<p>Hello${REFERRAL_TAIL_TOKEN}</p>`, text: 'Hello' };
+    expect(referralTokenCopy(PEST_INSIDER, typed)).toEqual({ body: typed, token: REFERRAL_TAIL_TOKEN });
   });
 
   test('another newsletter keeps its body, the same object, even when it holds the very same line', () => {
