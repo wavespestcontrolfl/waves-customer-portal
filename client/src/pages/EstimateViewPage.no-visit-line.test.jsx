@@ -40,7 +40,8 @@ async function renderPage(data) {
   });
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => data })));
   render(<EstimateViewPage />);
-  await screen.findByRole('heading', { level: 1 });
+  // The loading screen already has an h1, so wait for words that only the loaded estimate prints: the card's lead.
+  await screen.findByText(LEAD);
 }
 
 class VisibleObserver {
