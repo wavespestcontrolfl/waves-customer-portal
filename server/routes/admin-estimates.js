@@ -317,6 +317,7 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
     ...estimate,
     estimateData: estimate.estimate_data,
   });
+  const noVisitLine = require('../services/estimate-no-visit-line').noVisitLineFor(estimate, { proposalMode });
   return {
     first_name: firstName,
     estimate_url: viewUrl,
@@ -334,6 +335,10 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
     // Only present when the PDF copy rides along:
     // an absent key renders no block, so a send without it is unchanged.
     ...(pdfNote ? { estimate_pdf_note: pdfNote } : {}),
+    // "We measure your home and yard ... so most quotes need no visit." (owner 2026-11-21): a home estimate only.
+    // estimate.delivery also carries a commercial estimate that has no proposal; for it, and for a proposal, the
+    // key is absent and the template's paragraph renders nothing.
+    ...(noVisitLine ? { estimate_no_visit_line: noVisitLine } : {}),
   };
 }
 

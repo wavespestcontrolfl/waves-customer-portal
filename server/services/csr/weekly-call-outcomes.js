@@ -150,10 +150,9 @@ async function loadWeeklyCallOutcomes({ now = new Date(), conn = db, completedDa
 const FIRST_VISIT_SCRIPT_LINE = 'Call script: offer the first open visit before you offer to send an estimate.';
 
 // What the office says when a caller asks whether someone comes out to quote (owner 2026-11-21, his exact words). In
-// the four weeks to Nov 15, 9 of 16 calls about how the estimate works asked this. The same sentence is a paragraph in
-// the estimate email (migration 20261122030000); server/tests/estimate-delivery-no-visit-line-migration.test.js keeps
-// the two copies equal.
-const NO_VISIT_QUOTE_LINE = 'We measure your home and yard from county records and satellite images, so most quotes need no visit.';
+// the four weeks to Nov 15, 9 of 16 calls about how the estimate works asked this. The sentence has one home,
+// services/estimate-no-visit-line.js; the estimate email for a home carries the same words.
+const { NO_VISIT_QUOTE_LINE } = require('../estimate-no-visit-line');
 const NO_VISIT_SCRIPT_LINE = `If the caller asks whether someone comes out to quote, say: "${NO_VISIT_QUOTE_LINE}"`;
 
 // "New-customer callers: 40. Outcome known for 30. Booked on the call: 8 of 30 (27%). Estimate requested or promised, no booking recorded: 20. Call script: offer the first open visit before you offer to send an estimate. If the caller asks whether someone comes out to quote, say: ..."

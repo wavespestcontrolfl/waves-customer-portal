@@ -31,6 +31,8 @@ jest.mock('../services/estimate-delivery-options', () => ({
   }),
   commercialRiskTypeReviewNeeded: jest.fn(() => false),
   validateEstimateDeliveryOptions: jest.fn(),
+  // Real: the "no visit needed" email line reads it to tell a home estimate from a commercial one.
+  isCommercialEstimateData: jest.requireActual('../services/estimate-delivery-options').isCommercialEstimateData,
 }));
 jest.mock('../services/estimate-pricing-audit', () => ({
   buildEstimatePricingAudit: jest.fn(),
@@ -124,6 +126,65 @@ describe('admin estimate email delivery', () => {
     }, 'send-click-2');
     expect(nextSendKey).toMatch(/^estimate\.delivery:[a-f0-9]{64}$/);
     expect(nextSendKey).not.toBe(EmailTemplateLibrary.sendTemplate.mock.calls[0][0].idempotencyKey);
+  });
+
+  // Owner 2026-11-21, his exact words. estimate.delivery also carries a commercial estimate that has no proposal,
+  // and the sentence speaks of a home and yard, so only a home estimate's payload has the line.
+  describe('the "no visit needed" line', () => {
+    const LINE = 'We measure your home and yard from county records and satellite images, so most quotes need no visit.';
+    const estimateOf = (over) => ({
+      id: 'estimate-9',
+      customer_email: 'taylor@example.com',
+      customer_id: null,
+      status: 'sent',
+      updated_at: '2026-05-18T10:00:00.000Z',
+      category: 'RESIDENTIAL',
+      estimate_data: JSON.stringify({ services: [{ service: 'pest_control' }] }),
+      ...over,
+    });
+    const send = (estimate, extra = {}) => router._internals.sendEstimateEmail({
+      estimate,
+      firstName: 'Taylor',
+      viewUrl: 'https://portal.wavespestcontrol.com/estimate/sample',
+      priceLine: '$89/month',
+      idempotencyKey: 'send-click-1',
+      ...extra,
+    });
+    const sent = () => EmailTemplateLibrary.sendTemplate.mock.calls[0][0];
+
+    test('a home estimate sends estimate.delivery with the sentence', async () => {
+      await send(estimateOf());
+      expect(sent().templateKey).toBe('estimate.delivery');
+      expect(sent().payload.estimate_no_visit_line).toBe(LINE);
+    });
+
+    test('a commercial estimate without an enabled proposal sends estimate.delivery with no line', async () => {
+      await send(estimateOf({ category: 'COMMERCIAL' }));
+      expect(sent().templateKey).toBe('estimate.delivery');
+      expect(sent().payload).not.toHaveProperty('estimate_no_visit_line');
+      expect(sent().payload).toEqual(expect.objectContaining({ first_name: 'Taylor', price_summary: '$89/month' }));
+    });
+
+    test('a residential row whose estimate data is commercial gets no line', async () => {
+      await send(estimateOf({ estimate_data: JSON.stringify({ inputs: { propertyType: 'commercial' } }) }));
+      expect(sent().templateKey).toBe('estimate.delivery');
+      expect(sent().payload).not.toHaveProperty('estimate_no_visit_line');
+    });
+
+    test('a commercial proposal sends its own email with no line', async () => {
+      await send(estimateOf({ category: 'COMMERCIAL' }), { proposalMode: true });
+      expect(sent().templateKey).toBe('estimate.proposal_delivery');
+      expect(sent().payload).not.toHaveProperty('estimate_no_visit_line');
+    });
+
+    test('the payload builder: the line follows the estimate, not the caller', () => {
+      const build = (estimate, proposalMode = false) => router._internals.estimateEmailPayload({
+        estimate, firstName: 'Taylor', viewUrl: 'https://portal.wavespestcontrol.com/estimate/sample', priceLine: '$89/month', proposalMode,
+      });
+      expect(build(estimateOf()).estimate_no_visit_line).toBe(LINE);
+      expect(build(estimateOf(), true)).not.toHaveProperty('estimate_no_visit_line');
+      expect(build(estimateOf({ category: null }))).not.toHaveProperty('estimate_no_visit_line');
+    });
   });
 
   test('uses a stable scheduled estimate idempotency key across retry claims', () => {
