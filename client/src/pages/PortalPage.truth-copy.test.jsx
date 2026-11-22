@@ -323,7 +323,8 @@ describe('Refer tab Step 2 words', () => {
     render(<ReferTab customer={customer} onSwitchTab={() => {}} />);
 
     expect(await screen.findByRole('heading', { name: 'Friends & Neighbors' })).toBeInTheDocument();
-    expect(screen.getByText('You earned 10 credits this year, the most we give. Thank you! Credits start again January 1.')).toBeInTheDocument();
+    // The whole approved line (owner 2026-11-21 "words ok"): the note is still promised at the limit.
+    expect(screen.getByText('You earned 10 credits this year, the most we give. Thank you! Credits start again January 1. We still send a thank-you note for every friend who books.')).toBeInTheDocument();
     expect(screen.queryByText(/You earn a/)).not.toBeInTheDocument();
     expect(screen.queryByText(/credit is applied after/)).not.toBeInTheDocument();
   });

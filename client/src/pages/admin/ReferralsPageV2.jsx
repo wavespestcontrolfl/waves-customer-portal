@@ -14,6 +14,7 @@ import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { getAdminUser } from "../../lib/adminAuth";
 import useIsMobile from "../../hooks/useIsMobile";
 import useModalFocus from "../../hooks/useModalFocus";
+import { formatETDate } from "../../lib/timezone";
 
 const API = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: legacy color names remain to preserve the inline-style
@@ -657,6 +658,111 @@ function InboundReferralCard({ item, step2, onDone, flash }) {
 }
 
 // A failed read is not an empty result: say so, and offer a retry.
+// Step 2: one handwritten thank-you note to the member for every friend who books. The card lists the member and
+// the mailing address only: the note never names the friend, so the friend is not on this card or in its data.
+// It reads its own list when the Queue opens and shows nothing when no note is owed.
+function ThankYouNotes({ flash }) {
+  const isMobile = useIsMobile();
+  const [notes, setNotes] = useState([]);
+  const [failed, setFailed] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [busyId, setBusyId] = useState(null);
+
+  useEffect(() => {
+    let current = true;
+    af("/admin/referrals/thank-you-notes")
+      .then((r) => {
+        if (!current) return;
+        setNotes(r.notes || []);
+        setFailed(false);
+      })
+      .catch(() => {
+        if (current) setFailed(true);
+      });
+    return () => {
+      current = false;
+    };
+  }, [reloadKey]);
+
+  const markWritten = async (note) => {
+    if (busyId) return;
+    setBusyId(note.referralId);
+    try {
+      await adminPost(`/admin/referrals/thank-you-notes/${note.referralId}/written`);
+      setNotes((rows) => rows.filter((row) => row.referralId !== note.referralId));
+      flash(`Thank-you note for ${note.memberName || "the member"} marked written`);
+    } catch (e) {
+      flash("Error: " + e.message);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  if (failed) {
+    return <ErrorRow what="thank-you notes to write" onRetry={() => setReloadKey((k) => k + 1)} />;
+  }
+  if (notes.length === 0) return null;
+  return (
+    <div
+      style={{
+        background: D.card,
+        borderRadius: 12,
+        padding: 20,
+        border: `1px solid ${D.border}`,
+        display: "flex",
+        flexDirection: "column",
+        gap: 12,
+      }}
+    >
+      <div>
+        <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
+          Thank-you notes to write ({notes.length})
+        </div>
+        <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+          Write one note by hand to each member below. Each row is one friend who booked. Do not name the friend in
+          the note.
+        </div>
+      </div>
+      {notes.map((note) => (
+        <div
+          key={note.referralId}
+          style={{
+            border: `1px solid ${D.border}`,
+            borderRadius: 10,
+            padding: 14,
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            fontSize: 14,
+            color: D.text,
+          }}
+        >
+          <div>
+            <div style={{ color: D.heading, fontWeight: 500 }}>{note.memberName || "(no name)"}</div>
+            {note.addressLines.length > 0 ? (
+              note.addressLines.map((line, i) => <div key={i}>{line}</div>)
+            ) : (
+              <div style={{ color: D.muted }}>No mailing address on file</div>
+            )}
+            <div style={{ color: D.muted }}>
+              Friend booked {formatETDate(note.bookedAt, { month: "short", day: "numeric", year: "numeric" })}
+            </div>
+          </div>
+          <button
+            onClick={() => markWritten(note)}
+            disabled={busyId !== null}
+            style={{ ...btnSmall(D.card, D.heading), ...touch(isMobile) }}
+          >
+            {busyId === note.referralId ? "Saving..." : "Mark written"}
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function ErrorRow({ what, onRetry }) {
   return (
     <div
@@ -1351,6 +1457,7 @@ export default function ReferralsPageV2() {
               ))}
             </div>
           )}
+          <ThankYouNotes flash={flash} />
           {/* Submit form */}
           <div
             style={{

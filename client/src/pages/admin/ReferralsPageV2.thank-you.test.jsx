@@ -1,0 +1,106 @@
+// @vitest-environment jsdom
+// Referrals → Queue: the thank-you notes the office still has to write (Step 2: one handwritten note to the member
+// for every friend who books). The card shows the member and the mailing address, never the friend.
+import React from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import "@testing-library/jest-dom/vitest";
+import { MemoryRouter } from "react-router-dom";
+import ReferralsPageV2 from "./ReferralsPageV2";
+
+const FIRST = "00000000-0000-4000-8000-000000000031";
+const SECOND = "00000000-0000-4000-8000-000000000032";
+const NOTES = [
+  { referralId: FIRST, bookedAt: "2027-02-03T15:00:00.000Z", memberName: "Fixture Member", addressLines: ["12 Sample Way", "Unit 4", "Parrish, FL 34219"] },
+  { referralId: SECOND, bookedAt: "2027-02-05T15:00:00.000Z", memberName: "Second Member", addressLines: [] },
+];
+const response = (body, status = 200) => ({ ok: status < 400, status, json: async () => body });
+
+let notesResponse;
+let writtenResponse;
+beforeEach(() => {
+  notesResponse = () => response({ notes: NOTES });
+  writtenResponse = () => response({ success: true, written: true });
+  localStorage.setItem("waves_admin_token", "fixture-token");
+  vi.stubGlobal("fetch", vi.fn(async (url) => {
+    if (url === "/api/admin/referrals/stats") return response({ activePromoters: 0, totalReferrals: 0, convertedReferrals: 0, pendingReferrals: 0, totalRewardsDollars: 0, totalPaidOutCents: 0, pendingPayouts: 0, programROI: 0 });
+    if (url === "/api/admin/referrals/promoters?status=all") return response({ promoters: [] });
+    if (url === "/api/admin/referrals/queue") return response({ referrals: [] });
+    if (url === "/api/admin/referrals/payouts") return response({ payouts: [] });
+    if (url === "/api/admin/referrals/inbound") return response({ items: [] });
+    if (url === "/api/admin/referrals/thank-you-notes") return notesResponse();
+    if (url.endsWith("/written")) return writtenResponse();
+    throw new Error(`Unexpected fixture request: ${url}`);
+  }));
+});
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+const writes = () => fetch.mock.calls.filter(([url]) => url.endsWith("/written"));
+
+async function openQueue() {
+  render(<MemoryRouter initialEntries={["/admin/referrals"]}><ReferralsPageV2 /></MemoryRouter>);
+  // The tab prints its count ("Queue (0)"): the count is the referrals waiting, not the notes.
+  fireEvent.click(await screen.findByRole("button", { name: /^Queue/ }));
+}
+
+describe("Referrals queue: thank-you notes to write", () => {
+  it("lists each member with the mailing lines and the day the friend booked, and tells the office not to name the friend", async () => {
+    await openQueue();
+
+    expect(await screen.findByText("Thank-you notes to write (2)")).toBeInTheDocument();
+    expect(screen.getByText(/Do not name the friend in\s+the note\./)).toBeInTheDocument();
+    expect(screen.getByText("Fixture Member")).toBeInTheDocument();
+    expect(screen.getByText("12 Sample Way")).toBeInTheDocument();
+    expect(screen.getByText("Unit 4")).toBeInTheDocument();
+    expect(screen.getByText("Parrish, FL 34219")).toBeInTheDocument();
+    expect(screen.getByText("Friend booked Feb 3, 2027")).toBeInTheDocument();
+    // A member with no address on file is still owed a note; the row says what is missing.
+    expect(screen.getByText("Second Member")).toBeInTheDocument();
+    expect(screen.getByText("No mailing address on file")).toBeInTheDocument();
+  });
+
+  it("Mark written posts that referral once, takes the row off the card and keeps the other row", async () => {
+    await openQueue();
+    const buttons = await screen.findAllByRole("button", { name: "Mark written" });
+    fireEvent.click(buttons[0]);
+
+    expect(await screen.findByText("Thank-you note for Fixture Member marked written")).toBeInTheDocument();
+    expect(writes()).toHaveLength(1);
+    expect(writes()[0][0]).toBe(`/api/admin/referrals/thank-you-notes/${FIRST}/written`);
+    expect(writes()[0][1].method).toBe("POST");
+    expect(screen.queryByText("Fixture Member")).not.toBeInTheDocument();
+    expect(screen.getByText("Thank-you notes to write (1)")).toBeInTheDocument();
+    expect(screen.getByText("Second Member")).toBeInTheDocument();
+  });
+
+  it("a mark the server refused keeps the row and shows the server's reason", async () => {
+    writtenResponse = () => response({ error: "This referral has no thank-you note to write" }, 404);
+    await openQueue();
+    fireEvent.click((await screen.findAllByRole("button", { name: "Mark written" }))[0]);
+
+    expect(await screen.findByText("Error: This referral has no thank-you note to write")).toBeInTheDocument();
+    expect(screen.getByText("Fixture Member")).toBeInTheDocument();
+    expect(screen.getByText("Thank-you notes to write (2)")).toBeInTheDocument();
+  });
+
+  it("shows no card when no note is owed", async () => {
+    notesResponse = () => response({ notes: [] });
+    await openQueue();
+
+    await screen.findByText("Submit Referral");
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => url === "/api/admin/referrals/thank-you-notes")).toBe(true));
+    expect(screen.queryByText(/Thank-you notes to write/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("a failed read is an error with Retry, not an empty list; Retry reads the list again", async () => {
+    notesResponse = () => response({ error: "down" }, 503);
+    await openQueue();
+
+    expect(await screen.findByText("Could not load thank-you notes to write. This is not an empty list.")).toBeInTheDocument();
+    notesResponse = () => response({ notes: NOTES });
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("Thank-you notes to write (2)")).toBeInTheDocument();
+    expect(screen.queryByText(/Could not load thank-you notes/)).not.toBeInTheDocument();
+  });
+});
