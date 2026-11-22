@@ -30,7 +30,9 @@
  */
 const { redactAccessCodes } = require('../context-aggregator');
 const CompletionRecap = require('../completion-recap');
-const { noteRecordCopyViolations, heldAccessCode, CODE_SHAPED_NUMBER_RE } = require('./technician-report-copy');
+const {
+  noteRecordCopyViolations, heldAccessCode, CODE_SHAPED_NUMBER_RE, REPORT_NOTE_LINE_BREAK,
+} = require('./technician-report-copy');
 const { writerRulesRejectionDetail, lowercaseGermanRoach } = require('./report-writer-rules');
 const {
   orderRejection, noteWords, isCount, hideNumberMarks, showNumberMarks,
@@ -76,9 +78,11 @@ const REDACTED_RE = /\bredacted\b/i;
 // full-width "ｇａｔｅ" is "gate", and a mark no one sees (zero width, a soft
 // hyphen) is gone. The access mask, the product screens and the order check
 // then read the same letters. A fraction sign and a prime (feet, inches)
-// stay as written: made plain, "1½" would read "11/2".
+// stay as written: made plain, "1½" would read "11/2". Every line break the
+// reader knows (REPORT_NOTE_LINE_BREAK) is a new line.
 const OTHER_FORM_RUN_RE = /[^′″\u00BC-\u00BE\u2150-\u215E]+/gu;
-const oneForm = (text) => String(text || '').replace(/\p{Cf}/gu, '')
+const EACH_LINE_BREAK_RE = new RegExp(REPORT_NOTE_LINE_BREAK.source, 'g');
+const oneForm = (text) => String(text || '').replace(/\p{Cf}/gu, '').replace(EACH_LINE_BREAK_RE, '\n')
   .replace(OTHER_FORM_RUN_RE, (run) => run.normalize('NFKC')).replace(/\u3002/g, '.');
 
 // The note as the model and the checks read it: access codes never reach a
@@ -122,12 +126,15 @@ function ownNoteText(value) {
 // 2026-11-20, *A*: each wording today's screens miss is refused where the
 // note is written). A word of time: the report gives no day, date or period
 // ("Wait a day before stepping onto the grass.", "Drying time? Two days.",
-// "Foot traffic can resume on Monday.", "... on Nov 22."). A part that opens with an order to
+// "Foot traffic can resume on Monday.", "... on Nov 22.", "... on 11/22."). A part that opens with an order to
 // the customer ("Use rose at the back."). A pass phrase, and a prompt for one.
 // A word for the office alone.
 const TIME_WORD_RE = /\b(?:minutes?|hours?|days?|weeks?|months?|years?|today|tonight|tomorrow|yesterday|overnight|daily|weekly|monthly|(?:mon|tues|wednes|thurs|fri|satur|sun)days?|mon|tues?|wed|thu|thurs?|fri|mornings?|afternoons?|evenings?|nights?|nightly|noon|midnight)\b/i;
-const ORDER_OPENERS = new Set(`use wait keep stay avoid leave make remember try please do call contact enter press open close lock
+const ORDER_OPENERS = new Set(`use wait keep stay avoid leave make remember try please call contact enter press open close lock
 vacuum wash mop wipe mow`.split(/\s+/));
+// "Do" and "do not" open an order only before a word that orders: "Do not
+// see activity in the attic" is a finding.
+const pastDoNot = (partWords) => (partWords[0] === 'do' ? partWords.slice(partWords[1] === 'not' ? 2 : 1) : partWords);
 // A calendar date: a month with its day, either way round ("Nov 22", "22nd
 // of November"). "May" counts only before its day or after "of": "2 may be
 // more" is no date. The short weekdays in TIME_WORD_RE leave out "sat" and
@@ -135,14 +142,21 @@ vacuum wash mop wipe mow`.split(/\s+/));
 const MONTH_SRC = '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
 const DAY_SRC = '\\d{1,2}(?:st|nd|rd|th)?';
 const DATE_RE = new RegExp(`\\b(?:${MONTH_SRC}|may)\\.?\\s+${DAY_SRC}\\b|\\b${DAY_SRC}\\s+(?:of\\s+)?${MONTH_SRC}\\b|\\b${DAY_SRC}\\s+of\\s+may\\b`, 'i');
+// A date in figures: with its year anywhere ("11/22/26"), else a month and
+// a day after a word that leads to a day ("on 11/22"). A fraction is no
+// date ("mesh on 1/4 inch gaps").
+const FIGURE_DATE_RE = /\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b(?:on|by|until|till|after|before|since)\s+(?:the\s+)?(\d{1,2})\/(\d{1,2})\b/gi;
+const FRACTION_BOTTOMS = new Set(['2', '3', '4', '8', '16', '32']);
+const figureDate = (text) => [...text.matchAll(FIGURE_DATE_RE)]
+  .find(([, top, bottom]) => !(top && Number(top) < Number(bottom) && FRACTION_BOTTOMS.has(bottom)));
 function writeTimeRejection(text) {
-  const time = TIME_WORD_RE.exec(text) || DATE_RE.exec(text);
+  const time = TIME_WORD_RE.exec(text) || DATE_RE.exec(text) || figureDate(text);
   if (time) return { reason: 'time', words: [time[0]] };
   if (PASS_PHRASE_RE.test(text)) return { reason: 'access_code' };
   const office = noteWords(text).find((word) => OFFICE_ONLY_WORDS.has(word));
   if (office) return { reason: 'not_for_customer', words: [office] };
   const order = hideNumberMarks(text).split(/[.;!?,:\n]+/).map((part) => noteWords(showNumberMarks(part)))
-    .find((partWords) => ORDER_OPENERS.has(partWords[0]) || orderToCustomer(partWords));
+    .find((partWords) => ORDER_OPENERS.has(pastDoNot(partWords)[0]) || orderToCustomer(partWords));
   return order ? { reason: 'instruction', words: [order[0]] } : null;
 }
 
@@ -153,7 +167,7 @@ const inOneForm = (text) => text === oneForm(text);
 
 function shapeRejection(text) {
   if (!text) return { reason: 'empty' };
-  if (/[\r\n]/.test(text) || SIGN_OFF_RE.test(text) || !inOneForm(text)) return { reason: 'shape' };
+  if (REPORT_NOTE_LINE_BREAK.test(text) || SIGN_OFF_RE.test(text) || !inOneForm(text)) return { reason: 'shape' };
   if (text.length > MAX_OWN_NOTE_CHARS) return { reason: 'too_long' };
   return REDACTED_RE.test(text) ? { reason: 'access_code' } : null;
 }

@@ -75,6 +75,7 @@ describe('the report\'s word screens run on the text', () => {
     ['a line break', 'treated outside. swept webs', 'I treated outside.\nI swept webs.', 'shape'],
     ['a banned word in full-width letters', 'spray is safe', 'Spray is ｓａｆｅ.', 'shape'],
     ['a full-width sentence mark', 'treated outside. use rose at the back', 'I treated outside。Use rose at the back.', 'shape'],
+    ['a line break the reader refuses', 'treated shed', 'I treated\u0085shed.', 'shape'],
     ['a sign-off', 'treated outside', 'I treated outside. - Marcus', 'shape'],
     ['no text', 'treated outside', '  ', 'empty'],
     ['a text that is too long', 'treated outside', `I treated outside. ${'I treated outside. '.repeat(40)}`, 'too_long'],
@@ -98,6 +99,9 @@ describe('the wordings the reader lets stand are refused where the note is writt
     'Foot traffic can resume on the 3rd of December.',
     'Foot traffic can resume on the 3rd of May.',
     'Foot traffic can resume on Fri.',
+    'Foot traffic can resume on 11/22.',
+    'I treated the patio on 11/22/26.',
+    'Do not enter the yard.',
     'Use rose at the back.',
     'For the shed, use bluebird when prompted.',
     'The pass phrase is bluebird.',
@@ -206,6 +210,25 @@ describe('the stored text and the fixed sentence', () => {
   });
 
   test('a catalog that cannot be read throws: the caller uses the fixed sentence', async () => {
-    await expect(reportNoteRejection({ note: 'treated outside', text: 'I treated outside.' })).rejects.toThrow();
+    await expect(reportNoteRejection({ note: 'treated outside', text: 'I treated outside.' }))
+      .rejects.toThrow('catalog-wide trade-name screen needs a catalog read');
+  });
+
+  test('with a database and no rows given, the catalog is read from it', async () => {
+    const tables = [];
+    const db = (table) => ({
+      select: async () => {
+        tables.push(table);
+        return table === 'products_catalog' ? CATALOG.map(({ aliases, ...row }) => row) : [];
+      },
+    });
+    await expect(reportNoteRejection({ note: 'treated outside', text: 'I treated outside.', db })).resolves.toBeNull();
+    expect((await reportNoteRejection({ note: 'sprayed Borlux outside', text: 'I sprayed Borlux outside.', db }))?.reason).toBe('trade_name');
+    expect(tables).toEqual(['products_catalog', 'product_aliases', 'products_catalog', 'product_aliases']);
+  });
+
+  test('a finding that opens with "do not", and a fraction after "on", are no order and no date', async () => {
+    await expect(refusal('do not see activity in the attic', 'I do not see activity in the attic.')).resolves.toBeNull();
+    await expect(refusal('put mesh on 1/4 inch gaps', 'I put mesh on 1/4 inch gaps.')).resolves.toBeNull();
   });
 });

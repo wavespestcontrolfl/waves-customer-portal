@@ -109,6 +109,7 @@ describe('the text is refused', () => {
     ['a person made the thing treated, past a denial', 'customer never sprayed outside', 'You were never sprayed outside.', 'not_in_note', 'were'],
     ['a person made the thing treated, past an adverb', 'customer never personally sprayed outside', 'You were never personally sprayed outside.', 'not_in_note', 'were'],
     ['the one treated made the one who treated', 'customer was sprayed outside', 'You sprayed outside.', 'left_out', 'was'],
+    ['the one treated made the one who treated, past an adverb', 'customer already was sprayed outside', 'You already sprayed outside.', 'left_out', 'was'],
     ['"and" added between an action and what it was done to, past an article', 'inspected the damaged traps', 'I inspected and damaged traps.', 'not_in_note', 'and'],
     ['a person made the thing treated', 'neighbor sprayed outside', 'The neighbor was sprayed outside.', 'not_in_note', 'was'],
     ['"you" added where the note names no customer', 'I said treated shed', 'I said you treated the shed.', 'not_in_note', 'you'],

@@ -903,6 +903,7 @@ module.exports = {
   customerCopyViolations,
   heldAccessCode,
   CODE_SHAPED_NUMBER_RE,
+  REPORT_NOTE_LINE_BREAK,
   noteRecordCopyViolations,
   summaryCopySignature,
   renderWriterRulesState,

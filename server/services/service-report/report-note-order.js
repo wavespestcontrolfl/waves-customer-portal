@@ -236,11 +236,12 @@ function leaveOutRules({ words, parts }, { wordGoes, pairGoes, partGoes, names }
   // A form of "is" between a person and a word of treatment says who was
   // treated, so it stays: "customer was sprayed outside" is not "You sprayed
   // outside".
-  // Whatever stands between it and the treatment ("was never sprayed").
+  // Whatever stands between it and the treatment ("was never sprayed"), and
+  // with a denial or an adverb before it ("customer already was sprayed").
   const saysWhoWasTreated = (i) => {
     if (!FORMS_OF_IS.has(note[i])) return false;
     let before = i - 1;
-    while (samePart(i, before) && SMALL.has(note[before])) before -= 1;
+    while (samePart(i, before) && namesNoOne(note[before])) before -= 1;
     return samePart(i, before) && isActor(note[before]) && note.some((word, j) => j > i && samePart(i, j) && TREATMENTS.has(word));
   };
   const single = note.map((word, i) => named[i] || (!NEVER_LEFT_OUT.has(word) && SMALL.has(word) && !saysWhoWasTreated(i)));
