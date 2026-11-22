@@ -92,11 +92,14 @@ function startBoundedProbe(run) {
 // the 234 estimates sent in the 90 days to 2026-09-26 carried one, so the
 // stamp alone left the offer inert. Both sources count; more than one live
 // lead pointing at the estimate, or a pointer and a stamp naming different
-// leads, is ambiguous and yields none.
-async function linkedLeadIdFor(estimateId, estimateData, conn = db) {
+// leads, is ambiguous and yields none. `lock` (a booking transaction's
+// re-check): the pointing lead rows are held FOR UPDATE on `conn`, so a
+// relink of the lead in hand waits for that transaction.
+async function linkedLeadIdFor(estimateId, estimateData, conn = db, { lock = false } = {}) {
   const candidates = new Set();
   if (estimateId) {
-    const pointing = await conn('leads').where({ estimate_id: estimateId }).whereNull('deleted_at').limit(2).pluck('id');
+    const pointingRows = conn('leads').where({ estimate_id: estimateId }).whereNull('deleted_at').limit(2);
+    const pointing = await (lock ? pointingRows.forUpdate() : pointingRows).pluck('id');
     pointing.forEach((id) => candidates.add(String(id).toLowerCase()));
   }
   // Lowercased on both sides: uuids compare case-insensitively in Postgres,

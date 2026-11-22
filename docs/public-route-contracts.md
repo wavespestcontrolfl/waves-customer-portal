@@ -1310,7 +1310,7 @@ appointment changed concurrently", code: 'SLOT_TAKEN' }` (the rebooker's own
 concurrent-change answer) and writes nothing. A visit with no technician, or whose
 technician can no longer take work, passes the visit's service line instead
 (`serviceLines`, `line-technician liveServiceLine`: catalog row first; a Waves
-Assessment has none), which ranks only while `GATE_SERVICE_LINE_MAP=live`
+Assessment takes the line its lead asked for), which ranks only while `GATE_SERVICE_LINE_MAP=live`
 (home technician first, then the gap technician, territory included). With one
 assignable technician every response is unchanged.
 
@@ -1537,9 +1537,55 @@ signed offer named, with no second line check at confirm: an offer minted before
 a map edit stays redeemable for its 45-minute lifetime, as for any other offer
 input. The capture-intent revalidation passes the same lines as the offer, so
 offer and recheck agree. Fail-open: an unreadable map, or a map with no
-technician set for the asked lines, offers what today's code offers. Public
-inspection booking, public reschedule and re-service offers do not pass lines
-and are unchanged.
+technician set for the asked lines, offers what today's code offers. Re-service
+offers do not pass lines and are unchanged. Public reschedule passes the
+visit's line only for a visit with no technician, or one whose technician can
+no longer take work (above). Every Waves Assessment offer list and commit
+rebuild passes one line while `GATE_SERVICE_LINE_MAP=live`:
+`GET /:token`, `POST /:token/availability`, `POST /:token/find-slots` and
+`POST /:token` of `/api/public/inspection/:token`; `GET /:token`,
+`POST /:token/find-slots` and `POST /:token` of
+`/api/public/estimate-assessment/:token` (it has no `/availability`). Owner
+2026-11-21: the line the page's own lead asked for, where the estimate page's
+own lead is the one lead linked to the estimate; that lead decides alone, and
+its blank interest is the owner's line. With no such lead, the customer's
+newest lead with a service interest is read (`line-technician
+assessmentLineFor`). Lawn, tree & shrub, rodent and wildlife go to the owner's
+line, pest-only, termite and mosquito to that line, no lead to the owner. So
+offers come from that line's home or gap technician; not live, no line is
+read and any active field technician is offered. Each commit reads its line
+once, finds its slot in a build for that line, and reads the line again inside
+the booking transaction with the lead row held (`FOR UPDATE`); the estimate
+page first resolves the estimate's linked lead again on that transaction. A
+lead whose service interest changed in between, or an estimate linked to
+another lead with another line, answers the existing `409 SLOT_TAKEN` with
+fresh times for the line as it is now (the estimate page resolves the
+estimate and its link again for that list). While the map is in shadow no
+request reads a lead: the shadow recorder reads the estimate's linked lead
+after the booking, best-effort. No response shape changes.
+
+**Recorded exceptions to the commit re-check for the assessment line.** The
+line ranks technicians (who does the visit); it is not eligibility (whether
+the customer may book), and the office can reassign a visit. So outside the
+two booking pages' own re-check above, the line is an offer input, as the map
+is (the sentence on `/confirm` above):
+- *A lead linked to the estimate for the first time while its booking
+  transaction runs.* The re-check holds the lead rows that point at the
+  estimate when it reads them. The staff link writers take no per-estimate
+  lock, so a first link written after that read is not seen, as a link written
+  just after the save is not.
+- *Public reschedule of an assessment with no technician (or one who can no
+  longer take work).* It reads the customer's newest lead with a service
+  interest when it builds its offers; the mover's guard re-reads the visit's
+  technician on the locked row, not the lead.
+- *The phone agent's booking request.* It reads the line at its slot re-check
+  for the call's own lead, and again when the call's lead id arrived in
+  between; it does not read the lead inside the save.
+- *A booking with no lead in hand (an estimate with no one linked lead).* The
+  line comes from the customer's newest lead with a service interest, and the
+  re-check holds that row. The lead writers take no per-customer lock, so a
+  lead created, or a blank newer lead filled in, after that read is not seen,
+  as one written just after the save is not.
 
 **Territory routing (`GATE_TERRITORY_ROUTING=true`, owner 2026-10-30; ships dark:
 unset, and every value other than exactly `true`, leaves these routes as described

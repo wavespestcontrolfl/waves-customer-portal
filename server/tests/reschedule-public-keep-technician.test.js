@@ -59,16 +59,19 @@ const SVC = {
   service_key_snapshot: 'quarterly_pest',
 };
 
-// One chainable stand-in for every read: the technician row, the catalog row, else the visit row.
+// One chainable stand-in for every read: the technician row, the catalog row, the customer's lead, else the visit row.
 const tables = [];
-function wireDb({ tech = null, catalog = PEST_CATALOG, svc = null } = {}) {
+function wireDb({ tech = null, catalog = PEST_CATALOG, svc = null, lead = null } = {}) {
   tables.length = 0;
   mockDb.mockImplementation((table) => {
     tables.push(table);
     let value = svc;
     if (table === 'technicians') value = tech;
     else if (table === 'services') value = catalog;
-    const api = { leftJoin: () => api, where: () => api, orderBy: () => api, first: async () => value };
+    else if (table === 'leads') value = lead;
+    const api = {
+      leftJoin: () => api, where: () => api, whereNull: () => api, whereRaw: () => api, orderBy: () => api, first: async () => value,
+    };
     return api;
   });
 }
@@ -143,14 +146,34 @@ describe('buildAvailabilityForService — the visit keeps its technician', () =>
     expect(askedFor().technicianId).toBe('tech-a');
   });
 
-  test('an unassigned Waves Assessment gets neither rule (no line routes an assessment)', async () => {
-    wireDb({ catalog: { category: 'lawn_care', service_key: 'lawn_inspection', name: 'Waves Assessment' } });
-    await buildAvailabilityForService({
-      ...SVC, technician_id: null, service_key_snapshot: 'lawn_inspection', service_type: 'Waves Assessment',
-    }, RANGE);
+  // Owner 2026-11-21 (tech split, choice 4 = A): an assessment goes by what its lead asked for. The visit row holds no
+  // lead, so reschedule reads the customer's newest lead with a service interest; with none, the owner's line.
+  test('an unassigned Waves Assessment is offered the line its customer\'s lead asked for; lawn with no lead', async () => {
+    const ASSESSMENT = { category: 'inspection', service_key: 'lawn_inspection', name: 'Waves Assessment' };
+    const visit = {
+      ...SVC, technician_id: null, service_id: 'catalog-assessment', service_key_snapshot: 'lawn_inspection', service_type: 'Waves Assessment', customer_id: 'cust-1',
+    };
+    wireDb({ catalog: ASSESSMENT, lead: { service_interest: 'Pest Control Service' } });
+    await buildAvailabilityForService(visit, RANGE);
+    expect(askedFor()).not.toHaveProperty('technicianId');
+    expect(askedFor().serviceLines).toEqual(['general']);
+    expect(tables).toContain('leads');
 
+    mockBuildBookingAvailability.mockClear();
+    wireDb({ catalog: ASSESSMENT });
+    await buildAvailabilityForService(visit, RANGE);
+    expect(askedFor().serviceLines).toEqual(['lawn']);
+  });
+
+  test('map not live: an unassigned Waves Assessment gets neither rule and no lead is read', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'shadow';
+    wireDb({ catalog: { category: 'inspection', service_key: 'lawn_inspection', name: 'Waves Assessment' }, lead: { service_interest: 'Pest Control Service' } });
+    await buildAvailabilityForService({
+      ...SVC, technician_id: null, service_key_snapshot: 'lawn_inspection', service_type: 'Waves Assessment', customer_id: 'cust-1',
+    }, RANGE);
     expect(askedFor()).not.toHaveProperty('technicianId');
     expect(askedFor()).not.toHaveProperty('serviceLines');
+    expect(tables).not.toContain('leads');
   });
 });
 
