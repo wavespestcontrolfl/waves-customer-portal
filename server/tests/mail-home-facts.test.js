@@ -1,15 +1,18 @@
 /**
  * The home facts reader (services/mail/home-facts.js) with every outside call injected: no network, no database. Which
  * facts decide the size, when the permit page is read and stored, the size limits, each missing fact, each failure, the
- * two five-in-a-row stops, the kill switch of the parcel map, the permit page's own switch, and the pace. Made-up rows.
+ * five-in-a-row stops (the map's, and the permit reader's own two for the page), the kill switch of the parcel map, the
+ * permit page's own switch, and the pace. Made-up rows.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const {
   createFactsContext, readHomeFacts, factsSummary, factsProblems, arbitrate, firstMissing, LEFT,
-  PARCEL_PAUSE_MS, PERMIT_GAP_MS, PAGE_RETRY_MS, MAX_FAILURES_IN_A_ROW,
+  PARCEL_PAUSE_MS, PAGE_RETRY_MS, MAX_FAILURES_IN_A_ROW,
 } = require('../services/mail/home-facts');
+// The permit reader's own stop rule (pure): the tests fold page statuses with the real one.
+const { _private: permitReader } = require('../services/property-lookup/manatee-permit-detail');
 
 const NOW = Date.parse('2026-11-22T15:00:00Z');
 const HOUR = 60 * 60 * 1000;
@@ -35,6 +38,8 @@ function setup({ parcel = fullParcel(), ...over } = {}) {
     fetchPermitPage: track(async () => ({ status: 'ok', facts: { conditioned_sqft: 2400, stories: 2 } })),
     createThrottle: jest.fn(() => (fn) => fn(Number.MAX_SAFE_INTEGER)),
     recordPermitResult: track(async () => undefined),
+    countPageResult: permitReader.countResult,
+    permitGapMs: jest.fn(() => 2500),
     permitPageOn: jest.fn(() => true),
     sleep: jest.fn(async () => undefined),
     ...over,
@@ -237,13 +242,45 @@ describe('the stops', () => {
     for (let i = 0; i < 7; i += 1) { const row = makeRow(); outs.push(await t.read(row, blankPermit(row))); }
     expect(outs.map((o) => o.failed || (o === LEFT ? 'left' : 'other'))).toEqual([...Array(5).fill('permit_page'), 'left', 'left']);
     expect(t.deps.fetchPermitPage).toHaveBeenCalledTimes(5);
-    expect(factsSummary(t.ctx)).toMatchObject({ permitStopped: true, permitFailuresInARow: 5, permitPageOff: false });
+    expect(factsSummary(t.ctx)).toMatchObject({ permitStopped: true, permitStop: 'outage', permitFailuresInARow: 5, permitPageOff: false });
     expect(factsProblems(t.ctx)).toEqual(['the permit page did not answer (5 failures in a row)']);
     // A home the map sizes fully does not need the page, so the stop does not touch it.
     const full = setup();
     full.ctx.state.pageStopped = true;
     const row = makeRow();
     expect((await full.read(row, blankPermit(row))).missing).toBeNull();
+  });
+
+  test('five pages in a row with no building fields stop the page (the permit reader\'s structure stop): the rest is left, and the run has a problem', async () => {
+    const fetchPermitPage = jest.fn(async () => ({ status: 'no_fields', facts: null }));
+    const t = setup({ parcel: fullParcel({ livingAreaSqft: null }), fetchPermitPage });
+    const outs = [];
+    for (let i = 0; i < 7; i += 1) { const row = makeRow(); outs.push(await t.read(row, blankPermit(row))); }
+    expect(outs.map((o) => (o === LEFT ? 'left' : o.missing))).toEqual([...Array(permitReader.STOP_AFTER).fill('no_home_size'), 'left', 'left']);
+    expect(fetchPermitPage).toHaveBeenCalledTimes(5);
+    expect(t.deps.recordPermitResult).toHaveBeenCalledTimes(5);
+    expect(factsSummary(t.ctx)).toMatchObject({ permitStopped: true, permitStop: 'structure', permitNoFieldsInARow: 5, permitPageOff: false });
+    expect(factsProblems(t.ctx)).toEqual(['the permit page showed no building fields (5 pages in a row; did the page change?)']);
+  });
+
+  test('a good page or a not-found page starts the no-fields count again; a result that cannot be stored counts as a failure', async () => {
+    const answers = ['no_fields', 'no_fields', 'no_fields', 'no_fields', 'ok', 'no_fields', 'no_fields', 'no_fields', 'no_fields', 'not_found', 'no_fields'];
+    const fetchPermitPage = jest.fn(async () => {
+      const status = answers.shift();
+      return { status, facts: status === 'ok' ? { conditioned_sqft: 2400, stories: 2 } : null };
+    });
+    const t = setup({ parcel: fullParcel({ livingAreaSqft: null }), fetchPermitPage });
+    for (let i = 0; i < 11; i += 1) { const row = makeRow(); await t.read(row, blankPermit(row)); }
+    expect(fetchPermitPage).toHaveBeenCalledTimes(11);
+    expect(factsSummary(t.ctx)).toMatchObject({ permitStopped: false, permitStop: null, permitNoFieldsInARow: 1 });
+    // Five results in a row that cannot be stored stop the page as an outage (the permit reader counts them as errors).
+    const broken = setup({
+      parcel: fullParcel({ livingAreaSqft: null }),
+      recordPermitResult: jest.fn(async () => { throw Object.assign(new Error('db away'), { code: 'ECONNRESET' }); }),
+    });
+    for (let i = 0; i < 6; i += 1) { const row = makeRow(); await broken.read(row, blankPermit(row)); }
+    expect(broken.deps.fetchPermitPage).toHaveBeenCalledTimes(5);
+    expect(factsSummary(broken.ctx)).toMatchObject({ permitStopped: true, permitStop: 'outage', permitFailuresInARow: 5 });
   });
 
   test('a page that answers (even with no fields) starts the page count again', async () => {
@@ -295,7 +332,7 @@ describe('the stops', () => {
 });
 
 describe('pace and defaults', () => {
-  test('one call at a time, 0.6 s between map queries (none before the first), the permit throttle at a 2.5 s gap', async () => {
+  test('one call at a time, 0.6 s between map queries (none before the first), the permit throttle at the permit reader\'s gap', async () => {
     const t = setup();
     for (let i = 0; i < 4; i += 1) { const row = makeRow(); await t.read(row, permitOf(row)); }
     expect(t.flight.max).toBe(1);
@@ -303,7 +340,26 @@ describe('pace and defaults', () => {
     expect(PARCEL_PAUSE_MS).toBe(600);
     expect(t.deps.createThrottle).toHaveBeenCalledTimes(1);
     expect(t.deps.createThrottle.mock.calls[0][0]).toMatchObject({ gapMs: 2500, sleep: t.deps.sleep });
-    expect(PERMIT_GAP_MS).toBe(2500);
+    expect(t.deps.permitGapMs).toHaveBeenCalledTimes(1);
+  });
+
+  test('the default wiring takes the gap and the stop rule from the permit reader (PERMIT_DETAIL_SYNC_MIN_GAP_MS, floor 2 s)', () => {
+    const saved = process.env.PERMIT_DETAIL_SYNC_MIN_GAP_MS;
+    try {
+      delete process.env.PERMIT_DETAIL_SYNC_MIN_GAP_MS;
+      const createThrottle = jest.fn(() => (fn) => fn(Number.MAX_SAFE_INTEGER));
+      createFactsContext({ deps: { createThrottle }, clock: () => NOW });
+      expect(createThrottle.mock.calls[0][0]).toMatchObject({ gapMs: 2500 });
+      process.env.PERMIT_DETAIL_SYNC_MIN_GAP_MS = '6000';
+      const slow = createFactsContext({ deps: { createThrottle }, clock: () => NOW });
+      expect(createThrottle.mock.calls[1][0]).toMatchObject({ gapMs: 6000 });
+      process.env.PERMIT_DETAIL_SYNC_MIN_GAP_MS = '100';
+      createFactsContext({ deps: { createThrottle }, clock: () => NOW });
+      expect(createThrottle.mock.calls[2][0]).toMatchObject({ gapMs: 2000 });
+      expect(slow.d.countPageResult).toBe(permitReader.countResult);
+    } finally {
+      if (saved === undefined) delete process.env.PERMIT_DETAIL_SYNC_MIN_GAP_MS; else process.env.PERMIT_DETAIL_SYNC_MIN_GAP_MS = saved;
+    }
   });
 
   test('the default wiring reads the portal\'s own switch for the permit site at call time', () => {

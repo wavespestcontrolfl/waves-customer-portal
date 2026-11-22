@@ -13,10 +13,13 @@
  * Home size = the map's living area, else the permit plan's. Stories = the map's, else the permit's. Lot = the map's.
  * A missing fact is never guessed.
  *
- * Stops (per run, kept in the context): five parcel map failures in a row, or five permit page failures in a row, stop
- * that source; so does the parcel map's kill switch (COUNTY_PARCEL_GIS_DISABLED) and the permit page's own switch
- * (GATE_PERMIT_DETAIL_SYNC off). A row that needs a stopped source is left as it is. factsProblems says what the caller
- * must fail the run for. Strictly sequential: 0.6 s between map queries, the permit reader's throttle at 2.5 s.
+ * Stops (per run, kept in the context): five parcel map failures in a row stop the map. The permit page stops by the
+ * permit reader's own rule (its countResult): five failures in a row (the county site is away), or five pages in a row
+ * with no building fields (the page structure changed; without the stop a run would mark every permit no_fields). The
+ * parcel map's kill switch (COUNTY_PARCEL_GIS_DISABLED) and the permit page's own switch (GATE_PERMIT_DETAIL_SYNC off)
+ * stop their source too. A row that needs a stopped source is left as it is. factsProblems says what the caller must
+ * fail the run for. Strictly sequential: 0.6 s between map queries, the permit reader's throttle at the reader's own
+ * gap (PERMIT_DETAIL_SYNC_MIN_GAP_MS, 2.5 s by default).
  *
  * This module never touches the database itself (the stored permit row comes in as an argument; recordResult is the
  * permit reader's), calls no paid or AI service, and logs nothing: counts and codes only, never a name, an address, a
@@ -24,7 +27,6 @@
  */
 
 const PARCEL_PAUSE_MS = 600;
-const PERMIT_GAP_MS = 2500;
 const PAGE_RETRY_MS = 20 * 60 * 60 * 1000;
 const MAX_FAILURES_IN_A_ROW = 5;
 // The sizes the price table's columns hold. A number no home has is a missing fact, so it can never fail a save.
@@ -59,6 +61,9 @@ const REAL = {
   fetchPermitPage: () => require('../property-lookup/manatee-permit-detail')._private.fetchPermitDetail,
   createThrottle: () => require('../property-lookup/manatee-permit-detail')._private.createThrottle,
   recordPermitResult: () => require('../property-lookup/manatee-permit-detail')._private.recordResult,
+  // The permit reader's own stop rule and request gap, so the two readers of the county site agree.
+  countPageResult: () => require('../property-lookup/manatee-permit-detail')._private.countResult,
+  permitGapMs: () => require('../property-lookup/manatee-permit-detail')._private.minGapMs,
   permitPageOn: () => permitPageSwitchOn,
   sleep: () => sleepFor,
 };
@@ -72,10 +77,12 @@ function createFactsContext({ deps = {}, clock = Date.now } = {}) {
   return {
     d,
     clock,
-    polite: d.createThrottle({ gapMs: PERMIT_GAP_MS, sleep: d.sleep, now: clock }),
+    polite: d.createThrottle({ gapMs: d.permitGapMs(), sleep: d.sleep, now: clock }),
     state: {
       mapQueries: 0, mapFailures: 0, mapStopped: false, mapDisabled: false,
-      pages: 0, pageFailures: 0, pageStopped: false, pageOff: false, storeErrors: {},
+      // pageCounts and pageStreaks are the shapes the permit reader's countResult folds a page status into.
+      pages: 0, pageCounts: { ok: 0, noFields: 0, notFound: 0, errors: 0 }, pageStreaks: { noFields: 0, errors: 0 },
+      pageStopped: false, pageStop: null, pageOff: false, storeErrors: {},
     },
   };
 }
@@ -140,6 +147,17 @@ async function readParcel(row, ctx) {
 const isStale = (permit) => permit.detail_status === 'ok' && permit.detail_stale === true;
 const withoutStaleFacts = (permit) => (isStale(permit) ? { ...permit, conditioned_sqft: null, stories: null } : permit);
 
+// One page status ('error' for a failure) folded into the run's counts and streaks by the permit reader's own rule.
+// It answers 'structure' or 'outage' when the page must stop for this run.
+function countPage(ctx, status) {
+  const { d, state } = ctx;
+  const stop = d.countPageResult(state.pageCounts, state.pageStreaks, status);
+  if (stop) {
+    state.pageStopped = true;
+    state.pageStop = stop;
+  }
+}
+
 // The permit page, fetched and stored. A transport failure throws out of the reader: that is a failure of the row, and
 // nothing is stored for it (the row's own failed status holds the 20-hour wait).
 async function fetchAndStorePage(permit, ctx) {
@@ -148,19 +166,21 @@ async function fetchAndStorePage(permit, ctx) {
   try {
     page = await d.fetchPermitPage(permit.permit_no, { polite: ctx.polite });
   } catch {
-    state.pageFailures += 1;
-    if (state.pageFailures >= MAX_FAILURES_IN_A_ROW) state.pageStopped = true;
+    countPage(ctx, 'error');
     return { failed: 'permit_page' };
   }
-  state.pageFailures = 0;
   state.pages += 1;
+  let stored = true;
   try {
     await d.recordPermitResult(permit, page.status, page.facts, new Date(ctx.clock()));
   } catch (err) {
     // The result could not be stored: the facts of this read are still used, and the caller fails the run.
     const code = errorCode(err);
     state.storeErrors[code] = (state.storeErrors[code] || 0) + 1;
+    stored = false;
   }
+  // As the permit reader counts it: a result that could not be stored is an error.
+  countPage(ctx, stored ? page.status : 'error');
   // No good read: a stale row's old facts stay unused. A good read is merged as recordResult stores it: a fact the
   // page shows replaces the stored one, and a fact it does not show keeps the stored value.
   if (page.status !== 'ok') return { permit: withoutStaleFacts(permit) };
@@ -216,7 +236,8 @@ function factsSummary(ctx) {
   const { state } = ctx;
   return {
     mapQueries: state.mapQueries, mapFailuresInARow: state.mapFailures, mapStopped: state.mapStopped, mapDisabled: state.mapDisabled,
-    permitPages: state.pages, permitFailuresInARow: state.pageFailures, permitStopped: state.pageStopped, permitPageOff: state.pageOff,
+    permitPages: state.pages, permitFailuresInARow: state.pageStreaks.errors, permitNoFieldsInARow: state.pageStreaks.noFields,
+    permitStopped: state.pageStopped, permitStop: state.pageStop, permitPageOff: state.pageOff,
   };
 }
 
@@ -227,7 +248,9 @@ function factsProblems(ctx) {
   if (state.mapDisabled) problems.push('the parcel map is turned off (COUNTY_PARCEL_GIS_DISABLED)');
   else if (state.mapStopped) problems.push(`the parcel map did not answer (${state.mapFailures} failures in a row)`);
   if (state.pageOff) problems.push('the permit page is turned off (GATE_PERMIT_DETAIL_SYNC)');
-  else if (state.pageStopped) problems.push(`the permit page did not answer (${state.pageFailures} failures in a row)`);
+  else if (state.pageStop === 'structure') {
+    problems.push(`the permit page showed no building fields (${state.pageStreaks.noFields} pages in a row; did the page change?)`);
+  } else if (state.pageStopped) problems.push(`the permit page did not answer (${state.pageStreaks.errors} failures in a row)`);
   const stored = Object.entries(state.storeErrors);
   if (stored.length) {
     const count = stored.reduce((sum, [, n]) => sum + n, 0);
@@ -238,5 +261,5 @@ function factsProblems(ctx) {
 
 module.exports = {
   createFactsContext, readHomeFacts, factsSummary, factsProblems, arbitrate, firstMissing, LEFT,
-  PARCEL_PAUSE_MS, PERMIT_GAP_MS, PAGE_RETRY_MS, MAX_FAILURES_IN_A_ROW,
+  PARCEL_PAUSE_MS, PAGE_RETRY_MS, MAX_FAILURES_IN_A_ROW,
 };
