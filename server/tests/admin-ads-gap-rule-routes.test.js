@@ -358,6 +358,17 @@ describe('generic campaign writes cannot touch the hold', () => {
     expect(JSON.parse(campaignWrites[0].metadata)).toEqual({ note: 'new', budget_hold_cleared: cleared });
   });
 
+  test('POST /campaigns refuses metadata.lsa_customer_id, and a metadata replacement keeps the Local Services sync mark', async () => {
+    const create = await call('POST', '/campaigns', { campaign_name: 'X', platform: 'google_lsa', metadata: { lsa_customer_id: '1112223333' } });
+    expect(create.status).toBe(400);
+    expect(create.body.error).toMatch(/lsa_customer_id can't be set here/);
+    expect(campaignWrites).toHaveLength(0);
+    campaignRow.metadata = { lsa_customer_id: '7636809139' };
+    const res = await call('PUT', `/campaigns/${CAMPAIGN_ID}`, { metadata: { note: 'new' } });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(campaignWrites[0].metadata)).toEqual({ note: 'new', lsa_customer_id: '7636809139' });
+  });
+
   test('PUT /campaigns/:id metadata replacement keeps both a hold and an older release record', async () => {
     const hold = { mode: 'base', until: inDays(4) };
     const cleared = { at: '2026-11-01T07:00:00.000Z', by: 'admin-1', mode: 'stop', until: inDays(1) };
