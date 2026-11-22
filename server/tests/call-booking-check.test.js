@@ -9,7 +9,7 @@ jest.mock('../models/db', () => jest.fn());
 const { composeAdminAlert } = require('../services/admin-alert-compose');
 const { runCallBookingCheck, _private } = require('../services/call-booking-check');
 
-const { judgeService, judgePrice, problemOf, closeKeyFor, bellKey, specFor, detailFor, priceSpecFor, priceDetailFor, CLOSED } = _private;
+const { judgeService, judgePrice, problemOf, closeKeyFor, specFor, detailFor, priceSpecFor, priceDetailFor, CLOSED } = _private;
 
 const BILLING = new Map([
   ['one-time pest control service', 'one_time'],
@@ -117,12 +117,6 @@ describe('what a visit and the reading of its call say about the price', () => {
       .toEqual({ verdict: 'problem', amount: 250, agreed: false });
   });
 
-  test('a bell is keyed by its visit and problem; a price bell also by the number it shows', () => {
-    expect(bellKey('v1', { kind: 'service', heard: 'One-Time Pest Control Service' })).toBe('call-booking-check:service:v1');
-    expect(bellKey('v1', { kind: 'price', amount: 250, agreed: false })).toBe('call-booking-check:price:v1:25000s');
-    expect(bellKey('v1', { kind: 'price', amount: 149.5, agreed: true })).toBe('call-booking-check:price:v1:14950a');
-  });
-
   test('agrees: the visit needs no price from the call', () => {
     // It has a stored amount, on the visit or on its primary line; a stored $0 too (a free visit is a decision).
     for (const over of [{ estimated_price: 250 }, { estimated_price: '250.00' }, { estimated_price: 0 }, { primary_line_price: '250.00' }, { primary_line_price: 0 }]) {
@@ -171,6 +165,16 @@ describe('what a visit and the reading of its call say about the price', () => {
       pricedAs({ prices: [statedTerm({ accepted: false })] }),
     ];
     for (const row of rows) expect(verdict(row)).toBe('unknown');
+  });
+
+  test('unknown when the reading records a plan ask or a plan billing choice: the price can be the plan\'s', () => {
+    expect(verdict(pricedAs({ service_intent: 'recurring_membership_inquiry' }))).toBe('unknown');
+    for (const choice of ['annual_prepay', 'per_application']) {
+      expect(verdict(pricedAs({ billing_choice: choice }))).toBe('unknown');
+      expect(verdict(pricedAs({ quoted_price_usd: 350, billing_choice: choice }))).toBe('unknown');
+    }
+    // A billing choice the reading does not know is no evidence of a plan.
+    expect(verdict(pricedAs({ billing_choice: 'unsure' }))).toBe('problem');
   });
 
   test('unknown when the price cannot be tied to this visit: another service, a second service, or a second property', () => {
@@ -224,16 +228,11 @@ describe('when an open bell closes', () => {
     expect(closeKeyFor('price', unpriced({ ai_extraction_enriched: reading() }), BILLING)).toBeNull();
     // A discount with no amount: completion still has nothing to bill.
     expect(closeKeyFor('price', unpriced({ discount_id: 'd1', discount_type: 'percent' }), BILLING)).toBeNull();
-    // The bell shows the number the reading holds now.
-    expect(closeKeyFor('price', unpriced(), BILLING, '25000s')).toBeNull();
-    // The reading cannot be read now: the bell keeps its number until a valid reading says another one.
-    expect(closeKeyFor('price', unpriced({ v2_extraction_status: 'schema_failed' }), BILLING, '35000a')).toBeNull();
-  });
-
-  test('a price bell closes when the call is read again and holds another number', () => {
-    expect(closeKeyFor('price', unpriced(), BILLING, '35000a')).toBe('priceChanged');
-    expect(closeKeyFor('price', pricedAs({ quoted_price_usd: 250 }), BILLING, '25000s')).toBe('priceChanged');
-    expect(CLOSED.priceChanged.reason).toBe('price_reading_changed');
+    // The call was read again: another number, a disputed total, another service. The bell says the visit has no
+    // price, and that is still so.
+    expect(closeKeyFor('price', pricedAs({ quoted_price_usd: 300 }), BILLING)).toBeNull();
+    expect(closeKeyFor('price', pricedAs({ quoted_price_usd: 350, price_accepted_by_caller: false }), BILLING)).toBeNull();
+    expect(closeKeyFor('price', unpriced({ row_name: 'Rodent Exclusion Service', service_type: 'Rodent Exclusion Service' }), BILLING)).toBeNull();
     expect(closeKeyFor('price', unpriced({ row_name: null, row_service_key: null, row_billing_type: null }), BILLING)).toBeNull();
   });
 
@@ -277,33 +276,28 @@ describe('the bell copy passes the notification rule', () => {
 });
 
 describe('the price bell copy passes the notification rule', () => {
-  test('the name, the number staff said, and a link that opens the visit', () => {
+  test('the name, a why with no number, and a link that opens the visit', () => {
     const composed = composeAdminAlert(priceSpecFor({ visit: unpriced(), amount: 250, agreed: false, name: 'Pat Synthetic' }));
     expect(composed.headline).toBe("Schedule — set the price on Pat Synthetic's visit");
-    expect(composed.why).toBe('Staff said $250 on the call, not confirmed as final; the visit has no price.');
+    // A row is never rewritten and the call can be read again: the headline and the why hold no number.
+    expect(composed.why).toBe('The call holds a price for this one-time job; the visit has no price.');
+    expect(`${composed.headline} ${composed.why}`).not.toMatch(/\d/);
     expect(composed.link).toBe('/admin/dispatch?tab=schedule&date=2026-11-21&appointment=11111111-2222-4333-8444-555555555555');
     expect(composed.metadata).toMatchObject({ area: 'Schedule', severity: 'needs-you', who: 'person', doneWhen: 'visit_priced', subject: { type: 'visit', id: '11111111-2222-4333-8444-555555555555' } });
   });
 
-  test('a total the call agreed reads as agreed, with its cents', () => {
-    expect(composeAdminAlert(priceSpecFor({ visit: unpriced(), amount: 149.5, agreed: true, name: 'Pat Synthetic' })).why)
-      .toBe('The call agreed $149.50 for this one-time job; the visit has no price.');
-  });
-
-  test('a long name, no name and the largest amount still fit', () => {
+  test('a long name and no name still fit', () => {
     for (const name of ['Bartholomew Featherstonehaugh-Montgomery', '']) {
-      for (const agreed of [true, false]) {
-        expect(() => composeAdminAlert(priceSpecFor({ visit: unpriced(), amount: 99999.99, agreed, name }))).not.toThrow();
-      }
+      expect(() => composeAdminAlert(priceSpecFor({ visit: unpriced(), name }))).not.toThrow();
     }
     expect(composeAdminAlert(priceSpecFor({ visit: unpriced(), amount: 250, agreed: false, name: '' })).headline).toBe('Schedule — set the price on a phone-booked visit');
   });
 
-  test('the detail says which number, that it was not confirmed, what to do, and that nothing was changed', () => {
+  test('the detail gives the number as a dated fact, sends the reader to the call, and says nothing was changed', () => {
     expect(priceDetailFor({ visit: unpriced(), amount: 250, agreed: false, name: 'Pat Synthetic' }))
-      .toBe('Pat Synthetic: the visit booked from a phone call for 2026-11-21 is "One-Time Pest Control Service", a one-time visit with no price. On the call staff stated $250 for a one-time job and the caller accepted it. The call did not confirm that price as final: it can vary, or a charge was added. Set the visit\'s price before it is billed. Nothing was changed and the customer was not contacted.');
-    expect(priceDetailFor({ visit: unpriced(), amount: 350, agreed: true, name: '' }))
-      .toBe('A customer: the visit booked from a phone call for 2026-11-21 is "One-Time Pest Control Service", a one-time visit with no price. The call\'s reading holds $350 as the total the caller accepted. Set the visit\'s price before it is billed. Nothing was changed and the customer was not contacted.');
+      .toBe('Pat Synthetic: the visit booked from a phone call for 2026-11-21 is "One-Time Pest Control Service", a one-time visit with no price. When this bell rang, the reading of the call held $250 for that service: a price staff stated and the caller accepted, not confirmed as final (it can vary, or a charge was added). Check the call, then set the visit\'s price before it is billed. Nothing was changed and the customer was not contacted.');
+    expect(priceDetailFor({ visit: unpriced(), amount: 149.5, agreed: true, name: '' }))
+      .toBe('A customer: the visit booked from a phone call for 2026-11-21 is "One-Time Pest Control Service", a one-time visit with no price. When this bell rang, the reading of the call held $149.50 for that service: the total the caller accepted. Check the call, then set the visit\'s price before it is billed. Nothing was changed and the customer was not contacted.');
   });
 });
 
