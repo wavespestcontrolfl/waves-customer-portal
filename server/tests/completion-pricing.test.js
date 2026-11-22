@@ -72,20 +72,26 @@ describe('completion estimate evidence', () => {
   // line's saving had no name, so a Platinum plan's invoice printed one net line (production estimate, 2026-11-22).
   test('a list-price row with no tier record takes the estimate\'s tier when its rate is the whole saving', () => {
     const row = (perApplicationPrice, sourceLine = {}) => ({ ...line, perApplicationPrice, parentRecurringDiscounted: true,
-      sourceLine: { service: 'pest_control', perTreatment: 120, annualAfterDiscount: perApplicationPrice * 4, ...sourceLine } });
+      sourceLine: { service: 'pest_control', perTreatment: 120, visitsPerYear: 4, annualAfterDiscount: perApplicationPrice * 4, ...sourceLine } });
     const names = (quote) => quote.discounts.map(({ name, dollars, percent, named }) => [name, dollars, percent, named]);
     const platinum = { tierDiscounted: true, estimateTier: { tier: 'platinum', amount: 0.2 } };
     expect(names(acceptedPricing(row(96), platinum))).toEqual([['WaveGuard Platinum', 24, 20, true]]);
-    // The engine discounts the annual: a few cents either way are still the tier's.
-    expect(names(acceptedPricing(row(96.03), platinum))).toEqual([['WaveGuard Platinum', 23.97, 20, true]]);
-    expect(names(acceptedPricing(row(95.96), platinum))).toEqual([['WaveGuard Platinum', 24.04, 20, true]]);
     // A saving that is not the tier's rate, a service credit, or an estimate with no tier rate stays unnamed.
     const unnamed = (dollars) => [['Accepted estimate discount', dollars, undefined, false]];
+    // The saved annual must be the tier's annual to the cent: a few cents off is not the tier, and no annual or no
+    // visit count proves nothing.
+    expect(names(acceptedPricing(row(96.03), platinum))).toEqual(unnamed(23.97));
+    expect(names(acceptedPricing(row(95.96), platinum))).toEqual(unnamed(24.04));
+    expect(names(acceptedPricing(row(96, { annualAfterDiscount: undefined }), platinum))).toEqual(unnamed(24));
+    expect(names(acceptedPricing(row(96, { visitsPerYear: undefined }), platinum))).toEqual(unnamed(24));
+    // The engine discounts the annual, so the per-visit share can sit a cent off rate x list price and still be the tier's.
+    const gold = { tierDiscounted: true, estimateTier: { tier: 'gold', amount: 0.15 } };
+    expect(names(acceptedPricing(row(28.33, { perTreatment: 33.33, visitsPerYear: 9, annualAfterDiscount: 254.97 }), gold)))
+      .toEqual([['WaveGuard Gold', 5, 15, true]]);
     // A row with its own per-application net has no annual rounding: it must match to the cent.
     expect(names(acceptedPricing(row(96, { priceAfterDiscount: 96 }), platinum))).toEqual([['WaveGuard Platinum', 24, 20, true]]);
     expect(names(acceptedPricing(row(96.04, { priceAfterDiscount: 96.04 }), platinum))).toEqual(unnamed(23.96));
     // A half cent rounds either way: $100.10 at 15% is $85.085, saved by the engine as $85.09. No other cent passes.
-    const gold = { tierDiscounted: true, estimateTier: { tier: 'gold', amount: 0.15 } };
     expect(names(acceptedPricing(row(85.09, { perTreatment: 100.1, priceAfterDiscount: 85.09 }), gold))).toEqual([['WaveGuard Gold', 15.01, 15, true]]);
     expect(names(acceptedPricing(row(85.08, { perTreatment: 100.1, priceAfterDiscount: 85.08 }), gold))).toEqual([['WaveGuard Gold', 15.02, 15, true]]);
     expect(names(acceptedPricing(row(85.1, { perTreatment: 100.1, priceAfterDiscount: 85.1 }), gold))).toEqual(unnamed(15));
@@ -166,7 +172,7 @@ describe('completion estimate evidence', () => {
     // The saved engine shape: the list price on the row, the tier and the rate the accept used on the recurring block.
     test('a list-price row prints the estimate\'s tier at its saved rate; any other saving on it keeps one line', async () => {
       adminCustomers.scheduleLinesFromEstimate.mockReturnValue([{ ...estimateLine, perApplicationPrice: 88,
-        sourceLine: { service: 'pest_control', perTreatment: 110, annualAfterDiscount: 352 } }]);
+        sourceLine: { service: 'pest_control', perTreatment: 110, visitsPerYear: 4, annualAfterDiscount: 352 } }]);
       const billed = { ...visit, estimated_price: 88 };
       const platinum = (recurring, extra = {}) => ({ ...estimate, waveguard_tier: 'Platinum', estimate_data: { result: { recurring }, ...extra } });
       const read = (estimateRow) => acceptedVisitBreakdown(billed, { database: fakeDb({ estimateRow }) });

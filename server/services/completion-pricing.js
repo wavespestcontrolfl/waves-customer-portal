@@ -178,11 +178,26 @@ function staffAdjustedRow(raw) {
   return adjusted !== null && adjusted !== money(raw.annualAfterDiscount);
 }
 
-// The per-application nets a tier rate can leave on a list price: the exact cents, or either neighbour when they land
-// on a half cent (the engine and applyDiscount round a half cent in opposite directions).
-function tierNets(base, rate) {
-  const cents = Math.round(base * 100) * (1 - rate);
-  return [Math.round(cents - 1e-6) / 100, Math.round(cents + 1e-6) / 100];
+// The cents a tier rate leaves on a list price over a number of visits: the exact cents, or either neighbour when
+// they land on a half cent (the engine and applyDiscount round a half cent in opposite directions).
+function tierNetCents(base, visits, rate) {
+  const cents = Math.round(base * 100) * visits * (1 - rate);
+  return [Math.round(cents - 1e-6), Math.round(cents + 1e-6)];
+}
+
+// Whether a list-price row's own saved figures prove the tier's rate priced it, to the cent. A row with its own
+// per-application net must be billed at that net, and it must be the tier's net on the list price. Any other row is
+// billed from its saved annual (public-quote.js perApplicationForLine, same visit count): that annual must be the
+// tier's annual on list price x visits, and the billed net its per-visit share. A row with neither proves nothing.
+function tierPricedRow(raw, base, savings, rate) {
+  if (!(rate > 0 && rate <= 1)) return false;
+  const netCents = Math.round((base - savings) * 100);
+  const ownNet = money(raw.priceAfterDiscount);
+  if (ownNet !== null) return Math.round(ownNet * 100) === netCents && tierNetCents(base, 1, rate).includes(netCents);
+  const visits = [raw.visitsPerYear, raw.visits, raw.appsPerYear, raw.frequency].map(Number).find((count) => count > 0);
+  const annual = money(raw.annualAfterDiscount);
+  if (!visits || !(annual > 0)) return false;
+  return tierNetCents(base, visits, rate).includes(Math.round(annual * 100)) && Math.round((annual / visits) * 100) === netCents;
 }
 
 // A discount rate the row itself recorded (the legacy mapper writes one on lawn rows, with no tier record) that is not
@@ -195,7 +210,7 @@ function rowRateConflicts(raw, rate) {
 
 // The tier record that names a line's saving. The one on the line wins. Saved engine rows keep the tier on the
 // estimate's recurring block instead, with the list price on the row: such a line takes the estimate's tier only when
-// that tier's rate on the list price is the whole saving (to the engine's rounding), no service credit shares it, the
+// the row's saved figures prove that tier's rate priced it (tierPricedRow), no service credit shares the saving, the
 // row's service takes the tier percentage (estimate-public.js recurringServiceReceivesTierDiscount: not palm
 // injection's flat credit, not a legacy rodent row), the row is not flagged out of percentage discounts and staff did
 // not move the row's own price, and a rate the row recorded for itself is the tier's rate. The service is the row's
@@ -208,15 +223,7 @@ function namingTier(raw, base, savings, { estimateTier, credited, serviceKey }) 
     && (raw.waveGuardDiscountEligible === true || require('../routes/estimate-public')
       .recurringServiceReceivesTierDiscount({ ...raw, service: raw.service || serviceKey || undefined }));
   if (lineTier || !inferable) return lineTier || null;
-  const tierSavings = tierSavingsOn(base, Number(estimateTier.amount));
-  if (tierSavings === null) return null;
-  // A row with its own per-application net has no annual rounding: that net must be the net billed and a net the
-  // tier's rate leaves on the list price (tierNets). The rounding allowance is only for a net derived from the annual.
-  const ownNet = money(raw.priceAfterDiscount);
-  if (ownNet !== null) {
-    return ownNet === money(base - savings) && tierNets(base, Number(estimateTier.amount)).includes(ownNet) ? estimateTier : null;
-  }
-  return Math.abs(Math.round((savings - tierSavings) * 100)) <= TIER_ROUNDING_CENTS ? estimateTier : null;
+  return tierPricedRow(raw, base, savings, Number(estimateTier.amount)) ? estimateTier : null;
 }
 
 // One line's accepted saving split into the discounts that made it: the WaveGuard tier (namingTier), then the
