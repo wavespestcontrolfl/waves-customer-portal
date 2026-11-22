@@ -1,6 +1,6 @@
 const db = require('../models/db');
 const { normalizePhone } = require('../utils/phone');
-const { samePremiseDisplay, parseDisplayAddress } = require('./lead-address-unverified');
+const { samePremiseDisplay, parseDisplayAddress, loadContactVerdicts } = require('./lead-address-unverified');
 const { normalizeUnitLine, unitLineValueKey } = require('../utils/address-normalizer');
 const { DRAFT_ELIGIBLE_SQL } = require('./estimate-draft-retire');
 
@@ -334,7 +334,10 @@ async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
  *     Point Dr"): the web form and the wizard write it so. That is one step
  *     wider than the draft-retire sweep's test, which folds only the word
  *     that ends the street. A missing or incomplete address, or a street
- *     with no house number, fails closed: the draft is not a shell.
+ *     with no house number, fails closed: the draft is not a shell. So does
+ *     a draft matched only by that fold while this contact has a county-roll
+ *     address warning under the draft's spelling that no newer clean
+ *     verdict answers: the address hold would not see it for the run.
  *
  * Not a condition, on purpose: the SMS intake state of the customer
  * (customers.lead_intake_status). A lead who never answers keeps
@@ -405,9 +408,11 @@ function untouchedWebFormShells(database, last10, { now = new Date() } = {}) {
     });
 }
 
-// A word with a number sign in it and no letter: "1/2", "½", "¹⁄₂". After
-// the house number it is a part of that number, however it is spelled.
-const NUMBER_WORD_WITH_NO_LETTER = /^[^\p{L}]*\p{N}[^\p{L}]*$/u;
+// A fraction as a word of its own, in any spelling: "½", "1/2", "¹⁄₂". A
+// fraction sign, or a slash between two number signs, and no letter. After
+// the house number it is a part of that number. A plain number is not one:
+// it can be the street name ("12 7 Mile Rd").
+const FRACTION_WORD = /^[^\p{L}]*(?:[\u00BC-\u00BE\u2150-\u215E\u2189]|\p{N}[/\u2044\u2215]\p{N})[^\p{L}]*$/u;
 
 function sameDoor(addressA, addressB) {
   // The web form and the wizard do not write a street the same way: a name
@@ -425,13 +430,13 @@ function sameDoor(addressA, addressB) {
   if (!/^\d+[a-z]?\s/.test(a.street)) return false;
   // The key drops what is not a letter or a digit, so "12½" and "12 ½"
   // read as "12". The house numbers as typed must be the same too: the
-  // first word, and every number word with no letter that follows it (a
-  // fraction in any spelling). A word with a letter starts the street
-  // name, which stays with the matcher ("12 49th-St" = "12 49th St").
+  // first word, and a fraction that follows it as a word of its own. The
+  // street name stays with the matcher ("12 49th-St" = "12 49th St", "12 7
+  // Mile Rd" = "12 7-Mile Rd").
   const house = (parsed) => {
     const words = String(parsed.streetLine || '').trim().toLowerCase().split(/\s+/);
     let end = 1;
-    while (end < words.length && NUMBER_WORD_WITH_NO_LETTER.test(words[end])) end += 1;
+    while (end < words.length && FRACTION_WORD.test(words[end])) end += 1;
     return words.slice(0, end).join(' ');
   };
   if (house(a) !== house(b)) return false;
@@ -459,10 +464,26 @@ async function onlyUntouchedWebFormShellsOpen(database, { phone, address, custom
   const shells = await untouchedWebFormShells(database, values.last10, { now })
     .whereIn('id', open.map((row) => row.id))
     .select('id', 'address', 'customer_id', 'customer_email');
-  const shellKeys = new Set((Array.isArray(shells) ? shells : [])
-    .filter((row) => sameContact(row, { customerId, email }) && sameDoor(row.address, address))
-    .map((row) => String(row.id)));
-  return open.every((row) => shellKeys.has(String(row.id)));
+  const mine = (Array.isArray(shells) ? shells : [])
+    .filter((row) => sameContact(row, { customerId, email }) && sameDoor(row.address, address));
+  const shellKeys = new Set(mine.map((row) => String(row.id)));
+  if (!open.every((row) => shellKeys.has(String(row.id)))) return false;
+  // A draft that is the run's door only by the name-word fold ("Pt",
+  // "Point"). The address hold compares its own street key, with no fold: a
+  // county-roll warning of this contact that was stored under the DRAFT's
+  // spelling does not reach a run that types the other spelling. While
+  // such a warning is the contact's newest verdict for the draft's address,
+  // the draft keeps blocking (pre-push audit P1). Read with the hold's own
+  // loader. A run in the draft's own spelling needs no such read: the
+  // route's hold sees the warning.
+  for (const shell of mine) {
+    if (samePremiseDisplay(shell.address, address, { requireLocality: true })) continue;
+    const { line1, city, state, zip } = parseDisplayAddress(shell.address);
+    // One read for each such draft; a phone has one or two.
+    const verdicts = await loadContactVerdicts(database, { email, phone, premise: { line1, city, state, zip } });
+    if (verdicts.newestFlag && verdicts.newestFlagAt >= verdicts.newestCleanAt) return false;
+  }
+  return true;
 }
 
 module.exports = {

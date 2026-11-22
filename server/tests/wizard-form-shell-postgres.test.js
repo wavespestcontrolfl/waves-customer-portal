@@ -280,6 +280,56 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     expect(await shellsOnly({ address: '12 49th-St, Parrish, FL 34219' })).toBe(true);
   });
 
+  test('a number that starts the street name is not read into the house number', async () => {
+    await estimate({ address: '12 7 Mile Rd, Parrish, FL 34219' });
+
+    expect(await shellsOnly({ address: '12 7-Mile Rd, Parrish, FL 34219' })).toBe(true);
+    expect(await shellsOnly({ address: '12 7 Mile Rd, Parrish, FL 34219' })).toBe(true);
+  });
+
+  // The address hold matches a stored county-roll warning to a run by its
+  // own street key, with no fold. A warning stored under the draft's
+  // spelling does not reach a run that types the other spelling.
+  describe('a draft matched only by the name-word fold, and a county-roll address warning of the contact', () => {
+    const SHORT = '12 Sample Pt Dr, Parrish, FL 34219';
+    const FULL = '12 Sample Point Dr, Parrish, FL 34219';
+    const stamp = { address_line1: '12 Sample Pt Dr', city: 'Parrish', state: 'FL', zip: '34219' };
+    const leadWith = (extracted, fields = {}) => trx('leads').insert({
+      id: randomUUID(), status: 'new', first_name: 'Sample', last_name: 'Person', phone, email: EMAIL,
+      extracted_data: JSON.stringify(extracted), ...fields,
+    });
+    const warning = (fields = {}) => ({
+      address_unverified: { source: 'county_roll', reason: 'house number not on the county roll', flagged_at: new Date(Date.now() - 2 * DAY).toISOString(), ...stamp, ...fields },
+    });
+
+    test('a warning under the draft\'s spelling keeps the block for a run in the other spelling', async () => {
+      await estimate({ address: SHORT });
+      await leadWith(warning());
+
+      expect(await shellsOnly({ address: FULL })).toBe(false);
+      // In the draft's own spelling the route's hold sees the warning: not this rule's work.
+      expect(await shellsOnly({ address: SHORT })).toBe(true);
+    });
+
+    test('a newer clean verdict for that address answers the warning', async () => {
+      await estimate({ address: SHORT });
+      await leadWith(warning());
+      await leadWith({ address_verdict: { status: 'clean', at: new Date(Date.now() - DAY).toISOString(), ...stamp } });
+
+      expect(await shellsOnly({ address: FULL })).toBe(true);
+    });
+
+    test.each([
+      ['for another address', () => leadWith(warning({ address_line1: '88 Other Ave' }))],
+      ['of another contact', () => leadWith(warning(), { email: 'other.person@example.com' })],
+    ])('a warning %s does not keep the block', async (_label, seed) => {
+      await estimate({ address: SHORT });
+      await seed();
+
+      expect(await shellsOnly({ address: FULL })).toBe(true);
+    });
+  });
+
   // The run side of the same checks.
   test.each([
     ['no address', { address: '' }],
