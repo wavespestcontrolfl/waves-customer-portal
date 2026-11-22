@@ -72,7 +72,7 @@ describe('completion estimate evidence', () => {
   // line's saving had no name, so a Platinum plan's invoice printed one net line (production estimate, 2026-11-22).
   test('a list-price row with no tier record takes the estimate\'s tier when its rate is the whole saving', () => {
     const row = (perApplicationPrice, sourceLine = {}) => ({ ...line, perApplicationPrice, parentRecurringDiscounted: true,
-      sourceLine: { perTreatment: 120, annualAfterDiscount: perApplicationPrice * 4, ...sourceLine } });
+      sourceLine: { service: 'pest_control', perTreatment: 120, annualAfterDiscount: perApplicationPrice * 4, ...sourceLine } });
     const names = (quote) => quote.discounts.map(({ name, dollars, percent, named }) => [name, dollars, percent, named]);
     const platinum = { tierDiscounted: true, estimateTier: { tier: 'platinum', amount: 0.2 } };
     expect(names(acceptedPricing(row(96), platinum))).toEqual([['WaveGuard Platinum', 24, 20, true]]);
@@ -87,6 +87,11 @@ describe('completion estimate evidence', () => {
     // A row flagged out of percentage discounts never takes the tier, whatever its numbers.
     expect(names(acceptedPricing(row(96, { excludeFromPctDiscount: true }), platinum))).toEqual(unnamed(24));
     expect(names(acceptedPricing(row(96, { discountEligible: false }), platinum))).toEqual(unnamed(24));
+    // A service that takes no tier percentage (palm injection has a flat credit) never takes the tier name.
+    expect(names(acceptedPricing(row(96, { service: 'palm_injection' }), platinum))).toEqual(unnamed(24));
+    expect(names(acceptedPricing(row(96, { service: 'rodent_bait' }), platinum))).toEqual(unnamed(24));
+    expect(names(acceptedPricing(row(96, { service: 'rodent_bait', perApplicationBilled: true }), platinum)))
+      .toEqual([['WaveGuard Platinum', 24, 20, true]]);
     // Staff moved this row's own price (its final annual is under its tier annual): part of the saving is theirs.
     expect(names(acceptedPricing(row(96, { annualAfterDiscount: 400, manualFinalAnnual: 384 }), platinum))).toEqual(unnamed(24));
     expect(names(acceptedPricing(row(96, { annualAfterDiscount: undefined, manualFinalAnnual: 384 }), platinum))).toEqual(unnamed(24));
@@ -136,7 +141,7 @@ describe('completion estimate evidence', () => {
     // The saved engine shape: the list price on the row, the tier and the rate the accept used on the recurring block.
     test('a list-price row prints the estimate\'s tier at its saved rate; any other saving on it keeps one line', async () => {
       adminCustomers.scheduleLinesFromEstimate.mockReturnValue([{ ...estimateLine, perApplicationPrice: 88,
-        sourceLine: { perTreatment: 110, annualAfterDiscount: 352 } }]);
+        sourceLine: { service: 'pest_control', perTreatment: 110, annualAfterDiscount: 352 } }]);
       const billed = { ...visit, estimated_price: 88 };
       const platinum = (recurring, extra = {}) => ({ ...estimate, waveguard_tier: 'Platinum', estimate_data: { result: { recurring }, ...extra } });
       const read = (estimateRow) => acceptedVisitBreakdown(billed, { database: fakeDb({ estimateRow }) });
