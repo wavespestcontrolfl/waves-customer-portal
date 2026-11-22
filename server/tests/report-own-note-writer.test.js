@@ -110,14 +110,44 @@ describe('a model reads the masked note only', () => {
     await expect(cleanReportNote({
       note: 'bluebird. treated back yard', ...VISIT, catalogRows: CATALOG, db, customerId: 'customer-1',
     })).resolves.toEqual({ text: FIXED, source: 'fixed', reason: 'nothing_for_customer' });
-    // No customer to read the codes for, or a read that fails: no call.
+    // No customer to read the codes for, or a read that fails: no call, and
+    // a fixed sentence that names the outcome alone (no area label unread).
+    const outcomeOnly = fixedReportNote({});
     await expect(cleanReportNote({ note: 'treated back yard', ...VISIT, catalogRows: CATALOG }))
-      .resolves.toEqual({ text: FIXED, source: 'fixed', reason: 'screen_unavailable' });
+      .resolves.toEqual({ text: outcomeOnly, source: 'fixed', reason: 'screen_unavailable' });
     const broken = fileOf(async () => { throw new Error('read failed'); });
     await expect(cleanReportNote({
       note: 'treated back yard', ...VISIT, catalogRows: CATALOG, db: broken, customerId: 'customer-1',
-    })).resolves.toEqual({ text: FIXED, source: 'fixed', reason: 'screen_unavailable' });
+    })).resolves.toEqual({ text: outcomeOnly, source: 'fixed', reason: 'screen_unavailable' });
     expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
+  test('the fixed sentence names no area that holds a code on the customer\'s file', async () => {
+    answers('NONE');
+    const result = await clean('nothing to add', { areasServiced: ['bluebird shed'], storedCodes: ['bluebird'] });
+    expect(result).toEqual({ text: fixedReportNote({}), source: 'fixed', reason: 'nothing_for_customer' });
+    expect(result.text).not.toMatch(/bluebird/i);
+  });
+
+  test('inside a transaction the reads finish before the answer, whatever the wait', async () => {
+    jest.useFakeTimers();
+    const read = jest.spyOn(CompletionRecap, 'readCatalogScreenRows');
+    try {
+      let done = false;
+      read.mockReturnValueOnce(new Promise((resolve) => {
+        setTimeout(() => { done = true; resolve(CATALOG); }, OWN_NOTE_BUDGET_MS + 5000);
+      }));
+      const pending = cleanReportNote({
+        note: 'treated the patio', ...VISIT, db: { isTransaction: true }, storedCodes: [],
+      });
+      await jest.advanceTimersByTimeAsync(OWN_NOTE_BUDGET_MS + 5000);
+      await expect(pending).resolves.toEqual({ text: FIXED, source: 'fixed', reason: 'timeout' });
+      expect(done).toBe(true);
+      expect(dispatchWithFallback).not.toHaveBeenCalled();
+    } finally {
+      read.mockRestore();
+      jest.useRealTimers();
+    }
   });
 
   test('an answer that holds a code on the customer\'s file is refused and is not sent again', async () => {

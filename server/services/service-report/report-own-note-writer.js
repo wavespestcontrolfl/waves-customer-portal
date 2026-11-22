@@ -230,22 +230,29 @@ async function readForChecks({ storedCodes, customerId, catalogRows, db }) {
 async function cleanReportNote({
   note, serviceType, areasServiced, visitOutcome, catalogRows = null, db = null, storedCodes = null, customerId = null,
 } = {}) {
+  let codes = storedCodes;
+  // The fixed sentence names the service and the areas only when the codes on
+  // file were read and neither holds one; else it names the outcome alone.
+  const factsShown = () => (codes && !holdsAccess([serviceType, ...[].concat(areasServiced || [])].map(String).join('. '), codes)
+    ? { serviceType, areasServiced, visitOutcome } : { visitOutcome });
   const fixed = (reason, words = []) => ({
-    text: fixedReportNote({ serviceType, areasServiced, visitOutcome }), source: 'fixed', reason, ...(words.length ? { words } : {}),
+    text: fixedReportNote(factsShown()), source: 'fixed', reason, ...(words.length ? { words } : {}),
   });
   // The technician's wait starts here: reads and calls share one budget.
   const deadline = Date.now() + OWN_NOTE_BUDGET_MS;
   let refused = null;
   try {
     // One read of the codes and of the catalog for every check of this note.
-    const read = await within(readForChecks({
-      storedCodes, customerId, catalogRows, db,
-    }), OWN_NOTE_BUDGET_MS);
+    // Inside a transaction the reads are awaited whole: a read left running
+    // would share the connection with the caller's next write.
+    const reads = readForChecks({ storedCodes, customerId, catalogRows, db });
+    const read = db?.isTransaction ? await reads : await within(reads, OWN_NOTE_BUDGET_MS);
     if (read === LATE) {
       logger.warn('[report-own-note] the reads for the checks outlasted the wait, fixed sentence used');
       return fixed('timeout');
     }
-    const { codes, rows } = read;
+    ({ codes } = read);
+    const { rows } = read;
     const { said, skip } = noteToSend(note, codes);
     if (skip) return fixed(skip);
     const rejection = (text) => reportNoteRejection({
