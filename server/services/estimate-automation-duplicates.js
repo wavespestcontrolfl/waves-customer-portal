@@ -293,6 +293,10 @@ async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
  *
  * A row is an untouched shell when ALL of these hold:
  *   - the web form made it, and it is still an unarchived 'draft';
+ *   - nothing wrote it since it was made (updated_at = created_at, the same
+ *     test lead-draft-measurements.js uses). A staff edit, a later automation
+ *     write, an unarchive, and this module's own archive all move updated_at,
+ *     so a row that staff worked or restored is never a shell again;
  *   - it has no price (monthly, one-time and annual are all empty or 0), the
  *     same test lead-intake.js uses to find a shell it may fill;
  *   - nobody sent, viewed or scheduled it, auto-send did not claim it, and no
@@ -301,10 +305,15 @@ async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
  *   - no clarify ask for the phone is open or was sent in the last 7 days
  *     without an answer: the row may be waiting for the customer's reply.
  *
- * Shells are retired only when that lets the caller go on: `stillBlocks`
- * gets the newest open estimate that would remain (or null) and answers
- * whether it still blocks. When something else still blocks, nothing is
- * archived.
+ * Two steps that bracket the wizard's own estimate write, like
+ * lockSupersededDraftInTx / archiveSupersededDraftInTx above, so a shell is
+ * never lost without its replacement:
+ *   1. lockUntouchedWebFormShellsInTx: row-locks the phone's shells and
+ *      answers which ids may go. `stillBlocks` gets EVERY other open estimate
+ *      of the phone; when one of them still blocks, no id is returned.
+ *   2. archiveWebFormShellsInTx: after the wizard's draft was written in the
+ *      same transaction, archives those ids. When the write is refused or
+ *      never happens, the caller does not call it and the shells stand.
  *
  * Archived, not deleted: staff can unarchive the row, and every draft reader
  * (auto-send, clarify asks, measurements, lists) skips an archived row. The
@@ -312,14 +321,24 @@ async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
  * `estimatorEngine.superseded_at`: that stamp makes the unarchive route
  * refuse the row for good.
  *
- * The caller holds the phone's automated-estimate lock (the web form creates
- * its shell under the same lock) and has taken every advisory lock it will
- * need before this locks estimate rows.
+ * Locks. The caller holds the phone's automated-estimate lock (the web form
+ * creates its shell under the same lock) and has taken every other advisory
+ * lock it will need. Step 1 then TRIES the phone's clarify lock
+ * (estimate-clarify-asks.js withClarifyLock) and keeps it to the end of the
+ * transaction: the web form parks its clarify ask after its shell commits, so
+ * without the lock an ask could land between the check here and the archive.
+ * A try, never a wait: the clarify writers take other locks under theirs, and
+ * waiting here could deadlock with them. When a clarify writer holds the lock
+ * right now, no shell goes on this run. parkClarifyAsk reads the marker under
+ * the same lock and does not park an ask for a shell the wizard archived.
  */
 const WEB_FORM_SHELL_SOURCE = 'lead_webhook';
 // Same window as estimate-clarify-asks.js RECENT_SENT_WINDOW_MS: a sent ask
 // counts as waiting for its answer for 7 days.
 const CLARIFY_WAIT_WINDOW_MS = 7 * 86400000;
+// The namespace of estimate-clarify-asks.js withClarifyLock (keyed by the
+// phone's 10 digits). A second copy of one string, pinned by a test.
+const CLARIFY_LOCK_NAMESPACE = 'estimate_clarify';
 
 function untouchedWebFormShells(trx, last10, { now = new Date() } = {}) {
   return trx('estimates')
@@ -332,6 +351,7 @@ function untouchedWebFormShells(trx, last10, { now = new Date() } = {}) {
     .whereNull('sent_at')
     .whereNull('viewed_at')
     .whereNull('scheduled_at')
+    .whereRaw('updated_at = created_at')
     .whereRaw('COALESCE(monthly_total, 0) = 0')
     .whereRaw('COALESCE(onetime_total, 0) = 0')
     .whereRaw('COALESCE(annual_total, 0) = 0')
@@ -351,17 +371,23 @@ function untouchedWebFormShells(trx, last10, { now = new Date() } = {}) {
     });
 }
 
-async function retireUntouchedWebFormShellsInTx(trx, { phone, leadId = null, stillBlocks, now = new Date() } = {}) {
-  const none = { retiredIds: [], blockedById: null };
+async function lockUntouchedWebFormShellsInTx(trx, { phone, stillBlocks, now = new Date() } = {}) {
+  const none = { shellIds: [], newestRemaining: null, blockedById: null };
   if (!trx || typeof stillBlocks !== 'function') return none;
   const values = phoneLookupValues(phone);
   if (!values.last10) return none;
 
+  const locked = await trx.raw(
+    'select pg_try_advisory_xact_lock(hashtext(?), hashtext(?)) as got',
+    [CLARIFY_LOCK_NAMESPACE, values.last10]
+  );
+  if (locked?.rows?.[0]?.got !== true) return none;
+
   const open = await listOpenEstimatesByPhone(phone, { database: trx });
   if (!open.length) return none;
 
-  // Row locks first, so the verdict below is read on rows no other writer
-  // can promote, price or claim before the archive lands.
+  // Row locks, so the verdict below is read on rows no other writer can
+  // promote, price or claim before the archive lands.
   const shells = await untouchedWebFormShells(trx, values.last10, { now })
     .whereIn('id', open.map((row) => row.id))
     .forUpdate()
@@ -370,11 +396,15 @@ async function retireUntouchedWebFormShellsInTx(trx, { phone, leadId = null, sti
   if (!shellIds.length) return none;
 
   const shellKeys = new Set(shellIds.map(String));
-  const newestRemaining = open.find((row) => !shellKeys.has(String(row.id))) || null;
-  if (stillBlocks(newestRemaining)) {
-    return { retiredIds: [], blockedById: newestRemaining ? newestRemaining.id : null };
-  }
+  const remaining = open.filter((row) => !shellKeys.has(String(row.id)));
+  const blocker = remaining.find((row) => stillBlocks(row));
+  if (blocker) return { ...none, blockedById: blocker.id };
+  return { shellIds, newestRemaining: remaining[0] || null, blockedById: null };
+}
 
+async function archiveWebFormShellsInTx(trx, { phone, shellIds = [], leadId = null, now = new Date() } = {}) {
+  const values = phoneLookupValues(phone);
+  if (!trx || !values.last10 || !shellIds.length) return [];
   const marker = JSON.stringify({ at: now.toISOString(), leadId: leadId == null ? null : String(leadId) });
   // Guarded by the full predicate again: the update can only land on a row
   // that is still an untouched shell.
@@ -392,17 +422,15 @@ async function retireUntouchedWebFormShellsInTx(trx, { phone, leadId = null, sti
       updated_at: now,
     })
     .returning('id');
-  return {
-    retiredIds: (Array.isArray(retired) ? retired : []).map((row) => (row && typeof row === 'object' ? row.id : row)),
-    blockedById: null,
-  };
+  return (Array.isArray(retired) ? retired : []).map((row) => (row && typeof row === 'object' ? row.id : row));
 }
 
 module.exports = {
   acquireAutomatedEstimateLocks,
   lockSupersededDraftInTx,
   archiveSupersededDraftInTx,
-  retireUntouchedWebFormShellsInTx,
+  lockUntouchedWebFormShellsInTx,
+  archiveWebFormShellsInTx,
   automatedDuplicateBlock,
   automatedEstimateLockKeys,
   blockIfAutomatedEstimateDuplicate,
