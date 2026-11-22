@@ -814,6 +814,10 @@ postgres('Hired button on migrated PostgreSQL', () => {
       const requested = tokenFromLastEmail();
       expect((await put(replaced, '/google-signin', { googleEmail: address() })).status).toBe(200);
       expect(await redeem(requested.token)).toEqual(REFUSED);
+      // Only the Hired link's own lifetime counts as an admin's link: a stored link of any other length is refused.
+      await mockDatabase('technicians').where({ id: replaced })
+        .update({ password_reset_expires_at: mockDatabase.raw("password_reset_requested_at + interval '2 hours'") });
+      expect(await redeem(requested.token)).toEqual(REFUSED);
       expect((await row(replaced)).password_hash).toBeNull();
 
       // A row that has a password keeps the ordinary reset with a Google address linked.
