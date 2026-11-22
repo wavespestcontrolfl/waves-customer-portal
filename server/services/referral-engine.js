@@ -580,7 +580,9 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
   }
 
   // --- Send invite SMS ---
-  const smsBody = await renderReferralSms('referral_invite', {
+  // GATE_REFERRAL_STEP2: the seeded sentence becomes the approved Step 2 words (referral-step2.js); gate off, no read and
+  // the text is exactly as stored.
+  const smsBody = step2.inviteSmsWithOffer(await renderReferralSms('referral_invite', {
     referee_name: firstName,
     referrer_name: referrerName || promoter.first_name || 'your neighbor',
     referral_link: referralLink,
@@ -588,7 +590,7 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
     workflow: 'referral_invite',
     entity_type: 'referral',
     entity_id: referral.id,
-  });
+  }), await step2FriendCreditCents());
   const smsSent = await sendSMS(normalizedPhone || phone.trim(), smsBody, {
     messageType: 'referral_invite',
     referralId: referral.id,
@@ -1431,7 +1433,8 @@ async function memberCreditsThisYear(conn, memberId) {
 async function step2OfferFor(conn, memberId, settings) {
   const s = step2.step2Settings(settings);
   // The count is for the customer the credit is paid to (a household shares its promoter's customer).
-  const creditsThisYear = await memberCreditsThisYear(conn, await creditedMemberFor(conn, memberId));
+  // No member (the Automations preview page, which shows what a member gets): nothing earned yet, never at the limit.
+  const creditsThisYear = memberId ? await memberCreditsThisYear(conn, await creditedMemberFor(conn, memberId)) : 0;
   const capReached = step2.capReached(creditsThisYear, settings);
   return {
     // The existing field: nothing is promised to a member at the yearly limit (a cached portal build reads this field

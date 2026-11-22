@@ -99,7 +99,77 @@ const shareCardOffer = ({ refereeCents, memberCents, atLimit = false }) => [
 const memberCreditEmailLine = (rewardDollars, { canTurnOnAutomaticCredit = false } = {}) => `Your ${formatDollars(rewardDollars)} referral reward has been added to your Waves account as a credit.${
   canTurnOnAutomaticCredit ? ' To use it, turn on "Apply my credit to invoices automatically" in the Waves app.' : ''}`;
 
+// The stored texts (words: owner 2026-11-21). The texts in the database stay as they are; with the gate on, the SEEDED
+// sentence inside a rendered text is swapped for the approved Step 2 words, so nothing is edited by hand on flip day and
+// the amounts are always the live setting. A text an admin rewrote no longer holds the seeded sentence and is returned
+// as stored. Every swap takes the amount in cents from the caller (0 = say nothing new, body unchanged) and uses
+// string slicing, never a replacement string, because the words hold "$".
+
+// The referral invite text (the Referral Settings column, and the referral_invite row the app does not call today).
+// head = the words before the offer; legacy = the seeded offer. The seeded text ends "<stretch><link>" with an optional
+// STOP line, so a name that happens to hold the stretch does not match.
+const SEEDED_INVITE_OFFERS = Object.freeze([
+  { head: ' recommended Waves. ', legacy: "You'll both save when you sign up" },
+  { head: ' recommended Waves to you. ', legacy: 'Get a free quote' },
+]);
+const INVITE_TAIL = /^\S+(?:\n\nReply STOP to opt out\.)?$/;
+const friendInviteSmsOffer = (refereeCents) => `Start a plan and get a ${dollars(refereeCents)} credit after your first plan service`;
+
+// `body` is the RENDERED text (names and link filled in).
+function inviteSmsWithOffer(body, refereeCents) {
+  const text = String(body ?? '');
+  if (!(Number(refereeCents) > 0)) return text;
+  for (const { head, legacy } of SEEDED_INVITE_OFFERS) {
+    const seeded = `${head}${legacy}: `;
+    const at = text.lastIndexOf(seeded);
+    if (at >= 0 && INVITE_TAIL.test(text.slice(at + seeded.length))) {
+      return `${text.slice(0, at)}${head}${friendInviteSmsOffer(refereeCents)}: ${text.slice(at + seeded.length)}`;
+    }
+  }
+  return text;
+}
+
+// The office composer's referral insert (buildReferralLink). Today's line while there is no new amount.
+const composerReferralLine = (link, refereeCents) => (Number(refereeCents) > 0
+  ? `Know someone who needs pest or lawn care? They get a ${dollars(refereeCents)} credit after their first plan service with your link: ${link}\n\n`
+  : `Know someone who needs pest control? Share Waves here: ${link}\n\n`);
+
+// The referral_nudge email (Automations tab). The seeded sentence differs in the two bodies: the HTML body has it as a
+// sentence of its own, the text body after a dash.
+const NUDGE_SEEDED = Object.freeze({
+  html: 'When a neighbor, friend, or family member signs up for a recurring plan with it and we complete their first service, you each get a <strong>$25 account credit</strong>.',
+  text: ' — when a neighbor signs up for a recurring plan with it and we complete their first service, you each get a $25 account credit.',
+  preview: 'Refer a neighbor: you each get a $25 account credit.',
+});
+
+// The approved sentences: the friend's credit, then the member's. At the yearly limit (or no member amount) only the
+// friend's sentence is left: a member at the limit is never promised a credit.
+const nudgeEmailOffer = ({ refereeCents, memberCents, atLimit = false }, html) => {
+  const credit = (cents) => (html ? `<strong>${dollars(cents)} account credit</strong>` : `${dollars(cents)} account credit`);
+  const friend = `When a neighbor, friend or family member starts a recurring plan with your link, they get a ${credit(refereeCents)} after their first service.`;
+  const member = !atLimit && Number(memberCents) > 0 ? ` After we complete their first service, you get a ${credit(memberCents)}.` : '';
+  return `${friend}${member}`;
+};
+
+// `body` is the stored step body (html or text); `offer` = { refereeCents, memberCents, atLimit }.
+function nudgeEmailWithOffer(body, { html = false, ...offer }) {
+  const text = String(body ?? '');
+  const seeded = html ? NUDGE_SEEDED.html : NUDGE_SEEDED.text;
+  const at = Number(offer.refereeCents) > 0 ? text.indexOf(seeded) : -1;
+  if (at < 0) return text;
+  const words = nudgeEmailOffer(offer, html);
+  return `${text.slice(0, at)}${html ? words : `. ${words}`}${text.slice(at + seeded.length)}`;
+}
+
+// The Automations preview page's one-line summary (never sent). Both credits must be above 0 and the member not at the limit.
+function nudgePreviewWithOffer(line, { refereeCents, memberCents, atLimit = false }) {
+  if (line !== NUDGE_SEEDED.preview || atLimit || !(Number(refereeCents) > 0) || !(Number(memberCents) > 0)) return line;
+  return `Refer a neighbor: they get a ${dollars(refereeCents)} credit, you get a ${dollars(memberCents)} credit.`;
+}
+
 module.exports = {
   STEP2_DEFAULTS, step2Settings, memberCredit, etYearBounds, capReached, ruleTerms, formatDollars,
   friendInviteOfferLine, friendShareClause, memberInviteFriendClause, shareCardOffer, memberCreditEmailLine,
+  inviteSmsWithOffer, composerReferralLine, nudgeEmailWithOffer, nudgePreviewWithOffer,
+  SEEDED_INVITE_OFFERS, NUDGE_SEEDED,
 };

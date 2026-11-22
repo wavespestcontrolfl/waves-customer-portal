@@ -306,7 +306,8 @@ async function buildLatestEstimateLink(customerIds, { purpose = 'composer_insert
 }
 
 async function buildReferralLink(customerId) {
-  const { resolvePromoter, getLiveSettings } = require('./referral-engine');
+  const { resolvePromoter, getLiveSettings, step2FriendCreditCentsOf } = require('./referral-engine');
+  const { composerReferralLine } = require('./referral-step2');
   // Same STRICT settings read as the report referral endpoint
   // (reports-public.js): no live row or inactive program = no enrollment
   // and no link — enrollPromoter's own getSettings() falls back to
@@ -339,9 +340,11 @@ async function buildReferralLink(customerId) {
   if (!promoter?.referral_link) {
     return { url: null, line: '', reason: 'Could not build a referral link for this customer' };
   }
+  // GATE_REFERRAL_STEP2: the friend's credit from the live row read above (0 = today's line).
+  const friendCents = step2FriendCreditCentsOf(liveSettings);
   return {
     url: promoter.referral_link,
-    line: `Know someone who needs pest control? Share Waves here: ${promoter.referral_link}\n\n`,
+    line: composerReferralLine(promoter.referral_link, friendCents),
   };
 }
 

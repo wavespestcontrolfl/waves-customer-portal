@@ -723,7 +723,7 @@ describe('referral_nudge at delivery (GATE_REFERRAL_STEP2)', () => {
   });
   afterEach(() => { gates.referralStep2 = savedGate; jest.restoreAllMocks(); });
 
-  function nudgeQueues({ sendUpdate = chain(), enrollmentUpdate = chain() } = {}) {
+  function nudgeQueues({ sendUpdate = chain(), enrollmentUpdate = chain(), stepBodies = {} } = {}) {
     const enrollment = {
       id: 'enrollment-n', template_key: 'referral_nudge', customer_id: 'cust-n', status: 'active',
       current_step: 0, email: 'member@example.com', first_name: 'Sam', last_name: 'Member',
@@ -733,7 +733,7 @@ describe('referral_nudge at delivery (GATE_REFERRAL_STEP2)', () => {
       automation_enrollments: [chain({ first: enrollment }), chain({ first: enrollment }), enrollmentUpdate],
       automation_templates: [chain({ first: { key: 'referral_nudge', name: 'Referral Nudge', asm_group: 'service' } })],
       automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, subject: 'Share Waves, {{first_name}}',
-        html_body: '<p>Share it.</p>', text_body: 'Share it.', from_email: 'automations@wavespestcontrol.com', enabled: true }] })],
+        html_body: '<p>Share it.</p>', text_body: 'Share it.', from_email: 'automations@wavespestcontrol.com', enabled: true, ...stepBodies }] })],
       automation_step_sends: [chain({ returning: [{ id: 'send-n' }] }), sendUpdate],
       email_suppressions: [chain({ result: [] })],
     });
@@ -776,6 +776,63 @@ describe('referral_nudge at delivery (GATE_REFERRAL_STEP2)', () => {
     nudgeQueues();
     sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-nudge-2' });
     await expect(sendStep('enrollment-n')).resolves.toMatchObject({ sent: true });
+  });
+
+  describe('the words of a stored referral_nudge step (GATE_REFERRAL_STEP2)', () => {
+    const SEED = (field) => require('../models/migrations/20260926120200_customer_copy_audit_automations')
+      ._STEP_SWAPS.find((x) => x.key === 'referral_nudge' && x.field === field).after;
+    const sentMail = () => sendgrid.sendOne.mock.calls[0][0];
+    const decide = (decision) => jest.spyOn(engine, 'referralOfferDecision').mockResolvedValue(decision);
+    const ON = { gateOn: true, skip: false, atLimit: false, memberCents: 2500, refereeCents: 5000 };
+
+    test('gate on: the seeded sentence becomes the approved words in both bodies, from ONE decision read that also decides delivery', async () => {
+      const spy = decide(ON);
+      nudgeQueues({ stepBodies: { html_body: SEED('html_body'), text_body: SEED('text_body') } });
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-words' });
+      await expect(sendStep('enrollment-n')).resolves.toMatchObject({ sent: true });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy).toHaveBeenCalledWith(db, 'cust-n');
+      expect(sentMail().html).toContain('When a neighbor, friend or family member starts a recurring plan with your link, they get a <strong>$50 account credit</strong> after their first service. After we complete their first service, you get a <strong>$25 account credit</strong>.');
+      expect(sentMail().text).toContain('Share your referral link from the Refer tab in your portal. When a neighbor, friend or family member starts a recurring plan with your link, they get a $50 account credit after their first service. After we complete their first service, you get a $25 account credit. Or reply with their name');
+    });
+
+    test('gate off: the stored bodies are sent exactly as stored and nothing is read for the words', async () => {
+      gates.referralStep2 = false;
+      const spy = jest.spyOn(engine, 'referralOfferDecision');
+      nudgeQueues({ stepBodies: { html_body: SEED('html_body'), text_body: SEED('text_body') } });
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-off' });
+      await expect(sendStep('enrollment-n')).resolves.toMatchObject({ sent: true });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(sentMail().html).toContain('When a neighbor, friend, or family member signs up for a recurring plan with it and we complete their first service, you each get a <strong>$25 account credit</strong>.');
+      expect(sentMail().text).toContain('Share your referral link from the Refer tab in your portal \u2014 when a neighbor signs up for a recurring plan with it and we complete their first service, you each get a $25 account credit. Or reply');
+      expect(db).not.toHaveBeenCalledWith('referral_program_settings');
+    });
+
+    test('gate on, a step an admin rewrote: sent as stored', async () => {
+      decide(ON);
+      nudgeQueues({ stepBodies: { html_body: '<p>Know a neighbor? Send them your link.</p>', text_body: 'Know a neighbor? Send them your link.' } });
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-edited' });
+      await expect(sendStep('enrollment-n')).resolves.toMatchObject({ sent: true });
+      expect(sentMail().text).toContain('Know a neighbor? Send them your link.');
+      expect(sentMail().text).not.toMatch(/account credit/);
+    });
+
+    test('gate on, the friend credit is $0: today\'s sentence stays', async () => {
+      decide({ ...ON, refereeCents: 0 });
+      nudgeQueues({ stepBodies: { html_body: SEED('html_body'), text_body: SEED('text_body') } });
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-zero' });
+      await expect(sendStep('enrollment-n')).resolves.toMatchObject({ sent: true });
+      expect(sentMail().text).toContain('you each get a $25 account credit');
+    });
+
+    test('a test send has no member: it shows what a member under the limit gets (a null member id)', async () => {
+      const spy = decide(ON);
+      nudgeQueues({ stepBodies: { html_body: SEED('html_body'), text_body: SEED('text_body') } });
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-test' });
+      await expect(sendStep('enrollment-n', { testRecipient: 'office@example.com' })).resolves.toMatchObject({ sent: true });
+      expect(spy).toHaveBeenCalledWith(db, null);
+      expect(sentMail().text).toContain('you get a $25 account credit.');
+    });
   });
 });
 

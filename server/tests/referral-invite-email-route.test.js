@@ -361,6 +361,34 @@ describe('household sibling on the Refer tab (GH codex #3850 r2)', () => {
       referral_link: 'https://portal.wavespestcontrol.com/r/WAVES-J4KM',
     }), expect.objectContaining({ entity_id: 'promo-h' }));
   });
+  describe('/invite text (GATE_REFERRAL_STEP2): the seeded referral_invite row, swapped only while the gate is on', () => {
+    const SEED = require('../models/migrations/20261006220000_sms_template_tighten')._SWAPS.find(([key]) => key === 'referral_invite')[2];
+    const LINK = 'https://portal.wavespestcontrol.com/r/WAVES-J4KM';
+    const rendered = () => SEED.replace('{referee_name}', 'Jo').replace('{referrer_name}', 'Sam').replace('{referral_link}', LINK);
+    async function sendInvite(cents) {
+      installDb({ firstResults: { customers: { id: 'cust-1', first_name: 'Sam', email: 'sam@example.com' } } });
+      referralEngine.resolvePromoter.mockResolvedValueOnce({ promoter: household, household: true });
+      referralEngine.step2FriendCreditCents.mockResolvedValueOnce(cents);
+      const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      renderRequiredSmsTemplate.mockResolvedValueOnce(rendered());
+      sendCustomerMessage.mockResolvedValueOnce({ sent: true });
+      const res = await post('/api/referrals/invite', { phone: '(941) 555-0123', friendName: 'Jo' });
+      expect(res.status).toBe(200);
+      return sendCustomerMessage.mock.calls[0][0].body;
+    }
+
+    test('gate off (no friend amount): the stored text is sent exactly as rendered', async () => {
+      expect(await sendInvite(0)).toBe(rendered());
+    });
+
+    test('gate on: the approved words with the live amount, STOP line kept', async () => {
+      expect(await sendInvite(5000)).toBe(
+        `Hi Jo, Sam recommended Waves to you. Start a plan and get a $50 credit after your first plan service: ${LINK}\n\nReply STOP to opt out.`,
+      );
+    });
+  });
+
   test('POST / submits under the household promoter but names the acting sibling to the friend', async () => {
     installDb({ firstResults: { customers: { id: 'cust-1', first_name: 'Sam', email: 'sam@example.com' } } });
     referralEngine.resolvePromoter.mockResolvedValueOnce({ promoter: household, household: true });

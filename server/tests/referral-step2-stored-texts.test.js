@@ -1,0 +1,243 @@
+// Referral Step 2, the stored texts (words: owner 2026-11-21; GATE_REFERRAL_STEP2). The texts in the database are never changed:
+// with the gate on, the SEEDED sentence inside a rendered text is swapped for the approved words at render time
+// (referral-step2.js), and every amount is the live cents. Gate off: the text is exactly as stored.
+// Fixtures are the seeds the migrations wrote; a read of production (2026-11-22) found each stored text equal to its seed.
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true })) }));
+jest.mock('../services/sms-template-renderer', () => ({ renderRequiredSmsTemplate: jest.fn() }));
+
+const step2 = require('../services/referral-step2');
+const db = require('../models/db');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
+const { gates } = require('../config/feature-gates');
+const engine = require('../services/referral-engine');
+
+const step1Migration = require('../models/migrations/20261120090000_referral_step1_settings');
+const { _SWAPS: smsSwaps } = require('../models/migrations/20261006220000_sms_template_tighten');
+const { _STEP_SWAPS: stepSwaps } = require('../models/migrations/20260926120200_customer_copy_audit_automations');
+
+const COLUMN_SEED = step1Migration._CHANGES.find(([column]) => column === 'invite_sms_template')[2];
+const ROW_SEED = smsSwaps.find(([key]) => key === 'referral_invite')[2];
+const nudgeSeed = (field) => stepSwaps.find((s) => s.key === 'referral_nudge' && s.field === field).after;
+const HTML_SEED = nudgeSeed('html_body');
+const TEXT_SEED = nudgeSeed('text_body');
+const PREVIEW_SEED = nudgeSeed('preview_text');
+
+const LINK = 'portal.wavespestcontrol.com/r/WAVES-ABC12345';
+const fillColumn = (text, names = { referee: 'Jo', referrer: 'Sam' }) => text
+  .replace('{referee_name}', () => names.referee).replace('{referrer_name}', () => names.referrer).replace('{referral_link}', () => LINK);
+const fillRow = fillColumn;
+
+describe('the seeded sentences are in the seeds', () => {
+  test('each seed holds the sentence the swap looks for, so a drifting seed fails here', () => {
+    expect(COLUMN_SEED).toContain(`${step2.SEEDED_INVITE_OFFERS[0].head}${step2.SEEDED_INVITE_OFFERS[0].legacy}: {referral_link}`);
+    expect(ROW_SEED).toContain(`${step2.SEEDED_INVITE_OFFERS[1].head}${step2.SEEDED_INVITE_OFFERS[1].legacy}: {referral_link}\n\nReply STOP to opt out.`);
+    expect(HTML_SEED).toContain(step2.NUDGE_SEEDED.html);
+    expect(TEXT_SEED).toContain(step2.NUDGE_SEEDED.text);
+    expect(PREVIEW_SEED).toBe(step2.NUDGE_SEEDED.preview);
+  });
+});
+
+describe('inviteSmsWithOffer (the invite text, column and referral_invite row)', () => {
+  test('gate off or no amount: the text is returned exactly as rendered', () => {
+    for (const seed of [COLUMN_SEED, ROW_SEED]) {
+      const body = fillColumn(seed);
+      for (const cents of [0, undefined, null, -5, NaN]) expect(step2.inviteSmsWithOffer(body, cents)).toBe(body);
+    }
+  });
+
+  test('the column text gets the approved words with the live amount', () => {
+    expect(step2.inviteSmsWithOffer(fillColumn(COLUMN_SEED), 5000)).toBe(
+      `Hi Jo! Your neighbor Sam recommended Waves. Start a plan and get a $50 credit after your first plan service: ${LINK}`,
+    );
+  });
+
+  test('the referral_invite row gets the approved words and keeps its STOP line', () => {
+    expect(step2.inviteSmsWithOffer(fillRow(ROW_SEED), 5000)).toBe(
+      `Hi Jo, Sam recommended Waves to you. Start a plan and get a $50 credit after your first plan service: ${LINK}\n\nReply STOP to opt out.`,
+    );
+  });
+
+  test('cents are shown to the cent', () => {
+    expect(step2.inviteSmsWithOffer(fillColumn(COLUMN_SEED), 2550)).toContain('get a $25.50 credit after');
+  });
+
+  test('a text an admin rewrote is left as it is', () => {
+    for (const edited of [
+      `Hi Jo, Sam says Waves is great: ${LINK}`,
+      `Hi Jo! Sam recommended Waves. You'll both save $10 when you sign up: ${LINK}`,
+      `Hi Jo! Your neighbor Sam recommended Waves. You'll both save when you sign up, so call us: ${LINK} Thanks!`,
+    ]) expect(step2.inviteSmsWithOffer(edited, 5000)).toBe(edited);
+  });
+
+  test('a name that holds the seeded sentence is not swapped: only the stretch before the link counts', () => {
+    const name = "Pat recommended Waves. You'll both save when you sign up: ";
+    const rewritten = `Hi Jo, ${name}recommended Waves to you. Call us: ${LINK}`;
+    expect(step2.inviteSmsWithOffer(rewritten, 5000)).toBe(rewritten);
+    const seeded = fillColumn(COLUMN_SEED, { referee: 'Jo', referrer: name });
+    expect(step2.inviteSmsWithOffer(seeded, 5000)).toBe(
+      `Hi Jo! Your neighbor ${name} recommended Waves. Start a plan and get a $50 credit after your first plan service: ${LINK}`,
+    );
+  });
+});
+
+describe('composerReferralLine (the office composer insert)', () => {
+  test('no amount: today\'s line exactly; an amount: the approved words', () => {
+    const link = 'https://portal.wavespestcontrol.com/r/WAVES-ABC12345';
+    expect(step2.composerReferralLine(link, 0)).toBe(`Know someone who needs pest control? Share Waves here: ${link}\n\n`);
+    expect(step2.composerReferralLine(link, undefined)).toBe(`Know someone who needs pest control? Share Waves here: ${link}\n\n`);
+    expect(step2.composerReferralLine(link, 5000)).toBe(
+      `Know someone who needs pest or lawn care? They get a $50 credit after their first plan service with your link: ${link}\n\n`,
+    );
+    expect(step2.composerReferralLine(link, 2550)).toContain('They get a $25.50 credit');
+  });
+});
+
+describe('nudgeEmailWithOffer (the referral_nudge email)', () => {
+  const offer = { refereeCents: 5000, memberCents: 2500, atLimit: false };
+  const APPROVED_HTML = 'When a neighbor, friend or family member starts a recurring plan with your link, they get a <strong>$50 account credit</strong> after their first service. After we complete their first service, you get a <strong>$25 account credit</strong>.';
+  const APPROVED_TEXT = 'When a neighbor, friend or family member starts a recurring plan with your link, they get a $50 account credit after their first service. After we complete their first service, you get a $25 account credit.';
+
+  test('the HTML body: the seeded sentence becomes the approved words, nothing else moves', () => {
+    expect(step2.nudgeEmailWithOffer(HTML_SEED, { html: true, ...offer })).toBe(
+      HTML_SEED.replace(step2.NUDGE_SEEDED.html, () => APPROVED_HTML),
+    );
+    expect(step2.nudgeEmailWithOffer(HTML_SEED, { html: true, ...offer })).toContain(
+      `<p>Share your personal referral link — it's in the Refer tab of your customer portal. ${APPROVED_HTML}</p>`,
+    );
+  });
+
+  test('the text body: the seeded dash clause becomes a sentence and the approved words', () => {
+    const swapped = step2.nudgeEmailWithOffer(TEXT_SEED, { html: false, ...offer });
+    expect(swapped).toBe(
+      `Hi {{first_name}}! If our last service was solid, we'd love your help growing by word-of-mouth. Share your referral link from the Refer tab in your portal. ${APPROVED_TEXT} Or reply with their name and we'll reach out (one contact, no spam). Thanks for being on our route. — The Waves Pest Control team`,
+    );
+  });
+
+  test('amounts are the live cents, to the cent', () => {
+    expect(step2.nudgeEmailWithOffer(TEXT_SEED, { html: false, refereeCents: 2550, memberCents: 3000, atLimit: false }))
+      .toContain('they get a $25.50 account credit after their first service. After we complete their first service, you get a $30 account credit.');
+  });
+
+  test('a member at the yearly limit, or with no member amount, is promised no credit: the first sentence only', () => {
+    for (const memberOffer of [{ ...offer, atLimit: true }, { ...offer, memberCents: 0 }]) {
+      const swapped = step2.nudgeEmailWithOffer(HTML_SEED, { html: true, ...memberOffer });
+      expect(swapped).toContain('they get a <strong>$50 account credit</strong> after their first service.</p>');
+      expect(swapped).not.toMatch(/you get a/);
+    }
+  });
+
+  test('a $0 friend credit, or a body an admin rewrote, is returned as stored', () => {
+    expect(step2.nudgeEmailWithOffer(HTML_SEED, { html: true, ...offer, refereeCents: 0 })).toBe(HTML_SEED);
+    expect(step2.nudgeEmailWithOffer(TEXT_SEED, { html: false, ...offer, refereeCents: 0 })).toBe(TEXT_SEED);
+    const edited = '<p>Know a neighbor? Send them your link and we\'ll thank you both.</p>';
+    expect(step2.nudgeEmailWithOffer(edited, { html: true, ...offer })).toBe(edited);
+    // The HTML sentence in the text arm (and the reverse) is not the seeded stretch for that arm.
+    expect(step2.nudgeEmailWithOffer(HTML_SEED, { html: false, ...offer })).toBe(HTML_SEED);
+  });
+
+  test('the preview line: the approved summary when both credits are above 0 and the member is under the limit', () => {
+    expect(step2.nudgePreviewWithOffer(PREVIEW_SEED, offer)).toBe('Refer a neighbor: they get a $50 credit, you get a $25 credit.');
+    expect(step2.nudgePreviewWithOffer(PREVIEW_SEED, { ...offer, atLimit: true })).toBe(PREVIEW_SEED);
+    expect(step2.nudgePreviewWithOffer(PREVIEW_SEED, { ...offer, refereeCents: 0 })).toBe(PREVIEW_SEED);
+    expect(step2.nudgePreviewWithOffer('Refer a neighbor, edited.', offer)).toBe('Refer a neighbor, edited.');
+  });
+});
+
+describe('submitReferral sends the stored invite (column), swapped only while the gate is on', () => {
+  // A chainable stand-in for knex: every method returns the chain; a read answers from `tables`; a count answers 0.
+  let settingsReads;
+  let settingsRow;
+  function installDb() {
+    settingsReads = 0;
+    const make = (table) => {
+      const chain = new Proxy(function chainTarget() {}, {
+        get(_t, prop) {
+          if (prop === 'then') return undefined;
+          if (prop === 'first') {
+            return async () => {
+              if (table === 'referral_program_settings') { settingsReads += 1; return settingsRow; }
+              if (table === 'referral_promoters') return { id: 'promoter-1', customer_id: 'cust-1', first_name: 'Sam', referral_code: 'WAVES-ABC12345', customer_phone: '+19415550000' };
+              if (table === 'customers') return null;
+              if (table === 'referrals') return null;
+              return null;
+            };
+          }
+          if (prop === 'count') return () => ({ first: async () => ({ c: 0 }) });
+          if (prop === 'returning') return async () => [{ id: 'row-1' }];
+          if (prop === 'forUpdate' || prop === 'forKeyShare') return () => chain;
+          return () => chain;
+        },
+        apply() { return chain; },
+      });
+      return chain;
+    };
+    db.mockImplementation(make);
+    db.transaction = jest.fn(async (fn) => fn((table) => make(table)));
+    db.raw = jest.fn();
+  }
+
+  let savedGate;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    savedGate = gates.referralStep2;
+    settingsRow = { id: 1, program_active: true, base_url: 'https://portal.wavespestcontrol.com', referrer_reward_cents: 2500, referee_discount_cents: 5000, max_referrals_per_month: 20, invite_sms_template: COLUMN_SEED };
+    installDb();
+  });
+  afterEach(() => { gates.referralStep2 = savedGate; });
+
+  const sentBody = () => sendCustomerMessage.mock.calls[0][0].body;
+  const send = () => engine.submitReferral('promoter-1', { name: 'Jo Friend', phone: '941-555-0123', referrerName: 'Sam' });
+  const TODAY = (link) => `Hi Jo! Your neighbor Sam recommended Waves. You'll both save when you sign up: ${link}`;
+
+  test('gate off: the text is exactly the stored text, and the settings row is read once (no new read)', async () => {
+    gates.referralStep2 = false;
+    await send();
+    expect(sentBody()).toMatch(/^Hi Jo! Your neighbor Sam recommended Waves\. You'll both save when you sign up: \S+$/);
+    expect(sentBody()).toBe(TODAY(sentBody().split(': ').pop()));
+    expect(settingsReads).toBe(1);
+  });
+
+  test('gate off, a hand-edited stored text: sent exactly as stored', async () => {
+    gates.referralStep2 = false;
+    settingsRow.invite_sms_template = 'Hi {referee_name}, {referrer_name} thinks you will love Waves: {referral_link}';
+    await send();
+    expect(sentBody()).toMatch(/^Hi Jo, Sam thinks you will love Waves: \S+$/);
+  });
+
+  test('gate on: the approved words with the live friend credit', async () => {
+    gates.referralStep2 = true;
+    await send();
+    expect(sentBody()).toMatch(/^Hi Jo! Your neighbor Sam recommended Waves\. Start a plan and get a \$50 credit after your first plan service: \S+$/);
+  });
+
+  test('gate on, the friend credit is $0 or the program is paused: today\'s words', async () => {
+    gates.referralStep2 = true;
+    settingsRow.referee_discount_cents = 0;
+    await send();
+    expect(sentBody()).toMatch(/You'll both save when you sign up: /);
+    sendCustomerMessage.mockClear();
+    installDb();
+    settingsRow.referee_discount_cents = 5000;
+    settingsRow.program_active = false;
+    await send();
+    expect(sentBody()).toMatch(/You'll both save when you sign up: /);
+  });
+
+  test('gate on, a hand-edited stored text: sent as stored, with no amount', async () => {
+    gates.referralStep2 = true;
+    settingsRow.invite_sms_template = 'Hi {referee_name}, {referrer_name} thinks you will love Waves: {referral_link}';
+    await send();
+    expect(sentBody()).toMatch(/^Hi Jo, Sam thinks you will love Waves: \S+$/);
+  });
+
+  test('with no stored column text the referral_invite row is used and swapped the same way', async () => {
+    gates.referralStep2 = true;
+    settingsRow.invite_sms_template = null;
+    renderRequiredSmsTemplate.mockImplementation(async (_key, vars) => fillRow(ROW_SEED, { referee: vars.referee_name, referrer: vars.referrer_name }).replace(LINK, vars.referral_link));
+    await send();
+    expect(sentBody()).toMatch(/^Hi Jo, Sam recommended Waves to you\. Start a plan and get a \$50 credit after your first plan service: \S+\n\nReply STOP to opt out\.$/);
+  });
+});

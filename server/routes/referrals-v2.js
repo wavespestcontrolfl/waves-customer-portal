@@ -10,6 +10,7 @@ const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const engine = require('../services/referral-engine');
+const step2 = require('../services/referral-step2');
 const { isEnabled } = require('../config/feature-gates');
 const { isPromoterPhoneCollision, PHONE_COLLISION_MESSAGE, PHONE_COLLISION_CODE } = require('../services/referral-errors');
 const { sendCustomerMessage, classifyDeliveryCertainty } = require('../services/messaging/send-customer-message');
@@ -287,7 +288,9 @@ router.post('/invite', inviteLimiter, async (req, res, next) => {
 
     const cleanPhone = phone.replace(/\s+/g, '');
     const friendly = friendName ? friendName.replace(/[<>]/g, '') : 'there';
-    const body = await renderRequiredSmsTemplate('referral_invite', {
+    // GATE_REFERRAL_STEP2: the seeded sentence becomes the approved Step 2 words (referral-step2.js); gate off, no read
+    // and the text is exactly as stored.
+    const body = step2.inviteSmsWithOffer(await renderRequiredSmsTemplate('referral_invite', {
       referee_name: friendly,
       referrer_name: self?.first_name || promoter.first_name || 'your neighbor',
       referral_link: referralLink,
@@ -295,7 +298,7 @@ router.post('/invite', inviteLimiter, async (req, res, next) => {
       workflow: 'referral_invite',
       entity_type: 'referral_promoter',
       entity_id: promoter.id,
-    });
+    }), await engine.step2FriendCreditCents());
 
     // Cooldown: same promoter+phone within 24 hours = no-op (idempotent
     // double-tap protection). The receipt is reserved ATOMICALLY before the

@@ -283,7 +283,7 @@ function estimateEndedStop(estimate) {
   return null;
 }
 
-async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient, billingSend, retryNotBound = false, handedOffStep = null, step = null }) {
+async function automationDeliveryBlock({ enrollment, template, recipient, sendId, testRecipient, billingSend, retryNotBound = false, handedOffStep = null, step = null, nudgeDecision }) {
   if (testRecipient) return null;
   if (handedOffStep) return completeHandedOffRetry(enrollment, handedOffStep);
   if (retryNotBound) return blockStoppedRetry({ enrollment, sendId, recipient, verdict: 'not_bound' });
@@ -316,7 +316,7 @@ async function automationDeliveryBlock({ enrollment, template, recipient, sendId
     if (stop) return blockSendAndCancelEnrollment({ enrollment, sendId, ...stop });
   }
   if (template.key === 'referral_nudge') {
-    const verdict = await referralNudgeVerdict(enrollment.customer_id);
+    const verdict = await referralNudgeVerdict(enrollment.customer_id, nudgeDecision);
     if (verdict === 'defer') {
       // Standing unknown (settings or ledger unreadable) or the program paused: try again later; the once-ever
       // enrollment is never cancelled on a doubt.
@@ -333,11 +333,46 @@ async function automationDeliveryBlock({ enrollment, template, recipient, sendId
 // GATE_REFERRAL_STEP2, checked again at delivery (the member can reach the limit after the sequence was queued, or
 // before the gate was switched on): the referral_nudge copy promises a credit for each referral, so a member at the
 // yearly limit is cancelled; one whose standing cannot be read, or a paused program, is deferred. Gate off: never withheld.
-async function referralNudgeVerdict(customerId) {
+// `decision`: the one the send already read to choose its words (sendStepLocked); without it this reads its own.
+async function referralNudgeVerdict(customerId, decision) {
   if (!customerId) return 'send';
-  const offer = await require('./referral-engine').referralOfferDecision(db, customerId);
+  const offer = decision || await require('./referral-engine').referralOfferDecision(db, customerId);
   if (offer.skip) return 'defer';
   return offer.atLimit ? 'cap' : 'send';
+}
+
+// GATE_REFERRAL_STEP2, the words of the referral_nudge email (words: owner 2026-11-21). The stored step still holds its seeded
+// sentence; with the gate on that sentence is swapped for the approved Step 2 words at render time (referral-step2.js),
+// with the live amounts. A step an admin rewrote no longer holds it and renders as stored. Gate off: the decision answers
+// at once, reads nothing, and nothing is swapped.
+// A real send reads the member's decision ONCE: the same decision picks the words and, in automationDeliveryBlock, decides
+// whether the email goes (limit: cancelled; unreadable or paused: deferred). A test send, the test sequence and the
+// preview page have no member: they show what a member under the limit gets (a null member id).
+function memberlessNudgeDecision(templateKey) {
+  return templateKey === 'referral_nudge' ? require('./referral-engine').referralOfferDecision(db, null) : null;
+}
+
+async function referralNudgeDecision({ template, enrollment, testRecipient }) {
+  if (testRecipient) return memberlessNudgeDecision(template.key);
+  if (template.key !== 'referral_nudge' || !enrollment.customer_id) return null;
+  return require('./referral-engine').referralOfferDecision(db, enrollment.customer_id);
+}
+
+// A decision that makes no new promise (gate off, skip, none) leaves the body as stored.
+function nudgeOffer(decision) {
+  return decision?.gateOn && !decision.skip
+    ? { refereeCents: decision.refereeCents, memberCents: decision.memberCents, atLimit: decision.atLimit }
+    : null;
+}
+
+function nudgeBody(body, decision, html) {
+  const offer = nudgeOffer(decision);
+  return offer ? require('./referral-step2').nudgeEmailWithOffer(body, { html, ...offer }) : body;
+}
+
+function nudgePreviewLine(line, decision) {
+  const offer = nudgeOffer(decision);
+  return offer ? require('./referral-step2').nudgePreviewWithOffer(line, offer) : line;
 }
 
 // A payment-failed notice is billing mail, so it goes through the shared
@@ -1182,10 +1217,11 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
   if (routed.blocked) return routed.blocked;
   const { recipient } = routed;
   const consultationBlock = await resolveConsultationBlock(step, enrollment, recipient);
+  const nudgeDecision = await referralNudgeDecision({ template, enrollment, testRecipient });
   const { html, text } = renderAutomationStepContent({
     template,
-    htmlBody: step.html_body,
-    textBody: step.text_body,
+    htmlBody: nudgeBody(step.html_body, nudgeDecision, true),
+    textBody: nudgeBody(step.text_body, nudgeDecision, false),
     customer: personal,
     asmGroupId,
     consultationHtml: consultationBlock.html,
@@ -1208,7 +1244,7 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
 
   const deliveryBlock = await automationDeliveryBlock({ enrollment, template, recipient,
     sendId: sendRow.id, testRecipient, billingSend, retryNotBound: sendRow.retryNotBound,
-    handedOffStep: sendRow.retryHandedOff ? step : null, step });
+    handedOffStep: sendRow.retryHandedOff ? step : null, step, nudgeDecision });
   if (deliveryBlock) return deliveryBlock;
 
   const handoff = { started: false, accepted: null };
@@ -1384,14 +1420,15 @@ async function testSequence({ templateKey, toEmail }) {
 
   const fake = { first_name: 'Test', last_name: 'User', email: toEmail };
   const results = [];
+  const nudgeDecision = await memberlessNudgeDecision(templateKey);
 
   for (const step of steps) {
     if (!step.html_body && !step.text_body) { results.push({ step: step.step_order, skipped: 'empty' }); continue; }
     try {
       const rendered = renderAutomationStepContent({
         template,
-        htmlBody: step.html_body,
-        textBody: step.text_body,
+        htmlBody: nudgeBody(step.html_body, nudgeDecision, true),
+        textBody: nudgeBody(step.text_body, nudgeDecision, false),
         customer: fake,
         asmGroupId,
       });
@@ -1431,4 +1468,7 @@ module.exports = {
   automationSuppressionMatches,
   activeAutomationSuppressionFor,
   requiresTermiteBond,
+  memberlessNudgeDecision,
+  nudgeBody,
+  nudgePreviewLine,
 };
