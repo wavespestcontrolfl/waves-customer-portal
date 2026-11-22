@@ -102,6 +102,48 @@ describe('facts and the permit page', () => {
     expect(t.deps.recordPermitResult).toHaveBeenCalledWith(permit, 'no_fields', null, new Date(NOW));
   });
 
+  test('stale stored facts (the page was not read at the row\'s CO date) are never used: the page is read again and stored', async () => {
+    const row = makeRow();
+    const permit = permitOf(row, { detail_stale: true, detail_fetched_at: new Date(NOW - 900 * HOUR) }); // stored: 2100, 2 stories
+    const t = setup({ parcel: fullParcel({ livingAreaSqft: null, stories: null }) }); // the page: 2400, 2 stories
+    expect(await t.read(row, permit)).toEqual({
+      facts: { homeSqft: 2400, homeSqftSource: 'permit_plan', stories: 2, lotSqft: 8000 }, missing: null,
+    });
+    expect(t.deps.recordPermitResult).toHaveBeenCalledWith(permit, 'ok', { conditioned_sqft: 2400, stories: 2 }, new Date(NOW));
+    // The same stored facts on a row that is not stale are used with no page read.
+    const current = setup({ parcel: fullParcel({ livingAreaSqft: null, stories: null }) });
+    expect((await current.read(row, permitOf(row, { detail_stale: false }))).facts).toMatchObject({ homeSqft: 2100, stories: 2 });
+    expect(current.deps.fetchPermitPage).not.toHaveBeenCalled();
+  });
+
+  test('a stale row whose re-read gives no good page: the old facts stay unused and the home is missing its fact', async () => {
+    const row = makeRow();
+    const permit = permitOf(row, { detail_stale: true, detail_fetched_at: new Date(NOW - 900 * HOUR) });
+    const t = setup({ parcel: fullParcel({ livingAreaSqft: null }), fetchPermitPage: jest.fn(async () => ({ status: 'not_found', facts: null })) });
+    expect(await t.read(row, permit)).toEqual({
+      facts: { homeSqft: null, homeSqftSource: null, stories: 1, lotSqft: 8000 }, missing: 'no_home_size',
+    });
+    expect(t.deps.recordPermitResult).toHaveBeenCalledWith(permit, 'not_found', null, new Date(NOW));
+    // Tried in the last 20 hours: not read again, and still not used.
+    const recent = setup({ parcel: fullParcel({ livingAreaSqft: null }) });
+    expect(await recent.read(row, permitOf(row, { detail_stale: true, detail_fetched_at: new Date(NOW - 2 * HOUR) })))
+      .toMatchObject({ facts: { homeSqft: null }, missing: 'no_home_size' });
+    expect(recent.deps.fetchPermitPage).not.toHaveBeenCalled();
+    // The permit page stopped (its switch off): a stale row is left, like any row that needs the page.
+    const off = setup({ parcel: fullParcel({ livingAreaSqft: null }), permitPageOn: jest.fn(() => false) });
+    expect(await off.read(row, permit)).toBe(LEFT);
+  });
+
+  test('a good re-read is merged as the permit reader stores it: a fact the page does not show keeps the stored value', async () => {
+    const row = makeRow();
+    const permit = permitOf(row, { detail_stale: true, detail_fetched_at: new Date(NOW - 900 * HOUR), stories: 1.5 });
+    const t = setup({
+      parcel: fullParcel({ livingAreaSqft: null, stories: null }),
+      fetchPermitPage: jest.fn(async () => ({ status: 'ok', facts: { conditioned_sqft: 2400, stories: null } })),
+    });
+    expect((await t.read(row, permit)).facts).toEqual({ homeSqft: 2400, homeSqftSource: 'permit_plan', stories: 1.5, lotSqft: 8000 });
+  });
+
   test('a result that cannot be stored is counted by code, the facts of the read are still used, and the run has a problem', async () => {
     const row = makeRow();
     const t = setup({

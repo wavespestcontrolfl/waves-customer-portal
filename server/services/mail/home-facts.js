@@ -5,8 +5,10 @@
  * arbitrated like the estimator does. Used by the home price pass (services/mail/home-price.js).
  *
  *   - the parcel map, by parcel number: lot size, living area, stories;
- *   - when the map lacks the living area or the stories: the stored permit facts (detail_status 'ok'), or the county's
- *     permit page, once in 20 hours, stored through the permit reader's own recordResult so the weekly collector sees it.
+ *   - when the map lacks the living area or the stories: the stored permit facts (detail_status 'ok' and not stale), or
+ *     the county's permit page, once in 20 hours, stored through the permit reader's own recordResult so the weekly
+ *     collector sees it. Stored facts are stale when the row has a CO date the last page read did not see (a plan can
+ *     change at CO; the store's detail_stale). Stale facts are never used: the page is read again.
  *
  * Home size = the map's living area, else the permit plan's. Stories = the map's, else the permit's. Lot = the map's.
  * A missing fact is never guessed.
@@ -134,6 +136,10 @@ async function readParcel(row, ctx) {
   }
 }
 
+// The stored facts of an 'ok' row whose page was not read at its CO date may be an older plan's: they are not used.
+const isStale = (permit) => permit.detail_status === 'ok' && permit.detail_stale === true;
+const withoutStaleFacts = (permit) => (isStale(permit) ? { ...permit, conditioned_sqft: null, stories: null } : permit);
+
 // The permit page, fetched and stored. A transport failure throws out of the reader: that is a failure of the row, and
 // nothing is stored for it (the row's own failed status holds the 20-hour wait).
 async function fetchAndStorePage(permit, ctx) {
@@ -155,19 +161,24 @@ async function fetchAndStorePage(permit, ctx) {
     const code = errorCode(err);
     state.storeErrors[code] = (state.storeErrors[code] || 0) + 1;
   }
-  return { permit: page.status === 'ok' ? { ...permit, ...(page.facts || {}) } : permit };
+  // No good read: a stale row's old facts stay unused. A good read is merged as recordResult stores it: a fact the
+  // page shows replaces the stored one, and a fact it does not show keeps the stored value.
+  if (page.status !== 'ok') return { permit: withoutStaleFacts(permit) };
+  const found = Object.fromEntries(Object.entries(page.facts || {}).filter(([, value]) => value !== null && value !== undefined));
+  return { permit: { ...permit, ...found, detail_stale: false } };
 }
 
 /**
- * The permit's facts for a home the map could not fully size: the stored ones when the page was read before, else the
- * page, unless it was tried in the last 20 hours. The permit page's own switch is read before each fetch: off, the page
- * is stopped for the run. { permit } | { failed } | LEFT.
+ * The permit's facts for a home the map could not fully size: the stored ones when the page was read at the row's CO
+ * date (detail_status 'ok', not stale), else the page, unless it was tried in the last 20 hours. A stale row's stored
+ * facts are never used. The permit page's own switch is read before each fetch: off, the page is stopped for the run.
+ * { permit } | { failed } | LEFT.
  */
 async function permitForGaps(permit, ctx) {
   const { d, state } = ctx;
-  if (permit.detail_status === 'ok') return { permit };
+  if (permit.detail_status === 'ok' && !isStale(permit)) return { permit };
   const fetchedAt = permit.detail_fetched_at ? new Date(permit.detail_fetched_at).getTime() : null;
-  if (fetchedAt !== null && ctx.clock() - fetchedAt < PAGE_RETRY_MS) return { permit };
+  if (fetchedAt !== null && ctx.clock() - fetchedAt < PAGE_RETRY_MS) return { permit: withoutStaleFacts(permit) };
   if (!state.pageStopped && !d.permitPageOn()) {
     state.pageStopped = true;
     state.pageOff = true;
@@ -177,7 +188,8 @@ async function permitForGaps(permit, ctx) {
 }
 
 /**
- * The facts of one home. `permit` is its stored permit row (home-price-store permitFacts). Returns
+ * The facts of one home. `permit` is its stored permit row (home-price-store permitFacts, with its detail_stale).
+ * Returns
  *   LEFT                          the parcel map or the permit page it needs is stopped for this run;
  *   { failed, facts }             a read threw: failed is 'parcel_map' or 'permit_page'; facts are what the map gave;
  *   { facts, missing }            the arbitrated facts { homeSqft, homeSqftSource, stories, lotSqft } and the first
