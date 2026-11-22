@@ -13,8 +13,10 @@
  * that day cannot be the visit the callback corrects. The category is the
  * name classifier the night run uses (auto-dispatch/service-category.js
  * classifyServiceCategory), so a lawn re-service never lands on the last pest
- * visit. No source found: the callback stays with its own technician, as
- * today.
+ * visit. Rodent trapping and rodent exclusion count as ONE category here
+ * (creditCategory): they are one job for the customer, so a trap-check callback
+ * counts against the rodent visit before it, whichever of the two lines did it.
+ * No source found: the callback stays with its own technician, as today.
  *
  * Reads only. Jobs, revenue and margins stay with the technician who did the
  * work; only the callback count moves.
@@ -23,6 +25,12 @@ const { classifyServiceCategory } = require('./auto-dispatch/service-category');
 const { NON_PERFORMED_VISIT_OUTCOMES } = require('./visit-outcomes');
 
 const LOOKBACK_DAYS = 60;
+
+/** The category a callback and its source must share: the classifier's, with exclusion read as rodent. */
+const creditCategory = (serviceType) => {
+  const category = classifyServiceCategory(serviceType);
+  return category === 'exclusion' ? 'rodent' : category;
+};
 
 // SQL for 'this record's visit outcome performed no application' - the shared list (visit-outcomes.js).
 const PERFORMED_OUTCOME_SQL = (alias) => `COALESCE(${alias}.structured_notes->>'visitOutcome', '') NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map((o) => `'${o}'`).join(', ')})`;
@@ -100,11 +108,11 @@ async function callbackCreditByTechnician(conn, { start, endDate, distinctVisits
     const id = distinctVisits ? String(row.callback_visit) : String(row.callback_id);
     let entry = credited.get(id);
     if (!entry) {
-      entry = { techId: row.callback_tech_id ?? null, category: classifyServiceCategory(row.callback_type), found: false };
+      entry = { techId: row.callback_tech_id ?? null, category: creditCategory(row.callback_type), found: false };
       credited.set(id, entry);
     }
     if (entry.found || row.source_tech_id == null) continue;
-    if (classifyServiceCategory(row.source_type) === entry.category) {
+    if (creditCategory(row.source_type) === entry.category) {
       entry.techId = row.source_tech_id;
       entry.found = true;
     }

@@ -978,6 +978,40 @@ function wholeHomeInputError(message, code) {
 const includesReentryGuarantee = (result) => result?.includesReentryGuarantee === true;
 
 // ── Generate Complete Estimate ────────────────────────────────
+// GATE_PEST_PRICE_PHOTO_FACTS (owner 2026-11-21, "1, 2"): the customer price
+// path may hand the recurring pest line three photo facts beside `features`
+// (input.pestPhotoFacts; services/customer-pricing-ai.js sets it when the
+// property lookup's only doubt is the lawn area). The recurring pest step is
+// the one reader. Every other line prices on `features`, where that lookup
+// flag keeps the neutral defaults, so a mosquito, lawn, tree or termite price
+// does not move.
+//
+// What follows the pest line, by the existing rule and on purpose: a one-time
+// pest price is the recurring QUARTERLY rate times a multiplier. So a
+// one-time pest line on the same estimate (its recurringPestPerApp anchor,
+// below) and the public estimate's one-time choice (routes/estimate-public.js,
+// from the quarterly tier) are computed from this line's rate and move with
+// it, exactly as they do when `features` carries the same facts on a staff
+// estimate. One rate for the plan and for the one-time price beside it. A
+// one-time pest job priced with no recurring pest line never reads the key.
+//
+// Known values only: anything else leaves the feature as it was. The key is
+// no new power for a caller that controls the input: `features` already
+// carries the same three facts.
+const PEST_PHOTO_FACT_VALUES = {
+  shrubs: ['light', 'moderate', 'heavy'],
+  complexity: ['simple', 'moderate', 'complex'],
+};
+function pestPropertyWithPhotoFacts(property, facts) {
+  if (!facts || typeof facts !== 'object' || Array.isArray(facts)) return property;
+  const features = { ...(property.features || {}) };
+  for (const [key, allowed] of Object.entries(PEST_PHOTO_FACT_VALUES)) {
+    if (allowed.includes(facts[key])) features[key] = facts[key];
+  }
+  if (typeof facts.nearWater === 'boolean') features.nearWater = facts.nearWater;
+  return { ...property, features };
+}
+
 function generateEstimate(input) {
   const services = input.services || {};
   // Lawn cost-floor ENFORCEMENT arm state (owner ruling 2026-07-17: floors
@@ -1345,7 +1379,7 @@ function generateEstimate(input) {
         // re-price on the footprint ladder (stored quotes keep their
         // dollars or visibly stop).
         ? unitBandQuoteRequiredLine('pest_control', bandVerdict.reason)
-        : pricePestControl(property, {
+        : pricePestControl(pestPropertyWithPhotoFacts(property, input.pestPhotoFacts), {
         frequency: services.pest.frequency || 'quarterly',
         // No caller-provided version → defer to pricePestControl's own live
         // default (v2 curve). The old `|| 'v1'` fallback silently pinned

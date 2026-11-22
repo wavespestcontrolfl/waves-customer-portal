@@ -316,7 +316,7 @@ describe('buildLawnFastContext', () => {
     expect(spray).not.toHaveProperty('gateNotes');
   });
 
-  test('GATE_LAWN_RECLAIMED_HALF_N: the half-nitrogen note and the pre-emergent bag note ride the planned line onto the sheet, as the only notes carried', async () => {
+  test('reclaimed water: the half-nitrogen note and the pre-emergent bag note ride the planned line onto the sheet, as the only notes carried', async () => {
     process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
     process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
     const HALF = 'Reclaimed water: half nitrogen today (0.375 lb N, 1.6 lb per 1,000).';

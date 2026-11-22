@@ -2646,12 +2646,11 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // RECLAIMED WATER METERS — daily 3:47am ET (GATE_LAWN_RECLAIMED_HALF_N, owner 2026-10-23). Downloads Manatee County's public
+  // RECLAIMED WATER METERS — daily 3:47am ET (owner 2026-10-23). Downloads Manatee County's public
   // reclaimed-meter layer about weekly (the tick does it only when the stored copy is older than six days) and marks the properties
-  // at a meter, locally: no property data is sent to the county. Minute 47 is free in the 3am hour. Gate off = the tick does nothing.
+  // at a meter, locally: no property data is sent to the county. Minute 47 is free in the 3am hour.
   // =========================================================================
   cron.schedule('47 3 * * *', async () => {
-    if (!require('../config/feature-gates').lawnReclaimedHalfNLive()) return;
     const tickStartedAt = Date.now();
     try {
       const lockRes = await runExclusive('reclaimed-water-meters', async () => {

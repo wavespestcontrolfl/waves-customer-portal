@@ -267,14 +267,14 @@ function cogsTotalLine(terms) {
 
 // Tag on the four lawn protocol entries while they hold the v13 program.
 const LAWN_V13_TAG = 'lawn-v13';
-// Tag on them while they hold the reclaimed-water wording (GATE_LAWN_RECLAIMED_HALF_N, a v13-only text: "the app halves the N"). It is a
-// second axis of what the entries say, so a flip of that gate alone also marks the KB and both corpora stale for the 15-minute reconcile,
+// Tag on them while they hold the reclaimed-water wording (a v13-only text: "the app halves the N"). It is a
+// second axis of what the entries say, so it also marks the KB and both corpora stale for the 15-minute reconcile,
 // instead of leaving "the tech logs half" searchable until the nightly sync (a tech could then halve a dose the app already halved).
 const LAWN_RECLAIMED_TAG = 'lawn-reclaimed-half-n';
 function lawnWordingLive() {
   const gates = require('../config/feature-gates');
   const v13 = gates.lawnV13Live?.() === true;
-  return { v13, reclaimed: v13 && gates.lawnReclaimedHalfNLive?.() === true };
+  return { v13, reclaimed: v13 };
 }
 // Which program each index corpus last finished syncing ('v13' | 'legacy'), written to
 // system_settings only AFTER that corpus's sync succeeds. The four entry tags say what the
@@ -1105,7 +1105,7 @@ const KnowledgeBaseService = {
     );
   },
 
-  // Unsetting (or setting) GATE_LAWN_V13, or GATE_LAWN_RECLAIMED_HALF_N under it, must not wait for the 2:40 / 3:30 AM runs:
+  // Unsetting (or setting) GATE_LAWN_V13 must not wait for the 2:40 / 3:30 AM runs:
   // the lawn protocol entries and the knowledge-index corpora built from them
   // (protocol directly, kb through those entries) are rewritten from lawnProtocols()
   // as soon as this notices they hold the other program. Cheap no-op otherwise.

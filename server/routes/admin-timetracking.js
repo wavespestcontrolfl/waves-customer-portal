@@ -1659,7 +1659,7 @@ async function resendHireLink(req, res, next) {
 router.post('/technicians/:id/hire', requireAdmin, hireTechnician);
 router.post('/technicians/:id/hire/resend', requireAdmin, resendHireLink);
 
-// GET /technicians/:id/capabilities — the five dispatch categories for one
+// GET /technicians/:id/capabilities — the dispatch categories for one
 // tech, missing rows reported as 'unset'. Admin only: this is the editor's
 // read, and capability decisions are a management call.
 async function getTechnicianCapabilities(req, res, next) {
@@ -1673,7 +1673,7 @@ async function getTechnicianCapabilities(req, res, next) {
   }
 }
 
-// PUT /technicians/:id/capabilities — upsert any subset of the five
+// PUT /technicians/:id/capabilities — upsert any subset of the
 // categories as { service_category, state, notes }. The caller is stamped as
 // verifier. Turning a category Off never touches the schedule: visits already
 // assigned in that category are listed back for manual reassignment (same
@@ -1760,7 +1760,7 @@ router.put('/technicians/:id/voice-pin', requireAdmin, putTechnicianVoicePin);
 // live, new /book, phone and after-call bookings and the office Auto choice go to the
 // line's home technician, else its gap technician (services/scheduling/line-technician.js).
 // Admin only; 404 while the gate is off.
-const SERVICE_LINE_KEYS = ['general', 'mosquito', 'lawn', 'rodent', 'termite'];
+const SERVICE_LINE_KEYS = ['general', 'mosquito', 'lawn', 'rodent', 'exclusion', 'termite'];
 const SERVICE_LINE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHADOW_SUMMARY_DEFAULT_DAYS = 14;
 const SHADOW_SUMMARY_MAX_DAYS = 90;
@@ -1786,7 +1786,7 @@ async function readServiceLines(conn) {
 }
 
 // PUT body: { lines: [{ service_category, home_technician_id, gap_technician_id }] }.
-// Any subset of the five lines; a technician id is a uuid or null (cleared).
+// Any subset of the lines; a technician id is a uuid or null (cleared).
 function normalizeServiceLineEntries(input) {
   if (!Array.isArray(input) || !input.length) return { error: 'lines must be a non-empty array' };
   const seen = new Set();

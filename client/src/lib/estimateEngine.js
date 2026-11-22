@@ -733,6 +733,38 @@ export function rodentBaitWaveguardFlags() {
   return { tierQualifier: RODENT_BAIT.tierQualifier, excludeFromPctDiscount: RODENT_BAIT.excludeFromPctDiscount };
 }
 
+// True when a service picked on the estimate form CAN read Tree density. The
+// estimate tool shows the Tree density box only then; the form value itself
+// always flows unchanged (hidden, never cleared).
+//
+// Service-level on purpose. Whether a picked service reads the density for
+// THIS estimate also depends on other inputs (a tree count, a measured lawn
+// area, the exterior flea area, a commercial property). The form does not
+// mirror those engine rules: one missed case would hide a control that
+// changes a price. So the box may show where it changes nothing, as it did on
+// every estimate before, and it hides only when no picked service has any
+// read of it. Add a service's flag here when its pricer starts to read
+// tree density.
+//
+// Readers (server pricing-engine): Tree & Shrub (the no-count tree estimate),
+// recurring mosquito (tree pressure, monthly recommendation), the lawn family
+// priced from lawn area (the fallback lawn estimate's complexity score and
+// the "heavy tree canopy" turf review; commercial lawn too), and the flea
+// exterior spray (its tree-density adjustment). Non-readers: recurring and
+// one-time pest (owner directive 2026-07-30), one-time mosquito, misting,
+// palm injection, plugging, termite, rodent and the other specialty services.
+export function pickedServiceCanReadTreeDensity(form = {}) {
+  return !!(
+    form.svcTs ||
+    form.svcMosquito ||
+    form.svcLawn ||
+    form.svcOnetimeLawn ||
+    form.svcDethatch ||
+    form.svcTopdress ||
+    form.svcFleaExterior
+  );
+}
+
 // Estimator panel note for the rodent bait row, derived from the EMITTED
 // result (row-level tier/discount posture + whether the setup line fired)
 // and the live setup fee — never the migration-default literals (codex

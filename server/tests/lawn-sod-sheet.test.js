@@ -8,7 +8,7 @@ jest.mock('../services/service-completion-profiles', () => ({
 }));
 jest.mock('../services/waveguard-plan-engine', () => ({
   buildPlanForService: jest.fn(), v13VisitLimits: jest.fn(), v13ProtocolRows: jest.fn(() => new Map()), v13GateNotes: jest.fn(() => []),
-  // GATE_LAWN_RECLAIMED_HALF_N: the swap bag asks the engine's own decision; the real one, so the sheet and the plan cannot drift.
+  // The swap bag asks the engine's own decision; the real one, so the sheet and the plan cannot drift.
   nitrogenDecision: (...args) => jest.requireActual('../services/waveguard-plan-engine').nitrogenDecision(...args),
   nitrogenCutNotes: (...args) => jest.requireActual('../services/waveguard-plan-engine').nitrogenCutNotes(...args),
   visitOnV13Protocol: jest.fn((...args) => jest.requireActual('../services/waveguard-plan-engine').visitOnV13Protocol(...args)),
@@ -248,13 +248,13 @@ describe('loadSodForContext', () => {
       expect(out.plannedProducts.items[1]).toMatchObject({ amount: 10.5, ratePer1000: 2.1 });
     });
 
-    // GATE_LAWN_RECLAIMED_HALF_N: the swap bag is plain 24-0-11 (no pre-emergent), so a reclaimed lawn gets half its nitrogen.
-    describe('on a reclaimed lawn (GATE_LAWN_RECLAIMED_HALF_N)', () => {
+    // The swap bag is plain 24-0-11 (no pre-emergent), so a reclaimed lawn gets half its nitrogen.
+    describe('on a reclaimed lawn', () => {
       const water = require('../services/lawn-reclaimed-water');
       let reclaimed;
       const realRead = water.isReclaimedService;
-      beforeEach(() => { process.env.GATE_LAWN_RECLAIMED_HALF_N = 'true'; process.env.GATE_LAWN_V13 = 'true'; reclaimed = jest.spyOn(water, 'isReclaimedService').mockResolvedValue(true); });
-      afterEach(() => { delete process.env.GATE_LAWN_RECLAIMED_HALF_N; delete process.env.GATE_LAWN_V13; reclaimed.mockRestore(); });
+      beforeEach(() => { process.env.GATE_LAWN_V13 = 'true'; reclaimed = jest.spyOn(water, 'isReclaimedService').mockResolvedValue(true); });
+      afterEach(() => { delete process.env.GATE_LAWN_V13; reclaimed.mockRestore(); });
       const VISIT_UNPINNED = () => visitRow();
       const VISIT_PINNED = () => visitRow({ lawn_protocol_key: 'fixture_v13', lawn_protocol_version: '2026.05', lawn_protocol_window_key: 'oct_v13_spreader_fall' });
       const NOTE = (n, rate) => `Reclaimed water: half nitrogen today (${n} lb N, ${rate} lb per 1,000).`;
@@ -322,14 +322,6 @@ describe('loadSodForContext', () => {
           expect(out.plannedProducts.items[1]).toMatchObject({ amount: 6.25, ratePer1000: 1.25 });
         });
 
-        test('the reclaimed gate off (the sod sheet as it was): the bag follows the visit day, May, so the October bag 2.5 lb, unread and unchanged', async () => {
-          withDefaults(true);
-          delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
-          engineOf().visitOnV13Protocol.mockClear();
-          const out = await load({ record: prefs({ sod_laid_on: '2026-01-02' }), visit: MAY(), planned: OCT() });
-          expect(out.plannedProducts.items[1]).toMatchObject({ amount: 12.5, ratePer1000: 2.5 });
-          expect(engineOf().visitOnV13Protocol).not.toHaveBeenCalled();
-        });
       });
 
       test('a visit pinned to v13 is halved, and the pin is passed to the planner\'s own lookup with the lawn\'s track', async () => {
@@ -343,14 +335,12 @@ describe('loadSodForContext', () => {
       test.each([
         ['not reclaimed', () => reclaimed.mockResolvedValue(false)],
         ['a failed property read (the real reader, a query that throws)', () => reclaimed.mockImplementation((_knex, svc, options) => realRead(() => { throw Object.assign(new Error('db down'), { code: 'ECONNRESET' }); }, svc, options))],
-        ['the gate off (the engine is not asked at all)', () => { delete process.env.GATE_LAWN_RECLAIMED_HALF_N; reclaimed.mockClear(); }],
       ])('%s: the bag as it was, 2.5 lb per 1,000, no note', async (_label, arrange) => {
         arrange();
         const out = await load({ record, planned: OCT() });
         expect(out.newSod.swap).toMatchObject({ resolved: true, lbPer1000: 2.5 });
         expect(out.plannedProducts.items[1]).toMatchObject({ amount: 12.5, ratePer1000: 2.5 });
         expect(out.plannedProducts.items[1]).not.toHaveProperty('gateNotes');
-        if (process.env.GATE_LAWN_RECLAIMED_HALF_N !== 'true') expect(reclaimed).not.toHaveBeenCalled();
       });
     });
 

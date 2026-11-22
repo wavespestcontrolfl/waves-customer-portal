@@ -85,12 +85,12 @@ postgres('technician job type from the catalog (real Postgres)', () => {
     ];
 
     test('gate off: names only (palm reads general)', async () => {
-      expect(await capabilities.categoriesForServices(db, rows())).toEqual(['general', 'general', 'rodent']);
+      expect(await capabilities.categoriesForServices(db, rows())).toEqual(['general', 'general', 'exclusion']);
     });
 
     test('gate on: palm by id reads lawn, a pest key reads general, a name-only row falls back to the regex', async () => {
       process.env.GATE_TECH_JOB_TYPE_CHECKS = 'true';
-      expect(await capabilities.categoriesForServices(db, rows())).toEqual(['lawn', 'general', 'rodent']);
+      expect(await capabilities.categoriesForServices(db, rows())).toEqual(['lawn', 'general', 'exclusion']);
     });
 
     test('gate on, inside a transaction: the read rides a savepoint and the transaction stays usable', async () => {

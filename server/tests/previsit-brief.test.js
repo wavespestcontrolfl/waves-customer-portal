@@ -1558,11 +1558,11 @@ describe('the November nitrogen target on the lawn brief', () => {
   });
 });
 
-// GATE_LAWN_RECLAIMED_HALF_N: the brief states a reclaimed lawn's nitrogen bag the way the plan sizes it (half), and leaves a pre-emergent bag alone.
+// Reclaimed water: the brief states a reclaimed lawn's nitrogen bag the way the plan sizes it (half), and leaves a pre-emergent bag alone.
 describe('the nitrogen target on the lawn brief for a reclaimed property', () => {
   const { LAWN_V13_VERSION } = require('../services/lawn-program');
   const water = require('../services/lawn-reclaimed-water');
-  const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_RECLAIMED_HALF_N'];
+  const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE'];
   const BAG = 'LESCO 24-0-11 with PolyPlus OPTI';
   const DIMENSION = 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer';
   const visit = (month, name, targetN) => mockSummarize.mockReturnValue({
@@ -1609,15 +1609,10 @@ describe('the nitrogen target on the lawn brief for a reclaimed property', () =>
     expect((await bagFor('2026-12-10', 'LESCO 10-0-22 50% PolyPlus OPTI45')).gates.targetN).toBe('0.45 lb N/1000');
   });
 
-  test('a lawn that is not reclaimed, and the gate off (no read), keep the stored target', async () => {
+  test('a lawn that is not reclaimed keeps the stored target', async () => {
     visit(2, BAG, '0.75 lb N/1000');
     reclaimed.mockResolvedValue(false);
     expect((await bagFor('2026-02-10', BAG)).gates.targetN).toBe('0.75 lb N/1000');
-    reclaimed.mockClear();
-    delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
-    reclaimed.mockResolvedValue(true);
-    expect((await bagFor('2026-02-10', BAG)).gates.targetN).toBe('0.75 lb N/1000');
-    expect(reclaimed).not.toHaveBeenCalled();
   });
 
   test('a failed property read aborts the generation, as the brief\'s other reads do', async () => {
