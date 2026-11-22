@@ -50,6 +50,7 @@ describe("the Read the roof tap", () => {
     render(<RoofReadPanel spot={SPOT} address={ADDR} estimateId={EST} />);
     const panel = screen.getByTestId("roof-read-panel");
     expect(panel).toHaveTextContent("The AI read stays with staff. The points you save, with their notes, show on the customer estimate from its next send");
+    expect(panel).toHaveTextContent("To check how the points look, press Preview in the estimate tool. Preview shows the points the customer has now. When the customer has none, it shows the points of the next send, marked \"Staff preview\".");
     expect(panel).not.toHaveTextContent("Nothing here reaches the customer");
   });
 

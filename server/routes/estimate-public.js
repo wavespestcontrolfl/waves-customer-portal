@@ -31996,7 +31996,7 @@ async function composeEstimateDataPayload(estimate, {
       // estimate was sent, shown on the county roof photo in the Waves AI card. The key is absent with no frozen copy,
       // when staff hid the points, and when the estimate has moved to another address, so those responses stay
       // byte-identical. The page prints it; the emailed document does not (EstimateProposalDocument ignores the key).
-      ...(await roofPointsDocBlock(estimate)),
+      ...(await roofPointsDocBlock(estimate, { staffPreview: verifiedStaffPreview })),
       // Authored commercial proposal, rendered on-page under the commercial
       // glass gate. Key only exists for gated proposal estimates so every
       // other response stays byte-identical.
