@@ -72,6 +72,11 @@ describe('findCustomersAtAddress', () => {
     expect(ids).toEqual(['spouse']);
   });
 
+  it('strict: a failing property leg throws, so a partial list never reads as nobody else here', async () => {
+    const db = fakeDb({ customers: [ROW('a', '123 Palm Ave')], propertyError: new Error('connection reset') });
+    await expect(findCustomersAtAddress(db, '123 Palm Ave, Venice, FL 34285', { strict: true })).rejects.toThrow('connection reset');
+  });
+
   it('a failing property leg is skipped, not fatal', async () => {
     const db = fakeDb({ customers: [ROW('a', '123 Palm Ave')], propertyError: new Error('relation "customer_properties" does not exist') });
     const ids = (await findCustomersAtAddress(db, '123 Palm Ave, Venice, FL 34285')).map((r) => r.id);

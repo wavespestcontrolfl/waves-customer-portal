@@ -11,14 +11,15 @@
  * come from the county data. The body carries the home's own address and no customer, phone or email; the dry run
  * needs none. Nothing is saved.
  *
- * The verdict: a server price, no member of Waves at the address (the save's own warning: its price would be on
- * new-customer terms), exactly one engine line and it is the pest line, no quote-required line, no line a person must
+ * The verdict: a server price, no member of Waves at the address (its price would be on new-customer terms; read with
+ * the strict address match, because the save's own warning is fail-soft and a failed lookup there reads as no member), exactly one engine line and it is the pest line, no quote-required line, no line a person must
  * review before its price stands as exact (draft-builder lineNeedsReviewBeforeExactPrice, the shared test), an annual
  * total above 0 and a setup fee the table can hold. A clean price is priced; anything else is not_clean with one reason
  * code; a save the server refuses (4xx) is not_clean / save_refused; any other failure is failed / engine (tried again
- * later).
+ * later). A member check that cannot finish is failed / member_check (tried again later), never a price.
  *
- * No database access of its own, no paid or AI service, no logging.
+ * One database read of its own (the member check: customers and their properties at this address), no paid or AI
+ * service, no logging.
  */
 
 const MAX_AMOUNT = 1e8; // the price columns hold up to numeric(10,2)
@@ -31,6 +32,13 @@ const REAL = {
   dryRunEstimate: () => (body) => require('../admin-estimate-persistence').createOrReuseAdminEstimate({
     database: require('../../models/db'), body, technicianId: null, technician: null, dryRun: true, requireLivePricing: true,
   }),
+  // True when a member of Waves is at the address. Strict: a failed lookup throws, it never reads as no member.
+  memberAtAddress: () => async (address) => {
+    const { findCustomersAtAddress } = require('../customer-address-match');
+    const { isMembershipCustomerRow } = require('../waveguard-existing-services');
+    const rows = await findCustomersAtAddress(require('../../models/db'), address, { strict: true });
+    return rows.some(isMembershipCustomerRow);
+  },
 };
 
 const httpStatus = (err) => Number(err?.statusCode || err?.status) || 0;
@@ -62,8 +70,10 @@ function engineInputFor(facts, buildEngineInput) {
 }
 
 /** The estimate save's body for the home: its own address, no customer. */
+const addressOf = (row) => [row.address_line1, [row.city, row.state, row.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+
 function estimateBody(row, facts, engineInputs) {
-  const address = [row.address_line1, [row.city, row.state, row.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  const address = addressOf(row);
   return {
     address,
     showOneTimeOption: false,
@@ -131,15 +141,24 @@ function judge(prepared) {
  *   { status: 'priced', ...facts, priceAnnual, priceSetupFee, priceDigest }
  *   { status: 'not_clean', reason, ...facts }     reason: not_server_price | member_address | not_one_line |
  *                                                  engine_review | no_amount | save_refused
- *   { status: 'failed', reason: 'engine', ...facts }
- * `deps` may replace buildEngineInput and dryRunEstimate (tests).
+ *   { status: 'failed', reason: 'engine' | 'member_check', ...facts }
+ * `deps` may replace buildEngineInput, dryRunEstimate and memberAtAddress (tests).
  */
 async function priceHome(row, facts, deps = {}) {
   const buildEngineInput = deps.buildEngineInput || REAL.buildEngineInput();
   const dryRunEstimate = deps.dryRunEstimate || REAL.dryRunEstimate();
+  const memberAtAddress = deps.memberAtAddress || REAL.memberAtAddress();
   const known = {
     homeSqft: facts.homeSqft, homeSqftSource: facts.homeSqftSource, stories: facts.stories, lotSqft: facts.lotSqft,
   };
+  // Before the save: a home whose member check cannot finish is tried again later, never priced on new-customer terms.
+  let member;
+  try {
+    member = await memberAtAddress(addressOf(row));
+  } catch {
+    return { status: 'failed', reason: 'member_check', ...known };
+  }
+  if (member) return { status: 'not_clean', reason: 'member_address', ...known };
   let prepared;
   try {
     prepared = await dryRunEstimate(estimateBody(row, facts, engineInputFor(facts, buildEngineInput)));

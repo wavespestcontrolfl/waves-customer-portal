@@ -464,6 +464,7 @@ describe('the run with the real facts reader and the real quote (their outside c
     permitGapMs: jest.fn(() => 2500),
     sleep: jest.fn(async () => undefined),
     buildEngineInput: jest.fn((input) => ({ built: input })),
+    memberAtAddress: jest.fn(async () => false),
     dryRunEstimate: jest.fn(async () => ({
       estimate: {
         pricing_authority: 'SERVER', annual_total: '512.34',

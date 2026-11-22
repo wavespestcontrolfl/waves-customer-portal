@@ -33,6 +33,7 @@ function setup(over = {}) {
   const deps = {
     buildEngineInput: jest.fn((input) => ({ built: input })),
     dryRunEstimate: jest.fn(async () => prepared()),
+    memberAtAddress: jest.fn(async () => false),
     ...over,
   };
   return { deps, price: (f = facts) => priceHome(row, f, deps) };
@@ -189,5 +190,25 @@ describe('failures', () => {
   test('no message of an error reaches the result', async () => {
     const t = setup({ dryRunEstimate: jest.fn(async () => { throw new Error('101 EXAMPLE TRL TESTER ALEX J'); }) });
     expect(JSON.stringify(await t.price())).not.toMatch(/EXAMPLE|TESTER/);
+  });
+});
+
+describe('the strict member check, before the save', () => {
+  test('it is asked for the home\'s own address', async () => {
+    const t = setup();
+    await t.price();
+    expect(t.deps.memberAtAddress).toHaveBeenCalledWith(ADDRESS);
+  });
+
+  test('a member at the address: not_clean / member_address, and the save is never asked', async () => {
+    const t = setup({ memberAtAddress: jest.fn(async () => true) });
+    expect(await t.price()).toEqual({ status: 'not_clean', reason: 'member_address', ...facts });
+    expect(t.deps.dryRunEstimate).not.toHaveBeenCalled();
+  });
+
+  test('a member check that fails: failed / member_check (tried again later), never a price', async () => {
+    const t = setup({ memberAtAddress: jest.fn(async () => { throw new Error('connection reset'); }) });
+    expect(await t.price()).toEqual({ status: 'failed', reason: 'member_check', ...facts });
+    expect(t.deps.dryRunEstimate).not.toHaveBeenCalled();
   });
 });

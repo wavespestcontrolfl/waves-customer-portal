@@ -48,11 +48,13 @@ function candidateAddressString(row) {
 }
 
 /**
+ * `strict: true` throws when the property-address leg fails, instead of
+ *   returning the primary leg alone (the primary leg always throws).
  * @returns {Promise<Array<object>>} customer rows (deduped by id) whose
  *   primary or property address is the same street address, each with
  *   `matchedVia: 'primary' | 'property'` and the matched address columns.
  */
-async function findCustomersAtAddress(database, address, { excludeCustomerId = null } = {}) {
+async function findCustomersAtAddress(database, address, { excludeCustomerId = null, strict = false } = {}) {
   const houseNumber = houseNumberOf(address);
   if (!houseNumber) return [];
 
@@ -85,6 +87,8 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
       );
     candidates.push(...property.map((row) => ({ ...row, matchedVia: 'property' })));
   } catch (propErr) {
+    // strict: a caller that must not read a partial list as "nobody else is here" gets the error instead.
+    if (strict) throw propErr;
     logger.warn(`[customer-address-match] property-address leg skipped: ${propErr.message}`);
   }
 
