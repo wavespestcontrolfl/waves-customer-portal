@@ -327,17 +327,6 @@ function sittingsMismatch(candidateSittings, baselineSittings) {
   return null;
 }
 
-// Before the FIRST candidate sitting there is no pair to judge, yet a baseline can already rule the exam out:
-// fewer graded items than the minimum can never pair enough, and a baseline graded by more than one judge ruler
-// can never be compared (examRunsMismatch). { reason, detail } | null.
-function baselineRulesOut(baselineSittings) {
-  const { judgeRulerOf } = require('./sms-sealed-eval');
-  const mixed = baselineSittings.map((b) => judgeRulerOf(b.results)).find((ruler) => ruler.includes('+'));
-  if (mixed) return { reason: 'judge_mismatch', detail: { baselineRuler: mixed } };
-  const pairedItems = pairedTally([], baselineSittings.map((b) => b.results), []).pairedItems;
-  return pairedItems < MIN_PAIRED_ITEMS ? { reason: 'too_few_items', detail: { pairedItems } } : null;
-}
-
 /**
  * The promotion bar, pure. Each side is a list of sittings, { run, results } each (one a side unless
  * PROMPT_AUTOPROMOTE_EXAM_SITTINGS asks for more). Promote only when: every sitting completed and is
@@ -566,13 +555,13 @@ async function sitCandidate({ dbi, patch, runner, lock, now, open, complete, fin
     if (!got.baseline) return got;
     baselineId = got.baseline.id;
     // A candidate sitting is the one spend nobody else can use (a baseline is the live prompt's own exam). Before
-    // ANY of them is paid for, the baseline it would use is read: with the finished sittings when there are some
-    // (a baseline they may not be compared with, another judge ruler say, already settles the exam), and alone
-    // before the first (a baseline that graded too few items can never pair enough).
-    const baselineSittings = [await withResults(dbi, got.baseline), ...(finished ? finished.baselineSittings : [])];
-    const verdict = finished ? decidePromotion({ candidateSittings: finished.candidateSittings, baselineSittings }) : null;
-    const refused = finished ? (verdict.final && { reason: verdict.reason, detail: verdict.detail }) : baselineRulesOut(baselineSittings);
-    if (refused) return { refused };
+    // a further one is paid for, the finished sittings are read together with the baseline it would use: a
+    // baseline they may not be compared with (another judge ruler, say) already settles the exam.
+    // The FIRST sitting is the one-sitting loop as it was: its baseline is not read before its candidate sits.
+    if (finished) {
+      const verdict = decidePromotion({ candidateSittings: finished.candidateSittings, baselineSittings: [await withResults(dbi, got.baseline), ...finished.baselineSittings] });
+      if (verdict.final) return { refused: { reason: verdict.reason, detail: verdict.detail } };
+    }
   }
   const sitting = open
     ? { runId: open.id }
