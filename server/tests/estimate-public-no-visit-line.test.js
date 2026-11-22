@@ -87,10 +87,11 @@ const SENT = '2026-11-20T16:00:00.000Z';
 const recurringRow = (service) => ({ service, name: service, visitsPerYear: 6 });
 // A sent home estimate. `services` are its recurring service keys; `oneTime` its one-time rows; `servedServices` are the
 // recurring services of the price the customer is served (the send snapshot), the saved ones unless a test says otherwise.
+// `servedPrice` adds fields to that served price.
 // Each row gets its own id: the route keeps per-estimate memos, so two fixtures under one id would read each other's
 // price state.
 let rowSeq = 0;
-function estimateRow({ services = ['pest_control'], servedServices = services, oneTime = [], estimateData = {}, ...overrides } = {}) {
+function estimateRow({ services = ['pest_control'], servedServices = services, servedPrice = {}, oneTime = [], estimateData = {}, ...overrides } = {}) {
   rowSeq += 1;
   return {
     id: `est-no-visit-line-${rowSeq}`, token: 'novisitlinetoken', status: 'sent', sent_at: null, viewed_at: null,
@@ -111,6 +112,7 @@ function estimateRow({ services = ['pest_control'], servedServices = services, o
         combinedRecurring: { waveGuardDiscountPct: 0 },
         frequencies: [{ key: 'quarterly', monthly: 42.3, annual: 507.6, perServiceTreatments: servedServices.map((service) => ({ label: service, service, displayPrice: 56.4, visitsPerYear: 6, monthly: 42.3, annual: 507.6 })) }],
         oneTimeBreakdown: { items: oneTime },
+        ...servedPrice,
       } },
       ...estimateData,
     },
@@ -250,18 +252,38 @@ describe('serviceMixIsRemoteMeasured: is every service on the estimate priced fr
     expect(serviceMixIsRemoteMeasured([null, 'pest_control'], [null])).toBe(false);
   });
 
-  test('setup, discount and membership rows are not services: they neither count nor block', () => {
+  test('the setup fee and discount rows are not services: they neither count nor block', () => {
     const notServices = [
       { service: 'waveguard_setup', name: 'WaveGuard Setup', amount: 99 },
       { service: 'one_time_adjustment', name: 'Discount', amount: -20 },
       { service: 'manual_discount', name: 'Manual discount', amount: -10 },
+      { service: 'rodent_bundle_discount', name: 'Bundle discount', amount: -15 },
+      { kind: 'discount', label: 'Neighbor discount', amount: -25 },
+      {},
     ];
     expect(serviceMixIsRemoteMeasured([pest], notServices)).toBe(true);
-    expect(serviceMixIsRemoteMeasured([pest, { service: 'waveguard_membership', name: 'WaveGuard Membership' }], [])).toBe(true);
     // Rows that are not services do not make an estimate with no service a measured one.
     expect(serviceMixIsRemoteMeasured([], notServices)).toBe(false);
     // A positive "other one-time services" remainder is real work nothing classified.
     expect(serviceMixIsRemoteMeasured([pest], [{ service: 'one_time_adjustment', name: 'Other one-time services', amount: 75 }])).toBe(false);
+  });
+
+  test('a row is a fee or a discount by its stored service, compared whole: never by its name, never by a part of a key', () => {
+    // Setup work is work: a part of a key never makes a row a fee.
+    for (const key of ['rodent_bait_setup', 'trap_only_setup', 'mosquito_misting_setup', 'waveguard_membership', 'service_credit']) {
+      expect([key, serviceMixIsRemoteMeasured([pest, recurringRow(key)], [])]).toEqual([key, false]);
+      expect([key, serviceMixIsRemoteMeasured([pest], [{ service: key, name: key, amount: 50 }])]).toEqual([key, false]);
+    }
+    // A fee name on a row with no stored service is a name.
+    expect(serviceMixIsRemoteMeasured([pest], [{ name: 'WaveGuard Setup', amount: 99 }])).toBe(false);
+    // A stored service wins over a discount mark.
+    expect(serviceMixIsRemoteMeasured([pest], [{ service: 'german_roach', kind: 'discount', amount: -50 }])).toBe(false);
+    // A row with a price and nothing else is a row nobody can identify.
+    expect(serviceMixIsRemoteMeasured([pest], [{ amount: 120 }])).toBe(false);
+    expect(serviceMixIsRemoteMeasured([pest, { mo: 40 }], [])).toBe(false);
+    // A commercial row is never a measured home service, on either list.
+    expect(serviceMixIsRemoteMeasured([{ ...pest, isCommercial: true }], [])).toBe(false);
+    expect(serviceMixIsRemoteMeasured([pest], [{ service: 'one_time_pest', amount: 199, isCommercial: true }])).toBe(false);
   });
 });
 
@@ -336,6 +358,41 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
     }), {})).toBe(true);
   });
 
+  test('a saved row with a key or a price and no stored service takes the answer away', () => {
+    const saved = (extra) => ({ result: { ...plan('pest_control'), ...extra } });
+    // The page resolves a plan from a raw line's key. A key is not a stored service.
+    expect(estimateIsRemoteMeasured({ engineResult: { lineItems: [{ key: 'pest_control', monthly: 42 }] } }, {})).toBe(false);
+    expect(estimateIsRemoteMeasured(saved({ lineItems: [{ key: 'pest_control', monthly: 42 }] }), {})).toBe(false);
+    expect(estimateIsRemoteMeasured(saved({ lineItems: [{ key: 'rodent_bait', monthly: 35, annual: 420 }] }), {})).toBe(false);
+    expect(estimateIsRemoteMeasured({ result: { recurring: { services: [recurringRow('pest_control'), { key: 'lawn_care', mo: 60 }] } } }, {})).toBe(false);
+    expect(estimateIsRemoteMeasured(saved({ oneTime: { items: [{ key: 'one_time_pest', price: 199 }] } }), {})).toBe(false);
+    expect(estimateIsRemoteMeasured(saved({ specItems: [{ price: 250 }] }), {})).toBe(false);
+    // A fee name with no stored service is a name.
+    expect(estimateIsRemoteMeasured(saved({ oneTime: { items: [{ name: 'WaveGuard Setup', price: 99 }] } }), {})).toBe(false);
+    // The stored fee, a discount row and an empty row stay out of the way.
+    expect(estimateIsRemoteMeasured(saved({
+      oneTime: { items: [{ service: 'waveguard_setup', name: 'WaveGuard Setup', price: 99 }, { kind: 'discount', label: 'Neighbor discount', price: -25 }] },
+      lineItems: [{}, { service: '', name: '' }],
+    }), {})).toBe(true);
+  });
+
+  test('a stored service at any depth of a saved result counts, also in a place no reader lists', () => {
+    const saved = (extra) => ({ result: { ...plan('pest_control'), ...extra } });
+    // A line nested in a line.
+    expect(estimateIsRemoteMeasured(saved({ lineItems: [{ service: 'pest_control', monthly: 42, lineItems: [{ service: 'pest_control', monthly: 42 }] }] }), {})).toBe(true);
+    expect(estimateIsRemoteMeasured(saved({ lineItems: [{ service: 'pest_control', monthly: 42, lineItems: [{ service: 'rodent_trapping', price: 400 }] }] }), {})).toBe(false);
+    // The engine's notes about a service.
+    expect(estimateIsRemoteMeasured(saved({ marginWarnings: [{ service: 'pest_control', message: 'Below floor' }] }), {})).toBe(true);
+    expect(estimateIsRemoteMeasured(saved({ marginWarnings: [{ service: 'rodent_bait', message: 'Below floor' }] }), {})).toBe(false);
+    // A container this rule does not name, in either saved shape.
+    expect(estimateIsRemoteMeasured(saved({ addOnWork: { rows: [{ service: 'bed_bug', rooms: 2 }] } }), {})).toBe(false);
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control'), engineResult: { extras: [{ detail: { service: 'flea_package' } }] } }, {})).toBe(false);
+    // A commercial mark at any depth.
+    expect(estimateIsRemoteMeasured(saved({ addOnWork: { rows: [{ service: 'pest_control', isCommercial: true }] } }), {})).toBe(false);
+    // The frozen price inside the save is not a saved result: the served price is read by its own rule.
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control'), sendSnapshot: { pricingBundle: { firstVisitFees: [{ service: 'pest_initial_roach' }] } } }, {})).toBe(true);
+  });
+
   test('an inputs-only save is read from its replayed engine result, raw rows included', () => {
     const inputsOnly = () => ({ engineInputs: { homeSqFt: 2000, lotSqFt: 8000, services: { pest: { frequency: 'quarterly' } } } });
     // The real engine: one pest control line.
@@ -390,6 +447,37 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
       services: [section('pest_control'), { key: 'rodent', isRecurring: false, frequencies: [] }],
       oneTimeBreakdown: { items: [{ service: 'rodent_trapping', name: 'Rodent Trapping', amount: 400 }] },
     })).toBe(false);
+  });
+
+  test('a first-visit fee, a quote-required row or any stored service of the served price can take the answer away', () => {
+    const estData = { result: plan('pest_control') };
+    const setup = { service: 'waveguard_setup', amount: 99, label: 'WaveGuard setup', waivedWithPrepay: true };
+    const roach = { service: 'pest_initial_roach', amount: 150, label: 'Cockroach Treatment Service', waivedWithPrepay: false };
+    // The WaveGuard setup fee is a fee. A first-visit treatment is work.
+    expect(estimateIsRemoteMeasured(estData, { firstVisitFees: [setup], setupFee: setup })).toBe(true);
+    expect(estimateIsRemoteMeasured(estData, { firstVisitFees: [setup, roach], setupFee: setup })).toBe(false);
+    expect(estimateIsRemoteMeasured(estData, { firstVisitFees: [{ label: 'Cockroach Treatment Service', amount: 150 }] })).toBe(false);
+    expect(estimateIsRemoteMeasured(estData, { setupFee: roach })).toBe(false);
+    expect(estimateIsRemoteMeasured(estData, { rodentBaitSetupFee: { service: 'rodent_bait_setup', amount: 199, label: 'Bait Station Setup' } })).toBe(false);
+    expect(estimateIsRemoteMeasured(estData, { mistingInstallFee: { service: 'mosquito_misting_installation', amount: 2400 } })).toBe(false);
+    // Quote-required rows, on the price and on its one-time breakdown.
+    expect(estimateIsRemoteMeasured(estData, { quoteRequiredItems: [{ service: 'rodent_exclusion', name: 'Rodent Exclusion' }] })).toBe(false);
+    expect(estimateIsRemoteMeasured(estData, { oneTimeBreakdown: { items: [], quoteRequiredItems: [{ name: 'Custom work' }] } })).toBe(false);
+    // A section's own one-time rows and fee.
+    const section = (extra) => ({ key: 'pest_control', isRecurring: true, memberKeys: ['pest_control'], ...extra });
+    expect(estimateIsRemoteMeasured(estData, { services: [section({ setupFee: setup, oneTimeContribution: { items: [{ service: 'one_time_pest', amount: 199 }] } })] })).toBe(true);
+    expect(estimateIsRemoteMeasured(estData, { services: [section({ oneTimeContribution: { items: [{ service: 'german_roach', amount: 450 }] } })] })).toBe(false);
+    expect(estimateIsRemoteMeasured(estData, { services: [section({ setupFee: roach })] })).toBe(false);
+    // A one-time section's rows, and a place this rule does not name.
+    expect(estimateIsRemoteMeasured(estData, { services: [section({}), { key: 'pest_control', isRecurring: false, oneTimeContribution: { items: [{ service: 'flea_package', amount: 300 }] } }] })).toBe(false);
+    expect(estimateIsRemoteMeasured(estData, { laterWork: { rows: [{ service: 'stinging_insect' }] } })).toBe(false);
+    // A setup key in a plan row is work, not a fee.
+    expect(estimateIsRemoteMeasured(estData, { frequencies: [{ key: 'quarterly', perServiceTreatments: [{ service: 'pest_control' }, { service: 'rodent_bait_setup' }] }] })).toBe(false);
+    // Page copy rows hold display keys and no stored service.
+    expect(estimateIsRemoteMeasured(estData, { frequencies: [{
+      key: 'quarterly', perServiceTreatments: [{ service: 'pest_control' }],
+      included: [{ key: 'pest_control', label: 'Pest Control' }], addOns: [{ key: 'interior_spray', label: 'Interior spray', preChecked: true }],
+    }] })).toBe(true);
   });
 
   test('the served price never grants the answer: the saved estimate decides', () => {
@@ -448,6 +536,20 @@ describe('GET /:token/data: noVisitLine', () => {
     expect(servedRodent.status).toBe(200);
     expect(servedRodent.body.cta.terminalState).toBeNull();
     expect(servedRodent.body).not.toHaveProperty('noVisitLine');
+
+    // The same frozen price with a first-visit cockroach treatment the saved rows do not hold; its setup fee alone is a fee.
+    const frozen = { services: ['pest_control', 'mosquito'] };
+    const setupFee = { service: 'waveguard_setup', amount: 99, label: 'WaveGuard setup', waivedWithPrepay: true };
+    const servedSetupFee = await pageLoad(estimateRow({ ...frozen, servedPrice: { firstVisitFees: [setupFee], setupFee } }));
+    expect(servedSetupFee.body.cta.terminalState).toBeNull();
+    expect(servedSetupFee.body.noVisitLine).toBe(NO_VISIT_QUOTE_LINE);
+    const servedRoachFee = await pageLoad(estimateRow({
+      ...frozen,
+      servedPrice: { firstVisitFees: [setupFee, { service: 'pest_initial_roach', amount: 150, label: 'Cockroach Treatment Service', waivedWithPrepay: false }], setupFee },
+    }));
+    expect(servedRoachFee.status).toBe(200);
+    expect(servedRoachFee.body.cta.terminalState).toBeNull();
+    expect(servedRoachFee.body).not.toHaveProperty('noVisitLine');
 
     // The general one-time pest service is on the list, so the same estimate with that row keeps the line.
     const oneTimePest = await pageLoad(estimateRow({ oneTime: [{ service: 'one_time_pest', name: 'One-Time Pest Control', amount: 199, price: 199 }] }));
