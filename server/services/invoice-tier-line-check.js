@@ -11,7 +11,9 @@
 //
 // The witness is the engine's record, not the naming code it checks. A staff discount on the estimate's recurring work,
 // a service credit, or a floor that moved the line's price is not the tier alone, so such a line (one line by design)
-// is not a finding. A visit whose invoice keeps one line for another reason (no price of its own, its own price or
+// is not a finding. Nor is a line the invoice leaves unnamed on purpose: a row kept out of percentage discounts, a
+// service the tier percentage skips, a row that recorded another rate, records that name another tier or rate, or a
+// legacy nested block. A visit whose invoice keeps one line for another reason (no price of its own, its own price or
 // discount, add-ons, prepaid, a price that moved after acceptance, no saving on the line) is not read. Off gate = one
 // line by design: no finding.
 //
@@ -51,58 +53,98 @@ function upcomingEstimateVisits(conn, { today, days }) {
     .select('s.*');
 }
 
-// The engine's record for one service of the estimate: its per-visit list price, the WaveGuard rate it applied and the
-// tier it named. Only when the engine priced that line at exactly the tier's rate off its list: exactly one engine line
-// item is that service; the tier is its only discount, at one rate; no service credit shares the saving
-// (serviceSpecificDiscounts); its own annuals are that rate apart (no lawn floor or other guard moved the price); and no
-// staff discount reached the estimate's recurring work (the engine then stamps manualFinalAnnual on each line it can
-// reach, and completion-pricing.js infers no tier from the estimate). Else null.
-function engineTierRecord(data, serviceKey) {
+// The saved result the estimate's lines come from (estimate-public.js acceptanceServiceLists: result, else engineResult)
+// with its recurring block, and the engine's line items for that result: its own when the engine result was saved whole,
+// else the engine result saved beside the mapped one.
+function pricingRecords(data) {
+  const source = object(data.result || data.engineResult || data);
+  const lineItems = Array.isArray(source.lineItems) ? source.lineItems : list(object(data.engineResult).lineItems);
+  return { block: object(source.recurring), lineItems: lineItems.filter((item) => item && typeof item === 'object') };
+}
+
+// Whether an engine line is the pricing revision of the saved row the invoice matched: the row's per-visit list price
+// (the base the invoice reads, completion-pricing.js acceptedPricing) is the line's, and so is each annual the row took
+// from it (v1-legacy-mapper.js svcAdd). A reprice that replaced the row and kept an older engine result leaves them apart.
+function sameRevision(row, item, listCents) {
+  const base = [row.perTreatment, row.perApp, row.perVisit].map(cents).find((c) => c !== null);
+  return (base === undefined || base === listCents) && [[row.annualAfterDiscount, item.annualAfterDiscount],
+    [row.manualFinalAnnual, item.manualFinalAnnual]].every(([saved, engine]) => cents(saved) === null || cents(saved) === cents(engine));
+}
+
+// Whether the saved row takes the tier's percentage at the engine line's rate. The invoice names a tier the row does not
+// carry only then (completion-pricing.js namingTier): no flag keeps percentage discounts off the row; its service takes
+// the tier percentage (the eligibility the row saved wins over today's configuration); and no rate the row recorded for
+// itself (the legacy mapper writes one on lawn rows) is another rate.
+function rowTakesTierRate(row, serviceKey, rate) {
+  const { lineFlagsBlockPercentDiscount } = require('./pricing-engine/discount-engine');
+  const { recurringServiceReceivesTierDiscount } = require('../routes/estimate-public');
+  const discount = object(row.discount);
+  return !lineFlagsBlockPercentDiscount(row)
+    && (row.waveGuardDiscountEligible === true || recurringServiceReceivesTierDiscount({ ...row, service: row.service || serviceKey }))
+    && [discount.appliedDiscountPercent, discount.effectiveDiscount].every((recorded) => recorded == null || Number(recorded) === rate);
+}
+
+// The engine's record for the saved row the invoice matched: its per-visit list price, the WaveGuard rate it applied and
+// the tier it named. Only when the engine priced that line at exactly the tier's rate off its list: exactly one
+// recurring engine line is that service (a one-time line, such as a plan's first-visit fee, has no annual); it is the
+// row's pricing revision; the tier is its only discount, at one rate, and the row takes that rate; no service credit
+// shares the saving (serviceSpecificDiscounts, on the row or the line); its own annuals are that rate apart (no lawn
+// floor or other guard moved the price); and no engine line carries manualFinalAnnual (a staff discount reached
+// recurring work). Else null.
+function engineTierRecord(lineItems, row, serviceKey) {
   const { recurringServiceKey } = require('../routes/estimate-public');
-  const lineItems = list(data?.engineResult?.lineItems).filter((item) => item && typeof item === 'object');
-  if (!serviceKey || lineItems.some((item) => cents(item.manualFinalAnnual) !== null)) return null;
-  const items = lineItems.filter((item) => recurringServiceKey(item) === serviceKey);
+  if (lineItems.some((item) => cents(item.manualFinalAnnual) !== null)) return null;
+  const items = lineItems.filter((item) => cents(item.annualBeforeDiscount) > 0 && recurringServiceKey(item) === serviceKey);
   if (items.length !== 1) return null;
   const [item] = items;
   const priced = list(item.discount?.appliedDiscounts).filter((d) => Number(d?.amount) > 0);
   const [rate, ...otherRates] = [...new Set(priced.map((d) => Number(d.amount)))];
-  if (otherRates.length || !(rate <= 1) || priced.some((d) => d.type !== 'waveguard')) return null;
-  const credited = list(item.serviceSpecificDiscounts).some((credit) => Number(credit?.amount) > 0);
+  if (otherRates.length || !(rate <= 1) || priced.some((d) => d.type !== 'waveguard') || !rowTakesTierRate(row, serviceKey, rate)) return null;
+  const credited = [row, item].some((r) => list(r.serviceSpecificDiscounts).some((credit) => Number(credit?.amount) > 0));
   const before = cents(item.annualBeforeDiscount);
   const after = cents(item.annualAfterDiscount);
-  if (credited || before === null || after === null || Math.abs(after - Math.round(before * (1 - rate))) > 1) return null;
+  if (credited || after === null || Math.abs(after - Math.round(before * (1 - rate))) > 1) return null;
   const visits = [item.visitsPerYear, item.visits, item.frequency, item.appsPerYear].map(Number).find((n) => n > 0);
-  const selected = [item.selected, ...list(item.tiers).filter((t) => t && (t.selected === true || t.isSelected === true))]
-    .find((t) => t && cents(t.perApp) > 0);
-  // The selected frequency's price, else the item's own, else its list annual over its visits (none: NaN, skipped).
-  const listCents = [cents(selected?.perApp), cents(item.perApp), cents(item.perVisit), Math.round(before / visits)].find((c) => c > 0);
+  // The line's own per-visit price (the one the saved row copies; the engine keeps it equal to the selected program's),
+  // else its list annual over its visits (no visit count: NaN, skipped).
+  const listCents = [cents(item.perApp), cents(item.perVisit), Math.round(before / visits)].find((c) => c > 0);
   // The engine names the tier on the applied discount (discount-engine.js getEffectiveDiscount).
-  return listCents ? { rate, listCents, tier: word(priced[0].tier) } : null;
+  return listCents && sameRevision(row, item, listCents) ? { rate, listCents, tier: word(priced[0].tier) } : null;
 }
 
-// The tier the estimate's records name for its recurring work: the engine record's, the estimate's column and its saved
-// recurring block's (the two completion-pricing.js savedEstimateTier reads; an empty column falls back to the block).
-// Records that name different tiers name none: the invoice cannot name a saving from them, by design. Null unless
-// Silver, Gold or Platinum.
-function recordsTier(estimate, data, engineTier) {
-  const block = object(object(data.result || data.engineResult || data).recurring);
-  const words = [engineTier, estimate.waveguard_tier, block.waveGuardTier || block.tier].map(word).filter(Boolean);
-  return words.length && words.every((w) => w === words[0]) && DISCOUNTED_TIERS.includes(words[0]) ? words[0] : null;
+// The tier the estimate's records name for its recurring work, when they agree with the engine's line: the column and
+// the saved recurring block name no other tier (an empty column falls back to the block, as completion-pricing.js
+// savedEstimateTier does), and no rate the estimate saved for it (the send snapshot, the block's) is another rate.
+// Records that disagree name no saving: the invoice keeps one line by design. Null unless Silver, Gold or Platinum.
+function recordsTier(estimate, data, block, record) {
+  const words = [record.tier, estimate.waveguard_tier, block.waveGuardTier || block.tier].map(word).filter(Boolean);
+  const [tier] = words;
+  if (!DISCOUNTED_TIERS.includes(tier) || words.some((w) => w !== tier)) return null;
+  const { tierDiscountForEstimate } = require('../routes/estimate-public');
+  // Fallback 0: the snapshot's rate or none, never today's tier table.
+  const savedRates = [tierDiscountForEstimate(data, `${tier[0].toUpperCase()}${tier.slice(1)}`, 0), Number(block.discount)];
+  return savedRates.some((rate) => rate > 0 && Math.abs(rate - record.rate) > 1e-9) ? null : tier;
 }
 
 const printsTier = (breakdown) => breakdown.discounts.some((row) => /^WaveGuard\b/.test(String(row.name || '')));
 
 // One visit: a finding { visitId, estimateId, serviceKey, tier } or null.
 async function visitFinding(conn, visit) {
-  const { acceptedVisitBreakdown } = require('./completion-pricing');
+  const { acceptedVisitBreakdown, staffDiscountOnRecurring } = require('./completion-pricing');
   const { breakdown, reason, estimate, line } = await acceptedVisitBreakdown(visit, { database: conn });
   if (breakdown ? printsTier(breakdown) : reason !== 'discount_unnamed') return null;
   // The service of the saved row the invoice matched the visit to (by service id or key, never by the visit's label).
   const serviceKey = line ? require('../routes/estimate-public').recurringServiceKey(line) : null;
   if (!estimate || !serviceKey) return null;
   const data = parsed(estimate.estimate_data);
-  const record = engineTierRecord(data, serviceKey);
-  const tier = record ? recordsTier(estimate, data, record.tier) : null;
+  const { block, lineItems } = pricingRecords(data);
+  // The invoice infers no tier, by design (completion-pricing.js estimateDiscountContext, savedEstimateTier), when a staff
+  // discount reaches recurring work in any saved shape (it shares each line's saving), and when the legacy nested block
+  // (result.results.recurring) also supplies service rows (which block priced a line is then unknown).
+  const nested = object(object(object(data.result || data).results).recurring);
+  if (staffDiscountOnRecurring(data, block) || list(nested.services).length) return null;
+  const record = engineTierRecord(lineItems, line, serviceKey);
+  const tier = record ? recordsTier(estimate, data, block, record) : null;
   // For discount_unnamed the visit bills the accepted per-visit price (acceptedVisitBreakdown checks it first).
   const amountCents = cents(breakdown ? breakdown.amount : visit.estimated_price);
   if (!tier || amountCents === null) return null;
@@ -128,4 +170,4 @@ async function tierSavingsLeftOffInvoices(conn, { today, days = LOOK_AHEAD_DAYS 
   return { checked: visits.length, findings };
 }
 
-module.exports = { tierSavingsLeftOffInvoices, upcomingEstimateVisits, LIVE_VISIT_STATUSES, _private: { engineTierRecord, visitFinding } };
+module.exports = { tierSavingsLeftOffInvoices, upcomingEstimateVisits, LIVE_VISIT_STATUSES, _private: { engineTierRecord, pricingRecords, visitFinding } };

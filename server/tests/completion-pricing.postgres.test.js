@@ -324,8 +324,8 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
       annualAfterDiscount: 340, discount: { appliedDiscounts: [{ type: 'waveguard', tier: 'gold', amount: 0.15 }] } };
     const row = { service: 'pest_control', name: 'Pest Control', mo: 33.33, monthly: 33.33, basePrice: 100, perTreatment: 100,
       visitsPerYear: 4, annualAfterDiscount: 340 };
-    const save = (lineItems, recurring, columns = {}) => trx('estimates').where({ id: estimateId }).update({ ...columns,
-      estimate_data: { engineResult: { lineItems }, result: { recurring: { tier: 'Gold', waveGuardTier: 'Gold', services: [row], ...recurring } } } });
+    const save = (lineItems, recurring, columns = {}, extra = {}) => trx('estimates').where({ id: estimateId }).update({ ...columns,
+      estimate_data: { engineResult: { lineItems }, result: { recurring: { tier: 'Gold', waveGuardTier: 'Gold', services: [row], ...recurring } }, ...extra } });
     const { tierSavingsLeftOffInvoices } = require('../services/invoice-tier-line-check');
     const job = await trx('scheduled_services').where({ id: jobId }).first();
     const today = require('../utils/date-only').dateOnlyString(job.scheduled_date);
@@ -341,6 +341,14 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
       await save([item], {}, { waveguard_tier: null });
       expect(await reason(job)).toBe('discount_unnamed');
       expect(await findingsFor()).toEqual([{ visitId: jobId, estimateId, serviceKey: 'pest_control', tier: 'gold' }]);
+      // A staff discount kept only in the estimate's saved summary: one line by design.
+      await save([item], {}, {}, { summary: { manualDiscount: { amount: 0.04, recurringAmount: 0.04, label: 'Courtesy' } } });
+      expect(await reason(job)).toBe('discount_unnamed');
+      expect(await findingsFor()).toEqual([]);
+      // The block saved the Gold rate, but the row recorded another rate for itself: one line by design.
+      await save([item], { discount: 0.15, services: [{ ...row, discount: { effectiveDiscount: 0.1 } }] });
+      expect(await reason(job)).toBe('discount_unnamed');
+      expect(await findingsFor()).toEqual([]);
       // Staff moved the line to $339.96 a year ($84.99 a visit): one line by design, 1 cent off the tier's share.
       await save([{ ...item, manualFinalAnnual: 339.96 }], { services: [{ ...row, manualFinalAnnual: 339.96 }] });
       await trx('scheduled_services').where({ id: jobId }).update({ estimated_price: 84.99 });

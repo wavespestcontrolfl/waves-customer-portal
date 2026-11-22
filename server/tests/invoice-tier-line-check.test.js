@@ -1,17 +1,18 @@
 /**
  * invoice-tier-line-check.js: the nightly check for a WaveGuard tier saving an invoice would leave out. The invoice
  * decision (completion-pricing.js acceptedVisitBreakdown) is mocked, with the estimate row and the saved row it matched:
- * this suite proves the witness (the estimate's own engine line record) and which visits it reads.
- * completion-pricing.postgres.test.js runs it on the real decision. Synthetic estimates in the saved engine shape
- * (memory saved-estimate-tier-shape-trap); no real figures.
+ * this suite proves the witness (the estimate's own engine line record) and which visits it reads. The staff-discount
+ * reader stays the real one. completion-pricing.postgres.test.js runs the check on the real decision. Synthetic
+ * estimates in the saved engine shape (memory saved-estimate-tier-shape-trap); no real figures.
  */
-jest.mock('../services/completion-pricing', () => ({ acceptedVisitBreakdown: jest.fn() }));
+jest.mock('../services/completion-pricing', () => ({ ...jest.requireActual('../services/completion-pricing'), acceptedVisitBreakdown: jest.fn() }));
 // The real module, one reader overridden: estimate-public (recurringServiceKey) reads other gates when it loads.
 jest.mock('../config/feature-gates', () => ({ ...jest.requireActual('../config/feature-gates'), invoiceEstimateDiscountLinesLive: jest.fn(() => true) }));
 
 const { acceptedVisitBreakdown } = require('../services/completion-pricing');
 const { invoiceEstimateDiscountLinesLive } = require('../config/feature-gates');
-const { tierSavingsLeftOffInvoices, _private: { engineTierRecord } } = require('../services/invoice-tier-line-check');
+const { recurringServiceKey } = require('../routes/estimate-public');
+const { tierSavingsLeftOffInvoices, _private: { engineTierRecord, pricingRecords } } = require('../services/invoice-tier-line-check');
 
 const TODAY = '2026-06-15';
 
@@ -25,13 +26,17 @@ function fakeDb(visits = []) {
 
 const waveguard = (amount, tier = 'gold') => ({ appliedDiscounts: [{ type: 'waveguard', tier, amount }] });
 // $100 a visit, 4 visits, Gold 15%: $400 list, $340 net, $85 a visit.
-const pestItem = (extra = {}) => ({ service: 'pest_control', visitsPerYear: 4, annualBeforeDiscount: 400, annualAfterDiscount: 340,
-  tiers: [{ freq: 4, perApp: 100, selected: true }, { freq: 6, perApp: 90, selected: false }], discount: waveguard(0.15), ...extra });
+const pestItem = (extra = {}) => ({ service: 'pest_control', perApp: 100, visitsPerYear: 4, annual: 400, annualBeforeDiscount: 400,
+  annualAfterDiscount: 340, discount: waveguard(0.15), ...extra });
 // $140 a visit, 9 visits, 20%: $1,260 list, $1,008 net, $112 a visit.
-const lawnItem = (extra = {}) => ({ service: 'lawn_care', visitsPerYear: 9, annualBeforeDiscount: 1260, annualAfterDiscount: 1008,
-  perApp: 140, discount: waveguard(0.2), ...extra });
-const estimate = ({ lineItems = [pestItem()], tier = 'Gold', recurring = { tier: 'Gold', waveGuardTier: 'Gold' } } = {}) => ({
-  id: 'e1', waveguard_tier: tier, estimate_data: JSON.stringify({ engineResult: { lineItems }, result: { recurring } }) });
+const lawnItem = (extra = {}) => ({ service: 'lawn_care', perApp: 140, visitsPerYear: 9, annual: 1260, annualBeforeDiscount: 1260,
+  annualAfterDiscount: 1008, discount: waveguard(0.2), ...extra });
+// A plan's one-time first-visit fee: no annual.
+const firstVisitFee = { service: 'pest_initial_roach', price: 49, priceBeforeDiscount: 49, priceAfterDiscount: 49, discount: { appliedDiscounts: [] } };
+const gold = { tier: 'Gold', waveGuardTier: 'Gold' };
+const estimate = ({ lineItems = [pestItem()], tier = 'Gold', recurring = gold, data } = {}) => ({
+  id: 'e1', waveguard_tier: tier, estimate_data: JSON.stringify(data || { engineResult: { lineItems }, result: { recurring } }) });
+// The saved rows the mapper writes from those lines (v1-legacy-mapper.js svcAdd).
 const pestRow = { service: 'pest_control', name: 'Pest Control', perTreatment: 100, visitsPerYear: 4, annualAfterDiscount: 340 };
 const lawnRow = { service: 'lawn_care', name: 'Lawn Care', perTreatment: 140, visitsPerYear: 9, annualAfterDiscount: 1008 };
 const visit = (extra = {}) => ({ id: 'v1', source_estimate_id: 'e1', service_type: 'Quarterly Pest Control Service', estimated_price: '85.00', ...extra });
@@ -40,6 +45,7 @@ const findingsFor = async (row, decision) => {
   acceptedVisitBreakdown.mockResolvedValue(decision);
   return (await tierSavingsLeftOffInvoices(fakeDb([row]), { today: TODAY })).findings;
 };
+const findingsOn = (records, extra = {}) => findingsFor(visit(extra.visit), unnamed({ estimate: estimate(records), ...extra.decision }));
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -78,15 +84,67 @@ describe('tierSavingsLeftOffInvoices', () => {
     expect(await keyFor(visit(), unnamed({ line: null }))).toEqual([]);
   });
 
+  // Pre-push audit P1: a plan's one-time first-visit fee maps to the plan's key; only recurring lines are matched.
+  test('a one-time engine line with the plan\'s key does not hide the plan\'s line', async () => {
+    expect(recurringServiceKey(firstVisitFee)).toBe('pest_control');
+    expect(await findingsOn({ lineItems: [pestItem(), firstVisitFee] })).toHaveLength(1);
+  });
+
+  // Pre-push audit P1: the engine lines come from the saved result the estimate's lines come from.
+  test('the engine lines of the result the lines come from, and only the same pricing revision as the matched row', async () => {
+    // An engine result saved whole, with its lines on the result itself.
+    expect(await findingsOn({ data: { result: { lineItems: [pestItem()], recurring: gold } } })).toHaveLength(1);
+    // Its own lines win over an older engine result kept beside it.
+    const older = { lineItems: [pestItem({ discount: waveguard(0.1, 'silver'), annualAfterDiscount: 360 })] };
+    expect(await findingsOn({ data: { result: { lineItems: [pestItem()], recurring: gold }, engineResult: older } })).toHaveLength(1);
+    // A reprice replaced the mapped row ($339.96 a year, $84.99 a visit) and kept an older engine result: not the row's
+    // revision, so no finding, though the saving is 1 cent off the older line's tier share.
+    expect(await findingsOn({}, { visit: { estimated_price: '84.99' }, decision: { line: { ...pestRow, annualAfterDiscount: 339.96 } } })).toEqual([]);
+    expect(await findingsOn({}, { decision: { line: { ...pestRow, perTreatment: 110 } } })).toEqual([]);
+    expect(await findingsOn({}, { decision: { line: { ...pestRow, manualFinalAnnual: 339.96 } } })).toEqual([]);
+    // The row's list price is its first per-visit price, as the invoice reads it.
+    const noTreatment = { service: 'pest_control', name: 'Pest Control', visitsPerYear: 4, annualAfterDiscount: 340 };
+    expect(await findingsOn({}, { decision: { line: { ...noTreatment, perApp: 110 } } })).toEqual([]);
+    expect(await findingsOn({}, { decision: { line: { ...noTreatment, perApp: 100 } } })).toHaveLength(1);
+  });
+
+  // Every reason the invoice names no tier by design (completion-pricing.js namingTier, savedEstimateTier) is not a finding.
+  test('a row the tier percentage does not reach, or a legacy nested block, keeps one line by design', async () => {
+    const on = (line, records = {}) => findingsOn(records, { decision: { line } });
+    expect(await on({ ...pestRow, discountable: false })).toEqual([]);
+    expect(await on({ ...pestRow, waveGuardDiscountEligible: false })).toEqual([]);
+    expect(await on({ ...pestRow, excludeFromPctDiscount: true })).toEqual([]);
+    // A rate the row recorded for itself must be the engine line's rate.
+    expect(await on({ ...pestRow, discount: { effectiveDiscount: 0.1 } })).toEqual([]);
+    expect(await on({ ...pestRow, discount: { appliedDiscountPercent: 0.15, effectiveDiscount: 0.15 } })).toHaveLength(1);
+    // Palm injection takes a flat tier credit, not the percentage, unless the row saved that it takes the percentage.
+    const palm = { lineItems: [pestItem({ service: 'palm_injection' })] };
+    const palmRow = { ...pestRow, service: 'palm_injection', name: 'Palm Injection' };
+    expect(await on(palmRow, palm)).toEqual([]);
+    expect(await on({ ...palmRow, waveGuardDiscountEligible: true }, palm)).toHaveLength(1);
+    // The legacy nested block also supplies service rows: which block priced the line is then unknown.
+    const nested = (services) => ({ data: { engineResult: { lineItems: [pestItem()] }, result: { recurring: gold, results: { recurring: { services } } } } });
+    expect(await findingsOn(nested([pestRow]))).toEqual([]);
+    expect(await findingsOn(nested([]))).toHaveLength(1);
+  });
+
   // Pre-push audit P1: an empty tier column does not hide the engine's tier; records that disagree name no saving.
   test('the tier comes from the estimate\'s records: the engine\'s, the column and the saved block must not disagree', async () => {
-    const tierFor = async (records) => (await findingsFor(visit(), unnamed({ estimate: estimate(records) }))).map((f) => f.tier);
+    const tierFor = async (records) => (await findingsOn(records)).map((f) => f.tier);
     expect(await tierFor({ tier: null })).toEqual(['gold']);
     expect(await tierFor({ tier: null, recurring: {} })).toEqual(['gold']);
     expect(await tierFor({ lineItems: [pestItem({ discount: { appliedDiscounts: [{ type: 'waveguard', amount: 0.15 }] } })] })).toEqual(['gold']);
     expect(await tierFor({ tier: 'Silver' })).toEqual([]);
     expect(await tierFor({ tier: null, recurring: { tier: 'Silver' } })).toEqual([]);
     expect(await tierFor({ tier: 'Bronze', recurring: { tier: 'Bronze' }, lineItems: [pestItem({ discount: waveguard(0.15, 'bronze') })] })).toEqual([]);
+  });
+
+  test('a rate the estimate saved for its tier must be the engine line\'s rate', async () => {
+    const withData = (extra, recurring = gold) => findingsOn({ data: { engineResult: { lineItems: [pestItem()] }, result: { recurring }, ...extra } });
+    expect(await withData({}, { ...gold, discount: 0.15 })).toHaveLength(1);
+    expect(await withData({}, { ...gold, discount: 0.1 })).toEqual([]);
+    expect(await withData({ sendSnapshot: { tierDiscounts: { Gold: 0.15 } } })).toHaveLength(1);
+    expect(await withData({ sendSnapshot: { tierDiscounts: { Gold: 0.1 } } })).toEqual([]);
   });
 
   // The engine discounts the annual, so a few cents off the tier's share is its rounding; more is not the tier alone.
@@ -96,19 +154,23 @@ describe('tierSavingsLeftOffInvoices', () => {
     expect(await findingsFor(visit({ estimated_price: price }), unnamed())).toHaveLength(n);
   });
 
-  // Pre-push audit P1: a staff change to $84.99 sits within the rounding allowance, so the engine's own record of it
-  // must stop the finding first.
+  // Pre-push audit P1 (twice): a staff change to $84.99 sits within the rounding allowance, so every record of a staff
+  // discount, a credit or a floor must stop the finding first.
   test('a staff discount on recurring work, a service credit or a floor on the line is not the tier alone', async () => {
-    const billed = (price, lineItems, line = pestRow) => findingsFor(visit({ estimated_price: price }), unnamed({ estimate: estimate({ lineItems }), line }));
-    expect(await billed('84.99', [pestItem({ manualFinalAnnual: 339.96 })])).toEqual([]);
-    expect(await billed('85.00', [pestItem(), lawnItem({ manualFinalAnnual: 1000 })])).toEqual([]);
-    expect(await billed('84.99', [pestItem({ serviceSpecificDiscounts: [{ presetKey: 'credit', amount: 0.04 }] })])).toEqual([]);
+    const billed = (price, records, line = pestRow) => findingsOn(records, { visit: { estimated_price: price }, decision: { line } });
+    expect(await billed('84.99', { lineItems: [pestItem({ manualFinalAnnual: 339.96 })] })).toEqual([]);
+    expect(await billed('85.00', { lineItems: [pestItem(), lawnItem({ manualFinalAnnual: 1000 })] })).toEqual([]);
+    // A staff discount kept only in the estimate's saved summary (completion-pricing.js staffDiscountOnRecurring).
+    const summary = { manualDiscount: { amount: 0.04, recurringAmount: 0.04, label: 'Courtesy' } };
+    expect(await billed('84.99', { data: { engineResult: { lineItems: [pestItem()] }, result: { recurring: gold }, summary } })).toEqual([]);
+    expect(await billed('84.99', { lineItems: [pestItem({ serviceSpecificDiscounts: [{ presetKey: 'credit', amount: 0.04 }] })] })).toEqual([]);
+    expect(await billed('84.99', {}, { ...pestRow, serviceSpecificDiscounts: [{ presetKey: 'credit', amount: 0.04 }] })).toEqual([]);
     // A floor raised the lawn net to $1,008.36 ($112.04 a visit): 4 cents off the share, but not the tier's rate.
-    expect(await billed('112.04', [lawnItem({ annualAfterDiscount: 1008.36 })], lawnRow)).toEqual([]);
-    expect(await billed('112.00', [lawnItem()], lawnRow)).toHaveLength(1);
+    expect(await billed('112.04', { lineItems: [lawnItem({ annualAfterDiscount: 1008.36 })] }, { ...lawnRow, annualAfterDiscount: 1008.36 })).toEqual([]);
+    expect(await billed('112.00', { lineItems: [lawnItem()] }, lawnRow)).toHaveLength(1);
   });
 
-  test('the engine record must hold the tier as its only discount, on one line item of the service', async () => {
+  test('the engine record must hold the tier as its only discount, on one recurring line of the service', async () => {
     const cases = [
       [pestItem({ discount: { appliedDiscounts: [{ type: 'waveguard', amount: 0.15 }, { type: 'manual', amount: 0.05 }] } })],
       [pestItem({ discount: { appliedDiscounts: [] } })],
@@ -116,9 +178,8 @@ describe('tierSavingsLeftOffInvoices', () => {
       [pestItem(), pestItem()],
       [lawnItem()],
     ];
-    for (const lineItems of cases) expect(await findingsFor(visit(), unnamed({ estimate: estimate({ lineItems }) }))).toEqual([]);
-    const noEngine = { id: 'e1', waveguard_tier: 'Gold', estimate_data: { result: { recurring: { tier: 'Gold' } } } };
-    expect(await findingsFor(visit(), unnamed({ estimate: noEngine }))).toEqual([]);
+    for (const lineItems of cases) expect(await findingsOn({ lineItems })).toEqual([]);
+    expect(await findingsOn({ data: { result: { recurring: gold } } })).toEqual([]);
     expect(await findingsFor(visit(), unnamed({ estimate: null }))).toEqual([]);
   });
 
@@ -144,29 +205,37 @@ describe('tierSavingsLeftOffInvoices', () => {
   });
 });
 
+describe('pricingRecords', () => {
+  test('the result the lines come from, its block, and its own engine lines, else the engine result beside it', () => {
+    const own = pestItem(); const beside = lawnItem();
+    expect(pricingRecords({ result: { recurring: gold, lineItems: [own] }, engineResult: { lineItems: [beside] } }))
+      .toEqual({ block: gold, lineItems: [own] });
+    expect(pricingRecords({ result: { recurring: gold }, engineResult: { lineItems: [beside] } })).toEqual({ block: gold, lineItems: [beside] });
+    expect(pricingRecords({ engineResult: { recurring: gold, lineItems: [beside] } })).toEqual({ block: gold, lineItems: [beside] });
+    expect(pricingRecords({})).toEqual({ block: {}, lineItems: [] });
+  });
+});
+
 describe('engineTierRecord', () => {
-  const data = (...lineItems) => ({ engineResult: { lineItems } });
-  test('the per-visit list price: the selected frequency\'s, else the item\'s own, else its list annual over its visits', () => {
-    expect(engineTierRecord(data(pestItem()), 'pest_control')).toEqual({ rate: 0.15, listCents: 10000, tier: 'gold' });
-    // The lawn shape: the selected program is an object of its own.
-    expect(engineTierRecord(data(lawnItem({ selected: { perApp: 140 }, perApp: 150, discount: waveguard(0.2, 'platinum') })), 'lawn_care'))
+  test('the per-visit list price: the line\'s own, else its list annual over its visits', () => {
+    expect(engineTierRecord([pestItem()], pestRow, 'pest_control')).toEqual({ rate: 0.15, listCents: 10000, tier: 'gold' });
+    expect(engineTierRecord([lawnItem({ discount: waveguard(0.2, 'platinum') })], lawnRow, 'lawn_care'))
       .toEqual({ rate: 0.2, listCents: 14000, tier: 'platinum' });
-    // The tree and shrub shape: no tier list, the item's own per-visit price.
+    // The tree and shrub shape: the item's own per-visit price, or none.
     const shrub = (extra) => ({ service: 'tree_shrub', visitsPerYear: 6, discount: waveguard(0.1, 'silver'), ...extra });
-    expect(engineTierRecord(data(shrub({ perApp: 90.5, annualBeforeDiscount: 543, annualAfterDiscount: 488.7 })), 'tree_shrub'))
+    const shrubRow = { service: 'tree_shrub', name: 'Tree & Shrub' };
+    expect(engineTierRecord([shrub({ perApp: 90.5, annualBeforeDiscount: 543, annualAfterDiscount: 488.7 })], { ...shrubRow, perTreatment: 90.5 }, 'tree_shrub'))
       .toEqual({ rate: 0.1, listCents: 9050, tier: 'silver' });
-    expect(engineTierRecord(data(shrub({ annualBeforeDiscount: 600, annualAfterDiscount: 540 })), 'tree_shrub'))
+    expect(engineTierRecord([shrub({ annualBeforeDiscount: 600, annualAfterDiscount: 540 })], shrubRow, 'tree_shrub'))
       .toEqual({ rate: 0.1, listCents: 10000, tier: 'silver' });
     // No price of its own and no visit count: no list price to read.
-    expect(engineTierRecord(data(shrub({ visitsPerYear: undefined, annualBeforeDiscount: 600, annualAfterDiscount: 540 })), 'tree_shrub')).toBeNull();
+    expect(engineTierRecord([shrub({ visitsPerYear: undefined, annualBeforeDiscount: 600, annualAfterDiscount: 540 })], shrubRow, 'tree_shrub')).toBeNull();
   });
 
-  test('two tier rates, a rate above 100%, no annuals, no service, or no engine result name no record', () => {
-    expect(engineTierRecord(data(pestItem({ discount: { appliedDiscounts: [{ type: 'waveguard', amount: 0.1 }, { type: 'waveguard', amount: 0.15 }] } })), 'pest_control')).toBeNull();
-    expect(engineTierRecord(data(pestItem({ discount: waveguard(1.5) })), 'pest_control')).toBeNull();
-    expect(engineTierRecord(data(pestItem({ annualBeforeDiscount: undefined, annualAfterDiscount: undefined })), 'pest_control')).toBeNull();
-    expect(engineTierRecord(data(pestItem()), null)).toBeNull();
-    expect(engineTierRecord({}, 'pest_control')).toBeNull();
-    expect(engineTierRecord(null, 'pest_control')).toBeNull();
+  test('two tier rates, a rate above 100%, no annuals or no engine lines name no record', () => {
+    expect(engineTierRecord([pestItem({ discount: { appliedDiscounts: [{ type: 'waveguard', amount: 0.1 }, { type: 'waveguard', amount: 0.15 }] } })], pestRow, 'pest_control')).toBeNull();
+    expect(engineTierRecord([pestItem({ discount: waveguard(1.5) })], pestRow, 'pest_control')).toBeNull();
+    expect(engineTierRecord([pestItem({ annualBeforeDiscount: undefined, annualAfterDiscount: undefined })], pestRow, 'pest_control')).toBeNull();
+    expect(engineTierRecord([], pestRow, 'pest_control')).toBeNull();
   });
 });
