@@ -970,6 +970,22 @@ describe('pest insider fact manifest v1', () => {
     expect(titleOk('Lethal Smith in Southwest Florida Palms')).toBe(false);
   });
 
+  // The topic check (topic-targeting-gate.js) reads a rare proper noun in a
+  // post's title, headings, keywords or meta description as that post's
+  // subject. On 2026-11-22 two live mosquito posts own "IFAS", so the check
+  // refused a mosquito brief that named UF/IFAS in its title (pre-push audit).
+  // Which posts own a name is live data that a unit test cannot read: this
+  // pins the manifest side.
+  test('a mosquito brief names UF/IFAS in its sentences only: not in its title, a heading, an FAQ question or a keyword, and it tells the writer so', () => {
+    for (const id of ['PI-M04', 'PI-M02']) {
+      const b = byId(id);
+      const headings = b.outline.map((item) => (/^faq:/i.test(item) ? item : item.slice(0, item.indexOf(':'))));
+      const named = [b.working_title, b.primary_kw, ...b.secondary_kws, ...headings].filter((text) => /ifas/i.test(text));
+      expect([id, named]).toEqual([id, []]);
+      expect(b.verify_notes.join(' ')).toContain('Do not name UF/IFAS in the title, in a heading, in the meta description or in a keyword');
+    }
+  });
+
   // Tree and shrub posts are FAQ-blocked by service, and PI-T04 by its topic
   // (termites), so only the lawn and mosquito briefs carry an FAQ.
   test('an FAQ is asked for, and composes as required, only on the four lawn and mosquito topics', () => {
