@@ -1594,6 +1594,12 @@ describe('the nitrogen target on the lawn brief for a reclaimed property', () =>
     expect((await bagFor('2026-10-14', DIMENSION)).gates.targetN).toBe('0.73 lb N/1000');
   });
 
+  test('the October Stonewall 0.37% 18-0-10 bag (its catalog name has no "Pre-Emergent Plus Fertilizer") keeps its stated target too', async () => {
+    const STONEWALL = 'LESCO Stonewall 0.37% 18-0-10';
+    visit(10, STONEWALL, '0.73 lb N/1000');
+    expect((await bagFor('2026-10-14', STONEWALL)).gates.targetN).toBe('0.73 lb N/1000');
+  });
+
   test('the December potash bag (states K2O) keeps its stated target', async () => {
     mockSummarize.mockReturnValue({
       version: LAWN_V13_VERSION,
