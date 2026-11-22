@@ -17,8 +17,9 @@
 //  - A badge that does not move can sit inside a ring, and a line can run under it. So every ring that fits is
 //    checked: the first one (smallest, then by start angle) whose lines run under no badge is used. The ring grows to
 //    find one, and the ring with the fewest such lines is used when none is clean (10 to 20 points on one line).
-//  - A group no ring fits (about seven or more points on one spot in a photo corner) places badge by badge at the
-//    nearest free spot: badges apart first, then off the dots. With no free spot at all the badge stays on its point.
+//  - A group no ring fits places badge by badge at the nearest free spot: badges apart first, then off the dots. With
+//    no free spot at all the badge stays on its point. About 15 or more points on one spot in a photo corner get no
+//    clean ring inside RING_REACH_PX, and there a line can run under a badge.
 // Groups and badges are handled in pin order, with no randomness: the same input always gives the same output.
 
 const GAP_PX = 2;
