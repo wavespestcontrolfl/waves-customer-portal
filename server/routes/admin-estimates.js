@@ -1147,10 +1147,13 @@ async function buildEstimateSendPreview(estimate) {
       template: library.template, version: library.activeVersion,
       payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode, pdfNote, average, noVisitLine }),
     });
-    // The review keeps the "no visit needed" line only when this email shows it. The updated-estimate email, and a
-    // template an admin rewrote, have no paragraph for it: a record there would let a later change of the row
-    // refuse a send whose reviewed email never had the sentence.
-    const shownNoVisitLine = noVisitLine && [rendered.text, rendered.html].some((part) => String(part || '').includes(noVisitLine))
+    // The review keeps the "no visit needed" line only when this email shows it: when the version uses the line's
+    // variable anywhere, by the template library's own list (subject, preview text, text body, every block). The
+    // updated-estimate email, and a template an admin rewrote, do not use it: a record there would let a later
+    // change of the row refuse a send whose reviewed email never had the sentence.
+    const shownNoVisitLine = noVisitLine
+      && EmailTemplateLibrary.validationFor(library.template, library.activeVersion).referenced_variables
+        .includes(require('../services/estimate-no-visit-line').NO_VISIT_LINE_VARIABLE)
       ? noVisitLine
       : '';
     // `pdfCopy` is the reviewed PDF decision, kept with the review (and with a

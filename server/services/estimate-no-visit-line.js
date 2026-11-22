@@ -50,7 +50,8 @@ function noVisitLineFor(estimate = {}, { proposalMode = false } = {}) {
 }
 
 // A reviewed or scheduled send carries the email the office reviewed. The review keeps the line its email showed
-// (messages.email.noVisitLine, present only when the rendered email had it: buildEstimateSendPreview). At the send,
+// (messages.email.noVisitLine, present only when the email's template version uses the line's variable:
+// buildEstimateSendPreview). At the send,
 // `lineNow` is the line as the row reads at that moment:
 // - no review: the send carries lineNow;
 // - the review kept the line and the row still gets it: the send carries it;

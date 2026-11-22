@@ -53,6 +53,7 @@ jest.mock('../services/email-template-library', () => {
   }));
   return {
     templateContentHash: jest.requireActual('../services/email-template-library').templateContentHash,
+    validationFor: jest.requireActual('../services/email-template-library').validationFor,
     loadTemplateByKey: jest.fn(async (key) => ({ template: { ...template, template_key: key }, activeVersion: version })),
     renderTemplate,
     renderVersion: jest.fn(async (id, payload) => renderTemplate({ template, version: { id }, payload })),
@@ -2832,9 +2833,13 @@ describe('delivery email "no visit needed" line: a reviewed or scheduled send ke
   const LINE = noVisit.NO_VISIT_QUOTE_LINE;
   const reviewed = (record = {}) => ({ sms: null, email: { provider: 'sendgrid', ...record } });
   const sentPayload = () => email.sendTemplate.mock.calls.at(-1)[0].payload;
-  // The file's template renders no line (as the updated-estimate email does). These tests use one that has the
-  // paragraph: the line shows when the payload carries it.
+  // The file's template has no paragraph for the line (as the updated-estimate email has none). These tests use
+  // one that has it: the version uses the variable, and the line shows when the payload carries it. The library's
+  // real validationFor reads the version.
   const plainRender = email.renderTemplate.getMockImplementation();
+  const plainLibrary = email.loadTemplateByKey.getMockImplementation();
+  const libraryWith = (version) => async (key) => ({ template: { template_key: key }, activeVersion: { id: 'synthetic-email-version', ...version } });
+  const PARAGRAPH = { blocks: [{ type: 'paragraph', content: '{{estimate_no_visit_line}}' }] };
   const renderWithParagraph = ({ payload }) => ({
     subject: 'Synthetic estimate message',
     text: [payload.price_summary, payload.estimate_no_visit_line, payload.estimate_url].filter(Boolean).join('\n'),
@@ -2844,12 +2849,14 @@ describe('delivery email "no visit needed" line: a reviewed or scheduled send ke
   beforeEach(() => {
     current = LINE;
     featureGates.isEnabled.mockImplementation(() => false);
+    email.loadTemplateByKey.mockImplementation(libraryWith(PARAGRAPH));
     email.renderTemplate.mockImplementation(renderWithParagraph);
     jest.spyOn(noVisit, 'noVisitLineFor').mockImplementation(() => current);
     jest.spyOn(averageService, 'emailAverageParts').mockResolvedValue(null);
   });
   afterEach(() => {
     jest.restoreAllMocks();
+    email.loadTemplateByKey.mockImplementation(plainLibrary);
     email.renderTemplate.mockImplementation(plainRender);
     featureGates.isEnabled.mockImplementation(() => false);
   });
@@ -2862,6 +2869,7 @@ describe('delivery email "no visit needed" line: a reviewed or scheduled send ke
 
   test('a template with no paragraph for the line records none, so a later change of the row cannot refuse the send', async () => {
     // The updated-estimate email, or a template an admin rewrote: the row gets the line, the email does not show it.
+    email.loadTemplateByKey.mockImplementation(plainLibrary);
     email.renderTemplate.mockImplementation(plainRender);
     const preview = await invoke('/:id/send-preview', 'get');
     expect(preview.body.messages.email).not.toHaveProperty('noVisitLine');
@@ -2874,8 +2882,15 @@ describe('delivery email "no visit needed" line: a reviewed or scheduled send ke
     expect(sentPayload()).not.toHaveProperty('estimate_no_visit_line');
   });
 
-  test('the line shows in the HTML only (a custom text body without it): still recorded', async () => {
-    email.renderTemplate.mockImplementation(({ payload }) => ({ subject: 'Synthetic estimate message', text: payload.estimate_url, html: `<p>${payload.estimate_no_visit_line || ''}</p>` }));
+  test.each([
+    ['the subject', { subject: 'Your estimate. {{estimate_no_visit_line}}' }],
+    ['the preview text', { preview_text: '{{ estimate_no_visit_line }}' }],
+    ['a custom text body', { text_body: 'Hi {{first_name}}. {{estimate_no_visit_line}} {{estimate_url}}' }],
+    ['a details row', { blocks: [{ type: 'details', rows: [{ label: 'How we quote', value: '{{estimate_no_visit_line}}' }] }] }],
+  ])('a template that uses the line only in %s still records it', async (_where, version) => {
+    // Body text that does not show the line: the record comes from the version, not from a search of the body.
+    email.loadTemplateByKey.mockImplementation(libraryWith(version));
+    email.renderTemplate.mockImplementation(plainRender);
     expect((await invoke('/:id/send-preview', 'get')).body.messages.email.noVisitLine).toBe(LINE);
   });
 
