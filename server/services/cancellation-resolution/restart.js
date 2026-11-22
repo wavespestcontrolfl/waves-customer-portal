@@ -685,9 +685,10 @@ function resolveMintDeps(deps) {
     // The scheduler's hold release, for the quotes a replacement archives.
     releaseEstimateHolds: deps.releaseEstimateHolds
       || ((args) => require('../slot-reservation').releaseEstimateHolds(args)),
-    // The job a plan offer follows, by the job module's own rule (plan offer only; loaded on first call).
-    planOfferJobOf: deps.planOfferJobOf
-      || ((...args) => require('../onetime-plan-offer').planOfferJobOf(...args)),
+    // The offer a job is due today, with its dates, by the job module's own rule (plan offer only; loaded
+    // on first call).
+    dueOfferOfJob: deps.dueOfferOfJob
+      || ((...args) => require('../onetime-plan-offer').dueOfferOfJob(...args)),
   };
 }
 
@@ -1558,20 +1559,27 @@ async function mintRestartEstimate({ customer, now = () => new Date(), randomByt
 }
 
 
-// The offer's own bounds (mintPlanStartEstimate `offer`), checked before anything is read. The offer is
-// the standard quarterly pest plan with the setup fee waived (owner 2026-11-19), good for at most 31 days.
+// The caller's part of an offer (mintPlanStartEstimate `offer`), checked before anything is read: the offer is
+// the standard quarterly pest plan with the setup fee waived (owner 2026-11-19), for one named job.
+function assertPlanOfferArgs({ offer, serviceKey, shown }) {
+  const problem = (typeof offer?.jobId !== 'string' || !offer.jobId) ? 'a job id'
+    : serviceKey !== 'pest_control' ? 'the pest_control service'
+      : (shown?.setupFee != null && Number(shown.setupFee) !== 0) ? 'a setup fee of 0 in shown'
+        : null;
+  if (problem) throw new Error(`mintPlanStartEstimate offer needs ${problem}`);
+}
+
+// The offer's dates as the job module gave them (dueOfferOfJob), checked before they are stored: an end date
+// ahead of now and at most 31 days out, and a real calendar day for the first visit. A belt on that module's
+// answer: the estimate would otherwise end, or open its picker, on a date nobody stated.
 const PLAN_OFFER_MAX_DAYS = 31;
-function assertPlanOfferArgs({ offer, serviceKey, shown, nowDate }) {
-  const { endsAt, firstVisitFrom, jobId } = offer;
+function assertPlanOfferDates({ endsAt, firstVisitFrom }, nowDate) {
   const dateOnly = typeof firstVisitFrom === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(firstVisitFrom)
     && new Date(`${firstVisitFrom}T12:00:00Z`).toISOString().slice(0, 10) === firstVisitFrom;
   const endsMs = endsAt instanceof Date ? endsAt.getTime() : NaN;
-  const problem = (typeof jobId !== 'string' || !jobId) ? 'a job id'
-    : serviceKey !== 'pest_control' ? 'the pest_control service'
-      : !(endsMs > nowDate.getTime() && endsMs - nowDate.getTime() <= PLAN_OFFER_MAX_DAYS * 86400000) ? `an end date within ${PLAN_OFFER_MAX_DAYS} days`
-        : !dateOnly ? 'a YYYY-MM-DD first visit date'
-          : (shown?.setupFee != null && Number(shown.setupFee) !== 0) ? 'a setup fee of 0 in shown'
-            : null;
+  const problem = !(endsMs > nowDate.getTime() && endsMs - nowDate.getTime() <= PLAN_OFFER_MAX_DAYS * 86400000) ? `an end date within ${PLAN_OFFER_MAX_DAYS} days`
+    : !dateOnly ? 'a YYYY-MM-DD first visit date'
+      : null;
   if (problem) throw new Error(`mintPlanStartEstimate offer needs ${problem}`);
 }
 
@@ -1609,17 +1617,19 @@ async function liveOfferOfTappedQuote(trx, fresh, { serviceKey, optionId, now })
 // with the server's own recompute (offer_changed on drift) — never persisted.
 //
 // `offer` (the one-time job to plan offer, owner 2026-11-19 "build"; a job mints it and sends it with
-// no person tapping, owner 2026-11-20 "i want auto"): { jobId, endsAt: Date, firstVisitFrom:
-// 'YYYY-MM-DD' }. The same quote with the WaveGuard setup fee waived (shown.setupFee is 0), its own end
-// date as expires_at, and the stamp planStart.offer, which the slot picker, the booking checks and the
-// extension check read (plan-offer-estimate.js). The one-time job counts as the first plan visit, so the
-// customer books the next one on or after firstVisitFrom. A caller that breaks the offer's own bounds
-// has a bug: a plain Error, never a customer answer.
+// no person tapping, owner 2026-11-20 "i want auto"): { jobId }. The same quote with the WaveGuard setup
+// fee waived (shown.setupFee is 0), its own end date as expires_at, and the stamp planStart.offer =
+// { jobId, endsAt, firstVisitFrom }, which the slot picker, the booking checks and the extension check
+// read (plan-offer-estimate.js). The caller names the job only: the job module proves it and gives both
+// dates from the day its service was performed (dueOfferOfJob, the dates the offer email states). The
+// one-time job counts as the first plan visit, so the customer books the next one on or after
+// firstVisitFrom. A caller that breaks the offer's own bounds has a bug: a plain Error, never a customer
+// answer.
 async function mintPlanStartEstimate({
   customer, serviceKey, optionId, shown: cardShown, offer: callerOffer = null, now = () => new Date(), randomBytes = crypto.randomBytes, deps = {},
 }) {
   if (!customer || !customer.id) throw new Error('mintPlanStartEstimate requires a customer row');
-  if (callerOffer) assertPlanOfferArgs({ offer: callerOffer, serviceKey, shown: cardShown, nowDate: now() });
+  if (callerOffer) assertPlanOfferArgs({ offer: callerOffer, serviceKey, shown: cardShown });
   const notEligible = () => new RestartUnavailableError('not_eligible', 'This plan cannot be priced online right now.');
   // `shown` = the amounts the card displayed (PLAN_START_SHOWN_KEYS); a plan has a monthly price.
   const shownMonthly = Number(cardShown?.monthly);
@@ -1656,28 +1666,34 @@ async function mintPlanStartEstimate({
     }
     if (ownsPlan) throw notEligible();
 
-    // A caller's offer waives the setup fee because a one-time job was the first plan visit. That job is proven
-    // here, under the customer's locks and before anything is priced, retired or minted: a completed one-time
-    // pest or cockroach job of THIS customer with the record that its service was performed (the job module's
-    // own rule, planOfferJobOf). A job of another customer, a cancelled job, a plan visit or an unreadable job
-    // grants no waiver. As for the offer's other bounds, a caller that asks for one has a bug: a plain Error.
+    // A caller's offer names a job, nothing else. The waiver stands on "that one-time job was plan visit one",
+    // and the estimate's end date and first visit date count from the day that service was performed. So the
+    // job module proves the job and gives the dates (dueOfferOfJob), here, under the customer's locks and before
+    // anything is priced, retired or minted: a completed one-time pest or cockroach job of THIS customer, with
+    // the record that its service was performed, whose offer window is open today. The dates are the ones the
+    // offer email states (offerTerms), never the caller's. A job of another customer, a cancelled job, a plan
+    // visit, a job too old or too new, or an unreadable one grants no waiver. As for the offer's other bounds,
+    // a caller that asks for one has a bug: a plain Error.
+    let callerTerms = null;
     if (callerOffer) {
-      let job = null;
+      let due = null;
       try {
-        job = await mintDeps.planOfferJobOf(trx, { jobId: callerOffer.jobId, customerId: fresh.id });
+        due = await mintDeps.dueOfferOfJob(trx, { jobId: callerOffer.jobId, customerId: fresh.id, now: now() });
       } catch (err) {
         logger.warn(`[${logTag}] plan offer job lookup failed for ${fresh.id} — refusing: ${err.message}`);
       }
-      if (!job) throw new Error('mintPlanStartEstimate offer needs a completed one-time pest job of this customer');
+      if (!due) throw new Error('mintPlanStartEstimate offer needs a completed one-time pest job of this customer that is due its offer');
+      callerTerms = { jobId: callerOffer.jobId, endsAt: due.endsAt, firstVisitFrom: due.firstVisitFrom };
+      assertPlanOfferDates(callerTerms, now());
     }
 
     // A plain tap that finds the live offer quote of this service and option re-opens that offer through the
-    // core, never an early hand-back (liveOfferOfTappedQuote). Its stamp was checked when it was minted
-    // (assertPlanOfferArgs), and a live one is unexpired, so the caller's bounds are not run again. The card
+    // core, never an early hand-back (liveOfferOfTappedQuote). Its job and its dates were proven when it was
+    // minted (dueOfferOfJob), and a live one is unexpired, so they are not asked again. The card
     // shows the standard setup fee, the offer waives it: every amount the closures compare is the card's, with
     // the fee at 0, as an offer mint's own shown.
     const reopened = callerOffer ? null : await liveOfferOfTappedQuote(trx, fresh, { serviceKey, optionId, now });
-    const offer = callerOffer || reopened;
+    const offer = callerTerms || reopened;
     const shown = reopened ? { ...cardShown, setupFee: 0 } : cardShown;
 
     return mintPricedEstimate({
@@ -1746,7 +1762,7 @@ async function mintPlanStartEstimate({
       },
       note: (estimateId) => (offer ? {
         subject: `Plan offer estimate made after a one-time job — ${FAMILY_LABELS[family] || family}`,
-        body: `A plan estimate (${estimateId}) was made for the offer after the one-time job: no setup fee, open until ${require('../../utils/datetime-et').etDateString(offer.endsAt)}. Accepting it books the next plan visit.`,
+        body: `A plan estimate (${estimateId}) was made for the offer after the one-time job: no setup fee, good through ${require('../../utils/datetime-et').etDateString(new Date(offer.endsAt.getTime() - 1))}. Accepting it books the next plan visit.`,
       } : {
         subject: `Plan estimate opened from portal — ${FAMILY_LABELS[family] || family}`,
         body: `Customer opened a plan estimate (${estimateId}) priced at today's rates. Accepting it books the first visit.`,

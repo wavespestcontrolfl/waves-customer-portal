@@ -190,14 +190,44 @@ function qualifyingJobs(database) {
     .whereRaw('s.followup_included IS DISTINCT FROM true');
 }
 
-// The qualifying job with this id that belongs to this customer, or null. The offer estimate's mint asks it
-// under the customer's locks before it waives the setup fee (restart.js mintPlanStartEstimate `offer`): the
-// waiver stands on "that job was plan visit one", so a job of another customer, a cancelled one, a plan visit
-// or a visit with no performed record grants none. An id that is not a uuid is no job.
+// The qualifying jobs that are due their offer today: the offer day was FIRST_DAY to LAST_DAY days ago (ET).
+function dueJobs(database, today) {
+  return qualifyingJobs(database)
+    .whereRaw(`${OFFER_DAY_SQL} BETWEEN ?::date AND ?::date`, [shiftDay(today, -LAST_DAY), shiftDay(today, -FIRST_DAY)]);
+}
+
+// The offer's dates, counted in ET calendar days from its offer day. The email states them (offerPayload) and
+// the offer estimate stores them (restart.js mintPlanStartEstimate `offer`): one function, so the estimate can
+// never end, or take a first visit, on another day than the email says.
+//   lastDay                         the last day the offer is good ("good through")
+//   endsAt                          the instant it ends: the start of the ET day after lastDay
+//   firstVisitFrom / firstVisitTo   the window of the next plan visit
+function offerTerms(offerDay) {
+  const lastDay = shiftDay(offerDay, OFFER_DAYS);
+  return {
+    offerDay,
+    lastDay,
+    endsAt: parseETDateTime(`${shiftDay(lastDay, 1)}T00:00:00`),
+    firstVisitFrom: shiftDay(offerDay, NEXT_VISIT_FROM_DAYS),
+    firstVisitTo: shiftDay(offerDay, NEXT_VISIT_TO_DAYS),
+  };
+}
+
+// The offer this job is due today, with its dates, or null. The offer estimate's mint asks it under the
+// customer's locks before it waives the setup fee: the waiver stands on "that job was plan visit one", and the
+// estimate's end date and first visit date count from the day that service was performed. So the job must be a
+// qualifying job of THIS customer whose offer day is in today's window (the same rows as dueJobsPage), and the
+// dates are read here, never taken from the caller. A job of another customer, a cancelled one, a plan visit, a
+// visit with no performed record, or one whose window is not open or is over, has no offer. An id that is not
+// a uuid is no job.
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-async function planOfferJobOf(database, { jobId, customerId }) {
-  if (!UUID.test(String(jobId || '')) || !customerId) return null;
-  return (await qualifyingJobs(database).where('s.id', jobId).where('s.customer_id', customerId).first('s.id')) || null;
+async function dueOfferOfJob(database, { jobId, customerId, now }) {
+  if (!UUID.test(String(jobId || '')) || !customerId || !(now instanceof Date)) return null;
+  const row = await dueJobs(database, etDateString(now))
+    .where('s.id', jobId)
+    .where('s.customer_id', customerId)
+    .first(database.raw(`${OFFER_DAY_SQL} AS service_day`));
+  return row ? { jobId: String(jobId), ...offerTerms(dateOnlyString(row.service_day)) } : null;
 }
 
 // One page of the completed one-time jobs whose offer day was FIRST_DAY to LAST_DAY days ago (ET), oldest first.
@@ -208,8 +238,7 @@ async function planOfferJobOf(database, { jobId, customerId }) {
 // series parent): never a plan visit, a series extra, a free re-service or an included follow-up. A one-time
 // visit stores no pattern, or the 'one_time' marker.
 function dueJobsPage(database, today, after) {
-  const page = qualifyingJobs(database)
-    .whereRaw(`${OFFER_DAY_SQL} BETWEEN ?::date AND ?::date`, [shiftDay(today, -LAST_DAY), shiftDay(today, -FIRST_DAY)])
+  const page = dueJobs(database, today)
     .orderByRaw(`${OFFER_DAY_SQL} ASC`)
     .orderBy('s.id', 'asc')
     .limit(PAGE_SIZE);
@@ -476,6 +505,7 @@ async function evaluateJob(ctx) {
 function offerPayload({ customer, offerDay, option }) {
   const noYear = { year: undefined };
   const shortDay = (ymd) => formatDateOnly(ymd, { ...noYear, month: 'short' });
+  const terms = offerTerms(offerDay);
   return {
     first_name: greetingFirstName({
       customerName: [customer.first_name, customer.last_name].filter(Boolean).join(' '), customer,
@@ -485,8 +515,8 @@ function offerPayload({ customer, offerDay, option }) {
     address_short: String(customer.address_line1 || '').trim(),
     price_per_application: money(option.perVisit),
     setup_fee: money(option.setupFee),
-    next_visit_window: `${shortDay(shiftDay(offerDay, NEXT_VISIT_FROM_DAYS))} to ${shortDay(shiftDay(offerDay, NEXT_VISIT_TO_DAYS))}`,
-    offer_end_date: formatDateOnly(shiftDay(offerDay, OFFER_DAYS), noYear),
+    next_visit_window: `${shortDay(terms.firstVisitFrom)} to ${shortDay(terms.firstVisitTo)}`,
+    offer_end_date: formatDateOnly(terms.lastDay, noYear),
     // No estimate exists in shadow, so the button opens the estimate page's "not found" answer.
     estimate_url: portalUrl('/estimate/sample'),
   };
@@ -674,7 +704,8 @@ async function runOnetimePlanOfferJob({ now = new Date(), deps: overrides = {} }
 
 module.exports = {
   runOnetimePlanOfferJob,
-  planOfferJobOf,
+  dueOfferOfJob,
+  offerTerms,
   JOB_SERVICE_KEYS,
   OFFER_TEMPLATE,
   REMINDER_TEMPLATE,

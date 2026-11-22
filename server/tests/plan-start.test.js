@@ -312,7 +312,7 @@ const CUSTOMER = {
 };
 const recompute = jest.fn();
 const releaseHolds = jest.fn(async () => ({ released: 0 }));
-// The job a plan offer follows (the job module's planOfferJobOf): found by default; the refusal tests override it.
+// The offer a job is due (the job module's dueOfferOfJob): none by default; mintOffer and the refusal tests set it.
 const planOfferJob = jest.fn();
 // The frozen bundle in the real builder's shape (frequencies[] plus services[], each section with
 // defaultFrequencyKey and frequencies[]): one section for the minted family whose opening entry
@@ -366,7 +366,7 @@ function deps(overrides = {}) {
     crossSell: { loadEstimateSeed: async () => null },
     // The scheduler's hold release, recorded: the replace step frees each archived quote's holds.
     releaseEstimateHolds: releaseHolds,
-    planOfferJobOf: planOfferJob,
+    dueOfferOfJob: planOfferJob,
     propertyLookup: null,
     // Single-premises proof + verified-override probe (codex GH r4): green
     // by default here; the refusal tests override them.
@@ -386,7 +386,7 @@ beforeEach(() => {
   recompute.mockReset();
   releaseHolds.mockClear();
   planOfferJob.mockReset();
-  planOfferJob.mockImplementation(async (_trx, { jobId }) => ({ id: jobId }));
+  planOfferJob.mockImplementation(async () => null);
   recompute.mockResolvedValue({
     recomputed: true,
     serverResult: { engineVersion: 'v9.9', lineItems: [] },
@@ -932,7 +932,12 @@ describe('mintPlanStartEstimate', () => {
     const ENDS = new Date(FIXED_NOW().getTime() + 20 * 24 * 3600 * 1000);
     const OFFER = { jobId: 'job-1', endsAt: ENDS, firstVisitFrom: '2027-02-17' };
     const OFFER_SHOWN = { ...shownOf(PEST_LINE), setupFee: 0 };
-    const mintOffer = (offer = OFFER, overrides = {}, depOverrides = {}) => mint({ shown: OFFER_SHOWN, offer, ...overrides }, depOverrides);
+    // The mint takes the job id only. The job module proves the job and gives the offer's dates (dueOfferOfJob);
+    // here its answer for the job is `offer`, so `offer` holds the dates the mint must store.
+    const mintOffer = (offer = OFFER, overrides = {}, depOverrides = {}) => {
+      planOfferJob.mockImplementation(async (_trx, { jobId }) => ({ jobId, endsAt: offer.endsAt, firstVisitFrom: offer.firstVisitFrom }));
+      return mint({ shown: OFFER_SHOWN, offer: { jobId: offer.jobId }, ...overrides }, depOverrides);
+    };
     const SECOND_TOKEN = () => Buffer.from('0123456789abcdef');
 
     test('stores the stamp, the fee waiver and its own end date, and writes its own timeline note', async () => {
@@ -940,7 +945,7 @@ describe('mintPlanStartEstimate', () => {
       expect(result.reused).toBe(false);
       // The job was proven for this customer, on the mint's transaction, before anything was priced.
       expect(planOfferJob).toHaveBeenCalledTimes(1);
-      expect(planOfferJob.mock.calls[0][1]).toEqual({ jobId: 'job-1', customerId: LEAD.id });
+      expect(planOfferJob.mock.calls[0][1]).toEqual({ jobId: 'job-1', customerId: LEAD.id, now: FIXED_NOW() });
       expect(planOfferJob.mock.invocationCallOrder[0]).toBeLessThan(recompute.mock.invocationCallOrder[0]);
       // The waiver is on the data the server prices, so the recompute zeroes the setup fee.
       const [estimateData] = recompute.mock.calls[0];
@@ -960,7 +965,7 @@ describe('mintPlanStartEstimate', () => {
       expect(tables.customer_interactions).toHaveLength(1);
       expect(tables.customer_interactions[0]).toMatchObject({
         customer_id: 'cust-1', interaction_type: 'note', subject: 'Plan offer estimate made after a one-time job — Pest Control',
-        body: `A plan estimate (${row.id}) was made for the offer after the one-time job: no setup fee, open until 2026-12-09. Accepting it books the next plan visit.`,
+        body: `A plan estimate (${row.id}) was made for the offer after the one-time job: no setup fee, good through 2026-12-09. Accepting it books the next plan visit.`,
       });
     });
 
@@ -1008,7 +1013,8 @@ describe('mintPlanStartEstimate', () => {
       expect(tables.estimates.find((r) => r.id === plain.estimateId).archived_at).toBeTruthy();
     });
 
-    // A caller that breaks the offer's own bounds has a bug: a plain Error, nothing read, nothing minted.
+    // A caller that breaks the offer's own bounds, or a job module answer with dates the estimate cannot hold,
+    // is a bug: a plain Error, nothing priced, nothing minted.
     test.each([
       ['a service other than pest control', { serviceKey: 'lawn_care', optionId: 'lawn-enhanced' }, OFFER],
       ['an end date in the past', {}, { ...OFFER, endsAt: new Date(FIXED_NOW().getTime() - 1000) }],
@@ -1027,22 +1033,34 @@ describe('mintPlanStartEstimate', () => {
     });
 
     // The waiver stands on "that one-time job was plan visit one". A job the job module does not know as a
-    // completed one-time pest job of THIS customer (another customer's, a cancelled one, a plan visit), or one
-    // it cannot read, grants none: a caller bug, a plain Error, with nothing priced, retired or minted.
+    // completed one-time pest job of THIS customer that is due its offer today (another customer's, a cancelled
+    // one, a plan visit, one too old or too new), or one it cannot read, grants none: a caller bug, a plain
+    // Error, with nothing priced, retired or minted.
     test.each([
-      ['is not a qualifying job of this customer', async () => null],
+      ['is not due an offer for this customer', async () => null],
       ['cannot be read', async () => { throw new Error('boom'); }],
     ])('a job that %s refuses with a plain Error: the prior quote stays, nothing is priced or minted', async (_label, lookup) => {
       const plain = await mint();
       recompute.mockClear();
-      planOfferJob.mockImplementation(lookup);
-      const attempt = mintOffer(OFFER, { randomBytes: SECOND_TOKEN });
-      await expect(attempt).rejects.toThrow(/offer needs a completed one-time pest job of this customer/);
+      const attempt = mintOffer(OFFER, { randomBytes: SECOND_TOKEN }, { dueOfferOfJob: lookup });
+      await expect(attempt).rejects.toThrow(/offer needs a completed one-time pest job of this customer that is due its offer/);
       await expect(attempt).rejects.not.toMatchObject({ restartUnavailable: true });
       expect(recompute).not.toHaveBeenCalled();
       expect(tables.estimates).toHaveLength(1);
       expect(tables.estimates.find((r) => r.id === plain.estimateId).archived_at).toBeFalsy();
       expect(releaseHolds).not.toHaveBeenCalled();
+    });
+
+    // The caller cannot set the dates: only the job module's answer is stored.
+    test('dates in the caller\'s offer are ignored: the estimate stores the job module\'s dates', async () => {
+      planOfferJob.mockImplementation(async (_trx, { jobId }) => ({ jobId, endsAt: ENDS, firstVisitFrom: '2027-02-17' }));
+      const minted = await mint({
+        shown: OFFER_SHOWN,
+        offer: { jobId: 'job-1', endsAt: new Date(FIXED_NOW().getTime() + 29 * 24 * 3600 * 1000), firstVisitFrom: '2026-11-20' },
+      });
+      const row = tables.estimates.find((r) => r.id === minted.estimateId);
+      expect(JSON.parse(row.estimate_data).planStart.offer).toEqual({ jobId: 'job-1', endsAt: ENDS.toISOString(), firstVisitFrom: '2027-02-17' });
+      expect(row.expires_at).toEqual(ENDS);
     });
 
     test('a plain mint, and a plain tap that re-opens the offer, never ask for a job', async () => {

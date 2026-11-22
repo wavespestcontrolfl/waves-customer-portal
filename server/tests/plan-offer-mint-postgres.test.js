@@ -22,7 +22,7 @@ jest.mock('../models/db', () => new Proxy(function appConnection() {}, {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 const crypto = require('crypto');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
 const hex = (bytes) => crypto.randomBytes(bytes).toString('hex');
 const day = (n) => etDateString(addETDays(new Date(), n));
@@ -120,19 +120,25 @@ postgres('plan offer quote (live Postgres)', () => {
     customer, serviceKey: 'pest_control', optionId: option.id, shown, ...(offer ? { offer } : {}),
     deps: { db: trx, propertyLookup: async () => SAVED_LOOKUP },
   });
-  // One end date for the whole file: the same job's offer is the same offer only with the same dates.
-  const ENDS = new Date(Date.now() + 30 * DAY_MS);
-  const offerOf = (job, change = {}) => ({
-    jobId: String(job.id), endsAt: ENDS, firstVisitFrom: day(85), ...change,
+  // The caller names the job, nothing else: the job module proves it and gives the dates (dueOfferOfJob).
+  const offerOf = (job) => ({ jobId: String(job.id) });
+  // The dates the offer must carry for a job whose service was performed `daysAgo` ET days ago, counted here by
+  // hand: good through day 30 (it ends when the next ET day starts), the next visit from day 77.
+  const termsFor = (daysAgo) => ({
+    endsAt: parseETDateTime(`${day(31 - daysAgo)}T00:00:00`),
+    firstVisitFrom: day(77 - daysAgo),
   });
+  // A date some tests set as a quote's expiry by hand.
+  const ENDS = new Date(Date.now() + 30 * DAY_MS);
   const rowOf = (id) => trx('estimates').where({ id }).first();
 
   test('the offer quote: stamp, fee waiver, own end date, and a setup fee of $0 wherever the page and the accept read it', async () => {
     const { customer, job } = await seedCustomerWithJob();
     const option = await cardOption(customer, job);
     expect(option.setupFee).toBeGreaterThan(0);
-    const offer = offerOf(job);
-    const minted = await mintFor({ customer, option, shown: shownOf(option, 0), offer });
+    // The seeded job's service was performed 5 days ago.
+    const offer = termsFor(5);
+    const minted = await mintFor({ customer, option, shown: shownOf(option, 0), offer: offerOf(job) });
     expect(minted).toMatchObject({ reused: false, url: `/estimate/${minted.token}` });
 
     const row = await rowOf(minted.estimateId);
@@ -165,7 +171,7 @@ postgres('plan offer quote (live Postgres)', () => {
     // Its timeline note.
     const [note] = await trx('customer_interactions').where({ customer_id: customer.id, interaction_type: 'note' });
     expect(note.subject).toBe('Plan offer estimate made after a one-time job — Pest Control');
-    expect(note.body).toBe(`A plan estimate (${row.id}) was made for the offer after the one-time job: no setup fee, open until ${etDateString(offer.endsAt)}. Accepting it books the next plan visit.`);
+    expect(note.body).toBe(`A plan estimate (${row.id}) was made for the offer after the one-time job: no setup fee, good through ${day(25)}. Accepting it books the next plan visit.`);
 
     // The same card tapped plain carries the fee and no stamp: the offer is the only difference.
     const plainCustomer = await seedCustomerWithJob();
@@ -183,7 +189,7 @@ postgres('plan offer quote (live Postgres)', () => {
     const again = await mintFor({ customer, option, shown: shownOf(option, 0), offer: offerOf(job) });
     expect(again).toMatchObject({ estimateId: first.estimateId, token: first.token, reused: true });
 
-    const otherJob = await seedJob(customer, { daysAgo: 2 });
+    const otherJob = await seedJob(customer, { daysAgo: 4 });
     const next = await mintFor({ customer, option, shown: shownOf(option, 0), offer: offerOf(otherJob) });
     expect(next.reused).toBe(false);
     expect(next.estimateId).not.toBe(first.estimateId);
@@ -191,33 +197,36 @@ postgres('plan offer quote (live Postgres)', () => {
     expect(parse((await rowOf(next.estimateId)).estimate_data).planStart.offer.jobId).toBe(String(otherJob.id));
   });
 
-  // The offer day of one job can move (a follow-up visit done later). The mint's fingerprint holds no date, and the
-  // picker, the reservation and the accept read the STORED first visit date, so the old quote is never handed back.
-  test.each([
-    ['a later first visit date', () => ({ firstVisitFrom: day(88) })],
-    ['another end date', () => ({ endsAt: new Date(ENDS.getTime() - DAY_MS) })],
-  ])('the same job with %s is a new quote: the old one is retired and the new one stores the new dates', async (_label, change) => {
+  // The offer day of one job can move: its included follow-up visit is done later. The mint's fingerprint holds no
+  // date, and the picker, the reservation and the accept read the STORED first visit date, so the old quote is
+  // never handed back: the same job is minted again with the dates counted from the follow-up's day.
+  test('the same job after its included follow-up was done is a new quote: the old one is retired and the new one stores the later dates', async () => {
     const { customer, job } = await seedCustomerWithJob();
     const option = await cardOption(customer, job);
     const first = await mintFor({ customer, option, shown: shownOf(option, 0), offer: offerOf(job) });
-    const asked = offerOf(job, change());
-    const moved = await mintFor({ customer, option, shown: shownOf(option, 0), offer: asked });
+    expect(parse((await rowOf(first.estimateId)).estimate_data).planStart.offer.firstVisitFrom).toBe(termsFor(5).firstVisitFrom);
+
+    // The follow-up of that job, performed 3 days ago.
+    await seedJob(customer, { daysAgo: 3, followup_included: true, followup_source_service_id: job.id, parent_service_id: job.id });
+    const moved = await mintFor({ customer, option, shown: shownOf(option, 0), offer: offerOf(job) });
     expect(moved.reused).toBe(false);
     expect(moved.estimateId).not.toBe(first.estimateId);
     expect((await rowOf(first.estimateId)).archived_at).not.toBeNull();
     const movedRow = await rowOf(moved.estimateId);
+    const later = termsFor(3);
     expect(parse(movedRow.estimate_data).planStart.offer).toEqual({
-      jobId: String(job.id), endsAt: asked.endsAt.toISOString(), firstVisitFrom: asked.firstVisitFrom,
+      jobId: String(job.id), endsAt: later.endsAt.toISOString(), firstVisitFrom: later.firstVisitFrom,
     });
-    expect(new Date(movedRow.expires_at).getTime()).toBe(asked.endsAt.getTime());
+    expect(new Date(movedRow.expires_at).getTime()).toBe(later.endsAt.getTime());
     // What the picker and the 07:05 fill list read as the first day they may offer.
-    expect(await require('../services/estimate-slot-availability').estimateMoveInDate(movedRow)).toBe(asked.firstVisitFrom);
+    expect(await require('../services/estimate-slot-availability').estimateMoveInDate(movedRow)).toBe(later.firstVisitFrom);
   });
 
   // The waiver stands on "that one-time job was plan visit one". The mint proves the job under the customer's
   // locks with the job module's own rule: only a completed one-time pest job of THIS customer, with the record
-  // that its service was performed. Anything else is a caller bug: a plain Error, and the customer's live
-  // quote stays as it was.
+  // that its service was performed, whose offer window is open today (day 3 to day 14 after that service). The
+  // dates are counted from that day by the job module, never taken from the caller. Anything else is a caller
+  // bug: a plain Error, and the customer's live quote stays as it was.
   describe('the job the offer follows', () => {
     async function withPlainQuote() {
       const { customer, job } = await seedCustomerWithJob();
@@ -227,7 +236,7 @@ postgres('plan offer quote (live Postgres)', () => {
     }
     const refused = async ({ customer, option, plain }, job) => {
       await expect(mintFor({ customer, option, shown: shownOf(option, 0), offer: offerOf(job) }))
-        .rejects.toThrow(/offer needs a completed one-time pest job of this customer/);
+        .rejects.toThrow(/offer needs a completed one-time pest job of this customer that is due its offer/);
       const rows = await trx('estimates').where({ customer_id: customer.id, source: 'plan_start' });
       expect(rows).toHaveLength(1);
       expect(rows[0].id).toBe(plain.estimateId);
@@ -252,12 +261,40 @@ postgres('plan offer quote (live Postgres)', () => {
       await refused(mine, await seedJob(mine.customer, { daysAgo: 4, ...visit }));
     });
 
-    test('the customer\'s own completed one-time job, on any day, grants it', async () => {
+    // The offer window: the service was performed 3 to 14 ET days ago. Outside it the job is not due, so a late
+    // or an early mint grants no waiver.
+    test.each([[2, 'not yet open'], [15, 'over'], [40, 'long over']])('a job whose service was %i days ago (the window is %s) grants no waiver', async (daysAgo) => {
       const mine = await withPlainQuote();
-      const job = await seedJob(mine.customer, { daysAgo: 40 });
+      await refused(mine, await seedJob(mine.customer, { daysAgo }));
+    });
+
+    test.each([3, 14])('the customer\'s own job on day %i of the window grants it, with the dates counted from that day', async (daysAgo) => {
+      const mine = await withPlainQuote();
+      const job = await seedJob(mine.customer, { daysAgo });
       const offered = await mintFor({ customer: mine.customer, option: mine.option, shown: shownOf(mine.option, 0), offer: offerOf(job) });
       expect(offered.reused).toBe(false);
       expect((await rowOf(mine.plain.estimateId)).archived_at).not.toBeNull();
+      const row = await rowOf(offered.estimateId);
+      const terms = termsFor(daysAgo);
+      expect(parse(row.estimate_data).planStart.offer).toEqual({
+        jobId: String(job.id), endsAt: terms.endsAt.toISOString(), firstVisitFrom: terms.firstVisitFrom,
+      });
+      expect(new Date(row.expires_at).getTime()).toBe(terms.endsAt.getTime());
+    });
+
+    test('dates in the caller\'s offer are ignored: the estimate stores the dates counted from the job', async () => {
+      const { customer, job } = await seedCustomerWithJob();
+      const option = await cardOption(customer, job);
+      const minted = await mintFor({
+        customer, option, shown: shownOf(option, 0),
+        offer: { jobId: String(job.id), endsAt: new Date(Date.now() + 29 * DAY_MS), firstVisitFrom: day(1) },
+      });
+      const terms = termsFor(5);
+      const row = await rowOf(minted.estimateId);
+      expect(parse(row.estimate_data).planStart.offer).toEqual({
+        jobId: String(job.id), endsAt: terms.endsAt.toISOString(), firstVisitFrom: terms.firstVisitFrom,
+      });
+      expect(new Date(row.expires_at).getTime()).toBe(terms.endsAt.getTime());
     });
   });
 
@@ -270,7 +307,7 @@ postgres('plan offer quote (live Postgres)', () => {
     let published = false;
     const attempt = restart().mintPlanStartEstimate({
       customer, serviceKey: 'pest_control', optionId: option.id, shown: shownOf(option, 0), offer: offerOf(job),
-      now: () => (published ? new Date(ENDS.getTime() + 1000) : new Date()),
+      now: () => (published ? new Date(Date.now() + 40 * DAY_MS) : new Date()),
       deps: {
         db: trx,
         propertyLookup: async () => SAVED_LOOKUP,
