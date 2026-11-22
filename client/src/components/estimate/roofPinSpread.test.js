@@ -140,6 +140,19 @@ describe('spreadPins', () => {
     expect(Math.max(...shifts) - Math.min(...shifts)).toBeLessThan(0.01);
   });
 
+  it('runs no line under a badge that sits inside the ring: a row of four close points with a fifth pin above it', () => {
+    // The fifth pin is 28.6 px from the nearest point, so it stays. The ring of the row goes round it, and at the
+    // start angle with the shortest lines the line of badge 2 ran 4 px from its centre.
+    const px = [[112.5, 147], [135.5, 147], [158.5, 147], [181.5, 147], [145, 120]];
+    const out = spreadPins(px.map(([x, y]) => ({ x: x / 294, y: y / 294 })), 294);
+    expect(out.map((p) => p.callout)).toEqual([true, true, true, true, false]);
+    expect(out[4].moved).toBe(false);
+    expect(linesUnderBadges(out, 294)).toBe(0);
+    expect(linesCrossing(out)).toBe(0);
+    expect(dotsVisible(out, 294)).toBe(true);
+    expect(minPairGap(out, 294)).toBeGreaterThanOrEqual(MIN - 0.05);
+  });
+
   it('keeps a group clear of a badge that does not move: the ring uses the free arc and no line runs under that badge', () => {
     // Two points 10 px apart, and a third 34 px to the right of them: not crowded, so it stays where it is.
     const out = spreadPins([{ x: 0.4, y: 0.5 }, { x: 0.4 + 10 / 294, y: 0.5 }, { x: 0.4 + 44 / 294, y: 0.5 }], 294);

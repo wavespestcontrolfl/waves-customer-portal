@@ -13,8 +13,10 @@
 //    cover its own dot and line, and the customer saw a number and no place. The lines stay inside the ring, so a line
 //    does not run under another badge and look as if it ends there, and the badges take the ring places that make the
 //    lines shortest, so no two lines of a group cross.
-//  - A ring cut by the photo edge, by another badge or by another group uses its longest free arc, and grows until
-//    the group's badges fit on that arc. In a photo that full, a line can still pass under a badge of another group.
+//  - A ring cut by the photo edge, by another badge or by another group uses its longest free arc.
+//  - A badge that does not move can sit inside a ring, and a line can run under it. So every ring that fits is
+//    checked: the first one (smallest, then by start angle) whose lines run under no badge is used. The ring grows to
+//    find one, and the ring with the fewest such lines is used when none is clean (10 to 20 points on one line).
 //  - A group no ring fits (about seven or more points on one spot in a photo corner) places badge by badge at the
 //    nearest free spot: badges apart first, then off the dots. With no free spot at all the badge stays on its point.
 // Groups and badges are handled in pin order, with no randomness: the same input always gives the same output.
@@ -32,7 +34,7 @@ const CALLOUT_GAP_PX = 5;
 const LINE_GAP_PX = 3;
 const TAU = 2 * Math.PI;
 // A ring is checked at this many places round it, grows by RING_GROW_PX up to RING_REACH_PX past its smallest size, and
-// a ring that is free all the way round is tried at RING_TURNS start angles (the one with the shortest lines is used).
+// a ring that is free all the way round is tried at RING_TURNS start angles.
 const ARC_STEPS = 360;
 const RING_GROW_PX = 6;
 const RING_REACH_PX = 150;
@@ -181,26 +183,38 @@ function takePlaces(froms, places, c) {
   return take.map((k) => places[k]);
 }
 
+// How many times a line (from a point to its badge) runs under a badge that is not its own.
+function linesUnderBadges(froms, spots, placed, lineClear) {
+  let count = 0;
+  froms.forEach((from, i) => {
+    const under = (q) => gapToLine(q, from, spots[i]) < lineClear - SETTLED_EPSILON_PX;
+    count += spots.filter((q, j) => j !== i && under(q)).length + placed.filter(under).length;
+  });
+  return count;
+}
+
 // The badge places for one group, one per point in the group's order, or null when no ring fits. The smallest ring
-// keeps every dot of the group clear and holds the group's badges; a ring cut short grows until they fit on its arc.
-function ringFor(froms, free, { minDist, dotClear }) {
+// keeps every dot of the group clear and holds the group's badges; the first ring whose lines run under no badge wins.
+function ringFor(froms, placed, free, { minDist, dotClear, lineClear }) {
   const n = froms.length;
   const c = { x: froms.reduce((sum, f) => sum + f.x, 0) / n, y: froms.reduce((sum, f) => sum + f.y, 0) / n };
   const smallest = Math.max(Math.max(...froms.map((f) => gapBetween(f, c))) + dotClear, minDist / 2 / Math.sin(Math.PI / n));
-  for (let r = smallest; r <= smallest + RING_REACH_PX; r += RING_GROW_PX) {
+  let best = null;
+  for (let r = smallest; r <= smallest + RING_REACH_PX && !(best && best.faults === 0); r += RING_GROW_PX) {
+    const ring = { c, r, minDist };
     const arc = longestFreeArc(Array.from({ length: ARC_STEPS }, (_, k) => free({ x: c.x + r * Math.cos((k * TAU) / ARC_STEPS), y: c.y + r * Math.sin((k * TAU) / ARC_STEPS) })));
     const turns = arc.count === ARC_STEPS ? RING_TURNS : 1;
-    let best = null;
     for (let turn = 0; turn < turns; turn += 1) {
-      const places = ringPlaces({ c, r, minDist }, n, arc, turn);
+      const places = ringPlaces(ring, n, arc, turn);
       if (!places) break;
       const spots = takePlaces(froms, places, c);
+      const faults = linesUnderBadges(froms, spots, placed, lineClear);
       const len = spots.reduce((sum, spot, i) => sum + gapBetween(froms[i], spot), 0);
-      if (!best || len < best.len - 1e-9) best = { spots, len };
+      const better = !best || faults < best.faults || (faults === best.faults && r === best.r && len < best.len - 1e-9);
+      if (better) best = { spots, faults, len, r };
     }
-    if (best) return best.spots;
   }
-  return null;
+  return best && best.spots;
 }
 
 // The first spot that passes `free`, looking on rings around `from` from `startR` out, and on each ring from `angle`
@@ -230,7 +244,7 @@ function callOut(pts, crowded, { minDist, dotClear, lineClear, lo, hi }) {
   const free = (s) => apart(s) && clearOf(s, dots, dotClear) && lines.every((l) => gapToLine(s, l.from, l.to) >= lineClear);
   const farthest = (hi - lo) * Math.SQRT2;
   for (const group of crowdedGroups(pts, crowded, minDist)) {
-    const ring = ringFor(group.map((i) => pts[i].from), free, { minDist, dotClear });
+    const ring = ringFor(group.map((i) => pts[i].from), placed, free, { minDist, dotClear, lineClear });
     group.forEach((i, k) => {
       const p = pts[i];
       const spot = ring ? ring[k]
