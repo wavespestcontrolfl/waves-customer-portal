@@ -9,7 +9,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const script = path.join(__dirname, '..', '..', 'ops', 'agents', 'second-tech-handover.js');
 const {
   buildPlan, parseArgs, defaultStart, isOpenVisit, isGroupedVisit, seriesTechnicianId, isBaitSeries, isTermiteBaitAddon,
-  printPlan, planHandover, PlanError, offCapabilityLines, MOVABLE_LINES, TERRITORY_MOVABLE_LINES,
+  printPlan, offCapabilityLines, MOVABLE_LINES,
 } = require(script);
 
 const OWNER = '00000000-0000-4000-8000-000000000001';
@@ -26,6 +26,8 @@ const SAT = '2099-07-11';
 // After the 13-week weekend-customer window (--start 2099-07-06: dates before 2099-10-05 are inside it).
 const MON_LATE = '2099-10-12';
 const FRI_LATE = '2099-10-09';
+// A run that leaves termite out (--lines general,rodent,mosquito): bait customers stay whole with the owner (2026-10-25 rule).
+const NO_TERMITE = ['general', 'rodent', 'mosquito'];
 
 let seq = 0;
 const id = (p) => `${p}-${++seq}`;
@@ -72,14 +74,115 @@ describe('second-tech-handover planner', () => {
     expect(p.series.retemplate).toBe(1);
   });
 
-  test('rodent and mosquito move too; lawn and termite series are skipped as other_line', () => {
+  test('rodent, mosquito and termite move too; lawn and rodent exclusion stay as other_line; a run without termite skips termite too', () => {
     const rodent = parent({ line: 'rodent' });
     const mosq = parent({ line: 'mosquito' });
     const lawn = parent({ line: 'lawn' });
+    // Owner 2026-11-21 ("you seal, he traps"): the exclusion line stays with the owner in every run.
+    const exclusion = parent({ line: 'exclusion' });
     const termite = parent({ line: 'termite' });
-    const p = plan([rodent, mosq, lawn, termite], [rodent, mosq, lawn, termite].map((s) => visit(s, MON)));
-    expect(p.would_change.by_line).toEqual({ rodent: { series: 1, visits: 1 }, mosquito: { series: 1, visits: 1 } });
+    const all = [rodent, mosq, lawn, exclusion, termite];
+    const p = plan(all, all.map((s) => visit(s, MON)));
+    expect(p.would_change.by_line).toEqual({ rodent: { series: 1, visits: 1 }, mosquito: { series: 1, visits: 1 }, termite: { series: 1, visits: 1 } });
     expect(p.skipped.other_line).toEqual({ series: 2, visits: 2 });
+    const noTermite = plan(all, all.map((s) => visit(s, MON)), { lines: NO_TERMITE });
+    expect(noTermite.would_change.by_line).toEqual({ rodent: { series: 1, visits: 1 }, mosquito: { series: 1, visits: 1 } });
+    expect(noTermite.skipped.other_line).toEqual({ series: 3, visits: 3 });
+  });
+
+  test('a visit moves by its own line: one appointment of a series changed to another service', () => {
+    // Staff can change one appointment to another service ("this appointment only"). The series is termite; the
+    // reader gives each visit the line of its own service.
+    const termite = parent({ line: 'termite', service_type: 'Termite Monitoring Service' });
+    const own = visit(termite, MON, { line: 'termite' });
+    const lawnVisit = visit(termite, TUE, { line: 'lawn' });
+    const exclusionVisit = visit(termite, WED, { line: 'exclusion' });
+    const unknownVisit = visit(termite, THU, { line: null });
+    const trapVisit = visit(termite, MON_LATE, { line: 'rodent' });
+    const all = [own, lawnVisit, exclusionVisit, unknownVisit, trapVisit];
+    const p = plan([termite], all);
+    expect(new Set(p.ids.visits)).toEqual(new Set([own.id, trapVisit.id]));
+    expect(p.skipped.visit_other_line).toEqual({ series: 1, visits: 3 });
+    expect(p.skipped.off_day_customer).toBeUndefined();
+    // The trap visit moves under the rodent line: the hire must be able to take it, and the dry run counts it there
+    // (the series under its template line, each visit under its own).
+    expect(p.capability_lines).toEqual(['rodent', 'termite']);
+    expect(p.would_change.by_line).toEqual({ termite: { series: 1, visits: 1 }, rodent: { series: 0, visits: 1 } });
+    // A run that leaves rodent out keeps the trap visit with the owner too.
+    const termiteOnly = plan([termite], all, { lines: ['termite'] });
+    expect(termiteOnly.ids.visits).toEqual([own.id]);
+    expect(termiteOnly.skipped.visit_other_line).toEqual({ series: 1, visits: 4 });
+    expect(termiteOnly.capability_lines).toEqual(['termite']);
+    // A row with no line field (an older caller) goes with its series.
+    expect(plan([termite], [visit(termite, MON)]).ids.visits).toHaveLength(1);
+  });
+
+  test('an add-on is work of its own line: it keeps a visit or a series with the owner, or joins the capability check', () => {
+    // A pest series. One visit carries a sealing add-on (the owner's work), one a rodent bait add-on (the hire's).
+    const pest = parent({ customer_id: 'C-addon' });
+    const sealing = visit(pest, MON, { line: 'general', addon_lines: ['exclusion'] });
+    const baitStations = visit(pest, TUE, { line: 'general', addon_lines: ['rodent'] });
+    const unknown = visit(pest, WED, { line: 'general', addon_lines: [null] });
+    const plain = visit(pest, THU, { line: 'general', addon_lines: [] });
+    const p = plan([pest], [sealing, baitStations, unknown, plain]);
+    expect(new Set(p.ids.visits)).toEqual(new Set([baitStations.id, plain.id]));
+    expect(p.skipped.visit_other_line).toEqual({ series: 1, visits: 2 });
+    expect(p.capability_lines).toEqual(['general', 'rodent']);
+    // A run that leaves rodent out keeps the bait-station visit with the owner too.
+    const noRodent = plan([pest], [sealing, baitStations, unknown, plain], { lines: ['general', 'mosquito', 'termite'] });
+    expect(noRodent.ids.visits).toEqual([plain.id]);
+    expect(noRodent.capability_lines).toEqual(['general']);
+
+    // An add-on on the PARENT row is copied onto each new visit. A lawn one keeps the series whole with the owner;
+    // a rodent one moves, and the hire must take rodent work also when no visit moves now.
+    const lawnTemplate = parent({ customer_id: 'C-addon-lawn', addon_lines: ['lawn'] });
+    const kept = plan([lawnTemplate], [visit(lawnTemplate, MON, { line: 'general' })]);
+    expect(kept.ids.retemplate).toEqual([]);
+    expect(kept.skipped.addon_other_line).toEqual({ series: 1, visits: 1 });
+    const rodentTemplate = parent({ customer_id: 'C-addon-rodent', addon_lines: ['rodent'] });
+    const moved = plan([rodentTemplate], []);
+    expect(moved.ids.retemplate).toEqual([rodentTemplate.id]);
+    expect(moved.capability_lines).toEqual(['general', 'rodent']);
+  });
+
+  test('an off-day visit of another line still marks its customer a weekend customer: the series keeps that weekday', () => {
+    // A termite series on Fridays (a day off for the hire); staff changed the one appointment ahead to lawn. The visit
+    // stays with the owner either way, but a moved template would seed the next Friday visits to the hire.
+    const termite = parent({ customer_id: 'C-fri-lawn', line: 'termite', service_type: 'Termite Monitoring Service' });
+    const lawnFriday = visit(termite, FRI, { line: 'lawn', is_recurring: true });
+    const first = plan([termite], [lawnFriday]);
+    expect(first.skipped.off_day_customer).toEqual({ series: 1, visits: 1, customers: 1 });
+    expect(first.ids.retemplate).toEqual([]);
+    // The day-60 run lists the customer for the resolver and gives the lawn visit no new date and no new technician.
+    const draft = plan([termite], [lawnFriday], { weekendMove: true });
+    expect(draft.weekend_candidates).toEqual([{ customer_id: 'C-fri-lawn', series_ids: [termite.id] }]);
+    expect(draft.ids.moves).toEqual([]);
+    expect(draft.skipped.visit_other_line).toEqual({ series: 1, visits: 1 });
+    // The resolver never re-dates that visit (stayStillReason), so the customer stays whole and the template stays.
+    const kept = plan([termite], [lawnFriday], { weekendMove: true, weekend: { kept: new Map([['C-fri-lawn', 'visit_other_line']]), newDates: new Map(), anchors: [] } });
+    expect(kept.ids.retemplate).toEqual([]);
+    expect(kept.skipped.weekend_kept_visit_other_line).toEqual({ series: 1, visits: 1, customers: 1 });
+    // The same lawn visit on a work day marks nobody: the template moves and the visit stays.
+    const workday = plan([termite], [visit(termite, TUE, { line: 'lawn' })]);
+    expect(workday.ids.retemplate).toEqual([termite.id]);
+    expect(workday.skipped.off_day_customer).toBeUndefined();
+  });
+
+  test('one appointment ahead whose own service is bait work marks its customer, like a bait add-on', () => {
+    // A pest series; one visit was changed to the combined pest + bait service (it reads general, and it is bait work).
+    const pest = parent({ customer_id: 'C-bait-visit' });
+    const baitVisit = visit(pest, MON, { line: 'general', service_key_snapshot: 'pest_termite_bait_quarterly' });
+    const plain = visit(pest, TUE, { line: 'general' });
+    const moving = plan([pest], [baitVisit, plain]);
+    expect(moving.bait_customers_moving).toBe(1);
+    expect(moving.capability_lines).toEqual(['general', 'termite']);
+    // A run that leaves termite out keeps that customer whole.
+    const kept = plan([pest], [baitVisit, plain], { lines: NO_TERMITE });
+    expect(kept.ids.visits).toEqual([]);
+    expect(kept.skipped.termite_bait_customer).toEqual({ series: 1, visits: 2, customers: 1 });
+    // A cancelled one marks nobody.
+    const cancelled = plan([pest], [{ ...baitVisit, status: 'cancelled' }, plain], { lines: NO_TERMITE });
+    expect(cancelled.ids.visits).toEqual([plain.id]);
   });
 
   test('--lines narrows what moves', () => {
@@ -90,7 +193,7 @@ describe('second-tech-handover planner', () => {
     expect(p.skipped.other_line.series).toBe(1);
   });
 
-  test('a customer with an active termite-bait series keeps every series; a plain termite series does not make a bait customer', () => {
+  test('a run that leaves termite out: a customer with an active termite-bait series keeps every series; a plain termite series does not make a bait customer', () => {
     const baitCustomer = 'C-bait';
     const bait = parent({ customer_id: baitCustomer, line: 'termite', service_key_snapshot: 'termite_active_bait_quarterly', service_type: 'Quarterly Termite Active Bait Station Service' });
     const pest = parent({ customer_id: baitCustomer });
@@ -98,7 +201,7 @@ describe('second-tech-handover planner', () => {
     const pest2 = parent({ customer_id: 'C-mon' });
     const wdo = parent({ customer_id: 'C-wdo', line: 'termite', service_type: 'WDO Inspection' });
     const pest3 = parent({ customer_id: 'C-wdo' });
-    const p = plan([bait, pest, monitoring, pest2, wdo, pest3], [bait, pest, monitoring, pest2, wdo, pest3].map((s) => visit(s, MON)));
+    const p = plan([bait, pest, monitoring, pest2, wdo, pest3], [bait, pest, monitoring, pest2, wdo, pest3].map((s) => visit(s, MON)), { lines: NO_TERMITE });
     expect(p.skipped.termite_bait_customer).toEqual({ series: 2, visits: 2, customers: 2 });
     expect(p.ids.series).toEqual([pest3.id]);
     expect(isBaitSeries(wdo)).toBe(false);
@@ -113,7 +216,7 @@ describe('second-tech-handover planner', () => {
     const pest = parent({ customer_id: 'C-addon' });
     const pest2 = parent({ customer_id: 'C-addon' });
     const other = parent({ customer_id: 'C-plain' });
-    const p = plan([pest, pest2, other], [visit(pest, MON), visit(pest2, TUE), visit(other, WED)], { baitAddonSeriesIds: [pest.id] });
+    const p = plan([pest, pest2, other], [visit(pest, MON), visit(pest2, TUE), visit(other, WED)], { baitAddonSeriesIds: [pest.id], lines: NO_TERMITE });
     expect(p.skipped.termite_bait_customer).toEqual({ series: 2, visits: 2, customers: 1 });
     expect(p.ids.series).toEqual([other.id]);
   });
@@ -121,7 +224,7 @@ describe('second-tech-handover planner', () => {
   test('the combined pest + termite bait plan (catalog pest_control) is a bait plan', () => {
     const combined = parent({ customer_id: 'C-combo', line: 'general', catalog_key: 'pest_termite_bait_quarterly' });
     expect(isBaitSeries(combined)).toBe(true);
-    const p = plan([combined], [visit(combined, MON)]);
+    const p = plan([combined], [visit(combined, MON)], { lines: NO_TERMITE });
     expect(p.skipped.termite_bait_customer).toEqual({ series: 1, visits: 1, customers: 1 });
   });
 
@@ -130,7 +233,7 @@ describe('second-tech-handover planner', () => {
     const pest = parent({ customer_id: 'C-annual' });
     expect(isBaitSeries(annual)).toBe(true);
     expect(isBaitSeries({ ...annual, catalog_key: null })).toBe(false);
-    const p = plan([annual, pest], [annual, pest].map((s) => visit(s, MON)));
+    const p = plan([annual, pest], [annual, pest].map((s) => visit(s, MON)), { lines: NO_TERMITE });
     expect(p.skipped.termite_bait_customer).toEqual({ series: 1, visits: 1, customers: 1 });
     expect(p.would_change.visits).toBe(0);
   });
@@ -139,9 +242,134 @@ describe('second-tech-handover planner', () => {
     const bait = parent({ customer_id: 'C-old', line: 'termite', service_type: 'Termite Bait Station', recurring_ongoing: false });
     const done = visit(bait, '2099-05-01', { status: 'completed' });
     const pest = parent({ customer_id: 'C-old' });
-    const p = plan([bait, pest], [done, visit(pest, MON)]);
+    const p = plan([bait, pest], [done, visit(pest, MON)], { lines: NO_TERMITE });
     expect(p.skipped.termite_bait_customer).toBeUndefined();
     expect(p.would_change.visits).toBe(1);
+  });
+
+  describe('owner 2026-11-21: termite and its bait customers move in a plain run', () => {
+    const baitFixture = () => {
+      const bait = parent({ customer_id: 'C-b', line: 'termite', service_key_snapshot: 'termite_active_bait_quarterly', service_type: 'Quarterly Termite Active Bait Station Service' });
+      const pest = parent({ customer_id: 'C-b' });
+      return { bait, pest, parents: [bait, pest], visits: [visit(bait, MON), visit(pest, MON)] };
+    };
+
+    test('a bait series and the same customer\'s pest series both retemplate and their Mon visits move', () => {
+      const { bait, pest, parents, visits } = baitFixture();
+      const p = plan(parents, visits);
+      expect(p.skipped.termite_bait_customer).toBeUndefined();
+      expect(new Set(p.ids.retemplate)).toEqual(new Set([bait.id, pest.id]));
+      expect(p.ids.visits).toEqual(visits.map((v) => v.id));
+      expect(p.would_change.by_line).toEqual({ termite: { series: 1, visits: 1 }, general: { series: 1, visits: 1 } });
+      expect(p.bait_customers_moving).toBe(1);
+    });
+
+    test('a WDO / termite series with no --zips moves', () => {
+      const wdo = parent({ line: 'termite', service_type: 'WDO Inspection' });
+      const p = plan([wdo], [visit(wdo, TUE)]);
+      expect(p.would_change.by_line).toEqual({ termite: { series: 1, visits: 1 } });
+      expect(p.skipped.other_line).toBeUndefined();
+      expect(p.bait_customers_moving).toBe(0);
+    });
+
+    test('a pest series with a bait add-on moves', () => {
+      const pest = parent({ customer_id: 'C-addon2' });
+      const p = plan([pest], [visit(pest, MON)], { baitAddonSeriesIds: [pest.id] });
+      expect(p.skipped.termite_bait_customer).toBeUndefined();
+      expect(p.ids.series).toEqual([pest.id]);
+      expect(p.bait_customers_moving).toBe(1);
+    });
+
+    test('the combined pest + bait plan (line general) moves', () => {
+      const combined = parent({ customer_id: 'C-combo2', line: 'general', catalog_key: 'pest_termite_bait_quarterly' });
+      const p = plan([combined], [visit(combined, MON)]);
+      expect(p.skipped.termite_bait_customer).toBeUndefined();
+      expect(p.would_change.by_line).toEqual({ general: { series: 1, visits: 1 } });
+      expect(p.bait_customers_moving).toBe(1);
+    });
+
+    test('the same fixtures in a run that leaves termite out keep the customer whole', () => {
+      const { parents, visits } = baitFixture();
+      const p = plan(parents, visits, { lines: NO_TERMITE });
+      expect(p.skipped.termite_bait_customer).toEqual({ series: 1, visits: 1, customers: 1 });
+      expect(p.would_change.visits).toBe(0);
+      expect(p.bait_customers_moving).toBe(0);
+      const pest = parent({ customer_id: 'C-addon3' });
+      const addon = plan([pest], [visit(pest, MON)], { baitAddonSeriesIds: [pest.id], lines: NO_TERMITE });
+      expect(addon.skipped.termite_bait_customer).toEqual({ series: 1, visits: 1, customers: 1 });
+      expect(addon.bait_customers_moving).toBe(0);
+    });
+
+    test('printPlan names the bait customers that move, or the ones kept whole', () => {
+      const { parents, visits } = baitFixture();
+      const text = (p) => {
+        const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+        printPlan({ ...p, planId: 'x' }, { list: false });
+        const out = log.mock.calls.map((c) => c[0]).join('\n');
+        log.mockRestore();
+        return out;
+      };
+      const moving = text(plan(parents, visits));
+      expect(moving).toMatch(/Termite bait customers that move with this run \(owner 2026-11-21\): 1 customers/);
+      expect(moving).not.toMatch(/kept whole with the owner \(this run leaves termite out\)/);
+      const kept = text(plan(parents, visits, { lines: NO_TERMITE }));
+      expect(kept).toMatch(/Termite bait customers kept whole with the owner \(this run leaves termite out\): 1 customers; held back by this rule: 1 series, 1 visits$/m);
+      expect(text(plan([parent()], [], { lines: NO_TERMITE }))).toMatch(/kept whole with the owner \(this run leaves termite out\): none$/m);
+      // A customer whose ONLY series is the bait plan: it stays as other_line (the line is out), and the dry run still
+      // counts the customer as kept. Before, this line read "none".
+      const baitOnly = parent({ customer_id: 'C-bait-only', line: 'termite', service_key_snapshot: 'termite_active_bait_quarterly', service_type: 'Quarterly Termite Active Bait Station Service' });
+      const onlyPlan = plan([baitOnly], [visit(baitOnly, MON)], { lines: NO_TERMITE });
+      expect(onlyPlan.skipped.termite_bait_customer).toBeUndefined();
+      expect(onlyPlan.skipped.other_line).toEqual({ series: 1, visits: 1 });
+      expect(onlyPlan.bait_customers_kept).toBe(1);
+      expect(text(onlyPlan)).toMatch(/kept whole with the owner \(this run leaves termite out\): 1 customers$/m);
+    });
+
+    test('bait_customers_kept counts each kept bait customer once, only in a run without termite, and only inside --zips', () => {
+      const { parents, visits } = baitFixture();
+      expect(plan(parents, visits).bait_customers_kept).toBe(0); // termite moves: nobody is kept by this rule
+      expect(plan(parents, visits, { lines: NO_TERMITE }).bait_customers_kept).toBe(1); // two series, one customer
+      const inZip = parent({ customer_id: 'C-in', line: 'termite', service_key_snapshot: 'termite_active_bait_quarterly', zip: '99901' });
+      const outZip = parent({ customer_id: 'C-out', line: 'termite', service_key_snapshot: 'termite_active_bait_quarterly', zip: '99902' });
+      const zipRun = plan([inZip, outZip], [visit(inZip, MON), visit(outZip, MON)], {
+        lines: NO_TERMITE, zips: ['99901'], territory: [{ zip: '99901', area: 'south', technician_id: OWNER }],
+      });
+      expect(zipRun.bait_customers_kept).toBe(1);
+      // A bait customer whose series are all on another technician is not on --from: not counted.
+      const elsewhere = parent({ customer_id: 'C-else', line: 'termite', service_key_snapshot: 'termite_active_bait_quarterly', technician_id: HIRE });
+      expect(plan([elsewhere], [visit(elsewhere, MON, { technician_id: HIRE })], { lines: NO_TERMITE }).bait_customers_kept).toBe(0);
+    });
+
+    test('capability_lines: a run that moves any series of a bait customer needs the termite capability too', () => {
+      // No standalone termite series in any of these: before, only "general" was checked, so a hire set to Off for
+      // termite could be handed bait work. The customer mark decides (the same mark that keeps a bait customer whole
+      // in a run without termite); the planner does not guess which visit the scheduler puts the bait on.
+      const combined = parent({ customer_id: 'C-combo3', line: 'general', catalog_key: 'pest_termite_bait_quarterly' });
+      expect(plan([combined], [visit(combined, MON)]).capability_lines).toEqual(['general', 'termite']);
+      const addon = parent({ customer_id: 'C-addon4' });
+      expect(plan([addon], [visit(addon, MON)], { baitAddonSeriesIds: [addon.id] }).capability_lines).toEqual(['general', 'termite']);
+      // Template-only (no visit to move now) still hands the series over.
+      expect(plan([combined], []).capability_lines).toEqual(['general', 'termite']);
+      expect(plan([addon], [], { baitAddonSeriesIds: [addon.id] }).capability_lines).toEqual(['general', 'termite']);
+      // A bait customer's own pest series counts too, also with the bait series held by another technician.
+      const baitElsewhere = parent({ customer_id: 'C-split', line: 'termite', service_key_snapshot: 'termite_active_bait_quarterly', technician_id: HIRE });
+      const pestHere = parent({ customer_id: 'C-split' });
+      expect(plan([baitElsewhere, pestHere], [visit(pestHere, MON)]).capability_lines).toEqual(['general', 'termite']);
+      // Customers with no bait: the lines with a series to move, nothing more.
+      const pest = parent();
+      const wdo = parent({ line: 'termite', service_type: 'WDO Inspection' });
+      expect(plan([pest], [visit(pest, MON)]).capability_lines).toEqual(['general']);
+      expect(plan([pest, wdo], [visit(pest, MON), visit(wdo, MON)]).capability_lines).toEqual(['general', 'termite']);
+      // A run that leaves termite out keeps the bait customer whole: nothing of theirs moves, nothing to check.
+      expect(plan([combined, pest], [visit(combined, MON), visit(pest, MON)], { lines: NO_TERMITE }).capability_lines).toEqual(['general']);
+      expect(plan([combined], [visit(combined, MON)], { lines: NO_TERMITE }).capability_lines).toEqual([]);
+      expect(plan([], []).capability_lines).toEqual([]);
+    });
+
+    test('the PLAN ID of a default run differs from the same run with termite left out', () => {
+      const { parents, visits } = baitFixture();
+      expect(plan(parents, visits).planId).not.toBe(plan(parents, visits, { lines: NO_TERMITE }).planId);
+    });
   });
 
   test('a visit still in an old visit group is skipped as grouped; a dissolved group is not', () => {
@@ -196,7 +424,7 @@ describe('second-tech-handover planner', () => {
     const pest = parent({ customer_id: 'C-live' });
     // Its last visit is in progress (dated yesterday): not movable, but the series is live.
     const inProgress = visit(bait, '2099-06-29', { status: 'en_route' });
-    const p = plan([bait, pest], [inProgress, visit(pest, MON)], { liveSeriesIds: [bait.id, pest.id] });
+    const p = plan([bait, pest], [inProgress, visit(pest, MON)], { liveSeriesIds: [bait.id, pest.id], lines: NO_TERMITE });
     expect(p.skipped.termite_bait_customer).toEqual({ series: 1, visits: 1, customers: 1 });
     expect(p.would_change.visits).toBe(0);
   });
@@ -299,7 +527,7 @@ describe('second-tech-handover arguments and source', () => {
   test('parseArgs reads the flags and keeps the defaults', () => {
     const a = parseArgs(['--from', OWNER, `--to=${HIRE}`, '--start', START, '--lines', 'rodent,general', '--list', '--json']);
     expect(a).toMatchObject({ from: OWNER, to: HIRE, start: START, lines: ['rodent', 'general'], list: true, json: true });
-    expect(parseArgs(['--from', OWNER]).lines).toEqual(['general', 'rodent', 'mosquito']);
+    expect(parseArgs(['--from', OWNER]).lines).toEqual(['general', 'rodent', 'mosquito', 'termite']);
   });
 
   test('the planner file has no write path: --execute hands off to the execute file', () => {
@@ -603,19 +831,18 @@ describe('second-tech-handover planner — --zips (territory handover)', () => {
   });
 });
 
-// Owner 2026-10-30 (corrected the same day): "termite and WDO follow the territory". A --zips run also hands over termite
-// and WDO series; a run without --zips is what it was. Termite BAIT customers stay with the owner in every run.
-describe('second-tech-handover — termite / WDO by territory', () => {
+// Owner 2026-11-21 ("all rec"): termite and WDO go to the second technician in every ZIP, bait customers too, with or without
+// --zips (owner 2026-10-30 had it for a --zips run only). --zips still limits a run to the listed ZIPs.
+describe('second-tech-handover — termite / WDO in every run', () => {
   const territory = [{ zip: '34293', area: 'venice', technician_id: null }];
   const south = (o = {}) => parent({ zip: '34293', ...o });
-  const termitePlan = (parents, visits, o = {}) => plan(parents, visits, { zips: ['34293'], territory, lines: TERRITORY_MOVABLE_LINES, ...o });
+  const termitePlan = (parents, visits, o = {}) => plan(parents, visits, { zips: ['34293'], territory, ...o });
 
-  test('the territory lines are the four lines services/territory.js names; lawn is in neither list', () => {
+  test('the movable lines are the four lines services/territory.js names; lawn is not one of them', () => {
     const { TERRITORY_LINES } = require('../services/territory');
-    expect(new Set(TERRITORY_MOVABLE_LINES)).toEqual(new Set(TERRITORY_LINES));
-    expect(TERRITORY_MOVABLE_LINES).toEqual([...MOVABLE_LINES, 'termite']);
-    expect(MOVABLE_LINES).not.toContain('termite');
-    expect(TERRITORY_MOVABLE_LINES).not.toContain('lawn');
+    expect(new Set(MOVABLE_LINES)).toEqual(new Set(TERRITORY_LINES));
+    expect(MOVABLE_LINES).toEqual(['general', 'rodent', 'mosquito', 'termite']);
+    expect(MOVABLE_LINES).not.toContain('lawn');
   });
 
   test('a termite series moves in a --zips run: its template and its Mon-Thu visits', () => {
@@ -628,9 +855,9 @@ describe('second-tech-handover — termite / WDO by territory', () => {
     expect(p.skipped.other_line).toBeUndefined();
   });
 
-  test('without termite in the lines (a run without --zips) the same series stays as other_line', () => {
+  test('with --lines leaving termite out the same series stays as other_line', () => {
     const termite = parent({ line: 'termite', service_type: 'Termite Spot Treatment Service' });
-    const p = plan([termite], [visit(termite, TUE)]);
+    const p = plan([termite], [visit(termite, TUE)], { lines: NO_TERMITE });
     expect(p.series.retemplate).toBe(0);
     expect(p.skipped.other_line).toEqual({ series: 1, visits: 1 });
   });
@@ -642,18 +869,22 @@ describe('second-tech-handover — termite / WDO by territory', () => {
     expect(p.series.retemplate).toBe(0);
   });
 
-  test('termite bait customers still stay whole in a territory run, and the dry run prints their count', () => {
+  test('termite bait customers move in a territory run too; with termite left out they stay whole and the dry run prints their count', () => {
     const bait = south({ customer_id: 'C-bait2', line: 'termite', service_key_snapshot: 'termite_active_bait_quarterly', service_type: 'Quarterly Termite Active Bait Station Service' });
     const baitPest = south({ customer_id: 'C-bait2' });
     const plain = south({ line: 'termite', service_type: 'Termite Spot Treatment Service' });
-    const p = termitePlan([bait, baitPest, plain], [bait, baitPest, plain].map((s) => visit(s, MON)));
-    expect(p.skipped.termite_bait_customer).toEqual({ series: 2, visits: 2, customers: 1 });
-    expect(p.ids.series).toEqual([plain.id]);
+    const moves = termitePlan([bait, baitPest, plain], [bait, baitPest, plain].map((s) => visit(s, MON)));
+    expect(moves.skipped.termite_bait_customer).toBeUndefined();
+    expect(new Set(moves.ids.series)).toEqual(new Set([bait.id, baitPest.id, plain.id]));
+    expect(moves.bait_customers_moving).toBe(1);
+    const p = termitePlan([bait, baitPest, plain], [bait, baitPest, plain].map((s) => visit(s, MON)), { lines: NO_TERMITE });
+    expect(p.skipped.termite_bait_customer).toEqual({ series: 1, visits: 1, customers: 1 });
+    expect(p.ids.series).toEqual([]);
     const log = jest.spyOn(console, 'log').mockImplementation(() => {});
     printPlan({ ...p, planId: 'x' }, { list: false });
     const text = log.mock.calls.map((c) => c[0]).join('\n');
     log.mockRestore();
-    expect(text).toMatch(/Termite bait customers kept with the owner in every run \(owner has not ruled on bait\): 1 customers, 2 series, 2 visits/);
+    expect(text).toMatch(/Termite bait customers kept whole with the owner \(this run leaves termite out\): 1 customers; held back by this rule: 1 series, 1 visits$/m);
   });
 
   test('lawn never moves, even in a territory run', () => {
@@ -663,23 +894,26 @@ describe('second-tech-handover — termite / WDO by territory', () => {
     expect(p.series.retemplate).toBe(0);
   });
 
-  test('parseArgs: --zips alone defaults to the four lines; --lines narrows it; termite without --zips exits 2', () => {
-    expect(parseArgs(['--from', OWNER]).lines).toEqual(MOVABLE_LINES);
-    expect(parseArgs(['--from', OWNER, '--zips', '34293']).lines).toEqual(['general', 'rodent', 'mosquito', 'termite']);
+  test('parseArgs: the default is the four lines with and without --zips; --lines takes any subset of them; lawn and exclusion exit 2', () => {
+    const four = ['general', 'rodent', 'mosquito', 'termite'];
+    expect(parseArgs(['--from', OWNER]).lines).toEqual(four);
+    expect(parseArgs(['--from', OWNER, '--zips', '34293']).lines).toEqual(four);
     expect(parseArgs(['--from', OWNER, '--zips', '34293', '--lines', 'general']).lines).toEqual(['general']);
-    expect(parseArgs(['--from', OWNER, '--zips', '34293', '--lines', 'termite']).lines).toEqual(['termite']);
+    expect(parseArgs(['--from', OWNER, '--lines', 'termite']).lines).toEqual(['termite']);
+    expect(parseArgs(['--from', OWNER, '--lines', 'general,termite']).lines).toEqual(['general', 'termite']);
+    expect(parseArgs(['--from', OWNER, '--lines', 'general,rodent,mosquito']).lines).toEqual(NO_TERMITE);
     const exit = jest.spyOn(process, 'exit').mockImplementation((code) => { throw new Error(`exit ${code}`); });
     const err = jest.spyOn(console, 'error').mockImplementation(() => {});
-    expect(() => parseArgs(['--from', OWNER, '--lines', 'termite'])).toThrow('exit 2');
-    expect(err.mock.calls.map((c) => c[0]).join(' ')).toMatch(/termite needs --zips/);
-    expect(() => parseArgs(['--from', OWNER, '--lines', 'general,termite'])).toThrow('exit 2');
     expect(() => parseArgs(['--from', OWNER, '--lines', 'lawn'])).toThrow('exit 2');
+    expect(() => parseArgs(['--from', OWNER, '--lines', 'general,exclusion'])).toThrow('exit 2');
+    expect(err.mock.calls.map((c) => c[0]).join(' ')).not.toMatch(/--zips/);
     exit.mockRestore(); err.mockRestore();
   });
 
-  test('planHandover refuses termite without --zips before it reads anything', async () => {
-    await expect(planHandover(null, { from: OWNER, start: START, today: TODAY, lines: ['termite'] })).rejects.toMatchObject({ code: 'LINES_NEED_ZIPS' });
-    await expect(planHandover(null, { from: OWNER, start: START, today: TODAY, lines: ['termite'] })).rejects.toBeInstanceOf(PlanError);
+  test('--lines termite without --zips plans: a termite series moves', () => {
+    const termite = parent({ line: 'termite', service_type: 'Termite Spot Treatment Service' });
+    const p = plan([termite], [visit(termite, TUE)], { lines: parseArgs(['--from', OWNER, '--lines', 'termite']).lines });
+    expect(p.would_change.by_line).toEqual({ termite: { series: 1, visits: 1 } });
   });
 
   test('a WDO inspection reads termite: by name, and by the catalog categories wdo and termite', async () => {
@@ -930,6 +1164,16 @@ describe('second-tech-handover — --weekend-move date logic', () => {
     }
     const other = series(SAT, { count: 1, visitExtra: { technician_id: OTHER } });
     expect((await run([other])).kept.get(other.customer_id)).toBe('other_technician');
+    // One appointment changed to a service the run does not move (its own line): it is never re-dated, so a Saturday
+    // one keeps the customer whole. The same visit in a run that moves its line is re-dated as usual.
+    const lawnVisit = series(SAT, { count: 1, visitExtra: { line: 'lawn' } });
+    const withLines = (c, lines) => ({ ...clearFacts([c]), lines });
+    expect((await run([lawnVisit], { facts: withLines(lawnVisit, ['general', 'termite']) })).kept.get(lawnVisit.customer_id)).toBe('visit_other_line');
+    const pestVisit = series(SAT, { count: 1, visitExtra: { line: 'general' } });
+    expect((await run([pestVisit], { facts: withLines(pestVisit, ['general', 'termite']) })).kept.has(pestVisit.customer_id)).toBe(false);
+    // The same for a pest visit with a sealing add-on.
+    const sealingAddon = series(SAT, { count: 1, visitExtra: { line: 'general', addon_lines: ['exclusion'] } });
+    expect((await run([sealingAddon], { facts: withLines(sealingAddon, ['general', 'termite']) })).kept.get(sealingAddon.customer_id)).toBe('visit_other_line');
     const first = series(SAT, { count: 1 });
     first.series[0].live[0].recurring_parent_id = null;
     expect((await run([first])).kept.get(first.customer_id)).toBe('first_visit');

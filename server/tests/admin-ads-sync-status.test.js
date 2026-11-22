@@ -33,6 +33,7 @@ jest.mock('../services/ads/google-ads-config', () => ({ isConfigured: jest.fn(()
 // sync-status must never load the heavy Google Ads SDK module just to read config.
 jest.mock('../services/ads/google-ads', () => { throw new Error('google-ads SDK module must not load for sync-status'); });
 jest.mock('../services/ads/meta-ads', () => ({ isConfigured: jest.fn(() => false) }));
+jest.mock('../services/ads/google-lsa', () => ({ isConfigured: jest.fn(() => true) }));
 
 const express = require('express');
 const adsRouter = require('../routes/admin-ads');
@@ -87,9 +88,9 @@ describe('GET /api/admin/ads/sync-status', () => {
     expect(mockWhereInArgs).toEqual({
       table: 'job_health',
       col: 'job_name',
-      vals: ['google-ads-sync', 'meta-ads-campaigns', 'meta-ads-performance'],
+      vals: ['google-ads-sync', 'meta-ads-campaigns', 'meta-ads-performance', 'google-lsa-sync'],
     });
-    expect(res.body.syncs).toHaveLength(3);
+    expect(res.body.syncs).toHaveLength(4);
     expect(res.body.syncs[0]).toEqual({
       platform: 'google_ads',
       job: 'google-ads-sync',
@@ -110,6 +111,10 @@ describe('GET /api/admin/ads/sync-status', () => {
     // A job that never ran has no row: nulls, not a crash.
     expect(res.body.syncs[2]).toMatchObject({
       job: 'meta-ads-performance', last_status: null, last_success_at: null, consecutive_failures: 0,
+    });
+    // Local Services Ads has one job for both steps.
+    expect(res.body.syncs[3]).toMatchObject({
+      platform: 'google_lsa', job: 'google-lsa-sync', configured: true, last_status: null, last_success_at: null,
     });
   });
 });

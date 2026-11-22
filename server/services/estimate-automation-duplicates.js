@@ -1,5 +1,8 @@
 const db = require('../models/db');
 const { normalizePhone } = require('../utils/phone');
+const { samePremiseDisplay, parseDisplayAddress } = require('./lead-address-unverified');
+const { normalizeUnitLine, unitLineValueKey } = require('../utils/address-normalizer');
+const { DRAFT_ELIGIBLE_SQL } = require('./estimate-draft-retire');
 
 const OPEN_ESTIMATE_STATUSES = ['draft', 'scheduled', 'sent', 'viewed'];
 const AUTOMATED_ESTIMATE_LOCK_NAMESPACE = 'estimate_automation_duplicate';
@@ -282,10 +285,190 @@ async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
   return changed > 0;
 }
 
+/**
+ * Untouched web-form shells (owner 2026-11-21, "build";
+ * GATE_WIZARD_SUPERSEDES_FORM_DRAFT, read by routes/public-quote.js).
+ *
+ * The web form (source 'lead_webhook') leaves a draft estimate with no price
+ * when draft automation cannot price the request. Nobody works that row, yet
+ * it is an OPEN estimate for the phone, so it blocked the quote wizard's own
+ * estimate, and with no wizard estimate the person gets no booking link.
+ *
+ * onlyUntouchedWebFormShellsOpen answers one question for the wizard: is
+ * every open estimate of this phone an untouched shell of this run's own
+ * contact, for this run's own property? When yes, the wizard writes its own
+ * estimate as for a new visitor. This module reads only. The shell is not
+ * written, archived or locked: the caller is a public route, and a typed
+ * phone, email and address must never change a record that is already there.
+ * The shell stays in the office's list, as it does today.
+ *
+ * A row is an untouched shell when ALL of these hold:
+ *   - the web form made it, and it is still an unarchived 'draft';
+ *   - nothing wrote it since it was made (updated_at = created_at, the same
+ *     test lead-draft-measurements.js uses). A staff edit, a later automation
+ *     write and an unarchive all move updated_at;
+ *   - it has no price (monthly, one-time and annual are all empty or 0), the
+ *     same test lead-intake.js uses to find a shell it may fill;
+ *   - nobody sent or viewed it, auto-send did not claim it, and no lead
+ *     points at it, a soft-deleted lead too: the #6394 rule
+ *     (retireSupersededLeadWebhookDrafts, admin-estimate-persistence.js);
+ *   - it passes the draft-retire sweep's own "nothing depends on this draft"
+ *     rule (DRAFT_ELIGIBLE_SQL, estimate-draft-retire.js): older than 30
+ *     minutes, so the web form's background work on it is done (that work
+ *     can price and send the row), and no live lead, booking handoff, staged
+ *     clarify text, group, price lock, scheduled send, send in flight or
+ *     hold marker;
+ *   - no office Sold-by action and no logged follow-up: staff work that does
+ *     not move updated_at;
+ *   - no clarify ask for the phone is open or was sent in the last 7 days
+ *     without an answer: the answer can still price and send the row;
+ *   - it belongs to the wizard run's own contact: the customer row the run
+ *     resolved for itself (findExistingCustomerByContact) and the same
+ *     email. Two people can share a phone and a home;
+ *   - it is for the wizard run's own property: one phone can ask for quotes
+ *     on two homes. Same door by the shared premise matcher
+ *     (samePremiseDisplay) with street, city and ZIP on both sides, plus the
+ *     same house number as typed and the same unit. That is the draft-retire
+ *     sweep's street test too. While this rule's gate is on, the shared
+ *     street key reads one of six name words inside the street name short
+ *     or in full as one street ("Sample Pt Dr", "Sample Point Dr": the web
+ *     form and the wizard write it so; lead-address-unverified.js
+ *     streetKeyNoUnit). The fold is in that key, not here, so the
+ *     county-roll address hold reads the same street as this rule. A missing
+ *     or incomplete address, or a street with no house number, fails closed:
+ *     the draft is not a shell.
+ *
+ * Not a condition, on purpose: the SMS intake state of the customer
+ * (customers.lead_intake_status). A lead who never answers keeps
+ * 'awaiting_service' for good (134 of 173 such drafts on 2026-11-22), so the
+ * rule would then help almost nobody. A late answer does what it does today:
+ * lead-intake.js writes the service on the shell and alerts the owner. The
+ * estimator does not draft from it while an estimate is open for the phone.
+ *
+ * Any other open estimate of the phone still blocks: a draft with a price, a
+ * touched draft, a draft of another contact or for another property, an
+ * office or estimator estimate, a sent estimate, an estimate that is being
+ * sent or whose send failed.
+ *
+ * Contact and property are a "same request" test for dropping the block.
+ * They are not proof of identity (the wizard has none) and they are not
+ * kept on the wizard's draft: after the run, a same-phone wizard run
+ * refreshes that draft like every wizard draft (routes/public-quote.js,
+ * owner-hit 2026-06-12).
+ *
+ * No lock beyond the caller's phone lock (the web form creates its shell
+ * under the same lock). A shell that changes after the read costs nothing
+ * here: nothing is taken from it. An office estimate saved for the phone
+ * after the read is not seen, as for every new wizard visitor today: office
+ * writes do not take the phone lock.
+ */
+const WEB_FORM_SHELL_SOURCE = 'lead_webhook';
+// Same window as estimate-clarify-asks.js RECENT_SENT_WINDOW_MS: a sent ask
+// counts as waiting for its answer for 7 days.
+const CLARIFY_WAIT_WINDOW_MS = 7 * 86400000;
+
+function untouchedWebFormShells(database, last10, { now = new Date() } = {}) {
+  return database('estimates')
+    .where({ source: WEB_FORM_SHELL_SOURCE, status: 'draft' })
+    .whereRaw(
+      "right(regexp_replace(coalesce(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?",
+      [last10]
+    )
+    .whereRaw(DRAFT_ELIGIBLE_SQL)
+    .whereNull('sent_at')
+    .whereNull('viewed_at')
+    .whereRaw('updated_at = created_at')
+    // Staff work that does not move updated_at: Sold by, a logged follow-up.
+    .whereNull('sold_by_set_at')
+    .whereRaw('COALESCE(follow_up_count, 0) = 0')
+    .whereRaw('COALESCE(monthly_total, 0) = 0')
+    .whereRaw('COALESCE(onetime_total, 0) = 0')
+    .whereRaw('COALESCE(annual_total, 0) = 0')
+    // Both keys lead-estimate-auto-send.js reads, each by itself: an empty
+    // one must not hide the other.
+    .whereRaw("COALESCE(estimate_data->'automation'->'autoSend'->>'claimedAt', '') = ''")
+    .whereRaw("COALESCE(estimate_data->'automation'->'autoSend'->>'claimed_at', '') = ''")
+    // Any lead, soft-deleted ones too (the #6394 rule): the sweep's own
+    // lead check skips a soft-deleted lead.
+    .whereNotExists(function linkedToLead() {
+      this.select(database.raw('1')).from('leads').whereRaw('leads.estimate_id = estimates.id');
+    })
+    // By phone, and wider than the sweep's: a text sent in the last 7 days
+    // with no answer still holds the draft.
+    .whereNotExists(function clarifyAskWaiting() {
+      this.select(database.raw('1')).from('message_drafts')
+        .where({ intent: 'estimate_clarify', source_ref: `clarify:${last10}` })
+        .whereRaw("(flags->>'answered_at') is null")
+        .where(function openOrRecentlySent() {
+          this.where(function stillOpen() {
+            this.whereIn('status', ['pending', 'approved', 'revised']).whereNull('sent_at');
+          }).orWhere('sent_at', '>=', new Date(now.getTime() - CLARIFY_WAIT_WINDOW_MS));
+        });
+    });
+}
+
+// A fraction as a word of its own, in any spelling: "½", "1/2", "¹⁄₂". A
+// fraction sign, or a slash between two number signs, and no letter. After
+// the house number it is a part of that number. A plain number is not one:
+// it can be the street name ("12 7 Mile Rd").
+const FRACTION_WORD = /^[^\p{L}]*(?:[\u00BC-\u00BE\u2150-\u215E\u2189]|\p{N}[/\u2044\u2215]\p{N})[^\p{L}]*$/u;
+
+function sameDoor(addressA, addressB) {
+  if (!samePremiseDisplay(addressA, addressB, { requireLocality: true })) return false;
+  const a = parseDisplayAddress(addressA);
+  const b = parseDisplayAddress(addressB);
+  // A street with no house number can be many homes: the key must start
+  // with a number of its own ("12 sample st", "12b sample st"), not with a
+  // numbered street ("49th st"). The street keys are equal here, so one
+  // side answers for both.
+  if (!/^\d+[a-z]?\s/.test(a.street)) return false;
+  // The key drops what is not a letter or a digit, so "12½" and "12 ½"
+  // read as "12". The house numbers as typed must be the same too: the
+  // first word, and a fraction that follows it as a word of its own. The
+  // street name stays with the matcher ("12 49th-St" = "12 49th St", "12 7
+  // Mile Rd" = "12 7-Mile Rd").
+  const house = (parsed) => {
+    const words = String(parsed.streetLine || '').trim().toLowerCase().split(/\s+/);
+    let end = 1;
+    while (end < words.length && FRACTION_WORD.test(words[end])) end += 1;
+    return words.slice(0, end).join(' ');
+  };
+  if (house(a) !== house(b)) return false;
+  const unit = (parsed) => unitLineValueKey(normalizeUnitLine(parsed.unit));
+  return unit(a) === unit(b);
+}
+
+function sameContact(row, { customerId, email }) {
+  const runEmail = String(email || '').trim().toLowerCase();
+  if (!customerId || !runEmail) return false;
+  return String(row.customer_id || '') === String(customerId)
+    && String(row.customer_email || '').trim().toLowerCase() === runEmail;
+}
+
+async function onlyUntouchedWebFormShellsOpen(database, { phone, address, customerId, email, now = new Date() } = {}) {
+  const values = phoneLookupValues(phone);
+  if (!database || !values.last10) return false;
+  // Wider than the duplicate block's own list: an estimate that is being
+  // sent right now, or whose send failed, is live work for the phone too.
+  const open = await listOpenEstimatesByPhone(phone, {
+    database,
+    statuses: [...OPEN_ESTIMATE_STATUSES, 'sending', 'send_failed'],
+  });
+  if (!open.length) return false;
+  const shells = await untouchedWebFormShells(database, values.last10, { now })
+    .whereIn('id', open.map((row) => row.id))
+    .select('id', 'address', 'customer_id', 'customer_email');
+  const shellKeys = new Set((Array.isArray(shells) ? shells : [])
+    .filter((row) => sameContact(row, { customerId, email }) && sameDoor(row.address, address))
+    .map((row) => String(row.id)));
+  return open.every((row) => shellKeys.has(String(row.id)));
+}
+
 module.exports = {
   acquireAutomatedEstimateLocks,
   lockSupersededDraftInTx,
   archiveSupersededDraftInTx,
+  onlyUntouchedWebFormShellsOpen,
   automatedDuplicateBlock,
   automatedEstimateLockKeys,
   blockIfAutomatedEstimateDuplicate,

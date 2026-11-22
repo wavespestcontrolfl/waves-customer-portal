@@ -258,6 +258,31 @@ describe('tech rewards scores input checks', () => {
   });
 
   describe('settings', () => {
+    test('a reader that holds the settings lock keeps a save waiting until its transaction ends; two readers do not wait for each other', async () => {
+      // two pay runs' transactions, each on its own connection, as readers of the settings
+      const reader = await db.transaction();
+      const second = await db.transaction();
+      try {
+        await scores.lockSettingsForRead(reader);
+        await scores.lockSettingsForRead(second); // not held up by the first reader
+        expect((await reader.raw('SELECT pg_backend_pid() AS pid')).rows[0].pid).not.toBe((await second.raw('SELECT pg_backend_pid() AS pid')).rows[0].pid);
+        const before = await scores.getSettings('2026-08-31', reader);
+        let saved = null;
+        const save = scores.saveSettings({ weights: WEIGHTS, cutLines: { top: 96, mid: 86, low: 76 }, effectiveFrom: '2026-01-01' }).then((row) => { saved = row; return row; });
+        await new Promise((resolve) => { setTimeout(resolve, 400); });
+        expect(saved).toBeNull(); // the save waits
+        await second.commit();
+        await new Promise((resolve) => { setTimeout(resolve, 200); });
+        expect(saved).toBeNull(); // one reader is still at work
+        expect(await scores.getSettings('2026-08-31', reader)).toEqual(before); // and still reads the settings it began with
+        await reader.commit();
+        expect(await save).toMatchObject({ cutLines: { top: 96, mid: 86, low: 76 } });
+        expect((await scores.getSettings('2026-08-31')).cutLines).toEqual({ top: 96, mid: 86, low: 76 });
+      } finally {
+        for (const open of [reader, second]) if (!open.isCompleted()) await open.rollback();
+      }
+    });
+
     test('no row at all falls back to the calculator defaults', async () => {
       const s = await scores.getSettings('2026-08-31');
       expect(s).toMatchObject({ version: 0, source: 'default', weights: calc.DEFAULT_WEIGHTS, cutLines: calc.DEFAULT_CUT_LINES });

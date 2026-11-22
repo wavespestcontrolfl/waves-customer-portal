@@ -86,6 +86,14 @@ describe('Tech scoreboard tab', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('boom');
   });
 
+  it('shows a season bonus payroll has paid as the paid amount, with no estimate words', async () => {
+    await showBoard({ ...BOARD, seasonBonus: { grossCents: 1000000, estimate: false, estimateCents: null, paidCents: 61234 } });
+    expect(screen.getByText('$612.34')).toBeInTheDocument();
+    expect(screen.getByText('Paid. This is the amount payroll put on your paycheck.')).toBeInTheDocument();
+    expect(screen.queryByText('Not estimated yet')).not.toBeInTheDocument();
+    expect(screen.queryByText(/pay x .* multiplier\./)).not.toBeInTheDocument(); // no estimate formula beside a paid amount
+  });
+
   it('says what is missing when the score is incomplete and gives no bonus number', async () => {
     const board = {
       ...BOARD,

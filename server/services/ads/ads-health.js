@@ -10,6 +10,7 @@ const { enums, errors: errorEnums } = require('google-ads-api');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { getCustomer } = require('./google-ads');
+const { errorText } = require('./google-ads-config');
 const { executeGoogleAdsOpsTool } = require('../intelligence-bar/google-ads-ops-tools');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
@@ -38,7 +39,6 @@ function words(name) {
 const dollars = (value) => (value === null || value === undefined ? 'none' : `$${Number(value).toFixed(2)}`);
 const micros = (value) => (value === null || value === undefined ? 'none' : dollars(Number(value) / 1e6));
 const iso = (value) => new Date(value).toISOString();
-const errorText = (err) => String(err?.errors?.[0]?.message || err?.message || 'unknown error').slice(0, 200);
 
 // Google gives times as wall-clock text in the account's time zone, e.g. "2026-11-02 11:49:56.098059". Google fixes
 // the zone when an account is made, and the Waves account is America/New_York (checked 2026-11-05).

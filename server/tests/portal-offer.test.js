@@ -154,21 +154,32 @@ describe('buildPortalOffer', () => {
     expect(await buildPortalOffer('cust-1', db, { propertyLookup: missLookup })).toBeNull();
   });
 
+  // A pest-only member with a measured lawn: the ladder offers lawn and the
+  // turf profile prices it. Each test below proves that control first, so its
+  // own answer is the guard's doing and not an early "nothing to offer".
+  const PRICED_LAWN_SEED = {
+    serviceTypes: ['Quarterly Pest Control'],
+    turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+  };
+  const expectPricedLawnControl = async () => {
+    const control = await buildPortalOffer('cust-1', dbFor(PRICED_LAWN_SEED), { propertyLookup: missLookup });
+    expect(control?.serviceKey).toBe('lawn_care');
+    expect(control.mode).toBe('priced');
+  };
+
   test('a verified correction on file demotes to the quote CTA (no price on stale facts)', async () => {
+    await expectPricedLawnControl();
     hasVerifiedOverrides.mockImplementation(async () => true);
-    const db = dbFor({ serviceTypes: ['Quarterly Pest Control', 'Lawn Care Program'] });
-    const offer = await buildPortalOffer('cust-1', db, { propertyLookup: missLookup });
-    if (offer) {
-      expect(offer.mode).toBe('quote_cta');
-      expect(offer.option).toBeNull();
-    }
+    const offer = await buildPortalOffer('cust-1', dbFor(PRICED_LAWN_SEED), { propertyLookup: missLookup });
+    expect(offer).not.toBeNull();
+    expect(offer.serviceKey).toBe('lawn_care');
+    expect(offer.mode).toBe('quote_cta');
+    expect(offer.option).toBeNull();
   });
 
   test('a live plan-rate on the target family suppresses the offer entirely', async () => {
-    const db = dbFor({
-      serviceTypes: ['Quarterly Pest Control', 'Lawn Care Program'],
-      planRates: [{ family_key: 'tree_shrub', monthly_rate: 40 }],
-    });
+    await expectPricedLawnControl();
+    const db = dbFor({ ...PRICED_LAWN_SEED, planRates: [{ family_key: 'lawn_care', monthly_rate: 40 }] });
     expect(await buildPortalOffer('cust-1', db, { propertyLookup: missLookup })).toBeNull();
   });
 });

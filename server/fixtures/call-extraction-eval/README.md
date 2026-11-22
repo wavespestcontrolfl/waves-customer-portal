@@ -102,3 +102,15 @@ Each case has `expect`, the extraction a correct model should return for it. The
 tests in `server/tests/call-agreed-time-misses.test.js` pin the prompt contract
 and what routing does with each expected shape; the file is also replay input
 for a model bake-off. Never paste a real transcript into it.
+
+## Synthetic transcripts (`synthetic-estimate-response.json`)
+
+Added 2026-11-21 for extraction prompt v35 (`service_request.estimate_response`, the
+caller's answer to an estimate Waves already sent: accepted, accepted_with_condition,
+undecided, declined, or null). Same rules as the file above: every name and address is
+invented, each case has `expect`, and the tests in
+`server/tests/call-extraction-system-prompt.test.js` pin the prompt contract and the
+fixture shape. It covers accepted, accepted with a condition (a day still to find),
+undecided, declined, null because the price was first quoted on the call, null because
+only staff spoke of the estimate, and a changed mind (yes, then "let me think"). Nothing
+reads the field yet. Never paste a real transcript into it.

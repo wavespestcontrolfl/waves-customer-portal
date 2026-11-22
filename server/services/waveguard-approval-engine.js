@@ -128,7 +128,9 @@ async function latestComparableGroupApplication(knex, customerId, product, group
 
 // The repeat-group rule (never the same chemical group twice in a row) has two named exemptions
 // (owner 2026-10-06); every other same-group repeat behaves as before:
-//   pre_emergent_group_3: pre-emergents are all HRAC Group 3 this season, so a repeat is no signal;
+//   pre_emergent_group_3: pre-emergents are all HRAC Group 3 this season, so a repeat is no signal. The group is read from
+//     the typed column (hrac_group "3") or the older free-text one (moa_group "Group 3"): the liquid pre-emergents and the
+//     Stonewall 0.37% 18-0-10 bag hold it in the free-text column;
 //   take_all_artavia_pair: the planned take-all pair is Artavia, then Headway 28 days later (Headway adds
 //     propiconazole, group 3, to the same group 11 azoxystrobin, so group 11 repeats once: this is the
 //     named exception for it, 30 to 45 days apart); Artavia twice, 28 days apart, stays allowed (label spacing:
@@ -281,8 +283,11 @@ async function isV13TakeAllPair(knex, { customerId, propertyId, product, plan, g
     && dayNumber(history[0].service_date) === dayNumber(last.service_date);
 }
 
+// A group's bare code: the typed columns hold "3", the older free-text column holds "Group 3".
+const bareGroup = (value) => String(value ?? '').trim().replace(/^group\s+/i, '').toLowerCase();
+
 async function rotationExemption(knex, { customerId, propertyId, product, plan, groupType, groupValue, last, input, serviceDate, strict }) {
-  if (groupType === 'hrac' && String(groupValue) === '3' && productIsPreEmergent(product, plan)) return 'pre_emergent_group_3';
+  if ((groupType === 'hrac' || groupType === 'moa') && bareGroup(groupValue) === '3' && productIsPreEmergent(product, plan)) return 'pre_emergent_group_3';
   return await isTakeAllPair(knex, { customerId, propertyId, product, plan, groupType, groupValue, last, input, serviceDate, strict }) ? 'take_all_artavia_pair' : null;
 }
 
@@ -358,7 +363,6 @@ async function repeatGroupFindings(knex, { customerId, propertyId, product, inpu
 // different ones. The technician gets ONE finding for the group: the one whose earlier application is the latest;
 // on the same day the typed finding stays (it carries the fungicide code). A free-text group with no typed twin on
 // this product is its own group. Not behind the v13 gate: the catalog rows keep both columns when the gate is off.
-const bareGroup = (value) => String(value ?? '').trim().replace(/^group\s+/i, '').toLowerCase();
 function oneFindingPerGroup(product, findings) {
   const typedGroups = productGroups(product).filter(([type]) => type !== 'moa');
   const keyOf = ({ evidence }) => {

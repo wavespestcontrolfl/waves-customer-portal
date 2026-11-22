@@ -2646,12 +2646,11 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // RECLAIMED WATER METERS — daily 3:47am ET (GATE_LAWN_RECLAIMED_HALF_N, owner 2026-10-23). Downloads Manatee County's public
+  // RECLAIMED WATER METERS — daily 3:47am ET (owner 2026-10-23). Downloads Manatee County's public
   // reclaimed-meter layer about weekly (the tick does it only when the stored copy is older than six days) and marks the properties
-  // at a meter, locally: no property data is sent to the county. Minute 47 is free in the 3am hour. Gate off = the tick does nothing.
+  // at a meter, locally: no property data is sent to the county. Minute 47 is free in the 3am hour.
   // =========================================================================
   cron.schedule('47 3 * * *', async () => {
-    if (!require('../config/feature-gates').lawnReclaimedHalfNLive()) return;
     const tickStartedAt = Date.now();
     try {
       const lockRes = await runExclusive('reclaimed-water-meters', async () => {
@@ -3244,6 +3243,27 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Record-only check for the after-call estimate text: for each call whose caller said yes to an
+  // estimate Waves had sent, writes whether that text WOULD go (call_log.metadata.call_estimate_link_shadow).
+  // Sends nothing, no gate. Same 5-minute cadence as the booking-link text above. Loaded inside the tick:
+  // unlike call-booking-link-text it keeps no boot-time anchor, so nothing needs it at process start.
+  cron.schedule('0 */5 * * * *', async () => {
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const result = await runExclusive('call-estimate-link-shadow', () => require('./call-estimate-link-shadow').sweep());
+      if (result?.skipped && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`Estimate-link check tick skipped: ${result.reason || 'no_connection'}`);
+        await recordJobStart('call-estimate-link-shadow').catch(() => {});
+        await recordJobEnd('call-estimate-link-shadow', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[call-estimate-link-shadow] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // While the follow-up pager is live, the overdue watchdog takes each
   // promise over once it ages off the pager's 24-hour list. With callback
   // cards on it already runs every 5 minutes; with cards off its cadence is
@@ -3439,6 +3459,23 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Weekly newsletter sunset failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // NEWSLETTER GMAIL CHECK (owner 2026-11-22; no gate: reads only, emails no one)
+  // Every hour at :23. For each issue that went out 50 to 72 hours ago, it
+  // compares how many delivered copies Gmail readers opened with all other
+  // readers, and raises one admin alert per issue when Gmail is far behind
+  // (Gmail sends no spam reports, so no other check sees a Gmail spam
+  // placement). The rule lives in newsletter-gmail-check.js.
+  // =========================================================================
+  cron.schedule('23 * * * *', async () => {
+    try {
+      // runExclusive: a deploy overlap must not judge the same issue twice at once.
+      await runExclusive('newsletter-gmail-check', () => require('./newsletter-gmail-check').runNewsletterGmailCheck());
+    } catch (err) {
+      logger.error(`[newsletter-gmail-check] tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -8577,6 +8614,28 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Google Ads sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 6:10AM — Google Local Services Ads sync (account row, cost, leads)
+  // Local Services runs in its own Google Ads account. The sync mirrors it into
+  // one ad_campaigns row and its ad_performance_daily days (platform='google_lsa'), so the Ads page
+  // shows its cost and its charged leads. Read-only; it runs before the 6:25
+  // cost allocation. runExclusive records job_health ('google-lsa-sync'). A
+  // failed step throws with Google's reason, so the job reads failed.
+  // =========================================================================
+  cron.schedule('10 6 * * *', async () => {
+    try {
+      const googleLsa = require('./ads/google-lsa');
+      if (!googleLsa.isConfigured()) return;
+      await runExclusive('google-lsa-sync', async () => {
+        logger.info('Running: Google Local Services daily sync');
+        await googleLsa.runDailySync();
+        logger.info('Google Local Services daily sync complete');
+      });
+    } catch (err) {
+      logger.error(`Google Local Services sync failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

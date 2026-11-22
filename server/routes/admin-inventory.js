@@ -812,6 +812,7 @@ const V13_LAWN_PROTOCOL_PRODUCT_DEFINITIONS = [
   ['v13_stonewall_4fl', 'LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide', 'pesticide', 'pre-emergent herbicide'],
   ['v13_dimension_2ew', 'Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide', 'pesticide', 'pre-emergent herbicide'],
   ['v13_dimension_18_0_10', 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer', 'pesticide', 'pre-emergent herbicide with fertilizer'],
+  ['v13_stonewall_0_37_18_0_10', 'LESCO Stonewall 0.37% 18-0-10', 'pesticide', 'pre-emergent herbicide with fertilizer'],
   ['v13_lesco_24_0_11', 'LESCO 24-0-11 with PolyPlus OPTI', 'fertilizer', 'fertilizer'],
   ['v13_lesco_10_0_22', 'LESCO 10-0-22 50% PolyPlus OPTI45 50% YaraRega 2% Fe 2% Mg KMAG MOP SOP Turfgrass Granular Fertilizer', 'fertilizer', 'fertilizer'],
   ['v13_lesco_44_0_0', 'LESCO 44-0-0 100% PolyPlus OPTI120 Turfgrass Granular Fertilizer', 'fertilizer', 'fertilizer'],

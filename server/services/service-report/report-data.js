@@ -3610,7 +3610,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     .where({ customer_id: service.customer_id })
     .first()
     .catch(() => { prefsReadFailed = true; if (readFailures) readFailures.add('property_preferences'); return null; });
-  // GATE_LAWN_LIGHTING: which visit each trend point is (internal; never the payload).
+  // Lighting: which visit each trend point is (internal; never the payload).
   if (trendOut && typeof trendOut === 'object') {
     trendOut.rows = historyRows.map((row) => ({ id: String(row.id), date: row.service_date, colorHealth: lawnScoreValue(row.color_health) }));
   }
@@ -6081,11 +6081,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       }
       // GATE_LAWN_REPORT_POLISH: the longer-cycles line, from the decision frozen at completion (lawn-longer-cycles.js).
       attachLongerCycles(reportV2, reportFacts.frozenLongerCycles('lawn', service.structured_notes));
-      // GATE_LAWN_LIGHTING (owner 2026-10-04), read at call time. The stored light of
+      // Lawn lighting-aware color (owner 2026-10-04; needs the visit assessment, GATE_LAWN_VISIT_ASSESSMENT). The stored light of
       // visits is read at most once per render (memoized) and ONLY for a caller that
       // opted in (opts.lawnLighting, the /data render); /ask and the PDF builder read
       // nothing and see every light as unknown. A failed read is unknown light.
-      const lightingGateOn = typeof featureGates.lawnLightingLive === 'function' && featureGates.lawnLightingLive();
+      const lightingGateOn = featureGates.gateEnvValue('GATE_LAWN_VISIT_ASSESSMENT');
       const lightMemo = new Map();
       const readVisitLights = async (ids) => {
         if (!lightingGateOn || opts.lawnLighting !== true) return new Map();
@@ -6186,7 +6186,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
                 : 'unknown',
             };
           }
-          // GATE_LAWN_LIGHTING (owner 2026-10-04), read at call time: color is
+          // Lawn lighting (owner 2026-10-04): color is
           // compared between the two visits only in known, compatible light, and
           // the overall direction is decided without color. The two visits' stored
           // light is read ONLY by the live /data render (opts.lawnLighting, the same

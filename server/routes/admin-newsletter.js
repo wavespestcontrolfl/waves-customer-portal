@@ -27,7 +27,7 @@ const { computeSendRates, ratesFromTotals } = require('../services/newsletter-an
 const { newsletterAutoSendLive } = require('../config/feature-gates');
 const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
 const { moveIssueForSend } = require('../services/pest-insider/schedule');
-const { neutralizeHomeTokens } = require('../services/pest-insider/home');
+const { neutralizeIssueTokens } = require('../services/pest-insider/referral-line');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -1205,8 +1205,9 @@ router.get('/sends/:id/blog-export', async (req, res, next) => {
     const sentDate = send.sent_at ? etDateString(new Date(send.sent_at)) : etDateString();
 
     // Strip HTML to markdown-ish content (basic conversion)
-    // A Pest Insider issue's per-reader "Your home" tokens are no part of an export.
-    const bodyHtml = neutralizeHomeTokens(send.html_body || '');
+    // A Pest Insider issue's per-reader "Your home" tokens are no part of an export, and its
+    // referral line stands in its form with no amount.
+    const bodyHtml = neutralizeIssueTokens(send.html_body || '');
     const bodyText = bodyHtml
       .replace(/<h1[^>]*>(.*?)<\/h1>/gi, '# $1\n\n')
       .replace(/<h2[^>]*>(.*?)<\/h2>/gi, '## $1\n\n')
@@ -1268,7 +1269,7 @@ router.get('/sends/:id/blog-export', async (req, res, next) => {
       success: true,
       frontmatter,
       markdown,
-      htmlBody: send.html_body && neutralizeHomeTokens(send.html_body),
+      htmlBody: send.html_body && neutralizeIssueTokens(send.html_body),
       filename: `${slug}.md`,
     });
   } catch (err) { next(err); }

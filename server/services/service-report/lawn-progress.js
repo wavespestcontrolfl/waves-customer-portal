@@ -55,7 +55,7 @@
  *     Precedence: office_review (check.recheckOverride) > photo_pair
  *     (check.recheck); see effectiveRecheck.
  *
- * Lighting (GATE_LAWN_LIGHTING, owner 2026-10-04): pass `colorGuard` and sun, shade
+ * Lighting (owner 2026-10-04): pass `colorGuard` and sun, shade
  * and cloud stop moving the report's color words. Off (no colorGuard), every line
  * below is inert. On:
  *   - color_health is compared only when BOTH visits have a known light read and the
@@ -291,7 +291,7 @@ function appliedRows(applied, priorDate, issues = []) {
   return { rows: built.rows, unmapped: built.unmapped };
 }
 
-// GATE_LAWN_LIGHTING (gates.color exists only then). THE RULE for the whole gate: it
+// Lighting (gates.color exists only then). THE RULE for the whole gate: it
 // may only REMOVE a sentence the gate-off engine would have printed, never print a
 // different one. So an item is either what gate-off says or `unclear`, and
 // `unclear` is withheld by the copy. It withholds a color item (a) when the two
@@ -336,7 +336,7 @@ function itemForMetric({ row, metric, days, cur, prior, gates, band }) {
     state = 'holding_steady';
   }
 
-  // GATE_LAWN_LIGHTING: the state gate-off would have given is kept as `legacyState`
+  // Lighting: the state gate-off would have given is kept as `legacyState`
   // wherever the light rules withhold it, so the copy picks its sentence slots
   // exactly as gate-off would and only then withholds the line.
   const guarded = colorGuardGate(metric, gates, state, scoreDelta);
@@ -428,7 +428,7 @@ function nonColorBlend(scores) {
 }
 
 /**
- * GATE_LAWN_LIGHTING: color alone can never make the headline direction. THE RULE
+ * Lighting: color alone can never make the headline direction. THE RULE
  * (the gate only removes): the direction is first computed exactly as gate-off does
  * (overallDirection), and is kept only when the no-color blend (thickness, weeds,
  * stress damage) AGREES with it: up with the blend up a band, down with it down a
@@ -486,7 +486,7 @@ function comparisonGates(current, prior, colorGuard = null) {
   const curSeason = seasonOf(current);
   const seasonalLine = crossSeasonNoteFromSeasons(priorSeason, curSeason);
   return {
-    // GATE_LAWN_LIGHTING (colorGuard passed): whether color may be compared, and the
+    // Lighting (colorGuard passed): whether color may be compared, and the
     // dead band. Absent when off, so every other path reads exactly as before.
     ...(colorGuard ? { color: { ...colorComparability(colorGuard.currentLight, colorGuard.priorLight), band: COLOR_NO_CHANGE_POINTS } } : {}),
     level: confidence.level,
@@ -533,7 +533,7 @@ function sameOverallBasis(current, prior) {
  * @param {number} [input.band] category dead-band (default 8)
  * @param {number} [input.overallBand] overall dead-band (default 4)
  * @param {boolean} [input.photoPair] false = GATE_LAWN_PAIRED_RECHECK is off: stored photo_pair rechecks are ignored (default true)
- * @param {{currentLight?:string|null, priorLight?:string|null}|null} [input.colorGuard] GATE_LAWN_LIGHTING: when given, color is compared only in
+ * @param {{currentLight?:string|null, priorLight?:string|null}|null} [input.colorGuard] Lighting: when given, color is compared only in
  *   known, compatible light and the overall direction is decided without color (see the Lighting note above). Absent = unchanged.
  * @returns {object} { v, engineVersion, eligible, reason, daysSincePrior, confidence, season, overall, deltas, items, unmapped }
  */

@@ -42,7 +42,9 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | POST | `/api/admin/communications/messages/read` | admin-communications |
 | POST | `/api/admin/communications/name-check` | admin-communications |
 | POST | `/api/admin/communications/rewrite-sms` | admin-communications |
+| POST | `/api/admin/communications/send-howto` | admin-communications |
 | POST | `/api/admin/communications/send-prep` | admin-communications |
+| POST | `/api/admin/communications/send-welcome` | admin-communications |
 | GET | `/api/admin/communications/sender` | admin-communications |
 | POST | `/api/admin/communications/sms` | admin-communications |
 | GET | `/api/admin/communications/unread-count` | admin-communications |
@@ -463,6 +465,7 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | GET | `/api/admin/estimates/:id/edit-source` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/estimates/:id/extend` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/estimates/:id/follow-up` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
+| GET | `/api/admin/estimates/:id/follow-up-draft` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/estimates/:id/group` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | POST | `/api/admin/estimates/:id/mark-accepted` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |
 | GET | `/api/admin/estimates/:id/pricing-audit` | admin-estimates (router exemption gate: admin-only unless its named staff exemption applies) |

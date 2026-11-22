@@ -933,6 +933,15 @@ describe('new recurring welcome SMS', () => {
     expect(statusUpdates.map((u) => u.data.status)).toEqual(['sending', 'active']);
   });
 
+  test('an operator resend gets its own send key, so the once-ever key does not swallow it', async () => {
+    mockSendTemplate.mockResolvedValue({ sent: true });
+    const customer = { id: 'customer-1', first_name: 'Ada', email: 'ada@example.com' };
+    expect(await service.sendWelcomeEmail(customer, { resend: true })).toEqual({ outcome: 'sent' });
+    const { idempotencyKey, triggerEventId } = mockSendTemplate.mock.calls.at(-1)[0];
+    expect(idempotencyKey).toMatch(/^welcome\.new_recurring:customer-1:resend:\d+$/);
+    expect(triggerEventId).toBe(idempotencyKey);
+  });
+
   test('no email on the customer: SMS-only welcome, no sendTemplate call', async () => {
     mockDueSequences = [{
       id: 'seq-1',

@@ -74,6 +74,8 @@ function centsToDollars(cents) {
 // exported so the copy is unit-testable without a DB.
 function buildRefereeOfferLine(settings = {}) {
   const refereeCents = Number(settings.referee_discount_cents || 0);
+  // GATE_REFERRAL_STEP2: the friend gets an account credit after the first plan service (owner 2026-11-21).
+  if (refereeCents > 0 && isEnabled('referralStep2')) return step2.friendInviteOfferLine(refereeCents);
   return refereeCents > 0
     ? `Book your first service through their referral link and you’ll get ${centsToDollars(refereeCents)} off — our way of saying welcome.`
     : 'Book your first service through their referral link and you’ll be in great hands from your very first visit.';
@@ -578,7 +580,9 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
   }
 
   // --- Send invite SMS ---
-  const smsBody = await renderReferralSms('referral_invite', {
+  // GATE_REFERRAL_STEP2: the seeded sentence becomes the approved Step 2 words, or neutral words when there is no
+  // friend credit to state (referral-step2.js); gate off, no read and the text is exactly as stored.
+  const smsBody = step2.inviteSmsWithOffer(await renderReferralSms('referral_invite', {
     referee_name: firstName,
     referrer_name: referrerName || promoter.first_name || 'your neighbor',
     referral_link: referralLink,
@@ -586,7 +590,7 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
     workflow: 'referral_invite',
     entity_type: 'referral',
     entity_id: referral.id,
-  });
+  }), { step2On: isEnabled('referralStep2'), refereeCents: await step2FriendCreditCents(), link: referralLink });
   const smsSent = await sendSMS(normalizedPhone || phone.trim(), smsBody, {
     messageType: 'referral_invite',
     referralId: referral.id,
@@ -618,6 +622,18 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
 // Best-effort and idempotent per referral, so the call sites can never
 // double-send. Promoters aren't always customers, so
 // the send goes straight to promoter.customer_email.
+// The credited member's account, read when the credit email goes out (the morning after the credit). The billing tab
+// shows the automatic-credit switch only on an active account with a credit balance or the switch already on
+// (PortalPage: (totalCredits > 0 || autoApplyCredit) && !cancelledAccount). True only for a member who can see the
+// switch and still has it off. Unknown or unreadable = false: the email then gives no switch instruction.
+async function memberCanTurnOnAutomaticCredit(referral, promoter) {
+  const memberId = referral?.referrer_customer_id || promoter?.customer_id;
+  if (!memberId) return false;
+  const member = await db('customers').where({ id: memberId }).whereNull('deleted_at')
+    .first('active', 'account_credits', 'auto_apply_account_credit').catch(() => null);
+  return member?.active === true && member.auto_apply_account_credit !== true && Number(member.account_credits) > 0;
+}
+
 async function sendRewardEarnedEmail(promoter, referral, rewardDollars, destination = 'referral_balance') {
   try {
     const email = String(promoter?.customer_email || '').trim();
@@ -633,7 +649,7 @@ async function sendRewardEarnedEmail(promoter, referral, rewardDollars, destinat
         // credit (postCreditMovement), not referral balance — the email must
         // point the promoter at the right ledger.
         reward_line: destination === 'account_credit'
-          ? `Your ${step2.formatDollars(rewardDollars)} referral reward has been added to your account as a credit — it applies automatically to your next invoice.`
+          ? step2.memberCreditEmailLine(rewardDollars, { canTurnOnAutomaticCredit: await memberCanTurnOnAutomaticCredit(referral, promoter) })
           : `Your ${step2.formatDollars(rewardDollars)} referral reward has been added to your referral balance.`,
         // CTA points at the ledger the reward actually landed in: account
         // credits live on the billing tab, referral balance on the refer tab.
@@ -690,6 +706,14 @@ function recentRewardCreditsQuery(conn, now) {
     .select('r.*', 'l.delta as credit_dollars', 'l.created_at as credited_at');
 }
 
+// The amount the credit email states. A Step 2 row records what the member was paid (referrer_credit_cents, 0 at the
+// yearly limit), and that is the amount: after the member's and the friend's profiles are merged, the friend's
+// credit row carries the member's customer id too, and it must not set the amount. Any other row: its own amount.
+function rewardCreditEmailDollars(row) {
+  const recorded = row.referrer_credit_cents;
+  return recorded === null || recorded === undefined ? Number(row.credit_dollars) : Number(recorded) / 100;
+}
+
 // Conversions paid at once (require_service_completion off) put the reward on
 // the promoter balance inside convertReferral's transaction and email after it
 // commits. A failure before that email exists is only logged, and a retried
@@ -716,7 +740,9 @@ async function sendDueReferralRewardEmails({ now = new Date() } = {}) {
   const credits = await recentRewardCreditsQuery(db, now);
   const immediate = await recentImmediateRewardsQuery(db, now);
   const due = [
-    ...credits.map((row) => ({ row, at: row.credited_at, dollars: Number(row.credit_dollars), destination: 'account_credit' })),
+    ...credits.map((row) => ({ row, at: row.credited_at, dollars: rewardCreditEmailDollars(row), destination: 'account_credit' }))
+      // A member who was paid nothing (the yearly limit) has no credit to announce.
+      .filter(({ dollars }) => dollars > 0),
     ...immediate.map((row) => ({ row, at: row.converted_at, dollars: Number(row.referrer_reward_amount), destination: 'referral_balance' })),
   ];
   let attempted = 0;
@@ -1417,7 +1443,8 @@ async function memberCreditsThisYear(conn, memberId) {
 async function step2OfferFor(conn, memberId, settings) {
   const s = step2.step2Settings(settings);
   // The count is for the customer the credit is paid to (a household shares its promoter's customer).
-  const creditsThisYear = await memberCreditsThisYear(conn, await creditedMemberFor(conn, memberId));
+  // No member (the Automations preview page, which shows what a member gets): nothing earned yet, never at the limit.
+  const creditsThisYear = memberId ? await memberCreditsThisYear(conn, await creditedMemberFor(conn, memberId)) : 0;
   const capReached = step2.capReached(creditsThisYear, settings);
   return {
     // The existing field: nothing is promised to a member at the yearly limit (a cached portal build reads this field
@@ -1583,6 +1610,26 @@ async function checkMilestones(promoterId) {
 async function getLiveSettings(conn = db) {
   const row = await conn('referral_program_settings').where({ id: 1 }).first();
   return row ? { ...row, base_url: normalizeReferralBaseUrl(row.base_url) } : null;
+}
+
+// GATE_REFERRAL_STEP2: the friend's credit in cents that a line may state, from ONE live settings row the caller read
+// (getLiveSettings). A text that also follows the program's state (the Waves Pest Insider's referral line) decides
+// both from the same row, so the two cannot disagree. 0 = say nothing new: gate off, program paused, no amount, no row.
+function step2FriendCreditCentsOf(live) {
+  if (!isEnabled('referralStep2') || !live?.program_active) return 0;
+  return Math.max(0, Math.trunc(Number(live.referee_discount_cents) || 0));
+}
+
+// GATE_REFERRAL_STEP2: the friend's credit in cents, from the live settings row only, for a line that must never state
+// a code default (the invitation email). 0 = say nothing new: gate off, program paused, no amount, or the live row
+// unreadable.
+async function step2FriendCreditCents() {
+  if (!isEnabled('referralStep2')) return 0;
+  try {
+    return step2FriendCreditCentsOf(await getLiveSettings());
+  } catch {
+    return 0;
+  }
 }
 
 async function getSettings() {
@@ -1843,6 +1890,8 @@ module.exports = {
   milestoneLevelEarned,
   getSettings,
   getLiveSettings,
+  step2FriendCreditCents,
+  step2FriendCreditCentsOf,
   updateSettings,
   getPromoterStats,
   getProgramAnalytics,

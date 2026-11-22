@@ -20,7 +20,7 @@ describe('settledOtherSpelling', () => {
 });
 
 // Producer → consumer contract (pre-push audit P1 on this PR): the call pipeline is the only writer of
-// ai_extraction.email_spelling_settled (call-recording-processor.js, GATE_CALL_SPELLED_EMAIL_SETTLES). Build the
+// ai_extraction.email_spelling_settled (call-recording-processor.js). Build the
 // record with the producer's own rule and the exact shape the processor stores, then read it back through the
 // drip retry's reader and the source-call filter. If either side renames a key, this fails.
 describe('email_spelling_settled: what the call pipeline writes is what the drip retry reads', () => {

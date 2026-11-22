@@ -447,8 +447,7 @@ async function buildServiceReportV1ResponseData(service, token, {
   // only the /data render shows it, so only it pays for the city-wide
   // lawn-findings read.
   nearYou = false,
-  // OPT-IN likewise for the lawn lighting-aware color rule (GATE_LAWN_LIGHTING,
-  // owner 2026-10-04): only the /data render prints the "Since your last visit"
+  // OPT-IN likewise for the lawn lighting-aware color rule (owner 2026-10-04): only the /data render prints the "Since your last visit"
   // lines, so only it reads the two visits' stored light (one run read and one
   // photo read). The Q&A endpoint never does, so it never pays.
   lawnLighting = false,
@@ -788,26 +787,20 @@ async function buildServiceReportV1ResponseData(service, token, {
       crossSell = await buildReportCrossSell(service, db);
       // The referral card rides the SAME gate + payload (codex #3367 r5),
       // and its copy is composed from the LIVE referral program settings
-      // (codex PR r1): a disabled program suppresses the card entirely, and
-      // the reward promise softens to match what the settings actually
-      // grant — template copy must never advertise a benefit the referee
-      // won't receive. Best-effort: unreadable settings suppress the card.
-      // STRICT read (codex #3367 PR r2): getSettings() falls back to
-      // program-active $25/$25 defaults on a failed or absent row, which
-      // would advertise rewards a broken or unconfigured environment
-      // cannot honor — no live row, no card.
+      // (codex PR r1): a disabled program suppresses the card entirely.
+      // Best-effort: unreadable settings suppress the card. STRICT read
+      // (codex #3367 PR r2): getSettings() falls back to program-active
+      // $25/$25 defaults on a failed or absent row — no live row, no card.
+      // ONE composer (services/referral-share.js) shared with the estimate
+      // screens: static headline + CTA, plus the offer line while
+      // GATE_REFERRAL_STEP2 is on (amounts from the live settings, the
+      // member sentence dropped at the yearly limit). The customer's code
+      // and share text are NOT composed here — rendering a report is a
+      // read, and enrolling a promoter row on a public GET would be a
+      // durable write per view (staff QA reads included). The card's button
+      // fetches them from POST /:token/referral-link on the explicit tap.
       try {
-        const referralEngine = require('../services/referral-engine');
-        const settings = await referralEngine.getLiveSettings();
-        if (settings?.program_active) {
-          // Owner-dictated copy 2026-08-13: static headline + CTA, no
-          // amounts on the card. The customer's code and share text are NOT
-          // composed here — rendering a report is a read, and enrolling a
-          // promoter row on a public GET would be a durable write per view
-          // (staff QA reads included). The card's button fetches them from
-          // POST /:token/referral-link, which enrolls on the explicit tap.
-          referral = { ...require('../services/referral-share').REFERRAL_CARD_COPY };
-        }
+        referral = await require('../services/referral-share').composeReferralCard({ customerId: service.customer_id });
       } catch (err) {
         logger.warn(`[reports-public] referral card suppressed: ${err.message}`);
       }

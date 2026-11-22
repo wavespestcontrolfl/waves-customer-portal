@@ -18,6 +18,7 @@ const round2 = require('../models/migrations/20261005140000_lawn_v13_round2_fixe
 const round3 = require('../models/migrations/20261005160000_lawn_v13_round3_gates_and_combo_class');
 const migration = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
 const octoberMigration = require('../models/migrations/20261007120500_lawn_v13_october_dimension');
+const stonewallMigration = require('../models/migrations/20261122120000_lawn_v13_october_stonewall');
 const decemberMigration = require('../models/migrations/20261008130000_lawn_v13_december_potash');
 const aprilPolymerMigration = require('../models/migrations/20261022195000_lawn_v13_april_polymer_n_v3');
 const potassiumMigration = require('../models/migrations/20261029170000_lawn_v13_summer_potassium');
@@ -115,7 +116,7 @@ describe('the v13 recipe', () => {
 
   test('N targets parse from the visit notes and total the program', () => {
     const n = MONTHS.map((m) => engine.parseVisitNutrientTargets(visitFor(m).notes).targetNPer1000);
-    // October is Dimension 18-0-10 at 4.04 lb per 1,000 sq ft (commercial label, Coastal South): 0.73 lb N, 0.40 lb K2O.
+    // October is Stonewall 0.37% 18-0-10 at 4.04 lb per 1,000 sq ft (owner 2026-11-21): 0.73 lb N, 0.40 lb K2O.
     // December is LESCO 10-0-22 at 4.5 lb per 1,000 sq ft (owner 2026-10-08): 0.45 lb N, 0.99 lb K2O.
     // April on the 12x plan is LESCO 44-0-0 polymer bag at 2.27 lb per 1,000 sq ft (owner 2026-10-22): 1.0 lb N. The year was 3.18 lb N.
     expect(n).toEqual([0, 0.75, 0, 1, 0, 0, 0, 0, 0, 0.73, 0.75, 0.45]);
@@ -132,7 +133,7 @@ describe('the v13 recipe', () => {
     const tools = MONTHS.map((m) => productLines(visitFor(m).primary).map(nameOfLine));
     const N = migration.NAMES;
     expect(tools).toEqual([
-      [N.STW, N.NT], [N.F24], [N.DIM, N.NT], [aprilPolymerMigration.NEW_NAME], [], [N.NT, N.DIM], [], [N.NT, potassiumMigration.NAME], [N.NT, potassiumMigration.NAME], [octoberMigration.NEW_NAME], [N.F24], [decemberMigration.NEW_NAME],
+      [N.STW, N.NT], [N.F24], [N.DIM, N.NT], [aprilPolymerMigration.NEW_NAME], [], [N.NT, N.DIM], [], [N.NT, potassiumMigration.NAME], [N.NT, potassiumMigration.NAME], [stonewallMigration.NEW_NAME], [N.F24], [decemberMigration.NEW_NAME],
     ]);
   });
 });
@@ -180,29 +181,44 @@ describe('the 9x plan April step (recipe file and staged rows agree)', () => {
   });
 });
 
-// ── October: Dimension 18-0-10 replaces the discontinued Stonewall 15-0-15 (20261007120500) ──
-describe('migration 20261007120500: the October recipe line and the staged row it writes agree', () => {
-  const NEW = octoberMigration.NEW_NAME;
-  test('same name, same rate, same N and K2O targets, in every grass track', () => {
+// ── October: Stonewall 0.37% 18-0-10 replaces the Dimension granular (20261122120000) ──
+describe('migration 20261122120000: the October recipe line and the staged row it writes agree', () => {
+  const NEW = stonewallMigration.NEW_NAME;
+  test('same rate and the same N and K2O targets as the Dimension step, in every grass track', () => {
     for (const grass of GRASSES) {
       const october = v13[grass].visits.find((v) => v.month === 'Oct');
       const [line] = lines(october.primary);
       expect(nameOfLine(line)).toBe(NEW);
-      expect(line).toContain(`${octoberMigration.OCT_RATE} lb per 1,000 sq ft`);
+      expect(line).toContain(`${stonewallMigration.OCT_RATE} lb per 1,000 sq ft`);
       const targets = engine.parseVisitNutrientTargets(october.notes);
-      expect(`${targets.targetNPer1000} lb N/1000`).toBe(octoberMigration.NEW_GATES.targetN);
-      expect(`${targets.targetKPer1000} lb K2O/1000`).toBe(octoberMigration.NEW_GATES.targetK2O);
-      // Dithiopyr, not the prodiamine cap; the commercial label's figures.
-      expect(october.notes).toMatch(/Dithiopyr this year stays under the label yearly cap/);
-      expect(october.notes).toMatch(/0\.37 lb ai per acre: 4\.04 lb of product per 1,000 sq ft, the commercial label's Coastal South rate .* under its per-application maximum of 5\.46 lb/);
-      expect(october.notes).not.toMatch(/prodiamine|1\.5 lb ai per acre cap/i);
+      expect(`${targets.targetNPer1000} lb N/1000`).toBe(stonewallMigration.NEW_GATES.targetN);
+      expect(`${targets.targetKPer1000} lb K2O/1000`).toBe(stonewallMigration.NEW_GATES.targetK2O);
+      expect(stonewallMigration.NEW_GATES.targetN).toBe(octoberMigration.NEW_GATES.targetN);
+      expect(stonewallMigration.NEW_GATES.targetK2O).toBe(octoberMigration.NEW_GATES.targetK2O);
+      // Prodiamine now: 4.04 lb x 43.56 x 0.0037 = 0.65 lb ai per acre; with January 4FL (0.68) the year is 1.33 under the 1.5 cap.
+      expect(october.notes).toMatch(/This application is 0\.65 lb prodiamine ai per acre: 4\.04 lb of product per 1,000 sq ft/);
+      expect(october.notes).toMatch(/the year is 1\.33 lb prodiamine per acre, under the label's 1\.5 lb yearly maximum/);
+      expect(october.notes).not.toMatch(/dithiopyr|Coastal South|5\.46/i);
     }
-    expect(octoberMigration.OCT_RATE).toBe(4.04);
-    expect(octoberMigration.MAX_LABEL).toBe(5.46);
+    expect(stonewallMigration.OCT_RATE).toBe(4.04);
+    expect(4.04 * 43.56 * 0.0037).toBeCloseTo(0.65, 2);
+    expect(0.68 + 0.65).toBeLessThan(1.5);
+  });
+
+  test('the Season 2027 note names Stonewall for the November bag, with the same figures, in every grass track', () => {
+    for (const grass of GRASSES) {
+      const note = JSON.stringify(v13[grass]);
+      const season = /Season 2027[^"]*/.exec(note)[0];
+      expect(season).toContain('November LESCO Stonewall 0.37% 18-0-10 at 4.04 lb per 1,000 sq ft (0.73 lb N, 0.65 lb prodiamine per acre)');
+      expect(season).not.toMatch(/Dimension|dithiopyr/i);
+      expect(season).toContain('January Stonewall 4FL stays');
+    }
   });
 
   test('the 9x April step is untouched: still the derived 2.78 lb from the 0.5 lb N target', () => {
     const [line] = lines(visitFor(4).cadenceVariants['9'].primary);
+    // Still the Dimension granular: a third prodiamine pass in April would pass the label's 1.5 lb ai yearly maximum.
+    expect(nameOfLine(line)).toBe(octoberMigration.NEW_NAME);
     expect(line).toMatch(/2\.78 lb per 1,000 sq ft \(0\.5 lb N\), spreader$/);
     expect(engine.parseVisitNutrientTargets(visitFor(4).cadenceVariants['9'].notes).targetNPer1000).toBe(0.5);
   });
@@ -218,7 +234,7 @@ describe('migration 20261007120500: the October recipe line and the staged row i
 // ── The recipe names only catalog rows the migrations know ───────────────────
 // Blindside is added by migration 20261005140000 (the staged rows of 120000 have none).
 const BLINDSIDE = 'Blindside Herbicide';
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, octoberMigration.NEW_NAME, decemberMigration.NEW_NAME, aprilPolymerMigration.NEW_NAME, potassiumMigration.NAME, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE, advionMigration.NAME, 'LESCO Crosscheck Plus' /* house bifenthrin since 2026-11-18: a production catalog row */];
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, octoberMigration.NEW_NAME, stonewallMigration.NEW_NAME, decemberMigration.NEW_NAME, aprilPolymerMigration.NEW_NAME, potassiumMigration.NAME, matrixMigration.HEAD, matrixMigration.SOP, granuleMigration.GRANULE, advionMigration.NAME, 'LESCO Crosscheck Plus' /* house bifenthrin since 2026-11-18: a production catalog row */];
 
 describe('every v13 line names a catalog row the migrations know', () => {
   test('the recipe names only catalog names the migration knows', () => {
@@ -348,14 +364,14 @@ describe('staged migration 20261005120000', () => {
     for (const month of MONTHS) {
       const [, windowKey] = migration.WINDOWS.find((w) => w[0] === month);
       const rowsForWindow = migration.PRODUCTS.filter(([key]) => key === windowKey).map(([, spec]) => spec);
-      // The staged October row names Stonewall 15-0-15; 20261007120500 swaps it for Dimension 18-0-10.
+      // The staged October row names Stonewall 15-0-15; 20261007120500 swaps it for Dimension 18-0-10; 20261122120000 swaps that for Stonewall 0.37% 18-0-10.
       // The staged December row names the 24-0-11; 20261008130000 swaps it for LESCO 10-0-22.
       // 20261007180000 turns the April Artavia row into Headway and adds its own rows (Arena keeps its name: 20261007181000 undoes the rename).
       // (The July 0-0-50 row 180000 inserts is deleted by 20261007189000: the recipe has no July potash.)
       // 20261009100000 retires the Advion add-on rows and inserts the fire ant granule rows in their place.
       const matrixAdds = matrixMigration.INSERTS.filter((spec) => spec.windowKey === windowKey && spec.name !== matrixMigration.SOP).map((spec) => (spec.name === matrixMigration.ADVION ? { ...spec, name: granuleMigration.GRANULE } : spec));
       const after = (name) => (name === migration.NAMES.ART && windowKey === matrixMigration.WINDOWS.APR ? matrixMigration.HEAD : name);
-      const whole = [...rowsForWindow.filter((s) => s[6]).map((s) => (s[0] === octoberMigration.OLD_NAME ? octoberMigration.NEW_NAME : (s[0] === decemberMigration.OLD_NAME && windowKey === decemberMigration.DECEMBER_WINDOW ? decemberMigration.NEW_NAME : (s[0] === aprilPolymerMigration.OLD_NAME && windowKey === aprilPolymerMigration.APRIL_WINDOW ? aprilPolymerMigration.NEW_NAME : s[0])))), ...matrixAdds.filter((spec) => spec.defaultInPlan).map((spec) => spec.name)];
+      const whole = [...rowsForWindow.filter((s) => s[6]).map((s) => (s[0] === octoberMigration.OLD_NAME ? stonewallMigration.NEW_NAME : (s[0] === decemberMigration.OLD_NAME && windowKey === decemberMigration.DECEMBER_WINDOW ? decemberMigration.NEW_NAME : (s[0] === aprilPolymerMigration.OLD_NAME && windowKey === aprilPolymerMigration.APRIL_WINDOW ? aprilPolymerMigration.NEW_NAME : s[0])))), ...matrixAdds.filter((spec) => spec.defaultInPlan).map((spec) => spec.name)];
       // 20261009150000 (v13 final pass) inserts the December weed rows into November (Blindside is compared below).
       const finalPass = windowKey === finalPassMigration.WINDOWS.NOV ? finalPassMigration.WEED_NAMES.filter((n) => n !== BLINDSIDE) : [];
       // 20261023141000 (mole cricket bait): Advion in June and July, Velista in December; the August Talak mole cricket row is deleted. (Its June Acelepryn row is deleted again by 20261023144000.)
@@ -434,7 +450,7 @@ describe('migration 20261005130000: catalog rows, links and unread gate keys', (
       for (const line of [...lines(visitFor(month).primary), ...lines(visitFor(month).secondary)]) if (line.includes(' — ')) named.add(nameOfLine(line));
     }
     // 20261007180000 inserts Headway, the 0-0-50 and Advion, and renames the Arena row; 20261008130000 inserts the 10-0-22; 20261009100000 uses the existing Topchoice row.
-    const specNames = [...fixMigration.PRODUCTS.map((p) => p.name), ...matrixMigration.CATALOG.map((p) => p.name), decemberMigration.NEW_NAME, aprilPolymerMigration.NEW_NAME, potassiumMigration.NAME, granuleMigration.GRANULE, advionMigration.NAME, 'LESCO Crosscheck Plus' /* house bifenthrin since 2026-11-18: a production catalog row */];
+    const specNames = [...fixMigration.PRODUCTS.map((p) => p.name), ...matrixMigration.CATALOG.map((p) => p.name), decemberMigration.NEW_NAME, aprilPolymerMigration.NEW_NAME, potassiumMigration.NAME, granuleMigration.GRANULE, advionMigration.NAME, stonewallMigration.CATALOG_ROW.name /* inserted by 20261122120000 only where absent */, 'LESCO Crosscheck Plus' /* house bifenthrin since 2026-11-18: a production catalog row */];
     for (const name of named) expect(specNames).toContain(name);
     expect(new Set(specNames).size).toBe(specNames.length);
     const withEpa = Object.fromEntries(fixMigration.PRODUCTS.filter((p) => p.epa_reg_number).map((p) => [p.name, p.epa_reg_number]));

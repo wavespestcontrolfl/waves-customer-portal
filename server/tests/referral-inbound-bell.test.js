@@ -320,6 +320,18 @@ describe('a tap', () => {
     });
   });
 
+  test('a confirm whose credit did not post says so, in both gate states: never "after the first plan visit"', async () => {
+    const failed = { referralId: 'r-1', converted: true, creditsNow: true, credited: null, error: 'credit_failed' };
+    inbound.confirmInboundReferral.mockResolvedValue(failed);
+    await expect(run(CONFIRM)).resolves.toEqual({
+      ok: true, message: "Lea Quill is confirmed as Ames Fenn's referrer. The credits did not post. They post at the next plan visit.", resolution: 'Referrer confirmed',
+    });
+    gates.isEnabled.mockImplementation((gate) => gate === 'referralStep2');
+    await expect(run(CONFIRM)).resolves.toMatchObject({
+      ok: true, message: "Lea Quill is confirmed as Ames Fenn's referrer. The credits did not post. They post at the next plan visit.",
+    });
+  });
+
   test.each([
     ['REFERRER_CHANGED', 'The likely referrer changed. Pick the referrer in Referrals → Queue.'],
     ['FIRST_VISIT_DONE', "This customer's first plan visit is done, so the credits would post now. Confirm the referrer in Referrals → Queue."],

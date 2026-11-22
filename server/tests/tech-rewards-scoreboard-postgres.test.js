@@ -258,6 +258,64 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     expect(board.stayBonus.estimateCents).toBe(Math.round(230000 * 0.02));
   });
 
+  test('a closed season counts the checks for the pay weeks before the bonus\'s own run, and no check for a later pay week', async () => {
+    const [gam] = await db('technicians').insert({ name: 'Sample Gamma', hire_date: '2024-01-15' }).returning('id');
+    const [run] = await db('payroll_runs').insert({ status: 'finalized', week_start: '2026-09-14', pay_date: '2026-09-25' }).returning('id');
+    const [, cut, later] = await insertChecks([
+      { run_id: run.id, technician_id: gam.id, status: 'finalized', week_start: '2026-05-04', gross_cents: 100000 },
+      // the week of Sep 7: the last pay week counted for 2026 (its run is dated Sep 18, before the bonus's pay date, Sep 25)
+      { run_id: run.id, technician_id: gam.id, status: 'finalized', week_start: '2026-09-07', gross_cents: 8000, regular_pay_cents: 0 },
+      // the week of Sep 14: the bonus's own pay week, and every week after it, is never counted
+      { run_id: run.id, technician_id: gam.id, status: 'finalized', week_start: '2026-09-14', gross_cents: 6000, regular_pay_cents: 0 },
+    ]).returning('id');
+    await db('payroll_pay_lines').insert([
+      { technician_id: gam.id, check_id: cut.id, kind: 'commission', source_type: 'commission_payment', status: 'paid', earned_week_start: '2026-09-07', covers_to: '2026-05-10', amount_cents: 8000 }, // earned May 10
+      { technician_id: gam.id, check_id: later.id, kind: 'commission', source_type: 'commission_payment', status: 'paid', earned_week_start: '2026-09-14', covers_to: '2026-05-11', amount_cents: 6000 }, // earned May 11, paid a week too late
+    ]);
+    const board = await service.getScoreboard(gam.id, { now: NOW });
+    expect(board.seasonBonus.grossCents).toBe(100000 + 8000);
+  });
+
+  test('a season bonus shows as paid only for the pay run\'s own line on a finalized check of a finalized run', async () => {
+    await seed();
+    const LATER = new Date('2027-11-20T15:00:00Z'); // the 2027 season is closed
+    scores.buildSeasonScore.mockImplementation(async (id, year) => ({ complete: true, year, parts: PARTS, score: 91.5, rateBps: 400, settings: { version: 0, weights: WEIGHTS, cutLines: CUTS } }));
+    const key = (year) => ({ technician_id: alpha, kind: 'season_bonus', source_type: 'tech_rewards', source_id: `season_bonus:${alpha}:${year}`, earned_week_start: `${year}-09-13` });
+    await db('payroll_pay_lines').insert([
+      { ...key(2027), status: 'open', amount_cents: 41000 }, // on a draft run: not paid yet
+      // marked paid with the key of the 2026 season: no season before 2027 has a bonus, so it is not the pay run's line, and no check holds it
+      { ...key(2026), status: 'paid', amount_cents: 39000 },
+      { technician_id: alpha, kind: 'season_bonus', status: 'paid', earned_week_start: '2027-09-13', amount_cents: 12300 }, // hand-made: no source key
+    ]);
+    const board = async (now) => (await service.getScoreboard(alpha, { now })).seasonBonus;
+    // the 2026 season: the row keyed for it never shows as paid
+    expect(await board(NOW)).toMatchObject({ estimate: true });
+    expect(await board(NOW)).not.toHaveProperty('paidCents');
+    // the 2027 season: an open line is not paid
+    const before = await board(LATER);
+    expect(before).toMatchObject({ estimate: true });
+    expect(before).not.toHaveProperty('paidCents');
+    const own = () => db('payroll_pay_lines').where({ source_id: `season_bonus:${alpha}:2027` });
+    // marked paid with no check
+    await own().update({ status: 'paid' });
+    expect(await board(LATER)).not.toHaveProperty('paidCents');
+    // on a check that is not final, of a run that is not final
+    const [run] = await db('payroll_runs').insert({ status: 'draft', week_start: '2027-09-13', pay_date: '2027-09-24' }).returning('id');
+    const [check] = await insertChecks([{ run_id: run.id, technician_id: alpha, status: 'draft', week_start: '2027-09-13', gross_cents: 41000 }]).returning('id');
+    await own().update({ check_id: check.id });
+    expect(await board(LATER)).not.toHaveProperty('paidCents');
+    await db('payroll_checks').where({ id: check.id }).update({ status: 'finalized' });
+    expect(await board(LATER)).not.toHaveProperty('paidCents'); // the run is still a draft
+    await db('payroll_runs').where({ id: run.id }).update({ status: 'voided' });
+    expect(await board(LATER)).not.toHaveProperty('paidCents');
+    // the pay run's own line, on a finalized check of a finalized run: paid, and no estimate beside it
+    await db('payroll_runs').where({ id: run.id }).update({ status: 'finalized' });
+    expect(await board(LATER)).toEqual({ grossCents: before.grossCents, estimate: false, estimateCents: null, paidCents: 41000 });
+    // the 2026 row on that same finalized check is still not the pay run's line
+    await db('payroll_pay_lines').where({ source_id: `season_bonus:${alpha}:2026` }).update({ check_id: check.id });
+    expect(await board(NOW)).not.toHaveProperty('paidCents');
+  });
+
   test('paid time off on Aug 31 and a catch-up overtime premium earned in May are dated by their own records', async () => {
     const [eps] = await db('technicians').insert({ name: 'Sample Epsilon', hire_date: '2024-01-15' }).returning('id');
     const [run] = await db('payroll_runs').insert({ status: 'finalized', week_start: '2026-09-07', pay_date: '2026-09-18' }).returning('id');
@@ -498,6 +556,101 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     expect(board.seasonBonus.grossCents).toBe(777777);
     expect(board.reviews).toMatchObject({ count: 1, asks: 1 });
     expect(board.commission.paidCents).toBe(33333);
+  });
+
+  describe('the season scores a pay run reads before its transaction opens (tech-rewards-pay-lines.js readSeasonScores)', () => {
+    const SEASON_GATES = ['GATE_PAYROLL_PAY_LINES', 'GATE_TECH_REWARDS_SEASON_BONUS'];
+    const OLD_GATES = Object.fromEntries(SEASON_GATES.map((name) => [name, process.env[name]]));
+    const PAY_DATE = '2027-09-24'; // the last Friday of September 2027
+    const recipient = { employment_type: 'w2', role: 'technician', employment_status: 'active', field_dispatchable: true, hire_date: '2024-01-10' };
+    const keyOf = (id) => `season_bonus:${id}:2027`;
+    const scored = (year) => ({ complete: true, year, parts: PARTS, score: 91.5, rateBps: 400, settings: { version: 0, weights: WEIGHTS, cutLines: CUTS } });
+    let payLines;
+    let made;
+
+    beforeEach(async () => {
+      payLines = require('../services/tech-rewards-pay-lines');
+      for (const name of SEASON_GATES) process.env[name] = 'true';
+      made = (await db('technicians').insert(['Sample Delta', 'Sample Echo', 'Sample Foxtrot'].map((name) => ({ name, ...recipient }))).returning('id'))
+        .map((row) => row.id).sort();
+    });
+    afterEach(async () => {
+      for (const name of SEASON_GATES) {
+        if (OLD_GATES[name] === undefined) delete process.env[name];
+        else process.env[name] = OLD_GATES[name];
+      }
+      await db('technicians').whereIn('id', made).del();
+    });
+
+    test('one REPEATABLE READ, read-only snapshot for every technician; one technician\'s failed read leaves the others; the connection is given back', async () => {
+      const [first, second, settled] = made;
+      // the third technician's 2027 bonus is settled: the pay run's own line, no longer open
+      await db('payroll_pay_lines').insert({ technician_id: settled, kind: 'season_bonus', source_type: 'tech_rewards', source_id: keyOf(settled), status: 'paid', earned_week_start: '2027-09-13', amount_cents: 1000 });
+      const seen = [];
+      scores.buildSeasonScore.mockImplementation(async (id, year, season, trx) => {
+        seen.push({
+          id,
+          level: (await trx.raw('SHOW transaction_isolation')).rows[0].transaction_isolation,
+          readOnly: (await trx.raw('SHOW transaction_read_only')).rows[0].transaction_read_only,
+          pid: (await trx.raw('SELECT pg_backend_pid() AS pid')).rows[0].pid,
+        });
+        if (id === first) await trx.raw('SELECT 1 / 0'); // the first one read fails inside PostgreSQL
+        return scored(year);
+      });
+      const read = await payLines.readSeasonScores(db, PAY_DATE);
+      // Alpha and Beta get no Tech Rewards lines (not W-2 field technicians) and the settled bonus needs no score: none is read.
+      // (Technicians that earlier tests of this suite left on file are read too; this test looks at its own three.)
+      const mine = (list, idOf) => list.filter((item) => made.includes(idOf(item)));
+      expect(read.failed).toBe(false);
+      for (const id of [alpha, beta, settled]) expect(read.figures.has(keyOf(id))).toBe(false);
+      expect(mine([...read.figures.keys()], (key) => key.split(':')[1])).toEqual([keyOf(first), keyOf(second)]);
+      expect(read.figures.get(keyOf(first))).toBeNull();
+      expect(read.figures.get(keyOf(second))).toMatchObject({ seasonScore: { complete: true, score: 91.5, year: 2027 }, asks: 0, reviews: 0 });
+      expect(Object.keys(read.figures.get(keyOf(second))).sort()).toEqual(['asks', 'reviews', 'seasonScore', 'settings']);
+      expect(mine(seen, (s) => s.id).map((s) => [s.id, s.level, s.readOnly])).toEqual([[first, 'repeatable read', 'on'], [second, 'repeatable read', 'on']]);
+      expect(new Set(seen.map((s) => `${s.level} ${s.readOnly} ${s.pid}`)).size).toBe(1); // every technician: one snapshot, one connection
+      expect(require('../services/logger').error).toHaveBeenCalledWith(expect.stringContaining(`season 2027 score could not be read for technician ${first}`));
+      expect(db.client.pool.numUsed()).toBe(0); // given back before the pay run asks for its own
+      // nothing is read for a run dated for no season bonus, or with a gate off
+      seen.length = 0;
+      expect(await payLines.readSeasonScores(db, '2027-09-17')).toBeNull();
+      const [run] = await db('payroll_runs').insert({ status: 'draft', week_start: '2027-09-13', pay_date: PAY_DATE }).returning('id');
+      expect(mine([...(await payLines.readSeasonScoresOfRun(db, run.id)).figures.keys()], (key) => key.split(':')[1])).toHaveLength(2);
+      expect(await payLines.readSeasonScoresOfRun(db, randomUUID())).toBeNull(); // no such run
+      seen.length = 0;
+      delete process.env.GATE_TECH_REWARDS_SEASON_BONUS;
+      expect([await payLines.readSeasonScores(db, PAY_DATE), await payLines.readSeasonScoresOfRun(db, run.id), seen]).toEqual([null, null, []]);
+      // the snapshot itself cannot be taken: every bonus waits, and the pay run goes on
+      process.env.GATE_TECH_REWARDS_SEASON_BONUS = 'true';
+      const noConnection = { transaction: async () => { throw new Error('no connection'); } };
+      expect(await payLines.readSeasonScores(noConnection, PAY_DATE)).toEqual({ figures: new Map(), failed: true });
+    });
+
+    test('with a pool of two connections that two pay runs hold, the read waits for a connection while it holds none, and runs when one is free', async () => {
+      const knex = require('knex');
+      const small = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [mockSchema], pool: { min: 0, max: 2 }, acquireConnectionTimeout: 20000 });
+      const held = [];
+      try {
+        held.push(await small.transaction()); // the pay run that holds the payroll lock
+        held.push(await small.transaction()); // a pay run that waits for that lock, and holds its connection while it waits
+        const [holder, waiter] = held;
+        await Promise.all([holder.raw('SELECT 1'), waiter.raw('SELECT 1')]);
+        expect(small.client.pool.numUsed()).toBe(2);
+        let done = false;
+        const read = payLines.readSeasonScores(small, PAY_DATE).then((result) => { done = true; return result; });
+        await new Promise((resolve) => { setTimeout(resolve, 400); });
+        // a third pay run's score read: it waits in line and holds nothing, so the two pay runs are never held up by it
+        expect([done, small.client.pool.numUsed(), small.client.pool.numPendingAcquires()]).toEqual([false, 2, 1]);
+        await holder.commit();
+        const result = await read;
+        expect([result.failed, made.every((id) => result.figures.has(keyOf(id)))]).toEqual([false, true]);
+        expect(small.client.pool.numUsed()).toBe(1); // the waiting pay run's own: the read gave its connection back
+        await waiter.commit();
+      } finally {
+        for (const open of held) if (!open.isCompleted()) await open.rollback();
+        await small.destroy();
+      }
+    });
   });
 
   test('reads in one REPEATABLE READ, read-only snapshot', async () => {

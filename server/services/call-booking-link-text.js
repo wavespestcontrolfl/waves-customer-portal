@@ -2649,6 +2649,9 @@ module.exports = {
   computeSendAt,
   callEndFor,
   conversationSeconds,
+  // Read by services/call-estimate-link-shadow.js (the record-only after-call estimate check).
+  bookedSinceCall,
+  visitStampedWithCall,
   managedLineForCall,
   bookingTextLine,
   stagingIneligibleReason,

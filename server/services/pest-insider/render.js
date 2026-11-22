@@ -45,8 +45,9 @@
  *
  * No line asks the reader to forward the email: a forwarded copy carries
  * the subscriber's own unsubscribe link, and its page shows their address
- * (pre-push round 11). The plan's referral line comes in PR 4, linked to the
- * issue's web page (the send's archive link).
+ * (pre-push round 11). The referral line stands above the sign-off and links
+ * the Waves referral page. Its end is a token: the stored body never names
+ * an amount, and each surface gives the token its value (referral-line.js).
  *
  * Every piece of text is escaped.
  */
@@ -61,11 +62,13 @@ const { heroFor, HERO_WIDTH, HERO_HEIGHT } = require('./heroes');
 const { partPictureForFact, partPictureForSpecies, PART_WIDTH, PART_HEIGHT } = require('./parts');
 const { SERVICE_EMOJI } = require('./claim-check');
 const { toolById, toolLinkText, AMAZON_DISCLOSURE } = require('./tools');
-const { isPestInsiderPoll } = require('../newsletter-quiz');
+const { isPestInsiderPoll, pollResultLine } = require('../newsletter-quiz');
 const { validateNewsletterDraft } = require('../newsletter-validator');
 const { PEST_INSIDER_TYPE } = require('../../config/newsletter-types');
 const { etDateString } = require('../../utils/datetime-et');
 const { HOME_TOKEN, HOME_TEXT_TOKEN, hasHomeToken, neutralizeHomeTokens } = require('./home');
+const { REFERRAL_TOKEN, REFERRAL_TEXT_TOKEN } = require('./referral-line');
+const { escapeHtml, paragraph, link, wrapBlock } = require('./markup');
 
 const IDENTIFIER_URL = `${SITE}/pest-identifier/`;
 const POST_LINK_TEXT = 'Read the full story on the Waves blog';
@@ -130,10 +133,6 @@ const VERDICTS = Object.freeze({
   call: Object.freeze({ label: 'Worth a pro look', background: '#FEF2F2', text: '#991B1B' }),
 });
 
-const escapeHtml = (text) => String(text ?? '')
-  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-
 const own = (map, key) => (typeof key === 'string' && Object.prototype.hasOwnProperty.call(map, key) ? map[key] : null);
 const speciesUrl = (slug) => (/^[a-z0-9-]+$/.test(String(slug)) ? `${IDENTIFIER_URL}${slug}/` : null);
 
@@ -151,8 +150,6 @@ function sectionHead(index, label, emoji, title) {
   ].join('\n');
 }
 
-const paragraph = (html) => `<p style="margin:0 0 14px 0;font-size:16px;line-height:1.6;">${html}</p>`;
-const link = (href, label) => `<a class="dm-link" href="${escapeHtml(href)}" style="color:${newsletterPalette().blue};text-decoration:underline;font-weight:600;">${escapeHtml(label)}</a>`;
 // The newsletter's event box: one emoji row per line.
 const metaBox = (rows) => `<div class="dm-box" style="margin:0 0 14px 0;padding:12px 16px;background:${newsletterPalette().cardBg};border-radius:10px;font-size:15px;line-height:2;">\n${rows.join('<br/>\n')}\n</div>`;
 
@@ -163,6 +160,15 @@ const SIGNOFF_HTML = `<div class="dm-text">
 <p style="margin:0;font-size:16px;line-height:1.6;">${escapeHtml(SIGNOFF_NAME)} 🌊</p>
 </div>`;
 const SIGNOFF_TEXT = `${SIGNOFF_LINE}\n${SIGNOFF_NAME}\n`;
+
+// What closes every issue: the referral line, then the sign-off. A reader's
+// own block goes in before it. The line is a token in each part
+// (referral-line.js has its words and gives the tokens their value on every
+// surface): the stored body never names an amount, and a paused referral
+// program gets no line. Like the "Your home" tokens, each stands alone, so a
+// value of '' gives exactly the issue without the line.
+const CLOSING_HTML = `${REFERRAL_TOKEN}${SIGNOFF_HTML}`;
+const CLOSING_TEXT = `${REFERRAL_TEXT_TOKEN}${SIGNOFF_TEXT}`;
 
 // A Waves picture as wide as the column on a desktop screen (582px in
 // wrapNewsletter's card), with its size in the tag. A picture that moves
@@ -225,16 +231,23 @@ function datelineText(sendDate, minutes) {
   return ['Waves Pest Insider', date, `${minutes}-min read`].filter(Boolean).join(' · ');
 }
 
+// The last poll's result under the greeting, in the intro's own style. The
+// words are newsletter-quiz.js pollResultLine's, made here from a poll id and
+// its counts, never taken from the caller. Nothing when there is no line.
+const resultParagraph = (line) => `<p style="margin:0 0 12px 0;font-size:16px;line-height:1.6;">${escapeHtml(line)}</p>`;
+
 function openingBlock(issue, minutes) {
   const palette = newsletterPalette();
   const dateline = datelineText(issue.sendDate, minutes);
+  const result = pollResultLine(issue.lastPoll || undefined);
   const html = [
     `<p class="dm-muted" style="margin:0 0 14px 0;text-align:center;font-size:12px;line-height:1.5;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:${palette.muted};">${escapeHtml(dateline)}</p>`,
     heroHtml(issue.lead),
     `<p style="margin:0 0 8px 0;font-size:22px;line-height:1.4;">👋 <strong><em>${escapeHtml(GREETING)}</em></strong></p>`,
+    result && resultParagraph(result),
     `<p style="margin:0 0 26px 0;font-size:16px;line-height:1.6;">${escapeHtml(INTRO)}</p>`,
   ].filter(Boolean).join('\n');
-  return { html, text: `${dateline}\n\n${GREETING}\n${INTRO}` };
+  return { html, text: `${dateline}\n\n${GREETING}\n${result ? `${result}\n` : ''}${INTRO}` };
 }
 
 // The lead fact, when the lead names one whose own post is the lead's post.
@@ -339,7 +352,6 @@ function toolBlock(tool) {
   return { html, text };
 }
 
-const wrapBlock = (b) => `<div class="dm-text">\n${b.html}\n</div>`;
 
 // The issue's poll: a Waves Pest Insider poll's token (newsletter-quiz.js),
 // written here from the poll id, never taken from the caller. The sender
@@ -453,8 +465,10 @@ function homeSubstitutions(home, { now = new Date(), errorsOf = homeBlockErrors 
  *   fact whose top picture, card and sources the issue shows (only when that
  *   fact's own post is lead.postUrl) and whose service picks the band's emoji. sendDate (YYYY-MM-DD)
  *   goes in the dateline. pollQuizId, a Waves Pest Insider poll id, adds that
- *   poll after "What's this?" (pollBlock). Any other field is ignored: the
- *   shared body takes no caller text.
+ *   poll after "What's this?" (pollBlock). lastPoll, { quizId, counts } of the
+ *   last issue's poll, puts that poll's result line (pollResultLine) under the
+ *   greeting, before the intro: one paragraph in the HTML, its own line in the
+ *   text; no line when the poll has no votes. Any other field is ignored: the shared body takes no caller text.
  */
 function renderIssue(issue) {
   const lead = leadBlock(issue);
@@ -464,10 +478,11 @@ function renderIssue(issue) {
   const minutes = readMinutes([GREETING, INTRO, ...sections, SIGNOFF_TEXT].join(' '));
   const opening = openingBlock(issue, minutes);
   const pollHtml = poll ? [DIVIDER_HTML, wrapBlock(poll)] : [];
-  // The "Your home" tokens stand alone, glued to the sign-off by no join of
-  // their own: a reader whose value is '' gets exactly the issue without the block.
-  const html = `${[wrapBlock(opening), wrapBlock(lead), DIVIDER_HTML, wrapBlock(id), ...pollHtml].join('\n')}\n${HOME_TOKEN}${SIGNOFF_HTML}`;
-  const text = `${[opening.text, ...sections, ...(poll ? [poll.text] : [])].join('\n\n')}\n\n${HOME_TEXT_TOKEN}${SIGNOFF_TEXT}`;
+  // The "Your home" tokens stand alone, glued to the closing (the referral
+  // line, then the sign-off) by no join of their own: a reader whose value is
+  // '' gets exactly the issue without the block.
+  const html = `${[wrapBlock(opening), wrapBlock(lead), DIVIDER_HTML, wrapBlock(id), ...pollHtml].join('\n')}\n${HOME_TOKEN}${CLOSING_HTML}`;
+  const text = `${[opening.text, ...sections, ...(poll ? [poll.text] : [])].join('\n\n')}\n\n${HOME_TEXT_TOKEN}${CLOSING_TEXT}`;
   return { subject: issue.subject, preview: issue.preview, html_body: html, text_body: text };
 }
 
@@ -487,23 +502,24 @@ function wrapIssueHtml(issue, { unsubscribeUrl }) {
   });
 }
 
-// Puts `block` in front of the sign-off that closes `body`; a body with no
-// sign-off (one rendered before it existed) gets the block at its end.
-function beforeSignoff(body, block, signoff) {
-  if (body.endsWith(signoff)) return `${body.slice(0, body.length - signoff.length)}${block}\n${signoff}`;
+// Puts `block` in front of the closing (the referral line, then the
+// sign-off) that ends `body`; a body that does not end with it gets the block
+// at its end.
+function beforeClosing(body, block, closing) {
+  if (body.endsWith(closing)) return `${body.slice(0, body.length - closing.length)}${block}\n${closing}`;
   return `${body}\n${block}`;
 }
 
 /**
  * One reader's block ({ html, text }) after the shared sections, behind the
- * Waves badge and before the sign-off. A new object comes back; `issue` is
+ * Waves badge and before the closing. A new object comes back; `issue` is
  * not changed.
  */
 function addReaderBlock(issue, block) {
   return {
     ...issue,
-    html_body: beforeSignoff(issue.html_body, `${DIVIDER_HTML}\n${wrapBlock(block)}`, SIGNOFF_HTML),
-    text_body: beforeSignoff(issue.text_body, `${block.text}\n`, SIGNOFF_TEXT),
+    html_body: beforeClosing(issue.html_body, `${DIVIDER_HTML}\n${wrapBlock(block)}`, CLOSING_HTML),
+    text_body: beforeClosing(issue.text_body, `${block.text}\n`, CLOSING_TEXT),
   };
 }
 
@@ -532,4 +548,5 @@ module.exports = {
   renderIssue, withToolBlock, addReaderBlock, wrapIssueHtml, escapeHtml, speciesEmoji,
   homeBlock, homeBlockErrors, homeSubstitutions, hasHomeToken, neutralizeHomeTokens, HOME_LINE_LABELS, HOME_TOKEN, HOME_TEXT_TOKEN,
   IDENTIFIER_URL, POST_LINK_TEXT, PHOTO_ID_TEXT, VERDICTS, SIGNOFF_TEXT, CATEGORY_EMOJI, SPECIES_EMOJI,
+  CLOSING_TEXT,
 };

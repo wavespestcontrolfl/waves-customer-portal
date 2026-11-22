@@ -81,7 +81,9 @@ const {
 } = require('./payroll-pay-lines');
 const { syncReviewBonusLines } = require('./payroll-review-bonuses');
 const { syncCommissionLines } = require('./payroll-commission');
-const { syncTechRewardLines, dropRewardLinesOfWeek, paidBonusCounting, waitNotes } = require('./tech-rewards-pay-lines');
+const {
+  syncTechRewardLines, readSeasonScores, readSeasonScoresOfRun, dropRewardLinesOfWeek, paidBonusCounting, waitNotes,
+} = require('./tech-rewards-pay-lines');
 const { familyEmployeeOn, familyExemptIds } = require('./payroll-family-employee');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -844,7 +846,7 @@ async function runView(conn, runId, { evaluation = null } = {}) {
     view.waiting = live.waiting;
     view.stale = tokenOf(run, live.checks) !== view.token;
   }
-  // plain notes about a December gift or a stay bonus that waits (tech-rewards-pay-lines.js waitNotes); present only when there is one
+  // plain notes about a December gift, a stay bonus or a season bonus that waits (tech-rewards-pay-lines.js waitNotes); present only when there is one
   const notes = run.status === 'voided' ? [] : await waitNotes(conn, runId);
   if (notes.length) view.techRewardsNotes = notes;
   return view;
@@ -912,9 +914,13 @@ const syncCommission = (trx, weekStart, actorId) => syncCommissionLines(trx, {
   weekEnd: addStaffWorkDays(weekStart, 6), lock: true, actorId,
 });
 
-// Tech Rewards lines (GATE_TECH_REWARDS_PAY_LINES, GATE_TECH_REWARDS_STAY_BONUS), at the same three points. Takes the run row. It runs after applyDueSteps:
+// Tech Rewards lines (GATE_TECH_REWARDS_PAY_LINES, GATE_TECH_REWARDS_STAY_BONUS, GATE_TECH_REWARDS_SEASON_BONUS), at the same three points. Takes the run row. It runs after applyDueSteps:
 // it asks whether a check can be worked out for the technician, and a pay rate step that is due changes that answer.
-const syncTechRewards = (trx, run, actorId) => syncTechRewardLines(run, trx, { actorId });
+// `seasonScores`: the season score figures a season bonus is worked out from (readSeasonScores, readSeasonScoresOfRun). Each
+// run write reads them BEFORE its transaction opens, in one snapshot whose connection is given back first, so a pay run never
+// holds the payroll lock while it waits for a second connection. The sync reads each score again under the lock and holds a
+// bonus whose score changed in between. Null, and nothing read, on a run dated for no season bonus.
+const syncTechRewards = (trx, run, actorId, seasonScores) => syncTechRewardLines(run, trx, { actorId, seasonScores });
 // The Tech Rewards lines a void or a finalize took off (dropRewardLinesOfWeek), for that event's audit row: ids only. The key is
 // absent when there were none, so every other run's event is unchanged.
 const removedRewards = (ids) => (ids.length ? { tech_rewards_line_ids_removed: ids } : {});
@@ -933,6 +939,7 @@ async function draftRun(input, actor, conn = db) {
   const actorId = actorOf(actor);
   const taken = new PayrollError(409, 'That week already has a pay run. Open it, or void it first.');
   const today = etDateString();
+  const seasonScores = await readSeasonScores(conn, payDate);
   let runId;
   try {
     runId = await conn.transaction(async (trx) => {
@@ -944,7 +951,7 @@ async function draftRun(input, actor, conn = db) {
       await syncReviewBonuses(trx, start, actorId);
       await syncCommission(trx, start, actorId);
       await applyDueSteps(trx, { today });
-      await syncTechRewards(trx, run, actorId);
+      await syncTechRewards(trx, run, actorId, seasonScores);
       const evaluation = await evaluate(trx, run, { lock: true });
       if (!evaluation.checks.length && !evaluation.blocked.length && !evaluation.waiting.length) {
         // No run is kept (this rolls back), so there is no screen to list a waiting Tech Rewards line on: the message says
@@ -967,6 +974,7 @@ async function recomputeRun(runId, actor, conn = db) {
   requireUuid(runId, 'Pay run');
   const actorId = actorOf(actor);
   const today = etDateString();
+  const seasonScores = await readSeasonScoresOfRun(conn, runId);
   await conn.transaction(async (trx) => {
     await lockRunWrite(trx, today);
     const run = await loadRun(trx, runId, { lock: true });
@@ -974,7 +982,7 @@ async function recomputeRun(runId, actor, conn = db) {
     await syncReviewBonuses(trx, run.week_start, actorId);
     await syncCommission(trx, run.week_start, actorId);
     await applyDueSteps(trx, { today });
-    await syncTechRewards(trx, run, actorId);
+    await syncTechRewards(trx, run, actorId, seasonScores);
     const evaluation = await evaluate(trx, run, { lock: true });
     await replaceDraftChecks(trx, runId, evaluation.checks);
     await audit(trx, actorId, 'payroll.run_recomputed', 'payroll_runs', runId, { run_id: runId });
@@ -1021,6 +1029,7 @@ async function finalizeRun(runId, input, actor, conn = db) {
   const v = validate(finalizeSchema, input);
   const actorId = actorOf(actor);
   let changed = false;
+  const seasonScores = await readSeasonScoresOfRun(conn, runId);
   await conn.transaction(async (trx) => {
     await lockPayrollMutations(trx);
     const run = await loadRun(trx, runId, { lock: true });
@@ -1028,7 +1037,7 @@ async function finalizeRun(runId, input, actor, conn = db) {
     await syncReviewBonuses(trx, run.week_start, actorId);
     await syncCommission(trx, run.week_start, actorId);
     await applyDueSteps(trx);
-    await syncTechRewards(trx, run, actorId);
+    await syncTechRewards(trx, run, actorId, seasonScores);
     const evaluation = await evaluate(trx, run, { lock: true });
     if (evaluation.blocked.length || evaluation.waiting.length) throw new PayrollError(409, describeProblems(evaluation));
     if (!evaluation.checks.length) {
@@ -1079,10 +1088,11 @@ async function voidRun(runId, input, actor, conn = db) {
     if (run.status === 'finalized' && await laterFinalCheckExists(trx, run, rows.map((row) => row.technician_id))) {
       throw new PayrollError(409, 'A later pay run is already final. Void it first.');
     }
-    // A paid stay bonus on a later check was worked out from this run's pay (tech-rewards-pay-lines.js paidBonusCounting): the
-    // run that paid the bonus goes first, in another tax year too. Not behind a gate.
-    if (run.status === 'finalized' && await paidBonusCounting(trx, run)) {
-      throw new PayrollError(409, 'A stay bonus on another paycheck was worked out from this pay run. Void the pay run that paid the bonus first.');
+    // A paid stay bonus or season bonus on a later check was worked out from this run's pay (tech-rewards-pay-lines.js
+    // paidBonusCounting): the run that paid the bonus goes first, in another tax year too. Not behind a gate.
+    const countedBy = run.status === 'finalized' ? await paidBonusCounting(trx, run) : null;
+    if (countedBy) {
+      throw new PayrollError(409, `A ${countedBy === 'season_bonus' ? 'season' : 'stay'} bonus on another paycheck was worked out from this pay run. Void the pay run that paid the bonus first.`);
     }
     // Money may be on its way through Mercury: not behind a gate, so turning the gates off never lets a void through.
     await require('./payroll-mercury').assertNoOpenPayments(trx, rows.map((row) => row.id));

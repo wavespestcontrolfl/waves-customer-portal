@@ -23,7 +23,7 @@ const {
   validateStaffPassword,
 } = require('../utils/staff-password-policy');
 const { validDateOnly } = require('../utils/date-only');
-const { canonicalStaffEmail } = require('../utils/staff-identity');
+const { canonicalStaffEmail, findStaffByLoginEmail } = require('../utils/staff-identity');
 const { hashResetToken, mintResetToken } = require('../services/staff-reset-token');
 const { employmentPatch } = require('../services/technician-eligibility');
 const { seedNewHireCapabilities } = require('../services/technician-capabilities');
@@ -249,10 +249,13 @@ async function login(req, res, next) {
       .select('*');
 
     const candidate = matches.length === 1 ? matches[0] : null;
-    const passwordHash = typeof candidate?.password_hash === 'string' && candidate.password_hash
+    const ownHash = typeof candidate?.password_hash === 'string' && candidate.password_hash
       ? candidate.password_hash
-      : DUMMY_STAFF_PASSWORD_HASH;
-    const valid = await bcrypt.compare(password, passwordHash);
+      : null;
+    // The comparison always runs, for timing. A match against the fixed stand-in hash proves nothing about an
+    // account: a row with no password of its own (a hire who has not set one yet, or who signs in with Google)
+    // never gets a password session.
+    const valid = await bcrypt.compare(password, ownHash || DUMMY_STAFF_PASSWORD_HASH) && Boolean(ownHash);
 
     if (matches.length !== 1) {
       if (matches.length > 1) {
@@ -624,13 +627,17 @@ async function issuePasswordReset(email) {
     const matches = await canonicalStaffEmailQuery(trx, normalizedEmail)
       .where({ active: true })
       .whereIn('role', ['admin', 'technician'])
-      .select('id', 'email');
+      .select('id', 'email', 'google_only_login_at');
     if (matches.length !== 1) {
       if (matches.length > 1) {
         logger.error(`[staff-auth] Password reset blocked by canonical email collision (matches=${matches.length})`);
       }
       return null;
     }
+    // A Google-only account (the Team tab's Hired press on a row with a linked company Google address) has no
+    // password by design. The email on that row can be one typed on a job application, which nobody proved, so a
+    // reset request sends it nothing. The table's CHECK refuses a token on such a row as well.
+    if (matches[0].google_only_login_at) return null;
 
     const [updated] = await trx('technicians')
       .where({ id: matches[0].id, active: true })
@@ -859,7 +866,8 @@ async function register(req, res, next) {
     const hash = await bcrypt.hash(password, 12);
     const outcome = await db.transaction(async (trx) => {
       await lockStaffAccountMutations(trx);
-      const existing = await canonicalStaffEmailQuery(trx, normalizedEmail).first('id');
+      // One mailbox, one staff row: not another row's email and not another row's linked Google address.
+      const existing = await findStaffByLoginEmail(trx, normalizedEmail);
       if (existing) return { conflict: true };
       const [tech] = await trx('technicians').insert({
         name: normalizedName,

@@ -85,6 +85,7 @@ require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true, exports: n
 const { buildIssue } = require('../../server/services/pest-insider');
 const { sendDateET } = require('../../server/services/pest-insider/facts');
 const { wrapIssueHtml, withToolBlock } = require('../../server/services/pest-insider/render');
+const { neutralizeIssueTokens } = require('../../server/services/pest-insider/referral-line');
 const { RECENT_WINDOW } = require('../../server/services/pest-insider/plan');
 const { POSTS, POST_URLS, postUrl, checkLivePosts } = require('../../server/services/pest-insider/posts');
 const { loadTools } = require('../../server/services/pest-insider/tools');
@@ -96,9 +97,12 @@ for (const d of dates) {
 
 function saveIssue(sendDate, issue) {
   const base = path.join(outDir, `pest-insider-${sendDate}`);
-  const html = wrapIssueHtml(issue, { unsubscribeUrl: '{{unsubscribe_url}}' });
+  // The files show the issue as a surface with no reader shows it (the
+  // archive): no "Your home" block, and the referral line with no amount.
+  const shown = { ...issue, html_body: neutralizeIssueTokens(issue.html_body), text_body: neutralizeIssueTokens(issue.text_body) };
+  const html = wrapIssueHtml(shown, { unsubscribeUrl: '{{unsubscribe_url}}' });
   fs.writeFileSync(`${base}.html`, `<!-- subject: ${issue.subject.replace(/--/g, '- -')} -->\n${html}`);
-  fs.writeFileSync(`${base}.txt`, `Subject: ${issue.subject}\nPreview: ${issue.preview}\n\n${issue.text_body}`);
+  fs.writeFileSync(`${base}.txt`, `Subject: ${issue.subject}\nPreview: ${issue.preview}\n\n${shown.text_body}`);
   return base;
 }
 

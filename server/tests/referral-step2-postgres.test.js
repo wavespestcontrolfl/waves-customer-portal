@@ -369,6 +369,19 @@ const DAY = 86400000;
       });
     });
 
+    test('the friend credit follows the Referee Discount setting: $50 for the friend, $25 for the member', async () => {
+      await db('referral_program_settings').where({ id: 1 }).update({ referee_discount_cents: 5000 });
+      try {
+        const { member, friend, visit, ref } = await performed({ memberFields: HOME });
+        const result = await firstService(friend, visit);
+        expect(result).toMatchObject({ referralId: ref.id, referrerDollars: 25, refereeDollars: 50 });
+        expect(await amounts(friend.id)).toEqual([50]);
+        expect(await amounts(member.id)).toEqual([25]);
+      } finally {
+        await db('referral_program_settings').where({ id: 1 }).update({ referee_discount_cents: 2500 });
+      }
+    });
+
     test("the promoter's total earned follows the real credit: $25, $0 at the cap", async () => {
       const first = await performed({ memberFields: HOME });
       const staged = await db('referral_promoters').where({ id: first.ref.promoter_id }).first();
@@ -739,7 +752,7 @@ const DAY = 86400000;
       await db('referral_program_settings').where({ id: 1 }).update({ step2_referrer_reward_cents: 3000 });
       const member = await customer({ email: 'member@example.invalid' });
       await sendReferralInviteEmail({ customerId: member.id });
-      expect(lineOf()).toBe('you get a $30 referral reward and they get $25 off their first service.');
+      expect(lineOf()).toBe('you get a $30 referral reward and they get a $25 credit after their first plan service.');
     });
 
     test('gate on, program_active cleared (null): the program counts as paused', async () => {
@@ -793,7 +806,7 @@ const DAY = 86400000;
         });
       }
       await sendReferralInviteEmail({ customerId: member.id });
-      expect(lineOf()).toBe('they get $25 off their first service.');
+      expect(lineOf()).toBe('they get a $25 credit after their first plan service.');
       expect(lineOf()).not.toMatch(/you get/);
       // No friend discount either: nothing to say, so no email.
       sendTemplate.mockClear();

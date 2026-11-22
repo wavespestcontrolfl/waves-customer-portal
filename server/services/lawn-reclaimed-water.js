@@ -1,5 +1,5 @@
 /**
- * Reclaimed water, the property fact (GATE_LAWN_RECLAIMED_HALF_N, owner 2026-10-23).
+ * Reclaimed water, the property fact (owner 2026-10-23).
  *
  * customer_properties.reclaimed_water says whether the property's irrigation runs on reclaimed (purple pipe) water, and
  * reclaimed_water_source says who said so:
