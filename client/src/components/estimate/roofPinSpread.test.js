@@ -153,6 +153,26 @@ describe('spreadPins', () => {
     expect(minPairGap(out, 294)).toBeGreaterThanOrEqual(MIN - 0.05);
   });
 
+  it('keeps the lines of two groups apart: a row of four close points with a close pair above it', () => {
+    // With each ring picked on its own, the line of badge 2 ran through the dot of point 6 and across its line.
+    const px = [[100, 100], [120, 100], [140, 100], [160, 100], [122, 72], [127, 72]];
+    const out = spreadPins(px.map(([x, y]) => ({ x: x / 294, y: y / 294 })), 294);
+    expect(out.every((p) => p.callout)).toBe(true);
+    const at = (p) => ({ from: { x: p.fromX * 294, y: p.fromY * 294 }, badge: { x: p.x * 294, y: p.y * 294 } });
+    const toLine = (q, a, b) => {
+      const t = Math.min(1, Math.max(0, ((q.x - a.x) * (b.x - a.x) + (q.y - a.y) * (b.y - a.y)) / ((b.x - a.x) ** 2 + (b.y - a.y) ** 2)));
+      return Math.hypot(q.x - (a.x + t * (b.x - a.x)), q.y - (a.y + t * (b.y - a.y)));
+    };
+    const [row, pair] = [out.slice(0, 4).map(at), out.slice(4).map(at)];
+    // A dot is 4 px in radius: no line of one group comes within 6 px of the centre of a dot of the other.
+    row.forEach((line) => pair.forEach((other) => expect(toLine(other.from, line.from, line.badge)).toBeGreaterThanOrEqual(5.9)));
+    pair.forEach((line) => row.forEach((other) => expect(toLine(other.from, line.from, line.badge)).toBeGreaterThanOrEqual(5.9)));
+    expect(linesCrossing(out)).toBe(0);
+    expect(linesUnderBadges(out, 294)).toBe(0);
+    expect(dotsVisible(out, 294)).toBe(true);
+    expect(minPairGap(out, 294)).toBeGreaterThanOrEqual(MIN - 0.05);
+  });
+
   it('keeps a group clear of a badge that does not move: the ring uses the free arc and no line runs under that badge', () => {
     // Two points 10 px apart, and a third 34 px to the right of them: not crowded, so it stays where it is.
     const out = spreadPins([{ x: 0.4, y: 0.5 }, { x: 0.4 + 10 / 294, y: 0.5 }, { x: 0.4 + 44 / 294, y: 0.5 }], 294);

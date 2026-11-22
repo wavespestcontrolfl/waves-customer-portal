@@ -14,9 +14,10 @@
 //    does not run under another badge and look as if it ends there, and the badges take the ring places that make the
 //    lines shortest, so no two lines of a group cross.
 //  - A ring cut by the photo edge, by another badge or by another group uses its longest free arc.
-//  - A badge that does not move can sit inside a ring, and a line can run under it. So every ring that fits is
-//    checked: the first one (smallest, then by start angle) whose lines run under no badge is used. The ring grows to
-//    find one, and the ring with the fewest such lines is used when none is clean (10 to 20 points on one line).
+//  - A badge that does not move can sit inside a ring, and another group can be next to it. So every ring that fits
+//    is checked for lines that would mislead: a line under a badge it is not for, a line over the dot of another
+//    group, a line across a line drawn before. The first ring (smallest, then by start angle) with none is used. The
+//    ring grows to find one, and the ring with the fewest is used when none is clean (10 to 20 points on one line).
 //  - A group no ring fits places badge by badge at the nearest free spot: badges apart first, then off the dots. With
 //    no free spot at all the badge stays on its point. About 15 or more points on one spot in a photo corner get no
 //    clean ring inside RING_REACH_PX, and there a line can run under a badge.
@@ -31,8 +32,10 @@ const NUDGE_PX = 6;
 // The dot the card draws at a called-out point, and the clear roof between that dot and the rim of any badge.
 export const DOT_PX = 8;
 const CALLOUT_GAP_PX = 5;
-// The clear roof between a line and the rim of a badge it is not for.
+// The clear roof between a line and the rim of a badge it is not for, and between a line and the rim of a dot of
+// another group.
 const LINE_GAP_PX = 3;
+const DOT_GAP_PX = 2;
 const TAU = 2 * Math.PI;
 // A ring is checked at this many places round it, grows by RING_GROW_PX up to RING_REACH_PX past its smallest size, and
 // a ring that is free all the way round is tried at RING_TURNS start angles.
@@ -184,19 +187,29 @@ function takePlaces(froms, places, c) {
   return take.map((k) => places[k]);
 }
 
-// How many times a line (from a point to its badge) runs under a badge that is not its own.
-function linesUnderBadges(froms, spots, placed, lineClear) {
+// Do the lines a-b and c-d cross each other (not only touch at an end)?
+function linesCross(a, b, c, d) {
+  const side = (p, q, r) => Math.sign((q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x));
+  return side(a, b, c) * side(a, b, d) < 0 && side(c, d, a) * side(c, d, b) < 0;
+}
+
+// How many times a line of this ring (from a point to its badge) would mislead: it runs under a badge that is not its
+// own, over the dot of another group, or across a line drawn before.
+function lineFaults(froms, spots, { placed, otherDots, lines, lineClear, dotCover }) {
   let count = 0;
   froms.forEach((from, i) => {
-    const under = (q) => gapToLine(q, from, spots[i]) < lineClear - SETTLED_EPSILON_PX;
-    count += spots.filter((q, j) => j !== i && under(q)).length + placed.filter(under).length;
+    const near = (dist) => (q) => gapToLine(q, from, spots[i]) < dist - SETTLED_EPSILON_PX;
+    count += spots.filter((q, j) => j !== i && near(lineClear)(q)).length
+      + placed.filter(near(lineClear)).length
+      + otherDots.filter(near(dotCover)).length
+      + lines.filter((l) => linesCross(from, spots[i], l.from, l.to)).length;
   });
   return count;
 }
 
 // The badge places for one group, one per point in the group's order, or null when no ring fits. The smallest ring
 // keeps every dot of the group clear and holds the group's badges; the first ring whose lines run under no badge wins.
-function ringFor(froms, placed, free, { minDist, dotClear, lineClear }) {
+function ringFor(froms, free, drawn, { minDist, dotClear }) {
   const n = froms.length;
   const c = { x: froms.reduce((sum, f) => sum + f.x, 0) / n, y: froms.reduce((sum, f) => sum + f.y, 0) / n };
   const smallest = Math.max(Math.max(...froms.map((f) => gapBetween(f, c))) + dotClear, minDist / 2 / Math.sin(Math.PI / n));
@@ -209,7 +222,7 @@ function ringFor(froms, placed, free, { minDist, dotClear, lineClear }) {
       const places = ringPlaces(ring, n, arc, turn);
       if (!places) break;
       const spots = takePlaces(froms, places, c);
-      const faults = linesUnderBadges(froms, spots, placed, lineClear);
+      const faults = lineFaults(froms, spots, drawn);
       const len = spots.reduce((sum, spot, i) => sum + gapBetween(froms[i], spot), 0);
       const better = !best || faults < best.faults || (faults === best.faults && r === best.r && len < best.len - 1e-9);
       if (better) best = { spots, faults, len, r };
@@ -245,7 +258,9 @@ function callOut(pts, crowded, { minDist, dotClear, lineClear, lo, hi }) {
   const free = (s) => apart(s) && clearOf(s, dots, dotClear) && lines.every((l) => gapToLine(s, l.from, l.to) >= lineClear);
   const farthest = (hi - lo) * Math.SQRT2;
   for (const group of crowdedGroups(pts, crowded, minDist)) {
-    const ring = ringFor(group.map((i) => pts[i].from), placed, free, { minDist, dotClear, lineClear });
+    const froms = group.map((i) => pts[i].from);
+    const drawn = { placed, lines, otherDots: dots.filter((d) => !froms.includes(d)), lineClear, dotCover: DOT_PX / 2 + DOT_GAP_PX };
+    const ring = ringFor(froms, free, drawn, { minDist, dotClear });
     group.forEach((i, k) => {
       const p = pts[i];
       const spot = ring ? ring[k]
