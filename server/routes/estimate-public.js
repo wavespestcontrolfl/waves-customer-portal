@@ -1828,7 +1828,9 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   const moveIn = data?.move?.moveId && estimate.id
     ? (await require('../services/customer-moves').moveForEstimate(estimate.id, conn))?.move_in_date || null
     : null;
-  const firstAdoptableDate = moveIn && moveIn > today ? moveIn : today;
+  // A plan offer's quote adopts none before its firstVisitFrom either (owner 2026-11-19).
+  const offerFrom = require('../services/plan-offer-estimate').planOfferOf(data)?.firstVisitFrom;
+  const firstAdoptableDate = [moveIn, offerFrom].reduce((latest, from) => (from && from > latest ? from : latest), today);
   // Commit-time grace (accept path only): the estimate's OWN hold that
   // lapsed moments ago is still adoptable — commitReservation re-runs every
   // conflict check under the date lock, so nothing double-books. The view
@@ -12437,6 +12439,19 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
             }
           }
         }
+        // A plan offer's quote (owner 2026-11-19: the one-time job is the first plan visit): an adopted
+        // (non-hold) visit skips commitReservation's date check, so it is compared with firstVisitFrom, read
+        // from the estimate data this accept holds under its lock, as the move check above does.
+        const offerFrom = require('../services/plan-offer-estimate').planOfferOf(freshLinkData)?.firstVisitFrom;
+        if (offerFrom && existingAppointmentRow && !isReservationHeldAppointment(existingAppointmentRow)) {
+          const visitNow = await trx('scheduled_services').where({ id: existingAppointmentRow.id }).first('scheduled_date');
+          if (!visitNow || dateOnly(visitNow.scheduled_date) < offerFrom) {
+            const err = new Error('That visit is before your next plan visit window. Please pick a time on or after it.');
+            err.status = 409;
+            err.code = 'BEFORE_PLAN_VISIT_WINDOW';
+            throw err;
+          }
+        }
         // The call row is locked FOR UPDATE and HELD through the
         // acceptance write (codex P1, PR #3304 GH r6): an ordinary
         // SELECT would not serialize against the processor's concurrent
@@ -22634,6 +22649,8 @@ function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
   // auto-extension would revive the expired token's frozen dollars with no
   // recompute in the loop.
   if (String(estimate.source || '') === 'plan_restart') return false;
+  // A plan offer's quote ends on its own date (owner 2026-11-19); the customer's way back is the office.
+  if (require('../services/plan-offer-estimate').planOfferOf(estimate.estimate_data)) return false;
   // A held row (clarify re-price) is ineligible too — the renderer refuses
   // it, so an auto-grant would re-send a link that 404s (codex r7 P0 on
   // #3804); the extension writes carry the same predicate for the window

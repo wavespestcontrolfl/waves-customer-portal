@@ -34,3 +34,16 @@ test('the converter checks the move before it schedules anything', () => {
   expect(checkAt).toBeGreaterThan(-1);
   expect(src.indexOf('pickFirstServiceDate(customer, estimateId, { serviceKey: firstVisitServiceKey })')).toBeGreaterThan(checkAt);
 });
+
+test('the public accept refuses an adopted visit before a plan offer\'s first visit date, under the estimate row lock, before any branch (owner 2026-11-19)', () => {
+  const src = read('routes/estimate-public.js');
+  const lockAt = src.indexOf("const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first(");
+  const offerAt = src.indexOf("err.code = 'BEFORE_PLAN_VISIT_WINDOW';", lockAt);
+  const convertAt = src.indexOf('EstimateConverter.convertEstimate(estimate.id, {', lockAt);
+  expect(lockAt).toBeGreaterThan(-1);
+  expect(offerAt).toBeGreaterThan(lockAt);
+  expect(convertAt).toBeGreaterThan(offerAt);
+  // It reads the stamp from the estimate data the accept holds under that lock, and only an adopted (non-hold) visit is compared.
+  const window = src.slice(src.lastIndexOf('planOfferOf(freshLinkData)', offerAt), offerAt);
+  expect(window).toContain('!isReservationHeldAppointment(existingAppointmentRow)');
+});
