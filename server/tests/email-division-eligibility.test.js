@@ -455,12 +455,18 @@ describe('email-division eligibility', () => {
     // Offers on and referral asks by email: both parts allowed.
     const ALL_ON = { marketing_offers: true, referral_channel: 'email' };
     let reads;
+    let snapshot;
+    afterEach(() => { delete db.transaction; });
     const consent = ({
       prefs = ALL_ON, suppressions = [], email = 'sandy@example.test', customerId = 'cust-1',
       customer = customerRow(), dnc,
     } = {}) => {
       reads = { customers: 0, messaging_suppression: 0, notification_prefs: 0, email_suppressions: 0 };
-      db.mockImplementation((table) => {
+      // Every read goes through the snapshot's own handle: a read on the
+      // pool is outside the snapshot and fails the test.
+      db.mockImplementation((table) => { throw new Error(`Read of ${table} outside the snapshot`); });
+      db.transaction = jest.fn(async (work) => work(snapshot));
+      snapshot = jest.fn((table) => {
         if (!(table in reads)) throw new Error(`Unexpected db table ${table}`);
         reads[table] += 1;
         // `suppressions` may be a function of the read's number, for a row
@@ -488,6 +494,21 @@ describe('email-division eligibility', () => {
     test('both parts come from one read of each table', async () => {
       expect(await consent()).toEqual(YES);
       expect(reads).toEqual({ customers: 1, messaging_suppression: 1, notification_prefs: 1, email_suppressions: 1 });
+    });
+
+    // The four reads share one repeatable-read, read-only snapshot (pre-push
+    // audit P1 2026-11-22): a choice and a suppression that were never true
+    // together cannot add up to a yes.
+    test('the reads run in one repeatable-read, read-only snapshot', async () => {
+      expect(await consent()).toEqual(YES);
+      expect(db.transaction).toHaveBeenCalledTimes(1);
+      expect(db.transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: 'repeatable read', readOnly: true });
+      expect(snapshot).toHaveBeenCalledTimes(4);
+      // No customer or no address: no snapshot is opened.
+      expect(await consent({ customerId: null })).toEqual(NO);
+      expect(db.transaction).not.toHaveBeenCalled();
+      expect(await consent({ email: '' })).toEqual(NO);
+      expect(db.transaction).not.toHaveBeenCalled();
     });
 
     // A do-not-email row that lands while the evaluation runs (pre-push audit

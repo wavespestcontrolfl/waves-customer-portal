@@ -301,15 +301,14 @@ function prefsAllowPitch(prefs) {
 // never gets promotional copy on the new address's choices.
 const sameAddress = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
 const EMBEDDED_LINE_HOST = { stream: 'lifecycle', marketingClass: 'relationship', emailKey: 'embedded-line-host' };
-async function embeddedLineContext({ customerId, email, conn } = {}) {
-  if (!customerId || !email) return null;
-  const ctx = { ...EMBEDDED_LINE_HOST, customerId, database: conn || db, checks: {} };
+async function embeddedLineContext({ customerId, email, database }) {
+  const ctx = { ...EMBEDDED_LINE_HOST, customerId, database, checks: {} };
   if (await checkCustomer(ctx)) return null;
   if (!sameAddress(ctx.customer.email, email)) return null;
   // One read of the address's suppression rows for the whole evaluation: the
   // contact check, the marketing unsubscribe and the referral unsubscribe
   // all judge these rows (blockingSuppressions).
-  ctx.suppressionRows = await activeSuppressionRows(ctx.customer.email, ctx.database);
+  ctx.suppressionRows = await activeSuppressionRows(ctx.customer.email, database);
   for (const check of [checkStaffDnc, checkSuppression, checkEmailSwitchStreamFlagAndChannel]) {
     if (await check(ctx)) return null;
   }
@@ -338,11 +337,19 @@ async function referralAskAllowed(ctx) {
 //   referralAsk — the referral part: pitch, and the referral email's own
 //                 rules. A no here drops the referral part only, so an
 //                 allowed service offer still rides the line.
+// Every input (the customer row, a staff do-not-contact, the suppression
+// rows, the choices) is read in ONE repeatable-read snapshot, the repo's
+// pattern for a final check (visit-prep.js, estimate-consultation-offer.js):
+// values that were never true together cannot add up to a yes.
 const NO_LINE = Object.freeze({ pitch: false, referralAsk: false });
-async function embeddedLineConsent(who = {}) {
-  const ctx = await embeddedLineContext(who);
-  if (!ctx?.checks.allowPitch) return NO_LINE;
-  return { pitch: true, referralAsk: await referralAskAllowed(ctx) };
+const CONSENT_SNAPSHOT = { isolationLevel: 'repeatable read', readOnly: true };
+async function embeddedLineConsent({ customerId, email } = {}) {
+  if (!customerId || !email) return NO_LINE;
+  return db.transaction(async (trx) => {
+    const ctx = await embeddedLineContext({ customerId, email, database: trx });
+    if (!ctx?.checks.allowPitch) return NO_LINE;
+    return { pitch: true, referralAsk: await referralAskAllowed(ctx) };
+  }, CONSENT_SNAPSHOT);
 }
 
 async function checkEmailSwitchStreamFlagAndChannel(ctx) {
