@@ -562,6 +562,11 @@ async function sitCandidate({ dbi, patch, runner, lock, now, open, complete, fin
   if (closed) return { skipped: closed };
   let baselineId = open && open.baseline_run_id;
   if (!open) {
+    // A further sitting is drafted under the setup that is live NOW. When the model or the voice profile moved
+    // since the finished sittings, the new pair could never be compared with them: the exam is settled before
+    // another baseline is paid for.
+    const moved = finished ? await liveSetupReason(dbi, finished.candidateSittings[0].run) : null;
+    if (moved) return { refused: { reason: moved, detail: {} } };
     const got = await obtainBaseline({ dbi, patch, runner, lock, now, exclude: complete.map((r) => r.baseline_run_id).filter(Boolean) });
     if (!got.baseline) return got;
     baselineId = got.baseline.id;
@@ -709,18 +714,25 @@ async function raiseRuleAlert({ notify, patchNo, patchId, kind, reason }) {
   }
 }
 
+// Does this exam run still describe the live setup: the exam leg's model and the effective voice profile?
+// null = it does, else the reason. Read at activation, and before a further sitting of an exam is paid for.
+async function liveSetupReason(dbi, run) {
+  const { EXAM_LEG_ROUTES } = require('./sms-sealed-eval');
+  if (run.model !== EXAM_LEG_ROUTES[EXAM_LEG].model) return 'exam_model_changed';
+  const profile = await require('./sms-shadow-drafter').resolveEffectiveVoiceProfile({ dbi });
+  return (run.voice_profile_version ?? null) === (profile?.version ?? null) ? null : 'exam_profile_changed';
+}
+
 // The exam that earned the decision must still describe the live setup: same model and same
 // effective voice profile (a profile approval or a model swap between an observe-mode decision and
 // its activation, or a resumed run, leaves the base identity unchanged). The bar it met must also be at
 // least the bar as it is set now: a decision recorded on fewer sittings a side, or with an unsafe rise the
 // allowance no longer admits, is not acted on. null = still valid.
 async function staleEvidenceReason(dbi, cand) {
-  const { EXAM_LEG_ROUTES } = require('./sms-sealed-eval');
   const run = cand.exam_run_id ? await dbi('sms_sealed_eval_runs').where({ id: cand.exam_run_id }).first('status', 'model', 'voice_profile_version') : null;
   if (!run || run.status !== 'complete') return 'exam_missing';
-  if (run.model !== EXAM_LEG_ROUTES[EXAM_LEG].model) return 'exam_model_changed';
-  const profile = await require('./sms-shadow-drafter').resolveEffectiveVoiceProfile({ dbi });
-  if ((run.voice_profile_version ?? null) !== (profile?.version ?? null)) return 'exam_profile_changed';
+  const moved = await liveSetupReason(dbi, run);
+  if (moved) return moved;
   // A decision from before the sittings settings has none of these keys: one sitting a side, no net unsafe rise.
   const detail = cand.decision_detail || {};
   const count = (side, key, fallback) => (side && Number.isFinite(Number(side[key])) ? Number(side[key]) : fallback);

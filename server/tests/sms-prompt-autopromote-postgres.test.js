@@ -1047,6 +1047,24 @@ const ENV_NAMES = ['GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_AUTOPROMOTE', 'GATE
         expect(await trx('sms_sealed_eval_runs').where({ status: 'running' })).toHaveLength(0);
       });
 
+      test.each([
+        ['voice profile', { voice_profile_version: 987 }, 'exam_profile_changed'],
+        ['exam model', { model: 'some-older-model' }, 'exam_model_changed'],
+      ])('a %s that moved since the finished sitting settles the exam before another baseline is paid for', async (_name, was, reason) => {
+        process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = '2';
+        const items = await seedItems();
+        const patch = await insertPatch();
+        // The first pair, both runs drafted under the setup that was live then.
+        const base = await insertRun({ items, version: drafter.currentPromptVersion(), over: { ...was, started_at: new Date(NOW.getTime() - 5 * 3600_000) } });
+        await insertRun({
+          items, version: patchLib.stampPatchVersion(baseVersion(), patch.version_tag), patchId: patch.id, baselineId: base.id, overall: 7, actions: 6.5,
+          over: { ...was, started_at: new Date(NOW.getTime() - 4 * 3600_000) },
+        });
+        const { runner } = sittingRunner({ items });
+        expect(await auto.examineCandidate({ dbi: trx, now: NOW, runner, lock: lockThrough, notify: jest.fn() })).toEqual({ rejected: patch.id, reason });
+        expect(runner).not.toHaveBeenCalled();
+      });
+
       test('a baseline the finished sittings may not be compared with settles the exam before its candidate sitting is paid for', async () => {
         process.env.PROMPT_AUTOPROMOTE_EXAM_SITTINGS = '3';
         const items = await seedItems();
