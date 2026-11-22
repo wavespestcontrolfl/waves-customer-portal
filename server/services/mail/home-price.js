@@ -16,9 +16,11 @@
  * writes are the price columns of mail_prospects and the permit page result (through the permit reader's recordResult).
  * Nothing calls runHomePrices yet: the cron tick is the next PR.
  *
- * Limits: strictly sequential; a 20 minute budget; at most 40 rows. Three errors in a row that are not a row's own
- * stop the run (the database is away), and so do three price engine failures in a row (the engine or the live price
- * list is away). The run THROWS at its end, after logging, when a source was away (the facts reader says so), when the
+ * Limits: strictly sequential; a 20 minute budget, which also ends a permit page read between two of its requests;
+ * at most 40 homes handled in one run. A home left for a stopped source is not one of the 40: the run goes on to the
+ * homes behind it (it looks at up to 200 due rows), so homes that wait for the permit page cannot hold back homes that
+ * need no page. Three errors in a row that are not a row's own stop the run (the database is away), and so do three
+ * price engine failures in a row (the engine or the live price list is away). The run THROWS at its end, after logging, when a source was away (the facts reader says so), when the
  * price engine failed for every home it was asked or three times in a row, when a row could not be read or saved, or
  * when the database was away, so the job's health row records a failure. Rows left only by the row cap or the budget do
  * not make it throw.
@@ -31,7 +33,8 @@ const homeFacts = require('./home-facts');
 const { priceHome } = require('./home-quote');
 
 const BUDGET_MS = 20 * 60 * 1000;
-const ROW_CAP = 40;
+const ROW_CAP = 40; // homes handled (read and saved, kept or failed) in one run
+const READ_CAP = 200; // due rows one run looks at: a home left for a stopped source is not one of the 40
 const MAX_ERRORS_IN_A_ROW = 3;
 const MAX_ENGINE_FAILURES_IN_A_ROW = 3;
 const SINGLE_FAMILY_WORK = 'new single family';
@@ -105,13 +108,16 @@ function nextErrorStreak(streak, err) {
   return isArgumentError(err) ? streak : streak + 1;
 }
 
-// The due rows, one at a time, until the budget is spent, the database is away or the price engine is away.
-// Each stop is judged right after the row that causes it: the last row of a batch counts too, and a spent budget
-// cannot hide it.
+// The due rows, one at a time, until 40 homes were handled, the budget is spent, the database is away or the price
+// engine is away. A row left for a stopped source is not one of the 40. Each stop is judged right after the row that
+// causes it: the last row of a batch counts too, and a spent budget cannot hide it.
 async function handleDueRows(due, ctx, startedAt, summary) {
   let errorStreak = 0;
+  let handled = 0;
   for (const row of due) {
     if (ctx.clock() - startedAt >= BUDGET_MS) { summary.budgetSpent = true; return; }
+    if (handled >= ROW_CAP) { summary.capReached = true; return; }
+    const leftBefore = ctx.state.left;
     try {
       await handleRow(row, ctx);
       errorStreak = 0;
@@ -119,16 +125,19 @@ async function handleDueRows(due, ctx, startedAt, summary) {
       errorStreak = nextErrorStreak(errorStreak, err);
       bump(ctx.state.errors, errorCode(err));
     }
+    if (ctx.state.left === leftBefore) handled += 1;
     // Several errors in a row that are not a row's own mean the database is away: the rest waits.
     if (errorStreak >= MAX_ERRORS_IN_A_ROW) { summary.errorStop = true; return; }
     // Several price engine failures in a row mean the engine or the live price list is away: the rest waits.
     if (ctx.state.engineStreak >= MAX_ENGINE_FAILURES_IN_A_ROW) { summary.engineStop = true; return; }
   }
+  // Every row of the read was looked at. A full read means more may wait behind it.
+  summary.capReached = due.length >= READ_CAP;
 }
 
 async function readDueRows(d, startedAt) {
   try {
-    return await d.dueForPrice({ limit: ROW_CAP, now: new Date(startedAt) });
+    return await d.dueForPrice({ limit: READ_CAP, now: new Date(startedAt) });
   } catch (err) {
     // A database error can quote the query and its values: only its code leaves the module.
     throw new Error(`Mail home prices: the due rows could not be read (${errorCode(err)})`);
@@ -169,19 +178,23 @@ async function runHomePrices({ now = Date.now, deps } = {}) {
   const clock = clockOf(now);
   const startedAt = clock();
   const state = { left: 0, kept: 0, byStatus: {}, byReason: {}, errors: {}, quotes: 0, engineFailures: 0, engineStreak: 0 };
-  const ctx = { d, deps: d, state, clock, facts: homeFacts.createFactsContext({ deps: d, clock }) };
+  // The facts reader gets the run's deadline: a permit page read is up to 14 requests, and none is sent after it.
+  const facts = homeFacts.createFactsContext({ deps: d, clock, deadline: startedAt + BUDGET_MS });
+  const ctx = { d, deps: d, state, clock, facts };
   const due = await readDueRows(d, startedAt);
-  const summary = { due: due.length, capReached: due.length >= ROW_CAP, budgetSpent: false, errorStop: false, engineStop: false };
+  const summary = { due: due.length, capReached: false, budgetSpent: false, errorStop: false, engineStop: false };
   await handleDueRows(due, ctx, startedAt, summary);
   Object.assign(summary, {
     priced: state.byStatus.priced || 0, byStatus: state.byStatus, byReason: state.byReason, left: state.left, kept: state.kept,
     quotes: state.quotes, engineFailures: state.engineFailures,
     ...homeFacts.factsSummary(ctx.facts), errors: state.errors, ms: clock() - startedAt,
   });
+  // A permit page read the deadline cut is the budget too, also when it was the run's last row.
+  if (summary.permitBudgetStop) summary.budgetSpent = true;
   logger.info(`Mail home prices: ${JSON.stringify(summary)}`);
   const problems = problemsOf(ctx, summary);
   if (problems.length) throw Object.assign(new Error(`Mail home prices: ${problems.join('; ')}`), { summary });
   return summary;
 }
 
-module.exports = { runHomePrices, BUDGET_MS, ROW_CAP, MAX_ERRORS_IN_A_ROW, MAX_ENGINE_FAILURES_IN_A_ROW };
+module.exports = { runHomePrices, BUDGET_MS, ROW_CAP, READ_CAP, MAX_ERRORS_IN_A_ROW, MAX_ENGINE_FAILURES_IN_A_ROW };
