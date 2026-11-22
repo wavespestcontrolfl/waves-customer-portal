@@ -45,7 +45,7 @@ const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 const { nanpPhoneProblem } = require('../utils/phone');
 const { CUSTOMER_ANSWERED_SQL, callLogPhoneFor } = require('./estimate-call-list');
 const {
-  STAGING_LOOKBACK_DAYS, STAGING_GRACE_MINUTES, STAGING_STALE_MS, computeSendAt, callEndFor,
+  STAGING_LOOKBACK_DAYS, STAGING_GRACE_MINUTES, STAGING_STALE_MS, QUEUE_SCAN_LOOKBACK_MS, computeSendAt, callEndFor,
   bookedSinceCall, visitStampedWithCall,
 } = require('./call-booking-link-text');
 
@@ -375,9 +375,12 @@ async function decideOne(conn, callId, entry, now) {
   return (await recordDecision(conn, callId, entry, value)) ? value : null;
 }
 
-// Pending rows whose time has come, oldest first.
+// Pending rows whose time has come, oldest first. Bounded by the call's age (the booking-link lane's own queue
+// window: staging lookback + the 24 h give-up + a day), so a tick never reads the whole call table. A row is staged
+// within 3 days of its call and decided or given up within about 38 h of staging, so no live row falls outside it.
 function duePending(conn, now) {
   return conn('call_log')
+    .where('created_at', '>=', new Date(now.getTime() - QUEUE_SCAN_LOOKBACK_MS))
     .whereRaw("metadata->:key->>'status' = 'pending' AND (metadata->:key->>'send_at')::timestamptz <= :now::timestamptz",
       { key: METADATA_KEY, now: now.toISOString() })
     .orderByRaw("(metadata->:key->>'send_at')::timestamptz ASC", { key: METADATA_KEY })
