@@ -359,6 +359,13 @@ postgres('mail prospect store on PostgreSQL', () => {
     // A connection in the options' place (the call form before this change) is refused, not ignored.
     await expect(newHomePermitsForParcels([parcel('4000000041')], conn)).rejects.toThrow('the connection is the third argument');
     expect(Object.keys(await newHomePermitsForParcels([parcel('4000000041')], undefined, conn))).toEqual(['4000000041']);
+    // No issue date: the certificate must be there by the sale day.
+    await permit('BLD9900-0042', { parcel_pin: '4200000041', issued_date: null, co_date: dateAgo(2) });
+    const noIssueDate = async (soldOn) => Object.keys(await newHomePermitsForParcels([parcel('4200000041')], { soldOn }));
+    expect(await noIssueDate(dateAgo(5))).toEqual([]); // sold before the certificate
+    expect(await noIssueDate(dateAgo(2))).toEqual(['4200000041']); // sold on the certificate's day
+    expect(await noIssueDate(dateAgo(1))).toEqual(['4200000041']); // sold after it
+    expect(await noIssueDate(undefined)).toEqual(['4200000041']); // no sale day: as before
   });
 
   test('new-home permits: a certificate or an issue date after today does not count', async () => {
