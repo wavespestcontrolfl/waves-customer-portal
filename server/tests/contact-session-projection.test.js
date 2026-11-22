@@ -199,7 +199,7 @@ describe('pure projections', () => {
       hasCancellableWork: true, reservice: { url: '/reservice/rt', lanes: ['pest'] }, overlayHandoff: true,
       upcoming: [{
         id: 'a', date: '2099-01-05', serviceType: 'Pest Control', status: 'confirmed', technician: 'Adam', serviceDisplayName: null,
-        isRecurring: true, isCallback: false, waveguardQualifying: true, serviceFamily: 'pest',
+        isRecurring: true, isCallback: false, waveguardQualifying: true, serviceFamily: 'pest', serviceFamilies: ['pest'],
         rescheduleUrl: '/reschedule/t1', calendarUrl: '/api/public/appointment/t1/calendar.ics', calendarExpiresAt: '2099-01-05T17:00:00Z',
       }],
     });

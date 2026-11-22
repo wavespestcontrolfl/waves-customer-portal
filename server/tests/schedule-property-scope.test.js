@@ -190,7 +190,7 @@ describe('saved-property scope on the customer schedule routes', () => {
       groupedSpy.mockRestore();
       expect(body.reservice).toBeNull();
       expect(body.overlayHandoff).toBe(false);
-      expect(Object.keys(body.upcoming[0]).sort()).toEqual(['date', 'id', 'isCallback', 'isRecurring', 'serviceDisplayName', 'serviceFamily', 'serviceType', 'status', 'waveguardQualifying', 'windowEnd', 'windowStart']);
+      expect(Object.keys(body.upcoming[0]).sort()).toEqual(['date', 'id', 'isCallback', 'isRecurring', 'serviceDisplayName', 'serviceFamilies', 'serviceFamily', 'serviceType', 'status', 'waveguardQualifying', 'windowEnd', 'windowStart']);
       expect(JSON.stringify(body)).not.toMatch(/resched-tok|rescheduleUrl|calendarUrl|technician|customerConfirmed/);
     });
     jest.clearAllMocks();

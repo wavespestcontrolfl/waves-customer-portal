@@ -14,10 +14,15 @@ const { qualifyingKeysForRow } = require('../services/waveguard-existing-service
 // unlinked rows) is never plan coverage, even when its stale/canonical
 // service_type ("Rodent Pest Control") would classify as pest_control on the
 // combined text. Only then does the family classifier decide.
-function portalRowWaveGuardFamily(row) {
+// Every plan family the row covers. A combined visit ("Lawn + Tree & Shrub
+// Service") covers more than one, and each one counts for the plan's tier.
+function portalRowWaveGuardFamilies(row) {
   const { isCommercialServiceRow, isNonBaitRodentServiceRow } = require('../services/self-booking-plan-sync');
-  if (isCommercialServiceRow(row) || isNonBaitRodentServiceRow(row)) return null;
-  const keys = qualifyingKeysForRow(row);
+  if (isCommercialServiceRow(row) || isNonBaitRodentServiceRow(row)) return [];
+  return qualifyingKeysForRow(row);
+}
+function portalRowWaveGuardFamily(row) {
+  const keys = portalRowWaveGuardFamilies(row);
   return keys.length > 0 ? keys[0] : null;
 }
 function portalRowQualifiesForWaveGuard(row) {
@@ -253,6 +258,13 @@ router.get('/', async (req, res, next) => {
             service_name: s.catalog_service_name,
             catalog_billing_type: s.catalog_billing_type,
           }),
+          // Every family the visit covers; serviceFamily above is the first.
+          serviceFamilies: portalRowWaveGuardFamilies({
+            service_type: s.service_type,
+            service_key: s.catalog_service_key,
+            service_name: s.catalog_service_name,
+            catalog_billing_type: s.catalog_billing_type,
+          }),
           serviceDisplayName: (() => {
             if (!s.catalog_service_name) return null;
             const withCatalog = portalRowWaveGuardFamily({
@@ -376,6 +388,15 @@ router.get('/', async (req, res, next) => {
         // cards consume this instead of re-classifying a stale label —
         // catalog-over-label, same classifier as the flag above.
         serviceFamily: portalRowWaveGuardFamily({
+          service_type: s.service_type,
+          service_key: s.catalog_service_key,
+          service_name: s.catalog_service_name,
+          catalog_billing_type: s.catalog_billing_type,
+        }),
+        // Every family the visit covers (a combined visit covers more than
+        // one): the portal's plan lists read this; serviceFamily stays the
+        // first one, for clients that read a single family.
+        serviceFamilies: portalRowWaveGuardFamilies({
           service_type: s.service_type,
           service_key: s.catalog_service_key,
           service_name: s.catalog_service_name,

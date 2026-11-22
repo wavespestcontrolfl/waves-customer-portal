@@ -115,6 +115,42 @@ describe('resolvePlanServices — one service list for My Plan and Billing', () 
     });
   });
 
+  // A combined visit covers two plan families. The schedule route lists both
+  // in serviceFamilies; the single serviceFamily is its first one.
+  describe('a combined visit', () => {
+    const silver = { ...bronze, tier: 'Silver' };
+    const COMBINED = {
+      ...visit('Lawn + Tree & Shrub Service', { id: 'v-2f' }),
+      waveguardQualifying: true, serviceFamily: 'lawn_care', serviceFamilies: ['lawn_care', 'tree_shrub'],
+    };
+
+    it('puts both of its services on both lists, under their catalog names', () => {
+      const { includedServices, confirmedServices } = resolvePlanServices(silver, COMBINED, [COMBINED]);
+      expect(includedServices.map((s) => s.id)).toEqual(['lawn_care', 'tree_shrub']);
+      expect(confirmedServices.map((s) => s.id)).toEqual(['lawn_care', 'tree_shrub']);
+      // The visit's label names the visit, not one service.
+      expect(confirmedServices.map((s) => s.displayName)).toEqual(['Lawn Care', 'Tree & Shrub']);
+      expect(includedServices.map((s) => s.displayName)).toEqual(['Lawn Care', 'Tree & Shrub']);
+    });
+
+    it('a visit of the service\'s own still names it', () => {
+      const { confirmedServices } = resolvePlanServices(silver, COMBINED, [COMBINED, LAWN]);
+      expect(confirmedServices.map((s) => s.displayName)).toEqual(['Lawn Care Program', 'Tree & Shrub']);
+    });
+
+    it('a combined visit with pest control never names the pest plan', () => {
+      const withPest = { ...visit('Pest + Lawn Service', { id: 'v-pl' }), waveguardQualifying: true, serviceFamily: 'pest_control', serviceFamilies: ['pest_control', 'lawn_care'] };
+      const { confirmedServices, pestPlanName } = resolvePlanServices(silver, withPest, [withPest]);
+      expect(pestPlanName).toBeUndefined();
+      expect(confirmedServices.map((s) => s.displayName)).toEqual(['Pest Control', 'Lawn Care']);
+    });
+
+    it('an older payload with the single family alone keeps one service', () => {
+      const older = { ...COMBINED, serviceFamilies: undefined };
+      expect(confirmedIds(silver, older, [older])).toEqual(['lawn_care']);
+    });
+  });
+
   it('a customer with no plan lists only what the schedule shows', () => {
     const noPlan = { id: 'cust-2', tier: null, monthlyRate: 0 };
     expect(ids(noPlan, null, [])).toEqual([]);
@@ -311,6 +347,39 @@ describe('LearnTab: "Your plan includes ..."', () => {
     await waitFor(() => expect(api.getSchedule).toHaveBeenCalled());
     await Promise.resolve();
     expect(screen.queryByText(/plan includes/)).not.toBeInTheDocument();
+  });
+
+  it('a combined visit: the sentence names both services', async () => {
+    api.getSchedule.mockResolvedValue({
+      upcoming: [{
+        ...visit('Lawn + Tree & Shrub Service', { id: 'v-2f' }),
+        waveguardQualifying: true, serviceFamily: 'lawn_care', serviceFamilies: ['lawn_care', 'tree_shrub'],
+      }],
+    });
+    render(<LearnTab customer={{ ...bronze, tier: 'Silver' }} />);
+    expect(await screen.findByText(/plan includes Lawn Care, Tree & Shrub\./)).toBeInTheDocument();
+  });
+
+  // Platinum is "four or more": the count line follows the list.
+  it('a Platinum member with five services: the sentence names five and the count says 5', async () => {
+    api.getSchedule.mockResolvedValue({
+      upcoming: [
+        LAWN, PEST,
+        visit('Mosquito Barrier Treatment', { id: 'v-mosq' }),
+        visit('Tree & Shrub Care', { id: 'v-tree' }),
+        visit('Termite Bait Monitoring', { id: 'v-term' }),
+      ],
+    });
+    render(<LearnTab customer={{ ...bronze, tier: 'Platinum' }} />);
+    expect(await screen.findByText(/Termite Bait Monitoring/)).toBeInTheDocument();
+    expect(screen.getByText(/5 included services in your guidance/)).toBeInTheDocument();
+    expect(screen.queryByText(/4 included services/)).not.toBeInTheDocument();
+  });
+
+  it('a Platinum member with two services on the schedule: the count stays the tier\'s 4', async () => {
+    api.getSchedule.mockResolvedValue({ upcoming: [LAWN, PEST] });
+    render(<LearnTab customer={{ ...bronze, tier: 'Platinum' }} />);
+    expect(await screen.findByText(/4 included services in your guidance/)).toBeInTheDocument();
   });
 
   it('says nothing about services when the schedule read fails; the tip stays', async () => {

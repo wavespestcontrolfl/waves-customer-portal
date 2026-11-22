@@ -10625,12 +10625,14 @@ function LearnTab({ customer, onOpenPhotoId = null, scope = null }) {
 
   const activeTierName = resolveActiveTierName(customer);
   const tierName = activeTierName || 'No Plan';
-  const numServices = activeTierName ? (TIER_SERVICES[tierName] || 1) : 0;
   // The member's own plan services (My Plan's list), by family name. Never
   // the first N catalog services for an N-service tier: a lawn-only Bronze
   // member read "includes Pest Control" (owner 2026-11-22, "fix box"). No
   // name while the reads load or after they fail: the sentence stays out.
   const planServices = usePlanServices(customer, customer?.cancelled !== true && !!activeTierName);
+  // The tier's size. Platinum is "four or more": a fifth service the
+  // sentence below names is counted here too.
+  const numServices = activeTierName ? Math.max(TIER_SERVICES[tierName] || 1, (planServices || []).length) : 0;
   const customerServiceNames = (planServices || [])
     .map(s => s.name.replace(/ Program| Barrier Treatment/g, '').replace('Quarterly ', ''));
 
@@ -11159,10 +11161,11 @@ function planServiceMatches(svcId, service = {}) {
   // catalog-over-label, so a bait row wearing a stale 'Rodent Trapping'
   // label lands on the bait plan card instead of being dropped or
   // reclassified from text.
-  const fam = String(service.serviceFamily || '').toLowerCase();
-  if (fam) {
-    if (svcId === 'termite') return fam === 'termite_bait' || fam === 'termite';
-    return fam === svcId;
+  // serviceFamilies (2026-11-22) lists EVERY family of the visit: a combined
+  // visit covers more than one. An older payload has the single family only.
+  const fams = planRowServerFamilies(service);
+  if (fams.length) {
+    return fams.some((fam) => (svcId === 'termite' ? fam === 'termite_bait' || fam === 'termite' : fam === svcId));
   }
   const svcType = (service.serviceType || service.service_type || service.type || '').toLowerCase();
   return (
@@ -11188,6 +11191,31 @@ function detectCatalogServiceId(service) {
   }
   return null;
 }
+
+// The server's resolved families for a visit row, lower-cased: all of them
+// when the payload lists them, else the single one, else none (a row with
+// no server family is matched from its label).
+function planRowServerFamilies(service = {}) {
+  const list = Array.isArray(service.serviceFamilies) && service.serviceFamilies.length
+    ? service.serviceFamilies
+    : [service.serviceFamily];
+  return list.map((fam) => String(fam || '').toLowerCase()).filter(Boolean);
+}
+
+// Every catalog service a plan visit covers. A combined visit ("Lawn + Tree
+// & Shrub Service") covers more than one, and only the server says so: a row
+// matched from its label alone keeps its first match, as before.
+function detectCatalogServiceIds(service) {
+  if (planRowServerFamilies(service).length > 1) {
+    return SERVICE_CATALOG.filter((svc) => planServiceMatches(svc.id, service)).map((svc) => svc.id);
+  }
+  const id = detectCatalogServiceId(service);
+  return id ? [id] : [];
+}
+
+// The name a visit lends to its service. A combined visit's label names the
+// visit, not one service, so its services keep their catalog names.
+const planRowNameFor = (service, rowIds) => (rowIds.length === 1 ? planRowName(service) : null);
 
 const planRowName = (service) => service.serviceDisplayName || service.serviceType || service.service_type || service.type;
 
@@ -11232,15 +11260,16 @@ export function resolvePlanServices(customer, nextService, upcomingServices = []
   // SERVICE_CATALOG names are family placeholders for tier padding only.
   const detectedServiceNames = {};
   const addDetectedService = (service) => {
-    const id = detectCatalogServiceId(service);
-    if (!id) return;
-    if (!detectedServiceIds.includes(id)) detectedServiceIds.push(id);
+    const rowIds = detectCatalogServiceIds(service);
     // serviceDisplayName is the server's resolved CATALOG name, set only
     // when catalog identity overrode a stale label's family (codex #3591
     // r79 P2) — prefer it so the card title matches the card's program
     // (a repointed "Rodent Trapping" label never titles the bait card).
-    const realName = planRowName(service);
-    if (realName && !detectedServiceNames[id]) detectedServiceNames[id] = realName;
+    const realName = planRowNameFor(service, rowIds);
+    rowIds.forEach((id) => {
+      if (!detectedServiceIds.includes(id)) detectedServiceIds.push(id);
+      if (realName && !detectedServiceNames[id]) detectedServiceNames[id] = realName;
+    });
   };
   // One row per visit, and the schedule's row stands for a visit both reads
   // return: the all-properties next-visit projection carries no
@@ -11261,7 +11290,7 @@ export function resolvePlanServices(customer, nextService, upcomingServices = []
   // "Quarterly" right after the customer chose monthly. The other cards keep
   // the name of their first visit.
   const lastPestVisit = upcomingServices.filter(isPlanCoverageRow)
-    .filter((service) => detectCatalogServiceId(service) === 'pest_control').pop();
+    .filter((service) => detectCatalogServiceIds(service).join() === 'pest_control').pop();
   const pestPlanName = (lastPestVisit && planRowName(lastPestVisit)) || detectedServiceNames.pest_control;
 
   // For a tier'd member, the included-services list reflects the tier ENTITLEMENT, not
@@ -11318,10 +11347,12 @@ export function confirmedPlanServices(customer, upcomingServices = []) {
   const names = new Map();
   let lastPestName = null;
   upcomingServices.filter(isPlanCoverageRow).forEach((row) => {
-    const id = detectCatalogServiceId(row);
-    if (!id) return;
-    if (!names.has(id)) names.set(id, planRowName(row));
-    if (id === 'pest_control' && planRowName(row)) lastPestName = planRowName(row);
+    const rowIds = detectCatalogServiceIds(row);
+    const rowName = planRowNameFor(row, rowIds);
+    rowIds.forEach((id) => {
+      if (!names.get(id)) names.set(id, rowName || null);
+      if (id === 'pest_control' && rowName) lastPestName = rowName;
+    });
   });
   if (lastPestName) names.set('pest_control', lastPestName);
   const activeTierName = resolveActiveTierName(customer);

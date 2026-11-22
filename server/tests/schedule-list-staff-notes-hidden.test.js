@@ -71,7 +71,9 @@ describe('GET /schedule hides staff notes from the customer payload', () => {
     // non-bait guard runs first (codex #3591 r39 P2). Commercial rows too.
     const trapCatalogRow = { ...row, id: 'svc-tc', service_type: 'Rodent Pest Control', catalog_service_key: 'rodent_trapping', catalog_service_name: 'Rodent Trapping' };
     const commercialRow = { ...row, id: 'svc-c', service_type: 'Commercial Pest Control' };
-    db.mockReturnValueOnce(listChain([row, rodentRow, trapRow, staleLabelRow, trapCatalogRow, commercialRow]));
+    // A combined visit covers two plan families; both ride the payload.
+    const combinedRow = { ...row, id: 'svc-2f', service_type: 'Lawn + Tree & Shrub Service' };
+    db.mockReturnValueOnce(listChain([row, rodentRow, trapRow, staleLabelRow, trapCatalogRow, commercialRow, combinedRow]));
     await withServer(async (baseUrl) => {
       const body = await (await fetch(`${baseUrl}/schedule`)).json();
       const byId = Object.fromEntries(body.upcoming.map((v) => [v.id, v]));
@@ -86,6 +88,16 @@ describe('GET /schedule hides staff notes from the customer payload', () => {
       expect(byId['svc-s'].serviceFamily).toBe('rodent_bait');
       expect(byId['svc-1'].serviceFamily).toBe('pest_control');
       expect(byId['svc-t'].serviceFamily).toBeNull();
+      // Every family of the visit: one for a single-service visit, none for
+      // a row that is not plan coverage, both for a combined visit (the
+      // single serviceFamily stays its first one).
+      expect(byId['svc-1'].serviceFamilies).toEqual(['pest_control']);
+      expect(byId['svc-s'].serviceFamilies).toEqual(['rodent_bait']);
+      expect(byId['svc-t'].serviceFamilies).toEqual([]);
+      expect(byId['svc-c'].serviceFamilies).toEqual([]);
+      expect(byId['svc-2f'].serviceFamilies).toEqual(['lawn_care', 'tree_shrub']);
+      expect(byId['svc-2f'].serviceFamily).toBe('lawn_care');
+      expect(byId['svc-2f'].waveguardQualifying).toBe(true);
     });
     // Live flag off → rodent bait no longer qualifies on the portal payload.
     const constants = require('../services/pricing-engine/constants');

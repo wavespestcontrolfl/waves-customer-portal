@@ -217,7 +217,7 @@ function withoutTrackBearers(tracker) {
 // the refused coverage-only payload), so the ordinary /api/schedule and
 // /api/schedule/next entries drop them too (codex #6363 r15 P2): the
 // visit's date, window, service type, status and technician stay.
-const PLAN_SIGNAL_KEYS = ['isRecurring', 'isCallback', 'waveguardQualifying', 'serviceFamily'];
+const PLAN_SIGNAL_KEYS = ['isRecurring', 'isCallback', 'waveguardQualifying', 'serviceFamily', 'serviceFamilies'];
 
 // A visit entry for a contact: no action bearer, no plan signal.
 function contactVisit(visit) {
