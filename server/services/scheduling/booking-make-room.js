@@ -23,10 +23,11 @@
  *      the 24-hour text, and the told-lock reasons: with GATE_DAY_ONLY_PROMISE on, the customer's own time and told
  *      visits (owner 2026-11-22: staff placement, a confirmation and a first or one-time visit no longer fix a stop);
  *      with it off, confirmed, first or one-time, person-placed and told visits, as before 2026-11-22). Its customer
- *      also has both reminder tiers on and sent BY TEXT (the plan: "the customer gets reminder texts"), read with the sender's own channel and app routing rules. The lock is the re-plan's 24 hours (owner
- *      2026-11-03): the 24-hour text always carries the new time; a new time inside 72 hours gets no new 72-hour
- *      text, and a stop whose time was already told never moves at all. Its time
- *      preference (the re-plan's loadPref) allows the new hour, and it still ends by the night tools' day close.
+ *      also has both reminder tiers on and sent BY TEXT (the plan: "the customer gets reminder texts"), read with the
+ *      sender's own channel and app routing rules. The lock is the re-plan's 24 hours (owner 2026-11-03): the 24-hour
+ *      text always carries the new time; a new time inside 72 hours gets no new 72-hour text, and a stop whose time
+ *      was already told never moves at all. Its time preference (the re-plan's loadPref) allows the new hour, and it
+ *      still ends by the night tools' day close.
  *   3. Nothing else holds the new minutes of the new visit or of a moved stop: no unassigned visit, no other
  *      technician's visit while the occupancy check is technician-blind (the re-plan's blockedHoursFor rule), no
  *      schedule block.
