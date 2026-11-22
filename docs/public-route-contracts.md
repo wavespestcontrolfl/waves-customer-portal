@@ -6772,7 +6772,12 @@ row on every hit and redirects with `?ref=`; a legacy
 an unknown code redirects home. On a promoter hit, a crawler, link-preview,
 scanner or empty user agent (`utils/bot-ua.js` plus the empty check) still
 redirects and gets a row with `device_type` 'bot', but is never a unique
-click and never raises `total_clicks`).
+click and never raises `total_clicks`. The `?ref=` redirect goes to the
+website homepage. With `GATE_REFERRAL_FRIEND_PAGE` on it goes to the
+website's friend page `/referrer/` instead, and only while the live Step 2
+friend credit equals the amount that page states and the code has a live
+owner (`referral-inbound.js` `customerForCode`); the code, the click row
+and every other answer are the same).
 The estimate `/data` response includes `verifiedStaffPreview: true` only
 when `adminPreview=1` is accompanied by a valid staff bearer token. The
 customer SPA uses that verified field (or the existing verified
@@ -7681,7 +7686,12 @@ runs for a row with none, and a match there is refused);
 `/forgot-password` sends nothing and stores no token for a Google-only
 account (`technicians.google_only_login_at`, set by the Team tab's Hired
 press on a row with a linked company Google address; same generic answer),
-and a table CHECK refuses a password or a reset token on such a row;
+and a table CHECK refuses a password or a reset token on such a row; it
+also sends nothing for any row that has a linked Google address and no
+password, and `POST /reset-password` refuses a reset request's link on such
+a row (a reset request never creates that row's first password; only a link
+an admin sent with the Team tab's Hired press or Resend link does: a
+stored link whose lifetime is exactly the Hired link's 7 days);
 `/change-password`, `/register` (requireAdmin), and `/me` require the staff
 bearer; `/register` (like every Team tab writer of a staff email) refuses an
 address that is another staff row's email or linked Google address (409).

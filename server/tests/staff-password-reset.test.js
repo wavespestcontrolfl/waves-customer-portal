@@ -115,7 +115,7 @@ describe('staff password reset request', () => {
     await expect(issuePasswordReset(tech.email)).resolves.toEqual({ issued: false });
 
     // Read with the one matched row, inside the transaction that holds the staff lock; no token write follows.
-    expect(lookup.select).toHaveBeenCalledWith('id', 'email', 'google_only_login_at');
+    expect(lookup.select).toHaveBeenCalledWith('id', 'email', 'google_only_login_at', 'google_email', 'password_hash');
     expect(db).toHaveBeenCalledTimes(1);
     expect(sendStaffPasswordResetEmail).not.toHaveBeenCalled();
   });

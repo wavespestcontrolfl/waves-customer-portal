@@ -14,6 +14,7 @@ import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { getAdminUser } from "../../lib/adminAuth";
 import useIsMobile from "../../hooks/useIsMobile";
 import useModalFocus from "../../hooks/useModalFocus";
+import { formatETDate } from "../../lib/timezone";
 
 const API = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: legacy color names remain to preserve the inline-style
@@ -657,6 +658,177 @@ function InboundReferralCard({ item, step2, onDone, flash }) {
 }
 
 // A failed read is not an empty result: say so, and offer a retry.
+// Step 2: one handwritten thank-you note to the member for every friend who books. The card lists the member and
+// the mailing address only: the note never names the friend, so the friend is not on this card or in its data.
+// It reads its own list when the Queue opens and shows nothing when no note is owed.
+// One page of the list (200 notes, oldest first). `after` is the nextCursor of the page before; "": the first.
+const thankYouNotesPage = (after) => af(`/admin/referrals/thank-you-notes?after=${encodeURIComponent(after)}`);
+
+function ThankYouNotes({ flash }) {
+  const isMobile = useIsMobile();
+  // The card shows exactly one page, as the server last answered it: the rows, the count of every note owed and
+  // the position of the next page come from one statement. Nothing is kept from an earlier read and nothing is
+  // counted on this side, so two logins working the list cannot leave a written note or an old count on the card
+  // past the next read.
+  const [after, setAfter] = useState(""); // the position this page starts after; "": the oldest notes
+  const [page, setPage] = useState({ notes: [], total: 0, nextCursor: null });
+  const [failed, setFailed] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [busyId, setBusyId] = useState(null); // the note a mark is being saved for
+  const [loading, setLoading] = useState(true); // a page is being read
+  // One action at a time: a page read and a mark never overlap.
+  const idle = busyId === null && !loading;
+
+  useEffect(() => {
+    let current = true;
+    setLoading(true);
+    thankYouNotesPage(after)
+      .then((answer) => {
+        if (!current) return;
+        const notes = answer.notes || [];
+        const total = Number(answer.total) || 0;
+        // Every note of a later page was written since it was read: back to the oldest notes still owed. The
+        // card stays in "reading" until that page answers.
+        if (notes.length === 0 && total > 0 && after) {
+          setAfter("");
+          return;
+        }
+        setPage({ notes, total, nextCursor: answer.nextCursor || null });
+        setFailed(false);
+        setLoading(false);
+      })
+      .catch(() => {
+        if (!current) return;
+        setFailed(true);
+        setLoading(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [after, reloadKey]);
+
+  const goTo = (position) => {
+    if (!idle) return;
+    setLoading(true);
+    setAfter(position);
+  };
+
+  const markWritten = async (note) => {
+    if (!idle) return;
+    setBusyId(note.referralId);
+    try {
+      await adminPost(`/admin/referrals/thank-you-notes/${note.referralId}/written`);
+      flash(`Thank-you note for ${note.memberName || "the member"} marked written`);
+    } catch (e) {
+      flash("Error: " + e.message);
+    }
+    // Read this page again after every answer. A note that is no longer owed (written, or the referral was
+    // rejected, or the member archived) leaves the card; one that only failed to save stays for another try; the
+    // notes behind it move up.
+    setLoading(true);
+    setBusyId(null);
+    setReloadKey((k) => k + 1);
+  };
+
+  const { notes, total, nextCursor } = page;
+  if (failed) {
+    return <ErrorRow what="thank-you notes to write" onRetry={() => setReloadKey((k) => k + 1)} />;
+  }
+  if (total === 0) return null;
+  return (
+    <div
+      style={{
+        background: D.card,
+        borderRadius: 12,
+        padding: 20,
+        border: `1px solid ${D.border}`,
+        display: "flex",
+        flexDirection: "column",
+        gap: 12,
+      }}
+    >
+      <div>
+        <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
+          Thank-you notes to write ({total})
+        </div>
+        <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+          Write one note by hand to each member below. Each row is one friend who booked. Do not name the friend in
+          the note. Open the member to correct an address.
+        </div>
+      </div>
+      {notes.map((note) => (
+        <div
+          key={note.referralId}
+          style={{
+            border: `1px solid ${D.border}`,
+            borderRadius: 10,
+            padding: 14,
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            fontSize: 14,
+            color: D.text,
+          }}
+        >
+          <div>
+            <a
+              href={`/admin/customers?customerId=${encodeURIComponent(note.memberCustomerId)}`}
+              style={{ color: D.heading, fontWeight: 500 }}
+            >
+              {note.memberName || "(no name)"}
+            </a>
+            {note.addressLines.map((line, i) => (
+              <div key={i}>{line}</div>
+            ))}
+            {!note.addressComplete && (
+              <div style={{ color: D.heading, fontWeight: 500 }}>
+                {note.addressLines.length > 0 ? "Mailing address is not complete" : "No mailing address on file"}
+              </div>
+            )}
+            <div style={{ color: D.muted }}>
+              Owed since {formatETDate(note.owedSince, { month: "short", day: "numeric", year: "numeric" })}
+            </div>
+          </div>
+          <button
+            onClick={() => markWritten(note)}
+            disabled={!idle}
+            style={{ ...btnSmall(D.card, D.heading), ...touch(isMobile) }}
+          >
+            {busyId === note.referralId ? "Saving..." : "Mark written"}
+          </button>
+        </div>
+      ))}
+      {(nextCursor || after) && (
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12, fontSize: 14, color: D.text }}>
+          <span>
+            Showing {after ? "the next" : "the oldest"} {notes.length} of {total}.
+          </span>
+          {after && (
+            <button
+              onClick={() => goTo("")}
+              disabled={!idle}
+              style={{ ...btnSmall(D.card, D.heading), ...touch(isMobile) }}
+            >
+              First page
+            </button>
+          )}
+          {nextCursor && (
+            <button
+              onClick={() => goTo(nextCursor)}
+              disabled={!idle}
+              style={{ ...btnSmall(D.card, D.heading), ...touch(isMobile) }}
+            >
+              Next page
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ErrorRow({ what, onRetry }) {
   return (
     <div
@@ -1351,6 +1523,7 @@ export default function ReferralsPageV2() {
               ))}
             </div>
           )}
+          <ThankYouNotes flash={flash} />
           {/* Submit form */}
           <div
             style={{

@@ -71,7 +71,9 @@ the Google account in person. The row then shows "Signs in with Google", has no
 Resend link, and "Forgot password?" sends that hire nothing. This is the way to
 turn on the login of a job offer hire, because the email on a job application
 is one nobody proved. To give such a person a password later, set the row back
-to prospective, clear the Google sign-in and press Hired with the emailed link.
+to prospective, clear the Google sign-in and press Hired with the emailed link
+(that press needs `GATE_HIRED_PACKET`; the Google press does not: its Hired
+button shows while staff Google sign-in is on).
 First confirm the mailbox with the hire, and correct the Email field in the
 form: the link goes to that address, and whoever opens it sets the password.
 The Google press is for a technician row that never held a sign-in (no
