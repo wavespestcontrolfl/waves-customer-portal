@@ -755,28 +755,27 @@ Return a JSON object with:
 // reference pages as they are then, has that same promptKey. A restart, another
 // instance, a changed score, a changed product list, a reference page changed
 // or withdrawn, or an answer older than 30 minutes all end in an ordinary call.
+// One assessment holds an answer for each prompt it asked (a product added and
+// then removed asks the first prompt again: no second call for it).
 const PREPARED_ANSWER_TTL_MS = 30 * 60 * 1000;
 const PREPARED_ANSWER_MAX = 100;
 const PREPARED_CALLS_MAX = 5;
-const _preparedAnswers = new Map(); // assessmentId -> { promptKey, at, calls, answer: Promise<string|null> }
+const _preparedAnswers = new Map(); // assessmentId -> { calls, answers: Map<promptKey, { at, answer: Promise<string|null> }> }
 
-function heldPreparedAnswer(assessmentId) {
-  const held = _preparedAnswers.get(assessmentId);
-  if (held && Date.now() - held.at > PREPARED_ANSWER_TTL_MS) {
-    _preparedAnswers.delete(assessmentId);
-    return null;
-  }
-  return held || null;
+function heldPreparedAnswer(held, promptKey) {
+  const one = held?.answers.get(promptKey);
+  return one && Date.now() - one.at <= PREPARED_ANSWER_TTL_MS ? one : null;
 }
 
-// The grounded run's read. It always empties the slot: the visit's rows are
-// saved, so an answer made for another prompt can serve no later run, and one
-// that fits is used once (a later regeneration asks the model again).
+// The grounded run's read. It always empties the assessment's slot: the visit's
+// rows are saved, so an answer made for another prompt can serve no later run,
+// and the one that fits is used once (a later regeneration asks the model
+// again).
 async function preparedAnswer(assessmentId, promptKey) {
-  const held = heldPreparedAnswer(assessmentId);
+  const one = heldPreparedAnswer(_preparedAnswers.get(assessmentId), promptKey);
   _preparedAnswers.delete(assessmentId);
-  if (!held || held.promptKey !== promptKey) return null;
-  const answer = await held.answer;
+  if (!one) return null;
+  const answer = await one.answer;
   if (answer) logger.info(`[knowledge-bridge] grounded recommendations for ${assessmentId} use the answer prepared before completion`);
   return answer;
 }
@@ -1236,24 +1235,25 @@ const KnowledgeBridge = {
   // The early call (see _preparedAnswers). `plannedProducts` are the rows the
   // sheet is about to record, as the completion will save them:
   // { product_name, product_category }. Returns as soon as the call is running.
-  // The same prompt is asked once (answered, running or failed), and one
-  // assessment gets at most PREPARED_CALLS_MAX calls in a row. Writes nothing.
+  // One prompt is asked once in 30 minutes (answered, running or failed), and
+  // one assessment gets at most PREPARED_CALLS_MAX calls. Writes nothing.
   async prepareAssessmentRecommendations(assessmentId, plannedProducts) {
     const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
     // A linked assessment's grounded run has started or finished.
     if (!assessment || assessment.service_record_id) return { started: false };
     const context = await loadRecommendationContext(assessment);
     const { systemPrompt, userPrompt, promptKey } = recommendationPrompt({ assessment, appliedProducts: plannedProducts }, context);
-    const held = heldPreparedAnswer(assessmentId);
-    if (held?.promptKey === promptKey) return { started: true };
-    const calls = (held?.calls || 0) + 1;
-    if (calls > PREPARED_CALLS_MAX) return { started: false };
+    const held = _preparedAnswers.get(assessmentId) || { calls: 0, answers: new Map() };
+    if (heldPreparedAnswer(held, promptKey)) return { started: true };
+    if (held.calls >= PREPARED_CALLS_MAX) return { started: false };
     const answer = callClaude(systemPrompt, userPrompt, 1500)
       .catch((err) => { logger.warn(`[knowledge-bridge] prepared recommendation call failed for ${assessmentId}: ${err.message}`); return null; })
       .then((text) => (text && usablePreparedAnswer(text) ? text : null));
+    held.calls += 1;
+    held.answers.set(promptKey, { at: Date.now(), answer });
     // Deleted first so the newest request is also the newest key of the map.
     _preparedAnswers.delete(assessmentId);
-    _preparedAnswers.set(assessmentId, { promptKey, at: Date.now(), calls, answer });
+    _preparedAnswers.set(assessmentId, held);
     while (_preparedAnswers.size > PREPARED_ANSWER_MAX) _preparedAnswers.delete(_preparedAnswers.keys().next().value);
     return { started: true };
   },

@@ -75,6 +75,8 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     return { recommendations, summary: row.ai_summary };
   };
   const answersWith = (...summaries) => summaries.forEach((summary) => dispatch.mockResolvedValueOnce({ ok: true, json: answer(summary) }));
+  // The answers one assessment holds, oldest first.
+  const held = (id) => [...KnowledgeBridge._test.preparedAnswers.get(id).answers.values()];
 
   test('the same scores and products: the grounded run makes no call and stores the prepared answer as grounded', async () => {
     const assessment = await seedAssessment();
@@ -87,7 +89,7 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     }) });
 
     await expect(KnowledgeBridge.prepareAssessmentRecommendations(assessment.id, [FUNGICIDE, FERTILIZER])).resolves.toEqual({ started: true });
-    await KnowledgeBridge._test.preparedAnswers.get(assessment.id).answer;
+    await held(assessment.id)[0].answer;
     // Nothing is stored before the visit's rows are saved.
     expect(await stored(assessment.id)).toEqual({ recommendations: null, summary: null });
 
@@ -190,7 +192,7 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     dispatch.mockResolvedValueOnce({ ok: true, json: answer('Prepared summary.', { customerTip: 'This treatment is safe for pets.' }) });
     dispatch.mockResolvedValueOnce({ ok: true, json: answer('Completion summary.') });
     await KnowledgeBridge.prepareAssessmentRecommendations(assessment.id, [FERTILIZER]);
-    await expect(KnowledgeBridge._test.preparedAnswers.get(assessment.id).answer).resolves.toBeNull();
+    await expect(held(assessment.id)[0].answer).resolves.toBeNull();
     await saveVisitRows(assessment.id, [FERTILIZER]);
 
     await KnowledgeBridge.generateAssessmentRecommendations(assessment.id);
@@ -217,7 +219,7 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     const assessment = await seedAssessment();
     answersWith('Prepared summary.', 'Completion summary.');
     await KnowledgeBridge.prepareAssessmentRecommendations(assessment.id, [FERTILIZER]);
-    KnowledgeBridge._test.preparedAnswers.get(assessment.id).at -= KnowledgeBridge._test.PREPARED_ANSWER_TTL_MS + 1;
+    held(assessment.id)[0].at -= KnowledgeBridge._test.PREPARED_ANSWER_TTL_MS + 1;
     await saveVisitRows(assessment.id, [FERTILIZER]);
 
     await KnowledgeBridge.generateAssessmentRecommendations(assessment.id);
@@ -232,7 +234,7 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     dispatch.mockResolvedValueOnce({ ok: true, json: { recommendations: [] } });
     mockCreate.mockResolvedValueOnce({ stop_reason: 'end_turn', content: [{ type: 'text', text: '{"recommendations":[]}' }] });
     await KnowledgeBridge.prepareAssessmentRecommendations(assessment.id, [FERTILIZER]);
-    await expect(KnowledgeBridge._test.preparedAnswers.get(assessment.id).answer).resolves.toBeNull();
+    await expect(held(assessment.id)[0].answer).resolves.toBeNull();
     await saveVisitRows(assessment.id, [FERTILIZER]);
 
     answersWith('Completion summary.');
@@ -243,7 +245,7 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     expect((await stored(assessment.id)).summary).toBe('Completion summary.');
   });
 
-  test('the same visit facts are asked once, and one assessment gets at most 5 early calls in a row', async () => {
+  test('one prompt is asked once, and one assessment gets at most 5 early calls', async () => {
     const assessment = await seedAssessment();
     dispatch.mockResolvedValue({ ok: true, json: answer('Prepared summary.') });
 
@@ -256,7 +258,26 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     }
     expect(dispatch).toHaveBeenCalledTimes(5);
     await expect(KnowledgeBridge.prepareAssessmentRecommendations(assessment.id, [FUNGICIDE])).resolves.toEqual({ started: false });
+    // A prompt asked before is still answered from what is held.
+    await expect(KnowledgeBridge.prepareAssessmentRecommendations(assessment.id, [FERTILIZER])).resolves.toEqual({ started: true });
     expect(dispatch).toHaveBeenCalledTimes(5);
+  });
+
+  test('a product added and then removed: the first answer is still held, and the grounded run takes it', async () => {
+    const assessment = await seedAssessment();
+    answersWith('Fertilizer summary.', 'Fertilizer and fungicide summary.');
+    await KnowledgeBridge.prepareAssessmentRecommendations(assessment.id, [FERTILIZER]);
+    await KnowledgeBridge.prepareAssessmentRecommendations(assessment.id, [FERTILIZER, FUNGICIDE]);
+    await KnowledgeBridge.prepareAssessmentRecommendations(assessment.id, [FERTILIZER]);
+    expect(dispatch).toHaveBeenCalledTimes(2);
+
+    await saveVisitRows(assessment.id, [FERTILIZER]);
+    const result = await KnowledgeBridge.generateAssessmentRecommendations(assessment.id);
+
+    expect(dispatch).toHaveBeenCalledTimes(2);
+    expect(result._groundedInApplications).toBe(true);
+    expect((await stored(assessment.id)).summary).toBe('Fertilizer summary.');
+    expect(KnowledgeBridge._test.preparedAnswers.has(assessment.id)).toBe(false);
   });
 
   test('one prompt has one key whatever the order of its rows; the prompt lists the rows as they came', async () => {
