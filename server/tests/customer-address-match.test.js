@@ -101,13 +101,13 @@ describe('findCustomersAtAddress', () => {
     await expect(findCustomersAtAddress(db, 'Lot 12 Palm Ave, Venice, FL 34285')).resolves.toEqual([]);
   });
 
-  it('strict: the house number is a whole token anywhere in the line, on both legs; default keeps the prefix', async () => {
+  it('strict: the leading house digits are a whole digit run anywhere in the line, on both legs; default keeps the prefix', async () => {
     const strictDb = fakeDb();
-    await findCustomersAtAddress(strictDb, '123-125 Palm Ave, Venice, FL 34285', { strict: true });
+    await findCustomersAtAddress(strictDb, '123-125 Palm Ave, Venice, FL 34285', { strict: true, zip: '34285' });
     const raws = strictDb.calls.filter((c) => Array.isArray(c) && c[0] === 'whereRaw');
     expect(raws.map((c) => c[3])).toEqual([
-      ['address_line1', '(^|[^0-9a-z])123\\-125([^0-9a-z]|$)'],
-      ['cp.address_line1', '(^|[^0-9a-z])123\\-125([^0-9a-z]|$)'],
+      ['address_line1', '(^|[^0-9])123([^0-9]|$)'],
+      ['cp.address_line1', '(^|[^0-9])123([^0-9]|$)'],
     ]);
     const plainDb = fakeDb();
     await findCustomersAtAddress(plainDb, '123 Palm Ave, Venice, FL 34285');
@@ -115,10 +115,32 @@ describe('findCustomersAtAddress', () => {
     expect(plainDb.calls).toContainEqual(['where', 'customers', 'address_line1', 'ilike', '123 %']);
   });
 
-  it('strict: a member on file through the property leg with a tab after the house number is found', async () => {
+  it('strict: a member on file through the property leg with a tab after the house number is an exact match', async () => {
     const db = fakeDb({ properties: [ROW('member', '123\tPalm Ave', null, { waveguard_tier: 'Gold' })] });
-    const ids = (await findCustomersAtAddress(db, '123 Palm Ave, Venice, FL 34285', { strict: true })).map((r) => r.id);
-    expect(ids).toEqual(['member']);
+    const rows = await findCustomersAtAddress(db, '123 Palm Ave, Venice, FL 34285', { strict: true, zip: '34285' });
+    expect(rows.map((r) => [r.id, r.exactMatch])).toEqual([['member', true]]);
+  });
+
+  it('strict with a zip: a row the comparator rejects but with the same digits and zip (or no zip) is a near row', async () => {
+    const db = fakeDb({
+      customers: [ROW('exact', '123 Palm Ave')],
+      properties: [
+        ROW('unit-in-line2', '123 Palm Ave', '4'),
+        ROW('slash', '123/2 Palm Ave'),
+        ROW('no-zip', '123 Other St', null, { zip: null }),
+        ROW('other-zip', '123 Palm Ave', null, { zip: '34292', city: 'Venice' }),
+      ],
+    });
+    const rows = await findCustomersAtAddress(db, '123-2 Palm Ave, Venice, FL 34285', { strict: true, zip: '34285' });
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r.exactMatch]));
+    expect(byId['other-zip']).toBeUndefined();
+    expect(byId['no-zip']).toBe(false);
+    expect(byId.slash === true || byId.slash === false).toBe(true);
+    expect(byId['unit-in-line2'] === true || byId['unit-in-line2'] === false).toBe(true);
+    // Without strict nothing is marked and no near row is added.
+    const plain = await findCustomersAtAddress(db, '123-2 Palm Ave, Venice, FL 34285');
+    expect(plain.every((r) => !('exactMatch' in r))).toBe(true);
+    expect(plain.map((r) => r.id)).not.toContain('no-zip');
   });
 
   it('a failing property leg is skipped, not fatal', async () => {

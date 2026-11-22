@@ -17,7 +17,8 @@
  * total above 0 and a setup fee the table can hold. A clean price is priced; anything else is not_clean with one reason
  * code; a save the server refuses (4xx) is not_clean / save_refused; any other failure is failed / engine (tried again
  * later). A member check that cannot finish is failed / member_check (tried again later), never a price; an address
- * the check can never answer for (no readable house number, too many rows) is not_clean / member_unchecked.
+ * the check can never answer for (no readable house number, too many rows, a member on file it cannot tell apart)
+ * is not_clean / member_unchecked.
  *
  * One database read of its own (the member check: customers and their properties at this address), no paid or AI
  * service, no logging.
@@ -33,12 +34,16 @@ const REAL = {
   dryRunEstimate: () => (body) => require('../admin-estimate-persistence').createOrReuseAdminEstimate({
     database: require('../../models/db'), body, technicianId: null, technician: null, dryRun: true, requireLivePricing: true,
   }),
-  // True when a member of Waves is at the address. Strict: a failed lookup throws, it never reads as no member.
-  memberAtAddress: () => async (address) => {
+  // 'exact' when a member of Waves is at the address, 'near' when a member's address on file has the same house
+  // digits and zip but the comparator cannot call it the same (cannot tell), else null. Strict: a failed lookup
+  // throws, it never reads as no member.
+  memberAtAddress: () => async (address, zip) => {
     const { findCustomersAtAddress } = require('../customer-address-match');
     const { isMembershipCustomerRow } = require('../waveguard-existing-services');
-    const rows = await findCustomersAtAddress(require('../../models/db'), address, { strict: true });
-    return rows.some(isMembershipCustomerRow);
+    const members = (await findCustomersAtAddress(require('../../models/db'), address, { strict: true, zip }))
+      .filter(isMembershipCustomerRow);
+    if (members.some((r) => r.exactMatch)) return 'exact';
+    return members.length ? 'near' : null;
   },
   // The names the list counts as one place in a zip (prospect-store SAME_PLACE_CITY_NAMES), or the city alone.
   cityNamesOf: () => require('./prospect-store').cityNamesOf,
@@ -168,17 +173,22 @@ async function priceHome(row, facts, deps = {}) {
   // Before the save: a home whose member check cannot finish is tried again later, never priced on new-customer terms.
   // An address the search can never answer for is settled without a price (member_unchecked); any other error is
   // tried again later (member_check).
-  let member = false;
+  // A near member (same house digits and zip, a spelling the comparator cannot read) cannot be told apart: no price.
+  let member = null;
   try {
+    const zip = upperLine(row.zip).slice(0, 5);
     for (const address of memberCheckAddresses(row, cityNamesOf)) {
-      if (await memberAtAddress(address)) { member = true; break; }
+      const found = await memberAtAddress(address, zip);
+      if (found === 'exact') { member = 'exact'; break; }
+      if (found === 'near') member = 'near';
     }
   } catch (err) {
     const { ADDRESS_UNCHECKABLE } = require('../customer-address-match');
     if (err?.code === ADDRESS_UNCHECKABLE) return { status: 'not_clean', reason: 'member_unchecked', ...known };
     return { status: 'failed', reason: 'member_check', ...known };
   }
-  if (member) return { status: 'not_clean', reason: 'member_address', ...known };
+  if (member === 'exact') return { status: 'not_clean', reason: 'member_address', ...known };
+  if (member === 'near') return { status: 'not_clean', reason: 'member_unchecked', ...known };
   let prepared;
   try {
     prepared = await dryRunEstimate(estimateBody(row, facts, engineInputFor(facts, buildEngineInput)));

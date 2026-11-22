@@ -60,23 +60,33 @@ function candidateAddressString(row) {
  *   returning the primary leg alone (the primary leg always throws), and
  *   reads up to STRICT_LEG_LIMIT rows a leg, throwing when a leg fills it.
  *   An address it can never answer for throws with code ADDRESS_UNCHECKABLE.
+ *   strict also keeps the NEAR rows: the same leading house digits and the
+ *   same `zip` (a 5-digit option), but not the same street address to the
+ *   comparator. Each row then carries `exactMatch: true | false`. A caller
+ *   that must not miss a match treats a near row as "cannot tell": stored
+ *   spellings the comparator does not read (a compound number written
+ *   another way, a bare unit in line 2) land there instead of vanishing.
  * @returns {Promise<Array<object>>} customer rows (deduped by id) whose
  *   primary or property address is the same street address, each with
  *   `matchedVia: 'primary' | 'property'` and the matched address columns.
  */
-async function findCustomersAtAddress(database, address, { excludeCustomerId = null, strict = false } = {}) {
+async function findCustomersAtAddress(database, address, { excludeCustomerId = null, strict = false, zip = null } = {}) {
   const houseNumber = houseNumberOf(address);
   if (!houseNumber) {
     if (strict) throw uncheckable('no house number the search can read');
     return [];
   }
   const legLimit = strict ? STRICT_LEG_LIMIT : PER_LEG_LIMIT;
-  // The candidate filter. Default: the line starts with the house number and a space. strict: the house number is a
-  // whole token anywhere in the line (a tab after it, a unit before it), so the comparator sees every row it could
-  // match; the wider set is why strict has the higher cap.
+  // The candidate filter. Default: the line starts with the house number and a space. strict: the house number's
+  // leading digits are a whole digit run anywhere in the line (a tab after it, a unit before it, "123/2" for
+  // "123-2"), so the comparator and the near test see every row they could keep; the wider set is why strict has
+  // the higher cap.
+  const leadingDigits = houseNumber.match(/^\d+/)[0];
   const houseNumberFilter = (column) => (q) => (strict
-    ? q.whereRaw('?? ~* ?', [column, `(^|[^0-9a-z])${houseNumber.replace(/[^0-9a-z]/gi, (ch) => `\\${ch}`)}([^0-9a-z]|$)`])
+    ? q.whereRaw('?? ~ ?', [column, `(^|[^0-9])${leadingDigits}([^0-9]|$)`])
     : q.where(column, 'ilike', `${houseNumber} %`));
+  const nearZip = strict && /^\d{5}$/.test(String(zip || '')) ? String(zip) : null;
+  const zip5 = (value) => String(value || '').trim().slice(0, 5);
   const complete = (rows, leg) => {
     if (strict && rows.length >= legLimit) throw uncheckable(`the ${leg} leg filled its ${legLimit}-row cap`);
     return rows;
@@ -124,7 +134,16 @@ async function findCustomersAtAddress(database, address, { excludeCustomerId = n
     if (seen.has(String(row.id))) continue;
     if (!sameStreetAddress(candidateAddressString(row), address)) continue;
     seen.add(String(row.id));
-    matches.push(row);
+    matches.push(strict ? { ...row, exactMatch: true } : row);
+  }
+  if (!nearZip) return matches;
+  for (const row of candidates) {
+    if (!row.address_line1 || seen.has(String(row.id))) continue;
+    if (excludeCustomerId != null && String(row.id) === String(excludeCustomerId)) continue;
+    // A row with no zip on file cannot be told apart: near too.
+    if (zip5(row.zip) && zip5(row.zip) !== nearZip) continue;
+    seen.add(String(row.id));
+    matches.push({ ...row, exactMatch: false });
   }
   return matches;
 }

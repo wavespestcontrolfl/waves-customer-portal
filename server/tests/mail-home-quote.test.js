@@ -198,11 +198,11 @@ describe('the strict member check, before the save', () => {
   test('it is asked for the home\'s own address', async () => {
     const t = setup();
     await t.price();
-    expect(t.deps.memberAtAddress).toHaveBeenCalledWith(ADDRESS);
+    expect(t.deps.memberAtAddress).toHaveBeenCalledWith(ADDRESS, '34212');
   });
 
   test('a member at the address: not_clean / member_address, and the save is never asked', async () => {
-    const t = setup({ memberAtAddress: jest.fn(async () => true) });
+    const t = setup({ memberAtAddress: jest.fn(async () => 'exact') });
     expect(await t.price()).toEqual({ status: 'not_clean', reason: 'member_address', ...facts });
     expect(t.deps.dryRunEstimate).not.toHaveBeenCalled();
   });
@@ -218,12 +218,24 @@ describe('the member check: every name of the place, and an address it can never
   const bradenton = { id: 'row-2', address_line1: '7 SAMPLE CV', city: 'BRADENTON', state: 'FL', zip: '34211' };
 
   test('a home in a zip with two names is checked under both: a member on file under the other name is found', async () => {
-    const t = setup({ memberAtAddress: jest.fn(async (address) => address.includes('LAKEWOOD RANCH')) });
+    const t = setup({ memberAtAddress: jest.fn(async (address) => (address.includes('LAKEWOOD RANCH') ? 'exact' : null)) });
     expect(await priceHome(bradenton, facts, t.deps)).toEqual({ status: 'not_clean', reason: 'member_address', ...facts });
     expect(t.deps.memberAtAddress.mock.calls.map(([a]) => a)).toEqual([
       '7 SAMPLE CV, BRADENTON FL 34211', '7 SAMPLE CV, LAKEWOOD RANCH FL 34211',
     ]);
     expect(t.deps.dryRunEstimate).not.toHaveBeenCalled();
+  });
+
+  test('a near member under one name and none under the other: not_clean / member_unchecked, no price', async () => {
+    const t = setup({ memberAtAddress: jest.fn(async (address) => (address.includes('LAKEWOOD RANCH') ? 'near' : null)) });
+    expect(await priceHome(bradenton, facts, t.deps)).toEqual({ status: 'not_clean', reason: 'member_unchecked', ...facts });
+    expect(t.deps.memberAtAddress).toHaveBeenCalledTimes(2);
+    expect(t.deps.dryRunEstimate).not.toHaveBeenCalled();
+  });
+
+  test('an exact member under either name wins over a near one', async () => {
+    const t = setup({ memberAtAddress: jest.fn(async (address) => (address.includes('BRADENTON') ? 'near' : 'exact')) });
+    expect(await priceHome(bradenton, facts, t.deps)).toEqual({ status: 'not_clean', reason: 'member_address', ...facts });
   });
 
   test('a home in a zip with one name is checked once', async () => {
