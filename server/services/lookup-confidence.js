@@ -140,9 +140,43 @@ function lookupTurfZeroIsObserved(enriched) {
 // fills the rest), while a flag means "verify this before pricing".
 function lookupFeatureReadIsFlagged(enriched) {
   return hasVerifyFlagMatching(enriched, (field) => (
-    field.includes('estimatedturf') || field.includes('pool') || field.includes('shrub')
-    || field.includes('tree') || field.includes('landscape')
+    field.includes('estimatedturf') || isFeatureReadField(field)
   ));
+}
+
+// A verify flag on one of the photo's own feature reads (not on the lawn area).
+function isFeatureReadField(field) {
+  return field.includes('pool') || field.includes('shrub')
+    || field.includes('tree') || field.includes('landscape');
+}
+
+// GATE_PEST_PRICE_PHOTO_FACTS (owner 2026-11-21, reply "1, 2"): is the lawn
+// AREA the only thing a flagged feature read doubts? Then the photo itself is
+// not in question, and a pest price may keep the three photo facts it reads
+// (shrubs, complexity, near water) instead of the neutral defaults. An audit
+// of 106 estimates found the lawn-area flag on about half of homes, and the
+// owner's final value agreed with the photo on 87% of those three facts with
+// or without the flag.
+//
+// Read from machine fields only, never a flag's prose. Still refused:
+//   - a low grade or a whole-lookup flag (weak photo, wrong premise);
+//   - turfObservation 'unobservable': the photo conflicts with county records
+//     (an old photo of bare land), so every read off it is of the wrong scene;
+//   - countyTurfPriorSf: the photo gave no lawn number at all;
+//   - a flag on a pool, shrub, tree or landscape read.
+// Every flag the lookup raises on estimatedTurfSf is one of those cases or a
+// doubt about the lawn number alone; a new kind of estimatedTurfSf flag must
+// be sorted here (lookup-confidence-lawn-area-doubt.test.js counts them).
+function lookupLawnAreaIsTheOnlyFeatureDoubt(enriched) {
+  if (!enriched) return false;
+  if (!lookupConfidenceIsAdequate(enriched)) return false;
+  if (hasGlobalVerifyFlag(enriched)) return false;
+  if (String(enriched.turfObservation || '').trim().toLowerCase() === 'unobservable') return false;
+  if (Number(enriched.countyTurfPriorSf) > 0) return false;
+  const fields = (Array.isArray(enriched.fieldVerifyFlags) ? enriched.fieldVerifyFlags : [])
+    .map((flag) => String(flag?.field || '').toLowerCase());
+  if (fields.some(isFeatureReadField)) return false;
+  return fields.some((field) => field.includes('estimatedturf'));
 }
 
 // Vision-derived FEATURE modifiers (pool, cage, shrub/tree density,
@@ -318,6 +352,7 @@ module.exports = {
   lookupBedAreaIsTrustworthy,
   lookupBedAreaReadIsFlagged,
   lookupFeatureReadIsFlagged,
+  lookupLawnAreaIsTheOnlyFeatureDoubt,
   lookupFeaturesAreTrustworthy,
   lookupPropertyTypeIsTrustworthy,
   lookupDimensionIsTrustworthy,

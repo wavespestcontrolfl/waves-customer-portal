@@ -978,6 +978,29 @@ function wholeHomeInputError(message, code) {
 const includesReentryGuarantee = (result) => result?.includesReentryGuarantee === true;
 
 // ── Generate Complete Estimate ────────────────────────────────
+// GATE_PEST_PRICE_PHOTO_FACTS (owner 2026-11-21, "1, 2"): the customer price
+// path may hand the recurring pest line three photo facts beside `features`
+// (input.pestPhotoFacts; services/customer-pricing-ai.js sets it when the
+// property lookup's only doubt is the lawn area). This line alone reads them.
+// Every other line prices on `features`, where that lookup flag keeps the
+// neutral defaults, so a mosquito, lawn, tree or termite price does not move.
+// Known values only: anything else leaves the feature as it was. The key is
+// no new power for a caller that controls the input: `features` already
+// carries the same three facts.
+const PEST_PHOTO_FACT_VALUES = {
+  shrubs: ['light', 'moderate', 'heavy'],
+  complexity: ['simple', 'moderate', 'complex'],
+};
+function pestPropertyWithPhotoFacts(property, facts) {
+  if (!facts || typeof facts !== 'object' || Array.isArray(facts)) return property;
+  const features = { ...(property.features || {}) };
+  for (const [key, allowed] of Object.entries(PEST_PHOTO_FACT_VALUES)) {
+    if (allowed.includes(facts[key])) features[key] = facts[key];
+  }
+  if (typeof facts.nearWater === 'boolean') features.nearWater = facts.nearWater;
+  return { ...property, features };
+}
+
 function generateEstimate(input) {
   const services = input.services || {};
   // Lawn cost-floor ENFORCEMENT arm state (owner ruling 2026-07-17: floors
@@ -1345,7 +1368,7 @@ function generateEstimate(input) {
         // re-price on the footprint ladder (stored quotes keep their
         // dollars or visibly stop).
         ? unitBandQuoteRequiredLine('pest_control', bandVerdict.reason)
-        : pricePestControl(property, {
+        : pricePestControl(pestPropertyWithPhotoFacts(property, input.pestPhotoFacts), {
         frequency: services.pest.frequency || 'quarterly',
         // No caller-provided version → defer to pricePestControl's own live
         // default (v2 curve). The old `|| 'v1'` fallback silently pinned
