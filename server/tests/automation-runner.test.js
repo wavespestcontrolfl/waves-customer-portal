@@ -723,14 +723,15 @@ describe('referral_nudge at delivery (GATE_REFERRAL_STEP2)', () => {
   });
   afterEach(() => { gates.referralStep2 = savedGate; jest.restoreAllMocks(); });
 
-  function nudgeQueues({ sendUpdate = chain(), enrollmentUpdate = chain(), stepBodies = {} } = {}) {
+  function nudgeQueues({ sendUpdate = chain(), enrollmentUpdate = chain(), stepBodies = {}, enrollmentPatch = {} } = {}) {
     const enrollment = {
       id: 'enrollment-n', template_key: 'referral_nudge', customer_id: 'cust-n', status: 'active',
       current_step: 0, email: 'member@example.com', first_name: 'Sam', last_name: 'Member',
-      enrolled_at: new Date('2026-11-01T12:00:00Z'), metadata: {},
+      enrolled_at: new Date('2026-11-01T12:00:00Z'), metadata: {}, ...enrollmentPatch,
     };
     setDbQueues({
-      automation_enrollments: [chain({ first: enrollment }), chain({ first: enrollment }), enrollmentUpdate],
+      // An enrollment with no customer is read once (no customer lock), so its queue has one read fewer.
+      automation_enrollments: [chain({ first: enrollment }), ...(enrollment.customer_id ? [chain({ first: enrollment })] : []), enrollmentUpdate],
       automation_templates: [chain({ first: { key: 'referral_nudge', name: 'Referral Nudge', asm_group: 'service' } })],
       automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, subject: 'Share Waves, {{first_name}}',
         html_body: '<p>Share it.</p>', text_body: 'Share it.', from_email: 'automations@wavespestcontrol.com', enabled: true, ...stepBodies }] })],
@@ -817,10 +818,38 @@ describe('referral_nudge at delivery (GATE_REFERRAL_STEP2)', () => {
       expect(sentMail().text).not.toMatch(/account credit/);
     });
 
-    test('gate on, the friend credit is $0: today\'s sentence stays', async () => {
+    test('gate on, the friend credit is $0: the member\'s credit alone, never the seeded "$25 each"', async () => {
       decide({ ...ON, refereeCents: 0 });
       nudgeQueues({ stepBodies: { html_body: SEED('html_body'), text_body: SEED('text_body') } });
       sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-zero' });
+      await expect(sendStep('enrollment-n')).resolves.toMatchObject({ sent: true });
+      expect(sentMail().text).toContain('starts a recurring plan with your link and we complete their first service, you get a $25 account credit.');
+      expect(sentMail().text).not.toMatch(/you each get/);
+      expect(sentMail().html).not.toMatch(/you each get/);
+    });
+
+    test('gate on, an enrollment with no customer (the record was deleted): cancelled, nothing sent and nothing read', async () => {
+      const spy = jest.spyOn(engine, 'referralOfferDecision');
+      const { sendUpdate, enrollmentUpdate } = nudgeQueues({
+        enrollmentPatch: { customer_id: null },
+        stepBodies: { html_body: SEED('html_body'), text_body: SEED('text_body') },
+      });
+      await expect(sendStep('enrollment-n')).resolves.toEqual({ sent: false, blocked: true, reason: 'No customer on file for the referral nudge' });
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      expect(spy).not.toHaveBeenCalled();
+      expect(sendUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'blocked' }));
+      expect(enrollmentUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'cancelled', metadata: { sql: expect.stringContaining('{cancel_reason}'), bindings: [JSON.stringify('referral_no_member')] },
+      }));
+    });
+
+    test('gate off, an enrollment with no customer: sent as stored, as before', async () => {
+      gates.referralStep2 = false;
+      nudgeQueues({
+        enrollmentPatch: { customer_id: null },
+        stepBodies: { html_body: SEED('html_body'), text_body: SEED('text_body') },
+      });
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-nocust-off' });
       await expect(sendStep('enrollment-n')).resolves.toMatchObject({ sent: true });
       expect(sentMail().text).toContain('you each get a $25 account credit');
     });

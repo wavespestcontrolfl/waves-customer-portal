@@ -315,27 +315,34 @@ async function automationDeliveryBlock({ enrollment, template, recipient, sendId
     const stop = await estimateSentStop(enrollment, step);
     if (stop) return blockSendAndCancelEnrollment({ enrollment, sendId, ...stop });
   }
-  if (template.key === 'referral_nudge') {
-    const verdict = await referralNudgeVerdict(enrollment.customer_id, nudgeDecision);
-    if (verdict === 'defer') {
-      // Standing unknown (settings or ledger unreadable) or the program paused: try again later; the once-ever
-      // enrollment is never cancelled on a doubt.
-      return deferPaymentFailedForHold({ enrollment, sendId, reason: 'Referral offer unavailable; referral nudge deferred' });
-    }
-    if (verdict === 'cap') {
-      return blockSendAndCancelEnrollment({ enrollment, sendId,
-        reason: 'The member reached the yearly referral credit limit', cancelReason: 'referral_yearly_limit' });
-    }
-  }
+  if (template.key === 'referral_nudge') return referralNudgeBlock({ enrollment, sendId, nudgeDecision });
   return null;
+}
+
+const REFERRAL_NUDGE_STOPS = Object.freeze({
+  cap: { reason: 'The member reached the yearly referral credit limit', cancelReason: 'referral_yearly_limit' },
+  no_member: { reason: 'No customer on file for the referral nudge', cancelReason: 'referral_no_member' },
+});
+
+async function referralNudgeBlock({ enrollment, sendId, nudgeDecision }) {
+  const verdict = await referralNudgeVerdict(enrollment.customer_id, nudgeDecision);
+  if (verdict === 'defer') {
+    // Standing unknown (settings or ledger unreadable) or the program paused: try again later; the once-ever
+    // enrollment is never cancelled on a doubt.
+    return deferPaymentFailedForHold({ enrollment, sendId, reason: 'Referral offer unavailable; referral nudge deferred' });
+  }
+  const stop = REFERRAL_NUDGE_STOPS[verdict];
+  return stop ? blockSendAndCancelEnrollment({ enrollment, sendId, ...stop }) : null;
 }
 
 // GATE_REFERRAL_STEP2, checked again at delivery (the member can reach the limit after the sequence was queued, or
 // before the gate was switched on): the referral_nudge copy promises a credit for each referral, so a member at the
 // yearly limit is cancelled; one whose standing cannot be read, or a paused program, is deferred. Gate off: never withheld.
+// An enrollment with no customer (the customer record was deleted; the enrollment keeps its email): under the gate there
+// is no member to credit and no standing to read, so the promise cannot be kept and the enrollment is cancelled.
 // `decision`: the one the send already read to choose its words (sendStepLocked); without it this reads its own.
 async function referralNudgeVerdict(customerId, decision) {
-  if (!customerId) return 'send';
+  if (!customerId) return require('../config/feature-gates').isEnabled('referralStep2') ? 'no_member' : 'send';
   const offer = decision || await require('./referral-engine').referralOfferDecision(db, customerId);
   if (offer.skip) return 'defer';
   return offer.atLimit ? 'cap' : 'send';
@@ -346,8 +353,9 @@ async function referralNudgeVerdict(customerId, decision) {
 // with the live amounts. A step an admin rewrote no longer holds it and renders as stored. Gate off: the decision answers
 // at once, reads nothing, and nothing is swapped.
 // A real send reads the member's decision ONCE: the same decision picks the words and, in automationDeliveryBlock, decides
-// whether the email goes (limit: cancelled; unreadable or paused: deferred). A test send, the test sequence and the
-// preview page have no member: they show what a member under the limit gets (a null member id).
+// whether the email goes (limit: cancelled; unreadable or paused: deferred). A real send with no customer on the
+// enrollment reads nothing and is not swapped: under the gate the delivery check cancels it. A test send, the test
+// sequence and the preview page have no member: they show what a member under the limit gets (a null member id).
 function memberlessNudgeDecision(templateKey) {
   return templateKey === 'referral_nudge' ? require('./referral-engine').referralOfferDecision(db, null) : null;
 }

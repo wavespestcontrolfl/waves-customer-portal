@@ -129,19 +129,42 @@ describe('nudgeEmailWithOffer (the referral_nudge email)', () => {
     }
   });
 
-  test('a $0 friend credit, or a body an admin rewrote, is returned as stored', () => {
-    expect(step2.nudgeEmailWithOffer(HTML_SEED, { html: true, ...offer, refereeCents: 0 })).toBe(HTML_SEED);
-    expect(step2.nudgeEmailWithOffer(TEXT_SEED, { html: false, ...offer, refereeCents: 0 })).toBe(TEXT_SEED);
+  test('a $0 friend credit never restates the seeded "$25 each": the member\'s sentence alone', () => {
+    const memberOnly = { ...offer, refereeCents: 0 };
+    expect(step2.nudgeEmailWithOffer(HTML_SEED, { html: true, ...memberOnly })).toContain(
+      '<p>Share your personal referral link — it\'s in the Refer tab of your customer portal. When a neighbor, friend or family member starts a recurring plan with your link and we complete their first service, you get a <strong>$25 account credit</strong>.</p>',
+    );
+    const text = step2.nudgeEmailWithOffer(TEXT_SEED, { html: false, ...memberOnly });
+    expect(text).toContain('in your portal. When a neighbor, friend or family member starts a recurring plan with your link and we complete their first service, you get a $25 account credit. Or reply');
+    for (const body of [step2.nudgeEmailWithOffer(HTML_SEED, { html: true, ...memberOnly }), text]) {
+      expect(body).not.toMatch(/you each get|they get/);
+    }
+  });
+
+  test('no credit to state (both $0, or a $0 friend credit at the yearly limit): the sentence is left out', () => {
+    for (const none of [{ refereeCents: 0, memberCents: 0, atLimit: false }, { refereeCents: 0, memberCents: 2500, atLimit: true }]) {
+      expect(step2.nudgeEmailWithOffer(HTML_SEED, { html: true, ...none })).toContain(
+        '<p>Share your personal referral link — it\'s in the Refer tab of your customer portal.</p>',
+      );
+      const text = step2.nudgeEmailWithOffer(TEXT_SEED, { html: false, ...none });
+      expect(text).toContain('Share your referral link from the Refer tab in your portal. Or reply with their name');
+      expect(text).not.toMatch(/account credit/);
+    }
+  });
+
+  test('a body an admin rewrote is returned as stored', () => {
     const edited = '<p>Know a neighbor? Send them your link and we\'ll thank you both.</p>';
     expect(step2.nudgeEmailWithOffer(edited, { html: true, ...offer })).toBe(edited);
     // The HTML sentence in the text arm (and the reverse) is not the seeded stretch for that arm.
     expect(step2.nudgeEmailWithOffer(HTML_SEED, { html: false, ...offer })).toBe(HTML_SEED);
   });
 
-  test('the preview line: the approved summary when both credits are above 0 and the member is under the limit', () => {
+  test('the preview line states the same credits as the body, and only a seeded line is swapped', () => {
     expect(step2.nudgePreviewWithOffer(PREVIEW_SEED, offer)).toBe('Refer a neighbor: they get a $50 credit, you get a $25 credit.');
-    expect(step2.nudgePreviewWithOffer(PREVIEW_SEED, { ...offer, atLimit: true })).toBe(PREVIEW_SEED);
-    expect(step2.nudgePreviewWithOffer(PREVIEW_SEED, { ...offer, refereeCents: 0 })).toBe(PREVIEW_SEED);
+    expect(step2.nudgePreviewWithOffer(PREVIEW_SEED, { ...offer, atLimit: true })).toBe('Refer a neighbor: they get a $50 credit.');
+    expect(step2.nudgePreviewWithOffer(PREVIEW_SEED, { ...offer, memberCents: 0 })).toBe('Refer a neighbor: they get a $50 credit.');
+    expect(step2.nudgePreviewWithOffer(PREVIEW_SEED, { ...offer, refereeCents: 0 })).toBe('Refer a neighbor: you get a $25 credit.');
+    expect(step2.nudgePreviewWithOffer(PREVIEW_SEED, { refereeCents: 0, memberCents: 0 })).toBe('Refer a neighbor.');
     expect(step2.nudgePreviewWithOffer('Refer a neighbor, edited.', offer)).toBe('Refer a neighbor, edited.');
   });
 });

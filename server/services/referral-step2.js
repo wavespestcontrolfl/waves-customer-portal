@@ -142,29 +142,44 @@ const NUDGE_SEEDED = Object.freeze({
   preview: 'Refer a neighbor: you each get a $25 account credit.',
 });
 
-// The approved sentences: the friend's credit, then the member's. At the yearly limit (or no member amount) only the
-// friend's sentence is left: a member at the limit is never promised a credit.
-const nudgeEmailOffer = ({ refereeCents, memberCents, atLimit = false }, html) => {
+// The credits a nudge may state, in cents: each one only when it is paid. The member's is 0 at the yearly limit, so a
+// member at the limit is never promised a credit. The email body and the preview summary both read this.
+const nudgeCredits = ({ refereeCents, memberCents, atLimit = false }) => ({
+  friend: Math.max(0, Number(refereeCents) || 0),
+  member: atLimit ? 0 : Math.max(0, Number(memberCents) || 0),
+});
+
+// The approved sentences: the friend's credit, then the member's. One of them at $0: the other alone (the member's
+// alone is today's sentence without "each"). Neither: no sentence, so nothing is promised.
+const nudgeEmailOffer = (offer, html) => {
+  const { friend, member } = nudgeCredits(offer);
   const credit = (cents) => (html ? `<strong>${dollars(cents)} account credit</strong>` : `${dollars(cents)} account credit`);
-  const friend = `When a neighbor, friend or family member starts a recurring plan with your link, they get a ${credit(refereeCents)} after their first service.`;
-  const member = !atLimit && Number(memberCents) > 0 ? ` After we complete their first service, you get a ${credit(memberCents)}.` : '';
-  return `${friend}${member}`;
+  const start = 'When a neighbor, friend or family member starts a recurring plan with your link';
+  if (!friend) return member ? `${start} and we complete their first service, you get a ${credit(member)}.` : '';
+  return `${start}, they get a ${credit(friend)} after their first service.${member ? ` After we complete their first service, you get a ${credit(member)}.` : ''}`;
 };
 
-// `body` is the stored step body (html or text); `offer` = { refereeCents, memberCents, atLimit }.
+// `body` is the stored step body (html or text); `offer` = { refereeCents, memberCents, atLimit } from a decision made
+// with the gate on. A body without the seeded sentence is returned as stored.
 function nudgeEmailWithOffer(body, { html = false, ...offer }) {
   const text = String(body ?? '');
   const seeded = html ? NUDGE_SEEDED.html : NUDGE_SEEDED.text;
-  const at = Number(offer.refereeCents) > 0 ? text.indexOf(seeded) : -1;
+  const at = text.indexOf(seeded);
   if (at < 0) return text;
   const words = nudgeEmailOffer(offer, html);
-  return `${text.slice(0, at)}${html ? words : `. ${words}`}${text.slice(at + seeded.length)}`;
+  const rest = text.slice(at + seeded.length);
+  // The text body's seeded stretch starts at a dash: it becomes the end of the sentence before it.
+  if (!html) return `${text.slice(0, at)}.${words ? ` ${words}` : ''}${rest}`;
+  // No sentence left: the space before the seeded sentence goes too.
+  return words ? `${text.slice(0, at)}${words}${rest}` : `${text.slice(0, at).replace(/ $/, '')}${rest}`;
 }
 
-// The Automations preview page's one-line summary (never sent). Both credits must be above 0 and the member not at the limit.
-function nudgePreviewWithOffer(line, { refereeCents, memberCents, atLimit = false }) {
-  if (line !== NUDGE_SEEDED.preview || atLimit || !(Number(refereeCents) > 0) || !(Number(memberCents) > 0)) return line;
-  return `Refer a neighbor: they get a ${dollars(refereeCents)} credit, you get a ${dollars(memberCents)} credit.`;
+// The Automations preview page's one-line summary (never sent), from the same credits as the body.
+function nudgePreviewWithOffer(line, offer) {
+  if (line !== NUDGE_SEEDED.preview) return line;
+  const { friend, member } = nudgeCredits(offer);
+  const parts = [friend ? `they get a ${dollars(friend)} credit` : '', member ? `you get a ${dollars(member)} credit` : ''].filter(Boolean);
+  return parts.length ? `Refer a neighbor: ${parts.join(', ')}.` : 'Refer a neighbor.';
 }
 
 module.exports = {
