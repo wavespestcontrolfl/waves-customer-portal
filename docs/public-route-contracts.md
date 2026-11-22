@@ -1972,7 +1972,11 @@ value leave these routes byte-identical, with no extra query).**
 slots on the home or gap technician of the line(s) the held visit carries: the
 estimate's primary program's line (the program the hold stamps), or every
 program's line for a combined capacity hold, so only a technician on every one of
-those lines is offered. A line with no technician set in `service_line_techs`
+those lines is offered. Rodent exclusion work is its own line since 2026-11-21
+(`exclusion`: the sealing, wire mesh, roof-entry cover, sanitation and rodent
+inspection service keys, `CATALOG_KEY_LINES`); trapping and bait stations stay on
+`rodent`, so an exclusion estimate and a trapping estimate can list different
+technicians. A line with no technician set in `service_line_techs`
 adds no rule. At a date and start both have, the home technician's slot is the
 one listed; the gap technician's slots fill the starts the home technician has
 none for. Each listed slot stays a complete slot with its own `techId`,

@@ -16,7 +16,7 @@
  * category becomes Qualified only when someone marks it so. verified_by /
  * verified_at record who made that call.
  */
-const { CAPABILITY_CATEGORIES, categoryForCatalogCategory, classifyServiceCategory } = require('./auto-dispatch/service-category');
+const { CAPABILITY_CATEGORIES, lineForCatalogRow, classifyServiceCategory } = require('./auto-dispatch/service-category');
 const featureGates = require('../config/feature-gates');
 const logger = require('./logger');
 
@@ -34,7 +34,8 @@ const CATEGORY_LABELS = {
   general: 'General pest',
   mosquito: 'Mosquito',
   lawn: 'Lawn, tree & shrub',
-  rodent: 'Rodent',
+  rodent: 'Rodent trapping & bait',
+  exclusion: 'Rodent exclusion',
   termite: 'Termite / WDO',
 };
 
@@ -102,7 +103,7 @@ function staleError(category) {
   );
 }
 
-/** All five categories for one tech, missing rows reported as state 'unset'. */
+/** Every category for one tech, missing rows reported as state 'unset'. */
 async function listCapabilities(conn, technicianId) {
   const rows = await conn('technician_capabilities as tc')
     .leftJoin('technicians as v', 'tc.verified_by', 'v.id')
@@ -151,7 +152,7 @@ async function summarizeCapabilities(conn, technicianIds) {
 }
 
 /**
- * Seed the five categories for a newly created technician at the new-hire
+ * Seed every category for a newly created technician at the new-hire
  * level. Runs on the creator's transaction; existing rows are left alone.
  */
 async function seedNewHireCapabilities(conn, technicianId) {
@@ -224,10 +225,11 @@ async function writeCapabilities(conn, technicianId, entries, actorId) {
  * (the visit name) and, where the caller has them, `service_id` and
  * `service_key` (or `service_key_snapshot`).
  *   GATE_TECH_JOB_TYPE_CHECKS off: the NAME only (classifyServiceCategory), as before.
- *   On: the service library first (service_id, else the service key, to
- *   services.category, mapped by the table the service-line map uses), so
- *   "Palm Tree Nutritional Treatment" and "Top Dress" read lawn; the name only
- *   when the catalog names no category. An unreadable catalog falls to the name.
+ *   On: the service library first (service_id, else the service key, to the
+ *   catalog row, read by the rule the service-line map uses: lineForCatalogRow), so
+ *   "Palm Tree Nutritional Treatment" and "Top Dress" read lawn and the exclusion
+ *   services read exclusion; the name only when the catalog row names no category.
+ *   An unreadable catalog falls to the name.
  */
 async function categoriesForServices(conn, rows) {
   const byName = rows.map((row) => classifyServiceCategory(row.service_type));
@@ -246,7 +248,7 @@ async function categoriesForServices(conn, rows) {
         if (ids.length) q.whereIn('id', ids);
         if (keys.length) q.orWhereIn('service_key', keys);
       })
-      .select('id', 'service_key', 'category');
+      .select('id', 'service_key', 'category', 'name');
     catalog = conn.isTransaction && typeof conn.transaction === 'function'
       ? await conn.transaction((sp) => read(sp))
       : await read(conn);
@@ -254,13 +256,13 @@ async function categoriesForServices(conn, rows) {
     logger.warn(`[technician-capabilities] catalog category lookup failed: ${err.message}`);
     return byName;
   }
-  const byId = new Map(catalog.map((c) => [c.id, c.category]));
-  const byKey = new Map(catalog.map((c) => [c.service_key, c.category]));
+  const byId = new Map(catalog.map((c) => [c.id, c]));
+  const byKey = new Map(catalog.map((c) => [c.service_key, c]));
   return rows.map((row, i) => {
     const id = idOf(row);
     const key = keyOf(row);
-    const category = (id && byId.get(id)) || (key && byKey.get(key)) || null;
-    return categoryForCatalogCategory(category) || byName[i];
+    const catalogRow = (id && byId.get(id)) || (key && byKey.get(key)) || null;
+    return lineForCatalogRow(catalogRow) || byName[i];
   });
 }
 

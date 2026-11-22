@@ -63,28 +63,31 @@ describe('TeamTab service lines', () => {
     expect(calls.some((c) => c.url.includes('service-lines'))).toBe(false);
   });
 
-  it('shows five lines with the saved home and gap, and lists active and prospective techs only', async () => {
+  it('shows six lines with the saved home and gap, and lists active and prospective techs only', async () => {
     setup();
     const card = await screen.findByRole('region', { name: 'Service lines' });
     await waitFor(() => expect(within(card).getByLabelText('General pest Home tech')).toHaveValue('tech-new'));
     expect(within(card).getAllByRole('group').map((g) => g.getAttribute('aria-label'))).toEqual([
-      'General pest', 'Mosquito', 'Lawn / tree & shrub', 'Rodent', 'Termite / WDO',
+      'General pest', 'Mosquito', 'Lawn / tree & shrub', 'Rodent trapping & bait', 'Rodent exclusion', 'Termite / WDO',
     ]);
     expect(within(card).getByLabelText('General pest Gap tech')).toHaveValue('tech-adam');
     expect(within(card).getByLabelText('Mosquito Home tech')).toHaveValue('');
-    const options = within(within(card).getByLabelText('Rodent Home tech')).getAllByRole('option').map((o) => o.textContent);
+    const options = within(within(card).getByLabelText('Rodent exclusion Home tech')).getAllByRole('option').map((o) => o.textContent);
     expect(options).toEqual(['None', 'Owner Tech', 'New Hire (not started)']);
   });
 
-  it('saves all five lines, ids or null', async () => {
+  it('saves all six lines, ids or null', async () => {
     const { calls, showToast } = setup();
     const card = await screen.findByRole('region', { name: 'Service lines' });
     await waitFor(() => expect(within(card).getByLabelText('General pest Home tech')).toHaveValue('tech-new'));
-    fireEvent.change(within(card).getByLabelText('Rodent Home tech'), { target: { value: 'tech-new' } });
+    fireEvent.change(within(card).getByLabelText('Rodent trapping & bait Home tech'), { target: { value: 'tech-new' } });
     fireEvent.click(within(card).getByRole('button', { name: 'Save service lines' }));
     await waitFor(() => expect(showToast).toHaveBeenCalledWith('Service lines saved'));
     const put = calls.find((c) => c.method === 'PUT');
-    expect(put.body.lines).toHaveLength(5);
+    expect(put.body.lines).toHaveLength(6);
+    expect(put.body.lines.find((l) => l.service_category === 'exclusion')).toEqual({
+      service_category: 'exclusion', home_technician_id: null, gap_technician_id: null,
+    });
     expect(put.body.lines.find((l) => l.service_category === 'rodent')).toEqual({
       service_category: 'rodent', home_technician_id: 'tech-new', gap_technician_id: null,
     });
