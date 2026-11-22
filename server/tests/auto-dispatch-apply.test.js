@@ -1021,7 +1021,7 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     const row = { scheduled_service_id: 's1', moves: '2' };
     let trx = fakeTrx({ moveRows: [row] });
     await expect(guard(2)({ trx, technicianId: 't1', service: SERVICE }))
-      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', message: expect.stringContaining('moved automatically 2 times') });
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', message: expect.stringContaining('moved to another day automatically 2 times') });
     expect(trx.__calls).toEqual(['reschedule_log']);
     trx = fakeTrx({ moveRows: [{ scheduled_service_id: 's1', moves: '1' }] });
     await expect(guard(2)({ trx, technicianId: 't1', service: SERVICE })).resolves.toBeUndefined();
@@ -1036,7 +1036,7 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     const guard = makeMemberGuard({ service: SERVICE, best: BEST, config: { maxAutoMovesPerVisit: 2 }, techChanged: false });
     const siblings = [eligible(), eligible({ id: 's3' })];
     await expect(guard({ trx: fakeTrx({ siblings, moveRows: [{ scheduled_service_id: 's3', moves: '2' }] }), members }))
-      .rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's3', message: expect.stringContaining('moved automatically 2 times') });
+      .rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's3', message: expect.stringContaining('moved to another day automatically 2 times') });
     await expect(guard({ trx: fakeTrx({ siblings, moveRows: [{ scheduled_service_id: 's3', moves: '1' }] }), members })).resolves.toBeUndefined();
   });
 
