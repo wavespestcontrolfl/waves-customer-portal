@@ -1593,12 +1593,17 @@ function assertPlanOfferDates({ endsAt, firstVisitFrom }, nowDate) {
 // back only if all hold. Else it answers null and the standard flow runs, which retires the whole
 // lineage, the offer quote included: that limit stands for a tap of another service or option.
 async function liveOfferOfTappedQuote(trx, fresh, { serviceKey, optionId, now }) {
-  const rows = await trx('estimates')
+  // Only the newest live quote is read and locked: the core's liveness (liveRestartEstimate) as SQL, so the
+  // customer's accepted and expired quotes stay free for other writers while this transaction prices.
+  const newest = await trx('estimates')
     .where({ customer_id: fresh.id, source: PLAN_START_SOURCE })
     .whereNull('archived_at')
+    .whereIn('status', ['sent', 'viewed'])
+    .where((live) => live.whereNull('expires_at').orWhere('expires_at', '>', now()))
     .orderBy('created_at', 'desc')
-    .forUpdate();
-  const live = liveRestartEstimate(rows, now());
+    .forUpdate()
+    .first();
+  const live = liveRestartEstimate(newest ? [newest] : [], now());
   const stamp = live && !staffChangedDeliveryOptions(live) ? planOfferOf(live.estimate_data) : null;
   if (!stamp) return null;
   const planStart = parseJson(live.estimate_data, {})?.planStart;
@@ -1683,6 +1688,10 @@ async function mintPlanStartEstimate({
         logger.warn(`[${logTag}] plan offer job lookup failed for ${fresh.id} — refusing: ${err.message}`);
       }
       if (!due) throw new Error('mintPlanStartEstimate offer needs a completed one-time pest job of this customer that is due its offer');
+      // The estimate holds the earliest day only. The email's window (offerTerms firstVisitTo) is the 14 days
+      // the page's slot search opens on from that day. A wider search (the route's windowDays or date range)
+      // or a visit already on the books may land later, as on every estimate: a later plan visit changes no
+      // price and no charge, so nothing refuses it.
       callerTerms = { jobId: callerOffer.jobId, endsAt: due.endsAt, firstVisitFrom: due.firstVisitFrom };
       assertPlanOfferDates(callerTerms, now());
     }

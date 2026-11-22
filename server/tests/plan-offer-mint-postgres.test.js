@@ -433,6 +433,25 @@ postgres('plan offer quote (live Postgres)', () => {
       await intact(customer, offerQuote);
     });
 
+    // The tap reads and locks one row: the newest LIVE quote. A newer quote of the customer that has ended (still
+    // unarchived) is neither the answer nor a reason to miss the live offer behind it.
+    test('finds the live offer quote behind a newer quote that has ended', async () => {
+      const { customer, offerQuote, plainTap } = await withLiveOffer();
+      const endedId = crypto.randomUUID();
+      await trx.raw(
+        `INSERT INTO estimates
+         SELECT (jsonb_populate_record(NULL::estimates, to_jsonb(e) || jsonb_build_object(
+           'id', ?::text, 'token', ?::text, 'estimate_slug', ?::text, 'expires_at', ?::timestamptz, 'created_at', ?::timestamptz,
+           'estimate_data', e.estimate_data #- '{planStart,offer}'))).*
+         FROM estimates e WHERE e.id = ?`,
+        [endedId, crypto.randomBytes(16).toString('hex'), `ended-${endedId}`, new Date(Date.now() - DAY_MS), new Date(Date.now() + DAY_MS), offerQuote.estimateId],
+      );
+      expect(await plainTap()).toMatchObject({ estimateId: offerQuote.estimateId, reused: true });
+      expect((await rowOf(offerQuote.estimateId)).archived_at).toBeNull();
+      expect((await rowOf(endedId)).archived_at).toBeNull();
+      expect(await trx('estimates').where({ customer_id: customer.id, source: 'plan_start' })).toHaveLength(2);
+    });
+
     test.each([
       // The plan's price moved since the offer was minted: today's recompute no longer lands on the quote's frozen dollars.
       ['the price changed since the offer was minted', (offerQuote) => trx('estimates').where({ id: offerQuote.estimateId }).update({ monthly_total: 41 })],

@@ -193,6 +193,7 @@ function builder(table) {
     if (op === 'like') { const prefix = String(val).replace(/%$/, ''); return (r) => String(r[norm(a)] || '').startsWith(prefix); }
     if (op === '>=') return (r) => (r[norm(a)] ?? '') >= val;
     if (op === '<=') return (r) => (r[norm(a)] ?? '') <= val;
+    if (op === '>') return (r) => new Date(r[norm(a)]).getTime() > new Date(val).getTime();
     return (r) => String(r[norm(a)]) === String(val);
   };
   // Grouped predicate with knex's real AND/OR semantics (the reason group,
