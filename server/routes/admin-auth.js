@@ -627,13 +627,17 @@ async function issuePasswordReset(email) {
     const matches = await canonicalStaffEmailQuery(trx, normalizedEmail)
       .where({ active: true })
       .whereIn('role', ['admin', 'technician'])
-      .select('id', 'email');
+      .select('id', 'email', 'google_only_login_at');
     if (matches.length !== 1) {
       if (matches.length > 1) {
         logger.error(`[staff-auth] Password reset blocked by canonical email collision (matches=${matches.length})`);
       }
       return null;
     }
+    // A Google-only account (the Team tab's Hired press on a row with a linked company Google address) has no
+    // password by design. The email on that row can be one typed on a job application, which nobody proved, so a
+    // reset request sends it nothing. The table's CHECK refuses a token on such a row as well.
+    if (matches[0].google_only_login_at) return null;
 
     const [updated] = await trx('technicians')
       .where({ id: matches[0].id, active: true })

@@ -7488,6 +7488,10 @@ on `unauthenticatedAuthLimitKey` with production-only limiters;
 `POST /login` issues a password session only for a row with its own stored
 password hash (the timing comparison against the fixed stand-in hash still
 runs for a row with none, and a match there is refused);
+`/forgot-password` sends nothing and stores no token for a Google-only
+account (`technicians.google_only_login_at`, set by the Team tab's Hired
+press on a row with a linked company Google address; same generic answer),
+and a table CHECK refuses a password or a reset token on such a row;
 `/change-password`, `/register` (requireAdmin), and `/me` require the staff
 bearer; `/register` (like every Team tab writer of a staff email) refuses an
 address that is another staff row's email or linked Google address (409).
