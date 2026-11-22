@@ -391,6 +391,51 @@ describe('rain-out service', () => {
       expect(finder.mock.calls[0][0].pickerRoadCheck).toBeUndefined();
     });
 
+    // GATE_TECH_SHIFT_HOURS (D4 part 3b-2a): a technician's own move refuses an hour the visit's
+    // technician's shift today does not hold, so the sheet does not offer one. Now is 10:00 ET.
+    describe('shift hours', () => {
+      afterEach(() => { delete process.env.GATE_TECH_SHIFT_HOURS; });
+      const sameDayOnShift = async (shift, overrides = {}) => {
+        SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
+        wireDb({
+          scheduled_services: [
+            chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, status: 'confirmed', ...overrides }) }),
+            chain({ rows: [] }),
+          ],
+          // loadTechShifts: the set hours, then today's clock-ins (none).
+          technicians: [chain({ whereNotNull: jest.fn().mockReturnThis(), rows: [{ id: 'tech-1', shift_start: shift[0], shift_end: shift[1] }] })],
+          time_entries: [chain({ groupBy: jest.fn().mockReturnThis(), min: jest.fn().mockResolvedValue([]) })],
+        });
+        const options = await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
+        expect(options.ok).toBe(true);
+        return options.sameDay.map((o) => o.window.start);
+      };
+
+      test('gate on: a route-checked hour that starts before the shift, or ends after it, is not offered', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        finder.mockResolvedValue({ slots: [slot('11:00', 3), slot('12:00', 5), slot('13:00', 4), slot('14:00', 6)] });
+        expect(await sameDayOnShift(['12:00', '14:00'])).toEqual(['13:00', '12:00']);
+      });
+
+      test('gate on: the block is the commit\'s, so a 90-minute visit loses the last hour too', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        finder.mockResolvedValue({ slots: [slot('11:00', 3), slot('12:00', 5), slot('13:00', 4)] });
+        expect(await sameDayOnShift(['08:00', '14:00'], { estimated_duration_minutes: 90 })).toEqual(['11:00', '12:00']);
+      });
+
+      test('gate on: the +2h and +4h guesses are held to the shift as well', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        finder.mockRejectedValue(new Error('finder down'));
+        expect(await sameDayOnShift(['08:00', '13:00'])).toEqual(['12:00']);
+      });
+
+      test('gate off: every hour stays, and no shift is read', async () => {
+        finder.mockResolvedValue({ slots: [slot('11:00', 3), slot('14:00', 6)] });
+        // `sameDay` wires no technicians queue: a read would throw.
+        expect((await sameDay()).map((o) => o.window.start)).toEqual(['11:00', '14:00']);
+      });
+    });
+
     test('an hour with no drive number is offered last, without driveMinutes', async () => {
       finder.mockResolvedValue({ slots: [slot('11:00', null), slot('12:00', 9)] });
       const options = await sameDay();

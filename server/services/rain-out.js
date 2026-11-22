@@ -1128,7 +1128,28 @@ async function routeSameDayOptions(service, now = new Date()) {
 // (routeSameDayOptions returns null). A route judged full offers no hour.
 async function sameDayChoices(service) {
   const routed = await routeSameDayOptions(service);
-  return routed === null ? sameDayOptions() : routed;
+  return withinKeptShift(service, routed === null ? sameDayOptions() : routed);
+}
+
+// GATE_TECH_SHIFT_HOURS: a technician's own move refuses an hour the visit's
+// technician's shift today does not hold (rebooker.js rescheduleOnce,
+// shiftLive), so the sheet does not offer one. The block is the commit's: the
+// offered hour, and the later of its end and the start plus the visit's stored
+// length (rowBlockMinutes); the route-checked hours above are judged for one
+// hour only. Gate off, no technician or no hour to judge: no read, and every
+// hour stays. A failed read of the hours fails the list (no hour on a guess).
+async function withinKeptShift(service, options) {
+  if (!service.technician_id || !options.length) return options;
+  const { loadTechShifts, shiftBounds } = require('./technician-eligibility');
+  const shiftOf = await loadTechShifts(db, { technicianIds: [service.technician_id] });
+  const { rowBlockMinutes } = require('./scheduling/window-rules');
+  return options.filter((opt) => {
+    const { startMin, endMin } = rowBlockMinutes({
+      window_start: opt.window.start, window_end: opt.window.end, estimated_duration_minutes: service.estimated_duration_minutes });
+    if (startMin == null) return true;
+    const held = shiftBounds(shiftOf(service.technician_id, opt.date), startMin, endMin);
+    return held.openMin <= startMin && held.closeMin >= endMin;
+  });
 }
 
 // Advisory overlap probe for the Quick Move sheets (owner ask 2026-08-12:

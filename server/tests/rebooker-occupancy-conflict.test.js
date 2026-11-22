@@ -902,6 +902,65 @@ describe('findRescheduleOptions — candidate days are probed on the visit\'s te
       expect(db.mock.calls.some(([table]) => table === 'technicians')).toBe(false);
     });
   });
+
+  // GATE_TECH_SHIFT_HOURS (D4 part 3b-2a): a non-admin commit refuses a window the kept technician's
+  // shift does not hold, so a call with a reason is not offered one. This visit's option is 09:00
+  // (findBestWindow), committed as a one-hour block; its stored length is `minutes`.
+  describe('shift hours', () => {
+    afterEach(() => { delete process.env.GATE_TECH_SHIFT_HOURS; });
+    const wire = (shift, minutes = 60) => {
+      const svc = { ...service({ technician_id: 'tech-1', estimated_duration_minutes: minutes }), zip: '34202', city: 'Bradenton', count: '0' };
+      db.raw = rawFactory('db.raw');
+      db.mockImplementation((table) => {
+        if (table === 'technicians') {
+          return chain({ whereNotNull: jest.fn().mockReturnThis(),
+            select: jest.fn().mockResolvedValue([{ id: 'tech-1', shift_start: shift[0], shift_end: shift[1] }]) });
+        }
+        if (table === 'time_entries') return chain({ groupBy: jest.fn().mockReturnThis(), min: jest.fn().mockResolvedValue([]) });
+        return chain({ first: jest.fn().mockResolvedValue(svc), then: (resolve, reject) => Promise.resolve([]).then(resolve, reject) });
+      });
+    };
+    const rainOptions = () => SmartRebooker.findRescheduleOptions('svc-1', 'weather_rain', { probeSpanMinutes: 60 });
+
+    test('gate on, with a reason: a window the kept technician\'s shift does not hold is not probed and not offered', async () => {
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      wire(['10:00', '14:00']);
+      expect(await rainOptions()).toEqual([]);
+      expect(findConflictingVisits).not.toHaveBeenCalled();
+    });
+
+    test('gate on, with a reason: a window inside the shift is probed and offered', async () => {
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      wire(['09:00', '10:00']);
+      const options = await rainOptions();
+      expect(findConflictingVisits).toHaveBeenCalledTimes(10);
+      expect(options).toHaveLength(3);
+      expect(options.every((o) => o.suggestedWindow.start === '09:00')).toBe(true);
+    });
+
+    test('gate on, with a reason: the block is the commit\'s, so a 90-minute visit needs 09:00 to 10:30', async () => {
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      wire(['09:00', '10:00'], 90);
+      expect(await rainOptions()).toEqual([]);
+      wire(['09:00', '10:30'], 90);
+      expect(await rainOptions()).toHaveLength(3);
+    });
+
+    test('gate on, no reason (the admin picker): no shift read, and every day is probed', async () => {
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      wire(['10:00', '14:00']);
+      expect(await SmartRebooker.findRescheduleOptions('svc-1')).toHaveLength(3);
+      expect(findConflictingVisits).toHaveBeenCalledTimes(10);
+      expect(db.mock.calls.some(([table]) => table === 'technicians')).toBe(false);
+    });
+
+    test('gate off: no shift read, and every day is probed and offered as before', async () => {
+      wire(['10:00', '14:00']);
+      expect(await rainOptions()).toHaveLength(3);
+      expect(findConflictingVisits).toHaveBeenCalledTimes(10);
+      expect(db.mock.calls.some(([table]) => table === 'technicians')).toBe(false);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -144,6 +144,65 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
     });
   });
 
+  // The rain-out day options keep the visit's technician. The sheet commits the offered start as a
+  // one-hour window (probeSpanMinutes: 60; rain-out.js oneHourWindow), so the route check judges one
+  // hour, while the move judges the later of that hour and the visit's stored length.
+  describe('the rain-out day options (findRescheduleOptions)', () => {
+    const rainOptions = (id) => SmartRebooker.findRescheduleOptions(id, 'weather_rain', { probeSpanMinutes: 60 });
+    const minutes = (hhmm) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5));
+    const clock = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+    const oneHour = (option) => ({ start: option.suggestedWindow.start, end: clock(minutes(option.suggestedWindow.start) + 60) });
+
+    test('every offered day starts inside the shift and commits as a technician\'s own move', async () => {
+      await setShift('10:00', '14:00');
+      const id = await seed({ window_start: '11:00', window_end: '12:00' });
+      const options = await rainOptions(id);
+      expect(options.length).toBeGreaterThan(0);
+      for (const option of options) {
+        const window = oneHour(option);
+        expect(minutes(window.start)).toBeGreaterThanOrEqual(600);
+        expect(minutes(window.end)).toBeLessThanOrEqual(840);
+        expect(await move(id, option.date, window, 'tech')).toMatchObject({ success: true });
+      }
+    });
+
+    test('an hour the shift holds for one hour, but not for the visit\'s stored length, is not offered', async () => {
+      // On shift 10:00 to 11:30 a 10:00 hour fits. A 120-minute visit there ends at 12:00: the move refuses it.
+      await setShift('10:00', '11:30');
+      const short = await seed({ window_start: '10:00', window_end: '11:00' });
+      const offered = await rainOptions(short);
+      expect(offered.length).toBeGreaterThan(0);
+      const long = await seed({ window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 120 });
+      await expect(move(long, offered[0].date, oneHour(offered[0]), 'tech')).rejects.toMatchObject(refused);
+      expect(await rainOptions(long)).toEqual([]);
+    });
+
+    // The route-checked list places the visit with its stored length, inside the shift. The day list it
+    // replaces (arrival-window routing off, or a day the check could not judge) offers the visit type's
+    // fixed morning hour and reads no shift of its own.
+    test('route check off: a fixed morning hour before the shift is not offered to a rain-out; the admin picker still lists it', async () => {
+      const routeCheck = jest.spyOn(require('../services/scheduling/route-ranked-days'), 'routeRankedDaysLive').mockReturnValue(false);
+      try {
+        await setShift('10:00', '14:00');
+        const id = await seed({ window_start: '11:00', window_end: '12:00' });
+        const [forOffice] = await SmartRebooker.findRescheduleOptions(id);
+        expect(minutes(forOffice.suggestedWindow.start)).toBeLessThan(600);
+        // A technician's own move to that hour is refused, so the rain-out sheet is not offered it.
+        await expect(move(id, forOffice.date, oneHour(forOffice), 'tech')).rejects.toMatchObject(refused);
+        expect(await rainOptions(id)).toEqual([]);
+      } finally {
+        routeCheck.mockRestore();
+      }
+    });
+
+    test('gate off: the same long visit is offered days, as before', async () => {
+      delete process.env.GATE_TECH_SHIFT_HOURS;
+      await setShift('10:00', '11:30');
+      const long = await seed({ window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 120 });
+      expect((await rainOptions(long)).length).toBeGreaterThan(0);
+    });
+  });
+
   test('gate off, or a technician without set hours: the same automatic moves land, as before', async () => {
     delete process.env.GATE_TECH_SHIFT_HOURS;
     const off = await seed();

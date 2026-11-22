@@ -1587,6 +1587,25 @@ class SmartRebooker {
       keptTechWorkDays = await db('technicians').where({ id: service.technician_id }).first('id', 'work_days');
     }
 
+    // Shift hours (GATE_TECH_SHIFT_HOURS): as for work days. A non-admin commit
+    // of one of these options refuses a window the kept technician's shift does
+    // not hold (rescheduleOnce, shiftLive), so that flow is not offered one:
+    // clashesAt below answers true for it. The block is the commit's
+    // (rowBlockMinutes: the offered start, and the later of the offered end and
+    // the start plus the stored length). Gate off, no technician or the admin
+    // picker: no read, and no window is refused.
+    const keptShiftOf = reason && service.technician_id
+      ? await require('./technician-eligibility').loadTechShifts(db, { technicianIds: [service.technician_id] })
+      : null;
+    const outsideKeptShift = (dateStr, windowStart, windowEnd) => {
+      if (!keptShiftOf) return false;
+      const { startMin, endMin } = require('./scheduling/window-rules').rowBlockMinutes({
+        window_start: windowStart, window_end: windowEnd, estimated_duration_minutes: service.estimated_duration_minutes });
+      if (startMin == null) return false;
+      const held = require('./technician-eligibility').shiftBounds(keptShiftOf(service.technician_id, dateStr), startMin, endMin);
+      return held.openMin > startMin || held.closeMin < endMin;
+    };
+
     // The span the occupancy probe tests (and a route-checked search uses):
     // date-independent, so computed once.
     const effDuration = (() => {
@@ -1609,10 +1628,12 @@ class SmartRebooker {
       return 60;
     })();
 
-    // True when the commit's own overlap probe finds a clash for this window.
+    // True when the commit's own overlap probe finds a clash for this window,
+    // or the kept technician's shift does not hold it (outsideKeptShift).
     // A probe failure keeps the candidate (legacy behavior) — the commit-time
     // check still rejects a genuine clash.
     const clashesAt = async (dateStr, windowStart, windowEnd) => {
+      if (outsideKeptShift(dateStr, windowStart, windowEnd)) return true;
       try {
         const clash = await findConflictingVisits({
           db,
