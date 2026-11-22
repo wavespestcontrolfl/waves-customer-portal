@@ -302,27 +302,33 @@ async function embeddedLineContext({ customerId, email, conn } = {}) {
   return ctx;
 }
 
-// The add-a-service part of that line: the pipeline's embedded-pitch verdict.
-// Any other answer, a missing prefs row included, is no.
-async function embeddedPitchAllowed(who = {}) {
-  const ctx = await embeddedLineContext(who);
-  return Boolean(ctx?.checks.allowPitch);
-}
-
 // The referral part of that line is also a referral ask by email, so it
 // answers to the rules the referral email ('lc.referral*') answers to as
 // well: referral nudges not turned off, a referral channel that includes
 // email (the column's schema default is 'sms') and no referral unsubscribe.
-// Asked after embeddedPitchAllowed said yes; a no here drops the referral
-// part only, so an allowed service offer still rides the line.
 const REFERRAL_ASK_KEY = 'lc.referral';
-async function embeddedReferralAskAllowed(who = {}) {
-  const ctx = await embeddedLineContext(who);
-  if (!ctx) return false;
+async function referralAskAllowed(ctx) {
   if (!streamFlagOk('lifecycle', REFERRAL_ASK_KEY, ctx.prefs)) return false;
   if (streamChannelBlocksEmail('lifecycle', REFERRAL_ASK_KEY, ctx.prefs)) return false;
   const group = groupKeyFor('lifecycle', REFERRAL_ASK_KEY);
-  return (await activeSuppressionsFor(null, who.email, group, ctx.database)).length === 0;
+  return (await activeSuppressionsFor(null, ctx.customer.email, group, ctx.database)).length === 0;
+}
+
+// → { pitch, referralAsk }: the customer's choices for the whole line, from
+// ONE read. The sender asks AFTER it has composed the cards (pricing can
+// take seconds), so a choice the customer changed in the meantime decides
+// the line; nothing decided before the cards were built is kept.
+//   pitch       — the add-a-service part, and the line as a whole: the
+//                 pipeline's embedded-pitch verdict. Any other answer, a
+//                 missing prefs row included, is no.
+//   referralAsk — the referral part: pitch, and the referral email's own
+//                 rules. A no here drops the referral part only, so an
+//                 allowed service offer still rides the line.
+const NO_LINE = Object.freeze({ pitch: false, referralAsk: false });
+async function embeddedLineConsent(who = {}) {
+  const ctx = await embeddedLineContext(who);
+  if (!ctx?.checks.allowPitch) return NO_LINE;
+  return { pitch: true, referralAsk: await referralAskAllowed(ctx) };
 }
 
 async function checkEmailSwitchStreamFlagAndChannel(ctx) {
@@ -473,7 +479,7 @@ async function eligibleForEmail({
 }
 
 module.exports = {
-  eligibleForEmail, resolveMarketingClass, REASONS, groupKeyFor, embeddedPitchAllowed, embeddedReferralAskAllowed,
+  eligibleForEmail, resolveMarketingClass, REASONS, groupKeyFor, embeddedLineConsent,
   // Exported for callers outside the eligibility pipeline that need the
   // SAME channel-resolution semantics against a notification_prefs row
   // they've already read (e.g. newsletter-list-reconcile.js's SMS-only

@@ -1174,21 +1174,26 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   let offerLine = null;
   if (require('../config/feature-gates').isEnabled('docCrossSellEmail')) {
     try {
-      const { embeddedPitchAllowed, embeddedReferralAskAllowed } = require('./email-division/eligibility');
       const toHolder = Boolean(cleanEmail(recipient.email)) && cleanEmail(recipient.email) === cleanEmail(customer.email);
-      const who = { customerId: invoice.customer_id, email: recipient.email };
-      if (toHolder && await embeddedPitchAllowed(who)) {
-        const cards = await require('./receipt-cards').receiptCardsForInvoiceId(invoice.id);
-        // The referral part is a referral ask too: the customer's referral
-        // email choice decides it, apart from the service offer.
-        const referral = cards.referral && await embeddedReferralAskAllowed(who) ? cards.referral : null;
-        // The same links as the receipt page's cards: each names this
-        // customer's profile, so the app opens the right one.
-        const links = require('./app-link-cards').appLinksForCustomer(invoice.customer_id);
-        offerLine = require('./doc-offer-email-line').docOfferEmailLine({
-          crossSell: cards.crossSell, referral,
-          appUrls: { offer: `${domain}${links.offer}`, referral: `${domain}${links.referral}` },
-        });
+      const cards = toHolder ? await require('./receipt-cards').receiptCardsForInvoiceId(invoice.id) : {};
+      if (cards.crossSell || cards.referral) {
+        // The customer's choices are read ONCE, AFTER the cards are composed
+        // (pricing can take seconds) and right before the send: a customer
+        // who turned offers off or unsubscribed in the meantime gets no line.
+        // The referral part is a referral ask too, so the same read gives its
+        // own answer, apart from the service offer.
+        const consent = await require('./email-division/eligibility')
+          .embeddedLineConsent({ customerId: invoice.customer_id, email: recipient.email });
+        if (consent.pitch) {
+          // The same links as the receipt page's cards: each names this
+          // customer's profile, so the app opens the right one.
+          const links = require('./app-link-cards').appLinksForCustomer(invoice.customer_id);
+          offerLine = require('./doc-offer-email-line').docOfferEmailLine({
+            crossSell: cards.crossSell,
+            referral: consent.referralAsk ? cards.referral : null,
+            appUrls: { offer: `${domain}${links.offer}`, referral: `${domain}${links.referral}` },
+          });
+        }
       }
     } catch (err) {
       logger.warn(`[invoice-email] offer line skipped (code=${err?.code || 'none'})`);
