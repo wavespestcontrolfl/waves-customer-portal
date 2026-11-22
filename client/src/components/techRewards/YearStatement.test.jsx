@@ -48,7 +48,9 @@ describe('Yearly pay statement', () => {
       ['Overtime on bonus, commission and allowance', '$55.00'], ['Gross pay', '$9,800.00'], ['Federal income tax', '$900.00'],
       ['Social Security', '$607.60'], ['Medicare', '$142.10'], ['SIMPLE IRA (pre-tax)', '$294.00'], ['Net pay', '$7,856.30'],
     ]) expect(rowOf(pay, label)).toHaveTextContent(amount);
-    expect(screen.getByText(/Paid amounts from finalized paychecks, by pay date\. Not estimates\./)).toBeInTheDocument();
+    expect(screen.getByText('Amounts from finalized paychecks, by pay date. Not estimates.')).toBeInTheDocument();
+    // a finalized check can still wait for its bank transfer: the card never says the money was paid
+    expect(screen.getByLabelText('Pay statement').textContent).not.toMatch(/\bpaid\b(?! time off)/i);
   });
 
   it('leaves out a part with nothing in the year', async () => {

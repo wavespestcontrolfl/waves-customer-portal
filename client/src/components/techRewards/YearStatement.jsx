@@ -10,8 +10,9 @@ import { centsToDollars, dayLabel } from '../payroll/payrollFormat';
 // technician sees their OWN statement (Staff page, Time > Scoreboard, behind GATE_TECH_REWARDS_SCOREBOARD); the owner
 // opens any one technician's (Staff > Team > Scoreboard preview, not gated). Both load the same server object
 // (services/tech-rewards-year-statement.js): sums of what payroll stored on the finalized paychecks with a pay date in
-// the year. These are paid amounts, not estimates. The row names are the pay stub's. Nothing here changes pay or sends
-// a message. No customer data is shown.
+// the year. These are the amounts on finalized paychecks, not estimates. The words never say "paid": a finalized check
+// can still wait for its bank transfer, and the transfer can fail (the Mercury send is a separate step). The row names
+// are the pay stub's. Nothing here changes pay or sends a message. No customer data is shown.
 
 // The parts of gross pay, in the pay stub's order. A part with nothing in the year is not shown.
 const PAY_ROWS = [
@@ -104,7 +105,7 @@ export default function YearStatement({ path }) {
     <div className="flex flex-wrap items-end justify-between gap-3">
       <div>
         <h3 className="m-0 text-ui-title font-medium">Pay statement</h3>
-        <p className="m-0 text-ui-caption text-ink-secondary">Paid amounts from finalized paychecks, by pay date. Not estimates.</p>
+        <p className="m-0 text-ui-caption text-ink-secondary">Amounts from finalized paychecks, by pay date. Not estimates.</p>
       </div>
       {years.length > 0 && <Field label="Year">
         <Select value={shown} onChange={event => setYear(event.target.value)}>

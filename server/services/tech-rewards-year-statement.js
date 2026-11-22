@@ -6,13 +6,15 @@
  * It writes nothing: no pay line, no pay run row, no message.
  *
  * It works nothing out. Every figure is the sum of a figure payroll stored on a paycheck when the pay run was finalized
- * (payroll_checks, written by payroll-runs.js from payroll-calc.js computePaycheck), so a paid year never changes when a
+ * (payroll_checks, written by payroll-runs.js from payroll-calc.js computePaycheck), so a finalized year never changes when a
  * rate, a gate or a setting changes later.
  *
  * Which paychecks: the technician's FINALIZED checks of FINALIZED pay runs with a PAY DATE in the year. Pay counts in the
- * year it was paid, as on Form W-2 (payroll-form-figures.js readFormFigures) and in a pay stub's year to date
+ * year of its pay date, as on Form W-2 (payroll-form-figures.js readFormFigures) and in a pay stub's year to date
  * (payroll-runs.js getStub). So gross pay here is the year's W-2 box 5 (w2Figures sums the same paychecks), and work done
- * in the last week of December, paid in January, shows in the next year's statement. A draft and a voided check never count.
+ * in the last week of December, with a January pay date, shows in the next year's statement. A draft and a voided check never
+ * count. Finalized is not the same as sent: a bank-transfer check can still wait for its Mercury send, so the screen says
+ * "amounts from finalized paychecks", never "paid".
  *
  * The season bonus, stay bonus and December gift are one stored figure on a check (tech_rewards_cents). The statement splits
  * it by the kind of the paid pay lines the check holds (payroll_pay_lines), the rows payroll paid it from. The rows of
@@ -112,7 +114,7 @@ function composeStatement({ technician, year, currentYear, sums, rewards = {}, y
 }
 
 // The technician's paychecks that count: finalized checks of finalized pay runs.
-const paidChecks = (conn, technicianId) => conn('payroll_checks as c')
+const finalChecks = (conn, technicianId) => conn('payroll_checks as c')
   .join('payroll_runs as r', 'r.id', 'c.run_id')
   .where({ 'c.technician_id': technicianId, 'c.status': 'finalized', 'r.status': 'finalized' });
 const inYear = (query, year) => query.where('c.pay_date', '>=', `${year}-01-01`).where('c.pay_date', '<=', `${year}-12-31`);
@@ -120,19 +122,19 @@ const inYear = (query, year) => query.where('c.pay_date', '>=', `${year}-01-01`)
 async function readStatement(conn, technicianId, year, currentYear) {
   const technician = await conn('technicians').where({ id: technicianId }).first('id', 'name');
   if (!technician) throw new ScoreboardError(404, 'NOT_FOUND', 'Technician not found.');
-  const sums = await inYear(paidChecks(conn, technicianId), year).first(
+  const sums = await inYear(finalChecks(conn, technicianId), year).first(
     conn.raw('COUNT(*)::int AS "checkCount"'),
     conn.raw(`to_char(MIN(c.pay_date), 'YYYY-MM-DD') AS "firstPayDate"`),
     conn.raw(`to_char(MAX(c.pay_date), 'YYYY-MM-DD') AS "lastPayDate"`),
     ...Object.entries(CHECK_SUMS).map(([column, name]) => conn.raw('COALESCE(SUM(c.??), 0) AS ??', [column, name])),
   );
-  const rewardRows = await inYear(paidChecks(conn, technicianId), year)
+  const rewardRows = await inYear(finalChecks(conn, technicianId), year)
     .join('payroll_pay_lines as l', 'l.check_id', 'c.id')
     .where('l.status', 'paid')
     .whereIn('l.kind', Object.keys(REWARD_ROWS))
     .groupBy('l.kind')
     .select('l.kind', conn.raw('SUM(l.amount_cents) AS cents'));
-  const yearRows = await paidChecks(conn, technicianId)
+  const yearRows = await finalChecks(conn, technicianId)
     .distinct(conn.raw('EXTRACT(YEAR FROM c.pay_date)::int AS year'));
   return composeStatement({
     technician,

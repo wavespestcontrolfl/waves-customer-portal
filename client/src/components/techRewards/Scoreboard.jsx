@@ -12,7 +12,7 @@ import YearStatement from './YearStatement';
 // Tech Rewards Plan D5-4 (owner 2026-11-20). The technician's OWN scoreboard (Staff page, Time > Scoreboard, behind
 // GATE_TECH_REWARDS_SCOREBOARD) and the owner's preview of any one technician (Staff > Team > Scoreboard preview, not gated).
 // Both render ScoreboardView from the same server object. Every figure except commission is an estimate; the pay itself
-// comes later. Under the board both show that person's yearly pay statement (YearStatement.jsx, D5-6): paid amounts.
+// comes later. Under the board both show that person's yearly pay statement (YearStatement.jsx, D5-6): finalized amounts.
 // Nothing here changes pay or sends a message. No customer data is shown.
 
 const PART_LABELS = {

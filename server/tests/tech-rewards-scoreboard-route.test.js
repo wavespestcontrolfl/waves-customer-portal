@@ -150,6 +150,28 @@ describe('tech yearly pay statement (same gate, own numbers only)', () => {
   });
 });
 
+// The real allow-list (middleware/technician-scope.js), not the login stub above: with GATE_STAFF_DEFAULT_DENY on,
+// adminAuthenticate refuses a technician on any path the list does not name, before the router runs.
+describe('technician allow-list', () => {
+  const { technicianMayReach } = jest.requireActual('../middleware/technician-scope');
+
+  test('a technician reaches the three scoreboard reads, and nothing else under the route', () => {
+    for (const path of ['', '/availability', '/year-statement']) {
+      expect(technicianMayReach('GET', `/api/tech/rewards-scoreboard${path}`)).toBe(true);
+      expect(technicianMayReach('POST', `/api/tech/rewards-scoreboard${path}`)).toBe(false);
+    }
+    for (const path of ['/year-statement/2027', '/year-statements', `/${OTHER}`, `/${OTHER}/year-statement`]) {
+      expect(technicianMayReach('GET', `/api/tech/rewards-scoreboard${path}`)).toBe(false);
+    }
+  });
+
+  test('the owner preview stays closed to a technician', () => {
+    for (const path of ['', `/${OTHER}`, `/${OTHER}/year-statement`]) {
+      expect(technicianMayReach('GET', `/api/admin/tech-rewards-scoreboard${path}`)).toBe(false);
+    }
+  });
+});
+
 describe('tech availability check (the Staff page every-load request)', () => {
   test('answers only whether the tab shows, never reads a board, and needs the staff login', async () => {
     let response = await get(techBase, '/availability');
