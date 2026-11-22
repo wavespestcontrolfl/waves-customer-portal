@@ -46,16 +46,27 @@ function cellText(fragment) {
   return decodeHTML(fragment.replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
 }
 
+// A From or To cell is one list: <ol><li>NAME</li>...</ol>, or an empty <ol></ol> while the Clerk has not filled it
+// in. Text outside a list item, or a list item that holds another one, is a cell we do not understand: reading only
+// part of it would drop a buyer or join two names, so it throws.
 function listNames(fragment) {
   const names = [];
-  for (const m of fragment.matchAll(/<li\b[^>]*>([\s\S]*?)<\/li>/gi)) {
-    const name = cellText(m[1]);
+  let items = 0;
+  const rest = fragment.replace(/<li\b[^>]*>([\s\S]*?)<\/li>/gi, (_match, inner) => {
+    items += 1;
+    if (/<(li|ol)\b/i.test(inner)) throw new ClerkPageError('party_cell', 'Clerk party cell holds a nested list');
+    const name = cellText(inner);
     if (name) names.push(name);
+    return ' ';
+  });
+  if (items !== (fragment.match(/<li\b/gi) || []).length || cellText(rest) !== '') {
+    throw new ClerkPageError('party_cell', 'Clerk party cell holds text outside its list');
   }
   return names;
 }
 
-// The table is the only part of the page we read, so it is the only part that must be clean.
+// Rows are read from this one table only, so nothing unknown may sit inside it. (Outside it, parseDayList checks
+// just two things: no data row, and the pagers.)
 function checkTableMarkup(table) {
   if (table.includes('<!--')) throw new ClerkPageError('comment', 'Clerk results table holds an HTML comment');
   for (const m of table.matchAll(/<(\/?)([^\s>/]*)/g)) {
@@ -118,12 +129,22 @@ function parseDataRow(fragment, isoDate) {
   };
 }
 
-// A second page of results would hide rows, so any pagination beyond one page is an error.
-function checkPagination(afterTable) {
-  const ul = afterTable.match(/<ul\b[^>]*class="[^"]*\bpagination\b[^"]*"[^>]*>([\s\S]*?)<\/ul>/i);
-  if (ul && (ul[1].match(/<li\b/gi) || []).length > 1) {
-    throw new ClerkPageError('pagination', 'Clerk results run over more than one page');
+// A second page of results would hide rows. The real page prints its pager twice (above and below the table), each
+// with one entry, so: at least one pager, every pager closed, and none with more than one entry.
+function checkPagination(page) {
+  const opened = (page.match(/<ul\b[^>]*\bpagination\b/gi) || []).length;
+  const pagers = [...page.matchAll(/<ul\b[^>]*\bpagination\b[^>]*>([\s\S]*?)<\/ul>/gi)];
+  if (opened === 0 || pagers.length !== opened || pagers.some((m) => (m[1].match(/<li\b/gi) || []).length > 1)) {
+    throw new ClerkPageError('pagination', 'Clerk results run over more than one page, or the pager changed');
   }
+}
+
+// A day with no recordings (weekend, holiday) answers with the search form and nothing else of the results page
+// (it keeps the "skip to #data-display" link, so that word is no sign of results). Any table, row or pager, in any
+// spelling, means this is not that page.
+const RESULTS_TRACES = /<table\b|<tr\b|data-row|pagination/i;
+function isEmptyDay(page) {
+  return page.includes('action="/OfficialRecords/Search/DoSearch"') && !RESULTS_TRACES.test(page);
 }
 
 function parseDayList(html, isoDate) {
@@ -131,8 +152,7 @@ function parseDayList(html, isoDate) {
   const page = String(html || '');
   const starts = [...page.matchAll(/<table\b[^>]*\bid="results"/gi)];
   if (starts.length === 0) {
-    // A day with no recordings (weekend, holiday) answers with the search form and no table.
-    if (page.includes('action="/OfficialRecords/Search/DoSearch"') && !page.includes('class="data-row"')) return { rows: [] };
+    if (isEmptyDay(page)) return { rows: [] };
     throw new ClerkPageError('not_clerk_page', 'Page is not the Clerk day list');
   }
   if (starts.length > 1) throw new ClerkPageError('multiple_tables', 'Clerk page has more than one results table');
@@ -143,9 +163,43 @@ function parseDayList(html, isoDate) {
   const table = page.slice(starts[0].index, closeAt);
   checkTableMarkup(table);
   checkHeader(table);
+  // A data row outside the one table we read would be a row we never see.
+  if ((page.match(/data-row/gi) || []).length !== (table.match(/data-row/gi) || []).length) {
+    throw new ClerkPageError('rows_outside_table', 'Clerk page holds data rows outside the results table');
+  }
   const rows = dataRowFragments(table).map((fragment) => parseDataRow(fragment, isoDate));
-  checkPagination(page.slice(closeAt));
+  // The instrument number is a deed's identity for the caller: a repeat would let one row overwrite another.
+  if (new Set(rows.map((r) => r.instrument)).size !== rows.length) {
+    throw new ClerkPageError('duplicate_instrument', 'Clerk page lists an instrument number twice');
+  }
+  checkPagination(page);
   return { rows };
+}
+
+// Reads the body up to the cap, whatever the headers say (same form as bid-desk/charlotte-county.js readCapped).
+async function readCapped(res) {
+  const tooLarge = () => new ClerkPageError('too_large', 'Clerk day list is over 8 MB');
+  const declared = Number(res.headers?.get?.('content-length'));
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) throw tooLarge();
+  if (res.body && typeof res.body.getReader === 'function') {
+    const reader = res.body.getReader();
+    const chunks = [];
+    let size = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_BODY_BYTES) {
+        await reader.cancel().catch(() => {});
+        throw tooLarge();
+      }
+      chunks.push(Buffer.from(value));
+    }
+    return Buffer.concat(chunks).toString('utf8');
+  }
+  const body = await res.text();
+  if (Buffer.byteLength(body, 'utf8') > MAX_BODY_BYTES) throw tooLarge();
+  return body;
 }
 
 async function fetchDayList(isoDate, { fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
@@ -162,14 +216,14 @@ async function fetchDayList(isoDate, { fetchImpl = fetch, timeoutMs = DEFAULT_TI
       headers: { 'User-Agent': USER_AGENT, Accept: 'text/html' },
     });
     status = res.status;
-    if (status === 200) body = await res.text();
+    if (status === 200) body = await readCapped(res);
   } catch (err) {
+    if (err instanceof ClerkPageError) throw err;
     throw new ClerkPageError('fetch_failed', `Clerk day list request failed (${err.name || 'error'})`);
   } finally {
     clearTimeout(timer);
   }
   if (status !== 200) throw new ClerkPageError('http_status', `Clerk day list answered HTTP ${status}`);
-  if (Buffer.byteLength(body) > MAX_BODY_BYTES) throw new ClerkPageError('too_large', 'Clerk day list is over 8 MB');
   return parseDayList(body, isoDate);
 }
 

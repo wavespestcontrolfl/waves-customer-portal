@@ -19,13 +19,18 @@ function row({
   return `<tr class="data-row">${tds.map((c) => `<td>${c}</td>`).join('')}</tr>`;
 }
 
-function page({ rows = [row()], pages = 1, headers = HEADER_NAMES, extraInTable = '', tables = 1 } = {}) {
+const pagerOf = (pages) => `<div class="pagination-container"><ul class="pagination">${Array.from({ length: pages }, (_, i) => `<li${i ? '' : ' class="active"'}><a>${i + 1}</a></li>`).join('')}</ul></div>`;
+
+// The real page prints its pager above and below the table. `pagesAbove` / `pages` set how many entries each has.
+function page({ rows = [row()], pages = 1, pagesAbove = 1, headers = HEADER_NAMES, extraInTable = '', tables = 1 } = {}) {
   const table = `<table id="results" class="table table-primary"><tr>${headers.map((h) => `<th>${h}</th>`).join('')}</tr>${rows.join('')}${extraInTable}</table>`;
-  const pager = `<div class="pagination-container"><ul class="pagination">${Array.from({ length: pages }, (_, i) => `<li${i ? '' : ' class="active"'}><a>${i + 1}</a></li>`).join('')}</ul></div>`;
-  return `<html><body><div id="data-display">${Array(tables).fill(table).join('')}${pager}</div></body></html>`;
+  return `<html><body><div id="data-display">${pagerOf(pagesAbove)}${Array(tables).fill(table).join('')}${pagerOf(pages)}</div></body></html>`;
 }
 
-const EMPTY_DAY = '<html><body><form action="/OfficialRecords/Search/DoSearch" method="post"><input name="q"></form></body></html>';
+const partyCells = (toCell) => row({ cells: ['', '202699000001', '<ol><li>SAMPLE HOMES LLC</li></ol>', toCell, 'DEED', '', '', '$10.00', 'LOT 1 SAMPLE GROVE', '11-18-2026', '1'] });
+
+// The real empty day keeps the skip link to #data-display above the search form.
+const EMPTY_DAY = '<html><body><a class="sr-only" href="#data-display">Skip to Details</a><form action="/OfficialRecords/Search/DoSearch" method="post"><input name="q"></form></body></html>';
 
 const reasonOf = (fn) => {
   try { fn(); } catch (err) { expect(err).toBeInstanceOf(ClerkPageError); return err.reason; }
@@ -83,6 +88,15 @@ describe('parseDayList: pages that must throw', () => {
   test.each([
     ['a bot wall', '<html><body><h1>Just a moment...</h1></body></html>', 'not_clerk_page'],
     ['a search form that also holds data rows', `${EMPTY_DAY}<tr class="data-row"></tr>`, 'not_clerk_page'],
+    ['a search form with a results table in single quotes', `${EMPTY_DAY}<table id='results'><tr class='data-row'></tr></table>`, 'not_clerk_page'],
+    ['a search form with any table', `${EMPTY_DAY}<table><tr><td>x</td></tr></table>`, 'not_clerk_page'],
+    ['a search form with a pager', `${EMPTY_DAY}${pagerOf(1)}`, 'not_clerk_page'],
+    ['a search form with a loose row', `${EMPTY_DAY}<tr><td>x</td></tr>`, 'not_clerk_page'],
+    ['a data row outside the results table', page().replace('</body>', "<table><tr class='data-row'><td>x</td></tr></table></body>"), 'rows_outside_table'],
+    ['a buyer in a span next to the listed buyer', page({ rows: [partyCells('<ol><li>TESTER ALEX J</li></ol><span>TESTER JORDAN M</span>')] }), 'party_cell'],
+    ['a buyer in a span and no list', page({ rows: [partyCells('<span>TESTER ALEX J</span>')] }), 'party_cell'],
+    ['a buyer as bare text', page({ rows: [partyCells('TESTER ALEX J')] }), 'party_cell'],
+    ['a list item that never closes', page({ rows: [partyCells('<ol><li>TESTER ALEX J<li>TESTER JORDAN M</li></ol>')] }), 'party_cell'],
     ['two results tables', page({ tables: 2 }), 'multiple_tables'],
     ['a table that never closes', page().replace('</table>', ''), 'unclosed_table'],
     ['a comment inside the table', page({ extraInTable: '<!-- note -->' }), 'comment'],
@@ -93,9 +107,14 @@ describe('parseDayList: pages that must throw', () => {
     ['a row with 10 cells', page({ rows: [row({ cells: ['', '202699000001', '', '', 'DEED', '', '', '$10.00', 'LOT 1 X', '11-18-2026'] })] }), 'cell_count'],
     ['a stray row that is not a data row', page({ extraInTable: '<tr><td>x</td></tr>' }), 'row_count'],
     ['a bad instrument number', page({ rows: [row({ instrument: 'ABC123' })] }), 'instrument'],
+    ['the same instrument number on two rows', page({ rows: [row(), row({ to: ['TESTER JORDAN M'] })] }), 'duplicate_instrument'],
     ['a date from another day', page({ rows: [row({ date: '11-17-2026' })] }), 'date'],
     ['a malformed consideration', page({ rows: [row({ consideration: '425000' })] }), 'consideration'],
     ['two pagination pages', page({ pages: 2 }), 'pagination'],
+    ['two pagination pages in the pager above the table only', page({ pagesAbove: 2 }), 'pagination'],
+    ['a pager in single quotes with two pages', page().replace('<ul class="pagination">', "<ul class='pagination'><li><a>2</a></li>"), 'pagination'],
+    ['a pager that never closes', page().replace('</ul></div></div></body>', '</div></div></body>'), 'pagination'],
+    ['no pager at all', page().replaceAll(pagerOf(1), ''), 'pagination'],
   ])('%s', (_label, html, reason) => {
     expect(reasonOf(() => parseDayList(html, DAY))).toBe(reason);
   });
@@ -107,6 +126,26 @@ describe('parseDayList: pages that must throw', () => {
 
 describe('fetchDayList', () => {
   const response = (status, body) => ({ status, text: async () => body });
+  // A streamed answer, as the real fetch gives it: `chunks` byte arrays, then done. `canceled` counts cancel calls.
+  const streamed = (chunks, headers = {}) => {
+    const state = { reads: 0, canceled: 0 };
+    const res = {
+      status: 200,
+      headers: { get: (name) => headers[name.toLowerCase()] ?? null },
+      text: async () => { throw new Error('text() must not be used on a streamed answer'); },
+      body: {
+        getReader: () => ({
+          read: async () => {
+            const value = chunks[state.reads];
+            state.reads += 1;
+            return value ? { done: false, value } : { done: true, value: undefined };
+          },
+          cancel: async () => { state.canceled += 1; },
+        }),
+      },
+    };
+    return { res, state };
+  };
 
   test('one GET with the headers and the timeout signal, then the parsed rows', async () => {
     const fetchImpl = jest.fn(async () => response(200, page()));
@@ -131,6 +170,28 @@ describe('fetchDayList', () => {
     const err = await fetchDayList(DAY, { fetchImpl: async () => response(200, big) }).catch((e) => e);
     expect(err).toBeInstanceOf(ClerkPageError);
     expect(err.reason).toBe('too_large');
+  });
+
+  test('a streamed answer is read in pieces and parsed', async () => {
+    const bytes = Buffer.from(page());
+    const { res } = streamed([bytes.subarray(0, 100), bytes.subarray(100)]);
+    expect((await fetchDayList(DAY, { fetchImpl: async () => res })).rows).toHaveLength(1);
+  });
+
+  test('a streamed answer stops at the piece that crosses 8 MB: the rest is never read', async () => {
+    const piece = new Uint8Array(3 * 1024 * 1024);
+    const { res, state } = streamed([piece, piece, piece, piece, piece]);
+    const err = await fetchDayList(DAY, { fetchImpl: async () => res }).catch((e) => e);
+    expect(err.reason).toBe('too_large');
+    expect(state.reads).toBe(3);
+    expect(state.canceled).toBe(1);
+  });
+
+  test('a declared length over 8 MB is refused before any piece is read', async () => {
+    const { res, state } = streamed([new Uint8Array(10)], { 'content-length': String(8 * 1024 * 1024 + 1) });
+    const err = await fetchDayList(DAY, { fetchImpl: async () => res }).catch((e) => e);
+    expect(err.reason).toBe('too_large');
+    expect(state.reads).toBe(0);
   });
 
   test('a page the parser refuses throws, and a network error becomes a ClerkPageError', async () => {
