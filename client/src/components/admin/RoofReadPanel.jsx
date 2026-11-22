@@ -657,8 +657,8 @@ export default function RoofReadPanel({ spot, address, addressDoubt = false, est
       <p className="text-14 text-zinc-600">
         Staff only. Reads the county aerial photo for likely rodent entry points. Each new read is a paid model call, and a read of this roof
         from the last 90 days is reused at no cost. The AI read stays with staff. The points you save, with their notes, show on the
-        customer estimate from its next send, unless you clear "Show these points on the customer estimate". To check how the points look to the customer before the send,
-        press Preview in the estimate tool.
+        customer estimate from its next send, unless you clear "Show these points on the customer estimate". To check how the points look to the customer before the first
+        send, press Preview in the estimate tool. After a send, Preview shows the points the customer has now, not a later change.
       </p>
       {addressDoubt && (
         <p className="text-14 text-zinc-600" data-testid="roof-read-snapped">
