@@ -143,7 +143,10 @@ function maskAccessSentences(note) {
 // are codes, and each link in them (a visitor pass is a link, filed with no
 // code; the link counts with or without its "https://"). Of a neighbor's
 // pass only the link is a code here: the card shows the technician nothing
-// else of it. A code in another free-text field of the file (the access
+// else of it. One kind of directions is a code field: a gate directory row
+// of the type "instructions" holds a customer's gate-code field that is no
+// keypad number, as filed ("bluebird"), and every stop in the neighborhood
+// reads it. A code in another free-text field of the file (the access
 // notes) is not on this list.
 const STORED_CODE_COLUMNS = ['neighborhood_gate_code', 'property_gate_code', 'garage_code', 'lockbox_code'];
 const squeezed = (text) => oneForm(text).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
@@ -153,19 +156,27 @@ const squeezed = (text) => oneForm(text).toLowerCase().replace(/[^\p{L}\p{N}]+/g
 const runsOf = (value) => (oneForm(value).match(/[\p{L}\p{N}#*]+/gu) || []).map(squeezed);
 const withFigureGroups = (runs) => [...runs, ...runs.flatMap((run) => run.match(/\p{Nd}{3,}/gu) || [])];
 const codeFieldForms = (field) => [squeezed(field), ...withFigureGroups(runsOf(field))];
-const LINK_RE = /https?:\/\/(?:www\.)?(\S+)/giu;
+// A link ends where the visit card's pass link ends (URL_RE in
+// access-code-capture.js): at a space, an angle bracket or a quote.
+const LINK_RE = /https?:\/\/(?:www\.)?([^\s<>"']+)/giu;
 const linkForms = (directions) => [...oneForm(directions).matchAll(LINK_RE)].map((link) => squeezed(link[1]));
 const directionForms = (directions) => [
   ...withFigureGroups(runsOf(directions)).filter((form) => form.length >= 3 && /\p{Nd}/u.test(form)),
   ...linkForms(directions),
 ];
+const filedForms = (row) => [
+  ...codeFieldForms(row?.code),
+  ...(row?.access_type === 'instructions' ? codeFieldForms(row.instructions) : []),
+  ...directionForms(row?.instructions),
+];
 // `prefs` is the profile row; `filed` are rows of the access codes section
-// and of the gate directory ({ code, instructions }); `neighborPasses` are
-// the pass rows of the customer's neighborhoods ({ instructions }).
+// ({ code, instructions }) and of the gate directory ({ code, instructions,
+// access_type }); `neighborPasses` are the pass rows of the customer's
+// neighborhoods ({ instructions }).
 function storedCodesOf(prefs, filed = [], neighborPasses = []) {
   const forms = [
     ...STORED_CODE_COLUMNS.flatMap((column) => codeFieldForms(prefs?.[column])),
-    ...filed.flatMap((row) => [...codeFieldForms(row?.code), ...directionForms(row?.instructions)]),
+    ...filed.flatMap(filedForms),
     ...neighborPasses.flatMap((row) => linkForms(row?.instructions)),
   ];
   return [...new Set(forms.filter(Boolean))];
@@ -182,7 +193,7 @@ async function readStoredCodes(db, customerId) {
     .select('code', 'instructions'));
   const gates = await savepointRead(db, (k) => k('neighborhood_access as gate')
     .join('customer_properties as home', 'home.neighborhood_id', 'gate.neighborhood_id')
-    .where('home.customer_id', customerId).select('gate.code', 'gate.instructions'));
+    .where('home.customer_id', customerId).select('gate.code', 'gate.instructions', 'gate.access_type'));
   const passes = await savepointRead(db, (k) => k('customer_access_codes as pass')
     .join('customer_properties as theirs', 'theirs.id', 'pass.property_id')
     .join('customer_properties as home', 'home.neighborhood_id', 'theirs.neighborhood_id')
