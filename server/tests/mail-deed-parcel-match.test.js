@@ -35,20 +35,28 @@ describe('parseLegal', () => {
 });
 
 describe('parcelWhere', () => {
-  test('lot and subdivision prefix, block when there is one', () => {
+  test('every form of the lot number, the subdivision words in order, the block when there is one', () => {
     expect(parcelWhere({ lot: '171', block: null, subdivision: 'RYE RANCH' }))
-      .toBe("PAR_SUBDIV_LOT = '171' AND PAR_SUBDIV_NAME LIKE 'RYE RANCH%'");
-    expect(parcelWhere({ lot: '171', block: '48', subdivision: 'RYE RANCH' }))
-      .toBe("PAR_SUBDIV_LOT = '171' AND PAR_SUBDIV_NAME LIKE 'RYE RANCH%' AND PAR_SUBDIV_BLOCK = '48'");
+      .toBe("PAR_SUBDIV_LOT IN ('171', '0171') AND PAR_SUBDIV_NAME LIKE 'RYE%RANCH%'");
+    expect(parcelWhere({ lot: '5', block: '48', subdivision: 'RYE RANCH' }))
+      .toBe("PAR_SUBDIV_LOT IN ('5', '05', '005', '0005') AND PAR_SUBDIV_NAME LIKE 'RYE%RANCH%' AND PAR_SUBDIV_BLOCK IN ('48', '048', '0048')");
   });
-  test('an apostrophe is doubled so it cannot end the string', () => {
-    expect(parcelWhere(parseLegal("LOT 5 O'NEIL ESTATES"))).toBe("PAR_SUBDIV_LOT = '5' AND PAR_SUBDIV_NAME LIKE 'O''NEIL ESTATES%'");
+  test('a lot with leading zeros or a letter: with and without the zeros, capital and lower-case', () => {
+    expect(parcelWhere({ lot: '05', block: null, subdivision: 'RYE RANCH' })).toContain("PAR_SUBDIV_LOT IN ('05', '5', '005', '0005') AND");
+    expect(parcelWhere({ lot: '012A', block: 'B', subdivision: 'RYE RANCH' }))
+      .toBe("PAR_SUBDIV_LOT IN ('012A', '12A', '012a', '12a') AND PAR_SUBDIV_NAME LIKE 'RYE%RANCH%' AND PAR_SUBDIV_BLOCK IN ('B', 'b')");
+    expect(parcelWhere({ lot: '12345', block: null, subdivision: 'RYE RANCH' })).toContain("PAR_SUBDIV_LOT IN ('12345') AND");
+    expect(parcelWhere({ lot: '0', block: null, subdivision: 'RYE RANCH' })).toContain("PAR_SUBDIV_LOT IN ('0', '00', '000', '0000') AND");
   });
-  test('plain field comparisons joined by AND only: the shape the county firewall answers', () => {
-    for (const text of ['LOT 171 RYE RANCH', 'LOT 36 BLK 48 NORTH RIVER RANCH', "LOT 5 O'NEIL ESTATES PH I-A", 'LOT 12A TOWN & COUNTRY ESTATES']) {
+  test('only letters and digits of the deed reach the where string: an apostrophe cannot end it', () => {
+    expect(parcelWhere(parseLegal("LOT 5 O'NEIL ESTATES"))).toBe("PAR_SUBDIV_LOT IN ('5', '05', '005', '0005') AND PAR_SUBDIV_NAME LIKE 'O%NEIL%ESTATES%'");
+    expect(parcelWhere(parseLegal('LOT 12A TOWN & COUNTRY ESTATES'))).toContain("LIKE 'TOWN%COUNTRY%ESTATES%'");
+  });
+  test('IN lists and one LIKE, joined by AND: the shapes the county firewall answers', () => {
+    for (const text of ['LOT 171 RYE RANCH', 'LOT 36 BLK 48 NORTH RIVER RANCH', "LOT 5 O'NEIL ESTATES PH I-A", 'LOT 12A TOWN & COUNTRY ESTATES', 'LOT 07 BLK 0A ST. JOHNS']) {
       const where = parcelWhere(parseLegal(text));
-      expect(where).not.toMatch(/\bOR\b|\(|\)|UPPER|LOWER|;|--/);
-      expect(where.split(' AND ').every((part) => /^PAR_SUBDIV_(LOT|BLOCK) = '[^']+'$|^PAR_SUBDIV_NAME LIKE '([^']|'')+%'$/.test(part))).toBe(true);
+      expect(where).not.toMatch(/\bOR\b|UPPER|LOWER|;|--|''/);
+      expect(where.split(' AND ').every((part) => /^PAR_SUBDIV_(LOT|BLOCK) IN \('[0-9A-Za-z]+'(, '[0-9A-Za-z]+')*\)$|^PAR_SUBDIV_NAME LIKE '[A-Z0-9]+(%[A-Z0-9]+)*%'$/.test(part))).toBe(true);
     }
   });
 });
@@ -94,9 +102,15 @@ describe('chooseParcel', () => {
     for (const parcels of [undefined, null, 'x', {}]) {
       expect(() => chooseParcel({ sellerNames, parcels, permitsByParid: {} })).toThrow(TypeError);
     }
-    for (const permitsByParid of [undefined, null, 'x', []]) {
+    // A Promise is the permit read that was not awaited.
+    for (const permitsByParid of [undefined, null, 'x', [], new Map(), Promise.resolve({})]) {
       expect(() => chooseParcel({ sellerNames, parcels: [p], permitsByParid })).toThrow(TypeError);
     }
+  });
+  test('the permits may be an object with no prototype', () => {
+    const p = parcel('100000001', 'EXAMPLE BUILDERS LLC');
+    const permitsByParid = Object.assign(Object.create(null), { 100000001: permit('A') });
+    expect(chooseParcel({ sellerNames, parcels: [p], permitsByParid })).toMatchObject({ status: 'matched', permit: permit('A') });
   });
   test('one parcel with a permit, still under the seller\'s name: matched, owner_permit', () => {
     const p = parcel('100000001', 'EXAMPLE BUILDERS LLC');
@@ -177,7 +191,7 @@ describe('queryParcels', () => {
       lot: '171', block: null, ownerName: 'EXAMPLE BUILDERS LLC', ownerName2: null, platKnown: true, livingSqft: 2210, stories: 1.5, yearBuilt: 2026,
     }]);
     const url = new URL(fetchImpl.mock.calls[0][0]);
-    expect(url.searchParams.get('where')).toBe("PAR_SUBDIV_LOT = '171' AND PAR_SUBDIV_NAME LIKE 'RYE RANCH%'");
+    expect(url.searchParams.get('where')).toBe("PAR_SUBDIV_LOT IN ('171', '0171') AND PAR_SUBDIV_NAME LIKE 'RYE%RANCH%'");
     expect(url.searchParams.get('outFields')).toContain('PAR_OWNER_NAME2');
     expect(url.searchParams.get('returnGeometry')).toBe('false');
     expect(url.searchParams.get('resultRecordCount')).toBe('25');
@@ -226,6 +240,37 @@ describe('queryParcels', () => {
     test('a very long list of phase ids is read token by token', async () => {
       const long = `RYE RANCH PH ${'I '.repeat(400)}${'IV-A-1-B, '.repeat(400)}NOT A PHASE`;
       expect(await flags(legal, [long, `RYE RANCH PH ${'I AND '.repeat(400)}I PB81/1`])).toEqual([false, true]);
+    });
+    test('the map\'s spacing and punctuation do not change the name', async () => {
+      expect(await flags(legal, ['RYE  RANCH PH I PB81/1', 'RYE RANCH  PH IIA PB81/1', 'RYE-RANCH', 'RYERANCH PB81/1', 'RYE   RANCH']))
+        .toEqual([true, true, true, true, true]);
+      const saint = { lot: '171', block: null, subdivision: 'ST JOHNS' };
+      expect(await flags(saint, ['ST. JOHNS PH I PB81/1', 'ST.JOHNS', 'ST. JOHNSON PH I', 'ST. JOHNS. PH I'])).toEqual([true, true, false, false]);
+      // Known limit: a mark inside one of the deed's words on the map only. The query does not return such a name,
+      // so an answer that holds one is not the answer to this question.
+      await expect(queryParcels(saint, { fetchImpl: answer({ features: [feature({ PAR_SUBDIV_NAME: "ST JOHN'S PH I" })] }) })).rejects.toThrow(/not the lot asked for/);
+      const phaseOne = { lot: '171', block: null, subdivision: 'RYE RANCH PH I' };
+      expect(await flags(phaseOne, ['RYE RANCH  PH I', 'RYE  RANCH PH I SUBPH A PB81/1', 'RYE RANCH  PH II'])).toEqual([true, true, false]);
+    });
+    test('a parcel under other words is not a candidate; every other parcel stays', async () => {
+      const features = [
+        feature(),
+        feature({ PARID: '513309060', PAR_SUBDIV_NAME: 'RYE CREEK RANCH PH I PB81/1' }),
+        feature({ PARID: '513309061', PAR_SUBDIV_NAME: 'RYE RANCHO PH I' }),
+        feature({ PARID: '513309062', PAR_SUBDIV_NAME: 'RYE  RANCH PH IV PB81/1' }),
+      ];
+      const parcels = await queryParcels(legal, { fetchImpl: answer({ features }) });
+      expect(parcels.map((p) => [p.parid, p.platKnown])).toEqual([['513309059', true], ['513309061', false], ['513309062', true]]);
+    });
+    test('the lot and the block may have another form on the map; the map\'s own text is kept', async () => {
+      const [padded] = await queryParcels(legal, { fetchImpl: answer({ features: [feature({ PAR_SUBDIV_LOT: '0171' })] }) });
+      expect(padded.lot).toBe('0171');
+      const lettered = { lot: '12A', block: '8', subdivision: 'RYE RANCH' };
+      const [lower] = await queryParcels(lettered, { fetchImpl: answer({ features: [feature({ PAR_SUBDIV_LOT: '12a', PAR_SUBDIV_BLOCK: '08' })] }) });
+      expect([lower.lot, lower.block]).toEqual(['12a', '08']);
+      for (const other of [{ PAR_SUBDIV_LOT: '12B', PAR_SUBDIV_BLOCK: '8' }, { PAR_SUBDIV_LOT: '112A', PAR_SUBDIV_BLOCK: '8' }, { PAR_SUBDIV_LOT: '12A', PAR_SUBDIV_BLOCK: '18' }, { PAR_SUBDIV_LOT: '12A', PAR_SUBDIV_BLOCK: null }]) {
+        await expect(queryParcels(lettered, { fetchImpl: answer({ features: [feature(other)] }) })).rejects.toThrow(/not the lot asked for/);
+      }
     });
     test('no parcel of the answer is dropped, so a full page is still a cut-off answer', async () => {
       const full = Array.from({ length: 25 }, (_, i) => feature({ PARID: String(513309100 + i), PAR_SUBDIV_NAME: 'RYE RANCH ESTATES' }));
