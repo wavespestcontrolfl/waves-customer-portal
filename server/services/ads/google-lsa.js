@@ -232,8 +232,13 @@ async function syncCampaigns(customer, account) {
       .where({ platform_campaign_id: data.platform_campaign_id })
       .first();
     if (existing) {
-      await db('ad_campaigns').where({ id: existing.id }).update(data);
-      results.push({ ...existing, ...data });
+      // Google owns the status and the budget. The name and the type are set
+      // once, at insert: PUT /campaigns/:id lets the office edit them, and a
+      // nightly overwrite would undo that edit.
+      const { status, daily_budget_base, daily_budget_current, updated_at } = data;
+      const refreshed = { status, daily_budget_base, daily_budget_current, updated_at };
+      await db('ad_campaigns').where({ id: existing.id }).update(refreshed);
+      results.push({ ...existing, ...refreshed });
     } else {
       const [inserted] = await db('ad_campaigns')
         .insert({ id: uuidv4(), ...data, metadata: mark, created_at: new Date() })
@@ -308,14 +313,19 @@ async function storedDays(campaignIds, since, until) {
 //   written again as a zero day, so numbers Google no longer reports do not
 //   stay behind.
 // `uncounted` = leads that no row could carry (the account has no campaign row).
+// `unknown` = Google ids in the metrics rows that the portal holds no row for.
 function planPerformanceDays({ metricRows, leadsByDay, campaigns, storedKeys }) {
   const localId = new Map(campaigns.map((c) => [String(c.platform_campaign_id), c.id]));
   const metricIdsByDay = new Map();
   const planned = new Map();
+  const unknown = new Set();
   for (const row of metricRows) {
     const platformId = String(row.campaign.id);
     const date = row.segments.date;
-    if (!localId.has(platformId)) continue;
+    if (!localId.has(platformId)) {
+      unknown.add(platformId);
+      continue;
+    }
     planned.set(`${localId.get(platformId)}|${date}`, { campaignId: localId.get(platformId), date, metrics: row.metrics });
     metricIdsByDay.set(date, (metricIdsByDay.get(date) || new Set()).add(platformId));
   }
@@ -336,7 +346,7 @@ function planPerformanceDays({ metricRows, leadsByDay, campaigns, storedKeys }) 
     if (!planned.has(key)) planned.set(key, { campaignId, date, metrics: null });
   }
   const days = [...planned.entries()].map(([key, day]) => ({ key, ...day, leads: carried.get(key) || emptyLeadDay() }));
-  return { days, uncounted };
+  return { days, uncounted, unknown: [...unknown] };
 }
 
 async function syncDailyPerformance(customer, account, days = DEFAULT_DAYS) {
@@ -381,6 +391,13 @@ async function syncDailyPerformance(customer, account, days = DEFAULT_DAYS) {
     campaigns,
     storedKeys: [...stored.keys()],
   });
+  // Both campaign queries read the same set, so cost for a campaign the portal
+  // does not hold means Google made the campaign after the campaign step read
+  // the list. Writing now would drop its cost and could put its leads on
+  // another row, so the step fails with nothing written; the next run reads it.
+  if (plan.unknown.length) {
+    throw new Error(`Google reports cost for ${plan.unknown.length} campaign(s) the portal does not hold yet`);
+  }
   // Leads with no row to carry them would be dropped while the job reads as a
   // success, so the step fails and job_health shows it.
   if (plan.uncounted) {

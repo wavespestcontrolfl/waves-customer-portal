@@ -267,8 +267,9 @@ describe('runDailySync', () => {
     await GoogleLsa.runDailySync();
     expect(insertCalls.filter((c) => c.table === 'ad_campaigns')).toEqual([]);
     const update = updateCalls.find((c) => c.table === 'ad_campaigns');
-    expect(update.row).toMatchObject({ status: 'active' });
-    expect(update.row).not.toHaveProperty('metadata');
+    // Only what Google owns. The name and the type stay as the office may have edited them.
+    expect(Object.keys(update.row).sort()).toEqual(['daily_budget_base', 'daily_budget_current', 'status', 'updated_at']);
+    expect(update.row).toMatchObject({ status: 'active', daily_budget_current: 25.5 });
   });
 
   test('the lookup for an existing campaign is scoped to the account mark: a hand-entered row with the same Google id is never taken over', async () => {
@@ -377,10 +378,16 @@ describe('runDailySync', () => {
     ]);
   });
 
-  test('a metrics row for a campaign the portal does not hold is skipped', async () => {
-    answerGoogle({ metrics: [{ campaign: { id: 999 }, segments: { date: '2026-11-20' }, metrics: { cost_micros: 5000000 } }] });
-    await GoogleLsa.runDailySync();
+  test('cost for a campaign the portal does not hold yet fails the step, with nothing written', async () => {
+    answerGoogle({
+      metrics: [
+        { campaign: { id: 555 }, segments: { date: '2026-11-20' }, metrics: { cost_micros: 31000000 } },
+        { campaign: { id: 999 }, segments: { date: '2026-11-20' }, metrics: { cost_micros: 5000000 } },
+      ],
+    });
+    await expect(GoogleLsa.runDailySync()).rejects.toThrow('syncDailyPerformance: Google reports cost for 1 campaign(s) the portal does not hold yet');
     expect(perfInserts()).toEqual([]);
+    expect(mockDb.transaction).not.toHaveBeenCalled();
   });
 
   test('a stored day is updated, not inserted again', async () => {
