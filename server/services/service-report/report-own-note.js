@@ -31,7 +31,7 @@
 const { redactAccessCodes } = require('../context-aggregator');
 const CompletionRecap = require('../completion-recap');
 const {
-  noteRecordCopyViolations, heldAccessCode, CODE_SHAPED_NUMBER_RE, REPORT_NOTE_LINE_BREAK,
+  noteRecordCopyViolations, heldAccessCode, CODE_SHAPED_NUMBER_RE, REPORT_NOTE_LINE_BREAK, MAX_REPORT_NOTE_CHARS,
 } = require('./technician-report-copy');
 const { writerRulesRejectionDetail, lowercaseGermanRoach } = require('./report-writer-rules');
 const {
@@ -146,11 +146,18 @@ const DAY_SRC = '\\d{1,2}(?:st|nd|rd|th)?';
 const DATE_RE = new RegExp(`\\b(?:${MONTH_SRC}|may)\\.?\\s+${DAY_SRC}\\b|\\b${DAY_SRC}\\s+(?:of\\s+)?${MONTH_SRC}\\b|\\b${DAY_SRC}\\s+of\\s+may\\b`, 'i');
 // A date in figures: with its year anywhere ("11/22/26"), else a month and
 // a day after a word that leads to a day ("on 11/22", "on 3/4"). Figures
-// with a measure after them are a fraction ("mesh on 1/4 inch gaps").
-const MEASURE_SRC = '["\'″′]|(?:inch(?:es)?|in|ft|foot|feet|oz|ounces?|gal(?:lons?)?|cups?|lbs?|pounds?|acres?|yards?|of)\\b';
+// with a measure after them are a fraction ("mesh on 1/4 inch gaps"). "In"
+// alone is no measure: "on 3/4 in the yard" is a date, and no list of
+// things tells "on 1/4 in vents" from "on 3/4 in hardware storage areas".
+// The safe side: a date in a report is a promise, and "mesh on 1/4 in gaps"
+// costs the note one refusal ("1/4 inch gaps" passes).
+const MEASURE_SRC = '["\'″′]|(?:inch(?:es)?|ft|foot|feet|oz|ounces?|gal(?:lons?)?|cups?|lbs?|pounds?|acres?|yards?|of)\\b';
 const FIGURE_DATE_RE = new RegExp('\\b\\d{1,2}[/-]\\d{1,2}[/-]\\d{2,4}\\b'
   + `|\\b(?:on|by|until|till|after|before|since)\\s+(?:the\\s+)?\\d{1,2}\\/\\d{1,2}\\b(?![\\s-]*(?:${MEASURE_SRC}))`, 'i');
 const timeIn = (text) => TIME_WORD_RE.exec(text) || DATE_RE.exec(text) || FIGURE_DATE_RE.exec(text);
+// A time anywhere in a note, whatever other screen answers first for the
+// part that holds it ("treating outside, pest free on March 4").
+const holdsTime = (note) => noteRecordCopyViolations(note).includes('note_record_time') || Boolean(timeIn(note));
 function writeTimeRejection(text) {
   const time = timeIn(text);
   if (time) return { reason: 'time', words: [time[0]] };
@@ -252,7 +259,9 @@ async function reportNoteRejection({ note, text, catalogRows = null, db = null }
   const tidied = ownNoteText(text);
   return shapeRejection(tidied)
     || wordRejection(tidied, screens)
-    || orderRejection(tidied, said, whatMayGo(screens, mentioned.names.map(nameThatGoes)));
+    // The time is read in the note as given: a sentence the mask took holds
+    // one too ("gate opens tomorrow. treating outside").
+    || orderRejection(tidied, said, { ...whatMayGo(screens, mentioned.names.map(nameThatGoes)), dated: holdsTime(oneForm(note)) });
 }
 
 // The sentence code writes when there is no note to send: today's fallback
@@ -261,13 +270,16 @@ async function reportNoteRejection({ note, text, catalogRows = null, db = null }
 // A sentence of the recap the reader's screen refuses is left out, so the
 // reader shows the rest ("We checked the accessible areas": "accessible"
 // reads as a word of access).
-// When no sentence is left (a service name the reader refuses: "Gate
-// inspection"), the recap is written with no service name and no areas.
+// The reader shows at most MAX_REPORT_NOTE_CHARS, and nothing of a longer
+// note: a recap that many long area names make longer is written with no
+// areas. When no sentence is left (a service name the reader refuses: "Gate
+// inspection"), it is written with no service name either.
 function fixedReportNote({ serviceType, areasServiced, visitOutcome } = {}) {
   const shown = (text) => !noteRecordCopyViolations(text).length;
   const kept = (recap) => (shown(recap) ? recap : recap.split(/(?<=\.)\s+/).filter(shown).join(' '));
-  return kept(CompletionRecap.deterministicRecap({ serviceType, areasTreated: areasServiced, visitOutcome }))
-    || kept(CompletionRecap.deterministicRecap({ visitOutcome }));
+  return [{ serviceType, areasTreated: areasServiced, visitOutcome }, { serviceType, visitOutcome }, { visitOutcome }]
+    .map((facts) => kept(CompletionRecap.deterministicRecap(facts)))
+    .find((text) => text && text.length <= MAX_REPORT_NOTE_CHARS) || '';
 }
 
 module.exports = {
