@@ -80,6 +80,8 @@ const pricedReading = (over = {}, top = {}) => {
 // A one-time visit with no price whose call holds a price.
 const unpriced = (over = {}) => visit({ estimated_price: null, ai_extraction_enriched: pricedReading(), ...over });
 const pricedAs = (over, top) => unpriced({ ai_extraction_enriched: pricedReading(over, top) });
+// The same visit for a call that agreed a total: the strict field, and the one accepted one-time term it names.
+const totalAs = (over = {}, top) => pricedAs({ quoted_price_usd: 350, prices: [statedTerm({ amount_usd: 350 })], ...over }, top);
 // One-time catalog rows a call booking never prices, each named by the call that booked it.
 const namedVisit = (name, key) => unpriced({
   service_type: name, row_name: name, row_service_key: key, ai_extraction_enriched: pricedReading({ specific_service_name: name }),
@@ -98,7 +100,7 @@ describe('what a visit and the reading of its call say about the price', () => {
   test('a one-time visit with no price for a call that holds a price for that job: problem', () => {
     expect(judgePrice(unpriced())).toEqual({ verdict: 'problem', amount: 250, agreed: false });
     // The total the call agreed outranks any term.
-    expect(judgePrice(pricedAs({ quoted_price_usd: 350 }))).toEqual({ verdict: 'problem', amount: 350, agreed: true });
+    expect(judgePrice(totalAs())).toEqual({ verdict: 'problem', amount: 350, agreed: true });
     expect(judgePrice(pricedAs({ quoted_price_usd: 149.5, prices: [] }))).toEqual({ verdict: 'problem', amount: 149.5, agreed: true });
     // The stored reading may be a JSON string, and the name may carry stray spaces or another case.
     expect(verdict(unpriced({ ai_extraction_enriched: JSON.stringify(pricedReading()) }))).toBe('problem');
@@ -107,11 +109,11 @@ describe('what a visit and the reading of its call say about the price', () => {
 
   test('a total reads as agreed only when the reading does not mark it as changed after it was accepted', () => {
     const proofs = { price_offered_by_staff: true, price_accepted_by_caller: true };
-    expect(judgePrice(pricedAs({ quoted_price_usd: 350, ...proofs, price_is_final: true }))).toEqual({ verdict: 'problem', amount: 350, agreed: true });
+    expect(judgePrice(totalAs({ ...proofs, price_is_final: true }))).toEqual({ verdict: 'problem', amount: 350, agreed: true });
     // An older reading carries no proof fields.
-    expect(judgePrice(pricedAs({ quoted_price_usd: 350 })).agreed).toBe(true);
+    expect(judgePrice(totalAs()).agreed).toBe(true);
     // A later correction or an added charge: the number is shown, never as the agreed total.
-    expect(judgePrice(pricedAs({ quoted_price_usd: 350, ...proofs, price_is_final: false }))).toEqual({ verdict: 'problem', amount: 350, agreed: false });
+    expect(judgePrice(totalAs({ ...proofs, price_is_final: false }))).toEqual({ verdict: 'problem', amount: 350, agreed: false });
     // The 2026-11-21 reading: no total, the proof fields speak of a total that is not there. The stated price stands.
     expect(judgePrice(pricedAs({ price_offered_by_staff: false, price_accepted_by_caller: null, price_is_final: false, price_discussed: true })))
       .toEqual({ verdict: 'problem', amount: 250, agreed: false });
@@ -132,8 +134,9 @@ describe('what a visit and the reading of its call say about the price', () => {
     // A call booking never prices a Waves Assessment (by its key or its name) or a free re-service, even when
     // the call names that visit and speaks of a treatment price: that price is the quote, not this visit's charge.
     for (const row of ASSESSMENT_AND_RE_SERVICE) expect(verdict(row)).toBe('agrees');
-    // A visit with a price agrees whatever became of the reading.
+    // A visit with a price agrees whatever became of the reading, and when its catalog row is gone.
     expect(verdict(unpriced({ estimated_price: 250, v2_extraction_status: 'schema_failed', ai_extraction_enriched: null }))).toBe('agrees');
+    expect(verdict(unpriced({ estimated_price: 250, row_name: null, row_service_key: null, row_billing_type: null }))).toBe('agrees');
   });
 
   test('unknown when a side cannot be read, or the reading holds no price: never a problem, never an agreement', () => {
@@ -145,17 +148,17 @@ describe('what a visit and the reading of its call say about the price', () => {
       unpriced({ ai_extraction_enriched: reading() }),
       pricedAs({ prices: [] , price: null }),
       // The reading disputes its own total: staff did not offer it, or the caller did not accept it.
-      pricedAs({ quoted_price_usd: 350, price_offered_by_staff: false }),
-      pricedAs({ quoted_price_usd: 350, price_accepted_by_caller: false }),
+      totalAs({ price_offered_by_staff: false }),
+      totalAs({ price_accepted_by_caller: false }),
       // The schema writes null in a proof when no price was discussed: a total next to it contradicts it.
-      pricedAs({ quoted_price_usd: 350, price_offered_by_staff: null, price_accepted_by_caller: null, price_is_final: null }),
-      pricedAs({ quoted_price_usd: 350, price_offered_by_staff: true, price_accepted_by_caller: true, price_is_final: null }),
+      totalAs({ price_offered_by_staff: null, price_accepted_by_caller: null, price_is_final: null }),
+      totalAs({ price_offered_by_staff: true, price_accepted_by_caller: true, price_is_final: null }),
       // The reading says no price was discussed, and holds one.
       pricedAs({ price_discussed: false }),
-      pricedAs({ quoted_price_usd: 350, price_discussed: false }),
+      totalAs({ price_discussed: false }),
       // A $0 total is a free booking; an amount outside the booking's bounds is not a price.
-      pricedAs({ quoted_price_usd: 0 }),
-      pricedAs({ quoted_price_usd: 3 }),
+      pricedAs({ quoted_price_usd: 0, prices: [] }),
+      pricedAs({ quoted_price_usd: 3, prices: [] }),
       pricedAs({ prices: [statedTerm({ amount_usd: 3 })] }),
       // Nothing can tell which term stands: a range, two staff terms, a plan rate, the caller's own number, not accepted.
       pricedAs({ prices: [statedTerm({ amount_max_usd: 300 })] }),
@@ -167,11 +170,27 @@ describe('what a visit and the reading of its call say about the price', () => {
     for (const row of rows) expect(verdict(row)).toBe('unknown');
   });
 
+  test('a total is a one-time total only when the terms the caller accepted do not say otherwise', () => {
+    // The one accepted term is the total's own one-time amount, or an older reading carries no term at all.
+    expect(verdict(totalAs())).toBe('problem');
+    expect(verdict(totalAs({ prices: [], price: null }))).toBe('problem');
+    // "$350" next to an accepted "$350 per quarter" is a plan rate; a term with no unit says nothing.
+    for (const unit of ['per_quarter', 'per_month', 'per_application', 'per_year', 'unknown', null]) {
+      expect(verdict(totalAs({ prices: [statedTerm({ amount_usd: 350, unit })] }))).toBe('unknown');
+    }
+    // A second accepted term, a range, or a term with another amount: the visit's share is not known.
+    expect(verdict(totalAs({ prices: [statedTerm({ amount_usd: 350 }), statedTerm({ amount_usd: 31, unit: 'per_month' })] }))).toBe('unknown');
+    expect(verdict(totalAs({ prices: [statedTerm({ amount_usd: 350, amount_max_usd: 400 })] }))).toBe('unknown');
+    expect(verdict(totalAs({ prices: [statedTerm({ amount_usd: 250 })] }))).toBe('unknown');
+    // A term nobody accepted does not count against the total.
+    expect(verdict(totalAs({ prices: [statedTerm({ amount_usd: 350 }), statedTerm({ amount_usd: 99, unit: 'per_month', accepted: false })] }))).toBe('problem');
+  });
+
   test('unknown when the reading records a plan ask or a plan billing choice: the price can be the plan\'s', () => {
     expect(verdict(pricedAs({ service_intent: 'recurring_membership_inquiry' }))).toBe('unknown');
     for (const choice of ['annual_prepay', 'per_application']) {
       expect(verdict(pricedAs({ billing_choice: choice }))).toBe('unknown');
-      expect(verdict(pricedAs({ quoted_price_usd: 350, billing_choice: choice }))).toBe('unknown');
+      expect(verdict(totalAs({ billing_choice: choice }))).toBe('unknown');
     }
     // A billing choice the reading does not know is no evidence of a plan.
     expect(verdict(pricedAs({ billing_choice: 'unsure' }))).toBe('problem');
@@ -180,7 +199,7 @@ describe('what a visit and the reading of its call say about the price', () => {
   test('unknown when the price cannot be tied to this visit: another service, a second service, or a second property', () => {
     // The call spoke of a second service: the one accepted price can be that service's.
     expect(verdict(pricedAs({ secondary_categories: ['lawn_care'] }))).toBe('unknown');
-    expect(verdict(pricedAs({ quoted_price_usd: 350, secondary_categories: ['lawn_care'] }))).toBe('unknown');
+    expect(verdict(totalAs({ secondary_categories: ['lawn_care'] }))).toBe('unknown');
     expect(verdict(pricedAs({ secondary_categories: [] }))).toBe('problem');
     // The reading's price block is call-wide. The call named one service; the visit is another.
     expect(verdict(unpriced({ row_name: 'Rodent Exclusion Service', service_type: 'Rodent Exclusion Service' }))).toBe('unknown');
@@ -188,7 +207,7 @@ describe('what a visit and the reading of its call say about the price', () => {
     expect(verdict(pricedAs({ specific_service_name: null }))).toBe('unknown');
     // The call spoke of a second property: the price can be the other one's.
     expect(verdict(pricedAs({}, { property: { additional_properties: [{ city: 'Venice' }] } }))).toBe('unknown');
-    expect(verdict(pricedAs({ quoted_price_usd: 350 }, { property: { additional_properties: [{ city: 'Venice' }] } }))).toBe('unknown');
+    expect(verdict(totalAs({}, { property: { additional_properties: [{ city: 'Venice' }] } }))).toBe('unknown');
     expect(verdict(pricedAs({}, { property: { additional_properties: [] } }))).toBe('problem');
   });
 
@@ -230,8 +249,8 @@ describe('when an open bell closes', () => {
     expect(closeKeyFor('price', unpriced({ discount_id: 'd1', discount_type: 'percent' }), BILLING)).toBeNull();
     // The call was read again: another number, a disputed total, another service. The bell says the visit has no
     // price, and that is still so.
-    expect(closeKeyFor('price', pricedAs({ quoted_price_usd: 300 }), BILLING)).toBeNull();
-    expect(closeKeyFor('price', pricedAs({ quoted_price_usd: 350, price_accepted_by_caller: false }), BILLING)).toBeNull();
+    expect(closeKeyFor('price', totalAs({ quoted_price_usd: 300, prices: [statedTerm({ amount_usd: 300 })] }), BILLING)).toBeNull();
+    expect(closeKeyFor('price', totalAs({ price_accepted_by_caller: false }), BILLING)).toBeNull();
     expect(closeKeyFor('price', unpriced({ row_name: 'Rodent Exclusion Service', service_type: 'Rodent Exclusion Service' }), BILLING)).toBeNull();
     expect(closeKeyFor('price', unpriced({ row_name: null, row_service_key: null, row_billing_type: null }), BILLING)).toBeNull();
   });
@@ -240,6 +259,8 @@ describe('when an open bell closes', () => {
     expect(closeKeyFor('price', unpriced({ estimated_price: 275 }), BILLING)).toBe('price');
     expect(closeKeyFor('price', unpriced({ estimated_price: 0 }), BILLING)).toBe('price');
     expect(closeKeyFor('price', unpriced({ primary_line_price: 275 }), BILLING)).toBe('price');
+    // Staff set a price on a visit whose catalog row is gone: the bell still closes.
+    expect(closeKeyFor('price', unpriced({ estimated_price: 275, row_name: null, row_service_key: null, row_billing_type: null }), BILLING)).toBe('price');
     for (const row of ASSESSMENT_AND_RE_SERVICE) expect(closeKeyFor('price', row, BILLING)).toBe('noPriceNeeded');
     expect(closeKeyFor('price', planVisit({ estimated_price: null, ai_extraction_enriched: pricedReading() }), BILLING)).toBe('noPriceNeeded');
     expect(closeKeyFor('price', unpriced({ is_callback: true }), BILLING)).toBe('noPriceNeeded');
@@ -280,7 +301,7 @@ describe('the price bell copy passes the notification rule', () => {
     const composed = composeAdminAlert(priceSpecFor({ visit: unpriced(), amount: 250, agreed: false, name: 'Pat Synthetic' }));
     expect(composed.headline).toBe("Schedule — set the price on Pat Synthetic's visit");
     // A row is never rewritten and the call can be read again: the headline and the why hold no number.
-    expect(composed.why).toBe('The call holds a price for this one-time job; the visit has no price.');
+    expect(composed.why).toBe('The visit has no price; when this bell rang, its call held a price for the service it had then.');
     expect(`${composed.headline} ${composed.why}`).not.toMatch(/\d/);
     expect(composed.link).toBe('/admin/dispatch?tab=schedule&date=2026-11-21&appointment=11111111-2222-4333-8444-555555555555');
     expect(composed.metadata).toMatchObject({ area: 'Schedule', severity: 'needs-you', who: 'person', doneWhen: 'visit_priced', subject: { type: 'visit', id: '11111111-2222-4333-8444-555555555555' } });
@@ -295,9 +316,9 @@ describe('the price bell copy passes the notification rule', () => {
 
   test('the detail gives the number as a dated fact, sends the reader to the call, and says nothing was changed', () => {
     expect(priceDetailFor({ visit: unpriced(), amount: 250, agreed: false, name: 'Pat Synthetic' }))
-      .toBe('Pat Synthetic: the visit booked from a phone call for 2026-11-21 is "One-Time Pest Control Service", a one-time visit with no price. When this bell rang, the reading of the call held $250 for that service: a price staff stated and the caller accepted, not confirmed as final (it can vary, or a charge was added). Check the call, then set the visit\'s price before it is billed. Nothing was changed and the customer was not contacted.');
+      .toBe('Pat Synthetic: the visit booked from a phone call for 2026-11-21 is "One-Time Pest Control Service", a one-time visit with no price. When this bell rang, the reading of the call held $250 for that service: a price staff stated and the caller accepted, not confirmed as final (it can vary, or a charge was added). Check the call and the visit as it is now, then set the visit\'s price before it is billed. Nothing was changed and the customer was not contacted.');
     expect(priceDetailFor({ visit: unpriced(), amount: 149.5, agreed: true, name: '' }))
-      .toBe('A customer: the visit booked from a phone call for 2026-11-21 is "One-Time Pest Control Service", a one-time visit with no price. When this bell rang, the reading of the call held $149.50 for that service: the total the caller accepted. Check the call, then set the visit\'s price before it is billed. Nothing was changed and the customer was not contacted.');
+      .toBe('A customer: the visit booked from a phone call for 2026-11-21 is "One-Time Pest Control Service", a one-time visit with no price. When this bell rang, the reading of the call held $149.50 for that service: the total the caller accepted. Check the call and the visit as it is now, then set the visit\'s price before it is billed. Nothing was changed and the customer was not contacted.');
   });
 });
 

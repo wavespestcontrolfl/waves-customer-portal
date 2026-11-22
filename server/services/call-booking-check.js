@@ -14,9 +14,9 @@
 //            one-time price staff stated and the caller accepted
 //            ("One-time service is $250, but it varies"). The booking never takes the stated price: the reading
 //            marks a hedge and an added charge the same way. So the bell tells the office, and a person sets
-//            the price. The bell's headline and why carry no number: a row is never rewritten, and a call that
-//            is read again can hold another number. The detail gives the number as a dated fact ("when this
-//            bell rang") and sends the reader to the call.
+//            the price. The bell's headline and why carry no number, and the why dates its evidence ("when
+//            this bell rang"): a row is never rewritten, and the reading or the visit's service can change.
+//            The detail gives the number as a dated fact and sends the reader to the call.
 // A visit has one problem at a time: `service` needs a plan visit and `price` a one-time visit. A bell's key and
 // metadata carry the problem's name.
 //
@@ -123,6 +123,18 @@ function takesNoCallPrice(visit) {
     || require('./assessment-booking').isAssessmentServiceRow(row);
 }
 
+// Whether the reading's total can be a one-time total, by the price terms the caller accepted: none at all (an
+// older reading carries only the total), or exactly one, with the total's own exact amount and the one-time
+// unit. "$90" next to an accepted "$90 per quarter" is a plan rate; a second accepted term, a range or a term
+// with no unit leaves the visit's share unknown.
+function totalIsOneTime(request) {
+  const accepted = (Array.isArray(request.prices) && request.prices.length ? request.prices : [request.price])
+    .filter((entry) => entry && typeof entry === 'object' && entry.accepted === true);
+  if (!accepted.length) return true;
+  const [term] = accepted;
+  return accepted.length === 1 && term.unit === 'one_time' && term.amount_max_usd == null && term.amount_usd === request.quoted_price_usd;
+}
+
 // The price the reading holds for the job it names, as the booking's own price rule would put it on this
 // service (resolveCallBookingPrice: its bounds and its refusals): the total the call agreed, else the one-time
 // price staff stated and the caller accepted. null when it holds neither. A $0 total is a free booking, not a
@@ -134,13 +146,15 @@ function takesNoCallPrice(visit) {
 // an older reading has no proof fields at all (undefined), and its total stands. The proofs speak of the total
 // only, so the stated price does not read them. `agreed` is true only for a total the reading does not mark as
 // changed after it was accepted (price_is_final false): that one is shown as "not confirmed as final".
+//
+// A total is a one-time total only when the terms the caller accepted do not say otherwise (totalIsOneTime).
 function readingPrice(reading, catalogRow) {
   const request = reading.service_request;
   const strict = request.quoted_price_usd;
   if (request.price_discussed === false) return null;
   const proofStands = (proof) => proof === true || proof === undefined;
   if (strict != null && !(proofStands(request.price_offered_by_staff) && proofStands(request.price_accepted_by_caller)
-    && (proofStands(request.price_is_final) || request.price_is_final === false))) return null;
+    && (proofStands(request.price_is_final) || request.price_is_final === false) && totalIsOneTime(request))) return null;
   const { price, source } = require('./call-booking-catalog').resolveCallBookingPrice({
     quotedPrice: strict != null ? strict : resolveStatedOneTimeCallPrice(reading), catalogRow,
   });
@@ -158,8 +172,10 @@ function readingPrice(reading, catalogRow) {
 //            price block does not say which job a price covers), or the reading records a plan ask or the
 //            caller's choice of a plan's billing (the price can be the plan's).
 function judgePrice(visit) {
+  // A stored price settles it, whatever else can be read (a visit whose catalog row is gone, too).
+  if (visitHasPrice(visit)) return { verdict: 'agrees' };
   if (!visit.row_billing_type) return { verdict: 'unknown' };
-  if (takesNoCallPrice(visit) || visitHasPrice(visit)) return { verdict: 'agrees' };
+  if (takesNoCallPrice(visit)) return { verdict: 'agrees' };
   const reading = visit.v2_extraction_status === 'valid' ? readingOf(visit) : null;
   const request = reading && reading.service_request;
   if (!request || typeof request !== 'object') return { verdict: 'unknown' };
@@ -229,7 +245,8 @@ function detailFor({ visit, heard, name }) {
 
 const dollars = (amount) => `$${Number.isInteger(amount) ? amount : amount.toFixed(2)}`;
 
-// No number in the headline or the why: the row is never rewritten, and the reading can change.
+// No number in the headline or the why, and the why dates its evidence: the row is never rewritten, and the
+// reading or the visit's service can change while the bell is open.
 function priceSpecFor({ visit, name }) {
   const { fitAction } = require('./admin-alert-names');
   return {
@@ -237,7 +254,7 @@ function priceSpecFor({ visit, name }) {
     action: name
       ? fitAction(AREA, name, [(who) => `set the price on ${who}'s visit`, (who) => `price ${who}'s visit`])
       : 'set the price on a phone-booked visit',
-    why: 'The call holds a price for this one-time job; the visit has no price.',
+    why: 'The visit has no price; when this bell rang, its call held a price for the service it had then.',
     doneWhen: 'visit_priced',
   };
 }
@@ -250,7 +267,7 @@ function priceDetailFor({ visit, amount, agreed, name }) {
     + (agreed
       ? 'the total the caller accepted. '
       : 'a price staff stated and the caller accepted, not confirmed as final (it can vary, or a charge was added). ')
-    + 'Check the call, then set the visit\'s price before it is billed. '
+    + 'Check the call and the visit as it is now, then set the visit\'s price before it is billed. '
     + 'Nothing was changed and the customer was not contacted.';
 }
 

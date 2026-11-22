@@ -187,11 +187,11 @@ maybeDescribe('call booking check (live Postgres)', () => {
     const [row] = rows;
     expect(row.category).toBe('schedule');
     expect(row.title).toBe("Schedule — set the price on Pat Synthetic's visit");
-    expect(row.body).toBe('The call holds a price for this one-time job; the visit has no price.');
+    expect(row.body).toBe('The visit has no price; when this bell rang, its call held a price for the service it had then.');
     expect(row.link).toBe(`/admin/dispatch?tab=schedule&date=2026-11-21&appointment=${b.visitId}`);
     expect(row.done_at).toBeNull();
     expect(row.detail).toContain('When this bell rang, the reading of the call held $250 for that service');
-    expect(row.detail).toContain('Check the call, then set the visit\'s price before it is billed. Nothing was changed and the customer was not contacted.');
+    expect(row.detail).toContain('Check the call and the visit as it is now, then set the visit\'s price before it is billed. Nothing was changed and the customer was not contacted.');
     expect(row.metadata).toMatchObject({
       area: 'Schedule', severity: 'needs-you', who: 'person', doneWhen: 'visit_priced', subject: { type: 'visit', id: b.visitId },
       scheduledServiceId: b.visitId, customerId: b.customerId, callLogId: b.callId, problem: 'price',
@@ -229,13 +229,13 @@ maybeDescribe('call booking check (live Postgres)', () => {
     await trx('call_log').where({ id: b.callId }).update(pricedCall({ price: corrected, prices: [corrected] }));
     const next = await run(new Date('2026-11-21T22:15:00Z'));
     expect(next.raised).toBe(0);
-    await trx('call_log').where({ id: b.callId }).update(pricedCall({ quoted_price_usd: 350, price_accepted_by_caller: false }));
+    await trx('call_log').where({ id: b.callId }).update(pricedCall({ quoted_price_usd: 250, price_accepted_by_caller: false }));
     await run(new Date('2026-11-21T22:30:00Z'));
     const rows = await priceRowsFor(b.visitId);
     expect(rows).toHaveLength(1);
     // The row says the visit has no price, with no number, and that is still so.
     expect(rows[0].done_at).toBeNull();
-    expect(rows[0].body).toBe('The call holds a price for this one-time job; the visit has no price.');
+    expect(rows[0].body).toBe('The visit has no price; when this bell rang, its call held a price for the service it had then.');
   });
 
   test('a price bell stays open while the reading cannot be read; a visit changed to a plan closes it', async () => {
@@ -269,7 +269,8 @@ maybeDescribe('call booking check (live Postgres)', () => {
   test.each([
     ['the visit has a price', { visitOver: { estimated_price: 250 } }, pricedCall()],
     ['the visit has a price on its primary line', { visitOver: { primary_line_price: 250 } }, pricedCall()],
-    ['the reading disputes its own total', {}, pricedCall({ quoted_price_usd: 350, price_accepted_by_caller: false })],
+    ['the reading disputes its own total', {}, pricedCall({ quoted_price_usd: 250, price_accepted_by_caller: false })],
+    ['the total is a plan rate', {}, pricedCall({ quoted_price_usd: 250, price: { ...statedTerm, unit: 'per_quarter' }, prices: [{ ...statedTerm, unit: 'per_quarter' }] })],
     ['the call spoke of a second service', {}, pricedCall({ secondary_categories: ['lawn_care'] })],
     ['the reading records the caller\'s choice of a plan\'s billing', {}, pricedCall({ billing_choice: 'per_application' })],
     ['the visit is a free callback', { visitOver: { is_callback: true } }, pricedCall()],
