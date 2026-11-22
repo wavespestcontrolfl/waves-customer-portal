@@ -3999,6 +3999,39 @@ router.post('/:serviceId/pest-recap/draft', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /:serviceId/pest-recap/report-note — the technician's own note as the customer's report will show it (report speed
+// plan step 2, owner 2026-11-19 *note I*, *read first*). One model call tidies the note, the report's checks read the answer,
+// and the fixed sentence stands in when no tidied note passes: { ok, text, source: 'cleaned' | 'fixed', reason? }. The
+// technician reads the text on the sheet before it is sent. Writes nothing, sends nothing; one paid model call for a note
+// (two with the retry) unless the same note was tidied in the last 30 minutes. Dark behind GATE_REPORT_OWN_NOTE (404
+// {enabled:false} while off, nothing read). See services/service-report/report-own-note-writer.js.
+function reportNoteVisitRefusal({ ok, reason, svc, eligible }) {
+  if (!ok) return reason;
+  if (!eligible) return 'not_pest_control';
+  return svc.customer_id ? null : VISIT_NO_CUSTOMER_CODE;
+}
+router.post('/:serviceId/pest-recap/report-note', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').reportOwnNoteLive()) return res.status(404).json({ enabled: false });
+    if (!(await assertRecapOwnership(req, res))) return;
+    const visit = await PestRecap.resolveEligibility(req.params.serviceId);
+    const refusal = reportNoteVisitRefusal(visit);
+    if (refusal) return res.status(recapStatusForReason(refusal)).json({ error: refusal, code: refusal });
+    const { note, areasServiced } = req.body || {};
+    // The codes on the customer's file are read for this customer before any model reads the note.
+    const { text, source, reason } = await require('../services/service-report/report-own-note-writer').cleanReportNote({
+      note: typeof note === 'string' ? note : '',
+      serviceType: visit.svc.service_type,
+      areasServiced: Array.isArray(areasServiced) ? areasServiced : [],
+      db,
+      customerId: visit.svc.customer_id,
+    });
+    res.json({
+      ok: true, text, source, ...(reason ? { reason } : {}),
+    });
+  } catch (err) { next(err); }
+});
+
 // POST /:serviceId/pest-recap — commit the recap (complete, no bill).
 // Whether this recap must consume the kit: a first completion always; a
 // priorCompleted recap only when it is the RETRY of the completing recap —

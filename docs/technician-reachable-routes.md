@@ -87,6 +87,7 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | POST | `/api/admin/dispatch/:serviceId/pest-recap` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/pest-recap/context` | admin-dispatch |
 | POST | `/api/admin/dispatch/:serviceId/pest-recap/draft` | admin-dispatch |
+| POST | `/api/admin/dispatch/:serviceId/pest-recap/report-note` | admin-dispatch |
 | POST | `/api/admin/dispatch/:serviceId/photo-analysis/draft` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/promises` | admin-dispatch |
 | GET | `/api/admin/dispatch/:serviceId/property-map` | admin-dispatch |
