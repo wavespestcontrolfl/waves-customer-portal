@@ -51,26 +51,44 @@ const lineKey = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ')
 // …with the street suffix canonicalized (St == Street, Dr == Drive) so a
 // spelling difference between the two stages never reads as a different
 // premise (pre-push audit P1).
+// …and, while GATE_WIZARD_SUPERSEDES_FORM_DRAFT is on, with six name words
+// folded wherever they stand in the street name ("1260 Example Point Dr" =
+// "1260 Example Pt Dr"): see streetKeyNameWordsFolded.
 const streetKeyNoUnit = (v) => {
   const { splitStreetLineUnit, normalizeStreetLine } = require('../utils/address-normalizer');
   const text = String(v || '');
-  return lineKey(normalizeStreetLine(splitStreetLineUnit(text).street || text));
+  const key = lineKey(normalizeStreetLine(splitStreetLineUnit(text).street || text));
+  return nameWordsFoldLive() ? streetKeyNameWordsFolded(key) : key;
 };
-// A street key with six name words folded wherever they stand ("12 sample
-// point dr" = "12 sample pt dr"). streetKeyNoUnit folds only the word that
-// ends the street. Same table for the spellings. Only for a caller that
-// asks (samePremiseDisplay `foldStreetWords`).
-// The list is short on purpose (pre-push audit P1, twice): Point, Glen,
-// Grove, Beach, Vista, Shores. Those are the street-type words that the
-// stored addresses carry INSIDE street names in both spellings (read on
-// live data 2026-11-22: one address source shortens them), and whose short
+// Six name words that also stand INSIDE street names here, folded to their
+// short form wherever they stand: Point, Glen, Grove, Beach, Vista, Shores.
+// normalizeStreetLine folds a street-type word only where it ends the
+// street, so "Example Pt Dr" and "Example Point Dr" read as two streets.
+// One address source writes these words short (county records do), and the
+// stored addresses carry both spellings (read on live data 2026-11-22: the
+// fold changes 90 of 3,805 stored street keys and joins 3 pairs, each one
+// home of one contact written two ways).
+//
+// In THIS key, not in one caller: every address check that compares street
+// keys must agree on what one street is. A fold in the wizard's web-form
+// draft rule alone let that rule call two spellings one home while the
+// county-roll hold did not see a warning stored under the other spelling
+// (codex #8314 r1 P1).
+//
+// Behind the wizard's gate: the fold is why that rule works for such a
+// pair, and it changes live address checks (holds, the county-record
+// vouch, website-quote withdrawals, staff corrections, the draft-retire
+// sweep), so it turns on with the owner's flip and off with the gate.
+//
+// The list is short on purpose. A word is on it only when the stored
+// addresses carry it inside street names in both spellings AND its short
 // form reads as nothing else. Not on it: "St" and "Dr" (Saint, Doctor: "12
 // St George Dr" is not "12 Street George Dr"), "Is" for Island (a word of
 // its own: "12 This Is Paradise Dr"), and every word seen in one spelling
-// only. Add a word only with both: seen in two spellings, and no other
-// reading.
+// only. The spellings come from the normalizer's own table.
 const NAME_WORDS_FOLDED_INSIDE_A_STREET = new Set(['PT', 'GLN', 'GRV', 'BCH', 'VIS', 'SHRS']);
-const streetKeyWordsFolded = (key) => {
+const nameWordsFoldLive = () => require('../config/feature-gates').wizardSupersedesFormDraftLive?.() === true;
+const streetKeyNameWordsFolded = (key) => {
   const { STREET_SUFFIX_ALIASES } = require('../utils/address-normalizer');
   return String(key || '').split(' ')
     .map((word) => {
@@ -150,12 +168,6 @@ function flagCoversAddress(flag, address) {
 // agree — the cross-lead publication withdrawal uses this stricter form,
 // so a street-only submission can never match a published estimate for
 // that street in some other town (pre-push audit P1).
-// `foldStreetWords`: one of six name words written short or in full INSIDE
-// the street name is the same street too ("Sample Point Dr" = "Sample Pt
-// Dr"; the list and its reason are at streetKeyWordsFolded).
-// Off unless asked: the wizard's web-form-draft rule asks
-// (estimate-automation-duplicates.js sameDoor, with its own contact, house
-// number and unit tests). Every other caller keeps the key it had.
 // One display address ("<street line>, [<unit>,] <City>, FL <zip>") into
 // its parts. The normalizer may emit the unit as its OWN comma segment:
 // the city is the first later segment that is neither a unit line nor the
@@ -203,11 +215,10 @@ function parseDisplayAddress(text) {
   return { streetLine, line1, unit, street: streetKeyNoUnit(streetLine), city, state: state ? state.toUpperCase() : null, zip: zip5(tail) };
 }
 
-function samePremiseDisplay(a, b, { requireLocality = false, foldStreetWords = false } = {}) {
+function samePremiseDisplay(a, b, { requireLocality = false } = {}) {
   const x = parseDisplayAddress(a);
   const y = parseDisplayAddress(b);
-  const key = foldStreetWords ? streetKeyWordsFolded : (street) => street;
-  if (!x.street || key(x.street) !== key(y.street)) return false;
+  if (!x.street || x.street !== y.street) return false;
   if (requireLocality && (!cityKey(x.city) || !cityKey(y.city) || !x.zip || !y.zip)) return false;
   return sameLocality(x, y);
 }

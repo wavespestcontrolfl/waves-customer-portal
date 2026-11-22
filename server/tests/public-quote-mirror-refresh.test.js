@@ -67,7 +67,7 @@ describe('shouldRefreshWizardDraft', () => {
 describe('withoutFormShellBlock (GATE_WIZARD_SUPERSEDES_FORM_DRAFT)', () => {
   const GATE = 'GATE_WIZARD_SUPERSEDES_FORM_DRAFT';
   const trx = { name: 'trx' };
-  const RUN = { phone: '+19415550142', address: '12 Sample St, Parrish, FL 34219', customerId: 'cust-1', email: 'sample.person@example.com', rollAnswered: true };
+  const RUN = { phone: '+19415550142', address: '12 Sample St, Parrish, FL 34219', customerId: 'cust-1', email: 'sample.person@example.com' };
   const formShell = { blocked: true, reason: 'duplicate_phone', existingEstimateId: 'shell-1', existingStatus: 'draft', existingSource: 'lead_webhook' };
   const wizardDraft = { blocked: true, reason: 'duplicate_phone', existingEstimateId: 'wiz-1', existingStatus: 'draft', existingSource: 'quote_wizard' };
   const run = (block) => withoutFormShellBlock(trx, block, RUN);
@@ -96,8 +96,7 @@ describe('withoutFormShellBlock (GATE_WIZARD_SUPERSEDES_FORM_DRAFT)', () => {
   test('gate on: when untouched web-form drafts are all that is open, the run goes on as for a new visitor', async () => {
     expect(await run(formShell)).toBeNull();
     // The run's own customer, email and address go with it: a draft of another
-    // contact or for another property keeps the block. So does whether the
-    // county roll answered on this run: the rule's name-word fold needs it.
+    // contact or for another property keeps the block.
     expect(onlyUntouchedWebFormShellsOpen).toHaveBeenCalledWith(trx, RUN);
   });
 
@@ -137,11 +136,11 @@ describe('mirror refresh wiring', () => {
     );
   });
 
-  test('the same-phone duplicate read goes through withoutFormShellBlock, with the run\'s customer, email, address and county answer', () => {
+  test('the same-phone duplicate read goes through withoutFormShellBlock, with the run\'s customer, email and address', () => {
     // The duplicate branch (refresh, block or insert) must judge the block
     // that withoutFormShellBlock returns, never the first read.
     expect(routeSource).toMatch(
-      /const duplicateBlock = await withoutFormShellBlock\(\s*trx,\s*await blockIfAutomatedEstimateDuplicate\(contactPhone, \{ database: trx \}\),\s*(?:\/\/[^\n]*\n\s*)*\{ phone: contactPhone, address: quoteFullAddress, customerId, email: contactEmail, rollAnswered: !!rollAnsweredThisRun \},?\s*\);\s*if \(duplicateBlock\) \{/
+      /const duplicateBlock = await withoutFormShellBlock\(\s*trx,\s*await blockIfAutomatedEstimateDuplicate\(contactPhone, \{ database: trx \}\),\s*\{ phone: contactPhone, address: quoteFullAddress, customerId, email: contactEmail \},?\s*\);\s*if \(duplicateBlock\) \{/
     );
     // No second, unguarded duplicate read in the wizard's estimate mirror.
     expect(routeSource.match(/blockIfAutomatedEstimateDuplicate\(contactPhone/g)).toHaveLength(1);

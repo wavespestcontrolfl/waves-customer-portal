@@ -226,51 +226,65 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
   });
 
   // Found live 2026-11-21: the web form and the wizard wrote one name word
-  // inside the street name in two ways, and the draft kept blocking.
-  test.each([
-    ['Point', '12 Sample Pt Dr, Parrish, FL 34219', '12 Sample Point Dr, Parrish, FL 34219'],
-    ['Glen', '12 Sample Gln Ct, Parrish, FL 34219', '12 Sample Glen Ct, Parrish, FL 34219'],
-  ])('%s written short on the draft and in full on the run, inside the street name, is the same property when the county roll answered on the run', async (_word, onDraft, onRun) => {
-    await estimate({ address: onDraft });
+  // inside the street name in two ways, and the draft kept blocking. While
+  // the rule's gate is on, the shared street key reads six such words as
+  // one street (lead-address-unverified.js). In production this rule runs
+  // only with the gate on.
+  describe('a name word inside the street name, short on the draft and in full on the run', () => {
+    const GATE = 'GATE_WIZARD_SUPERSEDES_FORM_DRAFT';
+    const SHORT = '12 Sample Pt Dr, Parrish, FL 34219';
+    const FULL = '12 Sample Point Dr, Parrish, FL 34219';
+    let gateBefore;
 
-    expect(await shellsOnly({ address: onRun, rollAnswered: true })).toBe(true);
-    // The draft's own spelling needs no county answer.
-    expect(await shellsOnly({ address: onDraft })).toBe(true);
-  });
+    beforeEach(() => {
+      gateBefore = process.env[GATE];
+      process.env[GATE] = 'true';
+    });
 
-  // The address hold matches a stored county-roll warning to the run by its
-  // own street key, with no fold. With no county answer on the run, a
-  // warning stored under the draft's spelling could not reach it.
-  test.each([
-    ['no county answer', {}],
-    ['a county answer that is not exactly true', { rollAnswered: 'yes' }],
-  ])('with %s on the run, a name word written two ways keeps the block', async (_label, run) => {
-    await estimate({ address: '12 Sample Pt Dr, Parrish, FL 34219' });
+    afterEach(() => {
+      if (gateBefore === undefined) delete process.env[GATE];
+      else process.env[GATE] = gateBefore;
+    });
 
-    expect(await shellsOnly({ address: '12 Sample Point Dr, Parrish, FL 34219', ...run })).toBe(false);
-  });
+    test.each([
+      ['Point', SHORT, FULL],
+      ['Glen', '12 Sample Gln Ct, Parrish, FL 34219', '12 Sample Glen Ct, Parrish, FL 34219'],
+    ])('%s: the same property, in both directions', async (_word, onDraft, onRun) => {
+      await estimate({ address: onDraft });
 
-  test.each([
-    ['another word in the street name', '12 Sample Port Dr, Parrish, FL 34219'],
-    ['another house number', '14 Sample Point Dr, Parrish, FL 34219'],
-    ['another town', '12 Sample Point Dr, Bradenton, FL 34205'],
-    ['another unit', '12 Sample Point Dr Apt 4, Parrish, FL 34219'],
-  ])('a street-type word written two ways does not hide %s: the draft still blocks', async (_label, onRun) => {
-    await estimate({ address: '12 Sample Pt Dr, Parrish, FL 34219' });
+      expect(await shellsOnly({ address: onRun })).toBe(true);
+      expect(await shellsOnly({ address: onDraft })).toBe(true);
+    });
 
-    expect(await shellsOnly({ address: onRun, rollAnswered: true })).toBe(false);
-  });
+    test('with the gate off the shared key does not fold: the two spellings are two streets', async () => {
+      delete process.env[GATE];
+      await estimate({ address: SHORT });
 
-  // "St" is also Saint, "Dr" is also Doctor, and Island shortens to the
-  // word "Is": none of them is on the list.
-  test.each([
-    ['St', '12 St Sample Dr, Parrish, FL 34219', '12 Street Sample Dr, Parrish, FL 34219'],
-    ['Dr', '12 Dr Sample Blvd, Parrish, FL 34219', '12 Drive Sample Blvd, Parrish, FL 34219'],
-    ['Is', '12 This Is Sample Dr, Parrish, FL 34219', '12 This Island Sample Dr, Parrish, FL 34219'],
-  ])('"%s" inside the street name is not folded: the draft still blocks', async (_word, onDraft, onRun) => {
-    await estimate({ address: onDraft });
+      expect(await shellsOnly({ address: FULL })).toBe(false);
+    });
 
-    expect(await shellsOnly({ address: onRun, rollAnswered: true })).toBe(false);
+    test.each([
+      ['another word in the street name', '12 Sample Port Dr, Parrish, FL 34219'],
+      ['another house number', '14 Sample Point Dr, Parrish, FL 34219'],
+      ['another town', '12 Sample Point Dr, Bradenton, FL 34205'],
+      ['another unit', '12 Sample Point Dr Apt 4, Parrish, FL 34219'],
+    ])('the fold does not hide %s: the draft still blocks', async (_label, onRun) => {
+      await estimate({ address: SHORT });
+
+      expect(await shellsOnly({ address: onRun })).toBe(false);
+    });
+
+    // "St" is also Saint, "Dr" is also Doctor, and Island shortens to the
+    // word "Is": none of them is on the list.
+    test.each([
+      ['St', '12 St Sample Dr, Parrish, FL 34219', '12 Street Sample Dr, Parrish, FL 34219'],
+      ['Dr', '12 Dr Sample Blvd, Parrish, FL 34219', '12 Drive Sample Blvd, Parrish, FL 34219'],
+      ['Is', '12 This Is Sample Dr, Parrish, FL 34219', '12 This Island Sample Dr, Parrish, FL 34219'],
+    ])('"%s" inside the street name is not folded: the draft still blocks', async (_word, onDraft, onRun) => {
+      await estimate({ address: onDraft });
+
+      expect(await shellsOnly({ address: onRun })).toBe(false);
+    });
   });
 
   test.each([

@@ -328,25 +328,15 @@ async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
  *   - it is for the wizard run's own property: one phone can ask for quotes
  *     on two homes. Same door by the shared premise matcher
  *     (samePremiseDisplay) with street, city and ZIP on both sides, plus the
- *     same house number as typed and the same unit. One of six name words
- *     (Point, Glen, Grove, Beach, Vista, Shores) inside the street name may
- *     be short on one side and in full on the other ("Sample Pt Dr", "Sample
- *     Point Dr"): the web form and the wizard write it so. That is one step
- *     wider than the draft-retire sweep's test, which folds only the word
- *     that ends the street. A missing or incomplete address, or a street
- *     with no house number, fails closed: the draft is not a shell.
- *
- * The name-word fold counts only when the county roll answered for the
- * run's address on this run (`rollAnswered`, the route's
- * rollAnsweredThisRun; 24 of the last 25 wizard leads on 2026-11-22). The
- * address hold is the route's work, for the run's own address, and it
- * matches a stored county-roll warning to the run by its own street key (no
- * fold). With no county answer, a warning stored under the draft's spelling
- * could not reach a run in the other spelling: then the strict key decides
- * and the draft keeps blocking, as before the fold. With an answer, the
- * roll itself flags the home again or verifies it. This rule reads no
- * warning: a part copy of the hold here would only look like a guard
- * (pre-push audit, rounds 4 to 6 of the follow-up).
+ *     same house number as typed and the same unit. That is the draft-retire
+ *     sweep's street test too. While this rule's gate is on, the shared
+ *     street key reads one of six name words inside the street name short
+ *     or in full as one street ("Sample Pt Dr", "Sample Point Dr": the web
+ *     form and the wizard write it so; lead-address-unverified.js
+ *     streetKeyNoUnit). The fold is in that key, not here, so the
+ *     county-roll address hold reads the same street as this rule. A missing
+ *     or incomplete address, or a street with no house number, fails closed:
+ *     the draft is not a shell.
  *
  * Not a condition, on purpose: the SMS intake state of the customer
  * (customers.lead_intake_status). A lead who never answers keeps
@@ -423,19 +413,14 @@ function untouchedWebFormShells(database, last10, { now = new Date() } = {}) {
 // it can be the street name ("12 7 Mile Rd").
 const FRACTION_WORD = /^[^\p{L}]*(?:[\u00BC-\u00BE\u2150-\u215E\u2189]|\p{N}[/\u2044\u2215]\p{N})[^\p{L}]*$/u;
 
-function sameDoor(addressA, addressB, { foldNameWords = false } = {}) {
-  // The web form and the wizard do not write a street the same way: a name
-  // word such as Point comes short from one and in full from the other
-  // ("Sample Pt Dr", "Sample Point Dr"). foldStreetWords reads those as one
-  // street, for a short list of such words (found live 2026-11-21: 1 of 5
-  // past pairs). The caller says when the fold may count.
-  if (!samePremiseDisplay(addressA, addressB, { requireLocality: true, foldStreetWords: foldNameWords })) return false;
+function sameDoor(addressA, addressB) {
+  if (!samePremiseDisplay(addressA, addressB, { requireLocality: true })) return false;
   const a = parseDisplayAddress(addressA);
   const b = parseDisplayAddress(addressB);
   // A street with no house number can be many homes: the key must start
   // with a number of its own ("12 sample st", "12b sample st"), not with a
-  // numbered street ("49th st"). The house numbers are equal here (no
-  // folded word is a number), so one side answers for both.
+  // numbered street ("49th st"). The street keys are equal here, so one
+  // side answers for both.
   if (!/^\d+[a-z]?\s/.test(a.street)) return false;
   // The key drops what is not a letter or a digit, so "12½" and "12 ½"
   // read as "12". The house numbers as typed must be the same too: the
@@ -460,7 +445,7 @@ function sameContact(row, { customerId, email }) {
     && String(row.customer_email || '').trim().toLowerCase() === runEmail;
 }
 
-async function onlyUntouchedWebFormShellsOpen(database, { phone, address, customerId, email, rollAnswered = false, now = new Date() } = {}) {
+async function onlyUntouchedWebFormShellsOpen(database, { phone, address, customerId, email, now = new Date() } = {}) {
   const values = phoneLookupValues(phone);
   if (!database || !values.last10) return false;
   // Wider than the duplicate block's own list: an estimate that is being
@@ -474,7 +459,7 @@ async function onlyUntouchedWebFormShellsOpen(database, { phone, address, custom
     .whereIn('id', open.map((row) => row.id))
     .select('id', 'address', 'customer_id', 'customer_email');
   const shellKeys = new Set((Array.isArray(shells) ? shells : [])
-    .filter((row) => sameContact(row, { customerId, email }) && sameDoor(row.address, address, { foldNameWords: rollAnswered === true }))
+    .filter((row) => sameContact(row, { customerId, email }) && sameDoor(row.address, address))
     .map((row) => String(row.id)));
   return open.every((row) => shellKeys.has(String(row.id)));
 }
