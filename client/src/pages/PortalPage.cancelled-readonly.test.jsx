@@ -13,6 +13,7 @@ vi.mock('../utils/api', () => ({
   default: {
     // Billing mounts Home's add-a-service card (owner 2026-11-21).
     getPropertyRecommendations: vi.fn(async () => ({ available: false })),
+    requestPropertyRecommendation: vi.fn(),
     getSchedule: vi.fn(),
     getNotificationPrefs: vi.fn(),
     getPropertyNotificationPrefs: vi.fn(),
@@ -99,6 +100,12 @@ describe('BillingTab — add-a-service and refer cards', () => {
     expect(screen.queryByText('Mosquito coverage')).not.toBeInTheDocument();
     screen.getByRole('button', { name: 'Refer a friend' }).click();
     expect(onSwitchTab).toHaveBeenCalledWith('refer');
+    // The request says which tab the customer tapped on, so the office
+    // request names Billing and not Home.
+    screen.getByRole('button', { name: 'Get estimate' }).click();
+    await waitFor(() => expect(api.requestPropertyRecommendation).toHaveBeenCalledWith(
+      expect.objectContaining({ cardId: 'plan_offer', serviceKey: 'lawn_care', surface: 'billing' }),
+    ));
   });
 
   it('a cancelled account sees neither and never asks for recommendations', async () => {

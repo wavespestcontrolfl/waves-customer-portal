@@ -203,10 +203,27 @@ describe('route contracts (gate + drift)', () => {
   // Controls the route's mosquito revalidation without touching a DB.
   const mosquitoNote = jest.fn(async () => null);
 
-  function appWithGate(gateOn) {
+  // `offer` is what the route's recompute answers (default: no offer, this
+  // suite's stance). `ctaWrites` collects what the route hands the request
+  // writer, in place of a database write.
+  function appWithGate(gateOn, { offer = null, ctaWrites = null } = {}) {
     jest.doMock('../middleware/auth', () => ({
       authenticate: (req, _res, nextFn) => { req.customerId = 'cust-1'; nextFn(); },
     }));
+    jest.doMock('../services/service-report/cross-sell', () => ({
+      ...jest.requireActual('../services/service-report/cross-sell'),
+      buildPortalOffer: async () => offer,
+    }));
+    if (ctaWrites) {
+      jest.doMock('../services/cta-service-request', () => ({
+        ...jest.requireActual('../services/cta-service-request'),
+        // deduped: the route rings no bell, so the test reads no customer row.
+        writeOrRefreshCtaRequest: async (_db, args) => {
+          ctaWrites.push(args);
+          return { deduped: true, request: { id: 'req-1' } };
+        },
+      }));
+    }
     jest.doMock('../services/property-recommendations', () => ({
       buildPropertyRecommendations: async () => ({ cards: [] }),
       mosquitoNoteCard: mosquitoNote,
@@ -239,6 +256,7 @@ describe('route contracts (gate + drift)', () => {
     jest.dontMock('../middleware/auth');
     jest.dontMock('../routes/reports-public');
     jest.dontMock('../services/property-recommendations');
+    jest.dontMock('../services/cta-service-request');
     mosquitoNote.mockReset();
     mosquitoNote.mockImplementation(async () => null);
     if (server) { await new Promise((resolve) => server.close(resolve)); server = null; }
@@ -272,5 +290,40 @@ describe('route contracts (gate + drift)', () => {
     const gone = await post(base, { cardId: 'mosquito_note' });
     expect(gone.status).toBe(409);
     expect(mosquitoNote).toHaveBeenCalled();
+  });
+
+  // Owner 2026-11-21: the Billing tab shows the same offer card. The office
+  // must read which tab the customer tapped on, and one offer tapped on both
+  // tabs must stay one open request.
+  test('gate on: a Billing tap names Billing for the office; a Home tap stores what it stored before', async () => {
+    const offer = {
+      serviceKey: 'lawn_care', label: 'Lawn Care', mode: 'priced', relationship: 'add',
+      fingerprint: 'fp-1', option: { id: 'opt-1', perVisit: 62 },
+    };
+    const ctaWrites = [];
+    const base = await listen(appWithGate(true, { offer, ctaWrites }));
+    const tap = {
+      cardId: 'plan_offer', serviceKey: 'lawn_care', offerMode: 'priced', perApplication: 62, optionId: 'opt-1', fingerprint: 'fp-1',
+    };
+
+    expect((await post(base, tap)).status).toBe(200);
+    expect((await post(base, { ...tap, surface: 'billing' })).status).toBe(200);
+    // Only the known tab name reaches the office text; anything else is Home.
+    expect((await post(base, { ...tap, surface: 'Billing <b>' })).status).toBe(200);
+
+    const [home, billing, unknown] = ctaWrites;
+    expect(home.subject).toBe('Add Lawn Care — requested from portal home');
+    expect(home.description).toContain('on the portal home recommendations (shown $62.00 per application on portal home)');
+    expect(home.revisionSnapshot).toEqual({ source: 'portal_home', offer });
+
+    expect(billing.subject).toBe('Add Lawn Care — requested from portal Billing');
+    expect(billing.description).toContain('on the portal Billing recommendations (shown $62.00 per application on portal Billing)');
+    expect(billing.revisionSnapshot).toEqual({ source: 'portal_home', surface: 'billing', offer });
+    // The same open-request slot as Home: the writer refreshes one row.
+    expect(billing.source).toBe('portal_home');
+    expect(billing.requestedService).toBe(home.requestedService);
+
+    expect(unknown.subject).toBe(home.subject);
+    expect(unknown.revisionSnapshot).toEqual(home.revisionSnapshot);
   });
 });

@@ -1101,7 +1101,7 @@ const ADD_SERVICE_HEADING = {
   subtitle: 'Priced for this property. You pay per application, after each visit.',
 };
 
-function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING }) {
+function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING, surface = 'home' }) {
   // Per-card request state: idle → sending → sent | stale | failed.
   const [requestStates, setRequestStates] = useState({});
   // One-tap purchase overlay target (bet 3) — a priced offer card while the
@@ -1178,6 +1178,8 @@ function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING }) {
         // Server-issued digest of everything this card rendered — the
         // request path rejects any drift from what the customer saw.
         fingerprint: card.fingerprint || null,
+        // Which tab the card is on, so the office request names it.
+        surface,
       } : { cardId: card.id });
       setCardState(card.id, 'sent');
     } catch (err) {
@@ -8323,7 +8325,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
       </form>
       )}
 
-      {!cancelledAccount && <RecommendationsCard data={billingOffers} />}
+      {!cancelledAccount && <RecommendationsCard data={billingOffers} surface="billing" />}
       {!cancelledAccount && onSwitchTab && (
         <section data-glass="card" data-section="billing-refer" style={{ ...card, padding: 20, marginTop: 16, textAlign: 'center' }}>
           <h2 style={{ fontSize: 18, fontWeight: 700, color: B.glassNavy, margin: '0 0 6px' }}>Know someone who could use Waves?</h2>

@@ -3469,8 +3469,10 @@ decide it (this also covers a typed rodent/termite report's OWN identity —
 a `rodent_trapping` visit's own family is already counted owned by the
 ladder's existing report-identity corroboration). A recent, uncorroborated
 report identity for any family in `GUARDED_OWNERSHIP_FAMILIES`
-(`OFFER_LADDER` plus `termite`, kept there for exactly this ambiguity even
-though termite left the ladder itself) fails the WHOLE report card closed
+(`pest_control`, `lawn_care`, `tree_shrub` and `termite`: the two ladder
+families plus the two that left the ladder, termite on 2026-09-28 and tree &
+shrub on 2026-11-21, kept there for exactly this ambiguity) fails the WHOLE
+report card closed
 — the unseeded-next-visit gap and a just-cancelled plan are
 indistinguishable, so offering the family and advancing past it are each
 wrong in one of those worlds.

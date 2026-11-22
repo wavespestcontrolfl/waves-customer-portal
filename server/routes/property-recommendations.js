@@ -125,18 +125,26 @@ router.post('/request', requestLimiter, async (req, res, next) => {
 
     const requestedService = normalizeRequestedServiceKey(offer.serviceKey) || offer.serviceKey;
     const perApplication = Number(offer.option?.perVisit);
+    // The same card also shows on the Billing tab (owner 2026-11-21). The
+    // office text and the stored snapshot name the tab the customer tapped
+    // on. The `source` column stays 'portal_home': it is the card's shared
+    // open-request slot (CTA_REQUEST_SOURCES), so one offer tapped on both
+    // tabs refreshes one request and never files two. A Home tap stores
+    // exactly what it stored before.
+    const onBilling = metadata.surface === 'billing';
+    const place = onBilling ? 'portal Billing' : 'portal home';
     const priceText = Number.isFinite(perApplication) && perApplication > 0
-      ? `(shown $${perApplication.toFixed(2)} per application on portal home)`
-      : '(quote requested from portal home)';
+      ? `(shown $${perApplication.toFixed(2)} per application on ${place})`
+      : `(quote requested from ${place})`;
     const outcome = await writeOrRefreshCtaRequest(db, {
       customerId: req.customerId,
       requestedService,
       source: 'portal_home',
-      subject: `Add ${offer.label} — requested from portal home`,
-      description: `Customer tapped "${offer.label}" on the portal home recommendations ${priceText}. Review and follow up — no customer message has been sent.`,
+      subject: `Add ${offer.label} — requested from ${place}`,
+      description: `Customer tapped "${offer.label}" on the ${place} recommendations ${priceText}. Review and follow up — no customer message has been sent.`,
       // The server-computed offer snapshot — the shown price is the honored
       // price (sent-quote price-lock doctrine).
-      revisionSnapshot: { source: 'portal_home', offer },
+      revisionSnapshot: { source: 'portal_home', ...(onBilling ? { surface: 'billing' } : {}), offer },
     });
     await ringBell(req.customerId, [offer.label, priceText].join(' '), offer.relationship, outcome);
     return res.json({ success: true, deduped: !!outcome.deduped });
