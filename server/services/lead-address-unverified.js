@@ -56,6 +56,16 @@ const streetKeyNoUnit = (v) => {
   const text = String(v || '');
   return lineKey(normalizeStreetLine(splitStreetLineUnit(text).street || text));
 };
+// A street key with every street-type word folded, wherever it stands
+// ("12 sample point dr" = "12 sample pt dr", "12 state road 64" = "12 state
+// rd 64"). streetKeyNoUnit folds only the word that ends the street. Same
+// table. Only for a caller that asks (samePremiseDisplay `foldStreetWords`).
+const streetKeyWordsFolded = (key) => {
+  const { STREET_SUFFIX_ALIASES } = require('../utils/address-normalizer');
+  return String(key || '').split(' ')
+    .map((word) => (Object.hasOwn(STREET_SUFFIX_ALIASES, word) ? STREET_SUFFIX_ALIASES[word].toLowerCase() : word))
+    .join(' ');
+};
 const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
 
 // Same premise: same street line and, where both sides carry one, the same
@@ -127,6 +137,11 @@ function flagCoversAddress(flag, address) {
 // agree — the cross-lead publication withdrawal uses this stricter form,
 // so a street-only submission can never match a published estimate for
 // that street in some other town (pre-push audit P1).
+// `foldStreetWords`: a street-type word written short or in full INSIDE the
+// street name is the same street too ("Sample Point Dr" = "Sample Pt Dr").
+// Off unless asked: the wizard's web-form-draft rule asks
+// (estimate-automation-duplicates.js sameDoor, with its own contact, house
+// number and unit tests). Every other caller keeps the key it had.
 // One display address ("<street line>, [<unit>,] <City>, FL <zip>") into
 // its parts. The normalizer may emit the unit as its OWN comma segment:
 // the city is the first later segment that is neither a unit line nor the
@@ -174,10 +189,11 @@ function parseDisplayAddress(text) {
   return { streetLine, line1, unit, street: streetKeyNoUnit(streetLine), city, state: state ? state.toUpperCase() : null, zip: zip5(tail) };
 }
 
-function samePremiseDisplay(a, b, { requireLocality = false } = {}) {
+function samePremiseDisplay(a, b, { requireLocality = false, foldStreetWords = false } = {}) {
   const x = parseDisplayAddress(a);
   const y = parseDisplayAddress(b);
-  if (!x.street || x.street !== y.street) return false;
+  const key = foldStreetWords ? streetKeyWordsFolded : (street) => street;
+  if (!x.street || key(x.street) !== key(y.street)) return false;
   if (requireLocality && (!cityKey(x.city) || !cityKey(y.city) || !x.zip || !y.zip)) return false;
   return sameLocality(x, y);
 }

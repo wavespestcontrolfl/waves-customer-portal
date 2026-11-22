@@ -207,6 +207,7 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     ['is for another unit of the building', () => ({ address: '12 Sample St Apt 4, Parrish, FL 34219' })],
     // The shared street key drops the fraction; the typed house numbers differ.
     ['is for a house number with a fraction', () => ({ address: '12½ Sample St, Parrish, FL 34219' })],
+    ['is for a house number with a fraction written as its own word', () => ({ address: '12 ½ Sample St, Parrish, FL 34219' })],
     // No city or ZIP = no proof that it is the same home.
     ['has an address with no city or ZIP', () => ({ address: '12 Sample St' })],
     ['has no address', () => ({ address: '' })],
@@ -220,6 +221,29 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     await estimate({ address: '12 sample street, parrish, fl 34219' });
 
     expect(await shellsOnly()).toBe(true);
+  });
+
+  // Found live 2026-11-21: the web form and the wizard wrote one street-type
+  // word inside the street name in two ways, and the draft kept blocking.
+  test.each([
+    ['inside the street name', '12 Sample Pt Dr, Parrish, FL 34219', '12 Sample Point Dr, Parrish, FL 34219'],
+    ['before a road number', '12 State Rd 64, Parrish, FL 34219', '12 State Road 64, Parrish, FL 34219'],
+  ])('a street-type word written short on the draft and in full on the run, %s, is the same property', async (_label, onDraft, onRun) => {
+    await estimate({ address: onDraft });
+
+    expect(await shellsOnly({ address: onRun })).toBe(true);
+    expect(await shellsOnly({ address: onDraft })).toBe(true);
+  });
+
+  test.each([
+    ['another word in the street name', '12 Sample Port Dr, Parrish, FL 34219'],
+    ['another house number', '14 Sample Point Dr, Parrish, FL 34219'],
+    ['another town', '12 Sample Point Dr, Bradenton, FL 34205'],
+    ['another unit', '12 Sample Point Dr Apt 4, Parrish, FL 34219'],
+  ])('a street-type word written two ways does not hide %s: the draft still blocks', async (_label, onRun) => {
+    await estimate({ address: '12 Sample Pt Dr, Parrish, FL 34219' });
+
+    expect(await shellsOnly({ address: onRun })).toBe(false);
   });
 
   test.each([

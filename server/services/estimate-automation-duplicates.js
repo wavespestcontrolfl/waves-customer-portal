@@ -326,10 +326,14 @@ async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
  *     resolved for itself (findExistingCustomerByContact) and the same
  *     email. Two people can share a phone and a home;
  *   - it is for the wizard run's own property: one phone can ask for quotes
- *     on two homes. Same door by the test the draft-retire sweep uses
- *     (estimate-draft-retire.js sameProperty): the shared premise matcher
- *     with street, city and ZIP on both sides, plus the same unit. A missing
- *     or incomplete address, or a street with no house number, fails closed:
+ *     on two homes. Same door by the shared premise matcher
+ *     (samePremiseDisplay) with street, city and ZIP on both sides, plus the
+ *     same house number as typed and the same unit. A street-type word
+ *     inside the street name may be short on one side and in full on the
+ *     other ("Sample Pt Dr", "Sample Point Dr"): the web form and the wizard
+ *     write it so. That is one step wider than the draft-retire sweep's
+ *     test, which folds only the word that ends the street. A missing or
+ *     incomplete address, or a street with no house number, fails closed:
  *     the draft is not a shell.
  *
  * Not a condition, on purpose: the SMS intake state of the customer
@@ -402,17 +406,26 @@ function untouchedWebFormShells(database, last10, { now = new Date() } = {}) {
 }
 
 function sameDoor(addressA, addressB) {
-  if (!samePremiseDisplay(addressA, addressB, { requireLocality: true })) return false;
+  // The web form and the wizard do not write a street the same way: a
+  // street-type word inside the name comes short from one and in full from
+  // the other ("Sample Pt Dr", "Sample Point Dr"). foldStreetWords reads
+  // those as one street (found live 2026-11-21: 1 of 5 past pairs).
+  if (!samePremiseDisplay(addressA, addressB, { requireLocality: true, foldStreetWords: true })) return false;
   const a = parseDisplayAddress(addressA);
   const b = parseDisplayAddress(addressB);
   // A street with no house number can be many homes: the key must start
   // with a number of its own ("12 sample st", "12b sample st"), not with a
-  // numbered street ("49th st"). The street keys are equal here, so one
-  // side answers for both.
+  // numbered street ("49th st"). The house numbers are equal here (no
+  // street-type word is a number), so one side answers for both.
   if (!/^\d+[a-z]?\s/.test(a.street)) return false;
-  // The key drops what is not a letter or a digit, so "12½" reads as "12".
-  // The house numbers as typed must be the same too.
-  const house = (parsed) => String(parsed.streetLine || '').trim().split(/\s+/)[0].toLowerCase();
+  // The key drops what is not a letter or a digit, so "12½" and "12 ½"
+  // read as "12". The house numbers as typed must be the same too: all
+  // that stands before the first word that starts with a letter.
+  const house = (parsed) => {
+    const words = String(parsed.streetLine || '').trim().toLowerCase().split(/\s+/);
+    const name = words.findIndex((word) => /^[a-z]/.test(word));
+    return words.slice(0, name === -1 ? words.length : name).join(' ');
+  };
   if (house(a) !== house(b)) return false;
   const unit = (parsed) => unitLineValueKey(normalizeUnitLine(parsed.unit));
   return unit(a) === unit(b);

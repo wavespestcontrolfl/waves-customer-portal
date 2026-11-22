@@ -202,6 +202,37 @@ describe('samePremiseDisplay', () => {
     expect(samePremiseDisplay('1260 Example St, Parrish', '1260 Example St, Parrish, FL 34219', { requireLocality: true })).toBe(false);
     expect(samePremiseDisplay('1260 Example St, Parrish, FL 34219', '1260 Example St Apt 2, Parrish, FL 34219', { requireLocality: true })).toBe(true);
   });
+
+  // The wizard's web-form-draft rule asks for foldStreetWords. Every other
+  // caller decides an address hold, a withdrawal or a record write on the
+  // key it had: without the option nothing changes.
+  test('foldStreetWords: a street-type word inside the street name is one street short or in full, only when asked', () => {
+    const short = '1260 Example Pt Dr, Parrish, FL 34219';
+    const full = '1260 Example Point Dr, Parrish, FL 34219';
+    const fold = { requireLocality: true, foldStreetWords: true };
+
+    expect(samePremiseDisplay(short, full)).toBe(false);
+    expect(samePremiseDisplay(short, full, { requireLocality: true })).toBe(false);
+    expect(samePremiseDisplay(short, full, fold)).toBe(true);
+    expect(samePremiseDisplay('1260 State Rd 64, Parrish, FL 34219', '1260 State Road 64, Parrish, FL 34219', fold)).toBe(true);
+    // The word that ends the street folds with and without the option.
+    expect(samePremiseDisplay('1260 Example Drive, Parrish, FL 34219', '1260 Example Dr, Parrish, FL 34219', fold)).toBe(true);
+  });
+
+  test('foldStreetWords folds one word list only: another word, number, town or ZIP is another premise', () => {
+    const short = '1260 Example Pt Dr, Parrish, FL 34219';
+    const fold = { requireLocality: true, foldStreetWords: true };
+
+    expect(samePremiseDisplay(short, '1260 Example Port Dr, Parrish, FL 34219', fold)).toBe(false);
+    // "St" for Saint is not "Saint": only street-type words fold.
+    expect(samePremiseDisplay('1260 St Example Dr, Parrish, FL 34219', '1260 Saint Example Dr, Parrish, FL 34219', fold)).toBe(false);
+    expect(samePremiseDisplay(short, '1250 Example Point Dr, Parrish, FL 34219', fold)).toBe(false);
+    expect(samePremiseDisplay(short, '1260 Example Point Dr, Bradenton, FL 34219', fold)).toBe(false);
+    expect(samePremiseDisplay(short, '1260 Example Point Dr, Parrish, FL 34221', fold)).toBe(false);
+    expect(samePremiseDisplay(short, '1260 Example Point Dr', fold)).toBe(false);
+    // A word that is also a property of every object is a street word like any other.
+    expect(samePremiseDisplay('1260 Constructor Pt Dr, Parrish, FL 34219', '1260 Constructor Point Dr, Parrish, FL 34219', fold)).toBe(true);
+  });
 });
 
 describe('address verdict', () => {
