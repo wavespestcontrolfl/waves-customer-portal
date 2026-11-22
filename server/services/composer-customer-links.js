@@ -305,6 +305,22 @@ async function buildLatestEstimateLink(customerIds, { purpose = 'composer_insert
   return mintEstimateLink(found.estimate, { purpose });
 }
 
+// The code of a member link that GET /r/:code answers (routes/referral-links.js): https, an owned portal host, the
+// path /r/<code> with at most one trailing slash, and a code of that route's shape (its CODE_RE: keep the two in
+// sync). null for every other link. Strict on purpose: buildReferralLink promises a credit only for such a link.
+// The send check reads referral links more widely (ownedBearerShapes), because it must judge every link that could
+// be one.
+const MEMBER_LINK_PATH_RE = /^\/r\/([A-Za-z0-9_-]{4,32})\/?$/;
+function memberLinkCode(link) {
+  try {
+    const url = new URL(String(link || '').trim());
+    if (url.protocol !== 'https:' || !ownedPortalHosts().includes(url.host.toLowerCase())) return null;
+    return MEMBER_LINK_PATH_RE.exec(url.pathname)?.[1] || null;
+  } catch {
+    return null;
+  }
+}
+
 async function buildReferralLink(customerId) {
   const { resolvePromoter, getLiveSettings, step2FriendCreditCentsOf } = require('./referral-engine');
   const { composerReferralLine } = require('./referral-step2');
@@ -342,15 +358,15 @@ async function buildReferralLink(customerId) {
   }
   // GATE_REFERRAL_STEP2: the friend's credit from the live row read above (0 = today's line: gate off, paused, or no
   // amount). The line states it only when the link in the line leads to a member the office can confirm:
-  //  - the code is read from the link itself, as the send check reads a referral link (an owned portal host and
-  //    /r/<code>). getPromoterReferralLink can keep a stored link that is not an /r/ link, which names nobody;
+  //  - the link is one the public route answers, and the code is read from it (memberLinkCode above).
+  //    getPromoterReferralLink can keep a stored link that is not such a link, and it names nobody;
   //  - that code has an owner the Referrals queue can name (referral-inbound customerForCode, the same rule as
   //    the friend page in routes/referral-links.js). A household promoter can belong to an archived sibling profile.
   // A failed lookup is a no. Gate off: no lookup.
   let friendCents = step2FriendCreditCentsOf(liveSettings);
   if (friendCents > 0) {
     try {
-      const code = canonicalPortalToken(promoter.referral_link, ownedPortalHosts(), REFERRAL_LINK_PATH_RE, ANY_SCHEME);
+      const code = memberLinkCode(promoter.referral_link);
       const { customerForCode } = require('./referral-inbound');
       if (!code || !(await customerForCode(code))) friendCents = 0;
     } catch (err) {
@@ -2157,8 +2173,6 @@ async function visitCardRequestLinked(runs, hosts, conn) {
 // The moving page (routes/moving-public.js, 48 lowercase hex). A pasted
 // upper-case token is looked up lower-cased, so it is judged, never skipped.
 const MOVING_PATH_RE = /^\/moving\/([a-f0-9]{48})$/i;
-// A member's referral link: /r/<code> (routes/referral-links.js). buildReferralLink reads the code with it too.
-const REFERRAL_LINK_PATH_RE = /^\/r\/([A-Za-z0-9_-]+)$/i;
 const ownedBearerShapes = () => [
   ['reschedule', /\/reschedule\//i, RESCHEDULE_PATH_RE,
     async (conn, t) => (await conn('scheduled_services').where({ reschedule_token: t }).first('customer_id'))?.customer_id],
@@ -2170,7 +2184,7 @@ const ownedBearerShapes = () => [
     async (conn, t) => (await conn('invoices').where({ token: t }).first('customer_id'))?.customer_id],
   ['estimate', /\/estimate\//i, /^\/estimate\/([A-Za-z0-9_-]{8,})$/i,
     async (conn, t) => (await conn('estimates').where({ token: t }).first('customer_id'))?.customer_id],
-  ['referral', /\/r\//i, REFERRAL_LINK_PATH_RE, referralLinkOwner],
+  ['referral', /\/r\//i, /^\/r\/([A-Za-z0-9_-]+)$/i, referralLinkOwner],
   ['moving', /\/moving\//i, MOVING_PATH_RE,
     // A closed move's link is a 404: unresolved, so the caller fails closed.
     async (conn, t) => (await conn('customer_moves').where({ token: String(t).toLowerCase() }).whereNot({ status: 'closed' }).first('customer_id'))?.customer_id],

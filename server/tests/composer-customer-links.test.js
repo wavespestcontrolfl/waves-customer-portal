@@ -533,6 +533,13 @@ describe('buildReferralLink', () => {
     ['the stored link is a page with no code', 'https://wavespestcontrol.com/', () => {}, 0],
     ['the stored link has the code only in its query', 'https://wavespestcontrol.com/?ref=WAVES-ABC12345', () => {}, 0],
     ['the stored link is an /r/ link on a host that is not the portal', 'https://example.com/r/WAVES-ABC12345', () => {}, 0],
+    // What GET /r/:code does not answer as a member link (routes/referral-links.js: one optional trailing slash,
+    // a code of 4 to 32 characters).
+    ['the stored link ends in two slashes', 'https://portal.wavespestcontrol.com/r/WAVES-ABC12345//', () => {}, 0],
+    ['the stored link has a longer path', 'https://portal.wavespestcontrol.com/r/WAVES-ABC12345/x', () => {}, 0],
+    ['the code is shorter than the route accepts', 'https://portal.wavespestcontrol.com/r/abc', () => {}, 0],
+    ['the code is longer than the route accepts', `https://portal.wavespestcontrol.com/r/${'A'.repeat(33)}`, () => {}, 0],
+    ['the stored link is not https', 'http://portal.wavespestcontrol.com/r/WAVES-ABC12345', () => {}, 0],
   ])('GATE_REFERRAL_STEP2 on, %s: the link with today\'s line, which promises nothing', async (_name, link, arrange, lookups) => {
     resolvePromoter.mockResolvedValue({ promoter: { id: 'p1', referral_code: 'WAVES-ABC12345', referral_link: link }, alreadyEnrolled: true, household: true });
     step2FriendCreditCentsOf.mockReturnValueOnce(5000);
@@ -544,8 +551,12 @@ describe('buildReferralLink', () => {
     expect(customerForCode).toHaveBeenCalledTimes(lookups);
   });
 
-  test('GATE_REFERRAL_STEP2 on: a member link on the short-link host, or with a trailing slash, is read the same', async () => {
-    for (const link of ['https://wavespest.co/r/WAVES-ABC12345', 'https://portal.wavespestcontrol.com/r/WAVES-ABC12345/']) {
+  test('GATE_REFERRAL_STEP2 on: a member link on the short-link host, with one trailing slash, or with a query is read the same', async () => {
+    for (const link of [
+      'https://wavespest.co/r/WAVES-ABC12345',
+      'https://portal.wavespestcontrol.com/r/WAVES-ABC12345/',
+      'https://portal.wavespestcontrol.com/r/WAVES-ABC12345?x=1',
+    ]) {
       resolvePromoter.mockResolvedValue({ promoter: { id: 'p1', referral_link: link }, alreadyEnrolled: true });
       step2FriendCreditCentsOf.mockReturnValueOnce(5000);
       customerForCode.mockClear();
