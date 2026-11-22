@@ -1272,9 +1272,26 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
       // middleware — ahead of this handler and therefore ahead of any
       // recompute or DB work.
       try {
-        // The row the offer is recomputed from. One query with the report
-        // email's offer line (services/service-report/cross-sell-record.js).
-        const joined = await require('../services/service-report/cross-sell-record').loadCrossSellService(db, service.id);
+        const joined = await db('service_records as sr')
+          .leftJoin('customers as c', 'sr.customer_id', 'c.id')
+          .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
+          .where('sr.id', service.id)
+          .select(
+            // scheduled_service_id rides along so the click-path recompute
+            // classifies the report by its catalog identity exactly like
+            // the read path (codex #3367 PR r4) — omitting it made every
+            // valid click 409 whenever the catalog reclassified stale text.
+            'sr.id', 'sr.customer_id', 'sr.service_type', 'sr.scheduled_service_id', 'sr.is_callback',
+            // service_date/created_at feed the historical-report recency
+            // gate (PR r9) — the click path must classify identically.
+            'sr.service_date', 'sr.created_at',
+            db.raw('COALESCE(ss.service_address_line1, c.address_line1) as address_line1'),
+            db.raw(`${stampedLine2Sql('ss', 'c')} as address_line2`),
+            db.raw('COALESCE(ss.service_address_city, c.city) as city'),
+            db.raw('COALESCE(ss.service_address_zip, c.zip) as zip'),
+            'c.first_name', 'c.last_name',
+          )
+          .first();
         const { buildReportCrossSell } = require('../services/service-report/cross-sell');
         // Click-to-estimate (GATE_REPORT_CLICK_TO_ESTIMATE, inert without the
         // parent card gate that already guarded this event): a priced tap

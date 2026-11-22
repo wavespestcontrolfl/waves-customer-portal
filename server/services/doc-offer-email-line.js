@@ -25,21 +25,24 @@ function escapeHtml(value) {
 
 const link = (url, words) => `<a class="dm-link" href="${escapeHtml(url)}" style="color:#0A7EC2;text-decoration:underline;">${escapeHtml(words)}</a>`;
 
-// Can the customer add or start this offer where the link goes, or only ask
-// for a quote? The report's offer says so in `mode`; a link page's card says
-// so by carrying a per-application price or none.
-function offerIsPriced(crossSell) {
-  if (crossSell.mode !== undefined) return crossSell.mode === 'priced';
-  return Number(crossSell.perApplication) > 0;
-}
+// The line must not promise more than its link gives.
+//   - The Waves app: a link page's card carries a per-application price only
+//     when the app sells that offer to that customer in one tap
+//     (services/app-link-cards.js). Then the customer can add or start it
+//     there; without a price the app takes a quote request.
+//   - The report: its card's button asks for an estimate in every mode
+//     ("Request an Estimate": a tap files a request for the office; with
+//     GATE_REPORT_CLICK_TO_ESTIMATE on, a priced tap also mints an estimate
+//     the customer can view). So that line asks for a quote, never "Add" or
+//     "Start", priced offer or not.
+const appSellsNow = (crossSell) => Number(crossSell?.perApplication) > 0;
 
-// The line must not promise more than its link gives: a quote-only offer is
-// asked for, never added or started. relationship 'start': the customer has
-// no recurring plan to add to (the card says the same).
-function offerAsk(crossSell) {
+// relationship 'start': the customer has no recurring plan to add to (the
+// card says the same).
+function offerAsk(crossSell, canAddNow) {
   const label = crossSell?.label ? String(crossSell.label).toLowerCase() : '';
   if (!label) return '';
-  if (!offerIsPriced(crossSell)) return `Get a quote for ${label}`;
+  if (!canAddNow) return `Get a quote for ${label}`;
   return crossSell.relationship === 'start' ? `Start ${label}` : `Add ${label} to your plan`;
 }
 
@@ -70,9 +73,12 @@ function appLine(ask, offerLinkWords, referral, appUrls) {
 // place: the page the link opens, as the customer knows it ('report').
 function docOfferEmailLine({ crossSell = null, referral = null, url = null, place = null, appUrls = null }) {
   if (!require('../config/feature-gates').isEnabled('docCrossSellEmail')) return null;
-  const ask = offerAsk(crossSell);
-  if (appUrls) return appLine(ask, ask && !offerIsPriced(crossSell) ? 'ask for a quote' : 'see your offer', referral, appUrls);
+  if (appUrls) {
+    const sells = appSellsNow(crossSell);
+    return appLine(offerAsk(crossSell, sells), sells ? 'see your offer' : 'ask for a quote', referral, appUrls);
+  }
   if (!url || !place) return null;
+  const ask = offerAsk(crossSell, false);
   let lead;
   if (ask && referral) lead = `${ask} or refer a friend from your ${place}`;
   else if (ask) lead = `${ask} from your ${place}`;

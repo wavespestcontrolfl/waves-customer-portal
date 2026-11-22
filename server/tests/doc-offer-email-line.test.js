@@ -9,11 +9,12 @@ const { isEnabled } = require('../config/feature-gates');
 const { docOfferEmailLine, joinBodyAppends } = require('../services/doc-offer-email-line');
 
 // The report's card carries more than the line reads; the receipt's card is
-// the cut-down link card. The line reads label and relationship only.
+// the cut-down link card. The line reads the label, and for the app also
+// the relationship and whether the card carries a price.
 const OFFER = { serviceKey: 'lawn_care', label: 'Lawn Care', mode: 'priced', option: { perVisit: 62.5 } };
 const LINK_CARD = { label: 'Lawn Care', relationship: 'add', perApplication: 62.5 };
-// Quote-only: the report's offer says so in its mode, a link page's card by
-// carrying no per-application price.
+// Quote-only: a link page's card carries no per-application price (the app
+// does not sell that offer to that customer in one tap).
 const QUOTE_OFFER = { serviceKey: 'lawn_care', label: 'Lawn Care', mode: 'quote_cta', relationship: 'add', option: null };
 const QUOTE_CARD = { label: 'Lawn Care', relationship: 'add' };
 const REFERRAL = { headline: 'Know someone who could use Waves?', cta: 'Send My Referral Link' };
@@ -23,17 +24,18 @@ const APP = { offer: 'https://portal.example/?tab=billing', referral: 'https://p
 beforeEach(() => isEnabled.mockImplementation((key) => key === 'docCrossSellEmail'));
 
 describe('a page that holds the cards (the service report)', () => {
+  // The report's card asks for an estimate in every mode (its button reads
+  // "Request an Estimate"), so the line asks for a quote: never "Add" or
+  // "Start", for a priced offer too.
   test.each([
-    [{ crossSell: OFFER, referral: REFERRAL }, 'Add lawn care to your plan or refer a friend from your report'],
-    [{ crossSell: OFFER }, 'Add lawn care to your plan from your report'],
+    [{ crossSell: OFFER, referral: REFERRAL }, 'Get a quote for lawn care or refer a friend from your report'],
+    [{ crossSell: OFFER }, 'Get a quote for lawn care from your report'],
     [{ referral: REFERRAL }, 'Know someone who could use Waves? Share your referral link from your report'],
-    // A customer with no recurring plan has no plan to add to (the page's
-    // card says "Start lawn care" for the same offer).
-    [{ crossSell: { ...OFFER, relationship: 'start' }, referral: REFERRAL }, 'Start lawn care or refer a friend from your report'],
-    [{ crossSell: { ...OFFER, relationship: 'start' } }, 'Start lawn care from your report'],
-    [{ crossSell: { ...OFFER, relationship: 'add' } }, 'Add lawn care to your plan from your report'],
-    // A quote-only offer: the page lets the customer ask for a quote, not add
-    // or start the service, so the line must not say "Add" or "Start".
+    [{ crossSell: { ...OFFER, relationship: 'start' }, referral: REFERRAL }, 'Get a quote for lawn care or refer a friend from your report'],
+    [{ crossSell: { ...OFFER, relationship: 'add' } }, 'Get a quote for lawn care from your report'],
+    // A report offer that somehow carried a link card's price is still a
+    // request on the report.
+    [{ crossSell: { ...OFFER, perApplication: 62.5 } }, 'Get a quote for lawn care from your report'],
     [{ crossSell: QUOTE_OFFER, referral: REFERRAL }, 'Get a quote for lawn care or refer a friend from your report'],
     [{ crossSell: QUOTE_OFFER }, 'Get a quote for lawn care from your report'],
     [{ crossSell: { ...QUOTE_OFFER, relationship: 'start' } }, 'Get a quote for lawn care from your report'],
@@ -43,6 +45,7 @@ describe('a page that holds the cards (the service report)', () => {
     expect(line.html).toContain(`href="${URL}"`);
     // Never a price in an email.
     expect(`${line.text}${line.html}`).not.toMatch(/\$|62\.5/);
+    expect(`${line.text}${line.html}`).not.toMatch(/Add |Start /);
   });
 
   test('no cards, no line; no url or place, no line', () => {
@@ -89,6 +92,13 @@ describe('the Waves app (the receipt email)', () => {
     expect(line.text).toBe(text);
     expect(line.html).toContain('>ask for a quote</a>');
     expect(`${line.text}${line.html}`).not.toMatch(/Add |Start |see your offer/);
+  });
+
+  // A report-shaped offer (a `mode`, no card price) in the app shape is not
+  // an offer the app sells now: the card's price is the only yes.
+  test('an offer with no card price asks for a quote, whatever its mode says', () => {
+    const line = docOfferEmailLine({ crossSell: { ...OFFER, relationship: 'add' }, appUrls: APP });
+    expect(line.text).toBe(`Get a quote for lawn care in the Waves app: ${APP.offer}`);
   });
 
   test('a priced offer keeps its own link words', () => {

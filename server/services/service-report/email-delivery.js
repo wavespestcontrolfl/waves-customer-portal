@@ -756,10 +756,14 @@ async function sendServiceReportV1Email(recordId, {
       const { embeddedPitchAllowed, embeddedReferralAskAllowed } = require('../email-division/eligibility');
       const who = { customerId: service.customer_id, email: holder?.email };
       if (holder && await embeddedPitchAllowed(who)) {
-        const { buildCrossSellForServiceRecord } = require('./cross-sell-record');
-        const crossSell = await buildCrossSellForServiceRecord(db, recordId);
         const { reserviceReportCopyGateOn } = require('./reservice-report');
         const callback = reserviceReportCopyGateOn() && service.is_callback === true;
+        // The card the live report shows: the report route's own composer,
+        // on the row this sender loaded with the report's frozen identity
+        // applied (loadServiceRecord), as the report route does. So the line
+        // and the report read the same premises. Best-effort by contract:
+        // null on any failure. A complaint visit's report carries no card.
+        const crossSell = callback ? null : await require('./cross-sell').buildReportCrossSell(service, db);
         // The customer's own card: with GATE_REFERRAL_STEP2 on, the
         // report page's per-customer reward decision.
         // The referral part is a referral ask too: the customer's referral

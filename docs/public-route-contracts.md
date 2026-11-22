@@ -3538,6 +3538,10 @@ route guard switches to the named profile and `/auth/select-property`
 refuses a profile the signed-in account does not own. The customer id is no
 credential: nothing answers to it without a session. The page falls back to
 the bare tab for any other `href` (`appCardHref`).
+Both receipt routes gate the token format before any read
+(`routes/receipt-v2.js` `TOKEN_RE`, the pay router's range: the receipt token
+is the invoice's pay token; every token on record passes, production
+2026-11-22): a malformed token gets the unknown token's own 404.
 NO WRITE ROUTE: the receipt and the tracker have no card tap. Each card is a
 plain link into the Waves app (the Billing tab for the offer, the Refer tab
 for the referral) with no token, so nothing on a link page files a request,
