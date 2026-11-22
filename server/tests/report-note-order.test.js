@@ -4,26 +4,25 @@
  *
  * Behavior these tests pin: a text passes only when its words are the note's
  * words in the note's order, with one sentence for each sentence of the note
- * it keeps. It adds only small words, and leaves out only a small word, a
- * word the report's screens refuse, or a whole part that is not for the
- * customer.
+ * it keeps. It adds only small words, and leaves out only a small word or
+ * what the report's screens say may go: a word, two words together, a whole
+ * part of the note.
  * Regression they guard: a customer report, signed with the technician's
  * name, that says something the technician did not say.
  * Gap in existing proof: no other suite reads this module. Synthetic notes.
  */
 
-const { orderRejection, noteWords, orderToCustomer } = require('../services/service-report/report-note-order');
+const { orderRejection, noteWords, isCount } = require('../services/service-report/report-note-order');
 
-// A stand-in for the report's word screen: the reason a customer text may not
-// hold the fragment, or null. The real one is report-own-note.js.
-const SCREEN = [
-  [/\b(?:gate|code)\b/i, 'access_code'],
-  [/\b(?:rude|paid|billing)\b/i, 'not_for_customer'],
-  [/\bborlux\b/i, 'trade_name'],
-  [/^\s*(?:use|open)\b/i, 'instruction'],
-];
-const refused = (fragment) => (SCREEN.find(([shape]) => shape.test(fragment)) || [])[1] || null;
-const rejection = (note, text) => orderRejection(text, note, refused, ['Borlux SC']);
+// A stand-in for what the report's screens say may go. The real screens are
+// report-own-note.js: there, what may go is what no report text may hold.
+const screen = {
+  wordGoes: (word) => ['gate', 'code', 'borlux', 'weeks'].includes(word),
+  pairGoes: (first, second) => (first === 'no' && second === 'issues') || (isCount(first) && ['gallons', 'weeks'].includes(second)),
+  partGoes: (part) => /\b(?:gate|code|rude|paid|billing)\b|\[redacted\]|^\s*no (?:activity inside|bugs outside)\s*$|\bkeep pets off\b/i.test(part),
+  names: ['Borlux SC'],
+};
+const rejection = (note, text) => orderRejection(text, note, screen);
 
 describe('the text may go out', () => {
   test.each([
@@ -38,21 +37,26 @@ describe('the text may go out', () => {
     ['a count as a word', 'checked all rodent stations. feeding in 2 of 6. replaced bait', 'I checked all the rodent stations. Feeding was in two of six. I replaced the bait.'],
     ['a decimal stays a decimal', 'found 1.5 nests by the shed', 'I found 1.5 nests by the shed.'],
     ['what phone dictation writes for a word of the trade', 'pimento bugs in the lanai. swept the eves', 'Palmetto bugs were in the lanai. I swept the eaves.'],
-    ['two words written as one', 'customer said the lawn guy saw sod web worms', 'You said the lawn guy saw sod webworms.'],
+    ['two words of one part written as one', 'customer said the lawn guy saw sod web worms', 'You said the lawn guy saw sod webworms.'],
     ['"I serviced" before a part that names only places', 'cust not home. ext only', 'You were not home. I serviced the exterior only.'],
     ['a question stays a question', 'treated the shed. is the dog inside?', 'I treated the shed. Is the dog inside?'],
     ['a condition stays with its work', 'if ants return, treat the shed', 'If ants return, I treat the shed.'],
-    ['every word of a product name and its amount are left out', 'sprayed Borlux SC around the house 2 gallons, baited the kitchen', 'I sprayed around the house and baited the kitchen.'],
-    ['a period of time is left out with its figure', 'set 4 traps in the attic will recheck in two weeks', 'I set four traps in the attic and will recheck.'],
-    ['a word the screen refuses is left out', 'treated around the gate and the fence', 'I treated around the fence.'],
-    ['a refused pair of words is left out together', 'quiet visit no issues sprayed outside', 'It was a quiet visit and I sprayed outside.'],
-    ['a part for the office is left out whole', 'billing: charge extra for the wasp nest. customer was rude. treated outside', 'I treated outside.'],
+    ['an obligation stays an obligation', 'had to treat shed', 'I had to treat the shed.'],
+    ['a word that is also a property name of an object', 'constructor checked stairs', 'The constructor checked the stairs.'],
+    ['every word of a product name goes, and a figure with its unit', 'sprayed Borlux SC around the house 2 gallons, baited the kitchen', 'I sprayed around the house and baited the kitchen.'],
+    ['"of" goes with the amount before it', 'applied 2 gallons of bait in the kitchen', 'I applied bait in the kitchen.'],
+    ['a word that leads into a product name goes with it', 'treated with Borlux SC in kitchen', 'I treated in the kitchen.'],
+    ['a period goes with its figure and the word that leads into it', 'set 4 traps in the attic will recheck in two weeks', 'I set four traps in the attic and will recheck.'],
+    ['a word the screens let go', 'treated around the gate and the fence', 'I treated around the fence.'],
+    ['two words that go together', 'quiet visit no issues sprayed outside', 'It was a quiet visit and I sprayed outside.'],
+    ['a part the screens refuse goes whole', 'billing: charge extra for the wasp nest. customer was rude. treated outside', 'I treated outside.'],
     ['a removed code goes with its part', 'used [redacted] at the side. treated shed', 'I treated the shed.'],
-    ['an order to the customer is left out', 'treated the lawn, keep pets off the grass, swept the eaves', 'I treated the lawn and swept the eaves.'],
-    ['a finding that opens like an order stays', 'water in the basement. treated shed', 'Water was in the basement. I treated the shed.'],
-    ['nothing seen with no spot named is left out', 'no activity inside. treated baseboards in kitchen', 'I treated the baseboards in the kitchen.'],
-    ['nothing seen in a named spot stays', 'no droppings in the attic. set 2 traps', 'No droppings were in the attic. I set two traps.'],
-    ['a part that is left out shares a word with a part that stays', 'no activity inside. no ants in the kitchen. treated baseboards', 'No ants were in the kitchen. I treated the baseboards.'],
+    ['a refused part between two that stay', 'treated the lawn, keep pets off the grass, swept the eaves', 'I treated the lawn and swept the eaves.'],
+    ['a refused part goes with the condition inside it', 'treated the lawn, keep pets off until dry', 'I treated the lawn.'],
+    ['a part the screens do not refuse stays', 'water in the basement. treated shed', 'Water was in the basement. I treated the shed.'],
+    ['a part that goes shares a word with a part that stays', 'no activity inside. no ants in the kitchen. treated baseboards', 'No ants were in the kitchen. I treated the baseboards.'],
+    ['of two parts that may go, one goes and one stays', 'no activity inside. no activity in the kitchen. no bugs outside',
+      'No activity in the kitchen. No bugs outside.'],
   ])('%s', (_label, note, text) => {
     expect(rejection(note, text)).toBeNull();
   });
@@ -68,22 +72,29 @@ describe('the text is refused', () => {
     ['a word in a new spelling the check does not know', 'mouse in the shed', 'A house was in the shed.', 'not_in_note', 'house'],
     ['"not" made from "note"', 'left a note. treated the shed', 'I left. It was not treated, the shed.', 'not_in_note', 'not'],
     ['"not able" written as one word', 'ants not able to reach the bait', 'Ants notable to reach the bait.', 'not_in_note', 'notable'],
+    ['two words of two sentences written as one', 'web. worms?', 'Webworms.', 'not_in_note', 'webworms'],
     ['a sentence of added words alone', 'treated the shed', 'I treated the shed. I was there.', 'not_in_note', 'i'],
     ['"I" put beside the customer', 'customer treated the shed', 'The customer and I treated the shed.', 'not_in_note', 'i'],
     ['"I" put beside another person', 'the neighbor sprayed the fence line', 'The neighbor and I sprayed the fence line.', 'not_in_note', 'i'],
+    ['"I" put where the note names no one', 'customer said saw roaches in kitchen', 'You said I saw roaches in the kitchen.', 'not_in_note', 'i'],
     ['"I serviced" before work or a pest', 'ants in the kitchen', 'I serviced ants in the kitchen.', 'not_in_note', 'serviced'],
+    ['an added "have"', 'ants in the kitchen', 'I have ants in the kitchen.', 'not_in_note', 'have'],
     ['two words that changed places', 'treated the mouse hole by the house', 'I treated the house hole by the mouse.', 'out_of_order', 'hole'],
     ['a denial left out', 'no ants in kitchen treated baseboards', 'Ants were in the kitchen and I treated the baseboards.', 'left_out', 'no'],
     ['"not" left out', 'did not treat the shed, dog inside', 'I did treat the shed.', 'left_out', 'not'],
     ['"would" left out of "I\'d"', 'I\'d treat the shed', 'I treated the shed.', 'left_out', 'would'],
+    ['an obligation made a claim', 'had to treat shed', 'I treated the shed.', 'left_out', 'had'],
     ['the person who did the work left out', 'customer treated the shed himself', 'I treated the shed.', 'left_out', 'customer'],
     ['a condition left out', 'will come back if activity continues', 'I will come back.', 'left_out', 'if'],
-    ['a condition left out with the office part that holds it', 'treated kitchen, if customer paid', 'I treated the kitchen.', 'left_out', 'if'],
+    ['a condition left out with the refused part that holds it', 'treated kitchen, if customer paid', 'I treated the kitchen.', 'left_out', 'if'],
     ['a count left out', 'set 4 traps in attic', 'I set traps in the attic.', 'left_out', '4'],
-    ['a plain word that could open an order left out', 'left the shed window open', 'I left the shed window.', 'left_out', 'open'],
-    ['a finding left out as if it were an order', 'open gap under the sink, treated shed', 'I treated the shed.', 'left_out', 'open'],
-    ['a part for the customer left out', 'treated kitchen. found german roaches behind fridge. treated shed', 'I treated the kitchen. I treated the shed.', 'left_out', 'found'],
-    ['half of a refused pair kept', 'quiet visit no issues sprayed outside', 'It was a quiet visit, issues and I sprayed outside.', 'left_out', 'no'],
+    ['a unit left out and its figure kept', 'applied 2 gallons of bait', 'I applied 2 baits.', 'left_out', 'gallons'],
+    ['half of two words that go together kept', 'quiet visit no issues sprayed outside', 'It was a quiet visit, issues and I sprayed outside.', 'left_out', 'no'],
+    ['a plain word left out', 'left the shed window open', 'I left the shed window.', 'left_out', 'open'],
+    ['a finding the screens do not refuse left out', 'open gap under the sink, treated shed', 'I treated the shed.', 'left_out', 'open'],
+    ['a finding left out with a denial beside it', 'found a nest and did not treat it. checked the shed', 'I checked the shed.', 'left_out', 'found'],
+    ['nothing seen in a named spot left out', 'do not see activity in the attic. treated shed', 'I treated the shed.', 'left_out', 'do'],
+    ['a whole sentence for the customer left out', 'treated kitchen. found german roaches behind fridge. treated shed', 'I treated the kitchen. I treated the shed.', 'left_out', 'found'],
     ['two sentences of the note joined', 'cust not home. ext only', 'You were not home and I serviced the exterior only.', 'joined', 'exterior'],
     ['a line break in the note is a sentence end', 'cust not home\next only', 'You were not home and I serviced the exterior only.', 'joined', 'exterior'],
     ['a denial cut from what it denies', 'did not treat shed', 'I did not. I treated the shed.', 'split', 'treated'],
@@ -98,12 +109,20 @@ describe('the text is refused', () => {
     expect(rejection('', 'I was there.')).toEqual({ reason: 'not_in_note', words: ['i'] });
   });
 
-  test('with no screen, a word is left out only when it is a small word', () => {
+  test('with no screen, only a small word is left out', () => {
     expect(orderRejection('I treated around the fence.', 'treated around the gate and the fence')).toEqual({ reason: 'left_out', words: ['gate'] });
+    expect(orderRejection('I applied bait.', 'applied 2 gallons of bait')).toEqual({ reason: 'left_out', words: ['2'] });
+    expect(orderRejection('I treated the shed.', 'no activity inside. treated shed')).toEqual({ reason: 'left_out', words: ['no'] });
   });
 
-  test('a word for the office never goes alone: "not paid" must not leave "not" behind', () => {
-    expect(rejection('customer not paid treated kitchen', 'You have not treated the kitchen.')).toEqual({ reason: 'left_out', words: ['paid'] });
+  test('a word the screens refuse inside a part stays missing: "not paid" must not leave "not" behind', () => {
+    expect(rejection('customer not paid treated kitchen', 'You not treated the kitchen.')).toEqual({ reason: 'left_out', words: ['paid'] });
+  });
+
+  test('a denial, a condition or a person never goes as one word, whatever the screens say', () => {
+    const all = { wordGoes: () => true };
+    expect(orderRejection('I treated the shed.', 'not treated shed', all)).toEqual({ reason: 'left_out', words: ['not'] });
+    expect(orderRejection('The shed.', 'customer treated shed', all)).toEqual({ reason: 'left_out', words: ['customer'] });
   });
 });
 
@@ -112,19 +131,5 @@ describe('the words the check reads', () => {
     expect(noteWords("I'd say she's been here; didn't see 1.5 or 1,200")).toEqual(
       ['i', 'would', 'say', 'she', 'has', 'been', 'here', 'did', 'not', 'see', '1point5', 'or', '1200'],
     );
-  });
-
-  test.each([
-    ['keep pets off the grass', true],
-    ['water the lawn twice', true],
-    ['customer should water the lawn', true],
-    ['advised customer to keep the dogs out', true],
-    ['do not use the lanai', true],
-    ['water in the basement', false],
-    ['keep seeing ants in the kitchen', false],
-    ['sprayed perimeter to keep the ants out', false],
-    ['open gap under the sink', false],
-  ])('an order to the customer: %s', (part, isOrder) => {
-    expect(orderToCustomer(noteWords(part))).toBe(isOrder);
   });
 });
