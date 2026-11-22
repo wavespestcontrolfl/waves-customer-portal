@@ -40,8 +40,7 @@ const express = require('express');
 const router = require('../routes/admin-payroll');
 const { syncTechRewardLines, stayBonusStatus, seasonBonusPaidCents } = require('../services/tech-rewards-pay-lines');
 const { techRewardsOwnKey, techRewardsOwnedSql } = require('../services/payroll-pay-lines');
-const scoreboardService = require('../services/tech-rewards-scoreboard');
-const { readBonusPay, closedSeason, seasonBonusOf, readSeasonFigures } = scoreboardService;
+const { readBonusPay, closedSeason, seasonBonusOf, readSeasonFigures } = require('../services/tech-rewards-scoreboard');
 const scores = require('../services/tech-rewards-scores');
 const { TAX_YEARS } = require('../services/payroll-calc');
 const { workedWeeks } = require('../services/payroll-runs');
@@ -1909,7 +1908,6 @@ postgres('tech rewards pay lines: the December gift', () => {
     const seasonWaits = (name, why) => `Season bonus (2027) for ${name} waits: ${why}. Only a pay run dated Nov 23, 2027 or earlier can add it`;
     const waitsOf = async (runId) => (await syncEventOf(runId, 'waits')).flatMap((m) => m.waits);
     const skippedOf = async () => (await syncEvents()).flatMap((e) => e.metadata.skipped || []);
-    let snapshot;
 
     beforeEach(() => {
       process.env[SEASON_GATE] = 'true';
@@ -1918,27 +1916,9 @@ postgres('tech rewards pay lines: the December gift', () => {
       TAX_YEARS[2027] = TAX_YEARS[2026]; // no 2027 withholding tables are on file yet, and a 2027 check needs them
       scores.buildSeasonScore.mockReset().mockResolvedValue(scoreOf(92.5, 400));
       scores.getSettings.mockReset().mockResolvedValue(SETTINGS);
-      // In production the pay run reads the score figures in a snapshot transaction on its OWN connection
-      // (readSeasonScoreSnapshot; tech-rewards-scoreboard-postgres.test.js proves its isolation level, that the connection is
-      // not the caller's, and that an error in it leaves the caller's transaction usable). Every row of this suite lives in
-      // one uncommitted transaction on one connection, which a second connection cannot see. So here the same reads
-      // (readSeasonScoreFigures) run on that connection, inside a savepoint that stands for the snapshot's own transaction:
-      // an error in it is rolled back alone, as an error on another connection would be.
-      snapshot = jest.spyOn(scoreboardService, 'readSeasonScoreSnapshot').mockImplementation(async (technicianId, season) => {
-        await trx.raw('SAVEPOINT score_snapshot');
-        try {
-          const figures = await scoreboardService.readSeasonScoreFigures(trx, technicianId, season);
-          await trx.raw('RELEASE SAVEPOINT score_snapshot');
-          return figures;
-        } catch (err) {
-          await trx.raw('ROLLBACK TO SAVEPOINT score_snapshot');
-          throw err;
-        }
-      });
     });
     afterEach(() => {
       delete TAX_YEARS[2027];
-      snapshot.mockRestore();
     });
 
     it('is the band rate of the score times the pay earned in the season times the multiplier, on the run dated the last Friday of September', async () => {
@@ -1971,9 +1951,8 @@ postgres('tech rewards pay lines: the December gift', () => {
       for (const id of [late, gone, manager]) expect(await linesOf(id)).toHaveLength(0);
       expect(await skippedOf()).toContainEqual({ technician_id: late, kind: 'season_bonus', reason: 'hired_after_season' });
       expect(await notesOf(run.id)).toEqual([]);
-      // the score is asked for the whole season, as of its last day, through the snapshot read
+      // the score is asked for the whole season, as of its last day
       expect(scores.buildSeasonScore).toHaveBeenCalledWith(alpha, 2027, { start: '2027-03-01', end: '2027-08-31' }, expect.anything());
-      expect(snapshot).toHaveBeenCalledWith(alpha, closedSeason(2027));
       // the line is the figure the scoreboard works out for the closed season, from the same reads
       const season = closedSeason(2027);
       expect(seasonBonusOf('2024-01-10', season, await readSeasonFigures(trx, alpha, season)).seasonBonus)
@@ -2189,6 +2168,73 @@ postgres('tech rewards pay lines: the December gift', () => {
       await draft(NEXT);
       expect(await linesOf(alpha)).toHaveLength(1);
       expect(await lineOf(alpha)).toMatchObject({ status: 'paid', amount_cents: 18480 });
+    });
+
+    it('reads the season scores before the pay run\'s transaction opens and gives that connection back first: a pay run holds one connection at a time', async () => {
+      const alpha = await readyTech('Sample Alpha');
+      await paidWeeks(alpha);
+      await approvedWeek(alpha, BONUS_WEEK);
+      // In production every db.transaction() of the code under test takes a connection of its own from the pool. Here each one
+      // is a child of this suite's one transaction (the models/db mock above), so they can be counted: how many are open at
+      // the same time, and in which order they start. The score read is the one that asks for an isolation level.
+      let open = 0;
+      let most = 0;
+      const started = [];
+      const countedTransaction = async (work, config) => {
+        open += 1;
+        most = Math.max(most, open);
+        started.push(config && config.isolationLevel === 'repeatable read' && config.readOnly ? 'scores' : 'other');
+        try {
+          return await trx.transaction(work, config);
+        } finally {
+          open -= 1;
+        }
+      };
+      // the models/db mock reads every property from mockConnection: stand in for it with the count on `transaction` only
+      mockConnection = new Proxy(trx, {
+        get(target, key) {
+          if (key === 'transaction') return countedTransaction;
+          const value = target[key];
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+        apply: (target, _self, args) => target(...args),
+      });
+      try {
+        const run = await draft(BONUS_WEEK);
+        await recompute(run.id);
+        await finalize(run.id);
+      } finally {
+        mockConnection = trx;
+      }
+      expect(await linesOf(alpha)).toMatchObject([{ status: 'paid', amount_cents: 18480 }]);
+      // never two at once: with a pool of two connections, two pay runs at the same time cannot starve each other
+      expect(most).toBe(1);
+      // one score read for each run write (draft, recompute, finalize), each one before that write's own transaction
+      expect(started.filter((kind) => kind === 'scores')).toHaveLength(3);
+      expect(started.slice(0, 2)).toEqual(['scores', 'other']);
+      started.forEach((kind, i) => { if (kind === 'scores') expect(started[i + 1]).toBe('other'); });
+    });
+
+    it('waits, with a note, for a technician the read before the run did not cover, and for every technician when that read failed', async () => {
+      const alpha = await readyTech('Sample Alpha');
+      await paidWeeks(alpha);
+      await approvedWeek(alpha, BONUS_WEEK);
+      const run = await draft(BONUS_WEEK);
+      expect(await linesOf(alpha)).toMatchObject([{ status: 'open', amount_cents: 18480 }]);
+      const row = await runRow(run.id);
+      const reasons = async (seasonScores) => (await syncTechRewardLines(row, trx, { seasonScores })).waits.map((w) => w.reason);
+      // the read did not cover the technician (a recipient since that read): the open line comes off, and the run says so
+      expect(await reasons({ figures: new Map(), failed: false })).toEqual(['score_not_read']);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(await notesOf(run.id)).toEqual([seasonWaits('Sample Alpha', 'their season score was not read for this pay run, so recompute it')]);
+      // nothing was read at all (the gate was turned on after the read)
+      expect(await reasons(null)).toEqual(['score_not_read']);
+      // the read itself failed: an error, not a technician who was not covered
+      expect(await reasons({ figures: new Map(), failed: true })).toEqual(['score_read_failed']);
+      // the next sync reads them
+      await recompute(run.id);
+      expect(await linesOf(alpha)).toMatchObject([{ status: 'open', amount_cents: 18480 }]);
+      expect(await notesOf(run.id)).toEqual([]);
     });
 
     it('says nothing waits for a complete score under the lowest cut line, whatever else is not ready: no run will pay that bonus', async () => {

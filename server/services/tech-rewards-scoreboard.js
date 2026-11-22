@@ -601,26 +601,14 @@ const readSeasonPay = (conn, technicianId, season) => readBonusPay(conn, technic
 /**
  * Every figure a season's bonus is worked out from, on one connection: the score figures and the pay (seasonPay).
  * seasonBonusOf turns them into the bonus. The board reads them here, inside its own snapshot (getScoreboard). The pay line
- * reads the same two parts for a closed season (closedSeason): readSeasonScoreSnapshot and readSeasonPay.
+ * reads the same two parts for a closed season (closedSeason): readSeasonScoreFigures in a snapshot taken before the pay
+ * run's transaction opens (tech-rewards-pay-lines.js readSeasonScores), and readSeasonPay in that transaction.
  */
 async function readSeasonFigures(conn, technicianId, season) {
   const scored = await readSeasonScoreFigures(conn, technicianId, season);
   const seasonPay = await readSeasonPay(conn, technicianId, season);
   return { ...scored, grossSeasonCents: seasonPay.cents, seasonPay };
 }
-
-/**
- * readSeasonScoreFigures in ONE read-only REPEATABLE READ snapshot of its own, for a caller that is not in one: the pay run
- * (tech-rewards-pay-lines.js priceSeason), whose transaction is READ COMMITTED. The five score parts, the settings and the
- * review counts are then one moment's data, as on the board: a closeout that commits between two parts cannot count in one
- * and not in the other and move the score across a band. It runs on its own connection. The field records it reads are not
- * rows a pay run writes or locks, so the payroll lock and the pay run's own transaction are not touched, and an error in a
- * score reader cannot abort that transaction.
- */
-const readSeasonScoreSnapshot = (technicianId, season) => db.transaction(
-  (snapshot) => readSeasonScoreFigures(snapshot, technicianId, season),
-  { isolationLevel: 'repeatable read', readOnly: true },
-);
 
 // The day before a date (ET calendar).
 const dayBefore = (dateStr) => addStaffWorkDays(dateStr, -1);
@@ -680,5 +668,5 @@ async function listTechnicians(conn = db) {
 module.exports = {
   ScoreboardError, getScoreboard, listTechnicians, composeScoreboard, pickSeason, reviewRateBps, earnedGrossCents, checkComponents,
   ordinaryPremium, stayWindow, readBonusPay, closedSeason, seasonLastPayWeek, seasonBonusOf, readSeasonFigures, readSeasonScoreFigures,
-  readSeasonScoreSnapshot, readSeasonPay,
+  readSeasonPay,
 };

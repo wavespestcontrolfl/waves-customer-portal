@@ -11,7 +11,7 @@
  *   the 12 months of a stay bonus, and the pay  tech-rewards-scoreboard.js stayWindow, readBonusPay (the board's own figures,
  *   a stay bonus is worked out from             so the board and the pay line never differ)
  *   the season, its pay date and the bonus math tech-rewards-calc.js seasonWindow, seasonBonusPayDate, seasonBonusCents
- *   the score, review rate, multiplier and pay  tech-rewards-scoreboard.js readSeasonScoreSnapshot, readSeasonPay,
+ *   the score, review rate, multiplier and pay  tech-rewards-scoreboard.js readSeasonScoreFigures, readSeasonPay,
  *   a season bonus is worked out from           seasonBonusOf (the board's own figures and its own arithmetic)
  *   which weeks hold recorded work              payroll-runs.js workedWeeks (the test the pay run itself uses)
  *   which covered week would hold a pay run     payroll-runs.js lineGuardWeek (the two guards a run applies to every pay line)
@@ -105,16 +105,17 @@
  *     is not a calendar date, waits: the multiplier counts years of service, and no money goes out on a guess.
  *   - WHAT IT COVERS. The season, from the hire date for a technician hired during it (seasonSpanOf), spread over its
  *     workweeks like every line that has a span.
- *   - THE AMOUNT is worked out by the board's own code from the board's own reads (priceSeason: readSeasonScoreSnapshot,
- *     readSeasonPay, seasonBonusOf), as of the season's last day: the score and its settings, the review rate, the
- *     multiplier (the level part is the entry level until the career ladder has a source, as on the board; these are read
- *     in one snapshot of their own, as the board reads them), and the pay earned in the season on the
+ *   - THE AMOUNT is worked out by the board's own code from the board's own reads (readSeasonScores and priceSeason:
+ *     readSeasonScoreFigures, readSeasonPay, seasonBonusOf), as of the season's last day: the score and its settings, the
+ *     review rate, the multiplier (the level part is the entry level until the career ladder has a source, as on the board;
+ *     these are read in one snapshot, as the board reads them, BEFORE the pay run's transaction opens: readSeasonScores),
+ *     and the pay earned in the season on the
  *     FINALIZED checks for the pay weeks before the bonus's own (tech-rewards-scoreboard.js seasonLastPayWeek: through the
  *     week before the one a run dated the last Friday of September pays; a check for a later pay week never counts, as for
  *     the stay bonus). So it is written by a run for a week AFTER that week, when every week from the season's start that
  *     holds work has a finalized check. It waits while a score part has no data (score_incomplete) or no score settings are in force for the
- *     season (score_settings_missing), and when the read itself fails (score_read_failed: the error is logged and the pay
- *     run goes on). A complete score under the lowest cut line earns no bonus: no line and no note
+ *     season (score_settings_missing), when the read itself fails (score_read_failed: the error is logged and the pay
+ *     run goes on), and for a technician the read before the run did not cover (score_not_read: the next sync reads them). A complete score under the lowest cut line earns no bonus: no line and no note
  *     (score_below_bonus_line, in the audit event), whatever else is not ready: the band is asked before every wait. The line's note says the rate, the base, the multiplier and the score. An
  *     open line is worked out again at every sync (a score part corrected since moves it); a PAID line never changes.
  *   - A PAID season bonus holds the pay runs it counted, exactly as a paid stay bonus does (counted_check_ids).
@@ -134,7 +135,7 @@ const { addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-
 // payroll-runs.js loads this file, so its helpers are read on first use.
 const payrollRuns = () => require('./payroll-runs');
 // The board is the one home of the pay a stay bonus is worked out from (readBonusPay) and of its 12 months (stayWindow), and of
-// every figure of a season bonus (readSeasonScoreSnapshot, readSeasonPay, seasonBonusOf). It pulls in the score and review modules, so it loads on
+// every figure of a season bonus (readSeasonScoreFigures, readSeasonPay, seasonBonusOf). It pulls in the score and review modules, so it loads on
 // first use: a pay run that has no stay bonus and no season bonus to look at never reads it.
 const scoreboard = () => require('./tech-rewards-scoreboard');
 
@@ -460,16 +461,15 @@ async function priceStay(trx, cand, tech, run) {
 }
 
 /**
- * The score figures of a season bonus (the score and its settings, the review asks and reviews), or null when the read
- * failed. They are read in ONE read-only REPEATABLE READ snapshot on its own connection (tech-rewards-scoreboard.js
- * readSeasonScoreSnapshot), not in the pay run's READ COMMITTED transaction: the score has five parts, and a closeout that
- * commits between two of them must not count in one and not the other. The readers read field records that payroll does not
- * own (reports, audits, callbacks, truck checks, ratings), and a bonus never holds a pay run: an error there is logged and the
- * bonus waits (score_read_failed). The pay run's transaction is not touched, because the read is not in it.
+ * One technician's score figures of a season (tech-rewards-scoreboard.js readSeasonScoreFigures: the score and its settings,
+ * the review asks and reviews), or null when the read failed. The read runs in a savepoint of the snapshot: the readers read
+ * field records that payroll does not own (reports, audits, callbacks, truck checks, ratings), and an error in one
+ * technician's read must not end the snapshot the others are read in. The error is logged and that bonus waits
+ * (score_read_failed).
  */
-async function readSeasonScoreOrNull(technicianId, season) {
+async function readSeasonScoreOrNull(snapshot, technicianId, season) {
   try {
-    return await scoreboard().readSeasonScoreSnapshot(technicianId, season);
+    return await snapshot.transaction((savepoint) => scoreboard().readSeasonScoreFigures(savepoint, technicianId, season));
   } catch (err) {
     logger.error(`[tech-rewards-pay-lines] season ${season.year} score could not be read for technician ${technicianId}: ${err.message}`);
     return null;
@@ -477,15 +477,65 @@ async function readSeasonScoreOrNull(technicianId, season) {
 }
 
 /**
+ * The season score figures a pay run dated `payDate` may need, read BEFORE the pay run's transaction opens (payroll-runs.js
+ * draftRun, recomputeRun, finalizeRun), or null when the run is dated for no season bonus or a gate is off (then nothing is
+ * read). { figures: Map(source key -> the figures, or null for a read that failed), failed }.
+ *   - ONE SNAPSHOT. A score has five parts, its settings and two review counts. They are read in one read-only REPEATABLE
+ *     READ transaction, as the board reads them (tech-rewards-scoreboard.js getScoreboard), for every technician at once: a
+ *     closeout that commits between two parts cannot count in one and not the other and move a score across a band. The pay
+ *     run's own transaction is READ COMMITTED, so the read is not in it.
+ *   - ONE CONNECTION AT A TIME. The snapshot is taken, and its connection given back, before the pay run asks for its own:
+ *     a pay run never holds two connections. A read made from inside the pay run's transaction would hold the payroll lock
+ *     and wait for a second connection, while the pay runs that wait for that lock hold the rest of a small pool.
+ *   - WHO. Every technician who gets Tech Rewards lines now (recipients), less the ones whose season bonus is settled (a line
+ *     that is no longer open, as loadState reads it). The sync reads its own list under the lock afterwards: a technician it
+ *     finds who was not read here waits with a note (score_not_read), and the next sync reads them.
+ *   - A BONUS NEVER HOLDS A PAY RUN. A read that fails is logged and that bonus waits (score_read_failed): one technician's
+ *     (readSeasonScoreOrNull), or every one when the snapshot itself fails (`failed`).
+ */
+async function readSeasonScores(conn, payDate) {
+  const due = payLinesOn() && kindOn(SEASON) ? seasonDueInRun(payDate) : [];
+  if (!due.length) return null;
+  const figures = new Map();
+  try {
+    await conn.transaction(async (snapshot) => {
+      const settled = new Set((await closedLines(snapshot, { kind: SEASON })).filter(ownKeyOf).map((line) => line.source_id));
+      const ids = (await recipients(snapshot).orderBy('technicians.id').select('technicians.id')).map((row) => row.id);
+      for (const { key } of due) {
+        const season = scoreboard().closedSeason(Number(key));
+        for (const id of ids) {
+          const sourceId = sourceIdOf(SEASON, id, key);
+          if (!settled.has(sourceId)) figures.set(sourceId, await readSeasonScoreOrNull(snapshot, id, season));
+        }
+      }
+    }, { isolationLevel: 'repeatable read', readOnly: true });
+  } catch (err) {
+    logger.error(`[tech-rewards-pay-lines] season scores could not be read for a pay run dated ${payDate}: ${err.message}`);
+    return { figures: new Map(), failed: true };
+  }
+  return { figures, failed: false };
+}
+
+/** readSeasonScores for a pay run that is on file (a recompute, a finalize): a run's pay date never changes. Null for no such run. */
+async function readSeasonScoresOfRun(conn, runId) {
+  if (!payLinesOn() || !kindOn(SEASON)) return null;
+  const run = await conn('payroll_runs').where({ id: runId }).first(conn.raw("to_char(pay_date, 'YYYY-MM-DD') as pay_date"));
+  return run ? readSeasonScores(conn, run.pay_date) : null;
+}
+
+/**
  * The season bonus of one candidate: { amountCents, span, note, countedCheckIds }, { skip: reason } (no bonus for them) or
  * { wait: { reason, week } } (not on this run). Every figure is the board's own, read as of the season's last day
- * (tech-rewards-scoreboard.js readSeasonScoreSnapshot, readSeasonPay: the two reads the board's readSeasonFigures is made of)
+ * (tech-rewards-scoreboard.js readSeasonScoreFigures, readSeasonPay: the two reads the board's readSeasonFigures is made of)
  * and put together by the board's own code (seasonBonusOf), so the line is the figure the board shows for the closed season.
+ * The score figures are the ones read before the pay run's transaction opened (`seasonScores`, readSeasonScores).
  * The pay is the pay EARNED in the season on the finalized checks for the pay weeks through seasonLastPayWeek (readBonusPay:
  * no check for a later pay week), read in the pay run's transaction under the payroll lock, so, as for the stay bonus, the
  * line is worked out only when those checks are all final. In this order:
  *   hired_after_season      (skip) hired after the season's last day: no bonus for that season
- *   score_read_failed       the score could not be read (readSeasonScoreOrNull): the error is logged and the run goes on
+ *   score_not_read          the read before the run did not cover this technician (a recipient since that read, or a gate
+ *                           turned on since): the next sync reads them
+ *   score_read_failed       the score could not be read (readSeasonScores): the error is logged and the run goes on
  *   score_below_bonus_line  (skip) the score is complete and under the lowest cut line: the season earns no bonus on any
  *                           run. Asked BEFORE every wait below, so no run says a bonus waits (for a hire date, for an unpaid
  *                           week) that no run will pay
@@ -500,10 +550,11 @@ async function readSeasonScoreOrNull(technicianId, season) {
  *   no_pay_on_file, no_paycheck  as for the stay bonus
  * An open line is worked out again at every sync, so a score part or a setting corrected before the run is finalized moves it.
  */
-async function priceSeason(trx, cand, tech, run) {
+async function priceSeason(trx, cand, tech, run, { seasonScores }) {
   const season = scoreboard().closedSeason(Number(cand.key));
   if (tech.hire_date && tech.hire_date > season.end) return { skip: 'hired_after_season' };
-  const scored = await readSeasonScoreOrNull(tech.id, season);
+  const scored = seasonScores ? seasonScores.figures.get(sourceIdOf(SEASON, tech.id, cand.key)) : undefined;
+  if (scored === undefined && !(seasonScores && seasonScores.failed)) return { wait: { reason: 'score_not_read', week: null } };
   if (!scored) return { wait: { reason: 'score_read_failed', week: null } };
   // the band is the score module's own (buildSeasonScore: scoreBand with the settings in force on the season's last day)
   if (scored.seasonScore && scored.seasonScore.complete && scored.seasonScore.rateBps === 0) return { skip: 'score_below_bonus_line' };
@@ -554,16 +605,24 @@ async function stayBonusStatus(conn, technicianId, hireDate, today) {
 }
 
 /**
- * The season bonus payroll has PAID a technician for a season year, in cents, or null: the sync's own line for that year (its
- * whole source key) on a finalized check. The scoreboard shows it in place of its estimate for a closed season
- * (tech-rewards-scoreboard.js seasonBonusBlock): a paid line never changes, and the figures behind an estimate can (a score
- * part corrected later, an old week paid late). Not behind a gate: a paid line is a fact with the gate off too.
+ * The season bonus payroll has PAID a technician for a season year, in cents, or null: the sync's own line for that year
+ * (ownKeyOf: its whole source key, for a season that has a bonus) that is paid on a FINALIZED check of a FINALIZED pay run. A
+ * row marked paid that is not the sync's own (a hand-made line, a key for a season before the first one) or that no finalized
+ * check holds is not money payroll paid, and never shows as paid. The scoreboard shows the amount in place of its estimate
+ * for a closed season (tech-rewards-scoreboard.js seasonBonusBlock): a paid line never changes, and the figures behind an
+ * estimate can (a score part corrected later, an old week paid late). Not behind a gate: a paid line is a fact with the gate
+ * off too.
  */
 async function seasonBonusPaidCents(conn, technicianId, year) {
-  const row = await conn('payroll_pay_lines')
-    .where({ technician_id: technicianId, kind: SEASON, status: 'paid', source_type: SOURCE_TYPE, source_id: sourceIdOf(SEASON, technicianId, String(year)) })
-    .first('amount_cents');
-  return row ? Number(row.amount_cents) : null;
+  const row = await conn('payroll_pay_lines as line')
+    .join('payroll_checks as paid', 'paid.id', 'line.check_id')
+    .join('payroll_runs as run', 'run.id', 'paid.run_id')
+    .where({
+      'line.technician_id': technicianId, 'line.kind': SEASON, 'line.status': 'paid', 'line.source_type': SOURCE_TYPE,
+      'line.source_id': sourceIdOf(SEASON, technicianId, String(year)), 'paid.status': 'finalized', 'run.status': 'finalized',
+    })
+    .first('line.technician_id', 'line.kind', 'line.source_type', 'line.source_id', 'line.amount_cents');
+  return row && ownKeyOf(row) ? Number(row.amount_cents) : null;
 }
 
 const lineColumns = (trx) => ['id', 'technician_id', 'kind', 'status', 'amount_cents', 'note', 'counted_check_ids', 'source_type', 'source_id',
@@ -594,6 +653,7 @@ const WAIT_WORDS = {
   score_incomplete: () => 'a part of their season score has no data (their scoreboard names it), and a bonus is never worked out from a partial score',
   score_settings_missing: () => 'no score settings are in force for the last day of the season, so set them first',
   score_read_failed: () => 'the pay run could not read their season score because of an error, so report it',
+  score_not_read: () => 'their season score was not read for this pay run, so recompute it',
   base_needs_review: (w) => `an older paycheck paid a bonus line and other line pay for the week of ${dayLabel(w.week)} and kept no split of that week's overtime between them, so work this bonus out by hand`,
 };
 
@@ -758,7 +818,7 @@ async function applyCandidate(trx, run, sourceId, cand, state) {
   if (!cand.due) priced = { skip: 'not_due_in_this_run' };
   else if (!tech) priced = { skip: 'not_active' };
   else if (state.handMade.has(`${cand.kind}:${cand.technicianId}`) || state.foreignKeys.has(sourceId)) priced = { wait: { reason: OTHER_LINE[cand.kind], week: null } };
-  else priced = await PRICE[cand.kind](trx, cand, tech, run);
+  else priced = await PRICE[cand.kind](trx, cand, tech, run, state);
   if (priced.skip || priced.wait) {
     if (here) await trx('payroll_pay_lines').where({ id: open.id }).del();
     return { skip: priced.skip, wait: priced.wait, removed: here ? open.id : null };
@@ -789,9 +849,10 @@ async function applyCandidate(trx, run, sourceId, cand, state) {
  * payroll-runs.js loadRun reads it). Take it inside the pay run's transaction, after the payroll lock and before the run is
  * worked out. Pay lines off: no pay line is read or written. A kind's gate off: its open lines are removed and none is written.
  * With pay lines off, or every kind's gate off, the run's stored waits are cleared. Never blocks a check.
+ * `seasonScores`: what readSeasonScores read for this run before the transaction opened (null: nothing was read).
  * Returns { added, updated, removed, skipped: [{ technicianId, kind, reason }], waits: [{ technicianId, kind, sourceId, reason, week }] }.
  */
-async function syncTechRewardLines(run, trx, { lock = true, actorId = null } = {}) {
+async function syncTechRewardLines(run, trx, { lock = true, actorId = null, seasonScores = null } = {}) {
   const result = { added: 0, updated: 0, removed: 0, skipped: [], waits: [] };
   if (!payLinesOn()) {
     await clearWaits(trx, run);
@@ -804,7 +865,7 @@ async function syncTechRewardLines(run, trx, { lock = true, actorId = null } = {
   const dropped = offKinds.length ? await dropOpenLines(trx, lock, offKinds) : [];
   if (dropped.length) await audit(trx, actorId, run, { gate: 'off', removed_count: dropped.length, removed_line_ids: dropped });
   if (allOff) return { ...result, removed: dropped.length };
-  const state = await loadState(trx, run, lock);
+  const state = { ...(await loadState(trx, run, lock)), seasonScores };
   const ids = { added: [], updated: [], removed: [] };
   let examined = 0;
   let unchanged = 0;
@@ -939,6 +1000,8 @@ module.exports = {
   seasonDueInRun,
   seasonSpanOf,
   seasonBonusPaidCents,
+  readSeasonScores,
+  readSeasonScoresOfRun,
   sourceIdOf,
   syncTechRewardLines,
   dropRewardLinesOfWeek,
