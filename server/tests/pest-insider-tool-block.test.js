@@ -248,6 +248,9 @@ describe('toolBlockForBatch: the key', () => {
       ['a list where the address map belongs', { fyiTo: ['old-proof@example.net'] }],
       ['a text where the address map belongs', { fyiTo: 'old-proof@example.net' }],
       ['a record that is no object', ['old-proof@example.net']],
+      ['a key that is no address', { fyiTo: { address: 'old-proof@example.net' } }],
+      ['a value that is not true', { fyiTo: { 'old-proof@example.net': 'yes' } }],
+      ['one bad entry next to a good one', { fyiTo: { 'old-proof@example.net': true, note: true } }],
     ])('an unreadable FYI record (%s) gives every reader of the batch \'\' and one warning that holds no address', async (_label, diagnostics) => {
       const db = fakeDb({ issue: { tool_id: GAUGE, diagnostics }, rows: [row(1), row(2)] });
       const r = await run({ subscribers: [sub(1), sub(2)], db });

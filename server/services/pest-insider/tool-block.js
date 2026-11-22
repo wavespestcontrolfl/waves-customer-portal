@@ -92,10 +92,12 @@ function mailboxKey(value) {
 // internal domain by isInternalEmailRecipient. A family
 // member's address cannot be told from data: such a reader who opted in gets the block,
 // and the owner keeps that rule by not buying.
-// The addresses a copy of this issue's FYI went to (the issue row's diagnostics.fyiTo). No
-// record means no copy went out. A record that cannot be read throws, and the caller gives
-// every reader of the batch '': an unreadable list must not read as "nobody". The error
-// names no content of the record (it can hold addresses).
+// The addresses a copy of this issue's FYI went to (the issue row's diagnostics.fyiTo, written
+// by newsletter-proof.js recordFyiRecipient as { address: true }). No record means no copy
+// went out. A record that is not exactly that shape (bad JSON, a non-object, a key that is no
+// address, a value that is not true) throws, and the caller gives every reader of the batch
+// '': an unreadable list must not read as "nobody". The error names no content of the
+// record (it can hold addresses).
 function fyiAddresses(issue) {
   const unreadable = () => new Error("the issue's FYI recipient record is unreadable");
   let diagnostics = issue?.diagnostics;
@@ -107,6 +109,8 @@ function fyiAddresses(issue) {
   const recorded = diagnostics.fyiTo;
   if (recorded == null) return [];
   if (typeof recorded !== 'object' || Array.isArray(recorded)) throw unreadable();
+  const { isValidEmail } = require('../../utils/internal-email-recipients');
+  if (!Object.entries(recorded).every(([address, went]) => went === true && isValidEmail(address))) throw unreadable();
   return require('../newsletter-proof').issueFyiAddresses({ diagnostics });
 }
 
