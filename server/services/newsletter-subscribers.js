@@ -237,7 +237,11 @@ async function subscribeOrResubscribeOnce({
         // write clears unsubscribed_at: with the proof left on the row, only a timestamp
         // order would still say the click is void (pest-insider/tool-block.js optedIn), and
         // this write's timestamps are taken before it lands. The reader's next confirm
-        // click writes the proof again.
+        // click writes the proof again. Accepted: this write is by id, as it was, so a
+        // reader's click on a live re-signup link that lands between this function's read
+        // and this write loses its proof to these NULLs. That reader gets no tool block
+        // until the next confirm click: the safe side. A status guard here would need a
+        // new answer for every caller of this staff path, which is not part of this change.
         reader_confirmed_at: null,
         reader_confirmed_email: null,
         updated_at: new Date(),
