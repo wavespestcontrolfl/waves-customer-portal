@@ -17,7 +17,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const fs = require('fs');
 const path = require('path');
 const logger = require('../services/logger');
-const { runOnetimePlanOfferJob, TEMPLATE_VARIABLES, OFFER_TEMPLATE, REMINDER_TEMPLATE, _test } = require('../services/onetime-plan-offer');
+const {
+  runOnetimePlanOfferJob, planOfferJobOf, TEMPLATE_VARIABLES, OFFER_TEMPLATE, REMINDER_TEMPLATE, _test,
+} = require('../services/onetime-plan-offer');
 const { CUSTOMER_STAGES } = require('../services/customer-stages');
 
 // 11:30 PM ET on March 12 (already March 13 in UTC): the day window must come from the ET day.
@@ -785,5 +787,19 @@ describe('the default wiring', () => {
 
   test('the sample recipient is an internal address', () => {
     expect(require('../utils/internal-email-recipients').isInternalEmailRecipient(OFFICE)).toBe(true);
+  });
+});
+
+// The mint of the offer estimate asks this before it waives the setup fee. The query itself runs on real Postgres
+// (plan-offer-mint-postgres.test.js); here, what never reaches the database.
+describe('planOfferJobOf', () => {
+  test.each([
+    ['an id that is not a uuid', { jobId: 'job-1', customerId: 'c1' }],
+    ['no job id', { jobId: '', customerId: 'c1' }],
+    ['no customer', { jobId: '3f0c8a52-6f0e-4d5e-9a57-0d2a1c3b4e5f', customerId: null }],
+  ])('%s is no job, and nothing is read', async (_label, args) => {
+    const database = jest.fn(() => { throw new Error('must not be read'); });
+    expect(await planOfferJobOf(database, args)).toBe(null);
+    expect(database).not.toHaveBeenCalled();
   });
 });

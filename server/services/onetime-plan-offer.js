@@ -173,6 +173,33 @@ const FOLLOWUP_DAY_JOIN = `LEFT JOIN LATERAL (
 // kept out by its own test (done.service_day IS NOT NULL in dueJobsPage), never by this expression.
 const OFFER_DAY_SQL = 'GREATEST(done.service_day, COALESCE(follow.service_day, done.service_day))';
 
+// The jobs the offer can follow, on any day: a completed one-time pest or cockroach visit with the record that
+// its service was performed. dueJobsPage adds the day window; planOfferJobOf asks about one job.
+function qualifyingJobs(database) {
+  return database('scheduled_services as s')
+    .leftJoin('services as sv', 's.service_id', 'sv.id')
+    .joinRaw(PERFORMED_DAY_JOIN, [...NON_PERFORMED_VISIT_OUTCOMES])
+    .joinRaw(FOLLOWUP_DAY_JOIN, [...NON_PERFORMED_VISIT_OUTCOMES])
+    .where('s.status', 'completed')
+    .whereRaw('done.service_day IS NOT NULL')
+    .whereIn(database.raw('COALESCE(s.service_key_snapshot, sv.service_key)'), JOB_SERVICE_KEYS)
+    .whereRaw('s.is_recurring IS DISTINCT FROM true')
+    .whereNull('s.recurring_parent_id')
+    .whereRaw("COALESCE(s.recurring_pattern, '') IN ('', 'one_time')")
+    .whereRaw('s.is_callback IS DISTINCT FROM true')
+    .whereRaw('s.followup_included IS DISTINCT FROM true');
+}
+
+// The qualifying job with this id that belongs to this customer, or null. The offer estimate's mint asks it
+// under the customer's locks before it waives the setup fee (restart.js mintPlanStartEstimate `offer`): the
+// waiver stands on "that job was plan visit one", so a job of another customer, a cancelled one, a plan visit
+// or a visit with no performed record grants none. An id that is not a uuid is no job.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+async function planOfferJobOf(database, { jobId, customerId }) {
+  if (!UUID.test(String(jobId || '')) || !customerId) return null;
+  return (await qualifyingJobs(database).where('s.id', jobId).where('s.customer_id', customerId).first('s.id')) || null;
+}
+
 // One page of the completed one-time jobs whose offer day was FIRST_DAY to LAST_DAY days ago (ET), oldest first.
 // `after` is the last job of the page before: the next page starts behind it in the same (offer day, id) order.
 // The row's service_day is the offer day; job_day is the day the job itself was done.
@@ -181,19 +208,8 @@ const OFFER_DAY_SQL = 'GREATEST(done.service_day, COALESCE(follow.service_day, d
 // series parent): never a plan visit, a series extra, a free re-service or an included follow-up. A one-time
 // visit stores no pattern, or the 'one_time' marker.
 function dueJobsPage(database, today, after) {
-  const page = database('scheduled_services as s')
-    .leftJoin('services as sv', 's.service_id', 'sv.id')
-    .joinRaw(PERFORMED_DAY_JOIN, [...NON_PERFORMED_VISIT_OUTCOMES])
-    .joinRaw(FOLLOWUP_DAY_JOIN, [...NON_PERFORMED_VISIT_OUTCOMES])
-    .where('s.status', 'completed')
-    .whereRaw('done.service_day IS NOT NULL')
+  const page = qualifyingJobs(database)
     .whereRaw(`${OFFER_DAY_SQL} BETWEEN ?::date AND ?::date`, [shiftDay(today, -LAST_DAY), shiftDay(today, -FIRST_DAY)])
-    .whereIn(database.raw('COALESCE(s.service_key_snapshot, sv.service_key)'), JOB_SERVICE_KEYS)
-    .whereRaw('s.is_recurring IS DISTINCT FROM true')
-    .whereNull('s.recurring_parent_id')
-    .whereRaw("COALESCE(s.recurring_pattern, '') IN ('', 'one_time')")
-    .whereRaw('s.is_callback IS DISTINCT FROM true')
-    .whereRaw('s.followup_included IS DISTINCT FROM true')
     .orderByRaw(`${OFFER_DAY_SQL} ASC`)
     .orderBy('s.id', 'asc')
     .limit(PAGE_SIZE);
@@ -658,6 +674,7 @@ async function runOnetimePlanOfferJob({ now = new Date(), deps: overrides = {} }
 
 module.exports = {
   runOnetimePlanOfferJob,
+  planOfferJobOf,
   JOB_SERVICE_KEYS,
   OFFER_TEMPLATE,
   REMINDER_TEMPLATE,

@@ -685,6 +685,9 @@ function resolveMintDeps(deps) {
     // The scheduler's hold release, for the quotes a replacement archives.
     releaseEstimateHolds: deps.releaseEstimateHolds
       || ((args) => require('../slot-reservation').releaseEstimateHolds(args)),
+    // The job a plan offer follows, by the job module's own rule (plan offer only; loaded on first call).
+    planOfferJobOf: deps.planOfferJobOf
+      || ((...args) => require('../onetime-plan-offer').planOfferJobOf(...args)),
   };
 }
 
@@ -890,15 +893,22 @@ async function mintPricedEstimate(args) {
   if (reused) return reused;
   if (mint.reuseOnly) throw new RestartUnavailableError('pricing_unavailable', handMessage);
   // An offer's own end date (expiresAt), read again on the clock as it stands NOW. The entry checked it before
-  // the customer locks and the recompute, and it can pass during that work. A passed one retires nothing and
-  // publishes nothing (the transaction rolls back): the prior quote and its hold stay, and no link is handed
-  // out already expired. A caller that asks this late has a bug, as for the offer's other bounds: a plain Error.
-  if (mint.expiresAt && !(mint.expiresAt.getTime() > (mint.now ? mint.now() : nowDate).getTime())) {
-    throw new Error('mintPlanStartEstimate offer needs an end date that is still ahead when the quote is published');
-  }
+  // the customer locks and the recompute, and it can pass during that work, or during the publication itself
+  // (the retire, the hold release, the snapshot, the timeline row). So it is read before the prior quote is
+  // retired and once more after the new one is published, inside the transaction: a passed one rolls both back,
+  // the prior quote stays, and no link is handed out already expired. A caller that asks this late has a bug,
+  // as for the offer's other bounds: a plain Error.
+  const assertOfferOpen = () => {
+    if (mint.expiresAt && !(mint.expiresAt.getTime() > (mint.now ? mint.now() : nowDate).getTime())) {
+      throw new Error('mintPlanStartEstimate offer needs an end date that is still ahead when the quote is published');
+    }
+  };
+  assertOfferOpen();
 
   await retireLineage({ trx, fresh, source, nowDate, releaseEstimateHolds: mintDeps.releaseEstimateHolds });
-  return publishMintedEstimate(mint, { offer, estimateData });
+  const published = await publishMintedEstimate(mint, { offer, estimateData });
+  assertOfferOpen();
+  return published;
 }
 
 // Evidence the price depends on is read once, under the entry's policy
@@ -1645,6 +1655,21 @@ async function mintPlanStartEstimate({
       throw new RestartUnavailableError('pricing_unavailable', 'We could not verify your services just now. Please try again in a moment.');
     }
     if (ownsPlan) throw notEligible();
+
+    // A caller's offer waives the setup fee because a one-time job was the first plan visit. That job is proven
+    // here, under the customer's locks and before anything is priced, retired or minted: a completed one-time
+    // pest or cockroach job of THIS customer with the record that its service was performed (the job module's
+    // own rule, planOfferJobOf). A job of another customer, a cancelled job, a plan visit or an unreadable job
+    // grants no waiver. As for the offer's other bounds, a caller that asks for one has a bug: a plain Error.
+    if (callerOffer) {
+      let job = null;
+      try {
+        job = await mintDeps.planOfferJobOf(trx, { jobId: callerOffer.jobId, customerId: fresh.id });
+      } catch (err) {
+        logger.warn(`[${logTag}] plan offer job lookup failed for ${fresh.id} — refusing: ${err.message}`);
+      }
+      if (!job) throw new Error('mintPlanStartEstimate offer needs a completed one-time pest job of this customer');
+    }
 
     // A plain tap that finds the live offer quote of this service and option re-opens that offer through the
     // core, never an early hand-back (liveOfferOfTappedQuote). Its stamp was checked when it was minted

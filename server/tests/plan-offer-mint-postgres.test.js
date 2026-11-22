@@ -85,10 +85,23 @@ postgres('plan offer quote (live Postgres)', () => {
       address_line1: `${(parseInt(tag, 16) % 9000) + 100} Example Test Ln`, city: 'Parrish', state: 'FL', zip: '34219',
       active: true, pipeline_stage: 'won',
     }).returning('*');
+    return { customer, job: await seedJob(customer) };
+  }
+
+  // A completed one-time pest job with the record that its service was performed, as the job module reads one
+  // (onetime-plan-offer.js qualifyingJobs). `record: false` saves no record.
+  async function seedJob(customer, { daysAgo = 5, record = true, ...visit } = {}) {
     const [job] = await trx('scheduled_services').insert({
-      customer_id: customer.id, scheduled_date: day(-5), service_type: 'One-Time Pest Control', status: 'completed', is_recurring: false,
-    }).returning('id');
-    return { customer, job };
+      customer_id: customer.id, scheduled_date: day(-daysAgo), service_type: 'One-Time Pest Control', status: 'completed',
+      is_recurring: false, service_key_snapshot: 'one_time_pest_control', ...visit,
+    }).returning('*');
+    if (record) {
+      await trx('service_records').insert({
+        customer_id: customer.id, scheduled_service_id: job.id, service_type: job.service_type, status: 'completed',
+        service_date: day(-daysAgo), structured_notes: { visitOutcome: 'completed' },
+      });
+    }
+    return job;
   }
 
   // The card's option for the customer, through the shared offer pricer (the amounts the portal card shows).
@@ -170,9 +183,7 @@ postgres('plan offer quote (live Postgres)', () => {
     const again = await mintFor({ customer, option, shown: shownOf(option, 0), offer: offerOf(job) });
     expect(again).toMatchObject({ estimateId: first.estimateId, token: first.token, reused: true });
 
-    const [otherJob] = await trx('scheduled_services').insert({
-      customer_id: customer.id, scheduled_date: day(-2), service_type: 'One-Time Pest Control', status: 'completed', is_recurring: false,
-    }).returning('id');
+    const otherJob = await seedJob(customer, { daysAgo: 2 });
     const next = await mintFor({ customer, option, shown: shownOf(option, 0), offer: offerOf(otherJob) });
     expect(next.reused).toBe(false);
     expect(next.estimateId).not.toBe(first.estimateId);
@@ -201,6 +212,80 @@ postgres('plan offer quote (live Postgres)', () => {
     expect(new Date(movedRow.expires_at).getTime()).toBe(asked.endsAt.getTime());
     // What the picker and the 07:05 fill list read as the first day they may offer.
     expect(await require('../services/estimate-slot-availability').estimateMoveInDate(movedRow)).toBe(asked.firstVisitFrom);
+  });
+
+  // The waiver stands on "that one-time job was plan visit one". The mint proves the job under the customer's
+  // locks with the job module's own rule: only a completed one-time pest job of THIS customer, with the record
+  // that its service was performed. Anything else is a caller bug: a plain Error, and the customer's live
+  // quote stays as it was.
+  describe('the job the offer follows', () => {
+    async function withPlainQuote() {
+      const { customer, job } = await seedCustomerWithJob();
+      const option = await cardOption(customer, job);
+      const plain = await mintFor({ customer, option, shown: shownOf(option, option.setupFee) });
+      return { customer, option, plain };
+    }
+    const refused = async ({ customer, option, plain }, job) => {
+      await expect(mintFor({ customer, option, shown: shownOf(option, 0), offer: offerOf(job) }))
+        .rejects.toThrow(/offer needs a completed one-time pest job of this customer/);
+      const rows = await trx('estimates').where({ customer_id: customer.id, source: 'plan_start' });
+      expect(rows).toHaveLength(1);
+      expect(rows[0].id).toBe(plain.estimateId);
+      expect(rows[0].archived_at).toBeNull();
+      expect(parse(rows[0].estimate_data).operatorPriceAdjustment).toBeUndefined();
+    };
+
+    test('a job of another customer grants no waiver', async () => {
+      const mine = await withPlainQuote();
+      const { job: theirs } = await seedCustomerWithJob();
+      await refused(mine, theirs);
+    });
+
+    test.each([
+      ['a cancelled job', { status: 'cancelled' }],
+      ['a job with no record that the service was performed', { record: false }],
+      ['a plan visit', { is_recurring: true, recurring_pattern: 'quarterly' }],
+      ['a free re-service', { is_callback: true }],
+      ['another kind of one-time visit', { service_key_snapshot: 'rodent_exclusion', service_type: 'Rodent Exclusion' }],
+    ])('%s grants no waiver', async (_label, visit) => {
+      const mine = await withPlainQuote();
+      await refused(mine, await seedJob(mine.customer, { daysAgo: 4, ...visit }));
+    });
+
+    test('the customer\'s own completed one-time job, on any day, grants it', async () => {
+      const mine = await withPlainQuote();
+      const job = await seedJob(mine.customer, { daysAgo: 40 });
+      const offered = await mintFor({ customer: mine.customer, option: mine.option, shown: shownOf(mine.option, 0), offer: offerOf(job) });
+      expect(offered.reused).toBe(false);
+      expect((await rowOf(mine.plain.estimateId)).archived_at).not.toBeNull();
+    });
+  });
+
+  // The end date is read again after the new quote is published. One that passed during the publication rolls
+  // the whole mint back: the prior quote is live again and no new row stays.
+  test('an end date that passes while the quote is published rolls the mint back: the prior quote stays live', async () => {
+    const { customer, job } = await seedCustomerWithJob();
+    const option = await cardOption(customer, job);
+    const plain = await mintFor({ customer, option, shown: shownOf(option, option.setupFee) });
+    let published = false;
+    const attempt = restart().mintPlanStartEstimate({
+      customer, serviceKey: 'pest_control', optionId: option.id, shown: shownOf(option, 0), offer: offerOf(job),
+      now: () => (published ? new Date(ENDS.getTime() + 1000) : new Date()),
+      deps: {
+        db: trx,
+        propertyLookup: async () => SAVED_LOOKUP,
+        buildEstimateSendSnapshot: async (...args) => {
+          published = true;
+          return require('../routes/admin-estimates').buildEstimateSendSnapshot(...args);
+        },
+      },
+    });
+    await expect(attempt).rejects.toThrow(/offer needs an end date that is still ahead/);
+    expect(published).toBe(true);
+    const rows = await trx('estimates').where({ customer_id: customer.id, source: 'plan_start' });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(plain.estimateId);
+    expect(rows[0].archived_at).toBeNull();
   });
 
   // Staff can put estimates of several homes on one link (a group). The extension of one of them brings its siblings
