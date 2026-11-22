@@ -122,10 +122,22 @@ function pickLeadFact(dateET, recentFactIds, recheckedFactIds, livePostFactIds) 
 // links of the tools whose registry row is active at build time: no page of
 // Amazon is read, owner 2026-11-22), and not one of the last two issues' tools. A tool for the lead fact's service
 // comes first, then any such tool; the send date picks inside that pool.
-// None: the issue has no tool item (it still builds).
+// None: the issue has no tool item (it still builds). The registry is read
+// again here, for the tool as it is now. With no named link it is not read
+// (the caller names none when it could not read the registry: schedule.js
+// activeToolUrls), and a read that fails gives no tool: a tool item is never
+// a reason to stop an issue.
 function pickTool({ dateET, fact, recentToolIds, liveToolUrls }) {
+  if (!liveToolUrls.length) return null;
+  let usable;
+  try {
+    usable = loadTools().tools;
+  } catch (err) {
+    require('../logger').warn(`[pest-insider] tool registry could not be read (${err.message}); this issue has no tool`);
+    return null;
+  }
   const used = new Set(recentToolIds.slice(-TOOL_RECENT_WINDOW));
-  const live = loadTools().tools.filter((t) => liveToolUrls.includes(t.url) && !used.has(t.productId));
+  const live = usable.filter((t) => liveToolUrls.includes(t.url) && !used.has(t.productId));
   const forService = live.filter((t) => t.services.includes(fact.service));
   const pool = forService.length ? forService : live;
   return pool.length ? pool[pickIndex(`${dateET}:${fact.id}:tool`, pool.length)] : null;

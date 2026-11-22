@@ -609,6 +609,7 @@ async function purgeStalePendingSubscribers() {
  */
 async function confirmByToken(token) {
   const initial = await lookupByToken(token);
+  if (initial.action === 'already_active') return recordReaderClickOnActiveRow(token, initial);
   if (initial.action !== 'pending') return initial;
   if (initial.subscriber.status !== 'pending') return confirmResignupToken(token, initial.subscriber);
   // status === 'pending' — flip to active. The flip is an atomic CAS on
@@ -621,7 +622,8 @@ async function confirmByToken(token) {
   // lookup so the caller sees the current truth (the stale link reads
   // 'not_found'; a concurrent same-token confirm reads 'already_active').
   // The reader's own click also stamps reader_confirmed_at and reader_confirmed_email:
-  // the only writes of those two columns besides confirmResignupToken. A trusted add
+  // the only writes of those two columns besides confirmResignupToken and
+  // recordReaderClickOnActiveRow (the same click, on a row a trusted add reached first). A trusted add
   // promotes a pending row without them, so the Waves Pest Insider tool block
   // (pest-insider/tool-block.js) can tell a reader's click from a promotion. The
   // address is LOWER(email) of the row this UPDATE flips, taken in SQL: it is the
@@ -637,10 +639,44 @@ async function confirmByToken(token) {
       reader_confirmed_email: db.raw('LOWER(email)'),
       updated_at: now,
     });
-  if (!flipped) return lookupByToken(token);
+  if (!flipped) {
+    const current = await lookupByToken(token);
+    return current.action === 'already_active' ? recordReaderClickOnActiveRow(token, current) : current;
+  }
   await linkToCustomer(initial.subscriber.email);
   const fresh = await db('newsletter_subscribers').where({ id: initial.subscriber.id }).first();
   return { subscriber: fresh, action: 'confirmed' };
+}
+
+// The reader's confirm click on a row that is ALREADY active. A trusted add can activate a
+// pending row after the confirmation email went out and before the reader presses the button
+// (or between confirmByToken's lookup and its flip). The page then says "confirmed", and
+// without this write the reader's click would leave no proof (reader_confirmed_*). The proof is
+// written only when the link is the row's own unexpired signup link, with nothing later that
+// voids it:
+// - the token is on the row. An address move rotates it (customer-email-fanout.js), so the
+//   link was delivered to the address the row holds now;
+// - confirmation_sent_at is set and inside CONFIRM_TTL_MS;
+// - no opt-out, sunset or comeback stamp is at or after that send. A link from before an
+//   opt-out stays dead after a trusted resubscribe too: that write clears unsubscribed_at and
+//   sets resubscribed_at, which is later than the send;
+// - no click is on record for the row's current activation (reader_confirmed_at is empty, or
+//   before confirmed_at).
+// Nothing else changes: status, confirmed_at and every opt-out stamp stay, and the answer
+// stays 'already_active'. The address is LOWER(email) in SQL, as in confirmByToken.
+async function recordReaderClickOnActiveRow(token, found) {
+  const now = new Date();
+  const stamped = await db('newsletter_subscribers')
+    .where({ id: found.subscriber.id, confirmation_token: token, status: 'active' })
+    .where('confirmation_sent_at', '>', new Date(Date.now() - CONFIRM_TTL_MS))
+    .whereRaw('(unsubscribed_at IS NULL OR confirmation_sent_at > unsubscribed_at)')
+    .whereRaw('(deactivated_at IS NULL OR confirmation_sent_at > deactivated_at)')
+    .whereRaw('(resubscribed_at IS NULL OR confirmation_sent_at > resubscribed_at)')
+    .whereRaw('(reader_confirmed_at IS NULL OR reader_confirmed_at < confirmed_at)')
+    .update({ reader_confirmed_at: now, reader_confirmed_email: db.raw('LOWER(email)'), updated_at: now });
+  if (!stamped) return found;
+  const fresh = await db('newsletter_subscribers').where({ id: found.subscriber.id }).first();
+  return { subscriber: fresh, action: 'already_active' };
 }
 
 // The confirm click for a public re-signup on an unsubscribed/inactive row

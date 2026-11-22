@@ -16,9 +16,10 @@ jest.mock('../models/db', () => {
   const handler = (table) => {
     const wheres = [];
     const chain = {
-      where: jest.fn((arg) => { wheres.push(arg); return chain; }),
+      // One argument is kept as it is; a (column, operator, value) call is kept as that list.
+      where: jest.fn((...args) => { wheres.push(args.length === 1 ? args[0] : args); return chain; }),
       whereNull: jest.fn(() => chain),
-      whereRaw: jest.fn(() => chain),
+      whereRaw: jest.fn((sql) => { wheres.push(sql); return chain; }),
       first: jest.fn(async () => mockFirstQueue.shift() ?? null),
       update: jest.fn(async (patch) => {
         mockNsUpdates.push({ table, wheres: [...wheres], patch });
@@ -90,8 +91,66 @@ test('a concurrent same-token confirm reads back already_active instead of doubl
     { ...PENDING_ROW },
     { ...PENDING_ROW, status: 'active' }, // the sibling confirm won the CAS
   ];
-  mockUpdateQueue = [0];
+  // The flip missed. The proof write for an active row then finds the sibling's stamp
+  // (reader_confirmed_at = confirmed_at) and writes nothing.
+  mockUpdateQueue = [0, 0];
   const result = await confirmByToken('tok-old');
   expect(result.action).toBe('already_active');
+  expect(result.subscriber.status).toBe('active');
+  expect(mockNsUpdates).toHaveLength(2);
+  expect(mockNsUpdates[1].wheres).toContain('(reader_confirmed_at IS NULL OR reader_confirmed_at < confirmed_at)');
   expect(linkCalls()).toHaveLength(0);
+});
+
+// A trusted add can activate a pending row after the confirmation email went out and before the
+// reader presses the button. The click must still leave the reader's proof.
+describe('a confirm click on a row a trusted add activated first', () => {
+  const ACTIVE_ROW = { ...PENDING_ROW, status: 'active', confirmed_at: new Date() };
+  const STAMPED = { ...ACTIVE_ROW, reader_confirmed_at: new Date(), reader_confirmed_email: 'samtypo@example.com' };
+  const expectProofWrite = (write) => {
+    // Only the two proof columns and updated_at: status, confirmed_at and every opt-out stamp stay.
+    expect(Object.keys(write.patch).sort()).toEqual(['reader_confirmed_at', 'reader_confirmed_email', 'updated_at']);
+    expect(write.patch.reader_confirmed_at).toBeInstanceOf(Date);
+    expect(mockRawCalls).toContainEqual(['LOWER(email)']);
+    // The row's own unexpired link, with no opt-out, sunset or comeback after it, and no click on record.
+    expect(write.wheres).toContainEqual({ id: 41, confirmation_token: 'tok-old', status: 'active' });
+    const ttl = write.wheres.find((w) => Array.isArray(w));
+    expect(ttl.slice(0, 2)).toEqual(['confirmation_sent_at', '>']);
+    expect(Date.now() - ttl[2].getTime()).toBeGreaterThanOrEqual(7 * 24 * 60 * 60 * 1000);
+    expect(Date.now() - ttl[2].getTime()).toBeLessThan(7 * 24 * 60 * 60 * 1000 + 60 * 1000);
+    expect(write.wheres).toEqual(expect.arrayContaining([
+      '(unsubscribed_at IS NULL OR confirmation_sent_at > unsubscribed_at)',
+      '(deactivated_at IS NULL OR confirmation_sent_at > deactivated_at)',
+      '(resubscribed_at IS NULL OR confirmation_sent_at > resubscribed_at)',
+      '(reader_confirmed_at IS NULL OR reader_confirmed_at < confirmed_at)',
+    ]));
+  };
+
+  test('the row is active when the click arrives: the proof is written, the answer stays already_active', async () => {
+    mockFirstQueue = [{ ...ACTIVE_ROW }, { ...STAMPED }]; // lookupByToken, then the reread
+    const result = await confirmByToken('tok-old');
+    expect(result.action).toBe('already_active');
+    expect(result.subscriber.reader_confirmed_email).toBe('samtypo@example.com');
+    expect(mockNsUpdates).toHaveLength(1);
+    expectProofWrite(mockNsUpdates[0]);
+    expect(linkCalls()).toHaveLength(0);
+  });
+
+  test('the trusted add lands between the lookup and the flip: the flip misses, the proof is written', async () => {
+    mockFirstQueue = [{ ...PENDING_ROW }, { ...ACTIVE_ROW }, { ...STAMPED }];
+    mockUpdateQueue = [0, 1];
+    const result = await confirmByToken('tok-old');
+    expect(result.action).toBe('already_active');
+    expect(mockNsUpdates).toHaveLength(2);
+    expect(mockNsUpdates[0].patch.status).toBe('active'); // the missed flip
+    expectProofWrite(mockNsUpdates[1]);
+  });
+
+  test('a link the rule refuses (expired, older than an opt-out or comeback, or already used) writes nothing and reads the row as it is', async () => {
+    mockFirstQueue = [{ ...ACTIVE_ROW }];
+    mockUpdateQueue = [0];
+    const result = await confirmByToken('tok-old');
+    expect(result).toEqual({ subscriber: ACTIVE_ROW, action: 'already_active' });
+    expect(mockFirstQueue).toHaveLength(0);
+  });
 });
