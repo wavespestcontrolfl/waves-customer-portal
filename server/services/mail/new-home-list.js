@@ -40,10 +40,12 @@ const HOLD_BACK_ONE_IN = 5;
 const SETTLED_STATUSES = new Set(['eligible', 'held_back', 'not_eligible']);
 
 // Endings that are also written letter by letter ("L.L.C.", "L L C", "L.P."): each is matched in both forms.
+// They and "CO" count only after another word. At the start of a name they are a surname: the Clerk writes a
+// person's last name first ("NA ALEX J", "CO ROBIN M").
 const LETTER_ENDINGS = ['LLC', 'LC', 'LP', 'LLP', 'LLLP', 'PLLC', 'PA', 'NA'];
+const COMPANY_ENDINGS = [...LETTER_ENDINGS, ...LETTER_ENDINGS.map((ending) => ending.split('').join(' ')), 'CO'];
 const COMPANY_WORDS = [
-  ...LETTER_ENDINGS, ...LETTER_ENDINGS.map((ending) => ending.split('').join(' ')),
-  'INC', 'INCORPORATED', 'CORP', 'CORPORATION', 'CO', 'COMPANY', 'LTD',
+  'INC', 'INCORPORATED', 'CORP', 'CORPORATION', 'COMPANY', 'LTD',
   'LIMITED', 'HOMES', 'HOME', 'BUILDERS', 'CONSTRUCTION', 'DEVELOPMENT', 'COMMUNITIES', 'PROPERTIES',
   'HOLDINGS', 'INVESTMENTS', 'PARTNERS', 'PARTNERSHIP', 'GROUP', 'VENTURES', 'ENTERPRISES', 'FUND', 'BANK',
   'REALTY', 'RENTALS', 'CAPITAL', 'ASSOCIATES', 'MANAGEMENT', 'SERVICES', 'HOUSING', 'MINISTRIES',
@@ -55,10 +57,14 @@ const TRUST_WORDS = ['TRUST', 'TRUSTEE', 'TRUSTEES', 'TR', 'TRS', 'REVOCABLE', '
 // A letter-by-letter ending is matched as its own words, so initials before it do not hide it ("A B L.L.C.").
 const wordMatcher = (words) => new RegExp(`(?:^| )(?:${words.join('|')})(?: |$)`);
 const COMPANY_RE = wordMatcher(COMPANY_WORDS);
+const COMPANY_ENDING_RE = new RegExp(` (?:${COMPANY_ENDINGS.join('|')})(?: |$)`); // the space: never the first word
 const TRUST_RE = wordMatcher(TRUST_WORDS);
 const spaced = (name) => String(name || '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
 
-const isCompanyName = (name) => COMPANY_RE.test(spaced(name));
+const isCompanyName = (name) => {
+  const words = spaced(name);
+  return COMPANY_RE.test(words) || COMPANY_ENDING_RE.test(words);
+};
 const isTrustName = (name) => TRUST_RE.test(spaced(name));
 // A builder is a company that does not sell as a trust or a trustee. A person's capacity can hold a company word
 // ("TESTER ALEX CO-TRUSTEE" reads as "CO TRUSTEE"), and so can a trust's name ("TESTER HOME TRUST").
@@ -343,7 +349,9 @@ async function runNewHomeList({ mode = 'night', now = Date.now, deps } = {}) {
   for (const candidate of candidates) {
     const existing = bySourceRef.get(candidate.instrument);
     const why = whyNotDue(existing, nowMs);
-    if (why) bump(summary.skipped, why);
+    // The wait does not apply on the last day a run reads the deed: this is its last chance for an answer.
+    const waits = why === 'settled' || (why === 'retry_wait' && readTomorrow.has(candidate.date));
+    if (waits) bump(summary.skipped, why);
     else due.push({ candidate, retry: existing ? 1 : 0 });
   }
   // The map-query budget goes first to what cannot wait: a deed never judged before a retry, and an older day

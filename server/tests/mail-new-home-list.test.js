@@ -47,6 +47,19 @@ describe('company endings written with dots or with spaces', () => {
   ])('%s is a company', (name) => {
     expect(isCompanyName(name)).toBe(true);
   });
+  test('an ending counts only after another word: at the start of a name it is a surname', () => {
+    expect(isCompanyName('NA ALEX J')).toBe(false);
+    expect(isCompanyName('CO ROBIN M')).toBe(false);
+    expect(isCompanyName('PA JORDAN')).toBe(false);
+    expect(isCompanyName('L P TESTER')).toBe(false);
+    expect(buyerKind(['NA ALEX J'])).toBe('person');
+    expect(candidateFromRow(deed({ from: ['CO ROBIN M'] }))).toEqual({ skip: 'person_seller' });
+    expect(isCompanyName('SAMPLE BANK NA')).toBe(true);
+    expect(isCompanyName('EXAMPLE NA')).toBe(true);
+    expect(isCompanyName('EXAMPLE BUILDING CO')).toBe(true);
+    expect(isCompanyName('EXAMPLE CO OF SAMPLETON')).toBe(true);
+    expect(isCompanyName('NA HOLDINGS LLC')).toBe(true);
+  });
   test('initials before an ending do not hide it, and an initial stays apart from the word after it', () => {
     expect(buyerKind(['A B L.L.C.'])).toBe('company');
     expect(isCompanyName('A.B.CONSTRUCTION')).toBe(true);
@@ -321,6 +334,18 @@ describe('runNewHomeList', () => {
     expect(deps.saveProspect).toHaveBeenCalledTimes(1);
     expect(deps.saveProspect.mock.calls[0][0].source_ref).toBe('202699100002');
     expect(RETRY_AFTER_MS).toBe(20 * 3600 * 1000);
+  });
+
+  test('the 20-hour wait does not apply on the last day a run reads the deed', async () => {
+    const unmatched = (n) => ({ source_ref: String(202699100000 + n), status: 'unmatched', last_checked_at: new Date(NOW - 2 * 3600 * 1000) });
+    const deps = makeDeps({
+      rowsByDay: { '2026-11-12': [person(1, { date: '2026-11-12' })], '2026-11-17': [person(2)] },
+      existing: [unmatched(1), unmatched(2)], // both checked two hours ago
+    });
+    const summary = await run(deps);
+    // The deed of the 12th leaves the read tomorrow, so it is asked about now; the deed of the 17th waits.
+    expect(deps.saveProspect.mock.calls.map(([row]) => row.source_ref)).toEqual(['202699100001']);
+    expect(summary.skipped.retry_wait).toBe(1);
   });
 
   test('map queries stop at the cap; the rest are not saved, and later deeds that need no query still are', async () => {
