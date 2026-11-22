@@ -82,6 +82,7 @@ db.mockImplementation((table) => chainFor(dbRows[table]));
 const { NO_VISIT_QUOTE_LINE, noVisitLinePageBlock } = require('../services/estimate-no-visit-line');
 const { serviceMixIsRemoteMeasured, estimateIsRemoteMeasured } = estimatePublicRouter;
 const { generateEstimate } = require('../services/pricing-engine');
+const { PRICING_BASIS: UNIT_BAND_PRICING_BASIS, SIZE_BASIS: UNIT_BAND_SIZE_BASIS } = require('../services/pricing-engine/unit-band-pricing');
 
 const SENT = '2026-11-20T16:00:00.000Z';
 const recurringRow = (service) => ({ service, name: service, visitsPerYear: 6 });
@@ -477,6 +478,46 @@ describe('estimateIsRemoteMeasured: the rule reads every saved shape of the esti
     expect(logger.warn.mock.calls[0][0]).toContain('no-visit line rule could not read the estimate');
   });
 
+  test('a dwelling unit priced from the bedroom count the caller gave is not measured, whatever its service key', () => {
+    const band = { pricingBasis: UNIT_BAND_PRICING_BASIS, footprintSource: UNIT_BAND_SIZE_BASIS, footprintUsed: null };
+    const saved = (extra) => ({ result: { ...plan('pest_control'), ...extra } });
+    expect(UNIT_BAND_PRICING_BASIS).toBe('caller_stated_bedroom_count');
+    // The mark on a stored plan row, a raw engine line and a one-time row.
+    expect(estimateIsRemoteMeasured({ result: { recurring: { services: [{ ...recurringRow('pest_control'), ...band }] } } }, {})).toBe(false);
+    expect(estimateIsRemoteMeasured(saved({ lineItems: [{ service: 'pest_control', monthly: 40, ...band }] }), {})).toBe(false);
+    expect(estimateIsRemoteMeasured(saved({ oneTime: { items: [{ service: 'one_time_pest', price: 149, ...band }] } }), {})).toBe(false);
+    // Each mark alone, also the unit-scope audit's size basis on a row that stores no service.
+    expect(estimateIsRemoteMeasured(saved({ lineItems: [{ service: 'pest_control', monthly: 40, pricingBasis: UNIT_BAND_PRICING_BASIS }] }), {})).toBe(false);
+    expect(estimateIsRemoteMeasured(saved({ lineItems: [{ service: 'pest_control', monthly: 40, footprintSource: UNIT_BAND_SIZE_BASIS }] }), {})).toBe(false);
+    expect(estimateIsRemoteMeasured(saved({ unitScope: { sizeBasis: UNIT_BAND_SIZE_BASIS } }), {})).toBe(false);
+    expect(estimateIsRemoteMeasured({ result: plan('pest_control'), unitScopeAudit: { sizeBasis: UNIT_BAND_SIZE_BASIS } }, {})).toBe(false);
+    // The served price carries the basis on its plan rows.
+    const own = { result: plan('pest_control') };
+    expect(estimateIsRemoteMeasured(own, { frequencies: [{ key: 'quarterly', perServiceTreatments: [{ service: 'pest_control', pricingBasis: UNIT_BAND_PRICING_BASIS }] }] })).toBe(false);
+    expect(estimateIsRemoteMeasured(own, { oneTimeBreakdown: { items: [{ service: 'one_time_pest', amount: 149, pricingBasis: UNIT_BAND_PRICING_BASIS }] } })).toBe(false);
+    // A row priced from the measured property keeps the answer, with its own basis or with none.
+    for (const pricingBasis of ['TABLE_INTERPOLATION', 'PROGRAM_MINIMUM_MONTHLY', 'EXTRAPOLATED_ABOVE_TABLE_MAX', null, undefined]) {
+      const label = String(pricingBasis);
+      expect([label, estimateIsRemoteMeasured(saved({ lineItems: [{ service: 'pest_control', monthly: 40, pricingBasis, footprintSource: 'county' }] }), {
+        frequencies: [{ key: 'quarterly', perServiceTreatments: [{ service: 'pest_control', pricingBasis }] }],
+      })]).toEqual([label, true]);
+    }
+  });
+
+  test('a saved amount is not a service row: the saved estimate must store one', () => {
+    // The page's reader makes a termite bait install row from a saved amount. Alone, it grants nothing.
+    expect(estimateIsRemoteMeasured({ result: { oneTime: { tmInstall: 1200 } } }, {})).toBe(false);
+    expect(estimateIsRemoteMeasured({ result: { oneTime: { tmInstall: 1200, items: [] }, recurring: { services: [] } } }, {})).toBe(false);
+    expect(estimateIsRemoteMeasured({ oneTime: { tmInstall: 1200 } }, {})).toBe(false);
+    expect(estimateIsRemoteMeasured({ result: { membershipFee: 99 } }, {})).toBe(false);
+    // Beside the stored plan row it belongs to, it is that plan's install charge.
+    expect(estimateIsRemoteMeasured({ result: { ...plan('termite_bait'), oneTime: { tmInstall: 1200 } } }, {})).toBe(true);
+    // A stored fee or discount row is not a service row either.
+    expect(estimateIsRemoteMeasured({ result: { oneTime: { tmInstall: 1200, items: [{ service: 'waveguard_setup', price: 99 }] } } }, {})).toBe(false);
+    // A stored one-time service row is one.
+    expect(estimateIsRemoteMeasured({ result: { oneTime: { items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 199 }] } } }, {})).toBe(true);
+  });
+
   test('an inputs-only save is read from its replayed engine result, raw rows included', () => {
     const inputsOnly = () => ({ engineInputs: { homeSqFt: 2000, lotSqFt: 8000, services: { pest: { frequency: 'quarterly' } } } });
     // The real engine: one pest control line.
@@ -634,6 +675,14 @@ describe('GET /:token/data: noVisitLine', () => {
     expect(servedRoachFee.status).toBe(200);
     expect(servedRoachFee.body.cta.terminalState).toBeNull();
     expect(servedRoachFee.body).not.toHaveProperty('noVisitLine');
+
+    // A dwelling unit priced from the bedroom count the caller gave stores the pest control key too.
+    const bedroomBand = await pageLoad(estimateRow({
+      estimateData: { result: { recurring: { services: [{ ...recurringRow('pest_control'), pricingBasis: UNIT_BAND_PRICING_BASIS, footprintSource: UNIT_BAND_SIZE_BASIS }] } } },
+    }));
+    expect(bedroomBand.status).toBe(200);
+    expect(bedroomBand.body.cta.terminalState).toBeNull();
+    expect(bedroomBand.body).not.toHaveProperty('noVisitLine');
 
     // A stored service nobody can read, in a field no reader lists: the page still loads, with no line.
     const unreadable = await pageLoad(estimateRow({ estimateData: { laterWork: [{ detail: { service: { toString: null } } }] } }));

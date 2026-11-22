@@ -24217,23 +24217,28 @@ function estimateMakesNoGuaranteeClaim(estData = {}, pricingBundle = {}) {
 // `service` is a row nobody can identify.
 // Stored pricing data nobody can read is no ground for the sentence either (storedRowReader): a row container that is
 // there and is not a list, or an entry that is there and is not a row.
+// A listed identity is not enough when the row itself says its price did not come from a measurement: a dwelling unit
+// priced from the bedroom count the caller gave (unit-band-pricing.js) stores `pest_control` or `one_time_pest` too.
 // Three reads, and each one fails closed (estimateIsRemoteMeasured):
 // 1. The saved estimate grants the answer: the rows the guarantee rule reads from it (guaranteeServiceRows with no
 //    served price: both saved result shapes, an inputs-only replay, an authored proposal's rows). At least one service
-//    row, every one on its list, none commercial, and no failed replay.
+//    row, every one on its list, none commercial, and no failed replay. That reader also makes rows from saved amounts
+//    (a termite install amount, a membership fee), so read 2 must find a stored service row too.
 // 2. Every saved row, as it is stored, can take the answer away (savedRowsAreAllListed). The page's readers resolve a
 //    recurring row from its name, skip a raw engine line whose key they do not know, and drop work a plan includes at
 //    no charge. So the stored rows are read before any of that.
 // 3. The price the customer is served can take the answer away, and never grants it (servedPriceIsAllListed): a
 //    frozen send snapshot is served as it is, so a service it lists counts even when the saved result does not hold it.
-// Reads 2 and 3 each end with the same closed check: every row that stores a `service`, at any depth of the saved
-// estimate or of the served price, must pass (rowsStoringAService). A row container nobody listed here cannot carry a
-// service past the rule.
+// Reads 2 and 3 each end with the same closed check: every row that stores a `service` or a bedroom-band mark, at any
+// depth of the saved estimate or of the served price, must pass (rowsThatMustPass). A row container nobody listed here
+// cannot carry a service past the rule.
 // The line is optional copy: a row the rule cannot read gives no line and a warning, never a failed page.
 const REMOTE_MEASURED_RECURRING_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait']);
 // `termite_bait_installation` is the install charge of the termite bait plan itself: the same station count, from the
 // same measured perimeter.
 const REMOTE_MEASURED_ONE_TIME_SERVICES = new Set(['one_time_pest', 'one_time_lawn', 'one_time_mosquito', 'termite_bait_installation']);
+// The marks of a dwelling unit priced from the bedroom count the caller gave, not from a measurement.
+const { PRICING_BASIS: UNIT_BAND_PRICING_BASIS, SIZE_BASIS: UNIT_BAND_SIZE_BASIS } = require('../services/pricing-engine/unit-band-pricing');
 // The fee and discount identities the code writes. `rodent_bait_setup` and `trap_only_setup` are work, not fees.
 const NOT_A_SERVICE_IDENTITIES = new Set(['waveguard_setup', 'manual_discount', 'rodent_bundle_discount']);
 // A stored `service` that is not text is an identity nobody can read: it is on no list.
@@ -24259,9 +24264,15 @@ function storedRowIsNotAService(row) {
   return Object.values(row).every((value) => value == null || value === '');
 }
 
+// The engine's marks on a row priced from the bedroom count a caller gave, and on the unit-scope audit of such a quote.
+const storedRowIsPricedFromBedroomBand = (row) => row.pricingBasis === UNIT_BAND_PRICING_BASIS
+  || row.footprintSource === UNIT_BAND_SIZE_BASIS || row.sizeBasis === UNIT_BAND_SIZE_BASIS;
+
 // A stored row passes when it is not a service, or when its stored `service` is on one of the given lists. A commercial
-// row never passes: the engine marks it, and the page's normalized one-time rows drop the mark.
+// row never passes (the engine marks it, and the page's normalized one-time rows drop the mark), and neither does a
+// row priced from a bedroom band.
 const storedRowsAreListed = (rows, ...lists) => rows.every((row) => row.isCommercial !== true
+  && !storedRowIsPricedFromBedroomBand(row)
   && (storedRowIsNotAService(row) || lists.some((listed) => listed.has(serviceIdentity(row.service)))));
 
 // Reads row containers and remembers when one cannot be read. A container that is absent holds no row, and so does an
@@ -24289,12 +24300,12 @@ function storedRowReader() {
   };
 }
 
-// Every row that stores a `service`, at any depth of a value.
-function rowsStoringAService(value, found = [], seen = new WeakSet()) {
+// Every row that stores a `service` or a bedroom-band mark, at any depth of a value.
+function rowsThatMustPass(value, found = [], seen = new WeakSet()) {
   if (!value || typeof value !== 'object' || seen.has(value)) return found;
   seen.add(value);
-  if (isStoredRow(value) && serviceIdentity(value.service)) found.push(value);
-  for (const inner of Object.values(value)) rowsStoringAService(inner, found, seen);
+  if (isStoredRow(value) && (serviceIdentity(value.service) || storedRowIsPricedFromBedroomBand(value))) found.push(value);
+  for (const inner of Object.values(value)) rowsThatMustPass(inner, found, seen);
   return found;
 }
 
@@ -24317,9 +24328,11 @@ function serviceMixIsRemoteMeasured(recurringServices = [], oneTimeItems = []) {
 // - One-time and specialty rows: the one-time list. The containers are the ones the stored-row readers of
 //   estimate-result-container.js read (`oneTime.items[]`, `oneTime.specItems[]`, the nested `results.oneTime` copies,
 //   `specItems[]`, `quoteRequiredItems[]`). A row a plan includes at no charge is still work on the estimate.
-// - Then every row that stores a `service` at any depth of the saved estimate data and of the replay (a line nested in
-//   a line, a margin warning, a field no reader lists): either list. The frozen send snapshot is not part of this
-//   scan: it holds the price and scope as sent, and the price the customer is served is read by its own rule below.
+// - Then every row that stores a `service` or a bedroom-band mark at any depth of the saved estimate data and of the
+//   replay (a line nested in a line, a margin warning, a field no reader lists): either list. The frozen send snapshot
+//   is not part of this scan: it holds the price and scope as sent, and the price the customer is served is read by
+//   its own rule below.
+// - And at least one stored row is a service row.
 function savedRowsAreAllListed(estData = {}) {
   const read = storedRowReader();
   const { sendSnapshot: _sentPriceAndScope, ...savedData } = isStoredRow(estData) ? estData : {};
@@ -24343,7 +24356,9 @@ function savedRowsAreAllListed(estData = {}) {
       && storedRowsAreListed(rows.lines, REMOTE_MEASURED_RECURRING_SERVICES, REMOTE_MEASURED_ONE_TIME_SERVICES)
       && storedRowsAreListed(rows.oneTime, REMOTE_MEASURED_ONE_TIME_SERVICES)
     ))
-    && storedRowsAreListed(rowsStoringAService([savedData, results]), REMOTE_MEASURED_RECURRING_SERVICES, REMOTE_MEASURED_ONE_TIME_SERVICES);
+    && storedRowsAreListed(rowsThatMustPass([savedData, results]), REMOTE_MEASURED_RECURRING_SERVICES, REMOTE_MEASURED_ONE_TIME_SERVICES)
+    // Every row passed, so a row that is a service is a listed one. One must be stored: an amount is not a service row.
+    && containers.some((rows) => [...rows.plans, ...rows.lines, ...rows.oneTime].some((row) => !storedRowIsNotAService(row)));
 }
 
 // The price the customer is served.
@@ -24378,7 +24393,7 @@ function servedPriceIsAllListed(pricingBundle = {}) {
     && planIdentities.every((identity) => REMOTE_MEASURED_RECURRING_SERVICES.has(serviceIdentity(identity)))
     && storedRowsAreListed(planRows, REMOTE_MEASURED_RECURRING_SERVICES)
     && storedRowsAreListed(oneTimeRows, REMOTE_MEASURED_ONE_TIME_SERVICES)
-    && storedRowsAreListed(rowsStoringAService(pricingBundle), REMOTE_MEASURED_RECURRING_SERVICES, REMOTE_MEASURED_ONE_TIME_SERVICES);
+    && storedRowsAreListed(rowsThatMustPass(pricingBundle), REMOTE_MEASURED_RECURRING_SERVICES, REMOTE_MEASURED_ONE_TIME_SERVICES);
 }
 
 function estimateIsRemoteMeasured(estData = {}, pricingBundle = {}) {

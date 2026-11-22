@@ -7193,22 +7193,26 @@ Recurring: `pest_control`, `lawn_care`, `tree_shrub`, `mosquito` or `termite_bai
 `one_time_lawn`, `one_time_mosquito` or `termite_bait_installation` (the termite bait plan's own install charge). A row
 is not a service only by its stored `service`: `waveguard_setup`, `manual_discount`, `rodent_bundle_discount`, or a
 `one_time_adjustment` whose stated `amount` / `price` are readable numbers and none is above zero; an empty row is
-nothing. Every other row must store a listed service, priced or not, and must not be commercial. A row container that
-is there and is not a list, or an entry that is there and is not a row, cannot be read and takes the key away. Three
-reads, each failing closed. (1)
+nothing. Every other row must store a listed service, priced or not, must not be commercial, and must not carry the
+mark of a dwelling unit priced from the bedroom count the caller gave (`pricingBasis: 'caller_stated_bedroom_count'`,
+`footprintSource` or `sizeBasis` `'bedroom_band'`; such a unit stores `pest_control` or `one_time_pest` too). A row
+container that is there and is not a list, or an entry that is there and is not a row, cannot be read and takes the key
+away. Three reads, each failing closed. (1)
 The saved estimate grants the key: the rows of `guaranteeServiceRows` without the served price (both saved result shapes,
 an inputs-only replay, an authored proposal's rows) hold at least one service row and every one is on its list. (2)
 Every saved row as it is stored can take the key away, also one the page's readers skip or drop, in both saved result
 shapes, the bare save and an inputs-only save's replayed engine result: `recurring.services[]` and
 `results.recurring.services[]` (the recurring list), `lineItems[]` (either list), `oneTime.items[]`,
 `oneTime.specItems[]`, the nested `results.oneTime` copies, `specItems[]` and `quoteRequiredItems[]` (the one-time list),
-and then every row that stores a `service` at any depth of the saved estimate data and of the replay (either list; the
-frozen `sendSnapshot` is not scanned, the served price is read next). (3) The served price can take
+and then every row that stores a `service` or a bedroom-band mark at any depth of the saved estimate data and of the
+replay (either list; the frozen `sendSnapshot` is not scanned, the served price is read next). At least one stored row
+must be a service row: a saved amount the page turns into a row (a termite install amount) grants nothing. (3) The served price can take
 the key away and never grants it: `pricing.services[]` recurring sections by `memberKeys`, else `key`; every
 `perServiceTreatments[]` row of each `frequencies[]` and `serviceCadenceCombos[]` entry, on the price and on those
 sections (the recurring list); `pricing.oneTimeBreakdown.items[]`, the quote-required rows, `firstVisitFees[]`,
 `setupFee`, `rodentBaitSetupFee`, `mistingInstallFee` and each section's `oneTimeContribution.items[]` and `setupFee`
-(the one-time list); and then every row that stores a `service` at any depth of the price (either list). One row off its
+(the one-time list); and then every row that stores a `service` or a bedroom-band mark at any depth of the price (either
+list). One row off its
 list (rodent work, a misting system, foam, trenching, pre-slab, Bora-Care, a WDO inspection, traps, a palm injection, a
 bed bug, roach, flea or stinging insect job, a first-visit cockroach treatment, a termite station rental or bond row, an
 area add-on, a row with a name, a key or a price and no stored `service`, a stored `service` that is not text), no service
