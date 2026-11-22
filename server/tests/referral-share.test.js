@@ -81,7 +81,7 @@ describe('composeReferralCard with GATE_REFERRAL_STEP2 (the offer line)', () => 
     mockEngine.referralOfferDecision.mockResolvedValue(decision({ refereeCents: 0, memberCents: 0 }));
     expect(await composeReferralCard({ customerId: 'cust-1' })).toEqual(REFERRAL_CARD_COPY);
   });
-  test('gate on, a skipped decision (program paused or settings unreadable after the first read): no card, so no button that would answer 404', async () => {
+  test('gate on, a skipped decision (program paused or settings unreadable): no card, so no button that would answer 404', async () => {
     gates.referralStep2 = true;
     mockEngine.referralOfferDecision.mockResolvedValue({ gateOn: true, skip: true, atLimit: false, reason: 'program paused' });
     expect(await composeReferralCard({ customerId: 'cust-1' })).toBeNull();
@@ -93,18 +93,25 @@ describe('composeReferralCard with GATE_REFERRAL_STEP2 (the offer line)', () => 
     expect(await composeReferralCard()).toEqual(REFERRAL_CARD_COPY);
     expect(mockEngine.referralOfferDecision).not.toHaveBeenCalled();
   });
-  test('gate on, an inactive program is still null and reads no decision', async () => {
+  test('gate on, for a known customer the settings are read once, by the decision', async () => {
+    gates.referralStep2 = true;
+    await composeReferralCard({ customerId: 'cust-1' });
+    expect(mockEngine.referralOfferDecision).toHaveBeenCalledTimes(1);
+    expect(mockEngine.getLiveSettings).not.toHaveBeenCalled();
+  });
+  test('gate on, no customer id and an inactive program: still null', async () => {
     gates.referralStep2 = true;
     mockEngine.getLiveSettings.mockResolvedValue({ program_active: false });
-    expect(await composeReferralCard({ customerId: 'cust-1' })).toBeNull();
+    expect(await composeReferralCard()).toBeNull();
     expect(mockEngine.referralOfferDecision).not.toHaveBeenCalled();
   });
-  test('an outer transaction rides both reads', async () => {
+  test('an outer transaction rides the read on both paths', async () => {
     gates.referralStep2 = true;
     const conn = jest.fn();
     await composeReferralCard({ customerId: 'cust-1', conn });
-    expect(mockEngine.getLiveSettings).toHaveBeenCalledWith(conn);
     expect(mockEngine.referralOfferDecision).toHaveBeenCalledWith(conn, 'cust-1');
+    await composeReferralCard({ conn });
+    expect(mockEngine.getLiveSettings).toHaveBeenCalledWith(conn);
   });
   test('an offer-decision failure propagates so the caller suppresses the card', async () => {
     gates.referralStep2 = true;
