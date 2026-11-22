@@ -73,7 +73,18 @@ describe('GET /schedule hides staff notes from the customer payload', () => {
     const commercialRow = { ...row, id: 'svc-c', service_type: 'Commercial Pest Control' };
     // A combined visit covers two plan families; both ride the payload.
     const combinedRow = { ...row, id: 'svc-2f', service_type: 'Lawn + Tree & Shrub Service' };
-    db.mockReturnValueOnce(listChain([row, rodentRow, trapRow, staleLabelRow, trapCatalogRow, commercialRow, combinedRow]));
+    // The same label, stale, on a row whose catalog identity is lawn only.
+    // Both identities start with lawn; the whole family list is compared.
+    const staleCombinedLabelRow = { ...combinedRow, id: 'svc-2s', catalog_service_key: 'lawn_care_program', catalog_service_name: 'Lawn Care Program' };
+    // A recurring row booked through a one-time source is not plan coverage
+    // (serviceRowCountsTowardWaveGuard, the tier alignment's own rule).
+    const oneTimeSourceRow = { ...row, id: 'svc-ot', source: 'quote-wizard-onetime' };
+    const reserviceRow = { ...row, id: 'svc-cb', is_callback: true };
+    const notRecurringRow = { ...row, id: 'svc-nr', is_recurring: false };
+    db.mockReturnValueOnce(listChain([
+      row, rodentRow, trapRow, staleLabelRow, trapCatalogRow, commercialRow, combinedRow,
+      staleCombinedLabelRow, oneTimeSourceRow, reserviceRow, notRecurringRow,
+    ]));
     await withServer(async (baseUrl) => {
       const body = await (await fetch(`${baseUrl}/schedule`)).json();
       const byId = Object.fromEntries(body.upcoming.map((v) => [v.id, v]));
@@ -98,6 +109,17 @@ describe('GET /schedule hides staff notes from the customer payload', () => {
       expect(byId['svc-2f'].serviceFamilies).toEqual(['lawn_care', 'tree_shrub']);
       expect(byId['svc-2f'].serviceFamily).toBe('lawn_care');
       expect(byId['svc-2f'].waveguardQualifying).toBe(true);
+      expect(byId['svc-2f'].serviceDisplayName).toBeNull();
+      // The catalog identity names one family, the stale label two: the
+      // catalog name is sent, and the family list is the catalog's.
+      expect(byId['svc-2s'].serviceFamilies).toEqual(['lawn_care']);
+      expect(byId['svc-2s'].serviceDisplayName).toBe('Lawn Care');
+      // The row's own verdict: the family still resolves (the calendar reads
+      // it), but the visit does not count toward the plan.
+      expect(byId['svc-ot'].waveguardQualifying).toBe(false);
+      expect(byId['svc-ot'].serviceFamily).toBe('pest_control');
+      expect(byId['svc-cb'].waveguardQualifying).toBe(false);
+      expect(byId['svc-nr'].waveguardQualifying).toBe(false);
     });
     // Live flag off → rodent bait no longer qualifies on the portal payload.
     const constants = require('../services/pricing-engine/constants');

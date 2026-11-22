@@ -28,6 +28,26 @@ function portalRowWaveGuardFamily(row) {
 function portalRowQualifiesForWaveGuard(row) {
   return portalRowWaveGuardFamily(row) !== null;
 }
+// The visit row's plan-coverage verdict: its family qualifies AND the row
+// itself counts toward the plan, by the one rule the tier alignment uses
+// (serviceRowCountsTowardWaveGuard: recurring, live, not a re-service, not
+// booked through a one-time source). `s` is the full scheduled_services row.
+function portalVisitCountsTowardPlan(s, familyRow) {
+  const { serviceRowCountsTowardWaveGuard } = require('../services/self-booking-plan-sync');
+  return portalRowQualifiesForWaveGuard(familyRow) && serviceRowCountsTowardWaveGuard(s);
+}
+// The catalog name, sent only when the catalog identity resolves OTHER plan
+// families than the visit's label does. The whole family list is compared,
+// not its first entry: a lawn-only catalog row under a stale "Lawn + Tree &
+// Shrub Service" label has the same first family and would keep the label.
+function portalRowCatalogDisplayName(s, familyRow) {
+  if (!s.catalog_service_name) return null;
+  const withCatalog = portalRowWaveGuardFamilies(familyRow);
+  const labelOnly = portalRowWaveGuardFamilies({ service_type: s.service_type });
+  return withCatalog.length && withCatalog.join('|') !== labelOnly.join('|')
+    ? normalizeServiceType(s.catalog_service_name)
+    : null;
+}
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyStamp } = require('../services/service-report/time-format');
 const { calendarIcsAvailable, arrivalWindowEndsAt, UPCOMING_STATUSES, groupedIcsVerdict } = require('../services/appointment-ics-eligibility');
@@ -246,7 +266,7 @@ router.get('/', async (req, res, next) => {
           status: s.status,
           isRecurring: s.is_recurring === true,
           isCallback: s.is_callback === true,
-          waveguardQualifying: portalRowQualifiesForWaveGuard({
+          waveguardQualifying: portalVisitCountsTowardPlan(s, {
             service_type: s.service_type,
             service_key: s.catalog_service_key,
             service_name: s.catalog_service_name,
@@ -265,17 +285,12 @@ router.get('/', async (req, res, next) => {
             service_name: s.catalog_service_name,
             catalog_billing_type: s.catalog_billing_type,
           }),
-          serviceDisplayName: (() => {
-            if (!s.catalog_service_name) return null;
-            const withCatalog = portalRowWaveGuardFamily({
-              service_type: s.service_type,
-              service_key: s.catalog_service_key,
-              service_name: s.catalog_service_name,
-              catalog_billing_type: s.catalog_billing_type,
-            });
-            const labelOnly = portalRowWaveGuardFamily({ service_type: s.service_type });
-            return withCatalog && withCatalog !== labelOnly ? normalizeServiceType(s.catalog_service_name) : null;
-          })(),
+          serviceDisplayName: portalRowCatalogDisplayName(s, {
+            service_type: s.service_type,
+            service_key: s.catalog_service_key,
+            service_name: s.catalog_service_name,
+            catalog_billing_type: s.catalog_billing_type,
+          }),
           ...dayOnlyFields(hidden.has(String(s.id))),
         })),
       });
@@ -374,11 +389,14 @@ router.get('/', async (req, res, next) => {
         // visits from one-time visits and free re-service callbacks.
         isRecurring: s.is_recurring === true,
         isCallback: s.is_callback === true,
-        // Server-derived WaveGuard qualification for this row's family
+        // Server-derived WaveGuard qualification for this row: its family
         // (the same classifier alignment uses, which follows the LIVE
-        // rodent_waveguard.tier_qualifier flag) — the portal reads this
-        // instead of re-deriving coverage from the label (codex #3591 r19 P1).
-        waveguardQualifying: portalRowQualifiesForWaveGuard({
+        // rodent_waveguard.tier_qualifier flag) and the row itself (the
+        // alignment's serviceRowCountsTowardWaveGuard, so a recurring row
+        // booked through a one-time source is not plan coverage) — the
+        // portal reads this instead of re-deriving coverage from the label
+        // (codex #3591 r19 P1).
+        waveguardQualifying: portalVisitCountsTowardPlan(s, {
           service_type: s.service_type,
           service_key: s.catalog_service_key,
           service_name: s.catalog_service_name,
@@ -403,23 +421,16 @@ router.get('/', async (req, res, next) => {
           catalog_billing_type: s.catalog_billing_type,
         }),
         // Catalog display name, surfaced ONLY when catalog identity
-        // resolved a DIFFERENT family than the stale label (codex #3591
+        // resolved DIFFERENT families than the stale label (codex #3591
         // r79 P2): the client prefers it for card titles so a row still
         // labeled "Rodent Trapping" but repointed to the bait program does
         // not title a bait-station card with trapping copy.
-        serviceDisplayName: (() => {
-          if (!s.catalog_service_name) return null;
-          const withCatalog = portalRowWaveGuardFamily({
-            service_type: s.service_type,
-            service_key: s.catalog_service_key,
-            service_name: s.catalog_service_name,
-            catalog_billing_type: s.catalog_billing_type,
-          });
-          const labelOnly = portalRowWaveGuardFamily({ service_type: s.service_type });
-          return withCatalog && withCatalog !== labelOnly
-            ? normalizeServiceType(s.catalog_service_name)
-            : null;
-        })(),
+        serviceDisplayName: portalRowCatalogDisplayName(s, {
+          service_type: s.service_type,
+          service_key: s.catalog_service_key,
+          service_name: s.catalog_service_name,
+          catalog_billing_type: s.catalog_billing_type,
+        }),
         // Self-serve deep link (same page the reminder texts link) — the
         // portal's Reschedule buttons open this instead of drafting an SMS
         // to the office. Same-customer row, so exposing the token here adds
