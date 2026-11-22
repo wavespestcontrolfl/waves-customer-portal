@@ -779,8 +779,12 @@ postgres('Hired button on migrated PostgreSQL', () => {
       expect(await call(`/technicians/${id}/hire/google`, { body: hireBody({ googleEmail: google }) })).toEqual(CHANGED);
       expect(await row(id)).toEqual(before);
       expect(sendgrid.sendOne).not.toHaveBeenCalled();
-      // With staff Google sign-in off the link cannot be cleared: the row says so, and still offers no press.
-      process.env.GATE_STAFF_GOOGLE_SIGNIN = 'false';
+      // An address that cannot sign in today says why, and the row still offers no press: outside the sign-in
+      // domains (relink it), or staff Google sign-in off (the link cannot be cleared until it is on again).
+      const { GOOGLE_STAFF_SIGNIN_DOMAINS: domains } = process.env;
+      process.env.GOOGLE_STAFF_SIGNIN_DOMAINS = 'other.test';
+      expect(timetracking._test.hireLinkState(before)).toMatchObject({ hire_action: null, hire_google_only: 'bad_address' });
+      Object.assign(process.env, { GOOGLE_STAFF_SIGNIN_DOMAINS: domains, GATE_STAFF_GOOGLE_SIGNIN: 'false' });
       expect(timetracking._test.hireLinkState(before)).toMatchObject({ hire_action: null, hire_google_only: 'off' });
       process.env.GATE_STAFF_GOOGLE_SIGNIN = 'true';
 

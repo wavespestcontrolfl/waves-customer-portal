@@ -882,10 +882,10 @@ function hireLinkState(tech, now = new Date()) {
     // null, or how a Google-only account stands today: 'ready', 'unlinked'
     // (no address), 'bad_address' (outside the sign-in domains) or 'off'
     // (staff Google sign-in off or not set up). 'returning' = the prospective
-    // row above; with staff Google sign-in off it reads 'off' (the link
-    // cannot be cleared until the gate is on again).
+    // row above while its address can sign in; otherwise that row says why it
+    // cannot ('off': the link cannot be cleared until the gate is on again).
     hire_google_only: returning
-      ? (googleSignin.googleSigninReady() ? 'returning' : 'off')
+      ? (googleOnlyState(tech) === 'ready' ? 'returning' : googleOnlyState(tech))
       : (googleOnly && status === 'active' && tech.active === true ? googleOnlyState(tech) : null),
     hire_password_unset: passwordUnset,
     hire_link_pending: pending,
