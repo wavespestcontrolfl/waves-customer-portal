@@ -10313,8 +10313,8 @@ function initScheduledJobs() {
   // =========================================================================
   // DAILY 10:13AM — One-time job to plan offer, shadow step (owner 2026-11-19
   // "build"): prices the Quarterly Pest Control Service plan for each
-  // completed one-time pest or cockroach job that is 3 to 14 days old, for a
-  // customer the offer is for, and emails one sample of the offer and of its
+  // one-time pest or cockroach job whose service was done 3 to 14 days ago,
+  // for a customer the offer is for, and emails one sample of the offer and of its
   // reminder to the office inbox. No customer message and no estimate. A
   // missed morning costs nothing: the next one reads the same jobs. Gate read
   // per tick (GATE_ONETIME_PLAN_OFFER=shadow).

@@ -35,6 +35,7 @@ jest.mock('../services/sendgrid-mail', () => ({
 
 const crypto = require('crypto');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { formatDateOnly } = require('../utils/date-only');
 
 const NOW = new Date();
 const HOUR = 3600000;
@@ -99,13 +100,21 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
     return row;
   }
 
-  // A completed one-time job. `daysAgo` counts ET calendar days.
-  async function seedJob({ daysAgo = 5, customer = null, ...visit } = {}) {
+  // The record of a visit's service, as the completion flow saves it: performed, on the given day.
+  const seedRecord = (job, overrides = {}) => trx('service_records').insert({
+    customer_id: job.customer_id, scheduled_service_id: job.id, service_type: job.service_type, status: 'completed',
+    service_date: job.scheduled_date, structured_notes: { visitOutcome: 'completed' }, ...overrides,
+  });
+
+  // A completed one-time job with the record of its service. `daysAgo` counts ET calendar days: the scheduled
+  // day and, unless `record` names another, the day the service was done. `record: false` saves no record.
+  async function seedJob({ daysAgo = 5, customer = null, record = {}, ...visit } = {}) {
     const owner = customer || await seedCustomer();
     const [job] = await trx('scheduled_services').insert({
       customer_id: owner.id, scheduled_date: day(-daysAgo), service_type: 'One-Time Pest Control', status: 'completed',
       service_key_snapshot: 'one_time_pest_control', ...visit,
     }).returning('*');
+    if (record) await seedRecord(job, { service_date: day(-daysAgo), ...record });
     return { customer: owner, job };
   }
 
@@ -181,6 +190,67 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
     expect(summary.failed).toBe(0);
     const everyJob = [...Object.values(due), ...Object.values(notDue)].map((seeded) => seeded.job);
     expect(await sampledJobIds(everyJob)).toEqual(Object.values(due).map((seeded) => seeded.job.id).sort());
+  });
+
+  // The visit row says 'completed' also when the visit was closed without the service, so the visit's service
+  // record must say the service was performed (the shared outcome list of pest-pressure/first-visit.js).
+  test.each([
+    ['inspection only', { structured_notes: { visitOutcome: 'inspection_only' } }],
+    ['declined by the customer', { structured_notes: { visitOutcome: 'customer_declined' } }],
+    ['incomplete, by its outcome', { structured_notes: { visitOutcome: 'incomplete' } }],
+    ['incomplete, by the status of its record', { status: 'incomplete', structured_notes: {} }],
+  ])('not due: the visit was closed as %s', async (_name, record) => {
+    const { job } = await seedJob({ record });
+    expect(await run()).toMatchObject({ jobs: 0, sample: 0, failed: 0 });
+    expect(await sampleRows(job.id)).toHaveLength(0);
+  });
+
+  test('not due: a completed visit with no record of its service', async () => {
+    const { job } = await seedJob({ record: false });
+    expect(await run()).toMatchObject({ jobs: 0, sample: 0, failed: 0 });
+    expect(await sampleRows(job.id)).toHaveLength(0);
+  });
+
+  test.each([
+    ['a record with no outcome saved (an older report)', { structured_notes: {} }],
+    ['a record with no notes at all', { structured_notes: null }],
+  ])('due: %s is a performed service', async (_name, record) => {
+    await seedJob({ record });
+    expect(await run()).toMatchObject({ jobs: 1, sample: 1, failed: 0 });
+  });
+
+  // A visit can be done on another day than its scheduled day. The days of the offer count from the service.
+  test('the window, the email dates and the offer end count from the day the service was done, not from the scheduled day', async () => {
+    // Scheduled 5 days ago and done yesterday: too fresh today. Its scheduled day is inside the window.
+    const fresh = await seedJob({ daysAgo: 5, record: { service_date: day(-1) } });
+    // Scheduled 20 days ago and done 6 days ago: due. Its scheduled day is outside the window.
+    const late = await seedJob({ daysAgo: 20, record: { service_date: day(-6) } });
+    // Scheduled 6 days ago, with a record of a service done 16 days ago: too old.
+    const old = await seedJob({ daysAgo: 6, record: { service_date: day(-16) } });
+    expect(await run()).toMatchObject({ jobs: 1, sample: 1, failed: 0 });
+    expect(await sampledJobIds([fresh.job, late.job, old.job])).toEqual([late.job.id]);
+
+    // Every date in the words follows the service day (6 days ago): the visit named, the next visit 11 to 13
+    // weeks after it, and the last day of the offer 30 days after it. The scheduled day gives none of these.
+    const [offer] = await sampleRows(late.job.id);
+    const noYear = { year: undefined };
+    const short = (n) => formatDateOnly(day(n), { ...noYear, month: 'short' });
+    const weekday = formatDateOnly(day(-6), { ...noYear, month: undefined, day: undefined, weekday: 'long' });
+    expect(offer.text_snapshot).toContain(`Thanks for having us out on ${weekday}, ${short(-6)}.`);
+    expect(offer.text_snapshot).toContain(`we serviced your home on ${short(-6)}.`);
+    expect(offer.text_snapshot).toContain(`Next visit: You pick, ${short(71)} to ${short(85)}`);
+    expect(offer.text_snapshot).toContain(`This estimate is good through ${formatDateOnly(day(24), noYear)}.`);
+  });
+
+  test('a visit with two records is one job, on the day of its newest performed service', async () => {
+    // The first attempt was declined 9 days ago; the service was done 4 days ago.
+    const { job } = await seedJob({ daysAgo: 9, record: { structured_notes: { visitOutcome: 'customer_declined' } } });
+    await seedRecord(job, { service_date: day(-4) });
+    // A second performed record of the same visit, one day earlier: still one job.
+    await seedRecord(job, { service_date: day(-5) });
+    expect(await run()).toMatchObject({ jobs: 1, sample: 1, failed: 0 });
+    const [offer] = await sampleRows(job.id);
+    expect(offer.text_snapshot).toContain(`we serviced your home on ${formatDateOnly(day(-4), { year: undefined, month: 'short' })}.`);
   });
 
   // A live customer is active, not deleted and in a customer stage (whereLiveCustomer in customer-stages.js).
@@ -295,9 +365,14 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
     const customers = await trx('customers').insert(Array.from({ length: 51 }, (_, index) => ({
       first_name: 'Paging', last_name: 'Example', phone: `+1941556${String(index).padStart(4, '0')}`, active: true,
     }))).returning('id');
-    await trx('scheduled_services').insert(customers.map((customer, index) => ({
+    const visits = await trx('scheduled_services').insert(customers.map((customer, index) => ({
       customer_id: customer.id, scheduled_date: day(-3 - (index % 12)), service_type: 'One-Time Pest Control', status: 'completed',
       service_key_snapshot: 'one_time_pest_control',
+    }))).returning(['id', 'customer_id', 'scheduled_date', 'service_type']);
+    // Each service was done on its scheduled day, so the pages run in (service day, id) order over 12 days.
+    await trx('service_records').insert(visits.map((visit) => ({
+      customer_id: visit.customer_id, scheduled_service_id: visit.id, service_type: visit.service_type, status: 'completed',
+      service_date: visit.scheduled_date,
     })));
     const summary = await run();
     expect(summary).toMatchObject({ jobs: 51, held: 51, sample: 0, failed: 0 });

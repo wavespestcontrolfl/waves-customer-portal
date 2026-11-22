@@ -24,7 +24,8 @@ const { CUSTOMER_STAGES } = require('../services/customer-stages');
 
 // 11:30 PM ET on March 12 (already March 13 in UTC): the day window must come from the ET day.
 const NOW = new Date('2030-03-13T03:30:00Z');
-const JOB = { id: 'job-1', customer_id: 'cust-1', scheduled_date: '2030-03-05' };
+// `service_day` is the day the service was done, from the visit's service record (the job's own SQL).
+const JOB = { id: 'job-1', customer_id: 'cust-1', service_day: '2030-03-05' };
 const CUSTOMER = {
   id: 'cust-1', first_name: 'Jordan', last_name: 'Example', email: 'jordan@example.test', phone: '+19415550100',
   address_line1: '12 Example Test Ln', active: true,
@@ -50,7 +51,7 @@ function fakeDb(tables = {}) {
     };
     const recorded = [
       'where', 'orWhere', 'whereNot', 'whereIn', 'orWhereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhereRaw',
-      'whereBetween', 'leftJoin', 'join', 'orderBy', 'limit',
+      'whereBetween', 'leftJoin', 'join', 'joinRaw', 'orderBy', 'limit',
     ];
     for (const method of recorded) {
       builder[method] = (...args) => {
@@ -72,7 +73,7 @@ const whereValue = (query, column) => (query.calls.find(([method, first]) => met
 // The live-customer read is the one that filters on the customer stages (whereLiveCustomer in customer-stages.js).
 const isLiveCustomerRead = (query) => called(query, 'whereIn', 'pipeline_stage', CUSTOMER_STAGES);
 // A page of due jobs behind the first one carries the (date, id) of the last job read.
-const isLaterPageRead = (query) => query.calls.some(([method, sql]) => method === 'whereRaw' && String(sql).startsWith('(s.scheduled_date, s.id) >'));
+const isLaterPageRead = (query) => query.calls.some(([method, sql]) => method === 'whereRaw' && String(sql).startsWith('(done.service_day, s.id) >'));
 
 // A world where job-1 is in the offer's audience and prices. Each test changes one thing.
 // `jobs` is the first page of due jobs (a later page is empty).
@@ -174,13 +175,21 @@ describe("a job in the offer's audience that prices", () => {
     expect(deps.buildStartOffer).toHaveBeenCalledWith('cust-1', deps.db, 'pest_control', { visitId: 'job-1' });
   });
 
-  test('the jobs read are completed one-time pest and cockroach jobs, 3 to 14 days old on the ET calendar', async () => {
+  test('the jobs read are completed one-time pest and cockroach jobs whose service was done 3 to 14 days ago on the ET calendar', async () => {
     const deps = world();
     await run(deps);
     const [due] = deps.db.queriesOf('scheduled_services as s');
     expect(called(due, 'where', 's.status', 'completed')).toBe(true);
+    // The day is the service day of a service record that says the service was performed. The outcomes that
+    // say "nothing was performed" are the shared list, bound in its order.
+    const [, joinSql, joinBindings] = due.calls.find(([method]) => method === 'joinRaw');
+    expect(joinSql).toContain('SELECT MAX(r.service_date) AS service_day');
+    expect(joinSql).toContain("r.status = 'completed'");
+    expect(joinSql).toContain("COALESCE(r.structured_notes->>'visitOutcome', '') NOT IN (?, ?, ?)");
+    expect(joinBindings).toEqual(require('../services/pest-pressure/first-visit').NON_PERFORMED_VISIT_OUTCOMES);
     // March 12 in ET (March 13 in UTC): 14 days back is February 26, 3 days back is March 9.
-    expect(called(due, 'whereBetween', 's.scheduled_date', ['2030-02-26', '2030-03-09'])).toBe(true);
+    expect(called(due, 'whereBetween', 'done.service_day', ['2030-02-26', '2030-03-09'])).toBe(true);
+    expect(called(due, 'orderBy', 'done.service_day', 'asc')).toBe(true);
     expect(called(due, 'whereIn', { sql: 'COALESCE(s.service_key_snapshot, sv.service_key)' }, ['one_time_pest_control', 'cockroach_control'])).toBe(true);
     expect(called(due, 'whereNull', 's.recurring_parent_id')).toBe(true);
     // A one-time visit stores no pattern or the 'one_time' marker. Any other pattern is a plan's cadence.
@@ -190,7 +199,7 @@ describe("a job in the offer's audience that prices", () => {
 
   test('more due jobs than one page holds: the next page starts behind the last job read, and every job is counted', async () => {
     const firstPage = Array.from({ length: 50 }, (_, index) => ({ ...JOB, id: `job-${index + 1}` }));
-    const lastPage = [{ ...JOB, id: 'job-51', scheduled_date: '2030-03-06' }];
+    const lastPage = [{ ...JOB, id: 'job-51', service_day: '2030-03-06' }];
     const deps = world({ tables: { 'scheduled_services as s': (query) => (isLaterPageRead(query) ? lastPage : firstPage) } });
     const summary = await run(deps);
     expect(summary).toMatchObject({ jobs: 51, sample: 51 });
@@ -198,7 +207,7 @@ describe("a job in the offer's audience that prices", () => {
     expect(reads).toHaveLength(2);
     for (const read of reads) expect(called(read, 'limit', 50)).toBe(true);
     expect(isLaterPageRead(reads[0])).toBe(false);
-    expect(called(reads[1], 'whereRaw', '(s.scheduled_date, s.id) > (?::date, ?::uuid)', ['2030-03-05', 'job-50'])).toBe(true);
+    expect(called(reads[1], 'whereRaw', '(done.service_day, s.id) > (?::date, ?::uuid)', ['2030-03-05', 'job-50'])).toBe(true);
   });
 
   test('a last page that is exactly full costs one more read, which finds nothing', async () => {

@@ -8,7 +8,7 @@
  * 30 days. The offer email goes out from day 3 after the job with the plan price, and one reminder on day 21.
  *
  * This file is the first step, and it sends NO customer anything. Its purpose is the WORDS. Each morning it
- * reads the jobs that are 3 to 14 days old, keeps the customers the offer is for (a live customer, by the
+ * reads the jobs whose service was done 3 to 14 days ago, keeps the customers the offer is for (a live customer, by the
  * shared rule in customer-stages.js, with an email, who has not opted out: the offer's own opt-outs, and the
  * email division's standing answers, which are the staff do-not-contact list, the suppressions and the email
  * switch), prices the plan through the start offer pricing (service-report/cross-sell.js buildStartOffer:
@@ -26,6 +26,11 @@
  *
  * An answer of "not today" is not final. The job is read again each morning until day 14, so a home whose
  * property data is saved on day 5 gets its sample on day 5.
+ *
+ * The days count from the day the service was DONE, which the visit's service record states. A visit can be
+ * done days after its scheduled day, and a visit closed without the service (inspection only, declined by the
+ * customer, incomplete) keeps status 'completed'. So a job is due only when a service record says the service
+ * was performed, and the emails name that day.
  */
 
 const db = require('../models/db');
@@ -37,6 +42,7 @@ const { portalUrl } = require('../utils/portal-url');
 const { assertInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { REASONS: EMAIL_VERDICT } = require('./email-division/eligibility');
 const { whereLiveCustomer } = require('./customer-stages');
+const { NON_PERFORMED_VISIT_OUTCOMES } = require('./pest-pressure/first-visit');
 
 // The catalog keys of the two one-time jobs the offer follows (owner 2026-11-19: pest and roach only).
 const JOB_SERVICE_KEYS = ['one_time_pest_control', 'cockroach_control'];
@@ -93,8 +99,21 @@ function sampleKey(templateKey, jobId) {
   return `onetime-plan-offer:sample:${templateKey}:${jobId}`;
 }
 
-// One page of the completed one-time jobs that are FIRST_DAY to LAST_DAY days old today (ET), oldest first.
-// `after` is the last job of the page before: the next page starts behind it in the same (date, id) order.
+// The day the service of a visit was done: the service day of the visit's service record that says the service
+// was performed (status completed, and an outcome that is not one of the shared "nothing was performed" outcomes
+// of pest-pressure/first-visit.js: inspection only, declined by the customer, incomplete). The newest one, if a
+// visit has two. A visit with no such record has no day, so it is never due: the offer says "that job is plan
+// visit one", and only a record of the service proves there was one.
+const PERFORMED_DAY_JOIN = `JOIN LATERAL (
+    SELECT MAX(r.service_date) AS service_day
+    FROM service_records r
+    WHERE r.scheduled_service_id = s.id
+      AND r.status = 'completed'
+      AND COALESCE(r.structured_notes->>'visitOutcome', '') NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})
+  ) AS done ON TRUE`;
+
+// One page of the completed one-time jobs whose service was done FIRST_DAY to LAST_DAY days ago (ET), oldest
+// first. `after` is the last job of the page before: the next page starts behind it in the same (day, id) order.
 // The catalog identity is the row's own snapshot, else its services row: a text label alone is never a match.
 // One-time is read from the row by the repository's rule (the reverse of rate-review's PLAN_ROW_SQL, plus no
 // series parent): never a plan visit, a series extra, a free re-service or an included follow-up. A one-time
@@ -102,19 +121,20 @@ function sampleKey(templateKey, jobId) {
 function dueJobsPage(database, today, after) {
   const page = database('scheduled_services as s')
     .leftJoin('services as sv', 's.service_id', 'sv.id')
+    .joinRaw(PERFORMED_DAY_JOIN, [...NON_PERFORMED_VISIT_OUTCOMES])
     .where('s.status', 'completed')
-    .whereBetween('s.scheduled_date', [shiftDay(today, -LAST_DAY), shiftDay(today, -FIRST_DAY)])
+    .whereBetween('done.service_day', [shiftDay(today, -LAST_DAY), shiftDay(today, -FIRST_DAY)])
     .whereIn(database.raw('COALESCE(s.service_key_snapshot, sv.service_key)'), JOB_SERVICE_KEYS)
     .whereRaw('s.is_recurring IS DISTINCT FROM true')
     .whereNull('s.recurring_parent_id')
     .whereRaw("COALESCE(s.recurring_pattern, '') IN ('', 'one_time')")
     .whereRaw('s.is_callback IS DISTINCT FROM true')
     .whereRaw('s.followup_included IS DISTINCT FROM true')
-    .orderBy('s.scheduled_date', 'asc')
+    .orderBy('done.service_day', 'asc')
     .orderBy('s.id', 'asc')
     .limit(PAGE_SIZE);
-  if (after) page.whereRaw('(s.scheduled_date, s.id) > (?::date, ?::uuid)', [dateOnlyString(after.scheduled_date), after.id]);
-  return page.select('s.id', 's.customer_id', 's.scheduled_date');
+  if (after) page.whereRaw('(done.service_day, s.id) > (?::date, ?::uuid)', [dateOnlyString(after.service_day), after.id]);
+  return page.select('s.id', 's.customer_id', 'done.service_day');
 }
 
 // ---- Who the offer is for. Each rule answers the reason the offer is not for this customer, or null. ----
@@ -270,7 +290,8 @@ async function alreadySampled(database, jobId) {
 
 async function shadowJob(job, { now, deps, priceSettings }) {
   if (await alreadySampled(deps.db, job.id)) return { verdict: 'done', reason: null };
-  const ctx = { job, now, deps, priceSettings, jobDate: dateOnlyString(job.scheduled_date) };
+  // The emails name the day the service was done, and the offer's 30 days start there.
+  const ctx = { job, now, deps, priceSettings, jobDate: dateOnlyString(job.service_day) };
   const outcome = await evaluateJob(ctx);
   if (outcome.verdict === 'sample') await sendSamples(ctx, outcome.option);
   return outcome;
