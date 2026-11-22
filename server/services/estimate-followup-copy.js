@@ -96,6 +96,11 @@ const REPORT_TOUR_VIDEOS_LIVE = true;
 // with the 90-day card. Take 'lawn' out of this set in the PR that ships
 // the corrected lawn cut, after the owner's OK on that cut.
 const REPORT_TOURS_HELD = new Set(['lawn']);
+// The cut date rides each report-tour link as a query. The static mount
+// serves these files with a 1-hour max-age, so without it an email sent
+// right after a re-cut could play a cached older cut. Set it to the new
+// date with every report re-cut.
+const REPORT_TOUR_CUT = '20261122';
 const VIDEO_BASE = 'https://portal.wavespestcontrol.com/app-email/videos';
 
 // smsHook completes the phrase "your Waves {smsHook}" so brand
@@ -356,8 +361,8 @@ function followupEmailVars(estimate) {
     // Video slots are empty strings off-scope (or while the tours are
     // retired) — the email image/small_note blocks drop on blank
     // src/content, so the module vanishes cleanly.
-    report_video_preview: video ? `${VIDEO_BASE}/waves-${video.slug}-tour-preview.gif` : '',
-    report_video_url: video ? `${VIDEO_BASE}/waves-${video.slug}-tour.mp4` : '',
+    report_video_preview: video ? `${VIDEO_BASE}/waves-${video.slug}-tour-preview.gif?v=${REPORT_TOUR_CUT}` : '',
+    report_video_url: video ? `${VIDEO_BASE}/waves-${video.slug}-tour.mp4?v=${REPORT_TOUR_CUT}` : '',
     report_video_caption: video ? video.caption : '',
   };
 }
@@ -377,5 +382,5 @@ module.exports = {
   copyCategoryForEstimate,
   followupEmailVars,
   followupSmsHook,
-  _private: { PACKS, RECURRING_TERMS_BENEFIT, NEUTRAL_BENEFIT, NO_GUARANTEE_BENEFIT, REPORT_TOUR_VIDEOS_LIVE, REPORT_TOURS_HELD },
+  _private: { PACKS, RECURRING_TERMS_BENEFIT, NEUTRAL_BENEFIT, NO_GUARANTEE_BENEFIT, REPORT_TOUR_VIDEOS_LIVE, REPORT_TOURS_HELD, REPORT_TOUR_CUT },
 };

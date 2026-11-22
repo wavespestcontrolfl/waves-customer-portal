@@ -23,7 +23,7 @@ const {
   copyCategoryForEstimate,
   followupEmailVars,
   followupSmsHook,
-  _private: { PACKS, RECURRING_TERMS_BENEFIT, REPORT_TOUR_VIDEOS_LIVE, REPORT_TOURS_HELD },
+  _private: { PACKS, RECURRING_TERMS_BENEFIT, REPORT_TOUR_VIDEOS_LIVE, REPORT_TOURS_HELD, REPORT_TOUR_CUT },
 } = require('../services/estimate-followup-copy');
 
 const EMAIL_VAR_KEYS = [
@@ -216,8 +216,11 @@ describe('report-tour video slots (owner 2026-07-23 marketing videos)', () => {
     lanes(category);
     const vars = followupEmailVars({ id: 'e1' });
     expect(PACKS[category].video.slug).toBe(slug);
-    expect(vars.report_video_preview).toBe(`https://portal.wavespestcontrol.com/app-email/videos/waves-${slug}-tour-preview.gif`);
-    expect(vars.report_video_url).toBe(`https://portal.wavespestcontrol.com/app-email/videos/waves-${slug}-tour.mp4`);
+    // The cut date is in the link: the files are cached for an hour, and a
+    // link without it could play the older cut right after a re-cut.
+    expect(REPORT_TOUR_CUT).toMatch(/^\d{8}$/);
+    expect(vars.report_video_preview).toBe(`https://portal.wavespestcontrol.com/app-email/videos/waves-${slug}-tour-preview.gif?v=${REPORT_TOUR_CUT}`);
+    expect(vars.report_video_url).toBe(`https://portal.wavespestcontrol.com/app-email/videos/waves-${slug}-tour.mp4?v=${REPORT_TOUR_CUT}`);
     expect(vars.report_video_caption).toBe(PACKS[category].video.caption);
     expect(vars.report_video_caption).not.toMatch(/90-day/i);
   });

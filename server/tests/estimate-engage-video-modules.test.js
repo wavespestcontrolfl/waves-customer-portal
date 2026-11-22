@@ -150,8 +150,9 @@ describe('render QA', () => {
       expect(rendered.missingPayload).toEqual([]);
       expect(rendered.html).not.toMatch(/\{\{|\}\}/);
       const { slug, caption } = copyPrivate.PACKS[packKey].video;
-      expect(rendered.html).toContain(`/app-email/videos/waves-${slug}-tour-preview.gif`);
-      expect(rendered.html).toContain(`/app-email/videos/waves-${slug}-tour.mp4`);
+      const cut = copyPrivate.REPORT_TOUR_CUT;
+      expect(rendered.html).toContain(`/app-email/videos/waves-${slug}-tour-preview.gif?v=${cut}`);
+      expect(rendered.html).toContain(`/app-email/videos/waves-${slug}-tour.mp4?v=${cut}`);
       expect(rendered.text).toContain(caption);
     });
   }
