@@ -108,19 +108,22 @@
  *   - THE AMOUNT is worked out by the board's own code from the board's own reads (readSeasonScores and priceSeason:
  *     readSeasonScoreFigures, readSeasonPay, seasonBonusOf), as of the season's last day: the score and its settings, the
  *     review rate, the multiplier (the level part is the entry level until the career ladder has a source, as on the board;
- *     these are read in one snapshot, as the board reads them, BEFORE the pay run's transaction opens: readSeasonScores),
- *     and the pay earned in the season on the
+ *     these are read in one snapshot, as the board reads them, BEFORE the pay run's transaction opens, and read again
+ *     under the payroll lock: readSeasonScores, seasonScoreOf), and the pay earned in the season on the
  *     FINALIZED checks for the pay weeks before the bonus's own (tech-rewards-scoreboard.js seasonLastPayWeek: through the
  *     week before the one a run dated the last Friday of September pays; a check for a later pay week never counts, as for
  *     the stay bonus). So it is written by a run for a week AFTER that week, when every week from the season's start that
  *     holds work has a finalized check. It waits while a score part has no data (score_incomplete) or no score settings are in force for the
  *     season (score_settings_missing), when the read itself fails (score_read_failed: the error is logged and the pay
- *     run goes on), and for a technician the read before the run did not cover (score_not_read: the next sync reads them). A complete score under the lowest cut line earns no bonus: no line and no note
+ *     run goes on), for a technician the read before the run did not cover (score_not_read: the next sync reads them),
+ *     and when the score changed between that read and the payroll lock (score_changed: a finalize then pays no bonus from
+ *     the old score, and the office sees the run again). A complete score under the lowest cut line earns no bonus: no line and no note
  *     (score_below_bonus_line, in the audit event), whatever else is not ready: the band is asked before every wait. The line's note says the rate, the base, the multiplier and the score. An
  *     open line is worked out again at every sync (a score part corrected since moves it); a PAID line never changes.
  *   - A PAID season bonus holds the pay runs it counted, exactly as a paid stay bonus does (counted_check_ids).
  */
 const { recordAuditEvent } = require('./audit-log');
+const { isDeepStrictEqual } = require('node:util');
 const logger = require('./logger');
 const calc = require('./tech-rewards-calc');
 const { applyAssignable } = require('./technician-eligibility');
@@ -492,6 +495,8 @@ async function readSeasonScoreOrNull(snapshot, technicianId, season) {
  *     finds who was not read here waits with a note (score_not_read), and the next sync reads them.
  *   - A BONUS NEVER HOLDS A PAY RUN. A read that fails is logged and that bonus waits (score_read_failed): one technician's
  *     (readSeasonScoreOrNull), or every one when the snapshot itself fails (`failed`).
+ *   - NOT THE LAST WORD. The pay run takes the payroll lock after this read, and may wait for it. seasonScoreOf reads each
+ *     score again under the lock and uses these figures only when nothing changed.
  */
 async function readSeasonScores(conn, payDate) {
   const due = payLinesOn() && kindOn(SEASON) ? seasonDueInRun(payDate) : [];
@@ -524,21 +529,49 @@ async function readSeasonScoresOfRun(conn, runId) {
 }
 
 /**
+ * The score figures one season bonus is worked out from, or { wait }: the figures read before the pay run's transaction
+ * opened (readSeasonScores), once the pay run has checked them UNDER THE PAYROLL LOCK. The pay run waits for that lock after
+ * the first read, so a score part corrected in between (an owner rating, a closeout) would be paid from the old score, and
+ * a finalize would pay it with the draft the office approved. So the figures are read a second time here, on the pay run's
+ * own connection, in a savepoint (readSeasonScoreOrNull: no second connection, and an error does not end the pay run's
+ * transaction), and compared with the first:
+ *   the same      the snapshot's figures are one moment's data AND still the data under the lock: they are used
+ *   not the same  the bonus waits (score_changed). Its open line comes off, so a finalize sees a run that differs from the
+ *                 draft, pays nothing from the old score and gives the office the new numbers; the next sync reads again
+ * The second read alone is not used: it is READ COMMITTED, and its parts can be from two moments.
+ */
+async function seasonScoreOf(trx, technicianId, key, season, seasonScores) {
+  const wait = (reason) => ({ wait: { reason, week: null } });
+  const read = seasonScores ? seasonScores.figures.get(sourceIdOf(SEASON, technicianId, key)) : undefined;
+  if (read === undefined && !(seasonScores && seasonScores.failed)) return wait('score_not_read');
+  if (!read) return wait('score_read_failed');
+  const underLock = await readSeasonScoreOrNull(trx, technicianId, season);
+  if (!underLock) return wait('score_read_failed');
+  return isDeepStrictEqual(underLock, read) ? read : wait('score_changed');
+}
+
+/**
  * The season bonus of one candidate: { amountCents, span, note, countedCheckIds }, { skip: reason } (no bonus for them) or
  * { wait: { reason, week } } (not on this run). Every figure is the board's own, read as of the season's last day
  * (tech-rewards-scoreboard.js readSeasonScoreFigures, readSeasonPay: the two reads the board's readSeasonFigures is made of)
  * and put together by the board's own code (seasonBonusOf), so the line is the figure the board shows for the closed season.
- * The score figures are the ones read before the pay run's transaction opened (`seasonScores`, readSeasonScores).
+ * The score figures are the ones read before the pay run's transaction opened (`seasonScores`, readSeasonScores), checked
+ * again under the payroll lock (seasonScoreOf). `conflict`: the wait for a season bonus line that the sync did not write
+ * (applyCandidate), or null.
  * The pay is the pay EARNED in the season on the finalized checks for the pay weeks through seasonLastPayWeek (readBonusPay:
  * no check for a later pay week), read in the pay run's transaction under the payroll lock, so, as for the stay bonus, the
  * line is worked out only when those checks are all final. In this order:
  *   hired_after_season      (skip) hired after the season's last day: no bonus for that season
  *   score_not_read          the read before the run did not cover this technician (a recipient since that read, or a gate
  *                           turned on since): the next sync reads them
- *   score_read_failed       the score could not be read (readSeasonScores): the error is logged and the run goes on
+ *   score_read_failed       the score could not be read (readSeasonScores, seasonScoreOf): the error is logged and the run
+ *                           goes on
+ *   score_changed           the score is not what it was before the pay run took the payroll lock (seasonScoreOf)
+ *                           (while the score is not known, a line the sync did not write comes first: `conflict`)
  *   score_below_bonus_line  (skip) the score is complete and under the lowest cut line: the season earns no bonus on any
  *                           run. Asked BEFORE every wait below, so no run says a bonus waits (for a hire date, for an unpaid
- *                           week) that no run will pay
+ *                           week, for a line somebody made by hand) that no run will pay
+ *   other_season_line       a season bonus line that the sync did not write is on file (`conflict`): check that line first
  *   hire_date_missing,      no hire date on file, or one that is not a calendar date: the multiplier counts years of service,
  *   hire_date_invalid       so the bonus waits, with a note, until the date is entered or corrected
  *   pay_week_too_early      this run pays the last week the base counts or an earlier one: its own check is not final, so
@@ -550,14 +583,14 @@ async function readSeasonScoresOfRun(conn, runId) {
  *   no_pay_on_file, no_paycheck  as for the stay bonus
  * An open line is worked out again at every sync, so a score part or a setting corrected before the run is finalized moves it.
  */
-async function priceSeason(trx, cand, tech, run, { seasonScores }) {
+async function priceSeason(trx, cand, tech, run, { seasonScores, conflict }) {
   const season = scoreboard().closedSeason(Number(cand.key));
   if (tech.hire_date && tech.hire_date > season.end) return { skip: 'hired_after_season' };
-  const scored = seasonScores ? seasonScores.figures.get(sourceIdOf(SEASON, tech.id, cand.key)) : undefined;
-  if (scored === undefined && !(seasonScores && seasonScores.failed)) return { wait: { reason: 'score_not_read', week: null } };
-  if (!scored) return { wait: { reason: 'score_read_failed', week: null } };
+  const scored = await seasonScoreOf(trx, tech.id, cand.key, season, seasonScores);
+  if (scored.wait) return conflict || scored;
   // the band is the score module's own (buildSeasonScore: scoreBand with the settings in force on the season's last day)
   if (scored.seasonScore && scored.seasonScore.complete && scored.seasonScore.rateBps === 0) return { skip: 'score_below_bonus_line' };
+  if (conflict) return conflict;
   if (!tech.hire_date) return { wait: { reason: tech.hire_date_bad ? 'hire_date_invalid' : 'hire_date_missing', week: null } };
   const span = seasonSpanOf(season.year, run.week_start, tech.hire_date);
   const lastWeek = scoreboard().seasonLastPayWeek(season.year);
@@ -654,6 +687,7 @@ const WAIT_WORDS = {
   score_settings_missing: () => 'no score settings are in force for the last day of the season, so set them first',
   score_read_failed: () => 'the pay run could not read their season score because of an error, so report it',
   score_not_read: () => 'their season score was not read for this pay run, so recompute it',
+  score_changed: () => 'their season score changed while this pay run was worked out, so recompute it',
   base_needs_review: (w) => `an older paycheck paid a bonus line and other line pay for the week of ${dayLabel(w.week)} and kept no split of that week's overtime between them, so work this bonus out by hand`,
 };
 
@@ -814,11 +848,16 @@ async function applyCandidate(trx, run, sourceId, cand, state) {
   const open = state.openBySource.get(sourceId);
   const here = Boolean(open) && open.earned_week_start === run.week_start;
   const tech = state.techById.get(cand.technicianId);
+  // A line of the kind that the sync did not write (loadState, handMade and foreignKeys): the automatic line waits for it. A
+  // season bonus asks first whether the season earns a bonus at all (priceSeason: hired after the season, a score under the
+  // lowest cut line), so nobody is asked to check a hand-made line against an automatic bonus that no run will write.
+  const conflict = state.handMade.has(`${cand.kind}:${cand.technicianId}`) || state.foreignKeys.has(sourceId)
+    ? { wait: { reason: OTHER_LINE[cand.kind], week: null } } : null;
   let priced;
   if (!cand.due) priced = { skip: 'not_due_in_this_run' };
   else if (!tech) priced = { skip: 'not_active' };
-  else if (state.handMade.has(`${cand.kind}:${cand.technicianId}`) || state.foreignKeys.has(sourceId)) priced = { wait: { reason: OTHER_LINE[cand.kind], week: null } };
-  else priced = await PRICE[cand.kind](trx, cand, tech, run, state);
+  else if (conflict && cand.kind !== SEASON) priced = conflict;
+  else priced = await PRICE[cand.kind](trx, cand, tech, run, { seasonScores: state.seasonScores, conflict });
   if (priced.skip || priced.wait) {
     if (here) await trx('payroll_pay_lines').where({ id: open.id }).del();
     return { skip: priced.skip, wait: priced.wait, removed: here ? open.id : null };

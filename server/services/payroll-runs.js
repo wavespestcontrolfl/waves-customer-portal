@@ -918,7 +918,8 @@ const syncCommission = (trx, weekStart, actorId) => syncCommissionLines(trx, {
 // it asks whether a check can be worked out for the technician, and a pay rate step that is due changes that answer.
 // `seasonScores`: the season score figures a season bonus is worked out from (readSeasonScores, readSeasonScoresOfRun). Each
 // run write reads them BEFORE its transaction opens, in one snapshot whose connection is given back first, so a pay run never
-// holds the payroll lock while it waits for a second connection. Null, and nothing read, on a run dated for no season bonus.
+// holds the payroll lock while it waits for a second connection. The sync reads each score again under the lock and holds a
+// bonus whose score changed in between. Null, and nothing read, on a run dated for no season bonus.
 const syncTechRewards = (trx, run, actorId, seasonScores) => syncTechRewardLines(run, trx, { actorId, seasonScores });
 // The Tech Rewards lines a void or a finalize took off (dropRewardLinesOfWeek), for that event's audit row: ids only. The key is
 // absent when there were none, so every other run's event is unchanged.

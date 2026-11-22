@@ -2215,6 +2215,47 @@ postgres('tech rewards pay lines: the December gift', () => {
       started.forEach((kind, i) => { if (kind === 'scores') expect(started[i + 1]).toBe('other'); });
     });
 
+    it('pays no bonus from a score that changed while the pay run waited for the payroll lock: a finalize gives the run back for review', async () => {
+      const alpha = await readyTech('Sample Alpha');
+      await paidWeeks(alpha);
+      await approvedWeek(alpha, BONUS_WEEK);
+      const run = await draft(BONUS_WEEK);
+      expect(await linesOf(alpha)).toMatchObject([{ status: 'open', amount_cents: 18480 }]); // 4% of 2,640.00 x 1.75
+      const shown = (await api('GET', `/runs/${run.id}`)).body.run;
+      // The office approves that draft. The finalize reads the score (92.5), then waits for the payroll lock; meanwhile the
+      // owner corrects a rating, and under the lock the score is 85: a lower band.
+      scores.buildSeasonScore.mockResolvedValueOnce(scoreOf(92.5, 400)).mockResolvedValue(scoreOf(85, 250));
+      const stale = await api('POST', `/runs/${run.id}/finalize`, { body: { token: shown.token } });
+      expect([stale.status, stale.body.error]).toEqual([409, 'Hours or settings changed. Review the new numbers.']);
+      // nothing was paid from the old score: the run is still a draft, the bonus is off it, and the run says why
+      expect(await trx('payroll_runs').where({ id: run.id }).first('status')).toEqual({ status: 'draft' });
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect((await waitsOf(run.id)).map((w) => w.reason)).toEqual(['score_changed']);
+      expect(await notesOf(run.id)).toEqual([seasonWaits('Sample Alpha', 'their season score changed while this pay run was worked out, so recompute it')]);
+      // the next sync reads the corrected score before and under the lock: the bonus is back, at the new band, and finalizes
+      const again = await recompute(run.id);
+      expect(checkOf(again, alpha).techRewardsCents).toBe(11550); // 2.5%
+      expect(await notesOf(run.id)).toEqual([]);
+      await finalize(run.id);
+      expect(await linesOf(alpha)).toMatchObject([{ status: 'paid', amount_cents: 11550 }]);
+      // the same on a draft and a recompute: a score that moved in between is never written
+      scores.buildSeasonScore.mockReset().mockResolvedValueOnce(scoreOf(92.5, 400)).mockResolvedValue(scoreOf(92.6, 400));
+      const bravo = await readyTech('Sample Bravo');
+      await paidWeeks(bravo);
+      await approvedWeek(bravo, NEXT);
+      const next = await draft(NEXT);
+      expect(await linesOf(bravo)).toHaveLength(0);
+      expect((await waitsOf(next.id)).map((w) => [w.technician_id, w.reason])).toEqual([[bravo, 'score_changed']]);
+      // the read under the lock fails inside PostgreSQL: the bonus waits, and the pay run's transaction goes on
+      const logger = require('../services/logger');
+      scores.buildSeasonScore.mockReset().mockResolvedValueOnce(scoreOf(92.6, 400)).mockImplementation(async (_id, _year, _season, conn) => { await conn.raw('SELECT 1 / 0'); });
+      const failed = await recompute(next.id);
+      expect([failed.waiting, failed.blocked]).toEqual([[], []]);
+      expect(checkOf(failed, bravo)).toMatchObject({ grossCents: 88000 });
+      expect(await notesOf(next.id)).toEqual([`Season bonus (2027) for Sample Bravo waits: the pay run could not read their season score because of an error, so report it. Only a pay run dated Nov 23, 2027 or earlier can add it`]);
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining(`season 2027 score could not be read for technician ${bravo}`));
+    });
+
     it('waits, with a note, for a technician the read before the run did not cover, and for every technician when that read failed', async () => {
       const alpha = await readyTech('Sample Alpha');
       await paidWeeks(alpha);
@@ -2337,7 +2378,25 @@ postgres('tech rewards pay lines: the December gift', () => {
       await trx('payroll_pay_lines').insert({ technician_id: alpha, kind: 'season_bonus', amount_cents: 5000, earned_week_start: NEXT });
       const run = await draft(BONUS_WEEK);
       expect(await linesOf(alpha)).toHaveLength(0);
-      expect(await notesOf(run.id)).toEqual([seasonWaits('Sample Alpha', 'a season bonus line that the pay run did not write is already on file for them, so check that line first')]);
+      const other = seasonWaits('Sample Alpha', 'a season bonus line that the pay run did not write is already on file for them, so check that line first');
+      expect(await notesOf(run.id)).toEqual([other]);
+      // while the score is not known (its read failed), the line somebody made is still the first thing to check
+      scores.buildSeasonScore.mockRejectedValue(new Error('sample failure'));
+      await recompute(run.id);
+      expect(await notesOf(run.id)).toEqual([other]);
+      // a complete score under the lowest cut line: the season earns no automatic bonus, so there is nothing to check the
+      // hand-made line against. No wait and no note; the hand-made line is not touched
+      scores.buildSeasonScore.mockReset().mockResolvedValue(scoreOf(64, 0));
+      await recompute(run.id);
+      expect(await notesOf(run.id)).toEqual([]);
+      expect(await skippedOf()).toContainEqual({ technician_id: alpha, kind: 'season_bonus', reason: 'score_below_bonus_line' });
+      expect(await trx('payroll_pay_lines').where({ technician_id: alpha, kind: 'season_bonus' })).toMatchObject([{ status: 'open', amount_cents: 5000 }]);
+      // and the same for a technician hired after the season
+      scores.buildSeasonScore.mockReset().mockResolvedValue(scoreOf(92.5, 400));
+      await trx('technicians').where({ id: alpha }).update({ hire_date: '2027-09-01' });
+      await recompute(run.id);
+      expect(await notesOf(run.id)).toEqual([]);
+      expect(await skippedOf()).toContainEqual({ technician_id: alpha, kind: 'season_bonus', reason: 'hired_after_season' });
     });
   });
 });
