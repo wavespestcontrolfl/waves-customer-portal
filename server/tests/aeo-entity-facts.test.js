@@ -1215,6 +1215,8 @@ test('bond terms: the 1-, 5- and 10-year terms count in every wording, one term 
     'Waves offers an optional termite bond with financing available, in 1-, 5- or 10-year terms.',
     'The warranty comes in terms of 1, 5 or 10 years and financing is available.',
     'The bond runs 1, 5 or 10 years with payment plans available.',
+    // An article before each length is still the same list.
+    'The termite bond has a 1-year, a 5-year, or a 10-year term.',
   ];
   for (const text of stated) expect([text, score('E7', text).expected.bond_term_options]).toEqual([text, true]);
   const notStated = [
@@ -1229,6 +1231,7 @@ test('bond terms: the 1-, 5- and 10-year terms count in every wording, one term 
     'The termite bond is optional. Monitoring is offered for 1-, 5- or 10-year terms.',
     'The bond is optional, and termite monitoring is offered for 1-, 5- or 10-year terms.',
     'The bond is optional. You can spread payment over 1-, 5- or 10-year terms.',
+    'Waves finances installation over 1-, 5- or 10-year terms. The termite bond is optional.',
     'Lawn care plans come in 1-, 5- or 10-year terms.',
     // Another service's contract owns its own durations, also beside a bond.
     'Waves offers an optional termite bond. Monitoring contracts run for 1, 5 or 10 years.',
