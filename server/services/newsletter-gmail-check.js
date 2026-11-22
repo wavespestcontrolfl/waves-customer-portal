@@ -17,9 +17,9 @@
  * With fewer than MIN_COPIES delivered copies in either group there is no verdict.
  *
  * The job runs every hour (scheduler.js) and judges each issue from 48 to 72 hours after it went
- * out. Every run counts the same opens, the ones of the issue's first 48 hours (most have arrived
- * by then), so the day of hourly runs is one test that a restart or a failed run cannot skip, not
- * 24 tests of a moving count. An issue that stopped part way ('failed') is judged too: the copies
+ * out. Every run counts the same copies and opens, the ones of the issue's first 48 hours (most
+ * opens have arrived by then), so the day of hourly runs is one test that a restart or a failed
+ * run cannot skip, not 24 tests of a moving count. An issue that stopped part way ('failed') is judged too: the copies
  * it delivered reached readers. One alert per issue, ever: the dedupe key holds the send id, with
  * neither dedupeOpenOnly nor refreshOnDedupe, so a later run stays silent, also after a person
  * marked the row done (admin-alert-retention.js, RE-RING RISK). The check reads the ledger only
@@ -33,9 +33,12 @@ const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
 const { formatETDayDate } = require('../utils/datetime-et');
 
 const HOUR_MS = 60 * 60 * 1000;
-// Opens count up to JUDGE_FROM_MS after the issue went out; runs judge it from then to JUDGE_UNTIL_MS.
+// Copies and opens count up to JUDGE_FROM_MS after the issue went out; runs judge it from then to
+// JUDGE_UNTIL_MS.
 const JUDGE_FROM_MS = 48 * HOUR_MS;
 const JUDGE_UNTIL_MS = 72 * HOUR_MS;
+// A run mails its copies in minutes. A day is a wide margin for the longest one.
+const RUN_MARGIN_MS = 24 * HOUR_MS;
 const MIN_COPIES = 20;
 const CHANCE_LIMIT = 0.01;
 const alertKey = (sendId) => `newsletter-gmail-check:${sendId}`;
@@ -91,6 +94,10 @@ const WENT_OUT_SQL = 'greatest(newsletter_sends.sent_at, (select max(copy.sent_a
 function issuesToJudge(now) {
   return db('newsletter_sends')
     .whereIn('status', ['sent', 'failed'])
+    // Only a send whose row changed lately can be in the window: every run that mails copies stamps
+    // updated_at when it claims the send, at most RUN_MARGIN_MS before its newest copy. Without
+    // this, each hour would read the copies of every past issue to find its newest one.
+    .where('newsletter_sends.updated_at', '>', new Date(now.getTime() - JUDGE_UNTIL_MS - RUN_MARGIN_MS))
     .whereRaw(`${WENT_OUT_SQL} <= ?`, [new Date(now.getTime() - JUDGE_FROM_MS)])
     .whereRaw(`${WENT_OUT_SQL} > ?`, [new Date(now.getTime() - JUDGE_UNTIL_MS)])
     .orderByRaw(`${WENT_OUT_SQL} asc`)

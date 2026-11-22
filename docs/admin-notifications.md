@@ -865,8 +865,8 @@ sends no spam reports, so the spam-report stop cannot see an issue that Gmail fi
 `failed` part way), 48 to 72 hours after it went out (the later of its `sent_at` and its newest mailed copy, so a resumed send
 is judged from the resume), the check compares the share of delivered copies that Gmail readers opened with the share that all other
 readers opened (`gmailOpenCounts` in `newsletter-sender.js`: opens by a person only, read from the SendGrid event log, where a
-machine open is marked; a click is not an open). Every hourly run counts the same opens, the ones of the issue's first 48 hours,
-so the day of runs is one test and not 24. It raises one bell when Gmail's rate is under half of the other readers' rate
+machine open is marked; a click is not an open). Every hourly run counts the same copies and opens, the ones of the issue's first
+48 hours, so the day of runs is one test and not 24. It raises one bell when Gmail's rate is under half of the other readers' rate
 and chance does not explain the gap (under 1 in 100 by Fisher's exact test, which takes neither rate as exact); with fewer than 20
 delivered copies in either group it gives no verdict.
 Category `newsletter` with `bell: true` (newsletter is silenced by default), headline "Content — check Gmail delivery of the

@@ -2244,11 +2244,6 @@ async function ledgerProgress(trx, send) {
   return { got, left, refused: refusedCount };
 }
 
-// A delivered copy, as spamReportCounts and gmailOpenCounts both count one (unqualified columns of
-// newsletter_send_deliveries).
-const DELIVERED_COPY_SQL = 'delivered_at is not null or opened_at is not null or clicked_at is not null'
-  + ' or complained_at is not null or unsubscribed_at is not null';
-
 /**
  * A send's spam reports and the copies it delivered, for the Waves Pest Insider spam-report stop
  * (pest-insider/schedule.js). A report is a reader's own (complained_at with no drop reason).
@@ -2265,12 +2260,16 @@ async function spamReportCounts(db, sendId) {
     .whereNot(refusedDelivery)
     .select(
       db.raw('count(*) filter (where complained_at is not null and bounce_reason is distinct from ?) as reports', [SPAM_REPORT_DROP_REASON]),
-      db.raw(`count(*) filter (where ${DELIVERED_COPY_SQL}) as delivered`),
+      db.raw('count(*) filter (where delivered_at is not null or opened_at is not null or clicked_at is not null'
+        + ' or complained_at is not null or unsubscribed_at is not null) as delivered'),
     )
     .first();
   return { reports: Number(counts?.reports) || 0, delivered: Number(counts?.delivered) || 0 };
 }
 
+// A copy delivered by a given time (one binding): the earliest of the stamps that spamReportCounts
+// reads a delivered copy from (least skips a NULL; with none, the copy is not delivered).
+const DELIVERED_COPY_BY_SQL = 'least(delivered_at, opened_at, clicked_at, complained_at, unsubscribed_at) <= ?';
 // The mailed address is a Gmail mailbox. A Google Workspace mailbox on its own domain is not one
 // here: nothing in the address tells it apart.
 const GMAIL_COPY_SQL = "lower(split_part(newsletter_send_deliveries.email, '@', 2)) in ('gmail.com', 'googlemail.com')";
@@ -2288,23 +2287,23 @@ const PERSON_OPENED_COPY_SQL = `exists (select 1 from sendgrid_webhook_events pe
     and coalesce(person_open.occurred_at, person_open.created_at) <= ?)`;
 
 /**
- * A send's delivered copies and the ones a person opened by `openedBy`, for Gmail mailboxes and
- * for all other mailboxes, for the newsletter Gmail check (newsletter-gmail-check.js). A delivered
- * copy is the one spamReportCounts counts (DELIVERED_COPY_SQL, never a refused row). A click is
- * not an open: a mail scanner follows links, and mostly outside Gmail. One statement reads all
- * four counts. `openedBy` (a Date) is required: with a fixed time, a later read counts the same
- * opens.
+ * A send's copies delivered by `asOf` and the ones a person opened by then, for Gmail mailboxes
+ * and for all other mailboxes, for the newsletter Gmail check (newsletter-gmail-check.js). A
+ * delivered copy is the one spamReportCounts counts (never a refused row). A click is not an open:
+ * a mail scanner follows links, and mostly outside Gmail. One statement reads all four counts.
+ * `asOf` (a Date) is required: with a fixed time, a later read counts the same copies and opens. A
+ * copy delivered after it is in neither count: its reader had no time to open it.
  */
-async function gmailOpenCounts(db, sendId, openedBy) {
+async function gmailOpenCounts(db, sendId, asOf) {
   const counts = await db('newsletter_send_deliveries')
     .where({ send_id: sendId })
     .whereNot(refusedDelivery)
-    .whereRaw(`(${DELIVERED_COPY_SQL})`)
+    .whereRaw(DELIVERED_COPY_BY_SQL, [asOf])
     .select(
       db.raw(`count(*) filter (where ${GMAIL_COPY_SQL}) as gmail_delivered`),
-      db.raw(`count(*) filter (where ${GMAIL_COPY_SQL} and ${PERSON_OPENED_COPY_SQL}) as gmail_opened`, [openedBy]),
+      db.raw(`count(*) filter (where ${GMAIL_COPY_SQL} and ${PERSON_OPENED_COPY_SQL}) as gmail_opened`, [asOf]),
       db.raw(`count(*) filter (where not (${GMAIL_COPY_SQL})) as other_delivered`),
-      db.raw(`count(*) filter (where not (${GMAIL_COPY_SQL}) and ${PERSON_OPENED_COPY_SQL}) as other_opened`, [openedBy]),
+      db.raw(`count(*) filter (where not (${GMAIL_COPY_SQL}) and ${PERSON_OPENED_COPY_SQL}) as other_opened`, [asOf]),
     )
     .first();
   const n = (value) => Number(value) || 0;

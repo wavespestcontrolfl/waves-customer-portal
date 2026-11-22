@@ -14,6 +14,7 @@ jest.mock('../models/db', () => {
   const state = { sends: [], wheres: [] };
   const fn = jest.fn(() => {
     const q = {
+      where: jest.fn((...args) => { state.wheres.push(args); return q; }),
       whereIn: jest.fn((...args) => { state.wheres.push(args); return q; }),
       whereRaw: jest.fn((...args) => { state.wheres.push(args); return q; }),
       orderByRaw: jest.fn(() => q),
@@ -112,6 +113,8 @@ describe('runNewsletterGmailCheck', () => {
     expect(db).toHaveBeenCalledWith('newsletter_sends');
     expect(db.state.wheres).toEqual([
       ['status', ['sent', 'failed']],
+      // Only a send row changed in the last 96 hours is read for its newest copy.
+      ['newsletter_sends.updated_at', '>', new Date(NOW.getTime() - 96 * HOUR_MS)],
       [expect.stringMatching(/^greatest\(newsletter_sends\.sent_at, .+\) <= \?$/), [new Date(NOW.getTime() - 48 * HOUR_MS)]],
       [expect.stringMatching(/^greatest\(newsletter_sends\.sent_at, .+\) > \?$/), [new Date(NOW.getTime() - 72 * HOUR_MS)]],
     ]);
@@ -125,7 +128,7 @@ describe('runNewsletterGmailCheck', () => {
 
     const result = await runNewsletterGmailCheck({ now: NOW });
 
-    // Opens count up to 48 hours after the issue went out, whichever hourly run reads them.
+    // Copies and opens count up to 48 hours after the issue went out, whichever hourly run reads them.
     expect(gmailOpenCounts).toHaveBeenCalledWith(db, 'send-1', new Date('2026-12-05T12:00:00Z'));
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
     const [category, headline, why, opts] = notifyAdmin.mock.calls[0];
@@ -176,7 +179,7 @@ describe('runNewsletterGmailCheck', () => {
     expect(notifyAdmin.mock.calls[0][3].dedupeKey).toBe('newsletter-gmail-check:send-gap');
   });
 
-  test('the next hour reads the same 48 hours of opens, finds the alert already written and logs nothing', async () => {
+  test('the next hour reads the same 48 hours, finds the alert already written and logs nothing', async () => {
     db.state.sends = [issue()];
     gmailOpenCounts.mockResolvedValue(counts(2, 50, 20, 40));
     notifyAdmin.mockResolvedValueOnce({ id: 'notif-1', deduped: true });

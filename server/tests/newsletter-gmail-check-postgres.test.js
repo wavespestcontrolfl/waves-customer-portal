@@ -1,8 +1,8 @@
 /**
  * The newsletter Gmail check's two reads on real PostgreSQL.
  * - The counts (newsletter-sender gmailOpenCounts): which copies of one issue count as delivered
- *   and as opened by a person by a given time, for Gmail mailboxes and for all other mailboxes.
- *   The ledger rows are written by the SendGrid webhook's own event mapping
+ *   by a given time and as opened by a person by then, for Gmail mailboxes and for all other
+ *   mailboxes. The ledger rows are written by the SendGrid webhook's own event mapping
  *   (computeNewsletterEventUpdates), and the opens are rows of its event log
  *   (sendgrid_webhook_events), where the machine-open flag and the time of the open live.
  * - The issues a run judges (newsletter-gmail-check issuesToJudge): the ones that went out 48 to
@@ -46,18 +46,20 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     await db.destroy();
   });
 
-  // Applies SendGrid events to one ledger row through the webhook's own mapping, in order.
-  async function receive(id, ...events) {
+  const hoursAgo = (hours) => new Date(Date.now() - hours * 60 * 60 * 1000);
+  // Copies and opens count up to this time. Unless a case says otherwise, the events below reached
+  // the webhook 20 hours ago and the opens happened 10 hours ago.
+  const AS_OF = hoursAgo(2);
+
+  // Applies SendGrid events to one ledger row through the webhook's own mapping, in order. `at` =
+  // when the webhook got them: the time the mapping stamps on the row.
+  async function receive(id, events, at = hoursAgo(20)) {
     for (const ev of events) {
       const row = await db('newsletter_send_deliveries').where({ id }).first();
-      const update = computeNewsletterEventUpdates(ev, row);
+      const update = computeNewsletterEventUpdates(ev, row, at);
       if (update) await db('newsletter_send_deliveries').where({ id }).update(update.delivery);
     }
   }
-
-  const hoursAgo = (hours) => new Date(Date.now() - hours * 60 * 60 * 1000);
-  // Opens count up to this time. The opens below happened 10 hours ago unless a case says otherwise.
-  const OPENED_BY = hoursAgo(2);
 
   let eventNo = 0;
   // One row of the webhook's event log, as processWebhookEvent writes an open. `logged` = a row from
@@ -70,7 +72,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     });
   }
 
-  test('counts delivered copies and opens by a person by a given time, for Gmail and for all other mailboxes', async () => {
+  test('counts the copies delivered by a given time and the opens by a person by then, for Gmail and for all other mailboxes', async () => {
     const [send] = await db('newsletter_sends').insert({
       subject: 'Synthetic Gmail check', html_body: '<p>Body</p>', text_body: 'Body', status: 'sent', sent_at: new Date(), auto_share_social: false,
     }).returning(['id']);
@@ -83,7 +85,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
       // An open logged before the machine flag and the event time were kept.
       gmailOldFlag: `oldflag-${stamp}@gmail.com`,
       // A person opened it, but after the time the count stops at.
-      gmailLate: `late-${stamp}@gmail.com`,
+      gmailLateOpen: `lateopen-${stamp}@gmail.com`,
+      // Gmail took it after the time the count stops at: its reader had no time to open it.
+      gmailLateDelivery: `latedelivery-${stamp}@gmail.com`,
       // This reader's only open is on another issue's message.
       gmailOtherIssue: `otherissue-${stamp}@gmail.com`,
       // Accepted by SendGrid with no later event: not a delivered copy yet.
@@ -100,36 +104,39 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     }))).returning(['id', 'email']);
     const id = Object.fromEntries(Object.entries(copies).map(([kind, email]) => [kind, rows.find((row) => row.email === email).id]));
 
-    await receive(id.gmailPerson, { event: 'delivered' }, { event: 'open' });
+    await receive(id.gmailPerson, [{ event: 'delivered' }, { event: 'open' }]);
     await logOpen({ messageId, email: copies.gmailPerson, machineOpen: false });
-    await receive(id.gmailMachine, { event: 'delivered' }, { event: 'open', sg_machine_open: true });
+    await receive(id.gmailMachine, [{ event: 'delivered' }, { event: 'open', sg_machine_open: true }]);
     await logOpen({ messageId, email: copies.gmailMachine, machineOpen: true });
-    await receive(id.gmailOldFlag, { event: 'delivered' }, { event: 'open' });
+    await receive(id.gmailOldFlag, [{ event: 'delivered' }, { event: 'open' }]);
     await logOpen({ messageId, email: copies.gmailOldFlag, machineOpen: null, logged: hoursAgo(10) });
-    await receive(id.gmailLate, { event: 'delivered' }, { event: 'open' });
-    await logOpen({ messageId, email: copies.gmailLate, machineOpen: false, at: hoursAgo(1) });
-    await receive(id.gmailOtherIssue, { event: 'delivered' });
+    await receive(id.gmailLateOpen, [{ event: 'delivered' }]);
+    await receive(id.gmailLateOpen, [{ event: 'open' }], hoursAgo(1));
+    await logOpen({ messageId, email: copies.gmailLateOpen, machineOpen: false, at: hoursAgo(1) });
+    await receive(id.gmailLateDelivery, [{ event: 'delivered' }], hoursAgo(1));
+    await receive(id.gmailOtherIssue, [{ event: 'delivered' }]);
     await logOpen({ messageId: `other-${messageId}`, email: copies.gmailOtherIssue, machineOpen: false });
-    await receive(id.gmailBounced, { event: 'bounce', type: 'bounce', reason: '550 5.1.1 mailbox does not exist' });
-    await receive(id.otherPerson, { event: 'delivered' }, { event: 'open' });
+    await receive(id.gmailBounced, [{ event: 'bounce', type: 'bounce', reason: '550 5.1.1 mailbox does not exist' }]);
+    await receive(id.otherPerson, [{ event: 'delivered' }, { event: 'open' }]);
     // SendGrid reports the address in another case than the ledger holds.
     await logOpen({ messageId, email: copies.otherPerson.toUpperCase(), machineOpen: false });
-    await receive(id.otherClickOnly, { event: 'delivered' }, { event: 'click' });
-    await receive(id.otherSpamReport, { event: 'spamreport' });
+    await receive(id.otherClickOnly, [{ event: 'delivered' }, { event: 'click' }]);
+    await receive(id.otherSpamReport, [{ event: 'spamreport' }]);
 
     // The ledger alone cannot tell the machine open from a person's: both rows carry opened_at.
     const ledgerOpens = await db('newsletter_send_deliveries').whereIn('id', [id.gmailPerson, id.gmailMachine]).whereNotNull('opened_at');
     expect(ledgerOpens).toHaveLength(2);
 
-    expect(await gmailOpenCounts(db, send.id, OPENED_BY)).toEqual({
-      // Delivered: person, machine, old flag, other issue, late. Not the accepted-only copy, not the
-      // bounce. Opened: person, old flag.
+    expect(await gmailOpenCounts(db, send.id, AS_OF)).toEqual({
+      // Delivered: person, machine, old flag, other issue, late open. Not the late delivery, not the
+      // accepted-only copy, not the bounce. Opened: person, old flag.
       gmail: { delivered: 5, opened: 2 },
       // Delivered: person, click only, own spam report. Opened: person.
       other: { delivered: 3, opened: 1 },
     });
-    // A read with a later time counts the late open too: the time is what fixes the count.
-    expect((await gmailOpenCounts(db, send.id, new Date())).gmail).toEqual({ delivered: 5, opened: 3 });
+    // A read with a later time counts the late delivery and the late open too: the time is what
+    // fixes the counts, so every run of the check passes the same one.
+    expect((await gmailOpenCounts(db, send.id, new Date())).gmail).toEqual({ delivered: 6, opened: 3 });
   });
 
   test('a run judges the issues that went out 48 to 72 hours before, by the later of the send time and the newest mailed copy', async () => {
