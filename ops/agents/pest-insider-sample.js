@@ -12,18 +12,21 @@
  *     <outDir>        where the files go (created if missing)
  *     dates           send dates (ET); default 2026-12-03 and 2026-12-17
  *     --assume-live   count every reviewed blog post as live (no web request)
- *     --assume-tools  count every reviewed tool as live (this script checks no Amazon page)
+ *     --assume-tools  name every reviewed tool whose registry row is active (as the planner does; this script checks no Amazon page)
  *
  * Each issue links its lead fact's blog post, so a fact leads only when its
  * post is live. The script first asks the website for every reviewed post
  * (read-only GET requests, posts.checkLivePosts), as a send does;
  * --assume-live skips those requests, for a run with no network.
  *
- * "A tool we'd use" shows only a tool whose Amazon page passed a live check.
- * Amazon refuses plain page requests, so this script checks no tool page:
- * without --assume-tools the samples have no tool. With a tool, it also
- * writes the opted-in reader's copy (<date>.optin.html and .txt); the shared
- * copy, which the archive serves, never has the tool. Each run replaces a
+ * "A tool we'd use" shows only a reviewed tool whose registry row is active
+ * (the real build names those, schedule.js). Amazon's policies forbid robot
+ * reads of its pages, so this script reads no tool page: without
+ * --assume-tools the samples have no tool. With a tool, it also writes the
+ * opted-in reader's copy (<date>.optin.html and .txt): the shared issue with
+ * {{pi-tool}} filled, the way the sender fills it. The block is HTML only, so
+ * the .optin.txt equals the shared text. The shared copy, which the archive
+ * serves, never has the tool. Each run replaces a
  * date's earlier files: a date that now builds without a tool, or does not
  * build, keeps no older copy (pre-push PR 3 r2).
  *
@@ -84,24 +87,26 @@ require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true, exports: n
 
 const { buildIssue } = require('../../server/services/pest-insider');
 const { sendDateET } = require('../../server/services/pest-insider/facts');
-const { wrapIssueHtml, withToolBlock } = require('../../server/services/pest-insider/render');
+const { wrapIssueHtml, toolBlock, toolBlockErrors, TOOL_TOKEN } = require('../../server/services/pest-insider/render');
 const { neutralizeIssueTokens } = require('../../server/services/pest-insider/referral-line');
 const { RECENT_WINDOW } = require('../../server/services/pest-insider/plan');
 const { POSTS, POST_URLS, postUrl, checkLivePosts } = require('../../server/services/pest-insider/posts');
-const { loadTools } = require('../../server/services/pest-insider/tools');
+const { loadTools, toolById } = require('../../server/services/pest-insider/tools');
 
 // An impossible day (2027-02-30) is refused here too, before any file is written.
 for (const d of dates) {
   try { sendDateET(d); } catch (err) { usage(err.message); }
 }
 
-function saveIssue(sendDate, issue) {
+function saveIssue(sendDate, issue, { toolHtml = '' } = {}) {
   const base = path.join(outDir, `pest-insider-${sendDate}`);
   // The files show the issue as a surface with no reader shows it (the
-  // archive): no "Your home" block, and the referral line with no amount.
-  const shown = { ...issue, html_body: neutralizeIssueTokens(issue.html_body), text_body: neutralizeIssueTokens(issue.text_body) };
-  const html = wrapIssueHtml(shown, { unsubscribeUrl: '{{unsubscribe_url}}' });
-  fs.writeFileSync(`${base}.html`, `<!-- subject: ${issue.subject.replace(/--/g, '- -')} -->\n${html}`);
+  // archive): no "Your home" block, and the referral line with no amount. The
+  // opted-in copy has its tool token filled first, as the sender fills it.
+  const html = issue.html_body.split(TOOL_TOKEN).join(toolHtml);
+  const shown = { ...issue, html_body: neutralizeIssueTokens(html), text_body: neutralizeIssueTokens(issue.text_body) };
+  const page = wrapIssueHtml(shown, { unsubscribeUrl: '{{unsubscribe_url}}' });
+  fs.writeFileSync(`${base}.html`, `<!-- subject: ${issue.subject.replace(/--/g, '- -')} -->\n${page}`);
   fs.writeFileSync(`${base}.txt`, `Subject: ${issue.subject}\nPreview: ${issue.preview}\n\n${shown.text_body}`);
   return base;
 }
@@ -114,7 +119,7 @@ async function main() {
   fs.mkdirSync(outDir, { recursive: true });
   const tools = loadTools();
   const liveToolUrls = assumeTools ? tools.tools.map((t) => t.url) : [];
-  console.log(`tools: ${liveToolUrls.length} of ${tools.tools.length} reviewed tools ${assumeTools ? 'counted as live (--assume-tools)' : 'live (this script checks no Amazon page)'}`);
+  console.log(`tools: ${liveToolUrls.length} of ${tools.tools.length} reviewed tools ${assumeTools ? 'named (--assume-tools: every one whose registry row is active)' : 'named (this script reads no Amazon page: pass --assume-tools to name them)'}`);
   for (const p of tools.problems) console.log(`tool left out: ${p}`);
   const recent = { factIds: [], speciesSlugs: [], toolIds: [] };
   let failed = 0;
@@ -132,7 +137,13 @@ async function main() {
     if (result.ok) {
       console.log(`   subject: ${result.issue.subject}\n   preview: ${result.issue.preview}`);
       console.log(`   wrote ${saveIssue(sendDate, result.issue)}.html and .txt`);
-      if (result.tool) console.log(`   wrote ${saveIssue(`${sendDate}.optin`, withToolBlock(result.issue, result.tool))}.html and .txt (opted-in readers: + "A tool we'd use")`);
+      // The tool as the sender reads it: looked up again, so a row paused since the build gives no opted-in copy.
+      // It is also checked as the sender checks it (toolBlockErrors): a block the send check refuses is not shown.
+      const tool = result.tool ? toolById(result.tool.productId) : null;
+      const block = tool ? toolBlock(tool) : null;
+      const refused = block ? toolBlockErrors(block, tool) : [];
+      if (block && !refused.length) console.log(`   wrote ${saveIssue(`${sendDate}.optin`, result.issue, { toolHtml: block.html })}.html and .txt (opted-in readers: + "A tool we'd use" in the HTML part)`);
+      else if (result.tool) console.log(`   no opted-in copy: ${block ? `the send check refused the block (${refused[0]})` : `tool ${result.tool.productId} is not usable now`}`);
       // Only a built issue counts toward the rotation, like a sent one will.
       recent.factIds.push(d.factId);
       recent.speciesSlugs.push(d.speciesSlug);

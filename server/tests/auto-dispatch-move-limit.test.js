@@ -1,4 +1,4 @@
-// move-limit.js (owner 2026-10-09: at most two automatic moves per visit,
+// move-limit.js (owner 2026-10-09: at most two automatic day moves per visit,
 // counted from the durable move log) and needs-person-notice.js (the admin
 // notice for a visit auto-dispatch cannot fix alone).
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -35,7 +35,6 @@ jest.mock('../services/auto-dispatch/audit', () => {
 const moveLimit = require('../services/auto-dispatch/move-limit');
 const notice = require('../services/auto-dispatch/needs-person-notice');
 const audit = require('../services/auto-dispatch/audit');
-const { SLOT_CHANGED_SQL } = require('../services/auto-dispatch/eligibility');
 const { raiseAdminAlert, composeAdminAlert } = require('../services/admin-alert-compose');
 const { getAutoDispatchConfig } = require('../services/auto-dispatch/config');
 
@@ -65,7 +64,7 @@ describe('config', () => {
 });
 
 describe('the count', () => {
-  test('reads the auto-dispatch writer signature in the durable log where the slot changed (same-day re-times included)', async () => {
+  test('reads the auto-dispatch writer signature in the durable log where the DAY changed (owner 2026-11-22: a same-day change of the hour is not a counted move)', async () => {
     const conn = logConn([{ scheduled_service_id: 's1', moves: '2' }, { scheduled_service_id: 's2', moves: '1' }]);
     const counts = await moveLimit.countAutoMoves(conn, ['s1', 's2', 's3']);
     expect(counts.get('s1')).toBe(2);
@@ -75,11 +74,13 @@ describe('the count', () => {
       ['table', 'reschedule_log'],
       ['where', 'reason_code', 'auto_dispatch'],
       ['where', 'initiated_by', 'auto_dispatch'],
-      ['whereRaw', `${SLOT_CHANGED_SQL} AND original_window IS NOT NULL`],
+      ['whereRaw', moveLimit.DAY_MOVE_SQL],
       ['groupBy', 'scheduled_service_id'],
     ]));
-    // The predicate: a changed date OR a changed window, so a same-day re-time counts.
-    expect(SLOT_CHANGED_SQL).toMatch(/original_date IS DISTINCT FROM new_date OR original_window IS DISTINCT FROM new_window/);
+    // The predicate: a changed DATE only. A changed window alone (a same-day re-time) is not in it, and the
+    // window test that remains is the first-placement rule (the visit had an arrival window before).
+    expect(moveLimit.DAY_MOVE_SQL).toBe('original_date IS DISTINCT FROM new_date AND original_window IS NOT NULL');
+    expect(moveLimit.DAY_MOVE_SQL).not.toMatch(/new_window/);
   });
 
   test('no ids reads nothing; the limit off reads nothing; a failed read is null (fail closed)', async () => {
@@ -194,7 +195,7 @@ describe('the pick fallback exemption', () => {
     const conn = logConn([]);
     await moveLimit.countAutoMoves(conn, ['s1']);
     expect(conn.calls).toEqual(expect.arrayContaining([
-      ['whereRaw', `${SLOT_CHANGED_SQL} AND original_window IS NOT NULL`],
+      ['whereRaw', expect.stringContaining('original_window IS NOT NULL')],
     ]));
   });
 });
@@ -327,7 +328,7 @@ describe('needs-a-person notice', () => {
     await notice.raiseNotices(bucket, { nowDate: new Date('2026-11-20T12:00:00Z') });
     const whyOf = (id) => raiseAdminAlert.mock.calls.find(([, spec]) => spec.subject.id === id)[1].why;
     expect(whyOf('soon')).toBe('The Nov 27 visit, 7 days away or less, overlaps another stop, and auto-dispatch did not move it.');
-    expect(whyOf('later')).toBe('The Nov 28 visit used all its automatic moves and is still on a closed day.');
+    expect(whyOf('later')).toBe('The Nov 28 visit used all its automatic day moves and is still on a closed day.');
   });
 
   // Codex #6253 r1: a list of reason codes missed two of them. One rule now:

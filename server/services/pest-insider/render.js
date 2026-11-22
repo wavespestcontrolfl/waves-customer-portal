@@ -14,14 +14,16 @@
  * caller text and no other caller link: every round of the pre-push audit
  * (5 to 10) found another way such input could carry a code, a name, an
  * email or a merge tag into a shared email. The other blocks are added per
- * recipient, never to the shared body: "A tool we'd use" (withToolBlock,
- * opted-in readers only: its Amazon link may reach neither the archive nor
- * a reader who never opted in), and in PR 4 "Active near you" from area
- * counts. A per-reader block goes in before the sign-off (addReaderBlock).
- * "Your home" (a customer's own last visit and member-since month) is per
- * reader too, but it is filled by the sender, not added: the shared body
- * holds two tokens that stand alone just before the sign-off ({{pi-home}},
- * {{pi-home-text}}, home.js), and every surface without a reader strips them.
+ * recipient, never to the shared body: "A tool we'd use" (a token in the
+ * HTML part only, below), and in PR 4 "Active near you" from area counts.
+ * "A tool we'd use" (a reviewed tool and its Amazon link, for readers who
+ * opted in) and "Your home" (a customer's own last visit and member-since
+ * month) are per reader too, but each is filled by the sender, not added: the
+ * shared body holds tokens that stand alone just before the sign-off
+ * ({{pi-tool}} in the HTML, tool-block.js; {{pi-home}} and {{pi-home-text}},
+ * home.js), and every surface without a reader strips them. The tool block is
+ * HTML only: the campaign send tracks clicks in the text part, which rewrites
+ * every text URL, and an Amazon link must reach the reader as written.
  *
  * The look follows the weekly newsletter (owner 2026-11-19: "boring, no
  * visuals, look at what we do for the local newsletter"; then "more
@@ -61,13 +63,14 @@ const { cardFor, sourceLine, CARD_WIDTH, CARD_HEIGHT } = require('./cards');
 const { heroFor, HERO_WIDTH, HERO_HEIGHT } = require('./heroes');
 const { partPictureForFact, partPictureForSpecies, PART_WIDTH, PART_HEIGHT } = require('./parts');
 const { SERVICE_EMOJI } = require('./claim-check');
-const { toolById, toolLinkText, AMAZON_DISCLOSURE } = require('./tools');
+const { toolLinkText, AMAZON_DISCLOSURE } = require('./tools');
 const { isPestInsiderPoll, pollResultLine } = require('../newsletter-quiz');
 const { validateNewsletterDraft } = require('../newsletter-validator');
 const { PEST_INSIDER_TYPE } = require('../../config/newsletter-types');
 const { etDateString } = require('../../utils/datetime-et');
 const { HOME_TOKEN, HOME_TEXT_TOKEN, hasHomeToken, neutralizeHomeTokens } = require('./home');
 const { REFERRAL_TOKEN, REFERRAL_TEXT_TOKEN } = require('./referral-line');
+const { TOOL_TOKEN } = require('./tool-block');
 const { escapeHtml, paragraph, link, wrapBlock } = require('./markup');
 
 const IDENTIFIER_URL = `${SITE}/pest-identifier/`;
@@ -335,23 +338,56 @@ function identifierBlock({ idItem }) {
 }
 
 // "A tool we'd use": the reviewed tool's lines and link, and Amazon's exact
-// sentence right after the link, in both parts. Every word comes from the
-// tool list. Styling only here: Amazon's trademark rules allow no Amazon
-// logo or Amazon-styled button in email, so the link stays plain text.
+// sentence right after the link. Every word comes from the tool list. Styling
+// only here: Amazon's trademark rules allow no Amazon logo or Amazon-styled
+// button in email, so the link stays plain text. The link carries
+// `clicktracking=off` (SendGrid must not rewrite an Amazon link). The block is
+// HTML only, the value of {{pi-tool}} for one reader (tool-block.js says why
+// there is no text form): the Waves badge, the block and a newline, wrapped the
+// way homeBlock wraps its HTML value, so a value of '' leaves the issue as it
+// reads without the block.
 function toolBlock(tool) {
   const about = tool.lines.join(' ');
   const html = [
     sectionHead(2, SECTIONS.tool, TOOL_EMOJI, tool.name),
     paragraph(escapeHtml(about)),
     `<div class="dm-box" style="margin:0 0 14px 0;padding:12px 16px;background:${newsletterPalette().cardBg};border-radius:10px;">`,
-    `<p style="margin:0 0 6px 0;font-size:16px;line-height:1.6;">🔗 ${link(tool.url, toolLinkText(tool))}</p>`,
+    `<p style="margin:0 0 6px 0;font-size:16px;line-height:1.6;">🔗 ${link(tool.url, toolLinkText(tool), { untracked: true })}</p>`,
     `<p style="margin:0;font-size:16px;line-height:1.6;">${escapeHtml(AMAZON_DISCLOSURE)}</p>`,
     '</div>',
   ].join('\n');
-  const text = ["A TOOL WE'D USE", about, '', `${toolLinkText(tool)}: ${tool.url}`, AMAZON_DISCLOSURE].join('\n');
-  return { html, text };
+  return { html: `${DIVIDER_HTML}\n${wrapBlock({ html })}\n` };
 }
 
+/**
+ * The send validator on one reader's tool block, as it is mailed: the HTML
+ * part. The block alone has no subject or text part: the fixed subject stands
+ * in for the subject, and the text input is '' (the validator needs a body in
+ * one part, and it has one). The send check refuses affiliate material in
+ * every email (AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL), and this block is that
+ * material by design (owner 2026-11-22 "A"), so that one error is tolerated,
+ * and only when the block's links are exactly one, the tool's own link
+ * (untracked), with Amazon's sentence after it. Any other error stands.
+ * @param {{ html: string }} block  toolBlock's result
+ * @param {{ url: string }} tool  the usable tool the block was made from
+ * @returns {string[]}
+ */
+function toolBlockErrors(block, tool) {
+  const { errors } = validateNewsletterDraft({
+    subject: 'Waves Pest Insider',
+    preview_text: SECTIONS.tool,
+    html_body: block.html,
+    text_body: '',
+    newsletter_type: PEST_INSIDER_TYPE,
+  });
+  const anchors = block.html.match(/<a\b/g) || [];
+  const hrefs = [...block.html.matchAll(/\bhref="([^"]*)"/g)].map((m) => m[1]);
+  const sentenceAt = block.html.indexOf(escapeHtml(AMAZON_DISCLOSURE));
+  const ownLinkOnly = anchors.length === 1 && hrefs.length === 1 && hrefs[0] === escapeHtml(tool.url)
+    && block.html.includes('<a clicktracking=off ') && sentenceAt > block.html.indexOf('</a>');
+  if (!ownLinkOnly) return [...errors, 'the tool block must hold one untracked link, the tool\'s own, with Amazon\'s sentence after it'];
+  return errors.filter((e) => !e.startsWith('AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL'));
+}
 
 // The issue's poll: a Waves Pest Insider poll's token (newsletter-quiz.js),
 // written here from the poll id, never taken from the caller. The sender
@@ -478,10 +514,10 @@ function renderIssue(issue) {
   const minutes = readMinutes([GREETING, INTRO, ...sections, SIGNOFF_TEXT].join(' '));
   const opening = openingBlock(issue, minutes);
   const pollHtml = poll ? [DIVIDER_HTML, wrapBlock(poll)] : [];
-  // The "Your home" tokens stand alone, glued to the closing (the referral
-  // line, then the sign-off) by no join of their own: a reader whose value is
-  // '' gets exactly the issue without the block.
-  const html = `${[wrapBlock(opening), wrapBlock(lead), DIVIDER_HTML, wrapBlock(id), ...pollHtml].join('\n')}\n${HOME_TOKEN}${CLOSING_HTML}`;
+  // The tool token (HTML only) and the "Your home" tokens stand alone, glued
+  // to the closing (the referral line, then the sign-off) by no join of their
+  // own: a reader whose value is '' gets exactly the issue without the block.
+  const html = `${[wrapBlock(opening), wrapBlock(lead), DIVIDER_HTML, wrapBlock(id), ...pollHtml].join('\n')}\n${TOOL_TOKEN}${HOME_TOKEN}${CLOSING_HTML}`;
   const text = `${[opening.text, ...sections, ...(poll ? [poll.text] : [])].join('\n\n')}\n\n${HOME_TEXT_TOKEN}${CLOSING_TEXT}`;
   return { subject: issue.subject, preview: issue.preview, html_body: html, text_body: text };
 }
@@ -502,51 +538,9 @@ function wrapIssueHtml(issue, { unsubscribeUrl }) {
   });
 }
 
-// Puts `block` in front of the closing (the referral line, then the
-// sign-off) that ends `body`; a body that does not end with it gets the block
-// at its end.
-function beforeClosing(body, block, closing) {
-  if (body.endsWith(closing)) return `${body.slice(0, body.length - closing.length)}${block}\n${closing}`;
-  return `${body}\n${block}`;
-}
-
-/**
- * One reader's block ({ html, text }) after the shared sections, behind the
- * Waves badge and before the closing. A new object comes back; `issue` is
- * not changed.
- */
-function addReaderBlock(issue, block) {
-  return {
-    ...issue,
-    html_body: beforeClosing(issue.html_body, `${DIVIDER_HTML}\n${wrapBlock(block)}`, CLOSING_HTML),
-    text_body: beforeClosing(issue.text_body, `${block.text}\n`, CLOSING_TEXT),
-  };
-}
-
-/**
- * The issue as an opted-in reader gets it: the shared issue with "A tool
- * we'd use" after "What's this?". Owner 2026-11-19: Amazon links go only to
- * readers who opted in, so the shared issue (renderIssue), which the archive
- * serves to anyone, never has the tool. The send path (PR 4) adds it per
- * recipient, only for a reader with opt-in evidence, and checks that body
- * before it sends. The tool is looked up in the registry as it is now, and
- * renders only while its link is still the one that passed the live check
- * (pre-push PR 3 r4). A tool that is not usable now (paused since the build,
- * unknown, or the registry cannot be read), or whose link changed since the
- * check, is left out: the same `issue` object comes back, so the reader
- * gets the shared copy.
- * @param {{ subject: string, preview: string, html_body: string, text_body: string }} issue  renderIssue's result
- * @param {{ productId: string, url: string }|null} picked  buildIssue's `tool`: its product id and checked link
- */
-function withToolBlock(issue, picked) {
-  const tool = picked ? toolById(picked.productId) : null;
-  if (!tool || tool.url !== picked.url) return issue;
-  return addReaderBlock(issue, toolBlock(tool));
-}
-
 module.exports = {
-  renderIssue, withToolBlock, addReaderBlock, wrapIssueHtml, escapeHtml, speciesEmoji,
-  homeBlock, homeBlockErrors, homeSubstitutions, hasHomeToken, neutralizeHomeTokens, HOME_LINE_LABELS, HOME_TOKEN, HOME_TEXT_TOKEN,
+  renderIssue, wrapIssueHtml, escapeHtml, speciesEmoji,
+  toolBlock, toolBlockErrors, TOOL_TOKEN, homeBlock, homeBlockErrors, homeSubstitutions, hasHomeToken, neutralizeHomeTokens, HOME_LINE_LABELS, HOME_TOKEN, HOME_TEXT_TOKEN,
   IDENTIFIER_URL, POST_LINK_TEXT, PHOTO_ID_TEXT, VERDICTS, SIGNOFF_TEXT, CATEGORY_EMOJI, SPECIES_EMOJI,
   CLOSING_TEXT,
 };

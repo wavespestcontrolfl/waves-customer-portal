@@ -17,6 +17,8 @@
  *                            ("no issues", a figure and its unit)?
  *   partGoes(part)           may this whole part of the note go?
  *   names                    the product names the note holds
+ *   dated                    true when the note holds a time, anywhere: a
+ *                            time carries a tense (addedTenseRejection)
  * report-own-note.js builds it from the report's own screens (the next PR),
  * so what may go is what no report text may hold. Nothing calls this module
  * yet.
@@ -161,7 +163,7 @@ function noteWords(text) {
     .replace(/\b(she|he|it|that|there|what|who|where|here)'s (been|got)\b/g, '$1 has $2')
     .replace(/\b(she|he|it|that|there|what|who|where|here)'s\b/g, '$1 is')
     .replace(/\b(you|we|they|i)'ve\b/g, '$1 have')
-    .replace(/(\p{L})'s\b/gu, (_, letter) => ownerForm(letter)).replace(/'(?:ve|re|m)\b/g, ' ')
+    .replace(/(\p{L})'s\b/gu, (_, letter) => ownerForm(letter)).replace(/'m\b/g, ' am').replace(/'re\b/g, ' are').replace(/'ve\b/g, ' ')
     .match(/[\p{L}\p{N}]+/gu) || [];
 }
 const isCount = (word) => /\p{N}/u.test(word) || NUMBER_WORDS.includes(word);
@@ -290,11 +292,15 @@ function noPlaceRejection(out, k, note, from, { continues }, taken) {
 
 // A word the text adds: a small word; "I" where a sentence starts (`opens`)
 // or after a joining word (walkNote then looks for a person before it);
+// "am" only between "I" and a word in "-ing" ("I'm seeing ants"; "I am
+// treated outside" is not "treated outside"; addedTenseRejection refuses
+// it where the note holds a time);
 // "you" after a word of speech ("You said you"; walkNote then looks for
 // the customer). Never "me": "neighbor said" is not "Neighbor told me".
 function addedWordAllowed(out, k, opens) {
   const word = out[k];
   if (word === 'i') return opens || CLAUSE_OPENERS.has(out[k - 1]);
+  if (word === 'am') return out[k - 1] === 'i' && /ing$/.test(out[k + 1] || '');
   if (ADDABLE.has(word)) return true;
   return word === 'you' && ['said', 'told', 'me'].includes(out[k - 1]);
 }
@@ -439,7 +445,7 @@ function walkNote(textWords, read, rules, hidden) {
   // you."), and a sentence made of added and small words, say what the note
   // did not.
   const empty = Math.max(added.i, added.you, textWords.findIndex((entry) => !saysSomething.has(entry.id)));
-  return empty >= 0 ? stop('not_in_note', empty) : { usedIn };
+  return empty >= 0 ? stop('not_in_note', empty) : { usedIn, placedAt };
 }
 
 // What the text left out and may not: some of the words that go together,
@@ -462,6 +468,44 @@ function leftOutRejection(usedIn, out, read, rules) {
   return { reason: out.some((word) => sameWord(word, noteList[missing])) ? 'out_of_order' : 'left_out', words: [noteList[missing]] };
 }
 
+// A time in the note carries a tense: "treating outside tomorrow" is a plan,
+// and no report text holds the time. So where the note holds a time,
+// anywhere (`dated`), the text adds no form of "is" before a word in "-ing"
+// ("I was treating outside." is past work, "I am treating outside." is work
+// now), also with words of the part between the two ("I was spot treating
+// outside."). A contracted form is a form too ("I'm treating outside.").
+// The whole note is the unit on purpose. Which part a time speaks for has
+// no rule that holds: "treating outside. On March 4.", "treating outside,
+// pest free on March 4", "tomorrow, treating outside". The cost is the safe
+// side: after "ants trailing in kitchen. back in 2 weeks" the text says
+// "Ants trailing in the kitchen.", not "Ants were trailing".
+// Only a verb form counts. Right after an article or its like, a word in
+// "-ing" names a thing ("Ants were active in the building.", "all over the
+// ceiling"), and a few words in "-ing" are never a verb form. A place word
+// is no such sign ("I was inside checking traps." is work), and "all", "both"
+// and "each" are not either: they can speak of the crew ("We were all
+// treating outside.").
+const SETS_A_TENSE = new Set([...FORMS_OF_IS, 'am']);
+const BEFORE_A_THING = new Set('the a an this that these those my your his her its their our some any no every'.split(' '));
+const NO_VERB_FORM = new Set('nothing something anything everything during including'.split(' '));
+function addedTenseRejection(textWords, placedAt, read) {
+  // The part of the note each text word took; a text word with none was added.
+  const partOf = new Map(read.words.map((entry, i) => [placedAt[i], entry.part]));
+  const addedIsBefore = (at, part) => {
+    for (let k = at - 1; k >= 0 && (!partOf.has(k) || partOf.get(k) === part); k -= 1) {
+      if (!partOf.has(k) && SETS_A_TENSE.has(textWords[k].word)) return k;
+    }
+    return -1;
+  };
+  for (const [i, entry] of read.words.entries()) {
+    const verbForm = placedAt[i] >= 0 && entry.word.endsWith('ing') && !NO_VERB_FORM.has(entry.word)
+      && !BEFORE_A_THING.has(textWords[placedAt[i] - 1]?.word);
+    const wrong = verbForm ? addedIsBefore(placedAt[i], entry.part) : -1;
+    if (wrong >= 0) return { reason: 'not_in_note', words: [textWords[wrong].word] };
+  }
+  return null;
+}
+
 /**
  * The same-order check: null when the text's words are the note's words in
  * the note's order, else { reason, words: [word] } with reason
@@ -477,14 +521,14 @@ function leftOutRejection(usedIn, out, read, rules) {
  *   'question'     a question became a statement, or a statement a question.
  * `screen` is what the report's own screens say may go (see leaveOutRules).
  */
-function orderRejection(text, note, { wordGoes = NOTHING_GOES, pairGoes = NOTHING_GOES, partGoes = NOTHING_GOES, names = [] } = {}) {
+function orderRejection(text, note, { wordGoes = NOTHING_GOES, pairGoes = NOTHING_GOES, partGoes = NOTHING_GOES, names = [], dated = false } = {}) {
   const read = readNote(note);
   const rules = leaveOutRules(read, { wordGoes, pairGoes, partGoes, names });
   const textWords = readText(text);
   const out = textWords.map((entry) => entry.word);
   const check = (hidden) => {
-    const { usedIn, rejection } = walkNote(textWords, read, rules, hidden);
-    return rejection || leftOutRejection(usedIn, out, read, rules);
+    const { usedIn, placedAt, rejection } = walkNote(textWords, read, rules, hidden);
+    return rejection || leftOutRejection(usedIn, out, read, rules) || (dated ? addedTenseRejection(textWords, placedAt, read) : null);
   };
   // A part that goes may share a word with a part that stays ("no activity
   // inside. no ants in the kitchen"), and the walk takes the first place it

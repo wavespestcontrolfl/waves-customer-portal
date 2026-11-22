@@ -408,3 +408,30 @@ describe('transactional callers hand their own connection to the send (source pi
     expect((src.match(/lockCustomerEmail\(trx, sentEmailLc\)/g) || []).length).toBe(2);
   });
 });
+
+// knex puts a failed query's bound values in its error message, and the confirm path binds the
+// confirmation token and the subscriber's address. The route logs a code, not that message.
+describe('POST /api/public/newsletter/confirm/:token that fails', () => {
+  test('answers 500 and logs a code, never the failed query text with the token or the address', async () => {
+    const logger = require('../services/logger');
+    const token = '11111111-2222-4333-8444-555555555555';
+    const failure = Object.assign(new Error(`update "newsletter_subscribers" set "status" = 'active' where "confirmation_token" = '${token}' and "email" = 'neighbor@example.com' - deadlock detected`), { code: '40P01' });
+    require('../services/newsletter-subscribers').confirmByToken.mockRejectedValueOnce(failure);
+    const router = require('../routes/public-newsletter');
+    const app = express();
+    app.use(express.json());
+    app.use('/api/public/newsletter', router);
+    const server = app.listen(0);
+    logger.error.mockClear();
+    try {
+      const r = await fetch(`http://127.0.0.1:${server.address().port}/api/public/newsletter/confirm/${token}`, { method: 'POST' });
+      expect(r.status).toBe(500);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+    const logged = logger.error.mock.calls.map((call) => call.join(' ')).join('\n');
+    expect(logged).toContain('confirm POST failed: code=40P01');
+    expect(logged).not.toContain('neighbor@example.com');
+    expect(logged).not.toContain(token);
+  });
+});

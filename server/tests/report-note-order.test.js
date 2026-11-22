@@ -183,6 +183,48 @@ describe('the text is refused', () => {
     expect(rejection('customer not paid treated kitchen', 'You not treated the kitchen.')).toEqual({ reason: 'left_out', words: ['paid'] });
   });
 
+  test('where the note holds a time, the text adds no form of "is" before a word in "-ing"', () => {
+    const dated = { dated: true, wordGoes: (word) => word === 'tomorrow', partGoes: (part) => /11\/22|weeks|march/i.test(part) };
+    const added = (word) => ({ reason: 'not_in_note', words: [word] });
+    expect(orderRejection('I was treating outside.', 'treating outside tomorrow', dated)).toEqual(added('was'));
+    expect(orderRejection('Treating outside.', 'treating outside tomorrow', dated)).toBeNull();
+    // A word of the part between the two hides nothing.
+    expect(orderRejection('I was spot treating outside.', 'spot treating outside tomorrow', dated)).toEqual(added('was'));
+    expect(orderRejection('Spot treating outside.', 'spot treating outside tomorrow', dated)).toBeNull();
+    // "Am" sets a tense too, also contracted: work now is no plan.
+    expect(orderRejection('I am treating outside.', 'treating outside tomorrow', dated)).toEqual(added('am'));
+    expect(orderRejection('I\'m treating outside.', 'treating outside tomorrow', dated)).toEqual(added('am'));
+    expect(orderRejection('You\'re treating outside.', 'customer treating outside tomorrow', dated)).toEqual(added('are'));
+    // The whole note is the unit: the time may stand in another part or in another sentence.
+    expect(orderRejection('I was treating outside.', 'treating outside, on 11/22', dated)).toEqual(added('was'));
+    expect(orderRejection('I was treating outside.', 'treating outside, in two weeks', dated)).toEqual(added('was'));
+    expect(orderRejection('I was treating outside.', 'treating outside. in two weeks.', dated)).toEqual(added('was'));
+    expect(orderRejection('I was treating outside.', 'treating outside. on March 4.', dated)).toEqual(added('was'));
+    expect(orderRejection('I was treating outside.', 'tomorrow, treating outside', dated)).toEqual(added('was'));
+    expect(orderRejection('Ants were trailing in kitchen.', 'ants trailing in kitchen. back in 2 weeks', dated)).toEqual(added('were'));
+    expect(orderRejection('Ants trailing in kitchen.', 'ants trailing in kitchen. back in 2 weeks', dated)).toBeNull();
+    // A word in "-ing" right after an article names a thing, and "nothing" is no verb form.
+    expect(orderRejection('Ants were active in the building.', 'ants active in building. back in 2 weeks', dated)).toBeNull();
+    // A place word is no such sign, and the article of another word is not either.
+    expect(orderRejection('I was inside checking traps.', 'inside checking traps tomorrow', dated)).toEqual(added('was'));
+    expect(orderRejection('I was in the kitchen checking traps.', 'in kitchen checking traps tomorrow', dated)).toEqual(added('was'));
+    // "All" can speak of the crew.
+    expect(orderRejection('We were all treating outside.', 'we all treating outside tomorrow', dated)).toEqual(added('were'));
+    expect(orderRejection('Ants were all over the ceiling.', 'ants all over ceiling. back in 2 weeks', dated)).toBeNull();
+    expect(orderRejection('There was nothing in the kitchen.', 'nothing in kitchen. back in 2 weeks', dated)).toBeNull();
+    // A form of "is" before another word is no tense of the word in "-ing".
+    expect(orderRejection('Ants were bad. Treating outside.', 'ants bad. treating outside tomorrow', dated)).toBeNull();
+    // A note with no time: the small word may be added, and "I'm" where "I" may.
+    expect(orderRejection('Ants are coming in by the window.', 'ants coming in by the window')).toBeNull();
+    expect(orderRejection('I\'m seeing ants in the kitchen.', 'seeing ants in the kitchen')).toBeNull();
+    // "Am" only between "I" and a word in "-ing".
+    expect(orderRejection('Ants am trailing.', 'ants trailing')).toEqual(added('am'));
+    expect(orderRejection('I am treated outside.', 'treated outside')).toEqual(added('am'));
+    expect(orderRejection('I\'m treated outside.', 'treated outside')).toEqual(added('am'));
+    // A product name that went carried no tense.
+    expect(orderRejection('I was spraying outside.', 'spraying borlux outside', { wordGoes: (word) => word === 'borlux' })).toBeNull();
+  });
+
   test('a part that qualifies the rest goes only with its whole sentence', () => {
     const timed = { wordGoes: (word) => word === 'tomorrow', partGoes: (part) => /tomorrow/.test(part) };
     const note = 'will treat outside, weather permitting tomorrow';

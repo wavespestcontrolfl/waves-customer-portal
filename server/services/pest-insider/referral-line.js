@@ -53,6 +53,7 @@
 const { PEST_INSIDER_TYPE } = require('../../config/newsletter-types');
 const { memberInviteFriendClause } = require('../referral-step2');
 const { neutralizeHomeTokens } = require('./home');
+const { neutralizeToolToken } = require('./tool-block');
 const { escapeHtml, paragraph, link, wrapBlock } = require('./markup');
 const logger = require('../logger');
 
@@ -105,14 +106,14 @@ const fillReferralLine = (content, line) => (
 
 /**
  * A Waves Pest Insider issue's tokens as every surface with no reader shows
- * them: the "Your home" tokens go, and the referral line stands in its first
- * form. The one function such a surface calls (the archive, the RSS feed and
+ * them: the "A tool we'd use" token and the "Your home" tokens go, and the
+ * referral line stands in its first form. The one function such a surface calls (the archive, the RSS feed and
  * the touchpoint body through newsletter-draft.js stripPersonalizationTokens,
  * the blog export, the send check, the sample script).
  */
 function neutralizeIssueTokens(content) {
-  const noHome = neutralizeHomeTokens(content);
-  return hasReferralToken(noHome) ? fillReferralLine(noHome, referralLine(REFERRAL_TAIL)) : noHome;
+  const bare = neutralizeToolToken(neutralizeHomeTokens(content));
+  return hasReferralToken(bare) ? fillReferralLine(bare, referralLine(REFERRAL_TAIL)) : bare;
 }
 
 /**

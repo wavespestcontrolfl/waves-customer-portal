@@ -24,10 +24,13 @@
  * (it loads as empty: the registry's dark posture), only drops tools, so an
  * issue without a tool still builds (pre-push PR 3 r2).
  *
- * A product page can die or change after review (the door sweep's did), so
- * a send names the tool links whose page passed a live check
- * (`liveToolUrls`), and a tool is picked and rendered only while its link is
- * one of them. An issue with no live tool has no tool item.
+ * No page of Amazon is read, at the build or at send time: Amazon's
+ * Conditions of Use and Associates policies forbid robot reads of its pages
+ * (owner decision 2026-11-22, "A"). So the build names the tool links whose
+ * registry row is active at that moment (`liveToolUrls`, schedule.js), and a
+ * tool is picked only while its link is one of them. An issue with no such
+ * tool has no tool item. At send time the sender looks the picked tool up
+ * again (toolById), so a row paused after the build gives no block.
  */
 'use strict';
 

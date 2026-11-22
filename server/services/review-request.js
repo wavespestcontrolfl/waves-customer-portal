@@ -6198,6 +6198,82 @@ const ReviewService = {
   },
 
   /**
+   * True while a review ASK is still on its way to this customer. It reads the
+   * sources _stopFutureAsksLocked ends when a customer clicks: a one-off ask
+   * queued (_queuedOneOffAsk) or holding a send reservation; an ask being
+   * sent, or left `sending` with no send result (_unresolvedSendingAsk); a
+   * cadence with an ask still to come (_cadenceAskToComeFor); and a delivered
+   * ask whose text follow-up (processFollowups) could still go out. Each
+   * reader counts ASKS only: the one-off gate (_pendingOneOffAsk) is not used
+   * here, because its in-flight arm counts a claimed row of any template, a
+   * private check-in included. The follow-up has no age
+   * limit: the runner can defer it or reach its batch limit, so an ask older
+   * than the 72-hour spacing can still have its reminder to come. For senders
+   * of OTHER customer mail that must not land beside a review ask (the one-time
+   * plan offer). A private no-link check-in is not an ask, queued or as a
+   * cadence step. It reads rows only: an ask that is not a row yet (an
+   * enrollment that follows a recovered visit summary) is out of its reach, as
+   * review-click-guard.js says of every such list. Fail-closed like its parts:
+   * a DB error throws.
+   */
+  async reviewAskOnItsWay(customerId) {
+    if (await this._queuedOneOffAsk(customerId)) return true;
+    if (await this._reservedPendingAsk(customerId)) return true;
+    if (await this._unresolvedSendingAsk(customerId)) return true;
+    if (await this._cadenceAskToComeFor(customerId)) return true;
+    const followup = await this._followupPendingBase(db("review_requests").where({ customer_id: customerId })).first("id");
+    return Boolean(followup);
+  },
+
+  /**
+   * An ASK row still `sending`, at any claim age: its provider outcome is not
+   * known (_providerOutcomeUnknown). Inside the claim window it is a send in
+   * flight. Past it the row is still not settled: reconcileStrandedSends
+   * finishes it as sent on proof, or releases it to the scheduler or to the
+   * sequence cron, and they text it. A private no-link check-in is not an ask
+   * (ASK_TOUCH_SQL): in flight, or left `sending` for good by design, it
+   * holds nothing.
+   */
+  async _unresolvedSendingAsk(customerId) {
+    return db("review_requests")
+      .where({ customer_id: customerId, status: "sending" })
+      .whereRaw(OUTREACH.ASK_TOUCH_SQL)
+      .first("id");
+  },
+
+  /**
+   * A cadence that can still send this customer a review ASK: one that is
+   * active, parked while its opener is in flight (deferred / redeeming,
+   * _parkDeferredFinal), or parked behind a bounced visit summary
+   * (resumeVisitReviewOutreach brings it back), AND has a link-bearing ask
+   * among its steps from the current one on. A cadence whose only steps left
+   * are private check-ins sends no ask. Wider than _activeCadenceFor, which
+   * answers who owns this customer's asks now. Counted only while
+   * GATE_REVIEW_SEQUENCES is on, for the same reason: with the gate off
+   * nothing redeems or resumes a row, and a stranded one must not hold the
+   * customer forever. Fail-closed: a DB error throws.
+   */
+  async _cadenceAskToComeFor(customerId) {
+    const { isEnabled } = require("../config/feature-gates");
+    if (!isEnabled("reviewSequences")) return false;
+    const Summary = require("./visit-completion-summary");
+    const cadences = await db("review_sequences")
+      .where({ customer_id: customerId })
+      .where((q) => q.whereIn("status", ["active", "deferred", "redeeming"])
+        .orWhere({ status: "stopped", stop_reason: Summary.PARKED_REVIEW_REASON }))
+      .select("id", "plan", "current_step");
+    return cadences.some((seq) => this._askRemains(seq));
+  },
+
+  /** True when a step of the cadence, from its current step on, is a link-bearing ask. */
+  _askRemains(seq) {
+    let steps;
+    try { steps = Array.isArray(seq.plan) ? seq.plan : JSON.parse(seq.plan || "[]"); } catch { steps = []; }
+    if (!Array.isArray(steps)) return false;
+    return steps.slice(Number(seq.current_step) || 0).some((step) => OUTREACH.isAskTemplate(step?.templateKey));
+  },
+
+  /**
    * What a tracked /go click does about the later-ask paths it can reach
    * (one click, all of them): stops the clicked request's sequence
    * and every active / deferred cadence of the customer, relabels a cadence

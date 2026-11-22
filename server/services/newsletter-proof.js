@@ -508,8 +508,10 @@ async function renderSendPreview(send, toEmail) {
   } = require('./newsletter-draft');
   const { neutralizeQuizTokens } = require('./newsletter-quiz');
   // The owner's copy is not any reader's: a Waves Pest Insider issue's
-  // "Your home" tokens (per reader, filled only by the send) are removed.
-  const { neutralizeHomeTokens } = require('./pest-insider/home');
+  // "A tool we'd use" and "Your home" tokens (per reader, filled only by the
+  // send) are removed, by the one function every surface without a reader uses
+  // (the referral line is filled as of now below, so none is left for it).
+  const { neutralizeIssueTokens } = require('./pest-insider/referral-line');
 
   // Demo unsubscribe URL — won't resolve to a real subscriber but the link
   // renders correctly and Gmail/Apple Mail will show the native unsub UI.
@@ -568,7 +570,7 @@ async function renderSendPreview(send, toEmail) {
   }
   const { neutralizeFeedbackTokens } = require('./newsletter-feedback');
   const applyTokens = (s) => neutralizeFeedbackTokens(neutralizeQuizTokens(
-    neutralizeHomeTokens(String(s))
+    neutralizeIssueTokens(String(s))
       .split(GREETING_NAME_TOKEN).join(greetingValue)
       .split(CITY_TOKEN).join(cityValue)
       .split(GRASS_TYPE_TOKEN).join(grassValue),
@@ -1339,6 +1341,7 @@ module.exports = {
   proofRecipient,
   syncedApprovalMailbox,
   approvalSenders,
+  issueFyiAddresses,
   resolveFlagshipCalendarContext,
   maskEmail,
   parseProofToken,

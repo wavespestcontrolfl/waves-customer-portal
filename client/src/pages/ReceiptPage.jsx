@@ -37,7 +37,7 @@ import { DOC, DOC_FONT, DOC_EYEBROW, FS, FW, LH, SP, RADIUS, docButton } from '.
 import { useGlassSurface } from '../glass/glass-engine';
 import DocumentActionBar from '../components/DocumentActionBar';
 import PropertyLineGroups from '../components/billing/PropertyLineGroups';
-import { groupInvoiceLinesByProperty } from '@waves/invoice-property-groups';
+import { groupInvoiceLinesByProperty, invoiceDiscountRows } from '@waves/invoice-property-groups';
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import Icon from '../components/Icon';
@@ -321,6 +321,7 @@ export default function ReceiptPage() {
   const visibleLineItems = (invoice.lineItems || []).filter(item => !isDiscountLineItem(item));
   // Multi-property invoice (lines at 2+ saved properties): grouped rows; else null.
   const propertyGroups = groupInvoiceLinesByProperty(invoice.lineItems);
+  const discountRows = invoiceDiscountRows(invoice.lineItems, invoice.discountAmount, invoice.discountLabel);
   const depositCreditTotal = depositCreditTotalFromLineItems(invoice.lineItems);
   // When account credit (fully or partly) covered the invoice there may be no
   // payments row — fall back to the amount DUE net of applied credit (zero for a
@@ -662,9 +663,9 @@ export default function ReceiptPage() {
 
           <div data-glass-clear="" style={{ ...subtlePanel, padding: SP.md }}>
             <SummaryRow label="Subtotal" value={fmtCurrency(invoice.subtotal)} />
-            {invoice.discountAmount > 0 && (
-              <SummaryRow label={invoice.discountLabel || 'Discount'} value={`− ${fmtCurrency(invoice.discountAmount)}`} />
-            )}
+            {discountRows.map((row) => (
+              <SummaryRow key={row.label} label={row.label} value={`− ${fmtCurrency(row.amount)}`} />
+            ))}
             {invoice.taxAmount > 0 && customer?.isCommercial && (
               <SummaryRow label={`Tax (${(Number(invoice.taxRate || 0) * 100).toFixed(2)}%)`} value={fmtCurrency(invoice.taxAmount)} />
             )}

@@ -143,6 +143,16 @@ function inviteSmsWithOffer(body, { step2On = false, refereeCents = 0, link = ''
   return text;
 }
 
+// The office composer's referral insert (composer-customer-links.js buildReferralLink): a line a person in the
+// office puts into a message to one customer (from the Insert Link sheet, or built by the Intelligence Bar's
+// create_customer_link; the operator sends the text). Today's line while there is no new amount; the approved Step 2
+// words with one.
+// No STOP line in either state (owner 2026-11-22 "no line": a deliberate exception, docs/sms-stop-line-policy.md).
+// The client removes the line by its link (stripLinkLines), so it stays one line.
+const composerReferralLine = (link, refereeCents) => (Number(refereeCents) > 0
+  ? `Know someone who needs pest or lawn care? They get a ${dollars(refereeCents)} credit after their first plan service with your link: ${link}\n\n`
+  : `Know someone who needs pest control? Share Waves here: ${link}\n\n`);
+
 // The referral_nudge email (Automations tab). The seeded sentence differs in the two bodies: the HTML body has it as a
 // sentence of its own, the text body after a dash.
 const NUDGE_SEEDED = Object.freeze({
@@ -194,6 +204,6 @@ function nudgePreviewWithOffer(line, offer) {
 module.exports = {
   STEP2_DEFAULTS, step2Settings, memberCredit, etYearBounds, capReached, ruleTerms, formatDollars,
   friendInviteOfferLine, friendShareClause, memberInviteFriendClause, shareCardOffer, memberCreditEmailLine,
-  inviteSmsWithOffer, nudgeEmailWithOffer, nudgePreviewWithOffer,
+  inviteSmsWithOffer, composerReferralLine, nudgeEmailWithOffer, nudgePreviewWithOffer,
   SEEDED_INVITE_OFFERS, NUDGE_SEEDED,
 };

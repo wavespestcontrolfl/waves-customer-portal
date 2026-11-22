@@ -198,9 +198,13 @@ describeWithDatabase('Quick Move customer-pick hand-off on PostgreSQL', () => {
   test('a visit Auto-Dispatch already moved twice (the default limit) is handed off, and the night run may then place it', async () => {
     await insertVisit();
     const moved = { scheduled_service_id: serviceId, customer_id: customerId, reason_code: 'auto_dispatch', initiated_by: 'auto_dispatch', original_window: '09:00-10:00', new_window: '13:00-14:00' };
+    // Two moves to another day reach the limit. The third row is a same-day change of the hour, which is not a
+    // counted move (owner 2026-11-22, "days"): the count below stays 2.
+    const daysBefore = (n) => new Date(Date.parse(`${today}T12:00:00Z`) - n * 86400000).toISOString().slice(0, 10);
     await trx('reschedule_log').insert([
+      { ...moved, original_date: daysBefore(2), new_date: daysBefore(1) },
+      { ...moved, original_date: daysBefore(1), new_date: today, original_window: '13:00-14:00', new_window: '09:00-10:00' },
       { ...moved, original_date: today, new_date: today },
-      { ...moved, original_date: today, new_date: today, original_window: '13:00-14:00', new_window: '09:00-10:00' },
     ]);
     expect((await handOff()).ok).toBe(true);
 
