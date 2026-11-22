@@ -21325,6 +21325,7 @@ const CallRecordingProcessor = {
                         serviceId: existing.service_id || null,
                         serviceKey: existing.service_key_snapshot || null,
                         customerId,
+                        leadId,
                         excludeServiceIds: [existing.id],
                         excludeCustomerId: null,
                       }));
@@ -21885,6 +21886,7 @@ const CallRecordingProcessor = {
                   serviceType,
                   serviceId: callBookingCatalogRow?.id || null,
                   customerId,
+                  leadId,
                 }));
                 try {
                   const pick = await pickBookingTechnician();

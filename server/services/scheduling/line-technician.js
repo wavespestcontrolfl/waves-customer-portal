@@ -437,17 +437,20 @@ async function pickLineTechnician(conn, opts = {}) {
  * lawn_inspection, name "Waves Assessment"; services/assessment-booking.js).
  * Its line is not the catalog's or the name's (the name alone reads general
  * pest): it is the line its lead asked for (assessmentLineFor, owner 2026-11-21).
- * An unreadable catalog row reads "no".
+ * CATALOG IDENTITY WINS, as in assessment-booking isAssessmentVisit: a visit staff repointed to a paid service keeps
+ * its old "Waves Assessment" name and key snapshots, and it must route by its catalog row, not by a lead. The
+ * snapshots decide only with no service id, or when its row cannot be read.
  */
 async function isAssessmentIdentity(db, { serviceId = null, serviceKey = null, serviceType = null } = {}) {
   const { ASSESSMENT_SERVICE_KEY, isAssessmentServiceType, isAssessmentServiceRow } = require('../assessment-booking');
-  if (serviceKey === ASSESSMENT_SERVICE_KEY || isAssessmentServiceType(serviceType)) return true;
-  if (!serviceId) return false;
+  const bySnapshot = () => serviceKey === ASSESSMENT_SERVICE_KEY || isAssessmentServiceType(serviceType);
+  if (!serviceId) return bySnapshot();
   try {
-    return isAssessmentServiceRow(await db('services').where({ id: serviceId }).first('service_key', 'name'));
+    const row = await db('services').where({ id: serviceId }).first('service_key', 'name');
+    return row ? isAssessmentServiceRow(row) : bySnapshot();
   } catch (err) {
-    logger.warn(`[line-technician] assessment lookup failed (read as not an assessment): ${err.message}`);
-    return false;
+    logger.warn(`[line-technician] assessment lookup failed (the visit's own name and key decide): ${err.message}`);
+    return bySnapshot();
   }
 }
 

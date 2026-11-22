@@ -487,6 +487,12 @@ describe('live mode (GATE_SERVICE_LINE_MAP=live, build 4)', () => {
       expect(await liveServiceLine(db, { serviceKey: 'lawn_inspection' })).toBe('lawn');
       expect(await liveServiceLine(db, { serviceId: 'svc-lawn', serviceType: 'Anything', customerId: 'cust-1' })).toBe('lawn');
       expect(await liveServiceLine(db, { serviceType: 'General Pest Control', customerId: 'cust-1' })).toBe('general');
+      // The catalog row decides what the visit is. An assessment staff repointed to a paid service keeps its old
+      // name and key snapshots: it routes by its catalog row (lawn), never by the lead (mosquito).
+      expect(await liveServiceLine(db, { serviceId: 'svc-lawn', serviceKey: 'lawn_inspection', serviceType: 'Waves Assessment', customerId: 'cust-1' })).toBe('lawn');
+      // The assessment's own row, and a service id with no row (the snapshots decide), still read the lead.
+      expect(await liveServiceLine(db, { serviceId: 'svc-assess', serviceType: 'Anything', customerId: 'cust-1' })).toBe('mosquito');
+      expect(await liveServiceLine(db, { serviceId: 'svc-gone', serviceType: 'Waves Assessment', customerId: 'cust-1' })).toBe('mosquito');
     });
 
     test('an unreadable catalog row is not an assessment: the name decides', async () => {
