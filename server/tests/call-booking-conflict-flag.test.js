@@ -456,6 +456,50 @@ describe('booking conflict wiring (source-level — behavior needs a live DB)', 
     expect(slice).not.toContain('throw ');
   });
 
+  // GATE_TECH_SHIFT_HOURS (D4 part 3b): the after-call booking's automatic technician checks read
+  // the visit's own block (window-rules rowBlockMinutes), so a shift that does not hold it ends as
+  // every other refusal there does: the visit is written unassigned.
+  test('the automatic technician checks read the visit\'s own block for the shift', () => {
+    const block = "require\\('\\./scheduling/window-rules'\\)\\.rowBlockMinutes";
+    // A new visit: `hours` on the technician check it already makes.
+    const created = new RegExp(`assertAssignableTechnician\\(insertData\\.technician_id, \\{ conn: trx, date: String\\(scheduledDate\\)\\.slice\\(0, 10\\), workDays: true,\\s*hours: ${block}\\(insertData\\) \\}\\);`);
+    // A follow-up child (a package visit 2 or a follow-up asked for on the call): its planned
+    // block with the job's length, before its fence and its hour search, so both run for the
+    // technician it keeps (the hour search then stays inside the shift: plan-taken-hour.test.js).
+    const childBlock = new RegExp(`const fuBlock = ${block}\\(\\{ window_start: fuStart, window_end: fuWindowEnd, estimated_duration_minutes: fuDurationMin \\}\\);`);
+    // The read has its own nested savepoint, and a failed read answers "outside": the promised
+    // child is still written, unassigned. The gate is read first: off, no savepoint opens and
+    // the child keeps its technician.
+    const child = new RegExp(`const fuOffShift = followUpTechId && require\\('\\.\\./config/feature-gates'\\)\\.techShiftHoursLive\\?\\.\\(\\)\\s*&& await sp\\.transaction\\(\\(shiftSp\\) => require\\('\\./technician-eligibility'\\)\\.shiftExcluding\\(shiftSp, followUpTechId, fuPlan\\.scheduledDate, fuBlock\\)\\)\\s*\\.catch\\(\\(shiftErr\\) => \\{`);
+    for (const site of [created, childBlock, child]) expect(src).toMatch(site);
+    // Each anchor must exist: a missing one would read as position -1 and pass an order check.
+    const at = (text) => {
+      const index = src.indexOf(text, src.search(child));
+      expect(index).toBeGreaterThan(-1);
+      return index;
+    };
+    const failedRead = src.slice(src.search(child), at('if (fuOffShift) {'));
+    expect(failedRead).toContain('return true;');
+    expect(failedRead).not.toContain('throw ');
+    const dayCheck = src.indexOf('if (followUpTechId && packageFollowUp) {');
+    expect(dayCheck).toBeGreaterThan(-1);
+    expect(dayCheck).toBeLessThan(src.search(child));
+    expect(src.search(childBlock)).toBeLessThan(src.search(child));
+    expect(at('fenceBookingDay(fenceSp, { date: fuPlan.scheduledDate, techId: followUpTechId })')).toBeGreaterThan(at('if (fuOffShift) {'));
+    expect(at("callFollowUpWindow(sp, {")).toBeGreaterThan(at('fenceBookingDay(fenceSp, { date: fuPlan.scheduledDate, techId: followUpTechId })'));
+    // Nothing clears the technician between the hour search and the insert.
+    expect(src.slice(at("callFollowUpWindow(sp, {"), at("const [fuRow] = await sp('scheduled_services')"))).not.toContain('followUpTechId = null');
+    // Two technician checks stay without `hours`: the package visit 2's day check (the child's
+    // block is read right after it) and a reused visit's. The reuse path reads the row it reuses
+    // with no row lock, so its shift check comes with that lock, in its own PR.
+    expect(src.match(/assertAssignableTechnician\([^)]*workDays: true \}\)/g))
+      .toEqual([expect.stringContaining('followUpTechId'), expect.stringContaining('reuseTechId')]);
+    // Each refusal there is recovered as unassigned.
+    const after = (site, text) => src.slice(src.search(site)).slice(0, 2200).includes(text);
+    expect(after(child, 'followUpTechId = null;')).toBe(true);
+    expect(after(created, 'insertData.technician_id = null;')).toBe(true);
+  });
+
   test('owner ruling 2026-09-11: the follow-up child tries the fence for ITS OWN date/tech inside the savepoint, before its insert', () => {
     const seederIdx = src.indexOf('return await trx.transaction(async (sp) => {');
     expect(seederIdx).toBeGreaterThan(-1);

@@ -1,5 +1,6 @@
 // Real PostgreSQL transactions (rolled back): Tech Rewards Plan D5-5, the December gift as a pay line on pay runs, behind
-// GATE_TECH_REWARDS_PAY_LINES (which needs GATE_PAYROLL_PAY_LINES). The line is derived data, written and worked out again when a
+// GATE_TECH_REWARDS_PAY_LINES (which needs GATE_PAYROLL_PAY_LINES), and the stay bonus behind GATE_TECH_REWARDS_STAY_BONUS (the
+// last describe block). The line is derived data, written and worked out again when a
 // run is drafted, recomputed and finalized: one open line per technician in the first run dated on or after the gift date that is
 // ready, owned by that draft run, paid with its check, and deleted when the run is voided or finalizes without paying it. A gift
 // that is not ready waits and never holds the run. All names and amounts are synthetic. DATABASE_URL-gated like the other
@@ -32,8 +33,9 @@ jest.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: jest.fn() }));
 const { randomUUID } = require('node:crypto');
 const express = require('express');
 const router = require('../routes/admin-payroll');
-const { syncTechRewardLines } = require('../services/tech-rewards-pay-lines');
+const { syncTechRewardLines, stayBonusStatus } = require('../services/tech-rewards-pay-lines');
 const { techRewardsOwnKey, techRewardsOwnedSql } = require('../services/payroll-pay-lines');
+const { readGross, readStayPay } = require('../services/tech-rewards-scoreboard');
 const { workedWeeks } = require('../services/payroll-runs');
 const { staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
 
@@ -45,7 +47,7 @@ const GIFT_WEEK = '2026-12-07'; // pay date Fri Dec 18, the last Friday on or be
 const NEXT_WEEK = '2026-12-14'; // pay date Fri Dec 25
 const NOW = Date.parse('2027-01-05T17:00:00Z'); // every week above has ended
 
-const GATES = ['GATE_PAYROLL', 'GATE_PAYROLL_PAY_LINES', 'GATE_TECH_REWARDS_PAY_LINES', 'GATE_PAYROLL_FORM_FIGURES',
+const GATES = ['GATE_PAYROLL', 'GATE_PAYROLL_PAY_LINES', 'GATE_TECH_REWARDS_PAY_LINES', 'GATE_TECH_REWARDS_STAY_BONUS', 'GATE_PAYROLL_FORM_FIGURES',
   'GATE_PAYROLL_TIME_OFF', 'GATE_SHIFT_CLOSE_REVIEW', 'GATE_PAYROLL_COMMISSION_LEDGER', 'GATE_PAYROLL_REVIEW_BONUS_IMPORT'];
 const GIFT = 30000;
 
@@ -93,11 +95,13 @@ postgres('tech rewards pay lines: the December gift', () => {
   };
   // A finalized check of the run of `runWeek` that already paid a commission line earned in `lineWeek` (45 h worked, 5 of them
   // overtime), with the premium the check stored for that week: its column and its week row. `premiumCents` is whatever that
-  // check paid, by whatever rule it was priced. A finalized check cannot be edited, so it is written whole. { runId, lineId }
-  const paidLine = async (technicianId, runWeek, cents, lineWeek, premiumCents) => {
+  // check paid, by whatever rule it was priced. A finalized check cannot be edited, so it is written whole (`stored`: any
+  // other column of it). { runId, lineId }
+  const paidLine = async (technicianId, runWeek, cents, lineWeek, premiumCents, stored = {}) => {
     const runId = await paidWeek(technicianId, runWeek, {
       line_overtime_premium_cents: premiumCents,
       calc_snapshot: JSON.stringify({ lineOvertimeWeeks: [{ weekStart: lineWeek, workedMinutes: 2700, overtimeMinutes: 300, allocatedCents: cents, premiumCents }] }),
+      ...stored,
     });
     const check = await trx('payroll_checks').where({ run_id: runId, technician_id: technicianId }).first('id');
     const [line] = await trx('payroll_pay_lines').insert({
@@ -172,6 +176,7 @@ postgres('tech rewards pay lines: the December gift', () => {
     process.env.GATE_PAYROLL = 'true';
     process.env.GATE_PAYROLL_PAY_LINES = 'true';
     process.env.GATE_TECH_REWARDS_PAY_LINES = 'true';
+    delete process.env.GATE_TECH_REWARDS_STAY_BONUS;
     delete process.env.GATE_PAYROLL_FORM_FIGURES;
     delete process.env.GATE_PAYROLL_TIME_OFF;
     delete process.env.GATE_SHIFT_CLOSE_REVIEW;
@@ -320,8 +325,9 @@ postgres('tech rewards pay lines: the December gift', () => {
       const check = checkOf(giftRun, tech);
       expect(check).toMatchObject({ techRewardsCents: GIFT, lineOvertimePremiumCents: 34 });
       const stored = await trx('payroll_checks').where({ id: check.id }).first();
+      // the row also holds what the check would have paid for the week without the gift: nothing, the gift is its only line
       expect(stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === WEEK)).toMatchObject({
-        allocatedCents: 600, premiumCents: 34, earlierAllocatedCents: 600, earlierPremiumCents: 33,
+        allocatedCents: 600, premiumCents: 34, earlierAllocatedCents: 600, earlierPremiumCents: 33, ordinaryPremiumCents: 0,
       });
       // a week nobody paid for carries no earlier figures
       const plain = stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === '2026-11-02');
@@ -382,6 +388,36 @@ postgres('tech rewards pay lines: the December gift', () => {
       // the January check is final and whole: 34 is what its 6.03 line earns alone (1/2 x 603 / 45 h x 5 h = 33.5 -> 34)
       const kept = await trx('payroll_checks').where({ run_id: january.id, technician_id: tech, status: 'finalized' }).first();
       expect(Number(kept.line_overtime_premium_cents)).toBe(34);
+    });
+
+    it('keeps a commission\'s overtime in a bonus base as the pay run priced it, when a check with a LATER pay date was finalized first', async () => {
+      const tech = await readyTech('Sample Alpha');
+      const WEEK = '2026-11-09'; // 45 h worked, 5 of them overtime
+      await approvedWeek(tech, WEEK, '2400.00', '300.00');
+      await paidWeek(tech, WEEK); // the week's own check: 880.00 of wages and no line
+      // The week of Nov 16 was paid late: its check is dated Jan 4, 2027, and it was final BEFORE the gift's run. It paid a 6.00
+      // commission earned in WEEK, the first check to pay line pay for that week: 33.33 -> 33.
+      await trx('payroll_runs').insert({ week_start: '2026-11-16', pay_date: '2027-01-04', status: 'finalized' });
+      await paidLine(tech, '2026-11-16', 600, WEEK, 33, { pay_date: '2027-01-04', gross_cents: 88000 + 600 + 33 });
+      // The gift's run is dated Dec 18, 2026, EARLIER than that check, and is finalized after it. It carries another 6.00
+      // commission of WEEK beside the gift, whose share of WEEK is 6.00 too.
+      await trx('payroll_pay_lines').insert({ technician_id: tech, kind: 'commission', amount_cents: 600, earned_week_start: WEEK });
+      await approvedWeek(tech, GIFT_WEEK);
+      const run = await draft(GIFT_WEEK);
+      expect(run.payDate).toBe('2026-12-18');
+      // the two lines pay 67 for WEEK: their floor, 66.67 up (the shortfall, 100 on the 18.00 less the 33 paid, is 67 too)
+      expect(checkOf(run, tech)).toMatchObject({ commissionCents: 600, techRewardsCents: GIFT, lineOvertimePremiumCents: 67 });
+      await finalize(run.id);
+      const stored = await trx('payroll_checks').where({ run_id: run.id, technician_id: tech, status: 'finalized' }).first();
+      // the check keeps what its commission alone would have paid as the later check it was: its floor, 33.33 up = 34
+      expect(stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === WEEK)).toMatchObject({
+        premiumCents: 67, ordinaryPremiumCents: 34, earlierAllocatedCents: 600, earlierPremiumCents: 33,
+      });
+      // The pay earned in WEEK: its own 880.00, both commissions, and their overtime as it was PAID: 33, then 34. Put in pay
+      // date order the Dec 18 check looks like the first to pay for the week, where its commission would have earned 33.
+      expect(await readGross(trx, tech, WEEK, '2026-11-15')).toBe(88000 + 600 + 33 + 600 + 34);
+      // the stay bonus's reader takes the same figures: three weeks of wages, the commissions, 33 and 34; no gift, none of its 33
+      expect((await readStayPay(trx, tech, WEEK, '2026-12-13')).cents).toBe(3 * 88000 + 600 + 33 + 600 + 34);
     });
 
     it('makes a week whole that two older checks left 1 cent short: 33 + 33, then the gift\'s check pays 68 (134 on the three lines)', async () => {
@@ -1309,6 +1345,542 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect([dateOf(line.earned_week_start), dateOf(line.covers_from), dateOf(line.covers_to)]).toEqual([NEXT_WEEK, '2026-01-01', '2026-12-13']);
       expect(checkOf(next, tech).techRewardsCents).toBe(GIFT);
       expect(await linesOf(tech)).toHaveLength(1);
+    });
+  });
+  // Hired Nov 24, 2025: 1 year of service on Tue Nov 24, 2026. The 12 months are Nov 24, 2025 to Nov 23, 2026 and their last
+  // pay week is the week of Nov 23. So EARLY_WEEK (Nov 30, pay date Dec 11) is the first run that can carry the bonus, and
+  // Jan 23, 2027 (60 days after the anniversary) is the last pay date that can.
+  describe('the stay bonus', () => {
+    const HIRED = '2025-11-24';
+    const LAST_WEEK = '2026-11-23';
+    const STAY_GATE = 'GATE_TECH_REWARDS_STAY_BONUS';
+    const stayTech = (name, patch = {}) => readyTech(name, { hire_date: HIRED, ...patch });
+    // three paid weeks inside the 12 months: 3 x 880.00 = 2,640.00, and 2% of it is 52.80
+    const paidWeeks = async (technicianId) => {
+      for (const week of ['2026-11-02', '2026-11-09', '2026-11-16']) await paidWeek(technicianId, week);
+    };
+    const PERIOD = 'the pay earned Nov 24, 2025 to Nov 23, 2026';
+    const stayWaits = (name, why, years = '1 year') => `Stay bonus (${years}) for ${name} waits: ${why}. Only a pay run dated Jan 23, 2027 or earlier can add it`;
+    const refusedVoid = async (runId) => {
+      const done = await api('POST', `/runs/${runId}/void`, { body: { reason: 'Sample correction' } });
+      return [done.status, done.body.error];
+    };
+    const HELD = [409, 'A stay bonus on another paycheck was worked out from this pay run. Void the pay run that paid the bonus first.'];
+    const checkIdsOf = async (technicianId) => (await trx('payroll_checks').where({ technician_id: technicianId, status: 'finalized' }).select('id'))
+      .map((row) => row.id).sort();
+
+    beforeEach(() => {
+      process.env[STAY_GATE] = 'true';
+      delete process.env.GATE_TECH_REWARDS_PAY_LINES; // the stay bonus does not need the gift's gate
+    });
+
+    it('is 2% of the pay earned in the 12 months before the 1 year anniversary, on the first run for a week after them', async () => {
+      const alpha = await stayTech('Sample Alpha');
+      await paidWeeks(alpha);
+      await approvedWeek(alpha, EARLY_WEEK);
+      const other = await readyTech('Sample Other'); // hired Jan 10, 2024: 3 years on Jan 10, 2027, after this run's pay date
+      const noDate = await readyTech('Sample Nodate', { hire_date: null });
+      const gone = await stayTech('Sample Gone', { employment_status: 'inactive' });
+      const manager = await stayTech('Sample Manager', { role: 'admin' });
+      for (const id of [gone, manager]) await paidWeeks(id);
+      const run = await draft(EARLY_WEEK);
+      expect(run.payDate).toBe('2026-12-11');
+      const line = await lineOf(alpha);
+      expect(line).toMatchObject({
+        kind: 'stay_bonus', status: 'open', amount_cents: 5280, source_id: `stay_bonus:${alpha}:1`, note: `2% of $2,640.00, ${PERIOD}`,
+      });
+      expect([dateOf(line.earned_week_start), dateOf(line.covers_from), dateOf(line.covers_to)]).toEqual([EARLY_WEEK, '2025-11-24', '2026-11-23']);
+      // the line keeps the three checks it was worked out from
+      expect(line.counted_check_ids).toEqual(await checkIdsOf(alpha));
+      expect(line.counted_check_ids).toHaveLength(3);
+      expect(checkOf(run, alpha)).toMatchObject({ techRewardsCents: 5280, grossCents: 88000 + 5280 });
+      for (const id of [other, noDate, gone, manager]) expect(await linesOf(id)).toHaveLength(0);
+      expect(await notesOf(run.id)).toEqual([]);
+      // what the scoreboard asks of payroll: a run dated today could still write the bonus for Alpha, and for nobody the
+      // sync writes no line for (left, an office account), on the same dates; not after the 60 days (Jan 23)
+      const payable = async (id, today) => (await stayBonusStatus(trx, id, HIRED, today)).payableKeys;
+      expect([await payable(alpha, run.payDate), await payable(gone, run.payDate), await payable(manager, run.payDate), await payable(alpha, '2027-01-24')])
+        .toEqual([['1'], [], [], []]);
+      // the audit event names the line and holds no amount: ids, kinds, reason codes and counts only
+      const [event] = await syncEventOf(run.id, 'added_line_ids');
+      expect(event.added_line_ids).toEqual([line.id]);
+      const amounts = [5280, 264000, '5280', '264000', '52.80', '2640.00', '$52.80', '$2,640.00'];
+      const valuesOf = (value) => (value && typeof value === 'object' ? Object.values(value).flatMap(valuesOf) : [value]);
+      expect(valuesOf(event).filter((value) => amounts.includes(value))).toEqual([]);
+      expect(Object.keys(event).filter((key) => /cents|amount|base|note/i.test(key))).toEqual([]);
+      // finalize pays it with its check, and no later run writes the milestone again
+      await finalize(run.id);
+      expect(await lineOf(alpha)).toMatchObject({ status: 'paid', amount_cents: 5280 });
+      await approvedWeek(alpha, GIFT_WEEK);
+      const next = await draft(GIFT_WEEK);
+      expect(await linesOf(alpha)).toHaveLength(1);
+      expect(checkOf(next, alpha)).not.toHaveProperty('techRewardsCents');
+    });
+
+    it.each([
+      [3, '2023-11-24', 10560, '4%'],
+      [5, '2021-11-24', 21120, '8%'],
+    ])('is the rate of the milestone: %s years of service', async (years, hired, cents, rate) => {
+      const alpha = await stayTech('Sample Alpha', { hire_date: hired });
+      await paidWeeks(alpha);
+      const run = await draft(EARLY_WEEK);
+      expect(await lineOf(alpha)).toMatchObject({
+        kind: 'stay_bonus', amount_cents: cents, source_id: `stay_bonus:${alpha}:${years}`, note: `${rate} of $2,640.00, ${PERIOD}`,
+      });
+      expect(checkOf(run, alpha)).toMatchObject({ techRewardsCents: cents, grossCents: cents });
+    });
+
+    it('waits on the run of the last week of the 12 months: that week\'s pay is not final yet, and the next week\'s run counts it', async () => {
+      const alpha = await stayTech('Sample Alpha');
+      await paidWeeks(alpha);
+      await approvedWeek(alpha, LAST_WEEK);
+      const run = await draft(LAST_WEEK);
+      expect(run.payDate).toBe('2026-12-04'); // after the anniversary, and still too early
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(checkOf(run, alpha)).not.toHaveProperty('techRewardsCents');
+      expect([run.waiting, run.blocked]).toEqual([[], []]);
+      const tooSoon = 'the 12 months it is worked out from end in the week of Nov 23, 2026, and only a pay run for a later week can add it';
+      expect(await notesOf(run.id)).toEqual([stayWaits('Sample Alpha', tooSoon)]);
+      expect((await syncEventOf(run.id, 'waits')).flatMap((m) => m.waits)).toContainEqual({
+        technician_id: alpha, kind: 'stay_bonus', source_id: `stay_bonus:${alpha}:1`, reason: 'pay_week_too_early', week: LAST_WEEK,
+      });
+      await finalize(run.id);
+      // a finalized run gives no reason
+      expect(await notesOf(run.id)).toEqual(['Stay bonus (1 year) for Sample Alpha was not on this pay run. Only a pay run dated Jan 23, 2027 or earlier can add it']);
+      // Mon Nov 23 is the one day of that week in the 12 months: 1/7 of its 880.00 counts (no day records), so 2% of 2,765.71
+      const next = await draft(EARLY_WEEK);
+      expect(await lineOf(alpha)).toMatchObject({ amount_cents: 5531, note: `2% of $2,765.71, ${PERIOD}` });
+      expect(checkOf(next, alpha).techRewardsCents).toBe(5531);
+      await finalize(next.id);
+      expect(await notesOf(run.id)).toEqual([]); // paid: nothing waits
+    });
+
+    it('waits, with a note, while a week of the 12 months is approved and has no finalized check', async () => {
+      const alpha = await stayTech('Sample Alpha');
+      await paidWeeks(alpha);
+      await approvedWeek(alpha, '2026-10-05'); // approved, never paid
+      await approvedWeek(alpha, EARLY_WEEK);
+      const run = await draft(EARLY_WEEK);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect([run.waiting, run.blocked]).toEqual([[], []]);
+      expect(await notesOf(run.id)).toEqual([stayWaits('Sample Alpha', 'the week of Oct 5, 2026 is not paid yet')]);
+      // the wait does not stop the run: the check finalizes without the bonus
+      const final = await finalize(run.id);
+      expect(checkOf(final, alpha)).not.toHaveProperty('techRewardsCents');
+    });
+
+    it('counts the paychecks of the 12 months\' pay weeks only: a pay line that a later check pays is no part of it and never holds the bonus', async () => {
+      const alpha = await stayTech('Sample Alpha');
+      await paidWeeks(alpha);
+      await approvedWeek(alpha, EARLY_WEEK);
+      await approvedWeek(alpha, GIFT_WEEK);
+      // Two open lines this run pays. A commission for the week of Nov 16, entered late. And one for Tue Nov 24 to Fri Nov 27,
+      // days after the 12 months (they end Mon Nov 23) in their last week. Both land on the check of the week of Nov 30.
+      await trx('payroll_pay_lines').insert([
+        { technician_id: alpha, kind: 'commission', amount_cents: 10000, earned_week_start: '2026-11-16' },
+        { technician_id: alpha, kind: 'commission', amount_cents: 4000, earned_week_start: EARLY_WEEK, covers_from: '2026-11-24', covers_to: '2026-11-27' },
+      ]);
+      const run = await draft(EARLY_WEEK);
+      expect(checkOf(run, alpha)).toMatchObject({ commissionCents: 14000, techRewardsCents: 5280 });
+      expect(await lineOf(alpha)).toMatchObject({ amount_cents: 5280, note: `2% of $2,640.00, ${PERIOD}` });
+      expect(await notesOf(run.id)).toEqual([]);
+      const counted = (await lineOf(alpha)).counted_check_ids;
+      expect(counted).toHaveLength(3);
+      await finalize(run.id);
+      // the same answer on every later sync: the check that paid the two lines is for a later pay week, so it never counts
+      await voidRun(run.id);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      const next = await finalize((await draft(EARLY_WEEK)).id);
+      expect(await lineOf(alpha)).toMatchObject({ status: 'paid', amount_cents: 5280, counted_check_ids: counted });
+      expect(counted).not.toContain(checkOf(next, alpha).id);
+      // a commission for a week of the 12 months that the NEXT run pays changes nothing, and that run is voided freely
+      await trx('payroll_pay_lines').insert({ technician_id: alpha, kind: 'commission', amount_cents: 2000, earned_week_start: '2026-11-09' });
+      const later = await finalize((await draft(GIFT_WEEK)).id);
+      expect(checkOf(later, alpha)).toMatchObject({ commissionCents: 2000 });
+      expect(checkOf(later, alpha)).not.toHaveProperty('techRewardsCents');
+      expect(await linesOf(alpha)).toHaveLength(1);
+      expect(await lineOf(alpha)).toMatchObject({ status: 'paid', amount_cents: 5280, counted_check_ids: counted });
+      await voidRun(later.id);
+    });
+
+    it('waits, with a note, when no finalized paycheck holds pay for the 12 months: no bonus on a base of nothing', async () => {
+      const alpha = await stayTech('Sample Alpha');
+      await approvedWeek(alpha, EARLY_WEEK);
+      const run = await draft(EARLY_WEEK);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(checkOf(run, alpha)).not.toHaveProperty('techRewardsCents');
+      expect(await notesOf(run.id)).toEqual([stayWaits('Sample Alpha', 'no finalized paycheck holds pay of theirs for the 12 months it is worked out from')]);
+    });
+
+    it('never pays from an overtime split it cannot prove: an older paycheck with a bonus line, other line pay and earlier pay for the week makes the bonus wait for review; one with no earlier pay, or with the bonus line alone, is read from its own row', async () => {
+      const WEEK = '2026-11-09';
+      // An older check, for the week of Nov 16, with no stored split: it paid a 6.00 commission and a 6.00 gift line for WEEK
+      // (45 h worked, 5 of them overtime) and 67 of premium for the two. `earlier`: what its week row says earlier checks paid.
+      const mixedCheck = async (technicianId, earlier) => {
+        const { runId } = await paidLine(technicianId, '2026-11-16', 600, WEEK, 67, {
+          gross_cents: 88000 + 600 + 600 + 67,
+          tech_rewards_cents: 600,
+          calc_snapshot: JSON.stringify({ lineOvertimeWeeks: [{ weekStart: WEEK, workedMinutes: 2700, overtimeMinutes: 300, allocatedCents: 1200, premiumCents: 67, ...earlier }] }),
+        });
+        const check = await trx('payroll_checks').where({ run_id: runId, technician_id: technicianId }).first('id');
+        await trx('payroll_pay_lines').insert({
+          technician_id: technicianId, kind: 'december_gift', amount_cents: 600, earned_week_start: '2026-11-16', covers_from: WEEK, covers_to: '2026-11-15', status: 'paid', check_id: check.id,
+        });
+      };
+      const alpha = await stayTech('Sample Alpha');
+      const bravo = await stayTech('Sample Bravo');
+      for (const id of [alpha, bravo]) {
+        for (const week of ['2026-11-02', WEEK]) await paidWeek(id, week);
+        await approvedWeek(id, EARLY_WEEK);
+      }
+      // Alpha's row shows earlier pay for the week (6.00 of line pay, 33 of premium): the commission's part of the 67 depends on
+      // the exact earlier pay, which the row holds rounded. Not proven.
+      await mixedCheck(alpha, { earlierAllocatedCents: 600, earlierPremiumCents: 33 });
+      // Bravo's row shows none: the check priced its lines for the week alone, so the commission alone earned 33.33 -> 33
+      await mixedCheck(bravo, {});
+      // Charlie: WEEK's own check paid the 6.00 commission and its 33. The older check that followed holds ONLY the gift line
+      // for WEEK, with that earlier pay on its row and 34 of premium. Without the gift it would have paid nothing for the
+      // week, so there is nothing to split and nothing to review.
+      const charlie = await stayTech('Sample Charlie');
+      await paidWeek(charlie, '2026-11-02');
+      await paidLine(charlie, WEEK, 600, WEEK, 33, { gross_cents: 88000 + 600 + 33 });
+      await approvedWeek(charlie, EARLY_WEEK);
+      const giftRun = await paidWeek(charlie, '2026-11-16', {
+        gross_cents: 88000 + 600 + 34,
+        tech_rewards_cents: 600,
+        line_overtime_premium_cents: 34,
+        calc_snapshot: JSON.stringify({ lineOvertimeWeeks: [{ weekStart: WEEK, workedMinutes: 2700, overtimeMinutes: 300, allocatedCents: 600, premiumCents: 34, earlierAllocatedCents: 600, earlierPremiumCents: 33 }] }),
+      });
+      const giftCheck = await trx('payroll_checks').where({ run_id: giftRun, technician_id: charlie }).first('id');
+      await trx('payroll_pay_lines').insert({
+        technician_id: charlie, kind: 'december_gift', amount_cents: 600, earned_week_start: '2026-11-16', covers_from: WEEK, covers_to: '2026-11-15', status: 'paid', check_id: giftCheck.id,
+      });
+      const run = await draft(EARLY_WEEK);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(checkOf(run, alpha)).not.toHaveProperty('techRewardsCents');
+      expect(await notesOf(run.id)).toEqual([stayWaits('Sample Alpha',
+        'an older paycheck paid a bonus line and other line pay for the week of Nov 9, 2026 and kept no split of that week\'s overtime between them, so work this bonus out by hand')]);
+      // Bravo: three weeks of wages, the 6.00 commission and its 33; not the gift line and not its 34. 2% of 2,646.33 = 52.93
+      expect(await lineOf(bravo)).toMatchObject({ status: 'open', amount_cents: 5293, note: `2% of $2,646.33, ${PERIOD}` });
+      // Charlie: three weeks of wages, the commission and its 33 from WEEK's own check; none of the gift's 34. The same base.
+      expect(await lineOf(charlie)).toMatchObject({ status: 'open', amount_cents: 5293, note: `2% of $2,646.33, ${PERIOD}` });
+      // the bonus that waits never holds the run
+      await finalize(run.id);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(await lineOf(bravo)).toMatchObject({ status: 'paid', amount_cents: 5293 });
+    });
+
+    it('shows no stale wait: a hire date corrected since the run\'s last sync, to one this run is not dated for, takes the note off', async () => {
+      const alpha = await stayTech('Sample Alpha');
+      await approvedWeek(alpha, EARLY_WEEK);
+      const run = await draft(EARLY_WEEK); // dated Dec 11, 2026
+      const note = stayWaits('Sample Alpha', 'no finalized paycheck holds pay of theirs for the 12 months it is worked out from');
+      expect(await notesOf(run.id)).toEqual([note]);
+      // Corrected to a date whose 1 year anniversary (Dec 20, 2026) is after this run's pay date. A run dated Dec 11 does not
+      // write that bonus, so the reason saved at its sync is not shown beside the new date's deadline.
+      await trx('technicians').where({ id: alpha }).update({ hire_date: '2025-12-20' });
+      expect(await notesOf(run.id)).toEqual([]);
+      // a date this run is still dated for (anniversary Dec 1) keeps the note, with that date's deadline
+      await trx('technicians').where({ id: alpha }).update({ hire_date: '2025-12-01' });
+      expect(await notesOf(run.id)).toEqual([note.replace('Jan 23, 2027', 'Jan 30, 2027')]);
+    });
+
+    it('waits when no paycheck can be worked out for the technician, so a bonus alone never blocks the run', async () => {
+      const alpha = await stayTech('Sample Alpha', { pay_rate: null });
+      const bravo = await stayTech('Sample Bravo');
+      for (const id of [alpha, bravo]) await paidWeeks(id);
+      const run = await draft(EARLY_WEEK);
+      expect([run.waiting, run.blocked]).toEqual([[], []]);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(checkOf(run, bravo).techRewardsCents).toBe(5280);
+      expect(await notesOf(run.id)).toEqual([stayWaits('Sample Alpha',
+        'no paycheck can be worked out for them on this pay run (check their pay rate, and the tax tables for the pay date)')]);
+    });
+
+    it('follows the pay on file while it is open: a recompute works the amount out again, and finalize pays that amount', async () => {
+      const alpha = await stayTech('Sample Alpha');
+      await paidWeeks(alpha);
+      const run = await draft(EARLY_WEEK);
+      const first = await lineOf(alpha);
+      expect(first.amount_cents).toBe(5280);
+      await paidWeek(alpha, '2026-10-26'); // one more paid week of the 12 months
+      const again = await recompute(run.id);
+      const second = await lineOf(alpha);
+      expect([second.id, second.amount_cents, second.note]).toEqual([first.id, 7040, `2% of $3,520.00, ${PERIOD}`]);
+      expect(checkOf(again, alpha).techRewardsCents).toBe(7040);
+      await finalize(run.id);
+      expect(await lineOf(alpha)).toMatchObject({ status: 'paid', amount_cents: 7040 });
+    });
+
+    it('is keyed by the milestone, not by its date: a hire date corrected while the line is open moves it, and one corrected after it is paid never pays the milestone again', async () => {
+      const alpha = await stayTech('Sample Alpha');
+      await paidWeeks(alpha);
+      const run = await draft(EARLY_WEEK);
+      const first = await lineOf(alpha);
+      await trx('technicians').where({ id: alpha }).update({ hire_date: '2025-11-26' });
+      await recompute(run.id);
+      const moved = await lineOf(alpha);
+      expect([moved.id, moved.source_id, dateOf(moved.covers_from), dateOf(moved.covers_to), moved.note])
+        .toEqual([first.id, `stay_bonus:${alpha}:1`, '2025-11-26', '2026-11-25', '2% of $2,640.00, the pay earned Nov 26, 2025 to Nov 25, 2026']);
+      await finalize(run.id);
+      // paid. The hire date is corrected again, to one whose anniversary (Dec 10) the next run is dated for.
+      await trx('technicians').where({ id: alpha }).update({ hire_date: '2025-12-10' });
+      await approvedWeek(alpha, GIFT_WEEK);
+      const next = await draft(GIFT_WEEK);
+      expect(await linesOf(alpha)).toHaveLength(1);
+      expect(await lineOf(alpha)).toMatchObject({ id: first.id, status: 'paid', amount_cents: 5280 });
+      expect(checkOf(next, alpha)).not.toHaveProperty('techRewardsCents');
+      expect(await notesOf(next.id)).toEqual([]);
+      // what the scoreboard asks of payroll (its own suite covers what it shows): the 1 year milestone is settled, so no run
+      // dated inside the new anniversary's 60 days can write it
+      expect(await stayBonusStatus(trx, alpha, '2025-12-10', '2026-12-20')).toEqual({ settledKeys: ['1'], payableKeys: [] });
+    });
+
+    // PostgreSQL's date type holds the year 20251 (one key too many in a date box), infinity, and a date BC, which prints in
+    // YYYY-MM-DD with no era: '2025-11-24 BC' would read as the day Alpha's 1 year bonus is worked out from.
+    it.each(['20251-11-24', '2025-11-24 BC', '0099-11-24', 'infinity'])('reads a hire date the calendar cannot read (%s) as none: the rest of the run goes on, and every run says so until it is corrected', async (unreadable) => {
+      const alpha = await stayTech('Sample Alpha', { hire_date: unreadable });
+      const bravo = await stayTech('Sample Bravo');
+      for (const id of [alpha, bravo]) {
+        await paidWeeks(id);
+        await approvedWeek(id, EARLY_WEEK);
+      }
+      const run = await draft(EARLY_WEEK);
+      expect([run.waiting, run.blocked]).toEqual([[], []]);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(checkOf(run, alpha)).toMatchObject({ grossCents: 88000 });
+      expect(checkOf(run, bravo).techRewardsCents).toBe(5280);
+      const unread = 'Stay bonus for Sample Alpha waits: their hire date on file is not a date the pay run can read, so correct it on their staff profile';
+      expect(await notesOf(run.id)).toEqual([unread]);
+      expect((await syncEventOf(run.id, 'waits')).flatMap((m) => m.waits)).toContainEqual({
+        technician_id: alpha, kind: 'stay_bonus', source_id: null, reason: 'hire_date_invalid', week: null,
+      });
+      // corrected: the note goes with the date, and the next sync writes the bonus
+      await trx('technicians').where({ id: alpha }).update({ hire_date: HIRED });
+      expect(await notesOf(run.id)).toEqual([]);
+      const again = await recompute(run.id);
+      expect(checkOf(again, alpha).techRewardsCents).toBe(5280);
+      expect(await notesOf(run.id)).toEqual([]);
+      // a line that is open when the date turns unreadable comes off, and the run is finalized with the others' lines
+      await trx('technicians').where({ id: alpha }).update({ hire_date: unreadable });
+      await recompute(run.id);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(await notesOf(run.id)).toEqual([unread]);
+      await finalize(run.id);
+      expect(await lineOf(bravo)).toMatchObject({ status: 'paid', amount_cents: 5280 });
+      // a finalized run is never worked out again, and this wait has no last pay date to state: it shows no note
+      expect(await notesOf(run.id)).toEqual([]);
+    });
+
+    it('holds the gift of a technician whose hire date is not a calendar date too, with its own note and last pay date', async () => {
+      process.env.GATE_TECH_REWARDS_PAY_LINES = 'true';
+      const alpha = await readyTech('Sample Alpha', { hire_date: '20240-01-10' });
+      const bravo = await readyTech('Sample Bravo'); // hired Jan 10, 2024: no stay bonus is dated for this run
+      for (const id of [alpha, bravo]) await approvedWeek(id, GIFT_WEEK);
+      const run = await draft(GIFT_WEEK);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(checkOf(run, bravo).techRewardsCents).toBe(GIFT);
+      const why = 'their hire date on file is not a date the pay run can read, so correct it on their staff profile';
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', why), `Stay bonus for Sample Alpha waits: ${why}`]);
+      await finalize(run.id);
+      expect(await notesOf(run.id)).toEqual([missed('Sample Alpha')]);
+    });
+
+    it('takes an open line off when its technician has left, or has no hire date on file any more', async () => {
+      const alpha = await stayTech('Sample Alpha');
+      const bravo = await stayTech('Sample Bravo');
+      for (const id of [alpha, bravo]) await paidWeeks(id);
+      const run = await draft(EARLY_WEEK);
+      expect([await linesOf(alpha), await linesOf(bravo)].map((lines) => lines.length)).toEqual([1, 1]);
+      await trx('technicians').where({ id: alpha }).update({ employment_status: 'inactive' });
+      await trx('technicians').where({ id: bravo }).update({ hire_date: null });
+      await recompute(run.id);
+      expect([await linesOf(alpha), await linesOf(bravo)].map((lines) => lines.length)).toEqual([0, 0]);
+      const skipped = (await syncEvents()).flatMap((e) => e.metadata.skipped || []);
+      expect(skipped).toContainEqual({ technician_id: alpha, kind: 'stay_bonus', reason: 'not_active' });
+      expect(skipped).toContainEqual({ technician_id: bravo, kind: 'stay_bonus', reason: 'not_due_in_this_run' });
+      expect(await notesOf(run.id)).toEqual([]);
+    });
+
+    it('holds the automatic bonus for review when a stay bonus line the pay run did not write is on file', async () => {
+      const alpha = await stayTech('Sample Alpha');
+      await paidWeeks(alpha);
+      const [made] = await trx('payroll_pay_lines').insert({
+        technician_id: alpha, kind: 'stay_bonus', amount_cents: 12345, earned_week_start: EARLY_WEEK,
+      }).returning('id');
+      const run = await draft(EARLY_WEEK);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(checkOf(run, alpha).techRewardsCents).toBe(12345); // the hand-made line rides on the check as before
+      expect(await notesOf(run.id)).toEqual([stayWaits('Sample Alpha',
+        'a stay bonus line that the pay run did not write is already on file for them, so check that line first')]);
+      await trx('payroll_pay_lines').where({ id: made.id || made }).del();
+      const again = await recompute(run.id);
+      expect(checkOf(again, alpha).techRewardsCents).toBe(5280);
+      expect(await notesOf(run.id)).toEqual([]);
+    });
+
+    it('has its own gate: off takes only the open stay bonus line off, and the December gift follows its own gate', async () => {
+      process.env.GATE_TECH_REWARDS_PAY_LINES = 'true';
+      const alpha = await stayTech('Sample Alpha');
+      await paidWeeks(alpha);
+      const kinds = async () => (await linesOf(alpha)).map((line) => [line.kind, line.status, line.amount_cents]);
+      // dated Dec 18: the gift date, and inside the 60 days of the stay bonus. The gift is no part of the bonus's base.
+      const run = await draft(GIFT_WEEK);
+      expect(await kinds()).toEqual([['december_gift', 'open', GIFT], ['stay_bonus', 'open', 5280]]);
+      expect(checkOf(run, alpha).techRewardsCents).toBe(GIFT + 5280);
+      const stayLine = (await linesOf(alpha))[1];
+      delete process.env[STAY_GATE];
+      const off = await recompute(run.id);
+      expect(await kinds()).toEqual([['december_gift', 'open', GIFT]]);
+      expect(checkOf(off, alpha).techRewardsCents).toBe(GIFT);
+      expect((await syncEventOf(run.id, 'gate')).map((m) => m.removed_line_ids)).toEqual([[stayLine.id]]);
+      process.env[STAY_GATE] = 'true';
+      delete process.env.GATE_TECH_REWARDS_PAY_LINES;
+      await recompute(run.id);
+      expect(await kinds()).toEqual([['stay_bonus', 'open', 5280]]);
+      process.env.GATE_TECH_REWARDS_PAY_LINES = 'true';
+      await recompute(run.id);
+      await finalize(run.id);
+      expect(await kinds()).toEqual([['december_gift', 'paid', GIFT], ['stay_bonus', 'paid', 5280]]);
+      // paid lines stay with both gates off
+      delete process.env[STAY_GATE];
+      delete process.env.GATE_TECH_REWARDS_PAY_LINES;
+      await approvedWeek(alpha, NEXT_WEEK);
+      await draft(NEXT_WEEK);
+      expect(await kinds()).toEqual([['december_gift', 'paid', GIFT], ['stay_bonus', 'paid', 5280]]);
+    });
+
+    it('with its gate off writes no line and shows no note', async () => {
+      delete process.env[STAY_GATE];
+      const alpha = await stayTech('Sample Alpha');
+      await approvedWeek(alpha, EARLY_WEEK);
+      const run = await draft(EARLY_WEEK);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(await notesOf(run.id)).toEqual([]);
+      expect(await syncEvents()).toEqual([]);
+    });
+
+    it('reads and locks only the technicians a stay bonus is dated for', async () => {
+      const alpha = await stayTech('Sample Alpha');
+      const other = await readyTech('Sample Other');
+      await paidWeeks(alpha);
+      await approvedWeek(other, '2026-06-01');
+      const watch = async (work) => {
+        const statements = [];
+        const listen = (query) => statements.push({ sql: String(query.sql), bindings: query.bindings || [] });
+        database.on('query', listen);
+        try {
+          await work();
+        } finally {
+          database.removeListener('query', listen);
+        }
+        return statements.filter(({ sql }) => /from "technicians" where .*"employment_status" = .* for share/is.test(sql));
+      };
+      // a run dated Jun 12: no stay bonus is due, and no technician row is locked
+      expect(await watch(() => draft('2026-06-01'))).toEqual([]);
+      // a run dated Dec 11: only the technician with the anniversary is read FOR SHARE
+      const locked = await watch(() => draft(EARLY_WEEK));
+      expect(locked).toHaveLength(1);
+      expect(locked[0].bindings).toContain(alpha);
+      expect(locked[0].bindings).not.toContain(other);
+    });
+
+    it('holds the pay runs it counted: a run of an earlier tax year in the 12 months is not voided before the run that paid the bonus', async () => {
+      const alpha = await stayTech('Sample Alpha');
+      const bravo = await stayTech('Sample Bravo', { hire_date: '2023-11-24' }); // 3 years: the same 12 months
+      for (const id of [alpha, bravo]) await paidWeeks(id);
+      const inside = await paidWeek(alpha, '2025-12-01'); // a 2025 run in the 12 months (pay date Dec 12, 2025)
+      const before = await paidWeek(bravo, '2025-11-10'); // a 2025 run before them (pay date Nov 21, 2025)
+      const run = await draft(EARLY_WEEK);
+      expect(checkOf(run, alpha).techRewardsCents).toBe(7040); // 2% of 4 x 880.00
+      await finalize(run.id);
+      // the run before the 12 months was not counted: it is voided as before
+      await voidRun(before);
+      // the run inside them was. The tax year's own order does not hold it (no later 2025 check), the bonus does: gate on or off
+      expect(await refusedVoid(inside)).toEqual(HELD);
+      delete process.env[STAY_GATE];
+      expect(await refusedVoid(inside)).toEqual(HELD);
+      expect(await lineOf(alpha)).toMatchObject({ status: 'paid', amount_cents: 7040 });
+      // the run that paid the bonus goes first and takes the bonus line with it; then the earlier run goes
+      await voidRun(run.id);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      await voidRun(inside);
+      // the week is drafted again: the bonus is worked out from the pay that is left
+      process.env[STAY_GATE] = 'true';
+      const again = await draft(EARLY_WEEK);
+      expect(checkOf(again, alpha).techRewardsCents).toBe(5280);
+    });
+
+    it('holds only the paychecks that put pay into the bonus: one of an edge week whose paid days all fall before the 12 months is voided freely', async () => {
+      // 3 years on Sat Nov 28, 2026: the 12 months run Fri Nov 28, 2025 to Fri Nov 27, 2026, and the week of Nov 24, 2025 holds
+      // their first three days
+      const alpha = await stayTech('Sample Alpha', { hire_date: '2023-11-28' });
+      await paidWeeks(alpha);
+      // that week's check (a 2025 run): 880.00, all of it worked Monday to Thursday, before the 12 months
+      await approvedWeek(alpha, '2025-11-24');
+      await trx('time_entry_daily_summary').insert(['2025-11-24', '2025-11-25', '2025-11-26', '2025-11-27']
+        .map((workDate) => ({ technician_id: alpha, work_date: workDate, total_shift_minutes: 600, unpaid_meal_minutes: 0, status: 'approved' })));
+      const edge = await paidWeek(alpha, '2025-11-24');
+      const edgeCheck = await trx('payroll_checks').where({ run_id: edge, technician_id: alpha }).first('id');
+      await approvedWeek(alpha, EARLY_WEEK);
+      const run = await draft(EARLY_WEEK);
+      // 4% of 3 x 880.00: the edge week adds nothing (3 of its 7 days with no day records would add 377.14)
+      expect(checkOf(run, alpha).techRewardsCents).toBe(10560);
+      await finalize(run.id);
+      const line = await lineOf(alpha);
+      expect(line).toMatchObject({ status: 'paid', amount_cents: 10560 });
+      expect(line.counted_check_ids).toHaveLength(3);
+      expect(line.counted_check_ids).not.toContain(edgeCheck.id);
+      // the edge run was read and put nothing into the bonus: no later 2025 check holds it, and the paid bonus does not either
+      await voidRun(edge);
+      expect(await lineOf(alpha)).toMatchObject({ status: 'paid', amount_cents: 10560 });
+    });
+
+    it('holds a counted run whatever the pay dates: a week of the 12 months whose check is dated in the next tax year, finalized before a December bonus', async () => {
+      const alpha = await stayTech('Sample Alpha');
+      // the week of Nov 16 was paid late: its check is dated Jan 4, 2027, and it was final before the bonus's run
+      await trx('payroll_runs').insert({ week_start: '2026-11-16', pay_date: '2027-01-04', status: 'finalized' });
+      for (const week of ['2026-11-02', '2026-11-09']) await paidWeek(alpha, week);
+      const lateRun = await paidWeek(alpha, '2026-11-16', { pay_date: '2027-01-04' });
+      const counted = await checkIdsOf(alpha);
+      const run = await draft(EARLY_WEEK); // dated Dec 11, 2026: the tax year's order does not link it to a 2027 check
+      expect(checkOf(run, alpha).techRewardsCents).toBe(5280);
+      await finalize(run.id);
+      expect(await lineOf(alpha)).toMatchObject({ status: 'paid', counted_check_ids: counted });
+      // the bonus's check has the EARLIER pay date, and the run it counted is still held
+      expect(await refusedVoid(lateRun)).toEqual(HELD);
+      await voidRun(run.id);
+      await voidRun(lateRun);
+    });
+
+    it('keeps the record of a stay bonus: the migration is not rolled back while a line, open or paid, holds its counted checks', async () => {
+      const migration = require('../models/migrations/20261121180000_pay_line_counted_checks');
+      const refused = 'This migration is not rolled back while one does';
+      const alpha = await stayTech('Sample Alpha');
+      await paidWeeks(alpha);
+      const run = await draft(EARLY_WEEK);
+      // an OPEN line: the release before the column would carry it forward as a hand-made line and pay its old amount
+      expect(await lineOf(alpha)).toMatchObject({ status: 'open' });
+      const statements = [];
+      const listen = (query) => statements.push(String(query.sql));
+      database.on('query', listen);
+      try {
+        await expect(migration.down(trx)).rejects.toThrow(refused);
+      } finally {
+        database.removeListener('query', listen);
+      }
+      // the payroll lock is taken before the lines are read, so no pay run write slips in between the read and the drop
+      const lockAt = statements.findIndex((sql) => sql.includes('pg_advisory_xact_lock('));
+      const readAt = statements.findIndex((sql) => sql.includes('from "payroll_pay_lines"'));
+      expect(lockAt).toBeGreaterThanOrEqual(0);
+      expect(readAt).toBeGreaterThan(lockAt);
+      expect(statements.some((sql) => /drop column/i.test(sql))).toBe(false);
+      // a PAID line: its list is the evidence the void guard reads
+      await finalize(run.id);
+      expect(await lineOf(alpha)).toMatchObject({ status: 'paid' });
+      expect((await lineOf(alpha)).counted_check_ids).toHaveLength(3);
+      await expect(migration.down(trx)).rejects.toThrow(refused);
+      expect(await trx.schema.hasColumn('payroll_pay_lines', 'counted_check_ids')).toBe(true);
     });
   });
 });

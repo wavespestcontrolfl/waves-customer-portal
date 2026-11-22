@@ -36,36 +36,41 @@ const KINDS = ['review_bonus', 'commission', 'health_allowance', 'hsa_employer']
 const TECH_REWARD_KINDS = ['season_bonus', 'stay_bonus', 'december_gift'];
 // source_type of the lines the pay run's Tech Rewards sync writes (tech-rewards-pay-lines.js).
 const TECH_REWARDS_SOURCE = 'tech_rewards';
-// The kinds that sync writes today. The season bonus and the stay bonus come with part 3.
-const TECH_REWARDS_SYNC_KINDS = ['december_gift'];
-// The source id of the sync's line for one technician and one year.
-const techRewardsSourceId = (kind, technicianId, year) => `${kind}:${technicianId}:${year}`;
+// The kinds that sync writes, each with the form of its key (the last part of the source id). The season bonus comes later.
+//   december_gift   the year of the gift, 4 digits
+//   stay_bonus      the years of service of the milestone: 1, 3 or 5. One key for a milestone whatever its date, so a hire
+//                   date corrected after the bonus was paid never pays the same milestone again.
+const TECH_REWARDS_KEYS = { december_gift: { length: 4, pattern: '^[0-9]{4}$' }, stay_bonus: { length: 1, pattern: '^[135]$' } };
+const TECH_REWARDS_SYNC_KINDS = Object.keys(TECH_REWARDS_KEYS);
+// The source id of the sync's line for one technician and one key.
+const techRewardsSourceId = (kind, technicianId, key) => `${kind}:${technicianId}:${key}`;
 
 /**
  * OWNERSHIP of a Tech Rewards line: the one rule for every place that pays, moves, removes or counts one. The sync owns a
  * line only when its WHOLE source key is the sync's: the Tech Rewards source type, a kind the sync writes, and a source id
- * that is exactly techRewardsSourceId(the row's own kind, the row's own technician id as PostgreSQL prints it, a 4-digit
- * year). The comparison is exact, case included: the unique source key is case-sensitive text, so a key in another case is
- * another key. Any other row (no source, another source type, or the Tech Rewards source type with any other source id) is a
- * line somebody made by hand. It carries forward and is paid like every manual line, and the sync never matches, moves or
- * removes it.
- * techRewardsOwnKey(line): { kind, year } or null, for a row with technician_id, kind, source_type and source_id. Pure.
+ * that is exactly techRewardsSourceId(the row's own kind, the row's own technician id as PostgreSQL prints it, a key of the
+ * kind's form). The comparison is exact, case included: the unique source key is case-sensitive text, so a key in another
+ * case is another key. Any other row (no source, another source type, or the Tech Rewards source type with any other source
+ * id) is a line somebody made by hand. It carries forward and is paid like every manual line, and the sync never matches,
+ * moves or removes it.
+ * techRewardsOwnKey(line): { kind, key } or null, for a row with technician_id, kind, source_type and source_id. Pure.
  * techRewardsOwnedSql(alias): the same test as SQL text for payroll_pay_lines, a boolean that is never null (so NOT is safe
  * on a row with no source). It holds no value from a request: constants and column names only.
  */
 function techRewardsOwnKey(line) {
-  if (line.source_type !== TECH_REWARDS_SOURCE || !TECH_REWARDS_SYNC_KINDS.includes(line.kind)) return null;
-  const year = String(line.source_id || '').slice(-4);
-  if (!/^[0-9]{4}$/.test(year)) return null;
-  return line.source_id === techRewardsSourceId(line.kind, line.technician_id, year) ? { kind: line.kind, year } : null;
+  const form = line.source_type === TECH_REWARDS_SOURCE ? TECH_REWARDS_KEYS[line.kind] : null;
+  if (!form) return null;
+  const key = String(line.source_id || '').slice(-form.length);
+  if (!new RegExp(form.pattern).test(key)) return null;
+  return line.source_id === techRewardsSourceId(line.kind, line.technician_id, key) ? { kind: line.kind, key } : null;
 }
 
 function techRewardsOwnedSql(alias = null) {
   const col = (name) => (alias ? `${alias}.${name}` : name);
-  const kinds = TECH_REWARDS_SYNC_KINDS.map((kind) => `'${kind}'`).join(', ');
-  return `(${col('source_type')} IS NOT NULL AND ${col('source_type')} = '${TECH_REWARDS_SOURCE}' AND ${col('kind')} IN (${kinds})`
-    + ` AND right(${col('source_id')}, 4) ~ '^[0-9]{4}$'`
-    + ` AND ${col('source_id')} = ${col('kind')} || ':' || ${col('technician_id')}::text || ':' || right(${col('source_id')}, 4))`;
+  const ofKind = ([kind, { length, pattern }]) => `(${col('kind')} = '${kind}' AND right(${col('source_id')}, ${length}) ~ '${pattern}'`
+    + ` AND ${col('source_id')} = ${col('kind')} || ':' || ${col('technician_id')}::text || ':' || right(${col('source_id')}, ${length}))`;
+  return `(${col('source_type')} IS NOT NULL AND ${col('source_type')} = '${TECH_REWARDS_SOURCE}'`
+    + ` AND (${Object.entries(TECH_REWARDS_KEYS).map(ofKind).join(' OR ')}))`;
 }
 const STATUSES = ['open', 'paid', 'voided'];
 const KIND_WORDS = {
@@ -363,6 +368,31 @@ async function earlierLinePay(conn, ids, weeks) {
 }
 
 /**
+ * lineOvertimePremium for the lines of ONE check (same input, plus `kind` on each of `lines`), with one more figure on the
+ * row of every week a Tech Rewards line of the check covers: ordinaryPremiumCents, what the check would have paid for that
+ * week WITHOUT its Tech Rewards lines (its other lines priced by the same rule, from the same hours and the same earlier
+ * checks). A bonus never feeds a bonus, so a bonus base counts only that part of the week's premium
+ * (tech-rewards-scoreboard.js ordinaryPremium). It is stored with the check here, when the check is priced, because it
+ * cannot be worked out again later: what earlier checks had paid for a week when this check was priced is not readable
+ * from the rows of another day (a check with an earlier pay date can be finalized later, across a tax year, and a voided
+ * run's lines are no history). Never over the week's premium. A check with no Tech Rewards line is unchanged. Pure.
+ */
+function priceCheckLines(pricing) {
+  const priced = lineOvertimePremium(pricing);
+  const isReward = (line) => TECH_REWARD_KINDS.includes(line.kind);
+  const rewardWeeks = new Set(pricing.lines.filter(isReward).flatMap((line) => weeksOfLine(line)));
+  if (!rewardWeeks.size) return priced;
+  const without = new Map(lineOvertimePremium({ ...pricing, lines: pricing.lines.filter((line) => !isReward(line)) }).weeks
+    .map((week) => [week.weekStart, week.premiumCents]));
+  return {
+    ...priced,
+    weeks: priced.weeks.map((week) => (rewardWeeks.has(week.weekStart)
+      ? { ...week, ordinaryPremiumCents: Math.min(week.premiumCents, without.get(week.weekStart) || 0) }
+      : week)),
+  };
+}
+
+/**
  * The extra overtime the lines cause, for every technician in `byTech` (the map
  * openLinesFor returns). Each line's weeks are read from the APPROVED weekly
  * timesheets; a week with none counts as no hours worked. Returns a Map of
@@ -375,6 +405,8 @@ async function earlierLinePay(conn, ids, weeks) {
  * A week that finalized checks already paid line pay for is priced with what they paid (earlierLinePay): this check never
  * pays less than its own lines earn rounded up, and it makes up any shortfall of the week (payroll-regular-rate.js says
  * why). A caller that reads only the weeks, never the premium, passes history: false and skips those two reads.
+ * A check with a Tech Rewards line also gets the ordinary part of each week that line covers (priceCheckLines); the pay run
+ * stores the week rows with the check (calc_snapshot.lineOvertimeWeeks).
  */
 async function priceLines(conn, byTech, { lock = false, history = true } = {}) {
   const priced = new Map();
@@ -382,7 +414,7 @@ async function priceLines(conn, byTech, { lock = false, history = true } = {}) {
   const spansByTech = new Map();
   const weekSet = new Set();
   for (const [technicianId, { lines }] of byTech) {
-    const priceable = lines.map((line) => ({ amountCents: line.amountCents, ...lineSpan(line) }));
+    const priceable = lines.map((line) => ({ kind: line.kind, amountCents: line.amountCents, ...lineSpan(line) }));
     for (const line of priceable) for (const week of weeksOfLine(line)) weekSet.add(week);
     spansByTech.set(technicianId, priceable);
   }
@@ -400,7 +432,7 @@ async function priceLines(conn, byTech, { lock = false, history = true } = {}) {
     const approvedWeeks = new Set(rows.map((row) => row.week_start));
     const covered = [...new Set(lines.flatMap((line) => weeksOfLine(line)))].sort();
     priced.set(technicianId, {
-      ...lineOvertimePremium({
+      ...priceCheckLines({
         weeks, lines, earlierLines: earlier.get(technicianId)?.lines, earlierPremiums: earlier.get(technicianId)?.premiums,
       }),
       coveredWeeks: covered,
@@ -490,6 +522,7 @@ module.exports = {
   techRewardsOwnedSql,
   KIND_WORDS,
   payLinesOn,
+  priceCheckLines,
   listPayLines,
   listPayLineTechnicians,
   createPayLine,
