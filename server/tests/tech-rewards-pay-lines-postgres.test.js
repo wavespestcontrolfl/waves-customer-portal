@@ -33,7 +33,7 @@ jest.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: jest.fn() }));
 const { randomUUID } = require('node:crypto');
 const express = require('express');
 const router = require('../routes/admin-payroll');
-const { syncTechRewardLines, settledStayKeys } = require('../services/tech-rewards-pay-lines');
+const { syncTechRewardLines, stayBonusStatus } = require('../services/tech-rewards-pay-lines');
 const { techRewardsOwnKey, techRewardsOwnedSql } = require('../services/payroll-pay-lines');
 const { readGross, readStayPay } = require('../services/tech-rewards-scoreboard');
 const { workedWeeks } = require('../services/payroll-runs');
@@ -1396,6 +1396,11 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(checkOf(run, alpha)).toMatchObject({ techRewardsCents: 5280, grossCents: 88000 + 5280 });
       for (const id of [other, noDate, gone, manager]) expect(await linesOf(id)).toHaveLength(0);
       expect(await notesOf(run.id)).toEqual([]);
+      // what the scoreboard asks of payroll: a run dated today could still write the bonus for Alpha, and for nobody the
+      // sync writes no line for (left, an office account), on the same dates; not after the 60 days (Jan 23)
+      const payable = async (id, today) => (await stayBonusStatus(trx, id, HIRED, today)).payableKeys;
+      expect([await payable(alpha, run.payDate), await payable(gone, run.payDate), await payable(manager, run.payDate), await payable(alpha, '2027-01-24')])
+        .toEqual([['1'], [], [], []]);
       // the audit event names the line and holds no amount: ids, kinds, reason codes and counts only
       const [event] = await syncEventOf(run.id, 'added_line_ids');
       expect(event.added_line_ids).toEqual([line.id]);
@@ -1626,13 +1631,15 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(await lineOf(alpha)).toMatchObject({ id: first.id, status: 'paid', amount_cents: 5280 });
       expect(checkOf(next, alpha)).not.toHaveProperty('techRewardsCents');
       expect(await notesOf(next.id)).toEqual([]);
-      // the scoreboard asks the same rows which milestones are settled (its own suite covers what it shows)
-      expect(await settledStayKeys(trx, alpha)).toEqual(['1']);
+      // what the scoreboard asks of payroll (its own suite covers what it shows): the 1 year milestone is settled, so no run
+      // dated inside the new anniversary's 60 days can write it
+      expect(await stayBonusStatus(trx, alpha, '2025-12-10', '2026-12-20')).toEqual({ settledKeys: ['1'], payableKeys: [] });
     });
 
-    // PostgreSQL holds the year 20251 (one key too many in a date box); no calendar code here reads it.
-    it('reads a hire date that is not a calendar date as none: the rest of the run goes on, and every run says so until it is corrected', async () => {
-      const alpha = await stayTech('Sample Alpha', { hire_date: '20251-11-24' });
+    // PostgreSQL's date type holds the year 20251 (one key too many in a date box), infinity, and a date BC, which prints in
+    // YYYY-MM-DD with no era: '2025-11-24 BC' would read as the day Alpha's 1 year bonus is worked out from.
+    it.each(['20251-11-24', '2025-11-24 BC', '0099-11-24', 'infinity'])('reads a hire date the calendar cannot read (%s) as none: the rest of the run goes on, and every run says so until it is corrected', async (unreadable) => {
+      const alpha = await stayTech('Sample Alpha', { hire_date: unreadable });
       const bravo = await stayTech('Sample Bravo');
       for (const id of [alpha, bravo]) {
         await paidWeeks(id);
@@ -1655,7 +1662,7 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(checkOf(again, alpha).techRewardsCents).toBe(5280);
       expect(await notesOf(run.id)).toEqual([]);
       // a line that is open when the date turns unreadable comes off, and the run is finalized with the others' lines
-      await trx('technicians').where({ id: alpha }).update({ hire_date: '20251-11-24' });
+      await trx('technicians').where({ id: alpha }).update({ hire_date: unreadable });
       await recompute(run.id);
       expect(await linesOf(alpha)).toHaveLength(0);
       expect(await notesOf(run.id)).toEqual([unread]);

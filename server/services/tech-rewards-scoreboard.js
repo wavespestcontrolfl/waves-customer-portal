@@ -30,7 +30,7 @@ const scores = require('./tech-rewards-scores');
 const { countDeliveredAsksForTechnician } = require('./review-ask-history');
 const { weeksOfLine, lineOvertimePremium } = require('./payroll-regular-rate');
 const { TECH_REWARD_KINDS } = require('./payroll-pay-lines');
-const { settledStayKeys, stayDueInRun } = require('./tech-rewards-pay-lines');
+const { HIRE_DATE_SQL, stayBonusStatus } = require('./tech-rewards-pay-lines');
 const { PAYOUT_ELIGIBLE_SOURCES } = require('./review-incentives');
 const { SOURCE_TYPE: COMMISSION_SOURCE_TYPE } = require('./payroll-commission');
 const { SOURCE_TYPE: REVIEW_BONUS_SOURCE_TYPE } = require('./payroll-review-bonuses');
@@ -122,20 +122,19 @@ function seasonBonusBlock(score, multiplier, grossCents) {
 // The board's estimate and the pay line (tech-rewards-pay-lines.js) both take the period from here.
 const stayWindow = (dueDate) => ({ earningsStart: yearBefore(dueDate), earningsEnd: addStaffWorkDays(dueDate, -1) });
 
-// The stay bonus the board shows: the first milestone that no pay run has settled and that payroll can still pay. Both
-// answers are payroll's own (tech-rewards-pay-lines.js):
-//   settledKeys  the milestones a pay run has settled, as years of service in text (settledStayKeys). Payroll never pays one
-//                again, so after a hire date correction that moves a paid anniversary ahead of today the board shows the
-//                next milestone, not that one.
-//   stayDueInRun the milestone a pay run dated today could still write: from its anniversary to 60 days after it. The
-//                bonus is not on a check the day after the anniversary (the run of a later week writes it), so the board
-//                keeps it, with its 12 months ended, until its line is paid or the 60 days are over. An anniversary from
-//                before the plan has no bonus, and the board does not keep one.
-function stayBonusBlock(hireDate, today, priorPayCents, settledKeys = []) {
+// The stay bonus the board shows: the first milestone that no pay run has settled and that is still ahead, or that payroll
+// can still pay. Both lists are payroll's own answers, as years of service in text (tech-rewards-pay-lines.js stayBonusStatus):
+//   settledKeys  the milestones a pay run has settled. Payroll never pays one again, so after a hire date correction that
+//                moves a paid anniversary ahead of today the board shows the next milestone, not that one.
+//   payableKeys  the milestones a pay run dated today could still write for this technician: from the anniversary to 60 days
+//                after it, for a technician who gets Tech Rewards lines today. The bonus is not on a check the day after the
+//                anniversary (the run of a later week writes it), so the board keeps it, with its 12 months ended, until its
+//                line is paid or the 60 days are over. A milestone ahead is shown to everyone, as before: who gets it is
+//                asked on the day its pay run is built.
+function stayBonusBlock(hireDate, today, priorPayCents, { settledKeys = [], payableKeys = [] } = {}) {
   if (!hireDate || hireDate > today) return null;
-  const payable = stayDueInRun(today, hireDate).map((due) => due.key);
   const next = calc.stayBonusSchedule(hireDate).find(({ years, dueDate }) => !settledKeys.includes(String(years))
-    && (dueDate >= today || payable.includes(String(years))));
+    && (dueDate >= today || payableKeys.includes(String(years))));
   if (!next) return null;
   const { years, rateBps, dueDate } = next;
   // the 12 months of pay end the day before the anniversary: that is the day the estimate is final
@@ -150,7 +149,7 @@ function stayBonusBlock(hireDate, today, priorPayCents, settledKeys = []) {
 /**
  * The scoreboard from the already-read inputs. Pure: no database, no clock.
  * inputs: { technician: { id, name, hireDate }, today, season, seasonScore, settings, reviews, asks,
- *           grossSeasonCents, priorYearGrossCents, settledStayKeys, commission: { paidCents, unpaidCents },
+ *           grossSeasonCents, priorYearGrossCents, stay: { settledKeys, payableKeys }, commission: { paidCents, unpaidCents },
  *           commissionRecordedThrough: { weekEnd } | null }
  */
 function composeScoreboard(inputs) {
@@ -176,16 +175,18 @@ function composeScoreboard(inputs) {
     },
     multiplier,
     seasonBonus: seasonBonusBlock(score, multiplier, inputs.grossSeasonCents),
-    stayBonus: stayBonusBlock(technician.hireDate, today, inputs.priorYearGrossCents, inputs.settledStayKeys),
+    stayBonus: stayBonusBlock(technician.hireDate, today, inputs.priorYearGrossCents, inputs.stay),
   };
 }
 
 // ---------------------------------------------------------------------------
 // Reads (all on the one snapshot connection)
 
+// The hire date is read as payroll reads it (tech-rewards-pay-lines.js HIRE_DATE_SQL): one on file that the calendar code
+// cannot read (a date BC, a year past 9999) is none here too, so the board never estimates a bonus payroll will not write.
 async function readTechnician(conn, technicianId) {
   const row = await conn('technicians').where({ id: technicianId })
-    .first('id', 'name', conn.raw("to_char(hire_date, 'YYYY-MM-DD') AS hire_date"));
+    .first('id', 'name', conn.raw(`${HIRE_DATE_SQL} AS hire_date`));
   if (!row) throw new ScoreboardError(404, 'NOT_FOUND', 'Technician not found.');
   return { id: row.id, name: row.name, hireDate: row.hire_date || null };
 }
@@ -579,8 +580,8 @@ async function readAll(conn, technicianId, today) {
   const { seasonScore, settings } = await readScore(conn, technicianId, season);
   // the stay bonus the board shows (stayBonusBlock) is worked out from the 12 months before ITS anniversary, up to the day
   // before it or today, whichever comes first: the pay recorded so far in that window
-  const settled = technician.hireDate ? await settledStayKeys(conn, technicianId) : [];
-  const due = stayBonusBlock(technician.hireDate, today, 0, settled);
+  const stay = technician.hireDate ? await stayBonusStatus(conn, technicianId, technician.hireDate, today) : undefined;
+  const due = stayBonusBlock(technician.hireDate, today, 0, stay);
   const stayEnd = due ? (due.dueDate <= today ? dayBefore(due.dueDate) : today) : null;
   return {
     technician, today, season, seasonScore, settings,
@@ -588,7 +589,7 @@ async function readAll(conn, technicianId, today) {
     reviews: await readReviewCount(conn, technicianId, season),
     grossSeasonCents: await readGross(conn, technicianId, season.start, season.asOf),
     priorYearGrossCents: due && due.estimateCents !== null ? (await readStayPay(conn, technicianId, due.earningsStart, stayEnd)).cents : 0,
-    settledStayKeys: settled,
+    stay,
     commission: await readCommission(conn, technicianId, today),
     commissionRecordedThrough: await readCommissionRecordedThrough(conn, technicianId),
   };

@@ -41,6 +41,11 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
       t.string('name').notNullable();
       t.date('hire_date');
       t.boolean('active').notNullable().defaultTo(true);
+      // who gets a Tech Rewards pay line (tech-rewards-pay-lines.js recipients)
+      t.text('employment_type');
+      t.text('role');
+      t.text('employment_status');
+      t.boolean('field_dispatchable');
     });
     await s.createTable('payroll_runs', (t) => {
       t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
@@ -332,7 +337,11 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
 
   test('after the anniversary the stay bonus stays on the board until it is paid, worked out from the 12 months that ended', async () => {
     await seed();
-    const [delta] = await db('technicians').insert({ name: 'Sample Delta', hire_date: '2025-12-01' }).returning('id');
+    const fieldTech = { employment_type: 'w2', role: 'technician', employment_status: 'active', field_dispatchable: true };
+    const [delta, office] = await db('technicians').insert([
+      { name: 'Sample Delta', hire_date: '2025-12-01', ...fieldTech },
+      { name: 'Sample Office', hire_date: '2025-12-01', ...fieldTech, role: 'admin' }, // payroll writes an office account no line
+    ]).returning('id');
     const [inside, after] = await db('payroll_runs').insert([
       { status: 'finalized', week_start: '2026-11-16', pay_date: '2026-11-27' },
       { status: 'finalized', week_start: '2026-12-07', pay_date: '2026-12-18' },
@@ -344,11 +353,23 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     const today = new Date('2026-12-20T15:00:00Z');
     expect((await service.getScoreboard(delta.id, { now: today })).stayBonus)
       .toMatchObject({ dueDate: '2026-12-01', years: 1, earningsStart: '2025-12-01', earningsEnd: '2026-11-30', estimateCents: Math.round(70000 * 0.02) });
+    // the 60 days are over (Jan 31), or payroll would write this account no line: the next milestone ahead, as before
+    expect((await service.getScoreboard(delta.id, { now: new Date('2027-01-31T15:00:00Z') })).stayBonus).toMatchObject({ dueDate: '2028-12-01', years: 3 });
+    expect((await service.getScoreboard(office.id, { now: today })).stayBonus).toMatchObject({ dueDate: '2028-12-01', years: 3 });
     // payroll pays it: the board shows the 3 year bonus
     await db('payroll_pay_lines').insert({
       technician_id: delta.id, kind: 'stay_bonus', source_type: 'tech_rewards', source_id: `stay_bonus:${delta.id}:1`, status: 'paid', earned_week_start: '2026-12-07', amount_cents: 1400,
     });
     expect((await service.getScoreboard(delta.id, { now: today })).stayBonus).toMatchObject({ dueDate: '2028-12-01', years: 3 });
+  });
+
+  // PostgreSQL prints a date BC with no era in YYYY-MM-DD, and holds years past 9999: payroll reads neither, so the board does not
+  test.each(['2025-12-01 BC', '20251-12-01', '0099-12-01', 'infinity'])('a hire date on file that payroll cannot read (%s) is none on the board', async (hireDate) => {
+    await seed();
+    const [odd] = await db('technicians').insert({ name: 'Sample Odd', hire_date: hireDate }).returning('id');
+    const board = await service.getScoreboard(odd.id, { now: new Date('2026-12-20T15:00:00Z') });
+    expect(board.stayBonus).toBeNull();
+    expect(board.multiplier).toEqual({ reason: 'no_hire_date' });
   });
 
   test('commission is recorded through the end of the pay week of the newest ledger line, never a run date', async () => {

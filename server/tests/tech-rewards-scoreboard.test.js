@@ -408,27 +408,24 @@ describe('composeScoreboard', () => {
   test('a milestone a pay run has settled is never the next stay bonus, also after a hire date correction moves its anniversary ahead of today', () => {
     // the 1-year bonus was paid from the old hire date; the corrected date puts that anniversary on 2026-12-01, ahead of today
     const corrected = { technician: { id: 'tech-1', name: 'Sample Alpha', hireDate: '2025-12-01' }, priorYearGrossCents: 230000 };
-    expect(composeScoreboard(inputs({ ...corrected, settledStayKeys: ['1'] })).stayBonus)
+    expect(composeScoreboard(inputs({ ...corrected, stay: { settledKeys: ['1'] } })).stayBonus)
       .toEqual({ dueDate: '2028-12-01', years: 3, rateBps: 400, estimateCents: null, estimate: true, earningsStart: '2027-12-01', earningsEnd: '2028-11-30' });
-    expect(composeScoreboard(inputs({ ...corrected, settledStayKeys: ['1', '3', '5'] })).stayBonus).toBeNull();
+    expect(composeScoreboard(inputs({ ...corrected, stay: { settledKeys: ['1', '3', '5'] } })).stayBonus).toBeNull();
   });
 
-  test('a stay bonus stays on the board after its anniversary while a pay run dated today could still write it: 60 days, and not an anniversary from before the plan', () => {
-    const hired = { technician: { id: 'tech-1', name: 'Sample Alpha', hireDate: '2025-12-01' }, priorYearGrossCents: 230000 };
-    const oneYear = { dueDate: '2026-12-01', years: 1, rateBps: 200, estimateCents: 4600, estimate: true, earningsStart: '2025-12-01', earningsEnd: '2026-11-30' };
-    // the day after the anniversary, and the last pay date that can carry it (Dec 1 + 60 days)
-    for (const today of ['2026-12-02', '2027-01-30']) expect(composeScoreboard(inputs({ ...hired, today })).stayBonus).toEqual(oneYear);
-    // the 60 days are over, or payroll has paid it: the board moves on to the 3 year bonus
-    for (const over of [{ today: '2027-01-31' }, { today: '2026-12-02', settledStayKeys: ['1'] }]) {
-      expect(composeScoreboard(inputs({ ...hired, ...over })).stayBonus).toMatchObject({ dueDate: '2028-12-01', years: 3, estimateCents: null });
+  test('a stay bonus stays on the board after its anniversary only while payroll says a pay run dated today could still write it', () => {
+    const hired = { technician: { id: 'tech-1', name: 'Sample Alpha', hireDate: '2025-12-01' }, priorYearGrossCents: 230000, today: '2026-12-02' };
+    // payable (inside the 60 days, for a technician payroll pays): the 1 year bonus, from the 12 months that ended
+    expect(composeScoreboard(inputs({ ...hired, stay: { settledKeys: [], payableKeys: ['1'] } })).stayBonus)
+      .toEqual({ dueDate: '2026-12-01', years: 1, rateBps: 200, estimateCents: 4600, estimate: true, earningsStart: '2025-12-01', earningsEnd: '2026-11-30' });
+    // not payable (the 60 days are over, an office account, an anniversary from before the plan), or paid: the next one ahead
+    for (const stay of [undefined, { settledKeys: [], payableKeys: [] }, { settledKeys: ['1'], payableKeys: ['1'] }]) {
+      expect(composeScoreboard(inputs({ ...hired, stay })).stayBonus).toMatchObject({ dueDate: '2028-12-01', years: 3, estimateCents: null });
     }
-    // an anniversary from before the plan was approved (Nov 20, 2026) has no bonus: the board does not keep it
-    expect(composeScoreboard(inputs({ ...hired, technician: { ...hired.technician, hireDate: '2025-11-19' }, today: '2026-11-25' })).stayBonus)
-      .toMatchObject({ dueDate: '2028-11-19', years: 3 });
-    // past the last milestone's 60 days there is none left
-    expect(composeScoreboard(inputs({ ...hired, technician: { ...hired.technician, hireDate: '2021-12-01' }, today: '2027-01-31' })).stayBonus).toBeNull();
-    expect(composeScoreboard(inputs({ ...hired, technician: { ...hired.technician, hireDate: '2021-12-01' }, today: '2027-01-30' })).stayBonus)
-      .toMatchObject({ dueDate: '2026-12-01', years: 5, rateBps: 800 });
+    // past the 5 year anniversary: the bonus while it is payable, then none left
+    const five = { ...hired, technician: { ...hired.technician, hireDate: '2021-12-01' } };
+    expect(composeScoreboard(inputs({ ...five, stay: { payableKeys: ['5'] } })).stayBonus).toMatchObject({ dueDate: '2026-12-01', years: 5, rateBps: 800 });
+    expect(composeScoreboard(inputs({ ...five, stay: { payableKeys: [] } })).stayBonus).toBeNull();
   });
 
   test('past the 5-year bonus there is no next stay bonus', () => {

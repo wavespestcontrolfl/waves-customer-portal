@@ -100,7 +100,6 @@ const {
   payrollPayLinesLive, techRewardsPayLinesLive, techRewardsStayBonusLive, payrollTimeOffLive,
 } = require('../config/feature-gates');
 const { addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
-const { validCalendarDate } = require('../utils/datetime-et');
 
 // payroll-runs.js loads this file, so its helpers are read on first use.
 const payrollRuns = () => require('./payroll-runs');
@@ -241,17 +240,20 @@ const recipients = (trx) => applyAssignable(trx('technicians').where({ 'technici
 
 // ---- The technician rows
 
-// A technician row as the sync reads it. PostgreSQL's date type holds dates that the calendar code here cannot read: a year
-// past 9999 (one key too many in a date box) and infinity. Such a hire date is read as none (hire_date null) with
-// hire_date_bad true. Nothing is worked out from it, the rest of the run goes on, and the run says so in a note
-// (hire_date_invalid). routes/admin-timetracking.js hireDateError refuses such a date at save; this covers a row from before
-// that check, and one changed in the database.
-const techColumns = (conn) => ['technicians.id', conn.raw("to_char(technicians.hire_date, 'YYYY-MM-DD') as hire_date"),
+// The hire date as every Tech Rewards read takes it (the sync, the notes, the scoreboard): 'YYYY-MM-DD' text, and only for a
+// date the calendar code can read, the years 0100 to 9999 AD (exactly the dates utils/datetime-et.js validCalendarDate
+// accepts, which is what tech-rewards-calc.js asks of a date). PostgreSQL's date type holds more: a year past 9999 (one key
+// too many in a date box), infinity, and a date BC, whose YYYY-MM-DD text drops the era and reads as a date AD. So the range
+// is asked of the date itself, before it is text. Any other date on file reads as null.
+const HIRE_DATE_SQL = "CASE WHEN technicians.hire_date BETWEEN DATE '0100-01-01' AND DATE '9999-12-31' THEN to_char(technicians.hire_date, 'YYYY-MM-DD') END";
+
+// A technician row as the sync reads it. A hire date on file that is not readable (HIRE_DATE_SQL) is read as none
+// (hire_date null) with hire_date_bad true. Nothing is worked out from it, the rest of the run goes on, and the run says so
+// in a note (hire_date_invalid). routes/admin-timetracking.js hireDateError refuses such a date at save; this covers a row
+// from before that check, and one changed in the database.
+const techColumns = (conn) => ['technicians.id', conn.raw(`${HIRE_DATE_SQL} as hire_date`),
   conn.raw('technicians.hire_date IS NOT NULL as hire_on_file')];
-const readTech = ({ hire_on_file: onFile, ...row }) => {
-  const hireDate = validCalendarDate(row.hire_date);
-  return { ...row, hire_date: hireDate, hire_date_bad: Boolean(onFile) && !hireDate };
-};
+const readTech = ({ hire_on_file: onFile, ...row }) => ({ ...row, hire_date: row.hire_date || null, hire_date_bad: Boolean(onFile) && !row.hire_date });
 
 // ---- Readiness
 
@@ -399,17 +401,25 @@ const OTHER_LINE = { [GIFT]: 'other_gift_line', [STAY]: 'other_stay_line' };
 
 // The Tech Rewards lines that are no longer open (paid or voided). One of them that the sync wrote (ownKeyOf) settles its key:
 // no run reads or writes that line again. One read, for the sync (every technician), for the notes, and for the scoreboard
-// (one technician's stay bonuses, settledStayKeys).
+// (one technician's stay bonuses, stayBonusStatus).
 const closedLines = (conn, where = {}) => conn('payroll_pay_lines').where({ source_type: SOURCE_TYPE, ...where }).whereNot({ status: 'open' })
   .select('technician_id', 'kind', 'source_type', 'source_id');
 
 /**
- * The stay bonus milestones a technician is done with, as keys ('1', '3', '5'). No pay run writes one of them again, whatever
- * the hire date on file says now (loadState, settled), so the scoreboard never shows one as coming
- * (tech-rewards-scoreboard.js stayBonusBlock). Not behind a gate: a paid line is a fact with the gate off too.
+ * What the scoreboard asks of payroll to show a technician's stay bonus (tech-rewards-scoreboard.js stayBonusBlock), for the
+ * hire date as HIRE_DATE_SQL reads it. Stay bonus milestones as keys ('1', '3', '5'):
+ *   settledKeys  the ones the technician is done with: a line the sync wrote that is no longer open. No pay run writes one of
+ *                them again, whatever the hire date on file says now (loadState, settled).
+ *   payableKeys  the ones a pay run built and dated `today` could still write for them: not settled, inside their dates
+ *                (stayDueInRun: from the anniversary to LOOKBACK_DAYS after it, none before FIRST_STAY_DATE), and the
+ *                technician gets Tech Rewards lines today (recipients, as the sync asks on the day a run is built).
+ * The pay gate is not asked: the board shows the plan, as it does for a milestone that is still ahead.
  */
-async function settledStayKeys(conn, technicianId) {
-  return (await closedLines(conn, { technician_id: technicianId, kind: STAY })).map(ownKeyOf).filter(Boolean).map((own) => own.key);
+async function stayBonusStatus(conn, technicianId, hireDate, today) {
+  const settledKeys = (await closedLines(conn, { technician_id: technicianId, kind: STAY })).map(ownKeyOf).filter(Boolean).map((own) => own.key);
+  const dated = stayDueInRun(today, hireDate).map((due) => due.key).filter((key) => !settledKeys.includes(key));
+  const recipient = dated.length ? await recipients(conn).where('technicians.id', technicianId).first('technicians.id') : null;
+  return { settledKeys, payableKeys: recipient ? dated : [] };
 }
 
 const lineColumns = (trx) => ['id', 'technician_id', 'kind', 'status', 'amount_cents', 'note', 'counted_check_ids', 'source_type', 'source_id',
@@ -770,6 +780,7 @@ module.exports = {
   syncTechRewardLines,
   dropRewardLinesOfWeek,
   paidBonusCounting,
-  settledStayKeys,
+  HIRE_DATE_SQL,
+  stayBonusStatus,
   waitNotes,
 };
