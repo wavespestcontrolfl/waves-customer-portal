@@ -28,6 +28,9 @@ function realDeps() {
   return {
     bodies,
     deps: {
+      // The member check reads customers; this test has no database, so it answers "no member" here (the strict
+      // lookup itself is in mail-home-quote.test.js and customer-address-match.test.js).
+      memberAtAddress: async () => false,
       dryRunEstimate: (body) => {
         bodies.push(body);
         return createOrReuseAdminEstimate({ database: db, body, technicianId: null, technician: null, dryRun: true, requireLivePricing: true });
@@ -67,8 +70,12 @@ describe('the real engine input and the real dry run of the estimate save, with 
   });
 
   test('the default wiring builds the engine input and runs the dry run itself', async () => {
-    const result = await priceHome(row, facts);
+    const result = await priceHome(row, facts, { memberAtAddress: async () => false });
     expect(result).toMatchObject({ status: 'priced', homeSqft: 1800 });
+  });
+
+  test('the default member check with a database that fails: failed / member_check, never a price', async () => {
+    expect(await priceHome(row, facts)).toEqual({ status: 'failed', reason: 'member_check', ...facts });
   });
 
   test('the live price list unavailable refuses the save (503): failed / engine, tried again later', async () => {

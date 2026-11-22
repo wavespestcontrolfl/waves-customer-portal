@@ -20,8 +20,9 @@
  * at most 40 homes handled in one run. A home left for a stopped source is not one of the 40: the run goes on to the
  * homes behind it (it looks at up to 200 due rows), so homes that wait for the permit page cannot hold back homes that
  * need no page. Three errors in a row that are not a row's own stop the run (the database is away), and so do three
- * price engine failures in a row (the engine or the live price list is away). The run THROWS at its end, after logging, when a source was away (the facts reader says so), when the
- * price engine failed for every home it was asked or three times in a row, when a row could not be read or saved, or
+ * quote failures in a row (the price engine, the live price list or the member check's customer lookup is away). The
+ * run THROWS at its end, after logging, when a source was away (the facts reader says so), when the quote failed for
+ * every home it was asked or three times in a row, when a row could not be read or saved, or
  * when the database was away, so the job's health row records a failure. Rows left only by the row cap or the budget do
  * not make it throw.
  *
@@ -55,6 +56,8 @@ const errorCode = (err) => codeOf(err?.reason) || codeOf(err?.code) || codeOf(er
 
 const isSingleFamily = (permit) => String(permit?.type_of_work || '').trim().replace(/\s+/g, ' ').toLowerCase() === SINGLE_FAMILY_WORK;
 
+const QUOTE_FAILURE_REASONS = new Set(['engine', 'member_check']);
+
 /** The result to save for one row, or null to leave the row as it is. */
 async function resultFor(row, ctx) {
   const permit = await ctx.d.permitFacts(row.permit_no);
@@ -68,10 +71,11 @@ async function resultFor(row, ctx) {
   if (read.failed) return { status: 'failed', reason: read.failed, ...read.facts };
   if (read.missing) return { status: 'missing_fact', reason: read.missing, ...read.facts };
   const result = await priceHome(row, read.facts, ctx.deps);
-  // The price engine's own failures are counted: a row's failed / engine result is saved (tried again later), but an
-  // engine that is away must fail the run and must not be asked 40 times.
+  // The quote's own failures are counted: the price engine (failed / engine) and the member check before it
+  // (failed / member_check). A row's result is saved (tried again later), but an engine or a customer lookup that is
+  // away must fail the run and must not be asked 40 times.
   const { state } = ctx;
-  const engineFailed = result.status === 'failed' && result.reason === 'engine';
+  const engineFailed = result.status === 'failed' && QUOTE_FAILURE_REASONS.has(result.reason);
   state.quotes += 1;
   state.engineFailures += engineFailed ? 1 : 0;
   state.engineStreak = engineFailed ? state.engineStreak + 1 : 0;
@@ -128,7 +132,7 @@ async function handleDueRows(due, ctx, startedAt, summary) {
     if (ctx.state.left === leftBefore) handled += 1;
     // Several errors in a row that are not a row's own mean the database is away: the rest waits.
     if (errorStreak >= MAX_ERRORS_IN_A_ROW) { summary.errorStop = true; return; }
-    // Several price engine failures in a row mean the engine or the live price list is away: the rest waits.
+    // Several quote failures in a row mean the engine, the live price list or the customer lookup is away: the rest waits.
     if (ctx.state.engineStreak >= MAX_ENGINE_FAILURES_IN_A_ROW) { summary.engineStop = true; return; }
   }
   // Every row of the read was looked at. A full read means more may wait behind it.
@@ -149,8 +153,8 @@ function problemsOf(ctx, summary) {
   const problems = [...homeFacts.factsProblems(ctx.facts)]; // a copy: the reader's own list is not this function's to change
   if (summary.errorStop) problems.push('stopped after errors in a row');
   const { quotes, engineFailures } = ctx.state;
-  if (summary.engineStop) problems.push(`stopped after ${MAX_ENGINE_FAILURES_IN_A_ROW} price engine failures in a row`);
-  else if (quotes > 0 && engineFailures === quotes) problems.push(`the price engine failed for every home it was asked (${quotes})`);
+  if (summary.engineStop) problems.push(`stopped after ${MAX_ENGINE_FAILURES_IN_A_ROW} quote failures in a row (price engine or member check)`);
+  else if (quotes > 0 && engineFailures === quotes) problems.push(`the quote (price engine or member check) failed for every home it was asked (${quotes})`);
   const errors = Object.entries(ctx.state.errors);
   if (errors.length) {
     const count = errors.reduce((sum, [, n]) => sum + n, 0);
