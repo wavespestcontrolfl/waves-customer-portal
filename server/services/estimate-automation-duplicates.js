@@ -328,13 +328,13 @@ async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
  *   - it is for the wizard run's own property: one phone can ask for quotes
  *     on two homes. Same door by the shared premise matcher
  *     (samePremiseDisplay) with street, city and ZIP on both sides, plus the
- *     same house number as typed and the same unit. A street-type word
- *     inside the street name may be short on one side and in full on the
- *     other ("Sample Pt Dr", "Sample Point Dr"): the web form and the wizard
- *     write it so. That is one step wider than the draft-retire sweep's
- *     test, which folds only the word that ends the street. A missing or
- *     incomplete address, or a street with no house number, fails closed:
- *     the draft is not a shell.
+ *     same house number as typed and the same unit. One of six name words
+ *     (Point, Glen, Grove, Beach, Vista, Shores) inside the street name may
+ *     be short on one side and in full on the other ("Sample Pt Dr", "Sample
+ *     Point Dr"): the web form and the wizard write it so. That is one step
+ *     wider than the draft-retire sweep's test, which folds only the word
+ *     that ends the street. A missing or incomplete address, or a street
+ *     with no house number, fails closed: the draft is not a shell.
  *
  * Not a condition, on purpose: the SMS intake state of the customer
  * (customers.lead_intake_status). A lead who never answers keeps
@@ -405,26 +405,30 @@ function untouchedWebFormShells(database, last10, { now = new Date() } = {}) {
     });
 }
 
+// "1/2", or one fraction sign (¼ ½ ¾ and the other single-sign fractions).
+const FRACTION_WORD = /^(?:\d+\/\d+|[\u00BC-\u00BE\u2150-\u215E])$/;
+
 function sameDoor(addressA, addressB) {
-  // The web form and the wizard do not write a street the same way: a
-  // street-type word inside the name comes short from one and in full from
-  // the other ("Sample Pt Dr", "Sample Point Dr"). foldStreetWords reads
-  // those as one street (found live 2026-11-21: 1 of 5 past pairs).
+  // The web form and the wizard do not write a street the same way: a name
+  // word such as Point comes short from one and in full from the other
+  // ("Sample Pt Dr", "Sample Point Dr"). foldStreetWords reads those as one
+  // street, for a short list of such words (found live 2026-11-21: 1 of 5
+  // past pairs).
   if (!samePremiseDisplay(addressA, addressB, { requireLocality: true, foldStreetWords: true })) return false;
   const a = parseDisplayAddress(addressA);
   const b = parseDisplayAddress(addressB);
   // A street with no house number can be many homes: the key must start
   // with a number of its own ("12 sample st", "12b sample st"), not with a
   // numbered street ("49th st"). The house numbers are equal here (no
-  // street-type word is a number), so one side answers for both.
+  // folded word is a number), so one side answers for both.
   if (!/^\d+[a-z]?\s/.test(a.street)) return false;
   // The key drops what is not a letter or a digit, so "12½" and "12 ½"
-  // read as "12". The house numbers as typed must be the same too: all
-  // that stands before the first word that starts with a letter.
+  // read as "12". The house numbers as typed must be the same too: the
+  // first word, and a fraction that stands as the next word. The street
+  // name after it stays with the matcher ("12 49th-St" = "12 49th St").
   const house = (parsed) => {
-    const words = String(parsed.streetLine || '').trim().toLowerCase().split(/\s+/);
-    const name = words.findIndex((word) => /^[a-z]/.test(word));
-    return words.slice(0, name === -1 ? words.length : name).join(' ');
+    const [number = '', next = ''] = String(parsed.streetLine || '').trim().toLowerCase().split(/\s+/);
+    return FRACTION_WORD.test(next) ? `${number} ${next}` : number;
   };
   if (house(a) !== house(b)) return false;
   const unit = (parsed) => unitLineValueKey(normalizeUnitLine(parsed.unit));

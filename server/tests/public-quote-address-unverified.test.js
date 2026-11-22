@@ -206,7 +206,7 @@ describe('samePremiseDisplay', () => {
   // The wizard's web-form-draft rule asks for foldStreetWords. Every other
   // caller decides an address hold, a withdrawal or a record write on the
   // key it had: without the option nothing changes.
-  test('foldStreetWords: a street-type word inside the street name is one street short or in full, only when asked', () => {
+  test('foldStreetWords: a listed name word inside the street name is one street short or in full, only when asked', () => {
     const short = '1260 Example Pt Dr, Parrish, FL 34219';
     const full = '1260 Example Point Dr, Parrish, FL 34219';
     const fold = { requireLocality: true, foldStreetWords: true };
@@ -214,9 +214,30 @@ describe('samePremiseDisplay', () => {
     expect(samePremiseDisplay(short, full)).toBe(false);
     expect(samePremiseDisplay(short, full, { requireLocality: true })).toBe(false);
     expect(samePremiseDisplay(short, full, fold)).toBe(true);
-    expect(samePremiseDisplay('1260 State Rd 64, Parrish, FL 34219', '1260 State Road 64, Parrish, FL 34219', fold)).toBe(true);
     // The word that ends the street folds with and without the option.
     expect(samePremiseDisplay('1260 Example Drive, Parrish, FL 34219', '1260 Example Dr, Parrish, FL 34219', fold)).toBe(true);
+  });
+
+  test.each([
+    ['Point', 'Pt'], ['Glen', 'Gln'], ['Grove', 'Grv'], ['Beach', 'Bch'], ['Vista', 'Vis'], ['Shores', 'Shrs'],
+  ])('foldStreetWords: %s and %s inside the street name are one word', (full, short) => {
+    const fold = { requireLocality: true, foldStreetWords: true };
+
+    expect(samePremiseDisplay(`1260 Example ${full} Dr, Parrish, FL 34219`, `1260 Example ${short} Dr, Parrish, FL 34219`, fold)).toBe(true);
+  });
+
+  // The list is short on purpose: a word with another reading, or one that
+  // the records carry in one spelling only, stays as typed inside a name.
+  test.each([
+    ['Island, which shortens to the word "Is"', '1260 This Is Example Dr', '1260 This Island Example Dr'],
+    ['Road', '1260 State Rd 64', '1260 State Road 64'],
+    ['Lake', '1260 Lk Example Dr', '1260 Lake Example Dr'],
+    ['Court', '1260 Example Ct Dr', '1260 Example Court Dr'],
+    ['Avenue', '1260 Ave Example Blvd', '1260 Avenue Example Blvd'],
+  ])('foldStreetWords does not fold %s inside the street name', (_word, a, b) => {
+    const fold = { requireLocality: true, foldStreetWords: true };
+
+    expect(samePremiseDisplay(`${a}, Parrish, FL 34219`, `${b}, Parrish, FL 34219`, fold)).toBe(false);
   });
 
   test('foldStreetWords folds one word list only: another word, number, town or ZIP is another premise', () => {

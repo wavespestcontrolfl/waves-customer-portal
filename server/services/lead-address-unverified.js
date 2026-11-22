@@ -56,21 +56,26 @@ const streetKeyNoUnit = (v) => {
   const text = String(v || '');
   return lineKey(normalizeStreetLine(splitStreetLineUnit(text).street || text));
 };
-// A street key with every street-type word folded, wherever it stands
-// ("12 sample point dr" = "12 sample pt dr", "12 state road 64" = "12 state
-// rd 64"). streetKeyNoUnit folds only the word that ends the street. Same
-// table. Only for a caller that asks (samePremiseDisplay `foldStreetWords`).
-// Not folded: "st" and "dr". Inside a street name they are also Saint and
-// Doctor ("12 St George Dr" is not "12 Street George Dr"), so those two
-// stay as typed (pre-push audit P1). The word that ends the street is
-// already folded by streetKeyNoUnit.
-const TWO_MEANINGS_INSIDE_A_STREET_NAME = new Set(['ST', 'DR']);
+// A street key with six name words folded wherever they stand ("12 sample
+// point dr" = "12 sample pt dr"). streetKeyNoUnit folds only the word that
+// ends the street. Same table for the spellings. Only for a caller that
+// asks (samePremiseDisplay `foldStreetWords`).
+// The list is short on purpose (pre-push audit P1, twice): Point, Glen,
+// Grove, Beach, Vista, Shores. Those are the street-type words that the
+// stored addresses carry INSIDE street names in both spellings (read on
+// live data 2026-11-22: one address source shortens them), and whose short
+// form reads as nothing else. Not on it: "St" and "Dr" (Saint, Doctor: "12
+// St George Dr" is not "12 Street George Dr"), "Is" for Island (a word of
+// its own: "12 This Is Paradise Dr"), and every word seen in one spelling
+// only. Add a word only with both: seen in two spellings, and no other
+// reading.
+const NAME_WORDS_FOLDED_INSIDE_A_STREET = new Set(['PT', 'GLN', 'GRV', 'BCH', 'VIS', 'SHRS']);
 const streetKeyWordsFolded = (key) => {
   const { STREET_SUFFIX_ALIASES } = require('../utils/address-normalizer');
   return String(key || '').split(' ')
     .map((word) => {
       const alias = Object.hasOwn(STREET_SUFFIX_ALIASES, word) ? STREET_SUFFIX_ALIASES[word] : null;
-      return alias && !TWO_MEANINGS_INSIDE_A_STREET_NAME.has(alias) ? alias.toLowerCase() : word;
+      return alias && NAME_WORDS_FOLDED_INSIDE_A_STREET.has(alias) ? alias.toLowerCase() : word;
     })
     .join(' ');
 };
@@ -145,9 +150,9 @@ function flagCoversAddress(flag, address) {
 // agree — the cross-lead publication withdrawal uses this stricter form,
 // so a street-only submission can never match a published estimate for
 // that street in some other town (pre-push audit P1).
-// `foldStreetWords`: a street-type word written short or in full INSIDE the
-// street name is the same street too ("Sample Point Dr" = "Sample Pt Dr";
-// not "St" or "Dr", which are also Saint and Doctor there).
+// `foldStreetWords`: one of six name words written short or in full INSIDE
+// the street name is the same street too ("Sample Point Dr" = "Sample Pt
+// Dr"; the list and its reason are at streetKeyWordsFolded).
 // Off unless asked: the wizard's web-form-draft rule asks
 // (estimate-automation-duplicates.js sameDoor, with its own contact, house
 // number and unit tests). Every other caller keeps the key it had.

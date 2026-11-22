@@ -223,12 +223,12 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     expect(await shellsOnly()).toBe(true);
   });
 
-  // Found live 2026-11-21: the web form and the wizard wrote one street-type
-  // word inside the street name in two ways, and the draft kept blocking.
+  // Found live 2026-11-21: the web form and the wizard wrote one name word
+  // inside the street name in two ways, and the draft kept blocking.
   test.each([
-    ['inside the street name', '12 Sample Pt Dr, Parrish, FL 34219', '12 Sample Point Dr, Parrish, FL 34219'],
-    ['before a road number', '12 State Rd 64, Parrish, FL 34219', '12 State Road 64, Parrish, FL 34219'],
-  ])('a street-type word written short on the draft and in full on the run, %s, is the same property', async (_label, onDraft, onRun) => {
+    ['Point', '12 Sample Pt Dr, Parrish, FL 34219', '12 Sample Point Dr, Parrish, FL 34219'],
+    ['Glen', '12 Sample Gln Ct, Parrish, FL 34219', '12 Sample Glen Ct, Parrish, FL 34219'],
+  ])('%s written short on the draft and in full on the run, inside the street name, is the same property', async (_word, onDraft, onRun) => {
     await estimate({ address: onDraft });
 
     expect(await shellsOnly({ address: onRun })).toBe(true);
@@ -246,10 +246,12 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     expect(await shellsOnly({ address: onRun })).toBe(false);
   });
 
-  // "St" is also Saint and "Dr" is also Doctor inside a street name.
+  // "St" is also Saint, "Dr" is also Doctor, and Island shortens to the
+  // word "Is": none of them is on the list.
   test.each([
     ['St', '12 St Sample Dr, Parrish, FL 34219', '12 Street Sample Dr, Parrish, FL 34219'],
     ['Dr', '12 Dr Sample Blvd, Parrish, FL 34219', '12 Drive Sample Blvd, Parrish, FL 34219'],
+    ['Is', '12 This Is Sample Dr, Parrish, FL 34219', '12 This Island Sample Dr, Parrish, FL 34219'],
   ])('"%s" inside the street name is not folded: the draft still blocks', async (_word, onDraft, onRun) => {
     await estimate({ address: onDraft });
 
@@ -271,6 +273,9 @@ postgres('untouched web-form shell drafts and the quote wizard (live Postgres)',
     await estimate({ address: door });
 
     expect(await shellsOnly({ address: door })).toBe(true);
+    // The typed house number is the first word only: how the street name
+    // after it is written stays with the matcher.
+    expect(await shellsOnly({ address: '12 49th-St, Parrish, FL 34219' })).toBe(true);
   });
 
   // The run side of the same checks.

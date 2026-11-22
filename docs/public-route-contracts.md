@@ -6156,9 +6156,9 @@ when every open estimate of the phone is an untouched web-form shell of the
 run's own contact and for the run's own property, the block is dropped.
 A shell is a `lead_webhook` draft with the customer row the run resolved
 for itself and the same email, for the same property as the run (same
-street, house number as typed, city, ZIP and unit; a street-type word
-inside the street name may be short on one side and in full on the other;
-an address with no city or ZIP never matches),
+street, house number as typed, city, ZIP and unit; one of six name words
+inside the street name, such as Point, may be short on one side and in full
+on the other; an address with no city or ZIP never matches),
 that is older than 30 minutes, was never written since it was made, has no
 office Sold-by action and no logged follow-up, has no monthly, one-time or
 annual total, was never sent, viewed or scheduled, has no auto-send claim
