@@ -183,6 +183,27 @@ describe('the text is refused', () => {
     expect(rejection('customer not paid treated kitchen', 'You not treated the kitchen.')).toEqual({ reason: 'left_out', words: ['paid'] });
   });
 
+  test('where a word of time went, the text adds no form of "is" before a word in "-ing"', () => {
+    const timed = { wordGoes: (word) => word === 'tomorrow' && 'time' };
+    expect(orderRejection('I was treating outside.', 'treating outside tomorrow', timed)).toEqual({ reason: 'not_in_note', words: ['was'] });
+    expect(orderRejection('Treating outside.', 'treating outside tomorrow', timed)).toBeNull();
+    // A word of the part between the two hides nothing.
+    expect(orderRejection('I was spot treating outside.', 'spot treating outside tomorrow', timed)).toEqual({ reason: 'not_in_note', words: ['was'] });
+    expect(orderRejection('Spot treating outside.', 'spot treating outside tomorrow', timed)).toBeNull();
+    // "Am" sets a tense too: work now is no plan.
+    expect(orderRejection('I am treating outside.', 'treating outside tomorrow', timed)).toEqual({ reason: 'not_in_note', words: ['am'] });
+    // A word of time alone in its part carries the tense of the parts beside it.
+    expect(orderRejection('I was treating outside.', 'treating outside, tomorrow', timed)).toEqual({ reason: 'not_in_note', words: ['was'] });
+    expect(orderRejection('I was treating outside.', 'tomorrow, treating outside', timed)).toEqual({ reason: 'not_in_note', words: ['was'] });
+    expect(orderRejection('I was treating outside.', 'treating outside. tomorrow.', timed)).toEqual({ reason: 'not_in_note', words: ['was'] });
+    // A small word added in the sentence before is no tense of this one.
+    expect(orderRejection('Ants were bad. Treating outside.', 'ants bad. treating outside tomorrow', timed)).toBeNull();
+    // The word of time stays, or the note has none: the small word may be added.
+    expect(orderRejection('Ants are coming in by the window.', 'ants coming in by the window', timed)).toBeNull();
+    // A product name that went carried no tense.
+    expect(orderRejection('I was spraying outside.', 'spraying borlux outside', { wordGoes: (word) => word === 'borlux' })).toBeNull();
+  });
+
   test('a part that qualifies the rest goes only with its whole sentence', () => {
     const timed = { wordGoes: (word) => word === 'tomorrow', partGoes: (part) => /tomorrow/.test(part) };
     const note = 'will treat outside, weather permitting tomorrow';
