@@ -8350,7 +8350,12 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, on
       )}
 
       {/* A card saved in the offer's purchase overlay is on the account at
-          once: the same refresh as Billing's own add-payment flow. */}
+          once: the same refresh as Billing's own add-payment flow.
+          Two things are the shared card's own, the same on Home and My
+          Plan, and are not handled per host: the card keeps a bought offer
+          until the tab loads again (purchase init rejects the stale one
+          with a 409, the card's refresh state), and it resumes a bank-page
+          return when its host renders it. */}
       {!cancelledAccount && <RecommendationsCard data={billingOffers} surface="billing" onCardSaved={handleOfferCardSaved} />}
       {!cancelledAccount && onSwitchTab && (
         <section data-glass="card" data-section="billing-refer" style={{ ...card, padding: 20, marginTop: 16, textAlign: 'center' }}>
