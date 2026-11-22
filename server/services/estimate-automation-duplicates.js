@@ -282,10 +282,127 @@ async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
   return changed > 0;
 }
 
+/**
+ * Untouched web-form shells (owner 2026-11-21, "build";
+ * GATE_WIZARD_SUPERSEDES_FORM_DRAFT, read by routes/public-quote.js).
+ *
+ * The web form (source 'lead_webhook') leaves a draft estimate with no price
+ * when draft automation cannot price the request. Nobody works that row, yet
+ * it is an OPEN estimate for the phone, so it blocked the quote wizard's own
+ * estimate, and with no wizard estimate the person gets no booking link.
+ *
+ * A row is an untouched shell when ALL of these hold:
+ *   - the web form made it, and it is still an unarchived 'draft';
+ *   - it has no price (monthly, one-time and annual are all empty or 0), the
+ *     same test lead-intake.js uses to find a shell it may fill;
+ *   - nobody sent, viewed or scheduled it, auto-send did not claim it, and no
+ *     lead points at it: the #6394 rule (retireSupersededLeadWebhookDrafts,
+ *     admin-estimate-persistence.js);
+ *   - no clarify ask for the phone is open or was sent in the last 7 days
+ *     without an answer: the row may be waiting for the customer's reply.
+ *
+ * Shells are retired only when that lets the caller go on: `stillBlocks`
+ * gets the newest open estimate that would remain (or null) and answers
+ * whether it still blocks. When something else still blocks, nothing is
+ * archived.
+ *
+ * Archived, not deleted: staff can unarchive the row, and every draft reader
+ * (auto-send, clarify asks, measurements, lists) skips an archived row. The
+ * marker is `estimate_data.supersededByWizard`, deliberately NOT
+ * `estimatorEngine.superseded_at`: that stamp makes the unarchive route
+ * refuse the row for good.
+ *
+ * The caller holds the phone's automated-estimate lock (the web form creates
+ * its shell under the same lock) and has taken every advisory lock it will
+ * need before this locks estimate rows.
+ */
+const WEB_FORM_SHELL_SOURCE = 'lead_webhook';
+// Same window as estimate-clarify-asks.js RECENT_SENT_WINDOW_MS: a sent ask
+// counts as waiting for its answer for 7 days.
+const CLARIFY_WAIT_WINDOW_MS = 7 * 86400000;
+
+function untouchedWebFormShells(trx, last10, { now = new Date() } = {}) {
+  return trx('estimates')
+    .where({ source: WEB_FORM_SHELL_SOURCE, status: 'draft' })
+    .whereRaw(
+      "right(regexp_replace(coalesce(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?",
+      [last10]
+    )
+    .whereNull('archived_at')
+    .whereNull('sent_at')
+    .whereNull('viewed_at')
+    .whereNull('scheduled_at')
+    .whereRaw('COALESCE(monthly_total, 0) = 0')
+    .whereRaw('COALESCE(onetime_total, 0) = 0')
+    .whereRaw('COALESCE(annual_total, 0) = 0')
+    .whereRaw("COALESCE(estimate_data->'automation'->'autoSend'->>'claimedAt', '') = ''")
+    .whereNotExists(function linkedToLead() {
+      this.select(trx.raw('1')).from('leads').whereRaw('leads.estimate_id = estimates.id');
+    })
+    .whereNotExists(function clarifyAskWaiting() {
+      this.select(trx.raw('1')).from('message_drafts')
+        .where({ intent: 'estimate_clarify', source_ref: `clarify:${last10}` })
+        .whereRaw("(flags->>'answered_at') is null")
+        .where(function openOrRecentlySent() {
+          this.where(function stillOpen() {
+            this.whereIn('status', ['pending', 'approved', 'revised']).whereNull('sent_at');
+          }).orWhere('sent_at', '>=', new Date(now.getTime() - CLARIFY_WAIT_WINDOW_MS));
+        });
+    });
+}
+
+async function retireUntouchedWebFormShellsInTx(trx, { phone, leadId = null, stillBlocks, now = new Date() } = {}) {
+  const none = { retiredIds: [], blockedById: null };
+  if (!trx || typeof stillBlocks !== 'function') return none;
+  const values = phoneLookupValues(phone);
+  if (!values.last10) return none;
+
+  const open = await listOpenEstimatesByPhone(phone, { database: trx });
+  if (!open.length) return none;
+
+  // Row locks first, so the verdict below is read on rows no other writer
+  // can promote, price or claim before the archive lands.
+  const shells = await untouchedWebFormShells(trx, values.last10, { now })
+    .whereIn('id', open.map((row) => row.id))
+    .forUpdate()
+    .select('id');
+  const shellIds = (Array.isArray(shells) ? shells : []).map((row) => row.id);
+  if (!shellIds.length) return none;
+
+  const shellKeys = new Set(shellIds.map(String));
+  const newestRemaining = open.find((row) => !shellKeys.has(String(row.id))) || null;
+  if (stillBlocks(newestRemaining)) {
+    return { retiredIds: [], blockedById: newestRemaining ? newestRemaining.id : null };
+  }
+
+  const marker = JSON.stringify({ at: now.toISOString(), leadId: leadId == null ? null : String(leadId) });
+  // Guarded by the full predicate again: the update can only land on a row
+  // that is still an untouched shell.
+  const retired = await untouchedWebFormShells(trx, values.last10, { now })
+    .whereIn('id', shellIds)
+    .update({
+      archived_at: now,
+      // A jsonb scalar cannot take a key; such a row keeps its data as is.
+      estimate_data: trx.raw(
+        "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object'"
+        + " THEN jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{supersededByWizard}', ?::jsonb, true)"
+        + ' ELSE estimate_data END',
+        [marker]
+      ),
+      updated_at: now,
+    })
+    .returning('id');
+  return {
+    retiredIds: (Array.isArray(retired) ? retired : []).map((row) => (row && typeof row === 'object' ? row.id : row)),
+    blockedById: null,
+  };
+}
+
 module.exports = {
   acquireAutomatedEstimateLocks,
   lockSupersededDraftInTx,
   archiveSupersededDraftInTx,
+  retireUntouchedWebFormShellsInTx,
   automatedDuplicateBlock,
   automatedEstimateLockKeys,
   blockIfAutomatedEstimateDuplicate,

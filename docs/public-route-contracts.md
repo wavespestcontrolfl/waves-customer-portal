@@ -6112,6 +6112,27 @@ shortly." and the office notice reads "needs the area to plug (sq ft)". A
 positive area prices exactly as before. The site's plugging forms require the
 area. No new field, no new auth surface, no migration, no gate.
 
+Web-form shell drafts (owner 2026-11-21, "build"; DARK behind
+`GATE_WIZARD_SUPERSEDES_FORM_DRAFT`, read at call time, off unless exactly
+`true` — off, every run is blocked exactly as before): a `/calculate` run
+whose phone already has an open estimate (`draft`, `scheduled`, `sent` or
+`viewed`, not archived) other than the wizard's own draft mirrors no
+estimate, so it returns no booking handoff and sends no booking text. On,
+when the newest open estimate for the phone is a web-form draft (`source`
+`lead_webhook`), the run first archives the phone's untouched shells: a
+`lead_webhook` draft with no monthly, one-time or annual total that was never
+sent, viewed or scheduled, has no auto-send claim and no lead pointing at it,
+on a phone with no clarify ask that is open or was sent in the last 7 days
+without an answer. It then mirrors its estimate as for a new visitor, or
+refreshes the wizard's own older draft, and the usual booking handoff, email
+link and `quote_wizard_booking_invite` text follow. Nothing is archived when
+any other open estimate would still block (a draft with a price, a touched
+draft, an office or estimator estimate, a wizard estimate past draft). The
+archived row keeps status `draft`, gets
+`estimate_data.supersededByWizard = { at, leadId }` and can be unarchived by
+staff. Request and response shapes are unchanged: no new field, no new auth
+surface, no migration.
+
 Repeat-run dedupe (#3834 split, PR A′; DARK behind `GATE_WIZARD_LEAD_DEDUPE`,
 read at call time, default off in every environment — off, every run
 files as `new` exactly as before): a tokenless `/calculate` whose typed

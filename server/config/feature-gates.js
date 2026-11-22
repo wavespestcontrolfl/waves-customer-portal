@@ -208,6 +208,7 @@
  *   GATE_EMAIL_TEMPLATE_AUTOMATIONS=shadow (runs created + finalized as would_send, nothing dispatched) | true (live sends)
  *   GATE_LEAD_ESTIMATE_AUTOMATION=true    (generate priced lead draft estimates)
  *   GATE_LEAD_ESTIMATE_AUTO_SEND=true    (auto-send generated lead estimates)
+ *   GATE_WIZARD_SUPERSEDES_FORM_DRAFT=true (owner 2026-11-21, "build": an old web-form draft estimate that has no price and that nobody touched no longer blocks the website quote wizard. The wizard archives that draft (staff can unarchive it) and makes its own estimate, so the person gets the booking link on the page, in the email and by text, like every other wizard visitor. A draft with a price, a sent, viewed or scheduled draft, a draft a lead points at, a draft that waits for a customer answer, and every office or estimator estimate still block. It has a gate because the booking text is a text to a customer. Off unless exactly 'true', read at call time via wizardSupersedesFormDraftLive(). Kill: unset; a draft the wizard already archived stays archived until staff unarchive it.)
  *   GATE_LEAD_TURNSTILE=true    (enforce Cloudflare Turnstile on the public lead webhook)
  *   GATE_LAWN_ASSESSMENT=true   (public lawn-assessment photo funnel — paid vision per upload)
  *   GATE_PUBLIC_WATERING_PLAN=true (owner 2026-10-31, backlink tools plan step 2, 'ok go, approved'): public lawn watering calculator API + embed; dark until flipped; no paid AI; weather from the existing Open-Meteo plan, MRMS and NWS. GET /api/public/watering-plan answers one JSON plan for a curated Florida location or ZIP: last 7 days of observed rain (NOAA MRMS merged with Open-Meteo), the plan-week forecast, the turf's weekly need (ET0 x crop coefficient, seasonal fallback) and the week's run/hold decision from the same engine as the Monday irrigation email. The legal ceiling is the county's restriction policy (config/irrigation-restrictions.js) and it fails closed: outside established coverage the answer is need_only (inches, no event count, no legal maximum). No customer row, no database write, nothing sent to anyone. 120 requests per 15 minutes per IP. Read at call time via publicWateringPlanLive(), strict 'true', dark by default; off = every request to /api/public/watering-plan, any method, answers the generic 404 in server/index.js before the wildcard CORS handler, the global /api/ limiter and this route's own limiter. Kill switch: unset.)
@@ -3207,6 +3208,10 @@ const gates = {
   // Website estimate pages publish eligible engine quotes directly into the
   // existing estimate booking/Auto Pay flow. Ordinary lead forms never opt in.
   websiteQuoteBooking: process.env.GATE_WEBSITE_QUOTE_BOOKING === 'true',
+
+  // GATE_WIZARD_SUPERSEDES_FORM_DRAFT: read at CALL time via
+  // wizardSupersedesFormDraftLive(); this entry is for logGateStatus.
+  wizardSupersedesFormDraft: process.env.GATE_WIZARD_SUPERSEDES_FORM_DRAFT === 'true',
 
   // Commercial estimate glass parity — the customer estimate page renders an
   // authored commercial proposal's line items INSIDE the glass layout (plus
@@ -7379,6 +7384,16 @@ function leadDraftPropertyLookupLive() {
   return process.env.GATE_LEAD_DRAFT_PROPERTY_LOOKUP === 'true';
 }
 
+// GATE_WIZARD_SUPERSEDES_FORM_DRAFT read at CALL time; strict 'true', dark by default (owner 2026-11-21, "build").
+// On, the quote wizard archives a phone's untouched web-form shell drafts (no price, never sent, viewed,
+// scheduled, claimed or linked to a lead, no clarify ask waiting) when they are all that blocks its own estimate,
+// so the person gets the booking link and the booking text. Rule: retireUntouchedWebFormShellsInTx
+// (services/estimate-automation-duplicates.js); reader: routes/public-quote.js. It has a gate because the booking
+// text is a text to a customer. Off = the shell blocks as before. Kill = unset.
+function wizardSupersedesFormDraftLive() {
+  return process.env.GATE_WIZARD_SUPERSEDES_FORM_DRAFT === 'true';
+}
+
 // GATE_SMS_LEDGER_STALL_FEED read at CALL time — strict opt-in via gateEnvValue, dark. Owner 2026-11-01. Read by
 // sms-pathology-ledger.js (the nightly judge-v2 feed and the base-identity count, which sms-prompt-autopromote.js uses
 // for its proposal version match). Off = byte-identical to before. Sends, holds and changes nothing on its own.
@@ -9108,6 +9123,8 @@ module.exports.callPromiseAiNoCustomerLive = callPromiseAiNoCustomerLive;
 module.exports.planRateLedgerReconcileLive = planRateLedgerReconcileLive;
 // GATE_LEAD_DRAFT_PROPERTY_LOOKUP reader, on its own line so gate PRs never conflict.
 module.exports.leadDraftPropertyLookupLive = leadDraftPropertyLookupLive;
+// GATE_WIZARD_SUPERSEDES_FORM_DRAFT reader, on its own line so gate PRs never conflict.
+module.exports.wizardSupersedesFormDraftLive = wizardSupersedesFormDraftLive;
 // GATE_ESTIMATE_CONSUMER_NOTICE reader, on its own line so gate PRs never conflict.
 module.exports.estimateConsumerNoticeLive = estimateConsumerNoticeLive;
 // GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND reader, on its own line so gate PRs never conflict.
