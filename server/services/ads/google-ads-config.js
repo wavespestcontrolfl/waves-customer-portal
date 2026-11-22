@@ -16,4 +16,9 @@ function isConfigured() {
   return hasCredentials() && !!process.env.GOOGLE_ADS_CUSTOMER_ID;
 }
 
-module.exports = { isConfigured, hasCredentials };
+// The Google Ads SDK rejects with a GoogleAdsFailure object, not an Error: it
+// has no `.message`, and the reason is in errors[0].message. One short line for
+// a log or a job_health row.
+const errorText = (err) => String(err?.errors?.[0]?.message || err?.message || 'unknown error').slice(0, 200);
+
+module.exports = { isConfigured, hasCredentials, errorText };

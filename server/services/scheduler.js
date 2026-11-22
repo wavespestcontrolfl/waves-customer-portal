@@ -8589,8 +8589,8 @@ function initScheduledJobs() {
   // Local Services runs in its own Google Ads account. The sync mirrors it into
   // ad_campaigns / ad_performance_daily (platform='google_lsa'), so the Ads page
   // shows its cost and its charged leads. Read-only; it runs before the 6:25
-  // cost allocation. runExclusive records job_health ('google-lsa-sync'). Both
-  // steps run even if one fails, then the run throws the first failure.
+  // cost allocation. runExclusive records job_health ('google-lsa-sync'). A
+  // failed step throws with Google's reason, so the job reads failed.
   // =========================================================================
   cron.schedule('10 6 * * *', async () => {
     try {

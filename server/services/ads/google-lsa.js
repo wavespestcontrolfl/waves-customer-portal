@@ -2,7 +2,7 @@ const { v4: uuidv4 } = require('uuid');
 const db = require('../../models/db');
 const logger = require('../../services/logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
-const { hasCredentials } = require('./google-ads-config');
+const { hasCredentials, errorText } = require('./google-ads-config');
 
 // ---------------------------------------------------------------------------
 // Google Local Services Ads: read-only ingestion (owner 2026-11-21, "lead sync").
@@ -15,10 +15,10 @@ const { hasCredentials } = require('./google-ads-config');
 // page's "Local Service Ads" card filters on).
 //
 // Google charges Local Services by the lead, not by the click, so a day's
-// `conversions` here is its number of leads Google charged and did not credit
-// back (local_services_lead), and the day's lead mix is kept in
-// ad_performance_daily.metadata.lsa_leads. Google's own conversions number for
-// the day is kept beside it.
+// `conversions` here is ALWAYS its number of leads Google charged and did not
+// credit back (local_services_lead), never Google's conversions number. That
+// number is kept beside it in ad_performance_daily.metadata, with the day's
+// lead mix (metadata.lsa_leads).
 //
 // It only reads Google and writes these two tables. It creates no lead, changes
 // no call attribution and messages no one. Budget and status stay with Google:
@@ -165,9 +165,9 @@ function tallyLeadsByDay(leadRows) {
   return byDay;
 }
 
-// One ad_performance_daily row for a campaign-day. `leads` is that day's tally
-// when the account's leads belong to this campaign, else null: the row then
-// keeps Google's own conversions number.
+// One ad_performance_daily row for a campaign-day. `leads` is the account's
+// tally for the day on the row that carries the day's leads (leadCarrier), and
+// an empty tally on every other row.
 function mapPerformanceRow(metrics, leads) {
   const m = metrics || {};
   const cost = Number(m.cost_micros || 0) / 1_000_000;
@@ -178,15 +178,12 @@ function mapPerformanceRow(metrics, leads) {
     impressions: Number(m.impressions || 0),
     clicks: Number(m.clicks || 0),
     cost,
-    conversions: leads ? leads.charged : googleConversions,
+    conversions: leads.charged,
     conversion_value: conversionValue,
     ctr: Math.round(Number(m.ctr || 0) * 10000) / 100, // fraction -> percentage
     avg_cpc: Number(m.average_cpc || 0) / 1_000_000,
     roas: Math.round(roas * 100) / 100,
-    metadata: JSON.stringify({
-      google_conversions: googleConversions,
-      ...(leads ? { lsa_leads: leads } : {}),
-    }),
+    metadata: JSON.stringify({ google_conversions: googleConversions, lsa_leads: leads }),
     updated_at: new Date(),
   };
 }
@@ -274,15 +271,22 @@ async function windowStart(customer, since, earliest) {
   return start < earliest ? earliest : start;
 }
 
-// A lead names no campaign. The leads in the window belong to a campaign only
-// when it is the one campaign in play there: every campaign of the account that
-// is not removed, plus every campaign with a metrics row in the window (a
-// removed one included, so its earlier leads never move to the campaign that
-// replaced it). Any other count = unknown = null. Pure.
-function leadOwner(campaigns, metricRows) {
-  const inPlay = new Set(campaigns.filter((c) => c.status !== 'removed').map((c) => String(c.platform_campaign_id)));
-  for (const row of metricRows) inPlay.add(String(row.campaign.id));
-  return inPlay.size === 1 ? [...inPlay][0] : null;
+// A lead names no campaign, and the account's leads of a day must be counted
+// exactly once. The row that carries them is the campaign with a metrics row
+// that day; with none, the campaign that is not removed; with none, any
+// campaign of the account. So a removed campaign keeps the leads of the days it
+// ran, and they never move to the campaign that replaced it. When a rule leaves
+// more than one candidate, the first (lowest Google id) carries the leads and
+// the tally says `shared: true`: the count is the account's for the day, not
+// proven to be that campaign's. Pure. null = the account has no campaign row.
+function leadCarrier(date, campaigns, metricIdsByDay) {
+  const ran = metricIdsByDay.get(date);
+  const withMetrics = campaigns.filter((c) => ran?.has(String(c.platform_campaign_id)));
+  const live = campaigns.filter((c) => c.status !== 'removed');
+  const candidates = [withMetrics, live, campaigns].find((list) => list.length);
+  if (!candidates) return null;
+  const first = candidates.reduce((a, c) => (Number(c.platform_campaign_id) < Number(a.platform_campaign_id) ? c : a));
+  return { campaignId: first.id, shared: candidates.length > 1 };
 }
 
 // The days this sync already holds in the window: 'campaign id|YYYY-MM-DD' -> row id.
@@ -298,32 +302,41 @@ async function storedDays(campaignIds, since, until) {
 
 // Which campaign-days to write (pure), keyed 'campaign id|date':
 // - each Google metrics row for a campaign the portal holds;
-// - a day in the window with a lead and no metrics row (Google leaves a
-//   zero-metric day out);
+// - the row that carries a day's leads, also when Google has no metrics row
+//   for it (Google leaves a zero-metric day out);
 // - a day stored by an earlier run that neither of the above covers now. It is
-//   written again as a zero day, so numbers Google no longer reports, or leads
-//   that no longer have a known campaign, do not stay behind.
-// `leads` is the day's tally on the campaign that owns the leads, else null.
-function planPerformanceDays({ metricRows, leadsByDay, leadCampaignId, localId, storedKeys, since, until }) {
+//   written again as a zero day, so numbers Google no longer reports do not
+//   stay behind.
+// `uncounted` = leads that no row could carry (the account has no campaign row).
+function planPerformanceDays({ metricRows, leadsByDay, campaigns, storedKeys }) {
+  const localId = new Map(campaigns.map((c) => [String(c.platform_campaign_id), c.id]));
+  const metricIdsByDay = new Map();
   const planned = new Map();
   for (const row of metricRows) {
-    const campaignId = localId.get(String(row.campaign.id));
+    const platformId = String(row.campaign.id);
     const date = row.segments.date;
-    if (campaignId) planned.set(`${campaignId}|${date}`, { campaignId, date, metrics: row.metrics });
+    if (!localId.has(platformId)) continue;
+    planned.set(`${localId.get(platformId)}|${date}`, { campaignId: localId.get(platformId), date, metrics: row.metrics });
+    metricIdsByDay.set(date, (metricIdsByDay.get(date) || new Set()).add(platformId));
   }
-  for (const date of leadsByDay.keys()) {
-    const key = `${leadCampaignId}|${date}`;
-    if (date >= since && date <= until && !planned.has(key)) planned.set(key, { campaignId: leadCampaignId, date, metrics: null });
+  const carried = new Map();
+  let uncounted = 0;
+  for (const [date, tally] of leadsByDay) {
+    const carrier = leadCarrier(date, campaigns, metricIdsByDay);
+    if (!carrier) {
+      uncounted += tally.total;
+      continue;
+    }
+    const key = `${carrier.campaignId}|${date}`;
+    carried.set(key, carrier.shared ? { ...tally, shared: true } : tally);
+    if (!planned.has(key)) planned.set(key, { campaignId: carrier.campaignId, date, metrics: null });
   }
   for (const key of storedKeys) {
     const [campaignId, date] = key.split('|');
     if (!planned.has(key)) planned.set(key, { campaignId, date, metrics: null });
   }
-  return [...planned.entries()].map(([key, day]) => ({
-    key,
-    ...day,
-    leads: day.campaignId === leadCampaignId ? (leadsByDay.get(day.date) || emptyLeadDay()) : null,
-  }));
+  const days = [...planned.entries()].map(([key, day]) => ({ key, ...day, leads: carried.get(key) || emptyLeadDay() }));
+  return { days, uncounted };
 }
 
 async function syncDailyPerformance(customer, account, days = DEFAULT_DAYS) {
@@ -357,31 +370,23 @@ async function syncDailyPerformance(customer, account, days = DEFAULT_DAYS) {
     WHERE local_services_lead.creation_date_time >= '${since} 00:00:00'
   `);
 
-  // Removed campaigns stay in the lookup: the metrics query has no status
+  // Removed campaigns stay in the list: the metrics query has no status
   // filter, so a campaign removed since the last run still gets its last days
   // of cost and any later correction.
   const campaigns = await accountCampaigns(account).select('id', 'platform_campaign_id', 'status');
-  const localId = new Map(campaigns.map((c) => [String(c.platform_campaign_id), c.id]));
-
-  // With the owner unknown the lead counts are left out, and each row keeps
-  // Google's own conversions number.
-  const leadCampaignId = localId.get(leadOwner(campaigns, metricRows)) || null;
-  if (!leadCampaignId && leadRows.length) {
-    logger.warn(`[google-lsa] ${leadRows.length} lead(s) not counted: no single campaign owns the leads in the window`);
+  const stored = await storedDays(campaigns.map((c) => c.id), since, until);
+  const plan = planPerformanceDays({
+    metricRows,
+    leadsByDay: tallyLeadsByDay(leadRows),
+    campaigns,
+    storedKeys: [...stored.keys()],
+  });
+  if (plan.uncounted) {
+    logger.warn(`[google-lsa] ${plan.uncounted} lead(s) not counted: the portal holds no campaign row for the account`);
   }
 
-  const stored = await storedDays([...localId.values()], since, until);
-  const planned = planPerformanceDays({
-    metricRows,
-    leadsByDay: leadCampaignId ? tallyLeadsByDay(leadRows) : new Map(),
-    leadCampaignId,
-    localId,
-    storedKeys: [...stored.keys()],
-    since,
-    until,
-  });
   const results = [];
-  for (const { key, campaignId, date, metrics, leads } of planned) {
+  for (const { key, campaignId, date, metrics, leads } of plan.days) {
     const data = { campaign_id: campaignId, date, ...mapPerformanceRow(metrics, leads) };
     if (stored.has(key)) {
       await db('ad_performance_daily').where({ id: stored.get(key) }).update(data);
@@ -397,29 +402,27 @@ async function syncDailyPerformance(customer, account, days = DEFAULT_DAYS) {
 
 // ---------------------------------------------------------------------------
 // The daily job body (the scheduler wraps it in runExclusive('google-lsa-sync')).
-// Both steps run even if the first fails; then the run throws the first
-// failure, so job_health records it instead of a success.
+// The performance step runs only after the campaign step succeeded: it decides
+// which row carries a day's leads from the campaign rows, so it must not run on
+// a list that may miss a new campaign. A failure throws an Error with Google's
+// reason, so job_health records it instead of a success.
 // ---------------------------------------------------------------------------
 async function runDailySync({ days = DEFAULT_DAYS } = {}) {
   const customer = getCustomer();
   if (!customer) return { configured: false, synced: {} };
   const account = customerId();
-  const synced = { campaigns: 0, performanceRows: 0 };
-  let firstErr = null;
-  try {
-    synced.campaigns = (await syncCampaigns(customer, account)).length;
-  } catch (err) {
-    logger.error(`[google-lsa] syncCampaigns failed: ${err.message}`);
-    firstErr = err;
-  }
-  try {
-    synced.performanceRows = (await syncDailyPerformance(customer, account, days)).length;
-  } catch (err) {
-    logger.error(`[google-lsa] syncDailyPerformance failed: ${err.message}`);
-    firstErr = firstErr || err;
-  }
-  if (firstErr) throw firstErr;
-  return { configured: true, synced };
+  const step = async (name, run) => {
+    try {
+      return (await run()).length;
+    } catch (err) {
+      const reason = errorText(err);
+      logger.error(`[google-lsa] ${name} failed: ${reason}`);
+      throw new Error(`${name}: ${reason}`);
+    }
+  };
+  const campaigns = await step('syncCampaigns', () => syncCampaigns(customer, account));
+  const performanceRows = await step('syncDailyPerformance', () => syncDailyPerformance(customer, account, days));
+  return { configured: true, synced: { campaigns, performanceRows } };
 }
 
 module.exports = {
@@ -433,7 +436,7 @@ module.exports = {
     mapCampaign,
     mapPerformanceRow,
     tallyLeadsByDay,
-    leadOwner,
+    leadCarrier,
     windowStart,
     planPerformanceDays,
     dateRange,
