@@ -471,7 +471,9 @@ export function stillDecidingLine(stillDeciding, now = new Date()) {
   return help ? `Still deciding: ${help} · ${callListWhen(stillDeciding.at, now)}` : "";
 }
 // The four outcome buttons on a Call today row.
-export function CallOutcomeButtons({ estimate, onPick, saving = false, className }) {
+// `onFollowUp` (the mobile rows, which show these buttons on Call today only): a "Follow up" tap after the four outcomes opens the Follow Up modal
+// for the row. The desktop cards already carry their own Follow Up button, so they pass nothing.
+export function CallOutcomeButtons({ estimate, onPick, saving = false, className, onFollowUp }) {
   return (
     <div
       role="group"
@@ -493,6 +495,19 @@ export function CallOutcomeButtons({ estimate, onPick, saving = false, className
           {o.label}
         </Button>
       ))}
+      {onFollowUp && (
+        <Button
+          size="sm"
+          variant="secondary"
+          className="whitespace-nowrap"
+          onClick={(evt) => {
+            evt.stopPropagation();
+            onFollowUp(estimate);
+          }}
+        >
+          Follow up
+        </Button>
+      )}
     </div>
   );
 }
@@ -3856,6 +3871,7 @@ export function MobileEstimateRow({
   onCalled,
   onCallOutcome,
   callOutcomeSaving = false,
+  onFollowUp,
 }) {
   const navigate = useNavigate();
   const sendEstimateFromPipeline = useEstimateSend();
@@ -4100,6 +4116,7 @@ export function MobileEstimateRow({
               onPick={onCallOutcome}
               saving={callOutcomeSaving}
               className="mt-1"
+              onFollowUp={onFollowUp}
             />
           )}
         </div>
@@ -4342,6 +4359,7 @@ function EstimatesMobileListView({
   const v3Flag = useFeatureFlag("estimates_v2_status_pills");
   const [reasonTarget, setReasonTarget] = useState(null);
   const [declineTarget, setDeclineTarget] = useState(null);
+  const [followUpTarget, setFollowUpTarget] = useState(null);
   const [estimates, setEstimates] = useState([]);
   const [estimatesTruncated, setEstimatesTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -4842,6 +4860,7 @@ function EstimatesMobileListView({
               }}
               onCallOutcome={filter === "call_today" ? callOutcomes.save : undefined}
               callOutcomeSaving={callOutcomes.saving.has(e.id)}
+              onFollowUp={setFollowUpTarget}
             />
           ))}
         </div>
@@ -4904,6 +4923,17 @@ function EstimatesMobileListView({
           onClose={() => setReasonTarget(null)}
           onSaved={() => {
             setReasonTarget(null);
+            refreshEstimates();
+          }}
+        />
+      )}
+      {/* Opened by a Call today row's "Follow up" tap. A sent text stamps the estimate, which takes the row off Call today. */}
+      {followUpTarget && (
+        <FollowUpModalV2
+          estimate={followUpTarget}
+          onClose={() => setFollowUpTarget(null)}
+          onSent={() => {
+            setFollowUpTarget(null);
             refreshEstimates();
           }}
         />
