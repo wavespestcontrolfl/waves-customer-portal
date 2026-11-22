@@ -37,6 +37,23 @@ describe('company, trust and buyer kind', () => {
   });
 });
 
+describe('company endings written with dots', () => {
+  test.each(['EXAMPLE L.P.', 'EXAMPLE L.L.P.', 'EXAMPLE L.L.C.', 'EXAMPLE N.A.', 'EXAMPLE L.P', 'EXAMPLE, L.L.C', 'EXAMPLE P.A.'])('%s is a company', (name) => {
+    expect(isCompanyName(name)).toBe(true);
+  });
+  test('letters joined by dots stay apart from the word after them', () => {
+    expect(isCompanyName('A.B.CONSTRUCTION')).toBe(true);
+    expect(isCompanyName('TESTER A. J.')).toBe(false);
+    expect(isCompanyName('TESTER ALEX J')).toBe(false);
+  });
+  test('both roles: such a buyer is a company, and such a seller is a builder', () => {
+    expect(buyerKind(['EXAMPLE L.P.'])).toBe('company');
+    expect(candidateFromRow(deed({ to: ['EXAMPLE L.L.P.'] })).candidate.buyerKind).toBe('company');
+    expect(candidateFromRow(deed({ from: ['SAMPLE L.P.'] })).candidate).toMatchObject({ sellerNames: ['SAMPLE L.P.'], buyerKind: 'person' });
+    expect(candidateFromRow(deed({ from: ['SAMPLE L.P.', 'TESTER ROBIN K'] }))).toEqual({ skip: 'person_seller' });
+  });
+});
+
 describe('candidateFromRow', () => {
   test('a builder-to-person deed is a candidate with its buyer kind', () => {
     expect(candidateFromRow(deed())).toEqual({
@@ -207,6 +224,15 @@ describe('runNewHomeList', () => {
   }
   const run = (deps, mode = 'night') => runNewHomeList({ mode, now: () => NOW, deps });
   const person = (n, extra = {}) => deed({ instrument: String(202699100000 + n), description: `LOT ${n} SAMPLE GROVE`, ...extra });
+  // The map's parcel and the store's permit for person(12) ("LOT 12 SAMPLE GROVE"): with these the run saves a live home.
+  const HOME = {
+    parcels: [{
+      parid: '513309059', addressLine1: '101 EXAMPLE TRL', city: 'SAMPLETON', zip: '34212', subdivision: 'SAMPLE GROVE PH 1',
+      lot: '12', block: null, ownerName: 'SAMPLE HOMES LLC', livingSqft: 2100, stories: 2, yearBuilt: null, platKnown: true,
+    }],
+    permits: { 513309059: { permit_no: 'BLD9900-0001', co_date: '2026-10-30', issued_date: '2026-01-05' } },
+  };
+  const LIVE = ['eligible', 'held_back'];
 
   beforeEach(() => jest.clearAllMocks());
 
@@ -279,6 +305,23 @@ describe('runNewHomeList', () => {
     expect(deps.sleep.mock.calls.filter(([ms]) => ms === PARCEL_PAUSE_MS)).toHaveLength(MAX_PARCEL_QUERIES - 1);
   });
 
+  test('the map-query budget goes first to deeds never judged, the oldest day first; a retry waits', async () => {
+    const newest = Array.from({ length: MAX_PARCEL_QUERIES }, (_, i) => person(i + 1)); // recorded 2026-11-17
+    const oldest = [person(501, { date: '2026-11-12' }), person(502, { date: '2026-11-12' })];
+    const retry = person(700); // recorded 2026-11-17, stored as unmatched 21 hours ago: due again
+    const deps = makeDeps({
+      rowsByDay: { '2026-11-17': [retry, ...newest], '2026-11-12': oldest },
+      existing: [{ source_ref: '202699100700', status: 'unmatched', last_checked_at: new Date(NOW - 21 * 3600 * 1000) }],
+    });
+    const summary = await run(deps);
+    const order = deps.saveProspect.mock.calls.map(([row]) => row.source_ref);
+    expect(order.slice(0, 3)).toEqual(['202699100501', '202699100502', '202699100001']);
+    expect(order).toHaveLength(MAX_PARCEL_QUERIES);
+    expect(order).not.toContain('202699100700');
+    // 120 queries: the 2 of the oldest day and 118 of the newest. Left for the next run: 2 new deeds and the retry.
+    expect(summary.skipped.waits_for_next_run).toBe(3);
+  });
+
   test('five map failures in a row stop the queries and leave the rest unsaved', async () => {
     const deps = makeDeps({ rowsByDay: { '2026-11-17': Array.from({ length: 8 }, (_, i) => person(i + 1)) } });
     deps.queryParcels.mockRejectedValue(new Error('map is down'));
@@ -298,9 +341,12 @@ describe('runNewHomeList', () => {
   });
 
   test('a duplicate fallback (the home or its permit is live under another deed) is counted under its own reason', async () => {
-    const deps = makeDeps({ rowsByDay: { '2026-11-17': [person(1)] } });
+    // Only a live home can be refused as a duplicate, so the deed matches a parcel and a permit.
+    const deps = makeDeps({ rowsByDay: { '2026-11-17': [person(12)] }, ...HOME });
     deps.saveProspect.mockResolvedValue('not_eligible');
     const summary = await run(deps);
+    expect(LIVE).toContain(deps.saveProspect.mock.calls[0][0].status);
+    expect(summary.saved).toEqual({ not_eligible: 1 });
     expect(summary.savedByReason).toEqual({ 'not_eligible/duplicate': 1 });
   });
 
@@ -361,6 +407,14 @@ describe('runNewHomeList', () => {
     await expect(run(deps)).rejects.toThrow('Mail new-home list: 2 of 4 days failed (2026-11-16: Error; 2026-11-13: party_cell)');
   });
 
+  test('an unmatched deed that another run settled in the meantime is counted as kept', async () => {
+    const deps = makeDeps({ rowsByDay: { '2026-11-17': [person(1)] } });
+    deps.saveProspect.mockResolvedValue('eligible'); // the store kept the answer it already had
+    const summary = await run(deps);
+    expect(summary.saved).toEqual({ eligible: 1 });
+    expect(summary.savedByReason).toEqual({ 'eligible/kept': 1 });
+  });
+
   test('a failed day throws after the other days were saved, naming the day and the reason', async () => {
     const deps = makeDeps({ rowsByDay: { '2026-11-17': [person(1, { to: ['SAMPLE HOLDINGS LLC'] })] }, failDays: { '2026-11-16': 'http_status' } });
     await expect(run(deps)).rejects.toThrow(/1 of 4 days failed \(2026-11-16: http_status\)/);
@@ -370,11 +424,11 @@ describe('runNewHomeList', () => {
   });
 
   test('the log line is one line of counts: no name, no address', async () => {
-    const parcel = { parid: '513309059', addressLine1: '101 EXAMPLE TRL', city: 'SAMPLETON', zip: '34212', ownerName: 'SAMPLE HOMES LLC' };
-    const deps = makeDeps({
-      rowsByDay: { '2026-11-17': [person(1)] }, parcels: [parcel], permits: { 513309059: { permit_no: 'BLD9900-0001', co_date: null } },
-    });
+    const deps = makeDeps({ rowsByDay: { '2026-11-17': [person(12)] }, ...HOME });
     await run(deps);
+    // The saved row is a live home with its address and names; the line has none of them.
+    expect(deps.saveProspect.mock.calls[0][0]).toMatchObject({ address_line1: '101 EXAMPLE TRL', recipient_names: ['TESTER ALEX J'] });
+    expect(LIVE).toContain(deps.saveProspect.mock.calls[0][0].status);
     expect(logger.info).toHaveBeenCalledTimes(1);
     const line = logger.info.mock.calls[0][0];
     for (const text of NAMES) expect(line).not.toContain(text);

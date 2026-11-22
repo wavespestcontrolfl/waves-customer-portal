@@ -215,10 +215,21 @@ async function upsert(row, conn) {
  * takes a lock on the deed's identity. A second save of the same deed waits for the whole first save, so it can
  * never land between the refused write and the fallback and then be overwritten by that fallback. The first write
  * runs in its own savepoint, so a refusal rolls back only that write.
+ *
+ * `unmatched` is "no answer yet", so it never replaces a row that has an answer (eligible, held_back,
+ * not_eligible): nothing is written and the stored status is returned. Two runs can judge one deed at the same
+ * time, and the one that could not reach the parcel map must not undo the other's result. The stored row is read
+ * under the same lock.
  */
 async function saveProspect(row, conn = db) {
   return conn.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`mail_prospects:${row.list_key}:${row.source}:${row.source_ref}`]);
+    if (row.status === 'unmatched') {
+      const stored = await trx('mail_prospects')
+        .where({ list_key: row.list_key, source: row.source, source_ref: row.source_ref })
+        .first('status');
+      if (stored && stored.status !== 'unmatched') return stored.status;
+    }
     try {
       return await trx.transaction((attempt) => upsert(row, attempt));
     } catch (err) {

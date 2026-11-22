@@ -50,7 +50,12 @@ const TRUST_WORDS = ['TRUST', 'TRUSTEE', 'TRUSTEES', 'TR', 'TRS', 'REVOCABLE', '
 const wordMatcher = (words) => new RegExp(`(?:^| )(?:${words.join('|')})(?: |$)`);
 const COMPANY_RE = wordMatcher(COMPANY_WORDS);
 const TRUST_RE = wordMatcher(TRUST_WORDS);
-const spaced = (name) => String(name || '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
+// Letters joined by dots are one word first ("L.P." is LP, "N.A." is NA, "L.L.C" is LLC): a mark between them
+// would otherwise split a company ending into single letters.
+const spaced = (name) => String(name || '').toUpperCase()
+  .replace(/\b[A-Z](?:\.[A-Z])+\b\.?/g, (letters) => `${letters.replaceAll('.', '')} `)
+  .replace(/[^A-Z0-9]+/g, ' ')
+  .trim();
 
 const isCompanyName = (name) => COMPANY_RE.test(spaced(name));
 const isTrustName = (name) => TRUST_RE.test(spaced(name));
@@ -265,9 +270,14 @@ async function evaluateAndSave(candidates, d, summary) {
       const saved = await d.saveProspect(row);
       state.errorStreak = 0;
       bump(summary.saved, saved);
-      // The store saved another status: the home or its permit is already live under another deed.
-      if (saved !== row.status) bump(summary.savedByReason, `${saved}/duplicate`);
-      else if (row.reason) bump(summary.savedByReason, `${row.status}/${row.reason}`);
+      // The store can keep another status than the one asked for. A live home becomes not_eligible when the
+      // home or its permit is already live under another deed (duplicate). An unmatched deed keeps the answer
+      // another run stored for it in the meantime (kept).
+      if (saved === row.status) {
+        if (row.reason) bump(summary.savedByReason, `${row.status}/${row.reason}`);
+      } else {
+        bump(summary.savedByReason, `${saved}/${row.status === 'unmatched' ? 'kept' : 'duplicate'}`);
+      }
     } catch (err) {
       // One deed that cannot be judged or saved must not stop the deeds after it. It is not saved, so the next
       // run tries it again, and this run throws at its end.
@@ -297,9 +307,12 @@ async function runNewHomeList({ mode = 'night', now = Date.now, deps } = {}) {
     const existing = bySourceRef.get(candidate.instrument);
     const why = whyNotDue(existing, nowMs);
     if (why) bump(summary.skipped, why);
-    else due.push(candidate);
+    else due.push({ candidate, retry: existing ? 1 : 0 });
   }
-  await evaluateAndSave(due, d, summary);
+  // The map-query budget goes first to what cannot wait: a deed never judged before a retry, and an older day
+  // before a newer one (the oldest day is the first to leave the read). The page order stays inside a day.
+  due.sort((a, b) => (a.retry - b.retry) || a.candidate.date.localeCompare(b.candidate.date));
+  await evaluateAndSave(due.map((item) => item.candidate), d, summary);
   logger.info(`Mail new-home list (${mode}): ${JSON.stringify(summary)}`);
   const problems = [];
   if (failures.length) problems.push(`${failures.length} of ${days.length} days failed (${failures.join('; ')})`);

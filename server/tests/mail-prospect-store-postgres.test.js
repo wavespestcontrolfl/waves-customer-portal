@@ -29,7 +29,7 @@ const {
   findBySourceRefs, newHomePermitsForParcels, addressKnownToWaves, saveProspect,
 } = require('../services/mail/prospect-store');
 const { monthsAgoIso } = require('../services/property-lookup/manatee-permit-sync');
-const { runNewHomeList, holdBack, LIST_KEY } = require('../services/mail/new-home-list');
+const { runNewHomeList, daysToRead, holdBack, LIST_KEY } = require('../services/mail/new-home-list');
 
 jest.setTimeout(60000);
 
@@ -142,9 +142,30 @@ postgres('mail prospect store on PostgreSQL', () => {
 
   test('an update clears fields the new read no longer has', async () => {
     await saveProspect(live('202699000001', '5133090590'));
-    await saveProspect(prospect('202699000001'));
+    expect(await saveProspect(prospect('202699000001', { status: 'not_eligible', reason: 'known_address' }))).toBe('not_eligible');
     const [row] = await conn('mail_prospects').select('*');
-    expect(row).toMatchObject({ status: 'unmatched', parcel_pin: null, permit_no: null, address_line1: null });
+    expect(row).toMatchObject({ status: 'not_eligible', reason: 'known_address', parcel_pin: null, permit_no: null, address_line1: null });
+  });
+
+  test('unmatched is "no answer yet": it never replaces a row that has an answer', async () => {
+    await saveProspect(live('202699000001', '5133090590'));
+    await saveProspect(prospect('202699000002', { status: 'not_eligible', reason: 'company_buyer' }));
+    await saveProspect(prospect('202699000003', { reason: 'no_permit' }));
+    await conn('mail_prospects').update({ last_checked_at: '2026-11-01T12:00:00Z' });
+    // A second run that could not reach the map saves "unmatched" for all three.
+    expect(await saveProspect(prospect('202699000001', { reason: 'lookup_failed' }))).toBe('eligible');
+    expect(await saveProspect(prospect('202699000002', { reason: 'lookup_failed' }))).toBe('not_eligible');
+    expect(await saveProspect(prospect('202699000003', { reason: 'lookup_failed' }))).toBe('unmatched');
+    const rows = await conn('mail_prospects').orderBy('source_ref');
+    expect(rows.map((r) => [r.status, r.reason, r.parcel_pin])).toEqual([
+      ['eligible', null, '5133090590'], ['not_eligible', 'company_buyer', null], ['unmatched', 'lookup_failed', null],
+    ]);
+    // The two kept rows were not written at all; the unmatched one was checked again.
+    expect(rows.map((r) => r.last_checked_at.toISOString() === '2026-11-01T12:00:00.000Z')).toEqual([true, true, false]);
+    // Inside a caller's transaction too.
+    await conn.transaction(async (trx) => {
+      expect(await saveProspect(prospect('202699000001'), trx)).toBe('eligible');
+    });
   });
 
   test('a second live row for the same parcel is saved as not_eligible / duplicate_parcel', async () => {
@@ -445,11 +466,13 @@ postgres('mail prospect store on PostgreSQL', () => {
   });
 
   test('the new-home run saves through this store: a new home, a known address and a deed with no parcel', async () => {
-    // Tuesday 2026-11-17, 9:31 PM ET: the night run reads 17, 16, 13 and 12 November.
-    const now = Date.UTC(2026, 10, 18, 2, 31);
+    // One clock for the run and the table (the 20-hour wait compares them): now, and the newest day a night
+    // run reads today.
+    const now = Date.now();
+    const [day] = daysToRead('night', now);
     const deedRow = (lot) => ({
       instrument: String(202699200000 + lot), from: ['SAMPLE HOMES LLC'], to: ['TESTER ALEX J'], type: 'DEED',
-      consideration: 425000, description: `LOT ${lot} SAMPLE GROVE`, date: '2026-11-17',
+      consideration: 425000, description: `LOT ${lot} SAMPLE GROVE`, date: day,
     });
     const mapParcel = (extra = {}) => ({
       parid: '513309059', addressLine1: '101 EXAMPLE TRL', city: 'SAMPLETON', zip: '34212', subdivision: 'SAMPLE GROVE',
@@ -462,7 +485,7 @@ postgres('mail prospect store on PostgreSQL', () => {
       14: [],
     };
     const deps = {
-      fetchDayList: jest.fn(async (day) => ({ rows: day === '2026-11-17' ? [deedRow(12), deedRow(13), deedRow(14)] : [] })),
+      fetchDayList: jest.fn(async (asked) => ({ rows: asked === day ? [deedRow(12), deedRow(13), deedRow(14)] : [] })),
       queryParcels: jest.fn(async (legal) => parcelsByLot[legal.lot]),
       sleep: async () => {},
     };
@@ -488,7 +511,7 @@ postgres('mail prospect store on PostgreSQL', () => {
       match_basis: 'owner_permit', parcel_pin: '513309059', permit_no: 'BLD9900-0040', co_date: dateAgo(15),
       address_line1: '101 EXAMPLE TRL', city: 'SAMPLETON', state: 'FL', zip: '34212', subdivision: 'SAMPLE GROVE',
       living_sqft: 2100, stories: 2, year_built: 2026, legal_description: 'LOT 12 SAMPLE GROVE',
-      recipient_names: ['TESTER ALEX J'], recorded_date: '2026-11-17',
+      recipient_names: ['TESTER ALEX J'], recorded_date: day,
     });
     expect(rows[1]).toMatchObject({ parcel_pin: null, permit_no: null, address_line1: null });
 
