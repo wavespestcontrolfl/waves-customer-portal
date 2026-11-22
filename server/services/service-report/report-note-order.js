@@ -15,7 +15,8 @@
  *   wordGoes(word)           may this one word of the note go?
  *   pairGoes(first, second)  do these two words go together, or not at all
  *                            ("no issues", a figure and its unit)?
- *   partGoes(part)           may this whole part of the note go?
+ *   partGoes(part)           may this whole part of the note go? The answer
+ *                            'sentence' means: only with its whole sentence.
  *   names                    the product names the note holds
  * report-own-note.js builds it from the report's own screens (the next PR),
  * so what may go is what no report text may hold. Nothing calls this module
@@ -95,7 +96,10 @@ const PRONOUNS = new Set(['she', 'he', 'they', 'them', 'her', 'his', 'their']);
 // off" may be "You were advised to keep pets off".
 const TREATMENTS = new Set('sprayed treated baited dusted fogged misted trapped poisoned fumigated'.split(' '));
 const FORMS_OF_IS = new Set(['was', 'were', 'is', 'are']);
-const DENIALS = new Set(['not', 'never']);
+// Words that name no one, between a person and what the person did:
+// "customer never personally sprayed outside".
+const DENIALS = new Set(['not', 'never', 'just', 'already', 'ever', 'even']);
+const namesNoOne = (word) => SMALL.has(word) || DENIALS.has(word) || word.endsWith('ly');
 const AND = new Set(['and']);
 // Words that end in "ed" and say no action done ("treated shed sealed gap").
 const NOT_DONE = new Set('shed bed weed seed feed need'.split(' '));
@@ -204,7 +208,8 @@ const readText = (text) => sentencesOf(text).flatMap(({ text: sentence, asks }, 
 // What the text may leave out: `single[i]` for one word of the note, `leans`
 // for a word that goes only when the word it leans on goes, `groups` for
 // words that go together or not at all, `whole` for the parts that may go
-// whole, of which the `conditional` ones go only with their whole sentence.
+// whole, of which the `conditional` ones go only with their whole sentence
+// (a part that opens with a condition, or one the screen answers 'sentence').
 // The report's screens say which words, pairs and parts (`screen`).
 function leaveOutRules({ words, parts }, { wordGoes, pairGoes, partGoes, names }) {
   const note = words.map((entry) => entry.word);
@@ -242,8 +247,9 @@ function leaveOutRules({ words, parts }, { wordGoes, pairGoes, partGoes, names }
   const [whole, conditional] = [new Set(), new Set()];
   parts.forEach((raw, id) => {
     const partWords = words.filter((entry) => entry.part === id).map((entry) => entry.word);
-    if (partWords.length && partGoes(raw)) whole.add(id);
-    if (CONDITIONS.has(partWords.find((word) => !SMALL.has(word) && !CONDITION_LEADS.has(word)))) conditional.add(id);
+    const goes = partWords.length ? partGoes(raw) : false;
+    if (goes) whole.add(id);
+    if (goes === 'sentence' || CONDITIONS.has(partWords.find((word) => !SMALL.has(word) && !CONDITION_LEADS.has(word)))) conditional.add(id);
   });
   // The second word of each group by its first, and each later word by the
   // word before it: see placeInNote.
@@ -320,8 +326,9 @@ function addedActorRefused(added, place, read, sameSentence) {
 //     may be what the first was done to: "inspected damaged traps" is not
 //     "I inspected and damaged traps".
 //   - a form of "is" between a person and a word of treatment (TREATMENTS),
-//     also with a denial between them ("customer never sprayed outside" is
-//     not "You were never sprayed outside").
+//     also with a denial or an adverb between them ("customer never
+//     personally sprayed outside" is not "You were never personally sprayed
+//     outside").
 // `placedAt` is the text word that took each word of the note (-1 = none).
 function addedSmallRefused(textWords, k, place, last, read, placedAt) {
   if (!last) return -1;
@@ -333,7 +340,7 @@ function addedSmallRefused(textWords, k, place, last, read, placedAt) {
   if (sideBySide && before.part === here.part && done(before.word) && done(here.word) && added(AND) >= 0) return added(AND);
   if (!TREATMENTS.has(here.word)) return -1;
   let actor = place - 1;
-  while (actor >= 0 && read.words[actor].part === here.part && (SMALL.has(read.words[actor].word) || DENIALS.has(read.words[actor].word))) actor -= 1;
+  while (actor >= 0 && read.words[actor].part === here.part && namesNoOne(read.words[actor].word)) actor -= 1;
   if (actor < 0 || read.words[actor].part !== here.part || !isActor(read.words[actor].word)) return -1;
   return added(FORMS_OF_IS, placedAt[actor] >= 0 ? placedAt[actor] : last.k);
 }

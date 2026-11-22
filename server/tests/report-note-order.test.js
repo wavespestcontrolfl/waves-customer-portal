@@ -53,6 +53,7 @@ describe('the text may go out', () => {
     ['a form of "is" after a person, before a word that is no treatment', 'cust advised of the treatment', 'You were advised of the treatment.'],
     ['the one never treated stays the one never treated', 'customer was never sprayed outside', 'You were never sprayed outside.'],
     ['the one treated stays the one treated', 'customer was sprayed by a skunk. treated lanai', 'You were sprayed by a skunk. I treated the lanai.'],
+    ['a form of "is" after the customer, with other work later in the part', 'customer not home so sprayed outside only', 'You were not home so sprayed outside only.'],
     ['"I" after a joining word, where the note names no one', 'swept the eaves so treated the lanai', 'I swept the eaves so I treated the lanai.'],
     ['"I" in the part after the one that names a person', 'customer was not home, treated outside', 'You were not home, and I treated outside.'],
     ['a range stays a range, with any dash', 'set 2 - 3 traps in the attic', 'I set 2–3 traps in the attic.'],
@@ -106,6 +107,7 @@ describe('the text is refused', () => {
     ['"and" added between an action and what it was done to', 'inspected damaged traps', 'I inspected and damaged traps.', 'not_in_note', 'and'],
     ['the one never treated made the one who never treated', 'customer was never sprayed outside', 'You never sprayed outside.', 'left_out', 'was'],
     ['a person made the thing treated, past a denial', 'customer never sprayed outside', 'You were never sprayed outside.', 'not_in_note', 'were'],
+    ['a person made the thing treated, past an adverb', 'customer never personally sprayed outside', 'You were never personally sprayed outside.', 'not_in_note', 'were'],
     ['the one treated made the one who treated', 'customer was sprayed outside', 'You sprayed outside.', 'left_out', 'was'],
     ['"and" added between an action and what it was done to, past an article', 'inspected the damaged traps', 'I inspected and damaged traps.', 'not_in_note', 'and'],
     ['a person made the thing treated', 'neighbor sprayed outside', 'The neighbor was sprayed outside.', 'not_in_note', 'was'],
@@ -178,6 +180,17 @@ describe('the text is refused', () => {
 
   test('a word the screens refuse inside a part stays missing: "not paid" must not leave "not" behind', () => {
     expect(rejection('customer not paid treated kitchen', 'You not treated the kitchen.')).toEqual({ reason: 'left_out', words: ['paid'] });
+  });
+
+  test('a part the screen lets go only with its whole sentence', () => {
+    const timed = { wordGoes: (word) => word === 'tomorrow', partGoes: (part) => /tomorrow/.test(part) && 'sentence' };
+    const note = 'will treat outside, weather permitting tomorrow';
+    expect(orderRejection('I will treat outside.', note, timed)).toEqual({ reason: 'left_out', words: ['weather'] });
+    expect(orderRejection('I will treat outside, weather permitting.', note, timed)).toBeNull();
+    // Its sentence stays a plan: the text cannot drop it.
+    expect(orderRejection('I treated the shed.', `treated shed. ${note}`, timed)).toEqual({ reason: 'left_out', words: ['will'] });
+    // Alone in its sentence, the part goes as before.
+    expect(orderRejection('I treated the shed.', 'treated shed. back tomorrow', timed)).toBeNull();
   });
 
   test('a denial, a condition or a person never goes as one word, whatever the screens say', () => {

@@ -96,6 +96,8 @@ describe('the wordings the reader lets stand are refused where the note is writt
     'I treated the patio. Foot traffic can resume on Monday.',
     'Foot traffic can resume on Nov 22.',
     'Foot traffic can resume on the 3rd of December.',
+    'Foot traffic can resume on the 3rd of May.',
+    'Foot traffic can resume on Fri.',
     'Use rose at the back.',
     'For the shed, use bluebird when prompted.',
     'The pass phrase is bluebird.',
@@ -133,6 +135,25 @@ describe('the note a model reads holds no access code', () => {
     expect(noteAsRead('set traps in the garage, by the AC unit. swept eaves')).toBe('[redacted]. swept eaves');
     // A number in the next sentence keeps its mark.
     expect(noteAsRead('side gate open. found 2.5 inch gap')).toBe('[redacted]. found 2.5 inch gap');
+  });
+
+  test('the note is read in one letter form before any screen', async () => {
+    expect(noteAsRead('ｇａｔｅ, bluebird. treated shed')).toBe('[redacted]. treated shed');
+    expect(noteAsRead('ga\u200Bte, bluebird. treated shed')).toBe('[redacted]. treated shed');
+    expect(await refusal('ｇａｔｅ, bluebird. treated shed', 'Bluebird. I treated shed.')).not.toBeNull();
+    expect((await refusal('sprayed ｚｅｎｔｒａｔｈｒｉｎ around the house', 'I sprayed zentrathrin around the house.'))?.reason).toBe('active_ingredient');
+    // A fraction sign stays as written.
+    expect(noteAsRead('applied 1½ oz')).toBe('applied 1½ oz');
+  });
+
+  test('a part with a word of time goes only with its whole sentence', async () => {
+    const note = 'will treat outside, weather permitting tomorrow';
+    expect(await refusal(note, 'I will treat outside.')).toEqual({ reason: 'left_out', words: ['weather'] });
+    await expect(refusal(note, 'I will treat outside, weather permitting.')).resolves.toBeNull();
+    // Alone in its sentence, the part goes as before.
+    await expect(refusal('treated shed. back tomorrow', 'I treated the shed.')).resolves.toBeNull();
+    // "may" is no month without its day.
+    await expect(refusal('found 2 may be more nests', 'I found 2 may be more nests.')).resolves.toBeNull();
   });
 
   test('a condition masked with its sentence takes its work with it', async () => {

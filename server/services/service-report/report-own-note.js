@@ -72,6 +72,15 @@ const CONTACT_LINE_RE = /\b(?:text|call|contact|email|message)\s+(?:or\s+(?:text
 const SIGN_OFF_RE = /\s[-–—]\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\.?$/;
 const REDACTED_RE = /\bredacted\b/i;
 
+// One form for letters and marks, before any screen reads a note: a
+// full-width "ｇａｔｅ" is "gate", and a mark no one sees (zero width, a soft
+// hyphen) is gone. The access mask, the product screens and the order check
+// then read the same letters. A fraction sign and a prime (feet, inches)
+// stay as written: made plain, "1½" would read "11/2".
+const OTHER_FORM_RUN_RE = /[^′″\u00BC-\u00BE\u2150-\u215E]+/gu;
+const oneForm = (text) => String(text || '').replace(/\p{Cf}/gu, '')
+  .replace(OTHER_FORM_RUN_RE, (run) => run.normalize('NFKC')).replace(/\u3002/g, '.');
+
 // The note as the model and the checks read it: access codes never reach a
 // provider and can never be a word of the text. Line breaks stay: a break
 // ends a sentence of the note.
@@ -98,7 +107,7 @@ function maskAccessSentences(note) {
   return showNumberMarks(hideNumberMarks(note).split(/([.;!?\n]+)/)
     .map((piece, i) => (i % 2 === 0 && piece.trim() && withheld(piece) ? maskWhole(piece) : piece)).join(''));
 }
-const noteAsRead = (note) => maskAccessSentences(dollarweedAsOneWord(redactAccessCodes(passPhraseAsOneWord(String(note || '')
+const noteAsRead = (note) => maskAccessSentences(dollarweedAsOneWord(redactAccessCodes(passPhraseAsOneWord(oneForm(note)
   .replace(/[^\S\n]+/g, ' ').replace(/ ?\n[\n ]*/g, '\n').trim()))).replace(CODE_SHAPED_RE, '[redacted]'));
 // The tidied note as stored and screened. A line break stays in, so the
 // shape screen refuses it.
@@ -116,14 +125,16 @@ function ownNoteText(value) {
 // "Foot traffic can resume on Monday.", "... on Nov 22."). A part that opens with an order to
 // the customer ("Use rose at the back."). A pass phrase, and a prompt for one.
 // A word for the office alone.
-const TIME_WORD_RE = /\b(?:minutes?|hours?|days?|weeks?|months?|years?|today|tonight|tomorrow|yesterday|overnight|daily|weekly|monthly|(?:mon|tues|wednes|thurs|fri|satur|sun)days?|mornings?|afternoons?|evenings?|nights?|nightly|noon|midnight)\b/i;
+const TIME_WORD_RE = /\b(?:minutes?|hours?|days?|weeks?|months?|years?|today|tonight|tomorrow|yesterday|overnight|daily|weekly|monthly|(?:mon|tues|wednes|thurs|fri|satur|sun)days?|mon|tues?|wed|thu|thurs?|fri|mornings?|afternoons?|evenings?|nights?|nightly|noon|midnight)\b/i;
 const ORDER_OPENERS = new Set(`use wait keep stay avoid leave make remember try please do call contact enter press open close lock
 vacuum wash mop wipe mow`.split(/\s+/));
 // A calendar date: a month with its day, either way round ("Nov 22", "22nd
-// of November"). "May" counts only before its day: "2 may be more" is no date.
+// of November"). "May" counts only before its day or after "of": "2 may be
+// more" is no date. The short weekdays in TIME_WORD_RE leave out "sat" and
+// "sun": both are plain words.
 const MONTH_SRC = '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
 const DAY_SRC = '\\d{1,2}(?:st|nd|rd|th)?';
-const DATE_RE = new RegExp(`\\b(?:${MONTH_SRC}|may)\\.?\\s+${DAY_SRC}\\b|\\b${DAY_SRC}\\s+(?:of\\s+)?${MONTH_SRC}\\b`, 'i');
+const DATE_RE = new RegExp(`\\b(?:${MONTH_SRC}|may)\\.?\\s+${DAY_SRC}\\b|\\b${DAY_SRC}\\s+(?:of\\s+)?${MONTH_SRC}\\b|\\b${DAY_SRC}\\s+of\\s+may\\b`, 'i');
 function writeTimeRejection(text) {
   const time = TIME_WORD_RE.exec(text) || DATE_RE.exec(text);
   if (time) return { reason: 'time', words: [time[0]] };
@@ -135,14 +146,10 @@ function writeTimeRejection(text) {
   return order ? { reason: 'instruction', words: [order[0]] } : null;
 }
 
-// Letters and marks in one form only: a full-width "ｓａｆｅ" or "？" reads
-// one way to the word screens and another to the order check. A fraction
-// sign and a prime (feet, inches) stay.
-const OWN_FORM_RE = /[′″\u00BC-\u00BE\u2150-\u215E]/g;
-function inOneForm(text) {
-  const rest = text.replace(OWN_FORM_RE, '');
-  return rest === rest.normalize('NFKC') && !/\u3002/.test(rest);
-}
+// A text is in one form already (oneForm), or it is refused: a full-width
+// "ｓａｆｅ" or "？" reads one way to the word screens and another to the
+// order check.
+const inOneForm = (text) => text === oneForm(text);
 
 function shapeRejection(text) {
   if (!text) return { reason: 'empty' };
@@ -177,7 +184,8 @@ function wordRejection(text, { namesProduct, activeIngredients }) {
 //     beside it can be the code.
 //   - Two words go together: a refused pair, a figure with its unit or period.
 //   - A part goes whole when the screens refuse it as a text, when it holds a
-//     removed code, or when it is an order to the customer. Not for the
+//     removed code, or when it is an order to the customer. A part refused
+//     for a word of time goes only with its whole sentence. Not for the
 //     screen that reads how a part opens: "open gap under the sink" is a
 //     finding.
 const GOES_ALONE = new Set(['trade_name', 'active_ingredient', 'time']);
@@ -200,8 +208,13 @@ function whatMayGo(screens, names) {
     pairGoes: (first, second) => REFUSED_PAIRS.includes(`${first} ${second}`)
       || (isCount(first) && !isCount(second) && (PERIOD_RE.test(second) || reasonOf(`${figure(first)} ${second}`) === 'amount')),
     partGoes: (part) => {
+      if (REDACTED_RE.test(part) || orderToCustomer(noteWords(part))) return true;
       const reason = reasonOf(part);
-      return REDACTED_RE.test(part) || (Boolean(reason) && reason !== 'instruction') || orderToCustomer(noteWords(part));
+      if (!reason || reason === 'instruction') return false;
+      // The word of time can go alone, and what else its part says may
+      // qualify the rest ("will treat outside, weather permitting
+      // tomorrow"): the part goes only with its whole sentence.
+      return reason === 'time' ? 'sentence' : true;
     },
     names,
   };
