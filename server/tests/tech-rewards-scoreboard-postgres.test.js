@@ -219,6 +219,22 @@ const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 8
     expect(board.stayBonus).toMatchObject({ dueDate: '2028-04-01', years: 3, estimateCents: null, earningsStart: '2027-04-01' });
   });
 
+  test('a stay bonus milestone a pay run has settled is not the next one, whatever the hire date on file says now', async () => {
+    await seed();
+    // Alpha's hire date on file puts the 1 year anniversary on Dec 1, 2026, ahead of today. An open line and a row that is not
+    // the pay run's own settle nothing.
+    const line = { technician_id: alpha, kind: 'stay_bonus', source_type: 'tech_rewards', earned_week_start: '2026-11-02', amount_cents: 5280 };
+    await db('payroll_pay_lines').insert([
+      { ...line, status: 'open', source_id: `stay_bonus:${alpha}:1` },
+      { ...line, status: 'paid', source_id: `stay_bonus:${beta}:1` },
+    ]);
+    expect((await service.getScoreboard(alpha, { now: NOW })).stayBonus).toMatchObject({ dueDate: '2026-12-01', years: 1 });
+    // the pay run paid the 1 year bonus (from an earlier hire date on file): the board shows the 3 year one
+    await db('payroll_pay_lines').where({ technician_id: alpha, status: 'open' }).update({ status: 'paid' });
+    expect((await service.getScoreboard(alpha, { now: NOW })).stayBonus)
+      .toMatchObject({ dueDate: '2028-12-01', years: 3, rateBps: 400, estimateCents: null, earningsStart: '2027-12-01' });
+  });
+
   test('catch-up pay: lines paid in a later week count on the day they were earned, wages by work week', async () => {
     await seed();
     const [sept] = await db('payroll_checks').where({ technician_id: alpha, week_start: '2026-09-07' }).select('id');

@@ -316,6 +316,22 @@ describe('admin timetracking technician data/auth boundaries', () => {
     }
   });
 
+  // PostgreSQL's date type takes '20261-01-12' and 'infinity'; the pay run cannot work an anniversary out from either.
+  test('POST and PUT refuse a hire date that is not a calendar date, before any write', async () => {
+    for (const hireDate of ['20261-01-12', 'infinity', '2026-02-30', '2026-01-12T00:00:00.000Z', 20260112]) {
+      for (const [handler, req] of [
+        [updateTechnician, { params: { id: 'tech-1' }, body: { hireDate } }],
+        [createTechnician, { body: { name: 'Sample Alpha', employmentStatus: 'prospective', hireDate } }],
+      ]) {
+        const tx = installTransaction([]);
+        const result = await invoke(handler, { ...req, technicianId: 'admin-1' });
+        expect(result.statusCode).toBe(400);
+        expect(result.body.error).toBe('Hire date must be a valid YYYY-MM-DD date');
+        expect(tx.trx).not.toHaveBeenCalled();
+      }
+    }
+  });
+
   test('PUT audits a pay rate change with the old and new rate, in the same transaction', async () => {
     const target = makeChain({ first: rawTechnician });
     const write = makeChain();

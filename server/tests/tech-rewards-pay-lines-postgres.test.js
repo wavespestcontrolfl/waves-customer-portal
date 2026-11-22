@@ -33,7 +33,7 @@ jest.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: jest.fn() }));
 const { randomUUID } = require('node:crypto');
 const express = require('express');
 const router = require('../routes/admin-payroll');
-const { syncTechRewardLines } = require('../services/tech-rewards-pay-lines');
+const { syncTechRewardLines, settledStayKeys } = require('../services/tech-rewards-pay-lines');
 const { techRewardsOwnKey, techRewardsOwnedSql } = require('../services/payroll-pay-lines');
 const { readGross, readStayPay } = require('../services/tech-rewards-scoreboard');
 const { workedWeeks } = require('../services/payroll-runs');
@@ -1626,6 +1626,57 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(await lineOf(alpha)).toMatchObject({ id: first.id, status: 'paid', amount_cents: 5280 });
       expect(checkOf(next, alpha)).not.toHaveProperty('techRewardsCents');
       expect(await notesOf(next.id)).toEqual([]);
+      // the scoreboard asks the same rows which milestones are settled (its own suite covers what it shows)
+      expect(await settledStayKeys(trx, alpha)).toEqual(['1']);
+    });
+
+    // PostgreSQL holds the year 20251 (one key too many in a date box); no calendar code here reads it.
+    it('reads a hire date that is not a calendar date as none: the rest of the run goes on, and every run says so until it is corrected', async () => {
+      const alpha = await stayTech('Sample Alpha', { hire_date: '20251-11-24' });
+      const bravo = await stayTech('Sample Bravo');
+      for (const id of [alpha, bravo]) {
+        await paidWeeks(id);
+        await approvedWeek(id, EARLY_WEEK);
+      }
+      const run = await draft(EARLY_WEEK);
+      expect([run.waiting, run.blocked]).toEqual([[], []]);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(checkOf(run, alpha)).toMatchObject({ grossCents: 88000 });
+      expect(checkOf(run, bravo).techRewardsCents).toBe(5280);
+      const unread = 'Stay bonus for Sample Alpha waits: their hire date on file is not a date the pay run can read, so correct it on their staff profile';
+      expect(await notesOf(run.id)).toEqual([unread]);
+      expect((await syncEventOf(run.id, 'waits')).flatMap((m) => m.waits)).toContainEqual({
+        technician_id: alpha, kind: 'stay_bonus', source_id: null, reason: 'hire_date_invalid', week: null,
+      });
+      // corrected: the note goes with the date, and the next sync writes the bonus
+      await trx('technicians').where({ id: alpha }).update({ hire_date: HIRED });
+      expect(await notesOf(run.id)).toEqual([]);
+      const again = await recompute(run.id);
+      expect(checkOf(again, alpha).techRewardsCents).toBe(5280);
+      expect(await notesOf(run.id)).toEqual([]);
+      // a line that is open when the date turns unreadable comes off, and the run is finalized with the others' lines
+      await trx('technicians').where({ id: alpha }).update({ hire_date: '20251-11-24' });
+      await recompute(run.id);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(await notesOf(run.id)).toEqual([unread]);
+      await finalize(run.id);
+      expect(await lineOf(bravo)).toMatchObject({ status: 'paid', amount_cents: 5280 });
+      // a finalized run is never worked out again, and this wait has no last pay date to state: it shows no note
+      expect(await notesOf(run.id)).toEqual([]);
+    });
+
+    it('holds the gift of a technician whose hire date is not a calendar date too, with its own note and last pay date', async () => {
+      process.env.GATE_TECH_REWARDS_PAY_LINES = 'true';
+      const alpha = await readyTech('Sample Alpha', { hire_date: '20240-01-10' });
+      const bravo = await readyTech('Sample Bravo'); // hired Jan 10, 2024: no stay bonus is dated for this run
+      for (const id of [alpha, bravo]) await approvedWeek(id, GIFT_WEEK);
+      const run = await draft(GIFT_WEEK);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(checkOf(run, bravo).techRewardsCents).toBe(GIFT);
+      const why = 'their hire date on file is not a date the pay run can read, so correct it on their staff profile';
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', why), `Stay bonus for Sample Alpha waits: ${why}`]);
+      await finalize(run.id);
+      expect(await notesOf(run.id)).toEqual([missed('Sample Alpha')]);
     });
 
     it('takes an open line off when its technician has left, or has no hire date on file any more', async () => {

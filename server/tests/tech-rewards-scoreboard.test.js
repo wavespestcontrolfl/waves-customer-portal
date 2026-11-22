@@ -405,6 +405,14 @@ describe('composeScoreboard', () => {
     expect(board.stayBonus).toEqual({ dueDate: '2026-12-01', years: 1, rateBps: 200, estimateCents: 4600, estimate: true, earningsStart: '2025-12-01', earningsEnd: '2026-11-30' });
   });
 
+  test('a milestone a pay run has settled is never the next stay bonus, also after a hire date correction moves its anniversary ahead of today', () => {
+    // the 1-year bonus was paid from the old hire date; the corrected date puts that anniversary on 2026-12-01, ahead of today
+    const corrected = { technician: { id: 'tech-1', name: 'Sample Alpha', hireDate: '2025-12-01' }, priorYearGrossCents: 230000 };
+    expect(composeScoreboard(inputs({ ...corrected, settledStayKeys: ['1'] })).stayBonus)
+      .toEqual({ dueDate: '2028-12-01', years: 3, rateBps: 400, estimateCents: null, estimate: true, earningsStart: '2027-12-01', earningsEnd: '2028-11-30' });
+    expect(composeScoreboard(inputs({ ...corrected, settledStayKeys: ['1', '3', '5'] })).stayBonus).toBeNull();
+  });
+
   test('past the 5-year bonus there is no next stay bonus', () => {
     const board = composeScoreboard(inputs({ technician: { id: 'tech-1', name: 'Sample Alpha', hireDate: '2018-01-01' } }));
     expect(board.stayBonus).toBeNull();

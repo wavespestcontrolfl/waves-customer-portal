@@ -48,7 +48,8 @@
  *
  * READINESS. A sync NEVER blocks a check or holds a run. A technician who cannot get the gift at all is skipped with a reason
  * in the audit event and no note: hired after the gift date. A technician with no hire date on file WAITS until it is entered
- * (no money on a guess), and so does one who has a December gift line this sync did not write (a row added by hand in the
+ * (no money on a guess), and so does one whose hire date on file is not a calendar date (readTech, hire_date_invalid: the
+ * rest of the run goes on), and so does one who has a December gift line this sync did not write (a row added by hand in the
  * database: the automatic gift is never paid beside it), and so does every technician on a run whose pay week is before the
  * last week the gift covers (priceCandidate). A technician who can get it but not on
  * this run WAITS (waitOf): a later check of theirs in the tax year is already final, so
@@ -69,7 +70,8 @@
  * THE STAY BONUS (owner 2026-11-20, plan D2): 2% of the pay of the 12 months before the 1 year hire anniversary, 4% at 3
  * years, 8% at 5 years, each once. It runs through the same sync, with the same recipients, ownership, drafts, waits, notes,
  * void and finalize rules, and the same 60 days. What differs:
- *   - WHICH RUN. Due from the anniversary (stayDueInRun, by the hire date on file; none on file, none due, and no note). No
+ *   - WHICH RUN. Due from the anniversary (stayDueInRun, by the hire date on file; none on file, none due, and no note; one
+ *     on file that is not a calendar date, no anniversary is known, so every run notes it until it is corrected). No
  *     anniversary before FIRST_STAY_DATE has one. The key is the YEARS OF SERVICE ('stay_bonus:<technician id>:1'), not the
  *     date: a hire date corrected while the line is open moves the line, and one corrected after it is paid never pays the
  *     milestone again.
@@ -98,6 +100,7 @@ const {
   payrollPayLinesLive, techRewardsPayLinesLive, techRewardsStayBonusLive, payrollTimeOffLive,
 } = require('../config/feature-gates');
 const { addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
+const { validCalendarDate } = require('../utils/datetime-et');
 
 // payroll-runs.js loads this file, so its helpers are read on first use.
 const payrollRuns = () => require('./payroll-runs');
@@ -236,6 +239,20 @@ const stayNote = (milestone, span, baseCents) => `${milestone.rateBps / 100}% of
  */
 const recipients = (trx) => applyAssignable(trx('technicians').where({ 'technicians.employment_type': 'w2', 'technicians.role': 'technician' }));
 
+// ---- The technician rows
+
+// A technician row as the sync reads it. PostgreSQL's date type holds dates that the calendar code here cannot read: a year
+// past 9999 (one key too many in a date box) and infinity. Such a hire date is read as none (hire_date null) with
+// hire_date_bad true. Nothing is worked out from it, the rest of the run goes on, and the run says so in a note
+// (hire_date_invalid). routes/admin-timetracking.js hireDateError refuses such a date at save; this covers a row from before
+// that check, and one changed in the database.
+const techColumns = (conn) => ['technicians.id', conn.raw("to_char(technicians.hire_date, 'YYYY-MM-DD') as hire_date"),
+  conn.raw('technicians.hire_date IS NOT NULL as hire_on_file')];
+const readTech = ({ hire_on_file: onFile, ...row }) => {
+  const hireDate = validCalendarDate(row.hire_date);
+  return { ...row, hire_date: hireDate, hire_date_bad: Boolean(onFile) && !hireDate };
+};
+
 // ---- Readiness
 
 /**
@@ -323,9 +340,9 @@ const waitOf = async (trx, run, technicianId, span) => (await spanWaitOf(trx, ru
 /** { amountCents, span }, { skip: reason } (no gift for them) or { wait: { reason, week } } (not on this run) for one candidate. */
 async function priceGift(trx, cand, tech, run) {
   if (tech.hire_date && tech.hire_date > decemberGiftDate(Number(cand.key))) return { skip: 'hired_after_gift_date' };
-  // No hire date on file: the run cannot tell whether they were hired by the gift date, and no money goes out on a guess. The
-  // gift waits, with a note, until the date is entered.
-  if (!tech.hire_date) return { wait: { reason: 'hire_date_missing', week: null } };
+  // No hire date on file, or one that is not a calendar date (readTech): the run cannot tell whether they were hired by the
+  // gift date, and no money goes out on a guess. The gift waits, with a note, until the date is entered or corrected.
+  if (!tech.hire_date) return { wait: { reason: tech.hire_date_bad ? 'hire_date_invalid' : 'hire_date_missing', week: null } };
   const span = spanOf(cand.key, run.week_start, tech.hire_date);
   // This run pays a week before the last week the gift covers (an old week paid late; or the gift week's own run, for a
   // technician hired after that week). A line cannot cover days after the week that pays it, and the period is never cut
@@ -380,6 +397,21 @@ const OTHER_LINE = { [GIFT]: 'other_gift_line', [STAY]: 'other_stay_line' };
 
 // ---- Sync
 
+// The Tech Rewards lines that are no longer open (paid or voided). One of them that the sync wrote (ownKeyOf) settles its key:
+// no run reads or writes that line again. One read, for the sync (every technician), for the notes, and for the scoreboard
+// (one technician's stay bonuses, settledStayKeys).
+const closedLines = (conn, where = {}) => conn('payroll_pay_lines').where({ source_type: SOURCE_TYPE, ...where }).whereNot({ status: 'open' })
+  .select('technician_id', 'kind', 'source_type', 'source_id');
+
+/**
+ * The stay bonus milestones a technician is done with, as keys ('1', '3', '5'). No pay run writes one of them again, whatever
+ * the hire date on file says now (loadState, settled), so the scoreboard never shows one as coming
+ * (tech-rewards-scoreboard.js stayBonusBlock). Not behind a gate: a paid line is a fact with the gate off too.
+ */
+async function settledStayKeys(conn, technicianId) {
+  return (await closedLines(conn, { technician_id: technicianId, kind: STAY })).map(ownKeyOf).filter(Boolean).map((own) => own.key);
+}
+
 const lineColumns = (trx) => ['id', 'technician_id', 'kind', 'status', 'amount_cents', 'note', 'counted_check_ids', 'source_type', 'source_id',
   trx.raw("to_char(earned_week_start, 'YYYY-MM-DD') as earned_week_start"),
   trx.raw("to_char(covers_from, 'YYYY-MM-DD') as covers_from"),
@@ -394,6 +426,7 @@ const WAIT_WORDS = {
   no_paycheck: () => 'no paycheck can be worked out for them on this pay run (check their pay rate, and the tax tables for the pay date)',
   later_check_final: () => 'a later paycheck of theirs is already final, so this pay run cannot hold one for them',
   hire_date_missing: () => 'their hire date is not on file, so the pay run cannot tell whether they were hired by the gift date',
+  hire_date_invalid: () => 'their hire date on file is not a date the pay run can read, so correct it on their staff profile',
   pay_week_too_early: (w) => (w.kind === STAY
     ? `the 12 months it is worked out from end in the week of ${dayLabel(w.week)}, and only a pay run for a later week can add it`
     : `this pay run pays an earlier week than the week of ${dayLabel(w.week)}, the last week the gift covers`),
@@ -451,21 +484,21 @@ async function dropRewardLinesOfWeek(trx, weekStart) {
 // of the year read and lock no technician row. With lock the rows are read FOR SHARE, as payroll-family-employee.js
 // familyExemptIds reads them: a change to one of these technicians waits for the pay run's transaction, so a finalize never
 // pays a line the change took away. The stay bonus is looked for in a plain read first; only the locked rows are used after it.
+// A technician whose hire date on file is not a calendar date is read too (readTech): the run notes it.
 async function loadTechs(trx, run, lock, giftDue, openHere) {
-  const columns = ['technicians.id', trx.raw("to_char(technicians.hire_date, 'YYYY-MM-DD') as hire_date")];
   let ids = null;
   if (!giftDue.length) {
     const dated = kindOn(STAY)
-      ? (await recipients(trx).whereNotNull('technicians.hire_date').select(columns))
-        .filter((row) => stayDueInRun(run.pay_date, row.hire_date).length)
+      ? (await recipients(trx).whereNotNull('technicians.hire_date').select(techColumns(trx))).map(readTech)
+        .filter((row) => row.hire_date_bad || stayDueInRun(run.pay_date, row.hire_date).length)
       : [];
     ids = [...new Set([...dated.map((row) => row.id), ...openHere.filter((line) => line.kind === STAY).map((line) => line.technician_id)])];
     if (!ids.length) return [];
   }
-  const query = recipients(trx).orderBy('technicians.id').select(columns);
+  const query = recipients(trx).orderBy('technicians.id').select(techColumns(trx));
   if (ids) query.whereIn('technicians.id', ids);
   if (lock) query.forShare();
-  return query;
+  return (await query).map(readTech);
 }
 
 // Everything this run could write or change: the lines due by its pay date for every technician, plus the open Tech Rewards
@@ -474,8 +507,7 @@ async function loadState(trx, run, lock) {
   const openQuery = trx('payroll_pay_lines').where({ source_type: SOURCE_TYPE, status: 'open' }).select(lineColumns(trx));
   if (lock) openQuery.forUpdate();
   const allOpen = await openQuery;
-  const closed = await trx('payroll_pay_lines').where({ source_type: SOURCE_TYPE }).whereNot({ status: 'open' })
-    .select('technician_id', 'kind', 'source_type', 'source_id');
+  const closed = await closedLines(trx);
   // Only a line whose WHOLE source key is the sync's own (ownKeyOf) is treated as a line the sync wrote. A row with the Tech
   // Rewards source type and any other source id (another technician's key, no year) is a row somebody put in the database by
   // hand. The sync never matches it to a candidate, never changes it, and never writes the line whose key it holds: that
@@ -527,6 +559,8 @@ async function loadState(trx, run, lock) {
     settled,
     handMade,
     foreignKeys,
+    // A hire date on file that is not a calendar date: no anniversary is known, so no stay bonus can be looked for.
+    unreadHire: kindOn(STAY) ? techs.filter((tech) => tech.hire_date_bad).map((tech) => tech.id) : [],
     openBySource: new Map(ownOpen.map((line) => [line.source_id, line])),
   };
 }
@@ -620,12 +654,16 @@ async function syncTechRewardLines(run, trx, { lock = true, actorId = null } = {
     if (done.skip) result.skipped.push({ technicianId: cand.technicianId, kind: cand.kind, reason: done.skip });
     if (done.wait) result.waits.push({ technicianId: cand.technicianId, kind: cand.kind, sourceId, ...done.wait });
   }
+  // No stay bonus can be looked for from a hire date that is not a calendar date. It has no milestone, so no key: the run
+  // notes it at every sync until the date is corrected (waitNotes).
+  for (const technicianId of state.unreadHire) result.waits.push({ technicianId, kind: STAY, sourceId: null, reason: 'hire_date_invalid', week: null });
   await saveWaits(trx, run, result.waits);
   Object.assign(result, { added: ids.added.length, updated: ids.updated.length, removed: ids.removed.length + dropped.length });
   // One event for every sync that examined a gift, also when it changed nothing (a finalize that checked the lines again and
   // found them right): the trail then tells a sync that ran from one that did not. A run that is dated for no gift and holds no
-  // open line examines nothing and writes none, and so does a run whose gifts are all paid.
-  if (examined) {
+  // open line examines nothing and writes none, and so does a run whose gifts are all paid. A hire date the run could not read
+  // is in the event too.
+  if (examined || state.unreadHire.length) {
     await audit(trx, actorId, run, {
       added_line_ids: ids.added, updated_line_ids: ids.updated, removed_line_ids: ids.removed, unchanged_count: unchanged,
       skipped: result.skipped.map((s) => ({ technician_id: s.technicianId, kind: s.kind, reason: s.reason })),
@@ -653,24 +691,27 @@ async function waitNotes(conn, runId) {
     .first('status', 'tech_rewards_waits', conn.raw("to_char(pay_date, 'YYYY-MM-DD') as pay_date"));
   // a stored wait is read only when its kind's gate is on and its whole source key is the sync's own (ownKeyOf)
   const keyOf = (w) => ownKeyOf({ technician_id: w.technician_id, kind: w.kind, source_type: SOURCE_TYPE, source_id: w.source_id });
+  // a stay bonus that could not be looked for (a hire date on file that is not a calendar date) has no milestone and no key
+  const dateless = (w) => w.kind === STAY && w.reason === 'hire_date_invalid' && w.source_id == null;
   const waits = (row && Array.isArray(row.tech_rewards_waits) ? row.tech_rewards_waits : [])
-    .filter((w) => kindOn(w.kind) && KIND_WORDS[w.kind] && WAIT_WORDS[w.reason] && keyOf(w));
+    .filter((w) => kindOn(w.kind) && KIND_WORDS[w.kind] && WAIT_WORDS[w.reason] && (keyOf(w) || dateless(w)));
   if (!waits.length) return [];
   // paid: a line the sync wrote (its whole source key is its own) that is no longer open. A hand-made row that holds the key
   // is not the sync's line, so its technician's note stays.
-  const paid = new Set((await conn('payroll_pay_lines').where({ source_type: SOURCE_TYPE }).whereNot({ status: 'open' })
-    .whereIn('source_id', waits.map((w) => w.source_id)).select('technician_id', 'kind', 'source_type', 'source_id'))
+  const paid = new Set((await closedLines(conn).whereIn('source_id', waits.map((w) => w.source_id).filter(Boolean)))
     .filter((line) => ownKeyOf(line)).map((line) => line.source_id));
   // only for a technician who still gets a line (recipients): one who left since gets none from any run, so nothing waits
   const techs = new Map((await recipients(conn).whereIn('technicians.id', waits.map((w) => w.technician_id))
-    .select('technicians.id', 'technicians.name', conn.raw("to_char(technicians.hire_date, 'YYYY-MM-DD') as hire_date")))
-    .map((tech) => [tech.id, tech]));
+    .select([...techColumns(conn), 'technicians.name']))
+    .map((tech) => [tech.id, readTech(tech)]));
   // { what, limit }: the words for the line and the last pay date that can carry it, or null when no run pays it now (a hire
   // date on file after the gift date; a hire date taken off, so no anniversary is known). A stay bonus also only while THIS
   // run is still dated for the milestone by the hire date on file (stayDueInRun): the reason was saved at the run's latest
   // sync, and a hire date corrected since can move the anniversary out of this run's pay dates. The saved reason is then no
-  // reason of this run any more, so it is not shown beside a deadline of the new date.
+  // reason of this run any more, so it is not shown beside a deadline of the new date. A stay bonus that could not be looked
+  // for has no last pay date: its note shows on a draft only, and only while the date on file is still not a calendar date.
   const told = (w, tech) => {
+    if (dateless(w)) return row.status === 'draft' && tech.hire_date_bad ? { what: KIND_WORDS[STAY], limit: null } : null;
     const { key } = keyOf(w);
     if (w.kind === GIFT) {
       const year = Number(key);
@@ -687,7 +728,7 @@ async function waitNotes(conn, runId) {
     const line = tech && !paid.has(w.source_id) ? told(w, tech) : null;
     if (line) {
       const state = row.status === 'draft' ? `waits: ${WAIT_WORDS[w.reason](w)}` : 'was not on this pay run';
-      notes.push(`${line.what} for ${tech.name} ${state}. Only a pay run dated ${dayLabel(line.limit)} or earlier can add it`);
+      notes.push(`${line.what} for ${tech.name} ${state}${line.limit ? `. Only a pay run dated ${dayLabel(line.limit)} or earlier can add it` : ''}`);
     }
   }
   return notes.sort();
@@ -729,5 +770,6 @@ module.exports = {
   syncTechRewardLines,
   dropRewardLinesOfWeek,
   paidBonusCounting,
+  settledStayKeys,
   waitNotes,
 };
