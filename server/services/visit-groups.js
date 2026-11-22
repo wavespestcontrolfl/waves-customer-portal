@@ -1788,7 +1788,6 @@ async function unitShiftTest(conn, service) {
   const shiftOf = await require('./technician-eligibility').loadTechShifts(conn, {
     technicianIds: [...new Set(members.map((m) => m.technician_id).filter(Boolean).map(String))],
   });
-  const clock = (v) => (v ? String(v).slice(0, 5) : null);
   return (dateStr, windowStart, windowEnd) => {
     const predicted = predictMemberWindows({
       members, primaryId: service.id, visitWindowStart: visit.window_start, requestedStart: windowStart, requestedEnd: windowEnd, newDateStr: dateStr,
@@ -1799,7 +1798,7 @@ async function unitShiftTest(conn, service) {
     }
     // A member the placement leaves where it is does not move, and the mover does not judge it.
     const stays = (m, tg) => dateOnly(m.scheduled_date) === dateStr
-      && clock(m.window_start) === clock(tg.start) && clock(m.window_end) === clock(tg.end);
+      && toMinutes(m.window_start) === toMinutes(tg.start) && toMinutes(m.window_end) === toMinutes(tg.end);
     const landings = predicted.targets
       .map((tg, index) => ({ tg, m: members[index] }))
       .filter(({ tg, m }) => !stays(m, tg))
@@ -2188,14 +2187,16 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           // for none: no technician, or one without set hours). So with the
           // gate on, a first service that will change and whose caller fence
           // names another technician is refused here, before any write; so is
-          // a fence that names another length than a verdict used. The write
-          // can then never pass on a technician or length no verdict judged.
+          // a fence that names another length or other stored hours than a
+          // verdict used (hours compared by value). The write can then never
+          // pass on a technician, length or hours no verdict judged.
           const callerPin = options.expect || {};
           const pinned = (key) => Object.prototype.hasOwnProperty.call(callerPin, key);
           const firstChanges = require('../config/feature-gates').techShiftHoursLive() && landings.some((landing) => String(landing.id) === String(primary.id));
           if ((firstChanges && pinned('technician_id') && String(callerPin.technician_id || '') !== String(primary.technician_id || ''))
             || (Object.prototype.hasOwnProperty.call(shiftJudgedLengths, primary.id)
-              && pinned('estimated_duration_minutes') && (callerPin.estimated_duration_minutes ?? null) !== (primary.estimated_duration_minutes ?? null))) {
+              && ((pinned('estimated_duration_minutes') && (callerPin.estimated_duration_minutes ?? null) !== (primary.estimated_duration_minutes ?? null))
+                || ['window_start', 'window_end'].some((key) => pinned(key) && toMinutes(callerPin[key]) !== toMinutes(primary[key]))))) {
             throw Object.assign(new Error('Cannot reschedule — appointment changed concurrently'), { statusCode: 409, status: 409, isOperational: true, code: 'SLOT_TAKEN' });
           }
         }
@@ -2571,10 +2572,14 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // length it read under the stop lock, and the locks are released since.
     // The member's own write pins that length beside the technician, so a
     // dispatch edit of either that lands in between ends this member's move
-    // as a concurrent change. Not judged (gate off, the office's move, no set
+    // as a concurrent change. It pins the stored hours the plan read too: a
+    // move of the day alone carries them to the new day, and the other
+    // members shift by the first service's stored start. A sibling's fence
+    // has them already; the first service's loses them when the caller sends
+    // a fence of its own. Not judged (gate off, the office's move, no set
     // hours): no key is added.
     const shiftPin = Object.prototype.hasOwnProperty.call(plan.shiftJudgedLengths, target.id)
-      ? { estimated_duration_minutes: plan.shiftJudgedLengths[target.id] } : {};
+      ? { window_start: target.expect.window_start, window_end: target.expect.window_end, estimated_duration_minutes: plan.shiftJudgedLengths[target.id] } : {};
     const primaryExpect = {
       ...(callerFenced ? {} : target.expect),
       visit_id: plan.visitId,
@@ -2713,8 +2718,8 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
                 ? await t('scheduled_services').where({ id: target.id }).forUpdate().first('window_start', 'window_end', 'estimated_duration_minutes', 'service_type', 'scheduled_date')
                 : await t('scheduled_services').where({ id: target.id }).first('window_start', 'window_end', 'estimated_duration_minutes', 'service_type').catch(() => null);
               if (shiftJudged && row) {
-                const clock = (v) => (v ? String(v).slice(0, 5) : null);
-                if (dateOnly(row.scheduled_date) !== newDateStr || clock(row.window_start) !== clock(landed.window_start)) {
+                // The start is compared by value: a caller's "9:00" and the stored "09:00:00" are one start.
+                if (dateOnly(row.scheduled_date) !== newDateStr || toMinutes(row.window_start) !== toMinutes(landed.window_start)) {
                   throw Object.assign(new Error('Job was moved concurrently - the planned slot is stale'), { statusCode: 409, isOperational: true, code: 'ASSIGNMENT_STALE', memberId: target.id });
                 }
                 if (memberOutsideShift(shiftOf, newDateStr, [{

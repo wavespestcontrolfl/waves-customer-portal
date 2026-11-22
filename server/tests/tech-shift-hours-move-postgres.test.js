@@ -344,6 +344,46 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
         expect(await rowOf(stop.b)).toMatchObject(whereSeeded[1]);
       });
 
+      // A caller's own fence drops the plan's fence of the first service. A move of the day alone carries the
+      // stored hours to the new day, so the write pins the hours the verdict used all the same. The edit lands
+      // after the plan and before the first service's own move reads its row (as the mover calls that move).
+      describe('a move of the day alone, with a caller fence', () => {
+        let spy = null;
+        const editBeforeMemberMove = (id, patch) => {
+          const real = SmartRebooker.reschedule;
+          let done = false;
+          spy = jest.spyOn(SmartRebooker, 'reschedule').mockImplementation(async function wrapped(...args) {
+            if (!done && args[0] === id && args[5] && args[5].skipVisitSeam === true) { done = true; await f.db('scheduled_services').where({ id }).update(patch); }
+            return real.apply(this, args);
+          });
+        };
+        const dayOnly = (stop) => move(stop.a, nextDay, null, 'tech', { overlapAdvisory: true, expect: { technician_id: f.ids.technician } });
+        afterEach(() => { if (spy) { spy.mockRestore(); spy = null; } });
+
+        test('no edit: both services move and keep their hours', async () => {
+          const stop = await seedStop();
+          expect((await dayOnly(stop)).visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
+          expect(await stopOf(stop)).toMatchObject([{ day: nextDay, window_start: '09:00:00' }, { day: nextDay, window_start: '10:00:00' }]);
+        });
+
+        test('the first service\'s hours changed after the verdict: the move is refused as a concurrent change, and neither service moves', async () => {
+          const stop = await seedStop();
+          // The verdict was for 09:00 to 10:00. 13:00 to 14:00 is after the 12:00 shift end.
+          editBeforeMemberMove(stop.a, { window_start: '13:00', window_end: '14:00' });
+          await expect(dayOnly(stop)).rejects.toMatchObject({ statusCode: 409 });
+          expect(await rowOf(stop.a)).toMatchObject({ day: f.date, window_start: '13:00:00' });
+          expect(await rowOf(stop.b)).toMatchObject(whereSeeded[1]);
+        });
+
+        test('gate off: the same edit is carried to the new day, as before', async () => {
+          delete process.env.GATE_TECH_SHIFT_HOURS;
+          const stop = await seedStop();
+          editBeforeMemberMove(stop.a, { window_start: '13:00', window_end: '14:00' });
+          await dayOnly(stop).catch(() => null);
+          expect(await rowOf(stop.a)).toMatchObject({ day: nextDay, window_start: '13:00:00' });
+        });
+      });
+
       // A unit that names a technician moves each service on its old technician, then assigns it in a
       // later write of its own. The edit lands on another connection as that assignment begins: after
       // the service's move, before the step's locks (at its first statement, the date's occupancy lock).
