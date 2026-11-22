@@ -3470,8 +3470,10 @@ though termite left the ladder itself) fails the WHOLE report card closed
 — the unseeded-next-visit gap and a just-cancelled plan are
 indistinguishable, so offering the family and advancing past it are each
 wrong in one of those worlds. The same live render (`mode === 'live'`,
-under `GATE_REPORT_CROSS_SELL`, not on a callback report) carries the
-`referral` card from `composeReferralCard` (`services/referral-share.js`):
+under `GATE_REPORT_CROSS_SELL`) carries the `referral` card from
+`composeReferralCard` (`services/referral-share.js`); a callback report
+carries neither card while `GATE_RESERVICE_REPORT_COPY` is on, and with
+that gate off a callback report carries them like any other report:
 the static headline + CTA, and with `GATE_REFERRAL_STEP2` on an `offer`
 string whose amounts come from the live referral settings (the member
 sentence is dropped at the yearly limit; no card at all when the
