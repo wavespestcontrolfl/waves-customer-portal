@@ -2183,14 +2183,19 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           }
           // The first service's own write carries the caller's fence, and that
           // fence wins there over the plan's. A caller that pinned another
-          // technician or length than this verdict read under the lock asks
-          // from a stale view: refused here, before any write, so the write
-          // can never pass on a row the verdict did not judge.
+          // technician than the plan read under the lock asks from a stale
+          // view, and this verdict was for the technician the plan read (or
+          // for none: no technician, or one without set hours). So with the
+          // gate on, a first service that will change and whose caller fence
+          // names another technician is refused here, before any write; so is
+          // a fence that names another length than a verdict used. The write
+          // can then never pass on a technician or length no verdict judged.
           const callerPin = options.expect || {};
           const pinned = (key) => Object.prototype.hasOwnProperty.call(callerPin, key);
-          if (Object.prototype.hasOwnProperty.call(shiftJudgedLengths, primary.id)
-            && ((pinned('technician_id') && String(callerPin.technician_id || '') !== String(primary.technician_id || ''))
-              || (pinned('estimated_duration_minutes') && (callerPin.estimated_duration_minutes ?? null) !== (primary.estimated_duration_minutes ?? null)))) {
+          const firstChanges = require('../config/feature-gates').techShiftHoursLive() && landings.some((landing) => String(landing.id) === String(primary.id));
+          if ((firstChanges && pinned('technician_id') && String(callerPin.technician_id || '') !== String(primary.technician_id || ''))
+            || (Object.prototype.hasOwnProperty.call(shiftJudgedLengths, primary.id)
+              && pinned('estimated_duration_minutes') && (callerPin.estimated_duration_minutes ?? null) !== (primary.estimated_duration_minutes ?? null))) {
             throw Object.assign(new Error('Cannot reschedule — appointment changed concurrently'), { statusCode: 409, status: 409, isOperational: true, code: 'SLOT_TAKEN' });
           }
         }
@@ -2688,6 +2693,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
               // reported failed. The office's own move, a technician without
               // set hours that day, and the gate off take the path below as
               // it was: the destination lock alone and a plain read.
+              // The hours themselves are a point-in-time read with no lock of
+              // their own, as in every shift check (technician-eligibility
+              // shiftExcluding): a change of the hours that lands after this
+              // read leaves the same state as one that lands after the commit.
               const shiftOf = initiatedBy !== 'admin' && require('../config/feature-gates').techShiftHoursLive()
                 ? await require('./technician-eligibility').loadTechShifts(t, { technicianIds: [String(options.technicianId)] }) : null;
               const shiftJudged = !!(shiftOf && shiftOf(options.technicianId, newDateStr));

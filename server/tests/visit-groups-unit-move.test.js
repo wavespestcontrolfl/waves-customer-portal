@@ -1286,7 +1286,8 @@ describe('shift hours: a grouped stop is judged as one unit', () => {
       expect((await unit(fakeRebooker(), '10:00-11:00', 'auto_dispatch', { technicianId: 't9' })).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
     });
 
-    test('the caller\'s own fence on the first service must agree with what the verdict read: another technician or length is a stale request, refused before any write', async () => {
+    test('the caller\'s own fence on the first service must agree with what the plan read: another technician, or another length than a verdict used, is a stale request, refused before any write', async () => {
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
       // A technician's rain-out pins the technician whose request it is. The plan reads t1 under the lock and judges t1's hours.
       db.__script = script({ members: pair() });
       const stale = fakeRebooker();
@@ -1298,14 +1299,32 @@ describe('shift hours: a grouped stop is judged as one unit', () => {
       db.__script = script({ members: pair(), landed: landed('13:00', '14:00') });
       const agrees = fakeRebooker();
       expect((await unit(agrees, '13:00-14:00', 'tech', { expect: { technician_id: 't1', estimated_duration_minutes: null } })).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
-      // No verdict, no check: the office's own move keeps the caller's fence for the write to judge, as before.
+      // The office's own move keeps the caller's fence for the write to judge, as before.
       const office = fakeRebooker();
       expect((await unit(office, '13:00-14:00', 'admin', { expect: { technician_id: 't9' } })).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
       expect(office.reschedule.mock.calls[0][5].expect).toMatchObject({ technician_id: 't9' });
-      // A first service no shift judges (its technician has no set hours): the same.
+      // A first service no shift judged (its technician has no set hours): another technician is still stale, because
+      // no verdict was for that technician. Another length is not: no verdict used a length.
       delete shifts.t1;
+      jest.clearAllMocks(); db.__calls.length = 0;
+      db.__script = script({ members: pair() });
       const unjudged = fakeRebooker();
-      expect((await unit(unjudged, '13:00-14:00', 'tech', { expect: { technician_id: 't9' } })).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+      await expect(unit(unjudged, '13:00-14:00', 'tech', { expect: { technician_id: 't9' } })).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN' });
+      nothingWritten(unjudged);
+      db.__script = script({ members: pair(), landed: landed('13:00', '14:00') });
+      expect((await unit(unjudged, '13:00-14:00', 'tech', { expect: { estimated_duration_minutes: 30 } })).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+      // A first service the move does not change has no write for the fence to ride: not refused.
+      jest.clearAllMocks(); db.__calls.length = 0;
+      const members = pair({ window_start: '13:00', window_end: '14:00' });
+      db.__script = script({ members, landed: [{ id: 'a', scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00', technician_id: 't1' }, { id: 'b', scheduled_date: '2026-08-30', window_start: '13:00', window_end: '14:00', technician_id: 't1' }] });
+      const same = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-08-30', reason: 'weather_rain', initiatedBy: 'tech', options: { expect: { technician_id: 't9' } } }).catch((e) => e);
+      expect(same.code).not.toBe('SLOT_TAKEN');
+      // Gate off: the fence rides the write, as before.
+      delete process.env.GATE_TECH_SHIFT_HOURS;
+      db.__script = script({ members: pair(), landed: landed('13:00', '14:00') });
+      const off = fakeRebooker();
+      expect((await unit(off, '13:00-14:00', 'tech', { expect: { technician_id: 't9' } })).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+      expect(off.reschedule.mock.calls[0][5].expect).toMatchObject({ technician_id: 't9' });
     });
 
     // A unit that names a technician assigns each member in a later write of its own, after the
