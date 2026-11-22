@@ -1,18 +1,21 @@
 /**
- * The Waves Pest Insider's referral line at the time of use
- * (services/pest-insider/referral-line.js): the stored body never names the
- * friend's credit; the sender's copy holds a token that each batch fills from
- * the referral program's live setting, and the owner's copy shows the line as
- * a reader would get it now. Only an issue of the Pest Insider's own type is
- * touched.
+ * The Waves Pest Insider's referral line (services/pest-insider/referral-line.js):
+ * an issue's stored body holds a token for the line's end and never an
+ * amount. A surface with no reader shows the first approved form. The sender
+ * fills the token once per batch from the referral program's live setting,
+ * and the owner's copy is filled by the same rule. Only an issue of the Pest
+ * Insider's own type gets an amount.
  */
 const mockFriendCents = jest.fn();
 const mockWarn = jest.fn();
 jest.mock('../services/referral-engine', () => ({ step2FriendCreditCents: (...args) => mockFriendCents(...args) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), error: jest.fn(), warn: (...args) => mockWarn(...args), debug: jest.fn() }));
 
-const { referralTokenCopy, referralTailSubstitution, referralLineAsOfNow, REFERRAL_TAIL_TOKEN } = require('../services/pest-insider/referral-line');
-const { renderIssue } = require('../services/pest-insider/render');
+const {
+  REFERRAL_TAIL_TOKEN, hasReferralToken, neutralizeIssueTokens,
+  referralTailFor, referralTailSubstitution, referralLineAsOfNow,
+} = require('../services/pest-insider/referral-line');
+const { renderIssue, HOME_TOKEN, HOME_TEXT_TOKEN } = require('../services/pest-insider/render');
 const { POST_URLS } = require('../services/pest-insider/posts');
 
 const ISSUE = renderIssue({
@@ -22,9 +25,12 @@ const ISSUE = renderIssue({
   idItem: { text: 'It raises a generation in about a week.', species: { slug: 'aedes-mosquito', name: 'Aedes Mosquito' } },
 });
 const BODY = { html: ISSUE.html_body, text: ISSUE.text_body };
+const MAILED = `${BODY.html}\n${BODY.text}`;
 const PEST_INSIDER = { id: 'send-1', newsletter_type: 'pest-insider-monthly' };
-const STORED_END = ' — referrals are the nicest compliment we get.';
+const OTHERS = [{ newsletter_type: 'local-weekly-fresh-events' }, { newsletter_type: 'free-form' }, { newsletter_type: null }, {}, null];
+const FIRST_END = ' — referrals are the nicest compliment we get.';
 const AMOUNT_END = (amount) => `. They get a ${amount} credit after their first plan service.`;
+const filled = (part, end) => part.split(REFERRAL_TAIL_TOKEN).join(end);
 
 beforeEach(() => {
   mockFriendCents.mockReset();
@@ -32,108 +38,117 @@ beforeEach(() => {
   mockWarn.mockReset();
 });
 
-describe('referralTokenCopy: the sender\'s copy', () => {
-  test('a Waves Pest Insider issue gets the token in the place of the line\'s end, in both parts, and reads no setting', () => {
-    const { body, token } = referralTokenCopy(PEST_INSIDER, BODY);
-    expect(token).toBe(REFERRAL_TAIL_TOKEN);
-    expect(body.html.split(REFERRAL_TAIL_TOKEN)).toHaveLength(2);
-    expect(body.text.split(REFERRAL_TAIL_TOKEN)).toHaveLength(2);
-    expect(body.html).not.toContain(STORED_END);
-    expect(body.text).not.toContain(STORED_END);
-    // The stored body is not changed, and the copy is the same each time (a resumed send builds the same one).
-    expect(BODY).toEqual({ html: ISSUE.html_body, text: ISSUE.text_body });
-    expect(referralTokenCopy(PEST_INSIDER, BODY)).toEqual({ body, token });
+describe('the token in an issue', () => {
+  test('a rendered issue holds it in both parts; only the exact spelling is the token', () => {
+    expect(hasReferralToken(BODY.html)).toBe(true);
+    expect(hasReferralToken(BODY.text)).toBe(true);
+    for (const not of ['{{ pi-referral-tail }}', '{{PI-REFERRAL-TAIL}}', '{{pi-referral-tail-text}}', '', null, undefined]) expect(hasReferralToken(not)).toBe(false);
+  });
+
+  test('neutralizeIssueTokens gives the first form\'s end and removes the "Your home" tokens, in one call', () => {
+    expect(neutralizeIssueTokens(`a${HOME_TOKEN}b${HOME_TEXT_TOKEN}c${REFERRAL_TAIL_TOKEN}`)).toBe(`abc${FIRST_END}`);
+    expect(neutralizeIssueTokens(BODY.text)).toBe(filled(BODY.text, FIRST_END).split(HOME_TEXT_TOKEN).join(''));
+    expect(neutralizeIssueTokens(null)).toBe('');
     expect(mockFriendCents).not.toHaveBeenCalled();
-  });
-
-  test('an issue with no text part still gets its token', () => {
-    expect(referralTokenCopy(PEST_INSIDER, { html: BODY.html, text: null })).toEqual({
-      body: { html: referralTokenCopy(PEST_INSIDER, BODY).body.html, text: null }, token: REFERRAL_TAIL_TOKEN,
-    });
-  });
-
-  test('an issue whose line was edited by hand gets no token in either part: its words, or its link address in both parts or in one', () => {
-    const words = (part) => part.replace('nicest compliment', 'best compliment');
-    const address = (part) => part.split('/referral/').join('/refer-a-friend/');
-    for (const edited of [
-      { html: words(BODY.html), text: words(BODY.text) },
-      { html: address(BODY.html), text: address(BODY.text) },
-      { html: address(BODY.html), text: BODY.text },
-      { html: BODY.html, text: address(BODY.text) },
-    ]) {
-      expect(referralTokenCopy(PEST_INSIDER, edited)).toEqual({ body: edited, token: null });
-    }
-  });
-
-  test('a token typed into an issue by hand still gets its key, so it is never mailed raw', () => {
-    const typed = { html: `<p>Hello${REFERRAL_TAIL_TOKEN}</p>`, text: 'Hello' };
-    expect(referralTokenCopy(PEST_INSIDER, typed)).toEqual({ body: typed, token: REFERRAL_TAIL_TOKEN });
-  });
-
-  test('another newsletter keeps its body, the same object, even when it holds the very same line', () => {
-    for (const send of [{ newsletter_type: 'local-weekly-fresh-events' }, { newsletter_type: 'free-form' }, { newsletter_type: null }, {}, null]) {
-      const out = referralTokenCopy(send, BODY);
-      expect(out.token).toBeNull();
-      expect(out.body).toBe(BODY);
-    }
   });
 });
 
-describe('referralTailSubstitution: one batch\'s value', () => {
-  test('the value is the amount sentence for the live setting, read once for the batch', async () => {
+describe('referralTailFor: the token\'s value as of now', () => {
+  test('a Waves Pest Insider issue gets the amount end for the live setting', async () => {
     mockFriendCents.mockResolvedValue(5000);
-    expect(await referralTailSubstitution(REFERRAL_TAIL_TOKEN)).toEqual({ [REFERRAL_TAIL_TOKEN]: AMOUNT_END('$50') });
-    expect(mockFriendCents).toHaveBeenCalledTimes(1);
+    expect(await referralTailFor(PEST_INSIDER)).toBe(AMOUNT_END('$50'));
     mockFriendCents.mockResolvedValue(2500);
-    expect(await referralTailSubstitution(REFERRAL_TAIL_TOKEN)).toEqual({ [REFERRAL_TAIL_TOKEN]: AMOUNT_END('$25') });
+    expect(await referralTailFor(PEST_INSIDER)).toBe(AMOUNT_END('$25'));
   });
 
-  test('with no amount (gate off, program paused or setting unreadable: 0) the key is still there, with the stored end', async () => {
-    expect(await referralTailSubstitution(REFERRAL_TAIL_TOKEN)).toEqual({ [REFERRAL_TAIL_TOKEN]: STORED_END });
+  test('with no amount (gate off, program paused or setting unreadable: 0) it gets the first form\'s end', async () => {
+    expect(await referralTailFor(PEST_INSIDER)).toBe(FIRST_END);
+    expect(mockFriendCents).toHaveBeenCalledTimes(1);
   });
 
-  test('a read that throws gives the stored end and one warning: it never stops the batch or the owner\'s copy', async () => {
+  test('a read that throws gives the first form\'s end and one warning: it never stops a batch or the owner\'s copy', async () => {
     mockFriendCents.mockRejectedValue(new Error('settings table gone'));
-    expect(await referralTailSubstitution(REFERRAL_TAIL_TOKEN)).toEqual({ [REFERRAL_TAIL_TOKEN]: STORED_END });
+    expect(await referralTailFor(PEST_INSIDER)).toBe(FIRST_END);
     expect(mockWarn).toHaveBeenCalledTimes(1);
     expect(mockWarn.mock.calls[0][0]).toMatch(/referral line.*settings table gone/);
-    expect(await referralLineAsOfNow(PEST_INSIDER, BODY)).toEqual(BODY);
   });
 
-  test('no token gives no key and reads no setting', async () => {
-    expect(await referralTailSubstitution(null)).toEqual({});
+  test('any other newsletter gets the first form\'s end and reads no setting, whatever the setting holds', async () => {
+    mockFriendCents.mockResolvedValue(5000);
+    for (const send of OTHERS) expect(await referralTailFor(send)).toBe(FIRST_END);
+    expect(mockFriendCents).not.toHaveBeenCalled();
+  });
+});
+
+describe('referralTailSubstitution: one batch\'s key', () => {
+  test('a body that holds the token gives the key, with one read for the batch', async () => {
+    mockFriendCents.mockResolvedValue(5000);
+    expect(await referralTailSubstitution(PEST_INSIDER, MAILED)).toEqual({ [REFERRAL_TAIL_TOKEN]: AMOUNT_END('$50') });
+    expect(mockFriendCents).toHaveBeenCalledTimes(1);
+  });
+
+  test('with no amount the key is still there: a reader gets the first form, never the raw token', async () => {
+    const subs = await referralTailSubstitution(PEST_INSIDER, MAILED);
+    expect(subs).toEqual({ [REFERRAL_TAIL_TOKEN]: FIRST_END });
+    // What the reader reads is what the archive shows.
+    expect(filled(BODY.text, subs[REFERRAL_TAIL_TOKEN]).split(HOME_TEXT_TOKEN).join('')).toBe(neutralizeIssueTokens(BODY.text));
+  });
+
+  test('the token in one part only still gives the key', async () => {
+    expect(await referralTailSubstitution(PEST_INSIDER, `<p>no token</p>\n${BODY.text}`)).toEqual({ [REFERRAL_TAIL_TOKEN]: FIRST_END });
+  });
+
+  test('another newsletter that holds the token gets the key with the first form\'s end, and no read', async () => {
+    mockFriendCents.mockResolvedValue(5000);
+    for (const send of OTHERS) expect(await referralTailSubstitution(send, MAILED)).toEqual({ [REFERRAL_TAIL_TOKEN]: FIRST_END });
     expect(mockFriendCents).not.toHaveBeenCalled();
   });
 
-  test('a reader of the token copy gets exactly the stored body while there is no amount', async () => {
-    const { body, token } = referralTokenCopy(PEST_INSIDER, BODY);
-    const subs = await referralTailSubstitution(token);
-    expect(body.html.split(token).join(subs[token])).toBe(BODY.html);
-    expect(body.text.split(token).join(subs[token])).toBe(BODY.text);
+  test('a body with no token gives no key and reads no setting', async () => {
+    mockFriendCents.mockResolvedValue(5000);
+    expect(await referralTailSubstitution(PEST_INSIDER, neutralizeIssueTokens(MAILED))).toEqual({});
+    expect(await referralTailSubstitution(PEST_INSIDER, 'a {{ pi-referral-tail }} variant')).toEqual({});
+    expect(await referralTailSubstitution(PEST_INSIDER, '')).toEqual({});
+    expect(mockFriendCents).not.toHaveBeenCalled();
   });
 });
 
 describe('referralLineAsOfNow: the owner\'s copy and a test send', () => {
-  test('a Waves Pest Insider issue shows the amount sentence while the setting gives an amount', async () => {
+  test('a Waves Pest Insider issue shows the same words a batch mailed now would get, in both parts', async () => {
     mockFriendCents.mockResolvedValue(5000);
     const now = await referralLineAsOfNow(PEST_INSIDER, BODY);
+    const subs = await referralTailSubstitution(PEST_INSIDER, MAILED);
+    expect(now).toEqual({ html: filled(BODY.html, subs[REFERRAL_TAIL_TOKEN]), text: filled(BODY.text, subs[REFERRAL_TAIL_TOKEN]) });
     expect(now.html).toContain(`>Send them our way</a>${AMOUNT_END('$50')}</p>`);
     expect(now.text).toContain(`Send them our way${AMOUNT_END('$50')}\n`);
-    expect(now.html).not.toContain(STORED_END);
-    expect(now.text).not.toContain(REFERRAL_TAIL_TOKEN);
-    // The same words the batch's readers get.
-    const { body, token } = referralTokenCopy(PEST_INSIDER, BODY);
-    const subs = await referralTailSubstitution(token);
-    expect(now).toEqual({ html: body.html.split(token).join(subs[token]), text: body.text.split(token).join(subs[token]) });
+    for (const part of [now.html, now.text]) expect(part).not.toContain(REFERRAL_TAIL_TOKEN);
+    // The stored body is not changed.
+    expect(BODY).toEqual({ html: ISSUE.html_body, text: ISSUE.text_body });
   });
 
-  test('with no amount it shows the stored line', async () => {
-    expect(await referralLineAsOfNow(PEST_INSIDER, BODY)).toEqual(BODY);
+  test('with no amount it shows the first form', async () => {
+    expect(await referralLineAsOfNow(PEST_INSIDER, BODY)).toEqual({ html: filled(BODY.html, FIRST_END), text: filled(BODY.text, FIRST_END) });
   });
 
-  test('another newsletter keeps its body, the same object, and reads no setting', async () => {
+  test('each part is filled on its own: a copy whose text part is another text (a banner) still gets its HTML line', async () => {
     mockFriendCents.mockResolvedValue(5000);
-    expect(await referralLineAsOfNow({ newsletter_type: 'local-weekly-fresh-events' }, BODY)).toBe(BODY);
+    const now = await referralLineAsOfNow(PEST_INSIDER, { html: BODY.html, text: 'FYI: this issue goes out Thursday.' });
+    expect(now.html).toBe(filled(BODY.html, AMOUNT_END('$50')));
+    expect(now.text).toBe('FYI: this issue goes out Thursday.');
+    const htmlOnly = await referralLineAsOfNow(PEST_INSIDER, { html: BODY.html, text: null });
+    expect(htmlOnly).toEqual({ html: filled(BODY.html, AMOUNT_END('$50')), text: null });
+  });
+
+  test('another newsletter that holds the token shows the first form and reads no setting', async () => {
+    mockFriendCents.mockResolvedValue(5000);
+    expect(await referralLineAsOfNow({ newsletter_type: 'free-form' }, BODY)).toEqual({ html: filled(BODY.html, FIRST_END), text: filled(BODY.text, FIRST_END) });
+    expect(mockFriendCents).not.toHaveBeenCalled();
+  });
+
+  test('bodies with no token come back as given, the same object, with no read', async () => {
+    mockFriendCents.mockResolvedValue(5000);
+    const plain = { html: '<p>Hello</p>', text: 'Hello' };
+    expect(await referralLineAsOfNow(PEST_INSIDER, plain)).toBe(plain);
     expect(mockFriendCents).not.toHaveBeenCalled();
   });
 });

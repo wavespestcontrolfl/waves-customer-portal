@@ -39,7 +39,7 @@ const { sendDateET } = require('./facts');
 const { postUrl } = require('./posts');
 const { validateNewsletterDraft } = require('../newsletter-validator');
 const { neutralizeQuizTokens, pollInIssue, PEST_INSIDER_POLL_IDS } = require('../newsletter-quiz');
-const { neutralizeHomeTokens } = require('./home');
+const { neutralizeIssueTokens } = require('./referral-line');
 
 // The Pest Insider's newsletter type key: the send path, the proof kill
 // switch and the validator's claim rules all key on it.
@@ -56,12 +56,13 @@ const copyFailReason = (copy) => `copy_check_failed: ${copy.problems.map((p) => 
 // is read as its words (the archive's render), not as its token. The "Your
 // home" tokens are removed: the shared body is that block's absence, and each
 // reader's block is checked on its own at send time (render.js homeBlockErrors).
+// The referral line is read in its form with no amount (referral-line.js).
 function sendGateErrors(issue) {
   const { errors } = validateNewsletterDraft({
     subject: issue.subject,
     preview_text: issue.preview,
-    html_body: neutralizeHomeTokens(neutralizeQuizTokens(issue.html_body)),
-    text_body: neutralizeHomeTokens(neutralizeQuizTokens(issue.text_body)),
+    html_body: neutralizeIssueTokens(neutralizeQuizTokens(issue.html_body)),
+    text_body: neutralizeIssueTokens(neutralizeQuizTokens(issue.text_body)),
     newsletter_type: NEWSLETTER_TYPE,
   });
   return errors;

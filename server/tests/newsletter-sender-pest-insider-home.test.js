@@ -480,32 +480,30 @@ describe('sendCampaign: the "Your home" tokens', () => {
 });
 
 describe('sendCampaign: the end of the referral line', () => {
-  const STORED_END = ' — referrals are the nicest compliment we get.';
+  const FIRST_END = ' — referrals are the nicest compliment we get.';
   const AMOUNT_END = '. They get a $50 credit after their first plan service.';
   const mailed = (batch = 0) => mockSendBroadcast.mock.calls[batch][0];
   const three = (over = {}) => ({ send: sendRow(), subscribers: SUBS, deliveries: DELIVERIES, mailbox: { 1: [C1], 3: [C3] }, ...over });
+  const { recordTouchpoint } = require('../services/conversations');
+  const touchpointOf = (customerId) => recordTouchpoint.mock.calls.map((c) => c[0]).find((t) => t.customerId === customerId);
 
-  test('the mailed copy holds the token in the place of the stored end, and every reader gets its key: the stored end while there is no amount', async () => {
+  test('the mailed parts hold the token as stored, and every reader gets its key: the first form while there is no amount', async () => {
     buildDb(three());
     mockLoadHomeFacts.mockResolvedValue(new Map());
 
     await sendCampaign('send-1');
 
-    // The stored body has the line with no token; only the copy that goes to SendGrid has it.
-    expect(ISSUE.html_body).toContain(STORED_END);
-    expect(ISSUE.html_body).not.toContain(REFERRAL_TAIL_TOKEN);
-    for (const part of [mailed().html, mailed().text]) {
+    for (const part of [ISSUE.html_body, ISSUE.text_body, mailed().html, mailed().text]) {
       expect(part.split(REFERRAL_TAIL_TOKEN)).toHaveLength(2);
-      expect(part).not.toContain(STORED_END);
       expect(part).not.toMatch(/\$\s?\d/);
     }
     expect(recipients()).toHaveLength(3);
-    for (const r of recipients()) expect(r.substitutions[REFERRAL_TAIL_TOKEN]).toBe(STORED_END);
+    for (const r of recipients()) expect(r.substitutions[REFERRAL_TAIL_TOKEN]).toBe(FIRST_END);
     // One read for the batch, not one for each reader.
     expect(mockFriendCents).toHaveBeenCalledTimes(1);
   });
 
-  test('with an amount in the live setting, every reader gets the amount sentence, a customer or not', async () => {
+  test('with an amount in the live setting, every reader gets the amount end, a customer or not', async () => {
     buildDb(three());
     mockLoadHomeFacts.mockResolvedValue(new Map());
     mockFriendCents.mockResolvedValue(5000);
@@ -515,7 +513,7 @@ describe('sendCampaign: the end of the referral line', () => {
     for (const r of recipients()) expect(r.substitutions[REFERRAL_TAIL_TOKEN]).toBe(AMOUNT_END);
   });
 
-  test('the setting is read once per batch: a change between two batches applies from the second batch on', async () => {
+  test('the setting is read once per batch: a change between two batches applies from the second batch on, in the mail and in the history', async () => {
     buildDb({ send: sendRow({ segment_filter: MANY_PLAN }), subscribers: MANY, deliveries: MANY_DELIVERIES, mailbox: { 1: [C1], 501: [C_LAST] }, chunks: 2 });
     mockLoadHomeFacts.mockResolvedValue(new Map());
     mockFriendCents.mockResolvedValueOnce(5000).mockResolvedValueOnce(0);
@@ -526,9 +524,14 @@ describe('sendCampaign: the end of the referral line', () => {
     expect(mockFriendCents).toHaveBeenCalledTimes(2);
     expect(recipients(0)).toHaveLength(500);
     for (const r of recipients(0)) expect(r.substitutions[REFERRAL_TAIL_TOKEN]).toBe(AMOUNT_END);
-    expect(recipients(1).map((r) => r.substitutions[REFERRAL_TAIL_TOKEN])).toEqual([STORED_END]);
+    expect(recipients(1).map((r) => r.substitutions[REFERRAL_TAIL_TOKEN])).toEqual([FIRST_END]);
     // The second read comes after the first batch went out.
     expect(mockSendBroadcast.mock.invocationCallOrder[0]).toBeLessThan(mockFriendCents.mock.invocationCallOrder[1]);
+    // Each customer's touchpoint records the offer as that customer's batch was mailed it.
+    expect(touchpointOf(C1).body).toContain(`Send them our way${AMOUNT_END}\nhttps://www.wavespestcontrol.com/referral/`);
+    expect(touchpointOf(C_LAST).body).toContain(`Send them our way${FIRST_END}\nhttps://www.wavespestcontrol.com/referral/`);
+    expect(touchpointOf(C_LAST).body).not.toMatch(/\$\s?\d/);
+    for (const c of [C1, C_LAST]) expect(touchpointOf(c).body).not.toContain('{{pi-');
   });
 
   test('the amount follows the referral program alone: an issue sent with GATE_PEST_INSIDER_AUTO_SEND off states it too', async () => {
@@ -539,38 +542,35 @@ describe('sendCampaign: the end of the referral line', () => {
     await sendCampaign('send-1');
 
     expect(recipients()[0].substitutions[REFERRAL_TAIL_TOKEN]).toBe(AMOUNT_END);
+    expect(touchpointOf(C1).body).toContain(`Send them our way${AMOUNT_END}`);
   });
 
-  test('another newsletter with the very same body is mailed as stored: no token, no key, no read', async () => {
+  test('another newsletter that holds the token gets the first form for every reader, in the mail and in the history, and reads no setting', async () => {
     buildDb(three({ send: sendRow({ newsletter_type: 'free-form', segment_filter: null }) }));
     mockFriendCents.mockResolvedValue(5000);
 
     await sendCampaign('send-1');
 
-    for (const part of [mailed().html, mailed().text]) {
-      expect(part).toContain(STORED_END);
-      expect(part).not.toContain(REFERRAL_TAIL_TOKEN);
-    }
-    for (const r of recipients()) expect(r.substitutions).not.toHaveProperty(REFERRAL_TAIL_TOKEN);
+    for (const r of recipients()) expect(r.substitutions[REFERRAL_TAIL_TOKEN]).toBe(FIRST_END);
+    expect(touchpointOf(C1).body).toContain(`Send them our way${FIRST_END}`);
     expect(mockFriendCents).not.toHaveBeenCalled();
   });
 
-  test.each([
-    ['its words', (part) => part.replace('nicest compliment', 'best compliment'), 'best compliment we get.'],
-    ['its link address in both parts', (part) => part.split('/referral/').join('/refer-a-friend/'), '/refer-a-friend/'],
-  ])('an issue whose line was edited by hand (%s) is mailed as stored: no token, no amount, no key, no read', async (name, edit, kept) => {
-    buildDb(three({ send: sendRow({ html_body: edit(ISSUE.html_body), text_body: edit(ISSUE.text_body) }) }));
+  test('an issue with no token (its line cut, or its end typed in by hand) is mailed as stored: no key, no read, no amount', async () => {
+    const typed = (part) => part.split(REFERRAL_TAIL_TOKEN).join('. Thank you!');
+    buildDb(three({ send: sendRow({ html_body: typed(ISSUE.html_body), text_body: typed(ISSUE.text_body) }) }));
     mockLoadHomeFacts.mockResolvedValue(new Map());
     mockFriendCents.mockResolvedValue(5000);
 
     await sendCampaign('send-1');
 
     for (const part of [mailed().html, mailed().text]) {
-      expect(part).toContain(kept);
-      expect(part).not.toContain(REFERRAL_TAIL_TOKEN);
+      expect(part).toContain('Send them our way');
+      expect(part).toContain('. Thank you!');
       expect(part).not.toMatch(/\$\s?\d/);
     }
     for (const r of recipients()) expect(r.substitutions).not.toHaveProperty(REFERRAL_TAIL_TOKEN);
+    expect(touchpointOf(C1).body).toContain('Send them our way. Thank you!');
     expect(mockFriendCents).not.toHaveBeenCalled();
   });
 });
@@ -584,8 +584,9 @@ describe('every surface without a reader strips both tokens', () => {
     for (const [part, token] of [[ISSUE.html_body, HOME_TOKEN], [ISSUE.text_body, HOME_TEXT_TOKEN]]) {
       expect(part).toContain(token);
       const stripped = stripPersonalizationTokens(part);
-      expect(stripped).not.toContain('{{pi-home');
-      expect(stripped).toBe(neutralizeHomeTokens(part));
+      expect(stripped).not.toContain('{{pi-');
+      // The "Your home" tokens go, and the referral line ends in its form with no amount.
+      expect(stripped).toBe(neutralizeHomeTokens(part).split(REFERRAL_TAIL_TOKEN).join(' — referrals are the nicest compliment we get.'));
     }
     expect(stripPersonalizationTokens(`a ${HOME_TOKEN} b ${HOME_TEXT_TOKEN} {{city}}`)).toBe('a  b  your area');
   });
@@ -627,9 +628,16 @@ describe('every surface without a reader strips both tokens', () => {
     for (const part of [stored.html, stored.text, paid.html, paid.text]) expect(part).not.toContain(REFERRAL_TAIL_TOKEN);
     for (const part of [paid.html, paid.text]) expect(part).not.toContain('nicest compliment');
 
-    // Another newsletter's copy is its stored body.
+    // Another newsletter that holds the token shows the first form, whatever the setting holds.
     db.mockImplementation(() => chain({ first: null, result: [] }));
     const other = await renderSendPreview(sendRow({ status: 'draft', segment_filter: null, newsletter_type: 'free-form' }), 'owner@example.com');
-    expect(other.text).toContain('nicest compliment we get.');
+    expect(other.text).toContain('Send them our way — referrals are the nicest compliment we get.');
+    expect(other.html).not.toContain(REFERRAL_TAIL_TOKEN);
+
+    // An issue with no text part of its own: the FYI copy's text is only its banner, and the HTML line is still filled.
+    db.mockImplementation(() => chain({ first: null, result: [] }));
+    const banner = await renderSendPreview(sendRow({ status: 'draft', segment_filter: null, text_body: 'FYI: this issue goes out Thursday.' }), 'owner@example.com');
+    expect(banner.html).toContain('>Send them our way</a>. They get a $50 credit after their first plan service.</p>');
+    expect(banner.text).toContain('FYI: this issue goes out Thursday.');
   });
 });

@@ -37,7 +37,7 @@ const { selectAudience, SELLABLE_LINES } = require('./newsletter-audience-profil
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { hasQuizToken, buildQuizSubstitutions } = require('./newsletter-quiz');
 const { hasHomeToken, loadHomeFacts } = require('./pest-insider/home');
-const { referralTokenCopy, referralTailSubstitution } = require('./pest-insider/referral-line');
+const { REFERRAL_TAIL_TOKEN, fillReferralTail, referralTailSubstitution } = require('./pest-insider/referral-line');
 const { hasFeedbackToken, ensureFeedbackToken, buildFeedbackSubstitutions } = require('./newsletter-feedback');
 const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds, isFlagshipSend } = require('./newsletter-event-selection');
@@ -1213,13 +1213,10 @@ async function sendCampaign(sendId, opts = {}) {
   // show the footer the broadcast will carry. Local copies only: the
   // persisted html_body stays the operator's content; deterministic, so
   // resumes rebuild identically.
-  // A Waves Pest Insider issue's referral line gets a token for its end in these copies; each
-  // batch fills it from the live setting (pest-insider/referral-line.js).
-  const referral = referralTokenCopy(send, ensureFeedbackToken({
+  const { html: bodyHtml, text: bodyText } = ensureFeedbackToken({
     html: send.html_body || '',
     text: send.text_body,
-  }));
-  const { html: bodyHtml, text: bodyText } = referral.body;
+  });
 
   // Wrap the operator-written body in branded chrome (header + footer
   // + Waves logo). The unsubscribe URL is the SendGrid substitution
@@ -1255,7 +1252,9 @@ async function sendCampaign(sendId, opts = {}) {
   // Neutralize every merge tag: substitution happens inside SendGrid's payload,
   // so the raw body still carries {{greeting-name}}/{{city}}/{{grass-type}} —
   // touchpoints record the neutral form (matches a no-name/no-data subscriber).
-  const touchpointBody = stripPersonalizationTokens(send.text_body || stripHtml(send.html_body));
+  // One token is not neutral there: the end of a Waves Pest Insider issue's referral line can
+  // state a credit, so each batch's touchpoints record the end that batch was mailed (below).
+  const touchpointSource = send.text_body || stripHtml(send.html_body);
 
   // Per-recipient city + grass-type for the {{city}} / {{grass-type}} tokens.
   // Batch-loaded once; resolved per recipient in the substitutions map below.
@@ -1406,7 +1405,10 @@ async function sendCampaign(sendId, opts = {}) {
       // takes this mailbox inside that moment changes nothing a send one second earlier would
       // not have sent: the block states the visit of the customer whose own address it is.
       const homeFacts = homePlanned && pestInsiderAutoSendLive() ? await loadHomeFactsSafe(chunkToSend.map((s) => s.id), send.id) : null;
-      const referralSubs = await referralTailSubstitution(referral.token);
+      // The end of the referral line ({{pi-referral-tail}}, pest-insider/referral-line.js): read
+      // once for this batch, the same for every reader of it, and for its touchpoints.
+      const referralSubs = await referralTailSubstitution(send, quizBody);
+      const touchpointBody = stripPersonalizationTokens(fillReferralTail(touchpointSource, referralSubs[REFERRAL_TAIL_TOKEN]));
       const recipients = chunkToSend.map((s) => {
         const attemptToken = attemptTokenBySub.get(s.id);
         const pctx = s.customer_id ? personalizationByCustomer.get(s.customer_id) : null;

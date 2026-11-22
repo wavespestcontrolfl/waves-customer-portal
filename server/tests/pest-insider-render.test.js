@@ -4,7 +4,7 @@ const {
   homeBlock, homeBlockErrors, homeSubstitutions, HOME_LINE_LABELS, HOME_TOKEN, HOME_TEXT_TOKEN,
   CLOSING_TEXT,
 } = require('../services/pest-insider/render');
-const { REFERRAL_URL, REFERRAL_TAIL_TOKEN, withReferralTail, referralTail } = require('../services/pest-insider/referral-line');
+const { REFERRAL_URL, REFERRAL_TAIL_TOKEN, fillReferralTail, neutralizeIssueTokens, referralTail } = require('../services/pest-insider/referral-line');
 const { neutralizeHomeTokens, hasHomeToken } = require('../services/pest-insider/home');
 const { SPECIES } = require('../services/pest-insider/plan');
 const { cardFor } = require('../services/pest-insider/cards');
@@ -607,99 +607,83 @@ describe('the referral line', () => {
   // The owner's approved words (2026-11-21 "words ok"): the line until the new referral rules are on, and after.
   const TODAY = 'Know a neighbor fighting the same bugs? Send them our way — referrals are the nicest compliment we get.';
   const NEW_50 = 'Know a neighbor fighting the same bugs? Send them our way. They get a $50 credit after their first plan service.';
-  const bodies = (r) => ({ html: r.html_body, text: r.text_body });
+  // The line as an issue stores it: its end is the token.
+  const STORED = `Know a neighbor fighting the same bugs? Send them our way${REFERRAL_TAIL_TOKEN}`;
+  const SIGNOFF_WORDS = 'Catch you next time. — The Waves Team 🌊';
 
-  test('every issue closes with the line and then the sign-off, with no amount and no token in the stored body', () => {
+  test('every issue closes with the line and then the sign-off; its end is the token, once in each part, and the stored body names no amount', () => {
     for (const pollQuizId of [null, PEST_INSIDER_POLL_IDS[0]]) {
       const r = renderIssue({ ...BASE, pollQuizId });
       const closing = closingHtmlOf(r.html_body);
-      expect(wordsOf(closing)).toBe(`${TODAY} Catch you next time. — The Waves Team 🌊`);
-      // The link text is the ask, and it opens the Waves referral page.
+      expect(wordsOf(closing)).toBe(`${STORED} ${SIGNOFF_WORDS}`);
+      // The link's words are the ask, and the link opens the Waves referral page.
       expect(closing).toContain(`href="${REFERRAL_URL}"`);
-      expect(closing).toMatch(/>Send them our way<\/a> — referrals/);
+      expect(closing).toContain(`>Send them our way</a>${REFERRAL_TAIL_TOKEN}</p>`);
       expect(REFERRAL_URL).toBe('https://www.wavespestcontrol.com/referral/');
       expect(r.text_body.endsWith(CLOSING_TEXT)).toBe(true);
-      expect(CLOSING_TEXT).toBe(`${TODAY}\n${REFERRAL_URL}\n\n${SIGNOFF_TEXT}`);
-      // Once in each part, and the archive's copy can never state a credit.
-      expect(r.html_body.split('Know a neighbor')).toHaveLength(2);
-      expect(r.text_body.split('Know a neighbor')).toHaveLength(2);
+      expect(CLOSING_TEXT).toBe(`${STORED}\n${REFERRAL_URL}\n\n${SIGNOFF_TEXT}`);
       for (const part of [r.html_body, r.text_body]) {
-        expect(part).not.toContain(REFERRAL_TAIL_TOKEN);
+        expect(part.split(REFERRAL_TAIL_TOKEN)).toHaveLength(2);
+        expect(part.split('Know a neighbor')).toHaveLength(2);
+        // The archive serves this body for good: it can never state a credit.
         expect(part).not.toMatch(/\$\s?\d/);
         expect(part).not.toMatch(/credit/i);
       }
     }
   });
 
-  test('referralTail gives the amount sentence only for a whole, positive number of cents, in words HTML shows as written', () => {
+  test('a surface with no reader shows the first approved form, with no token left: neutralizeIssueTokens, and the archive\'s stripPersonalizationTokens', () => {
+    const { stripPersonalizationTokens } = require('../services/newsletter-draft');
+    const r = renderIssue({ ...BASE, pollQuizId: PEST_INSIDER_POLL_IDS[0] });
+    const html = neutralizeIssueTokens(r.html_body);
+    const text = neutralizeIssueTokens(r.text_body);
+    expect(wordsOf(closingHtmlOf(html))).toBe(`${TODAY} ${SIGNOFF_WORDS}`);
+    expect(text.endsWith(`${TODAY}\n${REFERRAL_URL}\n\n${SIGNOFF_TEXT}`)).toBe(true);
+    // The "Your home" tokens go in the same call, as before.
+    expect(html).toBe(neutralizeHomeTokens(r.html_body).split(REFERRAL_TAIL_TOKEN).join(' — referrals are the nicest compliment we get.'));
+    for (const part of [html, text, stripPersonalizationTokens(r.html_body), stripPersonalizationTokens(r.text_body)]) {
+      expect(part).not.toContain('{{pi-');
+      expect(part).toContain('referrals are the nicest compliment we get.');
+      expect(part).not.toMatch(/\$\s?\d/);
+    }
+    // Only the exact spelling is the token: a variant stays visible, never hidden behind a clean-looking copy.
+    expect(neutralizeIssueTokens('a {{ pi-referral-tail }} b {{PI-REFERRAL-TAIL}}')).toBe('a {{ pi-referral-tail }} b {{PI-REFERRAL-TAIL}}');
+  });
+
+  test('referralTail gives the amount end only for a whole, positive number of cents, in words HTML shows as written', () => {
     expect(referralTail(5000)).toBe('. They get a $50 credit after their first plan service.');
     expect(referralTail(2500)).toBe('. They get a $25 credit after their first plan service.');
     expect(referralTail(2550)).toBe('. They get a $25.50 credit after their first plan service.');
-    const stored = ' — referrals are the nicest compliment we get.';
-    for (const none of [0, -5000, NaN, null, undefined, '5000', 50.5, Infinity]) expect(referralTail(none)).toBe(stored);
+    const first = ' — referrals are the nicest compliment we get.';
+    for (const none of [0, -5000, NaN, null, undefined, '5000', 50.5, Infinity]) expect(referralTail(none)).toBe(first);
     for (const cents of [0, 2500, 2550, 5000]) expect(escapeHtml(referralTail(cents))).toBe(referralTail(cents));
     // The member is promised nothing: a member at the yearly limit earns no credit.
     expect(referralTail(5000)).not.toMatch(/\byou\b|\byour\b|\bwe\b/i);
   });
 
-  test('withReferralTail puts the amount sentence in a copy of both parts, and the stored end gives the stored body back', () => {
+  test('with the amount end in the place of the token, both parts read as the second approved form, and nothing else changes', () => {
     const r = renderIssue({ ...BASE, pollQuizId: PEST_INSIDER_POLL_IDS[0] });
-    const paid = withReferralTail(bodies(r), referralTail(5000));
-    expect(wordsOf(closingHtmlOf(paid.html))).toBe(`${NEW_50} Catch you next time. — The Waves Team 🌊`);
-    expect(closingHtmlOf(paid.html)).toMatch(/>Send them our way<\/a>\. They get a \$50 credit/);
-    expect(paid.text.endsWith(`${NEW_50}\n${REFERRAL_URL}\n\n${SIGNOFF_TEXT}`)).toBe(true);
-    // Nothing but the line's end changed.
-    expect(paid.html.split('. They get a $50 credit after their first plan service.').join(' — referrals are the nicest compliment we get.')).toBe(r.html_body);
-    expect(paid.text.split('. They get a $50 credit after their first plan service.').join(' — referrals are the nicest compliment we get.')).toBe(r.text_body);
-    expect(withReferralTail(bodies(r), referralTail(0))).toEqual(bodies(r));
-    expect(bodies(r)).toEqual({ html: r.html_body, text: r.text_body });
+    const html = fillReferralTail(r.html_body, referralTail(5000));
+    const text = fillReferralTail(r.text_body, referralTail(5000));
+    expect(wordsOf(closingHtmlOf(html))).toBe(`${NEW_50} ${SIGNOFF_WORDS}`);
+    expect(html).toContain('>Send them our way</a>. They get a $50 credit after their first plan service.</p>');
+    expect(text.endsWith(`${NEW_50}\n${REFERRAL_URL}\n\n${SIGNOFF_TEXT}`)).toBe(true);
+    expect(html.split(referralTail(5000)).join(REFERRAL_TAIL_TOKEN)).toBe(r.html_body);
+    expect(text.split(referralTail(5000)).join(REFERRAL_TAIL_TOKEN)).toBe(r.text_body);
+    // The end for no amount is the first form, exactly as the surfaces with no reader show it.
+    expect(fillReferralTail(r.text_body, referralTail(0))).toBe(r.text_body.split(REFERRAL_TAIL_TOKEN).join(' — referrals are the nicest compliment we get.'));
+    // No tail, or no content: back as given.
+    expect(fillReferralTail(r.html_body, undefined)).toBe(r.html_body);
+    expect(fillReferralTail(null, referralTail(5000))).toBeNull();
+    expect(fillReferralTail(undefined, referralTail(5000))).toBeUndefined();
   });
 
-  test('withReferralTail puts the sender\'s token once in each part, and leaves a body without the line alone', () => {
+  test('the first form passes the send check, and the amount end would not: it never goes in a stored body', () => {
     const r = renderIssue(BASE);
-    const copy = withReferralTail(bodies(r), REFERRAL_TAIL_TOKEN);
-    expect(copy.html.split(REFERRAL_TAIL_TOKEN)).toHaveLength(2);
-    expect(copy.text.split(REFERRAL_TAIL_TOKEN)).toHaveLength(2);
-    expect(copy.html).toContain(`>Send them our way</a>${REFERRAL_TAIL_TOKEN}</p>`);
-    expect(copy.text).toContain(`Send them our way${REFERRAL_TAIL_TOKEN}\n${REFERRAL_URL}\n`);
-    for (const part of [copy.html, copy.text]) expect(part).not.toContain('nicest compliment');
-    // A reader who gets the stored end back gets the stored body.
-    expect(copy.html.split(REFERRAL_TAIL_TOKEN).join(referralTail(0))).toBe(r.html_body);
-    expect(copy.text.split(REFERRAL_TAIL_TOKEN).join(referralTail(0))).toBe(r.text_body);
-    // Another body, and an issue with no text part.
-    expect(withReferralTail({ html: '<p>Know a neighbor? Send them our way.</p>', text: null }, REFERRAL_TAIL_TOKEN)).toEqual({ html: '<p>Know a neighbor? Send them our way.</p>', text: null });
-    const htmlOnly = withReferralTail({ html: r.html_body, text: undefined }, REFERRAL_TAIL_TOKEN);
-    expect(htmlOnly.html).toBe(copy.html);
-    expect(htmlOnly.text).toBeUndefined();
-  });
-
-  // The whole line must stand as rendered, in both parts, or neither part changes: an edited line never gets an amount.
-  const EDITS = {
-    'the end': (part) => part.replace('nicest compliment', 'best compliment'),
-    'the question': (part) => part.replace('Know a neighbor fighting', 'Know a friend fighting'),
-    'the link\'s words': (part) => part.replace('Send them our way', 'Send them to Waves'),
-    'the link\'s address': (part) => part.split('/referral/').join('/refer-a-friend/'),
-  };
-  test.each(Object.keys(EDITS))('a line with %s edited by hand keeps its whole body, in both parts or in one', (name) => {
-    const r = renderIssue(BASE);
-    const edit = EDITS[name];
-    expect(edit(r.html_body)).not.toBe(r.html_body);
-    expect(edit(r.text_body)).not.toBe(r.text_body);
-    for (const body of [
-      { html: edit(r.html_body), text: edit(r.text_body) },
-      { html: edit(r.html_body), text: r.text_body },
-      { html: r.html_body, text: edit(r.text_body) },
-    ]) {
-      expect(withReferralTail(body, REFERRAL_TAIL_TOKEN)).toEqual(body);
-      expect(withReferralTail(body, referralTail(5000))).toEqual(body);
-    }
-  });
-
-  test('the stored line passes the send check, and the amount sentence would not: it never goes in a stored body', () => {
-    const r = renderIssue(BASE);
-    const check = (b) => validateNewsletterDraft({ html_body: neutralizeHomeTokens(b.html), text_body: neutralizeHomeTokens(b.text), subject: r.subject, newsletter_type: 'pest-insider-monthly' }, { recipientCount: 1 }).errors;
-    expect(check(bodies(r))).toEqual([]);
-    expect(check(withReferralTail(bodies(r), referralTail(5000))).join(' ')).toMatch(/dollar amount/);
+    const check = (html, text) => validateNewsletterDraft({ html_body: html, text_body: text, subject: r.subject, newsletter_type: 'pest-insider-monthly' }, { recipientCount: 1 }).errors;
+    expect(check(neutralizeIssueTokens(r.html_body), neutralizeIssueTokens(r.text_body))).toEqual([]);
+    const paid = (part) => neutralizeIssueTokens(fillReferralTail(part, referralTail(5000)));
+    expect(check(paid(r.html_body), paid(r.text_body)).join(' ')).toMatch(/dollar amount/);
   });
 });
 

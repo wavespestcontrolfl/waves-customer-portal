@@ -46,9 +46,8 @@
  * No line asks the reader to forward the email: a forwarded copy carries
  * the subscriber's own unsubscribe link, and its page shows their address
  * (pre-push round 11). The referral line stands above the sign-off and links
- * the Waves referral page. The stored body never names an amount: the sender
- * and the owner's copy put the line's amount words in their own copies
- * (referral-line.js).
+ * the Waves referral page. Its end is a token: the stored body never names
+ * an amount, and each surface gives the token its value (referral-line.js).
  *
  * Every piece of text is escaped.
  */
@@ -68,7 +67,7 @@ const { validateNewsletterDraft } = require('../newsletter-validator');
 const { PEST_INSIDER_TYPE } = require('../../config/newsletter-types');
 const { etDateString } = require('../../utils/datetime-et');
 const { HOME_TOKEN, HOME_TEXT_TOKEN, hasHomeToken, neutralizeHomeTokens } = require('./home');
-const { REFERRAL_URL, REFERRAL_ASK, REFERRAL_LINK_TEXT, REFERRAL_TAIL } = require('./referral-line');
+const { REFERRAL_URL, REFERRAL_ASK, REFERRAL_LINK_TEXT, REFERRAL_TAIL_TOKEN } = require('./referral-line');
 
 const IDENTIFIER_URL = `${SITE}/pest-identifier/`;
 const POST_LINK_TEXT = 'Read the full story on the Waves blog';
@@ -167,12 +166,11 @@ const SIGNOFF_HTML = `<div class="dm-text">
 </div>`;
 const SIGNOFF_TEXT = `${SIGNOFF_LINE}\n${SIGNOFF_NAME}\n`;
 
-// The referral line (referral-line.js has its words and the reason the
-// stored line names no amount). referral-line.js finds the line's end by the
-// link's close and the paragraph's close in HTML, and by the address on the
-// next line in text: keep those when this changes.
-const REFERRAL_HTML = `<div class="dm-text">\n${paragraph(`${escapeHtml(REFERRAL_ASK)} ${link(REFERRAL_URL, REFERRAL_LINK_TEXT)}${escapeHtml(REFERRAL_TAIL)}`)}\n</div>\n`;
-const REFERRAL_TEXT = `${REFERRAL_ASK} ${REFERRAL_LINK_TEXT}${REFERRAL_TAIL}\n${REFERRAL_URL}\n\n`;
+// The referral line (referral-line.js has its words). Its end is a token in
+// both parts: the stored body never names an amount, and each surface gives
+// the token its value.
+const REFERRAL_HTML = `<div class="dm-text">\n${paragraph(`${escapeHtml(REFERRAL_ASK)} ${link(REFERRAL_URL, REFERRAL_LINK_TEXT)}${REFERRAL_TAIL_TOKEN}`)}\n</div>\n`;
+const REFERRAL_TEXT = `${REFERRAL_ASK} ${REFERRAL_LINK_TEXT}${REFERRAL_TAIL_TOKEN}\n${REFERRAL_URL}\n\n`;
 // What closes every issue: a reader's own block goes in before it.
 const CLOSING_HTML = `${REFERRAL_HTML}${SIGNOFF_HTML}`;
 const CLOSING_TEXT = `${REFERRAL_TEXT}${SIGNOFF_TEXT}`;
