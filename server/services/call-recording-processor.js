@@ -21014,10 +21014,7 @@ const CallRecordingProcessor = {
                       // (dated absences), same check the package helper runs.
                       if (followUpTechId && packageFollowUp) {
                         try {
-                          // `hours` (GATE_TECH_SHIFT_HOURS): visit 2's own block. A shift that does
-                          // not hold it seeds visit 2 unassigned, as a day off does.
-                          await require('./technician-eligibility').assertAssignableTechnician(followUpTechId, { conn: sp, date: fuPlan.scheduledDate, workDays: true,
-                            hours: require('./scheduling/window-rules').rowBlockMinutes({ window_start: fuStart, window_end: fuWindowEnd }) });
+                          await require('./technician-eligibility').assertAssignableTechnician(followUpTechId, { conn: sp, date: fuPlan.scheduledDate, workDays: true });
                         } catch (eligErr) {
                           if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
                           logger.warn(`[call-proc] package visit 2 technician ${followUpTechId} not assignable on ${fuPlan.scheduledDate}; seeding unassigned`);
@@ -21062,6 +21059,16 @@ const CallRecordingProcessor = {
                         window_end: fuWindowEnd,
                         window_display: `${fuH % 12 || 12}:${String(fuM).padStart(2, '0')} ${fuH >= 12 ? 'PM' : 'AM'}`,
                       }, { hourStated: fuPlan.hourStated, packageVisit: packageFollowUp });
+                      // GATE_TECH_SHIFT_HOURS: the child's FINAL block (a copied hour may just
+                      // have moved; rowBlockMinutes takes the later of the window's end and the
+                      // job's length) against its technician's shift. A shift that does not hold
+                      // it seeds the child unassigned, as a day off does for a package visit 2.
+                      // (No technician, or the gate off: shiftExcluding answers null with no read.)
+                      if (await require('./technician-eligibility').shiftExcluding(sp, followUpTechId, fuPlan.scheduledDate,
+                        require('./scheduling/window-rules').rowBlockMinutes({ ...fuWindow, estimated_duration_minutes: fuDurationMin }))) {
+                        logger.warn(`[call-proc] follow-up technician ${followUpTechId} is outside the shift on ${fuPlan.scheduledDate}; seeding unassigned`);
+                        followUpTechId = null;
+                      }
                       const [fuRow] = await sp('scheduled_services')
                         .insert({
                           customer_id: customerId,
@@ -21340,7 +21347,8 @@ const CallRecordingProcessor = {
                     // changed, leave the reused row unassigned rather than assign.
                     let reuseTechId = reuseCandidateTechId;
                     try {
-                      // `hours` (GATE_TECH_SHIFT_HOURS): the reused row's own block. A shift that
+                      // `hours` (GATE_TECH_SHIFT_HOURS): the reused row's own block, as this path
+                      // read it (the availability re-check below reads the same row). A shift that
                       // does not hold it leaves the row unassigned (a windowless row has no block).
                       await assertAssignableTechnician(reuseTechId, { conn: trx, date: dayRow?.day, workDays: true,
                         hours: require('./scheduling/window-rules').rowBlockMinutes(existing) });

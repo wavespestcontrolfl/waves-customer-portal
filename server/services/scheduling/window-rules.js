@@ -193,19 +193,23 @@ function occupancyBlockFor(row) {
 
 // A visit row's own block in MINUTES after midnight: the `hours` of the technician shift check
 // (assertAssignableTechnician and shiftExcluding, technician-eligibility.js). Its end is its start
-// plus `minutes` (a length resolved now) when given, else its stored end, else its start plus its
-// stored length (60 minutes when none). The end is never wrapped or clamped at midnight, so a long
-// job late in the day still ends after it starts: a stored end before the start was wrapped when
-// it was written (16:00 to 00:00) and is the next day's. A start that cannot be read gives nulls,
-// and the shift check then leaves the row to the caller's other checks. occupancyBlockFor above
-// is the clock form for the overlap probes (it clamps at 23:59).
+// plus `minutes` (a length resolved now) when given. Otherwise it is the LATER of its stored end
+// and its start plus its stored length: a writer may store a one-hour window for a longer job, and
+// the job must still end inside the shift. With neither, the job is 60 minutes. The end is never
+// wrapped or clamped at midnight, so a long job late in the day still ends after it starts: a
+// stored end before the start was wrapped when it was written (16:00 to 00:00) and is the next
+// day's. A start that cannot be read gives nulls, and the shift check then leaves the row to the
+// caller's other checks. occupancyBlockFor above is the clock form for the overlap probes (the
+// stored end first; it clamps at 23:59).
 function rowBlockMinutes(row, minutes = null) {
   const startMin = parseHHMM(row?.window_start);
   if (startMin == null) return { startMin: null, endMin: null };
   if (Number(minutes) > 0) return { startMin, endMin: startMin + Number(minutes) };
   const storedEnd = parseHHMM(row?.window_end);
-  if (storedEnd != null) return { startMin, endMin: storedEnd < startMin ? storedEnd + 1440 : storedEnd };
-  return { startMin, endMin: startMin + (Number(row?.estimated_duration_minutes) > 0 ? Number(row.estimated_duration_minutes) : 60) };
+  const windowEnd = storedEnd == null ? 0 : (storedEnd < startMin ? storedEnd + 1440 : storedEnd);
+  const lengthEnd = Number(row?.estimated_duration_minutes) > 0 ? startMin + Number(row.estimated_duration_minutes) : 0;
+  const endMin = Math.max(windowEnd, lengthEnd);
+  return { startMin, endMin: endMin > startMin ? endMin : startMin + 60 };
 }
 
 // Best-effort destination probe for the plan writers' candidate dates: the

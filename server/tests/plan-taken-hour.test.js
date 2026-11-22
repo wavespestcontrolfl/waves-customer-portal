@@ -36,13 +36,16 @@ describe('rowBlockMinutes (a visit row as the shift check reads it)', () => {
   const none = { startMin: null, endMin: null };
   test.each([
     ['its stored window', { window_start: '09:00', window_end: '10:00' }, undefined, { startMin: 540, endMin: 600 }],
-    ['the stored end before the stored length', { window_start: '09:00:00', window_end: '10:30:00', estimated_duration_minutes: 60 }, undefined, { startMin: 540, endMin: 630 }],
+    ['the stored end when it is the later one', { window_start: '09:00:00', window_end: '10:30:00', estimated_duration_minutes: 60 }, undefined, { startMin: 540, endMin: 630 }],
+    ['the stored length when the job runs past the stored end (a one-hour window, a 90-minute job)', { window_start: '16:00', window_end: '17:00', estimated_duration_minutes: 90 }, undefined, { startMin: 960, endMin: 1050 }],
     ['the stored length when there is no end', { window_start: '09:00', window_end: null, estimated_duration_minutes: 90 }, undefined, { startMin: 540, endMin: 630 }],
     ['60 minutes when there is no end and no length', { window_start: '9:00', window_end: null }, undefined, { startMin: 540, endMin: 600 }],
+    ['60 minutes when the stored end is the start and there is no length', { window_start: '23:59', window_end: '23:59' }, undefined, { startMin: 1439, endMin: 1499 }],
     ['a length resolved now, in place of the stored end and length', { window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 }, 150, { startMin: 540, endMin: 690 }],
+    ['a length resolved now, even a shorter one', { window_start: '09:00', window_end: '11:00', estimated_duration_minutes: 120 }, 45, { startMin: 540, endMin: 585 }],
     ['a zero length is no length', { window_start: '09:00', window_end: '10:00' }, 0, { startMin: 540, endMin: 600 }],
     ['a long job late in the day, not wrapped at midnight', { window_start: '16:00', window_end: null, estimated_duration_minutes: 480 }, undefined, { startMin: 960, endMin: 1440 }],
-    ['a stored end that wrapped at midnight, read as the next day', { window_start: '16:00', window_end: '00:00', estimated_duration_minutes: 480 }, undefined, { startMin: 960, endMin: 1440 }],
+    ['a stored end that wrapped at midnight, read as the next day', { window_start: '16:00', window_end: '00:00' }, undefined, { startMin: 960, endMin: 1440 }],
     ['an end past midnight, not clamped', { window_start: '23:30', window_end: null, estimated_duration_minutes: 60 }, undefined, { startMin: 1410, endMin: 1470 }],
     ['no block for a row with no start', { window_start: null, window_end: '10:00' }, undefined, none],
     ['no block for a start that is not a time', { window_start: '25:00', window_end: '10:00' }, 90, none],

@@ -456,20 +456,26 @@ describe('booking conflict wiring (source-level — behavior needs a live DB)', 
     expect(slice).not.toContain('throw ');
   });
 
-  // GATE_TECH_SHIFT_HOURS (D4 part 3b): each automatic technician check of the after-call booking
-  // passes the visit's own block (window-rules rowBlockMinutes), so a shift that does not hold it
-  // ends as every other refusal there does: the visit is written unassigned.
-  test('the three automatic technician checks pass the visit\'s own block as `hours`', () => {
-    const block = "hours: require\\('\\./scheduling/window-rules'\\)\\.rowBlockMinutes";
-    const visit2 = new RegExp(`assertAssignableTechnician\\(followUpTechId, \\{ conn: sp, date: fuPlan\\.scheduledDate, workDays: true,\\s*${block}\\(\\{ window_start: fuStart, window_end: fuWindowEnd \\}\\) \\}\\);`);
-    const reused = new RegExp(`assertAssignableTechnician\\(reuseTechId, \\{ conn: trx, date: dayRow\\?\\.day, workDays: true,\\s*${block}\\(existing\\) \\}\\);`);
-    const created = new RegExp(`assertAssignableTechnician\\(insertData\\.technician_id, \\{ conn: trx, date: String\\(scheduledDate\\)\\.slice\\(0, 10\\), workDays: true,\\s*${block}\\(insertData\\) \\}\\);`);
-    for (const site of [visit2, reused, created]) expect(src).toMatch(site);
-    // No check of the after-call booking is left without it.
-    expect(src.match(/assertAssignableTechnician\([^)]*workDays: true \}\)/g)).toBeNull();
-    // Each refusal there is recovered as unassigned, whatever its reason.
+  // GATE_TECH_SHIFT_HOURS (D4 part 3b): the after-call booking's automatic technician checks read
+  // the visit's own block (window-rules rowBlockMinutes), so a shift that does not hold it ends as
+  // every other refusal there does: the visit is written unassigned.
+  test('the automatic technician checks read the visit\'s own block for the shift', () => {
+    const block = "require\\('\\./scheduling/window-rules'\\)\\.rowBlockMinutes";
+    // A new visit and a reused one: `hours` on the technician check each already makes.
+    const reused = new RegExp(`assertAssignableTechnician\\(reuseTechId, \\{ conn: trx, date: dayRow\\?\\.day, workDays: true,\\s*hours: ${block}\\(existing\\) \\}\\);`);
+    const created = new RegExp(`assertAssignableTechnician\\(insertData\\.technician_id, \\{ conn: trx, date: String\\(scheduledDate\\)\\.slice\\(0, 10\\), workDays: true,\\s*hours: ${block}\\(insertData\\) \\}\\);`);
+    // A follow-up child (a package visit 2 or a follow-up asked for on the call): its FINAL
+    // window, after callFollowUpWindow may have moved a copied hour, with the job's length.
+    const child = new RegExp(`if \\(await require\\('\\./technician-eligibility'\\)\\.shiftExcluding\\(sp, followUpTechId, fuPlan\\.scheduledDate,\\s*${block}\\(\\{ \\.\\.\\.fuWindow, estimated_duration_minutes: fuDurationMin \\}\\)\\)\\) \\{`);
+    for (const site of [reused, created, child]) expect(src).toMatch(site);
+    expect(src.search(/const fuWindow = await require\('\.\/scheduling\/plan-taken-hour'\)\.callFollowUpWindow\(sp,/)).toBeLessThan(src.search(child));
+    expect(src.search(child)).toBeLessThan(src.search(/\.\.\.fuWindow,\n/));
+    // The one technician check left without `hours` is the package visit 2's day check: the
+    // child's block is read right after it, once its window is final.
+    expect(src.match(/assertAssignableTechnician\([^)]*workDays: true \}\)/g)).toEqual([expect.stringContaining('followUpTechId')]);
+    // Each refusal there is recovered as unassigned.
     const after = (site, text) => src.slice(src.search(site)).slice(0, 2200).includes(text);
-    expect(after(visit2, 'followUpTechId = null;')).toBe(true);
+    expect(after(child, 'followUpTechId = null;')).toBe(true);
     expect(after(reused, 'reuseTechId = null;')).toBe(true);
     expect(after(created, 'insertData.technician_id = null;')).toBe(true);
   });
