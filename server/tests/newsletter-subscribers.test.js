@@ -349,6 +349,8 @@ describe('the reader-confirmed stamps are written by the confirm click only', ()
     expect(write.update.status).toBe('active');
     expect(write.update.confirmed_at).toBeInstanceOf(Date);
     expect(stamps(write.update)).toEqual([]);
+    // The promotion flips only a row that is still pending.
+    expect(write.wheres).toContainEqual({ id: 'sub-7', status: 'pending' });
 
     queries = useRecordingDb({ firsts: [{ ...UNSUB_ROW }, { ...UNSUB_ROW, status: 'active' }] });
     expect((await subscribeOrResubscribe({ email: 'reader@example.com', source: 'admin_add', requireConfirmation: false, linkCustomer: false })).action).toBe('resubscribed');
@@ -388,6 +390,65 @@ describe('resend cooldown on a pending row', () => {
     const result = await subscribeOrResubscribe({ ...PUBLIC, publicSignup: false });
     expect(result.action).toBe('confirmation_resent');
     expect(queries.find((r) => r.update).fnWheres).toHaveLength(0);
+  });
+});
+
+// A trusted add reads a pending row; the reader's confirm click lands before the trusted write.
+// An id-only promotion would then write a later confirmed_at over the click and void the proof.
+describe('a trusted add that loses the race to the reader\'s confirm click', () => {
+  const PENDING = { ...UNSUB_ROW, id: 'sub-7', email: 'reader@example.com', status: 'pending', confirmed_at: null, unsubscribed_at: null, confirmation_token: 'pend-tok', confirmation_sent_at: new Date() };
+  const CLICKED = { ...PENDING, status: 'active', confirmed_at: new Date(), reader_confirmed_at: new Date(), reader_confirmed_email: 'reader@example.com' };
+  const add = () => subscribeOrResubscribe({ email: 'reader@example.com', source: 'admin_add', requireConfirmation: false, linkCustomer: false });
+
+  test('the promotion misses, writes nothing, and the add reads the row as the click left it', async () => {
+    // Reads: the pending row, then (re-run) the row the click activated, then that branch's reread.
+    const queries = useRecordingDb({ firsts: [{ ...PENDING }, { ...CLICKED }, { ...CLICKED }], updateCounts: [0] });
+    const result = await add();
+    expect(result.action).toBe('already_active');
+    expect(result.subscriber.reader_confirmed_at).toBe(CLICKED.reader_confirmed_at);
+    // One write was tried, the missed promotion. Nothing wrote confirmed_at after the click.
+    expect(queries).toHaveLength(1);
+    expect(queries[0].wheres).toContainEqual({ id: 'sub-7', status: 'pending' });
+  });
+
+  test('a second miss in a row stops: no third run', async () => {
+    const queries = useRecordingDb({ firsts: [{ ...PENDING }, { ...PENDING }], updateCounts: [0, 0] });
+    expect((await add()).action).toBe('already_pending');
+    expect(queries).toHaveLength(2);
+  });
+});
+
+// The read-only lookup tells the confirm page when an ACTIVE row's link can still record the
+// reader's click (the twin of the proof write's SQL conditions).
+describe('lookupByToken says when an active row\'s link can still record the reader\'s click', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const ago = (ms) => new Date(Date.now() - ms);
+  // A trusted add activated the row one day after the link went out; no click is on record.
+  const PROMOTED = { id: 'sub-8', email: 'reader@example.com', status: 'active', confirmation_token: 'tok', confirmation_sent_at: ago(2 * DAY), confirmed_at: ago(DAY), unsubscribed_at: null, deactivated_at: null, resubscribed_at: null, reader_confirmed_at: null };
+  const look = async (over) => {
+    useRecordingDb({ firsts: [{ ...PROMOTED, ...over }] });
+    return lookupByToken('tok');
+  };
+
+  test('a row a trusted add activated, with its unexpired link and no click on record: confirmable', async () => {
+    expect(await look({})).toMatchObject({ action: 'already_active', confirmable: true });
+    // A click from before the row's current activation does not count for it.
+    expect((await look({ reader_confirmed_at: ago(3 * DAY) })).confirmable).toBe(true);
+  });
+
+  test.each([
+    ['the click is on record for this activation', { reader_confirmed_at: ago(DAY) }],
+    ['a click later than the activation', { reader_confirmed_at: ago(DAY / 2) }],
+    ['the link is past 7 days', { confirmation_sent_at: ago(7 * DAY + 60 * 1000) }],
+    ['no send is on record', { confirmation_sent_at: null }],
+    ['an unreadable send stamp', { confirmation_sent_at: 'not a date' }],
+    ['a comeback after the send (the link is from before an opt-out)', { resubscribed_at: ago(DAY) }],
+    ['an opt-out stamp after the send', { unsubscribed_at: ago(DAY) }],
+    ['a sunset stamp after the send', { deactivated_at: ago(DAY) }],
+    ['an unreadable opt-out stamp', { unsubscribed_at: 'not a date' }],
+    ['a click on record and no confirmed_at', { reader_confirmed_at: ago(DAY), confirmed_at: null }],
+  ])('not confirmable: %s', async (_label, over) => {
+    expect(await look(over)).toMatchObject({ action: 'already_active', confirmable: false });
   });
 });
 

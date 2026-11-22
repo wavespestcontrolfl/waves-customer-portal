@@ -194,15 +194,10 @@ async function subscribeOrResubscribeOnce({
       if (requireConfirmation) {
         return resendPendingConfirmation(existing, { source, firstName, lastName, linkCustomer, lc, conn, throttle: publicSignup });
       }
-      // Trusted-context promotion: flip pending to active.
-      await conn('newsletter_subscribers').where({ id: existing.id }).update({
-        status: 'active',
-        confirmed_at: new Date(),
-        updated_at: new Date(),
-      });
-      if (linkCustomer) await linkToCustomer(lc, conn);
-      const fresh = await conn('newsletter_subscribers').where({ id: existing.id }).first();
-      return { subscriber: fresh, action: 'confirmed' };
+      // Trusted-context promotion: flip pending to active (its own step, promotePendingRow).
+      return promotePendingRow(existing, {
+        email, firstName, lastName, source, strict, linkCustomer, requireConfirmation, publicSignup, promoteWaitlist, lc, dbh,
+      }, retried);
     }
 
     if (existing.status === 'waitlist') {
@@ -279,6 +274,29 @@ async function subscribeOrResubscribeOnce({
     : subscribeOrResubscribeOnce({
       email, firstName, lastName, source, strict, linkCustomer, requireConfirmation, publicSignup, promoteWaitlist, dbh,
     }, { retried: true })));
+}
+
+// An existing 'pending' row met a trusted add (requireConfirmation:false): flip it to active.
+// The flip is a CAS on the pending status. The reader's own confirm click can land between
+// the caller's read and this write, and an id-only update would then write a later
+// confirmed_at over that click. That reads as a trusted re-activation after the click and
+// voids the reader's proof (pest-insider/tool-block.js optedIn). On a miss the row moved
+// first: one re-run against the row as it is now.
+async function promotePendingRow(existing, params, retried) {
+  const { lc, ...signup } = params;
+  const conn = signup.dbh || db;
+  const promoted = await conn('newsletter_subscribers').where({ id: existing.id, status: 'pending' }).update({
+    status: 'active',
+    confirmed_at: new Date(),
+    updated_at: new Date(),
+  });
+  if (!promoted) {
+    if (retried) return { subscriber: existing, action: 'already_pending' };
+    return subscribeOrResubscribeOnce(signup, { retried: true });
+  }
+  if (signup.linkCustomer) await linkToCustomer(lc, conn);
+  const fresh = await conn('newsletter_subscribers').where({ id: existing.id }).first();
+  return { subscriber: fresh, action: 'confirmed' };
 }
 
 // An existing 'pending' row met a requireConfirmation signup: refresh the
@@ -483,7 +501,10 @@ async function applyWaitlistTags(subscriber, rawTags, fields = {}, dbh = null) {
  *   'pending'        — ready to confirm: a 'pending' row, or an
  *                      unsubscribed/inactive row holding a live public
  *                      re-signup token (deferResignupToConfirm)
- *   'already_active' — row was already active (idempotent re-visit)
+ *   'already_active' — row was already active (idempotent re-visit). With
+ *                      `confirmable: true` when the link can still record the
+ *                      reader's click (readerProofOpen): the confirm page then
+ *                      shows its button, and the POST writes the proof only
  *   'unsubscribed'   — unsubscribed/inactive row and a stale link; nothing to do
  *   'expired'        — the link is past CONFIRM_TTL_MS
  *   'not_found'      — token doesn't match any row
@@ -492,7 +513,7 @@ async function lookupByToken(token) {
   if (!token) return { subscriber: null, action: 'not_found' };
   const sub = await db('newsletter_subscribers').where({ confirmation_token: token }).first();
   if (!sub) return { subscriber: null, action: 'not_found' };
-  if (sub.status === 'active') return { subscriber: sub, action: 'already_active' };
+  if (sub.status === 'active') return { subscriber: sub, action: 'already_active', confirmable: readerProofOpen(sub) };
   if (sub.status === 'unsubscribed' || sub.status === 'inactive') {
     // A public re-signup leaves the row as it was and only mints a token
     // (deferResignupToConfirm), so a live token on such a row is confirmable.
@@ -649,11 +670,12 @@ async function confirmByToken(token) {
 }
 
 // The reader's confirm click on a row that is ALREADY active. A trusted add can activate a
-// pending row after the confirmation email went out and before the reader presses the button
-// (or between confirmByToken's lookup and its flip). The page then says "confirmed", and
-// without this write the reader's click would leave no proof (reader_confirmed_*). The proof is
+// pending row after the confirmation email went out and before the reader uses the link (before
+// the page opens, before the button, or between confirmByToken's lookup and its flip). The
+// confirm page shows its button for such a row (lookupByToken `confirmable`), and without this
+// write the reader's click would leave no proof (reader_confirmed_*). The proof is
 // written only when the link is the row's own unexpired signup link, with nothing later that
-// voids it:
+// voids it (whereReaderProofOpen; readerProofOpen is its twin for a row already read):
 // - the token is on the row. An address move rotates it (customer-email-fanout.js), so the
 //   link was delivered to the address the row holds now;
 // - confirmation_sent_at is set and inside CONFIRM_TTL_MS;
@@ -664,19 +686,38 @@ async function confirmByToken(token) {
 //   before confirmed_at).
 // Nothing else changes: status, confirmed_at and every opt-out stamp stay, and the answer
 // stays 'already_active'. The address is LOWER(email) in SQL, as in confirmByToken.
+// The row in the answer is the one this token-guarded UPDATE returns (RETURNING), never a
+// reread by id: an address move can rotate the token between two statements, and the page
+// shows the address, so the answer must hold only a row this token owns.
 async function recordReaderClickOnActiveRow(token, found) {
   const now = new Date();
-  const stamped = await db('newsletter_subscribers')
-    .where({ id: found.subscriber.id, confirmation_token: token, status: 'active' })
+  const [stamped] = await whereReaderProofOpen(
+    db('newsletter_subscribers').where({ id: found.subscriber.id, confirmation_token: token, status: 'active' }),
+  ).update({ reader_confirmed_at: now, reader_confirmed_email: db.raw('LOWER(email)'), updated_at: now }, '*');
+  return stamped ? { subscriber: stamped, action: 'already_active' } : { subscriber: found.subscriber, action: 'already_active' };
+}
+
+function whereReaderProofOpen(query) {
+  return query
     .where('confirmation_sent_at', '>', new Date(Date.now() - CONFIRM_TTL_MS))
     .whereRaw('(unsubscribed_at IS NULL OR confirmation_sent_at > unsubscribed_at)')
     .whereRaw('(deactivated_at IS NULL OR confirmation_sent_at > deactivated_at)')
     .whereRaw('(resubscribed_at IS NULL OR confirmation_sent_at > resubscribed_at)')
-    .whereRaw('(reader_confirmed_at IS NULL OR reader_confirmed_at < confirmed_at)')
-    .update({ reader_confirmed_at: now, reader_confirmed_email: db.raw('LOWER(email)'), updated_at: now });
-  if (!stamped) return found;
-  const fresh = await db('newsletter_subscribers').where({ id: found.subscriber.id }).first();
-  return { subscriber: fresh, action: 'already_active' };
+    .whereRaw('(reader_confirmed_at IS NULL OR reader_confirmed_at < confirmed_at)');
+}
+
+// The twin of whereReaderProofOpen for an ACTIVE row already read (the read-only confirm
+// page): can this row's link still record the reader's click? An unreadable stamp says no.
+function readerProofOpen(sub) {
+  if (!sub || sub.status !== 'active' || !sub.confirmation_sent_at) return false;
+  const ms = (stamp) => new Date(stamp).getTime();
+  const sentMs = ms(sub.confirmation_sent_at);
+  if (!(Date.now() - sentMs < CONFIRM_TTL_MS)) return false;
+  for (const stamp of [sub.unsubscribed_at, sub.deactivated_at, sub.resubscribed_at]) {
+    if (stamp && !(sentMs > ms(stamp))) return false;
+  }
+  if (!sub.reader_confirmed_at) return true;
+  return !!sub.confirmed_at && ms(sub.reader_confirmed_at) < ms(sub.confirmed_at);
 }
 
 // The confirm click for a public re-signup on an unsubscribed/inactive row

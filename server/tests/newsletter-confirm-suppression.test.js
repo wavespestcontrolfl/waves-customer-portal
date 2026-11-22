@@ -409,6 +409,61 @@ describe('transactional callers hand their own connection to the send (source pi
   });
 });
 
+// A trusted add can make a row active before the reader uses the emailed link. The GET page
+// (read-only) then still shows its button, and the button posts to the route that records the click.
+describe('GET /api/public/newsletter/confirm/:token for a row that is already active', () => {
+  const token = '11111111-2222-4333-8444-555555555555';
+  const subs = require('../services/newsletter-subscribers');
+  const ROW = { id: 7, email: 'neighbor@example.com', status: 'active' };
+  async function call(method, headers) {
+    const router = require('../routes/public-newsletter');
+    const app = express();
+    app.use(express.urlencoded({ extended: false }));
+    app.use('/api/public/newsletter', router);
+    const server = app.listen(0);
+    try {
+      const r = await fetch(`http://127.0.0.1:${server.address().port}/api/public/newsletter/confirm/${token}`, { method, headers, body: method === 'POST' ? 'confirm=1' : undefined });
+      return { status: r.status, html: await r.text() };
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  }
+  beforeEach(() => { subs.lookupByToken.mockReset(); subs.confirmByToken.mockReset(); });
+
+  test('the link can still record the click: the page shows the confirm button, and the GET writes nothing', async () => {
+    subs.lookupByToken.mockResolvedValue({ subscriber: ROW, action: 'already_active', confirmable: true });
+    const page = await call('GET');
+    expect(page.status).toBe(200);
+    expect(page.html).toContain(`<form method="POST" action="/api/public/newsletter/confirm/${token}">`);
+    expect(page.html).toContain('Confirm subscription');
+    expect(page.html).not.toContain("You're already in.");
+    expect(subs.confirmByToken).not.toHaveBeenCalled();
+
+    // The button's POST reaches confirmByToken, which records the click, and the reader sees the usual answer.
+    subs.confirmByToken.mockResolvedValue({ subscriber: ROW, action: 'already_active' });
+    const done = await call('POST', { 'content-type': 'application/x-www-form-urlencoded' });
+    expect(subs.confirmByToken).toHaveBeenCalledWith(token);
+    expect(done.html).toContain("You're in!");
+  });
+
+  test('the click is on record, or the link cannot record one: the page says already in and shows no button', async () => {
+    subs.lookupByToken.mockResolvedValue({ subscriber: ROW, action: 'already_active', confirmable: false });
+    const page = await call('GET');
+    expect(page.html).toContain("You're already in.");
+    expect(page.html).not.toContain('<form');
+  });
+
+  test('a GET that fails logs a code, never the failed query text with the token', async () => {
+    const logger = require('../services/logger');
+    logger.error.mockClear();
+    subs.lookupByToken.mockRejectedValue(Object.assign(new Error(`select * from "newsletter_subscribers" where "confirmation_token" = '${token}' - connection terminated`), { code: '57P01' }));
+    expect((await call('GET')).status).toBe(500);
+    const logged = logger.error.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(logged).toContain('confirm GET failed: code=57P01');
+    expect(logged).not.toContain(token);
+  });
+});
+
 // knex puts a failed query's bound values in its error message, and the confirm path binds the
 // confirmation token and the subscriber's address. The route logs a code, not that message.
 describe('POST /api/public/newsletter/confirm/:token that fails', () => {

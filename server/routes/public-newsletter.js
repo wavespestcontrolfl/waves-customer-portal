@@ -604,8 +604,11 @@ function renderConfirmPage(heading, bodyHtml) {
 }
 
 // GET /api/public/newsletter/confirm/:token
-// Read-only — renders a confirm-button form for pending rows; status-
-// appropriate page for already-active / unsubscribed / unknown tokens.
+// Read-only — renders a confirm-button form for pending rows, and for an
+// active row whose link can still record the reader's click (a trusted add
+// made the row active before the reader used the link: lookupByToken
+// `confirmable`); status-appropriate page for every other already-active,
+// unsubscribed or unknown token.
 //
 // Why GET cannot mutate: corporate mail gateways (Defender, Mimecast,
 // Proofpoint, Outlook safe-link rewriting, etc.) routinely pre-fetch
@@ -623,7 +626,7 @@ router.get('/confirm/:token', async (req, res) => {
     const tokenSafe = escapeHtml(req.params.token);
 
     let heading; let bodyHtml;
-    if (result.action === 'pending') {
+    if (result.action === 'pending' || result.confirmable) {
       heading = 'One last click.';
       bodyHtml = `
           <p>Confirm the subscription${email ? ` for <span class="email">${email}</span>` : ''} to start receiving the Waves Newsletter.</p>
@@ -645,7 +648,9 @@ router.get('/confirm/:token', async (req, res) => {
 
     res.type('html').send(renderConfirmPage(heading, bodyHtml));
   } catch (err) {
-    logger.error(`[newsletter] confirm GET failed: ${err.message}`);
+    // A code, not the message: knex puts a failed query's bound values in its message, and the
+    // lookup binds the confirmation token (AGENTS.md: no PII in logs).
+    logger.error(`[newsletter] confirm GET failed: code=${err.code || err.name || 'unknown'}`);
     res.status(500).type('text').send('Something went wrong. Email contact@wavespestcontrol.com if you meant to confirm a subscription.');
   }
 });

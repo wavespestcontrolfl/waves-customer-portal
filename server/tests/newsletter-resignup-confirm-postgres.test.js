@@ -114,9 +114,15 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     const promoted = await reload(pending.id);
     expect(promoted.status).toBe('active');
     expect(promoted.reader_confirmed_at).toBeNull();
+    // The read-only page lookup offers the button, and writes nothing.
+    expect(await svc.lookupByToken(pending.confirmation_token)).toMatchObject({ action: 'already_active', confirmable: true });
+    expect((await reload(pending.id)).reader_confirmed_at).toBeNull();
 
     const clicked = await svc.confirmByToken(pending.confirmation_token);
     expect(clicked.action).toBe('already_active');
+    // The answer's row is the one the write returned.
+    expect(clicked.subscriber.id).toBe(pending.id);
+    expect(clicked.subscriber.reader_confirmed_at).toBeInstanceOf(Date);
     const done = await reload(pending.id);
     expect(clicked.subscriber.reader_confirmed_email).toBe(email.toLowerCase());
     expect(done.reader_confirmed_email).toBe(email.toLowerCase());
@@ -127,7 +133,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     expect(done.unsubscribed_at).toBeNull();
     expect(done.resubscribed_at).toBeNull();
 
-    // A second click writes nothing: the proof keeps its first instant.
+    // A second click writes nothing: the proof keeps its first instant, and the page shows no button.
+    expect((await svc.lookupByToken(pending.confirmation_token)).confirmable).toBe(false);
     expect((await svc.confirmByToken(pending.confirmation_token)).action).toBe('already_active');
     expect((await reload(pending.id)).reader_confirmed_at).toEqual(done.reader_confirmed_at);
   });
@@ -147,11 +154,27 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
       neverSent: await activeRow({ confirmation_sent_at: null }),
     };
     for (const [label, row] of Object.entries(rows)) {
+      // The page lookup (JS) and the write (SQL) agree: no button, and a POST writes nothing.
+      const looked = await svc.lookupByToken(row.confirmation_token);
       const result = await svc.confirmByToken(row.confirmation_token);
       const after = await reload(row.id);
-      expect([label, result.action, after.reader_confirmed_at, after.reader_confirmed_email, after.status])
-        .toEqual([label, 'already_active', null, null, 'active']);
+      expect([label, looked.confirmable, result.action, after.reader_confirmed_at, after.reader_confirmed_email, after.status])
+        .toEqual([label, false, 'already_active', null, null, 'active']);
     }
+  });
+
+  test('a trusted add promotes only a row that is still pending: after the reader\'s click it changes no stamp', async () => {
+    const email = addr();
+    await signup(email);
+    const pending = await db('newsletter_subscribers').where({ email }).first();
+    expect((await svc.confirmByToken(pending.confirmation_token)).action).toBe('confirmed');
+    const clicked = await reload(pending.id);
+    const added = await svc.subscribeOrResubscribe({ email, source: 'admin_add', strict: true, requireConfirmation: false, linkCustomer: false });
+    expect(added.action).toBe('already_active');
+    const after = await reload(pending.id);
+    expect(after.confirmed_at).toEqual(clicked.confirmed_at);
+    expect(after.reader_confirmed_at).toEqual(clicked.reader_confirmed_at);
+    expect(after.reader_confirmed_at.getTime()).toBe(after.confirmed_at.getTime());
   });
 
   test('inactive row: sunset markers and the re-engagement tag survive the submit and go at confirm', async () => {
