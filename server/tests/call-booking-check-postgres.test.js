@@ -165,6 +165,13 @@ maybeDescribe('call booking check (live Postgres)', () => {
     await run();
     // The call is being processed again: its reading is not valid for now.
     await trx('call_log').where({ id: b.callId }).update({ v2_extraction_status: 'schema_failed' });
+    // The office moves the visit meanwhile: the link follows it, and the bell keeps the service the call named.
+    await trx('scheduled_services').where({ id: b.visitId }).update({ scheduled_date: '2026-11-27' });
+    await run(new Date('2026-11-21T22:10:00Z'));
+    const [parked] = await rowsFor(b.visitId);
+    expect(parked.done_at).toBeNull();
+    expect(parked.link).toBe(`/admin/dispatch?tab=schedule&date=2026-11-27&appointment=${b.visitId}`);
+    expect(parked.body).toBe(`Booked as ${plan.name}; the call asked for ${oneTime.name}.`);
     // A reschedule request parks the same visit row until the office books it again.
     await trx('scheduled_services').where({ id: b.visitId }).update({ status: 'rescheduled' });
     await run(new Date('2026-11-21T22:15:00Z'));
@@ -187,6 +194,7 @@ maybeDescribe('call booking check (live Postgres)', () => {
     ['the call was a voice sandbox call', { callOver: { source: 'voice_relay_sandbox' } }],
     ['the call has no valid reading', { callOver: { v2_extraction_status: 'schema_failed' } }],
     ['the reading says the caller asked about a plan', { intent: 'recurring_membership_inquiry' }],
+    ['the reading records the caller\'s choice of a plan\'s billing', { callOver: { ai_extraction_enriched: JSON.stringify({ service_request: { specific_service_name: oneTime.name, service_intent: 'active_infestation_treatment', billing_choice: 'per_application' } }) } }],
     ['a person made the visit from the call', { visitOver: { source_action: 'admin' } }],
     ['the visit is the follow-up of a call booking', { visitOver: { source_action: 'ai_call_pipeline_followup' } }],
     ['the visit is already done', { status: 'completed' }],

@@ -39,6 +39,8 @@ const UNREADABLE = [
   ...[null, 'not json', {}, { service_request: 'text' }].map((stored) => planVisit({ ai_extraction_enriched: stored })),
   ...['Some Service Nobody Sells', 'Shared Name', null].map((name) => heardAs({ specific_service_name: name })),
   planVisit({ row_name: null, row_service_key: null, row_billing_type: null }),
+  // The reading disagrees with itself: a one-time service, and the caller's choice of a plan's billing.
+  ...['annual_prepay', 'per_application'].map((choice) => heardAs({ billing_choice: choice })),
 ];
 
 describe('what a visit and the reading of its call say about the service', () => {
@@ -59,6 +61,8 @@ describe('what a visit and the reading of its call say about the service', () =>
     expect(verdict(visit({ v2_extraction_status: 'schema_failed', ai_extraction_enriched: null }))).toBe('agrees');
     expect(verdict(heardAs({ specific_service_name: 'Monthly Pest Control Service' }))).toBe('agrees');
     expect(verdict(heardAs({ service_intent: 'recurring_membership_inquiry' }))).toBe('agrees');
+    // A billing choice the reading does not know is no evidence of a plan.
+    expect(verdict(heardAs({ billing_choice: 'unsure' }))).toBe('problem');
   });
 
   test('unknown when one side cannot be read: never a problem, never an agreement', () => {

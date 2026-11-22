@@ -74,7 +74,8 @@ const tidy = (text) => String(text || '').replace(/\s+/g, ' ').trim();
 //   agrees   the visit is not a plan visit (one-time or free), or the reading names a plan or says the caller
 //            asked about one;
 //   unknown  one side cannot be read: no valid reading, a name the catalog does not hold or holds under two
-//            billing types, or a visit with no catalog row.
+//            billing types, or a visit with no catalog row. Also a reading that disagrees with itself: it names
+//            a one-time service and records the caller's choice of a plan's billing (billing_choice).
 // `billingByName` maps a catalog service name to its billing type (recurring, one_time or free).
 function judgeService(visit, billingByName) {
   if (!visit.row_billing_type) return { verdict: 'unknown' };
@@ -86,6 +87,7 @@ function judgeService(visit, billingByName) {
   const heardBilling = billingByName.get(nameKey(heard));
   if (!heardBilling) return { verdict: 'unknown' };
   if (heardBilling !== 'one_time' || request.service_intent === 'recurring_membership_inquiry') return { verdict: 'agrees' };
+  if (require('./call-prepay-choice').billingChoiceOf(reading)) return { verdict: 'unknown' };
   return { verdict: 'problem', heard };
 }
 
@@ -166,8 +168,9 @@ async function loadBillingByName() {
 // ------------------------------------------------------------------ passes
 
 // Judge each open bell again, from its visit read by id; close the ones evidence closes. A bell that stays open
-// for a problem is raised again, which only rewrites it quietly (raiseBell): its link follows a visit the office
-// moved, at any age (the raise pass reads 7 days). Returns { closed, failed }.
+// is raised again, which only rewrites it quietly (raiseBell): its link follows a visit the office moved, at any
+// age (the raise pass reads 7 days) and while the reading cannot be read (the bell's own metadata keeps the
+// service the call named). Returns { closed, failed }.
 async function closePass(episodes, billingByName, now) {
   const bells = (await episodes.openAdminAlertMetadata(db, OWN_PREFIX))
     .filter((meta) => meta.scheduledServiceId && KINDS.includes(meta.problem));
@@ -184,8 +187,8 @@ async function closePass(episodes, billingByName, now) {
           db, [`${OWN_PREFIX}${meta.problem}:${meta.scheduledServiceId}`], CLOSED[key].reason, { now, resolution: CLOSED[key].text },
         )) || 0;
       } else {
-        const judged = judgeService(visit, billingByName);
-        if (judged.verdict === 'problem') await raiseBell(visit, judged.heard);
+        const heard = judgeService(visit, billingByName).heard || meta.heard;
+        if (heard) await raiseBell(visit, heard);
       }
     } catch (err) {
       tally.failed += 1;
@@ -210,7 +213,7 @@ async function raiseBell(visit, heard) {
     detail: detailFor({ visit, heard, name }),
     metadata: {
       scheduledServiceId: String(visit.id), customerId: visit.customer_id && String(visit.customer_id),
-      callLogId: String(visit.source_call_log_id), problem: 'service',
+      callLogId: String(visit.source_call_log_id), problem: 'service', heard: tidy(heard),
     },
   });
   if (!result) throw new Error('call booking check bell was not written');
