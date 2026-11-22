@@ -11,7 +11,11 @@ const {
   looseAddressKey, monthsAgoIso, CONSTRUCTION_ACTIVE_MONTHS, ACTIVE_SEEN_WITHIN_DAYS,
 } = require('../property-lookup/manatee-permit-sync');
 
-const LIVE_PARCEL_INDEX = 'mail_prospects_one_live_per_parcel';
+// The two partial unique indexes over the live rows, and the reason a row gets when one of them refuses it.
+const LIVE_INDEX_REASONS = {
+  mail_prospects_one_live_per_parcel: 'duplicate_parcel',
+  mail_prospects_one_live_per_permit: 'duplicate_permit',
+};
 const NEW_HOME_CO_MONTHS = 24;
 
 // Every writable column. A save writes all of them, so a row that was `unmatched` and is now matched (or the other
@@ -153,18 +157,20 @@ async function upsert(row, conn) {
 
 /**
  * Insert the row, or update the one with the same (list_key, source, source_ref). When the home is already live on
- * the list under another deed, the unique index refuses the write; the row is then kept as not_eligible with the
- * reason duplicate_parcel, so the deed is never read again and the run does not fail. The attempt runs in its own
- * (nested) transaction so the refusal never poisons a caller's transaction. Returns the status that was saved.
+ * the list under another deed, or its permit already backs another live home, a unique index refuses the write; the
+ * row is then kept as not_eligible with the reason duplicate_parcel or duplicate_permit, so the deed is never read
+ * again and the run does not fail. The attempt runs in its own (nested) transaction so the refusal never poisons a
+ * caller's transaction. Any other refusal (a live row without a parcel or a permit, an unknown status) is the
+ * caller's error and is thrown. Returns the status that was saved.
  */
 async function saveProspect(row, conn = db) {
   try {
     return await conn.transaction((trx) => upsert(row, trx));
   } catch (err) {
-    if (err && err.code === '23505' && String(err.constraint || err.message).includes(LIVE_PARCEL_INDEX)) {
-      return conn.transaction((trx) => upsert({ ...row, status: 'not_eligible', reason: 'duplicate_parcel' }, trx));
-    }
-    throw err;
+    const refused = err && err.code === '23505' ? String(err.constraint || err.message) : '';
+    const index = Object.keys(LIVE_INDEX_REASONS).find((name) => refused.includes(name));
+    if (!index) throw err;
+    return conn.transaction((trx) => upsert({ ...row, status: 'not_eligible', reason: LIVE_INDEX_REASONS[index] }, trx));
   }
 }
 

@@ -87,8 +87,9 @@ postgres('mail prospect store on PostgreSQL', () => {
     seller_names: ['SAMPLE HOMES LLC'], recipient_names: ['TESTER ALEX J'], buyer_kind: 'person', consideration: 425000,
     legal_description: 'LOT 12 SAMPLE GROVE', status: 'unmatched', reason: 'no_permit', ...extra,
   });
+  // A live row: each parcel has its own permit, unless a test says otherwise.
   const live = (ref, pin, extra = {}) => prospect(ref, {
-    status: 'eligible', reason: null, match_basis: 'permit', parcel_pin: pin, permit_no: 'BLD9900-0001',
+    status: 'eligible', reason: null, match_basis: 'permit', parcel_pin: pin, permit_no: `BLD-${pin}`,
     address_line1: '101 EXAMPLE TRL', city: 'SAMPLETON', zip: '34212', ...extra,
   });
   // Dates count back from today, so the 24-month bound holds on any run date.
@@ -101,13 +102,19 @@ postgres('mail prospect store on PostgreSQL', () => {
   const parcel = (parid, extra = {}) => ({ parid, addressLine1: '101 EXAMPLE TRL', zip: '34212', ...extra });
   const found = async (...parids) => Object.keys(await newHomePermitsForParcels(parids.map((id) => parcel(id)))).sort();
 
-  test('migration: columns, the unique key, the partial index, and a clean down', async () => {
+  test('migration: columns, the unique key, the two partial indexes, the checks, and a clean down', async () => {
     const idx = (await conn.raw('SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = ? AND tablename = ?', [schema, 'mail_prospects'])).rows;
     const names = idx.map((r) => r.indexname);
     expect(names).toEqual(expect.arrayContaining([
-      'mail_prospects_list_source_ref_key', 'mail_prospects_list_status_idx', 'mail_prospects_recorded_date_idx', 'mail_prospects_one_live_per_parcel',
+      'mail_prospects_list_source_ref_key', 'mail_prospects_list_status_idx', 'mail_prospects_recorded_date_idx',
+      'mail_prospects_one_live_per_parcel', 'mail_prospects_one_live_per_permit',
     ]));
-    expect(idx.find((r) => r.indexname === 'mail_prospects_one_live_per_parcel').indexdef).toMatch(/WHERE/);
+    expect(idx.find((r) => r.indexname === 'mail_prospects_one_live_per_parcel').indexdef).toMatch(/UNIQUE.*WHERE/);
+    expect(idx.find((r) => r.indexname === 'mail_prospects_one_live_per_permit').indexdef).toMatch(/UNIQUE.*WHERE/);
+    const checks = (await conn.raw(
+      "SELECT conname FROM pg_constraint WHERE conrelid = to_regclass(?) AND contype = 'c'", [`${schema}.mail_prospects`],
+    )).rows.map((r) => r.conname);
+    expect(checks).toEqual(expect.arrayContaining(['mail_prospects_status_check', 'mail_prospects_live_has_parcel_and_permit']));
     await mailMigration.up(conn); // second run: no-op
     await mailMigration.down(conn);
     expect(await conn.schema.hasTable('mail_prospects')).toBe(false);
@@ -144,6 +151,36 @@ postgres('mail prospect store on PostgreSQL', () => {
     expect(rows.map((r) => [r.source_ref, r.status, r.reason])).toEqual([
       ['202699000001', 'eligible', null], ['202699000002', 'not_eligible', 'duplicate_parcel'],
     ]);
+  });
+
+  test('a permit that already backs a live home cannot back a second one: not_eligible / duplicate_permit', async () => {
+    expect(await saveProspect(live('202699000001', '900000009', { permit_no: 'BLD9900-0020' }))).toBe('eligible');
+    expect(await saveProspect(live('202699000002', '9000000090', { permit_no: 'BLD9900-0020' }))).toBe('not_eligible');
+    const rows = await conn('mail_prospects').orderBy('source_ref');
+    expect(rows.map((r) => [r.source_ref, r.status, r.reason])).toEqual([
+      ['202699000001', 'eligible', null], ['202699000002', 'not_eligible', 'duplicate_permit'],
+    ]);
+    // The same deed read again keeps its own row and its own permit.
+    expect(await saveProspect(live('202699000001', '900000009', { permit_no: 'BLD9900-0020' }))).toBe('eligible');
+    // Another list is another list.
+    expect(await saveProspect(live('202699000003', '9000000090', { permit_no: 'BLD9900-0020', list_key: 'other_list' }))).toBe('eligible');
+  });
+
+  test('a live row must name its parcel and its permit, and a status must be a known one', async () => {
+    const refusedBy = async (row) => saveProspect(row).then(() => 'saved', (err) => `${err.code} ${err.constraint}`);
+    const live2 = (extra) => live('202699000009', '5133090590', extra);
+    expect(await refusedBy(live2({ parcel_pin: null }))).toBe('23514 mail_prospects_live_has_parcel_and_permit');
+    expect(await refusedBy(live2({ parcel_pin: undefined }))).toBe('23514 mail_prospects_live_has_parcel_and_permit');
+    expect(await refusedBy(live2({ parcel_pin: '  ' }))).toBe('23514 mail_prospects_live_has_parcel_and_permit');
+    expect(await refusedBy(live2({ permit_no: null }))).toBe('23514 mail_prospects_live_has_parcel_and_permit');
+    expect(await refusedBy(live2({ permit_no: '' }))).toBe('23514 mail_prospects_live_has_parcel_and_permit');
+    expect(await refusedBy(live2({ status: 'held_back', parcel_pin: null }))).toBe('23514 mail_prospects_live_has_parcel_and_permit');
+    expect(await refusedBy(live2({ status: 'Eligible' }))).toBe('23514 mail_prospects_status_check');
+    expect(await refusedBy(prospect('202699000009', { status: 'mailed' }))).toBe('23514 mail_prospects_status_check');
+    expect(await conn('mail_prospects').count('* as n').first()).toMatchObject({ n: '0' });
+    // A row that is not live needs neither.
+    expect(await refusedBy(prospect('202699000009'))).toBe('saved');
+    expect(await refusedBy(prospect('202699000010', { status: 'not_eligible', reason: 'company_buyer' }))).toBe('saved');
   });
 
   test('the duplicate fallback works inside a caller transaction', async () => {

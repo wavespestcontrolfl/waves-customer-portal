@@ -16,9 +16,18 @@
  * text columns: a long value must never make a deed fail on every run. The limited columns hold this feature's own
  * codes and ids whose shape the readers check (instrument number, parcel number, permit number, zip).
  *
- * One home can be on a list once: the partial unique index covers only live rows (eligible, held_back), so a second
- * deed for the same parcel is stored as not_eligible / duplicate_parcel instead of failing the run. Reading the same
- * deed again updates its row: (list_key, source, source_ref) is the identity.
+ * Three rules the table itself keeps, whatever code writes to it:
+ *   - status is one of the four values (a misspelled status would hide a row from the two indexes below);
+ *   - a live row (eligible, held_back) names its parcel and its permit. Without the check a live row with no parcel
+ *     number would pass the unique index, because PostgreSQL lets NULLs repeat;
+ *   - one home is live on a list once, and one permit backs one live home: two partial unique indexes over the live
+ *     rows. The store saves the second deed as not_eligible / duplicate_parcel or duplicate_permit instead of
+ *     failing the run. (Two parcels can share a permit's number form and its loose address key; the permit index
+ *     makes sure that even then a permit never gives two homes a card.)
+ * Today every live row comes from the new-home list, which always has a parcel and a permit. A later list without a
+ * permit changes the check in its own migration.
+ *
+ * Reading the same deed again updates its row: (list_key, source, source_ref) is the identity.
  *
  * Additive; down drops the table.
  */
@@ -58,7 +67,18 @@ exports.up = async function up(knex) {
     t.index(['recorded_date'], 'mail_prospects_recorded_date_idx');
   });
   await knex.raw(
+    "ALTER TABLE mail_prospects ADD CONSTRAINT mail_prospects_status_check CHECK (status IN ('eligible', 'held_back', 'not_eligible', 'unmatched'))",
+  );
+  await knex.raw(`
+    ALTER TABLE mail_prospects ADD CONSTRAINT mail_prospects_live_has_parcel_and_permit CHECK (
+      status NOT IN ('eligible', 'held_back')
+      OR (COALESCE(btrim(parcel_pin), '') <> '' AND COALESCE(btrim(permit_no), '') <> '')
+    )`);
+  await knex.raw(
     "CREATE UNIQUE INDEX mail_prospects_one_live_per_parcel ON mail_prospects (list_key, parcel_pin) WHERE status IN ('eligible', 'held_back')",
+  );
+  await knex.raw(
+    "CREATE UNIQUE INDEX mail_prospects_one_live_per_permit ON mail_prospects (list_key, permit_no) WHERE status IN ('eligible', 'held_back')",
   );
 };
 
