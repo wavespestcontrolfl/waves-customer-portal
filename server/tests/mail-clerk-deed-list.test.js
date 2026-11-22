@@ -51,8 +51,10 @@ function page({
 }
 
 // The real page of a day with no recordings: the listing holds one plain panel that names the day and says so.
-const emptyPanel = ({ day = DAY, found = 'We found 0 results' } = {}) => `<div class="panel panel-primary"><div class="panel-heading"><strong>Searched For:</strong> ${day}</div>`
-  + `<div class="panel-body"><p class="lg">${found}<span>. Please consider expanding your search, double check spelling or try different dates.</span></p></div></div>`;
+const HINT = '. Please consider expanding your search, double check spelling or try different dates.';
+const emptyPanel = ({ day = DAY, found = 'We found 0 results', hint = `<span>${HINT}</span>`, more = '' } = {}) => '<div class="panel panel-primary">'
+  + `<div class="panel-heading"><strong>Searched For:</strong> ${day}</div>`
+  + `<div class="panel-body"><p class="lg">${found}${hint}</p>${more}</div></div>`;
 const emptyDay = ({ inListing = emptyPanel(), afterListing = '', listing = '<div class="day-listing">' } = {}) => `${TOP}${listing}${inListing}</div>${afterListing}${END}`;
 
 const RESULTS_TABLE = `<table id="results" class="table table-primary">${header()}${row()}</table>`;
@@ -131,6 +133,12 @@ describe('parseDayList: pages that must throw', () => {
     ['the search page with no day listing', `${TOP}${END}`, 'not_clerk_page'],
     ['an empty day for another day', emptyDay({ inListing: emptyPanel({ day: '2026-11-17' }) }), 'not_clerk_page'],
     ['a panel that found 12 results and shows none', emptyDay({ inListing: emptyPanel({ found: 'We found 12 results' }) }), 'not_clerk_page'],
+    ['"We found 0 results" hidden next to a loading message', emptyDay({ inListing: emptyPanel({ found: '', hint: '<span hidden>We found 0 results</span><span>Loading results...</span>' }) }), 'not_clerk_page'],
+    ['"We found 0 results" and then more in the panel body', emptyDay({ inListing: emptyPanel({ more: '<p class="lg">Results are still loading</p>' }) }), 'not_clerk_page'],
+    ['"We found 0 results" with another hint', emptyDay({ inListing: emptyPanel({ hint: '<span>. The search failed, try again.</span>' }) }), 'not_clerk_page'],
+    ['"We found 0 results" outside the studied paragraph', emptyDay({ inListing: emptyPanel().replace('<p class="lg">', '<p class="lg hide">') }), 'not_clerk_page'],
+    ['an empty-day heading with one more element', emptyDay({ inListing: emptyPanel().replace('</strong>', '</strong><em>all days</em>') }), 'not_clerk_page'],
+    ['a comment in the empty-day message', emptyDay({ inListing: emptyPanel({ found: 'We found 0 results<!-- 12 -->' }) }), 'not_clerk_page'],
     ['an empty results panel (rows would come later by script)', emptyDay({ inListing: '<div id="data-display" class="panel panel-primary"></div>' }), 'not_clerk_page'],
     ['an empty day with a pager on the page', emptyDay({ afterListing: pager() }), 'not_clerk_page'],
     ['two panels in the day listing', emptyDay({ inListing: emptyPanel() + emptyPanel() }), 'not_clerk_page'],
@@ -206,6 +214,11 @@ describe('parseDayList: pages that must throw', () => {
     ['a heading for another day', page({ top: heading({ first: '11/17/2026', last: '11/17/2026' }) }), 'heading'],
     ['a heading whose last recording is on another day', page({ top: heading({ last: '11/19/2026' }) }), 'heading'],
     ['a heading with other words', page({ top: '<div class="panel-heading">Results</div>' }), 'heading'],
+    ['a heading with a fifth column', page({ top: heading().replace('</div></div></div>', '</div><div class="col-md-3">Showing 1 to 1 of 9</div></div></div>') }), 'heading'],
+    ['a heading whose count column is hidden', page({ top: heading().replace('<div class="col-md-3">Showing 1', '<div class="col-md-3" hidden>Showing 1') }), 'heading'],
+    ['a heading whose count holds markup', page({ top: heading().replace('Showing 1 to 1 of 1', 'Showing 1 to 1 of 1<span hidden>2</span>') }), 'heading'],
+    ['a heading with a search term', page({ top: heading().replace('<strong>Searched For:</strong>', '<strong>Searched For:</strong> SAMPLE') }), 'heading'],
+    ['a heading with a time that is not a time', page({ top: heading({ first: '11/18/2026 x', last: '11/18/2026' }) }), 'heading'],
     ['a heading that counts more rows than the page holds', page({ top: heading({ to: 2 }) }), 'row_total'],
     ['a heading for the first page of two', page({ top: heading({ to: 1, of: 2 }) }), 'row_total'],
     ['a heading that counts fewer rows than the page holds', page({ rows: [row(), row({ instrument: '202699000002' })], top: heading({ to: 1 }) }), 'row_total'],
@@ -263,7 +276,7 @@ describe('fetchDayList', () => {
     expect(rows).toHaveLength(1);
     const [url, opts] = fetchImpl.mock.calls[0];
     expect(url).toBe(dayListUrl(DAY));
-    expect(opts.redirect).toBe('follow');
+    expect(opts.redirect).toBe('manual');
     expect(opts.headers.Accept).toBe('text/html');
     expect(opts.headers['User-Agent']).toMatch(/WavesPortal/);
     expect(opts.signal).toBeDefined();
@@ -275,6 +288,14 @@ describe('fetchDayList', () => {
     expect(err).toBeInstanceOf(ClerkPageError);
     expect(err.reason).toBe('http_status');
     expect(err.message).toMatch(/403/);
+    expect(seen.signal.aborted).toBe(true);
+  });
+
+  test('a redirect is refused, not followed', async () => {
+    const { fetchImpl, seen } = capture({ status: 302, headers: { get: () => 'https://elsewhere.example/day' }, text: async () => page() });
+    const err = await fetchDayList(DAY, { fetchImpl }).catch((e) => e);
+    expect(err.reason).toBe('http_status');
+    expect(err.message).toMatch(/302/);
     expect(seen.signal.aborted).toBe(true);
   });
 

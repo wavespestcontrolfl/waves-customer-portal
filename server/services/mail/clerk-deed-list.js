@@ -49,8 +49,9 @@ const LISTING_ANCESTORS = [ // from the day listing's parent up to <html>
 ];
 // One pager: <div class="small"><div class="pagination-container"><ul class="pagination"><li class="active"><a>1</a>
 const PAGER_PATH = [['div', { class: 'pagination-container' }], ['ul', { class: 'pagination' }], ['li', { class: 'active' }], ['a', {}]];
-// The heading of a day with rows, all its text in one line. Dates are M/D/YYYY, times are not read.
-const HEADING_PATTERN = /^Searched For: Showing First On: (\d{1,2})\/(\d{1,2})\/(\d{4}) \S+ [AP]M Showing Last On: (\d{1,2})\/(\d{1,2})\/(\d{4}) \S+ [AP]M Showing 1 to (\d+) of (\d+)$/;
+// A time stamp in the heading of a day with rows: "11/18/2026 8:34:52 AM".
+const HEADING_STAMP = /^(\d{1,2})\/(\d{1,2})\/(\d{4}) \d{1,2}:\d{2}:\d{2} [AP]M$/;
+const EMPTY_DAY_HINT = '. Please consider expanding your search, double check spelling or try different dates.';
 const COL = Object.fromEntries(HEADER_NAMES.map((name, i) => [name, i]));
 
 class ClerkPageError extends Error {
@@ -79,38 +80,38 @@ function hasAttrs(node, expected) {
 
 const is = (node, tag, attrs) => node.tagName === tag && hasAttrs(node, attrs);
 
-// The elements directly under a node. Anything else there must be blank text: a comment or loose text throws.
-function elementChildren(node, reason) {
+// What sits directly under a node: its own text (spaces collapsed; parse5 has decoded &amp; and the like) and its
+// elements. A comment there throws.
+function ownParts(node, reason) {
   const elements = [];
+  let text = '';
   for (const child of node.childNodes) {
     if (isElement(child)) elements.push(child);
-    else if (child.nodeName !== '#text' || child.value.trim() !== '') {
-      throw new ClerkPageError(reason, 'Clerk page holds text or a comment where only elements are expected');
-    }
+    else if (child.nodeName === '#text') text += child.value;
+    else throw new ClerkPageError(reason, 'Clerk page holds a comment inside the part that is read');
   }
+  return { text: collapse(text), elements };
+}
+
+// The elements directly under a node that may hold elements and nothing else.
+function elementChildren(node, reason) {
+  const { text, elements } = ownParts(node, reason);
+  if (text) throw new ClerkPageError(reason, 'Clerk page holds text where only elements are expected');
   return elements;
 }
 
-// The text of a node that may hold text and nothing else, spaces collapsed. (parse5 has decoded &amp; and the like.)
+// The text of a node that may hold text and nothing else.
 function textOnly(node, reason) {
-  let text = '';
-  for (const child of node.childNodes) {
-    if (child.nodeName !== '#text') throw new ClerkPageError(reason, 'Clerk page holds markup where only text is expected');
-    text += child.value;
-  }
-  return collapse(text);
+  const { text, elements } = ownParts(node, reason);
+  if (elements.length > 0) throw new ClerkPageError(reason, 'Clerk page holds markup where only text is expected');
+  return text;
 }
 
-// All the text under a node, in page order, as one line.
-function allText(node) {
-  const pieces = [];
-  (function gather(n) {
-    for (const child of n.childNodes || []) {
-      if (child.nodeName === '#text') pieces.push(child.value);
-      else gather(child);
-    }
-  })(node);
-  return collapse(pieces.join(' '));
+// A node's own text when the node holds that text and exactly one `tag` element (no attributes) whose only content
+// is `label`; null for any other shape. <div><strong>Searched For:</strong> 2026-11-15</div> gives "2026-11-15".
+function labeled(node, tag, label, reason) {
+  const { text, elements } = ownParts(node, reason);
+  return elements.length === 1 && is(elements[0], tag, {}) && textOnly(elements[0], reason) === label ? text : null;
 }
 
 // The one element under a node when it is `tag` with exactly `attrs`; null for any other shape.
@@ -145,15 +146,17 @@ function dayPanel(found) {
   return panels.length === 1 && panels[0].tagName === 'div' ? panels[0] : null; // its attributes: the two callers
 }
 
-// A day with no recordings (weekend, holiday) says so itself:
+// A day with no recordings (weekend, holiday) says so itself, and the panel must be exactly this and no more:
 // <div class="panel panel-primary"><div class="panel-heading"><strong>Searched For:</strong> 2026-11-15</div>
-// <div class="panel-body"><p class="lg">We found 0 results<span>. Please consider ...</span></p></div></div>
+// <div class="panel-body"><p class="lg">We found 0 results<span>(EMPTY_DAY_HINT)</span></p></div></div>
 function isEmptyDayPanel(panel, isoDate) {
-  if (!hasAttrs(panel, { class: 'panel panel-primary' })) return false;
-  const parts = elementChildren(panel, 'not_clerk_page');
-  return parts.length === 2
-    && is(parts[0], 'div', { class: 'panel-heading' }) && allText(parts[0]) === `Searched For: ${isoDate}`
-    && is(parts[1], 'div', { class: 'panel-body' }) && /^We found 0 results\b/.test(allText(parts[1]));
+  const reason = 'not_clerk_page';
+  const parts = hasAttrs(panel, { class: 'panel panel-primary' }) ? elementChildren(panel, reason) : [];
+  const [heading, body] = parts;
+  if (parts.length !== 2 || !is(heading, 'div', { class: 'panel-heading' }) || !is(body, 'div', { class: 'panel-body' })) return false;
+  const message = onlyChild(body, 'p', { class: 'lg' }, reason);
+  return labeled(heading, 'strong', 'Searched For:', reason) === isoDate
+    && Boolean(message) && labeled(message, 'span', EMPTY_DAY_HINT, reason) === 'We found 0 results';
 }
 
 // The heading and the body of the panel of a day with rows; the body is a pager, the table, a pager.
@@ -175,14 +178,29 @@ function isSinglePagePager(box) {
   return Boolean(node) && textOnly(node, 'pagination') === '1';
 }
 
-// The heading's own account of the page: both recordings on the day asked for, and rows 1 to N of N.
+// The heading's own account of the page, in its four studied columns:
+// <div class="row"><div id="searchedfor" class="col-md-3"><strong>Searched For:</strong></div>
+//   <div class="col-md-3"><strong>Showing First On:</strong> 11/18/2026 8:34:52 AM</div>
+//   <div class="col-md-3"><strong>Showing Last On:</strong> 11/18/2026 4:30:43 PM</div>
+//   <div class="col-md-3">Showing 1 to 474 of 474</div></div>
+// Both recordings must be on the day asked for, and the rows read must be rows 1 to N of N.
 function checkHeading(heading, isoDate, rowCount) {
-  const m = allText(heading).match(HEADING_PATTERN);
-  const isoOf = (month, day, year) => `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
-  if (!m || isoOf(m[1], m[2], m[3]) !== isoDate || isoOf(m[4], m[5], m[6]) !== isoDate) {
-    throw new ClerkPageError('heading', 'Clerk results heading is not the studied one for the day asked for');
+  const reason = 'heading';
+  const row = onlyChild(heading, 'div', { class: 'row' }, reason);
+  const cols = row ? elementChildren(row, reason) : [];
+  const studied = cols.length === 4 && is(cols[0], 'div', { id: 'searchedfor', class: 'col-md-3' })
+    && cols.slice(1).every((col) => is(col, 'div', { class: 'col-md-3' }));
+  const dayOf = (stamp) => {
+    const m = (stamp || '').match(HEADING_STAMP);
+    return m ? `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}` : null;
+  };
+  const count = studied ? textOnly(cols[3], reason).match(/^Showing 1 to (\d+) of (\d+)$/) : null;
+  if (!count || labeled(cols[0], 'strong', 'Searched For:', reason) !== ''
+    || dayOf(labeled(cols[1], 'strong', 'Showing First On:', reason)) !== isoDate
+    || dayOf(labeled(cols[2], 'strong', 'Showing Last On:', reason)) !== isoDate) {
+    throw new ClerkPageError(reason, 'Clerk results heading is not the studied one for the day asked for');
   }
-  if (Number(m[7]) !== rowCount || Number(m[8]) !== rowCount) {
+  if (Number(count[1]) !== rowCount || Number(count[2]) !== rowCount) {
     throw new ClerkPageError('row_total', 'Clerk page does not hold all the rows its heading counts');
   }
 }
@@ -317,7 +335,9 @@ async function fetchDayList(isoDate, { fetchImpl = fetch, timeoutMs = DEFAULT_TI
   try {
     const res = await fetchImpl(url, {
       method: 'GET',
-      redirect: 'follow',
+      // The day page answers directly. A redirect is not followed: its 3xx status is refused below, so no other
+      // site can supply the page.
+      redirect: 'manual',
       signal: controller.signal,
       headers: { 'User-Agent': USER_AGENT, Accept: 'text/html' },
     });
