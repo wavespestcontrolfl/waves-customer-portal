@@ -282,6 +282,27 @@ describe('PUT /campaigns/:id status on synced platforms', () => {
     expect(updates.map(({ updated_at: _ignored, ...rest }) => rest)).toEqual([{ target_area: 'Bradenton' }]);
   });
 
+  test('the row the Local Services sync owns refuses a type change (the type keeps it on the Local Service Ads card); an unchanged type is not written back', async () => {
+    campaignRow = {
+      id: 'c-4', platform: 'google_lsa', platform_campaign_id: '7636809139', status: 'active', campaign_name: 'Local Service Ads',
+      campaign_type: 'google_lsa', metadata: { lsa_customer_id: '7636809139' },
+    };
+    let res = await call('PUT', '/campaigns/c-4', { campaign_type: 'google_search' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/set by the daily Local Services sync/);
+    expect(updates).toEqual([]);
+    res = await call('PUT', '/campaigns/c-4', { campaign_type: 'google_lsa', campaign_name: 'LSA Lakewood Ranch' });
+    expect(res.status).toBe(200);
+    expect(updates.map(({ updated_at: _ignored, ...rest }) => rest)).toEqual([{ campaign_name: 'LSA Lakewood Ranch' }]);
+  });
+
+  test('a google_lsa campaign entered by hand keeps an editable type', async () => {
+    campaignRow = { id: 'c-2', platform: 'google_lsa', status: 'active', campaign_name: 'LSA', campaign_type: 'google_lsa' };
+    const res = await call('PUT', '/campaigns/c-2', { campaign_type: 'other' });
+    expect(res.status).toBe(200);
+    expect(updates.map(({ updated_at: _ignored, ...rest }) => rest)).toEqual([{ campaign_type: 'other' }]);
+  });
+
   test('a campaign marked by an account the sync no longer reads is editable again', async () => {
     campaignRow = { id: 'c-6', platform: 'google_lsa', platform_campaign_id: '888', status: 'active', campaign_name: 'Old account', metadata: { lsa_customer_id: '1112223333' } };
     const res = await call('PUT', '/campaigns/c-6', { status: 'removed' });

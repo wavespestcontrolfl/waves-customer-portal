@@ -73,9 +73,11 @@ const lead = (createdAt, type, charged, creditState) => ({
   },
 });
 
-// Answers each GAQL query by the resource it reads.
-function answerGoogle({ campaigns = [CAMPAIGN_ROW], metrics = [], leads = [] } = {}) {
+// Answers each GAQL query by the resource it reads. `performanceMaxDays` = the
+// metrics rows of Performance Max campaigns inside the window.
+function answerGoogle({ campaigns = [CAMPAIGN_ROW], metrics = [], leads = [], performanceMaxDays = [] } = {}) {
   mockQuery.mockImplementation(async (gaql) => {
+    if (/'PERFORMANCE_MAX'/.test(gaql)) return performanceMaxDays;
     if (/FROM local_services_lead/.test(gaql)) return leads;
     if (/segments\.date/.test(gaql)) return metrics;
     return campaigns;
@@ -240,8 +242,8 @@ describe('runDailySync', () => {
     answerGoogle({ campaigns: [googleCampaign(555, 3, 25500000), googleCampaign(900, 2, 99000000, 2)] }); // a paused LSA + an enabled Search campaign
     await expect(GoogleLsa.runDailySync()).resolves.toEqual({ configured: true, synced: { campaigns: 1, performanceRows: 0 } });
     expect(accountUpdate()).toMatchObject({ status: 'paused', daily_budget_current: 25.5 });
-    const metricsQuery = mockQuery.mock.calls.map((c) => c[0]).find((q) => /segments\.date/.test(q));
-    expect(metricsQuery).toContain("campaign.advertising_channel_type = 'LOCAL_SERVICES'");
+    const costQuery = mockQuery.mock.calls.map((c) => c[0]).find((q) => /metrics\.impressions/.test(q));
+    expect(costQuery).toContain("campaign.advertising_channel_type = 'LOCAL_SERVICES'");
     // No status filter anywhere: a removed campaign must still give its last days.
     for (const [q] of mockQuery.mock.calls) expect(q).not.toMatch(/campaign\.status\s*(!=|=|IN)/);
   });
@@ -254,9 +256,20 @@ describe('runDailySync', () => {
     expect(mockQuery).toHaveBeenCalledTimes(1);
   });
 
-  test('a removed Performance Max campaign does not stop the run', async () => {
+  test('a removed Performance Max campaign with no numbers in the window does not stop the run', async () => {
     answerGoogle({ campaigns: [CAMPAIGN_ROW, googleCampaign(901, 'REMOVED', 40000000, 'PERFORMANCE_MAX')] });
     await expect(GoogleLsa.runDailySync()).resolves.toMatchObject({ synced: { campaigns: 1 } });
+  });
+
+  test('a removed Performance Max campaign that ran inside the window fails the run before any day is written', async () => {
+    answerGoogle({
+      campaigns: [CAMPAIGN_ROW, googleCampaign(901, 4, 40000000, 10)],
+      metrics: [metricsRow('2026-11-20', { cost_micros: 31000000 })],
+      performanceMaxDays: [metricsRow('2026-11-19', { cost_micros: 9000000 }, 901)],
+    });
+    await expect(GoogleLsa.runDailySync()).rejects.toThrow('syncDailyPerformance: a Performance Max campaign ran in the account between');
+    expect(perfInserts()).toEqual([]);
+    expect(perfUpdates()).toEqual([]);
   });
 
   test('the first run inserts ONE google_lsa row for the account, marked with the account', async () => {
@@ -399,8 +412,9 @@ describe('runDailySync', () => {
     test('every run reads the cost allocation\'s whole months, the same for the cost and for the leads', async () => {
       await GoogleLsa.runDailySync();
       const queries = mockQuery.mock.calls.map((c) => c[0]);
-      expect(queries).toHaveLength(3); // the account, the cost, the leads
-      expect(queries.find((q) => /segments\.date BETWEEN/.test(q))).toContain("BETWEEN '2026-08-01' AND '2026-11-21'");
+      expect(queries).toHaveLength(4); // the account, the Performance Max check, the cost, the leads
+      expect(queries.find((q) => /'PERFORMANCE_MAX'/.test(q))).toContain("BETWEEN '2026-08-01' AND '2026-11-21'");
+      expect(queries.find((q) => /'LOCAL_SERVICES'/.test(q))).toContain("BETWEEN '2026-08-01' AND '2026-11-21'");
       expect(queries.find((q) => /FROM local_services_lead/.test(q))).toContain("creation_date_time >= '2026-08-01 00:00:00'");
     });
 
@@ -421,7 +435,8 @@ describe('runDailySync', () => {
 
   test('a failed performance step fails the run', async () => {
     mockQuery.mockImplementation(async (gaql) => {
-      if (/segments\.date/.test(gaql)) throw new Error('quota');
+      if (/metrics\.impressions/.test(gaql)) throw new Error('quota');
+      if (/'PERFORMANCE_MAX'/.test(gaql)) return [];
       return /FROM local_services_lead/.test(gaql) ? [] : [CAMPAIGN_ROW];
     });
     await expect(GoogleLsa.runDailySync()).rejects.toThrow('syncDailyPerformance: quota');

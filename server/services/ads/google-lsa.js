@@ -241,11 +241,14 @@ const CHANNEL_FILTER = "campaign.advertising_channel_type = 'LOCAL_SERVICES'";
 // leads are in local_services_lead like any other, but API v23 has no field
 // that tells such a campaign from a normal Performance Max one, so its cost
 // cannot be read here. Leads of both kinds against the cost of one would show
-// a cost per lead that is too low, so the run fails before it writes.
+// a cost per lead that is too low, so the run fails before it writes: here for
+// a campaign that is not removed, and in syncDailyPerformance for a removed one
+// that still has numbers inside the window.
+const PERFORMANCE_MAX_REFUSAL = 'this sync reads standalone Local Services campaigns only, so nothing was written';
 function assertNoPerformanceMax(campaignRows) {
   const live = campaignRows.filter((r) => PERFORMANCE_MAX.has(r.campaign?.advertising_channel_type) && !REMOVED.has(r.campaign?.status));
   if (live.length) {
-    throw new Error(`the account has ${live.length} Performance Max campaign(s); this sync reads standalone Local Services campaigns only, so nothing was written`);
+    throw new Error(`the account has ${live.length} Performance Max campaign(s); ${PERFORMANCE_MAX_REFUSAL}`);
   }
 }
 
@@ -315,6 +318,20 @@ async function storedDays(campaignId, since, until) {
 async function syncDailyPerformance(customer, campaignId) {
   const { since, until } = rebuildWindow();
   logger.info(`[google-lsa] Syncing daily performance (${since} to ${until})`);
+
+  // Google answers a metrics row only for a campaign-day with numbers, so any
+  // row here is a Performance Max campaign (removed ones included) that ran
+  // inside the window.
+  const performanceMaxDays = await customer.query(`
+    SELECT campaign.id, segments.date, metrics.cost_micros
+    FROM campaign
+    WHERE segments.date BETWEEN '${since}' AND '${until}'
+      AND campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+    LIMIT 1
+  `);
+  if (performanceMaxDays.length) {
+    throw new Error(`a Performance Max campaign ran in the account between ${since} and ${until}; ${PERFORMANCE_MAX_REFUSAL}`);
+  }
 
   const metricRows = await customer.query(`
     SELECT

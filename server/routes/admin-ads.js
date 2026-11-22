@@ -63,9 +63,16 @@ const SYNCED_STATUS_REFUSALS = new Map([
 // the write below. google-lsa.js
 // loads the Google Ads SDK only when a sync runs, so the require is cheap.
 const LSA_SYNCED_STATUS_REFUSAL = "A synced Local Services campaign's status comes from Google. Change it there; the daily Local Services sync brings it in.";
+// The sync writes its row's type once, at insert, and the Ads page puts a row on
+// the "Local Service Ads" card by that type. A changed type would take the
+// row's cost off the card for good.
+const LSA_SYNCED_TYPE_REFUSAL = "The synced Local Services row's type is set by the daily Local Services sync. It keeps the row on the Local Service Ads card.";
+function ownedByLsaSync(campaign) {
+  return campaign.platform === 'google_lsa' && require('../services/ads/google-lsa').ownsCampaign(campaign);
+}
 function syncedStatusRefusal(campaign) {
   if (campaign.platform === 'google_lsa') {
-    return require('../services/ads/google-lsa').ownsCampaign(campaign) ? LSA_SYNCED_STATUS_REFUSAL : undefined;
+    return ownedByLsaSync(campaign) ? LSA_SYNCED_STATUS_REFUSAL : undefined;
   }
   return SYNCED_STATUS_REFUSALS.get(campaign.platform);
 }
@@ -257,16 +264,21 @@ router.put('/campaigns/:id', requireAdmin, async (req, res, next) => {
     // direct local flip here would drift from the platform until the next sync.
     // A campaign entered by hand has no synced status route, so PUT is the way
     // to retire it.
-    if (clean.value.status !== undefined) {
+    if (clean.value.status !== undefined || clean.value.campaign_type !== undefined) {
       const existing = await db('ad_campaigns').where({ id: req.params.id }).first();
       if (!existing) return res.status(404).json({ error: 'Campaign not found' });
-      const refusal = syncedStatusRefusal(existing);
+      const refusal = clean.value.status !== undefined && syncedStatusRefusal(existing);
       if (refusal) {
         if (clean.value.status !== existing.status) return res.status(400).json({ error: refusal });
         // The platform owns this status, so an unchanged one is not written
         // back: a sync that changes it between this read and the update below
         // must not be undone by the echo.
         delete clean.value.status;
+      }
+      // Same for the type of the row the Local Services sync owns.
+      if (clean.value.campaign_type !== undefined && ownedByLsaSync(existing)) {
+        if (clean.value.campaign_type !== existing.campaign_type) return res.status(400).json({ error: LSA_SYNCED_TYPE_REFUSAL });
+        delete clean.value.campaign_type;
       }
     }
     let campaign;
