@@ -296,6 +296,23 @@ jest.mock('../services/customer-credit', () => ({
     expect(byId[unnamed.id].suggestions).toEqual([]);
   });
 
+  // The website sends the first page of the visit with the code as its only parameter
+  // (wavespestcontrol-astro src/lib/attribution.ts safeLandingUrl): no utm, and the www host.
+  test.each([
+    ['the homepage', 'https://www.wavespestcontrol.com/?ref=WAVES-JANE'],
+    ['the friend page', 'https://www.wavespestcontrol.com/referrer/?ref=WAVES-JANE'],
+  ])('a lead that landed on %s names the member by the link code', async (_name, landing) => {
+    const referrer = await customer({ first_name: 'Jane', last_name: 'Smith', referral_code: 'WAVES-JANE', city: 'Parrish' });
+    const friend = await linkCustomer('WAVES-JANE', { landing_page_url: landing });
+
+    const items = await inbound.listInboundReferrals();
+    expect(items.map((i) => i.customerId)).toEqual([friend.id]);
+    expect(items[0]).toMatchObject({
+      evidence: { source: 'link', code: 'WAVES-JANE', spokenName: null },
+      suggestions: [{ customerId: referrer.id, viaCode: true }],
+    });
+  });
+
   test("a link code from the customer's own household is flagged, never suggested", async () => {
     const accountId = randomUUID();
     await customer({ account_id: accountId, referral_code: 'WAVES-SELF' });
