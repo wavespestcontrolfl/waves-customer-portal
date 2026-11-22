@@ -32,11 +32,11 @@
  *   - the check does not ask how the rest reads without what went, past the
  *     words in NEVER_LEFT_OUT and the rule for a part that opens with a
  *     condition;
- *   - a note often names no one ("said saw roaches treated kitchen"). The
- *     text may add "I" and "you" where the grammar takes them, and the check
- *     cannot tell who did what;
- *   - a name is no person to the check: "Sam and I sprayed" passes where
- *     "the neighbor and I sprayed" does not.
+ *   - a clause of the note that names no one is read as the technician's
+ *     work: the text may add "I" there. After a person the note names, in
+ *     the same part, the text adds no "I" ("customer inspected and treated
+ *     shed" is not "You inspected and I treated the shed"). A name is no
+ *     person to the check ("Sam inspected and I treated the shed" passes).
  */
 
 // ── The words ──────────────────────────────────────────────────────────
@@ -59,8 +59,9 @@ i we you they them their`.split(/\s+/));
 // gallons of bait").
 const LEAD_INS = new Set('in for at on by with of about within every per each'.split(' '));
 // The text adds "I" only as the first word of a sentence or after one of
-// these. "You said I saw roaches" is not "customer said saw roaches", with
-// or without a comma the text puts in.
+// these, and never after a person the note names in that part (PERSONS).
+// "You said I saw roaches" is not "customer said saw roaches", with or
+// without a comma the text puts in.
 const CLAUSE_OPENERS = new Set('and so but then because when while since'.split(' '));
 // A part that opens with a condition qualifies the rest of its sentence
 // ("if ants return, ...", "..., unless it rains"). A condition further in
@@ -70,8 +71,11 @@ const CONDITION_LEADS = new Set('but only or even not so'.split(' '));
 // The parts tried out of sight one set at a time (64 walks at most).
 const MAX_HIDDEN_PARTS = 6;
 const NOTHING_GOES = () => false;
-const PERSONS = new Set(`customer cust you she he they we homeowner client tenant owner resident wife husband son daughter
-neighbor neighbors landlord manager`.split(/\s+/));
+// After one of these in a part of the note, the text adds no "I": the note
+// says who acted, or leaves it open, and so does the text.
+const PERSONS = new Set(`customer cust you she he they we her his them their homeowner client tenant owner resident wife husband son
+daughter mom dad kid kids neighbor neighbors landlord manager guy lady man woman contractor housekeeper office tech technician
+company crew`.split(/\s+/));
 // A word of the note and what the text may write for it: a technician's short
 // form and its full word, the customer as "you" with the verb form "you"
 // takes, and what phone dictation writes for a word of the trade. Every
@@ -93,8 +97,11 @@ const NUMBER_TWINS = new Map(NUMBER_WORDS.flatMap((word, n) => [[word, String(n)
 // that is not a letter or a digit. A mark between two digits stays in the
 // word: "1.5" is not 15, and "1/2" is not "1-2".
 const numberMark = (_, digit, mark) => `${digit}${mark === '.' ? 'point' : `mark${mark.codePointAt(0)}mark`}`;
+// ".5 oz" is 0.5 oz: without the zero the point reads as a sentence end and
+// the figure as 5.
+const leadingZero = (text) => String(text || '').replace(/(^|[^\p{L}\p{N}.])\.(?=\p{N})/gu, '$10.');
 function noteWords(text) {
-  return String(text || '').normalize('NFKC').toLowerCase().replace(/[‘’]/g, "'").replace(/[\u2010-\u2015\u2212]/g, '-')
+  return leadingZero(text).normalize('NFKC').toLowerCase().replace(/[‘’]/g, "'").replace(/[\u2010-\u2015\u2212]/g, '-')
     .replace(/(\p{N}),(?=\p{N}{3}(?!\p{N}))/gu, '$1').replace(/(\p{N})\s*([/-])\s*(?=\p{N})/gu, '$1$2')
     .replace(/(\p{N})([^\p{L}\p{N}\s])(?=\p{N})/gu, numberMark)
     .replace(/\bcan't\b|\bcannot\b/g, 'can not').replace(/\bwon't\b/g, 'will not').replace(/n't\b/g, ' not')
@@ -119,7 +126,7 @@ const sameWord = (textWord, noteWord) => textWord === noteWord
 const PART_MARKS = /,+/;
 // A mark inside a number ends no sentence and no part ("2.5 gallons"): it is
 // hidden while the text is split, and put back in each piece.
-const hideNumberMarks = (text) => String(text || '').replace(/(\p{N})([.,])(?=\p{N})/gu, (_, digit, mark) => `${digit}${mark === '.' ? '\u0001' : '\u0002'}`);
+const hideNumberMarks = (text) => leadingZero(text).replace(/(\p{N})([.,])(?=\p{N})/gu, (_, digit, mark) => `${digit}${mark === '.' ? '\u0001' : '\u0002'}`);
 const showNumberMarks = (piece) => piece.replace(/\u0001/g, '.').replace(/\u0002/g, ',');
 
 // The sentences of a text, each with whether it asks ("?").
@@ -146,51 +153,59 @@ function readNote(note) {
 const readText = (text) => sentencesOf(text)
   .flatMap(({ text: sentence, asks }, id) => noteWords(sentence).map((word, at) => ({ word, id, asks, opens: at === 0 })));
 
-// What the text may leave out: `single[i]` for one word of the note, `pairs`
-// for two words that go together or not at all, `whole` for the parts that
-// may go whole, of which the `conditional` ones go only with their whole
-// sentence. The report's screens say which words, pairs and parts (`screen`).
+// What the text may leave out: `single[i]` for one word of the note, `leans`
+// for a word that goes only when the word it leans on goes, `groups` for
+// words that go together or not at all, `whole` for the parts that may go
+// whole, of which the `conditional` ones go only with their whole sentence.
+// The report's screens say which words, pairs and parts (`screen`).
 function leaveOutRules({ words, parts }, { wordGoes, pairGoes, partGoes, names }) {
   const note = words.map((entry) => entry.word);
   const samePart = (i, j) => Boolean(words[j]) && words[i].part === words[j].part;
-  // Every word of a product name goes with it ("Borlux SC").
-  const inName = new Set();
-  names.map(noteWords).forEach((name) => note.forEach((_, i) => {
-    if (name.every((word, offset) => note[i + offset] === word)) name.forEach((__, offset) => inName.add(i + offset));
+  // Every word of a product name ("Borlux SC"), and two words the screens
+  // pair ("no issues", a figure and its unit).
+  const groups = [];
+  names.map(noteWords).filter((name) => name.length).forEach((name) => note.forEach((_, i) => {
+    if (name.every((word, offset) => note[i + offset] === word && samePart(i, i + offset))) groups.push(name.map((__, offset) => i + offset));
   }));
-  const pairs = note.flatMap((word, i) => (samePart(i, i + 1) && pairGoes(word, note[i + 1]) ? [i] : []));
-  const named = note.map((word, i) => pairs.includes(i) || pairs.includes(i - 1)
-    || (!NEVER_LEFT_OUT.has(word) && (inName.has(i) || Boolean(wordGoes(word)))));
-  const leadsIn = (i) => {
-    const next = note.findIndex((word, j) => j > i && !SMALL.has(word));
-    return LEAD_INS.has(note[i]) && samePart(i, next) && named[next];
-  };
-  const trails = (i) => note[i] === 'of' && samePart(i, i - 1) && named[i - 1];
-  const single = note.map((word, i) => named[i] || (!NEVER_LEFT_OUT.has(word) && SMALL.has(word)) || leadsIn(i) || trails(i));
+  note.forEach((word, i) => {
+    if (samePart(i, i + 1) && pairGoes(word, note[i + 1])) groups.push([i, i + 1]);
+  });
+  const grouped = new Set(groups.flat());
+  const named = note.map((word, i) => grouped.has(i) || (!NEVER_LEFT_OUT.has(word) && Boolean(wordGoes(word))));
+  // A word that only leads into what goes ("in" before "two weeks", "with"
+  // before a product name), and "of" right after it ("2 gallons of bait").
+  const leans = new Map();
+  note.forEach((word, i) => {
+    const next = note.findIndex((later, j) => j > i && !SMALL.has(later));
+    if (LEAD_INS.has(word) && samePart(i, next) && named[next]) leans.set(i, next);
+    else if (word === 'of' && samePart(i, i - 1) && named[i - 1]) leans.set(i, i - 1);
+  });
+  const single = note.map((word, i) => named[i] || (!NEVER_LEFT_OUT.has(word) && SMALL.has(word)));
   const [whole, conditional] = [new Set(), new Set()];
   parts.forEach((raw, id) => {
     const partWords = words.filter((entry) => entry.part === id).map((entry) => entry.word);
     if (partWords.length && partGoes(raw)) whole.add(id);
     if (CONDITIONS.has(partWords.find((word) => !SMALL.has(word) && !CONDITION_LEADS.has(word)))) conditional.add(id);
   });
-  return { single, pairs, whole, conditional };
+  // The second word of each group, by its first: see placeInNote.
+  const follows = new Map(groups.filter((group) => group.length > 1).map((group) => [group[0], group[1]]));
+  return { single, leans, groups, follows, whole, conditional };
 }
 
 // ── Same order ─────────────────────────────────────────────────────────
 // Where word `k` of the text sits in the note at or after `from`: the first
-// place that holds the same word, or -1. The first of two words that go
+// place that holds the same word, or -1. The first of the words that go
 // together is no place unless the text goes on with the second ("no issues,
 // no ants": "No ants." takes the second "no").
-const placeInNote = (out, k, note, from, pairs) => note.findIndex((word, j) => j >= from && sameWord(out[k], word)
-  && !(pairs.includes(j) && !sameWord(out[k + 1] || '', note[j + 1])));
+const placeInNote = (out, k, note, from, follows) => note.findIndex((word, j) => j >= from && sameWord(out[k], word)
+  && !(follows.has(j) && !sameWord(out[k + 1] || '', note[follows.get(j)])));
 
 // A word the text adds: a small word; "I" where a sentence starts (`opens`)
-// or after a joining word, never after "<person> and" (the note did not put
-// the technician there); "you" and "me" beside a word of speech ("You said
-// you", "You told me").
+// or after a joining word (walkNote then looks for a person before it);
+// "you" and "me" beside a word of speech ("You said you", "You told me").
 function addedWordAllowed(out, k, opens) {
   const word = out[k];
-  if (word === 'i') return (opens || CLAUSE_OPENERS.has(out[k - 1])) && !(out[k - 1] === 'and' && PERSONS.has(out[k - 2]));
+  if (word === 'i') return opens || CLAUSE_OPENERS.has(out[k - 1]);
   if (ADDABLE.has(word)) return true;
   if (word === 'me') return out[k - 1] === 'told';
   return word === 'you' && ['said', 'told', 'me'].includes(out[k - 1]);
@@ -206,17 +221,24 @@ function walkNote(textWords, read, rules, hidden) {
   // One sentence of the text for one sentence of the note, both ways.
   const [noteSentenceOf, textSentenceOf, saysSomething] = [new Map(), new Map(), new Set()];
   const stop = (reason, k) => ({ rejection: { reason, words: [out[k]] } });
+  // A person the note names before place `at`, in the same part.
+  const personBefore = (at) => read.words.some((entry, j) => j < at && entry.part === read.words[at].part && PERSONS.has(entry.word));
   let from = 0;
+  // The "I" the text added last, until the walk finds the word it goes with.
+  let addedI = -1;
   for (let k = 0; k < out.length; k += 1) {
-    const place = placeInNote(out, k, noteList, from, rules.pairs);
-    if (place < 0) {
-      if (addedWordAllowed(out, k, textWords[k].opens)) continue;
-      return stop(noteList.some((word) => sameWord(out[k], word)) ? 'out_of_order' : 'not_in_note', k);
-    }
+    const place = placeInNote(out, k, noteList, from, rules.follows);
     // A small word that sits further on in the note, past words the text may
     // not leave out, is a word the text added here.
-    const jumpsOver = noteList.slice(from, place).some((word, offset) => word && !rules.single[from + offset]);
-    if (jumpsOver && addedWordAllowed(out, k, textWords[k].opens)) continue;
+    const jumpsOver = place >= 0 && noteList.slice(from, place)
+      .some((word, offset) => word && !rules.single[from + offset] && !rules.leans.has(from + offset));
+    if ((place < 0 || jumpsOver) && addedWordAllowed(out, k, textWords[k].opens)) {
+      if (out[k] === 'i') addedI = k;
+      continue;
+    }
+    if (place < 0) return stop(noteList.some((word) => sameWord(out[k], word)) ? 'out_of_order' : 'not_in_note', k);
+    if (addedI >= 0 && personBefore(place)) return stop('not_in_note', addedI);
+    addedI = -1;
     const { sentence, asks } = read.words[place];
     const { id } = textWords[k];
     if ((noteSentenceOf.get(id) ?? sentence) !== sentence) return stop('joined', k);
@@ -233,20 +255,22 @@ function walkNote(textWords, read, rules, hidden) {
   return empty >= 0 ? stop('not_in_note', empty) : { usedIn };
 }
 
-// What the text left out and may not: half of a pair, or a word that is no
-// small word, no word the screens let go and in no part that goes whole.
+// What the text left out and may not: some of the words that go together,
+// or a word that is no small word, no word the screens let go, no word that
+// leans on a word that went, and in no part that goes whole.
 function leftOutRejection(usedIn, out, read, rules) {
   const noteList = read.words.map((entry) => entry.word);
   const used = (i) => usedIn[i] >= 0;
   const usedParts = new Set(read.words.filter((_, i) => used(i)).map((entry) => entry.part));
   const usedSentences = new Set(read.words.filter((_, i) => used(i)).map((entry) => entry.sentence));
-  const brokenPair = rules.pairs.find((i) => used(i) !== used(i + 1));
-  if (brokenPair !== undefined) return { reason: 'left_out', words: [noteList[used(brokenPair) ? brokenPair + 1 : brokenPair]] };
+  const broken = rules.groups.find((group) => group.some(used) && !group.every(used));
+  if (broken) return { reason: 'left_out', words: [noteList[broken.find((i) => !used(i))]] };
+  const leansOnGone = (i) => rules.leans.has(i) && !used(rules.leans.get(i));
   // A whole part goes when the rules name it and the text uses none of it. A
   // part that opens with a condition goes only with its whole sentence.
   const partGoes = ({ part, sentence }) => rules.whole.has(part) && !usedParts.has(part)
     && !(rules.conditional.has(part) && usedSentences.has(sentence));
-  const missing = noteList.findIndex((word, i) => !used(i) && !rules.single[i] && !partGoes(read.words[i]));
+  const missing = noteList.findIndex((word, i) => !used(i) && !rules.single[i] && !leansOnGone(i) && !partGoes(read.words[i]));
   if (missing < 0) return null;
   return { reason: out.some((word) => sameWord(word, noteList[missing])) ? 'out_of_order' : 'left_out', words: [noteList[missing]] };
 }
