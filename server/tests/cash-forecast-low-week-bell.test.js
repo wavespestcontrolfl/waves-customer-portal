@@ -4,7 +4,6 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
-  cashForecastLive: jest.fn(() => true),
   alertEpisodesLive: jest.fn(() => true),
 }));
 jest.mock('../services/admin-alert-episodes', () => ({
@@ -35,7 +34,6 @@ const run = (f, opts = {}) => Bell.runCashForecastLowWeek({ database: jest.fn(),
 
 beforeEach(() => {
   jest.clearAllMocks();
-  gates.cashForecastLive.mockReturnValue(true);
   gates.alertEpisodesLive.mockReturnValue(true);
 });
 
@@ -103,19 +101,12 @@ describe('when the line cannot be judged', () => {
   });
 });
 
-describe('the close and the gate', () => {
+describe('the close', () => {
   test('no week below the floor: the row closes itself', async () => {
     episodes.closeAdminAlertKeys.mockResolvedValueOnce(1);
     expect(await run(forecast({ settings: { floor_cents: 300000 } }))).toEqual({ count: 0, outcome: 'closed' });
     expect(episodes.closeAdminAlertKeys).toHaveBeenCalledWith(expect.anything(), ['cash-forecast-low-week'], 'no_low_week',
       { resolution: 'No week ahead ends below your floor' });
-  });
-
-  test('gate off: nothing is read', async () => {
-    gates.cashForecastLive.mockReturnValue(false);
-    const load = jest.fn();
-    expect(await run(forecast(), { load })).toEqual({ skipped: 'disabled' });
-    expect(load).not.toHaveBeenCalled();
   });
 
   test('a failed forecast read throws and never closes the row', async () => {

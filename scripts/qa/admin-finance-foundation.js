@@ -515,21 +515,21 @@ async function install(page, server, state) {
         contentType: "text/csv",
         body: "date,amount\n2026-09-08,100\n",
       });
-    // Cash today card (GATE_CASH_FORECAST, dark): the gate-off route answers
-    // 404 and the card renders nothing, so this is an expected request.
+    // Cash today card (owner only): this synthetic login is not the owner, so
+    // the route answers 403 and the card renders nothing.
     if (key === "GET /api/admin/banking/cash-today")
       return route.fulfill({
-        status: 404,
+        status: 403,
         contentType: "application/json",
-        body: '{"error":"Not found"}',
+        body: '{"error":"Forbidden"}',
       });
-    // Cash forecast tab (same gate): the page asks once whether to list the
-    // tab; the gate-off route answers 404 and the tab stays hidden.
+    // Cash forecast tab (owner only): the page asks once whether to list the
+    // tab; a non-owner login gets 403 and the tab stays hidden.
     if (key === "GET /api/admin/banking/cash-forecast/inputs")
       return route.fulfill({
-        status: 404,
+        status: 403,
         contentType: "application/json",
-        body: '{"error":"Not found"}',
+        body: '{"error":"Forbidden"}',
       });
     if (!handlers.has(key)) {
       state.unmatched.push(key);

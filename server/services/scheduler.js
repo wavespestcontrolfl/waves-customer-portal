@@ -5984,15 +5984,13 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 7:37AM — Emailed invoices not linked to Spark (GATE_INVOICE_NOT_ON_SPARK;
-  // returns before any read when off). Owner 2026-11-05: one standing Tax bell
+  // DAILY 7:37AM — Emailed invoices not linked to Spark. Owner 2026-11-05: one standing Tax bell
   // lists, by vendor, the emailed vendor invoices dated 3 to 14 days ago whose
   // paying bank or card line is on an account outside INVOICE_OK_ACCOUNT_LABELS,
   // or was not found. Rings only when a vendor joins and closes itself when the
   // list is empty. Reads expenses and bank lines; sends nothing to a customer.
   // =========================================================================
   cron.schedule('37 7 * * *', async () => {
-    if (!require('../config/feature-gates').invoiceNotOnSparkLive()) return;
     try {
       await runExclusive('invoice-not-on-spark', async () => {
         const result = await require('./invoice-not-on-spark').runInvoiceNotOnSpark();
@@ -6004,15 +6002,13 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 7:43AM — Cash forecast low week (GATE_CASH_FORECAST; returns before any
-  // read when off). Owner 2026-11-04 D4 A: one standing owner-only bell when a week
+  // DAILY 7:43AM — Cash forecast low week. Owner 2026-11-04 D4 A: one standing owner-only bell when a week
   // of the next 13 ends below the owner's floor on the expected line. Rings only when
   // a low week first appears and closes itself when no week is below the floor.
   // Reads the forecast (Plaid's free /accounts/get, Stripe's balance, the portal's
   // own data); sends nothing to a customer.
   // =========================================================================
   cron.schedule('43 7 * * *', async () => {
-    if (!require('../config/feature-gates').cashForecastLive()) return;
     try {
       await runExclusive('cash-forecast-low-week', async () => {
         const result = await require('./cash-forecast/low-week-bell').runCashForecastLowWeek();
