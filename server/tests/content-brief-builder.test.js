@@ -1554,3 +1554,95 @@ describe('_gatherSignals: the search step retries a transient DataForSEO error o
     expect(out.serp_profile).toEqual({ dominant_intent: 'informational' });
   });
 });
+
+// Every claim composes a new brief, also one that then waits for a publish cap or for the terminal's
+// draft. Three such waits made a refresh "likely loop" for good (2026-11). Only briefs whose run got
+// as far as a draft count toward that review.
+describe('loop review counts only briefs whose run got as far as a draft', () => {
+  const { countLoopBriefs, NO_DRAFT_OUTCOMES } = require('../services/content/content-brief-builder')._internals;
+  const terminalWriter = require('../services/content/terminal-writer');
+  const db = require('../models/db');
+
+  test('the waiting outcomes are the publish-cap wait and the terminal-draft wait', () => {
+    expect([...NO_DRAFT_OUTCOMES].sort()).toEqual(['deferred_publish_cap', terminalWriter.AWAITING_OUTCOME].sort());
+  });
+
+  test('a brief counts unless every one of its runs waited without a draft', () => {
+    // The shape that parked a service-page refresh: four briefs, two real tries.
+    expect(countLoopBriefs([
+      { brief_id: 'b1', outcome: 'deferred_publish_cap' },
+      { brief_id: 'b2', outcome: 'deferred_terminal_draft' },
+      { brief_id: 'b2', outcome: 'completed_pending_review' },
+      { brief_id: 'b3', outcome: 'deferred_publish_cap' },
+      { brief_id: 'b4', outcome: 'deferred_terminal_draft' },
+      { brief_id: 'b4', outcome: 'deferred_terminal_hold' },
+    ])).toBe(2);
+    // Twelve waits for the terminal across three briefs are not one try.
+    expect(countLoopBriefs([
+      ...Array.from({ length: 12 }, (_, i) => ({ brief_id: `b${1 + (i % 3)}`, outcome: 'deferred_terminal_draft' })),
+    ])).toBe(0);
+    // Three gate failures are a loop.
+    expect(countLoopBriefs([
+      { brief_id: 'b1', outcome: 'deferred_gate_retry' },
+      { brief_id: 'b2', outcome: 'skipped_gate_fail' },
+      { brief_id: 'b3', outcome: 'completed_pending_review' },
+    ])).toBe(3);
+  });
+
+  test('a brief with no run, or a run with no outcome yet, counts', () => {
+    expect(countLoopBriefs([
+      { brief_id: 'b1', outcome: null },
+      { brief_id: 'b2', outcome: 'deferred_publish_cap' },
+      { brief_id: 'b2', outcome: null },
+    ])).toBe(2);
+    expect(countLoopBriefs([])).toBe(0);
+    expect(countLoopBriefs(undefined)).toBe(0);
+  });
+
+  test('_countLoopBriefs reads each brief with its run outcomes, and a failed read gives the full count', async () => {
+    const chain = {
+      leftJoin: jest.fn(() => chain),
+      where: jest.fn(() => chain),
+      select: jest.fn(async () => [
+        { brief_id: 'b1', outcome: 'deferred_publish_cap' },
+        { brief_id: 'b2', outcome: 'skipped_gate_fail' },
+      ]),
+    };
+    db.mockImplementation(() => chain);
+    try {
+      const builder = new ContentBriefBuilder();
+      await expect(builder._countLoopBriefs('opp-1', 2)).resolves.toBe(1);
+      expect(db).toHaveBeenCalledWith('content_briefs as b');
+      expect(chain.leftJoin).toHaveBeenCalledWith('autonomous_runs as r', 'r.brief_id', 'b.id');
+      expect(chain.where).toHaveBeenCalledWith('b.opportunity_id', 'opp-1');
+
+      chain.select.mockRejectedValueOnce(new Error('relation does not exist'));
+      await expect(builder._countLoopBriefs('opp-1', 4)).resolves.toBe(4);
+    } finally {
+      db.mockReset();
+    }
+  });
+
+  test('compose gives the router both counts', async () => {
+    const queue = require('../services/content/opportunity-queue');
+    const router = require('../services/content/decision-router');
+    const opportunity = {
+      id: 'opp-loop-count', page_url: null, query: 'termite swarmers', service: 'termite', city: 'Bradenton',
+      bucket: 'customer_need', signal_metadata: {},
+    };
+    const getById = jest.spyOn(queue, 'getById').mockResolvedValue(opportunity);
+    const route = jest.spyOn(router, 'route').mockImplementation(() => { throw new Error('stop after route'); });
+    try {
+      const builder = new ContentBriefBuilder();
+      builder._gatherSignals = jest.fn().mockResolvedValue({ customer_signal: null, serp_profile: null, conversion_feedback: null });
+      builder._countExistingBriefs = jest.fn().mockResolvedValue(4);
+      builder._countLoopBriefs = jest.fn().mockResolvedValue(2);
+      await expect(builder.compose(opportunity.id, { persist: false })).rejects.toThrow('stop after route');
+      expect(builder._countLoopBriefs).toHaveBeenCalledWith('opp-loop-count', 4);
+      expect(route).toHaveBeenCalledWith(opportunity, expect.objectContaining({ existing_brief_versions: 4, loop_brief_versions: 2 }));
+    } finally {
+      getById.mockRestore();
+      route.mockRestore();
+    }
+  });
+});

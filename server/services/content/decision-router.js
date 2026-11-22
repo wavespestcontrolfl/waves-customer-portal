@@ -129,6 +129,8 @@ function serpSafetyStop(serp_profile) {
  *   customer_signal?: from customer-insights-miner cluster — may be null,
  *   conversion_feedback?: from conversion-feedback-miner — may be null,
  *   existing_brief_versions?: int (for dedupe; opportunity already had a brief?)
+ *   loop_brief_versions?: int (the prior briefs whose run got as far as a draft; the "likely loop"
+ *     review counts these. Missing = existing_brief_versions)
  * }
  *
  * Returns {
@@ -179,6 +181,11 @@ function route(opportunity, signals = {}) {
   }
 
   const { serp_profile, customer_signal, conversion_feedback, existing_brief_versions = 0 } = signals;
+  // A claim that waited for a publish cap or for the terminal's draft composed a brief and wrote no
+  // draft. Such a brief is not a try, so it does not count toward the loop review.
+  const loopBriefVersions = Number.isInteger(signals.loop_brief_versions)
+    ? signals.loop_brief_versions
+    : existing_brief_versions;
 
   const notes = [];
   const breakdown = { base: opportunity.score || 0 };
@@ -275,9 +282,9 @@ function route(opportunity, signals = {}) {
   if (existing_brief_versions > 0 && action !== 'do_not_publish') {
     breakdown.redundancy = -Math.round(WEIGHTS.redundancy * Math.min(1, existing_brief_versions / 3));
     notes.push(`redundancy penalty: ${existing_brief_versions} prior brief version(s)`);
-    if (existing_brief_versions >= 3) {
+    if (loopBriefVersions >= 3) {
       humanReview = true;
-      humanReason = humanReason || `${existing_brief_versions} prior brief versions — likely loop`;
+      humanReason = humanReason || `${loopBriefVersions} prior brief versions — likely loop`;
     }
   }
 
