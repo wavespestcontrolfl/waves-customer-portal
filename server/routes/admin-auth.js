@@ -249,10 +249,13 @@ async function login(req, res, next) {
       .select('*');
 
     const candidate = matches.length === 1 ? matches[0] : null;
-    const passwordHash = typeof candidate?.password_hash === 'string' && candidate.password_hash
+    const ownHash = typeof candidate?.password_hash === 'string' && candidate.password_hash
       ? candidate.password_hash
-      : DUMMY_STAFF_PASSWORD_HASH;
-    const valid = await bcrypt.compare(password, passwordHash);
+      : null;
+    // The comparison always runs, for timing. A match against the fixed stand-in hash proves nothing about an
+    // account: a row with no password of its own (a hire who has not set one yet, or who signs in with Google)
+    // never gets a password session.
+    const valid = await bcrypt.compare(password, ownHash || DUMMY_STAFF_PASSWORD_HASH) && Boolean(ownHash);
 
     if (matches.length !== 1) {
       if (matches.length > 1) {

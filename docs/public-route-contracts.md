@@ -3479,6 +3479,21 @@ string whose amounts come from the live referral settings (the member
 sentence is dropped at the yearly limit; no card at all when the
 program is paused or its settings are unreadable). Read-only: a render
 enrolls no promoter, writes nothing and carries no personal data.
+Pest price photo facts (`GATE_PEST_PRICE_PHOTO_FACTS`, owner 2026-11-21, "1, 2";
+dark by default): the gate adds no field and removes none. On, the pest
+offer's per-application price (`crossSell.option.perVisit`, and the same
+price on the portal offer card, the portal pricing card, the plan start and
+the one-tap purchase) is computed with the photo's shrubs, complexity and
+near-water facts when the property lookup's only doubt is the lawn area,
+in place of the neutral defaults (a fact the vision providers disputed
+keeps its default). An estimate minted from that offer keeps the facts in
+`engineInputs`, so the estimate page (`GET /api/estimates/:token/data`)
+prices the same plan rate; when staff turn on its one-time choice, that
+amount is computed from the quarterly rate as before and so follows it.
+It can also add the engine's hand-check
+mark to a pest line (heavy shrubs with a complex landscape), and such an
+offer degrades to the quote CTA as any held price does. Off or unset: the
+price of today.
 
 The payload's `protocol.structuredObservations` contains only the saved
 completion-form observation snapshot, and a nonempty snapshot carries
@@ -7369,6 +7384,9 @@ Staff authentication (`server/routes/admin-auth.js`, mounted at
 15 min) and answers every failure with a generic 401 `Invalid credentials`;
 `/forgot-password` (5 per 15 min) and `/reset-password` (10 per 15 min) key
 on `unauthenticatedAuthLimitKey` with production-only limiters;
+`POST /login` issues a password session only for a row with its own stored
+password hash (the timing comparison against the fixed stand-in hash still
+runs for a row with none, and a match there is refused);
 `/change-password`, `/register` (requireAdmin), and `/me` require the staff
 bearer. Two-step sign-in (`GATE_ADMIN_MFA`, dark): for an enrolled account
 `/login` returns `{ mfaRequired, challengeToken }` (a 5-minute signed JWT of
