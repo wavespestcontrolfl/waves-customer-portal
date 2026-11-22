@@ -126,6 +126,10 @@ const BOOKING_FUNNEL_SERVICE_CATEGORIES = {
   mosquito: 'mosquito',
   tree_shrub: 'tree_shrub',
   termite: 'termite',
+  // The /book rodent option is the bait-station program: its priced draft is the engine's
+  // rodent_bait line (FUNNEL_TO_DRAFT_FAMILY below), and the visit saves as "Rodent Control".
+  // So it is the rodent line (trapping and bait stations), not the exclusion line
+  // (auto-dispatch/service-category.js), which a sealing job reaches through its estimate.
   rodent: 'rodent',
   bora_care: 'termite', // catalog service_key 'bora_care' carries category 'termite'
 };

@@ -17,6 +17,21 @@ describe('service category classification', () => {
     ['Roof-Entry Cover / Bird Box Service', 'exclusion'],
     ['Rodent Sanitation Service — Heavy', 'exclusion'],
     ['Rodent Inspection Service', 'exclusion'],
+    // The estimate engine's own labels for sealing work and for the bundle that includes it.
+    ['Rodent Entry-Point Plugging', 'exclusion'],
+    ['Rodent Plugging', 'exclusion'],
+    ['Rodent entry-point sealing', 'exclusion'],
+    ['Seal rodent entry points', 'exclusion'],
+    ['Rodent Guarantee Combo (12 mo)', 'exclusion'],
+    ['Rodent Guarantee', 'exclusion'],
+    ['Attic Sanitation', 'exclusion'],
+    // The payment-only guarantee rider is never a visit; it stays rodent.
+    ['Rodent Guarantee Service', 'rodent'],
+    // Sanitation, sealing and plugging count only beside a rodent, attic or entry-point word.
+    ['Cockroach sanitation', 'general'],
+    ['Lawn Plugging', 'lawn'],
+    // The public booking page's rodent option (the bait-station program).
+    ['Rodent Control', 'rodent'],
     ['Rodent Trapping Service', 'rodent'],
     ['Rodent Trapping Follow-Up Visit Service', 'rodent'],
     ['Rodent Trap Check - Additional', 'rodent'],

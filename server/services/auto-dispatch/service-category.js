@@ -23,14 +23,28 @@ const TIME_WINDOWS = {
   no_preference: { key: 'no_preference', startMin: 8 * 60, endMin: 17 * 60, label: 'Anytime 8–5' },
 };
 
+// Rodent EXCLUSION names (owner 2026-11-21: the second technician traps, the owner seals): sealing,
+// wire mesh, roof-entry covers, attic sanitation, the rodent inspection that prices a sealing job,
+// and the guarantee bundle the estimate engine sells (exclusion + bait stations; its label is
+// "Rodent Guarantee Combo (12 mo)" or the older "Rodent Guarantee"). Sanitation, sealing and
+// plugging count only beside a rodent, attic or entry-point word: "Cockroach sanitation" stays
+// general pest and "Lawn Plugging" stays lawn. "Rodent Guarantee Service" is the payment-only
+// guarantee rider, never a visit, and stays rodent.
+const EXCLUSION_NAME = new RegExp([
+  'exclusion', 'wire\\s*mesh', 'bird\\s*box', 'roof[- ]?entry',
+  'rodent\\s+inspection',
+  '(?:rodent|attic).*sanitation', 'sanitation.*(?:rodent|attic)',
+  '(?:rodent|entry[- ]?points?).*\\b(?:plug|seal)', '\\b(?:plug|seal)\\w*.*(?:rodent|entry[- ]?points?)',
+  'rodent\\s+guarantee(?!\\s+service)',
+].join('|'), 'i');
+
 // Ordered most-specific-first; first regex match wins. General pest is the fallback.
 const CATEGORY_PATTERNS = [
   ['termite', /termit|foam[_\s]*recurring|recurring[_\s]*foam|wdo|bora\s*care|wood[- ]?destroy|soil\s*(poison|treat)|pre[- ]?slab|preconstruction/i],
-  // Rodent EXCLUSION is its own line (owner 2026-11-21: the second technician traps, the owner seals):
-  // sealing, wire mesh, roof-entry covers, attic sanitation, and the rodent inspection that prices a
-  // sealing job. Tested before 'rodent', so the first visit of a job sold with trapping AND exclusion
-  // ("Rodent Exclusion & Trapping") reads exclusion; its trap checks are their own services and read rodent.
-  ['exclusion', /exclusion|wire\s*mesh|bird\s*box|roof[- ]?entry|sanitation|rodent\s+inspection/i],
+  // Exclusion is its own line. Tested before 'rodent', so the first visit of a job sold with trapping
+  // AND exclusion ("Rodent Exclusion & Trapping") reads exclusion; its trap checks are their own
+  // services and read rodent.
+  ['exclusion', EXCLUSION_NAME],
   ['rodent', /rodent|\brat\b|\brats\b|mice|\bmouse\b|trapping/i],
   ['mosquito', /mosquito|no[- ]?see[- ]?um|midge/i],
   ['lawn', /lawn|turf|fertiliz|weed\s*control|fungus|grass|aeration|de[- ]?thatch|tree\s*&?\s*(and\s*)?shrub|\bt\s*&\s*s\b|ornamental|palm\s*(injection|treat)/i],

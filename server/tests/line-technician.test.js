@@ -121,6 +121,16 @@ describe('serviceLineFor', () => {
     expect(await serviceLineFor(db, { serviceId: 'x4' })).toEqual({ line: 'exclusion', lineFrom: 'catalog' });
   });
 
+  test('an estimate line with no catalog row reads its label: the guarantee bundle and plugging are exclusion, the rider is not', async () => {
+    // The estimate picker passes each held program's label (estimate-slot-availability heldVisitLines), and the
+    // bundle (exclusion + bait stations) has no catalog row on purpose, so the saved visit carries the label too.
+    const db = fakeDb({ services: [{ id: 'g1', service_key: 'rodent_guarantee', category: 'rodent', name: 'Rodent Guarantee Service' }] });
+    expect(await serviceLineFor(db, { serviceType: 'Rodent Guarantee Combo (12 mo)' })).toEqual({ line: 'exclusion', lineFrom: 'name' });
+    expect(await serviceLineFor(db, { serviceType: 'Rodent Guarantee' })).toEqual({ line: 'exclusion', lineFrom: 'name' });
+    expect(await serviceLineFor(db, { serviceType: 'Rodent Entry-Point Plugging' })).toEqual({ line: 'exclusion', lineFrom: 'name' });
+    expect(await serviceLineFor(db, { serviceKey: 'rodent_guarantee', serviceType: 'Rodent Guarantee Service' })).toEqual({ line: 'rodent', lineFrom: 'catalog' });
+  });
+
   test('live: an exclusion visit goes to the exclusion line technician, a trap check to the rodent line technician', async () => {
     process.env.GATE_SERVICE_LINE_MAP = 'live';
     process.env.GATE_TECH_WORK_DAYS = 'true';

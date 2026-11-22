@@ -100,7 +100,7 @@ describe('the catalog category table (one table, shared with the service-line ma
     expect(lineForCatalogRow({ service_key: 'rodent_exclusion_whole_home', category: 'rodent', name: 'Whole-Home Rodent Exclusion Service' })).toBe('exclusion');
     expect(lineForCatalogRow({ service_key: 'rodent_new_trap_plan', category: 'rodent', name: 'Rodent Trap Plan' })).toBe('rodent');
     // The name check is for rodent rows only: another category keeps its line whatever the name says.
-    expect(lineForCatalogRow({ service_key: 'k', category: 'lawn_care', name: 'Sanitation' })).toBe('lawn');
+    expect(lineForCatalogRow({ service_key: 'k', category: 'lawn_care', name: 'Rodent Exclusion' })).toBe('lawn');
     expect(lineForCatalogRow({ service_key: 'k', category: 'other', name: 'Rodent Exclusion' })).toBeNull();
     expect(lineForCatalogRow(null)).toBeNull();
     expect(lineForCatalogRow({})).toBeNull();

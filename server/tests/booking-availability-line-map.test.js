@@ -166,6 +166,9 @@ describe('funnelServiceLines / buildFunnelAvailability', () => {
     expect(funnelServiceLines('lawn_care+tree_shrub')).toEqual(['lawn']);
     expect(funnelServiceLines('pest_control+lawn_care')).toEqual(['general', 'lawn']);
     expect(funnelServiceLines('bora_care')).toEqual(['termite']);
+    // The /book rodent option is the bait-station program (priced as rodent_bait): the rodent
+    // line, not the exclusion line a sealing estimate carries.
+    expect(funnelServiceLines('rodent')).toEqual(['rodent']);
   });
 
   test('not live, no funnel key or an unknown key: no lines', () => {
