@@ -15,7 +15,7 @@ jest.mock('../services/mail/home-quote', () => ({ priceHome: jest.fn() }));
 
 const homeFacts = require('../services/mail/home-facts');
 const { priceHome } = require('../services/mail/home-quote');
-const { runHomePrices, BUDGET_MS, ROW_CAP } = require('../services/mail/home-price');
+const { runHomePrices, BUDGET_MS, ROW_CAP, READ_CAP } = require('../services/mail/home-price');
 
 const actualFacts = jest.requireActual('../services/mail/home-facts');
 const actualQuote = jest.requireActual('../services/mail/home-quote');
@@ -90,6 +90,7 @@ describe('one row', () => {
     const [options] = homeFacts.createFactsContext.mock.calls[0];
     expect(options.deps).toBe(t.deps);
     expect(options.clock()).toBe(NOW);
+    expect(options.deadline).toBe(NOW + BUDGET_MS); // the end of the run's budget, for the permit throttle
     expect(priceHome.mock.calls[0][2]).toBe(t.deps);
   });
 
@@ -217,13 +218,42 @@ describe('the end of the run', () => {
 });
 
 describe('limits that do not fail the run', () => {
-  test('the due read asks for 40 rows at the run\'s time; a full list of 40 sets capReached and does not throw', async () => {
-    const rows = Array.from({ length: ROW_CAP }, () => makeRow());
+  test('the due read asks for 200 rows at the run\'s time; a run handles 40 homes, the rest waits, and it does not throw', async () => {
+    const rows = Array.from({ length: ROW_CAP + 5 }, () => makeRow());
     const t = setup({ rows });
     const summary = await t.run();
-    expect(ROW_CAP).toBe(40);
-    expect(t.deps.dueForPrice).toHaveBeenCalledWith({ limit: 40, now: new Date(NOW) });
-    expect(summary).toMatchObject({ due: 40, capReached: true, priced: 40, budgetSpent: false });
+    expect([ROW_CAP, READ_CAP]).toEqual([40, 200]);
+    expect(t.deps.dueForPrice).toHaveBeenCalledWith({ limit: 200, now: new Date(NOW) });
+    expect(summary).toMatchObject({ due: 45, capReached: true, priced: 40, budgetSpent: false });
+    expect(saved(t.deps).map(([row]) => row)).toEqual(rows.slice(0, 40));
+    // Exactly 40 due homes: every one is handled and nothing waits.
+    expect(await setup({ rows: rows.slice(0, 40) }).run()).toMatchObject({ due: 40, capReached: false, priced: 40 });
+  });
+
+  test('a home left for a stopped source is not one of the 40: the run goes on to the homes behind it', async () => {
+    const rows = Array.from({ length: 100 }, () => makeRow());
+    const waiting = new Set(rows.slice(0, 45).map((row) => row.id)); // they need the permit page, and it is stopped
+    homeFacts.readHomeFacts.mockImplementation(async (row) => (waiting.has(row.id) ? actualFacts.LEFT : { facts: FACTS, missing: null }));
+    const t = setup({ rows });
+    const summary = await t.run();
+    expect(summary).toMatchObject({ due: 100, left: 45, priced: 40, capReached: true });
+    expect(saved(t.deps).map(([row]) => row)).toEqual(rows.slice(45, 85));
+  });
+
+  test('a row that could not be read or saved is one of the 40', async () => {
+    const rows = Array.from({ length: 45 }, () => makeRow());
+    const t = setup({ rows, savePriceResult: jest.fn(async () => { throw new TypeError('x'); }) });
+    const failure = await t.run().catch((err) => err);
+    expect(t.deps.savePriceResult).toHaveBeenCalledTimes(40);
+    expect(failure.summary).toMatchObject({ capReached: true, errors: { TypeError: 40 } });
+  });
+
+  test('a read of 200 rows that the run walked to its end sets capReached: more may wait behind it', async () => {
+    const rows = Array.from({ length: READ_CAP }, () => makeRow());
+    homeFacts.readHomeFacts.mockResolvedValue(actualFacts.LEFT);
+    expect(await setup({ rows }).run()).toMatchObject({ due: 200, left: 200, priced: 0, capReached: true });
+    // A shorter read walked to its end leaves nothing behind.
+    expect(await setup({ rows: rows.slice(0, 60) }).run()).toMatchObject({ due: 60, left: 60, capReached: false });
   });
 
   test('a spent 20 minute budget leaves the rest for the next run and does not throw', async () => {
@@ -244,7 +274,7 @@ describe('limits that do not fail the run', () => {
       const rows = Array.from({ length: 6 }, () => makeRow());
       const t = setup({ rows, savePriceResult: jest.fn(async () => { real += BUDGET_MS / 3; return { written: true }; }) });
       const summary = await runHomePrices({ now: NOW, deps: t.deps });
-      expect(t.deps.dueForPrice).toHaveBeenCalledWith({ limit: 40, now: new Date(NOW) });
+      expect(t.deps.dueForPrice).toHaveBeenCalledWith({ limit: 200, now: new Date(NOW) });
       expect(saved(t.deps)).toHaveLength(3);
       expect(summary).toMatchObject({ due: 6, budgetSpent: true, ms: BUDGET_MS });
       // The facts reader's clock is the same advancing one.
@@ -485,5 +515,34 @@ describe('the run with the real facts reader and the real quote (their outside c
     expect(failure.summary).toMatchObject({ permitPageOff: true, left: 1, priced: 1 });
     expect(t.deps.fetchPermitPage).not.toHaveBeenCalled();
     expect(saved(t.deps).map(([row]) => row)).toEqual([fine]);
+  });
+
+  test('the budget ends between two requests of one permit page read (the real throttle): the home is left untried, not failed, and the run is good', async () => {
+    useReal();
+    const [needs, later] = [makeRow(), makeRow()];
+    const parcels = {
+      [needs.parcel_pin]: { lotSqft: 8000, livingAreaSqft: null, stories: 1 },
+      [later.parcel_pin]: { lotSqft: 8000, livingAreaSqft: 1800, stories: 1 },
+    };
+    let clockNow = NOW;
+    const sent = [];
+    const t = setup({
+      rows: [needs, later],
+      permits: { [needs.permit_no]: permitOf({ detail_status: null, detail_fetched_at: null, conditioned_sqft: null, stories: null }) },
+      permitPageOn: jest.fn(() => true),
+      ...lowLevel(parcels),
+      createThrottle: jest.requireActual('../services/property-lookup/manatee-permit-detail')._private.createThrottle,
+      // Two requests of one page read, as the permit reader sends them: each through the throttle.
+      fetchPermitPage: jest.fn(async (_no, { polite }) => {
+        await polite(async () => { sent.push('search'); clockNow = NOW + BUDGET_MS; });
+        await polite(async () => { sent.push('record'); });
+        return { status: 'ok', facts: { conditioned_sqft: 2400, stories: 2 } };
+      }),
+    });
+    const summary = await runHomePrices({ now: () => clockNow, deps: t.deps });
+    expect(sent).toEqual(['search']); // the second request is never sent
+    expect(summary).toMatchObject({ due: 2, left: 1, priced: 0, budgetSpent: true, permitBudgetStop: true, permitFailuresInARow: 0, permitStopped: false });
+    expect(t.deps.recordPermitResult).not.toHaveBeenCalled();
+    expect(t.deps.savePriceResult).not.toHaveBeenCalled();
   });
 });
