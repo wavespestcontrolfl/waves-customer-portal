@@ -79,8 +79,22 @@ function freedMin(rec) {
   return fig && rec.now ? Math.max(0, fig.sellableMin - rec.now.sellableMin) : 0;
 }
 
+/** True when the P1 (pack) rule accepts the day's plan. */
+const accepts = (rec) => !!(rec.p1 && rec.p1.wouldAccept);
+
 /** True for a day whose plan is the pack plan (day-replan/index.js withPackPlan: the record's p1 is that plan, accepted). */
-const packedDay = (rec) => !!(rec.p1 && rec.p1.plan === 'pack' && rec.p1.wouldAccept);
+const packedDay = (rec) => accepts(rec) && rec.p1.plan === 'pack';
+
+/**
+ * Where a planned tech-day belongs in the pack lists: 'moved' (the run wrote its pack plan), 'unmoved' (the rule accepts
+ * a plan the run did not write), or null. An unwritten day is chosen by the rule's acceptance, not by its sellable
+ * minutes: the rule accepts on the BIGGEST block (two 1-hour openings joined into one 2-hour opening add no sellable
+ * minute and still fit a new job).
+ */
+function packState(row, rec) {
+  if (row.apply_status === 'applied') return packedDay(rec) ? 'moved' : null;
+  return accepts(rec) ? 'unmoved' : null;
+}
 
 /** New jobs a block has room for (close-gaps SLOT_MIN: a 1-hour job and the drive it adds). */
 const jobsIn = (b) => Math.floor(b.min / SLOT_MIN);
@@ -161,22 +175,18 @@ function summarize(rows, techNames, unplanned = []) {
   let freed = 0;
   let replayed = 0;
   let pickDiffers = 0;
-  const packedDays = [];
-  const unmovedDays = [];
+  const pack = { moved: [], unmoved: [] };
   for (const row of rows) {
     const rec = parse(row.close_gaps);
     if (!rec || !rec.now) continue;
+    const who = { day: row.day, tech: techNames.get(String(row.technician_id)) || null, techId: String(row.technician_id) };
     for (const b of standing(row, rec).blocks || []) {
-      if (b.min >= SELLABLE_MIN) blocks.push({ day: row.day, tech: techNames.get(String(row.technician_id)) || null, techId: String(row.technician_id), ...b });
+      if (b.min >= SELLABLE_MIN) blocks.push({ ...who, ...b });
     }
-    // An applied day already has the re-plan's hours (a packed day is counted as moved); a day the run did not write
-    // keeps its gain, counted from the day as booked.
-    const applied = row.apply_status === 'applied';
-    const gain = applied ? 0 : freedMin(rec);
-    freed += gain;
-    const techDay = { day: row.day, tech: techNames.get(String(row.technician_id)) || null, techId: String(row.technician_id) };
-    if (gain > 0) unmovedDays.push(techDay);
-    if (applied && packedDay(rec)) packedDays.push(techDay);
+    const state = packState(row, rec);
+    if (state) pack[state].push({ ...who, gainMin: rec.p1.gainMin });
+    // An applied day already has the re-plan's hours; the measured rules' gains were counted from the day as booked.
+    if (row.apply_status !== 'applied') freed += freedMin(rec);
     replayed += (rec.s1 || []).length;
     pickDiffers += (rec.s1 || []).filter((s) => s.differs).length;
   }
@@ -185,9 +195,9 @@ function summarize(rows, techNames, unplanned = []) {
     for (const b of u.blocks) blocks.push({ day: u.day, tech, techId: String(u.technician_id), grid: true, stops: u.stops, ...b });
   }
   blocks.sort((a, b) => a.day.localeCompare(b.day) || a.start - b.start);
-  for (const list of [packedDays, unmovedDays]) list.sort((a, b) => a.day.localeCompare(b.day));
+  for (const list of [pack.moved, pack.unmoved]) list.sort((a, b) => a.day.localeCompare(b.day));
   const biggest = blocks.reduce((best, b) => (!best || b.min > best.min ? b : best), null);
-  return { blocks, totalMin: blocks.reduce((n, b) => n + b.min, 0), slots: blocks.reduce((n, b) => n + jobsIn(b), 0), biggest, freedMin: freed, packedDays, unmovedDays, replayed, pickDiffers };
+  return { blocks, totalMin: blocks.reduce((n, b) => n + b.min, 0), slots: blocks.reduce((n, b) => n + jobsIn(b), 0), biggest, freedMin: freed, packedDays: pack.moved, unmovedDays: pack.unmoved, replayed, pickDiffers };
 }
 
 const gridNote = (b) => (b.grid ? (b.stops ? ', 1 stop that day, drive not counted' : ', no stops booked') : '');
@@ -302,15 +312,21 @@ function rainLines(rain) {
 
 /**
  * What the pack rule did and what it left (owner 2026-11-22: the 04:40 run writes the pack plan in apply mode). A day
- * the run moved is already in the listed blocks. `freedMin` comes from the days the rule accepts that the run did not
- * write: every such day in shadow mode; in apply mode a day that changed after the plan or that the writer refused.
+ * the run moved is already in the listed blocks. The days the rule accepts that the run did not write are listed with
+ * the rule's own gain (the biggest block): every such day in shadow mode; in apply mode a day that changed after the
+ * plan or that the writer refused. `freedMin` is their total in sellable minutes, which can be 0.
  */
 function packLines(sum) {
   // Each technician's day by name: two technicians packed on one date are two schedules.
-  const names = (list) => list.map((d) => `${dayLabel(d.day)}${d.tech ? `, ${d.tech}` : ''}`).join('; ');
+  const name = (d) => `${dayLabel(d.day)}${d.tech ? `, ${d.tech}` : ''}`;
+  // The rule's own gain (the biggest open block), per day; the sellable minutes are the total, and may be none.
+  const bigger = (d) => (Number.isFinite(d.gainMin) ? ` (biggest block ${span(d.gainMin)} bigger)` : '');
   const lines = [];
-  if (sum.packedDays.length) lines.push(`The 4:40 AM run moved booked jobs toward the morning on: ${names(sum.packedDays)}. The blocks above are after that move.`);
-  if (sum.unmovedDays.length) lines.push(`Not moved: re-timing booked jobs toward the morning would free ${span(sum.freedMin)} more on: ${names(sum.unmovedDays)}.`);
+  if (sum.packedDays.length) lines.push(`The 4:40 AM run moved booked jobs toward the morning on: ${sum.packedDays.map(name).join('; ')}. The blocks above are after that move.`);
+  if (sum.unmovedDays.length) {
+    const freed = sum.freedMin ? ` It would free ${span(sum.freedMin)} more.` : '';
+    lines.push(`Not moved: re-timing booked jobs toward the morning would help on: ${sum.unmovedDays.map((d) => `${name(d)}${bigger(d)}`).join('; ')}.${freed}`);
+  }
   return lines;
 }
 

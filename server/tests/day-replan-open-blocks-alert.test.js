@@ -115,10 +115,10 @@ describe('the copy', () => {
       close_gaps: rec([tail(695, 325)], { packed: driveBest, p1: { plan: 'pack', packed: packPlan, wouldAccept: true, reason: 'bigger_block', gainMin: 95, lunchLost: false, changes: [] } }),
     }], new Map());
     expect(withGain.freedMin).toBe(95);
-    expect(withGain).toMatchObject({ unmovedDays: [{ day: '2026-11-21', tech: null, techId: TECH }], packedDays: [] });
+    expect(withGain).toMatchObject({ unmovedDays: [{ day: '2026-11-21', tech: null, techId: TECH, gainMin: 95 }], packedDays: [] });
     expect(composeAdminAlert(_internals.alertSpec(withGain)).why).toBe('Biggest block: Sat Nov 21, 11:35 AM to 5:00 PM; re-timing booked jobs could free 1 h 35 min more.');
     // The run did not write that day (shadow mode, or the write was skipped): the detail says what is left.
-    expect(_internals.detailText(withGain)).toContain('Not moved: re-timing booked jobs toward the morning would free 1 h 35 min more on: Sat Nov 21.');
+    expect(_internals.detailText(withGain)).toContain('Not moved: re-timing booked jobs toward the morning would help on: Sat Nov 21 (biggest block 1 h 35 min bigger). It would free 1 h 35 min more.');
     expect(_internals.detailText(withGain)).not.toContain('The 4:40 AM run moved');
   });
 
@@ -135,9 +135,24 @@ describe('the copy', () => {
     expect(text).not.toContain('Not moved');
     // The same packed plan when the writer skipped the day: the day reads as booked and its gain is still open.
     const skipped = _internals.summarize([{ ...row, apply_status: 'skipped' }], names);
-    expect(skipped).toMatchObject({ packedDays: [], unmovedDays: [{ day: '2026-11-21', tech: 'Pat' }], freedMin: 95 });
+    expect(skipped).toMatchObject({ packedDays: [], unmovedDays: [{ day: '2026-11-21', tech: 'Pat', gainMin: 95 }], freedMin: 95 });
     expect(skipped.blocks.map((b) => [b.start, b.min])).toEqual([[695, 325]]);
-    expect(_internals.detailText(skipped)).toContain('Not moved: re-timing booked jobs toward the morning would free 1 h 35 min more on: Sat Nov 21, Pat.');
+    expect(_internals.detailText(skipped)).toContain('Not moved: re-timing booked jobs toward the morning would help on: Sat Nov 21, Pat (biggest block 1 h 35 min bigger). It would free 1 h 35 min more.');
+  });
+
+  test('an accepted plan the run did not write is listed even when it frees no sellable minute: two 1-hour openings joined into one', () => {
+    // As booked: two openings of 60 minutes. Packed: one of 120. The sellable minutes are 120 both ways; the biggest block doubles.
+    const packPlan = { ...rec([tail(900, 120)]).now };
+    const p1 = { plan: 'pack', packed: packPlan, wouldAccept: true, reason: 'bigger_block', gainMin: 60, lunchLost: false, changes: [{ id: 'v1', from: '13:00', to: '12:00' }] };
+    const joined = _internals.summarize(
+      [{ technician_id: TECH, day: '2026-11-21', close_gaps: rec([wait(720, 60), tail(960, 60)], { packed: packPlan, p1 }) }],
+      new Map([[TECH, 'Pat']]),
+    );
+    expect(joined.freedMin).toBe(0);
+    expect(joined.unmovedDays).toEqual([{ day: '2026-11-21', tech: 'Pat', techId: TECH, gainMin: 60 }]);
+    const text = _internals.detailText(joined);
+    expect(text).toContain('Not moved: re-timing booked jobs toward the morning would help on: Sat Nov 21, Pat (biggest block 1 h bigger).');
+    expect(text).not.toContain('It would free');
   });
 
   test('two technicians packed on one date are named as two schedules, in day order', () => {
