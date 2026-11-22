@@ -125,18 +125,6 @@ describe('inviteSmsWithOffer (the invite text, column and referral_invite row)',
   });
 });
 
-describe('composerReferralLine (the office composer insert)', () => {
-  test('no amount: today\'s line exactly; an amount: the approved words', () => {
-    const link = 'https://portal.wavespestcontrol.com/r/WAVES-ABC12345';
-    expect(step2.composerReferralLine(link, 0)).toBe(`Know someone who needs pest control? Share Waves here: ${link}\n\n`);
-    expect(step2.composerReferralLine(link, undefined)).toBe(`Know someone who needs pest control? Share Waves here: ${link}\n\n`);
-    expect(step2.composerReferralLine(link, 5000)).toBe(
-      `Know someone who needs pest or lawn care? They get a $50 credit after their first plan service with your link: ${link}\n\n`,
-    );
-    expect(step2.composerReferralLine(link, 2550)).toContain('They get a $25.50 credit');
-  });
-});
-
 describe('nudgeEmailWithOffer (the referral_nudge email)', () => {
   const offer = { refereeCents: 5000, memberCents: 2500, atLimit: false };
   const APPROVED_HTML = 'When a neighbor, friend or family member starts a recurring plan with your link, they get a <strong>$50 account credit</strong> after their first service. After we complete their first service, you get a <strong>$25 account credit</strong>.';
