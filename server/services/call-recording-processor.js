@@ -9863,10 +9863,20 @@ const NEGATED_CADENCE_BEFORE_RE = /(?:\b(?:not|no|never|without|rather than|inst
 // Billing cadence is not service cadence: "can I PAY MONTHLY for the one-time
 // treatment?" is a payment-terms question.
 const PAYMENT_CONTEXT_BEFORE_RE = /\b(?:pay(?:ing)?|billed?|billing|charged?|payments?|installments?|invoiced?)\b[^.?!]{0,15}$/i;
+// A cadence the same sentence places WITH SOMEONE ELSE is that company's plan,
+// not an ask of Waves: "I just signed up for a monthly service with them that
+// I don't even need" booked a same-day one-time ant job as Monthly Pest Control
+// (2026-11-21). The marker may follow the cadence word or come before it
+// ("signed up with another company for monthly service"). A caller speaking to
+// Waves says "with you", which is not here.
+const OTHER_PROVIDER = String.raw`\bwith (?:them|another|a different|some other|the other|my (?:current|other|old|last|previous))\b`;
+const OTHER_PROVIDER_AFTER_RE = new RegExp(`^[^.?!;]{0,40}${OTHER_PROVIDER}`, 'i');
+const OTHER_PROVIDER_BEFORE_RE = new RegExp(`${OTHER_PROVIDER}[^.?!;]{0,40}$`, 'i');
 
 // True when `re` (global) matches somewhere that reads as SERVICE cadence:
-// not negated, and not preceded by a pest-pressure verb in the same clause —
-// unless a request verb after the pressure verb turned the clause into an ask.
+// not negated, not another company's plan, and not preceded by a pest-pressure
+// verb in the same clause — unless a request verb after the pressure verb
+// turned the clause into an ask.
 function serviceCadenceMatch(re, text) {
   const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
   let m;
@@ -9874,7 +9884,9 @@ function serviceCadenceMatch(re, text) {
     const before = text.slice(Math.max(0, m.index - 60), m.index);
     const after = text.slice(m.index + m[0].length, m.index + m[0].length + 20);
     const billingNounAfter = /^\s{0,2}(?:payments?|installments?|billing|invoices?|price|pricing|cost)\b/i.test(after);
-    if (!billingNounAfter && !NEGATED_CADENCE_BEFORE_RE.test(before) && !PAYMENT_CONTEXT_BEFORE_RE.test(before)) {
+    const otherProvider = OTHER_PROVIDER_BEFORE_RE.test(before)
+      || OTHER_PROVIDER_AFTER_RE.test(text.slice(m.index + m[0].length, m.index + m[0].length + 70));
+    if (!billingNounAfter && !otherProvider && !NEGATED_CADENCE_BEFORE_RE.test(before) && !PAYMENT_CONTEXT_BEFORE_RE.test(before)) {
       const pressure = before.match(PEST_PRESSURE_BEFORE_RE);
       if (!pressure || REQUEST_VERB_RE.test(before.slice(pressure.index))) return true;
     }

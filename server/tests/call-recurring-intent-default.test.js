@@ -403,6 +403,31 @@ describe('applyRecurringIntentDefault', () => {
     ).matched_service).toBe('Bee / Wasp Nest Removal Service');
   });
 
+  // 2026-11-21: a same-day one-time ant job booked as Monthly Pest Control. The caller's only
+  // cadence word described the plan she had just bought from another company.
+  test('a plan the caller bought from ANOTHER company is not an ask, wherever the marker sits', () => {
+    const oneTime = lead({ matched_service: 'One-Time Pest Control Service', specific_service_name: 'One-Time Pest Control Service' });
+    const t = [
+      'Caller: Do you happen to have anyone that could come out and spray, like, today?',
+      'Agent: One-time service is $250, but it varies.',
+      "Caller: Meanwhile, I just signed up for, like, a monthly service with them now that I don't even need because they didn't have, like, a one-time thing.",
+    ].join('\n');
+    expect(applyRecurringIntentDefault(oneTime, t)).toBe(oneTime);
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I signed up with another company for quarterly service, I just need this nest gone.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: we get monthly service with my current company, but they will not come out for wasps.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+  });
+
+  test('another company\'s plan does not hide a real ask of Waves in the same call', () => {
+    // The ask carries its own cadence word, in its own sentence or after the marker's sentence ends.
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I have monthly service with them. Can you set me up on quarterly?').matched_service)
+      .toBe('Quarterly Pest Control Service');
+    // "with you" is Waves, never the other company.
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I would like to start monthly service with you guys.').matched_service)
+      .toBe('Monthly Pest Control Service');
+  });
+
   test('an agent NEGATIVE plan statement plus "yes" is not an accepted offer', () => {
     const t = [
       'Caller: I have a wasp nest.',
