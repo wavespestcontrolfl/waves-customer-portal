@@ -237,7 +237,66 @@ async function hasInboundEmailSince(est, cutoff) {
 // checked first). Soft-fails if the tables aren't
 // present (e.g. fresh env) so we don't break the whole follow-up loop.
 async function hasRepliedRecently(est, days = 14, opts = {}) {
-  return hasRepliedSince(est, new Date(Date.now() - days * 86400000), opts);
+  const now = Date.now();
+  const windowStart = new Date(now - days * 86400000);
+  // GATE_ESTIMATE_REPLY_PAUSE_SINCE_ESTIMATE (owner 2026-11-21), read at CALL time and defensively: many suites mock the
+  // whole feature-gates module with a bare object. Off = exactly the window above.
+  const sinceEstimate = require("../config/feature-gates").estimateReplyPauseSinceEstimateLive?.() === true;
+  const cutoff = sinceEstimate ? await replyPauseWindowStart(est, windowStart, now) : windowStart;
+  return hasRepliedSince(est, cutoff, opts);
+}
+
+// The estimate's own creation time as epoch ms, or null when it cannot be read as a time that is not in the future.
+function estimateCreatedMs(est, now) {
+  const raw = est && est.created_at;
+  if (raw === null || raw === undefined || raw === "") return null;
+  const ms = new Date(raw).getTime();
+  return Number.isFinite(ms) && ms <= now ? ms : null;
+}
+
+// Is there another estimate that went out to the same person before this one was made? Same person = the same
+// customer_id, a phone in one of the stored forms, or the same trimmed lower-cased email. A person with no identifier at
+// all matches nothing (the reply arms cannot match them either), so no read is made for them.
+async function hasEarlierSentEstimate(est, createdMs) {
+  const customerId = est.customer_id || null;
+  const phones = replyPhoneForms(est.customer_phone);
+  const email = String(est.customer_email || "").trim().toLowerCase();
+  if (!customerId && !phones.length && !email) return false;
+  const row = await db("estimates")
+    .whereNot("id", est.id)
+    .whereNotNull("sent_at")
+    .where("created_at", "<", new Date(createdMs))
+    .andWhere(function () {
+      if (customerId) this.where("customer_id", customerId);
+      for (const phone of phones) this.orWhere("customer_phone", phone);
+      if (email) this.orWhereRaw("LOWER(TRIM(customer_email)) = ?", [email]);
+    })
+    .first("id");
+  return !!row;
+}
+
+// Reply-pause window start, gate on (owner 2026-11-21, option A). The 14 days also reach back BEFORE the estimate
+// existed, so the inquiry text a new prospect sent ("can I get a quote?") switched off every follow-up for that
+// estimate. For a person's FIRST sent estimate the window starts at the estimate's creation instead, when that is
+// later than the 14-day start. A person who already had an estimate out is in a live conversation with the office
+// (a re-quote), so for them the deliberate 14-day pause keeps covering their earlier replies.
+// created_at, never sent_at: a resend overwrites estimates.sent_at, so sent_at would forget a reply made between the
+// first send and the resend. created_at never moves and is never later than any send.
+// Any doubt keeps today's window (it pauses more and sends less): an unreadable or future created_at, a created_at
+// older than the window (nothing to clamp, no extra read), or a failed earlier-estimate read. The failed read falls
+// back on the replay path too: today's window is the safe side there, so it never throws. Only the error code or
+// name is logged (a knex message carries phone numbers and addresses).
+async function replyPauseWindowStart(est, windowStart, now) {
+  const createdMs = estimateCreatedMs(est, now);
+  if (createdMs === null || createdMs <= windowStart.getTime()) return windowStart;
+  try {
+    if (await hasEarlierSentEstimate(est, createdMs)) return windowStart;
+  } catch (e) {
+    const reason = (e && (e.code || e.name)) || "error";
+    logger.warn(`[est-followup] reply-pause window check skipped for estimate ${est && est.id}: ${reason}`);
+    return windowStart;
+  }
+  return new Date(createdMs);
 }
 
 // The two reply arms (text, then email) since an instant: the reply-pause window above is "the last N days", the 2-hour
