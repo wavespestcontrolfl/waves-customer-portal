@@ -277,15 +277,17 @@ function priceSpecFor({ visit, name }) {
 }
 
 // The number is a dated fact here ("when this bell rang"), and the reader is sent to the call. A call booking
-// with no price leaves "Create invoice on completion" off (callBookingInvoiceOnComplete), so the detail names
-// that switch of the schedule editor too while it is off: a price alone may not invoice.
+// with no price leaves "Create invoice on completion" off (callBookingInvoiceOnComplete). While it is off the
+// detail says so and asks the office to check how the visit bills. It does not say to turn the switch on: a
+// one-time or per-visit billing lane invoices a priced, performed visit by itself, and the switch invoices at
+// completion whatever the visit's outcome.
 function priceDetailFor({ visit, amount, name }) {
   const booked = tidy(visit.row_name || visit.service_type || 'a visit');
   return `${name || 'A customer'}: the visit booked from a phone call for ${visit.visit_date} is "${booked}", a one-time visit with no price. `
     + `When this bell rang, the reading of the call held ${dollars(amount)} for that service: `
     + 'a price staff stated and the caller accepted, not confirmed as final (it can vary, or a charge was added). '
     + 'Check the call and the visit as it is now, then set the visit\'s price before it is billed. '
-    + (visit.create_invoice_on_complete ? '' : 'In the same edit, turn on "Create invoice on completion": the booking left it off because the visit had no price. ')
+    + (visit.create_invoice_on_complete ? '' : '"Create invoice on completion" is off on this visit: check how the visit bills when you set the price. ')
     + 'Nothing was changed and the customer was not contacted.';
 }
 
