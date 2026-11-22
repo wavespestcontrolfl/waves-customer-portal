@@ -41,8 +41,7 @@ import { groupInvoiceLinesByProperty, invoiceDiscountRows } from '@waves/invoice
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import Icon from '../components/Icon';
-import CrossSellOfferCard from '../components/crossSell/CrossSellOfferCard';
-import ReferralShareCard from '../components/referral/ReferralShareCard';
+import AppLinkCards from '../components/crossSell/AppLinkCards';
 import {
   WavesShell,
   CustomerColumn,
@@ -163,53 +162,8 @@ const receiptCardStyles = {
   heading: { fontSize: 20, lineHeight: 1.35, fontWeight: FW.semibold, color: DOC.ink, margin: '0 0 8px' },
   price: { fontSize: FS.bodyLg, fontWeight: FW.semibold, color: DOC.ink, margin: '0 0 8px' },
   copy: { fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.muted, margin: '0 0 14px' },
-  button: { ...docButton('primary'), display: 'inline-block', fontSize: FS.bodyLg },
-  link: { ...docButton('primary'), display: 'inline-block', fontSize: FS.bodyLg, textDecoration: 'none', margin: '10px 6px 0' },
-  code: { fontSize: 20, fontWeight: 700, color: DOC.ink, letterSpacing: '0.04em', marginRight: 10 },
+  button: { ...docButton('primary'), display: 'inline-block', fontSize: FS.bodyLg, textDecoration: 'none' },
 };
-
-async function postReceiptCardAction(token, path, payload) {
-  try {
-    const response = await fetch(`${API_BASE}/receipt/${token}/${path}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload || {}),
-    });
-    const body = await response.json().catch(() => null);
-    return { ok: response.ok, status: response.status, body };
-  } catch {
-    return { ok: false, status: 0, body: null };
-  }
-}
-
-function ReceiptCards({ data, token }) {
-  if (!data?.crossSell && !data?.referral) return null;
-  const fetchLink = async () => {
-    const result = await postReceiptCardAction(token, 'referral-link');
-    if (!result.ok) throw new Error(`referral link ${result.status}`);
-    return result.body;
-  };
-  return (
-    <div className="waves-no-print">
-      {data.crossSell && (
-        <CrossSellOfferCard
-          offer={data.crossSell}
-          style={receiptCardStyle}
-          styles={receiptCardStyles}
-          submit={(metadata) => postReceiptCardAction(token, 'cross-sell', { metadata })}
-        />
-      )}
-      {data.referral && (
-        <ReferralShareCard
-          referral={data.referral}
-          fetchLink={fetchLink}
-          style={receiptCardStyle}
-          styles={receiptCardStyles}
-        />
-      )}
-    </div>
-  );
-}
 
 export default function ReceiptPage() {
   // Full liquid-glass scene (owner 2026-07-09 — the quiet 'pro' wash is
@@ -728,10 +682,12 @@ export default function ReceiptPage() {
         </BrandCard>
 
         {/* Add-a-service + referral cards (GATE_DOC_CROSS_SELL, owner
-            2026-11-21): the service report's cards, on the customer's own
-            paid receipt. The server decides eligibility; absent keys render
-            nothing. Screen only — the receipt prints as a record. */}
-        <ReceiptCards data={data} token={token} />
+            2026-11-21). Each card only opens the Waves app; nothing on the
+            receipt acts. The server decides when they show; absent keys
+            render nothing. Screen only — the receipt prints as a record. */}
+        <div className="waves-no-print">
+          <AppLinkCards offer={data.crossSell} referral={data.referral} style={receiptCardStyle} styles={receiptCardStyles} />
+        </div>
 
         <div className="waves-no-print waves-customer-help">
           Questions about this receipt? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.

@@ -82,9 +82,6 @@ const SERVICE_PHOTO_TTL_SECONDS = PhotoService.CUSTOMER_DWELL_TTL_SECONDS;
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
 
-// The two card taps (GATE_DOC_CROSS_SELL) never reach this limiter while
-// the gate is dark: middleware/doc-card-tap-dark-guard.js answers their 404
-// in server/index.js ahead of every limiter.
 router.use(rateLimit({
   windowMs: 60 * 1000,
   max: 120,
@@ -958,37 +955,14 @@ router.post('/:token/view', async (req, res) => {
 });
 
 // ── Add-a-service + referral cards (GATE_DOC_CROSS_SELL, owner 2026-11-21) ──
-// The service report's two cards on a COMPLETED visit's tracker. The track
+// On a COMPLETED visit's tracker. Each card is a link into the Waves app;
+// this router has no card tap route (services/app-link-cards.js). The track
 // link also goes to the account's service contacts (tenant, home buyer,
 // property manager — see the identity block above), so the cards show only
-// when the account holder is the only person this link reaches: no service
+// on an account whose links go to the account holder alone: no service
 // contact on the account and no third-party payer on the job, the visit's
-// invoice or the account. Otherwise a tenant could start a plan, or enroll as the
-// homeowner's promoter. The offer is the report's own composer over the
-// visit's service record, and the tap is the report's own tap.
-const TRACK_CARD_SURFACE = Object.freeze({
-  source: 'tracker', noun: 'page', title: 'visit tracker', notFoundBody: { error: 'Not found' },
-});
-
-// Ahead of the limiter on both taps: a dark gate or a malformed token is the
-// generic 404 before any limiter count or DB read, so a probe can never tell
-// the dark routes from missing ones by a 429.
-function trackCardRouteOpen(req, res, next) {
-  res.set(PRIVACY_HEADERS);
-  if (!isEnabled('docCrossSell') || !TOKEN_RE.test(req.params.token || '')) {
-    return res.status(404).json({ error: 'Not found' });
-  }
-  return next();
-}
-
-const trackCardActionLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 5,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => `track-xsell:${req.params.token || 'anon'}`,
-  message: { error: 'Too many requests. Please try again in a minute.' },
-});
+// invoice or the account. A display rule: the app's sign-in decides who may
+// act.
 
 // Does any invoice of the visit bill a third party? An invoice can do that
 // by itself, with no payer on the job or the account (buildSummary hides
@@ -1006,14 +980,10 @@ async function visitInvoiceBillsThirdParty(database, visitId, recordIds) {
   return Boolean(payerInvoice);
 }
 
-// → { customerId, serviceRecordId|null } when the token's visit may carry
-// the cards, else null. serviceRecordId is null when the visit has no
-// customer-deliverable report (the referral card still shows). `database`
-// is the tap's own transaction when the tap reads this again inside its
-// write.
-async function loadTrackCardContext(token, database = db) {
+// → the customer id when the token's visit may show the cards, else null.
+async function trackCardCustomerId(token) {
   if (!isEnabled('docCrossSell') || !TOKEN_RE.test(token || '')) return null;
-  const row = await database('scheduled_services as s')
+  const row = await db('scheduled_services as s')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
     .where('s.track_view_token', token)
     .first(
@@ -1025,111 +995,36 @@ async function loadTrackCardContext(token, database = db) {
   // The cards live only as long as the link does (it expires a day after the
   // visit's window). isTrackTokenLive reads a link with no expiry on record
   // as live for good, so such a link carries no cards (owner 2026-11-22,
-  // "week": no card tap from a link months later).
+  // "week": no card on a link months later).
   if (!row.track_token_expires_at) return null;
   if (row.status !== 'completed') return null;
-  const {
-    linkReachesOnlyAccountHolder, reportSuppressedForCustomer,
-  } = require('../services/service-report/cross-sell-tap');
+  const { linkReachesOnlyAccountHolder } = require('../services/app-link-cards');
   if (!linkReachesOnlyAccountHolder(row, [row.job_payer_id, row.customer_payer_id])) return null;
-  const records = await database('service_records')
+  const records = await db('service_records')
     .where({ scheduled_service_id: row.id })
-    .orderBy('created_at', 'desc')
-    .select('id', 'customer_id', 'structured_notes', 'is_callback');
-  const record = records[0];
-  if (await visitInvoiceBillsThirdParty(database, row.id, records.map((r) => r.id))) return null;
+    .select('id', 'is_callback');
+  if (await visitInvoiceBillsThirdParty(db, row.id, records.map((r) => r.id))) return null;
   // A complaint-driven visit gets neither card (owner 2026-08-30, the
   // report's rule): no upsell and no referral ask after a callback. The
-  // flag sits on the job and on the service records (any of them, not only
-  // the newest); a completed visit can have no service record.
+  // flag sits on the job and on the service records (any of them); a
+  // completed visit can have no service record.
   const { reserviceReportCopyGateOn } = require('../services/service-report/reservice-report');
   const callback = row.is_callback === true || records.some((r) => r.is_callback === true);
   if (reserviceReportCopyGateOn() && callback) return null;
-  // Same rule as the summary above: a visit whose report never reaches the
-  // customer gets no report-derived offer either. The record must be this
-  // visit's own customer's: the tap files its request for the record's
-  // customer.
-  const offers = record?.id && record.customer_id === row.customer_id
-    && !reportSuppressedForCustomer(record.structured_notes);
-  return { customerId: row.customer_id, serviceRecordId: offers ? record.id : null };
-}
-
-// The tap's read, again, inside its write: the same customer and (for the
-// offer) the same visit record, on current rows.
-async function trackContextStillHolds(token, context, trx, { offer }) {
-  const current = await loadTrackCardContext(token, trx);
-  if (!current || current.customerId !== context.customerId) return false;
-  return !offer || current.serviceRecordId === context.serviceRecordId;
+  return row.customer_id;
 }
 
 // Best-effort: any failure renders the tracker without the cards.
 async function trackCards(token) {
   try {
-    const context = await loadTrackCardContext(token);
-    if (!context) return {};
-    const cards = {};
-    if (context.serviceRecordId) {
-      const { buildCrossSellForServiceRecord } = require('../services/service-report/cross-sell-tap');
-      const crossSell = await buildCrossSellForServiceRecord(db, context.serviceRecordId);
-      if (crossSell) cards.crossSell = crossSell;
-    }
-    // The customer's own card: with GATE_REFERRAL_STEP2 on, the report's
-    // per-customer reward decision.
-    const referral = await require('../services/referral-share').composeReferralCard({ customerId: context.customerId });
-    if (referral) cards.referral = referral;
-    return cards;
+    const customerId = await trackCardCustomerId(token);
+    if (!customerId) return {};
+    return await require('../services/app-link-cards').appLinkCardsForCustomer(customerId);
   } catch (err) {
     logger.warn(`[track-public] cards suppressed (code=${err?.code || 'none'})`);
     return {};
   }
 }
-
-// POST /:token/cross-sell — the add-a-service card's tap (the report's tap).
-router.post('/:token/cross-sell', trackCardRouteOpen, trackCardActionLimiter, async (req, res) => {
-  res.set(PRIVACY_HEADERS);
-  try {
-    const context = await loadTrackCardContext(req.params.token);
-    if (!context?.serviceRecordId) return res.status(404).json({ error: 'Not found' });
-    const { handleCrossSellTap } = require('../services/service-report/cross-sell-tap');
-    const metadata = req.body && typeof req.body.metadata === 'object' && req.body.metadata ? req.body.metadata : {};
-    const { status, body } = await handleCrossSellTap({
-      db,
-      serviceRecordId: context.serviceRecordId,
-      metadata,
-      surface: TRACK_CARD_SURFACE,
-      // The request is recomputed, locked and written for this visit's own
-      // customer only.
-      linkCustomerId: context.customerId,
-      stillEligible: (trx) => trackContextStillHolds(req.params.token, context, trx, { offer: true }),
-    });
-    return res.status(status).json(body);
-  } catch (err) {
-    // Code only: Knex text can carry the bound track token.
-    logger.warn(`[track-public] cross-sell tap failed (code=${err?.code || 'none'})`);
-    return res.status(503).json({ error: 'Could not record the request — please try again' });
-  }
-});
-
-// POST /:token/referral-link — the referral card's tap (enrolls on the tap).
-router.post('/:token/referral-link', trackCardRouteOpen, trackCardActionLimiter, async (req, res) => {
-  res.set(PRIVACY_HEADERS);
-  try {
-    const context = await loadTrackCardContext(req.params.token);
-    if (!context) return res.status(404).json({ error: 'Not found' });
-    // The enrollment is written under the customer lock, after the same
-    // eligibility is read again on current rows.
-    const { referralShareIfStillEligible } = require('../services/service-report/cross-sell-tap');
-    const share = await referralShareIfStillEligible(db, context.customerId, (trx) => (
-      trackContextStillHolds(req.params.token, context, trx, { offer: false })
-    ));
-    if (!share) return res.status(404).json({ error: 'Not found' });
-    if (share.unavailable) return res.status(503).json({ error: 'Referral link unavailable — please try again' });
-    return res.json(share);
-  } catch (err) {
-    logger.warn(`[track-public] referral-link failed (code=${err?.code || 'none'})`);
-    return res.status(503).json({ error: 'Referral link unavailable — please try again' });
-  }
-});
 
 router._test = {
   isFreshVehicleTimestamp,

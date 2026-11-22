@@ -816,7 +816,7 @@ async function sendServiceReportV1Email(recordId, {
       const holder = recipients.find((r) => r.role === 'primary');
       const { embeddedPitchAllowed } = require('../email-division/eligibility');
       if (holder && await embeddedPitchAllowed({ customerId: service.customer_id, email: holder.email })) {
-        const { buildCrossSellForServiceRecord } = require('./cross-sell-tap');
+        const { buildCrossSellForServiceRecord } = require('./cross-sell-record');
         const crossSell = await buildCrossSellForServiceRecord(db, recordId);
         const { reserviceReportCopyGateOn } = require('./reservice-report');
         const callback = reserviceReportCopyGateOn() && service.is_callback === true;

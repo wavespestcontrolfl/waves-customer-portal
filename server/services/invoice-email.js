@@ -1161,9 +1161,11 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     '— Waves Pest Control',
   ]);
 
-  // GATE_DOC_CROSS_SELL_EMAIL (owner 2026-11-21): one closing line pointing
-  // at the receipt page's add-a-service / referral cards — only the cards that
-  // page will show this customer (services/receipt-cards.js), never a price.
+  // GATE_DOC_CROSS_SELL_EMAIL (owner 2026-11-21): one closing line about the
+  // add-a-service and referral cards. It names only the cards this invoice's
+  // receipt shows (services/receipt-cards.js), never a price, and it links to
+  // the Waves app (owner 2026-11-22): the app's sign-in decides who may act,
+  // so the links carry no token. It rides the account holder's own copy only.
   // The line is a pitch inside an operational email, so it follows the
   // customer's marketing choices (email-division's embedded-pitch rule): a
   // customer who turned offers off, takes marketing by text only, or
@@ -1173,9 +1175,12 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   if (require('../config/feature-gates').isEnabled('docCrossSellEmail')) {
     try {
       const { embeddedPitchAllowed } = require('./email-division/eligibility');
-      if (await embeddedPitchAllowed({ customerId: invoice.customer_id, email: recipient.email })) {
+      const toHolder = Boolean(cleanEmail(recipient.email)) && cleanEmail(recipient.email) === cleanEmail(customer.email);
+      if (toHolder && await embeddedPitchAllowed({ customerId: invoice.customer_id, email: recipient.email })) {
         const cards = await require('./receipt-cards').receiptCardsForInvoiceId(invoice.id);
-        offerLine = require('./doc-offer-email-line').docOfferEmailLine({ ...cards, url: receiptUrl, place: 'receipt' });
+        offerLine = require('./doc-offer-email-line').docOfferEmailLine({
+          ...cards, appUrls: { offer: `${domain}/?tab=billing`, referral: `${domain}/?tab=refer` },
+        });
       }
     } catch (err) {
       logger.warn(`[invoice-email] offer line skipped (code=${err?.code || 'none'})`);

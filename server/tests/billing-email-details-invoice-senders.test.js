@@ -299,10 +299,12 @@ describe('invoice.receipt', () => {
 // GATE_DOC_CROSS_SELL_EMAIL (#8262): the receipt email's one add-a-service
 // line is a pitch inside an operational email, so it follows the customer's
 // marketing email choice (email-division's embedded-pitch rule; pre-push
-// audit P1 2026-11-22). The receipt itself always sends.
+// audit P1 2026-11-22). Its links open the Waves app with no token (owner
+// 2026-11-22), and it rides the account holder's own copy only. The receipt
+// itself always sends.
 describe('invoice.receipt: the add-a-service line follows the marketing email choice', () => {
   const CARDS = {
-    crossSell: { serviceKey: 'lawn_care', label: 'Lawn Care', relationship: 'add' },
+    crossSell: { label: 'Lawn Care', relationship: 'add', perApplication: 62 },
     referral: { headline: 'Know someone?', cta: 'Send My Referral Link' },
   };
   let pitchSpy;
@@ -332,7 +334,25 @@ describe('invoice.receipt: the add-a-service line follows the marketing email ch
     const { result, args } = await sendPaidReceipt();
     expect(result.ok).toBe(true);
     expect(pitchSpy).toHaveBeenCalledWith({ customerId: 'cust-1', email: 'customer@example.com' });
-    expect(args.bodyAppend.text).toMatch(/^Add lawn care to your plan or refer a friend from your receipt: /);
+    // One link for each card, each to its own tab of the app; no receipt
+    // token and no price in the line.
+    expect(args.bodyAppend.text).toMatch(/^Add lawn care to your plan in the Waves app: https?:\/\/[^\s/]+\/\?tab=billing\nTo refer a friend, get your referral link: https?:\/\/[^\s/]+\/\?tab=refer$/);
+    expect(`${args.bodyAppend.text}${args.bodyAppend.html}`).not.toMatch(/\/receipt\/|\$|62/);
+  });
+
+  // The receipt can go to an address that is not the account holder's (a
+  // billing contact, a routed billing address). That copy never carries the
+  // homeowner's offer, whatever its marketing choice reads as.
+  test('a receipt that goes to another address than the account holder\'s gets no line', async () => {
+    pitchSpy.mockResolvedValue(true);
+    const contact = require('../services/customer-contact');
+    contact.getReceiptEmailRecipients.mockReturnValueOnce([{ email: 'books@example.com', name: 'Books', role: 'billing_contact' }]);
+    const { result, args } = await sendPaidReceipt();
+    expect(result.ok).toBe(true);
+    expect(args.to).toBe('books@example.com');
+    expect(args.bodyAppend?.text || '').not.toMatch(/lawn care|refer a friend/i);
+    expect(pitchSpy).not.toHaveBeenCalled();
+    expect(cardsSpy).not.toHaveBeenCalled();
   });
 
   test.each([

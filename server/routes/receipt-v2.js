@@ -15,46 +15,12 @@ const { generateReceiptPDF } = require('../services/pdf/invoice-pdf');
 
 const { loadPaymentForInvoice } = require('../services/receipt-payment');
 const { customerVisibleInvoiceNotes } = require('../services/invoice-notes');
-const rateLimit = require('express-rate-limit');
-const db = require('../models/db');
-const {
-  loadReceiptCardInvoice, receiptCardsEligible, receiptOfferRecordId, receiptCardsForToken,
-} = require('../services/receipt-cards');
-const { CARD_TAP_SURFACES } = require('../middleware/doc-card-tap-dark-guard');
+const { receiptCardsForToken } = require('../services/receipt-cards');
 
-// ── Add-a-service + referral cards (GATE_DOC_CROSS_SELL, owner 2026-11-21) ──
-// The service report's two cards on a paid receipt; who may see them lives
-// in services/receipt-cards.js (shared with the receipt email's line). The
-// referral card is static copy — enrollment happens only on the explicit
-// tap (POST /:token/referral-link), never on a GET.
-const RECEIPT_SURFACE = Object.freeze({
-  source: 'invoice_receipt', noun: 'receipt', title: 'invoice receipt',
-  notFoundBody: CARD_TAP_SURFACES.receipt.notFoundBody,
-});
-
-// Ahead of the limiter on both taps: a dark gate or a malformed token is the
-// generic 404 before any limiter count or DB read, so a probe can never tell
-// the dark routes from missing ones by a 429. The same check, with the same
-// token shape, runs first in middleware/doc-card-tap-dark-guard.js ahead of
-// the global /api/ limiter; this one keeps the router safe by itself.
-function receiptCardRouteOpen(req, res, next) {
-  if (!require('../config/feature-gates').isEnabled('docCrossSell')
-    || !CARD_TAP_SURFACES.receipt.tokenRe.test(String(req.params.token || ''))) {
-    return res.status(404).json(CARD_TAP_SURFACES.receipt.notFoundBody);
-  }
-  return next();
-}
-
-// Same posture as the report's crossSellActionLimiter: a permanent bearer
-// link must not drive pricing recomputes or promoter enrollment at volume.
-const receiptCardActionLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 5,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => `receipt-xsell:${req.params.token || 'anon'}`,
-  message: { error: 'Too many requests. Please try again in a minute.' },
-});
+// Add-a-service + referral cards (GATE_DOC_CROSS_SELL, owner 2026-11-21):
+// the GET below carries them for a receipt that may show them
+// (services/receipt-cards.js). Each card is a link into the Waves app; this
+// router has no card tap route (services/app-link-cards.js).
 
 // =========================================================================
 // GET /api/receipt/:token — Receipt view data (paid invoice record)
@@ -231,75 +197,6 @@ router.get('/:token/pdf', async (req, res, next) => {
     generateReceiptPDF(data, payment, res);
   } catch (err) {
     next(err);
-  }
-});
-
-// =========================================================================
-// POST /api/receipt/:token/cross-sell — the add-a-service card's tap
-// =========================================================================
-// The report card's tap, unchanged (services/service-report/cross-sell-tap.js):
-// recompute, match what was shown, one shared office request, and — with
-// GATE_REPORT_CLICK_TO_ESTIMATE on and a priced offer — an estimate URL to
-// open. 404 covers a dark gate, an ineligible receipt and an unknown token
-// alike, so the gate is not probeable.
-router.post('/:token/cross-sell', receiptCardRouteOpen, receiptCardActionLimiter, async (req, res) => {
-  try {
-    const data = await loadReceiptCardInvoice(req.params.token);
-    // The same answer the page used to show (or not show) the offer.
-    const offerRecordId = receiptOfferRecordId(data);
-    if (!offerRecordId) {
-      return res.status(404).json({ error: 'Receipt not found' });
-    }
-    const { handleCrossSellTap } = require('../services/service-report/cross-sell-tap');
-    const metadata = req.body && typeof req.body.metadata === 'object' && req.body.metadata ? req.body.metadata : {};
-    const { status, body } = await handleCrossSellTap({
-      db,
-      serviceRecordId: offerRecordId,
-      metadata,
-      surface: RECEIPT_SURFACE,
-      // The request is recomputed, locked and written for this receipt's
-      // own customer only.
-      linkCustomerId: data.customer_id,
-      // Read again inside the write: the gate, this token's invoice and its
-      // customer, the 7 days and who the receipt reaches, on current rows.
-      stillEligible: async (trx) => {
-        const current = await loadReceiptCardInvoice(req.params.token, trx);
-        return current?.customer_id === data.customer_id && receiptOfferRecordId(current) === offerRecordId;
-      },
-    });
-    return res.status(status).json(body);
-  } catch (err) {
-    // Code only, and never the global handler (it logs the message and the
-    // stack): Knex error text can carry the bound receipt token, which is a
-    // permanent bearer link.
-    logger.warn(`[receipt-v2] cross-sell tap failed (code=${err?.code || 'none'})`);
-    return res.status(503).json({ error: 'Could not record the request — please try again' });
-  }
-});
-
-// =========================================================================
-// POST /api/receipt/:token/referral-link — the referral card's tap
-// =========================================================================
-// Same composer as the report and estimate screens (enrolls on this tap).
-router.post('/:token/referral-link', receiptCardRouteOpen, receiptCardActionLimiter, async (req, res) => {
-  try {
-    const data = await loadReceiptCardInvoice(req.params.token);
-    if (!receiptCardsEligible(data)) return res.status(404).json({ error: 'Receipt not found' });
-    // The enrollment is written under the customer lock, after the same
-    // eligibility is read again on current rows.
-    const { referralShareIfStillEligible } = require('../services/service-report/cross-sell-tap');
-    const share = await referralShareIfStillEligible(db, data.customer_id, async (trx) => {
-      const current = await loadReceiptCardInvoice(req.params.token, trx);
-      return receiptCardsEligible(current) && current.customer_id === data.customer_id;
-    });
-    if (!share) return res.status(404).json({ error: 'Receipt not found' });
-    if (share.unavailable) return res.status(503).json({ error: 'Referral link unavailable — please try again' });
-    return res.json(share);
-  } catch (err) {
-    // err.code only (AGENTS.md PII-in-logs: enrollment constraint errors
-    // quote the customer's phone).
-    logger.warn(`[receipt-v2] referral-link failed (code=${err?.code || 'none'})`);
-    return res.status(503).json({ error: 'Referral link unavailable — please try again' });
   }
 });
 

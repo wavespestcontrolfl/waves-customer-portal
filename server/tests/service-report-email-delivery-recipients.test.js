@@ -189,8 +189,8 @@ describe('service report email recipient delivery', () => {
     const gates = require('../config/feature-gates');
     const gateSpy = jest.spyOn(gates, 'isEnabled')
       .mockImplementation((key) => ['docCrossSellEmail', 'reportCrossSell'].includes(key));
-    const tap = require('../services/service-report/cross-sell-tap');
-    const offerSpy = jest.spyOn(tap, 'buildCrossSellForServiceRecord')
+    const reportCard = require('../services/service-report/cross-sell-record');
+    const offerSpy = jest.spyOn(reportCard, 'buildCrossSellForServiceRecord')
       .mockResolvedValue({ serviceKey: 'lawn_care', label: 'Lawn Care', mode: 'priced', option: { perVisit: 62 } });
     const referralSpy = jest.spyOn(require('../services/referral-share'), 'composeReferralCard')
       .mockResolvedValue({ headline: 'Know someone?', cta: 'Send My Referral Link' });
@@ -229,8 +229,8 @@ describe('service report email recipient delivery', () => {
     const gates = require('../config/feature-gates');
     const gateSpy = jest.spyOn(gates, 'isEnabled')
       .mockImplementation((key) => ['docCrossSellEmail', 'reportCrossSell'].includes(key));
-    const tap = require('../services/service-report/cross-sell-tap');
-    const offerSpy = jest.spyOn(tap, 'buildCrossSellForServiceRecord')
+    const reportCard = require('../services/service-report/cross-sell-record');
+    const offerSpy = jest.spyOn(reportCard, 'buildCrossSellForServiceRecord')
       .mockResolvedValue({ serviceKey: 'lawn_care', label: 'Lawn Care', mode: 'priced', option: { perVisit: 62 } });
     const referralSpy = jest.spyOn(require('../services/referral-share'), 'composeReferralCard')
       .mockResolvedValue({ headline: 'Know someone?', cta: 'Send My Referral Link' });

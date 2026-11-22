@@ -7,8 +7,7 @@ import { io } from 'socket.io-client';
 import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api';
 import { WavesShell, CustomerColumn, PublicStateCard } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
-import CrossSellOfferCard from '../components/crossSell/CrossSellOfferCard';
-import ReferralShareCard from '../components/referral/ReferralShareCard';
+import AppLinkCards from '../components/crossSell/AppLinkCards';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_SUPPORT_PHONE_TEL,
@@ -811,10 +810,10 @@ function CompleteCard({ data }) {
   );
 }
 
-// Add-a-service + referral cards (GATE_DOC_CROSS_SELL, owner 2026-11-21):
-// the service report's cards, on a completed visit. The server decides
-// eligibility (only when the account holder is the one person this link
-// reaches); absent keys render nothing.
+// Add-a-service + referral cards (GATE_DOC_CROSS_SELL, owner 2026-11-21), on
+// a completed visit. Each card only opens the Waves app; nothing on the
+// tracker acts. The server decides when they show; absent keys render
+// nothing.
 const trackOfferCardStyle = {
   background: TRACK_SURFACE.surface,
   borderRadius: 8,
@@ -823,61 +822,18 @@ const trackOfferCardStyle = {
   textAlign: 'center',
   marginTop: 16,
 };
-const trackOfferButton = {
-  display: 'inline-block', padding: '14px 20px', background: COLORS.glassNavy, color: COLORS.white,
-  borderRadius: 8, fontWeight: 600, fontSize: 16, border: 'none', cursor: 'pointer', textDecoration: 'none',
-};
 const trackOfferStyles = {
   heading: { fontSize: 20, fontWeight: 600, lineHeight: 1.35, margin: '0 0 8px', color: TRACK_SURFACE.text },
   price: { fontSize: 16, fontWeight: 600, margin: '0 0 8px', color: TRACK_SURFACE.text },
   copy: { fontSize: 16, lineHeight: 1.5, margin: '0 0 14px', color: TRACK_SURFACE.body },
-  button: trackOfferButton,
-  link: { ...trackOfferButton, margin: '10px 6px 0' },
-  code: { fontSize: 20, fontWeight: 700, letterSpacing: '0.04em', marginRight: 10, color: TRACK_SURFACE.text },
+  button: {
+    display: 'inline-block', padding: '14px 20px', background: COLORS.glassNavy, color: COLORS.white,
+    borderRadius: 8, fontWeight: 600, fontSize: 16, textDecoration: 'none',
+  },
 };
 
-async function postTrackCardAction(token, path, payload) {
-  try {
-    const response = await fetch(`${API_BASE}/public/track/${token}/${path}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload || {}),
-    });
-    const body = await response.json().catch(() => null);
-    return { ok: response.ok, status: response.status, body };
-  } catch {
-    return { ok: false, status: 0, body: null };
-  }
-}
-
 function TrackOfferCards({ data }) {
-  const { token } = useParams();
-  if (!data?.crossSell && !data?.referral) return null;
-  const fetchLink = async () => {
-    const result = await postTrackCardAction(token, 'referral-link');
-    if (!result.ok) throw new Error(`referral link ${result.status}`);
-    return result.body;
-  };
-  return (
-    <>
-      {data.crossSell ? (
-        <CrossSellOfferCard
-          offer={data.crossSell}
-          style={trackOfferCardStyle}
-          styles={trackOfferStyles}
-          submit={(metadata) => postTrackCardAction(token, 'cross-sell', { metadata })}
-        />
-      ) : null}
-      {data.referral ? (
-        <ReferralShareCard
-          referral={data.referral}
-          fetchLink={fetchLink}
-          style={trackOfferCardStyle}
-          styles={trackOfferStyles}
-        />
-      ) : null}
-    </>
-  );
+  return <AppLinkCards offer={data?.crossSell} referral={data?.referral} style={trackOfferCardStyle} styles={trackOfferStyles} />;
 }
 
 function CancelledCard({ data }) {

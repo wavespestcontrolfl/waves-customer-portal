@@ -3513,129 +3513,39 @@ from that PDF, none from the last 30 days; no visit has `ai_report` lists; no
 stored form value fails the screen).
 
 Receipt and tracker add-a-service + referral cards (owner 2026-11-21,
-`GATE_DOC_CROSS_SELL`, dark): `GET /api/receipt/:token` (a PAID invoice) and
-`GET /api/public/track/:token` (a COMPLETED visit) may carry the report's
-`crossSell` and `referral` keys — the same shapes, built by the report's own
-composer over the invoice's or visit's service record
-(`services/service-report/cross-sell-tap.js#buildCrossSellForServiceRecord`,
-which also applies the complaint-visit suppression). Only when the link
-reaches the account holder alone (`linkReachesOnlyAccountHolder`: no
-third-party payer on the invoice, job or account, no service contact on the
-account; for the receipt also no distinct `notification_prefs.billing_email`,
-via the receipt email's own `getReceiptEmailRecipients`); otherwise, and with the gate off, the keys are absent and the
-payload is unchanged. The payer check reads every place a payer can sit: the
-receipt reads its invoice, the account, and the job by both links an invoice
-carries (`invoices.scheduled_service_id` and the service record's); the
-tracker reads the job, the account, and any invoice of the visit (by
-`scheduled_service_id` or by ANY service record of the visit, not only the
-newest). A receipt also carries no cards once its invoice's link has a
-recorded send to anyone but the account holder (the invoice email takes a
-one-off recipient and CC addresses; each holds the same token, and the paid
-pay page sends its holder on to the receipt): a `short_codes` row of the
-invoice with the third-party marker `purpose = 'payer_invoice'`
-(`invoice-email.js#payerCodeMarker`), or an `email_messages` row
-`invoice_sent:<id>` / `invoice_receipt:<id>` with a `cc_email_snapshot` or a
-`recipient_email_snapshot` that is not the account holder's email on file
-now (`THIRD_PARTY_SEND_COLUMNS` in `services/receipt-cards.js`; fail closed:
-a row counts whether or not its send reached the provider, and a customer
-whose email changed after the send reads as another address). Invoice
-follow-up emails take no one-off recipient or CC; they go where the billing
-resolver sends them, which the billing-email rule above already reads.
-Production, read-only, 2026-11-22: of 142 invoices paid in the last 30
-days, 2 carry the marker (payer-billed) and 5 have such an email row; 31 of
-the 32 paid in the last 7 days pass every rule. A receipt with no
-`service_record_id`, or (receipt and tracker alike) a visit whose report is
-not customer-deliverable (`structured_notes.typedReportDelivery` other than
-`auto_send`; `reportSuppressedForCustomer`), or whose service record belongs
-to another customer id than the link's own (the tap files its request for
-the record's customer), carries `referral` alone and its
-cross-sell tap is 404. The `referral` key is built for the link's own
-customer (`composeReferralCard({ customerId })`), so with
-`GATE_REFERRAL_STEP2` on it carries that customer's offer line and follows
-their yearly limit, as on the report. A priced card for a customer with no recurring plan
-(`relationship: 'start'`) is headed "Start {service}", never "Add {service}
-to your plan"; the email line says the same. The taps
-(`POST /api/receipt/:token/cross-sell` | `/referral-link`, `POST
-/api/public/track/:token/cross-sell` | `/referral-link`; body
-`{ metadata }` for cross-sell, the report card's metadata shape) run the
-report's own tap (`handleCrossSellTap`: recompute, 409 on any drift,
-one shared `service_requests` row with source `invoice_receipt` / `tracker`,
-`estimateUrl` with `GATE_REPORT_CLICK_TO_ESTIMATE`) and its referral composer
-(enrolls on the tap only). 404 when off or ineligible; a dark gate or a
-malformed token (receipt: the pay route's `^[A-Za-z0-9_-]{20,64}$`; tracker:
-64-hex) is the generic 404 AHEAD of every limiter, the body parsers and any
-DB read: `middleware/doc-card-tap-dark-guard.js` (mounted in
-`server/index.js` ahead of the global `/api/` limiter) answers it for both
-taps, in any letter case of the route name and with or without a closing
-slash (Express's own route matching), so a dark route never answers 429 and
-a malformed token never reaches a limiter; the same guard puts the privacy
-headers on every answer to a tap, a limiter 429 included; 5 a minute per token; a
-complaint-driven (callback) visit carries neither card and its taps 404 while
-`GATE_RESERVICE_REPORT_COPY` is on (the report's rule); the flag is read on
-the service record AND on the job (`scheduled_services.is_callback`: the
-receipt by both job links, the tracker on its own visit row), so a callback
-with no service record is covered, and on ANY service record of the job, not
-only the newest or the invoice's own;
-a receipt tap never records a receipt view. The receipt page shows the
-per-application price; the report card stays price-free (owner 2026-10-05).
-
-Who may tap a receipt or tracker card (owner decision 2026-11-22, "week";
-decided, not an open risk): a tap needs no login, as on the service report
-card (owner 2026-08-13). The receipt link is a permanent bearer link, so the
-receipt's cards and both receipt taps exist only for 7 days after the
-payment: `receiptCardsEligible` requires `invoices.paid_at` within
-`RECEIPT_CARD_WINDOW_MS` (7 x 24 h; `services/receipt-cards.js`). After day
-7, or with no `paid_at` on record, `GET /api/receipt/:token` has neither
-key, both receipt taps are 404, and the receipt email (a re-send included)
-has no card line. The owner accepted that any holder of the link may tap
-inside those 7 days. The tracker needs no day count: its cards and taps live
-only while the link's own `track_token_expires_at` is in the future (one day
-after the visit's window), and a tracker link with no expiry on record
-carries no cards. What a tap can do is the report tap's own limit: one
-shared office request for the offer shown and, with
-`GATE_REPORT_CLICK_TO_ESTIMATE`, that offer's estimate link; the referral
-tap returns the account's own share link. Production, read-only,
-2026-11-22: 0 of 556 paid invoices have no `paid_at`; 0 of 839 completed
-visits with a tracker link have no expiry.
-
-Commit path of a receipt or tracker card tap (the AGENTS.md rule "the commit
-path re-checks the preflight read"): each of the four taps reads its
-eligibility twice. The route reads it before the tap. The write then opens
-one transaction, locks the customer row (`customers ... FOR UPDATE`), and
-reads the same eligibility again ON THAT TRANSACTION before any row is
-written: the live gate (`isEnabled('docCrossSell')` at call time), the
-token's own row, the 7 days or the link expiry, the payer and service
-contact checks, the callback rule, and (cross-sell) that the offer's visit
-record is still the one the route read. A second read that says no answers
-the route's own generic 404 and writes nothing: no `service_requests` row,
-no estimate, no office bell, no promoter row. The seams are
-`writeOrRefreshCtaRequest`'s `afterLock(trx)`, `handleCrossSellTap`'s
-`stillEligible(trx)` with `surface.notFoundBody`, and
-`referralShareIfStillEligible` (the customer lock, the second read, then
-`buildReferralShareForCustomer(customerId, { conn: trx })`). The service
-report's own tap passes no second read and is unchanged.
-One customer end to end: the route passes the customer it read the link for
-as `linkCustomerId`. `handleCrossSellTap` answers the 404 before it
-recomputes anything when the offer's service record is no longer that
-customer's, so the row it locks and writes for is the link's own customer;
-the second read then requires the link (the invoice, or the visit) to still
-belong to that same customer, and its visit record to be that customer's.
-An invoice and its visit that move to another customer together are a 404,
-not a request for the former customer.
-No token in a log: a failed read or write on any of the four taps answers a
-generic 503 from the route itself and logs `err.code` only (Knex puts bound
-values in its error text, and the receipt token is permanent). A tap never
-passes its error to the global error handler, and a second read that throws
-is re-raised with its code and no message.
-Recorded exception, deliberate: the second read takes NO row lock on the
-invoice or the visit. Invoice settlement holds the invoice and takes the
-visit `FOR UPDATE NOWAIT` (`invoice-helpers.js#lockVisitForSettlement`), so
-a share lock held by a card tap would fail a payment with `visit_busy`, and
-both lock orders already exist in the repo. The customer row, which carries
-the service contact and account payer checks, is the locked row; the
-invoice and visit facts are read fresh on the transaction right before the
-write. Do not ask for `forShare()` / `forUpdate()` on `invoices` or
-`scheduled_services` here; the card suites fail a tap that takes one.
+`GATE_DOC_CROSS_SELL`, dark; owner 2026-11-22: the cards open the Waves app):
+`GET /api/receipt/:token` (a PAID invoice) and `GET /api/public/track/:token`
+(a COMPLETED visit) may carry two additive keys. `crossSell` is
+`{ label, relationship: 'add' | 'start', perApplication? }`: the plan offer
+the Waves app shows that customer now
+(`services/property-recommendations.js#appOfferForCustomer`: the app route's
+own gate, `GATE_PROPERTY_RECOMMENDATIONS`, then the app's composer), cut to
+what the page prints (`services/app-link-cards.js#publicOfferCard`; no option
+id, no fingerprint). `perApplication` is present only for a priced offer.
+`referral` is `composeReferralCard({ customerId })`'s `{ headline, cta,
+offer? }`, as on the report. With the gate off, or for a link that may not
+show them, both keys are absent and the payload is unchanged.
+NO WRITE ROUTE: the receipt and the tracker have no card tap. Each card is a
+plain link into the Waves app (`/?tab=billing` for the offer, `/?tab=refer`
+for the referral) with no token, so nothing on a link page files a request,
+mints an estimate or enrolls a promoter, and the app's sign-in decides who may
+act. A receipt link is the pay link and a tracker link is texted to the
+visit's contacts; a person who holds one sees the card and can do nothing with
+it (owner-accepted 2026-11-22). Do not add a card tap to either router.
+When a page shows the cards (display rules, not an authorization boundary):
+the receipt for 7 days after `invoices.paid_at` (owner 2026-11-22, "week";
+`RECEIPT_CARD_WINDOW_MS`; no `paid_at` = no cards), the tracker while its
+`track_token_expires_at` is in the future (a link with no expiry on record
+carries none); never for a complaint-driven (callback) visit while
+`GATE_RESERVICE_REPORT_COPY` is on (the flag is read on the job and on any
+service record of the job); and only on an account whose links go to the
+account holder by its own setup (`linkReachesOnlyAccountHolder`: no
+third-party payer on the invoice, the job or the account, no service contact
+on the account; for the receipt also no distinct
+`notification_prefs.billing_email`, via `getReceiptEmailRecipients`; for the
+tracker also no payer on any invoice of the visit). A forwarded or CC'd link
+is not tracked. Both builders are best-effort: any failure renders the page
+without cards. The service report's own card and its tap are unchanged.
 
 Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the
@@ -7874,18 +7784,13 @@ the candidate date at the current ET day, so an overdue open occurrence is
 never announced as the next visit.
 Treat the track token and any change
 to its payload, in any state, as security-critical. The GET stays strictly
-read-only; it has exactly FOUR write companions, all bounded (the two card
-taps below are dark behind `GATE_DOC_CROSS_SELL`).
+read-only; it has exactly TWO write companions, both bounded.
 `POST /api/public/track/:token/stops-ahead` — same token gate + rate limit,
 ignores its body, and only persists the stops-ahead display-clamp floor
 (monotone LEAST, skip-unchanged) via `computeStopsAhead` before returning the
 displayable count. The floor write and its no-op reread are bound to the exact
 technician/date/window used for the count and recheck that the visit is still
 placed and eligible, so a concurrent Quick Move cannot stamp its parked row.
-`POST /api/public/track/:token/cross-sell` and `/referral-link` — the
-add-a-service and referral card taps on a COMPLETED visit (receipt/tracker
-cards entry below); 404 unless `GATE_DOC_CROSS_SELL` is on and the link
-reaches the account holder alone; 5 a minute per token.
 `POST /api/public/track/:token/view` — same token format
 gate, expiry fence (unknown / malformed / expired = the same generic 404, no
 write), privacy headers and router rate limit; ignores its body; records ONE

@@ -1,10 +1,16 @@
 /**
- * One closing line in a customer email pointing at the add-a-service and
- * referral cards on the page the email links to (GATE_DOC_CROSS_SELL_EMAIL,
- * owner 2026-11-21). It names only what that page will actually show — the
- * caller passes the cards the page would render right now — and never a
- * price: an emailed price outlives the property and pricing data behind it,
- * so the page shows the current one.
+ * One closing line in a customer email about the add-a-service and referral
+ * cards (GATE_DOC_CROSS_SELL_EMAIL, owner 2026-11-21). It names only what
+ * the customer will find behind the link (the caller passes the cards that
+ * place shows right now) and never a price: an emailed price outlives the
+ * property and pricing data behind it, so the place shows the current one.
+ *
+ * Two shapes:
+ *   - a PAGE that holds both cards (the service report): `url` + `place`,
+ *     one link.
+ *   - the Waves app (the receipt email, owner 2026-11-22): `appUrls`
+ *     { offer, referral }, one link for each card's tab. The app's sign-in
+ *     decides who may act, so the line carries no token.
  *
  * Returns a sendTemplate `bodyAppend` ({ html, text }) or null.
  */
@@ -17,21 +23,53 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-// place: the page the link opens, as the customer knows it ('receipt',
-// 'report').
-function docOfferEmailLine({ crossSell = null, referral = null, url, place }) {
-  if (!require('../config/feature-gates').isEnabled('docCrossSellEmail') || !url || !place) return null;
-  const label = crossSell?.serviceKey ? String(crossSell.label || '').toLowerCase() : '';
-  // relationship 'start': the customer has no recurring plan to add to (the
-  // page's card says the same).
-  const ask = label && (crossSell.relationship === 'start' ? `Start ${label}` : `Add ${label} to your plan`);
+const link = (url, words) => `<a class="dm-link" href="${escapeHtml(url)}" style="color:#0A7EC2;text-decoration:underline;">${escapeHtml(words)}</a>`;
+
+// relationship 'start': the customer has no recurring plan to add to (the
+// card says the same).
+function offerAsk(crossSell) {
+  const label = crossSell?.label ? String(crossSell.label).toLowerCase() : '';
+  if (!label) return '';
+  return crossSell.relationship === 'start' ? `Start ${label}` : `Add ${label} to your plan`;
+}
+
+function appLine(ask, referral, appUrls) {
+  const offerUrl = ask ? appUrls.offer : null;
+  const referralUrl = referral ? appUrls.referral : null;
+  if (offerUrl && referralUrl) {
+    return {
+      html: `${escapeHtml(ask)} in the Waves app: ${link(offerUrl, 'see your offer')}. To refer a friend, ${link(referralUrl, 'get your referral link')}.`,
+      text: `${ask} in the Waves app: ${offerUrl}\nTo refer a friend, get your referral link: ${referralUrl}`,
+    };
+  }
+  if (offerUrl) {
+    return {
+      html: `${escapeHtml(ask)} in the Waves app: ${link(offerUrl, 'see your offer')}.`,
+      text: `${ask} in the Waves app: ${offerUrl}`,
+    };
+  }
+  if (referralUrl) {
+    return {
+      html: `Know someone who could use Waves? ${link(referralUrl, 'Get your referral link in the Waves app')}.`,
+      text: `Know someone who could use Waves? Get your referral link in the Waves app: ${referralUrl}`,
+    };
+  }
+  return null;
+}
+
+// place: the page the link opens, as the customer knows it ('report').
+function docOfferEmailLine({ crossSell = null, referral = null, url = null, place = null, appUrls = null }) {
+  if (!require('../config/feature-gates').isEnabled('docCrossSellEmail')) return null;
+  const ask = offerAsk(crossSell);
+  if (appUrls) return appLine(ask, referral, appUrls);
+  if (!url || !place) return null;
   let lead;
   if (ask && referral) lead = `${ask} or refer a friend from your ${place}`;
   else if (ask) lead = `${ask} from your ${place}`;
   else if (referral) lead = `Know someone who could use Waves? Share your referral link from your ${place}`;
   else return null;
   return {
-    html: `${escapeHtml(lead)}: <a class="dm-link" href="${escapeHtml(url)}" style="color:#0A7EC2;text-decoration:underline;">open your ${escapeHtml(place)}</a>.`,
+    html: `${escapeHtml(lead)}: ${link(url, `open your ${place}`)}.`,
     text: `${lead}: ${url}`,
   };
 }

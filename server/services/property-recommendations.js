@@ -24,6 +24,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const WATERING_COPY = require('../../shared/watering-copy.json');
 const { buildPortalOffer } = require('./service-report/cross-sell');
+const { gateEnvValue } = require('../config/feature-gates');
 const { loadOwnedRecurringServiceKeys } = require('./waveguard-existing-services');
 const { dateOnlyString } = require('../utils/date-only');
 const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
@@ -148,6 +149,16 @@ function offerCard(offer) {
   };
 }
 
+// The plan offer the app shows this customer now (the offer card on Home and
+// Billing), or null: the gate the app's route reads, then the app's own
+// composer. For a page that only POINTS at that card (the receipt and the
+// tracker, services/app-link-cards.js): it names an offer only when the app
+// will show one, and the same one.
+async function appOfferForCustomer(customerId, { knex = db } = {}) {
+  if (!customerId || !gateEnvValue('GATE_PROPERTY_RECOMMENDATIONS')) return null;
+  return buildPortalOffer(customerId, knex);
+}
+
 // monthIndex is injectable for tests; defaults to the current ET month.
 async function buildPropertyRecommendations(customerId, {
   knex = db,
@@ -182,6 +193,7 @@ async function buildPropertyRecommendations(customerId, {
 
 module.exports = {
   buildPropertyRecommendations,
+  appOfferForCustomer,
   // Production export: the request route revalidates the mosquito note
   // before writing (a stale page or direct POST must not file a request
   // the card would no longer render).
