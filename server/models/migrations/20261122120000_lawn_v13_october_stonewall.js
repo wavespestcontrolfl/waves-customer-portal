@@ -67,8 +67,9 @@
  *   4. Fertilizer analysis. The production row holds no analysis_n/p/k. The new-sod sheet
  *      (lawn-sod-sheet) and two completion checks read analysis_n from the row, so a bag
  *      without it is not treated as a fertilizer there. The bag's guaranteed analysis
- *      (18-0-10, in its name) is filled by ONE guarded UPDATE, only where all three columns
- *      are NULL; a value an administrator wrote is never overwritten.
+ *      (18-0-10, in its name) is filled column by column, each only where it is NULL (a row
+ *      that holds P but no N is still no fertilizer to those readers); a value an administrator
+ *      wrote is never overwritten.
  *   5. The standard rate. AGENTS.md, lawn protocol data fan-out: the catalog's
  *      default_rate_per_1000 matches the program rate. The yearly cap check counts an
  *      application whose ledger row holds no rate and no quantity at this figure. The production
@@ -79,11 +80,16 @@
  *      yearly maximum is 405 lb of product per acre, printed as 9.3 lb per 1,000 sq ft. The figure
  *      20261006140000 derived from the 1.5 lb ai line (9.3068) sits a little above it, so the
  *      cap is the label's own 9.3 (the rule of 20261006170000: the lower of the derived figure
- *      and the label's annual maximum). No cap row: 9.3 is inserted. A cap row that still holds
- *      exactly the derived 9.3068 (production): lowered to 9.3. A cap row with any other value
- *      or unit is someone's own number and stays. 405 / 43.56 = 9.2975 is not used: it would
- *      refuse the 9.3 lb rate the label itself lists. The 4FL cap and every other limit row are
- *      never changed.
+ *      and the label's annual maximum). The planner divides by this row, so it may never be
+ *      above the label:
+ *        - no cap row: 9.3 is inserted;
+ *        - a hard-block row in lb per 1,000 sq ft per year ABOVE 9.3 (production's 9.3068, or any
+ *          higher figure): lowered to 9.3;
+ *        - such a row at or under 9.3 is a stricter limit someone set: it stays;
+ *        - a row in another unit, or one that is not a hard block, cannot be compared with the
+ *          label: up() THROWS before it writes anything. Correct the row, then deploy.
+ *      405 / 43.56 = 9.2975 is not used: it would refuse the 9.3 lb rate the label itself lists.
+ *      The 4FL cap and every other limit row are never changed.
  *
  * Chemical group: no write. The production Stonewall row holds its group in the older free-text
  * column (moa_group 'Group 3', hrac_group NULL), as the liquid pre-emergents do. The rotation
@@ -247,7 +253,8 @@ async function patchRow(knex, row, columns, gateKeys) {
 // Puts back each column and gate key of a record that still holds the written value, and
 // only on a row that is still the Stonewall row this wrote.
 async function revertRow(knex, record) {
-  const row = await knex('lawn_protocol_products').where({ id: record.rowId }).first();
+  // FOR UPDATE, and the write repeats the guard: an edit made while the rollback runs waits; it is never overwritten from an older read.
+  const row = await knex('lawn_protocol_products').where({ id: record.rowId }).forUpdate().first();
   const { product_name: name, product_id: productId } = record.guard;
   if (!row || row.product_name !== name || String(row.product_id) !== String(productId)) return;
   const update = { updated_at: knex.fn.now() };
@@ -261,7 +268,7 @@ async function revertRow(knex, record) {
     if (change.had) gates[key] = change.before; else delete gates[key];
   }
   update.gates = JSON.stringify(gates);
-  await knex('lawn_protocol_products').where({ id: row.id }).update(update);
+  await knex('lawn_protocol_products').where({ id: row.id, product_name: name, product_id: productId }).update(update);
 }
 
 // Is this staged row exactly the October bag row for `name`? Name, product id, in the plan by default, 4.04 in POUNDS
@@ -301,23 +308,30 @@ async function readOctober(knex, dimensionId, stonewallId) {
   return { swaps, swapped, unresolved };
 }
 
-// The yearly prodiamine cap of `productId`: inserted where it has none; lowered to the label's 9.3 where the row still
-// holds exactly the derived 9.3068 in this unit. Any other value or unit stays. Returns what it inserted and lowered.
-async function ensureCap(knex, productId) {
-  const have = await knex('product_limits')
+// The bag's yearly prodiamine cap rows, read FOR UPDATE before any write.
+function readCaps(knex, productId) {
+  return knex('product_limits')
     .where({ product_id: productId, match_type: CAP_SPEC.match_type, match_value: CAP_SPEC.match_value, limit_type: CAP_SPEC.limit_type })
-    .select('id', 'limit_value', 'limit_unit').forUpdate();
-  if (!have.length) {
+    .select('id', 'limit_value', 'limit_unit', 'severity').forUpdate();
+}
+
+// Can this cap row be compared with the label maximum? A hard block, in lb per 1,000 sq ft per year, above zero.
+const capComparable = (cap) => cap.limit_unit === CAP_SPEC.limit_unit && cap.severity === CAP_SPEC.severity && Number(cap.limit_value) > 0;
+
+// No cap row: the label's 9.3 is inserted. A row above 9.3 is lowered to it; a row at or under 9.3 stays (a stricter
+// limit someone set). `caps` are the comparable rows readCaps returned. Returns what it inserted and lowered.
+async function applyCap(knex, productId, caps) {
+  if (!caps.length) {
     const row = { product_id: productId, ...CAP_SPEC };
     const [made] = await knex('product_limits').insert(row).returning('id');
     return { inserted: [{ id: made && typeof made === 'object' ? made.id : made, ...row }], lowered: [] };
   }
   const lowered = [];
-  for (const cap of have) {
-    if (Number(cap.limit_value) !== DERIVED_CAP || cap.limit_unit !== CAP_SPEC.limit_unit) continue;
+  for (const cap of caps) {
+    if (!(Number(cap.limit_value) > CAP_VALUE)) continue;
     const changed = await knex('product_limits').where({ id: cap.id, limit_value: cap.limit_value, limit_unit: cap.limit_unit })
       .update({ limit_value: CAP_VALUE, updated_at: knex.fn.now() });
-    if (changed === 1) lowered.push({ id: cap.id, before: DERIVED_CAP, after: CAP_VALUE });
+    if (changed === 1) lowered.push({ id: cap.id, before: Number(cap.limit_value), after: CAP_VALUE });
   }
   return { inserted: [], lowered };
 }
@@ -330,14 +344,17 @@ async function insertCatalogRow(knex) {
   return made && typeof made === 'object' ? made.id : made;
 }
 
-// The bag's guaranteed analysis by ONE guarded UPDATE, only where the row holds none of the three. Returns true when it wrote.
+// The bag's guaranteed analysis, column by column, each only where the row holds none. Returns the columns it
+// filled ({ analysis_n: 18, ... }), or null when it wrote nothing.
 async function fillAnalysis(knex, productId) {
   const columns = await knex('products_catalog').columnInfo();
-  if (!ANALYSIS_COLUMNS.every((column) => column in columns)) return false;
-  const changed = await knex('products_catalog').where({ id: productId })
-    .whereNull('analysis_n').whereNull('analysis_p').whereNull('analysis_k')
-    .update({ ...ANALYSIS, updated_at: knex.fn.now() });
-  return changed === 1;
+  const filled = {};
+  for (const column of ANALYSIS_COLUMNS) {
+    if (!(column in columns)) continue;
+    const changed = await knex('products_catalog').where({ id: productId }).whereNull(column).update({ [column]: ANALYSIS[column], updated_at: knex.fn.now() });
+    if (changed === 1) filled[column] = ANALYSIS[column];
+  }
+  return Object.keys(filled).length ? filled : null;
 }
 
 // The standard rate of an existing row: the label's lowest listed rate (or none) becomes the program rate, only on a
@@ -377,6 +394,14 @@ exports.up = async function up(knex) {
   }
   // No v13 October window: nothing names the bag here, so no lookup and no write.
   if (!swaps.length && !swapped) return;
+  // Still before any write: a cap row that cannot be compared with the label maximum would become the October plan's limit.
+  const caps = stonewallId ? await readCaps(knex, stonewallId) : [];
+  const unreadable = caps.filter((cap) => !capComparable(cap));
+  if (unreadable.length) {
+    throw new Error(`lawn v13 October Stonewall: the yearly prodiamine cap row of ${NEW_NAME} `
+      + `(${unreadable.map((cap) => `${cap.limit_value} ${cap.limit_unit}, ${cap.severity}`).join('; ')}) is not a ${CAP_SPEC.severity} in ${CAP_SPEC.limit_unit}, `
+      + `so it cannot be checked against the label maximum of ${CAP_VALUE} lb per 1,000 sq ft. Nothing was written. Correct that limit row, then run the migration again.`);
+  }
   let insertedProductId = null;
   if (!stonewallId) {
     // The row lives in production; a database built from migrations alone has none: insert it.
@@ -406,8 +431,8 @@ exports.up = async function up(knex) {
   }
 
   // The bag's catalog facts, wherever a track uses it: swapped by this run or before it.
-  const cap = await ensureCap(knex, stonewallId);
-  const analysisFilled = insertedProductId ? false : await fillAnalysis(knex, stonewallId);
+  const cap = await applyCap(knex, stonewallId, caps);
+  const analysisFilled = insertedProductId ? null : await fillAnalysis(knex, stonewallId);
   const defaultRate = insertedProductId ? null : await alignDefaultRate(knex, stonewallId);
   if (cap.inserted.length || cap.lowered.length || insertedProductId || analysisFilled || defaultRate) {
     await knex('lawn_protocol_audit_log').insert({
@@ -419,7 +444,7 @@ exports.up = async function up(knex) {
       changed_fields: JSON.stringify(['catalog', 'limits']),
       before_snapshot: JSON.stringify({}),
       after_snapshot: JSON.stringify({
-        productId: stonewallId, insertedProductId, analysisFilled: analysisFilled ? ANALYSIS : null, defaultRate, caps: cap.inserted, capsLowered: cap.lowered,
+        productId: stonewallId, insertedProductId, analysisFilled, defaultRate, caps: cap.inserted, capsLowered: cap.lowered,
       }),
       metadata: JSON.stringify({ migration: '20261122120000_lawn_v13_october_stonewall' }),
     });
@@ -452,8 +477,8 @@ async function revertProtocol(knex, log) {
   }
   for (const record of after.rows || []) await revertRow(knex, record);
   if (after.goalWindowId) {
-    const window = await knex('lawn_protocol_windows').where({ id: after.goalWindowId }).first('id', 'goal');
-    if (window && window.goal === after.newGoal) await knex('lawn_protocol_windows').where({ id: window.id }).update({ goal: after.oldGoal, updated_at: knex.fn.now() });
+    // One conditional UPDATE: the goal goes back only while it still reads the text this wrote.
+    await knex('lawn_protocol_windows').where({ id: after.goalWindowId, goal: after.newGoal }).update({ goal: after.oldGoal, updated_at: knex.fn.now() });
   }
   await knex('lawn_protocol_audit_log').where({ id: log.id }).del();
 }

@@ -1194,9 +1194,13 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
         product_id: stonewallId(), match_type: 'active_ingredient', match_value: 'prodiamine', limit_type: 'annual_max_rate', limit_value: value, limit_unit: 'lb/1000sf/year', severity: 'hard_block', description: 'Existing production row', ...extra,
       });
 
-      test('the derived 9.3068 (production, from 20261006140000) is lowered to the label\'s 9.3, audited, and down leaves it at 9.3', async () => {
+      // The planner divides by this row, so it may never be above the label's yearly maximum.
+      test.each([
+        ['the derived 9.3068 (production, from 20261006140000)', 9.3068],
+        ['a higher figure someone set', 9.5],
+      ])('%s is above the label\'s 9.3: lowered to 9.3, audited, and down leaves it at 9.3', async (_label, value) => {
         await withReset(async () => {
-          const [made] = await knex('product_limits').insert(capRow(9.3068)).returning('id');
+          const [made] = await knex('product_limits').insert(capRow(value)).returning('id');
           const id = made.id ?? made;
           const catalogBefore = await catalogJson();
           await stonewallMigration.up(knex);
@@ -1204,7 +1208,7 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
           expect(rows.map((row) => [row.id, Number(row.limit_value), row.limit_unit, row.severity, row.description])).toEqual([[id, 9.3, 'lb/1000sf/year', 'hard_block', 'Existing production row']]);
           expect(await catalogJson()).toBe(catalogBefore);
           expect((await ours()).find((log) => log.action === stonewallMigration.CATALOG_ACTION).after_snapshot)
-            .toMatchObject({ caps: [], capsLowered: [{ id, before: 9.3068, after: 9.3 }] });
+            .toMatchObject({ caps: [], capsLowered: [{ id, before: value, after: 9.3 }] });
           await stonewallMigration.down(knex);
           expect(shape(await limitRows(stonewallId()))).toEqual([['annual_max_rate', 'active_ingredient', 'prodiamine', 9.3, 'lb/1000sf/year', 'hard_block']]);
           expect(await octoberRow()).toMatchObject({ product_name: DIMENSION });
@@ -1212,12 +1216,11 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       });
 
       test.each([
-        ['a lower figure the office set', 8.5, {}],
-        ['a higher figure the office set', 9.5, {}],
-        ['the same number in another unit', 9.3068, { limit_unit: 'oz/1000sf/year' }],
-      ])('%s is someone\'s own number: kept as it is, no catalog audit row, and down leaves it', async (_label, value, extra) => {
+        ['a stricter figure the office set', 8.5],
+        ['the label figure itself', 9.3],
+      ])('%s is at or under the label maximum: kept as it is, no catalog audit row, and down leaves it', async (_label, value) => {
         await withReset(async () => {
-          await knex('product_limits').insert(capRow(value, extra));
+          await knex('product_limits').insert(capRow(value));
           const before = (await limitRows(stonewallId())).map((r) => JSON.stringify(r));
           const catalogBefore = await catalogJson();
           await stonewallMigration.up(knex);
@@ -1227,6 +1230,20 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
           expect((await ours()).map((log) => log.action)).toEqual([stonewallMigration.ACTION]);
           await stonewallMigration.down(knex);
           expect((await limitRows(stonewallId())).map((r) => JSON.stringify(r))).toEqual(before);
+          expect(await octoberRow()).toMatchObject({ product_name: DIMENSION });
+        });
+      });
+
+      test.each([
+        ['in another unit', { limit_unit: 'oz/1000sf/year' }],
+        ['that only warns', { severity: 'warning' }],
+      ])('a cap row %s cannot be checked against the label maximum: up throws and writes nothing', async (_label, extra) => {
+        await withReset(async () => {
+          await knex('product_limits').insert(capRow(9.3068, extra));
+          const stateOf = async () => JSON.stringify([await octoberRow(), await catalogJson(), await limitRows(stonewallId()), await otherRows(), await ours()]);
+          const before = await stateOf();
+          await expect(stonewallMigration.up(knex)).rejects.toThrow('cannot be checked against the label maximum of 9.3 lb per 1,000 sq ft. Nothing was written.');
+          expect(await stateOf()).toBe(before);
           expect(await octoberRow()).toMatchObject({ product_name: DIMENSION });
         });
       });
@@ -1366,12 +1383,27 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
         });
       });
 
-      test('an analysis an administrator wrote, even one figure of it, is never overwritten', async () => {
+      test.each([
+        ['N only', { analysis_n: 16, analysis_p: null, analysis_k: null }, [16, 0, 10], { analysis_p: 0, analysis_k: 10 }],
+        // The case the new-sod sheet cares about: a row that holds P but no N is no fertilizer to it.
+        ['P only', { analysis_n: null, analysis_p: 0, analysis_k: null }, [18, 0, 10], { analysis_n: 18, analysis_k: 10 }],
+      ])('an analysis an administrator wrote in part (%s) keeps what was written; only the empty columns are filled', async (_label, stored, expected, filled) => {
         await withReset(async () => {
-          await setAnalysis({ analysis_n: 16, analysis_p: null, analysis_k: null });
+          await setAnalysis(stored);
           try {
             await stonewallMigration.up(knex);
-            expect(await analysisOf()).toEqual([16, null, null]);
+            expect(await analysisOf()).toEqual(expected);
+            expect((await ours()).find((log) => log.action === stonewallMigration.CATALOG_ACTION).after_snapshot.analysisFilled).toEqual(filled);
+          } finally { await setAnalysis({ analysis_n: 18, analysis_p: 0, analysis_k: 10 }); }
+        });
+      });
+
+      test('a whole analysis an administrator wrote is never overwritten', async () => {
+        await withReset(async () => {
+          await setAnalysis({ analysis_n: 16, analysis_p: 2, analysis_k: 8 });
+          try {
+            await stonewallMigration.up(knex);
+            expect(await analysisOf()).toEqual([16, 2, 8]);
             expect((await ours()).find((log) => log.action === stonewallMigration.CATALOG_ACTION).after_snapshot).toMatchObject({ analysisFilled: null });
           } finally { await setAnalysis({ analysis_n: 18, analysis_p: 0, analysis_k: 10 }); }
         });

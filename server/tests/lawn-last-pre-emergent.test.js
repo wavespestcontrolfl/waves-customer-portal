@@ -120,6 +120,18 @@ describe('the words', () => {
     expect(neither.result).toBeNull();
   });
 
+  it('EPA 10404-114 (the October Stonewall 0.37% bag) is a pre-emergent by its registration alone, and gets the read-the-label note', async () => {
+    // Its name spells no ingredient and its label wait is not held: without the registration this row dropped out of the history.
+    const bag = { product_name: 'LESCO Stonewall 0.37% 18-0-10', product_category: 'herbicide', active_ingredient: null, epa_reg_number: '10404-114', service_date: '2026-10-05' };
+    const { result } = await block({ rows: [app(bag), app({ service_date: '2026-06-01' })] });
+    expect(result.line).toContain('LESCO Stonewall 0.37% 18-0-10, Oct 5, 2026');
+    expect(result.warning).toBeNull();
+    expect(result.note).toBe('The app does not hold this product\'s label wait for seeding or sod. Read the label.');
+    // The same row with another registration and no ingredient is not known: the older application answers.
+    const other = await block({ rows: [app({ ...bag, epa_reg_number: '99999-1' }), app({ service_date: '2026-06-01' })] });
+    expect(other.result.line).toContain('Dimension 2EW, Jun 1, 2026');
+  });
+
   it('another dithiopyr product (a different EPA registration, or none) gets the note, never the Dimension wait', async () => {
     for (const epa_reg_number of ['62719-542-10404', '99999-1', null]) {
       const { result } = await block({ rows: [app({ product_name: 'Other Dithiopyr 2L', epa_reg_number, service_date: '2026-09-20' })] });
