@@ -403,11 +403,12 @@ postgres('home price store on PostgreSQL', () => {
 
     test('ok: the plan size, the stories, the fetch time, the CO date and the type of work', async () => {
       await permit('PMT-1', {
-        detail_status: 'ok', conditioned_sqft: 2100, stories: 2, detail_fetched_at: hoursAgo(5), co_date: '2026-10-30',
+        detail_status: 'ok', conditioned_sqft: 2100, stories: 2, detail_fetched_at: hoursAgo(5), co_date: '2026-10-30', detail_co_date: '2026-10-30',
       });
       const facts = await permitFacts('PMT-1');
       expect(facts).toMatchObject({
         permit_no: 'PMT-1', type_of_work: 'New Single Family', detail_status: 'ok', conditioned_sqft: 2100, stories: 2, co_date: '2026-10-30',
+        detail_stale: false,
       });
       expect(facts.detail_fetched_at.getTime()).toBe(hoursAgo(5).getTime());
     });
@@ -431,6 +432,18 @@ postgres('home price store on PostgreSQL', () => {
       expect(await permitFacts('')).toBeNull();
       expect(await permitFacts(null)).toBeNull();
       await expect(permitFacts(conn)).rejects.toThrow(TypeError);
+    });
+
+    test('detail_stale: true when the row has a CO date the last page read did not see (the permit reader\'s own re-read test)', async () => {
+      const ok = { detail_status: 'ok', conditioned_sqft: 2100, stories: 2, detail_fetched_at: hoursAgo(900) };
+      await permit('PMT-6', { ...ok, co_date: '2026-10-30', detail_co_date: '2026-10-30' }); // read at this CO
+      await permit('PMT-7', { ...ok, co_date: '2026-10-30' }); // read before the CO arrived
+      await permit('PMT-8', { ...ok, co_date: '2026-11-05', detail_co_date: '2026-10-30' }); // a newer CO since the read
+      await permit('PMT-9', { ...ok }); // no CO yet
+      await permit('PMT-10', { co_date: '2026-10-30' }); // never read
+      const stale = async (no) => (await permitFacts(no)).detail_stale;
+      expect([await stale('PMT-6'), await stale('PMT-7'), await stale('PMT-8'), await stale('PMT-9'), await stale('PMT-10')])
+        .toEqual([false, true, true, false, true]);
     });
 
     test('the row can be handed to the permit reader as its candidate (it needs permit_no, co_date, detail_status)', async () => {

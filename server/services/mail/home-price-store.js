@@ -75,6 +75,11 @@ async function dueForPrice(options, conn = db) {
  * names the permit reader's recordResult wants of a candidate (permit_no, co_date, detail_status), so it can be passed
  * to it as it is. conditioned_sqft and stories are numbers or null; detail_fetched_at is a Date or null; co_date is
  * YYYY-MM-DD text or null.
+ *
+ * detail_stale is the permit reader's own test (selectCandidates) for facts it must read again: the row has a CO date
+ * the last page read did not see. A plan can change at CO, and a re-read that fails keeps detail_status 'ok' and the
+ * old facts. So an 'ok' row with detail_stale true may hold the size of an older plan: the price pass must not settle a
+ * price on it.
  */
 async function permitFacts(permitNo, conn = db) {
   if (typeof permitNo === 'function') throw new TypeError('permitFacts: the connection is the second argument');
@@ -85,6 +90,7 @@ async function permitFacts(permitNo, conn = db) {
     .first(
       'permit_no', 'type_of_work', 'detail_status', 'detail_fetched_at', 'conditioned_sqft', 'stories',
       conn.raw("to_char(co_date, 'YYYY-MM-DD') AS co_date"),
+      conn.raw('(co_date IS NOT NULL AND detail_co_date IS DISTINCT FROM co_date) AS detail_stale'),
     );
   if (!row) return null;
   const num = (v) => (v === null || v === undefined ? null : Number(v));
