@@ -27,7 +27,7 @@ const CLICK = new Date('2026-10-01T12:05:00Z');
 const EARLIER = new Date(CLICK.getTime() - 60000);
 const LATER = new Date(CLICK.getTime() + 60000);
 const GATE = 'GATE_PEST_INSIDER_AUTO_SEND';
-const ENV = ['NEWSLETTER_PROOF_EMAIL', 'NEWSLETTER_PROOF_APPROVERS', 'GMAIL_USER_EMAIL', 'INTERNAL_EMAIL_ALLOWLIST', 'ADMIN_EMAIL_ALLOWLIST', GATE];
+const ENV = ['NEWSLETTER_PROOF_EMAIL', 'NEWSLETTER_PROOF_APPROVERS', 'GMAIL_USER_EMAIL', 'INTERNAL_EMAIL_ALLOWLIST', 'ADMIN_EMAIL_ALLOWLIST', 'INTERNAL_EMAIL_DOMAINS', GATE];
 const envBefore = Object.fromEntries(ENV.map((k) => [k, process.env[k]]));
 
 const sub = (id, email = `reader${id}@example.net`) => ({ id, email });
@@ -191,6 +191,20 @@ describe('toolBlockForBatch: the key', () => {
       const db = fakeDb({ rows: [bad, row(2)] });
       const r = await run({ subscribers: [{ id: 1, email: bad.email }, sub(2)], db });
       expect(r.forReader({ id: 1, email: bad.email })).toEqual(NOT);
+      expect(r.forReader(sub(2))).toEqual(GOT);
+    });
+
+    // INTERNAL_EMAIL_DOMAINS replaces the default domains for isInternalEmailRecipient. A list that leaves a
+    // Waves domain out must not let an address on it get the block.
+    test.each(['someone@wavespestcontrol.com', 'Someone@News.WavesPestControl.com'])('with another internal domain configured, %s still gets \'\', and so does an address on the configured domain', async (email) => {
+      process.env.INTERNAL_EMAIL_DOMAINS = 'partner.example';
+      process.env.NEWSLETTER_PROOF_EMAIL = 'proof@example.net';
+      const waves = row(1, { email });
+      const partner = row(3, { email: 'desk@partner.example' });
+      const db = fakeDb({ rows: [waves, row(2), partner] });
+      const r = await run({ subscribers: [{ id: 1, email }, sub(2), { id: 3, email: partner.email }], db });
+      expect(r.forReader({ id: 1, email })).toEqual(NOT);
+      expect(r.forReader({ id: 3, email: partner.email })).toEqual(NOT);
       expect(r.forReader(sub(2))).toEqual(GOT);
     });
 

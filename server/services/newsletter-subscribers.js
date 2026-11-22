@@ -620,11 +620,13 @@ async function confirmByToken(token) {
   // theirs). Zero rows means the token no longer owns the row; re-run the
   // lookup so the caller sees the current truth (the stale link reads
   // 'not_found'; a concurrent same-token confirm reads 'already_active').
-  // The reader's own click also stamps reader_confirmed_at and reader_confirmed_email
-  // (the row's address as read above, lowercased; the token CAS above fences a rotated
-  // row): the only writes of those two columns besides confirmResignupToken. A trusted
-  // add promotes a pending row without them, so the Waves Pest Insider tool block
-  // (pest-insider/tool-block.js) can tell a reader's click from a promotion.
+  // The reader's own click also stamps reader_confirmed_at and reader_confirmed_email:
+  // the only writes of those two columns besides confirmResignupToken. A trusted add
+  // promotes a pending row without them, so the Waves Pest Insider tool block
+  // (pest-insider/tool-block.js) can tell a reader's click from a promotion. The
+  // address is LOWER(email) of the row this UPDATE flips, taken in SQL: it is the
+  // address on the row at that instant, and no address is bound into the query (knex
+  // puts bound values in a failed query's message, which a caller may log).
   const now = new Date();
   const flipped = await db('newsletter_subscribers')
     .where({ id: initial.subscriber.id, confirmation_token: token, status: 'pending' })
@@ -632,7 +634,7 @@ async function confirmByToken(token) {
       status: 'active',
       confirmed_at: now,
       reader_confirmed_at: now,
-      reader_confirmed_email: String(initial.subscriber.email || '').toLowerCase(),
+      reader_confirmed_email: db.raw('LOWER(email)'),
       updated_at: now,
     });
   if (!flipped) return lookupByToken(token);
@@ -656,7 +658,7 @@ async function confirmResignupToken(token, sub) {
     confirmed_at: now,
     // The reader's click, for the address on the row (see confirmByToken).
     reader_confirmed_at: now,
-    reader_confirmed_email: String(sub.email || '').toLowerCase(),
+    reader_confirmed_email: db.raw('LOWER(email)'),
     resubscribed_at: now,
     unsubscribed_at: null,
     // Sunset hygiene markers and the win-back tag go on every comeback — the

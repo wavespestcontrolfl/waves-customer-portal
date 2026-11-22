@@ -34,6 +34,10 @@ jest.mock('../models/db', () => {
 
 const { confirmByToken } = require('../services/newsletter-subscribers');
 
+// The raw queries that ran: every db.raw call but the 'LOWER(email)' fragment, which is a value in the
+// flip's UPDATE payload (the reader-confirmed address), not a query of its own.
+const linkCalls = () => mockRawCalls.filter(([sql]) => sql !== 'LOWER(email)');
+
 const PENDING_ROW = {
   id: 41,
   email: 'samtypo@example.com',
@@ -61,7 +65,10 @@ test('the activation flip CASes on token AND pending status, not id alone', asyn
   expect(flip.wheres).toContainEqual({ id: 41, confirmation_token: 'tok-old', status: 'pending' });
   // The click is also the reader's own proof for this address (reader_confirmed_*), one instant with confirmed_at.
   expect(flip.patch.reader_confirmed_at).toBe(flip.patch.confirmed_at);
-  expect(flip.patch.reader_confirmed_email).toBe('samtypo@example.com');
+  // The address is taken in SQL from the row the UPDATE flips (LOWER(email)): no address is bound into the
+  // query, so a failed update's message (knex puts bound values in it) cannot carry one.
+  expect(mockRawCalls).toContainEqual(['LOWER(email)']);
+  expect(Object.values(flip.patch)).not.toContain('samtypo@example.com');
 });
 
 test('a token rotated between lookup and flip never activates the row', async () => {
@@ -75,7 +82,7 @@ test('a token rotated between lookup and flip never activates the row', async ()
   mockUpdateQueue = [0]; // the CAS missed
   const result = await confirmByToken('tok-old');
   expect(result.action).toBe('not_found');
-  expect(mockRawCalls).toHaveLength(0); // linkToCustomer never ran
+  expect(linkCalls()).toHaveLength(0); // linkToCustomer never ran
 });
 
 test('a concurrent same-token confirm reads back already_active instead of double-flipping', async () => {
@@ -86,5 +93,5 @@ test('a concurrent same-token confirm reads back already_active instead of doubl
   mockUpdateQueue = [0];
   const result = await confirmByToken('tok-old');
   expect(result.action).toBe('already_active');
-  expect(mockRawCalls).toHaveLength(0);
+  expect(linkCalls()).toHaveLength(0);
 });

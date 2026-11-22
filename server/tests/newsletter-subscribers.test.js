@@ -330,14 +330,16 @@ describe('the reader-confirmed stamps are written by the confirm click only', ()
   const PENDING_ROW = { ...UNSUB_ROW, id: 'sub-7', email: 'Mixed.Case@Example.com', status: 'pending', confirmed_at: null, unsubscribed_at: null, confirmation_token: 'pend-tok', confirmation_sent_at: new Date() };
   const stamps = (payload) => Object.keys(payload).filter((k) => k.startsWith('reader_confirmed'));
 
-  test('confirmByToken on a pending row writes both, with one instant, and the row\'s address lowercased', async () => {
+  test('confirmByToken on a pending row writes both, with one instant, and takes the address in SQL from the row (no address bound)', async () => {
     const queries = useRecordingDb({ firsts: [{ ...PENDING_ROW }, { ...PENDING_ROW, status: 'active' }] });
     expect((await confirmByToken('pend-tok')).action).toBe('confirmed');
     const flip = queries.find((r) => r.update && r.update.status === 'active');
     expect(flip.wheres).toContainEqual({ id: 'sub-7', confirmation_token: 'pend-tok', status: 'pending' });
     expect(flip.update.confirmed_at).toBeInstanceOf(Date);
     expect(flip.update.reader_confirmed_at).toBe(flip.update.confirmed_at);
-    expect(flip.update.reader_confirmed_email).toBe('mixed.case@example.com');
+    // db.raw is a passthrough in this suite: the value is the SQL itself.
+    expect(flip.update.reader_confirmed_email).toBe('LOWER(email)');
+    expect(Object.values(flip.update).map((v) => String(v).toLowerCase())).not.toContain('mixed.case@example.com');
   });
 
   test('a trusted add of a pending row, a trusted resubscribe and a waitlist promotion write neither', async () => {
@@ -430,9 +432,11 @@ describe('lookupByToken / confirmByToken for a public re-signup token', () => {
     });
     expect(flip.update.confirmed_at).toBeInstanceOf(Date);
     expect(flip.update.resubscribed_at).toBeInstanceOf(Date);
-    // The reader's own click: the proof stamp is the same instant as confirmed_at, bound to the row's address.
+    // The reader's own click: the proof stamp is the same instant as confirmed_at, and the address is the
+    // row's own, taken in SQL (db.raw is a passthrough here), so no address is bound into the query.
     expect(flip.update.reader_confirmed_at).toBe(flip.update.confirmed_at);
-    expect(flip.update.reader_confirmed_email).toBe(row.email);
+    expect(flip.update.reader_confirmed_email).toBe('LOWER(email)');
+    expect(Object.values(flip.update)).not.toContain(row.email);
     expect(String(flip.update.tags)).toContain('COALESCE(tags');
     // The live-token ordering is enforced in the same statement.
     expect(flip.raws.join(' ')).toContain('confirmation_sent_at > unsubscribed_at');

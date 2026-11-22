@@ -88,7 +88,8 @@ function mailboxKey(value) {
 // mailbox that got the owner's copy stays a Waves mailbox for this issue), and the login
 // email of every staff user (technicians: `email`, and `google_email` for the Google
 // sign-in). Nobody at Waves may buy through these links, and the owner's copies must not
-// carry them. The internal domains are matched by isInternalEmailRecipient. A family
+// carry them. The Waves domains are matched by wavesDomain, and any other configured
+// internal domain by isInternalEmailRecipient. A family
 // member's address cannot be told from data: such a reader who opted in gets the block,
 // and the owner keeps that rule by not buying.
 async function wavesMailboxes(db, issue) {
@@ -101,6 +102,15 @@ async function wavesMailboxes(db, issue) {
     ...proof.issueFyiAddresses(issue),
     ...staff.flatMap((s) => [s.email, s.google_email]),
   ].map(mailboxKey).filter(Boolean));
+}
+
+// An address on a Waves-owned domain (internal-email-recipients.js DEFAULT_INTERNAL_DOMAINS),
+// whatever INTERNAL_EMAIL_DOMAINS says: that setting REPLACES the defaults for
+// isInternalEmailRecipient, and a list that leaves a Waves domain out must not let an
+// address on it get the Amazon link.
+function wavesDomain(email) {
+  const { DEFAULT_INTERNAL_DOMAINS } = require('../../utils/internal-email-recipients');
+  return DEFAULT_INTERNAL_DOMAINS.includes(normalized(email).split('@')[1]);
 }
 
 // The readers of this batch who may have the block, and the block. A thrown
@@ -122,7 +132,7 @@ async function readersWithBlock({ send, subscribers, planned, db }) {
   const { isInternalEmailRecipient } = require('../../utils/internal-email-recipients');
   const byId = new Map(rows.map((r) => [r.id, r]));
   const ids = new Set(subscribers
-    .filter((s) => optedIn(byId.get(s.id), s) && !isInternalEmailRecipient(s.email) && !waves.has(mailboxKey(s.email)))
+    .filter((s) => optedIn(byId.get(s.id), s) && !wavesDomain(s.email) && !isInternalEmailRecipient(s.email) && !waves.has(mailboxKey(s.email)))
     .map((s) => s.id));
   if (!ids.size) return none;
   // Checked once for the batch, before any reader gets it.

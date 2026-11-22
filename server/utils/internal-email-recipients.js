@@ -64,6 +64,7 @@ function assertInternalEmailRecipient(email, context = {}) {
 }
 
 module.exports = {
+  DEFAULT_INTERNAL_DOMAINS,
   normalizeEmail,
   isValidEmail,
   internalEmailAllowlist,
