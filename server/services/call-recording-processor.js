@@ -21026,12 +21026,20 @@ const CallRecordingProcessor = {
                       // BEFORE its fence and its hour search, so both run for the technician the
                       // child keeps. A shift that does not hold it seeds the child unassigned, as
                       // a day off does for a package visit 2; a copied hour that moves below stays
-                      // inside the shift (callFollowUpWindow). No technician, or the gate off:
-                      // shiftExcluding answers null with no read.
+                      // inside the shift (callFollowUpWindow). The read has its own nested
+                      // savepoint, as the fence below has: a failed read must not abort THIS
+                      // savepoint and lose the promised child. Hours that cannot be read never
+                      // assign: the child is seeded unassigned. No technician: nothing runs. The
+                      // gate off: shiftExcluding answers null with no read.
                       const fuDurationMin = callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES;
-                      if (await require('./technician-eligibility').shiftExcluding(sp, followUpTechId, fuPlan.scheduledDate,
-                        require('./scheduling/window-rules').rowBlockMinutes({ window_start: fuStart, window_end: fuWindowEnd, estimated_duration_minutes: fuDurationMin }))) {
-                        logger.warn(`[call-proc] follow-up technician ${followUpTechId} is outside the shift on ${fuPlan.scheduledDate}; seeding unassigned`);
+                      const fuBlock = require('./scheduling/window-rules').rowBlockMinutes({ window_start: fuStart, window_end: fuWindowEnd, estimated_duration_minutes: fuDurationMin });
+                      const fuOffShift = followUpTechId && await sp.transaction((shiftSp) => require('./technician-eligibility').shiftExcluding(shiftSp, followUpTechId, fuPlan.scheduledDate, fuBlock))
+                        .catch((shiftErr) => {
+                          logger.warn(`[call-proc] follow-up shift hours read failed for ${maskSid(callSid)} (seeding unassigned): ${shiftErr.message}`);
+                          return true;
+                        });
+                      if (fuOffShift) {
+                        logger.warn(`[call-proc] follow-up technician ${followUpTechId} is outside the shift on ${fuPlan.scheduledDate}, or its hours are unread; seeding unassigned`);
                         followUpTechId = null;
                       }
                       // Same bounded fence for the child's own date + tech
@@ -21349,11 +21357,7 @@ const CallRecordingProcessor = {
                     // changed, leave the reused row unassigned rather than assign.
                     let reuseTechId = reuseCandidateTechId;
                     try {
-                      // `hours` (GATE_TECH_SHIFT_HOURS): the reused row's own block, as this path
-                      // read it (the availability re-check below reads the same row). A shift that
-                      // does not hold it leaves the row unassigned (a windowless row has no block).
-                      await assertAssignableTechnician(reuseTechId, { conn: trx, date: dayRow?.day, workDays: true,
-                        hours: require('./scheduling/window-rules').rowBlockMinutes(existing) });
+                      await assertAssignableTechnician(reuseTechId, { conn: trx, date: dayRow?.day, workDays: true });
                       // A PICKED technician passed the capability filter on a
                       // plain read; re-read it under the technician share lock
                       // so an Off saved since cannot receive this visit. The line map's

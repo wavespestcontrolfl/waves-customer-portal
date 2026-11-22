@@ -461,27 +461,34 @@ describe('booking conflict wiring (source-level — behavior needs a live DB)', 
   // every other refusal there does: the visit is written unassigned.
   test('the automatic technician checks read the visit\'s own block for the shift', () => {
     const block = "require\\('\\./scheduling/window-rules'\\)\\.rowBlockMinutes";
-    // A new visit and a reused one: `hours` on the technician check each already makes.
-    const reused = new RegExp(`assertAssignableTechnician\\(reuseTechId, \\{ conn: trx, date: dayRow\\?\\.day, workDays: true,\\s*hours: ${block}\\(existing\\) \\}\\);`);
+    // A new visit: `hours` on the technician check it already makes.
     const created = new RegExp(`assertAssignableTechnician\\(insertData\\.technician_id, \\{ conn: trx, date: String\\(scheduledDate\\)\\.slice\\(0, 10\\), workDays: true,\\s*hours: ${block}\\(insertData\\) \\}\\);`);
     // A follow-up child (a package visit 2 or a follow-up asked for on the call): its planned
     // block with the job's length, before its fence and its hour search, so both run for the
     // technician it keeps (the hour search then stays inside the shift: plan-taken-hour.test.js).
-    const child = new RegExp(`if \\(await require\\('\\./technician-eligibility'\\)\\.shiftExcluding\\(sp, followUpTechId, fuPlan\\.scheduledDate,\\s*${block}\\(\\{ window_start: fuStart, window_end: fuWindowEnd, estimated_duration_minutes: fuDurationMin \\}\\)\\)\\) \\{`);
-    for (const site of [reused, created, child]) expect(src).toMatch(site);
+    const childBlock = new RegExp(`const fuBlock = ${block}\\(\\{ window_start: fuStart, window_end: fuWindowEnd, estimated_duration_minutes: fuDurationMin \\}\\);`);
+    // The read has its own nested savepoint, and a failed read answers "outside": the promised
+    // child is still written, unassigned.
+    const child = new RegExp(`const fuOffShift = followUpTechId && await sp\\.transaction\\(\\(shiftSp\\) => require\\('\\./technician-eligibility'\\)\\.shiftExcluding\\(shiftSp, followUpTechId, fuPlan\\.scheduledDate, fuBlock\\)\\)\\s*\\.catch\\(\\(shiftErr\\) => \\{`);
+    for (const site of [created, childBlock, child]) expect(src).toMatch(site);
     const at = (text) => src.indexOf(text, src.search(child));
+    const failedRead = src.slice(src.search(child), at('if (fuOffShift) {'));
+    expect(failedRead).toContain('return true;');
+    expect(failedRead).not.toContain('throw ');
     expect(src.indexOf('if (followUpTechId && packageFollowUp) {')).toBeLessThan(src.search(child));
-    expect(at('fenceBookingDay(fenceSp, { date: fuPlan.scheduledDate, techId: followUpTechId })')).toBeGreaterThan(src.search(child));
+    expect(src.search(childBlock)).toBeLessThan(src.search(child));
+    expect(at('fenceBookingDay(fenceSp, { date: fuPlan.scheduledDate, techId: followUpTechId })')).toBeGreaterThan(at('if (fuOffShift) {'));
     expect(at("callFollowUpWindow(sp, {")).toBeGreaterThan(at('fenceBookingDay(fenceSp, { date: fuPlan.scheduledDate, techId: followUpTechId })'));
     // Nothing clears the technician between the hour search and the insert.
     expect(src.slice(at("callFollowUpWindow(sp, {"), at("const [fuRow] = await sp('scheduled_services')"))).not.toContain('followUpTechId = null');
-    // The one technician check left without `hours` is the package visit 2's day check: the
-    // child's block is read right after it.
-    expect(src.match(/assertAssignableTechnician\([^)]*workDays: true \}\)/g)).toEqual([expect.stringContaining('followUpTechId')]);
+    // Two technician checks stay without `hours`: the package visit 2's day check (the child's
+    // block is read right after it) and a reused visit's. The reuse path reads the row it reuses
+    // with no row lock, so its shift check comes with that lock, in its own PR.
+    expect(src.match(/assertAssignableTechnician\([^)]*workDays: true \}\)/g))
+      .toEqual([expect.stringContaining('followUpTechId'), expect.stringContaining('reuseTechId')]);
     // Each refusal there is recovered as unassigned.
     const after = (site, text) => src.slice(src.search(site)).slice(0, 2200).includes(text);
     expect(after(child, 'followUpTechId = null;')).toBe(true);
-    expect(after(reused, 'reuseTechId = null;')).toBe(true);
     expect(after(created, 'insertData.technician_id = null;')).toBe(true);
   });
 
