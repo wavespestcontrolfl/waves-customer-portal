@@ -468,8 +468,9 @@ describe('booking conflict wiring (source-level — behavior needs a live DB)', 
     // technician it keeps (the hour search then stays inside the shift: plan-taken-hour.test.js).
     const childBlock = new RegExp(`const fuBlock = ${block}\\(\\{ window_start: fuStart, window_end: fuWindowEnd, estimated_duration_minutes: fuDurationMin \\}\\);`);
     // The read has its own nested savepoint, and a failed read answers "outside": the promised
-    // child is still written, unassigned.
-    const child = new RegExp(`const fuOffShift = followUpTechId && await sp\\.transaction\\(\\(shiftSp\\) => require\\('\\./technician-eligibility'\\)\\.shiftExcluding\\(shiftSp, followUpTechId, fuPlan\\.scheduledDate, fuBlock\\)\\)\\s*\\.catch\\(\\(shiftErr\\) => \\{`);
+    // child is still written, unassigned. The gate is read first: off, no savepoint opens and
+    // the child keeps its technician.
+    const child = new RegExp(`const fuOffShift = followUpTechId && require\\('\\.\\./config/feature-gates'\\)\\.techShiftHoursLive\\?\\.\\(\\)\\s*&& await sp\\.transaction\\(\\(shiftSp\\) => require\\('\\./technician-eligibility'\\)\\.shiftExcluding\\(shiftSp, followUpTechId, fuPlan\\.scheduledDate, fuBlock\\)\\)\\s*\\.catch\\(\\(shiftErr\\) => \\{`);
     for (const site of [created, childBlock, child]) expect(src).toMatch(site);
     const at = (text) => src.indexOf(text, src.search(child));
     const failedRead = src.slice(src.search(child), at('if (fuOffShift) {'));

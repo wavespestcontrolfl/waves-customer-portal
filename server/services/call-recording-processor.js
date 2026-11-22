@@ -21029,11 +21029,12 @@ const CallRecordingProcessor = {
                       // inside the shift (callFollowUpWindow). The read has its own nested
                       // savepoint, as the fence below has: a failed read must not abort THIS
                       // savepoint and lose the promised child. Hours that cannot be read never
-                      // assign: the child is seeded unassigned. No technician: nothing runs. The
-                      // gate off: shiftExcluding answers null with no read.
+                      // assign: the child is seeded unassigned. No technician, or the gate off:
+                      // nothing runs (no savepoint, no read), and the child keeps its technician.
                       const fuDurationMin = callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES;
                       const fuBlock = require('./scheduling/window-rules').rowBlockMinutes({ window_start: fuStart, window_end: fuWindowEnd, estimated_duration_minutes: fuDurationMin });
-                      const fuOffShift = followUpTechId && await sp.transaction((shiftSp) => require('./technician-eligibility').shiftExcluding(shiftSp, followUpTechId, fuPlan.scheduledDate, fuBlock))
+                      const fuOffShift = followUpTechId && require('../config/feature-gates').techShiftHoursLive?.()
+                        && await sp.transaction((shiftSp) => require('./technician-eligibility').shiftExcluding(shiftSp, followUpTechId, fuPlan.scheduledDate, fuBlock))
                         .catch((shiftErr) => {
                           logger.warn(`[call-proc] follow-up shift hours read failed for ${maskSid(callSid)} (seeding unassigned): ${shiftErr.message}`);
                           return true;
