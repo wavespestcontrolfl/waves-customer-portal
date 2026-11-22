@@ -36,9 +36,9 @@ describe('pageFacts', () => {
       { type: 'local_pack' },
       { type: 'local_pack' },
       { type: 'organic', domain: 'example-three.com', rank_absolute: 6, checks: { from_web: true } },
-      { type: 'organic', domain: 'example-four.com', rank_absolute: 7 },
-      { type: 'organic', domain: 'example-five.com', rank_absolute: 8 },
-      { type: 'organic', domain: 'example-six.com', rank_absolute: 9 },
+      { type: 'organic', domain: 'example-four.com', rank_absolute: 7, checks: { from_web: false } },
+      { type: 'organic', domain: 'example-five.com', rank_absolute: 8, checks: ['other_check'] },
+      { type: 'organic', domain: 'example-six.com', rank_absolute: 9, checks: 'from_web' },
     ];
     expect(pageFacts(items)).toEqual({
       items: 9,

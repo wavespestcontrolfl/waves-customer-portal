@@ -10,6 +10,13 @@ const TRACKED_COMPETITORS = ['turnerpest.com', 'hoskinspest.com', 'hometeampestd
 // poisoned-page repair on (GATE_DATAFORSEO_RESOLVE_POISONED), and the row did not say why: a page with
 // no organic results, with unrelated results, or with repaired ones. `repaired` counts organic results
 // DataForSEO read again from the live web (their `checks` value names `from_web`).
+// DataForSEO marks a repaired result with the entry `from_web` in its `checks` list. An object form counts
+// only when it says true: `{ from_web: false }` is a result that was not repaired.
+function repairedFromWeb(checks) {
+  if (Array.isArray(checks)) return checks.includes('from_web');
+  return Boolean(checks) && typeof checks === 'object' && checks.from_web === true;
+}
+
 function pageFacts(items) {
   const list = Array.isArray(items) ? items.filter(Boolean) : [];
   const types = {};
@@ -22,7 +29,7 @@ function pageFacts(items) {
     items: list.length,
     types,
     organic: organic.length,
-    repaired: organic.filter(i => JSON.stringify(i.checks ?? '').includes('from_web')).length,
+    repaired: organic.filter(i => repairedFromWeb(i.checks)).length,
     top_domains: organic.slice(0, 5).map(i => String(i.domain || '').toLowerCase().slice(0, 80)),
   };
 }
