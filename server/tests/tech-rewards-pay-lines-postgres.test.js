@@ -2219,7 +2219,17 @@ postgres('tech rewards pay lines: the December gift', () => {
       const alpha = await readyTech('Sample Alpha');
       await paidWeeks(alpha);
       await approvedWeek(alpha, BONUS_WEEK);
+      // the lock a score settings save takes, held shared by this session (tech-rewards-scores.js lockSettingsForRead)
+      const settingsLocks = async () => Number((await trx.raw(`SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()
+        AND mode = 'ShareLock' AND objsubid = 1 AND objid = (hashtext('tech-reward-settings')::bigint & 4294967295)::oid`)).rows[0].n);
+      // a run dated for no season bonus (Sep 17) works none out, and leaves the score settings alone
+      await approvedWeek(alpha, CUT_WEEK);
+      await finalize((await draft(CUT_WEEK)).id);
+      expect(await settingsLocks()).toBe(0);
+      // a run that works a season bonus out holds that lock to the end of its transaction: no settings version can be saved
+      // between its check of the score and the bonus it writes
       const run = await draft(BONUS_WEEK);
+      expect(await settingsLocks()).toBe(1);
       expect(await linesOf(alpha)).toMatchObject([{ status: 'open', amount_cents: 18480 }]); // 4% of 2,640.00 x 1.75
       const shown = (await api('GET', `/runs/${run.id}`)).body.run;
       // The office approves that draft. The finalize reads the score (92.5), then waits for the payroll lock; meanwhile the

@@ -141,6 +141,8 @@ const payrollRuns = () => require('./payroll-runs');
 // every figure of a season bonus (readSeasonScoreFigures, readSeasonPay, seasonBonusOf). It pulls in the score and review modules, so it loads on
 // first use: a pay run that has no stay bonus and no season bonus to look at never reads it.
 const scoreboard = () => require('./tech-rewards-scoreboard');
+// The score module is the home of the score settings lock (lockSettingsForRead). Loaded on first use, as the board is.
+const scoreSettings = () => require('./tech-rewards-scores');
 
 // The one home of the value is payroll-pay-lines.js, which pays these lines in their own week only (openLinesFor).
 const SOURCE_TYPE = TECH_REWARDS_SOURCE;
@@ -538,7 +540,8 @@ async function readSeasonScoresOfRun(conn, runId) {
  *   the same      the snapshot's figures are one moment's data AND still the data under the lock: they are used
  *   not the same  the bonus waits (score_changed). Its open line comes off, so a finalize sees a run that differs from the
  *                 draft, pays nothing from the old score and gives the office the new numbers; the next sync reads again
- * The second read alone is not used: it is READ COMMITTED, and its parts can be from two moments.
+ * The second read alone is not used: it is READ COMMITTED, and its parts can be from two moments. The sync holds the score
+ * settings lock by now (syncTechRewardLines), so the settings read here are the settings until the pay run ends.
  */
 async function seasonScoreOf(trx, technicianId, key, season, seasonScores) {
   const wait = (reason) => ({ wait: { reason, week: null } });
@@ -884,6 +887,21 @@ async function applyCandidate(trx, run, sourceId, cand, state) {
 }
 
 /**
+ * When this sync is about to work a season bonus out: from here to the end of the pay run's transaction no score settings
+ * version can be saved (tech-rewards-scores.js lockSettingsForRead, the lock saveSettings takes). The settings move every
+ * technician's band at once, so a save must not land between the check of a score under the payroll lock (seasonScoreOf) and
+ * the bonus this run pays. Taken after the payroll lock, and a settings save takes no payroll lock: the two cannot lock
+ * each other. A sync with no season bonus to work out takes nothing, and so does one that takes no locks (`lock` false).
+ * The field records behind the score parts (reports, audits, callbacks, truck checks, ratings) are not locked: a pay run
+ * never stops a technician closing a report. A record written after the check is after this pay run, and a paid bonus is the
+ * one worked out from the records on file when payroll finalized.
+ */
+async function holdScoreSettings(trx, state, lock) {
+  const pricesSeason = lock && [...state.candidates].some(([sourceId, cand]) => cand.kind === SEASON && cand.due && !state.settled.has(sourceId));
+  if (pricesSeason) await scoreSettings().lockSettingsForRead(trx);
+}
+
+/**
  * Makes the open Tech Rewards pay lines match the plan, for the pay run `run` ({ id, week_start, pay_date } as
  * payroll-runs.js loadRun reads it). Take it inside the pay run's transaction, after the payroll lock and before the run is
  * worked out. Pay lines off: no pay line is read or written. A kind's gate off: its open lines are removed and none is written.
@@ -905,6 +923,7 @@ async function syncTechRewardLines(run, trx, { lock = true, actorId = null, seas
   if (dropped.length) await audit(trx, actorId, run, { gate: 'off', removed_count: dropped.length, removed_line_ids: dropped });
   if (allOff) return { ...result, removed: dropped.length };
   const state = { ...(await loadState(trx, run, lock)), seasonScores };
+  await holdScoreSettings(trx, state, lock);
   const ids = { added: [], updated: [], removed: [] };
   let examined = 0;
   let unchanged = 0;
