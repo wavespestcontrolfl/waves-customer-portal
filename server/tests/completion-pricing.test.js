@@ -179,6 +179,12 @@ describe('completion estimate evidence', () => {
       expect((await read({ ...estimate, waveguard_tier: 'Platinum', estimate_data: { result: { recurring: { tier: 'Platinum', discount: 0.2 },
         manualDiscount: { amount: 10, recurringAmount: 0 }, totals: { manualDiscount: { amount: 5, recurringAmount: 5 } } } } })).reason)
         .toBe('discount_unnamed');
+      // A record with a value and no saved share (an older shape, replayed onto recurring work) counts too; an empty one does not.
+      const withStaff = (manualDiscount) => ({ ...estimate, waveguard_tier: 'Platinum',
+        estimate_data: { result: { recurring: { tier: 'Platinum', discount: 0.2 }, manualDiscount } } });
+      expect((await read(withStaff({ type: 'FIXED', value: 50, oneTimeAmount: 0 }))).reason).toBe('discount_unnamed');
+      expect((await read(withStaff({ type: 'FIXED', value: 0, amount: 0 }))).breakdown.discounts).toEqual([{ name: 'WaveGuard Platinum', dollars: 22 }]);
+      expect((await read(withStaff({ amount: 10, recurringAmount: 0 }))).breakdown.discounts).toEqual([{ name: 'WaveGuard Platinum', dollars: 22 }]);
       // The legacy nested block also supplies rows: which block priced the line is unknown, so nothing is named.
       expect((await read({ ...estimate, waveguard_tier: 'Platinum', estimate_data: { result: { recurring: { tier: 'Platinum', discount: 0.2 },
         results: { recurring: { tier: 'Gold', discount: 0.15, services: [{ service: 'pest_control' }] } } } } })).reason).toBe('discount_unnamed');

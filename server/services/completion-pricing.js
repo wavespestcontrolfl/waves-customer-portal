@@ -128,6 +128,15 @@ function savedEstimateTier(estimate, data) {
   return { recurring, discounted, tier: { tier, amount } };
 }
 
+// Whether a stored staff discount record can reach recurring work. Its saved recurring share decides when it has one
+// (exactly 0 = one-time only). A record with no share saved (an older or value-only shape, replayed onto recurring
+// work) reaches it whenever it carries any positive figure.
+function staffRecordReachesRecurring(manual) {
+  if (!manual || typeof manual !== 'object') return false;
+  if (manual.recurringAmount != null) return Number(manual.recurringAmount) !== 0;
+  return [manual.amount, manual.value].some((figure) => Number(figure) > 0);
+}
+
 // A staff discount on recurring work in any place the estimate persisted one: every stored summary spot
 // (estimate-manual-discount-replay.js storedManualDiscountCandidates, not only the first positive one), the recurring
 // blocks, and all of these again on the engine's own result beside a mapped result, which the readers otherwise skip.
@@ -135,8 +144,7 @@ function staffDiscountOnRecurring(data, tierBlock) {
   const { staffDiscountReachesRecurring } = require('../routes/admin-customers')._private;
   const { storedManualDiscountCandidates } = require('./estimate-manual-discount-replay');
   const engineView = { ...data, result: undefined };
-  const reaches = (manual) => !!manual && Number(manual.recurringAmount ?? manual.amount) > 0;
-  return [data, engineView].some((view) => storedManualDiscountCandidates(view).some(reaches))
+  return [data, engineView].some((view) => storedManualDiscountCandidates(view).some(staffRecordReachesRecurring))
     || staffDiscountReachesRecurring(data, tierBlock)
     || staffDiscountReachesRecurring(engineView, object(object(data.engineResult).recurring));
 }
