@@ -1120,6 +1120,15 @@ async function main() {
               !(
                 e.text.includes("503") &&
                 (!e.url || state.expectedFailures.includes(e.url))
+              ) &&
+              // The two owner-only cash reads answer 403 for this non-owner
+              // login on every Banking page load. Any other 403 still fails.
+              !(
+                e.text.includes("403") &&
+                [
+                  "/api/admin/banking/cash-today",
+                  "/api/admin/banking/cash-forecast/inputs",
+                ].some((path) => new URL(e.url || server.baseUrl).pathname === path)
               ),
           ),
           [],
