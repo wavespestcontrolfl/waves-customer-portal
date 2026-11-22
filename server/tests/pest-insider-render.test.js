@@ -352,8 +352,8 @@ describe('renderIssue', () => {
     expect(archive).toContain('Lizards on the lanai: friend or foe?');
     expect(archive).toContain('What lizards?');
     expect(archive).not.toMatch(/\/api\/public\/newsletter\/quiz|\{\{quiz/);
-    // Any other id adds nothing: the same body as no poll.
-    for (const other of [NEWSLETTER_POLL_IDS[0], 'pest-pressure-v1', 'pi-poll-unknown-v1', null, 7]) {
+    // Any other id adds nothing: the same body as no poll. A retired poll (pi-poll-bugging-you-v1) is one of them.
+    for (const other of [NEWSLETTER_POLL_IDS[0], 'pest-pressure-v1', 'pi-poll-unknown-v1', 'pi-poll-bugging-you-v1', null, 7]) {
       expect(renderIssue({ ...BASE, pollQuizId: other })).toEqual(renderIssue(BASE));
     }
   });

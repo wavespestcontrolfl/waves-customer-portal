@@ -40,7 +40,7 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
   const db = require('../models/db');
   const {
     newsletterIssuePolls, newsletterLastPoll, pollResultLine, chooseNewsletterPoll, recordQuizResponse,
-    NEWSLETTER_POLL_IDS, PEST_INSIDER_POLL_IDS,
+    NEWSLETTER_POLL_IDS, PEST_INSIDER_POLL_IDS, RETIRED_PEST_INSIDER_POLL_IDS,
   } = require('../services/newsletter-quiz');
   const { etDateString } = require('../utils/datetime-et');
   const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
@@ -330,6 +330,28 @@ postgres('Waves Newsletter polls (real Postgres)', () => {
     expect(await answerOf()).toEqual({ quiz_id: PI2, quiz_answer: 'ants' });
     await recordQuizResponse({ token: row.engagement_token, quizId: PI2, answerKey: 'spiders' });
     expect(await answerOf()).toEqual({ quiz_id: PI2, quiz_answer: 'spiders' });
+  });
+
+  test('an old issue with a retired poll is still a poll issue: the gap holds, a late vote counts, no other answer replaces it, no result line', async () => {
+    await onlyThisTestsPestInsiderIssues();
+    const [RETIRED] = RETIRED_PEST_INSIDER_POLL_IDS;
+    const [[row]] = await insertIssues(PEST_INSIDER_TYPE, [{ poll: RETIRED, sentAt: daysAgo(3) }]);
+    const answerOf = async () => db('newsletter_send_deliveries').where({ id: row.id }).first('quiz_id', 'quiz_answer');
+    // The history reads it as a poll issue, so the next issue takes no poll; the retired poll is never offered.
+    const history = await newsletterIssuePolls({ newsletterType: PEST_INSIDER_TYPE });
+    expect(history).toEqual({ ids: PEST_INSIDER_POLL_IDS, recent: [RETIRED], used: [RETIRED] });
+    expect(chooseNewsletterPoll(history)).toBeNull();
+    // A late vote from that email counts.
+    await recordQuizResponse({ token: row.engagement_token, quizId: RETIRED, answerKey: 'ants' });
+    expect(await answerOf()).toEqual({ quiz_id: RETIRED, quiz_answer: 'ants' });
+    // A hand-made link to another quiz, or to a current poll, does not replace it.
+    for (const [quizId, answerKey] of [['pest-pressure-v1', 'ants'], [PI1, 'shoe']]) {
+      await expect(recordQuizResponse({ token: row.engagement_token, quizId, answerKey }))
+        .resolves.toEqual({ ok: false, reason: 'not-in-issue' });
+    }
+    expect(await answerOf()).toEqual({ quiz_id: RETIRED, quiz_answer: 'ants' });
+    // The next issue reports no result for a retired poll.
+    expect(await newsletterLastPoll({ newsletterType: PEST_INSIDER_TYPE, sendDate: etDateString(new Date()) })).toBeNull();
   });
 
   test('the last poll result reads the newest issue readers got: its own votes, one per delivery row, only its poll', async () => {

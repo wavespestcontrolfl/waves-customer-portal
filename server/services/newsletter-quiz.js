@@ -177,6 +177,19 @@ const PEST_INSIDER_POLLS = [
   ['pi-poll-mosquito-bites-v1', 'Poll: mosquito bites', 'Who gets the mosquito bites at your house?',
     [['me-always', 'Me, always'], ['everyone', 'Everyone'], ['not-me', 'Not me'], ['nobody', 'Nobody']]],
 ];
+// Retired Waves Pest Insider polls: the planner never picks one again, but an
+// email already sent can still carry its vote links. So the definition stays:
+// a late vote from such an email still counts, the poll rules of
+// recordQuizResponse still hold for that issue (no other quiz's answer replaces
+// the vote), and the poll history still reads that issue as a poll issue. No
+// new issue shows one (render.js pollBlock takes a current poll only) and the
+// result line never reports one (pollResultLine).
+// pi-poll-bugging-you-v1: reworded and replaced by pi-poll-worst-guest-v1 on
+// 2026-11-22; a vote on the old question is not a vote on the new one.
+const RETIRED_PEST_INSIDER_POLLS = [
+  ['pi-poll-bugging-you-v1', 'Poll: pest bugging you', 'Which pest bugs you most this month?',
+    [['ants', 'Ants'], ['roaches', 'Roaches'], ['mosquitoes', 'Mosquitoes'], ['spiders', 'Spiders']]],
+];
 // Adds one newsletter's polls to QUIZZES; returns their ids in the owner's
 // order: the newsletter uses each once, then stops.
 function addPolls(polls, landingLine) {
@@ -200,12 +213,21 @@ function addPolls(polls, landingLine) {
 const NEWSLETTER_POLL_IDS = addPolls(NEWSLETTER_POLLS, 'Your vote is in. See you in the next Waves Newsletter.');
 // The Waves Pest Insider's next issue opens with the last poll's result (pollResultLine).
 const PEST_INSIDER_POLL_IDS = addPolls(PEST_INSIDER_POLLS, "Your vote is in. We'll share the top answer in the Waves Pest Insider.");
+// A retired poll keeps the thank-you line it had: it promises no result.
+const RETIRED_PEST_INSIDER_POLL_IDS = addPolls(RETIRED_PEST_INSIDER_POLLS, 'Your vote is in. See you in the next Waves Pest Insider.');
 const isNewsletterPoll = (quizId) => NEWSLETTER_POLL_IDS.includes(quizId);
+// A CURRENT Waves Pest Insider poll: one a new issue may show.
 const isPestInsiderPoll = (quizId) => PEST_INSIDER_POLL_IDS.includes(quizId);
-const isPoll = (quizId) => isNewsletterPoll(quizId) || isPestInsiderPoll(quizId);
+// Any poll an email can carry, a retired one included (the vote rules).
+const isPoll = (quizId) => isNewsletterPoll(quizId) || isPestInsiderPoll(quizId) || RETIRED_PEST_INSIDER_POLL_IDS.includes(quizId);
 // A newsletter type's own list: the Waves Pest Insider's for its type, the
 // Waves Newsletter's for any other (only the flagship draft shows one).
 const pollIdsFor = (newsletterType) => (newsletterType === PEST_INSIDER_TYPE ? PEST_INSIDER_POLL_IDS : NEWSLETTER_POLL_IDS);
+// The polls an issue of that type can hold, retired ones included: what the
+// poll history reads, so an old issue with a retired poll still counts as a
+// poll issue for the every-3rd-issue rule.
+const PEST_INSIDER_POLL_HISTORY_IDS = Object.freeze([...PEST_INSIDER_POLL_IDS, ...RETIRED_PEST_INSIDER_POLL_IDS]);
+const pollHistoryIdsFor = (newsletterType) => (newsletterType === PEST_INSIDER_TYPE ? PEST_INSIDER_POLL_HISTORY_IDS : NEWSLETTER_POLL_IDS);
 // Every poll id carries this; the history query's loose prefilter reads it.
 const POLL_ID_MARK = '-poll-';
 /** Sent issues between two polls: a poll shows in at most every 3rd issue, never two in a row. */
@@ -633,10 +655,13 @@ async function newsletterIssuePolls({ newsletterType, knex = require('../models/
     .where((body) => body.where('s.html_body', 'ilike', `%{{quiz%${POLL_ID_MARK}%`)
       .orWhere('s.text_body', 'ilike', `%{{quiz%${POLL_ID_MARK}%`))
     .select('s.html_body', 's.text_body');
+  // `ids` is the list the next issue picks from; the history also reads a
+  // retired poll, so the issue that carried one is still a poll issue.
+  const historyIds = pollHistoryIdsFor(newsletterType);
   return {
     ids,
-    recent: newest.map((issue) => pollInIssue(issue, ids)),
-    used: holding.map((issue) => pollInIssue(issue, ids)).filter(Boolean),
+    recent: newest.map((issue) => pollInIssue(issue, historyIds)),
+    used: holding.map((issue) => pollInIssue(issue, historyIds)).filter(Boolean),
   };
 }
 
@@ -706,6 +731,7 @@ function pollResultLine({ quizId, counts } = {}) {
 module.exports = {
   NEWSLETTER_POLL_IDS,
   PEST_INSIDER_POLL_IDS,
+  RETIRED_PEST_INSIDER_POLL_IDS,
   POLL_ID_MARK,
   POLL_ISSUE_GAP,
   isNewsletterPoll,

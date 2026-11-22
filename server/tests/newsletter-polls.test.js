@@ -34,7 +34,7 @@ jest.mock('../services/newsletter-event-selection', () => ({
 
 const db = require('../models/db');
 const {
-  NEWSLETTER_POLL_IDS, PEST_INSIDER_POLL_IDS, POLL_ID_MARK, POLL_ISSUE_GAP, QUIZ_TOKEN_PATTERN, getQuiz,
+  NEWSLETTER_POLL_IDS, PEST_INSIDER_POLL_IDS, RETIRED_PEST_INSIDER_POLL_IDS, POLL_ID_MARK, POLL_ISSUE_GAP, QUIZ_TOKEN_PATTERN, getQuiz, isPestInsiderPoll,
   chooseNewsletterPoll, pollInIssue, hasQuizToken, buildQuizSubstitutions, neutralizeQuizTokens, pollResultLine, recordQuizResponse, newsletterLastPoll,
 } = require('../services/newsletter-quiz');
 const {
@@ -255,8 +255,8 @@ describe('Waves Pest Insider polls', () => {
       'pi-poll-bug-surprise-v1', 'pi-poll-yard-smell-v1', 'pi-poll-mosquito-bites-v1',
     ]);
     expect(getQuiz('pi-poll-worst-guest-v1').label).toBe('Poll: worst house guest');
-    // The reworded poll has a new id; the old one is gone.
-    expect(getQuiz('pi-poll-bugging-you-v1')).toBeNull();
+    // The reworded poll has a new id; the old one is retired (see the retired-poll cases below).
+    expect(PEST_INSIDER_POLL_IDS).not.toContain('pi-poll-bugging-you-v1');
     // Each thank-you page names its own newsletter: the Pest Insider's says the top answer will come in the issue.
     expect(getQuiz(PI1).landingLine).toBe("Your vote is in. We'll share the top answer in the Waves Pest Insider.");
     expect(getQuiz(P1).landingLine).toBe('Your vote is in. See you in the next Waves Newsletter.');
@@ -331,6 +331,64 @@ describe('the last poll result line (Waves Pest Insider)', () => {
         expect(line).not.toMatch(/\d|%/);
       }
     }
+  });
+});
+
+describe('a retired Waves Pest Insider poll (an email already sent can still carry its vote links)', () => {
+  const RETIRED = 'pi-poll-bugging-you-v1';
+  const [PI1] = PEST_INSIDER_POLL_IDS;
+
+  // recordQuizResponse on a fake database: the delivery row, then the issue body it reads.
+  function voteOn(body) {
+    const updates = [];
+    db.mockImplementation((table) => {
+      const q = {
+        where: jest.fn(() => q),
+        first: jest.fn(async () => (table === 'newsletter_send_deliveries'
+          ? { id: 7, subscriber_id: 5, send_id: 3 }
+          : { html_body: body, text_body: '' })),
+        update: jest.fn(async (row) => { updates.push({ table, ...row }); }),
+      };
+      return q;
+    });
+    return updates;
+  }
+
+  test('it keeps its words and its poll rules, and no new issue can pick it or report it', () => {
+    expect(RETIRED_PEST_INSIDER_POLL_IDS).toEqual([RETIRED]);
+    const quiz = getQuiz(RETIRED);
+    expect(`${quiz.question} ${quiz.answers.map((a) => a.label).join(' · ')}`).toBe('Which pest bugs you most this month? Ants · Roaches · Mosquitoes · Spiders');
+    expect(quiz).toMatchObject({ poll: true, landingCtaSuppressed: true, landingLine: 'Your vote is in. See you in the next Waves Pest Insider.' });
+    expect(quiz.answers.every((a) => a.tags.length === 0)).toBe(true);
+    expect(RETIRED).toContain(POLL_ID_MARK);
+    // Not a current poll: the renderer shows a current poll only, and the planner picks from the current list.
+    expect(isPestInsiderPoll(RETIRED)).toBe(false);
+    expect(PEST_INSIDER_POLL_IDS).not.toContain(RETIRED);
+    for (let used = 0; used <= PEST_INSIDER_POLL_IDS.length; used += 1) {
+      expect(chooseNewsletterPoll({ recent: [], used: PEST_INSIDER_POLL_IDS.slice(0, used), ids: PEST_INSIDER_POLL_IDS })).not.toBe(RETIRED);
+    }
+    // The result line never reports it.
+    expect(pollResultLine({ quizId: RETIRED, counts: { ants: 3 } })).toBeNull();
+  });
+
+  test('a vote from an old issue that shows it still counts', async () => {
+    const updates = voteOn(`{{quiz:${RETIRED}}}`);
+    await expect(recordQuizResponse({ token: TOKEN, quizId: RETIRED, answerKey: 'ants' })).resolves.toEqual({ ok: true, reason: 'tagged' });
+    expect(updates.map((u) => [u.table, u.quiz_id, u.quiz_answer])).toEqual([['newsletter_send_deliveries', RETIRED, 'ants']]);
+  });
+
+  test('that issue takes no other quiz\'s answer: a hand-made link cannot replace the vote or add service tags', async () => {
+    for (const [quizId, answerKey] of [['pest-pressure-v1', 'ants'], [PI1, 'shoe']]) {
+      const updates = voteOn(`{{quiz:${RETIRED}}}`);
+      await expect(recordQuizResponse({ token: TOKEN, quizId, answerKey })).resolves.toEqual({ ok: false, reason: 'not-in-issue' });
+      expect(updates).toEqual([]);
+    }
+  });
+
+  test('a vote for it from an issue that never showed it is refused', async () => {
+    const updates = voteOn(`{{quiz:${PI1}}}`);
+    await expect(recordQuizResponse({ token: TOKEN, quizId: RETIRED, answerKey: 'ants' })).resolves.toEqual({ ok: false, reason: 'not-in-issue' });
+    expect(updates).toEqual([]);
   });
 });
 
