@@ -249,8 +249,12 @@ describe('second-tech-handover planner', () => {
       const combined = parent({ customer_id: 'C-combo3', line: 'general', catalog_key: 'pest_termite_bait_quarterly' });
       expect(plan([combined], [visit(combined, MON)]).capability_lines).toEqual(['general', 'termite']);
       const addon = parent({ customer_id: 'C-addon4' });
-      expect(plan([addon], [visit(addon, MON)], { baitAddonSeriesIds: [addon.id] }).capability_lines).toEqual(['general', 'termite']);
-      // Template-only (no visit to move now) still hands the series over.
+      const addonVisit = visit(addon, MON);
+      expect(plan([addon], [addonVisit], { baitAddonSeriesIds: [addon.id], baitAddonVisitIds: [addonVisit.id] }).capability_lines).toEqual(['general', 'termite']);
+      // The add-on on a visit that STAYS with the owner (a Friday after the 13 weeks) hands no bait work over.
+      const friday = visit(addon, FRI_LATE);
+      expect(plan([addon], [friday], { baitAddonSeriesIds: [addon.id], baitAddonVisitIds: [friday.id] }).capability_lines).toEqual(['general']);
+      // Template-only (no visit to move now) still hands the bait plan over.
       expect(plan([combined], []).capability_lines).toEqual(['general', 'termite']);
       // Plain pest and plain termite: the lines with a series to move, nothing more.
       const pest = parent();
@@ -261,6 +265,18 @@ describe('second-tech-handover planner', () => {
       const baitElsewhere = parent({ customer_id: 'C-split', line: 'termite', service_key_snapshot: 'termite_active_bait_quarterly', technician_id: HIRE });
       const pestHere = parent({ customer_id: 'C-split' });
       expect(plan([baitElsewhere, pestHere], [visit(pestHere, MON)]).capability_lines).toEqual(['general']);
+      // A one-time bait add-on on a PAST visit (not among the visits ahead), or on a finished one: the customer is still
+      // a bait customer for a run that leaves termite out, and the pest-only work that moves asks for no termite switch.
+      const past = parent({ customer_id: 'C-past-addon' });
+      const pestOnly = visit(past, MON);
+      const pastPlan = plan([past], [pestOnly], { baitAddonSeriesIds: [past.id], baitAddonVisitIds: ['V-completed-last-year'] });
+      expect(pastPlan.ids.visits).toEqual([pestOnly.id]);
+      expect(pastPlan.bait_customers_moving).toBe(1);
+      expect(pastPlan.capability_lines).toEqual(['general']);
+      const doneToday = visit(past, MON, { status: 'completed' });
+      expect(plan([past], [pestOnly, doneToday], { baitAddonSeriesIds: [past.id], baitAddonVisitIds: [doneToday.id], liveSeriesIds: [past.id] }).capability_lines).toEqual(['general']);
+      expect(plan([past], [pestOnly], { baitAddonSeriesIds: [past.id], baitAddonVisitIds: ['V-completed-last-year'], lines: NO_TERMITE }).skipped.termite_bait_customer)
+        .toEqual({ series: 1, visits: 1, customers: 1 });
       // A run that leaves termite out keeps the bait customer whole: nothing moves, nothing to check.
       expect(plan([combined], [visit(combined, MON)], { lines: NO_TERMITE }).capability_lines).toEqual([]);
       expect(plan([], []).capability_lines).toEqual([]);
