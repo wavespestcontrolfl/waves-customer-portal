@@ -176,6 +176,30 @@ describe('tierSavingsLeftOffInvoices', () => {
     expect(await tierFor({ tier: 'Bronze', recurring: { tier: 'Bronze' }, lineItems: [pestItem({ discount: waveguard(0.15, 'bronze') })] })).toEqual([]);
   });
 
+  // Pre-push audit P1 (round 5): the admin estimate tool saves the mapped result only (EstimateToolViewV2.jsx: inputs,
+  // result, summary, the tier column), with no engine line items. The witness is then the tier and rate it saved.
+  test('an estimate saved with no engine lines is read with the tier and the rate it saved', async () => {
+    const admin = (recurring, extra = {}, tier = 'Gold') => findingsOn({ tier, data: { inputs: {},
+      result: { recurring: { services: [pestRow], ...recurring } }, summary: { manualDiscount: null, serviceSpecificDiscounts: [] }, ...extra } });
+    expect(await admin({ ...gold, discount: 0.15 })).toEqual([{ visitId: 'v1', estimateId: 'e1', serviceKey: 'pest_control', tier: 'gold' }]);
+    expect(pricedWith()).toEqual([{ tier: 'gold', amount: 0.15 }]);
+    expect(await admin(gold, { sendSnapshot: { tierDiscounts: { Gold: 0.15 } } })).toHaveLength(1);
+    expect(await admin({ waveGuardTier: 'Gold', discount: 0.15 }, {}, null)).toHaveLength(1);
+    // No saved rate, a saved 0, or a rate that did not price the row: nothing proves the saving. With no rate the
+    // invoice's pricing is not asked.
+    jest.clearAllMocks();
+    expect(await admin(gold)).toEqual([]);
+    expect(acceptedPricing).not.toHaveBeenCalled();
+    expect(await admin({ ...gold, discount: 0 })).toEqual([]);
+    expect(await admin({ ...gold, discount: 0.1 })).toEqual([]);
+    // Records that disagree, no tier named, a staff discount on recurring work.
+    expect(await admin({ tier: 'Silver', discount: 0.15 })).toEqual([]);
+    expect(await admin({ discount: 0.15 }, {}, null)).toEqual([]);
+    expect(await admin({ ...gold, discount: 0.15 }, { summary: { manualDiscount: { amount: 5, recurringAmount: 5, label: 'Courtesy' } } })).toEqual([]);
+    // An estimate that saved engine lines, none of them this service's, has no witness.
+    expect(await findingsOn({ lineItems: [lawnItem()], recurring: { ...gold, discount: 0.15 } })).toEqual([]);
+  });
+
   // Pre-push audit P1: a saved 0 is a rate, and the invoice reads the send snapshot first.
   test('the rate the estimate saved for its tier, as the invoice reads it, must be the engine line\'s rate', async () => {
     const withData = (extra, recurring = gold) => findingsOn({ data: { engineResult: { lineItems: [pestItem()] }, result: { recurring }, ...extra } });

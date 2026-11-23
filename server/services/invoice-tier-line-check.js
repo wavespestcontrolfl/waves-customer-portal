@@ -10,7 +10,9 @@
 // given the tier the estimate's own engine line recorded.
 //
 // The witness is the engine's record: the tier and the rate it applied to that line, which the estimate's other records
-// must not contradict. It never comes from the invoice's own tier reading (savedEstimateTier), where the miss was. The
+// must not contradict. An estimate saved with no engine lines (the admin estimate tool's mapped result) has only its
+// saved tier and rate, so those are read here on their own. The witness never comes from the invoice's own tier reading
+// (savedEstimateTier), where the miss was. The
 // line is then priced by the invoice's own pure pricing (acceptedPricing), in the invoice's own discount context with
 // only that tier reading replaced, so every row rule that keeps one line on purpose (a service credit, a floor, a staff
 // change to the row, a row's own net, rate or flags, a service the tier percentage skips) stays that code's rule. The
@@ -75,12 +77,17 @@ function engineTierRecord(lineItems, serviceKey) {
   return { rate, tier: word(priced[0].tier) };
 }
 
-// The tier the estimate's records name for its recurring work, when they agree with the engine's line: the column and
-// the saved recurring block name no other tier (an empty column falls back to the block, as completion-pricing.js
-// savedEstimateTier does), and the rate the estimate saved for it is the engine line's rate. That rate is the one the
-// invoice reads (savedEstimateTier): the send snapshot's, else the rate of a block that names the tier. A saved 0 is a
-// rate; an estimate that saved none leaves the engine's. Records that disagree name no saving: the invoice keeps one
-// line by design. Null unless Silver, Gold or Platinum.
+// An estimate saved from its mapped result only (the admin estimate tool saves recurring.services with no line items)
+// has no engine record: its witness is the tier and rate the estimate saved, read here on their own (recordsTier).
+const NO_ENGINE_RECORD = { tier: '', rate: null };
+
+// The tier and rate the estimate's records name for its recurring work, when they agree with the engine's line: the
+// column and the saved recurring block name no other tier (an empty column falls back to the block, as
+// completion-pricing.js savedEstimateTier does), and the rate the estimate saved for it is the engine line's rate. That
+// rate is the one the invoice reads (savedEstimateTier): the send snapshot's, else the rate of a block that names the
+// tier. A saved 0 is a rate; an estimate that saved none leaves the engine's. With no engine record, the saved rate is
+// the witness, and an estimate that saved none names no saving. Records that disagree name no saving: the invoice
+// keeps one line by design. Null unless Silver, Gold or Platinum.
 function recordsTier(estimate, data, block, record) {
   const blockTier = word(block.waveGuardTier || block.tier);
   const words = [record.tier, word(estimate.waveguard_tier), blockTier].filter(Boolean);
@@ -89,7 +96,8 @@ function recordsTier(estimate, data, block, record) {
   const { snapshotTierDiscount } = require('../routes/estimate-public');
   const blockRate = blockTier && block.discount != null && block.discount !== '' ? Number(block.discount) : null;
   const saved = snapshotTierDiscount(data, `${tier[0].toUpperCase()}${tier.slice(1)}`) ?? blockRate;
-  return saved === null || Math.abs(saved - record.rate) <= 1e-9 ? tier : null;
+  if (record.rate === null) return saved === null ? null : { tier, rate: saved };
+  return saved === null || Math.abs(saved - record.rate) <= 1e-9 ? { tier, rate: record.rate } : null;
 }
 
 const printsTier = (breakdown) => list(breakdown?.discounts).some((row) => /^WaveGuard\b/.test(String(row.name || '')));
@@ -110,15 +118,15 @@ async function visitFinding(conn, visit) {
   // discount reaches recurring work in any saved shape, or when the legacy nested block also supplies service rows.
   const nested = object(object(object(data.result || data).results).recurring);
   if (staffDiscountOnRecurring(data, block) || list(nested.services).length) return null;
-  const record = engineTierRecord(lineItems, serviceKey);
-  const tier = record ? recordsTier(estimate, data, block, record) : null;
-  if (!tier) return null;
+  const record = lineItems.length ? engineTierRecord(lineItems, serviceKey) : NO_ENGINE_RECORD;
+  const witness = record ? recordsTier(estimate, data, block, record) : null;
+  if (!witness) return null;
   // The invoice's own pricing of the matched line, in the invoice's own discount context, with only its tier reading
-  // (savedEstimateTier) replaced by the engine's tier at the engine's rate.
+  // (savedEstimateTier) replaced by the witness's tier and rate.
   const context = estimateDiscountContext({ ...estimate, estimate_data: data });
-  const quote = acceptedPricing(line, { ...context, estimateTier: { tier, amount: record.rate } });
+  const quote = acceptedPricing(line, { ...context, estimateTier: { tier: witness.tier, amount: witness.rate } });
   const named = quote.discounts.length > 0 && quote.discounts.every((d) => d.named) && printsTier(quote);
-  return named ? { visitId: String(visit.id), estimateId: String(estimate.id), serviceKey, tier } : null;
+  return named ? { visitId: String(visit.id), estimateId: String(estimate.id), serviceKey, tier: witness.tier } : null;
 }
 
 /**

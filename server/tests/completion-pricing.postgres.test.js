@@ -367,6 +367,17 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
       expect((await pricing.acceptedVisitBreakdown({ ...job, estimated_price: 85 }, { database: trx })).breakdown)
         .toEqual({ base: 100, amount: 85, discounts: [{ name: 'WaveGuard Gold', dollars: 15 }] });
       expect(await findingsFor()).toEqual([]);
+      // The admin estimate tool's save: its mapped result only, with no engine lines (pre-push audit round 5). The
+      // invoice names the tier the block saved at its rate, so nothing is found; with no rate saved, nothing proves one.
+      const admin = (recurring) => trx('estimates').where({ id: estimateId }).update({ waveguard_tier: 'Gold', estimate_data: { inputs: {},
+        result: { recurring: { tier: 'Gold', waveGuardTier: 'Gold', services: [row], ...recurring } }, summary: { manualDiscount: null, serviceSpecificDiscounts: [] } } });
+      await admin({ discount: 0.15 });
+      expect((await pricing.acceptedVisitBreakdown({ ...job, estimated_price: 85 }, { database: trx })).breakdown.discounts)
+        .toEqual([{ name: 'WaveGuard Gold', dollars: 15 }]);
+      expect(await findingsFor()).toEqual([]);
+      await admin({});
+      expect(await reason({ ...job, estimated_price: 85 })).toBe('discount_unnamed');
+      expect(await findingsFor()).toEqual([]);
     } finally { delete process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES; }
     // Gate off: every invoice keeps one line by design, so the check reads nothing.
     expect(await tierSavingsLeftOffInvoices(trx, { today, days: 1 })).toEqual({ checked: 0, findings: [] });
