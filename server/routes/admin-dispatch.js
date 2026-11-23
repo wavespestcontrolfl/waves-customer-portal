@@ -6879,6 +6879,9 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         allowLive: true,
         adminWindowRules: true,
         sourceSurface: 'dispatch_board',
+        // GATE_DAY_ONLY_PROMISE: the office's "customer asked for this time" for the anchor's new slot, as the single move
+        // passes it; the series writer records it on the anchor only. Gate off: no key.
+        ...(require('../services/time-promise').dayOnlyPromiseOn() ? { customerAskedTime: req.body?.customerAskedTime === true } : {}),
         notifyRequested: notifyCustomer !== false,
         ...(operationKey ? { operationKey } : {}),
         // Staff surface: occupancy clashes commit with a warning instead of

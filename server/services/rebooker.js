@@ -4166,8 +4166,9 @@ class SmartRebooker {
           // Day change invalidates the row's route sequence — clear it so the
           // destination day appends the stop (consumers sort NULLs last).
           ...(sibDateChanges ? { route_order: null } : {}),
-          // Day-only promise (B3): a customer-driven series move records its intent in this same UPDATE.
-          ...moveIntentColumns(trx, options, { series: true }),
+          // Day-only promise (B3): a customer-driven series move records its intent in this same UPDATE; the office box
+          // ("Customer asked for this time") is recorded on the anchor, the occurrence it was ticked for.
+          ...moveIntentColumns(trx, options, { series: true, anchor: isAnchor }),
         };
         // Rewound rows need the post-commit cleanup (tech pointer release +
         // customer tracker refresh) — collected here, applied after the trx

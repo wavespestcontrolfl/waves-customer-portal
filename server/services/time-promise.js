@@ -467,9 +467,11 @@ function intentColumns(conn, asked) {
 const CUSTOMER_MOVE_SURFACES = Object.freeze(['customer_web', 'sms_reply', 'call_reschedule', 'call_makeup']);
 
 /** The intent a move records for the slot it sets: an explicit boolean from the caller (options.customerAskedTime: the office
- *  box on a dispatch board move) or true for a customer surface; otherwise undefined (the move records no intent). */
-function moveIntentFor(options, { series = false } = {}) {
-  if (!series && typeof options?.customerAskedTime === 'boolean') return options.customerAskedTime;
+ *  box on a dispatch board move) or true for a customer surface; otherwise undefined (the move records no intent). A series
+ *  move records the office box on its ANCHOR only, the occurrence the office picked the slot for (local audit 2026-11-22:
+ *  a staff placement alone no longer holds a visit, so the box is what keeps the night jobs off that slot). */
+function moveIntentFor(options, { series = false, anchor = false } = {}) {
+  if ((!series || anchor === true) && typeof options?.customerAskedTime === 'boolean') return options.customerAskedTime;
   return CUSTOMER_MOVE_SURFACES.includes(options?.sourceSurface) ? true : undefined;
 }
 
@@ -479,11 +481,11 @@ function moveIntentFor(options, { series = false } = {}) {
  * intent is bound to its own move, with no later write to race a newer move (customer_asked_time_at, currentIntent). {} when the
  * gate is off (the UPDATE payload stays exactly today's), when the move records no intent, or when the move did not change the
  * slot (`slotChanged` false: a technician-only change keeps the intent of the slot it holds). `series`: a series move records
- * the intent of a CUSTOMER surface only (an office series move keeps its current behavior).
+ * the intent of a CUSTOMER surface on every row, and the office box on the `anchor` row only.
  */
-function moveIntentColumns(conn, options, { slotChanged = true, series = false } = {}) {
+function moveIntentColumns(conn, options, { slotChanged = true, series = false, anchor = false } = {}) {
   if (!dayOnlyPromiseOn() || slotChanged !== true) return {};
-  const asked = moveIntentFor(options, { series });
+  const asked = moveIntentFor(options, { series, anchor });
   return asked === undefined ? {} : intentColumns(conn, asked);
 }
 
