@@ -382,7 +382,10 @@ function ptoBankSignature(row) {
   // What the bank paid on each date. A day off moved inside the week can keep every total and still change
   // these, and pay earned by date reads them (tech-rewards-scoreboard.js readGross).
   const paidDays = ((bank || {}).paidDays || []).map((day) => `${day.workDate}=${Number(day.minutes || 0).toFixed(2)}`).sort();
-  return [...figures, paidDays.join(',')];
+  // The hours a catch-up check shows as not paid out: the owner reads them to pay by hand. Only when there are some,
+  // so every other check keeps its token.
+  const notPaidOut = Number((bank || {}).notPaidOutMinutes || 0);
+  return [...figures, paidDays.join(','), ...(notPaidOut > 0 ? [`notPaidOut=${notPaidOut.toFixed(2)}`] : [])];
 }
 
 // The unpaid time off list in the token (payroll-time-off-bank.js applyBank): who, how much and why.

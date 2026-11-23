@@ -446,7 +446,7 @@ describe('Time off in the pay run table and stub', () => {
     render(<PayrollSettings />);
     fireEvent.click(await screen.findByRole('button', { name: 'Open pay run for Oct 12, 2026 to Oct 18, 2026' }));
     const detail = await screen.findByLabelText(/Pay run for/);
-    expect(within(detail).getByText('This week was paid after the bank was paid out. 1.54 h of time off it earned are not on this check: pay them by hand if you choose.')).toBeInTheDocument();
+    expect(within(detail).getByText('This week was paid after the bank was paid out. It would have earned up to 1.54 h of time off (less if the bank was near the 120 h cap). They are not on this check: pay them by hand if you choose.')).toBeInTheDocument();
   });
 
   it('shows no bank and no list on a run without them', async () => {

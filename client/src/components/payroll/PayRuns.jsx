@@ -364,7 +364,7 @@ function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
               {check.timeOffBank.paidOutHours ? `, paid out ${check.timeOffBank.paidOutHours} h` : ''}, balance {check.timeOffBank.balanceHours} h
             </p>}
             {check.timeOffBank?.notPaidOutHours && <p className="m-0 text-ui-caption text-ink-secondary">
-              {`This week was paid after the bank was paid out. ${check.timeOffBank.notPaidOutHours} h of time off it earned are not on this check: pay them by hand if you choose.`}
+              {`This week was paid after the bank was paid out. It would have earned up to ${check.timeOffBank.notPaidOutHours} h of time off (less if the bank was near the 120 h cap). They are not on this check: pay them by hand if you choose.`}
             </p>}
           </TD>
           <TD nums align="right">{hoursWord(check.regularHours)}</TD>

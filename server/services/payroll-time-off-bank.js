@@ -95,7 +95,7 @@ const usableFromOf = (hireDate) => (hireDate ? addStaffWorkDays(hireDate, USE_AF
  *   catchUp          null, or { hoursPerYear } for a week before a pay week whose final run already paid the bank
  *                    out, paid after that run (applyBank, paidOutInLaterWeek): the check pays the wages only. The week
  *                    earns nothing into the bank and the check pays nothing out; `notPaidOut` = what the week would
- *                    have earned, shown on the check so the office can pay it by hand (owner 2026-11-23 *a*). The bank
+ *                    have earned with no cap (an upper bound), shown on the check so the office can pay it by hand (owner 2026-11-23 *a*). The bank
  *                    was empty after the payout, so no time off of this week is paid from it.
  * Returns { paid, earlyPaid, unpaid, unpaidBeforeHire, unpaidByRule, earned, payout, notPaidOut, after, paidDays }. `earlyPaid`
  * is the part of `paid` that was early illness. Of `unpaid`: `unpaidBeforeHire` is time off before the hire
