@@ -523,6 +523,20 @@ function genericCompletionFacts(opts = {}) {
       notes: 'The form sends the post id (blogPostId); the server checks it against the one link rule (report-blog-post.js: published, live on the hub, live URL on the site\'s own host) and freezes the title and URL. Every service but WDO, termite pre-treat, and tree, shrub & palm (report-blog-post.js blogPostAllowedFor; lawn allowed 2026-10-04).',
     },
     {
+      key: 'report_note',
+      label: 'The technician\'s own note, tidied for the report (or the fixed sentence)',
+      capture: ['tap'],
+      tapOnly: true,
+      reason: 'The Fast Complete sheet sends the tidied note the technician read on the sheet (GATE_REPORT_OWN_NOTE); no dictated line fills it, and the server screens it again before it is frozen.',
+      storage: 'structured_notes.reportNote',
+      writers: [COMPLETE_SERVICE],
+      readers: [
+        { file: REPORT_DATA, section: 'The summary: the technician\'s own note (carriesReportNote, visitReportCustomerCopy)' },
+      ],
+      whenMissing: 'hidden',
+      notes: 'Frozen once with the record as { v: 1, source: cleaned | fixed, text } (report-own-note.js reportNoteToStore): the tidied note when it passes the screens again against the submitted technicianNotes, else the fixed sentence code writes. A render reads it whatever the gate says.',
+    },
+    {
       key: 'protocol_actions_completed',
       label: 'Protocol actions completed',
       capture: ['prefill', 'voice', 'tap'],
