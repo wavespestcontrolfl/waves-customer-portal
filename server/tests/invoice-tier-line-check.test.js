@@ -426,8 +426,8 @@ describe('tierSavingsLeftOffInvoices', () => {
     expect(sql).toContain('COALESCE(i.scheduled_service_id, sr2.scheduled_service_id) = ss.id');
     expect(sql).not.toContain('first_application_invoice_id');
     expect(sql).toContain('JOIN customers c ON c.id = ss.customer_id');
-    const dead = ['void', 'refunded', 'canceled', 'cancelled'];
-    expect(bindings).toEqual([TODAY, dead, ['v1', 'v2']]);
+    // A refunded invoice of its own still holds the visit; only a void or canceled one bills nothing.
+    expect(bindings).toEqual([TODAY, ['void', 'canceled', 'cancelled'], ['v1', 'v2']]);
     expect(AnnualPrepay.deferredPrepayHoldCustomerIds).toHaveBeenCalledWith(conn, ['c1', 'c2']);
     expect(AnnualPrepay.annualCoverageVerdictForPrediction.mock.calls).toEqual([
       [rows[0], conn, { deferredCustomerIds: deferred }], [rows[1], conn, { deferredCustomerIds: deferred }]]);

@@ -405,11 +405,14 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
       expect(await findingsFor()).toEqual([]);
       await trx('customers').where({ id: customerId }).update({ billing_mode: 'per_application', monthly_rate: null });
       expect(await findingsFor()).toEqual(flagged);
-      // An invoice made already bills the visit: its own (a void one bills nothing, so the new bill is judged again), or
-      // the combined first-application invoice its stamp names, by the schedule's own verdict.
+      // An invoice made already bills the visit: its own (a refunded one still holds the visit for manual billing; a void
+      // one bills nothing, so the new bill is judged again), or the combined first-application invoice its stamp names,
+      // by the schedule's own verdict.
       const stored = async (columns) => (await trx('invoices').insert({ customer_id: customerId, token: randomUUID(),
         invoice_number: `QA-${randomUUID().slice(0, 20)}`, status: 'sent', total: 85, ...columns }).returning('id'))[0].id;
       const own = await stored({ scheduled_service_id: jobId });
+      expect(await findingsFor()).toEqual([]);
+      await trx('invoices').where({ id: own }).update({ status: 'refunded' });
       expect(await findingsFor()).toEqual([]);
       await trx('invoices').where({ id: own }).update({ status: 'void' });
       expect(await findingsFor()).toEqual(flagged);

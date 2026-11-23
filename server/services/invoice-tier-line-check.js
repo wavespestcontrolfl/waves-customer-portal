@@ -245,7 +245,10 @@ const BILLED_KINDS = new Set(['invoice', 'auto_charge']);
 async function billingFacts(conn, visits, today) {
   if (!visits.length) return new Map();
   const { autopayActivePredicate } = require('./autopay-eligibility');
-  const dead = require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES;
+  // A refunded invoice of the visit's own still holds it: completion mints no replacement while a refund can bounce,
+  // and parks the visit for manual billing (complete-scheduled-service.js terminalInvoiceOnVisit; the first-application
+  // classifier skips the same statuses). Only a void or canceled one bills nothing.
+  const dead = require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES.filter((status) => status !== 'refunded');
   // Noon in Eastern time on `today`, standard or daylight time: the predicate binds that Eastern date.
   const autopay = autopayActivePredicate(new Date(`${today}T17:00:00Z`));
   const { rows } = await conn.raw(`
