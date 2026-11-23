@@ -381,6 +381,20 @@ describe('isPersonPlacedVisit', () => {
     expect(await isPersonPlacedVisit({ ...visit, window_start: '15:00:00' }, fakeDb({ log: [dateOnly] }))).toEqual({ placed: false });
   });
 
+  // Local audit 2026-11-22 (round 5): the day-only promise's pick check reads the same placement rows.
+  test('isCustomerPickedVisit: an end-only edit keeps the pick; another start ends it; a customer-request reason counts', async () => {
+    const { isCustomerPickedVisit } = require('../services/auto-dispatch/eligibility');
+    const longer = row({ id: 'l2', initiated_by: 'admin_bulk', series_move_id: null, created_at: '2026-10-07T12:00:00Z',
+      original_date: '2026-10-18', original_window: '09:00-10:00', new_window: '09:00-10:30' });
+    expect(await isCustomerPickedVisit(visit, fakeDb({ log: [row(), longer] }))).toEqual({ picked: true });
+    expect(await isCustomerPickedVisit({ ...visit, window_start: '13:00:00' }, fakeDb({ log: [row()] }))).toEqual({ picked: false });
+    const { window_start: _unused, ...bare } = visit;
+    expect(await isCustomerPickedVisit(bare, fakeDb({ log: [row()] }))).toEqual({ picked: true });
+    const requested = row({ initiated_by: 'admin', reason_code: 'customer_request_series', series_move_id: null });
+    expect(await isCustomerPickedVisit(visit, fakeDb({ log: [requested] }))).toEqual({ picked: true });
+    expect(await isCustomerPickedVisit(visit, fakeDb({ log: [row({ initiated_by: 'admin' })] }))).toEqual({ picked: false });
+  });
+
   test('not placed after a later automatic move, even one that returned the visit to the same date', async () => {
     const later = row({ id: 'l2', initiated_by: 'auto_dispatch', series_move_id: null, created_at: '2026-10-06T08:10:19Z', new_date: '2026-10-19' });
     const back = row({ id: 'l3', initiated_by: 'auto_dispatch', series_move_id: null, created_at: '2026-10-07T08:10:19Z', new_date: '2026-10-18' });
@@ -460,11 +474,22 @@ describe('isPersonPlacedVisit', () => {
     expect(await isPersonPlacedVisit(snapshot, confirmed, { refresh: true })).toEqual({ placed: false });
   });
 
-  test('the customer asked for this time (no move since): held; recorded "day only": a staff placement, free', async () => {
+  test('the customer asked for this time (no move since): held; recorded "day only" does not hold by itself', async () => {
     const askedRow = { ...snapshot, customer_asked_time: true, customer_asked_time_at: '2026-10-05T15:00:00Z' };
     expect(await isPersonPlacedVisit(askedRow, fakeDb({ log: [] })))
       .toMatchObject({ placed: true, reason_code: 'CUSTOMER_ASKED_TIME', reason_description: 'The customer asked for this time' });
     expect(await isPersonPlacedVisit({ ...askedRow, customer_asked_time: false }, fakeDb({ log: [] }))).toEqual({ placed: false });
+  });
+
+  // Local audit 2026-11-22 (round 5): "day only" leaves the hour to the office, not the day. The move record decides.
+  test('recorded "day only" on a customer-requested move still holds the day; on a staff move it is free', async () => {
+    const dayOnly = { ...visit, customer_asked_time: false, customer_asked_time_at: '2026-10-06T00:49:58Z', date_exception_source: null };
+    const requested = row({ initiated_by: 'admin', reason_code: 'customer_request', series_move_id: null, after_intent: false });
+    expect(await isPersonPlacedVisit(dayOnly, fakeDb({ log: [requested] })))
+      .toMatchObject({ placed: true, reason_code: 'CUSTOMER_PICKED' });
+    expect(await isPersonPlacedVisit(dayOnly, fakeDb({ log: [row({ after_intent: false })] }))).toMatchObject({ placed: true });
+    const staff = row({ initiated_by: 'admin', reason_code: 'admin', series_move_id: null, after_intent: false });
+    expect(await isPersonPlacedVisit(dayOnly, fakeDb({ log: [staff] }))).toEqual({ placed: false });
   });
 
   test('refresh sees an asked time that landed after the snapshot', async () => {

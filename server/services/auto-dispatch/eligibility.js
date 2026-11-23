@@ -323,7 +323,6 @@ async function isPersonPlacedVisit(input, db, opts = {}) {
     if (exceptionAt && (!placedAt || exceptionAt > placedAt)) {
       return { placed: true, reason_code: 'CUSTOMER_PICKED', reason_description: 'The customer chose this date (date edit)' };
     }
-    if (intent === false) return { placed: false };
     const start = startOf(service.window_start);
     const placement = owners.find((r) => ownsSlot(r, dateStr, start) && holdsSlot(r));
     if (!placement) return { placed: false };
@@ -343,14 +342,17 @@ async function isPersonPlacedVisit(input, db, opts = {}) {
 async function isCustomerPickedVisit(input, db, loadedRows = null) {
   if (!input || !input.id) return { picked: false };
   try {
-    const newestRows = loadedRows || await loadNewestSlotRows(db, input.id);
-    const newestAt = newestRows.length ? new Date(newestRows[0].created_at) : null;
-    const exceptionAt = input.date_exception === true && input.date_exception_at
-      && CUSTOMER_INITIATORS.has(String(input.date_exception_source || '')) ? new Date(input.date_exception_at) : null;
-    if (exceptionAt && !Number.isNaN(exceptionAt.getTime()) && (!newestAt || exceptionAt > newestAt)) return { picked: true };
+    // loadedRows: the newest PLACEMENT rows (time-promise memberIntentState), so an end-only edit never hides a pick.
+    const owners = loadedRows || await newestPlacementRows(db, input.id, await loadNewestSlotRows(db, input.id), false);
+    const placedAt = owners.length ? new Date(owners[0].created_at) : null;
+    const exceptionAt = customerExceptionAt(input);
+    if (exceptionAt && (!placedAt || exceptionAt > placedAt)) return { picked: true };
     const dateStr = toDateStr(input.scheduled_date);
-    const placement = newestRows.find((r) => (!dateStr || toDateStr(r.new_date) === dateStr) && CUSTOMER_INITIATORS.has(r.initiated_by));
-    return { picked: Boolean(placement) };
+    // A caller row without its start is judged on the date alone (fail closed: a pick on the date counts).
+    const start = input.window_start === undefined ? undefined : startOf(input.window_start);
+    const current = (r) => !dateStr || (start === undefined ? toDateStr(r.new_date) === dateStr : ownsSlot(r, dateStr, start));
+    const byCustomer = (r) => CUSTOMER_INITIATORS.has(r.initiated_by) || customerRequested(r);
+    return { picked: owners.some((r) => byCustomer(r) && current(r)) };
   } catch (err) {
     return { picked: true, degraded: true, reason_description: `Could not read the move history: ${err.message}` };
   }

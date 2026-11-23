@@ -269,8 +269,8 @@ function currentIntent(member, newestSlotChange) {
   return newestSlotChange.after_intent === false ? asked : null;
 }
 
-/** A member's current explicit intent and the move history it was judged on: { intent, rows }. Reads the history (one query,
- *  reused by the pick check) only for a member that has an explicit value. Throws on a failed read. */
+/** A member's current explicit intent and the move history it was judged on: { intent, rows }, rows = the newest placement
+ *  rows (reused by the pick check). Reads the history only for a member that has an explicit value. Throws on a failed read. */
 async function memberIntentState(conn, member) {
   if (member.customer_asked_time !== true && member.customer_asked_time !== false) return { intent: null, rows: null };
   const eligibility = require('./auto-dispatch/eligibility');
@@ -278,7 +278,7 @@ async function memberIntentState(conn, member) {
   // Judged against the newest change of date or start, as auto-dispatch's isPersonPlacedVisit judges it: an end-only edit
   // (a longer visit) never makes the intent stale (local audit 2026-11-22). Reads further back only after an end-only edit.
   const owners = await eligibility.newestPlacementRows(conn, member.id, rows, true);
-  return { intent: currentIntent(member, owners[0] || null), rows };
+  return { intent: currentIntent(member, owners[0] || null), rows: owners };
 }
 
 /** May this ONE member be promised only the day? `customer_asked_time` is the explicit intent for the current slot, while it
