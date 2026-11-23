@@ -484,7 +484,9 @@ export default function PayrollSettings() {
               {tech.name}
               {tech.employmentStatus === 'prospective' && <span className="block text-ui-caption text-ink-secondary">Not started</span>}
               {/* Listed while a minimum paid week is set, so it can be cleared after the last week is paid. */}
-              {tech.employmentStatus === 'inactive' && <span className="block text-ui-caption text-ink-secondary">Left: clear the minimum once the last week is paid</span>}
+              {tech.notW2
+                ? <span className="block text-ui-caption text-ink-secondary">Not W-2 now: clear the minimum</span>
+                : tech.employmentStatus === 'inactive' && <span className="block text-ui-caption text-ink-secondary">Left: clear the minimum once the last week is paid</span>}
             </TD>
             <TD nums>{tech.payRate != null ? `${dollars(tech.payRate)}/hr` : 'Not set'}</TD>
             <TD>{payMethodLabel(tech)}</TD>

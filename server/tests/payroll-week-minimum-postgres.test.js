@@ -250,6 +250,17 @@ postgres('payroll minimum paid week', () => {
     expect(byName(again, 'Sample Alpha')).not.toHaveProperty('minimumWeekHours');
   });
 
+  it('a day of time off before the hire date is not an earlier stay', async () => {
+    // Hired Wednesday; time off booked Monday (the bank pays nothing before the hire date); worked Thursday.
+    const id = await tech('Sample Alpha', { hours: '80', hired: addDays(W1, 2) });
+    await worked(id, W1, 10);
+    await offDay(id, W1, 8);
+    await trx('time_entry_daily_summary').insert({ technician_id: id, work_date: addDays(W1, 3), total_shift_minutes: 600 });
+    const run = (await draft(W1)).body.run;
+    expect(run.blocked).toEqual([]);
+    expect(byName(run, 'Sample Alpha')).toMatchObject({ minimumWeekHours: '10.00' });
+  });
+
   it('the run list totals carry the minimum pay like the run itself', async () => {
     const id = await tech('Sample Alpha');
     await worked(id, W1, 30);
@@ -262,8 +273,11 @@ postgres('payroll minimum paid week', () => {
     const id = await tech('Sample Alpha');
     await trx('technicians').where({ id }).update({ employment_type: '1099' });
     expect((await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: '40' }, email: OWNER })).status).toBe(409);
+    const row = (await api('GET', '/technicians')).body.technicians.find((tech) => tech.id === id);
+    expect(row).toMatchObject({ notW2: true, paidWeekMinimumHours: 40 });
     const cleared = await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: null }, email: OWNER });
     expect([cleared.status, cleared.body.technician.paidWeekMinimumHours]).toEqual([200, null]);
+    expect((await api('GET', '/technicians')).body.technicians.map((tech) => tech.id)).not.toContain(id);
   });
 
   it('a week with no work and no time off on file gets no check from the minimum', async () => {

@@ -50,18 +50,19 @@ function minimumWeekMinutes({ minimumHours, weekStart, hireDate = null, lastDay,
   return { target: target / 100, added: Math.max(0, target - hundredths(paidMinutes)) / 100 };
 }
 
-// Per technician among `ids`: the first and the last day of the week [start, end] with recorded work or time off
-// ('YYYY-MM-DD' or null), and whether anything is recorded after the week (also a later weekly timesheet with worked minutes, which
+// Per technician among `ids`: the first day of the week [start, end] with recorded WORK (time off is not work: a
+// day of time off before the hire date is the bank's to refuse, not an earlier stay) and the last day with recorded
+// work or time off ('YYYY-MM-DD' or null), and whether anything is recorded after the week (also a later weekly timesheet with worked minutes, which
 // payroll pays without dated days). Map of id -> { firstDay, lastDay, after }.
 async function recordedDays(conn, ids, start, end) {
   const byTech = new Map(ids.map((id) => [id, { firstDay: null, lastDay: null, after: false }]));
   if (!ids.length) return byTech;
-  const keep = (rows) => {
+  const keep = (rows, { work = true } = {}) => {
     for (const row of rows) {
       const seen = byTech.get(row.technician_id);
       if (!seen) continue;
       if (row.in_week && (!seen.lastDay || row.in_week > seen.lastDay)) seen.lastDay = row.in_week;
-      if (row.first_in_week && (!seen.firstDay || row.first_in_week < seen.firstDay)) seen.firstDay = row.first_in_week;
+      if (work && row.first_in_week && (!seen.firstDay || row.first_in_week < seen.firstDay)) seen.firstDay = row.first_in_week;
       if (row.after) seen.after = true;
     }
   };
@@ -92,7 +93,7 @@ async function recordedDays(conn, ids, start, end) {
     .whereIn('technician_id', ids)
     .where('work_date', '>=', start)
     .groupBy('technician_id')
-    .select('technician_id', ...summarize('work_date')));
+    .select('technician_id', ...summarize('work_date')), { work: false });
   return byTech;
 }
 
