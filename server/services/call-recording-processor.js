@@ -23065,7 +23065,7 @@ const CallRecordingProcessor = {
                           "CASE WHEN COALESCE(payload->>'skipped_reason', '') = 'retained_visit_review_after_denial' "
                           + "THEN COALESCE(payload, '{}'::jsonb) || ?::jsonb "
                           + "ELSE COALESCE(payload, '{}'::jsonb) || ?::jsonb END",
-                          [JSON.stringify({ retained_service_id: svc.id }), JSON.stringify({ retained_service_id: svc.id, skipped_reason: 'address_correction_needed_on_retained_visit' })],
+                          [JSON.stringify({ retained_service_id: svc.id }), JSON.stringify({ retained_service_id: svc.id, skipped_reason: 'address_correction_needed_on_retained_visit', agreed_one_time_job: null })],
                         ),
                         summary: ttrx.raw(
                           "CASE WHEN COALESCE(payload->>'skipped_reason', '') = 'retained_visit_review_after_denial' THEN summary ELSE ? END",
@@ -24559,6 +24559,8 @@ const CallRecordingProcessor = {
                 dispute_customer_id: customerId ? String(customerId) : null,
                 retained_service_id: null,
                 retained_scheduled_date: null,
+                // A refresh never keeps an agreed one-time job's evidence (address, price).
+                agreed_one_time_job: null,
               },
             }))
             // A standing task (open OR claimed) is REFRESHED with the current
@@ -24635,6 +24637,8 @@ const CallRecordingProcessor = {
                   dispute_customer_id: customerId ? String(customerId) : null,
                   retained_service_id: null,
                   retained_scheduled_date: null,
+                  // A refresh never keeps an agreed one-time job's evidence (address, price).
+                  agreed_one_time_job: null,
                 },
               }))
               .onConflict(ttrx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))

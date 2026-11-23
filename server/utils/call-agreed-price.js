@@ -156,7 +156,8 @@ function resolveStatedOneTimeCallPrice(v2Extraction = null) {
 function resolveAgreedOneTimeJobPrice(v2Extraction = null) {
   const svc = v2Extraction?.service_request;
   if (!svc || typeof svc !== 'object') return null;
-  const accepted = statedPriceTerms(svc).filter((entry) => entry.accepted === true);
+  const terms = statedPriceTerms(svc);
+  const accepted = terms.filter((entry) => entry.accepted === true);
   const amount = accepted.length === 1 ? exactOneTimeAmount(accepted[0]) : null;
   if (amount === null) return null;
   if (svc.quoted_price_usd == null) return resolveStatedOneTimeCallPrice(v2Extraction);
@@ -165,8 +166,14 @@ function resolveAgreedOneTimeJobPrice(v2Extraction = null) {
   // number is then not a Waves price, even when it matches the total. This is
   // the same evidence the office card shows (agreedOneTimeJobCardPrice), so a
   // held call's card always carries the price that held it.
+  // Staff's own term then has to be staff's only one, as with no total
+  // (resolveStatedOneTimeCallPrice): a second staff term (a trip fee added
+  // after the price) means the total is not the one price.
   const contradicted = svc.price_is_final === false || svc.price_accepted_by_caller === false || svc.price_offered_by_staff === false;
-  if (contradicted && accepted[0].stated_by !== 'agent') return null;
+  if (contradicted) {
+    const notCallers = terms.filter((entry) => entry.stated_by !== 'caller');
+    if (accepted[0].stated_by !== 'agent' || notCallers.length !== 1 || notCallers[0] !== accepted[0]) return null;
+  }
   return svc.quoted_price_usd === amount ? amount : null;
 }
 

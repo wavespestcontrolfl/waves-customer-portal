@@ -493,6 +493,17 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
 
   // An off-hour start never reaches the hold: the on-hour guard (or V2 routing) stops it first and files main's
   // off-hour card, unchanged. So the card's first-visit slot is always on the hour.
+  // Every writer that refreshes a skipped-booking card for another reason clears the job's evidence (an old
+  // address and price never ride on a refreshed card).
+  test('every inline refresh of the skipped-booking card clears agreed_one_time_job', () => {
+    for (const reason of ["skipped_reason: 'house_number_dispute_card_unfiled',", 'skipped_reason: String(skipReason).slice(0, 300),']) {
+      const at = source.indexOf(reason);
+      expect(at).toBeGreaterThan(-1);
+      expect(source.slice(at, source.indexOf('}))', at))).toContain('agreed_one_time_job: null,');
+    }
+    expect(source).toContain("skipped_reason: 'address_correction_needed_on_retained_visit', agreed_one_time_job: null })");
+  });
+
   test('the off-hour path stays main\'s', () => {
     const at = source.indexOf("flag: 'off_hour_start',\n                  extraction: v2ApprovedExtraction || undefined,");
     expect(at).toBeGreaterThan(-1);
@@ -546,6 +557,12 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
       expect(agreedOneTimeJobCardPrice(byStaff, 'One-Time Pest Control Service')).toEqual({ amount: 250, basis: 'stated' });
     }
     expect(resolveAgreedOneTimeJobPrice(reading({ quoted_price_usd: 250, price: callers, prices: [callers] }))).toBe(250);
+    // A second staff term next to a disputed total (a trip fee added after the price): not the one price, so no
+    // hold and no price on a card. With no dispute the strict total stays the caller's accepted total.
+    const tripFee = { ...price, amount_usd: 75, accepted: false };
+    expect(resolveAgreedOneTimeJobPrice(reading({ quoted_price_usd: 250, price_is_final: false, prices: [price, tripFee] }))).toBeNull();
+    expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price_is_final: false, prices: [price, tripFee] }), 'One-Time Pest Control Service')).toBeNull();
+    expect(resolveAgreedOneTimeJobPrice(reading({ quoted_price_usd: 250, prices: [price, tripFee] }))).toBe(250);
     // The booking resolved to another row (a free re-service): no price on the card.
     expect(agreedOneTimeJobCardPrice(reading(), 'Pest Control Re-Service')).toBeNull();
     expect(agreedOneTimeJobCardPrice(reading(), null)).toBeNull();
