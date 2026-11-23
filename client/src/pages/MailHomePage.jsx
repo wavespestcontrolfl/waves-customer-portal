@@ -67,6 +67,11 @@ function Unavailable() {
   );
 }
 
+// One of the 4 applications a year, from whole cents (as the server's monthly is).
+export function perApplication(annual) {
+  return Math.round(Math.round(Number(annual) * 100) / 4) / 100;
+}
+
 // County records are in capitals ("101 EXAMPLE TRL"). Each word reads in normal case ("101 Example Trl"), except
 // compass words (N, SW), which stay in capitals, and ordinals (1ST), which read as 1st.
 const KEEP_UPPER = new Set(['N', 'S', 'E', 'W', 'NE', 'NW', 'SE', 'SW']);
@@ -130,9 +135,17 @@ export default function MailHomePage() {
       <BrandCard style={{ marginTop: SP.xl, textAlign: 'center' }}>
         {price ? (
           <>
-            <div data-testid="monthly-price" style={{ fontSize: 44, fontWeight: FW.bold, lineHeight: LH.display, color: DOC.ink, letterSpacing: '-0.02em' }}>
-              {formatMoney(price.monthly)} a month
+            {/* AGENTS.md "Per application" price copy: the per-application price is the price; the month average sits
+                beneath it, smaller. A quarterly plan is 4 applications a year. */}
+            <div data-testid="application-price" style={{ fontSize: 44, fontWeight: FW.bold, lineHeight: LH.display, color: DOC.ink, letterSpacing: '-0.02em' }}>
+              {formatMoney(perApplication(price.annual))}
             </div>
+            <p style={{ margin: `${SP.xs}px 0 0`, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.ink }}>
+              per application, 4 a year
+            </p>
+            <p data-testid="monthly-price" style={{ margin: `${SP.xs}px 0 0`, fontSize: FS.body, lineHeight: LH.body, color: DOC.muted }}>
+              About {formatMoney(price.monthly)} a month
+            </p>
             <p style={{ margin: `${SP.sm}px 0 0`, fontSize: FS.bodyLg, lineHeight: LH.body, color: DOC.muted }}>
               Quarterly pest control{line1 ? ` for ${line1}` : ''}
             </p>

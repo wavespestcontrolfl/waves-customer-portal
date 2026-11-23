@@ -219,7 +219,7 @@ describe('sensitive SPA document headers', () => {
     expect(isEstimatePath('/api/estimates/0123456789abcdef0123456789abcdef/data')).toBe(false);
   });
 
-  test('marks new-home postcard token pages noindex, no-referrer, and no-store; matches only 32-hex tokens', () => {
+  test('marks new-home postcard token pages noindex, no-referrer, and no-store; and every spelling the client route renders', () => {
     const HOME_TOKEN = '0123456789abcdef0123456789abcdef';
     const res = mockResponse();
 
@@ -229,10 +229,15 @@ describe('sensitive SPA document headers', () => {
     expect(res.set).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
     expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
     expect(isMailHomePath(`/h/${HOME_TOKEN}/`)).toBe(true);
-    expect(isMailHomePath('/h/not-a-token')).toBe(false);
-    expect(isMailHomePath(`/h/${'a'.repeat(31)}`)).toBe(false);
-    expect(isMailHomePath(`/h/${'a'.repeat(33)}`)).toBe(false);
+    // Every spelling the client route renders gets the headers: any case, a percent-encoded letter, extra slashes, and
+    // any token (a bad one only shows the not-available page under them).
+    for (const alt of [`/H/${HOME_TOKEN}`, `/%68/${HOME_TOKEN}`, `/h/${HOME_TOKEN}//`, `/h/${HOME_TOKEN.toUpperCase()}`, '/h/not-a-token']) {
+      expect(isMailHomePath(alt)).toBe(true);
+    }
+    expect(isMailHomePath('/h')).toBe(false);
+    expect(isMailHomePath(`/h/${HOME_TOKEN}/extra`)).toBe(false);
     expect(isMailHomePath(`/api/public/home/${HOME_TOKEN}`)).toBe(false);
+    expect(isMailHomePath(`/help/${HOME_TOKEN}`)).toBe(false);
   });
 
   test('marks secure-appointment card token pages noindex, no-referrer, and no-store', () => {

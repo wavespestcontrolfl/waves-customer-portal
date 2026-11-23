@@ -7,7 +7,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 
 vi.mock('../glass/glass-engine', () => ({ useGlassSurface: () => {} }));
 
-import MailHomePage, { addressCase } from './MailHomePage';
+import MailHomePage, { addressCase, perApplication } from './MailHomePage';
 
 const TOKEN = '0123456789abcdef0123456789abcdef';
 const ADDRESS = { line1: '101 EXAMPLE TRL', city: 'SAMPLETON', zip: '34212' };
@@ -35,7 +35,9 @@ it('shows the big monthly price, the street, the plan line and the setup fee', a
   const fetchMock = renderPage(async () => response(200, { address: ADDRESS, price: PRICE, plan: 'pest_quarterly' }));
 
   expect(screen.getByRole('status')).toHaveTextContent('Loading');
-  expect(await screen.findByTestId('monthly-price')).toHaveTextContent('$37 a month');
+  expect(await screen.findByTestId('application-price')).toHaveTextContent('$111');
+  expect(screen.getByText('per application, 4 a year')).toBeInTheDocument();
+  expect(screen.getByTestId('monthly-price')).toHaveTextContent('About $37 a month');
   expect(fetchMock).toHaveBeenCalledWith(`/api/public/home/${TOKEN}`);
   expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Welcome to your new home');
   expect(screen.getByTestId('address')).toHaveTextContent('101 Example TrlSampleton');
@@ -51,8 +53,9 @@ it('shows the big monthly price, the street, the plan line and the setup fee', a
 });
 
 it('shows cents only when the monthly price is not whole', async () => {
-  renderPage(async () => response(200, { address: ADDRESS, price: { ...PRICE, monthly: 37.5 }, plan: 'pest_quarterly' }));
-  expect(await screen.findByTestId('monthly-price')).toHaveTextContent('$37.50 a month');
+  renderPage(async () => response(200, { address: ADDRESS, price: { ...PRICE, annual: 450, monthly: 37.5 }, plan: 'pest_quarterly' }));
+  expect(await screen.findByTestId('monthly-price')).toHaveTextContent('About $37.50 a month');
+  expect(screen.getByTestId('application-price')).toHaveTextContent('$112.50');
 });
 
 it.each([[0], [null]])('says nothing about setup when the setup fee is %s', async (setupFee) => {
@@ -93,4 +96,10 @@ it('addressCase reads county capitals in normal case, keeps compass words, lower
   expect(addressCase('  2200 NW 1ST  AVE ')).toBe('2200 NW 1st Ave');
   expect(addressCase('LAKEWOOD RANCH')).toBe('Lakewood Ranch');
   expect(addressCase(null)).toBe('');
+});
+
+it('perApplication is a quarter of the annual price, from whole cents', () => {
+  expect(perApplication(444)).toBe(111);
+  expect(perApplication(301.02)).toBe(75.26); // 30102 / 4 = 7525.5 cents
+  expect(perApplication('450')).toBe(112.5);
 });

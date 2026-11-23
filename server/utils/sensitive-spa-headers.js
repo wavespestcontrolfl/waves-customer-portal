@@ -58,8 +58,11 @@ function isCardPath(reqPath = '') {
 // Public new-home postcard page (/h/<32-hex token>) — the token is mail_prospects.page_token, a bearer credential printed
 // as a QR code, and the page renders the home's street address and a quoted price (GET /api/public/home/:token, GATE_MAIL_HOME_PAGE).
 // Same contract as the card shell: never indexed/archived, token never leaks via Referer, no caching.
+// The client route /h/:token matches the decoded path with no regard to case or extra trailing slashes, and for any
+// token, so this matches the same way (as isCareersOfferPath does): every document that opens the page carries the
+// headers, and a bad token only shows the not-available page under them.
 function isMailHomePath(reqPath = '') {
-  return /^\/h\/[a-f0-9]{32}\/?$/.test(String(reqPath || ''));
+  return /^\/h\/[^/]+\/*$/i.test(routerDecodedPath(reqPath));
 }
 
 // Public "secure your appointment" card-capture page — bearer token
