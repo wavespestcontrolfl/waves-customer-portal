@@ -202,6 +202,12 @@ describe('tierSavingsLeftOffInvoices', () => {
     // A row whose own record names another tier disputes the estimate's records: no finding.
     expect(await findingsFor(unpriced({ line: scheduleLine({ ...rawRow, discount: waveguard(0.15, 'silver') }, { perApplicationPrice: null }) })))
       .toEqual([]);
+    // A row whose own record claims another rate for the tier disputes the engine's record (round 13): the invoice's
+    // pricing takes the row's 20% Gold and caps it at the $15 saving, but the engine priced Gold at 15%. No finding.
+    const twenty = scheduleLine({ ...rawRow, discount: waveguard(0.2) }, { perApplicationPrice: 85 });
+    expect(jest.requireActual('../services/completion-pricing').acceptedPricing(twenty, {}).discounts)
+      .toEqual([{ name: 'WaveGuard Gold', percent: 20, dollars: 15, named: true }]);
+    expect(await findingsFor(unpriced({ line: { ...twenty, perApplicationPrice: null } }))).toEqual([]);
   });
 
   test.each(['no_discount', 'price_changed', 'not_priced', 'own_price_or_discount', 'prepaid', 'line_unmatched', 'line_ambiguous'])(

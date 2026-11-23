@@ -19,8 +19,8 @@
 //   mapped result) has only its saved tier and rate, so those are read here on their own. The witness never comes from
 //   the invoice's own tier reading (savedEstimateTier), where the miss was. The line is then priced by the invoice's own
 //   pure pricing (acceptedPricing), in the invoice's own discount context with only that tier reading replaced. Its tier
-//   row is the row that carries the tier's rate, whatever its name (a row whose own record names no tier prints a bare
-//   "WaveGuard"), and the matched row's own record must not name another tier. So every
+//   row is the row that carries a tier rate, whatever its name (a row whose own record names no tier prints a bare
+//   "WaveGuard"); that rate must be the witness's, and the matched row's own record must not name another tier. So every
 //   row rule that keeps one line on purpose (a service credit, a floor, a staff change to the row, a row's own net, rate
 //   or flags, a service the tier percentage skips) stays that code's rule. The two estimate rules of that tier reading
 //   that name no tier by design (a staff discount on recurring work, the legacy nested block) are read here: the first
@@ -174,9 +174,11 @@ function printedLabelMiss({ estimate, line, data, block, lineItems, serviceKey }
 // only its tier reading (savedEstimateTier) replaced by the witness's tier and rate. Not read when the invoice names no
 // tier by design (completion-pricing.js estimateDiscountContext, savedEstimateTier): a staff discount reaches recurring
 // work in any saved shape, or the legacy nested block also supplies service rows. One part must be the tier row: the
-// row that carries the tier's rate, as pricedTierRow reads it. Its name is not read, so a row whose own record names no
-// tier (it prints a bare "WaveGuard", pre-push audit) still counts; the matched row's own record must not name another
-// tier, since records that disagree name no saving. The tier left off, or null.
+// row that carries a tier rate, as pricedTierRow reads it. Its name is not read, so a row whose own record names no
+// tier (it prints a bare "WaveGuard", pre-push audit) still counts. Records that disagree name no saving: the matched
+// row's own record must not name another tier, and the tier row's rate must be the witness's (a row's own record wins
+// in that pricing and can claim another rate, which the pricing caps at the saving, pre-push audit). The tier left off,
+// or null.
 function unnamedSavingMiss({ estimate, line, data, block, lineItems, serviceKey }) {
   const { acceptedPricing, estimateDiscountContext, staffDiscountOnRecurring } = require('./completion-pricing');
   if (staffDiscountOnRecurring(data, block) || list(legacyNestedBlock(data).services).length) return null;
@@ -185,7 +187,9 @@ function unnamedSavingMiss({ estimate, line, data, block, lineItems, serviceKey 
   if (!witness) return null;
   const context = estimateDiscountContext({ ...estimate, estimate_data: data });
   const { discounts } = acceptedPricing(line, { ...context, estimateTier: { tier: witness.tier, amount: witness.rate } });
-  const named = discounts.length > 0 && discounts.every((d) => d.named) && discounts.some((d) => d.percent !== undefined)
+  const tierRow = discounts.find((d) => d.percent !== undefined);
+  const named = discounts.length > 0 && discounts.every((d) => d.named) && !!tierRow
+    && Math.abs(tierRow.percent - witness.rate * 100) < 1e-6
     && agreedTier([witness.tier, ...waveGuardRecordTiers([line.sourceLine])]) === witness.tier;
   return named ? witness.tier : null;
 }
