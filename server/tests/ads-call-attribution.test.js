@@ -169,6 +169,7 @@ describe('attributionForSourceType', () => {
   test('paid tracking numbers stay paid, mapped to their own channel', () => {
     expect(CallAttribution.attributionForSourceType('google_ads')).toEqual({ leadSource: 'google_ads', isPaid: true });
     expect(CallAttribution.attributionForSourceType('facebook')).toEqual({ leadSource: 'facebook', isPaid: true });
+    expect(CallAttribution.attributionForSourceType('google_lsa')).toEqual({ leadSource: 'google_lsa', isPaid: true });
   });
   test('organic marketing sources map to their funnel channel, is_paid=false', () => {
     expect(CallAttribution.attributionForSourceType('spoke_site')).toEqual({ leadSource: 'domain_website', isPaid: false });
