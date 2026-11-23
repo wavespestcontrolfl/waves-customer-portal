@@ -408,12 +408,12 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(builder).toContain('booking_window_start: windowStart || null,');
     // Visits start on the hour: an off-hour time the call set is flagged for staff to confirm.
     expect(builder).toContain('booking_off_hour: offTheHour(windowStart),');
-    expect(builder).toContain('off_hour: offTheHour(callFollowUpPlan.windowStart) }');
+    expect(builder).toContain('off_hour: offTheHour(followUpPlan.windowStart) }');
     expect(builder).toContain('stated_price: agreedJobCardPrice ? agreedJobCardPrice.amount : null,');
     expect(builder).toContain('price_basis: agreedJobCardPrice ? agreedJobCardPrice.basis : null,');
-    expect(builder).toContain('? { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null,');
+    expect(builder).toContain('? { scheduled_date: followUpPlan.scheduledDate || null, window_start: followUpPlan.windowStart || null,');
     // A follow-up time the call did not set is a suggestion on the card, not a promise.
-    expect(builder).toContain('suggested: callFollowUpPlan.hourStated !== true || callFollowUpPlan.packageOnly === true,');
+    expect(builder).toContain('suggested: followUpPlan.hourStated !== true || followUpPlan.packageOnly === true,');
     expect(call).toContain('agreedJobCardFiled = await fileSkippedBookingCard({');
     expect(call).toContain('agreedOneTimeJob: agreedJobCardEvidence,');
     // The card writer: the evidence is ONE key, written on every pass (null for another skip), so an older
@@ -489,7 +489,8 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
   test('under the hold a kept visit gets no visit 2, and the card names the kept visit', () => {
     // After every existing check (a child, an owed or dispatch-owned follow-up), before the child's slot is built.
     const fuAt = source.indexOf('const ensureCallFollowUpVisit = async');
-    const supp = source.indexOf('if (agreedJobHeldForOffice) {\n                    agreedJobFollowUpWithheld = true;\n                    return null;\n                  }', fuAt);
+    // It keeps the plan it withheld (recomputed from the kept visit's own date), never a flag.
+    const supp = source.indexOf('if (agreedJobHeldForOffice) {\n                    agreedJobFollowUpWithheld = fuPlan;\n                    return null;\n                  }', fuAt);
     expect(supp).toBeGreaterThan(source.indexOf('if (existingChild) return null;', fuAt));
     expect(supp).toBeGreaterThan(source.indexOf('if (callFollowUpPlan.packageOnly && require(\'./call-booking-source-actions\').isUnreviewedDispatchOwned(primaryRow)) return null;', fuAt));
     expect(supp).toBeGreaterThan(source.indexOf('if (!fuPlan) return null;', fuAt));
@@ -498,7 +499,10 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(at).toBeGreaterThan(source.indexOf('scheduledServiceId = svc.id;'));
     const site = source.slice(at, source.indexOf('// Street-level address holds only', at));
     expect(site).toContain("require('./call-one-time-job').serviceNameKey(svc.service_type) !== require('./call-one-time-job').serviceNameKey(serviceType)");
-    expect(site).toContain('agreedJobCardEvidence = agreedJobCardEvidenceFor({ keptVisitId: svc.id });');
+    // A kept-visit card shows visit 2 only when the hold withheld it, at the withheld plan's slot.
+    expect(site).toContain('agreedJobCardEvidence = agreedJobCardEvidenceFor({ keptVisitId: svc.id, followUpPlan: agreedJobFollowUpWithheld });');
+    expect(source).toContain('let agreedJobFollowUpWithheld = null;');
+    expect(source).toContain('const agreedJobCardEvidenceFor = ({ streetLevelAddress = null, keptVisitId = null, followUpPlan = callFollowUpPlan } = {}) => ({');
     expect(site).toContain("skippedReason: 'agreed_one_time_job_office_books'");
     expect(site).toContain('agreedOneTimeJob: agreedJobCardEvidence,');
   });
@@ -510,7 +514,10 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(at).toBeGreaterThan(source.indexOf('const agreedJobPriorByKey = agreedJobHeldForOffice'));
     const block = source.slice(at, source.indexOf("return { __held: { reason: 'agreed_one_time_job_office_books'", at));
     // The customer's primary only (a follow-up row carries the call link too; a rematched call another customer's).
-    expect(block).toContain("? await trx('scheduled_services').where({ source_call_log_id: call.id, customer_id: customerId }).whereNull('parent_service_id')");
+    expect(block).toContain("? await trx('scheduled_services').where({ customer_id: customerId }).whereNull('parent_service_id')");
+    // The call link or the legacy Call SID marker, as findExistingCallAppointment reads them.
+    expect(block).toContain('qb.where({ source_call_log_id: call.id });');
+    expect(block).toContain("if (call.twilio_call_sid) qb.orWhere('notes', 'like', `%Call SID: ${call.twilio_call_sid}%`);");
     expect(block).toContain(".whereIn('status', ['cancelled', 'rescheduled']).orderBy('created_at', 'desc').first('id', 'status')");
     expect(block).toContain("return { __held: { reason: 'auto_booking_previously_cancelled', existingId: agreedJobCancelled.id, existingStatus: agreedJobCancelled.status } };");
   });

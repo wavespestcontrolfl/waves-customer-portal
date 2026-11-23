@@ -20976,7 +20976,10 @@ const CallRecordingProcessor = {
               // Google matched only the street of it ('' = the address on file).
               // `keptVisitId`: the visit this pass kept for the call (the AI booked
               // nothing more).
-              const agreedJobCardEvidenceFor = ({ streetLevelAddress = null, keptVisitId = null } = {}) => ({
+              // `followUpPlan`: the visit 2 to show (the call's plan on the held card;
+              // on a kept-visit card only the plan the hold withheld, as recomputed
+              // from the kept visit's own date).
+              const agreedJobCardEvidenceFor = ({ streetLevelAddress = null, keptVisitId = null, followUpPlan = callFollowUpPlan } = {}) => ({
                 street_level_address: typeof streetLevelAddress === 'string' ? streetLevelAddress : null,
                 kept_visit_id: keptVisitId ? String(keptVisitId) : null,
                 // The slot the booker resolved (Eastern date and hour), not the raw timestamp.
@@ -20988,15 +20991,15 @@ const CallRecordingProcessor = {
                 price_basis: agreedJobCardPrice ? agreedJobCardPrice.basis : null,
                 // A follow-up the call did not set (the catalog interval, visit 1's
                 // hour, or a two-treatment package nobody discussed) is a suggestion.
-                follow_up: callFollowUpPlan
-                  ? { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null,
-                    suggested: callFollowUpPlan.hourStated !== true || callFollowUpPlan.packageOnly === true,
-                    off_hour: offTheHour(callFollowUpPlan.windowStart) }
+                follow_up: followUpPlan
+                  ? { scheduled_date: followUpPlan.scheduledDate || null, window_start: followUpPlan.windowStart || null,
+                    suggested: followUpPlan.hourStated !== true || followUpPlan.packageOnly === true,
+                    off_hour: offTheHour(followUpPlan.windowStart) }
                   : null,
               });
               // Under the hold the AI books nothing, not even visit 2 on a visit the
-              // call kept (ensureCallFollowUpVisit); set when it withheld one.
-              let agreedJobFollowUpWithheld = false;
+              // call kept (ensureCallFollowUpVisit): the plan it withheld, or null.
+              let agreedJobFollowUpWithheld = null;
               const svc = await db.transaction(async (trx) => {
                 await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', callSid]);
                 // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT — r25):
@@ -21212,7 +21215,7 @@ const CallRecordingProcessor = {
                   // first (a child, an owed or dispatch-owned follow-up), so this
                   // marks only a visit 2 still to book; the office card says so.
                   if (agreedJobHeldForOffice) {
-                    agreedJobFollowUpWithheld = true;
+                    agreedJobFollowUpWithheld = fuPlan;
                     return null;
                   }
                   // Runs in a SAVEPOINT (nested trx): a rejected follow-up
@@ -22555,11 +22558,18 @@ const CallRecordingProcessor = {
                   ? await trx('scheduled_services').where({ idempotency_key: insertData.idempotency_key }).first('id', 'status')
                   : null;
                 // The key carries the service, so a visit booked under the old
-                // label (and cancelled since) is found by the call's own link.
+                // label (and cancelled since) is found the way
+                // findExistingCallAppointment finds the call's visit: this
+                // customer's primary, by the call link or the legacy Call SID
+                // marker in its notes.
                 const agreedJobCancelled = (agreedJobPriorByKey && ['cancelled', 'rescheduled'].includes(agreedJobPriorByKey.status))
                   ? agreedJobPriorByKey
-                  : (agreedJobHeldForOffice && !agreedJobPriorByKey
-                    ? await trx('scheduled_services').where({ source_call_log_id: call.id, customer_id: customerId }).whereNull('parent_service_id')
+                  : (agreedJobHeldForOffice && !agreedJobPriorByKey && customerId
+                    ? await trx('scheduled_services').where({ customer_id: customerId }).whereNull('parent_service_id')
+                      .where((qb) => {
+                        qb.where({ source_call_log_id: call.id });
+                        if (call.twilio_call_sid) qb.orWhere('notes', 'like', `%Call SID: ${call.twilio_call_sid}%`);
+                      })
                       .whereIn('status', ['cancelled', 'rescheduled']).orderBy('created_at', 'desc').first('id', 'status')
                     : null);
                 if (agreedJobCancelled) {
@@ -22861,7 +22871,7 @@ const CallRecordingProcessor = {
               // what the call still needs (the same card, naming the kept visit).
               if (agreedJobHeldForOffice && (agreedJobFollowUpWithheld
                 || require('./call-one-time-job').serviceNameKey(svc.service_type) !== require('./call-one-time-job').serviceNameKey(serviceType))) {
-                agreedJobCardEvidence = agreedJobCardEvidenceFor({ keptVisitId: svc.id });
+                agreedJobCardEvidence = agreedJobCardEvidenceFor({ keptVisitId: svc.id, followUpPlan: agreedJobFollowUpWithheld });
                 agreedJobCardFiled = await fileSkippedBookingCard({
                   call, procToken, customerId, extraction: v2ApprovedExtraction || v2CanonicalExtraction,
                   skippedReason: 'agreed_one_time_job_office_books', preferredDateTime: extracted.preferred_date_time,
