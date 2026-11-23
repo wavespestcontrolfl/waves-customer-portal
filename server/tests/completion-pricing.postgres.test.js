@@ -378,6 +378,12 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
       await admin({});
       expect(await reason({ ...job, estimated_price: 85 })).toBe('discount_unnamed');
       expect(await findingsFor()).toEqual([]);
+      // A row whose own tier record names no tier prints a bare "WaveGuard" (pre-push audit): the estimate's records
+      // agree on Gold, so the check flags the line, with no saved rate needed.
+      await admin({ services: [{ ...row, discount: { appliedDiscounts: [{ type: 'waveguard', amount: 0.15 }] } }] });
+      expect((await pricing.acceptedVisitBreakdown({ ...job, estimated_price: 85 }, { database: trx })).breakdown.discounts)
+        .toEqual([{ name: 'WaveGuard', dollars: 15 }]);
+      expect(await findingsFor()).toEqual([{ visitId: jobId, estimateId, serviceKey: 'pest_control', tier: 'gold' }]);
     } finally { delete process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES; }
     // Gate off: every invoice keeps one line by design, so the check reads nothing.
     expect(await tierSavingsLeftOffInvoices(trx, { today, days: 1 })).toEqual({ checked: 0, findings: [] });

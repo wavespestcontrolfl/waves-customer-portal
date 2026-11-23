@@ -48,7 +48,6 @@ const scheduleLine = (sourceLine = pestRow, extra = {}) => ({ source: 'recurring
   serviceKey: 'pest_control_quarterly', sourceLine, ...extra });
 const visit = (extra = {}) => ({ id: 'v1', source_estimate_id: 'e1', service_type: 'Quarterly Pest Control Service', estimated_price: '85.00', ...extra });
 const unnamed = (extra = {}) => ({ breakdown: null, reason: 'discount_unnamed', estimate: estimate(), line: scheduleLine(), ...extra });
-const lines = (...names) => ({ breakdown: { base: 100, amount: 85, discounts: names.map((name) => ({ name, dollars: 15 / names.length })) } });
 const findingsFor = async (actual, row = visit()) => {
   acceptedVisitBreakdown.mockResolvedValue(actual);
   return (await tierSavingsLeftOffInvoices(fakeDb([row]), { today: TODAY })).findings;
@@ -105,23 +104,45 @@ describe('tierSavingsLeftOffInvoices', () => {
     expect(await withData({ summary: { manualDiscount: { amount: 5, recurringAmount: 0, label: 'Courtesy' } } })).toHaveLength(1);
   });
 
-  // Pre-push audit P1 (round 6): a row whose own tier record names no tier prints a bare "WaveGuard" line. The
-  // invoice's pricing would print the same again, so a printed line is judged by its name, not asked again.
-  test('a printed WaveGuard line must name the estimate\'s tier; a bare or another tier\'s label is a finding', async () => {
+  // Pre-push audit P1s (rounds 6 and 7): a row whose own tier record names no tier prints a bare "WaveGuard" line. The
+  // tier line is the tier row of the invoice's own pricing (the row with the rate), never a label read by its name, and
+  // judging its name needs no rate and no staff rule.
+  test('a printed WaveGuard tier line must name the tier the estimate\'s records agree on; a bare label is a finding', async () => {
     const tierless = { ...pestRow, discount: { appliedDiscounts: [{ type: 'waveguard', amount: 0.15 }] } };
-    expect(acceptedPricing(scheduleLine(tierless), {}).discounts.map((d) => d.name)).toEqual(['WaveGuard']);
+    // A breakdown the invoice prints; the check reads its rows from the invoice's own pricing of the line.
+    const printed = (row, extra = {}) => ({ breakdown: { base: 100, amount: 85, discounts: [] },
+      estimate: estimate({ recurring: { ...gold, discount: 0.15 } }), line: scheduleLine(row, extra) });
+    const names = () => acceptedPricing.mock.results.map(({ value }) => value.discounts.map((d) => d.name));
+    const finding = [{ visitId: 'v1', estimateId: 'e1', serviceKey: 'pest_control', tier: 'gold' }];
+    expect(await findingsFor(printed(pestRow))).toEqual([]);
+    expect(await findingsFor(printed(tierless))).toEqual(finding);
+    expect(names()).toEqual([['WaveGuard Gold'], ['WaveGuard']]);
+    // Records that name another tier, or no tier at all, name none: no finding. The matched row's own record counts.
+    expect(await findingsFor({ ...printed(tierless), estimate: estimate({ tier: 'Silver' }) })).toEqual([]);
+    const tierlessEngine = [pestItem({ discount: { appliedDiscounts: [{ type: 'waveguard', amount: 0.15 }] } })];
+    expect(await findingsFor({ ...printed(tierless), estimate: estimate({ tier: null, recurring: {}, lineItems: tierlessEngine }) })).toEqual([]);
     jest.clearAllMocks();
-    const printed = (...names) => ({ ...lines(...names), estimate: estimate(), line: scheduleLine() });
-    expect(await findingsFor(printed('WaveGuard Gold'))).toEqual([]);
-    expect(await findingsFor(printed('WaveGuard Gold', 'Courtesy'))).toEqual([]);
-    expect(await findingsFor(printed('WaveGuard'))).toEqual([{ visitId: 'v1', estimateId: 'e1', serviceKey: 'pest_control', tier: 'gold' }]);
-    expect(await findingsFor(printed('WaveGuard Silver'))).toHaveLength(1);
-    expect(acceptedPricing).not.toHaveBeenCalled();
-    // No witness (the records name another tier): no finding.
-    expect(await findingsFor({ ...printed('WaveGuard'), estimate: estimate({ tier: 'Silver' }) })).toEqual([]);
-    // Lines that name only another discount are asked of the invoice's pricing.
-    expect(await findingsFor(printed('Courtesy'))).toHaveLength(1);
-    expect(acceptedPricing).toHaveBeenCalledTimes(1);
+    expect(await findingsFor(printed({ ...pestRow, discount: waveguard(0.15, 'silver') }))).toEqual([]);
+    expect(names()).toEqual([['WaveGuard Silver']]);
+    // A staff discount beside the tier line changes nothing (round 7).
+    const staff = (label) => estimate({ data: { engineResult: { lineItems: [pestItem()] }, result: { recurring: gold },
+      summary: { manualDiscount: { amount: 5, recurringAmount: 5, label } } } });
+    jest.clearAllMocks();
+    expect(await findingsFor({ ...printed(tierless, { perApplicationPrice: 80 }), estimate: staff('Military Discount') })).toEqual(finding);
+    expect(await findingsFor({ ...printed(pestItem(), { perApplicationPrice: 80 }), estimate: staff('Military Discount') })).toEqual([]);
+    expect(names()).toEqual([['WaveGuard', 'Military Discount'], ['WaveGuard Gold', 'Military Discount']]);
+    // A staff label that starts with "WaveGuard" is not a tier line: the saving it names is not the tier's.
+    jest.clearAllMocks();
+    expect(await findingsFor({ ...printed({ ...pestRow, discount: { appliedDiscounts: [] } }), estimate: staff('WaveGuard Loyalty') })).toEqual([]);
+    expect(names()).toEqual([['WaveGuard Loyalty']]);
+    // An estimate with no engine lines and no saved rate still names its tier (round 7).
+    const mapped = estimate({ data: { result: { recurring: { ...gold, services: [tierless] } } } });
+    expect(await findingsFor({ ...printed(tierless), estimate: mapped })).toEqual(finding);
+    // The legacy nested block's tier counts too: another tier there names none.
+    const nested = (tier) => estimate({ data: { engineResult: { lineItems: [pestItem()] },
+      result: { recurring: gold, results: { recurring: { tier, services: [pestRow] } } } } });
+    expect(await findingsFor({ ...printed(tierless), estimate: nested('Silver') })).toEqual([]);
+    expect(await findingsFor({ ...printed(tierless), estimate: nested('Gold') })).toEqual(finding);
   });
 
   test.each(['no_discount', 'price_changed', 'not_priced', 'own_price_or_discount', 'prepaid', 'line_unmatched', 'line_ambiguous'])(
