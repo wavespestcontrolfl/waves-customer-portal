@@ -997,19 +997,18 @@ maybeDescribe('portal messages (live Postgres)', () => {
       const pat = await customer();
       const { escalationId } = await chat(pat.id, { alert: false });
       const clientRequestId = randomUUID();
-      // Only the try's final notice write fails (pending: false); the claim and the boundary mark still land.
-      const realRaw = db.raw;
-      const failing = jest.spyOn(db, 'raw').mockImplementation((...args) => {
-        let notice = null;
-        try { notice = JSON.parse(args[1]?.[0]); } catch { notice = null; }
-        if (String(args[0]).includes("jsonb_build_object('notice'") && notice?.pending === false) throw new Error('write failed');
-        return realRaw.apply(db, args);
-      });
+      // Postgres refuses only this answer's final notice write (notice.pending false); the claim and the boundary
+      // mark still land.
+      await db.raw("CREATE OR REPLACE FUNCTION test_fail_notice_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected notice write failure'; END $$");
+      await db.raw(`CREATE TRIGGER test_fail_notice_write BEFORE UPDATE ON messages FOR EACH ROW
+        WHEN (NEW.metadata->>'clientRequestId' = '${clientRequestId}' AND NEW.metadata->'notice'->>'pending' = 'false')
+        EXECUTE FUNCTION test_fail_notice_write()`);
       let first;
       try {
         first = await staffPress({ kind: 'chat', id: escalationId, body: 'See you Tuesday.', clientRequestId, actor });
       } finally {
-        failing.mockRestore();
+        await db.raw('DROP TRIGGER IF EXISTS test_fail_notice_write ON messages');
+        await db.raw('DROP FUNCTION IF EXISTS test_fail_notice_write()');
       }
       expect(first.notice).toEqual({ text: 'sent', pending: true });
       expect(mockAnswerText.requests).toHaveLength(1);
