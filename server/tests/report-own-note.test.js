@@ -450,3 +450,58 @@ describe('the stored text and the fixed sentence', () => {
     expect(await refusal('treated outside', 'I am treated outside.')).toEqual({ reason: 'not_in_note', words: ['am'] });
   });
 });
+
+// What a completion stores (GATE_REPORT_OWN_NOTE): the sheet's tidied note
+// only when it passes again against the note as submitted; else the fixed
+// sentence code writes. The sheet's own text never stands in for it.
+describe('the note a completion stores', () => {
+  const store = (reportNote, note, extra = {}) => OwnNote.reportNoteToStore({
+    reportNote, note, serviceType: 'Pest Control', catalogRows: CATALOG, storedCodes: [], ...extra,
+  });
+  const FIXED_STORED = { v: 1, source: 'fixed', text: fixedReportNote({ serviceType: 'Pest Control' }) };
+
+  test('a tidied note that passes again is stored in its stored form', async () => {
+    await expect(store({ source: 'cleaned', text: '"I treated the shed."' }, 'treated the shed'))
+      .resolves.toEqual({ v: 1, source: 'cleaned', text: 'I treated the shed.' });
+  });
+
+  test('a note changed since the sheet showed the text: the fixed sentence', async () => {
+    await expect(store({ source: 'cleaned', text: 'I treated the shed.' }, 'baited the kitchen')).resolves.toEqual(FIXED_STORED);
+  });
+
+  test('a code on the customer\'s file, or screens that cannot be read: the fixed sentence', async () => {
+    await expect(store({ source: 'cleaned', text: 'I treated the bluebird shed.' }, 'treated the bluebird shed', { storedCodes: ['bluebird'] }))
+      .resolves.toEqual(FIXED_STORED);
+    await expect(store({ source: 'cleaned', text: 'I treated the shed.' }, 'treated the shed', { catalogRows: null }))
+      .resolves.toEqual(FIXED_STORED);
+  });
+
+  test('the fixed sentence names no service that holds a code on file, and none when the codes cannot be read', async () => {
+    const outcomeOnly = { v: 1, source: 'fixed', text: fixedReportNote({}) };
+    await expect(store(null, 'x')).resolves.toBeNull();
+    await expect(store({ source: 'fixed', text: '' }, 'x', { serviceType: 'Bluebird Pest Control', storedCodes: ['bluebird'] }))
+      .resolves.toEqual(outcomeOnly);
+    await expect(store({ source: 'cleaned', text: 'I treated the shed.' }, 'treated the shed', { storedCodes: null }))
+      .resolves.toEqual(outcomeOnly);
+  });
+
+  test('a note over the preview\'s limit is not screened: the fixed sentence', async () => {
+    const long = `treated the shed. ${'x'.repeat(OwnNote.MAX_OWN_NOTE_INPUT_CHARS)}`;
+    await expect(store({ source: 'cleaned', text: 'I treated the shed.' }, long)).resolves.toEqual(FIXED_STORED);
+  });
+
+  test('the sheet\'s fixed text is not trusted; no sheet text stores nothing', async () => {
+    await expect(store({ source: 'fixed', text: 'Anything the client sent.' }, 'treated the shed')).resolves.toEqual(FIXED_STORED);
+    await expect(store(null, 'treated the shed')).resolves.toBeNull();
+    await expect(store(['x'], 'treated the shed')).resolves.toBeNull();
+    // A malformed shape is no sheet text: it never overwrites a stored note with the fixed sentence.
+    await expect(store({}, 'treated the shed')).resolves.toBeNull();
+    await expect(store({ source: 'other', text: 'x' }, 'treated the shed')).resolves.toBeNull();
+    await expect(store({ source: 'cleaned' }, 'treated the shed')).resolves.toBeNull();
+  });
+
+  test('what is stored is what the report reads', async () => {
+    const stored = await store({ source: 'cleaned', text: 'I treated the shed.' }, 'treated the shed');
+    expect(reportNoteCustomerCopy({ reportNote: stored })).toMatchObject({ body: 'I treated the shed.', source: 'cleaned' });
+  });
+});

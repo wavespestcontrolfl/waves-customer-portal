@@ -4836,6 +4836,26 @@ async function completeScheduledService(completionInput, packetContext = null) {
         completionInput.body?.blogPostId,
       )
       : { post: null, rejected: false };
+    // The technician's own note as the pest Fast Complete sheet showed it
+    // (GATE_REPORT_OWN_NOTE, report speed plan step 2): screened again here
+    // against the note this completion stores, before the transaction, and
+    // frozen with the record below (the tidied note, or the fixed sentence).
+    // Only a performed, untyped pest visit the recap sheet takes; with the gate
+    // off, or for any other visit, a sent note is ignored. Never throws; in a
+    // grouped closeout `db` is the packet's transaction and the reads run in
+    // savepoints.
+    const reportNotePick = require('../config/feature-gates').reportOwnNoteLive()
+      && completionInput.body?.reportNote != null
+      && visitOutcome === 'completed' && !typedFindingsType && !isBackfillCompletion
+      && require('./pest-recap').recapEligibleProfile(completionProfile)
+      ? await require('./service-report/report-own-note').reportNoteToStore({
+        reportNote: completionInput.body.reportNote,
+        note: typeof technicianNotes === 'string' ? technicianNotes.trim() : '',
+        serviceType: svc.service_type,
+        customerId: svc.customer_id,
+        db,
+      })
+      : null;
     // Typed lanes (mosquito_event, one-time pest, …) record their work in the
     // typed findings schema, never through the specialty presets, even when
     // their profile key aliases onto a specialty lane (mosquito_one_time →
@@ -7597,6 +7617,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             formRecommendations,
             ...(techTipsFreeze.tips.length ? { techTips: techTipsFreeze.tips } : {}),
             ...(blogPostPick.post ? { blogPost: blogPostPick.post } : {}),
+            ...(reportNotePick ? { reportNote: reportNotePick } : {}),
             // GATE_LAWN_TREATMENT_GUIDE: which guide cards showed and what the technician did, validated
             // from the lawnFast echo and frozen here; no customer or public path reads it.
             ...require('./lawn-treatment-guide').treatmentGuideFreeze(lawnFast, { products }),
@@ -7877,6 +7898,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
               profile: frozenCompletionProfile,
             }))) {
             delete structuredNotes.blogPost;
+          }
+          // The report note was screened on the pre-lock visit: a repoint since
+          // (another service, another customer, a profile the sheet does not
+          // take) or an identity the re-resolve could not establish drops it,
+          // and the report shows its own text.
+          if (structuredNotes.reportNote && (!primaryFreezeTrusted
+            || (lockedSvcRow && (String(lockedSvcRow.service_type ?? '') !== String(svc.service_type ?? '')
+              || String(lockedSvcRow.customer_id ?? '') !== String(svc.customer_id ?? '')))
+            || !require('./pest-recap').recapEligibleProfile(frozenCompletionProfile))) {
+            delete structuredNotes.reportNote;
           }
           // The inspection-credit marker keys to the LOCKED identity too
           // (Codex #3178 r32 P2): the serviceData literal tested the

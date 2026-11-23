@@ -23,12 +23,10 @@ const logger = require('../logger');
 const { dispatchWithFallback, rejectCall } = require('../llm/call');
 const CompletionRecap = require('../completion-recap');
 const {
-  reportNoteRejection, fixedReportNote, ownNoteText, noteAsRead, readStoredCodes,
+  reportNoteRejection, fixedReportNote, ownNoteText, noteAsRead, readStoredCodes, MAX_OWN_NOTE_INPUT_CHARS,
 } = require('./report-own-note');
 
 const REPORT_OWN_NOTE_VERSION = 'report_own_note_v1';
-// A dictated note is short. A longer one is not sent to a model.
-const MAX_OWN_NOTE_INPUT_CHARS = 2000;
 // The technician waits on the sheet for the text: one budget for both tries.
 const OWN_NOTE_BUDGET_MS = 16 * 1000;
 const OWN_NOTE_ATTEMPT_MS = 10 * 1000;
