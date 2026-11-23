@@ -8,10 +8,10 @@
 // #8343; fixed in #8355). The owner found it himself. This detector finds that kind of miss without him. It asks the
 // invoice's own decision (completion-pricing.js acceptedVisitBreakdown) about each upcoming visit, then one of two
 // questions:
-// - The invoice prints a WaveGuard tier line (printedTierLine): does it name the tier the estimate's records agree on
-//   (printedLabelMiss)? A row whose own tier record names no tier prints a bare "WaveGuard". Reading a label needs no
-//   rate.
-// - The invoice keeps the saving unnamed (reason discount_unnamed, or lines with no tier line): would its own pricing
+// - The invoice prints the line's discounts, and the line's saving has a tier share (pricedWithTierShare): does a printed
+//   row name the tier the estimate's records agree on (printedLabelMiss)? A row whose own tier record names no tier
+//   prints a bare "WaveGuard". Reading a label needs no rate.
+// - The invoice keeps the saving unnamed (reason discount_unnamed, or a breakdown with no tier share): would its own pricing
 //   of the matched line name the tier, if its tier reading had found what the estimate's records hold
 //   (unnamedSavingMiss)? The witness is the engine's record: the tier and the rate it applied to that line, which the
 //   estimate's other records must not contradict. An estimate saved with no engine lines (the admin estimate tool's
@@ -125,32 +125,31 @@ function matchedServiceKey(line) {
   return require('../routes/estimate-public').recurringServiceKey({ ...row, service: row.service || line.serviceKey || undefined });
 }
 
-// The WaveGuard tier line the invoice prints for the visit: the tier row of the invoice's own pricing of the matched line,
-// in its own discount context, as the decision priced it (completion-pricing.js acceptedVisitBreakdown). That row, and
-// only that row, carries the tier's rate (acceptedDiscountRows), so a staff label that starts with "WaveGuard" is not
-// read as one. Null when the invoice prints no breakdown, or no tier line.
-function printedTierLine(breakdown, estimate, line) {
-  if (!breakdown) return null;
+// Whether the line's saving has a WaveGuard tier share: the invoice's own pricing of the matched line, in the decision's
+// own discount context (the call completion-pricing.js acceptedVisitBreakdown makes), has a tier row. That row, and only
+// that row, carries the tier's rate (acceptedDiscountRows), so a staff label that starts with "WaveGuard" is not one.
+function pricedWithTierShare(estimate, line) {
   const { acceptedPricing, estimateDiscountContext } = require('./completion-pricing');
-  return acceptedPricing(line, estimateDiscountContext(estimate)).discounts.find((row) => row.percent !== undefined) || null;
+  return acceptedPricing(line, estimateDiscountContext(estimate)).discounts.some((row) => row.percent !== undefined);
 }
 
 // The tiers the WaveGuard records of these rows name. A record with no tier names none.
 const waveGuardRecordTiers = (rows) => rows.flatMap((row) => list(object(object(row).discount).appliedDiscounts)
   .filter((d) => d?.type === 'waveguard').map((d) => d.tier));
 
-// A printed WaveGuard tier line must name the tier the estimate's records agree on: the engine's recurring lines of the
-// service, the matched row's own record, the column, the saved block and the legacy nested block. A row whose own tier
-// record names no tier prints a bare "WaveGuard" (pre-push audit): the tier is left off. Reading a label needs no rate,
-// and a staff discount beside it changes nothing. The tier left off, or null.
-function printedLabelMiss({ estimate, line, data, block, lineItems, serviceKey }, printed) {
+// A printed breakdown of a line with a tier share must print a line named for the tier the estimate's records agree on:
+// the engine's recurring lines of the service, the matched row's own record, the column, the saved block and the legacy
+// nested block. It is judged on the rows the invoice prints (breakdown.discounts): a bare "WaveGuard" (a row whose own
+// tier record names no tier, pre-push audit), another tier's name, or no tier line at all leaves the tier off. Reading
+// a label needs no rate, and a staff discount beside it changes nothing. The tier left off, or null.
+function printedLabelMiss({ estimate, line, data, block, lineItems, serviceKey }, discounts) {
   const nested = legacyNestedBlock(data);
   const tier = agreedTier([
     ...waveGuardRecordTiers([...serviceEngineLines(lineItems, serviceKey), line.sourceLine]),
     estimate.waveguard_tier, block.waveGuardTier || block.tier, nested.waveGuardTier || nested.tier,
   ]);
   const { waveGuardTierName } = require('./completion-pricing');
-  return tier && printed.name !== waveGuardTierName(tier) ? tier : null;
+  return tier && !list(discounts).some((row) => row.name === waveGuardTierName(tier)) ? tier : null;
 }
 
 // A saving the invoice leaves unnamed, that its own pricing of the matched line names, in its own discount context with
@@ -178,8 +177,7 @@ async function visitFinding(conn, visit) {
   if (!serviceKey) return null;
   const data = parsed(estimate.estimate_data);
   const records = { estimate, line, data, serviceKey, ...pricingRecords(data) };
-  const printed = printedTierLine(breakdown, estimate, line);
-  const tier = printed ? printedLabelMiss(records, printed) : unnamedSavingMiss(records);
+  const tier = breakdown && pricedWithTierShare(estimate, line) ? printedLabelMiss(records, breakdown.discounts) : unnamedSavingMiss(records);
   return tier ? { visitId: String(visit.id), estimateId: String(estimate.id), serviceKey, tier } : null;
 }
 
