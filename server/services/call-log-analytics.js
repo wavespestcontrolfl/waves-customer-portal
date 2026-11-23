@@ -150,6 +150,14 @@ function sourceEvidence(row) {
       basis: 'The dialed number is currently assigned to this Google Ads call placement.',
     };
   }
+  if (sourceType === 'google_lsa') {
+    return {
+      kind: 'google_ads',
+      label: 'Google LSA',
+      detail: secondaryDetail('google_ads', name, row),
+      basis: 'The dialed number is currently assigned to the Google Local Services profile.',
+    };
+  }
   if (sourceType === 'facebook' || registry?.type === 'facebook') {
     return {
       kind: 'meta_ads',
@@ -253,6 +261,7 @@ function sourceSortExpression(conn, callAlias = 'cl') {
     WHEN ${callAlias}.metadata->>'numberType' IN ('location', 'tech_line', 'unassigned', 'internal_alert', 'customer_chat') THEN 'Source unknown'
     WHEN ${callAlias}.metadata->>'numberType' IN ('domain_tracking', 'pest_domain', 'lawn_domain') THEN 'Website'
     WHEN ${callAlias}.to_phone IN (${marks(google)}) OR call_source.source_type = 'google_ads' THEN 'Google Ads'
+    WHEN call_source.source_type = 'google_lsa' THEN 'Google LSA'
     WHEN ${callAlias}.to_phone IN (${marks(meta)}) OR call_source.source_type = 'facebook' THEN 'Meta Ads'
     WHEN ${callAlias}.to_phone IN (${marks(gbp)}) OR call_source.source_type = 'gbp' THEN 'Google Business Profile'
     WHEN ${callAlias}.to_phone IN (${marks(offline)}) OR call_source.source_type = 'vehicle' THEN 'Offline'

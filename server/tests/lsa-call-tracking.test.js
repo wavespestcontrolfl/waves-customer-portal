@@ -19,6 +19,10 @@ describe('Google LSA line released (owner 2026-11-23)', () => {
     expect(sourceEvidence({ to_phone: LSA, metadata: { numberType: 'google_lsa' } })).toMatchObject({ kind: 'google_ads', label: 'Google LSA' });
   });
 
+  test('a line whose source row is google_lsa reads Google LSA', () => {
+    expect(sourceEvidence({ to_phone: '+19415550100', _source_type: 'google_lsa' })).toMatchObject({ kind: 'google_ads', label: 'Google LSA' });
+  });
+
   test('the funnel still maps source_type google_lsa to the paid channel', () => {
     expect(attributionForSourceType('google_lsa')).toEqual({ leadSource: 'google_lsa', isPaid: true });
   });
