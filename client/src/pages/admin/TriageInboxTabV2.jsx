@@ -155,12 +155,14 @@ function agreedOneTimeJobRows(p) {
       ? { label: "Agreed price", value: `${price} one-time, the total the caller accepted on the call.` }
       : { label: "Staff said", value: `${price} one-time. Check the terms on the call before you set the visit's price.` }),
     // Visit 2 is owed either way; its slot is firm only when the call set the hour.
+    // Saving visit 1 of a two-treatment service adds visit 2 by itself
+    // (admin-schedule.js ensurePackageFollowUpVisit), so staff check before they book it.
     j.follow_up && j.follow_up.scheduled_date && { label: "Follow-up owed", value: [
       j.follow_up.reason === "package" ? "Visit 2 is part of this two-treatment service." : "The call agreed a second visit.",
       j.follow_up.time_set === true
         ? `The call set it for ${slot(j.follow_up.scheduled_date, j.follow_up.window_start)}.${j.follow_up.off_hour === true ? " Visits start on the hour: confirm an on-hour start with the customer." : ""}`
         : `Around ${slot(j.follow_up.scheduled_date, j.follow_up.window_start)}: the call did not set this time, so confirm it with the customer.`,
-      "Book it with the first visit.",
+      "Save visit 1 first, then check the schedule for visit 2: a two-treatment service adds it by itself. Book visit 2 only if it is missing, and move it if its time differs.",
     ].join(" ") },
   ];
 }

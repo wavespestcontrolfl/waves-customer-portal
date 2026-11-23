@@ -1592,7 +1592,8 @@ describe('ConfirmEvidence — agreed one-time job the AI did not book', () => {
     expect(screen.getByText(/The call agreed a second visit\. Around 2026-12-05 at 10:00: the call did not set this time/)).toBeInTheDocument();
     cleanup();
     show(payload({}, { follow_up: { scheduled_date: '2026-12-05', window_start: '10:00', reason: 'discussed', time_set: true } }));
-    expect(screen.getByText(/The call agreed a second visit\. The call set it for 2026-12-05 at 10:00\. Book it with the first visit\./)).toBeInTheDocument();
+    expect(screen.getByText(/The call agreed a second visit\. The call set it for 2026-12-05 at 10:00\. Save visit 1 first, then check the schedule for visit 2: a two-treatment service adds it by itself\. Book visit 2 only if it is missing/)).toBeInTheDocument();
+    expect(screen.queryByText(/Book it with the first visit/)).not.toBeInTheDocument();
   });
 
   it('asks staff to check the service and billing terms when the card carries no price', () => {
