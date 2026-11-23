@@ -8757,6 +8757,30 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // HOURLY :12 — Google Local Services lead match, step A (owner 2026-11-23)
+  // Google forbids a tracking number on the Local Services profile, so those
+  // calls ring the Bradenton office line and the portal files them as website
+  // calls. This job stores each Google lead of the last 30 days in lsa_leads and
+  // matches it to the call_log row, lead and customer. It only reads Google and
+  // writes lsa_leads: no existing attribution changes, no message goes out.
+  // runExclusive records job_health ('google-lsa-leads'); a failed read throws
+  // with Google's reason, so the job reads failed.
+  // =========================================================================
+  cron.schedule('12 * * * *', async () => {
+    try {
+      const googleLsa = require('./ads/google-lsa');
+      if (!googleLsa.isConfigured()) return;
+      await runExclusive('google-lsa-leads', async () => {
+        await require('./ads/google-lsa-leads').runLeadSync();
+      });
+    } catch (err) {
+      // err.message is safe here: runLeadSync throws only Google's reason or a
+      // database step, code and constraint (never a row's phone or name).
+      logger.error(`Google Local Services lead match failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:15AM — Meta (Facebook/Instagram) Ads sync (campaigns + insights)
   // Pulls Meta ad spend/performance into the same ad_campaigns /
   // ad_performance_daily tables (platform='facebook'); the PPC dashboard then

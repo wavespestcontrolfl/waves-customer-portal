@@ -422,6 +422,7 @@ module.exports = {
   isConfigured,
   ownsCampaign,
   runDailySync,
+  getCustomer, // the lead match (google-lsa-leads.js) reads through the same account
   _private: {
     customerId,
     accountState,
