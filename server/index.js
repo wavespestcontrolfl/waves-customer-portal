@@ -264,10 +264,12 @@ app.use('/api/public/watering-plan', (req, res, next) => {
   }
   next();
 });
-// New-home postcard page (GATE_MAIL_HOME_PAGE, dark): privacy headers on every outcome, and the generic 404 while dark,
-// for any method but GET/HEAD (an OPTIONS preflight included) and for a path that is not one page token. It sits
-// BEFORE the wildcard CORS handler below, the global /api limiter (429) and the body parsers, like the watering plan.
-app.use('/api/public/home', require('./routes/mail-home-public').preLimiterGuard);
+// New-home postcard page (GATE_MAIL_HOME_PAGE, dark): the WHOLE route is mounted here, BEFORE the wildcard CORS
+// handler below, cors(), the global /api limiter and the body parsers, so every answer (the dark 404, the unknown-token
+// 404, the page) leaves from one place with the same headers. Its guard (privacy headers; the generic 404 while dark,
+// for any method but GET/HEAD and for a path that is not one page token) runs first, then its own 60-a-minute limiter.
+// The page is same-origin (/h/:token), so it needs no CORS.
+app.use('/api/public/home', require('./routes/mail-home-public').preLimiterGuard, require('./routes/mail-home-public'));
 // Public, embeddable endpoints must be CORS-open to ANY origin and must answer
 // their own preflights BEFORE the credentialed allowlist below — the cors()
 // middleware terminates OPTIONS for non-allowlisted origins without an
@@ -890,7 +892,6 @@ app.use('/go', require('./routes/outbound-redirect'));
 // Digital business card — public token-scoped data + Save-contact vCard.
 app.use('/api/card', require('./routes/card-public'));
 // One new home's page (QR code on a postcard): the address and its stored price by 32-hex token. Dark behind GATE_MAIL_HOME_PAGE.
-app.use('/api/public/home', require('./routes/mail-home-public'));
 // Universal-link association files (apple-app-site-association / assetlinks.json).
 // Dark behind GATE_UNIVERSAL_LINKS — both files 404 until flipped.
 app.use('/.well-known', require('./routes/well-known'));

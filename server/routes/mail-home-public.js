@@ -34,7 +34,7 @@ const notFound = (res) => {
 const TOKEN_PATH = /^\/[0-9a-f]{32}\/?$/;
 
 /**
- * Mounted in server/index.js BEFORE the global /api limiter and the body parsers: the privacy headers on every
+ * Mounted in server/index.js with the router, BEFORE the CORS handlers, the global /api limiter and the body parsers: the privacy headers on every
  * outcome (a global 429 included), and while the gate is off, or for any path or method that is not a page read, the
  * same 404 an unknown token gets. So a dark probe never sees a 429 and the gate is not an oracle.
  */
