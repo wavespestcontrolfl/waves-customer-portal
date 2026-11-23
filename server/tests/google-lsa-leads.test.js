@@ -28,6 +28,7 @@ function builder(table) {
   return b;
 }
 const mockDb = jest.fn((table) => builder(table));
+mockDb.raw = jest.fn((sql) => ({ raw: sql }));
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn(), info: jest.fn() }));
 const mockQuery = jest.fn();
@@ -39,10 +40,12 @@ const Leads = require('../services/ads/google-lsa-leads');
 const {
   parseAccountTime, last10, mapLead, callsByLead, matchWindow, chooseCandidate,
   leadQuery, conversationQuery, upsertLeads, matchOpenLeads, decideMatch,
-  resolveSharedCalls, refillFields, refillMatches, dbErrorText,
+  resolveSharedCalls, refillFields, refillMatches, dbErrorText, samePhone, isCandidateCall, windowClosed,
 } = Leads._private;
 
 const ACCOUNT = '7636809139';
+// An inbound call from the consumer to the Local Services profile line.
+const CALL = { from_phone: '+19415550142', to_phone: '+19413187612' };
 const writesTo = (table, op) => mockWrites.filter((w) => w.table === table && w.op === op);
 
 beforeEach(() => {
@@ -207,7 +210,7 @@ describe('matching', () => {
   const phoneLead = { id: 'l1', lead_type: 'calls', consumer_phone: '+19415550142', lead_created_at: new Date('2026-11-20T19:05:09Z'), call_started_at: new Date('2026-11-20T19:04:30Z') };
 
   test('one inbound call: sets call, customer and the call\'s lead, basis phone_time', async () => {
-    mockRows.call_log = [{ id: 'call-1', customer_id: 'cust-1', twilio_call_sid: 'CA1' }];
+    mockRows.call_log = [{ ...CALL, id: 'call-1', customer_id: 'cust-1', twilio_call_sid: 'CA1' }];
     mockRows.leads = [{ id: 'lead-1' }];
     const update = await decideMatch(phoneLead);
     expect(update).toMatchObject({ call_log_id: 'call-1', customer_id: 'cust-1', lead_id: 'lead-1', match_basis: 'phone_time' });
@@ -217,7 +220,7 @@ describe('matching', () => {
   });
 
   test('one call with no lead: lead_id is null', async () => {
-    mockRows.call_log = [{ id: 'call-1', customer_id: null, twilio_call_sid: 'CA1' }];
+    mockRows.call_log = [{ ...CALL, id: 'call-1', customer_id: null, twilio_call_sid: 'CA1' }];
     mockRows.leads = [];
     expect(await decideMatch(phoneLead)).toMatchObject({ call_log_id: 'call-1', customer_id: null, lead_id: null });
   });
@@ -238,7 +241,7 @@ describe('matching', () => {
   });
 
   test('two calls: marked ambiguous with no ids', async () => {
-    mockRows.call_log = [{ id: 'a' }, { id: 'b' }];
+    mockRows.call_log = [{ ...CALL, id: 'a' }, { ...CALL, id: 'b' }];
     expect(await decideMatch(phoneLead)).toEqual({ match_basis: 'ambiguous' });
   });
 
@@ -263,9 +266,9 @@ describe('matching', () => {
       { ...phoneLead, id: 'l1', match_basis: null },
       { ...phoneLead, id: 'l2', match_basis: 'ambiguous' },
     ];
-    mockRows.call_log = [{ id: 'a' }, { id: 'b' }];
+    mockRows.call_log = [{ ...CALL, id: 'a' }, { ...CALL, id: 'b' }];
     const counts = await matchOpenLeads();
-    expect(counts).toEqual({ matched: 0, ambiguous: 2, unmatched: 0 });
+    expect(counts).toEqual({ matched: 0, ambiguous: 2, unmatched: 0, pending: 0 });
     const updates = writesTo('lsa_leads', 'update');
     expect(updates).toHaveLength(1); // l1 only: l2 was already marked
     const touched = new Set(mockWrites.filter((w) => ['insert', 'update'].includes(w.op)).map((w) => w.table));
@@ -305,10 +308,10 @@ describe('one call, one Google lead', () => {
 
   test('two open leads that pick the same call: neither is given it', async () => {
     mockRows.lsa_leads = [open('a'), open('b')];
-    mockRows.call_log = [{ id: 'c1', customer_id: 'cust-1', twilio_call_sid: 'CA1' }];
+    mockRows.call_log = [{ ...CALL, id: 'c1', customer_id: 'cust-1', twilio_call_sid: 'CA1' }];
     mockRows.leads = [];
     const counts = await matchOpenLeads();
-    expect(counts).toEqual({ matched: 0, ambiguous: 2, unmatched: 0 });
+    expect(counts).toEqual({ matched: 0, ambiguous: 2, unmatched: 0, pending: 0 });
     for (const w of writesTo('lsa_leads', 'update')) {
       expect(w.args[0]).not.toHaveProperty('call_log_id');
       expect(w.args[0].match_basis).toBe('ambiguous');
@@ -319,10 +322,10 @@ describe('one call, one Google lead', () => {
     let lsaReads = 0;
     // 1st read = the open leads; later reads = the "held by another lead" check.
     mockRows.lsa_leads = () => (lsaReads++ === 0 ? [open('a')] : [{ id: 'other' }]);
-    mockRows.call_log = [{ id: 'c1', customer_id: 'cust-1', twilio_call_sid: 'CA1' }];
+    mockRows.call_log = [{ ...CALL, id: 'c1', customer_id: 'cust-1', twilio_call_sid: 'CA1' }];
     mockRows.leads = [];
     const counts = await matchOpenLeads();
-    expect(counts).toEqual({ matched: 0, ambiguous: 1, unmatched: 0 });
+    expect(counts).toEqual({ matched: 0, ambiguous: 1, unmatched: 0, pending: 0 });
     const update = writesTo('lsa_leads', 'update')[0].args[0];
     expect(update).toMatchObject({ match_basis: 'ambiguous' });
     expect(update).not.toHaveProperty('call_log_id');
@@ -333,9 +336,9 @@ describe('one call, one Google lead', () => {
   test('a free call is given to the lead that chose it alone', async () => {
     let lsaReads = 0;
     mockRows.lsa_leads = () => (lsaReads++ === 0 ? [open('a')] : []);
-    mockRows.call_log = [{ id: 'c1', customer_id: 'cust-1', twilio_call_sid: 'CA1' }];
+    mockRows.call_log = [{ ...CALL, id: 'c1', customer_id: 'cust-1', twilio_call_sid: 'CA1' }];
     mockRows.leads = [{ id: 'lead-1' }];
-    expect(await matchOpenLeads()).toEqual({ matched: 1, ambiguous: 0, unmatched: 0 });
+    expect(await matchOpenLeads()).toEqual({ matched: 1, ambiguous: 0, unmatched: 0, pending: 0 });
     expect(writesTo('lsa_leads', 'update')[0].args[0]).toMatchObject({ call_log_id: 'c1', lead_id: 'lead-1', match_basis: 'phone_time' });
   });
 });
@@ -407,6 +410,120 @@ describe('database errors are never logged raw', () => {
     } finally {
       process.env = saved;
     }
+  });
+});
+
+describe('whole phone numbers, not just the last ten digits', () => {
+  test('a +44 number never meets a US number that shares its last ten digits', () => {
+    expect(samePhone('+449415550142', '+19415550142')).toBe(false);
+    expect(samePhone('+19415550142', '(941) 555-0142')).toBe(true);
+    expect(samePhone('+19415550142', '19415550142')).toBe(true);
+    expect(samePhone('+449415550142', '+449415550142')).toBe(true);
+    expect(samePhone('', '+19415550142')).toBe(false);
+  });
+
+  test('a call to another Waves number is not a candidate; a call from a +44 caller is not either', () => {
+    expect(isCandidateCall({ from_phone: '+19415550142', to_phone: '+19413187612' }, '+19415550142')).toBe(true);
+    expect(isCandidateCall({ from_phone: '+19415550142', to_phone: '+19412972606' }, '+19415550142')).toBe(false);
+    expect(isCandidateCall({ from_phone: '+449415550142', to_phone: '+19413187612' }, '+19415550142')).toBe(false);
+  });
+
+  test('findCandidateCalls drops a +44 caller that the last-ten query returned', async () => {
+    mockRows.call_log = [{ id: 'uk', from_phone: '+449415550142', to_phone: '+19413187612', customer_id: null, twilio_call_sid: 'CAUK' }];
+    expect(await decideMatch({ id: 'l1', lead_type: 'calls', consumer_phone: '+19415550142', lead_created_at: new Date('2026-11-20T19:05:09Z') })).toBeNull();
+  });
+});
+
+describe('the call processor\'s own lead link (SID first, as the processor)', () => {
+  const lead = { id: 'l1', lead_type: 'calls', consumer_phone: '+19415550142', lead_created_at: new Date('2026-11-20T19:05:09Z') };
+
+  test('the lead this call\'s SID created wins over a stamp', async () => {
+    mockRows.call_log = [{ ...CALL, id: 'c1', customer_id: 'cust-1', twilio_call_sid: 'CA1', stamped_lead_id: 'stamped-lead' }];
+    mockRows.leads = [{ id: 'sid-lead' }];
+    expect((await decideMatch(lead)).lead_id).toBe('sid-lead');
+    expect(writesTo('leads', 'where')[0].args[0]).toEqual({ twilio_call_sid: 'CA1' });
+    expect(writesTo('leads', 'whereRaw')).toHaveLength(0); // the stamp was not needed
+  });
+
+  test('no SID lead: the stamp (call_log.metadata.lead_id) is used; a stamp naming no lead gives none', async () => {
+    const answers = [[], [{ id: 'stamped-lead' }]]; // the SID finds nothing, then the stamp finds one
+    mockRows.leads = () => answers.shift();
+    mockRows.call_log = [{ ...CALL, id: 'c1', customer_id: 'cust-1', twilio_call_sid: 'CA1', stamped_lead_id: 'stamped-lead' }];
+    expect((await decideMatch(lead)).lead_id).toBe('stamped-lead');
+    expect(writesTo('leads', 'whereRaw')[0].args).toEqual(['id::text = ?', ['stamped-lead']]);
+
+    mockWrites.length = 0;
+    mockRows.leads = [];
+    mockRows.call_log = [{ ...CALL, id: 'c1', customer_id: 'cust-1', twilio_call_sid: 'CA1', stamped_lead_id: 'gone' }];
+    expect((await decideMatch(lead)).lead_id).toBeNull();
+  });
+
+  test('two SID leads: no guess, and the stamp is not consulted', async () => {
+    mockRows.call_log = [{ ...CALL, id: 'c1', customer_id: 'cust-1', twilio_call_sid: 'CA1', stamped_lead_id: 'stamped-lead' }];
+    mockRows.leads = [{ id: 'x' }, { id: 'y' }];
+    expect((await decideMatch(lead)).lead_id).toBeNull();
+    expect(writesTo('leads', 'whereRaw')).toHaveLength(0);
+  });
+
+  test('the refill uses the same order', async () => {
+    mockRows.lsa_leads = [{ id: 'a', call_log_id: 'c1', lead_id: null, customer_id: 'cust-1' }];
+    mockRows.call_log = [{ id: 'c1', customer_id: 'cust-1', twilio_call_sid: 'CA1', stamped_lead_id: 'stamped-lead' }];
+    const answers = [[], [{ id: 'stamped-lead' }]];
+    mockRows.leads = () => answers.shift();
+    expect(await refillMatches()).toBe(1);
+    expect(writesTo('lsa_leads', 'update')[0].args[0]).toMatchObject({ lead_id: 'stamped-lead' });
+  });
+});
+
+describe('a match is final only after its window closes', () => {
+  const lead = { id: 'a', lead_type: 'calls', consumer_phone: '+19415550142', lead_created_at: new Date('2026-11-20T19:05:09Z'), call_started_at: new Date('2026-11-20T19:04:30Z'), match_basis: null };
+
+  test('windowClosed: open until 30 minutes after the call, closed from then on', () => {
+    expect(windowClosed(lead, new Date('2026-11-20T19:34:29Z'))).toBe(false);
+    expect(windowClosed(lead, new Date('2026-11-20T19:34:30Z'))).toBe(true);
+    expect(windowClosed({}, new Date())).toBe(true); // no time, no window
+  });
+
+  test('a lead inside its window is left alone: no read of calls, no write, counted as waiting', async () => {
+    mockRows.lsa_leads = [lead];
+    mockRows.call_log = [{ ...CALL, id: 'c1' }];
+    const counts = await matchOpenLeads(new Date('2026-11-20T19:10:00Z'));
+    expect(counts).toEqual({ matched: 0, ambiguous: 0, unmatched: 0, pending: 1 });
+    expect(mockDb).not.toHaveBeenCalledWith('call_log');
+    expect(writesTo('lsa_leads', 'update')).toHaveLength(0);
+  });
+
+  test('once the window has closed the lead is matched', async () => {
+    let reads = 0;
+    mockRows.lsa_leads = () => (reads++ === 0 ? [lead] : []);
+    mockRows.call_log = [{ ...CALL, id: 'c1', customer_id: 'cust-1', twilio_call_sid: 'CA1' }];
+    mockRows.leads = [];
+    const counts = await matchOpenLeads(new Date('2026-11-20T19:40:00Z'));
+    expect(counts).toEqual({ matched: 1, ambiguous: 0, unmatched: 0, pending: 0 });
+  });
+});
+
+describe('the repeated hour on the fall-back day', () => {
+  test('01:30 on 2026-11-01 could be 05:30Z (EDT) or 06:30Z (EST): the window covers both', () => {
+    const first = parseAccountTime('2026-11-01 01:30:00');
+    expect(first.toISOString()).toBe('2026-11-01T05:30:00.000Z');
+    const w = matchWindow({ call_started_at: first });
+    expect(w.start.toISOString()).toBe('2026-11-01T05:20:00.000Z'); // earlier instant - 10 min
+    expect(w.end.toISOString()).toBe('2026-11-01T07:00:00.000Z'); // later instant + 30 min
+  });
+
+  test('a time outside the repeated hour keeps the plain window', () => {
+    for (const t of ['2026-11-01 00:30:00', '2026-11-01 02:30:00']) {
+      const at = parseAccountTime(t);
+      const w = matchWindow({ call_started_at: at });
+      expect(w.end.getTime() - w.start.getTime()).toBe(40 * 60 * 1000);
+    }
+  });
+
+  test('the lead stays open until the later window end', () => {
+    const lead = { lead_created_at: parseAccountTime('2026-11-01 01:30:00') };
+    expect(windowClosed(lead, new Date('2026-11-01T06:59:59Z'))).toBe(false);
+    expect(windowClosed(lead, new Date('2026-11-01T07:00:00Z'))).toBe(true);
   });
 });
 

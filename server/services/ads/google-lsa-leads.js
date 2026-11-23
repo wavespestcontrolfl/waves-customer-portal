@@ -1,7 +1,7 @@
 const db = require('../../models/db');
 const logger = require('../../services/logger');
-const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
-const { toE164 } = require('../../utils/phone');
+const { etDateString, addETDays, parseETDateTime, etWallClockOccurrences } = require('../../utils/datetime-et');
+const { toE164, phoneIdentityKey } = require('../../utils/phone');
 const { customerPhoneLookupKey, KNOWN_CALLER_PHONE_COLS } = require('../../utils/known-caller-phone');
 const TWILIO_NUMBERS = require('../../config/twilio-numbers');
 const { errorText } = require('./google-ads-config');
@@ -42,6 +42,8 @@ const CREDIT_STATE = { 2: 'PENDING', 3: 'CREDITED', 4: 'NOT_CHARGED' };
 // The Local Services profile's phone: its calls ring the Bradenton office line.
 // A call to any other Waves number is never an LSA call.
 const LSA_PROFILE_PHONE = TWILIO_NUMBERS.locations.bradenton.number;
+// The call processor's lead stamp, read with the call.
+const stampedLead = () => db.raw("metadata->>'lead_id' AS stamped_lead_id");
 const PHONE_CALL_CONVERSATION = new Set([4, 'PHONE_CALL']);
 
 // ---------------------------------------------------------------------------
@@ -129,14 +131,28 @@ function callsByLead(conversationRows) {
   return byLead;
 }
 
+const HOUR_MS = 60 * 60 * 1000;
+
 // The call window for a lead: [from - 10 min, from + 30 min], from = the call's
-// own start when Google gave one, else the lead's creation time.
+// own start when Google gave one, else the lead's creation time. On the
+// fall-back day the 1 AM hour happens twice, and parseAccountTime keeps the
+// first instant; a time in that repeated hour could be either, so the window
+// runs from the earlier instant - 10 min to the later instant + 30 min.
 function matchWindow(lead) {
   const from = lead.call_started_at || lead.lead_created_at;
   if (!from) return null;
-  const t = new Date(from).getTime();
+  const at = new Date(from);
+  const t = at.getTime();
   if (!Number.isFinite(t)) return null;
-  return { start: new Date(t - MATCH_BEFORE_MS), end: new Date(t + MATCH_AFTER_MS) };
+  const repeat = etWallClockOccurrences(at) === 2 ? HOUR_MS : 0;
+  return { start: new Date(t - MATCH_BEFORE_MS), end: new Date(t + repeat + MATCH_AFTER_MS) };
+}
+
+// A match is final only after the window has closed, so a second call inside it
+// can still make the lead ambiguous. No window = nothing to wait for.
+function windowClosed(lead, now = new Date()) {
+  const window = matchWindow(lead);
+  return !window || now.getTime() >= window.end.getTime();
 }
 
 // Pure choice among the inbound calls found for a lead. Exactly one -> that
@@ -208,27 +224,56 @@ async function upsertLeads(leads) {
   return leads.length;
 }
 
-// Inbound calls from the same number (last ten digits) to the Local Services
-// profile line, inside the window.
+// Pure. Both numbers must be the same line: phoneIdentityKey reads a US number
+// (10 digits, 1 + 10, +1) as its ten digits, and any other country code as its
+// full +digits, so +44 7911 123456 never meets a US number that shares its last
+// ten digits.
+function samePhone(a, b) {
+  const x = phoneIdentityKey(a);
+  return !!x && x === phoneIdentityKey(b);
+}
+
+// Pure. A call is a candidate when it came from the consumer's number to the
+// Local Services profile line.
+function isCandidateCall(call, consumerPhoneValue) {
+  return samePhone(call.from_phone, consumerPhoneValue) && samePhone(call.to_phone, LSA_PROFILE_PHONE);
+}
+
+// Inbound calls from the same number to the Local Services profile line, inside
+// the window. The query narrows on the last ten digits; isCandidateCall then
+// compares the whole numbers.
 async function findCandidateCalls(lead) {
   const key = last10(lead.consumer_phone);
   const window = matchWindow(lead);
   if (!key || !window) return [];
-  return db('call_log')
+  const rows = await db('call_log')
     .where({ direction: 'inbound' })
     .whereRaw("right(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [key])
     .whereRaw("right(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10(LSA_PROFILE_PHONE)])
     .where('created_at', '>=', window.start)
     .where('created_at', '<=', window.end)
-    .select('id', 'customer_id', 'twilio_call_sid');
+    .select('id', 'customer_id', 'twilio_call_sid', 'from_phone', 'to_phone', stampedLead());
+  return rows.filter((call) => isCandidateCall(call, lead.consumer_phone));
 }
 
-// The portal's lead for a call: leads.twilio_call_sid = call_log.twilio_call_sid.
-// Null when the call has no lead, or two leads (never guess).
+// The portal's lead for a call. The call processor's own link comes first:
+// call_log.metadata.lead_id, the stamp it writes when a call reuses an existing
+// lead (the lead keeps its ORIGINAL call's sid, so the sid cannot find it).
+// Without a stamp, or with one that names no lead, leads.twilio_call_sid =
+// call_log.twilio_call_sid. Null when the call has no lead, or two (never guess).
+// Same order as the call processor (call-recording-processor.js, "The SID
+// stays AUTHORITATIVE over the stamp"): the lead this call's SID created comes
+// first; the call_log.metadata.lead_id stamp (a call that reused an older
+// lead) only when no SID lead exists. Two SID leads = no guess.
 async function leadIdForCall(call) {
-  if (!call.twilio_call_sid) return null;
-  const rows = await db('leads').where({ twilio_call_sid: call.twilio_call_sid }).select('id').limit(2);
-  return rows.length === 1 ? rows[0].id : null;
+  if (call.twilio_call_sid) {
+    const rows = await db('leads').where({ twilio_call_sid: call.twilio_call_sid }).select('id').limit(2);
+    if (rows.length === 1) return rows[0].id;
+    if (rows.length > 1) return null;
+  }
+  if (!call.stamped_lead_id) return null;
+  const stamped = await db('leads').whereRaw('id::text = ?', [String(call.stamped_lead_id)]).select('id').limit(1);
+  return stamped.length ? stamped[0].id : null;
 }
 
 // The one live customer whose phone columns hold this number; null for none or
@@ -274,6 +319,7 @@ async function decideMatch(lead) {
 
 const AMBIGUOUS = { match_basis: 'ambiguous' };
 
+
 // Pure. One portal call belongs to ONE Google lead: when two open leads chose
 // the same call in a run, neither gets it (both become ambiguous, no ids).
 function resolveSharedCalls(plans) {
@@ -308,15 +354,17 @@ async function applyPlan({ lead, update }, counts) {
 
 // Leads with no real match yet: never matched, or marked ambiguous (a later
 // call may settle it). A 'phone_time' or 'phone_customer' match is final.
-async function matchOpenLeads() {
+async function matchOpenLeads(now = new Date()) {
   const open = await db('lsa_leads')
     .whereNotNull('consumer_phone')
     .where('lead_created_at', '>=', new Date(Date.now() - (LOOKBACK_DAYS + 5) * 24 * 3600 * 1000))
     .where((q) => q.whereNull('match_basis').orWhere('match_basis', 'ambiguous'))
     .select('id', 'lead_type', 'consumer_phone', 'lead_created_at', 'call_started_at', 'match_basis');
-  const counts = { matched: 0, ambiguous: 0, unmatched: 0 };
+  const counts = { matched: 0, ambiguous: 0, unmatched: 0, pending: 0 };
   const plans = [];
   for (const lead of open) {
+    // A phone-call lead waits until its window has closed: no write, still open.
+    if (lead.lead_type === 'calls' && !windowClosed(lead, now)) { counts.pending += 1; continue; }
     const update = await decideMatch(lead);
     if (update) plans.push({ lead, update });
     else counts.unmatched += 1;
@@ -346,7 +394,7 @@ async function refillMatches() {
     .where((q) => q.whereNull('lead_id').orWhereNull('customer_id'))
     .select('id', 'call_log_id', 'lead_id', 'customer_id');
   if (!rows.length) return 0;
-  const calls = await db('call_log').whereIn('id', rows.map((r) => r.call_log_id)).select('id', 'customer_id', 'twilio_call_sid');
+  const calls = await db('call_log').whereIn('id', rows.map((r) => r.call_log_id)).select('id', 'customer_id', 'twilio_call_sid', stampedLead());
   const byId = new Map(calls.map((c) => [c.id, c]));
   let filled = 0;
   for (const row of rows) {
@@ -417,7 +465,7 @@ async function runLeadSync() {
   const stored = await dbStep('store', () => upsertLeads(leads));
   const counts = await dbStep('match', () => matchOpenLeads());
   const refilled = await dbStep('refill', () => refillMatches());
-  logger.info(`[google-lsa-leads] Stored ${stored} leads (${since} to ${until}); matched ${counts.matched}, ambiguous ${counts.ambiguous}, unmatched ${counts.unmatched}, refilled ${refilled}`);
+  logger.info(`[google-lsa-leads] Stored ${stored} leads (${since} to ${until}); matched ${counts.matched}, ambiguous ${counts.ambiguous}, unmatched ${counts.unmatched}, waiting ${counts.pending}, refilled ${refilled}`);
   return { configured: true, leads: stored, ...counts, refilled };
 }
 
@@ -434,6 +482,9 @@ module.exports = {
     mapLead,
     callsByLead,
     matchWindow,
+    windowClosed,
+    samePhone,
+    isCandidateCall,
     chooseCandidate,
     leadQuery,
     conversationQuery,
