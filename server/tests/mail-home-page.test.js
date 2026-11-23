@@ -6,6 +6,7 @@
 const mockCalls = [];
 let mockRow;
 let mockUpdateError;
+let mockUpdateHang;
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => {
@@ -16,6 +17,7 @@ jest.mock('../models/db', () => {
     q.first = jest.fn(async (...columns) => { mockCalls.push({ op: 'first', q, columns }); return mockRow; });
     q.update = jest.fn(async (set) => {
       mockCalls.push({ op: 'update', q, set });
+      if (mockUpdateHang) await new Promise(() => {}); // a row lock that never lets go
       if (mockUpdateError) throw mockUpdateError;
       return 1;
     });
@@ -110,10 +112,22 @@ describe('getHomePage', () => {
     mockUpdateError = Object.assign(new Error(`update mail_prospects set ... where id = 'row-1' token ${TOKEN}`), { code: '57014' });
     const page = await getHomePage(TOKEN, { recordView: true });
     expect(page.address.line1).toBe('101 EXAMPLE TRL');
+    await new Promise((resolve) => setImmediate(resolve)); // the write is not awaited by the read
     expect(logger.warn).toHaveBeenCalledTimes(1);
     const line = logger.warn.mock.calls[0].join(' ');
     expect(line).toContain('57014');
     expect(line).not.toContain(TOKEN);
     expect(line).not.toContain('mail_prospects');
+  });
+
+  test('a view write that waits on a row lock never holds the page', async () => {
+    mockUpdateHang = true;
+    try {
+      const page = await getHomePage(TOKEN, { recordView: true });
+      expect(page.address.line1).toBe('101 EXAMPLE TRL');
+      expect(mockCalls.filter((c) => c.op === 'update')).toHaveLength(1);
+    } finally {
+      mockUpdateHang = false;
+    }
   });
 });

@@ -16,6 +16,7 @@ const { mailHomePageLive } = require('../config/feature-gates');
 const { shouldRecord } = require('../services/customer-page-views');
 const { getHomePage } = require('../services/mail/home-page');
 const logger = require('../services/logger');
+const { ipFallbackKey } = require('../middleware/rate-limit-key');
 
 function privacyHeaders(res) {
   res.set({ 'Cache-Control': 'private, no-store', 'X-Robots-Tag': 'noindex, nofollow' });
@@ -44,6 +45,8 @@ router.use(rateLimit({
   max: 60,
   standardHeaders: true,
   legacyHeaders: false,
+  // The shared IP key (an IPv6 address counts by its /64, as in public-map-image.js), not the raw address.
+  keyGenerator: (req) => ipFallbackKey(req.ip),
   handler: (req, res) => {
     privacyHeaders(res);
     res.status(429).json({ error: 'Too many requests. Please try again in a minute.' });

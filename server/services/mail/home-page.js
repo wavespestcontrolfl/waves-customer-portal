@@ -29,7 +29,7 @@ function priceOf(row) {
   return { monthly: price.monthly, annual: price.annual, setupFee: price.setupFee, pricedAt: price.pricedAt };
 }
 
-// One atomic write. It never throws: a failed view write must not fail the read, and only the error code is logged
+// One atomic write, fire and forget (getHomePage does not wait for it). It never throws: a failed view write must not fail the read, and only the error code is logged
 // (a Knex message carries SQL text and the bound token).
 async function countView(id) {
   try {
@@ -59,7 +59,8 @@ async function getHomePage(token, { recordView = false } = {}) {
     .whereIn('status', LIVE_STATUSES)
     .first('id', 'status', 'address_line1', 'city', 'zip', 'price_status', 'price_annual', 'price_setup_fee', 'priced_at');
   if (!row) return null;
-  if (recordView === true) await countView(row.id);
+  // Not awaited: a row lock or a slow write must never hold the page. countView never throws.
+  if (recordView === true) countView(row.id);
   return {
     address: { line1: row.address_line1 || null, city: row.city || null, zip: row.zip || null },
     price: priceOf(row),
