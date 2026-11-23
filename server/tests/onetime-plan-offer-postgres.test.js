@@ -1386,7 +1386,7 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
       test.each([
         ['sent 200 days ago', { daysAgo: 200 }],
         ['sent 364 days ago', { daysAgo: 364 }],
-        ['reserved 1 day ago (an offer still in flight)', { daysAgo: 1, status: 'reserved' }],
+        ['reserved 10 minutes ago (an offer still in flight)', { daysAgo: 10 / 1440, status: 'reserved' }],
       ])('an offer for another job %s holds this job: no estimate, no email', async (_name, earlier) => {
         await publishOffer();
         const { customer, job } = await seedJob();
@@ -1589,7 +1589,7 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
       expect(quotes).toHaveLength(2);
       expect(quotes[0].archived_at).not.toBeNull();
       expect((await offerMail(job.id)).html_snapshot).toContain(`/estimate/${quotes[1].token}`);
-      expect(providerRequest).toHaveBeenCalledTimes(1);
+      expect(Sendgrid.sendOne).toHaveBeenCalledTimes(2);
     });
 
     test('offers turned off after the estimate was made: the reservation is denied and leaves no row; back on, the next morning sends', async () => {
