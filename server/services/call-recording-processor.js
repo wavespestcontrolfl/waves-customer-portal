@@ -2035,7 +2035,8 @@ function buildAgreedOneTimeJobAlert({ call, firstName, serviceType, scheduledDat
       ringOnRefresh: () => false,
       detail,
       // Ids only: names, the address and the price are in the text the office reads.
-      metadata: { callLogId: call.id, source: 'call_agreed_one_time_job', ...(billToPayer?.id ? { payerId: String(billToPayer.id) } : {}) },
+      // Always written: a quiet refresh merges metadata, so a later pass with no payer must clear an older id.
+      metadata: { callLogId: call.id, source: 'call_agreed_one_time_job', payerId: billToPayer?.id ? String(billToPayer.id) : null },
     },
   };
 }

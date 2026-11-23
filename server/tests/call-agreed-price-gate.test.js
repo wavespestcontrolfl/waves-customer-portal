@@ -460,7 +460,10 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(other.opts.detail).toContain('No address resolved: confirm the service address with the customer before you book.');
     expect(other.opts.detail).toContain('Google matched only the street of this address');
     expect(other.opts.detail).not.toContain('Bill-To');
-    expect(other.opts.metadata.payerId).toBeUndefined();
+    // No payer: payerId is written as null, so a quiet refresh of a row that named a payer clears the old id.
+    expect(other.opts.metadata.payerId).toBeNull();
+    const { mergeRefreshMetadata } = require('../services/notification-service')._private;
+    expect(mergeRefreshMetadata(alert.opts.metadata, other.opts.metadata, false).payerId).toBeNull();
     // A set off-hour time is never the time to book: staff book or move visit 2 only to the on-hour time the customer confirms.
     expect(other.opts.detail).toContain('the call agreed a second visit. The call set it for Sat Dec 5, 2:30 PM, which is not on the hour: confirm an on-hour time with the customer.');
     expect(other.opts.detail).toContain('and book or move it only to the time the customer confirms.');
