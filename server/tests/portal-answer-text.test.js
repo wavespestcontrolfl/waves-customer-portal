@@ -13,8 +13,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { countSegments } = require('../services/messaging/segment-counter');
 const { checkSendWindow } = require('../services/messaging/validators/send-window');
-const { __private: { answerTextBody, textOutcome, earlierPush } } = require('../services/portal-messages');
-const { classifyDeliveryCertainty } = require('../services/messaging/send-customer-message');
+const { __private: { answerTextBody, textOutcome, earlierPush, sameDestination } } = require('../services/portal-messages');
+const { classifyDeliveryCertainty, normalizeRecipient } = require('../services/messaging/send-customer-message');
 
 const LEAD = "Hi Sam, here's our answer from Waves: ";
 // A synthetic customer id: the link names the customer's profile, as the reply email's does.
@@ -92,6 +92,10 @@ describe('the night rule for the answer text (only the staff press texts)', () =
 describe('the text outcome, by the shared delivery derivation', () => {
   test.each([
     [{ sent: true, blocked: false, deliveryOutcome: 'accepted' }, { text: 'sent' }],
+    // The Twilio adapter's suppressed owner number: sent: true, but nothing went. The email goes.
+    [{ sent: true, deliveryOutcome: 'not_sent', code: 'OWNER_SMS_SUPPRESSED' }, { text: 'not_sent', textCode: 'OWNER_SMS_SUPPRESSED' }],
+    // sent: true with no outcome tag is not proof: it may have gone out, so no email and no second text.
+    [{ sent: true }, { text: 'uncertain' }],
     [{ sent: false, blocked: true, code: 'SUPPRESSED', deliveryOutcome: 'not_sent' }, { text: 'not_sent', textCode: 'SUPPRESSED' }],
     // A refusal with no outcome tag is still a refusal: the email goes.
     [{ sent: false, blocked: true, deferred: true, code: 'QUIET_HOURS_HOLD' }, { text: 'not_sent', textCode: 'QUIET_HOURS_HOLD' }],
@@ -125,5 +129,28 @@ describe("the bell's record of an earlier push", () => {
 
   test('no bell reads as no push', () => {
     expect(earlierPush(null, now)).toBeNull();
+  });
+});
+
+describe('the number the text goes to', () => {
+  // The send step's own form of each stored number is what it texts.
+  test.each([
+    ['(941) 555-0142', true],
+    ['+1 941 555 0142', true],
+    ['19415550142', true],
+    ['+19415550142', true],
+    // A +45 number of eight national digits: the send step reads ten digits as +1 and ten digits, another number.
+    ['+4512345678', false],
+    // A short or broken number is no text number.
+    ['5550142', false],
+    ['', false],
+    [null, false],
+  ])('stored %p: texted as stored = %p', (stored, same) => {
+    expect(sameDestination(stored, normalizeRecipient(stored))).toBe(same);
+  });
+
+  test('a stored number that changed is not the destination', () => {
+    expect(sameDestination('+19415550142', '+19415550143')).toBe(false);
+    expect(sameDestination(null, '+19415550142')).toBe(false);
   });
 });

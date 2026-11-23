@@ -340,8 +340,10 @@ function earlierPush(bell, now = Date.now()) {
 // The in-app bell plus, unless push is false, a push to the Waves app. A push another attempt is still sending
 // is not a miss. With readEarlierPush (GATE_PORTAL_ANSWER_TEXT on), a try that sends no push still reads the bell's
 // record of an earlier try's push (a try made before the gate went on): one the app took counts as reached, so no
-// text or email follows it, and one still sending is in flight. Gate off, the outcome is this try's push alone.
+// text or email follows it, and one still sending is in flight. pushUnknown: that record could not be read (the bell
+// lookup failed). Gate off, the outcome is this try's push alone.
 async function bellAndPush(customerId, message, { push = true, readEarlierPush = false } = {}) {
+  const readsEarlier = readEarlierPush && !push;
   try {
     const bell = await require('./notification-service').notifyCustomer(customerId, 'service', NOTICE_TITLE, preview(message.body), {
       link: MESSAGES_LINK,
@@ -351,15 +353,17 @@ async function bellAndPush(customerId, message, { push = true, readEarlierPush =
       pushOptions: { nativeOnly: true },
       metadata: { portalMessageId: message.id },
     });
-    const earlier = readEarlierPush && !push ? earlierPush(bell) : null;
+    const earlier = readsEarlier ? earlierPush(bell) : null;
     return {
       bell: Boolean(bell?.id) && !bell.suppressed,
       pushAccepted: Number(bell?.push?.accepted || 0) || (earlier === 'accepted' ? 1 : 0),
       inFlight: bell?.push?.reason === 'push_in_flight' || earlier === 'sending',
+      // notifyCustomer answers null when its dedupe read failed (it cannot tell this bell from a new one).
+      ...(readsEarlier && !bell ? { pushUnknown: true } : {}),
     };
   } catch (err) {
     logger.warn(`[portal-messages] bell or push failed for message ${message.id}: ${err.message}`);
-    return { bell: false, pushAccepted: 0, inFlight: false };
+    return { bell: false, pushAccepted: 0, inFlight: false, ...(readsEarlier ? { pushUnknown: true } : {}) };
   }
 }
 
@@ -411,17 +415,25 @@ function answerTextBody(firstName, body, customerId) {
   return cut(end > 0 ? end : lo);
 }
 
-// The answer's text goes to the number just read, and only while the customer's row still holds it. The send step
+// True when `destination` (the number the send step texts: its normalizeRecipient form) is a whole E.164 number and
+// is the customer's stored phone in canonical E.164. The send step reads any ten digits as a US number, so a stored
+// number it would turn into another one (a +45 number of eight national digits becomes +1 and ten digits) fails here,
+// and that customer gets the email.
+function sameDestination(storedPhone, destination) {
+  return typeof destination === 'string' && /^\+\d{8,15}$/.test(destination)
+    && require('../utils/phone').toE164(storedPhone) === destination;
+}
+
+// The answer's text goes to `destination`, and only while the customer's row still holds that number. The send step
 // runs this handoff around the provider request (send-customer-message.js smsHandoffAllowed: this entry point only):
 // the customer-comms and phone locks (STOP and sms_enabled writers serialize on them), then the row read FOR SHARE, so
 // a phone correction commits before the read (a changed number refuses the text, and the email goes) or waits for the
 // request. The send step reloads consent, suppression and the send window on the same connection before the request.
-function phoneHeldHandoff(customerId, phone) {
+function phoneHeldHandoff(customerId, destination) {
   const { withSmsConsentLock } = require('../utils/customer-comms-lock');
-  const { toE164 } = require('../utils/phone');
-  return (dispatch) => withSmsConsentLock(db, { phone, customerId }, async (trx) => {
+  return (dispatch) => withSmsConsentLock(db, { phone: destination, customerId }, async (trx) => {
     const row = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forShare().first('phone');
-    if (!row?.phone || toE164(row.phone) !== toE164(phone)) {
+    if (!sameDestination(row?.phone, destination)) {
       return { ok: false, code: 'RECIPIENT_CHANGED', reason: 'recipient_changed', retryable: false };
     }
     return dispatch(trx);
@@ -434,15 +446,17 @@ function phoneHeldHandoff(customerId, phone) {
 // so it takes neither purpose 'conversational' nor the interlocked manual wrapper: that one settles the SMS thread's
 // waiting question as answered by staff, and the customer's text may wait on something else
 // (send-manual-customer-sms.js: it "interlocks staff REPLIES only"). { text: 'sent' } when the provider took it,
-// 'uncertain' when it may have gone out, else 'not_sent' with the refusal's code: no number, STOP or no consent, a
-// changed number, a failure. Never throws.
+// 'uncertain' when it may have gone out, else 'not_sent' with the refusal's code: no number, a number the send step
+// would change, STOP or no consent, a changed number, a failure. Never throws.
 async function answerText(customerId, message) {
   const Send = require('./messaging/send-customer-message');
   try {
     const customer = await db('customers').where({ id: customerId }).first('first_name', 'phone');
     if (!customer?.phone) return { text: 'not_sent', textCode: 'NO_PHONE' };
+    const destination = Send.normalizeRecipient(customer.phone);
+    if (!sameDestination(customer.phone, destination)) return { text: 'not_sent', textCode: 'NO_TEXT_NUMBER' };
     const result = await Send.sendCustomerMessage({
-      to: customer.phone,
+      to: destination,
       body: answerTextBody(customer.first_name, message.body, customerId),
       channel: 'sms',
       audience: 'customer',
@@ -450,7 +464,7 @@ async function answerText(customerId, message) {
       customerId,
       identityTrustLevel: 'phone_matches_customer',
       entryPoint: 'admin_portal_answer',
-      withSmsHandoff: phoneHeldHandoff(customerId, customer.phone),
+      withSmsHandoff: phoneHeldHandoff(customerId, destination),
       metadata: {
         original_message_type: 'portal_answer',
         portalMessageId: message.id,
@@ -467,10 +481,11 @@ async function answerText(customerId, message) {
   }
 }
 
-// The text's outcome by the shared derivation (classifyDeliveryCertainty): 'sent' when the provider took it,
+// The text's outcome by the shared derivation (classifyDeliveryCertainty), never by `sent` alone (the Twilio adapter
+// answers sent: true with deliveryOutcome 'not_sent' for a suppressed owner number): 'sent' when the provider took it,
 // 'not_sent' with the refusal's code when it surely did not go, else 'uncertain' (it may have gone out).
 function textOutcome(outcome, classify, fallbackCode) {
-  const certainty = outcome?.sent === true ? 'sent' : classify(outcome);
+  const certainty = classify(outcome);
   if (certainty === 'sent') return { text: 'sent' };
   if (certainty === 'not_sent') return { text: 'not_sent', textCode: outcome?.code || fallbackCode };
   return { text: 'uncertain' };
@@ -520,7 +535,11 @@ async function noticeCustomer(customerId, message, { byStaff = false } = {}) {
     // GATE_PORTAL_ANSWER_TEXT, read once for this try.
     const textLive = answerTextLive();
     const push = !textLive && claim.email === undefined && claim.text === undefined;
-    const { inFlight, ...sent } = await bellAndPush(customerId, message, { push, readEarlierPush: textLive });
+    const { inFlight, pushUnknown, ...sent } = await bellAndPush(customerId, message, { push, readEarlierPush: textLive });
+    // A retry (an earlier try may have pushed, before GATE_PORTAL_ANSWER_TEXT went on) that cannot read the bell's
+    // push record sends nothing yet: its claim stays, like a push in flight, and a later try reads the record. The
+    // last try goes ahead: a second notice is better than none. A first try has no earlier push to miss.
+    if (pushUnknown && claim.attempts > 1 && claim.attempts < NOTICE_ATTEMPTS) return { pending: true };
     if (inFlight) {
       // Another try is still sending the push: no email. Its claim stays (this try counted); on the last try the
       // notice ends here, since whatever that push does is the outcome.
@@ -799,5 +818,5 @@ module.exports = {
   customerUnread,
   markRead,
   resumePendingNotices,
-  __private: { preview, noticeCustomer, closeItemWith, closeItemBells, itemCustomerWith, claimNotice, ringOffice, metaOf, bellAndPush, answerTextBody, textOutcome, earlierPush },
+  __private: { preview, noticeCustomer, closeItemWith, closeItemBells, itemCustomerWith, claimNotice, ringOffice, metaOf, bellAndPush, answerTextBody, textOutcome, earlierPush, sameDestination },
 };

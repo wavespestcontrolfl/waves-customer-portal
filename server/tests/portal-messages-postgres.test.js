@@ -926,6 +926,41 @@ maybeDescribe('portal messages (live Postgres)', () => {
       expect(AccountMembershipEmail.sendPortalReply).toHaveBeenCalledTimes(1);
     });
 
+    test('a number the send step would text as another one (+45 and eight digits) gets no text: the email goes', async () => {
+      const pat = await customer();
+      await db('customers').where({ id: pat.id }).update({ phone: '+4512345678' });
+      const { escalationId } = await chat(pat.id, { alert: false });
+      const result = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'Yes.', actor });
+      expect(answerTexts()).toEqual([]);
+      expect(result.notice).toEqual({ bell: true, pushAccepted: 0, text: 'not_sent', email: 'sent' });
+      expect(await storedNotice(result.message.id)).toMatchObject({ textCode: 'NO_TEXT_NUMBER' });
+    });
+
+    test('a retry that cannot read the bell (an earlier try may have pushed) sends nothing yet; a first try goes ahead', async () => {
+      const NotificationService = require('../services/notification-service');
+      const pat = await customer();
+      const { escalationId } = await chat(pat.id, { alert: false });
+      const clientRequestId = randomUUID();
+      // A first try whose bell lookup fails: there is no earlier push to miss, so the text goes and the bell waits.
+      const failing = jest.spyOn(NotificationService, 'notifyCustomer').mockResolvedValueOnce(null);
+      const first = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'We can come Monday.', clientRequestId, actor });
+      expect(first.notice).toEqual({ bell: false, pushAccepted: 0, text: 'sent', email: 'not_needed', pending: true });
+      // As if that try had stopped before any step: a retry whose bell lookup fails waits.
+      await stopped(first.message.id, { attempts: 1 });
+      jest.clearAllMocks();
+      failing.mockResolvedValueOnce(null);
+      const waiting = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'We can come Monday.', clientRequestId, actor });
+      expect(waiting.notice).toEqual({ pending: true });
+      expect(answerTexts()).toEqual([]);
+      expect(AccountMembershipEmail.sendPortalReply).not.toHaveBeenCalled();
+      // The next try reads the bell (no earlier push on it) and texts.
+      failing.mockRestore();
+      await stopped(first.message.id, { attempts: 2 });
+      const done = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'We can come Monday.', clientRequestId, actor });
+      expect(done.notice).toEqual({ bell: true, pushAccepted: 0, text: 'sent', email: 'not_needed' });
+      expect(answerTexts(first.message.id)).toHaveLength(1);
+    });
+
     test('an earlier push the app took (a try before the gate went on) ends the notice: no text, no email; one still sending waits', async () => {
       const pat = await customer();
       const one = await chat(pat.id, { alert: false });
