@@ -1964,10 +1964,12 @@ function callEmailCheckCardPayload(callEmailCheck) {
 // agreedOneTimeJobCardPrice. `followUpPlan`: resolveCallFollowUpPlan's visit 2.
 // `streetLevelAddress`: Google matched only the street of it ('' = the address
 // on file). `bookingAddress`: the address the booking resolved (null: none).
-function buildAgreedJobCardEvidence({ scheduledDate = null, windowStart = null, price = null, followUpPlan = null, streetLevelAddress = null, bookingAddress = null } = {}) {
+// `billToPayer`: { id, name } of the Bill-To the booking would have stamped.
+function buildAgreedJobCardEvidence({ scheduledDate = null, windowStart = null, price = null, followUpPlan = null, streetLevelAddress = null, bookingAddress = null, billToPayer = null } = {}) {
   return {
     street_level_address: typeof streetLevelAddress === 'string' ? streetLevelAddress : null,
     booking_address: bookingAddress && bookingAddress.line1 ? bookingAddress : null,
+    bill_to: billToPayer && billToPayer.id ? billToPayer : null,
     booking_date: scheduledDate || null,
     booking_window_start: windowStart || null,
     stated_price: price ? price.amount : null,
@@ -22781,9 +22783,17 @@ const CallRecordingProcessor = {
                 // closes, and every action version-checks. It carries the price
                 // for the priced service only, and a promised follow-up visit.
                 if (svc.__held.reason === 'agreed_one_time_job_office_books') {
+                  // The Bill-To the booking would have stamped on the visit (a third
+                  // party the caller named): staff select it when they book. Its name
+                  // is display only; a failed read keeps the id.
+                  let billToPayer = null;
+                  if (callBookingPayerId) {
+                    const payerRow = await db('payers').where({ id: callBookingPayerId }).first('display_name').catch(() => null);
+                    billToPayer = { id: String(callBookingPayerId), name: payerRow?.display_name || null };
+                  }
                   agreedJobCardEvidence = buildAgreedJobCardEvidence({
                     scheduledDate, windowStart, price: agreedJobCardPrice, followUpPlan: callFollowUpPlan,
-                    streetLevelAddress: svc.__held.streetLevelAddress, bookingAddress: svc.__held.bookingAddress,
+                    streetLevelAddress: svc.__held.streetLevelAddress, bookingAddress: svc.__held.bookingAddress, billToPayer,
                   });
                   agreedJobCardFiled = await fileSkippedBookingCard({
                     call, procToken, customerId, extraction: v2ApprovedExtraction || v2CanonicalExtraction,

@@ -392,17 +392,20 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
   // a call verdict never closes it, and every action on it is version-checked (admin-triage.js). The pre-push
   // audit asked a new card reason for each of these; the existing card already has them.
   test('the held booking files the approved-but-unbooked card with its price, its basis and the promised follow-up', () => {
-    const site = "if (svc.__held.reason === 'agreed_one_time_job_office_books') {\n                  agreedJobCardEvidence = buildAgreedJobCardEvidence({";
+    const site = "if (svc.__held.reason === 'agreed_one_time_job_office_books') {\n                  // The Bill-To the booking would have stamped on the visit (a third";
     expect(count(site)).toBe(1);
     const call = source.slice(source.indexOf(site), source.indexOf("} else if (svc.__held.reason !== 'on_file_house_number_conflict') await db('triage_items')"));
     expect(call).toContain("skippedReason: 'agreed_one_time_job_office_books', preferredDateTime: extracted.preferred_date_time,");
     // The slot the booker resolved, the price for the priced service and its basis, a follow-up.
     // The evidence comes from one builder (the held card and the kept-visit card).
-    expect(call).toContain('agreedJobCardEvidence = buildAgreedJobCardEvidence({\n                    scheduledDate, windowStart, price: agreedJobCardPrice, followUpPlan: callFollowUpPlan,\n                    streetLevelAddress: svc.__held.streetLevelAddress, bookingAddress: svc.__held.bookingAddress,\n                  });');
+    expect(call).toContain('agreedJobCardEvidence = buildAgreedJobCardEvidence({\n                    scheduledDate, windowStart, price: agreedJobCardPrice, followUpPlan: callFollowUpPlan,\n                    streetLevelAddress: svc.__held.streetLevelAddress, bookingAddress: svc.__held.bookingAddress, billToPayer,\n                  });');
+    // The Bill-To the booking would have stamped rides on the card.
+    expect(call).toContain("const payerRow = await db('payers').where({ id: callBookingPayerId }).first('display_name').catch(() => null);");
     const builder = source.slice(source.indexOf('function buildAgreedJobCardEvidence({'), source.indexOf("// True for an 'HH:MM' start that is not on the hour"));
     expect(builder).toContain('booking_date: scheduledDate || null,');
     // The address the booking resolved rides from the hold onto the card.
     expect(builder).toContain('booking_address: bookingAddress && bookingAddress.line1 ? bookingAddress : null,');
+    expect(builder).toContain('bill_to: billToPayer && billToPayer.id ? billToPayer : null,');
     expect(source).toContain("? ['line1', 'line2', 'city', 'state', 'zip'].reduce((out, key) => ({ ...out, [key]: propertyLinkage.address[key] || null }), {})");
     // A street-only address match rides from the hold onto the card.
     expect(builder).toContain("street_level_address: typeof streetLevelAddress === 'string' ? streetLevelAddress : null,");

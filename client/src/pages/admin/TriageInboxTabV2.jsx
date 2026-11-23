@@ -149,6 +149,7 @@ function agreedOneTimeJobRows(p) {
     { label: "Book at", value: j.booking_address && j.booking_address.line1
       ? [j.booking_address.line1, j.booking_address.line2, j.booking_address.city, j.booking_address.state, j.booking_address.zip].filter((v) => String(v || "").trim()).join(", ")
       : "No address resolved: confirm the service address with the customer before you book." },
+    j.bill_to && j.bill_to.id && { label: "Bill-To", value: `${j.bill_to.name || "The paying party the caller named"}. Select this payer as Bill-To when you book, so the invoice goes to them.` },
     j.booking_date && { label: "Agreed time", value: `${slot(j.booking_date, j.booking_window_start)} ET` },
     typeof j.street_level_address === "string" && { label: "Address", value: `Google matched only the street of ${j.street_level_address || "the address on file"}. Confirm the house number with the customer before you book.` },
     price && (j.price_basis === "agreed_total"
@@ -162,7 +163,10 @@ function agreedOneTimeJobRows(p) {
       j.follow_up.time_set === true
         ? `The call set it for ${slot(j.follow_up.scheduled_date, j.follow_up.window_start)}.${j.follow_up.off_hour === true ? " Visits start on the hour: confirm an on-hour start with the customer." : ""}`
         : `Around ${slot(j.follow_up.scheduled_date, j.follow_up.window_start)}: the call did not set this time, so confirm it with the customer.`,
-      "Save visit 1 first, then check the schedule for visit 2: a two-treatment service adds it by itself. Book visit 2 only if it is missing, and move it if its time differs.",
+      // Move an existing visit 2 only to a time the call set: a copied hour never displaces a booked one.
+      j.follow_up.time_set === true
+        ? "Save visit 1 first, then check the schedule for visit 2: a two-treatment service adds it by itself. Book visit 2 only if it is missing, and move it to this time if it differs."
+        : "Save visit 1 first, then check the schedule for visit 2: a two-treatment service adds it by itself. Book visit 2 only if it is missing, at the time the customer confirms.",
     ].join(" ") },
   ];
 }
