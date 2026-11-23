@@ -1414,6 +1414,41 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
         expect(await run({})).toMatchObject({ sent: 1, held: 0, failed: 0 });
       });
 
+      // A worker that died after it reserved and before the provider leaves a `reserved` row. The ledger settles it
+      // after RESERVATION_LIFETIME_MS, but only inside a reservation, so the job's own rule settles it first.
+      describe('a reservation a crash left behind (older than the ledger\'s lifetime)', () => {
+        const STALE_DAYS = 3 / 24;
+        const staleKey = `onetime-plan-offer:offer:${crypto.randomUUID()}`;
+        const staleOffer = (customer) => earlierOffer(customer, { daysAgo: STALE_DAYS, status: 'reserved', key: staleKey });
+        const staleRow = () => trx('marketing_email_ledger').where({ idempotency_key: staleKey }).first();
+
+        test('with no provider message it is written off: it does not hold the job, and the job sends', async () => {
+          await publishOffer();
+          const { customer } = await seedJob();
+          await staleOffer(customer);
+          expect(await run({})).toMatchObject({ sent: 1, held: 0, failed: 0 });
+          expect(await staleRow()).toMatchObject({ status: 'failed', reason: 'abandoned_reservation' });
+        });
+
+        test.each([
+          ['the provider accepted it', { status: 'sent', sent_at: new Date() }],
+          ['the handoff started and the answer was lost', { status: 'queued', provider_handoff_phase: 'started' }],
+        ])('%s: it counts as an offer and still holds the job', async (_name, message) => {
+          await publishOffer();
+          const { customer, job } = await seedJob();
+          await staleOffer(customer);
+          await trx('email_messages').insert({
+            idempotency_key: staleKey, recipient_email_snapshot: customer.email, recipient_type: 'customer', recipient_id: customer.id,
+            template_key: OFFER, ...message,
+          });
+          const summary = await run({});
+          expect(summary).toMatchObject({ sent: 0, held: 1, failed: 0 });
+          expect(summary.reasons).toEqual({ offered_before: 1 });
+          expect((await staleRow()).status).toBe('sent');
+          expect(await offerMail(job.id)).toBeUndefined();
+        });
+      });
+
       // The rule's read and the reservation's guard are separate: a concurrent run can pass the rule and lose here.
       // The other job's offer lands between the job's own check and the reservation; the guard, inside the
       // reservation under the customer's lock, denies.
@@ -1519,6 +1554,42 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
       expect(later.reasons).toEqual({ send_dropped: 1 });
       expect(Sendgrid.sendOne).toHaveBeenCalledTimes(1);
       expect(providerRequest).not.toHaveBeenCalled();
+    });
+
+    // The customer opens another plan option after this job's mint committed. That mint archives the plan-start
+    // lineage, this offer's estimate included, while the email waits for the provider. The email's button would be
+    // dead, so the handoff refuses it; the row settles failed (not skipped), and the next morning mints again.
+    test('the offer estimate archived by the customer\'s next mint before the email leaves: no email; the next morning mints again and sends', async () => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      const realSend = require('../services/email-division/ledger').sendWithLedger;
+      const providerRequest = jest.fn();
+      Sendgrid.sendOne.mockImplementationOnce(async ({ database, providerBoundaryCheck }) => {
+        await providerBoundaryCheck({ database });
+        providerRequest();
+        return { messageId: 'sg-sample' };
+      });
+      const first = await run({
+        sendWithLedger: (args) => realSend({
+          ...args,
+          boundaryGuard: async (handoff) => {
+            await handoff('estimates').where({ customer_id: customer.id }).update({ archived_at: new Date() });
+            return args.boundaryGuard(handoff);
+          },
+        }),
+      });
+      expect(first).toMatchObject({ sent: 0, held: 1, failed: 0 });
+      expect(first.reasons).toEqual({ offer_estimate_gone: 1 });
+      expect(providerRequest).not.toHaveBeenCalled();
+      expect(await ledgerRow(job.id)).toMatchObject({ status: 'failed', reason: 'OFFER_ESTIMATE_GONE' });
+      expect((await offerMail(job.id))?.sent_at ?? null).toBeNull();
+
+      expect(await runAt(tomorrow)).toMatchObject({ sent: 1, held: 0, failed: 0 });
+      const quotes = await estimatesOf(customer);
+      expect(quotes).toHaveLength(2);
+      expect(quotes[0].archived_at).not.toBeNull();
+      expect((await offerMail(job.id)).html_snapshot).toContain(`/estimate/${quotes[1].token}`);
+      expect(providerRequest).toHaveBeenCalledTimes(1);
     });
 
     test('offers turned off after the estimate was made: the reservation is denied and leaves no row; back on, the next morning sends', async () => {

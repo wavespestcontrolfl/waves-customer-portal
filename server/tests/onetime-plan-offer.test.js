@@ -56,7 +56,7 @@ function fakeDb(tables = {}) {
     };
     const recorded = [
       'where', 'orWhere', 'whereNot', 'whereIn', 'orWhereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhereRaw',
-      'whereBetween', 'leftJoin', 'join', 'joinRaw', 'orderBy', 'orderByRaw', 'limit',
+      'whereBetween', 'forShare', 'leftJoin', 'join', 'joinRaw', 'orderBy', 'orderByRaw', 'limit',
     ];
     for (const method of recorded) {
       builder[method] = (...args) => {
@@ -127,6 +127,7 @@ function world({ tables = {}, jobs = [JOB], ...deps } = {}) {
     resolveRecurringCardPolicyForEstimate: jest.fn(async () => ({ enforced: true, required: true, exemptReason: null })),
     payAfterFirstVisitCardRail: jest.fn(() => true),
     sendWithLedger: jest.fn(async () => ({ ok: true, sent: true, reason: null, row: { id: 'led-1' }, duplicate: false })),
+    settleStaleReservations: jest.fn(async () => 0),
     unsubscribeUrl: (token) => `https://unsub.test/${token}`,
     raisePriceSettingsAlert: jest.fn(async () => ({ id: 'alert-1' })),
     closePriceSettingsAlert: jest.fn(async () => 0),
@@ -808,7 +809,7 @@ describe('the default wiring', () => {
       'openBalanceExists', 'isUncountedPartialDue', 'invoicePayerOwnership', 'itemizedMemberIds', 'combinedFirstInvoiceOf',
       'isInternalTestContact', 'activeSuppressionsFor', 'sendTemplate', 'unsubscribeUrl', 'raisePriceSettingsAlert', 'closePriceSettingsAlert',
       // Live mode: the library's own send resolution, the ledger, the mint, and the estimate page's card-rail functions.
-      'resolveTemplateForSend', 'sendWithLedger', 'mintPlanStartEstimate', 'buildEstimateMembershipContext',
+      'resolveTemplateForSend', 'sendWithLedger', 'settleStaleReservations', 'mintPlanStartEstimate', 'buildEstimateMembershipContext',
       'resolveRecurringCardPolicyForEstimate', 'payAfterFirstVisitCardRail',
     ]) {
       expect([name, typeof deps[name]]).toEqual([name, 'function']);
@@ -1145,6 +1146,17 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       expect(await heldBy({ tables: { marketing_email_ledger: [{ id: 'led-0' }], 'invoices as i': [] } })).toEqual({ offered_before: 1 });
     });
 
+    test('stale reserved rows are settled by the ledger before the rule counts them', async () => {
+      const order = [];
+      const deps = liveWorld({
+        tables: { marketing_email_ledger: () => { order.push('read'); return []; } },
+        settleStaleReservations: jest.fn(async () => { order.push('settle'); return 0; }),
+      });
+      await run(deps);
+      expect(deps.settleStaleReservations).toHaveBeenCalledWith('cust-1', NOW);
+      expect(order.slice(0, 2)).toEqual(['settle', 'read']);
+    });
+
     test("the ledger's guard repeats the rule inside the reservation, on the reservation's own transaction", async () => {
       const deps = liveWorld();
       await run(deps);
@@ -1173,14 +1185,14 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
     ])('%s denies both, in the ledger\'s spelling', async (_name, tables, reason) => {
       const { guard, boundaryGuard } = await guardsOf();
       expect(await guard(fakeDb({ marketing_email_ledger: [], ...tables }))).toEqual({ reason });
-      expect(await boundaryGuard(fakeDb(tables))).toEqual({ reason });
+      expect(await boundaryGuard(fakeDb({ estimates: [MINTED_ROW], ...tables }))).toEqual({ reason });
     });
 
     test('a suppression of the marketing group denies both, read for the address the email was built for, on that transaction', async () => {
       const { deps, guard, boundaryGuard } = await guardsOf();
       deps.activeSuppressionsFor.mockResolvedValue([{ id: 'sup-1' }]);
       const reserving = fakeDb({ marketing_email_ledger: [] });
-      const handoff = fakeDb();
+      const handoff = fakeDb({ estimates: [MINTED_ROW] });
       expect(await guard(reserving)).toEqual({ reason: 'EMAIL_SUPPRESSED' });
       expect(await boundaryGuard(handoff)).toEqual({ reason: 'EMAIL_SUPPRESSED' });
       expect(deps.activeSuppressionsFor).toHaveBeenCalledWith(null, 'jordan@example.test', 'marketing_newsletter', reserving);
@@ -1190,7 +1202,7 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
     test('no opt-out: both answer null, and the handoff guard reads the customer\'s preferences on its own transaction', async () => {
       const { guard, boundaryGuard } = await guardsOf();
       expect(await guard(fakeDb({ marketing_email_ledger: [] }))).toBeNull();
-      const handoff = fakeDb();
+      const handoff = fakeDb({ estimates: [MINTED_ROW] });
       expect(await boundaryGuard(handoff)).toBeNull();
       expect(called(handoff.queriesOf('notification_prefs')[0], 'where', { customer_id: 'cust-1' })).toBe(true);
       // The 12-month rule is the reservation's: the handoff does not read the ledger again.
@@ -1201,6 +1213,60 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       const { guard } = await guardsOf();
       const trx = fakeDb({ marketing_email_ledger: [{ id: 'led-0' }], notification_prefs: [{ marketing_offers: false }] });
       expect(await guard(trx)).toEqual({ reason: 'OFFERED_BEFORE' });
+    });
+  });
+
+  // The email's button opens the estimate this run minted. The customer's next plan-start mint (a tap on another
+  // plan option) archives it, so the handoff reads it again, under the customer-comms lock the mint takes.
+  describe('the offer estimate at the provider handoff', () => {
+    const handoffOf = async (change = {}) => {
+      const deps = liveWorld();
+      await run(deps);
+      const trx = fakeDb({ estimates: [{ ...MINTED_ROW, ...change }] });
+      return { boundaryGuard: sendOf(deps).boundaryGuard, trx };
+    };
+    const GONE = { reason: 'OFFER_ESTIMATE_GONE', retryable: true };
+
+    test('a live estimate of this customer that carries this job\'s stamp lets the email go; read FOR SHARE after the lock', async () => {
+      const { boundaryGuard, trx } = await handoffOf();
+      expect(await boundaryGuard(trx)).toBeNull();
+      const [read] = trx.queriesOf('estimates');
+      expect(called(read, 'where', { id: 'est-1' })).toBe(true);
+      expect(called(read, 'forShare')).toBe(true);
+    });
+
+    test.each([
+      ['archived by the next mint', { archived_at: new Date('2030-03-13T03:31:00Z') }],
+      ['declined', { status: 'declined' }],
+      ['accepted', { status: 'accepted' }],
+      ['expired', { expires_at: new Date(NOW.getTime() - 1000) }],
+      ['another customer\'s', { customer_id: 'cust-2' }],
+      ['carrying another job\'s stamp', { estimate_data: stamp('job-9') }],
+      ['without a stamp', { estimate_data: {} }],
+    ])('%s: the email does not leave, and the reservation settles retryable', async (_name, change) => {
+      const { boundaryGuard, trx } = await handoffOf(change);
+      expect(await boundaryGuard(trx)).toEqual(GONE);
+    });
+
+    test('a row that no longer exists: the same answer', async () => {
+      const deps = liveWorld();
+      await run(deps);
+      expect(await sendOf(deps).boundaryGuard(fakeDb({ estimates: [] }))).toEqual(GONE);
+    });
+
+    test('the estimate is judged before the opt-outs, so a customer who opted out meanwhile is still read after the wait', async () => {
+      const { boundaryGuard, trx } = await handoffOf({ status: 'declined' });
+      expect(await boundaryGuard(trx)).toEqual(GONE);
+      expect(trx.queriesOf('notification_prefs')).toHaveLength(0);
+    });
+
+    test('the ledger\'s refusal is a held job, not a failure; the next morning mints again', async () => {
+      const deps = liveWorld({
+        sendWithLedger: jest.fn(async () => ({ ok: false, sent: false, reason: 'OFFER_ESTIMATE_GONE', row: { id: 'led-1' }, duplicate: false })),
+      });
+      const summary = await run(deps);
+      expect(summary).toMatchObject({ held: 1, failed: 0, sent: 0 });
+      expect(summary.reasons).toEqual({ offer_estimate_gone: 1 });
     });
   });
 

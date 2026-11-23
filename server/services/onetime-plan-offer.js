@@ -56,6 +56,7 @@ const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-
 const { dateOnlyString, formatDateOnly } = require('../utils/date-only');
 const { greetingFirstName } = require('../utils/greeting-first-name');
 const { portalUrl } = require('../utils/portal-url');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { assertInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { REASONS: EMAIL_VERDICT } = require('./email-division/eligibility');
 const { whereLiveCustomer } = require('./customer-stages');
@@ -148,6 +149,7 @@ function defaultDeps() {
     sendTemplate: require('./email-template-library').sendTemplate,
     resolveTemplateForSend: require('./email-template-library').resolveTemplateForSend,
     sendWithLedger: (...args) => require('./email-division/ledger').sendWithLedger(...args),
+    settleStaleReservations: (...args) => require('./email-division/ledger').settleStaleReservations(...args),
     mintPlanStartEstimate: (...args) => require('./cancellation-resolution/restart').mintPlanStartEstimate(...args),
     // The estimate page's own two functions for "is this customer on the card rail" (estimate-public.js, the
     // pay-after-first-visit wording), and the membership context it hands the first one.
@@ -374,7 +376,11 @@ function offeredBefore(database, { customerId, jobId, now }) {
     .first('id');
 }
 
+// A worker that crashed after it reserved leaves a `reserved` row. The ledger settles it when it is older than
+// RESERVATION_LIFETIME_MS (and completes it as sent when the provider took the message), but only inside a
+// reservation. Settle first, so a dead row does not hold the customer for 365 days.
 async function notOfferedBefore({ job, now, deps }) {
+  await deps.settleStaleReservations(job.customer_id, now);
   const earlier = await offeredBefore(deps.db, { customerId: job.customer_id, jobId: job.id, now });
   return earlier ? OFFERED_BEFORE.toLowerCase() : null;
 }
@@ -775,6 +781,25 @@ async function offeredBeforeGuard(trx, { customerId, jobId, now }) {
   return (await offeredBefore(trx, { customerId, jobId, now })) ? { reason: OFFERED_BEFORE } : null;
 }
 
+// The offer's own estimate, at the provider handoff: the email's button opens it, so the email never leaves
+// for an estimate the customer cannot open. The same customer's next plan-start mint (a tap on another plan
+// option) archives this lineage, and that mint holds the customer-comms advisory lock, so this guard takes
+// that lock first (a mint in flight finishes before the read; a new one waits for this transaction's end) and
+// reads the row with a share lock (staff archiving it waits too). "Can open" is the public estimate page's
+// rule, as in openEstimateBesidesOffer. Retryable: the ledger settles the reservation `failed`, so the next
+// morning's run mints again under the same key.
+const OFFER_ESTIMATE_GONE = 'OFFER_ESTIMATE_GONE';
+async function offerEstimateGuard(trx, { customer, jobId, estimateId, now, deps }) {
+  await lockCustomerComms(trx, customer.id);
+  const estimate = await trx('estimates').where({ id: estimateId }).forShare()
+    .first('customer_id', 'status', 'archived_at', 'expires_at', 'estimate_data');
+  const open = estimate && estimate.customer_id === customer.id && !estimate.archived_at
+    && deps.liveEstimateStatuses.includes(estimate.status)
+    && (!estimate.expires_at || new Date(estimate.expires_at) > now)
+    && planOfferOf(estimate.estimate_data)?.jobId === String(jobId);
+  return open ? null : { reason: OFFER_ESTIMATE_GONE, retryable: true };
+}
+
 // The opt-outs of Waves marketing again (notOptedOut), on the ledger's own transaction. The division's checks
 // for this stream do not read them: offers turned off in the app, marketing by text only, a suppression of the
 // marketing group. The job's check ran before the home was priced and the estimate was made, so a customer
@@ -798,6 +823,7 @@ async function optedOutGuard(trx, { customer, deps }) {
 // a later morning. Any other row (sent) is the offer.
 const EARLIER_ATTEMPT = Object.freeze({ skipped: 'send_dropped', reserved: 'send_in_flight' });
 async function settleOfferSend(out, { deps }) {
+  if (out.reason === OFFER_ESTIMATE_GONE) return { verdict: 'held', reason: 'offer_estimate_gone' };
   if (out.sent) return { verdict: 'sent', reason: null };
   if (out.duplicate) {
     const reason = EARLIER_ATTEMPT[out.row?.status];
@@ -859,7 +885,9 @@ async function mintAndSend(ctx, option) {
     expectedRecipientEmail: customer.email,
     guard: async (trx) => (await offeredBeforeGuard(trx, { customerId: customer.id, jobId: job.id, now }))
       || optedOutGuard(trx, { customer, deps }),
-    boundaryGuard: (trx) => optedOutGuard(trx, { customer, deps }),
+    boundaryGuard: async (trx) => (await offerEstimateGuard(trx, {
+      customer, jobId: job.id, estimateId: minted.estimateId, now, deps,
+    })) || optedOutGuard(trx, { customer, deps }),
     template: { templateKey: OFFER_TEMPLATE, payload, categories: [OFFER_CATEGORY] },
   });
   return settleOfferSend(out, ctx);
