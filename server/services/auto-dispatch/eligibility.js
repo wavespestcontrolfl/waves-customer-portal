@@ -68,16 +68,15 @@ function resolveDateLockDenial(service, ctx, dateStr) {
 }
 
 // A visit a person took out of auto-dispatch, whatever its date or pin: staff
-// locked or excluded it, or the customer confirmed it. The ONE rule for the
-// eligibility check and for the missing-pin notice, which is moot for such a
-// visit (Codex #6208 r21, r24 P2). Returns the denial, or null.
+// locked or excluded it. The ONE rule for the eligibility check and for the
+// missing-pin notice, which is moot for such a visit (Codex #6208 r21, r24 P2).
+// Returns the denial, or null. A customer confirmation no longer holds a visit
+// (owner 2026-11-22: "i dont think it matters if staff pick it or tom confirmed
+// it", and again that evening, "this is all too limiting"; this replaces the
+// 2026-10-09 confirmed hold). The reminders carry the final day and hour.
 function heldOutOfAutoDispatch(service) {
   if (service.auto_dispatch_locked === true) return deny('MANUALLY_LOCKED', 'Locked from auto-dispatch by staff');
   if (service.auto_dispatch_excluded === true) return deny('AUTO_DISPATCH_EXCLUDED', 'Excluded from auto-dispatch');
-  // Any visit the customer confirmed holds its day and time (owner
-  // 2026-10-09; before, only a due-date occurrence was held, and two
-  // confirmed visits moved silently in one week).
-  if (service.customer_confirmed === true) return deny('CUSTOMER_CONFIRMED', 'Customer confirmed this visit');
   return null;
 }
 
@@ -177,104 +176,94 @@ async function lapsedPlanKeys(services, db) {
 }
 
 /**
- * Did a person put this visit on its current date? The series-move text says
- * "visits already on your calendar won't change unless we talk with you
- * first", and auto-dispatch never sends a text (apply.js), so moving such a
- * visit breaks that promise silently (prod 10-06: a customer picked Sun 9 AM
- * at 8:49 PM; the 4:10 AM run moved it to Mon 3 PM; nobody told them).
+ * Does the CUSTOMER hold this visit's current slot, or did staff lock it? (owner 2026-11-22, the fixed-visit rule:
+ * "if they have a preferred time.day in the app, mowing days for lawn, or if they speficallyb requested a time, via
+ * text, email, call, or if we clciked keep auto dispatch off this visit"; and that evening, of the staff-placed and
+ * confirmed holds, "this is all too limiting".) Both night jobs ask this one rule: the 4:10 AM run before it moves a
+ * visit's day or hour, and the 4:40 AM re-plan (day-replan) before it changes an hour. A visit is held when:
+ *   - staff locked or excluded it ("Keep auto-dispatch off this visit"): MANUALLY_LOCKED;
+ *   - the customer asked for this time (customer_asked_time, the office's box or a customer surface), while that intent
+ *     still holds for the current slot (time-promise.currentIntent, THE one read rule): CUSTOMER_ASKED_TIME;
+ *   - the newest placement onto the current date was made by the customer, or by a mover this rule does not know
+ *     (fail closed: only AUTOMATIC_INITIATORS and STAFF_INITIATORS leave a moved visit free), or a customer date exception
+ *     is newer than every logged move: CUSTOMER_PICKED.
+ * A staff placement and a customer confirmation alone do not hold it any more (they replace the 10-06 person-placed hold
+ * and the 10-09 confirmed hold). An office "day only" intent (customer_asked_time false, recorded with the newest move) is
+ * a staff placement. Preferred days and times (candidate-slots), mowing days, an hour told in writing (the told lock) and
+ * the AI move check (texts, emails, calls, notes) are separate rules and unchanged. The series texts no longer promise
+ * "won't change unless we talk with you first" (20261006220000_sms_template_tighten); every text now promises a reminder
+ * before each visit, and the reminders carry the final day and hour.
  *
- * Protection is the DEFAULT for a moved visit; only a known automatic mover
- * leaves it optimizable. Two kinds of evidence, newest wins:
- *   - the newest reschedule_log PLACEMENT row (new_date set; audit-only rows
- *     such as a no-show record never shadow a move). Every rebooker move
- *     writes one per visit it moves, grouped partners included. Unless every
- *     row of that move is AUTOMATIC_INITIATORS, a placement on the current
- *     date protects the visit — so staff, the customer page, SMS and call
- *     flows, and any mover added later are protected without a list here;
- *   - the visit's own date-exception stamp (date_exception + _at + _source),
- *     which staff direct date edits write without a reschedule_log row. The
- *     rebooker stamps the mover's initiator as the source; only a human
- *     source counts (HUMAN_EXCEPTION_SOURCES — backfills and generated
- *     replacements such as cancel_reseed are not a person).
- * A row that kept both the date and the window (a technician-only
- * reassignment, e.g. tech_out_auto_move) chose no date and is ignored.
- * A visit never moved since it was generated has neither, and stays
- * optimizable. A windowless recurring due visit is never protected: it has
+ * Evidence, newest wins: the newest reschedule_log PLACEMENT row (new_date set and the date or window changed; audit-only
+ * rows such as a no-show record never shadow a move, and every row one move writes shares its transaction's created_at),
+ * and the visit's own date-exception stamp (date_exception + _at + _source), which direct date edits write without a log
+ * row. A technician-only reassignment chose no slot and is ignored. A windowless recurring due visit is never held: it has
  * no promised time yet, and the run exists to place it.
  *
- * Fails CLOSED and DEGRADED: a read error skips the visit for this run and
- * marks the result degraded so the run does not report as healthy.
+ * opts.refresh re-reads the row's own lock, stamp and intent columns FOR SHARE until the caller's transaction ends (the
+ * apply-time guards hold a pre-transaction snapshot): a lock, an intent or a customer pick that lands after the mover's
+ * pre-read is either seen here or waits for the move to commit (Codex #6055 r5, r7; #6207 r3 P2).
+ *
+ * Fails CLOSED and DEGRADED: a read error holds the visit for this run and marks the result degraded so the run does not
+ * report as healthy. The function keeps its old name for its callers.
  */
 // 'day_replan': the nightly day re-plan (services/day-replan/apply.js, owner 2026-11-03) is an automatic mover too.
 // 'booking_make_room': the booking-time make-room move (services/scheduling/booking-make-room-accept.js, owner 2026-11-09) is
 // an automatic mover, not a person's placement.
 const AUTOMATIC_INITIATORS = new Set(['auto_dispatch', 'system', 'machine', 'weather_auto', 'day_replan', 'booking_make_room']);
+// Office and field staff. Their placement alone no longer holds a visit (owner 2026-11-22). 'rider_onetime_move' is a
+// legacy staff date-exception source.
+const STAFF_INITIATORS = new Set(['admin', 'admin_ib', 'admin_bulk', 'operator', 'tech', 'rider_onetime_move']);
 const CUSTOMER_INITIATORS = new Set(['customer', 'customer_self_serve', 'customer_portal', 'customer_sms', 'sms_offer_ai', 'ai_call_pipeline']);
-const HUMAN_EXCEPTION_SOURCES = new Set([...CUSTOMER_INITIATORS,
-  'admin', 'admin_ib', 'admin_bulk', 'operator', 'tech', 'rider_onetime_move']);
 // A row records a chosen slot only when the date or the window changed.
 const SLOT_CHANGED_SQL = '(original_date IS DISTINCT FROM new_date OR original_window IS DISTINCT FROM new_window)';
+const PLACEMENT_COLUMNS = ['auto_dispatch_locked', 'auto_dispatch_excluded', 'date_exception', 'date_exception_source',
+  'date_exception_at', 'customer_asked_time', 'customer_asked_time_at'];
 
-function whoPlaced(initiator) {
-  return CUSTOMER_INITIATORS.has(initiator) ? 'the customer' : 'staff';
+// The row as the rule reads it: the caller's copy, or a fresh read of the placement columns (always on refresh, and when
+// the caller's select left the intent or stamp columns out, so a missing column can never read as "not asked").
+async function placementRow(service, db, refresh) {
+  if (!refresh && service.customer_asked_time !== undefined && service.date_exception_source !== undefined) return service;
+  const query = db('scheduled_services').where({ id: service.id });
+  const fresh = await (refresh ? query.forShare() : query).first(...PLACEMENT_COLUMNS);
+  return fresh ? { ...service, ...fresh } : service;
 }
 
-function personExceptionAt(service) {
+function customerExceptionAt(service) {
   if (service.date_exception !== true || !service.date_exception_at) return null;
-  if (!HUMAN_EXCEPTION_SOURCES.has(String(service.date_exception_source || ''))) return null;
+  if (!CUSTOMER_INITIATORS.has(String(service.date_exception_source || ''))) return null;
   const at = new Date(service.date_exception_at);
   return Number.isNaN(at.getTime()) ? null : at;
 }
 
-// opts.refresh: re-read the row's own staff lock and date-exception columns
-// through `db` first (the apply-time move guard holds a pre-transaction
-// snapshot; an edit-screen change lands only in those columns).
-// It also reads customer_confirmed and holds the row (FOR SHARE) until the
-// caller's transaction ends: a grouped sibling's CAS carries no confirmation
-// flag, so a confirmation that lands after the mover's pre-read must either
-// be seen here or wait for the move to commit (Codex #6207 r3 P2).
-async function refreshedPlacementRow(service, db) {
-  const fresh = await db('scheduled_services').where({ id: service.id }).forShare()
-    .first('auto_dispatch_locked', 'auto_dispatch_excluded', 'date_exception', 'date_exception_source', 'date_exception_at', 'customer_confirmed');
-  return fresh ? { ...service, ...fresh } : service;
-}
+// A placement row that holds the visit: the customer's, or a mover this rule does not know (fail closed).
+const holdsSlot = (initiator) => !AUTOMATIC_INITIATORS.has(initiator) && !STAFF_INITIATORS.has(initiator);
+const asked = (service) => service.customer_asked_time === true || service.customer_asked_time === false;
 
 async function isPersonPlacedVisit(input, db, opts = {}) {
   const dateStr = toDateStr(input.scheduled_date);
   if (!input.id || !dateStr) return { placed: false };
   if (input.recurring_dispatch_due_date && !input.window_start) return { placed: false };
   try {
-    const service = opts.refresh ? await refreshedPlacementRow(input, db) : input;
+    const service = await placementRow(input, db, opts.refresh === true);
     if (service.auto_dispatch_locked === true || service.auto_dispatch_excluded === true) {
       return { placed: true, reason_code: 'MANUALLY_LOCKED', reason_description: 'Locked from auto-dispatch by staff' };
     }
-    // Only on the refreshed (apply-time) read: evaluation refuses a confirmed
-    // visit through isEligibleForAutoDispatch before it gets here.
-    if (opts.refresh && service.customer_confirmed === true) {
-      return { placed: true, reason_code: 'CUSTOMER_CONFIRMED', reason_description: 'Customer confirmed this visit' };
-    }
-    // The newest placement's rows, chosen entirely in SQL: created_at has
-    // microsecond precision and a JS Date keeps only milliseconds, so the
-    // timestamp must never round-trip through JS as a key (Codex #6055 r5).
-    const newestRows = await db('reschedule_log')
-      .where('scheduled_service_id', service.id)
-      .whereNotNull('new_date')
-      .whereRaw(SLOT_CHANGED_SQL)
-      .whereRaw(`created_at = (SELECT max(r2.created_at) FROM reschedule_log r2
-        WHERE r2.scheduled_service_id = reschedule_log.scheduled_service_id
-          AND r2.new_date IS NOT NULL
-          AND (r2.original_date IS DISTINCT FROM r2.new_date OR r2.original_window IS DISTINCT FROM r2.new_window))`)
-      .select('created_at', 'new_date', 'initiated_by', 'series_move_id');
+    // The move-history read carries after_intent only for a visit with a recorded intent (time-promise memberIntentState).
+    const newestRows = await loadNewestSlotRows(db, service.id, { withIntent: asked(service) });
+    // Lazy: time-promise requires this module lazily too.
+    const intent = asked(service) ? require('../time-promise').currentIntent(service, newestRows[0] || null) : null;
+    if (intent === true) return { placed: true, reason_code: 'CUSTOMER_ASKED_TIME', reason_description: 'The customer asked for this time' };
     const newestAt = newestRows.length ? new Date(newestRows[0].created_at) : null;
-    const exceptionAt = personExceptionAt(service);
+    const exceptionAt = customerExceptionAt(service);
     if (exceptionAt && (!newestAt || exceptionAt > newestAt)) {
-      return { placed: true, reason_code: 'PERSON_PLACED', reason_description: `Date chosen by ${whoPlaced(service.date_exception_source)} (date edit)` };
+      return { placed: true, reason_code: 'CUSTOMER_PICKED', reason_description: 'The customer chose this date (date edit)' };
     }
-    // Rows one move writes share its transaction's created_at.
-    const placement = newestRows.find((r) => toDateStr(r.new_date) === dateStr && !AUTOMATIC_INITIATORS.has(r.initiated_by));
+    if (intent === false) return { placed: false };
+    const placement = newestRows.find((r) => toDateStr(r.new_date) === dateStr && holdsSlot(r.initiated_by));
     if (!placement) return { placed: false };
-    const how = placement.series_move_id ? `series move ${placement.series_move_id}` : `move by ${placement.initiated_by || 'unknown'}`;
-    return { placed: true, reason_code: 'PERSON_PLACED', reason_description: `Date chosen by ${whoPlaced(placement.initiated_by)} (${how})` };
+    const who = CUSTOMER_INITIATORS.has(placement.initiated_by) ? 'The customer' : `An unknown mover (${placement.initiated_by || 'unknown'})`;
+    return { placed: true, reason_code: 'CUSTOMER_PICKED', reason_description: `${who} chose this date or time` };
   } catch (err) {
     return { placed: true, degraded: true, reason_code: 'PERSON_PLACED_UNKNOWN', reason_description: `Could not read the move history: ${err.message}` };
   }

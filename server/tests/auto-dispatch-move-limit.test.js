@@ -54,7 +54,10 @@ function logConn(rows, { fail = false } = {}) {
 
 describe('config', () => {
   afterEach(() => { delete process.env.AUTO_DISPATCH_MAX_MOVES_PER_VISIT; });
-  test('maxAutoMovesPerVisit defaults to 2, reads the env, 0 = no limit', () => {
+  // Owner 2026-11-22, "this is all too limiting": the default is now 0 (no limit); the env brings a cap back.
+  test('maxAutoMovesPerVisit defaults to 0 (no limit), reads the env', () => {
+    expect(getAutoDispatchConfig().maxAutoMovesPerVisit).toBe(0);
+    process.env.AUTO_DISPATCH_MAX_MOVES_PER_VISIT = '2';
     expect(getAutoDispatchConfig().maxAutoMovesPerVisit).toBe(2);
     process.env.AUTO_DISPATCH_MAX_MOVES_PER_VISIT = '3';
     expect(getAutoDispatchConfig().maxAutoMovesPerVisit).toBe(3);

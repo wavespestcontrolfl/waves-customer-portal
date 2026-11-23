@@ -79,15 +79,16 @@ describe('fixedReason with the day-told context', () => {
     expect(_internals.fixedReason(stop(), base({ personPlaced: new Set(['s1']) }))).toBe('person_placed');
   });
 
-  test('a customer-confirmed day-told visit stays fixed (conservative)', () => {
-    expect(_internals.fixedReason(stop({ customer_confirmed: true }), base({ dayTold: day }))).toBe('customer_confirmed');
+  // Owner 2026-11-22: a confirmation alone no longer fixes a stop, day-told or not.
+  test('a customer-confirmed day-told visit is judged like an unconfirmed one', () => {
+    expect(_internals.fixedReason(stop({ customer_confirmed: true }), base({ dayTold: day })))
+      .toBe(_internals.fixedReason(stop({ customer_confirmed: false }), base({ dayTold: day })));
   });
 
-  // The rule before 2026-11-22 (main), written out as the oracle. This change adds only the set-time lock, checked
-  // first and only with askRecorded, so for a stop that is not in setTime nothing else may change.
+  // The told-lock rule written out as the oracle. The set-time lock is checked first and only with askRecorded, so for a
+  // stop that is not in setTime nothing else may change. A confirmation is no reason (owner 2026-11-22).
   const mainRule = (row, { told, personPlaced, dayTold }) => {
     const dayOnly = !!dayTold && dayTold.has(row.id);
-    if (row.customer_confirmed === true) return 'customer_confirmed';
     if (!dayOnly && (row.is_recurring !== true || row.recurring_parent_id == null)) return 'first_or_one_time';
     if (!dayOnly && (!personPlaced || personPlaced.has(row.id))) return 'person_placed';
     if (!told || told.has(row.id)) return 'time_told';
@@ -354,11 +355,15 @@ describe('recheckVisit inside the move transaction (apply mode)', () => {
     expect(w.rowWrites()).toEqual([]);
   });
 
-  test('this gate on: a confirmed stop stays fixed also when told only the day (customer_confirmed)', async () => {
-    const over = deps({ levels: { a: 'day', b: 'day' } });
-    const w = world({ rowExtra: { ...recurring, b: { ...recurring.b, customer_confirmed: true } }, over });
-    expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:customer_confirmed', moved: 0 });
-    expect(w.rowWrites()).toEqual([]);
+  // Owner 2026-11-22: a confirmation no longer stops the write; the result is the unconfirmed one.
+  test('this gate on: a confirmed stop told only the day is written like an unconfirmed one', async () => {
+    const confirmed = world({ rowExtra: { ...recurring, b: { ...recurring.b, customer_confirmed: true } }, over: deps({ levels: { a: 'day', b: 'day' } }) });
+    const plain = world({ rowExtra: recurring, over: deps({ levels: { a: 'day', b: 'day' } }) });
+    const result = await confirmed.run();
+    expect(result.reason).not.toBe('visit_not_movable:customer_confirmed');
+    expect(result).toEqual(await plain.run());
+    const sansClock = (writes) => writes.map((w) => ({ ...w, patch: { ...w.patch, updated_at: 'clock' } }));
+    expect(sansClock(confirmed.rowWrites())).toEqual(sansClock(plain.rowWrites()));
   });
 
   test('this gate on: a visit told an hour meanwhile stops the write (time_told)', async () => {

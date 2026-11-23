@@ -1,5 +1,5 @@
 const { recurringDispatchDuePatch } = require('../services/scheduling/recurring-dispatch-due');
-const { staffEditLockPatch, autoDispatchBoxPatch } = require('../services/auto-dispatch/staff-edit-lock');
+const { autoDispatchBoxPatch } = require('../services/auto-dispatch/staff-edit-lock');
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
@@ -15976,9 +15976,8 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       if (occupancyRouteTouched) {
         const occRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
         Object.assign(updates, recurringDispatchDuePatch(occRow, updates));
-        // A staff date/window choice locks the occurrence from auto-dispatch
-        // (this path writes no reschedule_log row the person-placed guard reads).
-        Object.assign(updates, staffEditLockPatch(occRow, updates));
+        // A staff date/window choice no longer locks the occurrence from
+        // auto-dispatch (owner 2026-11-22); only the box does (staff-edit-lock.js).
         if (occRow && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(occRow.status))) {
           const occDate = updates.scheduled_date !== undefined
             ? dateOnly(updates.scheduled_date)

@@ -933,7 +933,7 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     isPersonPlacedVisit.mockResolvedValueOnce({ placed: true, reason_code: 'MANUALLY_LOCKED', reason_description: 'Locked from auto-dispatch by staff' });
     const trx = fakeTrx();
     await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: {} })({ trx, technicianId: 't1', service: SERVICE }))
-      .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('placed by a person') });
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('is held') });
     expect(isPersonPlacedVisit).toHaveBeenCalledWith(expect.objectContaining({ id: SERVICE.id }), trx, { refresh: true });
   });
 
@@ -1040,13 +1040,13 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     await expect(guard({ trx: fakeTrx({ siblings, moveRows: [{ scheduled_service_id: 's3', moves: '1' }] }), members })).resolves.toBeUndefined();
   });
 
-  test('a sibling a person placed refuses the whole grouped move (Codex #6055 r1 P1)', async () => {
+  test('a sibling the customer holds refuses the whole grouped move (Codex #6055 r1 P1)', async () => {
     const { isPersonPlacedVisit } = require('../services/auto-dispatch/eligibility');
     isPersonPlacedVisit.mockResolvedValueOnce({ placed: true, reason_code: 'PERSON_PLACED', reason_description: 'Date chosen by the customer (series move m1)' });
     const guard = makeMemberGuard({ service: SERVICE, best: BEST, config: {}, techChanged: false });
     const members = [{ id: SERVICE.id, status: 'confirmed' }, { id: 's2', status: 'confirmed' }];
     await expect(guard({ trx: fakeTrx({ siblings: [eligible()] }), members }))
-      .rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2', message: expect.stringContaining('placed by a person') });
+      .rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2', message: expect.stringContaining('is held') });
   });
 
   test('the receiving tech DEACTIVATED for a sibling category refuses; missing/qualified passes; an UNCHANGED tech is re-read too (Off can land mid-run)', async () => {
@@ -1208,27 +1208,15 @@ test('pins the complete location in the atomic rebooker expectation', async () =
 });
 
 
-test('confirmation after scoring prevents deferred placement', async () => {
+// Owner 2026-11-22 ("i dont think it matters if staff pick it or tom confirmed it"; "this is all too limiting"):
+// replaces the 2026-10-09 rule that a confirmation stops a move.
+test('a confirmation after scoring no longer stops a deferred placement, and the write does not pin it', async () => {
   const scored = { ...SERVICE, status: 'pending', window_start: null, window_end: null, recurring_dispatch_due_date: SERVICE.scheduled_date, customer_confirmed: false };
-  db.mockImplementation(() => readRow({ ...scored, customer_confirmed: true }));
-  await expect(applyAutoDispatchMove(scored, { ...BEST, date: SERVICE.scheduled_date }, 'run1'))
-    .rejects.toMatchObject({ code: 'STALE_PLACEMENT' });
-  expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
-});
-
-test('pins confirmation in the deferred placement write and rechecks each locked member', async () => {
-  const scored = { ...SERVICE, recurring_dispatch_due_date: SERVICE.scheduled_date, customer_confirmed: false };
-  const queue = [readRow(scored), { where() { return this; }, update: jest.fn().mockResolvedValue(1) }];
+  const queue = [readRow({ ...scored, customer_confirmed: true }), { where() { return this; }, update: jest.fn().mockResolvedValue(1) }];
   db.mockImplementation(() => queue.shift());
   await applyAutoDispatchMove(scored, { ...BEST, date: SERVICE.scheduled_date }, 'run1');
-  const options = SmartRebooker.reschedule.mock.calls[0][5];
-  expect(options.expect).toMatchObject({ customer_confirmed: false });
-  const trx = jest.fn();
-  for (const id of [scored.id, 'grouped-sibling']) {
-    await expect(options.moveGuard({ trx, service: { ...scored, id, customer_confirmed: true } }))
-      .rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
-  }
-  expect(trx).not.toHaveBeenCalled();
+  expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+  expect(SmartRebooker.reschedule.mock.calls[0][5].expect).not.toHaveProperty('customer_confirmed');
 });
 
 // GATE_AUTO_DISPATCH_SHARED_MODEL (owner-approved 2026-09-26, dispatch
@@ -1455,20 +1443,11 @@ describe('SLOT_TAKEN fallback (GATE_AUTO_DISPATCH_SHARED_MODEL)', () => {
 
 });
 
-test('a confirmation after scoring stops the move of any visit, due date or not (owner 2026-10-09)', async () => {
+test('a confirmation after scoring no longer stops the move of any visit (owner 2026-11-22)', async () => {
   const scored = { ...SERVICE, customer_confirmed: false };
-  db.mockImplementation(() => readRow({ ...scored, customer_confirmed: true }));
-  await expect(applyAutoDispatchMove(scored, BEST, 'run1')).rejects.toMatchObject({ code: 'STALE_PLACEMENT' });
-  expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
-});
-
-test('every move pins customer_confirmed in the atomic write and its guard refuses a confirmed row', async () => {
-  const scored = { ...SERVICE, customer_confirmed: false };
-  const queue = [readRow(scored), { where() { return this; }, update: jest.fn().mockResolvedValue(1) }];
+  const queue = [readRow({ ...scored, customer_confirmed: true }), { where() { return this; }, update: jest.fn().mockResolvedValue(1) }];
   db.mockImplementation(() => queue.shift());
   await applyAutoDispatchMove(scored, BEST, 'run1');
-  const options = SmartRebooker.reschedule.mock.calls[0][5];
-  expect(options.expect).toMatchObject({ customer_confirmed: false });
-  await expect(options.moveGuard({ trx: jest.fn(), service: { ...scored, customer_confirmed: true } }))
-    .rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
+  expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+  expect(SmartRebooker.reschedule.mock.calls[0][5].expect).not.toHaveProperty('customer_confirmed');
 });

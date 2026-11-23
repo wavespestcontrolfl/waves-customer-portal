@@ -4,9 +4,10 @@
 //
 // The forms keep the checked state and send it with their one save as
 // { autoDispatchLocked, autoDispatchLockedWas }; the server acts only when the
-// two differ (server/services/auto-dispatch/staff-edit-lock.js) and also sets
-// the lock itself when staff change the date or time. Renders nothing for a
-// visit that is not a recurring occurrence: auto-dispatch never moves those.
+// two differ (server/services/auto-dispatch/staff-edit-lock.js). A staff date
+// or time change no longer sets the lock by itself (owner 2026-11-22). Renders
+// nothing for a visit that is not a recurring occurrence: auto-dispatch never
+// moves those.
 //
 // Monochrome, inline styles only, so either form's style system can host it;
 // each form passes its own row container props and helper-text color.
@@ -30,7 +31,7 @@ export default function AutoDispatchLockBox({ service, checked, onChange, disabl
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 14, fontWeight: 500 }}>Keep auto-dispatch off this visit</div>
         <div style={{ fontSize: 14, marginTop: 2, color: helperColor }}>
-          Auto-dispatch will not move this visit. Changing the date or time here turns this on. A visit that a customer or staff moved to its date stays protected when this is off.
+          Auto-dispatch will not move this visit. Tick this when the customer asked for this day or time. A day or time the customer picked themselves stays protected when this is off.
         </div>
       </div>
     </label>

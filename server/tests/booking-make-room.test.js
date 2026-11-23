@@ -31,8 +31,12 @@ function stop(name, hour, lng, extra = {}) {
   };
 }
 
+// Stop A's told-lock fact: a first visit (first_or_one_time). Until 2026-11-22 the example used a customer confirmation,
+// which no longer fixes a stop (owner 2026-11-22); both are read at the same step, after the page's own rules.
+const FIRST_VISIT = { is_recurring: false, recurring_parent_id: null };
+
 const exampleDay = () => [
-  stop('a', 8, 10, { customer_confirmed: true }), stop('b', 9, 20), stop('c', 10, 30), stop('d', 11, 40),
+  stop('a', 8, 10, FIRST_VISIT), stop('b', 9, 20), stop('c', 10, 30), stop('d', 11, 40),
   stop('e', 13, 50), stop('f', 14, 60),
 ];
 // The free hours of the example day as the page lists them.
@@ -165,10 +169,18 @@ describe('the plan page example', () => {
     expect(JSON.parse(inserted[0].report).passed[0].moves).toHaveLength(3);
   });
 
-  test('the confirmed stop A never moves: 8 AM, whose chain starts with A, is not found', async () => {
+  // The test just below pins that a confirmation alone no longer fixes stop A.
+  test('the first-visit stop A never moves: 8 AM, whose chain starts with A, is not found', async () => {
     const { report } = await check();
     expect(starts(report)).not.toContain('08:00');
-    expect(report.byReason.fixed_customer_confirmed).toBeGreaterThanOrEqual(1);
+    expect(report.byReason.fixed_first_or_one_time).toBeGreaterThanOrEqual(1);
+  });
+
+  test('a stop A the customer only confirmed is not fixed by it: the 8 AM chain is checked (owner 2026-11-22)', async () => {
+    const rows = exampleDay().map((r) => (r.id === 'visit-a' ? { ...r, is_recurring: true, recurring_parent_id: 'parent-a', customer_confirmed: true } : r));
+    const { report } = await check({ deps: makeDeps({ rows }) });
+    expect(report.byReason.fixed_customer_confirmed).toBeUndefined();
+    expect(report.byReason.fixed_first_or_one_time).toBeUndefined();
   });
 
   test('a stop the customer was told the hour of never moves (read with the full day facts)', async () => {
@@ -418,9 +430,9 @@ describe('the chain', () => {
 
 describe('the 2-hour move (owner 2026-11-07 "B": a moved visit may shift up to 2 hours, not 1)', () => {
   const { buildChain, shiftsFor, MAX_SHIFT_MIN } = _internals;
-  // Room after the chain: A (confirmed) 8, B 9, C 10, nothing 11 AM-2 PM, E 2 PM, F 3 PM. Nobody was told an hour.
+  // Room after the chain: A (a first visit) 8, B 9, C 10, nothing 11 AM-2 PM, E 2 PM, F 3 PM. Nobody was told an hour.
   const roomyDay = () => [
-    stop('a', 8, 10, { customer_confirmed: true }), stop('b', 9, 20), stop('c', 10, 30), stop('e', 14, 50), stop('f', 15, 60),
+    stop('a', 8, 10, FIRST_VISIT), stop('b', 9, 20), stop('c', 10, 30), stop('e', 14, 50), stop('f', 15, 60),
   ];
   const ROOMY_FREE = [{ date: DAY, windowStart: '12:00', techId: TECH }];
   // The page's travel gap as the 11-06 dry run saw it: a stop moved 1 hour starts when the new visit ends, so there is
@@ -455,9 +467,9 @@ describe('the 2-hour move (owner 2026-11-07 "B": a moved visit may shift up to 2
     const routes = deps.evaluated.filter((e) => e.placement.windowStart === '09:00');
     expect(routes).toHaveLength(1);
     expect(routes[0].context.rows.find((r) => r.id === 'visit-b').window_start).toBe('11:00');
-    // 8 AM tries 2 hours too (its confirmed stop A is a full-day fact, read after the page's rules) and then fails on A.
+    // 8 AM tries 2 hours too (its first-visit stop A is a full-day fact, read after the page's rules) and then fails on A.
     expect(report.twoHourTried).toBe(3);
-    expect(report.byReason).toEqual({ fixed_customer_confirmed: 1, saving_below_bar: 2 });
+    expect(report.byReason).toEqual({ fixed_first_or_one_time: 1, saving_below_bar: 2 });
     const logged = JSON.parse(inserted[0].report);
     expect(logged.twoHourTried).toBe(3);
     expect(logged.passed.map((p) => p.shiftMin)).toEqual([120, 120]);
@@ -483,7 +495,7 @@ describe('the 2-hour move (owner 2026-11-07 "B": a moved visit may shift up to 2
 
   test('when the 1-hour move lands on a visit that needs no read, the 2-hour move goes on alone', async () => {
     // An unassigned visit holds 10-11 AM: B moved 1 hour would land on it; B moved 2 hours does not.
-    const rows = [stop('a', 8, 10, { customer_confirmed: true }), stop('b', 9, 20), stop('u', 10, 70, { technician_id: null }), stop('e', 14, 50), stop('f', 15, 60)];
+    const rows = [stop('a', 8, 10, FIRST_VISIT), stop('b', 9, 20), stop('u', 10, 70, { technician_id: null }), stop('e', 14, 50), stop('f', 15, 60)];
     const placement = jest.fn(PAGE_PLACES);
     const { report } = await check({ deps: makeDeps({ rows, told: [] }), pool: [{ date: DAY, windowStart: '16:00', techId: TECH }], placement });
     const nine = report.passed.find((p) => p.start === '09:00');
@@ -868,7 +880,7 @@ describe('the sooner-day pass (log only)', () => {
     });
 
     test('an hour passes the screen when either its 1-hour or its 2-hour shift does', async () => {
-      const rows = [stop('a', 8, 10, { customer_confirmed: true }), stop('b', 9, 20), stop('c', 10, 30), stop('e', 14, 50), stop('f', 15, 60)];
+      const rows = [stop('a', 8, 10, FIRST_VISIT), stop('b', 9, 20), stop('c', 10, 30), stop('e', 14, 50), stop('f', 15, 60)];
       const deps = makeDeps({ rows, told: [], travelGap: true });
       // 9 AM: the 1-hour shift (B to 10, C to 11) is expected to fail; the 2-hour shift (C to 12) is expected to pass.
       deps.travelGapConflicts = jest.fn((candidate, stops) => {
@@ -1011,7 +1023,7 @@ describe('findMakeRoomOffers (the page awaits it, mode on)', () => {
     const { hours, report, deps } = await offers();
     expect(hours.map((h) => `${h.date} ${h.start}`)).toEqual([`${DAY} 09:00`]);
     expect(hours[0]).toMatchObject({ techId: TECH, shiftMin: 60 });
-    // 8 AM (stop A, confirmed) fails its full check; 9 AM passes: the walk ends there and never checks 10 AM or later.
+    // 8 AM (stop A, a first visit) fails its full check; 9 AM passes: the walk ends there and never checks 10 AM or later.
     expect(report.sooner.checked).toBe(2);
     expect(report.mode).toBe('on');
   });
@@ -1208,8 +1220,8 @@ describe('verifyMakeRoomHour (the hold\'s proof, inside the reserve transaction)
   test('a stop that was locked since the offer refuses it', async () => {
     const told = await prove({ deps: makeDeps({ told: ['visit-e', 'visit-c'] }) });
     expect(told.reason).toBe('fixed_time_told');
-    const confirmed = await prove({ startMin: 8 * 60 });
-    expect(confirmed.reason).toBe('fixed_customer_confirmed');
+    const firstVisit = await prove({ startMin: 8 * 60 });
+    expect(firstVisit.reason).toBe('fixed_first_or_one_time');
   });
 
   test('a stop whose customer turned reminder texts off since the offer refuses it', async () => {
@@ -1485,7 +1497,7 @@ describe('later days (GATE_MAKE_ROOM_LATER_DAYS)', () => {
     const nine = report.sooner.passed.find((p) => p.start === '09:00');
     expect(moves(nine)).toEqual(['visit-b 09:00->10:00', 'visit-c 10:00->11:00', 'visit-d 11:00->12:00']);
     expect(nine.daysGained).toBe(-1);
-    // The confirmed stop A still never moves.
+    // The first-visit stop A still never moves.
     expect(found(report)).not.toContain(`${DAY} 08:00`);
   });
 
