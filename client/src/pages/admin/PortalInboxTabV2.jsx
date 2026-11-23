@@ -227,8 +227,6 @@ function MessageDetails({ item }) {
 // How the customer was told about an answer saved in the portal.
 export function noticeLine(name, notice) {
   if (Number(notice?.pushAccepted) > 0) return `Sent to ${name} in the portal. They got a notice in the Waves app.`;
-  // An earlier app notice could not be confirmed (its record could not be read): no text or email went after it.
-  if (notice?.pushUnknown) return `Sent to ${name} in the portal. We could not confirm their app notice, so we did not text or email them.`;
   if (notice?.text === "sent") return `Sent to ${name} in the portal. We texted them your answer.`;
   // The text may or may not have gone out (a provider timeout, a stop mid-send): no second text goes.
   if (notice?.text === "uncertain") return `Sent to ${name} in the portal. We could not confirm the text went out. Check their texts in Communications before you send another.`;

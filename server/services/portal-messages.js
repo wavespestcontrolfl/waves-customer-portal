@@ -283,7 +283,7 @@ const noticeReached = (notice) => Number(notice.pushAccepted) > 0 || textReached
 function publicNotice(notice) {
   if (!notice) return null;
   const shown = {};
-  for (const key of ['bell', 'pushAccepted', 'pushUnknown', 'text', 'email']) if (notice[key] !== undefined) shown[key] = notice[key];
+  for (const key of ['bell', 'pushAccepted', 'text', 'email']) if (notice[key] !== undefined) shown[key] = notice[key];
   return notice.pending ? { ...shown, pending: true } : shown;
 }
 
@@ -328,23 +328,9 @@ async function claimNotice(messageId, now = new Date()) {
   return { at: now.toISOString(), attempts: Number(attempts) || 1, email, text, textCode };
 }
 
-// The push an earlier try sent for this bell, from the bell's own record (push-notifications.js keeps pushState on
-// it): 'accepted', 'sending' while its lease runs (it may still be accepted), else null.
-function earlierPush(bell, now = Date.now()) {
-  const meta = metaOf(bell);
-  if (meta.pushState === 'accepted') return 'accepted';
-  if (meta.pushState !== 'sending') return null;
-  const leaseUntil = Date.parse(meta.pushLeaseUntil || '') || (Date.parse(meta.pushAttemptedAt || '') + 10 * 60 * 1000);
-  return leaseUntil > now ? 'sending' : null;
-}
-
 // The in-app bell plus, unless push is false, a push to the Waves app. A push another attempt is still sending
-// is not a miss. With readEarlierPush (GATE_PORTAL_ANSWER_TEXT on), a try that sends no push still reads the bell's
-// record of an earlier try's push (a try made before the gate went on): one the app took counts as reached, so no
-// text or email follows it, and one still sending is in flight. pushUnknown: that record could not be read (the bell
-// lookup failed). Gate off, the outcome is this try's push alone.
-async function bellAndPush(customerId, message, { push = true, readEarlierPush = false } = {}) {
-  const readsEarlier = readEarlierPush && !push;
+// is not a miss.
+async function bellAndPush(customerId, message, { push = true } = {}) {
   try {
     const bell = await require('./notification-service').notifyCustomer(customerId, 'service', NOTICE_TITLE, preview(message.body), {
       link: MESSAGES_LINK,
@@ -354,17 +340,10 @@ async function bellAndPush(customerId, message, { push = true, readEarlierPush =
       pushOptions: { nativeOnly: true },
       metadata: { portalMessageId: message.id },
     });
-    const earlier = readsEarlier ? earlierPush(bell) : null;
-    return {
-      bell: Boolean(bell?.id) && !bell.suppressed,
-      pushAccepted: Number(bell?.push?.accepted || 0) || (earlier === 'accepted' ? 1 : 0),
-      inFlight: bell?.push?.reason === 'push_in_flight' || earlier === 'sending',
-      // notifyCustomer answers null when its dedupe read failed (it cannot tell this bell from a new one).
-      ...(readsEarlier && !bell ? { pushUnknown: true } : {}),
-    };
+    return { bell: Boolean(bell?.id) && !bell.suppressed, pushAccepted: Number(bell?.push?.accepted || 0), inFlight: bell?.push?.reason === 'push_in_flight' };
   } catch (err) {
     logger.warn(`[portal-messages] bell or push failed for message ${message.id}: ${err.message}`);
-    return { bell: false, pushAccepted: 0, inFlight: false, ...(readsEarlier ? { pushUnknown: true } : {}) };
+    return { bell: false, pushAccepted: 0, inFlight: false };
   }
 }
 
@@ -416,12 +395,14 @@ function answerTextBody(firstName, body, customerId) {
   return cut(end > 0 ? end : lo);
 }
 
-// True when `destination` (the number the send step texts: its normalizeRecipient form) is a whole E.164 number and
-// is the customer's stored phone in canonical E.164. The send step reads any ten digits as a US number, so a stored
-// number it would turn into another one (a +45 number of eight national digits becomes +1 and ten digits) fails here,
-// and that customer gets the email.
+// True when `destination` (a whole E.164 number) is what the stored phone means to the send step (its
+// normalizeRecipient form, the number it dials) and in canonical E.164 (toE164). Both must agree: the send step reads
+// any ten digits as a US number (a +45 number of eight national digits becomes +1 and ten digits), and toE164 keeps
+// only the last ten digits of a number stored without a plus (so 44 and ten digits reads as the US number). A stored
+// number either one would turn into another one fails here, and that customer gets the email.
 function sameDestination(storedPhone, destination) {
   return typeof destination === 'string' && /^\+\d{8,15}$/.test(destination)
+    && require('./messaging/send-customer-message').normalizeRecipient(storedPhone) === destination
     && require('../utils/phone').toE164(storedPhone) === destination;
 }
 
@@ -541,20 +522,21 @@ function textOutcome(outcome, classify, fallbackCode) {
   return { text: 'uncertain' };
 }
 
-// GATE_PORTAL_ANSWER_TEXT: a try's text part, or null when the notice has none: the gate is off, the try is the
-// sweep's (it never starts a text), an earlier try moved to the email, or an earlier push reached the app. The move
-// to the text ('sending') is saved at the provider boundary only, while this try still holds the claim: the send
-// step's onDispatchStart, after its last check and right before the request. A try that stops before it sent
-// nothing, so its notice still goes by email; a check that refuses after the move takes it back (onDispatchAbort,
-// onDispatchRejected). A later try never texts again: it reuses the stored outcome, and a text still 'sending' (a try
-// that stopped mid-request) counts as maybe gone. { lost: true } when the claim was lost (a try that was taken over
-// sends nothing: the mark refuses the request). The mark and its undo run inside the held handoff transaction, so
-// they write through the marker connection (models/marker-db.js), never a second root-pool connection.
-async function textStep(customerId, message, claim, sent, { byStaff, textLive }) {
+// GATE_PORTAL_ANSWER_TEXT: a text-way notice's text part (noticeCustomer), or null when it has none: the gate is off
+// now (the kill: the email goes), the try is the sweep's (it never starts a text), or an earlier try moved to the
+// email. The move to the text ('sending') is saved at the provider boundary only, while this try still holds the
+// claim: the send step's onDispatchStart, after its last check and right before the request. A try that stops
+// before it sent nothing, so its notice still goes by email; a check that refuses after the move takes it back
+// (onDispatchAbort, onDispatchRejected). A later try never texts again: it reuses the stored outcome, and a text
+// still 'sending' (a try that stopped mid-request) counts as maybe gone. { lost: true } when the claim was lost (a
+// try that was taken over sends nothing: the mark refuses the request). The mark and its undo run inside the held
+// handoff transaction, so they write through the marker connection (models/marker-db.js), never a second root-pool
+// connection.
+async function textStep(customerId, message, claim, sent, { byStaff }) {
   if (claim.text !== undefined) {
     return { text: claim.text === 'sending' ? 'uncertain' : claim.text, ...(claim.textCode ? { textCode: claim.textCode } : {}) };
   }
-  if (!byStaff || !textLive || claim.email !== undefined || sent.pushAccepted > 0) return null;
+  if (!byStaff || !answerTextLive() || claim.email !== undefined) return null;
   const markerDb = require('../models/marker-db');
   const before = { ...sent, pending: true, claimedAt: claim.at, attempts: claim.attempts };
   let lost = false;
@@ -582,8 +564,9 @@ async function emailStep(customerId, message, claim, sent) {
 
 // The one notice for a saved answer, one try at a time (claimNotice): the customer's in-app bell plus a push
 // to the Waves app (app devices only: a browser subscription is not the app); an email with the whole answer
-// when no app device took the push. With GATE_PORTAL_ANSWER_TEXT on, the bell plus one text with the answer in
-// place of the push (textStep), and the email when no text went out. The move to the text or the email is saved
+// when no app device took the push. For an answer saved with GATE_PORTAL_ANSWER_TEXT on (noticeMode 'text'), the
+// bell plus one text with the answer in place of the push (textStep), and the email when no text went out. The move
+// to the text or the email is saved
 // before it goes, and a later try never pushes after it (it makes sure of the bell and finishes that step): a try
 // that stopped after the email went out cannot add a push. The try's outcome is final when the bell exists and the customer was reached or
 // can't be (an email skip or block), or when it was the last try. A missing bell, or an email worth another
@@ -597,27 +580,18 @@ async function noticeCustomer(customerId, message, { byStaff = false } = {}) {
   try {
     const claim = await claimNotice(message.id);
     if (!claim) return await storedNotice(message.id);
-    // GATE_PORTAL_ANSWER_TEXT, read once for this try.
-    const textLive = answerTextLive();
-    const push = !textLive && claim.email === undefined && claim.text === undefined;
-    const { inFlight, pushUnknown, ...sent } = await bellAndPush(customerId, message, { push, readEarlierPush: textLive });
-    // A retry (an earlier try may have pushed, before GATE_PORTAL_ANSWER_TEXT went on) that cannot read the bell's
-    // push record sends nothing: its claim stays, like a push in flight, and a later try reads the record. The last
-    // try sends nothing either (running out of tries is no news about that push, and a second notice is worse than a
-    // missing one): the notice ends unconfirmed (pushUnknown) for the staff screen. A first try has no earlier push
-    // to miss.
-    if (pushUnknown && claim.attempts > 1) {
-      if (claim.attempts < NOTICE_ATTEMPTS) return { pending: true };
-      const unconfirmed = { ...sent, pushUnknown: true, pending: false, claimedAt: claim.at, attempts: claim.attempts };
-      return (await recordNotice(message.id, unconfirmed)) ? publicNotice(unconfirmed) : await storedNotice(message.id);
-    }
+    // GATE_PORTAL_ANSWER_TEXT: the notice's way was fixed when the answer was saved (staffReply). A text-way notice
+    // never pushes, even after the gate goes off, and a push-way one never texts, even after the gate goes on, so one
+    // answer never gets both an app push and a text, and no try has to read what an earlier try's push did.
+    const textWay = metaOf(message).noticeMode === 'text';
+    const { inFlight, ...sent } = await bellAndPush(customerId, message, { push: !textWay && claim.email === undefined });
     if (inFlight) {
       // Another try is still sending the push: no email. Its claim stays (this try counted); on the last try the
       // notice ends here, since whatever that push does is the outcome.
       if (claim.attempts >= NOTICE_ATTEMPTS) await recordNotice(message.id, { ...sent, email: 'not_needed', pending: false, claimedAt: claim.at, attempts: claim.attempts });
       return { pending: claim.attempts < NOTICE_ATTEMPTS };
     }
-    const texted = await textStep(customerId, message, claim, sent, { byStaff, textLive });
+    const texted = textWay ? await textStep(customerId, message, claim, sent, { byStaff }) : null;
     if (texted?.lost) return await storedNotice(message.id);
     const mail = await emailStep(customerId, message, claim, { ...sent, ...texted });
     if (!mail) return await storedNotice(message.id);
@@ -643,7 +617,7 @@ async function resumePendingNotices(now = new Date()) {
     .where('m.created_at', '>', new Date(now.getTime() - SWEEP_MAX_AGE_MS))
     .orderBy('m.created_at', 'asc')
     .limit(SWEEP_LIMIT)
-    .select('m.id', 'm.body', 'm.admin_user_id', 'cv.customer_id');
+    .select('m.id', 'm.body', 'm.admin_user_id', 'm.metadata', 'cv.customer_id');
   for (const row of rows) await noticeCustomer(row.customer_id, row);
   if (rows.length) logger.info(`[portal-messages] finished ${rows.length} pending answer notice(s)`);
   return rows.length;
@@ -664,8 +638,11 @@ async function staffReply({ kind, id, body, clientRequestId = null, actor = {} }
     const thread = await threadWith(trx, customerId);
     const prior = await priorSend(trx, thread.id, 'outbound', clientRequestId);
     if (prior) return { replay: true, message: prior, customerId };
-    // GATE_PORTAL_ANSWER_TEXT: the number the answer's text may go to is the one on file when the answer is saved.
-    const answerTextTo = answerTextLive() ? await boundTextNumber(trx, customerId) : null;
+    // GATE_PORTAL_ANSWER_TEXT: on when the answer is saved = the text way (noticeMode 'text': the bell plus one text,
+    // else the email, never a push), with the number on file now (answerTextTo, none when it cannot be texted as
+    // stored). Off = the push way, as before. Every later try keeps this way (noticeCustomer).
+    const textWay = answerTextLive();
+    const answerTextTo = textWay ? await boundTextNumber(trx, customerId) : null;
     const message = await Conversations.appendMessage({
       conn: trx,
       conversationId: thread.id,
@@ -681,6 +658,7 @@ async function staffReply({ kind, id, body, clientRequestId = null, actor = {} }
         portalItem: { kind, id },
         notice: { pending: true },
         ...(clientRequestId ? { clientRequestId } : {}),
+        ...(textWay ? { noticeMode: 'text' } : {}),
         ...(answerTextTo ? { answerTextTo } : {}),
       },
     });
@@ -896,5 +874,5 @@ module.exports = {
   customerUnread,
   markRead,
   resumePendingNotices,
-  __private: { preview, noticeCustomer, closeItemWith, closeItemBells, itemCustomerWith, claimNotice, ringOffice, metaOf, bellAndPush, answerTextBody, textOutcome, earlierPush, sameDestination, answerCarriesLink },
+  __private: { preview, noticeCustomer, closeItemWith, closeItemBells, itemCustomerWith, claimNotice, ringOffice, metaOf, bellAndPush, answerTextBody, textOutcome, sameDestination, answerCarriesLink },
 };
