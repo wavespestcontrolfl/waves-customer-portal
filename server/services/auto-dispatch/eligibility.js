@@ -223,7 +223,19 @@ const PLACEMENT_COLUMNS = ['auto_dispatch_locked', 'auto_dispatch_excluded', 'da
   'date_exception_at', 'customer_asked_time', 'customer_asked_time_at', 'window_start'];
 // How far back the rule reads when the newest slot change is an end-only edit (0 such edits in 120 days, 2026-11-22).
 const PLACEMENT_HISTORY_ROWS = 50;
-const LOG_COLUMNS = ['created_at', 'new_date', 'initiated_by', 'original_date', 'original_window', 'new_window'];
+const LOG_COLUMNS = ['created_at', 'new_date', 'initiated_by', 'reason_code', 'original_date', 'original_window', 'new_window'];
+// Staff moves made FOR the customer's request hold like the customer's own: the reschedule dialog's "Customer request"
+// reasons and the reviewed AI-call reschedule (call-reschedule-apply.js), all logged as 'admin'. The series writer adds
+// '_series' to the reason (rebooker.js).
+const CUSTOMER_REQUEST_REASONS = new Set(['customer_request', 'customer_call_request', 'ai_call_reschedule']);
+const customerRequested = (r) => CUSTOMER_REQUEST_REASONS.has(String(r.reason_code || '').replace(/_series$/, ''));
+
+// The history columns, plus after_intent for a visit with a recorded intent (time-promise memberIntentState).
+const logSelect = (db, query, withIntent) => (withIntent
+  ? query.select(...LOG_COLUMNS,
+    db.raw(`reschedule_log.created_at > (SELECT s.customer_asked_time_at FROM scheduled_services s
+        WHERE s.id = reschedule_log.scheduled_service_id) AS after_intent`))
+  : query.select(...LOG_COLUMNS));
 
 // The HH:MM start of a window value ('09:00-10:00', '09:00:00-10:00:00', a time column), or null for no window.
 function startOf(value) {
@@ -236,25 +248,30 @@ function startOf(value) {
 const placesVisit = (r) => toDateStr(r.original_date) !== toDateStr(r.new_date) || startOf(r.original_window) !== startOf(r.new_window);
 
 // The newest placement rows (one move's rows share a created_at). When only an end-only edit is newest, read further back.
-async function newestPlacementRows(db, serviceId, newestRows) {
+async function newestPlacementRows(db, serviceId, newestRows, withIntent) {
   const placements = newestRows.filter(placesVisit);
   if (placements.length || !newestRows.length) return placements;
-  const history = await db('reschedule_log')
+  const history = await logSelect(db, db('reschedule_log')
     .where('scheduled_service_id', serviceId)
     .whereNotNull('new_date')
     .whereRaw(SLOT_CHANGED_SQL)
     .orderBy('created_at', 'desc')
-    .limit(PLACEMENT_HISTORY_ROWS)
-    .select(...LOG_COLUMNS);
+    .limit(PLACEMENT_HISTORY_ROWS), withIntent);
   const older = history.filter(placesVisit);
   if (!older.length && history.length >= PLACEMENT_HISTORY_ROWS) throw new Error('no placement in the newest move history');
   const at = older.length ? new Date(older[0].created_at).getTime() : null;
   return older.filter((r) => new Date(r.created_at).getTime() === at);
 }
 
-// The placement still owns the visit's slot: same date and same start. A start the read did not return matches (fail closed).
-const ownsSlot = (r, dateStr, start) => toDateStr(r.new_date) === dateStr
-  && (r.new_window === undefined || startOf(r.new_window) === start);
+// The placement still owns the visit's slot: same date and same start. A row with no new window is a date-only move: the
+// rebooker keeps the visit's start and logs NULL, so the old start or no start both match. A start the read did not
+// return matches (fail closed).
+function ownsSlot(r, dateStr, start) {
+  if (toDateStr(r.new_date) !== dateStr) return false;
+  if (r.new_window === undefined) return true;
+  if (r.new_window == null || r.new_window === '') return start === null || start === startOf(r.original_window);
+  return startOf(r.new_window) === start;
+}
 
 // The row as the rule reads it: the caller's copy, or a fresh read of the placement columns (always on refresh, and when
 // the caller's select left the intent or stamp columns out, so a missing column can never read as "not asked").
@@ -273,8 +290,11 @@ function customerExceptionAt(service) {
   return Number.isNaN(at.getTime()) ? null : at;
 }
 
-// A placement row that holds the visit: the customer's, or a mover this rule does not know (fail closed).
-const holdsSlot = (initiator) => !AUTOMATIC_INITIATORS.has(initiator) && !STAFF_INITIATORS.has(initiator);
+// A placement row that holds the visit: the customer's, a staff move for the customer's request, or a mover this rule
+// does not know (fail closed).
+const holdsSlot = (r) => customerRequested(r) || (!AUTOMATIC_INITIATORS.has(r.initiated_by) && !STAFF_INITIATORS.has(r.initiated_by));
+const pickedBy = (r) => (CUSTOMER_INITIATORS.has(r.initiated_by) || customerRequested(r)
+  ? 'The customer' : `An unknown mover (${r.initiated_by || 'unknown'})`);
 const asked = (service) => service.customer_asked_time === true || service.customer_asked_time === false;
 
 async function isPersonPlacedVisit(input, db, opts = {}) {
@@ -286,23 +306,24 @@ async function isPersonPlacedVisit(input, db, opts = {}) {
     if (service.auto_dispatch_locked === true || service.auto_dispatch_excluded === true) {
       return { placed: true, reason_code: 'MANUALLY_LOCKED', reason_description: 'Locked from auto-dispatch by staff' };
     }
-    // The move-history read carries after_intent only for a visit with a recorded intent (time-promise memberIntentState).
-    const newestRows = await loadNewestSlotRows(db, service.id, { withIntent: asked(service) });
+    const withIntent = asked(service);
+    const newestRows = await loadNewestSlotRows(db, service.id, { withIntent });
+    // The newest change of date or start: an end-only edit makes neither an asked time nor a date edit stale. (The
+    // day-only promise's memberIntentState still judges against the newest slot change of any kind.)
+    const owners = await newestPlacementRows(db, service.id, newestRows, withIntent);
     // Lazy: time-promise requires this module lazily too.
-    const intent = asked(service) ? require('../time-promise').currentIntent(service, newestRows[0] || null) : null;
+    const intent = withIntent ? require('../time-promise').currentIntent(service, owners[0] || null) : null;
     if (intent === true) return { placed: true, reason_code: 'CUSTOMER_ASKED_TIME', reason_description: 'The customer asked for this time' };
-    const newestAt = newestRows.length ? new Date(newestRows[0].created_at) : null;
+    const placedAt = owners.length ? new Date(owners[0].created_at) : null;
     const exceptionAt = customerExceptionAt(service);
-    if (exceptionAt && (!newestAt || exceptionAt > newestAt)) {
+    if (exceptionAt && (!placedAt || exceptionAt > placedAt)) {
       return { placed: true, reason_code: 'CUSTOMER_PICKED', reason_description: 'The customer chose this date (date edit)' };
     }
     if (intent === false) return { placed: false };
     const start = startOf(service.window_start);
-    const owners = await newestPlacementRows(db, service.id, newestRows);
-    const placement = owners.find((r) => ownsSlot(r, dateStr, start) && holdsSlot(r.initiated_by));
+    const placement = owners.find((r) => ownsSlot(r, dateStr, start) && holdsSlot(r));
     if (!placement) return { placed: false };
-    const who = CUSTOMER_INITIATORS.has(placement.initiated_by) ? 'The customer' : `An unknown mover (${placement.initiated_by || 'unknown'})`;
-    return { placed: true, reason_code: 'CUSTOMER_PICKED', reason_description: `${who} chose this date or time` };
+    return { placed: true, reason_code: 'CUSTOMER_PICKED', reason_description: `${pickedBy(placement)} chose this date or time` };
   } catch (err) {
     return { placed: true, degraded: true, reason_code: 'PERSON_PLACED_UNKNOWN', reason_description: `Could not read the move history: ${err.message}` };
   }
@@ -348,11 +369,7 @@ async function loadNewestSlotRows(db, serviceId, { withIntent = false } = {}) {
         WHERE r2.scheduled_service_id = reschedule_log.scheduled_service_id
           AND r2.new_date IS NOT NULL
           AND (r2.original_date IS DISTINCT FROM r2.new_date OR r2.original_window IS DISTINCT FROM r2.new_window))`);
-  return withIntent
-    ? query.select(...LOG_COLUMNS,
-      db.raw(`reschedule_log.created_at > (SELECT s.customer_asked_time_at FROM scheduled_services s
-        WHERE s.id = reschedule_log.scheduled_service_id) AS after_intent`))
-    : query.select(...LOG_COLUMNS);
+  return logSelect(db, query, withIntent);
 }
 
 module.exports = {

@@ -345,6 +345,42 @@ describe('isPersonPlacedVisit', () => {
     expect(await isPersonPlacedVisit(bare, fakeDb({ log: [row()], row: { window_start: '13:00:00' } }))).toEqual({ placed: false });
   });
 
+  // Local audit 2026-11-22 (round 3): an end-only edit never makes an asked time stale; a later change of start does.
+  test('an asked time survives a later end-only edit, and ends at a later change of start', async () => {
+    const askedVisit = { ...visit, customer_asked_time: true, customer_asked_time_at: '2026-10-07T00:00:00Z', date_exception_source: null };
+    const longer = row({ id: 'l2', initiated_by: 'admin_bulk', series_move_id: null, created_at: '2026-10-08T12:00:00Z',
+      original_date: '2026-10-18', original_window: '09:00-10:00', new_window: '09:00-10:30', after_intent: true });
+    const booked = row({ initiated_by: 'admin', series_move_id: null, after_intent: false });
+    expect(await isPersonPlacedVisit(askedVisit, fakeDb({ log: [booked, longer] })))
+      .toMatchObject({ placed: true, reason_code: 'CUSTOMER_ASKED_TIME' });
+    expect(await isPersonPlacedVisit(askedVisit, fakeDb({ log: [longer] })))
+      .toMatchObject({ placed: true, reason_code: 'CUSTOMER_ASKED_TIME' });
+    const restart = row({ id: 'l3', initiated_by: 'admin', series_move_id: null, created_at: '2026-10-09T12:00:00Z',
+      original_date: '2026-10-18', original_window: '13:00-14:00', new_window: '09:00-10:00', after_intent: true });
+    expect(await isPersonPlacedVisit(askedVisit, fakeDb({ log: [booked, longer, restart] }))).toEqual({ placed: false });
+  });
+
+  // Local audit 2026-11-22 (round 3): a staff move FOR the customer's request holds like the customer's own pick.
+  test('a staff move with a customer-request reason holds; an ordinary staff reason does not', async () => {
+    for (const reason_code of ['customer_request', 'customer_request_series', 'customer_call_request', 'customer_call_request_series',
+      'ai_call_reschedule', 'ai_call_reschedule_series']) {
+      expect(await isPersonPlacedVisit(visit, fakeDb({ log: [row({ initiated_by: 'admin', reason_code, series_move_id: null })] })))
+        .toMatchObject({ placed: true, reason_code: 'CUSTOMER_PICKED', reason_description: 'The customer chose this date or time' });
+    }
+    for (const reason_code of ['admin', 'admin_series', 'dispatch_drag', 'weather_rain', null]) {
+      expect(await isPersonPlacedVisit(visit, fakeDb({ log: [row({ initiated_by: 'admin', reason_code, series_move_id: null })] })))
+        .toEqual({ placed: false });
+    }
+  });
+
+  // Local audit 2026-11-22 (round 3): a date-only rebooker move keeps the visit's start and logs new_window NULL.
+  test('a customer date-only move holds with the kept start or no start, and ends at another start', async () => {
+    const dateOnly = row({ new_window: null, original_window: '13:00-14:00' });
+    expect(await isPersonPlacedVisit({ ...visit, window_start: '13:00:00' }, fakeDb({ log: [dateOnly] }))).toMatchObject({ placed: true });
+    expect(await isPersonPlacedVisit({ ...visit, window_start: null }, fakeDb({ log: [dateOnly] }))).toMatchObject({ placed: true });
+    expect(await isPersonPlacedVisit({ ...visit, window_start: '15:00:00' }, fakeDb({ log: [dateOnly] }))).toEqual({ placed: false });
+  });
+
   test('not placed after a later automatic move, even one that returned the visit to the same date', async () => {
     const later = row({ id: 'l2', initiated_by: 'auto_dispatch', series_move_id: null, created_at: '2026-10-06T08:10:19Z', new_date: '2026-10-19' });
     const back = row({ id: 'l3', initiated_by: 'auto_dispatch', series_move_id: null, created_at: '2026-10-07T08:10:19Z', new_date: '2026-10-18' });

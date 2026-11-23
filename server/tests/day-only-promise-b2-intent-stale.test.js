@@ -166,7 +166,7 @@ describe('the writes and the shared history read', () => {
     const db = Object.assign(() => mk(), { raw: (sql) => ({ raw: sql }) });
     await eligibility.loadNewestSlotRows(db, 's1');
     await eligibility.loadNewestSlotRows(db, 's1', { withIntent: true });
-    const cols = ['created_at', 'new_date', 'initiated_by', 'original_date', 'original_window', 'new_window'];
+    const cols = ['created_at', 'new_date', 'initiated_by', 'reason_code', 'original_date', 'original_window', 'new_window'];
     expect(selects[0]).toEqual(cols);
     expect(selects[1].slice(0, cols.length)).toEqual(cols);
     expect(selects[1]).toHaveLength(cols.length + 1);
