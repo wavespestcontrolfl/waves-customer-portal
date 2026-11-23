@@ -45,7 +45,7 @@ const pestRow = { service: 'pest_control', name: 'Pest Control', perTreatment: 1
 const lawnRow = { service: 'lawn_care', name: 'Lawn Care', perTreatment: 140, visitsPerYear: 9, annualAfterDiscount: 1008 };
 // The schedule line the invoice matched (admin-customers.js scheduleLinesFromEstimate), with its saved row.
 const scheduleLine = (sourceLine = pestRow, extra = {}) => ({ source: 'recurring', cadence: 'quarterly', perApplicationPrice: 85,
-  serviceKey: 'pest_control_quarterly', sourceLine, ...extra });
+  serviceKey: 'pest_control_quarterly', sourceLineKey: 'recurring:0', sourceLine, ...extra });
 const visit = (extra = {}) => ({ id: 'v1', source_estimate_id: 'e1', service_type: 'Quarterly Pest Control Service', estimated_price: '85.00', ...extra });
 const unnamed = (extra = {}) => ({ breakdown: null, reason: 'discount_unnamed', estimate: estimate(), line: scheduleLine(), ...extra });
 const findingsFor = async (actual, row = visit()) => {
@@ -65,7 +65,7 @@ describe('tierSavingsLeftOffInvoices', () => {
     const conn = fakeDb([visit()]);
     acceptedVisitBreakdown.mockResolvedValue(unnamed());
     expect(await tierSavingsLeftOffInvoices(conn, { today: TODAY })).toEqual({
-      checked: 1, findings: [{ visitId: 'v1', estimateId: 'e1', serviceKey: 'pest_control', tier: 'gold' }],
+      checked: 1, findings: [{ visitId: 'v1', estimateId: 'e1', serviceKey: 'pest_control', lineKey: 'recurring:0', tier: 'gold' }],
     });
     expect(acceptedVisitBreakdown.mock.calls).toEqual([[visit(), { database: conn }]]);
     // The invoice's own discount context (estimateDiscountContext), with only its tier reading replaced.
@@ -119,7 +119,7 @@ describe('tierSavingsLeftOffInvoices', () => {
         estimate: est, line };
     };
     const names = (actual) => actual.breakdown.discounts.map((d) => d.name);
-    const finding = [{ visitId: 'v1', estimateId: 'e1', serviceKey: 'pest_control', tier: 'gold' }];
+    const finding = [{ visitId: 'v1', estimateId: 'e1', serviceKey: 'pest_control', lineKey: 'recurring:0', tier: 'gold' }];
     expect(names(printed(pestRow))).toEqual(['WaveGuard Gold']);
     expect(await findingsFor(printed(pestRow))).toEqual([]);
     expect(names(printed(tierless))).toEqual(['WaveGuard']);
@@ -234,7 +234,7 @@ describe('tierSavingsLeftOffInvoices', () => {
   test('an estimate saved with no engine lines is read with the tier and the rate it saved', async () => {
     const admin = (recurring, extra = {}, tier = 'Gold') => findingsOn({ tier, data: { inputs: {},
       result: { recurring: { services: [pestRow], ...recurring } }, summary: { manualDiscount: null, serviceSpecificDiscounts: [] }, ...extra } });
-    expect(await admin({ ...gold, discount: 0.15 })).toEqual([{ visitId: 'v1', estimateId: 'e1', serviceKey: 'pest_control', tier: 'gold' }]);
+    expect(await admin({ ...gold, discount: 0.15 })).toEqual([{ visitId: 'v1', estimateId: 'e1', serviceKey: 'pest_control', lineKey: 'recurring:0', tier: 'gold' }]);
     expect(pricedWith()).toEqual([{ tier: 'gold', amount: 0.15 }]);
     expect(await admin(gold, { sendSnapshot: { tierDiscounts: { Gold: 0.15 } } })).toHaveLength(1);
     expect(await admin({ waveGuardTier: 'Gold', discount: 0.15 }, {}, null)).toHaveLength(1);

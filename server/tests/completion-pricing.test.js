@@ -257,9 +257,6 @@ describe('completion estimate evidence', () => {
     const source = { engineResult: { lineItems: [item, { ...item, perApp: 120, annual: 480 }] } };
     expect(acceptanceServiceLists(source).recurringSvcList).toHaveLength(1);
     expect(acceptanceServiceLists(source, { preserveDuplicates: true }).recurringSvcList).toHaveLength(2);
-    // A plan's one-time first-visit fee shares the plan's key but is no second recurring line (pre-push codex).
-    const fee = { service: 'pest_initial_roach', price: 49, priceBeforeDiscount: 49, priceAfterDiscount: 49 };
-    expect(acceptanceServiceLists({ result: { lineItems: [item, fee] } }, { preserveDuplicates: true }).recurringSvcList).toHaveLength(1);
   });
 
 });

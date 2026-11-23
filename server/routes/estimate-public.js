@@ -22346,12 +22346,8 @@ function acceptanceServiceLists(estData, { preserveDuplicates = false } = {}) {
     // Supplementation coalesces engine rows by family for acceptance.
     // Completion must still see that two original lines claimed the same
     // identity; repeating its normalized identity makes that match ambiguous.
-    // Only a line that becomes a recurring row on its own claims one: a
-    // one-time line (a plan's first-visit fee) shares its plan's key but never
-    // does (pre-push codex: it made every visit of such a plan ambiguous).
     const seenKeys = new Set();
     for (const row of sourceResult.lineItems) {
-      if (!recurringServicesWithSupplements({ lineItems: [row] }).length) continue;
       const key = recurringServiceKey(row);
       const matched = recurringRows.find((candidate) => recurringServiceKey(candidate) === key);
       if (key && seenKeys.has(key) && matched) recurringRows.push(matched);

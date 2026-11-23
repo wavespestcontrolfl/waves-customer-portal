@@ -176,7 +176,9 @@ function unnamedSavingMiss({ estimate, line, data, block, lineItems, serviceKey 
   return named ? witness.tier : null;
 }
 
-// One visit: a finding { visitId, estimateId, serviceKey, tier } or null.
+// One visit: a finding { visitId, estimateId, serviceKey, lineKey, tier } or null. `lineKey` is the schedule line the
+// invoice matched (admin-customers.js scheduleLinesFromEstimate sourceLineKey): two lines of one estimate can share a
+// service key (a monthly and a seasonal mosquito line), never a line key.
 async function visitFinding(conn, visit) {
   const { breakdown, reason, estimate, line } = await require('./completion-pricing').acceptedVisitBreakdown(visit, { database: conn });
   if ((!breakdown && reason !== 'discount_unnamed') || !estimate) return null;
@@ -186,12 +188,12 @@ async function visitFinding(conn, visit) {
   const records = { estimate, line, data, serviceKey, ...pricingRecords(data) };
   const tierRow = breakdown ? pricedTierRow(estimate, line) : null;
   const tier = tierRow ? printedLabelMiss(records, breakdown.discounts, tierRow) : unnamedSavingMiss(records);
-  return tier ? { visitId: String(visit.id), estimateId: String(estimate.id), serviceKey, tier } : null;
+  return tier ? { visitId: String(visit.id), estimateId: String(estimate.id), serviceKey, lineKey: line.sourceLineKey || null, tier } : null;
 }
 
 /**
  * The upcoming visits (today through `days` ahead, Eastern) whose invoice would not print their estimate's WaveGuard
- * tier line. Returns { checked, findings: [{ visitId, estimateId, serviceKey, tier }] }, one per visit. A visit that
+ * tier line. Returns { checked, findings: [{ visitId, estimateId, serviceKey, lineKey, tier }] }, one per visit. A visit that
  * cannot be read throws: a check that did not run proves nothing.
  */
 async function tierSavingsLeftOffInvoices(conn, { today, days = LOOK_AHEAD_DAYS } = {}) {

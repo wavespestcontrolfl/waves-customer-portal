@@ -340,7 +340,7 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
       // the Gold rate.
       await save([item], {}, { waveguard_tier: null });
       expect(await reason(job)).toBe('discount_unnamed');
-      expect(await findingsFor()).toEqual([{ visitId: jobId, estimateId, serviceKey: 'pest_control', tier: 'gold' }]);
+      expect(await findingsFor()).toEqual([{ visitId: jobId, estimateId, serviceKey: 'pest_control', lineKey: 'recurring:0', tier: 'gold' }]);
       // A staff discount kept only in the estimate's saved summary: one line by design.
       await save([item], {}, {}, { summary: { manualDiscount: { amount: 0.04, recurringAmount: 0.04, label: 'Courtesy' } } });
       expect(await reason(job)).toBe('discount_unnamed');
@@ -358,14 +358,16 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
       await trx('scheduled_services').where({ id: jobId }).update({ estimated_price: 84.99 });
       expect(await reason({ ...job, estimated_price: 84.99 })).toBe('discount_unnamed');
       expect(await findingsFor()).toEqual([]);
-      // An engine result saved whole, with the plan's first-visit fee beside the plan (pre-push audit): the fee is no
-      // second recurring line, so the visit matches its plan line and the invoice names the tier that line recorded.
-      const fee = { service: 'pest_initial_roach', price: 49, priceBeforeDiscount: 49, priceAfterDiscount: 49 };
+      // An engine result saved whole (result.lineItems, no mapped services), with the engine's own discount record, is out
+      // of the check's reach (pre-push audit round 10): the completion reader keeps the line's net only as `annual`, so a
+      // line the engine rated gets no per-visit price and the invoice keeps one line. Pricing such rows changes invoices,
+      // so it is not this check's change. 0 of 164 upcoming visits traced to this shape on 11-22.
+      const rated = { ...item, discount: { effectiveDiscount: 0.15, appliedDiscountPercent: 0.15,
+        appliedDiscounts: [{ type: 'waveguard', tier: 'gold', amount: 0.15 }] } };
       await trx('estimates').where({ id: estimateId }).update({
-        estimate_data: { result: { lineItems: [item, fee], recurring: { tier: 'Gold', waveGuardTier: 'Gold' } } } });
+        estimate_data: { result: { lineItems: [rated], recurring: { tier: 'Gold', waveGuardTier: 'Gold' } } } });
       await trx('scheduled_services').where({ id: jobId }).update({ estimated_price: 85 });
-      expect((await pricing.acceptedVisitBreakdown({ ...job, estimated_price: 85 }, { database: trx })).breakdown)
-        .toEqual({ base: 100, amount: 85, discounts: [{ name: 'WaveGuard Gold', dollars: 15 }] });
+      expect(await reason({ ...job, estimated_price: 85 })).toBe('no_breakdown');
       expect(await findingsFor()).toEqual([]);
       // The admin estimate tool's save: its mapped result only, with no engine lines (pre-push audit round 5). The
       // invoice names the tier the block saved at its rate, so nothing is found; with no rate saved, nothing proves one.
@@ -383,7 +385,7 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
       await admin({ services: [{ ...row, discount: { appliedDiscounts: [{ type: 'waveguard', amount: 0.15 }] } }] });
       expect((await pricing.acceptedVisitBreakdown({ ...job, estimated_price: 85 }, { database: trx })).breakdown.discounts)
         .toEqual([{ name: 'WaveGuard', dollars: 15 }]);
-      expect(await findingsFor()).toEqual([{ visitId: jobId, estimateId, serviceKey: 'pest_control', tier: 'gold' }]);
+      expect(await findingsFor()).toEqual([{ visitId: jobId, estimateId, serviceKey: 'pest_control', lineKey: 'recurring:0', tier: 'gold' }]);
     } finally { delete process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES; }
     // Gate off: every invoice keeps one line by design, so the check reads nothing.
     expect(await tierSavingsLeftOffInvoices(trx, { today, days: 1 })).toEqual({ checked: 0, findings: [] });

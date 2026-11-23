@@ -926,22 +926,25 @@ describe('detector adapters', () => {
 
   test('tier_saving_left_off_invoice reads the shared db from the Eastern day and keys a record by the estimate line', async () => {
     tierSavingsLeftOffInvoices.mockResolvedValue({ checked: 40, findings: [
-      { visitId: 'v1', estimateId: 'e1', serviceKey: 'pest_control', tier: 'platinum' },
-      { visitId: 'v2', estimateId: 'e1', serviceKey: 'pest_control', tier: 'platinum' },
-      { visitId: 'v3', estimateId: 'e2', serviceKey: 'rodent_bait', tier: 'silver' },
+      { visitId: 'v1', estimateId: 'e1', serviceKey: 'pest_control', lineKey: 'recurring:0', tier: 'platinum' },
+      { visitId: 'v2', estimateId: 'e1', serviceKey: 'pest_control', lineKey: 'recurring:0', tier: 'platinum' },
+      { visitId: 'v3', estimateId: 'e2', serviceKey: 'rodent_bait', lineKey: 'recurring:0', tier: 'silver' },
+      // A second line of estimate e1 with the same service key (a monthly and a seasonal mosquito line share one).
+      { visitId: 'v4', estimateId: 'e1', serviceKey: 'pest_control', lineKey: 'recurring:1', tier: 'platinum' },
     ] });
     const out = await byKey('tier_saving_left_off_invoice').run({ now: NOW });
     expect(tierSavingsLeftOffInvoices).toHaveBeenCalledWith(db, { today: '2026-06-15' });
     // Two visits of one estimate line are one finding, counted once in its first record (pre-push audit), and a new
-    // visit of that line entering the window posts nothing new.
+    // visit of that line entering the window posts nothing new. Two lines of one estimate stay two findings, even with
+    // one service key (pre-push audit).
     expect(out).toEqual({
-      count: 2,
-      ids: ['v1 (pest_control, platinum, 2 visits)', 'v3 (rodent_bait, silver, 1 visit)'],
-      itemKeys: ['e1:pest_control', 'e2:rodent_bait'],
-      detail: { checked: 40, visits: 3 },
+      count: 3,
+      ids: ['v1 (pest_control, platinum, 2 visits)', 'v3 (rodent_bait, silver, 1 visit)', 'v4 (pest_control, platinum, 1 visit)'],
+      itemKeys: ['e1:recurring:0', 'e2:recurring:0', 'e1:recurring:1'],
+      detail: { checked: 40, visits: 4 },
     });
     const r = { key: 'tier_saving_left_off_invoice', itemKeys: out.itemKeys, count: out.count };
-    expect(itemHashes(r, NOW)).toHaveLength(2);
+    expect(itemHashes(r, NOW)).toHaveLength(3);
     expect(byKey('tier_saving_left_off_invoice').moving).toBe(true);
   });
 

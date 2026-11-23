@@ -373,10 +373,11 @@ const DETECTORS = Object.freeze([
       const { tierSavingsLeftOffInvoices } = require('./invoice-tier-line-check');
       const { checked, findings } = await tierSavingsLeftOffInvoices(db, { today: etDateString(now) });
       // One finding per estimate line (pre-push audit: per visit, a line's first record counted each of its visits):
-      // its first visit in the window, and how many of its visits are there.
+      // its first visit in the window, and how many of its visits are there. The line is the schedule line the invoice
+      // matched, not its service key: two lines of one estimate can share a key (pre-push audit).
       const lines = new Map();
       for (const f of findings) {
-        const key = `${f.estimateId}:${f.serviceKey}`;
+        const key = `${f.estimateId}:${f.lineKey || f.serviceKey}`;
         if (lines.has(key)) lines.get(key).visits += 1;
         else lines.set(key, { ...f, visits: 1 });
       }
