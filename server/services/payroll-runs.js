@@ -157,6 +157,8 @@ function bankView(row) {
       unpaidHours: hoursText(figures.unpaidMinutes),
       balanceHours: hoursText(figures.afterMinutes),
       ...(paidOut > 0 ? { paidOutHours: hoursText(paidOut) } : {}),
+      // A check of a week before a payout, paid after it: the hours the week would have earned, not paid out.
+      ...(Number(figures.notPaidOutMinutes) > 0 ? { notPaidOutHours: hoursText(figures.notPaidOutMinutes) } : {}),
     },
   };
 }

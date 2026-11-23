@@ -425,6 +425,7 @@ describe('Time off in the pay run table and stub', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Open pay run for Oct 12, 2026 to Oct 18, 2026' }));
     const detail = await screen.findByLabelText(/Pay run for/);
     expect(within(detail).getByText('Time-off bank: earned 1.54 h, used 0.00 h, paid out 3.08 h, balance 0.00 h')).toBeInTheDocument();
+    expect(within(detail).queryByText(/paid after the bank was paid out/)).toBeNull();
     const paidOut = within(detail).getByRole('list', { name: 'Time-off bank paid out' });
     expect(within(paidOut).getAllByRole('listitem').map(item => item.textContent)).toEqual([
       'Sample Alpha3.08 hours, on the paycheck.', 'Sample BetaThe bank is empty: nothing is paid out.',
@@ -433,6 +434,19 @@ describe('Time off in the pay run table and stub', () => {
     const stub = await screen.findByLabelText('Pay stub');
     expect(within(stub).getByText('Paid out at leaving').parentElement).toHaveTextContent('3.08 h');
     expect(within(stub).getByText('Balance after this pay').parentElement).toHaveTextContent('0.00 h');
+  });
+
+  it('shows on a catch-up check the time-off hours it did not pay out, and nothing on any other check', async () => {
+    const bank = { earnedHours: '0.00', usedHours: '0.00', unpaidHours: '0.00', balanceHours: '0.00', notPaidOutHours: '1.54' };
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options) => {
+      if (path === '/admin/payroll/runs/run-1') return reply({ run: { ...RUN, checks: [check({ timeOffBank: bank })] } });
+      return original(path, options);
+    });
+    render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open pay run for Oct 12, 2026 to Oct 18, 2026' }));
+    const detail = await screen.findByLabelText(/Pay run for/);
+    expect(within(detail).getByText('This week was paid after the bank was paid out. 1.54 h of time off it earned are not on this check: pay them by hand if you choose.')).toBeInTheDocument();
   });
 
   it('shows no bank and no list on a run without them', async () => {
