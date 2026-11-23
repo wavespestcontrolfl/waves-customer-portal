@@ -145,17 +145,6 @@ const TWILIO_NUMBERS = {
       location: 'bradenton',
       source: 'facebook',
     },
-    // Google Local Services Ads (owner 2026-11-23, "yes buy, make sure its
-    // bradenton based number"): the phone on the Local Services profile only,
-    // so each Local Services call files under the paid google_lsa channel
-    // (ads/call-attribution.js) instead of the Bradenton city-page line.
-    googleLsa: {
-      number: '+19412135010',
-      formatted: '(941) 213-5010',
-      label: 'Google LSA',
-      location: 'bradenton',
-      source: 'google_lsa',
-    },
   },
 
   // ── GBP Call Tracking ────────────────────────────────────────
