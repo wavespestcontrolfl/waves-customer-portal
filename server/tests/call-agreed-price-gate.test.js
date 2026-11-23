@@ -348,7 +348,7 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
   const count = (text) => source.split(text).length - 1;
   const held = 'const agreedJobHeldForOffice = agreedJobAtAdoption\n              && (agreedServiceFields.length > 0 || agreedJobRewriteHeld || agreedJobHoldChangesService(extracted, transcription, bookableServiceNames));';
   const txAt = source.indexOf('const svc = await db.transaction(async (trx) => {');
-  const guard = "if (agreedJobHeldForOffice) {\n                  // A street-only address match (the visit would have booked\n                  // pending with an address card) rides on the office card.\n                  return { __held: { reason: 'agreed_one_time_job_office_books', streetLevelAddress: streetLevelPending ? String(v2StreetLevelHold?.address_on_file || '') : null } };\n                }";
+  const guard = "if (agreedJobHeldForOffice) {\n                  // A street-only address match (the visit would have booked\n                  // pending with an address card) rides on the office card.\n                  // So does the address the booking resolved (null: the address on file).\n                  return {\n                    __held: {\n                      reason: 'agreed_one_time_job_office_books',";
 
   test('the visit price call is unchanged, and the processor never reads a price staff only stated', () => {
     expect(at).toBeGreaterThan(-1);
@@ -398,12 +398,15 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(call).toContain("skippedReason: 'agreed_one_time_job_office_books', preferredDateTime: extracted.preferred_date_time,");
     // The slot the booker resolved, the price for the priced service and its basis, a follow-up.
     // The evidence comes from one builder (the held card and the kept-visit card).
-    expect(call).toContain('agreedJobCardEvidence = agreedJobCardEvidenceFor({ streetLevelAddress: svc.__held.streetLevelAddress });');
+    expect(call).toContain('agreedJobCardEvidence = agreedJobCardEvidenceFor({ streetLevelAddress: svc.__held.streetLevelAddress, bookingAddress: svc.__held.bookingAddress });');
     const builder = source.slice(source.indexOf('const agreedJobCardEvidenceFor = ('), source.indexOf('const svc = await db.transaction(async (trx) => {', source.indexOf('const agreedJobCardEvidenceFor = (')));
     expect(builder).toContain('booking_date: scheduledDate || null,');
+    // The address the booking resolved rides from the hold onto the card.
+    expect(builder).toContain('booking_address: bookingAddress && bookingAddress.line1 ? bookingAddress : null,');
+    expect(source).toContain("? ['line1', 'line2', 'city', 'state', 'zip'].reduce((out, key) => ({ ...out, [key]: propertyLinkage.address[key] || null }), {})");
     // A street-only address match rides from the hold onto the card.
     expect(builder).toContain("street_level_address: typeof streetLevelAddress === 'string' ? streetLevelAddress : null,");
-    expect(source).toContain("return { __held: { reason: 'agreed_one_time_job_office_books', streetLevelAddress: streetLevelPending ? String(v2StreetLevelHold?.address_on_file || '') : null } };");
+    expect(source).toContain("streetLevelAddress: streetLevelPending ? String(v2StreetLevelHold?.address_on_file || '') : null,\n                      bookingAddress: propertyLinkage.address");
     expect(builder).toContain('booking_window_start: windowStart || null,');
     // Visits start on the hour: an off-hour time the call set is flagged for staff to confirm.
     expect(builder).toContain('booking_off_hour: offTheHour(windowStart),');
@@ -480,7 +483,9 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(helper).toContain("if (call.twilio_call_sid) qb.orWhere('notes', 'like', `%Call SID: ${call.twilio_call_sid}%`);");
     // No status filter: a cancelled visit counts too. An unreadable answer counts as yes (main's path).
     expect(helper).not.toContain('status');
-    expect(helper).toContain('return true;\n  }\n}');
+    // An unreadable answer counts as no: the hold applies (a visit the call has is still found by the booking first).
+    expect(helper).toContain('return false;\n  }\n}');
+    expect(helper).toContain('if (!call?.id) return false;');
     // The replay-only paths it replaces are gone.
     for (const gone of ['agreedJobPriorByKey', 'agreedJobFollowUpWithheld', 'kept_visit_id']) expect(source).not.toContain(gone);
   });
@@ -511,7 +516,8 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     const callers = { ...price, stated_by: 'caller' };
     // …nor a caller's number the extraction says staff did not offer, even as a total.
     expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price_offered_by_staff: false, price: callers, prices: [callers] }), 'One-Time Pest Control Service')).toBeNull();
-    expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price_offered_by_staff: false }), 'One-Time Pest Control Service')).toEqual({ amount: 250, basis: 'agreed_total' });
+    // Staff's own term, not offered: a price to check, never "the total the caller accepted".
+    expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price_offered_by_staff: false }), 'One-Time Pest Control Service')).toEqual({ amount: 250, basis: 'stated' });
     expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price_is_final: false, price: callers, prices: [callers] }), 'One-Time Pest Control Service')).toBeNull();
     expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price: callers, prices: [callers] }), 'One-Time Pest Control Service')).toEqual({ amount: 250, basis: 'agreed_total' });
     // The booking resolved to another row (a free re-service): no price on the card.

@@ -1607,6 +1607,15 @@ describe('ConfirmEvidence — agreed one-time job the AI did not book', () => {
     expect(screen.queryByText(/Visits start on the hour/)).not.toBeInTheDocument();
   });
 
+  it('books at the address the booking resolved, and shows the caller\'s wording apart', () => {
+    show(payload({ scheduling_window: { requested_address: { street_line_1: '100 Example St' } } }, { booking_address: { line1: '100 Example St', line2: 'Unit 4', city: 'Bradenton', state: 'FL', zip: '34202' } }));
+    expect(screen.getByText('100 Example St, Unit 4, Bradenton, FL, 34202')).toBeInTheDocument();
+    expect(screen.getByText('Caller said:')).toBeInTheDocument();
+    cleanup();
+    show(payload());
+    expect(screen.getByText("The customer's address on file")).toBeInTheDocument();
+  });
+
   it('always tells staff to check the schedule before they book, so a visit booked since is never doubled', () => {
     show(payload());
     expect(screen.getByText('Before you book:')).toBeInTheDocument();

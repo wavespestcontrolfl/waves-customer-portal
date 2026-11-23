@@ -145,6 +145,10 @@ function agreedOneTimeJobRows(p) {
     // The card holds what the call said. Nothing later rewrites it, as on every approved-but-unbooked card.
     { label: "Before you book", value: "Check the customer's schedule. Staff or a later pass may have booked, moved or cancelled a visit for this call: never book a second one." },
     p.service && { label: "Book", value: p.service },
+    // The address the booking resolved; the caller's own wording shows below as "Caller said".
+    { label: "Book at", value: j.booking_address && j.booking_address.line1
+      ? [j.booking_address.line1, j.booking_address.line2, j.booking_address.city, j.booking_address.state, j.booking_address.zip].filter((v) => String(v || "").trim()).join(", ")
+      : "The customer's address on file" },
     j.booking_date && { label: "Agreed time", value: `${slot(j.booking_date, j.booking_window_start)} ET${j.booking_off_hour === true ? ". Visits start on the hour: confirm an on-hour start with the customer." : ""}` },
     typeof j.street_level_address === "string" && { label: "Address", value: `Google matched only the street of ${j.street_level_address || "the address on file"}. Confirm the house number with the customer before you book.` },
     price && (j.price_basis === "agreed_total"
@@ -283,7 +287,7 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
     // office books it from here: the service, the slot the booker resolved (Eastern), the price and a follow-up.
     ...agreedOneTimeJobRows(p),
     p.skipped_reason && p.scheduling_window?.requested_address?.street_line_1 && {
-      label: "Book at",
+      label: p.skipped_reason === "agreed_one_time_job_office_books" ? "Caller said" : "Book at",
       value: [p.scheduling_window.requested_address.street_line_1, p.scheduling_window.requested_address.street_line_2, p.scheduling_window.requested_address.city, p.scheduling_window.requested_address.postal_code].filter((v) => String(v || "").trim()).join(", "),
     },
     // …and on the RECOVERY task Accept files (stated_street deliberately

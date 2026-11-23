@@ -2037,10 +2037,11 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
 // GATE_CALL_AGREED_ONE_TIME_JOB: does any visit already belong to this call (any
 // status), by the call link or the legacy "Call SID:" notes marker that
 // findExistingCallAppointment reads? Read only when the hold would apply (a few
-// calls a quarter). An unreadable answer counts as yes: the call then runs as
-// before the gate.
+// calls a quarter). An unreadable answer counts as no, so the hold applies and
+// the AI never books the plan visit the hold exists to stop; a visit the call
+// does have is still found (and kept) by the booking's own lookups first.
 async function callHasAnyVisit(call) {
-  if (!call?.id) return true;
+  if (!call?.id) return false;
   try {
     const row = await db('scheduled_services')
       .where((qb) => {
@@ -2051,7 +2052,7 @@ async function callHasAnyVisit(call) {
     return !!row;
   } catch (err) {
     logger.warn(`[call-proc] agreed one-time job visit check failed for ${maskSid(call.twilio_call_sid)}: ${err.code || err.name || 'db_error'}`);
-    return true;
+    return false;
   }
 }
 
@@ -2073,10 +2074,12 @@ function agreedOneTimeJobCardPrice(v2Extraction, bookedService) {
   // An agreed total needs consistent evidence. When the extraction says the price
   // is not final, or the caller did not accept it, it is a price to check, shown
   // as staff's only when staff stated the term (never a caller's number).
-  // A caller's number the extraction says staff did not offer is never shown.
+  // Staff not offering it (an agent repeating a competitor's price, say) is a
+  // contradiction too: staff's own term then shows as a price to check, and a
+  // caller's number not at all.
   const statedBy = require('../utils/call-agreed-price').agreedOneTimeJobPriceStatedBy(v2Extraction);
   const consistent = request.price_is_final !== false && request.price_accepted_by_caller !== false
-    && !(request.price_offered_by_staff === false && statedBy !== 'agent');
+    && request.price_offered_by_staff !== false;
   if (consistent) return { amount, basis: 'agreed_total' };
   return statedBy === 'agent' ? { amount, basis: 'stated' } : null;
 }
@@ -21003,8 +21006,10 @@ const CallRecordingProcessor = {
               // GATE_CALL_AGREED_ONE_TIME_JOB: the office card's evidence (written by
               // every pass whole, so no older pass's details stay). `streetLevelAddress`:
               // Google matched only the street of it ('' = the address on file).
-              const agreedJobCardEvidenceFor = ({ streetLevelAddress = null } = {}) => ({
+              // `bookingAddress`: the address the booking resolved (null: the address on file).
+              const agreedJobCardEvidenceFor = ({ streetLevelAddress = null, bookingAddress = null } = {}) => ({
                 street_level_address: typeof streetLevelAddress === 'string' ? streetLevelAddress : null,
+                booking_address: bookingAddress && bookingAddress.line1 ? bookingAddress : null,
                 // The slot the booker resolved (Eastern date and hour), not the raw timestamp.
                 booking_date: scheduledDate || null,
                 booking_window_start: windowStart || null,
@@ -22565,7 +22570,16 @@ const CallRecordingProcessor = {
                 if (agreedJobHeldForOffice) {
                   // A street-only address match (the visit would have booked
                   // pending with an address card) rides on the office card.
-                  return { __held: { reason: 'agreed_one_time_job_office_books', streetLevelAddress: streetLevelPending ? String(v2StreetLevelHold?.address_on_file || '') : null } };
+                  // So does the address the booking resolved (null: the address on file).
+                  return {
+                    __held: {
+                      reason: 'agreed_one_time_job_office_books',
+                      streetLevelAddress: streetLevelPending ? String(v2StreetLevelHold?.address_on_file || '') : null,
+                      bookingAddress: propertyLinkage.address
+                        ? ['line1', 'line2', 'city', 'state', 'zip'].reduce((out, key) => ({ ...out, [key]: propertyLinkage.address[key] || null }), {})
+                        : null,
+                    },
+                  };
                 }
                 // Make-up move (GATE_CALL_MAKEUP_MOVE, owner 2026-10-22): every
                 // booking guard above passed and this fresh row is about to be
@@ -22760,7 +22774,7 @@ const CallRecordingProcessor = {
                 // closes, and every action version-checks. It carries the price
                 // for the priced service only, and a promised follow-up visit.
                 if (svc.__held.reason === 'agreed_one_time_job_office_books') {
-                  agreedJobCardEvidence = agreedJobCardEvidenceFor({ streetLevelAddress: svc.__held.streetLevelAddress });
+                  agreedJobCardEvidence = agreedJobCardEvidenceFor({ streetLevelAddress: svc.__held.streetLevelAddress, bookingAddress: svc.__held.bookingAddress });
                   agreedJobCardFiled = await fileSkippedBookingCard({
                     call, procToken, customerId, extraction: v2ApprovedExtraction || v2CanonicalExtraction,
                     skippedReason: 'agreed_one_time_job_office_books', preferredDateTime: extracted.preferred_date_time,
