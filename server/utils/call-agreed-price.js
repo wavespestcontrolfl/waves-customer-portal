@@ -148,7 +148,8 @@ function resolveStatedOneTimeCallPrice(v2Extraction = null) {
  *   - no strict total: the price staff stated (resolveStatedOneTimeCallPrice);
  *   - a strict total (quoted_price_usd, "the total the caller accepted for the
  *     service being booked"): that total, only when it is the same number as
- *     the accepted term. A $0 total, or one that differs, is not this price.
+ *     the accepted term. A $0 total, or one that differs, is not this price,
+ *     nor a caller's number the extraction says staff did not offer.
  * This is evidence, not a price to bill: see resolveStatedOneTimeCallPrice.
  */
 function resolveAgreedOneTimeJobPrice(v2Extraction = null) {
@@ -158,6 +159,9 @@ function resolveAgreedOneTimeJobPrice(v2Extraction = null) {
   const amount = accepted.length === 1 ? exactOneTimeAmount(accepted[0]) : null;
   if (amount === null) return null;
   if (svc.quoted_price_usd == null) return resolveStatedOneTimeCallPrice(v2Extraction);
+  // A caller's number the extraction says staff did not offer is not a Waves
+  // price, even when it matches the total.
+  if (svc.price_offered_by_staff === false && accepted[0].stated_by !== 'agent') return null;
   return svc.quoted_price_usd === amount ? amount : null;
 }
 

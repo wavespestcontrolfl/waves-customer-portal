@@ -392,14 +392,14 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
   // a call verdict never closes it, and every action on it is version-checked (admin-triage.js). The pre-push
   // audit asked a new card reason for each of these; the existing card already has them.
   test('the held booking files the approved-but-unbooked card with its price, its basis and the promised follow-up', () => {
-    const site = "if (svc.__held.reason === 'agreed_one_time_job_office_books') {\n                  agreedJobCardEvidence = agreedJobCardEvidenceFor(";
+    const site = "if (svc.__held.reason === 'agreed_one_time_job_office_books') {\n                  agreedJobCardEvidence = buildAgreedJobCardEvidence({";
     expect(count(site)).toBe(1);
     const call = source.slice(source.indexOf(site), source.indexOf("} else if (svc.__held.reason !== 'on_file_house_number_conflict') await db('triage_items')"));
     expect(call).toContain("skippedReason: 'agreed_one_time_job_office_books', preferredDateTime: extracted.preferred_date_time,");
     // The slot the booker resolved, the price for the priced service and its basis, a follow-up.
     // The evidence comes from one builder (the held card and the kept-visit card).
-    expect(call).toContain('agreedJobCardEvidence = agreedJobCardEvidenceFor({ streetLevelAddress: svc.__held.streetLevelAddress, bookingAddress: svc.__held.bookingAddress });');
-    const builder = source.slice(source.indexOf('const agreedJobCardEvidenceFor = ('), source.indexOf('const svc = await db.transaction(async (trx) => {', source.indexOf('const agreedJobCardEvidenceFor = (')));
+    expect(call).toContain('agreedJobCardEvidence = buildAgreedJobCardEvidence({\n                    scheduledDate, windowStart, price: agreedJobCardPrice, followUpPlan: callFollowUpPlan,\n                    streetLevelAddress: svc.__held.streetLevelAddress, bookingAddress: svc.__held.bookingAddress,\n                  });');
+    const builder = source.slice(source.indexOf('function buildAgreedJobCardEvidence({'), source.indexOf("// True for an 'HH:MM' start that is not on the hour"));
     expect(builder).toContain('booking_date: scheduledDate || null,');
     // The address the booking resolved rides from the hold onto the card.
     expect(builder).toContain('booking_address: bookingAddress && bookingAddress.line1 ? bookingAddress : null,');
@@ -410,12 +410,12 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(builder).toContain('booking_window_start: windowStart || null,');
     // Visits start on the hour: an off-hour time the call set is flagged for staff to confirm.
     expect(builder).toContain('booking_off_hour: offTheHour(windowStart),');
-    expect(builder).toContain('off_hour: offTheHour(callFollowUpPlan.windowStart) }');
-    expect(builder).toContain('stated_price: agreedJobCardPrice ? agreedJobCardPrice.amount : null,');
-    expect(builder).toContain('price_basis: agreedJobCardPrice ? agreedJobCardPrice.basis : null,');
-    expect(builder).toContain('? { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null,');
+    expect(builder).toContain('off_hour: offTheHour(followUpPlan.windowStart) }');
+    expect(builder).toContain('stated_price: price ? price.amount : null,');
+    expect(builder).toContain('price_basis: price ? price.basis : null,');
+    expect(builder).toContain('? { scheduled_date: followUpPlan.scheduledDate || null, window_start: followUpPlan.windowStart || null,');
     // A follow-up time the call did not set is a suggestion on the card, not a promise.
-    expect(builder).toContain('suggested: callFollowUpPlan.hourStated !== true || callFollowUpPlan.packageOnly === true,');
+    expect(builder).toContain('suggested: followUpPlan.hourStated !== true || followUpPlan.packageOnly === true,');
     expect(call).toContain('agreedJobCardFiled = await fileSkippedBookingCard({');
     expect(call).toContain('agreedOneTimeJob: agreedJobCardEvidence,');
     // The card writer: the evidence is ONE key, written on every pass (null for another skip), so an older
@@ -490,6 +490,18 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     for (const gone of ['agreedJobPriorByKey', 'agreedJobFollowUpWithheld', 'kept_visit_id']) expect(source).not.toContain(gone);
   });
 
+  // A held job at an off-hour time is stopped by the on-hour guard first (the hold never runs), so the guard's own
+  // card carries the job's evidence; the guard itself is unchanged.
+  test('the off-hour card carries the held job\'s evidence', () => {
+    const at = source.indexOf("flag: 'off_hour_start',\n                  extraction: v2ApprovedExtraction || undefined,");
+    expect(at).toBeGreaterThan(-1);
+    const card = source.slice(at, source.indexOf('scheduledDate = null;', at));
+    expect(card).toContain('...(agreedJobHeldForOffice ? {\n                      agreed_one_time_job: buildAgreedJobCardEvidence({');
+    expect(card).toContain('scheduledDate, windowStart, price: agreedJobCardPrice,');
+    // agreedJobHeldForOffice and its price exist before the guard.
+    expect(source.indexOf('const agreedJobCardPrice = agreedJobHeldForOffice')).toBeLessThan(at);
+  });
+
   test('offTheHour: true only for a start that is not on the hour', () => {
     const { offTheHour } = require('../services/call-recording-processor')._test;
     expect(offTheHour('10:30')).toBe(true);
@@ -514,7 +526,13 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price_is_final: true, price_accepted_by_caller: true }), 'One-Time Pest Control Service')).toEqual({ amount: 250, basis: 'agreed_total' });
     // A disputed total the CALLER stated is never shown as staff's number.
     const callers = { ...price, stated_by: 'caller' };
-    // …nor a caller's number the extraction says staff did not offer, even as a total.
+    // …nor a caller's number the extraction says staff did not offer, even as a total. The hold itself does not
+    // count it either (resolveAgreedOneTimeJobPrice), so such a call books as before.
+    const { resolveAgreedOneTimeJobPrice } = require('../utils/call-agreed-price');
+    expect(resolveAgreedOneTimeJobPrice(reading({ quoted_price_usd: 250, price_offered_by_staff: false, price: callers, prices: [callers] }))).toBeNull();
+    expect(resolveAgreedOneTimeJobPrice(reading({ quoted_price_usd: 250, price_offered_by_staff: false }))).toBe(250);
+    // The 11-21 shape (no strict total, staff's own term, price_offered_by_staff false) still reads as agreed.
+    expect(resolveAgreedOneTimeJobPrice(reading({ price_offered_by_staff: false, price_is_final: false }))).toBe(250);
     expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price_offered_by_staff: false, price: callers, prices: [callers] }), 'One-Time Pest Control Service')).toBeNull();
     // Staff's own term, not offered: a price to check, never "the total the caller accepted".
     expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price_offered_by_staff: false }), 'One-Time Pest Control Service')).toEqual({ amount: 250, basis: 'stated' });

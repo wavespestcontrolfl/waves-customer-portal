@@ -1956,6 +1956,32 @@ function callEmailCheckCardPayload(callEmailCheck) {
 // review-state marker so review_status opens. The two copies differed ONLY
 // in their skippedReason string. One helper, called from both sites — never
 // awaited from inside the caller's own db.transaction (this opens its own).
+// GATE_CALL_AGREED_ONE_TIME_JOB: the office card's evidence, written whole by
+// every pass (so no older pass's details stay). `scheduledDate` / `windowStart`:
+// the slot the booker resolved (Eastern), never the raw timestamp. `price`:
+// agreedOneTimeJobCardPrice. `followUpPlan`: resolveCallFollowUpPlan's visit 2.
+// `streetLevelAddress`: Google matched only the street of it ('' = the address
+// on file). `bookingAddress`: the address the booking resolved (null: none).
+function buildAgreedJobCardEvidence({ scheduledDate = null, windowStart = null, price = null, followUpPlan = null, streetLevelAddress = null, bookingAddress = null } = {}) {
+  return {
+    street_level_address: typeof streetLevelAddress === 'string' ? streetLevelAddress : null,
+    booking_address: bookingAddress && bookingAddress.line1 ? bookingAddress : null,
+    booking_date: scheduledDate || null,
+    booking_window_start: windowStart || null,
+    // Visits start on the hour: a time the call set at :30 is for staff to confirm.
+    booking_off_hour: offTheHour(windowStart),
+    stated_price: price ? price.amount : null,
+    price_basis: price ? price.basis : null,
+    // A follow-up the call did not set (the catalog interval, visit 1's hour, or
+    // a two-treatment package nobody discussed) is a suggestion.
+    follow_up: followUpPlan
+      ? { scheduled_date: followUpPlan.scheduledDate || null, window_start: followUpPlan.windowStart || null,
+        suggested: followUpPlan.hourStated !== true || followUpPlan.packageOnly === true,
+        off_hour: offTheHour(followUpPlan.windowStart) }
+      : null,
+  };
+}
+
 // True for an 'HH:MM' start that is not on the hour (visits start on the hour).
 function offTheHour(windowStart) {
   const minutes = /^\d{1,2}:(\d{2})/.exec(String(windowStart || ''));
@@ -20840,6 +20866,17 @@ const CallRecordingProcessor = {
                     scheduled_date: scheduledDate,
                     window_start: windowStart,
                     service_type: serviceType,
+                    // GATE_CALL_AGREED_ONE_TIME_JOB: a held one-time job at an off-hour
+                    // time is booked from THIS card (the hold never runs), so it carries
+                    // the job's evidence too.
+                    ...(agreedJobHeldForOffice ? {
+                      agreed_one_time_job: buildAgreedJobCardEvidence({
+                        scheduledDate, windowStart, price: agreedJobCardPrice,
+                        followUpPlan: isReServiceCatalogRow(callBookingCatalogRow) ? null : resolveCallFollowUpPlan({
+                          extracted: bookingExtracted, catalogRow: callBookingCatalogRow, parentDate: scheduledDate, parentWindowStart: windowStart,
+                        }),
+                      }),
+                    } : {}),
                   },
                 }))
                 .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
@@ -21003,28 +21040,6 @@ const CallRecordingProcessor = {
                 },
                 call,
               );
-              // GATE_CALL_AGREED_ONE_TIME_JOB: the office card's evidence (written by
-              // every pass whole, so no older pass's details stay). `streetLevelAddress`:
-              // Google matched only the street of it ('' = the address on file).
-              // `bookingAddress`: the address the booking resolved (null: the address on file).
-              const agreedJobCardEvidenceFor = ({ streetLevelAddress = null, bookingAddress = null } = {}) => ({
-                street_level_address: typeof streetLevelAddress === 'string' ? streetLevelAddress : null,
-                booking_address: bookingAddress && bookingAddress.line1 ? bookingAddress : null,
-                // The slot the booker resolved (Eastern date and hour), not the raw timestamp.
-                booking_date: scheduledDate || null,
-                booking_window_start: windowStart || null,
-                // Visits start on the hour: a time the call set at :30 is for staff to confirm.
-                booking_off_hour: offTheHour(windowStart),
-                stated_price: agreedJobCardPrice ? agreedJobCardPrice.amount : null,
-                price_basis: agreedJobCardPrice ? agreedJobCardPrice.basis : null,
-                // A follow-up the call did not set (the catalog interval, visit 1's
-                // hour, or a two-treatment package nobody discussed) is a suggestion.
-                follow_up: callFollowUpPlan
-                  ? { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null,
-                    suggested: callFollowUpPlan.hourStated !== true || callFollowUpPlan.packageOnly === true,
-                    off_hour: offTheHour(callFollowUpPlan.windowStart) }
-                  : null,
-              });
               const svc = await db.transaction(async (trx) => {
                 await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', callSid]);
                 // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT — r25):
@@ -22774,7 +22789,10 @@ const CallRecordingProcessor = {
                 // closes, and every action version-checks. It carries the price
                 // for the priced service only, and a promised follow-up visit.
                 if (svc.__held.reason === 'agreed_one_time_job_office_books') {
-                  agreedJobCardEvidence = agreedJobCardEvidenceFor({ streetLevelAddress: svc.__held.streetLevelAddress, bookingAddress: svc.__held.bookingAddress });
+                  agreedJobCardEvidence = buildAgreedJobCardEvidence({
+                    scheduledDate, windowStart, price: agreedJobCardPrice, followUpPlan: callFollowUpPlan,
+                    streetLevelAddress: svc.__held.streetLevelAddress, bookingAddress: svc.__held.bookingAddress,
+                  });
                   agreedJobCardFiled = await fileSkippedBookingCard({
                     call, procToken, customerId, extraction: v2ApprovedExtraction || v2CanonicalExtraction,
                     skippedReason: 'agreed_one_time_job_office_books', preferredDateTime: extracted.preferred_date_time,

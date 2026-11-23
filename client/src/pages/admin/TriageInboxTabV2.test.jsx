@@ -1613,7 +1613,17 @@ describe('ConfirmEvidence — agreed one-time job the AI did not book', () => {
     expect(screen.getByText('Caller said:')).toBeInTheDocument();
     cleanup();
     show(payload());
-    expect(screen.getByText("The customer's address on file")).toBeInTheDocument();
+    expect(screen.getByText(/No address resolved: confirm the service address with the customer/)).toBeInTheDocument();
+  });
+
+  it('shows the job on the off-hour card when the job\'s time was not on the hour', () => {
+    render(<ConfirmEvidence reasonCode="off_hour_start" payload={{ flag: 'off_hour_start', scheduled_date: '2026-11-21', window_start: '10:30', agreed_one_time_job: job({ booking_window_start: '10:30', booking_off_hour: true }) }} />);
+    expect(screen.getByText(/so the AI did not book it/)).toBeInTheDocument();
+    expect(screen.getByText(/Visits start on the hour: confirm an on-hour start/)).toBeInTheDocument();
+    cleanup();
+    // An off-hour card with no job evidence shows none of these rows.
+    render(<ConfirmEvidence reasonCode="off_hour_start" payload={{ flag: 'off_hour_start', scheduled_date: '2026-11-21', window_start: '10:30' }} />);
+    expect(screen.queryByText(/so the AI did not book it/)).not.toBeInTheDocument();
   });
 
   it('always tells staff to check the schedule before they book, so a visit booked since is never doubled', () => {
