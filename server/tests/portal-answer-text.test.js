@@ -1,0 +1,109 @@
+/**
+ * GATE_PORTAL_ANSWER_TEXT (owner 2026-11-22, "ok do your rec"): the text that carries an office answer from the
+ * portal. Pins the owner's words, the whole answer when it fits 3 segments, a long answer's first part cut at a space
+ * plus the portal link inside 3 segments and as long as fits, the count in the characters the send step sends (GSM
+ * punctuation, a link with no scheme), a name outside the GSM set, and the night rule: the staff press is the
+ * office's own send, the notice sweep keeps the 8 AM to 8 PM window. No database (the notice flow itself is
+ * portal-messages-postgres.test.js).
+ */
+process.env.GATE_SMS_SEND_WINDOW = 'true';
+
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+
+const { countSegments } = require('../services/messaging/segment-counter');
+const { checkSendWindow } = require('../services/messaging/validators/send-window');
+const { __private: { answerTextBody, textOutcome } } = require('../services/portal-messages');
+const { classifyDeliveryCertainty } = require('../services/messaging/send-customer-message');
+
+const LEAD = "Hi Sam, here's our answer from Waves: ";
+// A synthetic customer id: the link names the customer's profile, as the reply email's does.
+const ID = '00000000-0000-4000-8000-000000000001';
+const words = (n, from = 0) => Array.from({ length: n }, (_, i) => `word${from + i}`).join(' ');
+
+describe('the text that carries a portal answer', () => {
+  test('a short answer goes whole, in the owner\'s words', () => {
+    expect(answerTextBody('Sam', 'Yes, your tech can treat the lanai at your next visit on Tuesday, Dec 1.', ID))
+      .toBe(`${LEAD}Yes, your tech can treat the lanai at your next visit on Tuesday, Dec 1.`);
+  });
+
+  test('no first name reads "Hi there"; a name outside the GSM set is folded, not sent as UCS-2', () => {
+    expect(answerTextBody(null, 'Yes.', ID)).toBe("Hi there, here's our answer from Waves: Yes.");
+    const text = answerTextBody('Zoë', 'Yes.', ID);
+    expect(text).toBe("Hi Zoe, here's our answer from Waves: Yes.");
+    expect(countSegments(text).encoding).toBe('GSM_7');
+  });
+
+  test('typographic punctuation is sent, and counted, as GSM', () => {
+    const text = answerTextBody('Sam', 'We’ll be there “early”.', ID);
+    expect(text).toBe(`${LEAD}We'll be there "early".`);
+    expect(countSegments(text).encoding).toBe('GSM_7');
+  });
+
+  test('a long answer sends its first part, cut at a space, then the portal link, as long as fits in 3 segments', () => {
+    const text = answerTextBody('Sam', words(150), ID);
+    const match = text.match(/^Hi Sam, here's our answer from Waves: (word0 .* word(\d+))\.\.\. Read the rest in your portal: (\S+)$/);
+    expect(match).not.toBeNull();
+    // The link is the reply email's: the Messages tab for this customer's profile, with no scheme (the send step
+    // drops it, and the count must match).
+    expect(match[3]).toMatch(new RegExp(`/\\?tab=messages&notificationProperty=${ID}$`));
+    expect(match[3]).not.toMatch(/^https?:/);
+    const counted = countSegments(text);
+    expect(counted.encoding).toBe('GSM_7');
+    expect(counted.segmentCount).toBeLessThanOrEqual(3);
+    // One more word would not fit.
+    const last = Number(match[2]);
+    const longer = text.replace(`word${last}...`, `word${last} word${last + 1}...`);
+    expect(countSegments(longer).segmentCount).toBeGreaterThan(3);
+  });
+
+  test('a cut never ends inside a word; one long word with no space is cut where it stands', () => {
+    // 20 short words, then one word too long to fit: the cut falls inside it, so that word is dropped.
+    const text = answerTextBody('Sam', `${words(20)} ${'x'.repeat(400)}`, ID);
+    expect(text).toMatch(/ word19\.\.\. Read the rest in your portal: /);
+    const one = answerTextBody('Sam', 'x'.repeat(1000), ID);
+    expect(one).toMatch(/^Hi Sam, here's our answer from Waves: x+\.\.\. Read the rest in your portal: /);
+    expect(countSegments(one).segmentCount).toBe(3);
+  });
+
+  test('an answer with a character outside GSM is counted as UCS-2, so its first part is shorter', () => {
+    const text = answerTextBody('Sam', `🙂 ${words(150)}`, ID);
+    const counted = countSegments(text);
+    expect(counted.encoding).toBe('UCS_2');
+    expect(counted.segmentCount).toBeLessThanOrEqual(3);
+    expect(text).toMatch(new RegExp(` Read the rest in your portal: \\S+/\\?tab=messages&notificationProperty=${ID}$`));
+  });
+});
+
+describe('the night rule for the answer text', () => {
+  // 10 PM Eastern on 2026-11-22.
+  const night = new Date('2026-11-23T03:00:00Z');
+  const send = (entryPoint) => checkSendWindow({
+    to: '+19415550100', channel: 'sms', audience: 'customer', purpose: 'support_resolution', customerId: 'c-1',
+    identityTrustLevel: 'phone_matches_customer', entryPoint,
+  }, {}, {}, night);
+
+  test('the staff press is the office\'s own send: a night answer goes at once (owner 2026-11-05)', () => {
+    expect(send('admin_portal_answer')).toEqual({ ok: true });
+  });
+
+  test('the sweep finishing a stopped send is held to 8 AM to 8 PM', () => {
+    expect(send('portal_answer_sweep')).toMatchObject({ ok: false, code: 'QUIET_HOURS_HOLD', deferred: true });
+  });
+});
+
+describe('the text outcome, by the shared delivery derivation', () => {
+  test.each([
+    [{ sent: true, blocked: false, deliveryOutcome: 'accepted' }, { text: 'sent' }],
+    [{ sent: false, blocked: true, code: 'SUPPRESSED', deliveryOutcome: 'not_sent' }, { text: 'not_sent', textCode: 'SUPPRESSED' }],
+    // A refusal with no outcome tag is still a refusal: the email goes.
+    [{ sent: false, blocked: true, deferred: true, code: 'QUIET_HOURS_HOLD' }, { text: 'not_sent', textCode: 'QUIET_HOURS_HOLD' }],
+    [{ sent: false, deliveryOutcome: 'not_sent' }, { text: 'not_sent', textCode: 'NOT_SENT' }],
+    // It may have gone out: no email, no second text.
+    [{ sent: false, blocked: true, deliveryOutcome: 'uncertain', mayHaveSent: true }, { text: 'uncertain' }],
+    [{}, { text: 'uncertain' }],
+    [null, { text: 'uncertain' }],
+  ])('%j reads as %j', (outcome, read) => {
+    expect(textOutcome(outcome, classifyDeliveryCertainty, 'NOT_SENT')).toEqual(read);
+  });
+});

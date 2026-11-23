@@ -3579,3 +3579,13 @@ Owner 2026-11-13: "Use your approved texting voice for the portal AI" (asked in 
 **Reasoning:** A box that cannot change the price on screen invites a correction that does nothing. The owner approved the change on 2026-11-21 (reply "1, 2" to the audit page). The rule is service-level on purpose. Whether a picked service reads the density for one estimate also depends on other inputs (a tree count, a measured lawn area, the exterior flea area, a commercial property), and three tries at mirroring those engine rules in the form each missed a case, one of which hid the box where it changed a price. So the box may still show where it changes nothing, as it did on every estimate before; it hides only when no picked service has any read of it.
 
 **Revisit if:** a new service starts to read tree density (add its form flag to the rule), or pest pricing reads tree density again.
+
+## 2026-11-22 — An office answer in the portal reaches the customer by text
+
+Owner 2026-11-22 ("portal text", then "ok do your rec" on the portal-answers-by-text page). **Decision.** With `GATE_PORTAL_ANSWER_TEXT` on, an answer the office saves with Reply in portal reaches the customer as the in-app bell plus ONE text that carries the answer: "Hi {first name}, here's our answer from Waves: {answer}". An answer longer than 3 segments sends its first part, cut at a space, and ends "… Read the rest in your portal: {link}". No app push. When no text can go (no number, STOP, no consent, a refusal or a failure), the reply email goes, as before. A Waves AI answer (night or day) gets the in-app bell only. The owner flips the gate.
+
+**Context:** The 2026-11-05 rule was the app push, else one email. The owner's 2026-11-20 ruling makes a text the default notice (the app only on the customer's own app pick).
+
+**Reasoning:** The text carries the answer itself, so the customer does not need to sign in to read it. A reply to the text lands in Communications like any text. The staff press sends at any hour, as a staff text does (2026-11-05: a night answer sends at once); the 10-minute sweep that finishes a stopped send keeps the 8 AM to 8 PM window and emails outside it. A text whose outcome is unknown counts as sent: a second text is worse than a missing email. The text uses purpose `support_resolution` (as a request update's text), not the SMS-thread reply interlock, because it answers a portal item, not the SMS thread's waiting question. A Waves AI answer gets no text, so a model's words never reach a phone.
+
+**Revisit if:** customers reply to the answer texts in a way the office cannot follow, or the email fallback stops being needed.

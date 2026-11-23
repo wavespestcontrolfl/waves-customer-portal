@@ -227,8 +227,10 @@ function MessageDetails({ item }) {
 // How the customer was told about an answer saved in the portal.
 export function noticeLine(name, notice) {
   if (Number(notice?.pushAccepted) > 0) return `Sent to ${name} in the portal. They got a notice in the Waves app.`;
+  if (notice?.text === "sent" || notice?.text === "uncertain") return `Sent to ${name} in the portal. We texted them your answer.`;
   if (notice?.email === "sent") return `Sent to ${name} in the portal. We emailed them your answer.`;
   if (notice?.pending) return `Sent to ${name} in the portal. Their notice did not go out yet; we try again in a few minutes.`;
+  if (notice?.text) return `Sent to ${name} in the portal, but we could not reach them by text or email.`;
   return `Sent to ${name} in the portal, but we could not reach them by app or email. Reply by text too.`;
 }
 

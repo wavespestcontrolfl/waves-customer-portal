@@ -208,6 +208,33 @@ maybeDescribe('portal messages: after-hours Waves AI (live Postgres)', () => {
     expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(0);
   }, 60000);
 
+  test('with GATE_PORTAL_ANSWER_TEXT on, a Waves AI answer gets the in-app bell only: no push, no text, no email', async () => {
+    const SendCustomerMessage = require('../services/messaging/send-customer-message');
+    const sends = jest.spyOn(SendCustomerMessage, 'sendCustomerMessage');
+    process.env.GATE_PORTAL_ANSWER_TEXT = 'true';
+    try {
+      const pat = await customer('Bell');
+      await visit(pat.id);
+      mockCreate
+        .mockResolvedValueOnce(toolUse('get_upcoming_services', {}))
+        .mockResolvedValueOnce(answer('Your next visit is in ten days, between 9:00 and 11:00 AM.'));
+      const sent = await post(pat, 'When is my next visit?');
+      expect(await settled(sent.id)).toBe('answered');
+      const [ai] = await aiRows(pat.id);
+      const bell = await db('notifications').where({ recipient_type: 'customer', recipient_id: pat.id }).whereRaw("metadata->>'portalMessageId' = ?", [ai.id]).first();
+      expect(bell).toMatchObject({ title: 'New message from Waves', link: '/?tab=messages' });
+      expect(PushService.sendToCustomer).not.toHaveBeenCalled();
+      expect(AccountMembershipEmail.sendPortalReply).not.toHaveBeenCalled();
+      expect(sends.mock.calls.filter(([input]) => input?.audience === 'customer' && input?.customerId === pat.id)).toEqual([]);
+      expect((await db('messages').where({ id: ai.id }).first('metadata')).metadata.notice).toEqual({ bell: true, pushAccepted: 0, pending: false });
+      // Nothing is left pending for the sweep to text.
+      expect(await PortalMessages.resumePendingNotices(new Date(Date.now() + 10 * 60 * 1000))).toBe(0);
+    } finally {
+      delete process.env.GATE_PORTAL_ANSWER_TEXT;
+      sends.mockRestore();
+    }
+  }, 60000);
+
   test('the late "still waiting" ring still fires after the AI answered, and a staff answer closes the item and its bell', async () => {
     const { runPortalLateRering, dueAtFor, STILL_WAITING } = require('../services/portal-late-rering');
     const { bellEventAt } = require('../services/admin-alert-relevance');

@@ -494,6 +494,11 @@ describe("Portal inbox tab: answers in the portal", () => {
     [{ bell: true, pushAccepted: 0, email: "sent" }, "Sent to Pat Synthetic in the portal. We emailed them your answer."],
     [{ bell: true, pushAccepted: 0, email: "failed", pending: true }, "Sent to Pat Synthetic in the portal. Their notice did not go out yet; we try again in a few minutes."],
     [{ bell: true, pushAccepted: 0, email: "email_opted_out" }, "Sent to Pat Synthetic in the portal, but we could not reach them by app or email. Reply by text too."],
+    // GATE_PORTAL_ANSWER_TEXT: the text in place of the push; a text that may have gone counts as sent.
+    [{ bell: true, pushAccepted: 0, text: "sent", email: "not_needed" }, "Sent to Pat Synthetic in the portal. We texted them your answer."],
+    [{ bell: true, pushAccepted: 0, text: "uncertain", email: "not_needed" }, "Sent to Pat Synthetic in the portal. We texted them your answer."],
+    [{ bell: true, pushAccepted: 0, text: "not_sent", email: "sent" }, "Sent to Pat Synthetic in the portal. We emailed them your answer."],
+    [{ bell: true, pushAccepted: 0, text: "not_sent", email: "email_opted_out" }, "Sent to Pat Synthetic in the portal, but we could not reach them by text or email."],
   ])("says how the customer was told: %j", async (notice, line) => {
     adminFetch.mockImplementation(async (url) => {
       if (url === "/admin/portal-inbox") return withReplies();
