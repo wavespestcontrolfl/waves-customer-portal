@@ -19,6 +19,8 @@ const featureGates = require('../config/feature-gates');
 
 // GATE_PORTAL_MESSAGES, read at call time; a test that mocks feature-gates without the reader reads off.
 const portalMessagesLive = () => Boolean(featureGates.portalMessagesLive?.());
+// GATE_PORTAL_ANSWER_TEXT, the same way: the reply form says an answer goes by text before staff press Send.
+const answerByTextLive = () => Boolean(featureGates.portalAnswerTextLive?.());
 const portalInbox = require('../services/portal-inbox');
 const PortalMessages = require('../services/portal-messages');
 
@@ -32,13 +34,13 @@ router.get('/summary', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/admin/portal-inbox -> { enabled, cutoff, items, olderItems, total, older: { chats, requests } }
+// GET /api/admin/portal-inbox -> { enabled, replies, answerByText, cutoff, items, olderItems, total, older: { chats, requests } }
 // `items` = open, last 14 days; `olderItems` = open at or before the cutoff, listed one by one;
 // `older` = their true totals.
 router.get('/', async (req, res, next) => {
   try {
     res.set('Cache-Control', 'private, no-store');
-    res.json({ enabled: true, replies: portalMessagesLive(), ...(await portalInbox.list()) });
+    res.json({ enabled: true, replies: portalMessagesLive(), answerByText: answerByTextLive(), ...(await portalInbox.list()) });
   } catch (err) { next(err); }
 });
 
@@ -58,7 +60,8 @@ router.post('/close-older', async (req, res, next) => {
 
 // GATE_PORTAL_MESSAGES: POST /api/admin/portal-inbox/reply  { kind, id, body, requestId? }
 //   -> { message, closed, notice } . Answers one item inside the customer's portal: the answer is saved in
-// their portal thread, the item and its bells close, and the customer gets one notice (app push, else email).
+// their portal thread, the item and its bells close, and the customer gets one notice (app push, else email; with
+// GATE_PORTAL_ANSWER_TEXT on, one text with the answer, else email).
 // `requestId` makes a retried click return the first answer instead of sending a second one.
 const replySchema = Joi.object({
   kind: Joi.string().valid('chat', 'request', 'message').required(),

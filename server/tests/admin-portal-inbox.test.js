@@ -81,7 +81,14 @@ describe('admin portal inbox routes', () => {
     await withServer(async (base) => {
       expect(await (await fetch(`${base}/summary`, { headers: auth('admin') })).json()).toEqual({ enabled: true, replies: false, count: 5 });
       const body = await (await fetch(base, { headers: auth('admin') })).json();
-      expect(body).toMatchObject({ enabled: true, replies: false, items: [], olderItems, older: { chats: 2, requests: 3 } });
+      expect(body).toMatchObject({ enabled: true, replies: false, answerByText: false, items: [], olderItems, older: { chats: 2, requests: 3 } });
+      // GATE_PORTAL_ANSWER_TEXT: the reply form says the answer goes by text.
+      process.env.GATE_PORTAL_ANSWER_TEXT = 'true';
+      try {
+        expect(await (await fetch(base, { headers: auth('admin') })).json()).toMatchObject({ answerByText: true });
+      } finally {
+        delete process.env.GATE_PORTAL_ANSWER_TEXT;
+      }
     });
   });
 

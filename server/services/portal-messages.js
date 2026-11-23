@@ -362,6 +362,17 @@ async function replyEmail(customerId, message) {
   }
 }
 
+// The answer text's greeting, with the stored first name as the send step's characters carry it (an accent it cannot
+// send is folded away: "Jérôme" is sent as "Jerome").
+const answerLead = (firstName) => `Hi ${require('./messaging/gsm-normalize').gsmSafeName(firstName)}, here's our answer from Waves: `;
+// Text in the characters the send step sends (send-customer-message.js): typographic punctuation made GSM, and a
+// link's https:// scheme dropped.
+function sendableText(text) {
+  const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
+  const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
+  return normalizeGsmPunctuation(stripSmsUrlScheme(text));
+}
+
 // The answer's text (owner 2026-11-22, D2 A and D4): "Hi {first name}, here's our answer from Waves: {answer}". An
 // answer that does not fit TEXT_MAX_SEGMENTS sends its longest first part that fits, cut back to a space, and ends
 // "… Read the rest in your portal: {link}". The link is the reply email's (account-membership-email.js
@@ -369,12 +380,10 @@ async function replyEmail(customerId, message) {
 // the right one. Built in the characters the send step sends (send-customer-message.js makes the punctuation GSM and
 // drops a link's scheme), so the segment count is the provider's; a short link (GATE_SMS_LINK_WRAP) only shortens it.
 function answerTextBody(firstName, body, customerId) {
-  const { normalizeGsmPunctuation, gsmSafeName } = require('./messaging/gsm-normalize');
-  const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
   const { countSegments } = require('./messaging/segment-counter');
-  const sendable = (text) => normalizeGsmPunctuation(stripSmsUrlScheme(text));
+  const sendable = sendableText;
   const fits = (text) => countSegments(text).segmentCount <= TEXT_MAX_SEGMENTS;
-  const lead = `Hi ${gsmSafeName(firstName)}, here's our answer from Waves: `;
+  const lead = answerLead(firstName);
   const whole = sendable(`${lead}${body}`);
   if (fits(whole)) return whole;
   const { qualifyNotificationLink } = require('./notification-links');
@@ -417,14 +426,17 @@ async function boundTextNumber(trx, customerId) {
   return sameDestination(row?.phone, destination) ? destination : null;
 }
 
-// True when the answer may carry a Waves link: an owned host (composer-customer-links.js ownedPortalHosts: the portal
-// and the short-link host) anywhere in the text, read as a browser reads a typed link (full-width letters as ASCII,
-// the ideographic full stops as dots, invisible characters, tabs and line breaks dropped, percent-escapes decoded
-// until the text stops changing). There is no word-boundary rule, so a host right after a line break or a word is
-// still found; it over-reports on purpose (fail closed), and text still decoding after LINK_DECODE_PASSES counts as
-// a link. Such an answer is not texted: before the SMS composer texts a page link, it checks who owns the link
-// (bearerLinkSendCheck), and this text does not. The answer stays in the portal, and the reply email goes, as with
-// the gate off.
+// True when the text's own words may carry a Waves link: an owned host (composer-customer-links.js ownedPortalHosts:
+// the portal and the short-link host) anywhere in them, read as a browser reads a typed link (full-width letters as
+// ASCII, the ideographic full stops as dots, invisible characters, tabs and line breaks dropped, percent-escapes
+// decoded) and in the send step's form (sendableText: its scheme strip can join two parts into a host, as
+// "portalhttps://.wavespestcontrol.com" becomes "portal.wavespestcontrol.com"), from the words as given and from their
+// send-step form, pass after pass until nothing changes. The caller passes the greeting with the stored name and the
+// whole answer, before any cut (answerText); the only link added after this check is the server's own Messages link
+// (answerTextBody). There is no word-boundary rule, so a host right after a line break or a word is still found; it
+// over-reports on purpose (fail closed), and text still changing after LINK_DECODE_PASSES counts as a link. Such an
+// answer is not texted: before the SMS composer texts a page link, it checks who owns the link (bearerLinkSendCheck),
+// and this text does not. The answer stays in the portal, and the reply email goes, as with the gate off.
 const LINK_DECODE_PASSES = 12;
 const foldLinkText = (text) => text.normalize('NFKC').replace(/[\p{Default_Ignorable_Code_Point}\t\r\n]/gu, '')
   .replace(/[。．｡]/g, '.').toLowerCase();
@@ -435,16 +447,20 @@ const decodeEscapes = (text) => text.replace(/(?:%[0-9a-f]{2})+/g, (run) => {
     return run;
   }
 });
-function answerCarriesLink(body) {
+function answerCarriesLink(words) {
   const hosts = require('./composer-customer-links').ownedPortalHosts().map((host) => host.toLowerCase().replace(/:\d+$/, ''));
-  let view = foldLinkText(String(body || ''));
-  for (let pass = 0; pass < LINK_DECODE_PASSES; pass += 1) {
-    if (hosts.some((host) => view.includes(host))) return true;
-    const next = foldLinkText(decodeEscapes(view));
-    if (next === view) return false;
-    view = next;
-  }
-  return true;
+  const carries = (start) => {
+    let view = foldLinkText(start);
+    for (let pass = 0; pass < LINK_DECODE_PASSES; pass += 1) {
+      if (hosts.some((host) => view.includes(host))) return true;
+      const next = foldLinkText(sendableText(decodeEscapes(view)));
+      if (next === view) return false;
+      view = next;
+    }
+    return true;
+  };
+  const given = String(words || '');
+  return carries(given) || carries(sendableText(given));
 }
 
 // The answer's text goes to the number bound at the save, and only while the customer's row still holds it. The send
@@ -452,7 +468,8 @@ function answerCarriesLink(body) {
 // only): the customer-comms and phone locks (STOP and sms_enabled writers serialize on them), then the row read FOR
 // SHARE, so a phone correction commits before the read (a changed number refuses the text, and the email goes) or
 // waits for the request. The send step reloads consent, suppression and the send window on the same connection before
-// the request.
+// the request. GATE_PORTAL_ANSWER_TEXT is read again here, with the locks held and after the row read: a gate turned
+// off while this try waited sends no text (TEXT_GATE_OFF), and the email goes.
 function phoneHeldHandoff(customerId, destination) {
   const { withSmsConsentLock } = require('../utils/customer-comms-lock');
   return (dispatch) => withSmsConsentLock(db, { phone: destination, customerId }, async (trx) => {
@@ -460,6 +477,7 @@ function phoneHeldHandoff(customerId, destination) {
     if (!sameDestination(row?.phone, destination)) {
       return { ok: false, code: 'RECIPIENT_CHANGED', reason: 'recipient_changed', retryable: false };
     }
+    if (!answerTextLive()) return { ok: false, code: 'TEXT_GATE_OFF', reason: 'gate_off', retryable: false };
     return dispatch(trx);
   });
 }
@@ -471,16 +489,18 @@ function phoneHeldHandoff(customerId, destination) {
 // waiting question as answered by staff, and the customer's text may wait on something else
 // (send-manual-customer-sms.js: it "interlocks staff REPLIES only"). `boundary` holds the try's mark at the provider
 // boundary (textStep). { text: 'sent' } when the provider took it, 'uncertain' when it may have gone out, else
-// 'not_sent' with the refusal's code: a link in the answer, no number bound at the save, a changed number, STOP or no
-// consent, a failure. Never throws.
+// 'not_sent' with the refusal's code: no number bound at the save, a changed number, a link in the text's words, the
+// gate off at the send, STOP or no consent, a failure. Never throws.
 async function answerText(customerId, message, boundary) {
   const Send = require('./messaging/send-customer-message');
   try {
-    if (answerCarriesLink(message.body)) return { text: 'not_sent', textCode: 'ANSWER_HAS_LINK' };
     const destination = metaOf(message).answerTextTo;
     if (!destination) return { text: 'not_sent', textCode: 'NO_TEXT_NUMBER' };
     const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('first_name', 'phone');
     if (!sameDestination(customer?.phone, destination)) return { text: 'not_sent', textCode: 'RECIPIENT_CHANGED' };
+    // Every word the text carries besides the server's own Messages link: the greeting with the stored name, and the
+    // whole answer before any cut.
+    if (answerCarriesLink(`${answerLead(customer.first_name)}${message.body}`)) return { text: 'not_sent', textCode: 'ANSWER_HAS_LINK' };
     const result = await Send.sendCustomerMessage({
       to: destination,
       body: answerTextBody(customer.first_name, message.body, customerId),
@@ -874,5 +894,5 @@ module.exports = {
   customerUnread,
   markRead,
   resumePendingNotices,
-  __private: { preview, noticeCustomer, closeItemWith, closeItemBells, itemCustomerWith, claimNotice, ringOffice, metaOf, bellAndPush, answerTextBody, textOutcome, sameDestination, answerCarriesLink },
+  __private: { preview, noticeCustomer, closeItemWith, closeItemBells, itemCustomerWith, claimNotice, ringOffice, metaOf, bellAndPush, answerTextBody, answerLead, textOutcome, sameDestination, answerCarriesLink },
 };

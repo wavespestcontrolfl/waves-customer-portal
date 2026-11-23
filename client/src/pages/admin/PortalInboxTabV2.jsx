@@ -242,7 +242,7 @@ export function noticeLine(name, notice) {
 // made for: Send again after a failure, with the same text, is one answer (the
 // server replays it); changed text gets a new id. The box is read-only while it
 // sends.
-function PortalReply({ item, onSent, onCancel }) {
+function PortalReply({ item, answerByText, onSent, onCancel }) {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
@@ -280,7 +280,10 @@ function PortalReply({ item, onSent, onCancel }) {
         placeholder="Write your answer. The customer reads it in their portal."
       />
       <div className="text-14 text-ink-secondary">
-        They get a notice in the Waves app, or an email with your answer when they don't have the app.
+        {/* GATE_PORTAL_ANSWER_TEXT (the server's answerByText): where the answer's words go, before Send. */}
+        {answerByText
+          ? "We text them your answer as soon as you send it, at any hour. If no text can go, we email it."
+          : "They get a notice in the Waves app, or an email with your answer when they don't have the app."}
       </div>
       <div className="flex flex-wrap gap-2">
         <Button type="button" density="comfortable" variant="primary" disabled={sending || !draft.trim()} onClick={send}>
@@ -299,7 +302,7 @@ function PortalReply({ item, onSent, onCancel }) {
   );
 }
 
-function InboxRow({ item, busy, error, replies, onHandled, onReply, onOpenCustomer, onSent }) {
+function InboxRow({ item, busy, error, replies, answerByText, onHandled, onReply, onOpenCustomer, onSent }) {
   const hasCustomer = Boolean(item.customer?.id);
   const canReply = Boolean(replyHref(item.customer));
   const canPortalReply = replies && hasCustomer && REPLY_KINDS.includes(item.kind);
@@ -331,7 +334,7 @@ function InboxRow({ item, busy, error, replies, onHandled, onReply, onOpenCustom
           {busy ? "Saving…" : "Mark handled"}
         </Button>
       </div>
-      {replying && <PortalReply item={item} onSent={onSent} onCancel={() => setReplying(false)} />}
+      {replying && <PortalReply item={item} answerByText={answerByText} onSent={onSent} onCancel={() => setReplying(false)} />}
       {error && (
         <div role="alert" className="flex items-center gap-2 text-14 text-alert-fg mt-2">
           <AlertTriangle size={14} strokeWidth={1.75} aria-hidden /> {error}
@@ -445,6 +448,7 @@ export default function PortalInboxTabV2({ onCount }) {
           total: Number.isFinite(d.total) ? d.total : items.length,
           older: d.older || { chats: 0, requests: 0 },
           replies: d.replies === true,
+          answerByText: d.answerByText === true,
         });
       })
       .catch((err) => {
@@ -573,6 +577,7 @@ export default function PortalInboxTabV2({ onCount }) {
                   busy={busyKeys.has(rowKey(item))}
                   error={rowErrors[rowKey(item)]}
                   replies={data.replies}
+                  answerByText={data.answerByText}
                   onHandled={handle}
                   onReply={reply}
                   onOpenCustomer={openCustomer}
@@ -598,6 +603,7 @@ export default function PortalInboxTabV2({ onCount }) {
                         busy={busyKeys.has(rowKey(item))}
                         error={rowErrors[rowKey(item)]}
                         replies={data.replies}
+                        answerByText={data.answerByText}
                         onHandled={handle}
                         onReply={reply}
                         onOpenCustomer={openCustomer}

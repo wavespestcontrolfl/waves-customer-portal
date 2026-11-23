@@ -467,6 +467,18 @@ describe("Portal inbox tab: answers in the portal", () => {
     expect(within(bookingRow).queryByRole("button", { name: "Reply in portal" })).toBeNull();
   });
 
+  // GATE_PORTAL_ANSWER_TEXT: before Send, the form says where the answer's words go.
+  it.each([
+    [{}, "They get a notice in the Waves app, or an email with your answer when they don't have the app."],
+    [{ answerByText: true }, "We text them your answer as soon as you send it, at any hour. If no text can go, we email it."],
+  ])("says before Send how the answer reaches the customer (%o)", async (overrides, hint) => {
+    adminFetch.mockImplementation(async (url) => (url === "/admin/portal-inbox" ? withReplies(overrides) : updated(url)));
+    mount();
+    const row = (await screen.findByText("Pat Synthetic")).closest("[data-testid]");
+    fireEvent.click(within(row).getByRole("button", { name: "Reply in portal" }));
+    expect(within(row).getByText(hint)).toBeInTheDocument();
+  });
+
   it("sends the answer with a request id, drops the row, lowers the count and says how the customer was told", async () => {
     const onCount = vi.fn();
     adminFetch.mockImplementation(async (url) => {

@@ -12,7 +12,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { countSegments } = require('../services/messaging/segment-counter');
 const { checkSendWindow } = require('../services/messaging/validators/send-window');
-const { __private: { answerTextBody, textOutcome, sameDestination, answerCarriesLink } } = require('../services/portal-messages');
+const { __private: { answerTextBody, answerLead, textOutcome, sameDestination, answerCarriesLink } } = require('../services/portal-messages');
 const { classifyDeliveryCertainty, normalizeRecipient } = require('../services/messaging/send-customer-message');
 
 const LEAD = "Hi Sam, here's our answer from Waves: ";
@@ -159,5 +159,21 @@ describe('an answer with a Waves link is not texted (the email goes)', () => {
     ['Directions: https://www.google.com/maps/place/Bradenton', false],
   ])('%p carries a Waves link: %p', (body, carries) => {
     expect(answerCarriesLink(body)).toBe(carries);
+  });
+
+  test("the send step's scheme strip can join two parts into a Waves host: the check reads that form too", () => {
+    const dot = portal.indexOf('.');
+    const joined = `Sign: ${portal.slice(0, dot)}https://${portal.slice(dot)}/contract/abc123`;
+    expect(joined.includes(portal)).toBe(false);
+    expect(require('../services/messaging/sms-link-policy').stripSmsUrlScheme(joined)).toContain(`${portal}/contract/abc123`);
+    expect(answerCarriesLink(joined)).toBe(true);
+  });
+
+  test('the greeting carries the stored name as the text sends it: an accent folded away can make a Waves host', () => {
+    const name = `${portal[0]}\u0302${portal.slice(1)}`;
+    expect(answerCarriesLink(name)).toBe(false);
+    expect(answerLead(name)).toContain(portal);
+    expect(answerCarriesLink(`${answerLead(name)}See you Tuesday.`)).toBe(true);
+    expect(answerCarriesLink(`${answerLead('Pat')}See you Tuesday.`)).toBe(false);
   });
 });

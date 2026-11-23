@@ -978,6 +978,30 @@ maybeDescribe('portal messages (live Postgres)', () => {
       expect(AccountMembershipEmail.sendPortalReply).toHaveBeenCalledWith({ customerId: pat.id, messageId: result.message.id, body });
     });
 
+    test('a Waves link the greeting would carry (the stored first name, as the text sends it) gets no text: the email goes', async () => {
+      const host = new URL(require('../utils/portal-url').publicPortalUrl()).host;
+      const pat = await customer();
+      // The send step folds the mark away (gsmSafeName): the greeting would carry the host the stored name does not.
+      await db('customers').where({ id: pat.id }).update({ first_name: `${host[0]}\u0302${host.slice(1)}` });
+      const { escalationId } = await chat(pat.id, { alert: false });
+      const result = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'See you Tuesday.', actor });
+      expect(answerTexts()).toEqual([]);
+      expect(result.notice).toEqual({ bell: true, pushAccepted: 0, text: 'not_sent', email: 'sent' });
+      expect(await storedNotice(result.message.id)).toMatchObject({ textCode: 'ANSWER_HAS_LINK' });
+    });
+
+    test('a gate turned off while the text waited for its locks sends no text: the email goes', async () => {
+      const pat = await customer();
+      const { escalationId } = await chat(pat.id, { alert: false });
+      // The kill lands after the text step's first gate read, before the locked handoff.
+      mockAnswerText.beforeHandoff = async () => { process.env.GATE_PORTAL_ANSWER_TEXT = 'false'; };
+      const result = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'See you Tuesday.', actor });
+      expect(mockAnswerText.requests).toEqual([]);
+      expect(result.notice).toEqual({ bell: true, pushAccepted: 0, text: 'not_sent', email: 'sent' });
+      expect(await storedNotice(result.message.id)).toMatchObject({ textCode: 'TEXT_GATE_OFF' });
+      expect(PushService.sendToCustomer).not.toHaveBeenCalled();
+    });
+
     test('the move to the text is saved at the provider boundary only; a check after it takes it back, and the email goes', async () => {
       const pat = await customer();
       const one = await chat(pat.id, { alert: false });
