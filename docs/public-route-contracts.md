@@ -7759,7 +7759,7 @@ AASA also requires a team ID (`APPLE_TEAM_ID`/`APNS_TEAM_ID`), assetlinks
 also requires `ANDROID_ASSETLINKS_SHA256`. The AASA path list MUST keep
 `/admin/*`, `/tech/*`, `/api/*` excluded — the shell is customer-only and
 API/PDF responses must never be claimed by the app. It also excludes the
-browser-only pages (`/card`, `/careers`, `/help`, `/newsletter`, `/rv`, the roots
+browser-only pages (`/card`, `/careers`, `/h`, `/help`, `/newsletter`, `/rv`, the roots
 Android's allowlist leaves out; `/help/*` is the static how-to pages in
 `client/public/help`) and the exact marketing-redirect paths (`/quote`, bare
 `/estimate`, `/estimate/<service>`), so those open in Safari; `/estimate/<token>`
