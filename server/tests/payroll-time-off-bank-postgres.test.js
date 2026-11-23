@@ -1276,6 +1276,27 @@ postgres('payroll time-off bank', () => {
         .toEqual({ hoursPerYear: 400, heldAtWeek: 8 * 769 * 60, paidOut: 120 * 6000 });
     });
 
+    it('gives two late weeks the room under the cap once: the second catch-up counts what the first one earned', async () => {
+      const id = await tech('Sample Alpha', { hours: '400' });
+      // 15 full weeks at 7.69 hours: 115.35 hours before the two weeks that are missed (W1 - 7 and W1).
+      for (let n = 16; n >= 2; n -= 1) await fullWeek(id, addDays(W1, -7 * n));
+      expect((await balanceOf(id)).bank).toMatchObject({ balanceHours: '115.35' });
+      // The payout week is a week of time off: 40 hours paid from the bank, so the payout is under 120 hours.
+      for (let day = 0; day < 5; day += 1) await offDay(id, addDays(W2, day), 8);
+      expect((await payOut(id, W2)).status).toBe(200);
+      const second = await draftAndFinalize(W2);
+      expect(byName(second, 'Sample Alpha').timeOffBank).toMatchObject({ usedHours: '40.00', earnedHours: '7.69', paidOutHours: '83.04', balanceHours: '0.00' });
+      // The two weeks are recorded late and paid in week order, after the payout. The first has 4.65 hours of room.
+      await worked(id, addDays(W1, -7));
+      await worked(id, W1);
+      const first = await finalize((await draft(addDays(W1, -7), { payDate: '2026-10-16' })).body.run.id);
+      expect(byName(first.body.run, 'Sample Alpha').timeOffBank).toMatchObject({ earnedHours: '4.65', paidOutHours: '4.65' });
+      // The second week finds the bank full in its week: the first late week filled it.
+      const late = (await draft(W1, { payDate: '2026-10-23' })).body.run;
+      expect(byName(late, 'Sample Alpha').timeOffBank).toMatchObject({ earnedHours: '0.00', balanceHours: '0.00' });
+      expect((await finalize(late.id)).status).toBe(200);
+    });
+
     it('does not hold a payout for a week whose pay run is final: time off alone, made final with the gate off', async () => {
       const id = await tech('Sample Alpha', { hours: '80' });
       const other = await tech('Sample Bravo');

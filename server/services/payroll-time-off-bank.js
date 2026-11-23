@@ -446,7 +446,8 @@ async function laterWeekBankCheckExists(conn, run, technicianIds) {
 // later pay date comes after this run in the bank's order: finalizeRun refuses this run under it
 // (laterPayoutDecisionExists), and nothing is caught up. The payout read is the first one after this week. It
 // gives the yearly hours (kept on the run at finalize; the setting can be cleared after the payout is final), the
-// bank before this week up to it, and what it and the catch-up checks after it paid out.
+// bank before this week up to it (with what catch-up checks of earlier weeks earned), and what it and the catch-up
+// checks after it paid out.
 async function paidOutInLaterWeek(conn, ids, { weekStart, payDate }) {
   const byTech = new Map();
   if (!ids.length) return byTech;
@@ -472,6 +473,15 @@ async function paidOutInLaterWeek(conn, ids, { weekStart, payDate }) {
         });
       })
       .first(conn.raw('COALESCE(SUM(pto_earned_minutes - pto_minutes), 0) AS bank'));
+    // A catch-up check of an earlier week, paid after the payout, came before this week in week order: the hours it
+    // earned were in the bank in this week. Its payout is not taken off: on time, those hours would have been paid
+    // out on leaving, not before this week. So two late weeks never use the same room under the cap.
+    const caughtUpBefore = await conn('payroll_checks')
+      .where({ technician_id: row.technician_id, status: 'finalized' })
+      .whereNotNull('pto_earned_minutes')
+      .where('week_start', '<', weekStart)
+      .where('pay_date', '>', row.pay_date)
+      .first(conn.raw('COALESCE(SUM(pto_earned_minutes), 0) AS earned'));
     const out = await conn('payroll_checks')
       .where({ technician_id: row.technician_id, status: 'finalized' })
       .where(function payoutAndCatchUps() {
@@ -482,7 +492,7 @@ async function paidOutInLaterWeek(conn, ids, { weekStart, payDate }) {
       .first(conn.raw("COALESCE(SUM((calc_snapshot->'ptoBank'->>'payoutMinutes')::numeric), 0) AS paid_out"));
     byTech.set(row.technician_id, {
       hoursPerYear: Number(row.hours_per_year),
-      heldAtWeek: toUnits(held.bank),
+      heldAtWeek: toUnits(held.bank) + toUnits(caughtUpBefore.earned),
       paidOut: Math.max(0, toUnits(out.paid_out)),
     });
   }
