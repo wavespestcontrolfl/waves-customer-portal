@@ -767,8 +767,8 @@ describe('an agreed one-time job keeps its one-time service (owner 2026-11-22, G
       expect(count('applyRecurringIntentDefault(')).toBe(5); // the first pass, two judges, the pass helper, the definition
     });
 
-    test('the hold is asked once, inbound, at adoption, of the reading alone', () => {
-      expect(src).toContain("const agreedJobAtAdoption = !isOutboundCall(call) && v2Result?.status === 'valid'\n      && callAgreedOneTimeJob(v2Result.extraction, bookableCallServices);");
+    test('the hold is asked once, inbound, at adoption, of the reading and the call\'s own visits', () => {
+      expect(src).toContain("const agreedJobAtAdoption = !isOutboundCall(call) && v2Result?.status === 'valid'\n      && callAgreedOneTimeJob(v2Result.extraction, bookableCallServices)\n      && !(await callHasAnyVisit(call));");
       expect(count('callAgreedOneTimeJob(')).toBe(2); // this call and the definition
       expect(count('agreedJobHoldChangesService(')).toBe(3); // the pass helper, the booking's call and the definition
     });

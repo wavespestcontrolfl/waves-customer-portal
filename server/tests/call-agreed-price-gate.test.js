@@ -348,7 +348,7 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
   const count = (text) => source.split(text).length - 1;
   const held = 'const agreedJobHeldForOffice = agreedJobAtAdoption\n              && (agreedServiceFields.length > 0 || agreedJobRewriteHeld || agreedJobHoldChangesService(extracted, transcription, bookableServiceNames));';
   const txAt = source.indexOf('const svc = await db.transaction(async (trx) => {');
-  const guard = "if (agreedJobHeldForOffice && !agreedJobPriorByKey) {\n                  // A street-only address match (the visit would have booked\n                  // pending with an address card) rides on the office card.\n                  return { __held: { reason: 'agreed_one_time_job_office_books', streetLevelAddress: streetLevelPending ? String(v2StreetLevelHold?.address_on_file || '') : null } };\n                }";
+  const guard = "if (agreedJobHeldForOffice) {\n                  // A street-only address match (the visit would have booked\n                  // pending with an address card) rides on the office card.\n                  return { __held: { reason: 'agreed_one_time_job_office_books', streetLevelAddress: streetLevelPending ? String(v2StreetLevelHold?.address_on_file || '') : null } };\n                }";
 
   test('the visit price call is unchanged, and the processor never reads a price staff only stated', () => {
     expect(at).toBeGreaterThan(-1);
@@ -365,10 +365,9 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
 
   test('the booking is held when the hold changed its service: a label at adoption, or the rule on the booking\'s own view', () => {
     expect(count(held)).toBe(1);
-    // Set once, read by the key check and the guard below; nothing else writes it.
+    // Set once, read once (by the guard below); nothing else writes it.
     expect(count('agreedJobHeldForOffice =')).toBe(1);
-    expect(count('const agreedJobPriorByKey = agreedJobHeldForOffice\n')).toBe(1);
-    expect(count('if (agreedJobHeldForOffice && !agreedJobPriorByKey) {')).toBe(1);
+    expect(count('if (agreedJobHeldForOffice) {')).toBe(1);
     // Set next to the price call, before the booking transaction opens.
     expect(source.indexOf(held)).toBeGreaterThan(at);
     expect(source.indexOf(held)).toBeLessThan(txAt);
@@ -400,7 +399,7 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     // The slot the booker resolved, the price for the priced service and its basis, a follow-up.
     // The evidence comes from one builder (the held card and the kept-visit card).
     expect(call).toContain('agreedJobCardEvidence = agreedJobCardEvidenceFor({ streetLevelAddress: svc.__held.streetLevelAddress });');
-    const builder = source.slice(source.indexOf('const agreedJobCardEvidenceFor = ('), source.indexOf('let agreedJobFollowUpWithheld = false;'));
+    const builder = source.slice(source.indexOf('const agreedJobCardEvidenceFor = ('), source.indexOf('const svc = await db.transaction(async (trx) => {', source.indexOf('const agreedJobCardEvidenceFor = (')));
     expect(builder).toContain('booking_date: scheduledDate || null,');
     // A street-only address match rides from the hold onto the card.
     expect(builder).toContain("street_level_address: typeof streetLevelAddress === 'string' ? streetLevelAddress : null,");
@@ -408,12 +407,12 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(builder).toContain('booking_window_start: windowStart || null,');
     // Visits start on the hour: an off-hour time the call set is flagged for staff to confirm.
     expect(builder).toContain('booking_off_hour: offTheHour(windowStart),');
-    expect(builder).toContain('off_hour: offTheHour(followUpPlan.windowStart) }');
+    expect(builder).toContain('off_hour: offTheHour(callFollowUpPlan.windowStart) }');
     expect(builder).toContain('stated_price: agreedJobCardPrice ? agreedJobCardPrice.amount : null,');
     expect(builder).toContain('price_basis: agreedJobCardPrice ? agreedJobCardPrice.basis : null,');
-    expect(builder).toContain('? { scheduled_date: followUpPlan.scheduledDate || null, window_start: followUpPlan.windowStart || null,');
+    expect(builder).toContain('? { scheduled_date: callFollowUpPlan.scheduledDate || null, window_start: callFollowUpPlan.windowStart || null,');
     // A follow-up time the call did not set is a suggestion on the card, not a promise.
-    expect(builder).toContain('suggested: followUpPlan.hourStated !== true || followUpPlan.packageOnly === true,');
+    expect(builder).toContain('suggested: callFollowUpPlan.hourStated !== true || callFollowUpPlan.packageOnly === true,');
     expect(call).toContain('agreedJobCardFiled = await fileSkippedBookingCard({');
     expect(call).toContain('agreedOneTimeJob: agreedJobCardEvidence,');
     // The card writer: the evidence is ONE key, written on every pass (null for another skip), so an older
@@ -446,7 +445,7 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(heldReasons).not.toBeNull();
     expect(heldReasons[0]).not.toContain('agreed_one_time_job_office_books');
     expect(count("if (agreedJobCardEvidence) heldReasons.add('agreed_one_time_job_office_books');")).toBe(1);
-    expect(count('agreedJobCardFiled = ')).toBe(4); // false at the start, the held card, the kept-visit card, the retry
+    expect(count('agreedJobCardFiled = ')).toBe(3); // false at the start, the held card, the retry
     const fallback = source.slice(source.indexOf('const heldReasons = new Set('));
     // The retry goes through the card's own writer (the claim locked through the write), with the same evidence;
     // the inline fallback writer carries none of the agreed job's keys.
@@ -465,61 +464,25 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(buildTriageItem({ callLogId: 1, flag: 'agreed_one_time_job_office_books', extraction: {} }).category).toBe('service_unknown');
   });
 
-  // The lookups before the hold skip a cancelled visit, so the hold reads the booking's own key first, as the
-  // insert's conflict path does: a cancelled booking keeps its own hold and visit, a live row is reused.
-  test('the hold reads the booking key first: a cancelled booking keeps its hold, a row with the key is reused', () => {
-    const at = source.indexOf('const agreedJobPriorByKey = agreedJobHeldForOffice');
-    expect(at).toBeGreaterThan(-1);
-    const block = source.slice(at, source.indexOf("return { __held: { reason: 'agreed_one_time_job_office_books'", at));
-    expect(block).toContain("? await trx('scheduled_services').where({ idempotency_key: insertData.idempotency_key }).first('id', 'status')");
-    expect(block).toContain("const agreedJobCancelled = (agreedJobPriorByKey && ['cancelled', 'rescheduled'].includes(agreedJobPriorByKey.status))");
-    expect(block).toContain('if (agreedJobHeldForOffice && !agreedJobPriorByKey) {');
-    // insertData (and its key) exists before the read.
-    expect(source.lastIndexOf('const insertData = {', at)).toBeGreaterThan(source.lastIndexOf('const svc = await db.transaction(async (trx) => {', at));
-  });
-
   // The card holds what the call said; no later pass rewrites it (the card tells staff to check the schedule).
   test('no later pass writes visit details onto the agreed-job card', () => {
     expect(source).not.toContain('noteAgreedJobCardVisit');
     expect(source).not.toContain('visit_candidate');
   });
 
-  // Under the hold the AI books nothing: no visit 2 on a visit the call kept. When the kept visit is another service,
-  // or visit 2 was withheld, this pass files the same card naming the kept visit (its own fact, never a later note).
-  test('under the hold a kept visit gets no visit 2, and the card names the kept visit', () => {
-    // After every existing check (a child, an owed or dispatch-owned follow-up), before the child's slot is built.
-    const fuAt = source.indexOf('const ensureCallFollowUpVisit = async');
-    // It keeps the plan it withheld (recomputed from the kept visit's own date), never a flag.
-    const supp = source.indexOf('if (agreedJobHeldForOffice) {\n                    agreedJobFollowUpWithheld = fuPlan;\n                    return null;\n                  }', fuAt);
-    expect(supp).toBeGreaterThan(source.indexOf('if (existingChild) return null;', fuAt));
-    expect(supp).toBeGreaterThan(source.indexOf('if (callFollowUpPlan.packageOnly && require(\'./call-booking-source-actions\').isUnreviewedDispatchOwned(primaryRow)) return null;', fuAt));
-    expect(supp).toBeGreaterThan(source.indexOf('if (!fuPlan) return null;', fuAt));
-    expect(supp).toBeLessThan(source.indexOf('const primaryStart = String(primaryRow.window_start', fuAt));
-    const at = source.indexOf('if (agreedJobHeldForOffice && (agreedJobFollowUpWithheld');
-    expect(at).toBeGreaterThan(source.indexOf('scheduledServiceId = svc.id;'));
-    const site = source.slice(at, source.indexOf('// Street-level address holds only', at));
-    expect(site).toContain("require('./call-one-time-job').serviceNameKey(svc.service_type) !== require('./call-one-time-job').serviceNameKey(serviceType)");
-    // A kept-visit card shows visit 2 only when the hold withheld it, at the withheld plan's slot.
-    expect(site).toContain('agreedJobCardEvidence = agreedJobCardEvidenceFor({ keptVisitId: svc.id, followUpPlan: agreedJobFollowUpWithheld });');
-    expect(source).toContain('let agreedJobFollowUpWithheld = null;');
-    expect(source).toContain('const agreedJobCardEvidenceFor = ({ streetLevelAddress = null, keptVisitId = null, followUpPlan = callFollowUpPlan } = {}) => ({');
-    expect(site).toContain("skippedReason: 'agreed_one_time_job_office_books'");
-    expect(site).toContain('agreedOneTimeJob: agreedJobCardEvidence,');
-  });
-
-  // The booking key carries the service, so a visit booked under the old label and cancelled since is found by the
-  // call's own link: that cancellation keeps its hold.
-  test('a cancelled visit under another label holds as previously cancelled', () => {
-    const at = source.indexOf('const agreedJobCancelled = ');
-    expect(at).toBeGreaterThan(source.indexOf('const agreedJobPriorByKey = agreedJobHeldForOffice'));
-    const block = source.slice(at, source.indexOf("return { __held: { reason: 'agreed_one_time_job_office_books'", at));
-    // The customer's primary only (a follow-up row carries the call link too; a rematched call another customer's).
-    expect(block).toContain("? await trx('scheduled_services').where({ customer_id: customerId }).whereNull('parent_service_id')");
-    // The call link or the legacy Call SID marker, as findExistingCallAppointment reads them.
-    expect(block).toContain('qb.where({ source_call_log_id: call.id });');
-    expect(block).toContain("if (call.twilio_call_sid) qb.orWhere('notes', 'like', `%Call SID: ${call.twilio_call_sid}%`);");
-    expect(block).toContain(".whereIn('status', ['cancelled', 'rescheduled']).orderBy('created_at', 'desc').first('id', 'status')");
-    expect(block).toContain("return { __held: { reason: 'auto_booking_previously_cancelled', existingId: agreedJobCancelled.id, existingStatus: agreedJobCancelled.status } };");
+  // The hold acts only on a call's first booking: a call with any visit (any status) runs as before the gate, so a
+  // reprocess never re-labels or re-routes a booking it already made. One read, only when the hold would apply.
+  test('the hold needs a call with no visit of its own, read only when the hold would apply', () => {
+    expect(source).toContain('&& callAgreedOneTimeJob(v2Result.extraction, bookableCallServices)\n      && !(await callHasAnyVisit(call));');
+    expect(count('callHasAnyVisit(')).toBe(2); // the definition and the one read
+    const helper = source.slice(source.indexOf('async function callHasAnyVisit(call) {'), source.indexOf('// The price the office card (auto_booking_skipped_after_approval'));
+    expect(helper).toContain('qb.where({ source_call_log_id: call.id });');
+    expect(helper).toContain("if (call.twilio_call_sid) qb.orWhere('notes', 'like', `%Call SID: ${call.twilio_call_sid}%`);");
+    // No status filter: a cancelled visit counts too. An unreadable answer counts as yes (main's path).
+    expect(helper).not.toContain('status');
+    expect(helper).toContain('return true;\n  }\n}');
+    // The replay-only paths it replaces are gone.
+    for (const gone of ['agreedJobPriorByKey', 'agreedJobFollowUpWithheld', 'kept_visit_id']) expect(source).not.toContain(gone);
   });
 
   test('offTheHour: true only for a start that is not on the hour', () => {
@@ -546,6 +509,9 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price_is_final: true, price_accepted_by_caller: true }), 'One-Time Pest Control Service')).toEqual({ amount: 250, basis: 'agreed_total' });
     // A disputed total the CALLER stated is never shown as staff's number.
     const callers = { ...price, stated_by: 'caller' };
+    // …nor a caller's number the extraction says staff did not offer, even as a total.
+    expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price_offered_by_staff: false, price: callers, prices: [callers] }), 'One-Time Pest Control Service')).toBeNull();
+    expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price_offered_by_staff: false }), 'One-Time Pest Control Service')).toEqual({ amount: 250, basis: 'agreed_total' });
     expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price_is_final: false, price: callers, prices: [callers] }), 'One-Time Pest Control Service')).toBeNull();
     expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price: callers, prices: [callers] }), 'One-Time Pest Control Service')).toEqual({ amount: 250, basis: 'agreed_total' });
     // The booking resolved to another row (a free re-service): no price on the card.

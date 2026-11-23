@@ -1607,12 +1607,6 @@ describe('ConfirmEvidence — agreed one-time job the AI did not book', () => {
     expect(screen.queryByText(/Visits start on the hour/)).not.toBeInTheDocument();
   });
 
-  it('names a visit the call kept, and asks staff to book only what the call still needs', () => {
-    show(payload({}, { kept_visit_id: 'visit-9' }));
-    expect(screen.getByText(/The call already has visit visit-9, so the AI booked nothing more/)).toBeInTheDocument();
-    expect(screen.queryByText(/so the AI did not book it/)).not.toBeInTheDocument();
-  });
-
   it('always tells staff to check the schedule before they book, so a visit booked since is never doubled', () => {
     show(payload());
     expect(screen.getByText('Before you book:')).toBeInTheDocument();
