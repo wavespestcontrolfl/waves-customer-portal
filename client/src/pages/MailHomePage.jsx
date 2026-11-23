@@ -19,7 +19,9 @@ import { glassPestInclusions } from '../lib/estimate-glass-copy';
 import { useGlassSurface } from '../glass/glass-engine';
 import { DOC, DOC_EYEBROW, FS, FW, LH, SP, docHeading } from '../theme-doc';
 
-const API_BASE = import.meta.env.VITE_API_URL || '/api';
+// Always the page's own origin: /api/public/home is mounted before every CORS handler (one answer for every miss), so a
+// separate API origin (VITE_API_URL) would be refused by the browser.
+const API_BASE = '/api';
 
 // Cents only when the amount is not whole: $37 a month, $37.50 a month.
 function formatMoney(value) {
