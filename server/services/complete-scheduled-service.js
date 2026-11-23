@@ -4844,12 +4844,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // off, or for any other visit, a sent note is ignored. Never throws; in a
     // grouped closeout `db` is the packet's transaction and the reads run in
     // savepoints.
-    const reportNotePick = require('../config/feature-gates').reportOwnNoteLive()
-      && completionInput.body?.reportNote != null
-      && visitOutcome === 'completed' && !typedFindingsType && !isBackfillCompletion
-      // The preview route's own visit check (strict profile, area add-on rows);
-      // a read that fails is a visit not verified, so no note.
-      && (await failSoftRead(db, (k) => require('./pest-recap').resolveEligibility(svc.id, k, { strict: true }), null))?.eligible === true
+    const reportNoteSent = require('../config/feature-gates').reportOwnNoteLive() && completionInput.body?.reportNote != null;
+    // The preview route's own visit check (strict profile, area add-on rows), in a savepoint scope (its profile
+    // resolver runs its own savepoint reads). undefined = not asked; null = the check could not run.
+    const reportNoteVisit = reportNoteSent && visitOutcome === 'completed' && !typedFindingsType && !isBackfillCompletion
+      ? await savepointScope(db, (k) => require('./pest-recap').resolveEligibility(svc.id, k, { strict: true })).catch(() => null)
+      : undefined;
+    // A sent note on a visit that could not be checked refuses the completion below (retryable): the record never
+    // goes out without the note marker while the raw note reaches the recap model.
+    const reportNoteUnverified = reportNoteVisit === null;
+    const reportNotePick = reportNoteVisit?.eligible === true
       ? await require('./service-report/report-own-note').reportNoteToStore({
         reportNote: completionInput.body.reportNote,
         note: typeof technicianNotes === 'string' ? technicianNotes.trim() : '',
@@ -5284,6 +5288,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // A blog post that is no longer live on the site (unpublished, moved,
     // never live) is an actionable 400 for a fresh attempt, before any write,
     // like a retired tip: a link the tech chose never vanishes silently.
+    if (claim.action === 'proceed' && reportNoteUnverified) {
+      await CompletionAttempts.markCompletionAttemptFailed(
+        completionAttempt,
+        new Error('report_note_unverified'),
+        db,
+      ).catch(() => {});
+      return ({ status: 503, body: {
+        error: 'The report note could not be checked right now. Try Complete again.',
+        code: 'REPORT_NOTE_UNVERIFIED',
+      } });
+    }
     if (claim.action === 'proceed' && blogPostPick.rejected) {
       await CompletionAttempts.markCompletionAttemptFailed(
         completionAttempt,
@@ -7913,8 +7928,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             || (lockedSvcRow && (String(lockedSvcRow.service_type ?? '') !== String(svc.service_type ?? '')
               || String(lockedSvcRow.service_id ?? '') !== String(svc.service_id ?? '')
               || String(lockedSvcRow.customer_id ?? '') !== String(svc.customer_id ?? '')))
-            || !require('./pest-recap').recapEligibleProfile(frozenCompletionProfile)
-            || await failSoftRead(trx, (k) => require('./area-addon-visit-rows').visitHasAreaAddOnRows(k, svc.id), true))) {
+            // The preview route's own visit check again, on the locked visit (strict profile, add-on rows).
+            || (await savepointScope(trx, (k) => require('./pest-recap').resolveEligibility(svc.id, k, { strict: true }))
+              .catch(() => null))?.eligible !== true)) {
             throw Object.assign(new Error('visit changed since the report note was screened'), { code: 'visit_identity_changed' });
           }
           // The inspection-credit marker keys to the LOCKED identity too

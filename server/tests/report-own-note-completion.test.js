@@ -17,16 +17,17 @@ const completionSource = fs.readFileSync(path.join(__dirname, '../services/compl
 const block = completionSource.slice(completionSource.indexOf('async function completeScheduledService('));
 
 describe('the completion\'s report note', () => {
-  const pickAt = block.indexOf('const reportNotePick = ');
-  const pick = block.slice(pickAt, pickAt + 1000);
+  const sentAt = block.indexOf('const reportNoteSent = ');
+  const pick = block.slice(sentAt, sentAt + 1800);
 
-  test('picked only with the gate on, for a performed untyped pest visit the recap sheet takes', () => {
-    expect(pick).toMatch(/^const reportNotePick = require\('\.\.\/config\/feature-gates'\)\.reportOwnNoteLive\(\)/);
-    expect(pick).toContain('&& completionInput.body?.reportNote != null');
-    expect(pick).toContain("&& visitOutcome === 'completed' && !typedFindingsType && !isBackfillCompletion");
-    // The preview route's own visit check, strict, through a savepoint read.
-    expect(pick).toContain("&& (await failSoftRead(db, (k) => require('./pest-recap').resolveEligibility(svc.id, k, { strict: true }), null))?.eligible === true");
-    expect(pick).toMatch(/: null;$/m);
+  test('asked only with the gate on and a note sent, for a performed untyped non-backfill visit', () => {
+    expect(pick).toMatch(/^const reportNoteSent = require\('\.\.\/config\/feature-gates'\)\.reportOwnNoteLive\(\) && completionInput\.body\?\.reportNote != null;/);
+    expect(pick).toContain("reportNoteSent && visitOutcome === 'completed' && !typedFindingsType && !isBackfillCompletion");
+  });
+
+  test('the visit check is the preview route\'s, strict, in a savepoint scope (no nested queue)', () => {
+    expect(pick).toContain("await savepointScope(db, (k) => require('./pest-recap').resolveEligibility(svc.id, k, { strict: true })).catch(() => null)");
+    expect(pick).toContain('const reportNotePick = reportNoteVisit?.eligible === true');
   });
 
   test('screened again against the note this completion stores, for the visit\'s customer', () => {
@@ -35,27 +36,29 @@ describe('the completion\'s report note', () => {
     expect(pick).toContain('customerId: svc.customer_id,');
   });
 
-  test('picked before the record is written, and frozen with it', () => {
-    expect(pickAt).toBeGreaterThan(0);
-    expect(pickAt).toBeLessThan(block.indexOf("trx('service_records').insert(recordInsert)"));
-    expect(block).toContain('...(reportNotePick ? { reportNote: reportNotePick } : {}),');
+  test('a sent note on a visit that could not be checked refuses a fresh attempt, before any write', () => {
+    expect(pick).toContain('const reportNoteUnverified = reportNoteVisit === null;');
+    const reject = block.indexOf("if (claim.action === 'proceed' && reportNoteUnverified) {");
+    expect(reject).toBeGreaterThan(0);
+    expect(reject).toBeLessThan(block.indexOf("trx('service_records').insert(recordInsert)"));
+    expect(block.slice(reject, reject + 500)).toMatch(/markCompletionAttemptFailed[\s\S]*status: 503[\s\S]*code: 'REPORT_NOTE_UNVERIFIED'/);
   });
 
-  test('a frozen note is the customer recap: no model reads the raw note for one', () => {
+  test('frozen with the record; a frozen note is the customer recap (no model reads the raw note for one)', () => {
+    expect(sentAt).toBeLessThan(block.indexOf("trx('service_records').insert(recordInsert)"));
+    expect(block).toContain('...(reportNotePick ? { reportNote: reportNotePick } : {}),');
     expect(block).toContain('let effectiveCustomerRecap = reportNotePick ? reportNotePick.text : customerRecap;');
   });
 
-  test('a repoint under the lock rolls the record back as a changed visit', () => {
+  test('a changed visit under the lock rolls the record back', () => {
     const resolve = block.indexOf('frozenCompletionProfile = await resolveCompletionProfileForScheduledService(lockedSvcRow, trx);');
     const drop = block.indexOf('if (structuredNotes.reportNote && (!primaryFreezeTrusted');
     expect(drop).toBeGreaterThan(resolve);
     expect(drop).toBeLessThan(block.indexOf('structured_notes: serializeJsonb(structuredNotes),'));
-    const dropBlock = block.slice(drop, drop + 1000);
-    expect(dropBlock).toContain("String(lockedSvcRow.service_type ?? '') !== String(svc.service_type ?? '')");
+    const dropBlock = block.slice(drop, drop + 1200);
     expect(dropBlock).toContain("String(lockedSvcRow.service_id ?? '') !== String(svc.service_id ?? '')");
     expect(dropBlock).toContain("String(lockedSvcRow.customer_id ?? '') !== String(svc.customer_id ?? '')");
-    expect(dropBlock).toContain("!require('./pest-recap').recapEligibleProfile(frozenCompletionProfile)");
-    expect(dropBlock).toContain("visitHasAreaAddOnRows(k, svc.id), true)");
+    expect(dropBlock).toContain("savepointScope(trx, (k) => require('./pest-recap').resolveEligibility(svc.id, k, { strict: true }))");
     expect(dropBlock).toContain("code: 'visit_identity_changed'");
   });
 });
