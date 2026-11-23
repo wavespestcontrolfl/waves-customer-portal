@@ -154,7 +154,8 @@ describe('the writes and the shared history read', () => {
     })();
   });
 
-  test('loadNewestSlotRows adds the after_intent column only when asked (the auto-dispatch pick check stays byte for byte)', async () => {
+  // The read also returns the old and new slot (local audit 2026-11-22: the pick check matches the placement's date and start).
+  test('loadNewestSlotRows adds the after_intent column only when asked', async () => {
     const selects = [];
     const mk = () => {
       const chain = {};
@@ -165,9 +166,11 @@ describe('the writes and the shared history read', () => {
     const db = Object.assign(() => mk(), { raw: (sql) => ({ raw: sql }) });
     await eligibility.loadNewestSlotRows(db, 's1');
     await eligibility.loadNewestSlotRows(db, 's1', { withIntent: true });
-    expect(selects[0]).toEqual(['created_at', 'new_date', 'initiated_by']);
-    expect(selects[1].slice(0, 3)).toEqual(['created_at', 'new_date', 'initiated_by']);
-    expect(selects[1][3].raw).toMatch(/customer_asked_time_at.*AS after_intent/s);
+    const cols = ['created_at', 'new_date', 'initiated_by', 'original_date', 'original_window', 'new_window'];
+    expect(selects[0]).toEqual(cols);
+    expect(selects[1].slice(0, cols.length)).toEqual(cols);
+    expect(selects[1]).toHaveLength(cols.length + 1);
+    expect(selects[1][cols.length].raw).toMatch(/customer_asked_time_at.*AS after_intent/s);
   });
 
   test('isCustomerPickedVisit still answers from rows handed to it, and from its own read without them', async () => {

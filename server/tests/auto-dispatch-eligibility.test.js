@@ -201,8 +201,6 @@ describe('GATE_AUTO_DISPATCH_FLEX_TIER ctx', () => {
 
 describe('isPersonPlacedVisit', () => {
   // An in-memory reschedule_log. Rows are filtered by the predicates the
-  // query sends, so a wrong column or value makes a test miss the row.
-  // An in-memory reschedule_log. Rows are filtered by the predicates the
   // query sends, so a wrong column or value makes a test miss the row; the
   // newest-placement subquery is evaluated like PostgreSQL would.
   function fakeDb({ log = [], fail = false, row = null } = {}) {
@@ -214,8 +212,16 @@ describe('isPersonPlacedVisit', () => {
       }
       if (table !== 'reschedule_log') throw new Error(`unexpected table ${table}`);
       const preds = [];
+      let newestFirst = false;
+      let cap = Infinity;
       const chain = {
         where(key, value) { preds.push((r) => String(r[key]) === String(value)); return chain; },
+        orderBy(key, dir) {
+          if (key !== 'created_at' || dir !== 'desc') throw new Error(`unexpected order ${key} ${dir}`);
+          newestFirst = true;
+          return chain;
+        },
+        limit(n) { cap = n; return chain; },
         whereNotNull(key) { preds.push((r) => r[key] != null); return chain; },
         whereRaw(sql) {
           if (sql === '(original_date IS DISTINCT FROM new_date OR original_window IS DISTINCT FROM new_window)') {
@@ -231,7 +237,9 @@ describe('isPersonPlacedVisit', () => {
         },
         select: async () => {
           if (fail) throw new Error('connection reset');
-          return log.filter((r) => preds.every((p) => p(r)));
+          const rows = log.filter((r) => preds.every((p) => p(r)));
+          if (newestFirst) rows.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+          return rows.slice(0, cap);
         },
       };
       return chain;
@@ -293,6 +301,48 @@ describe('isPersonPlacedVisit', () => {
   test('a later staff move ends a customer hold', async () => {
     const staff = row({ id: 'l2', initiated_by: 'admin', series_move_id: null, created_at: '2026-10-07T12:00:00Z', original_date: '2026-10-19' });
     expect(await isPersonPlacedVisit(visit, fakeDb({ log: [row(), staff] }))).toEqual({ placed: false });
+  });
+
+  // Local audit 2026-11-22: an end-only edit (a longer visit) is not a placement; the customer's start still stands.
+  test('a later end-only staff edit keeps the customer pick, and keeps a staff placement free', async () => {
+    const longer = row({ id: 'l2', initiated_by: 'admin_bulk', series_move_id: null, created_at: '2026-10-07T12:00:00Z',
+      original_date: '2026-10-18', original_window: '09:00-10:00', new_window: '09:00-10:30' });
+    expect(await isPersonPlacedVisit(visit, fakeDb({ log: [row(), longer] })))
+      .toMatchObject({ placed: true, reason_code: 'CUSTOMER_PICKED' });
+    const staffPick = row({ initiated_by: 'admin', series_move_id: null });
+    expect(await isPersonPlacedVisit(visit, fakeDb({ log: [staffPick, longer] }))).toEqual({ placed: false });
+  });
+
+  test('a history of end-only edits only, as long as the read, fails closed and degraded', async () => {
+    const pad = (n) => String(n).padStart(2, '0');
+    const edits = Array.from({ length: 50 }, (_, i) => row({ id: `e${i}`, initiated_by: 'admin_bulk', series_move_id: null,
+      created_at: new Date(Date.parse('2026-10-08T00:00:00Z') + i * 60000).toISOString(),
+      original_date: '2026-10-18', original_window: '09:00-10:00', new_window: `09:00-11:${pad(i)}` }));
+    expect(await isPersonPlacedVisit(visit, fakeDb({ log: [row(), ...edits] })))
+      .toMatchObject({ placed: true, degraded: true, reason_code: 'PERSON_PLACED_UNKNOWN' });
+    expect(await isPersonPlacedVisit(visit, fakeDb({ log: [row(), ...edits.slice(0, 49)] })))
+      .toMatchObject({ placed: true, reason_code: 'CUSTOMER_PICKED' });
+  });
+
+  // Local audit 2026-11-22: the edit screen changes a slot without a log row; a start the customer did not pick is the
+  // office's placement, which no longer holds (owner 2026-11-22).
+  test('a customer pick no longer holds once the visit has another start on the same date', async () => {
+    expect(await isPersonPlacedVisit({ ...visit, window_start: '13:00:00' }, fakeDb({ log: [row()] }))).toEqual({ placed: false });
+    expect(await isPersonPlacedVisit({ ...visit, window_start: '09:00' }, fakeDb({ log: [row()] })))
+      .toMatchObject({ placed: true, reason_code: 'CUSTOMER_PICKED' });
+  });
+
+  test('a customer day pick with no hour holds while the visit has no hour', async () => {
+    const dayPick = row({ new_window: null });
+    expect(await isPersonPlacedVisit({ ...visit, window_start: null }, fakeDb({ log: [dayPick] }))).toMatchObject({ placed: true });
+    expect(await isPersonPlacedVisit({ ...visit, window_start: '10:00:00' }, fakeDb({ log: [dayPick] }))).toEqual({ placed: false });
+  });
+
+  test('a caller row without its start is re-read, and the stored start decides', async () => {
+    const { window_start: _unused, ...bare } = visit;
+    expect(await isPersonPlacedVisit(bare, fakeDb({ log: [row()], row: { window_start: '09:00:00' } })))
+      .toMatchObject({ placed: true, reason_code: 'CUSTOMER_PICKED' });
+    expect(await isPersonPlacedVisit(bare, fakeDb({ log: [row()], row: { window_start: '13:00:00' } }))).toEqual({ placed: false });
   });
 
   test('not placed after a later automatic move, even one that returned the visit to the same date', async () => {
