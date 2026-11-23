@@ -1394,7 +1394,7 @@ function moveProposal(plan) {
     customer_asked_time: plan.customerAskedTime === true,
     stops,
     ...plan.skipped,
-    note: `Would move ${stops.length} stop(s) to ${dateStr}${notifyCustomers ? ' and TEXT each customer the new arrival window' : ' silently (no customer texts)'}. Re-call with confirmed:true to apply.`,
+    note: `Would move ${stops.length} stop(s) to ${dateStr}${notifyCustomers ? ' and TEXT each customer about the move' : ' silently (no customer texts)'}. Re-call with confirmed:true to apply.`,
   };
 }
 
