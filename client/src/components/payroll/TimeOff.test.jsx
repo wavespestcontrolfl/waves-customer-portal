@@ -382,6 +382,33 @@ describe('Time off in the pay run table and stub', () => {
     expect(within(stub).getByText('$88.00')).toBeInTheDocument();
   });
 
+  it('adds a minimum week column only when a check has one, and its line on the stub', async () => {
+    const withMinimum = { ...RUN, checks: [check({ minimumWeekHours: '10.00', minimumWeekMinutes: 600, minimumWeekPayCents: 22000 })] };
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options) => {
+      if (path === '/admin/payroll/runs/run-1') return reply({ run: withMinimum });
+      if (path === '/admin/payroll/checks/check-a/stub') {
+        return reply({ stub: { ...STUB, hours: { ...STUB.hours, minimumWeek: '10.00' }, earnings: { ...STUB.earnings, minimumWeekPayCents: 22000 } } });
+      }
+      return original(path, options);
+    });
+    render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open pay run for Oct 12, 2026 to Oct 18, 2026' }));
+    const detail = await screen.findByLabelText(/Pay run for/);
+    const table = within(detail).getByRole('table', { name: 'Paychecks' });
+    expect(within(table).getByRole('columnheader', { name: 'Minimum week' })).toBeInTheDocument();
+    fireEvent.click(within(detail).getByRole('button', { name: 'Stub for Sample Alpha' }));
+    const stub = await screen.findByLabelText('Pay stub');
+    expect(within(stub).getByText('Minimum week pay (10.00 h at $22.00/h, not hours worked)')).toBeInTheDocument();
+  });
+
+  it('shows no minimum week column on a run without one', async () => {
+    render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open pay run for Oct 12, 2026 to Oct 18, 2026' }));
+    const table = within(await screen.findByLabelText(/Pay run for/)).getByRole('table', { name: 'Paychecks' });
+    expect(within(table).queryByRole('columnheader', { name: 'Minimum week' })).toBeNull();
+  });
+
   it('shows the time-off bank on the check and the stub, and lists time off the bank did not pay', async () => {
     const bank = { earnedHours: '7.25', usedHours: '7.69', unpaidHours: '2.31', balanceHours: '7.25' };
     const original = adminFetch.getMockImplementation();
@@ -746,6 +773,39 @@ describe('The banks on the time off panel stay current', () => {
     await waitFor(() => expect(runReads()).toBe(before + 1));
     expect(await screen.findByText('Hours or settings changed since this draft. Press Recompute.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Finalize' })).toBeDisabled();
+  });
+
+  it('saves the minimum paid week and reads the open draft again, so it shows as out of date', async () => {
+    let minimum = null;
+    const original = adminFetch.getMockImplementation();
+    const runReads = () => calls.filter(c => c.path === '/admin/payroll/runs/run-1' && c.method === 'GET').length;
+    adminFetch.mockImplementation((path, options = {}) => {
+      if (TECH_LIST.includes(path)) {
+        return reply({ technicians: TECHS.map(tech => ({ ...tech, paidWeekMinimumHours: tech.id === 'tech-a' ? minimum : null })) });
+      }
+      if (path === '/admin/payroll/runs') return reply({ runs: [{ id: 'run-1', weekStart: '2026-10-12', weekEnd: '2026-10-18', payDate: '2026-10-23', status: 'draft', totals }] });
+      if (path === '/admin/payroll/runs/run-1') {
+        calls.push({ path, method: 'GET' });
+        return reply({ run: { ...RUN, status: 'draft', checks: [check({ status: 'draft' })], stale: minimum !== null } });
+      }
+      if (path === '/admin/payroll/technicians/tech-a/week-minimum') {
+        calls.push({ path, method: options.method, body: options.body });
+        minimum = 40;
+        return reply({ technician: { id: 'tech-a', paidWeekMinimumHours: 40 } });
+      }
+      return original(path, options);
+    });
+    render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: /Open pay run for/ }));
+    expect(await screen.findByRole('button', { name: 'Finalize' })).toBeEnabled();
+    const before = runReads();
+    const input = await screen.findByLabelText('Minimum paid hours a week for Sample Alpha');
+    fireEvent.change(input, { target: { value: '40' } });
+    fireEvent.click(within(input.closest('form')).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(runReads()).toBe(before + 1));
+    expect(calls.find(c => c.path === '/admin/payroll/technicians/tech-a/week-minimum')).toMatchObject({ method: 'PUT', body: { hours: '40' } });
+    expect(await screen.findByText('Minimum paid hours a week saved for Sample Alpha.')).toBeInTheDocument();
+    expect(await screen.findByText('Hours or settings changed since this draft. Press Recompute.')).toBeInTheDocument();
   });
 
   it('reads the open draft again when a bank payout is set, so it shows as out of date', async () => {

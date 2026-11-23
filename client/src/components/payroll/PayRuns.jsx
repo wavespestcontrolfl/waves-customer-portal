@@ -112,6 +112,7 @@ export function StubDialog({ call, check, onClose }) {
               <TR><TD>Regular pay ({stub.hours.regular} h at {centsToDollars(Math.round(Number(stub.hourlyRate) * 100))}/h)</TD><TD nums align="right">{centsToDollars(stub.earnings.regularPayCents)}</TD><TD nums align="right" /></TR>
               <TR><TD>Overtime pay ({stub.hours.overtime} h)</TD><TD nums align="right">{centsToDollars(stub.earnings.overtimePayCents)}</TD><TD nums align="right" /></TR>
               {stub.earnings.ptoPayCents > 0 && <TR><TD>Paid time off ({stub.hours.pto} h at {centsToDollars(Math.round(Number(stub.hourlyRate) * 100))}/h)</TD><TD nums align="right">{centsToDollars(stub.earnings.ptoPayCents)}</TD><TD nums align="right" /></TR>}
+              {stub.earnings.minimumWeekPayCents > 0 && <TR><TD>Minimum week pay ({stub.hours.minimumWeek} h at {centsToDollars(Math.round(Number(stub.hourlyRate) * 100))}/h, not hours worked)</TD><TD nums align="right">{centsToDollars(stub.earnings.minimumWeekPayCents)}</TD><TD nums align="right" /></TR>}
               {stub.earnings.holidayPayCents > 0 && <TR><TD>Holiday pay ({stub.hours.holiday} h at {centsToDollars(Math.round(Number(stub.hourlyRate) * 100))}/h)</TD><TD nums align="right">{centsToDollars(stub.earnings.holidayPayCents)}</TD><TD nums align="right" /></TR>}
               {stub.earnings.reviewBonusCents > 0 && <TR><TD>Review bonus</TD><TD nums align="right">{centsToDollars(stub.earnings.reviewBonusCents)}</TD><TD nums align="right" /></TR>}
               {stub.earnings.commissionCents > 0 && <TR><TD>Commission</TD><TD nums align="right">{centsToDollars(stub.earnings.commissionCents)}</TD><TD nums align="right" /></TR>}
@@ -333,6 +334,8 @@ function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
   // Only a pay run drafted with time off turned on carries these figures.
   const showPto = run.checks.some(check => check.ptoPayCents > 0);
   const showHoliday = run.checks.some(check => check.holidayPayCents > 0);
+  // Only a check of an employee with a minimum paid week carries this figure.
+  const showMinimum = run.checks.some(check => check.minimumWeekPayCents > 0);
   const showBank = isFinal && run.checks.some(check => check.bank);
   // Only a run read with GATE_PAYROLL_MERCURY_STATUS on carries each check's payment.
   const showMercury = isFinal && run.checks.some(check => check.payment);
@@ -345,6 +348,7 @@ function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
         <TH>Employee</TH><TH align="right">Regular</TH><TH align="right">Overtime</TH>
         {showPto && <TH align="right">Paid time off</TH>}
         {showHoliday && <TH align="right">Holiday</TH>}
+        {showMinimum && <TH align="right">Minimum week</TH>}
         {showLines && <TH align="right">Bonus, commission, allowance</TH>}
         {showLines && <TH align="right">Overtime on those</TH>}
         <TH align="right">Rate</TH><TH align="right">Gross</TH>
@@ -371,6 +375,7 @@ function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
           <TD nums align="right">{hoursWord(check.overtimeHours)}</TD>
           {showPto && <TD nums align="right">{hoursWord(check.ptoHours)} · {centsToDollars(check.ptoPayCents)}</TD>}
           {showHoliday && <TD nums align="right">{hoursWord(check.holidayHours)} · {centsToDollars(check.holidayPayCents)}</TD>}
+          {showMinimum && <TD nums align="right">{check.minimumWeekPayCents > 0 ? `${hoursWord(check.minimumWeekHours)} · ${centsToDollars(check.minimumWeekPayCents)}` : ''}</TD>}
           {showLines && <TD nums align="right">{centsToDollars(check.reviewBonusCents + check.commissionCents + check.healthAllowanceCents + (check.techRewardsCents || 0))}</TD>}
           {showLines && <TD nums align="right">{centsToDollars(check.lineOvertimePremiumCents)}</TD>}
           <TD nums align="right">{centsToDollars(Math.round(Number(check.hourlyRate) * 100))}</TD>

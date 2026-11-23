@@ -301,6 +301,7 @@ function computePaycheck({
   overtimeMinutes = 0,
   ptoMinutes,
   holidayMinutes,
+  minimumWeekMinutes,
   ytdGrossWages = 0,
   w4,
   reemploymentRateBp = FLORIDA_NEW_EMPLOYER_RATE_BP,
@@ -340,6 +341,10 @@ function computePaycheck({
   const withTimeOff = ptoMinutes !== undefined || holidayMinutes !== undefined;
   const ptoPay = roundDiv(rateCents * nonNegativeCents(ptoMinutes, 'Paid time off minutes'), 6000n);
   const holidayPay = roundDiv(rateCents * nonNegativeCents(holidayMinutes, 'Holiday minutes'), 6000n);
+  // Minimum week pay (payroll-week-minimum.js): hours not worked that bring the week up to the technician's
+  // minimum, at the straight rate. Its line is in the output only when the caller passed it.
+  const withMinimum = minimumWeekMinutes !== undefined;
+  const minimumPay = roundDiv(rateCents * nonNegativeCents(minimumWeekMinutes, 'Minimum week minutes'), 6000n);
   // Pay lines ride on the check only when the caller passes them.
   // (wholeCents reads an omitted figure as zero.)
   const withPayLines = payLines != null;
@@ -351,7 +356,7 @@ function computePaycheck({
   // Season bonus, stay bonus and December gift pay lines (Tech Rewards Plan): taxable wages like a review bonus.
   const techRewards = wholeCents(lineFigures.techRewardsCents, 'Tech rewards');
   const lineOvertimePremium = wholeCents(lineFigures.lineOvertimePremiumCents, 'Overtime on pay lines');
-  const gross = regularPay + overtimePay + ptoPay + holidayPay
+  const gross = regularPay + overtimePay + ptoPay + holidayPay + minimumPay
     + reviewBonus + commission + healthAllowance + techRewards + lineOvertimePremium;
 
   const ytd = nonNegativeCents(ytdGrossWages, 'Year-to-date wages');
@@ -390,6 +395,7 @@ function computePaycheck({
       overtimePayCents: overtimePay,
       overtimePremiumCents: overtimePremium,
       ...(withTimeOff ? { ptoPayCents: ptoPay, holidayPayCents: holidayPay } : {}),
+      ...(withMinimum ? { minimumWeekPayCents: minimumPay } : {}),
       ...(withPayLines ? {
         reviewBonusCents: reviewBonus,
         commissionCents: commission,

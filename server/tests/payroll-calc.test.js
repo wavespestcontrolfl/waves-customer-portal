@@ -321,6 +321,26 @@ describe('computePaycheck: paid time off and holidays (GATE_PAYROLL_TIME_OFF)', 
   });
 });
 
+describe('computePaycheck: minimum paid week (payroll-week-minimum.js)', () => {
+  test('pays the minimum hours at the straight rate, in gross and taxed with it, never as overtime', () => {
+    // 32 h worked + 8 h of minimum at $21.00: the same gross and taxes as 40 h worked, no overtime pay.
+    const result = paycheck({ hourlyRate: '21.00', regularMinutes: '1920.00', ptoMinutes: 0, holidayMinutes: 0, minimumWeekMinutes: '480.00' });
+    const asWorked = paycheck({ hourlyRate: '21.00', regularMinutes: '2400.00', ptoMinutes: 0, holidayMinutes: 0 });
+    expect(result.minimumWeekPayCents).toBe(16800);
+    expect(result.overtimePayCents).toBe(0);
+    expect(result.grossPayCents).toBe(asWorked.grossPayCents);
+    for (const key of ['federalIncomeTaxCents', 'socialSecurityEmployeeCents', 'medicareEmployeeCents', 'netPayCents', 'futaCents']) {
+      expect(result[key]).toBe(asWorked[key]);
+    }
+  });
+
+  test('carries no minimum key when the figure is not passed, and refuses a mistyped one', () => {
+    expect(paycheck({ ptoMinutes: 0, holidayMinutes: 0 })).not.toHaveProperty('minimumWeekPayCents');
+    expect(paycheck({ minimumWeekMinutes: 0 }).minimumWeekPayCents).toBe(0);
+    expect(() => paycheck({ minimumWeekMinutes: '-1' })).toThrow(/Minimum week minutes/);
+  });
+});
+
 describe('computePaycheck: family employee (GATE_PAYROLL_FAMILY_EMPLOYEE)', () => {
   const stripExempt = ({ unemploymentExempt, ...rest }) => rest;
 

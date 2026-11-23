@@ -118,6 +118,21 @@ const allowanceSchema = Joi.object({
     return text;
   }).required().messages({ 'any.required': 'Enter the hours per year, or leave it empty to clear it' }),
 });
+// The minimum paid hours of a full workweek (payroll-week-minimum.js). Empty clears it.
+const MAX_WEEK_MINIMUM_HOURS = 40;
+const weekMinimumSchema = Joi.object({
+  hours: Joi.any().custom((value, helpers) => {
+    if (value == null || value === '') return null;
+    let text = null;
+    if (typeof value === 'number' && Number.isFinite(value)) text = String(value);
+    else if (typeof value === 'string') text = value.trim();
+    if (text === null || !/^\d+(?:\.\d{1,2})?$/.test(text)) return helpers.message('Minimum hours must be a number with at most 2 decimal places');
+    if (Number(text) <= 0 || Number(text) > MAX_WEEK_MINIMUM_HOURS) {
+      return helpers.message(`Minimum hours must be more than 0 and ${MAX_WEEK_MINIMUM_HOURS} or fewer`);
+    }
+    return text;
+  }).required().messages({ 'any.required': 'Enter the minimum hours, or leave it empty to clear it' }),
+});
 // The pay week of a bank payout, by its first day. Empty takes the payout back.
 const PAYOUT_WEEK_MESSAGE = 'Pick the first day of a pay week (YYYY-MM-DD)';
 const payoutWeek = (value, helpers) => {
@@ -428,6 +443,30 @@ async function setPtoAllowance(technicianId, input, actor, conn = db) {
   });
 }
 
+// The minimum paid hours of a full workweek, a setting (offer letter, "Hours and schedule"; payroll-week-minimum.js).
+// null clears it: the pay run pays the hours on file and no more.
+async function setWeekMinimum(technicianId, input, actor, conn = db) {
+  requireUuid(technicianId, 'Technician');
+  const v = validate(weekMinimumSchema, input);
+  const actorId = actorOf(actor);
+  return conn.transaction(async (trx) => {
+    // The lock finalizeRun takes: the setting never changes under a finalize. A draft read before the save is stale
+    // after it (the check and its token change).
+    await lockPayrollMutations(trx);
+    const tech = await trx('technicians').where({ id: technicianId }).forUpdate().first('id', 'employment_type');
+    if (!tech) throw new PayrollError(404, 'Technician not found.');
+    if (tech.employment_type !== 'w2') throw new PayrollError(409, 'A minimum paid week is for W-2 employees.');
+    await trx('technicians').where({ id: technicianId }).update({ paid_week_minimum_hours: v.hours, updated_at: trx.fn.now() });
+    await recordAuditEvent({
+      trx, critical: true, actor_type: 'admin', actor_id: actorId,
+      action: 'payroll.week_minimum_changed', resource_type: 'technicians', resource_id: technicianId,
+      metadata: { technician_id: technicianId, hours: v.hours },
+    });
+    const row = await trx('technicians').where({ id: technicianId }).first('id', 'paid_week_minimum_hours');
+    return { id: row.id, paidWeekMinimumHours: row.paid_week_minimum_hours == null ? null : Number(row.paid_week_minimum_hours) };
+  });
+}
+
 // "Pay out the bank" (handbook, "When you leave"): the pay run for the week starting `weekStart` pays the
 // technician every hour the bank holds after that week, on their check (payroll-time-off-bank.js). The handbook
 // pays unused hours except after a quit without 14 days' notice or a dismissal for misconduct, so only the
@@ -493,5 +532,6 @@ module.exports = {
   updateTimeOff,
   deleteTimeOff,
   setPtoAllowance,
+  setWeekMinimum,
   setPtoPayoutWeek,
 };
