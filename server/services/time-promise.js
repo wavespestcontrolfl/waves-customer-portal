@@ -273,8 +273,12 @@ function currentIntent(member, newestSlotChange) {
  *  reused by the pick check) only for a member that has an explicit value. Throws on a failed read. */
 async function memberIntentState(conn, member) {
   if (member.customer_asked_time !== true && member.customer_asked_time !== false) return { intent: null, rows: null };
-  const rows = await require('./auto-dispatch/eligibility').loadNewestSlotRows(conn, member.id, { withIntent: true });
-  return { intent: currentIntent(member, rows[0] || null), rows };
+  const eligibility = require('./auto-dispatch/eligibility');
+  const rows = await eligibility.loadNewestSlotRows(conn, member.id, { withIntent: true });
+  // Judged against the newest change of date or start, as auto-dispatch's isPersonPlacedVisit judges it: an end-only edit
+  // (a longer visit) never makes the intent stale (local audit 2026-11-22). Reads further back only after an end-only edit.
+  const owners = await eligibility.newestPlacementRows(conn, member.id, rows, true);
+  return { intent: currentIntent(member, owners[0] || null), rows };
 }
 
 /** May this ONE member be promised only the day? `customer_asked_time` is the explicit intent for the current slot, while it
@@ -565,11 +569,12 @@ async function loadOfficeToldFields(conn, rows, now = new Date()) {
   const entry = (id) => entryOf(out, id);
   let visitsForReminders = [];
   try {
-    // The CURRENT intent (currentIntent, the one read rule), not the raw column: an intent a later slot-changing move left
-    // behind reads as not recorded (null), so the box never pre-checks a choice the customer made for an older slot. Both
-    // facts come from this ONE query (the same filter and comparison as eligibility.loadNewestSlotRows withIntent).
+    // The CURRENT intent (currentIntent, the one read rule), not the raw column: an intent a later move of the date or start
+    // left behind reads as not recorded (null), so the box never pre-checks a choice the customer made for an older slot. Both
+    // facts come from this ONE query, judged against placements (eligibility PLACEMENT_SQL, as memberIntentState judges
+    // them): an end-only edit never makes the intent stale.
     const slotRows = (extra) => `EXISTS (SELECT 1 FROM reschedule_log WHERE reschedule_log.scheduled_service_id = scheduled_services.id
-      AND new_date IS NOT NULL AND ${require('./auto-dispatch/eligibility').SLOT_CHANGED_SQL}${extra})`;
+      AND new_date IS NOT NULL AND ${require('./auto-dispatch/eligibility').PLACEMENT_SQL}${extra})`;
     const stored = await conn('scheduled_services').whereIn('id', list.map((r) => r.id)).select(
       'id', 'customer_id', 'property_id', 'customer_asked_time', 'customer_asked_time_at',
       conn.raw(`${slotRows('')} AS has_slot_change`),

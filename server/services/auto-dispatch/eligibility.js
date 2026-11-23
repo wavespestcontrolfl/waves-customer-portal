@@ -219,6 +219,10 @@ const STAFF_INITIATORS = new Set(['admin', 'admin_ib', 'admin_bulk', 'operator',
 const CUSTOMER_INITIATORS = new Set(['customer', 'customer_self_serve', 'customer_portal', 'customer_sms', 'sms_offer_ai', 'ai_call_pipeline']);
 // A row records a chosen slot only when the date or the window changed.
 const SLOT_CHANGED_SQL = '(original_date IS DISTINCT FROM new_date OR original_window IS DISTINCT FROM new_window)';
+// A row PLACES the visit when the date or the START changed (placesVisit below, in SQL; the log's windows are 'HH:MM-HH:MM',
+// 'HH:MM:SS-HH:MM:SS' or NULL). An end-only edit (a longer visit) does not.
+const PLACEMENT_SQL = "(original_date IS DISTINCT FROM new_date OR left(split_part(COALESCE(original_window, ''), '-', 1), 5)"
+  + " IS DISTINCT FROM left(split_part(COALESCE(new_window, ''), '-', 1), 5))";
 const PLACEMENT_COLUMNS = ['auto_dispatch_locked', 'auto_dispatch_excluded', 'date_exception', 'date_exception_source',
   'date_exception_at', 'customer_asked_time', 'customer_asked_time_at', 'window_start'];
 // How far back the rule reads when the newest slot change is an end-only edit (0 such edits in 120 days, 2026-11-22).
@@ -308,8 +312,8 @@ async function isPersonPlacedVisit(input, db, opts = {}) {
     }
     const withIntent = asked(service);
     const newestRows = await loadNewestSlotRows(db, service.id, { withIntent });
-    // The newest change of date or start: an end-only edit makes neither an asked time nor a date edit stale. (The
-    // day-only promise's memberIntentState still judges against the newest slot change of any kind.)
+    // The newest change of date or start: an end-only edit makes neither an asked time nor a date edit stale (the same
+    // rule as time-promise memberIntentState).
     const owners = await newestPlacementRows(db, service.id, newestRows, withIntent);
     // Lazy: time-promise requires this module lazily too.
     const intent = withIntent ? require('../time-promise').currentIntent(service, owners[0] || null) : null;
@@ -373,5 +377,5 @@ async function loadNewestSlotRows(db, serviceId, { withIntent = false } = {}) {
 }
 
 module.exports = {
-  isEligibleForAutoDispatch, heldOutOfAutoDispatch, isRecurringPlanActive, lapsedPlanKeys, planKey, isPersonPlacedVisit, isCustomerPickedVisit, loadNewestSlotRows, CUSTOMER_INITIATORS, VALID_STATUSES, SLOT_CHANGED_SQL,
+  isEligibleForAutoDispatch, heldOutOfAutoDispatch, isRecurringPlanActive, lapsedPlanKeys, planKey, isPersonPlacedVisit, isCustomerPickedVisit, loadNewestSlotRows, newestPlacementRows, PLACEMENT_SQL, CUSTOMER_INITIATORS, VALID_STATUSES, SLOT_CHANGED_SQL,
 };

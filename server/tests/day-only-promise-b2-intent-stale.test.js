@@ -28,7 +28,7 @@ function fakeConn({ services = [svc()], source = 'admin_manual', log = [] } = {}
     reads.push(table);
     const ins = [];
     const chain = {};
-    for (const m of ['where', 'whereNotIn', 'whereNotNull', 'whereNull', 'whereRaw', 'whereBetween', 'orderBy', 'join', 'leftJoin', 'distinct', 'orWhere', 'andWhere']) chain[m] = () => chain;
+    for (const m of ['where', 'whereNotIn', 'whereNotNull', 'whereNull', 'whereRaw', 'whereBetween', 'orderBy', 'limit', 'join', 'leftJoin', 'distinct', 'orWhere', 'andWhere']) chain[m] = () => chain;
     chain.whereIn = (_c, values) => { ins.push(values.map(String)); return chain; };
     chain.select = async () => {
       if (table === 'scheduled_services') return services.filter((r) => !ins.length || ins[0].includes(String(r.id)) || ins[0].includes(String(r.visit_id)));
@@ -103,6 +103,15 @@ describe('memberEligible through dayOnlyEligibility', () => {
     expect(await eligible(tie)).toBe(true);
     const asked = fakeConn({ services: [svc({ customer_asked_time: true, customer_asked_time_at: AT })], log: [logRow('admin', false)] });
     expect(await eligible(asked)).toBe(false);
+  }));
+
+  // Local audit 2026-11-22: judged against the newest change of date or start, as auto-dispatch's isPersonPlacedVisit is.
+  test('an explicit true survives a later end-only edit (still a set time); a later change of start makes it stale', withGate('true', async () => {
+    const member = svc({ is_recurring: true, recurring_parent_id: 'p1', customer_asked_time: true, customer_asked_time_at: AT });
+    const longer = logRow('admin_bulk', true, { original_date: VISIT_DATE, original_window: '09:00-10:00', new_window: '09:00-10:30' });
+    expect(await eligible(fakeConn({ services: [member], log: [longer] }))).toBe(false);
+    const restart = logRow('admin', true, { original_date: VISIT_DATE, original_window: '13:00-14:00', new_window: '09:00-10:00' });
+    expect(await eligible(fakeConn({ services: [member], log: [restart] }))).toBe(true);
   }));
 
   test('a booking intent (no time) followed by a move is inferred; with no move it holds', withGate('true', async () => {
