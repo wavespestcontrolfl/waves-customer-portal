@@ -4861,6 +4861,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
         .then((hasRows) => hasRows !== true, () => true);
     const reportNoteUnverified = reportNoteVisit === null || (reportNoteVisit?.ok === true && !reportNoteVisit.profile)
       || reportNoteAddOnsUnread;
+    // A sent note on a visit the check now finds the sheet does not take (an add-on or a reclassification since the
+    // sheet loaded) refuses as a changed visit (409 below): the sheet reloads, never a recap from the raw note.
+    const reportNoteVisitChanged = reportNoteVisit?.ok === true && reportNoteVisit.eligible !== true && !reportNoteUnverified;
     // A sent note in no shape the sheet sends is a bad request (400 below), never a completion without the marker.
     const reportNoteInvalid = reportNoteSent && !require('./service-report/report-own-note').isSheetReportNote(completionInput.body.reportNote);
     const reportNotePick = reportNoteVisit?.eligible === true
@@ -5307,6 +5310,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
       return ({ status: 400, body: {
         error: 'The report note was not sent in a form the server reads. Reload the sheet and complete again.',
         code: 'REPORT_NOTE_INVALID',
+      } });
+    }
+    if (claim.action === 'proceed' && reportNoteVisitChanged && !reportNoteInvalid) {
+      await CompletionAttempts.markCompletionAttemptFailed(
+        completionAttempt,
+        new Error('report_note_visit_changed'),
+        db,
+      ).catch(() => {});
+      return ({ status: 409, body: {
+        error: 'This visit changed since the sheet opened. Reload it and complete again.',
+        code: 'visit_identity_changed',
       } });
     }
     if (claim.action === 'proceed' && reportNoteUnverified) {

@@ -54,6 +54,14 @@ describe('the completion\'s report note', () => {
     expect(block.slice(reject, reject + 500)).toMatch(/status: 400[\s\S]*code: 'REPORT_NOTE_INVALID'/);
   });
 
+  test('a sent note on a visit the sheet no longer takes is a 409 changed visit, before any write', () => {
+    expect(pick).toContain('const reportNoteVisitChanged = reportNoteVisit?.ok === true && reportNoteVisit.eligible !== true && !reportNoteUnverified;');
+    const reject = block.indexOf("if (claim.action === 'proceed' && reportNoteVisitChanged && !reportNoteInvalid) {");
+    expect(reject).toBeGreaterThan(0);
+    expect(reject).toBeLessThan(block.indexOf("trx('service_records').insert(recordInsert)"));
+    expect(block.slice(reject, reject + 500)).toMatch(/status: 409[\s\S]*code: 'visit_identity_changed'/);
+  });
+
   test('frozen with the record; a frozen note is the customer recap (no model reads the raw note for one)', () => {
     expect(sentAt).toBeLessThan(block.indexOf("trx('service_records').insert(recordInsert)"));
     expect(block).toContain('...(reportNotePick ? { reportNote: reportNotePick } : {}),');
