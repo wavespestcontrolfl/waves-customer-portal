@@ -8,7 +8,8 @@ import { adminFetch } from "../../lib/adminFetch";
 import { formatETDate, formatETDateOnly } from "../../lib/timezone";
 
 // Mail (admin only, read only). The new-home list: buyers of a new home, from the county's public deed list, who would
-// get a postcard in a later step. Nothing here is sent to anyone, no AI is used and no row is written.
+// get a postcard in a later step, with each home's shadow price. Nothing here is sent to anyone, no AI is used and no row
+// is written.
 
 const VIEWS = [
   { key: "live", label: "Homes" },
@@ -33,6 +34,68 @@ const REASON_LABELS = {
   no_address: "No street address",
 };
 const reasonLabel = (reason) => (reason ? REASON_LABELS[reason] || reason : "Not given");
+
+// The shadow price (mailer step 2b): the quarterly pest plan price the price pass stored for an eligible home. Nobody is
+// quoted from it. One plain label for each price status and reason (services/mail/home-price.js, home-facts.js,
+// home-quote.js). An unknown code shows as it is.
+const PRICE_STATUS_LABELS = {
+  priced: "Priced",
+  not_clean: "No price",
+  missing_fact: "Waiting for a fact",
+  failed: "Will try again",
+  untried: "Not priced yet",
+};
+const PRICE_REASON_LABELS = {
+  no_home_size: "No home size yet",
+  no_stories: "No story count yet",
+  no_lot_size: "No lot size yet",
+  permit_row: "Permit not found",
+  parcel_map: "County map did not answer",
+  permit_page: "Permit page did not answer",
+  permit_canceled: "Permit canceled",
+  not_single_family: "Not a single-family home",
+  member_address: "A customer already lives there",
+  member_unchecked: "A customer may live there",
+  member_check: "Customer check did not answer",
+  engine: "Price engine did not answer",
+  engine_review: "Price needs a review",
+  not_server_price: "Not a list price",
+  not_one_line: "More than one line",
+  no_amount: "No amount",
+  save_refused: "Estimate check refused it",
+};
+const SIZE_SOURCE_LABELS = { parcel_map: "county map", permit_plan: "permit plan" };
+const money = (value) => Number(value).toLocaleString("en-US", { style: "currency", currency: "USD" });
+
+export function priceText(price) {
+  if (!price) return "";
+  if (price.status === "priced" && price.monthly != null) {
+    return `${money(price.monthly)} a month${price.setupFee ? ` + ${money(price.setupFee)} setup` : ""}`;
+  }
+  const status = PRICE_STATUS_LABELS[price.status] || price.status;
+  return price.reason ? `${status}: ${PRICE_REASON_LABELS[price.reason] || price.reason}` : status;
+}
+
+export function factsText(price) {
+  if (!price || !price.homeSqft) return "";
+  const parts = [`${countText(price.homeSqft)} sq ft${price.sizeSource ? ` (${SIZE_SOURCE_LABELS[price.sizeSource] || price.sizeSource})` : ""}`];
+  if (price.stories) parts.push(`${price.stories} ${Number(price.stories) === 1 ? "story" : "stories"}`);
+  if (price.lotSqft) parts.push(`lot ${countText(price.lotSqft)} sq ft`);
+  return parts.join(", ");
+}
+
+// The line under the runs: how far the price pass got on the homes that get a card.
+export function priceCountsText(priceCounts) {
+  if (!priceCounts) return "";
+  const parts = [
+    ["Priced", priceCounts.priced],
+    ["no price", priceCounts.notClean],
+    ["waiting for a fact", priceCounts.missingFact],
+    ["will try again", priceCounts.failed],
+    ["not priced yet", priceCounts.untried],
+  ].filter(([, count], i) => i === 0 || count > 0);
+  return `Shadow prices: ${parts.map(([label, count]) => `${label} ${countText(count)}`).join(" · ")}`;
+}
 
 // An error answer may carry no JSON body. A success whose body cannot be read (cut off on the way) is an error
 // too, so the page shows Try again, never a broken list.
@@ -100,6 +163,7 @@ function HomesTable({ rows }) {
               <TH>Address</TH>
               <TH>Subdivision</TH>
               <TH>Group</TH>
+              <TH>Shadow price</TH>
             </TR>
           </THead>
           <TBody>
@@ -110,6 +174,14 @@ function HomesTable({ rows }) {
                 <TD data-label="Address" className="align-top">{[row.addressLine1, row.city, row.zip].filter(Boolean).join(", ") || "Not listed"}</TD>
                 <TD data-label="Subdivision" className="align-top">{row.subdivision || "Not listed"}</TD>
                 <TD data-label="Group" className="align-top">{GROUP_LABELS[row.status] || row.status}</TD>
+                <TD data-label="Shadow price" className="align-top">
+                  {row.status === "eligible" ? (
+                    <>
+                      <span className="text-ui-body text-zinc-900">{priceText(row.price)}</span>
+                      {factsText(row.price) && <div className="text-ui-body text-ink-secondary">{factsText(row.price)}</div>}
+                    </>
+                  ) : <span className="text-ui-body text-ink-secondary">No card</span>}
+                </TD>
               </TR>
             ))}
           </TBody>
@@ -158,7 +230,7 @@ export default function MailProspectsPage({ embedded = false }) {
       {!embedded && <AdminCommandHeader variant="workspace" title="Mail" icon={Mail} />}
 
       <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-white px-3 py-2 text-ui-body text-ink-secondary">
-        New-home buyers from the county deed list. Nothing is mailed yet.
+        New-home buyers from the county deed list. Nothing is mailed yet, and the prices are shadow prices: nobody sees them.
       </div>
 
       {loading && <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Loading the mail list…</div>}
@@ -172,7 +244,8 @@ export default function MailProspectsPage({ embedded = false }) {
             <CountCard label="Not eligible" value={data.counts.notEligible} />
             <CountCard label="No match yet" value={data.counts.unmatched} />
           </div>
-          <p className="mb-3 text-ui-body text-zinc-900">{runText(data)}</p>
+          <p className="mb-1 text-ui-body text-zinc-900">{runText(data)}</p>
+          {data.priceCounts && <p className="mb-3 text-ui-body text-zinc-900">{priceCountsText(data.priceCounts)}</p>}
         </>
       )}
 
