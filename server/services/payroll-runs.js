@@ -33,6 +33,13 @@
  * bypasses the timesheet: a technician whose worked time is not approved stays
  * waiting. Gate off, every function here reads and returns what it did before.
  *
+ * Time-off bank (owner 2026-11-21; no gate of its own, services/payroll-time-off-bank.js): for a
+ * technician whose yearly time-off hours are set, the draft pays paid time off only from the bank,
+ * and the check stores the hours it earned (pto_earned_minutes), the early illness minutes it paid
+ * (pto_early_illness_minutes) and the bank figures (calc_snapshot.ptoBank). Time off that is not paid is
+ * listed on the draft with its reason; the list is worked out on each view, so the review token takes it.
+ * With no yearly hours set, every function here reads and returns what it did before.
+ *
  * GATE_PAYROLL_PAY_LINES (owner 2026-10-29, D5 part 1): a draft also pays the open
  * pay lines of services/payroll-pay-lines.js (review bonus, commission, health
  * allowance, employer HSA money) and the extra overtime they cause in the federal
@@ -85,6 +92,7 @@ const {
   syncTechRewardLines, readSeasonScores, readSeasonScoresOfRun, dropRewardLinesOfWeek, paidBonusCounting, waitNotes,
 } = require('./tech-rewards-pay-lines');
 const { familyEmployeeOn, familyExemptIds } = require('./payroll-family-employee');
+const timeOffBank = require('./payroll-time-off-bank');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_REASON = 500;
@@ -127,6 +135,27 @@ const mercuryStatusOn = () => typeof payrollMercuryStatusLive === 'function' && 
 const TIME_OFF_MINUTE_COLUMNS = ['pto_minutes', 'holiday_minutes'];
 const TIME_OFF_PAY_COLUMNS = ['pto_pay_cents', 'holiday_pay_cents'];
 const TIME_OFF_COLUMNS = [...TIME_OFF_MINUTE_COLUMNS, ...TIME_OFF_PAY_COLUMNS];
+// Time-off bank: a check of a technician with a bank stored the hours it earned (never null then) and its
+// bank figures; any other check stored neither and shows neither.
+const storedBank = (row) => row.pto_earned_minutes != null;
+// What buildCheck stores for a technician with a bank (evaluate() sets tech.pto_bank, only behind the gate).
+const bankSnapshot = (tech) => (tech.pto_bank ? { ptoBank: tech.pto_bank } : {});
+const bankColumns = (tech) => (tech.pto_bank ? {
+  pto_earned_minutes: tech.pto_bank.earnedMinutes, pto_early_illness_minutes: tech.pto_bank.earlyIllnessMinutes,
+} : {});
+// What a check with a bank shows; nothing for any other check, so that one keeps exactly its earlier keys.
+function bankView(row) {
+  if (!storedBank(row)) return {};
+  const figures = row.pto_bank || {};
+  return {
+    timeOffBank: {
+      earnedHours: hoursText(row.pto_earned_minutes),
+      usedHours: hoursText(row.pto_minutes),
+      unpaidHours: hoursText(figures.unpaidMinutes),
+      balanceHours: hoursText(figures.afterMinutes),
+    },
+  };
+}
 
 // GATE_PAYROLL_PAY_LINES: payroll_checks column -> computePaycheck output key. Null on a
 // check made with the gate off; read and written only with the gate on.
@@ -291,7 +320,10 @@ function buildCheck({
     overtime_minutes: tech.overtime_minutes,
     ytd_gross_before_cents: ytdGrossCents,
     w4_election_id: w4.id,
-    calc_snapshot: JSON.stringify(lines.length ? { ...pay, payLines: lines, lineOvertimeWeeks: linePremium.weeks } : pay),
+    calc_snapshot: JSON.stringify({
+      ...(lines.length ? { ...pay, payLines: lines, lineOvertimeWeeks: linePremium.weeks } : pay),
+      ...bankSnapshot(tech),
+    }),
     pay_method: tech.pay_method || 'check',
     status: 'draft',
     ...simpleColumns(simple, pay),
@@ -307,6 +339,7 @@ function buildCheck({
     check.holiday_minutes = holidayMinutes;
     check.pto_pay_cents = pay.ptoPayCents;
     check.holiday_pay_cents = pay.holidayPayCents;
+    Object.assign(check, bankColumns(tech));
   }
   return { check };
 }
@@ -331,10 +364,31 @@ function payLinesSignature(row) {
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
 }
 
+// The time-off bank figures a check holds, normalized. A stored row carries them as `pto_bank`
+// (calc_snapshot->'ptoBank'); a row about to be stored carries them in its calc_snapshot text.
+function ptoBankSignature(row) {
+  let bank = row.pto_bank;
+  if (!('pto_bank' in row) && typeof row.calc_snapshot === 'string') {
+    try { bank = JSON.parse(row.calc_snapshot).ptoBank; } catch { bank = null; }
+  }
+  const figures = ['earnedMinutes', 'earlyIllnessMinutes', 'unpaidMinutes', 'unpaidRuleMinutes', 'unpaidBeforeHireMinutes', 'beforeMinutes', 'afterMinutes']
+    .map((key) => Number((bank || {})[key] || 0).toFixed(2));
+  // What the bank paid on each date. A day off moved inside the week can keep every total and still change
+  // these, and pay earned by date reads them (tech-rewards-scoreboard.js readGross).
+  const paidDays = ((bank || {}).paidDays || []).map((day) => `${day.workDate}=${Number(day.minutes || 0).toFixed(2)}`).sort();
+  return [...figures, paidDays.join(',')];
+}
+
+// The unpaid time off list in the token (payroll-time-off-bank.js applyBank): who, how much and why.
+const unpaidSignature = (unpaid) => unpaid.map((row) => [row.technicianId, row.hours, row.reason])
+  .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+
 // A token over everything that decides the numbers on a run. It is computed from
 // rows as stored (strings from Postgres) and from rows about to be stored
 // (numbers), so every value is normalized first.
-function tokenOf(run, rows) {
+// `unpaid` = the time off a time-off bank did not pay, as the view listed it. It is not stored (a technician it
+// names can have no check), so the view and finalize pass it; with none, the token is the one it always was.
+function tokenOf(run, rows, unpaid = []) {
   const withTimeOff = timeOffOn();
   const withLines = payLinesOn();
   const withFamily = familyEmployeeOn();
@@ -352,6 +406,9 @@ function tokenOf(run, rows) {
       ...TIME_OFF_MINUTE_COLUMNS.map((key) => Number(row[key] || 0).toFixed(2)),
       ...TIME_OFF_PAY_COLUMNS.map((key) => Number(row[key] || 0)),
     ] : []),
+    // The time-off bank: a change of the yearly hours, the hire date, an illness mark or an earlier
+    // check after drafting changes what the bank pays or earns, so the draft goes stale.
+    ...(storedBank(row) ? [Number(row.pto_earned_minutes).toFixed(2), ptoBankSignature(row)] : []),
     // Adding, removing or changing a pay line after drafting changes the token too. A row that
     // stored pay line figures keeps them in the token after the gate is turned off, so a draft
     // that still shows them goes stale instead of finalizing without them.
@@ -361,7 +418,8 @@ function tokenOf(run, rows) {
     // And for SIMPLE IRA savings: a new, changed or ended election after drafting makes the draft stale.
     ...(storedSimple(row) ? [row.simple_election_id, Number(row.simple_deferral_cents), Number(row.simple_employer_cents)] : []),
   ]).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-  return crypto.createHash('sha256').update(JSON.stringify([run.week_start, run.pay_date, parts])).digest('hex').slice(0, 32);
+  const signed = [run.week_start, run.pay_date, parts, ...(unpaid.length ? [unpaidSignature(unpaid)] : [])];
+  return crypto.createHash('sha256').update(JSON.stringify(signed)).digest('hex').slice(0, 32);
 }
 
 function sumRows(rows) {
@@ -383,11 +441,14 @@ const runColumns = (conn) => [
   conn.raw("to_char(week_start, 'YYYY-MM-DD') as week_start"),
   conn.raw("to_char(pay_date, 'YYYY-MM-DD') as pay_date"),
   'created_at', 'finalized_at', 'voided_at',
+  // The time off a finalized run did not pay (time-off bank), kept with the run; not read with the gate off.
+  ...(timeOffOn() ? ['unpaid_time_off'] : []),
 ];
 
 const checkColumns = (conn) => [
   'id', 'run_id', 'technician_id', 'employee_name', 'hourly_rate', 'regular_minutes', 'overtime_minutes',
-  ...MONEY_KEYS, ...(timeOffOn() ? TIME_OFF_COLUMNS : []),
+  ...MONEY_KEYS,
+  ...(timeOffOn() ? [...TIME_OFF_COLUMNS, 'pto_earned_minutes', conn.raw("calc_snapshot->'ptoBank' as pto_bank")] : []),
   ...PAY_LINE_KEYS, ...UNEMPLOYMENT_COLUMNS, ...SIMPLE_COLUMNS, conn.raw("calc_snapshot->'payLines' as pay_lines"),
   'ytd_gross_before_cents', 'w4_election_id', 'pay_method', 'check_number', 'status',
   conn.raw("to_char(week_start, 'YYYY-MM-DD') as week_start"),
@@ -438,6 +499,7 @@ function serializeCheck(row) {
       ptoPayCents: Number(row.pto_pay_cents || 0),
       holidayPayCents: Number(row.holiday_pay_cents || 0),
     } : {}),
+    ...bankView(row),
     ...(payLinesOn() || storedLines(row) ? {
       reviewBonusCents: Number(row.review_bonus_cents || 0),
       commissionCents: Number(row.commission_cents || 0),
@@ -751,9 +813,26 @@ async function evaluate(conn, run, { lock = false } = {}) {
       reason: `Timesheet for the week of ${week} is not approved yet, and a pay line covers that week`,
     });
   }
-  const linesOnlyRows = [...lineMap.values()]
+  let linesOnlyRows = [...lineMap.values()]
     .filter(({ tech }) => !haveCheck.has(tech.technician_id))
     .map(({ tech }) => ({ ...tech, regular_minutes: 0, overtime_minutes: 0, pto_minutes: 0, holiday_minutes: 0 }));
+  // Time-off bank, over every row that can become a check: the bank pays the week's paid time off, the check
+  // earns hours, and a pay-line-only check carries the bank figures too. A week of time off alone that the
+  // bank pays nothing of makes no check unless a pay line needs one. Time off not paid is listed with its reason.
+  let bankHolds = new Map();
+  let unpaidTimeOff = [];
+  if (timeOffOn()) {
+    const banked = await timeOffBank.applyBank(conn, [...withHours, ...timeOffOnlyRows, ...linesOnlyRows], {
+      start, end, payDate: run.pay_date, lock,
+    });
+    ({ holds: bankHolds, unpaid: unpaidTimeOff } = banked);
+    const needsCheck = (row) => bankHolds.has(row.technician_id) || lineMap.has(row.technician_id)
+      || Number(row.pto_minutes) + Number(row.holiday_minutes) > 0;
+    const offEnd = withHours.length + timeOffOnlyRows.length;
+    linesOnlyRows = banked.rows.slice(offEnd);
+    timeOffOnlyRows = banked.rows.slice(withHours.length, offEnd).filter(needsCheck);
+    withHours = banked.rows.slice(0, withHours.length);
+  }
   // Each check pays the rate of ITS week (payroll-rate-steps.js); with no pay rate step the rows are unchanged.
   const payable = await withWeekRates(conn,
     [...withHours, ...timeOffOnlyRows, ...linesOnlyRows].filter((row) => !waitingIds.has(row.technician_id)), start);
@@ -775,6 +854,7 @@ async function evaluate(conn, run, { lock = false } = {}) {
   // per technician; the run's own week comes last, so its reason wins.
   const lineUnreviewed = shiftCloseReviewLive() ? await lineWeeksUnreviewed(conn, priced) : new Map();
   const holds = new Map([
+    ...bankHolds,
     ...[...lineUnreviewed].map(([id, week]) => [id, `${AUTO_CLOSE_BLOCK_REASON} in the week of ${week}, which a pay line covers`]),
     ...[...unreviewed].map((id) => [id, AUTO_CLOSE_BLOCK_REASON]),
   ]);
@@ -792,7 +872,7 @@ async function evaluate(conn, run, { lock = false } = {}) {
     if (built.blocked) blocked.push({ technicianId: tech.technician_id, name: tech.name, reason: built.blocked });
     else checks.push({ ...built.check, run_id: run.id });
   }
-  return { checks, blocked, waiting, lines: lineMap };
+  return { checks, blocked, waiting, lines: lineMap, unpaidTimeOff };
 }
 
 // Bank status of each finalized check (GATE_PAYROLL_BANK_MATCH): matched with the date of the
@@ -840,11 +920,19 @@ async function runView(conn, runId, { evaluation = null } = {}) {
     totals: sumRows(rows),
     token: tokenOf(run, rows),
   };
+  // A run that is no longer a draft shows the time off it did not pay as finalize kept it; a draft lists it live below.
+  if (run.status !== 'draft' && run.unpaid_time_off) view.unpaidTimeOff = run.unpaid_time_off;
   if (run.status === 'draft') {
     const live = evaluation || await evaluate(conn, run);
     view.blocked = live.blocked;
     view.waiting = live.waiting;
     view.stale = tokenOf(run, live.checks) !== view.token;
+    // Time off a time-off bank did not pay; the key is present only when there is some. The list is of now, so the
+    // token takes it: finalize refuses once when the list changed after this view.
+    if (live.unpaidTimeOff.length) {
+      view.unpaidTimeOff = live.unpaidTimeOff;
+      view.token = tokenOf(run, rows, live.unpaidTimeOff);
+    }
   }
   // plain notes about a December gift, a stay bonus or a season bonus that waits (tech-rewards-pay-lines.js waitNotes); present only when there is one
   const notes = run.status === 'voided' ? [] : await waitNotes(conn, runId);
@@ -926,10 +1014,13 @@ const syncTechRewards = (trx, run, actorId, seasonScores) => syncTechRewardLines
 const removedRewards = (ids) => (ids.length ? { tech_rewards_line_ids_removed: ids } : {});
 
 // The payroll lock comes before the run row, the order finalizeRun uses. Pay lines need it, and so does a pay
-// rate step that is due (applyDueSteps changes technicians.pay_rate). `today` is read once per run write, so
-// the answer here and in applyDueSteps is the same. With no step due and pay lines off, no lock is taken.
+// rate step that is due (applyDueSteps changes technicians.pay_rate). Time off needs it too: the evaluation
+// locks the week's approved rows and then the rows of the technicians who have a time-off bank, and a manual
+// shift entry takes this lock before it locks its technician row and reads the week. Without it the two can
+// deadlock. `today` is read once per run write, so the answer here and in applyDueSteps is the same. With no
+// step due and both gates off, no lock is taken.
 async function lockRunWrite(trx, today) {
-  if (payLinesOn() || await hasDueSteps(trx, today)) await lockPayrollMutations(trx);
+  if (payLinesOn() || timeOffOn() || await hasDueSteps(trx, today)) await lockPayrollMutations(trx);
 }
 
 async function draftRun(input, actor, conn = db) {
@@ -953,7 +1044,9 @@ async function draftRun(input, actor, conn = db) {
       await applyDueSteps(trx, { today });
       await syncTechRewards(trx, run, actorId, seasonScores);
       const evaluation = await evaluate(trx, run, { lock: true });
-      if (!evaluation.checks.length && !evaluation.blocked.length && !evaluation.waiting.length) {
+      // A week whose time off a time-off bank did not pay still gets a run, also with no paycheck: finalizing it
+      // closes the week, so the unpaid decision is kept and those hours stop waiting for a pay run.
+      if (!evaluation.checks.length && !evaluation.blocked.length && !evaluation.waiting.length && !evaluation.unpaidTimeOff.length) {
         // No run is kept (this rolls back), so there is no screen to list a waiting Tech Rewards line on: the message says
         // each one, with its reason and the last pay date that can add it. Read before the rollback takes the run row.
         const waitingRewards = await waitNotes(trx, id);
@@ -1040,7 +1133,9 @@ async function finalizeRun(runId, input, actor, conn = db) {
     await syncTechRewards(trx, run, actorId, seasonScores);
     const evaluation = await evaluate(trx, run, { lock: true });
     if (evaluation.blocked.length || evaluation.waiting.length) throw new PayrollError(409, describeProblems(evaluation));
-    if (!evaluation.checks.length) {
+    // A run with no paycheck can still close a week whose time off was not paid (see draftRun). The token check
+    // below then covers a draft whose checks are gone.
+    if (!evaluation.checks.length && !evaluation.unpaidTimeOff.length) {
       // A draft can still show checks that are gone: its only checks rode on a pay line that another run has paid since. Keep
       // the fresh, empty numbers as the draft, as the token check below does, so the screen shows what changed.
       if (!(await loadCheckRows(trx, runId)).length) throw new PayrollError(409, 'There are no paychecks to finalize.');
@@ -1052,13 +1147,24 @@ async function finalizeRun(runId, input, actor, conn = db) {
     if (await laterFinalCheckExists(trx, run, evaluation.checks.map((check) => check.technician_id))) {
       throw new PayrollError(409, 'A later pay run is already final. Void it first, then finalize this one.');
     }
+    // The same for the time-off bank, in any year: a later check already read the bank without this run, or a
+    // later final run already left time off of the technician unpaid from it (with or without a check).
+    const banked = evaluation.checks.filter(storedBank).map((check) => check.technician_id);
+    if (await timeOffBank.laterBankCheckExists(trx, run, banked) || await timeOffBank.laterUnpaidDecisionExists(trx, run, banked)) {
+      throw new PayrollError(409, 'A later pay run is already final. Void it first, then finalize this one.');
+    }
     await replaceDraftChecks(trx, runId, evaluation.checks);
     const rows = await loadCheckRows(trx, runId);
-    if (tokenOf(run, rows) !== v.token) {
+    if (tokenOf(run, rows, evaluation.unpaidTimeOff) !== v.token) {
       // Keep the fresh numbers as the draft, so the screen shows what changed.
       changed = true;
       await audit(trx, actorId, 'payroll.run_recomputed', 'payroll_runs', runId, { run_id: runId });
       return;
+    }
+    // The time off this run does not pay stays on the run: a technician it names can have no check to show it.
+    // Written while the row is still a draft; the row is frozen once it is final.
+    if (evaluation.unpaidTimeOff.length) {
+      await trx('payroll_runs').where({ id: runId }).update({ unpaid_time_off: JSON.stringify(evaluation.unpaidTimeOff) });
     }
     const now = trx.fn.now();
     await trx('payroll_checks').where({ run_id: runId, status: 'draft' }).update({ status: 'finalized' });
@@ -1086,6 +1192,13 @@ async function voidRun(runId, input, actor, conn = db) {
     if (run.status === 'voided') throw new PayrollError(409, 'This pay run is already voided.');
     const rows = await loadCheckRows(trx, runId, { lock: true });
     if (run.status === 'finalized' && await laterFinalCheckExists(trx, run, rows.map((row) => row.technician_id))) {
+      throw new PayrollError(409, 'A later pay run is already final. Void it first.');
+    }
+    // The same for the time-off bank, in any year: a later check read the bank with this run in it, or a later final
+    // run left time off unpaid that the hours this void gives back would have paid (the 16 early illness hours too).
+    // Not behind the gate: a check that holds a bank counts in later checks either way.
+    const banked = run.status === 'finalized' ? await timeOffBank.bankTechniciansOfRun(trx, runId) : [];
+    if (await timeOffBank.laterBankCheckExists(trx, run, banked) || await timeOffBank.laterUnpaidDecisionExists(trx, run, banked)) {
       throw new PayrollError(409, 'A later pay run is already final. Void it first.');
     }
     // A paid stay bonus or season bonus on a later check was worked out from this run's pay (tech-rewards-pay-lines.js
@@ -1210,6 +1323,8 @@ async function getStub(checkId, conn = db) {
     payMethod: c.payMethod,
     checkNumber: c.checkNumber,
     ...(c.w4Default ? { w4Default: true } : {}),
+    // Time-off bank after this check; only on a check of a technician with a bank.
+    ...(c.timeOffBank ? { timeOffBank: c.timeOffBank } : {}),
     ytd: {
       grossCents: Number(ytd.gross),
       federalIncomeTaxCents: Number(ytd.federal_income_tax),

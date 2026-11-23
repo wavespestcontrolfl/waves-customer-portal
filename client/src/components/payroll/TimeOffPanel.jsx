@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '../ui/Button';
 import { Card } from '../ui/Card';
+import { Checkbox } from '../ui/Checkbox';
 import { Field } from '../ui/Field';
 import { Input } from '../ui/Input';
 import { Select } from '../ui/Select';
@@ -11,7 +12,9 @@ import { dayLabel } from './payrollFormat';
 
 // Pay runs section, "Time off" (owner ruling 2026-10-26, dark behind
 // GATE_PAYROLL_TIME_OFF). Paid time off and holidays are hours not worked, paid
-// at the straight rate on the pay run for that week. The allowance only warns.
+// at the straight rate on the pay run for that week. An employee whose yearly hours
+// are set has a time-off bank (owner 2026-11-21): the pay run pays paid time off only
+// from the bank, and this panel shows the bank. A day is never refused here.
 // With the gate off the server answers 404 and this panel renders nothing.
 
 const KINDS = [{ value: 'pto', label: 'Paid time off' }, { value: 'holiday', label: 'Holiday' }];
@@ -22,15 +25,19 @@ const UPCOMING_DAYS = 120;
 // '20.00' -> '20', '7.75' -> '7.75'
 const plainHours = value => String(Number(value));
 
-const blankForm = () => ({ technicianId: '', workDate: '', kind: 'pto', hours: '', note: '' });
+const blankForm = () => ({ technicianId: '', workDate: '', kind: 'pto', hours: '', note: '', illness: false });
 
-function yearLine(balance, year) {
-  const booked = plainHours(balance.ptoHoursBooked);
-  if (balance.allowanceHours == null) return `Paid time off booked in ${year}: ${booked} hours`;
-  return `Paid time off booked in ${year}: ${booked} of ${plainHours(balance.allowanceHours)} hours`;
+// The time-off bank of an employee who has one: what it holds today, what waits for a pay run, and the rules.
+function bankLine(bank, today) {
+  const parts = [`Time-off bank: ${plainHours(bank.balanceHours)} hours`];
+  if (Number(bank.waitingHours) > 0) parts.push(`Waiting for a pay run: ${plainHours(bank.waitingHours)} hours`);
+  parts.push(`Earns ${bank.fullWeekHours} hours for a full week, up to ${bank.capHours} hours`);
+  if (!bank.usableFrom) parts.push('No hire date on file');
+  else if (bank.usableFrom > today) parts.push(`Until ${dayLabel(bank.usableFrom)} the bank pays illness days only`);
+  return parts.join('. ');
 }
 
-const isOver = balance => balance.allowanceHours != null && Number(balance.ptoHoursBooked) > Number(balance.allowanceHours);
+const isShort = bank => Number(bank.waitingHours) > Math.max(0, Number(bank.balanceHours));
 
 function EntriesTable({ title, entries, onEdit, onRemove, busy }) {
   if (!entries.length) return null;
@@ -42,7 +49,7 @@ function EntriesTable({ title, entries, onEdit, onRemove, busy }) {
       {entries.map(entry => <TR key={entry.id}>
         <TD>{dayLabel(entry.workDate)}</TD>
         <TD>{entry.name}</TD>
-        <TD>{kindWord(entry.kind)}</TD>
+        <TD>{kindWord(entry.kind)}{entry.illness ? ' (illness)' : ''}</TD>
         <TD nums align="right">{entry.hours}</TD>
         <TD>{entry.note || ''}</TD>
         <TD>
@@ -56,7 +63,7 @@ function EntriesTable({ title, entries, onEdit, onRemove, busy }) {
   </Table>;
 }
 
-export default function TimeOffPanel({ call, weekStart, onChanged }) {
+export default function TimeOffPanel({ call, weekStart, refreshKey, onChanged }) {
   // null until the first answer; false when the server says the gate is off.
   const [enabled, setEnabled] = useState(null);
   const [technicians, setTechnicians] = useState([]);
@@ -72,7 +79,13 @@ export default function TimeOffPanel({ call, weekStart, onChanged }) {
   const weekEnd = addStaffCalendarDays(weekStart, 6);
   const year = weekStart.slice(0, 4);
 
+  // Only the newest load may write. A finalize, a void or a settings save starts a new load while an older
+  // one can still wait for its answers; an old answer that arrives last must not put the old banks back.
+  const newestLoad = useRef(0);
   const load = useCallback(async () => {
+    newestLoad.current += 1;
+    const mine = newestLoad.current;
+    const superseded = () => mine !== newestLoad.current;
     const today = etDateString(new Date());
     const upcoming = addStaffCalendarDays(today, UPCOMING_DAYS);
     const wanted = upcoming > weekEnd ? upcoming : weekEnd;
@@ -80,24 +93,34 @@ export default function TimeOffPanel({ call, weekStart, onChanged }) {
     const to = wanted < limit ? wanted : limit;
     try {
       const list = await call(`/time-off?from=${weekStart}&to=${to}`);
+      if (superseded()) return;
       setEnabled(true);
       setEntries(list.entries || []);
       setError('');
       const techs = (await call('/technicians')).technicians || [];
+      if (superseded()) return;
       setTechnicians(techs);
       const found = await Promise.all(techs.map(async tech => {
         const data = await call(`/time-off/balance?technicianId=${tech.id}&year=${year}`);
         return { name: tech.name, balance: data.balance };
       }));
+      if (superseded()) return;
       setBalances(found);
     } catch (failure) {
+      if (superseded()) return;
       if (failure.status === 404) { setEnabled(false); return; }
       // Fail closed: only a successful gated answer opens the panel. Any other
       // failure keeps it as it was (hidden until the first good load).
       setError(failure.message);
     }
   }, [call, weekStart, weekEnd, year]);
-  useEffect(() => { load(); }, [load]);
+  // refreshKey changes when the open pay run is finalized or voided, or a yearly-hours setting is saved: each
+  // changes a time-off bank and the hours waiting for a pay run.
+  useEffect(() => { load(); }, [load, refreshKey]);
+  // A save or a removal can end after the week on screen changed. It must reload that week, not the week
+  // it started in: the old load would be the newest one, and it would put the old week's days back.
+  const latestLoad = useRef(load);
+  useEffect(() => { latestLoad.current = load; }, [load]);
 
   if (enabled !== true) return null;
 
@@ -108,14 +131,14 @@ export default function TimeOffPanel({ call, weekStart, onChanged }) {
     event.preventDefault();
     setBusy(true); setError(''); setMessage(''); setWarning('');
     try {
-      const body = { kind: form.kind, hours: form.hours.trim(), note: form.note.trim() };
+      const body = { kind: form.kind, hours: form.hours.trim(), note: form.note.trim(), illness: form.kind === 'pto' && form.illness };
       const data = editing
         ? await call(`/time-off/${editing}`, { method: 'PUT', body })
         : await call('/time-off', { method: 'POST', body: { technicianId: form.technicianId, workDate: form.workDate, ...body } });
       setMessage(editing ? 'Time off changed.' : 'Time off saved.');
       if (data.warning) setWarning(data.warning);
       reset();
-      await load();
+      await latestLoad.current();
       if (onChanged) onChanged();
     } catch (failure) { setError(failure.message); }
     setBusy(false);
@@ -127,7 +150,7 @@ export default function TimeOffPanel({ call, weekStart, onChanged }) {
       await call(`/time-off/${entry.id}`, { method: 'DELETE' });
       setMessage('Time off removed.');
       if (editing === entry.id) reset();
-      await load();
+      await latestLoad.current();
       if (onChanged) onChanged();
     } catch (failure) { setError(failure.message); }
     setBusy(false);
@@ -136,7 +159,7 @@ export default function TimeOffPanel({ call, weekStart, onChanged }) {
   function edit(entry) {
     setMessage(''); setWarning(''); setError('');
     setEditing(entry.id);
-    setForm({ technicianId: entry.technicianId, workDate: entry.workDate, kind: entry.kind, hours: plainHours(entry.hours), note: entry.note || '' });
+    setForm({ technicianId: entry.technicianId, workDate: entry.workDate, kind: entry.kind, hours: plainHours(entry.hours), note: entry.note || '', illness: entry.illness === true });
   }
 
   const inWeek = entries.filter(entry => entry.workDate >= weekStart && entry.workDate <= weekEnd);
@@ -149,6 +172,7 @@ export default function TimeOffPanel({ call, weekStart, onChanged }) {
       <p className="m-0 mt-1 text-ui-caption text-ink-secondary">
         Paid time off and holidays are hours not worked. The pay run for that week pays them at the regular rate. They never count toward overtime.
         Once a week's pay run is final, void it before you change a day.
+        For an employee with a time-off bank, the pay run pays paid time off only from the bank. Hours past the bank are unpaid.
       </p>
     </header>
     {message && <p role="status" className="m-0 text-ui-caption text-zinc-900">{message}</p>}
@@ -177,6 +201,10 @@ export default function TimeOffPanel({ call, weekStart, onChanged }) {
         <Field label="Note">
           <Input maxLength={500} autoComplete="off" value={form.note} onChange={set('note')} />
         </Field>
+        {form.kind === 'pto' && <Checkbox
+          id="time-off-illness" label="Illness" checked={form.illness}
+          onChange={event => setForm(prev => ({ ...prev, illness: event.target.checked }))}
+        />}
         <div className="flex flex-wrap gap-2">
           <Button type="submit" disabled={busy || !ready}>{editing ? 'Save changes' : 'Add time off'}</Button>
           {editing && <Button type="button" variant="secondary" disabled={busy} onClick={reset}>Cancel</Button>}
@@ -196,9 +224,11 @@ export default function TimeOffPanel({ call, weekStart, onChanged }) {
 
     {balances.length > 0 && <ul className="m-0 grid list-none gap-1 p-0" aria-label={`Paid time off in ${year}`}>
       {balances.map(({ name, balance }) => <li key={balance.technicianId} className="text-ui-caption">
-        <strong>{name}</strong>: {yearLine(balance, year)}
+        <strong>{name}</strong>: {balance.bank
+          ? bankLine(balance.bank, etDateString(new Date()))
+          : `Paid time off booked in ${year}: ${plainHours(balance.ptoHoursBooked)} hours`}
         {balance.holidayDaysBooked > 0 && `. Holidays booked: ${balance.holidayDaysBooked}`}
-        {isOver(balance) && <span className="text-warn-fg"> Over the yearly allowance by {plainHours(Math.round((Number(balance.ptoHoursBooked) - Number(balance.allowanceHours)) * 100) / 100)} hours.</span>}
+        {balance.bank && isShort(balance.bank) && <span className="text-warn-fg"> The bank does not hold all the waiting hours today. A pay run pays only the hours the bank holds then.</span>}
       </li>)}
     </ul>}
   </section>;
