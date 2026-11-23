@@ -1,6 +1,6 @@
 /** Candidate-specific read analysis for the existing schedule gap tool.
  * Reuses staff arrival-placement checks and the optimizer's hard preference
- * filters (the mowing-day rule included, GATE_AUTO_DISPATCH_MOWING_DAYS).
+ * filters (the mowing-day rule included, mowing-days.js).
  * No holds, geocoding, reassignment, or customer promises are made. */
 const { guardedCoordSelects } = require('./day-stops');
 const { enumerateArrivalPlacements } = require('./arrival-route');
@@ -91,7 +91,7 @@ async function estimateGapCandidate(estimate, conn, picker = {}) {
   const moveInDate = await slots.estimateMoveInDate(estimate);
   const mowing = mowingDays.unitRule(preferences, performs);
   const dayOpen = (date) => (!seasonal || slots.inMosquitoSeason(date)) && (!moveInDate || date >= moveInDate)
-    && !mowingDays.blocksLive(date, mowing);
+    && !mowingDays.blocksDay(date, mowing);
   // The line names the services this visit performs, in the page's words: plan-only mode keeps a companion program that
   // books its own visits in the profile's label.
   return { service, preferences, holds: [], siblingDates: [], deactivated,
@@ -187,12 +187,12 @@ function analyzeGapCandidate(candidate, rows, {
     return { ...response, reason: 'plan_paused_on_date' };
   }
   // The customer's date rules, all cheap and pure, so a list rather than a
-  // chain. GATE_AUTO_DISPATCH_MOWING_DAYS='true': a Lawn Care Service visit is
+  // chain. A Lawn Care Service visit is
   // not offered on or next to the customer's mowing day (mowing-days.js).
   const dateRefused = [
     inBlackout(date, preferences.blackout),
     violatesPreferredDay(date, preferences),
-    mowingDays.blocksLive(date, mowingDays.unitRule(preferences, [service])),
+    mowingDays.blocksDay(date, mowingDays.unitRule(preferences, [service])),
     service.skip_weekends && [0, 6].includes(weekdayOf(date)),
   ].some(Boolean);
   if (dateRefused) return { ...response, reason: 'customer_date_preference' };
