@@ -164,8 +164,10 @@ describe('GET /api/public/home/:token', () => {
   });
 
   test('gate off: the guard answers 404 before the route limiter, even for a client the limiter would refuse', async () => {
-    // Runs last: the limiter test above already used up this client's 60 a minute.
-    expect((await get(`/api/public/home/${TOKEN}`)).status).toBe(429);
+    // Use up this client's 60 a minute (fewer reads if another test already used some), so the limiter would refuse it.
+    let status = 0;
+    for (let i = 0; i < 61 && status !== 429; i += 1) status = (await get(`/api/public/home/${TOKEN}`)).status;
+    expect(status).toBe(429);
     mailHomePageLive.mockReturnValue(false);
     const res = await get(`/api/public/home/${TOKEN}`);
     expect(res.status).toBe(404);
