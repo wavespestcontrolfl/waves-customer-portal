@@ -1986,15 +1986,19 @@ function buildAgreedOneTimeJobAlert({ call, firstName, serviceType, scheduledDat
     : 'Staff priced a one-time job on the call, so the AI booked no visit and sent no text.';
   // Visit 2 is owed either way; its slot is firm only when the call set the hour (a
   // package's visit 2 never is), and the schedule adds a package's visit 2 by itself.
+  // A time is firm only when the call set it on the hour; any other time is for the
+  // customer to confirm (visits start on the hour).
   const visitTwo = (plan) => {
-    const timeSet = plan.hourStated === true && plan.packageOnly !== true;
     const slot = spokenVisitWhen(plan.scheduledDate, plan.windowStart);
-    const onHour = offTheHour(plan.windowStart) ? ' Visits start on the hour: confirm an on-hour start with the customer.' : '';
+    const set = plan.hourStated === true && plan.packageOnly !== true;
+    const firm = set && !offTheHour(plan.windowStart);
+    const unset = `Around ${slot}: the call did not set this time, so confirm it with the customer.`;
+    const offHour = `The call set it for ${slot}, which is not on the hour: confirm an on-hour time with the customer.`;
     return [
       plan.packageOnly === true ? 'Visit 2 is owed: it is part of this two-treatment service.' : 'Visit 2 is owed: the call agreed a second visit.',
-      timeSet ? `The call set it for ${slot}.${onHour}` : `Around ${slot}: the call did not set this time, so confirm it with the customer.`,
+      firm ? `The call set it for ${slot}.` : (set ? offHour : unset),
       'Save visit 1 first, then check the schedule for visit 2: a two-treatment service adds it by itself.',
-      timeSet ? 'Book visit 2 only if it is missing, and move it to this time if it differs.' : 'Book visit 2 only if it is missing, at the time the customer confirms.',
+      firm ? 'Book visit 2 only if it is missing, and move it to this time if it differs.' : 'Book visit 2 only if it is missing, and book or move it only to the time the customer confirms.',
     ].join(' ');
   };
   const detail = [
@@ -2002,7 +2006,7 @@ function buildAgreedOneTimeJobAlert({ call, firstName, serviceType, scheduledDat
     AGREED_JOB_PRICE_LINES[price ? price.basis : 'none'](price && `$${Number(price.amount).toFixed(2)}`),
     bookingAddress?.line1 ? `Book at: ${formatAddress(bookingAddress)}.` : 'No address resolved: confirm the service address with the customer before you book.',
     typeof streetLevelAddress === 'string' && 'Google matched only the street of this address: confirm the house number with the customer.',
-    billToPayer?.id && `Bill-To: ${billToPayer.name || 'the paying party the caller named'}. Select this payer as Bill-To when you book, so the invoice goes to them.`,
+    billToPayer?.id && `Bill-To: ${billToPayer.name || 'the paying party the caller named'} (payer page: /admin/payers?payer=${encodeURIComponent(billToPayer.id)}). Select this payer as Bill-To when you book, so the invoice goes to them.`,
     followUpPlan?.scheduledDate && visitTwo(followUpPlan),
     'Before you book: check the customer\'s schedule. Staff may have booked, moved or cancelled a visit for this call since; never book a second one.',
   ].filter(Boolean).join('\n');
@@ -2031,7 +2035,8 @@ function buildAgreedOneTimeJobAlert({ call, firstName, serviceType, scheduledDat
       ringOnRefresh: () => false,
       detail,
       // Ids only: names, the address and the price are in the text the office reads.
-      metadata: { callLogId: call.id, source: 'call_agreed_one_time_job' },
+      // Always written: a quiet refresh merges metadata, so a later pass with no payer must clear an older id.
+      metadata: { callLogId: call.id, source: 'call_agreed_one_time_job', payerId: billToPayer?.id ? String(billToPayer.id) : null },
     },
   };
 }
@@ -22828,9 +22833,16 @@ const CallRecordingProcessor = {
                   // A row id = the task exists (raised now, or by an earlier pass of
                   // this call). No id (a failed write, a muted preference): the
                   // fallback below files main's generic card, so the task is never lost.
+                  // Only the call's current worker publishes (or refreshes) the task, under
+                  // the call row's lock: a superseded pass never rewrites a newer pass's
+                  // text, and files nothing (the fallback card's writer is fenced too).
                   try {
-                    const raised = await require('./admin-alert-compose').raiseAdminAlert(alert.category, alert.spec, alert.opts);
-                    agreedJobAlerted = !!(raised && raised.id);
+                    const raised = await db.transaction(async (atrx) => {
+                      const owner = await atrx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id');
+                      if (!owner) return { superseded: true };
+                      return require('./admin-alert-compose').raiseAdminAlert(alert.category, alert.spec, { ...alert.opts, trx: atrx });
+                    });
+                    agreedJobAlerted = !!(raised && (raised.id || raised.superseded));
                   } catch (alertErr) {
                     logger.warn(`[call-proc] agreed one-time job alert failed for ${maskSid(callSid)}: ${alertErr.code || alertErr.name || 'error'}`);
                   }

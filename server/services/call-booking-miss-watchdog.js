@@ -196,6 +196,8 @@ const REPLACED_BY_DATE_CHECK = 'Replaced by a date check';
 const REPLACED_VISIT_GONE = 'The booked visit is gone; replaced by a new alert to book it';
 // Dismiss on the Dispatch held-visit strip (owner 2026-11-01): the office will not book it.
 const DISMISSED_ON_DISPATCH = 'Dismissed on Dispatch: not booking';
+// The resolution line of a miss bell an agreed one-time job's office notification replaced.
+const REPLACED_BY_OFFICE_TASK = 'Replaced by the one-time job notification for this call';
 
 // Log-safe phone rendering — full numbers belong ONLY in the admin
 // notification body (an authenticated surface); Railway logs are plaintext.
@@ -503,7 +505,7 @@ const newestFirst = (a, b) => (new Date(b.created_at) - new Date(a.created_at)) 
 // the bell it replaces, so each episode gets its own key. With no `openRows` it
 // is the ring path's verdict. `row` is the visit behind the verdict; `mismatch`
 // is { visit_id, date, time } for booked_other_day.
-function classifyOpenBookingMiss(call, slot, bookedRows, openRows, { now, namesakes }) {
+function classifyOpenBookingMiss(call, slot, bookedRows, openRows, { now, namesakes, officeTask = false }) {
   const ordered = [...openRows].sort(newestFirst);
   const [newest] = ordered;
   const closesOf = (rows, resolution) => (rows.length ? [{ ids: rows.map((r) => r.id), resolution }] : []);
@@ -522,6 +524,9 @@ function classifyOpenBookingMiss(call, slot, bookedRows, openRows, { now, namesa
   }
   // The office dismissed the call's held row on Dispatch: it will not book it, so no bell stands.
   if (call.held_visit_dismissed_at) return result('dismissed', null, { closes: closeAll(DISMISSED_ON_DISPATCH) });
+  // GATE_CALL_AGREED_ONE_TIME_JOB: the call now has the office's one-time job task (its
+  // own admin notification), so an older miss bell is replaced by it and nothing rings.
+  if (officeTask) return result('office_task', null, { closes: closeAll(REPLACED_BY_OFFICE_TASK) });
 
   // A later visit answers the call only when it is for the service the call agreed (a
   // routine lawn visit must never close or relabel a pest booking miss), on the call's
@@ -860,7 +865,11 @@ async function planOpenBookingMissBells({ now = new Date() } = {}) {
 
   const { namesakes } = await loadNamesakeAccounts(entries);
   const bookedRows = await loadBookingRows(entries, namesakes);
-  return entries.map(({ call, slot, rows, holdReason, reviewOnly }) => ({ call, slot, holdReason, reviewOnly, plan: classifyOpenBookingMiss(call, slot, bookedRows, rows, { now, namesakes }) }));
+  const taskCalls = await loadAgreedJobTaskCallIds(entries);
+  return entries.map(({ call, slot, rows, holdReason, reviewOnly }) => ({
+    call, slot, holdReason, reviewOnly,
+    plan: classifyOpenBookingMiss(call, slot, bookedRows, rows, { now, namesakes, officeTask: taskCalls.has(String(call.id)) }),
+  }));
 }
 
 // Dismiss on the Dispatch held-visit strip (owner 2026-11-01): a person decided not to book the
