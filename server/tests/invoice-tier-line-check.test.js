@@ -10,22 +10,41 @@ jest.mock('../services/completion-pricing', () => {
   const actual = jest.requireActual('../services/completion-pricing');
   return { ...actual, acceptedVisitBreakdown: jest.fn(), acceptedPricing: jest.fn(actual.acceptedPricing) };
 });
+// The annual-prepay verdict a billing prediction passes: no after-visit prepay year, no stamp to validate (null).
+jest.mock('../services/annual-prepay-renewals', () => ({
+  deferredPrepayHoldCustomerIds: jest.fn(async () => new Set()), annualCoverageVerdictForPrediction: jest.fn(async () => null),
+}));
+// The real billing rules; the schedule's first-application verdict is watched (a visit here has no scheduled date, so the
+// real verdict reads it as not covered).
+jest.mock('../services/billing-lane', () => {
+  const actual = jest.requireActual('../services/billing-lane');
+  return { ...actual, siblingCoverageForSchedule: jest.fn(actual.siblingCoverageForSchedule) };
+});
 // The real module, one reader overridden: estimate-public (recurringServiceKey) reads other gates when it loads.
 jest.mock('../config/feature-gates', () => ({ ...jest.requireActual('../config/feature-gates'), invoiceEstimateDiscountLinesLive: jest.fn(() => true) }));
 
 const { acceptedVisitBreakdown, acceptedPricing } = require('../services/completion-pricing');
+const AnnualPrepay = require('../services/annual-prepay-renewals');
+const { siblingCoverageForSchedule } = require('../services/billing-lane');
 const { invoiceEstimateDiscountLinesLive } = require('../config/feature-gates');
 const { recurringServiceKey } = require('../routes/estimate-public');
 const { tierSavingsLeftOffInvoices, _private: { engineTierRecord, pricingRecords } } = require('../services/invoice-tier-line-check');
 
 const TODAY = '2026-06-15';
 
-// A knex stand-in for the visit query: it returns `visits`. The check reads nothing else itself.
-function fakeDb(visits = []) {
+// A visit's billing facts (billingFacts' query): a customer with no lane, plan, Auto Pay or payer, and no invoice of the
+// visit's own yet, so completion invoices the visit at its own price.
+const selfPay = (extra = {}) => ({ autopay_active: false, payer_billed: false, is_callback: false, own_invoice: false,
+  billing_mode: null, waveguard_tier: null, monthly_rate: null, per_application_fee: null, ...extra });
+// A knex stand-in for the visit query (it returns `visits`) and the billing-facts query (it returns `facts`). The check
+// reads nothing else itself.
+function fakeDb(visits = [], facts = visits.map((row) => ({ id: row.id, ...selfPay() }))) {
   const chain = {};
   for (const m of ['join', 'leftJoin', 'where', 'whereNull', 'whereIn', 'whereRaw', 'orderBy']) chain[m] = jest.fn(() => chain);
   chain.select = jest.fn(async () => visits);
-  return jest.fn(() => chain);
+  const conn = jest.fn(() => chain);
+  conn.raw = jest.fn(async () => ({ rows: facts }));
+  return conn;
 }
 
 const waveguard = (amount, tier = 'gold') => ({ appliedDiscounts: [{ type: 'waveguard', tier, amount }] });
@@ -58,6 +77,7 @@ const pricedWith = () => acceptedPricing.mock.calls.map(([, context]) => context
 beforeEach(() => {
   jest.clearAllMocks();
   invoiceEstimateDiscountLinesLive.mockReturnValue(true);
+  AnnualPrepay.annualCoverageVerdictForPrediction.mockResolvedValue(null);
 });
 
 describe('tierSavingsLeftOffInvoices', () => {
@@ -65,7 +85,7 @@ describe('tierSavingsLeftOffInvoices', () => {
     const conn = fakeDb([visit()]);
     acceptedVisitBreakdown.mockResolvedValue(unnamed());
     expect(await tierSavingsLeftOffInvoices(conn, { today: TODAY })).toEqual({
-      checked: 1, findings: [{ visitId: 'v1', estimateId: 'e1', serviceKey: 'pest_control', lineKey: 'recurring:0', tier: 'gold' }],
+      checked: 1, notJudged: 0, findings: [{ visitId: 'v1', estimateId: 'e1', serviceKey: 'pest_control', lineKey: 'recurring:0', tier: 'gold' }],
     });
     expect(acceptedVisitBreakdown.mock.calls).toEqual([[visit(), { database: conn }]]);
     // The invoice's own discount context (estimateDiscountContext), with only its tier reading replaced.
@@ -323,7 +343,7 @@ describe('tierSavingsLeftOffInvoices', () => {
   test('gate off: every invoice keeps one line by design, so no visit is read', async () => {
     invoiceEstimateDiscountLinesLive.mockReturnValue(false);
     const conn = fakeDb([visit()]);
-    expect(await tierSavingsLeftOffInvoices(conn, { today: TODAY })).toEqual({ checked: 0, findings: [] });
+    expect(await tierSavingsLeftOffInvoices(conn, { today: TODAY })).toEqual({ checked: 0, notJudged: 0, findings: [] });
     expect(conn).not.toHaveBeenCalled();
     expect(acceptedVisitBreakdown).not.toHaveBeenCalled();
   });
@@ -334,6 +354,88 @@ describe('tierSavingsLeftOffInvoices', () => {
     acceptedVisitBreakdown.mockReset();
     acceptedVisitBreakdown.mockResolvedValueOnce(unnamed()).mockRejectedValueOnce(new Error('second read failed'));
     await expect(tierSavingsLeftOffInvoices(fakeDb([visit(), visit({ id: 'v2' })]), { today: TODAY })).rejects.toThrow('second read failed');
+  });
+
+  test('only a new bill of the visit at its own price is judged: what completion bills, by the shared prediction', async () => {
+    const judged = async (facts, row = visit()) => {
+      jest.clearAllMocks();
+      acceptedVisitBreakdown.mockResolvedValue(unnamed());
+      const result = await tierSavingsLeftOffInvoices(fakeDb([row], [{ id: row.id, ...selfPay(facts) }]), { today: TODAY });
+      return { checked: result.checked, notJudged: result.notJudged, read: acceptedVisitBreakdown.mock.calls.length, findings: result.findings.length };
+    };
+    const yes = { checked: 1, notJudged: 0, read: 1, findings: 1 };
+    const no = { checked: 0, notJudged: 1, read: 0, findings: 0 };
+    expect(await judged({})).toEqual(yes);
+    // A per-application plan on Auto Pay is charged the visit's own price.
+    const perApp = { billing_mode: 'per_application', waveguard_tier: 'Gold', autopay_active: true };
+    expect(await judged(perApp, visit({ is_recurring: true }))).toEqual(yes);
+    // Dues cover a member's plan visit: on Auto Pay, and without it (the month's dues count as paid). A member's
+    // one-off priced visit still bills its own price.
+    const member = { billing_mode: 'monthly_membership', waveguard_tier: 'Gold', monthly_rate: '49.00' };
+    expect(await judged({ ...member, autopay_active: true }, visit({ is_recurring: true }))).toEqual(no);
+    expect(await judged(member, visit({ is_recurring: true }))).toEqual(no);
+    expect(await judged({ ...member, autopay_active: true }, visit({ is_recurring: false }))).toEqual(yes);
+    // A payer's invoice, a callback of a per-application plan, a prepaid visit, an invoice made already: not judged.
+    expect(await judged({ payer_billed: true })).toEqual(no);
+    expect(await judged({ ...perApp, is_callback: true })).toEqual(no);
+    expect(await judged({}, visit({ prepaid_amount: '85.00', prepaid_method: 'cash' }))).toEqual(no);
+    expect(await judged({ own_invoice: true })).toEqual(no);
+    // A bill at another amount than the visit's own price prints one net line by design (part of it prepaid).
+    expect(await judged({}, visit({ prepaid_amount: '20.00', prepaid_method: 'cash' }))).toEqual(no);
+    // An annual prepay: a stamped visit of the annual lane (no verdict: the stamp stands), and a covering verdict in any
+    // lane, a stamped visit of a per-application plan too. A verdict that it does not cover leaves the bill judged.
+    const stamped = visit({ prepaid_method: 'annual_prepay_invoice' });
+    expect(await judged({ billing_mode: 'annual_prepay' }, stamped)).toEqual(no);
+    AnnualPrepay.annualCoverageVerdictForPrediction.mockResolvedValue(true);
+    expect(await judged(perApp, stamped)).toEqual(no);
+    expect(await judged({})).toEqual(no);
+    AnnualPrepay.annualCoverageVerdictForPrediction.mockResolvedValue(false);
+    expect(await judged({ billing_mode: 'annual_prepay' }, stamped)).toEqual(yes);
+    // An invoice made for another visit: the estimate's combined first-application invoice, by the schedule's own
+    // verdict, to collect or settled; a visit held for review is not a new bill either.
+    for (const state of ['collect_on_combined_invoice', 'settled', 'review']) {
+      siblingCoverageForSchedule.mockResolvedValueOnce({ coverage: { state, reason: state === 'review' ? 'terminal_invoice' : null } });
+      expect(await judged({})).toEqual(no);
+    }
+    expect(siblingCoverageForSchedule.mock.calls[0][0]).toEqual({ svc: visit(), dbConn: expect.any(Function) });
+    // Asked only of a visit that completion would bill: a covered member's visit never reaches it.
+    jest.clearAllMocks();
+    await judged({ ...member, autopay_active: true }, visit({ is_recurring: true }));
+    expect(siblingCoverageForSchedule).not.toHaveBeenCalled();
+    // A lookup that failed fails the run: a check that did not run proves nothing.
+    jest.clearAllMocks();
+    siblingCoverageForSchedule.mockResolvedValueOnce({ coverage: { state: 'review', reason: 'lookup_failed' } });
+    await expect(tierSavingsLeftOffInvoices(fakeDb([visit()]), { today: TODAY })).rejects.toThrow('first-application invoice lookup failed for visit v1');
+    // A visit with no facts row (deleted after the visit query) has nothing to judge.
+    jest.clearAllMocks();
+    AnnualPrepay.annualCoverageVerdictForPrediction.mockResolvedValue(null);
+    expect(await tierSavingsLeftOffInvoices(fakeDb([visit()], []), { today: TODAY })).toEqual({ checked: 0, notJudged: 1, findings: [] });
+  });
+
+  test('the billing facts: one query for all visits, Auto Pay on the Eastern day; the annual verdict as a prediction reads it', async () => {
+    const rows = [visit({ customer_id: 'c1' }), visit({ id: 'v2', customer_id: 'c2' })];
+    const conn = fakeDb(rows);
+    acceptedVisitBreakdown.mockResolvedValue(unnamed());
+    const deferred = new Set(['c2']);
+    AnnualPrepay.deferredPrepayHoldCustomerIds.mockResolvedValue(deferred);
+    expect((await tierSavingsLeftOffInvoices(conn, { today: TODAY })).checked).toBe(2);
+    expect(conn.raw).toHaveBeenCalledTimes(1);
+    const [sql, bindings] = conn.raw.mock.calls[0];
+    // Its own invoices only, linked by the visit or its service record; the first-application stamp is the schedule
+    // verdict's to read (billing-rule-home-ratchet).
+    expect(sql).toContain('COALESCE(i.scheduled_service_id, sr2.scheduled_service_id) = ss.id');
+    expect(sql).not.toContain('first_application_invoice_id');
+    expect(sql).toContain('JOIN customers c ON c.id = ss.customer_id');
+    const dead = ['void', 'refunded', 'canceled', 'cancelled'];
+    expect(bindings).toEqual([TODAY, dead, ['v1', 'v2']]);
+    expect(AnnualPrepay.deferredPrepayHoldCustomerIds).toHaveBeenCalledWith(conn, ['c1', 'c2']);
+    expect(AnnualPrepay.annualCoverageVerdictForPrediction.mock.calls).toEqual([
+      [rows[0], conn, { deferredCustomerIds: deferred }], [rows[1], conn, { deferredCustomerIds: deferred }]]);
+    // Auto Pay is read on the Eastern day of `today`, in daylight and in standard time.
+    jest.clearAllMocks();
+    const winter = fakeDb([visit()]);
+    await tierSavingsLeftOffInvoices(winter, { today: '2026-01-15' });
+    expect(winter.raw.mock.calls[0][1][0]).toBe('2026-01-15');
   });
 
   test('the visit query reads today through 90 days ahead by default', async () => {

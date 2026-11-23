@@ -316,7 +316,7 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
   // row the invoice matched: a saving that record priced at the tier rate and the invoice cannot name is a finding; one
   // the invoice names is not, and neither is one a staff change shares.
   test('the nightly check flags a tier saving the invoice leaves unnamed, and passes one it names', () => rollbackTest(async (trx) => {
-    const { jobId, customerId, estimateId } = await fixture(trx, { jobPrice: 85 });
+    const { jobId, customerId, estimateId, parentId } = await fixture(trx, { jobPrice: 85 });
     // The visit's label is display text: the invoice matches its line by service id, and the check reads that line.
     await trx('scheduled_services').where({ id: jobId }).update({ primary_line_price: null, service_type: 'Home Protection Plan' });
     await trx('customers').where({ id: customerId }).update({ pipeline_stage: 'active_customer' });
@@ -397,10 +397,42 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
       await admin({ services: [{ ...row, discount: { appliedDiscounts: [{ type: 'waveguard', amount: 0.15 }] } }] });
       expect((await pricing.acceptedVisitBreakdown({ ...job, estimated_price: 85 }, { database: trx })).breakdown.discounts)
         .toEqual([{ name: 'WaveGuard', dollars: 15 }]);
-      expect(await findingsFor()).toEqual([{ visitId: jobId, estimateId, serviceKey: 'pest_control', lineKey: 'recurring:0', tier: 'gold' }]);
+      const flagged = [{ visitId: jobId, estimateId, serviceKey: 'pest_control', lineKey: 'recurring:0', tier: 'gold' }];
+      expect(await findingsFor()).toEqual(flagged);
+      // Only a new bill of the visit at its own price is judged (pre-push audit round 14), with the billing facts read on
+      // this schema. Dues cover the plan visit of a member: no bill of it.
+      await trx('customers').where({ id: customerId }).update({ billing_mode: 'monthly_membership', monthly_rate: 49 });
+      expect(await findingsFor()).toEqual([]);
+      await trx('customers').where({ id: customerId }).update({ billing_mode: 'per_application', monthly_rate: null });
+      expect(await findingsFor()).toEqual(flagged);
+      // An invoice made already bills the visit: its own (a void one bills nothing, so the new bill is judged again), or
+      // the combined first-application invoice its stamp names, by the schedule's own verdict.
+      const stored = async (columns) => (await trx('invoices').insert({ customer_id: customerId, token: randomUUID(),
+        invoice_number: `QA-${randomUUID().slice(0, 20)}`, status: 'sent', total: 85, ...columns }).returning('id'))[0].id;
+      const own = await stored({ scheduled_service_id: jobId });
+      expect(await findingsFor()).toEqual([]);
+      await trx('invoices').where({ id: own }).update({ status: 'void' });
+      expect(await findingsFor()).toEqual(flagged);
+      const { siblingCoverageForSchedule } = require('../services/billing-lane');
+      const coverage = async () => (await siblingCoverageForSchedule({ svc: await trx('scheduled_services').where({ id: jobId }).first(), dbConn: trx })).coverage;
+      const firstBill = await stored({ scheduled_service_id: parentId });
+      await trx('scheduled_services').where({ id: jobId }).update({ first_application_invoice_id: firstBill });
+      expect(await coverage()).toMatchObject({ state: 'collect_on_combined_invoice', invoiceId: firstBill });
+      expect(await findingsFor()).toEqual([]);
+      // A voided combined invoice holds the visit for review (owner ruling: refuse after a void): not a new bill either.
+      await trx('invoices').where({ id: firstBill }).update({ status: 'void' });
+      expect(await coverage()).toMatchObject({ state: 'review', reason: 'combined_invoice_voided' });
+      expect(await findingsFor()).toEqual([]);
+      // With no stamp, another visit's invoice never covers a priced visit: its new bill is judged again.
+      await trx('scheduled_services').where({ id: jobId }).update({ first_application_invoice_id: null });
+      expect(await coverage()).toMatchObject({ state: 'none' });
+      expect(await findingsFor()).toEqual(flagged);
+      const { checked, notJudged } = await tierSavingsLeftOffInvoices(trx, { today, days: 1 });
+      expect(checked).toBeGreaterThanOrEqual(1);
+      expect(notJudged).toBeGreaterThanOrEqual(0);
     } finally { delete process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES; }
     // Gate off: every invoice keeps one line by design, so the check reads nothing.
-    expect(await tierSavingsLeftOffInvoices(trx, { today, days: 1 })).toEqual({ checked: 0, findings: [] });
+    expect(await tierSavingsLeftOffInvoices(trx, { today, days: 1 })).toEqual({ checked: 0, notJudged: 0, findings: [] });
   }));
 
 });

@@ -371,7 +371,7 @@ const DETECTORS = Object.freeze([
     provenance: 'owner 2026-11-22 — 0 of 163 upcoming tier visits printed the WaveGuard line after GATE_INVOICE_ESTIMATE_DISCOUNT_LINES went on (#8329, #8343; fixed in #8355)',
     async run({ now }) {
       const { tierSavingsLeftOffInvoices } = require('./invoice-tier-line-check');
-      const { checked, findings } = await tierSavingsLeftOffInvoices(db, { today: etDateString(now) });
+      const { checked, notJudged, findings } = await tierSavingsLeftOffInvoices(db, { today: etDateString(now) });
       // One finding per estimate line (pre-push audit: per visit, a line's first record counted each of its visits):
       // its first visit in the window, and how many of its visits are there. The line is the schedule line the invoice
       // matched, not its service key: two lines of one estimate can share a key (pre-push audit).
@@ -386,7 +386,7 @@ const DETECTORS = Object.freeze([
         count: byLine.length,
         ids: byLine.map(([, f]) => `${f.visitId} (${f.serviceKey}, ${f.tier}, ${f.visits} visit${f.visits === 1 ? '' : 's'})`),
         itemKeys: byLine.map(([key]) => key),
-        detail: { checked, visits: findings.length },
+        detail: { checked, notJudged, visits: findings.length },
       };
     },
   },

@@ -32,6 +32,11 @@
 // A visit whose invoice keeps one line for another reason (no price of its own, its own price or discount, add-ons,
 // prepaid, no single matched line, a price that moved after acceptance, no saving on the line) is not read. Off gate =
 // one line by design: no finding.
+// Only a new bill of the visit at its own price is judged (pre-push audit round 14): what completing the visit bills,
+// by the shared prediction the schedule board, the close-out sheet and the cash forecast use (billsVisitAtItsPrice). A
+// visit that dues, an annual prepay, a payer or a prepayment bills, or that an invoice made already bills (its own, or
+// the estimate's combined first-application invoice made at acceptance, by the schedule's own verdict:
+// billedOnAnotherInvoice), is not judged and is counted as such: the check judges bills not yet made.
 //
 // Read-only: no write, no customer contact, no paid call. The lead-to-cash sweep (lead-to-cash-invariants.js) runs it
 // once a day. ops/agents/estimate-discount-lines-report.js reads the same visits (upcomingEstimateVisits).
@@ -228,20 +233,107 @@ async function visitFinding(conn, visit) {
   return tier ? { visitId: String(visit.id), estimateId: String(estimate.id), serviceKey, lineKey: line.sourceLineKey || null, tier } : null;
 }
 
+// The bills this check judges: completion bills the visit itself, by invoice or by Auto Pay charge (billing-lane.js
+// predictCompletionBilling kinds). A payer's invoice, dues, an annual prepay, a prepayment and no charge are not.
+const BILLED_KINDS = new Set(['invoice', 'auto_charge']);
+
+// What completing each visit bills turns on its customer and its records, read here as the cash forecast reads them
+// (cash-forecast/load.js readVisits): the customer's lane and plan, Auto Pay on `today`, an active payer (the visit's,
+// else the customer's unless the visit is pinned to self-pay), a callback record, and a live invoice of the visit's own
+// (linked by the visit or by its service record). One query for all the visits; by visit id. An invoice made for
+// another visit that covers this one is billedOnAnotherInvoice's question.
+async function billingFacts(conn, visits, today) {
+  if (!visits.length) return new Map();
+  const { autopayActivePredicate } = require('./autopay-eligibility');
+  const dead = require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES;
+  // Noon in Eastern time on `today`, standard or daylight time: the predicate binds that Eastern date.
+  const autopay = autopayActivePredicate(new Date(`${today}T17:00:00Z`));
+  const { rows } = await conn.raw(`
+    SELECT ss.id, ${autopay.sql} AS autopay_active,
+      EXISTS (SELECT 1 FROM payers p
+        WHERE p.id = COALESCE(ss.payer_id, CASE WHEN COALESCE(ss.self_pay_override, false) THEN NULL ELSE c.payer_id END)
+          AND p.active IS DISTINCT FROM false) AS payer_billed,
+      (COALESCE(ss.is_callback, false) OR EXISTS (
+        SELECT 1 FROM service_records sr WHERE sr.scheduled_service_id = ss.id AND COALESCE(sr.is_callback, false))) AS is_callback,
+      EXISTS (SELECT 1 FROM invoices i LEFT JOIN service_records sr2 ON sr2.id = i.service_record_id
+        WHERE COALESCE(i.scheduled_service_id, sr2.scheduled_service_id) = ss.id AND i.status <> ALL(?::text[])) AS own_invoice,
+      c.billing_mode, c.waveguard_tier, c.monthly_rate, c.per_application_fee
+    FROM scheduled_services ss
+    JOIN customers c ON c.id = ss.customer_id
+    WHERE ss.id = ANY(?::uuid[])`, [autopay.binding, dead, visits.map((visit) => visit.id)]);
+  return new Map(rows.map((row) => [String(row.id), row]));
+}
+
+// Whether completing the visit makes a new bill of the visit at its own price: the one bill this check can judge
+// (pre-push audit round 14). A live invoice of its own (one made at acceptance or at booking) is its bill, made
+// already: the check judges bills not yet made and does not re-read a stored one (an invoice made for another visit is
+// billedOnAnotherInvoice's question). An annual prepay the verdict says covers it bills nothing, in any lane (the forecast's rule: completion skips that
+// invoice, complete-scheduled-service.js annualPrepayCovered). Else the shared prediction of what completion bills
+// (billing-lane.js predictCompletionBilling, which the schedule board, the close-out sheet and the cash forecast ask)
+// must be an invoice or an Auto Pay charge at the visit's own price: a bill at another amount prints one net line by
+// design (invoice.js acceptedEstimateBreakdown). The month's dues count as paid: which plan visit of a month the dues
+// cover is decided when it completes (billing-lane.js monthlyDuesCollected), so a plan visit dues could cover is not
+// judged. No facts (the visit was deleted after the visit query): nothing to judge.
+function billsVisitAtItsPrice(visit, facts, annualCoverage) {
+  if (!facts || facts.own_invoice === true || annualCoverage === true) return false;
+  const { resolveBillingLane, predictCompletionBilling } = require('./billing-lane');
+  const prediction = predictCompletionBilling({
+    lane: resolveBillingLane(facts).mode,
+    billingMode: facts.billing_mode || null,
+    autopayActive: facts.autopay_active === true,
+    estimatedPrice: visit.estimated_price != null ? Number(visit.estimated_price) : null,
+    primaryLinePrice: visit.primary_line_price,
+    monthlyRate: facts.monthly_rate,
+    perApplicationFee: facts.per_application_fee,
+    isRecurring: visit.is_recurring === true,
+    isCallback: facts.is_callback === true,
+    serviceType: visit.service_type,
+    payerBilled: facts.payer_billed === true,
+    prepaidAmount: visit.prepaid_amount,
+    prepaidMethod: visit.prepaid_method || null,
+    annualCoverageValidated: annualCoverage,
+    duesCollectedThisMonth: true,
+  });
+  return BILLED_KINDS.has(prediction.kind) && require('./completion-pricing').sameMoney(prediction.amount, visit.estimated_price);
+}
+
+// Whether an invoice made for another visit already bills this one: the estimate's combined first-application invoice
+// made at acceptance. The verdict is the one every schedule surface renders (billing-lane.js siblingCoverageForSchedule:
+// its eligibility gate, then siblingInvoiceCoverageVerdict, the home of that rule). Covered (to collect or settled) is
+// not a new bill; nor is a visit held for review (a voided or refunded combined invoice). A lookup that failed throws:
+// a check that did not run proves nothing.
+async function billedOnAnotherInvoice(conn, visit) {
+  const { coverage } = await require('./billing-lane').siblingCoverageForSchedule({ svc: visit, dbConn: conn });
+  if (coverage.reason === 'lookup_failed') throw new Error(`first-application invoice lookup failed for visit ${visit.id}`);
+  return coverage.state !== 'none';
+}
+
 /**
  * The upcoming visits (today through `days` ahead, Eastern) whose invoice would not print their estimate's WaveGuard
- * tier line. Returns { checked, findings: [{ visitId, estimateId, serviceKey, lineKey, tier }] }, one per visit. A visit that
- * cannot be read throws: a check that did not run proves nothing.
+ * tier line. Returns { checked, notJudged, findings: [{ visitId, estimateId, serviceKey, lineKey, tier }] }: `checked`
+ * counts the visits whose new bill the check judged, `notJudged` the visits read whose bill is not one
+ * (billsVisitAtItsPrice, billedOnAnotherInvoice); one finding per visit. A visit that cannot be read throws: a check that did not run proves
+ * nothing.
  */
 async function tierSavingsLeftOffInvoices(conn, { today, days = LOOK_AHEAD_DAYS } = {}) {
-  if (!require('../config/feature-gates').invoiceEstimateDiscountLinesLive()) return { checked: 0, findings: [] };
+  if (!require('../config/feature-gates').invoiceEstimateDiscountLinesLive()) return { checked: 0, notJudged: 0, findings: [] };
   const visits = await upcomingEstimateVisits(conn, { today, days });
+  const facts = await billingFacts(conn, visits, today);
+  // The annual-prepay verdict a billing prediction passes (annual-prepay-renewals.js), read as the forecast reads it:
+  // one query finds the customers with an after-visit prepay year, then each visit is asked.
+  const AnnualPrepay = require('./annual-prepay-renewals');
+  const deferredCustomerIds = await AnnualPrepay.deferredPrepayHoldCustomerIds(conn, visits.map((visit) => visit.customer_id));
   const findings = [];
+  let checked = 0;
   for (const visit of visits) {
+    const annualCoverage = await AnnualPrepay.annualCoverageVerdictForPrediction(visit, conn, { deferredCustomerIds });
+    if (!billsVisitAtItsPrice(visit, facts.get(String(visit.id)), annualCoverage)) continue;
+    if (await billedOnAnotherInvoice(conn, visit)) continue;
+    checked += 1;
     const finding = await visitFinding(conn, visit);
     if (finding) findings.push(finding);
   }
-  return { checked: visits.length, findings };
+  return { checked, notJudged: visits.length - checked, findings };
 }
 
 module.exports = { tierSavingsLeftOffInvoices, upcomingEstimateVisits, LIVE_VISIT_STATUSES, _private: { engineTierRecord, pricingRecords, visitFinding } };

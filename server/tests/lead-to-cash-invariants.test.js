@@ -925,7 +925,7 @@ describe('detector adapters', () => {
   });
 
   test('tier_saving_left_off_invoice reads the shared db from the Eastern day and keys a record by the estimate line', async () => {
-    tierSavingsLeftOffInvoices.mockResolvedValue({ checked: 40, findings: [
+    tierSavingsLeftOffInvoices.mockResolvedValue({ checked: 40, notJudged: 9, findings: [
       { visitId: 'v1', estimateId: 'e1', serviceKey: 'pest_control', lineKey: 'recurring:0', tier: 'platinum' },
       { visitId: 'v2', estimateId: 'e1', serviceKey: 'pest_control', lineKey: 'recurring:0', tier: 'platinum' },
       { visitId: 'v3', estimateId: 'e2', serviceKey: 'rodent_bait', lineKey: 'recurring:0', tier: 'silver' },
@@ -941,7 +941,7 @@ describe('detector adapters', () => {
       count: 3,
       ids: ['v1 (pest_control, platinum, 2 visits)', 'v3 (rodent_bait, silver, 1 visit)', 'v4 (pest_control, platinum, 1 visit)'],
       itemKeys: ['e1:recurring:0', 'e2:recurring:0', 'e1:recurring:1'],
-      detail: { checked: 40, visits: 4 },
+      detail: { checked: 40, notJudged: 9, visits: 4 },
     });
     const r = { key: 'tier_saving_left_off_invoice', itemKeys: out.itemKeys, count: out.count };
     expect(itemHashes(r, NOW)).toHaveLength(3);
