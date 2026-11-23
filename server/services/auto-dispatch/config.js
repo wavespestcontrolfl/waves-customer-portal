@@ -161,7 +161,7 @@ function keepTechEnabled() {
 
 // The 2026-10-09 move rules (move-rules.js), resolved apart from
 // getAutoDispatchConfig to keep that function inside its complexity budget.
-function moveRuleConfig(overrides) {
+function moveRuleConfig(overrides, flexTierEnabled) {
   return {
     // A DAY move must save at least this many modeled drive minutes on the
     // visit's own detour (owner 2026-10-09: 16 of 50 moves in a week cleared
@@ -180,17 +180,19 @@ function moveRuleConfig(overrides) {
     conflictMaxAddedDriveMinutes: overrides.conflictMaxAddedDriveMinutes
       ?? intEnv('AUTO_DISPATCH_CONFLICT_MAX_ADDED_DRIVE_MINUTES', 15, { min: 0, max: 240 }),
     // The most automatic DAY moves one visit may have, counted from the durable
-    // reschedule_log (move-limit.js). 0 = no limit, the default since the owner's
-    // 2026-11-22 "this is all too limiting" (the 10-09 default was 2, "at most
-    // two"). Without it a visit still cannot drift: every move stays inside its
-    // band around the visit's durable original date (flex-tier), a second move
-    // needs the higher re-move score (removeStabilityFloor), and nothing moves
-    // inside 25 hours or after a time was told. Set the env var to bring a cap
-    // back. When on: a same-day change of the hour does not count (owner
-    // 2026-11-22, "days"); a forced move of a placed visit counts when it changes
-    // the day; the first placement of a visit with no arrival window never counts.
+    // reschedule_log (move-limit.js). Under the flex tier the default is 0 = no
+    // limit, since the owner's 2026-11-22 "this is all too limiting": every flex
+    // move stays inside its band around the visit's durable original date, a
+    // second move needs the higher re-move score (removeStabilityFloor), and
+    // nothing moves inside 25 hours or after a time was told. The route-tiers
+    // and legacy guards search around the CURRENT date, so there the 2026-10-09
+    // default of 2 ("at most two") stays: the cap is what stops nightly drift.
+    // The env var overrides both. When on: a same-day change of the hour does not
+    // count (owner 2026-11-22, "days"); a forced move of a placed visit counts
+    // when it changes the day; the first placement of a visit with no arrival
+    // window never counts.
     maxAutoMovesPerVisit: overrides.maxAutoMovesPerVisit
-      ?? intEnv('AUTO_DISPATCH_MAX_MOVES_PER_VISIT', 0, { min: 0, max: 20 }),
+      ?? intEnv('AUTO_DISPATCH_MAX_MOVES_PER_VISIT', flexTierEnabled ? 0 : 2, { min: 0, max: 20 }),
     // ROAD CHECK (GATE_AUTO_DISPATCH_ROAD_CHECK, road-check.js): an ordinary
     // move's drive saving is measured again on Google's traffic-aware roads
     // before the visit moves. The cap is the most route-matrix legs one run
@@ -271,7 +273,7 @@ function getAutoDispatchConfig(overrides = {}) {
       ?? intEnv('AUTO_DISPATCH_DATE_TOLERANCE_DAYS', 7, { min: 1, max: 60 }),
     minScoreImprovement: overrides.minScoreImprovement
       ?? intEnv('AUTO_DISPATCH_MIN_SCORE_IMPROVEMENT', 15, { min: 0, max: 100 }),
-    ...moveRuleConfig(overrides),
+    ...moveRuleConfig(overrides, flexTierEnabled),
     maxChangesPerRun: overrides.maxChangesPerRun
       ?? intEnv('AUTO_DISPATCH_MAX_CHANGES_PER_RUN', 100, { min: 0, max: 100000 }),
     // Self-heal: per-run cap on geocoding MISSING_GEO customers (each is a Google
