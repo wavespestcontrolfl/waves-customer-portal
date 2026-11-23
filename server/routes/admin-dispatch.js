@@ -6618,8 +6618,8 @@ async function planVisitMoveForStaff({ serviceId, newDate, newWindow, notifyCust
   if (keepSlot) Object.assign(rescheduleOptions, { keepStatus: true, allowLive: false });
   rescheduleOptions.sourceSurface = sourceSurface;
   // GATE_DAY_ONLY_PROMISE part B2/B3: the office's "customer asked for this time" (or day only) for the new slot. The rebooker writes it
-  // in the same UPDATE that moves each visit (per member of a grouped stop), so it belongs to this move alone. Gate off: no key.
-  if (require('../services/time-promise').dayOnlyPromiseOn()) rescheduleOptions.customerAskedTime = body?.customerAskedTime === true;
+  // in the same UPDATE that moves each visit (per member of a grouped stop), so it belongs to this move alone.
+  rescheduleOptions.customerAskedTime = body?.customerAskedTime === true;
   rescheduleOptions.notifyRequested = notifyCustomer !== false;
   if (operationKey) rescheduleOptions.operationKey = operationKey;
   const expectVisit = body.expectVisit;
@@ -6880,8 +6880,8 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         adminWindowRules: true,
         sourceSurface: 'dispatch_board',
         // GATE_DAY_ONLY_PROMISE: the office's "customer asked for this time" for the anchor's new slot, as the single move
-        // passes it; the series writer records it on the anchor only. Gate off: no key.
-        ...(require('../services/time-promise').dayOnlyPromiseOn() ? { customerAskedTime: req.body?.customerAskedTime === true } : {}),
+        // passes it; the series writer records it on the anchor only.
+        customerAskedTime: req.body?.customerAskedTime === true,
         notifyRequested: notifyCustomer !== false,
         ...(operationKey ? { operationKey } : {}),
         // Staff surface: occupancy clashes commit with a warning instead of

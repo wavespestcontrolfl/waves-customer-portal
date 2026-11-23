@@ -56,18 +56,6 @@ function isFlexTierEnabled() {
   }
 }
 
-// GATE_DAY_ONLY_PROMISE (owner 2026-11-05 "D2 a"): a visit whose latest promise is day-only (or
-// an unknown window) is frozen too: the customer was told that day. Same call-time, fail-closed read, once per run,
-// into config.dayOnlyPromise.
-function isDayOnlyPromiseEnabled() {
-  try {
-    const gates = require('../../config/feature-gates');
-    return typeof gates.dayOnlyPromiseLive === 'function' && gates.dayOnlyPromiseLive() === true;
-  } catch (_) {
-    return false;
-  }
-}
-
 // GATE_AUTO_DISPATCH_CONFLICT_MOVES: same call-time, fail-closed convention.
 function isConflictMovesEnabled() {
   const { gateEnvValue } = require('../../config/feature-gates');
@@ -235,9 +223,10 @@ function moveRuleConfig(overrides, flexTierEnabled) {
     // other technicians' slots (`other_tech`) and apply.js refuses a change
     // (TECH_CHANGE_BLOCKED). Unassigned visits are unchanged.
     keepTech: overrides.keepTech ?? keepTechEnabled(),
-    // GATE_DAY_ONLY_PROMISE: a day-only or unknown-window promise also freezes the visit
-    // (loadReminderFreeze opts.anyPromise). Read once per run, so it lands in config_snapshot.
-    dayOnlyPromise: overrides.dayOnlyPromise ?? isDayOnlyPromiseEnabled(),
+    // A day-only or unknown-window promise also freezes the visit (loadReminderFreeze opts.anyPromise); always so since
+    // GATE_DAY_ONLY_PROMISE was removed. Kept in config_snapshot as a recorded fact: the Auto-Dispatch page reads it to state
+    // the rule a run used, and a run saved before 2026-11-08 says false or has no key.
+    dayOnlyPromise: true,
   };
 }
 

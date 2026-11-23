@@ -15,7 +15,20 @@ jest.mock('../services/day-replan/planner', () => {
 jest.mock('../services/scheduling/occupancy', () => ({ techScopedConfirmActive: jest.fn(() => false) }));
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ DAY_OPEN: 8 * 60, DAY_CLOSE: 17 * 60 }));
 jest.mock('../services/route-reorder', () => ({ _internals: { LIVE_HOLD_SQL: '(live-hold)' }, CUSTOMER_PREMISE_ALIASES: [{ customer_address_line1: 'customers.address_line1' }] }));
-jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: jest.fn() }));
+// loadPromiseLevels answers from the same `loadToldVisitIds` fake: a told id reads 'hour', any other 'none'.
+jest.mock('../services/auto-dispatch/told-visits', () => {
+  const loadToldVisitIds = jest.fn();
+  const loadPromiseLevels = jest.fn(async (...args) => {
+    const told = await loadToldVisitIds(...args);
+    return new Map(args[1].map((id) => [id, told.has(id) ? 'hour' : 'none']));
+  });
+  return { loadToldVisitIds, loadPromiseLevels };
+});
+jest.mock('../services/time-promise', () => ({
+  ...jest.requireActual('../services/time-promise'),
+  // No stop has a set time here (its own suite: day-only-promise-day-replan.test.js).
+  dayOnlyEligibility: jest.fn(async (_conn, ids) => new Map(ids.map((id) => [id, { eligible: true, level: 'none' }]))),
+}));
 jest.mock('../services/auto-dispatch/preferences', () => ({ getCustomerSchedulingPreferences: jest.fn() }));
 jest.mock('../services/auto-dispatch/eligibility', () => ({
   ...jest.requireActual('../services/auto-dispatch/eligibility'),

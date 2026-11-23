@@ -176,7 +176,7 @@ describe('transactional email provider retry classification', () => {
     });
   });
 
-  describe('a stored DAY-ONLY appointment email is revalidated before any retry (GATE_DAY_ONLY_PROMISE)', () => {
+  describe('a stored DAY-ONLY appointment email is revalidated before any retry', () => {
     const { revalidateDelayedDaySend } = require('../services/appointment-reminders');
     const dayMessage = (over = {}) => message({
       template_key: 'appointment.reminder_72h_day', recipient_id: 'cust-1', trigger_event_id: 'appointment.reminder_72h:svc-9',

@@ -114,10 +114,9 @@ const RESCHEDULE_REASON_CODE = 'ai_call_reschedule'; // reschedule_log.reason_co
 
 // The caller asked for the slot the visit already holds: record "the customer asked for this time" on it, as a move to that
 // slot records it (sourceSurface 'call_reschedule'), so the night jobs keep it (local audit 2026-11-22: a staff placement alone
-// no longer holds a visit). Only while the locked row still holds that slot. Gate off (GATE_DAY_ONLY_PROMISE): no read, no write.
+// no longer holds a visit). Only while the locked row still holds that slot.
 async function recordAskedAtCurrentSlot(trx, visitId, plan, locked = null) {
   const timePromise = require('./time-promise');
-  if (!timePromise.dayOnlyPromiseOn()) return false;
   const row = locked || await trx('scheduled_services').where({ id: visitId }).forUpdate().first('scheduled_date', 'window_start');
   const start = (v) => String(v || '').slice(0, 5);
   if (!row || require('../utils/date-only').dateOnlyString(row.scheduled_date) !== plan.newDate

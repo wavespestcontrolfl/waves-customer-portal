@@ -388,7 +388,7 @@ function makeMoveGuard({ service, best, config = {} }) {
     if (placed.placed) throw refuse(row.id, `is held (${placed.reason_description})`);
     // Night told-lock (owner 2026-11-05, "D1 a"): a promise delivered after the pass-1 re-check (scoring can take minutes) still stops the
     // move. Read on the move transaction; a failed read throws, so nothing moves (fail closed).
-    await assertNotToldOnMove(trx, row, config, refuse);
+    await assertNotToldOnMove(trx, row, refuse);
     // REMINDERS-OFF LOCK (owner 2026-11-07, reminder-off.js): the 24-hour reminder is the customer's only notice of
     // this move, so a row whose reminder will not go out never moves. Read on the move transaction; fails closed.
     // Only on the call that writes this row's placement (the rebooker passes `destination`): the unit mover's later
@@ -401,9 +401,9 @@ function makeMoveGuard({ service, best, config = {} }) {
 
 // Night told-lock (owner 2026-11-05, "D1 a"), the moving visit's own told-time check inside its move
 // transaction (makeMemberGuard covers the siblings, never the primary).
-async function assertNotToldOnMove(trx, row, config, refuse) {
+async function assertNotToldOnMove(trx, row, refuse) {
   const { loadToldVisitIds } = require('./told-visits');
-  const told = await loadToldVisitIds(trx, [row.id], new Date(), ...(dayOnlyOf(config) ? [{ anyPromise: true }] : []));
+  const told = await loadToldVisitIds(trx, [row.id], new Date(), { anyPromise: true });
   if (told.has(String(row.id)) || told.has(row.id)) throw refuse(row.id, 'has a time the customer was already told (frozen)');
 }
 
@@ -457,18 +457,10 @@ async function checkMemberEligibility(rows, best, eligCtx, trx, refuse) {
   }
 }
 
-// GATE_DAY_ONLY_PROMISE (config.dayOnlyPromise, the run's one read): a
-// day-only (or unknown-window) promise then freezes a visit too (loadReminderFreeze opts.anyPromise), because the
-// dispatcher moves DATES and a customer told only the day was still told that day. The rain pass and
-// route-reorder never build this config.
-function dayOnlyOf(config) {
-  return !!config && config.dayOnlyPromise === true;
-}
-
-// loadReminderFreeze's option object for a night run: lock24h and toldLock always, anyPromise when
-// GATE_DAY_ONLY_PROMISE is on too (dayOnlyOf).
-function freezeOpts(dayOnly = false) {
-  return dayOnly === true ? { lock24h: true, toldLock: true, anyPromise: true } : { lock24h: true, toldLock: true };
+// loadReminderFreeze's option object for a night run: lock24h, toldLock and anyPromise. A day-only (or unknown-window)
+// promise freezes a visit too, because the dispatcher moves DATES and a customer told only the day was still told that day.
+function freezeOpts() {
+  return { lock24h: true, toldLock: true, anyPromise: true };
 }
 
 function reminderWindowText(lock24h) {
@@ -482,8 +474,8 @@ function reminderWindowText(lock24h) {
 // 24-hour reminder's band and sent flag instead of the 72-hour one.
 // With `lock24h` a sibling the customer was already told a time for (owner 2026-11-05, "D1 a", a known-slot
 // promise) is frozen too.
-async function checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse, lock24h = false, dayOnly = false) {
-  const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), new Date(), ...(lock24h ? [undefined, freezeOpts(dayOnly)] : []));
+async function checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse, lock24h = false) {
+  const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), new Date(), ...(lock24h ? [undefined, freezeOpts()] : []));
   if (freeze.failed) throw refuse(siblings[0].id, 'reminder-sent status is unreadable (frozen, fail closed)');
   const frozen = siblings.find((m) => freeze.frozen.has(m.id));
   if (frozen) throw refuse(frozen.id, reminderWindowText(lock24h));
@@ -515,10 +507,10 @@ async function checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse,
 // land before this move commits. Each sibling's DESTINATION must clear the
 // freeze too: best.date + that member's own derived start from the unit
 // mover's `targets` (a member with no target fails closed).
-async function checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse, targets, lock24h = false, dayOnly = false) {
+async function checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse, targets, lock24h = false) {
   const now = new Date();
   const hours = flexTier.flexFreezeHoursFor(lock24h);
-  const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), now, ...(lock24h ? [hours, freezeOpts(dayOnly)] : [hours]));
+  const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), now, ...(lock24h ? [hours, freezeOpts()] : [hours]));
   if (freeze.failed) throw refuse(siblings[0].id, 'reminder-sent status is unreadable (frozen, fail closed)');
   const frozen = siblings.find((m) => freeze.frozen.has(m.id));
   if (frozen) throw refuse(frozen.id, `is inside its ${hours}-hour reminder window (frozen)`);
@@ -590,9 +582,9 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
       if (weekend) throw refuse(weekend.id, `skips weekends and ${best.date} is a ${isSaturday(best.date) ? 'Saturday' : 'Sunday'}`);
     }
     if (guardMode === 'tiers') {
-      await checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse, true, dayOnlyOf(config));
+      await checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse, true);
     } else if (guardMode === 'flex') {
-      await checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse, targets, true, dayOnlyOf(config));
+      await checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse, targets, true);
     }
     await checkSameSeriesClash(trx, rows, best, memberIds, refuse);
     // A Lawn Care Service member holds the unit to the mowing rule as saved now.

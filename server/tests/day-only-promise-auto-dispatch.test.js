@@ -1,9 +1,8 @@
 // GATE_DAY_ONLY_PROMISE part A (owner 2026-11-05 "D1 a" / "D2 a"): through the real 04:10 auto-dispatch run (the same
-// harness as night-told-lock-orchestrator.test.js), with this gate on,
+// harness as night-told-lock-orchestrator.test.js),
 // a recurring visit 30 h out whose latest promise is day-only, or an unknown window, is skipped REMINDER_SENT_FROZEN:
 // the dispatcher moves DATES and the customer was told that day. Checked at evaluation and at the apply-time
-// re-check; the moving visit's own transaction and the grouped-sibling guards are in the apply section below. This gate
-// off: the known-slot told lock alone (a day or unknown promise does not freeze). The promise reader (told-visits) runs for real;
+// re-check; the moving visit's own transaction and the grouped-sibling guards are in the apply section below. The promise reader (told-visits) runs for real;
 // only the detector's database read (loadPromiseEvents) is fed events. Synthetic ids only.
 jest.mock('../services/no-show-detector', () => {
   const actual = jest.requireActual('../services/no-show-detector');
@@ -129,7 +128,6 @@ beforeEach(() => {
 });
 
 beforeEach(() => { detector.loadPromiseEvents.mockReset(); detector.loadPromiseEvents.mockResolvedValue([]); });
-afterEach(() => { delete process.env.GATE_DAY_ONLY_PROMISE; });
 afterAll(() => { delete process.env.AUTO_DISPATCH_ALLOW_APPLY; });
 
 const skipCodes = () => audit.logDecision.mock.calls.map((c) => c[1]).filter((d) => d.action !== 'changed').map((d) => d.reason_code);
@@ -144,103 +142,71 @@ const promise = (over = {}) => ({ visit_id: 's1', start_at: null, communicated_a
 const dayPromise = () => detector.loadPromiseEvents.mockResolvedValue([promise({ level: 'day' })]);
 const unknownPromise = () => detector.loadPromiseEvents.mockResolvedValue([promise()]);
 const hourPromise = () => detector.loadPromiseEvents.mockResolvedValue([promise({ start_at: SLOT })]);
-const on = { dayOnlyPromise: true };
 
 describe.each([['tiers', tiers, false], ['flex', flex, true]])('%s mode', (_name, go, moves) => {
-  test('all three gates on: a visit 30 h out whose latest promise is day-only is skipped REMINDER_SENT_FROZEN at evaluation', async () => {
+  test('a visit 30 h out whose latest promise is day-only is skipped REMINDER_SENT_FROZEN at evaluation', async () => {
     setup(30, [reminderRow(30, {})]);
     dayPromise();
-    const res = await go(on);
+    const res = await go();
     expect(res.changed).toBe(0);
     expect(skipCodes()).toContain('REMINDER_SENT_FROZEN');
     expect(skipTexts()[0]).toContain('told-time');
     expect(candidateSlots.findValidCandidateSlots).not.toHaveBeenCalled();
   });
 
-  test('all three gates on: an unknown-window promise is skipped too', async () => {
+  test('an unknown-window promise is skipped too', async () => {
     setup(30, [reminderRow(30, {})]);
     unknownPromise();
-    const res = await go(on);
+    const res = await go();
     expect(res.changed).toBe(0);
     expect(skipCodes()).toContain('REMINDER_SENT_FROZEN');
   });
 
-  test('all three gates on: a day-only promise sent between pass 1 and the apply freezes the move (apply-time re-check)', async () => {
+  test('a day-only promise sent between pass 1 and the apply freezes the move (apply-time re-check)', async () => {
     setup(30, [reminderRow(30, {}), reminderRow(30, {})]);
     detector.loadPromiseEvents.mockResolvedValueOnce([]).mockResolvedValue([promise({ level: 'day' })]);
-    const res = await go(on);
+    const res = await go();
     expect(res.changed).toBe(0);
     expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
     if (moves) expect(skipCodes()).toContain('REMINDER_SENT_FROZEN');
   });
 
-  test('all three gates on: no promise at all, or a known slot with no day mark, behaves as PR 1 (no promise = movable, slot = frozen)', async () => {
+  test('no promise at all, or a known slot with no day mark, behaves as PR 1 (no promise = movable, slot = frozen)', async () => {
     setup(30, [reminderRow(30, {}), reminderRow(30, {})]);
-    const res = await go(on);
+    const res = await go();
     expect(skipCodes()).not.toContain('REMINDER_SENT_FROZEN');
     if (moves) expect(res.changed).toBe(1);
     jest.clearAllMocks();
     setup(30, [reminderRow(30, {})]);
     hourPromise();
-    await go(on);
+    await go();
     expect(skipCodes()).toContain('REMINDER_SENT_FROZEN');
-  });
-
-  test('this gate off: the known-slot told lock alone, a day-only or unknown-window promise does not freeze', async () => {
-    setup(30, [reminderRow(30, {}), reminderRow(30, {})]);
-    dayPromise();
-    const res = await go({ ...on, dayOnlyPromise: false });
-    expect(skipCodes()).not.toContain('REMINDER_SENT_FROZEN');
-    if (moves) expect(res.changed).toBe(1);
-    jest.clearAllMocks();
-    setup(30, [reminderRow(30, {}), reminderRow(30, {})]);
-    unknownPromise();
-    await go({ ...on, dayOnlyPromise: false });
-    expect(skipCodes()).not.toContain('REMINDER_SENT_FROZEN');
   });
 
   test('a promise read that fails freezes the visit (fail closed)', async () => {
     setup(30, [reminderRow(30, {})]);
     detector.loadPromiseEvents.mockRejectedValue(new Error('promise read down'));
-    const res = await go(on);
+    const res = await go();
     expect(res.changed).toBe(0);
     expect(skipCodes()).toContain('REMINDER_STATUS_UNKNOWN');
   });
 });
 
-describe('this gate is read once per run', () => {
-  test('the gate is read from the environment; the run config carries dayOnlyPromise', async () => {
+describe('the run config', () => {
+  test('the run config records dayOnlyPromise: true', async () => {
     setup(30, [reminderRow(30, {})]);
     dayPromise();
-    process.env.GATE_DAY_ONLY_PROMISE = 'true';
     const res = await tiers();
     expect(res.changed).toBe(0);
     expect(skipCodes()).toContain('REMINDER_SENT_FROZEN');
     expect(audit.startRun.mock.calls[0][0].dayOnlyPromise).toBe(true);
   });
-
-  test('the env gate off: config.dayOnlyPromise is false and a day-only promise does not freeze', async () => {
-    setup(30, [reminderRow(30, {}), reminderRow(30, {})]);
-    dayPromise();
-    await flex();
-    expect(audit.startRun.mock.calls[0][0].dayOnlyPromise).toBe(false);
-    expect(skipCodes()).not.toContain('REMINDER_SENT_FROZEN');
-  });
 });
 
-describe('dayOnlyOf and the freeze option', () => {
-  const { dayOnlyOf, freezeReadArgs } = _internals;
-  test('dayOnlyOf needs dayOnlyPromise strictly true', () => {
-    expect(dayOnlyOf(on)).toBe(true);
-    for (const off of [{ dayOnlyPromise: false }, { dayOnlyPromise: 'true' }]) expect(dayOnlyOf({ ...on, ...off })).toBe(false);
-    expect(dayOnlyOf(undefined)).toBe(false);
-    expect(dayOnlyOf({})).toBe(false);
-  });
-
-  test('freezeReadArgs adds anyPromise only with the day-only flag; otherwise the told-lock options', () => {
-    expect(freezeReadArgs('flex', true)).toEqual([25, { lock24h: true, toldLock: true, anyPromise: true }]);
-    expect(freezeReadArgs('flex', false)).toEqual([25, { lock24h: true, toldLock: true }]);
-    expect(freezeReadArgs('flex')).toEqual([25, { lock24h: true, toldLock: true }]);
-    expect(freezeReadArgs('tiers', true)).toEqual([24.25, { lock24h: true, toldLock: true, anyPromise: true }]);
+describe('the freeze option', () => {
+  const { freezeReadArgs } = _internals;
+  test('freezeReadArgs always adds anyPromise to the told-lock options', () => {
+    expect(freezeReadArgs('flex')).toEqual([25, { lock24h: true, toldLock: true, anyPromise: true }]);
+    expect(freezeReadArgs('tiers')).toEqual([24.25, { lock24h: true, toldLock: true, anyPromise: true }]);
   });
 });

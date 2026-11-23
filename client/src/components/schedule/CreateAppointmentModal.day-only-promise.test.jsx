@@ -1,26 +1,19 @@
 // @vitest-environment jsdom
 /**
- * GATE_DAY_ONLY_PROMISE part E: New Appointment shows "Customer asked for this time" under the time picker only while the
- * gate is on (flag `day_only_promise`); a checked box adds customerAskedTime: true to the create request, and with the gate
- * off (or the box unchecked) the request body has no such field.
+ * Day-only promise part E: New Appointment shows "Customer asked for this time" under the time picker; a checked box adds
+ * customerAskedTime: true to the create request, and with the box unchecked the request body has no such field.
  */
 import React from 'react';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useDiscountStackingState } from '../../hooks/useDiscountStacking';
 
-const gate = vi.hoisted(() => ({ on: false }));
-vi.mock('../../hooks/useFeatureFlag', async (importOriginal) => ({
-  ...(await importOriginal()),
-  useFeatureFlag: (key) => key === 'day_only_promise' && gate.on,
-}));
 vi.mock('../../hooks/useDiscountStacking', () => ({
   useDiscountStackingState: vi.fn(() => ({ enabled: false, known: true, retry: vi.fn() })),
   ensureStackingFresh: vi.fn(async () => ({ enabled: true, known: true })),
 }));
 import CreateAppointmentModal from './CreateAppointmentModal.jsx';
 
-beforeEach(() => { gate.on = false; });
 afterEach(() => {
   cleanup();
   vi.mocked(useDiscountStackingState).mockReturnValue({ enabled: false, known: true, retry: vi.fn() });
@@ -91,20 +84,8 @@ const BOX = 'Customer asked for this time';
 const hint = () => screen.getByTestId('asked-time-hint');
 
 describe('the New Appointment time picker', () => {
-  it('gate off: no box, no hint, and the create body has no customerAskedTime', async () => {
-    const fetcher = installFetch();
-    await mountWithService();
-    expect(screen.queryByLabelText(BOX)).toBeNull();
-    expect(screen.queryByTestId('asked-time-hint')).toBeNull();
-    const submit = screen.getByRole('button', { name: 'Schedule appointment' });
-    await waitFor(() => expect(submit.disabled).toBe(false));
-    fireEvent.click(submit);
-    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
-    expect(JSON.parse(schedulePosts(fetcher)[0][1].body)).not.toHaveProperty('customerAskedTime');
-  });
 
-  it('gate on: the box starts unchecked with the phone-script line; an unchecked box sends no field', async () => {
-    gate.on = true;
+  it('the box starts unchecked with the phone-script line; an unchecked box sends no field', async () => {
     const fetcher = installFetch();
     await mountWithService();
     const box = await screen.findByLabelText(BOX);
@@ -117,8 +98,7 @@ describe('the New Appointment time picker', () => {
     expect(JSON.parse(schedulePosts(fetcher)[0][1].body)).not.toHaveProperty('customerAskedTime');
   });
 
-  it('gate on: the phone script shows only while the day-only promise can be made (reminder on, slot beyond 24.25 h)', async () => {
-    gate.on = true;
+  it('the phone script shows only while the day-only promise can be made (reminder on, slot beyond 24.25 h)', async () => {
     installFetch({ reminder24hOn: false });
     await mountWithService();
     await screen.findByLabelText(BOX);
@@ -126,16 +106,14 @@ describe('the New Appointment time picker', () => {
     await waitFor(() => expect(hint().textContent).toBe('Tell the customer this time.'));
   });
 
-  it('gate on: an unknown reminder answer reads as "will not go out" (the senders\' answer for unreadable preferences)', async () => {
-    gate.on = true;
+  it('an unknown reminder answer reads as "will not go out" (the senders\' answer for unreadable preferences)', async () => {
     installFetch({ omitReminder: true });
     await mountWithService();
     await screen.findByLabelText(BOX);
     expect(hint().textContent).toBe('Tell the customer this time.');
   });
 
-  it('gate on: a slot inside the 24.25-hour cutoff gets "Tell the customer this time."', async () => {
-    gate.on = true;
+  it('a slot inside the 24.25-hour cutoff gets "Tell the customer this time."', async () => {
     installFetch();
     await mountWithService();
     await waitFor(() => expect(hint().textContent).toContain('Promise the day only'));
@@ -145,8 +123,7 @@ describe('the New Appointment time picker', () => {
     expect(hint().textContent).toBe('Tell the customer this time.');
   });
 
-  it('gate on: customer A\'s late schedule-estimates reply after switching to customer B does not change B\'s answer', async () => {
-    gate.on = true;
+  it('customer A\'s late schedule-estimates reply after switching to customer B does not change B\'s answer', async () => {
     let releaseA;
     const heldA = new Promise((resolve) => { releaseA = resolve; });
     const CUSTOMER_B = { id: 'customer-b', firstName: 'Grace', lastName: 'Hopper', phone: '5550100' };
@@ -173,8 +150,7 @@ describe('the New Appointment time picker', () => {
     expect(hint().textContent).toContain('Promise the day only');
   });
 
-  it('gate on: a checked box swaps the line for "Tell the customer this time." and sends customerAskedTime: true', async () => {
-    gate.on = true;
+  it('a checked box swaps the line for "Tell the customer this time." and sends customerAskedTime: true', async () => {
     const fetcher = installFetch();
     await mountWithService();
     fireEvent.click(await screen.findByLabelText(BOX));

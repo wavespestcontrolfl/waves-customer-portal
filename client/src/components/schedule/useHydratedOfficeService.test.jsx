@@ -1,11 +1,8 @@
 // @vitest-environment jsdom
-// GATE_DAY_ONLY_PROMISE part E: an editor opened on a row from any feed (the month view, a customer page) reads the visit's
+// Day-only promise part E: an editor opened on a row from any feed (the month view, a customer page) reads the visit's
 // office fields first, so its "Customer asked for this time" box starts from the stored choice.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-
-const gate = { on: true };
-vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: (key) => key === 'day_only_promise' && gate.on }));
 
 import { needsOfficeFields, usePropertyReminderAnswer, withOfficeFields } from './useHydratedOfficeService';
 
@@ -15,11 +12,11 @@ const Probe = ({ service }) => (
 
 const reply = (body) => ({ ok: true, json: async () => body });
 
-beforeEach(() => { gate.on = true; localStorage.setItem('waves_admin_token', 'test-token'); });
+beforeEach(() => { localStorage.setItem('waves_admin_token', 'test-token'); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('needsOfficeFields', () => {
-  it('only with the gate on and a row that lacks the fields', () => {
+  it('only when enabled and for a row that lacks the fields', () => {
     expect(needsOfficeFields({ id: 'v1' }, true)).toBe(true);
     expect(needsOfficeFields({ id: 'v1', customerAskedTime: null }, true)).toBe(false);
     expect(needsOfficeFields({ id: 'v1', customerAskedTime: false }, true)).toBe(false);
@@ -104,17 +101,12 @@ describe('withOfficeFields', () => {
     expect(asText()).toBe('undefined|-|undefined');
   });
 
-  it('no request: a row that carries the fields, the gate off, or a technician\'s sheet', async () => {
+  it('no request: a row that carries the fields, or a technician\'s sheet', async () => {
     const fetcher = vi.fn(async () => reply({}));
     vi.stubGlobal('fetch', fetcher);
     render(<Wrapped service={{ id: 'v1', customerAskedTime: false, reminder24hOn: true }} />);
     expect(asText()).toBe('false|-|true');
     cleanup();
-    gate.on = false;
-    render(<Wrapped service={{ id: 'v1' }} />);
-    expect(asText()).toBe('undefined|-|undefined');
-    cleanup();
-    gate.on = true;
     render(<Wrapped service={{ id: 'v1' }} adminActions={false} />);
     expect(asText()).toBe('undefined|-|undefined');
     expect(fetcher).not.toHaveBeenCalled();
@@ -146,7 +138,7 @@ describe('a late reply for an earlier row never replaces the current row\'s answ
       return reply({ reminder24hOn: true, reminder24hByProperty: {} });
     }));
     const Answer = ({ customerId }) => {
-      const on = usePropertyReminderAnswer({ id: 'v', customerId, propertyId: 'p-home', reminder24hOn: false }, 'p-other', true);
+      const on = usePropertyReminderAnswer({ id: 'v', customerId, propertyId: 'p-home', reminder24hOn: false }, 'p-other');
       return <div data-testid="answer">{String(on)}</div>;
     };
     const view = render(<Answer customerId="cust-a" />);

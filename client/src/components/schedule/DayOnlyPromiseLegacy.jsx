@@ -1,6 +1,6 @@
 // GATE_DAY_ONLY_PROMISE part E: the "Customer asked for this time" box and the "Told: ..." badge for the windows that
 // use inline styles and a `D` palette (New Appointment, Edit appointment). The Tier 1 windows build theirs from
-// components/ui with the same words (dayOnlyPromise.js). The caller shows these only with the gate on.
+// components/ui with the same words (dayOnlyPromise.js).
 import { ASKED_TIME_LABEL, askedTimeHint, toldBadgeText } from './dayOnlyPromise';
 
 export function AskedTimeBoxLegacy({ id, checked, onChange, disabled = false, colors, style, slot }) {

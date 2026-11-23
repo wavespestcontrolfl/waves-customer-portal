@@ -84,14 +84,13 @@ describe('day-only promise words and request fields', () => {
     expect(reminderAnswerFor({ c1: { on: true, byProperty: {} } }, { id: 'c1' }, 'p-home')).toBe(true);
   });
 
-  it('the create request carries customerAskedTime only with the gate on AND the box checked', () => {
-    expect(askedTimeCreateFields(true, true)).toEqual({ customerAskedTime: true });
-    expect(askedTimeCreateFields(true, false)).toEqual({});
-    expect(askedTimeCreateFields(false, true)).toEqual({});
-    expect(askedTimeCreateFields(undefined, undefined)).toEqual({});
+  it('the create request carries customerAskedTime only when the box is checked', () => {
+    expect(askedTimeCreateFields(true)).toEqual({ customerAskedTime: true });
+    expect(askedTimeCreateFields(false)).toEqual({});
+    expect(askedTimeCreateFields(undefined)).toEqual({});
   });
 
-  it('a move request carries true or false with the gate on, nothing with it off', () => {
+  it('a move request carries true or false when enabled, nothing otherwise', () => {
     expect(askedTimeMoveFields(true, true)).toEqual({ customerAskedTime: true });
     expect(askedTimeMoveFields(true, false)).toEqual({ customerAskedTime: false });
     expect(askedTimeMoveFields(true, undefined)).toEqual({ customerAskedTime: false });
