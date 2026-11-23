@@ -350,6 +350,22 @@ describe('series move (rebooker.rescheduleSeries): a customer series move record
     for (const u of none.updates) expect(u.update.mock.calls[0][0]).not.toHaveProperty('customer_asked_time');
   });
 
+  // Local audit 2026-11-22: an anchor whose date and start stay (an end-only edit) keeps the intent of the slot it holds.
+  test('office class: an end-only series edit leaves the anchor intent alone', async () => {
+    const { updates } = wireSeriesMocks('confirmed', SIBS());
+    await SmartRebooker.rescheduleSeries('svc-1', BASE, { start: '09:00', end: '11:30' }, 'admin', 'admin',
+      { allowLive: true, sourceSurface: 'dispatch_board', customerAskedTime: false });
+    for (const u of updates) expect(u.update.mock.calls[0][0]).not.toHaveProperty('customer_asked_time');
+  });
+
+  // seriesOperationKey is not exported; pin its source (as rebooker-collective-move.test.js pins the technician key).
+  test('the series request key carries the office box, presence-encoded', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rebooker.js'), 'utf8');
+    const fn = src.slice(src.indexOf('function seriesOperationKey('), src.indexOf('\n}\n', src.indexOf('function seriesOperationKey(')));
+    expect(fn).toMatch(/typeof options\.customerAskedTime === 'boolean' \? `:asked=\$\{options\.customerAskedTime \? 1 : 0\}` : ''/);
+    expect(fn).toMatch(/\$\{techKey\}\$\{askedKey\}`;/);
+  });
+
   test('gate off: no key on a customer series move', async () => {
     delete process.env.GATE_DAY_ONLY_PROMISE;
     const { updates } = wireSeriesMocks('confirmed', SIBS());
