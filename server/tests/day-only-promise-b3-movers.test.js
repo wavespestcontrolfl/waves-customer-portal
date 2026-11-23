@@ -359,10 +359,10 @@ describe('series move (rebooker.rescheduleSeries): a customer series move record
   });
 
   // seriesOperationKey is not exported; pin its source (as rebooker-collective-move.test.js pins the technician key).
-  test('the series request key carries the office box, presence-encoded', () => {
+  test('the series request key carries a ticked office box only (an unticked request keeps its pre-deploy key)', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rebooker.js'), 'utf8');
     const fn = src.slice(src.indexOf('function seriesOperationKey('), src.indexOf('\n}\n', src.indexOf('function seriesOperationKey(')));
-    expect(fn).toMatch(/typeof options\.customerAskedTime === 'boolean' \? `:asked=\$\{options\.customerAskedTime \? 1 : 0\}` : ''/);
+    expect(fn).toMatch(/const askedKey = options\.customerAskedTime === true \? ':asked=1' : '';/);
     expect(fn).toMatch(/\$\{techKey\}\$\{askedKey\}`;/);
   });
 

@@ -525,8 +525,9 @@ function seriesOperationKey(serviceId, newDate, newWindow, options = {}) {
   const techKey = techRequested ? `:tech=${options.technicianId ? String(options.technicianId) : '-'}` : '';
   const confirmationKey = options.pendingConfirmation === true ? ':pending' : '';
   // …and the office's "customer asked for this time" box, which the anchor's UPDATE records (time-promise moveIntentFor):
-  // the same slot with the box flipped is a different request (local audit 2026-11-22). Presence-encoded like the tech.
-  const askedKey = typeof options.customerAskedTime === 'boolean' ? `:asked=${options.customerAskedTime ? 1 : 0}` : '';
+  // the same slot with the box flipped is a different request (local audit 2026-11-22). Only a ticked box adds to the key,
+  // so an unticked request keeps the key it had before this field existed (a retry across the deploy still replays).
+  const askedKey = options.customerAskedTime === true ? ':asked=1' : '';
   const requestKey = `${serviceId}:${dateOnly(newDate)}:${hm(win.start)}:${hm(win.end)}${options.clearAnchorWindow === true ? ':clear' : ''}${confirmationKey}${techKey}${askedKey}`;
   const technician = techRequested ? { id: options.technicianId ? String(options.technicianId) : null } : null;
   if (typeof options.operationKey === 'string' && options.operationKey) {
