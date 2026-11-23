@@ -21,6 +21,7 @@ const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { loadPackingAnchors } = require('../services/scheduling/packing-geometry');
 const lineTech = require('../services/scheduling/line-technician');
+const { classifyServiceCategory } = require('../services/auto-dispatch/service-category');
 const { buildBookingAvailability, buildFunnelAvailability, funnelServiceLines } = require('../routes/booking')._internals;
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
@@ -166,6 +167,16 @@ describe('funnelServiceLines / buildFunnelAvailability', () => {
     expect(funnelServiceLines('lawn_care+tree_shrub')).toEqual(['lawn']);
     expect(funnelServiceLines('pest_control+lawn_care')).toEqual(['general', 'lawn']);
     expect(funnelServiceLines('bora_care')).toEqual(['termite']);
+    // The /book rodent option saves a general "Rodent Control" visit (the first look; the
+    // booking-link text sends a rodent inspection here too): the exclusion line, the same line
+    // the saved visit's name reads, so the offer and the saved visit agree.
+    expect(funnelServiceLines('rodent')).toEqual(['exclusion']);
+    expect(classifyServiceCategory('Rodent Control')).toBe('exclusion');
+    expect(funnelServiceLines('pest_control+rodent')).toEqual(['exclusion', 'general']);
+    // A two-choice booking saves both labels joined by " + ": the saved visit still reads exclusion,
+    // so a later reschedule of it offers the exclusion line, never the trapping line.
+    expect(funnelServiceLines('mosquito+rodent')).toEqual(['exclusion', 'mosquito']);
+    expect(classifyServiceCategory('Mosquito Control + Rodent Control')).toBe('exclusion');
   });
 
   test('not live, no funnel key or an unknown key: no lines', () => {

@@ -11,19 +11,13 @@ const { AMAZON_DISCLOSURE, loadTools, toolById, toolLinkText, checkTools } = req
 const { toolLineProblem } = require('../services/pest-insider/claim-check');
 const { planIssue } = require('../services/pest-insider/plan');
 const { FACTS } = require('../services/pest-insider/facts');
-const { POST_URLS } = require('../services/pest-insider/posts');
-const { renderIssue, withToolBlock } = require('../services/pest-insider/render');
+const { toolBlock } = require('../services/pest-insider/render');
 
 const { tools: TOOLS, problems: TOOL_PROBLEMS } = loadTools();
 
 const index = registry.productIndex();
 const MESH = 'stuff-it-copper-mesh';
 const entry = (over = {}) => ({ product_id: MESH, name: 'Copper mesh', lines: ['Copper mesh fills small gaps.'], services: ['pest'], ...over });
-// A shared issue for withToolBlock to add a tool to.
-const SHARED = renderIssue({
-  subject: 's', preview: 'p', lead: { headline: 'h', sentences: [{ text: 'a' }], postUrl: POST_URLS[0] },
-  idItem: { text: 'x', species: { slug: 'aedes-mosquito', name: 'Aedes Mosquito' } },
-});
 // A registry index with one row changed, for the refusals.
 const indexWith = (id, change) => {
   const copy = new Map(index);
@@ -68,7 +62,7 @@ describe('the reviewed tool list', () => {
       expect(require('../data/pest-insider-tools-v1.json').tools.find((t) => t.product_id === MESH).name).toBe('Buy to support us');
       const tool = toolById(MESH);
       expect(tool).toMatchObject({ name: saved.name, lines: saved.lines, services: saved.services });
-      const copy = withToolBlock(SHARED, tool).text_body;
+      const copy = toolBlock(tool).html;
       expect(copy).toContain(`${saved.lines[0]} ${saved.lines[1]}`);
       expect(copy).not.toMatch(/buy through our link|Buy to support us/);
     } finally {
@@ -151,7 +145,7 @@ describe('the reviewed tool list', () => {
 });
 
 describe('the registry as it is now (pre-push PR 3 r3)', () => {
-  test('a row paused or relinked while the process runs takes effect at the next pick and render; a relinked tool waits for a check of its new link (r4)', () => {
+  test('a row paused or relinked while the process runs takes effect at the next pick and render; a relinked tool is picked only when its new link is named', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pest-insider-registry-'));
     const file = path.join(dir, 'registry.json');
     const base = registry.loadRegistry();
@@ -165,14 +159,13 @@ describe('the registry as it is now (pre-push PR 3 r3)', () => {
     const plan = (liveToolUrls) => planIssue({ sendDate: FEB, livePostFactIds: FACTS.map((f) => f.id), liveToolUrls }).tool;
     const mesh = TOOLS.find((t) => t.productId === MESH);
     const gauge = TOOLS.find((t) => t.productId === 'acurite-glass-rain-gauge');
-    const shared = SHARED;
     const before = process.env.AFFILIATE_REGISTRY_PATH;
     try {
       process.env.AFFILIATE_REGISTRY_PATH = file;
       write((row) => row, new Date('2026-11-01T00:00:00Z'));
       expect(loadTools()).toEqual({ tools: TOOLS, problems: [] });
       expect(plan([mesh.url]).productId).toBe(MESH);
-      expect(withToolBlock(shared, gauge).html_body).toContain(`href="${gauge.url}"`);
+      expect(toolBlock(toolById(gauge.productId)).html).toContain(`href="${gauge.url}"`);
 
       write((row) => {
         if (row.product_id === MESH) return { ...row, status: 'paused' };
@@ -182,13 +175,13 @@ describe('the registry as it is now (pre-push PR 3 r3)', () => {
       expect(loadTools().problems).toEqual([`${MESH}: its registry row is inactive, not active`]);
       expect(toolById(MESH)).toBeNull();
       expect(plan([mesh.url])).toBeNull();
-      expect(withToolBlock(shared, mesh)).toBe(shared);
       // relinked: only the old link passed a check, so the tool waits for a check of the new one
       expect(toolById(gauge.productId).url).toBe(NEW_URL);
       expect(plan([gauge.url])).toBeNull();
-      expect(withToolBlock(shared, gauge)).toBe(shared);
       expect(plan([NEW_URL]).productId).toBe(gauge.productId);
-      expect(withToolBlock(shared, { productId: gauge.productId, url: NEW_URL }).html_body).toContain(`href="${NEW_URL}"`);
+      // The send looks the tool up again by its id: the block carries the link as the registry has it now.
+      expect(toolBlock(toolById(gauge.productId)).html).toContain(`href="${NEW_URL}"`);
+      expect(toolBlock(toolById(gauge.productId)).html).not.toContain(gauge.url);
     } finally {
       if (before === undefined) delete process.env.AFFILIATE_REGISTRY_PATH;
       else process.env.AFFILIATE_REGISTRY_PATH = before;

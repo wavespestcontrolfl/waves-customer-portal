@@ -1,8 +1,13 @@
 // Pest Insider renderer: reviewed copy only, escaping, absolute links, dark-mode hooks.
 const {
-  renderIssue, withToolBlock, addReaderBlock, wrapIssueHtml, speciesEmoji, escapeHtml, POST_LINK_TEXT, VERDICTS, SIGNOFF_TEXT, CATEGORY_EMOJI, SPECIES_EMOJI,
+  renderIssue, toolBlock, toolBlockErrors, TOOL_TOKEN, wrapIssueHtml, speciesEmoji, escapeHtml, POST_LINK_TEXT, VERDICTS, SIGNOFF_TEXT, CATEGORY_EMOJI, SPECIES_EMOJI,
   homeBlock, homeBlockErrors, homeSubstitutions, HOME_LINE_LABELS, HOME_TOKEN, HOME_TEXT_TOKEN,
+  CLOSING_TEXT,
 } = require('../services/pest-insider/render');
+const {
+  REFERRAL_URL, REFERRAL_TAIL, REFERRAL_TOKEN, REFERRAL_TEXT_TOKEN, NO_LINE,
+  fillReferralLine, neutralizeIssueTokens, referralTail, referralLine,
+} = require('../services/pest-insider/referral-line');
 const { neutralizeHomeTokens, hasHomeToken } = require('../services/pest-insider/home');
 const { SPECIES } = require('../services/pest-insider/plan');
 const { cardFor } = require('../services/pest-insider/cards');
@@ -11,6 +16,7 @@ const { heroFor } = require('../services/pest-insider/heroes');
 const { partPictureForFact } = require('../services/pest-insider/parts');
 const { factById } = require('../services/pest-insider/facts');
 const { toolById, toolLinkText, AMAZON_DISCLOSURE } = require('../services/pest-insider/tools');
+const { hasToolToken, neutralizeToolToken } = require('../services/pest-insider/tool-block');
 const { bodyIsDarkAware } = require('../services/email-template');
 const { validateNewsletterDraft } = require('../services/newsletter-validator');
 const { PEST_INSIDER_POLL_IDS, NEWSLETTER_POLL_IDS, neutralizeQuizTokens } = require('../services/newsletter-quiz');
@@ -25,6 +31,12 @@ const BASE = {
 };
 const DIVIDER = 'https://d2riygw2ap9mi.cloudfront.net/social-media/waves-divider-2026-v2.gif';
 const imgSrcs = (html) => [...html.matchAll(/<img [^>]*src="([^"]+)"/g)].map((m) => m[1]);
+// What closes every stored issue: the referral line's token, then the sign-off.
+const closingHtmlOf = (html) => html.slice(html.lastIndexOf(REFERRAL_TOKEN));
+// The issue as an opted-in reader gets it: the tool token filled with the tool's HTML block (the sender's fill).
+const withTool = (issue, tool) => ({ ...issue, html_body: issue.html_body.split(TOOL_TOKEN).join(toolBlock(tool).html) });
+// The words a reader sees in a piece of HTML.
+const wordsOf = (html) => html.replace(/<[^>]+>/g, '').replace(/&#39;/g, "'").replace(/\s+/g, ' ').trim();
 // A lead for a real fact: its own post and its reviewed lines.
 const leadFor = (factId) => ({ ...BASE.lead, postUrl: postUrl(factId), factId });
 // The same, under the fact's own title as the headline, as buildIssue sends it.
@@ -163,7 +175,7 @@ describe('renderIssue', () => {
 
   test('every mention of the Waves newsletter, blog, website or app says Waves (owner 2026-11-19)', () => {
     const species = { slug: 'pillbug', name: 'Pillbug', category: 'Occasional invaders', scientific: 'Armadillidium vulgare', verdict: 'watch' };
-    const r = withToolBlock(renderIssue({ ...BASE, sendDate: '2026-12-03', lead: leadFor('A01'), idItem: { ...BASE.idItem, species } }), toolById('acurite-glass-rain-gauge'));
+    const r = withTool(renderIssue({ ...BASE, sendDate: '2026-12-03', lead: leadFor('A01'), idItem: { ...BASE.idItem, species } }), toolById('acurite-glass-rain-gauge'));
     const words = (text) => text.replace(/<[^>]*>/g, ' ').replace(/https?:\/\/\S+/g, ' ').replace(/&#39;/g, "'");
     for (const part of [r.html_body, r.text_body]) {
       const text = words(part);
@@ -252,55 +264,95 @@ describe('renderIssue', () => {
     for (const part of [shared.html_body, shared.text_body]) expect(part).not.toMatch(/amazon/i);
   });
 
-  test('withToolBlock adds the tool after "What\'s this?" and before the sign-off, with Amazon\'s sentence right after the link', () => {
+  test('the tool token stands in the HTML only, right before the "Your home" token; the text part has none', () => {
+    for (const pollQuizId of [null, PEST_INSIDER_POLL_IDS[0]]) {
+      const r = renderIssue({ ...BASE, pollQuizId });
+      expect(r.html_body.split(TOOL_TOKEN)).toHaveLength(2);
+      expect(r.html_body.endsWith(`\n${TOOL_TOKEN}${HOME_TOKEN}${closingHtmlOf(r.html_body)}`)).toBe(true);
+      expect(r.html_body.indexOf(TOOL_TOKEN)).toBeGreaterThan(r.html_body.indexOf('Aedes Mosquito'));
+      if (pollQuizId) expect(r.html_body.indexOf(TOOL_TOKEN)).toBeGreaterThan(r.html_body.indexOf(`{{quiz:${pollQuizId}}}`));
+      // Order in the HTML: tool, home, referral, sign-off.
+      const at = [TOOL_TOKEN, HOME_TOKEN, REFERRAL_TOKEN, 'Catch you next time.'].map((t) => r.html_body.indexOf(t));
+      expect(at).toEqual([...at].sort((x, y) => x - y));
+      // The text part is today's text: no tool token, no tool words, no Amazon.
+      expect(hasToolToken(r.text_body)).toBe(false);
+      expect(r.text_body).not.toMatch(/pi-tool|amazon|A TOOL WE'D USE/i);
+      expect(r.text_body.endsWith(`\n\n${HOME_TEXT_TOKEN}${CLOSING_TEXT}`)).toBe(true);
+    }
+  });
+
+  test('the text body of an issue is the same whatever tool was picked: the tool is not a render input', () => {
+    const plain = renderIssue(BASE);
+    for (const toolId of ['acurite-glass-rain-gauge', 'stuff-it-copper-mesh']) {
+      expect(renderIssue({ ...BASE, toolId, tool: toolById(toolId) }).text_body).toBe(plain.text_body);
+    }
+  });
+
+  test('only the exact lowercase spelling is the token: no case or spacing variant is stripped or detected', () => {
+    for (const variant of ['{{ pi-tool }}', '{{PI-TOOL}}', '{{pi-Tool}}', '{{pi-tool-text}}', '{pi-tool}']) {
+      expect(hasToolToken(`a ${variant} b`)).toBe(false);
+      expect(neutralizeToolToken(`a ${variant} b`)).toBe(`a ${variant} b`);
+      expect(neutralizeIssueTokens(`a ${variant} b`)).toBe(`a ${variant} b`);
+    }
+    expect(neutralizeToolToken(`a${TOOL_TOKEN}b${TOOL_TOKEN}`)).toBe('ab');
+    expect(neutralizeIssueTokens(`a${TOOL_TOKEN}b`)).toBe('ab');
+  });
+
+  test('toolBlock is the HTML value of the token: badge, band, reviewed lines, an untracked link, and Amazon\'s sentence right after it', () => {
     const gauge = toolById('acurite-glass-rain-gauge');
-    const shared = renderIssue(BASE);
-    const r = withToolBlock(shared, gauge);
-    expect(r.subject).toBe(shared.subject);
-    expect(r.preview).toBe(shared.preview);
-    // the shared copy, unchanged, then the badge and the tool block, then the sign-off
-    const signoffHtml = shared.html_body.slice(shared.html_body.lastIndexOf('<div class="dm-text">'));
-    expect(signoffHtml).toContain('Catch you next time.');
-    const sharedSections = shared.html_body.slice(0, shared.html_body.length - signoffHtml.length);
-    expect(r.html_body.startsWith(`${sharedSections}<div style="text-align:center;margin:28px 0;"><img src="${DIVIDER}"`)).toBe(true);
-    expect(r.html_body.endsWith(`\n${signoffHtml}`)).toBe(true);
-    const html = r.html_body.slice(sharedSections.length, r.html_body.length - signoffHtml.length);
+    const { html } = toolBlock(gauge);
+    expect(Object.keys(toolBlock(gauge))).toEqual(['html']);
+    expect(html.startsWith(`<div style="text-align:center;margin:28px 0;"><img src="${DIVIDER}"`)).toBe(true);
+    expect(html.endsWith('</div>\n')).toBe(true);
     expect(html).toContain('A tool we&#39;d use');
     expect(html).toContain(`<strong><em>${gauge.name}</em></strong>`);
-    expect(html).toContain(`href="${gauge.url}"`);
+    // SendGrid honors clicktracking=off only BEFORE href; the one link is the tool's own.
+    expect(html).toContain(`<a clicktracking=off class="dm-link" href="${gauge.url}"`);
+    expect(html.indexOf('clicktracking=off')).toBeLessThan(html.indexOf('href='));
+    expect(html.match(/<a\b/g)).toHaveLength(1);
     const linkAt = html.indexOf(`>${toolLinkText(gauge)}</a>`);
     const sentenceAt = html.indexOf(AMAZON_DISCLOSURE);
     expect(linkAt).toBeGreaterThan(html.indexOf(gauge.lines[1]));
     expect(sentenceAt).toBeGreaterThan(linkAt);
     // in normal body text, not the muted small print
     expect(html.slice(html.lastIndexOf('<p', sentenceAt), sentenceAt)).not.toMatch(/dm-muted/);
-    const sharedText = shared.text_body.slice(0, shared.text_body.length - SIGNOFF_TEXT.length);
-    // The "Your home" token stands right before the sign-off; the tool block goes between them.
-    expect(shared.text_body.endsWith(`\n\n${HOME_TEXT_TOKEN}${SIGNOFF_TEXT}`)).toBe(true);
-    expect(r.text_body)
-      .toBe(`${sharedText}A TOOL WE'D USE\n${gauge.lines.join(' ')}\n\n${toolLinkText(gauge)}: ${gauge.url}\n${AMAZON_DISCLOSURE}\n\n${SIGNOFF_TEXT}`);
+    // With the value in place of the token the block sits after "What's this?" and before the home token's place and the sign-off.
+    const r = renderIssue(BASE);
+    const filled = withTool(r, gauge).html_body;
+    expect(filled.indexOf('A tool we&#39;d use')).toBeGreaterThan(filled.indexOf('Aedes Mosquito'));
+    expect(filled.indexOf('A tool we&#39;d use')).toBeLessThan(filled.indexOf('Catch you next time.'));
+    expect(filled.endsWith(closingHtmlOf(r.html_body))).toBe(true);
   });
 
-  test('withToolBlock puts the tool at the end of a body with no sign-off', () => {
-    const gauge = toolById('acurite-glass-rain-gauge');
-    const r = withToolBlock({ subject: 's', preview: 'p', html_body: '<div class="dm-text">\nold\n</div>', text_body: 'old\n' }, gauge);
-    expect(r.html_body.startsWith('<div class="dm-text">\nold\n</div>\n<div style="text-align:center;')).toBe(true);
-    expect(r.html_body.endsWith('</div>\n</div>')).toBe(true);
-    expect(r.text_body).toBe(`old\n\nA TOOL WE'D USE\n${gauge.lines.join(' ')}\n\n${toolLinkText(gauge)}: ${gauge.url}\n${AMAZON_DISCLOSURE}\n`);
-  });
-
-  test('withToolBlock leaves the shared copy for a tool not usable now, or whose link is not the checked one (pre-push PR 3 r3, r4)', () => {
-    const gauge = toolById('acurite-glass-rain-gauge');
-    const shared = renderIssue(BASE);
-    for (const picked of [
-      { productId: 'ks-adjustable-door-sweep', url: gauge.url },
-      { productId: 'no-such-tool', url: gauge.url },
-      { productId: gauge.productId, url: 'https://www.amazon.com/dp/B000000001?tag=wavespestcont-20' },
-      { productId: gauge.productId },
-      gauge.productId, null, 7,
-    ]) {
-      expect(withToolBlock(shared, picked)).toBe(shared);
+  test('toolBlockErrors: the one tolerated error is the affiliate rule, and only for the tool\'s own single link with Amazon\'s sentence after it', () => {
+    for (const id of ['acurite-glass-rain-gauge', 'stuff-it-copper-mesh', 'ks-adjustable-door-sweep']) {
+      const tool = toolById(id);
+      if (!tool) continue;
+      const block = toolBlock(tool);
+      // The shared validator itself refuses the block's affiliate link; only that error is tolerated.
+      const raw = validateNewsletterDraft({ subject: 's', preview_text: 'p', html_body: block.html, text_body: '', newsletter_type: 'pest-insider-monthly' }).errors;
+      expect(raw.some((e) => e.startsWith('AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL'))).toBe(true);
+      expect(toolBlockErrors(block, tool)).toEqual([]);
     }
+    const gauge = toolById('acurite-glass-rain-gauge');
+    const block = toolBlock(gauge);
+    const other = 'https://www.amazon.com/dp/B000000001?tag=wavespestcont-20';
+    const bad = [
+      // a second link
+      { html: `${block.html}<p><a href="https://www.example.com/x">x</a></p>` },
+      // another product's link
+      { html: block.html.split(gauge.url).join(other) },
+      // a link that Amazon's click tracking could rewrite
+      { html: block.html.replace('clicktracking=off ', '') },
+      // Amazon's sentence missing, or before the link
+      { html: block.html.replace(AMAZON_DISCLOSURE, 'x') },
+      { html: `<p>${AMAZON_DISCLOSURE}</p>${block.html.replace(AMAZON_DISCLOSURE, 'x')}` },
+      // a claim the send check refuses next to the link
+      { html: block.html.replace(gauge.lines[0], '100% safe for pets and kids, guaranteed.') },
+    ];
+    for (const b of bad) expect(toolBlockErrors(b, gauge).length).toBeGreaterThan(0);
+    // A dollar amount is refused by the send check whatever the link looks like.
+    expect(toolBlockErrors({ html: block.html.replace(gauge.lines[0], 'It costs $25 today.') }, gauge).join(' ')).toMatch(/dollar|\$/i);
   });
 
   test('the shared body takes no caller text or link (pre-push rounds 5 to 10)', () => {
@@ -322,8 +374,8 @@ describe('renderIssue', () => {
     expect(withCallerInput.text_body).toBe(plain.text_body);
   });
 
-  test('a Waves Pest Insider poll goes after "What\'s this?", once in each part, and a reader\'s tool block after it', () => {
-    const poll = PEST_INSIDER_POLL_IDS[1];
+  test('a Waves Pest Insider poll goes after "What\'s this?", once in each part, and the tool block after it', () => {
+    const poll = 'pi-poll-lizards-v1';
     const r = renderIssue({ ...BASE, pollQuizId: poll });
     const html = r.html_body;
     expect(html.split(`{{quiz:${poll}}}`)).toHaveLength(2);
@@ -333,17 +385,17 @@ describe('renderIssue', () => {
     // The band stands alone: no small label over it, as in the Waves Newsletter.
     expect(html).toContain('<div class="dm-text">\n<h2 class="dm-chip"');
     expect(renderIssue(BASE).html_body).not.toContain('<div class="dm-text">\n<h2 class="dm-chip"');
-    expect(r.text_body).toContain(`\n\nQUICK POLL\n{{quiz-text:${poll}}}\n\n${HOME_TEXT_TOKEN}${SIGNOFF_TEXT}`);
-    // The tool is added per reader before the sign-off, so after the poll.
-    const withTool = withToolBlock(r, toolById('acurite-glass-rain-gauge'));
-    expect(withTool.html_body.indexOf('A tool we&#39;d use')).toBeGreaterThan(withTool.html_body.indexOf(`{{quiz:${poll}}}`));
+    expect(r.text_body).toContain(`\n\nQUICK POLL\n{{quiz-text:${poll}}}\n\n${HOME_TEXT_TOKEN}${CLOSING_TEXT}`);
+    // The tool fills its token before the sign-off, so after the poll.
+    const toolIssue = withTool(r, toolById('acurite-glass-rain-gauge'));
+    expect(toolIssue.html_body.indexOf('A tool we&#39;d use')).toBeGreaterThan(toolIssue.html_body.indexOf(`{{quiz:${poll}}}`));
     // The archive and the FYI copy show the question and answers with no vote link.
     const archive = neutralizeQuizTokens(html);
     expect(archive).toContain('Lizards on the lanai: friend or foe?');
     expect(archive).toContain('What lizards?');
     expect(archive).not.toMatch(/\/api\/public\/newsletter\/quiz|\{\{quiz/);
-    // Any other id adds nothing: the same body as no poll.
-    for (const other of [NEWSLETTER_POLL_IDS[0], 'pest-pressure-v1', 'pi-poll-unknown-v1', null, 7]) {
+    // Any other id adds nothing: the same body as no poll. A retired poll (pi-poll-bugging-you-v1) is one of them.
+    for (const other of [NEWSLETTER_POLL_IDS[0], 'pest-pressure-v1', 'pi-poll-unknown-v1', 'pi-poll-bugging-you-v1', null, 7]) {
       expect(renderIssue({ ...BASE, pollQuizId: other })).toEqual(renderIssue(BASE));
     }
   });
@@ -393,18 +445,18 @@ describe('"Your home": the tokens in the shared body and the per-reader block', 
   const NOW = new Date('2026-11-21T15:00:00Z');
   const HOME = { lastVisit: { date: '2026-11-10', line: 'pest' }, sinceDate: '2024-03-05' };
   const POLL = PEST_INSIDER_POLL_IDS[0];
-  const signoffHtmlOf = (html) => html.slice(html.lastIndexOf('<div class="dm-text">'));
+  const signoffHtmlOf = closingHtmlOf;
 
   test('both tokens stand alone right before the sign-off, after "What\'s this?" and the poll, in both parts', () => {
     for (const pollQuizId of [null, POLL]) {
       const r = renderIssue({ ...BASE, pollQuizId });
       const signoffHtml = signoffHtmlOf(r.html_body);
-      // The HTML token is a line of its own glued to the sign-off: no divider, heading or wrapper around it.
-      expect(r.html_body.endsWith(`\n${HOME_TOKEN}${signoffHtml}`)).toBe(true);
+      // The HTML token is a line of its own glued to the sign-off (after the tool token): no divider, heading or wrapper around it.
+      expect(r.html_body.endsWith(`\n${TOOL_TOKEN}${HOME_TOKEN}${signoffHtml}`)).toBe(true);
       expect(r.html_body.split(HOME_TOKEN)).toHaveLength(2);
       expect(r.html_body.indexOf(HOME_TOKEN)).toBeGreaterThan(r.html_body.indexOf('Aedes Mosquito'));
       if (pollQuizId) expect(r.html_body.indexOf(HOME_TOKEN)).toBeGreaterThan(r.html_body.indexOf(`{{quiz:${pollQuizId}}}`));
-      expect(r.text_body.endsWith(`\n\n${HOME_TEXT_TOKEN}${SIGNOFF_TEXT}`)).toBe(true);
+      expect(r.text_body.endsWith(`\n\n${HOME_TEXT_TOKEN}${CLOSING_TEXT}`)).toBe(true);
       expect(r.text_body.split(HOME_TEXT_TOKEN)).toHaveLength(2);
       expect(r.text_body.indexOf(HOME_TEXT_TOKEN)).toBeGreaterThan(r.text_body.indexOf('WHAT\'S THIS?'));
       if (pollQuizId) expect(r.text_body.indexOf(HOME_TEXT_TOKEN)).toBeGreaterThan(r.text_body.indexOf(`{{quiz-text:${pollQuizId}}}`));
@@ -416,8 +468,8 @@ describe('"Your home": the tokens in the shared body and the per-reader block', 
   test('with an empty value the body is the issue without the block: no empty band, no extra blank line', () => {
     for (const pollQuizId of [null, POLL]) {
       const r = renderIssue({ ...BASE, pollQuizId });
-      const html = neutralizeHomeTokens(r.html_body);
-      const text = neutralizeHomeTokens(r.text_body);
+      const html = neutralizeHomeTokens(neutralizeToolToken(r.html_body));
+      const text = neutralizeHomeTokens(neutralizeToolToken(r.text_body));
       // The issue as it read before the tokens: every part joined by one newline (HTML) or one blank line (text).
       expect(html).not.toContain(`\n\n${signoffHtmlOf(r.html_body)}`);
       expect(html).toContain(`</div>\n${signoffHtmlOf(r.html_body)}`);
@@ -425,11 +477,11 @@ describe('"Your home": the tokens in the shared body and the per-reader block', 
       expect(html.split('\n\n')).toHaveLength(r.html_body.split('\n\n').length);
       expect(html.endsWith(signoffHtmlOf(r.html_body))).toBe(true);
       expect(text).not.toMatch(/\n\n\n/);
-      expect(text.endsWith(`\n\n${SIGNOFF_TEXT}`)).toBe(true);
+      expect(text.endsWith(`\n\n${CLOSING_TEXT}`)).toBe(true);
       expect(text).not.toContain('{{pi-home');
       // The substitution a reader with no block gets is exactly that.
       const empty = homeSubstitutions(null).substitutions;
-      expect(r.html_body.split(HOME_TOKEN).join(empty[HOME_TOKEN])).toBe(html);
+      expect(r.html_body.split(TOOL_TOKEN).join('').split(HOME_TOKEN).join(empty[HOME_TOKEN])).toBe(html);
       expect(r.text_body.split(HOME_TEXT_TOKEN).join(empty[HOME_TEXT_TOKEN])).toBe(text);
     }
   });
@@ -441,23 +493,15 @@ describe('"Your home": the tokens in the shared body and the per-reader block', 
     const filledText = r.text_body.split(HOME_TEXT_TOKEN).join(subs[HOME_TEXT_TOKEN]);
     expect(filledHtml.indexOf('Your home')).toBeGreaterThan(filledHtml.indexOf(`{{quiz:${POLL}}}`));
     expect(filledHtml.indexOf('Your home')).toBeLessThan(filledHtml.indexOf('Catch you next time.'));
-    expect(filledText).toContain(`{{quiz-text:${POLL}}}\n\nYOUR HOME\nLast visit: November 10 (pest control).\nWith Waves since March 2024.\n\n${SIGNOFF_TEXT}`);
+    expect(filledText).toContain(`{{quiz-text:${POLL}}}\n\nYOUR HOME\nLast visit: November 10 (pest control).\nWith Waves since March 2024.\n\n${CLOSING_TEXT}`);
     expect(filledHtml.split('<h2 class="dm-chip"').length - 1).toBe(4);
-    // addReaderBlock / withToolBlock still put their block before the sign-off, and the body still ends with it.
+    // With the tool filled too, both blocks sit before the sign-off, the tool first, and the body still ends with it.
     const gauge = toolById('acurite-glass-rain-gauge');
-    const withTool = withToolBlock(r, gauge);
-    expect(withTool.html_body.endsWith(signoffHtmlOf(r.html_body))).toBe(true);
-    expect(withTool.text_body.endsWith(SIGNOFF_TEXT)).toBe(true);
-    expect(withTool.html_body.indexOf(HOME_TOKEN)).toBeLessThan(withTool.html_body.indexOf('A tool we&#39;d use'));
-    expect(withTool.html_body.indexOf('A tool we&#39;d use')).toBeLessThan(withTool.html_body.indexOf('Catch you next time.'));
-    const added = addReaderBlock(r, { html: '<p>mine</p>', text: 'MINE' });
-    expect(added.html_body.endsWith(signoffHtmlOf(r.html_body))).toBe(true);
-    expect(added.html_body).toContain('<p>mine</p>\n</div>\n<div class="dm-text">');
-    expect(added.text_body).toBe(`${r.text_body.slice(0, r.text_body.length - SIGNOFF_TEXT.length)}MINE\n\n${SIGNOFF_TEXT}`);
-    // A tool block after an empty home value reads as it does today: one blank line between the sections.
-    const toolText = neutralizeHomeTokens(withTool.text_body);
-    expect(toolText).toContain(`${AMAZON_DISCLOSURE}\n\n${SIGNOFF_TEXT}`);
-    expect(toolText).not.toMatch(/\n\n\n/);
+    const both = withTool({ ...r, html_body: filledHtml }, gauge);
+    expect(both.html_body.endsWith(signoffHtmlOf(r.html_body))).toBe(true);
+    expect(both.html_body.indexOf('A tool we&#39;d use')).toBeLessThan(both.html_body.indexOf('Your home'));
+    expect(both.html_body.indexOf('Your home')).toBeLessThan(both.html_body.indexOf('Catch you next time.'));
+    expect(both.html_body.split('<h2 class="dm-chip"').length - 1).toBe(5);
   });
 
   test('the block prints the fixed words and the dates it formats itself', () => {
@@ -594,6 +638,139 @@ describe('"Your home": the tokens in the shared body and the per-reader block', 
   });
 });
 
+describe('the referral line', () => {
+  // The owner's approved words (2026-11-21 "words ok"): the line until the new referral rules are on, and after.
+  const TODAY = 'Know a neighbor fighting the same bugs? Send them our way — referrals are the nicest compliment we get.';
+  const NEW_50 = 'Know a neighbor fighting the same bugs? Send them our way. They get a $50 credit after their first plan service.';
+  const SIGNOFF_WORDS = 'Catch you next time. — The Waves Team 🌊';
+  const SIGNOFF_OPENS = '<div class="dm-text">\n<p style="margin:26px 0 4px 0;';
+  // The last two text blocks of a body whose tokens have their values.
+  const lastTwoBlocks = (html) => html.slice(html.lastIndexOf('<div class="dm-text">', html.lastIndexOf('<div class="dm-text">') - 1));
+
+  test('every issue closes with the line\'s token and then the sign-off, once in each part; the stored body holds no word of the line and no amount', () => {
+    expect(CLOSING_TEXT).toBe(`${REFERRAL_TEXT_TOKEN}${SIGNOFF_TEXT}`);
+    for (const pollQuizId of [null, PEST_INSIDER_POLL_IDS[0]]) {
+      const r = renderIssue({ ...BASE, pollQuizId });
+      expect(r.html_body).toContain(`</div>\n${TOOL_TOKEN}${HOME_TOKEN}${REFERRAL_TOKEN}${SIGNOFF_OPENS}`);
+      expect(r.text_body.endsWith(`\n\n${HOME_TEXT_TOKEN}${REFERRAL_TEXT_TOKEN}${SIGNOFF_TEXT}`)).toBe(true);
+      // Each part holds its own token, once, and not the other part's.
+      expect(r.html_body.split(REFERRAL_TOKEN)).toHaveLength(2);
+      expect(r.html_body).not.toContain(REFERRAL_TEXT_TOKEN);
+      expect(r.text_body.split(REFERRAL_TEXT_TOKEN)).toHaveLength(2);
+      expect(r.text_body).not.toContain(REFERRAL_TOKEN);
+      for (const part of [r.html_body, r.text_body]) {
+        // The archive serves this body for good: it can never state a credit, and a pause of the program can take the whole line out.
+        expect(part).not.toContain('Know a neighbor');
+        expect(part).not.toContain(REFERRAL_URL);
+        expect(part).not.toMatch(/\$\s?\d/);
+        expect(part).not.toMatch(/credit/i);
+      }
+    }
+  });
+
+  test('referralLine gives the two approved forms word for word, with the link on "Send them our way"', () => {
+    expect(REFERRAL_URL).toBe('https://www.wavespestcontrol.com/referral/');
+    const first = referralLine(REFERRAL_TAIL);
+    expect(wordsOf(first.html)).toBe(TODAY);
+    expect(first.text).toBe(`${TODAY}\n${REFERRAL_URL}\n\n`);
+    const paid = referralLine(referralTail(5000));
+    expect(wordsOf(paid.html)).toBe(NEW_50);
+    expect(paid.text).toBe(`${NEW_50}\n${REFERRAL_URL}\n\n`);
+    for (const line of [first, paid]) {
+      // One text block of the body, with the body's own paragraph and link markup, and a newline for the sign-off to follow.
+      expect(line.html).toMatch(new RegExp(`^<div class="dm-text">\\n<p style="margin:0 0 14px 0;font-size:16px;line-height:1.6;">Know a neighbor fighting the same bugs\\? <a class="dm-link" href="${REFERRAL_URL}" style="[^"]+">Send them our way</a>[^<]+</p>\\n</div>\\n$`));
+      expect([...line.html.matchAll(/href="([^"]+)"/g)].map((m) => m[1])).toEqual([REFERRAL_URL]);
+    }
+    // The link is styled as the issue's other text links are.
+    const leadLink = renderIssue(BASE).html_body.match(/<a class="dm-link" href="[^"]+" style="([^"]+)"/)[1];
+    expect(first.html).toContain(`style="${leadLink}">Send them our way</a>`);
+    // An end is written into the HTML part as text.
+    expect(referralLine(' <b>&').html).toContain('Send them our way</a> &lt;b&gt;&amp;</p>');
+    expect(referralLine(' <b>&').text).toContain('Send them our way <b>&\n');
+    expect(NO_LINE).toEqual({ html: '', text: '' });
+  });
+
+  test('a surface with no reader shows the first approved form, with no token left: neutralizeIssueTokens, and the archive\'s stripPersonalizationTokens', () => {
+    const { stripPersonalizationTokens } = require('../services/newsletter-draft');
+    const r = renderIssue({ ...BASE, pollQuizId: PEST_INSIDER_POLL_IDS[0] });
+    const html = neutralizeIssueTokens(r.html_body);
+    const text = neutralizeIssueTokens(r.text_body);
+    expect(wordsOf(lastTwoBlocks(html))).toBe(`${TODAY} ${SIGNOFF_WORDS}`);
+    expect(html.endsWith(`</div>\n${referralLine(REFERRAL_TAIL).html}${closingHtmlOf(r.html_body).slice(REFERRAL_TOKEN.length)}`)).toBe(true);
+    expect(text.endsWith(`\n\n${TODAY}\n${REFERRAL_URL}\n\n${SIGNOFF_TEXT}`)).toBe(true);
+    expect(text).not.toMatch(/\n\n\n/);
+    // The "Your home" tokens go in the same call, as before.
+    expect(html).toBe(neutralizeHomeTokens(neutralizeToolToken(r.html_body)).split(REFERRAL_TOKEN).join(referralLine(REFERRAL_TAIL).html));
+    expect(text).toBe(neutralizeHomeTokens(neutralizeToolToken(r.text_body)).split(REFERRAL_TEXT_TOKEN).join(referralLine(REFERRAL_TAIL).text));
+    for (const part of [html, text, stripPersonalizationTokens(r.html_body), stripPersonalizationTokens(r.text_body)]) {
+      expect(part).not.toContain('{{pi-');
+      expect(part.split('referrals are the nicest compliment we get.')).toHaveLength(2);
+      expect(part).not.toMatch(/\$\s?\d/);
+    }
+    // Only the exact spellings are the tokens: a variant stays visible, never hidden behind a clean-looking copy.
+    const variants = 'a {{ pi-referral }} b {{PI-REFERRAL-TEXT}} c {{pi-referral-tail}}';
+    expect(neutralizeIssueTokens(variants)).toBe(variants);
+    // A body with no token of the line is only cleared of the "Your home" tokens.
+    expect(neutralizeIssueTokens(`a${HOME_TOKEN}b`)).toBe('ab');
+    expect(neutralizeIssueTokens(null)).toBe('');
+  });
+
+  test('referralTail gives the amount end only for a whole, positive number of cents', () => {
+    expect(referralTail(5000)).toBe('. They get a $50 credit after their first plan service.');
+    expect(referralTail(2500)).toBe('. They get a $25 credit after their first plan service.');
+    expect(referralTail(2550)).toBe('. They get a $25.50 credit after their first plan service.');
+    for (const none of [0, -5000, NaN, null, undefined, '5000', 50.5, Infinity]) expect(referralTail(none)).toBe(REFERRAL_TAIL);
+    expect(REFERRAL_TAIL).toBe(' — referrals are the nicest compliment we get.');
+    // The member is promised nothing: a member at the yearly limit earns no credit.
+    expect(referralTail(5000)).not.toMatch(/\byou\b|\byour\b|\bwe\b/i);
+  });
+
+  test('with the amount line in the place of the tokens, both parts read as the second approved form, and nothing else changes', () => {
+    const r = renderIssue({ ...BASE, pollQuizId: PEST_INSIDER_POLL_IDS[0] });
+    const paid = referralLine(referralTail(5000));
+    const html = fillReferralLine(r.html_body, paid);
+    const text = fillReferralLine(r.text_body, paid);
+    expect(wordsOf(lastTwoBlocks(html))).toBe(`${NEW_50} ${SIGNOFF_WORDS}`);
+    expect(text.endsWith(`${NEW_50}\n${REFERRAL_URL}\n\n${SIGNOFF_TEXT}`)).toBe(true);
+    expect(html).toBe(r.html_body.split(REFERRAL_TOKEN).join(paid.html));
+    expect(text).toBe(r.text_body.split(REFERRAL_TEXT_TOKEN).join(paid.text));
+    // No line given, or no content: back as it is.
+    expect(fillReferralLine(r.html_body, null)).toBe(r.html_body);
+    expect(fillReferralLine(r.html_body, undefined)).toBe(r.html_body);
+    expect(fillReferralLine(null, paid)).toBeNull();
+    expect(fillReferralLine(undefined, paid)).toBeUndefined();
+  });
+
+  test('with no line (a paused referral program), a reader gets exactly the issue without it: the sign-off follows the last section', () => {
+    for (const pollQuizId of [null, PEST_INSIDER_POLL_IDS[0]]) {
+      const r = renderIssue({ ...BASE, pollQuizId });
+      const html = neutralizeHomeTokens(neutralizeToolToken(fillReferralLine(r.html_body, NO_LINE)));
+      const text = neutralizeHomeTokens(neutralizeToolToken(fillReferralLine(r.text_body, NO_LINE)));
+      for (const part of [html, text]) {
+        expect(part).not.toContain('{{pi-');
+        expect(part).not.toContain('Know a neighbor');
+        expect(part).not.toContain(REFERRAL_URL);
+      }
+      expect(html).toBe(r.html_body.split(`${TOOL_TOKEN}${HOME_TOKEN}${REFERRAL_TOKEN}`).join(''));
+      expect(html).toContain(`</div>\n${SIGNOFF_OPENS}`);
+      expect(text).toBe(r.text_body.split(`${HOME_TEXT_TOKEN}${REFERRAL_TEXT_TOKEN}`).join(''));
+      expect(text.endsWith(`\n\n${SIGNOFF_TEXT}`)).toBe(true);
+      expect(text).not.toMatch(/\n\n\n/);
+    }
+  });
+
+  test('the first form and an issue with no line pass the send check; the amount form would not: it never goes in a stored body', () => {
+    const r = renderIssue(BASE);
+    const check = (html, text) => validateNewsletterDraft({ html_body: html, text_body: text, subject: r.subject, newsletter_type: 'pest-insider-monthly' }, { recipientCount: 1 }).errors;
+    expect(check(neutralizeIssueTokens(r.html_body), neutralizeIssueTokens(r.text_body))).toEqual([]);
+    const withLine = (line) => (part) => neutralizeHomeTokens(neutralizeToolToken(fillReferralLine(part, line)));
+    const none = withLine(NO_LINE);
+    expect(check(none(r.html_body), none(r.text_body))).toEqual([]);
+    const paid = withLine(referralLine(referralTail(5000)));
+    expect(check(paid(r.html_body), paid(r.text_body)).join(' ')).toMatch(/dollar amount/);
+  });
+});
+
 describe('wrapIssueHtml', () => {
   test('the full page escapes the preview, which wrapNewsletter places raw', () => {
     const issue = renderIssue({ ...BASE, preview: 'Look <script>alert(1)</script> & "see"' });
@@ -602,5 +779,48 @@ describe('wrapIssueHtml', () => {
     expect(html).toContain('Look &lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;see&quot;');
     expect(html).toContain(issue.html_body);
     expect(html).toContain('{{unsubscribe_url}}');
+  });
+});
+
+describe('the last poll result line', () => {
+  const lastPoll = { quizId: PEST_INSIDER_POLL_IDS[0], counts: { 'cup-and-card': 3, shoe: 1 } };
+  const LINE = 'Last poll: Spider in the house. What happens next? The top answer was Cup and card.';
+  const PARAGRAPH = `<p style="margin:0 0 12px 0;font-size:16px;line-height:1.6;">${LINE}</p>`;
+  const INTRO_TEXT = "Here's one thing we learned about Southwest Florida homes and yards, plus one critter worth knowing.";
+  const INTRO_HTML = INTRO_TEXT.replace("'", '&#39;');
+
+  test('goes under the greeting and before the intro, in both parts', () => {
+    const r = renderIssue({ ...BASE, lastPoll });
+    const html = r.html_body;
+    expect(html.split(LINE)).toHaveLength(2);
+    expect(html).toContain(PARAGRAPH);
+    expect(html.indexOf('Hey there!')).toBeLessThan(html.indexOf(LINE));
+    expect(html.indexOf(LINE)).toBeLessThan(html.indexOf(INTRO_HTML));
+    expect(r.text_body).toContain(`Hey there!\n${LINE}\n${INTRO_TEXT}`);
+    // It joins the paragraph the greeting is in: the blocks that follow it do not move.
+    expect(wordsOf(html)).toContain(`Hey there! ${LINE} ${INTRO_TEXT}`);
+  });
+
+  test.each([
+    ['no poll given', undefined],
+    ['null', null],
+    ['no votes', { quizId: PEST_INSIDER_POLL_IDS[0], counts: {} }],
+    ['an unknown poll', { quizId: 'pi-poll-unknown-v1', counts: { shoe: 4 } }],
+    ['a Waves Newsletter poll', { quizId: NEWSLETTER_POLL_IDS[0], counts: { beach: 4 } }],
+  ])('with %s the issue is byte for byte the issue with no line', (_name, value) => {
+    for (const pollQuizId of [null, PEST_INSIDER_POLL_IDS[1]]) {
+      const plain = renderIssue({ ...BASE, pollQuizId });
+      const r = renderIssue({ ...BASE, pollQuizId, lastPoll: value });
+      expect(r).toEqual(plain);
+    }
+  });
+
+  test('the line is the only difference, and the caller cannot hand the renderer its own line', () => {
+    const plain = renderIssue(BASE);
+    const r = renderIssue({ ...BASE, lastPoll });
+    expect(r.html_body.replace(`\n${PARAGRAPH}`, '')).toBe(plain.html_body);
+    expect(r.text_body.replace(`${LINE}\n`, '')).toBe(plain.text_body);
+    const own = renderIssue({ ...BASE, lastPollLine: 'Last poll: write what you like here.' });
+    expect(own).toEqual(plain);
   });
 });

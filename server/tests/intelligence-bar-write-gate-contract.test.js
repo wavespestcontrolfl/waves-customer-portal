@@ -21,7 +21,6 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-process.env.GATE_EDIT_APPT_ADDRESS = 'true';
 // send_autopay_setup_link's preview runs the Auto Pay service's own eligibility
 // read, which refuses before the channel preflight while the lane is dark.
 process.env.GATE_AUTOPAY_SETUP_LINK = 'true';

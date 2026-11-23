@@ -391,6 +391,116 @@ describe('rain-out service', () => {
       expect(finder.mock.calls[0][0].pickerRoadCheck).toBeUndefined();
     });
 
+    // GATE_TECH_SHIFT_HOURS (D4 part 3b-2a): a technician's own move refuses an hour the visit's
+    // technician's shift today does not hold, so the sheet does not offer one. Now is 10:00 ET.
+    describe('shift hours', () => {
+      afterEach(() => { delete process.env.GATE_TECH_SHIFT_HOURS; });
+      const sameDayOnShift = async (shift, overrides = {}) => {
+        SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
+        wireDb({
+          scheduled_services: [
+            chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, status: 'confirmed', ...overrides }) }),
+            chain({ rows: [] }),
+          ],
+          // loadTechShifts: the set hours, then today's clock-ins (none).
+          technicians: [chain({ whereNotNull: jest.fn().mockReturnThis(), rows: [{ id: 'tech-1', shift_start: shift[0], shift_end: shift[1] }] })],
+          time_entries: [chain({ groupBy: jest.fn().mockReturnThis(), min: jest.fn().mockResolvedValue([]) })],
+        });
+        const options = await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
+        expect(options.ok).toBe(true);
+        return options.sameDay.map((o) => o.window.start);
+      };
+      // The dispatch board's sheet: it commits as the office. No technicians queue is wired, so a shift read would throw.
+      const sameDayForOffice = async () => {
+        SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
+        wireDb({
+          scheduled_services: [
+            chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, status: 'confirmed' }) }),
+            chain({ rows: [] }),
+          ],
+        });
+        const options = await RainOut.getOptions('svc-1', { caller: { isAdmin: true, technicianId: 'admin-1' }, initiatedBy: 'admin' });
+        expect(options.ok).toBe(true);
+        return options.sameDay.map((o) => o.window.start);
+      };
+
+      test('gate on: a route-checked hour that starts before the shift, or ends after it, is not offered', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        finder.mockResolvedValue({ slots: [slot('11:00', 3), slot('12:00', 5), slot('13:00', 4), slot('14:00', 6)] });
+        expect(await sameDayOnShift(['12:00', '14:00'])).toEqual(['13:00', '12:00']);
+      });
+
+      test('gate on: the block is the commit\'s, so a 90-minute visit loses the last hour too', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        finder.mockResolvedValue({ slots: [slot('11:00', 3), slot('12:00', 5), slot('13:00', 4)] });
+        expect(await sameDayOnShift(['08:00', '14:00'], { estimated_duration_minutes: 90 })).toEqual(['11:00', '12:00']);
+      });
+
+      test('gate on: the +2h and +4h guesses are held to the shift as well', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        finder.mockRejectedValue(new Error('finder down'));
+        expect(await sameDayOnShift(['08:00', '13:00'])).toEqual(['12:00']);
+      });
+
+      test('gate on: an hour the shift drops does not take a place from the next-best hour (at most 4, after the shift)', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        // Lowest drive first: 15:00, 14:00, 13:00, 12:00, then 11:00. A 90-minute visit at 15:00 ends at 16:30.
+        finder.mockResolvedValue({ slots: [slot('11:00', 5), slot('12:00', 4), slot('13:00', 3), slot('14:00', 2), slot('15:00', 1)] });
+        expect(await sameDayOnShift(['08:00', '16:00'], { estimated_duration_minutes: 90 })).toEqual(['14:00', '13:00', '12:00', '11:00']);
+      });
+
+      test('gate on: the route keeps hours and the shift holds none of them: no hour, not a guess', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        // The 12:00 guess fits the shift, but the route did not keep 12:00.
+        finder.mockResolvedValue({ slots: [slot('15:00', 1)] });
+        expect(await sameDayOnShift(['08:00', '13:00'])).toEqual([]);
+      });
+
+      test('gate on, the dispatch board\'s sheet (it commits as the office): every hour stays, and no shift is read', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        finder.mockResolvedValue({ slots: [slot('11:00', 3), slot('14:00', 6)] });
+        expect(await sameDayForOffice()).toEqual(['11:00', '14:00']);
+        finder.mockRejectedValue(new Error('finder down'));
+        expect(await sameDayForOffice()).toEqual(['12:00', '14:00']);
+      });
+
+      // A grouped stop commits through the unit mover, which judges every member (visit-groups unitShiftTest;
+      // its own cases are in visit-groups-unit-move.test.js). The sheet asks that test, not the single-visit one.
+      describe('a grouped stop', () => {
+        const vg = require('../services/visit-groups');
+        let unitShiftTest;
+        afterEach(() => unitShiftTest.mockRestore());
+
+        test('gate on: an hour the unit\'s check refuses is not offered, though the tapped visit alone fits; no single-visit shift read', async () => {
+          process.env.GATE_TECH_SHIFT_HOURS = 'true';
+          const refuses = jest.fn((date, start) => start === '13:00');
+          unitShiftTest = jest.spyOn(vg, 'unitShiftTest').mockResolvedValue(refuses);
+          finder.mockResolvedValue({ slots: [slot('11:00', 3), slot('12:00', 5), slot('13:00', 4)] });
+          SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
+          // No technicians queue is wired: a single-visit shift read would throw.
+          wireDb({ scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, status: 'confirmed' }) }), chain({ rows: [] })] });
+          const options = await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
+          expect(options.sameDay.map((o) => o.window.start)).toEqual(['11:00', '12:00']);
+          expect(unitShiftTest).toHaveBeenCalledWith(db, expect.objectContaining({ id: 'svc-1' }));
+          expect(refuses.mock.calls.map((c) => c.slice(1))).toEqual(expect.arrayContaining([['11:00', '12:00'], ['13:00', '14:00']]));
+        });
+
+        test('gate on: the dispatch board\'s sheet (it commits as the office) does not ask', async () => {
+          process.env.GATE_TECH_SHIFT_HOURS = 'true';
+          unitShiftTest = jest.spyOn(vg, 'unitShiftTest').mockResolvedValue(() => true);
+          finder.mockResolvedValue({ slots: [slot('11:00', 3), slot('14:00', 6)] });
+          expect(await sameDayForOffice()).toEqual(['11:00', '14:00']);
+          expect(unitShiftTest).not.toHaveBeenCalled();
+        });
+      });
+
+      test('gate off: every hour stays, and no shift is read', async () => {
+        finder.mockResolvedValue({ slots: [slot('11:00', 3), slot('14:00', 6)] });
+        // `sameDay` wires no technicians queue: a read would throw.
+        expect((await sameDay()).map((o) => o.window.start)).toEqual(['11:00', '14:00']);
+      });
+    });
+
     test('an hour with no drive number is offered last, without driveMinutes', async () => {
       finder.mockResolvedValue({ slots: [slot('11:00', null), slot('12:00', 9)] });
       const options = await sameDay();
@@ -2298,7 +2408,9 @@ describe('rain-out service', () => {
         // admin reschedule-options stay overlap-only (advisory saves).
         // caller: the route-checked day list buys Google road times for an
         // admin caller only; this tech caller stays on the estimate.
-        'svc-1', 'weather_rain', { probeSpanMinutes: 60, travelGap: true, caller: { isAdmin: false, technicianId: 'tech-1' } },
+        // initiatedBy: who the sheet's commit records (default 'tech'); the day
+        // options are held to the technician's shift unless it is the office.
+        'svc-1', 'weather_rain', { probeSpanMinutes: 60, travelGap: true, caller: { isAdmin: false, technicianId: 'tech-1' }, initiatedBy: 'tech' },
       );
       expect(options.days).toHaveLength(2);
       expect(options.days[0]).toMatchObject({ date: '2026-06-12', rainChance: 65 });
@@ -2339,6 +2451,11 @@ describe('rain-out service', () => {
       wire();
       await RainOut.getOptions('svc-1');
       expect(SmartRebooker.findRescheduleOptions.mock.calls[0][2].caller).toBeNull();
+      expect(SmartRebooker.findRescheduleOptions.mock.calls[0][2].initiatedBy).toBe('tech');
+      // The dispatch board's sheet commits as the office and says so.
+      wire();
+      await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' }, initiatedBy: 'admin' });
+      expect(SmartRebooker.findRescheduleOptions.mock.calls[0][2].initiatedBy).toBe('admin');
     });
 
     // The customer-pick offer rides the options payload.

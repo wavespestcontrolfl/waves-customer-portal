@@ -1,4 +1,4 @@
-/** The office's reclaimed-water answer (GATE_LAWN_RECLAIMED_HALF_N) through the real route, the audited domain writer and PostgreSQL.
+/** The office's reclaimed-water answer through the real route, the audited domain writer and PostgreSQL.
  *  Synthetic fixtures on an isolated database; skips without IB_TEST_DATABASE_URL. */
 const { databaseUrl, propertyDbFixture } = require('./helpers/property-db');
 const suite = databaseUrl ? describe : describe.skip;
@@ -7,8 +7,6 @@ suite('reclaimed water edits against isolated Postgres', () => {
   const fixture = propertyDbFixture();
   let db, actor, customerA, api, address;
   beforeAll(() => { ({ db, actor, customerA, api, address } = fixture); });
-  beforeEach(() => { process.env.GATE_LAWN_RECLAIMED_HALF_N = 'true'; });
-  afterEach(() => { delete process.env.GATE_LAWN_RECLAIMED_HALF_N; });
 
   const primaryOf = () => db('customer_properties').where({ customer_id: customerA, is_primary: true }).first();
   const put = (propertyId, body) => api(`/api/admin/customers/${customerA}/properties/${propertyId}/reclaimed-water`, body, 'PUT');
@@ -66,40 +64,23 @@ suite('reclaimed water edits against isolated Postgres', () => {
     }
   }, 30000);
 
-  test('a bad body, another customer\'s property and the gate off write nothing and leave no audit row', async () => {
+  test('a bad body and another customer\'s property write nothing and leave no audit row', async () => {
     const property = await primaryOf();
     const before = (await auditOf(property.id)).length;
     expect((await put(property.id, { reclaimed: 'yes' })).status).toBe(400);
     expect((await put('00000000-0000-4000-8000-000000000000', { reclaimed: true })).status).toBe(404);
-    delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
-    expect((await put(property.id, { reclaimed: true })).status).toBe(404);
     expect((await auditOf(property.id)).length).toBe(before);
     expect((await primaryOf()).reclaimed_water).toBeNull();
   }, 30000);
 
-  test('the PATCH writer refuses the field while the gate is off, so it has no side door', async () => {
-    delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
-    const property = await primaryOf();
-    const refused = await api(`/api/admin/customers/${customerA}/properties/${property.id}`, { reclaimed_water: true }, 'PATCH');
-    expect(refused.status).toBe(400);
-    expect((await primaryOf()).reclaimed_water).toBeNull();
-  }, 30000);
-
-  test('gate off: the list, add and edit answers carry none of the three columns and no reclaimedWater key', async () => {
-    delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
+  test('the list and edit answers carry the three reclaimed columns, and the list carries reclaimedWater: true', async () => {
     const list = await api(`/api/admin/customers/${customerA}/properties`);
     expect(list.status).toBe(200);
-    expect(list.body).not.toHaveProperty('reclaimedWater');
-    for (const row of list.body.properties) {
-      for (const column of ['reclaimed_water', 'reclaimed_water_source', 'reclaimed_water_checked_at']) expect(row).not.toHaveProperty(column);
-    }
+    expect(list.body.reclaimedWater).toBe(true);
+    expect(list.body.properties[0]).toHaveProperty('reclaimed_water');
     const edited = await api(`/api/admin/customers/${customerA}/properties/${list.body.properties[0].id}`, { label: 'Fixture label' }, 'PATCH');
     expect(edited.status).toBe(200);
-    for (const row of edited.body.properties) expect(row).not.toHaveProperty('reclaimed_water');
-    process.env.GATE_LAWN_RECLAIMED_HALF_N = 'true';
-    const on = await api(`/api/admin/customers/${customerA}/properties`);
-    expect(on.body.reclaimedWater).toBe(true);
-    expect(on.body.properties[0]).toHaveProperty('reclaimed_water');
+    for (const row of edited.body.properties) expect(row).toHaveProperty('reclaimed_water');
     expect(address(1)).toBeTruthy();
   }, 30000);
 
@@ -123,15 +104,6 @@ suite('reclaimed water edits against isolated Postgres', () => {
       expect(await rowOf(row.id)).toMatchObject({ reclaimed_water: null, reclaimed_water_source: null });
     });
 
-    test('GATE_LAWN_RECLAIMED_HALF_N off: valid picker coordinates are not stored (the old insert)', async () => {
-      delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
-      const res = await post({ ...next(), latitude: 27.58211234, longitude: -82.42763456 });
-      expect(res.status).toBe(201);
-      const row = await rowOf(res.body.propertyId);
-      expect(row.latitude).toBeNull();
-      expect(row.longitude).toBeNull();
-    });
-
     test.each([
       ['no coordinates', {}],
       ['only a latitude', { latitude: 27.5 }],
@@ -139,6 +111,8 @@ suite('reclaimed water edits against isolated Postgres', () => {
       ['out of range', { latitude: 127.5, longitude: -82.4 }],
       ['null, zero and booleans', { latitude: 0, longitude: 0 }],
       ['booleans', { latitude: true, longitude: false }],
+      ['a blank latitude string', { latitude: ' ', longitude: -82.4 }],
+      ['an empty longitude string', { latitude: 27.5, longitude: '' }],
     ])('%s: the address is saved without coordinates', async (_label, coords) => {
       const res = await post({ ...next(), ...coords });
       expect(res.status).toBe(201);

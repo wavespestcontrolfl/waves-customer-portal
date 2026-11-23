@@ -39,7 +39,7 @@ function selectedCoordinates(selected, form) {
   return unchanged ? { latitude: selected.lat, longitude: selected.lng } : {};
 }
 
-// The reclaimed-water control (GATE_LAWN_RECLAIMED_HALF_N). A person's answer (office or customer) is shown as the choice; with no
+// The reclaimed-water control. A person's answer (office or customer) is shown as the choice; with no
 // answer the control reads "Automatic" and the line under it says what the county meter match found.
 function reclaimedChoice(p) {
   if (p.reclaimed_water_source === "office" || p.reclaimed_water_source === "customer") return p.reclaimed_water ? "yes" : "no";
@@ -96,8 +96,6 @@ export default function CustomerPropertiesPanelV2({
   const [properties, setProperties] = useState([]);
   // Resolved once from the list response: a dark feature mounts no row editors.
   const [serviceAreasEnabled, setServiceAreasEnabled] = useState(false);
-  // GATE_LAWN_RECLAIMED_HALF_N, resolved from the same list response: dark = no control.
-  const [reclaimedEnabled, setReclaimedEnabled] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadErr, setLoadErr] = useState("");
   const [adding, setAdding] = useState(false);
@@ -136,7 +134,6 @@ export default function CustomerPropertiesPanelV2({
     setLoadErr("");
     setCanChangePrimary(false);
     setServiceAreasEnabled(false);
-    setReclaimedEnabled(false);
     setPrimaryPreview(null);
     // A refreshed preview is obsolete; an in-flight write still owns its lock.
     setPreviewBusy(false);
@@ -146,7 +143,6 @@ export default function CustomerPropertiesPanelV2({
           setProperties(Array.isArray(d.properties) ? d.properties : []);
           setCanChangePrimary(d.canChangePrimary === true);
           setServiceAreasEnabled(d.propertyServiceAreas === true);
-          setReclaimedEnabled(d.reclaimedWater === true);
         }
       })
       .catch((e) => {
@@ -187,9 +183,9 @@ export default function CustomerPropertiesPanelV2({
           state: stateCode,
           zip: form.zip.trim(),
           // The selected address's coordinates, only while the typed street, city and ZIP are still the ones selected (an edited address would
-          // otherwise keep the old pin); the server validates them and ignores a bad pair. Only with GATE_LAWN_RECLAIMED_HALF_N on: the
-          // coordinates feed the reclaimed-water meter match, so a dark gate sends the old body.
-          ...(reclaimedEnabled ? selectedCoordinates(selectedAddressRef.current, form) : {}),
+          // otherwise keep the old pin); the server validates them and ignores a bad pair. The
+          // coordinates feed the reclaimed-water meter match.
+          ...selectedCoordinates(selectedAddressRef.current, form),
           occupancy_type: form.occupancy_type || "unknown",
           relationship: form.relationship || null,
           label: form.label.trim() || null,
@@ -422,22 +418,20 @@ export default function CustomerPropertiesPanelV2({
                     ))}
                   </Select>
                 </div>
-                {reclaimedEnabled && (
-                  <div className="max-w-64" data-testid="reclaimed-water-control">
-                    <Select
-                      aria-label={`Reclaimed water for ${p.address_line1}`}
-                      value={reclaimedChoice(p)}
-                      disabled={!canEdit || writeBusy}
-                      onChange={(e) => putReclaimed(p.id, e.target.value)}
-                      className="text-14 text-zinc-900 border border-hairline border-zinc-300 rounded-xs px-2 py-1 bg-white"
-                    >
-                      <option value="">Reclaimed water: automatic</option>
-                      <option value="yes">Reclaimed water: yes</option>
-                      <option value="no">Reclaimed water: no</option>
-                    </Select>
-                    <p className="mt-1 text-14 text-ink-secondary">{reclaimedHint(p)}</p>
-                  </div>
-                )}
+                <div className="max-w-64" data-testid="reclaimed-water-control">
+                  <Select
+                    aria-label={`Reclaimed water for ${p.address_line1}`}
+                    value={reclaimedChoice(p)}
+                    disabled={!canEdit || writeBusy}
+                    onChange={(e) => putReclaimed(p.id, e.target.value)}
+                    className="text-14 text-zinc-900 border border-hairline border-zinc-300 rounded-xs px-2 py-1 bg-white"
+                  >
+                    <option value="">Reclaimed water: automatic</option>
+                    <option value="yes">Reclaimed water: yes</option>
+                    <option value="no">Reclaimed water: no</option>
+                  </Select>
+                  <p className="mt-1 text-14 text-ink-secondary">{reclaimedHint(p)}</p>
+                </div>
                 {canEdit && canChangePrimary && !p.is_primary && (
                   <div className="max-w-64">
                     <Button variant="secondary" size="sm" className="text-14" disabled={writeBusy || !p.primary_change_eligible} onClick={() => previewPrimary(p.id)}>

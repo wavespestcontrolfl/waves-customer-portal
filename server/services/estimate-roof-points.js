@@ -16,6 +16,11 @@
  *     snapshot stays byte-identical. Staff hiding is immediate (checked against the estimate's read rows NOW), and
  *     the read the copy came from must still be one of the estimate's own; the content is the frozen copy. An estimate moved to another address since the send prints nothing, and so does a copy older than
  *     the estimate's latest handoff (a later send could not replace or delete it).
+ *
+ * A lead's copy and the first customer (owner 2026-11-21, follow-up "keep"; migration 20261121210000): the copy a lead
+ * already holds stays on the page for the FIRST customer the estimate takes after that send (copyForHolder), and a send
+ * to that customer keeps it while no points were saved for them (keepOrFreeze, leadCopyToKeep). No row changes its owner and nothing
+ * new is published: it is the same copy, for the person the lead became.
  */
 
 const db = require('../models/db');
@@ -49,9 +54,9 @@ const estimateContext = (estimate) => ({
  *  - The read and the estimate must name the SAME customer, or both name none. A points save writes the customer who
  *    holds the estimate on a read that names none (saveTechCount), so the read's customer is the one the points were
  *    confirmed for. A read that names A is not B's once the estimate goes to B. A read that names no customer (points
- *    confirmed for a lead) is not shown once the estimate has a customer: nothing here guesses who the first customer
- *    was. Staff save the points once more and that save names the customer. A duplicate merge repoints the read and
- *    the estimate together, so the merged customer keeps it.
+ *    confirmed for a lead) is not a customer's own: no send freezes it for a customer. Staff save the points once more
+ *    and that save names the customer. (The copy a lead already holds is another matter: see copyForHolder.) A
+ *    duplicate merge repoints the read and the estimate together, so the merged customer keeps it.
  *  - And the roof read's own context rule (matchesContext): the estimate's plain row, or the two-part row of the
  *    customer the estimate belongs to now.
  */
@@ -90,43 +95,76 @@ function sameHome(a, b) {
   return !zipA || !zipB || zipA === zipB;
 }
 
+/**
+ * What a send made now would freeze for this estimate: `{ row, points }` (the newest points read and what
+ * customerPointsFromRow gives for it), `points` null when there is nothing to show. The ONE place that decides this: the
+ * freeze copies it, and a verified staff preview (roofPointsDocBlock) shows it before the first send.
+ * The points were saved for the address the staff lookup ran for (the same lookup gave the photo centre). An estimate
+ * that has another address now is another roof: it gets no points until staff read and confirm that one.
+ * Hidden points and a read saved for another customer give null here too (customerPointsFromRow, ownRead).
+ */
+async function nextSendPoints(estimate, knex) {
+  const row = await newestPointsRead(estimate, knex);
+  const points = sameHome(row?.points_address, estimate.address) ? customerPointsFromRow(row) : null;
+  return { row, points };
+}
+
 const timeMs = (v) => (v ? new Date(v).getTime() : NaN);
 
 /**
  * Freeze (or clear) one estimate's roof points for the send handed off at `deliveredAt` (the lastDeliveredAt that send
- * stamps on the estimate). `estimate` needs { id, address }. Returns 'frozen', 'cleared' or 'skipped' (never throws; a
- * storage error is logged and reported as 'skipped', and the page then omits the older copy: see copyIsCurrent).
+ * stamps on the estimate). `estimate` is the row that send read, as it stood BEFORE this handoff's delivery state.
+ * Returns 'frozen', 'kept', 'cleared' or 'skipped' (never throws; a storage error is logged and reported as 'skipped',
+ * and the page then omits the older copy: see copyIsCurrent).
+ *
+ * A send never undoes a later one. Sends of one estimate take no common lock here, so a send can reach its write
+ * after a send with a later handoff. Every write therefore names only a copy that no later handoff wrote
+ * (copyNotNewer, and the same test in writeCopy): the newer copy is not replaced, re-timed or deleted. A freeze or a
+ * keep that loses that way is 'skipped'; a clear leaves the newer copy and is still 'cleared'.
  */
 async function freezeRoofPointsForEstimate(estimate, { deliveredAt, knex = db } = {}) {
   if (!estimate?.id || !Number.isFinite(timeMs(deliveredAt))) return 'skipped';
   try {
-    const row = await newestPointsRead(estimate, knex);
-    // The points were saved for the address the staff lookup ran for (the same lookup gave the photo centre). An
-    // estimate that has another address now is another roof: it gets no points until staff read and confirm that one.
-    const points = sameHome(row?.points_address, estimate.address) ? customerPointsFromRow(row) : null;
-    if (!points) {
-      await knex(TABLE).where({ estimate_id: estimate.id }).del();
-      return 'cleared';
-    }
-    const record = {
-      estimate_id: estimate.id,
-      read_id: row.id,
-      // Both name the same home here. The copy keeps the one that carries a ZIP: the page then sees a later ZIP change
-      // on the estimate even when the estimate had no ZIP at this send.
-      address: String(addressZip(row.points_address) ? row.points_address : estimate.address),
-      snapshot: JSON.stringify(points),
-      // Who this copy is for: the customer who holds the estimate at this send (null = none). The page shows the copy
-      // only to that holder (copyForHolder).
-      customer_id: estimate.customer_id || null,
-      delivered_at: new Date(deliveredAt).toISOString(),
-      frozen_at: knex.fn.now(),
-    };
-    await knex(TABLE).insert(record).onConflict('estimate_id').merge();
-    return 'frozen';
+    const at = new Date(deliveredAt).toISOString();
+    const next = await nextSendPoints(estimate, knex);
+    if (next.points) return await writeCopy(estimate, next, at, knex);
+    // No points of the holder's own. `next.row` is a points read of theirs (no points, hidden, another address): it
+    // decides, and the copy goes. With none, the lead's copy of a first customer may stay (keepOrFreeze).
+    if (!next.row && (await holdsLeadCopy(estimate, knex))) return await keepOrFreeze(estimate, at, knex);
+    await copyNotNewer(knex, estimate, at).del();
+    return 'cleared';
   } catch (err) {
     logger.warn(`[estimate-roof-points] freeze skipped for estimate ${estimate.id}: ${errCode(err)}`);
     return 'skipped';
   }
+}
+
+// The estimate's copy, unless a handoff later than `at` (an ISO time) wrote it.
+const copyNotNewer = (knex, estimate, at) => knex(TABLE).where({ estimate_id: estimate.id }).where('delivered_at', '<=', at);
+
+// Write the estimate's copy with these points for the send handed off at `at`, or replace a copy that is not newer.
+async function writeCopy(estimate, { row, points }, at, knex) {
+  const record = {
+    estimate_id: estimate.id,
+    read_id: row.id,
+    // Both name the same home here. The copy keeps the one that carries a ZIP: the page then sees a later ZIP change
+    // on the estimate even when the estimate had no ZIP at this send.
+    address: String(addressZip(row.points_address) ? row.points_address : estimate.address),
+    snapshot: JSON.stringify(points),
+    // Who this copy is for: the customer who holds the estimate at this send (null = none). The page shows the copy
+    // only to that holder (copyForHolder).
+    customer_id: estimate.customer_id || null,
+    // A lead's copy carries the estimate's count of customer changes as that send read it (copyForHolder). Null for a
+    // customer's copy, and when the row has no count.
+    lead_changes: !estimate.customer_id && Number.isInteger(estimate.customer_changes) ? estimate.customer_changes : null,
+    delivered_at: at,
+    frozen_at: knex.fn.now(),
+  };
+  // The update half of the upsert applies only to a copy that is not newer. It then answers no row.
+  const written = await knex(TABLE).insert(record).onConflict('estimate_id').merge()
+    .where(`${TABLE}.delivered_at`, '<=', at)
+    .returning('estimate_id');
+  return written.length ? 'frozen' : 'skipped';
 }
 
 /**
@@ -140,6 +178,11 @@ function copyIsCurrent(row, estimate) {
   return Number.isFinite(latest) && Number.isFinite(copy) && copy >= latest;
 }
 
+// Is any read of this estimate hidden? (Hide or show is one choice for the estimate: see readsAllowCopy.)
+async function anyReadHidden(estimate, knex) {
+  return Boolean(await knex(READS).where({ estimate_id: estimate.id, hide_on_estimate: true }).first('id'));
+}
+
 /**
  * May the copy be shown NOW, by the read rows as they stand?
  *  - Staff did not hide the estimate's roof points. Hide or show is one choice for the estimate: saveTechCount writes it
@@ -148,24 +191,51 @@ function copyIsCurrent(row, estimate) {
  *  - The read the copy came from is still one of this estimate's own reads (ownRead), so an estimate handed to
  *    another customer since the send does not show a read taken for the first one. A copy whose read is gone cannot be
  *    judged, so it is not shown (no code deletes a read).
+ *  - For the lead's copy the first customer keeps (keptForFirstCustomer), that read may also still be the lead's: it
+ *    names no customer and has the estimate's own key, as when the copy was frozen. A read that names another customer
+ *    is never allowed.
  */
-async function readsAllowCopy(estimate, readId, knex) {
+async function readsAllowCopy(estimate, copy, knex) {
   const [frozen, anyHidden] = await Promise.all([
-    readId ? knex(READS).where({ id: readId }).first('hide_on_estimate', 'context_key', 'customer_id', 'estimate_id') : null,
-    knex(READS).where({ estimate_id: estimate.id, hide_on_estimate: true }).first('id'),
+    copy.read_id ? knex(READS).where({ id: copy.read_id }).first('hide_on_estimate', 'context_key', 'customer_id', 'estimate_id') : null,
+    anyReadHidden(estimate, knex),
   ]);
   if (anyHidden || !frozen || frozen.hide_on_estimate) return false;
-  return ownRead(frozen, estimate);
+  return ownRead(frozen, estimate) || (keptForFirstCustomer(copy, estimate) && ownRead(frozen, { ...estimate, customer_id: null }));
 }
 
 /**
- * True when the copy was frozen for the customer who holds the estimate now (both none counts). A copy frozen for a
- * lead is not shown once the estimate has a customer, whatever is saved on its read since: the next send freezes a
- * copy for that customer. A deleted customer's copies go with the customer (the foreign key cascades).
+ * Customer changes of the estimate since a lead's copy was frozen (estimates.customer_changes now, less the count that
+ * send wrote on the copy). NaN, which equals nothing, for a customer's copy, for a copy from before the count
+ * (lead_changes null) and for an estimate row that carries no count.
+ */
+const changesSince = (row, estimate) => (row.customer_id || !Number.isInteger(row.lead_changes) || !Number.isInteger(estimate.customer_changes)
+  ? NaN
+  : estimate.customer_changes - row.lead_changes);
+
+/**
+ * A lead's copy on an estimate that took its FIRST customer since that send: one change since, and a customer now.
+ * The copy was frozen with no customer, and the count goes up by one with every change, so that one change is the
+ * step from no customer to this one: the customer the lead became.
+ */
+const keptForFirstCustomer = (row, estimate) => Boolean(estimate.customer_id) && changesSince(row, estimate) === 1;
+
+/**
+ * True when the copy was frozen for the one who holds the estimate now.
+ *  - A copy that names a customer: that customer holds the estimate. A deleted customer's copies go with the customer
+ *    (the foreign key cascades).
+ *  - A lead's copy (it names none) that carries the count: the estimate still has no customer and no change since
+ *    (the same lead holds the link), or the estimate took its first customer since (keptForFirstCustomer, owner
+ *    follow-up "keep"). After any other change (a second customer, a merge, no customer again) it is not shown,
+ *    whatever is saved on its read since: the next send freezes a copy for the holder.
+ *  - A lead's copy with no count (from before migration 20261121210000) keeps the rule it had: only while the estimate
+ *    has no customer.
  */
 function copyForHolder(row, estimate) {
   const lower = (v) => (v ? String(v).toLowerCase() : null);
-  return lower(row.customer_id) === lower(estimate.customer_id);
+  if (row.customer_id) return lower(row.customer_id) === lower(estimate.customer_id);
+  if (row.lead_changes == null) return !estimate.customer_id;
+  return estimate.customer_id ? keptForFirstCustomer(row, estimate) : changesSince(row, estimate) === 0;
 }
 
 function cleanSnapshot(snapshot) {
@@ -186,21 +256,92 @@ function cleanSnapshot(snapshot) {
   };
 }
 
-/** The /data key for the customer estimate: `{ roofPoints }`, or `{}`. Fail-soft: a storage hiccup omits the section. */
-async function roofPointsDocBlock(estimate, { knex = db } = {}) {
+/**
+ * The /data key for the customer estimate: `{ roofPoints }`, or `{}`. Fail-soft: a storage hiccup omits the section.
+ * `staffPreview` is true ONLY for a request the route verified as staff (a valid staff token, not just ?adminPreview=1).
+ * Then, and only when the customer block below is absent, the answer carries what the next send would freeze, marked
+ * `preview: true`, so staff can check the points before the first send. Any other caller gets exactly the customer block.
+ */
+async function roofPointsDocBlock(estimate, { knex = db, staffPreview = false } = {}) {
   if (!estimate?.id) return {};
   try {
-    const row = await knex(TABLE).where({ estimate_id: estimate.id }).first();
-    if (!row || !copyIsCurrent(row, estimate) || !copyForHolder(row, estimate)) return {};
-    if (!sameHome(row.address, estimate.address)) return {};
-    const snapshot = cleanSnapshot(row.snapshot);
-    if (!snapshot) return {};
-    if (!(await readsAllowCopy(estimate, row.read_id, knex))) return {};
-    return { roofPoints: snapshot };
+    const frozen = await frozenCopyBlock(estimate, knex);
+    if (frozen || staffPreview !== true) return frozen ? { roofPoints: frozen } : {};
+    const { points } = await nextSendPoints(estimate, knex);
+    // The customer page hides the points while ANY read of the estimate is hidden (readsAllowCopy), so the preview does
+    // too: it must show only what the customer would see after that send.
+    const snapshot = points && !(await anyReadHidden(estimate, knex)) ? cleanSnapshot(points) : null;
+    return snapshot ? { roofPoints: { ...snapshot, preview: true } } : {};
   } catch (err) {
     logger.warn(`[estimate-roof-points] section skipped for estimate ${estimate.id}: ${errCode(err)}`);
     return {};
   }
+}
+
+// What the customer's page shows of this copy row: its snapshot when every rule lets it show, else null.
+async function shownSnapshot(row, estimate, knex) {
+  if (!row || !copyIsCurrent(row, estimate) || !copyForHolder(row, estimate)) return null;
+  if (!sameHome(row.address, estimate.address)) return null;
+  const snapshot = cleanSnapshot(row.snapshot);
+  if (!snapshot) return null;
+  if (!(await readsAllowCopy(estimate, row, knex))) return null;
+  return snapshot;
+}
+
+// The customer's block: the estimate's frozen copy as the page shows it, else null.
+async function frozenCopyBlock(estimate, knex) {
+  return shownSnapshot(await knex(TABLE).where({ estimate_id: estimate.id }).first(), estimate, knex);
+}
+
+// Is the estimate's copy a lead's copy that this row's customer, the first since that send, keeps (keptForFirstCustomer)?
+async function holdsLeadCopy(estimate, knex) {
+  const copy = await knex(TABLE).where({ estimate_id: estimate.id }).first('customer_id', 'lead_changes');
+  return Boolean(copy) && keptForFirstCustomer(copy, estimate);
+}
+
+/**
+ * The send to a first customer whose estimate carries the lead's copy: keep that copy, or freeze the customer's own
+ * points, or clear. It is decided under a lock on the estimate row. A points save holds that row FOR UPDATE
+ * (roof-entry-read.js saveUnderEstimate) while it names the customer on the lead's read. Without the lock, such a save
+ * landing between the two lookups here would hide the read from both (it is no longer the lead's, and was not yet the
+ * customer's), and the send would clear points it must keep or freeze. The wait is 5 seconds; past that the caller
+ * reports 'skipped' and the page omits the older copy until the next send.
+ *
+ * Other sends take no lock, so one may replace the copy while this one decides. Like every write of a send, the keep
+ * and the clear name only a copy that no later handoff wrote (copyNotNewer). A keep that finds its copy replaced
+ * reports 'skipped' and leaves that copy alone.
+ */
+async function keepOrFreeze(estimate, at, knex) {
+  return knex.transaction(async (trx) => {
+    await trx.raw("SET LOCAL lock_timeout = '5s'");
+    await trx('estimates').where({ id: estimate.id }).forShare().first('id');
+    const next = await nextSendPoints(estimate, trx);
+    if (next.points) return writeCopy(estimate, next, at, trx);
+    const copy = next.row ? null : await leadCopyToKeep(estimate, trx);
+    if (!copy) {
+      await copyNotNewer(trx, estimate, at).del();
+      return 'cleared';
+    }
+    // Only the handoff time is written: the snapshot stays the one the lead received, also when the read was edited since.
+    const kept = await copyNotNewer(trx, estimate, at).where({ read_id: copy.read_id, lead_changes: copy.lead_changes }).whereNull('customer_id').update({ delivered_at: at });
+    return kept === 1 ? 'kept' : 'skipped';
+  });
+}
+
+/**
+ * The lead's copy a send to the first customer keeps, or null. That customer has no points read of their own yet (staff
+ * did not press Save points since the lead became this customer). The copy stays, under this handoff's time so that it
+ * is still the estimate's latest (copyIsCurrent), when all of this holds:
+ *  - the customer's page shows that copy now (shownSnapshot: the first customer, the latest handoff before this one,
+ *    the same home, not hidden, its read still the lead's or this customer's);
+ *  - and the lead's read it came from would still be sent to a lead: it is the newest points read with no customer and
+ *    its points are not cleared. A clear ends the copy at the next send, as it always did.
+ */
+async function leadCopyToKeep(estimate, knex) {
+  const copy = await knex(TABLE).where({ estimate_id: estimate.id }).first();
+  if (!copy || !keptForFirstCustomer(copy, estimate) || !(await shownSnapshot(copy, estimate, knex))) return null;
+  const lead = await nextSendPoints({ ...estimate, customer_id: null }, knex);
+  return lead.points && lead.row.id === copy.read_id ? copy : null;
 }
 
 module.exports = {

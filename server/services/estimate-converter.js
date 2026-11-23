@@ -8858,11 +8858,16 @@ const EstimateConverter = {
           }
           lineItems.push(...mistingInstallInvoiceLines(mistingInstall));
           if (firstApplicationAmount > 0) {
-            lineItems.push({
-              description: 'First service application',
-              quantity: 1,
-              unit_price: firstApplicationAmount,
-            });
+            // GATE_INVOICE_ESTIMATE_DISCOUNT_LINES: the WaveGuard tier and the
+            // estimate's own discount as their own lines (same total).
+            lineItems.push(...await require('./estimate-first-application-invoice').itemizeFirstApplicationDiscounts({
+              estimateId, customerId, scheduledServiceId: firstScheduledServiceId,
+              lines: [{
+                description: 'First service application',
+                quantity: 1,
+                unit_price: firstApplicationAmount,
+              }],
+            }, database));
           }
           // Acceptance deposit credits against this first invoice through
           // create()'s depositCredit param — create() caps the request

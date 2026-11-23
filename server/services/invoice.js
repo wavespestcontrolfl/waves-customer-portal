@@ -12,7 +12,7 @@ const {
   isFixedDiscountType,
   isVariableOrCustomDiscountPreset,
 } = require("./discount-stack");
-const { discountStackingLive } = require("../config/feature-gates");
+const { discountStackingLive, invoiceEstimateDiscountLinesLive } = require("../config/feature-gates");
 // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
 // billing-lane's one resolver (lazy, so no require cycle).
 const stampedZeroFreeLive = () => require("./billing-lane").stampedZeroFreeLive();
@@ -2825,6 +2825,22 @@ async function alertPrepaidVisitsToApplyToDuesInvoice(invoiceRow) {
   }
 }
 
+// The accepted estimate's breakdown for this visit (completion-pricing.js
+// acceptedVisitBreakdown) when GATE_INVOICE_ESTIMATE_DISCOUNT_LINES is on and
+// it prices exactly the amount billed here, else null. A best-effort read on
+// its own savepoint: a failure leaves the one net line, never another total.
+async function acceptedEstimateBreakdown(conn, scheduled, billedAmount) {
+  if (!invoiceEstimateDiscountLinesLive()) return null;
+  const read = (database) => require("./completion-pricing").acceptedVisitBreakdown(scheduled, { database });
+  try {
+    const { breakdown } = conn.isTransaction === true ? await conn.transaction(read) : await read(conn);
+    return breakdown && Math.round(breakdown.amount * 100) === Math.round(Number(billedAmount) * 100) ? breakdown : null;
+  } catch (err) {
+    logger.warn(`[invoice] estimate discount lines skipped for visit ${scheduled.id}: ${err.message}`);
+    return null;
+  }
+}
+
 async function buildScheduledServiceInvoiceLines(
   scheduledServiceId,
   {
@@ -2905,7 +2921,14 @@ async function buildScheduledServiceInvoiceLines(
     fallbackAmount,
     scheduled.estimated_price,
   );
-  const primaryBase = primaryBaseKnown
+  // A visit booked from an accepted estimate stores only its net price; with
+  // GATE_INVOICE_ESTIMATE_DISCOUNT_LINES it bills the estimate's price with
+  // each named discount as its own line (below), the same net in total. Null
+  // for a visit with a primary price, discount or add-on of its own.
+  const accepted = await acceptedEstimateBreakdown(conn, scheduled, scheduledAmount);
+  const primaryBase = accepted
+    ? accepted.base
+    : primaryBaseKnown
     ? Math.max(0, roundMoney(scheduled.primary_line_price))
     : Math.max(
         0,
@@ -2944,6 +2967,18 @@ async function buildScheduledServiceInvoiceLines(
         })
       : null;
     if (lineDiscount) lineItems.push(lineDiscount);
+    if (accepted) {
+      lineItems.push(...accepted.discounts.map((row, index) => ({
+        ...buildDiscountLineItem({
+          parentClientId: primaryClientId,
+          discountName: row.name,
+          discountType: "fixed_amount",
+          discountAmount: row.dollars,
+          discountDollars: row.dollars,
+        }),
+        client_id: `discount_estimate_${index}_${primaryClientId}`,
+      })));
+    }
   }
 
   for (const addon of addons) {

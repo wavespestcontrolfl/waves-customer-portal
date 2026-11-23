@@ -1,8 +1,9 @@
 // One-time job to plan offer, shadow step, against real PostgreSQL (one rolled-back transaction per test),
 // behind GATE_ONETIME_PLAN_OFFER=shadow (owner 2026-11-19, "build"). The unit suite pins the decisions with
-// stubs; this one proves what only a database can: the job's own SQL (which visits are due, who the offer is
-// for), the real collaborators on real tables (suppressions, the email division's verdict, the offer pricing
-// with the real engine, its plan records and its proof of the job's home), and that the two DRAFT templates
+// stubs; this one proves what only a database can: the job's own SQL (which visits are due, the offer day, each
+// send rule's read), the real collaborators on real tables (open balance, review-ask history, suppressions, the
+// email division's verdict, the offer pricing with the real engine, its plan records and its proof of the
+// job's home), and that the two DRAFT templates
 // the migration seeds render and send as test sends through the real template library, and the one admin
 // notification for a morning the price settings stopped (a real row, refreshed, closed and opened again). Only
 // the email transport, the property lookup and the phone banner of an admin notification are stubs (no network,
@@ -33,6 +34,10 @@ jest.mock('../services/sendgrid-mail', () => ({
   sendOne: jest.fn(async () => ({ messageId: 'sg-sample' })),
 }));
 
+// The review cadence gate is read once, when feature-gates loads. Production has it on (read 2026-11-20).
+const savedReviewGate = process.env.GATE_REVIEW_SEQUENCES;
+process.env.GATE_REVIEW_SEQUENCES = 'true';
+
 const crypto = require('crypto');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { formatDateOnly } = require('../utils/date-only');
@@ -46,6 +51,11 @@ const hex = (bytes) => crypto.randomBytes(bytes).toString('hex');
 // The ET calendar day n days from today: the job's own day arithmetic.
 const day = (n) => etDateString(addETDays(NOW, n));
 const sampleKey = (templateKey, jobId) => `onetime-plan-offer:sample:${templateKey}:${jobId}`;
+// The review cadence of a one-time job: the day-0 ask, the day-4 reminder, the day-7 nudge. Each carries the review link.
+const { DEFAULT_SEQUENCE_PLAN } = require('../services/review-outreach-templates');
+const ASK_PLAN = JSON.stringify(DEFAULT_SEQUENCE_PLAN);
+// A cadence whose last step is a private check-in: no review link.
+const CHECKIN_LAST_PLAN = JSON.stringify([DEFAULT_SEQUENCE_PLAN[0], { day: 5, channel: 'sms', templateKey: 'satisfaction_confirm' }]);
 
 postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
   // The first test loads the pricing engine and the template library.
@@ -72,6 +82,8 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
   afterAll(async () => {
     if (savedGate === undefined) delete process.env.GATE_ONETIME_PLAN_OFFER;
     else process.env.GATE_ONETIME_PLAN_OFFER = savedGate;
+    if (savedReviewGate === undefined) delete process.env.GATE_REVIEW_SEQUENCES;
+    else process.env.GATE_REVIEW_SEQUENCES = savedReviewGate;
     await database?.destroy();
   });
 
@@ -106,17 +118,60 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
     service_date: job.scheduled_date, structured_notes: { visitOutcome: 'completed' }, ...overrides,
   });
 
-  // A completed one-time job with the record of its service. `daysAgo` counts ET calendar days: the scheduled
-  // day and, unless `record` names another, the day the service was done. `record: false` saves no record.
-  async function seedJob({ daysAgo = 5, customer = null, record = {}, ...visit } = {}) {
+  // A completed one-time job with the record of its service and its paid invoice. `daysAgo` counts ET calendar
+  // days: the scheduled day and, unless `record` names another, the day the service was done. `record: false`
+  // saves no record, and `invoice: null` saves no invoice.
+  async function seedJob({ daysAgo = 5, customer = null, record = {}, invoice = { status: 'paid', total: 225 }, ...visit } = {}) {
     const owner = customer || await seedCustomer();
     const [job] = await trx('scheduled_services').insert({
       customer_id: owner.id, scheduled_date: day(-daysAgo), service_type: 'One-Time Pest Control', status: 'completed',
       service_key_snapshot: 'one_time_pest_control', ...visit,
     }).returning('*');
     if (record) await seedRecord(job, { service_date: day(-daysAgo), ...record });
+    if (invoice) {
+      await trx('invoices').insert({
+        token: hex(16), invoice_number: `TEST-${hex(4)}`, customer_id: owner.id, scheduled_service_id: job.id,
+        subtotal: invoice.total, total: invoice.total, status: invoice.status,
+      });
+    }
     return { customer: owner, job };
   }
+
+  // Another completed visit of the same customer on the job's day (5 days ago), finished at `completedAt`.
+  async function seedSameDayVisit(customer, completedAt, visit = {}) {
+    const [row] = await trx('scheduled_services').insert({
+      customer_id: customer.id, scheduled_date: day(-5), service_type: 'Rodent Inspection', status: 'completed',
+      service_key_snapshot: 'rodent_exclusion', completed_at: completedAt, ...visit,
+    }).returning('*');
+    return row;
+  }
+  const EARLIER = '2030-01-01 14:00:00+00';
+  const LATER = '2030-01-01 16:00:00+00';
+  // The job finished between EARLIER and LATER, so a same-day visit can sit on either side of it.
+  const jobFinishedAtThree = (job) => trx('scheduled_services').where({ id: job.id }).update({ completed_at: '2030-01-01 15:00:00+00' });
+
+  // One stop billed together: a completion packet links every billed visit to the ONE invoice.
+  async function seedPacket(customer, invoiceId, visitIds) {
+    const [visit] = await trx('service_visits').insert({
+      customer_id: customer.id, scheduled_date: day(-5), stop_base_key: `test-${hex(6)}`, created_by: 'test',
+    }).returning('id');
+    const [packet] = await trx('visit_completion_packets').insert({
+      visit_id: visit.id, idempotency_key: `test-${hex(8)}`, request_hash: hex(16), payload: '{}', status: 'done',
+    }).returning('id');
+    await trx('visit_completion_packet_items').insert(visitIds.map((scheduled_service_id) => ({
+      packet_id: packet.id, scheduled_service_id, derived_idempotency_key: `test-${hex(8)}`, status: 'done', invoice_id: invoiceId,
+    })));
+  }
+  const jobInvoice = (job) => trx('invoices').where({ scheduled_service_id: job.id }).first('id');
+  const primaryLine = (visit) => ({ client_id: `scheduled_${visit.id}_primary`, description: 'Service', amount: 100 });
+
+  // A text a person in the office typed to the customer, `hoursAgo` hours before now.
+  const seedStaffText = (customer, message_body, hoursAgo) => trx('sms_log').insert({
+    customer_id: customer.id, direction: 'outbound', from_phone: '+19415550199', to_phone: customer.phone,
+    message_type: 'manual', status: 'delivered', message_body, created_at: new Date(NOW.getTime() - hoursAgo * HOUR),
+  });
+  // An instant on the Eastern wall clock of an ET calendar day, computed by PostgreSQL (not by the code under test).
+  const easternInstant = async (ymd, time) => (await trx.raw("SELECT (?::date + ?::time) AT TIME ZONE 'America/New_York' AS at", [ymd, time])).rows[0].at;
 
   const priced = () => jest.fn(async () => ({ option: { id: 'pest-quarterly', perVisit: 104.5, setupFee: 99 }, reason: null }));
   // The real job with the real collaborators. Tests of the audience rules stub only the price.
@@ -129,7 +184,7 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
     return rows.map((row) => row.idempotency_key.split(':').pop()).sort();
   };
 
-  test('a one-time job sends both samples to the office through the real template library, once, and saves no estimate', async () => {
+  test('a paid one-time job sends both samples to the office through the real template library, once, and saves no estimate', async () => {
     const { customer, job } = await seedJob();
     const summary = await run();
     expect(summary).toMatchObject({ mode: 'shadow', sample: 1, failed: 0 });
@@ -141,7 +196,7 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
       expect(row.sent_at).not.toBeNull();
       expect(row.subject_snapshot).toMatch(/^\[TEST\] /);
       expect(row.html_snapshot).toContain('Sample only. No estimate was saved and the customer got no email.');
-      expect(row.html_snapshot).toContain(`so this customer may not get the offer. Job ${job.id}.`);
+      expect(row.html_snapshot).toContain(`This account passed the send rules today, so this customer would get the offer. Job ${job.id}.`);
       expect(row.html_snapshot).toContain('$104.50 per application');
       expect(row.html_snapshot).not.toMatch(/\{\{/);
     }
@@ -350,9 +405,8 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
     ['the email bounced', async ({ customer }) => {
       await trx('email_suppressions').insert({ email: customer.email, suppression_type: 'bounce', status: 'active' });
     }, 'email_suppressed'],
-    // The email division's standing answers (the real eligibleForEmail, stream nurture), under its reason names.
-    // No seeded customer has an estimate on file, so each case also proves that the division reads these
-    // before its checks for the day of the send.
+    // The email division's answers (the real eligibleForEmail, stream nurture, with the job as the completed
+    // visit that stands for the relationship), under its reason names.
     ["the email is unsubscribed from the nurture group, the offer templates' own", async ({ customer }) => {
       await trx('email_suppressions').insert({ email: customer.email, suppression_type: 'unsubscribe', group_key: 'marketing_nurture', status: 'active' });
     }, 'email_suppressed_group'],
@@ -362,6 +416,12 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
     ['the customer is on the staff do-not-contact list', async ({ customer }) => {
       await trx('messaging_suppression').insert({ phone: customer.phone, reason: 'manual_dnc', active: true });
     }, 'staff_dnc'],
+    ['another marketing email went out today', async ({ customer }) => {
+      await trx('marketing_email_ledger').insert({
+        customer_id: customer.id, stream: 'broadcast', marketing_class: 'marketing', email_key: 'newsletter.sample',
+        idempotency_key: `test:${hex(8)}`, recipient_email: customer.email, status: 'sent', sent_at: NOW,
+      });
+    }, 'cap_same_day'],
   ])('held: %s', async (_name, arrange, reason) => {
     const seeded = await seedJob();
     await arrange(seeded);
@@ -378,12 +438,278 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
     ['a preferences row with the offers switch unset', async ({ customer }) => {
       await trx('notification_prefs').insert({ customer_id: customer.id, marketing_offers: null });
     }],
-    // This step shows the words. The state of the account on the day is judged with the customer email, in
-    // the next step: a booked visit, an open invoice and a queued review ask do not stop a sample.
-    ['a booked visit, an open invoice and a queued review ask (not judged in this step)', async ({ customer }) => {
+  ])('not a hold: %s', async (_name, arrange) => {
+    const seeded = await seedJob();
+    await arrange(seeded);
+    expect(await run()).toMatchObject({ sample: 1, held: 0, failed: 0 });
+  });
+
+  // The email division names the job as the customer's completed visit, so the relationship check passes with no
+  // estimate on file and the checks behind it are judged. The division says so itself, for the same customer.
+  test('with no estimate on file the division finds no relationship without the visit, and the job names it', async () => {
+    const { customer } = await seedJob();
+    const { eligibleForEmail } = require('../services/email-division/eligibility');
+    await expect(eligibleForEmail({ customerId: customer.id, stream: 'nurture', emailKey: OFFER, now: NOW }))
+      .resolves.toMatchObject({ ok: false, reason: 'RELATIONSHIP_NOT_ELIGIBLE' });
+    expect(await run()).toMatchObject({ sample: 1, held: 0, failed: 0 });
+  });
+
+  // Each case seeds the one row its rule reads, on the real table.
+  test.each([
+    ['a visit is still booked', async ({ customer }) => {
       await trx('scheduled_services').insert({ customer_id: customer.id, scheduled_date: day(4), service_type: 'Cockroach Control', status: 'pending' });
+    }, 'another_visit'],
+    // A visit the customer asked to move keeps its old day until the office moves it. Today or later, it is still to come.
+    ['a visit is parked for a new day, and still carries today as its day', async ({ customer }) => {
+      await trx('scheduled_services').insert({ customer_id: customer.id, scheduled_date: day(0), service_type: 'Cockroach Control', status: 'rescheduled' });
+    }, 'another_visit'],
+    // The column's default is pending: a row with no status is not closed.
+    ['a visit row has no status', async ({ customer }) => {
+      await trx('scheduled_services').insert({ customer_id: customer.id, scheduled_date: day(4), service_type: 'Cockroach Control', status: null });
+    }, 'another_visit'],
+    ['a later visit was completed (a re-service)', async ({ customer }) => {
+      await trx('scheduled_services').insert({ customer_id: customer.id, scheduled_date: day(-1), service_type: 'Re-Service', status: 'completed' });
+    }, 'another_visit'],
+    // The same day counts too: the order is the service day, then the completion time.
+    ['a re-service was completed later the same day', async ({ customer, job }) => {
+      await jobFinishedAtThree(job);
+      await seedSameDayVisit(customer, LATER, { service_type: 'Re-Service', service_key_snapshot: 'one_time_pest_control', is_callback: true });
+    }, 'another_visit'],
+    ['another kind of visit was completed later the same day', async ({ customer, job }) => {
+      await jobFinishedAtThree(job);
+      await seedSameDayVisit(customer, LATER);
+    }, 'another_visit'],
+                    ['the invoice is not paid', async ({ job }) => {
+      await trx('invoices').where({ scheduled_service_id: job.id }).update({ status: 'sent' });
+    }, 'invoice_not_paid'],
+    // One stop billed together: the invoice total is not the price of this job, whichever visit it sits under.
+    ['the job was billed first on one invoice with another visit', async ({ customer, job }) => {
+      await jobFinishedAtThree(job);
+      const other = await seedSameDayVisit(customer, EARLIER);
+      await seedPacket(customer, (await jobInvoice(job)).id, [job.id, other.id]);
+    }, 'combined_invoice'],
+    ['the job was billed second: the one invoice sits under the other visit', async ({ customer, job }) => {
+      await jobFinishedAtThree(job);
+      const other = await seedSameDayVisit(customer, EARLIER);
+      const invoice = await jobInvoice(job);
+      await trx('invoices').where({ id: invoice.id }).update({ scheduled_service_id: other.id });
+      await seedPacket(customer, invoice.id, [other.id, job.id]);
+    }, 'combined_invoice'],
+    ["a line of the job's invoice names another visit (an estimate's combined first invoice)", async ({ customer, job }) => {
+      await jobFinishedAtThree(job);
+      const other = await seedSameDayVisit(customer, EARLIER);
+      await trx('invoices').where({ scheduled_service_id: job.id }).update({ line_items: JSON.stringify([primaryLine(job), primaryLine(other)]) });
+    }, 'combined_invoice'],
+    ["the job is named only on a line of another visit's invoice", async ({ customer, job }) => {
+      await jobFinishedAtThree(job);
+      const other = await seedSameDayVisit(customer, EARLIER);
+      await trx('invoices').where({ scheduled_service_id: job.id })
+        .update({ scheduled_service_id: other.id, line_items: JSON.stringify([primaryLine(other), primaryLine(job)]) });
+    }, 'combined_invoice'],
+    ["an invoice names the job on a line, and its service record belongs to another visit", async ({ customer, job }) => {
+      await jobFinishedAtThree(job);
+      const other = await seedSameDayVisit(customer, EARLIER);
+      const [record] = await trx('service_records').insert({
+        customer_id: customer.id, scheduled_service_id: other.id, service_date: day(-5), service_type: 'Rodent Inspection',
+      }).returning('id');
+      await trx('invoices').where({ scheduled_service_id: job.id })
+        .update({ scheduled_service_id: null, service_record_id: record.id, line_items: JSON.stringify([primaryLine(job)]) });
+    }, 'combined_invoice'],
+    ["the job carries the stamp of an estimate's combined first invoice", async ({ job }) => {
+      await trx('scheduled_services').where({ id: job.id }).update({ first_application_invoice_id: (await jobInvoice(job)).id });
+    }, 'combined_invoice'],
+    // Billing Recovery's "billed elsewhere" record: an invoice made for other work also covers a visit.
+    ["another visit is recorded as billed elsewhere on the job's invoice", async ({ customer, job }) => {
+      await jobFinishedAtThree(job);
+      const other = await seedSameDayVisit(customer, EARLIER);
+      await trx('visit_billing_dispositions').insert({ scheduled_service_id: other.id, disposition: 'billed_elsewhere', invoice_id: (await jobInvoice(job)).id });
+    }, 'combined_invoice'],
+    ['the job has no invoice of its own and is recorded as billed elsewhere on another paid invoice', async ({ job }) => {
+      // The covering invoice was made by hand: no visit link, no service record, no line that names a visit.
+      const invoice = await jobInvoice(job);
+      await trx('invoices').where({ id: invoice.id }).update({ scheduled_service_id: null });
+      await trx('visit_billing_dispositions').insert({ scheduled_service_id: job.id, disposition: 'billed_elsewhere', invoice_id: invoice.id });
+    }, 'combined_invoice'],
+    // Owed, but not in the balance the Waves app counts (that balance reads sent, viewed and overdue invoices).
+    ['another invoice is part-paid with an amount still due', async ({ customer }) => {
+      await trx('invoices').insert({
+        token: hex(16), invoice_number: `TEST-${hex(4)}`, customer_id: customer.id, subtotal: 100, total: 100, amount_paid: 40, status: 'partially_paid',
+      });
+    }, 'open_balance'],
+    ['another invoice is open', async ({ customer }) => {
       await trx('invoices').insert({ token: hex(16), invoice_number: `TEST-${hex(4)}`, customer_id: customer.id, subtotal: 80, total: 80, status: 'sent' });
+    }, 'open_balance'],
+    ['a review ask is queued', async ({ customer }) => {
       await trx('review_requests').insert({ token: hex(16), customer_id: customer.id, status: 'pending', scheduled_for: new Date(NOW.getTime() + 24 * HOUR) });
+    }, 'review_ask'],
+    ['a review ask is being sent from the composer', async ({ customer }) => {
+      await trx('review_requests').insert({ token: hex(16), customer_id: customer.id, status: 'sending', claimed_at: new Date() });
+    }, 'review_ask'],
+    // Past the 10-minute claim window the row is still not settled: the review service's recovery can release it to send.
+    ['a review ask was left `sending` 4 days ago, with no send result', async ({ customer }) => {
+      await trx('review_requests').insert({ token: hex(16), customer_id: customer.id, status: 'sending', claimed_at: new Date(NOW.getTime() - 96 * HOUR) });
+    }, 'review_ask'],
+    // The reminder and the nudge of an active cadence are not queued rows yet. They are still on their way.
+    ['a review cadence still has asks to come', async ({ customer }) => {
+      await trx('review_sequences').insert({ customer_id: customer.id, plan: ASK_PLAN, status: 'active', current_step: 1 });
+    }, 'review_ask'],
+    // A cadence parked while its opener is in flight, or behind a bounced visit summary, comes back and sends.
+    ['a review cadence is parked while its first ask is being sent', async ({ customer }) => {
+      await trx('review_sequences').insert({ customer_id: customer.id, plan: ASK_PLAN, status: 'deferred' });
+    }, 'review_ask'],
+    ['a review cadence is parked behind a bounced visit summary', async ({ customer }) => {
+      await trx('review_sequences').insert({ customer_id: customer.id, plan: ASK_PLAN, status: 'stopped', stop_reason: 'visit_summary_bounced', current_step: 1 });
+    }, 'review_ask'],
+    // A send whose result was never recorded: the review service itself treats the ask as not yet stopped.
+    ['a review ask still holds a send reservation from 4 days ago', async ({ customer }) => {
+      const [ask] = await trx('review_requests').insert({ token: hex(16), customer_id: customer.id, status: 'pending' }).returning('id');
+      await trx('sms_log').insert({
+        customer_id: customer.id, direction: 'outbound', from_phone: '+19415550199', to_phone: customer.phone, message_type: 'review_request',
+        status: 'sending', message_body: 'Review ask', created_at: new Date(NOW.getTime() - 96 * HOUR),
+        metadata: JSON.stringify({ review_request_id: ask.id, review_ask_reservation: true }),
+      });
+    }, 'review_ask'],
+    // The follow-up runner can defer a reminder or reach its batch limit, so the ask can be older than 72 hours.
+    ['a review ask from 4 days ago still has its follow-up text to come', async ({ customer }) => {
+      await trx('review_requests').insert({ token: hex(16), customer_id: customer.id, status: 'sent', sms_sent_at: new Date(NOW.getTime() - 96 * HOUR) });
+    }, 'review_ask'],
+    ['a review ask was delivered yesterday', async ({ customer }) => {
+      await trx('review_requests').insert({ token: hex(16), customer_id: customer.id, status: 'sent', sms_sent_at: new Date(NOW.getTime() - 24 * HOUR) });
+    }, 'review_ask'],
+    // An ask the office typed exists only as a text in sms_log: no review_requests row carries it.
+    ['the office typed a review ask yesterday', async ({ customer }) => {
+      await seedStaffText(customer, 'Hi Jordan, here is that review link one more time. Thank you!', 24);
+    }, 'review_ask'],
+    ['the customer rated the job a 4', async ({ customer }) => {
+      await trx('review_requests').insert({ token: hex(16), customer_id: customer.id, status: 'rated', rating: 4, rated_at: NOW });
+    }, 'low_rating'],
+    ['a complaint was logged', async ({ customer }) => {
+      await trx('customer_interactions').insert({ customer_id: customer.id, interaction_type: 'complaint', subject: 'Still seeing activity' });
+    }, 'complaint'],
+    ['a service request is open', async ({ customer }) => {
+      await trx('service_requests').insert({ customer_id: customer.id, category: 'pest', subject: 'Follow-up question', status: 'new' });
+    }, 'open_request'],
+    ['an estimate is open', async ({ customer }) => {
+      await trx('estimates').insert({ customer_id: customer.id, status: 'sent', expires_at: new Date(NOW.getTime() + 72 * HOUR) });
+    }, 'open_estimate'],
+    // The customer can open an estimate while it is being sent. Its end date is written when the send ends.
+    ['an estimate is being sent, and its end date is not written yet', async ({ customer }) => {
+      await trx('estimates').insert({ customer_id: customer.id, status: 'sending' });
+    }, 'open_estimate'],
+    // The scheduler's queue test has no end date: a late send still goes out, and the send writes a new end date.
+    ['the office scheduled an estimate to send, and its old end date has passed', async ({ customer }) => {
+      await trx('estimates').insert({
+        customer_id: customer.id, status: 'scheduled', scheduled_at: new Date(NOW.getTime() + HOUR), expires_at: new Date(NOW.getTime() - 24 * HOUR),
+      });
+    }, 'open_estimate'],
+    // This customer has no estimate on file. The division's checks behind that one must still be judged.
+    ['the office texted the customer yesterday, and no estimate is on file', async ({ customer }) => {
+      await seedStaffText(customer, 'Thanks for choosing Waves. Call the office with any question.', 24);
+    }, 'recent_human_contact'],
+  ])('held by a send rule: %s', async (_name, arrange, reason) => {
+    const seeded = await seedJob();
+    await arrange(seeded);
+    const buildStartOffer = priced();
+    const summary = await run({ buildStartOffer });
+    expect(summary).toMatchObject({ sample: 0, office: 0, failed: 0 });
+    expect(summary.reasons).toEqual({ [reason]: 1 });
+    expect(buildStartOffer).not.toHaveBeenCalled();
+    expect(Sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['an old rating, a closed request, an expired estimate and a 4-day-old review ask', async ({ customer }) => {
+      await trx('review_requests').insert({ token: hex(16), customer_id: customer.id, status: 'rated', rating: 3, rated_at: new Date(NOW.getTime() - 30 * 24 * HOUR), sms_sent_at: new Date(NOW.getTime() - 96 * HOUR) });
+      await trx('service_requests').insert({ customer_id: customer.id, category: 'pest', subject: 'Old question', status: 'resolved' });
+      await trx('estimates').insert({ customer_id: customer.id, status: 'sent', expires_at: new Date(NOW.getTime() - 24 * HOUR) });
+    }],
+    ['an earlier one-time visit and a cancelled later one', async ({ customer }) => {
+      await trx('scheduled_services').insert([
+        { customer_id: customer.id, scheduled_date: day(-40), service_type: 'One-Time Pest Control', status: 'completed' },
+        { customer_id: customer.id, scheduled_date: day(6), service_type: 'One-Time Pest Control', status: 'cancelled' },
+      ]);
+    }],
+    // 9 PM Eastern the evening before the job is already the job's date in UTC. It is still before the job.
+    ['a complaint and a low rating from 9 PM Eastern the evening before the job', async ({ customer }) => {
+      const eveningBefore = await easternInstant(day(-6), '21:00');
+      await trx('customer_interactions').insert({ customer_id: customer.id, interaction_type: 'complaint', subject: 'Before the visit', created_at: eveningBefore });
+      await trx('review_requests').insert({ token: hex(16), customer_id: customer.id, status: 'rated', rating: 2, rated_at: eveningBefore });
+    }],
+    ['a review ask the office typed 4 days ago', async ({ customer }) => {
+      await seedStaffText(customer, 'Hi Jordan, here is that review link one more time. Thank you!', 96);
+    }],
+    // "Handled" is not "delivered": the runner closed the follow-up yesterday and no text went out.
+    ['a 4-day-old review ask whose follow-up was closed with no text', async ({ customer }) => {
+      await trx('review_requests').insert({
+        token: hex(16), customer_id: customer.id, status: 'sent', sms_sent_at: new Date(NOW.getTime() - 96 * HOUR),
+        followup_sent: true, followup_sent_at: new Date(NOW.getTime() - 24 * HOUR),
+      });
+    }],
+    // Billing Recovery's other records are not a shared invoice: the invoice it cut, and a visit marked free.
+    ["Billing Recovery cut the job's own invoice, and marked an earlier visit free", async ({ customer, job }) => {
+      await jobFinishedAtThree(job);
+      const other = await seedSameDayVisit(customer, EARLIER);
+      await trx('visit_billing_dispositions').insert([
+        { scheduled_service_id: job.id, disposition: 'billed', invoice_id: (await jobInvoice(job)).id },
+        { scheduled_service_id: other.id, disposition: 'intentionally_free' },
+      ]);
+    }],
+    ['a part-paid invoice has nothing left to pay', async ({ customer }) => {
+      await trx('invoices').insert({
+        token: hex(16), invoice_number: `TEST-${hex(4)}`, customer_id: customer.id, subtotal: 100, total: 100, amount_paid: 100, status: 'partially_paid',
+      });
+    }],
+    ['a visit completed earlier the same day, billed on its own', async ({ customer, job }) => {
+      await jobFinishedAtThree(job);
+      await seedSameDayVisit(customer, EARLIER);
+    }],
+    // A private check-in carries no review link: it is not a review ask.
+    ['a private check-in is queued, and a finished and a stopped review cadence are on file', async ({ customer }) => {
+      await trx('review_requests').insert({
+        token: hex(16), customer_id: customer.id, status: 'pending', scheduled_for: new Date(NOW.getTime() + 24 * HOUR), template_key: 'satisfaction_confirm',
+      });
+      await trx('review_sequences').insert([
+        { customer_id: customer.id, plan: ASK_PLAN, status: 'completed', current_step: 3 },
+        { customer_id: customer.id, plan: ASK_PLAN, status: 'stopped', stop_reason: 'clicked', current_step: 1 },
+      ]);
+    }],
+    // A check-in is not an ask: not while it is being sent, and not when the recovery leaves it `sending` for good.
+    ['a private check-in is being sent now, and another was left `sending` 4 days ago', async ({ customer }) => {
+      await trx('review_requests').insert([
+        { token: hex(16), customer_id: customer.id, status: 'sending', claimed_at: new Date(), template_key: 'satisfaction_confirm' },
+        { token: hex(16), customer_id: customer.id, status: 'sending', claimed_at: new Date(NOW.getTime() - 96 * HOUR), template_key: 'resolution_check' },
+      ]);
+    }],
+    // A draft may never go out, and a failed send is the office's to send again.
+    ['a draft estimate, and an estimate whose send failed', async ({ customer }) => {
+      await trx('estimates').insert([{ customer_id: customer.id, status: 'draft' }, { customer_id: customer.id, status: 'send_failed' }]);
+    }],
+    // Neither is on the scheduler's send queue: no send time, or held for a new price.
+    ['a scheduled estimate with no send time, and one held for a new price', async ({ customer }) => {
+      await trx('estimates').insert([
+        { customer_id: customer.id, status: 'scheduled' },
+        {
+          customer_id: customer.id, status: 'scheduled', scheduled_at: new Date(NOW.getTime() + HOUR),
+          estimate_data: JSON.stringify({ estimatorEngine: { reprice_pending_at: new Date(NOW.getTime() - HOUR).toISOString() } }),
+        },
+      ]);
+    }],
+    // The booking was cancelled and made again: the old row stays parked for good, and its day has passed.
+    ['a visit parked for a new day whose day has passed', async ({ customer }) => {
+      await trx('scheduled_services').insert({ customer_id: customer.id, scheduled_date: day(-8), service_type: 'One-Time Pest Control', status: 'rescheduled' });
+    }],
+    // The ask of this cadence went out long ago. Only its private check-in is left, and that is not an ask.
+    ['an active review cadence whose only step left is a private check-in', async ({ customer }) => {
+      await trx('review_sequences').insert({ customer_id: customer.id, plan: CHECKIN_LAST_PLAN, status: 'active', current_step: 1 });
+    }],
+    ["the invoice is linked through the job's service record, and its packet holds the job alone", async ({ customer, job }) => {
+      const [record] = await trx('service_records').insert({
+        customer_id: customer.id, scheduled_service_id: job.id, service_date: day(-5), service_type: 'One-Time Pest Control',
+      }).returning('id');
+      const invoice = await jobInvoice(job);
+      await trx('invoices').where({ id: invoice.id })
+        .update({ scheduled_service_id: null, service_record_id: record.id, line_items: JSON.stringify([primaryLine(job)]) });
+      await seedPacket(customer, invoice.id, [job.id]);
     }],
   ])('not a hold: %s', async (_name, arrange) => {
     const seeded = await seedJob();
@@ -391,31 +717,30 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
     expect(await run()).toMatchObject({ sample: 1, held: 0, failed: 0 });
   });
 
-  // The email division's three checks for the day of the send come with the customer email. Each case seeds
-  // the real rows, asks the division itself what it answers, and then runs the job.
+  // Two one-time jobs on one day would each read as the customer's last visit: two offers to one customer.
   test.each([
-    ['RELATIONSHIP_NOT_ELIGIBLE', 'no estimate is on file yet', async () => {}],
-    ['CAP_SAME_DAY', 'another marketing email went out today', async ({ customer }) => {
-      await trx('estimates').insert({ customer_id: customer.id, status: 'sent', expires_at: new Date(NOW.getTime() + 72 * HOUR) });
-      await trx('marketing_email_ledger').insert({
-        customer_id: customer.id, stream: 'broadcast', marketing_class: 'marketing', email_key: 'newsletter.sample',
-        idempotency_key: `test:${hex(8)}`, recipient_email: customer.email, status: 'sent', sent_at: NOW,
-      });
-    }],
-    ['RECENT_HUMAN_CONTACT', 'the office texted the customer yesterday', async ({ customer }) => {
-      await trx('estimates').insert({ customer_id: customer.id, status: 'sent', expires_at: new Date(NOW.getTime() + 72 * HOUR) });
-      await trx('sms_log').insert({
-        customer_id: customer.id, direction: 'outbound', from_phone: '+19415550199', to_phone: customer.phone,
-        message_type: 'manual', status: 'delivered', message_body: 'Thanks for choosing Waves.', created_at: new Date(NOW.getTime() - 24 * HOUR),
-      });
-    }],
-  ])('not a hold: the email division answers %s (%s), a check for the day of the send', async (verdict, _name, arrange) => {
-    const seeded = await seedJob();
-    await arrange(seeded);
-    const { eligibleForEmail } = require('../services/email-division/eligibility');
-    await expect(eligibleForEmail({ customerId: seeded.customer.id, stream: 'nurture', emailKey: OFFER, now: NOW }))
-      .resolves.toMatchObject({ ok: false, reason: verdict });
-    expect(await run()).toMatchObject({ sample: 1, held: 0, failed: 0 });
+    ['the later completion time', ['2030-01-01 15:00:00+00', '2030-01-01 16:00:00+00'], 1],
+    ['the later completion time, whatever the order the rows were saved in', ['2030-01-01 16:00:00+00', '2030-01-01 15:00:00+00'], 0],
+    // Closer than one millisecond: a comparison made in JavaScript would hold both jobs.
+    ['a completion time a few microseconds later', ['2030-01-01 15:00:00.123456+00', '2030-01-01 15:00:00.123999+00'], 1],
+    ['a completion time over none', [null, '2030-01-01 15:00:00+00'], 1],
+  ])('two one-time jobs on one day: the offer follows %s', async (_name, completedAt, last) => {
+    const customer = await seedCustomer();
+    const jobs = [];
+    for (const completed_at of completedAt) jobs.push((await seedJob({ customer, completed_at })).job);
+    const summary = await run();
+    expect(summary).toMatchObject({ jobs: 2, sample: 1, held: 1, failed: 0 });
+    expect(summary.reasons).toEqual({ another_visit: 1 });
+    expect(await sampledJobIds(jobs)).toEqual([jobs[last].id]);
+  });
+
+  test('two one-time jobs on one day with no completion time: the id settles it, and exactly one is sampled', async () => {
+    const customer = await seedCustomer();
+    const jobs = [(await seedJob({ customer })).job, (await seedJob({ customer })).job];
+    const summary = await run();
+    expect(summary).toMatchObject({ jobs: 2, sample: 1, held: 1, failed: 0 });
+    const [highestId] = (await trx.raw('SELECT id FROM scheduled_services WHERE id = ANY(?::uuid[]) ORDER BY id DESC LIMIT 1', [jobs.map((job) => job.id)])).rows;
+    expect(await sampledJobIds(jobs)).toEqual([highestId.id]);
   });
 
   test('more due jobs than one page: every job is read once, in pages, across the days of the window', async () => {
@@ -456,11 +781,7 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
     ['a legacy monthly rate with no tier', async (customer) => trx('customers').where({ id: customer.id }).update({ monthly_rate: 45 })],
     ['a billed plan rate the ledger could not name', async (customer) => trx('customer_plan_rates').insert({ customer_id: customer.id, family_key: 'unattributed', monthly_rate: 45 })],
     // Palm injection maps to no offer family: the live recurring row itself is the plan.
-    ['a recurring palm injection visit, which maps to no offer family', async (customer) => trx('scheduled_services').insert({
-      customer_id: customer.id, scheduled_date: day(30), service_type: 'Palm Injection', status: 'pending', is_recurring: true, recurring_pattern: 'quarterly',
-    })],
     ['an annual prepay whose paid coverage is live', async (customer) => seedPrepayTerm(customer, 'active', 'paid')],
-    ['an annual prepay invoice that is still payable', async (customer) => seedPrepayTerm(customer, 'payment_pending', 'sent')],
   ])('the real offer pricing: %s means the customer has a plan, so no price and no sample', async (_name, arrange) => {
     const { customer } = await seedJob();
     await arrange(customer);
@@ -469,6 +790,41 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
     expect(summary).toMatchObject({ sample: 0, office: 0, held: 1, failed: 0 });
     expect(summary.reasons).toEqual({ has_plan: 1 });
     expect(Sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  // These plan records also stop the job at a send rule that runs before the pricer: a booked plan visit is
+  // another visit, and a prepay invoice that is still payable is an open balance. So the pricer never sees them.
+  test.each([
+    ['a recurring palm injection visit, which maps to no offer family', async (customer) => trx('scheduled_services').insert({
+      customer_id: customer.id, scheduled_date: day(30), service_type: 'Palm Injection', status: 'pending', is_recurring: true, recurring_pattern: 'quarterly',
+    }), 'another_visit'],
+    ['an annual prepay invoice that is still payable', async (customer) => seedPrepayTerm(customer, 'payment_pending', 'sent'), 'open_balance'],
+  ])('a customer with %s is held by a send rule before the pricer', async (_name, arrange, reason) => {
+    const { customer } = await seedJob();
+    await arrange(customer);
+    const buildStartOffer = priced();
+    const summary = await run({ buildStartOffer });
+    expect(summary).toMatchObject({ sample: 0, office: 0, held: 1, failed: 0 });
+    expect(summary.reasons).toEqual({ [reason]: 1 });
+    expect(buildStartOffer).not.toHaveBeenCalled();
+  });
+
+  test('the plan visit price must be below the price of the job: the office prices it by hand otherwise', async () => {
+    const { job } = await seedJob({ invoice: { status: 'paid', total: 104.5 } });
+    const summary = await run();
+    expect(summary).toMatchObject({ sample: 0, office: 1, held: 0, failed: 0 });
+    expect(summary.reasons).toEqual({ plan_not_below_job: 1 });
+    expect(await sampleRows(job.id)).toHaveLength(0);
+  });
+
+  test('the job price is the largest PAID invoice of the job; a void or open one never counts', async () => {
+    const { job } = await seedJob({ invoice: { status: 'paid', total: 60 } });
+    const more = (status, total) => trx('invoices').insert({
+      token: hex(16), invoice_number: `TEST-${hex(4)}`, customer_id: job.customer_id, scheduled_service_id: job.id, subtotal: total, total, status,
+    });
+    await more('paid', 150);
+    await more('void', 500);
+    expect(await run()).toMatchObject({ sample: 1, office: 0, failed: 0 });
   });
 
   test('the real offer pricing: a home with a saved lookup is sampled at the engine price; the lookup is cache-only', async () => {
@@ -618,6 +974,197 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
       expect(await run({})).toMatchObject({ office: 1, failed: 0 });
       expect(await alertRows()).toHaveLength(0);
     });
+  });
+
+  // ---- The included follow-up (owner 2026-11-22, "2A"). ----
+  // A cockroach job often includes one free follow-up visit: a row with followup_included, linked to the job by
+  // followup_source_service_id and parent_service_id (package-followup-booking.js). Once it is done, the days
+  // of the offer count from the day it was done.
+  const SHORT = { year: undefined, month: 'short' };
+  const roach = { service_key_snapshot: 'cockroach_control', service_type: 'Cockroach Control' };
+  // The follow-up of `job`: completed and performed `daysAgo` days ago, unless the test says otherwise.
+  async function seedFollowUp(job, { daysAgo = 5, status = 'completed', record = {}, ...row } = {}) {
+    const [followUp] = await trx('scheduled_services').insert({
+      customer_id: job.customer_id, scheduled_date: day(-daysAgo), service_type: 'Cockroach Control Follow-Up', status,
+      service_key_snapshot: 'cockroach_control', followup_included: true, followup_source_service_id: job.id, parent_service_id: job.id, ...row,
+    }).returning('*');
+    if (record) await seedRecord(followUp, { service_date: day(-daysAgo), ...record });
+    return followUp;
+  }
+
+  test('the follow-up was done 5 days ago and the job 16 days ago: the job is due, and every date follows the follow-up', async () => {
+    const { job } = await seedJob({ daysAgo: 16, ...roach });
+    await seedFollowUp(job, { daysAgo: 5 });
+    expect(await run()).toMatchObject({ jobs: 1, sample: 1, held: 0, failed: 0 });
+    // The follow-up is the job's own: a completed follow-up is not "a visit completed after the job".
+    const [offer] = await sampleRows(job.id);
+    const noYear = { year: undefined };
+    const weekday = formatDateOnly(day(-5), { ...noYear, month: undefined, day: undefined, weekday: 'long' });
+    expect(offer.text_snapshot).toContain(`Thanks for having us out on ${weekday}, ${formatDateOnly(day(-5), SHORT)}.`);
+    expect(offer.text_snapshot).toContain(`we serviced your home on ${formatDateOnly(day(-5), SHORT)}.`);
+    expect(offer.text_snapshot).toContain(`Next visit: You pick, ${formatDateOnly(day(72), SHORT)} to ${formatDateOnly(day(86), SHORT)}`);
+    expect(offer.text_snapshot).toContain(`This estimate is good through ${formatDateOnly(day(25), noYear)}.`);
+    expect(await run()).toMatchObject({ sample: 0, done: 1, failed: 0 });
+  });
+
+  test('the window is the offer day: a follow-up done 2 days ago keeps a job of 16 days ago out, and one done 15 days ago leaves a job of 6 days ago out', async () => {
+    const tooFresh = await seedJob({ daysAgo: 16, ...roach });
+    await seedFollowUp(tooFresh.job, { daysAgo: 2 });
+    const tooOld = await seedJob({ daysAgo: 20, ...roach });
+    await seedFollowUp(tooOld.job, { daysAgo: 15 });
+    // A follow-up done on the day of the job, or before it, never moves the day back.
+    const sameDay = await seedJob({ daysAgo: 6, ...roach });
+    await seedFollowUp(sameDay.job, { daysAgo: 6 });
+    const summary = await run();
+    expect(summary).toMatchObject({ jobs: 1, sample: 1, failed: 0 });
+    expect(await sampledJobIds([tooFresh.job, tooOld.job, sameDay.job])).toEqual([sameDay.job.id]);
+  });
+
+  test('a complaint from between the job and its follow-up still holds: "since the job" starts at the job day', async () => {
+    const { customer, job } = await seedJob({ daysAgo: 16, ...roach });
+    await seedFollowUp(job, { daysAgo: 5 });
+    await trx('customer_interactions').insert({
+      customer_id: customer.id, interaction_type: 'complaint', subject: 'Still seeing activity', created_at: await easternInstant(day(-10), '12:00'),
+    });
+    const summary = await run();
+    expect(summary).toMatchObject({ sample: 0, held: 1, failed: 0 });
+    expect(summary.reasons).toEqual({ complaint: 1 });
+  });
+
+  test('a cancelled follow-up does not count: the days count from the job', async () => {
+    const due = await seedJob({ daysAgo: 6, ...roach });
+    await seedFollowUp(due.job, { daysAgo: 2, status: 'cancelled', record: false });
+    const old = await seedJob({ daysAgo: 16, ...roach });
+    await seedFollowUp(old.job, { daysAgo: 5, status: 'cancelled', record: false });
+    expect(await run()).toMatchObject({ jobs: 1, sample: 1, held: 0, failed: 0 });
+    expect(await sampledJobIds([due.job, old.job])).toEqual([due.job.id]);
+    const [offer] = await sampleRows(due.job.id);
+    expect(offer.text_snapshot).toContain(`we serviced your home on ${formatDateOnly(day(-6), SHORT)}.`);
+  });
+
+  // A follow-up that is still to come keeps the offer waiting, through the rule for another visit.
+  test.each([
+    ['pending, with a day that has passed', { status: 'pending', daysAgo: 2 }, 'another_visit'],
+    ['confirmed for a day to come', { status: 'confirmed', daysAgo: -3 }, 'another_visit'],
+    ['parked for a new day, still dated today', { status: 'rescheduled', daysAgo: 0 }, 'another_visit'],
+    ['parked for a new day, and its day has passed', { status: 'rescheduled', daysAgo: 2 }, null],
+    ['skipped', { status: 'skipped', daysAgo: 2 }, null],
+  ])('an open follow-up (%s)', async (_name, followUp, reason) => {
+    const { job } = await seedJob({ daysAgo: 6, ...roach });
+    await seedFollowUp(job, { ...followUp, record: false });
+    const summary = await run();
+    if (reason) {
+      expect(summary).toMatchObject({ sample: 0, held: 1, failed: 0 });
+      expect(summary.reasons).toEqual({ [reason]: 1 });
+    } else {
+      expect(summary).toMatchObject({ sample: 1, held: 0, failed: 0 });
+    }
+  });
+
+  // A follow-up closed 'completed' with no performed service (inspection only, declined, incomplete, no record)
+  // is not a done follow-up. It does not move the day, and it does not hold.
+  test.each([
+    ['inspection only', { record: { structured_notes: { visitOutcome: 'inspection_only' } } }],
+    ['declined by the customer', { record: { structured_notes: { visitOutcome: 'customer_declined' } } }],
+    ['incomplete, by the status of its record', { record: { status: 'incomplete', structured_notes: {} } }],
+    ['closed with no service record at all', { record: false }],
+    ['a performed record of ANOTHER customer that names the follow-up', { record: { customer_id: 'other' } }],
+  ])('a follow-up closed %s: no hold, and the days count from the job', async (_name, followUp) => {
+    const due = await seedJob({ daysAgo: 6, ...roach });
+    const old = await seedJob({ daysAgo: 16, ...roach });
+    const other = await seedCustomer();
+    for (const { job } of [due, old]) {
+      const record = followUp.record && followUp.record.customer_id === 'other' ? { ...followUp.record, customer_id: other.id } : followUp.record;
+      await seedFollowUp(job, { daysAgo: 2, record });
+    }
+    expect(await run()).toMatchObject({ jobs: 1, sample: 1, held: 0, failed: 0 });
+    expect(await sampledJobIds([due.job, old.job])).toEqual([due.job.id]);
+    const [offer] = await sampleRows(due.job.id);
+    expect(offer.text_snapshot).toContain(`we serviced your home on ${formatDateOnly(day(-6), SHORT)}.`);
+  });
+
+  test("a row of another customer, or one linked to another visit, is not the job's follow-up", async () => {
+    // Linked to the job, but of another customer: no day for the job, and no hold on it.
+    const foreign = await seedJob({ daysAgo: 16, ...roach });
+    const stranger = await seedCustomer();
+    await seedFollowUp(foreign.job, { daysAgo: 5, customer_id: stranger.id });
+    const foreignDue = await seedJob({ daysAgo: 6, ...roach });
+    await seedFollowUp(foreignDue.job, { daysAgo: 2, customer_id: (await seedCustomer()).id });
+    expect(await run()).toMatchObject({ jobs: 1, sample: 1, held: 0, failed: 0 });
+    expect(await sampledJobIds([foreign.job, foreignDue.job])).toEqual([foreignDue.job.id]);
+    const [offer] = await sampleRows(foreignDue.job.id);
+    expect(offer.text_snapshot).toContain(`we serviced your home on ${formatDateOnly(day(-6), SHORT)}.`);
+  });
+
+  test("a completed follow-up row that is not linked to the job moves no day, and it holds the job like any visit done after it", async () => {
+    const { customer, job } = await seedJob({ daysAgo: 8, ...roach });
+    const [earlier] = await trx('scheduled_services').insert({
+      customer_id: customer.id, scheduled_date: day(-40), service_type: 'Cockroach Control', status: 'completed', service_key_snapshot: 'cockroach_control',
+    }).returning('id');
+    // The flag is set, but the links name another visit (or none).
+    await seedFollowUp(job, { daysAgo: 5, followup_source_service_id: earlier.id, parent_service_id: null });
+    const summary = await run();
+    expect(summary).toMatchObject({ jobs: 1, sample: 0, held: 1, failed: 0 });
+    expect(summary.reasons).toEqual({ another_visit: 1 });
+    // A row with the flag and no links at all is the same.
+    const loose = await seedJob({ daysAgo: 9, ...roach });
+    await seedFollowUp(loose.job, { daysAgo: 4, followup_source_service_id: null, parent_service_id: null });
+    expect(await run()).toMatchObject({ jobs: 2, sample: 0, held: 2, failed: 0 });
+  });
+
+  test('another visit completed after the follow-up still holds the job', async () => {
+    const { customer, job } = await seedJob({ daysAgo: 16, ...roach });
+    await seedFollowUp(job, { daysAgo: 5 });
+    await trx('scheduled_services').insert({ customer_id: customer.id, scheduled_date: day(-3), service_type: 'Re-Service', status: 'completed' });
+    const summary = await run();
+    expect(summary).toMatchObject({ jobs: 1, sample: 0, held: 1, failed: 0 });
+    expect(summary.reasons).toEqual({ another_visit: 1 });
+  });
+
+  test('a job with no performed record is never due, also when its follow-up was performed (GREATEST skips a NULL)', async () => {
+    const none = await seedJob({ daysAgo: 8, record: false, ...roach });
+    await seedFollowUp(none.job, { daysAgo: 5 });
+    const notPerformed = await seedJob({ daysAgo: 6, record: { structured_notes: { visitOutcome: 'inspection_only' } }, ...roach });
+    await seedFollowUp(notPerformed.job, { daysAgo: 4 });
+    expect(await run()).toMatchObject({ jobs: 0, sample: 0, held: 0, failed: 0 });
+    expect(await sampledJobIds([none.job, notPerformed.job])).toEqual([]);
+  });
+
+  test('a follow-up row is never a due job of its own, though it is a roach visit with a performed record', async () => {
+    const { job } = await seedJob({ daysAgo: 16, ...roach });
+    const followUp = await seedFollowUp(job, { daysAgo: 5 });
+    await run();
+    expect(await sampledJobIds([followUp])).toEqual([]);
+  });
+
+  // Offer days and job days differ, so the order of the pages is the offer-day order. A page cursor on the job
+  // day would skip jobs or read some twice.
+  test('more due jobs than one page, with follow-up days that reorder them: every job is read once', async () => {
+    const customers = await trx('customers').insert(Array.from({ length: 60 }, (_, index) => ({
+      first_name: 'Paging', last_name: 'Example', phone: `+1941557${String(index).padStart(4, '0')}`, active: true,
+    }))).returning('id');
+    const jobs = await trx('scheduled_services').insert(customers.map((customer, index) => ({
+      customer_id: customer.id, scheduled_date: day(index % 3 === 0 ? -(3 + (index % 12)) : -(20 + (index % 5))),
+      service_type: 'Cockroach Control', status: 'completed', service_key_snapshot: 'cockroach_control',
+    }))).returning(['id', 'customer_id', 'scheduled_date', 'service_type']);
+    await trx('service_records').insert(jobs.map((job) => ({
+      customer_id: job.customer_id, scheduled_service_id: job.id, service_type: job.service_type, status: 'completed', service_date: job.scheduled_date,
+    })));
+    // Two jobs in three were done long ago and have a follow-up done inside the window, on days that cut across
+    // the job days of the other jobs.
+    const withFollowUp = jobs.filter((_, index) => index % 3 !== 0);
+    const followUps = await trx('scheduled_services').insert(withFollowUp.map((job, index) => ({
+      customer_id: job.customer_id, scheduled_date: day(-(3 + ((index * 5) % 12))), service_type: 'Cockroach Control Follow-Up', status: 'completed',
+      service_key_snapshot: 'cockroach_control', followup_included: true, followup_source_service_id: job.id, parent_service_id: job.id,
+    }))).returning(['id', 'customer_id', 'scheduled_date', 'service_type']);
+    await trx('service_records').insert(followUps.map((followUp) => ({
+      customer_id: followUp.customer_id, scheduled_service_id: followUp.id, service_type: followUp.service_type, status: 'completed',
+      service_date: followUp.scheduled_date,
+    })));
+    // No email on file ends each job at the first rule it reaches, with no send.
+    const summary = await run();
+    expect(summary).toMatchObject({ jobs: 60, held: 60, sample: 0, failed: 0 });
+    expect(summary.reasons).toEqual({ no_email: 60 });
   });
 
   test('with the gate at true (the future customer value) the job does nothing', async () => {

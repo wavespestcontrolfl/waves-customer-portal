@@ -1161,6 +1161,40 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     '— Waves Pest Control',
   ]);
 
+  // GATE_DOC_CROSS_SELL_EMAIL (owner 2026-11-21): one closing line about the
+  // add-a-service and referral cards. It names only the cards this invoice's
+  // receipt shows (services/receipt-cards.js), never a price, and it links to
+  // the Waves app (owner 2026-11-22): the app's sign-in decides who may act,
+  // so the links carry no token. It rides the account holder's own copy only.
+  // The line is a pitch inside an operational email, so it follows the
+  // customer's marketing choices (email-division's embedded-pitch rule): a
+  // customer who turned offers off, takes marketing by text only, or
+  // unsubscribed from marketing email gets the receipt without it.
+  // Best-effort: no line on any failure.
+  let offerLine = null;
+  if (require('../config/feature-gates').isEnabled('docCrossSellEmail')) {
+    try {
+      const { embeddedPitchAllowed, embeddedReferralAskAllowed } = require('./email-division/eligibility');
+      const toHolder = Boolean(cleanEmail(recipient.email)) && cleanEmail(recipient.email) === cleanEmail(customer.email);
+      const who = { customerId: invoice.customer_id, email: recipient.email };
+      if (toHolder && await embeddedPitchAllowed(who)) {
+        const cards = await require('./receipt-cards').receiptCardsForInvoiceId(invoice.id);
+        // The referral part is a referral ask too: the customer's referral
+        // email choice decides it, apart from the service offer.
+        const referral = cards.referral && await embeddedReferralAskAllowed(who) ? cards.referral : null;
+        // The same links as the receipt page's cards: each names this
+        // customer's profile, so the app opens the right one.
+        const links = require('./app-link-cards').appLinksForCustomer(invoice.customer_id);
+        offerLine = require('./doc-offer-email-line').docOfferEmailLine({
+          crossSell: cards.crossSell, referral,
+          appUrls: { offer: `${domain}${links.offer}`, referral: `${domain}${links.referral}` },
+        });
+      }
+    } catch (err) {
+      logger.warn(`[invoice-email] offer line skipped (code=${err?.code || 'none'})`);
+    }
+  }
+
   if (sendgrid.isConfigured()) {
     const receiptHandoff = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
     try {
@@ -1180,6 +1214,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
         },
         recipientType: 'customer',
         recipientId: invoice.customer_id || null,
+        ...(offerLine ? { bodyAppend: offerLine } : {}),
         triggerEventId: `invoice_receipt:${invoice.id}`,
         idempotencyKey,
         categories: ['invoice_receipt'],

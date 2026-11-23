@@ -6,14 +6,12 @@ jest.mock('../models/db', () => {
   db.transaction = jest.fn(async cb => cb(db));
   return db;
 });
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 jest.mock('../services/appointment-address', () => ({ planAppointmentAddress: jest.fn(), lockAppointmentAddress: jest.fn(), applyAppointmentAddress: jest.fn(async () => ['stop']), refreshAppointmentAddressBriefs: jest.fn(async () => {}) }));
 jest.mock('../services/appointment-tagger', () => ({ classifyAppointmentType: jest.fn(() => ({ tag: 'general_pest', label: 'General Pest' })) }));
 jest.mock('../services/scheduling/occupancy', () => ({ acquireOccupancyLocks: jest.fn() }));
 jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn() }));
 const db = require('../models/db');
 const address = require('../services/appointment-address');
-const gates = require('../config/feature-gates');
 const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 const tagger = require('../services/appointment-tagger');
 const { executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
@@ -23,7 +21,6 @@ let plan;
 let property;
 beforeEach(() => {
   jest.clearAllMocks();
-  gates.isEnabled.mockReturnValue(true);
   property = { id: input.property_id, address_line1: '200 Test Street', city: 'Test City', state: 'FL', zip: '34201', customer_id: 'customer' };
   plan = { anchor: { id: input.appointment_id, customer_id: 'customer' }, propertyId: input.property_id, scope: 'visit', rows: [
     { id: input.appointment_id, customer_id: 'customer', scheduled_date: '2099-01-02', status: 'en_route', recurring_parent_id: 'template' },
@@ -66,7 +63,6 @@ test('confirmed execution rebuilds WDO research after commit, never inside the t
   expect(address.refreshAppointmentAddressBriefs.mock.invocationCallOrder[0]).toBeGreaterThan(address.applyAppointmentAddress.mock.invocationCallOrder[0]);
   // A refused confirmation never triggers research.
   jest.clearAllMocks();
-  gates.isEnabled.mockReturnValue(true);
   property.address_line1 = '300 Test Street';
   await call({ ...input, confirmed: true, _verified_address_fingerprint: previewFingerprint(preview) }, { confirmed: true });
   expect(address.refreshAppointmentAddressBriefs).not.toHaveBeenCalled();
@@ -90,11 +86,8 @@ test('destination changes between approval and commit refuse without writes', as
   expect(address.applyAppointmentAddress).not.toHaveBeenCalled();
 });
 
-test('missing server confirmation, dark gate, terminal visits, and recurring templates fail closed', async () => {
+test('missing server confirmation, terminal visits, and recurring templates fail closed', async () => {
   expect((await call({ ...input, confirmed: true })).error).toMatch(/confirmation card/);
-  gates.isEnabled.mockReturnValue(false);
-  expect((await call()).error).toMatch(/not enabled/);
-  gates.isEnabled.mockReturnValue(true);
   plan.rows[0].status = 'completed';
   expect((await call()).error).toMatch(/completed/);
   plan.rows[0] = { ...plan.rows[0], status: 'pending', is_recurring: true, recurring_parent_id: null };

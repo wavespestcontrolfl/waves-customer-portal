@@ -179,9 +179,12 @@ function moveRuleConfig(overrides) {
     // closed-day move too. Owner decision pending on the number.
     conflictMaxAddedDriveMinutes: overrides.conflictMaxAddedDriveMinutes
       ?? intEnv('AUTO_DISPATCH_CONFLICT_MAX_ADDED_DRIVE_MINUTES', 15, { min: 0, max: 240 }),
-    // The most automatic moves one visit may have (owner 2026-10-09: "at most
-    // two"), counted from the durable reschedule_log (move-limit.js). Day
-    // moves, same-day re-times and forced moves all count. 0 = no limit.
+    // The most automatic DAY moves one visit may have (owner 2026-10-09: "at
+    // most two"), counted from the durable reschedule_log (move-limit.js). A
+    // same-day change of the hour does not count (owner 2026-11-22, "days");
+    // a forced move of a placed visit counts when it changes the day; the
+    // first placement of a visit with no arrival window never counts.
+    // 0 = no limit.
     maxAutoMovesPerVisit: overrides.maxAutoMovesPerVisit
       ?? intEnv('AUTO_DISPATCH_MAX_MOVES_PER_VISIT', 2, { min: 0, max: 20 }),
     // ROAD CHECK (GATE_AUTO_DISPATCH_ROAD_CHECK, road-check.js): an ordinary
@@ -287,7 +290,7 @@ function getAutoDispatchConfig(overrides = {}) {
     // runs — behavior is the legacy flat lock, byte for byte.
     routeTiersEnabled,
     // FLEX-TIER: when true, auto-dispatch's day-move guard is the Flexible
-    // tier (flex-tier.js: 73h freeze, fixed ±5-day radius clamped by the
+    // tier (flex-tier.js: 25h night freeze, a ±5-day radius (±7 for a visit that repeats every 8 weeks or less often) clamped by the
     // series' adjacent occurrence) instead of the route-tiers days-out
     // ladder. Independent of routeTiersEnabled; guardMode below gives this
     // one precedence when both are somehow on.
@@ -299,7 +302,18 @@ function getAutoDispatchConfig(overrides = {}) {
     // this same config object — a grouped move's siblings are always
     // checked under the identical mode as the tapped row that triggered it.
     guardMode: flexTierEnabled ? 'flex' : (routeTiersEnabled ? 'tiers' : 'legacy'),
+    ...flexPolicyFacts(flexTierEnabled),
   };
+}
+
+// What the admin page states for a flex run (AutoDispatchPage policyText), saved in config_snapshot so a run keeps
+// the rule it ran under: the night freeze in hours (the run always passes lock24h, owner 2026-11-03) and the widest
+// band (±7, owner 2026-11-22; flexBandRadius decides which visits get it). A run saved before these fields existed
+// has neither, and the page then states only what every flex run had in common.
+function flexPolicyFacts(flexTierEnabled) {
+  if (!flexTierEnabled) return {};
+  const flexTier = require('./flex-tier');
+  return { flexFreezeHours: flexTier.flexFreezeHoursFor(true), flexWideRadiusDays: flexTier.FLEX_TIER_WIDE_RADIUS_DAYS };
 }
 
 module.exports = {

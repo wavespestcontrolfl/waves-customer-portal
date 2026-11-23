@@ -151,7 +151,7 @@ function terminalInvoiceLines(invoice, customer, amountDueCents) {
     });
     const f = invoiceTotalsFacts(invoice, customer);
     const adjustments = [
-      f.discount > 0 ? { label: f.discountLabel, amount_cents: -cents(f.discount) } : null,
+      ...f.discountRows.map((row) => ({ label: row.label, amount_cents: -cents(row.amount) })),
       f.showTax ? { label: f.taxLabel, amount_cents: cents(f.tax) } : null,
       f.depositCredit > 0 ? { label: 'Deposit paid at acceptance', amount_cents: -cents(f.depositCredit) } : null,
       f.creditApplied > 0 ? { label: 'Account credit applied', amount_cents: -cents(f.creditApplied) } : null,

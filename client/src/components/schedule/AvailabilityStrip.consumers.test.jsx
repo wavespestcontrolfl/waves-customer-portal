@@ -173,7 +173,7 @@ it('new appointment: taking a chip sets the date, the hour and the technician it
   vi.stubGlobal('fetch', vi.fn(async (url) => {
     const u = String(url);
     if (u.endsWith('/admin/technicians')) return json({ technicians: [{ id: 'tech-1', name: 'Fixture Tech' }] });
-    if (u.includes('/properties?context=appointment_address')) return json({ properties: [], canChangeAppointmentAddress: false });
+    if (u.includes('/properties?context=appointment_address')) return json({ properties: [] });
     if (u.includes('/schedule-estimates')) return json({ estimates: [] });
     if (u.endsWith('/admin/dispatch/slot-check')) return json({ ok: true, results: [{ conflicts: [] }] });
     return json({});
@@ -284,7 +284,7 @@ it('open times, New Appointment: every route is listed, and a row books its tech
   vi.stubGlobal('fetch', vi.fn(async (url) => {
     const u = String(url);
     if (u.endsWith('/admin/technicians')) return json({ technicians: [{ id: 'tech-1', name: 'Fixture Tech' }] });
-    if (u.includes('/properties?context=appointment_address')) return json({ properties: [], canChangeAppointmentAddress: false });
+    if (u.includes('/properties?context=appointment_address')) return json({ properties: [] });
     if (u.includes('/schedule-estimates')) return json({ estimates: [] });
     if (u.endsWith('/admin/dispatch/slot-check')) return json({ ok: true, results: [{ conflicts: [] }] });
     return json({});

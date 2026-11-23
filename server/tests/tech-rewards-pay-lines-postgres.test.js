@@ -1,6 +1,6 @@
 // Real PostgreSQL transactions (rolled back): Tech Rewards Plan D5-5, the December gift as a pay line on pay runs, behind
-// GATE_TECH_REWARDS_PAY_LINES (which needs GATE_PAYROLL_PAY_LINES), and the stay bonus behind GATE_TECH_REWARDS_STAY_BONUS (the
-// last describe block). The line is derived data, written and worked out again when a
+// GATE_TECH_REWARDS_PAY_LINES (which needs GATE_PAYROLL_PAY_LINES), the stay bonus behind GATE_TECH_REWARDS_STAY_BONUS and the
+// season bonus behind GATE_TECH_REWARDS_SEASON_BONUS (the last two describe blocks). The line is derived data, written and worked out again when a
 // run is drafted, recomputed and finalized: one open line per technician in the first run dated on or after the gift date that is
 // ready, owned by that draft run, paid with its check, and deleted when the run is voided or finalizes without paying it. A gift
 // that is not ready waits and never holds the run. All names and amounts are synthetic. DATABASE_URL-gated like the other
@@ -16,6 +16,11 @@ jest.mock('../models/db', () => new Proxy((...args) => mockConnection(...args), 
   },
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The season score's parts are D5-2's own and have their own suite (tech-rewards-scores-postgres.test.js): the season bonus
+// tests stub the score and its settings, as the scoreboard's database suite does. Nothing else of the module is replaced.
+jest.mock('../services/tech-rewards-scores', () => ({
+  ...jest.requireActual('../services/tech-rewards-scores'), buildSeasonScore: jest.fn(), getSettings: jest.fn(),
+}));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => {
     req.technicianId = req.headers['x-test-admin'] || null;
@@ -33,9 +38,12 @@ jest.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: jest.fn() }));
 const { randomUUID } = require('node:crypto');
 const express = require('express');
 const router = require('../routes/admin-payroll');
-const { syncTechRewardLines, stayBonusStatus } = require('../services/tech-rewards-pay-lines');
+const { syncTechRewardLines, stayBonusStatus, seasonBonusPaidCents } = require('../services/tech-rewards-pay-lines');
 const { techRewardsOwnKey, techRewardsOwnedSql } = require('../services/payroll-pay-lines');
-const { readGross, readStayPay } = require('../services/tech-rewards-scoreboard');
+const { readBonusPay, closedSeason, seasonBonusOf, readSeasonFigures } = require('../services/tech-rewards-scoreboard');
+const { getYearStatement } = require('../services/tech-rewards-year-statement');
+const scores = require('../services/tech-rewards-scores');
+const { TAX_YEARS } = require('../services/payroll-calc');
 const { workedWeeks } = require('../services/payroll-runs');
 const { staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
 
@@ -47,7 +55,7 @@ const GIFT_WEEK = '2026-12-07'; // pay date Fri Dec 18, the last Friday on or be
 const NEXT_WEEK = '2026-12-14'; // pay date Fri Dec 25
 const NOW = Date.parse('2027-01-05T17:00:00Z'); // every week above has ended
 
-const GATES = ['GATE_PAYROLL', 'GATE_PAYROLL_PAY_LINES', 'GATE_TECH_REWARDS_PAY_LINES', 'GATE_TECH_REWARDS_STAY_BONUS', 'GATE_PAYROLL_FORM_FIGURES',
+const GATES = ['GATE_PAYROLL', 'GATE_PAYROLL_PAY_LINES', 'GATE_TECH_REWARDS_PAY_LINES', 'GATE_TECH_REWARDS_STAY_BONUS', 'GATE_TECH_REWARDS_SEASON_BONUS', 'GATE_PAYROLL_FORM_FIGURES',
   'GATE_PAYROLL_TIME_OFF', 'GATE_SHIFT_CLOSE_REVIEW', 'GATE_PAYROLL_COMMISSION_LEDGER', 'GATE_PAYROLL_REVIEW_BONUS_IMPORT'];
 const GIFT = 30000;
 
@@ -177,6 +185,7 @@ postgres('tech rewards pay lines: the December gift', () => {
     process.env.GATE_PAYROLL_PAY_LINES = 'true';
     process.env.GATE_TECH_REWARDS_PAY_LINES = 'true';
     delete process.env.GATE_TECH_REWARDS_STAY_BONUS;
+    delete process.env.GATE_TECH_REWARDS_SEASON_BONUS;
     delete process.env.GATE_PAYROLL_FORM_FIGURES;
     delete process.env.GATE_PAYROLL_TIME_OFF;
     delete process.env.GATE_SHIFT_CLOSE_REVIEW;
@@ -413,11 +422,10 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(stored.calc_snapshot.lineOvertimeWeeks.find((w) => w.weekStart === WEEK)).toMatchObject({
         premiumCents: 67, ordinaryPremiumCents: 34, earlierAllocatedCents: 600, earlierPremiumCents: 33,
       });
-      // The pay earned in WEEK: its own 880.00, both commissions, and their overtime as it was PAID: 33, then 34. Put in pay
-      // date order the Dec 18 check looks like the first to pay for the week, where its commission would have earned 33.
-      expect(await readGross(trx, tech, WEEK, '2026-11-15')).toBe(88000 + 600 + 33 + 600 + 34);
-      // the stay bonus's reader takes the same figures: three weeks of wages, the commissions, 33 and 34; no gift, none of its 33
-      expect((await readStayPay(trx, tech, WEEK, '2026-12-13')).cents).toBe(3 * 88000 + 600 + 33 + 600 + 34);
+      // The pay earned in WEEK holds both commissions and their overtime as it was PAID: 33, then 34. Put in pay date order the
+      // Dec 18 check looks like the first to pay for the week, where its commission would have earned 33. The bonus reader
+      // takes the figures of the three pay weeks: three weeks of wages, the commissions, 33 and 34; no gift, none of its 33
+      expect((await readBonusPay(trx, tech, WEEK, '2026-12-13')).cents).toBe(3 * 88000 + 600 + 33 + 600 + 34);
     });
 
     it('makes a week whole that two older checks left 1 cent short: 33 + 33, then the gift\'s check pays 68 (134 on the three lines)', async () => {
@@ -1930,6 +1938,528 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect((await lineOf(alpha)).counted_check_ids).toHaveLength(3);
       await expect(migration.down(trx)).rejects.toThrow(refused);
       expect(await trx.schema.hasColumn('payroll_pay_lines', 'counted_check_ids')).toBe(true);
+    });
+  });
+  describe('the season bonus', () => {
+    const SEASON_GATE = 'GATE_TECH_REWARDS_SEASON_BONUS';
+    const CUT_WEEK = '2027-09-06'; // the last pay week whose check counts in the base (default pay date Fri Sep 17)
+    const BONUS_WEEK = '2027-09-13'; // default pay date Fri Sep 24, the last Friday of September 2027
+    const NEXT = '2027-09-20'; // default pay date Fri Oct 1
+    const SETTINGS = {
+      version: 3, weights: { onTime: 25, audit: 25, callbacks: 20, truck: 10, ownerRating: 20 }, cutLines: { top: 90, mid: 80, low: 70 },
+    };
+    const PARTS = { onTime: 95, audit: 90, callbacks: 88, truck: 100, ownerRating: 85 };
+    const scoreOf = (score, rateBps) => ({ complete: true, year: 2027, parts: PARTS, score, rateBps, settings: SETTINGS });
+    // three paid weeks inside the season: 3 x 880.00 = 2,640.00
+    const paidWeeks = async (technicianId) => {
+      for (const week of ['2027-06-07', '2027-06-14', '2027-06-21']) await paidWeek(technicianId, week);
+    };
+    const PERIOD = 'the pay earned Mar 1, 2027 to Aug 31, 2027';
+    const seasonWaits = (name, why) => `Season bonus (2027) for ${name} waits: ${why}. Only a pay run dated Nov 23, 2027 or earlier can add it`;
+    const waitsOf = async (runId) => (await syncEventOf(runId, 'waits')).flatMap((m) => m.waits);
+    const skippedOf = async () => (await syncEvents()).flatMap((e) => e.metadata.skipped || []);
+
+    beforeEach(() => {
+      process.env[SEASON_GATE] = 'true';
+      delete process.env.GATE_TECH_REWARDS_PAY_LINES; // the season bonus does not need the gift's gate
+      jest.setSystemTime(Date.parse('2027-10-12T17:00:00Z')); // every week used below has ended
+      TAX_YEARS[2027] = TAX_YEARS[2026]; // no 2027 withholding tables are on file yet, and a 2027 check needs them
+      scores.buildSeasonScore.mockReset().mockResolvedValue(scoreOf(92.5, 400));
+      scores.getSettings.mockReset().mockResolvedValue(SETTINGS);
+    });
+    afterEach(() => {
+      delete TAX_YEARS[2027];
+    });
+
+    it('is the band rate of the score times the pay earned in the season times the multiplier, on the run dated the last Friday of September', async () => {
+      const alpha = await readyTech('Sample Alpha'); // hired Jan 10, 2024: 3 full years on Mar 1, 2027, so the multiplier is 1.75
+      const bravo = await readyTech('Sample Bravo', { hire_date: '2027-05-10' }); // hired during the season: no year yet, 1.00
+      const late = await readyTech('Sample Late', { hire_date: '2027-09-01' }); // hired after the season
+      const gone = await readyTech('Sample Gone', { employment_status: 'inactive' });
+      const manager = await readyTech('Sample Manager', { role: 'admin' });
+      for (const id of [alpha, gone, manager]) await paidWeeks(id);
+      await paidWeek(bravo, '2027-06-07');
+      await approvedWeek(alpha, BONUS_WEEK);
+      const run = await draft(BONUS_WEEK);
+      expect(run.payDate).toBe('2027-09-24');
+      const line = await lineOf(alpha);
+      // 4% of 2,640.00 is 105.60, times 1.75
+      expect(line).toMatchObject({
+        kind: 'season_bonus', status: 'open', amount_cents: 18480, source_id: `season_bonus:${alpha}:2027`,
+        note: `4% of $2,640.00, ${PERIOD}, times 1.75 (season score 92.5)`,
+      });
+      expect([dateOf(line.earned_week_start), dateOf(line.covers_from), dateOf(line.covers_to)]).toEqual([BONUS_WEEK, '2027-03-01', '2027-08-31']);
+      // the line keeps the three checks it was worked out from
+      expect(line.counted_check_ids).toEqual((await trx('payroll_checks').where({ technician_id: alpha, status: 'finalized' }).select('id')).map((row) => row.id).sort());
+      expect(line.counted_check_ids).toHaveLength(3);
+      expect(checkOf(run, alpha)).toMatchObject({ techRewardsCents: 18480, grossCents: 88000 + 18480 });
+      // hired during the season: covered from the hire date, and a check for the bonus alone
+      const bravoLine = await lineOf(bravo);
+      expect(bravoLine).toMatchObject({ amount_cents: 3520, note: `4% of $880.00, ${PERIOD}, times 1 (season score 92.5)` });
+      expect([dateOf(bravoLine.covers_from), dateOf(bravoLine.covers_to)]).toEqual(['2027-05-10', '2027-08-31']);
+      expect(checkOf(run, bravo)).toMatchObject({ techRewardsCents: 3520, grossCents: 3520 });
+      for (const id of [late, gone, manager]) expect(await linesOf(id)).toHaveLength(0);
+      expect(await skippedOf()).toContainEqual({ technician_id: late, kind: 'season_bonus', reason: 'hired_after_season' });
+      expect(await notesOf(run.id)).toEqual([]);
+      // the score is asked for the whole season, as of its last day
+      expect(scores.buildSeasonScore).toHaveBeenCalledWith(alpha, 2027, { start: '2027-03-01', end: '2027-08-31' }, expect.anything());
+      // the line is the figure the scoreboard works out for the closed season, from the same reads
+      const season = closedSeason(2027);
+      expect(seasonBonusOf('2024-01-10', season, await readSeasonFigures(trx, alpha, season)).seasonBonus)
+        .toMatchObject({ estimateCents: 18480, grossCents: 264000, rateBps: 400, multiplierE4: 17500 });
+      // the audit event names the line and holds no amount: ids, kinds, reason codes and counts only
+      const [event] = await syncEventOf(run.id, 'added_line_ids');
+      expect(event.added_line_ids.sort()).toEqual([line.id, bravoLine.id].sort());
+      const amounts = [18480, 264000, 3520, '18480', '264000', '184.80', '2640.00', '$184.80', '$2,640.00', 92.5, '92.5'];
+      const valuesOf = (value) => (value && typeof value === 'object' ? Object.values(value).flatMap(valuesOf) : [value]);
+      expect(valuesOf(event).filter((value) => amounts.includes(value))).toEqual([]);
+      expect(Object.keys(event).filter((key) => /cents|amount|base|note|score/i.test(key))).toEqual([]);
+      // nothing is paid yet, so the scoreboard has no paid amount to show
+      expect(await seasonBonusPaidCents(trx, alpha, 2027)).toBeNull();
+      // finalize pays it with its check, the scoreboard reads the paid amount, and no later run writes the season again
+      await finalize(run.id);
+      expect(await lineOf(alpha)).toMatchObject({ status: 'paid', amount_cents: 18480 });
+      expect([await seasonBonusPaidCents(trx, alpha, 2027), await seasonBonusPaidCents(trx, bravo, 2027), await seasonBonusPaidCents(trx, alpha, 2026)])
+        .toEqual([18480, 3520, null]);
+      // the yearly pay statement (D5-6) names the bonus from the lines the finalized check itself froze, with nothing left unnamed
+      expect((await getYearStatement(alpha, '2027')).pay).toMatchObject({ seasonBonusCents: 18480, stayBonusCents: 0, decemberGiftCents: 0, otherCents: 0 });
+      expect((await getYearStatement(bravo, '2027')).pay).toMatchObject({ seasonBonusCents: 3520, otherCents: 0 });
+      await approvedWeek(alpha, NEXT);
+      const next = await draft(NEXT);
+      expect(await linesOf(alpha)).toHaveLength(1);
+      expect(checkOf(next, alpha)).not.toHaveProperty('techRewardsCents');
+    });
+
+    it.each([
+      [85, 250, 11550, '2.5%'], // 2.5% of 2,640.00 is 66.00, times 1.75
+      [72.25, 100, 4620, '1%'],
+    ])('is the rate of the score\'s band: a score of %s', async (score, rateBps, cents, rate) => {
+      scores.buildSeasonScore.mockResolvedValue(scoreOf(score, rateBps));
+      const alpha = await readyTech('Sample Alpha');
+      await paidWeeks(alpha);
+      const run = await draft(BONUS_WEEK);
+      expect(await lineOf(alpha)).toMatchObject({ amount_cents: cents, note: `${rate} of $2,640.00, ${PERIOD}, times 1.75 (season score ${score})` });
+      expect(checkOf(run, alpha)).toMatchObject({ techRewardsCents: cents, grossCents: cents });
+    });
+
+    it('counts the review rate in the multiplier: delivered asks and credited reviews of the season', async () => {
+      const alpha = await readyTech('Sample Alpha');
+      await paidWeeks(alpha);
+      // 4 asks delivered in the season and 1 review credited in it: 25%, the full review part (+0.50), so 1.75 becomes 2.25
+      for (const day of ['2027-04-05', '2027-05-10', '2027-06-14', '2027-07-19']) {
+        await trx('review_requests').insert({ technician_id: alpha, token: randomUUID(), service_date: day, sms_sent_at: `${day}T16:00:00Z` });
+      }
+      await trx('review_incentive_payouts').insert({ technician_id: alpha, source: 'google_review', earned_at: '2027-06-20T16:00:00Z' });
+      await draft(BONUS_WEEK);
+      expect(await lineOf(alpha)).toMatchObject({ amount_cents: 23760, note: `4% of $2,640.00, ${PERIOD}, times 2.25 (season score 92.5)` });
+    });
+
+    it('is not looked for on a run dated before the last Friday of September, and waits on a run for the last pay week its pay is counted through', async () => {
+      const alpha = await readyTech('Sample Alpha');
+      await paidWeeks(alpha);
+      await approvedWeek(alpha, CUT_WEEK); // 880.00 of wages for Sep 6 - 12: after the season, so none of it is in the base
+      const early = await draft(CUT_WEEK); // dated Sep 17: before the bonus's pay date
+      expect(early.payDate).toBe('2027-09-17');
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(await notesOf(early.id)).toEqual([]);
+      expect(scores.buildSeasonScore).not.toHaveBeenCalled();
+      await voidRun(early.id);
+      // The same week on a run dated the bonus's pay date: its own check is not final, so its pay is not in the base yet.
+      // That check pays a 100.00 commission earned in the week of Aug 23, which is pay of the season.
+      await trx('payroll_pay_lines').insert({ technician_id: alpha, kind: 'commission', amount_cents: 10000, earned_week_start: '2027-08-23' });
+      const run = await draft(CUT_WEEK, '2027-09-24');
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(checkOf(run, alpha)).toMatchObject({ commissionCents: 10000, grossCents: 88000 + 10000 });
+      expect([run.waiting, run.blocked]).toEqual([[], []]);
+      const tooSoon = 'the pay it is worked out from is counted through the pay week of Sep 6, 2027, and only a pay run for a later week can add it';
+      expect(await notesOf(run.id)).toEqual([seasonWaits('Sample Alpha', tooSoon)]);
+      expect(await waitsOf(run.id)).toContainEqual({
+        technician_id: alpha, kind: 'season_bonus', source_id: `season_bonus:${alpha}:2027`, reason: 'pay_week_too_early', week: CUT_WEEK,
+      });
+      await finalize(run.id);
+      expect(await notesOf(run.id)).toEqual(['Season bonus (2027) for Sample Alpha was not on this pay run. Only a pay run dated Nov 23, 2027 or earlier can add it']);
+      // the next week's run counts that check: 4% of 2,740.00 is 109.60, times 1.75
+      const next = await draft(BONUS_WEEK);
+      const line = await lineOf(alpha);
+      expect(line).toMatchObject({ amount_cents: 19180, note: `4% of $2,740.00, ${PERIOD}, times 1.75 (season score 92.5)` });
+      expect(line.counted_check_ids).toHaveLength(4);
+      expect(checkOf(next, alpha).techRewardsCents).toBe(19180);
+      // A commission of the season that the bonus's own run pays is not in the base: only checks for earlier pay weeks count,
+      // so the amount does not depend on which run carries the bonus.
+      await trx('payroll_pay_lines').insert({ technician_id: alpha, kind: 'commission', amount_cents: 5000, earned_week_start: '2027-08-16' });
+      const again = await recompute(next.id);
+      expect(checkOf(again, alpha)).toMatchObject({ commissionCents: 5000, techRewardsCents: 19180 });
+      await finalize(next.id);
+      expect(await notesOf(run.id)).toEqual([]); // paid: nothing waits
+      // a run the bonus counted is not voided first: inside one tax year the pay run's own order already holds it
+      const held = await api('POST', `/runs/${run.id}/void`, { body: { reason: 'Sample correction' } });
+      expect([held.status, held.body.error]).toEqual([409, 'A later pay run is already final. Void it first.']);
+    });
+
+    it('holds a counted run that the tax year\'s own order does not: a season week whose check is dated in the next tax year, finalized before the bonus', async () => {
+      const alpha = await readyTech('Sample Alpha');
+      for (const week of ['2027-06-07', '2027-06-14']) await paidWeek(alpha, week);
+      // the week of Jun 21 was paid late: its check is dated Jan 4, 2028, and it was final before the bonus's run
+      await trx('payroll_runs').insert({ week_start: '2027-06-21', pay_date: '2028-01-04', status: 'finalized' });
+      const lateRun = await paidWeek(alpha, '2027-06-21', { pay_date: '2028-01-04' });
+      const run = await draft(BONUS_WEEK); // dated Sep 24, 2027: the tax year's order does not link it to a 2028 check
+      expect(checkOf(run, alpha).techRewardsCents).toBe(18480);
+      await finalize(run.id);
+      expect((await lineOf(alpha)).counted_check_ids).toHaveLength(3);
+      const refused = async () => {
+        const done = await api('POST', `/runs/${lateRun}/void`, { body: { reason: 'Sample correction' } });
+        return [done.status, done.body.error];
+      };
+      const HELD = [409, 'A season bonus on another paycheck was worked out from this pay run. Void the pay run that paid the bonus first.'];
+      expect(await refused()).toEqual(HELD);
+      delete process.env[SEASON_GATE]; // the paid bonus is protected with the gate off too
+      expect(await refused()).toEqual(HELD);
+      // the run that paid the bonus goes first and takes the bonus line with it; then the counted run goes
+      await voidRun(run.id);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      await voidRun(lateRun);
+    });
+
+    it('waits, with a note, while a week from the season\'s start on is approved and has no finalized check', async () => {
+      const alpha = await readyTech('Sample Alpha');
+      await paidWeeks(alpha);
+      await approvedWeek(alpha, '2027-07-05'); // approved, never paid
+      await approvedWeek(alpha, BONUS_WEEK);
+      const run = await draft(BONUS_WEEK);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(checkOf(run, alpha)).not.toHaveProperty('techRewardsCents');
+      expect([run.waiting, run.blocked]).toEqual([[], []]); // the wait does not hold the run or the check
+      expect(await notesOf(run.id)).toEqual([seasonWaits('Sample Alpha', 'the week of Jul 5, 2027 is not paid yet')]);
+      // the July week is paid by a catch-up run: its 880.00 is in the base. 4% of 3,520.00 is 140.80, times 1.75
+      const catchUp = await draft('2027-07-05', '2027-09-22');
+      await finalize(catchUp.id);
+      const again = await recompute(run.id);
+      expect(await lineOf(alpha)).toMatchObject({ amount_cents: 24640, note: `4% of $3,520.00, ${PERIOD}, times 1.75 (season score 92.5)` });
+      expect(checkOf(again, alpha)).toMatchObject({ techRewardsCents: 24640, grossCents: 88000 + 24640 });
+      expect(await notesOf(run.id)).toEqual([]);
+    });
+
+    it('waits while a part of the score has no data, and is written when the score is complete', async () => {
+      const alpha = await readyTech('Sample Alpha');
+      await paidWeeks(alpha);
+      await approvedWeek(alpha, BONUS_WEEK);
+      scores.buildSeasonScore.mockResolvedValue({ complete: false, year: 2027, parts: { ...PARTS, audit: null }, missing: ['audit'] });
+      const run = await draft(BONUS_WEEK);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      const partial = 'a part of their season score has no data (their scoreboard names it), and a bonus is never worked out from a partial score';
+      expect(await notesOf(run.id)).toEqual([seasonWaits('Sample Alpha', partial)]);
+      expect(await waitsOf(run.id)).toContainEqual({
+        technician_id: alpha, kind: 'season_bonus', source_id: `season_bonus:${alpha}:2027`, reason: 'score_incomplete', week: null,
+      });
+      scores.buildSeasonScore.mockResolvedValue(scoreOf(92.5, 400));
+      const again = await recompute(run.id);
+      expect(checkOf(again, alpha).techRewardsCents).toBe(18480);
+      expect(await notesOf(run.id)).toEqual([]);
+    });
+
+    it('waits while no score settings are in force for the season', async () => {
+      const alpha = await readyTech('Sample Alpha');
+      await paidWeeks(alpha);
+      await approvedWeek(alpha, BONUS_WEEK);
+      scores.buildSeasonScore.mockRejectedValue(new scores.TechRewardsScoresError('NO_SETTINGS_IN_FORCE', 'No score settings are in force'));
+      const run = await draft(BONUS_WEEK);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(await notesOf(run.id)).toEqual([seasonWaits('Sample Alpha', 'no score settings are in force for the last day of the season, so set them first')]);
+      expect((await waitsOf(run.id)).map((w) => w.reason)).toEqual(['score_settings_missing']);
+    });
+
+    it('waits, and the pay run goes on, when the score cannot be read: a failed statement there does not stop payroll', async () => {
+      const logger = require('../services/logger');
+      const alpha = await readyTech('Sample Alpha');
+      const bravo = await readyTech('Sample Bravo');
+      for (const id of [alpha, bravo]) {
+        await paidWeeks(id);
+        await approvedWeek(id, BONUS_WEEK);
+      }
+      // Alpha's score read fails inside PostgreSQL, which would abort the pay run's transaction; Bravo's is read as usual
+      scores.buildSeasonScore.mockImplementation(async (technicianId, _year, _season, conn) => {
+        if (technicianId === alpha) await conn.raw('SELECT 1 / 0');
+        return scoreOf(92.5, 400);
+      });
+      const run = await draft(BONUS_WEEK);
+      expect([run.waiting, run.blocked]).toEqual([[], []]);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(checkOf(run, alpha)).toMatchObject({ grossCents: 88000 });
+      expect(checkOf(run, bravo)).toMatchObject({ techRewardsCents: 18480, grossCents: 88000 + 18480 });
+      expect(await notesOf(run.id)).toEqual([seasonWaits('Sample Alpha', 'the pay run could not read their season score because of an error, so report it')]);
+      expect((await waitsOf(run.id)).map((w) => [w.technician_id, w.reason])).toEqual([[alpha, 'score_read_failed']]);
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining(`season 2027 score could not be read for technician ${alpha}`));
+      // the run finalizes with the others' bonuses, and the next sync after the fix writes Alpha's
+      scores.buildSeasonScore.mockResolvedValue(scoreOf(92.5, 400));
+      const again = await recompute(run.id);
+      expect(checkOf(again, alpha).techRewardsCents).toBe(18480);
+      expect(await notesOf(run.id)).toEqual([]);
+    });
+
+    it('writes no line and no note for a complete score under the lowest cut line, and moves an open line when the score is corrected', async () => {
+      const alpha = await readyTech('Sample Alpha');
+      await paidWeeks(alpha);
+      for (const week of [BONUS_WEEK, NEXT]) await approvedWeek(alpha, week);
+      const run = await draft(BONUS_WEEK);
+      expect(await lineOf(alpha)).toMatchObject({ status: 'open', amount_cents: 18480 });
+      // a score part corrected before the run is finalized: the open line follows it
+      scores.buildSeasonScore.mockResolvedValue(scoreOf(85, 250));
+      await recompute(run.id);
+      expect(await lineOf(alpha)).toMatchObject({ status: 'open', amount_cents: 11550, note: `2.5% of $2,640.00, ${PERIOD}, times 1.75 (season score 85)` });
+      // under the lowest cut line the season earns no bonus: the line comes off, and nothing waits
+      scores.buildSeasonScore.mockResolvedValue(scoreOf(64, 0));
+      const none = await recompute(run.id);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(checkOf(none, alpha)).not.toHaveProperty('techRewardsCents');
+      expect(await notesOf(run.id)).toEqual([]);
+      expect(await skippedOf()).toContainEqual({ technician_id: alpha, kind: 'season_bonus', reason: 'score_below_bonus_line' });
+      // back over the line before finalize: written again; a PAID line never changes
+      scores.buildSeasonScore.mockResolvedValue(scoreOf(92.5, 400));
+      await recompute(run.id);
+      await finalize(run.id);
+      scores.buildSeasonScore.mockResolvedValue(scoreOf(85, 250));
+      await draft(NEXT);
+      expect(await linesOf(alpha)).toHaveLength(1);
+      expect(await lineOf(alpha)).toMatchObject({ status: 'paid', amount_cents: 18480 });
+    });
+
+    it('reads the season scores before the pay run\'s transaction opens and gives that connection back first: a pay run holds one connection at a time', async () => {
+      const alpha = await readyTech('Sample Alpha');
+      await paidWeeks(alpha);
+      await approvedWeek(alpha, BONUS_WEEK);
+      // In production every db.transaction() of the code under test takes a connection of its own from the pool. Here each one
+      // is a child of this suite's one transaction (the models/db mock above), so they can be counted: how many are open at
+      // the same time, and in which order they start. The score read is the one that asks for an isolation level.
+      let open = 0;
+      let most = 0;
+      const started = [];
+      const countedTransaction = async (work, config) => {
+        open += 1;
+        most = Math.max(most, open);
+        started.push(config && config.isolationLevel === 'repeatable read' && config.readOnly ? 'scores' : 'other');
+        try {
+          return await trx.transaction(work, config);
+        } finally {
+          open -= 1;
+        }
+      };
+      // the models/db mock reads every property from mockConnection: stand in for it with the count on `transaction` only
+      mockConnection = new Proxy(trx, {
+        get(target, key) {
+          if (key === 'transaction') return countedTransaction;
+          const value = target[key];
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+        apply: (target, _self, args) => target(...args),
+      });
+      try {
+        const run = await draft(BONUS_WEEK);
+        await recompute(run.id);
+        await finalize(run.id);
+      } finally {
+        mockConnection = trx;
+      }
+      expect(await linesOf(alpha)).toMatchObject([{ status: 'paid', amount_cents: 18480 }]);
+      // never two at once: with a pool of two connections, two pay runs at the same time cannot starve each other
+      expect(most).toBe(1);
+      // one score read for each run write (draft, recompute, finalize), each one before that write's own transaction
+      expect(started.filter((kind) => kind === 'scores')).toHaveLength(3);
+      expect(started.slice(0, 2)).toEqual(['scores', 'other']);
+      started.forEach((kind, i) => { if (kind === 'scores') expect(started[i + 1]).toBe('other'); });
+    });
+
+    it('pays no bonus from a score that changed while the pay run waited for the payroll lock: a finalize gives the run back for review', async () => {
+      const alpha = await readyTech('Sample Alpha');
+      await paidWeeks(alpha);
+      await approvedWeek(alpha, BONUS_WEEK);
+      // the lock a score settings save takes, held shared by this session (tech-rewards-scores.js lockSettingsForRead)
+      const settingsLocks = async () => Number((await trx.raw(`SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()
+        AND mode = 'ShareLock' AND objsubid = 1 AND objid = (hashtext('tech-reward-settings')::bigint & 4294967295)::oid`)).rows[0].n);
+      // a run dated for no season bonus (Sep 17) works none out, and leaves the score settings alone
+      await approvedWeek(alpha, CUT_WEEK);
+      await finalize((await draft(CUT_WEEK)).id);
+      expect(await settingsLocks()).toBe(0);
+      // a run that works a season bonus out holds that lock to the end of its transaction: no settings version can be saved
+      // between its check of the score and the bonus it writes
+      const run = await draft(BONUS_WEEK);
+      expect(await settingsLocks()).toBe(1);
+      expect(await linesOf(alpha)).toMatchObject([{ status: 'open', amount_cents: 18480 }]); // 4% of 2,640.00 x 1.75
+      const shown = (await api('GET', `/runs/${run.id}`)).body.run;
+      // The office approves that draft. The finalize reads the score (92.5), then waits for the payroll lock; meanwhile the
+      // owner corrects a rating, and under the lock the score is 85: a lower band.
+      scores.buildSeasonScore.mockResolvedValueOnce(scoreOf(92.5, 400)).mockResolvedValue(scoreOf(85, 250));
+      const stale = await api('POST', `/runs/${run.id}/finalize`, { body: { token: shown.token } });
+      expect([stale.status, stale.body.error]).toEqual([409, 'Hours or settings changed. Review the new numbers.']);
+      // nothing was paid from the old score: the run is still a draft, the bonus is off it, and the run says why
+      expect(await trx('payroll_runs').where({ id: run.id }).first('status')).toEqual({ status: 'draft' });
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect((await waitsOf(run.id)).map((w) => w.reason)).toEqual(['score_changed']);
+      expect(await notesOf(run.id)).toEqual([seasonWaits('Sample Alpha', 'their season score changed while this pay run was worked out, so recompute it')]);
+      // the next sync reads the corrected score before and under the lock: the bonus is back, at the new band, and finalizes
+      const again = await recompute(run.id);
+      expect(checkOf(again, alpha).techRewardsCents).toBe(11550); // 2.5%
+      expect(await notesOf(run.id)).toEqual([]);
+      await finalize(run.id);
+      expect(await linesOf(alpha)).toMatchObject([{ status: 'paid', amount_cents: 11550 }]);
+      // the same on a draft and a recompute: a score that moved in between is never written
+      scores.buildSeasonScore.mockReset().mockResolvedValueOnce(scoreOf(92.5, 400)).mockResolvedValue(scoreOf(92.6, 400));
+      const bravo = await readyTech('Sample Bravo');
+      await paidWeeks(bravo);
+      await approvedWeek(bravo, NEXT);
+      const next = await draft(NEXT);
+      expect(await linesOf(bravo)).toHaveLength(0);
+      expect((await waitsOf(next.id)).map((w) => [w.technician_id, w.reason])).toEqual([[bravo, 'score_changed']]);
+      // the read under the lock fails inside PostgreSQL: the bonus waits, and the pay run's transaction goes on
+      const logger = require('../services/logger');
+      scores.buildSeasonScore.mockReset().mockResolvedValueOnce(scoreOf(92.6, 400)).mockImplementation(async (_id, _year, _season, conn) => { await conn.raw('SELECT 1 / 0'); });
+      const failed = await recompute(next.id);
+      expect([failed.waiting, failed.blocked]).toEqual([[], []]);
+      expect(checkOf(failed, bravo)).toMatchObject({ grossCents: 88000 });
+      expect(await notesOf(next.id)).toEqual([`Season bonus (2027) for Sample Bravo waits: the pay run could not read their season score because of an error, so report it. Only a pay run dated Nov 23, 2027 or earlier can add it`]);
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining(`season 2027 score could not be read for technician ${bravo}`));
+    });
+
+    it('waits, with a note, for a technician the read before the run did not cover, and for every technician when that read failed', async () => {
+      const alpha = await readyTech('Sample Alpha');
+      await paidWeeks(alpha);
+      await approvedWeek(alpha, BONUS_WEEK);
+      const run = await draft(BONUS_WEEK);
+      expect(await linesOf(alpha)).toMatchObject([{ status: 'open', amount_cents: 18480 }]);
+      const row = await runRow(run.id);
+      const reasons = async (seasonScores) => (await syncTechRewardLines(row, trx, { seasonScores })).waits.map((w) => w.reason);
+      // the read did not cover the technician (a recipient since that read): the open line comes off, and the run says so
+      expect(await reasons({ figures: new Map(), failed: false })).toEqual(['score_not_read']);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(await notesOf(run.id)).toEqual([seasonWaits('Sample Alpha', 'their season score was not read for this pay run, so recompute it')]);
+      // nothing was read at all (the gate was turned on after the read)
+      expect(await reasons(null)).toEqual(['score_not_read']);
+      // the read itself failed: an error, not a technician who was not covered
+      expect(await reasons({ figures: new Map(), failed: true })).toEqual(['score_read_failed']);
+      // the next sync reads them
+      await recompute(run.id);
+      expect(await linesOf(alpha)).toMatchObject([{ status: 'open', amount_cents: 18480 }]);
+      expect(await notesOf(run.id)).toEqual([]);
+    });
+
+    it('says nothing waits for a complete score under the lowest cut line, whatever else is not ready: no run will pay that bonus', async () => {
+      scores.buildSeasonScore.mockResolvedValue(scoreOf(64, 0));
+      const alpha = await readyTech('Sample Alpha');
+      const bravo = await readyTech('Sample Bravo', { hire_date: null }); // no hire date on file
+      const delta = await readyTech('Sample Delta', { hire_date: '20240-01-10' }); // a hire date the calendar cannot read
+      for (const id of [alpha, bravo, delta]) {
+        await paidWeeks(id);
+        await approvedWeek(id, CUT_WEEK);
+        await approvedWeek(id, BONUS_WEEK);
+      }
+      await approvedWeek(alpha, '2027-07-05'); // a week of the season that is approved and never paid
+      // on a run for the last pay week the base counts (too early for a bonus), and on the bonus's own run
+      const cut = await draft(CUT_WEEK, '2027-09-24');
+      expect([await notesOf(cut.id), await waitsOf(cut.id)]).toEqual([[], []]);
+      await finalize(cut.id);
+      const run = await draft(BONUS_WEEK);
+      expect([await notesOf(run.id), await waitsOf(run.id)]).toEqual([[], []]);
+      for (const id of [alpha, bravo, delta]) {
+        expect(await linesOf(id)).toHaveLength(0);
+        expect(await skippedOf()).toContainEqual({ technician_id: id, kind: 'season_bonus', reason: 'score_below_bonus_line' });
+      }
+      // the same three with a score that earns a bonus: each one's own reason shows
+      scores.buildSeasonScore.mockResolvedValue(scoreOf(92.5, 400));
+      await recompute(run.id);
+      expect((await waitsOf(run.id)).map((w) => [w.technician_id, w.reason]).sort()).toEqual([
+        [alpha, 'week_not_paid'], [bravo, 'hire_date_missing'], [delta, 'hire_date_invalid'],
+      ].sort());
+    });
+
+    it('leaves a season bonus row keyed for a season before 2027 alone, with the gate off and on: it is a hand-made line', async () => {
+      const alpha = await readyTech('Sample Alpha');
+      await paidWeeks(alpha);
+      for (const week of [BONUS_WEEK, NEXT]) await approvedWeek(alpha, week);
+      // somebody put this row in the database by hand: the Tech Rewards source type, and the 2026 season as its key
+      const old = { technician_id: alpha, kind: 'season_bonus', source_type: 'tech_rewards', source_id: `season_bonus:${alpha}:2026` };
+      await trx('payroll_pay_lines').insert({ ...old, amount_cents: 5000, earned_week_start: NEXT });
+      const oldRow = () => trx('payroll_pay_lines').where({ source_id: old.source_id }).first();
+      expect(techRewardsOwnKey(await oldRow())).toBeNull();
+      expect((await trx('payroll_pay_lines').where({ source_id: old.source_id }).whereRaw(techRewardsOwnedSql()).select('id'))).toHaveLength(0);
+      // gate off: the sync takes off the open lines it owns, and this is not one
+      delete process.env[SEASON_GATE];
+      const run = await draft(BONUS_WEEK);
+      expect(await oldRow()).toMatchObject({ status: 'open', amount_cents: 5000 });
+      // gate on: still untouched, and the technician's own 2027 line waits for somebody to check the hand-made one
+      process.env[SEASON_GATE] = 'true';
+      await recompute(run.id);
+      expect(await oldRow()).toMatchObject({ status: 'open', amount_cents: 5000 });
+      expect(await trx('payroll_pay_lines').where({ source_id: `season_bonus:${alpha}:2027` })).toHaveLength(0);
+      expect((await waitsOf(run.id)).map((w) => w.reason)).toEqual(['other_season_line']);
+    });
+
+    it('waits, with a note, for a technician whose hire date is not on file or is not a calendar date: the multiplier counts years of service', async () => {
+      const alpha = await readyTech('Sample Alpha', { hire_date: null });
+      const bravo = await readyTech('Sample Bravo', { hire_date: '20240-01-10' });
+      for (const id of [alpha, bravo]) {
+        await paidWeeks(id);
+        await approvedWeek(id, BONUS_WEEK);
+      }
+      const run = await draft(BONUS_WEEK);
+      for (const id of [alpha, bravo]) expect(await linesOf(id)).toHaveLength(0);
+      expect((await notesOf(run.id)).sort()).toEqual([
+        seasonWaits('Sample Alpha', 'their hire date is not on file, so the pay run cannot count their years of service'),
+        seasonWaits('Sample Bravo', 'their hire date on file is not a date the pay run can read, so correct it on their staff profile'),
+      ]);
+      // entered: the next sync writes the bonus
+      await trx('technicians').where({ id: alpha }).update({ hire_date: '2024-01-10' });
+      const again = await recompute(run.id);
+      expect(checkOf(again, alpha).techRewardsCents).toBe(18480);
+    });
+
+    it('has its own gate: off takes the open season line off, whatever the gift\'s gate says; a paid line stays paid with the gate off', async () => {
+      const alpha = await readyTech('Sample Alpha');
+      await paidWeeks(alpha);
+      for (const week of [BONUS_WEEK, NEXT]) await approvedWeek(alpha, week);
+      const run = await draft(BONUS_WEEK);
+      expect(await lineOf(alpha)).toMatchObject({ kind: 'season_bonus', status: 'open' });
+      delete process.env[SEASON_GATE];
+      process.env.GATE_TECH_REWARDS_PAY_LINES = 'true';
+      const off = await recompute(run.id);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      expect(checkOf(off, alpha)).not.toHaveProperty('techRewardsCents');
+      expect(await notesOf(run.id)).toEqual([]);
+      expect((await syncEventOf(run.id, 'removed_line_ids')).some((m) => m.removed_line_ids.length === 1)).toBe(true);
+      process.env[SEASON_GATE] = 'true';
+      const on = await recompute(run.id);
+      expect(checkOf(on, alpha).techRewardsCents).toBe(18480);
+      // a PAID line stays paid with the gate off
+      await finalize(run.id);
+      delete process.env[SEASON_GATE];
+      await draft(NEXT);
+      expect(await lineOf(alpha)).toMatchObject({ status: 'paid', amount_cents: 18480 });
+    });
+
+    it('waits when a season bonus line that the pay run did not write is on file for the technician', async () => {
+      const alpha = await readyTech('Sample Alpha');
+      await paidWeeks(alpha);
+      await approvedWeek(alpha, BONUS_WEEK);
+      await trx('payroll_pay_lines').insert({ technician_id: alpha, kind: 'season_bonus', amount_cents: 5000, earned_week_start: NEXT });
+      const run = await draft(BONUS_WEEK);
+      expect(await linesOf(alpha)).toHaveLength(0);
+      const other = seasonWaits('Sample Alpha', 'a season bonus line that the pay run did not write is already on file for them, so check that line first');
+      expect(await notesOf(run.id)).toEqual([other]);
+      // while the score is not known (its read failed), the line somebody made is still the first thing to check
+      scores.buildSeasonScore.mockRejectedValue(new Error('sample failure'));
+      await recompute(run.id);
+      expect(await notesOf(run.id)).toEqual([other]);
+      // a complete score under the lowest cut line: the season earns no automatic bonus, so there is nothing to check the
+      // hand-made line against. No wait and no note; the hand-made line is not touched
+      scores.buildSeasonScore.mockReset().mockResolvedValue(scoreOf(64, 0));
+      await recompute(run.id);
+      expect(await notesOf(run.id)).toEqual([]);
+      expect(await skippedOf()).toContainEqual({ technician_id: alpha, kind: 'season_bonus', reason: 'score_below_bonus_line' });
+      expect(await trx('payroll_pay_lines').where({ technician_id: alpha, kind: 'season_bonus' })).toMatchObject([{ status: 'open', amount_cents: 5000 }]);
+      // and the same for a technician hired after the season
+      scores.buildSeasonScore.mockReset().mockResolvedValue(scoreOf(92.5, 400));
+      await trx('technicians').where({ id: alpha }).update({ hire_date: '2027-09-01' });
+      await recompute(run.id);
+      expect(await notesOf(run.id)).toEqual([]);
+      expect(await skippedOf()).toContainEqual({ technician_id: alpha, kind: 'season_bonus', reason: 'hired_after_season' });
     });
   });
 });

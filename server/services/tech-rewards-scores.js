@@ -166,9 +166,17 @@ async function getSettings(asOfDate, conn = db) {
 }
 
 /**
+ * The lock a settings save takes (saveSettings), as a READER takes it: shared, until the caller's transaction ends. While a
+ * reader holds it no settings version can be saved, so the settings it reads are the settings in force until it is done. The
+ * pay run takes it before it works out a season bonus (tech-rewards-pay-lines.js syncTechRewardLines): a new version cannot
+ * move a band between the pay run's read and the bonus it pays. Readers do not hold each other up.
+ */
+const lockSettingsForRead = (trx) => trx.raw('SELECT pg_advisory_xact_lock_shared(hashtext(?))', [SETTINGS_LOCK_KEY]);
+
+/**
  * Insert the next settings version. `actor` is the saving login's technicians.id (uuid)
- * or null. Takes an advisory lock, so two saves get two different versions. A version
- * may not take effect before the one it follows (history is not rewritten).
+ * or null. Takes an advisory lock, so two saves get two different versions, and a save waits for a reader that holds the
+ * lock (lockSettingsForRead). A version may not take effect before the one it follows (history is not rewritten).
  */
 async function saveSettings(input, actor = null, conn = db) {
   if (!isPlainObject(input)) fail('INVALID_SETTINGS', 'settings must be an object');
@@ -355,6 +363,7 @@ module.exports = {
   REPORT_ON_TIME_HOURS,
   CALLBACK_RATE_AT_ZERO,
   getSettings,
+  lockSettingsForRead,
   saveSettings,
   readOnTime,
   readAudit,

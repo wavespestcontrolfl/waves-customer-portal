@@ -10,6 +10,39 @@ const crypto = require('crypto');
 const logger = require('../services/logger');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 const { isBotUserAgent: isKnownBotUserAgent } = require('../utils/bot-ua');
+const { isEnabled } = require('../config/feature-gates');
+const engine = require('../services/referral-engine');
+const inbound = require('../services/referral-inbound');
+
+const SITE = 'https://wavespestcontrol.com';
+// The website's friend page (wavespestcontrol-astro src/pages/referrer.astro). Its words state the friend's
+// credit as a fixed amount. Change the page's amount and this number together.
+const FRIEND_PAGE = { path: '/referrer/', statesFriendCreditCents: 5000 };
+
+// Whether a link with this code may open the friend page. The page promises the friend a credit, so both must
+// hold, else the answer is no:
+//  - the live friend credit equals what the page states (referral-engine step2FriendCreditCents: 0 when Step 2 is
+//    off, the program is paused, or the settings row has no amount or cannot be read);
+//  - the code has an owner the office can confirm as the referrer: referral-inbound customerForCode, the lookup
+//    the Referrals queue names the member by (no archived customer, no promoter without a customer).
+// A failed read is a no.
+async function friendPageApplies(code) {
+  if (!isEnabled('referralFriendPage')) return false;
+  try {
+    return (await engine.step2FriendCreditCents()) === FRIEND_PAGE.statesFriendCreditCents
+      && !!(await inbound.customerForCode(code));
+  } catch (err) {
+    logger.warn(`[ReferralLink] Friend page check failed: ${err.code || err.message}`);
+    return false;
+  }
+}
+
+// Where a member's link lands, with the code the website sends back on the lead (?ref=).
+// GATE_REFERRAL_FRIEND_PAGE off (the default): the homepage, as before, and no extra read.
+// On: the friend page when friendPageApplies; in every other state the homepage, which promises nothing.
+async function memberLinkTarget(code) {
+  return `${SITE}${(await friendPageApplies(code)) ? FRIEND_PAGE.path : '/'}?ref=${code}&utm_source=referral`;
+}
 
 // /r mounts OUTSIDE the global /api/ limiter and every hit below writes a
 // referral_clicks row — without a limiter this is an unauthenticated,
@@ -75,7 +108,7 @@ router.get('/:code', referralClickLimiter, async (req, res) => {
       // Fallback: check customers.referral_code
       const customer = await db('customers').where({ referral_code: code }).first();
       if (customer) {
-        return res.redirect(`https://wavespestcontrol.com/?ref=${code}&utm_source=referral`);
+        return res.redirect(await memberLinkTarget(code));
       }
       return res.redirect('https://wavespestcontrol.com');
     }
@@ -129,8 +162,8 @@ router.get('/:code', referralClickLimiter, async (req, res) => {
 
     logger.info(`[ReferralLink] Click on ${code} from ${ip} (${isUnique ? 'unique' : 'repeat'})`);
 
-    // Redirect to main site with ref param
-    res.redirect(`https://wavespestcontrol.com/?ref=${code}&utm_source=referral`);
+    // Redirect to the website with the ref param
+    res.redirect(await memberLinkTarget(code));
   } catch (err) {
     logger.error(`[ReferralLink] Error: ${err.message}`);
     res.redirect('https://wavespestcontrol.com');
@@ -139,3 +172,4 @@ router.get('/:code', referralClickLimiter, async (req, res) => {
 
 module.exports = router;
 module.exports._isBotUserAgent = isBotUserAgent;
+module.exports._FRIEND_PAGE = FRIEND_PAGE;

@@ -11,6 +11,7 @@ const mockEngine = {
   getLiveSettings: jest.fn(),
   resolvePromoter: jest.fn(),
   getPromoterReferralLink: jest.fn(),
+  referralOfferDecision: jest.fn(),
 };
 jest.mock('../services/referral-engine', () => mockEngine);
 
@@ -41,6 +42,81 @@ describe('composeReferralCard', () => {
   test('a settings failure propagates so the caller suppresses the card', async () => {
     mockEngine.getLiveSettings.mockRejectedValue(new Error('db down'));
     await expect(composeReferralCard()).rejects.toThrow('db down');
+  });
+});
+
+describe('composeReferralCard with GATE_REFERRAL_STEP2 (the offer line)', () => {
+  const { gates } = require('../config/feature-gates');
+  const ONE = 'They get a $50 credit after their first plan service. You get $25.';
+  const decision = (over = {}) => ({ gateOn: true, skip: false, atLimit: false, memberCents: 2500, refereeCents: 5000, ...over });
+  beforeEach(() => { mockEngine.referralOfferDecision.mockResolvedValue(decision()); });
+  afterEach(() => { gates.referralStep2 = false; });
+
+  test('gate off: the static copy exactly, and the offer decision is never read', async () => {
+    gates.referralStep2 = false;
+    const card = await composeReferralCard({ customerId: 'cust-1' });
+    expect(card).toEqual(REFERRAL_CARD_COPY);
+    expect(Object.keys(card)).toEqual(['headline', 'cta']);
+    expect(mockEngine.referralOfferDecision).not.toHaveBeenCalled();
+  });
+  test('gate on: headline and CTA unchanged, plus the offer from the live amounts', async () => {
+    gates.referralStep2 = true;
+    const card = await composeReferralCard({ customerId: 'cust-1' });
+    expect(card).toEqual({ ...REFERRAL_CARD_COPY, offer: ONE });
+    expect(mockEngine.referralOfferDecision).toHaveBeenCalledWith(expect.anything(), 'cust-1');
+    expect(mockEngine.resolvePromoter).not.toHaveBeenCalled();
+  });
+  test('gate on, a member at the yearly limit never reads "You get"', async () => {
+    gates.referralStep2 = true;
+    mockEngine.referralOfferDecision.mockResolvedValue(decision({ atLimit: true }));
+    expect((await composeReferralCard({ customerId: 'cust-1' })).offer).toBe('They get a $50 credit after their first plan service.');
+  });
+  test('gate on, a friend amount of 0 leaves the member sentence alone', async () => {
+    gates.referralStep2 = true;
+    mockEngine.referralOfferDecision.mockResolvedValue(decision({ refereeCents: 0 }));
+    expect((await composeReferralCard({ customerId: 'cust-1' })).offer).toBe('You get $25.');
+  });
+  test('gate on, no sentence left: the static copy, no offer key', async () => {
+    gates.referralStep2 = true;
+    mockEngine.referralOfferDecision.mockResolvedValue(decision({ refereeCents: 0, memberCents: 0 }));
+    expect(await composeReferralCard({ customerId: 'cust-1' })).toEqual(REFERRAL_CARD_COPY);
+  });
+  test('gate on, a skipped decision (program paused or settings unreadable): no card, so no button that would answer 404', async () => {
+    gates.referralStep2 = true;
+    mockEngine.referralOfferDecision.mockResolvedValue({ gateOn: true, skip: true, atLimit: false, reason: 'program paused' });
+    expect(await composeReferralCard({ customerId: 'cust-1' })).toBeNull();
+    mockEngine.referralOfferDecision.mockResolvedValue({ gateOn: true, skip: true, atLimit: false, reason: 'settings unavailable' });
+    expect(await composeReferralCard({ customerId: 'cust-1' })).toBeNull();
+  });
+  test('gate on, no customer id: the static copy and no decision read', async () => {
+    gates.referralStep2 = true;
+    expect(await composeReferralCard()).toEqual(REFERRAL_CARD_COPY);
+    expect(mockEngine.referralOfferDecision).not.toHaveBeenCalled();
+  });
+  test('gate on, for a known customer the settings are read once, by the decision', async () => {
+    gates.referralStep2 = true;
+    await composeReferralCard({ customerId: 'cust-1' });
+    expect(mockEngine.referralOfferDecision).toHaveBeenCalledTimes(1);
+    expect(mockEngine.getLiveSettings).not.toHaveBeenCalled();
+  });
+  test('gate on, no customer id and an inactive program: still null', async () => {
+    gates.referralStep2 = true;
+    mockEngine.getLiveSettings.mockResolvedValue({ program_active: false });
+    expect(await composeReferralCard()).toBeNull();
+    expect(mockEngine.referralOfferDecision).not.toHaveBeenCalled();
+  });
+  test('an outer transaction rides the read on both paths', async () => {
+    gates.referralStep2 = true;
+    const conn = jest.fn();
+    await composeReferralCard({ customerId: 'cust-1', conn });
+    expect(mockEngine.referralOfferDecision).toHaveBeenCalledWith(conn, 'cust-1');
+    await composeReferralCard({ conn });
+    expect(mockEngine.getLiveSettings).toHaveBeenCalledWith(conn);
+  });
+  test('an offer-decision failure propagates so the caller suppresses the card', async () => {
+    gates.referralStep2 = true;
+    mockEngine.referralOfferDecision.mockRejectedValue(new Error('db down'));
+    await expect(composeReferralCard({ customerId: 'cust-1' })).rejects.toThrow('db down');
   });
 });
 
@@ -99,5 +175,38 @@ describe('buildReferralShareForCustomer', () => {
     // The settings read rides the outer connection and is reused by the enroll.
     expect(mockEngine.getLiveSettings).toHaveBeenCalledWith(conn);
     expect(mockEngine.resolvePromoter).toHaveBeenCalledWith('cust-1', { conn, settings: expect.objectContaining({ program_active: true }) });
+  });
+});
+
+describe('buildReferralShareForCustomer with GATE_REFERRAL_STEP2', () => {
+  const { gates } = require('../config/feature-gates');
+  afterEach(() => { gates.referralStep2 = false; });
+
+  test('gate on: a credit after the first plan service, from the setting; the subject drops "off"', async () => {
+    gates.referralStep2 = true;
+    mockEngine.getLiveSettings.mockResolvedValue({ program_active: true, referee_discount_cents: 5000 });
+    const share = await buildReferralShareForCustomer('cust-1');
+    expect(share.smsBody).toBe("We use Waves and they'll give you a $50 credit after your first plan service with my code WAVES-TEST01. wavespestcontrol.com/r/WAVES-TEST01");
+    expect(share.emailBody).toBe("We use Waves Pest Control and they'll give you a $50 credit after your first plan service with my code WAVES-TEST01.\n\nhttps://wavespestcontrol.com/r/WAVES-TEST01");
+    expect(share.emailSubject).toBe('Waves Pest Control');
+  });
+  test('gate on: cents read exactly', async () => {
+    gates.referralStep2 = true;
+    mockEngine.getLiveSettings.mockResolvedValue({ program_active: true, referee_discount_cents: 3250 });
+    expect((await buildReferralShareForCustomer('cust-1')).smsBody).toContain('a $32.50 credit after');
+  });
+  test('gate on, no amount: mention the code, as today', async () => {
+    gates.referralStep2 = true;
+    mockEngine.getLiveSettings.mockResolvedValue({ program_active: true, referee_discount_cents: 0 });
+    const share = await buildReferralShareForCustomer('cust-1');
+    expect(share.smsBody).toBe('We use Waves and mention my code WAVES-TEST01 when you book. wavespestcontrol.com/r/WAVES-TEST01');
+    expect(share.emailSubject).toBe('Waves Pest Control');
+  });
+  test('gate off: today, word for word', async () => {
+    gates.referralStep2 = false;
+    const share = await buildReferralShareForCustomer('cust-1');
+    expect(share.smsBody).toBe("We use Waves and they'll take $25 off your first service with my code WAVES-TEST01. wavespestcontrol.com/r/WAVES-TEST01");
+    expect(share.emailBody).toBe("We use Waves Pest Control and they'll take $25 off your first service with my code WAVES-TEST01.\n\nhttps://wavespestcontrol.com/r/WAVES-TEST01");
+    expect(share.emailSubject).toBe('$25 off Waves Pest Control');
   });
 });

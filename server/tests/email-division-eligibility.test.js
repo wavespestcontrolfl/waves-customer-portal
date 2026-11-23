@@ -14,7 +14,9 @@
 jest.mock('../models/db', () => jest.fn());
 
 const db = require('../models/db');
-const { eligibleForEmail, resolveMarketingClass, REASONS } = require('../services/email-division/eligibility');
+const {
+  eligibleForEmail, resolveMarketingClass, REASONS, embeddedPitchAllowed, embeddedReferralAskAllowed,
+} = require('../services/email-division/eligibility');
 
 const NOW = new Date('2026-09-28T15:00:00Z'); // Mon Sep 28, 11:00 ET
 
@@ -46,6 +48,9 @@ function evalWith({
     email_enabled: true, marketing_offers: true, weather_alerts: true, referral_nudge: true, weather_alert_channel: 'email', referral_channel: 'email',
   },
   estimates, ledger = [], smsOutbound, smsInbound, callInbound, callOutbound, tables,
+  // The scheduled_services read of the completed-visit relationship. Not wired by default: a verdict that
+  // reads the table without a caller-named visit fails the test as an unexpected table.
+  visits,
 } = {}, args = {}) {
   db.mockImplementation((table) => {
     const map = tables || {
@@ -57,6 +62,7 @@ function evalWith({
       marketing_email_ledger: ledger,
       sms_log: [chain({ first: smsOutbound }), chain({ first: smsInbound })],
       call_log: [chain({ first: callInbound }), chain({ first: callOutbound })],
+      ...(visits ? { scheduled_services: visits } : {}),
     };
     const supply = map[table];
     if (!supply) throw new Error(`Unexpected db table ${table}`);
@@ -221,6 +227,38 @@ describe('email-division eligibility', () => {
   test('RELATIONSHIP_NOT_ELIGIBLE for nurture with no estimates on file', async () => {
     const r = await evalWith({}, { stream: 'nurture', marketingClass: 'marketing', emailKey: 'nur.tip1' });
     expect(r.reason).toBe(REASONS.RELATIONSHIP_NOT_ELIGIBLE);
+  });
+
+  // The plan offer after a one-time job asks for the verdict BEFORE it saves its estimate. If the missing
+  // estimate ended the verdict there, the caps and the human-contact check behind it would never be judged.
+  describe('nurture with no estimate yet: a completed visit of the same customer is the relationship', () => {
+    const OFFER = { stream: 'nurture', emailKey: 'nurture.plan_offer', completedVisitId: 'visit-1' };
+    const visitFound = () => chain({ first: { id: 'visit-1' } });
+
+    test('the visit is read for THIS customer in completed status, and the verdict is ok', async () => {
+      const visits = visitFound();
+      const r = await evalWith({ visits, ledger: [chain({ result: [] })] }, OFFER);
+      expect(r).toMatchObject({ ok: true, reason: null });
+      expect(visits.where).toHaveBeenCalledWith({ id: 'visit-1', customer_id: 'cust-1', status: 'completed' });
+    });
+
+    test("the caller's word alone widens nothing: no such visit row is RELATIONSHIP_NOT_ELIGIBLE", async () => {
+      const r = await evalWith({ visits: chain({ first: undefined }) }, OFFER);
+      expect(r).toMatchObject({ ok: false, reason: REASONS.RELATIONSHIP_NOT_ELIGIBLE });
+    });
+
+    test('the same-day cap and the human-contact check still run behind it', async () => {
+      const capped = await evalWith({ visits: visitFound(), ledger: [chain({ result: [{ sent_at: NOW.toISOString() }] })] }, OFFER);
+      expect(capped.reason).toBe(REASONS.CAP_SAME_DAY);
+      const contacted = await evalWith({ visits: visitFound(), ledger: [chain({ result: [] })], smsOutbound: { id: 'sms-1' } }, OFFER);
+      expect(contacted.reason).toBe(REASONS.RECENT_HUMAN_CONTACT);
+    });
+
+    test('an estimate on file is still the first answer: the visit table is not read', async () => {
+      // No scheduled_services table is wired here, so a read of it would end as LOOKUP_FAILED.
+      const r = await evalWith({ estimates: { id: 'est-1' }, ledger: [chain({ result: [] })] }, OFFER);
+      expect(r).toMatchObject({ ok: true, reason: null });
+    });
   });
 
   test.each([
@@ -397,6 +435,146 @@ describe('email-division eligibility', () => {
     const r = await evalWith({ tables: { customers: chain({ firstError: new Error('connection reset') }) } });
     expect(r.ok).toBe(false);
     expect(r.reason).toBe(REASONS.LOOKUP_FAILED);
+  });
+
+  // The receipt and service-report emails (#8262) are sent outside this
+  // pipeline and carry one add-a-service line. They ask the same question
+  // the pipeline answers as checks.allowPitch.
+  describe('embeddedPitchAllowed: a pitch line inside an operational email', () => {
+    const MARKETING_UNSUBSCRIBE = {
+      email: 'sandy@example.test', group_key: 'marketing_newsletter', suppression_type: 'unsubscribe', status: 'active',
+    };
+    const allowed = ({
+      prefs = { marketing_offers: true }, suppressions = [], email = 'sandy@example.test', customerId = 'cust-1',
+      customer = customerRow(), dnc,
+    } = {}) => {
+      db.mockImplementation((table) => {
+        const map = {
+          customers: chain({ first: customer }),
+          messaging_suppression: chain({ first: dnc }),
+          notification_prefs: chain({ first: prefs }),
+          email_suppressions: chain({ result: suppressions }),
+        };
+        if (!map[table]) throw new Error(`Unexpected db table ${table}`);
+        return map[table];
+      });
+      return embeddedPitchAllowed({ customerId, email });
+    };
+
+    test('offers on, a marketing channel that includes email, no marketing unsubscribe: yes', async () => {
+      expect(await allowed()).toBe(true);
+      // The same address in another letter case is the same address.
+      expect(await allowed({ email: ' Sandy@Example.test ' })).toBe(true);
+      expect(await allowed({ prefs: { marketing_offers: true, marketing_channel: 'both' } })).toBe(true);
+    });
+
+    test.each([
+      ['offers turned off', { prefs: { marketing_offers: false } }],
+      ['offers never chosen', { prefs: { marketing_offers: null } }],
+      ['no prefs row', { prefs: null }],
+      ['marketing by text only', { prefs: { marketing_offers: true, marketing_channel: 'sms' } }],
+      ['a marketing unsubscribe on the address', { suppressions: [MARKETING_UNSUBSCRIBE] }],
+      // The pipeline's own contact checks run first (pre-push audit P1
+      // 2026-11-22): a customer who turned email off still gets the receipt,
+      // without promotional copy.
+      ['the email switch off', { prefs: { email_enabled: false, marketing_offers: true, referral_channel: 'email' } }],
+      ['a staff do-not-contact on the customer\'s phone', { dnc: { phone: '+19415550100' } }],
+      ['a removed customer', { customer: customerRow({ deleted_at: '2026-11-01T00:00:00Z' }) }],
+      ['no customer row', { customer: null }],
+      // The holder changed their address while the email was being built: the
+      // old inbox gets the operational email, never promotional copy.
+      ['an address that is no longer the customer\'s address on file', { customer: customerRow({ email: 'new@example.test' }) }],
+      ['a bounce on the address', { suppressions: [{ email: 'sandy@example.test', group_key: 'service_operational', suppression_type: 'bounce', status: 'active' }] }],
+      ['no address', { email: '' }],
+      ['no customer', { customerId: null }],
+    ])('%s: no', async (_label, world) => {
+      expect(await allowed(world)).toBe(false);
+    });
+
+    test.each([
+      ['offers on', {}],
+      ['offers off', { prefs: { email_enabled: true, marketing_offers: false } }],
+      ['text only', { prefs: { email_enabled: true, marketing_offers: true, marketing_channel: 'sms' } }],
+      ['unsubscribed', { suppressions: [MARKETING_UNSUBSCRIBE] }],
+    ])('it is the pipeline\'s own answer (%s)', async (_label, world) => {
+      const pipeline = await evalWith(world, { emailKey: 'lc.welcome' });
+      const prefs = world.prefs || { email_enabled: true, marketing_offers: true };
+      expect(await allowed({ ...world, prefs })).toBe(pipeline.checks.allowPitch);
+    });
+  });
+
+  // The referral part of that line is a referral ask by email (pre-push audit
+  // P1 2026-11-22): a customer who takes marketing email but turned referral
+  // nudges off, or takes them by text only, must not get it. It answers to
+  // the referral email's own rules, apart from the service offer.
+  describe('embeddedReferralAskAllowed: the referral part of that line', () => {
+    const REFERRAL_UNSUBSCRIBE = {
+      email: 'sandy@example.test', group_key: 'marketing_referral', suppression_type: 'unsubscribe', status: 'active',
+    };
+    const BOUNCE = { email: 'sandy@example.test', group_key: 'service_operational', suppression_type: 'bounce', status: 'active' };
+    const NEWSLETTER_UNSUBSCRIBE = {
+      email: 'sandy@example.test', group_key: 'marketing_newsletter', suppression_type: 'unsubscribe', status: 'active',
+    };
+    const allowed = ({
+      prefs = { referral_channel: 'email' }, suppressions = [], email = 'sandy@example.test', customerId = 'cust-1',
+      customer = customerRow(), dnc,
+    } = {}) => {
+      db.mockImplementation((table) => {
+        const map = {
+          customers: chain({ first: customer }),
+          messaging_suppression: chain({ first: dnc }),
+          notification_prefs: chain({ first: prefs }),
+          email_suppressions: chain({ result: suppressions }),
+        };
+        if (!map[table]) throw new Error(`Unexpected db table ${table}`);
+        return map[table];
+      });
+      return embeddedReferralAskAllowed({ customerId, email });
+    };
+
+    test('referral nudges on and a referral channel that includes email: yes', async () => {
+      expect(await allowed()).toBe(true);
+      expect(await allowed({ prefs: { referral_nudge: true, referral_channel: 'both' } })).toBe(true);
+      // Another stream's unsubscribe is not a referral unsubscribe.
+      expect(await allowed({ suppressions: [NEWSLETTER_UNSUBSCRIBE] })).toBe(true);
+    });
+
+    test.each([
+      ['referral nudges turned off', { prefs: { referral_nudge: false, referral_channel: 'email' } }],
+      ['referral asks by text only', { prefs: { referral_nudge: true, referral_channel: 'sms' } }],
+      // The column's schema default is text, and the app shows it that way.
+      ['no referral channel chosen', { prefs: { referral_nudge: true } }],
+      ['no prefs row', { prefs: null }],
+      ['a referral unsubscribe on the address', { suppressions: [REFERRAL_UNSUBSCRIBE] }],
+      // The pipeline's own contact checks run first (pre-push audit P1
+      // 2026-11-22): a customer who turned email off still gets the receipt,
+      // without promotional copy.
+      ['the email switch off', { prefs: { email_enabled: false, marketing_offers: true, referral_channel: 'email' } }],
+      ['a staff do-not-contact on the customer\'s phone', { dnc: { phone: '+19415550100' } }],
+      ['a removed customer', { customer: customerRow({ deleted_at: '2026-11-01T00:00:00Z' }) }],
+      ['no customer row', { customer: null }],
+      // The holder changed their address while the email was being built: the
+      // old inbox gets the operational email, never promotional copy.
+      ['an address that is no longer the customer\'s address on file', { customer: customerRow({ email: 'new@example.test' }) }],
+      ['a bounce on the address', { suppressions: [BOUNCE] }],
+      ['no address', { email: '' }],
+      ['no customer', { customerId: null }],
+    ])('%s: no', async (_label, world) => {
+      expect(await allowed(world)).toBe(false);
+    });
+
+    test.each([
+      ['a channel with email', {}],
+      ['nudges off', { prefs: { email_enabled: true, referral_nudge: false, referral_channel: 'email' } }],
+      ['text only', { prefs: { email_enabled: true, referral_nudge: true, referral_channel: 'sms' } }],
+      ['unsubscribed', { suppressions: [REFERRAL_UNSUBSCRIBE] }],
+    ])('it is the referral email\'s own answer (%s)', async (_label, world) => {
+      const prefs = world.prefs || { email_enabled: true, referral_nudge: true, referral_channel: 'email' };
+      // An empty send ledger: the comparison is about the customer's referral
+      // choice, not the pipeline's send caps.
+      const pipeline = await evalWith({ ...world, prefs, ledger: [chain({ result: [] })] }, { emailKey: 'lc.referral_ask' });
+      expect(await allowed({ ...world, prefs })).toBe(pipeline.ok);
+    });
   });
 
   test('LOOKUP_FAILED on an unrecognized stream (never falls through to an allow)', async () => {

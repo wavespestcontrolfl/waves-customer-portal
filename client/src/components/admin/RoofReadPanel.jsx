@@ -273,8 +273,10 @@ const savedFrom = (read) => ({
   holder: read.estimate_customer_id ?? null,
 });
 
-// A saved list the customer estimate does not show yet (`unconfirmed`): it was saved before the server recorded the
-// home's address with it, or before the estimate had its customer (the estimate has a holder and the read names none).
+// A saved list that is not confirmed for this address and this customer (`unconfirmed`): it was saved before the server
+// recorded the home's address with it, or before the estimate had its customer (the estimate has a holder and the read
+// names none). No send freezes such a list for the customer. The estimate may still show the copy the customer received
+// as a lead (estimate-roof-points.js copyForHolder), so the note does not say that nothing is shown.
 // Save points sends the list again as it stands; the server then records the address of this lookup and the customer
 // who holds the estimate. Staff confirm such a list against the photo, so it is sent only once the photo has loaded
 // (`confirmReady`).
@@ -486,8 +488,9 @@ function RoofPointsEditor({ read, imageUrl, spot, address, estimateId, onReadAga
         />
         {unconfirmed && (
           <p className="text-14 text-zinc-600" data-testid="roof-read-points-unconfirmed">
-            The customer estimate does not show these points yet. They were saved before this address or this customer was on
-            the record. Check them against the photo, then press Save points to confirm them. They show from the next send.
+            These points are not confirmed for this address and this customer yet. They were saved before this address or
+            this customer was on the record. Check them against the photo, then press Save points to confirm them. The
+            customer estimate shows the confirmed points from the next send.
           </p>
         )}
         <div className="flex items-center gap-3 flex-wrap">
@@ -657,7 +660,8 @@ export default function RoofReadPanel({ spot, address, addressDoubt = false, est
       <p className="text-14 text-zinc-600">
         Staff only. Reads the county aerial photo for likely rodent entry points. Each new read is a paid model call, and a read of this roof
         from the last 90 days is reused at no cost. The AI read stays with staff. The points you save, with their notes, show on the
-        customer estimate from its next send, unless you clear "Show these points on the customer estimate".
+        customer estimate from its next send, unless you clear "Show these points on the customer estimate". To check how the points look, press Preview in the estimate
+        tool. Preview shows the points the customer has now. When the customer has none, it shows the points of the next send, marked "Staff preview".
       </p>
       {addressDoubt && (
         <p className="text-14 text-zinc-600" data-testid="roof-read-snapped">

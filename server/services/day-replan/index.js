@@ -14,6 +14,10 @@
  * straight-line model (no Google, no AI, no paid call). 'apply' (GATE_DAY_REPLAN=true) behaves
  * exactly like 'shadow' until a later PR writes the new hours.
  *
+ * The plan written is the drive-best plan when the drive rule takes the day. When it does not, the PACK plan (the
+ * plan that ends earliest with no more drive; planner option packAllowanceMin 0) is the day's plan when the close-gaps
+ * P1 rule accepts it (owner 2026-11-22; ./close-gaps.js packVerdict, plus the app's own simulation agreeing).
+ *
  * A stop is MOVABLE only when all hold; everything else stays FIXED at its hour:
  *   status pending or confirmed, not an estimate-slot hold, no staff lock (auto_dispatch_locked or
  *   auto_dispatch_excluded), not part of a grouped visit (another live row shares its visit_id), no
@@ -25,6 +29,18 @@
  * visit with a parent series), person_placed (staff or the customer chose the date or time; the auto-dispatch rule,
  * and an unreadable history keeps the stop fixed) and time_told (the customer has a known time from a delivered
  * text, email, call or booking, by the no-show detector's promise reader).
+ * With GATE_DAY_ONLY_PROMISE on, one more kind of stop is fixed, and checked FIRST (owner 2026-11-22), because only then
+ * does the app record whether the customer asked for the time (`askRecorded`, set only then; the office form's tick,
+ * time-promise.recordCustomerAskedTime): set_time, a visit that may not be promised as a day only
+ * (time-promise.dayOnlyEligibility, the told level ignored), whatever the customer was told, so a day-only notice no
+ * longer frees a time the customer asked for. That rule refuses a visit when the customer asked for the time, or picked
+ * it online, on the reschedule page, from a text offer or with the AI call agent, and also when a first or one-time
+ * visit's booking source does not show an office booking; the reason says only that the time is set, not who set it.
+ * An answer that could not be read (a failed read, a missing verdict) is set_time_unread and fixes the stop too. It is
+ * not a preferred time in the app (that is the stop's `pref`; a movable stop only takes hours inside it), "keep
+ * auto-dispatch off this visit" (the staff_lock above) or a mowing day or preferred day (date rules; this job never
+ * changes a date). Everything else is unchanged: customer_confirmed, first_or_one_time, person_placed (a delivered
+ * day-only notice, `dayTold`, frees those two) and time_told. Gate off: unchanged.
  * Also enforced for movable stops: the technician's tech_schedule_blocks (own and global, every type but
  * 'available') may not overlap a stop's service interval; hours held by unassigned (and, while occupancy is
  * tech-blind, other technicians') visits are taken; the day closes at the night pass's DAY_CLOSE (after_hours);
@@ -211,6 +227,34 @@ async function loadToldLevels(conn, rows, now) {
 }
 
 /**
+ * The stops that have a set time (owner 2026-11-22), as Map<id, 'set_time' | 'set_time_unread'> holding only the fixed
+ * ids. Read only while GATE_DAY_ONLY_PROMISE is on, the only time the app records whether the customer asked for the
+ * time. THE rule is time-promise.dayOnlyEligibility with the told level ignored: a visit that is not eligible there may
+ * not be promised as a day only, so its time is set ('set_time'). The customer asked for it (customer_asked_time), or
+ * picked it online, on the reschedule page, from a text offer or with the AI call agent; or it is a first or one-time
+ * visit whose booking source does not show an office booking (the staff follow-up flow, cron_selfheal, no reminder row).
+ * The reason does not say which: that rule does not tell them apart, and the stop is fixed either way. An answer that
+ * could not be read is 'set_time_unread': a missing verdict, a verdict marked `failed` (dayOnlyEligibility catches its
+ * own database errors and returns those), or a call that throws (every id). Fails CLOSED: an unread stop stays fixed.
+ */
+async function loadSetTime(conn, rows, now) {
+  const ids = rows.map((r) => r.id);
+  const fixed = new Map();
+  try {
+    const verdicts = await require('../time-promise').dayOnlyEligibility(conn, ids, now, { ignoreLevel: true });
+    for (const id of ids) {
+      const verdict = verdicts.get(id);
+      if (!verdict || verdict.failed === true) fixed.set(id, 'set_time_unread');
+      else if (verdict.eligible !== true) fixed.set(id, 'set_time');
+    }
+  } catch (err) {
+    logger.warn(`[day-replan] the set-time read failed (${err.message}); the day stays fixed`);
+    for (const id of ids) fixed.set(id, 'set_time_unread');
+  }
+  return fixed;
+}
+
+/**
  * Ids of stops a person (staff or the customer) placed on their current date or time, by the auto-dispatch rule
  * (eligibility.isPersonPlacedVisit: the newest slot-changing reschedule_log row by a non-automatic initiator that
  * lands on the date, or a person date exception). A day holds a handful of rows, so one bounded read per row.
@@ -235,7 +279,9 @@ async function loadDayContext(conn, dateStr, now, makeRoomWriteProof = false) {
   const ctx = { dateStr, now, allRows: rows, visitCounts: countBy(rows, 'visit_id'), customerCounts: countBy(rows, 'customer_id'), sent24, reminder24hOff };
   const dayOnly = dayOnlyOn();
   const facts = dayOnly ? await loadToldLevels(conn, rows, now) : { told: await loadToldIds(conn, rows, now) };
-  return { ...ctx, toldLock: true, ...facts, personPlaced: await loadPersonPlaced(conn, rows) };
+  // askRecorded: only while GATE_DAY_ONLY_PROMISE is on does the app record whether the customer asked for the time.
+  const ask = dayOnly ? { askRecorded: true, setTime: await loadSetTime(conn, rows, now) } : {};
+  return { ...ctx, toldLock: true, ...facts, ...ask, personPlaced: await loadPersonPlaced(conn, rows) };
 }
 
 /**
@@ -275,10 +321,17 @@ function officeReviewPending(row) {
 }
 
 /**
- * Told-lock reasons, checked after the existing ones: a time the customer was told or chose does not
- * change. A told-lock fact the day load did not provide counts as not yet known, so the stop stays fixed.
+ * Told-lock reasons, checked after the existing ones: a time the customer was told or chose does not change. A
+ * told-lock fact the day load did not provide counts as not yet known, so the stop stays fixed. With
+ * GATE_DAY_ONLY_PROMISE on (`askRecorded`) a set time (set_time, or set_time_unread when the answer could not be read;
+ * the `setTime` map) fixes the stop first, whatever the customer was told, so a day-only notice does not free it; a
+ * context without `askRecorded` ignores `setTime` (the gate off: unchanged).
  */
-function toldLockReason(row, { told, personPlaced, dayTold }) {
+function toldLockReason(row, { told, personPlaced, dayTold, askRecorded, setTime }) {
+  if (askRecorded === true) {
+    const set = setTime ? setTime.get(row.id) : 'set_time_unread';
+    if (set) return set;
+  }
   if (row.customer_confirmed === true) return 'customer_confirmed';
   // GATE_DAY_ONLY_PROMISE: a stop the customer was told only the DAY for (dayTold) may change its hour inside that
   // day, so being a first or one-time visit, or being placed by a person, does not fix it (the re-plan only changes
@@ -468,7 +521,8 @@ async function computeTechDay(conn, env, { dateStr, techId, rows, dayContext }) 
   const entries = rows.map((row) => ({ row, why: fixedReason(row, dayContext), pref: null }));
   await attachPrefs(conn, entries);
   const planned = planEntries(env, { rows, entries, blocks, origin, techId, dayContext });
-  return { entries, blocks, origin, dayContext, ...planned, hash: versionHash(dayContext.allRows) };
+  const plan = { entries, blocks, origin, dayContext, ...planned, hash: versionHash(dayContext.allRows) };
+  return planned.verdict.accepted ? plan : withPackPlan(env, plan, { rows, techId });
 }
 
 /**
@@ -537,21 +591,75 @@ function packPlan(env, plan, { rows, techId }) {
   return { ...planned, origin: plan.origin, blocks: plan.blocks };
 }
 
+const lunchLost = (nowFig, fig) => !!(nowFig && nowFig.lunch && fig && !fig.lunch);
+
+/** Each planner stop whose hour a plan changes: the list the writer writes (apply.js movesFrom). */
+const stopChanges = (plan) => plan.stops
+  .map((s) => ({ id: s.id, fromMin: s.slotStartMin, toMin: plan.result.best.slots[s.id] }))
+  .filter((c) => c.toMin != null && c.toMin !== c.fromMin);
+
 /**
- * P1: the drive rule on the drive-best plan first (the live rule); else the pack plan, which P1 would accept when it
- * keeps every promise, drives no more, ends no later and grows the biggest block by P1_MIN_GAIN.
+ * P1 for a plan the drive rule did not take: the pack plan and its record. It is accepted when it keeps every promise,
+ * drives no more, ends no later and grows the biggest open block by P1_MIN_GAIN (packVerdict), and the app's own
+ * simulation without the schedule blocks (the one apply.js finalRoute compares with) agrees: no more drive, no later end
+ * (else app_sim_rejects), and it changes at least one stop's hour (else no_hour_change).
  */
-function measurePack(env, plan, { rows, techId, nowFig, packed, sims, bounds }) {
-  const lunchLost = (fig) => !!(nowFig && nowFig.lunch && fig && !fig.lunch);
-  if (plan.verdict.accepted) {
-    const v = packVerdict({ now: nowFig, packed, kept: keptWithBlocks(plan, sims), driveRuleAccepts: true });
-    return { ...v, plan: 'drive', packed, lunchLost: lunchLost(packed), changes: [] };
-  }
+function packProposal(env, plan, { rows, techId }) {
+  const bounds = boundsOf(env, plan, techId);
+  const nowFig = openTime(simsOf(env, plan).current, bounds);
   const alt = packPlan(env, plan, { rows, techId });
   const altSims = simsOf(env, alt);
   const fig = openTime(altSims.planned, bounds);
-  const v = packVerdict({ now: nowFig, packed: fig, kept: keptWithBlocks(alt, altSims), driveRuleAccepts: false });
-  return { ...v, plan: 'pack', packed: fig, lunchLost: lunchLost(fig), changes: v.wouldAccept ? hourChanges(alt.rowGroups, alt.result.best) : [] };
+  let verdict = packVerdict({ now: nowFig, packed: fig, kept: keptWithBlocks(alt, altSims), driveRuleAccepts: false });
+  const { current, planned } = alt.check;
+  if (verdict.wouldAccept && !(current && planned && planned.driveMin <= current.driveMin && planned.endMin <= current.endMin)) {
+    verdict = { wouldAccept: false, reason: 'app_sim_rejects', gainMin: verdict.gainMin };
+  }
+  // The night writes hours only. A pack plan that changes no hour (two stops of one hour, in another order) has nothing
+  // to write and the writer would skip it (no_hour_changes), so it is not the day's plan.
+  const changes = verdict.wouldAccept ? stopChanges(alt) : [];
+  if (verdict.wouldAccept && changes.length === 0) verdict = { wouldAccept: false, reason: 'no_hour_change', gainMin: verdict.gainMin };
+  const p1Changes = verdict.wouldAccept ? hourChanges(alt.rowGroups, alt.result.best) : [];
+  return { alt, changes, p1: { ...verdict, plan: 'pack', packed: fig, lunchLost: lunchLost(nowFig, fig), changes: p1Changes } };
+}
+
+/**
+ * The day's plan when the drive rule did not take it (owner 2026-11-22): the pack plan when P1 accepts it (the same
+ * plan object shape, `packed: true`, verdict reason 'packed'), else the drive plan with the P1 record. A pack step that
+ * throws never fails the night: the drive plan stands, not accepted, with no P1 record.
+ */
+function withPackPlan(env, plan, { rows, techId }) {
+  let proposal;
+  try {
+    proposal = packProposal(env, plan, { rows, techId });
+  } catch (err) {
+    logger.warn(`[day-replan] ${plan.dayContext.dateStr} tech ${techId}: the pack plan failed (${err.message}); the drive plan stands`);
+    return { ...plan, p1: null };
+  }
+  const { alt, p1, changes } = proposal;
+  if (!p1.wouldAccept) return { ...plan, p1 };
+  return {
+    ...plan,
+    rowGroups: alt.rowGroups,
+    stops: alt.stops,
+    staleReasons: alt.staleReasons,
+    check: alt.check,
+    plannerResult: alt.plannerResult,
+    result: { ...alt.result, changes },
+    verdict: { accepted: true, reason: 'packed', savedMin: alt.check.current.driveMin - alt.check.planned.driveMin },
+    p1,
+    packed: true,
+  };
+}
+
+/**
+ * The day's P1 record: the pack plan's when the drive rule did not take the day (computeTechDay computed it, null when
+ * that step failed); a drive-accepted day never computes P1, since the drive rule already takes it.
+ */
+function measurePack(plan, { nowFig, packed, sims }) {
+  if (!plan.verdict.accepted || plan.packed) return plan.p1 ?? null;
+  const v = packVerdict({ now: nowFig, packed, kept: keptWithBlocks(plan, sims), driveRuleAccepts: true });
+  return { ...v, plan: 'drive', packed, lunchLost: lunchLost(nowFig, packed), changes: [] };
 }
 
 /**
@@ -575,26 +683,42 @@ async function replayPrefs(conn, plan) {
 }
 
 /**
- * The close-gaps measurement for one planned tech-day (./close-gaps.js; owner 2026-11-18). It measures only and never
- * throws: a failure leaves the row's close_gaps null, and the night's plan row is written either way.
+ * S1, the replay of the day's recent bookings, or null when it fails. It only measures, so its failure must not take
+ * the rest of the record with it: on a packed day the record's figures are the plan the night wrote, and the morning
+ * notification reads the day from them.
  */
-async function measureCloseGaps(conn, env, plan, { rows, techId }) {
+async function replayOrNull(conn, env, plan, { techId, bounds }) {
+  try {
+    return replayRecentBookings({
+      groups: plan.rowGroups, prefById: await replayPrefs(conn, plan), now: plan.dayContext.now, origin: plan.origin,
+      marginMin: DEFAULT_OPTIONS.marginMin, bounds, rowHours,
+      blockedHours: blockedHoursFor(plan.dayContext.allRows, techId, env.techBlind), blocks: plan.blocks,
+    });
+  } catch (err) {
+    logger.warn(`[day-replan] close-gaps: the booking replay failed (${err.message}); the record is written without it`);
+    return null;
+  }
+}
+
+/**
+ * The close-gaps record for one planned tech-day (./close-gaps.js; owner 2026-11-18). P1 is the plan the night writes
+ * since 2026-11-22; the rest only measures. It never throws: a failure leaves the row's close_gaps null, and the
+ * night's plan row is written either way.
+ */
+async function measureCloseGaps(conn, env, plan, { techId }) {
   try {
     const bounds = boundsOf(env, plan, techId);
     const sims = simsOf(env, plan);
     const nowFig = openTime(sims.current, bounds);
-    // The drive-best plan: the one the live apply writes (the morning notification reads it for an applied day).
+    // The plan the live apply writes (the morning notification reads it for an applied day): the drive-best plan, or
+    // the pack plan on a packed day (the plan is then the pack plan, so this is its open time).
     const packed = openTime(sims.planned, bounds);
     return {
       v: 2,
       now: nowFig,
       packed,
-      p1: measurePack(env, plan, { rows, techId, nowFig, packed, sims, bounds }),
-      s1: replayRecentBookings({
-        groups: plan.rowGroups, prefById: await replayPrefs(conn, plan), now: plan.dayContext.now, origin: plan.origin,
-        marginMin: DEFAULT_OPTIONS.marginMin, bounds, rowHours,
-        blockedHours: blockedHoursFor(plan.dayContext.allRows, techId, env.techBlind), blocks: plan.blocks,
-      }),
+      p1: measurePack(plan, { nowFig, packed, sims }),
+      s1: await replayOrNull(conn, env, plan, { techId, bounds }),
       gaps: lockedGaps(nowFig, new Map(plan.entries.map((e) => [String(e.row.id), e.why]))),
     };
   } catch (err) {
@@ -646,7 +770,7 @@ async function planTechDay(conn, env, { dateStr, techId, rows, dayContext }, sum
   const { entries, check, verdict, staleReasons, result, plannerResult } = plan;
   const apply = env.mode === 'apply';
   const planId = apply ? crypto.randomUUID() : null;
-  const closeGaps = await measureCloseGaps(conn, env, plan, { rows, techId });
+  const closeGaps = await measureCloseGaps(conn, env, plan, { techId });
   await conn(PLAN_TABLE).insert(planRow({
     runId: env.runId, techId, dateStr, entries, result, check, verdict, closeGaps, ...(apply ? { mode: 'apply', planId } : {}),
   }));
@@ -661,9 +785,11 @@ async function planTechDay(conn, env, { dateStr, techId, rows, dayContext }, sum
     stored_order_stale: staleReasons,
     planner: { accepted: plannerResult.accepted, reason: plannerResult.reason, saved_min: plannerResult.savedMin },
     app_sim: check,
+    ...(plan.packed ? { packed: true } : {}),
   });
   if (verdict.accepted) {
     summary.accepted += 1;
+    if (plan.packed) summary.packed += 1;
     summary.savedMin += verdict.savedMin;
     summary.changedVisits += result.changes.length;
   }
@@ -728,7 +854,7 @@ async function planDate(conn, env, dateStr, now, summary) {
 }
 
 /**
- * @returns {Promise<{status: string, runId?: string, days?: number, accepted?: number, savedMin?: number,
+ * @returns {Promise<{status: string, runId?: string, days?: number, accepted?: number, packed?: number, savedMin?: number,
  *   changedVisits?: number, skipped?: object[], failed?: object[]}>}
  */
 /** The run's environment: start points, the departure minute, the occupancy rule, the night pass's day bounds. */
@@ -754,7 +880,7 @@ async function runDayReplanIfEnabled({ now = new Date(), conn = db, deps = null 
   if (mode === 'off') return { status: 'off' };
   const apply = mode === 'apply';
   const runId = crypto.randomUUID();
-  const summary = { status: 'completed', runId, days: 0, accepted: 0, savedMin: 0, changedVisits: 0, plans: [], skipped: [], failed: [] };
+  const summary = { status: 'completed', runId, days: 0, accepted: 0, packed: 0, savedMin: 0, changedVisits: 0, plans: [], skipped: [], failed: [] };
   // Apply mode only: what the writer did, per tech-day.
   if (apply) Object.assign(summary, { apply: [], appliedVisits: 0 });
   let env;
@@ -775,7 +901,7 @@ async function runDayReplanIfEnabled({ now = new Date(), conn = db, deps = null 
   const byStatus = apply ? summary.apply.reduce((counts, a) => ({ ...counts, [a.status]: (counts[a.status] || 0) + 1 }), {}) : {};
   const applied = apply ? ` apply=${JSON.stringify(byStatus)} appliedVisits=${summary.appliedVisits}` : '';
   const recovered = summary.repaired ? ` repaired=${summary.repaired}` : '';
-  logger.info(`[day-replan] ${env.mode} run ${runId}: days=${summary.days} accepted=${summary.accepted} savedMin=${summary.savedMin} changedVisits=${summary.changedVisits} baselines=${JSON.stringify(baselines)} skipped=${summary.skipped.length} failed=${summary.failed.length}${applied}${recovered}`);
+  logger.info(`[day-replan] ${env.mode} run ${runId}: days=${summary.days} accepted=${summary.accepted} packed=${summary.packed} savedMin=${summary.savedMin} changedVisits=${summary.changedVisits} baselines=${JSON.stringify(baselines)} skipped=${summary.skipped.length} failed=${summary.failed.length}${applied}${recovered}`);
   return summary;
 }
 
@@ -804,6 +930,8 @@ function applyDeps() {
     // The move transaction re-reads whether the visit's 24-hour reminder will go out (apply.js recheckVisit).
     loadReminder24hOffIds,
     loadPromiseLevels: (conn, ids, now) => require('../auto-dispatch/told-visits').loadPromiseLevels(conn, ids, now),
+    // With that gate on, whether the visit's time is now a set time (apply.js toldLockFacts).
+    loadSetTime,
     isPersonPlacedVisit: (row, conn) => require('../auto-dispatch/eligibility').isPersonPlacedVisit(row, conn),
     // The ids among `ids` the customer has a known time for (the no-show detector's promise reader); throws when unreadable.
     loadToldIds: (conn, ids, now) => require('../auto-dispatch/told-visits').loadToldVisitIds(conn, ids, now),
@@ -830,7 +958,7 @@ function applyDeps() {
   };
 }
 
-module.exports = { runDayReplanIfEnabled, _internals: { applyDeps, lockDayRows, plannerStop, versionHash, loadDayContext, loadReminder24hOffIds, computeTechDay, rowHours, baselinesFor, loadBlocks, blocksWholeDay, dryWindowPref, blockedHoursFor, fixedReason, skipReason, horizonDates, LOCK_HOURS,
+module.exports = { runDayReplanIfEnabled, _internals: { applyDeps, lockDayRows, plannerStop, versionHash, loadDayContext, loadReminder24hOffIds, computeTechDay, rowHours, baselinesFor, loadBlocks, blocksWholeDay, dryWindowPref, blockedHoursFor, fixedReason, loadSetTime, skipReason, horizonDates, LOCK_HOURS,
   // The booking-time make-room check (scheduling/booking-make-room.js) reads a day, a preference and a leg the same way.
   loadDayStops, loadPref, legMin,
   // The close-gaps measurement (owner 2026-11-18).

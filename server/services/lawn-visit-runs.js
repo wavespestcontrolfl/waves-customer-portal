@@ -113,7 +113,7 @@ async function priorAssessmentCount(customerId, knex) {
 }
 
 // The photo quality rows the technician's screen gets. The stored rows carry the
-// model's light read too (GATE_LAWN_LIGHTING); that is for the report's color
+// model's light read too; that is for the report's color
 // comparison, not something the technician reads or must act on, so it stays off
 // the staff response. Rows from before the gate have no such keys and pass through.
 function staffPhotoQuality(value) {

@@ -60,6 +60,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     expect(after.unsubscribed_at).toEqual(row.unsubscribed_at);
     expect(after.resubscribed_at).toBeNull();
     expect(after.confirmed_at).toEqual(row.confirmed_at);
+    // The submit is no click: the reader-confirmed stamps stay empty until the link is used.
+    expect(after.reader_confirmed_at).toBeNull();
+    expect(after.reader_confirmed_email).toBeNull();
     expect(after.confirmation_token).not.toBe(row.confirmation_token);
     expect(after.confirmation_sent_at.getTime()).toBeGreaterThan(row.unsubscribed_at.getTime());
 
@@ -71,8 +74,128 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     expect(done.unsubscribed_at).toBeNull();
     expect(done.resubscribed_at).toBeInstanceOf(Date);
     expect(done.confirmed_at.getTime()).toBeGreaterThan(row.confirmed_at.getTime());
+    // The click wrote the reader's proof: one instant with confirmed_at, bound to this address.
+    expect(done.reader_confirmed_at.getTime()).toBe(done.confirmed_at.getTime());
+    expect(done.reader_confirmed_email).toBe(email.toLowerCase());
     // A second click on the same link is the idempotent already-active page.
     expect((await svc.confirmByToken(after.confirmation_token)).action).toBe('already_active');
+  });
+
+  test('a new public signup: the confirm click stamps the reader proof; a trusted add of a pending row stamps confirmed_at and nothing else', async () => {
+    const clicked = addr();
+    expect((await signup(clicked)).action).toBe('confirmation_sent');
+    const pending = await db('newsletter_subscribers').where({ email: clicked }).first();
+    expect(pending.status).toBe('pending');
+    expect(pending.reader_confirmed_at).toBeNull();
+    expect((await svc.confirmByToken(pending.confirmation_token)).action).toBe('confirmed');
+    const done = await reload(pending.id);
+    expect(done.status).toBe('active');
+    expect(done.reader_confirmed_at.getTime()).toBe(done.confirmed_at.getTime());
+    expect(done.reader_confirmed_email).toBe(clicked.toLowerCase());
+
+    const trusted = addr();
+    await signup(trusted);
+    const promoted = await svc.subscribeOrResubscribe({ email: trusted, source: 'admin_add', strict: true, requireConfirmation: false, linkCustomer: false });
+    expect(promoted.action).toBe('confirmed');
+    const row = await db('newsletter_subscribers').where({ email: trusted }).first();
+    expect(row.status).toBe('active');
+    expect(row.confirmed_at).toBeInstanceOf(Date);
+    expect(row.reader_confirmed_at).toBeNull();
+    expect(row.reader_confirmed_email).toBeNull();
+  });
+
+  test('a trusted resubscribe after an opt-out clears the reader proof; the reader\'s next confirm click writes it again', async () => {
+    const email = addr();
+    await signup(email);
+    const pending = await db('newsletter_subscribers').where({ email }).first();
+    await svc.confirmByToken(pending.confirmation_token);
+    expect((await reload(pending.id)).reader_confirmed_at).toBeInstanceOf(Date);
+    // The reader opts out, then a trusted add brings the row back.
+    await db('newsletter_subscribers').where({ id: pending.id }).update({ status: 'unsubscribed', unsubscribed_at: new Date() });
+    const back = await svc.subscribeOrResubscribe({ email, source: 'admin_add', strict: true, requireConfirmation: false, linkCustomer: false });
+    expect(back.action).toBe('resubscribed');
+    const row = await reload(pending.id);
+    expect([row.status, row.unsubscribed_at, row.reader_confirmed_at, row.reader_confirmed_email]).toEqual(['active', null, null, null]);
+
+    // Opt out again, sign up on the public form, click the new link: the proof is the new click.
+    // The stamps are set back so the new link is later than each of them by minutes, not by the
+    // milliseconds between two statements, and the last confirmation is past the 10-minute cooldown.
+    await db('newsletter_subscribers').where({ id: pending.id }).update({
+      status: 'unsubscribed', unsubscribed_at: ago(5 * MIN), confirmed_at: ago(20 * MIN), resubscribed_at: ago(20 * MIN), confirmation_sent_at: ago(30 * MIN),
+    });
+    expect((await signup(email)).action).toBe('confirmation_sent');
+    const armed = await reload(pending.id);
+    expect((await svc.confirmByToken(armed.confirmation_token)).action).toBe('confirmed');
+    const done = await reload(pending.id);
+    expect(done.status).toBe('active');
+    expect(done.reader_confirmed_at.getTime()).toBe(done.confirmed_at.getTime());
+    expect(done.reader_confirmed_email).toBe(email.toLowerCase());
+  });
+
+  // A trusted add reads an opted-out row; the reader's click on a live re-signup link lands before
+  // the trusted write (which is by id). `racing` is a connection whose UPDATE waits for that click.
+  test.each([
+    ['the reader confirms: the row is active at the write, and the new proof stays', false],
+    ['the reader confirms and opts out again: the row is opted out at the write, and the proof goes', true],
+  ])('a trusted comeback that lands after the reader\'s click on a re-signup link (%s)', async (_label, optsOutAgain) => {
+    const email = addr();
+    const row = await unsubscribedRow(email, { reader_confirmed_at: ago(60 * DAY - MIN), reader_confirmed_email: email });
+    await signup(email);
+    const armed = await reload(row.id);
+    let clicked = null;
+    const racing = (table) => {
+      const q = db(table);
+      const update = q.update.bind(q);
+      q.update = async (...args) => {
+        if (!clicked) {
+          clicked = await svc.confirmByToken(armed.confirmation_token);
+          if (optsOutAgain) await db('newsletter_subscribers').where({ id: row.id }).update({ status: 'unsubscribed', unsubscribed_at: new Date() });
+        }
+        return update(...args);
+      };
+      return q;
+    };
+    racing.raw = (...args) => db.raw(...args);
+    const added = await svc.subscribeOrResubscribe({ email, source: 'admin_add', strict: true, requireConfirmation: false, linkCustomer: false, dbh: racing });
+    expect(clicked.action).toBe('confirmed');
+    expect(added.action).toBe('resubscribed');
+    const after = await reload(row.id);
+    expect(after.status).toBe('active');
+    expect(after.unsubscribed_at).toBeNull();
+    if (optsOutAgain) {
+      expect([after.reader_confirmed_at, after.reader_confirmed_email]).toEqual([null, null]);
+    } else {
+      expect(after.reader_confirmed_email).toBe(email.toLowerCase());
+      // The proof is the click on the re-signup link, not the old one, and it is not before confirmed_at.
+      expect(after.reader_confirmed_at.getTime()).toBeGreaterThan(row.reader_confirmed_at.getTime());
+      expect(after.reader_confirmed_at.getTime()).toBeGreaterThanOrEqual(after.confirmed_at.getTime());
+    }
+  });
+
+  test('a trusted add after the reader\'s click changes no stamp, and a click after a trusted add writes no proof (accepted)', async () => {
+    // The reader clicks first: a later trusted add leaves confirmed_at and the proof as the click wrote them.
+    const clickedFirst = addr();
+    await signup(clickedFirst);
+    const pending = await db('newsletter_subscribers').where({ email: clickedFirst }).first();
+    expect((await svc.confirmByToken(pending.confirmation_token)).action).toBe('confirmed');
+    const clicked = await reload(pending.id);
+    const added = await svc.subscribeOrResubscribe({ email: clickedFirst, source: 'admin_add', strict: true, requireConfirmation: false, linkCustomer: false });
+    expect(added.action).toBe('already_active');
+    const after = await reload(pending.id);
+    expect(after.confirmed_at).toEqual(clicked.confirmed_at);
+    expect(after.reader_confirmed_at).toEqual(clicked.reader_confirmed_at);
+    expect(after.reader_confirmed_at.getTime()).toBe(after.confirmed_at.getTime());
+
+    // The trusted add lands first: the reader's link then reads already_active and writes nothing.
+    const addedFirst = addr();
+    await signup(addedFirst);
+    const row = await db('newsletter_subscribers').where({ email: addedFirst }).first();
+    await svc.subscribeOrResubscribe({ email: addedFirst, source: 'admin_add', strict: true, requireConfirmation: false, linkCustomer: false });
+    expect((await svc.confirmByToken(row.confirmation_token)).action).toBe('already_active');
+    const promoted = await reload(row.id);
+    expect(promoted.status).toBe('active');
+    expect(promoted.reader_confirmed_at).toBeNull();
+    expect(promoted.reader_confirmed_email).toBeNull();
   });
 
   test('inactive row: sunset markers and the re-engagement tag survive the submit and go at confirm', async () => {

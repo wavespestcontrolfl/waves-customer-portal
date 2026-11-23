@@ -979,7 +979,7 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
   );
 }
 
-function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork = null, lockInCta = null, mistingLayout = null, roofPoints }) {
+function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork = null, lockInCta = null, mistingLayout = null, roofPoints, noVisitLine }) {
   const phone = useIsMobile(560);
   // GATE_MISTING_LAYOUT_DESIGNER: the staff-drawn misting layout (/data `mistingLayout`) takes the satellite photo's
   // place. A picture that fails to load puts the satellite photo back, so there is never a hole.
@@ -988,6 +988,8 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
   // satellite photo's place too, unless a misting layout is showing (misting wins). A photo that fails to load puts the
   // satellite photo back.
   const [roofPointsFailed, setRoofPointsFailed] = useState(false);
+  // The satellite photo that failed to load, by its URL, so a card that later gets another photo starts clean.
+  const [failedSatelliteUrl, setFailedSatelliteUrl] = useState(null);
   if (!intelligence) return null;
   const showMisting = Boolean(mistingLayout?.imageUrl) && !mistingFailed;
   const showRoofPoints = !showMisting && !roofPointsFailed && hasRoofPoints(roofPoints);
@@ -998,6 +1000,12 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
   // "Show your work" (estimateShowYourWork gate): the parcel-outline
   // satellite image replaces the plain one when the server resolved it.
   const satelliteUrl = showYourWork?.overlaySatelliteUrl || intelligence.satelliteUrl;
+  // The owner's "no visit needed" sentence (2026-11-22, option B) sits under the satellite photo. The server decides who
+  // gets it and sends the words (/data `noVisitLine`): an open home estimate whose every service Waves prices from the
+  // measured home and yard alone. The card adds one condition of its own: the satellite photo itself is the picture on the
+  // card. A staff-made picture in its place (misting layout, roof points) means a visit happened, and a photo that did
+  // not load leaves the sentence with nothing to describe.
+  const showNoVisitLine = Boolean(noVisitLine) && Boolean(satelliteUrl) && !photoReplaced && failedSatelliteUrl !== satelliteUrl;
   const showYourWorkFacts = Array.isArray(showYourWork?.facts) ? showYourWork.facts : [];
 
   return (
@@ -1037,6 +1045,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
           src={resolveApiAssetUrl(satelliteUrl)}
           alt={`Satellite view of ${address || 'your property'}`}
           loading="lazy"
+          onError={() => setFailedSatelliteUrl(satelliteUrl)}
           style={{
             display: 'block',
             width: '100%',
@@ -1047,6 +1056,12 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
             background: '#F7F5EE',
           }}
         />
+      ) : null}
+
+      {showNoVisitLine ? (
+        <div data-testid="no-visit-line" style={{ marginTop: 8, fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
+          {noVisitLine}
+        </div>
       ) : null}
 
       {showYourWork?.overlaySatelliteUrl && !photoReplaced ? (
@@ -5497,8 +5512,8 @@ export function ExistingPlanUpgradeCard({ membership, waveGuardTier, readOnly = 
 
 // Referral share card on the accepted / just-accepted screens
 // (GATE_ESTIMATE_SUCCESS_REFERRAL). The render payload carries only the
-// headline + CTA; the tap POSTs /:token/referral-link, which enrolls the
-// promoter — so a render never does. Same shared card as the service report.
+// headline + CTA (and the offer line while GATE_REFERRAL_STEP2 is on); the tap
+// POSTs /:token/referral-link, which enrolls the promoter — so a render never does. Same shared card as the service report.
 // `staffView` — a staff preview of a PUBLISHED accepted estimate
 // (?adminPreview=1) must never enroll the customer as a promoter: the card
 // renders its staff state and never fetches, and the fetch it would make
@@ -5521,6 +5536,7 @@ export function EstimateReferralCard({ referral, token, staffView = false }) {
       // are inert here, so the estimate's own card typography rides inline.
       styles={{
         heading: { fontSize: 20, lineHeight: 1.35, fontWeight: 600, color: COLORS.navy, margin: '0 0 14px' },
+        offer: { fontSize: 16, lineHeight: 1.5, color: COLORS.navy, margin: '-6px 0 14px' },
         button: { ...estimateCtaStyle, display: 'inline-block', fontSize: 16 },
         link: { ...estimateCtaStyle, display: 'inline-block', fontSize: 16, textDecoration: 'none', margin: '10px 6px 0' },
         code: { fontSize: 20, fontWeight: 700, color: COLORS.navy, letterSpacing: '0.04em', marginRight: 10 },
@@ -6710,7 +6726,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   const acceptance = data?.estimate?.acceptance || { mode: 'standard_slot_pick' };
   // C4 plan-restart quote: server-frozen offer (see /data planRestart) —
   // the repricing controls and the one-time mode toggle are omitted.
-  const restartQuote = data?.estimate?.planRestart === true;
+  // A plan offer's quote (/data planOffer: the quarterly plan with the setup fee waived) is frozen the same way.
+  const restartQuote = data?.estimate?.planRestart === true || data?.estimate?.planOffer === true;
   const existingAppointment = acceptance.mode === 'existing_appointment' ? acceptance.appointment : null;
   // Payment-only accept (guarantee-only renewal): no slot picker, no
   // reservation — accept goes straight to review, then invoice.
@@ -9443,6 +9460,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   }
 
   const { estimate, pricing, cta } = data;
+  // The owner's "no visit needed" sentence for the Waves AI card: the words the server sent (/data `noVisitLine`), or ''.
+  const noVisitLine = typeof data.noVisitLine === 'string' ? data.noVisitLine.trim() : '';
   const canAccept = cta?.canAccept === true;
   // Review-before-booking (e.g. priced termite trenching) is NOT terminal: the
   // price + Ask-Waves stay visible and only self-booking is gated. A genuine
@@ -10430,7 +10449,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             not for an authored commercial proposal — the PDF document drops
             `intelligence` for it the same way. */}
         {authoredProposalOnPage ? null : (
-          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} mistingLayout={data.mistingLayout || null} roofPoints={data.roofPoints || null} />
+          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} mistingLayout={data.mistingLayout || null} roofPoints={data.roofPoints || null} noVisitLine={noVisitLine} />
         )}
         {showAskBar && !isRegulatedCertificateSurface ? (
           <EstimateAskBar
@@ -10520,7 +10539,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     <>
       {!isRegulatedCertificateSurface ? (
         <>
-          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} mistingLayout={data.mistingLayout || null} roofPoints={data.roofPoints || null} />
+          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} mistingLayout={data.mistingLayout || null} roofPoints={data.roofPoints || null} noVisitLine={noVisitLine} />
           <EstimateAskBar
             preview={readOnlyPreview}
             token={token}
@@ -10964,6 +10983,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 <SlotPicker
                   website={websiteMode}
                   preview={readOnlyPreview}
+                  firstVisitFrom={data?.estimate?.planOffer === true ? data.estimate.planOfferFirstVisitFrom || null : null}
                   token={token}
                   askToken={estimate.askToken}
                   selectedSlotId={selectedSlotId}
@@ -11060,7 +11080,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     return (
       <WebsiteEstimateFlow
         services={services} selected={selected} onFrequencyChange={handleFrequencyChange}
-        lockedSection={isLockedMirrorSection} oneTime={serviceMode === 'one_time'}
+        // A fixed quote (a restart, a plan offer) has no cadence step: the accept refuses any other cadence.
+        lockedSection={(section) => restartQuote || isLockedMirrorSection(section)} oneTime={serviceMode === 'one_time'}
         oneTimeBreakdown={pricing.oneTimeBreakdown} combinedFrequency={combinedFrequency}
         fees={(pricing.firstVisitFees?.length ? pricing.firstVisitFees : (setupFeeEffective ? [setupFeeEffective] : [])).map(tierAwareFee).filter(fee => Number(fee.amount) > 0)}
         bookingContent={<>{slotIssueBanner}{bookingContent}{paymentContent}</>} reviewContent={reviewContent}
@@ -11213,8 +11234,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           {/* Pest visit-preference toggles ("Skip parts you don't need")
               live BELOW the schedule card (owner directive). Glass removes
               the customize section entirely — zero lifetime toggle clicks
-              (owner directive); pre-checked defaults still apply. */}
-          {serviceMode === 'recurring' && !glassContent && renderFlags.showPestRecurringAddOns === true
+              (owner directive); pre-checked defaults still apply. A fixed quote
+              (a restart, a plan offer) shows none: PUT /preferences refuses it. */}
+          {serviceMode === 'recurring' && !glassContent && !restartQuote && renderFlags.showPestRecurringAddOns === true
             ? services
               .filter((section) => section.isPest && section.isRecurring)
               .map((section) => {
@@ -11264,6 +11286,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 showYourWork={data.showYourWork || null}
                 mistingLayout={data.mistingLayout || null}
                 roofPoints={data.roofPoints || null}
+                noVisitLine={noVisitLine}
                 lockInCta={canShowSlotPicker
                   ? <GlassSectionCta label="This price fits my home — lock it in →" onClick={promptPickTime} style={{ justifyContent: 'center' }} />
                   : null}

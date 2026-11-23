@@ -1,4 +1,5 @@
 // Pest Insider plan: which fact leads and which species fills "What's this?".
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const { planIssue, SPECIES, CATEGORY_SERVICES, SEASONAL_MAX_MONTHS, TOOL_RECENT_WINDOW } = require('../services/pest-insider/plan');
 const { factsForSend, factById, FACTS } = require('../services/pest-insider/facts');
 const { tools: TOOLS } = require('../services/pest-insider/tools').loadTools();
@@ -176,5 +177,31 @@ describe('planIssue: "A tool we\'d use"', () => {
     expect(plan({ sendDate: DEC, liveToolUrls: [...ALL_TOOLS, 'https://www.amazon.com/dp/B000000000?tag=wavespestcont-20'] }).tool).toBeNull();
     expect(() => plan({ sendDate: DEC, liveToolUrls: ALL_URLS[0] })).toThrow(/must be lists/);
     expect(() => plan({ sendDate: DEC, recentToolIds: null })).toThrow(/must be lists/);
+  });
+
+  // schedule.js names no link when it cannot read the registry. The planner reads the registry
+  // itself, and that second read must not stop the issue either.
+  test('a registry that cannot be read never stops the plan: no read with no named link, no tool and one warning with one', () => {
+    const registry = require('../../packages/affiliate-registry');
+    const logger = require('../services/logger');
+    const read = jest.spyOn(registry, 'productIndex').mockImplementation(() => { throw new Error('registry file unreadable'); });
+    logger.warn.mockClear();
+    try {
+      const none = plan({ sendDate: DEC, liveToolUrls: [] });
+      expect(none.leadFact).not.toBeNull();
+      expect(none.tool).toBeNull();
+      expect(read).not.toHaveBeenCalled();
+      expect(logger.warn).not.toHaveBeenCalled();
+
+      const named = plan({ sendDate: DEC, liveToolUrls: ALL_URLS });
+      expect(named.leadFact).not.toBeNull();
+      expect(named.idItem).not.toBeNull();
+      expect(named.tool).toBeNull();
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      expect(logger.warn.mock.calls[0][0]).toContain('this issue has no tool');
+    } finally {
+      read.mockRestore();
+    }
+    expect(plan({ sendDate: DEC, liveToolUrls: ALL_URLS }).tool).not.toBeNull();
   });
 });

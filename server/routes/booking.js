@@ -129,6 +129,13 @@ const BOOKING_FUNNEL_SERVICE_CATEGORIES = {
   rodent: 'rodent',
   bora_care: 'termite', // catalog service_key 'bora_care' carries category 'termite'
 };
+// The service line of a funnel key whose catalog category cannot say it. The /book rodent option
+// saves a general "Rodent Control" visit: the first look at a rodent problem (the booking-link text
+// sends a rodent inspection here too, sms-book-funnel-map.js). That visit is on the exclusion line
+// with the rodent inspection (owner 2026-11-21: the owner does the first visit and the inspection,
+// the second technician traps), the same line its saved name reads
+// (auto-dispatch/service-category.js), so the offer and the saved visit agree.
+const BOOKING_FUNNEL_SERVICE_LINES = Object.freeze({ rodent: 'exclusion' });
 
 // The booking's own expected-minutes credit (owner ruling 2026-09-23) for
 // a funnel serviceKey ('pest_control', 'pest_control+lawn_care', …): every
@@ -2282,7 +2289,9 @@ function funnelServiceLines(serviceKey) {
   if (!lineMapLive()) return null;
   const { categoryForCatalogCategory } = require('../services/auto-dispatch/service-category');
   const lines = normalizeBookingServiceKeys(serviceKey)
-    .map((key) => categoryForCatalogCategory(BOOKING_FUNNEL_SERVICE_CATEGORIES[key]))
+    .map((key) => (Object.prototype.hasOwnProperty.call(BOOKING_FUNNEL_SERVICE_LINES, key)
+      ? BOOKING_FUNNEL_SERVICE_LINES[key]
+      : categoryForCatalogCategory(BOOKING_FUNNEL_SERVICE_CATEGORIES[key])))
     .filter(Boolean);
   return lines.length ? [...new Set(lines)].sort() : null;
 }
@@ -4917,6 +4926,8 @@ async function createSelfBooking(payload = {}) {
         source: 'book', scheduledServiceId: row.id, customerId: row.customer_id, date: row.scheduled_date,
         windowStart: row.window_start, windowEnd: row.window_end, serviceId: row.service_id, serviceKey: serviceKey || null,
         serviceType: row.service_type, durationMinutes: row.estimated_duration_minutes, actualTechnicianId: row.technician_id,
+        // The lead a Waves Assessment was booked for (the lead link's own lead, the estimate's linked lead).
+        leadId: callbackVisit?.lineLeadId || null,
       });
     }
 

@@ -726,15 +726,21 @@ function usePropertyScore() {
 // GATE_PROPERTY_RECOMMENDATIONS; gate-off answers available:false and the
 // card renders nothing). Best-effort: a failed load just hides the card.
 // =========================================================================
-function usePropertyRecommendations() {
+// reloadKey: a host that changes it reads the stack again (Billing does,
+// after a purchase from its offer card). A reload starts from an empty
+// stack: what was shown is out of date (it offers the service just bought),
+// and only a read that succeeds may show cards again.
+function usePropertyRecommendations(enabled = true, reloadKey = 0) {
   const [data, setData] = useState(null);
   useEffect(() => {
+    if (!enabled) return undefined;
     let cancelled = false;
+    if (reloadKey > 0) setData(null);
     api.getPropertyRecommendations()
-      .then(d => { if (!cancelled && d?.available && d.cards?.length) setData(d); })
+      .then(d => { if (!cancelled) setData(d?.available && d.cards?.length ? d : null); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, []);
+  }, [enabled, reloadKey]);
   return data;
 }
 
@@ -770,6 +776,41 @@ function usePlanOffers(enabled) {
     return () => { cancelled = true; };
   }, [enabled]);
   return data;
+}
+
+// =========================================================================
+// The member's plan services, for the two places that NAME them: Billing's
+// Plan Charges and the Learn sentence (owner 2026-11-22, "fix box"). The
+// server builds the list (planFamilies on the all-properties schedule read,
+// from the tier alignment's own rules); this hook only maps each family to
+// its catalog entry, in catalog order. It never guesses from the tier: both
+// places listed the first N catalog services for an N-service tier, so a
+// lawn-only Bronze member read "Pest Control".
+// null while the read loads, after a failed read, and from a server that
+// does not send the list: the caller then names no service. `enabled` is
+// false for a cancelled account (its session may not read the schedule) and
+// for a non-member.
+// =========================================================================
+const PLAN_FAMILY_CATALOG_IDS = { termite_bait: 'termite' };
+function planServicesFromFamilies(families) {
+  if (!Array.isArray(families)) return null;
+  const ids = new Set(families.map((family) => PLAN_FAMILY_CATALOG_IDS[family] || family));
+  return SERVICE_CATALOG.filter((svc) => ids.has(svc.id));
+}
+function usePlanServices(enabled, reloadKey = 0) {
+  const [families, setFamilies] = useState(null);
+  useEffect(() => {
+    if (!enabled) {
+      setFamilies(null);
+      return undefined;
+    }
+    let cancelled = false;
+    api.getSchedule(365, { allProperties: true })
+      .then((data) => { if (!cancelled) setFamilies(Array.isArray(data?.planFamilies) ? data.planFamilies : null); })
+      .catch(() => { if (!cancelled) setFamilies(null); });
+    return () => { cancelled = true; };
+  }, [enabled, reloadKey]);
+  return useMemo(() => planServicesFromFamilies(families), [families]);
 }
 
 // =========================================================================
@@ -1100,7 +1141,7 @@ const ADD_SERVICE_HEADING = {
   subtitle: 'Priced for this property. You pay per application, after each visit.',
 };
 
-function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING }) {
+function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING, surface = 'home', onCardSaved = null, onPurchased = null }) {
   // Per-card request state: idle → sending → sent | stale | failed.
   const [requestStates, setRequestStates] = useState({});
   // One-tap purchase overlay target (bet 3) — a priced offer card while the
@@ -1111,6 +1152,12 @@ function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING }) {
   // reopens the overlay at the right step.
   const [purchaseResume, setPurchaseResume] = useState(null);
   const resumeProcessedRef = useRef(false);
+  // The host tab's "a payment method was saved here" hook (Billing reloads
+  // its card list). A ref, so the mount-only resume effect below calls the
+  // current one.
+  const onCardSavedRef = useRef(onCardSaved);
+  onCardSavedRef.current = onCardSaved;
+  const notifyCardSaved = () => { onCardSavedRef.current?.(); };
   useEffect(() => {
     if (resumeProcessedRef.current) return;
     const returned = getReturnedSetupIntent('one_tap_card');
@@ -1124,6 +1171,10 @@ function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING }) {
         await api.saveStripeCard(null, returned.setupIntentId);
         cardJustSaved = true;
       } catch { /* state fetch below reports hasCardOnFile either way */ }
+      // After the attempt, saved or not: the host tab read its card list
+      // before this save, and a failed call can still be a card that an
+      // earlier try already saved.
+      notifyCardSaved();
       let resolved = false;
       try {
         const state = await api.oneTapGet(resumeId);
@@ -1149,17 +1200,25 @@ function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING }) {
   // is empty or failed transiently — the resume fetch succeeding is the
   // customer's only automatic path back to the held purchase (the return
   // URL params are cleared once the state loads).
-  if (!data?.cards?.length) {
-    if (!purchaseResume) return null;
-    return (
-      <OneTapPurchaseOverlay
-        open
-        card={null}
-        resume={purchaseResume}
-        onClose={() => setPurchaseResume(null)}
-      />
-    );
-  }
+  //
+  // ONE overlay element at ONE place in this component's tree, whatever the
+  // card list does (not loaded yet, empty, advice only, loaded): every return
+  // below is a fragment whose second child is this element. A purchase
+  // resumed before the cards arrive keeps its instance when they do; an
+  // overlay that unmounts releases the held visit time. The overlay draws
+  // through a portal, so its place here is not its place on the screen.
+  const overlay = (purchaseCard || purchaseResume) ? (
+    <OneTapPurchaseOverlay
+      open
+      card={purchaseCard}
+      resume={purchaseCard ? null : purchaseResume}
+      onClose={() => { setPurchaseCard(null); setPurchaseResume(null); }}
+      onCardSaved={notifyCardSaved}
+      onPurchased={onPurchased}
+    />
+  ) : null;
+  const overlayOnly = <>{null}{overlay}</>;
+  if (!data?.cards?.length) return overlayOnly;
   const muted = PORTAL_SHELL.muted;
   const setCardState = (id, value) => setRequestStates((prev) => ({ ...prev, [id]: value }));
 
@@ -1177,6 +1236,8 @@ function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING }) {
         // Server-issued digest of everything this card rendered — the
         // request path rejects any drift from what the customer saw.
         fingerprint: card.fingerprint || null,
+        // Which tab the card is on, so the office request names it.
+        surface,
       } : { cardId: card.id });
       setCardState(card.id, 'sent');
     } catch (err) {
@@ -1207,19 +1268,10 @@ function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING }) {
   const visibleCards = (data?.cards || []).filter((c) => c.kind !== 'advice');
   // Same rule as the empty-payload guard above: a restored purchase must
   // still render when only advice cards came back (pre-push P1).
-  if (visibleCards.length === 0) {
-    if (!purchaseResume) return null;
-    return (
-      <OneTapPurchaseOverlay
-        open
-        card={null}
-        resume={purchaseResume}
-        onClose={() => setPurchaseResume(null)}
-      />
-    );
-  }
+  if (visibleCards.length === 0) return overlayOnly;
 
   return (
+    <>
     <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: 20 }}>
       <div data-glass="chip" style={CUSTOMER_SECTION_LABEL}>
         <Icon name={heading.icon} size={14} strokeWidth={2} />{heading.label}
@@ -1317,15 +1369,9 @@ function RecommendationsCard({ data, heading = RECOMMENDATIONS_HEADING }) {
           );
         })}
       </div>
-      {(purchaseCard || purchaseResume) && (
-        <OneTapPurchaseOverlay
-          open
-          card={purchaseCard}
-          resume={purchaseCard ? null : purchaseResume}
-          onClose={() => { setPurchaseCard(null); setPurchaseResume(null); }}
-        />
-      )}
     </section>
+    {overlay}
+    </>
   );
 }
 
@@ -1355,7 +1401,7 @@ function oneTapDayLabel(date) {
   return dt.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
-function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
+function OneTapPurchaseOverlay({ open, card, onClose, resume = null, onCardSaved = null, onPurchased = null }) {
   useLockBodyScroll(open);
   // Close is LOCKED while a confirmation is in flight (same guard as
   // "Change time"): unmounting races the in-flight /confirm — a commit
@@ -1595,6 +1641,9 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
       }
       if (setupIntent.payment_method) {
         await api.saveStripeCard(setupIntent.payment_method, setupIntent.id);
+        // The card is on the account now, whether or not the customer
+        // finishes this purchase: the host tab reloads what it shows.
+        if (onCardSaved) onCardSaved();
       }
       setCardSaved(true);
       setNeedsCard(false);
@@ -1616,6 +1665,8 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
       const r = await api.oneTapConfirm(init.purchaseId, { termsAccepted: true });
       setResult(r);
       setStep('done');
+      // The plan changed on the server: a host that shows the plan reloads.
+      if (onPurchased) onPurchased();
     } catch (err) {
       if (err?.status === 402) {
         setNeedsCard(true);
@@ -2285,7 +2336,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
         {metrics.map((m) => {
           const current = scores[m.key] || 0;
           // The server flags the first-visit color as hidden when the first and latest
-          // photos were not taken in known, compatible light (GATE_LAWN_LIGHTING):
+          // photos were not taken in known, compatible light:
           // today's color shows alone, with no "from" and no change.
           const compareHidden = m.key === 'colorHealth' && initialScores?.colorHidden === true;
           const initial = compareHidden ? 0 : (initialScores?.[m.initialKey] || 0);
@@ -6459,13 +6510,30 @@ function BillingChannelSelect({ field, channels, usable, saving, onChange }) {
   );
 }
 
-function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) {
+// The Billing tab's root column: one style for its loading, error and loaded
+// views, so the root stays the same <div> across them.
+const BILLING_COLUMN = { display: 'flex', flexDirection: 'column', gap: 16 };
+
+function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, onSwitchTab = null }) {
   const portalGlass = usePortalGlass();
   // C4: a cancelled account keeps billing READS (balance, invoices, history,
   // credits) and the tokenized Pay now hand-off; every management surface
   // whose writes the middleware now 401s (cards, Auto Pay, credit toggle,
   // recipients) is hidden rather than shown broken.
   const cancelledAccount = customer?.cancelled === true;
+  // Home's add-a-service offer, on Billing too (owner 2026-11-21): the same
+  // card, data and one-tap purchase as Home, offers only — the seasonal
+  // mosquito note stays on Home. Pest or lawn only (the shared offer ladder).
+  const [offersReloadKey, setOffersReloadKey] = useState(0);
+  const homeRecommendations = usePropertyRecommendations(!cancelledAccount, offersReloadKey);
+  // The services Plan Charges lists, from the server (usePlanServices). A
+  // purchase from the offer card changes the plan, so the list reads again
+  // with the offers.
+  const planServices = usePlanServices(!cancelledAccount && !!resolveActiveTierName(customer), offersReloadKey);
+  const billingOffers = useMemo(() => {
+    const cards = (homeRecommendations?.cards || []).filter((c) => c.kind === 'offer');
+    return cards.length ? { ...homeRecommendations, cards } : null;
+  }, [homeRecommendations]);
   const [payments, setPayments] = useState([]);
   // "Apply my credit automatically" slider (owner ruling 2026-08-28): the
   // balance stays on the account until the customer turns this on. Server-
@@ -6614,6 +6682,28 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         // instead of failing the action.
         if (seq === cardsSeqRef.current) setStripeError(CARD_REFRESH_MISS_MSG);
       });
+  };
+
+  // A payment method saved from the add-a-service offer's purchase overlay.
+  // The same two steps as the add-payment flow below: a consented save can
+  // enroll Auto Pay server-side, so the AutopayCard remounts after the card
+  // list reloads.
+  const handleOfferCardSaved = async () => {
+    await refreshCards();
+    setAutopayRefreshKey((k) => k + 1);
+  };
+
+  // A purchase confirmed from the offer card changed the plan. Billing shows
+  // the plan (WaveGuard tier, discount, services under Plan Charges), so the
+  // customer record reloads; and the offers read again, so the service just
+  // bought is no longer offered here.
+  // The purchase can also change how the account is billed (per visit to
+  // per application); Plan Charges reads that from the Auto Pay data, so
+  // that reloads too.
+  const handleOfferPurchased = () => {
+    if (typeof refreshCustomer === 'function') Promise.resolve(refreshCustomer()).catch(() => {});
+    setOffersReloadKey((k) => k + 1);
+    handleOfferCardSaved();
   };
 
   const loadBilling = useCallback(() => {
@@ -7003,30 +7093,47 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
     return `${cardBrandLabel(method.brand)}${last4 ? ` ending in ${last4}` : ''}`;
   };
 
+  // The add-a-service card owns its purchase overlay and the return from a
+  // bank page for it (it saves the returned method and reopens the held
+  // purchase). It is the same keyed child of the same root <div> in every
+  // branch below, so React keeps the one instance: the return is resumed
+  // while Billing loads or fails to load, and the reopened purchase stays
+  // open when Billing then renders. Before Billing has loaded it gets no
+  // offers, so it shows nothing but a resumed purchase.
+  const offerCard = (offers) => (cancelledAccount ? null : (
+    <RecommendationsCard key="billing-offer" data={offers} surface="billing" onCardSaved={handleOfferCardSaved} onPurchased={handleOfferPurchased} />
+  ));
+
   if (loading) {
     return (
-      <PortalStatePanel
-        icon="card"
-        eyebrow="Billing"
-        titleAs="h1"
-        title="Loading billing"
-        message="Checking your balance, saved methods, autopay status, and payment history."
-      />
+      <div style={BILLING_COLUMN}>
+        <PortalStatePanel
+          icon="card"
+          eyebrow="Billing"
+          titleAs="h1"
+          title="Loading billing"
+          message="Checking your balance, saved methods, autopay status, and payment history."
+        />
+        {offerCard(null)}
+      </div>
     );
   }
 
   if (loadError) {
     return (
-      <PortalStatePanel
-        icon="warning"
-        tone="danger"
-        eyebrow="Billing"
-        titleAs="h1"
-        title="Could not load billing"
-        message={loadError}
-        actionLabel="Try Again"
-        onAction={loadBilling}
-      />
+      <div style={BILLING_COLUMN}>
+        <PortalStatePanel
+          icon="warning"
+          tone="danger"
+          eyebrow="Billing"
+          titleAs="h1"
+          title="Could not load billing"
+          message={loadError}
+          actionLabel="Try Again"
+          onAction={loadBilling}
+        />
+        {offerCard(null)}
+      </div>
     );
   }
 
@@ -7078,7 +7185,6 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   const tierName = activeTierName || 'No Plan';
   const tier = activeTierName ? TIER[tierName] : null;
   const monthlyRate = customer?.monthlyRate || 0;
-  const numServices = activeTierName ? (TIER_SERVICES[tierName] || 1) : 0;
   const discount = activeTierName ? (TIER_DISCOUNTS[tierName] || 0) : 0;
 
   // Card expiry check — already expired, or expiring within 60 days. An
@@ -7286,7 +7392,10 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   // figures (static catalog basePrice × 12 × discount) were fabricated
   // annual totals — the card now speaks in the tier's real percentage
   // (owner 2026-07-11: no per-year totals, no invented per-service rates).
-  const includedServices = SERVICE_CATALOG.slice(0, numServices);
+  // The member's own plan services (planServices, read above): never the
+  // first N catalog services for an N-service tier. No row while the read
+  // loads or after it fails.
+  const includedServices = planServices || [];
 
   const currentBalance = Number(balance?.currentBalance || 0);
   const balanceState = currentBalance > 0 ? 'Balance due' : 'Current';
@@ -7459,7 +7568,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <div style={BILLING_COLUMN}>
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0 }}>
@@ -8312,6 +8421,17 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         )}
         </>}
       </form>
+      )}
+
+      {offerCard(billingOffers)}
+      {!cancelledAccount && onSwitchTab && (
+        <section data-glass="card" data-section="billing-refer" style={{ ...card, padding: 20, marginTop: 16, textAlign: 'center' }}>
+          <h2 style={{ fontSize: 18, fontWeight: 700, color: B.glassNavy, margin: '0 0 6px' }}>Know someone who could use Waves?</h2>
+          <p style={{ fontSize: 14, color: muted, margin: '0 0 12px' }}>Share your referral link from the Refer tab.</p>
+          <button type="button" data-glass-accent="" onClick={() => onSwitchTab('refer')} style={primaryButton}>
+            Refer a friend
+          </button>
+        </section>
       )}
     </div>
   );
@@ -10516,10 +10636,15 @@ function LearnTab({ customer, onOpenPhotoId = null, scope = null }) {
 
   const activeTierName = resolveActiveTierName(customer);
   const tierName = activeTierName || 'No Plan';
-  const numServices = activeTierName ? (TIER_SERVICES[tierName] || 1) : 0;
-  const customerServiceNames = SERVICE_CATALOG
-    .slice(0, numServices)
+  // The member's own plan services, from the server (usePlanServices): never
+  // the first N catalog services for an N-service tier. No name while the
+  // read loads or after it fails: the sentence below stays out.
+  const planServices = usePlanServices(customer?.cancelled !== true && !!activeTierName);
+  const customerServiceNames = (planServices || [])
     .map(s => s.name.replace(/ Program| Barrier Treatment/g, '').replace('Quarterly ', ''));
+  // The count is the number of services the sentence names. No count while
+  // the list is not known: never the tier's size as a guess.
+  const numServices = customerServiceNames.length;
 
   const filteredFaq = faqSearch.trim()
     ? faq.map(cat => ({
@@ -10619,11 +10744,13 @@ function LearnTab({ customer, onOpenPhotoId = null, scope = null }) {
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
               {activeTierName ? `WaveGuard ${tierName}` : 'No active WaveGuard plan'}
             </div>
-            <div style={{ marginTop: 4, fontSize: 14, color: muted }}>
-              {activeTierName
-                ? `${numServices} included service${numServices === 1 ? '' : 's'} in your guidance.`
-                : 'Plan-specific guidance appears after activation.'}
-            </div>
+            {(!activeTierName || numServices > 0) && (
+              <div style={{ marginTop: 4, fontSize: 14, color: muted }}>
+                {activeTierName
+                  ? `${numServices} included service${numServices === 1 ? '' : 's'} in your guidance.`
+                  : 'Plan-specific guidance appears after activation.'}
+              </div>
+            )}
           </div>
         </div>
 
@@ -14064,6 +14191,37 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
 // =========================================================================
 const PENDING_REFERRAL_STATUSES = ['pending', 'contacted', 'estimated', 'sms_failed'];
 
+// GATE_REFERRAL_STEP2 words for the Refer tab (owner 2026-11-21): the friend's benefit is an account credit after the
+// first plan service. The server sends annualCap only while the program is on Step 2, with friendReward in dollars (the
+// live Referee Discount setting). Every field is null when the tab must keep today's words: Step 2 off, or the server
+// confirms no amount for that line (friend amount 0, member at the yearly limit, program paused). Both credits post at
+// the friend's first performed recurring plan service, so every line says "first plan service" (not "paid", not any
+// one-time service).
+function referTabStep2Words({ data, rewardPerReferral, earnsCredit, money, shareLink }) {
+  if (data?.annualCap == null) return { heading: null, intro: null, limitLine: null, earnStep: null, shareText: null };
+  const friendReward = Number(data.friendReward) || 0;
+  const cap = Number(data.annualCap);
+  // A member at the yearly limit reads how many credits the year brought, and that the note still comes. A paused
+  // program promises nothing (the server then sends programPaused and every amount at 0): no line, since it
+  // promises the note and the January restart while no friend can use a link.
+  const atLimit = data.capReached === true && Number(data.creditsThisYear) > 0 && data.programPaused !== true;
+  const amounts = [
+    friendReward > 0 && `They get a ${money(friendReward)} credit after their first plan service.`,
+    earnsCredit && `You earn a ${money(rewardPerReferral)} credit after their first plan service. Up to ${cap} credit${cap === 1 ? '' : 's'} a year.`,
+  ].filter(Boolean);
+  return {
+    heading: 'Friends & Neighbors',
+    intro: amounts.length ? ['Share your link.', ...amounts].join(' ') : null,
+    limitLine: atLimit
+      ? `You earned ${Number(data.creditsThisYear)} credits this year, the most we give. Thank you! Credits start again January 1. We still send a thank-you note for every friend who books.`
+      : null,
+    earnStep: `Your ${money(rewardPerReferral)} credit is applied after their first plan service.`,
+    shareText: friendReward > 0
+      ? `I use Waves and thought you might want their info. You get a ${money(friendReward)} credit after your first plan service with my link: ${shareLink}`
+      : null,
+  };
+}
+
 function ReferTab({ customer, onSwitchTab }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
@@ -14284,7 +14442,8 @@ function ReferTab({ customer, onSwitchTab }) {
     : Number(stats.totalEarned || 0);
   const availableBalance = Number(data?.availableBalance || 0) / 100;
   const pendingEarnings = Number(data?.pendingEarnings || 0) / 100;
-  const shareText = `I use Waves and thought you might want their info. Here is my referral link: ${shareLink}`;
+  const step2Words = referTabStep2Words({ data, rewardPerReferral, earnsCredit, money, shareLink });
+  const shareText = step2Words.shareText || `I use Waves and thought you might want their info. Here is my referral link: ${shareLink}`;
   const customerFirstName = customer?.firstName || customer?.first_name || 'your friend';
 
   const statusConfig = {
@@ -14382,14 +14541,12 @@ function ReferTab({ customer, onSwitchTab }) {
               lineHeight: 1.1,
               letterSpacing: 0,
             }}>
-              {earnsCredit ? 'Refer and Earn' : 'Refer a Neighbor'}
+              {step2Words.heading || (earnsCredit ? 'Refer and Earn' : 'Refer a Neighbor')}
             </h1>
             <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
-              {atYearlyLimit && Number(data.creditsThisYear) > 0
-                ? `You earned ${Number(data.creditsThisYear)} credits this year, the most we give. Thank you! Credits start again January 1.`
-                : earnsCredit
-                  ? `Share your Waves link with neighbors. You earn ${money(rewardPerReferral)} account credit when a referral starts service.`
-                  : 'Share your Waves link with neighbors who could use a hand with pest or lawn care.'}
+              {step2Words.limitLine || step2Words.intro || (earnsCredit
+                ? `Share your Waves link with neighbors. You earn ${money(rewardPerReferral)} account credit when a referral starts service.`
+                : 'Share your Waves link with neighbors who could use a hand with pest or lawn care.')}
             </div>
           </div>
           <div style={{
@@ -14759,7 +14916,7 @@ function ReferTab({ customer, onSwitchTab }) {
           {[
             { icon: 'share', title: 'Share', text: 'Send your code or referral link to a neighbor.' },
             { icon: 'checkCircle', title: 'They start', text: 'We track the referral when they become a Waves customer.' },
-            earnsCredit && { icon: 'coins', title: 'You earn', text: `${money(rewardPerReferral)} credit is applied after their qualifying first service.` },
+            earnsCredit && { icon: 'coins', title: 'You earn', text: step2Words.earnStep || `${money(rewardPerReferral)} credit is applied after their qualifying first service.` },
           ].filter(Boolean).map(item => (
             <div key={item.title} style={{
               padding: 14,
@@ -18902,7 +19059,7 @@ export default function PortalPage() {
           // history entries.
           navigate(sub === 'completed' ? '/?tab=services' : '/?tab=schedule', { replace: true });
         }} onRequestVisit={cancelledAccount || contactSession ? null : () => setShowReportIssue(true)} onSelectProperty={(id) => selectProperty(id, { tab: 'visits' })} switchingPropertyId={switchingPropertyId} />}
-        {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} focusPaymentMethods={new URLSearchParams(location.search).get('focus') === 'payment-methods'} />}
+        {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} onSwitchTab={switchTab} focusPaymentMethods={new URLSearchParams(location.search).get('focus') === 'payment-methods'} />}
         {activeTab === 'refer' && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'property' && (savedSecondarySelection
@@ -19005,4 +19162,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { buildArticles, useLearnArticles, ScoreRing, LawnHealthCard, ChatWidget, LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, PropertyScopeSelect, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ReferTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };
+export { buildArticles, useLearnArticles, ScoreRing, LawnHealthCard, ChatWidget, LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, LearnTab, PropertyScopeSelect, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ReferTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };

@@ -1043,8 +1043,25 @@ code. Each route's 409 body, unchanged:
 
 A self-booked plan's first visit is lengthened to the program's length only
 when the longer block fits the shift too; otherwise it keeps its signed end,
-as when the next time is taken. Not yet checked at a commit: public
-reschedule moves, and the day as the route would run it (capacity mode). Gate
+as when the next time is taken.
+A public reschedule that moves one visit is checked too (D4 part 3b-2a;
+`POST /api/public/reschedule/:token`, `SmartRebooker.reschedule`): the visit as
+the move leaves it (the picked start, and the later of the picked end and the
+start plus the visit's stored length) against the picked technician's shift. A
+shift that does not hold it answers the 409 this route already gives when the
+mover finds the time taken or the technician off that day:
+`{ error, code: 'SLOT_TAKEN' }` (the mover's body: no `availability`; the page
+clears the picked time and reloads its list). The move's write also pins the
+technician and the length it judged, so a dispatch edit that lands between the
+move's read and its write answers this route's existing concurrent-change 409
+(`{ error, code: null }`) instead of being written over. No new status, field
+or code. A grouped stop (two or more services at one address) is not moved
+from this route, gate on or off: the page answers its `grouped` verdict and the
+mover refuses a customer's move of the stop before any shift check, as before.
+So the stop's own shift check (D4 part 3b-2b: a technician's rain-out,
+auto-dispatch) adds no answer to a public route. Not yet
+checked at a commit: a public reschedule that shifts a recurring series (the
+next D4 part), and the day as the route would run it (capacity mode). Gate
 off: byte-identical.
 `GET /api/public/estimates/:token/available-slots?date=` with a date past the
 browse horizon answers `400 { error: 'date is beyond the booking horizon',
@@ -1310,7 +1327,7 @@ appointment changed concurrently", code: 'SLOT_TAKEN' }` (the rebooker's own
 concurrent-change answer) and writes nothing. A visit with no technician, or whose
 technician can no longer take work, passes the visit's service line instead
 (`serviceLines`, `line-technician liveServiceLine`: catalog row first; a Waves
-Assessment has none), which ranks only while `GATE_SERVICE_LINE_MAP=live`
+Assessment takes the line its lead asked for), which ranks only while `GATE_SERVICE_LINE_MAP=live`
 (home technician first, then the gap technician, territory included). With one
 assignable technician every response is unchanged.
 
@@ -1512,9 +1529,17 @@ other's probe.
 these routes byte-identical, with no extra query).** `/api/booking/availability`,
 `/find-slots` and the `/capture-intent` revalidation (all through
 `buildFunnelAvailability`) pass the funnel service's lines (`pest_control` →
-general pest, `lawn_care` / `tree_shrub` → lawn, `mosquito`, `rodent`,
-`termite` / `bora_care` → termite) to `buildBookingAvailability` as
-`serviceLines`. When at least one of those lines has a home or gap technician set
+general pest, `lawn_care` / `tree_shrub` → lawn, `mosquito`, `rodent` →
+exclusion, `termite` / `bora_care` → termite) to `buildBookingAvailability` as
+`serviceLines`. The `rodent` choice saves a general "Rodent Control" visit, the
+first look at a rodent problem (the booking-link text sends a rodent inspection
+here too); since 2026-11-21 that visit is on the `exclusion` line with the
+rodent inspection (`BOOKING_FUNNEL_SERVICE_LINES` in `routes/booking.js`; the
+saved visit's name reads the same line, alone or as one part of a two-service
+name such as "Mosquito Control + Rodent Control"), and the `rodent` line is
+only trapping and bait-station work. So `/availability`, `/find-slots` and the
+`/capture-intent` revalidation offer the rodent choice on the exclusion line's
+home or gap technician. When at least one of those lines has a home or gap technician set
 in `service_line_techs` (the Team tab "Service lines" card), the offer keeps only
 slots on a technician who is the home or gap technician of EVERY mapped line (a
 two-service key such as `pest_control+lawn_care` therefore needs one technician
@@ -1529,9 +1554,55 @@ signed offer named, with no second line check at confirm: an offer minted before
 a map edit stays redeemable for its 45-minute lifetime, as for any other offer
 input. The capture-intent revalidation passes the same lines as the offer, so
 offer and recheck agree. Fail-open: an unreadable map, or a map with no
-technician set for the asked lines, offers what today's code offers. Public
-inspection booking, public reschedule and re-service offers do not pass lines
-and are unchanged.
+technician set for the asked lines, offers what today's code offers. Re-service
+offers do not pass lines and are unchanged. Public reschedule passes the
+visit's line only for a visit with no technician, or one whose technician can
+no longer take work (above). Every Waves Assessment offer list and commit
+rebuild passes one line while `GATE_SERVICE_LINE_MAP=live`:
+`GET /:token`, `POST /:token/availability`, `POST /:token/find-slots` and
+`POST /:token` of `/api/public/inspection/:token`; `GET /:token`,
+`POST /:token/find-slots` and `POST /:token` of
+`/api/public/estimate-assessment/:token` (it has no `/availability`). Owner
+2026-11-21: the line the page's own lead asked for, where the estimate page's
+own lead is the one lead linked to the estimate; that lead decides alone, and
+its blank interest is the owner's line. With no such lead, the customer's
+newest lead with a service interest is read (`line-technician
+assessmentLineFor`). Lawn, tree & shrub, rodent and wildlife go to the owner's
+line, pest-only, termite and mosquito to that line, no lead to the owner. So
+offers come from that line's home or gap technician; not live, no line is
+read and any active field technician is offered. Each commit reads its line
+once, finds its slot in a build for that line, and reads the line again inside
+the booking transaction with the lead row held (`FOR UPDATE`); the estimate
+page first resolves the estimate's linked lead again on that transaction. A
+lead whose service interest changed in between, or an estimate linked to
+another lead with another line, answers the existing `409 SLOT_TAKEN` with
+fresh times for the line as it is now (the estimate page resolves the
+estimate and its link again for that list). While the map is in shadow no
+request reads a lead: the shadow recorder reads the estimate's linked lead
+after the booking, best-effort. No response shape changes.
+
+**Recorded exceptions to the commit re-check for the assessment line.** The
+line ranks technicians (who does the visit); it is not eligibility (whether
+the customer may book), and the office can reassign a visit. So outside the
+two booking pages' own re-check above, the line is an offer input, as the map
+is (the sentence on `/confirm` above):
+- *A lead linked to the estimate for the first time while its booking
+  transaction runs.* The re-check holds the lead rows that point at the
+  estimate when it reads them. The staff link writers take no per-estimate
+  lock, so a first link written after that read is not seen, as a link written
+  just after the save is not.
+- *Public reschedule of an assessment with no technician (or one who can no
+  longer take work).* It reads the customer's newest lead with a service
+  interest when it builds its offers; the mover's guard re-reads the visit's
+  technician on the locked row, not the lead.
+- *The phone agent's booking request.* It reads the line at its slot re-check
+  for the call's own lead, and again when the call's lead id arrived in
+  between; it does not read the lead inside the save.
+- *A booking with no lead in hand (an estimate with no one linked lead).* The
+  line comes from the customer's newest lead with a service interest, and the
+  re-check holds that row. The lead writers take no per-customer lock, so a
+  lead created, or a blank newer lead filled in, after that read is not seen,
+  as one written just after the save is not.
 
 **Territory routing (`GATE_TERRITORY_ROUTING=true`, owner 2026-10-30; ships dark:
 unset, and every value other than exactly `true`, leaves these routes as described
@@ -1972,7 +2043,13 @@ value leave these routes byte-identical, with no extra query).**
 slots on the home or gap technician of the line(s) the held visit carries: the
 estimate's primary program's line (the program the hold stamps), or every
 program's line for a combined capacity hold, so only a technician on every one of
-those lines is offered. A line with no technician set in `service_line_techs`
+those lines is offered. Rodent exclusion work is its own line since 2026-11-21
+(`exclusion`: the sealing, wire mesh, roof-entry cover, sanitation and rodent
+inspection service keys, `CATALOG_KEY_LINES`, and the general rodent visit: a
+visit named only "Rodent Control", which is also what `/book`'s rodent choice
+saves and offers by); trapping and bait stations stay on
+`rodent`, so an exclusion estimate and a trapping estimate can list different
+technicians. A line with no technician set in `service_line_techs`
 adds no rule. At a date and start both have, the home technician's slot is the
 one listed; the gap technician's slots fill the starts the home technician has
 none for. Each listed slot stays a complete slot with its own `techId`,
@@ -3439,19 +3516,75 @@ above (production 2026-11-20, read-only: 3 of 654 completed visits lose a line
 from that PDF, none from the last 30 days; no visit has `ai_report` lists; no
 stored form value fails the screen).
 
+Receipt and tracker add-a-service + referral cards (owner 2026-11-21,
+`GATE_DOC_CROSS_SELL`, dark; owner 2026-11-22: the cards open the Waves app):
+`GET /api/receipt/:token` (a PAID invoice) and `GET /api/public/track/:token`
+(a COMPLETED visit) may carry two additive keys. `crossSell` is
+`{ label, relationship: 'add' | 'start', perApplication?, href }`: the plan
+offer the Waves app shows that customer now
+(`services/property-recommendations.js#appOfferForCustomer`: the app route's
+own gate, `GATE_PROPERTY_RECOMMENDATIONS`, then the app's composer), cut to
+what the page prints (`services/app-link-cards.js#publicOfferCard`; no option
+id, no fingerprint). `perApplication` is present only for a priced offer the
+app sells that customer in one tap
+(`services/one-tap-purchase.js#oneTapShownTo`, the same answer as the app
+route's `oneTap` field): without one-tap the app's card asks for an estimate
+and names no price, so the page's card is a quote request too.
+`referral` is `composeReferralCard({ customerId })`'s `{ headline, cta,
+offer? }`, as on the report, plus `href`. With the gate off, or for a link
+that may not show them, both keys are absent and the payload is unchanged.
+Each `href` is the card's tab in the app with the customer profile named
+(`services/app-link-cards.js#appLinksForCustomer`, through
+`qualifyNotificationLink`: `/?tab=billing&notificationProperty=<customer
+id>`, `/?tab=refer&notificationProperty=<customer id>`). One login can hold
+more than one profile and the app opens on the profile last used; the app's
+route guard switches to the named profile and `/auth/select-property`
+refuses a profile the signed-in account does not own. The customer id is no
+credential: nothing answers to it without a session. The page falls back to
+the bare tab for any other `href` (`appCardHref`).
+Both receipt routes gate the token format before any read
+(`routes/receipt-v2.js` `TOKEN_RE`, the pay router's range: the receipt token
+is the invoice's pay token; every token on record passes, production
+2026-11-22): a malformed token gets the unknown token's own 404.
+NO WRITE ROUTE: the receipt and the tracker have no card tap. Each card is a
+plain link into the Waves app (the Billing tab for the offer, the Refer tab
+for the referral) with no token, so nothing on a link page files a request,
+mints an estimate or enrolls a promoter, and the app's sign-in decides who may
+act. A receipt link is the pay link and a tracker link is texted to the
+visit's contacts; a person who holds one sees the card and can do nothing with
+it (owner-accepted 2026-11-22). Do not add a card tap to either router.
+When a page shows the cards (display rules, not an authorization boundary):
+the receipt for 7 days after `invoices.paid_at` (owner 2026-11-22, "week";
+`RECEIPT_CARD_WINDOW_MS`; no `paid_at` = no cards), the tracker while its
+`track_token_expires_at` is in the future (a link with no expiry on record
+carries none); never for a complaint-driven (callback) visit while
+`GATE_RESERVICE_REPORT_COPY` is on (the flag is read on the job and on any
+service record of the job); and only on an account whose links go to the
+account holder by its own setup (`linkReachesOnlyAccountHolder`: no
+third-party payer on the invoice, the job or the account, no service contact
+on the account; for the receipt also no distinct
+`notification_prefs.billing_email`, via `getReceiptEmailRecipients`; for the
+tracker also no payer on any invoice of the visit). A forwarded or CC'd link
+is not tracked. Both builders are best-effort: any failure renders the page
+without cards. The service report's own card and its tap are unchanged.
+
 Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the
 report payload's `crossSell` object offers the ONE next family the
 customer doesn't have, walking `OFFER_LADDER` =
-`pest_control → lawn_care → tree_shrub` (owner ruling 2026-09-28: report
-offers push the three pillars only — termite left the ladder). A customer
-owning pest, lawn, AND tree & shrub gets no card at all. The SAME owner
+`pest_control → lawn_care` (owner ruling 2026-09-28: termite left the
+ladder; owner ruling 2026-11-21, "let's leave tree and shrub off ... just
+do pest control and lawn care", every pushed surface: tree & shrub left it
+too). A customer owning pest AND lawn gets no card at all; a one-time T&S
+report with nothing recurring starts LAWN, and T&S stays only a family a
+customer may choose from the My Plan list (`PURCHASE_FAMILIES`) or the
+photo-triage lane may name. The SAME owner
 ruling applies to EVERY offer surface, not only the report ("three
 pillars is fine for now, yes applies there too"): the portal offer card
 and the photo-triage lane (`buildPortalOffer` / `buildPortalPurchaseBasis`
 / `resolvePortalOfferTarget`, and `buildOfferForFamily`) share the
-identical `OFFER_LADDER` and `pickOfferTarget` — a customer owning all
-three pillars gets no ladder-picked offer on any surface, and the
+identical `OFFER_LADDER` and `pickOfferTarget` — a customer owning pest
+and lawn gets no ladder-picked offer on any surface, and the
 portal's one-tap termite purchase path is gone with it. `termite`/
 `termite_bait` ownership still counts as "has a plan, not the anchor" via
 the ownership vocabulary's mapping — it is simply never the offered rung.
@@ -3465,11 +3598,37 @@ decide it (this also covers a typed rodent/termite report's OWN identity —
 a `rodent_trapping` visit's own family is already counted owned by the
 ladder's existing report-identity corroboration). A recent, uncorroborated
 report identity for any family in `GUARDED_OWNERSHIP_FAMILIES`
-(`OFFER_LADDER` plus `termite`, kept there for exactly this ambiguity even
-though termite left the ladder itself) fails the WHOLE report card closed
+(`pest_control`, `lawn_care`, `tree_shrub` and `termite`: the two ladder
+families plus the two that left the ladder, termite on 2026-09-28 and tree &
+shrub on 2026-11-21, kept there for exactly this ambiguity) fails the WHOLE
+report card closed
 — the unseeded-next-visit gap and a just-cancelled plan are
 indistinguishable, so offering the family and advancing past it are each
-wrong in one of those worlds.
+wrong in one of those worlds. The same live render (`mode === 'live'`,
+under `GATE_REPORT_CROSS_SELL`) carries the `referral` card from
+`composeReferralCard` (`services/referral-share.js`); a callback report
+carries neither card while `GATE_RESERVICE_REPORT_COPY` is on, and with
+that gate off a callback report carries them like any other report:
+the static headline + CTA, and with `GATE_REFERRAL_STEP2` on an `offer`
+string whose amounts come from the live referral settings (the member
+sentence is dropped at the yearly limit; no card at all when the
+program is paused or its settings are unreadable). Read-only: a render
+enrolls no promoter, writes nothing and carries no personal data.
+Pest price photo facts (`GATE_PEST_PRICE_PHOTO_FACTS`, owner 2026-11-21, "1, 2";
+dark by default): the gate adds no field and removes none. On, the pest
+offer's per-application price (`crossSell.option.perVisit`, and the same
+price on the portal offer card, the portal pricing card, the plan start and
+the one-tap purchase) is computed with the photo's shrubs, complexity and
+near-water facts when the property lookup's only doubt is the lawn area,
+in place of the neutral defaults (a fact the vision providers disputed
+keeps its default). An estimate minted from that offer keeps the facts in
+`engineInputs`, so the estimate page (`GET /api/estimates/:token/data`)
+prices the same plan rate; when staff turn on its one-time choice, that
+amount is computed from the quarterly rate as before and so follows it.
+It can also add the engine's hand-check
+mark to a pest line (heavy shrubs with a complex landscape), and such an
+offer degrades to the quote CTA as any held price does. Off or unset: the
+price of today.
 
 The payload's `protocol.structuredObservations` contains only the saved
 completion-form observation snapshot, and a nonempty snapshot carries
@@ -4248,18 +4407,16 @@ existed is never served after it, and a visit with none keeps its key. Every par
 at most six one-sentence parts. No token, eligibility, privacy, rate-limit or header
 change; no new route.
 
-`GATE_LAWN_LIGHTING` (dark, owner 2026-10-04; off leaves every payload key,
-sentence, prompt and stored row unchanged, key for key) is ONE rule, "no color
+Lawn lighting-aware color (owner 2026-10-04) is ONE rule, "no color
 claim between visits shot in different or unknown light", with six independent
-effects. Each reads the gate at call time on its own; only effect 3 needs
-`GATE_LAWN_SINCE_LAST`. The gate reader `lawnLightingLive()` is true only when
-`GATE_LAWN_LIGHTING` AND `GATE_LAWN_VISIT_ASSESSMENT` are both on: the light read
+effects. Only effect 3 needs `GATE_LAWN_SINCE_LAST`. Every effect runs only while
+`GATE_LAWN_VISIT_ASSESSMENT` is on: the light read
 comes only from the one-call visit assessment (`/assess` stays on the legacy
 per-photo path without it), so without that gate no run would ever store a light,
-and no effect below can run without the reader that feeds it. It adds NO payload
+and no effect below can run without the read that feeds it. It adds NO payload
 key to `GET /api/reports/:token/data`; it only removes or never writes color
 wording (the one added key is `initialScores.colorHidden` on the portal route,
-effect 6). A visit assessed before the gate
+effect 6). A visit assessed before the rule
 has no light read, so its light is `unknown` and its color is never compared.
 Compatible light: full sun and sun with shadows (`mixed_sun_shade`) with each other
 (owner 2026-10-22, option B: under the lighting prompt the model reads sunlit and
@@ -4271,11 +4428,11 @@ comes from its usable photos whose shot has positive color weight in
 shade and hot-edge shots; detail shots do not count) when the visit was read under
 the shot-list prompt, and from EVERY usable photo when it was read under the legacy
 prompt (one whole-visit color score from all photos); which prompt is decided from
-the run's own stored prompt version, never from today's gate. A visit whose usable photos are all direct sun (full sun, sun with shadows) is sun with shadows; any other mix (sun beside cloud or shade, or any low light in the mix) is mixed light (`mixed_light`, never a model answer), compared with nothing. A photo read as overcast or open shade with hard shadows contradicts itself (a hard shadow needs direct sun), so that photo is mixed light too, and so is its visit. Any prompt position with no stored photo row (its insert failed) or no
+the run's own stored prompt version, never from today's setting. A visit whose usable photos are all direct sun (full sun, sun with shadows) is sun with shadows; any other mix (sun beside cloud or shade, or any low light in the mix) is mixed light (`mixed_light`, never a model answer), compared with nothing. A photo read as overcast or open shade with hard shadows contradicts itself (a hard shadow needs direct sun), so that photo is mixed light too, and so is its visit. Any prompt position with no stored photo row (its insert failed) or no
 light read makes the visit's light unknown.
 
-Every code path that reads the gate (`lawnLightingLive()` in
-`server/config/feature-gates.js`; nothing else reads `GATE_LAWN_LIGHTING`):
+Every code path that reads the visit assessment gate for this rule
+(`server/config/feature-gates.js` `gateEnvValue`; nothing else decides lighting):
 1. `server/services/lawn-visit-assessment.js` `analyzeVisit`: the visit assessment
    reads each photo's light under `lawn-visit-v1-lighting` /
    `lawn-visit-v1-shot-list-lighting` and the run stores it in
@@ -4359,10 +4516,8 @@ Every code path that reads the gate (`lawnLightingLive()` in
    `beforeAfter.improvement.colorHealth: null`, and `PortalPage.jsx` then shows
    today's color alone, with no "from" and no change. Every other number in that
    payload is a raw reading and is unchanged.
-7. `server/config/feature-gates.js` `logGateStatus` entry (`lawnLighting`): logging
-   only.
 
-What the gate does NOT cover (raw readings, unchanged; each is a score the visit
+What the rule does NOT cover (raw readings, unchanged; each is a score the visit
 earned, shown with its own date, not a sentence about color changing). Color is part
 of these overall numbers, so they can still move when only the light did:
 - the overall trend `reportV2.trends.overall` and the overall points on the
@@ -4381,7 +4536,7 @@ of these overall numbers, so they can still move when only the light did:
 time by `tsLightingLive()` in `server/config/feature-gates.js`, through
 `lightingLive()` in `server/services/tree-shrub-lighting.js`; off leaves every
 prompt, preview response, stored row and payload key unchanged, key for key) is the
-`GATE_LAWN_LIGHTING` rule for tree/shrub photos, with the same light words and the
+lawn lighting rule for tree/shrub photos, with the same light words and the
 same compatibility table (`lawn-lighting.js`, reused as is): full sun with sun and
 shadows, overcast with open shade; sun never with overcast or open shade; low
 light, mixed light and unknown never compatible. Every photo counts toward the
@@ -5059,7 +5214,13 @@ emailed link is clicked), so an anonymous post cannot retag an already-confirmed
 best-effort: a failure never fails the signup, and the zip/city values are never logged. The
 same B5 rule shapes the rest of subscribe: a repeat submit for an address whose last confirmation
 is under 10 minutes old sends no second email and answers exactly the same, and an `unsubscribed`/
-`inactive` address is only changed by the confirm POST, never by the subscribe POST. An unsubscribe
+`inactive` address is only changed by the confirm POST, never by the subscribe POST. The confirm
+POST's flip (a `pending` row, or a live re-signup token) also records the reader's own click on the
+row it flips: `reader_confirmed_at` and `reader_confirmed_email` (the row's address, lowercased in
+SQL). No other route or writer sets those columns (a comeback that is not the reader's click clears
+them); the confirm GET stays read-only; a link on a row
+that is already `active` still answers `already_active` and writes nothing; the responses are
+unchanged; and a failed confirm POST logs an error code, never the failed query's text. An unsubscribe
 (one-click POST or a SendGrid unsubscribe event) that lands on an already-`unsubscribed` row holding
 a live re-signup token advances `unsubscribed_at`, which revokes that emailed link; the unsubscribe
 GET page shows its confirm form for such a row); the quiz and feedback tokens are the same
@@ -5429,7 +5590,10 @@ and keys via the shared /64-collapsing `rateLimitKey`). Eligibility
 requires a PUBLISHED estimate (sent_at/viewed_at set — the expiration
 sweep flips never-sent drafts to 'expired' too, and those must never
 qualify) that is past expires_at or sweep-expired, not
-accepted/declined/archived. Fixed-validity bids and groups containing any live
+accepted/declined/archived. A plan offer's quote (`estimate_data.planStart.offer`, see
+the plan offer paragraph beside the new-home estimates) is ineligible too, so the
+customer's way back is the office; both the POST and the expired `/data` response
+answer the generic 404 without the extension-offer bit. Fixed-validity bids and groups containing any live
 fixed-validity sibling (draft, scheduled, mid-send, published or expired —
 not only the rows an extension would revive) are ineligible before
 any claim: both the POST and the expired `/data` response use generic 404
@@ -6112,6 +6276,48 @@ shortly." and the office notice reads "needs the area to plug (sq ft)". A
 positive area prices exactly as before. The site's plugging forms require the
 area. No new field, no new auth surface, no migration, no gate.
 
+Web-form shell drafts (owner 2026-11-21, "build"; DARK behind
+`GATE_WIZARD_SUPERSEDES_FORM_DRAFT`, read at call time, off unless exactly
+`true` — off, every run is blocked exactly as before): a `/calculate` run
+whose phone already has an open estimate (`draft`, `scheduled`, `sent` or
+`viewed`, not archived) other than the wizard's own draft mirrors no
+estimate, so it returns no booking handoff and sends no booking text. On,
+when every open estimate of the phone is an untouched web-form shell of the
+run's own contact and for the run's own property, the block is dropped.
+A shell is a `lead_webhook` draft with the customer row the run resolved
+for itself and the same email, for the same property as the run (same
+street, house number as typed, city, ZIP and unit; an address with no city
+or ZIP never matches),
+that is older than 30 minutes, was never written since it was made, has no
+office Sold-by action and no logged follow-up, has no monthly, one-time or
+annual total, was never sent, viewed or scheduled, has no auto-send claim
+and no lead pointing at it, on a phone with no clarify ask that is open or
+was sent in the last 7 days without an answer. The run then mirrors its
+estimate as for a new visitor, and the usual booking handoff, email link and
+`quote_wizard_booking_invite` text follow. The run only reads the shell: it
+never writes, archives or locks an estimate it did not make, because the
+caller's phone, email and address are typed, not proven. Any other open
+estimate of the phone still blocks (a draft with a price, a touched draft, a
+web-form draft of another contact or for another property, an office or
+estimator estimate, a sent estimate). The contact and property tests are a
+same-request test, not proof of identity. After the run the phone holds the
+wizard's own draft, and a later same-phone run refreshes it under the
+wizard's existing refresh rule (2026-06-12), which this gate does not
+change. No new request field, no new response field, no new auth surface,
+no migration.
+
+Street key under the same gate: while `GATE_WIZARD_SUPERSEDES_FORM_DRAFT`
+is on, every public route that compares street lines with the shared key
+(`streetKeyNoUnit`, `server/services/lead-address-unverified.js`) reads six
+name words inside a street name as one word, short or in full: Point/Pt,
+Glen/Gln, Grove/Grv, Beach/Bch, Vista/Vis, Shores/Shrs ("Sample Pt Dr" =
+"Sample Point Dr"). That covers the address-unverified hold of the public
+property lookup, `/api/public/quote/calculate` and the booking confirm (a
+county-roll warning or a clean verdict stored under one spelling covers a
+request in the other), the county-record vouch of the lookup, the
+website-quote withdrawal, and the web-form shell test above. Off, every
+comparison is as before. No request or response shape changes.
+
 Repeat-run dedupe (#3834 split, PR A′; DARK behind `GATE_WIZARD_LEAD_DEDUPE`,
 read at call time, default off in every environment — off, every run
 files as `new` exactly as before): a tokenless `/calculate` whose typed
@@ -6425,7 +6631,10 @@ business credentials).
 automation step's HTML body with SAMPLE merge values only — no real customer
 data — for operator preview/share. Token in path, `noindex`. Every status
 sends `Content-Security-Policy: sandbox` (no allow-* tokens), so stored HTML
-cannot run script on the portal origin).
+cannot run script on the portal origin). With `GATE_REFERRAL_STEP2` on, the
+`referral_nudge` step shows the approved Step 2 words and the live
+referral-setting amounts in place of its seeded sentence and summary line
+(no customer data; nothing stored is changed).
 `/l/:code` (short-link resolver for every customer-facing short URL — 302 to
 target / 410 on expired / generic 404 with no enumeration leak; `noindex`;
 mounts OUTSIDE the global `/api/` limiter so it carries its own 120/min
@@ -6532,7 +6741,12 @@ row on every hit and redirects with `?ref=`; a legacy
 an unknown code redirects home. On a promoter hit, a crawler, link-preview,
 scanner or empty user agent (`utils/bot-ua.js` plus the empty check) still
 redirects and gets a row with `device_type` 'bot', but is never a unique
-click and never raises `total_clicks`).
+click and never raises `total_clicks`. The `?ref=` redirect goes to the
+website homepage. With `GATE_REFERRAL_FRIEND_PAGE` on it goes to the
+website's friend page `/referrer/` instead, and only while the live Step 2
+friend credit equals the amount that page states and the code has a live
+owner (`referral-inbound.js` `customerForCode`); the code, the click row
+and every other answer are the same).
 The estimate `/data` response includes `verifiedStaffPreview: true` only
 when `adminPreview=1` is accompanied by a valid staff bearer token. The
 customer SPA uses that verified field (or the existing verified
@@ -7111,9 +7325,17 @@ estimate belongs to now. A points save (a list or a clear) is checked under a lo
 It writes the estimate's customer on a read that names none and never rewrites a read that names another customer.
 The copy itself names the customer it was frozen for (`estimate_roof_points.customer_id`, null for none, deleted with
 a deleted customer) and is shown only while the estimate has that holder. So a read saved for customer A is never
-published once the estimate is B's, and points saved or frozen while the estimate had no customer (a lead) are not
-published once it has one, until staff save them again and a send freezes a copy for that customer: lead, then A,
-then B never reaches B. The staff panel says so and one press of Save points sends the list unchanged. `imageUrl` is the county aerial export URL of the read's own crop, rebuilt by the server from the read's image source
+published once the estimate is B's, and points saved while the estimate had no customer (a lead) are not frozen for a
+customer until staff save them again: the staff panel says so and one press of Save points sends the list unchanged.
+One copy outlives its holder (owner follow-up "keep", 2026-11-21; migration `20261121210000`): the copy a lead already
+holds stays for the FIRST customer the estimate takes after that send. `estimates.customer_changes` counts every
+change of the estimate's customer (a database trigger is its only writer), a send to a lead writes that count on the
+copy (`estimate_roof_points.lead_changes`), and the page shows a lead's copy while the count is the same and the
+estimate has no customer, or while it is one more and the estimate has a customer. After any other change (a second
+customer, a duplicate merge, no customer again) it is not shown: lead, then A, then B never reaches B. A lead's copy
+with no count (from before that migration) is shown only while the estimate has no customer. A send to that first
+customer keeps the lead's copy while no points are saved for them and the lead's read still carries those points;
+otherwise a send with no points deletes it as before. No read and no copy changes its customer. `imageUrl` is the county aerial export URL of the read's own crop, rebuilt by the server from the read's image source
 and its stored centre (never caller-supplied, no key); `imageYear` is that photo's year. `n` is the 1-based number the page
 prints on the pin and in the list; `x` and `y` are 0-1 fractions of the photo from its top-left corner; `type` is a roof
 entry type or `other`; `label` is the plain name, followed by the staff note when one was saved ("Roof return, front left"; the note passes
@@ -7127,8 +7349,11 @@ panel with the points and never read from the estimate row; checked at the freez
 latest handoff (`estimate_roof_points.delivered_at` is not older than `estimate_data.deliveryState.lastDeliveredAt`,
 so a copy that a later send could not replace or delete is not shown); the copy was frozen for the estimate's current
 address (the misting layout's address comparison, but an address missing on either side counts as no match); the
-copy was frozen for the customer who holds the estimate now (both none counts); the read the copy came from still
-exists and is still one of the estimate's own reads by that rule (both checked at request time, so an estimate handed
+copy was frozen for the customer who holds the estimate now (both none counts; a lead's copy that carries a count
+needs the same count), or it is a lead's copy and the estimate took its first customer since that send
+(`lead_changes` plus one equals `estimates.customer_changes`, and the estimate has a customer); the read the copy
+came from still exists and is still one of the estimate's own reads by that rule, or, for that first customer's copy
+only, it still names no customer and has the estimate's own key (all checked at request time, so an estimate handed
 to another customer since the send shows nothing); and staff have not hidden the points (checked at request time: hide or show is one choice for the estimate, written to
 every roof read of it and inherited by each new read, so the key is absent when the read the copy came from or any
 roof read of the estimate is hidden). "The same address" ignores case, spacing, punctuation and a trailing state, and
@@ -7136,6 +7361,91 @@ a ZIP on one side only; two different ZIP codes are two homes. Every other respo
 (`EstimateViewPage`, Waves AI card) shows it in the place of the satellite photo (a misting layout wins when both are
 present) and puts the satellite photo back when the picture fails to load. `EstimateProposalDocument` (the emailed PDF)
 ignores it, and the emailed-PDF fingerprint does not read it.
+Staff preview variant: on a VERIFIED staff preview only (`?adminPreview=1` AND a valid staff Bearer token, the route's
+`verifiedStaffPreview`; the query parameter alone never counts), when the customer block above is absent, the key carries what
+the next send would freeze, marked `preview: true` (`{ imageUrl, imageYear|null, pins: [...], preview: true }`), so staff can
+check the points in the estimate tool's customer preview before the first send. It comes from the same function the freeze
+uses (`nextSendPoints`: the newest finished read of the estimate's own context whose points the technician set, saved for the
+estimate's current address, through `customerPointsFromRow`), and every pin label is screened again, as on the customer block.
+It is absent (the key is not sent) when staff hid the points, when any roof read of the estimate is hidden, when the read names
+another customer, when the points were saved for another address, and when no point is confirmed. When the customer block
+exists, a staff preview gets that same block with no `preview` key. A request that is not a verified staff preview, the emailed
+document and the intelligence bar never get the `preview` key, and their responses are byte-identical to before.
+`/data` (the normal page load only, never the `?mode=pdf` document render pass) may carry an optional top-level
+`noVisitLine` string (owner 2026-11-22, option B; no gate): the owner's sentence "We measure your home and yard from
+county records and satellite images, so most quotes need no visit." (`NO_VISIT_QUOTE_LINE` in
+`services/estimate-no-visit-line.js`, the same sentence as the `estimate.delivery` email paragraph and the office call
+script line). Copy only: no customer or pricing data. ABSENT unless all of these hold: the estimate is open (the same
+`cta.terminalState === null` the page reads, so an accepted, declined, expired or quote-required estimate carries none);
+every service row on the estimate is one Waves prices from the measured home and yard alone (`estimateIsRemoteMeasured`
+in `routes/estimate-public.js`). The rule is two exact lists of service identities, not the page's display categories. A
+row's identity is its own stored `service`, compared whole; a name, a label, a `key` or a part of a key never counts.
+Recurring: `pest_control`, `lawn_care`, `mosquito` or `termite_bait`. One-time: `one_time_pest`, `one_time_lawn`,
+`one_time_mosquito` or `termite_bait_installation` (the termite bait plan's own install charge). `tree_shrub` is off
+the list on purpose: its price is built from a tree count, a palm count and a bed area that a person often gives, and
+the engine cannot always tell a counted number from a stated one. A row
+is not a service only by its stored `service`: `waveguard_setup`, `manual_discount`, `rodent_bundle_discount`, or a
+`one_time_adjustment` whose stated `amount` / `price` are readable numbers and none is above zero; an empty row is
+nothing. Every other row must store a listed service, priced or not, must not be commercial, and must not carry one of
+the engine's not-measured marks: a dwelling unit priced from the bedroom count the caller gave (`pricingBasis:
+'caller_stated_bedroom_count'`, `footprintSource` or `sizeBasis` `'bedroom_band'`; such a unit stores `pest_control` or
+`one_time_pest` too); or any mark of the engine's predicate for a priced row whose price is not exact yet
+(`lineNeedsReviewBeforeExactPrice` in `estimator-engine/draft-builder.js`: a fallback footprint, a low
+`pricingConfidence`, a heuristic or low-grade turf size, `requiresMeasurement`, `quoteRequired`, a custom quote flag,
+a row priced with no count on record); or a mosquito area taken from a lot-category proxy (`missingAreaData: true`);
+or an engine input flag that says a size is not measured or not verified for this unit (`lotSizeMeasured: false`,
+`buildingSizeMeasured: false`, `measuredTurfUnitVerified: false`, anywhere in the saved estimate data). When a lawn
+service is quoted (`lawn_care`, `one_time_lawn`), a heuristic turf mark on any stored object of the saved data, the
+replay or the served price takes the key away too (a V1 save keeps the resolved turf basis in `results.lawnMeta`, not
+on the lawn row); with no lawn service quoted that mark is not read. The review reasons the engine keeps for the
+whole estimate (`pricingMetadata.manualReviewReasons` and its copies, on any stored object) are read like a row's
+reasons. A call draft's selected home or lot size whose `estimatorEngine.propertyFacts.{home,lot}.source` is anything
+but `county_assessed` takes the key away (a caller-stated size, a fallback source, a saved profile value, the
+`property_facts_v2` label, a size with no source); a rejected candidate is not read. An estimate drafted from a visit
+(`estimate_data.scheduled_service_id`) carries no key, and neither does an estimate whose customer completed a Waves
+Assessment in the look window (`hadCompletedAssessmentLook`, the one rule the free-assessment offers use; one read,
+made only for an estimate that would carry the key; a failed read leaves the key as the rule decided it). The rule
+reads marks about a size of the home or
+yard and marks that a price needs a visit. It does not read a quantity of product the office picks (mosquito stations,
+dunks) or a pricing decision the office makes (a discount, `priceOverridden`). It does not read the admin estimator's
+form state (`inputs._manualFields`, `_homeSqFtEdited`, `_lotSqFtEdited`: the boxes the office changed, most often from
+the same aerial image). So outside a call draft, a home size or a lawn size the office typed counts like a measured
+one: the engine prices it with no mark. The office's review of a price (`requiresManualReview`, `manualReviewReasons`) is read by
+its reasons. Only a reason that says a measured size is large keeps the key (`large_lot`,
+`pest_large_lot_manual_review`, `large_pool_cage`, `pest_large_or_oversized_pool_cage`): a reviewed price from measured
+sizes is still measured. Every other reason, a reason that is not text, and a review mark with no reason take the key
+away (for example `stories_estimated`, `mosquito_treatable_area_unverified`,
+`termite_measurement_manual_override_used`, and any reason added later). A row
+container that is there and is not a list, or an entry that is there and is not a row, cannot be read and takes the key
+away. Three reads, each failing closed. (1)
+The saved estimate grants the key: the rows of `guaranteeServiceRows` without the served price (both saved result shapes,
+an inputs-only replay, an authored proposal's rows) hold at least one service row and every one is on its list. (2)
+Every saved row as it is stored can take the key away, also one the page's readers skip or drop, in both saved result
+shapes, the bare save and an inputs-only save's replayed engine result: `recurring.services[]` and
+`results.recurring.services[]` (the recurring list), `lineItems[]` (either list), `oneTime.items[]`,
+`oneTime.specItems[]`, the nested `results.oneTime` copies, `specItems[]` and `quoteRequiredItems[]` (the one-time list),
+and then every row that stores a `service` or a not-measured size mark at any depth of the saved estimate data and of
+the replay (either list; the frozen `sendSnapshot` is not scanned, the served price is read next). At least one stored row
+must be a service row: a saved amount the page turns into a row (a termite install amount) grants nothing. (3) The served price can take
+the key away and never grants it: `pricing.services[]` recurring sections by `memberKeys`, else `key`; every
+`perServiceTreatments[]` row of each `frequencies[]` and `serviceCadenceCombos[]` entry, on the price and on those
+sections (the recurring list); `pricing.oneTimeBreakdown.items[]`, the quote-required rows, `firstVisitFees[]`,
+`setupFee`, `rodentBaitSetupFee`, `mistingInstallFee` and each section's `oneTimeContribution.items[]` and `setupFee`
+(the one-time list); and then every row that stores a `service` or a not-measured size mark at any depth of the price
+(either list). One row off its
+list (tree and shrub, rodent work, a misting system, foam, trenching, pre-slab, Bora-Care, a WDO inspection, traps, a palm
+injection, a bed bug, roach, flea or stinging insect job, a first-visit cockroach treatment, a termite station rental or bond row, an
+area add-on, a row with a name, a key or a price and no stored `service`, a stored `service` that is not text), no service
+row at all, or a failed replay, and the key is absent; a row the rule cannot read gives no key and a warning, never a
+failed response); and the estimate email's rule reads the row as a home
+estimate (`noVisitLineFor`: category `RESIDENTIAL`, not a proposal, and no commercial mark by `isCommercialEstimateRow` at
+its strict reading, so a commercial estimate, a proposal and a condo carry none). A row the rule cannot read omits the key
+and logs a warning; it never fails the response. Every other response stays byte-identical. The interactive estimate
+page (`EstimateViewPage`, Waves AI card) prints the string under the satellite photo, above the "Red outline" caption,
+only while the satellite photo itself is the picture on the card (not when the card has no photo, and not while a
+misting layout or roof points take the photo's place). The legacy server-rendered page (`renderPage`) and
+`EstimateProposalDocument` (the emailed PDF) do not print it. The Intelligence Bar's estimate detail composes the same
+page payload, so its page projection carries the key for the same estimates.
 `/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
 `copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
 and rodent-trapping rows may carry the sold allowance used to render that
@@ -7195,8 +7505,11 @@ the mint is caught). RESPONSE (2026-10-31, Waves Admin pay screens): beside
 surcharge fields, a successful burn returns what the customer pays for:
 `invoice_number`, `items` (`{ description, amount_cents }`, the invoice's
 visible service lines via `visibleInvoiceLines` / `invoiceLineParts`) and
-`adjustments` (`{ label, amount_cents }`: discount, commercial tax, deposit paid
-at acceptance, account credit applied, paid so far, via `invoiceTotalsFacts`) —
+`adjustments` (`{ label, amount_cents }`: each discount as its own row (since
+2026-11-22, `invoiceDiscountRows` in `@waves/invoice-property-groups`; one
+combined row when the discount lines cannot be told apart), commercial tax,
+deposit paid at acceptance, account credit applied, paid so far, via
+`invoiceTotalsFacts`) —
 the rows the invoice PDF prints, down to the amount due. When items plus
 adjustments do not add up to the handoff amount, every item carries
 `amount_cents: null` and `adjustments` is empty (names only), so the screen
@@ -7350,8 +7663,22 @@ Staff authentication (`server/routes/admin-auth.js`, mounted at
 15 min) and answers every failure with a generic 401 `Invalid credentials`;
 `/forgot-password` (5 per 15 min) and `/reset-password` (10 per 15 min) key
 on `unauthenticatedAuthLimitKey` with production-only limiters;
+`POST /login` issues a password session only for a row with its own stored
+password hash (the timing comparison against the fixed stand-in hash still
+runs for a row with none, and a match there is refused);
+`/forgot-password` sends nothing and stores no token for a Google-only
+account (`technicians.google_only_login_at`, set by the Team tab's Hired
+press on a row with a linked company Google address; same generic answer),
+and a table CHECK refuses a password or a reset token on such a row; it
+also sends nothing for any row that has a linked Google address and no
+password, and `POST /reset-password` refuses a reset request's link on such
+a row (a reset request never creates that row's first password; only a link
+an admin sent with the Team tab's Hired press or Resend link does: a
+stored link whose lifetime is exactly the Hired link's 7 days);
 `/change-password`, `/register` (requireAdmin), and `/me` require the staff
-bearer. Two-step sign-in (`GATE_ADMIN_MFA`, dark): for an enrolled account
+bearer; `/register` (like every Team tab writer of a staff email) refuses an
+address that is another staff row's email or linked Google address (409).
+Two-step sign-in (`GATE_ADMIN_MFA`, dark): for an enrolled account
 `/login` returns `{ mfaRequired, challengeToken }` (a 5-minute signed JWT of
 type `staff_mfa_challenge`, never an access token) instead of a session, and
 the public `POST /login/mfa` (a generic 404 while the gate is dark, answered in
@@ -8137,6 +8464,79 @@ estimate page offers no existing visit before the move-in date for adoption
 accept with no picked time places the first visit from the new city on or
 after the move-in date. Gate off: no move-in limit. No new route, token,
 header, rate limit or payload field.
+Plan offer estimates on the estimate routes (the one-time job to plan offer,
+owner 2026-11-19): an estimate whose `estimate_data.planStart.offer` stamp
+(`{ jobId, endsAt, firstVisitFrom }`, read only through
+`services/plan-offer-estimate.js` `planOfferOf`: a non-empty job id, an end
+date that parses and a `YYYY-MM-DD` first visit date, else no offer) exists
+is the standard quarterly pest plan quote with the WaveGuard setup fee waived
+(`estimate_data.operatorPriceAdjustment.waiveSetupFee`, a setup fee of 0 on
+the page, the row and the accept) and its own `expires_at` (at most 31 days).
+Nothing sends it yet; the stamp is written only by the plan-start mint with an
+`offer` (`restart.js` `mintPlanStartEstimate`). It limits the first visit as
+the move-in date does, with no gate and no move row: `available-slots` /
+`find-slots` offer no day before `firstVisitFrom` (`estimateMoveInDate`, the
+same window rules and offer-cache key as the move-in date; the 07:05 fill list
+follows through the same function), `/reserve` refuses an earlier slot and the
+accept-time commit of a hold refuses one dated before it (`SLOT_UNAVAILABLE`
+with "slot is before the offer's first visit date", `slot-reservation.js`
+`moveBookingRefusal`), and the estimate page offers no existing visit before it
+for adoption (`findLinkedUpcomingAppointment`). `PUT /:token/accept` reads the
+stamp from the estimate data it holds under the estimate row lock and refuses an
+adopted (non-hold) visit dated before `firstVisitFrom`, judged on the visit row
+locked `FOR UPDATE` for the adoption: 409 `{ error: 'That visit is before your
+next plan visit window. Please pick a time on or after it.', code:
+'BEFORE_PLAN_VISIT_WINDOW' }`, rolled back, with the customer's recoverable
+pick-another-time answer as for `BEFORE_MOVE_IN`. The offer quote never
+self-extends: `isEstimateExtensionRequestEligible` is false for it, so `POST
+/:token/extension-request` and the expired `/data` response answer the generic
+404 with no `extensionRequestEligible`, `expiresAt`, `sentAt` or
+`extensionSelfServe` (the customer's way back is the office; a staff extension
+of the offer quote itself is unchanged). An offer quote is never a member of a
+multi-property group: `ensureEstimateGroupId` (the only write that groups an
+existing estimate) refuses it as the anchor of "Add another property" with 400
+`plan_offer_grouped`, on the locked row. So the group exceptions of these routes
+never apply to it, and each one also refuses an offer row by itself: the
+expired-group navigation (`publishedGroupLinks` gives it no
+`groupLinkViewableThrough` promise and `refreshExpiredGroupNavigation` answers
+null for it) and the `/data` and map-image `groupLinkViewBypass`, so an expired
+offer token answers the generic 404 even beside a live sibling. A grouped sibling's extension, from
+`POST /:token/extension-request` or from staff, never revives or re-dates an
+offer quote in its group: the sibling update and the revivable-sibling verdict
+both carry `PLAN_OFFER_ABSENT_SQL` (`estimate-extension.js`), so that quote
+keeps its expiry and its status. The offer quote is a FROZEN offer, as a
+restart quote is (`frozenOfferRefusal`): the waiver sits on the whole estimate,
+so the offer sells the quarterly plan it opens on and nothing else. `PUT
+/:token/select-tier`, `/bond`, `/service-opt-out` and `/preferences` answer 409
+`{ error: 'This offer is for the plan as shown. For a different plan, call or
+text us.', code: 'plan_offer_frozen' }` and write nothing; `PUT /:token/accept`
+answers the same 409 for the one-time mode (first, before anything is read),
+for a `selectedFrequency` other than the stored offer's default key, known or
+unknown (`frozenOfferFrequencyRefusal`; the page always sends that default),
+as soon as the price list is built and so before the quote-required, deposit
+and recurring-card checks (never a 402 "save a card" or a 400 "not available"
+for a cadence the offer cannot take), and, on a restart quote of several
+services, for a combo that is not the default one at the stored totals, before
+any billing or booking (an offer quote has one service and no combo); and
+`/data` carries
+`estimate.planOffer: true` (present only on an offer row) so the page draws the
+cadence as fixed text and omits the repricing controls, the add-a-service
+offer, the opt-out and the one-time toggle, as for `planRestart`, with
+`estimate.planOfferFirstVisitFrom` (YYYY-MM-DD, the quote's first bookable day)
+so the page's date box starts on that day and its "nothing in the next 7 days"
+line stays off. The portal pricing card's plain tap (`POST /api/requests/start-plan`)
+never retires a live offer quote of the same service and option: it re-opens the
+offer through the mint core (`reuseOnly`), which re-proves the single premises,
+today's price against the card with the setup fee taken as 0, the frozen page
+snapshot, the quote's address and priced-home key, and hands the same estimate
+back (`reused: true`) only if every check holds; otherwise it answers 409
+`pricing_unavailable` (or `offer_changed` when the card's price is stale) and
+archives nothing and frees no hold. A tap for another service or option, or for
+an offer quote that is expired, archived, accepted or changed by staff, takes the
+standard flow. No new route, token, header or rate limit; the only new response
+codes are `BEFORE_PLAN_VISIT_WINDOW`, `plan_offer_frozen` and the tap's two, and
+the only new response fields are `estimate.planOffer` and
+`estimate.planOfferFirstVisitFrom`.
 `/api/public/inspection/:token` (GET + POST, plus `POST /:token/find-slots`,
 `POST /:token/availability`, `POST /:token/waitlist`; the lead-scoped "Book
 with Adam" consultation link — booking.js's free Waves Assessment (owner
@@ -9346,8 +9746,11 @@ Same composer as the service report's tap — `services/referral-share.js`
 `enrollPromoter` with the household 23505 fallback scoped to account_id,
 owner-voice share copy, exact-cents referee amount). The RENDER payloads
 (/data, the accept response, the already-accepted retry) carry only the
-static headline + CTA via `composeReferralCard`; enrollment happens on the
-tap only, never on a read. Guards: gate with a gate-aware limiter skip
+static headline + CTA via `composeReferralCard`, plus an `offer` string
+while `GATE_REFERRAL_STEP2` is on (amounts from the live referral
+settings; the member sentence is dropped at the yearly limit; no card
+when the program is paused or its settings are unreadable; read-only,
+no personal data); enrollment happens on the tap only, never on a read. Guards: gate with a gate-aware limiter skip
 (dark = generic 404), token format gate, 5/min shared IPv6-safe key, the
 durable call-side linkage verdict, full customer-viewability +
 accepted-only + linked-customer, inactive program = 404, `err.code`-only
@@ -10015,7 +10418,7 @@ Lawn protocol card, December potassium bag (GATE_LAWN_DEC_LARGE_PATCH_K, dark, o
 Misting system card (GATE_MOSQUITO_MISTING, dark, owner 2026-10-30): `GET /api/misting-system` feeds the small card on the app's Home tab for a customer with an automatic mosquito misting system. It is behind the customer JWT (`authenticate`), not public, and it is listed here because it is a new customer-facing read. With the gate off (read at call time via `mosquitoMistingLive()`) the answer is `{ system: null }` and nothing is read from the database. A household-contact login (`req.contactSession`) also gets `{ system: null }` with no read: v1 shows the card to the account holder only. Otherwise the answer is `{ propertyScope, system }`. `propertyScope` is the resolved saved-property scope, echoed like `/api/schedule/next` so Home drops a card served under another house than it shows. `system` is `null` when the selected house has no current calibration or no upcoming misting service-plan visit (a cancelled plan has none, so the card disappears by itself); otherwise it is `{ installedOn, lastRefillOn, nextCheckOn, nextMistAt, mistTimes }`: `installedOn`, `lastRefillOn` (or `null`) and `nextCheckOn` are ET calendar dates (`YYYY-MM-DD`), `nextMistAt` is an ISO instant built from the calibration's ET wall-clock mist times (later today, else the first time tomorrow), and `mistTimes` is the stored sorted list of `HH:MM` strings. `nextCheckOn` is the next plan visit (catalog key `mosquito_misting_service`, never the service label) under the same rules as `/api/schedule/next`: pending or confirmed, today or later, the same saved-property predicate, and no unreviewed dispatch-owned follow-up. The payload holds no ids, no product or chemistry data, no prices and no staff names. No new token, public surface, write or rate-limit change.
 `/api/public/email-resubscribe/:token` (GET, and `POST /:token`; the "Turn Waves emails back on?" page an account holder reaches from the email the app's **Turn emails back on** button sends to their own address on file). Dark behind `GATE_PORTAL_EMAIL_RESUBSCRIBE` (strict `'true'`, read per request): off, both routes answer the same 404 "Link expired." page as an unknown token. The privacy headers and that gate check run in `preParserGuard`, which `server/index.js` mounts BEFORE the global `/api/` limiter and the body parsers (the router runs it again), so a dark route never answers a 429 or a parser 400, and every answer, those included, carries the privacy headers. The token is 32 random bytes as base64url (43 characters, `^[A-Za-z0-9_-]{43}$`, checked before any query) and only its sha256 is stored (`email_resubscribe_requests.token_hash`); the token exists only in the emailed link and the request log redacts it (40+ base64url characters). A malformed, unknown, never-sent or expired (7 days) token is the same 404 page ("This link has expired or was already used."). Privacy headers (`Cache-Control: no-store`, `X-Robots-Tag: noindex`, `Referrer-Policy: no-referrer`) on every answer. Router limit 20 req/min per IP. **GET is read-only** (mail scanners fetch every link; a test asserts no insert or update): an open link whose address still has a customer unsubscribe renders the address (HTML-escaped) and a POST form button; a used link, or an address with nothing left to release, renders "You're all set."; nothing is written. **POST is the state change.** It re-validates the token, then in one transaction takes the request row `FOR UPDATE` (a concurrent or late second POST waits, then finds `used_at` set and answers "You're all set." with no SendGrid call and no release; a request that expired meanwhile is the expired page), takes the address lock and re-checks hard blocks (a bounce, spam complaint or do-not-email on the address, added after the link was issued, means no SendGrid call, no release, the request invalidated with `outcome {refused:'hard_block'}`, and the generic 404 expired page / JSON `expired`; GET renders that same expired page and never the button), then clears SendGrid's own unsubscribe list for the address's releasable rows FIRST while holding both locks (request row, then address key) (8 s bound; 2xx or 404 counts as cleared; error codes only are logged), then in one transaction under the per-address email lock releases only the rows SendGrid confirmed (row version `xmin` unchanged since the pre-read; consent source `email_confirm_link`) and marks the request `used_at` only when no releasable row is left. A failed clear or a row that changed leaves the link usable and answers 503 "We couldn't finish that." Responses: an HTML page for a form submit, JSON `{ success, state }` (`done` | `already` | `retry` | `expired`) otherwise. Releasable rows are active, customer-made `unsubscribe` rows only (global or `service_operational`; never newsletter, bounce, spam complaint, do-not-email or staff-made rows). The payload shows only the address the holder already owns; it never reveals why an address is blocked. The page and the email are the only customer-visible surface, and sending the email is a customer click in the app (`POST /api/notifications/email-resubscribe`, customer JWT, holder sessions only, at most one email per address per 24 hours: a still-usable link answers `sent`, a used or expired one answers `wait` with `nextAt`; 6 requests per 10 minutes per customer), not a staff or cron send.
 
-Expired-estimate card details (2026-11-05, estimate page audit): GET `/api/estimates/:token/data` on the eligible-expired 404 (a real, published estimate that died of expiry, `GATE_ESTIMATE_EXTENSION_REQUEST` on, not blocked by a fixed-bid validity window, and, new here, deliverable under the pricing-authority verdict the POST `/:token/extension-request` checks first, since that POST answers the generic 404 for any other row; the same case that carries `extensionRequestEligible: true`) now also carries `expiresAt` (the stored `expires_at`), `sentAt` (only when the row has a `sent_at`) and `extensionSelfServe: true` (only while a tap would win the POST `/:token/extension-request` auto-claim: `extension_auto_granted_at` unset and no `extension_requested_at` in the last 24 hours, so the tap is the self-serve 7-day reopen; never an explicit `false`). The not-found card uses them to say "Your estimate from Oct 28 expired on Nov 4" and to word its button. Every other 404 (unknown token, draft, archived, `plan_restart`, send_failed, gate off, fixed-bid window) stays the bare `{ error: 'Estimate not found' }`, byte-identical to before. Side effect: when a customer request (sent estimate, not a bot user agent, no admin marker cookie, not an admin IP, not a verified staff preview, not the page's own `refresh=1` re-read, not a PDF render pass) reaches that branch for an eligible row, the route writes one `audit_log` row (`actor_type` `customer`, `action` `estimate_expired_open`, `resource_type` `estimate`, `metadata` `{ expires_at, extension_offered }`) whether or not the button shows. It never writes `estimate_views` or `estimate_checkout_events`, which customer follow-up jobs read without a kind filter.
+Expired-estimate card details (2026-11-05, estimate page audit): GET `/api/estimates/:token/data` on the eligible-expired 404 (a real, published estimate that died of expiry, `GATE_ESTIMATE_EXTENSION_REQUEST` on, not blocked by a fixed-bid validity window, and, new here, deliverable under the pricing-authority verdict the POST `/:token/extension-request` checks first, since that POST answers the generic 404 for any other row; the same case that carries `extensionRequestEligible: true`) now also carries `expiresAt` (the stored `expires_at`), `sentAt` (only when the row has a `sent_at`) and `extensionSelfServe: true` (only while a tap would win the POST `/:token/extension-request` auto-claim: `extension_auto_granted_at` unset and no `extension_requested_at` in the last 24 hours, so the tap is the self-serve 7-day reopen; never an explicit `false`). The not-found card uses them to say "Your estimate from Oct 28 expired on Nov 4" and to word its button. Every other 404 (unknown token, draft, archived, `plan_restart`, a plan offer quote, send_failed, gate off, fixed-bid window) stays the bare `{ error: 'Estimate not found' }`, byte-identical to before. Side effect: when a customer request (sent estimate, not a bot user agent, no admin marker cookie, not an admin IP, not a verified staff preview, not the page's own `refresh=1` re-read, not a PDF render pass) reaches that branch for an eligible row, the route writes one `audit_log` row (`actor_type` `customer`, `action` `estimate_expired_open`, `resource_type` `estimate`, `metadata` `{ expires_at, extension_offered }`) whether or not the button shows. It never writes `estimate_views` or `estimate_checkout_events`, which customer follow-up jobs read without a kind filter.
 
 `/api/webhooks/sendgrid/events` (POST; SendGrid signed-event webhook, ECDSA signature + timestamp headers, fail-closed without `SENDGRID_WEBHOOK_PUBLIC_KEY`; contract otherwise unchanged): **Body cap 1 MB** (the route's own `express.raw({ type: '*/*', limit: '1mb' })`, raised from body-parser's 100 KB default in sweep #7765 B6; SendGrid's docs say a batch posts when it reaches about 768 KB; 1 MB is the same pre-auth bound as the global `express.json` limit in `server/index.js`): a larger body answers 413 before the signature check. A body within the cap is verified and processed as below. The response is 200 once the batch is processed, with one documented rule on retries. A non-2xx (500) is returned when any event in the batch failed AND that event is a `bounce`, `dropped` or `blocked` event, carries `err.retryWebhook` (rate review letters, and the retry delivery below), or is retry-critical; SendGrid then redelivers the batch and the event-ledger row (`sendgrid_webhook_events`, unique `event_id`) makes every redelivery idempotent. Other-spelling retry (`GATE_CALL_BOUNCE_OTHER_SPELLING`, dark, strict `'true'`, read per event): when the gate is on, a `delivered` event whose send (named by its `sg_message_id`, or, when it beats the runner's save of that id, by the bound retry send's own SendGrid custom arg `automation_step_send_id`, trusted only while the event's recipient is the send's recipient and the claim's retry address and the row is unbound or bound to the event's message id) is bound by `retry_send_id` to a `call_email_spelling_retries` claim still `resending` (the delivery that commits the customer's email to the address that worked), or for which that pre-check cannot be answered, is retry-critical, decided BEFORE the event's lookups and transaction: ANY failure while processing it (message lookups, event-ledger insert, delivery update, the retry commit with its fanout and audit row, the COMMIT itself) answers 500, nothing is half-written (the ledger row rolls back with the transaction), and the redelivery commits once (a later delivery of the same event is a no-op through the ledger; a different delivery finds no `resending` claim). Gate off, any other event, and any send not bound to a pending claim keep the previous contract (200 even when processing failed, except the bounce / dropped / blocked and rate-review cases above). A hard bounce, a blocked dead-domain event or a delivery of a bound retry send never changes the response code on success, which stays 200. No new route, auth, rate limit or header change.
 

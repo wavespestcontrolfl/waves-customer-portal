@@ -157,6 +157,7 @@ const { normalizeWebsiteQuoteContact, applyContactNormalization, normalizeContac
 const { isHoneypotTripped } = require('../utils/lead-abuse');
 const {
   blockIfAutomatedEstimateDuplicate,
+  onlyUntouchedWebFormShellsOpen,
   withAutomatedEstimatePhoneLock,
 } = require('../services/estimate-automation-duplicates');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
@@ -795,6 +796,30 @@ function shouldRefreshWizardDraft(duplicateBlock) {
   return !!duplicateBlock
     && duplicateBlock.existingSource === 'quote_wizard'
     && duplicateBlock.existingStatus === 'draft';
+}
+
+// Owner 2026-11-21, "build" (GATE_WIZARD_SUPERSEDES_FORM_DRAFT, off unless
+// exactly 'true'): an old web-form draft with no price that nobody touched
+// must not cost a wizard visitor the booking link. When such drafts, of this
+// run's own contact and for this run's own property, are EVERY open estimate
+// of the phone, the block is dropped and the run writes its own estimate as
+// for a new visitor (onlyUntouchedWebFormShellsOpen holds the rule). The old
+// draft is only read, never changed. Any other open estimate still blocks.
+// The contact and property tests answer "is this run the same request as
+// the old form?". They are not proof of identity: this route has none. Once
+// the run wrote its draft, the phone is in the wizard's normal state, and a
+// later same-phone run refreshes that draft like every wizard draft (the
+// branch below, owner-hit 2026-06-12). This rule does not change that.
+// It has a gate because the unblocked run texts the person the booking link.
+async function withoutFormShellBlock(trx, duplicateBlock, { phone, address, customerId, email }) {
+  if (!duplicateBlock || shouldRefreshWizardDraft(duplicateBlock)) return duplicateBlock;
+  // Only a web-form draft can be a shell, and the block names the newest
+  // open estimate: any other newest estimate blocks without a read.
+  if (duplicateBlock.existingSource !== 'lead_webhook' || duplicateBlock.existingStatus !== 'draft') return duplicateBlock;
+  if (require('../config/feature-gates').wizardSupersedesFormDraftLive?.() !== true) return duplicateBlock;
+  if (!await onlyUntouchedWebFormShellsOpen(trx, { phone, address, customerId, email })) return duplicateBlock;
+  logger.info(`[public-quote] An untouched web-form draft (${duplicateBlock.existingEstimateId}) did not block the wizard estimate`);
+  return null;
 }
 
 function normalizePublicQuotePestFrequency(value) {
@@ -3592,7 +3617,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         });
       } else {
         await withAutomatedEstimatePhoneLock(contactPhone, async (trx) => {
-          const duplicateBlock = await blockIfAutomatedEstimateDuplicate(contactPhone, { database: trx });
+          // An untouched web-form draft alone does not block (owner
+          // 2026-11-21; withoutFormShellBlock, dark behind its gate).
+          const duplicateBlock = await withoutFormShellBlock(
+            trx,
+            await blockIfAutomatedEstimateDuplicate(contactPhone, { database: trx }),
+            { phone: contactPhone, address: quoteFullAddress, customerId, email: contactEmail },
+          );
           if (duplicateBlock) {
             // A wizard re-run by the same phone lands here with a NEW lead
             // id (the lead_id-keyed lookup above only matches re-submits of
@@ -4650,6 +4681,7 @@ module.exports._internals = {
   derivePerApplication,
   derivePerApplicationBreakdown,
   deriveLawnArea,
+  withoutFormShellBlock,
   shouldRefreshWizardDraft,
   resolveRealLotSqFt,
   resolveEntryChannel,

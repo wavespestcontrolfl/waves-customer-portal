@@ -305,8 +305,25 @@ async function buildLatestEstimateLink(customerIds, { purpose = 'composer_insert
   return mintEstimateLink(found.estimate, { purpose });
 }
 
+// The code of a member link that GET /r/:code answers (routes/referral-links.js): https, an owned portal host, the
+// path /r/<code> with at most one trailing slash, and a code of that route's shape (its CODE_RE: keep the two in
+// sync). null for every other link. Strict on purpose: buildReferralLink promises a credit only for such a link.
+// The send check reads referral links more widely (ownedBearerShapes), because it must judge every link that could
+// be one.
+const MEMBER_LINK_PATH_RE = /^\/r\/([A-Za-z0-9_-]{4,32})\/?$/;
+function memberLinkCode(link) {
+  try {
+    const url = new URL(String(link || '').trim());
+    if (url.protocol !== 'https:' || !ownedPortalHosts().includes(url.host.toLowerCase())) return null;
+    return MEMBER_LINK_PATH_RE.exec(url.pathname)?.[1] || null;
+  } catch {
+    return null;
+  }
+}
+
 async function buildReferralLink(customerId) {
-  const { resolvePromoter, getLiveSettings } = require('./referral-engine');
+  const { resolvePromoter, getLiveSettings, step2FriendCreditCentsOf } = require('./referral-engine');
+  const { composerReferralLine } = require('./referral-step2');
   // Same STRICT settings read as the report referral endpoint
   // (reports-public.js): no live row or inactive program = no enrollment
   // and no link — enrollPromoter's own getSettings() falls back to
@@ -339,9 +356,27 @@ async function buildReferralLink(customerId) {
   if (!promoter?.referral_link) {
     return { url: null, line: '', reason: 'Could not build a referral link for this customer' };
   }
+  // GATE_REFERRAL_STEP2: the friend's credit from the live row read above (0 = today's line: gate off, paused, or no
+  // amount). The line states it only when the link in the line leads to a member the office can confirm:
+  //  - the link is one the public route answers, and the code is read from it (memberLinkCode above).
+  //    getPromoterReferralLink can keep a stored link that is not such a link, and it names nobody;
+  //  - that code has an owner the Referrals queue can name (referral-inbound customerForCode, the same rule as
+  //    the friend page in routes/referral-links.js). A household promoter can belong to an archived sibling profile.
+  // A failed lookup is a no. Gate off: no lookup.
+  let friendCents = step2FriendCreditCentsOf(liveSettings);
+  if (friendCents > 0) {
+    try {
+      const code = memberLinkCode(promoter.referral_link);
+      const { customerForCode } = require('./referral-inbound');
+      if (!code || !(await customerForCode(code))) friendCents = 0;
+    } catch (err) {
+      logger.warn(`[composer-links] referral code owner lookup failed (customerId=${customerId}, code=${err?.code || 'none'})`);
+      friendCents = 0;
+    }
+  }
   return {
     url: promoter.referral_link,
-    line: `Know someone who needs pest control? Share Waves here: ${promoter.referral_link}\n\n`,
+    line: composerReferralLine(promoter.referral_link, friendCents),
   };
 }
 

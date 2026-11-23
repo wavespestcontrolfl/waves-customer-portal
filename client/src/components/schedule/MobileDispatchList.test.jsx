@@ -185,7 +185,7 @@ describe('MobileDispatchList protocol opener', () => {
 describe('MobileDispatchList tie-proximity display order', () => {
   it('shows the server displayOrder ahead of raw booking order for a same-tech tie', () => {
     fetch.mockResolvedValue({ ok: true, json: async () => ({}) });
-    // Booked (array) order is Far-then-Near; GATE_SCHEDULE_TIE_PROXIMITY's
+    // Booked (array) order is Far-then-Near; the
     // server-computed displayOrder says Near is actually closer to the
     // previous stop, so it must render FIRST despite being booked second.
     const bookedFirstButFarther = {

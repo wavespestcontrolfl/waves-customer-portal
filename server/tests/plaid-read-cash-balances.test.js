@@ -1,5 +1,5 @@
 /**
- * readCashBalances (Cash today card, GATE_CASH_FORECAST): read-only balances
+ * readCashBalances (Cash today card): read-only balances
  * from Plaid's FREE /accounts/get. No DATABASE_URL needed: the db is a
  * chainable fake that fails the test on any write.
  */

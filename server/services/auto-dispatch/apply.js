@@ -208,12 +208,12 @@ async function fenceFlexSeries(trx, rows, refuse) {
 // note: the fence alone never stops an ordinary single-occurrence
 // reschedule of a neighbor) and the durable drift anchor (route-tiers'
 // loadAnchorMap/resolveAnchor — the earliest pre-auto-dispatch date on
-// record), so the ±5 days are measured from the visit's original date and an
+// record), so the ±5 days (±7 for a plan of 2 months or longer) are measured from the visit's original date and an
 // earlier night's move never resets them. Refuses (fail closed) on an
 // unreadable or busy read, an unknown anchor or neighbor set, or best.date
 // outside a window.
 async function assertFlexWindows(trx, rows, best, today, refuse) {
-  const neighborMap = await flexTier.loadSeriesNeighbors(trx, rows, { lock: true });
+  const neighborMap = await flexTier.loadSeriesNeighbors(trx, rows, { lock: true, withRadius: true });
   if (neighborMap === null) throw refuse(rows[0].id, 'series occurrence order is unreadable or being edited (no move, fail closed)');
   const anchorMap = await routeTiers.loadAnchorMap(trx, rows.map((r) => r.id));
   if (anchorMap === null) throw refuse(rows[0].id, 'drift-anchor evidence is unreadable (no move, fail closed)');
@@ -222,11 +222,15 @@ async function assertFlexWindows(trx, rows, best, today, refuse) {
     if (!anchor) throw refuse(r.id, 'has no derivable drift anchor (no move, fail closed)');
     const neighbors = neighborMap.get(r.id);
     if (!neighbors) throw refuse(r.id, 'is missing from its own series read (no move, fail closed)');
+    // The band is this row's own (7 for a plan of 2 months or longer, else 5), from the
+    // pattern the locked neighbor read just saw: never a pass-1 value. No radius reads 5.
+    // A live sibling inside 56 days also reads 5 (flexBandRadius: a pattern can be wrong for the visits it labels).
+    const radius = flexTier.flexBandRadius({ radiusDays: neighbors.radiusDays, neighbors });
     const window = flexTier.flexTierMoveWindow({
-      origDate: r.scheduled_date, anchorDate: anchor, today, neighbors,
+      origDate: r.scheduled_date, anchorDate: anchor, today, neighbors, radiusDays: radius,
     });
     if (!flexTier.flexWindowAdmits(window, r.scheduled_date, best.date)) {
-      throw refuse(r.id, `cannot legally move to ${best.date} (outside its ±${flexTier.FLEX_TIER_RADIUS_DAYS}-day flex window of its current and original date ${anchor}, the ${routeTiers.MIN_DESTINATION_DAYS_OUT}-day destination floor, clamped by its series' adjacent occurrence)`);
+      throw refuse(r.id, `cannot legally move to ${best.date} (outside its ±${radius}-day flex window of its current and original date ${anchor}, the ${routeTiers.MIN_DESTINATION_DAYS_OUT}-day destination floor, clamped by its series' adjacent occurrence)`);
     }
   }
 }
@@ -356,7 +360,7 @@ function makeMoveGuard({ service, best, config = {} }) {
     if (row.customer_confirmed === true) {
       throw refuse(row.id, 'was confirmed by the customer');
     }
-    // At most N automatic moves per visit, counted on this transaction so a
+    // At most N automatic day moves per visit, counted on this transaction so a
     // move another run landed minutes ago is seen (move-limit.js).
     await moveLimit.assertUnderLimit(trx, [row], config, refuse);
     // GATE_AUTO_DISPATCH_PROOFREADER: what the approval stood on still stands.

@@ -44,7 +44,12 @@ const logger = require('../logger');
 // matrix for buildReportCrossSell, buildPortalOffer / buildPortalPurchaseBasis
 // / resolvePortalOfferTarget, and buildOfferForFamily (photo-triage) — they
 // can never disagree about what a customer may be offered.
-const OFFER_LADDER = ['pest_control', 'lawn_care', 'tree_shrub'];
+// Owner ruling 2026-11-21 ("let's leave tree and shrub off ... just do pest
+// control and lawn care", every pushed surface): the ladder PUSHES pest and
+// lawn only. Tree & shrub stays a family a customer may CHOOSE from the My
+// Plan list (PURCHASE_FAMILIES) and a family the photo-triage lane may name
+// (a requested target, owner-reviewed) — it is never the ladder's pick.
+const OFFER_LADDER = ['pest_control', 'lawn_care'];
 
 // What a customer may CHOOSE to add from the My Plan "Add a service" list
 // (owner 2026-11-12: "let's have the rodent bait and the mosquito also added
@@ -54,7 +59,7 @@ const OFFER_LADDER = ['pest_control', 'lawn_care', 'tree_shrub'];
 // always has. Termite stays out: its station installation is charged at the
 // start, and a one-tap purchase charges nothing at confirm.
 const PURCHASE_ONLY_FAMILIES = ['mosquito', 'rodent_bait'];
-const PURCHASE_FAMILIES = [...OFFER_LADDER, ...PURCHASE_ONLY_FAMILIES];
+const PURCHASE_FAMILIES = [...OFFER_LADDER, 'tree_shrub', ...PURCHASE_ONLY_FAMILIES];
 
 // Guarded-ownership families for the report's recent-report ambiguity guard
 // ONLY (see guardedFamilies below) — separate from OFFER_LADDER because
@@ -66,7 +71,10 @@ const PURCHASE_FAMILIES = [...OFFER_LADDER, ...PURCHASE_ONLY_FAMILIES];
 // fail the whole report card closed rather than fall through to
 // startFamilyForIdentity and pitch a 'start pest' card to a customer who
 // may still own a termite plan.
-const GUARDED_OWNERSHIP_FAMILIES = [...OFFER_LADDER, 'termite'];
+// Tree & shrub stays guarded after leaving the ladder (2026-11-21) for the
+// same reason termite did: a recent uncorroborated T&S identity is exactly as
+// ambiguous about ownership as it was before.
+const GUARDED_OWNERSHIP_FAMILIES = [...OFFER_LADDER, 'tree_shrub', 'termite'];
 
 // Prompts routed through customer-pricing-ai's own SERVICE_MATCHERS so the
 // offer prices exactly what the portal pricing panel would price for the same
@@ -124,10 +132,9 @@ function offerVocabulary(ownedKeys = []) {
 // ONE picker shared by buildReportCrossSell, buildPortalOffer /
 // buildPortalPurchaseBasis / resolvePortalOfferTarget, and buildOfferForFamily
 // (photo-triage): they can never disagree about what a customer may be
-// offered.
-//   all three pillars (pest+lawn+T&S)      → NO card (referral fills the slot)
+// offered. Tree & shrub left the ladder 2026-11-21 (see OFFER_LADDER):
+//   pest+lawn (with or without anything)   → NO card (referral fills the slot)
 //   T&S without lawn (incl. T&S+termite)   → lawn
-//   pest+lawn                              → tree & shrub
 //   has pest                               → lawn
 //   has lawn                               → pest
 //   termite-only / rodent- / mosquito-only → pest
@@ -138,12 +145,10 @@ function pickOfferTarget(ownedKeys) {
   const pest = owned.has('pest_control');
   const lawn = owned.has('lawn_care');
   const tree = owned.has('tree_shrub');
-  // Owns all three pillars → nothing to offer (owner 2026-09-28: termite is
-  // no longer a rung on any surface; `termite` ownership still counts as
-  // "has a plan" via the final pest_control default below).
-  if (pest && lawn && tree) return null;
+  // Owns both ladder rungs → nothing to offer (termite left 2026-09-28, tree
+  // & shrub 2026-11-21; their ownership still counts as "has a plan").
+  if (pest && lawn) return null;
   if (tree && !lawn) return 'lawn_care';
-  if (pest && lawn) return 'tree_shrub';
   if (pest) return 'lawn_care';
   if (lawn) return 'pest_control';
   // termite-only, or only non-ladder evidence (rodent, mosquito): the
@@ -154,10 +159,12 @@ function pickOfferTarget(ownedKeys) {
 // Identity-start rules (owner matrix 2026-08-13): when the customer owns
 // NOTHING recurring, the offer starts the family today's report belongs to —
 // a one-time lawn visit starts recurring lawn, a one-time T&S visit starts
-// recurring T&S, and everything else (pest, roach/flea/bed-bug specialties,
+// recurring LAWN (2026-11-21: T&S is never pushed; lawn is its ladder
+// neighbour, the same answer the T&S-without-lawn ownership row gives), and
+// everything else (pest, roach/flea/bed-bug specialties,
 // rodent, termite, WDO, mosquito, unknown) starts recurring pest, the anchor.
-// T&S is matched before lawn so a combined "Lawn, Tree & Shrub" identity
-// resolves to the more specific family.
+// Both the T&S and the lawn wording start lawn; the T&S match still runs
+// after the palm veto so "Palm Tree Injections" stays with the anchor.
 function startFamilyForIdentity(row = {}) {
   const s = [row.service_key, row.service_name, row.service_type]
     .filter(Boolean).join(' ').replace(/[_-]+/g, ' ').toLowerCase();
@@ -169,7 +176,7 @@ function startFamilyForIdentity(row = {}) {
   // Plurals matched explicitly (codex #3379 r1 P2): "Trees & Shrubs" and
   // "Ornamentals" are normal catalog wording, and \btree\b alone misses
   // them — the ownership classifier handles the same variants.
-  if (/\b(trees?|shrubs?|ornamentals?)\b/.test(s)) return 'tree_shrub';
+  if (/\b(trees?|shrubs?|ornamentals?)\b/.test(s)) return 'lawn_care';
   if (/\b(lawns?|turf)\b/.test(s)) return 'lawn_care';
   return 'pest_control';
 }
@@ -233,7 +240,7 @@ function pickOption(options = [], targetKey) {
 // authority for the property-equality proof, shared with filterRowsToStreet.
 const { scopeKeysShareLocality } = require('../estimate-property-linkage');
 const { hasPresenceValue } = require('../pricing-engine/property-calculator');
-const { hasGlobalVerifyFlag } = require('../lookup-confidence');
+const { hasGlobalVerifyFlag, hasHighPriorityDimensionFlag } = require('../lookup-confidence');
 // Moved to visit-property-scope.js (codex round-5 P1) so the upcoming-visits
 // card can share this exact single-premises proof instead of re-deriving
 // its own (a legacy no-evidence row on a multi-property account must not
@@ -357,9 +364,15 @@ function positiveOrNull(value) {
 //   - what was fed INTO the pricer:
 //       a. the stored requests (SEED_INPUT_KEYS), at any depth: the estimator
 //          also attaches the request to the result it saves. The lookup
-//          profile kept there lists verify flags for most properties. The
-//          check never read it, and reading it would end nearly every seeded
-//          price;
+//          profile kept there lists verify flags for most properties, and
+//          reading all of them would end nearly every seeded price. ONE kind
+//          is read (owner 2026-11-22): a HIGH flag on home size, lot size,
+//          stories or the whole lookup (lookup-confidence's
+//          hasHighPriorityDimensionFlag), the lookup's own "verify before
+//          pricing" grade on a dimension a seed replays. It counts whether or
+//          not the office corrected the number afterwards: the stored request
+//          does not say, and the office prices such a home by hand. On
+//          2026-11-22, 12 of 165 production seeds read as clean and held one;
 //       b. the service picks at the root (`services` as an object keyed by
 //          service). The quote wizard stores the request body's picks there
 //          as submitted, beside the normalized engineInput, and the lead
@@ -452,19 +465,30 @@ function estimateRequiresFieldVerification(estData, { replaysLawnSize = true } =
   const slimResult = (key, value) => key === 'engineResult' && isKeyed(value) && !Array.isArray(value.fieldVerify);
   // The stored JSON is a finite tree, so the walk needs no depth limit; a
   // limit would be a place where a marker reads as clean.
-  const pending = [{ node: estData, turfCounts: true }];
+  // `request` marks a node below a stored request: only the lookup's HIGH
+  // dimension flags are read there.
+  const pending = [{ node: estData, turfCounts: true, request: false }];
   while (pending.length) {
-    const { node, turfCounts } = pending.pop();
+    const { node, turfCounts, request } = pending.pop();
     if (!node || typeof node !== 'object') continue;
     if (Array.isArray(node)) {
-      for (const item of node) pending.push({ node: item, turfCounts });
+      for (const item of node) pending.push({ node: item, turfCounts, request });
+      continue;
+    }
+    if (request) {
+      if (hasHighPriorityDimensionFlag(node)) return true;
+      for (const child of Object.values(node)) pending.push({ node: child, turfCounts, request });
       continue;
     }
     if (markedForReview(node, turfCounts)) return true;
     for (const [childKey, child] of Object.entries(node)) {
-      if (SEED_INPUT_KEYS.has(childKey) || servicePicks(node, childKey, child)) continue;
+      if (servicePicks(node, childKey, child)) continue;
+      if (SEED_INPUT_KEYS.has(childKey)) {
+        pending.push({ node: child, turfCounts, request: true });
+        continue;
+      }
       if (slimResult(childKey, child)) return true;
-      pending.push({ node: child, turfCounts: childKey !== 'property' || turfSummaryCounts(node) });
+      pending.push({ node: child, turfCounts: childKey !== 'property' || turfSummaryCounts(node), request });
     }
   }
   return false;
@@ -972,13 +996,6 @@ async function buildReportCrossSell(service, database, {
     // connection succeeded milliseconds earlier.
     const ladderEvidence = [...ownedKeys, ...reportFamilies];
 
-    // Owner ruling 2026-09-28: a customer who owns all three pillars gets NO
-    // card at all — the referral card fills that slot instead.
-    {
-      const pillars = offerVocabulary(ladderEvidence);
-      if (pillars.has('pest_control') && pillars.has('lawn_care') && pillars.has('tree_shrub')) return null;
-    }
-
     // No recurring evidence at all → the identity-start branch: offer starts
     // the family today's report belongs to (owner matrix 2026-08-13). With
     // evidence, the ownership matrix decides. relationship below stays
@@ -1089,11 +1106,11 @@ async function buildReportCrossSell(service, database, {
     );
 
     const option = result.ok ? pickOption(result.options, targetKey) : null;
-    // A tree & shrub offer built on a seed whose zero tree count was
-    // provenance-ambiguous never prices (codex #3367 PR r10) — the count
-    // may have been an operator-confirmed zero the fallback would
-    // contradict, or a synthetic zero the replay would price at nothing.
-    const ambiguousTreeEvidence = targetKey === 'tree_shrub' && !!propertySeed?.zeroTreeCountAmbiguous;
+    // No zero-tree-count check here: this report path only ever targets the
+    // ladder (pest, lawn — tree & shrub left it 2026-11-21). A REQUESTED
+    // tree & shrub offer (My Plan list, photo triage) prices in
+    // composePricedOfferBasis, which keeps that guard (pinned in
+    // portal-offer.test.js).
     // A seed whose own estimate required field verification never prices
     // (codex #3367 PR r13). Conservative by design: the flag demotes even
     // when the seed only partly filled the profile, because the estimate's
@@ -1102,7 +1119,7 @@ async function buildReportCrossSell(service, database, {
     // would need provenance the stored blob does not carry.
     const seedRequiresVerification = !!propertySeed?.requiresFieldVerification;
     const priced = optionIsPriceable(option) && !baselineIncomplete && !baselineUnexpected
-      && !ambiguousTreeEvidence && !correctionsUnapplied && !seedRequiresVerification
+      && !correctionsUnapplied && !seedRequiresVerification
       && !rodentSetupFeeUnwaived(targetKey, result.currentServiceKeys);
 
     const payload = {

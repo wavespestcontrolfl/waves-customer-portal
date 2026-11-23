@@ -50,6 +50,7 @@ describe("the Read the roof tap", () => {
     render(<RoofReadPanel spot={SPOT} address={ADDR} estimateId={EST} />);
     const panel = screen.getByTestId("roof-read-panel");
     expect(panel).toHaveTextContent("The AI read stays with staff. The points you save, with their notes, show on the customer estimate from its next send");
+    expect(panel).toHaveTextContent("To check how the points look, press Preview in the estimate tool. Preview shows the points the customer has now. When the customer has none, it shows the points of the next send, marked \"Staff preview\".");
     expect(panel).not.toHaveTextContent("Nothing here reaches the customer");
   });
 
@@ -563,7 +564,7 @@ describe("confirmed points", () => {
 
   it("a list saved before the address was recorded: the panel says so, and Save points sends it unchanged with the crop, the address and the list it loaded", async () => {
     await opened({}, READ({ tech_pins: SAVED, points_address: null }));
-    expect(screen.getByTestId("roof-read-points-unconfirmed")).toHaveTextContent(/The customer estimate does not show these points yet.*press Save points to confirm them/);
+    expect(screen.getByTestId("roof-read-points-unconfirmed")).toHaveTextContent(/These points are not confirmed for this address and this customer yet.*press Save points to confirm them.*shows the confirmed points from the next send/);
     fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_pins: SAVED }) }));
     fireEvent.click(screen.getByTestId("roof-read-points-save"));
     await screen.findByText("Points saved.");
@@ -583,9 +584,11 @@ describe("confirmed points", () => {
   });
 
   it("a list saved before the estimate had this customer: the panel says so, and Save points sends it unchanged", async () => {
-    // The read names no customer and the estimate has one now: the customer estimate does not show the list.
+    // The read names no customer and the estimate has one now: no send freezes the list for that customer. The
+    // estimate may still show the copy the customer received as a lead, so the note does not say it shows nothing.
     await opened({}, READ({ tech_pins: SAVED, estimate_customer_id: CUST }));
-    expect(screen.getByTestId("roof-read-points-unconfirmed")).toHaveTextContent(/The customer estimate does not show these points yet/);
+    expect(screen.getByTestId("roof-read-points-unconfirmed")).toHaveTextContent(/These points are not confirmed for this address and this customer yet/);
+    expect(screen.getByTestId("roof-read-points-unconfirmed")).not.toHaveTextContent(/does not show/);
     // The server's answer names the customer the save recorded.
     fetchMock.mockImplementationOnce(() => reply({ read: READ({ tech_pins: SAVED, customer_id: CUST, estimate_customer_id: CUST }) }));
     fireEvent.click(screen.getByTestId("roof-read-points-save"));

@@ -265,3 +265,99 @@ describe('referral reward honesty', () => {
     expect(screen.queryByText(/You earned 5 credits/)).not.toBeInTheDocument();
   });
 });
+
+// GATE_REFERRAL_STEP2 words (owner 2026-11-21, *visit* + *flat*): the friend gets an account credit after the first plan
+// service. The server sends annualCap only on Step 2, and friendReward from the live Referee Discount setting.
+describe('Refer tab Step 2 words', () => {
+  const step2 = (over = {}) => ({
+    stats: { totalReferrals: 2, converted: 1 },
+    referralCode: 'PAT123',
+    rewardPerReferral: 25,
+    standardReward: 25,
+    annualCap: 10,
+    creditsThisYear: 1,
+    capReached: false,
+    friendReward: 50,
+    ...over,
+  });
+  const tapText = async () => {
+    const location = { href: '' };
+    Object.defineProperty(window, 'location', { configurable: true, writable: true, value: location });
+    fireEvent.click(await screen.findByRole('button', { name: 'Text' }));
+    return decodeURIComponent(location.href);
+  };
+  const realLocation = window.location;
+  afterEach(() => {
+    Object.defineProperty(window, 'location', { configurable: true, writable: true, value: realLocation });
+  });
+
+  it('names both credits, the first plan service and the yearly limit', async () => {
+    api.getReferrals.mockResolvedValue(step2());
+    render(<ReferTab customer={customer} onSwitchTab={() => {}} />);
+
+    expect(await screen.findByRole('heading', { name: 'Friends & Neighbors' })).toBeInTheDocument();
+    expect(screen.getByText('Share your link. They get a $50 credit after their first plan service. You earn a $25 credit after their first plan service. Up to 10 credits a year.')).toBeInTheDocument();
+    expect(screen.getByText('Your $25 credit is applied after their first plan service.')).toBeInTheDocument();
+    expect(screen.queryByText(/Refer and Earn/)).not.toBeInTheDocument();
+    expect(await tapText()).toBe('sms:?body=I use Waves and thought you might want their info. You get a $50 credit after your first plan service with my link: https://portal.wavespestcontrol.com/r/PAT123');
+  });
+
+  it('an amount with cents is shown to the cent, never rounded up', async () => {
+    api.getReferrals.mockResolvedValue(step2({ friendReward: 49.99, rewardPerReferral: 12.5 }));
+    render(<ReferTab customer={customer} onSwitchTab={() => {}} />);
+
+    expect(await screen.findByText('Share your link. They get a $49.99 credit after their first plan service. You earn a $12.50 credit after their first plan service. Up to 10 credits a year.')).toBeInTheDocument();
+  });
+
+  it('promises the friend nothing when the friend amount is 0: no friend sentence, and today\'s share text', async () => {
+    api.getReferrals.mockResolvedValue(step2({ friendReward: 0 }));
+    render(<ReferTab customer={customer} onSwitchTab={() => {}} />);
+
+    expect(await screen.findByText('Share your link. You earn a $25 credit after their first plan service. Up to 10 credits a year.')).toBeInTheDocument();
+    expect(screen.queryByText(/They get/)).not.toBeInTheDocument();
+    expect(await tapText()).toBe('sms:?body=I use Waves and thought you might want their info. Here is my referral link: https://portal.wavespestcontrol.com/r/PAT123');
+  });
+
+  it('a member at the yearly limit keeps the limit line and is promised no credit', async () => {
+    api.getReferrals.mockResolvedValue(step2({ rewardPerReferral: 0, capReached: true, creditsThisYear: 10 }));
+    render(<ReferTab customer={customer} onSwitchTab={() => {}} />);
+
+    expect(await screen.findByRole('heading', { name: 'Friends & Neighbors' })).toBeInTheDocument();
+    // The whole approved line (owner 2026-11-21 "words ok"): the note is still promised at the limit.
+    expect(screen.getByText('You earned 10 credits this year, the most we give. Thank you! Credits start again January 1. We still send a thank-you note for every friend who books.')).toBeInTheDocument();
+    expect(screen.queryByText(/You earn a/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/credit is applied after/)).not.toBeInTheDocument();
+  });
+
+  it('a paused program promises nothing to a member at the yearly limit: no limit line, no note, no January restart', async () => {
+    // The server's paused answer keeps capReached and creditsThisYear, with every amount at 0.
+    api.getReferrals.mockResolvedValue(step2({
+      rewardPerReferral: 0, standardReward: 0, friendReward: 0, programPaused: true, capReached: true, creditsThisYear: 10,
+    }));
+    render(<ReferTab customer={customer} onSwitchTab={() => {}} />);
+
+    expect(await screen.findByText('Share your Waves link with neighbors who could use a hand with pest or lawn care.')).toBeInTheDocument();
+    expect(screen.queryByText(/the most we give/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/thank-you note/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/January 1/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\$\d+ credit/)).not.toBeInTheDocument();
+  });
+
+  it('a paused program names no amount', async () => {
+    api.getReferrals.mockResolvedValue(step2({ rewardPerReferral: 0, standardReward: 0, friendReward: 0, programPaused: true }));
+    render(<ReferTab customer={customer} onSwitchTab={() => {}} />);
+
+    expect(await screen.findByText('Share your Waves link with neighbors who could use a hand with pest or lawn care.')).toBeInTheDocument();
+    expect(screen.queryByText(/\$\d+ credit/)).not.toBeInTheDocument();
+  });
+
+  it('with Step 2 off (no annualCap) the tab keeps today\'s words, even if a friend amount arrives', async () => {
+    api.getReferrals.mockResolvedValue({ stats: { totalReferrals: 0, converted: 0 }, referralCode: 'PAT123', rewardPerReferral: 25, friendReward: 50 });
+    render(<ReferTab customer={customer} onSwitchTab={() => {}} />);
+
+    expect(await screen.findByRole('heading', { name: 'Refer and Earn' })).toBeInTheDocument();
+    expect(screen.getByText('Share your Waves link with neighbors. You earn $25 account credit when a referral starts service.')).toBeInTheDocument();
+    expect(screen.getByText('$25 credit is applied after their qualifying first service.')).toBeInTheDocument();
+    expect(await tapText()).toBe('sms:?body=I use Waves and thought you might want their info. Here is my referral link: https://portal.wavespestcontrol.com/r/PAT123');
+  });
+});

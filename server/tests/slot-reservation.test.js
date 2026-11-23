@@ -725,6 +725,40 @@ describe('slot reservation helpers', () => {
     }
   });
 
+  test('reserveSlot refuses a plan offer estimate\'s slot before its first visit date, from the estimate data alone, and books on the date (owner 2026-11-19)', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    const { lockMoveForConversion } = require('../services/customer-moves');
+    lockMoveForConversion.mockClear();
+    try {
+      const offerData = (firstVisitFrom) => JSON.stringify({ planStart: { offer: { jobId: 'job-1', endsAt: '2027-05-30T12:00:00.000Z', firstVisitFrom } } });
+      const reserveWith = (firstVisitFrom) => {
+        const estimateBuilder = makeEstimateBuilder({ id: 'estimate-456', status: 'sent', service_interest: 'Generic estimate service', estimate_data: offerData(firstVisitFrom) });
+        const insertBuilder = makeInsertBuilder({ id: 'scheduled-123', reservation_expires_at: '2027-05-20T13:15:00.000Z' });
+        const trx = makeTrx({ estimateBuilder, technicianBuilder: makeTechnicianBuilder(), scheduledBuilders: [makeLiveHoldsBuilder([]), makeConflictBuilder(null), makeGlobalProbeBuilder([]), insertBuilder] });
+        db.transaction = jest.fn(async (callback) => callback(trx));
+        return {
+          insertBuilder,
+          run: slotReservation.reserveSlot({
+            estimateId: 'estimate-456',
+            slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 }),
+            selectedFrequency: 'quarterly',
+          }),
+        };
+      };
+      const early = reserveWith('2027-05-21');
+      await expect(early.run).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: "slot is before the offer's first visit date" });
+      expect(early.insertBuilder.insert).not.toHaveBeenCalled();
+      // The date itself is bookable, and no move is ever read for an offer estimate.
+      const onTheDate = reserveWith('2027-05-20');
+      await expect(onTheDate.run).resolves.toBeTruthy();
+      expect(onTheDate.insertBuilder.insert).toHaveBeenCalled();
+      expect(lockMoveForConversion).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('reserveSlot refuses an archived row on the LOCKED read, whatever its source — generic not-found, no hold minted (GATE_PORTAL_PLAN_START pre-push P1)', async () => {
     // The plan-start and plan-restart mints archive the quote they replace and release its holds; a
     // reserve that passed the route's archived check and waited on this row lock must not re-create one.
@@ -1007,6 +1041,20 @@ describe('slot reservation helpers', () => {
           estimatedPrice: 219.6, estimate: { id: 'estimate-456', service_interest: 'Pest Control', estimate_data: { move: { moveId: 'move-1' } } }, trx,
         })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: 'slot is before the move-in date' });
         expect(lockMoveForConversion).toHaveBeenCalledWith(trx, { move: { moveId: 'move-1' } });
+        expect(updateBuilder.update).not.toHaveBeenCalled();
+      } finally { jest.useRealTimers(); }
+    });
+
+    test('a plan offer estimate\'s hold dated before its first visit date is refused SLOT_UNAVAILABLE at commit (owner 2026-11-19)', async () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2027-05-10T15:00:00Z'));
+      try {
+        const { trx, updateBuilder } = wire({ reservationExpiresAt: '2027-05-10T15:15:00.000Z' });
+        const estimate = { id: 'estimate-456', service_interest: 'Pest Control', estimate_data: { planStart: { offer: { jobId: 'job-1', endsAt: '2027-05-30T12:00:00.000Z', firstVisitFrom: '2027-05-21' } } } };
+        await expect(slotReservation.commitReservation({
+          scheduledServiceId: 'scheduled-123', customerId: 'customer-1', paymentMethodPreference: 'card_on_file',
+          estimatedPrice: 219.6, estimate, trx,
+        })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', message: "slot is before the offer's first visit date" });
         expect(updateBuilder.update).not.toHaveBeenCalled();
       } finally { jest.useRealTimers(); }
     });

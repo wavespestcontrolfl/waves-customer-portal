@@ -7,11 +7,13 @@ import { Table, TBody, TD, TH, THead, TR } from '../ui/Table';
 import { adminFetch } from '../../lib/adminFetch';
 import useTechScoreboard from '../../hooks/useTechScoreboard';
 import { centsToDollars, dayLabel } from '../payroll/payrollFormat';
+import YearStatement from './YearStatement';
 
 // Tech Rewards Plan D5-4 (owner 2026-11-20). The technician's OWN scoreboard (Staff page, Time > Scoreboard, behind
 // GATE_TECH_REWARDS_SCOREBOARD) and the owner's preview of any one technician (Staff > Team > Scoreboard preview, not gated).
 // Both render ScoreboardView from the same server object. Every figure except commission is an estimate; the pay itself
-// comes later. Nothing here changes pay or sends a message. No customer data is shown.
+// comes later. Under the board both show that person's yearly pay statement (YearStatement.jsx, D5-6): finalized amounts.
+// Nothing here changes pay or sends a message. No customer data is shown.
 
 const PART_LABELS = {
   onTime: 'Reports on time',
@@ -70,6 +72,18 @@ function ScoreCard({ score }) {
   </Card>;
 }
 
+// A season bonus payroll has paid shows the paid amount (paidCents), with no estimate beside it.
+function seasonBonusValue(seasonBonus) {
+  if (seasonBonus.paidCents != null) return centsToDollars(seasonBonus.paidCents);
+  return seasonBonus.estimateCents === null ? 'Not estimated yet' : centsToDollars(seasonBonus.estimateCents);
+}
+
+function seasonBonusNote(seasonBonus) {
+  if (seasonBonus.paidCents != null) return 'Paid. This is the amount payroll put on your paycheck.';
+  if (seasonBonus.estimateCents === null) return NO_BONUS_REASONS[seasonBonus.reason] || ESTIMATE_NOTE;
+  return `${ESTIMATE_NOTE} ${bpsPercent(seasonBonus.rateBps)} of ${centsToDollars(seasonBonus.grossCents)} pay x ${times(seasonBonus.multiplierE4)} multiplier.`;
+}
+
 function BonusCard({ scoreboard }) {
   const { seasonBonus, multiplier, stayBonus } = scoreboard;
   return <Card className="grid gap-3 p-4" aria-label="Bonus estimates">
@@ -77,10 +91,8 @@ function BonusCard({ scoreboard }) {
     <div className="grid gap-4 sm:grid-cols-2">
       <Stat
         label="Season bonus (paid the last Friday of September)"
-        value={seasonBonus.estimateCents === null ? 'Not estimated yet' : centsToDollars(seasonBonus.estimateCents)}
-        note={seasonBonus.estimateCents === null
-          ? NO_BONUS_REASONS[seasonBonus.reason] || ESTIMATE_NOTE
-          : `${ESTIMATE_NOTE} ${bpsPercent(seasonBonus.rateBps)} of ${centsToDollars(seasonBonus.grossCents)} pay x ${times(seasonBonus.multiplierE4)} multiplier.`}
+        value={seasonBonusValue(seasonBonus)}
+        note={seasonBonusNote(seasonBonus)}
       />
       <Stat
         label="Next stay bonus"
@@ -133,6 +145,8 @@ export default function Scoreboard() {
     {board.status === 'loading' && <p role="status" className="m-0">Loading…</p>}
     {board.status === 'error' && <p role="alert" className="m-0 text-ui-caption text-alert-fg">{board.error}</p>}
     {board.status === 'ready' && <ScoreboardView scoreboard={board.scoreboard} />}
+    {/* once the board request has answered: a 404 (gate off) never reaches here, so the statement is never asked for then */}
+    {board.status !== 'loading' && <YearStatement path="/tech/rewards-scoreboard/year-statement" />}
   </Card>;
 }
 
@@ -144,7 +158,8 @@ async function call(path) {
 }
 
 // Staff page, Team > Scoreboard preview (admin only, works with the gate off): the owner opens any one technician's
-// board to check the numbers before technicians see them.
+// board to check the numbers before technicians see them, and their yearly pay statement. The picker also lists a former
+// technician who has a finalized paycheck, so that statement stays reachable after they leave.
 export function ScoreboardPreview() {
   const [technicians, setTechnicians] = useState(null);
   const [technicianId, setTechnicianId] = useState('');
@@ -173,12 +188,14 @@ export function ScoreboardPreview() {
       <Field label="Technician">
         <Select value={technicianId} onChange={event => setTechnicianId(event.target.value)} disabled={!technicians}>
           <option value="">Choose a technician</option>
-          {(technicians || []).map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+          {/* a former technician is listed only when payroll holds a finalized paycheck for them (active: false) */}
+          {(technicians || []).map(t => <option key={t.id} value={t.id}>{t.active === false ? `${t.name} (no longer active)` : t.name}</option>)}
         </Select>
       </Field>
     </div>
     {error && <p role="alert" className="m-0 text-ui-caption text-alert-fg">{error}</p>}
     {technicianId && !board && !error && <p role="status" className="m-0">Loading…</p>}
     {board && <ScoreboardView scoreboard={board} />}
+    {technicianId && <YearStatement key={technicianId} path={`/admin/tech-rewards-scoreboard/${encodeURIComponent(technicianId)}/year-statement`} />}
   </Card>;
 }

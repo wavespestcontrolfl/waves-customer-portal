@@ -9,6 +9,11 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/pest-insider/index', () => ({ buildIssue: jest.fn() }));
 jest.mock('../services/pest-insider/posts', () => ({ checkLivePosts: jest.fn() }));
+// The tool registry is the real one, wrapped so a case can pause a row or make it unreadable.
+jest.mock('../services/pest-insider/tools', () => {
+  const actual = jest.requireActual('../services/pest-insider/tools');
+  return { ...actual, loadTools: jest.fn(actual.loadTools) };
+});
 jest.mock('../services/pest-insider/audience', () => ({
   ...jest.requireActual('../services/pest-insider/audience'),
   selectIssueAudience: jest.fn(),
@@ -18,15 +23,21 @@ jest.mock('../services/newsletter-sender', () => ({ spamReportCounts: jest.fn() 
 // No Pest Insider issue reached readers yet, unless a case says otherwise: the first poll is due.
 jest.mock('../services/newsletter-quiz', () => {
   const actual = jest.requireActual('../services/newsletter-quiz');
-  return { ...actual, newsletterIssuePolls: jest.fn(async () => ({ ids: actual.PEST_INSIDER_POLL_IDS, recent: [], used: [] })) };
+  return {
+    ...actual,
+    newsletterIssuePolls: jest.fn(async () => ({ ids: actual.PEST_INSIDER_POLL_IDS, recent: [], used: [] })),
+    // The newest issue readers got held no poll, unless a case says otherwise: no result line.
+    newsletterLastPoll: jest.fn(async () => null),
+  };
 });
 
 const { buildIssue } = require('../services/pest-insider/index');
 const { checkLivePosts } = require('../services/pest-insider/posts');
+const { loadTools } = require('../services/pest-insider/tools');
 const { selectIssueAudience } = require('../services/pest-insider/audience');
 const { triggerNotification } = require('../services/notification-triggers');
 const { spamReportCounts } = require('../services/newsletter-sender');
-const { newsletterIssuePolls, PEST_INSIDER_POLL_IDS } = require('../services/newsletter-quiz');
+const { newsletterIssuePolls, newsletterLastPoll, PEST_INSIDER_POLL_IDS } = require('../services/newsletter-quiz');
 const logger = require('../services/logger');
 const {
   issueDatesInMonth, isIssueDate, nextIssueDate, todayET, nextDay, recentHistory, runIssuePlanner, USED_STATUSES,
@@ -187,6 +198,9 @@ describe('recentHistory', () => {
   });
 });
 
+// The links of every tool whose registry row is active (no Amazon page is read: owner 2026-11-22).
+const REGISTRY_URLS = jest.requireActual('../services/pest-insider/tools').loadTools().tools.map((t) => t.url);
+
 describe('runIssuePlanner', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -247,11 +261,14 @@ describe('runIssuePlanner', () => {
       recent: { factIds: ['f1', 'f2'], speciesSlugs: ['s1', 's2'], toolIds: ['tool-a', null] },
       recheckedFactIds: [],
       livePostFactIds: ['fact-live-1', 'fact-live-2'],
-      liveToolUrls: [],
+      liveToolUrls: REGISTRY_URLS,
       pollQuizId: PEST_INSIDER_POLL_IDS[0],
+      lastPoll: null,
     });
     // The poll history is this newsletter's, read through the planner's database.
     expect(newsletterIssuePolls).toHaveBeenCalledWith({ newsletterType: 'pest-insider-monthly', knex: database });
+    // The last poll's votes are read for the issue's own date, through the same database.
+    expect(newsletterLastPoll).toHaveBeenCalledWith({ newsletterType: 'pest-insider-monthly', sendDate: '2026-12-03', knex: database });
     expect(database.calls.inserts).toHaveLength(1);
     const row = database.calls.inserts[0];
     expect(row).toMatchObject({
@@ -265,6 +282,40 @@ describe('runIssuePlanner', () => {
     expect(logger.info).toHaveBeenCalledTimes(1);
   });
 
+  test('the build names the links of the tools whose registry row is active now; a paused row is left out, and an unreadable registry names none', async () => {
+    expect(REGISTRY_URLS.length).toBeGreaterThan(1);
+    buildIssue.mockReturnValue(GOOD_BUILD);
+    const urlsOf = () => buildIssue.mock.calls[buildIssue.mock.calls.length - 1][0].liveToolUrls;
+    await runIssuePlanner({ now: WED_BUILD_DAY, database: fakeDb({}), fetchImpl: jest.fn() });
+    expect(urlsOf()).toEqual(REGISTRY_URLS);
+
+    // One row paused since: the registry's loadTools leaves it out, and so does the build.
+    const actual = jest.requireActual('../services/pest-insider/tools');
+    const [paused, ...rest] = actual.loadTools().tools;
+    loadTools.mockReturnValueOnce({ tools: rest, problems: [`${paused.productId}: its registry row is inactive, not active`] });
+    await runIssuePlanner({ now: WED_BUILD_DAY, database: fakeDb({}), fetchImpl: jest.fn() });
+    expect(urlsOf()).toEqual(rest.map((t) => t.url));
+    expect(urlsOf()).not.toContain(paused.url);
+
+    // A registry that cannot be read: no tool, one warning, and the issue still builds.
+    loadTools.mockImplementationOnce(() => { throw new Error('registry file unreadable'); });
+    const result = await runIssuePlanner({ now: WED_BUILD_DAY, database: fakeDb({}), fetchImpl: jest.fn() });
+    expect(urlsOf()).toEqual([]);
+    expect(result).toMatchObject({ status: 'shadow', written: true });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('registry file unreadable'));
+  });
+
+  test('an issue built with a tool records its id on the row, and the next issue\'s history carries it', async () => {
+    buildIssue.mockReturnValue({ ...GOOD_BUILD, tool: { productId: 'acurite-glass-rain-gauge' }, diagnostics: { ...GOOD_BUILD.diagnostics, toolId: 'acurite-glass-rain-gauge' } });
+    const database = fakeDb({});
+    await runIssuePlanner({ now: WED_BUILD_DAY, database, fetchImpl: jest.fn() });
+    const row = database.calls.inserts[0];
+    expect(row.tool_id).toBe('acurite-glass-rain-gauge');
+    // The next issue reads it back as one entry for this issue, in the planner's `recent.toolIds`.
+    const next = fakeDb({ history: [{ issue_date: row.issue_date, fact_id: row.fact_id, species_slug: row.species_slug, tool_id: row.tool_id }] });
+    expect((await recentHistory('2026-12-17', { database: next })).toolIds).toEqual(['acurite-glass-rain-gauge']);
+  });
+
   test.each([
     ['one of the two newest issues readers got had a poll', async () => ({ ids: PEST_INSIDER_POLL_IDS, recent: [null, PEST_INSIDER_POLL_IDS[0]], used: [PEST_INSIDER_POLL_IDS[0]] }), null],
     ['the poll history cannot be read', async () => { throw new Error('relation does not exist'); }, 'poll choice failed (relation does not exist); this issue has no poll'],
@@ -275,6 +326,23 @@ describe('runIssuePlanner', () => {
     expect(buildIssue).toHaveBeenCalledTimes(1);
     expect(buildIssue.mock.calls[0][0].pollQuizId).toBeNull();
     if (warning) expect(logger.warn).toHaveBeenCalledWith(`[pest-insider] ${warning}`);
+  });
+
+  test.each([
+    ['the newest issue readers got held a poll with votes', async () => ({ quizId: PEST_INSIDER_POLL_IDS[0], counts: { shoe: 2 } }), { quizId: PEST_INSIDER_POLL_IDS[0], counts: { shoe: 2 } }, null],
+    ['the newest issue readers got held no poll (or it is over 45 days old)', async () => null, null, null],
+    ['the poll got no votes', async () => ({ quizId: PEST_INSIDER_POLL_IDS[0], counts: {} }), null, null],
+    ['the votes cannot be read', async () => { throw new Error('relation does not exist'); }, null, 'last poll result failed (relation does not exist); this issue has no result line'],
+  ])("the issue's result line: %s", async (_name, read, want, warning) => {
+    newsletterLastPoll.mockImplementationOnce(read);
+    buildIssue.mockReturnValue({ ok: false, reason: 'x', issue: null, diagnostics: {} });
+    const result = await runIssuePlanner({ now: WED_BUILD_DAY, database: fakeDb() });
+    // The read never stops the build, and the build still runs once.
+    expect(result.skipped).toBe(false);
+    expect(buildIssue).toHaveBeenCalledTimes(1);
+    expect(buildIssue.mock.calls[0][0].lastPoll).toEqual(want);
+    if (warning) expect(logger.warn).toHaveBeenCalledWith(`[pest-insider] ${warning}`);
+    else expect(logger.warn).not.toHaveBeenCalled();
   });
 
   test('a refused build is recorded as skipped with the reason and no subject', async () => {

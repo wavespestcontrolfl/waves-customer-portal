@@ -1,5 +1,5 @@
 /**
- * Reclaimed water meters (GATE_LAWN_RECLAIMED_HALF_N, owner 2026-10-23).
+ * Reclaimed water meters (owner 2026-10-23).
  *
  * Manatee County publishes where its reclaimed (purple pipe) water meters are, as a public ArcGIS layer. This module
  * downloads that layer into `reclaimed_water_meters` and marks the properties that sit at a meter. The match runs HERE,

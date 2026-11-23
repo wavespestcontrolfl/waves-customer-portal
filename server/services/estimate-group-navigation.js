@@ -1,5 +1,6 @@
 const { callSideBlockForEstimateData, estimateOffCustomerSurface } = require('../utils/estimate-claim-sql');
 const { proposalExpiry, groupLinkViewableThrough } = require('./proposal-bid');
+const { planOfferOf } = require('./plan-offer-estimate');
 
 function parseEstimateData(value) {
   if (!value) return null;
@@ -24,7 +25,10 @@ async function publishedGroupLinks(database, estimate, { lock = false } = {}) {
     if (!(candidate.sent_at || candidate.viewed_at)
       || candidate.disposition === 'expired_unsent'
       || candidate.price_locked_at
-      || estimateOffCustomerSurface(candidate)) continue;
+      || estimateOffCustomerSurface(candidate)
+      // A plan offer's quote ends on its own date: it neither gives nor gets a navigation promise (a belt:
+      // ensureEstimateGroupId keeps it out of every group).
+      || planOfferOf(candidate.estimate_data)) continue;
     // The public reader uses the same durable call-side verdict. An
     // estimate-side quarantine marker may be absent after a failed write.
     if (await callSideBlockForEstimateData(database, parseEstimateData(candidate.estimate_data), { estimateStatus: candidate.status })) continue;

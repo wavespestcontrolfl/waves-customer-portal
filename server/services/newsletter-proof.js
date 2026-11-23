@@ -508,8 +508,10 @@ async function renderSendPreview(send, toEmail) {
   } = require('./newsletter-draft');
   const { neutralizeQuizTokens } = require('./newsletter-quiz');
   // The owner's copy is not any reader's: a Waves Pest Insider issue's
-  // "Your home" tokens (per reader, filled only by the send) are removed.
-  const { neutralizeHomeTokens } = require('./pest-insider/home');
+  // "A tool we'd use" and "Your home" tokens (per reader, filled only by the
+  // send) are removed, by the one function every surface without a reader uses
+  // (the referral line is filled as of now below, so none is left for it).
+  const { neutralizeIssueTokens } = require('./pest-insider/referral-line');
 
   // Demo unsubscribe URL — won't resolve to a real subscriber but the link
   // renders correctly and Gmail/Apple Mail will show the native unsub UI.
@@ -518,7 +520,12 @@ async function renderSendPreview(send, toEmail) {
   // of a hand-composed campaign shows the footer the broadcast will carry
   // (neutralized to inert chips below — no per-recipient token here).
   const { ensureFeedbackToken } = require('./newsletter-feedback');
-  const ensured = ensureFeedbackToken({ html: send.html_body || '', text: send.text_body });
+  // A Waves Pest Insider issue's referral line ({{pi-referral}} / {{pi-referral-text}}) reads
+  // as a reader would get it now: the stored body holds only the tokens, and the send fills
+  // them from the referral program's live state by the same rule (an amount, the first form,
+  // or no line while the program is paused).
+  const { referralLineAsOfNow } = require('./pest-insider/referral-line');
+  const ensured = await referralLineAsOfNow(send, ensureFeedbackToken({ html: send.html_body || '', text: send.text_body }));
   // Event click-tracking tokens resolve to the DIRECT event URLs in
   // proofs/tests — the reader clicks straight through, untracked.
   const { resolveEvclickDirect, eventUrlMapForSend } = require('./newsletter-event-clicks');
@@ -563,7 +570,7 @@ async function renderSendPreview(send, toEmail) {
   }
   const { neutralizeFeedbackTokens } = require('./newsletter-feedback');
   const applyTokens = (s) => neutralizeFeedbackTokens(neutralizeQuizTokens(
-    neutralizeHomeTokens(String(s))
+    neutralizeIssueTokens(String(s))
       .split(GREETING_NAME_TOKEN).join(greetingValue)
       .split(CITY_TOKEN).join(cityValue)
       .split(GRASS_TYPE_TOKEN).join(grassValue),
@@ -1334,6 +1341,7 @@ module.exports = {
   proofRecipient,
   syncedApprovalMailbox,
   approvalSenders,
+  issueFyiAddresses,
   resolveFlagshipCalendarContext,
   maskEmail,
   parseProofToken,
