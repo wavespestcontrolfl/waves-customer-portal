@@ -399,6 +399,10 @@ function fixedReportNote({ serviceType, areasServiced, visitOutcome } = {}) {
  * No sheet text (null, a shape that is not { source: 'cleaned' | 'fixed', text })
  * = null: the record carries no note. Never throws.
  */
+// The note the sheet sends: { source: 'cleaned' | 'fixed', text }.
+const isSheetReportNote = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+  && ['cleaned', 'fixed'].includes(value.source) && typeof value.text === 'string';
+
 // A dictated note is short. A longer one is not sent to a model, and the
 // completion stores the fixed sentence for it without running the screens.
 const MAX_OWN_NOTE_INPUT_CHARS = 2000;
@@ -406,8 +410,7 @@ const MAX_OWN_NOTE_INPUT_CHARS = 2000;
 async function reportNoteToStore({
   reportNote, note, serviceType, customerId, db, catalogRows = null, storedCodes = null,
 } = {}) {
-  if (!reportNote || typeof reportNote !== 'object' || Array.isArray(reportNote)
-    || !['cleaned', 'fixed'].includes(reportNote.source) || typeof reportNote.text !== 'string') return null;
+  if (!isSheetReportNote(reportNote)) return null;
   let codes = Array.isArray(storedCodes) ? storedCodes : null;
   if (!codes) codes = await readStoredCodes(db, customerId).catch(() => null);
   const said = typeof note === 'string' ? note : '';
@@ -427,6 +430,7 @@ async function reportNoteToStore({
 module.exports = {
   reportNoteRejection,
   reportNoteToStore,
+  isSheetReportNote,
   MAX_OWN_NOTE_INPUT_CHARS,
   fixedReportNote,
   ownNoteText,

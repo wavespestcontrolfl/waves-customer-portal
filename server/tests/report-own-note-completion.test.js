@@ -18,7 +18,7 @@ const block = completionSource.slice(completionSource.indexOf('async function co
 
 describe('the completion\'s report note', () => {
   const sentAt = block.indexOf('const reportNoteSent = ');
-  const pick = block.slice(sentAt, sentAt + 1800);
+  const pick = block.slice(sentAt, sentAt + 3000);
 
   test('asked only with the gate on and a note sent, for a performed untyped non-backfill visit', () => {
     expect(pick).toMatch(/^const reportNoteSent = require\('\.\.\/config\/feature-gates'\)\.reportOwnNoteLive\(\) && completionInput\.body\?\.reportNote != null;/);
@@ -37,11 +37,21 @@ describe('the completion\'s report note', () => {
   });
 
   test('a sent note on a visit that could not be checked refuses a fresh attempt, before any write', () => {
-    expect(pick).toContain('const reportNoteUnverified = reportNoteVisit === null || (reportNoteVisit?.ok === true && !reportNoteVisit.profile);');
+    expect(pick).toContain('const reportNoteUnverified = reportNoteVisit === null || (reportNoteVisit?.ok === true && !reportNoteVisit.profile)');
+    expect(pick).toContain("savepointScope(db, (k) => require('./area-addon-visit-rows').visitHasAreaAddOnRows(k, svc.id))");
+    expect(pick).toContain('.then(() => false, () => true);');
     const reject = block.indexOf("if (claim.action === 'proceed' && reportNoteUnverified) {");
     expect(reject).toBeGreaterThan(0);
     expect(reject).toBeLessThan(block.indexOf("trx('service_records').insert(recordInsert)"));
     expect(block.slice(reject, reject + 500)).toMatch(/markCompletionAttemptFailed[\s\S]*status: 503[\s\S]*code: 'REPORT_NOTE_UNVERIFIED'/);
+  });
+
+  test('a sent note in no shape the sheet sends is a 400 for a fresh attempt, before any write', () => {
+    expect(pick).toContain("const reportNoteInvalid = reportNoteSent && !require('./service-report/report-own-note').isSheetReportNote(completionInput.body.reportNote);");
+    const reject = block.indexOf("if (claim.action === 'proceed' && reportNoteInvalid) {");
+    expect(reject).toBeGreaterThan(0);
+    expect(reject).toBeLessThan(block.indexOf("trx('service_records').insert(recordInsert)"));
+    expect(block.slice(reject, reject + 500)).toMatch(/status: 400[\s\S]*code: 'REPORT_NOTE_INVALID'/);
   });
 
   test('frozen with the record; a frozen note is the customer recap (no model reads the raw note for one)', () => {

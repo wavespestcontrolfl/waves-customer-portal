@@ -4852,8 +4852,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
       : undefined;
     // A sent note on a visit that could not be checked refuses the completion below (retryable): the record never
     // goes out without the note marker while the raw note reaches the recap model.
-    // resolveEligibility answers a failed profile lookup as profile null: that is a check that could not run too.
-    const reportNoteUnverified = reportNoteVisit === null || (reportNoteVisit?.ok === true && !reportNoteVisit.profile);
+    // resolveEligibility answers a failed profile lookup as profile null, and a failed add-on lookup as "has add-on
+    // rows": both are a check that could not run, so the add-on read is made again here and a failure counts.
+    const reportNoteAddOnsUnread = reportNoteVisit?.ok === true && reportNoteVisit.svc?.hasAreaAddOnRows === true
+      && await savepointScope(db, (k) => require('./area-addon-visit-rows').visitHasAreaAddOnRows(k, svc.id))
+        .then(() => false, () => true);
+    const reportNoteUnverified = reportNoteVisit === null || (reportNoteVisit?.ok === true && !reportNoteVisit.profile)
+      || reportNoteAddOnsUnread;
+    // A sent note in no shape the sheet sends is a bad request (400 below), never a completion without the marker.
+    const reportNoteInvalid = reportNoteSent && !require('./service-report/report-own-note').isSheetReportNote(completionInput.body.reportNote);
     const reportNotePick = reportNoteVisit?.eligible === true
       ? await require('./service-report/report-own-note').reportNoteToStore({
         reportNote: completionInput.body.reportNote,
@@ -5289,6 +5296,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // A blog post that is no longer live on the site (unpublished, moved,
     // never live) is an actionable 400 for a fresh attempt, before any write,
     // like a retired tip: a link the tech chose never vanishes silently.
+    if (claim.action === 'proceed' && reportNoteInvalid) {
+      await CompletionAttempts.markCompletionAttemptFailed(
+        completionAttempt,
+        new Error('report_note_invalid'),
+        db,
+      ).catch(() => {});
+      return ({ status: 400, body: {
+        error: 'The report note was not sent in a form the server reads. Reload the sheet and complete again.',
+        code: 'REPORT_NOTE_INVALID',
+      } });
+    }
     if (claim.action === 'proceed' && reportNoteUnverified) {
       await CompletionAttempts.markCompletionAttemptFailed(
         completionAttempt,

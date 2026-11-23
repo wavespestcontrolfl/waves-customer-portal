@@ -498,6 +498,8 @@ describe('the note a completion stores', () => {
     await expect(store({}, 'treated the shed')).resolves.toBeNull();
     await expect(store({ source: 'other', text: 'x' }, 'treated the shed')).resolves.toBeNull();
     await expect(store({ source: 'cleaned' }, 'treated the shed')).resolves.toBeNull();
+    expect([{}, null, [], { source: 'other', text: 'x' }, { source: 'cleaned' }].some(OwnNote.isSheetReportNote)).toBe(false);
+    expect(OwnNote.isSheetReportNote({ source: 'fixed', text: '' })).toBe(true);
   });
 
   test('what is stored is what the report reads', async () => {
