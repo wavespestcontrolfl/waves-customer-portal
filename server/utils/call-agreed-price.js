@@ -148,8 +148,9 @@ function resolveStatedOneTimeCallPrice(v2Extraction = null) {
  *   - no strict total: the price staff stated (resolveStatedOneTimeCallPrice);
  *   - a strict total (quoted_price_usd, "the total the caller accepted for the
  *     service being booked"): that total, only when it is the same number as
- *     the accepted term. A $0 total, or one that differs, is not this price,
- *     nor a caller's number the extraction says staff did not offer.
+ *     the accepted term. A $0 total, or one that differs, is not this price;
+ *     nor is a caller's number when the extraction contradicts the total (not
+ *     final, not accepted, or not offered by staff).
  * This is evidence, not a price to bill: see resolveStatedOneTimeCallPrice.
  */
 function resolveAgreedOneTimeJobPrice(v2Extraction = null) {
@@ -159,9 +160,13 @@ function resolveAgreedOneTimeJobPrice(v2Extraction = null) {
   const amount = accepted.length === 1 ? exactOneTimeAmount(accepted[0]) : null;
   if (amount === null) return null;
   if (svc.quoted_price_usd == null) return resolveStatedOneTimeCallPrice(v2Extraction);
-  // A caller's number the extraction says staff did not offer is not a Waves
-  // price, even when it matches the total.
-  if (svc.price_offered_by_staff === false && accepted[0].stated_by !== 'agent') return null;
+  // A total the extraction contradicts (not final, not accepted by the caller,
+  // or not offered by staff) counts only as staff's own term: a caller's
+  // number is then not a Waves price, even when it matches the total. This is
+  // the same evidence the office card shows (agreedOneTimeJobCardPrice), so a
+  // held call's card always carries the price that held it.
+  const contradicted = svc.price_is_final === false || svc.price_accepted_by_caller === false || svc.price_offered_by_staff === false;
+  if (contradicted && accepted[0].stated_by !== 'agent') return null;
   return svc.quoted_price_usd === amount ? amount : null;
 }
 

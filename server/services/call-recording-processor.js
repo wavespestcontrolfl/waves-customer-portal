@@ -1972,11 +1972,14 @@ function buildAgreedJobCardEvidence({ scheduledDate = null, windowStart = null, 
     booking_window_start: windowStart || null,
     stated_price: price ? price.amount : null,
     price_basis: price ? price.basis : null,
-    // A follow-up the call did not set (the catalog interval, visit 1's hour, or
-    // a two-treatment package nobody discussed) is a suggestion.
+    // Visit 2 is always owed (resolveCallFollowUpPlan plans one only when the
+    // call discussed it or the service is a two-treatment package). Why it is
+    // owed and whether the call set its hour are separate facts: without a set
+    // hour the slot (the catalog interval, visit 1's hour) is for staff to confirm.
     follow_up: followUpPlan
       ? { scheduled_date: followUpPlan.scheduledDate || null, window_start: followUpPlan.windowStart || null,
-        suggested: followUpPlan.hourStated !== true || followUpPlan.packageOnly === true,
+        reason: followUpPlan.packageOnly === true ? 'package' : 'discussed',
+        time_set: followUpPlan.hourStated === true && followUpPlan.packageOnly !== true,
         off_hour: offTheHour(followUpPlan.windowStart) }
       : null,
   };

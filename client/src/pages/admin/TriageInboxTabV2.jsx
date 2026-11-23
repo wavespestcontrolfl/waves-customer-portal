@@ -154,11 +154,14 @@ function agreedOneTimeJobRows(p) {
     price && (j.price_basis === "agreed_total"
       ? { label: "Agreed price", value: `${price} one-time, the total the caller accepted on the call.` }
       : { label: "Staff said", value: `${price} one-time. Check the terms on the call before you set the visit's price.` }),
-    j.follow_up && j.follow_up.scheduled_date && (j.follow_up.suggested === true
-      ? { label: "Suggested follow-up", value: `Visit 2 around ${slot(j.follow_up.scheduled_date, j.follow_up.window_start)}. The call did not set this time: confirm it with the customer before you book it.` }
-      : j.follow_up.off_hour === true
-        ? { label: "Promised follow-up", value: `Visit 2 was promised for ${slot(j.follow_up.scheduled_date, j.follow_up.window_start)}. Visits start on the hour: confirm an on-hour start with the customer, then book it with the first visit.` }
-        : { label: "Promised follow-up", value: `Visit 2 was promised for ${slot(j.follow_up.scheduled_date, j.follow_up.window_start)}. Book it with the first visit.` }),
+    // Visit 2 is owed either way; its slot is firm only when the call set the hour.
+    j.follow_up && j.follow_up.scheduled_date && { label: "Follow-up owed", value: [
+      j.follow_up.reason === "package" ? "Visit 2 is part of this two-treatment service." : "The call agreed a second visit.",
+      j.follow_up.time_set === true
+        ? `The call set it for ${slot(j.follow_up.scheduled_date, j.follow_up.window_start)}.${j.follow_up.off_hour === true ? " Visits start on the hour: confirm an on-hour start with the customer." : ""}`
+        : `Around ${slot(j.follow_up.scheduled_date, j.follow_up.window_start)}: the call did not set this time, so confirm it with the customer.`,
+      "Book it with the first visit.",
+    ].join(" ") },
   ];
 }
 

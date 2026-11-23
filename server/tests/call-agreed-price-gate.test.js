@@ -414,7 +414,9 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(builder).toContain('price_basis: price ? price.basis : null,');
     expect(builder).toContain('? { scheduled_date: followUpPlan.scheduledDate || null, window_start: followUpPlan.windowStart || null,');
     // A follow-up time the call did not set is a suggestion on the card, not a promise.
-    expect(builder).toContain('suggested: followUpPlan.hourStated !== true || followUpPlan.packageOnly === true,');
+    // Why visit 2 is owed and whether its hour was set are separate facts.
+    expect(builder).toContain("reason: followUpPlan.packageOnly === true ? 'package' : 'discussed',");
+    expect(builder).toContain('time_set: followUpPlan.hourStated === true && followUpPlan.packageOnly !== true,');
     expect(call).toContain('agreedJobCardFiled = await fileSkippedBookingCard({');
     expect(call).toContain('agreedOneTimeJob: agreedJobCardEvidence,');
     // The card writer: the evidence is ONE key, written on every pass (null for another skip), so an older
@@ -534,6 +536,16 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price_offered_by_staff: false }), 'One-Time Pest Control Service')).toEqual({ amount: 250, basis: 'stated' });
     expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price_is_final: false, price: callers, prices: [callers] }), 'One-Time Pest Control Service')).toBeNull();
     expect(agreedOneTimeJobCardPrice(reading({ quoted_price_usd: 250, price: callers, prices: [callers] }), 'One-Time Pest Control Service')).toEqual({ amount: 250, basis: 'agreed_total' });
+    // The hold and the card read the same evidence: a held call's card always shows the price that held it.
+    for (const contradiction of [{ price_is_final: false }, { price_accepted_by_caller: false }, { price_offered_by_staff: false }]) {
+      const byCaller = reading({ quoted_price_usd: 250, ...contradiction, price: callers, prices: [callers] });
+      expect(resolveAgreedOneTimeJobPrice(byCaller)).toBeNull();
+      expect(agreedOneTimeJobCardPrice(byCaller, 'One-Time Pest Control Service')).toBeNull();
+      const byStaff = reading({ quoted_price_usd: 250, ...contradiction });
+      expect(resolveAgreedOneTimeJobPrice(byStaff)).toBe(250);
+      expect(agreedOneTimeJobCardPrice(byStaff, 'One-Time Pest Control Service')).toEqual({ amount: 250, basis: 'stated' });
+    }
+    expect(resolveAgreedOneTimeJobPrice(reading({ quoted_price_usd: 250, price: callers, prices: [callers] }))).toBe(250);
     // The booking resolved to another row (a free re-service): no price on the card.
     expect(agreedOneTimeJobCardPrice(reading(), 'Pest Control Re-Service')).toBeNull();
     expect(agreedOneTimeJobCardPrice(reading(), null)).toBeNull();

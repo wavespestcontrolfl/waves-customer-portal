@@ -1583,13 +1583,16 @@ describe('ConfirmEvidence — agreed one-time job the AI did not book', () => {
     expect(screen.queryByText(/Check the terms/)).not.toBeInTheDocument();
   });
 
-  it('shows a follow-up the call did not set as a suggestion, and a set one as promised', () => {
-    show(payload({}, { follow_up: { scheduled_date: '2026-12-05', window_start: '17:00', suggested: true } }));
-    expect(screen.getByText('Suggested follow-up:')).toBeInTheDocument();
-    expect(screen.getByText(/Visit 2 around 2026-12-05 at 17:00\. The call did not set this time/)).toBeInTheDocument();
+  it('always shows visit 2 as owed, with why, and its time as set or to confirm', () => {
+    show(payload({}, { follow_up: { scheduled_date: '2026-12-05', window_start: '17:00', reason: 'package', time_set: false } }));
+    expect(screen.getByText('Follow-up owed:')).toBeInTheDocument();
+    expect(screen.getByText(/Visit 2 is part of this two-treatment service\. Around 2026-12-05 at 17:00: the call did not set this time/)).toBeInTheDocument();
     cleanup();
-    show(payload({}, { follow_up: { scheduled_date: '2026-12-05', window_start: '10:00', suggested: false } }));
-    expect(screen.getByText('Promised follow-up:')).toBeInTheDocument();
+    show(payload({}, { follow_up: { scheduled_date: '2026-12-05', window_start: '10:00', reason: 'discussed', time_set: false } }));
+    expect(screen.getByText(/The call agreed a second visit\. Around 2026-12-05 at 10:00: the call did not set this time/)).toBeInTheDocument();
+    cleanup();
+    show(payload({}, { follow_up: { scheduled_date: '2026-12-05', window_start: '10:00', reason: 'discussed', time_set: true } }));
+    expect(screen.getByText(/The call agreed a second visit\. The call set it for 2026-12-05 at 10:00\. Book it with the first visit\./)).toBeInTheDocument();
   });
 
   it('asks staff to check the service and billing terms when the card carries no price', () => {
@@ -1599,8 +1602,8 @@ describe('ConfirmEvidence — agreed one-time job the AI did not book', () => {
   });
 
   it('flags an off-hour follow-up for an on-hour start', () => {
-    show(payload({}, { follow_up: { scheduled_date: '2026-12-05', window_start: '14:30', suggested: false, off_hour: true } }));
-    expect(screen.getByText(/Visit 2 was promised for 2026-12-05 at 14:30\. Visits start on the hour/)).toBeInTheDocument();
+    show(payload({}, { follow_up: { scheduled_date: '2026-12-05', window_start: '14:30', reason: 'discussed', time_set: true, off_hour: true } }));
+    expect(screen.getByText(/The call set it for 2026-12-05 at 14:30\. Visits start on the hour/)).toBeInTheDocument();
     cleanup();
     show(payload());
     expect(screen.queryByText(/Visits start on the hour/)).not.toBeInTheDocument();
