@@ -108,7 +108,7 @@ describe('getHomePage', () => {
     expect(updates[0].set).toEqual({
       page_views: { sql: 'page_views + 1' },
       page_first_viewed_at: { sql: 'coalesce(page_first_viewed_at, now())' },
-      page_last_viewed_at: { sql: 'now()' },
+      page_last_viewed_at: { sql: 'greatest(page_last_viewed_at, now())' },
     });
   });
 

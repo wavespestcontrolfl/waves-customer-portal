@@ -38,7 +38,7 @@ async function countView(id) {
     await db('mail_prospects').where({ id }).update({
       page_views: db.raw('page_views + 1'),
       page_first_viewed_at: db.raw('coalesce(page_first_viewed_at, now())'),
-      page_last_viewed_at: db.raw('now()'),
+      page_last_viewed_at: db.raw('greatest(page_last_viewed_at, now())'), // never backward: greatest() skips a NULL
     }).timeout(VIEW_WRITE_TIMEOUT_MS, { cancel: true });
   } catch (err) {
     try {
