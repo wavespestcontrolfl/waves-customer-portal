@@ -426,27 +426,16 @@ async function boundTextNumber(trx, customerId) {
   return sameDestination(row?.phone, destination) ? destination : null;
 }
 
-// True when the text's own words may carry a Waves link: a host that serves Waves pages (linkHosts) anywhere in them,
-// read as a browser reads a typed link (full-width letters as
+// True when the text's own words may carry a Waves link: a host that serves Waves pages (linkHosts) anywhere in any
+// form the words take on the way to a browser (messaging/sms-link-policy.js strictLinkViews: full-width letters as
 // ASCII, the ideographic full stops as dots, invisible characters, tabs and line breaks dropped, percent-escapes
-// decoded) and in the send step's form (sendableText: its scheme strip can join two parts into a host, as
-// "portalhttps://.wavespestcontrol.com" becomes "portal.wavespestcontrol.com"), from the words as given and from their
-// send-step form, pass after pass until nothing changes. The caller passes the greeting with the stored name and the
-// whole answer, before any cut (answerText); the only link added after this check is the server's own Messages link
+// decoded, and the send step's own form, whose scheme strip can join two parts into a host), from the words as given
+// and from their send-step form (sendableText). The caller passes the greeting with the stored name and the whole
+// answer, before any cut (answerText); the only link added after this check is the server's own Messages link
 // (answerTextBody). There is no word-boundary rule, so a host right after a line break or a word is still found; it
-// over-reports on purpose (fail closed), and text still changing after LINK_DECODE_PASSES counts as a link. Such an
-// answer is not texted: before the SMS composer texts a page link, it checks who owns the link (bearerLinkSendCheck),
-// and this text does not. The answer stays in the portal, and the reply email goes, as with the gate off.
-const LINK_DECODE_PASSES = 12;
-const foldLinkText = (text) => text.normalize('NFKC').replace(/[\p{Default_Ignorable_Code_Point}\t\r\n]/gu, '')
-  .replace(/[。．｡]/g, '.').toLowerCase();
-const decodeEscapes = (text) => text.replace(/(?:%[0-9a-f]{2})+/g, (run) => {
-  try {
-    return decodeURIComponent(run);
-  } catch {
-    return run;
-  }
-});
+// over-reports on purpose (fail closed), and text that never stops changing counts as a link. Such an answer is not
+// texted: before the SMS composer texts a page link, it checks who owns the link (bearerLinkSendCheck), and this text
+// does not. The answer stays in the portal, and the reply email goes, as with the gate off.
 // Every host that serves Waves pages, the token pages among them: the composer's owned hosts (composer-customer-links.js
 // ownedPortalHosts: the portal and the short-link host), the own-domain rule's hosts (utils/signed-link-redaction.js
 // ownHosts: wavespestcontrol.com with every subdomain, and every host the app builds links with, the deployment's own
@@ -458,19 +447,13 @@ function linkHosts() {
   return [...new Set([...owned, ...own, 'up.railway.app'].map((host) => host.toLowerCase().replace(/:\d+$/, '')))];
 }
 function answerCarriesLink(words) {
+  const { strictLinkViews } = require('./messaging/sms-link-policy');
   const hosts = linkHosts();
-  const carries = (start) => {
-    let view = foldLinkText(start);
-    for (let pass = 0; pass < LINK_DECODE_PASSES; pass += 1) {
-      if (hosts.some((host) => view.includes(host))) return true;
-      const next = foldLinkText(sendableText(decodeEscapes(view)));
-      if (next === view) return false;
-      view = next;
-    }
-    return true;
-  };
   const given = String(words || '');
-  return carries(given) || carries(sendableText(given));
+  return [given, sendableText(given)].some((start) => {
+    const views = strictLinkViews(start);
+    return !views || views.some((view) => hosts.some((host) => view.includes(host)));
+  });
 }
 
 // The answer's text goes to the number bound at the save, and only while the customer's row still holds it. The send
@@ -611,6 +594,9 @@ async function emailStep(customerId, message, claim, sent) {
 // goes at most once (textStep), and the email carries its own idempotency key. `byStaff` marks a try run by the
 // staff press itself (staffReply): only such a try starts a text, never the sweep.
 async function noticeCustomer(customerId, message, { byStaff = false } = {}) {
+  // This try's text outcome once known: a write that fails after the text went out still tells staff it went (the
+  // stored 'sending' mark keeps the one-text rule for every later try).
+  let texted = null;
   try {
     const claim = await claimNotice(message.id);
     if (!claim) return await storedNotice(message.id);
@@ -625,7 +611,7 @@ async function noticeCustomer(customerId, message, { byStaff = false } = {}) {
       if (claim.attempts >= NOTICE_ATTEMPTS) await recordNotice(message.id, { ...sent, email: 'not_needed', pending: false, claimedAt: claim.at, attempts: claim.attempts });
       return { pending: claim.attempts < NOTICE_ATTEMPTS };
     }
-    const texted = textWay ? await textStep(customerId, message, claim, sent, { byStaff }) : null;
+    texted = textWay ? await textStep(customerId, message, claim, sent, { byStaff }) : null;
     if (texted?.lost) return await storedNotice(message.id);
     const mail = await emailStep(customerId, message, claim, { ...sent, ...texted });
     if (!mail) return await storedNotice(message.id);
@@ -636,7 +622,7 @@ async function noticeCustomer(customerId, message, { byStaff = false } = {}) {
     return publicNotice(notice);
   } catch (err) {
     logger.warn(`[portal-messages] notice failed for message ${message.id}: ${err.message}`);
-    return { pending: true };
+    return { ...(texted?.text ? { text: texted.text } : {}), pending: true };
   }
 }
 

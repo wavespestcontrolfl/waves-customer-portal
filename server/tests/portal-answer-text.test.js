@@ -164,6 +164,15 @@ describe('an answer with a Waves link is not texted (the email goes)', () => {
     expect(answerCarriesLink(body)).toBe(carries);
   });
 
+  test('the shared strict forms (sms-link-policy strictLinkViews): every form in order; null when the text never settles', () => {
+    const { strictLinkViews } = require('../services/messaging/sms-link-policy');
+    expect(strictLinkViews('Yes, Tuesday works.')).toEqual(['yes, tuesday works.']);
+    const views = strictLinkViews('Sign: PORTALhttps://.wavespestcontrol.com/c');
+    expect(views[0]).toBe('sign: portalhttps://.wavespestcontrol.com/c');
+    expect(views).toContain('sign: portal.wavespestcontrol.com/c');
+    expect(strictLinkViews(`x%25${'25'.repeat(20)}`)).toBeNull();
+  });
+
   test("a host the app builds links with (the deployment's own host) is a Waves host too, read at call time", () => {
     const body = 'Pay here: answers-alias.example.test/pay/abc123';
     expect(answerCarriesLink(body)).toBe(false);

@@ -993,6 +993,36 @@ maybeDescribe('portal messages (live Postgres)', () => {
       expect(await storedNotice(result.message.id)).toMatchObject({ textCode: 'ANSWER_HAS_LINK' });
     });
 
+    test('a failed last write after the provider took the text still tells staff the text went; no second text follows', async () => {
+      const pat = await customer();
+      const { escalationId } = await chat(pat.id, { alert: false });
+      const clientRequestId = randomUUID();
+      // Only the try's final notice write fails (pending: false); the claim and the boundary mark still land.
+      const realRaw = db.raw;
+      const failing = jest.spyOn(db, 'raw').mockImplementation((...args) => {
+        let notice = null;
+        try { notice = JSON.parse(args[1]?.[0]); } catch { notice = null; }
+        if (String(args[0]).includes("jsonb_build_object('notice'") && notice?.pending === false) throw new Error('write failed');
+        return realRaw.apply(db, args);
+      });
+      let first;
+      try {
+        first = await staffPress({ kind: 'chat', id: escalationId, body: 'See you Tuesday.', clientRequestId, actor });
+      } finally {
+        failing.mockRestore();
+      }
+      expect(first.notice).toEqual({ text: 'sent', pending: true });
+      expect(mockAnswerText.requests).toHaveLength(1);
+      expect(await storedNotice(first.message.id)).toMatchObject({ text: 'sending', pending: true });
+      // A later try reads the stored mark as maybe sent: no second text, no email.
+      await stopped(first.message.id, await storedNotice(first.message.id));
+      jest.clearAllMocks();
+      const again = await staffPress({ kind: 'chat', id: escalationId, body: 'See you Tuesday.', clientRequestId, actor });
+      expect(again.notice).toEqual({ bell: true, pushAccepted: 0, text: 'uncertain', email: 'not_needed' });
+      expect(answerTexts()).toEqual([]);
+      expect(AccountMembershipEmail.sendPortalReply).not.toHaveBeenCalled();
+    });
+
     test("a link on another host that serves the portal (the deployment's own host) gets no text: the email goes", async () => {
       const pat = await customer();
       const { escalationId } = await chat(pat.id, { alert: false });
