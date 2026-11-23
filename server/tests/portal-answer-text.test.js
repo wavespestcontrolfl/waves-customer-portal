@@ -155,10 +155,24 @@ describe('an answer with a Waves link is not texted (the email goes)', () => {
     [`${[...portal].map((c) => (c === '.' ? '\u3002' : String.fromCharCode(c.charCodeAt(0) + 0xFEE0))).join('')}/pay/abc123`, true],
     // Still decoding after every pass: no scan can vouch for it.
     [`x${'%25'.repeat(1)}${'25'.repeat(20)}`, true],
+    // Every other host that serves Waves pages: a Waves subdomain, the Railway app domain.
+    ['Pay at https://www.wavespestcontrol.com/pay/abc123', true],
+    ['Sign at waves-customer-portal-production.up.railway.app/contract/abc123', true],
     ['Yes, Tuesday works. Your tech will call first.', false],
     ['Directions: https://www.google.com/maps/place/Bradenton', false],
   ])('%p carries a Waves link: %p', (body, carries) => {
     expect(answerCarriesLink(body)).toBe(carries);
+  });
+
+  test("a host the app builds links with (the deployment's own host) is a Waves host too, read at call time", () => {
+    const body = 'Pay here: answers-alias.example.test/pay/abc123';
+    expect(answerCarriesLink(body)).toBe(false);
+    process.env.RAILWAY_PUBLIC_DOMAIN = 'answers-alias.example.test';
+    try {
+      expect(answerCarriesLink(body)).toBe(true);
+    } finally {
+      delete process.env.RAILWAY_PUBLIC_DOMAIN;
+    }
   });
 
   test("the send step's scheme strip can join two parts into a Waves host: the check reads that form too", () => {
@@ -170,9 +184,11 @@ describe('an answer with a Waves link is not texted (the email goes)', () => {
   });
 
   test('the greeting carries the stored name as the text sends it: an accent folded away can make a Waves host', () => {
-    const name = `${portal[0]}\u0302${portal.slice(1)}`;
+    const { OWN_DOMAIN } = require('../utils/signed-link-redaction');
+    // The stored name carries no Waves host ("ŵavespestcontrol.com"); the send step folds the mark away.
+    const name = `${OWN_DOMAIN[0]}\u0302${OWN_DOMAIN.slice(1)}/c`;
     expect(answerCarriesLink(name)).toBe(false);
-    expect(answerLead(name)).toContain(portal);
+    expect(answerLead(name)).toContain(OWN_DOMAIN);
     expect(answerCarriesLink(`${answerLead(name)}See you Tuesday.`)).toBe(true);
     expect(answerCarriesLink(`${answerLead('Pat')}See you Tuesday.`)).toBe(false);
   });

@@ -426,8 +426,8 @@ async function boundTextNumber(trx, customerId) {
   return sameDestination(row?.phone, destination) ? destination : null;
 }
 
-// True when the text's own words may carry a Waves link: an owned host (composer-customer-links.js ownedPortalHosts:
-// the portal and the short-link host) anywhere in them, read as a browser reads a typed link (full-width letters as
+// True when the text's own words may carry a Waves link: a host that serves Waves pages (linkHosts) anywhere in them,
+// read as a browser reads a typed link (full-width letters as
 // ASCII, the ideographic full stops as dots, invisible characters, tabs and line breaks dropped, percent-escapes
 // decoded) and in the send step's form (sendableText: its scheme strip can join two parts into a host, as
 // "portalhttps://.wavespestcontrol.com" becomes "portal.wavespestcontrol.com"), from the words as given and from their
@@ -447,8 +447,18 @@ const decodeEscapes = (text) => text.replace(/(?:%[0-9a-f]{2})+/g, (run) => {
     return run;
   }
 });
+// Every host that serves Waves pages, the token pages among them: the composer's owned hosts (composer-customer-links.js
+// ownedPortalHosts: the portal and the short-link host), the own-domain rule's hosts (utils/signed-link-redaction.js
+// ownHosts: wavespestcontrol.com with every subdomain, and every host the app builds links with, the deployment's own
+// Railway host RAILWAY_PUBLIC_DOMAIN among them), and Railway's shared app domain, whose other names for a deployment
+// serve the same pages. Read at call time, as those lists are.
+function linkHosts() {
+  const owned = require('./composer-customer-links').ownedPortalHosts();
+  const own = require('../utils/signed-link-redaction').ownHosts();
+  return [...new Set([...owned, ...own, 'up.railway.app'].map((host) => host.toLowerCase().replace(/:\d+$/, '')))];
+}
 function answerCarriesLink(words) {
-  const hosts = require('./composer-customer-links').ownedPortalHosts().map((host) => host.toLowerCase().replace(/:\d+$/, ''));
+  const hosts = linkHosts();
   const carries = (start) => {
     let view = foldLinkText(start);
     for (let pass = 0; pass < LINK_DECODE_PASSES; pass += 1) {

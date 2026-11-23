@@ -982,15 +982,29 @@ maybeDescribe('portal messages (live Postgres)', () => {
     });
 
     test('a Waves link the greeting would carry (the stored first name, as the text sends it) gets no text: the email goes', async () => {
-      const host = new URL(require('../utils/portal-url').publicPortalUrl()).host;
+      const { OWN_DOMAIN } = require('../utils/signed-link-redaction');
       const pat = await customer();
       // The send step folds the mark away (gsmSafeName): the greeting would carry the host the stored name does not.
-      await db('customers').where({ id: pat.id }).update({ first_name: `${host[0]}\u0302${host.slice(1)}` });
+      await db('customers').where({ id: pat.id }).update({ first_name: `${OWN_DOMAIN[0]}\u0302${OWN_DOMAIN.slice(1)}/c` });
       const { escalationId } = await chat(pat.id, { alert: false });
       const result = await staffPress({ kind: 'chat', id: escalationId, body: 'See you Tuesday.', actor });
       expect(answerTexts()).toEqual([]);
       expect(result.notice).toEqual({ bell: true, pushAccepted: 0, text: 'not_sent', email: 'sent' });
       expect(await storedNotice(result.message.id)).toMatchObject({ textCode: 'ANSWER_HAS_LINK' });
+    });
+
+    test("a link on another host that serves the portal (the deployment's own host) gets no text: the email goes", async () => {
+      const pat = await customer();
+      const { escalationId } = await chat(pat.id, { alert: false });
+      process.env.RAILWAY_PUBLIC_DOMAIN = 'answers-alias.example.test';
+      try {
+        const result = await staffPress({ kind: 'chat', id: escalationId, body: `Pay here: https://answers-alias.example.test/pay/${randomUUID()}`, actor });
+        expect(answerTexts()).toEqual([]);
+        expect(result.notice).toEqual({ bell: true, pushAccepted: 0, text: 'not_sent', email: 'sent' });
+        expect(await storedNotice(result.message.id)).toMatchObject({ textCode: 'ANSWER_HAS_LINK' });
+      } finally {
+        delete process.env.RAILWAY_PUBLIC_DOMAIN;
+      }
     });
 
     test('a gate turned off while the text waited for its locks sends no text: the email goes', async () => {

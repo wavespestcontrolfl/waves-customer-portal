@@ -69,6 +69,10 @@ const NON_HUMAN_REPLY_MESSAGE_TYPES = Object.freeze([
   'rain_out_moved', 'rain_out_moved_v2', 'rain_out_moved_v3', 'rain_out_moved_custom_v1', 'rain_out_moved_day_v1',
   // Quick Move "let the customer pick a day": a proactive hand-off notice.
   'rain_out_customer_pick_v1',
+  // An office answer in the portal, texted to the customer (GATE_PORTAL_ANSWER_TEXT, portal-messages.js): staff words,
+  // but an answer to the customer's portal message, not to their last text; capturing it would pair it with an
+  // unrelated inbound text. The message keeps its adminUserId for attribution.
+  'portal_answer',
 ]);
 
 function shouldCaptureReply({ channel, direction, authorType, adminUserId, messageType, body } = {}) {
