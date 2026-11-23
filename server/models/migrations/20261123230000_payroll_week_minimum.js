@@ -30,6 +30,10 @@ exports.down = async function down(knex) {
   if (await knex('payroll_checks').whereNotNull('minimum_week_minutes').first('id')) {
     throw new Error('payroll_checks holds minimum week pay. Preserve the schema and roll forward; do not drop it.');
   }
+  // A minimum the owner set is a pay promise on file: rolling back would lose it without a word.
+  if (await knex('technicians').whereNotNull('paid_week_minimum_hours').first('id')) {
+    throw new Error('technicians holds a minimum paid week setting. Clear it first, or roll forward; do not drop it.');
+  }
   await knex.raw('ALTER TABLE payroll_checks DROP CONSTRAINT IF EXISTS payroll_checks_minimum_week_check');
   await knex.raw('ALTER TABLE payroll_checks DROP COLUMN IF EXISTS minimum_week_pay_cents, DROP COLUMN IF EXISTS minimum_week_minutes');
   await knex.raw('ALTER TABLE technicians DROP COLUMN IF EXISTS paid_week_minimum_hours');

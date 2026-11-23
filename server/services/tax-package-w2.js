@@ -37,7 +37,9 @@ async function loadFinalizedW2Checks(conn, sd, ed, { timeOff = false } = {}) {
     .orderBy([{ column: 'pay_date' }, { column: 'week_start' }, { column: 'employee_name' }, { column: 'id' }])
     .select(
       ...W2_CHECK_COLUMNS,
-      ...(timeOff ? ['pto_minutes', 'holiday_minutes', 'minimum_week_minutes'] : []),
+      ...(timeOff ? ['pto_minutes', 'holiday_minutes'] : []),
+      // The minimum paid week, whatever the gate is now: a check that paid one keeps its hours in the package.
+      'minimum_week_minutes',
       conn.raw("to_char(week_start, 'YYYY-MM-DD') AS week_start"),
       conn.raw("to_char(pay_date, 'YYYY-MM-DD') AS pay_date"),
     );

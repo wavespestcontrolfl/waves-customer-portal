@@ -76,6 +76,7 @@ const { syncPayrollFilingsSafe } = require('./payroll-tax-calendar');
 const { etDateString, validCalendarDate } = require('../utils/datetime-et');
 const {
   STAFF_WORK_DATE_SQL,
+  STAFF_DAILY_WORK_SQL,
   addStaffWorkDays,
   staffWeekStartForWorkDate,
 } = require('../utils/staff-time-work-date');
@@ -305,7 +306,10 @@ function buildCheck({
       regularMinutes: tech.regular_minutes,
       overtimeMinutes: tech.overtime_minutes,
       ...(withTimeOff ? { ptoMinutes, holidayMinutes } : {}),
-      ...(withMinimum ? { minimumWeekMinutes: tech.minimum_week_minutes } : {}),
+      ...(withMinimum ? {
+        minimumWeekMinutes: tech.minimum_week_minutes,
+        minimumWeekPayoutMinutes: (tech.pto_bank && tech.pto_bank.payoutMinutes) || 0,
+      } : {}),
       ytdGrossWages: centsText(ytdGrossCents),
       w4,
       ...(withLines ? {
@@ -588,20 +592,12 @@ async function withPaperPayments(conn, rows) {
 
 // Technicians with worked time in the week, approved or not. Same test as the
 // timesheet approval screen, so "waiting" matches what the office sees there.
-const DAILY_WORK_SQL = `(
-      COALESCE(total_shift_minutes, 0) <> 0
-      OR COALESCE(total_job_minutes, 0) <> 0
-      OR COALESCE(total_drive_minutes, 0) <> 0
-      OR COALESCE(total_break_minutes, 0) <> 0
-      OR COALESCE(total_admin_minutes, 0) <> 0
-      OR COALESCE(job_count, 0) <> 0
-    )`;
 
 async function workedTechnicianIds(conn, start, end) {
   const daily = await conn('time_entry_daily_summary')
     .where('work_date', '>=', start)
     .where('work_date', '<=', end)
-    .whereRaw(DAILY_WORK_SQL)
+    .whereRaw(STAFF_DAILY_WORK_SQL)
     .select('technician_id');
   const entries = await conn('time_entries')
     .whereRaw(`${STAFF_WORK_DATE_SQL} BETWEEN ?::date AND ?::date`, [start, end])
@@ -623,7 +619,7 @@ async function workedWeeksByTechnician(conn, ids, start, end) {
   if (!ids.length) return byTech;
   const daily = await conn('time_entry_daily_summary')
     .whereIn('technician_id', ids).where('work_date', '>=', start).where('work_date', '<=', end)
-    .whereRaw(DAILY_WORK_SQL)
+    .whereRaw(STAFF_DAILY_WORK_SQL)
     .distinct('technician_id', conn.raw(`to_char(${weekStartSql('work_date')}, 'YYYY-MM-DD') AS week_start`));
   const entries = await conn('time_entries')
     .whereIn('technician_id', ids).where('status', '!=', 'voided')
@@ -937,7 +933,9 @@ async function evaluate(conn, run, { lock = false } = {}) {
     unpaidTimeOff = unpaidTimeOff.filter((row) => !payoutHolds.has(row.technicianId));
     // The minimum paid week of a technician who has one (payroll-week-minimum.js): a week of time off the bank
     // could not pay in full still gets a check when the minimum adds hours to it.
-    const settled = await weekMinimum.applyMinimum(conn, banked.rows, { start, end });
+    const minimum = await weekMinimum.applyMinimum(conn, banked.rows, { start, end });
+    const settled = minimum.rows;
+    for (const [technicianId, reason] of minimum.holds) if (!bankHolds.has(technicianId)) bankHolds.set(technicianId, reason);
     const needsCheck = (row) => bankHolds.has(row.technician_id) || lineMap.has(row.technician_id)
       || Number(row.pto_minutes) + Number(row.holiday_minutes) + Number(row.minimum_week_minutes || 0) > 0;
     const offEnd = withHours.length + timeOffOnlyRows.length;

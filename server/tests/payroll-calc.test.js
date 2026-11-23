@@ -334,6 +334,21 @@ describe('computePaycheck: minimum paid week (payroll-week-minimum.js)', () => {
     }
   });
 
+  test('never falls a cent short of the guarantee when each line rounds on its own', () => {
+    // $22.33: 1.01 h worked + 1.01 h of paid time off + 37.98 h added. Priced line by line: 22.55 + 22.55 + 848.09 =
+    // 893.19; 40 h x $22.33 = 893.20. The added line takes the cent.
+    const result = paycheck({ hourlyRate: '22.33', regularMinutes: '60.60', ptoMinutes: '60.60', holidayMinutes: 0, minimumWeekMinutes: '2278.80' });
+    expect(result.minimumWeekPayCents).toBe(84810);
+    expect(result.regularPayCents + result.ptoPayCents + result.minimumWeekPayCents).toBe(89320);
+  });
+
+  test('hours a payout paid out do not count toward the guarantee', () => {
+    // 30 h worked + 50 h paid out at leaving + 10 h added: gross = 40 h + the 50 h payout.
+    const result = paycheck({ hourlyRate: '21.00', regularMinutes: '1800.00', ptoMinutes: '3000.00', holidayMinutes: 0, minimumWeekMinutes: '600.00', minimumWeekPayoutMinutes: '3000.00' });
+    expect(result.minimumWeekPayCents).toBe(21000);
+    expect(result.grossPayCents).toBe(84000 + 105000);
+  });
+
   test('carries no minimum key when the figure is not passed, and refuses a mistyped one', () => {
     expect(paycheck({ ptoMinutes: 0, holidayMinutes: 0 })).not.toHaveProperty('minimumWeekPayCents');
     expect(paycheck({ minimumWeekMinutes: 0 }).minimumWeekPayCents).toBe(0);

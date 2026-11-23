@@ -293,6 +293,26 @@ const toNumbers = (obj) => Object.fromEntries(
  * reemploymentRateBp is Florida's rate for Waves in basis points (270 = 2.7%).
  * All returned money is integer cents.
  */
+// Minimum week pay: the hours the minimum added (not worked), at the straight rate. It is worked out as the pay of
+// the whole guarantee less the rounded lines that count toward it, so the check never falls a cent short of
+// minimum x rate: worked hours (overtime at the straight rate), paid time off (not the hours a payout paid out)
+// and holiday hours count. Zero when the minimum added no hours.
+function minimumWeekPay({
+  rateCents, regularHundredths, overtimeHundredths, regularPay, ptoPay, holidayPay,
+  ptoMinutes, holidayMinutes, minimumWeekMinutes, minimumWeekPayoutMinutes,
+}) {
+  const added = nonNegativeCents(minimumWeekMinutes, 'Minimum week minutes');
+  if (added === 0n) return 0n;
+  const payout = nonNegativeCents(minimumWeekPayoutMinutes, 'Minimum week payout minutes');
+  const pto = nonNegativeCents(ptoMinutes, 'Paid time off minutes');
+  if (payout > pto) throw new Error('Minimum week payout minutes must not be more than the paid time off minutes');
+  const counted = regularHundredths + overtimeHundredths + (pto - payout) + nonNegativeCents(holidayMinutes, 'Holiday minutes');
+  const guarantee = roundDiv(rateCents * (counted + added), 6000n);
+  const credited = regularPay + roundDiv(rateCents * overtimeHundredths, 6000n) + ptoPay
+    - roundDiv(rateCents * payout, 6000n) + holidayPay;
+  return guarantee > credited ? guarantee - credited : 0n;
+}
+
 function computePaycheck({
   payDate,
   payFrequency = 'weekly',
@@ -302,6 +322,7 @@ function computePaycheck({
   ptoMinutes,
   holidayMinutes,
   minimumWeekMinutes,
+  minimumWeekPayoutMinutes,
   ytdGrossWages = 0,
   w4,
   reemploymentRateBp = FLORIDA_NEW_EMPLOYER_RATE_BP,
@@ -341,10 +362,12 @@ function computePaycheck({
   const withTimeOff = ptoMinutes !== undefined || holidayMinutes !== undefined;
   const ptoPay = roundDiv(rateCents * nonNegativeCents(ptoMinutes, 'Paid time off minutes'), 6000n);
   const holidayPay = roundDiv(rateCents * nonNegativeCents(holidayMinutes, 'Holiday minutes'), 6000n);
-  // Minimum week pay (payroll-week-minimum.js): hours not worked that bring the week up to the technician's
-  // minimum, at the straight rate. Its line is in the output only when the caller passed it.
+  // Minimum week pay (payroll-week-minimum.js). Its line is in the output only when the caller passed it.
   const withMinimum = minimumWeekMinutes !== undefined;
-  const minimumPay = roundDiv(rateCents * nonNegativeCents(minimumWeekMinutes, 'Minimum week minutes'), 6000n);
+  const minimumPay = minimumWeekPay({
+    rateCents, regularHundredths, overtimeHundredths, regularPay, ptoPay, holidayPay,
+    ptoMinutes, holidayMinutes, minimumWeekMinutes, minimumWeekPayoutMinutes,
+  });
   // Pay lines ride on the check only when the caller passes them.
   // (wholeCents reads an omitted figure as zero.)
   const withPayLines = payLines != null;

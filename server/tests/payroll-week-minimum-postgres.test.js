@@ -32,6 +32,7 @@ jest.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: jest.fn() }));
 const { randomUUID } = require('node:crypto');
 const express = require('express');
 const router = require('../routes/admin-payroll');
+const { NO_LAST_DAY } = require('../services/payroll-week-minimum');
 const { addStaffWorkDays } = require('../utils/staff-time-work-date');
 
 jest.setTimeout(60000);
@@ -187,6 +188,35 @@ postgres('payroll minimum paid week', () => {
     });
     const check = byName((await draft(W1)).body.run, 'Sample Alpha');
     expect(check).toMatchObject({ regularHours: '15.00', minimumWeekHours: '5.00' });
+  });
+
+  it('an employee who left with no bank: the last week counts the days up to the last daily summary with work', async () => {
+    // Inactive, no bank, nothing after the week; worked Mon + Tue per the daily summaries: 20 h minimum, 15 worked.
+    const id = await tech('Sample Alpha', { employment_status: 'inactive' });
+    await worked(id, W1, 15);
+    await trx('time_entry_daily_summary').insert([
+      { technician_id: id, work_date: W1, total_shift_minutes: 480 },
+      { technician_id: id, work_date: addDays(W1, 1), total_shift_minutes: 420 },
+    ]);
+    expect(byName((await draft(W1)).body.run, 'Sample Alpha')).toMatchObject({ regularHours: '15.00', minimumWeekHours: '5.00' });
+  });
+
+  it('an inactive employee with work after the week: the week is not the last one, the full minimum applies', async () => {
+    const id = await tech('Sample Alpha', { employment_status: 'inactive' });
+    await worked(id, W1, 15);
+    await trx('time_entry_daily_summary').insert([
+      { technician_id: id, work_date: W1, total_shift_minutes: 900 },
+      { technician_id: id, work_date: addDays(W1, 8), total_shift_minutes: 480 },
+    ]);
+    expect(byName((await draft(W1)).body.run, 'Sample Alpha')).toMatchObject({ minimumWeekHours: '25.00' });
+  });
+
+  it('holds a last week with paid hours and no dated day on file, with a reason', async () => {
+    const id = await tech('Sample Alpha', { employment_status: 'inactive' });
+    await worked(id, W1, 15);
+    const run = (await draft(W1)).body.run;
+    expect(run.checks).toEqual([]);
+    expect(run.blocked).toEqual([{ technicianId: id, name: 'Sample Alpha', reason: NO_LAST_DAY }]);
   });
 
   it('a week with no work and no time off on file gets no check from the minimum', async () => {

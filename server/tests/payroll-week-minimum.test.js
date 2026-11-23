@@ -49,7 +49,7 @@ describe('applyMinimum', () => {
   const fakeConn = (techs) => {
     const conn = (table) => {
       const q = {
-        whereIn: () => q, where: () => q, whereNotNull: () => q, whereRaw: () => q, whereBetween: () => q, groupBy: () => q,
+        whereIn: () => q, where: () => q, whereNotNull: () => q, whereRaw: () => q, groupBy: () => q,
         select: async () => (table === 'technicians' ? techs : []),
       };
       return q;
@@ -63,20 +63,21 @@ describe('applyMinimum', () => {
     const plain = row('b', { regular_minutes: '1200' });
     const out = await applyMinimum(fakeConn([{ id: 'a', paid_week_minimum_hours: '40', hire_date: null, payout_week: null }]),
       [row('a', { regular_minutes: '1800' }), plain], { start: WEEK, end: '2026-06-07' });
-    expect(out[0].minimum_week_minutes).toBe(600);
-    expect(out[1]).toBe(plain);
+    expect(out.rows[0].minimum_week_minutes).toBe(600);
+    expect(out.rows[1]).toBe(plain);
+    expect(out.holds.size).toBe(0);
   });
 
   test('payout hours and unpaid hours before the hire date do not count', async () => {
     const out = await applyMinimum(fakeConn([{ id: 'a', paid_week_minimum_hours: '40', hire_date: null, payout_week: null }]), [
       row('a', { regular_minutes: '1800', pto_minutes: 3000, pto_bank: { payoutMinutes: 3000, unpaidMinutes: 600, unpaidBeforeHireMinutes: 600 } }),
     ], { start: WEEK, end: '2026-06-07' });
-    expect(out[0].minimum_week_minutes).toBe(600);
+    expect(out.rows[0].minimum_week_minutes).toBe(600);
   });
 
   test('a check with no work and no time off (a pay line alone) gets no minimum', async () => {
     const lone = row('a');
     const out = await applyMinimum(fakeConn([{ id: 'a', paid_week_minimum_hours: '40', hire_date: null, payout_week: null }]), [lone], { start: WEEK, end: '2026-06-07' });
-    expect(out[0]).toBe(lone);
+    expect(out.rows[0]).toBe(lone);
   });
 });

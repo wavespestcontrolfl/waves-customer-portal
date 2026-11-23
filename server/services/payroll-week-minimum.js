@@ -11,13 +11,16 @@
  * they never make overtime, and the bank earns nothing on them.
  *
  * The scheduled days are Monday to Thursday (the letter: four 10-hour days). The first week counts the scheduled
- * days on and after the hire date. The last week (the week whose pay run pays out the bank) counts the scheduled
- * days up to the last day with recorded work or time off: there is no leaving date on file.
+ * days on and after the hire date. The last week counts the scheduled days up to the last day with recorded work
+ * (a time entry or a daily summary with worked time) or time off: there is no leaving date on file. A week is the
+ * last week when its pay run pays out the bank, or when the employee is no longer active and nothing is recorded
+ * after it, with or without a bank. A last week with paid hours and no dated day on file is held with a reason:
+ * the days cannot be counted.
  *
  * Not here: a week with no recorded work and no time off gets none from the minimum (also a check for a pay line
  * alone).
  */
-const { STAFF_WORK_DATE_SQL, addStaffWorkDays } = require('../utils/staff-time-work-date');
+const { STAFF_WORK_DATE_SQL, STAFF_DAILY_WORK_SQL, addStaffWorkDays } = require('../utils/staff-time-work-date');
 
 const SCHEDULED_DAYS = 4;
 
@@ -46,48 +49,68 @@ function minimumTopUpMinutes({ minimumHours, weekStart, hireDate = null, lastDay
   return Math.max(0, target - hundredths(unpaidMinutes) - hundredths(paidMinutes)) / 100;
 }
 
-// The last day of the week [start, end] with recorded work or time off, per technician among `ids`: Map of id ->
-// 'YYYY-MM-DD' (absent = none).
-async function lastActiveDays(conn, ids, start, end) {
-  const byTech = new Map();
+// Per technician among `ids`: the last day of the week [start, end] with recorded work or time off ('YYYY-MM-DD' or
+// null), and whether anything is recorded after the week. Map of id -> { lastDay, after }.
+async function recordedDays(conn, ids, start, end) {
+  const byTech = new Map(ids.map((id) => [id, { lastDay: null, after: false }]));
   if (!ids.length) return byTech;
   const keep = (rows) => {
-    for (const row of rows) if (row.day && (!byTech.has(row.technician_id) || row.day > byTech.get(row.technician_id))) byTech.set(row.technician_id, row.day);
+    for (const row of rows) {
+      const seen = byTech.get(row.technician_id);
+      if (!seen) continue;
+      if (row.in_week && (!seen.lastDay || row.in_week > seen.lastDay)) seen.lastDay = row.in_week;
+      if (row.after) seen.after = true;
+    }
   };
+  const summarize = (dateSql) => [
+    conn.raw(`to_char(MAX(${dateSql}) FILTER (WHERE ${dateSql} <= ?::date), 'YYYY-MM-DD') AS in_week`, [end]),
+    conn.raw(`BOOL_OR(${dateSql} > ?::date) AS after`, [end]),
+  ];
   keep(await conn('time_entries')
     .whereIn('technician_id', ids)
-    .whereRaw(`${STAFF_WORK_DATE_SQL} BETWEEN ?::date AND ?::date`, [start, end])
+    .whereRaw(`${STAFF_WORK_DATE_SQL} >= ?::date`, [start])
     .where('status', '!=', 'voided')
     .groupBy('technician_id')
-    .select('technician_id', conn.raw(`to_char(MAX(${STAFF_WORK_DATE_SQL}), 'YYYY-MM-DD') AS day`)));
+    .select('technician_id', ...summarize(STAFF_WORK_DATE_SQL)));
+  keep(await conn('time_entry_daily_summary')
+    .whereIn('technician_id', ids)
+    .where('work_date', '>=', start)
+    .whereRaw(STAFF_DAILY_WORK_SQL)
+    .groupBy('technician_id')
+    .select('technician_id', ...summarize('work_date')));
   keep(await conn('payroll_time_off')
     .whereIn('technician_id', ids)
-    .whereBetween('work_date', [start, end])
+    .where('work_date', '>=', start)
     .groupBy('technician_id')
-    .select('technician_id', conn.raw("to_char(MAX(work_date), 'YYYY-MM-DD') AS day")));
+    .select('technician_id', ...summarize('work_date')));
   return byTech;
 }
+
+const NO_LAST_DAY = 'This is the last week of an employee with a minimum paid week, and no day of it has a time entry, a '
+  + 'daily summary or time off on file, so the days the minimum covers cannot be counted. Add the shifts, or clear '
+  + 'the minimum for this employee (Payroll settings).';
 
 /**
  * Sets `minimum_week_minutes` on each row (a pay run row: regular_minutes, overtime_minutes, pto_minutes,
  * holiday_minutes and, for a technician with a bank, pto_bank) of a technician whose minimum is set, 0 when the week
  * already reaches it, when the week has recorded work or time off. Rows of every other technician come back unchanged.
+ * Returns { rows, holds }: holds = Map of technician id -> reason (a last week with no dated day).
  */
 async function applyMinimum(conn, rows, { start, end }) {
+  const holds = new Map();
   const ids = [...new Set(rows.map((row) => row.technician_id))];
-  if (!ids.length) return rows;
+  if (!ids.length) return { rows, holds };
   const techs = new Map((await conn('technicians')
     .whereIn('id', ids)
     .where({ employment_type: 'w2' })
     .whereNotNull('paid_week_minimum_hours')
-    .select('id', 'paid_week_minimum_hours',
+    .select('id', 'paid_week_minimum_hours', 'employment_status',
       conn.raw("to_char(hire_date, 'YYYY-MM-DD') AS hire_date"),
       conn.raw("to_char(pto_payout_week_start, 'YYYY-MM-DD') AS payout_week")))
     .map((row) => [row.id, row]));
-  if (!techs.size) return rows;
-  const leaving = [...techs.values()].filter((tech) => tech.payout_week === start).map((tech) => tech.id);
-  const lastDays = await lastActiveDays(conn, leaving, start, end);
-  return rows.map((row) => {
+  if (!techs.size) return { rows, holds };
+  const days = await recordedDays(conn, [...techs.keys()], start, end);
+  const out = rows.map((row) => {
     const tech = techs.get(row.technician_id);
     if (!tech) return row;
     const bank = row.pto_bank || {};
@@ -97,16 +120,23 @@ async function applyMinimum(conn, rows, { start, end }) {
     // A check with no work and no time off in the week (a pay line alone, such as a bonus after leaving) is not a
     // week on the job: no minimum.
     if (paidMinutes + unpaidMinutes <= 0) return row;
+    const recorded = days.get(row.technician_id);
+    const lastWeek = tech.payout_week === start || (tech.employment_status === 'inactive' && !recorded.after);
+    if (lastWeek && !recorded.lastDay) {
+      holds.set(row.technician_id, NO_LAST_DAY);
+      return row;
+    }
     const minimum = minimumTopUpMinutes({
       minimumHours: tech.paid_week_minimum_hours,
       weekStart: start,
       hireDate: tech.hire_date,
-      ...(tech.payout_week === start ? { lastDay: lastDays.get(row.technician_id) || null } : {}),
+      ...(lastWeek ? { lastDay: recorded.lastDay } : {}),
       paidMinutes,
       unpaidMinutes,
     });
     return { ...row, minimum_week_minutes: minimum };
   });
+  return { rows: out, holds };
 }
 
-module.exports = { SCHEDULED_DAYS, minimumTopUpMinutes, lastActiveDays, applyMinimum };
+module.exports = { SCHEDULED_DAYS, NO_LAST_DAY, minimumTopUpMinutes, recordedDays, applyMinimum };
