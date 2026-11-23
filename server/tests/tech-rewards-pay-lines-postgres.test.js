@@ -813,6 +813,8 @@ postgres('tech rewards pay lines: the December gift', () => {
       const alpha = await readyTech('Sample Alpha', { pto_hours_per_year: '80.00' });
       const charlie = await readyTech('Sample Charlie', { pto_hours_per_year: '80.00' });
       const delta = await readyTech('Sample Delta', { pto_hours_per_year: '80.00' });
+      // Echo's yearly hours were cleared after the payout below was final: no bank now.
+      const echo = await readyTech('Sample Echo');
       const bravo = await readyTech('Sample Bravo');
       await approvedWeek(bravo, GIFT_WEEK);
       const run = await draft(GIFT_WEEK);
@@ -826,14 +828,15 @@ postgres('tech rewards pay lines: the December gift', () => {
         week_start: later, pay_date: addDays(later, 11), status: 'finalized',
         unpaid_time_off: JSON.stringify([{ technicianId: alpha, name: 'Sample Alpha', hours: '8.00', reason: 'Sample reason.' }]),
         // That run also paid out Delta's bank, which was empty: a kept decision with no check.
-        bank_payouts: JSON.stringify([{ technicianId: delta, name: 'Sample Delta', hours: '0.00' }]),
+        bank_payouts: JSON.stringify([{ technicianId: delta, name: 'Sample Delta', hours: '0.00' }, { technicianId: echo, name: 'Sample Echo', hours: '0.00' }]),
       });
       await paidWeek(charlie, '2027-01-04', { pto_earned_minutes: '92.40' });
       const again = await recompute(run.id);
-      expect([checkOf(again, alpha), checkOf(again, charlie), checkOf(again, delta)]).toEqual([undefined, undefined, undefined]);
-      expect([await linesOf(alpha), await linesOf(charlie), await linesOf(delta)]).toEqual([[], [], []]);
+      expect([checkOf(again, alpha), checkOf(again, charlie), checkOf(again, delta), checkOf(again, echo)]).toEqual([undefined, undefined, undefined, undefined]);
+      expect([await linesOf(alpha), await linesOf(charlie), await linesOf(delta), await linesOf(echo)]).toEqual([[], [], [], []]);
       const why = 'a later pay run that is already final used their time-off bank, so this pay run cannot hold a paycheck for them';
-      expect((await notesOf(run.id)).sort()).toEqual([waits('Sample Alpha', why), waits('Sample Charlie', why), waits('Sample Delta', why)]);
+      expect((await notesOf(run.id)).sort())
+        .toEqual([waits('Sample Alpha', why), waits('Sample Charlie', why), waits('Sample Delta', why), waits('Sample Echo', why)]);
       expect((await finalize(run.id)).checks.map((c) => c.technicianId)).toEqual([bravo]);
     });
 

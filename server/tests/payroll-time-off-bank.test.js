@@ -3,6 +3,7 @@
 // payroll-time-off-bank-postgres.test.js.
 const {
   CAP_HOURS, USE_AFTER_DAYS, EARLY_ILLNESS_HOURS, fullWeekHundredths, usableFromOf, settleWeek, unpaidReason, toUnits, hoursText,
+  catchUpEarns,
 } = require('../services/payroll-time-off-bank');
 
 // Hundredths of a minute in one hour.
@@ -188,7 +189,7 @@ describe('paying out the bank when the technician leaves', () => {
 
   // A catch-up check: the bank held `heldAtWeek` before the week (week order, up to the payout), and the payout
   // and the catch-up checks after it paid out `paidOut`.
-  const caught = (heldAtWeek = 0, paidOut = 0) => ({ heldAtWeek, paidOut });
+  const caught = (heldAtWeek = 0, paidOut = 0) => ({ start: heldAtWeek, before: [], after: [], paidOut });
 
   it('pays out only the hours the week earns on a catch-up check, and leaves the bank as it was', () => {
     // The technician has left and the bank was paid out: it holds nothing before the week and nothing after.
@@ -224,6 +225,39 @@ describe('paying out the bank when the technician leaves', () => {
   it('pays the whole bank out when the week is the payout week, catch-up or not', () => {
     expect(week({ bankBefore: hours(10), payOut: true })).toMatchObject({ payout: hours(10) + 9240, after: 0 });
     expect(week({ bankBefore: hours(10), payOut: true, catchUp: caught() })).toMatchObject({ payout: hours(10) + 9240, after: 0 });
+  });
+});
+
+describe('what a catch-up week earns', () => {
+  const onTime = (used, earned) => ({ used: hours(used), earned: hours(earned), caughtUp: false });
+  const late = (earned) => ({ used: 0, earned: hours(earned), caughtUp: true });
+  it('gives two late weeks the room under the cap once, in either order', () => {
+    // 115.35 hours in the bank, two late weeks of 7.69: on time the first earns 4.65 and the second 0.
+    expect(catchUpEarns({ start: hours(115.35), before: [], after: [] }, hours(7.69))).toBe(hours(4.65));
+    expect(catchUpEarns({ start: hours(115.35), before: [late(4.65)], after: [] }, hours(7.69))).toBe(0);
+    // Paid in reverse order: the later week took the room, so the earlier one earns nothing more.
+    expect(catchUpEarns({ start: hours(115.35), before: [], after: [late(4.65)] }, hours(7.69))).toBe(0);
+  });
+
+  it('gives back the room that time off between two late weeks used', () => {
+    // 119 hours, late week A (1.54), then a week paid on time with 40 hours off, then late week B (1.54).
+    expect(catchUpEarns({ start: hours(119), before: [onTime(40, 0)], after: [] }, hours(1.54))).toBe(hours(1.54));
+    // B was paid first with 1.54 hours: A still has its 1 hour of room.
+    expect(catchUpEarns({ start: hours(119), before: [], after: [onTime(40, 0), late(1.54)] }, hours(1.54))).toBe(hours(1));
+    // And A paid first: B has its 1.54.
+    expect(catchUpEarns({ start: hours(119), before: [late(1), onTime(40, 0)], after: [] }, hours(1.54))).toBe(hours(1.54));
+  });
+
+  it('lets a week paid on time keep no more than it earned, and less when the late week filled the bank', () => {
+    // A late week that fills the bank leaves the next week, paid on time, less room: the late week still earns its hours.
+    expect(catchUpEarns({ start: hours(118), before: [], after: [onTime(0, 2)] }, hours(2))).toBe(hours(2));
+    // A week on time that earned 1 hour never earns more in the replay.
+    expect(catchUpEarns({ start: hours(100), before: [onTime(0, 1)], after: [] }, hours(30))).toBe(hours(19));
+  });
+
+  it('counts what the late weeks already paid took, also when the replay gives them less', () => {
+    // A later late week was paid 4 hours, but with this week's 4 in the bank first it earns 0: together 4, already 4.
+    expect(catchUpEarns({ start: hours(116), before: [], after: [late(4)] }, hours(4))).toBe(0);
   });
 });
 

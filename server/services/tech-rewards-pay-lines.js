@@ -408,7 +408,8 @@ async function spanWaitOf(trx, run, technicianId, span, amountCents) {
   const banks = timeOffOn() ? await timeOffBank.bankTechnicians(trx, [technicianId]) : new Map();
   const banked = [...banks.keys()];
   if (await timeOffBank.laterBankCheckExists(trx, run, banked) || await timeOffBank.laterUnpaidDecisionExists(trx, run, banked)
-    || await timeOffBank.laterPayoutDecisionExists(trx, run, banked)) {
+    // Asked also with no yearly hours now: finalizeRun asks it of every check (the hours can be cleared after a payout).
+    || await timeOffBank.laterPayoutDecisionExists(trx, run, [technicianId])) {
     return { reason: 'later_bank_use_final', week: null };
   }
   const payoutWeek = (await timeOffBank.payoutsNotFinal(trx, banks, run.week_start)).get(technicianId);

@@ -91,11 +91,10 @@ const usableFromOf = (hireDate) => (hireDate ? addStaffWorkDays(hireDate, USE_AF
  *   entries          this week's paid-time-off days: [{ workDate, units, illness }]
  *   regular, holiday the week's worked regular minutes and holiday minutes
  *   payOut           true on the pay run that pays out the bank (the technician leaves)
- *   catchUp          null, or { heldAtWeek, paidOut } for a week before a pay week whose final run already paid the
+ *   catchUp          null, or { start, before, after, paidOut } for a week before a pay week whose final run already paid the
  *                    bank out, paid after that run (applyBank, paidOutInLaterWeek): the check pays out the hours this
- *                    week earns, never more than the 120-hour cap left room for. `heldAtWeek` = the bank before this
- *                    week in week order, up to the payout, with what the other catch-up checks of that payout earned;
- *                    `paidOut` = what the payout and the catch-up checks after
+ *                    week earns, never more than the 120-hour cap left room for. `start`, `before`, `after` = the
+ *                    weeks of this time on the job up to the payout (catchUpEarns); `paidOut` = what the payout and the catch-up checks after
  *                    it paid out. The bank was empty after the payout, so no time off of this week is paid from it.
  * Returns { paid, earlyPaid, unpaid, unpaidBeforeHire, unpaidByRule, earned, payout, after, paidDays }. `earlyPaid`
  * is the part of `paid` that was early illness. Of `unpaid`: `unpaidBeforeHire` is time off before the hire
@@ -105,6 +104,34 @@ const usableFromOf = (hireDate) => (hireDate ? addStaffWorkDays(hireDate, USE_AF
  * `payout` is what the bank holds after the week, paid out when `payOut` is set, or the hours the week earned
  * when `catchUp` is set; it is not in `paid`.
  */
+// What a catch-up week earns: the weeks of this time on the job up to the payout are run again in week order, with
+// this week and the other catch-up weeks in their places, each under the 120-hour cap as the bank stood then. The
+// catch-up weeks earn that much together; this week gets what the ones already paid did not take. So the answer
+// is the same in any order the late weeks are paid, and time off taken between two of them gives the cap room back.
+// A week paid on time keeps no more than it earned: with more hours in the bank before it, it can earn less.
+// `catchUp`: { start, before, after } (paidOutInLaterWeek); `raw` = what this week earns under no cap.
+function catchUpEarns({ start = 0, before = [], after = [] }, raw) {
+  let bank = start;
+  let together = 0;
+  let paidAlready = 0;
+  const step = (used, earns) => {
+    const held = bank - used;
+    const earned = Math.max(0, Math.min(earns, CAP - held));
+    bank = held + earned;
+    return earned;
+  };
+  const replay = (week) => {
+    const earned = step(week.used, week.earned);
+    if (!week.caughtUp) return;
+    together += earned;
+    paidAlready += week.earned;
+  };
+  before.forEach(replay);
+  together += step(0, raw);
+  after.forEach(replay);
+  return Math.max(0, together - paidAlready);
+}
+
 function settleWeek({ hoursPerYear, bankBefore, earlyPaidBefore, hireDate, usableFrom, entries, regular, holiday, payOut = false, catchUp = null }) {
   // A catch-up week comes before the payout: the hours a later stay put in the bank are not this week's to use.
   let available = catchUp ? 0 : Math.max(0, bankBefore);
@@ -143,7 +170,7 @@ function settleWeek({ hoursPerYear, bankBefore, earlyPaidBefore, hireDate, usabl
   // under the cap on everything paid out on leaving: a bank that was full then, or that the payout paid out
   // full, earns nothing more. Hours the bank gained since (the technician came back) stay in it.
   const earned = catchUp
-    ? Math.max(0, Math.min(earnedHundredthsOfHour * 60, CAP - catchUp.heldAtWeek, CAP - catchUp.paidOut))
+    ? Math.max(0, Math.min(catchUpEarns(catchUp, earnedHundredthsOfHour * 60), CAP - catchUp.paidOut))
     : Math.min(earnedHundredthsOfHour * 60, Math.max(0, CAP - held));
   // The payout takes the hours this week earned too, and earns nothing itself: it is not in `straight`.
   // A catch-up check pays out only what the week earned: the payout that came before it settled the rest. A bank
@@ -442,7 +469,7 @@ async function laterWeekBankCheckExists(conn, run, technicianIds) {
 }
 
 // The technicians among `ids` whose bank a finalized run for a LATER pay week paid out, on a pay date before
-// `payDate`: Map of id -> { hoursPerYear, heldAtWeek, paidOut } (settleWeek catchUp). A check of theirs for this
+// `payDate`: Map of id -> { hoursPerYear, start, before, after, paidOut } (settleWeek catchUp). A check of theirs for this
 // earlier week comes after that payout in the bank's order, so it is a catch-up check. A payout on the same or a
 // later pay date comes after this run in the bank's order: finalizeRun refuses this run under it
 // (laterPayoutDecisionExists), and nothing is caught up. The payout read is the first one after this week. It
@@ -466,7 +493,7 @@ async function paidOutInLaterWeek(conn, ids, { weekStart, payDate }) {
   for (const row of rows) {
     // The payout before this one, for a technician who left and came back: its catch-up checks settled the first
     // time on the job. Only weeks after its week are caught up under this payout.
-    const before = await conn('payroll_runs as r')
+    const previous = await conn('payroll_runs as r')
       .where('r.status', 'finalized')
       .where('r.week_start', '<', row.week_start)
       .whereRaw("EXISTS (SELECT 1 FROM jsonb_array_elements(r.bank_payouts) AS kept WHERE (kept->>'technicianId')::uuid = ?)",
@@ -475,37 +502,43 @@ async function paidOutInLaterWeek(conn, ids, { weekStart, payDate }) {
       .first(conn.raw("to_char(r.week_start, 'YYYY-MM-DD') AS week_start"));
     const ofThisPayout = function catchUpsOfThisPayout() {
       this.where('week_start', '<', row.week_start).andWhere('pay_date', '>', row.pay_date);
-      if (before) this.andWhere('week_start', '>', before.week_start);
+      if (previous) this.andWhere('week_start', '>', previous.week_start);
     };
-    const held = await conn('payroll_checks')
+    // The bank at the start of this time on the job: every check up to the payout before. The catch-up checks of that
+    // payout paid out what they earned, so they change nothing in it.
+    const start = previous ? await conn('payroll_checks')
       .where({ technician_id: row.technician_id, status: 'finalized' })
       .whereNotNull('pto_earned_minutes')
-      .where('week_start', '<', weekStart)
-      .where(function beforePayout() {
-        this.where('pay_date', '<', row.pay_date).orWhere(function sameDay() {
-          this.where('pay_date', row.pay_date).andWhere('week_start', '<', row.week_start);
-        });
-      })
-      .first(conn.raw('COALESCE(SUM(pto_earned_minutes - pto_minutes), 0) AS bank'));
-    // The other catch-up checks of this payout used room under the cap: an earlier week's hours were in the bank in
-    // this week, and a later week's hours would have found this week's in it. So the room is taken off in either
-    // order, and two late weeks never use the same room. Their payout is not taken off: on time, those hours would
-    // have been paid out on leaving.
-    const caughtUpBefore = await conn('payroll_checks')
+      .where('week_start', '<=', previous.week_start)
+      .first(conn.raw('COALESCE(SUM(pto_earned_minutes - pto_minutes), 0) AS bank')) : { bank: 0 };
+    // Each week of this time on the job before the payout week, other than this one: what its checks paid from the
+    // bank and earned, and whether they are catch-up checks of this payout (paid after it).
+    const weeks = await conn('payroll_checks')
       .where({ technician_id: row.technician_id, status: 'finalized' })
       .whereNotNull('pto_earned_minutes')
+      .where('week_start', '<', row.week_start)
       .whereNot('week_start', weekStart)
-      .where(ofThisPayout)
-      .first(conn.raw('COALESCE(SUM(pto_earned_minutes), 0) AS earned'));
+      .modify((query) => { if (previous) query.where('week_start', '>', previous.week_start); })
+      .groupByRaw('1, 2')
+      .orderBy('week_start')
+      .select(
+        conn.raw("to_char(week_start, 'YYYY-MM-DD') AS week_start"),
+        conn.raw('pay_date > ? AS caught_up', [row.pay_date]),
+        conn.raw("SUM(pto_minutes - COALESCE((calc_snapshot->'ptoBank'->>'payoutMinutes')::numeric, 0)) AS used"),
+        conn.raw('SUM(pto_earned_minutes) AS earned'),
+      );
     const out = await conn('payroll_checks')
       .where({ technician_id: row.technician_id, status: 'finalized' })
       .where(function payoutAndCatchUps() {
         this.where('run_id', row.run_id).orWhere(ofThisPayout);
       })
       .first(conn.raw("COALESCE(SUM((calc_snapshot->'ptoBank'->>'payoutMinutes')::numeric), 0) AS paid_out"));
+    const asWeek = (week) => ({ used: toUnits(week.used), earned: toUnits(week.earned), caughtUp: Boolean(week.caught_up) });
     byTech.set(row.technician_id, {
       hoursPerYear: Number(row.hours_per_year),
-      heldAtWeek: toUnits(held.bank) + toUnits(caughtUpBefore.earned),
+      start: toUnits(start.bank),
+      before: weeks.filter((week) => week.week_start < weekStart).map(asWeek),
+      after: weeks.filter((week) => week.week_start > weekStart).map(asWeek),
       paidOut: Math.max(0, toUnits(out.paid_out)),
     });
   }
@@ -685,6 +718,7 @@ module.exports = {
   payoutsSetElsewhere,
   firstBankFactDays,
   paidOutInLaterWeek,
+  catchUpEarns,
   laterWeekBankUseExists,
   laterBankCheckExists,
   laterWeekBankCheckExists,

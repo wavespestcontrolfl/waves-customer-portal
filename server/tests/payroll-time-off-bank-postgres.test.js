@@ -1253,7 +1253,7 @@ postgres('payroll time-off bank', () => {
       // A catch-up check for a still earlier week reads what the payout (1.54) and this catch-up check (1.23) paid out,
       // and the room under the cap the 1.23 hours of this catch-up check used.
       expect((await bank.paidOutInLaterWeek(trx, [id], { weekStart: addDays(W1, -7), payDate: '2026-10-23' })).get(id))
-        .toEqual({ hoursPerYear: 80, heldAtWeek: 73.8 * 100, paidOut: (92.4 + 73.8) * 100 });
+        .toEqual({ hoursPerYear: 80, start: 0, before: [], after: [{ used: 0, earned: 73.8 * 100, caughtUp: true }], paidOut: (92.4 + 73.8) * 100 });
     });
 
     it('earns nothing more on a catch-up check when the bank was full in that week and the payout paid it out full', async () => {
@@ -1269,12 +1269,15 @@ postgres('payroll time-off bank', () => {
       const late = (await draft(W1, { payDate: '2026-10-16' })).body.run;
       expect(byName(late, 'Sample Alpha').timeOffBank).toMatchObject({ earnedHours: '0.00', balanceHours: '0.00' });
       expect((await finalize(late.id)).status).toBe(200);
-      // The bank answer for the catch-up: full in that week, 120 hours paid out on leaving.
-      expect((await bank.paidOutInLaterWeek(trx, [id], { weekStart: W1, payDate: '2026-10-16' })).get(id))
-        .toEqual({ hoursPerYear: 400, heldAtWeek: 120 * 6000, paidOut: 120 * 6000 });
-      // For a week in the middle, only the 8 weeks before it count: 8 x 7.69 hours.
-      expect((await bank.paidOutInLaterWeek(trx, [id], { weekStart: addDays(W1, -56), payDate: '2026-10-16' })).get(id))
-        .toEqual({ hoursPerYear: 400, heldAtWeek: 8 * 769 * 60, paidOut: 120 * 6000 });
+      // The bank answer for the catch-up: full in that week (the 16 weeks before it), 120 hours paid out on leaving.
+      const atWeek1 = (await bank.paidOutInLaterWeek(trx, [id], { weekStart: W1, payDate: '2026-10-16' })).get(id);
+      expect([atWeek1.hoursPerYear, atWeek1.start, atWeek1.before.length, atWeek1.after, atWeek1.paidOut]).toEqual([400, 0, 16, [], 120 * 6000]);
+      expect(bank.catchUpEarns(atWeek1, 769 * 60)).toBe(0);
+      // For a week in the middle, the 8 weeks before it leave room for its 7.69 hours; the cap on what was paid out
+      // on leaving (120 hours) still holds it at 0 on the check.
+      const atWeek8 = (await bank.paidOutInLaterWeek(trx, [id], { weekStart: addDays(W1, -56), payDate: '2026-10-16' })).get(id);
+      expect([atWeek8.before.length, atWeek8.after.length, atWeek8.paidOut]).toEqual([8, 8, 120 * 6000]);
+      expect(bank.catchUpEarns(atWeek8, 769 * 60)).toBe(769 * 60);
     });
 
     it('gives two late weeks the room under the cap once: the second catch-up counts what the first one earned', async () => {
@@ -1316,6 +1319,24 @@ postgres('payroll time-off bank', () => {
       expect((await finalize(early.id)).status).toBe(200);
     });
 
+    it('gives back the cap room that time off between two late weeks used, in either order', async () => {
+      const id = await tech('Sample Alpha', { hours: '400' });
+      // 14 full weeks: 107.66 hours. Then late week A, a week of 40 hours off paid on time, late week B, the payout.
+      for (let n = 16; n >= 3; n -= 1) await fullWeek(id, addDays(W1, -7 * n));
+      const A = addDays(W1, -14);
+      for (let day = 0; day < 5; day += 1) await offDay(id, addDays(W1, -7 + day), 8);
+      expect(byName(await draftAndFinalize(addDays(W1, -7)), 'Sample Alpha').timeOffBank).toMatchObject({ usedHours: '40.00', balanceHours: '75.35' });
+      expect((await payOut(id, W2)).status).toBe(200);
+      expect(byName(await fullWeek(id, W2), 'Sample Alpha').timeOffBank).toMatchObject({ paidOutHours: '83.04' });
+      // On time, A would have made 115.35 hours, the time off 83.04, B 90.73: each late week earns its 7.69.
+      await worked(id, A);
+      await worked(id, W1);
+      const b = await finalize((await draft(W1, { payDate: '2026-10-16' })).body.run.id);
+      expect(byName(b.body.run, 'Sample Alpha').timeOffBank).toMatchObject({ earnedHours: '7.69', paidOutHours: '7.69' });
+      const a = await finalize((await draft(A, { payDate: '2026-10-23' })).body.run.id);
+      expect(byName(a.body.run, 'Sample Alpha').timeOffBank).toMatchObject({ earnedHours: '7.69', paidOutHours: '7.69' });
+    });
+
     it('counts only the catch-up checks of the same payout: a late week of the first time on the job does not cut the second', async () => {
       const id = await tech('Sample Alpha', { hours: '80' });
       // The first time on the job ends with the payout of week 2 (1.54 hours).
@@ -1332,7 +1353,7 @@ postgres('payroll time-off bank', () => {
       expect(byName(first.body.run, 'Sample Alpha').timeOffBank).toMatchObject({ earnedHours: '1.54', paidOutHours: '1.54' });
       // Week 3 is caught up under the payout of week 4 alone: the bank before it was empty, and that payout paid 1.54.
       expect((await bank.paidOutInLaterWeek(trx, [id], { weekStart: W3, payDate: addDays(LATE, 7) })).get(id))
-        .toEqual({ hoursPerYear: 80, heldAtWeek: 0, paidOut: 92.4 * 100 });
+        .toEqual({ hoursPerYear: 80, start: 0, before: [], after: [], paidOut: 92.4 * 100 });
     });
 
     it('does not finalize a plain check of an earlier week under an empty payout after the yearly hours were cleared', async () => {
