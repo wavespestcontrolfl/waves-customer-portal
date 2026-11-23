@@ -68,6 +68,10 @@ describe('GET /api/public/home/:token', () => {
     getHomePage.mockResolvedValue(null);
     const unknown = await get(`/api/public/home/${TOKEN}`);
     expect(unknown.status).toBe(off.status);
+    // The same headers too: the router limiter's headers are dropped from a 404.
+    const names = (res) => [...res.headers.keys()].filter((n) => !['date', 'content-length', 'etag', 'connection', 'keep-alive'].includes(n)).sort();
+    expect(names(unknown)).toEqual(names(off));
+    expect(names(unknown).some((n) => /ratelimit/i.test(n))).toBe(false);
     expect(await unknown.json()).toEqual({ error: 'Not found' });
     expectPrivate(unknown);
   });

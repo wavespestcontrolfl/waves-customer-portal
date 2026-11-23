@@ -22,7 +22,13 @@ function privacyHeaders(res) {
   res.set({ 'Cache-Control': 'private, no-store', 'X-Robots-Tag': 'noindex, nofollow' });
 }
 
-const notFound = (res) => res.status(404).json({ error: 'Not found' });
+// Every 404 is the same answer: the rate-limit headers the limiters set on a live request (the global one and this
+// router's) are dropped, so a gate-off 404 (answered before any limiter) and an unknown-token 404 cannot be told apart.
+const RATE_LIMIT_HEADER = /^(x-)?ratelimit/i;
+const notFound = (res) => {
+  for (const name of res.getHeaderNames()) if (RATE_LIMIT_HEADER.test(name)) res.removeHeader(name);
+  return res.status(404).json({ error: 'Not found' });
+};
 // The raw path, before Express decodes it: one lowercase 32-hex token, with or without a trailing slash. A bad percent
 // escape, another path or another case never reaches the route (it would throw in Express's decode and answer 500).
 const TOKEN_PATH = /^\/[0-9a-f]{32}\/?$/;

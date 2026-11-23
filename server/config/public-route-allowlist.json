@@ -54,7 +54,7 @@
         "USE /api/public/secure-card (inline function#8abc12e6)",
         "USE /api/public/track (trackPublicPreparser#a6e0dc6f)",
         "USE /api/public/email-resubscribe (preParserGuard#ea6eeb70)",
-        "USE /api/public/home (preLimiterGuard#1c59b98b)",
+        "USE /api/public/home (preLimiterGuard#c523750c)",
         "USE /api/social/series (inline function#033624d5)",
         "USE /api/stripe/terminal/save-card-handoff (inline function#371094d5)"
       ]
