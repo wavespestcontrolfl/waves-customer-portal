@@ -39,7 +39,7 @@ describe('the completion\'s report note', () => {
   test('a sent note on a visit that could not be checked refuses a fresh attempt, before any write', () => {
     expect(pick).toContain('const reportNoteUnverified = reportNoteVisit === null || (reportNoteVisit?.ok === true && !reportNoteVisit.profile)');
     expect(pick).toContain("savepointScope(db, (k) => require('./area-addon-visit-rows').visitHasAreaAddOnRows(k, svc.id))");
-    expect(pick).toContain('.then(() => false, () => true);');
+    expect(pick).toContain('.then((hasRows) => hasRows !== true, () => true);');
     const reject = block.indexOf("if (claim.action === 'proceed' && reportNoteUnverified) {");
     expect(reject).toBeGreaterThan(0);
     expect(reject).toBeLessThan(block.indexOf("trx('service_records').insert(recordInsert)"));
@@ -65,10 +65,11 @@ describe('the completion\'s report note', () => {
     const drop = block.indexOf('if (structuredNotes.reportNote && (!primaryFreezeTrusted');
     expect(drop).toBeGreaterThan(resolve);
     expect(drop).toBeLessThan(block.indexOf('structured_notes: serializeJsonb(structuredNotes),'));
-    const dropBlock = block.slice(drop, drop + 1200);
+    const dropBlock = block.slice(drop, drop + 1500);
     expect(dropBlock).toContain("String(lockedSvcRow.service_id ?? '') !== String(svc.service_id ?? '')");
     expect(dropBlock).toContain("String(lockedSvcRow.customer_id ?? '') !== String(svc.customer_id ?? '')");
     expect(dropBlock).toContain("savepointScope(trx, (k) => require('./pest-recap').resolveEligibility(svc.id, k, { strict: true }))");
+    expect(dropBlock).toContain("String(locked.profile?.serviceKey ?? '') !== String(reportNoteVisit?.profile?.serviceKey ?? '')");
     expect(dropBlock).toContain("code: 'visit_identity_changed'");
   });
 });

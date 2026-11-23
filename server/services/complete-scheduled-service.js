@@ -4855,8 +4855,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // resolveEligibility answers a failed profile lookup as profile null, and a failed add-on lookup as "has add-on
     // rows": both are a check that could not run, so the add-on read is made again here and a failure counts.
     const reportNoteAddOnsUnread = reportNoteVisit?.ok === true && reportNoteVisit.svc?.hasAreaAddOnRows === true
+      // Rows found again = a confirmed add-on visit (no note); none, or a read that fails = the first verdict was a
+      // failed read, so the completion is refused as retryable.
       && await savepointScope(db, (k) => require('./area-addon-visit-rows').visitHasAreaAddOnRows(k, svc.id))
-        .then(() => false, () => true);
+        .then((hasRows) => hasRows !== true, () => true);
     const reportNoteUnverified = reportNoteVisit === null || (reportNoteVisit?.ok === true && !reportNoteVisit.profile)
       || reportNoteAddOnsUnread;
     // A sent note in no shape the sheet sends is a bad request (400 below), never a completion without the marker.
@@ -7947,9 +7949,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
             || (lockedSvcRow && (String(lockedSvcRow.service_type ?? '') !== String(svc.service_type ?? '')
               || String(lockedSvcRow.service_id ?? '') !== String(svc.service_id ?? '')
               || String(lockedSvcRow.customer_id ?? '') !== String(svc.customer_id ?? '')))
-            // The preview route's own visit check again, on the locked visit (strict profile, add-on rows).
-            || (await savepointScope(trx, (k) => require('./pest-recap').resolveEligibility(svc.id, k, { strict: true }))
-              .catch(() => null))?.eligible !== true)) {
+            // The preview route's own visit check again, on the locked visit (strict profile, add-on rows), and the
+            // same resolved service as the note was screened on (a null service_id resolves through the key snapshot).
+            || await savepointScope(trx, (k) => require('./pest-recap').resolveEligibility(svc.id, k, { strict: true }))
+              .then((locked) => locked?.eligible !== true
+                || String(locked.profile?.serviceKey ?? '') !== String(reportNoteVisit?.profile?.serviceKey ?? ''), () => true))) {
             throw Object.assign(new Error('visit changed since the report note was screened'), { code: 'visit_identity_changed' });
           }
           // The inspection-credit marker keys to the LOCKED identity too
