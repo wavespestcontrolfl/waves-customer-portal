@@ -1237,8 +1237,6 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
 
     test.each([
       ['archived by the next mint', { archived_at: new Date('2030-03-13T03:31:00Z') }],
-      ['declined', { status: 'declined' }],
-      ['accepted', { status: 'accepted' }],
       ['expired', { expires_at: new Date(NOW.getTime() - 1000) }],
       ['another customer\'s', { customer_id: 'cust-2' }],
       ['carrying another job\'s stamp', { estimate_data: stamp('job-9') }],
@@ -1248,6 +1246,11 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       expect(await boundaryGuard(trx)).toEqual(GONE);
     });
 
+    test.each([['declined'], ['accepted']])('%s by the customer: final, never retried on a later morning', async (status) => {
+      const { boundaryGuard, trx } = await handoffOf({ status });
+      expect(await boundaryGuard(trx)).toEqual({ reason: 'OFFER_ESTIMATE_GONE', retryable: false });
+    });
+
     test('a row that no longer exists: the same answer', async () => {
       const deps = liveWorld();
       await run(deps);
@@ -1255,7 +1258,7 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
     });
 
     test('the estimate is judged before the opt-outs, so a customer who opted out meanwhile is still read after the wait', async () => {
-      const { boundaryGuard, trx } = await handoffOf({ status: 'declined' });
+      const { boundaryGuard, trx } = await handoffOf({ archived_at: new Date(NOW) });
       expect(await boundaryGuard(trx)).toEqual(GONE);
       expect(trx.queriesOf('notification_prefs')).toHaveLength(0);
     });

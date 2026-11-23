@@ -787,7 +787,8 @@ async function offeredBeforeGuard(trx, { customerId, jobId, now }) {
 // that lock first (a mint in flight finishes before the read; a new one waits for this transaction's end) and
 // reads the row with a share lock (staff archiving it waits too). "Can open" is the public estimate page's
 // rule, as in openEstimateBesidesOffer. Retryable: the ledger settles the reservation `failed`, so the next
-// morning's run mints again under the same key.
+// morning's run mints again under the same key. Except when the customer ended the offer themselves (declined
+// or accepted it): that is final, the ledger settles the key `skipped`, and no later morning sends it again.
 const OFFER_ESTIMATE_GONE = 'OFFER_ESTIMATE_GONE';
 async function offerEstimateGuard(trx, { customer, jobId, estimateId, now, deps }) {
   await lockCustomerComms(trx, customer.id);
@@ -797,7 +798,7 @@ async function offerEstimateGuard(trx, { customer, jobId, estimateId, now, deps 
     && deps.liveEstimateStatuses.includes(estimate.status)
     && (!estimate.expires_at || new Date(estimate.expires_at) > now)
     && planOfferOf(estimate.estimate_data)?.jobId === String(jobId);
-  return open ? null : { reason: OFFER_ESTIMATE_GONE, retryable: true };
+  return open ? null : { reason: OFFER_ESTIMATE_GONE, retryable: !['declined', 'accepted'].includes(estimate?.status) };
 }
 
 // The opt-outs of Waves marketing again (notOptedOut), on the ledger's own transaction. The division's checks
