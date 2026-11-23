@@ -7,7 +7,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 
 vi.mock('../glass/glass-engine', () => ({ useGlassSurface: () => {} }));
 
-import MailHomePage from './MailHomePage';
+import MailHomePage, { addressCase } from './MailHomePage';
 
 const TOKEN = '0123456789abcdef0123456789abcdef';
 const ADDRESS = { line1: '101 EXAMPLE TRL', city: 'SAMPLETON', zip: '34212' };
@@ -38,8 +38,8 @@ it('shows the big monthly price, the street, the plan line and the setup fee', a
   expect(await screen.findByTestId('monthly-price')).toHaveTextContent('$37 a month');
   expect(fetchMock).toHaveBeenCalledWith(`/api/public/home/${TOKEN}`);
   expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Welcome to your new home');
-  expect(screen.getByTestId('address')).toHaveTextContent('101 EXAMPLE TRLSAMPLETON');
-  expect(screen.getByText('Quarterly pest control for 101 EXAMPLE TRL')).toBeInTheDocument();
+  expect(screen.getByTestId('address')).toHaveTextContent('101 Example TrlSampleton');
+  expect(screen.getByText('Quarterly pest control for 101 Example Trl')).toBeInTheDocument();
   expect(screen.getByText('One-time setup: $99')).toBeInTheDocument();
   // Plan lines are the estimate's own quarterly pest lines.
   expect(screen.getByText(/Protected 4× a year/)).toBeInTheDocument();
@@ -66,7 +66,7 @@ it('asks the visitor to call when there is no price', async () => {
   expect(await screen.findByText('Call us for your price')).toBeInTheDocument();
   expect(screen.queryByTestId('monthly-price')).not.toBeInTheDocument();
   expect(document.body.textContent).not.toMatch(/\$/);
-  expect(screen.getByText('Quarterly pest control for 101 EXAMPLE TRL')).toBeInTheDocument();
+  expect(screen.getByText('Quarterly pest control for 101 Example Trl')).toBeInTheDocument();
 });
 
 it('links the call button to the main line', async () => {
@@ -86,4 +86,11 @@ it.each([
   expect(screen.getByRole('link', { name: 'Call (941) 297-5749' })).toHaveAttribute('href', 'tel:+19412975749');
   expect(screen.queryByTestId('monthly-price')).not.toBeInTheDocument();
   expect(document.body.textContent).not.toContain(TOKEN);
+});
+
+it('addressCase reads county capitals in normal case, keeps compass words, lowers ordinals', () => {
+  expect(addressCase('101 EXAMPLE TRL')).toBe('101 Example Trl');
+  expect(addressCase('  2200 NW 1ST  AVE ')).toBe('2200 NW 1st Ave');
+  expect(addressCase('LAKEWOOD RANCH')).toBe('Lakewood Ranch');
+  expect(addressCase(null)).toBe('');
 });

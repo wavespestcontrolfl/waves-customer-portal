@@ -67,6 +67,19 @@ function Unavailable() {
   );
 }
 
+// County records are in capitals ("101 EXAMPLE TRL"). Each word reads in normal case ("101 Example Trl"), except
+// compass words (N, SW), which stay in capitals, and ordinals (1ST), which read as 1st.
+const KEEP_UPPER = new Set(['N', 'S', 'E', 'W', 'NE', 'NW', 'SE', 'SW']);
+export function addressCase(text) {
+  if (typeof text !== 'string' || !text.trim()) return '';
+  return text.trim().split(/\s+/).map((word) => {
+    const upper = word.toUpperCase();
+    if (KEEP_UPPER.has(upper)) return upper;
+    if (/^\d/.test(word)) return word.toLowerCase();
+    return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+  }).join(' ');
+}
+
 export default function MailHomePage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
@@ -97,8 +110,8 @@ export default function MailHomePage() {
   }
   if (status === 'unavailable') return <Unavailable />;
 
-  const line1 = data.address.line1 || null;
-  const city = data.address.city || null;
+  const line1 = addressCase(data.address.line1) || null;
+  const city = addressCase(data.address.city) || null;
   const price = data.price;
   const setupFee = price && Number(price.setupFee) > 0 ? Number(price.setupFee) : null;
 
