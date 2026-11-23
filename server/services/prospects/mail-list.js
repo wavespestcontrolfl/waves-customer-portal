@@ -37,7 +37,8 @@ function toPrice(row) {
     reason: row.price_reason || null,
     annual,
     // The plan is billed monthly: the card and the home's page show the monthly price.
-    monthly: annual == null ? null : Math.round((annual / 12) * 100) / 100,
+    // From whole cents: a float division can sit just under a half cent (1250.10 / 12 * 100 = 10417.4999...).
+    monthly: annual == null ? null : Math.round(Math.round(annual * 100) / 12) / 100,
     setupFee: num(row.price_setup_fee),
     homeSqft: num(row.home_sqft),
     sizeSource: row.home_sqft_source || null,
@@ -126,4 +127,4 @@ async function listMailProspects({ view = VIEWS[0] } = {}) {
   };
 }
 
-module.exports = { VIEWS, listMailProspects };
+module.exports = { VIEWS, listMailProspects, toPrice };
