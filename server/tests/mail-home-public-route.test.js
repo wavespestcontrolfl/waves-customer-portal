@@ -27,7 +27,12 @@ let base;
 
 beforeAll((done) => {
   const app = express();
-  app.use('/api/public/home', require('../routes/mail-home-public'));
+  const route = require('../routes/mail-home-public');
+  // As in server/index.js: the guard first, then a stand-in for the global /api limiter that always refuses the path
+  // /limited-<token>, then the router.
+  app.use('/api/public/home', route.preLimiterGuard);
+  app.use('/api/public/home', (req, res, next) => (req.query.globalLimit === '1' ? res.status(429).json({ error: 'limited' }) : next()));
+  app.use('/api/public/home', route);
   app.use((err, req, res, next) => {
     res.status(500).json({ error: 'Server error' });
   });
@@ -67,7 +72,7 @@ describe('GET /api/public/home/:token', () => {
     expectPrivate(unknown);
   });
 
-  test('a malformed token is a 404 (the service decides; it answers null)', async () => {
+  test('a malformed token is a 404 before any lookup', async () => {
     getHomePage.mockResolvedValue(null);
     for (const bad of ['short', 'ABCDEF0123456789ABCDEF0123456789', `${TOKEN}0`, 'g'.repeat(32)]) {
       const res = await get(`/api/public/home/${bad}`);
@@ -115,11 +120,47 @@ describe('GET /api/public/home/:token', () => {
     expect(getHomePage).toHaveBeenCalledWith(TOKEN, { recordView: false });
   });
 
-  test('a service error is the app error handler, not a leak', async () => {
-    getHomePage.mockRejectedValue(new Error('select * from mail_prospects where page_token = secret'));
+  test('a service error answers 500 itself and logs only the error code, never the message with the token', async () => {
+    const logger = require('../services/logger');
+    logger.error.mockClear();
+    getHomePage.mockRejectedValue(Object.assign(new Error(`select * from mail_prospects where page_token = '${TOKEN}'`), { code: '57P01' }));
     const res = await get(`/api/public/home/${TOKEN}`);
     expect(res.status).toBe(500);
-    expect(JSON.stringify(await res.json())).not.toContain('mail_prospects');
+    expectPrivate(res);
+    const body = JSON.stringify(await res.json());
+    expect(body).not.toContain('mail_prospects');
+    expect(body).not.toContain(TOKEN);
+    expect(logger.error).toHaveBeenCalledWith('[mail-home-public] page read failed (code=57P01)');
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain(TOKEN);
+  });
+
+  test('gate off: the guard answers 404 before the global limiter could answer 429', async () => {
+    mailHomePageLive.mockReturnValue(false);
+    const res = await get(`/api/public/home/${TOKEN}?globalLimit=1`);
+    expect(res.status).toBe(404);
+    expectPrivate(res);
+    mailHomePageLive.mockReturnValue(true);
+    const live = await get(`/api/public/home/${TOKEN}?globalLimit=1`);
+    expect(live.status).toBe(429);
+    expectPrivate(live);
+  });
+
+  test('a bad percent escape, another path or another method is the same 404, never a 500', async () => {
+    for (const path of ['/%E0%A4%A', `/${TOKEN}/extra`, '/', '']) {
+      const res = await get(`/api/public/home${path}`);
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: 'Not found' });
+      expectPrivate(res);
+    }
+    const post = await fetch(`${base}/api/public/home/${TOKEN}`, { method: 'POST' });
+    expect(post.status).toBe(404);
+    expect(getHomePage).not.toHaveBeenCalled();
+  });
+
+  test('a HEAD request reads without counting a view', async () => {
+    const res = await fetch(`${base}/api/public/home/${TOKEN}`, { method: 'HEAD', headers: { 'user-agent': 'Mozilla/5.0 (iPhone) Safari' } });
+    expect(res.status).toBe(200);
+    expect(getHomePage).toHaveBeenCalledWith(TOKEN, { recordView: false });
   });
 
   test('the route carries a rate limiter (standard headers) and the 429 keeps the private headers', async () => {

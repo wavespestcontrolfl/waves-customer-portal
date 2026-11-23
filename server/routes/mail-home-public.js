@@ -15,9 +15,27 @@ const router = express.Router();
 const { mailHomePageLive } = require('../config/feature-gates');
 const { shouldRecord } = require('../services/customer-page-views');
 const { getHomePage } = require('../services/mail/home-page');
+const logger = require('../services/logger');
 
 function privacyHeaders(res) {
   res.set({ 'Cache-Control': 'private, no-store', 'X-Robots-Tag': 'noindex, nofollow' });
+}
+
+const notFound = (res) => res.status(404).json({ error: 'Not found' });
+// The raw path, before Express decodes it: one lowercase 32-hex token, with or without a trailing slash. A bad percent
+// escape, another path or another case never reaches the route (it would throw in Express's decode and answer 500).
+const TOKEN_PATH = /^\/[0-9a-f]{32}\/?$/;
+
+/**
+ * Mounted in server/index.js BEFORE the global /api limiter and the body parsers: the privacy headers on every
+ * outcome (a global 429 included), and while the gate is off, or for any path or method that is not a page read, the
+ * same 404 an unknown token gets. So a dark probe never sees a 429 and the gate is not an oracle.
+ */
+function preLimiterGuard(req, res, next) {
+  privacyHeaders(res);
+  if (!mailHomePageLive()) return notFound(res);
+  if ((req.method !== 'GET' && req.method !== 'HEAD') || !TOKEN_PATH.test(req.path)) return notFound(res);
+  return next();
 }
 
 // Per-route read limit on top of the global /api limiter, the same bar as the card route.
@@ -32,17 +50,26 @@ router.use(rateLimit({
   },
 }));
 
-router.get('/:token', async (req, res, next) => {
+// The error code only: a Knex error message carries the SQL and its bound values, and the bound value here is the
+// page token, a credential. The app error handler logs err.message, so the error never goes to next().
+const codeOf = (err) => (err && (typeof err.code === 'string' || typeof err.code === 'number') ? String(err.code).slice(0, 32) : 'unknown');
+
+router.get('/:token', async (req, res) => {
+  privacyHeaders(res);
+  // The guard runs at the mount; the route checks again, so the router is safe mounted alone.
+  if (!mailHomePageLive()) return notFound(res);
   try {
-    privacyHeaders(res);
-    if (!mailHomePageLive()) return res.status(404).json({ error: 'Not found' });
-    // shouldRecord skips link-preview and scanner user agents (isBotUserAgent), staff browsers and staff IPs.
-    const page = await getHomePage(req.params.token, { recordView: shouldRecord(req) });
-    if (!page) return res.status(404).json({ error: 'Not found' });
+    // Only a GET is an open (Express serves HEAD through this handler). shouldRecord skips link-preview and scanner
+    // user agents (isBotUserAgent), staff browsers and staff IPs.
+    const recordView = req.method === 'GET' && shouldRecord(req);
+    const page = await getHomePage(req.params.token, { recordView });
+    if (!page) return notFound(res);
     return res.json(page);
   } catch (err) {
-    return next(err);
+    logger.error(`[mail-home-public] page read failed (code=${codeOf(err)})`);
+    return res.status(500).json({ error: 'Something went wrong. Please try again.' });
   }
 });
 
 module.exports = router;
+module.exports.preLimiterGuard = preLimiterGuard;
