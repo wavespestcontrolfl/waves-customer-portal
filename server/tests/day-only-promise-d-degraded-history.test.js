@@ -40,9 +40,6 @@ function fakeConn({ services, reminders = [], failMoves = false, moves = [] }) {
   return conn;
 }
 
-const OLD = process.env.GATE_DAY_ONLY_PROMISE;
-beforeEach(() => { process.env.GATE_DAY_ONLY_PROMISE = 'true'; });
-afterEach(() => { if (OLD === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = OLD; });
 
 const broken = () => fakeConn({ services: [svc('s1')], reminders: [officeReminder('s1')], failMoves: true });
 const healthy = () => fakeConn({ services: [svc('s1')], reminders: [officeReminder('s1')] });
@@ -87,12 +84,5 @@ describe('a good move-history read carries no marker', () => {
     const moves = [{ created_at: '2026-11-09T13:00:00Z', new_date: '2026-11-20', initiated_by: 'customer_sms' }];
     const out = await dayOnlyEligibility(fakeConn({ services: [svc('s1')], reminders: [officeReminder('s1')], moves }), ['s1'], NOW);
     expect(out.get('s1')).toEqual({ eligible: false, level: 'none' });
-  });
-});
-
-describe('gate off', () => {
-  test('loadTimeDisplay reads nothing and carries no marker, even with a broken history', async () => {
-    process.env.GATE_DAY_ONLY_PROMISE = 'false';
-    expect((await loadTimeDisplay(broken(), ROWS, NOW)).get('s1')).toEqual({ showHour: true, level: null, eligible: false });
   });
 });

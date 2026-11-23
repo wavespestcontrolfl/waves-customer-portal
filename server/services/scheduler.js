@@ -1815,6 +1815,74 @@ function initScheduledJobs() {
   registerDeployKillRetry('mail-new-home-list', () => runMailNewHomeListTick('night'));
 
   // =========================================================================
+  // 9:51 PM ET daily + 12:51 PM ET weekdays — New-home mail list: each card
+  // home's facts and the price of its quarterly pest plan, shadow only
+  // (services/mail/home-price.js). For each home of the list that gets a
+  // card: the county parcel map, the county permit page when the map lacks
+  // the size or the stories, then a dry run of the estimate save. It fills
+  // the price columns of mail_prospects. Nothing is sent, nothing reads the
+  // price yet, and no paid or AI service is called.
+  // Twenty minutes after each list tick above (a list run takes 1 to 3
+  // minutes), so a day's new homes are priced the same day.
+  // ONE lease for both ticks and the deploy-kill retry: two runs must never
+  // ask the parcel map or the county permit site at once. A second run is
+  // harmless: a settled home is never read again, and the store refuses a
+  // write from a run that read an older version of the row.
+  // Around it, the permit sync's lease (no health row of its own): the
+  // weekly permit sync is the other reader of the county permit site and
+  // the other writer of a permit's page result. With both leases the two
+  // never run at once, so neither can store a page result over the other's
+  // newer one. The permit sync's lease is the OUTER one, so when the permit
+  // sync holds it, the mail-home-price lease is never taken: its health row
+  // and a deploy-kill retry mark stay as they were (an inner skip would read
+  // as a good run). The tick logs one line and the next tick prices the
+  // homes. A permit sync tick that comes while this run holds the lease
+  // skips, as it would for its own run. By schedule they
+  // do not meet: the permit sync's detail step runs Mondays from 7:41 AM for
+  // at most 60 minutes and its catch-up slots (7:41 AM, 9:11 AM, 1:41 PM,
+  // 5:41 PM) take about 3 minutes; this run has a 20 minute budget.
+  // A run that throws (the parcel map, the permit page or the price engine
+  // was away or turned off, a row could not be read or saved) is logged here
+  // and recorded as a failed run by the lease.
+  // Minute 51 at hours 12 and 21: no other job names it (checked against
+  // every cron.schedule in this repo; the only named :51 jobs run at 11 PM).
+  // Only the every-minute and every-N-minute pollers share it.
+  // =========================================================================
+  // A tick whose price body never started, for any reason but a held lease
+  // (no pool connection, no lock slot in time, a lost session, a lock query
+  // that threw), is a missed tick: the outer lease keeps no health row, so
+  // the tick records it on mail-home-price itself. Once the body starts, the
+  // inner lease records the run. Not on a deploy-kill retry: that row's
+  // dead-run mark must stay so the retry can run again.
+  const runMailHomePriceTick = async ({ retry = false } = {}) => {
+    const tickStartedAt = Date.now();
+    let bodyStarted = false;
+    const priceRun = () => {
+      bodyStarted = true;
+      return require('./mail/home-price').runHomePrices();
+    };
+    let missed = null;
+    try {
+      const out = await runExclusive('permit-sync', () => runExclusive('mail-home-price', priceRun), { recordHealth: false });
+      if (out && out.skipped === true && out.reason === 'lease_held') {
+        logger.info('Mail home prices: not run, the permit sync or another instance holds a lease');
+      } else if (out && out.skipped === true) {
+        missed = `tick skipped: ${out.reason || 'no_connection'}`;
+      }
+    } catch (err) {
+      if (!bodyStarted) missed = `tick skipped: ${err.message}`;
+      else logger.error(`Mail home prices failed: ${err.message}`);
+    }
+    if (missed && !bodyStarted) {
+      logger.error(`Mail home prices failed: ${missed}`);
+      if (!retry) await recordMissedTick('mail-home-price', tickStartedAt, missed).catch(() => {});
+    }
+  };
+  cron.schedule('51 21 * * *', () => runMailHomePriceTick(), { timezone: 'America/New_York' });
+  cron.schedule('51 12 * * 1-5', () => runMailHomePriceTick(), { timezone: 'America/New_York' });
+  registerDeployKillRetry('mail-home-price', () => runMailHomePriceTick({ retry: true }));
+
+  // =========================================================================
   // MONDAY 10:36 AM ET — Weekly restaurant prospect list (owner 2026-11-19):
   // new food licenses, ownership changes and violation-35 inspections in
   // Manatee / Sarasota / Charlotte, less Punta Gorda (not served), from

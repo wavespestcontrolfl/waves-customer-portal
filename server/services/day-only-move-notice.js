@@ -4,9 +4,9 @@
  * GATE_DAY_ONLY_PROMISE part B2 (owner 2026-11-05 "D2 a", 2026-11-06 "office"): a MOVE notice promises only the new DAY
  * until the 24-hour reminder. The senders (admin-schedule sendRescheduleNoticeForVisit, appointment-reminders
  * handleReschedule, rain-out sendMovedSms, admin-dispatch applySeriesMoveEffects) share these helpers so each keeps its
- * own already-large function small. With the gate off every function here answers "today's copy" and reads nothing.
+ * own already-large function small.
  *
- * The decision is time-promise.js dayOnlyMoveDecision (gate, the DATE changes, more than 24.25 h out, the customer's
+ * The decision is time-promise.js dayOnlyMoveDecision (the DATE changes, more than 24.25 h out, the customer's
  * 24-hour reminder will really go out, and the intent). A day-only send records DAY_PROMISE_META (promise_level 'day',
  * no slot) beside its guard fields, so the no-show reader reads it as a day promise and a bounced text can be rebuilt.
  * A missing, disabled or unrenderable day row sends today's window copy: a customer always gets a message, and the
@@ -47,12 +47,11 @@ async function renderDayRow(templateKey, vars, context) {
 
 /**
  * May this move notice promise only the new day? Never throws; false on any failure. `ids` (or `serviceId`) are the visits
- * whose recorded intent decides when `intent` is absent. Gate off: false, nothing read.
+ * whose recorded intent decides when `intent` is absent.
  */
 async function moveNoticeDayOnly({ serviceId, ids = null, customerId, newStartAt, oldDate, newDate, intent }) {
   try {
     const timePromise = require('./time-promise');
-    if (!timePromise.dayOnlyPromiseOn()) return false;
     const reminders = require('./appointment-reminders');
     const prefs = await reminders.getReminderPrefs(customerId, { scheduledServiceId: serviceId });
     return await timePromise.dayOnlyMoveDecision(db, {

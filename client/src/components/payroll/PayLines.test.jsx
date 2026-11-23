@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import PayrollSettings from './PayrollSettings';
 import { dollarsToCents } from './PayLinesPanel';
@@ -327,6 +327,56 @@ describe('pay run with pay lines', () => {
     // The void reopened it: it waits again, with its Remove button.
     expect(await view.findByRole('button', { name: 'Remove Commission for Sample Alpha' })).toBeInTheDocument();
     expect(view.queryByRole('table', { name: 'Pay lines paid' })).toBeNull();
+  });
+
+  it('keeps the newest pay lines when an older request answers last', async () => {
+    let reads = 0;
+    let releaseOld;
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options = {}) => {
+      if (path === '/admin/payroll/runs') return reply({ runs: [{ id: 'run-1', weekStart: '2026-10-12', payDate: '2026-10-23', status: 'finalized', totals }] });
+      if (path === '/admin/payroll/pay-lines?status=open') {
+        reads += 1;
+        // The first read is slow. Its answer still holds a line that a pay run has paid since.
+        if (reads === 1) return new Promise(resolve => { releaseOld = () => resolve(reply({ payLines: [line()] })); });
+        return reply({ payLines: [] });
+      }
+      return original(path, options);
+    });
+    render(<PayrollSettings />);
+    await waitFor(() => expect(releaseOld).toBeTypeOf('function'));
+    // Opening a run starts a newer read, and it answers first.
+    fireEvent.click(await screen.findByRole('button', { name: /Open pay run for/ }));
+    const view = within(await panel());
+    expect(await view.findByText('No pay lines waiting for a pay run.')).toBeInTheDocument();
+    expect(reads).toBe(2);
+    await act(async () => { releaseOld(); await new Promise(resolve => { setTimeout(resolve, 0); }); });
+    expect(view.getByText('No pay lines waiting for a pay run.')).toBeInTheDocument();
+    expect(view.queryByRole('button', { name: 'Remove Commission for Sample Alpha' })).toBeNull();
+  });
+
+  it('keeps the newest paid lines when an older request answers last', async () => {
+    let reads = 0;
+    let releaseOld;
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options = {}) => {
+      if (path === '/admin/payroll/runs') return reply({ runs: [{ id: 'run-1', weekStart: '2026-10-12', payDate: '2026-10-23', status: 'finalized', totals }] });
+      if (path === '/admin/payroll/pay-lines?status=open') return reply({ payLines: [] });
+      if (path === '/admin/payroll/pay-lines?status=paid') {
+        reads += 1;
+        // The first read is slow. Its answer is from before a pay run paid the line.
+        if (reads === 1) return new Promise(resolve => { releaseOld = () => resolve(reply({ payLines: [] })); });
+        return reply({ payLines: [line({ status: 'paid', checkId: 'check-a' })] });
+      }
+      return original(path, options);
+    });
+    render(<PayrollSettings />);
+    await waitFor(() => expect(releaseOld).toBeTypeOf('function'));
+    fireEvent.click(await screen.findByRole('button', { name: /Open pay run for/ }));
+    const view = within(await panel());
+    expect(within(await view.findByRole('table', { name: 'Pay lines paid' })).getByText('Commission')).toBeInTheDocument();
+    await act(async () => { releaseOld(); await new Promise(resolve => { setTimeout(resolve, 0); }); });
+    expect(within(view.getByRole('table', { name: 'Pay lines paid' })).getByText('Commission')).toBeInTheDocument();
   });
 
   it('shows none of it when the checks carry no pay line figures', async () => {

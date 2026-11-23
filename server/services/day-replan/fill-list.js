@@ -257,7 +257,7 @@ async function planVisitCandidate(conn, row, day, addOns) {
       return overflow ? [...services, OVERFLOW_SERVICE] : services;
     },
     dayOpen: (date) => date >= earliest && date < day && oneOff(date) && clampDateToSeason(pattern, date) === date
-      && !mowingDays.blocksLive(date, mowing) };
+      && !mowingDays.blocksDay(date, mowing) };
 }
 
 /**

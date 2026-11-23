@@ -9,7 +9,8 @@ import { adminFetch } from '../../utils/admin-fetch';
 
 vi.mock('../../utils/admin-fetch', () => ({ adminFetch: vi.fn(), isRateLimitError: () => false }));
 const enabledVisit = { id: 'service-one', visitId: 'visit-one', visitCloseoutEnabled: true, visitCloseoutPacket: null };
-const enabledStandalone = { id: 'service-standalone', visitId: null, visitCloseoutEnabled: true, visitCloseoutPacket: null };
+// A feed row carries customerAskedTime (the office fields), so the editor opens at once instead of reading them first.
+const enabledStandalone = { id: 'service-standalone', visitId: null, visitCloseoutEnabled: true, visitCloseoutPacket: null, customerAskedTime: null };
 vi.mock('./SchedulePage', () => ({
   CompletionPanel: () => null,
   RescheduleModal: () => null,

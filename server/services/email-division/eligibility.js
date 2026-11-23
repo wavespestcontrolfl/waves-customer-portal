@@ -36,7 +36,9 @@ const db = require('../../models/db');
 const { CUSTOMER_STAGES } = require('../customer-stages');
 const { etDateString } = require('../../utils/datetime-et');
 const { toE164 } = require('../../utils/phone');
-const { activeSuppressionsFor, GLOBAL_SUPPRESSION_TYPES } = require('../email-template-library');
+const {
+  activeSuppressionsFor, activeSuppressionRows, suppressionsBlocking, GLOBAL_SUPPRESSION_TYPES,
+} = require('../email-template-library');
 
 // call-bridge.js sources a person dials from (admin click-to-call, the
 // callback card, a technician's line) and the statuses meaning the call
@@ -248,8 +250,17 @@ async function checkStaffDnc(ctx) {
   return dnc ? REASONS.STAFF_DNC : null;
 }
 
+// The active suppression rows that block a send in this group. The pipeline
+// reads them per check. The embedded line (embeddedLineContext) reads the
+// address's rows ONCE and every check of that evaluation classifies those
+// same rows, so a row that lands between two checks cannot split the verdict.
+async function blockingSuppressions(ctx, groupKey) {
+  if (ctx.suppressionRows) return suppressionsBlocking(ctx.suppressionRows, null, groupKey);
+  return activeSuppressionsFor(null, ctx.customer.email, groupKey, ctx.database);
+}
+
 async function checkSuppression(ctx) {
-  const { customer, stream, emailKey, database } = ctx;
+  const { stream, emailKey } = ctx;
   // Reuse the canonical classifier (email-template-library.js) rather than
   // re-derive it: a bounce/spam_complaint/do_not_email row blocks every
   // stream even when it carries an unrelated group_key, not just a
@@ -257,7 +268,7 @@ async function checkSuppression(ctx) {
   // the classifier's template-only branches (transactional-bypass) never
   // trigger for a real send_stream group key like ours.
   const groupKey = groupKeyFor(stream, emailKey, ctx.marketingClass);
-  const suppressions = await activeSuppressionsFor(null, customer.email, groupKey, database);
+  const suppressions = await blockingSuppressions(ctx, groupKey);
   if (!suppressions.length) return null;
   const isGlobal = suppressions.some((row) => (
     !row.group_key || GLOBAL_SUPPRESSION_TYPES.has(String(row.suppression_type || '').toLowerCase())
@@ -266,8 +277,79 @@ async function checkSuppression(ctx) {
 }
 
 async function marketingSuppressed(ctx) {
-  const rows = await activeSuppressionsFor(null, ctx.customer.email, 'marketing_newsletter', ctx.database);
-  return rows.length > 0;
+  return (await blockingSuppressions(ctx, 'marketing_newsletter')).length > 0;
+}
+
+// The prefs half of the embedded-pitch rule: the customer takes marketing
+// offers, and their marketing channel includes email.
+function prefsAllowPitch(prefs) {
+  return prefs?.marketing_offers === true && channelFor(prefs, 'marketing_channel') !== 'sms';
+}
+
+// May an OPERATIONAL email to this customer carry a promotional line? For a
+// sender outside the eligibleForEmail pipeline (the receipt and
+// service-report emails' add-a-service line). It runs the pipeline's own
+// contact checks, in the pipeline's order, as an operational email of this
+// customer meets them: the customer row, a staff do-not-contact, a global or
+// operational suppression, the email switch. The last check also gives the
+// pipeline's embedded-pitch verdict (checks.allowPitch: marketing offers on,
+// a marketing channel that includes email, no marketing unsubscribe).
+// → the checked context, or null when a check says no. `email` is the
+// address the line rides: it must still be the customer's address on file.
+// A holder who changed their address while the email was being built keeps
+// the operational email at the old address, without the line; the old inbox
+// never gets promotional copy on the new address's choices.
+const sameAddress = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+const EMBEDDED_LINE_HOST = { stream: 'lifecycle', marketingClass: 'relationship', emailKey: 'embedded-line-host' };
+async function embeddedLineContext({ customerId, email, database }) {
+  const ctx = { ...EMBEDDED_LINE_HOST, customerId, database, checks: {} };
+  if (await checkCustomer(ctx)) return null;
+  if (!sameAddress(ctx.customer.email, email)) return null;
+  // One read of the address's suppression rows for the whole evaluation: the
+  // contact check, the marketing unsubscribe and the referral unsubscribe
+  // all judge these rows (blockingSuppressions).
+  ctx.suppressionRows = await activeSuppressionRows(ctx.customer.email, database);
+  for (const check of [checkStaffDnc, checkSuppression, checkEmailSwitchStreamFlagAndChannel]) {
+    if (await check(ctx)) return null;
+  }
+  return ctx;
+}
+
+// The referral part of that line is also a referral ask by email, so it
+// answers to the rules the referral email ('lc.referral*') answers to as
+// well: referral nudges not turned off, a referral channel that includes
+// email (the column's schema default is 'sms') and no referral unsubscribe.
+const REFERRAL_ASK_KEY = 'lc.referral';
+async function referralAskAllowed(ctx) {
+  if (!streamFlagOk('lifecycle', REFERRAL_ASK_KEY, ctx.prefs)) return false;
+  if (streamChannelBlocksEmail('lifecycle', REFERRAL_ASK_KEY, ctx.prefs)) return false;
+  const group = groupKeyFor('lifecycle', REFERRAL_ASK_KEY);
+  return (await blockingSuppressions(ctx, group)).length === 0;
+}
+
+// → { pitch, referralAsk }: the customer's choices for the whole line, from
+// ONE read. The sender asks AFTER it has composed the cards (pricing can
+// take seconds), so a choice the customer changed in the meantime decides
+// the line; nothing decided before the cards were built is kept.
+//   pitch       — the add-a-service part, and the line as a whole: the
+//                 pipeline's embedded-pitch verdict. Any other answer, a
+//                 missing prefs row included, is no.
+//   referralAsk — the referral part: pitch, and the referral email's own
+//                 rules. A no here drops the referral part only, so an
+//                 allowed service offer still rides the line.
+// Every input (the customer row, a staff do-not-contact, the suppression
+// rows, the choices) is read in ONE repeatable-read snapshot, the repo's
+// pattern for a final check (visit-prep.js, estimate-consultation-offer.js):
+// values that were never true together cannot add up to a yes.
+const NO_LINE = Object.freeze({ pitch: false, referralAsk: false });
+const CONSENT_SNAPSHOT = { isolationLevel: 'repeatable read', readOnly: true };
+async function embeddedLineConsent({ customerId, email } = {}) {
+  if (!customerId || !email) return NO_LINE;
+  return db.transaction(async (trx) => {
+    const ctx = await embeddedLineContext({ customerId, email, database: trx });
+    if (!ctx?.checks.allowPitch) return NO_LINE;
+    return { pitch: true, referralAsk: await referralAskAllowed(ctx) };
+  }, CONSENT_SNAPSHOT);
 }
 
 async function checkEmailSwitchStreamFlagAndChannel(ctx) {
@@ -281,8 +363,7 @@ async function checkEmailSwitchStreamFlagAndChannel(ctx) {
   // …and the customer's marketing channel must include email: an SMS-only
   // marketing choice keeps promotional copy out of an operational email too
   // (codex GitHub round P1).
-  const marketingChannelIsSmsOnly = channelFor(prefs, 'marketing_channel') === 'sms';
-  checks.allowPitch = prefs?.marketing_offers === true && !marketingChannelIsSmsOnly && !(await marketingSuppressed(ctx));
+  checks.allowPitch = prefsAllowPitch(prefs) && !(await marketingSuppressed(ctx));
   if (!streamFlagOk(stream, emailKey, prefs, ctx.marketingClass)) return REASONS.STREAM_FLAG_OFF;
   if (streamChannelBlocksEmail(stream, emailKey, prefs, ctx.marketingClass)) return REASONS.STREAM_CHANNEL_NOT_EMAIL;
   return null;
@@ -419,7 +500,7 @@ async function eligibleForEmail({
 }
 
 module.exports = {
-  eligibleForEmail, resolveMarketingClass, REASONS, groupKeyFor,
+  eligibleForEmail, resolveMarketingClass, REASONS, groupKeyFor, embeddedLineConsent,
   // Exported for callers outside the eligibility pipeline that need the
   // SAME channel-resolution semantics against a notification_prefs row
   // they've already read (e.g. newsletter-list-reconcile.js's SMS-only

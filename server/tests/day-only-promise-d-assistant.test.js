@@ -1,6 +1,6 @@
 /**
  * GATE_DAY_ONLY_PROMISE part D: the portal chat assistant's tools state only the DATE for a visit whose customer was
- * told only the day, plus the plain "do not state or guess an hour" note. Gate off = today's results. No model call, no
+ * told only the day, plus the plain "do not state or guess an hour" note.  No model call, no
  * database: the schedule rows are fakes and the promise reader (time-promise.js) is mocked.
  */
 jest.mock('../models/db', () => jest.fn());
@@ -12,7 +12,7 @@ jest.mock('../services/portal-payment-history', () => ({ listPortalPayments: jes
 jest.mock('../services/portal-service-history', () => ({ listPortalServiceHistory: jest.fn() }));
 const mockGates = { reserviceStreamline: true };
 jest.mock('../config/feature-gates', () => ({ isEnabled: (name) => mockGates[name] === true }));
-jest.mock('../services/time-promise', () => ({ dayOnlyPromiseOn: jest.fn(), loadTimeDisplay: jest.fn() }));
+jest.mock('../services/time-promise', () => ({ loadTimeDisplay: jest.fn() }));
 const mockOpen = jest.fn();
 jest.mock('../services/reservice-scheduler', () => {
   const actual = jest.requireActual('../services/reservice-scheduler');
@@ -49,7 +49,6 @@ const verdicts = (map) => new Map(Object.entries(map).map(([id, showHour]) => [i
 beforeEach(() => {
   jest.clearAllMocks();
   mockGates.reserviceStreamline = true;
-  timePromise.dayOnlyPromiseOn.mockReturnValue(false);
   reschedulePage.loadById.mockImplementation(async (id) => ({ id }));
   reschedulePage.pageEligibility.mockResolvedValue({ ok: true });
 });
@@ -61,15 +60,7 @@ describe('get_upcoming_services', () => {
   ];
   const run = () => { db.mockReturnValue(thenable(ROWS)); return executeToolCall('get_upcoming_services', {}, 'cust-1'); };
 
-  test('gate off: today\'s windows, byte for byte, and no promise read', async () => {
-    const out = await run();
-    expect(out.services.map((s) => s.window)).toEqual([arrivalWindowRange('09:00:00'), arrivalWindowRange('13:00:00')]);
-    expect(JSON.stringify(out)).not.toContain('texted the day before');
-    expect(timePromise.loadTimeDisplay).not.toHaveBeenCalled();
-  });
-
-  test('gate on: the day-only visit gets the date and the note (no hour), the customer-picked visit keeps its window; ONE read', async () => {
-    timePromise.dayOnlyPromiseOn.mockReturnValue(true);
+  test('the day-only visit gets the date and the note (no hour), the customer-picked visit keeps its window; ONE read', async () => {
     timePromise.loadTimeDisplay.mockResolvedValue(verdicts({ 'v-day': false, 'v-hour': true }));
     const out = await run();
     expect(timePromise.loadTimeDisplay).toHaveBeenCalledTimes(1);
@@ -78,8 +69,7 @@ describe('get_upcoming_services', () => {
     expect(out.services[1].window).toBe(arrivalWindowRange('13:00:00'));
   });
 
-  test('gate on + the read failed: the day-only wording for every visit', async () => {
-    timePromise.dayOnlyPromiseOn.mockReturnValue(true);
+  test('the read failed: the day-only wording for every visit', async () => {
     timePromise.loadTimeDisplay.mockRejectedValue(new Error('db down'));
     const out = await run();
     expect(out.services.map((s) => s.window)).toEqual([NOTE, NOTE]);
@@ -93,15 +83,7 @@ describe('offer_reschedule_link', () => {
   ];
   const run = (turn = null) => { db.mockReturnValue(thenable(ROWS)); return executeToolCall('offer_reschedule_link', {}, 'cust-1', [], null, {}, turn); };
 
-  test('gate off: today\'s windows, no promise read', async () => {
-    const out = await run();
-    expect(out.visits.map((v) => v.window)).not.toContain(NOTE);
-    expect(out.visits[0].window).toBe(arrivalWindowRange('10:00'));
-    expect(timePromise.loadTimeDisplay).not.toHaveBeenCalled();
-  });
-
-  test('gate on: one bulk read; the day-only visit states the date and the note only', async () => {
-    timePromise.dayOnlyPromiseOn.mockReturnValue(true);
+  test('one bulk read; the day-only visit states the date and the note only', async () => {
     timePromise.loadTimeDisplay.mockResolvedValue(verdicts({ 'r-1': false, 'r-2': true }));
     const out = await run();
     expect(timePromise.loadTimeDisplay).toHaveBeenCalledTimes(1);
@@ -124,14 +106,7 @@ describe('a re-service already booked (offer_reservice)', () => {
     mockPage.reserviceLocationReviewRequired.mockResolvedValue(false);
   });
 
-  test('gate off: its date and window, as today', async () => {
-    const out = await offer();
-    expect(out.already_booked).toEqual({ date: 'Oct 9, 2026', window: expect.stringMatching(/10/) });
-    expect(timePromise.loadTimeDisplay).not.toHaveBeenCalled();
-  });
-
-  test('gate on + day-only: the date and the note, no hour; the visit is read by its real start', async () => {
-    timePromise.dayOnlyPromiseOn.mockReturnValue(true);
+  test('day-only: the date and the note, no hour; the visit is read by its real start', async () => {
     timePromise.loadTimeDisplay.mockResolvedValue(verdicts({ 'svc-callback-1': false }));
     const out = await offer();
     expect(out.already_booked).toEqual({ date: 'Oct 9, 2026', window: NOTE });
@@ -139,16 +114,14 @@ describe('a re-service already booked (offer_reservice)', () => {
     expect(timePromise.loadTimeDisplay.mock.calls[0][1]).toEqual([{ id: 'svc-callback-1', scheduled_date: '2026-10-09', window_start: '10:00:00' }]);
   });
 
-  test('gate on + a customer-picked visit: the window is kept', async () => {
-    timePromise.dayOnlyPromiseOn.mockReturnValue(true);
+  test('a customer-picked visit: the window is kept', async () => {
     timePromise.loadTimeDisplay.mockResolvedValue(verdicts({ 'svc-callback-1': true }));
     const out = await offer();
     expect(out.already_booked.window).toMatch(/10/);
     expect(out.already_booked.window).not.toBe(NOTE);
   });
 
-  test('gate on + the read failed: the day-only wording', async () => {
-    timePromise.dayOnlyPromiseOn.mockReturnValue(true);
+  test('the read failed: the day-only wording', async () => {
     timePromise.loadTimeDisplay.mockRejectedValue(new Error('db down'));
     const out = await offer();
     expect(out.already_booked.window).toBe(NOTE);

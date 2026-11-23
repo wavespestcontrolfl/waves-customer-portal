@@ -785,6 +785,55 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', 'the week of Jun 29, 2026 is not paid yet')]);
     });
 
+    it('does not wait for a week a final pay run closed with no paycheck (a time-off bank paid none of the time off), and waits again after a void', async () => {
+      process.env.GATE_PAYROLL_TIME_OFF = 'true';
+      const tech = await readyTech('Sample Alpha', { pto_hours_per_year: '80.00' }); // a time-off bank that holds nothing yet
+      await trx('payroll_time_off').insert({ technician_id: tech, work_date: '2026-07-02', kind: 'pto', minutes: '480.00' });
+      // The week of Jun 29 holds that day off alone. Its pay run makes no paycheck; finalizing it closes the week.
+      const early = await draft('2026-06-29');
+      expect(early.checks).toEqual([]);
+      await finalize(early.id);
+      await approvedWeek(tech, GIFT_WEEK);
+      const run = await draft(GIFT_WEEK); // no check will ever come for the week of Jun 29: the gift does not wait for one
+      expect(checkOf(run, tech).techRewardsCents).toBe(GIFT);
+      expect(await notesOf(run.id)).toEqual([]);
+      // that closed week does not hide another week: a worked week with no check still makes the gift wait
+      await approvedWeek(tech, '2026-07-06');
+      expect(checkOf(await recompute(run.id), tech)).not.toHaveProperty('techRewardsCents');
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', 'the week of Jul 6, 2026 is not paid yet')]);
+      // a void opens the week of Jun 29 again: it is the oldest week that needs a pay run
+      await voidRun(early.id);
+      await recompute(run.id);
+      expect(await notesOf(run.id)).toEqual([waits('Sample Alpha', 'the week of Jun 29, 2026 is not paid yet')]);
+    });
+
+    it('waits when a later final pay run already used the time-off bank of the technician, so a gift alone never blocks the run', async () => {
+      process.env.GATE_PAYROLL_TIME_OFF = 'true';
+      // Alpha and Charlie have a time-off bank and no hours this week: only the gift makes a check for them.
+      const alpha = await readyTech('Sample Alpha', { pto_hours_per_year: '80.00' });
+      const charlie = await readyTech('Sample Charlie', { pto_hours_per_year: '80.00' });
+      const bravo = await readyTech('Sample Bravo');
+      await approvedWeek(bravo, GIFT_WEEK);
+      const run = await draft(GIFT_WEEK);
+      expect([checkOf(run, alpha).techRewardsCents, checkOf(run, charlie).techRewardsCents]).toEqual([GIFT, GIFT]);
+      // A later week is already final, and its run left time off of Alpha unpaid from the bank, with no check. A check of
+      // Charlie in the next tax year is final too, and it read the bank (the year-to-date guard does not see another year).
+      // Finalize refuses a run that holds a check of either now (the bank's order guards), so both gifts wait and the run
+      // keeps its other check.
+      const later = addDays(GIFT_WEEK, 7);
+      await trx('payroll_runs').insert({
+        week_start: later, pay_date: addDays(later, 11), status: 'finalized',
+        unpaid_time_off: JSON.stringify([{ technicianId: alpha, name: 'Sample Alpha', hours: '8.00', reason: 'Sample reason.' }]),
+      });
+      await paidWeek(charlie, '2027-01-04', { pto_earned_minutes: '92.40' });
+      const again = await recompute(run.id);
+      expect([checkOf(again, alpha), checkOf(again, charlie)]).toEqual([undefined, undefined]);
+      expect([await linesOf(alpha), await linesOf(charlie)]).toEqual([[], []]);
+      const why = 'a later pay run that is already final used their time-off bank, so this pay run cannot hold a paycheck for them';
+      expect((await notesOf(run.id)).sort()).toEqual([waits('Sample Alpha', why), waits('Sample Charlie', why)]);
+      expect((await finalize(run.id)).checks.map((c) => c.technicianId)).toEqual([bravo]);
+    });
+
     it('waits when no paycheck can be worked out for the technician, so a gift alone never blocks the run', async () => {
       const alpha = await readyTech('Sample Alpha', { pay_rate: null }); // no pay rate, and no hours this week
       const bravo = await readyTech('Sample Bravo');

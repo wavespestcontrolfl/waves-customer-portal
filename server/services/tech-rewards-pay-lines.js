@@ -137,6 +137,7 @@ const { addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-
 
 // payroll-runs.js loads this file, so its helpers are read on first use.
 const payrollRuns = () => require('./payroll-runs');
+const timeOffBank = require('./payroll-time-off-bank');
 // The board is the one home of the pay a stay bonus is worked out from (readBonusPay) and of its 12 months (stayWindow), and of
 // every figure of a season bonus (readSeasonScoreFigures, readSeasonPay, seasonBonusOf). It pulls in the score and review modules, so it loads on
 // first use: a pay run that has no stay bonus and no season bonus to look at never reads it.
@@ -336,7 +337,9 @@ const readTech = ({ hire_on_file: onFile, ...row }) => ({ ...row, hire_date: row
  * workedWeeks, which counts a shift that has no summary yet) that no approved timesheet settles. A week whose approved
  * timesheet has no minutes and that holds no payable time off gets no check from any run (evaluate), so it is settled: a gift
  * never waits for a check that cannot come. A week is paid when the technician has a FINALIZED check for it in a
- * finalized run. Whole weeks are asked, the weeks a line's overtime is priced from.
+ * finalized run. A week is settled too when its finalized run kept the technician's time off as not paid
+ * (payroll_runs.unpaid_time_off: a time-off bank that paid none of it makes no check, and no later run pays that week);
+ * a void of that run opens the week again. Whole weeks are asked, the weeks a line's overtime is priced from.
  */
 async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo }) {
   const from = staffWeekStartForWorkDate(coversFrom);
@@ -362,13 +365,18 @@ async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo }) {
     .where({ 'c.technician_id': technicianId, 'c.status': 'finalized', 'r.status': 'finalized' })
     .whereIn('c.week_start', weeks)
     .select(trx.raw("to_char(c.week_start, 'YYYY-MM-DD') AS week_start"))).map((row) => row.week_start));
-  return weeks.filter((week) => !paid.has(week)).sort()[0] || null;
+  const open = weeks.filter((week) => !paid.has(week));
+  const decided = new Set(await timeOffBank.unpaidDecisionWeeks(trx, technicianId, open));
+  return open.filter((week) => !decided.has(week)).sort()[0] || null;
 }
 
 /**
  * Why the gift cannot go on this run for the technician, as { reason, week }, or null when it can:
  *   later_check_final   a later check of theirs in the tax year is already final: finalize refuses a run that holds a check
  *                       of theirs, so a gift here would hold the whole run (week is null)
+ *   later_bank_use_final  they have a time-off bank, and a later final run already read it or left their time off unpaid from
+ *                       it, with or without a check, in any year: finalize refuses a run that holds a check of theirs for
+ *                       that too (payroll-runs.js finalizeRun), so a gift here would hold the whole run (week is null)
  *   week_not_paid       a week before the run's own, from the start of its span on, holds work and has no finalized check
  *   week_needs_review   the pay run's own line guards would hold a check for an earlier week of its span
  *   no_paycheck         no check can be worked out for the technician on this run (week is null)
@@ -385,6 +393,12 @@ async function oldestUnpaidWeek(trx, technicianId, { coversFrom, coversTo }) {
  */
 async function spanWaitOf(trx, run, technicianId, span, amountCents) {
   if (await payrollRuns().laterFinalCheckExists(trx, run, [technicianId])) return { reason: 'later_check_final', week: null };
+  // The check the gift needs would hold the bank of a technician who has one (GATE_PAYROLL_TIME_OFF), also a check for the
+  // gift alone. Finalize asks the bank's own order guards of every such check, so the gift waits for the same answer.
+  const banked = timeOffOn() ? [...(await timeOffBank.bankTechnicians(trx, [technicianId])).keys()] : [];
+  if (await timeOffBank.laterBankCheckExists(trx, run, banked) || await timeOffBank.laterUnpaidDecisionExists(trx, run, banked)) {
+    return { reason: 'later_bank_use_final', week: null };
+  }
   const beforeRun = addStaffWorkDays(run.week_start, -1);
   const earlier = { coversFrom: span.coversFrom, coversTo: beforeRun };
   if (earlier.coversFrom <= earlier.coversTo) {
@@ -436,7 +450,7 @@ async function priceGift(trx, cand, tech, run) {
  * worked out only when those checks are all final, and it is the same on every run after that:
  *   pay_week_too_early  this run pays the last week of the 12 months or an earlier one. Its own check is not final, so the
  *                       pay of that week is not in the base yet: the run of a later week writes the bonus (week = that last week)
- *   (spanWaitOf)        later_check_final, week_not_paid, week_needs_review, as for the gift: every week from the start of
+ *   (spanWaitOf)        later_check_final, later_bank_use_final, week_not_paid, week_needs_review, as for the gift: every week from the start of
  *                       the 12 months to the day before the run's week that holds work has a finalized check
  *   base_needs_review   an older check of the 12 months paid a Tech Rewards line and other line pay for an overtime week and
  *                       kept no proven split of that overtime (tech-rewards-scoreboard.js ordinaryPremium, unsplitWeeks;
@@ -674,6 +688,7 @@ const WAIT_WORDS = {
   week_needs_review: (w) => `the week of ${dayLabel(w.week)} has a timesheet to approve or an automatic clock-out to review`,
   no_paycheck: () => 'no paycheck can be worked out for them on this pay run (check their pay rate, and the tax tables for the pay date)',
   later_check_final: () => 'a later paycheck of theirs is already final, so this pay run cannot hold one for them',
+  later_bank_use_final: () => 'a later pay run that is already final used their time-off bank, so this pay run cannot hold a paycheck for them',
   hire_date_missing: (w) => (w.kind === SEASON
     ? 'their hire date is not on file, so the pay run cannot count their years of service'
     : 'their hire date is not on file, so the pay run cannot tell whether they were hired by the gift date'),

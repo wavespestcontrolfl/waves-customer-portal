@@ -75,9 +75,8 @@ beforeEach(() => {
     appointment_reminders: { service_type: 'Pest Control' },
   };
   renderer.renderSmsTemplate.mockResolvedValue('day body');
-  process.env.GATE_DAY_ONLY_PROMISE = 'true';
 });
-afterAll(() => { delete process.env.GATE_DAY_ONLY_PROMISE; });
+
 
 describe('an office move to another date, far out, no "customer asked for this time"', () => {
   test('the day row: new day and date, no window or time, the reschedule line is the day-only ask', async () => {
@@ -169,16 +168,6 @@ describe('everything else keeps today\'s window copy', () => {
     expect(AppointmentReminders.deliverMoveNoticeEmail.mock.calls[0][0]).not.toHaveProperty('dayOnly');
   });
 
-  test('gate off: byte for byte today (body, exact metadata keys, email arguments), and nothing is read for the decision', async () => {
-    delete process.env.GATE_DAY_ONLY_PROMISE;
-    const out = await notice({ previousDate: OLD_DATE }, { delivered: false });
-    todayBody(out);
-    expect(Object.keys(out.meta).sort()).toEqual(['move_notice_at', 'rendered_slot_ms', 'scheduled_service_id']);
-    expect(AppointmentReminders.getReminderPrefs).not.toHaveBeenCalled();
-    expect(Object.keys(AppointmentReminders.deliverMoveNoticeEmail.mock.calls[0][0]).sort()).toEqual(
-      ['arrivalWindow', 'customerId', 'kind', 'noticeAt', 'notificationEventKey', 'scheduledServiceId', 'sendOutcome', 'serviceLabel', 'apptTime'].sort(),
-    );
-  });
 });
 
 describe('recordOfficeMoveIntent (the write inside the moving transaction)', () => {
@@ -190,7 +179,7 @@ describe('recordOfficeMoveIntent (the write inside the moving transaction)', () 
     return fn;
   };
 
-  test('gate on: true only for exactly true, else false; every moved member', async () => {
+  test('true only for exactly true, else false; every moved member', async () => {
     const c = conn();
     await recordOfficeMoveIntent(c, ['a', 'b'], { customerAskedTime: true });
     await recordOfficeMoveIntent(c, ['c'], {});
@@ -199,10 +188,4 @@ describe('recordOfficeMoveIntent (the write inside the moving transaction)', () 
     expect(c.writes.map((w) => [w.ids, w.patch.customer_asked_time])).toEqual([[['a', 'b'], true], [['c'], false], [['d'], false], [['e'], false]]);
   });
 
-  test('gate off: no write, so the UPDATE payloads stay today\'s', async () => {
-    delete process.env.GATE_DAY_ONLY_PROMISE;
-    const c = conn();
-    await recordOfficeMoveIntent(c, ['a'], { customerAskedTime: true });
-    expect(c.writes).toEqual([]);
-  });
 });

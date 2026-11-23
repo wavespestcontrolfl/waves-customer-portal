@@ -86,6 +86,13 @@ describe('input checks stop before the connection is used', () => {
     await expect(createTimeOff(good(patch), TECH_ID, untouched)).rejects.toMatchObject({ message: expect.stringMatching(message) });
   });
 
+  it('refuses an illness mark that is not yes or no, and one on a holiday, on create and on change', async () => {
+    await expect(createTimeOff(good({ illness: 'maybe' }), TECH_ID, untouched)).rejects.toMatchObject({ status: 400, message: 'Illness must be yes or no' });
+    const onHoliday = { status: 400, message: 'Only a paid time off day can be marked as illness' };
+    await expect(createTimeOff(good({ kind: 'holiday', illness: true }), TECH_ID, untouched)).rejects.toMatchObject(onHoliday);
+    await expect(updateTimeOff(ENTRY_ID, { kind: 'holiday', hours: 8, illness: true }, TECH_ID, untouched)).rejects.toMatchObject(onHoliday);
+  });
+
   it('create refuses an unknown field', async () => {
     await expect(createTimeOff({ ...good(), extra: 1 }, TECH_ID, untouched)).rejects.toMatchObject({ status: 400 });
   });
@@ -138,6 +145,7 @@ describe('writes', () => {
     ['create', (conn) => createTimeOff(good(), TECH_ID, conn)],
     ['update', (conn) => updateTimeOff(ENTRY_ID, { kind: 'pto', hours: 1 }, TECH_ID, conn)],
     ['delete', (conn) => deleteTimeOff(ENTRY_ID, TECH_ID, conn)],
+    ['yearly hours', (conn) => setPtoAllowance(TECH_ID, { hoursPerYear: 80 }, TECH_ID, conn)],
   ])('%s takes the same lock finalizeRun takes before any table is read', async (_name, call) => {
     const { events, stop, trx, conn } = fakeConnection();
     await expect(call(conn)).rejects.toBe(stop);

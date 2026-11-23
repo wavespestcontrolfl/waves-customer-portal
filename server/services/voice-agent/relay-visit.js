@@ -215,7 +215,7 @@ async function todayEtaText(customerId, { tier = 'redacted', recognisedContact =
   }
 
   // GATE_DAY_ONLY_PROMISE (part D): a visit whose customer was told only the day is stated as the day, never an hour.
-  // Gate off: no read, the window is spoken exactly as before. Gate on and a failed read: the day-only wording.
+  // A failed read: the day-only wording.
   const dayOnly = (await loadDayOnlyCheck(db, [{ ...row, scheduled_date: today }]))(row);
   const { windowStart, spokenEnd } = await spokenArrivalWindow(db, row, dayOnly);
 

@@ -14,7 +14,9 @@
 jest.mock('../models/db', () => jest.fn());
 
 const db = require('../models/db');
-const { eligibleForEmail, resolveMarketingClass, REASONS } = require('../services/email-division/eligibility');
+const {
+  eligibleForEmail, resolveMarketingClass, REASONS, embeddedLineConsent,
+} = require('../services/email-division/eligibility');
 
 const NOW = new Date('2026-09-28T15:00:00Z'); // Mon Sep 28, 11:00 ET
 
@@ -433,6 +435,156 @@ describe('email-division eligibility', () => {
     const r = await evalWith({ tables: { customers: chain({ firstError: new Error('connection reset') }) } });
     expect(r.ok).toBe(false);
     expect(r.reason).toBe(REASONS.LOOKUP_FAILED);
+  });
+
+  // The receipt and service-report emails (#8262) are sent outside this
+  // pipeline and carry one add-a-service line. embeddedLineConsent answers
+  // for the whole line from ONE read: the senders ask it after the cards are
+  // composed, so a choice changed while the offer was priced decides.
+  describe('embeddedLineConsent: a pitch line inside an operational email', () => {
+    const MARKETING_UNSUBSCRIBE = {
+      email: 'sandy@example.test', group_key: 'marketing_newsletter', suppression_type: 'unsubscribe', status: 'active',
+    };
+    const REFERRAL_UNSUBSCRIBE = {
+      email: 'sandy@example.test', group_key: 'marketing_referral', suppression_type: 'unsubscribe', status: 'active',
+    };
+    const BOUNCE = { email: 'sandy@example.test', group_key: 'service_operational', suppression_type: 'bounce', status: 'active' };
+    const YES = { pitch: true, referralAsk: true };
+    const OFFER_ONLY = { pitch: true, referralAsk: false };
+    const NO = { pitch: false, referralAsk: false };
+    // Offers on and referral asks by email: both parts allowed.
+    const ALL_ON = { marketing_offers: true, referral_channel: 'email' };
+    let reads;
+    let snapshot;
+    afterEach(() => { delete db.transaction; });
+    const consent = ({
+      prefs = ALL_ON, suppressions = [], email = 'sandy@example.test', customerId = 'cust-1',
+      customer = customerRow(), dnc,
+    } = {}) => {
+      reads = { customers: 0, messaging_suppression: 0, notification_prefs: 0, email_suppressions: 0 };
+      // Every read goes through the snapshot's own handle: a read on the
+      // pool is outside the snapshot and fails the test.
+      db.mockImplementation((table) => { throw new Error(`Read of ${table} outside the snapshot`); });
+      db.transaction = jest.fn(async (work) => work(snapshot));
+      snapshot = jest.fn((table) => {
+        if (!(table in reads)) throw new Error(`Unexpected db table ${table}`);
+        reads[table] += 1;
+        // `suppressions` may be a function of the read's number, for a row
+        // that lands while the evaluation runs.
+        const rows = typeof suppressions === 'function' ? suppressions(reads.email_suppressions) : suppressions;
+        return {
+          customers: chain({ first: customer }),
+          messaging_suppression: chain({ first: dnc }),
+          notification_prefs: chain({ first: prefs }),
+          email_suppressions: chain({ result: rows }),
+        }[table];
+      });
+      return embeddedLineConsent({ customerId, email });
+    };
+
+    test('offers on, a marketing channel that includes email, referral asks by email: both parts', async () => {
+      expect(await consent()).toEqual(YES);
+      // The same address in another letter case is the same address.
+      expect(await consent({ email: ' Sandy@Example.test ' })).toEqual(YES);
+      expect(await consent({ prefs: { marketing_offers: true, marketing_channel: 'both', referral_nudge: true, referral_channel: 'both' } })).toEqual(YES);
+    });
+
+    // One read of each table decides both parts: a second read could see
+    // another state than the first.
+    test('both parts come from one read of each table', async () => {
+      expect(await consent()).toEqual(YES);
+      expect(reads).toEqual({ customers: 1, messaging_suppression: 1, notification_prefs: 1, email_suppressions: 1 });
+    });
+
+    // The four reads share one repeatable-read, read-only snapshot (pre-push
+    // audit P1 2026-11-22): a choice and a suppression that were never true
+    // together cannot add up to a yes.
+    test('the reads run in one repeatable-read, read-only snapshot', async () => {
+      expect(await consent()).toEqual(YES);
+      expect(db.transaction).toHaveBeenCalledTimes(1);
+      expect(db.transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: 'repeatable read', readOnly: true });
+      expect(snapshot).toHaveBeenCalledTimes(4);
+      // No customer or no address: no snapshot is opened.
+      expect(await consent({ customerId: null })).toEqual(NO);
+      expect(db.transaction).not.toHaveBeenCalled();
+      expect(await consent({ email: '' })).toEqual(NO);
+      expect(db.transaction).not.toHaveBeenCalled();
+    });
+
+    // A do-not-email row that lands while the evaluation runs (pre-push audit
+    // P1 2026-11-22): with a read per check, the referral check saw it and
+    // the marketing check did not, and the offer part rode a line the helper
+    // itself had seen blocked. All checks judge the first read's rows.
+    test('a suppression that lands during the evaluation cannot split the verdict', async () => {
+      const DO_NOT_EMAIL = { email: 'sandy@example.test', group_key: null, suppression_type: 'do_not_email', status: 'active' };
+      expect(await consent({ suppressions: (read) => (read === 1 ? [] : [DO_NOT_EMAIL]) })).toEqual(YES);
+      expect(reads.email_suppressions).toBe(1);
+      // The same row on the one read: no line at all.
+      expect(await consent({ suppressions: [DO_NOT_EMAIL] })).toEqual(NO);
+    });
+
+    // The whole line is a pitch: with the marketing choice off there is no
+    // line, whatever the referral choice says.
+    test.each([
+      ['offers turned off', { prefs: { marketing_offers: false, referral_channel: 'email' } }],
+      ['offers never chosen', { prefs: { marketing_offers: null, referral_channel: 'email' } }],
+      ['no prefs row', { prefs: null }],
+      ['marketing by text only', { prefs: { marketing_offers: true, marketing_channel: 'sms', referral_channel: 'email' } }],
+      ['a marketing unsubscribe on the address', { suppressions: [MARKETING_UNSUBSCRIBE] }],
+      // The pipeline's own contact checks run first (pre-push audit P1
+      // 2026-11-22): a customer who turned email off still gets the receipt,
+      // without promotional copy.
+      ['the email switch off', { prefs: { email_enabled: false, marketing_offers: true, referral_channel: 'email' } }],
+      ['a staff do-not-contact on the customer\'s phone', { dnc: { phone: '+19415550100' } }],
+      ['a removed customer', { customer: customerRow({ deleted_at: '2026-11-01T00:00:00Z' }) }],
+      ['no customer row', { customer: null }],
+      // The holder changed their address while the email was being built: the
+      // old inbox gets the operational email, never promotional copy.
+      ['an address that is no longer the customer\'s address on file', { customer: customerRow({ email: 'new@example.test' }) }],
+      ['a bounce on the address', { suppressions: [BOUNCE] }],
+      ['no address', { email: '' }],
+      ['no customer', { customerId: null }],
+    ])('%s: no line at all', async (_label, world) => {
+      expect(await consent(world)).toEqual(NO);
+    });
+
+    // The referral part is a referral ask by email (pre-push audit P1
+    // 2026-11-22): a customer who takes marketing email but turned referral
+    // nudges off, or takes them by text only, must not get it. A no there
+    // drops the referral part only: the service offer still rides.
+    test.each([
+      ['referral nudges turned off', { prefs: { marketing_offers: true, referral_nudge: false, referral_channel: 'email' } }],
+      ['referral asks by text only', { prefs: { marketing_offers: true, referral_nudge: true, referral_channel: 'sms' } }],
+      // The column's schema default is text, and the app shows it that way.
+      ['no referral channel chosen', { prefs: { marketing_offers: true, referral_nudge: true } }],
+      ['a referral unsubscribe on the address', { suppressions: [REFERRAL_UNSUBSCRIBE] }],
+    ])('%s: the offer part alone', async (_label, world) => {
+      expect(await consent(world)).toEqual(OFFER_ONLY);
+    });
+
+    test.each([
+      ['offers on', {}],
+      ['offers off', { prefs: { email_enabled: true, marketing_offers: false } }],
+      ['text only', { prefs: { email_enabled: true, marketing_offers: true, marketing_channel: 'sms' } }],
+      ['unsubscribed', { suppressions: [MARKETING_UNSUBSCRIBE] }],
+    ])('the offer part is the pipeline\'s own answer (%s)', async (_label, world) => {
+      const pipeline = await evalWith(world, { emailKey: 'lc.welcome' });
+      const prefs = world.prefs || { email_enabled: true, marketing_offers: true };
+      expect((await consent({ ...world, prefs })).pitch).toBe(pipeline.checks.allowPitch);
+    });
+
+    test.each([
+      ['a channel with email', {}],
+      ['nudges off', { prefs: { email_enabled: true, marketing_offers: true, referral_nudge: false, referral_channel: 'email' } }],
+      ['text only', { prefs: { email_enabled: true, marketing_offers: true, referral_nudge: true, referral_channel: 'sms' } }],
+      ['unsubscribed', { suppressions: [REFERRAL_UNSUBSCRIBE] }],
+    ])('with offers on, the referral part is the referral email\'s own answer (%s)', async (_label, world) => {
+      const prefs = world.prefs || { email_enabled: true, marketing_offers: true, referral_nudge: true, referral_channel: 'email' };
+      // An empty send ledger: the comparison is about the customer's referral
+      // choice, not the pipeline's send caps.
+      const pipeline = await evalWith({ ...world, prefs, ledger: [chain({ result: [] })] }, { emailKey: 'lc.referral_ask' });
+      expect((await consent({ ...world, prefs })).referralAsk).toBe(pipeline.ok);
+    });
   });
 
   test('LOOKUP_FAILED on an unrecognized stream (never falls through to an allow)', async () => {

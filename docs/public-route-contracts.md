@@ -3371,9 +3371,14 @@ no note state at all (pre-push audit round 29). No other mode carries the key.
 The technician's own note (owner 2026-11-19, the report speed plan; reader
 `visitReportCustomerCopy`, `technician-report-copy.js`): a completed visit may
 carry `structured_notes.reportNote = { v: 1, text, source: 'cleaned' | 'fixed' }`.
-Nothing writes it yet (its writer ships later, behind `GATE_REPORT_OWN_NOTE`). A
-render reads it from the record whatever a gate says, so a report already sent
-keeps its text. On such a record `technician_notes` holds the technician's raw
+Its one writer is the completion (`POST /api/admin/dispatch/:serviceId/complete`,
+`completeScheduledService`) while `GATE_REPORT_OWN_NOTE` is on: for a performed,
+untyped pest visit it freezes the key with the record, holding the tidied note
+when `reportNoteToStore` passes it again against the submitted note, else the
+fixed sentence; a repoint under the visit lock drops it. It is written once,
+with the record, like the other completion freezes. A render reads it from the
+record whatever the gate says, so turning the gate off keeps every stored note
+visible on its report, and a report already sent keeps its text. On such a record `technician_notes` holds the technician's raw
 note, and no reader below shows a line of it. (The lawn and tree & shrub
 technician paragraphs, each under its own gate, still take that note as their
 input, as they do on any visit today.) The payload changes existing fields
@@ -3515,6 +3520,58 @@ stored legacy recap, and the lawn layout takes no applied sentence out of it. A 
 above (production 2026-11-20, read-only: 3 of 654 completed visits lose a line
 from that PDF, none from the last 30 days; no visit has `ai_report` lists; no
 stored form value fails the screen).
+
+Receipt and tracker add-a-service + referral cards (owner 2026-11-21,
+`GATE_DOC_CROSS_SELL`, dark; owner 2026-11-22: the cards open the Waves app):
+`GET /api/receipt/:token` (a PAID invoice) and `GET /api/public/track/:token`
+(a COMPLETED visit) may carry two additive keys. `crossSell` is
+`{ label, relationship: 'add' | 'start', perApplication?, href }`: the plan
+offer the Waves app shows that customer now
+(`services/property-recommendations.js#appOfferForCustomer`: the app route's
+own gate, `GATE_PROPERTY_RECOMMENDATIONS`, then the app's composer), cut to
+what the page prints (`services/app-link-cards.js#publicOfferCard`; no option
+id, no fingerprint). `perApplication` is present only for a priced offer the
+app sells that customer in one tap
+(`services/one-tap-purchase.js#oneTapShownTo`, the same answer as the app
+route's `oneTap` field): without one-tap the app's card asks for an estimate
+and names no price, so the page's card is a quote request too.
+`referral` is `composeReferralCard({ customerId })`'s `{ headline, cta,
+offer? }`, as on the report, plus `href`. With the gate off, or for a link
+that may not show them, both keys are absent and the payload is unchanged.
+Each `href` is the card's tab in the app with the customer profile named
+(`services/app-link-cards.js#appLinksForCustomer`, through
+`qualifyNotificationLink`: `/?tab=billing&notificationProperty=<customer
+id>`, `/?tab=refer&notificationProperty=<customer id>`). One login can hold
+more than one profile and the app opens on the profile last used; the app's
+route guard switches to the named profile and `/auth/select-property`
+refuses a profile the signed-in account does not own. The customer id is no
+credential: nothing answers to it without a session. The page falls back to
+the bare tab for any other `href` (`appCardHref`).
+Both receipt routes gate the token format before any read
+(`routes/receipt-v2.js` `TOKEN_RE`, the pay router's range: the receipt token
+is the invoice's pay token; every token on record passes, production
+2026-11-22): a malformed token gets the unknown token's own 404.
+NO WRITE ROUTE: the receipt and the tracker have no card tap. Each card is a
+plain link into the Waves app (the Billing tab for the offer, the Refer tab
+for the referral) with no token, so nothing on a link page files a request,
+mints an estimate or enrolls a promoter, and the app's sign-in decides who may
+act. A receipt link is the pay link and a tracker link is texted to the
+visit's contacts; a person who holds one sees the card and can do nothing with
+it (owner-accepted 2026-11-22). Do not add a card tap to either router.
+When a page shows the cards (display rules, not an authorization boundary):
+the receipt for 7 days after `invoices.paid_at` (owner 2026-11-22, "week";
+`RECEIPT_CARD_WINDOW_MS`; no `paid_at` = no cards), the tracker while its
+`track_token_expires_at` is in the future (a link with no expiry on record
+carries none); never for a complaint-driven (callback) visit while
+`GATE_RESERVICE_REPORT_COPY` is on (the flag is read on the job and on any
+service record of the job); and only on an account whose links go to the
+account holder by its own setup (`linkReachesOnlyAccountHolder`: no
+third-party payer on the invoice, the job or the account, no service contact
+on the account; for the receipt also no distinct
+`notification_prefs.billing_email`, via `getReceiptEmailRecipients`; for the
+tracker also no payer on any invoice of the visit). A forwarded or CC'd link
+is not tracked. Both builders are best-effort: any failure renders the page
+without cards. The service report's own card and its tap are unchanged.
 
 Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
 `services/service-report/cross-sell.js`'s `buildReportCrossSell`): the
@@ -10372,7 +10429,7 @@ Expired-estimate card details (2026-11-05, estimate page audit): GET `/api/estim
 
 Stuck-booking records and office alert (2026-11-05, estimate page audit fix 3): GET `/api/public/estimates/:token/available-slots`, POST `/:token/find-slots`, POST `/:token/reserve`, DELETE `/:token/reserve/:scheduledServiceId`, PUT `/api/estimates/:token/accept` and the eligible-expired 404 of GET `/api/estimates/:token/data` answer exactly as before; every change here is a side effect after the answer is decided, never awaited by it, and never a customer message. For a customer request (not a bot user agent, no admin marker cookie, not an admin IP; `customer-page-views.js` `shouldRecord`), a date browse (`?date=`) or a find-slots search writes one `audit_log` row `estimate_slot_search` (`metadata` `{ via: 'date' | 'ai', date, empty }`), a reserve that took a hold writes `estimate_hold_started` (`{ scheduled_service_id, date, window_start, expires_at }`), and a release that deleted one writes `estimate_hold_ended` (`{ scheduled_service_id, how: 'released' }`); the 15-minute expiry sweep writes `estimate_hold_ended` with `how: 'expired'` for each estimate hold it deletes. All rows are `actor_type` `customer`, `resource_type` `estimate`, never `estimate_views` or `estimate_checkout_events`. The office's stuck alert (`estimate-stuck-alert.js`, one bell per estimate per Eastern day, sent, not accepted, declined or archived estimates only) is raised when the 90-day read (`windowDays=90`, no date) answers no slots and names no `metadata.firstDayAvailability` day, five searches in a row answer none, a hold the customer started expires unbooked with no newer live hold, available-slots answers an error other than the retryable capacity 409, the accept answers a 4xx the page does not recover from by itself (not 402, 404 or 429, not a refresh-and-confirm-again or busy-retry code, not a taken time or lapsed hold, not a no-booking reload such as the Bermuda or area add-on codes, not the office-review park), or the expired 404 above records a return.
 
-Day-only customer screens (`GATE_DAY_ONLY_PROMISE`, part C1, additive; gate off is byte-for-byte today): a visit the customer was told only the DAY for (`time-promise.js loadTimeDisplay` says `showHour` false: an office or recurring visit more than 24.25 h out whose hour the customer did not pick) is sent with its hour fields blank and two added keys, `day_only: true` and `arrival_note: "Arrival window texted the day before"` (`time-display.js`; no key is added for a visit that shows its hour). One bulk `loadTimeDisplay` call per payload; a failed lookup shows the hour. Surfaces: `GET /api/schedule`, `/next`, `/account-next`, `/properties-next` (`windowStart`, `windowEnd` null; `calendarExpiresAt` is the end of the ET day), `GET /api/public/appointment/:token` (`appointment.windowStart`, `appointment.arrivalWindow`, `service.visit.windowStart` null; the keys ride on `appointment`), `GET /api/public/prep/:token` (`upcomingVisits[].windowLabel` null), `GET /api/reports/project/:token/data` (`upcomingAppointment.windowStart`), the service report's `nextAppointment`, `nextSameServiceAppointment`, `upcomingVisitsCard.visits[]` and the termite and cockroach next visit (`windowStart` null, so the narrative prints the date alone), the estimate page's linked appointment (`windowStart`, `windowEnd`, `windowDisplay` null) and `GET /api/public/secure-card/:token` (`windowDisplay` null). `GET /api/public/appointment/:token/calendar.ics` for a day-only visit is an all-day event (`DTSTART;VALUE=DATE`, `DTEND;VALUE=DATE` the next day, description "We'll text your arrival window the day before.") with the same `UID` the timed event uses, so a later download updates the same calendar entry. Confirm: `POST /api/public/appointment/:token/confirm` and `POST /api/schedule/:id/confirm` accept a blank `windowStart` for a visit the server still shows as day-only (the visit's current start stands in; the date must still match); a blank `windowStart` for a visit that now shows its hour answers the usual 409 CHANGED. Unconditional fix (not gated): `GET /api/public/secure-card/:token` `windowDisplay` is now built from the visit's current `window_start` (the 2-hour arrival window), not the stored `window_display`, which no move updates.
+Day-only customer screens (part C1, additive): a visit the customer was told only the DAY for (`time-promise.js loadTimeDisplay` says `showHour` false: an office or recurring visit more than 24.25 h out whose hour the customer did not pick) is sent with its hour fields blank and two added keys, `day_only: true` and `arrival_note: "Arrival window texted the day before"` (`time-display.js`; no key is added for a visit that shows its hour). One bulk `loadTimeDisplay` call per payload; a failed lookup shows the hour. Surfaces: `GET /api/schedule`, `/next`, `/account-next`, `/properties-next` (`windowStart`, `windowEnd` null; `calendarExpiresAt` is the end of the ET day), `GET /api/public/appointment/:token` (`appointment.windowStart`, `appointment.arrivalWindow`, `service.visit.windowStart` null; the keys ride on `appointment`), `GET /api/public/prep/:token` (`upcomingVisits[].windowLabel` null), `GET /api/reports/project/:token/data` (`upcomingAppointment.windowStart`), the service report's `nextAppointment`, `nextSameServiceAppointment`, `upcomingVisitsCard.visits[]` and the termite and cockroach next visit (`windowStart` null, so the narrative prints the date alone), the estimate page's linked appointment (`windowStart`, `windowEnd`, `windowDisplay` null) and `GET /api/public/secure-card/:token` (`windowDisplay` null). `GET /api/public/appointment/:token/calendar.ics` for a day-only visit is an all-day event (`DTSTART;VALUE=DATE`, `DTEND;VALUE=DATE` the next day, description "We'll text your arrival window the day before.") with the same `UID` the timed event uses, so a later download updates the same calendar entry. Confirm: `POST /api/public/appointment/:token/confirm` and `POST /api/schedule/:id/confirm` accept a blank `windowStart` for a visit the server still shows as day-only (the visit's current start stands in; the date must still match); a blank `windowStart` for a visit that now shows its hour answers the usual 409 CHANGED. Unconditional fix (not gated): `GET /api/public/secure-card/:token` `windowDisplay` is now built from the visit's current `window_start` (the 2-hour arrival window), not the stored `window_display`, which no move updates.
 
 `/api/estimates/:token/promo-code` (POST, body `{ code }`; the "Have a promo code?" field on the customer estimate page, `GATE_ESTIMATE_PROMO_CODE`, dark in prod, owner 2026-11-18). A valid code saves one `estimate_promo_codes` row for the estimate with the credit amount frozen from the `discounts` row. It changes no price on the estimate, moves no money and sends nothing: the account credit posts once, when the estimate is accepted (`services/estimate-promo-code.js` `redeemPromoCodeForAcceptedEstimate`, called after the customer accept and the office Mark Won commit, and by the hourly `sweepAcceptedPromoCodes` recovery pass; the gate is read again there). Guards: `Cache-Control: no-store`, `X-Robots-Tag: noindex` and `Referrer-Policy: no-referrer` stamped before the limiter so its 429 carries them too; the code is saved in a transaction that locks the estimate row and re-checks that it can still be accepted (the accept takes the same lock, so a code is never saved onto an estimate accepted meanwhile); gate with a gate-aware limiter skip (dark = generic 404), `?adminPreview=1` = 404 (staff never enter a code from the preview), token format gate before any DB read, 10/hour keyed per IP and token, the durable call-side linkage verdict, and an estimate that can still be accepted with no price lock; every other row is the generic 404. A refused code answers 400 `{ error }` with `invalid_code` (unknown, inactive, expired, out of uses, not a fixed-dollar code, a code scoped by a rule this path cannot check, or a customer who is not eligible: one answer for all, so a probe learns nothing about why), `code_already_entered` (one code per estimate, enforced by a unique index) or `discount_already_applied` (the estimate carries an office discount). Success answers `{ success, promoCode: { canEnter: false, applied: { code, creditAmount, credited } } }`. Logs carry the estimate id and the error code only, never the token or the typed code. The same `promoCode` block rides `GET /api/estimates/:token/data` and the accept response when the gate is on: `{ canEnter: true, applied: null }` on an estimate that can still be accepted and has no office discount, `{ canEnter: false, applied }` once a code is on it, and absent otherwise (gate off, or a code that was voided at acceptance). Treat the gate, the generic refusal, the one-code-per-estimate and one-mint-per-row indexes and the no-comms rule as security-critical.
 

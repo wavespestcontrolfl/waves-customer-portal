@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
 import { Card } from '../ui/Card';
@@ -48,6 +48,20 @@ function StubLine({ label, value, strong = false }) {
   return <div className={`flex justify-between gap-4 py-0.5 ${strong ? 'font-medium' : ''}`}>
     <span>{label}</span><span className="tabular-nums">{value}</span>
   </div>;
+}
+
+// Time-off bank on the stub: only on a check of an employee with a bank (the server sends `timeOffBank`).
+function StubBank({ bank }) {
+  if (!bank) return null;
+  return <>
+    <h2 className="field-section-heading">Time-off bank</h2>
+    <div className="pay-stub-meta">
+      <StubLine label="Earned this pay" value={`${bank.earnedHours} h`} />
+      <StubLine label="Used this pay" value={`${bank.usedHours} h`} />
+      {Number(bank.unpaidHours) > 0 && <StubLine label="Time off not paid" value={`${bank.unpaidHours} h`} />}
+      <StubLine label="Balance after this pay" value={`${bank.balanceHours} h`} strong />
+    </div>
+  </>;
 }
 
 export function StubDialog({ call, check, onClose }) {
@@ -113,6 +127,8 @@ export function StubDialog({ call, check, onClose }) {
             </TBody>
           </Table>
           {stub.w4Default && <p className="m-0 text-ui-caption text-ink-secondary">{NO_W4_NOTE}</p>}
+
+          <StubBank bank={stub.timeOffBank} />
 
           {stub.employerContributions && stub.employerContributions.hsaCents > 0 && <>
             <h2 className="field-section-heading">Employer contributions</h2>
@@ -189,6 +205,15 @@ function Problems({ title, items }) {
       </li>)}
     </ul>
   </div>;
+}
+
+// Time off a time-off bank did not pay, with the server's reason (the bank is short, or the first-90-days rule).
+// It does not block the pay run; the server sends the list only when there is some.
+function UnpaidTimeOff({ rows = [] }) {
+  return <Problems
+    title="Time off not paid"
+    items={rows.map(row => ({ technicianId: row.technicianId, name: row.name, reason: row.reason }))}
+  />;
 }
 
 // Mercury paychecks (GATE_PAYROLL_MERCURY_STATUS / _PAY, owner plan A): Mercury sends a bank-transfer paycheck only
@@ -288,7 +313,7 @@ function MercuryCell({ call, check, onSaved }) {
 }
 
 function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
-  if (run.checks.length === 0) return <p className="m-0">No paychecks in this run yet.</p>;
+  if (run.checks.length === 0) return <p className="m-0">{run.status === 'draft' ? 'No paychecks in this run yet.' : 'No paychecks in this run.'}</p>;
   const t = run.totals;
   // Only a pay run drafted with time off turned on carries these figures.
   const showPto = run.checks.some(check => check.ptoPayCents > 0);
@@ -319,6 +344,9 @@ function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
           <TD>
             {check.name}
             {check.w4Default && <p className="m-0 text-ui-caption text-ink-secondary">{NO_W4_NOTE}</p>}
+            {check.timeOffBank && <p className="m-0 text-ui-caption text-ink-secondary">
+              Time-off bank: earned {check.timeOffBank.earnedHours} h, used {check.timeOffBank.usedHours} h, balance {check.timeOffBank.balanceHours} h
+            </p>}
           </TD>
           <TD nums align="right">{hoursWord(check.regularHours)}</TD>
           <TD nums align="right">{hoursWord(check.overtimeHours)}</TD>
@@ -457,28 +485,70 @@ function SendToMercury({ call, run, onChanged, onMessage }) {
   </div>;
 }
 
-export function RunDetail({ call, run, onChanged, onMessage, onRunsChanged }) {
-  const [confirming, setConfirming] = useState(false);
+// A run with no paycheck can still be finalized when it lists time off a time-off bank did not pay: that
+// closes the week, and those hours stop waiting for a pay run.
+const closesUnpaidOnly = run => run.checks.length === 0 && (run.unpaidTimeOff || []).length > 0;
+// `unverified`: the last read of the run failed, so its numbers can be from before a change.
+const canFinalizeRun = (run, unverified) => run.status === 'draft' && !run.stale && !unverified
+  && run.blocked.length + run.waiting.length === 0
+  && (run.checks.length > 0 || closesUnpaidOnly(run));
+
+// Why the owner cannot trust a draft's numbers yet. Recompute works them out again and reads them.
+function DraftNotices({ run, unverified }) {
+  if (run.status !== 'draft') return null;
+  return <>
+    {run.stale && <p role="status" className="m-0 text-ui-caption text-warn-fg">Hours or settings changed since this draft. Press Recompute.</p>}
+    {unverified && <p role="status" className="m-0 text-ui-caption text-warn-fg">This draft could not be read again after a change. Press Recompute.</p>}
+  </>;
+}
+
+function ConfirmFinalize({ run, busy, onYes, onCancel }) {
+  return <div role="group" aria-label="Confirm finalize" className="grid gap-2 rounded-sm border-hairline border-zinc-300 p-3">
+    <p className="m-0">{closesUnpaidOnly(run)
+      ? 'Finalize this pay run? It has no paycheck. The week closes and the time off above stays unpaid. You can void the run later to redo the week.'
+      : 'Finalize this pay run? The paychecks become final. You can void the run later to redo the week.'}</p>
+    <div className="flex flex-wrap gap-2">
+      <Button disabled={busy} onClick={onYes}>Yes, finalize</Button>
+      <Button variant="secondary" disabled={busy} onClick={onCancel}>Cancel</Button>
+    </div>
+  </div>;
+}
+
+export function RunDetail({ call, run, unverified, onChanged, onMessage, onRunsChanged }) {
+  // While the finalize prompt is open: the review token of the numbers on screen when Finalize was pressed.
+  const [confirmToken, setConfirmToken] = useState(null);
   const [voiding, setVoiding] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [stubFor, setStubFor] = useState(null);
+  const canFinalize = canFinalizeRun(run, unverified);
+  // A read in the background can bring other numbers under the open prompt. Time off that a time-off bank
+  // does not pay changes the token and does not make the draft out of date, so "Yes" would finalize numbers
+  // the owner did not confirm. The prompt closes, and the owner reviews them and presses Finalize again.
+  const confirming = confirmToken !== null && (busy || (confirmToken === run.token && canFinalize));
+  useEffect(() => {
+    if (confirmToken === null || confirming) return;
+    setConfirmToken(null);
+    setError('The numbers changed. Review them, then press Finalize again.');
+  }, [confirmToken, confirming]);
 
   async function act(action, path, body, done) {
     setBusy(true); setError('');
+    // A finalize or a void settles the run: it changes the time-off banks, the pay lines and the tax forms.
+    const settles = action === 'finalize' || action === 'void';
     try {
       const data = await call(path, { method: 'POST', ...(body ? { body } : {}) });
-      setConfirming(false); setVoiding(false);
+      setConfirmToken(null); setVoiding(false);
       onMessage(done);
       await onChanged(data.run.id);
     } catch (failure) {
       setError(failure.message);
-      // A changed draft was already saved by the server: show it.
-      if (action === 'finalize') { setConfirming(false); await onChanged(run.id); }
+      // The server can have committed before the error reached the page: a changed draft it saved in place
+      // of a finalize, or a void whose answer was lost. Read the run again and show what the server holds.
+      if (settles) { setConfirmToken(null); setVoiding(false); await onChanged(run.id); }
     }
-    // A finalized or voided run changes the tax form figures on this page. Refetch them after a
-    // failure too: the server may have committed before the error reached the page.
-    if ((action === 'finalize' || action === 'void') && onRunsChanged) onRunsChanged();
+    // The tax form figures on this page are read again for the same reason, after a failure too.
+    if (settles && onRunsChanged) onRunsChanged();
     setBusy(false);
   }
 
@@ -498,8 +568,6 @@ export function RunDetail({ call, run, onChanged, onMessage, onRunsChanged }) {
 
   const isDraft = run.status === 'draft';
   const isFinal = run.status === 'finalized';
-  const problems = run.blocked.length + run.waiting.length;
-  const canFinalize = isDraft && run.checks.length > 0 && problems === 0 && !run.stale;
 
   return <Card className="grid gap-4 p-4" aria-label={`Pay run for ${weekLabel(run.weekStart)}`}>
     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -511,11 +579,12 @@ export function RunDetail({ call, run, onChanged, onMessage, onRunsChanged }) {
     </div>
 
     {run.status === 'voided' && <p className="m-0 text-ui-caption">Voided{run.voidReason ? `: ${run.voidReason}` : ''}</p>}
-    {run.stale && <p role="status" className="m-0 text-ui-caption text-warn-fg">Hours or settings changed since this draft. Press Recompute.</p>}
+    <DraftNotices run={run} unverified={unverified} />
 
     <Problems title="Waiting for approval" items={run.waiting} />
     <Problems title="Blocked" items={run.blocked} />
     <WaitingBonuses notes={run.techRewardsNotes} />
+    <UnpaidTimeOff rows={run.unpaidTimeOff} />
 
     <ChecksTable
       call={call} run={run} isFinal={isFinal} onStub={setStubFor}
@@ -524,13 +593,11 @@ export function RunDetail({ call, run, onChanged, onMessage, onRunsChanged }) {
 
     {error && <p role="alert" className="m-0 text-ui-caption text-alert-fg">{error}</p>}
 
-    {confirming && <div role="group" aria-label="Confirm finalize" className="grid gap-2 rounded-sm border-hairline border-zinc-300 p-3">
-      <p className="m-0">Finalize this pay run? The paychecks become final. You can void the run later to redo the week.</p>
-      <div className="flex flex-wrap gap-2">
-        <Button disabled={busy} onClick={() => act('finalize', `/runs/${run.id}/finalize`, { token: run.token }, 'Pay run finalized.')}>Yes, finalize</Button>
-        <Button variant="secondary" disabled={busy} onClick={() => setConfirming(false)}>Cancel</Button>
-      </div>
-    </div>}
+    {confirming && <ConfirmFinalize
+      run={run} busy={busy}
+      onYes={() => act('finalize', `/runs/${run.id}/finalize`, { token: confirmToken }, 'Pay run finalized.')}
+      onCancel={() => setConfirmToken(null)}
+    />}
 
     {voiding && <VoidForm
       busy={busy}
@@ -540,7 +607,7 @@ export function RunDetail({ call, run, onChanged, onMessage, onRunsChanged }) {
 
     {!confirming && !voiding && <div className="flex flex-wrap gap-2">
       {isDraft && <Button variant="secondary" disabled={busy} onClick={() => act('recompute', `/runs/${run.id}/recompute`, null, 'Pay run recomputed.')}>Recompute</Button>}
-      {isDraft && <Button disabled={busy || !canFinalize} onClick={() => setConfirming(true)}>Finalize</Button>}
+      {isDraft && <Button disabled={busy || !canFinalize} onClick={() => { setError(''); setConfirmToken(run.token); }}>Finalize</Button>}
       {(isDraft || isFinal) && <Button variant="secondary" disabled={busy} onClick={() => setVoiding(true)}>Void</Button>}
       {run.status !== 'voided' && run.checks.length > 0 && <Button variant="secondary" disabled={busy} onClick={exportCsv}>Export CSV</Button>}
     </div>}
@@ -551,7 +618,10 @@ export function RunDetail({ call, run, onChanged, onMessage, onRunsChanged }) {
   </Card>;
 }
 
-export default function PayRuns({ call, onRunsChanged }) {
+// What the owner asked for while a new pay run is being made: no run id exists yet.
+const NEW_RUN = Symbol('new pay run');
+
+export default function PayRuns({ call, onRunsChanged, bankKey = '' }) {
   const weeks = useMemo(() => {
     const last = lastFinishedWeekStart();
     return Array.from({ length: WEEK_CHOICES }, (_, n) => addStaffCalendarDays(last, -7 * n));
@@ -563,6 +633,9 @@ export default function PayRuns({ call, onRunsChanged }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  // The last read of the run on screen failed. The list reload clears `error`, so this stays apart from it:
+  // the run keeps a line that says so, and Finalize waits until a read of it succeeds.
+  const [unverified, setUnverified] = useState(false);
 
   const loadList = useCallback(async () => {
     try {
@@ -572,13 +645,83 @@ export default function PayRuns({ call, onRunsChanged }) {
   }, [call]);
   useEffect(() => { loadList(); }, [loadList]);
 
-  const open = useCallback(async (id) => {
+  // Only the newest read sets the open run. An older read that answers last (a reload after a setting was
+  // saved, a slow network) must not put another run back under the Finalize and Void buttons.
+  // `shown` is the run on screen. `wanted` is the run the owner last asked for: it differs from `shown`
+  // only while that read is on its way. `changes` counts the changes of something a run depends on, and
+  // `readThrough` is the count the run on screen was read at. A read that a change ended under can be from
+  // before the change, so it is made once more; and the run on screen is behind while the two counts differ.
+  const newestOpen = useRef(0);
+  const shown = useRef(null);
+  const wanted = useRef(null);
+  const changes = useRef(0);
+  const readThrough = useRef(0);
+  const show = useCallback((next, seen) => {
+    shown.current = next.id; wanted.current = next.id; readThrough.current = seen;
+    setRun(next); setUnverified(false);
+  }, []);
+  // `kept` is the failure that sent the owner back to the run on screen. It stays up while that run is read
+  // again: the list is not reloaded then, because a list reload clears the message.
+  const open = useCallback(async (id, kept = '') => {
+    wanted.current = id;
+    newestOpen.current += 1;
+    const mine = newestOpen.current;
     try {
-      const data = await call(`/runs/${id}`);
-      setRun(data.run); setError('');
-    } catch (failure) { setError(failure.message); }
-    loadList();
-  }, [call, loadList]);
+      let data;
+      let seen;
+      do {
+        seen = changes.current;
+        data = await call(`/runs/${id}`);
+        if (mine !== newestOpen.current) return;
+      } while (seen !== changes.current);
+      show(data.run, seen); setError(kept);
+    } catch (failure) {
+      if (mine !== newestOpen.current) return;
+      wanted.current = shown.current;
+      setError(failure.message);
+      if (shown.current === id) setUnverified(true);
+      // The owner is back on the run on screen. A change that ended while they waited is not in it (its read
+      // was held back, or dropped for this one): read it now.
+      if (shown.current && shown.current !== id && readThrough.current !== changes.current) {
+        open(shown.current, failure.message);
+        return;
+      }
+    }
+    if (!kept) loadList();
+  }, [call, loadList, show]);
+  // Something a run depends on changed (time off, a yearly-hours setting, another run finalized or voided).
+  // The run on screen is read again now. While the owner waits for another run or a new one, that read is
+  // not started: it would be dropped for this one, and the first run would stay under the buttons. The run
+  // they wait for is read once more when it answers, and the run on screen is read when that one fails
+  // (both by the count). Returns the read it started, or null.
+  const refresh = useCallback(() => {
+    changes.current += 1;
+    if (shown.current && wanted.current === shown.current) return open(shown.current);
+    return null;
+  }, [open]);
+
+  // A recompute, a finalize or a void answers for the run it started on. Read that run again only while it
+  // is still the run the owner wants: an answer that arrives after they opened another run must not put the
+  // first run back under the buttons. That answer can still have changed a time-off bank or a pay line, and
+  // the run the owner looks at or waits for can have read them before it: the panels reload
+  // (settledElsewhere) and that run is read again, so a draft shows as out of date. The list reloads either way.
+  const [settledElsewhere, setSettledElsewhere] = useState(0);
+  const changed = useCallback((id) => {
+    // The answer is a change too. When the read below is dropped for a run that then does not come, the
+    // run on screen is behind by this count, and the failed open reads it.
+    if (wanted.current === id) { changes.current += 1; return open(id); }
+    setSettledElsewhere(count => count + 1);
+    return refresh() || loadList();
+  }, [open, loadList, refresh]);
+
+  // A yearly-hours setting changes what an open draft would pay. Read the run again, so a draft shows as
+  // out of date and Finalize waits for a Recompute.
+  const bankKeySeen = useRef(bankKey);
+  useEffect(() => {
+    if (bankKeySeen.current === bankKey) return;
+    bankKeySeen.current = bankKey;
+    refresh();
+  }, [bankKey, refresh]);
 
   function pickWeek(event) {
     setWeek(event.target.value);
@@ -588,11 +731,28 @@ export default function PayRuns({ call, onRunsChanged }) {
   async function start(event) {
     event.preventDefault();
     setBusy(true); setError(''); setMessage('');
+    // The owner asks for a new run. It becomes the open run when it answers, unless they picked another
+    // run meanwhile. Until then no refresh may read the shown run again: that read would take its place.
+    // A change that ended while the run was being made can be missing from its answer: read it once more.
+    // When no run comes, the run on screen has not read that change: read it, as a failed open does.
+    wanted.current = NEW_RUN;
+    newestOpen.current += 1;
+    const mine = newestOpen.current;
+    const seen = changes.current;
     try {
       const data = await call('/runs', { method: 'POST', body: { weekStart: week, payDate } });
-      setRun(data.run);
+      if (mine === newestOpen.current) {
+        show(data.run, seen);
+        if (seen !== changes.current) open(data.run.id);
+      }
       loadList();
-    } catch (failure) { setError(failure.message); }
+    } catch (failure) {
+      setError(failure.message);
+      if (mine === newestOpen.current) {
+        wanted.current = shown.current;
+        if (shown.current && readThrough.current !== changes.current) open(shown.current, failure.message);
+      }
+    }
     setBusy(false);
   }
 
@@ -619,20 +779,24 @@ export default function PayRuns({ call, onRunsChanged }) {
     </Card>
 
     {run && <RunDetail
-      key={run.id} call={call} run={run}
-      onChanged={open} onMessage={setMessage} onRunsChanged={onRunsChanged}
+      key={run.id} call={call} run={run} unverified={unverified}
+      onChanged={changed} onMessage={setMessage} onRunsChanged={onRunsChanged}
     />}
 
     <TimeOffPanel
       call={call} weekStart={run ? run.weekStart : week}
-      onChanged={() => { if (run) open(run.id); }}
+      // A finalize adds to and takes from the time-off banks, a void undoes that, and a yearly-hours setting
+      // (bankKey, from the settings table) turns a bank on or off: reload the balances on each.
+      refreshKey={`${run ? `${run.id}:${run.status}` : ''}|${bankKey}|${settledElsewhere}`}
+      onChanged={refresh}
     />
 
     <PayLinesPanel
       call={call} weekStart={run ? run.weekStart : week}
-      // A finalize pays the open lines and a void reopens them: reload when the run's status changes.
-      refreshKey={run ? `${run.id}:${run.status}` : ''}
-      onChanged={() => { if (run) open(run.id); }}
+      // A finalize pays the open lines and a void reopens them: reload when the run's status changes, and
+      // when a finalize or a void of another run ends (settledElsewhere).
+      refreshKey={`${run ? `${run.id}:${run.status}` : ''}|${settledElsewhere}`}
+      onChanged={refresh}
     />
 
     {runs && runs.length === 0 && <p className="m-0">No pay runs yet.</p>}

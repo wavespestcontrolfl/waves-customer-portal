@@ -686,7 +686,14 @@ async function sendCustomerMessageCore(input) {
     || (input.audience === 'customer' && input.purpose === 'billing'
       && input.operatorInitiated === true
       && input.metadata?.original_message_type === 'price_change_notice'
-      && input.metadata?.rate_review_letter === true);
+      && input.metadata?.rate_review_letter === true)
+    // The text that carries an office answer from the portal (portal-messages.js answerText,
+    // GATE_PORTAL_ANSWER_TEXT): the whole answer goes to the number on the customer's row, so the
+    // customer-comms + phone locks and the customer row are held through the provider request while the
+    // number is re-read (a phone correction can never send the answer to the old number).
+    || (input.audience === 'customer' && input.purpose === 'support_resolution'
+      && input.entryPoint === 'admin_portal_answer'
+      && input.metadata?.original_message_type === 'portal_answer');
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is not allowed for this message' };
   }

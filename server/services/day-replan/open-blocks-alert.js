@@ -6,7 +6,7 @@
  * Daily 07:05 ET (scheduler.js) it reads the close-gaps records the 04:40 re-plan wrote (day_replan_plans.close_gaps,
  * ./close-gaps.js) and raises ONE admin notification: the open time in the next 7 days that a new job could fill
  * (blocks of an hour or more inside a technician's day, 8:00 AM to 5:00 PM, with no job), the biggest block, and what
- * re-timing booked jobs would free under the rules being measured. The full list is in the row's detail.
+ * re-timing booked jobs would free on the days the run did not re-time. The full list is in the row's detail.
  * It sends nothing to a customer and changes no visit.
  *
  * Which tech-days count (the booking picker's own rules): an assignable technician who is not marked absent, on a day
@@ -70,7 +70,7 @@ const parse = (value) => (typeof value === 'string' ? JSON.parse(value) : value)
 const standing = (row, rec) => (row.apply_status === 'applied' && rec.packed ? rec.packed : rec.now);
 
 /**
- * Extra sellable minutes one tech-day would gain from the measured P1 rule, 0 when none. P1's plan is p1.packed
+ * Extra sellable minutes one tech-day would gain from the P1 (pack) rule, 0 when none. P1's plan is p1.packed
  * (record v2); a v1 record measured P1 on the drive-best plan (packed).
  */
 function freedMin(rec) {
@@ -163,7 +163,8 @@ function summarize(rows, techNames, unplanned = []) {
     for (const b of standing(row, rec).blocks || []) {
       if (b.min >= SELLABLE_MIN) blocks.push({ day: row.day, tech: techNames.get(String(row.technician_id)) || null, techId: String(row.technician_id), ...b });
     }
-    // An applied day already has the re-plan's hours; the measured rules' gains were counted from the day as booked.
+    // An applied day already has the re-plan's hours (a packed day too: its record's p1 is the plan the run wrote);
+    // the gains were counted from the day as booked.
     if (row.apply_status !== 'applied') freed += freedMin(rec);
     replayed += (rec.s1 || []).length;
     pickDiffers += (rec.s1 || []).filter((s) => s.differs).length;
@@ -298,7 +299,9 @@ function detailText(sum, fill = null, rain = null) {
   if (rain) lines.push('', ...rainLines(rain));
   lines.push(
     '',
-    'Measuring only (no visit changes): re-timing booked jobs to the front of the day under the new rules would free'
+    // The pack rule writes since 2026-11-22: a day the run re-timed is already in the blocks above (standing), so
+    // this figure is only from the days the run did not write (every day in shadow mode).
+    'On the days the 4:40 AM run did not re-time: moving booked jobs to the front of the day would free'
       + ` ${span(sum.freedMin)} more.`,
     `New bookings from the last 24 hours, replayed: ${sum.replayed}. A block-aware picker would pick a different hour for ${sum.pickDiffers}.`,
   );

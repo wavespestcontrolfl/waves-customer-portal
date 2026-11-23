@@ -4836,6 +4836,58 @@ async function completeScheduledService(completionInput, packetContext = null) {
         completionInput.body?.blogPostId,
       )
       : { post: null, rejected: false };
+    // The technician's own note as the pest Fast Complete sheet showed it
+    // (GATE_REPORT_OWN_NOTE, report speed plan step 2): screened again here
+    // against the note this completion stores, before the transaction, and
+    // frozen with the record below (the tidied note, or the fixed sentence).
+    // Only a performed, untyped pest visit the recap sheet takes; with the gate
+    // off, or for any other visit, a sent note is ignored. Never throws; in a
+    // grouped closeout `db` is the packet's transaction and the reads run in
+    // savepoints.
+    const reportNoteLive = require('../config/feature-gates').reportOwnNoteLive();
+    const reportNoteSent = reportNoteLive && completionInput.body?.reportNote != null;
+    // A note sent while the gate is off (turned off after the sheet loaded) refuses a fresh attempt (409 below): the
+    // raw note it carries is never a recap's input. Replays and resumes of a committed attempt are untouched.
+    const reportNoteStale = !reportNoteLive && completionInput.body?.reportNote != null;
+    // The preview route's own visit check (strict profile, area add-on rows), in a savepoint scope (its profile
+    // resolver runs its own savepoint reads). undefined = not asked; null = the check could not run.
+    // The report shows the note only on its pest layout (detectServiceLine of the visit label), so a label read as
+    // another line takes none.
+    const reportNoteVisit = reportNoteSent && visitOutcome === 'completed' && !typedFindingsType && !isBackfillCompletion
+      && detectServiceLine(svc.service_type || '') === 'pest'
+      ? await savepointScope(db, (k) => require('./pest-recap').resolveEligibility(svc.id, k, { strict: true })).catch(() => null)
+      : undefined;
+    // A sent note on a visit that could not be checked refuses the completion below (retryable): the record never
+    // goes out without the note marker while the raw note reaches the recap model.
+    // resolveEligibility answers a failed profile lookup as profile null, and a failed add-on lookup as "has add-on
+    // rows": both are a check that could not run, so the add-on read is made again here and a failure counts.
+    const reportNoteAddOnsUnread = reportNoteVisit?.ok === true && reportNoteVisit.svc?.hasAreaAddOnRows === true
+      // Rows found again = a confirmed add-on visit (no note); none, or a read that fails = the first verdict was a
+      // failed read, so the completion is refused as retryable.
+      && await savepointScope(db, (k) => require('./area-addon-visit-rows').visitHasAreaAddOnRows(k, svc.id))
+        .then((hasRows) => hasRows !== true, () => true);
+    const reportNoteUnverified = reportNoteVisit === null || (reportNoteVisit?.ok === true && !reportNoteVisit.profile)
+      || reportNoteAddOnsUnread;
+    // A sent note on a visit the check now finds the sheet does not take (an add-on or a reclassification since the
+    // sheet loaded) refuses as a changed visit (409 below): the sheet reloads, never a recap from the raw note.
+    const reportNoteVisitChanged = reportNoteVisit?.ok === true && reportNoteVisit.eligible !== true && !reportNoteUnverified;
+    // A sent note in no shape the sheet sends is a bad request (400 below), never a completion without the marker.
+    // A visit with a companion service is never one: its report shows the companion card, not the note.
+    const reportNoteCompanions = Array.isArray(companionFindings) ? companionFindings.length > 0
+      : Boolean(companionFindings && typeof companionFindings === 'object' && Object.keys(companionFindings).length);
+    // So is a visit the check never asks about (not performed, typed, a backfill): the sheet sends a note only for a
+    // performed pest visit.
+    const reportNoteInvalid = reportNoteSent && (reportNoteCompanions || reportNoteVisit === undefined
+      || !require('./service-report/report-own-note').isSheetReportNote(completionInput.body.reportNote));
+    const reportNotePick = reportNoteVisit?.eligible === true && !reportNoteInvalid
+      ? await require('./service-report/report-own-note').reportNoteToStore({
+        reportNote: completionInput.body.reportNote,
+        note: typeof technicianNotes === 'string' ? technicianNotes.trim() : '',
+        serviceType: svc.service_type,
+        customerId: svc.customer_id,
+        db,
+      })
+      : null;
     // Typed lanes (mosquito_event, one-time pest, …) record their work in the
     // typed findings schema, never through the specialty presets, even when
     // their profile key aliases onto a specialty lane (mosquito_one_time →
@@ -5262,6 +5314,50 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // A blog post that is no longer live on the site (unpublished, moved,
     // never live) is an actionable 400 for a fresh attempt, before any write,
     // like a retired tip: a link the tech chose never vanishes silently.
+    if (claim.action === 'proceed' && reportNoteStale) {
+      await CompletionAttempts.markCompletionAttemptFailed(
+        completionAttempt,
+        new Error('report_note_off'),
+        db,
+      ).catch(() => {});
+      return ({ status: 409, body: {
+        error: 'The report note is turned off. Reload the sheet and complete again.',
+        code: 'REPORT_NOTE_OFF',
+      } });
+    }
+    if (claim.action === 'proceed' && reportNoteInvalid) {
+      await CompletionAttempts.markCompletionAttemptFailed(
+        completionAttempt,
+        new Error('report_note_invalid'),
+        db,
+      ).catch(() => {});
+      return ({ status: 400, body: {
+        error: 'The report note was not sent in a form the server reads. Reload the sheet and complete again.',
+        code: 'REPORT_NOTE_INVALID',
+      } });
+    }
+    if (claim.action === 'proceed' && reportNoteVisitChanged && !reportNoteInvalid) {
+      await CompletionAttempts.markCompletionAttemptFailed(
+        completionAttempt,
+        new Error('report_note_visit_changed'),
+        db,
+      ).catch(() => {});
+      return ({ status: 409, body: {
+        error: 'This visit changed since the sheet opened. Reload it and complete again.',
+        code: 'visit_identity_changed',
+      } });
+    }
+    if (claim.action === 'proceed' && reportNoteUnverified) {
+      await CompletionAttempts.markCompletionAttemptFailed(
+        completionAttempt,
+        new Error('report_note_unverified'),
+        db,
+      ).catch(() => {});
+      return ({ status: 503, body: {
+        error: 'The report note could not be checked right now. Try Complete again.',
+        code: 'REPORT_NOTE_UNVERIFIED',
+      } });
+    }
     if (claim.action === 'proceed' && blogPostPick.rejected) {
       await CompletionAttempts.markCompletionAttemptFailed(
         completionAttempt,
@@ -6539,7 +6635,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // call so a stalled provider can't keep the already-claimed completion
         // attempt 'pending' (retries would then 409 until the stale window expires)
         // — on timeout (or error) we fall back to the deterministic recap.
-        let effectiveCustomerRecap = customerRecap;
+        // A frozen report note is the customer copy: the recap (and its text)
+        // is that screened note, so no model reads the raw note for a recap.
+        let effectiveCustomerRecap = reportNotePick ? reportNotePick.text : customerRecap;
         // An invoice-issued closeout has no form, no products and no
         // application evidence behind it, and renders no report — a
         // generated recap would spend an LLM call (plus its six-second
@@ -7597,6 +7695,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             formRecommendations,
             ...(techTipsFreeze.tips.length ? { techTips: techTipsFreeze.tips } : {}),
             ...(blogPostPick.post ? { blogPost: blogPostPick.post } : {}),
+            ...(reportNotePick ? { reportNote: reportNotePick } : {}),
             // GATE_LAWN_TREATMENT_GUIDE: which guide cards showed and what the technician did, validated
             // from the lawnFast echo and frozen here; no customer or public path reads it.
             ...require('./lawn-treatment-guide').treatmentGuideFreeze(lawnFast, { products }),
@@ -7877,6 +7976,23 @@ async function completeScheduledService(completionInput, packetContext = null) {
               profile: frozenCompletionProfile,
             }))) {
             delete structuredNotes.blogPost;
+          }
+          // The report note was screened on the pre-lock visit: a repoint since
+          // (another service or catalog service, another customer, a profile
+          // the sheet does not take, an area add-on row) or an identity the
+          // re-resolve could not establish rolls the record back as a changed
+          // visit (the sheet reloads and is sent again), never a record left
+          // with the raw note and no note marker.
+          if (structuredNotes.reportNote && (!primaryFreezeTrusted
+            || (lockedSvcRow && (String(lockedSvcRow.service_type ?? '') !== String(svc.service_type ?? '')
+              || String(lockedSvcRow.service_id ?? '') !== String(svc.service_id ?? '')
+              || String(lockedSvcRow.customer_id ?? '') !== String(svc.customer_id ?? '')))
+            // The preview route's own visit check again, on the locked visit (strict profile, add-on rows), and the
+            // same resolved service as the note was screened on (a null service_id resolves through the key snapshot).
+            || await savepointScope(trx, (k) => require('./pest-recap').resolveEligibility(svc.id, k, { strict: true }))
+              .then((locked) => locked?.eligible !== true
+                || String(locked.profile?.serviceKey ?? '') !== String(reportNoteVisit?.profile?.serviceKey ?? ''), () => true))) {
+            throw Object.assign(new Error('visit changed since the report note was screened'), { code: 'visit_identity_changed' });
           }
           // The inspection-credit marker keys to the LOCKED identity too
           // (Codex #3178 r32 P2): the serviceData literal tested the

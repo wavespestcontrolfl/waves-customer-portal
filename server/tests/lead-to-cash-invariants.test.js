@@ -46,6 +46,7 @@ jest.mock('../config/completion-lane-registry', () => ({
 }));
 jest.mock('../services/closeout-status', () => ({ getCloseoutStatus: jest.fn() }));
 jest.mock('../services/new-recurring-welcome-sms', () => ({ findFirstPlansWithoutWelcome: jest.fn(), WELCOME_AUDIT_WINDOW_DAYS: 14, WELCOME_AUDIT_GRACE_HOURS: 3 }));
+jest.mock('../services/invoice-tier-line-check', () => ({ tierSavingsLeftOffInvoices: jest.fn() }));
 jest.mock('../services/customer-properties', () => ({
   customersWithStreetLineHoldingLocality: jest.fn(), customersWithUnpinnedSavedAddress: jest.fn(), customersWithIncompleteAddress: jest.fn(),
 }));
@@ -74,6 +75,7 @@ const { classifyCatalogRow } = require('../config/completion-lane-registry');
 const { getCloseoutStatus } = require('../services/closeout-status');
 const { customersWithStreetLineHoldingLocality, customersWithUnpinnedSavedAddress, customersWithIncompleteAddress } = require('../services/customer-properties');
 const { runPredicate } = require('../services/completion-record-invariants');
+const { tierSavingsLeftOffInvoices } = require('../services/invoice-tier-line-check');
 const {
   runLeadToCashInvariantSweep, DETECTORS,
   _private: {
@@ -111,9 +113,10 @@ describe('registry contract', () => {
 
   // A check whose query is bound to a look-back or look-ahead date can lose a finding with nothing fixed, so its failures
   // post as records, never in the standing list a clean run closes. A new detector with such a date filter joins this list.
-  test('the moving-window checks are the closeout day, the 14-day welcome audit, the ghost lanes and churned upcoming visits', () => {
+  test('the moving-window checks are the closeout day, the 14-day welcome audit, the ghost lanes, churned upcoming visits and the 90-day invoice tier check', () => {
     expect(DETECTORS.filter((d) => d.moving).map((d) => d.key).sort())
-      .toEqual(['churned_upcoming_visits', 'closeout_failed_facts', 'completion_lane_ghost_lanes', 'new_plan_without_welcome']);
+      .toEqual(['churned_upcoming_visits', 'closeout_failed_facts', 'completion_lane_ghost_lanes', 'new_plan_without_welcome',
+        'tier_saving_left_off_invoice']);
     // Only the closeout check reads a different window on each run (yesterday).
     expect(DETECTORS.filter((d) => d.freshEachRun).map((d) => d.key)).toEqual(['closeout_failed_facts']);
     for (const d of DETECTORS) if (d.freshEachRun) expect(d.moving).toBe(true);
@@ -919,6 +922,30 @@ describe('detector adapters', () => {
     expect(auditRecurringScheduleAnomalies).toHaveBeenCalledWith({}, db);
     expect(out).toEqual({ count: 2, ids: ['a1', 'a2'], detail: { cadence: 2 } });
     expect(JSON.stringify(out)).not.toContain('SHOULD NOT LEAK');
+  });
+
+  test('tier_saving_left_off_invoice reads the shared db from the Eastern day and keys a record by the estimate line', async () => {
+    tierSavingsLeftOffInvoices.mockResolvedValue({ checked: 40, notJudged: 9, findings: [
+      { visitId: 'v1', estimateId: 'e1', serviceKey: 'pest_control', lineKey: 'recurring:0', tier: 'platinum' },
+      { visitId: 'v2', estimateId: 'e1', serviceKey: 'pest_control', lineKey: 'recurring:0', tier: 'platinum' },
+      { visitId: 'v3', estimateId: 'e2', serviceKey: 'rodent_bait', lineKey: 'recurring:0', tier: 'silver' },
+      // A second line of estimate e1 with the same service key (a monthly and a seasonal mosquito line share one).
+      { visitId: 'v4', estimateId: 'e1', serviceKey: 'pest_control', lineKey: 'recurring:1', tier: 'platinum' },
+    ] });
+    const out = await byKey('tier_saving_left_off_invoice').run({ now: NOW });
+    expect(tierSavingsLeftOffInvoices).toHaveBeenCalledWith(db, { today: '2026-06-15' });
+    // Two visits of one estimate line are one finding, counted once in its first record (pre-push audit), and a new
+    // visit of that line entering the window posts nothing new. Two lines of one estimate stay two findings, even with
+    // one service key (pre-push audit).
+    expect(out).toEqual({
+      count: 3,
+      ids: ['v1 (pest_control, platinum, 2 visits)', 'v3 (rodent_bait, silver, 1 visit)', 'v4 (pest_control, platinum, 1 visit)'],
+      itemKeys: ['e1:recurring:0', 'e2:recurring:0', 'e1:recurring:1'],
+      detail: { checked: 40, notJudged: 9, visits: 4 },
+    });
+    const r = { key: 'tier_saving_left_off_invoice', itemKeys: out.itemKeys, count: out.count };
+    expect(itemHashes(r, NOW)).toHaveLength(3);
+    expect(byKey('tier_saving_left_off_invoice').moving).toBe(true);
   });
 
   test('stale_open_visits reuses the sweep finder and status counts', async () => {

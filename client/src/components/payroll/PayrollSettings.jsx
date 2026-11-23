@@ -221,8 +221,9 @@ export function W4HistoryDialog({ technician, onClose }) {
   </Dialog>;
 }
 
-// GATE_PAYROLL_TIME_OFF: the yearly paid time off allowance. It only warns when a
-// day is booked past it. Empty = no allowance set.
+// GATE_PAYROLL_TIME_OFF: the yearly paid time off hours. A number gives the employee a time-off bank:
+// a year of full weeks earns these hours, and the pay run pays paid time off only from the bank.
+// Empty = no bank; the pay run pays every recorded hour.
 function AllowanceCell({ technician, onSaved }) {
   const current = technician.ptoHoursPerYear == null ? '' : String(technician.ptoHoursPerYear);
   const [value, setValue] = useState(current);
@@ -237,7 +238,7 @@ function AllowanceCell({ technician, onSaved }) {
         method: 'PUT',
         body: { hoursPerYear: value.trim() === '' ? null : value.trim() },
       });
-      onSaved(`Paid time off allowance saved for ${technician.name}.`);
+      onSaved(`Paid time off hours per year saved for ${technician.name}.`);
     } catch (failure) { setError(failure.message); }
     setBusy(false);
   }
@@ -416,6 +417,8 @@ export default function PayrollSettings() {
   const saved = text => { setDialog(null); setMessage(text); load(); };
   // Present only when the server has GATE_PAYROLL_TIME_OFF on.
   const showAllowance = hasField(technicians, 'ptoHoursPerYear');
+  // The yearly hours of every employee as one text: the time-off panel reloads its banks when it changes.
+  const bankKey = (technicians || []).map(tech => `${tech.id}:${tech.ptoHoursPerYear ?? ''}`).join('|');
   // Present only when the server has GATE_PAYROLL_PAY_LINES on.
   const showCoverage = hasField(technicians, 'flsaOvertimeCovered');
   // Present only when the server has GATE_PAYROLL_FAMILY_EMPLOYEE on.
@@ -466,7 +469,7 @@ export default function PayrollSettings() {
         </TBody>
       </Table>
     </Card>}
-    <PayRuns call={call} onRunsChanged={() => setFormsVersion(v => v + 1)} />
+    <PayRuns call={call} bankKey={bankKey} onRunsChanged={() => setFormsVersion(v => v + 1)} />
     <PayrollForms call={call} refreshKey={formsVersion} />
     {dialog?.kind === 'w4' && <W4Dialog technician={dialog.tech} onClose={close} onSaved={saved} />}
     {dialog?.kind === 'pay' && <PayMethodDialog technician={dialog.tech} onClose={close} onSaved={saved} />}
