@@ -24,20 +24,43 @@ jest.mock('../services/push-notifications', () => ({
   sendToCustomer: jest.fn(async () => mockPushResult),
   resolveNotificationPropertyId: jest.fn(async () => null),
 }));
-// GATE_PORTAL_ANSWER_TEXT: only the answer's own texts are faked; any other send is the real one. The fake runs the
-// caller's locked handoff as the send step does (against the real database: its locks and its row read), and the
-// provider "takes" the text only when the handoff reaches its dispatch. `beforeHandoff` runs first (a write that lands
-// between the read and the send); the outcome is then set per test.
-const mockAnswerText = { result: null, error: null, beforeHandoff: null };
+// GATE_PORTAL_ANSWER_TEXT: only the answer's own texts are faked; any other send is the real one. The fake keeps
+// twilio.js's order against the real database: the caller's locked handoff (its locks and its row read), then the
+// caller's onDispatchStart (the durable mark), then the request, which "takes" the text (`requests`). A throw before
+// the request is a refusal (SMS_HANDOFF_CHECK_FAILED), as twilio.js reads it; an error with no providerOutcome is
+// thrown before the handoff (the send step tags every later throw). Hooks: `beforeHandoff` (a write that lands
+// between the read and the send), `afterStart` (just after the mark), and `refuseAfterStart` (a check after the mark
+// refuses: the fake calls onDispatchAbort, then `afterUndo`, and refuses with that code). The outcome is set per test.
+const mockAnswerText = {
+  result: null, error: null, beforeHandoff: null, afterStart: null, refuseAfterStart: null, afterUndo: null, requests: [],
+};
 jest.mock('../services/messaging/send-customer-message', () => {
   const actual = jest.requireActual('../services/messaging/send-customer-message');
   return {
     ...actual,
     sendCustomerMessage: jest.fn(async (input) => {
       if (input?.entryPoint !== 'admin_portal_answer') return actual.sendCustomerMessage(input);
+      if (mockAnswerText.error && !mockAnswerText.error.providerOutcome) throw mockAnswerText.error;
       if (mockAnswerText.beforeHandoff) await mockAnswerText.beforeHandoff(input);
-      let reached = !input.withSmsHandoff;
-      const verdict = input.withSmsHandoff ? await input.withSmsHandoff(async () => { reached = true; return { ok: true }; }) : null;
+      let reached = false;
+      let verdict;
+      try {
+        verdict = await input.withSmsHandoff(async () => {
+          if (input.onDispatchStart) await input.onDispatchStart();
+          if (mockAnswerText.afterStart) await mockAnswerText.afterStart(input);
+          if (mockAnswerText.refuseAfterStart) {
+            await input.onDispatchAbort();
+            if (mockAnswerText.afterUndo) await mockAnswerText.afterUndo(input);
+            return { ok: false, code: mockAnswerText.refuseAfterStart };
+          }
+          reached = true;
+          mockAnswerText.requests.push(input);
+          return { ok: true };
+        });
+      } catch (err) {
+        if (reached) throw err;
+        verdict = { ok: false, code: 'SMS_HANDOFF_CHECK_FAILED' };
+      }
       if (!reached) return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: verdict?.code || 'SMS_HANDOFF_CHECK_FAILED' };
       if (mockAnswerText.error) throw mockAnswerText.error;
       return mockAnswerText.result;
@@ -790,9 +813,9 @@ maybeDescribe('portal messages (live Postgres)', () => {
     beforeAll(() => { SendCustomerMessage = require('../services/messaging/send-customer-message'); });
     beforeEach(() => {
       process.env.GATE_PORTAL_ANSWER_TEXT = 'true';
-      mockAnswerText.result = ACCEPTED;
-      mockAnswerText.error = null;
-      mockAnswerText.beforeHandoff = null;
+      Object.assign(mockAnswerText, {
+        result: ACCEPTED, error: null, beforeHandoff: null, afterStart: null, refuseAfterStart: null, afterUndo: null, requests: [],
+      });
     });
     // The answer's texts this test sent, for one answer.
     const answerTexts = (messageId) => SendCustomerMessage.sendCustomerMessage.mock.calls.map(([input]) => input)
@@ -914,7 +937,7 @@ maybeDescribe('portal messages (live Postgres)', () => {
       expect(notice.text).toBeUndefined();
     });
 
-    test('a phone corrected after the read gets no text: the locked handoff re-reads the number, and the email goes', async () => {
+    test('a phone corrected at the send gets no text: the locked handoff re-reads the number, and the email goes', async () => {
       const pat = await customer();
       const { escalationId } = await chat(pat.id, { alert: false });
       const corrected = phone();
@@ -924,6 +947,84 @@ maybeDescribe('portal messages (live Postgres)', () => {
       expect(result.notice).toEqual({ bell: true, pushAccepted: 0, text: 'not_sent', email: 'sent' });
       expect(await storedNotice(result.message.id)).toMatchObject({ text: 'not_sent', textCode: 'RECIPIENT_CHANGED', email: 'sent', pending: false });
       expect(AccountMembershipEmail.sendPortalReply).toHaveBeenCalledTimes(1);
+    });
+
+    test('the number is bound when the answer is saved: a phone corrected after the save, or an answer saved with the gate off, gets the email', async () => {
+      const NotificationService = require('../services/notification-service');
+      const pat = await customer();
+      const one = await chat(pat.id, { alert: false });
+      // The phone changes after the save and before the text step (the bell goes in between).
+      const realNotify = NotificationService.notifyCustomer;
+      const spy = jest.spyOn(NotificationService, 'notifyCustomer').mockImplementationOnce(async (...args) => {
+        await db('customers').where({ id: pat.id }).update({ phone: phone() });
+        return realNotify.apply(NotificationService, args);
+      });
+      const moved = await PortalMessages.staffReply({ kind: 'chat', id: one.escalationId, body: 'See you Tuesday.', actor });
+      spy.mockRestore();
+      expect((await db('messages').where({ id: moved.message.id }).first('metadata')).metadata.answerTextTo).toBe(pat.phone);
+      expect(answerTexts()).toEqual([]);
+      expect(moved.notice).toEqual({ bell: true, pushAccepted: 0, text: 'not_sent', email: 'sent' });
+      expect(await storedNotice(moved.message.id)).toMatchObject({ textCode: 'RECIPIENT_CHANGED' });
+      // Saved while the gate was off: no number is bound, so a retried click after the flip sends the email.
+      process.env.GATE_PORTAL_ANSWER_TEXT = 'false';
+      const two = await chat(pat.id, { alert: false });
+      const clientRequestId = randomUUID();
+      const before = await PortalMessages.staffReply({ kind: 'chat', id: two.escalationId, body: 'Booked.', clientRequestId, actor });
+      await stopped(before.message.id, { attempts: 1 });
+      process.env.GATE_PORTAL_ANSWER_TEXT = 'true';
+      jest.clearAllMocks();
+      const after = await PortalMessages.staffReply({ kind: 'chat', id: two.escalationId, body: 'Booked.', clientRequestId, actor });
+      expect(answerTexts()).toEqual([]);
+      expect(after.notice).toEqual({ bell: true, pushAccepted: 0, text: 'not_sent', email: 'sent' });
+      expect(await storedNotice(before.message.id)).toMatchObject({ textCode: 'NO_TEXT_NUMBER' });
+    });
+
+    test('an answer that carries a portal link gets no text (the composer checks who owns such a link): the email goes', async () => {
+      const { publicPortalUrl } = require('../utils/portal-url');
+      const pat = await customer();
+      const { escalationId } = await chat(pat.id, { alert: false });
+      const body = `Sign here: ${new URL(publicPortalUrl()).host}/contract/${randomUUID()}`;
+      const result = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body, actor });
+      expect(answerTexts()).toEqual([]);
+      expect(result.notice).toEqual({ bell: true, pushAccepted: 0, text: 'not_sent', email: 'sent' });
+      expect(await storedNotice(result.message.id)).toMatchObject({ textCode: 'ANSWER_HAS_LINK' });
+      expect(AccountMembershipEmail.sendPortalReply).toHaveBeenCalledWith({ customerId: pat.id, messageId: result.message.id, body });
+    });
+
+    test('the move to the text is saved at the provider boundary only; a check after it takes it back, and the email goes', async () => {
+      const pat = await customer();
+      const one = await chat(pat.id, { alert: false });
+      const seen = [];
+      const look = async (input) => { seen.push((await storedNotice(input.metadata.portalMessageId)).text); };
+      Object.assign(mockAnswerText, { beforeHandoff: look, afterStart: look });
+      const sent = await PortalMessages.staffReply({ kind: 'chat', id: one.escalationId, body: 'Yes.', actor });
+      // Nothing marked before the boundary: a try that stops there leaves its notice to the email.
+      expect(seen).toEqual([undefined, 'sending']);
+      expect(sent.notice).toEqual({ bell: true, pushAccepted: 0, text: 'sent', email: 'not_needed' });
+      seen.length = 0;
+      Object.assign(mockAnswerText, { beforeHandoff: null, refuseAfterStart: 'QUIET_HOURS_HOLD', afterUndo: look });
+      const two = await chat(pat.id, { alert: false });
+      const held = await PortalMessages.staffReply({ kind: 'chat', id: two.escalationId, body: 'No.', actor });
+      expect(seen).toEqual(['sending', undefined]);
+      expect(mockAnswerText.requests).toHaveLength(1);
+      expect(held.notice).toEqual({ bell: true, pushAccepted: 0, text: 'not_sent', email: 'sent' });
+      expect(await storedNotice(held.message.id)).toMatchObject({ textCode: 'QUIET_HOURS_HOLD' });
+    });
+
+    test('a try that lost its claim before the boundary sends nothing: no request, no email, the new holder\'s notice stands', async () => {
+      const pat = await customer();
+      const { escalationId } = await chat(pat.id, { alert: false });
+      const taken = new Date(Date.now() + 1000).toISOString();
+      // Another try takes the claim between this try's checks and its mark.
+      mockAnswerText.beforeHandoff = (input) => db('messages').where({ id: input.metadata.portalMessageId })
+        .update({ metadata: db.raw("jsonb_set(metadata, '{notice,claimedAt}', to_jsonb(?::text))", [taken]) });
+      const result = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'Yes.', actor });
+      expect(mockAnswerText.requests).toEqual([]);
+      expect(AccountMembershipEmail.sendPortalReply).not.toHaveBeenCalled();
+      const notice = await storedNotice(result.message.id);
+      expect(notice).toMatchObject({ claimedAt: taken, pending: true });
+      expect(notice.text).toBeUndefined();
+      expect(result.notice).toEqual({ pending: true });
     });
 
     test('a number the send step would text as another one (+45 and eight digits) gets no text: the email goes', async () => {

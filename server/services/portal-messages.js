@@ -424,11 +424,33 @@ function sameDestination(storedPhone, destination) {
     && require('../utils/phone').toE164(storedPhone) === destination;
 }
 
-// The answer's text goes to `destination`, and only while the customer's row still holds that number. The send step
-// runs this handoff around the provider request (send-customer-message.js smsHandoffAllowed: this entry point only):
-// the customer-comms and phone locks (STOP and sms_enabled writers serialize on them), then the row read FOR SHARE, so
-// a phone correction commits before the read (a changed number refuses the text, and the email goes) or waits for the
-// request. The send step reloads consent, suppression and the send window on the same connection before the request.
+// GATE_PORTAL_ANSWER_TEXT: the number the answer's text may go to, read in the answer's own transaction (staffReply)
+// and saved on the message as `answerTextTo`: the send step's form of the customer's phone, when it is that phone
+// (sameDestination). Null when there is none to bind (no phone, or one the send step would read as another number).
+// The text goes only while the customer's row still holds this number, so a phone correction at any point after the
+// save gets the email, never a text to the new number.
+async function boundTextNumber(trx, customerId) {
+  const row = await trx('customers').where({ id: customerId }).whereNull('deleted_at').first('phone');
+  const destination = require('./messaging/send-customer-message').normalizeRecipient(row?.phone);
+  return sameDestination(row?.phone, destination) ? destination : null;
+}
+
+// True when the answer carries a link to an owned host (composer-customer-links.js nestedOwnedLinkRuns: the portal or
+// the short-link host, with or without a scheme, nested in another URL or percent-encoded; it over-reports on
+// purpose), or text no scan can vouch for (linkTextUnstable). Such an answer is not texted: before it texts a page
+// link, the SMS composer checks who owns it (bearerLinkSendCheck), and this text does not. The answer stays in the
+// portal, and the reply email goes, as with the gate off.
+function answerCarriesLink(body) {
+  const { nestedOwnedLinkRuns, linkTextUnstable } = require('./composer-customer-links');
+  return nestedOwnedLinkRuns(body).length > 0 || linkTextUnstable(body);
+}
+
+// The answer's text goes to the number bound at the save, and only while the customer's row still holds it. The send
+// step runs this handoff around the provider request (send-customer-message.js smsHandoffAllowed: this entry point
+// only): the customer-comms and phone locks (STOP and sms_enabled writers serialize on them), then the row read FOR
+// SHARE, so a phone correction commits before the read (a changed number refuses the text, and the email goes) or
+// waits for the request. The send step reloads consent, suppression and the send window on the same connection before
+// the request.
 function phoneHeldHandoff(customerId, destination) {
   const { withSmsConsentLock } = require('../utils/customer-comms-lock');
   return (dispatch) => withSmsConsentLock(db, { phone: destination, customerId }, async (trx) => {
@@ -445,16 +467,18 @@ function phoneHeldHandoff(customerId, destination) {
 // update (support_resolution: 3 segments, the number on the customer's own row). It is not a reply on the SMS thread,
 // so it takes neither purpose 'conversational' nor the interlocked manual wrapper: that one settles the SMS thread's
 // waiting question as answered by staff, and the customer's text may wait on something else
-// (send-manual-customer-sms.js: it "interlocks staff REPLIES only"). { text: 'sent' } when the provider took it,
-// 'uncertain' when it may have gone out, else 'not_sent' with the refusal's code: no number, a number the send step
-// would change, STOP or no consent, a changed number, a failure. Never throws.
-async function answerText(customerId, message) {
+// (send-manual-customer-sms.js: it "interlocks staff REPLIES only"). `boundary` holds the try's mark at the provider
+// boundary (textStep). { text: 'sent' } when the provider took it, 'uncertain' when it may have gone out, else
+// 'not_sent' with the refusal's code: a link in the answer, no number bound at the save, a changed number, STOP or no
+// consent, a failure. Never throws.
+async function answerText(customerId, message, boundary) {
   const Send = require('./messaging/send-customer-message');
   try {
-    const customer = await db('customers').where({ id: customerId }).first('first_name', 'phone');
-    if (!customer?.phone) return { text: 'not_sent', textCode: 'NO_PHONE' };
-    const destination = Send.normalizeRecipient(customer.phone);
-    if (!sameDestination(customer.phone, destination)) return { text: 'not_sent', textCode: 'NO_TEXT_NUMBER' };
+    if (answerCarriesLink(message.body)) return { text: 'not_sent', textCode: 'ANSWER_HAS_LINK' };
+    const destination = metaOf(message).answerTextTo;
+    if (!destination) return { text: 'not_sent', textCode: 'NO_TEXT_NUMBER' };
+    const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('first_name', 'phone');
+    if (!sameDestination(customer?.phone, destination)) return { text: 'not_sent', textCode: 'RECIPIENT_CHANGED' };
     const result = await Send.sendCustomerMessage({
       to: destination,
       body: answerTextBody(customer.first_name, message.body, customerId),
@@ -465,6 +489,10 @@ async function answerText(customerId, message) {
       identityTrustLevel: 'phone_matches_customer',
       entryPoint: 'admin_portal_answer',
       withSmsHandoff: phoneHeldHandoff(customerId, destination),
+      // The provider boundary (twilio.js): after the send step's last check, right before the request.
+      onDispatchStart: boundary.start,
+      onDispatchAbort: boundary.undo,
+      onDispatchRejected: boundary.undo,
       metadata: {
         original_message_type: 'portal_answer',
         portalMessageId: message.id,
@@ -493,16 +521,29 @@ function textOutcome(outcome, classify, fallbackCode) {
 
 // GATE_PORTAL_ANSWER_TEXT: a try's text part, or null when the notice has none: the gate is off, the try is the
 // sweep's (it never starts a text), an earlier try moved to the email, or an earlier push reached the app. The move
-// to the text is saved while this try holds the claim, then the text goes. A later try never texts again: it reuses
-// the stored outcome, and a text still 'sending' (a try that stopped mid-send) counts as maybe gone. { lost: true }
-// when the claim was lost (a try that was taken over sends nothing).
+// to the text ('sending') is saved at the provider boundary only, while this try still holds the claim: the send
+// step's onDispatchStart, after its last check and right before the request. A try that stops before it sent
+// nothing, so its notice still goes by email; a check that refuses after the move takes it back (onDispatchAbort,
+// onDispatchRejected). A later try never texts again: it reuses the stored outcome, and a text still 'sending' (a try
+// that stopped mid-request) counts as maybe gone. { lost: true } when the claim was lost (a try that was taken over
+// sends nothing: the mark refuses the request).
 async function textStep(customerId, message, claim, sent, { byStaff, textLive }) {
   if (claim.text !== undefined) {
     return { text: claim.text === 'sending' ? 'uncertain' : claim.text, ...(claim.textCode ? { textCode: claim.textCode } : {}) };
   }
   if (!byStaff || !textLive || claim.email !== undefined || sent.pushAccepted > 0) return null;
-  const held = await recordNotice(message.id, { ...sent, text: 'sending', pending: true, claimedAt: claim.at, attempts: claim.attempts });
-  return held ? answerText(customerId, message) : { lost: true };
+  const before = { ...sent, pending: true, claimedAt: claim.at, attempts: claim.attempts };
+  let lost = false;
+  const texted = await answerText(customerId, message, {
+    start: async () => {
+      if (await recordNotice(message.id, { ...before, text: 'sending' })) return;
+      lost = true;
+      // A throw before the request is a refusal: twilio.js sends nothing (SMS_HANDOFF_CHECK_FAILED).
+      throw new Error('the answer notice moved to another try');
+    },
+    undo: () => recordNotice(message.id, before),
+  });
+  return lost ? { lost: true } : texted;
 }
 
 // A try's email part. Not needed after an accepted push or a text that went out; done already when an earlier try
@@ -593,6 +634,8 @@ async function staffReply({ kind, id, body, clientRequestId = null, actor = {} }
     const thread = await threadWith(trx, customerId);
     const prior = await priorSend(trx, thread.id, 'outbound', clientRequestId);
     if (prior) return { replay: true, message: prior, customerId };
+    // GATE_PORTAL_ANSWER_TEXT: the number the answer's text may go to is the one on file when the answer is saved.
+    const answerTextTo = answerTextLive() ? await boundTextNumber(trx, customerId) : null;
     const message = await Conversations.appendMessage({
       conn: trx,
       conversationId: thread.id,
@@ -604,7 +647,12 @@ async function staffReply({ kind, id, body, clientRequestId = null, actor = {} }
       deliveryStatus: 'sent',
       messageType: 'portal_reply',
       // pending until noticeCustomer records how the customer was told (a stopped process leaves it for the sweep)
-      metadata: { portalItem: { kind, id }, notice: { pending: true }, ...(clientRequestId ? { clientRequestId } : {}) },
+      metadata: {
+        portalItem: { kind, id },
+        notice: { pending: true },
+        ...(clientRequestId ? { clientRequestId } : {}),
+        ...(answerTextTo ? { answerTextTo } : {}),
+      },
     });
     const closed = await closeItemWith(trx, kind, id, customerId);
     return { message, closed, customerId, threadId: thread.id };
@@ -818,5 +866,5 @@ module.exports = {
   customerUnread,
   markRead,
   resumePendingNotices,
-  __private: { preview, noticeCustomer, closeItemWith, closeItemBells, itemCustomerWith, claimNotice, ringOffice, metaOf, bellAndPush, answerTextBody, textOutcome, earlierPush, sameDestination },
+  __private: { preview, noticeCustomer, closeItemWith, closeItemBells, itemCustomerWith, claimNotice, ringOffice, metaOf, bellAndPush, answerTextBody, textOutcome, earlierPush, sameDestination, answerCarriesLink },
 };

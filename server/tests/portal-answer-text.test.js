@@ -3,8 +3,8 @@
  * portal. Pins the owner's words, the whole answer when it fits 3 segments, a long answer's first part cut at a space
  * plus the portal link inside 3 segments and as long as fits, the count in the characters the send step sends (GSM
  * punctuation, a link with no scheme), a name outside the GSM set, the night rule (the staff press is the office's own
- * send), the outcome mapping, and the bell's record of an earlier push. No database (the notice flow itself is
- * portal-messages-postgres.test.js).
+ * send), the outcome mapping, the bell's record of an earlier push, the number check, and the link check (an answer
+ * with a Waves link is not texted). No database (the notice flow itself is portal-messages-postgres.test.js).
  */
 process.env.GATE_SMS_SEND_WINDOW = 'true';
 
@@ -13,7 +13,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { countSegments } = require('../services/messaging/segment-counter');
 const { checkSendWindow } = require('../services/messaging/validators/send-window');
-const { __private: { answerTextBody, textOutcome, earlierPush, sameDestination } } = require('../services/portal-messages');
+const { __private: { answerTextBody, textOutcome, earlierPush, sameDestination, answerCarriesLink } } = require('../services/portal-messages');
 const { classifyDeliveryCertainty, normalizeRecipient } = require('../services/messaging/send-customer-message');
 
 const LEAD = "Hi Sam, here's our answer from Waves: ";
@@ -152,5 +152,21 @@ describe('the number the text goes to', () => {
   test('a stored number that changed is not the destination', () => {
     expect(sameDestination('+19415550142', '+19415550143')).toBe(false);
     expect(sameDestination(null, '+19415550142')).toBe(false);
+  });
+});
+
+describe('an answer with a Waves link is not texted (the email goes)', () => {
+  const portal = new URL(require('../utils/portal-url').publicPortalUrl()).host;
+  const short = new URL(require('../services/short-url').shortLinkBaseUrl()).host;
+  test.each([
+    [`Sign here: https://${portal}/contract/abc123`, true],
+    [`Pay at ${portal}/pay/abc123.`, true],
+    [`Here it is: ${short}/l/abc123`, true],
+    // Nested in another URL and percent-encoded: still a portal link.
+    [`https://example.com/?next=https%3A%2F%2F${portal}%2Fpay%2Fabc123`, true],
+    ['Yes, Tuesday works. Your tech will call first.', false],
+    ['Directions: https://www.google.com/maps/place/Bradenton', false],
+  ])('%p carries a Waves link: %p', (body, carries) => {
+    expect(answerCarriesLink(body)).toBe(carries);
   });
 });
