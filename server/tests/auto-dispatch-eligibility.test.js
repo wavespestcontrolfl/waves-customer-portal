@@ -207,7 +207,8 @@ describe('isPersonPlacedVisit', () => {
     const slotChanged = (r) => r.original_date !== r.new_date || r.original_window !== r.new_window;
     // PLACEMENT_SQL in JS: the date, or the first five characters of the window's start, changed.
     const startText = (w) => String(w || '').split('-')[0].slice(0, 5);
-    const placed = (r) => r.original_date !== r.new_date || startText(r.original_window) !== startText(r.new_window);
+    const placed = (r) => r.original_date !== r.new_date || (r.new_window != null && r.new_window !== ''
+      && startText(r.original_window) !== startText(r.new_window));
     const fake = (table) => {
       if (table === 'scheduled_services') {
         const read = { forShare: () => read, first: async () => { if (fail) throw new Error('connection reset'); return row; } };
@@ -368,12 +369,12 @@ describe('isPersonPlacedVisit', () => {
 
   // Local audit 2026-11-22 (round 3): a staff move FOR the customer's request holds like the customer's own pick.
   test('a staff move with a customer-request reason holds; an ordinary staff reason does not', async () => {
-    for (const reason_code of ['customer_request', 'customer_request_series', 'customer_call_request', 'customer_call_request_series',
-      'ai_call_reschedule', 'ai_call_reschedule_series']) {
+    for (const reason_code of ['customer_call_request', 'customer_call_request_series', 'ai_call_reschedule', 'ai_call_reschedule_series']) {
       expect(await isPersonPlacedVisit(visit, fakeDb({ log: [row({ initiated_by: 'admin', reason_code, series_move_id: null })] })))
         .toMatchObject({ placed: true, reason_code: 'CUSTOMER_PICKED', reason_description: 'The customer chose this date or time' });
     }
-    for (const reason_code of ['admin', 'admin_series', 'dispatch_drag', 'weather_rain', null]) {
+    // 'customer_request' is the reschedule dialog's DEFAULT reason (local audit round 7): it proves nothing.
+    for (const reason_code of ['customer_request', 'customer_request_series', 'admin', 'admin_series', 'dispatch_drag', 'weather_rain', null]) {
       expect(await isPersonPlacedVisit(visit, fakeDb({ log: [row({ initiated_by: 'admin', reason_code, series_move_id: null })] })))
         .toEqual({ placed: false });
     }
@@ -396,9 +397,19 @@ describe('isPersonPlacedVisit', () => {
     expect(await isCustomerPickedVisit({ ...visit, window_start: '13:00:00' }, fakeDb({ log: [row()] }))).toEqual({ picked: false });
     const { window_start: _unused, ...bare } = visit;
     expect(await isCustomerPickedVisit(bare, fakeDb({ log: [row()] }))).toEqual({ picked: true });
-    const requested = row({ initiated_by: 'admin', reason_code: 'customer_request_series', series_move_id: null });
+    const requested = row({ initiated_by: 'admin', reason_code: 'ai_call_reschedule_series', series_move_id: null });
     expect(await isCustomerPickedVisit(visit, fakeDb({ log: [requested] }))).toEqual({ picked: true });
     expect(await isCustomerPickedVisit(visit, fakeDb({ log: [row({ initiated_by: 'admin' })] }))).toEqual({ picked: false });
+  });
+
+  // Local audit 2026-11-22 (round 7): a technician-only reassignment passes no window; the rebooker keeps the start and logs
+  // new_window NULL on the same date. It changed neither the date nor the start, so the customer's pick stands.
+  test('a later technician-only reassignment (same date, new_window NULL) keeps the customer pick', async () => {
+    const reassigned = row({ id: 'l2', initiated_by: 'admin', reason_code: 'admin', series_move_id: null, created_at: '2026-10-07T12:00:00Z',
+      original_date: '2026-10-18', original_window: '09:00-10:00', new_window: null });
+    expect(await isPersonPlacedVisit(visit, fakeDb({ log: [row(), reassigned] })))
+      .toMatchObject({ placed: true, reason_code: 'CUSTOMER_PICKED' });
+    expect(await isPersonPlacedVisit(visit, fakeDb({ log: [row({ initiated_by: 'admin' }), reassigned] }))).toEqual({ placed: false });
   });
 
   test('not placed after a later automatic move, even one that returned the visit to the same date', async () => {
@@ -490,7 +501,7 @@ describe('isPersonPlacedVisit', () => {
   // Local audit 2026-11-22 (round 5): "day only" leaves the hour to the office, not the day. The move record decides.
   test('recorded "day only" on a customer-requested move still holds the day; on a staff move it is free', async () => {
     const dayOnly = { ...visit, customer_asked_time: false, customer_asked_time_at: '2026-10-06T00:49:58Z', date_exception_source: null };
-    const requested = row({ initiated_by: 'admin', reason_code: 'customer_request', series_move_id: null, after_intent: false });
+    const requested = row({ initiated_by: 'admin', reason_code: 'ai_call_reschedule', series_move_id: null, after_intent: false });
     expect(await isPersonPlacedVisit(dayOnly, fakeDb({ log: [requested] })))
       .toMatchObject({ placed: true, reason_code: 'CUSTOMER_PICKED' });
     expect(await isPersonPlacedVisit(dayOnly, fakeDb({ log: [row({ after_intent: false })] }))).toMatchObject({ placed: true });

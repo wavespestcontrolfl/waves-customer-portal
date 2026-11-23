@@ -570,12 +570,11 @@ async function loadOfficeToldFields(conn, rows, now = new Date()) {
   const entry = (id) => entryOf(out, id);
   let visitsForReminders = [];
   try {
-    // The CURRENT intent (currentIntent, the one read rule), not the raw column: an intent a later move of the date or start
-    // left behind reads as not recorded (null), so the box never pre-checks a choice the customer made for an older slot. Both
-    // facts come from this ONE query, judged against placements (eligibility PLACEMENT_SQL, as memberIntentState judges
-    // them): an end-only edit never makes the intent stale.
+    // The CURRENT intent (currentIntent, the one read rule), not the raw column: an intent a later slot-changing move left
+    // behind reads as not recorded (null), so the box never pre-checks a choice the customer made for an older slot. Both
+    // facts come from this ONE query (the same filter and comparison as eligibility.loadNewestSlotRows withIntent).
     const slotRows = (extra) => `EXISTS (SELECT 1 FROM reschedule_log WHERE reschedule_log.scheduled_service_id = scheduled_services.id
-      AND new_date IS NOT NULL AND ${require('./auto-dispatch/eligibility').PLACEMENT_SQL}${extra})`;
+      AND new_date IS NOT NULL AND ${require('./auto-dispatch/eligibility').SLOT_CHANGED_SQL}${extra})`;
     const stored = await conn('scheduled_services').whereIn('id', list.map((r) => r.id)).select(
       'id', 'customer_id', 'property_id', 'customer_asked_time', 'customer_asked_time_at',
       conn.raw(`${slotRows('')} AS has_slot_change`),

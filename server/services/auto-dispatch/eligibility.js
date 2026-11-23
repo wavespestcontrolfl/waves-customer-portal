@@ -220,17 +220,20 @@ const CUSTOMER_INITIATORS = new Set(['customer', 'customer_self_serve', 'custome
 // A row records a chosen slot only when the date or the window changed.
 const SLOT_CHANGED_SQL = '(original_date IS DISTINCT FROM new_date OR original_window IS DISTINCT FROM new_window)';
 // A row PLACES the visit when the date or the START changed (placesVisit below, in SQL; the log's windows are 'HH:MM-HH:MM',
-// 'HH:MM:SS-HH:MM:SS' or NULL). An end-only edit (a longer visit) does not.
-const placementSql = (t = '') => `(${t}original_date IS DISTINCT FROM ${t}new_date`
-  + ` OR left(split_part(COALESCE(${t}original_window, ''), '-', 1), 5) IS DISTINCT FROM left(split_part(COALESCE(${t}new_window, ''), '-', 1), 5))`;
+// 'HH:MM:SS-HH:MM:SS' or NULL). An end-only edit (a longer visit) does not. A NULL new_window is a move that kept the
+// visit's window (the rebooker keeps window_start when a caller passes none: a date-only move, a technician-only
+// reassignment), so on the same date it changed nothing.
+const placementSql = (t = '') => `(${t}original_date IS DISTINCT FROM ${t}new_date OR (NULLIF(${t}new_window, '') IS NOT NULL`
+  + ` AND left(split_part(COALESCE(${t}original_window, ''), '-', 1), 5) IS DISTINCT FROM left(split_part(${t}new_window, '-', 1), 5)))`;
 const PLACEMENT_SQL = placementSql();
 const PLACEMENT_COLUMNS = ['auto_dispatch_locked', 'auto_dispatch_excluded', 'date_exception', 'date_exception_source',
   'date_exception_at', 'customer_asked_time', 'customer_asked_time_at', 'window_start'];
 const LOG_COLUMNS = ['created_at', 'new_date', 'initiated_by', 'reason_code', 'original_date', 'original_window', 'new_window'];
-// Staff moves made FOR the customer's request hold like the customer's own: the reschedule dialog's "Customer request"
-// reasons and the reviewed AI-call reschedule (call-reschedule-apply.js), all logged as 'admin'. The series writer adds
-// '_series' to the reason (rebooker.js).
-const CUSTOMER_REQUEST_REASONS = new Set(['customer_request', 'customer_call_request', 'ai_call_reschedule']);
+// Staff moves made FOR the customer's request hold like the customer's own: the reviewed AI-call reschedule
+// (call-reschedule-apply.js) and the legacy 'customer_call_request', both logged as 'admin'. The series writer adds
+// '_series' to the reason (rebooker.js). Not the reschedule dialog's 'customer_request': that is its default reason
+// (SchedulePage.jsx), so it proves nothing; the office ticks "Customer asked for this time" instead.
+const CUSTOMER_REQUEST_REASONS = new Set(['customer_call_request', 'ai_call_reschedule']);
 const customerRequested = (r) => CUSTOMER_REQUEST_REASONS.has(String(r.reason_code || '').replace(/_series$/, ''));
 
 // The history columns, plus after_intent for a visit with a recorded intent (time-promise memberIntentState).
@@ -247,8 +250,9 @@ function startOf(value) {
   return m ? `${m[1].padStart(2, '0')}:${m[2]}` : String(value).trim();
 }
 
-// A move PLACES the visit when it changed the date or the start.
-const placesVisit = (r) => toDateStr(r.original_date) !== toDateStr(r.new_date) || startOf(r.original_window) !== startOf(r.new_window);
+// A move PLACES the visit when it changed the date or the start (PLACEMENT_SQL in JS; a NULL new_window kept the window).
+const placesVisit = (r) => toDateStr(r.original_date) !== toDateStr(r.new_date)
+  || (r.new_window != null && r.new_window !== '' && startOf(r.original_window) !== startOf(r.new_window));
 
 // The newest placement rows (one move's rows share a created_at). When only an end-only edit is newest (2 of 1,163 rows on
 // 2026-11-22), the newest placement before it, chosen entirely in SQL: created_at has microsecond precision and a JS Date
