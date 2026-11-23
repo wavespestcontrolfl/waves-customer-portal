@@ -4851,7 +4851,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const reportNoteStale = !reportNoteLive && completionInput.body?.reportNote != null;
     // The preview route's own visit check (strict profile, area add-on rows), in a savepoint scope (its profile
     // resolver runs its own savepoint reads). undefined = not asked; null = the check could not run.
+    // The report shows the note only on its pest layout (detectServiceLine of the visit label), so a label read as
+    // another line takes none.
     const reportNoteVisit = reportNoteSent && visitOutcome === 'completed' && !typedFindingsType && !isBackfillCompletion
+      && detectServiceLine(svc.service_type || '') === 'pest'
       ? await savepointScope(db, (k) => require('./pest-recap').resolveEligibility(svc.id, k, { strict: true })).catch(() => null)
       : undefined;
     // A sent note on a visit that could not be checked refuses the completion below (retryable): the record never

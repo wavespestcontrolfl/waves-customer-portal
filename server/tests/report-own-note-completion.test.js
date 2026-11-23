@@ -24,6 +24,7 @@ describe('the completion\'s report note', () => {
     expect(pick).toMatch(/^const reportNoteLive = require\('\.\.\/config\/feature-gates'\)\.reportOwnNoteLive\(\);/);
     expect(pick).toContain('const reportNoteSent = reportNoteLive && completionInput.body?.reportNote != null;');
     expect(pick).toContain("reportNoteSent && visitOutcome === 'completed' && !typedFindingsType && !isBackfillCompletion");
+    expect(pick).toContain("&& detectServiceLine(svc.service_type || '') === 'pest'");
   });
 
   test('the visit check is the preview route\'s, strict, in a savepoint scope (no nested queue)', () => {
