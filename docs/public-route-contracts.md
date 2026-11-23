@@ -3371,9 +3371,14 @@ no note state at all (pre-push audit round 29). No other mode carries the key.
 The technician's own note (owner 2026-11-19, the report speed plan; reader
 `visitReportCustomerCopy`, `technician-report-copy.js`): a completed visit may
 carry `structured_notes.reportNote = { v: 1, text, source: 'cleaned' | 'fixed' }`.
-Nothing writes it yet (its writer ships later, behind `GATE_REPORT_OWN_NOTE`). A
-render reads it from the record whatever a gate says, so a report already sent
-keeps its text. On such a record `technician_notes` holds the technician's raw
+Its one writer is the completion (`POST /api/admin/dispatch/:serviceId/complete`,
+`completeScheduledService`) while `GATE_REPORT_OWN_NOTE` is on: for a performed,
+untyped pest visit it freezes the key with the record, holding the tidied note
+when `reportNoteToStore` passes it again against the submitted note, else the
+fixed sentence; a repoint under the visit lock drops it. It is written once,
+with the record, like the other completion freezes. A render reads it from the
+record whatever the gate says, so turning the gate off keeps every stored note
+visible on its report, and a report already sent keeps its text. On such a record `technician_notes` holds the technician's raw
 note, and no reader below shows a line of it. (The lawn and tree & shrub
 technician paragraphs, each under its own gate, still take that note as their
 input, as they do on any visit today.) The payload changes existing fields
