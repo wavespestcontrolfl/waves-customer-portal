@@ -32,7 +32,7 @@ jest.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: jest.fn() }));
 const { randomUUID } = require('node:crypto');
 const express = require('express');
 const router = require('../routes/admin-payroll');
-const { NO_LAST_DAY } = require('../services/payroll-week-minimum');
+const { NO_LAST_DAY, EARLIER_STAY } = require('../services/payroll-week-minimum');
 const { addStaffWorkDays } = require('../utils/staff-time-work-date');
 
 jest.setTimeout(60000);
@@ -233,6 +233,37 @@ postgres('payroll minimum paid week', () => {
     const run = (await draft(W1)).body.run;
     expect(run.checks).toEqual([]);
     expect(run.blocked).toEqual([{ technicianId: id, name: 'Sample Alpha', reason: NO_LAST_DAY }]);
+  });
+
+  it('holds a week of an earlier stay: work before the hire date on file', async () => {
+    // Rehired later: the hire date moved past this week, which has shifts on Monday and Tuesday.
+    const id = await tech('Sample Alpha', { hired: addDays(W1, 21) });
+    await worked(id, W1, 15);
+    await trx('time_entry_daily_summary').insert({ technician_id: id, work_date: W1, total_shift_minutes: 900 });
+    const run = (await draft(W1)).body.run;
+    expect(run.blocked).toEqual([{ technicianId: id, name: 'Sample Alpha', reason: EARLIER_STAY }]);
+    // Clearing the minimum pays the week as before.
+    await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: null }, email: OWNER });
+    const again = (await api('POST', `/runs/${run.id}/recompute`)).body.run;
+    expect(again.blocked).toEqual([]);
+    expect(byName(again, 'Sample Alpha')).toMatchObject({ regularHours: '15.00', grossCents: 33000 });
+    expect(byName(again, 'Sample Alpha')).not.toHaveProperty('minimumWeekHours');
+  });
+
+  it('the run list totals carry the minimum pay like the run itself', async () => {
+    const id = await tech('Sample Alpha');
+    await worked(id, W1, 30);
+    const created = (await draft(W1)).body.run;
+    const listed = (await api('GET', '/runs')).body.runs.find((row) => row.id === created.id);
+    expect(listed.totals).toMatchObject({ grossCents: 88000, minimumWeekPayCents: 22000 });
+  });
+
+  it('the setting can be cleared for a person who is no longer W-2, and not set', async () => {
+    const id = await tech('Sample Alpha');
+    await trx('technicians').where({ id }).update({ employment_type: '1099' });
+    expect((await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: '40' }, email: OWNER })).status).toBe(409);
+    const cleared = await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: null }, email: OWNER });
+    expect([cleared.status, cleared.body.technician.paidWeekMinimumHours]).toEqual([200, null]);
   });
 
   it('a week with no work and no time off on file gets no check from the minimum', async () => {

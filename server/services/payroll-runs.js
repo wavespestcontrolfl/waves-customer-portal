@@ -934,7 +934,7 @@ async function evaluate(conn, run, { lock = false } = {}) {
     unpaidTimeOff = unpaidTimeOff.filter((row) => !payoutHolds.has(row.technicianId));
     // The minimum paid week of a technician who has one (payroll-week-minimum.js): a week of time off the bank
     // could not pay in full still gets a check when the minimum adds hours to it.
-    const minimum = await weekMinimum.applyMinimum(conn, banked.rows, { start, end });
+    const minimum = await weekMinimum.applyMinimum(conn, banked.rows, { start, end, lock });
     const settled = minimum.rows;
     for (const [technicianId, reason] of minimum.holds) if (!bankHolds.has(technicianId)) bankHolds.set(technicianId, reason);
     const needsCheck = (row) => bankHolds.has(row.technician_id) || lineMap.has(row.technician_id)
@@ -1070,7 +1070,7 @@ async function listRuns(conn = db) {
     .select(runColumns(conn));
   if (!runs.length) return [];
   const rows = await conn('payroll_checks').whereIn('run_id', runs.map((run) => run.id))
-    .select(['run_id', ...MONEY_KEYS, ...(timeOffOn() ? TIME_OFF_PAY_COLUMNS : [])]);
+    .select(['run_id', ...MONEY_KEYS, ...(timeOffOn() ? TIME_OFF_PAY_COLUMNS : []), 'minimum_week_minutes', 'minimum_week_pay_cents']);
   const byRun = new Map();
   for (const row of rows) {
     if (!byRun.has(row.run_id)) byRun.set(row.run_id, []);

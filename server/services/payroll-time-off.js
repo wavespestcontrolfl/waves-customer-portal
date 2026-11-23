@@ -455,7 +455,8 @@ async function setWeekMinimum(technicianId, input, actor, conn = db) {
     await lockPayrollMutations(trx);
     const tech = await trx('technicians').where({ id: technicianId }).forUpdate().first('id', 'employment_type');
     if (!tech) throw new PayrollError(404, 'Technician not found.');
-    if (tech.employment_type !== 'w2') throw new PayrollError(409, 'A minimum paid week is for W-2 employees.');
+    // Clearing is always allowed: a setting kept from W-2 days must not come back when the person is W-2 again.
+    if (v.hours != null && tech.employment_type !== 'w2') throw new PayrollError(409, 'A minimum paid week is for W-2 employees.');
     await trx('technicians').where({ id: technicianId }).update({ paid_week_minimum_hours: v.hours, updated_at: trx.fn.now() });
     await recordAuditEvent({
       trx, critical: true, actor_type: 'admin', actor_id: actorId,

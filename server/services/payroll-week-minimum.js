@@ -50,22 +50,24 @@ function minimumWeekMinutes({ minimumHours, weekStart, hireDate = null, lastDay,
   return { target: target / 100, added: Math.max(0, target - hundredths(paidMinutes)) / 100 };
 }
 
-// Per technician among `ids`: the last day of the week [start, end] with recorded work or time off ('YYYY-MM-DD' or
-// null), and whether anything is recorded after the week (also a later weekly timesheet with worked minutes, which
-// payroll pays without dated days). Map of id -> { lastDay, after }.
+// Per technician among `ids`: the first and the last day of the week [start, end] with recorded work or time off
+// ('YYYY-MM-DD' or null), and whether anything is recorded after the week (also a later weekly timesheet with worked minutes, which
+// payroll pays without dated days). Map of id -> { firstDay, lastDay, after }.
 async function recordedDays(conn, ids, start, end) {
-  const byTech = new Map(ids.map((id) => [id, { lastDay: null, after: false }]));
+  const byTech = new Map(ids.map((id) => [id, { firstDay: null, lastDay: null, after: false }]));
   if (!ids.length) return byTech;
   const keep = (rows) => {
     for (const row of rows) {
       const seen = byTech.get(row.technician_id);
       if (!seen) continue;
       if (row.in_week && (!seen.lastDay || row.in_week > seen.lastDay)) seen.lastDay = row.in_week;
+      if (row.first_in_week && (!seen.firstDay || row.first_in_week < seen.firstDay)) seen.firstDay = row.first_in_week;
       if (row.after) seen.after = true;
     }
   };
   const summarize = (dateSql) => [
     conn.raw(`to_char(MAX(${dateSql}) FILTER (WHERE ${dateSql} <= ?::date), 'YYYY-MM-DD') AS in_week`, [end]),
+    conn.raw(`to_char(MIN(${dateSql}) FILTER (WHERE ${dateSql} <= ?::date), 'YYYY-MM-DD') AS first_in_week`, [end]),
     conn.raw(`BOOL_OR(${dateSql} > ?::date) AS after`, [end]),
   ];
   keep(await conn('time_entries')
@@ -85,7 +87,7 @@ async function recordedDays(conn, ids, start, end) {
     .where('week_start', '>', end)
     .whereRaw('COALESCE(regular_minutes, 0) + COALESCE(overtime_minutes, 0) > 0')
     .groupBy('technician_id')
-    .select('technician_id', conn.raw('NULL AS in_week'), conn.raw('true AS after')));
+    .select('technician_id', conn.raw('NULL AS in_week'), conn.raw('NULL AS first_in_week'), conn.raw('true AS after')));
   keep(await conn('payroll_time_off')
     .whereIn('technician_id', ids)
     .where('work_date', '>=', start)
@@ -98,24 +100,31 @@ const NO_LAST_DAY = 'This is the last week of an employee with a minimum paid we
   + 'daily summary or time off on file, so the days the minimum covers cannot be counted. Add the shifts, or clear '
   + 'the minimum for this employee (Payroll settings lists an employee who has left while a minimum is set).';
 
+const EARLIER_STAY = 'This week holds work before the hire date on file (an earlier stay, before a rehire moved the '
+  + 'hire date), so the days the minimum paid week covers cannot be counted. Pay the week by hand, or clear the '
+  + 'minimum for this employee while this pay run is made (Payroll settings).';
+
 /**
  * Sets `minimum_week_minutes` on each row (a pay run row: regular_minutes, overtime_minutes, pto_minutes,
  * holiday_minutes and, for a technician with a bank, pto_bank) of a technician whose minimum is set, 0 when the week
  * already reaches it, when the week has recorded work or time off. Rows of every other technician come back unchanged.
- * Returns { rows, holds }: holds = Map of technician id -> reason (a last week with no dated day).
+ * Returns { rows, holds }: holds = Map of technician id -> reason (a last week with no dated day, a week of an
+ * earlier stay). With `lock` (finalize), the technician rows are read FOR SHARE: a change of the setting, the hire
+ * date or the employment status waits for the finalize, or the finalize waits for it and reads the new values.
  */
-async function applyMinimum(conn, rows, { start, end }) {
+async function applyMinimum(conn, rows, { start, end, lock = false }) {
   const holds = new Map();
   const ids = [...new Set(rows.map((row) => row.technician_id))];
   if (!ids.length) return { rows, holds };
-  const techs = new Map((await conn('technicians')
+  const techQuery = conn('technicians')
     .whereIn('id', ids)
     .where({ employment_type: 'w2' })
     .whereNotNull('paid_week_minimum_hours')
     .select('id', 'paid_week_minimum_hours', 'employment_status',
       conn.raw("to_char(hire_date, 'YYYY-MM-DD') AS hire_date"),
-      conn.raw("to_char(pto_payout_week_start, 'YYYY-MM-DD') AS payout_week")))
-    .map((row) => [row.id, row]));
+      conn.raw("to_char(pto_payout_week_start, 'YYYY-MM-DD') AS payout_week"));
+  if (lock) techQuery.forShare();
+  const techs = new Map((await techQuery).map((row) => [row.id, row]));
   if (!techs.size) return { rows, holds };
   const days = await recordedDays(conn, [...techs.keys()], start, end);
   const out = rows.map((row) => {
@@ -129,6 +138,11 @@ async function applyMinimum(conn, rows, { start, end }) {
     // week on the job: no minimum.
     if (paidMinutes + unpaidMinutes <= 0) return row;
     const recorded = days.get(row.technician_id);
+    // Work before the hire date on file is an earlier stay: its schedule is not known here.
+    if (tech.hire_date && (recorded.firstDay ? recorded.firstDay < tech.hire_date : end < tech.hire_date)) {
+      holds.set(row.technician_id, EARLIER_STAY);
+      return row;
+    }
     const lastWeek = tech.payout_week === start || (tech.employment_status === 'inactive' && !recorded.after);
     if (lastWeek && !recorded.lastDay) {
       holds.set(row.technician_id, NO_LAST_DAY);
@@ -147,4 +161,4 @@ async function applyMinimum(conn, rows, { start, end }) {
   return { rows: out, holds };
 }
 
-module.exports = { SCHEDULED_DAYS, NO_LAST_DAY, minimumWeekMinutes, recordedDays, applyMinimum };
+module.exports = { SCHEDULED_DAYS, NO_LAST_DAY, EARLIER_STAY, minimumWeekMinutes, recordedDays, applyMinimum };
