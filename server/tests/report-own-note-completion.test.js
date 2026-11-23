@@ -48,7 +48,7 @@ describe('the completion\'s report note', () => {
   });
 
   test('a sent note in no shape the sheet sends is a 400 for a fresh attempt, before any write', () => {
-    expect(pick).toContain('const reportNoteInvalid = reportNoteSent && (reportNoteCompanions');
+    expect(pick).toContain('const reportNoteInvalid = reportNoteSent && (reportNoteCompanions || reportNoteVisit === undefined');
     expect(pick).toContain("|| !require('./service-report/report-own-note').isSheetReportNote(completionInput.body.reportNote));");
     // A visit with a companion service never takes a note (its report shows the companion card).
     expect(pick).toContain('const reportNoteCompanions = Array.isArray(companionFindings) ? companionFindings.length > 0');

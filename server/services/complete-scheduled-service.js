@@ -4872,7 +4872,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // A visit with a companion service is never one: its report shows the companion card, not the note.
     const reportNoteCompanions = Array.isArray(companionFindings) ? companionFindings.length > 0
       : Boolean(companionFindings && typeof companionFindings === 'object' && Object.keys(companionFindings).length);
-    const reportNoteInvalid = reportNoteSent && (reportNoteCompanions
+    // So is a visit the check never asks about (not performed, typed, a backfill): the sheet sends a note only for a
+    // performed pest visit.
+    const reportNoteInvalid = reportNoteSent && (reportNoteCompanions || reportNoteVisit === undefined
       || !require('./service-report/report-own-note').isSheetReportNote(completionInput.body.reportNote));
     const reportNotePick = reportNoteVisit?.eligible === true && !reportNoteInvalid
       ? await require('./service-report/report-own-note').reportNoteToStore({
