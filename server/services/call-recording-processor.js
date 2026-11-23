@@ -2047,10 +2047,13 @@ function agreedOneTimeJobCardPrice(v2Extraction, bookedService) {
   const amount = resolveAgreedOneTimeJobPrice(v2Extraction);
   const { serviceNameKey } = require('./call-one-time-job');
   if (amount == null || !request || serviceNameKey(bookedService) !== serviceNameKey(request.specific_service_name)) return null;
-  // An agreed total needs consistent evidence: the extraction saying the price is
-  // not final, or the caller did not accept it, makes it a price to check.
-  const agreed = request.quoted_price_usd === amount && request.price_is_final !== false && request.price_accepted_by_caller !== false;
-  return { amount, basis: agreed ? 'agreed_total' : 'stated' };
+  // No strict total: staff stated it (the resolver then needs an agent-stated term).
+  if (request.quoted_price_usd == null) return { amount, basis: 'stated' };
+  // An agreed total needs consistent evidence. When the extraction says the price
+  // is not final, or the caller did not accept it, it is a price to check, shown
+  // as staff's only when staff stated the term (never a caller's number).
+  if (request.price_is_final !== false && request.price_accepted_by_caller !== false) return { amount, basis: 'agreed_total' };
+  return require('../utils/call-agreed-price').agreedOneTimeJobPriceStatedBy(v2Extraction) === 'agent' ? { amount, basis: 'stated' } : null;
 }
 
 // Geographic hard veto for the LEGACY (non-enforce) booking path. The V2
@@ -21130,10 +21133,6 @@ const CallRecordingProcessor = {
                   // call whose booking since completed or was cancelled must
                   // not book a stray child off it.
                   if (['cancelled', 'completed', 'skipped', 'no_show'].includes(primaryRow.status)) return null;
-                  if (agreedJobHeldForOffice) {
-                    agreedJobFollowUpWithheld = true;
-                    return null;
-                  }
                   // A street-level address hold has no visit 2 until the office
                   // confirms the address: the promised follow-up rides on the review
                   // card (payload.follow_up_plan) instead of a child at an unverified
@@ -21207,6 +21206,14 @@ const CallRecordingProcessor = {
                       parentWindowStart: String(primaryRow.window_start || '').slice(0, 5) || windowStart || '09:00',
                     });
                     if (!fuPlan) return null;
+                  }
+                  // GATE_CALL_AGREED_ONE_TIME_JOB: under the hold the AI books nothing,
+                  // not even visit 2 on a visit the call kept. Every check above ran
+                  // first (a child, an owed or dispatch-owned follow-up), so this
+                  // marks only a visit 2 still to book; the office card says so.
+                  if (agreedJobHeldForOffice) {
+                    agreedJobFollowUpWithheld = true;
+                    return null;
                   }
                   // Runs in a SAVEPOINT (nested trx): a rejected follow-up
                   // insert must never roll back the confirmed primary
@@ -22552,7 +22559,8 @@ const CallRecordingProcessor = {
                 const agreedJobCancelled = (agreedJobPriorByKey && ['cancelled', 'rescheduled'].includes(agreedJobPriorByKey.status))
                   ? agreedJobPriorByKey
                   : (agreedJobHeldForOffice && !agreedJobPriorByKey
-                    ? await trx('scheduled_services').where({ source_call_log_id: call.id }).whereIn('status', ['cancelled', 'rescheduled']).orderBy('created_at', 'desc').first('id', 'status')
+                    ? await trx('scheduled_services').where({ source_call_log_id: call.id, customer_id: customerId }).whereNull('parent_service_id')
+                      .whereIn('status', ['cancelled', 'rescheduled']).orderBy('created_at', 'desc').first('id', 'status')
                     : null);
                 if (agreedJobCancelled) {
                   return { __held: { reason: 'auto_booking_previously_cancelled', existingId: agreedJobCancelled.id, existingStatus: agreedJobCancelled.status } };
@@ -24571,23 +24579,25 @@ const CallRecordingProcessor = {
       // The agreed one-time job's card IS this fallback's card (one reason
       // code): written once per pass, so the fallback runs only after a failed
       // write, and then with the card's full evidence.
-      if (agreedJobCardFiled) heldReasons.add('agreed_one_time_job_office_books');
+      // A failed agreed-job card write (the held card, or one naming a kept
+      // visit, which sets bookedServiceId) is retried once here through the
+      // same writer (the claim locked through the write), with the same
+      // evidence; the inline writer below never handles it.
+      if (agreedJobCardEvidence && !agreedJobCardFiled) {
+        agreedJobCardFiled = await fileSkippedBookingCard({
+          call, procToken, customerId, extraction: v2ApprovedExtraction || v2CanonicalExtraction,
+          skippedReason: 'agreed_one_time_job_office_books', preferredDateTime: extracted.preferred_date_time,
+          serviceType: appointmentResult?.service || extracted.matched_service || extracted.requested_service || null,
+          bridgeNeedsConfirmation, callSid, agreedOneTimeJob: agreedJobCardEvidence,
+        });
+      }
+      if (agreedJobCardEvidence) heldReasons.add('agreed_one_time_job_office_books');
       if (!bookedServiceId && !heldReasons.has(appointmentResult?.skippedReason)) {
         const skipReason = appointmentResult?.skippedReason
           || appointmentResult?.scheduleError
           || appointmentResult?.error
           || (!customerId ? 'booked_call_without_customer' : 'auto_booking_not_created');
-        if (skipReason === 'agreed_one_time_job_office_books') {
-          // The agreed job's first write failed: retry through its own writer,
-          // which holds the claim (FOR UPDATE) through the write, with the same
-          // evidence, so a superseded worker never publishes an older pass's.
-          await fileSkippedBookingCard({
-            call, procToken, customerId, extraction: v2ApprovedExtraction || v2CanonicalExtraction,
-            skippedReason: skipReason, preferredDateTime: extracted.preferred_date_time,
-            serviceType: appointmentResult?.service || extracted.matched_service || extracted.requested_service || null,
-            bridgeNeedsConfirmation, callSid, agreedOneTimeJob: agreedJobCardEvidence,
-          });
-        } else try {
+        try {
           // A standing task (open OR claimed) is REFRESHED with the current
           // service / window under the triage-call lock, as the shadow-mode
           // fallback does: a claimed conflict card that cannot record a newly

@@ -161,6 +161,16 @@ function resolveAgreedOneTimeJobPrice(v2Extraction = null) {
   return svc.quoted_price_usd === amount ? amount : null;
 }
 
+// Who stated the one accepted term that resolveAgreedOneTimeJobPrice reads:
+// 'agent', 'caller', or null (none, or more than one). The office card shows a
+// disputed total as staff's number only when staff stated it.
+function agreedOneTimeJobPriceStatedBy(v2Extraction = null) {
+  const svc = v2Extraction?.service_request;
+  if (!svc || typeof svc !== 'object') return null;
+  const accepted = statedPriceTerms(svc).filter((entry) => entry.accepted === true);
+  return accepted.length === 1 ? (accepted[0].stated_by || null) : null;
+}
+
 function formatAgreedTerm(term) {
   const amount = term?.amount;
   if (typeof amount !== 'number' || !Number.isFinite(amount)) return '$0.00';
@@ -183,5 +193,6 @@ module.exports = {
   resolveCallAgreedPrice,
   resolveStatedOneTimeCallPrice,
   resolveAgreedOneTimeJobPrice,
+  agreedOneTimeJobPriceStatedBy,
   formatAgreedPriceLabel,
 };
