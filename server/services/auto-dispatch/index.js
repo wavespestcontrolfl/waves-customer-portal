@@ -317,7 +317,7 @@ function noteUnmoved(run, service, reasonCode) {
 // or a person may have changed its slot or freed the stop it overlapped.
 // Returns null when it is no longer an open visit with an arrival time,
 // { clear: true } when it no longer conflicts. A visit whose only conflict is
-// the customer's mowing day (GATE_AUTO_DISPATCH_MOWING_DAYS) needs no person:
+// the customer's mowing day (mowing-days.js) needs no person:
 // it reads clear here, so it raises no notice and closes an older one.
 async function standingConflict(seen, id) {
   const row = await db('scheduled_services').where({ id }).first('*');
@@ -389,7 +389,7 @@ async function settleConflicts(run) {
 
 async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   const {
-    current, candidates, drops, skipped, search, shadow_candidates: dryShadowCandidates = [], mowing, mowing_shadow_candidates: mowingShadowCandidates = null,
+    current, candidates, drops, skipped, search, shadow_candidates: dryShadowCandidates = [], mowing,
   } = await findSlotsOrSkip(service, prefs, ctx);
   const prefsSnapshot = prefs.raw_snapshot;
   const scoreCtx = { currentTechnicianId: service.technician_id, changeCount: service.auto_dispatch_change_count || 0 };
@@ -412,7 +412,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
       reason_code: reason.code,
       reason_description: reason.description,
       conflict: (current && current.conflict) || null,
-      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, ...(search ? { search } : {}), model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}), ...conflictOf(current), ...dryTimeConstraint(prefs, { service, current, candidates: dryShadowCandidates, shadow: emptyShadow }), ...mowingDays.auditNote(mowing, { service, current }) } },
+      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, ...(search ? { search } : {}), model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}), ...conflictOf(current), ...dryTimeConstraint(prefs, { service, current, candidates: dryShadowCandidates, shadow: emptyShadow }), ...mowingDays.auditNote(mowing, { current }) } },
     };
   }
 
@@ -446,10 +446,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   const live = ranked.qualifies ? best : null;
   Object.assign(constraints, dryTimeConstraint(prefs, {
     service, current, candidates: shadowPool, live, shadow: dryTimeShadowBest({ service, prefs, current, candidates: shadowPool, scoreCtx, threshold, config }),
-  }), mowingDays.auditNote(mowing, {
-    service, current, live, currentScore, threshold, config, conflictMoves: ctx.conflictMoves,
-    shadowCandidates: mowingShadowCandidates, scoreOf: (cand) => scoreAppointmentPlacement(cand, prefs, scoreCtx),
-  }));
+  }), mowingDays.auditNote(mowing, { current, live }));
 
   // Capped AFTER scoring (Codex r1): with the gate on, findValidCandidateSlots
   // returns every survivor and each was scored above before this cap.
@@ -483,7 +480,7 @@ function dryTimeConstraint(prefs, {
 
 // A placement audit rebuilt around the candidate apply.js tried keeps the
 // evaluation's dry_time block, with live_best following that candidate, and
-// its mowing_days block as it was (GATE_AUTO_DISPATCH_MOWING_DAYS).
+// its mowing_days block as it was (mowing-days.js).
 function carryDryTime(built, evaluation, candidate) {
   const from = (evaluation.audit && evaluation.audit.constraints) || {};
   const note = dryTime.noteForCandidate(from.dry_time, candidate);

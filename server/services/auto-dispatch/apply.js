@@ -361,7 +361,7 @@ function makeMoveGuard({ service, best, config = {} }) {
     await require('./proofreader/nightly').assertStillApproved(trx, service, config, refuse, row);
     await checkFlexOwnBounds(trx, row, best, config.guardMode, refuse, destination, true);
     await assertSourceConflictHolds(trx, service, config.sourceConflict, refuse, sourceCheck);
-    // GATE_AUTO_DISPATCH_MOWING_DAYS='true': the destination against the mowing rule as saved now.
+    // The destination against the mowing rule as saved now.
     await mowingDays.assertDestinationClear(trx, row, best.date, refuse, [row.service_type]);
     const receiving = best.technician_id || technicianId || row.technician_id || null;
     // GATE_SOUTH_ZONE_DAY_FUNNEL: a visit outside the far-south zones never lands on a date holding a far-south stop.
@@ -595,7 +595,7 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
       await checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse, targets, true, dayOnlyOf(config));
     }
     await checkSameSeriesClash(trx, rows, best, memberIds, refuse);
-    // GATE_AUTO_DISPATCH_MOWING_DAYS='true': a Lawn Care Service member holds the unit to the mowing rule as saved now.
+    // A Lawn Care Service member holds the unit to the mowing rule as saved now.
     await mowingDays.assertDestinationClear(trx, service, best.date, refuse, rows.map((r) => r.service_type));
     // Every sibling against the receiving tech, committed rows, tech changed
     // or not (see assertCapabilitiesActive).

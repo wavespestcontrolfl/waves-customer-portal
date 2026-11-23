@@ -665,7 +665,8 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     let trx = fakeTrx({ caps: [{ service_category: lawn, active: false }] });
     await expect(guard({ trx, technicianId: 't1' })).rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', statusCode: 409 });
     // technician row share-locked FIRST (serializes with the editor's FOR UPDATE), then the read
-    expect(trx.__calls).toEqual(['technicians', 'technician_capabilities']);
+    // the lawn visit's mowing rule re-read first (mowing-days.js assertDestinationClear)
+    expect(trx.__calls).toEqual(['property_preferences', 'technicians', 'technician_capabilities']);
     trx = fakeTrx({ caps: [{ service_category: lawn, active: true }] });
     await expect(guard({ trx, technicianId: 't1' })).resolves.toBeUndefined();
     trx = fakeTrx({ caps: [] });
@@ -679,11 +680,11 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     await expect(toT2({ trx, technicianId: 't1' })).resolves.toBeUndefined();
     trx = fakeTrx({ capsByTech: { t1: [{ service_category: lawn, active: true }], t2: [{ service_category: lawn, active: false }] } });
     await expect(toT2({ trx, technicianId: 't1' })).rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
-    // No receiving tech at all → nothing to check, no read.
+    // No receiving tech at all → no capability read (the lawn visit's mowing rule is still re-read).
     const unassigned = makeMoveGuard({ service: { ...lawnRow, technician_id: null }, best: { ...BEST, technician_id: null } });
     trx = fakeTrx();
     await expect(unassigned({ trx, technicianId: null })).resolves.toBeUndefined();
-    expect(trx.__calls).toEqual([]);
+    expect(trx.__calls).toEqual(['property_preferences']);
     // A grouped SIBLING moved by the unit mover: the rebooker hands its own row,
     // which is what gets checked — not the closure's primary.
     const pestPrimary = makeMoveGuard({ service: { ...SERVICE, service_type: 'Quarterly Pest Control' }, best: BEST });
@@ -1056,7 +1057,7 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     const guard = makeMemberGuard({ service: SERVICE, best, config: {}, techChanged: true });
     let trx = fakeTrx({ siblings: [eligible()], caps: [{ service_category: lawn, active: false }] });
     await expect(guard({ trx, members })).rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2' });
-    expect(trx.__calls).toEqual(['scheduled_services', 'recurring_plan_alerts', 'scheduled_services', 'technicians', 'technician_capabilities']); // member read, plan check, series probe, tech-row share lock, capability
+    expect(trx.__calls).toEqual(['scheduled_services', 'recurring_plan_alerts', 'scheduled_services', 'property_preferences', 'technicians', 'technician_capabilities']); // member read, plan check, series probe, mowing rule, tech-row share lock, capability
     trx = fakeTrx({ siblings: [eligible()], caps: [] });
     await expect(guard({ trx, members })).resolves.toBeUndefined();
     trx = fakeTrx({ siblings: [eligible()], caps: [{ service_category: lawn, active: true }] });

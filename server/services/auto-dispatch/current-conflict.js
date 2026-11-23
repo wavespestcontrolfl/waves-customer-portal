@@ -23,7 +23,7 @@
  *               (techScopedConfirmActive), a row assigned to a different
  *               technician (owner 2026-10-03: only the same technician or an
  *               unassigned row counts);
- *   mowing_day  GATE_AUTO_DISPATCH_MOWING_DAYS='true' only, and only when
+ *   mowing_day  only when
  *               neither of the above applies: a unit with a Lawn Care Service
  *               visit sits on the customer's mowing day or a day next to it
  *               (mowing-days.js; the row read here, so the apply-time and
@@ -169,21 +169,19 @@ async function overlappingStopIds(service, ctx, excludeIds, dateStr) {
   return overlapping.map((r) => String(r.id)).filter((id) => !samePlace.has(id));
 }
 
-// GATE_AUTO_DISPATCH_MOWING_DAYS='true': the visit's date is a blocked
-// weekday of its customer's mowing rule and its unit (the visit, else an open
-// group member in `excludeIds`) holds a Lawn Care Service visit. Other modes:
-// null, nothing read.
+// The visit's date is a blocked weekday of its customer's mowing rule and its
+// unit (the visit, else an open group member in `excludeIds`) holds a Lawn
+// Care Service visit.
 async function mowingDayConflict(service, conn, excludeIds, dateStr) {
   const mowingDays = require('./mowing-days');
-  if (mowingDays.mowingDaysMode() !== 'true') return null;
   const lawn = mowingDays.isLawnCareService(service.service_type);
   const others = [...(excludeIds || [])].map(String).filter((id) => id !== String(service.id));
   // A visit alone that is not a Lawn Care Service visit: nothing to read.
   if (!lawn && !others.length) return null;
   const row = await conn('property_preferences').where('customer_id', service.customer_id).first('preferred_day', 'mowing_days');
   const { normalizePreferences } = require('./preferences');
-  const rule = mowingDays.ruleFor(row, normalizePreferences(row, service.service_type).preferred_day_indexes, 'true');
-  if (!mowingDays.blocksLive(dateStr, rule)) return null;
+  const rule = mowingDays.ruleFor(row, normalizePreferences(row, service.service_type).preferred_day_indexes);
+  if (!mowingDays.blocksDay(dateStr, rule)) return null;
   const types = lawn ? [] : await conn('scheduled_services').whereIn('id', others).pluck('service_type');
   if (!mowingDays.unitRule({ mowing: rule }, [service, ...types.map((t) => ({ service_type: t }))])) return null;
   return { kind: 'mowing_day', date: dateStr, mowing_days: rule.days };
