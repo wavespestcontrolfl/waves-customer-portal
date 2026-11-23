@@ -152,7 +152,7 @@ function sourceEvidence(row) {
   }
   // Only an active row proves the placement: the 2026-11-23 line was released
   // and its row turned off (20261124000000).
-  if (sourceType === 'google_lsa' && row?._source_is_active !== false) {
+  if (sourceType === 'google_lsa' && row?._source_is_active === true) {
     return {
       kind: 'google_ads',
       label: 'Google LSA',
@@ -263,7 +263,7 @@ function sourceSortExpression(conn, callAlias = 'cl') {
     WHEN ${callAlias}.metadata->>'numberType' IN ('location', 'tech_line', 'unassigned', 'internal_alert', 'customer_chat') THEN 'Source unknown'
     WHEN ${callAlias}.metadata->>'numberType' IN ('domain_tracking', 'pest_domain', 'lawn_domain') THEN 'Website'
     WHEN ${callAlias}.to_phone IN (${marks(google)}) OR call_source.source_type = 'google_ads' THEN 'Google Ads'
-    WHEN call_source.source_type = 'google_lsa' AND call_source.is_active IS NOT FALSE THEN 'Google LSA'
+    WHEN call_source.source_type = 'google_lsa' AND call_source.is_active IS TRUE THEN 'Google LSA'
     WHEN ${callAlias}.to_phone IN (${marks(meta)}) OR call_source.source_type = 'facebook' THEN 'Meta Ads'
     WHEN ${callAlias}.to_phone IN (${marks(gbp)}) OR call_source.source_type = 'gbp' THEN 'Google Business Profile'
     WHEN ${callAlias}.to_phone IN (${marks(offline)}) OR call_source.source_type = 'vehicle' THEN 'Offline'

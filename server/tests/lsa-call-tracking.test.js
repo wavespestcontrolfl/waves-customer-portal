@@ -20,7 +20,7 @@ describe('Google LSA line released (owner 2026-11-23)', () => {
   });
 
   test('a line whose source row is google_lsa reads Google LSA', () => {
-    expect(sourceEvidence({ to_phone: '+19415550100', _source_type: 'google_lsa' })).toMatchObject({ kind: 'google_ads', label: 'Google LSA' });
+    expect(sourceEvidence({ to_phone: '+19415550100', _source_type: 'google_lsa', _source_is_active: true })).toMatchObject({ kind: 'google_ads', label: 'Google LSA' });
     expect(sourceEvidence({ to_phone: '+19415550100', _source_type: 'google_lsa', _source_is_active: false }).label).not.toBe('Google LSA');
   });
 
