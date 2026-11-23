@@ -395,8 +395,10 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(count(site)).toBe(1);
     const call = source.slice(source.indexOf(site), source.indexOf("} else if (svc.__held.reason !== 'on_file_house_number_conflict') await db('triage_items')"));
     expect(call).toContain('const alert = buildAgreedOneTimeJobAlert({\n                    call, firstName: extracted.first_name, serviceType, scheduledDate, windowStart,\n                    price: agreedJobCardPrice, followUpPlan: callFollowUpPlan,\n                    streetLevelAddress: svc.__held.streetLevelAddress, bookingAddress: svc.__held.bookingAddress, billToPayer,\n                  });');
-    expect(call).toContain("const raised = await require('./admin-alert-compose').raiseAdminAlert(alert.category, alert.spec, alert.opts);");
-    expect(call).toContain('agreedJobAlerted = !!(raised && raised.id);');
+    // Only the call's current worker publishes or refreshes the task, under the call row's lock, in one transaction.
+    expect(call).toContain("const raised = await db.transaction(async (atrx) => {\n                      const owner = await atrx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id');\n                      if (!owner) return { superseded: true };\n                      return require('./admin-alert-compose').raiseAdminAlert(alert.category, alert.spec, { ...alert.opts, trx: atrx });\n                    });");
+    // A superseded pass files nothing either: the current worker owns the task.
+    expect(call).toContain('agreedJobAlerted = !!(raised && (raised.id || raised.superseded));');
     expect(call).not.toContain('fileSkippedBookingCard');
     // A raised notification is the office's task: the call gets no review state and no confirm-before-dispatch note.
     expect(source).toContain("const agreedJobTaskRaised = svc.__held.reason === 'agreed_one_time_job_office_books' && agreedJobAlerted;\n                if (!agreedJobTaskRaised && !bridgeNeedsConfirmation.includes(svc.__held.reason)) bridgeNeedsConfirmation.push(svc.__held.reason);");
@@ -435,13 +437,14 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(alert.opts.ringOnRefresh()).toBe(false);
     expect(alert.opts.dedupeOpenOnly).toBeUndefined();
     expect(alert.opts.dedupeKey.startsWith(require('../services/call-one-time-job').AGREED_ONE_TIME_JOB_ALERT_PREFIX)).toBe(true);
-    expect(alert.opts.metadata).toEqual({ callLogId: 'call-1', source: 'call_agreed_one_time_job' });
+    // The resolved payer stays identifiable: its id rides in metadata and as a payer page link in the detail.
+    expect(alert.opts.metadata).toEqual({ callLogId: 'call-1', source: 'call_agreed_one_time_job', payerId: 'payer-1' });
     const detail = alert.opts.detail;
     expect(detail).toContain('Staff said $250.00 one-time. Check the terms on the call before you set the visit\'s price.');
     expect(detail).toContain('Book at: 100 Example St, Bradenton, FL 34202.');
-    expect(detail).toContain('Bill-To: Example Property Management. Select this payer as Bill-To when you book');
+    expect(detail).toContain('Bill-To: Example Property Management (payer page: /admin/payers?payer=payer-1). Select this payer as Bill-To when you book');
     expect(detail).toContain('Visit 2 is owed: it is part of this two-treatment service. Around Sat Dec 5, 5 PM: the call did not set this time');
-    expect(detail).toContain('Book visit 2 only if it is missing, at the time the customer confirms.');
+    expect(detail).toContain('Book visit 2 only if it is missing, and book or move it only to the time the customer confirms.');
     expect(detail).toContain('Before you book: check the customer\'s schedule.');
     expect(detail).not.toContain('Google matched only the street');
 
@@ -457,8 +460,15 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(other.opts.detail).toContain('No address resolved: confirm the service address with the customer before you book.');
     expect(other.opts.detail).toContain('Google matched only the street of this address');
     expect(other.opts.detail).not.toContain('Bill-To');
-    expect(other.opts.detail).toContain('the call agreed a second visit. The call set it for Sat Dec 5, 2:30 PM. Visits start on the hour');
-    expect(other.opts.detail).toContain('move it to this time if it differs.');
+    expect(other.opts.metadata.payerId).toBeUndefined();
+    // A set off-hour time is never the time to book: staff book or move visit 2 only to the on-hour time the customer confirms.
+    expect(other.opts.detail).toContain('the call agreed a second visit. The call set it for Sat Dec 5, 2:30 PM, which is not on the hour: confirm an on-hour time with the customer.');
+    expect(other.opts.detail).toContain('and book or move it only to the time the customer confirms.');
+    expect(other.opts.detail).not.toContain('move it to this time if it differs');
+    // A set on-hour time is firm.
+    const firm = buildAgreedOneTimeJobAlert({ ...base, followUpPlan: { scheduledDate: '2026-12-05', windowStart: '17:00', hourStated: true } });
+    expect(firm.opts.detail).toContain('The call set it for Sat Dec 5, 5 PM. Save visit 1 first');
+    expect(firm.opts.detail).toContain('Book visit 2 only if it is missing, and move it to this time if it differs.');
 
     // No price, no follow-up, and a service name too long for the why: the plain why, still one sentence.
     const plain = buildAgreedOneTimeJobAlert({ ...base, serviceType: 'One-Time Pest Control Service With An Extremely Long Catalog Name For Testing Only', price: null });

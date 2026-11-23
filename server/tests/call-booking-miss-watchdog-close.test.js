@@ -7,7 +7,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), alertRingOnceLive: jest.fn(() => true) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 
-const mockState = { calls: [], booked: [], customers: [], open: [], updates: [], inserts: [], failClose: false, notificationFilters: [], callLogSelects: [] };
+const mockState = { calls: [], booked: [], customers: [], open: [], tasks: [], updates: [], inserts: [], failClose: false, notificationFilters: [], callLogSelects: [] };
 
 jest.mock('../models/db', () => {
   const makeBuilder = (table) => {
@@ -17,12 +17,17 @@ jest.mock('../models/db', () => {
       if (table === 'call_log') return ctx.callIds ? mockState.calls.filter((c) => ctx.callIds.includes(c.id)) : mockState.calls;
       if (table === 'scheduled_services') return mockState.booked;
       if (table === 'customers') return mockState.customers;
-      if (table === 'notifications') return ctx.probe ? mockState.open : [];
+      // The agreed one-time job task lookup (dedupeKey = ANY) reads its own rows.
+      if (table === 'notifications') return ctx.task ? mockState.tasks : (ctx.probe ? mockState.open : []);
       return [];
     };
     const b = {
       where: () => b,
-      whereRaw: (sql, args) => { if (table === 'notifications') mockState.notificationFilters.push([sql, args]); return b; },
+      whereRaw: (sql, args) => {
+        if (table === 'notifications') mockState.notificationFilters.push([sql, args]);
+        if (table === 'notifications' && /= ANY\(\?\)/.test(sql)) ctx.task = true;
+        return b;
+      },
       whereNotNull: () => b,
       whereNull: () => { ctx.probe = true; return b; },
       whereIn: (col, ids) => {
@@ -97,7 +102,7 @@ const bell = (id, minute, over = {}) => ({
   id, title: "Schedule — book Sam Sample's Waves Assessment", created_at: `2026-10-20T15:${minute}:00Z`,
   mismatch_visit_id: null, mismatch_date: null, mismatch_time: null, ...over,
 });
-const classify = (rows, open = [bell('n1', '10')], opts = {}) => classifyOpenBookingMiss(call(opts.call), opts.slot || SLOT, rows, open, { now: opts.now || NOW, namesakes: opts.namesakes || new Map() });
+const classify = (rows, open = [bell('n1', '10')], opts = {}) => classifyOpenBookingMiss(call(opts.call), opts.slot || SLOT, rows, open, { now: opts.now || NOW, namesakes: opts.namesakes || new Map(), officeTask: opts.officeTask });
 
 describe('classifyOpenBookingMiss', () => {
   test('booked: the visit on the agreed slot closes every bell, naming the visit', () => {
@@ -255,6 +260,15 @@ describe('classifyOpenBookingMiss', () => {
     expect(plan.closes).toEqual([{ ids: ['n2', 'n1'], resolution: 'Dismissed on Dispatch: not booking' }]);
   });
 
+  // GATE_CALL_AGREED_ONE_TIME_JOB: the call has the office's one-time job task (its own notification), so an older
+  // miss bell is replaced by it and nothing new rings, even for a visit on another day. A booked visit still wins.
+  test('office_task: a call with the one-time job notification closes its miss bells and rings nothing', () => {
+    const plan = classify([visit({ sched_date: '2026-10-28' })], [bell('n1', '10'), bell('n2', '20')], { officeTask: true });
+    expect(plan).toMatchObject({ verdict: 'office_task', keep: null, ring: null });
+    expect(plan.closes).toEqual([{ ids: ['n2', 'n1'], resolution: 'Replaced by the one-time job notification for this call' }]);
+    expect(classify([visit({ sched_date: '2026-11-04' })], [bell('n1', '10')], { officeTask: true }).verdict).toBe('booked');
+  });
+
   test('a dismissed call that was booked anyway closes as booked, and a later visit on another day as dismissed', () => {
     const dismissed = { call: { held_visit_dismissed_at: '2026-10-21T13:00:00.000Z' } };
     expect(classify([visit({ sched_date: '2026-11-04' })], [bell('n1', '10')], dismissed).verdict).toBe('booked');
@@ -274,6 +288,7 @@ describe('close pass', () => {
     mockState.booked = [];
     mockState.customers = [];
     mockState.open = [];
+    mockState.tasks = [];
     mockState.updates = [];
     mockState.inserts = [];
     mockState.failClose = false;
@@ -291,6 +306,18 @@ describe('close pass', () => {
     const result = await tick();
     expect(result).toMatchObject({ closed: 1, raised: 0, alerted: 0 });
     expect(mockState.updates).toEqual([{ table: 'notifications', ids: ['n1'], payload: { done_by: 'call-booking-miss', resolution: 'Dismissed on Dispatch: not booking' } }]);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  // A call that rang as a miss before a reprocess raised its one-time job notification: the miss bell retires as
+  // replaced, and no date check or "book it" bell rings beside the office's task.
+  test('a call with the one-time job notification: its miss bells close as replaced and nothing rings', async () => {
+    mockState.open = [open('n1', '10'), open('n2', '20')];
+    mockState.booked = wrongWeek();
+    mockState.tasks = [{ dedupe_key: `agreed-one-time-job:${CALL_ID}` }];
+    const result = await tick();
+    expect(result).toMatchObject({ closed: 2, raised: 0, alerted: 0 });
+    expect(mockState.updates).toEqual([{ table: 'notifications', ids: ['n2', 'n1'], payload: { done_by: 'call-booking-miss', resolution: 'Replaced by the one-time job notification for this call' } }]);
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
