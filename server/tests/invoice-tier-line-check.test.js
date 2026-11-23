@@ -104,7 +104,7 @@ describe('tierSavingsLeftOffInvoices', () => {
     expect(await withData({ summary: { manualDiscount: { amount: 5, recurringAmount: 0, label: 'Courtesy' } } })).toHaveLength(1);
   });
 
-  // Pre-push audit P1s (rounds 6 to 9): a row whose own tier record names no tier prints a bare "WaveGuard" line. The
+  // Pre-push audit P1s (rounds 6 to 9, and 11): a row whose own tier record names no tier prints a bare "WaveGuard" line. The
   // check judges the row the invoice prints (breakdown.discounts) in the place of the tier row of its own pricing (the
   // row that carries the rate). Judging a name needs no rate and no staff rule.
   test('a printed breakdown of a line with a tier share must name the tier the records agree on; a bare label is a finding', async () => {
@@ -130,6 +130,13 @@ describe('tierSavingsLeftOffInvoices', () => {
     expect(await findingsFor(withRows([{ name: 'WaveGuard', dollars: 15 }]))).toEqual(finding);
     expect(await findingsFor(withRows([{ name: 'WaveGuard Silver', dollars: 15 }]))).toEqual(finding);
     expect(await findingsFor(withRows([{ name: 'WaveGuard Gold', dollars: 14 }]))).toEqual(finding);
+    // A fault in the invoice's own label code cannot pass its own output (round 11): with waveGuardTierName dropping the
+    // tier, a bare tier line is still a finding, and a "WaveGuard Gold" line still is not.
+    const labelCode = jest.spyOn(require('../services/completion-pricing'), 'waveGuardTierName').mockReturnValue('WaveGuard');
+    try {
+      expect(await findingsFor(withRows([{ name: 'WaveGuard', dollars: 15 }]))).toEqual(finding);
+      expect(await findingsFor(printed(pestRow))).toEqual([]);
+    } finally { labelCode.mockRestore(); }
     // Records that name another tier, or no tier at all, name none: no finding. The matched row's own record counts.
     expect(await findingsFor(printed(tierless, {}, estimate({ tier: 'Silver' })))).toEqual([]);
     const tierlessEngine = [pestItem({ discount: { appliedDiscounts: [{ type: 'waveguard', amount: 0.15 }] } })];
@@ -162,6 +169,35 @@ describe('tierSavingsLeftOffInvoices', () => {
       result: { recurring: gold, results: { recurring: { tier, services: [pestRow] } } } } });
     expect(await findingsFor(printed(tierless, {}, nested('Silver')))).toEqual([]);
     expect(await findingsFor(printed(tierless, {}, nested('Gold')))).toEqual(finding);
+  });
+
+  // Pre-push audit P1 (rounds 10 and 11): an engine result saved whole keeps a rated line's net only as `annual`, so the
+  // reader gives the line no per-visit price and the invoice cannot price it (reason no_breakdown). The engine's own
+  // record of the line holds the net: priced by the reader's own derivation, it must be the visit's price.
+  test('a line the reader could not price is read from the engine\'s own record, at the visit\'s price', async () => {
+    // The row the reader keeps from the engine line (estimate-public.js recurringServicesWithSupplements): the list price
+    // a visit, the net only as `annual`, and the engine's own discount record.
+    const rawRow = { service: 'pest_control', name: 'Pest Control', mo: 28.33, monthly: 28.33, annual: 340, perTreatment: 100,
+      visitsPerYear: 4, discount: waveguard(0.15) };
+    const whole = (lineItems = [pestItem()]) => estimate({ data: { result: { lineItems, recurring: gold } } });
+    const unpriced = (extra = {}) => ({ breakdown: null, reason: 'no_breakdown', estimate: whole(),
+      line: scheduleLine(rawRow, { perApplicationPrice: null }), ...extra });
+    const finding = [{ visitId: 'v1', estimateId: 'e1', serviceKey: 'pest_control', lineKey: 'recurring:0', tier: 'gold' }];
+    expect(await findingsFor(unpriced())).toEqual(finding);
+    // Priced at the engine's own net a visit ($340 / 4), in the invoice's own context with the engine's tier and rate.
+    expect(acceptedPricing.mock.calls).toEqual([[scheduleLine(rawRow, { perApplicationPrice: 85 }),
+      expect.objectContaining({ estimateTier: { tier: 'gold', amount: 0.15 } })]]);
+    // A visit whose price moved off the engine's net keeps one line by design.
+    expect(await findingsFor(unpriced(), visit({ estimated_price: '84.99' }))).toEqual([]);
+    // A line the reader priced is not repriced: its own price is above its list, so the invoice keeps one line.
+    expect(await findingsFor(unpriced({ line: scheduleLine(rawRow, { perApplicationPrice: 110 }) }))).toEqual([]);
+    // With no engine record of the line, nothing proves the net: no engine lines, or two of the service.
+    expect(await findingsFor(unpriced({ estimate: estimate({ data: { result: { recurring: { ...gold, discount: 0.15, services: [rawRow] } } } }) })))
+      .toEqual([]);
+    expect(await findingsFor(unpriced({ estimate: whole([pestItem(), pestItem({ perApp: 120 })]) }))).toEqual([]);
+    // The engine's record must name the tier as its only discount, and the estimate's records must agree with it.
+    expect(await findingsFor(unpriced({ estimate: whole([pestItem({ discount: { appliedDiscounts: [] } })]) }))).toEqual([]);
+    expect(await findingsFor(unpriced({ estimate: { ...whole(), waveguard_tier: 'Silver' } }))).toEqual([]);
   });
 
   test.each(['no_discount', 'price_changed', 'not_priced', 'own_price_or_discount', 'prepaid', 'line_unmatched', 'line_ambiguous'])(

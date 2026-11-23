@@ -183,6 +183,11 @@ describe('completion estimate evidence', () => {
       const unnamedRow = { ...estimate, estimate_data: {} };
       expect(await acceptedVisitBreakdown(visit, { database: fakeDb({ estimateRow: unnamedRow }) }))
         .toEqual({ breakdown: null, reason: 'discount_unnamed', estimate: unnamedRow, line: estimateLine });
+      // A line the reader gave no per-visit price: the estimate and the line ride along for the nightly check too.
+      const unpricedLine = { ...estimateLine, perApplicationPrice: null };
+      adminCustomers.scheduleLinesFromEstimate.mockReturnValue([unpricedLine]);
+      expect(await acceptedVisitBreakdown(visit, { database: fakeDb() }))
+        .toEqual({ breakdown: null, reason: 'no_breakdown', estimate, line: unpricedLine });
     });
 
     // The saved engine shape: the list price on the row, the tier and the rate the accept used on the recurring block.

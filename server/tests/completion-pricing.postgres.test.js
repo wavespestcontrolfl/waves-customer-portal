@@ -358,16 +358,28 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
       await trx('scheduled_services').where({ id: jobId }).update({ estimated_price: 84.99 });
       expect(await reason({ ...job, estimated_price: 84.99 })).toBe('discount_unnamed');
       expect(await findingsFor()).toEqual([]);
-      // An engine result saved whole (result.lineItems, no mapped services), with the engine's own discount record, is out
-      // of the check's reach (pre-push audit round 10): the completion reader keeps the line's net only as `annual`, so a
-      // line the engine rated gets no per-visit price and the invoice keeps one line. Pricing such rows changes invoices,
-      // so it is not this check's change. 0 of 164 upcoming visits traced to this shape on 11-22.
+      // An engine result saved whole (result.lineItems, no mapped services), with the engine's own discount record (pre-push
+      // audit rounds 10 and 11): the completion reader keeps the line's net only as `annual`, so it gives the rated line no
+      // per-visit price and the invoice keeps one line (no_breakdown). The engine's own record proves that net at the
+      // visit's price, so the check flags the visit.
       const rated = { ...item, discount: { effectiveDiscount: 0.15, appliedDiscountPercent: 0.15,
         appliedDiscounts: [{ type: 'waveguard', tier: 'gold', amount: 0.15 }] } };
-      await trx('estimates').where({ id: estimateId }).update({
-        estimate_data: { result: { lineItems: [rated], recurring: { tier: 'Gold', waveGuardTier: 'Gold' } } } });
+      const whole = (lineItems) => trx('estimates').where({ id: estimateId }).update({
+        estimate_data: { result: { lineItems, recurring: { tier: 'Gold', waveGuardTier: 'Gold' } } } });
+      await whole([rated]);
       await trx('scheduled_services').where({ id: jobId }).update({ estimated_price: 85 });
       expect(await reason({ ...job, estimated_price: 85 })).toBe('no_breakdown');
+      expect(await findingsFor()).toEqual([{ visitId: jobId, estimateId, serviceKey: 'pest_control', lineKey: 'recurring:0', tier: 'gold' }]);
+      // A visit whose price moved off the engine's net keeps one line by design.
+      await trx('scheduled_services').where({ id: jobId }).update({ estimated_price: 84.99 });
+      expect(await findingsFor()).toEqual([]);
+      await trx('scheduled_services').where({ id: jobId }).update({ estimated_price: 85 });
+      // The plan's first-visit fee saved beside it: the reader counts the fee as a second line of the plan's key, so the
+      // visit has no single line (line_ambiguous) and the check has none to price. Out of this PR's scope (its body, "Not
+      // covered").
+      const fee = { service: 'pest_initial_roach', price: 49, priceBeforeDiscount: 49, priceAfterDiscount: 49 };
+      await whole([rated, fee]);
+      expect(await reason({ ...job, estimated_price: 85 })).toBe('line_ambiguous');
       expect(await findingsFor()).toEqual([]);
       // The admin estimate tool's save: its mapped result only, with no engine lines (pre-push audit round 5). The
       // invoice names the tier the block saved at its rate, so nothing is found; with no rate saved, nothing proves one.
