@@ -18,7 +18,12 @@ vi.mock('../../components/schedule/ScheduleSaveNotice', async (importOriginal) =
   ...(await importOriginal()),
   showScheduleSaveNotice: (message) => { saveNotice.shown.push(message); },
 }));
-const service = { id: 'fixture-visit', customerId: 'fixture-account', customerName: 'Fixture account', serviceType: 'Pest Control', scheduledDate: '2035-01-02', windowStart: '08:00', windowEnd: '09:00', status: 'confirmed', notes: 'Existing note' };
+const service = {
+  id: 'fixture-visit', customerId: 'fixture-account', customerName: 'Fixture account',
+  serviceType: 'Pest Control', scheduledDate: '2035-01-02', windowStart: '08:00', windowEnd: '09:00',
+  status: 'confirmed', notes: 'Existing note', propertyId: 'fixture-property',
+  address: '400 Existing Service Rd', city: 'Bradenton', state: 'FL', zip: '34200',
+};
 // Structural round 3 on #4657: the debounced money preview is a
 // non-GET call too (POST .../update-details/preview) but never
 // persists anything — excluded so "a write happened" still means the
@@ -113,6 +118,141 @@ it('retains edits after a failed save and prevents duplicate saves and dismissal
   await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
   expect(writes()).toHaveLength(2);
   expect(JSON.parse(writes()[1][1].body)).toMatchObject({ notes: 'Updated note', createInvoice: false });
+});
+
+it('requires an explicit commercial setup choice and retries the exact recurring save with its opaque visit token', async () => {
+  const setupFeeReview = {
+    invoiceId: 'invoice-source-55',
+    visitKey: 'opaque-visit-property-time-token',
+    prepaidAmountCents: 5500,
+    visitFeeCents: 7300,
+  };
+  let putCount = 0;
+  fetch.mockImplementation(async (url, options = {}) => {
+    if (isPut(url, options)) {
+      putCount += 1;
+      if (putCount === 1) {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({
+            code: 'COMMERCIAL_SETUP_VISIT_REVIEW',
+            error: 'Choose which setup this prepayment covers.',
+            setupFeeReview,
+          }),
+        };
+      }
+      return { ok: true, json: async () => ({ success: true }) };
+    }
+    if (String(url).includes('/properties?context=appointment_address')) {
+      return {
+        ok: true,
+        json: async () => ({
+          canChangeAppointmentAddress: true,
+          properties: [{
+            id: 'warehouse-property', label: 'Warehouse', address_line1: '800 Warehouse Blvd',
+            city: 'Palmetto', state: 'FL', zip: '34221',
+          }],
+        }),
+      };
+    }
+    return okJson(url);
+  });
+  const onSaved = vi.fn();
+  render(<Harness onSaved={onSaved} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: 'warehouse-property' } });
+  const repeatText = screen.getByText('Repeat');
+  const repeatCheckbox = repeatText.parentElement.parentElement.querySelector('input[type="checkbox"]');
+  fireEvent.click(repeatCheckbox);
+  await clickSave();
+
+  const reviewDialog = await screen.findByRole('dialog', { name: 'Choose how to handle this setup fee' });
+  expect(reviewDialog).toHaveTextContent('$55.00');
+  expect(reviewDialog).toHaveTextContent('$73.00');
+  const bookingRegion = within(reviewDialog).getByRole('region', { name: 'Booking being reviewed' });
+  expect(bookingRegion).toHaveTextContent('Pest Control');
+  expect(bookingRegion).toHaveTextContent('Quarterly');
+  expect(bookingRegion).toHaveTextContent('Tue, Jan 2, 2035 · 8:00 AM–9:00 AM');
+  expect(bookingRegion).toHaveTextContent('Warehouse');
+  expect(bookingRegion).toHaveTextContent('800 Warehouse Blvd, Palmetto, FL 34221');
+  expect(screen.getByRole('link', { name: 'Open source invoice' })).toHaveAttribute('href', '/admin/invoices?invoice=invoice-source-55');
+  expect(writes()).toHaveLength(1);
+  const firstBody = body(0);
+  expect(firstBody).toMatchObject({ isRecurring: true, spawnRecurringChildren: true });
+  expect(firstBody).not.toHaveProperty('commercialSetupDecision');
+
+  fireEvent.click(screen.getByRole('button', { name: "Bill this booking's $73.00 setup separately" }));
+  await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+  expect(writes()).toHaveLength(2);
+  expect(body(1)).toEqual({
+    ...firstBody,
+    commercialSetupDecision: { ...setupFeeReview, resolution: 'separate' },
+  });
+});
+
+it('stops a stale setup choice without writing, then requests fresh review after staff save the changed editor', async () => {
+  const setupFeeReview = {
+    invoiceId: 'invoice-source-55',
+    visitKey: 'opaque-visit-property-time-token',
+    prepaidAmountCents: 5500,
+    visitFeeCents: 7300,
+  };
+  const freshSetupFeeReview = {
+    invoiceId: 'invoice-source-89',
+    visitKey: 'fresh-opaque-visit-property-time-token',
+    prepaidAmountCents: 8900,
+    visitFeeCents: 9700,
+  };
+  let putCount = 0;
+  fetch.mockImplementation(async (url, options = {}) => {
+    if (isPut(url, options)) {
+      putCount += 1;
+      if (putCount <= 2) {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({
+            code: 'COMMERCIAL_SETUP_VISIT_REVIEW',
+            error: 'Choose which setup this prepayment covers.',
+            setupFeeReview: putCount === 1 ? setupFeeReview : freshSetupFeeReview,
+          }),
+        };
+      }
+      return { ok: true, json: async () => ({ success: true }) };
+    }
+    return okJson(url);
+  });
+  const onSaved = vi.fn();
+  render(<Harness onSaved={onSaved} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit visit' }));
+  await clickSave();
+  await screen.findByRole('dialog', { name: 'Choose how to handle this setup fee' });
+  const firstBody = body(0);
+
+  fireEvent.change(screen.getByDisplayValue('Existing note'), { target: { value: 'Note changed during review' } });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeEnabled(), { timeout: 2000 });
+  fireEvent.click(screen.getByRole('button', { name: 'Use the $55.00 setup on the source invoice for this visit' }));
+
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Choose how to handle this setup fee' })).not.toBeInTheDocument());
+  expect(writes()).toHaveLength(1);
+  expect(screen.getByRole('alert')).toHaveTextContent('The appointment changed. Review the updated booking and save again.');
+  await clickSave();
+
+  await waitFor(() => expect(writes()).toHaveLength(2));
+  expect(body(1)).toMatchObject({ notes: 'Note changed during review' });
+  expect(body(1)).not.toHaveProperty('commercialSetupDecision');
+  expect(body(1)).not.toEqual(firstBody);
+  const refreshedDialog = await screen.findByRole('dialog', { name: 'Choose how to handle this setup fee' });
+  expect(refreshedDialog).toHaveTextContent('$89.00');
+  fireEvent.click(screen.getByRole('button', { name: 'Use the $89.00 setup on the source invoice for this visit' }));
+
+  await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+  expect(writes()).toHaveLength(3);
+  expect(body(2)).toEqual({
+    ...body(1),
+    commercialSetupDecision: { ...freshSetupFeeReview, resolution: 'covered' },
+  });
 });
 
 it('keeps a failed cancellation open for retry and blocks duplicate cancellation while pending', async () => {
