@@ -4,6 +4,7 @@ const { etDateString, addETDays, parseETDateTime, etWallClockOccurrences } = req
 const { toE164, phoneIdentityKey } = require('../../utils/phone');
 const { findOnlyKnownCallerCustomer } = require('../../utils/known-caller-phone');
 const { whereNotSandboxCall } = require('../voice-agent/relay-protocol');
+const { callStartedAt } = require('../../utils/call-timeline');
 const TWILIO_NUMBERS = require('../../config/twilio-numbers');
 const { errorText } = require('./google-ads-config');
 const GoogleLsa = require('./google-lsa');
@@ -240,9 +241,21 @@ function isCandidateCall(call, consumerPhoneValue) {
   return samePhone(call.from_phone, consumerPhoneValue) && samePhone(call.to_phone, LSA_PROFILE_PHONE);
 }
 
-// Inbound calls from the same number to the Local Services profile line, inside
-// the window. The query narrows on the last ten digits; isCandidateCall then
-// compares the whole numbers.
+// A row written AFTER the call (status-callback / recording-recovery paths) is
+// stamped at the call's end, so the query reaches this far past the window and
+// callStartedAt (utils/call-timeline) then places each call at its real start.
+const POST_CALL_ROW_SLACK_MS = 4 * 3600 * 1000;
+
+// Pure. The call started inside the window (normalized start, not row time).
+function startedInWindow(call, window) {
+  const started = callStartedAt(call);
+  return Boolean(started) && started >= window.start && started <= window.end;
+}
+
+// Inbound calls from the same number to the Local Services profile line that
+// STARTED inside the window. The query narrows on the last ten digits and a
+// widened time range; isCandidateCall then compares the whole numbers and
+// startedInWindow the real start.
 async function findCandidateCalls(lead) {
   const key = last10(lead.consumer_phone);
   const window = matchWindow(lead);
@@ -253,9 +266,10 @@ async function findCandidateCalls(lead) {
     .whereRaw("right(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [key])
     .whereRaw("right(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10(LSA_PROFILE_PHONE)])
     .where('created_at', '>=', window.start)
-    .where('created_at', '<=', window.end)
-    .select('id', 'customer_id', 'twilio_call_sid', 'from_phone', 'to_phone', stampedLead());
-  return rows.filter((call) => isCandidateCall(call, lead.consumer_phone));
+    .where('created_at', '<=', new Date(window.end.getTime() + POST_CALL_ROW_SLACK_MS))
+    .select('id', 'customer_id', 'twilio_call_sid', 'from_phone', 'to_phone', 'created_at', 'metadata',
+      'duration_seconds', 'recording_duration_seconds', stampedLead());
+  return rows.filter((call) => isCandidateCall(call, lead.consumer_phone) && startedInWindow(call, window));
 }
 
 // The portal's lead for a call. The call processor's own link comes first:
@@ -498,6 +512,7 @@ module.exports = {
     decideMatch,
     matchOpenLeads,
     resolveSharedCalls,
+    startedInWindow,
     refillFields,
     refillMatches,
     dbErrorText,

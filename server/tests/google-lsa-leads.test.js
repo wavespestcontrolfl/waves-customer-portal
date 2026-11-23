@@ -40,12 +40,12 @@ const Leads = require('../services/ads/google-lsa-leads');
 const {
   parseAccountTime, last10, mapLead, callsByLead, matchWindow, chooseCandidate,
   leadQuery, conversationQuery, upsertLeads, matchOpenLeads, decideMatch,
-  resolveSharedCalls, refillFields, refillMatches, dbErrorText, samePhone, isCandidateCall, windowClosed,
+  resolveSharedCalls, startedInWindow, refillFields, refillMatches, dbErrorText, samePhone, isCandidateCall, windowClosed,
 } = Leads._private;
 
 const ACCOUNT = '7636809139';
 // An inbound call from the consumer to the Local Services profile line.
-const CALL = { from_phone: '+19415550142', to_phone: '+19413187612' };
+const CALL = { from_phone: '+19415550142', to_phone: '+19413187612', created_at: new Date('2026-11-20T19:05:00Z') };
 const writesTo = (table, op) => mockWrites.filter((w) => w.table === table && w.op === op);
 
 beforeEach(() => {
@@ -234,7 +234,7 @@ describe('matching', () => {
     expect(raws[2]).toEqual(['9415550142']);
     const bounds = writesTo('call_log', 'where').slice(1).map((w) => w.args);
     expect(bounds[0][2].toISOString()).toBe('2026-11-20T18:54:30.000Z');
-    expect(bounds[1][2].toISOString()).toBe('2026-11-20T19:34:30.000Z');
+    expect(bounds[1][2].toISOString()).toBe('2026-11-20T23:34:30.000Z'); // window end + 4 h for post-call rows
   });
 
   test('no call: nothing is written', async () => {
@@ -575,5 +575,30 @@ describe('runLeadSync', () => {
     mockRows.lsa_leads = [];
     const out = await Leads.runLeadSync();
     expect(out.leads).toBe(1);
+  });
+});
+
+describe('the call\'s real start, not its row time', () => {
+  const window = { start: new Date('2026-11-20T18:54:30Z'), end: new Date('2026-11-20T19:34:30Z') };
+
+  test('a row written when the call began is placed at its row time', () => {
+    expect(startedInWindow({ created_at: new Date('2026-11-20T19:05:00Z') }, window)).toBe(true);
+    expect(startedInWindow({ created_at: new Date('2026-11-20T19:40:00Z') }, window)).toBe(false);
+  });
+
+  test('a 35-minute call whose row was written after it ended is placed at its start', () => {
+    const postCall = {
+      created_at: new Date('2026-11-20T19:40:00Z'),
+      metadata: { source: 'twilio_studio_recording_status' },
+      duration_seconds: 35 * 60,
+    };
+    expect(startedInWindow(postCall, window)).toBe(true); // started 19:05
+  });
+
+  test('the query reaches past the window for post-call rows', async () => {
+    mockRows.call_log = [];
+    await decideMatch({ id: 'l1', lead_type: 'calls', consumer_phone: '+19415550142', lead_created_at: new Date('2026-11-20T19:05:09Z'), call_started_at: new Date('2026-11-20T19:04:30Z') });
+    const bounds = writesTo('call_log', 'where').slice(1).map((w) => w.args);
+    expect(bounds[1][2].getTime() - window.end.getTime()).toBe(4 * 3600 * 1000);
   });
 });
