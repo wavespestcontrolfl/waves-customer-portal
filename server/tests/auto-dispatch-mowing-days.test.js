@@ -262,11 +262,6 @@ function CTX_FOR_STANDING() {
 describe('evaluation and audit (index.js evaluatePlacement)', () => {
   const CONFIG = { minScoreImprovement: 15, removeStabilityFloor: 35, minDayMoveDriveSavingMinutes: 6 };
   const evalCtx = () => ctx({ conflictMoves: true, db: tableDb({ property_preferences: { first: { preferred_day: null, mowing_days: ['Mon'] } } }) });
-  const without = (result) => {
-    const copy = JSON.parse(JSON.stringify(result));
-    delete copy.audit.constraints.mowing_days;
-    return copy;
-  };
 
   test('the visit is in conflict and moves to the open day without the score bar', async () => {
     findAvailableSlots.mockResolvedValue({ slots: [slot(TUE, '10:00'), slot(WED)] });

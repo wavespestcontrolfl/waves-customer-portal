@@ -566,7 +566,9 @@ describe('the write of a checked move', () => {
 
   describe('the move transaction asks once more that the approval still stands', () => {
     const refuse = (id, why) => new Error(`${id} ${why}`);
-    const scored = () => require('../services/auto-dispatch/preferences').normalizePreferences(undefined, SERVICE.service_type);
+    const scored = () => require('../services/auto-dispatch/mowing-days').withMowingRule(
+      require('../services/auto-dispatch/preferences').normalizePreferences(undefined, SERVICE.service_type), undefined,
+    );
     // The move transaction: the advisory lock, the preference row, the notice row.
     const trxOf = ({ locked = true, prefsRow, notice = null } = {}) => {
       const calls = [];
