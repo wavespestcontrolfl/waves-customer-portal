@@ -438,7 +438,7 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(alert.opts.metadata).toEqual({ callLogId: 'call-1', source: 'call_agreed_one_time_job' });
     const detail = alert.opts.detail;
     expect(detail).toContain('Staff said $250.00 one-time. Check the terms on the call before you set the visit\'s price.');
-    expect(detail).toContain('Book at: 100 Example St, Bradenton, FL, 34202.');
+    expect(detail).toContain('Book at: 100 Example St, Bradenton, FL 34202.');
     expect(detail).toContain('Bill-To: Example Property Management. Select this payer as Bill-To when you book');
     expect(detail).toContain('Visit 2 is owed: it is part of this two-treatment service. Around Sat Dec 5, 5 PM: the call did not set this time');
     expect(detail).toContain('Book visit 2 only if it is missing, at the time the customer confirms.');

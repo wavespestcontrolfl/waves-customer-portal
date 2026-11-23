@@ -918,6 +918,29 @@ async function closeResolvedBookingMissBells({ now = new Date() } = {}) {
   return { closed, raised };
 }
 
+// GATE_CALL_AGREED_ONE_TIME_JOB: the calls among these misses that the AI held as an
+// agreed one-time job and that already have the office's task (one admin notification,
+// open or done; call-recording-processor.js buildAgreedOneTimeJobAlert), so the pager
+// never rings them again. No such row (its write failed): the pager rings as before.
+// An unreadable answer is an empty set, so it rings too.
+async function loadAgreedJobTaskCallIds(misses) {
+  const ids = new Set();
+  if (!misses.length) return ids;
+  const { AGREED_ONE_TIME_JOB_ALERT_PREFIX: prefix } = require('./call-one-time-job');
+  try {
+    const rows = await db('notifications')
+      .where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ANY(?)", [misses.map((m) => `${prefix}${m.call.id}`)])
+      .select(db.raw("metadata->>'dedupeKey' AS dedupe_key"));
+    for (const key of rows.map((r) => String(r.dedupe_key || ''))) {
+      if (key.startsWith(prefix)) ids.add(key.slice(prefix.length));
+    }
+  } catch (err) {
+    logger.warn(`[call-booking-miss] agreed one-time job task lookup failed: ${err.code || err.name || 'db_error'}`);
+  }
+  return ids;
+}
+
 async function runCallBookingMissWatchdog({ now = new Date() } = {}) {
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('callBookingMissWatchdog')) {
@@ -1029,25 +1052,7 @@ async function runInner({ now }) {
   }
 
   // GATE_ALERT_RING_ONCE (owner 2026-10-14): the first ring stands alone.
-  // GATE_CALL_AGREED_ONE_TIME_JOB: a call the AI held as an agreed one-time job
-  // already has the office's task (one admin notification, open or done), so the
-  // pager never rings it again. No such row (its write failed): the pager rings as
-  // before. An unreadable answer rings too.
-  const officeTaskCalls = new Set();
-  if (misses.length) {
-    const { AGREED_ONE_TIME_JOB_ALERT_PREFIX } = require('./call-one-time-job');
-    try {
-      const taskRows = await db('notifications')
-        .where({ recipient_type: 'admin' })
-        .whereRaw("metadata->>'dedupeKey' = ANY(?)", [misses.map((m) => `${AGREED_ONE_TIME_JOB_ALERT_PREFIX}${m.call.id}`)])
-        .select(db.raw("metadata->>'dedupeKey' AS dedupe_key"));
-      for (const r of taskRows) {
-        if (typeof r.dedupe_key === 'string' && r.dedupe_key.startsWith(AGREED_ONE_TIME_JOB_ALERT_PREFIX)) officeTaskCalls.add(r.dedupe_key.slice(AGREED_ONE_TIME_JOB_ALERT_PREFIX.length));
-      }
-    } catch (err) {
-      logger.warn(`[call-booking-miss] agreed one-time job task lookup failed: ${err.code || err.name || 'db_error'}`);
-    }
-  }
+  const officeTaskCalls = await loadAgreedJobTaskCallIds(misses);
   const ringOnce = require('../config/feature-gates').alertRingOnceLive();
   let alerted = 0;
   let repeated = 0;

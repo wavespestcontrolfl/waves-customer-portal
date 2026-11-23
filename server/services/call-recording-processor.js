@@ -1967,47 +1967,46 @@ function callEmailCheckCardPayload(callEmailCheck) {
 // resolveCallFollowUpPlan's visit 2. `streetLevelAddress`: Google matched only
 // the street. `bookingAddress`: the address the booking resolved (null: none).
 // `billToPayer`: { id, name } of the Bill-To the booking would have stamped.
-function buildAgreedOneTimeJobAlert({ call, firstName = null, serviceType = null, scheduledDate = null, windowStart = null, price = null, followUpPlan = null, streetLevelAddress = null, bookingAddress = null, billToPayer = null } = {}) {
+// The price line of the notification's detail, by the price's basis (none: no price).
+const AGREED_JOB_PRICE_LINES = Object.freeze({
+  agreed_total: (amount) => `Agreed price: ${amount} one-time, the total the caller accepted on the call.`,
+  stated: (amount) => `Staff said ${amount} one-time. Check the terms on the call before you set the visit's price.`,
+  none: () => 'No price is shown: check the service and its billing terms on the call.',
+});
+
+function buildAgreedOneTimeJobAlert({ call, firstName, serviceType, scheduledDate, windowStart, price, followUpPlan, streetLevelAddress, bookingAddress, billToPayer }) {
   const { fitAction, tidyName } = require('./admin-alert-names');
   const { breaksAlertRules } = require('./admin-alert-compose');
-  const who = tidyName(firstName) || 'the caller';
+  const { formatAddress } = require('../utils/address-normalizer');
   const service = String(serviceType || '').trim() || 'one-time service';
   const when = spokenVisitWhen(scheduledDate, windowStart);
-  const plain = 'Staff priced a one-time job on the call, so the AI booked no visit and sent no text.';
-  const named = `${service}${when ? `, ${when}` : ''}: the AI booked no visit and sent no text.`;
-  const why = named.length <= 110 && !breaksAlertRules(named) ? named : plain;
-  const money = (amount) => `$${Number(amount).toFixed(2)}`;
-  const address = bookingAddress && bookingAddress.line1
-    ? [bookingAddress.line1, bookingAddress.line2, bookingAddress.city, bookingAddress.state, bookingAddress.zip].map((v) => String(v || '').trim()).filter(Boolean).join(', ')
-    : '';
-  const followUp = followUpPlan && followUpPlan.scheduledDate
-    ? (() => {
-      const timeSet = followUpPlan.hourStated === true && followUpPlan.packageOnly !== true;
-      const slot = spokenVisitWhen(followUpPlan.scheduledDate, followUpPlan.windowStart);
-      return [
-        'Visit 2 is owed:',
-        followUpPlan.packageOnly === true ? 'it is part of this two-treatment service.' : 'the call agreed a second visit.',
-        timeSet
-          ? `The call set it for ${slot}.${offTheHour(followUpPlan.windowStart) ? ' Visits start on the hour: confirm an on-hour start with the customer.' : ''}`
-          : `Around ${slot}: the call did not set this time, so confirm it with the customer.`,
-        'Save visit 1 first, then check the schedule for visit 2: a two-treatment service adds it by itself.',
-        timeSet ? 'Book visit 2 only if it is missing, and move it to this time if it differs.' : 'Book visit 2 only if it is missing, at the time the customer confirms.',
-      ].join(' ');
-    })()
-    : null;
+  const named = `${[service, when].filter(Boolean).join(', ')}: the AI booked no visit and sent no text.`;
+  const why = named.length <= 110 && !breaksAlertRules(named)
+    ? named
+    : 'Staff priced a one-time job on the call, so the AI booked no visit and sent no text.';
+  // Visit 2 is owed either way; its slot is firm only when the call set the hour (a
+  // package's visit 2 never is), and the schedule adds a package's visit 2 by itself.
+  const visitTwo = (plan) => {
+    const timeSet = plan.hourStated === true && plan.packageOnly !== true;
+    const slot = spokenVisitWhen(plan.scheduledDate, plan.windowStart);
+    const onHour = offTheHour(plan.windowStart) ? ' Visits start on the hour: confirm an on-hour start with the customer.' : '';
+    return [
+      plan.packageOnly === true ? 'Visit 2 is owed: it is part of this two-treatment service.' : 'Visit 2 is owed: the call agreed a second visit.',
+      timeSet ? `The call set it for ${slot}.${onHour}` : `Around ${slot}: the call did not set this time, so confirm it with the customer.`,
+      'Save visit 1 first, then check the schedule for visit 2: a two-treatment service adds it by itself.',
+      timeSet ? 'Book visit 2 only if it is missing, and move it to this time if it differs.' : 'Book visit 2 only if it is missing, at the time the customer confirms.',
+    ].join(' ');
+  };
   const detail = [
     `The call agreed a one-time job (${service})${when ? ` for ${when} ET` : ''}. The service rule would have booked a plan, so the AI booked no visit and sent no text. Book it from this call.`,
-    price && price.basis === 'agreed_total'
-      ? `Agreed price: ${money(price.amount)} one-time, the total the caller accepted on the call.`
-      : price
-        ? `Staff said ${money(price.amount)} one-time. Check the terms on the call before you set the visit's price.`
-        : 'No price is shown: check the service and its billing terms on the call.',
-    address ? `Book at: ${address}.` : 'No address resolved: confirm the service address with the customer before you book.',
-    typeof streetLevelAddress === 'string' ? 'Google matched only the street of this address: confirm the house number with the customer.' : null,
-    billToPayer && billToPayer.id ? `Bill-To: ${billToPayer.name || 'the paying party the caller named'}. Select this payer as Bill-To when you book, so the invoice goes to them.` : null,
-    followUp,
+    AGREED_JOB_PRICE_LINES[price ? price.basis : 'none'](price && `$${Number(price.amount).toFixed(2)}`),
+    bookingAddress?.line1 ? `Book at: ${formatAddress(bookingAddress)}.` : 'No address resolved: confirm the service address with the customer before you book.',
+    typeof streetLevelAddress === 'string' && 'Google matched only the street of this address: confirm the house number with the customer.',
+    billToPayer?.id && `Bill-To: ${billToPayer.name || 'the paying party the caller named'}. Select this payer as Bill-To when you book, so the invoice goes to them.`,
+    followUpPlan?.scheduledDate && visitTwo(followUpPlan),
     'Before you book: check the customer\'s schedule. Staff may have booked, moved or cancelled a visit for this call since; never book a second one.',
   ].filter(Boolean).join('\n');
+  const who = tidyName(firstName) || 'the caller';
   const link = `/admin/communications#tab=calls&call=${encodeURIComponent(call.id)}`;
   return {
     category: 'schedule',
