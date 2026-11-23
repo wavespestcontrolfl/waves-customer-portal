@@ -270,7 +270,12 @@ function WeekMinimumCell({ technician, onSaved }) {
     try {
       await call(`/technicians/${technician.id}/week-minimum`, {
         method: 'PUT',
-        body: { hours: value.trim() === '' ? null : value.trim(), lastDay: lastDay || null },
+        body: {
+          hours: value.trim() === '' ? null : value.trim(),
+          lastDay: lastDay || null,
+          // What this page showed: the server refuses the save when another tab changed it since.
+          shown: { hours: technician.paidWeekMinimumHours ?? null, lastDay: technician.paidWeekMinimumLastDay || null },
+        },
       });
       onSaved(`Minimum paid hours a week saved for ${technician.name}.`);
     } catch (failure) { setError(failure.message); }

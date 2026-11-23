@@ -187,6 +187,41 @@ postgres('payroll minimum paid week', () => {
     expect(byName((await draft(W1)).body.run, 'Sample Alpha')).toMatchObject({ regularHours: '15.00', minimumWeekHours: '5.00' });
   });
 
+  it('in the last week, time off the bank did not pay lowers the minimum only up to the last day', async () => {
+    // Empty bank. Last day Tuesday: 20 h minimum. Unpaid time off Thursday (after it) changes nothing: 15 worked, 5 added.
+    const after = await tech('Sample Alpha', { hours: '80', paid_week_minimum_last_day: addDays(W1, 1) });
+    await worked(after, W1, 15);
+    await offDay(after, addDays(W1, 3), 10);
+    // Unpaid time off Monday (before it) lowers the minimum: 20 - 8 = 12, worked 5, so 7 added.
+    const before = await tech('Sample Bravo', { hours: '80', paid_week_minimum_last_day: addDays(W1, 1) });
+    await worked(before, W1, 5);
+    await offDay(before, W1, 8);
+    const run = (await draft(W1)).body.run;
+    expect(byName(run, 'Sample Alpha')).toMatchObject({ ptoHours: '0.00', minimumWeekHours: '5.00' });
+    expect(byName(run, 'Sample Bravo')).toMatchObject({ ptoHours: '0.00', minimumWeekHours: '7.00' });
+  });
+
+  it('a rehire: the last day of the earlier stay is not read, and can be cleared after its week is paid', async () => {
+    const id = await tech('Sample Alpha', { paid_week_minimum_last_day: addDays(W1, 1) });
+    await worked(id, W1, 15);
+    expect((await finalize((await draft(W1)).body.run.id)).status).toBe(200);
+    // Rehired three weeks later: a short week pays the full minimum again.
+    const back = addDays(W1, 21);
+    await trx('technicians').where({ id }).update({ hire_date: back });
+    await worked(id, back, 30);
+    expect(byName((await draft(back)).body.run, 'Sample Alpha')).toMatchObject({ minimumWeekHours: '10.00' });
+    const cleared = await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: '40', lastDay: null }, email: OWNER });
+    expect([cleared.status, cleared.body.technician.paidWeekMinimumLastDay]).toEqual([200, null]);
+  });
+
+  it('refuses a save from a page that showed other settings', async () => {
+    const id = await tech('Sample Alpha', { paid_week_minimum_last_day: addDays(W1, 1) });
+    const put = (shown) => api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: '38', lastDay: null, shown }, email: OWNER });
+    const stale = await put({ hours: 40, lastDay: null });
+    expect([stale.status, stale.body.error]).toEqual([409, 'The minimum or the last day changed since this page was read. Read the page again.']);
+    expect((await put({ hours: 40, lastDay: addDays(W1, 1) })).status).toBe(200);
+  });
+
   it('a week after the last day pays no minimum', async () => {
     const id = await tech('Sample Alpha', { paid_week_minimum_last_day: addDays(W1, -3) });
     await worked(id, W1, 6);

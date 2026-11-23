@@ -138,7 +138,15 @@ const weekMinimumSchema = Joi.object({
     const day = typeof value === 'string' ? validCalendarDate(value.trim()) : null;
     return day || helpers.message('Last day must be a date (YYYY-MM-DD)');
   }),
+  // What the page showed: a save from a page read before another change is refused (409), so an old tab never
+  // puts back a full-week minimum another tab ended. Left out = no check (a caller with no page).
+  shown: Joi.object({
+    hours: Joi.any().allow(null),
+    lastDay: Joi.any().allow(null),
+  }),
 });
+const WEEK_MINIMUM_STALE = 'The minimum or the last day changed since this page was read. Read the page again.';
+const sameHours = (a, b) => (a == null || a === '' ? null : Number(a)) === (b == null || b === '' ? null : Number(b));
 const LAST_DAY_PAID = (week) => `A final pay run already paid this employee for the week of ${week} or later, so the last day `
   + 'cannot change there. Void that pay run first.';
 // The pay week of a bank payout, by its first day. Empty takes the payout back.
@@ -465,13 +473,21 @@ async function setWeekMinimum(technicianId, input, actor, conn = db) {
     // after it (the check and its token change).
     await lockPayrollMutations(trx);
     const tech = await trx('technicians').where({ id: technicianId }).forUpdate()
-      .first('id', 'employment_type', trx.raw("to_char(paid_week_minimum_last_day, 'YYYY-MM-DD') AS last_day"));
+      .first('id', 'employment_type', 'paid_week_minimum_hours',
+        trx.raw("to_char(paid_week_minimum_last_day, 'YYYY-MM-DD') AS last_day"),
+        trx.raw("to_char(hire_date, 'YYYY-MM-DD') AS hire_date"));
     if (!tech) throw new PayrollError(404, 'Technician not found.');
+    if (v.shown && (!sameHours(v.shown.hours, tech.paid_week_minimum_hours) || (v.shown.lastDay || null) !== tech.last_day)) {
+      throw new PayrollError(409, WEEK_MINIMUM_STALE);
+    }
     // Clearing is always allowed: a setting kept from W-2 days must not come back when the person is W-2 again.
     if (v.hours != null && tech.employment_type !== 'w2') throw new PayrollError(409, 'A minimum paid week is for W-2 employees.');
     const lastDay = v.hours == null ? null : (v.lastDay === undefined ? tech.last_day : v.lastDay);
-    if (lastDay !== tech.last_day) {
-      const earliest = [lastDay, tech.last_day].filter(Boolean).sort()[0];
+    // A last day before the hire date ended an earlier stay (a rehire moved the hire date past it): the pay run no
+    // longer reads it, so it is not guarded and can be cleared or replaced.
+    const shownLast = tech.last_day && tech.hire_date && tech.last_day < tech.hire_date ? null : tech.last_day;
+    if (lastDay !== tech.last_day && (lastDay || shownLast)) {
+      const earliest = [lastDay, shownLast].filter(Boolean).sort()[0];
       const week = staffWeekStartForWorkDate(earliest);
       const paid = await trx('payroll_checks').where({ technician_id: tech.id, status: 'finalized' })
         .where('week_start', '>=', week).first('id');

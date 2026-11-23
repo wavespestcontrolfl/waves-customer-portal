@@ -397,7 +397,7 @@ describe('Time off in the pay run table and stub', () => {
     const day = await screen.findByLabelText('Last day for Sample Alpha');
     fireEvent.change(day, { target: { value: '2026-10-13' } });
     fireEvent.click(within(day.closest('form')).getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(calls.find(c => c.path === '/admin/payroll/technicians/tech-a/week-minimum')).toMatchObject({ body: { hours: '40', lastDay: '2026-10-13' } }));
+    await waitFor(() => expect(calls.find(c => c.path === '/admin/payroll/technicians/tech-a/week-minimum')).toMatchObject({ body: { hours: '40', lastDay: '2026-10-13', shown: { hours: 40, lastDay: null } } }));
   });
 
   it('adds a minimum week column only when a check has one, and its line on the stub', async () => {
@@ -821,7 +821,7 @@ describe('The banks on the time off panel stay current', () => {
     fireEvent.change(input, { target: { value: '40' } });
     fireEvent.click(within(input.closest('form')).getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(runReads()).toBe(before + 1));
-    expect(calls.find(c => c.path === '/admin/payroll/technicians/tech-a/week-minimum')).toMatchObject({ method: 'PUT', body: { hours: '40', lastDay: null } });
+    expect(calls.find(c => c.path === '/admin/payroll/technicians/tech-a/week-minimum')).toMatchObject({ method: 'PUT', body: { hours: '40', lastDay: null, shown: { hours: null, lastDay: null } } });
     expect(await screen.findByText('Minimum paid hours a week saved for Sample Alpha.')).toBeInTheDocument();
     expect(await screen.findByText('Hours or settings changed since this draft. Press Recompute.')).toBeInTheDocument();
   });
