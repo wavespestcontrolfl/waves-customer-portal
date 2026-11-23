@@ -91,7 +91,8 @@ function recordedSourceEvidence(row) {
     kind: 'google_ads', label: 'Google Ads', detail: location || 'Google Ads call line',
     basis: 'When the call arrived, the dialed number was assigned to this Google Ads call placement.',
   };
-  // Local Services is a Google paid placement: same kind as Google Ads, own label.
+  // The released Local Services line (941) 213-5010 (2026-11-23): a call it
+  // already recorded keeps its Google paid label.
   if (type === 'google_lsa') return {
     kind: 'google_ads', label: 'Google LSA', detail: location || 'Local Services call line',
     basis: 'When the call arrived, the dialed number was assigned to the Google Local Services profile.',
@@ -149,7 +150,9 @@ function sourceEvidence(row) {
       basis: 'The dialed number is currently assigned to this Google Ads call placement.',
     };
   }
-  if (sourceType === 'google_lsa' || registry?.type === 'google_lsa') {
+  // Only an active row proves the placement: the 2026-11-23 line was released
+  // and its row turned off (20261124000000).
+  if (sourceType === 'google_lsa' && row?._source_is_active === true) {
     return {
       kind: 'google_ads',
       label: 'Google LSA',
@@ -242,7 +245,6 @@ function sourceSortExpression(conn, callAlias = 'cl') {
   const shared = sharedLineNumbers(TWILIO_NUMBERS);
   const google = Object.values(TWILIO_NUMBERS.paidTracking).filter((line) => line.source === 'google_ads').map((line) => line.number);
   const meta = Object.values(TWILIO_NUMBERS.paidTracking).filter((line) => line.source === 'facebook').map((line) => line.number);
-  const lsa = Object.values(TWILIO_NUMBERS.paidTracking).filter((line) => line.source === 'google_lsa').map((line) => line.number);
   const gbp = Object.values(TWILIO_NUMBERS.gbpTracking).map((line) => line.number);
   const websites = [
     ...TWILIO_NUMBERS.domainTracking,
@@ -261,7 +263,7 @@ function sourceSortExpression(conn, callAlias = 'cl') {
     WHEN ${callAlias}.metadata->>'numberType' IN ('location', 'tech_line', 'unassigned', 'internal_alert', 'customer_chat') THEN 'Source unknown'
     WHEN ${callAlias}.metadata->>'numberType' IN ('domain_tracking', 'pest_domain', 'lawn_domain') THEN 'Website'
     WHEN ${callAlias}.to_phone IN (${marks(google)}) OR call_source.source_type = 'google_ads' THEN 'Google Ads'
-    WHEN ${callAlias}.to_phone IN (${marks(lsa)}) OR call_source.source_type = 'google_lsa' THEN 'Google LSA'
+    WHEN call_source.source_type = 'google_lsa' AND call_source.is_active IS TRUE THEN 'Google LSA'
     WHEN ${callAlias}.to_phone IN (${marks(meta)}) OR call_source.source_type = 'facebook' THEN 'Meta Ads'
     WHEN ${callAlias}.to_phone IN (${marks(gbp)}) OR call_source.source_type = 'gbp' THEN 'Google Business Profile'
     WHEN ${callAlias}.to_phone IN (${marks(offline)}) OR call_source.source_type = 'vehicle' THEN 'Offline'
@@ -271,7 +273,7 @@ function sourceSortExpression(conn, callAlias = 'cl') {
       OR (call_source.source_type = 'main_site' AND call_source.domain IS NOT NULL)
       THEN 'Website'
     ELSE 'Source unknown'
-  END`, [...google, ...lsa, ...meta, ...gbp, ...offline, ...shared, ...websites]);
+  END`, [...google, ...meta, ...gbp, ...offline, ...shared, ...websites]);
 }
 
 function applyCallListOrder(query, conn, { sort, order } = {}) {

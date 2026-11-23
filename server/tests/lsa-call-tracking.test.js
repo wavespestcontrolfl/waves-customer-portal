@@ -1,32 +1,31 @@
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
-const { _private: { sourceEvidence } } = require('../services/call-log-analytics');
 const { attributionForSourceType } = require('../services/ads/call-attribution');
+const { _private: { sourceEvidence } } = require('../services/call-log-analytics');
 const migration = require('../models/migrations/20261123170000_google_lsa_line_source');
+const retire = require('../models/migrations/20261124000000_google_lsa_line_retire');
 
-const LSA = '+19412135010'; // Google Local Services profile line (Bradenton)
+const LSA = '+19412135010'; // released Google Local Services line (Bradenton)
 
-describe('Google LSA call tracking number', () => {
-  test('googleLsa is registered as a paid google_lsa line in Bradenton', () => {
-    const line = TWILIO_NUMBERS.paidTracking.googleLsa;
-    expect(line).toMatchObject({ number: LSA, source: 'google_lsa', location: 'bradenton' });
+describe('Google LSA line released (owner 2026-11-23)', () => {
+  // Google forbids a tracking number as the Local Services business phone
+  // (support.google.com/localservices/answer/7435507), so the line was released.
+  test('the registry no longer carries the line', () => {
+    expect(TWILIO_NUMBERS.paidTracking.googleLsa).toBeUndefined();
+    expect(TWILIO_NUMBERS.findByNumber(LSA)).toBeNull();
+    expect(TWILIO_NUMBERS.getLeadSourceFromNumber(LSA).source).toBe('unknown');
   });
 
-  test('findByNumber tags the line as type google_lsa', () => {
-    expect(TWILIO_NUMBERS.findByNumber(LSA)).toMatchObject({ type: 'google_lsa', trackingId: 'googleLsa', locationId: 'bradenton' });
-  });
-
-  test('getLeadSourceFromNumber and the funnel map both give google_lsa (paid)', () => {
-    expect(TWILIO_NUMBERS.getLeadSourceFromNumber(LSA).source).toBe('google_lsa');
-    expect(attributionForSourceType('google_lsa')).toEqual({ leadSource: 'google_lsa', isPaid: true });
-  });
-
-  test('the call log labels a call to the line Google LSA', () => {
+  test('a call the line already recorded keeps the Google LSA label', () => {
     expect(sourceEvidence({ to_phone: LSA, metadata: { numberType: 'google_lsa' } })).toMatchObject({ kind: 'google_ads', label: 'Google LSA' });
-    expect(sourceEvidence({ to_phone: LSA })).toMatchObject({ kind: 'google_ads', label: 'Google LSA' });
   });
 
-  test('the Bradenton city-page line still reads as before', () => {
-    expect(TWILIO_NUMBERS.getLeadSourceFromNumber('+19413187612').source).toBe('waves_website');
+  test('a line whose source row is google_lsa reads Google LSA', () => {
+    expect(sourceEvidence({ to_phone: '+19415550100', _source_type: 'google_lsa', _source_is_active: true })).toMatchObject({ kind: 'google_ads', label: 'Google LSA' });
+    expect(sourceEvidence({ to_phone: '+19415550100', _source_type: 'google_lsa', _source_is_active: false }).label).not.toBe('Google LSA');
+  });
+
+  test('the funnel still maps source_type google_lsa to the paid channel', () => {
+    expect(attributionForSourceType('google_lsa')).toEqual({ leadSource: 'google_lsa', isPaid: true });
   });
 });
 
@@ -59,5 +58,45 @@ describe('20261123170000_google_lsa_line_source', () => {
 
   test('down never deletes', async () => {
     await expect(migration.down()).resolves.toBeUndefined();
+  });
+});
+
+describe('20261124000000_google_lsa_line_retire', () => {
+  function fakeKnex({ hasTable = true } = {}) {
+    const calls = [];
+    const knex = (table) => {
+      const q = { table, wheres: [] };
+      calls.push(q);
+      const chain = {
+        whereIn: (col, vals) => { q.wheres.push({ col, vals }); return chain; },
+        where: (w) => { q.wheres.push(w); return chain; },
+        update: async (patch) => { q.patch = patch; return 1; },
+      };
+      return chain;
+    };
+    knex.schema = { hasTable: async () => hasTable };
+    knex.fn = { now: () => 'NOW' };
+    knex.calls = calls;
+    return knex;
+  }
+
+  test('turns only the active google_lsa row for the number off, and keeps it', async () => {
+    const knex = fakeKnex();
+    await retire.up(knex);
+    expect(knex.calls).toHaveLength(1);
+    const [q] = knex.calls;
+    expect(q.table).toBe('lead_sources');
+    expect(q.wheres).toEqual(expect.arrayContaining([
+      { col: 'twilio_phone_number', vals: expect.arrayContaining([LSA, '9412135010']) },
+      { source_type: 'google_lsa', is_active: true },
+    ]));
+    expect(q.patch).toEqual({ is_active: false, updated_at: 'NOW' });
+  });
+
+  test('no table, no write; down never writes', async () => {
+    const knex = fakeKnex({ hasTable: false });
+    await retire.up(knex);
+    expect(knex.calls).toHaveLength(0);
+    await expect(retire.down()).resolves.toBeUndefined();
   });
 });
