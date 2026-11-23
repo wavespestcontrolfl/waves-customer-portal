@@ -129,48 +129,6 @@ function textNumberRows(p, livePhone) {
   ];
 }
 
-// GATE_CALL_AGREED_ONE_TIME_JOB: the rows of an approved-but-unbooked card the AI held for a one-time job staff
-// priced on the call. Its evidence is one key (agreed_one_time_job), written on every pass, so old details never stay.
-// It says what the call agreed; the schedule, not the card, says whether the visit exists yet.
-function agreedOneTimeJobRows(p) {
-  if (p.skipped_reason !== "agreed_one_time_job_office_books") return [];
-  const j = p.agreed_one_time_job && typeof p.agreed_one_time_job === "object" ? p.agreed_one_time_job : {};
-  const slot = (date, time) => `${String(date).slice(0, 10)}${time ? ` at ${String(time).slice(0, 5)}` : ""}`;
-  const price = typeof j.stated_price === "number" ? fmtMoney(j.stated_price) : null;
-  return [
-    // No price: the booking resolved to another service (a covered re-service, say), or none was clear.
-    { label: "Why", value: price
-      ? "Staff priced a one-time job on the call, so the AI did not book it. Book it with its price."
-      : "Staff priced a one-time job on the call, so the AI did not book it. Check the service and its billing terms on the call, then book it." },
-    // The card holds what the call said. Nothing later rewrites it, as on every approved-but-unbooked card.
-    { label: "Before you book", value: "Check the customer's schedule. Staff or a later pass may have booked, moved or cancelled a visit for this call: never book a second one." },
-    p.service && { label: "Book", value: p.service },
-    // The address the booking resolved; the caller's own wording shows below as "Caller said".
-    { label: "Book at", value: j.booking_address && j.booking_address.line1
-      ? [j.booking_address.line1, j.booking_address.line2, j.booking_address.city, j.booking_address.state, j.booking_address.zip].filter((v) => String(v || "").trim()).join(", ")
-      : "No address resolved: confirm the service address with the customer before you book." },
-    j.bill_to && j.bill_to.id && { label: "Bill-To", value: `${j.bill_to.name || "The paying party the caller named"}. Select this payer as Bill-To when you book, so the invoice goes to them.` },
-    j.booking_date && { label: "Agreed time", value: `${slot(j.booking_date, j.booking_window_start)} ET` },
-    typeof j.street_level_address === "string" && { label: "Address", value: `Google matched only the street of ${j.street_level_address || "the address on file"}. Confirm the house number with the customer before you book.` },
-    price && (j.price_basis === "agreed_total"
-      ? { label: "Agreed price", value: `${price} one-time, the total the caller accepted on the call.` }
-      : { label: "Staff said", value: `${price} one-time. Check the terms on the call before you set the visit's price.` }),
-    // Visit 2 is owed either way; its slot is firm only when the call set the hour.
-    // Saving visit 1 of a two-treatment service adds visit 2 by itself
-    // (admin-schedule.js ensurePackageFollowUpVisit), so staff check before they book it.
-    j.follow_up && j.follow_up.scheduled_date && { label: "Follow-up owed", value: [
-      j.follow_up.reason === "package" ? "Visit 2 is part of this two-treatment service." : "The call agreed a second visit.",
-      j.follow_up.time_set === true
-        ? `The call set it for ${slot(j.follow_up.scheduled_date, j.follow_up.window_start)}.${j.follow_up.off_hour === true ? " Visits start on the hour: confirm an on-hour start with the customer." : ""}`
-        : `Around ${slot(j.follow_up.scheduled_date, j.follow_up.window_start)}: the call did not set this time, so confirm it with the customer.`,
-      // Move an existing visit 2 only to a time the call set: a copied hour never displaces a booked one.
-      j.follow_up.time_set === true
-        ? "Save visit 1 first, then check the schedule for visit 2: a two-treatment service adds it by itself. Book visit 2 only if it is missing, and move it to this time if it differs."
-        : "Save visit 1 first, then check the schedule for visit 2: a two-treatment service adds it by itself. Book visit 2 only if it is missing, at the time the customer confirms.",
-    ].join(" ") },
-  ];
-}
-
 export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = null, livePhone }) {
   const p = parsePayload(payload);
   if (!p) return null;
@@ -292,11 +250,8 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
     // A recovery task books at its PRESERVED requested premise when that
     // differs from the primary on file (a cleared dispute whose stated
     // address is a saved secondary property) — codex r36 P1.
-    // GATE_CALL_AGREED_ONE_TIME_JOB: the AI booked no visit for a one-time job staff priced on the call. The
-    // office books it from here: the service, the slot the booker resolved (Eastern), the price and a follow-up.
-    ...agreedOneTimeJobRows(p),
     p.skipped_reason && p.scheduling_window?.requested_address?.street_line_1 && {
-      label: p.skipped_reason === "agreed_one_time_job_office_books" ? "Caller said" : "Book at",
+      label: "Book at",
       value: [p.scheduling_window.requested_address.street_line_1, p.scheduling_window.requested_address.street_line_2, p.scheduling_window.requested_address.city, p.scheduling_window.requested_address.postal_code].filter((v) => String(v || "").trim()).join(", "),
     },
     // …and on the RECOVERY task Accept files (stated_street deliberately

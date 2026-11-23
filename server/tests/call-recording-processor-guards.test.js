@@ -2160,7 +2160,7 @@ describe('fileSkippedBookingCard — the shared shadow/legacy-mode "approved but
   test('pushes the review marker only when this worker still owned the call and filed the card', () => {
     expect(body).toContain('if (!stillOwner) return false;');
     expect(body).toContain('return true;');
-    const gate = body.indexOf('if (!filed) return false;');
+    const gate = body.indexOf('if (!filed) return;');
     const push = body.indexOf("bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval')");
     expect(gate).toBeGreaterThan(-1);
     expect(push).toBeGreaterThan(gate);
