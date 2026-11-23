@@ -59,6 +59,7 @@ function StubBank({ bank }) {
       <StubLine label="Earned this pay" value={`${bank.earnedHours} h`} />
       <StubLine label="Used this pay" value={`${bank.usedHours} h`} />
       {Number(bank.unpaidHours) > 0 && <StubLine label="Time off not paid" value={`${bank.unpaidHours} h`} />}
+      {bank.paidOutHours && <StubLine label="Paid out at leaving" value={`${bank.paidOutHours} h`} />}
       <StubLine label="Balance after this pay" value={`${bank.balanceHours} h`} strong />
     </div>
   </>;
@@ -194,7 +195,8 @@ function WaitingBonuses({ notes = [] }) {
   </div>;
 }
 
-function Problems({ title, items }) {
+// `action(item)`: a button for the row, or nothing.
+function Problems({ title, items, action }) {
   if (!items.length) return null;
   return <div>
     <h4 className="m-0 mb-1 text-ui-body font-medium">{title}</h4>
@@ -202,6 +204,7 @@ function Problems({ title, items }) {
       {items.map(item => <li key={item.technicianId} className="rounded-sm border-hairline border-zinc-200 p-2">
         <strong>{item.name}</strong>
         <span className="block text-ui-caption text-ink-secondary">{item.reason}</span>
+        {action && action(item)}
       </li>)}
     </ul>
   </div>;
@@ -213,6 +216,18 @@ function UnpaidTimeOff({ rows = [] }) {
   return <Problems
     title="Time off not paid"
     items={rows.map(row => ({ technicianId: row.technicianId, name: row.name, reason: row.reason }))}
+  />;
+}
+
+// The time-off bank payouts this pay run decides (an employee leaves, "Pay out the bank"). A payout of an empty
+// bank has no paycheck to show it, so this list is where the owner sees it. The server sends it only when there is one.
+function BankPayouts({ rows = [] }) {
+  return <Problems
+    title="Time-off bank paid out"
+    items={rows.map(row => ({
+      technicianId: row.technicianId, name: row.name,
+      reason: Number(row.hours) > 0 ? `${row.hours} hours, on the paycheck.` : 'The bank is empty: nothing is paid out.',
+    }))}
   />;
 }
 
@@ -345,7 +360,11 @@ function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
             {check.name}
             {check.w4Default && <p className="m-0 text-ui-caption text-ink-secondary">{NO_W4_NOTE}</p>}
             {check.timeOffBank && <p className="m-0 text-ui-caption text-ink-secondary">
-              Time-off bank: earned {check.timeOffBank.earnedHours} h, used {check.timeOffBank.usedHours} h, balance {check.timeOffBank.balanceHours} h
+              Time-off bank: earned {check.timeOffBank.earnedHours} h, used {check.timeOffBank.usedHours} h
+              {check.timeOffBank.paidOutHours ? `, paid out ${check.timeOffBank.paidOutHours} h` : ''}, balance {check.timeOffBank.balanceHours} h
+            </p>}
+            {check.timeOffBank?.notPaidOutHours && <p className="m-0 text-ui-caption text-ink-secondary">
+              {`This week was paid after the bank was paid out. It would have earned up to ${check.timeOffBank.notPaidOutHours} h of time off (less if the bank was near the 120 h cap). They are not on this check: pay them by hand if you choose.`}
             </p>}
           </TD>
           <TD nums align="right">{hoursWord(check.regularHours)}</TD>
@@ -485,13 +504,17 @@ function SendToMercury({ call, run, onChanged, onMessage }) {
   </div>;
 }
 
-// A run with no paycheck can still be finalized when it lists time off a time-off bank did not pay: that
-// closes the week, and those hours stop waiting for a pay run.
-const closesUnpaidOnly = run => run.checks.length === 0 && (run.unpaidTimeOff || []).length > 0;
+// A run with no paycheck can still be finalized when it lists time off a time-off bank did not pay (that closes
+// the week, and those hours stop waiting for a pay run) or the payout of an empty bank (that settles the payout).
+// What such a run decides, in the words of the finalize prompt; '' when it decides nothing.
+const noCheckWords = run => (run.checks.length > 0 ? '' : [
+  (run.unpaidTimeOff || []).length > 0 && 'the time off above stays unpaid',
+  (run.bankPayouts || []).length > 0 && 'the empty time-off bank above is settled with nothing paid out',
+].filter(Boolean).join(', and '));
 // `unverified`: the last read of the run failed, so its numbers can be from before a change.
 const canFinalizeRun = (run, unverified) => run.status === 'draft' && !run.stale && !unverified
   && run.blocked.length + run.waiting.length === 0
-  && (run.checks.length > 0 || closesUnpaidOnly(run));
+  && (run.checks.length > 0 || noCheckWords(run) !== '');
 
 // Why the owner cannot trust a draft's numbers yet. Recompute works them out again and reads them.
 function DraftNotices({ run, unverified }) {
@@ -504,8 +527,8 @@ function DraftNotices({ run, unverified }) {
 
 function ConfirmFinalize({ run, busy, onYes, onCancel }) {
   return <div role="group" aria-label="Confirm finalize" className="grid gap-2 rounded-sm border-hairline border-zinc-300 p-3">
-    <p className="m-0">{closesUnpaidOnly(run)
-      ? 'Finalize this pay run? It has no paycheck. The week closes and the time off above stays unpaid. You can void the run later to redo the week.'
+    <p className="m-0">{noCheckWords(run)
+      ? `Finalize this pay run? It has no paycheck. The week closes and ${noCheckWords(run)}. You can void the run later to redo the week.`
       : 'Finalize this pay run? The paychecks become final. You can void the run later to redo the week.'}</p>
     <div className="flex flex-wrap gap-2">
       <Button disabled={busy} onClick={onYes}>Yes, finalize</Button>
@@ -552,6 +575,27 @@ export function RunDetail({ call, run, unverified, onChanged, onMessage, onRunsC
     setBusy(false);
   }
 
+  // A payout whose bank is gone holds the run: the server lists the employee as blocked, with `payoutWeek`. The
+  // owner takes the payout back on that row. The Time off panel has no line for an employee with no bank.
+  async function takePayoutBack(item) {
+    setBusy(true); setError('');
+    try {
+      // The payout this row is for: set for this run's week, which no final pay run has paid (the run is a
+      // draft). The server refuses when the payout is another one now, or in another state (another tab).
+      await call(`/technicians/${item.technicianId}/pto-payout-week`, { method: 'PUT', body: { weekStart: null, shownWeekStart: item.payoutWeek, shownState: 'set' } });
+      onMessage(`The time-off bank of ${item.name} is not paid out.`);
+      await onChanged(run.id);
+    } catch (failure) {
+      setError(failure.message);
+      // The run is read again: after a change elsewhere this row can be gone.
+      await onChanged(run.id);
+    }
+    setBusy(false);
+  }
+  const payoutAction = item => (item.payoutWeek
+    ? <Button variant="secondary" size="sm" disabled={busy} onClick={() => takePayoutBack(item)} aria-label={`Do not pay out the bank of ${item.name}`}>Do not pay out</Button>
+    : null);
+
   async function exportCsv() {
     setBusy(true); setError('');
     try {
@@ -582,9 +626,10 @@ export function RunDetail({ call, run, unverified, onChanged, onMessage, onRunsC
     <DraftNotices run={run} unverified={unverified} />
 
     <Problems title="Waiting for approval" items={run.waiting} />
-    <Problems title="Blocked" items={run.blocked} />
+    <Problems title="Blocked" items={run.blocked} action={payoutAction} />
     <WaitingBonuses notes={run.techRewardsNotes} />
     <UnpaidTimeOff rows={run.unpaidTimeOff} />
+    <BankPayouts rows={run.bankPayouts} />
 
     <ChecksTable
       call={call} run={run} isFinal={isFinal} onStub={setStubFor}

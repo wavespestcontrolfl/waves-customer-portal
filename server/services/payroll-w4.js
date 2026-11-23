@@ -236,7 +236,16 @@ async function setPayMethod(technicianId, input, actor, conn = db) {
 
 // W-2 technicians (active or not started yet) for the Payroll tab, each with the
 // W-4 in force today. Selects named columns only: never SSN, address or DOB.
-async function listPayrollTechnicians(conn = db) {
+// The W-2 employees a payroll list shows: the active and prospective ones. `formerWithBank` (the Time off
+// panel, GATE_PAYROLL_TIME_OFF) adds an employee who has left (employment_status inactive) and still has a
+// time-off bank setting: the owner settles that bank after the employee is marked inactive ("Pay out the
+// bank"), so the panel must still list them.
+const listedEmployees = (query, formerWithBank) => query.where({ employment_type: 'w2' }).where(function listed() {
+  this.whereIn('employment_status', ['active', 'prospective']);
+  if (formerWithBank) this.orWhereNotNull('pto_hours_per_year');
+});
+
+async function listPayrollTechnicians(conn = db, formerWithBank) {
   const today = etDateString();
   // GATE_PAYROLL_TIME_OFF: the yearly paid time off allowance rides on each row.
   const withTimeOff = typeof payrollTimeOffLive === 'function' && payrollTimeOffLive();
@@ -246,9 +255,7 @@ async function listPayrollTechnicians(conn = db) {
   const withFamily = typeof payrollFamilyEmployeeLive === 'function' && payrollFamilyEmployeeLive();
   // GATE_PAYROLL_MERCURY_STATUS: the Mercury recipient id rides on each row (null = not entered).
   const withMercury = typeof payrollMercuryStatusLive === 'function' && payrollMercuryStatusLive();
-  const rows = await conn('technicians')
-    .where({ employment_type: 'w2' })
-    .whereIn('employment_status', ['active', 'prospective'])
+  const rows = await listedEmployees(conn('technicians'), formerWithBank)
     .orderBy('name')
     .select('id', 'name', 'pay_rate', 'pay_method', 'employment_status',
       ...(withTimeOff ? ['pto_hours_per_year'] : []),
