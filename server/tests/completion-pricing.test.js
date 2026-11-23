@@ -165,11 +165,11 @@ describe('completion estimate evidence', () => {
     beforeEach(() => { jest.spyOn(adminCustomers, 'scheduleLinesFromEstimate').mockReturnValue([estimateLine]); });
     afterEach(() => jest.restoreAllMocks());
 
-    // With the estimate row and the saved row the visit matched, which the nightly check reads (invoice-tier-line-check.js).
+    // With the estimate row and the schedule line the visit matched, which the nightly check prices (invoice-tier-line-check.js).
     test('a visit still at the accepted price gets the estimate price and each named discount', async () => {
       expect(await acceptedVisitBreakdown(visit, { database: fakeDb() })).toEqual({ breakdown: {
         base: 110, amount: 94.05, discounts: [{ name: 'WaveGuard Silver', dollars: 11 }, { name: 'Military Discount', dollars: 4.95 }] },
-      estimate, line: estimateLine.sourceLine });
+      estimate, line: estimateLine });
     });
 
     test('anything of its own, a moved price, another estimate state or an unnamed saving keeps one line', async () => {
@@ -182,7 +182,7 @@ describe('completion estimate evidence', () => {
       expect(await reason(visit, fakeDb({ estimateRow: { ...estimate, status: 'sent' } }))).toBe('estimate_not_accepted');
       const unnamedRow = { ...estimate, estimate_data: {} };
       expect(await acceptedVisitBreakdown(visit, { database: fakeDb({ estimateRow: unnamedRow }) }))
-        .toEqual({ breakdown: null, reason: 'discount_unnamed', estimate: unnamedRow, line: estimateLine.sourceLine });
+        .toEqual({ breakdown: null, reason: 'discount_unnamed', estimate: unnamedRow, line: estimateLine });
     });
 
     // The saved engine shape: the list price on the row, the tier and the rate the accept used on the recurring block.
@@ -257,6 +257,9 @@ describe('completion estimate evidence', () => {
     const source = { engineResult: { lineItems: [item, { ...item, perApp: 120, annual: 480 }] } };
     expect(acceptanceServiceLists(source).recurringSvcList).toHaveLength(1);
     expect(acceptanceServiceLists(source, { preserveDuplicates: true }).recurringSvcList).toHaveLength(2);
+    // A plan's one-time first-visit fee shares the plan's key but is no second recurring line (pre-push codex).
+    const fee = { service: 'pest_initial_roach', price: 49, priceBeforeDiscount: 49, priceAfterDiscount: 49 };
+    expect(acceptanceServiceLists({ result: { lineItems: [item, fee] } }, { preserveDuplicates: true }).recurringSvcList).toHaveLength(1);
   });
 
 });
