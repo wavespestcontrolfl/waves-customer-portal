@@ -41,16 +41,21 @@ describe('the completion\'s report note', () => {
     expect(block).toContain('...(reportNotePick ? { reportNote: reportNotePick } : {}),');
   });
 
-  test('a repoint under the lock drops it before the record is written', () => {
+  test('a frozen note is the customer recap: no model reads the raw note for one', () => {
+    expect(block).toContain('let effectiveCustomerRecap = reportNotePick ? reportNotePick.text : customerRecap;');
+  });
+
+  test('a repoint under the lock rolls the record back as a changed visit', () => {
     const resolve = block.indexOf('frozenCompletionProfile = await resolveCompletionProfileForScheduledService(lockedSvcRow, trx);');
     const drop = block.indexOf('if (structuredNotes.reportNote && (!primaryFreezeTrusted');
     expect(drop).toBeGreaterThan(resolve);
     expect(drop).toBeLessThan(block.indexOf('structured_notes: serializeJsonb(structuredNotes),'));
-    const dropBlock = block.slice(drop, drop + 800);
+    const dropBlock = block.slice(drop, drop + 1000);
     expect(dropBlock).toContain("String(lockedSvcRow.service_type ?? '') !== String(svc.service_type ?? '')");
     expect(dropBlock).toContain("String(lockedSvcRow.service_id ?? '') !== String(svc.service_id ?? '')");
     expect(dropBlock).toContain("String(lockedSvcRow.customer_id ?? '') !== String(svc.customer_id ?? '')");
     expect(dropBlock).toContain("!require('./pest-recap').recapEligibleProfile(frozenCompletionProfile)");
-    expect(dropBlock).toContain('delete structuredNotes.reportNote;');
+    expect(dropBlock).toContain("visitHasAreaAddOnRows(k, svc.id), true)");
+    expect(dropBlock).toContain("code: 'visit_identity_changed'");
   });
 });

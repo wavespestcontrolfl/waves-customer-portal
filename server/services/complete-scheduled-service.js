@@ -6561,7 +6561,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // call so a stalled provider can't keep the already-claimed completion
         // attempt 'pending' (retries would then 409 until the stale window expires)
         // — on timeout (or error) we fall back to the deterministic recap.
-        let effectiveCustomerRecap = customerRecap;
+        // A frozen report note is the customer copy: the recap (and its text)
+        // is that screened note, so no model reads the raw note for a recap.
+        let effectiveCustomerRecap = reportNotePick ? reportNotePick.text : customerRecap;
         // An invoice-issued closeout has no form, no products and no
         // application evidence behind it, and renders no report — a
         // generated recap would spend an LLM call (plus its six-second
@@ -7902,15 +7904,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
             delete structuredNotes.blogPost;
           }
           // The report note was screened on the pre-lock visit: a repoint since
-          // (another service or catalog service, another customer, a profile the sheet does not
-          // take) or an identity the re-resolve could not establish drops it,
-          // and the report shows its own text.
+          // (another service or catalog service, another customer, a profile
+          // the sheet does not take, an area add-on row) or an identity the
+          // re-resolve could not establish rolls the record back as a changed
+          // visit (the sheet reloads and is sent again), never a record left
+          // with the raw note and no note marker.
           if (structuredNotes.reportNote && (!primaryFreezeTrusted
             || (lockedSvcRow && (String(lockedSvcRow.service_type ?? '') !== String(svc.service_type ?? '')
               || String(lockedSvcRow.service_id ?? '') !== String(svc.service_id ?? '')
               || String(lockedSvcRow.customer_id ?? '') !== String(svc.customer_id ?? '')))
-            || !require('./pest-recap').recapEligibleProfile(frozenCompletionProfile))) {
-            delete structuredNotes.reportNote;
+            || !require('./pest-recap').recapEligibleProfile(frozenCompletionProfile)
+            || await failSoftRead(trx, (k) => require('./area-addon-visit-rows').visitHasAreaAddOnRows(k, svc.id), true))) {
+            throw Object.assign(new Error('visit changed since the report note was screened'), { code: 'visit_identity_changed' });
           }
           // The inspection-credit marker keys to the LOCKED identity too
           // (Codex #3178 r32 P2): the serviceData literal tested the
