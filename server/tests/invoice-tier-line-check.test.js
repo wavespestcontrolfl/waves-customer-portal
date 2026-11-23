@@ -104,9 +104,9 @@ describe('tierSavingsLeftOffInvoices', () => {
     expect(await withData({ summary: { manualDiscount: { amount: 5, recurringAmount: 0, label: 'Courtesy' } } })).toHaveLength(1);
   });
 
-  // Pre-push audit P1s (rounds 6 to 8): a row whose own tier record names no tier prints a bare "WaveGuard" line. The
-  // check judges the rows the invoice prints (breakdown.discounts); the invoice's own pricing only says whether the line
-  // has a tier share (its tier row carries the rate). Judging a name needs no rate and no staff rule.
+  // Pre-push audit P1s (rounds 6 to 9): a row whose own tier record names no tier prints a bare "WaveGuard" line. The
+  // check judges the row the invoice prints (breakdown.discounts) in the place of the tier row of its own pricing (the
+  // row that carries the rate). Judging a name needs no rate and no staff rule.
   test('a printed breakdown of a line with a tier share must name the tier the records agree on; a bare label is a finding', async () => {
     const real = jest.requireActual('../services/completion-pricing');
     const tierless = { ...pestRow, discount: { appliedDiscounts: [{ type: 'waveguard', amount: 0.15 }] } };
@@ -129,6 +129,7 @@ describe('tierSavingsLeftOffInvoices', () => {
     expect(await findingsFor(withRows([]))).toEqual(finding);
     expect(await findingsFor(withRows([{ name: 'WaveGuard', dollars: 15 }]))).toEqual(finding);
     expect(await findingsFor(withRows([{ name: 'WaveGuard Silver', dollars: 15 }]))).toEqual(finding);
+    expect(await findingsFor(withRows([{ name: 'WaveGuard Gold', dollars: 14 }]))).toEqual(finding);
     // Records that name another tier, or no tier at all, name none: no finding. The matched row's own record counts.
     expect(await findingsFor(printed(tierless, {}, estimate({ tier: 'Silver' })))).toEqual([]);
     const tierlessEngine = [pestItem({ discount: { appliedDiscounts: [{ type: 'waveguard', amount: 0.15 }] } })];
@@ -145,6 +146,11 @@ describe('tierSavingsLeftOffInvoices', () => {
     const namedWithStaff = printed(pestItem(), { perApplicationPrice: 80 }, staff('Military Discount'));
     expect(names(namedWithStaff)).toEqual(['WaveGuard Gold', 'Military Discount']);
     expect(await findingsFor(namedWithStaff)).toEqual([]);
+    // The tier row's own label is judged, not any row's (round 9): a staff row named "WaveGuard Gold" beside a bare tier
+    // row is a finding, even at the same dollars.
+    const goldStaffLabel = printed(tierless, { perApplicationPrice: 70 }, staff('WaveGuard Gold'));
+    expect(goldStaffLabel.breakdown.discounts).toEqual([{ name: 'WaveGuard', dollars: 15 }, { name: 'WaveGuard Gold', dollars: 15 }]);
+    expect(await findingsFor(goldStaffLabel)).toEqual(finding);
     // A staff label that starts with "WaveGuard" is not a tier share: the line is asked the unnamed-saving question.
     const loyalty = printed({ ...pestRow, discount: { appliedDiscounts: [] } }, {}, staff('WaveGuard Loyalty'));
     expect(names(loyalty)).toEqual(['WaveGuard Loyalty']);
