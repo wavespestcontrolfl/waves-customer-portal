@@ -542,9 +542,11 @@ function textOutcome(outcome, classify, fallbackCode) {
   return { text: 'uncertain' };
 }
 
-// GATE_PORTAL_ANSWER_TEXT: a text-way notice's text part (noticeCustomer), or null when it has none: the gate is off
-// now (the kill: the email goes), the try is the sweep's (it never starts a text), or an earlier try moved to the
-// email. The move to the text ('sending') is saved at the provider boundary only, while this try still holds the
+// GATE_PORTAL_ANSWER_TEXT: a text-way notice's text part (noticeCustomer). It is always recorded, so the staff screen
+// never reads a text-way notice as the push way: 'not_sent' with a code when this try starts no text, because the try
+// is the sweep's (SWEEP_NO_TEXT: it never starts a text), the gate is off now (TEXT_GATE_OFF: the kill, the email
+// goes), or an earlier try moved to the email (EMAIL_STARTED). The move to the text ('sending') is saved at the
+// provider boundary only, while this try still holds the
 // claim: the send step's onDispatchStart, after its last check and right before the request. A try that stops
 // before it sent nothing, so its notice still goes by email; a check that refuses after the move takes it back
 // (onDispatchAbort, onDispatchRejected). A later try never texts again: it reuses the stored outcome, and a text
@@ -556,7 +558,9 @@ async function textStep(customerId, message, claim, sent, { byStaff }) {
   if (claim.text !== undefined) {
     return { text: claim.text === 'sending' ? 'uncertain' : claim.text, ...(claim.textCode ? { textCode: claim.textCode } : {}) };
   }
-  if (!byStaff || !answerTextLive() || claim.email !== undefined) return null;
+  if (!byStaff) return { text: 'not_sent', textCode: 'SWEEP_NO_TEXT' };
+  if (!answerTextLive()) return { text: 'not_sent', textCode: 'TEXT_GATE_OFF' };
+  if (claim.email !== undefined) return { text: 'not_sent', textCode: 'EMAIL_STARTED' };
   const markerDb = require('../models/marker-db');
   const before = { ...sent, pending: true, claimedAt: claim.at, attempts: claim.attempts };
   let lost = false;
@@ -649,7 +653,7 @@ async function resumePendingNotices(now = new Date()) {
  *   actor: { technicianId: string|null, role: string } }} input
  * @returns {Promise<{ message: object, closed: boolean, notice: object|null, replay?: boolean }>}
  */
-async function staffReply({ kind, id, body, clientRequestId = null, actor = {} }) {
+async function staffReply({ kind, id, body, clientRequestId = null, shownByText = false, actor = {} }) {
   requireLive();
   if (!ITEM_KINDS.includes(kind)) throw new PortalMessageError('bad_kind', 400);
   const text = checkedBody(body);
@@ -660,8 +664,16 @@ async function staffReply({ kind, id, body, clientRequestId = null, actor = {} }
     if (prior) return { replay: true, message: prior, customerId };
     // GATE_PORTAL_ANSWER_TEXT: on when the answer is saved = the text way (noticeMode 'text': the bell plus one text,
     // else the email, never a push), with the number on file now (answerTextTo, none when it cannot be texted as
-    // stored). Off = the push way, as before. Every later try keeps this way (noticeCustomer).
+    // stored). Off = the push way, as before. Every later try keeps this way (noticeCustomer). A new answer goes only
+    // the way its reply form showed (`shownByText`: the list's answerByText; none counts as the push way): a flip
+    // while the draft was open refuses the save, and the form shows the new way. A retried click (above) returns the
+    // first answer whatever its form shows.
     const textWay = answerTextLive();
+    if (Boolean(shownByText) !== textWay) {
+      throw new PortalMessageError('notice_way_changed', 409, textWay
+        ? 'This answer now goes by text, at any hour, else by email. Check the line above Send (reload the page if it still says app notice), then press Send again.'
+        : 'This answer now goes by app notice or email, not by text. Check the line above Send, then press Send again.');
+    }
     const answerTextTo = textWay ? await boundTextNumber(trx, customerId) : null;
     const message = await Conversations.appendMessage({
       conn: trx,

@@ -58,16 +58,19 @@ router.post('/close-older', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GATE_PORTAL_MESSAGES: POST /api/admin/portal-inbox/reply  { kind, id, body, requestId? }
+// GATE_PORTAL_MESSAGES: POST /api/admin/portal-inbox/reply  { kind, id, body, requestId?, answerByText? }
 //   -> { message, closed, notice } . Answers one item inside the customer's portal: the answer is saved in
 // their portal thread, the item and its bells close, and the customer gets one notice (app push, else email; with
 // GATE_PORTAL_ANSWER_TEXT on, one text with the answer, else email).
-// `requestId` makes a retried click return the first answer instead of sending a second one.
+// `requestId` makes a retried click return the first answer instead of sending a second one. `answerByText` is the way
+// the reply form showed (the list's answerByText); a new answer whose way changed since is refused (409
+// notice_way_changed), and the form shows the new way.
 const replySchema = Joi.object({
   kind: Joi.string().valid('chat', 'request', 'message').required(),
   id: Joi.string().uuid().required(),
   body: Joi.string().allow('').max(PortalMessages.BODY_MAX * 2).required(),
   requestId: Joi.string().uuid().optional(),
+  answerByText: Joi.boolean().strict().optional(),
 });
 
 router.post('/reply', async (req, res, next) => {
@@ -80,6 +83,7 @@ router.post('/reply', async (req, res, next) => {
       id: value.id,
       body: value.body,
       clientRequestId: value.requestId || null,
+      shownByText: value.answerByText === true,
       actor: { technicianId: req.technicianId, role: req.techRole },
     });
     res.json(result);

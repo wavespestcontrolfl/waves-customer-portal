@@ -156,8 +156,22 @@ describe('admin portal inbox routes', () => {
         expect(await gone.json()).toEqual({ error: 'This item is gone.', code: 'not_found' });
       });
       expect(mockStaffReply.mock.calls[0][0]).toEqual({
-        kind: 'request', id: ITEM, body: 'We can come Monday.', clientRequestId: REQ, actor: { technicianId: 'admin-1', role: 'admin' },
+        kind: 'request', id: ITEM, body: 'We can come Monday.', clientRequestId: REQ, shownByText: false, actor: { technicianId: 'admin-1', role: 'admin' },
       });
+    });
+
+    // GATE_PORTAL_ANSWER_TEXT: the way the reply form showed goes to the service, which refuses a changed one.
+    test('passes the way the form showed (answerByText) and refuses one that is not a boolean', async () => {
+      process.env.GATE_PORTAL_MESSAGES = 'true';
+      mockStaffReply.mockResolvedValue({ message: { id: 'm-1' }, closed: true, notice: null });
+      await withServer(async (base) => {
+        for (const answerByText of ['yes', 'true', 1]) {
+          expect((await post(base, 'admin', { kind: 'chat', id: ITEM, body: 'Hi', answerByText })).status).toBe(400);
+        }
+        expect((await post(base, 'admin', { kind: 'chat', id: ITEM, body: 'Hi', answerByText: true })).status).toBe(200);
+        expect((await post(base, 'admin', { kind: 'chat', id: ITEM, body: 'Hi' })).status).toBe(200);
+      });
+      expect(mockStaffReply.mock.calls.map(([input]) => input.shownByText)).toEqual([true, false]);
     });
   });
 

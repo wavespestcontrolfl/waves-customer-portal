@@ -479,6 +479,33 @@ describe("Portal inbox tab: answers in the portal", () => {
     expect(within(row).getByText(hint)).toBeInTheDocument();
   });
 
+  it("asks for a second press when the way changed since the form opened, then sends the new way with the same request id", async () => {
+    const changed = "This answer now goes by text, at any hour, else by email. Check the line above Send (reload the page if it still says app notice), then press Send again.";
+    let presses = 0;
+    adminFetch.mockImplementation(async (url) => {
+      if (url === "/admin/portal-inbox") return withReplies();
+      if (url === "/admin/portal-inbox/reply") {
+        presses += 1;
+        if (presses === 1) throw Object.assign(new Error(changed), { status: 409, code: "notice_way_changed" });
+        return { message: { id: "m1" }, closed: true, notice: { bell: true, pushAccepted: 0, text: "sent", email: "not_needed" } };
+      }
+      return updated(url);
+    });
+    mount();
+    const row = (await screen.findByText("Pat Synthetic")).closest("[data-testid]");
+    fireEvent.click(within(row).getByRole("button", { name: "Reply in portal" }));
+    expect(within(row).getByText("They get a notice in the Waves app, or an email with your answer when they don't have the app.")).toBeInTheDocument();
+    fireEvent.change(within(row).getByRole("textbox", { name: "Answer in the portal" }), { target: { value: "Friday works." } });
+    fireEvent.click(within(row).getByRole("button", { name: "Send in portal" }));
+    expect(await within(row).findByRole("alert")).toHaveTextContent(changed);
+    expect(within(row).getByText("We text them your answer as soon as you send it, at any hour. If no text can go, we email it.")).toBeInTheDocument();
+    fireEvent.click(within(row).getByRole("button", { name: "Send in portal" }));
+    expect(await screen.findByTestId("portal-sent-note")).toHaveTextContent("Sent to Pat Synthetic in the portal. We texted them your answer.");
+    const bodies = adminFetch.mock.calls.filter(([url]) => url === "/admin/portal-inbox/reply").map(([, init]) => JSON.parse(init.body));
+    expect(bodies.map((b) => b.answerByText)).toEqual([false, true]);
+    expect(bodies[1].requestId).toBe(bodies[0].requestId);
+  });
+
   it("sends the answer with a request id, drops the row, lowers the count and says how the customer was told", async () => {
     const onCount = vi.fn();
     adminFetch.mockImplementation(async (url) => {

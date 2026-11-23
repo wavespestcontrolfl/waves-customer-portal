@@ -244,6 +244,9 @@ export function noticeLine(name, notice) {
 // sends.
 function PortalReply({ item, answerByText, onSent, onCancel }) {
   const [draft, setDraft] = useState("");
+  // GATE_PORTAL_ANSWER_TEXT: the way this form shows, sent with the answer. The server refuses a new answer whose way
+  // changed since (notice_way_changed); the form then shows the new way, and the staff press Send again.
+  const [shownByText, setShownByText] = useState(Boolean(answerByText));
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const requestRef = useRef(null);
@@ -257,11 +260,12 @@ function PortalReply({ item, answerByText, onSent, onCancel }) {
     try {
       const res = await adminFetch("/admin/portal-inbox/reply", {
         method: "POST",
-        body: JSON.stringify({ kind: item.kind, id: item.id, body: text, requestId: requestRef.current.id }),
+        body: JSON.stringify({ kind: item.kind, id: item.id, body: text, requestId: requestRef.current.id, answerByText: shownByText }),
       });
       onSent(item, res);
     } catch (err) {
-      // The service's refusals carry a code and words for staff (gone, inactive customer, empty).
+      if (err?.code === "notice_way_changed") setShownByText((shown) => !shown);
+      // The service's refusals carry a code and words for staff (gone, inactive customer, empty, a changed way).
       setError(isRateLimitError(err) ? RATE_LIMITED : err?.code && err.message ? err.message : "Could not send. Try again.");
       setSending(false);
     }
@@ -281,7 +285,7 @@ function PortalReply({ item, answerByText, onSent, onCancel }) {
       />
       <div className="text-14 text-ink-secondary">
         {/* GATE_PORTAL_ANSWER_TEXT (the server's answerByText): where the answer's words go, before Send. */}
-        {answerByText
+        {shownByText
           ? "We text them your answer as soon as you send it, at any hour. If no text can go, we email it."
           : "They get a notice in the Waves app, or an email with your answer when they don't have the app."}
       </div>
