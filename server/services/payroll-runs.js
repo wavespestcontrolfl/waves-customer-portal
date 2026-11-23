@@ -1255,7 +1255,12 @@ async function finalizeRun(runId, input, actor, conn = db) {
     // of the tax year below, which refuses the same run with fewer words: this refusal names the way that needs no
     // void. On a pay date after that run's, this run comes after the payout, and a check for a week before the
     // payout week is a catch-up check (payroll-time-off-bank.js paidOutInLaterWeek).
-    if (await timeOffBank.laterPayoutDecisionExists(trx, run, banked)) throw new PayrollError(409, LATER_RUN_PAID_OUT);
+    // Every technician with a check here is asked, also one with no yearly hours now: the hours can be cleared after
+    // a payout, and a plain check before it on an earlier pay date would pay time off the payout never saw.
+    const checked = evaluation.checks.map((check) => check.technician_id);
+    if (await timeOffBank.laterPayoutDecisionExists(trx, run, [...new Set([...banked, ...checked])])) {
+      throw new PayrollError(409, LATER_RUN_PAID_OUT);
+    }
     if (await laterFinalCheckExists(trx, run, evaluation.checks.map((check) => check.technician_id))) {
       throw new PayrollError(409, 'A later pay run is already final. Void it first, then finalize this one.');
     }

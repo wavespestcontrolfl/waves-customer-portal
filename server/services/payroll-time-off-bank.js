@@ -94,7 +94,8 @@ const usableFromOf = (hireDate) => (hireDate ? addStaffWorkDays(hireDate, USE_AF
  *   catchUp          null, or { heldAtWeek, paidOut } for a week before a pay week whose final run already paid the
  *                    bank out, paid after that run (applyBank, paidOutInLaterWeek): the check pays out the hours this
  *                    week earns, never more than the 120-hour cap left room for. `heldAtWeek` = the bank before this
- *                    week in week order, up to the payout; `paidOut` = what the payout and the catch-up checks after
+ *                    week in week order, up to the payout, with what the other catch-up checks of that payout earned;
+ *                    `paidOut` = what the payout and the catch-up checks after
  *                    it paid out. The bank was empty after the payout, so no time off of this week is paid from it.
  * Returns { paid, earlyPaid, unpaid, unpaidBeforeHire, unpaidByRule, earned, payout, after, paidDays }. `earlyPaid`
  * is the part of `paid` that was early illness. Of `unpaid`: `unpaidBeforeHire` is time off before the hire
@@ -463,6 +464,19 @@ async function paidOutInLaterWeek(conn, ids, { weekStart, payDate }) {
     [weekStart, payDate, ids],
   );
   for (const row of rows) {
+    // The payout before this one, for a technician who left and came back: its catch-up checks settled the first
+    // time on the job. Only weeks after its week are caught up under this payout.
+    const before = await conn('payroll_runs as r')
+      .where('r.status', 'finalized')
+      .where('r.week_start', '<', row.week_start)
+      .whereRaw("EXISTS (SELECT 1 FROM jsonb_array_elements(r.bank_payouts) AS kept WHERE (kept->>'technicianId')::uuid = ?)",
+        [row.technician_id])
+      .orderBy('r.week_start', 'desc')
+      .first(conn.raw("to_char(r.week_start, 'YYYY-MM-DD') AS week_start"));
+    const ofThisPayout = function catchUpsOfThisPayout() {
+      this.where('week_start', '<', row.week_start).andWhere('pay_date', '>', row.pay_date);
+      if (before) this.andWhere('week_start', '>', before.week_start);
+    };
     const held = await conn('payroll_checks')
       .where({ technician_id: row.technician_id, status: 'finalized' })
       .whereNotNull('pto_earned_minutes')
@@ -473,21 +487,20 @@ async function paidOutInLaterWeek(conn, ids, { weekStart, payDate }) {
         });
       })
       .first(conn.raw('COALESCE(SUM(pto_earned_minutes - pto_minutes), 0) AS bank'));
-    // A catch-up check of an earlier week, paid after the payout, came before this week in week order: the hours it
-    // earned were in the bank in this week. Its payout is not taken off: on time, those hours would have been paid
-    // out on leaving, not before this week. So two late weeks never use the same room under the cap.
+    // The other catch-up checks of this payout used room under the cap: an earlier week's hours were in the bank in
+    // this week, and a later week's hours would have found this week's in it. So the room is taken off in either
+    // order, and two late weeks never use the same room. Their payout is not taken off: on time, those hours would
+    // have been paid out on leaving.
     const caughtUpBefore = await conn('payroll_checks')
       .where({ technician_id: row.technician_id, status: 'finalized' })
       .whereNotNull('pto_earned_minutes')
-      .where('week_start', '<', weekStart)
-      .where('pay_date', '>', row.pay_date)
+      .whereNot('week_start', weekStart)
+      .where(ofThisPayout)
       .first(conn.raw('COALESCE(SUM(pto_earned_minutes), 0) AS earned'));
     const out = await conn('payroll_checks')
       .where({ technician_id: row.technician_id, status: 'finalized' })
       .where(function payoutAndCatchUps() {
-        this.where('run_id', row.run_id).orWhere(function catchUps() {
-          this.where('week_start', '<', row.week_start).andWhere('pay_date', '>', row.pay_date);
-        });
+        this.where('run_id', row.run_id).orWhere(ofThisPayout);
       })
       .first(conn.raw("COALESCE(SUM((calc_snapshot->'ptoBank'->>'payoutMinutes')::numeric), 0) AS paid_out"));
     byTech.set(row.technician_id, {
