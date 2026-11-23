@@ -4844,7 +4844,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // off, or for any other visit, a sent note is ignored. Never throws; in a
     // grouped closeout `db` is the packet's transaction and the reads run in
     // savepoints.
-    const reportNoteSent = require('../config/feature-gates').reportOwnNoteLive() && completionInput.body?.reportNote != null;
+    const reportNoteLive = require('../config/feature-gates').reportOwnNoteLive();
+    const reportNoteSent = reportNoteLive && completionInput.body?.reportNote != null;
+    // A note sent while the gate is off (turned off after the sheet loaded) refuses a fresh attempt (409 below): the
+    // raw note it carries is never a recap's input. Replays and resumes of a committed attempt are untouched.
+    const reportNoteStale = !reportNoteLive && completionInput.body?.reportNote != null;
     // The preview route's own visit check (strict profile, area add-on rows), in a savepoint scope (its profile
     // resolver runs its own savepoint reads). undefined = not asked; null = the check could not run.
     const reportNoteVisit = reportNoteSent && visitOutcome === 'completed' && !typedFindingsType && !isBackfillCompletion
@@ -4865,8 +4869,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // sheet loaded) refuses as a changed visit (409 below): the sheet reloads, never a recap from the raw note.
     const reportNoteVisitChanged = reportNoteVisit?.ok === true && reportNoteVisit.eligible !== true && !reportNoteUnverified;
     // A sent note in no shape the sheet sends is a bad request (400 below), never a completion without the marker.
-    const reportNoteInvalid = reportNoteSent && !require('./service-report/report-own-note').isSheetReportNote(completionInput.body.reportNote);
-    const reportNotePick = reportNoteVisit?.eligible === true
+    // A visit with a companion service is never one: its report shows the companion card, not the note.
+    const reportNoteCompanions = Array.isArray(companionFindings) ? companionFindings.length > 0
+      : Boolean(companionFindings && typeof companionFindings === 'object' && Object.keys(companionFindings).length);
+    const reportNoteInvalid = reportNoteSent && (reportNoteCompanions
+      || !require('./service-report/report-own-note').isSheetReportNote(completionInput.body.reportNote));
+    const reportNotePick = reportNoteVisit?.eligible === true && !reportNoteInvalid
       ? await require('./service-report/report-own-note').reportNoteToStore({
         reportNote: completionInput.body.reportNote,
         note: typeof technicianNotes === 'string' ? technicianNotes.trim() : '',
@@ -5301,6 +5309,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // A blog post that is no longer live on the site (unpublished, moved,
     // never live) is an actionable 400 for a fresh attempt, before any write,
     // like a retired tip: a link the tech chose never vanishes silently.
+    if (claim.action === 'proceed' && reportNoteStale) {
+      await CompletionAttempts.markCompletionAttemptFailed(
+        completionAttempt,
+        new Error('report_note_off'),
+        db,
+      ).catch(() => {});
+      return ({ status: 409, body: {
+        error: 'The report note is turned off. Reload the sheet and complete again.',
+        code: 'REPORT_NOTE_OFF',
+      } });
+    }
     if (claim.action === 'proceed' && reportNoteInvalid) {
       await CompletionAttempts.markCompletionAttemptFailed(
         completionAttempt,

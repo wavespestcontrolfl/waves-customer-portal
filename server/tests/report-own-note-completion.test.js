@@ -17,11 +17,12 @@ const completionSource = fs.readFileSync(path.join(__dirname, '../services/compl
 const block = completionSource.slice(completionSource.indexOf('async function completeScheduledService('));
 
 describe('the completion\'s report note', () => {
-  const sentAt = block.indexOf('const reportNoteSent = ');
-  const pick = block.slice(sentAt, sentAt + 3000);
+  const sentAt = block.indexOf('const reportNoteLive = ');
+  const pick = block.slice(sentAt, sentAt + 4500);
 
   test('asked only with the gate on and a note sent, for a performed untyped non-backfill visit', () => {
-    expect(pick).toMatch(/^const reportNoteSent = require\('\.\.\/config\/feature-gates'\)\.reportOwnNoteLive\(\) && completionInput\.body\?\.reportNote != null;/);
+    expect(pick).toMatch(/^const reportNoteLive = require\('\.\.\/config\/feature-gates'\)\.reportOwnNoteLive\(\);/);
+    expect(pick).toContain('const reportNoteSent = reportNoteLive && completionInput.body?.reportNote != null;');
     expect(pick).toContain("reportNoteSent && visitOutcome === 'completed' && !typedFindingsType && !isBackfillCompletion");
   });
 
@@ -47,7 +48,11 @@ describe('the completion\'s report note', () => {
   });
 
   test('a sent note in no shape the sheet sends is a 400 for a fresh attempt, before any write', () => {
-    expect(pick).toContain("const reportNoteInvalid = reportNoteSent && !require('./service-report/report-own-note').isSheetReportNote(completionInput.body.reportNote);");
+    expect(pick).toContain('const reportNoteInvalid = reportNoteSent && (reportNoteCompanions');
+    expect(pick).toContain("|| !require('./service-report/report-own-note').isSheetReportNote(completionInput.body.reportNote));");
+    // A visit with a companion service never takes a note (its report shows the companion card).
+    expect(pick).toContain('const reportNoteCompanions = Array.isArray(companionFindings) ? companionFindings.length > 0');
+    expect(pick).toContain('const reportNotePick = reportNoteVisit?.eligible === true && !reportNoteInvalid');
     const reject = block.indexOf("if (claim.action === 'proceed' && reportNoteInvalid) {");
     expect(reject).toBeGreaterThan(0);
     expect(reject).toBeLessThan(block.indexOf("trx('service_records').insert(recordInsert)"));
@@ -60,6 +65,14 @@ describe('the completion\'s report note', () => {
     expect(reject).toBeGreaterThan(0);
     expect(reject).toBeLessThan(block.indexOf("trx('service_records').insert(recordInsert)"));
     expect(block.slice(reject, reject + 500)).toMatch(/status: 409[\s\S]*code: 'visit_identity_changed'/);
+  });
+
+  test('a note sent while the gate is off refuses a fresh attempt (409), before any write', () => {
+    expect(pick).toContain('const reportNoteStale = !reportNoteLive && completionInput.body?.reportNote != null;');
+    const reject = block.indexOf("if (claim.action === 'proceed' && reportNoteStale) {");
+    expect(reject).toBeGreaterThan(block.indexOf("if (claim.action === 'replay') {"));
+    expect(reject).toBeLessThan(block.indexOf("trx('service_records').insert(recordInsert)"));
+    expect(block.slice(reject, reject + 500)).toMatch(/status: 409[\s\S]*code: 'REPORT_NOTE_OFF'/);
   });
 
   test('frozen with the record; a frozen note is the customer recap (no model reads the raw note for one)', () => {
