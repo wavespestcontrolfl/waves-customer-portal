@@ -70,7 +70,7 @@ async function revalidatePlacement(service) {
   const fresh = await db('scheduled_services')
     .where({ id: service.id })
     .first('scheduled_date', 'window_start', 'window_end', 'technician_id', 'status',
-      'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', 'recurring_dispatch_due_date', 'customer_confirmed', ...LOCATION_FIELDS);
+      'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', 'recurring_dispatch_due_date', ...LOCATION_FIELDS);
   if (!fresh) {
     return { ok: false, fresh: null, code: 'STALE_PLACEMENT', reason: 'Service no longer exists' };
   }
@@ -82,9 +82,6 @@ async function revalidatePlacement(service) {
   // still be a live pending/confirmed visit before moving.
   if (!['pending', 'confirmed'].includes(String(fresh.status))) {
     return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: `Visit status changed to '${fresh.status}' after scoring` };
-  }
-  if (fresh.customer_confirmed === true) {
-    return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: 'Customer confirmed this visit after scoring' };
   }
   const changed = toDateStr(fresh.recurring_dispatch_due_date) !== toDateStr(service.recurring_dispatch_due_date)
     || toDateStr(fresh.scheduled_date) !== toDateStr(service.scheduled_date)
@@ -357,9 +354,6 @@ function makeMoveGuard({ service, best, config = {} }) {
     trx, technicianId, service: movingRow, destination,
   }) => {
     const row = movingRow || service;
-    if (row.customer_confirmed === true) {
-      throw refuse(row.id, 'was confirmed by the customer');
-    }
     // At most N automatic day moves per visit, counted on this transaction so a
     // move another run landed minutes ago is seen (move-limit.js).
     await moveLimit.assertUnderLimit(trx, [row], config, refuse);
@@ -384,14 +378,14 @@ function makeMoveGuard({ service, best, config = {} }) {
     // GATE_TECH_START_POINTS: the start points the move was scored from still
     // stand — an unassigned visit's current day included (sourceDayTechnicianId).
     await assertScoredStartPoints(trx, [service.technician_id, config.sourceDayTechnicianId, receiving], config.startPointFor);
-    // A person may have placed this visit since pass 1 (even back onto the
-    // same slot, which the field CAS cannot see). The row handed in is the
-    // pre-transaction snapshot, so the check re-reads the row's own lock and
-    // date-exception columns and its history on the move transaction
-    // (Codex #6055 r5, r7).
+    // Staff may have locked this visit, or the customer picked or asked for its
+    // slot, since pass 1 (even back onto the same slot, which the field CAS
+    // cannot see). The row handed in is the pre-transaction snapshot, so the
+    // check re-reads the row's own lock and intent columns and its history on
+    // the move transaction (Codex #6055 r5, r7).
     const placed = await isPersonPlacedVisit(row, trx, { refresh: true });
     if (placed.degraded) throw new Error(`service ${row.id}: ${placed.reason_description}`);
-    if (placed.placed) throw refuse(row.id, `was placed by a person (${placed.reason_description})`);
+    if (placed.placed) throw refuse(row.id, `is held (${placed.reason_description})`);
     // Night told-lock (owner 2026-11-05, "D1 a"): a promise delivered after the pass-1 re-check (scoring can take minutes) still stops the
     // move. Read on the move transaction; a failed read throws, so nothing moves (fail closed).
     await assertNotToldOnMove(trx, row, config, refuse);
@@ -453,13 +447,13 @@ async function checkMemberEligibility(rows, best, eligCtx, trx, refuse) {
     if (!elig.eligible) throw refuse(r.id, `is not auto-dispatchable (${elig.reason_code}: ${elig.reason_description})`);
     const plan = await isRecurringPlanActive(r, trx);
     if (!plan.active) throw refuse(r.id, `is on an inactive plan (${plan.reason_code})`);
-    // A grouped move drags every member, so a member a person placed
-    // protects the whole visit, whichever member the run evaluated.
+    // A grouped move drags every member, so a member staff locked or the
+    // customer holds protects the whole visit, whichever member the run evaluated.
     const placed = await isPersonPlacedVisit(r, trx);
     // An unreadable history is a failure, not a refusal: it must reach the
     // run's failed count (previewGroupMove rethrows any non-409 error).
     if (placed.degraded) throw new Error(`grouped service ${r.id}: ${placed.reason_description}`);
-    if (placed.placed) throw refuse(r.id, `was placed by a person (${placed.reason_code}: ${placed.reason_description})`);
+    if (placed.placed) throw refuse(r.id, `is held (${placed.reason_code}: ${placed.reason_description})`);
   }
 }
 
@@ -960,11 +954,11 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config)
     window_start: fresh.window_start,
     window_end: fresh.window_end,
     technician_id: fresh.technician_id,
-    // recurring_dispatch_due_date and customer_confirmed are pinned with the
-    // location fields, null when absent. customer_confirmed for every visit
-    // (owner 2026-10-09): a confirmation that lands between the read above
-    // and the move fails the atomic match.
-    ...Object.fromEntries(['recurring_dispatch_due_date', 'customer_confirmed', ...LOCATION_FIELDS]
+    // recurring_dispatch_due_date is pinned with the location fields, null
+    // when absent. A customer confirmation no longer holds a visit (owner
+    // 2026-11-22), so it is not pinned; the customer's own pick or asked time
+    // is re-read on the move transaction (makeMoveGuard).
+    ...Object.fromEntries(['recurring_dispatch_due_date', ...LOCATION_FIELDS]
       .map((field) => [field, fresh[field] ?? null])),
   };
 

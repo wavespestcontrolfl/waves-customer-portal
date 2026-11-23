@@ -24,11 +24,13 @@
  *   other live stop that day for the same customer (co-visits stay together), its appointment starts
  *   more than 24.25 hours from now (America/New_York), its 24-hour reminder is not sent, and that reminder will go out
  *   (reminder_24h_off: the customer turned it off, or the answer is unknown or unreadable; it is the only notice of a new hour).
- * A night tool never changes a time the customer was already told (owner 2026-11-05, "D1 a"), so four more kinds of
- * stop are fixed, checked after the rules above: customer_confirmed, first_or_one_time (not a recurring
- * visit with a parent series), person_placed (staff or the customer chose the date or time; the auto-dispatch rule,
- * and an unreadable history keeps the stop fixed) and time_told (the customer has a known time from a delivered
- * text, email, call or booking, by the no-show detector's promise reader).
+ * A night tool never changes a time the customer was already told (owner 2026-11-05, "D1 a"), so three more kinds of
+ * stop are fixed, checked after the rules above: first_or_one_time (not a recurring visit with a parent series),
+ * person_placed (the customer picked or asked for the date or time; the auto-dispatch rule
+ * eligibility.isPersonPlacedVisit, and an unreadable history keeps the stop fixed) and time_told (the customer has a
+ * known time from a delivered text, email, call or booking, by the no-show detector's promise reader). A staff placement
+ * and a customer confirmation alone no longer fix a stop (owner 2026-11-22: "i dont think it matters if staff pick it or
+ * tom confirmed it"; that evening, "this is all too limiting").
  * With GATE_DAY_ONLY_PROMISE on, one more kind of stop is fixed, and checked FIRST (owner 2026-11-22), because only then
  * does the app record whether the customer asked for the time (`askRecorded`, set only then; the office form's tick,
  * time-promise.recordCustomerAskedTime): set_time, a visit that may not be promised as a day only
@@ -39,8 +41,8 @@
  * An answer that could not be read (a failed read, a missing verdict) is set_time_unread and fixes the stop too. It is
  * not a preferred time in the app (that is the stop's `pref`; a movable stop only takes hours inside it), "keep
  * auto-dispatch off this visit" (the staff_lock above) or a mowing day or preferred day (date rules; this job never
- * changes a date). Everything else is unchanged: customer_confirmed, first_or_one_time, person_placed (a delivered
- * day-only notice, `dayTold`, frees those two) and time_told. Gate off: unchanged.
+ * changes a date). Everything else is unchanged: first_or_one_time, person_placed (a delivered day-only notice,
+ * `dayTold`, frees those two) and time_told. Gate off: unchanged.
  * Also enforced for movable stops: the technician's tech_schedule_blocks (own and global, every type but
  * 'available') may not overlap a stop's service interval; hours held by unassigned (and, while occupancy is
  * tech-blind, other technicians') visits are taken; the day closes at the night pass's DAY_CLOSE (after_hours);
@@ -126,6 +128,7 @@ function dayOnlyOn() {
 const TOLD_LOCK_SELECT = [
   'scheduled_services.recurring_dispatch_due_date',
   'scheduled_services.date_exception', 'scheduled_services.date_exception_source', 'scheduled_services.date_exception_at',
+  'scheduled_services.customer_asked_time', 'scheduled_services.customer_asked_time_at',
 ];
 
 async function loadDayStops(conn, dateStr, makeRoomWriteProof = false) {
@@ -255,10 +258,10 @@ async function loadSetTime(conn, rows, now) {
 }
 
 /**
- * Ids of stops a person (staff or the customer) placed on their current date or time, by the auto-dispatch rule
- * (eligibility.isPersonPlacedVisit: the newest slot-changing reschedule_log row by a non-automatic initiator that
- * lands on the date, or a person date exception). A day holds a handful of rows, so one bounded read per row.
- * isPersonPlacedVisit fails CLOSED: a read failure counts as placed, so the stop stays fixed.
+ * Ids of stops the customer holds on their current date or time, or staff locked, by the auto-dispatch rule
+ * (eligibility.isPersonPlacedVisit: the customer asked for the time, or the customer's own move or date edit is the
+ * newest placement; a staff placement alone no longer counts, owner 2026-11-22). A day holds a handful of rows, so one
+ * bounded read per row. isPersonPlacedVisit fails CLOSED: a read failure counts as placed, so the stop stays fixed.
  */
 async function loadPersonPlaced(conn, rows) {
   const { isPersonPlacedVisit } = require('../auto-dispatch/eligibility');
@@ -332,10 +335,9 @@ function toldLockReason(row, { told, personPlaced, dayTold, askRecorded, setTime
     const set = setTime ? setTime.get(row.id) : 'set_time_unread';
     if (set) return set;
   }
-  if (row.customer_confirmed === true) return 'customer_confirmed';
   // GATE_DAY_ONLY_PROMISE: a stop the customer was told only the DAY for (dayTold) may change its hour inside that
-  // day, so being a first or one-time visit, or being placed by a person, does not fix it (the re-plan only changes
-  // the hour). A confirmed stop above stays fixed, which is the conservative side.
+  // day, so being a first or one-time visit, or a customer-held slot, does not fix it (the re-plan only changes the
+  // hour). A customer confirmation does not fix a stop (owner 2026-11-22).
   const dayOnly = !!dayTold && dayTold.has(row.id);
   if (!dayOnly && (row.is_recurring !== true || row.recurring_parent_id == null)) return 'first_or_one_time';
   if (!dayOnly && (!personPlaced || personPlaced.has(row.id))) return 'person_placed';
