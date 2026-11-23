@@ -263,7 +263,7 @@ async function listPayrollTechnicians(conn = db, formerWithBank) {
   const rows = await listedEmployees(conn('technicians'), formerWithBank, withTimeOff)
     .orderBy('name')
     .select('id', 'name', 'pay_rate', 'pay_method', 'employment_status', 'employment_type',
-      ...(withTimeOff ? ['pto_hours_per_year', 'paid_week_minimum_hours'] : []),
+      ...(withTimeOff ? ['pto_hours_per_year', 'paid_week_minimum_hours', conn.raw("to_char(paid_week_minimum_last_day, 'YYYY-MM-DD') AS paid_week_minimum_last_day")] : []),
       ...(withCoverage ? ['flsa_overtime_covered'] : []),
       ...(withMercury ? ['mercury_recipient_id'] : []),
       ...(withFamily ? ['family_relationship', 'family_employer_entity', conn.raw("to_char(family_exempt_from, 'YYYY-MM-DD') as family_exempt_from")] : []),
@@ -284,6 +284,7 @@ async function listPayrollTechnicians(conn = db, formerWithBank) {
       ...(withTimeOff ? {
         ptoHoursPerYear: row.pto_hours_per_year == null ? null : Number(row.pto_hours_per_year),
         paidWeekMinimumHours: row.paid_week_minimum_hours == null ? null : Number(row.paid_week_minimum_hours),
+        paidWeekMinimumLastDay: row.paid_week_minimum_last_day || null,
       } : {}),
       ...(withCoverage ? { flsaOvertimeCovered: row.flsa_overtime_covered == null ? null : row.flsa_overtime_covered } : {}),
       ...(withMercury ? { mercuryRecipientId: row.mercury_recipient_id || null } : {}),

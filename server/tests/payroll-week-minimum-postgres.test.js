@@ -1,6 +1,6 @@
 // Real PostgreSQL transactions (rolled back): the minimum paid week (payroll-week-minimum.js). A short week topped up
 // on its own line (stub, CSV, frozen once final), rule *a* (the minimum less unpaid time off), the first week from the
-// hire date, the payout week up to the last recorded day, a technician with no minimum unchanged, and the owner-only
+// hire date, the week of the last day the owner typed, a technician with no minimum unchanged, and the owner-only
 // setting. All names are synthetic. DATABASE_URL-gated like the other *-postgres suites.
 // CI runs a DB suite only when it carries this exact line (tests.yml greps for it).
 const SKIP = !process.env.DATABASE_URL;
@@ -32,7 +32,7 @@ jest.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: jest.fn() }));
 const { randomUUID } = require('node:crypto');
 const express = require('express');
 const router = require('../routes/admin-payroll');
-const { NO_LAST_DAY, EARLIER_STAY } = require('../services/payroll-week-minimum');
+const { EARLIER_STAY } = require('../services/payroll-week-minimum');
 const { addStaffWorkDays } = require('../utils/staff-time-work-date');
 
 jest.setTimeout(60000);
@@ -178,45 +178,46 @@ postgres('payroll minimum paid week', () => {
     expect(byName((await draft(W1)).body.run, 'Sample Alpha')).toMatchObject({ minimumWeekHours: '8.00', grossCents: 44000 });
   });
 
-  it('the week the bank is paid out counts the scheduled days up to the last recorded day', async () => {
-    // Last shift Tuesday: Mon + Tue = 20 h minimum; 15 h worked, so 5 h added (25 h in any other week).
-    const id = await tech('Sample Alpha', { hours: '80', pto_payout_week_start: W1 });
+  it('the week of the last day the owner typed counts the scheduled days up to it', async () => {
+    // Last day Tuesday: Mon + Tue = 20 h minimum; 15 h worked, so 5 h added (25 h in a full week). Nothing is guessed:
+    // time off booked after the last day changes nothing.
+    const id = await tech('Sample Alpha', { paid_week_minimum_last_day: addDays(W1, 1) });
     await worked(id, W1, 15);
-    await trx('time_entries').insert({
-      id: randomUUID(), technician_id: id, entry_type: 'shift', status: 'completed', approval_status: 'approved',
-      clock_in: `${addDays(W1, 1)}T12:00:00Z`, clock_out: `${addDays(W1, 1)}T20:00:00Z`, duration_minutes: 480,
-    });
-    const check = byName((await draft(W1)).body.run, 'Sample Alpha');
-    expect(check).toMatchObject({ regularHours: '15.00', minimumWeekHours: '5.00' });
-  });
-
-  it('an employee who left with no bank: the last week counts the days up to the last daily summary with work', async () => {
-    // Inactive, no bank, nothing after the week; worked Mon + Tue per the daily summaries: 20 h minimum, 15 worked.
-    const id = await tech('Sample Alpha', { employment_status: 'inactive' });
-    await worked(id, W1, 15);
-    await trx('time_entry_daily_summary').insert([
-      { technician_id: id, work_date: W1, total_shift_minutes: 480 },
-      { technician_id: id, work_date: addDays(W1, 1), total_shift_minutes: 420 },
-    ]);
+    await offDay(id, addDays(W1, 8), 8);
     expect(byName((await draft(W1)).body.run, 'Sample Alpha')).toMatchObject({ regularHours: '15.00', minimumWeekHours: '5.00' });
   });
 
-  it('an inactive employee with work after the week: the week is not the last one, the full minimum applies', async () => {
-    const id = await tech('Sample Alpha', { employment_status: 'inactive' });
-    await worked(id, W1, 15);
-    await trx('time_entry_daily_summary').insert([
-      { technician_id: id, work_date: W1, total_shift_minutes: 900 },
-      { technician_id: id, work_date: addDays(W1, 8), total_shift_minutes: 480 },
-    ]);
-    expect(byName((await draft(W1)).body.run, 'Sample Alpha')).toMatchObject({ minimumWeekHours: '25.00' });
+  it('a week after the last day pays no minimum', async () => {
+    const id = await tech('Sample Alpha', { paid_week_minimum_last_day: addDays(W1, -3) });
+    await worked(id, W1, 6);
+    const check = byName((await draft(W1)).body.run, 'Sample Alpha');
+    expect(check.grossCents).toBe(13200);
+    expect(check).not.toHaveProperty('minimumWeekHours');
   });
 
-  it('a later weekly timesheet with worked minutes means the week is not the last one', async () => {
-    const id = await tech('Sample Alpha', { employment_status: 'inactive' });
+  it('the last day: set and cleared by the owner, refused once a final check covers its week, and cleared with the minimum', async () => {
+    const id = await tech('Sample Alpha');
+    const put = (body) => api('PUT', `/technicians/${id}/week-minimum`, { body, email: OWNER });
+    expect((await put({ hours: '40', lastDay: 'soon' })).status).toBe(400);
+    const set = await put({ hours: '40', lastDay: addDays(W1, 1) });
+    expect([set.status, set.body.technician]).toEqual([200, { id, paidWeekMinimumHours: 40, paidWeekMinimumLastDay: addDays(W1, 1) }]);
+    // Hours alone keep the last day.
+    expect((await put({ hours: '38' })).body.technician.paidWeekMinimumLastDay).toBe(addDays(W1, 1));
     await worked(id, W1, 15);
-    await worked(id, addDays(W1, 7), 8);
-    await trx('time_entry_daily_summary').insert({ technician_id: id, work_date: addDays(W1, 1), total_shift_minutes: 900 });
-    expect(byName((await draft(W1)).body.run, 'Sample Alpha')).toMatchObject({ minimumWeekHours: '25.00' });
+    const created = (await draft(W1)).body.run;
+    expect((await finalize(created.id)).status).toBe(200);
+    // The week is paid: moving the last day there, or to an earlier week, or clearing it, is refused.
+    for (const lastDay of [addDays(W1, 3), addDays(W1, -7), null]) {
+      const refused = await put({ hours: '38', lastDay });
+      expect([refused.status, refused.body.error]).toEqual([409, `A final pay run already paid this employee for the week of ${lastDay && lastDay < W1 ? addDays(W1, -7) : W1} or later, so the last day cannot change there. Void that pay run first.`]);
+    }
+    expect((await put({ hours: null })).status).toBe(409);
+    // A later last day whose week has no final check is fine.
+    const tech2 = await tech('Sample Bravo', { paid_week_minimum_last_day: addDays(W1, 1) });
+    const later = await api('PUT', `/technicians/${tech2}/week-minimum`, { body: { hours: '40', lastDay: addDays(W1, 15) }, email: OWNER });
+    expect(later.body.technician.paidWeekMinimumLastDay).toBe(addDays(W1, 15));
+    const cleared = await api('PUT', `/technicians/${tech2}/week-minimum`, { body: { hours: null }, email: OWNER });
+    expect(cleared.body.technician).toEqual({ id: tech2, paidWeekMinimumHours: null, paidWeekMinimumLastDay: null });
   });
 
   it('lists an employee who has left while a minimum is set, so it can be cleared', async () => {
@@ -225,14 +226,6 @@ postgres('payroll minimum paid week', () => {
     const listed = (await api('GET', '/technicians')).body.technicians.map((row) => row.id);
     expect(listed).toContain(id);
     expect(listed).not.toContain(gone);
-  });
-
-  it('holds a last week with paid hours and no dated day on file, with a reason', async () => {
-    const id = await tech('Sample Alpha', { employment_status: 'inactive' });
-    await worked(id, W1, 15);
-    const run = (await draft(W1)).body.run;
-    expect(run.checks).toEqual([]);
-    expect(run.blocked).toEqual([{ technicianId: id, name: 'Sample Alpha', reason: NO_LAST_DAY }]);
   });
 
   it('holds a week of an earlier stay: work before the hire date on file', async () => {
@@ -295,7 +288,7 @@ postgres('payroll minimum paid week', () => {
     expect((await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: '41' }, email: OWNER })).status).toBe(400);
     expect((await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: '0' }, email: OWNER })).status).toBe(400);
     const set = await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: '40' }, email: OWNER });
-    expect([set.status, set.body]).toEqual([200, { technician: { id, paidWeekMinimumHours: 40 } }]);
+    expect([set.status, set.body]).toEqual([200, { technician: { id, paidWeekMinimumHours: 40, paidWeekMinimumLastDay: null } }]);
     const stale = await api('POST', `/runs/${created.id}/finalize`, { body: { token: shown.token } });
     expect(stale.status).toBe(409);
     const listed = (await api('GET', '/technicians')).body.technicians.find((row) => row.id === id);

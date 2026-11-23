@@ -382,6 +382,24 @@ describe('Time off in the pay run table and stub', () => {
     expect(within(stub).getByText('$88.00')).toBeInTheDocument();
   });
 
+  it('sends the last day typed next to a minimum', async () => {
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options = {}) => {
+      if (TECH_LIST.includes(path)) return reply({ technicians: TECHS.map(tech => ({ ...tech, paidWeekMinimumHours: tech.id === 'tech-a' ? 40 : null, paidWeekMinimumLastDay: null })) });
+      if (path === '/admin/payroll/technicians/tech-a/week-minimum') {
+        calls.push({ path, method: options.method, body: options.body });
+        return reply({ technician: { id: 'tech-a', paidWeekMinimumHours: 40, paidWeekMinimumLastDay: '2026-10-13' } });
+      }
+      return original(path, options);
+    });
+    render(<PayrollSettings />);
+    expect(screen.queryByLabelText('Last day for Sample Beta')).toBeNull();
+    const day = await screen.findByLabelText('Last day for Sample Alpha');
+    fireEvent.change(day, { target: { value: '2026-10-13' } });
+    fireEvent.click(within(day.closest('form')).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(calls.find(c => c.path === '/admin/payroll/technicians/tech-a/week-minimum')).toMatchObject({ body: { hours: '40', lastDay: '2026-10-13' } }));
+  });
+
   it('adds a minimum week column only when a check has one, and its line on the stub', async () => {
     const withMinimum = { ...RUN, checks: [check({ minimumWeekHours: '10.00', minimumWeekMinutes: 600, minimumWeekPayCents: 22000 })] };
     const original = adminFetch.getMockImplementation();
@@ -803,7 +821,7 @@ describe('The banks on the time off panel stay current', () => {
     fireEvent.change(input, { target: { value: '40' } });
     fireEvent.click(within(input.closest('form')).getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(runReads()).toBe(before + 1));
-    expect(calls.find(c => c.path === '/admin/payroll/technicians/tech-a/week-minimum')).toMatchObject({ method: 'PUT', body: { hours: '40' } });
+    expect(calls.find(c => c.path === '/admin/payroll/technicians/tech-a/week-minimum')).toMatchObject({ method: 'PUT', body: { hours: '40', lastDay: null } });
     expect(await screen.findByText('Minimum paid hours a week saved for Sample Alpha.')).toBeInTheDocument();
     expect(await screen.findByText('Hours or settings changed since this draft. Press Recompute.')).toBeInTheDocument();
   });

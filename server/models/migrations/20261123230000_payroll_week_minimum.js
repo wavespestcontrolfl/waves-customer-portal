@@ -5,6 +5,8 @@
  *
  * technicians.paid_week_minimum_hours: the minimum paid hours of a full workweek, a setting.
  * NULL = none (today's pay).
+ * technicians.paid_week_minimum_last_day: the employee's last day, typed by the owner when they leave (owner
+ * 2026-11-23 *a*, "you type the last day"). Its week pays the scheduled days up to it; later weeks pay no minimum.
  *
  * payroll_checks.minimum_week_minutes / minimum_week_pay_cents: the hours the minimum added to the
  * check (not hours worked) and their pay at the straight rate. NULL on a check of a technician with
@@ -15,7 +17,8 @@ exports.up = async function up(knex) {
   await knex.raw(`ALTER TABLE technicians
     ADD COLUMN paid_week_minimum_hours numeric(5,2) NULL
       CONSTRAINT technicians_paid_week_minimum_hours_check
-      CHECK (paid_week_minimum_hours IS NULL OR (paid_week_minimum_hours > 0 AND paid_week_minimum_hours <= 40))`);
+      CHECK (paid_week_minimum_hours IS NULL OR (paid_week_minimum_hours > 0 AND paid_week_minimum_hours <= 40)),
+    ADD COLUMN paid_week_minimum_last_day date NULL`);
   await knex.raw(`ALTER TABLE payroll_checks
     ADD COLUMN minimum_week_minutes numeric(10,2) NULL,
     ADD COLUMN minimum_week_pay_cents bigint NULL`);
@@ -31,10 +34,10 @@ exports.down = async function down(knex) {
     throw new Error('payroll_checks holds minimum week pay. Preserve the schema and roll forward; do not drop it.');
   }
   // A minimum the owner set is a pay promise on file: rolling back would lose it without a word.
-  if (await knex('technicians').whereNotNull('paid_week_minimum_hours').first('id')) {
+  if (await knex('technicians').whereNotNull('paid_week_minimum_hours').orWhereNotNull('paid_week_minimum_last_day').first('id')) {
     throw new Error('technicians holds a minimum paid week setting. Clear it first, or roll forward; do not drop it.');
   }
   await knex.raw('ALTER TABLE payroll_checks DROP CONSTRAINT IF EXISTS payroll_checks_minimum_week_check');
   await knex.raw('ALTER TABLE payroll_checks DROP COLUMN IF EXISTS minimum_week_pay_cents, DROP COLUMN IF EXISTS minimum_week_minutes');
-  await knex.raw('ALTER TABLE technicians DROP COLUMN IF EXISTS paid_week_minimum_hours');
+  await knex.raw('ALTER TABLE technicians DROP COLUMN IF EXISTS paid_week_minimum_last_day, DROP COLUMN IF EXISTS paid_week_minimum_hours');
 };
