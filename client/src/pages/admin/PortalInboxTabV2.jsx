@@ -244,7 +244,8 @@ export function noticeLine(name, notice) {
 // sends.
 function PortalReply({ item, answerByText, onSent, onCancel }) {
   const [draft, setDraft] = useState("");
-  // GATE_PORTAL_ANSWER_TEXT: the way this form shows, sent with the answer. The server refuses a new answer whose way
+  // GATE_PORTAL_ANSWER_TEXT: the way this form shows, sent with the answer only when it is the text way (none = the
+  // push way, so a server without the field still takes the answer). The server refuses a new answer whose way
   // changed since (notice_way_changed); the form then shows the new way, and the staff press Send again.
   const [shownByText, setShownByText] = useState(Boolean(answerByText));
   const [sending, setSending] = useState(false);
@@ -260,7 +261,7 @@ function PortalReply({ item, answerByText, onSent, onCancel }) {
     try {
       const res = await adminFetch("/admin/portal-inbox/reply", {
         method: "POST",
-        body: JSON.stringify({ kind: item.kind, id: item.id, body: text, requestId: requestRef.current.id, answerByText: shownByText }),
+        body: JSON.stringify({ kind: item.kind, id: item.id, body: text, requestId: requestRef.current.id, ...(shownByText ? { answerByText: true } : {}) }),
       });
       onSent(item, res);
     } catch (err) {

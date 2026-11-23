@@ -508,6 +508,12 @@ async function answerText(customerId, message, boundary) {
       onDispatchStart: boundary.start,
       onDispatchAbort: boundary.undo,
       onDispatchRejected: boundary.undo,
+      // The text keeps the staff member who wrote the answer (adminUserId): it is a text a person sent, so it counts as
+      // Waves reaching the customer wherever staff-contact.js decides that (an open ask, a callback promise), as any
+      // staff text does; the topic of a reply is never judged there (owner rulings 2026-09-28,
+      // sms-commitment-fulfillment.js rule 18: "the bell means nobody from Waves responded"; 2026-09-29, staff-contact.js:
+      // a staff text is judged the same wherever it closes a promise). It is only kept out of reply training
+      // (reply-training-capture.js NON_HUMAN_REPLY_MESSAGE_TYPES), which pairs a text with the customer's last text.
       metadata: {
         original_message_type: 'portal_answer',
         portalMessageId: message.id,

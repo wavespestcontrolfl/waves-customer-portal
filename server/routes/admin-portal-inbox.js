@@ -63,8 +63,8 @@ router.post('/close-older', async (req, res, next) => {
 // their portal thread, the item and its bells close, and the customer gets one notice (app push, else email; with
 // GATE_PORTAL_ANSWER_TEXT on, one text with the answer, else email).
 // `requestId` makes a retried click return the first answer instead of sending a second one. `answerByText` is the way
-// the reply form showed (the list's answerByText); a new answer whose way changed since is refused (409
-// notice_way_changed), and the form shows the new way.
+// the reply form showed (the list's answerByText; the form sends it only as true, and none is the push way); a new
+// answer whose way changed since is refused (409 notice_way_changed), and the form shows the new way.
 const replySchema = Joi.object({
   kind: Joi.string().valid('chat', 'request', 'message').required(),
   id: Joi.string().uuid().required(),

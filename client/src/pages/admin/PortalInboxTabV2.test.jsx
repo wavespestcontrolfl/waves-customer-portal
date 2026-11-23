@@ -502,7 +502,9 @@ describe("Portal inbox tab: answers in the portal", () => {
     fireEvent.click(within(row).getByRole("button", { name: "Send in portal" }));
     expect(await screen.findByTestId("portal-sent-note")).toHaveTextContent("Sent to Pat Synthetic in the portal. We texted them your answer.");
     const bodies = adminFetch.mock.calls.filter(([url]) => url === "/admin/portal-inbox/reply").map(([, init]) => JSON.parse(init.body));
-    expect(bodies.map((b) => b.answerByText)).toEqual([false, true]);
+    // The push way sends no field (a server without it still takes the answer); the text way sends true.
+    expect("answerByText" in bodies[0]).toBe(false);
+    expect(bodies[1].answerByText).toBe(true);
     expect(bodies[1].requestId).toBe(bodies[0].requestId);
   });
 
