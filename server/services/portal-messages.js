@@ -67,11 +67,9 @@ const SWEEP_MIN_AGE_MS = 5 * 60 * 1000;
 const SWEEP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const SWEEP_LIMIT = 50;
 const MESSAGES_LINK = '/?tab=messages';
-// GATE_PORTAL_ANSWER_TEXT: the answer's text. A staff press is the office's own send (send-window.js
-// OPERATOR_ENTRY_POINTS: a night answer goes at once, owner 2026-11-05); the sweep finishing a notice is not, so its
-// text keeps the 8 AM to 8 PM window, and outside it the email goes instead.
-const TEXT_ENTRY_STAFF = 'admin_portal_answer';
-const TEXT_ENTRY_SWEEP = 'portal_answer_sweep';
+// GATE_PORTAL_ANSWER_TEXT: the answer's text goes only on the staff press, the office's own send (send-window.js
+// OPERATOR_ENTRY_POINTS admin_portal_answer: a night answer goes at once, owner 2026-11-05). The notice sweep never
+// starts a text: a notice it finishes goes by email, so no automatic step texts a customer, at night or by day.
 // The cost bound on the owner's page: a text is at most 3 segments. A longer answer sends its first part and the link.
 const TEXT_MAX_SEGMENTS = 3;
 // The after-hours AI answer's row (portal-messages-night-ai.js). portal-inbox.js repeats the message type in its
@@ -329,9 +327,21 @@ async function claimNotice(messageId, now = new Date()) {
   return { at: now.toISOString(), attempts: Number(attempts) || 1, email, text, textCode };
 }
 
+// The push an earlier try sent for this bell, from the bell's own record (push-notifications.js keeps pushState on
+// it): 'accepted', 'sending' while its lease runs (it may still be accepted), else null.
+function earlierPush(bell, now = Date.now()) {
+  const meta = metaOf(bell);
+  if (meta.pushState === 'accepted') return 'accepted';
+  if (meta.pushState !== 'sending') return null;
+  const leaseUntil = Date.parse(meta.pushLeaseUntil || '') || (Date.parse(meta.pushAttemptedAt || '') + 10 * 60 * 1000);
+  return leaseUntil > now ? 'sending' : null;
+}
+
 // The in-app bell plus, unless push is false, a push to the Waves app. A push another attempt is still sending
-// is not a miss.
-async function bellAndPush(customerId, message, { push = true } = {}) {
+// is not a miss. With readEarlierPush (GATE_PORTAL_ANSWER_TEXT on), a try that sends no push still reads the bell's
+// record of an earlier try's push (a try made before the gate went on): one the app took counts as reached, so no
+// text or email follows it, and one still sending is in flight. Gate off, the outcome is this try's push alone.
+async function bellAndPush(customerId, message, { push = true, readEarlierPush = false } = {}) {
   try {
     const bell = await require('./notification-service').notifyCustomer(customerId, 'service', NOTICE_TITLE, preview(message.body), {
       link: MESSAGES_LINK,
@@ -341,7 +351,12 @@ async function bellAndPush(customerId, message, { push = true } = {}) {
       pushOptions: { nativeOnly: true },
       metadata: { portalMessageId: message.id },
     });
-    return { bell: Boolean(bell?.id) && !bell.suppressed, pushAccepted: Number(bell?.push?.accepted || 0), inFlight: bell?.push?.reason === 'push_in_flight' };
+    const earlier = readEarlierPush && !push ? earlierPush(bell) : null;
+    return {
+      bell: Boolean(bell?.id) && !bell.suppressed,
+      pushAccepted: Number(bell?.push?.accepted || 0) || (earlier === 'accepted' ? 1 : 0),
+      inFlight: bell?.push?.reason === 'push_in_flight' || earlier === 'sending',
+    };
   } catch (err) {
     logger.warn(`[portal-messages] bell or push failed for message ${message.id}: ${err.message}`);
     return { bell: false, pushAccepted: 0, inFlight: false };
@@ -396,15 +411,32 @@ function answerTextBody(firstName, body, customerId) {
   return cut(end > 0 ? end : lo);
 }
 
+// The answer's text goes to the number just read, and only while the customer's row still holds it. The send step
+// runs this handoff around the provider request (send-customer-message.js smsHandoffAllowed: this entry point only):
+// the customer-comms and phone locks (STOP and sms_enabled writers serialize on them), then the row read FOR SHARE, so
+// a phone correction commits before the read (a changed number refuses the text, and the email goes) or waits for the
+// request. The send step reloads consent, suppression and the send window on the same connection before the request.
+function phoneHeldHandoff(customerId, phone) {
+  const { withSmsConsentLock } = require('../utils/customer-comms-lock');
+  const { toE164 } = require('../utils/phone');
+  return (dispatch) => withSmsConsentLock(db, { phone, customerId }, async (trx) => {
+    const row = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forShare().first('phone');
+    if (!row?.phone || toE164(row.phone) !== toE164(phone)) {
+      return { ok: false, code: 'RECIPIENT_CHANGED', reason: 'recipient_changed', retryable: false };
+    }
+    return dispatch(trx);
+  });
+}
+
 // The answer's one text, through the canonical send (STOP list, consent, audit log, the provider handoff the
 // automatic SMS lanes respect). It resolves the customer's portal item, the same purpose as the text for a request's
 // update (support_resolution: 3 segments, the number on the customer's own row). It is not a reply on the SMS thread,
 // so it takes neither purpose 'conversational' nor the interlocked manual wrapper: that one settles the SMS thread's
 // waiting question as answered by staff, and the customer's text may wait on something else
 // (send-manual-customer-sms.js: it "interlocks staff REPLIES only"). { text: 'sent' } when the provider took it,
-// 'uncertain' when it may have gone out, else 'not_sent' with the refusal's code: no number, STOP or no consent, the
-// night window for the sweep, a failure. Never throws.
-async function answerText(customerId, message, byStaff) {
+// 'uncertain' when it may have gone out, else 'not_sent' with the refusal's code: no number, STOP or no consent, a
+// changed number, a failure. Never throws.
+async function answerText(customerId, message) {
   const Send = require('./messaging/send-customer-message');
   try {
     const customer = await db('customers').where({ id: customerId }).first('first_name', 'phone');
@@ -417,7 +449,8 @@ async function answerText(customerId, message, byStaff) {
       purpose: 'support_resolution',
       customerId,
       identityTrustLevel: 'phone_matches_customer',
-      entryPoint: byStaff ? TEXT_ENTRY_STAFF : TEXT_ENTRY_SWEEP,
+      entryPoint: 'admin_portal_answer',
+      withSmsHandoff: phoneHeldHandoff(customerId, customer.phone),
       metadata: {
         original_message_type: 'portal_answer',
         portalMessageId: message.id,
@@ -443,17 +476,18 @@ function textOutcome(outcome, classify, fallbackCode) {
   return { text: 'uncertain' };
 }
 
-// GATE_PORTAL_ANSWER_TEXT: a try's text part, or null when the notice has none (the gate is off, or an earlier try
-// moved to the email). The move to the text is saved while this try holds the claim, then the text goes. A later try
-// never texts again: it reuses the stored outcome, and a text still 'sending' (a try that stopped mid-send) counts as
-// maybe gone. { lost: true } when the claim was lost (a try that was taken over sends nothing).
-async function textStep(customerId, message, claim, sent, byStaff) {
+// GATE_PORTAL_ANSWER_TEXT: a try's text part, or null when the notice has none: the gate is off, the try is the
+// sweep's (it never starts a text), an earlier try moved to the email, or an earlier push reached the app. The move
+// to the text is saved while this try holds the claim, then the text goes. A later try never texts again: it reuses
+// the stored outcome, and a text still 'sending' (a try that stopped mid-send) counts as maybe gone. { lost: true }
+// when the claim was lost (a try that was taken over sends nothing).
+async function textStep(customerId, message, claim, sent, { byStaff, textLive }) {
   if (claim.text !== undefined) {
     return { text: claim.text === 'sending' ? 'uncertain' : claim.text, ...(claim.textCode ? { textCode: claim.textCode } : {}) };
   }
-  if (!answerTextLive() || claim.email !== undefined) return null;
+  if (!byStaff || !textLive || claim.email !== undefined || sent.pushAccepted > 0) return null;
   const held = await recordNotice(message.id, { ...sent, text: 'sending', pending: true, claimedAt: claim.at, attempts: claim.attempts });
-  return held ? answerText(customerId, message, byStaff) : { lost: true };
+  return held ? answerText(customerId, message) : { lost: true };
 }
 
 // A try's email part. Not needed after an accepted push or a text that went out; done already when an earlier try
@@ -478,20 +512,22 @@ async function emailStep(customerId, message, claim, sent) {
 // in place (it counted) and adds no email. The stored notice keeps its try count. Never throws. Safe to run
 // again: the bell dedupes on its key, an accepted push is claimed by its bell (push-notifications.js), the text
 // goes at most once (textStep), and the email carries its own idempotency key. `byStaff` marks a try run by the
-// staff press itself (staffReply), never by the sweep.
+// staff press itself (staffReply): only such a try starts a text, never the sweep.
 async function noticeCustomer(customerId, message, { byStaff = false } = {}) {
   try {
     const claim = await claimNotice(message.id);
     if (!claim) return await storedNotice(message.id);
-    const push = !answerTextLive() && claim.email === undefined && claim.text === undefined;
-    const { inFlight, ...sent } = await bellAndPush(customerId, message, { push });
+    // GATE_PORTAL_ANSWER_TEXT, read once for this try.
+    const textLive = answerTextLive();
+    const push = !textLive && claim.email === undefined && claim.text === undefined;
+    const { inFlight, ...sent } = await bellAndPush(customerId, message, { push, readEarlierPush: textLive });
     if (inFlight) {
       // Another try is still sending the push: no email. Its claim stays (this try counted); on the last try the
       // notice ends here, since whatever that push does is the outcome.
       if (claim.attempts >= NOTICE_ATTEMPTS) await recordNotice(message.id, { ...sent, email: 'not_needed', pending: false, claimedAt: claim.at, attempts: claim.attempts });
       return { pending: claim.attempts < NOTICE_ATTEMPTS };
     }
-    const texted = await textStep(customerId, message, claim, sent, byStaff);
+    const texted = await textStep(customerId, message, claim, sent, { byStaff, textLive });
     if (texted?.lost) return await storedNotice(message.id);
     const mail = await emailStep(customerId, message, claim, { ...sent, ...texted });
     if (!mail) return await storedNotice(message.id);
@@ -763,5 +799,5 @@ module.exports = {
   customerUnread,
   markRead,
   resumePendingNotices,
-  __private: { preview, noticeCustomer, closeItemWith, closeItemBells, itemCustomerWith, claimNotice, ringOffice, metaOf, bellAndPush, answerTextBody, textOutcome },
+  __private: { preview, noticeCustomer, closeItemWith, closeItemBells, itemCustomerWith, claimNotice, ringOffice, metaOf, bellAndPush, answerTextBody, textOutcome, earlierPush },
 };

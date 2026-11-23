@@ -2,8 +2,8 @@
  * GATE_PORTAL_ANSWER_TEXT (owner 2026-11-22, "ok do your rec"): the text that carries an office answer from the
  * portal. Pins the owner's words, the whole answer when it fits 3 segments, a long answer's first part cut at a space
  * plus the portal link inside 3 segments and as long as fits, the count in the characters the send step sends (GSM
- * punctuation, a link with no scheme), a name outside the GSM set, and the night rule: the staff press is the
- * office's own send, the notice sweep keeps the 8 AM to 8 PM window. No database (the notice flow itself is
+ * punctuation, a link with no scheme), a name outside the GSM set, the night rule (the staff press is the office's own
+ * send), the outcome mapping, and the bell's record of an earlier push. No database (the notice flow itself is
  * portal-messages-postgres.test.js).
  */
 process.env.GATE_SMS_SEND_WINDOW = 'true';
@@ -13,7 +13,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { countSegments } = require('../services/messaging/segment-counter');
 const { checkSendWindow } = require('../services/messaging/validators/send-window');
-const { __private: { answerTextBody, textOutcome } } = require('../services/portal-messages');
+const { __private: { answerTextBody, textOutcome, earlierPush } } = require('../services/portal-messages');
 const { classifyDeliveryCertainty } = require('../services/messaging/send-customer-message');
 
 const LEAD = "Hi Sam, here's our answer from Waves: ";
@@ -75,7 +75,7 @@ describe('the text that carries a portal answer', () => {
   });
 });
 
-describe('the night rule for the answer text', () => {
+describe('the night rule for the answer text (only the staff press texts)', () => {
   // 10 PM Eastern on 2026-11-22.
   const night = new Date('2026-11-23T03:00:00Z');
   const send = (entryPoint) => checkSendWindow({
@@ -87,9 +87,6 @@ describe('the night rule for the answer text', () => {
     expect(send('admin_portal_answer')).toEqual({ ok: true });
   });
 
-  test('the sweep finishing a stopped send is held to 8 AM to 8 PM', () => {
-    expect(send('portal_answer_sweep')).toMatchObject({ ok: false, code: 'QUIET_HOURS_HOLD', deferred: true });
-  });
 });
 
 describe('the text outcome, by the shared delivery derivation', () => {
@@ -105,5 +102,28 @@ describe('the text outcome, by the shared delivery derivation', () => {
     [null, { text: 'uncertain' }],
   ])('%j reads as %j', (outcome, read) => {
     expect(textOutcome(outcome, classifyDeliveryCertainty, 'NOT_SENT')).toEqual(read);
+  });
+});
+
+describe("the bell's record of an earlier push", () => {
+  const now = Date.parse('2026-11-22T20:00:00Z');
+  const at = (minutes) => new Date(now + minutes * 60 * 1000).toISOString();
+  test.each([
+    [{ pushState: 'accepted' }, 'accepted'],
+    [{ pushState: 'sending', pushLeaseUntil: at(2) }, 'sending'],
+    [{ pushState: 'sending', pushLeaseUntil: at(-1) }, null],
+    // No lease written: the attempt time plus 10 minutes, as push-notifications.js reads it.
+    [{ pushState: 'sending', pushAttemptedAt: at(-5) }, 'sending'],
+    [{ pushState: 'sending', pushAttemptedAt: at(-11) }, null],
+    [{ pushState: 'failed' }, null],
+    [{}, null],
+  ])('%j reads as %s', (metadata, read) => {
+    expect(earlierPush({ id: 'n-1', metadata }, now)).toBe(read);
+    // A row whose metadata comes back as text reads the same.
+    expect(earlierPush({ id: 'n-1', metadata: JSON.stringify(metadata) }, now)).toBe(read);
+  });
+
+  test('no bell reads as no push', () => {
+    expect(earlierPush(null, now)).toBeNull();
   });
 });

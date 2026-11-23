@@ -85,7 +85,7 @@ const OPERATOR_ENTRY_POINTS = new Set([
   'admin_leads_send_sms',
   // The office's Send on an answer in the customer's portal (routes/admin-portal-inbox.js -> portal-messages.js
   // staffReply): the answer's text with GATE_PORTAL_ANSWER_TEXT on (owner 2026-11-05: a night answer sends at
-  // once). The notice sweep that finishes a stopped send uses portal_answer_sweep, which stays fenced.
+  // once). Only the press texts: the notice sweep that finishes a stopped notice sends the email, never a text.
   'admin_portal_answer',
   'admin_prep_guide_send',
   'admin_pricing_strategy_upsell',

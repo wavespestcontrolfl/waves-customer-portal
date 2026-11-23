@@ -24,17 +24,23 @@ jest.mock('../services/push-notifications', () => ({
   sendToCustomer: jest.fn(async () => mockPushResult),
   resolveNotificationPropertyId: jest.fn(async () => null),
 }));
-// GATE_PORTAL_ANSWER_TEXT: only the answer's own texts are faked (their outcome is set per test: a result, or a
-// function of the send's input); any other send is the real one.
-const mockAnswerText = { result: null, error: null };
+// GATE_PORTAL_ANSWER_TEXT: only the answer's own texts are faked; any other send is the real one. The fake runs the
+// caller's locked handoff as the send step does (against the real database: its locks and its row read), and the
+// provider "takes" the text only when the handoff reaches its dispatch. `beforeHandoff` runs first (a write that lands
+// between the read and the send); the outcome is then set per test.
+const mockAnswerText = { result: null, error: null, beforeHandoff: null };
 jest.mock('../services/messaging/send-customer-message', () => {
   const actual = jest.requireActual('../services/messaging/send-customer-message');
   return {
     ...actual,
     sendCustomerMessage: jest.fn(async (input) => {
-      if (!['admin_portal_answer', 'portal_answer_sweep'].includes(input?.entryPoint)) return actual.sendCustomerMessage(input);
+      if (input?.entryPoint !== 'admin_portal_answer') return actual.sendCustomerMessage(input);
+      if (mockAnswerText.beforeHandoff) await mockAnswerText.beforeHandoff(input);
+      let reached = !input.withSmsHandoff;
+      const verdict = input.withSmsHandoff ? await input.withSmsHandoff(async () => { reached = true; return { ok: true }; }) : null;
+      if (!reached) return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: verdict?.code || 'SMS_HANDOFF_CHECK_FAILED' };
       if (mockAnswerText.error) throw mockAnswerText.error;
-      return typeof mockAnswerText.result === 'function' ? mockAnswerText.result(input) : mockAnswerText.result;
+      return mockAnswerText.result;
     }),
   };
 });
@@ -786,11 +792,15 @@ maybeDescribe('portal messages (live Postgres)', () => {
       process.env.GATE_PORTAL_ANSWER_TEXT = 'true';
       mockAnswerText.result = ACCEPTED;
       mockAnswerText.error = null;
+      mockAnswerText.beforeHandoff = null;
     });
     // The answer's texts this test sent, for one answer.
     const answerTexts = (messageId) => SendCustomerMessage.sendCustomerMessage.mock.calls.map(([input]) => input)
-      .filter((input) => ['admin_portal_answer', 'portal_answer_sweep'].includes(input.entryPoint)
-        && (!messageId || input.metadata?.portalMessageId === messageId));
+      .filter((input) => input.entryPoint === 'admin_portal_answer' && (!messageId || input.metadata?.portalMessageId === messageId));
+    // The bell's own record of a push (push-notifications.js writes it; that module is faked here).
+    const markBellPush = (messageId, record) => db('notifications').where({ recipient_type: 'customer' })
+      .whereRaw("metadata->>'portalMessageId' = ?", [messageId])
+      .update({ metadata: db.raw("metadata || ?::jsonb", [JSON.stringify(record)]) });
     const storedNotice = async (messageId) => (await db('messages').where({ id: messageId }).first('metadata')).metadata.notice;
     // As if a try stopped mid-notice: `notice` stored, claimed 3 minutes ago (stale), the answer `ageMinutes` old.
     const stopped = (messageId, notice, ageMinutes = 0) => db('messages').where({ id: messageId }).update({
@@ -817,6 +827,7 @@ maybeDescribe('portal messages (live Postgres)', () => {
         customerId: pat.id,
         identityTrustLevel: 'phone_matches_customer',
         entryPoint: 'admin_portal_answer',
+        withSmsHandoff: expect.any(Function),
         metadata: { original_message_type: 'portal_answer', portalMessageId: result.message.id },
       })]);
       expect(await storedNotice(result.message.id)).toMatchObject({ bell: true, pushAccepted: 0, text: 'sent', email: 'not_needed', pending: false });
@@ -887,26 +898,58 @@ maybeDescribe('portal messages (live Postgres)', () => {
       expect(await storedNotice(lost.message.id)).toMatchObject({ textCode: 'SEND_FAILED' });
     });
 
-    test('the sweep finishing a stopped notice texts on its own entry point (held to 8 AM to 8 PM); held, the email goes', async () => {
+    test('the sweep never starts a text: a notice it finishes goes by email; only the staff press texts', async () => {
+      const pat = await customer();
+      const { escalationId } = await chat(pat.id, { alert: false });
+      const answer = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'Booked for Friday.', actor });
+      // As if the process stopped right after the save, before any step.
+      await stopped(answer.message.id, { attempts: 1 }, 10);
+      jest.clearAllMocks();
+      expect(await PortalMessages.resumePendingNotices()).toBeGreaterThanOrEqual(1);
+      expect(answerTexts()).toEqual([]);
+      expect(PushService.sendToCustomer).not.toHaveBeenCalled();
+      expect(AccountMembershipEmail.sendPortalReply).toHaveBeenCalledWith(expect.objectContaining({ messageId: answer.message.id }));
+      const notice = await storedNotice(answer.message.id);
+      expect(notice).toMatchObject({ bell: true, pushAccepted: 0, email: 'sent', pending: false });
+      expect(notice.text).toBeUndefined();
+    });
+
+    test('a phone corrected after the read gets no text: the locked handoff re-reads the number, and the email goes', async () => {
+      const pat = await customer();
+      const { escalationId } = await chat(pat.id, { alert: false });
+      const corrected = phone();
+      mockAnswerText.beforeHandoff = () => db('customers').where({ id: pat.id }).update({ phone: corrected });
+      const result = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'See you Tuesday.', actor });
+      expect(answerTexts()).toEqual([expect.objectContaining({ to: pat.phone })]);
+      expect(result.notice).toEqual({ bell: true, pushAccepted: 0, text: 'not_sent', email: 'sent' });
+      expect(await storedNotice(result.message.id)).toMatchObject({ text: 'not_sent', textCode: 'RECIPIENT_CHANGED', email: 'sent', pending: false });
+      expect(AccountMembershipEmail.sendPortalReply).toHaveBeenCalledTimes(1);
+    });
+
+    test('an earlier push the app took (a try before the gate went on) ends the notice: no text, no email; one still sending waits', async () => {
       const pat = await customer();
       const one = await chat(pat.id, { alert: false });
-      const day = await PortalMessages.staffReply({ kind: 'chat', id: one.escalationId, body: 'Booked for Friday.', actor });
       const two = await chat(pat.id, { alert: false });
-      const night = await PortalMessages.staffReply({ kind: 'chat', id: two.escalationId, body: 'Booked for Saturday.', actor });
-      // As if both stopped right after the save, before any step.
-      await stopped(day.message.id, { attempts: 1 }, 10);
-      await stopped(night.message.id, { attempts: 1 }, 10);
+      const firstId = randomUUID();
+      const secondId = randomUUID();
+      // Gate off: the push goes, then both tries stop before their final notice is saved.
+      process.env.GATE_PORTAL_ANSWER_TEXT = 'false';
+      mockPushResult.sent = 1;
+      const took = await PortalMessages.staffReply({ kind: 'chat', id: one.escalationId, body: 'On our way.', clientRequestId: firstId, actor });
+      const sending = await PortalMessages.staffReply({ kind: 'chat', id: two.escalationId, body: 'Running late.', clientRequestId: secondId, actor });
+      await stopped(took.message.id, { attempts: 1 });
+      await stopped(sending.message.id, { attempts: 1 });
+      await markBellPush(took.message.id, { pushState: 'accepted', pushAcceptedAt: new Date().toISOString() });
+      await markBellPush(sending.message.id, { pushState: 'sending', pushLeaseUntil: new Date(Date.now() + 2 * 60 * 1000).toISOString() });
+      process.env.GATE_PORTAL_ANSWER_TEXT = 'true';
+      mockPushResult.sent = 0;
       jest.clearAllMocks();
-      // The night answer's text meets the window: the send holds it (it is not queued) and the email goes.
-      mockAnswerText.result = (input) => (input.metadata?.portalMessageId === night.message.id
-        ? { sent: false, blocked: true, deferred: true, retryable: true, code: 'QUIET_HOURS_HOLD', deliveryOutcome: 'not_sent' }
-        : ACCEPTED);
-      expect(await PortalMessages.resumePendingNotices()).toBeGreaterThanOrEqual(2);
-      expect(answerTexts(day.message.id)).toEqual([expect.objectContaining({ entryPoint: 'portal_answer_sweep' })]);
-      expect(await storedNotice(day.message.id)).toMatchObject({ text: 'sent', email: 'not_needed', pending: false });
-      expect(answerTexts(night.message.id)).toEqual([expect.objectContaining({ entryPoint: 'portal_answer_sweep' })]);
-      expect(AccountMembershipEmail.sendPortalReply).toHaveBeenCalledWith(expect.objectContaining({ messageId: night.message.id }));
-      expect(await storedNotice(night.message.id)).toMatchObject({ text: 'not_sent', textCode: 'QUIET_HOURS_HOLD', email: 'sent', pending: false });
+      const again = await PortalMessages.staffReply({ kind: 'chat', id: one.escalationId, body: 'On our way.', clientRequestId: firstId, actor });
+      expect(again.notice).toEqual({ bell: true, pushAccepted: 1, email: 'not_needed' });
+      const waiting = await PortalMessages.staffReply({ kind: 'chat', id: two.escalationId, body: 'Running late.', clientRequestId: secondId, actor });
+      expect(waiting.notice).toEqual({ pending: true });
+      expect(answerTexts()).toEqual([]);
+      expect(AccountMembershipEmail.sendPortalReply).not.toHaveBeenCalled();
       expect(PushService.sendToCustomer).not.toHaveBeenCalled();
     });
 
