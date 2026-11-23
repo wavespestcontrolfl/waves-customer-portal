@@ -218,7 +218,8 @@ const CUSTOMER_OR_UNKNOWN_SOURCES = Object.freeze([
 // Statuses that end a visit: a member in one of them is no longer part of the stop the customer hears about.
 const ENDED_STATUSES = ['cancelled', 'completed', 'skipped'];
 
-const MEMBER_COLUMNS = ['id', 'visit_id', 'status', 'scheduled_date', 'is_recurring', 'recurring_parent_id',
+// window_start: the customer-pick check matches a placement's start too (eligibility isCustomerPickedVisit).
+const MEMBER_COLUMNS = ['id', 'visit_id', 'status', 'scheduled_date', 'window_start', 'is_recurring', 'recurring_parent_id',
   'date_exception', 'date_exception_source', 'date_exception_at', 'customer_asked_time', 'customer_asked_time_at'];
 
 /** The live members of each requested row's stop: Map<requested id, member rows[]>. A row with no stop is its own

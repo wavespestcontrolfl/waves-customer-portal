@@ -205,6 +205,9 @@ describe('isPersonPlacedVisit', () => {
   // newest-placement subquery is evaluated like PostgreSQL would.
   function fakeDb({ log = [], fail = false, row = null } = {}) {
     const slotChanged = (r) => r.original_date !== r.new_date || r.original_window !== r.new_window;
+    // PLACEMENT_SQL in JS: the date, or the first five characters of the window's start, changed.
+    const startText = (w) => String(w || '').split('-')[0].slice(0, 5);
+    const placed = (r) => r.original_date !== r.new_date || startText(r.original_window) !== startText(r.new_window);
     const fake = (table) => {
       if (table === 'scheduled_services') {
         const read = { forShare: () => read, first: async () => { if (fail) throw new Error('connection reset'); return row; } };
@@ -224,11 +227,15 @@ describe('isPersonPlacedVisit', () => {
         limit(n) { cap = n; return chain; },
         whereNotNull(key) { preds.push((r) => r[key] != null); return chain; },
         whereRaw(sql) {
+          const { PLACEMENT_SQL } = require('../services/auto-dispatch/eligibility');
+          const newestOf = sql.includes('split_part') ? placed : slotChanged;
           if (sql === '(original_date IS DISTINCT FROM new_date OR original_window IS DISTINCT FROM new_window)') {
             preds.push(slotChanged);
+          } else if (sql === PLACEMENT_SQL) {
+            preds.push(placed);
           } else if (/created_at = \(SELECT max\(r2\.created_at\)/.test(sql)) {
             preds.push((r) => {
-              const peers = log.filter((x) => x.scheduled_service_id === r.scheduled_service_id && x.new_date != null && slotChanged(x));
+              const peers = log.filter((x) => x.scheduled_service_id === r.scheduled_service_id && x.new_date != null && newestOf(x));
               const max = Math.max(...peers.map((x) => new Date(x.created_at).getTime()));
               return new Date(r.created_at).getTime() === max;
             });
@@ -313,15 +320,14 @@ describe('isPersonPlacedVisit', () => {
     expect(await isPersonPlacedVisit(visit, fakeDb({ log: [staffPick, longer] }))).toEqual({ placed: false });
   });
 
-  test('a history of end-only edits only, as long as the read, fails closed and degraded', async () => {
+  test('any number of end-only edits still finds the customer pick before them (one SQL read, no row limit)', async () => {
     const pad = (n) => String(n).padStart(2, '0');
-    const edits = Array.from({ length: 50 }, (_, i) => row({ id: `e${i}`, initiated_by: 'admin_bulk', series_move_id: null,
+    const edits = Array.from({ length: 60 }, (_, i) => row({ id: `e${i}`, initiated_by: 'admin_bulk', series_move_id: null,
       created_at: new Date(Date.parse('2026-10-08T00:00:00Z') + i * 60000).toISOString(),
       original_date: '2026-10-18', original_window: '09:00-10:00', new_window: `09:00-11:${pad(i)}` }));
     expect(await isPersonPlacedVisit(visit, fakeDb({ log: [row(), ...edits] })))
-      .toMatchObject({ placed: true, degraded: true, reason_code: 'PERSON_PLACED_UNKNOWN' });
-    expect(await isPersonPlacedVisit(visit, fakeDb({ log: [row(), ...edits.slice(0, 49)] })))
       .toMatchObject({ placed: true, reason_code: 'CUSTOMER_PICKED' });
+    expect(await isPersonPlacedVisit(visit, fakeDb({ log: [row({ initiated_by: 'admin' }), ...edits] }))).toEqual({ placed: false });
   });
 
   // Local audit 2026-11-22: the edit screen changes a slot without a log row; a start the customer did not pick is the

@@ -221,12 +221,11 @@ const CUSTOMER_INITIATORS = new Set(['customer', 'customer_self_serve', 'custome
 const SLOT_CHANGED_SQL = '(original_date IS DISTINCT FROM new_date OR original_window IS DISTINCT FROM new_window)';
 // A row PLACES the visit when the date or the START changed (placesVisit below, in SQL; the log's windows are 'HH:MM-HH:MM',
 // 'HH:MM:SS-HH:MM:SS' or NULL). An end-only edit (a longer visit) does not.
-const PLACEMENT_SQL = "(original_date IS DISTINCT FROM new_date OR left(split_part(COALESCE(original_window, ''), '-', 1), 5)"
-  + " IS DISTINCT FROM left(split_part(COALESCE(new_window, ''), '-', 1), 5))";
+const placementSql = (t = '') => `(${t}original_date IS DISTINCT FROM ${t}new_date`
+  + ` OR left(split_part(COALESCE(${t}original_window, ''), '-', 1), 5) IS DISTINCT FROM left(split_part(COALESCE(${t}new_window, ''), '-', 1), 5))`;
+const PLACEMENT_SQL = placementSql();
 const PLACEMENT_COLUMNS = ['auto_dispatch_locked', 'auto_dispatch_excluded', 'date_exception', 'date_exception_source',
   'date_exception_at', 'customer_asked_time', 'customer_asked_time_at', 'window_start'];
-// How far back the rule reads when the newest slot change is an end-only edit (0 such edits in 120 days, 2026-11-22).
-const PLACEMENT_HISTORY_ROWS = 50;
 const LOG_COLUMNS = ['created_at', 'new_date', 'initiated_by', 'reason_code', 'original_date', 'original_window', 'new_window'];
 // Staff moves made FOR the customer's request hold like the customer's own: the reschedule dialog's "Customer request"
 // reasons and the reviewed AI-call reschedule (call-reschedule-apply.js), all logged as 'admin'. The series writer adds
@@ -251,20 +250,20 @@ function startOf(value) {
 // A move PLACES the visit when it changed the date or the start.
 const placesVisit = (r) => toDateStr(r.original_date) !== toDateStr(r.new_date) || startOf(r.original_window) !== startOf(r.new_window);
 
-// The newest placement rows (one move's rows share a created_at). When only an end-only edit is newest, read further back.
+// The newest placement rows (one move's rows share a created_at). When only an end-only edit is newest (2 of 1,163 rows on
+// 2026-11-22), the newest placement before it, chosen entirely in SQL: created_at has microsecond precision and a JS Date
+// keeps only milliseconds (Codex #6055 r5). The JS filter is the same rule again.
 async function newestPlacementRows(db, serviceId, newestRows, withIntent) {
   const placements = newestRows.filter(placesVisit);
   if (placements.length || !newestRows.length) return placements;
-  const history = await logSelect(db, db('reschedule_log')
+  const older = await logSelect(db, db('reschedule_log')
     .where('scheduled_service_id', serviceId)
     .whereNotNull('new_date')
-    .whereRaw(SLOT_CHANGED_SQL)
-    .orderBy('created_at', 'desc')
-    .limit(PLACEMENT_HISTORY_ROWS), withIntent);
-  const older = history.filter(placesVisit);
-  if (!older.length && history.length >= PLACEMENT_HISTORY_ROWS) throw new Error('no placement in the newest move history');
-  const at = older.length ? new Date(older[0].created_at).getTime() : null;
-  return older.filter((r) => new Date(r.created_at).getTime() === at);
+    .whereRaw(PLACEMENT_SQL)
+    .whereRaw(`created_at = (SELECT max(r2.created_at) FROM reschedule_log r2
+        WHERE r2.scheduled_service_id = reschedule_log.scheduled_service_id
+          AND r2.new_date IS NOT NULL AND ${placementSql('r2.')})`), withIntent);
+  return older.filter(placesVisit);
 }
 
 // The placement still owns the visit's slot: same date and same start. A row with no new window is a date-only move: the
