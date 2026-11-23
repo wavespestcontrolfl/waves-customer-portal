@@ -164,6 +164,17 @@ describe('an answer with a Waves link is not texted (the email goes)', () => {
     [`Here it is: ${short}/l/abc123`, true],
     // Nested in another URL and percent-encoded: still a portal link.
     [`https://example.com/?next=https%3A%2F%2F${portal}%2Fpay%2Fabc123`, true],
+    // On the next line, after a tab, or after an invisible character: the phone shows a tappable link.
+    [`Sign at\n${portal}/contract/abc123`, true],
+    [`Sign at\r\n${portal}/contract/abc123`, true],
+    [`Sign at\t${portal}/contract/abc123`, true],
+    [`Sign at\u200B${portal}/contract/abc123`, true],
+    // A soft hyphen or a line break inside the host, an encoded line break, a full-width host: a browser opens it.
+    [`${portal.slice(0, 3)}\u00AD${portal.slice(3)}/pay/abc123`, true],
+    [`${portal.slice(0, 3)}%0A${portal.slice(3)}/pay/abc123`, true],
+    [`${[...portal].map((c) => (c === '.' ? '\u3002' : String.fromCharCode(c.charCodeAt(0) + 0xFEE0))).join('')}/pay/abc123`, true],
+    // Still decoding after every pass: no scan can vouch for it.
+    [`x${'%25'.repeat(1)}${'25'.repeat(20)}`, true],
     ['Yes, Tuesday works. Your tech will call first.', false],
     ['Directions: https://www.google.com/maps/place/Bradenton', false],
   ])('%p carries a Waves link: %p', (body, carries) => {

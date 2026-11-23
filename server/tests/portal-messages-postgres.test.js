@@ -15,6 +15,8 @@ const SKIP = !process.env.DATABASE_URL;
 const maybeDescribe = SKIP ? describe.skip : describe;
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The marker connection (models/marker-db.js) is the test database here; the text's mark must go through it.
+jest.mock('../models/marker-db', () => jest.fn(() => require('../models/db')));
 jest.mock('../services/account-membership-email', () => ({
   sendPortalReply: jest.fn(async () => ({ ok: true, messageId: 'email-1' })),
   sendRequestUpdated: jest.fn(async () => ({ ok: true })),
@@ -983,7 +985,8 @@ maybeDescribe('portal messages (live Postgres)', () => {
       const { publicPortalUrl } = require('../utils/portal-url');
       const pat = await customer();
       const { escalationId } = await chat(pat.id, { alert: false });
-      const body = `Sign here: ${new URL(publicPortalUrl()).host}/contract/${randomUUID()}`;
+      // A bare link on its own line (the shared run scan drops the line break and can miss it).
+      const body = `Sign here:\n${new URL(publicPortalUrl()).host}/contract/${randomUUID()}`;
       const result = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body, actor });
       expect(answerTexts()).toEqual([]);
       expect(result.notice).toEqual({ bell: true, pushAccepted: 0, text: 'not_sent', email: 'sent' });
@@ -998,8 +1001,10 @@ maybeDescribe('portal messages (live Postgres)', () => {
       const look = async (input) => { seen.push((await storedNotice(input.metadata.portalMessageId)).text); };
       Object.assign(mockAnswerText, { beforeHandoff: look, afterStart: look });
       const sent = await PortalMessages.staffReply({ kind: 'chat', id: one.escalationId, body: 'Yes.', actor });
-      // Nothing marked before the boundary: a try that stops there leaves its notice to the email.
+      // Nothing marked before the boundary: a try that stops there leaves its notice to the email. The mark is written
+      // through the marker connection, not a second root-pool connection inside the held handoff.
       expect(seen).toEqual([undefined, 'sending']);
+      expect(require('../models/marker-db')).toHaveBeenCalled();
       expect(sent.notice).toEqual({ bell: true, pushAccepted: 0, text: 'sent', email: 'not_needed' });
       seen.length = 0;
       Object.assign(mockAnswerText, { beforeHandoff: null, refuseAfterStart: 'QUIET_HOURS_HOLD', afterUndo: look });

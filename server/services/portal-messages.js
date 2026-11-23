@@ -293,10 +293,11 @@ async function storedNotice(messageId) {
 }
 
 // Writes a try's outcome, only while that try still holds the claim (a try that was taken over writes nothing).
-function recordNotice(messageId, notice) {
-  return db('messages').where({ id: messageId })
+// `conn` is the marker connection for the write made inside the held text handoff (textStep).
+function recordNotice(messageId, notice, conn = db) {
+  return conn('messages').where({ id: messageId })
     .whereRaw("metadata->'notice'->>'claimedAt' = ?", [notice.claimedAt])
-    .update({ metadata: db.raw("coalesce(metadata, '{}'::jsonb) || jsonb_build_object('notice', ?::jsonb)", [JSON.stringify(notice)]), updated_at: new Date() });
+    .update({ metadata: conn.raw("coalesce(metadata, '{}'::jsonb) || jsonb_build_object('notice', ?::jsonb)", [JSON.stringify(notice)]), updated_at: new Date() });
 }
 
 // The claim conditions, shared by claimNotice and the sweep so the sweep only picks notices it can claim.
@@ -435,14 +436,34 @@ async function boundTextNumber(trx, customerId) {
   return sameDestination(row?.phone, destination) ? destination : null;
 }
 
-// True when the answer carries a link to an owned host (composer-customer-links.js nestedOwnedLinkRuns: the portal or
-// the short-link host, with or without a scheme, nested in another URL or percent-encoded; it over-reports on
-// purpose), or text no scan can vouch for (linkTextUnstable). Such an answer is not texted: before it texts a page
-// link, the SMS composer checks who owns it (bearerLinkSendCheck), and this text does not. The answer stays in the
-// portal, and the reply email goes, as with the gate off.
+// True when the answer may carry a Waves link: an owned host (composer-customer-links.js ownedPortalHosts: the portal
+// and the short-link host) anywhere in the text, read as a browser reads a typed link (full-width letters as ASCII,
+// the ideographic full stops as dots, invisible characters, tabs and line breaks dropped, percent-escapes decoded
+// until the text stops changing). There is no word-boundary rule, so a host right after a line break or a word is
+// still found; it over-reports on purpose (fail closed), and text still decoding after LINK_DECODE_PASSES counts as
+// a link. Such an answer is not texted: before the SMS composer texts a page link, it checks who owns the link
+// (bearerLinkSendCheck), and this text does not. The answer stays in the portal, and the reply email goes, as with
+// the gate off.
+const LINK_DECODE_PASSES = 12;
+const foldLinkText = (text) => text.normalize('NFKC').replace(/[\p{Default_Ignorable_Code_Point}\t\r\n]/gu, '')
+  .replace(/[。．｡]/g, '.').toLowerCase();
+const decodeEscapes = (text) => text.replace(/(?:%[0-9a-f]{2})+/g, (run) => {
+  try {
+    return decodeURIComponent(run);
+  } catch {
+    return run;
+  }
+});
 function answerCarriesLink(body) {
-  const { nestedOwnedLinkRuns, linkTextUnstable } = require('./composer-customer-links');
-  return nestedOwnedLinkRuns(body).length > 0 || linkTextUnstable(body);
+  const hosts = require('./composer-customer-links').ownedPortalHosts().map((host) => host.toLowerCase().replace(/:\d+$/, ''));
+  let view = foldLinkText(String(body || ''));
+  for (let pass = 0; pass < LINK_DECODE_PASSES; pass += 1) {
+    if (hosts.some((host) => view.includes(host))) return true;
+    const next = foldLinkText(decodeEscapes(view));
+    if (next === view) return false;
+    view = next;
+  }
+  return true;
 }
 
 // The answer's text goes to the number bound at the save, and only while the customer's row still holds it. The send
@@ -526,22 +547,24 @@ function textOutcome(outcome, classify, fallbackCode) {
 // nothing, so its notice still goes by email; a check that refuses after the move takes it back (onDispatchAbort,
 // onDispatchRejected). A later try never texts again: it reuses the stored outcome, and a text still 'sending' (a try
 // that stopped mid-request) counts as maybe gone. { lost: true } when the claim was lost (a try that was taken over
-// sends nothing: the mark refuses the request).
+// sends nothing: the mark refuses the request). The mark and its undo run inside the held handoff transaction, so
+// they write through the marker connection (models/marker-db.js), never a second root-pool connection.
 async function textStep(customerId, message, claim, sent, { byStaff, textLive }) {
   if (claim.text !== undefined) {
     return { text: claim.text === 'sending' ? 'uncertain' : claim.text, ...(claim.textCode ? { textCode: claim.textCode } : {}) };
   }
   if (!byStaff || !textLive || claim.email !== undefined || sent.pushAccepted > 0) return null;
+  const markerDb = require('../models/marker-db');
   const before = { ...sent, pending: true, claimedAt: claim.at, attempts: claim.attempts };
   let lost = false;
   const texted = await answerText(customerId, message, {
     start: async () => {
-      if (await recordNotice(message.id, { ...before, text: 'sending' })) return;
+      if (await recordNotice(message.id, { ...before, text: 'sending' }, markerDb())) return;
       lost = true;
       // A throw before the request is a refusal: twilio.js sends nothing (SMS_HANDOFF_CHECK_FAILED).
       throw new Error('the answer notice moved to another try');
     },
-    undo: () => recordNotice(message.id, before),
+    undo: () => recordNotice(message.id, before, markerDb()),
   });
   return lost ? { lost: true } : texted;
 }
