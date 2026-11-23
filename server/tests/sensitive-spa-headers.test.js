@@ -5,6 +5,7 @@ const {
   isPestReportPath,
   isServiceReportPath,
   isEstimatePath,
+  isMailHomePath,
   isSecureCardPath,
   isPriceChangeNoticePath,
   isContractPath,
@@ -216,6 +217,22 @@ describe('sensitive SPA document headers', () => {
     expect(isEstimatePath(`/estimate/${ESTIMATE_TOKEN}/other`)).toBe(false);
     expect(isEstimatePath('/estimate')).toBe(false);
     expect(isEstimatePath('/api/estimates/0123456789abcdef0123456789abcdef/data')).toBe(false);
+  });
+
+  test('marks new-home postcard token pages noindex, no-referrer, and no-store; matches only 32-hex tokens', () => {
+    const HOME_TOKEN = '0123456789abcdef0123456789abcdef';
+    const res = mockResponse();
+
+    applySensitiveSpaHeaders(`/h/${HOME_TOKEN}`, res);
+
+    expect(res.set).toHaveBeenCalledWith('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    expect(res.set).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
+    expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
+    expect(isMailHomePath(`/h/${HOME_TOKEN}/`)).toBe(true);
+    expect(isMailHomePath('/h/not-a-token')).toBe(false);
+    expect(isMailHomePath(`/h/${'a'.repeat(31)}`)).toBe(false);
+    expect(isMailHomePath(`/h/${'a'.repeat(33)}`)).toBe(false);
+    expect(isMailHomePath(`/api/public/home/${HOME_TOKEN}`)).toBe(false);
   });
 
   test('marks secure-appointment card token pages noindex, no-referrer, and no-store', () => {
