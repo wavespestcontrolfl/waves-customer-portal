@@ -22,7 +22,15 @@ jest.mock('../services/auto-dispatch/candidate-slots', () => ({ DAY_OPEN: 8 * 60
 jest.mock('../services/route-reorder', () => ({ _internals: { LIVE_HOLD_SQL: '(live-hold)' }, CUSTOMER_PREMISE_ALIASES: [{ customer_address_line1: 'customers.address_line1' }] }));
 jest.mock('../services/auto-dispatch/preferences', () => ({ getCustomerSchedulingPreferences: jest.fn() }));
 // The night told-lock's reads (its own suite: night-told-lock-day-replan.test.js): nobody was told anything, no person placed any visit.
-jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: jest.fn(async () => new Set()) }));
+jest.mock('../services/auto-dispatch/told-visits', () => ({
+  loadToldVisitIds: jest.fn(async () => new Set()),
+  loadPromiseLevels: jest.fn(async (_conn, ids) => new Map(ids.map((id) => [id, 'none']))),
+}));
+jest.mock('../services/time-promise', () => ({
+  ...jest.requireActual('../services/time-promise'),
+  // No stop has a set time here (day-only-promise-day-replan.test.js).
+  dayOnlyEligibility: jest.fn(async (_conn, ids) => new Map(ids.map((id) => [id, { eligible: true, level: 'none' }]))),
+}));
 jest.mock('../services/auto-dispatch/eligibility', () => ({
   ...jest.requireActual('../services/auto-dispatch/eligibility'),
   isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),

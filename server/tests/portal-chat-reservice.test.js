@@ -10,6 +10,11 @@ const mockPage = { TOKEN_RE: /^[a-f0-9]{64}$/, pageLaneState: jest.fn(), reservi
 jest.mock('../routes/reservice-public', () => ({ _internals: mockPage }));
 jest.mock('../services/portal-payment-history', () => ({ listPortalPayments: jest.fn() }));
 jest.mock('../services/portal-service-history', () => ({ listPortalServiceHistory: jest.fn() }));
+// The day-only read is its own suite (day-only-promise-d-assistant.test.js): here every visit shows its hour.
+jest.mock('../services/day-only-ai-context', () => ({
+  ...jest.requireActual('../services/day-only-ai-context'),
+  loadDayOnlyCheck: jest.fn(async () => () => false),
+}));
 const mockGates = { reserviceStreamline: true };
 jest.mock('../config/feature-gates', () => ({ isEnabled: (name) => mockGates[name] === true }));
 // The real classifier of the customer's words; only the switch is stubbed.
@@ -30,6 +35,7 @@ jest.mock('../services/reservice-scheduler', () => {
 const db = require('../models/db');
 const { _internals: reschedulePage } = require('../routes/reschedule-public');
 const { portalToolsFor, executeToolCall } = require('../services/ai-assistant/tools');
+const { DAY_ONLY_ARRIVAL_NOTE } = require('../services/day-only-ai-context');
 
 const ANTS = 'The ants are back in the kitchen';
 const WEEDS = 'Weeds are coming back all over the lawn';
@@ -157,7 +163,8 @@ test('a coordinated booked lookup rolls back but keeps the completed booked fact
 
   expect(turn.transaction.mock.calls.map(([stage]) => stage)).toEqual(['re-service offer', 'booked re-service move']);
   expect(rolledBack).toEqual(['booked re-service move']);
-  expect(result.already_booked).toEqual({ date: 'Oct 9, 2026', window: expect.stringMatching(/10/) });
+  // The move lookup failed, so nothing can judge the hour: the day only (the note stands in for the window).
+  expect(result.already_booked).toEqual({ date: 'Oct 9, 2026', window: DAY_ONLY_ARRIVAL_NOTE });
   expect(result.instruction).not.toMatch(/button/);
   expect(actions).toEqual([]);
   expect(turn.assertActive).not.toHaveBeenCalled();
@@ -447,7 +454,8 @@ describe('GATE_PORTAL_CHAT_RESERVICE_LAWN: the model judges a current lawn probl
 
     const { result } = await lawnOffer({ current_problem: true, customer_quote: QUOTE });
 
-    expect(result.already_booked).toEqual({ date: 'Oct 12, 2026', window: 'TBD' });
+    // No readable visit id to judge the hour by: the day only (the day-only note stands in for the window).
+    expect(result.already_booked).toEqual({ date: 'Oct 12, 2026', window: DAY_ONLY_ARRIVAL_NOTE });
     expect(result.instruction).toMatch(/free lawn care re-service is already on the schedule/);
   });
 

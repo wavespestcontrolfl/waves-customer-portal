@@ -727,18 +727,10 @@ function reminderFreezeHours(guardMode) {
 // the explicit lock24h option, so no other caller's default ever changes. A night
 // run (owner 2026-11-05, "D1 a") also freezes a visit the customer was told a time
 // for (`toldLock`, a known-slot promise).
-// GATE_DAY_ONLY_PROMISE (`dayOnly`, only with toldLock): the option also freezes a visit whose latest promise is a
-// day-only or unknown-window one (opts.anyPromise).
-function freezeReadArgs(guardMode, dayOnly = false) {
+// The option also freezes a visit whose latest promise is a day-only or unknown-window one (opts.anyPromise).
+function freezeReadArgs(guardMode) {
   const hours = reminderFreezeHours(guardMode);
-  return [hours, dayOnly === true ? { lock24h: true, toldLock: true, anyPromise: true } : { lock24h: true, toldLock: true }];
-}
-
-// The run's one read of GATE_DAY_ONLY_PROMISE (config.dayOnlyPromise): a day-only or unknown-window promise then
-// freezes a visit too (loadReminderFreeze opts.anyPromise). Only this config carries it; the rain pass and
-// route-reorder never build it.
-function dayOnlyOf(config) {
-  return !!config && config.dayOnlyPromise === true;
+  return [hours, { lock24h: true, toldLock: true, anyPromise: true }];
 }
 
 // How the skip text names the reminder that froze a visit: the 24-hour reminder, or a time the customer was told.
@@ -755,14 +747,14 @@ function frozenReminderLabel() {
 // freeze/guard-unknown every visit rather than move without the check.
 // Pulled out of runAutoDispatch to keep its complexity budget (see
 // buildPlacementAudit above). Returns { reminderFreeze, anchorMap, neighborMap, degraded }.
-async function loadGuardContext(guardMode, services, nowDate, dayOnly = false) {
+async function loadGuardContext(guardMode, services, nowDate) {
   if (guardMode === 'legacy') {
     return {
       reminderFreeze: null, anchorMap: null, neighborMap: null, degraded: false,
     };
   }
   const ids = services.map((s) => s.id);
-  const reminderFreeze = await routeTiers.loadReminderFreeze(db, ids, nowDate, ...freezeReadArgs(guardMode, dayOnly));
+  const reminderFreeze = await routeTiers.loadReminderFreeze(db, ids, nowDate, ...freezeReadArgs(guardMode));
   // ALL ids, not just change_count>0 — the durable move records (not the
   // best-effort stamp) decide whether a visit has spent drift budget.
   const anchorMap = await routeTiers.loadAnchorMap(db, ids);
@@ -910,9 +902,9 @@ async function resolveDayMoveWindow(guardMode, service, guardCtx, today, nowDate
 // runAutoDispatch's pass-2 loop for the same complexity-budget reason as
 // resolveDayMoveWindow. Returns { window, meta, skip }; skip.degraded flags
 // a read failure the caller must fold into the run's health status.
-async function recheckDayMoveWindow(guardMode, service, meta, nowDate, dayOnly = false) {
+async function recheckDayMoveWindow(guardMode, service, meta, nowDate) {
   if (guardMode === 'legacy') return { window: null, meta: null, skip: null };
-  const applyFreeze = await routeTiers.loadReminderFreeze(db, [service.id], nowDate, ...freezeReadArgs(guardMode, dayOnly));
+  const applyFreeze = await routeTiers.loadReminderFreeze(db, [service.id], nowDate, ...freezeReadArgs(guardMode));
   if (applyFreeze.failed) {
     return { window: null, meta: null, skip: { code: 'REMINDER_STATUS_UNKNOWN', description: 'Reminder-sent status unreadable at apply time — frozen (fail closed)', degraded: true } };
   }
@@ -1383,7 +1375,7 @@ async function recheckPlannedMove(pm, run) {
   }
   if (!dayMoveGuarded(run.guardMode, pm.service)) return null;
   const recheckNow = new Date();
-  const recheck = await recheckDayMoveWindow(run.guardMode, pm.service, pm.ctx.tierMeta, recheckNow, dayOnlyOf(run.config));
+  const recheck = await recheckDayMoveWindow(run.guardMode, pm.service, pm.ctx.tierMeta, recheckNow);
   if (recheck.skip) {
     if (recheck.skip.degraded) run.guardReadDegraded = true;
     return recheck.skip;
@@ -1751,7 +1743,7 @@ async function runAutoDispatch(opts = {}) {
     // (flex's) series neighbors, one query pair at most. FAIL CLOSED — a
     // failed read freezes/guard-unknowns every visit rather than moving
     // without the check.
-    run.guardCtx = await loadGuardContext(run.guardMode, services, nowDate, dayOnlyOf(config));
+    run.guardCtx = await loadGuardContext(run.guardMode, services, nowDate);
     run.guardReadDegraded = run.guardCtx.degraded;
     await loadRunMoveCounts(run, services);
     await loadRunReminderOff(run, services);
@@ -1815,4 +1807,4 @@ async function runAutoDispatch(opts = {}) {
   return { runId, status: runStatus, geocoded: run.geo.geocoded, geocode_attempts: run.geo.attempts, ...totals };
 }
 
-module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn, evaluatePlacement, noteArrivalShadow, describeGuardRule, standingConflict, dayOnlyOf, freezeReadArgs } };
+module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn, evaluatePlacement, noteArrivalShadow, describeGuardRule, standingConflict, freezeReadArgs } };

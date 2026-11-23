@@ -2598,7 +2598,7 @@ class SmartRebooker {
           : {})
         .update({
           ...updates,
-          // Day-only promise (B3): the intent of this move, written by this same UPDATE (gate off: nothing added).
+          // Day-only promise (B3): the intent of this move, written by this same UPDATE.
           ...moveIntentColumns(trx, options, { slotChanged: slotChangedBy(service, updates, newDateStr) }),
           track_token_expires_at: scheduledServiceTrackTokenExpiry(trx, newDate, windowEnd),
           // The move's own change time (same stamp the series path writes):

@@ -165,16 +165,13 @@ function wireRescheduleMocks(service) {
 
 const NOW_RAW = { label: 'trx.raw', sql: 'now()', bindings: undefined };
 const timePromise = require('../services/time-promise');
-const OLD_GATE = process.env.GATE_DAY_ONLY_PROMISE;
 
 beforeEach(() => {
   jest.clearAllMocks();
   db.raw = rawFactory('db.raw');
   db.transaction = undefined;
-  process.env.GATE_DAY_ONLY_PROMISE = 'true';
 });
 afterEach(() => {
-  if (OLD_GATE === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = OLD_GATE;
 });
 
 const move = (options, initiatedBy = 'admin') => SmartRebooker.reschedule(
@@ -245,11 +242,6 @@ describe('moveIntentColumns (the one helper every mover uses)', () => {
   const { moveIntentColumns, moveIntentFor } = timePromise;
   const conn = { raw: (sql) => ({ sql }) };
 
-  test('gate off: nothing, whatever the options say', () => {
-    delete process.env.GATE_DAY_ONLY_PROMISE;
-    expect(moveIntentColumns(conn, { customerAskedTime: true, sourceSurface: 'customer_web' })).toEqual({});
-  });
-
   test('an explicit boolean wins; a customer surface records true; anything else records nothing', () => {
     expect(moveIntentColumns(conn, { customerAskedTime: false })).toEqual({ customer_asked_time: false, customer_asked_time_at: { sql: 'now()' } });
     expect(moveIntentColumns(conn, { customerAskedTime: true, sourceSurface: 'dispatch_board' }).customer_asked_time).toBe(true);
@@ -312,14 +304,6 @@ describe('single move (rebooker.reschedule): the intent rides the move\'s own UP
     expect(payloadOf(updateQuery)).not.toHaveProperty('customer_asked_time');
   });
 
-  test('gate off: the UPDATE payload is exactly today\'s (no key, whatever the options say)', async () => {
-    delete process.env.GATE_DAY_ONLY_PROMISE;
-    const { updateQuery } = wireRescheduleMocks(liveService('confirmed'));
-    await move({ sourceSurface: 'customer_web', customerAskedTime: true });
-    const keys = Object.keys(payloadOf(updateQuery));
-    expect(keys).not.toContain('customer_asked_time');
-    expect(keys).not.toContain('customer_asked_time_at');
-  });
 });
 
 describe('series move (rebooker.rescheduleSeries): a customer series move records its intent on every swept row, an office one on its anchor only', () => {
@@ -364,10 +348,10 @@ describe('series move (rebooker.rescheduleSeries): a customer series move record
     const read = (rel) => require('fs').readFileSync(require('path').join(__dirname, rel), 'utf8');
     const dispatch = read('../routes/admin-dispatch.js');
     const series = dispatch.slice(dispatch.indexOf('SmartRebooker.rescheduleSeries(req.params.serviceId'), dispatch.indexOf('qualityDates,\n      });', dispatch.indexOf('SmartRebooker.rescheduleSeries(req.params.serviceId')));
-    expect(series).toMatch(/dayOnlyPromiseOn\(\) \? \{ customerAskedTime: req\.body\?\.customerAskedTime === true \} : \{\}/);
+    expect(series).toMatch(/customerAskedTime: req\.body\?\.customerAskedTime === true,/);
     const schedule = read('../routes/admin-schedule.js');
     const edit = schedule.slice(schedule.indexOf("sourceSurface: 'edit_modal',"), schedule.indexOf('carryVisit: false,', schedule.indexOf("sourceSurface: 'edit_modal',")));
-    expect(edit).toMatch(/dayOnlyPromiseOn\(\) && typeof req\.body\?\.customerAskedTime === 'boolean'/);
+    expect(edit).toMatch(/typeof req\.body\?\.customerAskedTime === 'boolean'/);
     expect(edit).toMatch(/\{ customerAskedTime: req\.body\.customerAskedTime \}/);
   });
 
@@ -379,13 +363,6 @@ describe('series move (rebooker.rescheduleSeries): a customer series move record
     expect(fn).toMatch(/\$\{techKey\}\$\{askedKey\}`;/);
   });
 
-  test('gate off: no key on a customer series move', async () => {
-    delete process.env.GATE_DAY_ONLY_PROMISE;
-    const { updates } = wireSeriesMocks('confirmed', SIBS());
-    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve',
-      { allowLive: true, sourceSurface: 'customer_web' });
-    for (const u of updates) expect(u.update.mock.calls[0][0]).not.toHaveProperty('customer_asked_time_at');
-  });
 });
 
 // ── A -> B -> C -> B with delayed effects ──
@@ -483,10 +460,10 @@ describe('the customer movers name a surface that records the intent', () => {
 
   test('public rescheduler (single and series), text reply / offer, and both call-reschedule moves', () => {
     expect(timePromise.CUSTOMER_MOVE_SURFACES).toEqual(['customer_web', 'sms_reply', 'call_reschedule', 'call_makeup']);
-    // The series call names its surface; the single call passes the explicit option (gate on only).
+    // The series call names its surface; the single call passes the explicit option.
     expect(read('../routes/reschedule-public.js')).toContain("sourceSurface: 'customer_web'");
     expect(read('../routes/reschedule-public.js')).toContain('...dayPromiseMoveIntent(),');
-    expect(read('../routes/reschedule-public.js')).toContain("? { customerAskedTime: true } : {}");
+    expect(read('../routes/reschedule-public.js')).toContain('return { customerAskedTime: true };');
     expect(read('../services/sms-scheduling-act.js')).toContain("const SOURCE_SURFACE = 'sms_reply';");
     expect(read('../services/reschedule-sms.js')).toContain("sourceSurface: 'sms_reply'");
     expect(read('../services/call-reschedule-apply.js').match(/sourceSurface: 'call_reschedule'/g).length).toBeGreaterThanOrEqual(2);
@@ -516,12 +493,12 @@ describe('every mover that writes the intent audits its move in the same transac
     expect(src).not.toMatch(/\bdb\('reschedule_log'\)\.insert/);
   });
 
-  test('Intelligence Bar: with the gate on the row is inserted in the batch transaction (savepoint), and the post-commit append skips an audited stop', () => {
+  test('Intelligence Bar: the row is inserted in the batch transaction (savepoint), and the post-commit append skips an audited stop', () => {
     const src = read('services/intelligence-bar/schedule-tools.js');
-    expect(src).toContain('if (auditInTrx) await auditMovedStopInTrx(trx, c, dateStr, reason);');
+    expect(src).toContain('await auditMovedStopInTrx(trx, c, dateStr, reason);');
     expect(src).toContain('await trx.transaction((sp) => insertMoveAudit(sp, c, dateStr, reason));');
     expect(src).toContain('if (c.auditedInTrx) continue;');
-    // The only other insert of the row is the post-commit one (gate off), through the db connection.
+    // The only other insert of the row is the post-commit one (a failed in-transaction insert), through the db connection.
     expect(src.match(/insertMoveAudit\(db, /g)).toHaveLength(1);
   });
 });

@@ -3220,12 +3220,10 @@ router.get('/:id/comms', requireAdmin, async (req, res, next) => {
 });
 
 // { reminder24hOn, reminder24hByProperty } for ONE customer (appointment-reminders.loadBookingReminder24hAnswers, the senders'
-// own rule, read-only): the customer row's answer, and while property texts are enforced each saved property's own. {} with the
-// gate off or on a failed read: the client reads a missing field as "the reminder will not go out", which is what the senders
+// own rule, read-only): the customer row's answer, and while property texts are enforced each saved property's own. {} on a failed read: the client reads a missing field as "the reminder will not go out", which is what the senders
 // do with unreadable preferences.
 async function reminder24hField(customerId) {
   try {
-    if (!require('../services/time-promise').dayOnlyPromiseOn()) return {};
     const answers = await require('../services/appointment-reminders').loadBookingReminder24hAnswers(db, customerId);
     return { reminder24hOn: answers.customer, reminder24hByProperty: answers.properties };
   } catch {
@@ -3406,7 +3404,7 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
       };
     }));
     // GATE_DAY_ONLY_PROMISE part E: will this customer's 24-hour reminder go out? The booking window's phone-script hint needs
-    // it (a day-only promise is made only when that text will go out). Gate off: the reply is exactly today's, nothing read.
+    // it (a day-only promise is made only when that text will go out).
     res.json({ estimates: out, ...(await reminder24hField(customer.id)) });
   } catch (err) { next(err); }
 });

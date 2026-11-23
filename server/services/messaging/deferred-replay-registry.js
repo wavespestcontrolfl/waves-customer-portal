@@ -1932,7 +1932,7 @@ function slotPinFor(meta) {
 // A queued DAY-ONLY body (GATE_DAY_ONLY_PROMISE, queueHeldNoticeContacts stores promise_level 'day' with it) is
 // revalidated at replay time through the same chokepoint a bounce recovery uses (appointment-reminders.js
 // revalidateDelayedDaySend): a promise newer than the original send (the 24-hour text delivered the window) supersedes it,
-// and a gate rolled back, a 24-hour reminder switched off or a visit inside the cutoff means the day-only body is no longer
+// and a 24-hour reminder switched off or a visit inside the cutoff means the day-only body is no longer
 // true to say. This replay holds only the FROZEN body of one contact, with no template variables to re-render window copy
 // from, so both cases SUPPRESS it (logged by the scheduler as stale_replay). That is safe: the 24-hour reminder still gives
 // the window to every customer who will get it, and a customer who switched it off chose that. A read failure holds the row

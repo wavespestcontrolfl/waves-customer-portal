@@ -1,13 +1,12 @@
 /**
- * GATE_DAY_ONLY_PROMISE on the nightly day re-plan (services/day-replan, owner 2026-11-05 "D2 a", 2026-11-22): with
- * this gate on, a stop the customer was told only the DAY for may change its hour inside that day: a first or
+ * Day-only promise on the nightly day re-plan (services/day-replan, owner 2026-11-05 "D2 a", 2026-11-22): a stop the
+ * customer was told only the DAY for may change its hour inside that day: a first or
  * one-time visit and a person-placed visit told only the day are movable. A customer-confirmed stop, a stop told an
  * hour (a known slot, or an unknown window) and every other existing reason stay fixed. A failed level read fails
- * CLOSED. Gate off: the known-slot told lock alone. The one change of 2026-11-22: only with the gate on does the app
- * record whether the customer asked for the time (`askRecorded`), and then set_time (time-promise.dayOnlyEligibility,
- * mocked here; set_time_unread when the answer cannot be read) fixes a stop FIRST, whatever it was told, so a
- * day-only notice no longer frees a time the customer asked for. Gate off, or a context without `askRecorded`:
- * `setTime` is never read or used. Same harness as night-told-lock-day-replan
+ * CLOSED. The app records whether the customer asked for the time (`askRecorded`), and then set_time
+ * (time-promise.dayOnlyEligibility, mocked here; set_time_unread when the answer cannot be read) fixes a stop FIRST,
+ * whatever it was told, so a day-only notice no longer frees a time the customer asked for. A hand-built context without
+ * `askRecorded`: `setTime` is never read or used. Same harness as night-told-lock-day-replan
  * and day-replan-apply; the promise reader (told-visits) is mocked. Synthetic ids only.
  */
 jest.mock('../models/db', () => jest.fn());
@@ -44,7 +43,6 @@ const toMin = (v) => { const [h, m] = String(v).slice(0, 5).split(':').map(Numbe
 const savedEnv = { ...process.env };
 beforeEach(() => {
   jest.clearAllMocks();
-  delete process.env.GATE_DAY_ONLY_PROMISE;
   isPersonPlacedVisit.mockImplementation(async () => ({ placed: false }));
   loadToldVisitIds.mockReset();
   loadToldVisitIds.mockResolvedValue(new Set());
@@ -143,7 +141,7 @@ describe('fixedReason with the day-told context', () => {
     expect(_internals.fixedReason(stop(), base({ askRecorded: true, setTime: undefined, dayTold: day }))).toBe('set_time_unread');
   });
 
-  test('without askRecorded (gate off, or a hand-built context) a setTime fact is ignored', () => {
+  test('without askRecorded (a hand-built context) a setTime fact is ignored', () => {
     const own = new Map([['s1', 'set_time']]);
     expect(_internals.fixedReason(stop(), base({ setTime: own }))).toBeNull();
     expect(_internals.fixedReason(stop({ is_recurring: false }), base({ setTime: own }))).toBe('first_or_one_time');
@@ -155,7 +153,7 @@ describe('fixedReason with the day-told context', () => {
     expect(_internals.fixedReason(stop(), base({ personPlaced: new Set(['s1']) }))).toBe('person_placed');
   });
 
-  test('no dayTold in the context (gate off): PR 1 behavior', () => {
+  test('no dayTold in the context (a hand-built one): PR 1 behavior', () => {
     const { dayTold, ...pr1 } = base({ personPlaced: new Set(['s1']) });
     expect(dayTold).toBeDefined();
     expect(_internals.fixedReason(stop(), pr1)).toBe('person_placed');
@@ -221,8 +219,7 @@ describe('loadDayContext', () => {
     return _internals.loadDayContext(conn, TOMORROW, NOW);
   };
 
-  test('this gate on: ONE bulk level read; hour -> told, day -> dayTold', async () => {
-    process.env.GATE_DAY_ONLY_PROMISE = 'true';
+  test('ONE bulk level read; hour -> told, day -> dayTold', async () => {
     loadPromiseLevels.mockImplementation(levelsOf({ a: 'day', b: 'hour' }));
     const ctx = await load();
     expect(loadPromiseLevels).toHaveBeenCalledTimes(1);
@@ -230,7 +227,7 @@ describe('loadDayContext', () => {
     expect(loadToldVisitIds).not.toHaveBeenCalled();
     expect([...ctx.told]).toEqual(['b']);
     expect([...ctx.dayTold]).toEqual(['a']);
-    // The ask is recorded only with the gate on: setTime from one bulk read, and the person-placed read as before.
+    // The ask is recorded: setTime from one bulk read, and the person-placed read as before.
     expect(ctx.askRecorded).toBe(true);
     expect(ctx.setTime).toEqual(new Map());
     expect(dayOnlyEligibility).toHaveBeenCalledTimes(1);
@@ -241,8 +238,7 @@ describe('loadDayContext', () => {
     expect(_internals.fixedReason({ ...dayRows()[1], customer_confirmed: false }, ctx)).toBe('time_told');
   });
 
-  test('this gate on: a failed level read keeps the whole day fixed (every row counts as hour)', async () => {
-    process.env.GATE_DAY_ONLY_PROMISE = 'true';
+  test('a failed level read keeps the whole day fixed (every row counts as hour)', async () => {
     loadPromiseLevels.mockRejectedValue(new Error('level read down'));
     const ctx = await load();
     expect([...ctx.told].sort()).toEqual(['a', 'b', 'c']);
@@ -252,21 +248,7 @@ describe('loadDayContext', () => {
     expect(logger.warn).toHaveBeenCalled();
   });
 
-  test('this gate off: the known-slot told set only (no dayTold, no level read)', async () => {
-    loadToldVisitIds.mockResolvedValue(new Set(['b']));
-    const ctx = await load();
-    expect(loadPromiseLevels).not.toHaveBeenCalled();
-    expect(loadToldVisitIds).toHaveBeenCalledTimes(1);
-    expect([...ctx.told]).toEqual(['b']);
-    expect(ctx).not.toHaveProperty('dayTold');
-    expect(ctx).not.toHaveProperty('askRecorded');
-    expect(ctx).not.toHaveProperty('setTime');
-    expect(dayOnlyEligibility).not.toHaveBeenCalled();
-    expect(ctx.personPlaced).toBeInstanceOf(Set);
-  });
-
-  test('this gate on: a set-time answer fixes that stop first, also one told only the day; a failed read keeps the whole day fixed', async () => {
-    process.env.GATE_DAY_ONLY_PROMISE = 'true';
+  test('a set-time answer fixes that stop first, also one told only the day; a failed read keeps the whole day fixed', async () => {
     loadPromiseLevels.mockImplementation(levelsOf({ a: 'day', b: 'day', c: 'day' }));
     dayOnlyEligibility.mockImplementation(async (_conn, ids) => new Map(ids.map((id) => [id, { eligible: id !== 'b', level: 'none' }])));
     const ctx = await load();
@@ -307,29 +289,26 @@ describe('recheckVisit inside the move transaction (apply mode)', () => {
     const run = () => applyAcceptedDay({ conn, env, dateStr: TOMORROW, techId: TECH, plan, deps, replan: async () => fresh });
     return { db, run, rowWrites: () => db.updates.filter((u) => u.table === 'scheduled_services') };
   }
-  const deps = ({ dayOnly = true, levels = {}, placed = false, setTime = [] } = {}) => ({
-    dayOnlyOn: () => dayOnly,
+  const deps = ({ levels = {}, placed = false, setTime = [] } = {}) => ({
     isPersonPlacedVisit: jest.fn(async () => ({ placed })),
     loadSetTime: jest.fn(async (_conn, rows) => new Map(rows.map((r) => r.id).filter((id) => setTime.includes(id)).map((id) => [id, 'set_time']))),
-    loadToldIds: jest.fn(async () => new Set()),
     loadPromiseLevels: jest.fn(levelsOf(levels)),
   });
 
-  test('this gate on: a one-time visit told only the day is written (no first_or_one_time)', async () => {
+  test('a one-time visit told only the day is written (no first_or_one_time)', async () => {
     const over = deps({ levels: { a: 'day', b: 'day' } });
     const w = world({ rowExtra: oneTime, over });
     expect(await w.run()).toEqual({ status: 'applied', reason: 'applied', moved: 2 });
     expect(over.loadPromiseLevels).toHaveBeenCalled();
-    expect(over.loadToldIds).not.toHaveBeenCalled();
   });
 
-  test('this gate on: a person-placed visit told only the day is written', async () => {
+  test('a person-placed visit told only the day is written', async () => {
     const over = deps({ levels: { a: 'day', b: 'day' }, placed: true });
     const w = world({ rowExtra: recurring, over });
     expect(await w.run()).toEqual({ status: 'applied', reason: 'applied', moved: 2 });
   });
 
-  test('this gate on: a visit whose time became a set time meanwhile stops the write (visit_not_movable:set_time), also one told only the day', async () => {
+  test('a visit whose time became a set time meanwhile stops the write (visit_not_movable:set_time), also one told only the day', async () => {
     const over = deps({ levels: { a: 'day', b: 'day' }, setTime: ['b'] });
     const w = world({ rowExtra: recurring, over });
     expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:set_time', moved: 0 });
@@ -338,7 +317,7 @@ describe('recheckVisit inside the move transaction (apply mode)', () => {
     expect(over.loadSetTime.mock.calls[0][1]).toEqual([{ id: expect.any(String) }]);
   });
 
-  test('this gate on: the real set-time read that fails stops the write as set_time_unread', async () => {
+  test('the real set-time read that fails stops the write as set_time_unread', async () => {
     dayOnlyEligibility.mockRejectedValue(new Error('verdict read down'));
     const over = deps({ levels: { a: 'day', b: 'day' } });
     over.loadSetTime = _internals.loadSetTime;
@@ -347,7 +326,7 @@ describe('recheckVisit inside the move transaction (apply mode)', () => {
     expect(w.rowWrites()).toEqual([]);
   });
 
-  test('this gate on: a set-time read that throws stops the write (fail closed)', async () => {
+  test('a set-time read that throws stops the write (fail closed)', async () => {
     const over = deps({ levels: { a: 'day', b: 'day' } });
     over.loadSetTime = jest.fn(async () => { throw new Error('verdict read down'); });
     const w = world({ rowExtra: recurring, over });
@@ -356,7 +335,7 @@ describe('recheckVisit inside the move transaction (apply mode)', () => {
   });
 
   // Owner 2026-11-22: a confirmation no longer stops the write; the result is the unconfirmed one.
-  test('this gate on: a confirmed stop told only the day is written like an unconfirmed one', async () => {
+  test('a confirmed stop told only the day is written like an unconfirmed one', async () => {
     const confirmed = world({ rowExtra: { ...recurring, b: { ...recurring.b, customer_confirmed: true } }, over: deps({ levels: { a: 'day', b: 'day' } }) });
     const plain = world({ rowExtra: recurring, over: deps({ levels: { a: 'day', b: 'day' } }) });
     const result = await confirmed.run();
@@ -366,14 +345,14 @@ describe('recheckVisit inside the move transaction (apply mode)', () => {
     expect(sansClock(confirmed.rowWrites())).toEqual(sansClock(plain.rowWrites()));
   });
 
-  test('this gate on: a visit told an hour meanwhile stops the write (time_told)', async () => {
+  test('a visit told an hour meanwhile stops the write (time_told)', async () => {
     const over = deps({ levels: { a: 'day', b: 'hour' } });
     const w = world({ rowExtra: recurring, over });
     expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:time_told', moved: 0 });
     expect(w.rowWrites()).toEqual([]);
   });
 
-  test('this gate on: a level read that throws fails closed (time_told), nothing written', async () => {
+  test('a level read that throws fails closed (time_told), nothing written', async () => {
     const over = deps();
     over.loadPromiseLevels = jest.fn(async () => { throw new Error('level read down'); });
     const w = world({ rowExtra: recurring, over });
@@ -381,28 +360,16 @@ describe('recheckVisit inside the move transaction (apply mode)', () => {
     expect(w.rowWrites()).toEqual([]);
   });
 
-  test('this gate on: a one-time visit with no promise at all keeps today\'s rule (first_or_one_time)', async () => {
+  test('a one-time visit with no promise at all keeps today\'s rule (first_or_one_time)', async () => {
     const over = deps({ levels: {} });
     const w = world({ rowExtra: oneTime, over });
     expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:first_or_one_time', moved: 0 });
   });
 
-  test('this gate off: the known-slot read and no level read', async () => {
-    const over = deps({ dayOnly: false, levels: { a: 'day', b: 'day' } });
-    const w = world({ rowExtra: oneTime, over });
-    expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:first_or_one_time', moved: 0 });
-    expect(over.loadPromiseLevels).not.toHaveBeenCalled();
-    expect(over.loadSetTime).not.toHaveBeenCalled();
-    expect(over.loadToldIds).toHaveBeenCalled();
-  });
-
-  test('applyDeps carries dayOnlyOn, loadPromiseLevels and loadSetTime', () => {
+  test('applyDeps carries loadPromiseLevels and loadSetTime', () => {
     const real = _internals.applyDeps();
     expect(typeof real.loadSetTime).toBe('function');
-    expect(typeof real.dayOnlyOn).toBe('function');
     expect(typeof real.loadPromiseLevels).toBe('function');
-    expect(real.dayOnlyOn()).toBe(false);
-    process.env.GATE_DAY_ONLY_PROMISE = 'true';
-    expect(real.dayOnlyOn()).toBe(true);
+    expect(real).not.toHaveProperty('dayOnlyOn');
   });
 });

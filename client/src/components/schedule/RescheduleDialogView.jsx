@@ -20,14 +20,14 @@ import SlotConflictNotice from "./SlotConflictNotice";
 import { seriesMoveSummary } from "./seriesMove";
 import { ASKED_TIME_LABEL, askedTimeHint, toldBadgeText } from "./dayOnlyPromise";
 
-// GATE_DAY_ONLY_PROMISE: what the customer was told (feed field `told`), shown beside the visit's name.
+// What the customer was told (feed field `told`), shown beside the visit's name.
 function ToldBadge({ service }) {
   const text = toldBadgeText(service.told, service.scheduledDate);
   if (!text) return null;
   return <Badge className="ml-2 align-middle" data-testid="told-badge">{text}</Badge>;
 }
 
-// GATE_DAY_ONLY_PROMISE: the "Customer asked for this time" box. The phone-script line is NOT here: each suggested option and
+// The "Customer asked for this time" box. The phone-script line is NOT here: each suggested option and
 // the custom picker judge their own slot (OptionHint), because "Select" moves the visit at once and a single window-level line
 // could contradict the option staff really pick.
 function AskedTimeField({ checked, onChange, disabled }) {
@@ -44,12 +44,10 @@ function AskedTimeField({ checked, onChange, disabled }) {
   );
 }
 
-// GATE_DAY_ONLY_PROMISE: the phone-script line for ONE slot, from the same rule as the Edit window (askedTimeHint: box off, a
+// The phone-script line for ONE slot, from the same rule as the Edit window (askedTimeHint: box off, a
 // different date than the visit's own, more than 24.25 h out, 24-hour reminder on; else "Tell the customer this time.").
 // `option` is a suggestion ({ date, suggestedWindow: { start } }); without it `date` and `start` are the custom picker's slot.
-// Gate off (`enabled` false): nothing.
-function OptionHint({ enabled, checked, service, option, date, start, testId = "option-hint" }) {
-  if (!enabled) return null;
+function OptionHint({ checked, service, option, date, start, testId = "option-hint" }) {
   const slot = {
     date: option ? option.date : date,
     start: option ? option.suggestedWindow?.start : start,
@@ -67,8 +65,7 @@ export default function RescheduleDialogView({
   setNotes,
   notificationType,
   setNotificationType,
-  // GATE_DAY_ONLY_PROMISE: the "Customer asked for this time" box (off by default: no box).
-  dayOnlyPromiseOn,
+  // The "Customer asked for this time" box.
   customerAskedTime,
   setCustomerAskedTime,
   sending,
@@ -102,7 +99,7 @@ export default function RescheduleDialogView({
         <DialogBody className="space-y-4">
           <p className="text-ui-body text-ink-secondary">
             {service.customerName} — {service.serviceType}
-            {dayOnlyPromiseOn && <ToldBadge service={service} />}
+            <ToldBadge service={service} />
           </p>
           <Field label="Reason">
             <Select value={reason} onChange={(event) => setReason(event.target.value)}>
@@ -118,7 +115,7 @@ export default function RescheduleDialogView({
               <option value="sms">Text message</option>
             </Select>
           </Field>
-          {dayOnlyPromiseOn && <AskedTimeField checked={customerAskedTime} onChange={setCustomerAskedTime} disabled={sending}  />}
+          <AskedTimeField checked={customerAskedTime} onChange={setCustomerAskedTime} disabled={sending} />
           {seriesConfirm && (
             <Card data-testid="series-move-confirm"><CardBody>
               <h3 className="text-ui-body font-medium mb-2">Move to {seriesConfirmDate || seriesConfirm.body.newDate}?</h3>
@@ -166,7 +163,7 @@ export default function RescheduleDialogView({
                         : ` · ${option.currentLoad} jobs · ${option.sameAreaServices} same area`}
                       {option.dayAlreadyLate ? " · already late" : ""}
                     </div>
-                    <OptionHint enabled={dayOnlyPromiseOn} checked={customerAskedTime} service={service} option={option} />
+                    <OptionHint checked={customerAskedTime} service={service} option={option} />
                   </div>
                   <Button onClick={() => handleReschedule(option)} disabled={sending}>Select</Button>
                 </CardBody></Card>
@@ -192,7 +189,7 @@ export default function RescheduleDialogView({
                   </Select>
                 </Field>
                 <div className="sm:col-span-2">
-                  <OptionHint enabled={dayOnlyPromiseOn} checked={customerAskedTime} service={service} date={manualDate} start={manualTime} testId="asked-time-hint" />
+                  <OptionHint checked={customerAskedTime} service={service} date={manualDate} start={manualTime} testId="asked-time-hint" />
                 </div>
                 <Button className="sm:col-span-2" onClick={handleManualReschedule} disabled={sending || !manualDate}>Reschedule</Button>
               </div>
