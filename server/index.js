@@ -885,6 +885,8 @@ app.use('/rv', require('./routes/review-geo-link'));
 app.use('/go', require('./routes/outbound-redirect'));
 // Digital business card — public token-scoped data + Save-contact vCard.
 app.use('/api/card', require('./routes/card-public'));
+// One new home's page (QR code on a postcard): the address and its stored price by 32-hex token. Dark behind GATE_MAIL_HOME_PAGE.
+app.use('/api/public/home', require('./routes/mail-home-public'));
 // Universal-link association files (apple-app-site-association / assetlinks.json).
 // Dark behind GATE_UNIVERSAL_LINKS — both files 404 until flipped.
 app.use('/.well-known', require('./routes/well-known'));

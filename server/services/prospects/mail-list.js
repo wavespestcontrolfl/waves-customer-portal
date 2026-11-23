@@ -126,4 +126,4 @@ async function listMailProspects({ view = VIEWS[0] } = {}) {
   };
 }
 
-module.exports = { VIEWS, listMailProspects };
+module.exports = { VIEWS, listMailProspects, toPrice };

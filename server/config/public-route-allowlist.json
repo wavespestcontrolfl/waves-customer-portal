@@ -215,6 +215,15 @@
       ]
     },
     {
+      "router": "server/routes/mail-home-public.js",
+      "mount": "/api/public/home",
+      "reason": "One new home's page (QR code on a later postcard, mailer step 2c) by unguessable 32-hex token, dark behind GATE_MAIL_HOME_PAGE (generic 404 while off, same as an unknown token). Read only apart from one atomic view-counter update on the home's own row; returns the address and the stored plan price only, never names, parcel, permit or deed fields; the USE entry is the router's per-IP limiter whose 429 keeps the private no-store headers",
+      "routes": [
+        "USE /api/public/home (express-rate-limit({ handler#f9b42f85 }))",
+        "GET /api/public/home/:token"
+      ]
+    },
+    {
       "router": "server/routes/well-known.js",
       "mount": "/.well-known",
       "reason": "Apple app-site-association + Android assetlinks — the platforms fetch these anonymously by contract; security.txt (RFC 9116) is static public disclosure-contact text",
