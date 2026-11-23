@@ -2,7 +2,7 @@ const db = require('../../models/db');
 const logger = require('../../services/logger');
 const { etDateString, addETDays, parseETDateTime, etWallClockOccurrences } = require('../../utils/datetime-et');
 const { toE164, phoneIdentityKey } = require('../../utils/phone');
-const { customerPhoneLookupKey, KNOWN_CALLER_PHONE_COLS } = require('../../utils/known-caller-phone');
+const { findOnlyKnownCallerCustomer } = require('../../utils/known-caller-phone');
 const TWILIO_NUMBERS = require('../../config/twilio-numbers');
 const { errorText } = require('./google-ads-config');
 const GoogleLsa = require('./google-lsa');
@@ -280,19 +280,8 @@ async function leadIdForCall(call) {
 // for two or more (never guess). Same columns as the call pipeline's identity
 // match (utils/known-caller-phone).
 async function findOnlyCustomer(phone) {
-  const key = customerPhoneLookupKey(phone);
-  if (!key) return null;
-  const keys = key.length === 10 ? [key, `1${key}`] : [key];
-  const placeholder = keys.map(() => '?').join(', ');
-  const frag = KNOWN_CALLER_PHONE_COLS
-    .map((col) => `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') IN (${placeholder})`)
-    .join(' OR ');
-  const rows = await db('customers')
-    .whereNull('deleted_at')
-    .whereRaw(`(${frag})`, KNOWN_CALLER_PHONE_COLS.flatMap(() => keys))
-    .select('id')
-    .limit(2);
-  return rows.length === 1 ? rows[0].id : null;
+  const row = await findOnlyKnownCallerCustomer(db, phone, ['id']);
+  return row ? row.id : null;
 }
 
 // What to write for one lead, or null for "leave it as it is". A phone-call
@@ -322,14 +311,23 @@ const AMBIGUOUS = { match_basis: 'ambiguous' };
 
 // Pure. One portal call belongs to ONE Google lead: when two open leads chose
 // the same call in a run, neither gets it (both become ambiguous, no ids).
+// A lead still inside its window (pending) is counted as a claimant but never
+// written: a closed lead that shares a call with a pending one waits too
+// (pending), so it cannot take the call before the other lead's window ends.
 function resolveSharedCalls(plans) {
   const taken = new Map();
-  for (const { update } of plans) {
-    if (update?.call_log_id) taken.set(update.call_log_id, (taken.get(update.call_log_id) || 0) + 1);
+  const pendingCalls = new Set();
+  for (const { update, pending } of plans) {
+    if (!update?.call_log_id) continue;
+    taken.set(update.call_log_id, (taken.get(update.call_log_id) || 0) + 1);
+    if (pending) pendingCalls.add(update.call_log_id);
   }
-  return plans.map((plan) => (plan.update?.call_log_id && taken.get(plan.update.call_log_id) > 1
-    ? { ...plan, update: { ...AMBIGUOUS } }
-    : plan));
+  return plans.map((plan) => {
+    const callId = plan.update?.call_log_id;
+    if (plan.pending || (callId && pendingCalls.has(callId))) return { ...plan, pending: true };
+    if (callId && taken.get(callId) > 1) return { ...plan, update: { ...AMBIGUOUS } };
+    return plan;
+  });
 }
 
 // True when another lsa_leads row already holds this call.
@@ -363,13 +361,18 @@ async function matchOpenLeads(now = new Date()) {
   const counts = { matched: 0, ambiguous: 0, unmatched: 0, pending: 0 };
   const plans = [];
   for (const lead of open) {
-    // A phone-call lead waits until its window has closed: no write, still open.
-    if (lead.lead_type === 'calls' && !windowClosed(lead, now)) { counts.pending += 1; continue; }
+    // A phone-call lead still inside its window is never written, but its
+    // candidate call still counts against other leads (resolveSharedCalls).
+    const pending = lead.lead_type === 'calls' && !windowClosed(lead, now);
     const update = await decideMatch(lead);
-    if (update) plans.push({ lead, update });
+    if (update) plans.push({ lead, update, pending });
+    else if (pending) counts.pending += 1;
     else counts.unmatched += 1;
   }
-  for (const plan of resolveSharedCalls(plans)) await applyPlan(plan, counts);
+  for (const plan of resolveSharedCalls(plans)) {
+    if (plan.pending) counts.pending += 1;
+    else await applyPlan(plan, counts);
+  }
   return counts;
 }
 

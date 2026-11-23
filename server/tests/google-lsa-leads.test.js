@@ -484,13 +484,22 @@ describe('a match is final only after its window closes', () => {
     expect(windowClosed({}, new Date())).toBe(true); // no time, no window
   });
 
-  test('a lead inside its window is left alone: no read of calls, no write, counted as waiting', async () => {
+  test('a lead inside its window is left alone: no write, counted as waiting', async () => {
     mockRows.lsa_leads = [lead];
     mockRows.call_log = [{ ...CALL, id: 'c1' }];
+    mockRows.leads = [];
     const counts = await matchOpenLeads(new Date('2026-11-20T19:10:00Z'));
     expect(counts).toEqual({ matched: 0, ambiguous: 0, unmatched: 0, pending: 1 });
-    expect(mockDb).not.toHaveBeenCalledWith('call_log');
     expect(writesTo('lsa_leads', 'update')).toHaveLength(0);
+  });
+
+  test('resolveSharedCalls: a closed lead sharing a call with a pending lead waits; two closed leads go ambiguous', () => {
+    const p = (id, call, pending = false) => ({ lead: { id }, update: { call_log_id: call, match_basis: 'phone_time' }, pending });
+    const out = resolveSharedCalls([p('closed', 'c1'), p('open', 'c1', true), p('x', 'c2'), p('y', 'c2'), p('solo', 'c3')]);
+    expect(out.map((o) => [o.lead.id, o.pending === true, o.update.match_basis])).toEqual([
+      ['closed', true, 'phone_time'], ['open', true, 'phone_time'],
+      ['x', false, 'ambiguous'], ['y', false, 'ambiguous'], ['solo', false, 'phone_time'],
+    ]);
   });
 
   test('once the window has closed the lead is matched', async () => {
