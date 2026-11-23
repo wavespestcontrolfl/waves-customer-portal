@@ -15,11 +15,14 @@ jest.mock('../models/db', () => {
     q.where = jest.fn((cond) => { q.wheres.push(cond); return q; });
     q.whereIn = jest.fn((column, list) => { q.inLists.push([column, list]); return q; });
     q.first = jest.fn(async (...columns) => { mockCalls.push({ op: 'first', q, columns }); return mockRow; });
-    q.update = jest.fn(async (set) => {
+    q.update = jest.fn((set) => {
       mockCalls.push({ op: 'update', q, set });
-      if (mockUpdateHang) await new Promise(() => {}); // a row lock that never lets go
-      if (mockUpdateError) throw mockUpdateError;
-      return 1;
+      const run = async () => {
+        if (mockUpdateHang) await new Promise(() => {}); // a row lock that never lets go
+        if (mockUpdateError) throw mockUpdateError;
+        return 1;
+      };
+      return { timeout: jest.fn((ms, opts) => { q.timeoutArgs = [ms, opts]; return run(); }) };
     });
     return q;
   });
@@ -101,6 +104,7 @@ describe('getHomePage', () => {
     const updates = mockCalls.filter((c) => c.op === 'update');
     expect(updates).toHaveLength(1);
     expect(updates[0].q.wheres).toEqual([{ id: 'row-1' }]);
+    expect(updates[0].q.timeoutArgs).toEqual([2000, { cancel: true }]);
     expect(updates[0].set).toEqual({
       page_views: { sql: 'page_views + 1' },
       page_first_viewed_at: { sql: 'coalesce(page_first_viewed_at, now())' },

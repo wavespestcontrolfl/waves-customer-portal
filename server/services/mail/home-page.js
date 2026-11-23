@@ -21,6 +21,8 @@ const LIST_KEY = 'new_home'; // services/mail/new-home-list.js LIST_KEY
 const LIVE_STATUSES = ['eligible', 'held_back'];
 const TOKEN_RE = /^[0-9a-f]{32}$/;
 const PLAN = 'pest_quarterly';
+// A view write that waits longer (a row lock) is canceled, so it never holds a pool connection for long.
+const VIEW_WRITE_TIMEOUT_MS = 2000;
 
 function priceOf(row) {
   if (row.status !== 'eligible' || row.price_status !== 'priced') return null;
@@ -37,7 +39,7 @@ async function countView(id) {
       page_views: db.raw('page_views + 1'),
       page_first_viewed_at: db.raw('coalesce(page_first_viewed_at, now())'),
       page_last_viewed_at: db.raw('now()'),
-    });
+    }).timeout(VIEW_WRITE_TIMEOUT_MS, { cancel: true });
   } catch (err) {
     try {
       const code = err && (typeof err.code === 'string' || typeof err.code === 'number') ? String(err.code).slice(0, 32) : 'unknown';
