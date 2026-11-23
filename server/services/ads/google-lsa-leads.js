@@ -3,6 +3,7 @@ const logger = require('../../services/logger');
 const { etDateString, addETDays, parseETDateTime, etWallClockOccurrences } = require('../../utils/datetime-et');
 const { toE164, phoneIdentityKey } = require('../../utils/phone');
 const { findOnlyKnownCallerCustomer } = require('../../utils/known-caller-phone');
+const { whereNotSandboxCall } = require('../voice-agent/relay-protocol');
 const TWILIO_NUMBERS = require('../../config/twilio-numbers');
 const { errorText } = require('./google-ads-config');
 const GoogleLsa = require('./google-lsa');
@@ -246,8 +247,9 @@ async function findCandidateCalls(lead) {
   const key = last10(lead.consumer_phone);
   const window = matchWindow(lead);
   if (!key || !window) return [];
-  const rows = await db('call_log')
-    .where({ direction: 'inbound' })
+  // A voice-agent sandbox or tech-voice call is never a customer's call.
+  const rows = await whereNotSandboxCall(db('call_log')
+    .where({ direction: 'inbound' }))
     .whereRaw("right(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [key])
     .whereRaw("right(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10(LSA_PROFILE_PHONE)])
     .where('created_at', '>=', window.start)

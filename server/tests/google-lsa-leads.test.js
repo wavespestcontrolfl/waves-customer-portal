@@ -229,7 +229,9 @@ describe('matching', () => {
     mockRows.call_log = [];
     await decideMatch(phoneLead);
     expect(writesTo('call_log', 'where')[0].args[0]).toEqual({ direction: 'inbound' });
-    expect(writesTo('call_log', 'whereRaw')[0].args[1]).toEqual(['9415550142']);
+    const raws = writesTo('call_log', 'whereRaw').map((w) => w.args[1]);
+    expect(raws.slice(0, 2)).toEqual([['source', 'voice_relay_sandbox'], ['source', 'tech_voice']]); // sandbox calls excluded
+    expect(raws[2]).toEqual(['9415550142']);
     const bounds = writesTo('call_log', 'where').slice(1).map((w) => w.args);
     expect(bounds[0][2].toISOString()).toBe('2026-11-20T18:54:30.000Z');
     expect(bounds[1][2].toISOString()).toBe('2026-11-20T19:34:30.000Z');
