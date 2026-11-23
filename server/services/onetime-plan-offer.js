@@ -156,6 +156,9 @@ function defaultDeps() {
     buildEstimateMembershipContext: (...args) => require('./estimate-membership-context').buildEstimateMembershipContext(...args),
     resolveRecurringCardPolicyForEstimate: (...args) => require('./recurring-card-on-file').resolveRecurringCardPolicyForEstimate(...args),
     payAfterFirstVisitCardRail: (...args) => require('./recurring-card-on-file').payAfterFirstVisitCardRail(...args),
+    // Auto Pay state, by the card lane's own readers (recurring-card-on-file.js, autopay-eligibility.js).
+    isAutopayPaused: require('./autopay-eligibility').isPaused,
+    explicitAutopayDisable: require('./recurring-card-on-file').explicitAutopayDisable,
     unsubscribeUrl: require('./sendgrid-mail').unsubscribeUrl,
     raisePriceSettingsAlert,
     closePriceSettingsAlert,
@@ -545,9 +548,11 @@ async function noLiveEstimate({ job, now, deps }) {
 // customer opened in between (a portal tap takes the same locks, so it has committed by then) would be
 // archived by the mint's lineage retire, and its link and slot hold with it. With this answer the mint refuses
 // (`open_estimate`), retires nothing, and the job is held for the morning.
-function heldByOpenEstimate(database, { customerId, jobId, now }) {
+// An offer the customer ended (offerEnded) holds the mint the same way: it never mints over a decline.
+async function heldByOpenEstimate(database, { customerId, jobId, now }) {
   const { liveEstimateStatuses, repricePendingAbsentSql } = defaultDeps();
-  return openEstimateBesidesOffer(database, { customerId, jobId, now }, { liveEstimateStatuses, repricePendingAbsentSql });
+  return (await openEstimateBesidesOffer(database, { customerId, jobId, now }, { liveEstimateStatuses, repricePendingAbsentSql }))
+    || offerEnded(database, { customerId, jobId });
 }
 
 // The email division's own verdict for a marketing email on the nurture stream (unsubscribe, do-not-contact,
@@ -587,9 +592,40 @@ async function paysAfterVisit({ job, deps }) {
   return onRail ? null : 'not_pay_after_visit';
 }
 
+// "You pay after each visit" is the email's promise, and a plan start puts the customer on Auto Pay. The card
+// policy alone does not refuse every account that has said no: with GATE_PAF_EXISTING_CUSTOMERS on, a paused
+// customer still gets a policy that rides the rail (autopayPaused), and the policy resolver reads an explicit
+// Auto Pay turn-off only for plan members. So the account is asked directly, with the card lane's own readers:
+// Auto Pay paused now (isPaused), or turned off by the customer (the latest autopay_log toggle,
+// explicitAutopayDisable). Both hold the job in both modes. A failed read throws, and the job fails for the morning.
+async function autoPayAllowed({ job, now, deps }) {
+  const account = await deps.db('customers').where({ id: job.customer_id }).first('id', 'autopay_enabled', 'autopay_paused_until');
+  if (!account) return 'no_customer';
+  if (deps.isAutopayPaused(account, now)) return 'autopay_paused';
+  return (await deps.explicitAutopayDisable(account, deps.db)) ? 'autopay_off' : null;
+}
+
+// The offer's own estimate, once the customer ended it (declined it, or took it). A failed send leaves the quote
+// open, and the customer can decline it before the next morning's retry. That retry must not mint over a
+// "no": the job holds, and the key is never tried again by a mint. The mint asks the same question again under
+// the customer's locks (heldByOpenEstimate). The offer stamp names the job.
+const ENDED_OFFER_STATUSES = Object.freeze(['declined', 'accepted']);
+async function offerEnded(database, { customerId, jobId }) {
+  const ended = await database('estimates')
+    .where({ customer_id: customerId, source: 'plan_start' })
+    .whereIn('status', ENDED_OFFER_STATUSES)
+    .whereRaw("estimate_data->'planStart'->'offer'->>'jobId' = ?", [String(jobId)])
+    .first('id');
+  return Boolean(ended);
+}
+
+async function offerNotEnded({ job, deps }) {
+  return (await offerEnded(deps.db, { customerId: job.customer_id, jobId: job.id })) ? 'offer_ended' : null;
+}
+
 const SEND_RULES = [
-  anotherVisit, customerReachable, notOptedOut, notOfferedBefore, jobPaid, paysAfterVisit, reviewAskClear, noComplaint,
-  noLiveEstimate, emailAllowed,
+  anotherVisit, customerReachable, notOptedOut, notOfferedBefore, jobPaid, paysAfterVisit, autoPayAllowed, reviewAskClear,
+  noComplaint, offerNotEnded, noLiveEstimate, emailAllowed,
 ];
 
 // The plan price, or the reason this home goes to the office to price by hand. The pricer gets the job: it
@@ -790,6 +826,12 @@ async function offeredBeforeGuard(trx, { customerId, jobId, now }) {
 // morning's run mints again under the same key. Except when the customer ended the offer themselves (declined
 // or accepted it): that is final, the ledger settles the key `skipped`, and no later morning sends it again.
 const OFFER_ESTIMATE_GONE = 'OFFER_ESTIMATE_GONE';
+// The kill switch (GATE_ONETIME_PLAN_OFFER, read again, never from the run's start): a batch that began live
+// stops sending when the owner turns it off. The job reads it before each job, and the handoff reads it once
+// more, the last read before the email leaves. Retryable: the next live morning sends under the same key.
+const OFFER_GATE_OFF = 'OFFER_GATE_OFF';
+const liveModeOn = () => require('../config/feature-gates').onetimePlanOfferMode?.() === 'live';
+
 async function offerEstimateGuard(trx, { customer, jobId, estimateId, now, deps }) {
   await lockCustomerComms(trx, customer.id);
   const estimate = await trx('estimates').where({ id: estimateId }).forShare()
@@ -798,7 +840,7 @@ async function offerEstimateGuard(trx, { customer, jobId, estimateId, now, deps 
     && deps.liveEstimateStatuses.includes(estimate.status)
     && (!estimate.expires_at || new Date(estimate.expires_at) > now)
     && planOfferOf(estimate.estimate_data)?.jobId === String(jobId);
-  return open ? null : { reason: OFFER_ESTIMATE_GONE, retryable: !['declined', 'accepted'].includes(estimate?.status) };
+  return open ? null : { reason: OFFER_ESTIMATE_GONE, retryable: !ENDED_OFFER_STATUSES.includes(estimate?.status) };
 }
 
 // The opt-outs of Waves marketing again (notOptedOut), on the ledger's own transaction. The division's checks
@@ -822,9 +864,11 @@ async function optedOutGuard(trx, { customer, deps }) {
 // ledger's permanent drop: no offer went out and the key is never sent again, so the job reads held on every
 // later morning, never "offered". `reserved` is a send in flight, or one a crash left: the ledger settles it on
 // a later morning. Any other row (sent) is the offer.
+// The handoff's own refusals (boundaryGuard): the job is held, whatever the ledger settled the row as.
+const HANDOFF_HOLDS = ['OFFER_ESTIMATE_GONE', 'OFFER_GATE_OFF'];
 const EARLIER_ATTEMPT = Object.freeze({ skipped: 'send_dropped', reserved: 'send_in_flight' });
 async function settleOfferSend(out, { deps }) {
-  if (out.reason === OFFER_ESTIMATE_GONE) return { verdict: 'held', reason: 'offer_estimate_gone' };
+  if (HANDOFF_HOLDS.includes(out.reason)) return { verdict: 'held', reason: out.reason.toLowerCase() };
   if (out.sent) return { verdict: 'sent', reason: null };
   if (out.duplicate) {
     const reason = EARLIER_ATTEMPT[out.row?.status];
@@ -886,7 +930,8 @@ async function mintAndSend(ctx, option) {
     expectedRecipientEmail: customer.email,
     guard: async (trx) => (await offeredBeforeGuard(trx, { customerId: customer.id, jobId: job.id, now }))
       || optedOutGuard(trx, { customer, deps }),
-    boundaryGuard: async (trx) => (await offerEstimateGuard(trx, {
+    boundaryGuard: async (trx) => (liveModeOn() ? null : { reason: OFFER_GATE_OFF, retryable: true })
+      || (await offerEstimateGuard(trx, {
       customer, jobId: job.id, estimateId: minted.estimateId, now, deps,
     })) || optedOutGuard(trx, { customer, deps }),
     template: { templateKey: OFFER_TEMPLATE, payload, categories: [OFFER_CATEGORY] },
@@ -962,6 +1007,11 @@ async function reportPriceSettings({ now, deps }, { refused, priced }) {
 // One job's result into the morning's counts. A failure is counted and the job is read again the next morning.
 async function countJob(job, run, summary) {
   summary.jobs += 1;
+  if (run.mode === 'live' && !liveModeOn()) {
+    summary.held += 1;
+    summary.reasons.offer_gate_off = (summary.reasons.offer_gate_off || 0) + 1;
+    return;
+  }
   try {
     const { verdict, reason } = await (run.mode === 'live' ? liveJob : shadowJob)(job, run);
     summary[verdict] += 1;

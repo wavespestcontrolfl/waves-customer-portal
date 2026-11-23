@@ -1499,6 +1499,44 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
         expect(await offerMail(job.id)).toBeUndefined();
       });
 
+      // The card policy lets these two through (a paused customer under GATE_PAF_EXISTING_CUSTOMERS; an explicit
+      // turn-off of a customer who is no plan member), so the job asks the account itself.
+      test.each([
+        ['live', 'paused, with the existing-customer rail on', 'autopay_paused', async () => {
+          process.env.GATE_PAF_EXISTING_CUSTOMERS = 'true';
+          return seedCustomer({ autopay_paused_until: day(30) });
+        }],
+        ['live', 'turned off by the customer', 'autopay_off', async () => {
+          const customer = await seedCustomer({ autopay_enabled: false });
+          await trx('autopay_log').insert({ customer_id: customer.id, event_type: 'autopay_disabled' });
+          return customer;
+        }],
+        ['shadow', 'turned off by the customer', 'autopay_off', async () => {
+          const customer = await seedCustomer({ autopay_enabled: false });
+          await trx('autopay_log').insert({ customer_id: customer.id, event_type: 'autopay_disabled' });
+          return customer;
+        }],
+      ])('%s, Auto Pay %s: held, no quote, no email, no sample', async (mode, _state, reason, arrange) => {
+        const savedPaf = process.env.GATE_PAF_EXISTING_CUSTOMERS;
+        try {
+          process.env.GATE_ONETIME_PLAN_OFFER = mode;
+          await publishOffer();
+          const customer = await arrange();
+          const { job } = await seedJob({ customer });
+          const summary = await run({});
+          expect(summary.reasons).toEqual({ [reason]: 1 });
+          expect(summary).toMatchObject({ sample: 0, held: 1, failed: 0 });
+          expect(summary.sent ?? 0).toBe(0);
+          expect(await estimatesOf(customer)).toEqual([]);
+          expect(await offerMail(job.id)).toBeUndefined();
+          expect(await sampleRows(job.id)).toEqual([]);
+          expect(Sendgrid.sendOne).not.toHaveBeenCalled();
+        } finally {
+          if (savedPaf === undefined) delete process.env.GATE_PAF_EXISTING_CUSTOMERS;
+          else process.env.GATE_PAF_EXISTING_CUSTOMERS = savedPaf;
+        }
+      });
+
       // A sample tells the office "this customer would get the offer today", so shadow holds the same customers.
       test.each([
         ['Auto Pay paused', async () => seedCustomer({ autopay_paused_until: day(30) })],
@@ -1590,6 +1628,50 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
       expect(quotes[0].archived_at).not.toBeNull();
       expect((await offerMail(job.id)).html_snapshot).toContain(`/estimate/${quotes[1].token}`);
       expect(Sendgrid.sendOne).toHaveBeenCalledTimes(2);
+    });
+
+    // A failed send leaves the quote open. The customer declines it before the next morning: the retry holds,
+    // and nothing is minted over the decline.
+    test.each([['declined'], ['accepted']])('a failed send, then the customer %s the quote: the next morning holds; no new quote, no email', async (status) => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      Sendgrid.sendOne.mockRejectedValueOnce(Object.assign(new Error('provider down'), { status: 500 }));
+      expect(await run({})).toMatchObject({ sent: 0, failed: 1 });
+      const [quote] = await estimatesOf(customer);
+      await trx('estimates').where({ id: quote.id }).update({ status });
+      const later = await runAt(tomorrow);
+      expect(later).toMatchObject({ sent: 0, held: 1, failed: 0 });
+      expect(later.reasons).toEqual({ offer_ended: 1 });
+      expect(await estimatesOf(customer)).toHaveLength(1);
+      expect(Sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect((await offerMail(job.id))?.sent_at ?? null).toBeNull();
+    });
+
+    // The kill switch: the owner turns GATE_ONETIME_PLAN_OFFER off while the batch runs. The email is
+    // reserved but never leaves, the row settles failed, and the next live morning sends it.
+    test('the gate turned off after the estimate was made: the provider is never called; back on, the next morning sends', async () => {
+      await publishOffer();
+      const { job } = await seedJob();
+      const real = require('../services/cancellation-resolution/restart').mintPlanStartEstimate;
+      const providerRequest = jest.fn();
+      Sendgrid.sendOne.mockImplementationOnce(async ({ database, providerBoundaryCheck }) => {
+        await providerBoundaryCheck({ database });
+        providerRequest();
+        return { messageId: 'sg-sample' };
+      });
+      const first = await run({
+        mintPlanStartEstimate: async (args) => {
+          const minted = await real(args);
+          process.env.GATE_ONETIME_PLAN_OFFER = 'off';
+          return minted;
+        },
+      });
+      expect(first).toMatchObject({ sent: 0, held: 1, failed: 0 });
+      expect(first.reasons).toEqual({ offer_gate_off: 1 });
+      expect(providerRequest).not.toHaveBeenCalled();
+      expect(await ledgerRow(job.id)).toMatchObject({ status: 'failed', reason: 'OFFER_GATE_OFF' });
+      process.env.GATE_ONETIME_PLAN_OFFER = 'live';
+      expect(await runAt(tomorrow)).toMatchObject({ sent: 1, held: 0, failed: 0 });
     });
 
     test('offers turned off after the estimate was made: the reservation is denied and leaves no row; back on, the next morning sends', async () => {

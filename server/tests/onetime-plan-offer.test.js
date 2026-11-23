@@ -48,7 +48,10 @@ function fakeDb(tables = {}) {
     queries.push(query);
     const rows = () => {
       const source = tables[table];
-      return typeof source === 'function' ? source(query) : (source || []);
+      if (typeof source === 'function') return source(query);
+      // The estimates read for a quote the customer ended (a status filter) answers only the rows in that status.
+      const statuses = table === 'estimates' ? (query.calls.find(([method, column]) => method === 'whereIn' && column === 'status') || [])[2] : null;
+      return (source || []).filter((row) => !statuses?.includes('declined') || statuses.includes(row.status));
     };
     const builder = {
       first: async () => rows()[0],
@@ -128,6 +131,8 @@ function world({ tables = {}, jobs = [JOB], ...deps } = {}) {
     payAfterFirstVisitCardRail: jest.fn(() => true),
     sendWithLedger: jest.fn(async () => ({ ok: true, sent: true, reason: null, row: { id: 'led-1' }, duplicate: false })),
     settleStaleReservations: jest.fn(async () => 0),
+    isAutopayPaused: jest.fn(() => false),
+    explicitAutopayDisable: jest.fn(async () => false),
     unsubscribeUrl: (token) => `https://unsub.test/${token}`,
     raisePriceSettingsAlert: jest.fn(async () => ({ id: 'alert-1' })),
     closePriceSettingsAlert: jest.fn(async () => 0),
@@ -460,8 +465,8 @@ describe('a send rule holds the job: no price is computed and nothing is sent', 
   test('the estimate read covers an estimate that is being sent, and one on the send queue', async () => {
     const deps = world();
     await run(deps);
-    const [read] = deps.db.queriesOf('estimates');
-    expect(called(read, 'whereNull', 'archived_at')).toBe(true);
+    const read = deps.db.queriesOf('estimates').find((query) => called(query, 'whereNull', 'archived_at'));
+    expect(read).toBeDefined();
     // Open now: the public estimate page's list, with its expiry test.
     expect(called(read, 'whereIn', 'status', ['sending', 'sent', 'viewed'])).toBe(true);
     expect(called(read, 'orWhere', 'expires_at', '>', NOW)).toBe(true);
@@ -810,7 +815,7 @@ describe('the default wiring', () => {
       'isInternalTestContact', 'activeSuppressionsFor', 'sendTemplate', 'unsubscribeUrl', 'raisePriceSettingsAlert', 'closePriceSettingsAlert',
       // Live mode: the library's own send resolution, the ledger, the mint, and the estimate page's card-rail functions.
       'resolveTemplateForSend', 'sendWithLedger', 'settleStaleReservations', 'mintPlanStartEstimate', 'buildEstimateMembershipContext',
-      'resolveRecurringCardPolicyForEstimate', 'payAfterFirstVisitCardRail',
+      'resolveRecurringCardPolicyForEstimate', 'payAfterFirstVisitCardRail', 'isAutopayPaused', 'explicitAutopayDisable',
     ]) {
       expect([name, typeof deps[name]]).toEqual([name, 'function']);
     }
@@ -887,7 +892,11 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
   const MINTED_ROW = mintedFor('job-1');
   // The estimates table answers two reads: the minted row by its id (the date check and the card-rail check), and
   // the live-estimate rule (the rows the customer already has). The test says which rows the customer has.
-  const estimates = (existing = [], minted = MINTED_ROW) => (query) => (called(query, 'where', { id: 'est-1' }) ? [minted] : existing);
+  // A quote the customer ended is another read (a final-status filter): none, unless the test says so.
+  const estimates = (existing = [], minted = MINTED_ROW) => (query) => {
+    if (called(query, 'where', { id: 'est-1' })) return [minted];
+    return called(query, 'whereIn', 'status', ['declined', 'accepted']) ? [] : existing;
+  };
   const liveWorld = ({ tables = {}, existing = [], minted, ...deps } = {}) => world({
     buildStartOffer: jest.fn(async () => ({ option: { ...LIVE_OPTION }, reason: null })),
     tables: { estimates: estimates(existing, minted), ...tables },
@@ -1270,6 +1279,118 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       const summary = await run(deps);
       expect(summary).toMatchObject({ held: 1, failed: 0, sent: 0 });
       expect(summary.reasons).toEqual({ offer_estimate_gone: 1 });
+    });
+  });
+
+  // The card policy alone does not refuse every customer who said no to Auto Pay (a paused one rides the rail
+  // under GATE_PAF_EXISTING_CUSTOMERS; the resolver reads an explicit turn-off for plan members only).
+  describe('Auto Pay paused or turned off on the account', () => {
+    test.each([
+      ['live', 'paused', { isAutopayPaused: jest.fn(() => true) }, 'autopay_paused'],
+      ['live', 'turned off', { explicitAutopayDisable: jest.fn(async () => true) }, 'autopay_off'],
+      ['shadow', 'paused', { isAutopayPaused: jest.fn(() => true) }, 'autopay_paused'],
+      ['shadow', 'turned off', { explicitAutopayDisable: jest.fn(async () => true) }, 'autopay_off'],
+    ])('%s, Auto Pay %s: held before the home is priced; no estimate, no email, no sample', async (mode, _state, change, reason) => {
+      process.env.GATE_ONETIME_PLAN_OFFER = mode;
+      const deps = liveWorld(change);
+      const summary = await run(deps);
+      expect(summary.reasons).toEqual({ [reason]: 1 });
+      expect(summary.held).toBe(1);
+      expect(deps.buildStartOffer).not.toHaveBeenCalled();
+      expect(deps.mintPlanStartEstimate).not.toHaveBeenCalled();
+      expect(deps.sendWithLedger).not.toHaveBeenCalled();
+      expect(deps.sendTemplate).not.toHaveBeenCalled();
+    });
+
+    test('the card lane\'s own readers are asked about this customer, on the job\'s connection, with the run\'s clock', async () => {
+      const deps = liveWorld();
+      await run(deps);
+      expect(deps.isAutopayPaused).toHaveBeenCalledWith(CUSTOMER, NOW);
+      expect(deps.explicitAutopayDisable).toHaveBeenCalledWith(CUSTOMER, deps.db);
+    });
+
+    test('the rule runs after the card rail rule', async () => {
+      const deps = liveWorld({
+        isAutopayPaused: jest.fn(() => true),
+        payAfterFirstVisitCardRail: jest.fn(() => false),
+      });
+      expect((await run(deps)).reasons).toEqual({ not_pay_after_visit: 1 });
+    });
+
+    test('a failed read fails the job, never "Auto Pay is on"', async () => {
+      const deps = liveWorld({ explicitAutopayDisable: jest.fn(async () => { throw new Error('read failed'); }) });
+      expect(liveCounts(await run(deps))).toEqual({ ...ZERO, failed: 1 });
+      expect(deps.mintPlanStartEstimate).not.toHaveBeenCalled();
+    });
+  });
+
+  // A failed send leaves the quote open; the customer can decline it before the next morning's retry.
+  describe('the customer ended this job\'s offer estimate: the next morning never mints over it', () => {
+    const ended = (rows) => (query) => (called(query, 'whereIn', 'status', ['declined', 'accepted']) ? rows : []);
+
+    test.each([['live'], ['shadow']])('%s: a declined or accepted quote carrying this job\'s stamp holds the job', async (mode) => {
+      process.env.GATE_ONETIME_PLAN_OFFER = mode;
+      const deps = liveWorld({ tables: { estimates: ended([{ id: 'est-0' }]) } });
+      const summary = await run(deps);
+      expect(summary.reasons).toEqual({ offer_ended: 1 });
+      expect(deps.mintPlanStartEstimate).not.toHaveBeenCalled();
+      expect(deps.sendWithLedger).not.toHaveBeenCalled();
+    });
+
+    test('the read: this customer\'s plan_start quotes in a final status, by the stamp\'s job id', async () => {
+      const deps = liveWorld({ tables: { estimates: ended([]) } });
+      await run(deps);
+      const read = deps.db.queriesOf('estimates').find((query) => called(query, 'whereIn', 'status', ['declined', 'accepted']));
+      expect(called(read, 'where', { customer_id: 'cust-1', source: 'plan_start' })).toBe(true);
+      expect(called(read, 'whereRaw', "estimate_data->'planStart'->'offer'->>'jobId' = ?", ['job-1'])).toBe(true);
+    });
+
+    test('the mint asks again under the customer\'s locks: heldByOpenEstimate answers true for it', async () => {
+      const { heldByOpenEstimate } = require('../services/onetime-plan-offer');
+      const asked = { customerId: 'cust-1', jobId: 'job-1', now: NOW };
+      expect(await heldByOpenEstimate(fakeDb({ estimates: ended([{ id: 'est-0' }]) }), asked)).toBe(true);
+      expect(await heldByOpenEstimate(fakeDb({ estimates: ended([]) }), asked)).toBe(false);
+    });
+  });
+
+  // GATE_ONETIME_PLAN_OFFER is the kill switch: a batch that began live stops when the owner turns it off.
+  describe('the gate turned off during a live batch', () => {
+    const JOB_2 = { ...JOB, id: 'job-2' };
+
+    test('the next job is held and nothing more is minted or sent', async () => {
+      const mint = jest.fn(async () => {
+        process.env.GATE_ONETIME_PLAN_OFFER = 'off';
+        return { estimateId: 'est-1', token: 'tok-1', url: '/estimate/tok-1', reused: false };
+      });
+      const deps = liveWorld({ jobs: [JOB, JOB_2], mintPlanStartEstimate: mint });
+      const summary = await run(deps);
+      expect(mint).toHaveBeenCalledTimes(1);
+      expect(summary).toMatchObject({ jobs: 2, held: 1, failed: 0 });
+      expect(summary.reasons).toEqual({ offer_gate_off: 1 });
+    });
+
+    test('the handoff reads the gate once more, the last read before the email leaves', async () => {
+      const deps = liveWorld();
+      await run(deps);
+      const { boundaryGuard } = sendOf(deps);
+      expect(await boundaryGuard(fakeDb({ estimates: [MINTED_ROW] }))).toBeNull();
+      for (const value of ['off', 'shadow', undefined]) {
+        if (value === undefined) delete process.env.GATE_ONETIME_PLAN_OFFER;
+        else process.env.GATE_ONETIME_PLAN_OFFER = value;
+        const trx = fakeDb({ estimates: [MINTED_ROW] });
+        expect(await boundaryGuard(trx)).toEqual({ reason: 'OFFER_GATE_OFF', retryable: true });
+        // The gate is read before anything is locked or read.
+        expect(trx.queriesOf('estimates')).toHaveLength(0);
+      }
+    });
+
+    test('the ledger\'s refusal is a held job, not a failure', async () => {
+      const deps = liveWorld({
+        sendWithLedger: jest.fn(async () => ({ ok: false, sent: false, reason: 'OFFER_GATE_OFF', row: { id: 'led-1' }, duplicate: false })),
+      });
+      const summary = await run(deps);
+      expect(summary).toMatchObject({ held: 1, failed: 0, sent: 0 });
+      expect(summary.reasons).toEqual({ offer_gate_off: 1 });
     });
   });
 
