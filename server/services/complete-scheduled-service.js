@@ -4847,7 +4847,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const reportNotePick = require('../config/feature-gates').reportOwnNoteLive()
       && completionInput.body?.reportNote != null
       && visitOutcome === 'completed' && !typedFindingsType && !isBackfillCompletion
-      && require('./pest-recap').recapEligibleProfile(completionProfile)
+      // The preview route's own visit check (strict profile, area add-on rows);
+      // a read that fails is a visit not verified, so no note.
+      && (await failSoftRead(db, (k) => require('./pest-recap').resolveEligibility(svc.id, k, { strict: true }), null))?.eligible === true
       ? await require('./service-report/report-own-note').reportNoteToStore({
         reportNote: completionInput.body.reportNote,
         note: typeof technicianNotes === 'string' ? technicianNotes.trim() : '',
@@ -7900,11 +7902,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
             delete structuredNotes.blogPost;
           }
           // The report note was screened on the pre-lock visit: a repoint since
-          // (another service, another customer, a profile the sheet does not
+          // (another service or catalog service, another customer, a profile the sheet does not
           // take) or an identity the re-resolve could not establish drops it,
           // and the report shows its own text.
           if (structuredNotes.reportNote && (!primaryFreezeTrusted
             || (lockedSvcRow && (String(lockedSvcRow.service_type ?? '') !== String(svc.service_type ?? '')
+              || String(lockedSvcRow.service_id ?? '') !== String(svc.service_id ?? '')
               || String(lockedSvcRow.customer_id ?? '') !== String(svc.customer_id ?? '')))
             || !require('./pest-recap').recapEligibleProfile(frozenCompletionProfile))) {
             delete structuredNotes.reportNote;

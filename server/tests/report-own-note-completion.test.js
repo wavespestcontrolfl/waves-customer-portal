@@ -18,13 +18,14 @@ const block = completionSource.slice(completionSource.indexOf('async function co
 
 describe('the completion\'s report note', () => {
   const pickAt = block.indexOf('const reportNotePick = ');
-  const pick = block.slice(pickAt, pickAt + 700);
+  const pick = block.slice(pickAt, pickAt + 1000);
 
   test('picked only with the gate on, for a performed untyped pest visit the recap sheet takes', () => {
     expect(pick).toMatch(/^const reportNotePick = require\('\.\.\/config\/feature-gates'\)\.reportOwnNoteLive\(\)/);
     expect(pick).toContain('&& completionInput.body?.reportNote != null');
     expect(pick).toContain("&& visitOutcome === 'completed' && !typedFindingsType && !isBackfillCompletion");
-    expect(pick).toContain("&& require('./pest-recap').recapEligibleProfile(completionProfile)");
+    // The preview route's own visit check, strict, through a savepoint read.
+    expect(pick).toContain("&& (await failSoftRead(db, (k) => require('./pest-recap').resolveEligibility(svc.id, k, { strict: true }), null))?.eligible === true");
     expect(pick).toMatch(/: null;$/m);
   });
 
@@ -45,8 +46,9 @@ describe('the completion\'s report note', () => {
     const drop = block.indexOf('if (structuredNotes.reportNote && (!primaryFreezeTrusted');
     expect(drop).toBeGreaterThan(resolve);
     expect(drop).toBeLessThan(block.indexOf('structured_notes: serializeJsonb(structuredNotes),'));
-    const dropBlock = block.slice(drop, drop + 600);
+    const dropBlock = block.slice(drop, drop + 800);
     expect(dropBlock).toContain("String(lockedSvcRow.service_type ?? '') !== String(svc.service_type ?? '')");
+    expect(dropBlock).toContain("String(lockedSvcRow.service_id ?? '') !== String(svc.service_id ?? '')");
     expect(dropBlock).toContain("String(lockedSvcRow.customer_id ?? '') !== String(svc.customer_id ?? '')");
     expect(dropBlock).toContain("!require('./pest-recap').recapEligibleProfile(frozenCompletionProfile)");
     expect(dropBlock).toContain('delete structuredNotes.reportNote;');
