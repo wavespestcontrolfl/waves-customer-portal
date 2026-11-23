@@ -37,7 +37,7 @@ describe('the completion\'s report note', () => {
   });
 
   test('a sent note on a visit that could not be checked refuses a fresh attempt, before any write', () => {
-    expect(pick).toContain('const reportNoteUnverified = reportNoteVisit === null;');
+    expect(pick).toContain('const reportNoteUnverified = reportNoteVisit === null || (reportNoteVisit?.ok === true && !reportNoteVisit.profile);');
     const reject = block.indexOf("if (claim.action === 'proceed' && reportNoteUnverified) {");
     expect(reject).toBeGreaterThan(0);
     expect(reject).toBeLessThan(block.indexOf("trx('service_records').insert(recordInsert)"));

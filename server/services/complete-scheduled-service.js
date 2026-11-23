@@ -4852,7 +4852,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       : undefined;
     // A sent note on a visit that could not be checked refuses the completion below (retryable): the record never
     // goes out without the note marker while the raw note reaches the recap model.
-    const reportNoteUnverified = reportNoteVisit === null;
+    // resolveEligibility answers a failed profile lookup as profile null: that is a check that could not run too.
+    const reportNoteUnverified = reportNoteVisit === null || (reportNoteVisit?.ok === true && !reportNoteVisit.profile);
     const reportNotePick = reportNoteVisit?.eligible === true
       ? await require('./service-report/report-own-note').reportNoteToStore({
         reportNote: completionInput.body.reportNote,
