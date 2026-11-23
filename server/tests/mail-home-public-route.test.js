@@ -28,11 +28,8 @@ let base;
 beforeAll((done) => {
   const app = express();
   const route = require('../routes/mail-home-public');
-  // As in server/index.js: the guard first, then a stand-in for the global /api limiter that always refuses the path
-  // /limited-<token>, then the router.
-  app.use('/api/public/home', route.preLimiterGuard);
-  app.use('/api/public/home', (req, res, next) => (req.query.globalLimit === '1' ? res.status(429).json({ error: 'limited' }) : next()));
-  app.use('/api/public/home', route);
+  // As in server/index.js: one mount, the guard first, then the router (its own limiter and the route).
+  app.use('/api/public/home', route.preLimiterGuard, route);
   app.use((err, req, res, next) => {
     res.status(500).json({ error: 'Server error' });
   });
@@ -138,17 +135,6 @@ describe('GET /api/public/home/:token', () => {
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain(TOKEN);
   });
 
-  test('gate off: the guard answers 404 before the global limiter could answer 429', async () => {
-    mailHomePageLive.mockReturnValue(false);
-    const res = await get(`/api/public/home/${TOKEN}?globalLimit=1`);
-    expect(res.status).toBe(404);
-    expectPrivate(res);
-    mailHomePageLive.mockReturnValue(true);
-    const live = await get(`/api/public/home/${TOKEN}?globalLimit=1`);
-    expect(live.status).toBe(429);
-    expectPrivate(live);
-  });
-
   test('a bad percent escape, another path or another method is the same 404, never a 500', async () => {
     for (const path of ['/%E0%A4%A', `/${TOKEN}/extra`, '/', '']) {
       const res = await get(`/api/public/home${path}`);
@@ -175,5 +161,14 @@ describe('GET /api/public/home/:token', () => {
     for (let i = 0; i < 61; i += 1) last = await get(`/api/public/home/${TOKEN}`);
     expect(last.status).toBe(429);
     expectPrivate(last);
+  });
+
+  test('gate off: the guard answers 404 before the route limiter, even for a client the limiter would refuse', async () => {
+    // Runs last: the limiter test above already used up this client's 60 a minute.
+    expect((await get(`/api/public/home/${TOKEN}`)).status).toBe(429);
+    mailHomePageLive.mockReturnValue(false);
+    const res = await get(`/api/public/home/${TOKEN}`);
+    expect(res.status).toBe(404);
+    expectPrivate(res);
   });
 });
