@@ -120,6 +120,18 @@ describe('first bell', () => {
     await expect(runCallBookingMissWatchdog({ now: NOW })).rejects.toThrow(/pager output lost/);
   });
 
+  // GATE_CALL_AGREED_ONE_TIME_JOB: a call the AI held as an agreed one-time job already has the office's task
+  // (one admin notification, open or done), so the pager never rings it again; with no such row it rings.
+  test('a held one-time job that already has its office notification never rings again', async () => {
+    mockState.rung = [{ dedupe_key: `agreed-one-time-job:${CALL_ID}` }];
+    const result = await runCallBookingMissWatchdog({ now: NOW });
+    expect(result).toMatchObject({ misses: 1, alerted: 0, repeated: 0 });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    // Another call's task, or none: the pager rings as before.
+    mockState.rung = [{ dedupe_key: 'agreed-one-time-job:another-call' }];
+    expect(await runCallBookingMissWatchdog({ now: NOW })).toMatchObject({ alerted: 1 });
+  });
+
   test('a booked call-linked row clears the miss: nothing rings', async () => {
     mockState.booked = [{ customer_id: 'cust-9', sched_date: '2026-10-04', window_start: '11:00:00', source_call_log_id: CALL_ID, notes: null }];
     const result = await runCallBookingMissWatchdog({ now: NOW });

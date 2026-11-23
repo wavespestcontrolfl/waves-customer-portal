@@ -1029,6 +1029,25 @@ async function runInner({ now }) {
   }
 
   // GATE_ALERT_RING_ONCE (owner 2026-10-14): the first ring stands alone.
+  // GATE_CALL_AGREED_ONE_TIME_JOB: a call the AI held as an agreed one-time job
+  // already has the office's task (one admin notification, open or done), so the
+  // pager never rings it again. No such row (its write failed): the pager rings as
+  // before. An unreadable answer rings too.
+  const officeTaskCalls = new Set();
+  if (misses.length) {
+    const { AGREED_ONE_TIME_JOB_ALERT_PREFIX } = require('./call-one-time-job');
+    try {
+      const taskRows = await db('notifications')
+        .where({ recipient_type: 'admin' })
+        .whereRaw("metadata->>'dedupeKey' = ANY(?)", [misses.map((m) => `${AGREED_ONE_TIME_JOB_ALERT_PREFIX}${m.call.id}`)])
+        .select(db.raw("metadata->>'dedupeKey' AS dedupe_key"));
+      for (const r of taskRows) {
+        if (typeof r.dedupe_key === 'string' && r.dedupe_key.startsWith(AGREED_ONE_TIME_JOB_ALERT_PREFIX)) officeTaskCalls.add(r.dedupe_key.slice(AGREED_ONE_TIME_JOB_ALERT_PREFIX.length));
+      }
+    } catch (err) {
+      logger.warn(`[call-booking-miss] agreed one-time job task lookup failed: ${err.code || err.name || 'db_error'}`);
+    }
+  }
   const ringOnce = require('../config/feature-gates').alertRingOnceLive();
   let alerted = 0;
   let repeated = 0;
@@ -1037,6 +1056,7 @@ async function runInner({ now }) {
       logger.warn(`[call-booking-miss] per-run alert cap hit (${MAX_ALERTS_PER_RUN}); the rest ring next tick`);
       break;
     }
+    if (officeTaskCalls.has(String(m.call.id))) continue;
     const dedupeKey = `call-booking-miss:${m.call.id}`;
     if (!(await alreadyAlerted(dedupeKey))) {
       const outcome = await ringMiss(m, { dedupeKey, repeat: false });

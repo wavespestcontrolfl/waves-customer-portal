@@ -42,4 +42,10 @@ function readsAsOneOneTimeJob(reading) {
     && !flags.some((flag) => UNSETTLED_JOB_FLAGS.includes(flag));
 }
 
-module.exports = { readsAsOneOneTimeJob, serviceNameKey, ONE_TIME_JOB_INTENTS, UNSETTLED_JOB_FLAGS };
+// The dedupe-key prefix of the office's admin notification for an agreed
+// one-time job the AI held (GATE_CALL_AGREED_ONE_TIME_JOB, call-recording-
+// processor.js buildAgreedOneTimeJobAlert): `<prefix><call id>`. The call
+// booking-miss watchdog reads it so one held call never rings twice.
+const AGREED_ONE_TIME_JOB_ALERT_PREFIX = 'agreed-one-time-job:';
+
+module.exports = { readsAsOneOneTimeJob, serviceNameKey, ONE_TIME_JOB_INTENTS, UNSETTLED_JOB_FLAGS, AGREED_ONE_TIME_JOB_ALERT_PREFIX };

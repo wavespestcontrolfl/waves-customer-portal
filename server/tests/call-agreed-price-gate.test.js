@@ -398,6 +398,8 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(call).toContain("const raised = await require('./admin-alert-compose').raiseAdminAlert(alert.category, alert.spec, alert.opts);");
     expect(call).toContain('agreedJobAlerted = !!(raised && raised.id);');
     expect(call).not.toContain('fileSkippedBookingCard');
+    // A raised notification is the office's task: the call gets no review state and no confirm-before-dispatch note.
+    expect(source).toContain("const agreedJobTaskRaised = svc.__held.reason === 'agreed_one_time_job_office_books' && agreedJobAlerted;\n                if (!agreedJobTaskRaised && !bridgeNeedsConfirmation.includes(svc.__held.reason)) bridgeNeedsConfirmation.push(svc.__held.reason);");
     // The Bill-To the booking would have stamped rides on the notification.
     expect(call).toContain("const payerRow = await db('payers').where({ id: callBookingPayerId }).first('display_name').catch(() => null);");
     // The address the booking resolved and a street-only match ride from the hold.
@@ -428,9 +430,11 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
       link: '/admin/communications#tab=calls&call=call-1', subject: { type: 'call', id: 'call-1' },
     }));
     expect(alert.category).toBe('schedule');
-    // One ring per call, for good (a reprocess never rings again).
-    expect(alert.opts).toEqual(expect.objectContaining({ bell: true, dedupeKey: 'agreed-one-time-job:call-1' }));
+    // One ring per call, for good: a later pass of the call updates the text quietly (no ring; read and done kept).
+    expect(alert.opts).toEqual(expect.objectContaining({ bell: true, dedupeKey: 'agreed-one-time-job:call-1', refreshOnDedupe: true }));
+    expect(alert.opts.ringOnRefresh()).toBe(false);
     expect(alert.opts.dedupeOpenOnly).toBeUndefined();
+    expect(alert.opts.dedupeKey.startsWith(require('../services/call-one-time-job').AGREED_ONE_TIME_JOB_ALERT_PREFIX)).toBe(true);
     expect(alert.opts.metadata).toEqual({ callLogId: 'call-1', source: 'call_agreed_one_time_job' });
     const detail = alert.opts.detail;
     expect(detail).toContain('Staff said $250.00 one-time. Check the terms on the call before you set the visit\'s price.');

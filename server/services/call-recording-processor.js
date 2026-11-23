@@ -2025,7 +2025,11 @@ function buildAgreedOneTimeJobAlert({ call, firstName = null, serviceType = null
     opts: {
       bell: true,
       link,
-      dedupeKey: `agreed-one-time-job:${call.id}`,
+      dedupeKey: `${require('./call-one-time-job').AGREED_ONE_TIME_JOB_ALERT_PREFIX}${call.id}`,
+      // A later pass of the same call (the hold applies again while it has no
+      // visit) updates the text quietly: no second ring, read and done kept.
+      refreshOnDedupe: true,
+      ringOnRefresh: () => false,
       detail,
       // Ids only: names, the address and the price are in the text the office reads.
       metadata: { callLogId: call.id, source: 'call_agreed_one_time_job' },
@@ -22871,7 +22875,11 @@ const CallRecordingProcessor = {
                 // applies regardless of whether the card insert above
                 // fired (deduped, so on_file_house_number_conflict's own
                 // dedicated push elsewhere is never doubled).
-                if (!bridgeNeedsConfirmation.includes(svc.__held.reason)) bridgeNeedsConfirmation.push(svc.__held.reason);
+                // A held one-time job whose admin notification was raised is the
+                // office's task there, not a call review: no review state, no
+                // confirm-before-dispatch note. Without it, the fallback card sets both.
+                const agreedJobTaskRaised = svc.__held.reason === 'agreed_one_time_job_office_books' && agreedJobAlerted;
+                if (!agreedJobTaskRaised && !bridgeNeedsConfirmation.includes(svc.__held.reason)) bridgeNeedsConfirmation.push(svc.__held.reason);
               } else if (svc && svc.__makeup) {
                 // The booking transaction found a missed recurring visit and
                 // inserted nothing: move it now, or hold (never a new visit).
