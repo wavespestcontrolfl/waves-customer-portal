@@ -366,17 +366,26 @@ const DETECTORS = Object.freeze([
     // estimate's line, not each of its visits: one record per line, however many of its visits are in the window.
     key: 'tier_saving_left_off_invoice',
     moving: true,
-    label: 'Upcoming visits whose invoice would leave out the WaveGuard tier saving their estimate priced',
+    label: 'Upcoming visits whose invoice would not print their estimate\'s WaveGuard tier line',
     href: '/admin/invoices',
     provenance: 'owner 2026-11-22 — 0 of 163 upcoming tier visits printed the WaveGuard line after GATE_INVOICE_ESTIMATE_DISCOUNT_LINES went on (#8329, #8343; fixed in #8355)',
     async run({ now }) {
       const { tierSavingsLeftOffInvoices } = require('./invoice-tier-line-check');
       const { checked, findings } = await tierSavingsLeftOffInvoices(db, { today: etDateString(now) });
+      // One finding per estimate line (pre-push audit: per visit, a line's first record counted each of its visits):
+      // its first visit in the window, and how many of its visits are there.
+      const lines = new Map();
+      for (const f of findings) {
+        const key = `${f.estimateId}:${f.serviceKey}`;
+        if (lines.has(key)) lines.get(key).visits += 1;
+        else lines.set(key, { ...f, visits: 1 });
+      }
+      const byLine = [...lines.entries()];
       return {
-        count: findings.length,
-        ids: findings.map((f) => `${f.visitId} (${f.serviceKey}, ${f.tier})`),
-        itemKeys: findings.map((f) => `${f.estimateId}:${f.serviceKey}`),
-        detail: { checked },
+        count: byLine.length,
+        ids: byLine.map(([, f]) => `${f.visitId} (${f.serviceKey}, ${f.tier}, ${f.visits} visit${f.visits === 1 ? '' : 's'})`),
+        itemKeys: byLine.map(([key]) => key),
+        detail: { checked, visits: findings.length },
       };
     },
   },

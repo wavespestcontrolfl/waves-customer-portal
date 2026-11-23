@@ -1,5 +1,6 @@
 'use strict';
-// Upcoming visits whose invoice would leave out the WaveGuard tier saving their estimate priced.
+// Upcoming visits whose invoice would not print their estimate's WaveGuard tier line: the saving left unnamed, or a
+// WaveGuard line that does not name the tier.
 //
 // Owner 2026-11-22: GATE_INVOICE_ESTIMATE_DISCOUNT_LINES went on, and the owner opened two customers' invoices to see
 // the new lines. None printed: 0 of 163 upcoming estimate-booked visits named the WaveGuard tier, because the invoice
@@ -7,7 +8,8 @@
 // #8343; fixed in #8355). The owner found it himself. This detector finds that kind of miss without him: an upcoming
 // visit whose invoice keeps its saving unnamed (completion-pricing.js acceptedVisitBreakdown: reason discount_unnamed,
 // or lines with no WaveGuard row), while the invoice's own pricing of the line it matched names the tier once it is
-// given the tier the estimate's own engine line recorded.
+// given the tier the estimate's own engine line recorded; or whose invoice prints a WaveGuard line that does not name
+// that tier.
 //
 // The witness is the engine's record: the tier and the rate it applied to that line, which the estimate's other records
 // must not contradict. An estimate saved with no engine lines (the admin estimate tool's mapped result) has only its
@@ -100,39 +102,52 @@ function recordsTier(estimate, data, block, record) {
   return saved === null || Math.abs(saved - record.rate) <= 1e-9 ? { tier, rate: record.rate } : null;
 }
 
-const printsTier = (breakdown) => list(breakdown?.discounts).some((row) => /^WaveGuard\b/.test(String(row.name || '')));
+const tierRows = (discounts) => list(discounts).filter((row) => /^WaveGuard\b/.test(String(row.name || '')));
 
-// One visit: a finding { visitId, estimateId, serviceKey, tier } or null.
-async function visitFinding(conn, visit) {
-  const { acceptedVisitBreakdown, acceptedPricing, estimateDiscountContext, staffDiscountOnRecurring } = require('./completion-pricing');
-  const { breakdown, reason, estimate, line } = await acceptedVisitBreakdown(visit, { database: conn });
-  if (breakdown ? printsTier(breakdown) : reason !== 'discount_unnamed') return null;
+// The witness for the line the invoice matched: its service, and the tier and rate the estimate's own records name for
+// it. Null when they name none or disagree, and when the invoice names no tier by design (completion-pricing.js
+// estimateDiscountContext, savedEstimateTier): a staff discount reaches recurring work in any saved shape, or the
+// legacy nested block also supplies service rows.
+function lineWitness(estimate, line, data) {
   const row = object(line?.sourceLine);
   // The service of the saved row the invoice matched: the row's own, else the key the schedule matched it to (as the
   // invoice reads it, completion-pricing.js namingTier). Never the visit's label.
   const serviceKey = line ? require('../routes/estimate-public').recurringServiceKey({ ...row, service: row.service || line.serviceKey || undefined }) : null;
-  if (!estimate || !serviceKey) return null;
-  const data = parsed(estimate.estimate_data);
+  if (!serviceKey) return null;
   const { block, lineItems } = pricingRecords(data);
-  // The invoice names no tier by design (completion-pricing.js estimateDiscountContext, savedEstimateTier) when a staff
-  // discount reaches recurring work in any saved shape, or when the legacy nested block also supplies service rows.
   const nested = object(object(object(data.result || data).results).recurring);
-  if (staffDiscountOnRecurring(data, block) || list(nested.services).length) return null;
+  if (require('./completion-pricing').staffDiscountOnRecurring(data, block) || list(nested.services).length) return null;
   const record = lineItems.length ? engineTierRecord(lineItems, serviceKey) : NO_ENGINE_RECORD;
-  const witness = record ? recordsTier(estimate, data, block, record) : null;
+  const named = record ? recordsTier(estimate, data, block, record) : null;
+  return named ? { serviceKey, ...named } : null;
+}
+
+// One visit: a finding { visitId, estimateId, serviceKey, tier } or null.
+async function visitFinding(conn, visit) {
+  const { acceptedVisitBreakdown, acceptedPricing, estimateDiscountContext, waveGuardTierName } = require('./completion-pricing');
+  const { breakdown, reason, estimate, line } = await acceptedVisitBreakdown(visit, { database: conn });
+  if ((!breakdown && reason !== 'discount_unnamed') || !estimate) return null;
+  const data = parsed(estimate.estimate_data);
+  const witness = lineWitness(estimate, line, data);
   if (!witness) return null;
+  const tierName = waveGuardTierName(witness.tier);
+  const finding = { visitId: String(visit.id), estimateId: String(estimate.id), serviceKey: witness.serviceKey, tier: witness.tier };
+  // A WaveGuard line the invoice prints must name the estimate's tier. A line whose own record names no tier prints a
+  // bare "WaveGuard" (pre-push audit): the tier is left off, and the invoice's pricing would print the same again.
+  const printed = tierRows(breakdown?.discounts);
+  if (printed.length) return printed.some((row) => row.name === tierName) ? null : finding;
   // The invoice's own pricing of the matched line, in the invoice's own discount context, with only its tier reading
   // (savedEstimateTier) replaced by the witness's tier and rate.
   const context = estimateDiscountContext({ ...estimate, estimate_data: data });
   const quote = acceptedPricing(line, { ...context, estimateTier: { tier: witness.tier, amount: witness.rate } });
-  const named = quote.discounts.length > 0 && quote.discounts.every((d) => d.named) && printsTier(quote);
-  return named ? { visitId: String(visit.id), estimateId: String(estimate.id), serviceKey, tier: witness.tier } : null;
+  const named = quote.discounts.length > 0 && quote.discounts.every((d) => d.named) && quote.discounts.some((d) => d.name === tierName);
+  return named ? finding : null;
 }
 
 /**
- * The upcoming visits (today through `days` ahead, Eastern) whose invoice would leave out the WaveGuard tier saving
- * their estimate priced. Returns { checked, findings: [{ visitId, estimateId, serviceKey, tier }] }. A visit that cannot
- * be read throws: a check that did not run proves nothing.
+ * The upcoming visits (today through `days` ahead, Eastern) whose invoice would not print their estimate's WaveGuard
+ * tier line. Returns { checked, findings: [{ visitId, estimateId, serviceKey, tier }] }, one per visit. A visit that
+ * cannot be read throws: a check that did not run proves nothing.
  */
 async function tierSavingsLeftOffInvoices(conn, { today, days = LOOK_AHEAD_DAYS } = {}) {
   if (!require('../config/feature-gates').invoiceEstimateDiscountLinesLive()) return { checked: 0, findings: [] };

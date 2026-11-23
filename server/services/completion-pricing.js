@@ -602,4 +602,4 @@ async function acceptedVisitBreakdown(service, { database = db, firstApplication
 
 module.exports = { MONEY_FIELDS, visitPriceDecisionRecorded, loadCompletionPricing, prepareCompletionPricingReview, lockCompletionPricingEstimate,
   commitCompletionPricingReview, lockCompletionPricingParent, committedCompletionPrice, acceptedPricing, acceptedVisitBreakdown,
-  matchServiceLine, propertyMatches, money, estimateDiscountContext, staffDiscountOnRecurring };
+  matchServiceLine, propertyMatches, money, estimateDiscountContext, staffDiscountOnRecurring, waveGuardTierName };

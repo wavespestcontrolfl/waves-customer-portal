@@ -932,12 +932,13 @@ describe('detector adapters', () => {
     ] });
     const out = await byKey('tier_saving_left_off_invoice').run({ now: NOW });
     expect(tierSavingsLeftOffInvoices).toHaveBeenCalledWith(db, { today: '2026-06-15' });
+    // Two visits of one estimate line are one finding, counted once in its first record (pre-push audit), and a new
+    // visit of that line entering the window posts nothing new.
     expect(out).toEqual({
-      count: 3,
-      ids: ['v1 (pest_control, platinum)', 'v2 (pest_control, platinum)', 'v3 (rodent_bait, silver)'],
-      // Two visits of one estimate line are one finding: a new visit of that line entering the window posts nothing new.
-      itemKeys: ['e1:pest_control', 'e1:pest_control', 'e2:rodent_bait'],
-      detail: { checked: 40 },
+      count: 2,
+      ids: ['v1 (pest_control, platinum, 2 visits)', 'v3 (rodent_bait, silver, 1 visit)'],
+      itemKeys: ['e1:pest_control', 'e2:rodent_bait'],
+      detail: { checked: 40, visits: 3 },
     });
     const r = { key: 'tier_saving_left_off_invoice', itemKeys: out.itemKeys, count: out.count };
     expect(itemHashes(r, NOW)).toHaveLength(2);

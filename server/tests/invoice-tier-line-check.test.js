@@ -105,10 +105,23 @@ describe('tierSavingsLeftOffInvoices', () => {
     expect(await withData({ summary: { manualDiscount: { amount: 5, recurringAmount: 0, label: 'Courtesy' } } })).toHaveLength(1);
   });
 
-  test('an invoice that names the tier is not read; lines that name only another discount are', async () => {
-    expect(await findingsFor(lines('WaveGuard Gold'))).toEqual([]);
+  // Pre-push audit P1 (round 6): a row whose own tier record names no tier prints a bare "WaveGuard" line. The
+  // invoice's pricing would print the same again, so a printed line is judged by its name, not asked again.
+  test('a printed WaveGuard line must name the estimate\'s tier; a bare or another tier\'s label is a finding', async () => {
+    const tierless = { ...pestRow, discount: { appliedDiscounts: [{ type: 'waveguard', amount: 0.15 }] } };
+    expect(acceptedPricing(scheduleLine(tierless), {}).discounts.map((d) => d.name)).toEqual(['WaveGuard']);
+    jest.clearAllMocks();
+    const printed = (...names) => ({ ...lines(...names), estimate: estimate(), line: scheduleLine() });
+    expect(await findingsFor(printed('WaveGuard Gold'))).toEqual([]);
+    expect(await findingsFor(printed('WaveGuard Gold', 'Courtesy'))).toEqual([]);
+    expect(await findingsFor(printed('WaveGuard'))).toEqual([{ visitId: 'v1', estimateId: 'e1', serviceKey: 'pest_control', tier: 'gold' }]);
+    expect(await findingsFor(printed('WaveGuard Silver'))).toHaveLength(1);
     expect(acceptedPricing).not.toHaveBeenCalled();
-    expect(await findingsFor({ ...lines('Courtesy'), estimate: estimate(), line: scheduleLine() })).toHaveLength(1);
+    // No witness (the records name another tier): no finding.
+    expect(await findingsFor({ ...printed('WaveGuard'), estimate: estimate({ tier: 'Silver' }) })).toEqual([]);
+    // Lines that name only another discount are asked of the invoice's pricing.
+    expect(await findingsFor(printed('Courtesy'))).toHaveLength(1);
+    expect(acceptedPricing).toHaveBeenCalledTimes(1);
   });
 
   test.each(['no_discount', 'price_changed', 'not_priced', 'own_price_or_discount', 'prepaid', 'line_unmatched', 'line_ambiguous'])(
