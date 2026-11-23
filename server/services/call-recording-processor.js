@@ -1958,7 +1958,9 @@ function callEmailCheckCardPayload(callEmailCheck) {
 // awaited from inside the caller's own db.transaction (this opens its own).
 // GATE_CALL_AGREED_ONE_TIME_JOB: the office card's evidence, written whole by
 // every pass (so no older pass's details stay). `scheduledDate` / `windowStart`:
-// the slot the booker resolved (Eastern), never the raw timestamp. `price`:
+// the slot the booker resolved (Eastern), never the raw timestamp, and always on
+// the hour (an off-hour start stops at the on-hour guard or V2 routing first,
+// which file main's off-hour card). `price`:
 // agreedOneTimeJobCardPrice. `followUpPlan`: resolveCallFollowUpPlan's visit 2.
 // `streetLevelAddress`: Google matched only the street of it ('' = the address
 // on file). `bookingAddress`: the address the booking resolved (null: none).
@@ -1968,8 +1970,6 @@ function buildAgreedJobCardEvidence({ scheduledDate = null, windowStart = null, 
     booking_address: bookingAddress && bookingAddress.line1 ? bookingAddress : null,
     booking_date: scheduledDate || null,
     booking_window_start: windowStart || null,
-    // Visits start on the hour: a time the call set at :30 is for staff to confirm.
-    booking_off_hour: offTheHour(windowStart),
     stated_price: price ? price.amount : null,
     price_basis: price ? price.basis : null,
     // A follow-up the call did not set (the catalog interval, visit 1's hour, or
@@ -20866,17 +20866,6 @@ const CallRecordingProcessor = {
                     scheduled_date: scheduledDate,
                     window_start: windowStart,
                     service_type: serviceType,
-                    // GATE_CALL_AGREED_ONE_TIME_JOB: a held one-time job at an off-hour
-                    // time is booked from THIS card (the hold never runs), so it carries
-                    // the job's evidence too.
-                    ...(agreedJobHeldForOffice ? {
-                      agreed_one_time_job: buildAgreedJobCardEvidence({
-                        scheduledDate, windowStart, price: agreedJobCardPrice,
-                        followUpPlan: isReServiceCatalogRow(callBookingCatalogRow) ? null : resolveCallFollowUpPlan({
-                          extracted: bookingExtracted, catalogRow: callBookingCatalogRow, parentDate: scheduledDate, parentWindowStart: windowStart,
-                        }),
-                      }),
-                    } : {}),
                   },
                 }))
                 .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))

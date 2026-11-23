@@ -409,7 +409,6 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     expect(source).toContain("streetLevelAddress: streetLevelPending ? String(v2StreetLevelHold?.address_on_file || '') : null,\n                      bookingAddress: propertyLinkage.address");
     expect(builder).toContain('booking_window_start: windowStart || null,');
     // Visits start on the hour: an off-hour time the call set is flagged for staff to confirm.
-    expect(builder).toContain('booking_off_hour: offTheHour(windowStart),');
     expect(builder).toContain('off_hour: offTheHour(followUpPlan.windowStart) }');
     expect(builder).toContain('stated_price: price ? price.amount : null,');
     expect(builder).toContain('price_basis: price ? price.basis : null,');
@@ -490,16 +489,13 @@ describe('processRecording booking — agreed one-time job (GATE_CALL_AGREED_ONE
     for (const gone of ['agreedJobPriorByKey', 'agreedJobFollowUpWithheld', 'kept_visit_id']) expect(source).not.toContain(gone);
   });
 
-  // A held job at an off-hour time is stopped by the on-hour guard first (the hold never runs), so the guard's own
-  // card carries the job's evidence; the guard itself is unchanged.
-  test('the off-hour card carries the held job\'s evidence', () => {
+  // An off-hour start never reaches the hold: the on-hour guard (or V2 routing) stops it first and files main's
+  // off-hour card, unchanged. So the card's first-visit slot is always on the hour.
+  test('the off-hour path stays main\'s', () => {
     const at = source.indexOf("flag: 'off_hour_start',\n                  extraction: v2ApprovedExtraction || undefined,");
     expect(at).toBeGreaterThan(-1);
-    const card = source.slice(at, source.indexOf('scheduledDate = null;', at));
-    expect(card).toContain('...(agreedJobHeldForOffice ? {\n                      agreed_one_time_job: buildAgreedJobCardEvidence({');
-    expect(card).toContain('scheduledDate, windowStart, price: agreedJobCardPrice,');
-    // agreedJobHeldForOffice and its price exist before the guard.
-    expect(source.indexOf('const agreedJobCardPrice = agreedJobHeldForOffice')).toBeLessThan(at);
+    expect(source.slice(at, source.indexOf('scheduledDate = null;', at))).not.toContain('agreed_one_time_job');
+    expect(source).not.toContain('booking_off_hour');
   });
 
   test('offTheHour: true only for a start that is not on the hour', () => {

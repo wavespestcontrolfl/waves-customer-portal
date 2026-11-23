@@ -133,9 +133,7 @@ function textNumberRows(p, livePhone) {
 // priced on the call. Its evidence is one key (agreed_one_time_job), written on every pass, so old details never stay.
 // It says what the call agreed; the schedule, not the card, says whether the visit exists yet.
 function agreedOneTimeJobRows(p) {
-  // Its own card, or the off-hour card when the job's time was not on the hour (the hold never ran).
-  const offHourCard = !p.skipped_reason && p.flag === "off_hour_start" && p.agreed_one_time_job && typeof p.agreed_one_time_job === "object";
-  if (p.skipped_reason !== "agreed_one_time_job_office_books" && !offHourCard) return [];
+  if (p.skipped_reason !== "agreed_one_time_job_office_books") return [];
   const j = p.agreed_one_time_job && typeof p.agreed_one_time_job === "object" ? p.agreed_one_time_job : {};
   const slot = (date, time) => `${String(date).slice(0, 10)}${time ? ` at ${String(time).slice(0, 5)}` : ""}`;
   const price = typeof j.stated_price === "number" ? fmtMoney(j.stated_price) : null;
@@ -151,7 +149,7 @@ function agreedOneTimeJobRows(p) {
     { label: "Book at", value: j.booking_address && j.booking_address.line1
       ? [j.booking_address.line1, j.booking_address.line2, j.booking_address.city, j.booking_address.state, j.booking_address.zip].filter((v) => String(v || "").trim()).join(", ")
       : "No address resolved: confirm the service address with the customer before you book." },
-    j.booking_date && { label: "Agreed time", value: `${slot(j.booking_date, j.booking_window_start)} ET${j.booking_off_hour === true ? ". Visits start on the hour: confirm an on-hour start with the customer." : ""}` },
+    j.booking_date && { label: "Agreed time", value: `${slot(j.booking_date, j.booking_window_start)} ET` },
     typeof j.street_level_address === "string" && { label: "Address", value: `Google matched only the street of ${j.street_level_address || "the address on file"}. Confirm the house number with the customer before you book.` },
     price && (j.price_basis === "agreed_total"
       ? { label: "Agreed price", value: `${price} one-time, the total the caller accepted on the call.` }
