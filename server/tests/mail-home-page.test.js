@@ -74,6 +74,11 @@ describe('getHomePage', () => {
     expect(Object.keys(page).sort()).toEqual(['address', 'plan', 'price']);
   });
 
+  test('the monthly price is rounded from whole cents (301.02 / 12 = 25.085 is 25.09, not the float 25.08)', async () => {
+    mockRow = row({ price_annual: '301.02' });
+    expect((await getHomePage(TOKEN)).price.monthly).toBe(25.09);
+  });
+
   test('held back, or not priced: price null, address still there', async () => {
     for (const over of [{ status: 'held_back' }, { price_status: 'missing_fact', price_annual: null, price_setup_fee: null, priced_at: null },
       { price_status: null, price_annual: null, price_setup_fee: null, priced_at: null }]) {

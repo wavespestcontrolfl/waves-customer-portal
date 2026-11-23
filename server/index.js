@@ -264,6 +264,10 @@ app.use('/api/public/watering-plan', (req, res, next) => {
   }
   next();
 });
+// New-home postcard page (GATE_MAIL_HOME_PAGE, dark): privacy headers on every outcome, and the generic 404 while dark,
+// for any method but GET/HEAD (an OPTIONS preflight included) and for a path that is not one page token. It sits
+// BEFORE the wildcard CORS handler below, the global /api limiter (429) and the body parsers, like the watering plan.
+app.use('/api/public/home', require('./routes/mail-home-public').preLimiterGuard);
 // Public, embeddable endpoints must be CORS-open to ANY origin and must answer
 // their own preflights BEFORE the credentialed allowlist below — the cors()
 // middleware terminates OPTIONS for non-allowlisted origins without an
@@ -523,9 +527,6 @@ app.use('/api/public/track', require('./middleware/track-public-preparser').trac
 // outcome, the GLOBAL /api limiter's 429s and the body parsers' 400s included, and while dark
 // the generic 404 page before either of them (same reasoning as secure-card above).
 app.use('/api/public/email-resubscribe', require('./routes/public-email-resubscribe').preParserGuard);
-// New-home page (GATE_MAIL_HOME_PAGE, dark): privacy headers on every outcome, the GLOBAL /api limiter's 429s included,
-// and while dark (or for a path that is not one page token) the generic 404 before the limiter and the body parsers.
-app.use('/api/public/home', require('./routes/mail-home-public').preLimiterGuard);
 // The public agent surfaces (MCP + A2A) carry the same unobservable-when-
 // dark contract as the funnels above: while their gates are off they must
 // read 404 even for an IP that already exhausted the global /api/ limiter
