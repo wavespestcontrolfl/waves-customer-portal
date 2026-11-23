@@ -1337,7 +1337,11 @@ async function voidRun(runId, input, actor, conn = db) {
     const { banked, paidOut, keptPaidOut } = run.status === 'finalized'
       ? await bankDecisionsOfRun(trx, run) : { banked: [], paidOut: [], keptPaidOut: [] };
     if (await timeOffBank.laterBankCheckExists(trx, run, banked) || await timeOffBank.laterUnpaidDecisionExists(trx, run, banked)
-      || await timeOffBank.laterPayoutDecisionExists(trx, run, banked) || await timeOffBank.laterWeekBankCheckExists(trx, run, paidOut)) {
+      // The payout guard asks every technician with a final check here, as finalizeRun does: the redo of a plain check
+      // on its own pay date would be refused under that payout. A draft decided nothing.
+      || await timeOffBank.laterPayoutDecisionExists(trx, run, run.status === 'finalized'
+        ? [...new Set([...banked, ...rows.map((row) => row.technician_id)])] : banked)
+      || await timeOffBank.laterWeekBankCheckExists(trx, run, paidOut)) {
       throw new PayrollError(409, 'A later pay run is already final. Void it first.');
     }
     // The void puts the payouts this run paid back on its week. It waits while one is set for another week now.

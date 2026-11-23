@@ -1351,6 +1351,21 @@ postgres('payroll time-off bank', () => {
       expect(byName(late.body.run, 'Sample Alpha').timeOffBank).toMatchObject({ earnedHours: '4.65', paidOutHours: '4.65' });
     });
 
+    it('does not void a plain check under a later empty payout: its redo on the same pay date could not be made final', async () => {
+      const id = await tech('Sample Alpha');
+      const other = await tech('Sample Bravo');
+      // Week 1: a plain check (no bank yet). Then Alpha gets a bank and leaves: the payout of week 2 is empty.
+      await worked(id, W1);
+      const first = await draftAndFinalize(W1);
+      expect(byName(first, 'Sample Alpha').timeOffBank).toBeUndefined();
+      expect((await api('PUT', `/technicians/${id}/pto-allowance`, { body: { hoursPerYear: 80 } })).status).toBe(200);
+      expect((await payOut(id, W2)).status).toBe(200);
+      await worked(other, W2);
+      expect((await draftAndFinalize(W2)).bankPayouts).toEqual([{ technicianId: id, name: 'Sample Alpha', hours: '0.00' }]);
+      const undo = await api('POST', `/runs/${first.id}/void`, { body: { reason: 'Redo' } });
+      expect([undo.status, undo.body.error]).toEqual([409, 'A later pay run is already final. Void it first.']);
+    });
+
     it('counts only the catch-up checks of the same payout: a late week of the first time on the job does not cut the second', async () => {
       const id = await tech('Sample Alpha', { hours: '80' });
       // The first time on the job ends with the payout of week 2 (1.54 hours).
@@ -2066,8 +2081,8 @@ postgres('payroll time-off bank', () => {
         later.mockResolvedValueOnce(true);
         const voided = await api('POST', `/runs/${run.id}/void`, { body: { reason: 'Redo' } });
         expect([voided.status, voided.body.error]).toEqual([409, 'A later pay run is already final. Void it first.']);
-        // Asked about the technicians whose check holds a bank, not the others.
-        expect(later.mock.calls[0][2]).toEqual([id]);
+        // Asked about every technician with a check here, as finalize asks: a plain check too.
+        expect([...later.mock.calls[0][2]].sort()).toEqual([id, plain].sort());
         expect((await api('POST', `/runs/${run.id}/void`, { body: { reason: 'Redo' } })).status).toBe(200);
       } finally {
         later.mockRestore();
