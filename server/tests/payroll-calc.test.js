@@ -324,7 +324,7 @@ describe('computePaycheck: paid time off and holidays (GATE_PAYROLL_TIME_OFF)', 
 describe('computePaycheck: minimum paid week (payroll-week-minimum.js)', () => {
   test('pays the minimum hours at the straight rate, in gross and taxed with it, never as overtime', () => {
     // 32 h worked + 8 h of minimum at $21.00: the same gross and taxes as 40 h worked, no overtime pay.
-    const result = paycheck({ hourlyRate: '21.00', regularMinutes: '1920.00', ptoMinutes: 0, holidayMinutes: 0, minimumWeekMinutes: '480.00' });
+    const result = paycheck({ hourlyRate: '21.00', regularMinutes: '1920.00', ptoMinutes: 0, holidayMinutes: 0, minimumWeekMinutes: '480.00', minimumWeekTargetMinutes: '2400.00' });
     const asWorked = paycheck({ hourlyRate: '21.00', regularMinutes: '2400.00', ptoMinutes: 0, holidayMinutes: 0 });
     expect(result.minimumWeekPayCents).toBe(16800);
     expect(result.overtimePayCents).toBe(0);
@@ -337,14 +337,21 @@ describe('computePaycheck: minimum paid week (payroll-week-minimum.js)', () => {
   test('never falls a cent short of the guarantee when each line rounds on its own', () => {
     // $22.33: 1.01 h worked + 1.01 h of paid time off + 37.98 h added. Priced line by line: 22.55 + 22.55 + 848.09 =
     // 893.19; 40 h x $22.33 = 893.20. The added line takes the cent.
-    const result = paycheck({ hourlyRate: '22.33', regularMinutes: '60.60', ptoMinutes: '60.60', holidayMinutes: 0, minimumWeekMinutes: '2278.80' });
+    const result = paycheck({ hourlyRate: '22.33', regularMinutes: '60.60', ptoMinutes: '60.60', holidayMinutes: 0, minimumWeekMinutes: '2278.80', minimumWeekTargetMinutes: '2400.00' });
     expect(result.minimumWeekPayCents).toBe(84810);
     expect(result.regularPayCents + result.ptoPayCents + result.minimumWeekPayCents).toBe(89320);
   });
 
+  test('pays the cent the lines round away when the hours on file meet the guarantee exactly', () => {
+    // $22.33: 30.10 h + 0.53 h + 9.37 h = 40 h, priced line by line 672.13 + 11.83 + 209.23 = 893.19 < 893.20.
+    const result = paycheck({ hourlyRate: '22.33', regularMinutes: '1806.00', ptoMinutes: '31.80', holidayMinutes: '562.20', minimumWeekMinutes: '0', minimumWeekTargetMinutes: '2400.00' });
+    expect(result.minimumWeekPayCents).toBe(1);
+    expect(result.grossPayCents).toBe(89320);
+  });
+
   test('hours a payout paid out do not count toward the guarantee', () => {
     // 30 h worked + 50 h paid out at leaving + 10 h added: gross = 40 h + the 50 h payout.
-    const result = paycheck({ hourlyRate: '21.00', regularMinutes: '1800.00', ptoMinutes: '3000.00', holidayMinutes: 0, minimumWeekMinutes: '600.00', minimumWeekPayoutMinutes: '3000.00' });
+    const result = paycheck({ hourlyRate: '21.00', regularMinutes: '1800.00', ptoMinutes: '3000.00', holidayMinutes: 0, minimumWeekMinutes: '600.00', minimumWeekTargetMinutes: '2400.00', minimumWeekPayoutMinutes: '3000.00' });
     expect(result.minimumWeekPayCents).toBe(21000);
     expect(result.grossPayCents).toBe(84000 + 105000);
   });

@@ -211,6 +211,22 @@ postgres('payroll minimum paid week', () => {
     expect(byName((await draft(W1)).body.run, 'Sample Alpha')).toMatchObject({ minimumWeekHours: '25.00' });
   });
 
+  it('a later weekly timesheet with worked minutes means the week is not the last one', async () => {
+    const id = await tech('Sample Alpha', { employment_status: 'inactive' });
+    await worked(id, W1, 15);
+    await worked(id, addDays(W1, 7), 8);
+    await trx('time_entry_daily_summary').insert({ technician_id: id, work_date: addDays(W1, 1), total_shift_minutes: 900 });
+    expect(byName((await draft(W1)).body.run, 'Sample Alpha')).toMatchObject({ minimumWeekHours: '25.00' });
+  });
+
+  it('lists an employee who has left while a minimum is set, so it can be cleared', async () => {
+    const id = await tech('Sample Alpha', { employment_status: 'inactive' });
+    const gone = await tech('Sample Bravo', { employment_status: 'inactive', minimum: null });
+    const listed = (await api('GET', '/technicians')).body.technicians.map((row) => row.id);
+    expect(listed).toContain(id);
+    expect(listed).not.toContain(gone);
+  });
+
   it('holds a last week with paid hours and no dated day on file, with a reason', async () => {
     const id = await tech('Sample Alpha', { employment_status: 'inactive' });
     await worked(id, W1, 15);

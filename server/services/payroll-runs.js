@@ -308,6 +308,7 @@ function buildCheck({
       ...(withTimeOff ? { ptoMinutes, holidayMinutes } : {}),
       ...(withMinimum ? {
         minimumWeekMinutes: tech.minimum_week_minutes,
+        minimumWeekTargetMinutes: tech.minimum_week_target_minutes || 0,
         minimumWeekPayoutMinutes: (tech.pto_bank && tech.pto_bank.payoutMinutes) || 0,
       } : {}),
       ytdGrossWages: centsText(ytdGrossCents),

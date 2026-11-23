@@ -480,7 +480,12 @@ export default function PayrollSettings() {
         </TR></THead>
         <TBody>
           {technicians.map(tech => <TR key={tech.id}>
-            <TD>{tech.name}{tech.employmentStatus === 'prospective' && <span className="block text-ui-caption text-ink-secondary">Not started</span>}</TD>
+            <TD>
+              {tech.name}
+              {tech.employmentStatus === 'prospective' && <span className="block text-ui-caption text-ink-secondary">Not started</span>}
+              {/* Listed while a minimum paid week is set, so it can be cleared after the last week is paid. */}
+              {tech.employmentStatus === 'inactive' && <span className="block text-ui-caption text-ink-secondary">Left: clear the minimum once the last week is paid</span>}
+            </TD>
             <TD nums>{tech.payRate != null ? `${dollars(tech.payRate)}/hr` : 'Not set'}</TD>
             <TD>{payMethodLabel(tech)}</TD>
             <TD><W4Summary w4={tech.currentW4} /></TD>

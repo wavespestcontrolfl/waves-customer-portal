@@ -240,9 +240,12 @@ async function setPayMethod(technicianId, input, actor, conn = db) {
 // panel, GATE_PAYROLL_TIME_OFF) adds an employee who has left (employment_status inactive) and still has a
 // time-off bank setting: the owner settles that bank after the employee is marked inactive ("Pay out the
 // bank"), so the panel must still list them.
-const listedEmployees = (query, formerWithBank) => query.where({ employment_type: 'w2' }).where(function listed() {
+// With time off on, an employee who has left stays listed while a minimum paid week is set, so the owner can clear
+// it (payroll-week-minimum.js holds a last week it cannot count).
+const listedEmployees = (query, formerWithBank, withMinimum) => query.where({ employment_type: 'w2' }).where(function listed() {
   this.whereIn('employment_status', ['active', 'prospective']);
   if (formerWithBank) this.orWhereNotNull('pto_hours_per_year');
+  if (withMinimum) this.orWhereNotNull('paid_week_minimum_hours');
 });
 
 async function listPayrollTechnicians(conn = db, formerWithBank) {
@@ -255,7 +258,7 @@ async function listPayrollTechnicians(conn = db, formerWithBank) {
   const withFamily = typeof payrollFamilyEmployeeLive === 'function' && payrollFamilyEmployeeLive();
   // GATE_PAYROLL_MERCURY_STATUS: the Mercury recipient id rides on each row (null = not entered).
   const withMercury = typeof payrollMercuryStatusLive === 'function' && payrollMercuryStatusLive();
-  const rows = await listedEmployees(conn('technicians'), formerWithBank)
+  const rows = await listedEmployees(conn('technicians'), formerWithBank, withTimeOff)
     .orderBy('name')
     .select('id', 'name', 'pay_rate', 'pay_method', 'employment_status',
       ...(withTimeOff ? ['pto_hours_per_year', 'paid_week_minimum_hours'] : []),

@@ -28,7 +28,8 @@ const SCHEDULED_DAYS = 4;
 const hundredths = (minutes) => Math.round(Number(minutes || 0) * 100);
 
 /**
- * The minutes the minimum adds to one technician's week, pure. All inputs are minutes (numbers or decimal strings).
+ * The minutes the minimum guarantees in one technician's week (`target`, the minimum less unpaid time off) and the
+ * minutes it adds to the hours on file (`added`), pure. All inputs are minutes (numbers or decimal strings).
  *   minimumHours   the weekly minimum (the setting)
  *   weekStart      the Monday of the pay week ('YYYY-MM-DD')
  *   hireDate       day 1 of the job, or null (every scheduled day counts)
@@ -37,7 +38,7 @@ const hundredths = (minutes) => Math.round(Number(minutes || 0) * 100);
  *   paidMinutes    worked (regular + overtime), paid time off (not a payout) and paid holiday minutes of the week
  *   unpaidMinutes  time-off minutes of the week that were not paid (not those before the hire date)
  */
-function minimumTopUpMinutes({ minimumHours, weekStart, hireDate = null, lastDay, paidMinutes, unpaidMinutes = 0 }) {
+function minimumWeekMinutes({ minimumHours, weekStart, hireDate = null, lastDay, paidMinutes, unpaidMinutes = 0 }) {
   let days = 0;
   for (let n = 0; n < SCHEDULED_DAYS; n += 1) {
     const day = addStaffWorkDays(weekStart, n);
@@ -45,12 +46,13 @@ function minimumTopUpMinutes({ minimumHours, weekStart, hireDate = null, lastDay
     if (lastDay !== undefined && (lastDay === null || day > lastDay)) continue;
     days += 1;
   }
-  const target = Math.round((hundredths(Number(minimumHours) * 60) * days) / SCHEDULED_DAYS);
-  return Math.max(0, target - hundredths(unpaidMinutes) - hundredths(paidMinutes)) / 100;
+  const target = Math.max(0, Math.round((hundredths(Number(minimumHours) * 60) * days) / SCHEDULED_DAYS) - hundredths(unpaidMinutes));
+  return { target: target / 100, added: Math.max(0, target - hundredths(paidMinutes)) / 100 };
 }
 
 // Per technician among `ids`: the last day of the week [start, end] with recorded work or time off ('YYYY-MM-DD' or
-// null), and whether anything is recorded after the week. Map of id -> { lastDay, after }.
+// null), and whether anything is recorded after the week (also a later weekly timesheet with worked minutes, which
+// payroll pays without dated days). Map of id -> { lastDay, after }.
 async function recordedDays(conn, ids, start, end) {
   const byTech = new Map(ids.map((id) => [id, { lastDay: null, after: false }]));
   if (!ids.length) return byTech;
@@ -78,6 +80,12 @@ async function recordedDays(conn, ids, start, end) {
     .whereRaw(STAFF_DAILY_WORK_SQL)
     .groupBy('technician_id')
     .select('technician_id', ...summarize('work_date')));
+  keep(await conn('time_weekly_summary')
+    .whereIn('technician_id', ids)
+    .where('week_start', '>', end)
+    .whereRaw('COALESCE(regular_minutes, 0) + COALESCE(overtime_minutes, 0) > 0')
+    .groupBy('technician_id')
+    .select('technician_id', conn.raw('NULL AS in_week'), conn.raw('true AS after')));
   keep(await conn('payroll_time_off')
     .whereIn('technician_id', ids)
     .where('work_date', '>=', start)
@@ -88,7 +96,7 @@ async function recordedDays(conn, ids, start, end) {
 
 const NO_LAST_DAY = 'This is the last week of an employee with a minimum paid week, and no day of it has a time entry, a '
   + 'daily summary or time off on file, so the days the minimum covers cannot be counted. Add the shifts, or clear '
-  + 'the minimum for this employee (Payroll settings).';
+  + 'the minimum for this employee (Payroll settings lists an employee who has left while a minimum is set).';
 
 /**
  * Sets `minimum_week_minutes` on each row (a pay run row: regular_minutes, overtime_minutes, pto_minutes,
@@ -126,7 +134,7 @@ async function applyMinimum(conn, rows, { start, end }) {
       holds.set(row.technician_id, NO_LAST_DAY);
       return row;
     }
-    const minimum = minimumTopUpMinutes({
+    const minimum = minimumWeekMinutes({
       minimumHours: tech.paid_week_minimum_hours,
       weekStart: start,
       hireDate: tech.hire_date,
@@ -134,9 +142,9 @@ async function applyMinimum(conn, rows, { start, end }) {
       paidMinutes,
       unpaidMinutes,
     });
-    return { ...row, minimum_week_minutes: minimum };
+    return { ...row, minimum_week_minutes: minimum.added, minimum_week_target_minutes: minimum.target };
   });
   return { rows: out, holds };
 }
 
-module.exports = { SCHEDULED_DAYS, NO_LAST_DAY, minimumTopUpMinutes, recordedDays, applyMinimum };
+module.exports = { SCHEDULED_DAYS, NO_LAST_DAY, minimumWeekMinutes, recordedDays, applyMinimum };

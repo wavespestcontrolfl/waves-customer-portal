@@ -1,10 +1,15 @@
-const { minimumTopUpMinutes, applyMinimum } = require('../services/payroll-week-minimum');
+const { minimumWeekMinutes, applyMinimum } = require('../services/payroll-week-minimum');
 
 // Week of Monday 2026-06-01 (Mon-Thu = 06-01..06-04). Minutes in, minutes out.
 const WEEK = '2026-06-01';
-const top = (over) => minimumTopUpMinutes({ minimumHours: '40', weekStart: WEEK, paidMinutes: 0, ...over });
+const top = (over) => minimumWeekMinutes({ minimumHours: '40', weekStart: WEEK, paidMinutes: 0, ...over }).added;
 
-describe('minimumTopUpMinutes', () => {
+describe('minimumWeekMinutes', () => {
+  test('the target is the minimum less unpaid time off, also when the week already reaches it', () => {
+    expect(minimumWeekMinutes({ minimumHours: '40', weekStart: WEEK, paidMinutes: 2400 })).toEqual({ target: 2400, added: 0 });
+    expect(minimumWeekMinutes({ minimumHours: '40', weekStart: WEEK, paidMinutes: 1200, unpaidMinutes: 600 })).toEqual({ target: 1800, added: 600 });
+  });
+
   test('tops a short full week up to the minimum', () => {
     expect(top({ paidMinutes: 1800 })).toBe(600); // 30 h worked -> 10 h added
   });
@@ -40,7 +45,7 @@ describe('minimumTopUpMinutes', () => {
   });
 
   test('a minimum below 40 is used as set', () => {
-    expect(minimumTopUpMinutes({ minimumHours: '32.5', weekStart: WEEK, paidMinutes: 1800 })).toBe(150);
+    expect(minimumWeekMinutes({ minimumHours: '32.5', weekStart: WEEK, paidMinutes: 1800 }).added).toBe(150);
   });
 });
 
