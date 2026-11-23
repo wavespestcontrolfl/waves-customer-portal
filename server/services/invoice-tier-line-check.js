@@ -18,7 +18,9 @@
 //   estimate's other records must not contradict. An estimate saved with no engine lines (the admin estimate tool's
 //   mapped result) has only its saved tier and rate, so those are read here on their own. The witness never comes from
 //   the invoice's own tier reading (savedEstimateTier), where the miss was. The line is then priced by the invoice's own
-//   pure pricing (acceptedPricing), in the invoice's own discount context with only that tier reading replaced, so every
+//   pure pricing (acceptedPricing), in the invoice's own discount context with only that tier reading replaced. Its tier
+//   row is the row that carries the tier's rate, whatever its name (a row whose own record names no tier prints a bare
+//   "WaveGuard"), and the matched row's own record must not name another tier. So every
 //   row rule that keeps one line on purpose (a service credit, a floor, a staff change to the row, a row's own net, rate
 //   or flags, a service the tier percentage skips) stays that code's rule. The two estimate rules of that tier reading
 //   that name no tier by design (a staff discount on recurring work, the legacy nested block) are read here: the first
@@ -36,9 +38,9 @@
 
 const LIVE_VISIT_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'];
 const DISCOUNTED_TIERS = ['silver', 'gold', 'platinum'];
-// The tier line names an invoice prints (owner 2026-11-22), written out here and not read from the invoice's own label
-// code (completion-pricing.js waveGuardTierName): a fault there would print and expect the same wrong name (pre-push
-// audit).
+// The tier line names an invoice prints (owner 2026-11-22), written out here: the check never reads a name from the
+// invoice's own label code (completion-pricing.js waveGuardTierName), where a fault would print and expect the same
+// wrong name (pre-push audit).
 const TIER_LINE_NAMES = { silver: 'WaveGuard Silver', gold: 'WaveGuard Gold', platinum: 'WaveGuard Platinum' };
 const LOOK_AHEAD_DAYS = 90;
 
@@ -171,19 +173,20 @@ function printedLabelMiss({ estimate, line, data, block, lineItems, serviceKey }
 // A saving the invoice leaves unnamed, that its own pricing of the matched line names, in its own discount context with
 // only its tier reading (savedEstimateTier) replaced by the witness's tier and rate. Not read when the invoice names no
 // tier by design (completion-pricing.js estimateDiscountContext, savedEstimateTier): a staff discount reaches recurring
-// work in any saved shape, or the legacy nested block also supplies service rows. The tier row's name is compared
-// through the invoice's own label code on both sides: a fault there names both alike, so it cannot hide a visit here.
-// The tier left off, or null.
+// work in any saved shape, or the legacy nested block also supplies service rows. One part must be the tier row: the
+// row that carries the tier's rate, as pricedTierRow reads it. Its name is not read, so a row whose own record names no
+// tier (it prints a bare "WaveGuard", pre-push audit) still counts; the matched row's own record must not name another
+// tier, since records that disagree name no saving. The tier left off, or null.
 function unnamedSavingMiss({ estimate, line, data, block, lineItems, serviceKey }) {
-  const { acceptedPricing, estimateDiscountContext, staffDiscountOnRecurring, waveGuardTierName } = require('./completion-pricing');
+  const { acceptedPricing, estimateDiscountContext, staffDiscountOnRecurring } = require('./completion-pricing');
   if (staffDiscountOnRecurring(data, block) || list(legacyNestedBlock(data).services).length) return null;
   const record = lineItems.length ? engineTierRecord(lineItems, serviceKey) : NO_ENGINE_RECORD;
   const witness = record ? recordsTier(estimate, data, block, record) : null;
   if (!witness) return null;
   const context = estimateDiscountContext({ ...estimate, estimate_data: data });
-  const quote = acceptedPricing(line, { ...context, estimateTier: { tier: witness.tier, amount: witness.rate } });
-  const tierName = waveGuardTierName(witness.tier);
-  const named = quote.discounts.length > 0 && quote.discounts.every((d) => d.named) && quote.discounts.some((d) => d.name === tierName);
+  const { discounts } = acceptedPricing(line, { ...context, estimateTier: { tier: witness.tier, amount: witness.rate } });
+  const named = discounts.length > 0 && discounts.every((d) => d.named) && discounts.some((d) => d.percent !== undefined)
+    && agreedTier([witness.tier, ...waveGuardRecordTiers([line.sourceLine])]) === witness.tier;
   return named ? witness.tier : null;
 }
 

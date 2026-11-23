@@ -603,4 +603,4 @@ async function acceptedVisitBreakdown(service, { database = db, firstApplication
 
 module.exports = { MONEY_FIELDS, visitPriceDecisionRecorded, loadCompletionPricing, prepareCompletionPricingReview, lockCompletionPricingEstimate,
   commitCompletionPricingReview, lockCompletionPricingParent, committedCompletionPrice, acceptedPricing, acceptedVisitBreakdown,
-  matchServiceLine, propertyMatches, money, sameMoney, estimateDiscountContext, staffDiscountOnRecurring, waveGuardTierName };
+  matchServiceLine, propertyMatches, money, sameMoney, estimateDiscountContext, staffDiscountOnRecurring };

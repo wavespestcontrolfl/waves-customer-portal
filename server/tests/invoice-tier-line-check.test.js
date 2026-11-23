@@ -127,16 +127,11 @@ describe('tierSavingsLeftOffInvoices', () => {
     // The rows the invoice prints are what is judged: a tier line left out or renamed is a finding (round 8).
     const withRows = (discounts) => ({ ...printed(pestRow), breakdown: { ...printed(pestRow).breakdown, discounts } });
     expect(await findingsFor(withRows([]))).toEqual(finding);
+    // A fault in the invoice's own label code that drops the tier prints this row. The check's names are its own (round
+    // 11), so it is still a finding.
     expect(await findingsFor(withRows([{ name: 'WaveGuard', dollars: 15 }]))).toEqual(finding);
     expect(await findingsFor(withRows([{ name: 'WaveGuard Silver', dollars: 15 }]))).toEqual(finding);
     expect(await findingsFor(withRows([{ name: 'WaveGuard Gold', dollars: 14 }]))).toEqual(finding);
-    // A fault in the invoice's own label code cannot pass its own output (round 11): with waveGuardTierName dropping the
-    // tier, a bare tier line is still a finding, and a "WaveGuard Gold" line still is not.
-    const labelCode = jest.spyOn(require('../services/completion-pricing'), 'waveGuardTierName').mockReturnValue('WaveGuard');
-    try {
-      expect(await findingsFor(withRows([{ name: 'WaveGuard', dollars: 15 }]))).toEqual(finding);
-      expect(await findingsFor(printed(pestRow))).toEqual([]);
-    } finally { labelCode.mockRestore(); }
     // Records that name another tier, or no tier at all, name none: no finding. The matched row's own record counts.
     expect(await findingsFor(printed(tierless, {}, estimate({ tier: 'Silver' })))).toEqual([]);
     const tierlessEngine = [pestItem({ discount: { appliedDiscounts: [{ type: 'waveguard', amount: 0.15 }] } })];
@@ -198,6 +193,15 @@ describe('tierSavingsLeftOffInvoices', () => {
     // The engine's record must name the tier as its only discount, and the estimate's records must agree with it.
     expect(await findingsFor(unpriced({ estimate: whole([pestItem({ discount: { appliedDiscounts: [] } })]) }))).toEqual([]);
     expect(await findingsFor(unpriced({ estimate: { ...whole(), waveguard_tier: 'Silver' } }))).toEqual([]);
+    // An engine record that names no tier (round 12): the invoice's pricing at the engine's net prints a bare "WaveGuard"
+    // tier row, at the tier's rate. The estimate's other records name Gold, so the visit is a finding.
+    const tierless = { appliedDiscounts: [{ type: 'waveguard', amount: 0.15 }] };
+    const bare = unpriced({ estimate: whole([pestItem({ discount: tierless })]),
+      line: scheduleLine({ ...rawRow, discount: tierless }, { perApplicationPrice: null }) });
+    expect(await findingsFor(bare)).toEqual(finding);
+    // A row whose own record names another tier disputes the estimate's records: no finding.
+    expect(await findingsFor(unpriced({ line: scheduleLine({ ...rawRow, discount: waveguard(0.15, 'silver') }, { perApplicationPrice: null }) })))
+      .toEqual([]);
   });
 
   test.each(['no_discount', 'price_changed', 'not_priced', 'own_price_or_discount', 'prepaid', 'line_unmatched', 'line_ambiguous'])(
