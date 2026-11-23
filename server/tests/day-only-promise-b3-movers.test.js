@@ -358,6 +358,19 @@ describe('series move (rebooker.rescheduleSeries): a customer series move record
     for (const u of updates) expect(u.update.mock.calls[0][0]).not.toHaveProperty('customer_asked_time');
   });
 
+  // Local audit 2026-11-22: both office series paths pass the box (the dispatch board route and the edit form's collective
+  // date move); the edit form passes it only when it sent one.
+  test('the office series routes pass the "customer asked for this time" box to the series writer', () => {
+    const read = (rel) => require('fs').readFileSync(require('path').join(__dirname, rel), 'utf8');
+    const dispatch = read('../routes/admin-dispatch.js');
+    const series = dispatch.slice(dispatch.indexOf('SmartRebooker.rescheduleSeries(req.params.serviceId'), dispatch.indexOf('qualityDates,\n      });', dispatch.indexOf('SmartRebooker.rescheduleSeries(req.params.serviceId')));
+    expect(series).toMatch(/dayOnlyPromiseOn\(\) \? \{ customerAskedTime: req\.body\?\.customerAskedTime === true \} : \{\}/);
+    const schedule = read('../routes/admin-schedule.js');
+    const edit = schedule.slice(schedule.indexOf("sourceSurface: 'edit_modal',"), schedule.indexOf('carryVisit: false,', schedule.indexOf("sourceSurface: 'edit_modal',")));
+    expect(edit).toMatch(/dayOnlyPromiseOn\(\) && typeof req\.body\?\.customerAskedTime === 'boolean'/);
+    expect(edit).toMatch(/\{ customerAskedTime: req\.body\.customerAskedTime \}/);
+  });
+
   // seriesOperationKey is not exported; pin its source (as rebooker-collective-move.test.js pins the technician key).
   test('the series request key carries a ticked office box only (an unticked request keeps its pre-deploy key)', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/rebooker.js'), 'utf8');

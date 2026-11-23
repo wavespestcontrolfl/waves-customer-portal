@@ -12623,6 +12623,10 @@ async function planCollectiveEditDateMove(req) {
         adminWindowRules: true,
         overlapAdvisory: true,
         sourceSurface: 'edit_modal',
+        // GATE_DAY_ONLY_PROMISE: the form's "customer asked for this time" box, when it sent one; the series writer records it
+        // on the anchor (a staff placement alone no longer holds a visit, owner 2026-11-22). Gate off or no field: no key.
+        ...(require('../services/time-promise').dayOnlyPromiseOn() && typeof req.body?.customerAskedTime === 'boolean'
+          ? { customerAskedTime: req.body.customerAskedTime } : {}),
         // Save road buy: this route is requireAdmin; the anchor's hour
         // buys its road times before the series transaction.
         ...(req.techRole === 'admin' && req.technicianId ? { roadSpender: req.technicianId } : {}),
