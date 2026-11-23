@@ -1065,6 +1065,16 @@ maybeDescribe('portal messages (live Postgres)', () => {
       const done = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'We can come Monday.', clientRequestId, actor });
       expect(done.notice).toEqual({ bell: true, pushAccepted: 0, text: 'sent', email: 'not_needed' });
       expect(answerTexts(first.message.id)).toHaveLength(1);
+      // The last try (attempts: 5) that still cannot read the bell sends nothing and ends unconfirmed.
+      await stopped(first.message.id, { attempts: 4 });
+      jest.clearAllMocks();
+      const unreadable = jest.spyOn(NotificationService, 'notifyCustomer').mockResolvedValueOnce(null);
+      const last = await PortalMessages.staffReply({ kind: 'chat', id: escalationId, body: 'We can come Monday.', clientRequestId, actor });
+      unreadable.mockRestore();
+      expect(last.notice).toEqual({ bell: false, pushAccepted: 0, pushUnknown: true });
+      expect(answerTexts()).toEqual([]);
+      expect(AccountMembershipEmail.sendPortalReply).not.toHaveBeenCalled();
+      expect(await storedNotice(first.message.id)).toMatchObject({ pushUnknown: true, pending: false, attempts: 5 });
     });
 
     test('an earlier push the app took (a try before the gate went on) ends the notice: no text, no email; one still sending waits', async () => {

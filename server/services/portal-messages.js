@@ -283,7 +283,7 @@ const noticeReached = (notice) => Number(notice.pushAccepted) > 0 || textReached
 function publicNotice(notice) {
   if (!notice) return null;
   const shown = {};
-  for (const key of ['bell', 'pushAccepted', 'text', 'email']) if (notice[key] !== undefined) shown[key] = notice[key];
+  for (const key of ['bell', 'pushAccepted', 'pushUnknown', 'text', 'email']) if (notice[key] !== undefined) shown[key] = notice[key];
   return notice.pending ? { ...shown, pending: true } : shown;
 }
 
@@ -522,7 +522,8 @@ async function answerText(customerId, message, boundary) {
     });
     return textOutcome(result, Send.classifyDeliveryCertainty, 'NOT_SENT');
   } catch (err) {
-    logger.warn(`[portal-messages] answer text failed for message ${message.id}: ${err.message}`);
+    // The error's code or name only: a send error's words can carry the number or the message (AGENTS.md: log ids).
+    logger.warn(`[portal-messages] answer text failed for message ${message.id} (${err?.code || err?.name || 'error'})`);
     // A throw before the send (the customer read, the body) sent nothing. A throw from the send carries the outcome
     // the provider step saw (send-customer-message.js tags every throw), read as send-manual-customer-sms.js does.
     if (!err?.providerOutcome) return { text: 'not_sent', textCode: 'SEND_FAILED' };
@@ -601,9 +602,15 @@ async function noticeCustomer(customerId, message, { byStaff = false } = {}) {
     const push = !textLive && claim.email === undefined && claim.text === undefined;
     const { inFlight, pushUnknown, ...sent } = await bellAndPush(customerId, message, { push, readEarlierPush: textLive });
     // A retry (an earlier try may have pushed, before GATE_PORTAL_ANSWER_TEXT went on) that cannot read the bell's
-    // push record sends nothing yet: its claim stays, like a push in flight, and a later try reads the record. The
-    // last try goes ahead: a second notice is better than none. A first try has no earlier push to miss.
-    if (pushUnknown && claim.attempts > 1 && claim.attempts < NOTICE_ATTEMPTS) return { pending: true };
+    // push record sends nothing: its claim stays, like a push in flight, and a later try reads the record. The last
+    // try sends nothing either (running out of tries is no news about that push, and a second notice is worse than a
+    // missing one): the notice ends unconfirmed (pushUnknown) for the staff screen. A first try has no earlier push
+    // to miss.
+    if (pushUnknown && claim.attempts > 1) {
+      if (claim.attempts < NOTICE_ATTEMPTS) return { pending: true };
+      const unconfirmed = { ...sent, pushUnknown: true, pending: false, claimedAt: claim.at, attempts: claim.attempts };
+      return (await recordNotice(message.id, unconfirmed)) ? publicNotice(unconfirmed) : await storedNotice(message.id);
+    }
     if (inFlight) {
       // Another try is still sending the push: no email. Its claim stays (this try counted); on the last try the
       // notice ends here, since whatever that push does is the outcome.

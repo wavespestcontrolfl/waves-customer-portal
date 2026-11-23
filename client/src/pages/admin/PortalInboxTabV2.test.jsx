@@ -497,6 +497,8 @@ describe("Portal inbox tab: answers in the portal", () => {
     // GATE_PORTAL_ANSWER_TEXT: the text in place of the push; a text that may have gone counts as sent.
     [{ bell: true, pushAccepted: 0, text: "sent", email: "not_needed" }, "Sent to Pat Synthetic in the portal. We texted them your answer."],
     [{ bell: true, pushAccepted: 0, text: "uncertain", email: "not_needed" }, "Sent to Pat Synthetic in the portal. We could not confirm the text went out. Check their texts in Communications before you send another."],
+    [{ bell: true, pushAccepted: 0, text: "sending", pending: true }, "Sent to Pat Synthetic in the portal. A text with your answer may be going out now. Check their texts in Communications before you send another."],
+    [{ bell: false, pushAccepted: 0, pushUnknown: true }, "Sent to Pat Synthetic in the portal. We could not confirm their app notice, so we did not text or email them."],
     [{ bell: true, pushAccepted: 0, text: "not_sent", email: "sent" }, "Sent to Pat Synthetic in the portal. We emailed them your answer."],
     [{ bell: true, pushAccepted: 0, text: "not_sent", email: "email_opted_out" }, "Sent to Pat Synthetic in the portal, but we could not reach them by text or email."],
   ])("says how the customer was told: %j", async (notice, line) => {

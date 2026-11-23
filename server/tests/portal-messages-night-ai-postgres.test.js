@@ -103,6 +103,15 @@ maybeDescribe('portal messages: after-hours Waves AI (live Postgres)', () => {
     }
     throw new Error('the after-hours step did not finish');
   }
+  // The AI answer's notice is written after its outcome (portal-messages-night-ai.js notifyCustomer): wait for it.
+  async function noticeWritten(customerId) {
+    for (let i = 0; i < 150; i += 1) {
+      const [ai] = await aiRows(customerId);
+      if (ai?.metadata?.notice) return ai;
+      await pause(100);
+    }
+    throw new Error('the AI answer notice was not written');
+  }
   async function post(c, body, { hour = NIGHT, clientRequestId = null } = {}) {
     mockHour = hour;
     try {
@@ -220,7 +229,7 @@ maybeDescribe('portal messages: after-hours Waves AI (live Postgres)', () => {
         .mockResolvedValueOnce(answer('Your next visit is in ten days, between 9:00 and 11:00 AM.'));
       const sent = await post(pat, 'When is my next visit?');
       expect(await settled(sent.id)).toBe('answered');
-      const [ai] = await aiRows(pat.id);
+      const ai = await noticeWritten(pat.id);
       const bell = await db('notifications').where({ recipient_type: 'customer', recipient_id: pat.id }).whereRaw("metadata->>'portalMessageId' = ?", [ai.id]).first();
       expect(bell).toMatchObject({ title: 'New message from Waves', link: '/?tab=messages' });
       expect(PushService.sendToCustomer).not.toHaveBeenCalled();
