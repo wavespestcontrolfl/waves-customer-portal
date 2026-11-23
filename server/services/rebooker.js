@@ -524,7 +524,11 @@ function seriesOperationKey(serviceId, newDate, newWindow, options = {}) {
   const techRequested = Object.prototype.hasOwnProperty.call(options, 'technicianId');
   const techKey = techRequested ? `:tech=${options.technicianId ? String(options.technicianId) : '-'}` : '';
   const confirmationKey = options.pendingConfirmation === true ? ':pending' : '';
-  const requestKey = `${serviceId}:${dateOnly(newDate)}:${hm(win.start)}:${hm(win.end)}${options.clearAnchorWindow === true ? ':clear' : ''}${confirmationKey}${techKey}`;
+  // …and the office's "customer asked for this time" box, which the anchor's UPDATE records (time-promise moveIntentFor):
+  // the same slot with the box flipped is a different request (local audit 2026-11-22). Only a ticked box adds to the key,
+  // so an unticked request keeps the key it had before this field existed (a retry across the deploy still replays).
+  const askedKey = options.customerAskedTime === true ? ':asked=1' : '';
+  const requestKey = `${serviceId}:${dateOnly(newDate)}:${hm(win.start)}:${hm(win.end)}${options.clearAnchorWindow === true ? ':clear' : ''}${confirmationKey}${techKey}${askedKey}`;
   const technician = techRequested ? { id: options.technicianId ? String(options.technicianId) : null } : null;
   if (typeof options.operationKey === 'string' && options.operationKey) {
     return { key: options.operationKey, derived: false, requestKey, technician };
@@ -4166,8 +4170,12 @@ class SmartRebooker {
           // Day change invalidates the row's route sequence — clear it so the
           // destination day appends the stop (consumers sort NULLs last).
           ...(sibDateChanges ? { route_order: null } : {}),
-          // Day-only promise (B3): a customer-driven series move records its intent in this same UPDATE.
-          ...moveIntentColumns(trx, options, { series: true }),
+          // Day-only promise (B3): a customer-driven series move records its intent in this same UPDATE; the office box
+          // ("Customer asked for this time") is recorded on the anchor, the occurrence it was ticked for. A row whose date
+          // and start stay (an end-only edit) keeps the intent of the slot it holds, as the single-visit writer does.
+          ...moveIntentColumns(trx, options, {
+            series: true, anchor: isAnchor, slotChanged: slotChangedBy(sib, { window_start: occurrenceWindow.start }, dateOnlyString(date)),
+          }),
         };
         // Rewound rows need the post-commit cleanup (tech pointer release +
         // customer tracker refresh) — collected here, applied after the trx

@@ -33397,6 +33397,7 @@ module.exports.recurringServiceFirstVisitPrice = recurringServiceFirstVisitPrice
 module.exports.resolveRecurringMonthlyParts = resolveRecurringMonthlyParts;
 module.exports.normalizeManualDiscountSummary = normalizeManualDiscountSummary;
 module.exports.tierDiscountForEstimate = tierDiscountForEstimate;
+module.exports.snapshotTierDiscount = snapshotTierDiscount;
 module.exports.manualDiscountForRecurringBase = manualDiscountForRecurringBase;
 module.exports.applyManualOneTimeDiscountToChoiceRows = applyManualOneTimeDiscountToChoiceRows;
 module.exports.sameDayVisitTotalForPricingFrequency = sameDayVisitTotalForPricingFrequency;

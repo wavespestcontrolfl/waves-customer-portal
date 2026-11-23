@@ -101,6 +101,16 @@ describe('dayOnlyEligibility: a first or one-time visit also fails once the cust
     expect((await verdict(conn)).s1.eligible).toBe(false);
   });
 
+  // Local audit 2026-11-22 (round 6): the pick check reads each member's start. The edit screen changes a start without a
+  // log row, so a customer pick at 09:00 no longer counts once staff set the visit to 13:00 on the same date.
+  test('a customer pick counts only while the member keeps the picked start', async () => {
+    const picked = { s1: [{ created_at: '2026-11-08T10:00:00Z', original_date: '2026-11-12', new_date: '2026-11-15',
+      original_window: '13:00-14:00', new_window: '09:00-10:00', initiated_by: 'customer_self_serve' }] };
+    const at = (start) => fakeConn({ services: [svc('s1', { window_start: start })], reminders: [office('s1')], moves: picked });
+    expect((await verdict(at('09:00:00'))).s1.eligible).toBe(false);
+    expect((await verdict(at('13:00:00'))).s1.eligible).toBe(true);
+  });
+
   test('an office booking that only staff moved: eligible', async () => {
     const conn = fakeConn({ services: [svc('s1')], reminders: [office('s1')], moves: staffMove });
     expect((await verdict(conn)).s1.eligible).toBe(true);

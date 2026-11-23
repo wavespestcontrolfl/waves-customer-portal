@@ -361,6 +361,35 @@ const DETECTORS = Object.freeze([
       return { count: ids.length, ids, detail: { windowDays: WELCOME_AUDIT_WINDOW_DAYS, graceHours: WELCOME_AUDIT_GRACE_HOURS } };
     },
   },
+  {
+    // It reads the next 90 days of visits, so a finding can leave with nothing fixed: a record. The finding is the
+    // estimate's line, not each of its visits: one record per line, however many of its visits are in the window.
+    key: 'tier_saving_left_off_invoice',
+    moving: true,
+    label: 'Upcoming visits whose invoice would not print their estimate\'s WaveGuard tier line',
+    href: '/admin/invoices',
+    provenance: 'owner 2026-11-22 — 0 of 163 upcoming tier visits printed the WaveGuard line after GATE_INVOICE_ESTIMATE_DISCOUNT_LINES went on (#8329, #8343; fixed in #8355)',
+    async run({ now }) {
+      const { tierSavingsLeftOffInvoices } = require('./invoice-tier-line-check');
+      const { checked, notJudged, findings } = await tierSavingsLeftOffInvoices(db, { today: etDateString(now) });
+      // One finding per estimate line (pre-push audit: per visit, a line's first record counted each of its visits):
+      // its first visit in the window, and how many of its visits are there. The line is the schedule line the invoice
+      // matched, not its service key: two lines of one estimate can share a key (pre-push audit).
+      const lines = new Map();
+      for (const f of findings) {
+        const key = `${f.estimateId}:${f.lineKey || f.serviceKey}`;
+        if (lines.has(key)) lines.get(key).visits += 1;
+        else lines.set(key, { ...f, visits: 1 });
+      }
+      const byLine = [...lines.entries()];
+      return {
+        count: byLine.length,
+        ids: byLine.map(([, f]) => `${f.visitId} (${f.serviceKey}, ${f.tier}, ${f.visits} visit${f.visits === 1 ? '' : 's'})`),
+        itemKeys: byLine.map(([key]) => key),
+        detail: { checked, notJudged, visits: findings.length },
+      };
+    },
+  },
   // History-wide completion ↔ report record invariants (integrity audit
   // 2026-09-02). closeout_failed_facts above reads yesterday only and skips
   // `pending` facts, so a missing record / token / tracker stamp / customer

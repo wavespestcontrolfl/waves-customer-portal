@@ -28,7 +28,7 @@ function fakeConn({ services = [svc()], source = 'admin_manual', log = [] } = {}
     reads.push(table);
     const ins = [];
     const chain = {};
-    for (const m of ['where', 'whereNotIn', 'whereNotNull', 'whereNull', 'whereRaw', 'whereBetween', 'orderBy', 'join', 'leftJoin', 'distinct', 'orWhere', 'andWhere']) chain[m] = () => chain;
+    for (const m of ['where', 'whereNotIn', 'whereNotNull', 'whereNull', 'whereRaw', 'whereBetween', 'orderBy', 'limit', 'join', 'leftJoin', 'distinct', 'orWhere', 'andWhere']) chain[m] = () => chain;
     chain.whereIn = (_c, values) => { ins.push(values.map(String)); return chain; };
     chain.select = async () => {
       if (table === 'scheduled_services') return services.filter((r) => !ins.length || ins[0].includes(String(r.id)) || ins[0].includes(String(r.visit_id)));
@@ -105,6 +105,15 @@ describe('memberEligible through dayOnlyEligibility', () => {
     expect(await eligible(asked)).toBe(false);
   }));
 
+  // Local audit 2026-11-22: judged against the newest change of date or start, as auto-dispatch's isPersonPlacedVisit is.
+  test('an explicit true survives a later end-only edit (still a set time); a later change of start makes it stale', withGate('true', async () => {
+    const member = svc({ is_recurring: true, recurring_parent_id: 'p1', customer_asked_time: true, customer_asked_time_at: AT });
+    const longer = logRow('admin_bulk', true, { original_date: VISIT_DATE, original_window: '09:00-10:00', new_window: '09:00-10:30' });
+    expect(await eligible(fakeConn({ services: [member], log: [longer] }))).toBe(false);
+    const restart = logRow('admin', true, { original_date: VISIT_DATE, original_window: '13:00-14:00', new_window: '09:00-10:00' });
+    expect(await eligible(fakeConn({ services: [member], log: [restart] }))).toBe(true);
+  }));
+
   test('a booking intent (no time) followed by a move is inferred; with no move it holds', withGate('true', async () => {
     const moved = fakeConn({ services: [svc({ customer_asked_time: true })], log: [logRow('admin', null)] });
     expect(await eligible(moved)).toBe(true); // inferred: office source, an office move
@@ -154,7 +163,8 @@ describe('the writes and the shared history read', () => {
     })();
   });
 
-  test('loadNewestSlotRows adds the after_intent column only when asked (the auto-dispatch pick check stays byte for byte)', async () => {
+  // The read also returns the old and new slot (local audit 2026-11-22: the pick check matches the placement's date and start).
+  test('loadNewestSlotRows adds the after_intent column only when asked', async () => {
     const selects = [];
     const mk = () => {
       const chain = {};
@@ -165,9 +175,11 @@ describe('the writes and the shared history read', () => {
     const db = Object.assign(() => mk(), { raw: (sql) => ({ raw: sql }) });
     await eligibility.loadNewestSlotRows(db, 's1');
     await eligibility.loadNewestSlotRows(db, 's1', { withIntent: true });
-    expect(selects[0]).toEqual(['created_at', 'new_date', 'initiated_by']);
-    expect(selects[1].slice(0, 3)).toEqual(['created_at', 'new_date', 'initiated_by']);
-    expect(selects[1][3].raw).toMatch(/customer_asked_time_at.*AS after_intent/s);
+    const cols = ['created_at', 'new_date', 'initiated_by', 'reason_code', 'original_date', 'original_window', 'new_window'];
+    expect(selects[0]).toEqual(cols);
+    expect(selects[1].slice(0, cols.length)).toEqual(cols);
+    expect(selects[1]).toHaveLength(cols.length + 1);
+    expect(selects[1][cols.length].raw).toMatch(/customer_asked_time_at.*AS after_intent/s);
   });
 
   test('isCustomerPickedVisit still answers from rows handed to it, and from its own read without them', async () => {

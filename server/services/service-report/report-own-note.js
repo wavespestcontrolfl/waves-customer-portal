@@ -36,7 +36,7 @@ const { redactAccessCodes } = require('../context-aggregator');
 const { savepointRead } = require('../../utils/savepoint-read');
 const CompletionRecap = require('../completion-recap');
 const {
-  noteRecordCopyViolations, heldAccessCode, CODE_SHAPED_NUMBER_RE, REPORT_NOTE_LINE_BREAK, MAX_REPORT_NOTE_CHARS,
+  noteRecordCopyViolations, heldAccessCode, CODE_SHAPED_NUMBER_RE, REPORT_NOTE_LINE_BREAK, MAX_REPORT_NOTE_CHARS, REPORT_NOTE_VERSION,
 } = require('./technician-report-copy');
 const { writerRulesRejectionDetail, lowercaseGermanRoach } = require('./report-writer-rules');
 const {
@@ -388,8 +388,50 @@ function fixedReportNote({ serviceType, areasServiced, visitOutcome } = {}) {
     .find((text) => text && text.length <= MAX_REPORT_NOTE_CHARS) || '';
 }
 
+/**
+ * What a completion stores as the report's note (structured_notes.reportNote),
+ * from the text the sheet showed. A tidied note is stored only when it passes
+ * the screens again against the note as submitted (the technician may have
+ * changed the note since); else, or when the screens cannot be read, the fixed
+ * sentence. The sheet's text is never trusted for the fixed sentence: code
+ * writes it, and names the service only when the codes on the customer's file
+ * were read and the name holds none (the preview's rule, report-own-note-writer).
+ * No sheet text (null, a shape that is not { source: 'cleaned' | 'fixed', text })
+ * = null: the record carries no note. Never throws.
+ */
+// The note the sheet sends: { source: 'cleaned' | 'fixed', text }.
+const isSheetReportNote = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+  && ['cleaned', 'fixed'].includes(value.source) && typeof value.text === 'string';
+
+// A dictated note is short. A longer one is not sent to a model, and the
+// completion stores the fixed sentence for it without running the screens.
+const MAX_OWN_NOTE_INPUT_CHARS = 2000;
+
+async function reportNoteToStore({
+  reportNote, note, serviceType, customerId, db, catalogRows = null, storedCodes = null,
+} = {}) {
+  if (!isSheetReportNote(reportNote)) return null;
+  let codes = Array.isArray(storedCodes) ? storedCodes : null;
+  if (!codes) codes = await readStoredCodes(db, customerId).catch(() => null);
+  const said = typeof note === 'string' ? note : '';
+  if (codes && reportNote.source === 'cleaned' && said.length <= MAX_OWN_NOTE_INPUT_CHARS) {
+    try {
+      const refused = await reportNoteRejection({
+        note: said, text: reportNote.text, db, catalogRows, storedCodes: codes,
+      });
+      if (!refused) return { v: REPORT_NOTE_VERSION, source: 'cleaned', text: ownNoteText(reportNote.text) };
+    } catch { /* the fixed sentence below */ }
+  }
+  const named = codes && !noteAsRead(String(serviceType || ''), codes).includes('[redacted]');
+  const text = fixedReportNote(named ? { serviceType } : {});
+  return text ? { v: REPORT_NOTE_VERSION, source: 'fixed', text } : null;
+}
+
 module.exports = {
   reportNoteRejection,
+  reportNoteToStore,
+  isSheetReportNote,
+  MAX_OWN_NOTE_INPUT_CHARS,
   fixedReportNote,
   ownNoteText,
   noteAsRead,

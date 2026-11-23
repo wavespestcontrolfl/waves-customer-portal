@@ -218,7 +218,8 @@ const CUSTOMER_OR_UNKNOWN_SOURCES = Object.freeze([
 // Statuses that end a visit: a member in one of them is no longer part of the stop the customer hears about.
 const ENDED_STATUSES = ['cancelled', 'completed', 'skipped'];
 
-const MEMBER_COLUMNS = ['id', 'visit_id', 'status', 'scheduled_date', 'is_recurring', 'recurring_parent_id',
+// window_start: the customer-pick check matches a placement's start too (eligibility isCustomerPickedVisit).
+const MEMBER_COLUMNS = ['id', 'visit_id', 'status', 'scheduled_date', 'window_start', 'is_recurring', 'recurring_parent_id',
   'date_exception', 'date_exception_source', 'date_exception_at', 'customer_asked_time', 'customer_asked_time_at'];
 
 /** The live members of each requested row's stop: Map<requested id, member rows[]>. A row with no stop is its own
@@ -269,12 +270,16 @@ function currentIntent(member, newestSlotChange) {
   return newestSlotChange.after_intent === false ? asked : null;
 }
 
-/** A member's current explicit intent and the move history it was judged on: { intent, rows }. Reads the history (one query,
- *  reused by the pick check) only for a member that has an explicit value. Throws on a failed read. */
+/** A member's current explicit intent and the move history it was judged on: { intent, rows }, rows = the newest placement
+ *  rows (reused by the pick check). Reads the history only for a member that has an explicit value. Throws on a failed read. */
 async function memberIntentState(conn, member) {
   if (member.customer_asked_time !== true && member.customer_asked_time !== false) return { intent: null, rows: null };
-  const rows = await require('./auto-dispatch/eligibility').loadNewestSlotRows(conn, member.id, { withIntent: true });
-  return { intent: currentIntent(member, rows[0] || null), rows };
+  const eligibility = require('./auto-dispatch/eligibility');
+  const rows = await eligibility.loadNewestSlotRows(conn, member.id, { withIntent: true });
+  // Judged against the newest change of date or start, as auto-dispatch's isPersonPlacedVisit judges it: an end-only edit
+  // (a longer visit) never makes the intent stale (local audit 2026-11-22). Reads further back only after an end-only edit.
+  const owners = await eligibility.newestPlacementRows(conn, member.id, rows, true);
+  return { intent: currentIntent(member, owners[0] || null), rows: owners };
 }
 
 /** May this ONE member be promised only the day? `customer_asked_time` is the explicit intent for the current slot, while it
@@ -462,9 +467,11 @@ function intentColumns(conn, asked) {
 const CUSTOMER_MOVE_SURFACES = Object.freeze(['customer_web', 'sms_reply', 'call_reschedule', 'call_makeup']);
 
 /** The intent a move records for the slot it sets: an explicit boolean from the caller (options.customerAskedTime: the office
- *  box on a dispatch board move) or true for a customer surface; otherwise undefined (the move records no intent). */
-function moveIntentFor(options, { series = false } = {}) {
-  if (!series && typeof options?.customerAskedTime === 'boolean') return options.customerAskedTime;
+ *  box on a dispatch board move) or true for a customer surface; otherwise undefined (the move records no intent). A series
+ *  move records the office box on its ANCHOR only, the occurrence the office picked the slot for (local audit 2026-11-22:
+ *  a staff placement alone no longer holds a visit, so the box is what keeps the night jobs off that slot). */
+function moveIntentFor(options, { series = false, anchor = false } = {}) {
+  if ((!series || anchor === true) && typeof options?.customerAskedTime === 'boolean') return options.customerAskedTime;
   return CUSTOMER_MOVE_SURFACES.includes(options?.sourceSurface) ? true : undefined;
 }
 
@@ -474,11 +481,11 @@ function moveIntentFor(options, { series = false } = {}) {
  * intent is bound to its own move, with no later write to race a newer move (customer_asked_time_at, currentIntent). {} when the
  * gate is off (the UPDATE payload stays exactly today's), when the move records no intent, or when the move did not change the
  * slot (`slotChanged` false: a technician-only change keeps the intent of the slot it holds). `series`: a series move records
- * the intent of a CUSTOMER surface only (an office series move keeps its current behavior).
+ * the intent of a CUSTOMER surface on every row, and the office box on the `anchor` row only.
  */
-function moveIntentColumns(conn, options, { slotChanged = true, series = false } = {}) {
+function moveIntentColumns(conn, options, { slotChanged = true, series = false, anchor = false } = {}) {
   if (!dayOnlyPromiseOn() || slotChanged !== true) return {};
-  const asked = moveIntentFor(options, { series });
+  const asked = moveIntentFor(options, { series, anchor });
   return asked === undefined ? {} : intentColumns(conn, asked);
 }
 

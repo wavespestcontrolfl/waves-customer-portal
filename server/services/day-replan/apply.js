@@ -160,12 +160,12 @@ function finalRoute(fresh, env, techId) {
 // the same facts loadDayContext gives the planner (day-replan/index.js TOLD_LOCK_SELECT + the reason's own fields).
 const TOLD_ROW_COLUMNS = [
   'customer_confirmed', 'is_recurring', 'recurring_parent_id', 'scheduled_date', 'recurring_dispatch_due_date',
-  'date_exception', 'date_exception_source', 'date_exception_at',
+  'date_exception', 'date_exception_source', 'date_exception_at', 'customer_asked_time', 'customer_asked_time_at',
 ];
 
 /**
- * The told-lock facts for one visit, read inside its move transaction, so a time told to the customer or a person
- * placement made after the fresh plan still stops the write. The told read is the no-show detector's promise reader (a
+ * The told-lock facts for one visit, read inside its move transaction, so a time told to the customer, or a slot the
+ * customer picked or asked for, after the fresh plan still stops the write. The told read is the no-show detector's promise reader (a
  * 72-hour flag with no real promise does not stop the write); a read that throws stops the write (fail closed).
  * isPersonPlacedVisit fails closed too (an unreadable history = placed).
  */
