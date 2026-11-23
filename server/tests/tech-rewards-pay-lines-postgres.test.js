@@ -840,6 +840,30 @@ postgres('tech rewards pay lines: the December gift', () => {
       expect((await finalize(run.id)).checks.map((c) => c.technicianId)).toEqual([bravo]);
     });
 
+    it('waits on a catch-up check after the yearly hours were cleared when a later final pay run used the bank, so a gift alone never blocks the run', async () => {
+      process.env.GATE_PAYROLL_TIME_OFF = 'true';
+      // Foxtrot left: a final run for a later week, paid before this run's pay date, paid out the bank. Then the
+      // yearly hours were cleared. A check of the gift week is a catch-up check of that payout, so it holds the bank.
+      const foxtrot = await readyTech('Sample Foxtrot');
+      const bravo = await readyTech('Sample Bravo');
+      await approvedWeek(bravo, GIFT_WEEK);
+      // The gift week's run is paid late, after the payout below.
+      const run = await draft(GIFT_WEEK, addDays(GIFT_WEEK, 17));
+      expect(checkOf(run, foxtrot).techRewardsCents).toBe(GIFT);
+      const later = addDays(GIFT_WEEK, 7);
+      await trx('payroll_runs').insert({
+        week_start: later, pay_date: addDays(later, 7), status: 'finalized',
+        bank_payouts: JSON.stringify([{ technicianId: foxtrot, name: 'Sample Foxtrot', hours: '0.00', hoursPerYear: 80 }]),
+      });
+      // A check of the next tax year is final and read the bank: finalize refuses a bank check of Foxtrot here.
+      await paidWeek(foxtrot, '2027-01-04', { pto_earned_minutes: '92.40' });
+      const again = await recompute(run.id);
+      expect([checkOf(again, foxtrot), await linesOf(foxtrot)]).toEqual([undefined, []]);
+      const why = 'a later pay run that is already final used their time-off bank, so this pay run cannot hold a paycheck for them';
+      expect(await notesOf(run.id)).toEqual([waits('Sample Foxtrot', why)]);
+      expect((await finalize(run.id)).checks.map((c) => c.technicianId)).toEqual([bravo]);
+    });
+
     it('waits while a time-off bank payout set for an earlier week is not final, so a gift alone never blocks the run', async () => {
       process.env.GATE_PAYROLL_TIME_OFF = 'true';
       // Alpha has a time-off bank and no hours this week: only the gift makes a check for them. Their payout is set

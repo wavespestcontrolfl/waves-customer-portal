@@ -406,7 +406,11 @@ async function spanWaitOf(trx, run, technicianId, span, amountCents) {
   // The check the gift needs would hold the bank of a technician who has one (GATE_PAYROLL_TIME_OFF), also a check for the
   // gift alone. Finalize asks the bank's own order guards of every such check, so the gift waits for the same answer.
   const banks = timeOffOn() ? await timeOffBank.bankTechnicians(trx, [technicianId]) : new Map();
-  const banked = [...banks.keys()];
+  // With no yearly hours now, a check of an earlier week after a payout is still a bank check (a catch-up check), and
+  // finalize asks the same guards of it.
+  const caughtUp = timeOffOn() && !banks.size
+    && (await timeOffBank.caughtUpIds(trx, [technicianId], { weekStart: run.week_start, payDate: run.pay_date })).size > 0;
+  const banked = caughtUp ? [technicianId] : [...banks.keys()];
   if (await timeOffBank.laterBankCheckExists(trx, run, banked) || await timeOffBank.laterUnpaidDecisionExists(trx, run, banked)
     // Asked also with no yearly hours now: finalizeRun asks it of every check (the hours can be cleared after a payout).
     || await timeOffBank.laterPayoutDecisionExists(trx, run, [technicianId])) {

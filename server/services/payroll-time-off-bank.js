@@ -104,32 +104,27 @@ const usableFromOf = (hireDate) => (hireDate ? addStaffWorkDays(hireDate, USE_AF
  * `payout` is what the bank holds after the week, paid out when `payOut` is set, or the hours the week earned
  * when `catchUp` is set; it is not in `paid`.
  */
-// What a catch-up week earns: the weeks of this time on the job up to the payout are run again in week order, with
-// this week and the other catch-up weeks in their places, each under the 120-hour cap as the bank stood then. The
-// catch-up weeks earn that much together; this week gets what the ones already paid did not take. So the answer
-// is the same in any order the late weeks are paid, and time off taken between two of them gives the cap room back.
-// A week paid on time keeps no more than it earned: with more hours in the bank before it, it can earn less.
+// What a catch-up week earns: the weeks of this time on the job through the payout week are run again in week order,
+// each under the 120-hour cap as the bank stood then, once as they were paid and once with this week and the other
+// catch-up weeks in their places. The late weeks earn what they add to the bank at the payout: hours that filled the
+// bank and so took hours from a later week add nothing. This week gets what the ones already paid did not take. So
+// the answer is the same in any order the late weeks are paid, and time off between two of them gives room back.
 // `catchUp`: { start, before, after } (paidOutInLaterWeek); `raw` = what this week earns under no cap.
 function catchUpEarns({ start = 0, before = [], after = [] }, raw) {
-  let bank = start;
-  let together = 0;
-  let paidAlready = 0;
-  const step = (used, earns) => {
-    const held = bank - used;
-    const earned = Math.max(0, Math.min(earns, CAP - held));
-    bank = held + earned;
-    return earned;
+  const replay = (withLate) => {
+    let bank = start;
+    const step = (used, earns) => {
+      const held = bank - used;
+      bank = held + Math.max(0, Math.min(earns, CAP - held));
+    };
+    const each = (week) => { if (withLate || !week.caughtUp) step(week.used, week.earned); };
+    before.forEach(each);
+    if (withLate) step(0, raw);
+    after.forEach(each);
+    return bank;
   };
-  const replay = (week) => {
-    const earned = step(week.used, week.earned);
-    if (!week.caughtUp) return;
-    together += earned;
-    paidAlready += week.earned;
-  };
-  before.forEach(replay);
-  together += step(0, raw);
-  after.forEach(replay);
-  return Math.max(0, together - paidAlready);
+  const paidAlready = [...before, ...after].reduce((sum, week) => sum + (week.caughtUp ? week.earned : 0), 0);
+  return Math.max(0, replay(true) - replay(false) - paidAlready);
 }
 
 function settleWeek({ hoursPerYear, bankBefore, earlyPaidBefore, hireDate, usableFrom, entries, regular, holiday, payOut = false, catchUp = null }) {
@@ -476,6 +471,19 @@ async function laterWeekBankCheckExists(conn, run, technicianIds) {
 // gives the yearly hours (kept on the run at finalize; the setting can be cleared after the payout is final), the
 // bank before this week up to it (with what catch-up checks of earlier weeks earned), and what it and the catch-up
 // checks after it paid out.
+// The technicians among `ids` that a check of this week on `payDate` catches up (paidOutInLaterWeek), as a Set: the
+// question alone, for one with no yearly hours now (tech-rewards-pay-lines spanWaitOf).
+async function caughtUpIds(conn, ids, { weekStart, payDate }) {
+  if (!ids.length) return new Set();
+  const { rows } = await conn.raw(
+    `SELECT DISTINCT (kept->>'technicianId')::uuid AS technician_id
+      FROM payroll_runs AS r CROSS JOIN LATERAL jsonb_array_elements(r.bank_payouts) AS kept
+      WHERE r.status = 'finalized' AND r.week_start > ? AND r.pay_date < ? AND (kept->>'technicianId')::uuid = ANY(?::uuid[])`,
+    [weekStart, payDate, ids],
+  );
+  return new Set(rows.map((row) => row.technician_id));
+}
+
 async function paidOutInLaterWeek(conn, ids, { weekStart, payDate }) {
   const byTech = new Map();
   if (!ids.length) return byTech;
@@ -511,19 +519,18 @@ async function paidOutInLaterWeek(conn, ids, { weekStart, payDate }) {
       .whereNotNull('pto_earned_minutes')
       .where('week_start', '<=', previous.week_start)
       .first(conn.raw('COALESCE(SUM(pto_earned_minutes - pto_minutes), 0) AS bank')) : { bank: 0 };
-    // Each week of this time on the job before the payout week, other than this one: what its checks paid from the
-    // bank and earned, and whether they are catch-up checks of this payout (paid after it).
+    // Each week of this time on the job through the payout week: what its final checks paid from the
+    // bank (less what they paid out) and earned, and whether they are catch-up checks of this payout (paid after it).
     const weeks = await conn('payroll_checks')
       .where({ technician_id: row.technician_id, status: 'finalized' })
       .whereNotNull('pto_earned_minutes')
-      .where('week_start', '<', row.week_start)
-      .whereNot('week_start', weekStart)
+      .where('week_start', '<=', row.week_start)
       .modify((query) => { if (previous) query.where('week_start', '>', previous.week_start); })
       .groupByRaw('1, 2')
       .orderBy('week_start')
       .select(
         conn.raw("to_char(week_start, 'YYYY-MM-DD') AS week_start"),
-        conn.raw('pay_date > ? AS caught_up', [row.pay_date]),
+        conn.raw('(pay_date > ? AND week_start < ?) AS caught_up', [row.pay_date, row.week_start]),
         conn.raw("SUM(pto_minutes - COALESCE((calc_snapshot->'ptoBank'->>'payoutMinutes')::numeric, 0)) AS used"),
         conn.raw('SUM(pto_earned_minutes) AS earned'),
       );
@@ -537,7 +544,8 @@ async function paidOutInLaterWeek(conn, ids, { weekStart, payDate }) {
     byTech.set(row.technician_id, {
       hoursPerYear: Number(row.hours_per_year),
       start: toUnits(start.bank),
-      before: weeks.filter((week) => week.week_start < weekStart).map(asWeek),
+      // A final check of this same week came first: this check is not final yet.
+      before: weeks.filter((week) => week.week_start <= weekStart).map(asWeek),
       after: weeks.filter((week) => week.week_start > weekStart).map(asWeek),
       paidOut: Math.max(0, toUnits(out.paid_out)),
     });
@@ -719,6 +727,7 @@ module.exports = {
   firstBankFactDays,
   paidOutInLaterWeek,
   catchUpEarns,
+  caughtUpIds,
   laterWeekBankUseExists,
   laterBankCheckExists,
   laterWeekBankCheckExists,

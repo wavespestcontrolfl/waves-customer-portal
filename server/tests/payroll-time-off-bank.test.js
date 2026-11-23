@@ -248,9 +248,13 @@ describe('what a catch-up week earns', () => {
     expect(catchUpEarns({ start: hours(119), before: [late(1), onTime(40, 0)], after: [] }, hours(1.54))).toBe(hours(1.54));
   });
 
-  it('lets a week paid on time keep no more than it earned, and less when the late week filled the bank', () => {
-    // A late week that fills the bank leaves the next week, paid on time, less room: the late week still earns its hours.
-    expect(catchUpEarns({ start: hours(118), before: [], after: [onTime(0, 2)] }, hours(2))).toBe(hours(2));
+  it('pays nothing for hours that filled the bank and so took hours from a later week', () => {
+    // 118 hours; a late week of 2 fills the bank, so the next week (on time, 2 hours) earns 0: the bank is the same.
+    expect(catchUpEarns({ start: hours(118), before: [], after: [onTime(0, 2)] }, hours(2))).toBe(0);
+    // Also with time off after it: 118, late 2, on time 2, then 40 off and 2 earned. The payout is 82 either way.
+    expect(catchUpEarns({ start: hours(118), before: [], after: [onTime(0, 2), onTime(40, 2)] }, hours(2))).toBe(0);
+    // 117: on time the late week earns 2 and the next week 1. Paid late, the next week earned 2: 1 is added.
+    expect(catchUpEarns({ start: hours(117), before: [], after: [onTime(0, 2)] }, hours(2))).toBe(hours(1));
     // A week on time that earned 1 hour never earns more in the replay.
     expect(catchUpEarns({ start: hours(100), before: [onTime(0, 1)], after: [] }, hours(30))).toBe(hours(19));
   });
