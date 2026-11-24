@@ -130,9 +130,10 @@ async function applyMinimum(conn, rows, { start, end, lock = false }) {
   const firstWork = await firstWorkDays(conn, [...techs.keys()], start, end);
   // In the week of the last day, only time off up to that day lowers the minimum (time off booked after it is not
   // on a scheduled day of the job). The bank's own per-day figures say which days it did not pay.
+  // A technician with no bank was paid every booked hour: nothing is unpaid, so only a bank's rows are read.
   const lastWeekRows = rows.filter((row) => {
     const tech = techs.get(row.technician_id);
-    return tech && tech.last_day && tech.last_day >= start && tech.last_day <= end;
+    return tech && row.pto_bank && tech.last_day && tech.last_day >= start && tech.last_day <= end;
   }).map((row) => {
     const tech = techs.get(row.technician_id);
     return { ...row, from: tech.hire_date && tech.hire_date > start ? tech.hire_date : start, to: tech.last_day };
@@ -145,15 +146,16 @@ async function applyMinimum(conn, rows, { start, end, lock = false }) {
     const bank = row.pto_bank || {};
     const paidOff = Number(row.pto_minutes || 0) - Number(bank.payoutMinutes || 0);
     const paidMinutes = Number(row.regular_minutes || 0) + Number(row.overtime_minutes || 0) + paidOff + Number(row.holiday_minutes || 0);
-    const unpaidMinutes = unpaidToLastDay.has(row.technician_id)
-      ? unpaidToLastDay.get(row.technician_id)
-      : Math.max(0, Number(bank.unpaidMinutes || 0) - Number(bank.unpaidBeforeHireMinutes || 0));
+    const inLastWeek = tech.last_day && tech.last_day <= end;
+    let unpaidMinutes = Math.max(0, Number(bank.unpaidMinutes || 0) - Number(bank.unpaidBeforeHireMinutes || 0));
+    if (inLastWeek) unpaidMinutes = unpaidToLastDay.get(row.technician_id) || 0;
     // A check with no work and no time off in the week (a pay line alone, such as a bonus after leaving) is not a
     // week on the job: no minimum.
     if (paidMinutes + unpaidMinutes <= 0) return row;
     // Work before the hire date on file is an earlier stay: its schedule is not known here.
     const first = firstWork.get(row.technician_id);
-    if (tech.hire_date && (first ? first < tech.hire_date : end < tech.hire_date)) {
+    const workedMinutes = Number(row.regular_minutes || 0) + Number(row.overtime_minutes || 0);
+    if (tech.hire_date && (first ? first < tech.hire_date : workedMinutes > 0 && end < tech.hire_date)) {
       holds.set(row.technician_id, EARLIER_STAY);
       return row;
     }

@@ -201,6 +201,38 @@ postgres('payroll minimum paid week', () => {
     expect(byName(run, 'Sample Bravo')).toMatchObject({ ptoHours: '0.00', minimumWeekHours: '7.00' });
   });
 
+  it('no bank: paid time off in the last week counts toward the minimum', async () => {
+    // Last day Tuesday: 20 h minimum; 5 h worked + 8 h of paid time off Monday, so 7 h added.
+    const id = await tech('Sample Alpha', { paid_week_minimum_last_day: addDays(W1, 1) });
+    await worked(id, W1, 5);
+    await offDay(id, W1, 8);
+    expect(byName((await draft(W1)).body.run, 'Sample Alpha')).toMatchObject({ ptoHours: '8.00', minimumWeekHours: '7.00' });
+  });
+
+  it('refuses a new last day in a week a final run closed with the time off unpaid and no check', async () => {
+    // Empty bank, last day Monday, only unpaid time off: the run has no check for them and is final.
+    const id = await tech('Sample Alpha', { hours: '80', paid_week_minimum_last_day: W1 });
+    await offDay(id, W1, 10);
+    const run = (await draft(W1)).body.run;
+    expect(run.checks).toEqual([]);
+    expect((await finalize(run.id)).status).toBe(200);
+    const moved = await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: '40', lastDay: addDays(W1, 1) }, email: OWNER });
+    expect(moved.status).toBe(409);
+  });
+
+  it('refuses a new last day before the hire date', async () => {
+    const id = await tech('Sample Alpha', { hired: W1 });
+    const early = await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: '40', lastDay: addDays(W1, -1) }, email: OWNER });
+    expect([early.status, early.body.error]).toEqual([400, `The last day must be on or after the hire date (${W1}).`]);
+  });
+
+  it('a holiday-only week after a rehire is not held as an earlier stay', async () => {
+    const id = await tech('Sample Alpha', { hired: addDays(W1, 21) });
+    await offDay(id, addDays(W1, 2), 8, 'holiday');
+    const run = (await draft(W1)).body.run;
+    expect(run.blocked).toEqual([]);
+  });
+
   it('a rehire: the last day of the earlier stay is not read, and can be cleared after its week is paid', async () => {
     const id = await tech('Sample Alpha', { paid_week_minimum_last_day: addDays(W1, 1) });
     await worked(id, W1, 15);

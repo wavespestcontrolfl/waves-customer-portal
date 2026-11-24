@@ -486,11 +486,18 @@ async function setWeekMinimum(technicianId, input, actor, conn = db) {
     // A last day before the hire date ended an earlier stay (a rehire moved the hire date past it): the pay run no
     // longer reads it, so it is not guarded and can be cleared or replaced.
     const shownLast = tech.last_day && tech.hire_date && tech.last_day < tech.hire_date ? null : tech.last_day;
+    if (lastDay && lastDay !== tech.last_day && tech.hire_date && lastDay < tech.hire_date) {
+      throw new PayrollError(400, `The last day must be on or after the hire date (${tech.hire_date}).`);
+    }
     if (lastDay !== tech.last_day && (lastDay || shownLast)) {
       const earliest = [lastDay, shownLast].filter(Boolean).sort()[0];
       const week = staffWeekStartForWorkDate(earliest);
+      // A final check of the employee, or a final run that left their time off unpaid with no check: either week is
+      // closed, and a new last day could owe it more.
       const paid = await trx('payroll_checks').where({ technician_id: tech.id, status: 'finalized' })
-        .where('week_start', '>=', week).first('id');
+        .where('week_start', '>=', week).first('id')
+        || await trx('payroll_runs').where({ status: 'finalized' }).where('week_start', '>=', week)
+          .whereRaw('unpaid_time_off @> ?::jsonb', [JSON.stringify([{ technicianId: tech.id }])]).first('id');
       if (paid) throw new PayrollError(409, LAST_DAY_PAID(week));
     }
     await trx('technicians').where({ id: technicianId })
