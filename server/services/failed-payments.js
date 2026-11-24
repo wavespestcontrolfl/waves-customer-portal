@@ -11,17 +11,15 @@
 // invoice keeps counting (the invoice sum only covers sent / viewed / overdue).
 const db = require('../models/db');
 const { isNeverAttemptedHoldDeferral, excludeNeverAttemptedHoldDeferrals } = require('./collections/collection-hold');
-const { paymentMetadataValueSql } = require('./payer-linkage');
+const { metadataOf, paymentMetadataValueSql } = require('./payer-linkage');
 
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// metadataOf also decodes the legacy string-encoded and array-shaped values older writers left behind; a plain
+// JSON.parse reads no invoice_id from them and double-counts the debt (balance sums the invoice and the failed row).
 const metadataInvoiceId = (p) => {
-  try {
-    const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
-    return m && m.invoice_id != null ? String(m.invoice_id) : null;
-  } catch {
-    return null;
-  }
+  const m = metadataOf(p);
+  return m && m.invoice_id != null ? String(m.invoice_id) : null;
 };
 
 // Never-attempted LOCK-contention deferral (Codex #4682 r3/r4): the monthly cron writes a 'failed' row with next_retry_at armed when
@@ -34,12 +32,7 @@ const isNeverAttemptedLockDeferral = (p) => {
   const armed = Number(p.retry_count || 0) === 0 && p.next_retry_at != null;
   const collected = p.superseded_by_payment_id != null && String(p.superseded_by_payment_id) !== String(p.id);
   if (!armed && !collected) return false;
-  try {
-    const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
-    return !!(m && m.deferred_reason === LOCK_DEFERRAL_REASON);
-  } catch {
-    return false;
-  }
+  return metadataOf(p)?.deferred_reason === LOCK_DEFERRAL_REASON;
 };
 
 // collection_hold (B10) deferrals ride the same shared predicate every failed-payment consumer uses.

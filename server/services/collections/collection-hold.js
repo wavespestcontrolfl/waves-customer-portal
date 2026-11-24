@@ -50,6 +50,7 @@
  */
 
 const db = require('../../models/db');
+const { metadataOf, paymentMetadataValueSql } = require('../payer-linkage');
 
 const HOLD_FLAG = 'collection_hold';
 const DISPUTE_REASON_PREFIX = 'dispute';
@@ -548,20 +549,17 @@ function isNeverAttemptedHoldDeferral(p) {
   if (!p || p.stripe_payment_intent_id) return false;
   const armed = Number(p.retry_count || 0) === 0 && p.next_retry_at != null;
   const collected = p.superseded_by_payment_id != null && String(p.superseded_by_payment_id) !== String(p.id);
-  try {
-    const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
-    if (!m || m.deferred_reason !== HOLD_DEFERRAL_REASON) return false;
-    return armed || collected || m.deferred_resolution === ABSORBED_RESOLUTION;
-  } catch {
-    return false;
-  }
+  // Shared decoder: a legacy string-encoded or array-shaped metadata value still names its deferral.
+  const m = metadataOf(p);
+  if (!m || m.deferred_reason !== HOLD_DEFERRAL_REASON) return false;
+  return armed || collected || m.deferred_resolution === ABSORBED_RESOLUTION;
 }
 
 // `alias` is the payments table name/alias in the calling query. COALESCE
 // keeps the NOT() NULL-safe for rows with no metadata.
 function excludeNeverAttemptedHoldDeferrals(query, alias = 'payments') {
   return query.whereRaw(
-    `NOT (COALESCE(${alias}.metadata->>'deferred_reason', '') = ? AND ${alias}.stripe_payment_intent_id IS NULL AND ((COALESCE(${alias}.retry_count, 0) = 0 AND ${alias}.next_retry_at IS NOT NULL) OR (${alias}.superseded_by_payment_id IS NOT NULL AND ${alias}.superseded_by_payment_id <> ${alias}.id) OR COALESCE(${alias}.metadata->>'deferred_resolution', '') = ?))`,
+    `NOT (COALESCE(${paymentMetadataValueSql(alias, 'deferred_reason')}, '') = ? AND ${alias}.stripe_payment_intent_id IS NULL AND ((COALESCE(${alias}.retry_count, 0) = 0 AND ${alias}.next_retry_at IS NOT NULL) OR (${alias}.superseded_by_payment_id IS NOT NULL AND ${alias}.superseded_by_payment_id <> ${alias}.id) OR COALESCE(${paymentMetadataValueSql(alias, 'deferred_resolution')}, '') = ?))`,
     [HOLD_DEFERRAL_REASON, ABSORBED_RESOLUTION],
   );
 }

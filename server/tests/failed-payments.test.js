@@ -69,6 +69,36 @@ describe('loadFailedPaymentFacts for the portal balance', () => {
   });
 });
 
+describe('legacy array-shaped metadata (a notice appended to string-encoded metadata)', () => {
+  const legacy = (over) => JSON.stringify([JSON.stringify(over), { retry_notice: 'sent' }]);
+
+  test('an array-backed failure linked to a sent invoice is not counted again as standalone debt', async () => {
+    const dbh = fakeDb({
+      payments: [row({ metadata: legacy({ invoice_id: INVOICE_A }), amount: 40 })],
+      invoices: [{ id: INVOICE_A }],
+    });
+    const facts = await loadFailedPaymentFacts('c1', dbh);
+    expect(facts.failedInvoiceIds).toEqual([INVOICE_A]);
+    expect(standaloneFailedTotal(facts)).toBe(0);
+  });
+
+  test('an array-backed lock-contention placeholder is never a payment failure', () => {
+    const placeholder = row({
+      stripe_payment_intent_id: null, retry_count: 0, next_retry_at: '2026-11-25T00:00:00Z',
+      metadata: legacy({ deferred_reason: 'lock_contention' }), amount: 25,
+    });
+    expect(standaloneFailedTotal({ rows: [placeholder], balanceCarryingInvoiceIds: new Set() })).toBe(0);
+  });
+
+  test('an array-backed collection-hold placeholder is never a payment failure', () => {
+    const placeholder = row({
+      stripe_payment_intent_id: null, retry_count: 0, next_retry_at: '2026-11-25T00:00:00Z',
+      metadata: legacy({ deferred_reason: 'collection_hold' }), amount: 25,
+    });
+    expect(standaloneFailedTotal({ rows: [placeholder], balanceCarryingInvoiceIds: new Set() })).toBe(0);
+  });
+});
+
 describe('loadFailedPaymentFacts — strict (SMS grounding)', () => {
   test('payer-owned rows are filtered in SQL and every column the payer-linkage predicate reads is selected', async () => {
     const dbh = fakeDb({ payments: [row()] });
