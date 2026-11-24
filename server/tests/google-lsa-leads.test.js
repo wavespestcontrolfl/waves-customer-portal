@@ -561,6 +561,8 @@ describe('runLeadSync', () => {
     const out = await Leads.runLeadSync();
     expect(mockQuery).toHaveBeenCalledTimes(2);
     expect(out).toMatchObject({ configured: true, leads: 1 });
+    // Step B runs after the match and refill; with no matched rows it does nothing.
+    expect(out.relabel).toEqual({ relabeled: 0, created: 0, kept: 0, retry: 0, failed: 0 });
     expect(writesTo('lsa_leads', 'insert')).toHaveLength(1);
   });
 
