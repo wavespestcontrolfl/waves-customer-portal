@@ -49,7 +49,7 @@ policy decision.
 
 ## Steps
 1. Mark job status = cancelled
-2. Check unscheduled job queue for same date, same service line, nearby address
+2. Check unscheduled job queue for same date, nearby address, any service line the tech covers
 3. If match found: assign to tech, insert at cancelled job's position
 4. If no match: compress route (move stop N+1 forward), reduce drive time estimate
 5. Log result with message for dispatch board

@@ -33,5 +33,5 @@ All pest control and termite work, in every served ZIP.
 ---
 
 ## Notes
-- No ZIP territories. Do not assign work by ZIP cluster.
+- Do not split work between techs by ZIP cluster; the split is by service line. The live mapping is in the auto-dispatch territory settings.
 - This page holds no performance numbers. Read live figures from the portal reports, never from this page.

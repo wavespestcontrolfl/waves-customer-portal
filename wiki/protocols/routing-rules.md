@@ -15,8 +15,8 @@ When the second technician is hired, the split is **by service line, not by ZIP 
 - **Second tech:** all pest control and termite work, in every served ZIP.
 - **Adam:** lawn care, tree & shrub, and exclusion, in every served ZIP; fills in on pest when needed.
 
-There are no ZIP territories or tech clusters. Group a day's stops by geography for drive time only.
-The live rules are in the dispatch code (auto-dispatch and the route check); this page only summarizes them.
+Do not split work between techs by ZIP cluster. Group a day's stops by geography for drive time only.
+The live mapping is in the auto-dispatch territory settings and the dispatch code; this page only summarizes the rulings.
 
 ## Route Building Order
 
@@ -53,5 +53,5 @@ The live rules are in the dispatch code (auto-dispatch and the route check); thi
 
 - Start: 7:30–8:00 AM first stop
 - No lunch break is scheduled (owner 2026-11-24); every clocked minute is paid. Do not hold a midday gap.
-- End: the paid day runs to about 6:00 PM
+- End: auto-dispatch places no stop that ends after 5:00 PM (`DAY_CLOSE`); the paid day runs to about 6:00 PM
 - Estimates/inspections: prefer 9–11 AM or 2–4 PM (customers more available)
