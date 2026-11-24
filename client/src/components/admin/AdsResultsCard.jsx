@@ -40,7 +40,7 @@ function rainText(rows) {
 const PLATFORM_NAMES = { google_ads: "Google Ads", google_lsa: "Google LSA", facebook: "Facebook" };
 
 function rainDayText(rain) {
-  if (!rain || !rain.call) return "";
+  if (!rain || (!rain.call && !rain.cutoff_call)) return "";
   const measured = rain.wet_day === null || rain.wet_day === undefined ? "not measured yet" : rain.wet_day ? "it rained" : "stayed dry";
   if (!rain.cutoff_call) return `No 2 PM call (later forecast ${rain.call}), ${measured}`;
   return `2 PM call ${rain.cutoff_call}, ${measured}`;
@@ -178,7 +178,8 @@ export default function AdsResultsCard() {
       </div>
       <div className="text-ui-body text-ink-secondary [margin:4px_0_12px]">
         Leads from paid ads and what they paid. Paid means a paid invoice on or after the lead day. Plan / one-time
-        is the customer today. Each customer counts once, on their first lead. Calls are leads linked to a call (links start Aug 9, 2026). Rain days use the recorded 2 PM forecast call (test mode: the ads do not change yet).
+        is the customer today. Each customer counts once, on their first lead in the period shown, so a shorter period can move a customer
+        to another campaign. Calls are leads linked to a call (links start Aug 9, 2026). Rain days use the recorded 2 PM forecast call (test mode: the ads do not change yet).
         Leads are tracked funnel leads: an LSA message or call with no
         funnel record is not counted here.
       </div>

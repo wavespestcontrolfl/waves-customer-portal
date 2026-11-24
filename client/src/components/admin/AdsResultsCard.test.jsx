@@ -81,6 +81,7 @@ describe('AdsResultsCard', () => {
   it('counts the recorded 2 PM forecast call, not a later forecast', async () => {
     const changed = [
       { ...zero, date: '2026-10-05', campaign_id: 'c', campaign: 'Test Campaign C', platform: 'google_ads', rain_day: { call: 'rain', cutoff_call: 'dry', wet_day: false } },
+      { ...zero, date: '2026-10-07', campaign_id: 'c', campaign: 'Test Campaign C', platform: 'google_ads', rain_day: { call: null, cutoff_call: 'unknown', wet_day: null } },
       { ...zero, date: '2026-10-06', campaign_id: 'c', campaign: 'Test Campaign C', platform: 'google_ads', rain_day: { call: 'rain', cutoff_call: null, wet_day: null } },
     ];
     reply({ period: '90d', since: 'x', until: 'y', rows: changed, totals: zero });
@@ -90,6 +91,7 @@ describe('AdsResultsCard', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Show days for Test Campaign C' }));
     expect(screen.getByText('2 PM call dry, stayed dry')).toBeInTheDocument();
     expect(screen.getByText('No 2 PM call (later forecast rain), not measured yet')).toBeInTheDocument();
+    expect(screen.getByText('2 PM call unknown, not measured yet')).toBeInTheDocument();
   });
 
   it('asks again when the period changes', async () => {
