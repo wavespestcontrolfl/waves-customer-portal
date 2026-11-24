@@ -127,30 +127,30 @@ describe('link recognition (ownedPortalLinkSpans)', () => {
       expect(wrappedOwnedLinkIn(`See https://evil.example/?next=${prep(PREVIEW)}`)).toBe(true);
     });
 
-    test('a bare-host PUBLIC_PORTAL_URL (the short-link base returns it as typed) still parses: its links are judged, no check throws', () => {
-      process.env.PUBLIC_PORTAL_URL = HOST;
-      expect(require('../services/short-url').shortLinkBaseUrl()).toBe(HOST);
-      expect(ownedPortalHosts()).toEqual([HOST]);
-      expect(ownedPortalLinkSpans(`Prep: ${prep(HOST)}`).map((s) => s.url)).toEqual([prep(HOST)]);
-      expect(wrappedOwnedLinkIn(`See https://evil.example/?next=${prep(HOST)}`)).toBe(true);
-      // In production an alias that names no host, or a single label (it would read every same word in a message as a
-      // link), drops only itself.
+    test('in production an alias that names no host, or names a single label, drops only itself', () => {
+      // A single label would read every same word in a message as a link.
       deployedIn('production');
+      process.env.PUBLIC_PORTAL_URL = `https://${HOST}`;
       process.env.CLIENT_URL = 'https://';
       process.env.PORTAL_URL = 'https://portal';
       process.env.PORTAL_DOMAIN = 'mailto:office@wavespest.example';
+      process.env.RAILWAY_PUBLIC_DOMAIN = '/links';
+      expect(ownedPortalHosts()).toEqual([HOST]);
       process.env.RAILWAY_PUBLIC_DOMAIN = `staff@${RAILWAY}`;
       expect(ownedPortalHosts()).toEqual([HOST]);
-      // A link base that names no host ('https://' reads back as 'https:' from publicPortalUrl()) fails as a bad base
-      // always has, never as a host named 'https'.
-      process.env.PUBLIC_PORTAL_URL = 'https://';
-      expect(() => ownedPortalHosts()).toThrow('names no host');
     });
 
-    test('a short-link base that names no host stops the wrap, as a bad base always has: the customer keeps the working link', async () => {
-      process.env.PUBLIC_PORTAL_URL = `https://${HOST}`;
-      process.env.SHORTLINK_BASE_URL = 'https://';
-      expect(() => ownedPortalHosts()).toThrow('names no host');
+    // The SMS wrap mints its short links on the short-link base as typed, so a base that is not a full URL must stop
+    // every check and the wrap, never become a host ('https:///links' parses to a host named 'links').
+    test.each([
+      ['a bare-host PUBLIC_PORTAL_URL (the short-link base returns it as typed)', { PUBLIC_PORTAL_URL: HOST }],
+      ['a path-only SHORTLINK_BASE_URL', { PUBLIC_PORTAL_URL: `https://${HOST}`, SHORTLINK_BASE_URL: '/links' }],
+      ['a SHORTLINK_BASE_URL with no host', { PUBLIC_PORTAL_URL: `https://${HOST}`, SHORTLINK_BASE_URL: 'https://' }],
+      ['a PUBLIC_PORTAL_URL with no host', { PUBLIC_PORTAL_URL: 'https://', SHORTLINK_BASE_URL: `https://${HOST}` }],
+    ])('a link base that is not a full URL stops every check and the wrap, as on main: %s', async (_label, env) => {
+      deployedIn('production');
+      Object.assign(process.env, env);
+      expect(() => ownedPortalHosts()).toThrow();
       const body = `Your prep guide: ${prep(HOST)}`;
       expect(await wrapPortalLinks({ ...base, body })).toEqual({ body, codes: [] });
       expect(createShortCode).not.toHaveBeenCalled();

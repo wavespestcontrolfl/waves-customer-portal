@@ -952,10 +952,9 @@ const PORTAL_HOST_ENV_NAMES = Object.freeze(['PUBLIC_PORTAL_URL', 'PORTAL_URL', 
 function ownedHostKey(host) {
   return String(host).toLowerCase().replace(/\.$/, '');
 }
-// The host a link base or portal origin value names (a full http(s) URL or a bare host, as typed); null when it is
-// empty or names no host. One parser for every value, so one bad value drops only itself: shortLinkBaseUrl() returns
-// PUBLIC_PORTAL_URL as typed (a bare host too). A scheme with no `//` ('https:', which publicPortalUrl() makes of
-// 'https://', or 'mailto:x') is no host, and neither is a value with userinfo.
+// The host an alias value names (a full http(s) URL or a bare host, as typed); null when it is empty or names no host,
+// so one bad alias drops only itself. A scheme with no `//` ('https:', 'mailto:x') is no host, and neither is a value
+// with userinfo.
 const SCHEMED_VALUE_RE = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//;
 const SCHEME_WITHOUT_HOST_RE = /^[A-Za-z][A-Za-z0-9+.-]*:(?!\d)/;
 function portalHostOf(value) {
@@ -978,16 +977,11 @@ function productionAliasHostOf(value) {
   const host = portalHostOf(value);
   return host && PRODUCTION_ALIAS_HOST_RE.test(host) ? host : null;
 }
-// A link base must name a host (a bare one too): the app builds its links on it, the SMS wrap's short links among
-// them. A base that names none fails as main's parse did, so no check or wrap runs on it (the wrap then keeps the
-// body as typed). Only an alias drops itself.
-function linkBaseHostOf(value) {
-  const host = portalHostOf(value);
-  if (!host) throw new Error('A portal link base (SHORTLINK_BASE_URL / PUBLIC_PORTAL_URL) names no host');
-  return host;
-}
 function ownedPortalHosts() {
-  const hosts = [require('./short-url').shortLinkBaseUrl(), publicPortalUrl()].map(linkBaseHostOf);
+  // The link bases parse exactly as before: the app builds its links on them as typed (the SMS wrap mints its short
+  // links on the short-link base), so a base that is not a full URL throws, and no check or wrap runs on it (the wrap
+  // then keeps the body as typed). Only an alias drops itself.
+  const hosts = [require('./short-url').shortLinkBaseUrl(), publicPortalUrl()].map((u) => new URL(u).host);
   if (isDeployedProduction()) hosts.push(BRANDED_PORTAL_HOST, ...PORTAL_HOST_ENV_NAMES.map((name) => productionAliasHostOf(process.env[name])));
   return [...new Set(hosts.filter(Boolean).map(ownedHostKey))];
 }
