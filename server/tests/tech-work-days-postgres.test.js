@@ -3,7 +3,7 @@
  * (migration 20261025200000), the slot-discovery seam, the commit-time refusal at
  * automatic paths, the office warning, and series upkeep. A mocked knex proves none
  * of the CHECK, the smallint[] round trip or the real queries.
- * An office booking also says when the technician's shift does not hold the visit
+ * The same office paths also say when the technician's shift does not hold the visit
  * (GATE_TECH_SHIFT_HOURS, D4 part 3c): the last block, on the same real rows.
  *
  * Runs in the DB-gated CI step (DATABASE_URL on the migrated waves_test database) or
@@ -286,9 +286,9 @@ postgres('technician work days (real Postgres)', () => {
     });
   });
 
-  // GATE_TECH_SHIFT_HOURS (D4 part 3c): an office booking is told when the technician's shift does
-  // not hold the visit. One reader gives both lines (technician-eligibility.dayWarningsFor), so each
-  // path is asked once and never refused.
+  // GATE_TECH_SHIFT_HOURS (D4 part 3c): the same office paths are told when the technician's shift
+  // does not hold the visit. One reader gives both lines (technician-eligibility.dayWarningsFor), so
+  // each path is asked once and never refused.
   describe('the office is told the shift (GATE_TECH_SHIFT_HOURS)', () => {
     // A Monday to Friday a year out, counted from today in Eastern time: the lead route refuses a date
     // that has passed, so a fixed week would fail once it did. Never WEEK itself (other blocks book it).
@@ -336,6 +336,21 @@ postgres('technician work days (real Postgres)', () => {
       process.env.GATE_TECH_SHIFT_HOURS = 'true';
       process.env.GATE_TECH_WORK_DAYS = 'true';
       expect((await book(FRI2, '16:00', 60)).warnings).toEqual([`${morning.name} does not work on Fridays.`]);
+    });
+
+    test('the office board assignment of a visit outside the shift succeeds with the line; inside it, and gate off, no warnings key', async () => {
+      const { assignDispatchJob } = require('../services/dispatch-assignment');
+      const assign = async (scheduledDate, windowStart) => {
+        const jobId = (await book(scheduledDate, windowStart, 60, null)).visit.id;
+        const out = await assignDispatchJob({ jobId, technicianId: morning.id, actorId: null, emit: false });
+        expect((await db('scheduled_services').where({ id: jobId }).first('technician_id')).technician_id).toBe(morning.id);
+        return out;
+      };
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      expect(await assign(TUE2, '15:00')).toMatchObject({ changed: true, warnings: [line()] });
+      expect(await assign(WED2, '08:00')).not.toHaveProperty('warnings');
+      delete process.env.GATE_TECH_SHIFT_HOURS;
+      expect(await assign(THU2, '16:00')).not.toHaveProperty('warnings');
     });
 
     test('a lead booked from the office outside the shift is saved and told (POST /admin/leads/:id/schedule-appointment)', async () => {

@@ -526,11 +526,15 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
       expect(dateOnly((await rowsOf([f.pest[1].id])).get(String(f.pest[1].id)).scheduled_date)).toBe(addDays(dateOnly(f.pest[1].scheduled_date), 1));
     });
 
-    test('the office\'s own series move carries that partner: it is not checked', async () => {
+    test('the office\'s own series move carries that partner: it is not checked, and the office is told the shift for it', async () => {
       process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
       process.env.GATE_TECH_SHIFT_HOURS = 'true';
       const f = await buildLongPartner();
-      expect((await moveLawnSeries(f)).success).not.toBe(false);
+      const result = await moveLawnSeries(f);
+      expect(result.success).not.toBe(false);
+      // The plan's own visits fit 08:00 to 12:00 (D4 part 3c); the carried partner's four hours do not.
+      expect((result.warnings || []).filter((w) => /shift is/.test(w)))
+        .toEqual(["Synthetic carry tech's shift is 8:00 AM to 12:00 PM. This visit is outside those hours."]);
       expect(dateOnly((await rowsOf([f.pest[0].id])).get(String(f.pest[0].id)).scheduled_date)).toBe(addDays(dateOnly(f.pest[0].scheduled_date), 1));
     });
 

@@ -119,8 +119,19 @@ function chain(row) {
 // technician_capabilities rows that are Off (GATE_TECH_JOB_TYPE_CHECKS); [] = qualified or needs review.
 let capabilityOffCategories = [];
 let techWorkDays = null;
+// The set hours (GATE_TECH_SHIFT_HOURS) as [start, end]; null = none. The hours read asks for a list
+// by id (loadTechShifts): with hours set it answers for each id it names.
+let techShift = null;
+function withSetHours(c) {
+  const rows = c.then;
+  c.then = (resolve, reject) => (techShift
+    ? Promise.resolve(c.whereIn.mock.calls.filter(([column]) => column === 'id').flatMap(([, ids]) => ids)
+      .map((id) => ({ id, shift_start: techShift[0], shift_end: techShift[1] }))).then(resolve, reject)
+    : rows(resolve, reject));
+  return c;
+}
 function chainTechnician() {
-  return chain({ id: 'any-tech', name: 'Test Tech', role: 'technician', employment_status: 'active', field_dispatchable: true, active: true, work_days: techWorkDays });
+  return withSetHours(chain({ id: 'any-tech', name: 'Test Tech', role: 'technician', employment_status: 'active', field_dispatchable: true, active: true, work_days: techWorkDays }));
 }
 
 // technician_absences: a hit only when where() named THIS tech + THIS date
@@ -195,8 +206,10 @@ function setup({ svc, absenceTechId, absenceDate, seriesRows = null }) {
 beforeEach(() => {
   jest.clearAllMocks();
   techWorkDays = null;
+  techShift = null;
   capabilityOffCategories = [];
   delete process.env.GATE_TECH_WORK_DAYS;
+  delete process.env.GATE_TECH_SHIFT_HOURS;
   delete process.env.GATE_TECH_JOB_TYPE_CHECKS;
   findConflictingVisits.mockResolvedValue([]);
   acquireOccupancyLock.mockImplementation(async () => {});
@@ -316,6 +329,87 @@ describe('PUT /:id/update-details — technician work days (office paths warn, n
   });
 });
 
+
+// GATE_TECH_SHIFT_HOURS (D4 part 3c): the office edit saves and is told when the final technician's
+// shift on the final day does not hold the visit as the save leaves it. Asked where the day-off line
+// is asked: a save that changes the day or the technician.
+describe('PUT /:id/update-details — technician shift hours (office paths warn, never block)', () => {
+  afterEach(() => { delete process.env.GATE_TECH_SHIFT_HOURS; delete process.env.GATE_TECH_WORK_DAYS; });
+  const dayLines = (body) => (body.warnings || []).filter((w) => /shift is|does not work/.test(w));
+  const line = (end) => `Test Tech's shift is 8:00 AM to ${end}. This visit is outside those hours.`;
+  const stored = () => setup({ svc: baseSvc({ technician_id: TECH_A }), absenceTechId: null, absenceDate: null });
+
+  // The stored visit is 09:00 to 10:00, sixty minutes.
+  test('gate on, a date move that keeps the row\'s hours onto a shift that ends before the visit does: written, and the reply says so', async () => {
+    process.env.GATE_TECH_SHIFT_HOURS = 'true';
+    techShift = ['08:00:00', '09:30:00'];
+    stored();
+    const { status, body } = await put('svc-1', { scheduledDate: NEW_DATE });
+    expect(status).toBe(200);
+    expect(updateCalls.length).toBeGreaterThan(0);
+    expect(body.warnings).toEqual([line('9:30 AM')]);
+  });
+
+  test('gate on, a shift that holds the visit, and a technician with no set hours: no line', async () => {
+    process.env.GATE_TECH_SHIFT_HOURS = 'true';
+    techShift = ['08:00:00', '10:00:00'];
+    stored();
+    expect(dayLines((await put('svc-1', { scheduledDate: NEW_DATE })).body)).toEqual([]);
+    techShift = null;
+    stored();
+    expect(dayLines((await put('svc-1', { scheduledDate: NEW_DATE })).body)).toEqual([]);
+  });
+
+  test('gate on, the hours this save writes are the hours asked about, not the row\'s', async () => {
+    process.env.GATE_TECH_SHIFT_HOURS = 'true';
+    techShift = ['08:00:00', '09:30:00'];
+    stored();
+    // The row's 09:00 to 10:00 is outside the shift; this save's 08:00 to 09:00 is inside it.
+    const earlier = await put('svc-1', { scheduledDate: NEW_DATE, windowStart: '08:00', windowEnd: '09:00' });
+    expect({ status: earlier.status, lines: dayLines(earlier.body), error: earlier.body.error }).toEqual({ status: 200, lines: [], error: undefined });
+    techShift = ['08:00:00', '10:00:00'];
+    stored();
+    // The row's hours are inside this shift; this save's 10:00 to 11:00 is not.
+    const later = await put('svc-1', { scheduledDate: NEW_DATE, windowStart: '10:00', windowEnd: '11:00' });
+    expect({ status: later.status, lines: dayLines(later.body), error: later.body.error }).toEqual({ status: 200, lines: [line('10:00 AM')], error: undefined });
+  });
+
+  test('gate on, a new technician on the same day is asked about too', async () => {
+    process.env.GATE_TECH_SHIFT_HOURS = 'true';
+    techShift = ['08:00:00', '09:30:00'];
+    stored();
+    const { status, body } = await put('svc-1', { technicianId: TECH_B });
+    expect(status).toBe(200);
+    expect(dayLines(body)).toEqual([line('9:30 AM')]);
+  });
+
+  test('gate on, a save that keeps the day and the technician is not asked (as for the day-off line)', async () => {
+    process.env.GATE_TECH_SHIFT_HOURS = 'true';
+    techShift = ['08:00:00', '09:30:00'];
+    stored();
+    const { status, body } = await put('svc-1', { scheduledDate: STORED_DATE, notes: 'gate code changed' });
+    expect(status).toBe(200);
+    expect(dayLines(body)).toEqual([]);
+  });
+
+  test('gate off: the set hours are ignored', async () => {
+    techShift = ['08:00:00', '09:30:00'];
+    stored();
+    const { status, body } = await put('svc-1', { scheduledDate: NEW_DATE });
+    expect(status).toBe(200);
+    expect(dayLines(body)).toEqual([]);
+  });
+
+  // NEW_DATE (2099-08-01) is a Saturday.
+  test('both gates on, onto a day off and outside the shift: the day-off line alone', async () => {
+    process.env.GATE_TECH_SHIFT_HOURS = 'true';
+    process.env.GATE_TECH_WORK_DAYS = 'true';
+    techWorkDays = [1, 2, 3, 4, 5];
+    techShift = ['08:00:00', '09:30:00'];
+    stored();
+    expect((await put('svc-1', { scheduledDate: NEW_DATE })).body.warnings).toEqual(['Test Tech does not work on Saturdays.']);
+  });
+});
 
 // GATE_TECH_JOB_TYPE_CHECKS (owner 2026-10-25): the office edit saves and warns when the
 // NEW technician is set to Off for the visit's category.
