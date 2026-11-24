@@ -299,12 +299,15 @@ async function memberEligible(conn, member, source) {
  * is rejected without a read) AND the same customer-pick check, since a customer's self-service reschedule leaves the office
  * source in place.
  */
-async function dayOnlyEligibility(conn, ids, now = new Date(), { ignoreLevel = false } = {}) {
+async function dayOnlyEligibility(conn, ids, now = new Date(), { ignoreLevel = false, onDate = null } = {}) {
   const result = new Map();
   if (!ids || ids.length === 0) return result;
   try {
     // A MOVE replaces the old promise (part B2), so its decision ignores the level: every visit reads as 'none'.
-    const levels = ignoreLevel ? new Map(ids.map((id) => [id, 'none'])) : await loadPromiseLevels(conn, ids, now);
+    // `onDate` (a send's own rendered date): the level read is pinned to it, so a visit moved off that date reads 'hour'
+    // (fail closed) and an hour told for that date is never dropped against the visit's new date (pre-push Codex P1).
+    const levels = ignoreLevel ? new Map(ids.map((id) => [id, 'none']))
+      : await loadPromiseLevels(conn, ids, now, onDate ? { sameDateOnly: onDate } : undefined);
     const facts = await loadStopFacts(conn, ids);
     const memberIds = [...new Set([...facts.values()].flat().map((m) => String(m.id)))];
     const sources = await loadBookingSources(conn, memberIds);
@@ -342,7 +345,8 @@ async function dayOnlySendDecision(conn, { id = null, ids = null, startAt, now =
   const no = { dayOnly: false, level: null, eligible: false };
   if (!wanted.length) return no;
   if (!shouldPromiseDayOnly({ startAt, now, reminder24hEnabled, customerPicked: false, level: 'none' })) return no;
-  const verdicts = await dayOnlyEligibility(conn, wanted, now, { ignoreLevel });
+  const onDate = startAt == null ? null : etDateString(startAt instanceof Date ? startAt : new Date(startAt)) || null;
+  const verdicts = await dayOnlyEligibility(conn, wanted, now, { ignoreLevel, onDate });
   // A stop is judged as a whole: every requested member must be eligible, and no member's latest promise may be an hour.
   const all = wanted.map((w) => verdicts.get(w) || { eligible: false, level: 'hour' });
   const eligible = all.every((a) => a.eligible);

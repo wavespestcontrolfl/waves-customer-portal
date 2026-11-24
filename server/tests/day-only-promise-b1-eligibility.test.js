@@ -319,7 +319,7 @@ describe('dayOnlySendDecision', () => {
   });
 
   test('recurring child 3 days out: day only; a customer-picked child: not', async () => {
-    const free = fakeConn({ services: [child('s1')], reminders: [office('s1', 'recurring_auto_extend')] });
+    const free = fakeConn({ services: [child('s1', { scheduled_date: '2026-11-13' })], reminders: [office('s1', 'recurring_auto_extend')] });
     expect((await decide(free, { startAt: new Date('2026-11-13T14:00:00Z') })).dayOnly).toBe(true);
     const moves = { s1: [{ created_at: '2026-11-08T10:00:00Z', new_date: '2026-11-15', initiated_by: 'customer_portal' }] };
     const picked = fakeConn({ services: [child('s1')], moves });

@@ -257,6 +257,15 @@ describe('dayOnlyReplayDecision: a held or merged move notice re-sent as a confi
     expect(await replay(conn)).toBe(false);
   });
 
+  test('the send decision (confirmation, 3-day text) is pinned to the rendered date too: a told Monday window stands (codex P1)', async () => {
+    const send = (date) => timePromise.dayOnlySendDecision(fakeConn({ services: [svc('s1', { customer_asked_time: false, scheduled_date: date })], messages: [hourFor('2026-11-15')] }), { id: 's1', startAt: FAR, now: NOW, reminder24hEnabled: true });
+    expect((await send('2026-11-16')).dayOnly).toBe(false);
+    expect((await send('2026-11-15')).dayOnly).toBe(false);
+    const old = { ...hourFor('2026-11-12') };
+    const moved = await timePromise.dayOnlySendDecision(fakeConn({ services: [svc('s1', { customer_asked_time: false })], messages: [old] }), { id: 's1', startAt: FAR, now: NOW, reminder24hEnabled: true });
+    expect(moved.dayOnly).toBe(true);
+  });
+
   test('a set time (true) stays a window; an unrecorded intent (NULL) is today\'s rules, not this one', async () => {
     expect(await replay(fakeConn({ services: [svc('s1', { customer_asked_time: true })] }))).toBe(false);
     expect(await replay(fakeConn({ services: [svc('s1')] }))).toBe(false);
