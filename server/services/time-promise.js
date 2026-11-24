@@ -417,7 +417,9 @@ async function dayOnlyReplayDecision(conn, { id, startAt, now = new Date(), remi
     // Stop-wide, like every other day-only decision: every live member of the visit's stop must be eligible too (a sibling the
     // customer picked blocks it), with the old level ignored (the move replaced the old promise; the check below judges the new date).
     if ((await dayOnlyEligibility(conn, [String(id)], now, { ignoreLevel: true })).get(String(id))?.eligible !== true) return false;
-    const promise = (await resolvePromises(conn, [id], now)).get(id);
+    // sameDateOnly (pre-push Codex P1, 2026-11-24): an off-date promise does not stand, so in a stop a sibling's hour for
+    // THIS date is never hidden by another member's older-date slot (stopPromise would pick the earlier slot).
+    const promise = (await resolvePromises(conn, [id], now, { sameDateOnly: true })).get(id);
     if (!promise) return true;
     if (promise.start_at == null) return promise.level === 'day';
     return etDateString(new Date(promise.start_at)) !== etDateString(startAt instanceof Date ? startAt : new Date(startAt));

@@ -241,6 +241,11 @@ describe('dayOnlyReplayDecision: a held or merged move notice re-sent as a confi
       expect(await replay(fakeConn({ services: [member('s1'), member('s2', { customer_asked_time: true, status: 'cancelled' })] }))).toBe(true);
     });
 
+    test('a sibling\'s hour for THIS date blocks even when another member holds an older-date hour (codex P1)', async () => {
+      const current = { ...hourFor('2026-11-15'), id: 2, appointment_id: 's2' };
+      expect(await replay(fakeConn({ services: [member('s1'), member('s2')], messages: [hourFor('2026-11-12'), current] }))).toBe(false);
+    });
+
     test('an old hour level does not block (the move replaced it), a stop-wide read failure is false', async () => {
       expect(await replay(fakeConn({ services: [member('s1'), member('s2')], messages: [hourFor('2026-11-12')] }))).toBe(true);
       expect(await replay(fakeConn({ services: [member('s1'), member('s2')], failOn: 'appointment_reminders' }))).toBe(false);
