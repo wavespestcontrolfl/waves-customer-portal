@@ -153,6 +153,13 @@ function mergeEstimateRows(...lists) {
   }
   return Array.from(byId.values());
 }
+// Archived booked-another-way rows are resolved wins too: no status filter,
+// the sweep keeps their sent/viewed status. Read-only list for the KPI bar.
+function fetchBookedOtherWayRows() {
+  return adminFetch(
+    "/admin/estimates?archived=only&disposition=converted_other_path&limit=all",
+  );
+}
 function estimatePipelineFetchPaths(filter) {
   // limit=all → server-side ESTIMATE_LIST_LIMIT cap. PipelineAnalytics
   // computes all-time KPIs from this list, so a numeric page-size here would
@@ -2264,10 +2271,7 @@ function EstimatePipelineViewV2({
       // isn't lost — the Won funnel / MRR-won KPI depend on these archived wins.
       fetches.push(
         adminFetch("/admin/estimates?archived=only&status=accepted&limit=all"),
-        // Archived booked-another-way rows are resolved wins too (no status filter: the sweep keeps their sent/viewed status).
-        adminFetch(
-          "/admin/estimates?archived=only&disposition=converted_other_path&limit=all",
-        ),
+        fetchBookedOtherWayRows(),
       );
     }
     Promise.all(fetches)
