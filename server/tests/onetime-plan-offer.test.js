@@ -2076,6 +2076,22 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       expect(order).toEqual(['raise', 'close']);
     });
 
+    test.each([
+      ['a follow-up moved the offer day: the stored day has passed, the current one has not', '2030-03-05', 0],
+      ['the current day has passed too', '2030-02-01', 1],
+    ])('the last day is the job\'s current one: %s', async (_name, serviceDay, closes) => {
+      const deps = liveWorld({
+        jobs: [{ ...JOB, service_day: serviceDay }],
+        buildStartOffer: jest.fn(async () => ({ option: null, reason: 'has_plan' })),
+        tables: { notifications: [item('job-1', { lastDay: '2030-03-01', jobId: 'job-1' })], estimates: [] },
+      });
+      process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+      await run(deps);
+      expect(closeKeys).toHaveBeenCalledTimes(closes);
+      const read = deps.db.queriesOf('scheduled_services as s').find((query) => called(query, 'where', 's.id', 'job-1'));
+      expect(read).toBeDefined();
+    });
+
     test('off reads nothing', async () => {
       process.env.GATE_ONETIME_PLAN_OFFER = 'off';
       const deps = liveWorld({ tables: { notifications: [item('ended', { lastDay: '2030-03-11' })] } });

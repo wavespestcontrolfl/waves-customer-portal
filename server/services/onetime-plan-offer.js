@@ -1173,6 +1173,15 @@ async function officeItemWithdrawn({ customerId, jobId }, { now, deps }) {
   return !verdict.ok && WITHDRAWN_VERDICTS.includes(verdict.reason) ? 'The customer may not be contacted' : null;
 }
 
+// The offer's last day as the job reads TODAY: an included follow-up done after the item moves the offer day, and only
+// a live morning that prices the job again rewrites the item. A job that no longer qualifies (cancelled, its service
+// record taken back) has no offer: its last day is the item's own. An item with no job keeps its stored day.
+async function currentLastDay(database, meta) {
+  if (!meta.jobId) return meta.lastDay || null;
+  const row = await qualifyingJobs(database).where('s.id', meta.jobId).first(database.raw(`${OFFER_DAY_SQL} AS service_day`));
+  return row ? offerTerms(dateOnlyString(row.service_day)).lastDay : (meta.lastDay || null);
+}
+
 // The open office items, closed when their job is handled: an estimate of the customer made after the item (a person
 // quoted the plan, or any other estimate went out), or the offer's last day is over. Sends nothing. A failure never
 // fails the run: the next morning reads the same rows.
@@ -1187,7 +1196,8 @@ async function closeOfficeItems({ now, deps }) {
   for (const row of rows) {
     const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
     let done = null;
-    if (meta.lastDay && today > meta.lastDay) done = 'The plan offer ended';
+    const lastDay = await currentLastDay(deps.db, meta);
+    if (lastDay && today > lastDay) done = 'The plan offer ended';
     else if (meta.customerId) {
       const quoted = await deps.db('estimates').where({ customer_id: meta.customerId })
         .where('created_at', '>', row.created_at).first('id');
