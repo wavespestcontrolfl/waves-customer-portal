@@ -165,20 +165,29 @@ describe('completion estimate evidence', () => {
     beforeEach(() => { jest.spyOn(adminCustomers, 'scheduleLinesFromEstimate').mockReturnValue([estimateLine]); });
     afterEach(() => jest.restoreAllMocks());
 
+    // With the estimate row and the schedule line the visit matched, which the nightly check prices (invoice-tier-line-check.js).
     test('a visit still at the accepted price gets the estimate price and each named discount', async () => {
       expect(await acceptedVisitBreakdown(visit, { database: fakeDb() })).toEqual({ breakdown: {
-        base: 110, amount: 94.05, discounts: [{ name: 'WaveGuard Silver', dollars: 11 }, { name: 'Military Discount', dollars: 4.95 }] } });
+        base: 110, amount: 94.05, discounts: [{ name: 'WaveGuard Silver', dollars: 11 }, { name: 'Military Discount', dollars: 4.95 }] },
+      estimate, line: estimateLine });
     });
 
     test('anything of its own, a moved price, another estimate state or an unnamed saving keeps one line', async () => {
       const reason = async (row, db = fakeDb()) => (await acceptedVisitBreakdown(row, { database: db })).reason;
-      expect(await reason({ ...visit, estimated_price: 99 })).toBe('price_changed');
+      expect(await acceptedVisitBreakdown({ ...visit, estimated_price: 99 }, { database: fakeDb() })).toEqual({ breakdown: null, reason: 'price_changed' });
       expect(await reason({ ...visit, primary_line_price: 110 })).toBe('own_price_or_discount');
       expect(await reason({ ...visit, line_discount_dollars: 11 })).toBe('own_price_or_discount');
       expect(await reason({ ...visit, prepaid_amount: 94.05 })).toBe('prepaid');
       expect(await reason(visit, fakeDb({ addons: [{ id: 'a1' }] }))).toBe('add_ons');
       expect(await reason(visit, fakeDb({ estimateRow: { ...estimate, status: 'sent' } }))).toBe('estimate_not_accepted');
-      expect(await reason(visit, fakeDb({ estimateRow: { ...estimate, estimate_data: {} } }))).toBe('discount_unnamed');
+      const unnamedRow = { ...estimate, estimate_data: {} };
+      expect(await acceptedVisitBreakdown(visit, { database: fakeDb({ estimateRow: unnamedRow }) }))
+        .toEqual({ breakdown: null, reason: 'discount_unnamed', estimate: unnamedRow, line: estimateLine });
+      // A line the reader gave no per-visit price: the estimate and the line ride along for the nightly check too.
+      const unpricedLine = { ...estimateLine, perApplicationPrice: null };
+      adminCustomers.scheduleLinesFromEstimate.mockReturnValue([unpricedLine]);
+      expect(await acceptedVisitBreakdown(visit, { database: fakeDb() }))
+        .toEqual({ breakdown: null, reason: 'no_breakdown', estimate, line: unpricedLine });
     });
 
     // The saved engine shape: the list price on the row, the tier and the rate the accept used on the recurring block.
@@ -188,8 +197,8 @@ describe('completion estimate evidence', () => {
       const billed = { ...visit, estimated_price: 88 };
       const platinum = (recurring, extra = {}) => ({ ...estimate, waveguard_tier: 'Platinum', estimate_data: { result: { recurring }, ...extra } });
       const read = (estimateRow) => acceptedVisitBreakdown(billed, { database: fakeDb({ estimateRow }) });
-      expect(await read(platinum({ tier: 'Platinum', discount: 0.2 }))).toEqual({ breakdown: {
-        base: 110, amount: 88, discounts: [{ name: 'WaveGuard Platinum', dollars: 22 }] } });
+      expect(await read(platinum({ tier: 'Platinum', discount: 0.2 }))).toEqual(expect.objectContaining({ breakdown: {
+        base: 110, amount: 88, discounts: [{ name: 'WaveGuard Platinum', dollars: 22 }] } }));
       // An empty tier column reads the saved recurring block, as the accept does.
       expect((await read({ ...platinum({ waveGuardTier: 'Platinum', discount: 0.2 }), waveguard_tier: null })).breakdown.discounts)
         .toEqual([{ name: 'WaveGuard Platinum', dollars: 22 }]);

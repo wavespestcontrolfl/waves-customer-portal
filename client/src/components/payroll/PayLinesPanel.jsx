@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '../ui/Button';
 import { Card } from '../ui/Card';
 import { Field } from '../ui/Field';
@@ -71,17 +71,26 @@ export default function PayLinesPanel({ call, weekStart, refreshKey, onChanged }
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
 
+  // Only the newest load may write. A finalize or a void of another run starts a new load while an older one
+  // can still be on its way: an old answer that arrives last would put a paid line back in the waiting list.
+  const newestLoad = useRef(0);
   const load = useCallback(async () => {
+    newestLoad.current += 1;
+    const mine = newestLoad.current;
+    const superseded = () => mine !== newestLoad.current;
     try {
       const openData = await call('/pay-lines?status=open');
+      if (superseded()) return;
       setEnabled(true);
       setOpen(openData.payLines || []);
       setError('');
       // Every W-2 employee, one who has left too (a commission paid after the last day).
       const [paidData, techData] = await Promise.all([call('/pay-lines?status=paid'), call('/pay-lines/technicians')]);
+      if (superseded()) return;
       setPaid((paidData.payLines || []).slice(0, 10));
       setTechnicians(techData.technicians || []);
     } catch (failure) {
+      if (superseded()) return;
       if (failure.status === 404) { setEnabled(false); return; }
       // Fail closed: only a successful gated answer opens the panel.
       setError(failure.message);

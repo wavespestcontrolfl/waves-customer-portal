@@ -101,6 +101,16 @@ describe('dayOnlyEligibility: a first or one-time visit also fails once the cust
     expect((await verdict(conn)).s1.eligible).toBe(false);
   });
 
+  // Local audit 2026-11-22 (round 6): the pick check reads each member's start. The edit screen changes a start without a
+  // log row, so a customer pick at 09:00 no longer counts once staff set the visit to 13:00 on the same date.
+  test('a customer pick counts only while the member keeps the picked start', async () => {
+    const picked = { s1: [{ created_at: '2026-11-08T10:00:00Z', original_date: '2026-11-12', new_date: '2026-11-15',
+      original_window: '13:00-14:00', new_window: '09:00-10:00', initiated_by: 'customer_self_serve' }] };
+    const at = (start) => fakeConn({ services: [svc('s1', { window_start: start })], reminders: [office('s1')], moves: picked });
+    expect((await verdict(at('09:00:00'))).s1.eligible).toBe(false);
+    expect((await verdict(at('13:00:00'))).s1.eligible).toBe(true);
+  });
+
   test('an office booking that only staff moved: eligible', async () => {
     const conn = fakeConn({ services: [svc('s1')], reminders: [office('s1')], moves: staffMove });
     expect((await verdict(conn)).s1.eligible).toBe(true);
@@ -281,21 +291,11 @@ describe('dayOnlyEligibility: the level rule and stop-wide judging', () => {
 });
 
 describe('dayOnlySendDecision', () => {
-  const OLD = process.env.GATE_DAY_ONLY_PROMISE;
-  beforeEach(() => { process.env.GATE_DAY_ONLY_PROMISE = 'true'; });
-  afterEach(() => { if (OLD === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = OLD; });
   const world = () => fakeConn({ services: [svc('s1')], reminders: [office('s1')] });
   const decide = (conn, over = {}) => dayOnlySendDecision(conn, { id: 's1', startAt: FAR, now: NOW, reminder24hEnabled: true, ...over });
 
-  test('gate on, an office first visit 5 days out: day only', async () => {
+  test('an office first visit 5 days out: day only', async () => {
     expect(await decide(world())).toEqual({ dayOnly: true, level: 'none', eligible: true });
-  });
-
-  test('gate off: false, and nothing is read', async () => {
-    delete process.env.GATE_DAY_ONLY_PROMISE;
-    const conn = world();
-    expect((await decide(conn)).dayOnly).toBe(false);
-    expect(Object.keys(conn.calls)).toEqual([]);
   });
 
   test('inside the 24.25 h cutoff: false, nothing read', async () => {
@@ -341,22 +341,9 @@ describe('dayOnlySendDecision', () => {
 });
 
 describe('loadTimeDisplay', () => {
-  const OLD = process.env.GATE_DAY_ONLY_PROMISE;
-  afterEach(() => { if (OLD === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = OLD; });
   const row = (id, date, windowStart = '09:00:00') => ({ id, scheduled_date: date, window_start: windowStart });
 
-  test('gate off: showHour true for every row and NO database read', async () => {
-    delete process.env.GATE_DAY_ONLY_PROMISE;
-    const conn = fakeConn();
-    const out = await loadTimeDisplay(conn, [row('s1', '2026-11-20'), row('s2', '2026-11-21')], NOW);
-    expect([...out.values()].every((v) => v.showHour === true)).toBe(true);
-    expect(out.size).toBe(2);
-    expect(Object.keys(conn.calls)).toEqual([]);
-  });
-
-  describe('gate on', () => {
-    beforeEach(() => { process.env.GATE_DAY_ONLY_PROMISE = 'true'; });
-
+  describe('judged by the reads', () => {
     test('an eligible visit far out: the day only', async () => {
       const conn = fakeConn({ services: [svc('s1')], reminders: [office('s1')] });
       const out = await loadTimeDisplay(conn, [row('s1', '2026-11-20')], NOW);

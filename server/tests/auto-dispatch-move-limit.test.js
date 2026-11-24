@@ -54,12 +54,23 @@ function logConn(rows, { fail = false } = {}) {
 
 describe('config', () => {
   afterEach(() => { delete process.env.AUTO_DISPATCH_MAX_MOVES_PER_VISIT; });
-  test('maxAutoMovesPerVisit defaults to 2, reads the env, 0 = no limit', () => {
-    expect(getAutoDispatchConfig().maxAutoMovesPerVisit).toBe(2);
+  // Owner 2026-11-22, "this is all too limiting": under the flex tier the default is 0 (no limit). The
+  // route-tiers and legacy guards search around the current date, so there the 2026-10-09 cap of 2 stays.
+  test('maxAutoMovesPerVisit defaults to 0 under the flex tier and 2 otherwise; the env overrides both', () => {
+    const flex = { flexTierEnabled: true };
+    const tiers = { flexTierEnabled: false, routeTiersEnabled: true };
+    const legacy = { flexTierEnabled: false, routeTiersEnabled: false };
+    expect(getAutoDispatchConfig(flex).maxAutoMovesPerVisit).toBe(0);
+    expect(moveLimit.limitOf(getAutoDispatchConfig(flex))).toBe(0);
+    expect(getAutoDispatchConfig(tiers).maxAutoMovesPerVisit).toBe(2);
+    expect(getAutoDispatchConfig(legacy).maxAutoMovesPerVisit).toBe(2);
+    process.env.AUTO_DISPATCH_MAX_MOVES_PER_VISIT = '2';
+    expect(getAutoDispatchConfig(flex).maxAutoMovesPerVisit).toBe(2);
     process.env.AUTO_DISPATCH_MAX_MOVES_PER_VISIT = '3';
-    expect(getAutoDispatchConfig().maxAutoMovesPerVisit).toBe(3);
+    expect(getAutoDispatchConfig(flex).maxAutoMovesPerVisit).toBe(3);
+    expect(getAutoDispatchConfig(legacy).maxAutoMovesPerVisit).toBe(3);
     process.env.AUTO_DISPATCH_MAX_MOVES_PER_VISIT = '0';
-    expect(moveLimit.limitOf(getAutoDispatchConfig())).toBe(0);
+    expect(moveLimit.limitOf(getAutoDispatchConfig(legacy))).toBe(0);
   });
 });
 

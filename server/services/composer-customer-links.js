@@ -3260,6 +3260,7 @@ async function visitsLinkedInBody(body) {
 module.exports = {
   visitsLinkedInBody,
   ownedPortalLinkSpans,
+  ownedPortalHosts,
   OPEN_ESTIMATE_STATUSES,
   REVIEW_GATE_REASONS,
   buildReviewRequestLink,

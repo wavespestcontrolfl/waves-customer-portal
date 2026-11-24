@@ -11,17 +11,34 @@
  * come from the county data. The body carries the home's own address and no customer, phone or email; the dry run
  * needs none. Nothing is saved.
  *
- * The verdict: a server price, no member of Waves at the address (the save's own warning: its price would be on
- * new-customer terms), exactly one engine line and it is the pest line, no quote-required line, no line a person must
+ * The verdict: a server price, no member of Waves at the address (its price would be on new-customer terms; read with
+ * the strict address match, because the save's own warning is fail-soft and a failed lookup there reads as no member), exactly one engine line and it is the pest line, no quote-required line, no line a person must
  * review before its price stands as exact (draft-builder lineNeedsReviewBeforeExactPrice, the shared test), an annual
  * total above 0 and a setup fee the table can hold. A clean price is priced; anything else is not_clean with one reason
  * code; a save the server refuses (4xx) is not_clean / save_refused; any other failure is failed / engine (tried again
- * later).
+ * later). A member check that cannot finish is failed / member_check (tried again later), never a price; an address
+ * the check can never answer for (no readable house number, too many rows, a member on file it cannot tell apart)
+ * is not_clean / member_unchecked.
  *
- * No database access of its own, no paid or AI service, no logging.
+ * One database read of its own (the member check: customers and their properties at this address), no paid or AI
+ * service, no logging.
  */
 
 const MAX_AMOUNT = 1e8; // the price columns hold up to numeric(10,2)
+
+// 'exact' when a member of Waves is at the address, 'near' when a member's address on file has the same house digits and
+// zip but the comparator cannot call it the same (cannot tell), else null. Strict: a failed lookup throws, it never reads as
+// no member. `conn` is a knex handle or a transaction (the booking's, when the check is made inside it).
+function memberAtAddressOn(conn) {
+  return async (address, zip) => {
+    const { findCustomersAtAddress } = require('../customer-address-match');
+    const { isMembershipCustomerRow } = require('../waveguard-existing-services');
+    const members = (await findCustomersAtAddress(conn, address, { strict: true, zip, membersOnly: true }))
+      .filter(isMembershipCustomerRow);
+    if (members.some((r) => r.exactMatch)) return 'exact';
+    return members.length ? 'near' : null;
+  };
+}
 
 // The real call for each outside dependency a test did not inject, loaded one by one.
 const REAL = {
@@ -31,6 +48,9 @@ const REAL = {
   dryRunEstimate: () => (body) => require('../admin-estimate-persistence').createOrReuseAdminEstimate({
     database: require('../../models/db'), body, technicianId: null, technician: null, dryRun: true, requireLivePricing: true,
   }),
+  memberAtAddress: () => memberAtAddressOn(require('../../models/db')),
+  // The names the list counts as one place in a zip (prospect-store SAME_PLACE_CITY_NAMES), or the city alone.
+  cityNamesOf: () => require('./prospect-store').cityNamesOf,
 };
 
 const httpStatus = (err) => Number(err?.statusCode || err?.status) || 0;
@@ -62,8 +82,20 @@ function engineInputFor(facts, buildEngineInput) {
 }
 
 /** The estimate save's body for the home: its own address, no customer. */
+const addressOf = (row) => [row.address_line1, [row.city, row.state, row.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+const upperLine = (text) => String(text || '').toUpperCase().replace(/\s+/g, ' ').trim();
+
+// The home's address once for each name of its place: a member may have it on file under the other name of the same
+// zip (BRADENTON for LAKEWOOD RANCH in 34211), and the strict match compares cities.
+function memberCheckAddresses(row, cityNamesOf) {
+  const city = upperLine(row.city);
+  const zip = upperLine(row.zip).slice(0, 5);
+  if (!city || !zip) return [addressOf(row)];
+  return cityNamesOf(city, zip).map((name) => addressOf({ ...row, city: name }));
+}
+
 function estimateBody(row, facts, engineInputs) {
-  const address = [row.address_line1, [row.city, row.state, row.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  const address = addressOf(row);
   return {
     address,
     showOneTimeOption: false,
@@ -127,19 +159,51 @@ function judge(prepared) {
 }
 
 /**
+ * 'exact' | 'near' | null: whether a member of Waves is at the home (under each name of its place). Throws when the check
+ * cannot finish. `memberAtAddress` defaults to the shared handle's; the booking passes its transaction's
+ * (memberAtAddressOn(trx)), so the same check runs inside the booking.
+ */
+async function memberStatusOf(row, memberAtAddress = memberAtAddressOn(require('../../models/db')), cityNamesOf = REAL.cityNamesOf()) {
+  let member = null;
+  const zip = upperLine(row.zip).slice(0, 5);
+  for (const address of memberCheckAddresses(row, cityNamesOf)) {
+    const found = await memberAtAddress(address, zip);
+    if (found === 'exact') return 'exact';
+    if (found === 'near') member = 'near';
+  }
+  return member;
+}
+
+/**
  * The result to save for a home with every fact (`facts`: homeSqft, homeSqftSource, stories, lotSqft):
  *   { status: 'priced', ...facts, priceAnnual, priceSetupFee, priceDigest }
  *   { status: 'not_clean', reason, ...facts }     reason: not_server_price | member_address | not_one_line |
- *                                                  engine_review | no_amount | save_refused
- *   { status: 'failed', reason: 'engine', ...facts }
- * `deps` may replace buildEngineInput and dryRunEstimate (tests).
+ *                                                  engine_review | no_amount | save_refused | member_unchecked
+ *   { status: 'failed', reason: 'engine' | 'member_check', ...facts }
+ * `deps` may replace buildEngineInput, dryRunEstimate, memberAtAddress and cityNamesOf (tests).
  */
 async function priceHome(row, facts, deps = {}) {
   const buildEngineInput = deps.buildEngineInput || REAL.buildEngineInput();
   const dryRunEstimate = deps.dryRunEstimate || REAL.dryRunEstimate();
+  const memberAtAddress = deps.memberAtAddress || REAL.memberAtAddress();
+  const cityNamesOf = deps.cityNamesOf || REAL.cityNamesOf();
   const known = {
     homeSqft: facts.homeSqft, homeSqftSource: facts.homeSqftSource, stories: facts.stories, lotSqft: facts.lotSqft,
   };
+  // Before the save: a home whose member check cannot finish is tried again later, never priced on new-customer terms.
+  // An address the search can never answer for is settled without a price (member_unchecked); any other error is
+  // tried again later (member_check).
+  // A near member (same house digits and zip, a spelling the comparator cannot read) cannot be told apart: no price.
+  let member = null;
+  try {
+    member = await memberStatusOf(row, memberAtAddress, cityNamesOf);
+  } catch (err) {
+    const { ADDRESS_UNCHECKABLE } = require('../customer-address-match');
+    if (err?.code === ADDRESS_UNCHECKABLE) return { status: 'not_clean', reason: 'member_unchecked', ...known };
+    return { status: 'failed', reason: 'member_check', ...known };
+  }
+  if (member === 'exact') return { status: 'not_clean', reason: 'member_address', ...known };
+  if (member === 'near') return { status: 'not_clean', reason: 'member_unchecked', ...known };
   let prepared;
   try {
     prepared = await dryRunEstimate(estimateBody(row, facts, engineInputFor(facts, buildEngineInput)));
@@ -156,4 +220,4 @@ async function priceHome(row, facts, deps = {}) {
   };
 }
 
-module.exports = { priceHome, judge, estimateBody, engineInputFor };
+module.exports = { priceHome, judge, estimateBody, engineInputFor, memberStatusOf, memberAtAddressOn };

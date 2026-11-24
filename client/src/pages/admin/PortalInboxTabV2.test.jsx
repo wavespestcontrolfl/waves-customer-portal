@@ -467,6 +467,47 @@ describe("Portal inbox tab: answers in the portal", () => {
     expect(within(bookingRow).queryByRole("button", { name: "Reply in portal" })).toBeNull();
   });
 
+  // GATE_PORTAL_ANSWER_TEXT: before Send, the form says where the answer's words go.
+  it.each([
+    [{}, "They get a notice in the Waves app, or an email with your answer when they don't have the app."],
+    [{ answerByText: true }, "We text them your answer as soon as you send it, at any hour. If no text can go, we email it."],
+  ])("says before Send how the answer reaches the customer (%o)", async (overrides, hint) => {
+    adminFetch.mockImplementation(async (url) => (url === "/admin/portal-inbox" ? withReplies(overrides) : updated(url)));
+    mount();
+    const row = (await screen.findByText("Pat Synthetic")).closest("[data-testid]");
+    fireEvent.click(within(row).getByRole("button", { name: "Reply in portal" }));
+    expect(within(row).getByText(hint)).toBeInTheDocument();
+  });
+
+  it("asks for a second press when the way changed since the form opened, then sends the new way with the same request id", async () => {
+    const changed = "This answer now goes by text, at any hour, else by email. Check the line above Send (reload the page if it still says app notice), then press Send again.";
+    let presses = 0;
+    adminFetch.mockImplementation(async (url) => {
+      if (url === "/admin/portal-inbox") return withReplies();
+      if (url === "/admin/portal-inbox/reply") {
+        presses += 1;
+        if (presses === 1) throw Object.assign(new Error(changed), { status: 409, code: "notice_way_changed" });
+        return { message: { id: "m1" }, closed: true, notice: { bell: true, pushAccepted: 0, text: "sent", email: "not_needed" } };
+      }
+      return updated(url);
+    });
+    mount();
+    const row = (await screen.findByText("Pat Synthetic")).closest("[data-testid]");
+    fireEvent.click(within(row).getByRole("button", { name: "Reply in portal" }));
+    expect(within(row).getByText("They get a notice in the Waves app, or an email with your answer when they don't have the app.")).toBeInTheDocument();
+    fireEvent.change(within(row).getByRole("textbox", { name: "Answer in the portal" }), { target: { value: "Friday works." } });
+    fireEvent.click(within(row).getByRole("button", { name: "Send in portal" }));
+    expect(await within(row).findByRole("alert")).toHaveTextContent(changed);
+    expect(within(row).getByText("We text them your answer as soon as you send it, at any hour. If no text can go, we email it.")).toBeInTheDocument();
+    fireEvent.click(within(row).getByRole("button", { name: "Send in portal" }));
+    expect(await screen.findByTestId("portal-sent-note")).toHaveTextContent("Sent to Pat Synthetic in the portal. We texted them your answer.");
+    const bodies = adminFetch.mock.calls.filter(([url]) => url === "/admin/portal-inbox/reply").map(([, init]) => JSON.parse(init.body));
+    // The push way sends no field (a server without it still takes the answer); the text way sends true.
+    expect("answerByText" in bodies[0]).toBe(false);
+    expect(bodies[1].answerByText).toBe(true);
+    expect(bodies[1].requestId).toBe(bodies[0].requestId);
+  });
+
   it("sends the answer with a request id, drops the row, lowers the count and says how the customer was told", async () => {
     const onCount = vi.fn();
     adminFetch.mockImplementation(async (url) => {
@@ -494,6 +535,14 @@ describe("Portal inbox tab: answers in the portal", () => {
     [{ bell: true, pushAccepted: 0, email: "sent" }, "Sent to Pat Synthetic in the portal. We emailed them your answer."],
     [{ bell: true, pushAccepted: 0, email: "failed", pending: true }, "Sent to Pat Synthetic in the portal. Their notice did not go out yet; we try again in a few minutes."],
     [{ bell: true, pushAccepted: 0, email: "email_opted_out" }, "Sent to Pat Synthetic in the portal, but we could not reach them by app or email. Reply by text too."],
+    // GATE_PORTAL_ANSWER_TEXT: the text in place of the push; a text that may have gone counts as sent.
+    [{ bell: true, pushAccepted: 0, text: "sent", email: "not_needed" }, "Sent to Pat Synthetic in the portal. We texted them your answer."],
+    // The text went out, then the try's last write failed: staff still read that the text went.
+    [{ text: "sent", pending: true }, "Sent to Pat Synthetic in the portal. We texted them your answer."],
+    [{ bell: true, pushAccepted: 0, text: "uncertain", email: "not_needed" }, "Sent to Pat Synthetic in the portal. We could not confirm the text went out. Check their texts in Communications before you send another."],
+    [{ bell: true, pushAccepted: 0, text: "sending", pending: true }, "Sent to Pat Synthetic in the portal. A text with your answer may be going out now. Check their texts in Communications before you send another."],
+    [{ bell: true, pushAccepted: 0, text: "not_sent", email: "sent" }, "Sent to Pat Synthetic in the portal. We emailed them your answer."],
+    [{ bell: true, pushAccepted: 0, text: "not_sent", email: "email_opted_out" }, "Sent to Pat Synthetic in the portal, but we could not reach them by text or email."],
   ])("says how the customer was told: %j", async (notice, line) => {
     adminFetch.mockImplementation(async (url) => {
       if (url === "/admin/portal-inbox") return withReplies();

@@ -243,6 +243,18 @@ describe('GATE_PAYROLL_TIME_OFF', () => {
     else process.env.GATE_PAYROLL_TIME_OFF = OLD_GATE;
   });
 
+  it('signs the hours a catch-up check shows as not paid out, and keeps the token of every other check', () => {
+    process.env.GATE_PAYROLL_TIME_OFF = 'true';
+    const bank = { earnedMinutes: 0, payoutMinutes: 0, earlyIllnessMinutes: 0, unpaidMinutes: 0, unpaidRuleMinutes: 0,
+      unpaidBeforeHireMinutes: 0, beforeMinutes: 0, afterMinutes: 0, paidDays: [] };
+    const withBank = (extra) => ({ ...build(), pto_earned_minutes: '0.00', pto_bank: { ...bank, ...extra } });
+    const plain = tokenOf(run, [withBank({})]);
+    expect(tokenOf(run, [withBank({ notPaidOutMinutes: 0 })])).toBe(plain);
+    const shown = tokenOf(run, [withBank({ notPaidOutMinutes: 92.4 })]);
+    expect(shown).not.toBe(plain);
+    expect(tokenOf(run, [withBank({ notPaidOutMinutes: 73.8 })])).not.toBe(shown);
+  });
+
   describe('off (unset, or anything but the exact string true)', () => {
     it.each([undefined, 'false', 'TRUE', '1', ''])('is byte for byte today with the gate %p, even when the row carries time off', (value) => {
       if (value === undefined) delete process.env.GATE_PAYROLL_TIME_OFF;

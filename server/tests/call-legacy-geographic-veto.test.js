@@ -216,16 +216,39 @@ describe('legacyGeographicVeto: Punta Gorda', () => {
       .toEqual(expect.objectContaining({ reason: 'punta_gorda_locality' }));
   });
 
-  test('33983 with Punta Gorda is vetoed; 33980 with Port Charlotte and 33983 alone are served', () => {
+  test('33983 with Punta Gorda is vetoed as Punta Gorda', () => {
     expect(legacyGeographicVeto({ extracted: { city: 'Punta Gorda', zip: '33983' } }))
       .toEqual(expect.objectContaining({ reason: 'punta_gorda_locality' }));
-    expect(legacyGeographicVeto({ addressValidation: avCharlotte, extracted: { city: 'Port Charlotte', zip: '33980' } })).toBeNull();
-    expect(legacyGeographicVeto({ addressValidation: avCharlotte, extracted: { zip: '33983' } })).toBeNull();
   });
 
-  test('Port Charlotte 33948 and Englewood are served', () => {
-    expect(legacyGeographicVeto({ addressValidation: avCharlotte, extracted: { city: 'Port Charlotte', zip: '33948' } })).toBeNull();
-    expect(legacyGeographicVeto({ addressValidation: avCharlotte, extracted: { city: 'Englewood', zip: '34223' } })).toBeNull();
+  // Owner ruling 2026-11-23: six places are held until a second technician is hired.
+  test.each([
+    [{ city: 'Port Charlotte', zip: '33980' }], [{ city: 'Port Charlotte', zip: '33948' }], [{ zip: '33983' }],
+    [{ city: 'Englewood', zip: '34223' }], [{ city: 'Rotonda West' }], [{ zip: '33947' }],
+    [{ city: 'Placida' }], [{ city: 'Boca Grande' }], [{ city: 'Babcock Ranch', zip: '33982' }],
+  ])('held place %j is vetoed even with a positive AV verdict', (extracted) => {
+    expect(legacyGeographicVeto({ addressValidation: avCharlotte, extracted }))
+      .toEqual({ reason: 'not_yet_served_locality', county: null });
+  });
+
+  test('an on-file held address vetoes even when the call names a served town', () => {
+    expect(legacyGeographicVeto({
+      extracted: { city: 'Venice', zip: '34285' },
+      onFile: { city: 'Port Charlotte', zip: '33948' },
+    })).toEqual({ reason: 'not_yet_served_locality', county: null });
+  });
+
+  // A held place vetoes every booking path, the make-up move included (owner ruling 2026-11-23, decision recorded in the PR):
+  // no customer has a recurring plan or a future visit in a held place today, so there is no make-up to move, and V2 routing
+  // (live) holds such a call for staff review before this veto runs. Staff move a held-place customer's visit by hand.
+  test('a held place also closes the make-up gate and the booking branch', () => {
+    expect(source).toMatch(/const makeupGateOn = isEnabled\('callMakeupMove'\) && !v2RoutingBlocked && !legacyGeoVeto/);
+    expect(source).toContain('&& legacyGeoVeto) {');
+  });
+
+  test('North Port and Venice are served', () => {
+    expect(legacyGeographicVeto({ addressValidation: { status: 'validated_accept', inServiceArea: true, county: 'Sarasota County' }, extracted: { city: 'North Port', zip: '34287' } })).toBeNull();
+    expect(legacyGeographicVeto({ addressValidation: { status: 'validated_accept', inServiceArea: true, county: 'Sarasota County' }, extracted: { city: 'North Port', zip: '34291' } })).toBeNull();
   });
 
   test('an on-file Punta Gorda address vetoes even when the call names a served town', () => {

@@ -196,6 +196,8 @@ const REPLACED_BY_DATE_CHECK = 'Replaced by a date check';
 const REPLACED_VISIT_GONE = 'The booked visit is gone; replaced by a new alert to book it';
 // Dismiss on the Dispatch held-visit strip (owner 2026-11-01): the office will not book it.
 const DISMISSED_ON_DISPATCH = 'Dismissed on Dispatch: not booking';
+// The resolution line of a miss bell an agreed one-time job's office notification replaced.
+const REPLACED_BY_OFFICE_TASK = 'Replaced by the one-time job notification for this call';
 
 // Log-safe phone rendering — full numbers belong ONLY in the admin
 // notification body (an authenticated surface); Railway logs are plaintext.
@@ -503,7 +505,7 @@ const newestFirst = (a, b) => (new Date(b.created_at) - new Date(a.created_at)) 
 // the bell it replaces, so each episode gets its own key. With no `openRows` it
 // is the ring path's verdict. `row` is the visit behind the verdict; `mismatch`
 // is { visit_id, date, time } for booked_other_day.
-function classifyOpenBookingMiss(call, slot, bookedRows, openRows, { now, namesakes }) {
+function classifyOpenBookingMiss(call, slot, bookedRows, openRows, { now, namesakes, officeTask = false }) {
   const ordered = [...openRows].sort(newestFirst);
   const [newest] = ordered;
   const closesOf = (rows, resolution) => (rows.length ? [{ ids: rows.map((r) => r.id), resolution }] : []);
@@ -522,6 +524,9 @@ function classifyOpenBookingMiss(call, slot, bookedRows, openRows, { now, namesa
   }
   // The office dismissed the call's held row on Dispatch: it will not book it, so no bell stands.
   if (call.held_visit_dismissed_at) return result('dismissed', null, { closes: closeAll(DISMISSED_ON_DISPATCH) });
+  // GATE_CALL_AGREED_ONE_TIME_JOB: the call now has the office's one-time job task (its
+  // own admin notification), so an older miss bell is replaced by it and nothing rings.
+  if (officeTask) return result('office_task', null, { closes: closeAll(REPLACED_BY_OFFICE_TASK) });
 
   // A later visit answers the call only when it is for the service the call agreed (a
   // routine lawn visit must never close or relabel a pest booking miss), on the call's
@@ -860,7 +865,11 @@ async function planOpenBookingMissBells({ now = new Date() } = {}) {
 
   const { namesakes } = await loadNamesakeAccounts(entries);
   const bookedRows = await loadBookingRows(entries, namesakes);
-  return entries.map(({ call, slot, rows, holdReason, reviewOnly }) => ({ call, slot, holdReason, reviewOnly, plan: classifyOpenBookingMiss(call, slot, bookedRows, rows, { now, namesakes }) }));
+  const taskCalls = await loadAgreedJobTaskCallIds(entries);
+  return entries.map(({ call, slot, rows, holdReason, reviewOnly }) => ({
+    call, slot, holdReason, reviewOnly,
+    plan: classifyOpenBookingMiss(call, slot, bookedRows, rows, { now, namesakes, officeTask: taskCalls.has(String(call.id)) }),
+  }));
 }
 
 // Dismiss on the Dispatch held-visit strip (owner 2026-11-01): a person decided not to book the
@@ -916,6 +925,29 @@ async function closeResolvedBookingMissBells({ now = new Date() } = {}) {
   if (waiting) logger.warn(`[call-booking-miss] close pass: alert cap hit (${MAX_ALERTS_PER_RUN}); ${waiting} replacement(s) wait for the next tick`);
   if (closed || raised) logger.info(`[call-booking-miss] close pass: closed=${closed} raised=${raised}`);
   return { closed, raised };
+}
+
+// GATE_CALL_AGREED_ONE_TIME_JOB: the calls among these misses that the AI held as an
+// agreed one-time job and that already have the office's task (one admin notification,
+// open or done; call-recording-processor.js buildAgreedOneTimeJobAlert), so the pager
+// never rings them again. No such row (its write failed): the pager rings as before.
+// An unreadable answer is an empty set, so it rings too.
+async function loadAgreedJobTaskCallIds(misses) {
+  const ids = new Set();
+  if (!misses.length) return ids;
+  const { AGREED_ONE_TIME_JOB_ALERT_PREFIX: prefix } = require('./call-one-time-job');
+  try {
+    const rows = await db('notifications')
+      .where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ANY(?)", [misses.map((m) => `${prefix}${m.call.id}`)])
+      .select(db.raw("metadata->>'dedupeKey' AS dedupe_key"));
+    for (const key of rows.map((r) => String(r.dedupe_key || ''))) {
+      if (key.startsWith(prefix)) ids.add(key.slice(prefix.length));
+    }
+  } catch (err) {
+    logger.warn(`[call-booking-miss] agreed one-time job task lookup failed: ${err.code || err.name || 'db_error'}`);
+  }
+  return ids;
 }
 
 async function runCallBookingMissWatchdog({ now = new Date() } = {}) {
@@ -1029,6 +1061,7 @@ async function runInner({ now }) {
   }
 
   // GATE_ALERT_RING_ONCE (owner 2026-10-14): the first ring stands alone.
+  const officeTaskCalls = await loadAgreedJobTaskCallIds(misses);
   const ringOnce = require('../config/feature-gates').alertRingOnceLive();
   let alerted = 0;
   let repeated = 0;
@@ -1037,6 +1070,7 @@ async function runInner({ now }) {
       logger.warn(`[call-booking-miss] per-run alert cap hit (${MAX_ALERTS_PER_RUN}); the rest ring next tick`);
       break;
     }
+    if (officeTaskCalls.has(String(m.call.id))) continue;
     const dedupeKey = `call-booking-miss:${m.call.id}`;
     if (!(await alreadyAlerted(dedupeKey))) {
       const outcome = await ringMiss(m, { dedupeKey, repeat: false });

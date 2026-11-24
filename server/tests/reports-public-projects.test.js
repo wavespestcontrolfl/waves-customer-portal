@@ -458,7 +458,7 @@ describe('public project reports', () => {
     });
   });
 
-  test('GATE_DAY_ONLY_PROMISE: a day-only follow-up appointment shows the date, no hour, and the note', async () => {
+  test('day-only: a day-only follow-up appointment shows the date, no hour, and the note', async () => {
     const projectRead = chain({
       first: jest.fn().mockResolvedValue({
         id: 'project-dayonly', customer_id: 'customer-1', scheduled_service_id: 'ss-source',

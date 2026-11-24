@@ -26,7 +26,8 @@ if (require.main === module) {
   process.env.DATABASE_URL = 'postgres://127.0.0.1:1/estimate-discount-lines-report-unused';
 }
 
-const LIVE_VISIT_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'];
+// The visits the nightly check reads too (lead-to-cash sweep, tier_saving_left_off_invoice). It requires nothing at load.
+const { upcomingEstimateVisits } = require('../../server/services/invoice-tier-line-check');
 
 const REASONS = {
   not_priced: 'the visit has no price of its own (billed by fee or plan)',
@@ -68,20 +69,6 @@ function summarize(results) {
     kept,
     errors: kept.error || 0,
   };
-}
-
-async function upcomingEstimateVisits(conn, { today, days }) {
-  return conn('scheduled_services as s')
-    .join('customers as c', 'c.id', 's.customer_id')
-    .leftJoin('scheduled_services as p', 'p.id', 's.recurring_parent_id')
-    // whereLiveCustomer (services/customer-stages.js), alias-qualified.
-    .where('c.active', true).whereNull('c.deleted_at').whereIn('c.pipeline_stage', ['active_customer', 'won', 'at_risk'])
-    .whereIn('s.status', LIVE_VISIT_STATUSES)
-    .whereRaw('s.scheduled_date >= ?::date AND s.scheduled_date < ?::date + ?::int', [today, today, days])
-    .whereRaw('COALESCE(s.is_callback, false) = false')
-    .whereRaw('COALESCE(s.source_estimate_id, p.source_estimate_id) IS NOT NULL')
-    .orderBy([{ column: 's.scheduled_date' }, { column: 's.id' }])
-    .select('s.*');
 }
 
 function printReport(report, { rows }) {
@@ -139,7 +126,7 @@ async function main(argv) {
   }
 }
 
-module.exports = { parseArgs, summarize, upcomingEstimateVisits };
+module.exports = { parseArgs, summarize };
 
 if (require.main === module) {
   main(process.argv.slice(2))

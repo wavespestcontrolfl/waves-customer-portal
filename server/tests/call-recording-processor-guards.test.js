@@ -2298,7 +2298,9 @@ describe('a late scheduling hold refreshes the ai_triage lead activity instead o
     const lastSchedulingPushAt = processorSrc.lastIndexOf(
       "if (!bridgeNeedsConfirmation.includes('auto_booking_skipped_after_approval')) bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval');",
     );
-    const heldHandlerPushAt = processorSrc.indexOf('if (!bridgeNeedsConfirmation.includes(svc.__held.reason)) bridgeNeedsConfirmation.push(svc.__held.reason);');
+    // GATE_CALL_AGREED_ONE_TIME_JOB: the one exception is a held one-time job whose admin notification was raised
+    // (its task is there, not in call review); every other held reason still pushes.
+    const heldHandlerPushAt = processorSrc.indexOf('if (!agreedJobTaskRaised && !bridgeNeedsConfirmation.includes(svc.__held.reason)) bridgeNeedsConfirmation.push(svc.__held.reason);');
     expect(lastSchedulingPushAt).toBeGreaterThan(-1);
     expect(heldHandlerPushAt).toBeGreaterThan(-1);
     expect(refreshGateAt).toBeGreaterThan(lastSchedulingPushAt);
@@ -2334,7 +2336,7 @@ describe('the generic __held handler pushes its reason onto bridgeNeedsConfirmat
     expect(elseAt).toBeGreaterThan(insertCatchAt);
     const section = processorSrc.slice(insertCatchAt, elseAt);
     expect(section).toContain(
-      'if (!bridgeNeedsConfirmation.includes(svc.__held.reason)) bridgeNeedsConfirmation.push(svc.__held.reason);',
+      'if (!agreedJobTaskRaised && !bridgeNeedsConfirmation.includes(svc.__held.reason)) bridgeNeedsConfirmation.push(svc.__held.reason);',
     );
   });
 

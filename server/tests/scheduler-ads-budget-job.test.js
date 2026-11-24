@@ -35,6 +35,8 @@ const mockAdjustBudgets = jest.fn();
 jest.mock('../services/ads/budget-manager', () => ({ adjustBudgets: mockAdjustBudgets }));
 const mockRecordRouteFill = jest.fn();
 jest.mock('../services/ads/route-fill', () => ({ recordRouteFill: mockRecordRouteFill }));
+const mockRecordRainMode = jest.fn();
+jest.mock('../services/ads/rain-mode', () => ({ recordRainMode: mockRecordRainMode }));
 const mockRunAdsHealthAlerts = jest.fn();
 jest.mock('../services/ads/ads-health-alerts', () => ({ runAdsHealthAlerts: mockRunAdsHealthAlerts }));
 
@@ -131,5 +133,29 @@ describe('route fill record step', () => {
     await budgetTick()();
     expect(mockJobOutcomes['ads-budget-adjust']).toBe('failed: budget run crashed');
     expect(mockJobOutcomes['ads-route-fill']).toBe('success');
+  });
+});
+
+// The rain-day ads record (services/ads/rain-mode.js) is the last step of the same beat.
+describe('rain mode record step', () => {
+  test('runs once per beat under its own job_health row, after the route fill record', async () => {
+    mockAdjustBudgets.mockResolvedValue({ evaluated: 1, changed: 0, failed: 0 });
+    mockRecordRouteFill.mockResolvedValue({ tick: null, campaigns: [], problems: [] });
+    mockRecordRainMode.mockResolvedValue({ day: '2026-11-24', call: 'dry', campaigns: [], scored: [], problems: [] });
+    await budgetTick()();
+    expect(mockRecordRainMode).toHaveBeenCalledTimes(1);
+    expect(mockJobOutcomes['ads-rain-mode']).toBe('success');
+    expect(mockRecordRouteFill.mock.invocationCallOrder[0]).toBeLessThan(mockRecordRainMode.mock.invocationCallOrder[0]);
+  });
+
+  test('a failed rain record fails only its own tick and is logged', async () => {
+    mockAdjustBudgets.mockResolvedValue({ evaluated: 1, changed: 0, failed: 0 });
+    mockRecordRouteFill.mockResolvedValue({ tick: null, campaigns: [], problems: [] });
+    mockRecordRainMode.mockRejectedValue(new Error('rain mode record: forecast unread for 2026-11-24'));
+    await expect(budgetTick()()).resolves.toBeUndefined();
+    expect(mockJobOutcomes['ads-budget-adjust']).toBe('success');
+    expect(mockJobOutcomes['ads-route-fill']).toBe('success');
+    expect(mockJobOutcomes['ads-rain-mode']).toBe('failed: rain mode record: forecast unread for 2026-11-24');
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('Ad rain-mode record failed'));
   });
 });

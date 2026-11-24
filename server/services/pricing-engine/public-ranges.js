@@ -678,7 +678,7 @@ function buildRows() {
       ],
       (opts) => sp.priceRodentGuarantee(opts),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : r.price)),
-    notes: 'Renewable 12-month rodent-free guarantee; eligibility requires completed trapping, completed exclusion, sanitation completed (or photo baseline), and no activity after the final trap check. Priced by property tier — larger, more complex properties price higher.',
+    notes: 'Renewable 12-month rodent exclusion guarantee covering up to 4 callbacks and re-sealing of the original exclusion points; eligibility requires completed trapping and completed exclusion. Priced by property tier — larger, more complex properties price higher.',
   }));
 
   add('trap_only_retainer', () => rangeRow({

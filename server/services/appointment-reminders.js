@@ -776,7 +776,7 @@ async function deliverBouncedMoveNoticeEmail({ kind, audit, customerId, schedule
   }
   // GATE_DAY_ONLY_PROMISE part B2: a bounced DAY-ONLY reschedule text (window_unknown only because it quoted no window) goes
   // through B1's delayed-send chokepoint (revalidateDelayedDaySend) before its recovery email: 'day' -> the day-only email;
-  // 'window' (inside the cutoff, the gate rolled back, the 24-hour reminder off) -> today's window email; 'suppress' (a later
+  // 'window' (inside the cutoff, the 24-hour reminder off) -> today's window email; 'suppress' (a later
   // promise already stands, or none can be read) -> no email.
   const dayText = kind === 'rescheduled' && isDayPromise(meta);
   let dayOnly = false;
@@ -1261,11 +1261,10 @@ function reminder24hWillSend(prefs) {
   return Boolean(prefs.serviceReminder24h) && !(prefs.reminder24hChannel === 'sms' && !prefs.smsEnabled);
 }
 
-/** True when this send may promise only the day. Gate off (or any error): false, and nothing is read. */
+/** True when this send may promise only the day. Any error: false. */
 async function dayOnlyForSend({ id, startAt, reminder24hEnabled, ignoreLevel = false }) {
   try {
     const timePromise = require('./time-promise');
-    if (!timePromise.dayOnlyPromiseOn()) return false;
     const decision = await timePromise.dayOnlySendDecision(db, { id, startAt, reminder24hEnabled, ...(ignoreLevel ? { ignoreLevel: true } : {}) });
     return decision.dayOnly === true;
   } catch (err) {
@@ -1284,11 +1283,10 @@ async function confirmationDayOnly(record, { scheduledServiceId, apptTime, prefs
 
 /** A held or merged MOVE notice re-sent as a confirmation (GATE_DAY_ONLY_PROMISE part B2) keeps the recorded intent: a day
  *  intent (customer_asked_time false) re-sends the day row even though the old promise was an hour (the move replaced it); a
- *  set time (true) stays a window. Gate off (or any error): false, and nothing is read. */
+ *  set time (true) stays a window. Any error: false. */
 async function moveReplayDayOnly({ id, startAt, reminder24hEnabled }) {
   try {
     const timePromise = require('./time-promise');
-    if (!timePromise.dayOnlyPromiseOn()) return false;
     return await timePromise.dayOnlyReplayDecision(db, { id, startAt, reminder24hEnabled });
   } catch (err) {
     logger.warn(`[appt-remind] day-only replay decision failed for ${id} (${err.message}) - sending the window copy`);
@@ -1454,9 +1452,9 @@ async function delayedSendIsStale(scheduledServiceId, notice = null) {
  * stored day-only body later must ask this first (day-only-promise-b1-persisted-paths.test.js scans for it).
  *   'suppress'  a promise newer than the original send stands (the latest promise is already an hour, e.g. the 24-hour text
  *               delivered the window) or the promise cannot be read: send nothing.
- *   'day'       the SAME shared decision a fresh send uses (dayOnlyNow: live gate, the cutoff, reminder24hWillSend on the
+ *   'day'       the SAME shared decision a fresh send uses (dayOnlyNow: the cutoff, reminder24hWillSend on the
  *               customer's CURRENT preferences, full eligibility) still says day: the day-only body may go.
- *   'window'    it no longer does (gate rolled back, the 24-hour reminder switched off, inside the cutoff): the day-only
+ *   'window'    it no longer does (the 24-hour reminder switched off, inside the cutoff): the day-only
  *               body must not go. The caller sends window copy if it can render it, else suppresses.
  * `apptTime` is the visit's start the caller already knows; absent, it is read from the visit.
  * `noticeAt` (a MOVE notice's recovery, with `apptTime` the slot that notice quoted, or `noticeDate` its ET date): only a promise
@@ -7473,12 +7471,11 @@ async function replayRecipient({ customerId, scheduledServiceId, contactKey, acc
 }
 
 // The day-only decision for a send made NOW outside the reminder scan (the service-contact replay, a bounce's email
-// recovery): the SAME shared decision a fresh send uses, on the live gate, the customer's CURRENT preferences
-// (reminder24hWillSend) and the full eligibility. Gate off (or any error, unreadable preferences): false, and the caller
+// recovery): the SAME shared decision a fresh send uses, on the customer's CURRENT preferences
+// (reminder24hWillSend) and the full eligibility. Any error or unreadable preferences: false, and the caller
 // sends window copy.
 async function dayOnlyNow({ customerId, scheduledServiceId, apptTime, ignoreLevel = false }) {
   try {
-    if (!require('./time-promise').dayOnlyPromiseOn()) return false;
     const prefs = await getReminderPrefs(customerId, { scheduledServiceId });
     if (prefs.unavailable) return false;
     return await dayOnlyForSend({ id: scheduledServiceId, startAt: apptTime, reminder24hEnabled: reminder24hWillSend(prefs), ...(ignoreLevel ? { ignoreLevel: true } : {}) });

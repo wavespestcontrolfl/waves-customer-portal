@@ -191,9 +191,9 @@ describe('the callers pass what the decision needs (source scans)', () => {
     expect(ib).toContain('customerAskedTime: input.customer_asked_time === true,');
   });
 
-  test('customer moves: the reschedule page and the text-offer mover pass set_time with the date they moved from, only with the gate on', () => {
+  test('customer moves: the reschedule page and the text-offer mover pass set_time with the date they moved from', () => {
     expect(reschedulePublic).toContain("...await moveNoticeArgs(svc, 'set_time'),");
-    expect(reschedulePublic).toContain('? { timePromise, previousDate: apptDateStr(svc.scheduled_date) }');
+    expect(reschedulePublic).toContain('return { timePromise, previousDate: apptDateStr(svc.scheduled_date) };');
     expect(act).toContain("{ timePromise: 'set_time', previousDate }");
     expect(act).toContain('previousDate: dateOnlyString(svc.scheduled_date)');
   });

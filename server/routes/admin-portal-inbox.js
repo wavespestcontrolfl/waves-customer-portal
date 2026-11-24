@@ -19,6 +19,8 @@ const featureGates = require('../config/feature-gates');
 
 // GATE_PORTAL_MESSAGES, read at call time; a test that mocks feature-gates without the reader reads off.
 const portalMessagesLive = () => Boolean(featureGates.portalMessagesLive?.());
+// GATE_PORTAL_ANSWER_TEXT, the same way: the reply form says an answer goes by text before staff press Send.
+const answerByTextLive = () => Boolean(featureGates.portalAnswerTextLive?.());
 const portalInbox = require('../services/portal-inbox');
 const PortalMessages = require('../services/portal-messages');
 
@@ -32,13 +34,13 @@ router.get('/summary', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/admin/portal-inbox -> { enabled, cutoff, items, olderItems, total, older: { chats, requests } }
+// GET /api/admin/portal-inbox -> { enabled, replies, answerByText, cutoff, items, olderItems, total, older: { chats, requests } }
 // `items` = open, last 14 days; `olderItems` = open at or before the cutoff, listed one by one;
 // `older` = their true totals.
 router.get('/', async (req, res, next) => {
   try {
     res.set('Cache-Control', 'private, no-store');
-    res.json({ enabled: true, replies: portalMessagesLive(), ...(await portalInbox.list()) });
+    res.json({ enabled: true, replies: portalMessagesLive(), answerByText: answerByTextLive(), ...(await portalInbox.list()) });
   } catch (err) { next(err); }
 });
 
@@ -56,15 +58,19 @@ router.post('/close-older', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GATE_PORTAL_MESSAGES: POST /api/admin/portal-inbox/reply  { kind, id, body, requestId? }
+// GATE_PORTAL_MESSAGES: POST /api/admin/portal-inbox/reply  { kind, id, body, requestId?, answerByText? }
 //   -> { message, closed, notice } . Answers one item inside the customer's portal: the answer is saved in
-// their portal thread, the item and its bells close, and the customer gets one notice (app push, else email).
-// `requestId` makes a retried click return the first answer instead of sending a second one.
+// their portal thread, the item and its bells close, and the customer gets one notice (app push, else email; with
+// GATE_PORTAL_ANSWER_TEXT on, one text with the answer, else email).
+// `requestId` makes a retried click return the first answer instead of sending a second one. `answerByText` is the way
+// the reply form showed (the list's answerByText; the form sends it only as true, and none is the push way); a new
+// answer whose way changed since is refused (409 notice_way_changed), and the form shows the new way.
 const replySchema = Joi.object({
   kind: Joi.string().valid('chat', 'request', 'message').required(),
   id: Joi.string().uuid().required(),
   body: Joi.string().allow('').max(PortalMessages.BODY_MAX * 2).required(),
   requestId: Joi.string().uuid().optional(),
+  answerByText: Joi.boolean().strict().optional(),
 });
 
 router.post('/reply', async (req, res, next) => {
@@ -77,6 +83,7 @@ router.post('/reply', async (req, res, next) => {
       id: value.id,
       body: value.body,
       clientRequestId: value.requestId || null,
+      shownByText: value.answerByText === true,
       actor: { technicianId: req.technicianId, role: req.techRole },
     });
     res.json(result);

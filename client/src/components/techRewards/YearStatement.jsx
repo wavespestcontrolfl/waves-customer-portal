@@ -20,6 +20,7 @@ const PAY_ROWS = [
   ['overtimePayCents', 'Overtime pay'],
   ['ptoPayCents', 'Paid time off'],
   ['holidayPayCents', 'Holiday pay'],
+  ['minimumWeekPayCents', 'Minimum week pay'],
   ['reviewBonusCents', 'Review bonus'],
   ['commissionCents', 'Commission'],
   ['healthAllowanceCents', 'Health allowance'],

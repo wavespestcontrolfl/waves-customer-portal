@@ -1,11 +1,14 @@
-// One-time job to plan offer, shadow step, against real PostgreSQL (one rolled-back transaction per test),
-// behind GATE_ONETIME_PLAN_OFFER=shadow (owner 2026-11-19, "build"). The unit suite pins the decisions with
+// One-time job to plan offer, shadow and live, against real PostgreSQL (one rolled-back transaction per test),
+// behind GATE_ONETIME_PLAN_OFFER=shadow|live (owner 2026-11-19, "build"; live: 2026-11-20, "i want auto"). The unit suite pins the decisions with
 // stubs; this one proves what only a database can: the job's own SQL (which visits are due, the offer day, each
 // send rule's read), the real collaborators on real tables (open balance, review-ask history, suppressions, the
 // email division's verdict, the offer pricing with the real engine, its plan records and its proof of the
 // job's home), and that the two DRAFT templates
 // the migration seeds render and send as test sends through the real template library, and the one admin
-// notification for a morning the price settings stopped (a real row, refreshed, closed and opened again). Only
+// notification for a morning the price settings stopped (a real row, refreshed, closed and opened again). The last
+// describe runs LIVE with the REAL mint (mintPlanStartEstimate) and the REAL ledger (sendWithLedger, the real
+// template library and the real eligibility): the customer's estimate row, the one email row, the second morning,
+// a denied send and a failed send that leave the quote, and the 12-month rule inside the reservation. Only
 // the email transport, the property lookup and the phone banner of an admin notification are stubs (no network,
 // no spend, nothing sent). All names and addresses are synthetic.
 // CI runs a DB suite only when it carries this exact line (tests.yml greps for it).
@@ -87,8 +90,15 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
     await database?.destroy();
   });
 
+  // The card rail's two switches, on as production has them. The offer is only for a customer whose plan visits
+  // are billed after the visit (the email says so), in shadow as in live: with either one off, every job is held.
+  const RAIL_ENV = ['RECURRING_CARD_ON_FILE', 'GATE_PAY_AFTER_FIRST_VISIT'];
+  let savedRailEnv;
+
   beforeEach(async () => {
     process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+    savedRailEnv = Object.fromEntries(RAIL_ENV.map((name) => [name, process.env[name]]));
+    for (const name of RAIL_ENV) process.env[name] = 'true';
     jest.clearAllMocks();
     Lookup.performPropertyLookup.mockResolvedValue(null);
     trx = await database.transaction();
@@ -96,6 +106,10 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
   });
 
   afterEach(async () => {
+    for (const name of RAIL_ENV) {
+      if (savedRailEnv[name] === undefined) delete process.env[name];
+      else process.env[name] = savedRailEnv[name];
+    }
     await trx.rollback();
   });
 
@@ -1172,5 +1186,784 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
     const { job } = await seedJob();
     expect(await run()).toMatchObject({ mode: 'off', jobs: 0, sample: 0 });
     expect(await sampleRows(job.id)).toHaveLength(0);
+  });
+
+  // ---- Live (owner 2026-11-20, "i want auto"). ----
+  // The REAL mint (mintPlanStartEstimate with `offer`), the REAL card-rail check, the REAL ledger and the REAL
+  // template library, on the rows below. Only the provider send (Sendgrid.sendOne) and the property lookup are stubs.
+  describe('live', () => {
+    // The real send's unsubscribe is the SendGrid ASM group of the marketing stream (the ledger passes no link).
+    const cardEnv = ['SENDGRID_ASM_GROUP_NEWSLETTER'];
+    let savedCardEnv;
+    const readPlan = (value) => (typeof value === 'string' ? JSON.parse(value) : value);
+
+    beforeEach(() => {
+      process.env.GATE_ONETIME_PLAN_OFFER = 'live';
+      savedCardEnv = Object.fromEntries(cardEnv.map((name) => [name, process.env[name]]));
+      for (const name of cardEnv) process.env[name] = '101';
+      Lookup.performPropertyLookup.mockResolvedValue({ enriched: { homeSqFt: 2400, lotSqFt: 8000, stories: 1 }, propertyRecord: {} });
+    });
+    afterEach(() => {
+      for (const name of cardEnv) {
+        if (savedCardEnv[name] === undefined) delete process.env[name];
+        else process.env[name] = savedCardEnv[name];
+      }
+    });
+
+    // The owner's publish of the offer template: an active version on an active template (publishVersion's result).
+    async function publishOffer() {
+      const template = await trx('email_templates').where({ template_key: OFFER }).first('id');
+      const version = await trx('email_template_versions').where({ template_id: template.id }).orderBy('version_number', 'desc').first('id');
+      await trx('email_template_versions').where({ id: version.id }).update({ status: 'active' });
+      await trx('email_templates').where({ id: template.id }).update({ status: 'active', active_version_id: version.id });
+    }
+
+    const offerKey = (jobId) => `onetime-plan-offer:offer:${jobId}`;
+    const offerMail = (jobId) => trx('email_messages').where({ idempotency_key: offerKey(jobId) }).first();
+    const ledgerRow = (jobId) => trx('marketing_email_ledger').where({ idempotency_key: offerKey(jobId) }).first();
+    const estimatesOf = (customer) => trx('estimates').where({ customer_id: customer.id }).orderBy('created_at', 'asc');
+    const tomorrow = new Date(NOW.getTime() + 24 * HOUR);
+    const runAt = (at, deps = {}) => Offer.runOnetimePlanOfferJob({ now: at, deps });
+
+    // A job's offer terms by hand: the job's service was done `daysAgo` ET days ago.
+    const { parseETDateTime } = require('../utils/datetime-et');
+    const endsOf = (daysAgo) => new Date(parseETDateTime(`${day(30 - daysAgo)}T23:59:59`).getTime() + 999);
+
+    test('a paid one-time job: the customer gets the real estimate and ONE offer email; the next morning sends nothing more', async () => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      const summary = await run({});
+      expect(summary).toMatchObject({ mode: 'live', jobs: 1, sent: 1, sample: 0, held: 0, office: 0, done: 0, failed: 0 });
+      expect(summary).not.toHaveProperty('words_not_approved');
+
+      // The estimate: a plan-start quote with the offer stamp, no setup fee and its own end date.
+      const [estimate, ...others] = await estimatesOf(customer);
+      expect(others).toEqual([]);
+      expect(estimate).toMatchObject({ source: 'plan_start', status: 'sent' });
+      expect(Number(estimate.onetime_total)).toBe(0);
+      expect(new Date(estimate.expires_at).getTime()).toBe(endsOf(5).getTime());
+      const data = readPlan(estimate.estimate_data);
+      expect(data.planStart.offer).toEqual({ jobId: String(job.id), endsAt: endsOf(5).toISOString(), firstVisitFrom: day(72) });
+      expect(Offer.offerTerms(day(-5))).toMatchObject({ firstVisitFrom: day(72), endsAt: endsOf(5) });
+      expect(data.operatorPriceAdjustment).toMatchObject({ waiveSetupFee: true });
+
+      // One email, to the customer's own address, from the ledger, with the link to THIS estimate.
+      const mail = await offerMail(job.id);
+      expect(mail).toMatchObject({ template_key: OFFER, status: 'sent', recipient_email_snapshot: customer.email, recipient_type: 'customer', provider_message_id: 'sg-sample' });
+      expect(mail.sent_at).not.toBeNull();
+      expect(mail.subject_snapshot).toBe('Your pest control plan estimate, with no setup fee');
+      expect(mail.html_snapshot).toContain(`/estimate/${estimate.token}`);
+      expect(mail.html_snapshot).not.toContain('/estimate/sample');
+      expect(mail.html_snapshot).not.toMatch(/\{\{/);
+      expect(mail.html_snapshot).not.toContain('Sample only');
+      expect(mail.text_snapshot).toContain('Hi Jordan,');
+      expect(mail.text_snapshot).toContain('One-time setup fee: $0 (normally $');
+      expect(mail.text_snapshot).toContain('Due today: $0');
+      expect(mail.text_snapshot).toContain('You pay after each visit. Nothing is charged today.');
+      expect(Sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect(Sendgrid.sendOne.mock.calls[0][0].to).toBe(customer.email);
+      expect(await ledgerRow(job.id)).toMatchObject({
+        customer_id: customer.id, stream: 'nurture', marketing_class: 'marketing', email_key: OFFER, status: 'sent', recipient_email: customer.email,
+      });
+      // No office sample in live, and no reminder.
+      expect(await sampleRows(job.id)).toEqual([]);
+      expect(await trx('email_messages').where({ template_key: REMINDER }).first('id')).toBeUndefined();
+
+      // The next morning: done. No second email, no second quote.
+      expect(await runAt(tomorrow)).toMatchObject({ mode: 'live', jobs: 1, done: 1, sent: 0, failed: 0 });
+      expect(Sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect(await estimatesOf(customer)).toHaveLength(1);
+      expect(await trx('marketing_email_ledger').where({ customer_id: customer.id, email_key: OFFER })).toHaveLength(1);
+    });
+
+    test('the offer template is still a draft (as the migration seeds it): the run reads no job, makes no estimate and sends nothing', async () => {
+      const { customer } = await seedJob();
+      expect(await run({})).toMatchObject({ mode: 'live', jobs: 0, sent: 0, failed: 0, words_not_approved: true });
+      expect(await estimatesOf(customer)).toEqual([]);
+      expect(Sendgrid.sendOne).not.toHaveBeenCalled();
+      expect(await trx('marketing_email_ledger').where({ customer_id: customer.id }).first('id')).toBeUndefined();
+      // A template the owner paused or archived after publishing is no published words either.
+      await publishOffer();
+      await trx('email_templates').where({ template_key: OFFER }).update({ status: 'paused' });
+      expect(await run({})).toMatchObject({ jobs: 0, words_not_approved: true });
+      expect(Sendgrid.sendOne).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['shadow', { jobs: 1, sample: 1 }],
+      ['true', { jobs: 0, sample: 0 }],
+      ['Live', { jobs: 0, sample: 0 }],
+    ])('the gate at %s never makes an estimate and never sends the customer anything, even with the template published', async (value, expected) => {
+      await publishOffer();
+      process.env.GATE_ONETIME_PLAN_OFFER = value;
+      const { customer, job } = await seedJob();
+      expect(await run({})).toMatchObject(expected);
+      expect(await estimatesOf(customer)).toEqual([]);
+      expect(await offerMail(job.id)).toBeUndefined();
+      expect(await ledgerRow(job.id)).toBeUndefined();
+      expect(Sendgrid.sendOne.mock.calls.every(([mail]) => mail.to === OFFICE)).toBe(true);
+    });
+
+    // A send the division denies AFTER the job's own check passed: the customer turns marketing off in between
+    // (here, right after the estimate is made). The quote stays on file. The next morning, with the switch back
+    // on, the job gets past its own quote, reuses it (same token) and sends.
+    test('a denied send leaves the quote on file; the next morning reuses it and sends the one email', async () => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      const real = require('../services/cancellation-resolution/restart').mintPlanStartEstimate;
+      const optOutAfterMint = jest.fn(async (args) => {
+        const minted = await real(args);
+        await trx('notification_prefs').insert({ customer_id: customer.id, email_enabled: false });
+        return minted;
+      });
+      const first = await run({ mintPlanStartEstimate: optOutAfterMint });
+      expect(first).toMatchObject({ sent: 0, held: 1, failed: 0 });
+      expect(first.reasons).toEqual({ email_switch_off: 1 });
+      expect(Sendgrid.sendOne).not.toHaveBeenCalled();
+      const [quote, ...rest] = await estimatesOf(customer);
+      expect(rest).toEqual([]);
+      expect(readPlan(quote.estimate_data).planStart.offer.jobId).toBe(String(job.id));
+      expect(await offerMail(job.id)).toBeUndefined();
+
+      await trx('notification_prefs').where({ customer_id: customer.id }).update({ email_enabled: true });
+      expect(await runAt(tomorrow)).toMatchObject({ sent: 1, held: 0, failed: 0 });
+      const after = await estimatesOf(customer);
+      expect(after.map((row) => row.id)).toEqual([quote.id]);
+      const mail = await offerMail(job.id);
+      expect(mail.html_snapshot).toContain(`/estimate/${quote.token}`);
+      expect(Sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect(await trx('marketing_email_ledger').where({ customer_id: customer.id, email_key: OFFER })).toHaveLength(1);
+    });
+
+    // The provider fails: the ledger settles the row failed and the library's message row never reached it. The job
+    // fails for the morning. The next morning sends under the same key and the same quote, and the customer gets one email.
+    test('a provider failure leaves the quote on file and the key unsent; the next morning sends once', async () => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      Sendgrid.sendOne.mockRejectedValueOnce(Object.assign(new Error('provider down'), { status: 500 }));
+      const first = await run({});
+      expect(first).toMatchObject({ sent: 0, failed: 1 });
+      const [quote] = await estimatesOf(customer);
+      expect((await ledgerRow(job.id)).status).toBe('failed');
+      const mail = await offerMail(job.id);
+      expect(mail?.sent_at ?? null).toBeNull();
+
+      // The library holds a message queued less than 2 minutes ago as in flight. The test's clock is the database's, so
+      // age the row by the day the next morning is away.
+      await trx('email_messages').where({ idempotency_key: offerKey(job.id) }).update({ queued_at: new Date(Date.now() - 24 * HOUR) });
+      const second = await runAt(tomorrow);
+      expect(second).toMatchObject({ sent: 1, failed: 0 });
+      expect((await estimatesOf(customer)).map((row) => row.id)).toEqual([quote.id]);
+      expect((await ledgerRow(job.id)).status).toBe('sent');
+      expect((await offerMail(job.id)).sent_at).not.toBeNull();
+      expect(await trx('marketing_email_ledger').where({ customer_id: customer.id, email_key: OFFER })).toHaveLength(1);
+      expect(Sendgrid.sendOne).toHaveBeenCalledTimes(2);
+      // The third morning is done: no third attempt.
+      expect(await runAt(new Date(tomorrow.getTime() + 24 * HOUR))).toMatchObject({ done: 1, sent: 0 });
+      expect(Sendgrid.sendOne).toHaveBeenCalledTimes(2);
+    });
+
+    // The real transport marks the handoff 'started' before the request. A failure after that may have gone out, so the
+    // library refuses to retry it and the job counts the offer as sent: never a second email.
+    test('a provider failure after the handoff started may have gone out: the next morning is done and sends nothing', async () => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      Sendgrid.sendOne.mockRejectedValueOnce(Object.assign(new Error('timed out'), { status: 504 }));
+      expect(await run({})).toMatchObject({ sent: 0, failed: 1 });
+      await trx('email_messages').where({ idempotency_key: offerKey(job.id) }).update({ provider_handoff_phase: 'started' });
+      expect(await runAt(tomorrow)).toMatchObject({ done: 1, sent: 0, failed: 0 });
+      expect(Sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect(await estimatesOf(customer)).toHaveLength(1);
+    });
+
+    describe('one offer per customer per 12 months', () => {
+      const earlierOffer = (customer, { daysAgo, status = 'sent', key = `onetime-plan-offer:offer:${crypto.randomUUID()}`, emailKey = OFFER }) => trx('marketing_email_ledger').insert({
+        customer_id: customer.id, stream: 'nurture', marketing_class: 'marketing', email_key: emailKey, idempotency_key: key,
+        recipient_email: customer.email, status, reserved_at: new Date(NOW.getTime() - daysAgo * 24 * HOUR),
+        sent_at: status === 'sent' ? new Date(NOW.getTime() - daysAgo * 24 * HOUR) : null,
+      });
+
+      test.each([
+        ['sent 200 days ago', { daysAgo: 200 }],
+        ['sent 364 days ago', { daysAgo: 364 }],
+        ['reserved 10 minutes ago (an offer still in flight)', { daysAgo: 10 / 1440, status: 'reserved' }],
+      ])('an offer for another job %s holds this job: no estimate, no email', async (_name, earlier) => {
+        await publishOffer();
+        const { customer, job } = await seedJob();
+        await earlierOffer(customer, earlier);
+        const summary = await run({});
+        expect(summary).toMatchObject({ sent: 0, held: 1, failed: 0 });
+        expect(summary.reasons).toEqual({ offered_before: 1 });
+        expect(await estimatesOf(customer)).toEqual([]);
+        expect(await offerMail(job.id)).toBeUndefined();
+        expect(Sendgrid.sendOne).not.toHaveBeenCalled();
+      });
+
+      test.each([
+        ['one sent 366 days ago', async (customer) => earlierOffer(customer, { daysAgo: 366 })],
+        ['one that failed', async (customer) => earlierOffer(customer, { daysAgo: 2, status: 'failed' })],
+        ['another template', async (customer) => earlierOffer(customer, { daysAgo: 100, emailKey: 'nurture.expired_1' })],
+        // The office sample is a TEST send: it is an email_messages row for the office and no ledger row at all.
+        ['the office sample of this very job', async (customer, job) => trx('email_messages').insert({
+          template_key: OFFER, idempotency_key: sampleKey(OFFER, job.id), recipient_email_snapshot: OFFICE, recipient_type: 'test', status: 'sent', sent_at: new Date(),
+        })],
+      ])('not a hold: %s', async (_name, arrange) => {
+        await publishOffer();
+        const { customer, job } = await seedJob();
+        await arrange(customer, job);
+        expect(await run({})).toMatchObject({ sent: 1, held: 0, failed: 0 });
+      });
+
+      // The ledger settles a `failed` row from email_messages for 30 days only. Past that, an offer whose email the
+      // provider took (or whose handoff started) still counts for the whole year.
+      describe('a failed ledger row whose email went out, or may have', () => {
+        const failedOffer = async (customer, { daysAgo, message }) => {
+          const key = `onetime-plan-offer:offer:${crypto.randomUUID()}`;
+          await earlierOffer(customer, { daysAgo, status: 'failed', key });
+          if (message) {
+            await trx('email_messages').insert({
+              idempotency_key: key, recipient_email_snapshot: customer.email, recipient_type: 'customer', recipient_id: customer.id,
+              template_key: OFFER, ...message,
+            });
+          }
+        };
+
+        test.each([
+          ['accepted, 100 days ago', { daysAgo: 100, message: { status: 'sent', sent_at: new Date(NOW.getTime() - 100 * 24 * HOUR) } }],
+          ['handoff started, 200 days ago', { daysAgo: 200, message: { status: 'queued', provider_handoff_phase: 'started' } }],
+          // The year runs from the handoff: reserved 366 days ago, accepted 100 days ago, still inside it.
+          ['reserved 366 days ago but accepted 100 days ago', { daysAgo: 366, message: { status: 'sent', sent_at: new Date(NOW.getTime() - 100 * 24 * HOUR) } }],
+        ])('%s: holds the job', async (_name, earlier) => {
+          await publishOffer();
+          const { customer, job } = await seedJob();
+          await failedOffer(customer, earlier);
+          const summary = await run({});
+          expect(summary).toMatchObject({ sent: 0, held: 1, failed: 0 });
+          expect(summary.reasons).toEqual({ offered_before: 1 });
+          expect(await estimatesOf(customer)).toEqual([]);
+          expect(await offerMail(job.id)).toBeUndefined();
+        });
+
+        test.each([
+          ['no message', { daysAgo: 100, message: null }],
+          ['a message the provider refused', { daysAgo: 100, message: { status: 'failed', provider_handoff_phase: 'rejected' } }],
+          ['accepted 366 days ago', { daysAgo: 366, message: { status: 'sent', sent_at: new Date(NOW.getTime() - 366 * 24 * HOUR) } }],
+        ])('not a hold: %s', async (_name, earlier) => {
+          await publishOffer();
+          const { customer } = await seedJob();
+          await failedOffer(customer, earlier);
+          expect(await run({})).toMatchObject({ sent: 1, held: 0, failed: 0 });
+        });
+
+        test('the guard inside the reservation counts it too: an offer that landed after the job\'s own check; the quote stays', async () => {
+          await publishOffer();
+          const { customer, job } = await seedJob();
+          const real = require('../services/cancellation-resolution/restart').mintPlanStartEstimate;
+          const summary = await run({
+            mintPlanStartEstimate: async (args) => {
+              const minted = await real(args);
+              await failedOffer(customer, { daysAgo: 100, message: { status: 'sent', sent_at: new Date() } });
+              return minted;
+            },
+          });
+          expect(summary).toMatchObject({ sent: 0, held: 1, failed: 0 });
+          expect(summary.reasons).toEqual({ offered_before: 1 });
+          expect(await estimatesOf(customer)).toHaveLength(1);
+          expect(await ledgerRow(job.id)).toBeUndefined();
+        });
+      });
+
+      // A worker that died after it reserved and before the provider leaves a `reserved` row. The ledger settles it
+      // after RESERVATION_LIFETIME_MS, but only inside a reservation, so the job's own rule settles it first.
+      describe('a reservation a crash left behind (older than the ledger\'s lifetime)', () => {
+        const STALE_DAYS = 3 / 24;
+        const staleKey = `onetime-plan-offer:offer:${crypto.randomUUID()}`;
+        const staleOffer = (customer) => earlierOffer(customer, { daysAgo: STALE_DAYS, status: 'reserved', key: staleKey });
+        const staleRow = () => trx('marketing_email_ledger').where({ idempotency_key: staleKey }).first();
+
+        test('with no provider message it is written off: it does not hold the job, and the job sends', async () => {
+          await publishOffer();
+          const { customer } = await seedJob();
+          await staleOffer(customer);
+          expect(await run({})).toMatchObject({ sent: 1, held: 0, failed: 0 });
+          expect(await staleRow()).toMatchObject({ status: 'failed', reason: 'abandoned_reservation' });
+        });
+
+        test.each([
+          ['the provider accepted it', { status: 'sent', sent_at: new Date() }],
+          ['the handoff started and the answer was lost', { status: 'queued', provider_handoff_phase: 'started' }],
+        ])('%s: it counts as an offer and still holds the job', async (_name, message) => {
+          await publishOffer();
+          const { customer, job } = await seedJob();
+          await staleOffer(customer);
+          await trx('email_messages').insert({
+            idempotency_key: staleKey, recipient_email_snapshot: customer.email, recipient_type: 'customer', recipient_id: customer.id,
+            template_key: OFFER, ...message,
+          });
+          const summary = await run({});
+          expect(summary).toMatchObject({ sent: 0, held: 1, failed: 0 });
+          expect(summary.reasons).toEqual({ offered_before: 1 });
+          expect((await staleRow()).status).toBe('sent');
+          expect(await offerMail(job.id)).toBeUndefined();
+        });
+      });
+
+      // The rule's read and the reservation's guard are separate: a concurrent run can pass the rule and lose here.
+      // The other job's offer lands between the job's own check and the reservation; the guard, inside the
+      // reservation under the customer's lock, denies.
+      test("the guard inside the reservation denies an offer that landed after the job's own check; the quote stays", async () => {
+        await publishOffer();
+        const { customer, job } = await seedJob();
+        const real = require('../services/cancellation-resolution/restart').mintPlanStartEstimate;
+        const summary = await run({
+          mintPlanStartEstimate: async (args) => {
+            const minted = await real(args);
+            await earlierOffer(customer, { daysAgo: 200 });
+            return minted;
+          },
+        });
+        expect(summary).toMatchObject({ sent: 0, held: 1, failed: 0 });
+        expect(summary.reasons).toEqual({ offered_before: 1 });
+        expect(await estimatesOf(customer)).toHaveLength(1);
+        expect(await ledgerRow(job.id)).toBeUndefined();
+        expect(Sendgrid.sendOne).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('the email says "you pay after each visit": only a customer on the card rail gets it', () => {
+      test('the estimate page\'s gate or the card lane off: the job is held before the home is priced, so no quote and no email', async () => {
+        await publishOffer();
+        process.env.GATE_PAY_AFTER_FIRST_VISIT = 'false';
+        const { customer, job } = await seedJob();
+        const summary = await run({});
+        expect(summary).toMatchObject({ sent: 0, held: 1, failed: 0 });
+        expect(summary.reasons).toEqual({ not_pay_after_visit: 1 });
+        expect(await estimatesOf(customer)).toEqual([]);
+        expect(await offerMail(job.id)).toBeUndefined();
+        expect(Sendgrid.sendOne).not.toHaveBeenCalled();
+        // The gate is back on: the next morning makes the quote and sends.
+        process.env.GATE_PAY_AFTER_FIRST_VISIT = 'true';
+        expect(await runAt(tomorrow)).toMatchObject({ sent: 1, held: 0 });
+        expect(await estimatesOf(customer)).toHaveLength(1);
+      });
+
+      test('a customer whose Auto Pay is paused is invoiced before service: no quote, no email', async () => {
+        await publishOffer();
+        const customer = await seedCustomer({ autopay_paused_until: day(30) });
+        const { job } = await seedJob({ customer });
+        const summary = await run({});
+        expect(summary.reasons).toEqual({ not_pay_after_visit: 1 });
+        expect(summary).toMatchObject({ sent: 0, held: 1 });
+        expect(await estimatesOf(customer)).toEqual([]);
+        expect(await offerMail(job.id)).toBeUndefined();
+      });
+
+      // The card policy lets these two through (a paused customer under GATE_PAF_EXISTING_CUSTOMERS; an explicit
+      // turn-off of a customer who is no plan member), so the job asks the account itself.
+      test.each([
+        ['live', 'paused, with the existing-customer rail on', 'autopay_paused', async () => {
+          process.env.GATE_PAF_EXISTING_CUSTOMERS = 'true';
+          return seedCustomer({ autopay_paused_until: day(30) });
+        }],
+        ['live', 'turned off by the customer', 'autopay_off', async () => {
+          const customer = await seedCustomer({ autopay_enabled: false });
+          await trx('autopay_log').insert({ customer_id: customer.id, event_type: 'autopay_disabled' });
+          return customer;
+        }],
+        ['shadow', 'turned off by the customer', 'autopay_off', async () => {
+          const customer = await seedCustomer({ autopay_enabled: false });
+          await trx('autopay_log').insert({ customer_id: customer.id, event_type: 'autopay_disabled' });
+          return customer;
+        }],
+      ])('%s, Auto Pay %s: held, no quote, no email, no sample', async (mode, _state, reason, arrange) => {
+        const savedPaf = process.env.GATE_PAF_EXISTING_CUSTOMERS;
+        try {
+          process.env.GATE_ONETIME_PLAN_OFFER = mode;
+          await publishOffer();
+          const customer = await arrange();
+          const { job } = await seedJob({ customer });
+          const summary = await run({});
+          expect(summary.reasons).toEqual({ [reason]: 1 });
+          expect(summary).toMatchObject({ sample: 0, held: 1, failed: 0 });
+          expect(summary.sent ?? 0).toBe(0);
+          expect(await estimatesOf(customer)).toEqual([]);
+          expect(await offerMail(job.id)).toBeUndefined();
+          expect(await sampleRows(job.id)).toEqual([]);
+          expect(Sendgrid.sendOne).not.toHaveBeenCalled();
+        } finally {
+          if (savedPaf === undefined) delete process.env.GATE_PAF_EXISTING_CUSTOMERS;
+          else process.env.GATE_PAF_EXISTING_CUSTOMERS = savedPaf;
+        }
+      });
+
+      // A sample tells the office "this customer would get the offer today", so shadow holds the same customers.
+      test.each([
+        ['Auto Pay paused', async () => seedCustomer({ autopay_paused_until: day(30) })],
+        ['the card lane off', async () => { process.env.RECURRING_CARD_ON_FILE = 'false'; return seedCustomer(); }],
+      ])('shadow, %s: the job is held and the office gets no sample', async (_name, arrange) => {
+        process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+        const customer = await arrange();
+        const { job } = await seedJob({ customer });
+        const summary = await run({});
+        expect(summary).toMatchObject({ mode: 'shadow', jobs: 1, sample: 0, held: 1, failed: 0 });
+        expect(summary.reasons).toEqual({ not_pay_after_visit: 1 });
+        expect(await sampleRows(job.id)).toEqual([]);
+        expect(Sendgrid.sendOne).not.toHaveBeenCalled();
+      });
+    });
+
+    // The job's opt-out check runs before the home is priced and the estimate is made, and the division's own
+    // checks for this stream do not read "offers off" or "marketing by text only". The customer turns offers off
+    // after the reservation, right before the email would leave: the ledger's handoff asks the job's guard.
+    test('offers turned off right before the email leaves: the provider is never called, and the key is dropped for good', async () => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      const realSend = require('../services/email-division/ledger').sendWithLedger;
+      // The real transport runs the ledger's last check right before it builds the provider request
+      // (sendgrid-mail.js sendOne). This suite replaces the transport, so the replacement does the same.
+      const providerRequest = jest.fn();
+      Sendgrid.sendOne.mockImplementationOnce(async ({ database, providerBoundaryCheck }) => {
+        await providerBoundaryCheck({ database });
+        providerRequest();
+        return { messageId: 'sg-sample' };
+      });
+      const first = await run({
+        sendWithLedger: (args) => realSend({
+          ...args,
+          boundaryGuard: async (handoff) => {
+            await handoff('notification_prefs').insert({ customer_id: customer.id, marketing_offers: false });
+            return args.boundaryGuard(handoff);
+          },
+        }),
+      });
+      expect(first).toMatchObject({ sent: 0, held: 1, failed: 0 });
+      expect(first.reasons).toEqual({ offers_off: 1 });
+      expect(Sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect(providerRequest).not.toHaveBeenCalled();
+      expect(await ledgerRow(job.id)).toMatchObject({ status: 'skipped', reason: 'OFFERS_OFF' });
+      expect((await offerMail(job.id))?.sent_at ?? null).toBeNull();
+      // Still off the next morning: the job's own rule holds it.
+      expect((await runAt(tomorrow)).reasons).toEqual({ offers_off: 1 });
+      // Back on: the ledger never sends a skipped key again, and the job says so. No email, ever.
+      await trx('notification_prefs').where({ customer_id: customer.id }).update({ marketing_offers: true });
+      const later = await runAt(new Date(tomorrow.getTime() + 24 * HOUR));
+      expect(later).toMatchObject({ sent: 0, held: 1, done: 0, failed: 0 });
+      expect(later.reasons).toEqual({ send_dropped: 1 });
+      expect(Sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect(providerRequest).not.toHaveBeenCalled();
+    });
+
+    // The customer opens another plan option after this job's mint committed. That mint archives the plan-start
+    // lineage, this offer's estimate included, while the email waits for the provider. The email's button would be
+    // dead, so the handoff refuses it; the row settles failed (not skipped), and the next morning mints again.
+    test('the offer estimate archived by the customer\'s next mint before the email leaves: no email; the next morning mints again and sends', async () => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      const realSend = require('../services/email-division/ledger').sendWithLedger;
+      const providerRequest = jest.fn();
+      Sendgrid.sendOne.mockImplementationOnce(async ({ database, providerBoundaryCheck }) => {
+        await providerBoundaryCheck({ database });
+        providerRequest();
+        return { messageId: 'sg-sample' };
+      });
+      const first = await run({
+        sendWithLedger: (args) => realSend({
+          ...args,
+          boundaryGuard: async (handoff) => {
+            await handoff('estimates').where({ customer_id: customer.id }).update({ archived_at: new Date() });
+            return args.boundaryGuard(handoff);
+          },
+        }),
+      });
+      expect(first).toMatchObject({ sent: 0, held: 1, failed: 0 });
+      expect(first.reasons).toEqual({ offer_estimate_gone: 1 });
+      expect(providerRequest).not.toHaveBeenCalled();
+      expect(await ledgerRow(job.id)).toMatchObject({ status: 'failed', reason: 'OFFER_ESTIMATE_GONE' });
+      expect((await offerMail(job.id))?.sent_at ?? null).toBeNull();
+
+      expect(await runAt(tomorrow)).toMatchObject({ sent: 1, held: 0, failed: 0 });
+      const quotes = await estimatesOf(customer);
+      expect(quotes).toHaveLength(2);
+      expect(quotes[0].archived_at).not.toBeNull();
+      expect((await offerMail(job.id)).html_snapshot).toContain(`/estimate/${quotes[1].token}`);
+      expect(Sendgrid.sendOne).toHaveBeenCalledTimes(2);
+    });
+
+    // A failed send leaves the quote open. The customer declines it before the next morning: the retry holds,
+    // and nothing is minted over the decline.
+    test.each([['declined'], ['accepted']])('a failed send, then the customer %s the quote: the next morning holds; no new quote, no email', async (status) => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      Sendgrid.sendOne.mockRejectedValueOnce(Object.assign(new Error('provider down'), { status: 500 }));
+      expect(await run({})).toMatchObject({ sent: 0, failed: 1 });
+      const [quote] = await estimatesOf(customer);
+      await trx('estimates').where({ id: quote.id }).update({ status });
+      const later = await runAt(tomorrow);
+      expect(later).toMatchObject({ sent: 0, held: 1, failed: 0 });
+      expect(later.reasons).toEqual({ offer_ended: 1 });
+      expect(await estimatesOf(customer)).toHaveLength(1);
+      expect(Sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect((await offerMail(job.id))?.sent_at ?? null).toBeNull();
+    });
+
+    // The kill switch: the owner turns GATE_ONETIME_PLAN_OFFER off while the batch runs. The email is
+    // reserved but never leaves, the row settles failed, and the next live morning sends it.
+    test('the gate turned off after the estimate was made: the provider is never called; back on, the next morning sends', async () => {
+      await publishOffer();
+      const { job } = await seedJob();
+      const real = require('../services/cancellation-resolution/restart').mintPlanStartEstimate;
+      const providerRequest = jest.fn();
+      Sendgrid.sendOne.mockImplementationOnce(async ({ database, providerBoundaryCheck }) => {
+        await providerBoundaryCheck({ database });
+        providerRequest();
+        return { messageId: 'sg-sample' };
+      });
+      const first = await run({
+        mintPlanStartEstimate: async (args) => {
+          const minted = await real(args);
+          process.env.GATE_ONETIME_PLAN_OFFER = 'off';
+          return minted;
+        },
+      });
+      expect(first).toMatchObject({ sent: 0, held: 1, failed: 0 });
+      expect(first.reasons).toEqual({ offer_gate_off: 1 });
+      expect(providerRequest).not.toHaveBeenCalled();
+      expect(await ledgerRow(job.id)).toMatchObject({ status: 'failed', reason: 'OFFER_GATE_OFF' });
+      process.env.GATE_ONETIME_PLAN_OFFER = 'live';
+      expect(await runAt(tomorrow)).toMatchObject({ sent: 1, held: 0, failed: 0 });
+    });
+
+    // The customer turns Auto Pay off while the quote is made. The card policy for the estimate does not read an
+    // explicit turn-off of a customer who is no plan member, so the handoff asks the account again.
+    test('Auto Pay turned off after the estimate was made: the provider is never called; back on, the next morning sends', async () => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      const real = require('../services/cancellation-resolution/restart').mintPlanStartEstimate;
+      const providerRequest = jest.fn();
+      Sendgrid.sendOne.mockImplementationOnce(async ({ database, providerBoundaryCheck }) => {
+        await providerBoundaryCheck({ database });
+        providerRequest();
+        return { messageId: 'sg-sample' };
+      });
+      const first = await run({
+        mintPlanStartEstimate: async (args) => {
+          const minted = await real(args);
+          await trx('customers').where({ id: customer.id }).update({ autopay_enabled: false });
+          await trx('autopay_log').insert({ customer_id: customer.id, event_type: 'autopay_disabled' });
+          return minted;
+        },
+      });
+      expect(first).toMatchObject({ sent: 0, held: 1, failed: 0 });
+      expect(first.reasons).toEqual({ autopay_off: 1 });
+      expect(providerRequest).not.toHaveBeenCalled();
+      expect(await ledgerRow(job.id)).toMatchObject({ status: 'failed', reason: 'AUTOPAY_OFF' });
+      // Still off the next morning: the job's own rule holds it. Back on, it sends.
+      expect((await runAt(tomorrow)).reasons).toEqual({ autopay_off: 1 });
+      await trx('customers').where({ id: customer.id }).update({ autopay_enabled: true });
+      await trx('autopay_log').insert({ customer_id: customer.id, event_type: 'autopay_enabled', created_at: new Date(Date.now() + 1000) });
+      expect(await runAt(new Date(tomorrow.getTime() + 24 * HOUR))).toMatchObject({ sent: 1, held: 0, failed: 0 });
+    });
+
+    // Staff views, the win/loss report and the click-mint reports date a send by deliveryState.firstDeliveredAt.
+    test('a sent offer is recorded on the estimate once: first and last delivery, the email channel, and a later morning adds nothing', async () => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      expect(await run({})).toMatchObject({ sent: 1, failed: 0 });
+      const [quote] = await estimatesOf(customer);
+      const state = readPlan(quote.estimate_data).deliveryState;
+      const acceptedAt = new Date((await offerMail(job.id)).sent_at).toISOString();
+      expect(state).toMatchObject({
+        sentChannels: ['email'], failedChannels: [], firstDeliveredAt: acceptedAt, lastDeliveredAt: acceptedAt, deliveredAt: [acceptedAt],
+        channels: { email: { ok: true, providerAccepted: true } },
+      });
+      expect(readPlan(quote.estimate_data).planStart.offer.jobId).toBe(String(job.id));
+      expect(await runAt(tomorrow)).toMatchObject({ sent: 0, done: 1 });
+      expect(readPlan((await estimatesOf(customer))[0].estimate_data).deliveryState).toEqual(state);
+    });
+
+    // The write of the stamp failed (or the run died after the send). A later run records it from the message, with
+    // the job long out of its 3 to 14 day window, and never sends anything.
+    describe('a send the provider took whose estimate was never stamped', () => {
+      const failedWrite = async () => { throw new Error('write failed'); };
+      const stateOf = async (customer) => readPlan((await estimatesOf(customer))[0].estimate_data).deliveryState;
+      const lateRun = () => runAt(new Date(NOW.getTime() + 20 * 24 * HOUR));
+
+      test('the email links its estimate; a run 20 days later stamps it with the message\'s time, once', async () => {
+        await publishOffer();
+        const { customer, job } = await seedJob();
+        expect(await run({ writeOfferDelivery: failedWrite })).toMatchObject({ sent: 1, failed: 0 });
+        const [quote] = await estimatesOf(customer);
+        expect(quote.estimate_data.deliveryState).toBeUndefined();
+        const mail = await offerMail(job.id);
+        expect(mail.estimate_id).toBe(quote.id);
+        expect(await lateRun()).toMatchObject({ sent: 0, jobs: 0, failed: 0 });
+        const state = await stateOf(customer);
+        expect(state.firstDeliveredAt).toBe(new Date(mail.sent_at).toISOString());
+        expect(state.deliveredAt).toEqual([new Date(mail.sent_at).toISOString()]);
+        // A recorded delivery is filtered out in SQL: a later run finds nothing to write.
+        const writes = jest.fn(Offer._test.defaultDeps().writeOfferDelivery);
+        await runAt(new Date(NOW.getTime() + 21 * 24 * HOUR), { writeOfferDelivery: writes });
+        expect(writes).not.toHaveBeenCalled();
+        expect(await stateOf(customer)).toEqual(state);
+        expect(Sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      });
+
+      test('a staff resend already on the estimate: the offer\'s handoff is merged in, in time order; first is the earliest, last the latest', async () => {
+        await publishOffer();
+        const { customer, job } = await seedJob();
+        expect(await run({ writeOfferDelivery: failedWrite })).toMatchObject({ sent: 1, failed: 0 });
+        const [quote] = await estimatesOf(customer);
+        const mail = await offerMail(job.id);
+        const resentAt = new Date(new Date(mail.sent_at).getTime() + 2 * HOUR).toISOString();
+        await trx('estimates').where({ id: quote.id }).update({
+          estimate_data: JSON.stringify({
+            ...readPlan(quote.estimate_data),
+            deliveryState: { sentChannels: ['sms'], failedChannels: [], firstDeliveredAt: resentAt, lastDeliveredAt: resentAt, deliveredAt: [resentAt] },
+          }),
+        });
+        await lateRun();
+        const state = await stateOf(customer);
+        const offerAt = new Date(mail.sent_at).toISOString();
+        expect(state).toMatchObject({ firstDeliveredAt: offerAt, lastDeliveredAt: resentAt, deliveredAt: [offerAt, resentAt] });
+        expect(state.sentChannels.sort()).toEqual(['email', 'sms']);
+        // The email's result joins the channel results; the staff resend stays the latest attempt.
+        expect(state.channels.email).toMatchObject({ ok: true, providerAccepted: true });
+        expect(state.attemptedAt).toBeUndefined();
+      });
+
+      test('a quote minted after the email left (a replacement for the same job) is not stamped: the email linked the first one', async () => {
+        await publishOffer();
+        const { customer, job } = await seedJob();
+        expect(await run({ writeOfferDelivery: failedWrite })).toMatchObject({ sent: 1, failed: 0 });
+        const [quote] = await estimatesOf(customer);
+        const {
+          id, token: _token, estimate_slug: _slug, created_at: _createdAt, ...rest
+        } = quote;
+        await trx('estimates').insert({ ...rest, token: crypto.randomBytes(16).toString('hex'), created_at: new Date(Date.now() + 60000) });
+        const mail = await offerMail(job.id);
+        expect(mail.estimate_id).toBe(id);
+        await lateRun();
+        const [first, second] = await estimatesOf(customer);
+        expect(first.id).toBe(id);
+        expect(readPlan(first.estimate_data).deliveryState.firstDeliveredAt).toBe(new Date(mail.sent_at).toISOString());
+        expect(readPlan(second.estimate_data).deliveryState).toBeUndefined();
+      });
+    });
+
+    test('offers turned off after the estimate was made: the reservation is denied and leaves no row; back on, the next morning sends', async () => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      const real = require('../services/cancellation-resolution/restart').mintPlanStartEstimate;
+      const first = await run({
+        mintPlanStartEstimate: async (args) => {
+          const minted = await real(args);
+          await trx('notification_prefs').insert({ customer_id: customer.id, marketing_offers: false });
+          return minted;
+        },
+      });
+      expect(first).toMatchObject({ sent: 0, held: 1, failed: 0 });
+      expect(first.reasons).toEqual({ offers_off: 1 });
+      expect(await ledgerRow(job.id)).toBeUndefined();
+      expect(Sendgrid.sendOne).not.toHaveBeenCalled();
+      await trx('notification_prefs').where({ customer_id: customer.id }).update({ marketing_offers: true });
+      expect(await runAt(tomorrow)).toMatchObject({ sent: 1, held: 0, failed: 0 });
+      expect(await estimatesOf(customer)).toHaveLength(1);
+    });
+
+    // The job's "no other open estimate" check runs before the mint takes the customer's locks. The customer taps
+    // "See my price and book" on the portal card in between: that quote is a link the customer holds.
+    test('a quote the customer opened after the job\'s own check is never retired: the mint refuses, the job is held, no email', async () => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      const real = require('../services/cancellation-resolution/restart').mintPlanStartEstimate;
+      const realOffer = require('../services/service-report/cross-sell').buildStartOffer;
+      let cardFee;
+      let tapped;
+      const summary = await run({
+        buildStartOffer: async (...args) => {
+          const out = await realOffer(...args);
+          cardFee = out.option?.setupFee;
+          return out;
+        },
+        mintPlanStartEstimate: async (args) => {
+          // The portal tap: the same option at the card's amounts, with the standard setup fee and no offer.
+          tapped = await real({
+            customer: args.customer, serviceKey: args.serviceKey, optionId: args.optionId, shown: { ...args.shown, setupFee: cardFee }, now: args.now,
+          });
+          return real(args);
+        },
+      });
+      expect(cardFee).toBeGreaterThan(0);
+      expect(summary).toMatchObject({ sent: 0, held: 1, failed: 0 });
+      expect(summary.reasons).toEqual({ open_estimate: 1 });
+      const rows = await estimatesOf(customer);
+      expect(rows.map((row) => row.id)).toEqual([tapped.estimateId]);
+      expect(rows[0]).toMatchObject({ archived_at: null, status: 'sent' });
+      expect(readPlan(rows[0].estimate_data).planStart.offer).toBeUndefined();
+      expect(Number(rows[0].onetime_total)).toBe(cardFee);
+      expect(await ledgerRow(job.id)).toBeUndefined();
+      expect(Sendgrid.sendOne).not.toHaveBeenCalled();
+      // The next morning the job's own rule reads that quote: held, and still nothing is retired.
+      expect((await runAt(tomorrow)).reasons).toEqual({ open_estimate: 1 });
+      expect((await estimatesOf(customer)).map((row) => row.archived_at)).toEqual([null]);
+    });
+
+    // The run lists the job with its offer day, and the email's dates count from that day. The mint reads the day
+    // again under the customer's locks. Staff correct the day the service was performed in between.
+    test('the performed day changed between the list and the mint: no email with dates that are not the estimate\'s; the next morning sends the right ones', async () => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      const real = require('../services/cancellation-resolution/restart').mintPlanStartEstimate;
+      const first = await run({
+        mintPlanStartEstimate: async (args) => {
+          await trx('service_records').where({ scheduled_service_id: job.id }).update({ service_date: day(-6) });
+          return real(args);
+        },
+      });
+      expect(first).toMatchObject({ sent: 0, held: 1, failed: 0 });
+      expect(first.reasons).toEqual({ offer_day_moved: 1 });
+      expect(Sendgrid.sendOne).not.toHaveBeenCalled();
+      expect(await ledgerRow(job.id)).toBeUndefined();
+      // The estimate carries the dates of the corrected day (6 days ago), not of the day the run listed (5 days ago).
+      const [quote, ...rest] = await estimatesOf(customer);
+      expect(rest).toEqual([]);
+      expect(readPlan(quote.estimate_data).planStart.offer).toEqual({ jobId: String(job.id), endsAt: endsOf(6).toISOString(), firstVisitFrom: day(71) });
+
+      // The next morning lists the job with the corrected day: the same quote, and an email with its dates.
+      expect(await runAt(tomorrow)).toMatchObject({ sent: 1, held: 0, failed: 0 });
+      expect((await estimatesOf(customer)).map((row) => row.id)).toEqual([quote.id]);
+      const mail = await offerMail(job.id);
+      expect(mail.html_snapshot).toContain(`/estimate/${quote.token}`);
+      const { formatDateOnly } = require('../utils/date-only');
+      expect(mail.text_snapshot).toContain(formatDateOnly(day(24), { year: undefined }));
+      expect(mail.text_snapshot).not.toContain(formatDateOnly(day(25), { year: undefined }));
+    });
+
+    test('a business account: the pricer stops it before the mint, so no quote and no email', async () => {
+      await publishOffer();
+      const customer = await seedCustomer({ building_use: 'nonresidential' });
+      await seedJob({ customer });
+      const summary = await run({});
+      expect(summary).toMatchObject({ sent: 0, office: 1, failed: 0 });
+      expect(await estimatesOf(customer)).toEqual([]);
+      expect(Sendgrid.sendOne).not.toHaveBeenCalled();
+    });
+
+    test('the customer changed their email after the quote was made: the ledger refuses the send, and the old address gets nothing', async () => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      const real = require('../services/cancellation-resolution/restart').mintPlanStartEstimate;
+      const summary = await run({
+        mintPlanStartEstimate: async (args) => {
+          const minted = await real(args);
+          await trx('customers').where({ id: customer.id }).update({ email: `new.${hex(3)}@example.test` });
+          return minted;
+        },
+      });
+      expect(summary).toMatchObject({ sent: 0, held: 1, failed: 0 });
+      expect(summary.reasons).toEqual({ recipient_changed: 1 });
+      expect(Sendgrid.sendOne).not.toHaveBeenCalled();
+      expect(await offerMail(job.id)).toBeUndefined();
+    });
   });
 });

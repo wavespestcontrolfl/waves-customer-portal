@@ -187,6 +187,17 @@ describe('w2PayrollToCSV with paid time off (GATE_PAYROLL_TIME_OFF)', () => {
   });
 });
 
+describe('w2PayrollToCSV with a minimum paid week', () => {
+  test('adds Minimum Week Hours only when a check has one, gate on or off, and the totals row foots it', () => {
+    const lines = csv.w2PayrollToCSV([{ ...CHECK, minimum_week_minutes: '600.00' }, { ...CHECK, minimum_week_minutes: null }]).split('\n');
+    expect(lines[0]).toBe('Employee,Week Start,Week End,Pay Date,Regular Hours,Overtime Hours,Minimum Week Hours,Gross Wages,Federal Income Tax Withheld,Employee Social Security,Employee Medicare (incl. Additional Medicare),Employer Social Security,Employer Medicare,FUTA,Florida Reemployment Tax,Net Pay');
+    expect(lines[1].split(',')[6]).toBe('10.00');
+    expect(lines[2].split(',')[6]).toBe('0.00');
+    expect(lines[3].split(',')[6]).toBe('10.00');
+    expect(csv.w2PayrollToCSV([{ ...CHECK, minimum_week_minutes: null }])).toBe(csv.w2PayrollToCSV([CHECK]));
+  });
+});
+
 describe('loadFinalizedW2Checks columns', () => {
   const { loadFinalizedW2Checks, W2_CHECK_COLUMNS } = require('../services/tax-package-w2');
   const fakeConn = () => {
@@ -207,6 +218,8 @@ describe('loadFinalizedW2Checks columns', () => {
     const off = fakeConn();
     await loadFinalizedW2Checks(off.conn, '2026-01-01', '2026-12-31');
     expect(off.seen.cols.filter((c) => /pto|holiday/.test(String(c)))).toEqual([]);
+    // The stored minimum paid week is read whatever the gate is, so a final check keeps its hours in the package.
+    expect(off.seen.cols).toContain('minimum_week_minutes');
     const on = fakeConn();
     await loadFinalizedW2Checks(on.conn, '2026-01-01', '2026-12-31', { timeOff: true });
     expect(on.seen.cols).toEqual(expect.arrayContaining(['pto_minutes', 'holiday_minutes']));

@@ -769,7 +769,7 @@ async function loadNextAppointment(customerId) {
   if (!row) return null;
   const { normalizeServiceType } = require('../../utils/service-normalizer');
   // GATE_DAY_ONLY_PROMISE (part D): a visit whose customer was told only the day is stated as the date alone, never an
-  // hour (day-only-ai-context.js; gate off = no read, no extra key). A failed read with the gate on also says only the day.
+  // hour (day-only-ai-context.js). A failed read also says only the day.
   const dayOnly = (await require('../day-only-ai-context').loadDayOnlyCheck(db, [row]))(row);
   return {
     date: speakDate(row.scheduled_date),

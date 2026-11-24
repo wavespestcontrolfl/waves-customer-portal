@@ -54,6 +54,53 @@ function resolvePoisonedParam() {
     : {};
 }
 
+// Since ~2026-11-06 every organic item DataForSEO returns carries Google's redirect wrapper:
+// domain 'google.com' and url 'https://google.com/goto?url=...'. The real site is only in the
+// breadcrumb ("https://www.masseyservices.com", or "https://www.orkin.com › ... › Title" on
+// desktop). Restore `domain` in place: the breadcrumb host as Google shows it (www kept), plus
+// site_url = the breadcrumb base URL (path segments are truncated text, not real paths) and
+// domain_from_breadcrumb = true. `url` keeps the wrapper (it still leads to the page). Items with no usable
+// breadcrumb host (social posts: "5 comments") and non-goto items stay as they are.
+
+function isGotoItem(item) {
+  if (!item || item.type !== 'organic' || typeof item.url !== 'string') return false;
+  try {
+    const u = new URL(item.url);
+    return /^(www\.)?google\.com$/i.test(u.hostname) && u.pathname === '/goto';
+  } catch { return false; }
+}
+
+function breadcrumbSite(breadcrumb) {
+  const base = String(breadcrumb || '').split('›')[0].trim();
+  // A site address has no spaces; "5 comments" and other text do.
+  if (!base || /\s/.test(base)) return null;
+  let u;
+  try { u = new URL(/^https?:\/\//i.test(base) ? base : `https://${base}`); } catch { return null; }
+  if (!/^https?:$/.test(u.protocol) || !u.hostname.includes('.')) return null;
+  return { host: u.hostname.toLowerCase(), url: u.origin };
+}
+
+function normalizeGotoOrganic(data) {
+  const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
+  for (const task of tasks) {
+    for (const result of Array.isArray(task?.result) ? task.result : []) {
+      for (const item of Array.isArray(result?.items) ? result.items : []) {
+        if (!isGotoItem(item)) continue;
+        const site = breadcrumbSite(item.breadcrumb);
+        if (!site) continue;
+        // Only the site name is restored. `url` keeps Google's /goto link: it
+        // still leads to the real page, and a breadcrumb gives only the site's
+        // base address, so callers that fetch or classify `url` keep today's
+        // behavior. `site_url` carries that base address for callers that want it.
+        item.domain = site.host;
+        item.site_url = site.url;
+        item.domain_from_breadcrumb = true;
+      }
+    }
+  }
+  return data;
+}
+
 class DataForSEO {
   constructor() {
     this.login = process.env.DATAFORSEO_LOGIN;
@@ -134,7 +181,7 @@ class DataForSEO {
   // With GATE_DATAFORSEO_RESOLVE_POISONED on, the task also asks DataForSEO to repair a
   // poisoned page (resolvePoisonedParam above).
   async serpOrganic(keyword, location = 'Bradenton,Florida,United States', device = 'mobile', { signal = null } = {}) {
-    return this.request('/serp/google/organic/live/advanced', [{
+    const data = await this.request('/serp/google/organic/live/advanced', [{
       keyword,
       ...serpLocation(location),
       language_name: 'English',
@@ -142,6 +189,7 @@ class DataForSEO {
       os: device === 'desktop' ? 'macos' : 'iOS',
       ...resolvePoisonedParam(),
     }], 3, { signal });
+    return normalizeGotoOrganic(data);
   }
 
   // SERP — Map Pack. `extra` merges extra task params (e.g. { search_places:false }
@@ -302,4 +350,4 @@ class DataForSEO {
 module.exports = new DataForSEO();
 module.exports.DataForSEO = DataForSEO;
 module.exports.serpLocation = serpLocation;
-module.exports._test = { hasUrlBoundary, normalizeIndexedUrl };
+module.exports._test = { hasUrlBoundary, normalizeIndexedUrl, normalizeGotoOrganic };

@@ -753,27 +753,39 @@ async function sendServiceReportV1Email(recordId, {
   if (gates.isEnabled('docCrossSellEmail') && gates.isEnabled('reportCrossSell')) {
     try {
       const holder = recipients.find((r) => r.role === 'primary');
-      const { embeddedPitchAllowed, embeddedReferralAskAllowed } = require('../email-division/eligibility');
-      const who = { customerId: service.customer_id, email: holder?.email };
-      if (holder && await embeddedPitchAllowed(who)) {
-        const { reserviceReportCopyGateOn } = require('./reservice-report');
-        const callback = reserviceReportCopyGateOn() && service.is_callback === true;
+      const { reserviceReportCopyGateOn } = require('./reservice-report');
+      // A complaint visit's report carries no card, so its email names none.
+      const callback = reserviceReportCopyGateOn() && service.is_callback === true;
+      if (holder && !callback) {
         // The card the live report shows: the report route's own composer,
         // on the row this sender loaded with the report's frozen identity
         // applied (loadServiceRecord), as the report route does. So the line
         // and the report read the same premises. Best-effort by contract:
-        // null on any failure. A complaint visit's report carries no card.
-        const crossSell = callback ? null : await require('./cross-sell').buildReportCrossSell(service, db);
-        // The customer's own card: with GATE_REFERRAL_STEP2 on, the
-        // report page's per-customer reward decision.
-        // The referral part is a referral ask too: the customer's referral
-        // email choice decides it, apart from the service offer.
-        const referral = callback || !(await embeddedReferralAskAllowed(who))
-          ? null
-          : await require('../referral-share').composeReferralCard({ customerId: service.customer_id });
-        offerLine = require('../doc-offer-email-line').docOfferEmailLine({
-          crossSell, referral, url: fullReportUrl, place: 'report',
-        });
+        // null on any failure.
+        const crossSell = await require('./cross-sell').buildReportCrossSell(service, db);
+        // The customer's own card: with GATE_REFERRAL_STEP2 on, the report
+        // page's per-customer reward decision. A card that cannot be read is
+        // no card: the service offer still rides the line.
+        let referralCard = null;
+        try {
+          referralCard = await require('../referral-share').composeReferralCard({ customerId: service.customer_id });
+        } catch (err) {
+          logger.warn(`[report-email] referral card skipped (code=${err?.code || 'none'})`);
+        }
+        if (crossSell || referralCard) {
+          // The customer's choices are read ONCE, AFTER the cards are
+          // composed (pricing can take seconds): a customer who turned
+          // offers off or unsubscribed in the meantime gets no line. The
+          // referral part is a referral ask too, so the same read gives its
+          // own answer, apart from the service offer.
+          const consent = await require('../email-division/eligibility')
+            .embeddedLineConsent({ customerId: service.customer_id, email: holder.email });
+          if (consent.pitch) {
+            offerLine = require('../doc-offer-email-line').docOfferEmailLine({
+              crossSell, referral: consent.referralAsk ? referralCard : null, url: fullReportUrl, place: 'report',
+            });
+          }
+        }
       }
     } catch (err) {
       logger.warn(`[report-email] offer line skipped (code=${err?.code || 'none'})`);

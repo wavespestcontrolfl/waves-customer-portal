@@ -273,8 +273,14 @@ function lineComponents(line) {
  *   (regular_pay_cents + overtime_pay_      weighted by paid minutes; the week's        by work_date, overtime_minutes of the
  *   cents; the weekly OT premium is in      overtime minutes are the LAST minutes       check (hours past 40 are worked last)
  *   overtime_pay)                           worked, at 1.5x
- *   paid time off (pto_pay_cents)          the dated PTO records of the week,           payroll_time_off (kind pto)
- *                                           weighted by minutes
+ *   paid time off (pto_pay_cents)          the dated PTO records of the week,           payroll_time_off (kind pto); for a
+ *                                           weighted by minutes; for a check with a     check with a time-off bank,
+ *                                           time-off bank, the minutes the bank PAID    calc_snapshot.ptoBank.paidDays
+ *                                           on each date (it can pay one day of the
+ *                                           week and not the next). The hours a check
+ *                                           paid out at leaving (ptoBank.payoutMinutes)
+ *                                           were taken on no day: their pay is in
+ *                                           "anything else" below
  *   holiday pay (holiday_pay_cents)        the dated holiday records of the week,       payroll_time_off (kind holiday)
  *                                           weighted by minutes
  *   commission lines (commission_cents)    the payment day for a ledger line            payroll_pay_lines of the check:
@@ -462,6 +468,15 @@ function ordinaryPremium(lines, storedWeeks) {
   return { weeks, excludedCents, unsplitWeeks };
 }
 
+// The part of a check's PTO pay that is a time-off bank payout at leaving (payroll-time-off-bank.js: those hours are
+// in pto_minutes at the same rate). No day earned it, so it is not dated by the week's time-off days: taken out of
+// ptoPayCents, it falls in the check's undated remainder (checkComponents).
+function ptoPayoutCents(row) {
+  const paidOut = hundredths(row.pto_payout_minutes);
+  const all = hundredths(row.pto_minutes);
+  return paidOut > 0 && all > 0 ? signedMulDivRound(toCents(row.pto_pay_cents), Math.min(paidOut, all), all) : 0;
+}
+
 /**
  * The technician's finalized checks that can hold pay earned in [from, to] (every check whose pay week ends on or
  * after `from`: a catch-up line or premium can be paid long after it was earned), with their dated parts, then
@@ -484,7 +499,9 @@ async function readGrossAndChecks(conn, technicianId, from, to, { throughWeek = 
   const rows = await query
     .select('c.id', conn.raw("to_char(c.week_start, 'YYYY-MM-DD') AS week_start"), 'c.gross_cents', 'c.regular_pay_cents',
       'c.overtime_pay_cents', 'c.overtime_minutes', 'c.pto_pay_cents', 'c.holiday_pay_cents', 'c.tech_rewards_cents',
-      conn.raw("COALESCE((c.calc_snapshot->'lineOvertimeWeeks')::jsonb, '[]'::jsonb) AS line_overtime_weeks"));
+      conn.raw("COALESCE((c.calc_snapshot->'lineOvertimeWeeks')::jsonb, '[]'::jsonb) AS line_overtime_weeks"),
+      conn.raw("c.calc_snapshot->'ptoBank'->'paidDays' AS pto_paid_days"),
+      'c.pto_minutes', conn.raw("c.calc_snapshot->'ptoBank'->'payoutMinutes' AS pto_payout_minutes"));
   if (!rows.length) return { cents: 0, checkIds: [], unsplitWeeks: [] };
   const lineRows = await conn('payroll_pay_lines as l')
     .whereIn('l.check_id', rows.map((row) => row.id))
@@ -508,7 +525,7 @@ async function readGrossAndChecks(conn, technicianId, from, to, { throughWeek = 
       regularPayCents: toCents(row.regular_pay_cents),
       overtimePayCents: toCents(row.overtime_pay_cents),
       overtimeMinutes: Number(row.overtime_minutes) || 0,
-      ptoPayCents: toCents(row.pto_pay_cents),
+      ptoPayCents: toCents(row.pto_pay_cents) - ptoPayoutCents(row),
       holidayPayCents: toCents(row.holiday_pay_cents),
       techRewardsCents: toCents(row.tech_rewards_cents),
       lines: ownLines.filter((line) => GROSS_LINE_KINDS.includes(line.kind))
@@ -520,6 +537,11 @@ async function readGrossAndChecks(conn, technicianId, from, to, { throughWeek = 
     if (weekEnd >= from && check.weekStart <= to && (check.weekStart < from || weekEnd > to)) {
       check.dayMinutes = await readDayMinutes(conn, technicianId, check.weekStart);
       Object.assign(check, await readTimeOffRecords(conn, technicianId, check.weekStart));
+      // A time-off bank pays the booked days in date order and can leave a later day unpaid (payroll-time-off-bank.js
+      // settleWeek). The check stored what it paid on each date: its PTO pay was earned on those days, not on every booked one.
+      if (Array.isArray(row.pto_paid_days)) {
+        check.ptoRecords = row.pto_paid_days.map((day) => ({ workDate: day.workDate, minutes: Number(day.minutes) || 0 }));
+      }
     }
     const earned = earnedGrossCents([check], from, to);
     cents += earned;

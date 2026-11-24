@@ -11,52 +11,17 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const fs = require('fs');
 const path = require('path');
-const gates = require('../config/feature-gates');
 const db = require('../models/db');
 const timePromise = require('../services/time-promise');
 const toldVisits = require('../services/auto-dispatch/told-visits');
 
-const { DAY_PROMISE_META, DAY_PROMISE_CUTOFF_HOURS, shouldPromiseDayOnly, showHourFor, dayOnlyPromiseOn } = timePromise;
+const { DAY_PROMISE_META, DAY_PROMISE_CUTOFF_HOURS, shouldPromiseDayOnly, showHourFor } = timePromise;
 const NOW = new Date('2026-11-10T09:00:00Z');
 const HOUR = 3600000;
 const at = (hours) => new Date(NOW.getTime() + hours * HOUR);
 
-afterEach(() => { delete process.env.GATE_DAY_ONLY_PROMISE; });
-
-describe('the gate reader', () => {
-  test('dark by default; only exactly "true" turns it on, read at call time', () => {
-    expect(gates.dayOnlyPromiseLive()).toBe(false);
-    expect(dayOnlyPromiseOn()).toBe(false);
-    for (const v of ['', 'false', '1', 'on', 'TRUE', 'yes']) {
-      process.env.GATE_DAY_ONLY_PROMISE = v;
-      expect(gates.dayOnlyPromiseLive()).toBe(false);
-      expect(dayOnlyPromiseOn()).toBe(false);
-    }
-    process.env.GATE_DAY_ONLY_PROMISE = 'true';
-    expect(gates.dayOnlyPromiseLive()).toBe(true);
-    expect(dayOnlyPromiseOn()).toBe(true);
-    delete process.env.GATE_DAY_ONLY_PROMISE;
-    expect(dayOnlyPromiseOn()).toBe(false);
-  });
-
-  test('the reader is exported on its own line, the boot log has an entry, the header documents it', () => {
-    const src = fs.readFileSync(path.join(__dirname, '../config/feature-gates.js'), 'utf8');
-    expect(src).toMatch(/^module\.exports\.dayOnlyPromiseLive = dayOnlyPromiseLive;$/m);
-    expect(src).toMatch(/^ \*   GATE_DAY_ONLY_PROMISE=true /m);
-    expect(gates.gates.dayOnlyPromise).toBe(false);
-  });
-
-  test('an unreadable gate is off', () => {
-    jest.isolateModules(() => {
-      jest.doMock('../config/feature-gates', () => { throw new Error('boom'); });
-      expect(require('../services/time-promise').dayOnlyPromiseOn()).toBe(false);
-    });
-    jest.dontMock('../config/feature-gates');
-  });
-});
-
 describe('shouldPromiseDayOnly', () => {
-  const ok = { startAt: at(50), now: NOW, reminder24hEnabled: true, customerPicked: false, level: 'none', gateOn: true };
+  const ok = { startAt: at(50), now: NOW, reminder24hEnabled: true, customerPicked: false, level: 'none' };
   const call = (over = {}) => shouldPromiseDayOnly({ ...ok, ...over });
 
   test('true when every condition holds', () => {
@@ -66,8 +31,6 @@ describe('shouldPromiseDayOnly', () => {
   });
 
   test('each condition flipping alone makes it false', () => {
-    expect(call({ gateOn: false })).toBe(false);
-    expect(call({ gateOn: undefined })).toBe(false); // an unset gate reads the real gate, which is off
     expect(call({ startAt: at(10) })).toBe(false); // inside the cutoff
     expect(call({ reminder24hEnabled: false })).toBe(false);
     expect(call({ customerPicked: true })).toBe(false);
@@ -102,26 +65,12 @@ describe('shouldPromiseDayOnly', () => {
     expect(call({ startAt: at(-5) })).toBe(false);
     expect(call({ startAt: at(50).toISOString() })).toBe(true);
   });
-
-  test('gateOn defaults to the real gate, read at call time', () => {
-    const { gateOn, ...withoutGate } = ok;
-    expect(gateOn).toBe(true);
-    expect(shouldPromiseDayOnly(withoutGate)).toBe(false);
-    process.env.GATE_DAY_ONLY_PROMISE = 'true';
-    expect(shouldPromiseDayOnly(withoutGate)).toBe(true);
-  });
 });
 
 describe('showHourFor', () => {
-  const call = (over = {}) => showHourFor({ level: 'none', startAt: at(50), now: NOW, gateOn: true, ...over });
+  const call = (over = {}) => showHourFor({ level: 'none', startAt: at(50), now: NOW, ...over });
 
-  test('gate off: always the hour (today)', () => {
-    expect(call({ gateOn: false })).toBe(true);
-    expect(call({ gateOn: false, level: 'day' })).toBe(true);
-    expect(call({ gateOn: undefined, level: 'day' })).toBe(true); // real gate, off
-  });
-
-  test('gate on, far out, level none or day: only the day (false)', () => {
+  test('far out, level none or day: only the day (false)', () => {
     expect(call()).toBe(false);
     expect(call({ level: 'day' })).toBe(false);
   });
@@ -141,11 +90,6 @@ describe('showHourFor', () => {
     expect(call({ startAt: null })).toBe(true);
     expect(call({ startAt: undefined })).toBe(true);
     expect(call({ startAt: 'not a time' })).toBe(true);
-  });
-
-  test('gateOn defaults to the real gate, read at call time', () => {
-    process.env.GATE_DAY_ONLY_PROMISE = 'true';
-    expect(showHourFor({ level: 'day', startAt: at(50), now: NOW })).toBe(false);
   });
 });
 
