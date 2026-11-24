@@ -11,6 +11,8 @@ const { postCreditMovement, round2 } = require('./customer-credit');
 const { toE164, isLikelyE164, phoneMatchDigits } = require('../utils/phone');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
 const { promoterPhoneInUseError } = require('./referral-errors');
+const { isEnabled } = require('../config/feature-gates');
+const step2 = require('./referral-step2');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -72,6 +74,8 @@ function centsToDollars(cents) {
 // exported so the copy is unit-testable without a DB.
 function buildRefereeOfferLine(settings = {}) {
   const refereeCents = Number(settings.referee_discount_cents || 0);
+  // GATE_REFERRAL_STEP2: the friend gets an account credit after the first plan service (owner 2026-11-21).
+  if (refereeCents > 0 && isEnabled('referralStep2')) return step2.friendInviteOfferLine(refereeCents);
   return refereeCents > 0
     ? `Book your first service through their referral link and you’ll get ${centsToDollars(refereeCents)} off — our way of saying welcome.`
     : 'Book your first service through their referral link and you’ll be in great hands from your very first visit.';
@@ -576,7 +580,9 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
   }
 
   // --- Send invite SMS ---
-  const smsBody = await renderReferralSms('referral_invite', {
+  // GATE_REFERRAL_STEP2: the seeded sentence becomes the approved Step 2 words, or neutral words when there is no
+  // friend credit to state (referral-step2.js); gate off, no read and the text is exactly as stored.
+  const smsBody = step2.inviteSmsWithOffer(await renderReferralSms('referral_invite', {
     referee_name: firstName,
     referrer_name: referrerName || promoter.first_name || 'your neighbor',
     referral_link: referralLink,
@@ -584,7 +590,7 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
     workflow: 'referral_invite',
     entity_type: 'referral',
     entity_id: referral.id,
-  });
+  }), { step2On: isEnabled('referralStep2'), refereeCents: await step2FriendCreditCents(), link: referralLink });
   const smsSent = await sendSMS(normalizedPhone || phone.trim(), smsBody, {
     messageType: 'referral_invite',
     referralId: referral.id,
@@ -616,6 +622,18 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
 // Best-effort and idempotent per referral, so the call sites can never
 // double-send. Promoters aren't always customers, so
 // the send goes straight to promoter.customer_email.
+// The credited member's account, read when the credit email goes out (the morning after the credit). The billing tab
+// shows the automatic-credit switch only on an active account with a credit balance or the switch already on
+// (PortalPage: (totalCredits > 0 || autoApplyCredit) && !cancelledAccount). True only for a member who can see the
+// switch and still has it off. Unknown or unreadable = false: the email then gives no switch instruction.
+async function memberCanTurnOnAutomaticCredit(referral, promoter) {
+  const memberId = referral?.referrer_customer_id || promoter?.customer_id;
+  if (!memberId) return false;
+  const member = await db('customers').where({ id: memberId }).whereNull('deleted_at')
+    .first('active', 'account_credits', 'auto_apply_account_credit').catch(() => null);
+  return member?.active === true && member.auto_apply_account_credit !== true && Number(member.account_credits) > 0;
+}
+
 async function sendRewardEarnedEmail(promoter, referral, rewardDollars, destination = 'referral_balance') {
   try {
     const email = String(promoter?.customer_email || '').trim();
@@ -631,8 +649,8 @@ async function sendRewardEarnedEmail(promoter, referral, rewardDollars, destinat
         // credit (postCreditMovement), not referral balance — the email must
         // point the promoter at the right ledger.
         reward_line: destination === 'account_credit'
-          ? `Your $${Math.round(rewardDollars)} referral reward has been added to your account as a credit — it applies automatically to your next invoice.`
-          : `Your $${Math.round(rewardDollars)} referral reward has been added to your referral balance.`,
+          ? step2.memberCreditEmailLine(rewardDollars, { canTurnOnAutomaticCredit: await memberCanTurnOnAutomaticCredit(referral, promoter) })
+          : `Your ${step2.formatDollars(rewardDollars)} referral reward has been added to your referral balance.`,
         // CTA points at the ledger the reward actually landed in: account
         // credits live on the billing tab, referral balance on the refer tab.
         cta_label: destination === 'account_credit' ? 'View my account credit' : 'View my referral balance',
@@ -688,6 +706,14 @@ function recentRewardCreditsQuery(conn, now) {
     .select('r.*', 'l.delta as credit_dollars', 'l.created_at as credited_at');
 }
 
+// The amount the credit email states. A Step 2 row records what the member was paid (referrer_credit_cents, 0 at the
+// yearly limit), and that is the amount: after the member's and the friend's profiles are merged, the friend's
+// credit row carries the member's customer id too, and it must not set the amount. Any other row: its own amount.
+function rewardCreditEmailDollars(row) {
+  const recorded = row.referrer_credit_cents;
+  return recorded === null || recorded === undefined ? Number(row.credit_dollars) : Number(recorded) / 100;
+}
+
 // Conversions paid at once (require_service_completion off) put the reward on
 // the promoter balance inside convertReferral's transaction and email after it
 // commits. A failure before that email exists is only logged, and a retried
@@ -714,7 +740,9 @@ async function sendDueReferralRewardEmails({ now = new Date() } = {}) {
   const credits = await recentRewardCreditsQuery(db, now);
   const immediate = await recentImmediateRewardsQuery(db, now);
   const due = [
-    ...credits.map((row) => ({ row, at: row.credited_at, dollars: Number(row.credit_dollars), destination: 'account_credit' })),
+    ...credits.map((row) => ({ row, at: row.credited_at, dollars: rewardCreditEmailDollars(row), destination: 'account_credit' }))
+      // A member who was paid nothing (the yearly limit) has no credit to announce.
+      .filter(({ dollars }) => dollars > 0),
     ...immediate.map((row) => ({ row, at: row.converted_at, dollars: Number(row.referrer_reward_amount), destination: 'referral_balance' })),
   ];
   let attempted = 0;
@@ -744,6 +772,26 @@ function referralError(statusCode, code, message) {
   return err;
 }
 
+// The settings convertReferral runs on. Gate off: getSettings(), as before. GATE_REFERRAL_STEP2: Step 2 governs the
+// member's reward, so conversion is deferred to the friend's first paid service whatever require_service_completion says
+// (the immediate promoter-balance payout would skip the yearly cap; creditReferralOnFirstService never selects an
+// already-earned referral), and the amount staged on the promoter's pending earnings is the Step 2 standard member
+// credit (the settlement moves total earned by actual minus staged, so a capped credit shows truly). Under the gate
+// the live row is required before anything is staged or paid (milestone bonuses included): getSettings() would stand
+// in defaults for a failed read.
+async function conversionSettings(conn) {
+  if (!isEnabled('referralStep2')) return getSettings();
+  const live = await liveSettingsOrThrow(conn || db);
+  // `stagedMark`: written on the referral so its settlement takes the Step 2 bookkeeping even if the gate has been
+  // switched off by then; the settlement replaces it with the final reason. thank_you_note_due_at: the member is
+  // owed a handwritten thank-you note for this conversion (referral-thank-you-notes.js). It is written here and
+  // nowhere else, so the note follows the conversion under the gate and never the settlement.
+  return {
+    ...live, require_service_completion: true, referrer_reward_cents: step2.step2Settings(live).step2_referrer_reward_cents,
+    stagedMark: { referrer_reward_reason: 'staged', thank_you_note_due_at: new Date() },
+  };
+}
+
 // A reward has been staged/credited for this referral iff conversion already
 // ran against it — regardless of what `status` says now.
 const STAGED_REWARD_STATUSES = ['pending_service', 'earned', 'paid', 'superseded'];
@@ -761,7 +809,7 @@ function referralRewardAlreadyStaged(referral) {
 // caller commits), so a refusal also undoes what the caller wrote.
 async function convertReferral(referralId, { customerId, tier, monthlyValue, trx: callerTrx = null, deferredOnly = false } = {}) {
   if (callerTrx && !deferredOnly) throw new Error('convertReferral joins a caller transaction only when deferredOnly');
-  const settings = await getSettings();
+  const settings = await conversionSettings(callerTrx);
 
   // Calculate reward (base + tier bonus)
   let rewardCents = settings.referrer_reward_cents;
@@ -811,6 +859,7 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue, trx
       converted_tier: tier || null,
       converted_monthly_value: monthlyValue || null,
       referrer_reward_status: settings.require_service_completion ? 'pending_service' : 'earned',
+      ...settings.stagedMark,
       updated_at: new Date(),
     };
     await trx('referrals').where({ id: referralId }).update(updates);
@@ -877,7 +926,7 @@ async function convertReferral(referralId, { customerId, tier, monthlyValue, trx
             const rewardSms = await renderReferralSms('referral_reward', {
               referrer_name: promoter.first_name,
               referee_name: referral.referee_name || referral.referral_first_name || 'your friend',
-              reward_amount: `$${Math.round(rewardDollars)}`,
+              reward_amount: `${step2.formatDollars(rewardDollars)}`,
             }, settings.reward_sms_template, {
               workflow: 'referral_reward',
               entity_type: 'referral',
@@ -1070,6 +1119,13 @@ async function updateReferralStatus(referralId, { status, adminNotes, lostReason
   });
 }
 
+// The member's reward as the dashboards show it: the amount a settled Step 2 referral actually paid
+// (referrer_credit_cents, $0 at the yearly cap included), else the amount staged at conversion.
+function referralRewardAmount(r) {
+  if (r.referrer_credit_cents !== null && r.referrer_credit_cents !== undefined) return Number(r.referrer_credit_cents) / 100;
+  return parseFloat(r.referrer_reward_amount || r.credit_amount || 0);
+}
+
 // ---------------------------------------------------------------------------
 // 4b. creditReferralOnFirstService — issue the real $25-each account credits
 // ---------------------------------------------------------------------------
@@ -1150,6 +1206,12 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
   const settings = await getSettings();
   const refereeCents = Number(settings.referee_discount_cents) || 0;
   const refereeDollars = round2(refereeCents / 100);
+  // GATE_REFERRAL_STEP2: the member is paid at the same moment and call site as the live program today, the friend's
+  // first performed recurring plan visit (the caller contract already excludes an inspection, a decline and an
+  // incomplete visit); only the amount changes ($25, nothing at the yearly cap). Payment settlement is
+  // deliberately not checked: an account credit has no cash value and only reduces the member's own invoices, and
+  // detecting settlement across ACH, prepay, dues, packet and payer-billed lanes is out of scope.
+  const step2On = isEnabled('referralStep2');
 
   const outcome = await db.transaction(async (trx) => {
     // Re-read under lock; these guards are the single-use protection.
@@ -1160,25 +1222,15 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
       || referral.referrer_reward_status !== 'pending_service') {
       return { skipped: true };
     }
-
-    // Real account credit = the FLAT referrer reward, symmetric with the referee
-    // credit below (which uses the current referee_discount setting). WaveGuard
-    // tier bonuses (bonus_<tier>_cents) live ONLY in the bypassed promoter-balance
-    // ledger and must never inflate the real account credit — the agreed reward is
-    // a flat $25, so a Silver/Gold/Platinum signup still credits a flat $25.
-    const referrerDollars = round2((Number(settings.referrer_reward_cents) / 100) || 0);
-    // The pending DRAIN, by contrast, uses the exact amount staged into the
-    // promoter's pending at conversion (base + any tier bonus, FROZEN on the
-    // referral) so the non-cashable tracker zeroes out. Finite-check so a frozen
-    // $0 doesn't fall back to the current setting.
-    const frozenStaked = Number(referral.referrer_reward_amount);
-    const referrerCents = Math.round((Number.isFinite(frozenStaked) ? frozenStaked : referrerDollars) * 100);
+    const { memberCredit, step2Row, referrerDollars, referrerCents, postedCents, refereeDollarsNow } = await settlementAmounts(trx, {
+      referral, step2On, settings, refereeDollars,
+    });
 
     // Referee — the customer who just completed their first recurring service.
-    if (refereeDollars > 0) {
+    if (refereeDollarsNow > 0) {
       await postCreditMovement({
         customerId,
-        delta: refereeDollars,
+        delta: refereeDollarsNow,
         source: 'referral',
         referralId: referral.id,
         note: 'Referral welcome credit — first recurring service completed',
@@ -1203,7 +1255,13 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
       first_service_completed: true,
       referrer_reward_status: 'earned',
       referee_credited: true,
-      referrer_credited: true,
+      referrer_credited: !memberCredit || memberCredit.dollars > 0,
+      ...(step2Row ? {
+        referrer_credit_cents: postedCents,
+        referrer_reward_reason: memberCredit ? memberCredit.reason : 'standard',
+        // The friend's customer row, for the finance views (no phone matching).
+        referee_customer_id: customerId,
+      } : {}),
       status: 'credited',
       updated_at: new Date(),
     });
@@ -1216,21 +1274,251 @@ async function creditReferralOnFirstService({ customerId, serviceId }) {
     // immediately-earned referral (already paid at conversion) is never clobbered.
     await supersedeAndUnwindSiblings(trx, { matchesPhone, excludeId: referral.id });
 
-    // Promoter bookkeeping: drain the exact pending amount staged at conversion.
+    // Promoter bookkeeping: drain the exact pending amount staged at conversion. The member's real credit can differ
+    // from the amount staged ($0 at the cap, or a different rule after a gate flip), so total earned moves
+    // by the difference and the promoter dashboard shows what was truly earned.
     if (referral.promoter_id) {
+      // Posted minus staged for a Step 2 row (see step2Row); a legacy row adjusts by nothing, as before.
+      const earnedAdjust = step2Row ? postedCents - referrerCents : 0;
       await trx('referral_promoters').where({ id: referral.promoter_id }).update({
         pending_earnings_cents: db.raw('GREATEST(pending_earnings_cents - ?, 0)', [referrerCents]),
+        ...(earnedAdjust ? { total_earned_cents: db.raw('GREATEST(total_earned_cents + ?, 0)', [earnedAdjust]) } : {}),
         updated_at: new Date(),
       });
     }
 
-    return { skipped: false, referral, referrerDollars };
+    return { skipped: false, referral, referrerDollars, memberCredit, refereeDollars: refereeDollarsNow };
   });
 
   if (outcome.skipped) return null;
 
-  logger.info(`[ReferralEngine] First recurring service for customer ${customerId} → credited referral ${outcome.referral.id}: referrer $${outcome.referrerDollars}, referee $${refereeDollars}`);
-  return { referralId: outcome.referral.id, referrerDollars: outcome.referrerDollars, refereeDollars };
+  logger.info(`[ReferralEngine] First recurring service for customer ${customerId} → credited referral ${outcome.referral.id}: referrer $${outcome.referrerDollars}, referee $${outcome.refereeDollars}`);
+  return {
+    referralId: outcome.referral.id,
+    referrerDollars: outcome.referrerDollars,
+    refereeDollars: outcome.refereeDollars,
+    ...(outcome.memberCredit ? { referrerReason: outcome.memberCredit.reason } : {}),
+  };
+}
+
+// What one settlement pays, decided once (inside the settlement transaction, the referral row locked).
+// GATE_REFERRAL_STEP2: the money rules (amount, yearly limit, the friend's credit) come from the live row read INSIDE
+// this transaction, never from getSettings(), whose defaults stand in for a failed read. That holds for a referral
+// staged under Step 2 (marked 'staged') after the gate has been switched off too. A read that fails or finds no row
+// ends the transaction here: nothing posts and no guard is consumed, so the referral stays pending for the next
+// completion. An unmarked referral with the gate off keeps getSettings(), as before (its legacy path, adjusted by
+// nothing). `step2Row`: the Step 2 bookkeeping applies (amount posted and reason recorded, total earned reconciled).
+// Real account credit = the FLAT reward; WaveGuard tier bonuses live only in the promoter ledger and never inflate it.
+// The pending DRAIN uses the exact amount staged at conversion (base + any tier bonus, FROZEN on the referral).
+async function settlementAmounts(trx, { referral, step2On, settings, refereeDollars }) {
+  const step2Row = step2On || referral.referrer_reward_reason === 'staged';
+  const rules = step2Row ? await liveSettingsOrThrow(trx) : settings;
+  const memberCredit = step2On ? await step2MemberCredit(trx, { referral, settings: rules }) : null;
+  const referrerDollars = memberCredit ? memberCredit.dollars : round2((Number(rules.referrer_reward_cents) / 100) || 0);
+  const frozenStaked = Number(referral.referrer_reward_amount);
+  return {
+    memberCredit,
+    step2Row,
+    referrerDollars,
+    referrerCents: Math.round((Number.isFinite(frozenStaked) ? frozenStaked : referrerDollars) * 100),
+    postedCents: referral.referrer_customer_id ? Math.round(referrerDollars * 100) : 0,
+    refereeDollarsNow: step2Row ? round2((Number(rules.referee_discount_cents) || 0) / 100) : refereeDollars,
+  };
+}
+
+// The live settings row, read on `conn` (the posting transaction), or an error: the Step 2 money path never runs on
+// the defaults getSettings() falls back to.
+async function liveSettingsOrThrow(conn) {
+  const row = await getLiveSettings(conn);
+  if (!row) throw referralError(503, 'SETTINGS_UNAVAILABLE', 'Referral program settings could not be read; nothing was credited');
+  return row;
+}
+
+// What staff are told before confirming a referral, under the gate: the rule from the live settings and whether the
+// member is at the yearly limit (null when the settings cannot be read; the prompts then say credits follow the
+// program settings). referral-inbound attaches it to each Queue card.
+// The customer a confirm for `memberId` would pay: the referral's referrer_customer_id is the promoter's customer, and a
+// household's profiles share one promoter (resolvePromoter hands back the owner's), so a secondary profile's confirm
+// pays the household promoter's customer. Read-only mirror of that rule: the member's own promoter, else the
+// household's, else the member (who would be enrolled).
+async function creditedMemberFor(conn, memberId) {
+  const own = await conn('referral_promoters').where({ customer_id: memberId }).first('customer_id');
+  if (own) return own.customer_id;
+  const household = await findHouseholdPromoter(memberId, conn);
+  return household?.customer_id || memberId;
+}
+
+async function step2TermsFor(conn, memberId) {
+  const live = await getLiveSettings(conn);
+  if (!live) return null;
+  const atCap = memberId ? step2.capReached(await memberCreditsThisYear(conn, await creditedMemberFor(conn, memberId)), live) : false;
+  return { ...step2.ruleTerms(live, atCap), forCustomerId: memberId ? String(memberId) : null };
+}
+
+// What a set of referred customers cost in referral credits: the posted amounts for a settled Step 2 referral (the
+// member's referrer_credit_cents plus the credit the friend actually got), the flat `perConversionDollars` for any
+// other (legacy, or still waiting). Gate off: the flat amount for all, as before. Returns dollars.
+async function referralAcquisitionCost(conn, customerIds, perConversionDollars) {
+  const flat = customerIds.length * perConversionDollars;
+  if (!customerIds.length) return flat;
+  // The friend is found from the credit the settlement itself posted to them: a referral-sourced ledger row that
+  // names the referral (referral_id) on a customer other than its referrer. No phone matching, so formatting and
+  // shared household phones cannot misattribute a referral. A settled referral whose friend credit was $0 posted no
+  // such row and is not found, so it keeps the flat amount. The member's side is the referral's own
+  // referrer_credit_cents. Recorded amounts count whatever the gate says now (a Step 2 settlement stays what it was).
+  // The friend's customer row on the referral (referee_customer_id, stamped at the Step 2 settlement) comes first; it
+  // needs no friend credit row, so a $0 friend credit costs the member amount alone. The friend's ledger row is the
+  // fallback for a referral settled before that column.
+  const referrals = new Map();
+  const settledFor = async (column) => conn('referrals as r')
+    .whereIn(`r.${column}`, customerIds)
+    .whereNotNull('r.referrer_credit_cents')
+    .select('r.id', `r.${column} as customer_id`, 'r.referrer_credit_cents', 'r.referrer_customer_id');
+  const merged = [];
+  for (const row of await settledFor('referee_customer_id')) {
+    referrals.set(row.id, { customerId: row.customer_id, member: Number(row.referrer_credit_cents) / 100, friend: 0 });
+    // The friend's and the member's profiles were merged (the dedupe repoints both customer ids and both ledger rows
+    // to the survivor): the friend's current customer is the member's, so no ledger row can be told apart by customer.
+    if (row.referrer_customer_id && row.referrer_customer_id === row.customer_id) merged.push(row.id);
+  }
+  if (merged.length) {
+    // The combined ledger for that referral (the member's credit and the friend's together) is what it cost.
+    const combined = await conn('customer_credit_ledger').whereIn('referral_id', merged)
+      .where('source', 'referral').where('delta', '>', 0).groupBy('referral_id').select('referral_id').sum({ total: 'delta' });
+    for (const row of combined) {
+      const entry = referrals.get(row.referral_id);
+      entry.member = 0;
+      entry.friend = Number(row.total);
+    }
+  }
+  const linked = await conn('customer_credit_ledger as l')
+    .join('referrals as r', 'r.id', 'l.referral_id')
+    .whereIn('l.customer_id', customerIds)
+    .where('l.source', 'referral')
+    .where('l.delta', '>', 0)
+    .whereNotNull('r.referrer_credit_cents')
+    .whereRaw('l.customer_id <> r.referrer_customer_id')
+    .select('l.customer_id', 'r.id as referral_id', 'r.referrer_credit_cents', 'l.delta', 'r.referee_customer_id');
+  for (const row of linked) {
+    const entry = referrals.get(row.referral_id)
+      || { customerId: row.customer_id, member: Number(row.referrer_credit_cents) / 100, friend: 0 };
+    entry.friend += Number(row.delta);
+    referrals.set(row.referral_id, entry);
+  }
+  if (!referrals.size) return flat;
+  const actualByCustomer = new Map();
+  for (const { customerId, member, friend } of referrals.values()) {
+    actualByCustomer.set(customerId, (actualByCustomer.get(customerId) || 0) + member + friend);
+  }
+  let total = flat;
+  for (const actual of actualByCustomer.values()) total += actual - perConversionDollars;
+  return round2(total);
+}
+
+// How many member credits this member holds in the current America/New_York calendar year. The year is read from
+// the DATABASE's transaction timestamp, the same clock that stamps the ledger row's created_at (its column default),
+// not the application clock: a transaction that began before ET midnight on January 1 stamps its credit in the old
+// year and must count the old year, whenever it gets its locks. Only the member's own credits count: a ledger row
+// whose referral names the member as referrer, so a credit the member once got as a friend is not one of the ten.
+async function memberCreditsThisYear(conn, memberId) {
+  const { rows: [{ now }] } = await conn.raw('SELECT transaction_timestamp() AS now');
+  const { start, end } = step2.etYearBounds(new Date(now));
+  const earned = await conn('customer_credit_ledger as l')
+    .join('referrals as r', 'r.id', 'l.referral_id')
+    .where('l.customer_id', memberId)
+    .where('l.source', 'referral')
+    .where('l.delta', '>', 0)
+    .whereRaw('r.referrer_customer_id = l.customer_id')
+    // A referral counts once, and only when it paid the member: a Step 2 row's own referrer_credit_cents says so, so
+    // after a customer merge (member and friend on one profile, both credits on one customer) a friend-only credit or
+    // the friend's second ledger row cannot take a cap slot. A row with no such record is a flat-credit row: it counts.
+    .where((q) => q.whereNull('r.referrer_credit_cents').orWhere('r.referrer_credit_cents', '>', 0))
+    .where('l.created_at', '>=', start)
+    .where('l.created_at', '<', end)
+    .countDistinct({ n: 'r.id' })
+    .first();
+  return Number(earned?.n || 0);
+}
+
+// The Step 2 offer as the member's own referral screen will state it (PR 2 renders it; nothing customer-facing
+// changes in this PR): the member's amount, the yearly limit and where the member stands.
+async function step2OfferFor(conn, memberId, settings) {
+  const s = step2.step2Settings(settings);
+  // The count is for the customer the credit is paid to (a household shares its promoter's customer).
+  // No member (the Automations preview page, which shows what a member gets): nothing earned yet, never at the limit.
+  const creditsThisYear = memberId ? await memberCreditsThisYear(conn, await creditedMemberFor(conn, memberId)) : 0;
+  const capReached = step2.capReached(creditsThisYear, settings);
+  return {
+    // The existing field: nothing is promised to a member at the yearly limit (a cached portal build reads this field
+    // alone); the configured standard amount is exposed as standardReward.
+    rewardPerReferral: capReached ? 0 : s.step2_referrer_reward_cents / 100,
+    standardReward: s.step2_referrer_reward_cents / 100,
+    annualCap: s.step2_annual_credit_cap,
+    creditsThisYear,
+    capReached,
+  };
+}
+
+// The offer for a member-facing promise, from the LIVE settings row (never getSettings()' defaults): null when the row
+// cannot be read, and the caller then promises nothing.
+async function step2OfferStrict(conn, memberId) {
+  try {
+    const live = await getLiveSettings(conn);
+    if (!live) return null;
+    const offer = {
+      ...(await step2OfferFor(conn, memberId, live)),
+      // The friend's credit from the same live row, so an invitation states both amounts from one read.
+      friendReward: (Number(live.referee_discount_cents) || 0) / 100,
+    };
+    // A paused program promises nothing, as the rest of the engine treats it: only an affirmative active value counts
+    // (a cleared column is not active).
+    return live.program_active
+      ? offer
+      : { ...offer, rewardPerReferral: 0, standardReward: 0, friendReward: 0, programPaused: true };
+  } catch (err) {
+    logger.warn(`[ReferralEngine] Step 2 offer unavailable: ${err.code || err.message}`);
+    return null;
+  }
+}
+
+// ONE decision for every member-facing referral promise (the invitation email, the referral_nudge enrollment and the
+// nudge's delivery check), so the gate, the offer's availability and the amounts are read in one place.
+//   gateOn     GATE_REFERRAL_STEP2 is on. Off, nothing here applies: { gateOn: false, skip: false, atLimit: false }, plus the
+//              flat legacy amounts when the caller asks for them (legacyAmounts), exactly today's behavior.
+//   skip       no promise can be made (the live settings row cannot be read, or the program is paused); `reason` says which
+//   atLimit    the member holds the yearly limit: the member part of a promise is dropped (or the nudge is cancelled)
+//   reason     set whenever the full promise is withheld (skip, or atLimit): the words for the log line
+//   memberCents / refereeCents   the amounts, from the same live row
+async function referralOfferDecision(conn, customerId, { legacyAmounts = false } = {}) {
+  if (!isEnabled('referralStep2')) {
+    if (!legacyAmounts) return { gateOn: false, skip: false, atLimit: false };
+    const legacy = await getSettings();
+    return { gateOn: false, skip: false, atLimit: false, memberCents: legacy.referrer_reward_cents, refereeCents: Number(legacy.referee_discount_cents || 0) };
+  }
+  const offer = await step2OfferStrict(conn, customerId);
+  if (!offer || offer.programPaused) {
+    return { gateOn: true, skip: true, atLimit: false, reason: offer ? 'program paused' : 'settings unavailable' };
+  }
+  return {
+    gateOn: true, skip: false, atLimit: offer.capReached, ...(offer.capReached ? { reason: 'at the yearly limit' } : {}),
+    memberCents: Math.round(offer.standardReward * 100), refereeCents: Math.round(offer.friendReward * 100),
+  };
+}
+
+// Step 2's member credit for the friend's first performed recurring service, inside creditReferralOnFirstService's
+// transaction with the referral row locked. { dollars, reason }: 'standard' (step2_referrer_reward_cents, $25) or
+// 'cap_reached' (dollars 0: the member already has step2_annual_credit_cap credits this America/New_York calendar
+// year). The member's customer row is locked first, so two friends' first services for one member count one after the
+// other, and the credit posted next (postCreditMovement locks the same row) is inside that count for the next one.
+async function step2MemberCredit(trx, { referral, settings }) {
+  const memberId = referral.referrer_customer_id;
+  if (!memberId) return { dollars: 0, reason: null };
+  await trx('customers').where({ id: memberId }).forUpdate().first('id');
+
+  if (step2.capReached(await memberCreditsThisYear(trx, memberId), settings)) return { dollars: 0, reason: 'cap_reached' };
+
+  const { cents, reason } = step2.memberCredit(settings);
+  return { dollars: round2(cents / 100), reason };
 }
 
 // ---------------------------------------------------------------------------
@@ -1326,6 +1614,26 @@ async function getLiveSettings(conn = db) {
   return row ? { ...row, base_url: normalizeReferralBaseUrl(row.base_url) } : null;
 }
 
+// GATE_REFERRAL_STEP2: the friend's credit in cents that a line may state, from ONE live settings row the caller read
+// (getLiveSettings). A text that also follows the program's state (the Waves Pest Insider's referral line) decides
+// both from the same row, so the two cannot disagree. 0 = say nothing new: gate off, program paused, no amount, no row.
+function step2FriendCreditCentsOf(live) {
+  if (!isEnabled('referralStep2') || !live?.program_active) return 0;
+  return Math.max(0, Math.trunc(Number(live.referee_discount_cents) || 0));
+}
+
+// GATE_REFERRAL_STEP2: the friend's credit in cents, from the live settings row only, for a line that must never state
+// a code default (the invitation email). 0 = say nothing new: gate off, program paused, no amount, or the live row
+// unreadable.
+async function step2FriendCreditCents() {
+  if (!isEnabled('referralStep2')) return 0;
+  try {
+    return step2FriendCreditCentsOf(await getLiveSettings());
+  } catch {
+    return 0;
+  }
+}
+
 async function getSettings() {
   try {
     const row = await getLiveSettings();
@@ -1340,9 +1648,12 @@ async function getSettings() {
     base_url: normalizeReferralBaseUrl(DEFAULT_REFERRAL_BASE_URL),
     referrer_reward_cents: 2500,
     referee_discount_cents: 2500,
-    bonus_silver_cents: 5000,
-    bonus_gold_cents: 7500,
-    bonus_platinum_cents: 10000,
+    ...step2.STEP2_DEFAULTS,
+    // Tier bonuses only ever inflated the promoter ledger, never the real
+    // account credit (flat referrer reward); 0 since 20261120090000.
+    bonus_silver_cents: 0,
+    bonus_gold_cents: 0,
+    bonus_platinum_cents: 0,
     milestone_3_bonus_cents: 2500,
     milestone_5_bonus_cents: 5000,
     milestone_10_bonus_cents: 10000,
@@ -1362,7 +1673,7 @@ async function getSettings() {
 // ---------------------------------------------------------------------------
 const SETTING_BOOLEAN_KEYS = ['program_active', 'auto_credit_enabled', 'require_service_completion'];
 const SETTING_TEMPLATE_KEYS = ['invite_sms_template', 'reward_sms_template', 'milestone_sms_template'];
-const SETTING_COUNT_KEYS = ['max_referrals_per_month', 'cooldown_days'];
+const SETTING_COUNT_KEYS = ['max_referrals_per_month', 'cooldown_days', 'step2_annual_credit_cap'];
 
 // Money and count settings feed promoter balances and fraud limits, so a
 // negative, fractional or non-numeric value must never reach the table. No
@@ -1373,8 +1684,10 @@ function validateSettingValue(key, value) {
   if (value === null) return null;
   if (key.endsWith('_cents') || SETTING_COUNT_KEYS.includes(key)) {
     const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
-    if (typeof n !== 'number' || !Number.isSafeInteger(n) || n < 0) {
-      throw referralError(400, 'INVALID_SETTING', `${key} must be a whole number that is 0 or more`);
+    // The yearly credit limit is at least 1: a limit of 0 would pay no member anything.
+    const min = key === 'step2_annual_credit_cap' ? 1 : 0;
+    if (typeof n !== 'number' || !Number.isSafeInteger(n) || n < min) {
+      throw referralError(400, 'INVALID_SETTING', `${key} must be a whole number that is ${min} or more`);
     }
     return n;
   }
@@ -1399,6 +1712,7 @@ async function updateSettings(updates) {
     'milestone_3_bonus_cents', 'milestone_5_bonus_cents', 'milestone_10_bonus_cents',
     'min_payout_cents', 'auto_credit_enabled', 'require_service_completion',
     'max_referrals_per_month', 'cooldown_days',
+    'step2_referrer_reward_cents', 'step2_annual_credit_cap',
     'invite_sms_template', 'reward_sms_template', 'milestone_sms_template',
   ];
 
@@ -1444,7 +1758,7 @@ async function getPromoterStats(promoterId) {
       id: r.id,
       name: r.referee_name || `${r.referral_first_name || ''} ${r.referral_last_name || ''}`.trim(),
       status: r.status,
-      rewardAmount: parseFloat(r.referrer_reward_amount || r.credit_amount || 0),
+      rewardAmount: referralRewardAmount(r),
       rewardStatus: r.referrer_reward_status || (r.referrer_credited ? 'earned' : 'pending'),
       createdAt: r.created_at,
       convertedAt: r.converted_at,
@@ -1485,7 +1799,7 @@ async function getProgramAnalytics(startDate, endDate) {
         db.raw("COUNT(*) FILTER (WHERE status IN ('pending','contacted','estimated','sms_failed')) as pending"),
         db.raw("COUNT(*) FILTER (WHERE (status = 'signed_up' OR status = 'credited') AND referrer_reward_status IS DISTINCT FROM 'superseded') as converted"),
         db.raw("COUNT(*) FILTER (WHERE status = 'rejected' OR lost_reason IS NOT NULL) as lost"),
-        db.raw("COALESCE(SUM(CASE WHEN status IN ('signed_up','credited') AND referrer_reward_status IS DISTINCT FROM 'superseded' THEN referrer_reward_amount ELSE 0 END), 0) as total_rewards_dollars"),
+        db.raw("COALESCE(SUM(CASE WHEN status IN ('signed_up','credited') AND referrer_reward_status IS DISTINCT FROM 'superseded' THEN COALESCE(referrer_credit_cents / 100.0, referrer_reward_amount) ELSE 0 END), 0) as total_rewards_dollars"),
         db.raw("COALESCE(SUM(CASE WHEN status IN ('signed_up','credited') AND referrer_reward_status IS DISTINCT FROM 'superseded' THEN converted_monthly_value ELSE 0 END), 0) as total_monthly_value"),
       ).first(),
     db('referral_clicks')
@@ -1565,6 +1879,12 @@ module.exports = {
   convertReferral,
   updateReferralStatus,
   creditReferralOnFirstService,
+  step2OfferFor,
+  memberCreditsThisYear,
+  step2OfferStrict,
+  referralOfferDecision,
+  step2TermsFor,
+  referralAcquisitionCost,
   sendDueReferralRewardEmails,
   nextRewardEmailAt,
   recentRewardCreditsQuery,
@@ -1572,6 +1892,8 @@ module.exports = {
   milestoneLevelEarned,
   getSettings,
   getLiveSettings,
+  step2FriendCreditCents,
+  step2FriendCreditCentsOf,
   updateSettings,
   getPromoterStats,
   getProgramAnalytics,

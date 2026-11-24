@@ -329,13 +329,7 @@ describe('admin banking routes', () => {
     });
   });
 
-  describe('GET /cash-today (GATE_CASH_FORECAST)', () => {
-    const savedGate = process.env.GATE_CASH_FORECAST;
-    afterEach(() => {
-      if (savedGate === undefined) delete process.env.GATE_CASH_FORECAST;
-      else process.env.GATE_CASH_FORECAST = savedGate;
-    });
-
+  describe('GET /cash-today', () => {
     function bank(over = {}) {
       return {
         name: 'Synthetic Checking',
@@ -372,30 +366,13 @@ describe('admin banking routes', () => {
       });
     }
 
-    test('gate off: the owner gets 404 and nothing is read', async () => {
-      delete process.env.GATE_CASH_FORECAST;
-      const { status, body } = await getCash('admin');
-      expect(status).toBe(404);
-      expect(body).toEqual({ error: 'Not found' });
-      expect(PlaidSync.readCashBalances).not.toHaveBeenCalled();
-      expect(db).not.toHaveBeenCalled();
-    });
-
-    test('only the exact value true turns the gate on', async () => {
-      process.env.GATE_CASH_FORECAST = '1';
-      const { status } = await getCash('admin');
-      expect(status).toBe(404);
-    });
-
-    test('a non-owner admin gets 403 even with the gate on', async () => {
-      process.env.GATE_CASH_FORECAST = 'true';
+    test('a non-owner admin gets 403', async () => {
       const { status } = await getCash('admin2');
       expect(status).toBe(403);
       expect(PlaidSync.readCashBalances).not.toHaveBeenCalled();
     });
 
-    test('gate on + owner: 200 with the full shape', async () => {
-      process.env.GATE_CASH_FORECAST = 'true';
+    test('owner: 200 with the full shape', async () => {
       PlaidSync.readCashBalances.mockResolvedValue({
         accounts: [bank(), bank({ name: 'Second Checking', mask: '2222', available: 250, balance_as_of: '2026-11-05T14:00:00Z' })],
         cards: [],
@@ -415,7 +392,6 @@ describe('admin banking routes', () => {
     });
 
     test('a login_required connection is listed as unavailable while other data still returns', async () => {
-      process.env.GATE_CASH_FORECAST = 'true';
       PlaidSync.readCashBalances.mockResolvedValue({
         accounts: [bank()],
         cards: [],
@@ -429,7 +405,6 @@ describe('admin banking routes', () => {
     });
 
     test('available null falls back to current', async () => {
-      process.env.GATE_CASH_FORECAST = 'true';
       PlaidSync.readCashBalances.mockResolvedValue({
         accounts: [bank({ available: null, current: 77.1 })],
         cards: [],
@@ -441,7 +416,6 @@ describe('admin banking routes', () => {
     });
 
     test('a card lands in cards as money owed and is not in bank_usd', async () => {
-      process.env.GATE_CASH_FORECAST = 'true';
       PlaidSync.readCashBalances.mockResolvedValue({
         accounts: [bank()],
         cards: [bank({ name: 'Synthetic Card', mask: '3333', account_type: 'card', available: 5000, current: 420.1 })],
@@ -455,7 +429,6 @@ describe('admin banking routes', () => {
     });
 
     test('non-USD entries stay listed but are left out of every total', async () => {
-      process.env.GATE_CASH_FORECAST = 'true';
       PlaidSync.readCashBalances.mockResolvedValue({
         accounts: [bank(), bank({ name: 'Foreign', mask: '4444', currency: 'CAD', available: 9999 })],
         cards: [bank({ account_type: 'card', mask: '5555', currency: 'EUR', current: 888 })],
@@ -473,7 +446,6 @@ describe('admin banking routes', () => {
     });
 
     test('in-transit arrival_day is the UTC calendar day of a midnight-UTC marker, never shifted to Eastern', async () => {
-      process.env.GATE_CASH_FORECAST = 'true';
       PlaidSync.readCashBalances.mockResolvedValue({ accounts: [], cards: [], unavailable: [] });
       const q = payoutsDb([
         { amount: '1.00', currency: 'usd', status: 'pending', arrival_date: new Date('2026-01-15T00:00:00Z'), bank_last_four: '1234' },
@@ -484,7 +456,6 @@ describe('admin banking routes', () => {
     });
 
     test('an in-transit database failure answers in_transit.error and still 200', async () => {
-      process.env.GATE_CASH_FORECAST = 'true';
       PlaidSync.readCashBalances.mockResolvedValue({ accounts: [bank()], cards: [], unavailable: [] });
       db.mockImplementation(() => { throw new Error('relation "stripe_payouts" does not exist'); });
       const { status, body } = await getCash('admin');
@@ -495,7 +466,6 @@ describe('admin banking routes', () => {
     });
 
     test('an unexpected bank read failure is a 500 without the raw error', async () => {
-      process.env.GATE_CASH_FORECAST = 'true';
       PlaidSync.readCashBalances.mockRejectedValue(new Error('select * from plaid_items failed'));
       payoutsDb([]);
       const { status, body } = await getCash('admin');
@@ -504,13 +474,7 @@ describe('admin banking routes', () => {
     });
   });
 
-  describe('/cash-forecast (GATE_CASH_FORECAST, step 2)', () => {
-    const savedGate = process.env.GATE_CASH_FORECAST;
-    afterEach(() => {
-      if (savedGate === undefined) delete process.env.GATE_CASH_FORECAST;
-      else process.env.GATE_CASH_FORECAST = savedGate;
-    });
-
+  describe('/cash-forecast (step 2)', () => {
     async function call(method, path, { token = 'admin', body } = {}) {
       return withServer(async (baseUrl) => {
         const res = await fetch(`${baseUrl}/admin/banking${path}`, {
@@ -530,23 +494,7 @@ describe('admin banking routes', () => {
       settings: { last_year_receipts: {} },
     });
 
-    test('gate off: every forecast route is 404 and nothing is read or written', async () => {
-      delete process.env.GATE_CASH_FORECAST;
-      for (const [method, path] of [['GET', '/cash-forecast'], ['GET', '/cash-forecast/inputs'], ['POST', '/cash-forecast/items'],
-        ['PATCH', '/cash-forecast/items/x'], ['DELETE', '/cash-forecast/items/x'], ['PUT', '/cash-forecast/settings'],
-        ['PUT', '/cash-forecast/marks/ACME'], ['DELETE', '/cash-forecast/marks/ACME']]) {
-        const { status, body } = await call(method, path, { body: method === 'GET' || method === 'DELETE' ? undefined : {} });
-        expect([method, path, status, body]).toEqual([method, path, 404, { error: 'Not found' }]);
-      }
-      expect(loadForecastInput).not.toHaveBeenCalled();
-      expect(CashForecastInputs.createItem).not.toHaveBeenCalled();
-      expect(CashForecastInputs.saveSettings).not.toHaveBeenCalled();
-      expect(CashForecastInputs.saveMark).not.toHaveBeenCalled();
-      expect(CashForecastInputs.clearMark).not.toHaveBeenCalled();
-    });
-
-    test('a non-owner admin gets 403 on the read and the writes, gate on', async () => {
-      process.env.GATE_CASH_FORECAST = 'true';
+    test('a non-owner admin gets 403 on the read and the writes', async () => {
       expect((await call('GET', '/cash-forecast', { token: 'admin2' })).status).toBe(403);
       expect((await call('PUT', '/cash-forecast/settings', { token: 'admin2', body: { floor_cents: 1 } })).status).toBe(403);
       expect((await call('PUT', '/cash-forecast/marks/ACME', { token: 'admin2', body: { mark: 'business' } })).status).toBe(403);
@@ -558,7 +506,6 @@ describe('admin banking routes', () => {
     });
 
     test('a repeating-bill mark: the decoded key, the body and the owner id; clearing passes the key; 400 keeps the reason', async () => {
-      process.env.GATE_CASH_FORECAST = 'true';
       CashForecastInputs.saveMark.mockResolvedValueOnce({ key: 'ACME LOAN', mark: 'business', updated_at: 'T' });
       expect(await call('PUT', '/cash-forecast/marks/ACME%20LOAN', { body: { mark: 'business' } }))
         .toEqual({ status: 200, body: { key: 'ACME LOAN', mark: 'business', updated_at: 'T' } });
@@ -573,7 +520,6 @@ describe('admin banking routes', () => {
     });
 
     test('the owner gets 13 weeks from the engine; a failed read is a plain 500', async () => {
-      process.env.GATE_CASH_FORECAST = 'true';
       loadForecastInput.mockResolvedValueOnce(minimalInput());
       const ok = await call('GET', '/cash-forecast');
       expect(ok.status).toBe(200);
@@ -586,7 +532,6 @@ describe('admin banking routes', () => {
     });
 
     test('inputs read returns items, settings and the allowed values', async () => {
-      process.env.GATE_CASH_FORECAST = 'true';
       CashForecastInputs.listItems.mockResolvedValueOnce([{ id: 'i1' }]);
       CashForecastInputs.getSettings.mockResolvedValueOnce({ floor_cents: null, last_year_receipts: {}, updated_at: null });
       const { status, body } = await call('GET', '/cash-forecast/inputs');
@@ -595,7 +540,6 @@ describe('admin banking routes', () => {
     });
 
     test('writes pass the body and the owner id; 201 on create, 400 with the reason, 404 for an unknown item, plain 500', async () => {
-      process.env.GATE_CASH_FORECAST = 'true';
       CashForecastInputs.createItem.mockResolvedValueOnce({ id: 'i1' });
       expect(await call('POST', '/cash-forecast/items', { body: { label: 'Policy' } })).toEqual({ status: 201, body: { id: 'i1' } });
       expect(CashForecastInputs.createItem).toHaveBeenCalledWith(db, { label: 'Policy' }, 'admin-1');

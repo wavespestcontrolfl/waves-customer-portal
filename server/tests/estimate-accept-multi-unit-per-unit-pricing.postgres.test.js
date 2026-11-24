@@ -397,4 +397,79 @@ suite('multi-program no-slot accept — per-unit follow-up pricing + office aler
       expect(unresolvedAlertCalls(estimateId)).toHaveLength(1);
     });
   });
+
+  // Owner 2026-11-22: the first bill lists the WaveGuard tier and the estimate's own discount as their own lines
+  // (GATE_INVOICE_ESTIMATE_DISCOUNT_LINES), same total. Regressions: a multi-program accept leaves its first visits
+  // unpriced, and visits at the customer's own address are unstamped — both read as "no breakdown" before.
+  describe('the first bill lists the accepted discounts (GATE_INVOICE_ESTIMATE_DISCOUNT_LINES)', () => {
+    const originalGate = process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES;
+    afterEach(() => {
+      if (originalGate === undefined) delete process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES;
+      else process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES = originalGate;
+    });
+    const silver = { effectiveDiscount: 0.1, appliedDiscounts: [{ type: 'waveguard', tier: 'silver', amount: 0.1 }] };
+    const pest = { name: 'Pest Control', service: 'pest_control', mo: 33, visitsPerYear: 4, perTreatment: 110,
+      priceAfterDiscount: 99, discount: silver };
+    const lawn = { name: 'Lawn Care', service: 'lawn_care', serviceKey: 'lawn_care_monthly', frequency: 'monthly', mo: 54,
+      visitsPerYear: 12, perTreatment: 60, priceAfterDiscount: 54, discount: silver };
+    const silverData = (services, result = {}) => ({
+      customerSelection: { frequency: 'quarterly' },
+      setupFeeQuote: { amount: 0, waived: true },
+      result: { results: { pestTiers: [{ label: 'Quarterly', mo: 36.67, ann: 440, apps: 4, pa: 110 }] },
+        recurring: { discount: 0.1, services }, oneTime: { items: [], membershipFee: 0 }, ...result },
+    });
+    async function silverEstimate(estimateData, linkedCustomer = null) {
+      const fx = await estimateFixture(mockTransaction, { estimateData, linkedCustomer });
+      await mockTransaction('estimates').where({ id: fx.estimateId }).update({ waveguard_tier: 'Silver' });
+      return fx;
+    }
+    async function firstBill(estimateId) {
+      const { customer_id: customerId } = await mockTransaction('estimates').where({ id: estimateId }).first('customer_id');
+      const [invoice, extra] = await mockTransaction('invoices').where({ customer_id: customerId });
+      expect(extra).toBeUndefined();
+      return { total: Number(invoice.total), lines: invoice.line_items.map((line) => [line.description, Number(line.unit_price)]) };
+    }
+
+    test('pest + lawn: the day at the accepted prices, then WaveGuard Silver once; off = today\'s one line', async () => {
+      const off = await silverEstimate(silverData([pest, lawn]));
+      expect((await putAccept(off.token)).status).toBe(200);
+      expect(await firstBill(off.estimateId)).toEqual({ total: 153, lines: [['First service application', 153]] });
+
+      process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES = 'true';
+      const on = await silverEstimate(silverData([pest, lawn]));
+      expect((await putAccept(on.token)).status).toBe(200);
+      expect(await firstBill(on.estimateId)).toEqual({ total: 153,
+        lines: [['First service application', 170], ['WaveGuard Silver', -17]] });
+      // A later pest visit (unstamped, at the customer's own address) prints the same breakdown on its own bill.
+      const { pest: series } = await seriesRows(on.estimateId);
+      const { acceptedVisitBreakdown } = require('../services/completion-pricing');
+      expect((await acceptedVisitBreakdown(series.children[0], { database: mockTransaction })).breakdown).toEqual({
+        base: 110, amount: 99, discounts: [{ name: 'WaveGuard Silver', dollars: 11 }] });
+    });
+
+    test('pest with a Military Discount: the labeled credit keeps its own line and amount beside the tier', async () => {
+      process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES = 'true';
+      const { estimateId, token } = await silverEstimate(silverData([{ ...pest, manualFinalAnnual: 376.2 }], {
+        manualDiscount: { type: 'PERCENT', value: 5, amount: 19.8, recurringAmount: 19.8, label: 'Military Discount' } }));
+      expect((await putAccept(token)).status).toBe(200);
+      expect(await firstBill(estimateId)).toEqual({ total: 94.05,
+        lines: [['First service application', 110], ['WaveGuard Silver', -11], ['Military Discount', -4.95]] });
+    });
+
+    test('the converter\'s own first bill (an office accept) lists the tier the same way', async () => {
+      process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES = 'true';
+      const customer = perAppCustomer({ billing_mode: null, per_application_fee: null, pipeline_stage: 'lead',
+        address_line1: '123 Synthetic Ave', city: 'Bradenton', zip: '34205' });
+      const { estimateId } = await silverEstimate(silverData([pest, lawn]), customer);
+      await mockTransaction('estimates').where({ id: estimateId }).update({ status: 'accepted', accepted_at: new Date() });
+      await require('../services/estimate-converter').convertEstimate(estimateId, {
+        database: mockTransaction, autoSendInvoice: false, skipMembershipEmail: true, createdCustomerId: customer.id,
+        firstApplicationAmount: 153,
+        firstApplicationRowAmounts: [{ service: 'pest_control', name: 'Pest Control', amount: 99 },
+          { service: 'lawn_care', name: 'Lawn Care', amount: 54 }],
+      });
+      expect(await firstBill(estimateId)).toEqual({ total: 153,
+        lines: [['First service application', 170], ['WaveGuard Silver', -17]] });
+    });
+  });
 });

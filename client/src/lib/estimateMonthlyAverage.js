@@ -82,6 +82,21 @@ export function planCreditSource({ renderFlags, selectedCombo, combinedFrequency
     .map(liveCredit).find(Boolean) || null;
 }
 
+// Does the SELECTED plan carry a credit? Unlike planCreditSource this does not care how the
+// credit is displayed (itemized into the sections or on the plan card): the accept takes its
+// slice off the first application either way. The selected cadence's own state comes first:
+// its combo or plan frequency and each recurring section's selected cadence carry their own
+// manualDiscount and a suppression marker (the pricing floor capped the credit away). The
+// estimate-level fields are the fallback only when the selection says nothing.
+export function selectedPlanCreditDeclared({ services, selected, selectedCombo, combinedFrequency, pricing }) {
+  const recurring = (Array.isArray(services) ? services : []).filter((section) => section?.isRecurring);
+  const rows = [selectedCombo || combinedFrequency, ...recurring.map((section) => selectedFrequencyOf(section, selected))]
+    .filter(Boolean);
+  if (rows.some((row) => row.manualDiscountSuppressed !== true && liveCredit(row.manualDiscount))) return true;
+  if (rows.some((row) => row.manualDiscountSuppressed === true)) return false;
+  return [pricing?.combinedRecurring?.manualDiscount, pricing?.manualDiscount].some((discount) => liveCredit(discount) !== null);
+}
+
 // An open, recurring, per-application plan: not one-time, commercial, billed
 // monthly, quote-required, accepted/declined, or the annual-prepay choice.
 export function pageAverageEligible({ serviceMode, estimate, billsMonthly, isCommercialEstimate, cta, paymentPreference }) {

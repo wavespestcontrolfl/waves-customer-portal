@@ -6,8 +6,7 @@
  * client renders (the date stays) and adds `dayOnlyFields(true)`: `day_only: true` plus `arrival_note`. The server does
  * the blanking, so an older client bundle that knows nothing about `day_only` still shows the date and no hour.
  *
- * Gate off (or any failure): the set is empty and `dayOnlyFields(false)` is `{}`, so a payload is byte-for-byte what it
- * was before this part. A failure reads as "show the hour" (the safe side for a screen, same rule as loadTimeDisplay).
+ * A failure leaves the set empty and `dayOnlyFields(false)` is `{}`. A failure reads as "show the hour" (the safe side for a screen, same rule as loadTimeDisplay).
  */
 
 const { loadTimeDisplay } = require('./time-promise');
@@ -66,7 +65,7 @@ function dayOnlyFields(dayOnly) {
  * The slot a confirm POST proves, for a client that was shown a day-only visit. That client has no hour to echo
  * (`windowStart` blank), so the match would fail forever. When the body carries no windowStart and the server still
  * shows this visit as day-only, the row's CURRENT start stands in: the confirm lands on the visit's current slot and the
- * date still has to match. Every other body (an hour was echoed, gate off, hour shown now, any failure) is returned as
+ * date still has to match. Every other body (an hour was echoed, hour shown now, any failure) is returned as
  * it came, so the comparison is exactly today's. A visit that crossed the 24-hour cutoff after the page loaded now shows
  * its hour, so the blank body fails the match and the customer reloads to see it. `stop` is the page's grouped stop
  * (dayOnlyVisit), so the confirm judges the stop the same way the page did.

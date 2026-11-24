@@ -28,7 +28,7 @@ function fakeConn({ services = [svc()], source = 'admin_manual', log = [] } = {}
     reads.push(table);
     const ins = [];
     const chain = {};
-    for (const m of ['where', 'whereNotIn', 'whereNotNull', 'whereNull', 'whereRaw', 'whereBetween', 'orderBy', 'join', 'leftJoin', 'distinct', 'orWhere', 'andWhere']) chain[m] = () => chain;
+    for (const m of ['where', 'whereNotIn', 'whereNotNull', 'whereNull', 'whereRaw', 'whereBetween', 'orderBy', 'limit', 'join', 'leftJoin', 'distinct', 'orWhere', 'andWhere']) chain[m] = () => chain;
     chain.whereIn = (_c, values) => { ins.push(values.map(String)); return chain; };
     chain.select = async () => {
       if (table === 'scheduled_services') return services.filter((r) => !ins.length || ins[0].includes(String(r.id)) || ins[0].includes(String(r.visit_id)));
@@ -45,14 +45,6 @@ function fakeConn({ services = [svc()], source = 'admin_manual', log = [] } = {}
   conn.updates = updates;
   return conn;
 }
-
-const withGate = (value, fn) => async () => {
-  const prior = process.env.GATE_DAY_ONLY_PROMISE;
-  if (value === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = value;
-  try { await fn(); } finally {
-    if (prior === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = prior;
-  }
-};
 
 const eligible = async (conn) => (await dayOnlyEligibility(conn, ['s1'], NOW, { ignoreLevel: true })).get('s1').eligible;
 const AT = '2026-11-09T11:00:00Z';
@@ -78,43 +70,52 @@ describe('currentIntent (the one read rule)', () => {
 });
 
 describe('memberEligible through dayOnlyEligibility', () => {
-  test('an explicit false with no later move is still day only (and reads the history once, with the intent)', withGate('true', async () => {
+  test('an explicit false with no later move is still day only (and reads the history once, with the intent)', async () => {
     const conn = fakeConn({ services: [svc({ customer_asked_time: false, customer_asked_time_at: AT })], log: [] });
     expect(await eligible(conn)).toBe(true);
     expect(conn.reads.filter((t) => t === 'reschedule_log')).toHaveLength(1);
-  }));
+  });
 
-  test('office false, then a later customer move with NO intent write: inferred as picked, so the window copy (every customer initiator)', withGate('true', async () => {
+  test('office false, then a later customer move with NO intent write: inferred as picked, so the window copy (every customer initiator)', async () => {
     for (const who of ['customer_sms', 'ai_call_pipeline', 'customer_self_serve', 'sms_offer_ai']) {
       const conn = fakeConn({ services: [svc({ customer_asked_time: false, customer_asked_time_at: AT })], log: [logRow(who, true)] });
       expect(await eligible(conn)).toBe(false);
       expect(conn.reads.filter((t) => t === 'reschedule_log')).toHaveLength(1); // the pick check reuses the rows
     }
-  }));
+  });
 
-  test('a stale false followed by an OFFICE move is inferred: office source, not picked, day only', withGate('true', async () => {
+  test('a stale false followed by an OFFICE move is inferred: office source, not picked, day only', async () => {
     const conn = fakeConn({ services: [svc({ customer_asked_time: false, customer_asked_time_at: AT })], log: [logRow('admin', true)] });
     expect(await eligible(conn)).toBe(true);
     expect(await eligible(fakeConn({ services: [svc({ customer_asked_time: false, customer_asked_time_at: AT })], source: 'booking_new', log: [logRow('admin', true)] }))).toBe(false);
-  }));
+  });
 
-  test('the same-transaction case: the intent and its own move\'s log row share now(), so it holds (a set time stays a window)', withGate('true', async () => {
+  test('the same-transaction case: the intent and its own move\'s log row share now(), so it holds (a set time stays a window)', async () => {
     const tie = fakeConn({ services: [svc({ customer_asked_time: false, customer_asked_time_at: AT })], log: [logRow('admin', false)] });
     expect(await eligible(tie)).toBe(true);
     const asked = fakeConn({ services: [svc({ customer_asked_time: true, customer_asked_time_at: AT })], log: [logRow('admin', false)] });
     expect(await eligible(asked)).toBe(false);
-  }));
+  });
 
-  test('a booking intent (no time) followed by a move is inferred; with no move it holds', withGate('true', async () => {
+  // Local audit 2026-11-22: judged against the newest change of date or start, as auto-dispatch's isPersonPlacedVisit is.
+  test('an explicit true survives a later end-only edit (still a set time); a later change of start makes it stale', async () => {
+    const member = svc({ is_recurring: true, recurring_parent_id: 'p1', customer_asked_time: true, customer_asked_time_at: AT });
+    const longer = logRow('admin_bulk', true, { original_date: VISIT_DATE, original_window: '09:00-10:00', new_window: '09:00-10:30' });
+    expect(await eligible(fakeConn({ services: [member], log: [longer] }))).toBe(false);
+    const restart = logRow('admin', true, { original_date: VISIT_DATE, original_window: '13:00-14:00', new_window: '09:00-10:00' });
+    expect(await eligible(fakeConn({ services: [member], log: [restart] }))).toBe(true);
+  });
+
+  test('a booking intent (no time) followed by a move is inferred; with no move it holds', async () => {
     const moved = fakeConn({ services: [svc({ customer_asked_time: true })], log: [logRow('admin', null)] });
     expect(await eligible(moved)).toBe(true); // inferred: office source, an office move
     const picked = fakeConn({ services: [svc({ customer_asked_time: true })], log: [logRow('customer_sms', null)] });
     expect(await eligible(picked)).toBe(false);
     expect(await eligible(fakeConn({ services: [svc({ customer_asked_time: true })], log: [] }))).toBe(false); // holds: a set time
     expect(await eligible(fakeConn({ services: [svc({ customer_asked_time: false })], log: [] }))).toBe(true);
-  }));
+  });
 
-  test('an unrecorded intent reads no history up front (the pick check does, as before); a failed history read is not eligible', withGate('true', async () => {
+  test('an unrecorded intent reads no history up front (the pick check does, as before); a failed history read is not eligible', async () => {
     const conn = fakeConn({ services: [svc()], log: [] });
     expect(await eligible(conn)).toBe(true);
     expect(conn.reads.filter((t) => t === 'reschedule_log')).toHaveLength(1);
@@ -123,38 +124,32 @@ describe('memberEligible through dayOnlyEligibility', () => {
     const failing = (table) => { if (table === 'reschedule_log') throw new Error('read failed'); return real(table); };
     failing.raw = real.raw;
     expect(await eligible(failing)).toBe(false);
-  }));
+  });
 });
 
 describe('dayOnlyReplayDecision uses the same rule', () => {
   const replay = (conn) => dayOnlyReplayDecision(conn, { id: 's1', startAt: FAR, now: NOW, reminder24hEnabled: true });
 
-  test('a fresh explicit false: the day row again; a stale false (a later customer move): false', withGate('true', async () => {
+  test('a fresh explicit false: the day row again; a stale false (a later customer move): false', async () => {
     expect(await replay(fakeConn({ services: [svc({ customer_asked_time: false, customer_asked_time_at: AT })], log: [logRow('admin', false)] }))).toBe(true);
     expect(await replay(fakeConn({ services: [svc({ customer_asked_time: false, customer_asked_time_at: AT })], log: [logRow('customer_sms', true)] }))).toBe(false);
-  }));
+  });
 
-  test('a booking false (no time) with a move logged since is stale: not an explicit false', withGate('true', async () => {
+  test('a booking false (no time) with a move logged since is stale: not an explicit false', async () => {
     expect(await replay(fakeConn({ services: [svc({ customer_asked_time: false })], log: [logRow('admin', null)] }))).toBe(false);
     expect(await replay(fakeConn({ services: [svc({ customer_asked_time: false })], log: [] }))).toBe(true);
-  }));
+  });
 });
 
 describe('the writes and the shared history read', () => {
-  test('every intent write also stamps customer_asked_time_at with the database clock; gate off writes nothing', async () => {
-    await withGate('true', async () => {
-      const conn = fakeConn();
-      await recordCustomerAskedTime(conn, ['s1'], false);
-      expect(conn.updates[0].payload).toEqual({ customer_asked_time: false, customer_asked_time_at: { raw: 'now()' } });
-    })();
-    await withGate(undefined, async () => {
-      const conn = fakeConn();
-      expect(await recordCustomerAskedTime(conn, ['s1'], true)).toBe(0);
-      expect(conn.updates).toEqual([]);
-    })();
+  test('every intent write also stamps customer_asked_time_at with the database clock', async () => {
+    const conn = fakeConn();
+    await recordCustomerAskedTime(conn, ['s1'], false);
+    expect(conn.updates[0].payload).toEqual({ customer_asked_time: false, customer_asked_time_at: { raw: 'now()' } });
   });
 
-  test('loadNewestSlotRows adds the after_intent column only when asked (the auto-dispatch pick check stays byte for byte)', async () => {
+  // The read also returns the old and new slot (local audit 2026-11-22: the pick check matches the placement's date and start).
+  test('loadNewestSlotRows adds the after_intent column only when asked', async () => {
     const selects = [];
     const mk = () => {
       const chain = {};
@@ -165,9 +160,11 @@ describe('the writes and the shared history read', () => {
     const db = Object.assign(() => mk(), { raw: (sql) => ({ raw: sql }) });
     await eligibility.loadNewestSlotRows(db, 's1');
     await eligibility.loadNewestSlotRows(db, 's1', { withIntent: true });
-    expect(selects[0]).toEqual(['created_at', 'new_date', 'initiated_by']);
-    expect(selects[1].slice(0, 3)).toEqual(['created_at', 'new_date', 'initiated_by']);
-    expect(selects[1][3].raw).toMatch(/customer_asked_time_at.*AS after_intent/s);
+    const cols = ['created_at', 'new_date', 'initiated_by', 'reason_code', 'original_date', 'original_window', 'new_window'];
+    expect(selects[0]).toEqual(cols);
+    expect(selects[1].slice(0, cols.length)).toEqual(cols);
+    expect(selects[1]).toHaveLength(cols.length + 1);
+    expect(selects[1][cols.length].raw).toMatch(/customer_asked_time_at.*AS after_intent/s);
   });
 
   test('isCustomerPickedVisit still answers from rows handed to it, and from its own read without them', async () => {
@@ -178,7 +175,7 @@ describe('the writes and the shared history read', () => {
 });
 
 describe('Intelligence Bar move_stops_to_day declares the office box', () => {
-  test('input_schema carries customer_asked_time (boolean, described); the preview key exists only with the gate on', async () => {
+  test('input_schema carries customer_asked_time (boolean, described); the preview key is always present', async () => {
     jest.doMock('../models/db', () => jest.fn());
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
     const { SCHEDULE_TOOLS } = require('../services/intelligence-bar/schedule-tools');

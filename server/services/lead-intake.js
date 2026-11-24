@@ -5,7 +5,7 @@
  * by lead-webhook.js. Drives a two-step capture when their message includes
  * service interest:
  *
- *   awaiting_service  →  (classify pest/lawn/one_time)  →  awaiting_address
+ *   awaiting_service  →  (classify pest/lawn/pest_lawn/one_time)  →  awaiting_address
  *                                                           ↓
  *                             (address extracted)   →  estimate_drafted
  *
@@ -33,6 +33,9 @@ const {
 const SERVICE_LABEL = {
   pest: 'Pest Control',
   lawn: 'Lawn Care',
+  // A reply naming both (owner 2026-11-19, "a"): one draft for both, under
+  // the label the web form writes for its pest + lawn choice.
+  pest_lawn: 'Pest Control + Lawn Care',
   one_time: 'One-Time Service',
 };
 

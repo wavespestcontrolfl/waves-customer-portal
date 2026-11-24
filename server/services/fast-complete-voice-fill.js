@@ -172,7 +172,7 @@ function sheetUnit(unit, measure) {
 // pest_reservice: the catalog the sheet's picker searches (GET
 // /pest-recap/context's `products`, the same loadRecapCatalogProducts, minus the
 // categories the picker hides), each with the names techs call it by
-// (product_aliases: "Talstar P" is logged as Atticus Talak), plus the exact
+// (product_aliases: "Talstar P" is logged as LESCO Crosscheck Plus since 2026-11-18; before that, Atticus Talak), plus the exact
 // pest / where / activity / method strings above.
 async function loadProductAliases(knex, productIds) {
   if (!productIds.length) return new Map();

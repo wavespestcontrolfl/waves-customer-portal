@@ -18,7 +18,7 @@ const {
 
 const baselineRow = (over = {}) => ({
   id: 'p1', name: 'Taurus SC Termiticide', epa_reg_number: '53883-279', formulation: 'SC',
-  container_size: '78 oz', unit_size_oz: 78, monthly_cost_estimate: 120,
+  container_size: '78 oz', unit_size_oz: 78,
   siteone_price: 95, siteone_quantity: '78 oz', siteone_unit: 'oz', ...over,
 });
 
@@ -30,7 +30,7 @@ const VENDORS = [
 describe('toScanSpec', () => {
   test('builds the scan product + EVERY competitor vendor, quantity prefers SiteOne pack', () => {
     const urls = new Map([['dmo', 'https://www.domyown.com/p-1817.html']]);
-    const { product, vendors, spend } = toScanSpec(baselineRow(), VENDORS, urls);
+    const { product, vendors, spend } = toScanSpec(baselineRow(), VENDORS, urls, 120);
     expect(product).toMatchObject({
       product_id: 'p1', name: 'Taurus SC Termiticide', vendorProductName: 'Taurus SC Termiticide',
       epaReg: '53883-279', quantity: '78 oz',
@@ -65,29 +65,37 @@ describe('toScanSpec', () => {
 });
 
 describe('assembleScanSpecs', () => {
-  test('dedups by product (first wins), ranks by spend then price, respects limit', () => {
+  test('dedups by product (first wins), ranks by logged spend then price, respects limit', () => {
     const rows = [
-      baselineRow({ id: 'a', monthly_cost_estimate: 50, siteone_price: 10 }),
-      baselineRow({ id: 'a', monthly_cost_estimate: 999 }), // dup id -> ignored
-      baselineRow({ id: 'b', monthly_cost_estimate: 200, siteone_price: 20 }),
-      baselineRow({ id: 'c', monthly_cost_estimate: 0, siteone_price: 300 }),
+      baselineRow({ id: 'a', siteone_price: 10 }),
+      baselineRow({ id: 'a', siteone_price: 999 }), // dup id -> ignored
+      baselineRow({ id: 'b', siteone_price: 20 }),
+      baselineRow({ id: 'c', siteone_price: 300 }),
     ];
-    const specs = assembleScanSpecs(rows, new Map(), { limit: 2, vendors: VENDORS });
-    expect(specs.map((s) => s.product.product_id)).toEqual(['b', 'a']); // spend 200 > 50 > c(0)
-    expect(specs).toHaveLength(2);
+    const spendByProduct = new Map([['a', 50], ['b', 200], ['c', 30]]);
+    const specs = assembleScanSpecs(rows, new Map(), { limit: 2, vendors: VENDORS, spendByProduct });
+    expect(specs.map((s) => [s.product.product_id, s.spend])).toEqual([['b', 200], ['a', 50]]); // c (30) is past the limit
     expect(specs[0].vendors.map((v) => v.vendor_id)).toEqual(['dmo', 'sol']); // every vendor on each spec
+  });
+  test('a product with no booked spend in the window is not scanned, however high its SiteOne price', () => {
+    // Production 2026-11-20: the hand-typed monthly cost put Termidor SC (no use) first and left Antapex and
+    // Gentrol (weekly use, no typed cost) at ranks 102 and 151 of 189, so the scan never checked them.
+    const rows = [baselineRow({ id: 'unused', siteone_price: 900 }), baselineRow({ id: 'used', siteone_price: 10 })];
+    const specs = assembleScanSpecs(rows, new Map(), { limit: 5, vendors: VENDORS, spendByProduct: new Map([['used', 5], ['unused', 0]]) });
+    expect(specs.map((s) => s.product.product_id)).toEqual(['used']);
+    expect(assembleScanSpecs(rows, new Map(), { limit: 5, vendors: VENDORS })).toEqual([]);
   });
   test('ties on spend break by SiteOne price desc', () => {
     const rows = [
-      baselineRow({ id: 'lo', monthly_cost_estimate: 0, siteone_price: 10 }),
-      baselineRow({ id: 'hi', monthly_cost_estimate: 0, siteone_price: 90 }),
+      baselineRow({ id: 'lo', siteone_price: 10 }),
+      baselineRow({ id: 'hi', siteone_price: 90 }),
     ];
-    const specs = assembleScanSpecs(rows, new Map(), { limit: 5, vendors: VENDORS });
+    const specs = assembleScanSpecs(rows, new Map(), { limit: 5, vendors: VENDORS, spendByProduct: new Map([['lo', 40], ['hi', 40]]) });
     expect(specs.map((s) => s.product.product_id)).toEqual(['hi', 'lo']);
   });
   test('attaches each vendor URL from the per-product map', () => {
     const urlByProduct = new Map([['p9', new Map([['dmo', 'https://www.domyown.com/p9'], ['sol', 'https://www.solutionsstores.com/p9']])]]);
-    const specs = assembleScanSpecs([baselineRow({ id: 'p9' })], urlByProduct, { limit: 5, vendors: VENDORS });
+    const specs = assembleScanSpecs([baselineRow({ id: 'p9' })], urlByProduct, { limit: 5, vendors: VENDORS, spendByProduct: new Map([['p9', 1]]) });
     expect(specs[0].vendors.find((v) => v.vendor_id === 'dmo').url).toBe('https://www.domyown.com/p9');
     expect(specs[0].vendors.find((v) => v.vendor_id === 'sol').url).toBe('https://www.solutionsstores.com/p9');
   });

@@ -97,6 +97,54 @@ describe('apply mode', () => {
     expect(w.syncMovedReminders).toHaveBeenCalledTimes(changes.length);
   });
 
+  describe('a packed day (the drive rule refuses, the pack rule takes it; owner 2026-11-22)', () => {
+    // Three stops side by side at 8 AM, 11 AM and 3 PM: the same drive in any hour order, so only the hours move.
+    const packRows = () => [row('a', 0.020, 8), row('b', 0.021, 11), row('c', 0.022, 15)];
+
+    test('is written: applied, every moved visit on the pack plan\'s hour, one day_replan log row each, route order numbered', async () => {
+      const w = setup({ rows: packRows() });
+      const out = await w.run();
+      expect(out).toMatchObject({ status: 'completed', days: 1, accepted: 1, packed: 1, changedVisits: 2, appliedVisits: 2 });
+      expect(out.apply).toEqual([expect.objectContaining({ date: TOMORROW, technician_id: 'tech-1', status: 'applied', reason: 'applied', moved: 2 })]);
+
+      const insert = w.db.inserts.find((i) => i.table === 'day_replan_plans').row;
+      expect(insert).toMatchObject({ mode: 'apply', accepted: true, reason: 'packed' });
+      const changes = JSON.parse(insert.changes);
+      expect(changes.map((c) => c.id).sort()).toEqual(['b', 'c']);
+      const after = w.windows();
+      expect(after.a).toBe('08:00');
+      for (const c of changes) expect(after[c.id]).toBe(c.to);
+      const logs = w.db.inserts.filter((i) => i.table === 'reschedule_log').map((i) => i.row);
+      expect(logs.map((l) => l.scheduled_service_id).sort()).toEqual(['b', 'c']);
+      expect(logs.every((l) => l.initiated_by === 'day_replan' && l.reason_code === 'day_replan')).toBe(true);
+      // The route reads in hour order and was numbered with the writes.
+      const order = [...w.db.rows].sort((x, y) => String(x.window_start).localeCompare(String(y.window_start))).map((r) => r.route_order);
+      expect(order).toEqual([1, 2, 3]);
+      expect(w.db.updates.filter((u) => u.table === 'day_replan_plans')).toEqual([
+        expect.objectContaining({ patch: expect.objectContaining({ apply_status: 'applied', apply_reason: 'applied' }) }),
+      ]);
+      expect(w.syncMovedReminders).toHaveBeenCalledTimes(2);
+      // The record: the top-level packed figures are the plan the writer wrote.
+      const rec = JSON.parse(insert.close_gaps);
+      expect(rec.p1).toMatchObject({ plan: 'pack', wouldAccept: true });
+      expect(rec.packed).toEqual(rec.p1.packed);
+    });
+
+    test('a day that changed between the plan and the write is skipped as changed_since_plan', async () => {
+      let calls = 0;
+      const w = setup({
+        rows: packRows(),
+        over: { now: () => { calls += 1; if (calls === 1) w.db.rows[1].updated_at = new Date('2026-11-03T12:30:00Z'); return NOW; } },
+      });
+      const before = w.windows();
+      const out = await w.run();
+      expect(out.packed).toBe(1);
+      expect(out.apply).toEqual([expect.objectContaining({ status: 'skipped', reason: 'changed_since_plan', moved: 0 })]);
+      expect(w.windows()).toEqual(before);
+      expect(w.acquireOccupancyLock).not.toHaveBeenCalled();
+    });
+  });
+
   test('the applied marker commits with the hours, before any post-commit effect runs', async () => {
     const w = setup({ rows: zigzagRows() });
     const seen = [];
@@ -112,8 +160,8 @@ describe('apply mode', () => {
   });
 
   test('a day the plan does not accept is planned and logged, never written', async () => {
-    // Two stops that cannot save 10 minutes.
-    const w = setup({ rows: [row('a', 0.05, 9), row('b', 0.06, 10)] });
+    // Two stops that cannot save 10 minutes, and already as early as the day opens, so the pack plan has nothing to take.
+    const w = setup({ rows: [row('a', 0.05, 8), row('b', 0.06, 9)] });
     const out = await w.run();
     expect(out.accepted).toBe(0);
     expect(w.acquireOccupancyLock).not.toHaveBeenCalled();

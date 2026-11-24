@@ -19,15 +19,14 @@ jest.mock('../services/admin-alert-episodes', () => ({
   closeAdminAlertKeys: jest.fn().mockResolvedValue(0),
   closeAdminAlertIds: jest.fn().mockResolvedValue(0),
 }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(), wdoAttentionRingsLive: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn() }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
 const episodes = require('../services/admin-alert-episodes');
 const logger = require('../services/logger');
-const featureGates = require('../config/feature-gates');
-const { isEnabled } = featureGates;
+const { isEnabled } = require('../config/feature-gates');
 const { runWdoReportAttentionSweep, _private } = require('../services/wdo-report-attention');
 
 function chain(overrides = {}) {
@@ -38,6 +37,7 @@ function chain(overrides = {}) {
     whereNotIn: jest.fn().mockReturnThis(),
     whereNull: jest.fn().mockReturnThis(),
     whereNotNull: jest.fn().mockReturnThis(),
+    orderBy: jest.fn().mockReturnThis(),
     orWhere: jest.fn().mockReturnThis(),
     join: jest.fn().mockReturnThis(),
     leftJoin: jest.fn().mockReturnThis(),
@@ -49,7 +49,6 @@ function chain(overrides = {}) {
 beforeEach(() => {
   jest.clearAllMocks();
   NotificationService.notifyAdmin.mockResolvedValue({});
-  featureGates.wdoAttentionRingsLive.mockReturnValue(false);
   episodes.openAdminAlertKeys.mockResolvedValue([]);
   episodes.closeAdminAlertKeys.mockResolvedValue(0);
   episodes.closeAdminAlertIds.mockResolvedValue(0);
@@ -197,9 +196,9 @@ describe('runWdoReportAttentionSweep', () => {
   });
 });
 
-// GATE_WDO_ATTENTION_RINGS (owner 2026-11-05): the bell rings again under GATE_ADMIN_BELL_POLICY, a muted result is not a
+// Rings (owner 2026-11-05): the bell rings again under GATE_ADMIN_BELL_POLICY, a muted result is not a
 // ring, a clean lane closes the sweep's own rows, and a standing row's count follows the set.
-describe('runWdoReportAttentionSweep — GATE_WDO_ATTENTION_RINGS', () => {
+describe('runWdoReportAttentionSweep — rings', () => {
   const NOW = new Date('2026-11-06T12:00:00Z');
   const KEY = (...ids) => `wdo_report_attention:${ids.join('|').slice(0, 200)}`;
 
@@ -227,10 +226,9 @@ describe('runWdoReportAttentionSweep — GATE_WDO_ATTENTION_RINGS', () => {
 
   beforeEach(() => {
     isEnabled.mockReturnValue(true);
-    featureGates.wdoAttentionRingsLive.mockReturnValue(true);
   });
 
-  test('gate on: the ring carries bellDefault; the rest of the call is what it was', async () => {
+  test('the ring carries bellDefault; the rest of the call is what it was', async () => {
     setup({ signed: ['p1'] });
     const r = await runWdoReportAttentionSweep({ now: NOW });
     expect(r).toEqual({ ok: true, rang: true, items: 1 });
@@ -245,40 +243,7 @@ describe('runWdoReportAttentionSweep — GATE_WDO_ATTENTION_RINGS', () => {
     });
   });
 
-  test('gate off: no bellDefault, a muted result still counts as rung, nothing is closed or read', async () => {
-    featureGates.wdoAttentionRingsLive.mockReturnValue(false);
-    const calls = setup({ signed: ['p1'], standing: [standingRow('n1', ['signed_unsent:p0'])] });
-    NotificationService.notifyAdmin.mockResolvedValue({ id: null, suppressed: true });
-    const r = await runWdoReportAttentionSweep({ now: NOW });
-    expect(r).toEqual({ ok: true, rang: true, items: 1 });
-    expect(NotificationService.notifyAdmin.mock.calls[0][3]).not.toHaveProperty('bellDefault');
-    expect(logger.warn).not.toHaveBeenCalled();
-    expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
-    expect(calls.updates).toEqual([]);
-    expect(calls.whereRaw).toEqual([]);
-  });
-
-  test('gate off, lane clean: nothing is closed', async () => {
-    featureGates.wdoAttentionRingsLive.mockReturnValue(false);
-    setup();
-    expect(await runWdoReportAttentionSweep({ now: NOW })).toEqual({ ok: true, clean: true });
-    expect(episodes.openAdminAlertKeys).not.toHaveBeenCalled();
-  });
-
-  test('a feature-gates mock without the reader reads as off', async () => {
-    const reader = featureGates.wdoAttentionRingsLive;
-    delete featureGates.wdoAttentionRingsLive;
-    try {
-      setup({ signed: ['p1'] });
-      const r = await runWdoReportAttentionSweep({ now: NOW });
-      expect(r).toEqual({ ok: true, rang: true, items: 1 });
-      expect(NotificationService.notifyAdmin.mock.calls[0][3]).not.toHaveProperty('bellDefault');
-    } finally {
-      featureGates.wdoAttentionRingsLive = reader;
-    }
-  });
-
-  test('gate on: a muted result is not a ring (warn log, rang false, nothing closed)', async () => {
+  test('a muted result is not a ring (warn log, rang false, nothing closed)', async () => {
     setup({ signed: ['p1'], standing: [standingRow('n1', ['signed_unsent:p0'])] });
     NotificationService.notifyAdmin.mockResolvedValue({ id: null, suppressed: true, deduped: false });
     const r = await runWdoReportAttentionSweep({ now: NOW });
@@ -289,24 +254,20 @@ describe('runWdoReportAttentionSweep — GATE_WDO_ATTENTION_RINGS', () => {
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
   });
 
-  test('gate on: a failed insert still fails the sweep', async () => {
+  test('a failed insert still fails the sweep', async () => {
     setup({ signed: ['p1'] });
     NotificationService.notifyAdmin.mockResolvedValue(null);
     await expect(runWdoReportAttentionSweep({ now: NOW })).rejects.toThrow('bell not recorded');
   });
 
-  test('gate on: the cover read ignores rows the sweep closed; gate off still counts them', async () => {
-    const on = setup({ signed: ['p1'], priors: [{ metadata: { item_ids: ['signed_unsent:p1'] } }] });
+  test('the cover read ignores rows the sweep closed', async () => {
+    const calls = setup({ signed: ['p1'], priors: [{ metadata: { item_ids: ['signed_unsent:p1'] } }] });
     const r = await runWdoReportAttentionSweep({ now: NOW });
     expect(r).toEqual(expect.objectContaining({ deduped: true, items: 1 }));
-    expect(on.whereRaw.some((sql) => sql.includes("'autoCleared'"))).toBe(true);
-    featureGates.wdoAttentionRingsLive.mockReturnValue(false);
-    const off = setup({ signed: ['p1'], priors: [{ metadata: { item_ids: ['signed_unsent:p1'] } }] });
-    await runWdoReportAttentionSweep({ now: NOW });
-    expect(off.whereRaw).toEqual([]);
+    expect(calls.whereRaw.some((sql) => sql.includes("'autoCleared'"))).toBe(true);
   });
 
-  test('gate on, lane clean: the sweep closes its own open rows with a plain resolution', async () => {
+  test('lane clean: the sweep closes its own open rows with a plain resolution', async () => {
     setup();
     episodes.openAdminAlertKeys.mockResolvedValue([KEY('signed_unsent:p1'), KEY('signed_unsent:p1', 'signed_unsent:p2')]);
     episodes.closeAdminAlertKeys.mockResolvedValue(2);
@@ -322,13 +283,13 @@ describe('runWdoReportAttentionSweep — GATE_WDO_ATTENTION_RINGS', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('gate on, lane clean, no open row: nothing to close', async () => {
+  test('lane clean, no open row: nothing to close', async () => {
     setup();
     expect(await runWdoReportAttentionSweep({ now: NOW })).toEqual({ ok: true, clean: true, closed: 0 });
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
   });
 
-  test('gate on, the set shrank (one report marked sent another way): the open row is rewritten in place, quietly', async () => {
+  test('the set shrank (one report marked sent another way): the open row is rewritten in place, quietly', async () => {
     const calls = setup({
       signed: ['p2'],
       priors: [{ metadata: { item_ids: ['signed_unsent:p1', 'signed_unsent:p2'] } }],
@@ -349,7 +310,7 @@ describe('runWdoReportAttentionSweep — GATE_WDO_ATTENTION_RINGS', () => {
     expect(episodes.closeAdminAlertIds).not.toHaveBeenCalled();
   });
 
-  test('gate on, the same set is still open: nothing is rewritten or closed', async () => {
+  test('the same set is still open: nothing is rewritten or closed', async () => {
     const calls = setup({
       signed: ['p1'],
       priors: [{ metadata: { item_ids: ['signed_unsent:p1'] } }],
@@ -362,7 +323,7 @@ describe('runWdoReportAttentionSweep — GATE_WDO_ATTENTION_RINGS', () => {
     expect(episodes.closeAdminAlertIds).not.toHaveBeenCalled();
   });
 
-  test('gate on, a row with exactly the current set is open beside a stale one: the stale one is closed, not rewritten', async () => {
+  test('a row with exactly the current set is open beside a stale one: the stale one is closed, not rewritten', async () => {
     const calls = setup({
       signed: ['p2'],
       priors: [{ metadata: { item_ids: ['signed_unsent:p2'] } }],
@@ -377,7 +338,7 @@ describe('runWdoReportAttentionSweep — GATE_WDO_ATTENTION_RINGS', () => {
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
   });
 
-  test('gate on, the set grew: it rings once, then the smaller row is closed as replaced', async () => {
+  test('the set grew: it rings once, then the smaller row is closed as replaced', async () => {
     setup({
       signed: ['p1', 'p2'],
       priors: [{ metadata: { item_ids: ['signed_unsent:p1'] } }],
@@ -392,7 +353,7 @@ describe('runWdoReportAttentionSweep — GATE_WDO_ATTENTION_RINGS', () => {
     expect(episodes.closeAdminAlertKeys).not.toHaveBeenCalled();
   });
 
-  test('gate on, an uncovered item with a muted ring leaves the open row alone', async () => {
+  test('an uncovered item with a muted ring leaves the open row alone', async () => {
     setup({ signed: ['p1', 'p2'], standing: [standingRow('n1', ['signed_unsent:p1'])] });
     NotificationService.notifyAdmin.mockResolvedValue({ id: null, suppressed: true });
     await runWdoReportAttentionSweep({ now: NOW });

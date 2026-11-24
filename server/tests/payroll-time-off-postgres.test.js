@@ -465,26 +465,23 @@ postgres('payroll time off', () => {
       expect((await api('GET', `/time-off?from=${day(-100)}&to=${day(301)}`)).status).toBe(400);
     });
 
-    it('warns past the allowance, still saves the day, and counts only paid time off, per calendar year', async () => {
+    // The time-off bank and its warnings are in payroll-time-off-bank-postgres.test.js.
+    it('never warns with no yearly hours set, and the balance counts only paid time off, per calendar year', async () => {
       const id = await readyTech('Sample Alpha');
-      expect((await api('PUT', `/technicians/${id}/pto-allowance`, { body: { hoursPerYear: '16' } })).body.technician).toEqual({ id, ptoHoursPerYear: 16 });
       const year = day(1).slice(0, 4);
       const inYear = (n) => `${year}-12-${String(n).padStart(2, '0')}`;
       const a = await api('POST', '/time-off', { body: { technicianId: id, workDate: inYear(20), kind: 'pto', hours: 8 } });
       const b = await api('POST', '/time-off', { body: { technicianId: id, workDate: inYear(21), kind: 'pto', hours: 4 } });
       const c = await api('POST', '/time-off', { body: { technicianId: id, workDate: inYear(22), kind: 'pto', hours: 8 } });
-      expect([a.body.warning, b.body.warning]).toEqual([null, null]);
+      expect([a.body.warning, b.body.warning, c.body.warning]).toEqual([null, null, null]);
       expect(c.status).toBe(201);
-      expect(c.body.warning).toBe(`Sample Alpha now has 20.00 hours of paid time off booked in ${year}. The yearly allowance is 16 hours. The day is saved.`);
-      expect(await trx('payroll_time_off').where({ id: c.body.entry.id }).first('id')).toBeTruthy();
-      // A holiday does not count against the allowance.
+      // A holiday is not paid time off.
       const holiday = await api('POST', '/time-off', { body: { technicianId: id, workDate: inYear(25), kind: 'holiday', hours: 8 } });
       expect(holiday.body.warning).toBeNull();
       const bal = (await api('GET', `/time-off/balance?technicianId=${id}&year=${year}`)).body.balance;
-      expect(bal).toMatchObject({ allowanceHours: 16, ptoHoursBooked: '20.00', ptoHoursPaid: '0.00', holidayDaysBooked: 1, year: Number(year) });
-      // A change that stays over the allowance warns too; one that gets under it does not.
-      expect((await api('PUT', `/time-off/${c.body.entry.id}`, { body: { kind: 'pto', hours: 5 } })).body.warning).toMatch(/17.00 hours/);
-      expect((await api('PUT', `/time-off/${c.body.entry.id}`, { body: { kind: 'pto', hours: 4 } })).body.warning).toBeNull();
+      expect(bal).toMatchObject({ allowanceHours: null, ptoHoursBooked: '20.00', ptoHoursPaid: '0.00', holidayDaysBooked: 1, year: Number(year) });
+      expect(bal).not.toHaveProperty('bank');
+      expect((await api('PUT', `/time-off/${c.body.entry.id}`, { body: { kind: 'pto', hours: 5 } })).body.warning).toBeNull();
     });
 
     it('sets and clears the allowance, W-2 only, and audits it without the number', async () => {
@@ -706,6 +703,8 @@ postgres('payroll time off', () => {
       create: (conn) => timeOff.createTimeOff({ technicianId: randomUUID(), workDate: etDateString(), kind: 'pto', hours: 8 }, ADMIN_ID, conn),
       update: (conn) => timeOff.updateTimeOff(randomUUID(), { kind: 'pto', hours: 8 }, ADMIN_ID, conn),
       delete: (conn) => timeOff.deleteTimeOff(randomUUID(), ADMIN_ID, conn),
+      // The yearly hours turn a time-off bank on or off: the save waits for a finalize too.
+      'yearly hours': (conn) => timeOff.setPtoAllowance(randomUUID(), { hoursPerYear: 80 }, ADMIN_ID, conn),
     };
 
     it.each(Object.keys(calls))('%s waits while a finalize holds the lock, then goes on', async (name) => {

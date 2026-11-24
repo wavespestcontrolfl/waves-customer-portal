@@ -1,5 +1,5 @@
 /**
- * GATE_DEAD_NUMBER_ALERT (owner 2026-11-04, "fix check"): a customer's number that keeps failing texts with Twilio
+ * Dead-number alert (owner 2026-11-04, "fix check"): a customer's number that keeps failing texts with Twilio
  * 30003 / 30005 raises ONE bell row naming the customer, from POST /api/webhooks/twilio/status, and the row closes
  * at the customer's next delivered text. The route runs for real; the database is a small fake keyed by table.
  * Invented names and numbers only.
@@ -99,26 +99,9 @@ beforeEach(() => {
   mockRows.clear();
   mockUpdates.length = 0;
   jest.clearAllMocks();
-  process.env.GATE_DEAD_NUMBER_ALERT = 'true';
 });
-afterAll(() => { delete process.env.GATE_DEAD_NUMBER_ALERT; });
 
 describe('dead number alert: when it rings', () => {
-  test('gate off: nothing is read or raised', async () => {
-    delete process.env.GATE_DEAD_NUMBER_ALERT;
-    mockState.failedRows = failedAt('06-29', '07-10', '11-04');
-    expect(await fail()).toBe(200);
-    expect(mockNotify).not.toHaveBeenCalled();
-    expect(mockDbCalls.mock.calls.filter(([t]) => t === 'customers' || t === 'notifications')).toHaveLength(0);
-  });
-
-  test('gate is on only for exactly "true"', async () => {
-    process.env.GATE_DEAD_NUMBER_ALERT = '1';
-    mockState.failedRows = failedAt('06-29', '11-04');
-    await fail();
-    expect(mockNotify).not.toHaveBeenCalled();
-  });
-
   test('the first failure alone raises nothing', async () => {
     mockState.failedRows = failedAt('11-04');
     expect(await fail()).toBe(200);
@@ -354,14 +337,6 @@ describe('dead number alert: when it closes', () => {
     await delivered();
     expect(mockClose).not.toHaveBeenCalled();
   });
-
-  test('gate off: a delivered text reads nothing', async () => {
-    delete process.env.GATE_DEAD_NUMBER_ALERT;
-    mockState.openKeys = [KEY];
-    await delivered();
-    expect(mockClose).not.toHaveBeenCalled();
-    expect(mockDbCalls).not.toHaveBeenCalledWith('notifications');
-  });
 });
 
 describe("dead number alert: a callback that beats the sender's own log", () => {
@@ -397,12 +372,6 @@ describe("dead number alert: a callback that beats the sender's own log", () => 
     await jest.advanceTimersByTimeAsync(15 * 1000);
     expect(mockClose).toHaveBeenCalledTimes(1);
     expect(mockUpdates).toContainEqual({ table: 'sms_log', vals: { status: 'delivered' } });
-  });
-
-  test('gate off: a missing row schedules nothing', async () => {
-    delete process.env.GATE_DEAD_NUMBER_ALERT;
-    await deadNumber.handleDeadNumberFailure({ sid: 'SM1', status: 'undelivered', errorCode: '30005' });
-    expect(jest.getTimerCount()).toBe(0);
   });
 });
 

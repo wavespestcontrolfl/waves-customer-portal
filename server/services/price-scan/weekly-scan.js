@@ -1,9 +1,9 @@
 // Autonomous weekly vendor price scan (price-scan lane). The piece that makes the
-// lane RUN by itself: pick the products we spend the most on that have a SiteOne
-// baseline, scan the public competitors we have adapters for (DoMyOwn / Solutions /
-// Keystone) for a cheaper published per-unit price, and stage ONE price-match draft
-// for the SiteOne rep (Mark) in /admin/price-match. Nothing is emailed — a human
-// reviews + sends the draft.
+// lane RUN by itself: pick the products job costing booked the most material cost for
+// over the last 12 months that have a SiteOne baseline, scan the public competitors
+// we have adapters for (DoMyOwn / Solutions / Keystone) for a cheaper published
+// per-unit price, and stage ONE price-match draft for the SiteOne rep (Mark) in
+// /admin/price-match. Nothing is emailed — a human reviews + sends the draft.
 //
 // Layering: this module is pure orchestration + DB. The browser I/O is injected
 // (scanner.runScanMany) so the assembly + opportunity mapping stay unit-tested, and
@@ -16,6 +16,7 @@ const { createDraft } = require('./price-match-draft');
 const { selectAdapterKey, getAdapter } = require('./adapters/registry');
 const { quantityToOz } = require('./extract');
 const { getVendorLoginCredentials } = require('../vendor-credentials');
+const { addETDays, etDateString } = require('../../utils/datetime-et');
 
 // A pack size is only usable if it normalizes to oz — that's exactly what verifyMatch's
 // size gate and the per-unit ($/oz) comparison need. In practice vendor_pricing.quantity
@@ -33,6 +34,12 @@ function realPackSize(v) {
 // How many top-spend products to scan per run. Kept modest — each product is scraped
 // across every scrapable vendor, so this bounds total live page loads.
 const DEFAULT_LIMIT = Number(process.env.PRICE_SCAN_MAX_PRODUCTS) || 25;
+
+// The spend a product ranks on: the material cost job costing booked for it over the last
+// 12 months (owner 2026-11-20, *scan*). It replaced the hand-typed
+// products_catalog.monthly_cost_estimate, which ranked a product we never applied first and
+// left two we use weekly unscanned.
+const SPEND_WINDOW_DAYS = 365;
 
 // The codebase's canonical "live price" gate (see price_sync_control_layer): only
 // operator-approved, active vendor_pricing rows. Critically this EXCLUDES the Hermes
@@ -132,8 +139,9 @@ async function scrapableVendors(db) {
 // for scanProduct/runScanMany. `quantity` is the pack we compare on — prefer
 // SiteOne's own pack string, then catalog container_size, then numeric unit_size_oz.
 // Each vendor's URL (host-validated, optional) is looked up in urlByVendorId; without
-// one the adapter searches that vendor by name.
-function toScanSpec(row, vendors = [], urlByVendorId = null) {
+// one the adapter searches that vendor by name. `spend` is the product's booked material
+// cost over the last 12 months (bookedSpendByProduct).
+function toScanSpec(row, vendors = [], urlByVendorId = null, spend = 0) {
   // Prefer SiteOne's own pack, but only when it's a REAL size — "Each (1)" must fall
   // through to the structured catalog size (container_size, then unit_size_oz) instead of
   // shadowing it, otherwise the scanner can't size-match or compute $/oz.
@@ -160,7 +168,33 @@ function toScanSpec(row, vendors = [], urlByVendorId = null) {
     website: v.website || null, // storefront base — the generic Shopify adapter needs it
     url: (urlByVendorId && urlByVendorId.get && urlByVendorId.get(v.id)) || null,
   }));
-  return { product, vendors: vlist, spend: Number(row.monthly_cost_estimate) || 0 };
+  return { product, vendors: vlist, spend: Number(spend) || 0 };
+}
+
+// Each product's booked material cost over the last 12 months (the 365 ET calendar days
+// ending today; a visit dated after today is not booked use yet): the product lines job costing
+// wrote on each visit's job_costs row (job-costing.js calcProductsCost -> products_used
+// [{ product_id, line, ... }]). Reading the booked lines keeps job costing's rules in one
+// place: an inventory movement's cost first, else the application priced per unit, and no
+// cost for an amount the completion refused. So the scan ranks on the same cost the job-cost
+// reports show. Map product_id -> spend.
+async function bookedSpendByProduct(db, productIds, { now = new Date() } = {}) {
+  const spend = new Map();
+  if (!productIds || !productIds.length) return spend;
+  const since = etDateString(addETDays(now, 1 - SPEND_WINDOW_DAYS));
+  const today = etDateString(now);
+  const productOf = "line.value ->> 'product_id'";
+  const rows = await db('job_costs as jc')
+    // A row whose products_used is not an array (a hand-entered job cost) has no lines.
+    .joinRaw("cross join lateral jsonb_array_elements(case when jsonb_typeof(jc.products_used) = 'array' then jc.products_used else '[]'::jsonb end) as line(value)")
+    .where('jc.service_date', '>=', since)
+    .where('jc.service_date', '<=', today)
+    .whereRaw("jsonb_typeof(line.value -> 'line') = 'number'")
+    .whereIn(db.raw(productOf), productIds.map(String))
+    .groupByRaw(productOf)
+    .select(db.raw(`${productOf} as product_id`), db.raw("sum((line.value ->> 'line')::numeric) as spend"));
+  for (const r of rows) spend.set(r.product_id, Math.round(Number(r.spend) * 100) / 100);
+  return spend;
 }
 
 // Attach decrypted login credentials to the spec vendors that use a login adapter (Veseris).
@@ -185,24 +219,26 @@ async function attachLoginCredentials(db, specs, deps = {}) {
 }
 
 // PURE: dedup baseline rows to one per product (caller orders by recency so the first
-// row per product wins), rank by monthly spend (then SiteOne price), take the top
-// `limit`, and shape each into a scan spec. `urlByProduct` is a Map of
-// product_id -> Map(vendor_id -> url).
-function assembleScanSpecs(baselineRows, urlByProduct, { limit = DEFAULT_LIMIT, vendors = [] } = {}) {
+// row per product wins), rank by booked spend (then SiteOne price), take the top
+// `limit`, and shape each into a scan spec. A product with no booked spend in the
+// window is not scanned. `urlByProduct` is a Map of product_id -> Map(vendor_id -> url);
+// `spendByProduct` is a Map of product_id -> spend (bookedSpendByProduct).
+function assembleScanSpecs(baselineRows, urlByProduct, { limit = DEFAULT_LIMIT, vendors = [], spendByProduct = new Map() } = {}) {
   const byProduct = new Map();
   for (const r of baselineRows || []) if (!byProduct.has(r.id)) byProduct.set(r.id, r);
-  const ranked = [...byProduct.values()].sort((a, b) => (
-    (Number(b.monthly_cost_estimate) || 0) - (Number(a.monthly_cost_estimate) || 0)
+  const spendOf = (r) => Number(spendByProduct.get(r.id)) || 0;
+  const ranked = [...byProduct.values()].filter((r) => spendOf(r) > 0).sort((a, b) => (
+    spendOf(b) - spendOf(a)
     || (Number(b.siteone_price) || 0) - (Number(a.siteone_price) || 0)
   ));
   return ranked.slice(0, Math.max(0, limit)).map((r) => toScanSpec(
-    r, vendors, urlByProduct && urlByProduct.get ? urlByProduct.get(r.id) : null,
+    r, vendors, urlByProduct && urlByProduct.get ? urlByProduct.get(r.id) : null, spendOf(r),
   ));
 }
 
-// Fetch top-spend products that have an APPROVED SiteOne baseline + each scrapable
-// vendor's APPROVED, on-host product URL, then assemble scan specs. Wrapped so a
-// schema surprise degrades to an empty list (the cron logs zero rather than crashing).
+// Fetch the products that have an APPROVED SiteOne baseline, their booked spend + each
+// scrapable vendor's APPROVED, on-host product URL, then assemble scan specs. Wrapped so
+// a schema surprise degrades to an empty list (the cron logs zero rather than crashing).
 async function selectScanProducts(db, { limit = DEFAULT_LIMIT, siteoneId, vendors = [] } = {}) {
   try {
     const baselineRows = await db('products_catalog as pc')
@@ -214,12 +250,13 @@ async function selectScanProducts(db, { limit = DEFAULT_LIMIT, siteoneId, vendor
       .andWhere((b) => b.where('pc.active', true).orWhereNull('pc.active'))
       .select(
         'pc.id', 'pc.name', 'pc.epa_reg_number', 'pc.formulation',
-        'pc.container_size', 'pc.unit_size_oz', 'pc.monthly_cost_estimate',
+        'pc.container_size', 'pc.unit_size_oz',
         'so.price as siteone_price', 'so.quantity as siteone_quantity', 'so.unit as siteone_unit',
       )
       .orderBy('so.last_checked_at', 'desc'); // most-recent SiteOne row wins the per-product dedup
 
     const ids = [...new Set(baselineRows.map((r) => r.id))];
+    const spendByProduct = await bookedSpendByProduct(db, ids);
     const vendorById = new Map((vendors || []).map((v) => [v.id, v]));
     const vendorIds = [...vendorById.keys()];
     const urlByProduct = new Map(); // product_id -> Map(vendor_id -> url)
@@ -239,7 +276,7 @@ async function selectScanProducts(db, { limit = DEFAULT_LIMIT, siteoneId, vendor
         if (!pm.has(r.vendor_id)) pm.set(r.vendor_id, r.vendor_product_url);
       }
     }
-    return assembleScanSpecs(baselineRows, urlByProduct, { limit, vendors });
+    return assembleScanSpecs(baselineRows, urlByProduct, { limit, vendors, spendByProduct });
   } catch (err) {
     logger.error(`[price-scan] product selection failed: ${err.message}`);
     return [];
@@ -508,6 +545,8 @@ module.exports = {
   selectScanProducts,
   assembleScanSpecs,
   toScanSpec,
+  bookedSpendByProduct,
+  SPEND_WINDOW_DAYS,
   opportunityToMatch,
   tallyBreakdown,
   isBrowserUnavailable,

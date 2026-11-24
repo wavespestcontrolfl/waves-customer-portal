@@ -3,7 +3,8 @@
  * Invariants:
  *   - neither path mutates the estimate; the change request's only write is
  *     the service_requests row (+ admin bell), still-deciding's is one
- *     activity_log row (no bell, no request row).
+ *     activity_log row a day (no request row). A still-deciding reason goes
+ *     on that row and to the office bell hook; no reason, no bell.
  *   - the full viewability contract + accepted/declined exclusion gate both
  *     writes with a generic 404.
  *   - an empty change request is a 400 on a VALID token only.
@@ -32,6 +33,7 @@ const { sendOfficeNotification } = require('../services/estimate-measurement-rev
 const {
   CHANGE_REQUEST_SERVICE_KEY,
   CHANGE_REQUEST_TOPICS,
+  STILL_DECIDING_REASONS,
   normalizeTopics,
   isSoftExitEligible,
   createEstimateOfficeRequest,
@@ -43,6 +45,8 @@ const ESTIMATE_ROW = { id: 'est-1', token: 'tok-1', status: 'viewed', estimate_n
 function mockDb({ estimate = ESTIMATE_ROW, dupeRow = null, recentSignal = null } = {}) {
   const inserts = [];
   const activity = [];
+  const activityUpdates = [];
+  const activityDayBounds = [];
   const database = (table) => {
     if (table === 'estimates') return { where: () => ({ first: async () => estimate }) };
     if (table === 'service_requests') {
@@ -58,7 +62,10 @@ function mockDb({ estimate = ESTIMATE_ROW, dupeRow = null, recentSignal = null }
     if (table === 'customers') return { where: () => ({ first: async () => ({ first_name: 'Pat', last_name: 'Sample' }) }) };
     if (table === 'activity_log') {
       return {
-        where: () => ({ where: () => ({ first: async () => recentSignal }) }),
+        where: (filter) => ({
+          where: (...bound) => { activityDayBounds.push(bound); return { first: async () => recentSignal }; },
+          update: async (changes) => { activityUpdates.push({ filter, changes }); return 1; },
+        }),
         insert: async (row) => { activity.push(row); return [1]; },
       };
     }
@@ -67,6 +74,8 @@ function mockDb({ estimate = ESTIMATE_ROW, dupeRow = null, recentSignal = null }
   database.raw = (s) => s;
   database.inserts = inserts;
   database.activity = activity;
+  database.activityUpdates = activityUpdates;
+  database.activityDayBounds = activityDayBounds;
   return database;
 }
 const viewable = () => true;
@@ -201,6 +210,133 @@ describe('recordEstimateStillDeciding', () => {
         .rejects.toMatchObject({ status: 404 });
       expect(database.activity).toHaveLength(0);
     }
+  });
+
+  describe('with what would help the customer decide', () => {
+    const REQ = { headers: {} };
+    const at = new Date('2026-11-21T15:00:00.000Z');
+    const record = (database, reason, noteReason) => recordEstimateStillDeciding({
+      estimateToken: 'tok-1', reason, req: REQ, database, viewabilityCheck: viewable, noteReason, now: () => at,
+    });
+
+    test('the keys are the five reasons the sheet offers', () => {
+      expect(STILL_DECIDING_REASONS).toEqual({
+        price: 'A lower price',
+        person: 'Talking to a person first',
+        quotes: 'Comparing other quotes',
+        timing: 'Not the right time yet',
+        other: 'Something else',
+      });
+    });
+
+    test('a first signal with a reason: one row that carries the reason and its time, then the office hook', async () => {
+      const database = mockDb();
+      const noteReason = jest.fn(async () => undefined);
+      const out = await record(database, 'person', noteReason);
+      expect(out).toEqual({ success: true, deduped: false });
+      expect(database.activity).toHaveLength(1);
+      expect(database.activity[0].description).toBe('Customer is still deciding on their estimate. What would help: Talking to a person first.');
+      expect(JSON.parse(database.activity[0].metadata)).toEqual({ source: 'public_estimate', reason: 'person', reason_at: at.toISOString() });
+      expect(noteReason).toHaveBeenCalledTimes(1);
+      expect(noteReason).toHaveBeenCalledWith(REQ, 'est-1', 'person');
+      expect(database.inserts).toHaveLength(0);
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    });
+
+    test('the sheet\'s order (signal on the tap, reason after it): the day\'s row takes the reason, no second row', async () => {
+      const database = mockDb({ recentSignal: { id: 'act-1' } });
+      const noteReason = jest.fn(async () => undefined);
+      const out = await record(database, 'price', noteReason);
+      expect(out).toEqual({ success: true, deduped: true });
+      expect(database.activity).toHaveLength(0);
+      expect(database.activityUpdates).toHaveLength(1);
+      expect(database.activityUpdates[0].filter).toEqual({ id: 'act-1' });
+      expect(database.activityUpdates[0].changes.description).toBe('Customer is still deciding on their estimate. What would help: A lower price.');
+      expect(JSON.parse(database.activityUpdates[0].changes.metadata)).toEqual({ source: 'public_estimate', reason: 'price', reason_at: at.toISOString() });
+      expect(noteReason).toHaveBeenCalledWith(REQ, 'est-1', 'price');
+    });
+
+    // The sheet says "We will call you" only on this answer. The office bell hook decides it (the bell was raised for
+    // a customer who asked for a person, on an estimate with a phone); this function only passes it on.
+    test('the answer promises a call only when the office bell hook says so', async () => {
+      const told = (answer) => async () => answer;
+      expect(await record(mockDb(), 'person', told({ raised: true, reason: 'sent', callPromised: true }))).toEqual({ success: true, deduped: false, callPromised: true });
+      expect(await record(mockDb({ recentSignal: { id: 'act-1' } }), 'person', told({ raised: true, reason: 'refreshed', callPromised: true })))
+        .toEqual({ success: true, deduped: true, callPromised: true });
+      for (const answer of [{ raised: true, reason: 'sent', callPromised: false }, { raised: false, reason: 'silenced', callPromised: false }, null, undefined]) {
+        expect(await record(mockDb(), 'person', told(answer))).toEqual({ success: true, deduped: false });
+      }
+    });
+
+    test('the day\'s row is today\'s Eastern day: a reason this morning never rewrites last night\'s row', async () => {
+      // 15:00Z on Nov 21 is 10:00 AM Eastern; the Eastern day began at 05:00Z.
+      const database = mockDb();
+      await record(database, 'price', async () => undefined);
+      expect(database.activityDayBounds).toEqual([['created_at', '>=', new Date('2026-11-21T05:00:00.000Z')]]);
+      // 03:30Z on Nov 22 is still Nov 21, 10:30 PM Eastern: the same day's row.
+      const late = mockDb();
+      await recordEstimateStillDeciding({ estimateToken: 'tok-1', database: late, viewabilityCheck: viewable, now: () => new Date('2026-11-22T03:30:00.000Z') });
+      expect(late.activityDayBounds).toEqual([['created_at', '>=', new Date('2026-11-21T05:00:00.000Z')]]);
+    });
+
+    test('a signal with no reason never clears a reason and rings nothing', async () => {
+      for (const reason of [undefined, null, '']) {
+        const database = mockDb({ recentSignal: { id: 'act-1', metadata: { reason: 'person' } } });
+        const noteReason = jest.fn(async () => undefined);
+        expect(await record(database, reason, noteReason)).toEqual({ success: true, deduped: true });
+        expect(database.activityUpdates).toHaveLength(0);
+        expect(database.activity).toHaveLength(0);
+        expect(noteReason).not.toHaveBeenCalled();
+      }
+      const database = mockDb();
+      const noteReason = jest.fn(async () => undefined);
+      await record(database, undefined, noteReason);
+      expect(JSON.parse(database.activity[0].metadata)).toEqual({ source: 'public_estimate' });
+      expect(noteReason).not.toHaveBeenCalled();
+    });
+
+    test('a reason the sheet does not offer is a 400 on a VALID token only, with nothing written or rung', async () => {
+      for (const reason of ['cheaper', 'constructor', '__proto__', 'toString', ['price'], { key: 'price' }, 7]) {
+        const database = mockDb();
+        const noteReason = jest.fn(async () => undefined);
+        await expect(record(database, reason, noteReason)).rejects.toMatchObject({ status: 400 });
+        expect(database.activity).toHaveLength(0);
+        expect(database.activityUpdates).toHaveLength(0);
+        expect(noteReason).not.toHaveBeenCalled();
+      }
+      const dead = mockDb({ estimate: { ...ESTIMATE_ROW, status: 'declined' } });
+      await expect(record(dead, 'cheaper', jest.fn())).rejects.toMatchObject({ status: 404 });
+    });
+
+    test('the office hook runs only after the write committed', async () => {
+      const events = [];
+      const database = mockDb();
+      database.transaction = async (fn) => {
+        const trx = (table) => (table === 'estimates'
+          ? { where: () => ({ forUpdate: () => ({ first: async () => ESTIMATE_ROW }), first: async () => ESTIMATE_ROW }) }
+          : database(table));
+        trx.raw = database.raw;
+        const out = await fn(trx);
+        events.push('commit');
+        return out;
+      };
+      await record(database, 'quotes', async () => { events.push('hook'); });
+      expect(events).toEqual(['commit', 'hook']);
+
+      // A write the locked row refuses never reaches the hook.
+      const refused = mockDb();
+      refused.transaction = async (fn) => {
+        const locked = { ...ESTIMATE_ROW, status: 'accepted' };
+        const trx = (table) => (table === 'estimates'
+          ? { where: () => ({ forUpdate: () => ({ first: async () => locked }), first: async () => locked }) }
+          : refused(table));
+        trx.raw = refused.raw;
+        return fn(trx);
+      };
+      const hook = jest.fn();
+      await expect(record(refused, 'quotes', hook)).rejects.toMatchObject({ status: 404 });
+      expect(hook).not.toHaveBeenCalled();
+    });
   });
 
   test('runs under the estimate row lock and re-validates the LOCKED row (pre-push codex P0)', async () => {

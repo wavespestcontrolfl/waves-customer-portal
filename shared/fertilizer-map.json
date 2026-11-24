@@ -1,0 +1,10 @@
+{
+  "rows": 8,
+  "columns": 6,
+  "assignments": {
+    ".": "Unmapped",
+    "L": "Lawn crew",
+    "T": "Tree and shrub crew",
+    "X": "Fertilizer-free"
+  }
+}

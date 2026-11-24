@@ -47,6 +47,7 @@ const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const {
   validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour, scorePickedHourByTech, hintSearchPlan, buildHintSummary, loadSummaryDayFacts,
+  openTimesBoxLive,
 } = require('../services/scheduling/find-time-hints');
 const { gateEnvValue } = require('../config/feature-gates');
 const { createPickerBudget } = require('../services/scheduling/hint-road-times');
@@ -244,7 +245,7 @@ async function techsLackingServices(techIds, { serviceType, serviceTypes }) {
 // The pickers ask once which box to draw, so a search is shaped for it from
 // the start. Read at call time: a flip needs no redeploy.
 router.get('/ui', (req, res) => {
-  res.json({ ok: true, openTimes: gateEnvValue('GATE_BEST_TIME_HINTS') && gateEnvValue('GATE_OPEN_TIMES_BOX') });
+  res.json({ ok: true, openTimes: openTimesBoxLive() });
 });
 
 // Scopes this request so a refused Google
@@ -510,7 +511,7 @@ router.post('/', trackRoadLimit, async (req, res) => {
       // Only a strip that shows the rows asks for them; any other skips the
       // rain and road-time work (Codex #6045 r2).
       bestRows: bestRows === true,
-      // Rain ranking (GATE_BOOKING_RAIN_RANK) reads what is being booked.
+      // Rain ranking reads what is being booked.
       // Each name carries its catalog key when the catalog holds it, so the
       // ranking reads the service's identity, not the words in its name.
       // An existing visit's own rows say what moves, and how far a shared

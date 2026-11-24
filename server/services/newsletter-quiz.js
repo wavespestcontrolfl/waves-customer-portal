@@ -26,9 +26,13 @@
  * carry an answer the server won't honor (and vice-versa).
  */
 
-const db = require('../models/db');
+// The database loads where it is used (recordQuizResponse, newsletterIssuePolls), not here: the
+// Waves Pest Insider builder loads this module for its polls and must build offline, with no
+// database module (pest-insider/index.js; pre-push round 21).
 const logger = require('./logger');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { PEST_INSIDER_TYPE } = require('../config/newsletter-types');
+const { etCalendarDaysUntil } = require('../utils/datetime-et');
 
 // Body substitution tokens. Hyphenated like {{greeting-name}} / {{grass-type}}
 // so a model-written _italic_ marker can't split them mid-render. {{quiz}} is
@@ -125,6 +129,109 @@ const QUIZZES = {
     ],
   },
 };
+
+// Waves Newsletter polls: the list the owner approved on 2026-11-20 (NL1-NL10
+// on the Pest Insider look page; "other than that looks good"), in his order.
+// Just for fun: no interest tags, no visit promise, and landingCtaSuppressed
+// keeps the thank-you page from pitching a booking. A vote takes the same two
+// taps as every quiz (the answer, then Confirm). The autopilot adds one poll
+// to at most every 3rd issue (chooseNewsletterPoll); nothing else adds one.
+const NEWSLETTER_POLLS = [
+  ['nl-poll-weekend-v1', 'Poll: weekend plans', 'Where will you be this weekend?',
+    [['beach', 'Beach'], ['park', 'Park'], ['home', 'Home'], ['out-to-eat', 'Out to eat']]],
+  ['nl-poll-drive-v1', 'Poll: drive for an event', 'How far will you drive for a good event?',
+    [['15-minutes', '15 minutes'], ['half-hour', 'Half an hour'], ['hour', 'An hour'], ['road-trip', 'Road trip!']]],
+  ['nl-poll-sunset-spot-v1', 'Poll: sunset spot', 'Your Gulf sunset spot?',
+    [['siesta-key', 'Siesta Key'], ['anna-maria', 'Anna Maria'], ['st-pete-beach', 'St. Pete Beach'], ['somewhere-else', 'Somewhere else']]],
+  ['nl-poll-classic-v1', 'Poll: Florida classic', 'Pick one Florida classic',
+    [['grouper-sandwich', 'Grouper sandwich'], ['cuban-sandwich', 'Cuban sandwich'], ['stone-crab', 'Stone crab'], ['key-lime-pie', 'Key lime pie']]],
+  ['nl-poll-rainy-v1', 'Poll: rainy afternoon', 'Rainy afternoon plan?',
+    [['museum', 'Museum'], ['movie', 'Movie'], ['mall', 'Mall'], ['nap', 'Nap']]],
+  ['nl-poll-whats-on-v1', "Poll: finding what's on", "How do you find out what's on?",
+    [['waves-newsletter', 'Waves Newsletter'], ['friends', 'Friends'], ['social-media', 'Social media'], ['wing-it', 'I wing it']]],
+  ['nl-poll-dogs-v1', 'Poll: dogs at events', 'Dogs at events: more, please?',
+    [['more', 'More, please'], ['fine', "They're fine"], ['fewer', 'Fewer, please'], ['no-opinion', 'No opinion']]],
+  ['nl-poll-sunrise-v1', 'Poll: sunrise or sunset', 'Sunrise or sunset?',
+    [['sunrise', 'Sunrise'], ['sunset', 'Sunset'], ['both', 'Both'], ['asleep', "I'm asleep"]]],
+  ['nl-poll-season-v1', 'Poll: best season', 'Best Florida season?',
+    [['winter', 'Winter'], ['spring', 'Spring'], ['summer', 'Summer'], ['fall', 'Fall (what fall?)']]],
+  ['nl-poll-music-v1', 'Poll: live music', "Live music: what's your speed?",
+    [['rock', 'Rock'], ['country', 'Country'], ['jazz-blues', 'Jazz or blues'], ['anything-live', 'Anything live']]],
+];
+// Waves Pest Insider polls: the wording and order the owner approved on
+// 2026-11-22 ("polls rec", choice C), which replace the 2026-11-20 list (PI1-PI6
+// on the same page). Same rules as the Waves Newsletter's. The Pest Insider
+// planner adds one to at most every 3rd issue (pest-insider/schedule.js, through
+// chooseNewsletterPoll); nothing else adds one.
+const PEST_INSIDER_POLLS = [
+  ['pi-poll-house-spider-v1', 'Poll: spider in the house', 'Spider in the house. What happens next?',
+    [['cup-and-card', 'Cup and card'], ['leave-it-be', 'Leave it be'], ['shoe', 'Shoe'], ['move-out', 'Move out']]],
+  ['pi-poll-worst-guest-v1', 'Poll: worst house guest', 'Which pest is the worst house guest?',
+    [['ants', 'Ants'], ['roaches', 'Roaches'], ['mosquitoes', 'Mosquitoes'], ['spiders', 'Spiders']]],
+  ['pi-poll-lizards-v1', 'Poll: lizards on the lanai', 'Lizards on the lanai: friend or foe?',
+    [['friend', 'Friend'], ['foe', 'Foe'], ['depends', 'Depends'], ['what-lizards', 'What lizards?']]],
+  ['pi-poll-bug-surprise-v1', 'Poll: Florida bug surprise', 'Biggest Florida bug surprise?',
+    [['palmetto-bugs', 'Palmetto bugs'], ['lovebugs', 'Lovebugs'], ['fire-ants', 'Fire ants'], ['no-see-ums', 'No-see-ums']]],
+  ['pi-poll-yard-smell-v1', 'Poll: yard smell', 'Best smell in a Florida yard?',
+    [['orange-blossom', 'Orange blossom'], ['cut-grass', 'Cut grass'], ['jasmine', 'Jasmine'], ['rain-coming', 'Rain coming']]],
+  ['pi-poll-mosquito-bites-v1', 'Poll: mosquito bites', 'Who gets the mosquito bites at your house?',
+    [['me-always', 'Me, always'], ['everyone', 'Everyone'], ['not-me', 'Not me'], ['nobody', 'Nobody']]],
+];
+// Retired Waves Pest Insider polls: the planner never picks one again, but an
+// email already sent can still carry its vote links. So the definition stays:
+// a late vote from such an email still counts, the poll rules of
+// recordQuizResponse still hold for that issue (no other quiz's answer replaces
+// the vote), and the poll history still reads that issue as a poll issue. No
+// new issue shows one (render.js pollBlock takes a current poll only) and the
+// result line never reports one (pollResultLine).
+// pi-poll-bugging-you-v1: reworded and replaced by pi-poll-worst-guest-v1 on
+// 2026-11-22; a vote on the old question is not a vote on the new one.
+const RETIRED_PEST_INSIDER_POLLS = [
+  ['pi-poll-bugging-you-v1', 'Poll: pest bugging you', 'Which pest bugs you most this month?',
+    [['ants', 'Ants'], ['roaches', 'Roaches'], ['mosquitoes', 'Mosquitoes'], ['spiders', 'Spiders']]],
+];
+// Adds one newsletter's polls to QUIZZES; returns their ids in the owner's
+// order: the newsletter uses each once, then stops.
+function addPolls(polls, landingLine) {
+  for (const [id, label, question, answers] of polls) {
+    QUIZZES[id] = {
+      label,
+      question,
+      emailCta: 'Tap one, then confirm. Just for fun.',
+      landingLine,
+      // The archive and the owner's Monday or FYI copy show the poll with no links.
+      neutralLine: 'Readers vote right in the email. Just for fun.',
+      landingCtaSuppressed: true,
+      poll: true,
+      bookLabel: 'Book a visit',
+      bookService: 'pest_control',
+      answers: answers.map(([key, text]) => ({ key, label: text, tags: [] })),
+    };
+  }
+  return Object.freeze(polls.map(([id]) => id));
+}
+const NEWSLETTER_POLL_IDS = addPolls(NEWSLETTER_POLLS, 'Your vote is in. See you in the next Waves Newsletter.');
+// The Waves Pest Insider's next issue opens with the last poll's result (pollResultLine).
+const PEST_INSIDER_POLL_IDS = addPolls(PEST_INSIDER_POLLS, "Your vote is in. We'll share the top answer in the Waves Pest Insider.");
+// A retired poll keeps the thank-you line it had: it promises no result.
+const RETIRED_PEST_INSIDER_POLL_IDS = addPolls(RETIRED_PEST_INSIDER_POLLS, 'Your vote is in. See you in the next Waves Pest Insider.');
+const isNewsletterPoll = (quizId) => NEWSLETTER_POLL_IDS.includes(quizId);
+// A CURRENT Waves Pest Insider poll: one a new issue may show.
+const isPestInsiderPoll = (quizId) => PEST_INSIDER_POLL_IDS.includes(quizId);
+// Any poll an email can carry, a retired one included (the vote rules).
+const isPoll = (quizId) => isNewsletterPoll(quizId) || isPestInsiderPoll(quizId) || RETIRED_PEST_INSIDER_POLL_IDS.includes(quizId);
+// A newsletter type's own list: the Waves Pest Insider's for its type, the
+// Waves Newsletter's for any other (only the flagship draft shows one).
+const pollIdsFor = (newsletterType) => (newsletterType === PEST_INSIDER_TYPE ? PEST_INSIDER_POLL_IDS : NEWSLETTER_POLL_IDS);
+// The polls an issue of that type can hold, retired ones included: what the
+// poll history reads, so an old issue with a retired poll still counts as a
+// poll issue for the every-3rd-issue rule.
+const PEST_INSIDER_POLL_HISTORY_IDS = Object.freeze([...PEST_INSIDER_POLL_IDS, ...RETIRED_PEST_INSIDER_POLL_IDS]);
+const pollHistoryIdsFor = (newsletterType) => (newsletterType === PEST_INSIDER_TYPE ? PEST_INSIDER_POLL_HISTORY_IDS : NEWSLETTER_POLL_IDS);
+// Every poll id carries this; the history query's loose prefilter reads it.
+const POLL_ID_MARK = '-poll-';
+/** Sent issues between two polls: a poll shows in at most every 3rd issue, never two in a row. */
+const POLL_ISSUE_GAP = 2;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -307,7 +414,7 @@ function renderQuizNeutralHtml({ quizId = DEFAULT_QUIZ_ID } = {}) {
   return `<div class="dm-box" style="margin:24px 0;padding:20px;background:${C.cardBg};border:1px solid ${C.rule};border-radius:12px;text-align:center;">
 <p style="margin:0 0 12px 0;font-size:18px;font-weight:700;color:${C.navy};font-family:Inter,Arial,sans-serif;">${esc(quiz.question)}</p>
 <div>${chips}</div>
-<p style="margin:12px 0 0 0;font-size:14px;color:${C.muted};font-family:Inter,Arial,sans-serif;">Subscribers tap an answer right in the email to get a free check.</p>
+<p style="margin:12px 0 0 0;font-size:14px;color:${C.muted};font-family:Inter,Arial,sans-serif;">${esc(quiz.neutralLine || 'Subscribers tap an answer right in the email to get a free check.')}</p>
 </div>`;
 }
 
@@ -356,6 +463,7 @@ function neutralizeQuizTokens(content) {
  * 'no-delivery' | 'no-subscriber' | 'error'.
  */
 async function recordQuizResponse({ token, quizId, answerKey }) {
+  const db = require('../models/db');
   try {
     if (!token || !UUID_RE.test(String(token))) return { ok: false, reason: 'bad-token' };
     const answer = resolveAnswer(quizId, answerKey);
@@ -363,8 +471,21 @@ async function recordQuizResponse({ token, quizId, answerKey }) {
 
     const delivery = await db('newsletter_send_deliveries')
       .where({ engagement_token: token })
-      .first('id', 'subscriber_id');
+      .first('id', 'subscriber_id', 'send_id');
     if (!delivery) return { ok: false, reason: 'no-delivery' };
+
+    // A poll answer (Waves Newsletter or Waves Pest Insider) counts only from
+    // an issue that showed that poll, and an issue that showed a poll takes
+    // answers only to the quizzes it showed (quizzesInIssue, the rule the poll history reads
+    // too): an older issue's token must not record a poll its reader never
+    // saw, and a hand-made link must not overwrite a poll vote (or add
+    // service tags) with another quiz's answer. An issue with no poll keeps
+    // the old rule. The public route answers the same either way.
+    const answeredQuiz = quizId || DEFAULT_QUIZ_ID;
+    const shown = quizzesInIssue(await db('newsletter_sends').where({ id: delivery.send_id }).first('html_body', 'text_body'));
+    if ((isPoll(answeredQuiz) || shown.some(isPoll)) && !shown.includes(answeredQuiz)) {
+      return { ok: false, reason: 'not-in-issue' };
+    }
 
     // Stamp the answer on the delivery row regardless (engagement record).
     await db('newsletter_send_deliveries').where({ id: delivery.id }).update({
@@ -410,7 +531,214 @@ async function recordQuizResponse({ token, quizId, answerKey }) {
   }
 }
 
+/**
+ * The quizzes an issue shows: every quiz token, of either form, in either
+ * part, in any letter case. These are the tokens the sender renders as vote
+ * links: newsletter-sender.js builds one substitution map from both parts
+ * joined (buildQuizSubstitutions), and SendGrid applies it to both parts.
+ */
+function quizzesInIssue(issue) {
+  return parseQuizTokens(`${issue?.html_body || ''}\n${issue?.text_body || ''}`).map((token) => token.quizId);
+}
+
+// The poll from `ids` (default: the Waves Newsletter's) an issue shows, or null.
+function pollInIssue(issue, ids = NEWSLETTER_POLL_IDS) {
+  return quizzesInIssue(issue).find((quizId) => ids.includes(quizId)) || null;
+}
+
+/**
+ * The poll for a newsletter's next issue, or null. `recent` lists the newest
+ * POLL_ISSUE_GAP issues readers got (newest first), each as the poll it
+ * showed or null; `used` lists every poll an issue holds; `ids` is that
+ * newsletter's list (newsletterIssuePolls returns all three; the default is
+ * the Waves Newsletter's). No poll when one of the recent issues had one, so a
+ * poll shows in at most every 3rd issue and never in two in a row. Otherwise
+ * the first poll in the owner's order that no issue holds; none once the list
+ * is used up.
+ */
+function chooseNewsletterPoll({ recent = [], used = [], ids = NEWSLETTER_POLL_IDS } = {}) {
+  if (recent.slice(0, POLL_ISSUE_GAP).some(Boolean)) return null;
+  const taken = new Set(used);
+  return ids.find((id) => !taken.has(id)) || null;
+}
+
+// An issue's time: its sent_at, else the earliest time any of its delivery rows
+// records, else its schedule, else its draft time (the rule newsletterIssuePolls
+// describes). Both history reads sort and date issues by it.
+const ISSUE_TIME_SQL = `COALESCE(s.sent_at,
+      (SELECT LEAST(MIN(f.sent_at), MIN(f.delivered_at), MIN(f.opened_at), MIN(f.clicked_at),
+          MIN(f.complained_at), MIN(f.unsubscribed_at))
+        FROM newsletter_send_deliveries f WHERE f.send_id = s.id),
+      s.scheduled_for, s.created_at)`;
+
+// whereExists callback: one of the issue's delivery rows reached its reader by
+// the sender's own rule. reachedDelivery's unqualified columns are d's: SQL
+// resolves a name in the innermost FROM first, before the outer newsletter_sends row.
+function reachedRowFilter(knex) {
+  // Loaded here, not at the top: newsletter-sender.js loads this module first.
+  const { reachedDelivery } = require('./newsletter-sender');
+  return (sub) => {
+    reachedDelivery(sub.select(knex.raw('1')).from('newsletter_send_deliveries as d').whereRaw('d.send_id = s.id'));
+  };
+}
+
+// The newest `limit` issues of one newsletter type that readers got (newest
+// first), with `columns` of each (newsletter_sends as s).
+function newestReachedIssues({ newsletterType, knex, limit, columns }) {
+  return knex('newsletter_sends as s')
+    .where('s.newsletter_type', newsletterType)
+    .whereExists(reachedRowFilter(knex))
+    .orderByRaw(`${ISSUE_TIME_SQL} DESC`)
+    .limit(limit)
+    .select(columns);
+}
+
+/**
+ * Reads what chooseNewsletterPoll needs from the issues of one newsletter
+ * type: its list (pollIdsFor), the polls of the newest POLL_ISSUE_GAP issues
+ * that readers got, and every poll an issue holds. An issue reached readers when one of its delivery
+ * rows reached its reader by the sender's own rule (newsletter-sender.js
+ * reachedDelivery), whatever the issue's status: a send its deadline stopped,
+ * or one the stale-claim recovery ended, is 'failed' although its first
+ * batches reached readers; a 'sent' issue whose every recipient dropped out
+ * before dispatch, or whose every message hard-bounced, reached no one (its
+ * recipient_count is no proof either way: a worker that stopped after a
+ * batch leaves it at 0).
+ * Sent bodies keep their quiz tokens (the per-reader buttons are SendGrid
+ * substitutions), so the tokens in html_body and text_body are the record,
+ * read as the sender renders them (pollInIssue).
+ * An issue's time is its sent_at, else the earliest time any of its delivery
+ * rows records (a worker that failed after a batch leaves sent_at empty, a
+ * lost SendGrid answer leaves a row's sent_at empty while the webhook still
+ * stamps the delivery, and a resume clears scheduled_for), else its schedule,
+ * else its draft time.
+ *
+ * An issue no reader got yet still holds its poll while a Resume could mail
+ * one of its rows (newsletter-sender.js outstandingEligibleDeliveries: a
+ * retryable row of a still-eligible reader): sendCampaign skips the Tuesday
+ * window for a resume of existing rows, so that issue can go out after a
+ * later one. Its poll is never chosen again, and is skipped if the issue is
+ * never resumed. It is held, not every poll: a failed issue nobody resumes
+ * would otherwise stop the polls for good.
+ * Any other unsent issue holds nothing: a fresh send of a flagship issue goes
+ * out only on its own Tuesday at 6:00 AM ET (newsletter-sender.js
+ * isCurrentFlagshipTarget + isFlagshipDeliveryWindow), and its approval needs
+ * that Tuesday still ahead (newsletter-proof.js resolveFlagshipCalendarContext),
+ * so last week's unsent issue cannot follow this week's.
+ */
+async function newsletterIssuePolls({ newsletterType, knex = require('../models/db') } = {}) {
+  // Loaded here, not at the top: newsletter-sender.js loads this module first.
+  const { outstandingEligibleDeliveries } = require('./newsletter-sender');
+  const ids = pollIdsFor(newsletterType);
+  const issues = () => knex('newsletter_sends as s').where('s.newsletter_type', newsletterType);
+  const reachedRow = reachedRowFilter(knex);
+  const resumableRow = () => outstandingEligibleDeliveries('s.id', { database: knex, correlate: true })
+    .select(knex.raw('1'));
+  // An unsent Waves Pest Insider issue holds its poll while its send row
+  // exists: a held issue (its send is a draft again), a queued one, one a
+  // worker has claimed, and a failed one, whatever its delivery rows say. A
+  // person can send or resume any of them by hand, and the sender has no send
+  // window on those paths for this newsletter, so such an issue can go out
+  // after a later one. A poll held by an issue that never goes out is skipped
+  // until that row is deleted: with six polls, a skipped one is cheaper than a
+  // repeated one. A flagship issue goes out only on its own Tuesday, so there
+  // only a resumable row holds.
+  const UNSENT = ['draft', 'scheduled', 'sending', 'failed'];
+  const newest = await newestReachedIssues({ newsletterType, knex, limit: POLL_ISSUE_GAP, columns: ['s.html_body', 's.text_body'] });
+  // A loose prefilter (any token form, either part, any letter case);
+  // pollInIssue then reads the tokens exactly as the sender renders them.
+  const holding = await issues()
+    .where((issue) => {
+      issue.whereExists(reachedRow).orWhereExists(resumableRow());
+      if (newsletterType === PEST_INSIDER_TYPE) issue.orWhereIn('s.status', UNSENT);
+    })
+    .where((body) => body.where('s.html_body', 'ilike', `%{{quiz%${POLL_ID_MARK}%`)
+      .orWhere('s.text_body', 'ilike', `%{{quiz%${POLL_ID_MARK}%`))
+    .select('s.html_body', 's.text_body');
+  // `ids` is the list the next issue picks from; the history also reads a
+  // retired poll, so the issue that carried one is still a poll issue.
+  const historyIds = pollHistoryIdsFor(newsletterType);
+  return {
+    ids,
+    recent: newest.map((issue) => pollInIssue(issue, historyIds)),
+    used: holding.map((issue) => pollInIssue(issue, historyIds)).filter(Boolean),
+  };
+}
+
+/** A poll issue older than this many days (by ET calendar date) leaves its result out of the next issue. */
+const POLL_RESULT_MAX_AGE_DAYS = 45;
+
+/**
+ * The vote counts of a Waves Pest Insider's last poll, for the issue sent on
+ * `sendDate` ('YYYY-MM-DD', ET), or null. Only the NEWEST issue readers got
+ * counts (newestReachedIssues, the rule and the issue time newsletterIssuePolls
+ * reads): when it held a poll, and its time is at most POLL_RESULT_MAX_AGE_DAYS
+ * before `sendDate`, the result is { quizId, counts } with one count per
+ * answer key. A vote is one of that issue's own delivery rows with the poll's
+ * id and an answer time; a reader who voted again changed the row's answer
+ * (recordQuizResponse), so each row counts once. Throws on a read failure: the
+ * planner's caller drops the line and warns (schedule.js lastPollLine).
+ */
+async function newsletterLastPoll({ newsletterType, sendDate, knex = require('../models/db') } = {}) {
+  const [issue] = await newestReachedIssues({
+    newsletterType,
+    knex,
+    limit: 1,
+    columns: ['s.id', 's.html_body', 's.text_body', knex.raw(`${ISSUE_TIME_SQL} AS issue_time`)],
+  });
+  const quizId = issue ? pollInIssue(issue, pollIdsFor(newsletterType)) : null;
+  if (!quizId) return null;
+  // Whole ET calendar days from the issue's day to the new issue's day.
+  if (etCalendarDaysUntil(sendDate, new Date(issue.issue_time)) > POLL_RESULT_MAX_AGE_DAYS) return null;
+  const rows = await knex('newsletter_send_deliveries')
+    .where({ send_id: issue.id, quiz_id: quizId })
+    .whereNotNull('quiz_answered_at')
+    .groupBy('quiz_answer')
+    .select('quiz_answer')
+    .count({ n: '*' });
+  return { quizId, counts: Object.fromEntries(rows.map((row) => [row.quiz_answer, Number(row.n)])) };
+}
+
+// A label ends its sentence with a period unless it already ends in ? . or !
+// ("What lizards?" stays "What lizards?").
+const endSentence = (text) => (/[.?!]$/.test(text) ? text : `${text}.`);
+
+/**
+ * The words that tell readers how a Waves Pest Insider poll came out, or null
+ * (owner 2026-11-22, "polls rec"): `Last poll: <question> The top answer was
+ * <label>.`; for two answers tied at the top `It was a tie between X and Y.`
+ * (the poll's own answer order, except a label that holds " and " goes last);
+ * for three or four, `It was a tie. No answer came out on top.` No line for no
+ * votes, an unknown poll, or a poll of another newsletter. Only the poll's own
+ * answer keys count. It never prints a count or a percentage.
+ * @param {{ quizId: string, counts: Record<string, number> }} result
+ */
+function pollResultLine({ quizId, counts } = {}) {
+  const quiz = isPestInsiderPoll(quizId) ? getQuiz(quizId) : null;
+  if (!quiz) return null;
+  const votes = quiz.answers.map((a) => ({ label: a.label, n: Number(counts?.[a.key]) || 0 }));
+  const top = Math.max(...votes.map((v) => v.n));
+  if (!(top > 0)) return null;
+  const labels = votes.filter((v) => v.n === top).map((v) => v.label);
+  if (labels.length === 1) return `Last poll: ${quiz.question} The top answer was ${endSentence(labels[0])}`;
+  if (labels.length > 2) return `Last poll: ${quiz.question} It was a tie. No answer came out on top.`;
+  const [first, second] = [...labels].sort((a, b) => a.includes(' and ') - b.includes(' and '));
+  return `Last poll: ${quiz.question} It was a tie between ${first} and ${endSentence(second)}`;
+}
+
 module.exports = {
+  NEWSLETTER_POLL_IDS,
+  PEST_INSIDER_POLL_IDS,
+  RETIRED_PEST_INSIDER_POLL_IDS,
+  POLL_ID_MARK,
+  POLL_ISSUE_GAP,
+  isNewsletterPoll,
+  isPestInsiderPoll,
+  pollInIssue,
+  chooseNewsletterPoll,
+  newsletterIssuePolls,
+  newsletterLastPoll,
+  pollResultLine,
   QUIZ_HTML_TOKEN,
   QUIZ_TEXT_TOKEN,
   QUIZ_TOKEN_PATTERN,

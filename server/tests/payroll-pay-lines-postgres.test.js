@@ -687,6 +687,85 @@ postgres('payroll pay lines', () => {
     });
   });
 
+  // Tech Rewards Plan D5-5, part 1: the kinds exist and a pay run carries them. No code writes one yet, so these rows are
+  // inserted straight into the table.
+  describe('a season bonus, stay bonus or December gift line', () => {
+    const rewardLine = async (technicianId, kind, amountCents) => {
+      const [row] = await trx('payroll_pay_lines').insert({
+        technician_id: technicianId, kind, amount_cents: amountCents, earned_week_start: W1,
+      }).returning('id');
+      return row.id;
+    };
+
+    it('is a kind the table allows beside the four earlier ones, and any other kind is refused', async () => {
+      const id = await readyTech('Sample Alpha');
+      for (const kind of ['review_bonus', 'commission', 'health_allowance', 'hsa_employer', 'season_bonus', 'stay_bonus', 'december_gift']) {
+        expect(await refused(() => trx('payroll_pay_lines').insert({ technician_id: id, kind, amount_cents: 100, earned_week_start: W1 }))).toBeUndefined();
+      }
+      const other = await refused(() => trx('payroll_pay_lines').insert({ technician_id: id, kind: 'free_money', amount_cents: 100, earned_week_start: W1 }));
+      expect(other.message).toMatch(/payroll_pay_lines_kind_check/);
+    });
+
+    it('cannot be added or removed by hand, and shows in the list', async () => {
+      const id = await readyTech('Sample Alpha');
+      for (const kind of ['season_bonus', 'stay_bonus', 'december_gift']) {
+        const added = await api('POST', '/pay-lines', { body: { kind, technicianId: id, amountCents: 30000, earnedWeekStart: W1 } });
+        expect(added.status).toBe(400);
+      }
+      const lineId = await rewardLine(id, 'december_gift', 30000);
+      const listed = await api('GET', `/pay-lines?technicianId=${id}&status=open`);
+      expect(listed.body.payLines).toMatchObject([{ id: lineId, kind: 'december_gift', amountCents: 30000, status: 'open' }]);
+      const removed = await api('DELETE', `/pay-lines/${lineId}`);
+      expect(removed.status).toBe(409);
+      expect(removed.body.error).toBe('The pay run works this line out by itself. It cannot be removed here.');
+      expect(await lineRow(lineId)).toMatchObject({ status: 'open' });
+    });
+
+    it('is taxable pay on the check, with its own figure on the check row, the stub and the CSV', async () => {
+      const id = await readyTech('Sample Alpha');
+      const plain = await readyTech('Sample Bravo');
+      await approvedWeek(id, W1);
+      await approvedWeek(plain, W1);
+      await rewardLine(id, 'season_bonus', 150000);
+      await rewardLine(id, 'december_gift', 30000);
+      await addLine(id, { amountCents: 3000 });
+      const run = await draftAndFinalize(W1);
+      const check = byName(run, 'Sample Alpha');
+      expect(check).toMatchObject({ techRewardsCents: 180000, reviewBonusCents: 3000, grossCents: 88000 + 3000 + 180000 });
+      // Medicare is withheld on it, as on any wages
+      expect(check.medicareCents).toBe(Math.round((88000 + 3000 + 180000) * 0.0145));
+      const stored = await trx('payroll_checks').where({ id: check.id }).first('tech_rewards_cents');
+      expect(Number(stored.tech_rewards_cents)).toBe(180000);
+      // a check with none stores null and shows no such figure
+      const other = byName(run, 'Sample Bravo');
+      expect(other).not.toHaveProperty('techRewardsCents');
+      expect((await trx('payroll_checks').where({ id: other.id }).first('tech_rewards_cents')).tech_rewards_cents).toBeNull();
+      const stub = (await api('GET', `/checks/${check.id}/stub`)).body.stub;
+      expect(stub.earnings).toMatchObject({ techRewardsCents: 180000, grossCents: 88000 + 3000 + 180000 });
+      expect((await api('GET', `/checks/${other.id}/stub`)).body.stub.earnings).not.toHaveProperty('techRewardsCents');
+      const csv = (await api('GET', `/runs/${run.id}/export.csv`, { raw: true })).text.split('\n');
+      expect(csv[0]).toMatch(/Overtime On Bonus And Allowance,HSA From Waves,Tech Rewards Bonus$/);
+      expect(csv[1]).toMatch(/^Sample Alpha,.*,1800\.00$/);
+      expect(csv[2]).toMatch(/^Sample Bravo,.*,0\.00$/);
+      // the lines are paid with the check, like any pay line
+      const paid = await trx('payroll_pay_lines').where({ technician_id: id }).whereIn('kind', ['season_bonus', 'december_gift']).pluck('status');
+      expect(paid).toEqual(['paid', 'paid']);
+    });
+
+    it('adds no CSV column to a run with none, and the check figure is never negative', async () => {
+      const id = await readyTech('Sample Alpha');
+      await approvedWeek(id, W1);
+      await addLine(id, { amountCents: 3000 });
+      const created = await draft(W1);
+      const csv = await api('GET', `/runs/${created.body.run.id}/export.csv`, { raw: true });
+      expect(csv.text.split('\n')[0]).toMatch(/Overtime On Bonus And Allowance,HSA From Waves$/);
+      const check = byName(created.body.run, 'Sample Alpha');
+      expect(check).not.toHaveProperty('techRewardsCents');
+      const negative = await refused(() => trx('payroll_checks').where({ id: check.id }).update({ tech_rewards_cents: -1 }));
+      expect(negative.message).toMatch(/payroll_checks_tech_rewards_check/);
+    });
+  });
+
   describe('with the gate off', () => {
     it('leaves an open line alone and writes a check exactly as before', async () => {
       const id = await readyTech('Sample Alpha');

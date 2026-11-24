@@ -26,7 +26,7 @@
  * exactly like a manual "add product" tap. PEST is NOT curated here (owner ruling
  * 2026-09-27): the general recurring/one-time pest visit keeps its
  * existing house mix on the client — lib/pest-default-mix.js (Taurus SC +
- * Atticus Talak 7.9 F + LESCO 90/10 Nonionic Surfactant, fixed totals). A
+ * LESCO Crosscheck Plus + LESCO 90/10 Nonionic Surfactant, fixed totals). A
  * seasonal pest rotation is a possible LATER PR, built when a visit
  * actually needs it, not ahead of time.
  *
@@ -91,7 +91,6 @@
  */
 
 const { matchServiceProtocol, MATCH_RULES } = require('./protocol-matcher');
-const { gateEnvValue } = require('../config/feature-gates');
 const { filterTreeShrubDefaults } = require('./tree-shrub-completion-defaults');
 const { inferTreeShrubOrdinanceZone } = require('./tree-shrub-closeout');
 
@@ -364,9 +363,9 @@ function emptyResult(serviceId) {
 // keeps the conservative Sarasota/Manatee rule (an unknown zone).
 async function propertyOrdinanceZone(db, propertyId) {
   const place = propertyId
-    ? await db('customer_properties').where({ id: propertyId }).first('city', 'address_line1').catch(() => null)
+    ? await db('customer_properties').where({ id: propertyId }).first('city', 'zip').catch(() => null)
     : null;
-  return inferTreeShrubOrdinanceZone({ city: place?.city, address: place?.address_line1 });
+  return inferTreeShrubOrdinanceZone(place || {});
 }
 
 // The route-facing orchestrator: loads the scheduled service + its
@@ -404,11 +403,7 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
     });
 
     let holds = [];
-    if (resolved.programKey === 'tree_shrub' && !gateEnvValue('GATE_TREE_SHRUB_FIELD_GUIDE')) {
-      // Gate dark: the new protocol-visit entries stay hidden, and every other
-      // source keeps main's pre-#5089 behavior unchanged.
-      if (resolved.source === 'protocol_visit') return { ...empty, programKey: 'tree_shrub' };
-    } else if (resolved.programKey === 'tree_shrub') {
+    if (resolved.programKey === 'tree_shrub') {
       // Legacy service defaults are not reviewed T&S treatment choices.
       if (resolved.source !== 'protocol_visit') return { ...empty, programKey: 'tree_shrub' };
       const zone = await propertyOrdinanceZone(db, scheduled.property_id);

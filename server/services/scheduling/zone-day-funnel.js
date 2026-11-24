@@ -17,7 +17,8 @@
  *      visible to step 1.
  *
  * Deliberate boundaries:
- *   - Offer-time only. There is NO redemption re-check in reserveSlot: the
+ *   - Offer-time only. There is NO redemption re-check of the cluster choice
+ *     in reserveSlot (owner rule B per truck, below, is a different check): the
  *     signed slot offer (slot-offer-token) already binds surface + estimate +
  *     date, so a customer can only tap a day this funnel genuinely offered —
  *     and unlike an owner blackout, a cluster day shifting between offer and
@@ -42,13 +43,64 @@
  *     by slug. Zone-stop matching mirrors filterCollidingSlots exactly (zone
  *     slug OR customer city, both case-insensitive) so the two can't drift.
  *
+ * Per truck (GATE_MULTI_TECH_CONFIRM, read through occupancy.js
+ * techScopedConfirmActive like every tech-scoped check; owner 2026-11-19
+ * "build south"): getZoneFunnelDays also returns each zone day's technicians
+ * (techDays), and onZoneDay decides whether a date is a zone day for one
+ * technician: a stop of that technician, or an unassigned stop (any truck may
+ * take it). The night run's far-south rule (auto-dispatch/south-day-kept.js)
+ * reads it. The booking pages (the estimate page, the assessment link) follow
+ * owner rule B (2026-11-19, "Only the truck that is already going south that
+ * day"): dropOtherTruckDays removes each opening of a truck on another
+ * truck's zone day, and it runs on the openings BEFORE a page chooses among
+ * trucks (one technician per start, the one-per-hour collapse, the line
+ * rule's home-first start, the seed day, the customer route check and its
+ * floor). Each of those choices then runs exactly as with one truck, over
+ * what the rule allows: clustered keeps the zone trucks' own days, seeded
+ * opens one new day (no truck goes south on it yet; never empty when such a
+ * day has an opening). The assessment link's commit rebuild drops the same
+ * openings, because that commit books whichever truck its rebuild finds at
+ * the picked date and start (the estimate page books the signed slot's own
+ * technician). Two bookings can still pick the same new day for two trucks
+ * before either is written, so the assessment link's booking transaction
+ * re-checks the truck under its date lock (truckMayTakeDate,
+ * createSelfBooking callbackVisit.slotGuard) with the zone it stamps on its
+ * row. The estimate page re-checks it under the same date lock at each hold
+ * write: a new hold in the zone it stamps (reserveSlot), and a re-tap, an
+ * extend and an accept in the hold's stamp (slot-reservation.js
+ * holdKeepsSouthDay), the zone its list funneled (zoneOfHoldStamp: a stamp whose
+ * row is gone is checked in the same funneled pool). A hold that list did not
+ * funnel (no stamp: its estimate in no zone when held) is not checked. The stop read
+ * counts a hold by the real clock (clock_timestamp), not the writer's
+ * transaction start; under the date lock it also counts a visit staff booked
+ * that keeps its old hold time (zoneStopDays). The
+ * assessment link's list and its booking resolve the zone from the one booking
+ * address the same way (slot-zone.js leadBookingZone: its city decides, its text
+ * only without one, else the customer's own city on file when the list knows the
+ * customer; createSelfBooking callbackVisit.zoneAddress, read only with the
+ * funnel on), so the offer never shows a time the check refuses, and the
+ * visit's stamp makes it a zone stop for the next booking.
+ * Off, every zone day is the fleet's, as with one truck.
+ *
  * Fail-open like blackout-dates: any lookup failure disables the funnel for
  * that request (full pool offered) — a scattered offer beats no offer.
  */
 
 const logger = require('../logger');
-const { zoneSlugOf, resolveEstimateZone } = require('../slot-zone');
+const { zoneSlugOf, leadBookingZone } = require('../slot-zone');
 const { isEnabled } = require('../../config/feature-gates');
+const { bookedVisitOrLiveHoldByRealClock } = require('./reservation-occupancy');
+
+// The per-truck switch: the scheduler's one technician-scope reader (occupancy.js techScopedConfirmActive,
+// GATE_MULTI_TECH_CONFIRM), read at call time. A read that throws (a suite that mocks occupancy or feature-gates
+// down to a few functions) reads as off, every zone day the fleet's, and never fails the zone lookup.
+function perTruckLive() {
+  try {
+    return require('./occupancy').techScopedConfirmActive() === true;
+  } catch {
+    return false;
+  }
+}
 
 // Funneled zone slugs (zoneSlugOf format — 'Venice / North Port' → 'venice').
 // Override without a deploy via SOUTH_FUNNEL_ZONE_SLUGS (comma-separated);
@@ -69,8 +121,13 @@ function funnelZoneSlugs() {
   );
 }
 
+// The far-south funnel switch (GATE_SOUTH_ZONE_DAY_FUNNEL).
+function funnelOn() {
+  return isEnabled('southZoneDayFunnel');
+}
+
 function isFunnelZone(estimateZone) {
-  if (!isEnabled('southZoneDayFunnel')) return false;
+  if (!funnelOn()) return false;
   const slug = zoneSlugOf(estimateZone);
   return !!slug && funnelZoneSlugs().has(slug);
 }
@@ -151,23 +208,35 @@ function rowMatchesZone(row, estimateZone, zoneSlug, zoneCities) {
 // is (or was) in the zone.
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 
-// Distinct YYYY-MM-DD dates in [dateFrom, dateTo] with at least one live
-// scheduled service (assigned or unassigned — either means a truck is in the
-// zone that day) matching the estimate's zone. Hold rows count only while
-// unexpired, mirroring filterCollidingSlots.
-async function zoneStopDates(dbc, estimateZone, dateFrom, dateTo) {
+// The zone's stop days in [dateFrom, dateTo]. `dates`: the distinct
+// YYYY-MM-DD dates with at least one live scheduled service (assigned or
+// unassigned — either means a truck is in the zone that day) matching the
+// estimate's zone. `techs`: each of those dates -> the technician ids of its
+// stops (null = an unassigned stop).
+// Holds follow main's split by side (occupancy.js occupiedHoldFilter, #7993). The check under the date lock
+// (`includeClaimedReservations`, truckMayTakeDate) also counts a visit staff booked that keeps its old hold time, as
+// the reservation and confirmation checks do: that visit is its truck's stop until the cleanup job clears the time
+// (pre-push P1 on 5061a1da2b). Fleet-wide there is no such check, and the lists count a hold only while unexpired, as
+// the estimate page's collision and packing reads and the booking lists do (pre-push P1 on b4fc39b372); per truck
+// they read holds as the check does (getZoneFunnelDays). Both read the real clock, not NOW() (the transaction's
+// start): a writer reads this under its date lock after waiting for it, and an unclaimed hold that ran out meanwhile
+// no longer holds the day (owner rule B).
+function liveHoldByRealClock(q) {
+  q.whereNull('scheduled_services.reservation_expires_at').orWhereRaw('scheduled_services.reservation_expires_at > clock_timestamp()');
+}
+
+async function zoneStopDays(dbc, estimateZone, dateFrom, dateTo, { includeClaimedReservations = false } = {}) {
   const rows = await dbc('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
     .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
-    .andWhere((q) => {
-      q.whereNull('scheduled_services.reservation_expires_at').orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-    })
+    .andWhere(includeClaimedReservations ? bookedVisitOrLiveHoldByRealClock : liveHoldByRealClock)
     .select(
       'scheduled_services.scheduled_date',
       'scheduled_services.zone',
       'scheduled_services.service_address_city as service_city',
       'customers.city as customer_city',
+      'scheduled_services.technician_id',
     );
 
   const zoneSlug = zoneSlugOf(estimateZone);
@@ -175,30 +244,60 @@ async function zoneStopDates(dbc, estimateZone, dateFrom, dateTo) {
     (estimateZone?.cities || []).map((c) => String(c || '').toLowerCase()).filter(Boolean),
   );
   const dates = new Set();
+  const techs = new Map();
   for (const row of rows) {
     if (!rowMatchesZone(row, estimateZone, zoneSlug, zoneCities)) continue;
     const date = row.scheduled_date instanceof Date
       ? row.scheduled_date.toISOString().slice(0, 10)
       : String(row.scheduled_date).slice(0, 10);
-    if (date) dates.add(date);
+    if (!date) continue;
+    dates.add(date);
+    if (!techs.has(date)) techs.set(date, new Set());
+    techs.get(date).add(row.technician_id == null ? null : String(row.technician_id));
   }
-  return dates;
+  return { dates, techs };
 }
 
-// { days, failed }: `days` is the Set of zone-stop dates when the funnel
-// applies to this estimate's zone, null when it doesn't (gate off, no/other
-// zone, or lookup failure — null means "leave the pool alone"). `failed`
-// distinguishes a transient lookup failure from genuinely-inactive so the
-// caller can keep fail-open REQUEST-scoped (e.g. not cache the unfunneled
-// result and extend one bad lookup across the whole cache TTL).
+// { days, techDays, failed }: `days` is the Set of zone-stop dates when the
+// funnel applies to this estimate's zone, null when it doesn't (gate off,
+// no/other zone, or lookup failure — null means "leave the pool alone").
+// `techDays` is the per-truck view of the same days (date -> technician ids,
+// null = an unassigned stop) when GATE_MULTI_TECH_CONFIRM is on, else null:
+// every zone day is the fleet's. `failed` distinguishes a transient lookup
+// failure from genuinely-inactive so the caller can keep fail-open
+// REQUEST-scoped (e.g. not cache the unfunneled result and extend one bad
+// lookup across the whole cache TTL).
 async function getZoneFunnelDays(dbc, { estimateZone, dateFrom, dateTo }) {
-  if (!isFunnelZone(estimateZone)) return { days: null, failed: false };
+  if (!isFunnelZone(estimateZone)) return { days: null, techDays: null, failed: false };
   try {
-    return { days: await zoneStopDates(dbc, estimateZone, dateFrom, dateTo), failed: false };
+    // Per truck, the lists read holds as the check under the date lock does (truckMayTakeDate), so they offer a
+    // truck only the days that check admits (pre-push P1 on e61d2e4cc0).
+    const perTruck = perTruckLive();
+    const { dates, techs } = await zoneStopDays(dbc, estimateZone, dateFrom, dateTo, { includeClaimedReservations: perTruck });
+    return { days: dates, techDays: perTruck ? techs : null, failed: false };
   } catch (err) {
     logger.warn(`[zone-day-funnel] zone-stop lookup failed (failing open): ${err.message}`);
-    return { days: null, failed: true };
+    return { days: null, techDays: null, failed: true };
   }
+}
+
+// Is `date` a zone day for technician `techId`? `days` = the zone-stop dates, `techDays` = their per-truck view
+// (getZoneFunnelDays). Fleet-wide (techDays null) or no technician: any zone stop that day. Per truck: a stop of
+// that technician, or an unassigned stop (any truck may take it).
+function onZoneDay(date, techId, days, techDays) {
+  if (!days.has(date)) return false;
+  if (!techDays || techId == null) return true;
+  const techs = techDays.get(date);
+  return !!techs && (techs.has(null) || techs.has(String(techId)));
+}
+
+// Owner rule B per truck: the slots a booking page may offer before it chooses among trucks. A date with no zone
+// stop stays open to every truck; a zone day only to its own trucks (onZoneDay: a stop of that technician, an
+// unassigned stop, or a slot with no technician). `view` = getZoneFunnelDays' { days, techDays }; `techOf(slot)` reads
+// a slot's technician id. Fleet-wide (techDays null) or no funnel (days null): the very same array.
+function dropOtherTruckDays(slots, { days = null, techDays = null } = {}, techOf) {
+  if (!days || !techDays || !Array.isArray(slots)) return slots;
+  return slots.filter((slot) => !days.has(slot?.date) || onZoneDay(slot.date, techOf(slot), days, techDays));
 }
 
 // Pure pool filter. funnelDays null → untouched. Otherwise clustered mode
@@ -227,26 +326,69 @@ function applyZoneDayFunnel(bookable, funnelDays, { preferredSeedDates = [] } = 
   };
 }
 
-// The same funnel for an offer pool that is not built by the estimate page
-// (the lead assessment link: routes/booking.js buildBookingAvailability, fed
-// the lead's address text). Same helpers, same rules: the zone resolves from
-// the address text through resolveEstimateZone, the cluster days come from
-// getZoneFunnelDays over THIS request's window, and applyZoneDayFunnel keeps
-// the cluster days or seeds one day (the pool's score order, route day first).
-// Returns `pool` itself — same array — whenever the funnel does not apply
-// (gate off, no address, no funneled zone) or cannot be resolved (zone or
-// lookup failure: logged, fail open, exactly as the estimate page does).
-async function funnelOfferPool(pool, { address, dateFrom, dateTo, routeDaySlug = null, conn }) {
-  if (!address || !Array.isArray(pool) || !pool.length || !isEnabled('southZoneDayFunnel')) return pool;
+// Owner rule B when a booking is written, under the writer's date lock: may `technicianId` still take `date` for a
+// booking in `estimateZone`, the zone the writer stamps on its row? Two bookings can pick the same new day for two
+// trucks before either is written; the date lock serializes them, and this read on the locked transaction sees the
+// first one's stop. Writers: the lead assessment link (createSelfBooking callbackVisit.slotGuard) and the estimate page's
+// hold writes (slot-reservation.js reserveSlot and holdKeepsSouthDay). true when the rule
+// does not apply (gate off, fleet view, no technician, no funneled zone), with no read. A query failure throws, so the writer's transaction fails closed like its other reads.
+async function truckMayTakeDate(conn, { estimateZone, date, technicianId }) {
+  if (technicianId == null || !perTruckLive() || !isFunnelZone(estimateZone)) return true;
+  const { dates, techs } = await zoneStopDays(conn, estimateZone, date, date, { includeClaimedReservations: true });
+  return !dates.has(date) || onZoneDay(date, technicianId, dates, techs);
+}
+
+// The zone a hold's zone stamp names, for the check at a kept hold's write (slot-reservation.js holdKeepsSouthDay).
+// ONE classification with the lists and the new-hold check: a stamp is far-south when isFunnelZone says so of a zone
+// with that slug (a funneled slug, exactly). reserveSlot stamps the slug of the zone row its list funneled by, so a
+// hold with such a stamp was funneled and checked when it was written, and it is ALWAYS checked again, whatever
+// happened to the zone rows since. Any other stamp names no zone (null) and is never checked: none, another zone, or
+// a legacy compound ('venice_north_port'), which isFunnelZone does not funnel either, so no list and no new hold
+// treated that hold as far-south. The zone is the ONE funneled row with that slug, the row the list funneled by. With
+// that row renamed or removed, the slug stands for the whole pool, because every funneled slug names the one
+// consolidated south pool the stop read counts that stamp in: it takes the cities of every funneled row left, so their
+// unstamped stops match by city (none left: no cities, and the stamped stops still count). When several rows share
+// the slug (zoneSlugOf drops what follows the first '/'), the stamp cannot tell them apart, so it takes the cities of
+// all of them. No row is ever picked by its order in the table.
+function zoneOfHoldStamp(zones, stamp) {
+  const slug = String(stamp || '').trim().toLowerCase();
+  if (!isFunnelZone({ zone_name: slug })) return null;
+  const pool = zones.filter(isFunnelZone);
+  const own = pool.filter((zone) => zoneSlugOf(zone) === slug);
+  if (own.length === 1) return own[0];
+  return { id: null, zone_name: slug, cities: (own.length ? own : pool).flatMap((zone) => zone.cities || []) };
+}
+
+// The funnel for an offer pool that is not built by the estimate page (the lead assessment link:
+// routes/booking.js buildBookingAvailability, fed the lead's address text), read in two steps because that
+// builder keeps one technician per date and start: offerFunnelView before its claims (per truck,
+// dropOtherTruckDays runs on find-time's slots), funnelOfferPool after them. Same helpers, same rules: the zone
+// resolves as the booking resolves it (slot-zone.js leadBookingZone), from the address's own `city` first (the zone
+// its booking will stamp, createSelfBooking), else the address text, else `customerCity`, the trusted customer's
+// city on file that the booking falls back to (pre-push P1 on aa30bd86f1: a list read the address alone, so it could
+// offer an hour the booking's fallback zone refuses). The cluster days come from getZoneFunnelDays over THIS
+// request's window. Returns { days, techDays }, or null when the funnel does not apply (gate off, no address,
+// no funneled zone) or cannot be resolved (zone or lookup failure: logged, fail open, as the estimate page does).
+// In the fleet view a one-day window funnels to itself (clustered or seeded, that day stays whole), so it reads
+// nothing: the commit's single-day rebuild with the gate off runs exactly as before.
+async function offerFunnelView({ address, city = null, customerCity = null, dateFrom, dateTo, conn }) {
+  if (!address || !isEnabled('southZoneDayFunnel')) return null;
+  if (dateFrom === dateTo && !perTruckLive()) return null;
   let estimateZone = null;
   try {
-    estimateZone = await resolveEstimateZone(conn, { address });
+    ({ zone: estimateZone } = await leadBookingZone(conn, { address, city }, customerCity));
   } catch (err) {
     logger.warn(`[zone-day-funnel] offer zone resolution failed (failing open): ${err.message}`);
-    return pool;
+    return null;
   }
-  const { days } = await getZoneFunnelDays(conn, { estimateZone, dateFrom, dateTo });
-  if (!days) return pool;
+  const { days, techDays } = await getZoneFunnelDays(conn, { estimateZone, dateFrom, dateTo });
+  return days ? { days, techDays } : null;
+}
+
+// applyZoneDayFunnel over an offer pool with offerFunnelView's `view`: the cluster days, or one seed day (the
+// pool's score order, route day first). Returns `pool` itself (same array) when `view` is null or the pool empty.
+async function funnelOfferPool(pool, view, { routeDaySlug = null, conn } = {}) {
+  if (!view || !Array.isArray(pool) || !pool.length) return pool;
   let preferredSeedDates = [...new Set(pool.map((s) => s?.date).filter(Boolean))];
   if (routeDaySlug) {
     const { preferRouteDayDates, readZoneRouteDays } = require('./zone-route-days');
@@ -254,7 +396,7 @@ async function funnelOfferPool(pool, { address, dateFrom, dateTo, routeDaySlug =
       zoneSlug: routeDaySlug, config: await readZoneRouteDays(conn),
     });
   }
-  return applyZoneDayFunnel(pool, days, { preferredSeedDates }).slots;
+  return applyZoneDayFunnel(pool, view.days, { preferredSeedDates }).slots;
 }
 
 // The service_zones rows the funnel applies to right now (isFunnelZone: gate on AND slug in the funnel list). []
@@ -265,7 +407,7 @@ async function funnelZoneRows(dbc) {
   return zones.filter(isFunnelZone);
 }
 
-// Is this visit/stop row ({zone, service_city, customer_city}, the shape zoneStopDates matches) in one of the funneled
+// Is this visit/stop row ({zone, service_city, customer_city}, the shape zoneStopDays matches) in one of the funneled
 // zones (funnelZoneRows)? true / false, or null when the row carries no usable zone stamp and no city, so the funnel
 // has nothing to decide on. Same matcher as the cluster days: rowMatchesZone.
 function rowInFunnelZones(row, zones) {
@@ -279,12 +421,19 @@ function rowInFunnelZones(row, zones) {
 module.exports = {
   getZoneFunnelDays,
   applyZoneDayFunnel,
+  dropOtherTruckDays,
+  truckMayTakeDate,
+  zoneOfHoldStamp,
+  offerFunnelView,
   funnelOfferPool,
   funnelZoneRows,
   rowInFunnelZones,
+  onZoneDay,
+  perTruckLive,
+  funnelOn,
   isFunnelZone,
   funnelZoneSlugs,
   fallbackCenterZoneName,
   // Exposed for tests.
-  _internals: { funnelZoneSlugs, rowMatchesZone, zoneStopDates },
+  _internals: { funnelZoneSlugs, rowMatchesZone, zoneStopDays },
 };

@@ -117,8 +117,22 @@ describe('route wiring', () => {
     expect(block).toMatch(/COALESCE\(extracted_data, '\{\}'::jsonb\) \|\| \?::jsonb/);
     expect(block).toMatch(/db\.raw\(TRIAGE_REPLACE_EXTRACTED_SQL, /);
     const sql = require('../routes/lead-webhook')._test.TRIAGE_REPLACE_EXTRACTED_SQL;
-    expect(sql).toContain("'sign_host', COALESCE(extracted_data, '{}'::jsonb)->'sign_host'");
-    expect(sql).toContain(")) || (?::jsonb - 'attribution') || ");
+    const carriedSignHost = "'sign_host', COALESCE(extracted_data, '{}'::jsonb)->'sign_host'";
+    const carriedSourceEvidence = "'source_evidence', COALESCE(extracted_data, '{}'::jsonb)->'source_evidence'";
+    const sanitizedTriage = "|| ((?::jsonb - 'attribution') - 'source_evidence') ||";
+    const rebuiltAttribution = "jsonb_strip_nulls(jsonb_build_object('attribution'";
+
+    // Operator order is the contract: intake-owned values are carried first;
+    // model output follows but cannot supply/replace attribution or acquisition
+    // evidence; the captured page URLs are rebuilt last and therefore win.
+    const signHostAt = sql.indexOf(carriedSignHost);
+    const sourceEvidenceAt = sql.indexOf(carriedSourceEvidence);
+    const triageAt = sql.indexOf(sanitizedTriage);
+    const attributionAt = sql.indexOf(rebuiltAttribution, triageAt);
+    expect(signHostAt).toBeGreaterThan(-1);
+    expect(sourceEvidenceAt).toBeGreaterThan(signHostAt);
+    expect(triageAt).toBeGreaterThan(sourceEvidenceAt);
+    expect(attributionAt).toBeGreaterThan(triageAt);
   });
 
   test('both Customer 360 notes carry the sign-host line', () => {
@@ -126,8 +140,9 @@ describe('route wiring', () => {
     expect(existing.slice(0, existing.indexOf('metadata:'))).toMatch(/\(signHostNote \? `\\n\$\{signHostNote\}` : ''\)/);
 
     const created = src.slice(src.indexOf('subject: `New lead from ${leadSource.detail || leadSource.source}`'));
-    // First in the body: Customer 360 previews body[0..200].
-    expect(created.slice(0, created.indexOf('metadata:'))).toMatch(/body: `\$\{signHostNote \? `\$\{signHostNote\}\. ` : ''\}Form: /);
+    // First in the body: Customer 360 previews body[0..200]. A quiz lead's
+    // answers line follows it (lead-webhook-quiz.test.js), then the form facts.
+    expect(created.slice(0, created.indexOf('metadata:'))).toMatch(/body: `\$\{signHostNote \? `\$\{signHostNote\}\. ` : ''\}\$\{quizNote \? `\$\{quizNote\}\. ` : ''\}Form: /);
   });
 
   test('the triage and Lead Response Agent prose never include the sign host', () => {

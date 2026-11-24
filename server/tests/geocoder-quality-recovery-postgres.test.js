@@ -48,7 +48,6 @@ postgres('geocoder quality recovery on isolated PostgreSQL', () => {
     'GATE_ROUTE_REORDER_REPAIR',
     'GATE_SCHEDULE_QUALITY_MEASUREMENTS',
     'GATE_SCHEDULE_QUALITY_ALERTS',
-    'GATE_DRIVE_TIME_CALIBRATION',
   ];
   const savedGates = Object.fromEntries(gates.map(gate => [gate, process.env[gate]]));
 
@@ -106,9 +105,6 @@ postgres('geocoder quality recovery on isolated PostgreSQL', () => {
     process.env.GATE_ROUTE_REORDER_REPAIR = 'true';
     process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS = 'true';
     process.env.GATE_SCHEDULE_QUALITY_ALERTS = 'true';
-    // Deliberately keep calibration off: this suite verifies coordinate and
-    // warning reconciliation, while route-order repair has its own PG suite.
-    delete process.env.GATE_DRIVE_TIME_CALIBRATION;
     geocodeAddressWithStatus.mockResolvedValue({ location: PIN, permanent: false });
     mockConnection = await database.transaction();
     for (const table of [
@@ -247,6 +243,9 @@ postgres('geocoder quality recovery on isolated PostgreSQL', () => {
   }, 30000);
 
   test('a failed refresh beyond the nightly band retains its date and later clears the real warning', async () => {
+    // Repair off here: this test breaks the ledger table on purpose, and the repair writer's own ledger insert would
+    // abort the outer transaction before the measurement savepoint can fail alone. Repair has its own PG suite.
+    process.env.GATE_ROUTE_REORDER_REPAIR = 'false';
     const lateDate = '2026-10-08';
     await insertService(RECOVERED, { scheduled_date: lateDate });
     expect(await refreshScheduleQualityAlerts({ dates: [lateDate], now: NOW }, mockConnection))

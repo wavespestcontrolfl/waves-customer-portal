@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { Button } from '../ui';
+import { registerReloadHold } from '../../lib/reloadHolds';
 
 let messages = [];
 const listeners = new Set();
@@ -9,6 +10,8 @@ const subscribe = (listener) => {
   return () => listeners.delete(listener);
 };
 const snapshot = () => messages;
+// An open notice holds an automatic reload of an out-of-date tab.
+registerReloadHold('schedule-notice', () => messages.length > 0);
 
 // Lives in the admin shell so closing an appointment cannot hide its saved
 // outcome. Every save event accumulates until the operator dismisses — two

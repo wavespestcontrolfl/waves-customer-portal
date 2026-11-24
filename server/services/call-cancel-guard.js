@@ -1,5 +1,5 @@
 /**
- * Cancel notice for New Appointment (GATE_CALL_CANCEL_GUARD, dark by default).
+ * Cancel notice for New Appointment.
  *
  * 2026-10-30: a new lead agreed a visit on a 12:52 AM call that did not book (a "time unclear" card asking the office to
  * book it). At 7:08 AM she called back and canceled. Nothing was booked yet, so nothing was removed; the cancel filed a

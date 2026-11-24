@@ -46,7 +46,7 @@ function scoreOrNull(raw, min, max) {
   return Math.max(min, Math.min(max, Math.round(raw.value)));
 }
 
-// `lighting: true` (GATE_LAWN_LIGHTING, decided by the caller) adds the model's
+// `lighting: true` (decided by the caller) adds the model's
 // light read to every row: { lighting, hard_shadows } with hard_shadows true,
 // false or null. An unrated photo, or an answer that gave no read, is `unknown`
 // and null. Off, the rows are exactly what they always were (no extra keys).
@@ -122,7 +122,7 @@ const shapeCheck = ({ lighting, scale2 }) => {
   return lighting ? hasLightingResponseShape : hasResponseShape;
 };
 
-// `lighting: true` validates against the lighting variant's shape (GATE_LAWN_LIGHTING).
+// `lighting: true` validates against the lighting variant's shape.
 function validateAssessmentJson(result, photoCount, { lighting = false, scale2 = false } = {}) {
   const json = result && result.json;
   if (!json || typeof json !== 'object' || Array.isArray(json)) return 'malformed_assessment';

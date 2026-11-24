@@ -70,7 +70,7 @@ async function revalidatePlacement(service) {
   const fresh = await db('scheduled_services')
     .where({ id: service.id })
     .first('scheduled_date', 'window_start', 'window_end', 'technician_id', 'status',
-      'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', 'recurring_dispatch_due_date', 'customer_confirmed',
+      'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', 'recurring_dispatch_due_date',
       'reservation_service_mix', ...LOCATION_FIELDS);
   if (!fresh) {
     return { ok: false, fresh: null, code: 'STALE_PLACEMENT', reason: 'Service no longer exists' };
@@ -83,9 +83,6 @@ async function revalidatePlacement(service) {
   // still be a live pending/confirmed visit before moving.
   if (!['pending', 'confirmed'].includes(String(fresh.status))) {
     return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: `Visit status changed to '${fresh.status}' after scoring` };
-  }
-  if (fresh.customer_confirmed === true) {
-    return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: 'Customer confirmed this visit after scoring' };
   }
   if (fresh.reservation_service_mix?.version === 2) {
     return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: 'Visit joined a version-2 allocation after scoring' };
@@ -212,12 +209,12 @@ async function fenceFlexSeries(trx, rows, refuse) {
 // note: the fence alone never stops an ordinary single-occurrence
 // reschedule of a neighbor) and the durable drift anchor (route-tiers'
 // loadAnchorMap/resolveAnchor — the earliest pre-auto-dispatch date on
-// record), so the ±5 days are measured from the visit's original date and an
+// record), so the ±5 days (±7 for a plan of 2 months or longer) are measured from the visit's original date and an
 // earlier night's move never resets them. Refuses (fail closed) on an
 // unreadable or busy read, an unknown anchor or neighbor set, or best.date
 // outside a window.
 async function assertFlexWindows(trx, rows, best, today, refuse) {
-  const neighborMap = await flexTier.loadSeriesNeighbors(trx, rows, { lock: true });
+  const neighborMap = await flexTier.loadSeriesNeighbors(trx, rows, { lock: true, withRadius: true });
   if (neighborMap === null) throw refuse(rows[0].id, 'series occurrence order is unreadable or being edited (no move, fail closed)');
   const anchorMap = await routeTiers.loadAnchorMap(trx, rows.map((r) => r.id));
   if (anchorMap === null) throw refuse(rows[0].id, 'drift-anchor evidence is unreadable (no move, fail closed)');
@@ -226,11 +223,15 @@ async function assertFlexWindows(trx, rows, best, today, refuse) {
     if (!anchor) throw refuse(r.id, 'has no derivable drift anchor (no move, fail closed)');
     const neighbors = neighborMap.get(r.id);
     if (!neighbors) throw refuse(r.id, 'is missing from its own series read (no move, fail closed)');
+    // The band is this row's own (7 for a plan of 2 months or longer, else 5), from the
+    // pattern the locked neighbor read just saw: never a pass-1 value. No radius reads 5.
+    // A live sibling inside 56 days also reads 5 (flexBandRadius: a pattern can be wrong for the visits it labels).
+    const radius = flexTier.flexBandRadius({ radiusDays: neighbors.radiusDays, neighbors });
     const window = flexTier.flexTierMoveWindow({
-      origDate: r.scheduled_date, anchorDate: anchor, today, neighbors,
+      origDate: r.scheduled_date, anchorDate: anchor, today, neighbors, radiusDays: radius,
     });
     if (!flexTier.flexWindowAdmits(window, r.scheduled_date, best.date)) {
-      throw refuse(r.id, `cannot legally move to ${best.date} (outside its ±${flexTier.FLEX_TIER_RADIUS_DAYS}-day flex window of its current and original date ${anchor}, the ${routeTiers.MIN_DESTINATION_DAYS_OUT}-day destination floor, clamped by its series' adjacent occurrence)`);
+      throw refuse(r.id, `cannot legally move to ${best.date} (outside its ±${radius}-day flex window of its current and original date ${anchor}, the ${routeTiers.MIN_DESTINATION_DAYS_OUT}-day destination floor, clamped by its series' adjacent occurrence)`);
     }
   }
 }
@@ -362,21 +363,23 @@ function makeMoveGuard({ service, best, config = {} }) {
     if (row.reservation_service_mix?.version === 2) {
       throw refuse(row.id, 'belongs to a version-2 allocation that must move as one unit');
     }
-    if (row.customer_confirmed === true) {
-      throw refuse(row.id, 'was confirmed by the customer');
-    }
-    // At most N automatic moves per visit, counted on this transaction so a
+    // At most N automatic day moves per visit, counted on this transaction so a
     // move another run landed minutes ago is seen (move-limit.js).
     await moveLimit.assertUnderLimit(trx, [row], config, refuse);
     // GATE_AUTO_DISPATCH_PROOFREADER: what the approval stood on still stands.
     await require('./proofreader/nightly').assertStillApproved(trx, service, config, refuse, row);
     await checkFlexOwnBounds(trx, row, best, config.guardMode, refuse, destination, true);
     await assertSourceConflictHolds(trx, service, config.sourceConflict, refuse, sourceCheck);
-    // GATE_AUTO_DISPATCH_MOWING_DAYS='true': the destination against the mowing rule as saved now.
+    // The destination against the mowing rule as saved now.
     await mowingDays.assertDestinationClear(trx, row, best.date, refuse, [row.service_type]);
-    // GATE_SOUTH_ZONE_DAY_FUNNEL: a visit outside the far-south zones never lands on a date holding a far-south stop.
-    await southDayKept.assertDestinationClear(trx, row, service, best.date, refuse);
     const receiving = best.technician_id || technicianId || row.technician_id || null;
+    // GATE_SOUTH_ZONE_DAY_FUNNEL: a visit outside the far-south zones never lands on a date holding a far-south stop.
+    // With GATE_MULTI_TECH_CONFIRM, for a single visit: a stop of each technician it can sit with that day, or an
+    // unassigned one. That is the receiving technician and the one this transaction writes (`technicianId`, the
+    // rebooker's kept technician; null = unassigned), which differ only when the visit was reassigned after the run
+    // ranked it. A grouped visit keeps the fleet's view (south-day-kept.js).
+    const southTechs = technicianId === undefined ? [receiving] : [receiving, technicianId || null];
+    await southDayKept.assertDestinationClear(trx, row, service, best.date, refuse, southTechs);
     await assertCapabilitiesActive(trx, receiving, [row], refuse);
     // GATE_TERRITORY_NIGHT_RUN: the moving visit lands only in its own territory, read at apply (a ZIP can
     // change hands, or the visit's address change, after the run scored the move).
@@ -384,17 +387,17 @@ function makeMoveGuard({ service, best, config = {} }) {
     // GATE_TECH_START_POINTS: the start points the move was scored from still
     // stand — an unassigned visit's current day included (sourceDayTechnicianId).
     await assertScoredStartPoints(trx, [service.technician_id, config.sourceDayTechnicianId, receiving], config.startPointFor);
-    // A person may have placed this visit since pass 1 (even back onto the
-    // same slot, which the field CAS cannot see). The row handed in is the
-    // pre-transaction snapshot, so the check re-reads the row's own lock and
-    // date-exception columns and its history on the move transaction
-    // (Codex #6055 r5, r7).
+    // Staff may have locked this visit, or the customer picked or asked for its
+    // slot, since pass 1 (even back onto the same slot, which the field CAS
+    // cannot see). The row handed in is the pre-transaction snapshot, so the
+    // check re-reads the row's own lock and intent columns and its history on
+    // the move transaction (Codex #6055 r5, r7).
     const placed = await isPersonPlacedVisit(row, trx, { refresh: true });
     if (placed.degraded) throw new Error(`service ${row.id}: ${placed.reason_description}`);
-    if (placed.placed) throw refuse(row.id, `was placed by a person (${placed.reason_description})`);
+    if (placed.placed) throw refuse(row.id, `is held (${placed.reason_description})`);
     // Night told-lock (owner 2026-11-05, "D1 a"): a promise delivered after the pass-1 re-check (scoring can take minutes) still stops the
     // move. Read on the move transaction; a failed read throws, so nothing moves (fail closed).
-    await assertNotToldOnMove(trx, row, config, refuse);
+    await assertNotToldOnMove(trx, row, refuse);
     // REMINDERS-OFF LOCK (owner 2026-11-07, reminder-off.js): the 24-hour reminder is the customer's only notice of
     // this move, so a row whose reminder will not go out never moves. Read on the move transaction; fails closed.
     // Only on the call that writes this row's placement (the rebooker passes `destination`): the unit mover's later
@@ -407,9 +410,9 @@ function makeMoveGuard({ service, best, config = {} }) {
 
 // Night told-lock (owner 2026-11-05, "D1 a"), the moving visit's own told-time check inside its move
 // transaction (makeMemberGuard covers the siblings, never the primary).
-async function assertNotToldOnMove(trx, row, config, refuse) {
+async function assertNotToldOnMove(trx, row, refuse) {
   const { loadToldVisitIds } = require('./told-visits');
-  const told = await loadToldVisitIds(trx, [row.id], new Date(), ...(dayOnlyOf(config) ? [{ anyPromise: true }] : []));
+  const told = await loadToldVisitIds(trx, [row.id], new Date(), { anyPromise: true });
   if (told.has(String(row.id)) || told.has(row.id)) throw refuse(row.id, 'has a time the customer was already told (frozen)');
 }
 
@@ -453,28 +456,20 @@ async function checkMemberEligibility(rows, best, eligCtx, trx, refuse) {
     if (!elig.eligible) throw refuse(r.id, `is not auto-dispatchable (${elig.reason_code}: ${elig.reason_description})`);
     const plan = await isRecurringPlanActive(r, trx);
     if (!plan.active) throw refuse(r.id, `is on an inactive plan (${plan.reason_code})`);
-    // A grouped move drags every member, so a member a person placed
-    // protects the whole visit, whichever member the run evaluated.
+    // A grouped move drags every member, so a member staff locked or the
+    // customer holds protects the whole visit, whichever member the run evaluated.
     const placed = await isPersonPlacedVisit(r, trx);
     // An unreadable history is a failure, not a refusal: it must reach the
     // run's failed count (previewGroupMove rethrows any non-409 error).
     if (placed.degraded) throw new Error(`grouped service ${r.id}: ${placed.reason_description}`);
-    if (placed.placed) throw refuse(r.id, `was placed by a person (${placed.reason_code}: ${placed.reason_description})`);
+    if (placed.placed) throw refuse(r.id, `is held (${placed.reason_code}: ${placed.reason_description})`);
   }
 }
 
-// GATE_DAY_ONLY_PROMISE (config.dayOnlyPromise, the run's one read): a
-// day-only (or unknown-window) promise then freezes a visit too (loadReminderFreeze opts.anyPromise), because the
-// dispatcher moves DATES and a customer told only the day was still told that day. The rain pass and
-// route-reorder never build this config.
-function dayOnlyOf(config) {
-  return !!config && config.dayOnlyPromise === true;
-}
-
-// loadReminderFreeze's option object for a night run: lock24h and toldLock always, anyPromise when
-// GATE_DAY_ONLY_PROMISE is on too (dayOnlyOf).
-function freezeOpts(dayOnly = false) {
-  return dayOnly === true ? { lock24h: true, toldLock: true, anyPromise: true } : { lock24h: true, toldLock: true };
+// loadReminderFreeze's option object for a night run: lock24h, toldLock and anyPromise. A day-only (or unknown-window)
+// promise freezes a visit too, because the dispatcher moves DATES and a customer told only the day was still told that day.
+function freezeOpts() {
+  return { lock24h: true, toldLock: true, anyPromise: true };
 }
 
 function reminderWindowText(lock24h) {
@@ -488,8 +483,8 @@ function reminderWindowText(lock24h) {
 // 24-hour reminder's band and sent flag instead of the 72-hour one.
 // With `lock24h` a sibling the customer was already told a time for (owner 2026-11-05, "D1 a", a known-slot
 // promise) is frozen too.
-async function checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse, lock24h = false, dayOnly = false) {
-  const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), new Date(), ...(lock24h ? [undefined, freezeOpts(dayOnly)] : []));
+async function checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse, lock24h = false) {
+  const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), new Date(), ...(lock24h ? [undefined, freezeOpts()] : []));
   if (freeze.failed) throw refuse(siblings[0].id, 'reminder-sent status is unreadable (frozen, fail closed)');
   const frozen = siblings.find((m) => freeze.frozen.has(m.id));
   if (frozen) throw refuse(frozen.id, reminderWindowText(lock24h));
@@ -521,10 +516,10 @@ async function checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse,
 // land before this move commits. Each sibling's DESTINATION must clear the
 // freeze too: best.date + that member's own derived start from the unit
 // mover's `targets` (a member with no target fails closed).
-async function checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse, targets, lock24h = false, dayOnly = false) {
+async function checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse, targets, lock24h = false) {
   const now = new Date();
   const hours = flexTier.flexFreezeHoursFor(lock24h);
-  const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), now, ...(lock24h ? [hours, freezeOpts(dayOnly)] : [hours]));
+  const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), now, ...(lock24h ? [hours, freezeOpts()] : [hours]));
   if (freeze.failed) throw refuse(siblings[0].id, 'reminder-sent status is unreadable (frozen, fail closed)');
   const frozen = siblings.find((m) => freeze.frozen.has(m.id));
   if (frozen) throw refuse(frozen.id, `is inside its ${hours}-hour reminder window (frozen)`);
@@ -596,12 +591,12 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
       if (weekend) throw refuse(weekend.id, `skips weekends and ${best.date} is a ${isSaturday(best.date) ? 'Saturday' : 'Sunday'}`);
     }
     if (guardMode === 'tiers') {
-      await checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse, true, dayOnlyOf(config));
+      await checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse, true);
     } else if (guardMode === 'flex') {
-      await checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse, targets, true, dayOnlyOf(config));
+      await checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse, targets, true);
     }
     await checkSameSeriesClash(trx, rows, best, memberIds, refuse);
-    // GATE_AUTO_DISPATCH_MOWING_DAYS='true': a Lawn Care Service member holds the unit to the mowing rule as saved now.
+    // A Lawn Care Service member holds the unit to the mowing rule as saved now.
     await mowingDays.assertDestinationClear(trx, service, best.date, refuse, rows.map((r) => r.service_type));
     // Every sibling against the receiving tech, committed rows, tech changed
     // or not (see assertCapabilitiesActive).
@@ -963,11 +958,11 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config)
     window_start: fresh.window_start,
     window_end: fresh.window_end,
     technician_id: fresh.technician_id,
-    // recurring_dispatch_due_date and customer_confirmed are pinned with the
-    // location fields, null when absent. customer_confirmed for every visit
-    // (owner 2026-10-09): a confirmation that lands between the read above
-    // and the move fails the atomic match.
-    ...Object.fromEntries(['recurring_dispatch_due_date', 'customer_confirmed', 'reservation_service_mix', ...LOCATION_FIELDS]
+    // recurring_dispatch_due_date and reservation_service_mix are pinned with
+    // the location fields, null when absent. A customer confirmation no longer
+    // holds a visit (owner 2026-11-22), so it is not pinned; the customer's own
+    // pick or asked time is re-read on the move transaction (makeMoveGuard).
+    ...Object.fromEntries(['recurring_dispatch_due_date', 'reservation_service_mix', ...LOCATION_FIELDS]
       .map((field) => [field, fresh[field] ?? null])),
   };
 

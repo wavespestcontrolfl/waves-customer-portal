@@ -355,6 +355,85 @@ describe('refuseFrozenRestartMutation (PR #3671 GH r21 P1 — restart quotes are
     expect(res.statusCode).toBe(null);
   });
 
+  // A plan offer's quote (owner 2026-11-19: the quarterly pest plan with the setup fee waived) is frozen the
+  // same way. The waiver sits on the whole estimate, so a repriced or re-mixed offer would carry the $0 fee to
+  // a plan the offer never named.
+  const OFFER_ROW = {
+    source: 'plan_start',
+    estimate_data: { planStart: { serviceKey: 'pest_control', offer: { jobId: 'job-1', endsAt: '2026-12-22T05:00:00.000Z', firstVisitFrom: '2027-02-15' } } },
+  };
+  const PLAIN_START_ROW = { source: 'plan_start', estimate_data: { planStart: { serviceKey: 'pest_control' } } };
+
+  it('409s a plan offer quote with its own code and words, as an object or as stored JSON', () => {
+    for (const row of [OFFER_ROW, { ...OFFER_ROW, estimate_data: JSON.stringify(OFFER_ROW.estimate_data) }]) {
+      const res = resStub();
+      expect(refuseFrozenRestartMutation(row, res)).toBe(true);
+      expect(res.statusCode).toBe(409);
+      expect(res.body).toEqual({ error: 'This offer is for the plan as shown. For a different plan, call or text us.', code: 'plan_offer_frozen' });
+    }
+  });
+
+  it('passes a plain plan-start quote through: only the offer stamp freezes it', () => {
+    const res = resStub();
+    expect(refuseFrozenRestartMutation(PLAIN_START_ROW, res)).toBe(false);
+    expect(res.statusCode).toBe(null);
+  });
+
+  describe('the accept may name only the frozen offer\'s default frequency (frozenOfferFrequencyRefusal)', () => {
+    const { frozenOfferFrequencyRefusal } = require('../routes/estimate-public');
+    // The pest ladder as the page lists it: it opens on the first entry, the quarterly plan the offer priced.
+    const LADDER = [{ key: 'quarterly' }, { key: 'bimonthly' }, { key: 'monthly' }];
+
+    it.each(['bimonthly', 'monthly'])('a plan offer quote refuses %s: the waived setup fee never rides another cadence', (key) => {
+      expect(frozenOfferFrequencyRefusal(OFFER_ROW, key, LADDER)).toMatchObject({ code: 'plan_offer_frozen' });
+    });
+
+    it('a plan offer quote takes the default key the page always sends, and a body with no key', () => {
+      expect(frozenOfferFrequencyRefusal(OFFER_ROW, 'quarterly', LADDER)).toBe(null);
+      expect(frozenOfferFrequencyRefusal(OFFER_ROW, '', LADDER)).toBe(null);
+    });
+
+    it('a restart quote keeps its own refusal; a plain plan-start quote and any other estimate may pick a cadence', () => {
+      expect(frozenOfferFrequencyRefusal({ source: 'plan_restart' }, 'monthly', LADDER)).toMatchObject({ code: 'restart_quote_frozen' });
+      expect(frozenOfferFrequencyRefusal({ source: 'plan_restart' }, 'quarterly', LADDER)).toBe(null);
+      expect(frozenOfferFrequencyRefusal(PLAIN_START_ROW, 'monthly', LADDER)).toBe(null);
+      expect(frozenOfferFrequencyRefusal({ source: 'manual' }, 'monthly', LADDER)).toBe(null);
+    });
+
+    it('the accept asks it, and the one-time and combo checks read the same frozen answer, before billing or booking', () => {
+      const src = require('fs').readFileSync(require.resolve('../routes/estimate-public'), 'utf8');
+      const accept = src.slice(src.indexOf("router.put('/:token/accept'"), src.indexOf("router.put('/:token/select-tier'"));
+      const oneTime = accept.indexOf('if (frozenOffer && requestedOneTime) return res.status(409).json(frozenOffer);');
+      const frequency = accept.indexOf('const frozenFrequency = frozenOfferFrequencyRefusal(estimate, selectedFrequencyKey,');
+      const combo = accept.indexOf('if (frozenOffer) {');
+      // The cadence answers before the card check (402) and before the unknown-cadence answer (400).
+      expect(accept.indexOf('RecurringCards.verifyRecurringCardIntent({')).toBeGreaterThan(frequency);
+      expect(accept.indexOf("'selectedFrequency is not available for this estimate'")).toBeGreaterThan(frequency);
+      const lockedWrite = accept.indexOf('db.transaction(');
+      expect(oneTime).toBeGreaterThan(-1);
+      expect(frequency).toBeGreaterThan(oneTime);
+      expect(combo).toBeGreaterThan(frequency);
+      expect(accept).toContain('if (frozenFrequency) return res.status(409).json(frozenFrequency);');
+      // No accept check still keys the freeze on the restart source alone.
+      expect(accept).not.toMatch(/=== 'plan_restart' && (requestedOneTime|selectedFrequencyKey)/);
+      // All three answer before the accept's first transaction.
+      expect(lockedWrite).toBeGreaterThan(combo);
+    });
+
+    it('/data marks an offer row so the page draws it as fixed', () => {
+      const src = require('fs').readFileSync(require.resolve('../routes/estimate-public'), 'utf8');
+      expect(src).toContain('(offer ? { planOffer: true, planOfferFirstVisitFrom: offer.firstVisitFrom } : {})');
+      const page = require('fs').readFileSync(require.resolve('../../client/src/pages/EstimateViewPage.jsx'), 'utf8');
+      expect(page).toContain('data?.estimate?.planRestart === true || data?.estimate?.planOffer === true');
+      // The picker's date box starts on the offer's first day, and its "sooner visit" line stays off.
+      expect(page).toContain('firstVisitFrom={data?.estimate?.planOffer === true ? data.estimate.planOfferFirstVisitFrom || null : null}');
+      // The visit-preference toggles (PUT /preferences, refused on a fixed quote) are not drawn either.
+      expect(page).toContain("serviceMode === 'recurring' && !glassContent && !restartQuote && renderFlags.showPestRecurringAddOns === true");
+      // The website view (?website=1) draws its own cadence step: a fixed quote gets none.
+      expect(page).toContain('lockedSection={(section) => restartQuote || isLockedMirrorSection(section)}');
+    });
+  });
+
   it('is wired into every public reprice route (select-tier, bond, service-opt-out, preferences)', () => {
     // Source-level wiring assertion: the guard only protects routes that
     // actually call it, and a refactor that drops a call site must fail

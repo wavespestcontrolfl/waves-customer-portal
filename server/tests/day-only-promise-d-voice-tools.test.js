@@ -1,7 +1,7 @@
 /**
  * GATE_DAY_ONLY_PROMISE part D: the voice agent's visit lookup (get_today_eta) and its booked re-service answer
  * (request_reservice) state only the DATE for a visit whose customer was told only the day, plus the plain "do not state or
- * guess an hour" note. Gate off = today's text. No model call, no database: rows are fakes, the promise reader is mocked.
+ * guess an hour" note.  No model call, no database: rows are fakes, the promise reader is mocked.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
@@ -21,7 +21,7 @@ jest.mock('../services/reservice-scheduler', () => ({
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n-1' })) }));
 jest.mock('../services/voice-agent/relay-alert', () => ({ alertOwnerHotLead: jest.fn(async () => false), alertOwnerReservice: jest.fn(async () => true) }));
-jest.mock('../services/time-promise', () => ({ dayOnlyPromiseOn: jest.fn(), loadTimeDisplay: jest.fn() }));
+jest.mock('../services/time-promise', () => ({ loadTimeDisplay: jest.fn() }));
 jest.mock('../utils/datetime-et', () => {
   const actual = jest.requireActual('../utils/datetime-et');
   return { ...actual, etDateString: jest.fn(() => '2026-08-12') };
@@ -59,7 +59,6 @@ afterAll(() => {
 beforeEach(() => {
   jest.clearAllMocks();
   process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
-  timePromise.dayOnlyPromiseOn.mockReturnValue(false);
 });
 
 describe('get_today_eta', () => {
@@ -69,14 +68,7 @@ describe('get_today_eta', () => {
   };
   const eta = () => { prime({ scheduled_services: [VISIT] }); return executeTool('get_today_eta', {}, FULL); };
 
-  test('gate off: today\'s window, byte for byte, and no promise read', async () => {
-    const out = await eta();
-    expect(out).toBe('Today\'s appointment window is 9 AM to 11 AM for Pest Control. The technician has not started toward the property yet, so there is no live arrival time. Give the window only; never invent a more precise ETA.');
-    expect(timePromise.loadTimeDisplay).not.toHaveBeenCalled();
-  });
-
-  test('gate on + day-only: no hour anywhere, the note present, one read', async () => {
-    timePromise.dayOnlyPromiseOn.mockReturnValue(true);
+  test('day-only: no hour anywhere, the note present, one read', async () => {
     timePromise.loadTimeDisplay.mockResolvedValue(verdicts({ 'ss-1': false }));
     const out = await eta();
     expect(timePromise.loadTimeDisplay).toHaveBeenCalledTimes(1);
@@ -86,24 +78,21 @@ describe('get_today_eta', () => {
     expect(out).not.toMatch(/Give the window only/);
   });
 
-  test('gate on + customer-picked visit: the hour is kept exactly as today', async () => {
-    timePromise.dayOnlyPromiseOn.mockReturnValue(true);
+  test('customer-picked visit: the hour is kept exactly as today', async () => {
     timePromise.loadTimeDisplay.mockResolvedValue(verdicts({ 'ss-1': true }));
     const out = await eta();
     expect(out).toContain('Today\'s appointment window is 9 AM to 11 AM for Pest Control.');
     expect(out).not.toContain('texted the day before');
   });
 
-  test('gate on + the read failed: the day-only wording, never the hour', async () => {
-    timePromise.dayOnlyPromiseOn.mockReturnValue(true);
+  test('the read failed: the day-only wording, never the hour', async () => {
     timePromise.loadTimeDisplay.mockRejectedValue(new Error('db down'));
     const out = await eta();
     expect(out).toContain(NOTE);
     expect(out.replace(NOTE, '')).not.toMatch(HOUR_PATTERN);
   });
 
-  test('gate on + no window on the row: day-only never falls back to the reminder time', async () => {
-    timePromise.dayOnlyPromiseOn.mockReturnValue(true);
+  test('no window on the row: day-only never falls back to the reminder time', async () => {
     timePromise.loadTimeDisplay.mockResolvedValue(verdicts({ 'ss-1': false }));
     prime({ scheduled_services: [{ ...VISIT, window_start: null }], appointment_reminders: [{ appointment_time: new Date('2026-08-12T17:30:00Z') }] });
     const out = await executeTool('get_today_eta', {}, FULL);
@@ -122,14 +111,7 @@ describe('request_reservice: a re-service already booked', () => {
     return executeTool('request_reservice', GOOD, CTX);
   };
 
-  test('gate off: today\'s window and no promise read', async () => {
-    const out = await book();
-    expect(out).toMatch(/\(arrival window 09:00-11:00\)/);
-    expect(timePromise.loadTimeDisplay).not.toHaveBeenCalled();
-  });
-
-  test('gate on + day-only: the date and the note, no hour; the visit is read by its real start', async () => {
-    timePromise.dayOnlyPromiseOn.mockReturnValue(true);
+  test('day-only: the date and the note, no hour; the visit is read by its real start', async () => {
     timePromise.loadTimeDisplay.mockResolvedValue(verdicts({ 'ss-9': false }));
     const out = await book();
     expect(out).toContain(`(arrival window: ${NOTE})`);
@@ -138,15 +120,13 @@ describe('request_reservice: a re-service already booked', () => {
     expect(timePromise.loadTimeDisplay.mock.calls[0][1]).toEqual([{ id: 'ss-9', scheduled_date: '2026-08-20', window_start: '09:00:00' }]);
   });
 
-  test('gate on + customer-picked visit: the window is kept', async () => {
-    timePromise.dayOnlyPromiseOn.mockReturnValue(true);
+  test('customer-picked visit: the window is kept', async () => {
     timePromise.loadTimeDisplay.mockResolvedValue(verdicts({ 'ss-9': true }));
     const out = await book();
     expect(out).toMatch(/\(arrival window 09:00-11:00\)/);
   });
 
-  test('gate on + the read failed, or no visit id to judge by: the day-only wording', async () => {
-    timePromise.dayOnlyPromiseOn.mockReturnValue(true);
+  test('the read failed, or no visit id to judge by: the day-only wording', async () => {
     timePromise.loadTimeDisplay.mockRejectedValue(new Error('db down'));
     expect(await book()).toContain(`(arrival window: ${NOTE})`);
     const { rescheduleUrl, ...noToken } = WITH_TOKEN;

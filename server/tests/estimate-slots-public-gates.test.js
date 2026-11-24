@@ -518,6 +518,209 @@ describe('area add-ons reserve only in one-time mode (GATE_AREA_ADDONS on)', () 
 // Codex round 11 P1 on #6135: /recurring-card-intent checked the park and the quote gates but not the add-on rule, so an
 // add-on estimate with a linked appointment (checkout bypasses /reserve) minted a SetupIntent and saved the customer's card,
 // and only then did the accept refuse. The same refusal now comes first, before any Stripe work.
+// A customer's own plan quote that staff changed (the one-time option or invoice billing on): its accept refuses it
+// (estimate-public.js), so no route here holds a time or asks for a card. Each answers the accept's own 409, on the first
+// read and on every locked or post-Stripe re-read, and the page shows its refused-quote banner (codex pre-push P1 x4).
+describe('a plan quote that staff changed takes no time and no card (codex pre-push P1 x4)', () => {
+  const { staffChangedQuoteRefusal } = require('../services/cancellation-resolution/restart');
+  const planQuote = (overrides = {}) => ({
+    id: 'est-plan-q', token: TOKEN, status: 'sent', expires_at: null, archived_at: null, monthly_total: 88, customer_id: 'cust-1',
+    source: 'plan_start', show_one_time_option: false, bill_by_invoice: false,
+    estimate_data: JSON.stringify({ result: { recurring: { services: [{ name: 'Pest Control', mo: 88 }], monthlyTotal: 88 } } }),
+    ...overrides,
+  });
+  const post = (leg, body = {}) => fetch(`${base}/${TOKEN}/${leg}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const expected = (row) => {
+    const refusal = staffChangedQuoteRefusal(row);
+    return { error: refusal.message, code: refusal.code };
+  };
+  let spies = [];
+  beforeEach(() => {
+    const recurring = require('../services/recurring-card-on-file');
+    spies = [
+      jest.spyOn(recurring, 'createRecurringCardSetupIntentForEstimate').mockResolvedValue({ clientSecret: 'cs', setupIntentId: 'seti_new' }),
+      jest.spyOn(recurring, 'replaceRecurringCardIntent').mockResolvedValue({ ok: true, intent: { clientSecret: 'cs', setupIntentId: 'seti_new' } }),
+    ];
+    require('../routes/estimate-public').retireOrDenyDroppedCapture.mockClear();
+    require('../services/estimate-card-holds').createCardHoldSetupIntentForEstimate.mockClear();
+  });
+  afterEach(() => spies.forEach((spy) => spy.mockRestore()));
+  const minted = () => [
+    require('../services/recurring-card-on-file').createRecurringCardSetupIntentForEstimate,
+    require('../services/recurring-card-on-file').replaceRecurringCardIntent,
+    require('../services/estimate-card-holds').createCardHoldSetupIntentForEstimate,
+  ];
+
+  test.each([
+    ['plan_start', 'bill_by_invoice'], ['plan_start', 'show_one_time_option'],
+    ['plan_restart', 'bill_by_invoice'], ['plan_restart', 'show_one_time_option'],
+  ])('a %s quote with %s on: both card steps answer the accept\'s 409 and mint nothing', async (source, column) => {
+    currentEstimate = planQuote({ source, [column]: true });
+    for (const [leg, body] of [['card-hold-intent', { serviceMode: 'one_time' }], ['recurring-card-intent', {}]]) {
+      const res = await post(leg, body);
+      expect([leg, res.status]).toEqual([leg, 409]);
+      expect(await res.json()).toEqual(expected(currentEstimate));
+    }
+    for (const fn of minted()) expect(fn).not.toHaveBeenCalled();
+    expect(require('../routes/estimate-public').retireOrDenyDroppedCapture).not.toHaveBeenCalled();
+  });
+
+  test('a replace request retires the capture it names first: the page drops it on this answer', async () => {
+    currentEstimate = planQuote({ bill_by_invoice: true });
+    const res = await post('recurring-card-intent', { replaceSetupIntentId: ' seti_old ' });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual(expected(currentEstimate));
+    expect(require('../routes/estimate-public').retireOrDenyDroppedCapture).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-plan-q' }), 'seti_old');
+    for (const fn of minted()) expect(fn).not.toHaveBeenCalled();
+  });
+
+  test('a plan quote with both options off, and a staff estimate with one on, are not refused by the rule', async () => {
+    for (const row of [planQuote(), planQuote({ source: 'admin', bill_by_invoice: true })]) {
+      currentEstimate = row;
+      const res = await post('recurring-card-intent', {});
+      const body = await res.json();
+      expect(['PLAN_START_STATE_CHANGED', 'RESTART_STATE_CHANGED']).not.toContain(body.code);
+    }
+  });
+
+  test('order: after the park decision, before every policy answer and any Stripe work (both routes)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'estimate-slots-public.js'), 'utf8');
+    const routes = [
+      src.slice(src.indexOf("router.post('/:token/card-hold-intent'"), src.indexOf("router.post('/:token/recurring-card-intent'")),
+      src.slice(src.indexOf("router.post('/:token/recurring-card-intent'"), src.indexOf("router.delete('/:token/reserve/:scheduledServiceId'")),
+    ];
+    for (const route of routes) {
+      const at = route.indexOf('await refuseStaffChangedQuoteIntent(res, estimate');
+      expect(at).toBeGreaterThan(route.indexOf('contactReviewState(estimate, { estData, quoteRequirement })'));
+      expect(at).toBeLessThan(route.indexOf('sendRecheckedIntentResponse('));
+    }
+  });
+
+  const HOLD = '11111111-1111-4111-8111-111111111111';
+  const TRX = { isTransaction: true, raw: jest.fn(async () => ({})) }; // raw: the SAVEPOINT statements
+  const { estimatePublicBlockingState } = require('../routes/estimate-public');
+  const internals = () => require('../routes/estimate-slots-public')._internals;
+
+  test.each(['bill_by_invoice', 'show_one_time_option'])('with %s on, every slot route refuses it on the first read: slot list, date search, reserve, extend', async (column) => {
+    slotReservation.extendReservation.mockClear();
+    currentEstimate = planQuote({ [column]: true });
+    for (const [label, call] of [
+      ['available-slots', () => fetch(`${base}/${TOKEN}/available-slots`)],
+      ['find-slots', () => post('find-slots', { query: 'next week please' })],
+      ['reserve', () => post('reserve', { slotId: '2030-01-01_09-00_unassigned' })],
+      ['extend', () => fetch(`${base}/${TOKEN}/reserve/${HOLD}/extend`, { method: 'POST' })],
+    ]) {
+      const res = await call();
+      expect([label, res.status]).toEqual([label, 409]);
+      expect([label, await res.json()]).toEqual([label, expected(currentEstimate)]);
+    }
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    expect(findEstimateSlots).not.toHaveBeenCalled();
+    expect(slotReservation.reserveSlot).not.toHaveBeenCalled();
+    expect(slotReservation.extendReservation).not.toHaveBeenCalled();
+    // The projected first read carries the fields the rule reads.
+    for (const cols of firstArgsHistory) expect(cols).toEqual(expect.arrayContaining(['source', 'bill_by_invoice', 'show_one_time_option']));
+    expect(firstArgsHistory.length).toBeGreaterThan(0);
+  });
+
+  test('the texting AI\'s slot gate offers no time for it; a clean plan quote passes the gate', async () => {
+    const { slotBrowseRefusal, offerableEstimateSlots } = internals();
+    const changed = planQuote({ bill_by_invoice: true });
+    await expect(slotBrowseRefusal(changed)).resolves.toEqual({ status: 409, body: expected(changed) });
+    await expect(slotBrowseRefusal(planQuote())).resolves.toBeNull();
+    currentEstimate = changed;
+    const acceptance = require('../routes/estimate-public').resolveEstimateAcceptance;
+    acceptance.mockClear();
+    await expect(offerableEstimateSlots('est-plan-q', 'cust-1')).resolves.toBeNull();
+    expect(acceptance).not.toHaveBeenCalled();
+  });
+
+  test('the locked reserve and extend rows refuse it too, an extend\'s busy skip included', async () => {
+    currentEstimate = planQuote();
+    const changed = planQuote({ show_one_time_option: true });
+    let reserveRefusal;
+    slotReservation.reserveSlot.mockImplementationOnce(async (args) => {
+      reserveRefusal = await args.revalidateEstimate(changed, TRX, { date: '2030-01-01' });
+      const err = new Error('estimate cannot be self-booked'); err.code = 'ESTIMATE_NO_BOOKING'; err.response = reserveRefusal; throw err;
+    });
+    const reserved = await post('reserve', { slotId: '2030-01-01_09-00_unassigned' });
+    expect(reserved.status).toBe(409);
+    expect(await reserved.json()).toEqual(expected(changed));
+    expect(reserveRefusal).toEqual({ status: 409, body: expected(changed) });
+    let extendPredicate;
+    slotReservation.extendReservation.mockImplementationOnce(async (args) => { extendPredicate = args.revalidateEstimate; return { scheduledServiceId: HOLD, expiresAt: null }; });
+    expect((await fetch(`${base}/${TOKEN}/reserve/${HOLD}/extend`, { method: 'POST' })).status).toBe(200);
+    await expect(extendPredicate(changed, TRX)).resolves.toEqual({ status: 409, body: expected(changed) });
+    // A briefly held customer row skips only the park decision on an extend: the plan-quote rule reads the row alone.
+    const busy = () => estimatePublicBlockingState.mockRejectedValueOnce(Object.assign(new Error('could not obtain lock'), { code: '55P03' }));
+    busy();
+    await expect(extendPredicate(changed, TRX)).resolves.toEqual({ status: 409, body: expected(changed) });
+    busy();
+    await expect(extendPredicate(planQuote(), TRX)).resolves.toBeNull();
+    // A reserve keeps its retryable busy answer.
+    busy();
+    await expect(internals().lockedContactReviewRefusal(changed, TRX)).resolves.toMatchObject({ status: 409, body: { code: 'CUSTOMER_BUSY_RETRY' } });
+  });
+
+  test('a change that lands while Stripe mints: the post-Stripe re-read refuses it, so no client secret leaves the server', async () => {
+    const holds = require('../services/estimate-card-holds');
+    holds.resolveCardHoldPolicy.mockReturnValue({ required: true, enforced: true, noShowFeeAmount: 49, cancelWindowHours: 24 });
+    try {
+      currentEstimate = planQuote();
+      holds.createCardHoldSetupIntentForEstimate.mockImplementationOnce(async () => {
+        currentEstimate = planQuote({ bill_by_invoice: true }); // the staff write commits during the mint
+        return { clientSecret: 'cs_SECRET', setupIntentId: 'seti_1', noShowFeeAmount: 49, cancelWindowHours: 24 };
+      });
+      const res = await post('card-hold-intent', {});
+      const text = await res.text();
+      expect(res.status).toBe(409);
+      expect(text).not.toContain('cs_SECRET');
+      expect(JSON.parse(text)).toEqual(expected(currentEstimate));
+      expect(holds.createCardHoldSetupIntentForEstimate).toHaveBeenCalledTimes(1);
+      // The recurring route's exit runs the same re-read, and retires its minted intent first (pinned above by source).
+      await expect(internals().postMintRefusal({ id: 'est-plan-q' }, { requestedServiceMode: '' })).resolves.toEqual({ status: 409, body: expected(currentEstimate) });
+      // Control: still clean at the re-read -> the secret is returned.
+      currentEstimate = planQuote();
+      holds.createCardHoldSetupIntentForEstimate.mockResolvedValueOnce({ clientSecret: 'cs_SECRET', setupIntentId: 'seti_2', noShowFeeAmount: 49, cancelWindowHours: 24 });
+      const ok = await post('card-hold-intent', {});
+      expect(ok.status).toBe(200);
+      expect((await ok.json()).clientSecret).toBe('cs_SECRET');
+    } finally {
+      holds.resolveCardHoldPolicy.mockReset();
+    }
+  });
+
+  test('a hold extension acts on no card: a body naming one makes no Stripe call, first read or locked row (codex pre-push P0)', async () => {
+    // The extend answers before it validates the hold, so it must never write to Stripe (an unknown or foreign hold id
+    // gets the same estimate-level answer). A refused plan quote's capture is retired by its setup_intent.succeeded
+    // webhook instead (stripe-webhook.js).
+    const { retireOrDenyDroppedCapture } = require('../routes/estimate-public');
+    retireOrDenyDroppedCapture.mockClear();
+    const extend = () => fetch(`${base}/${TOKEN}/reserve/${HOLD}/extend`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recurringCardSetupIntentId: 'seti_captured' }),
+    });
+    currentEstimate = planQuote({ bill_by_invoice: true });
+    const pre = await extend();
+    expect(pre.status).toBe(409);
+    expect(await pre.json()).toEqual(expected(currentEstimate));
+    currentEstimate = planQuote();
+    slotReservation.extendReservation.mockImplementationOnce(async (args) => {
+      const refusal = await args.revalidateEstimate(planQuote({ show_one_time_option: true }), TRX);
+      const err = new Error('estimate cannot be self-booked'); err.code = 'ESTIMATE_NO_BOOKING'; err.response = refusal; throw err;
+    });
+    expect((await extend()).status).toBe(409);
+    expect(retireOrDenyDroppedCapture).not.toHaveBeenCalled();
+  });
+
+  test('order: the blocking state answers first (as in the accept), then the plan-quote rule', async () => {
+    const { slotBlockingRefusal } = internals();
+    const changed = planQuote({ show_one_time_option: true });
+    estimatePublicBlockingState.mockResolvedValueOnce({ state: 'quote_required' });
+    await expect(slotBlockingRefusal(changed, {})).resolves.toEqual({ status: 409, body: { error: 'Estimate is no longer active' } });
+    await expect(slotBlockingRefusal(changed, {})).resolves.toEqual({ status: 409, body: expected(changed) });
+  });
+});
+
 describe('area add-ons: a recurring-mode card intent mints nothing (GATE_AREA_ADDONS on)', () => {
   const ADDON_ROW = { service: 'area_addon', addOnKey: 'web_sweep', catalogServiceKey: 'area_addon_web_sweep', name: 'Web Sweep', price: 89 };
   const WITH_RECURRING = {
@@ -1467,6 +1670,25 @@ describe('offerableEstimateSlots — the page\'s default selection axes', () => 
     resolveEstimateAcceptance.mockResolvedValueOnce({ acceptance: { mode: 'existing_appointment' } });
     await expect(pageSlotPicker('est-1')).resolves.toBeNull();
     expect(getAvailableSlots).not.toHaveBeenCalled();
+  });
+
+  // The 07:05 fill list passes its own read of the estimate, so its checks judge one revision.
+  test('pageSlotPicker with the caller\'s row: no estimate read, and the snapshot step rewrites a copy, never the row', async () => {
+    const { pageSlotPicker } = require('../routes/estimate-slots-public')._internals;
+    const { reconcileFrozenMembershipSnapshot } = require('../routes/estimate-public');
+    const db = require('../models/db');
+    buildPricingBundle.mockResolvedValue({
+      frequencies: [freq('monthly'), freq('quarterly', { recommended: true })],
+      services: [{ key: 'pest_control', isRecurring: true, defaultFrequencyKey: 'quarterly', frequencies: [freq('monthly'), freq('quarterly')] }],
+    });
+    reconcileFrozenMembershipSnapshot.mockImplementationOnce(async (full) => { full.estimate_data = { rewritten: true }; });
+    db.mockClear();
+    buildPricingBundle.mockClear();
+    const row = { ...OWN, estimate_data: { kept: true } };
+    await expect(pageSlotPicker('est-1', { row })).resolves.toEqual({ serviceMode: 'recurring', selection: { selectedFrequency: 'quarterly' } });
+    expect(db).not.toHaveBeenCalledWith('estimates');
+    expect(buildPricingBundle).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-1', estimate_data: { rewritten: true } }), expect.anything());
+    expect(row.estimate_data).toEqual({ kept: true });
   });
 
   test('a section default the combined list does not offer falls back to frequencies[0], exactly as the page does', async () => {

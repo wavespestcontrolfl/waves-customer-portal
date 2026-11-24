@@ -7,9 +7,11 @@ import React, {
   useMemo,
 } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Trash2, Search, SlidersHorizontal } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, Trash2, Search, SlidersHorizontal } from "lucide-react";
 import { callViaBridge } from "../../components/admin/CallBridgeLink";
 import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
+import LeadSourceCell from "../../components/admin/LeadSourceCell";
+import { LeadVisitDisclosure } from "../../components/admin/SourceVisitLinks";
 import useIsMobile from "../../hooks/useIsMobile";
 import { useFeatureFlag } from "../../hooks/useFeatureFlag";
 import {
@@ -37,7 +39,8 @@ import {
   UiSurface,
 } from "../../components/ui";
 import { leadAddressUnverifiedNotice } from "../../lib/leadAddressUnverified";
-import { etDateString } from "../../lib/timezone";
+import { quizAnswerLine } from "../../lib/leadQuizAnswers";
+import { etDateString, formatETDateTime } from "../../lib/timezone";
 import { isConsultationVisit } from "../../lib/consultationVisit";
 import ConsultationStatsPanel from "./ConsultationStatsPanel";
 import { leadServiceAddress } from "../../utils/format-address";
@@ -945,13 +948,13 @@ const BUILDER_WARRANTY_FILTER_LABELS = {
   expiring: "Builder warranty expiring",
 };
 const LEAD_TABLE_COLUMNS = [
-  { id: "identity", label: "Name / Phone", required: true, width: 26 },
-  { id: "source", label: "Source", width: 13 },
-  { id: "service", label: "Service", width: 19 },
+  { id: "identity", label: "Name / Phone", required: true, width: 22 },
+  { id: "source", label: "Source", width: 19 },
+  { id: "service", label: "Service", width: 15 },
   { id: "urgency", label: "Urgency", width: 8 },
   { id: "status", label: "Status", required: true, width: 18 },
   { id: "response", label: "Response", width: 10 },
-  { id: "actions", label: "Actions", required: true, width: 6 },
+  { id: "actions", label: "Actions", required: true, width: 8 },
 ];
 const ALL_LEAD_TABLE_COLUMNS = LEAD_TABLE_COLUMNS.map((column) => column.id);
 
@@ -992,6 +995,15 @@ function leadFiltersFromParams(params) {
       params.get("builder_warranty") === "expiring" ? "expiring" : "",
   };
 }
+// Footnote for the "Reached in 15 min" card. A lead is left out of the counts when the record cannot
+// say who reached it or when (a call with no answer time, an estimate sent again after the app sent it).
+function reachedSub(reach) {
+  const base = "First contact by a person: call, text, email or estimate";
+  return reach.notJudged > 0
+    ? `${base}. ${reach.notJudged} left out: who reached them, or when, is not recorded`
+    : base;
+}
+
 export function LeadsSection({ newLeadRequest = 0 }) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -1251,8 +1263,9 @@ export function LeadsSection({ newLeadRequest = 0 }) {
           params.set("builder_warranty", filters.builder_warranty);
         if (filters.start_date) params.set("start_date", filters.start_date);
         if (filters.end_date) params.set("end_date", filters.end_date);
-        params.set("sort", filters.sort);
-        params.set("order", filters.sort === "name" ? "asc" : "desc");
+        const sortField = { received_oldest: "first_contact_at", source_desc: "source" }[filters.sort] || filters.sort;
+        params.set("sort", sortField);
+        params.set("order", ["name", "source", "received_oldest"].includes(filters.sort) ? "asc" : "desc");
         params.set("page", filters.page);
         params.set("limit", String(filters.pageSize));
         const data = await adminFetch(`/admin/leads?${params}`);
@@ -1879,6 +1892,9 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                     value: "first_contact_at",
                     label: "Newest first",
                   },
+                  { value: "received_oldest", label: "Oldest first" },
+                  { value: "source", label: "Source A–Z" },
+                  { value: "source_desc", label: "Source Z–A" },
                   {
                     value: "name",
                     label: "Name A–Z",
@@ -1969,8 +1985,16 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                       <TH
                         key={column.id}
                         className="text-left text-ink-secondary"
+                        aria-sort={column.id === "source" ? ({ source: "ascending", source_desc: "descending" }[filters.sort] || "none") : undefined}
                       >
-                        {column.label}
+                        {column.id === "source" ? (
+                          <button type="button" className="inline-flex cursor-pointer items-center gap-1 rounded-sm border-0 bg-transparent p-0 font-sans text-14 font-medium text-ink-secondary u-focus-ring"
+                            aria-label={filters.sort === "source" ? "Sort by source, descending" : "Sort by source, ascending"}
+                            onClick={() => setFilters((f) => ({ ...f, sort: f.sort === "source" ? "source_desc" : "source", page: 1 }))}>
+                            Source
+                            {filters.sort === "source" ? <ArrowUp size={14} aria-hidden="true" /> : filters.sort === "source_desc" ? <ArrowDown size={14} aria-hidden="true" /> : <ArrowUpDown size={14} aria-hidden="true" />}
+                          </button>
+                        ) : column.label}
                       </TH>
                     ))}
                   </TR>
@@ -2020,23 +2044,20 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                 Estimate: {lead.estimate_status || "linked"}
                               </div>
                             )}
-                            <div className="text-ui-body text-ink-secondary">
-                              {lead.next_follow_up_at
-                                ? `Follow up ${fmtShortDate(lead.next_follow_up_at)}`
-                                : `Added ${fmtShortDate(lead.first_contact_at)}`}
-                            </div>
+                            {lead.first_contact_at && (
+                              <div className="text-ui-body text-ink-secondary">
+                                Received <time dateTime={lead.first_contact_at}>{formatETDateTime(lead.first_contact_at, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</time>
+                              </div>
+                            )}
+                            {lead.next_follow_up_at && (
+                              <div className="text-ui-body text-ink-secondary">Follow up {fmtShortDate(lead.next_follow_up_at)}</div>
+                            )}
+                            {columnMode === "compact" && (
+                              <div className="mt-2"><LeadSourceCell evidence={lead.source_evidence} legacySource={lead.source_name} /></div>
+                            )}
                             </TD>],
                             ["source", <TD key="source" data-label="Source">
-                                {lead.source_name ? (
-                                  <LeadBadge
-                                    label={lead.source_name}
-                                    tone={"strong"}
-                                  />
-                                ) : (
-                                  <span className="text-ink-secondary text-ui-body">
-                                    --
-                                  </span>
-                                )}
+                                <LeadSourceCell evidence={lead.source_evidence} legacySource={lead.source_name} />
                             </TD>],
                             ["service", <TD key="service" data-label="Service" className="text-zinc-900" title={lead.service_interest || undefined}>
                                 <div className="flex flex-wrap items-center gap-[6px]">
@@ -2300,9 +2321,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                         First Contact:{" "}
                                         <span className="text-zinc-900">
                                           {lead.first_contact_at
-                                            ? new Date(
-                                                lead.first_contact_at,
-                                              ).toLocaleString()
+                                            ? `${formatETDateTime(lead.first_contact_at)} ET`
                                             : "--"}
                                         </span>
                                       </div>
@@ -2364,6 +2383,12 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                           </span>
                                         </div>
                                       )}
+                                      <div className="my-3">
+                                        <div className="mb-1 font-medium text-zinc-900">Source evidence</div>
+                                        <LeadSourceCell evidence={lead.source_evidence} legacySource={lead.source_name} />
+                                        {lead.source_evidence?.basis && <p className="mb-0 mt-1">{lead.source_evidence.basis}</p>}
+                                        <LeadVisitDisclosure key={lead.id} id={lead.id} read={adminFetch} />
+                                      </div>
                                       {lead.heard_about && (
                                         <div>
                                           Heard about us:{" "}
@@ -2395,15 +2420,28 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                         ].filter(Boolean);
                                         const timelineLabel =
                                           TIMELINE_LABELS[ex.timeline];
+                                        const quizLine = quizAnswerLine(
+                                          ex.quiz,
+                                        );
                                         if (
                                           !ex.pain_points &&
                                           !ex.preferred_date_time &&
                                           !timelineLabel &&
+                                          !quizLine &&
                                           quoteFlags.length === 0
                                         )
                                           return null;
                                         return (
                                           <>
+                                            {quizLine && (
+                                              <div>
+                                                {quizLine.name}
+                                                {quizLine.answers ? ":" : ""}{" "}
+                                                <span className="text-zinc-900">
+                                                  {quizLine.answers}
+                                                </span>
+                                              </div>
+                                            )}
                                             {timelineLabel && (
                                               <div>
                                                 Wants service:{" "}
@@ -3439,16 +3477,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                           {leadServiceName(lead) || "--"}
                         </div>{" "}
                         <div className="flex items-center gap-[6px] flex-wrap">
-                          {lead.source_name && (
-                            <LeadBadge
-                              label={
-                                lead.source_name.length > 16
-                                  ? lead.source_name.slice(0, 13) + "..."
-                                  : lead.source_name
-                              }
-                              tone={"strong"}
-                            />
-                          )}
+                          <LeadSourceCell evidence={lead.source_evidence} legacySource={lead.source_name} />
                           {lead.urgency && lead.urgency !== "normal" && (
                             <LeadBadge
                               label={lead.urgency}
@@ -3940,6 +3969,20 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                 : undefined
             }
           />{" "}
+          {(ov.leadReach?.cohort > 0 || ov.leadReach?.notJudged > 0) && (
+            <>
+              <MetricCard
+                label="Reached in 15 min"
+                value={`${ov.leadReach.reachedWithin} of ${ov.leadReach.cohort}`}
+                sub={reachedSub(ov.leadReach)}
+              />{" "}
+              <MetricCard
+                label="Never reached"
+                value={ov.leadReach.neverReached}
+                sub="No call, text, email or estimate on record"
+              />{" "}
+            </>
+          )}
           <MetricCard label="Cost per Acquisition" value={fmtMoney(ov.cpa)} />{" "}
           <MetricCard
             label="Avg Speed to Lead"

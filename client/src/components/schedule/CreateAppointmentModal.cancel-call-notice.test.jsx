@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
- * "Canceled on a call" on New Appointment (GATE_CALL_CANCEL_GUARD). 2026-10-30: a caller canceled at 7:08 AM while
+ * "Canceled on a call" on New Appointment. 2026-10-30: a caller canceled at 7:08 AM while
  * nothing was booked, and the office booked her at 11:22 from this form, which showed nothing about it. The notice
- * renders under the chosen customer only when the route answers {enabled:true, call}; a dark gate or a failed probe
+ * renders under the chosen customer only when the route answers a call; no cancel call or a failed probe
  * renders nothing; and it never stops the save.
  */
 import React from 'react';
@@ -32,7 +32,7 @@ function futureDate(days = 30) {
   return [d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0')].join('-');
 }
 
-function installFetch({ probe = { enabled: true, call: CANCEL }, probeFails = false } = {}) {
+function installFetch({ probe = { call: CANCEL }, probeFails = false } = {}) {
   const fetcher = vi.fn((input, options = {}) => {
     const url = String(input);
     if (url.includes('/cancel-call-notice')) return probeFails ? Promise.reject(new Error('boom')) : Promise.resolve(json(probe));
@@ -41,7 +41,7 @@ function installFetch({ probe = { enabled: true, call: CANCEL }, probeFails = fa
       return Promise.resolve(json({ services: [{ id: 'svc-1', service_key: 'one_time_pest_control', name: 'One-Time Pest Control Service', billing_type: 'one_time', base_price: 250, default_duration_minutes: 60 }] }));
     }
     if (url.endsWith('/admin/schedule') && options.method === 'POST') return Promise.resolve(json({ id: 'appt-1' }));
-    if (url.includes('/properties?context=appointment_address')) return Promise.resolve(json({ properties: [], canChangeAppointmentAddress: false }));
+    if (url.includes('/properties?context=appointment_address')) return Promise.resolve(json({ properties: [] }));
     if (url.includes('/schedule-estimates')) return Promise.resolve(json({ estimates: [] }));
     if (url.endsWith('/admin/technicians')) return Promise.resolve(json({ technicians: [] }));
     if (url.endsWith('/admin/discounts')) return Promise.resolve(json([]));
@@ -85,8 +85,8 @@ describe('Canceled on a call notice', () => {
     expect(probeCalls(fetcher)[0][0]).toContain('customerId=customer-a');
   });
 
-  it('is absent when the gate is dark ({enabled:false})', async () => {
-    const fetcher = installFetch({ probe: { enabled: false, call: null } });
+  it('is absent when the latest call was not a cancellation ({call:null})', async () => {
+    const fetcher = installFetch({ probe: { call: null } });
     mount();
     await waitFor(() => expect(probeCalls(fetcher)).toHaveLength(1));
     await screen.findByRole('button', { name: 'Schedule appointment' });

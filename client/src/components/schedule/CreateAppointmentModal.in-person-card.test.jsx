@@ -49,7 +49,7 @@ function installFetch({ availability, inPersonResult, catalog = null, postReplie
       return Promise.resolve(reply.error ? json({ error: reply.error }, { ok: false, status: 500 }) : json(reply));
     }
     if (url.endsWith("/card-request/in-person")) return Promise.resolve(json(inPersonResult));
-    if (url.includes("/properties?context=appointment_address")) return Promise.resolve(json({ properties: [], canChangeAppointmentAddress: false }));
+    if (url.includes("/properties?context=appointment_address")) return Promise.resolve(json({ properties: [] }));
     if (url.includes("/schedule-estimates")) return Promise.resolve(json({ estimates: [] }));
     if (url.endsWith("/admin/technicians")) return Promise.resolve(json({ technicians: [] }));
     if (url.endsWith("/admin/discounts")) return Promise.resolve(json([]));

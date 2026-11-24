@@ -404,6 +404,8 @@ test('series scope hands the RAW window to the rebooker with adminWindowRules so
       // series effects (codex #4295 r2 P2).
       qualityDates: expect.any(Set),
       sourceSurface: 'dispatch_board',
+      // The office's "customer asked for this time" box (day-only promise): off when the request sends none.
+      customerAskedTime: false,
       notifyRequested: false,
       // Staff surface — occupancy clashes commit with a warning (owner
       // ruling 2026-08-25, rebooker.overlapAdvisory).

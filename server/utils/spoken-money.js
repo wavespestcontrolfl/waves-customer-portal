@@ -1,5 +1,5 @@
 /**
- * Dictated dollar amounts, read the way the operator said them (GATE_DICTATION_MONEY_NORMALIZE).
+ * Dictated dollar amounts, read the way the operator said them.
  *
  * The staff mic's transcriber hears "sixty-one thirty-three" and writes "6133", "$60.33" or
  * "$61.33". Staff mean $61.33. normalizeSpokenMoney(text) fixes the forms that are unambiguous
@@ -244,7 +244,7 @@ function textAfter(text, phrase) {
 
 /**
  * The system-prompt note the Intelligence Bar adds when the operator DICTATED the message
- * (GATE_DICTATION_MONEY_NORMALIZE; the client only says `dictation_used: true`). Every line comes from the
+ * (the client only says `dictation_used: true`). Every line comes from the
  * server's own parse of the question: no client-supplied amount or heard string is read. At most three
  * lines, unclear amounts first. Returns '' when the parse finds nothing.
  *   - an unclear amount: ask with offer_choices between $61.33 and $6,133 before using it.

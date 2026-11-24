@@ -272,6 +272,27 @@ describe('estimate show your work — gate off', () => {
       expect(body.estimate.planRestart).toBe(true);
     });
   });
+
+  // A plan quote that staff changed (the one-time option or invoice billing on) is refused by the accept and both card
+  // steps, so /data marks it and the page shows its refused-quote banner from the start (codex pre-push P1).
+  test('GET /:token/data marks a plan quote staff changed with the accept\'s code and words, and nothing else', async () => {
+    const marked = async (row) => {
+      dbRows = { estimates: estimateRow(row) };
+      let estimate;
+      await withServer(async (baseUrl) => {
+        estimate = (await (await fetch(`${baseUrl}/estimates/showyourworktoken/data`)).json()).estimate;
+      });
+      return estimate;
+    };
+    expect(await marked({ source: 'plan_start', bill_by_invoice: true }).then((e) => e.quoteRefusal)).toEqual({
+      code: 'PLAN_START_STATE_CHANGED',
+      error: 'This estimate changed since it was created — please go back to your portal for a current price.',
+    });
+    expect(await marked({ source: 'plan_restart', show_one_time_option: true }).then((e) => e.quoteRefusal?.code)).toBe('RESTART_STATE_CHANGED');
+    for (const row of [{ source: 'plan_start' }, { source: 'plan_restart' }, { bill_by_invoice: true, show_one_time_option: true }]) {
+      expect('quoteRefusal' in await marked(row)).toBe(false);
+    }
+  });
 });
 
 describe('estimate show your work — gate on', () => {

@@ -87,6 +87,10 @@ postgres('SendGrid webhook attempt fence (PostgreSQL)', () => {
     await mockPg.schema.createTable('sendgrid_webhook_events', (t) => {
       t.string('event_id').primary(); t.string('event_type'); t.string('message_id');
       t.string('email'); t.string('status'); t.timestamp('processed_at'); t.timestamp('updated_at');
+      // SendGrid's own event time (migration 20261120110000) and machine-open flag
+      // (20261120110001), written by processWebhookEvent.
+      t.timestamp('occurred_at', { useTz: true });
+      t.boolean('machine_open');
     });
     await mockPg.schema.createTable('newsletter_send_deliveries', (t) => {
       t.uuid('id').primary(); t.string('provider_message_id'); t.string('email');

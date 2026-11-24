@@ -65,6 +65,8 @@
       "what": "404 in production before the auth chain runs" },
     { "name": "devOnly", "module": "server/routes/admin-dev-dispatch-alert.js", "local": true,
       "what": "404 in production before the auth chain runs" },
+    { "name": "gateOn", "module": "server/routes/admin-roof-entry-read.js", "local": true,
+      "what": "404 {enabled:false} while GATE_ROOF_ENTRY_READ is off, ahead of adminAuthenticate so a dark gate never reaches the technicians lookup; otherwise next()" },
     { "name": "requireAiContentReport", "module": "server/routes/ai-assistant.js", "local": true,
       "what": "404 while the report surface is dark (unobservable-when-dark contract) before auth" },
     { "name": "chatReportLimiter", "module": "server/routes/ai-assistant.js", "local": true,

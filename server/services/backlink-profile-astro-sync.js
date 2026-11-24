@@ -97,6 +97,9 @@ const SAMEAS_EXCLUDED_PAGES = new Set([
   // Brand-wide handle, not one office's profile: the Sarasota and Parrish listings link it too, and every
   // unscoped listing lands in the Bradenton bucket (astro #841). A corporate profile is hand-curated in astro.
   'pinterest.com/wavespestcontrol',
+  // 9040 Town Center Pkwy + (941) 297-5749 = the HQ, not the Bradenton office this unscoped listing lands in
+  // (astro #865). Its corporate entry is hand-curated in astro CORPORATE_ENTITY_PROFILES.
+  'swflinc.com/business-directory/waves-pest-control',
 ]);
 
 function isExcludedHost(host) {

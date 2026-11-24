@@ -152,6 +152,42 @@ function groupInvoiceLinesByProperty(lineItems) {
 }
 
 /**
+ * The discount rows a customer document prints between Subtotal and Total
+ * (owner 2026-11-22: "multiple discounts should be separate rows"): one row
+ * per discount, named by its line, in first-appearance order. Lines with the
+ * same name (one discount across several services) share a row.
+ *
+ * One combined row (`combinedLabel`, the invoice's stored discount_label)
+ * when there is only one discount name, or when the discount lines do not
+ * add up to the stored discount total to the cent (a whole-invoice pick has
+ * no line, a capped discount keeps its uncapped lines), so the rows always
+ * reconcile to the total. Acceptance-deposit credit lines are prior
+ * payments, not discounts. [] when the invoice has no discount.
+ */
+function invoiceDiscountRows(lineItems, discountAmount, combinedLabel) {
+  const totalCents = Math.round((Number(discountAmount) || 0) * 100);
+  if (!(totalCents > 0)) return [];
+  const rows = [];
+  const byName = new Map();
+  for (const item of parseLineItems(lineItems)) {
+    if (!isDiscountLine(item) || item?.category === 'deposit_credit') continue;
+    const cents = Math.round(Math.abs(lineAmount(item)) * 100);
+    if (!cents) continue;
+    const label = clean(item.description) || 'Discount';
+    const key = label.toLowerCase();
+    if (!byName.has(key)) {
+      byName.set(key, { label, cents: 0 });
+      rows.push(byName.get(key));
+    }
+    byName.get(key).cents += cents;
+  }
+  if (rows.length < 2 || rows.reduce((sum, row) => sum + row.cents, 0) !== totalCents) {
+    return [{ label: clean(combinedLabel) || 'Discount', amount: totalCents / 100 }];
+  }
+  return rows.map(({ label, cents }) => ({ label, amount: cents / 100 }));
+}
+
+/**
  * The distinct property addresses an invoice's lines were frozen at, in
  * first-appearance order — one label when every line sits at one saved
  * property (the email names THAT property, not the account address), several
@@ -182,5 +218,6 @@ module.exports = {
   propertyCityStateZip,
   propertyAddressLabel,
   groupInvoiceLinesByProperty,
+  invoiceDiscountRows,
   invoicePropertyLabels,
 };

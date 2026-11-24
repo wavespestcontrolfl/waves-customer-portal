@@ -667,6 +667,9 @@ const PRICE_LINE_NO_CONTEXT =
   + ' queued, or the caller declines to give a missing detail, call capture_lead again WITHOUT'
   + ' estimate_requested, say a team member will follow up — nothing stronger — and end normally.';
 
+const { renderCompanyFactsSection } = require('../sms-company-facts');
+const COMPANY_FACTS_SECTION = renderCompanyFactsSection();
+
 const SYSTEM_PROMPT = [
   // The approved company name is "Waves Pest Control" — never an alternate
   // brand form on any customer surface (AGENTS.md; the greeting says the same).
@@ -716,6 +719,21 @@ const SYSTEM_PROMPT = [
   '- ONLY state appointment times that a tool actually returned. Never invent or guess a',
   '  time, date, or that a slot is held. If a tool returns no times, say a team member will',
   '  call to find one.',
+  '',
+  // The same owner-approved list the texting agent and the email auto-draft read: ONE source
+  // (sms-company-facts.COMPANY_FACTS), never a copy here. Rendered text is appended as-is so one
+  // approved fact reaches every channel; the lines below it frame it for speech.
+  COMPANY_FACTS_SECTION.replace(/\n$/, ''),
+  'These facts answer general questions. Say only the one or two that answer what the caller asked,',
+  'in short spoken sentences; never read the list out. They promise no visit time, price, or call',
+  'back, and they do not replace the rules above: a Waves team member still confirms every',
+  'appointment, and you only offer times a tool returned.',
+  'Use a fact only when it is about the same service and the same question the caller asked.',
+  'Never stretch one to a nearby case: a cockroach fact is not an ant answer, a pest-treatment',
+  'fact is not a rodent answer, and "someone needs to be home" does not answer whether to leave',
+  'during a treatment. When no fact or tool covers the question, say a team member will confirm.',
+  'Never promise a free, no-charge, or return visit, and never describe what Waves does not do,',
+  'unless a fact above or a tool result says it.',
   '',
   'Before you end the call, you MUST call the capture_lead tool with everything you gathered',
   '(a brief call_summary is required; include any time they picked in preferred_date_time).',
@@ -4652,4 +4670,4 @@ function floorSummary(callerTurns, scrub) {
   return `Inbound voice call (auto-captured on hangup). ${spokenSoFar}`;
 }
 
-module.exports = { RelayConversation, voiceEffortFor, SYSTEM_PROMPT, MODEL, resolveSessionModel, isAllowedOverrideModel, ALLOWED_OVERRIDE_MODEL_IDS, OPENAI_VOICE_OVERRIDE_MODEL_IDS, ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS, allowedOverrideModelIds, providerFor, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };
+module.exports = { RelayConversation, voiceEffortFor, SYSTEM_PROMPT, MODEL, resolveSessionModel, isAllowedOverrideModel, ALLOWED_OVERRIDE_MODEL_IDS, OPENAI_VOICE_OVERRIDE_MODEL_IDS, ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS, allowedOverrideModelIds, providerFor, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName, getVoiceProfileTextNonBlocking };

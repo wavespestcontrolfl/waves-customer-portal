@@ -147,6 +147,28 @@ const REPORT_PRODUCT_COPY = [
     petsKids: 'Stay off treated areas until the application has dried.',
   },
   {
+    // Owner ruling 2026-11-18: LESCO Crosscheck Plus (bifenthrin 7.9%, SiteOne label D00001542) is the house bifenthrin
+    // and replaces Atticus Talak above for new work; the Talak entry stays for old records and leftover stock. Same
+    // owner-approved wording as Talak (the same active ingredient and use). movedEpaRegs: the registration the catalog
+    // row carried before it took 10404-120.
+    epaReg: '10404-120',
+    movedEpaRegs: ['279-3206-10404'],
+    names: ['lesco crosscheck plus', 'crosscheck plus'],
+    mainPests: ['spiders', 'crawling insects'],
+    howItWorks: 'A long-lasting barrier on soil, walls and eaves. Insects that crawl across or rest on treated surfaces pick up a dose — our main barrier against spiders and crawling invaders.',
+    // 112 distinct pests — SiteOne/LESCO label D00001542 (EPA Reg. No. 10404-120), read in full 2026-11-18: the
+    // structural list (p18) plus yellow jackets and bed bugs (p19-20), stored products (p23), animal facilities (p24),
+    // termites and wood borers (p26-28), turf (p39-44) and ornamental (p47-49) tables reconciled; plurals, synonyms
+    // and life stages merged, a named species counted apart from its group. Every counting variant read gives
+    // 112-116. -> floors to 100+.
+    alsoLabeledForPestCount: 112,
+    // Pests its current label names, for the writer's "its label lists" fact (label-pest-facts.js): all on the
+    // structural list (p18, "Spiders (including Black Widow, ...)"), yellow jackets on p19 and p22. The label leaves
+    // no species out by name (no Pharaoh ant clause), so no labelPestsExcept.
+    labelPests: ['ants', 'cockroaches', 'spiders', 'wasps', 'flies', 'Carpenter ants', 'Fire ants', 'Widow spiders', 'silverfish', 'earwigs', 'millipedes', 'centipedes', 'springtails', 'crickets', 'Yellowjackets', 'scorpions'],
+    petsKids: 'Stay off treated areas until the application has dried.',
+  },
+  {
     // The catalog row is Atticus Antapex WSG (EPA 91234-401) since the owner's
     // 2026-10-26 confirmation of the bottle actually applied, so visit lines read
     // through the catalog carry that registration; lines recorded earlier keep

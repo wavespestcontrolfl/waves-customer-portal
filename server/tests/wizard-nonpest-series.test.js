@@ -1009,6 +1009,18 @@ describe('booking route wiring (source contracts)', () => {
     expect(seeder).not.toMatch(/where\(\{ id: parent\.source_estimate_id \}\)\.first\('address'\)/);
   });
 
+  test('the longer first visit must also fit the technician\'s shift: outside it the signed slot stays and the office is told (GATE_TECH_SHIFT_HOURS)', () => {
+    // The booking commit checks the signed block against the shift. The plan's longer block is decided
+    // here, after that commit, so it needs the same rule on the activation's own transaction.
+    expect(booking).toMatch(/const pastShift = extensionClashes\.length === 0 && Boolean\(await shiftExcluding\(trx, seriesParentRow\.technician_id,\s*\n\s*parentDateStr, \{ startMin: timeToMin\(slot_start\), endMin: parentEndMin \}\)\);/);
+    // Only a clear AND in-shift block is written; every other case takes the short-slot branch.
+    expect(booking).toMatch(/if \(extensionClashes\.length === 0 && !pastShift\) \{\s*\n\s*await trx\('scheduled_services'\)\s*\n\s*\.where\(\{ id: seriesParentRow\.id \}\)\s*\n\s*\.update\(\{ estimated_duration_minutes: seededChildDuration, window_end: extendedEnd,/);
+    expect(booking).not.toMatch(/if \(extensionClashes\.length === 0\) \{/);
+    // The office note and the bell name the real reason, not neighbouring work.
+    expect(booking).toMatch(/notes: trx\.raw\(pastShift\s*\n\s*\? "COALESCE\(notes, ''\) \|\| ' — first visit reserved at the funnel duration; the program needs a longer slot but it does not fit the shift hours; office to adjust'"/);
+    expect(booking).toMatch(/\$\{pastShift \? "the longer slot does not fit that technician's shift hours\. Re-place" : 'the following time is already occupied\. Move the neighbouring work or re-place'\} this visit/);
+  });
+
   test('a parent that cannot extend to the program duration keeps its signed slot AND rings the office bell in-trx (r14)', () => {
     expect(booking).toMatch(/dedupeKey: `wizard-activation-short-slot:\$\{seriesParentRow\.id\}`/);
     expect(booking).toMatch(/notifySeriesOfficeBellInTx = async \(trx, \{ dedupeKey, title, body, metadata, failLabel \}\)/);

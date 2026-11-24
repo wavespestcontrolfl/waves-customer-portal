@@ -2,9 +2,9 @@
  * Service-type classification + time-of-day defaults for auto-dispatch.
  *
  * `scheduled_services.service_type` is free-form text. We map it to:
- *   - a technician_capabilities category (general | mosquito | lawn | rodent | termite)
+ *   - a technician_capabilities category (general | mosquito | lawn | rodent | exclusion | termite)
  *   - a default time-of-day window, per the owner's routing rule:
- *       pest-family (general / rodent / termite / mosquito) → EARLY morning
+ *       pest-family (general / rodent / exclusion / termite / mosquito) → EARLY morning
  *       lawn-family  (lawn / tree & shrub)                   → MID/LATE morning
  *     (the day runs 08:00–17:00).
  *
@@ -23,10 +23,44 @@ const TIME_WINDOWS = {
   no_preference: { key: 'no_preference', startMin: 8 * 60, endMin: 17 * 60, label: 'Anytime 8–5' },
 };
 
-// Ordered most-specific-first; first regex match wins. General pest is the fallback.
+// The two RODENT lines (owner 2026-11-21: the second technician traps, the owner seals).
+//
+// `rodent` (trapping & bait) is only work a key or a name SAYS is trapping or bait: a trap job, a
+// trap check, bait stations, monitoring, a trap-only retainer. Every other rodent job is the
+// `exclusion` line: sealing, wire mesh, roof-entry covers, sanitation, entry-point plugging, the
+// rodent inspection, the guarantee bundle the estimate engine sells (exclusion + bait stations),
+// dead-rodent removal, and the GENERAL rodent visit ("Rodent Control": the first look at a rodent
+// problem, which is what /book's rodent choice, the booking-link text for an inspection and an
+// estimate hold saved under the lead's interest all save). So a rodent name this file has never
+// seen goes to the exclusion line's technician, who does the first visit and the inspection, and
+// never to the trapping technician by default. Sanitation, sealing and plugging count only beside
+// a rodent, attic or entry-point word: "Cockroach sanitation" stays general pest and "Lawn
+// Plugging" stays lawn.
+const RODENT_WORD = '(?:rodent|\\brats?\\b|\\bmice\\b|\\bmouse\\b)';
+// A trapping or bait word, or the combined pest plan's own label ("Pest & Rodent Control", key
+// pest_rodent_quarterly: the pest plan with rodent bait stations, pest-led everywhere in this repo).
+const TRAP_OR_BAIT_WORD = '(?:trap|bait|monitor|retainer|pest\\s*(?:&|and)\\s*rodent)';
+const TRAP_OR_BAIT_NAME = new RegExp(TRAP_OR_BAIT_WORD, 'i');
+// Inside the rodent catalog category a name needs no rodent word: "Attic Sealing", "Sanitation".
+const RODENT_ROW_EXCLUSION_WORK = /exclusion|wire[\s_]*mesh|bird[\s_]*box|roof[-\s_]?entry|sanitation|plug|seal/i;
+const EXCLUSION_NAME = new RegExp([
+  // Exclusion work, whatever else the name says ("Rodent Exclusion & Trapping" is the first visit).
+  'exclusion', 'wire[\\s_]*mesh', 'bird[\\s_]*box', 'roof[-\\s_]?entry',
+  '(?:rodent|attic).*sanitation', 'sanitation.*(?:rodent|attic)',
+  '(?:rodent|entry[-\\s_]?points?).*(?:plug|seal)', '(?:plug|seal)\\w*.*(?:rodent|entry[-\\s_]?points?)',
+  // Any other rodent name with no trapping or bait word in it. Each part of a two-service name
+  // ("Rodent Control + Termite Bait Station Service") is read by itself.
+  `(?:^|\\+)(?![^+]*${TRAP_OR_BAIT_WORD})[^+]*${RODENT_WORD}`,
+].join('|'), 'i');
+
+// Ordered; the first regex match wins. General pest is the fallback. Exclusion is first, so a
+// two-service name with an exclusion part ("Rodent Control + Termite Inspection", what /book saves
+// for two choices) reads exclusion. 'rodent' is reached only by a name with a trapping or bait word
+// ("trap-only" is the retainer programs, whose names carry no rodent word).
 const CATEGORY_PATTERNS = [
+  ['exclusion', EXCLUSION_NAME],
   ['termite', /termit|foam[_\s]*recurring|recurring[_\s]*foam|wdo|bora\s*care|wood[- ]?destroy|soil\s*(poison|treat)|pre[- ]?slab|preconstruction/i],
-  ['rodent', /rodent|\brat\b|\brats\b|mice|\bmouse\b|trapping|exclusion/i],
+  ['rodent', /rodent|\brat\b|\brats\b|mice|\bmouse\b|trapping|trap[- ]?only/i],
   ['mosquito', /mosquito|no[- ]?see[- ]?um|midge/i],
   ['lawn', /lawn|turf|fertiliz|weed\s*control|fungus|grass|aeration|de[- ]?thatch|tree\s*&?\s*(and\s*)?shrub|\bt\s*&\s*s\b|ornamental|palm\s*(injection|treat)/i],
 ];
@@ -37,7 +71,7 @@ const LAWN_FAMILY = new Set(['lawn']);
 // classifyServiceCategory can return. The Team tab editor, the new-hire seed,
 // and the CHECK constraint on technician_capabilities.service_category all
 // derive from this list; a new category is a migration, not just a regex.
-const CAPABILITY_CATEGORIES = ['general', 'mosquito', 'lawn', 'rodent', 'termite'];
+const CAPABILITY_CATEGORIES = ['general', 'mosquito', 'lawn', 'rodent', 'exclusion', 'termite'];
 
 // services.category (the service library) -> capability category / service line.
 // inspection / specialty / other / anything unknown names no category of its own:
@@ -60,8 +94,65 @@ function categoryForCatalogCategory(catalogCategory) {
   return Object.prototype.hasOwnProperty.call(CATALOG_CATEGORY_LINES, key) ? CATALOG_CATEGORY_LINES[key] : null;
 }
 
+// The service library holds trapping and exclusion under ONE category ('rodent'), and the rodent
+// inspection under 'inspection', so the category cannot tell the two rodent lines apart. The
+// service KEY does (owner 2026-11-21, rodent jobs = A: "you seal, he traps"; the owner keeps attic
+// sanitation, the rodent inspection that prices a sealing job and the first visit). A job sold with
+// trapping and exclusion together is the owner's first visit; its trap checks are their own
+// services on the rodent line. A key listed here keeps its line when staff rename the row.
+const CATALOG_KEY_LINES = Object.freeze({
+  rodent_exclusion: 'exclusion',
+  rodent_exclusion_only: 'exclusion',
+  rodent_trapping_exclusion: 'exclusion',
+  rodent_trapping_exclusion_sanitation: 'exclusion',
+  rodent_trapping_sanitation: 'exclusion',
+  rodent_wire_mesh: 'exclusion',
+  rodent_bird_box: 'exclusion',
+  rodent_sanitation_light: 'exclusion',
+  rodent_sanitation_standard: 'exclusion',
+  rodent_sanitation_heavy: 'exclusion',
+  rodent_inspection: 'exclusion',
+  // The general rodent visit ("Rodent Pest Control Service"): the first look, as the inspection.
+  rodent_general_one_time: 'exclusion',
+  // Dead-rodent removal and odor treatment: cleanup, reported with the sanitation services.
+  rodent_dead_animal_removal: 'exclusion',
+  // Trapping and bait stations: the rodent line.
+  rodent_trapping: 'rodent',
+  rodent_trapping_followup: 'rodent',
+  rodent_trap_check_additional: 'rodent',
+  rodent_bait_quarterly: 'rodent',
+  rodent_bait_setup: 'rodent',
+  rodent_monitoring: 'rodent',
+  trap_only_retainer_monthly: 'rodent',
+  trap_only_retainer_plus: 'rodent',
+  trap_only_retainer_standard: 'rodent',
+});
+
+/**
+ * The capability category / service line a service-library row names, or null when it names
+ * none (the caller then reads the visit NAME). `row` = { service_key, category, name }, any
+ * of them optional. The key first (CATALOG_KEY_LINES), then the category. A 'rodent' row whose
+ * key is not listed (a service added to the library later) is the rodent line only when its own
+ * catalog NAME says trapping or bait and names no exclusion work; otherwise it is exclusion, as an
+ * unknown rodent name is. The category already says "rodent", so the name needs no rodent word
+ * ("Bait Station Refill" is the rodent line).
+ */
+function lineForCatalogRow(row) {
+  if (!row) return null;
+  const key = String(row.service_key || '').trim().toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(CATALOG_KEY_LINES, key)) return CATALOG_KEY_LINES[key];
+  const line = categoryForCatalogCategory(row.category);
+  if (line !== 'rodent') return line;
+  const name = String(row.name || '');
+  return TRAP_OR_BAIT_NAME.test(name) && !RODENT_ROW_EXCLUSION_WORK.test(name) ? 'rodent' : 'exclusion';
+}
+
 function classifyServiceCategory(serviceType) {
   const s = String(serviceType || '').toLowerCase();
+  // A caller with no visit name passes the service KEY as the name (a key-only slot search): a
+  // listed key decides first, the same way the catalog row would.
+  const key = s.trim();
+  if (Object.prototype.hasOwnProperty.call(CATALOG_KEY_LINES, key)) return CATALOG_KEY_LINES[key];
   for (const [cat, re] of CATEGORY_PATTERNS) {
     if (re.test(s)) return cat;
   }
@@ -124,7 +215,9 @@ module.exports = {
   TIME_WINDOWS,
   CAPABILITY_CATEGORIES,
   CATALOG_CATEGORY_LINES,
+  CATALOG_KEY_LINES,
   categoryForCatalogCategory,
+  lineForCatalogRow,
   classifyServiceCategory,
   serviceFamily,
   serviceFamilyPreference,

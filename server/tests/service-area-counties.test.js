@@ -40,10 +40,38 @@ describe('Punta Gorda triage flag', () => {
     expect(flagsFor({ county: 'Charlotte', postal_code: '33950' })).toContain('out_of_service_area');
   });
 
-  test('Port Charlotte (33980, 33948) and Englewood stay unflagged', () => {
-    expect(flagsFor({ city: 'Port Charlotte', county: 'Charlotte', postal_code: '33980' })).not.toContain('out_of_service_area');
-    expect(flagsFor({ city: 'Port Charlotte', county: 'Charlotte', postal_code: '33948' })).not.toContain('out_of_service_area');
-    expect(flagsFor({ city: 'Englewood', county: 'Charlotte', postal_code: '34223' })).not.toContain('out_of_service_area');
-    expect(flagsFor({ postal_code: '33983', county: 'Charlotte' })).not.toContain('out_of_service_area');
+  // The 2026-11-23 hold ended when the second technician was hired: every place on it is served and stays unflagged.
+  test.each([
+    [{ city: 'Port Charlotte', county: 'Charlotte', postal_code: '33980' }],
+    [{ city: 'Port Charlotte', county: 'Charlotte', postal_code: '33981' }],
+    [{ city: 'Port Charlotte', county: 'Charlotte', postal_code: '33948' }],
+    [{ city: 'Gulf Cove', county: 'Charlotte' }],
+    [{ city: 'Deep Creek', county: 'Charlotte' }],
+    [{ city: 'Rotonda West', county: 'Charlotte', postal_code: '33947' }],
+    [{ city: 'Placida', county: 'Charlotte' }],
+    [{ city: 'Boca Grande', county: 'Charlotte' }],
+    [{ city: 'Babcock Ranch', county: 'Charlotte', postal_code: '33982' }],
+    [{ postal_code: '33983', county: 'Charlotte' }],
+    [{ city: 'Englewood', county: 'Sarasota', postal_code: '34223' }],
+    [{ city: 'Englewood', county: 'Charlotte', postal_code: '34224' }],
+  ])('a place held on 2026-11-23 %j is served again and unflagged', (sa) => {
+    expect(flagsFor(sa)).not.toContain('out_of_service_area');
+  });
+
+  test('a ZIP Punta Gorda shares (33980 / 33982 / 33983) with no city is unverified, not served; a served city on it is not flagged', () => {
+    for (const postal_code of ['33980', '33982', '33983']) {
+      const flags = flagsFor({ county: 'Charlotte', postal_code });
+      expect(flags).toContain('address_unverified');
+      expect(flags).not.toContain('out_of_service_area');
+      expect(flagsFor({ county: 'Charlotte', city: '  ', postal_code })).toContain('address_unverified');
+      expect(flagsFor({ county: 'Charlotte', city: 'Port Charlotte', postal_code })).not.toContain('address_unverified');
+      expect(flagsFor({ county: 'Charlotte', city: 'Punta Gorda', postal_code })).toContain('out_of_service_area');
+    }
+    expect(flagsFor({ county: 'Charlotte', postal_code: '33948' })).not.toContain('address_unverified');
+  });
+
+  test('North Port and Venice stay unflagged', () => {
+    expect(flagsFor({ city: 'North Port', county: 'Sarasota', postal_code: '34287' })).not.toContain('out_of_service_area');
+    expect(flagsFor({ city: 'Venice', county: 'Sarasota', postal_code: '34285' })).not.toContain('out_of_service_area');
   });
 });

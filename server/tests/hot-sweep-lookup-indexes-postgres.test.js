@@ -21,7 +21,6 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const migration = require('../models/migrations/20261104233000_hot_sweep_lookup_indexes');
-const { gates } = require('../config/feature-gates');
 const { retireCalledBackMissedCalls } = require('../services/missed-call-bell');
 const { EMAIL_HASH_SQL } = require('../services/access-code-capture');
 
@@ -31,9 +30,8 @@ jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('hot sweep lookup indexes on PostgreSQL', () => {
   let database;
   const schema = `hot_sweep_idx_${randomUUID().replaceAll('-', '')}`;
-  const tables = ['customers', 'emails', 'bid_opportunity_emails', 'call_log', 'notifications'];
-  const gateNames = ['callbackNeedsAnswer', 'missedCallVisitUnderway'];
-  const savedGates = Object.fromEntries(gateNames.map((key) => [key, gates[key]]));
+  // scheduled_services and invoices: the retire pass's visit-underway clause reads them.
+  const tables = ['customers', 'emails', 'bid_opportunity_emails', 'call_log', 'notifications', 'scheduled_services', 'invoices'];
 
   const indexesPresent = async () => (await database.raw(
     'SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND indexname = ANY(?) ORDER BY 1',
@@ -57,7 +55,6 @@ jest.setTimeout(30000);
     mockConn = database;
   });
   afterAll(async () => {
-    Object.assign(gates, savedGates);
     if (database) {
       await database.raw('DROP SCHEMA IF EXISTS ?? CASCADE', [schema]);
       await database.destroy();
@@ -97,7 +94,6 @@ jest.setTimeout(30000);
 
   test('the missed-call retire query joins call_log through call_log_id_text_idx', async () => {
     await migration.up(database);
-    Object.assign(gates, { callbackNeedsAnswer: true, missedCallVisitUnderway: false });
     const callId = randomUUID();
     await database('call_log').insert([
       { id: callId, direction: 'inbound', from_phone: '+19415550100', created_at: new Date('2026-11-03T14:00:00Z') },

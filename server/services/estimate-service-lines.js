@@ -475,5 +475,6 @@ module.exports = {
   inferEstimateServiceLines,
   oneTimeServicesFromData,
   parseEstimateData,
+  recurringServicesFromData,
   serviceKeysFromText,
 };

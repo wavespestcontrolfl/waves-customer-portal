@@ -12,6 +12,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { generateConfirmationCode } = require('../utils/slot-offer-token');
 const { findConflictingVisits, acquireOccupancyLock } = require('./scheduling/occupancy');
+const { bookedVisitOrLiveHold } = require('./scheduling/reservation-occupancy');
 const { travelGapEnabled, violatesTravelGap } = require('./scheduling/travel-gap');
 const { ensureCatalogLoaded, expectedMinutesSync, expectedServiceMinutes } = require('./scheduling/expected-service-minutes');
 const { loadPackingAnchors, packedBounds } = require('./scheduling/packing-geometry');
@@ -539,19 +540,15 @@ class AvailabilityEngine {
   // unlinked live self-bookings and live estimate holds, as [{ start, end }]
   // minutes.
   async loadZoneOccupied(conn, zone, dateStr, options = {}) {
-    // Mirror getAvailableSlots' occupied set: zone services + live
-    // self-bookings. Any overlap means the slot was taken since the
-    // customer loaded the picker.
+    // At confirmation a staff-booked visit occupies its zone even when its
+    // original hold timestamp has lapsed since the customer loaded the picker.
     const occupied = [];
     const scheduledInZone = await conn('scheduled_services')
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .where('scheduled_services.scheduled_date', dateStr)
       .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
       .whereNotNull('scheduled_services.window_start')
-      .where((q) => {
-        q.whereNull('scheduled_services.reservation_expires_at')
-          .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-      })
+      .where(bookedVisitOrLiveHold)
       .modify((q) => {
         // Case-insensitive city match — same reasoning as the slot
         // builder above; empty list matches nothing like an empty whereIn.

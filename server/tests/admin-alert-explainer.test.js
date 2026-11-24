@@ -44,7 +44,6 @@ beforeEach(() => {
   jest.clearAllMocks();
   explainer._private.recentFailures.clear();
   delete process.env.GATE_ALERT_EXPLAINER;
-  delete process.env.GATE_ALERT_CUSTOMER_LINE;
   customersForAlerts.mockResolvedValue(new Map([[ID, { id: CUSTOMER_ID, name: 'Jane Doe' }]]));
   dispatchWithFallback.mockResolvedValue({ ok: true, json: answer, provider: 'anthropic', model: 'routine-model' });
 });
@@ -237,14 +236,15 @@ describe('withExplainerFields (the bell list)', () => {
     row({ id: '00000000-0000-4000-8000-0000000000e2', explainer: { v: 1, version: 'c'.repeat(32), ...answer } }),
   ];
 
-  test('gate off: the stored column is dropped and nothing is added', async () => {
+  test('explainer off, an admin: the stored column is dropped and only `customer` is added', async () => {
     const rows = await explainer.withExplainerFields(listed(), { role: 'admin' });
     rows.forEach((r) => {
       expect(r).not.toHaveProperty('explainer');
       expect(r).not.toHaveProperty('explainable');
-      expect(r).not.toHaveProperty('customer');
     });
-    expect(customersForAlerts).not.toHaveBeenCalled();
+    expect(rows[0].customer).toEqual({ id: CUSTOMER_ID, name: 'Jane Doe' });
+    expect(rows[1]).not.toHaveProperty('customer');
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
   test('gate on, a technician: the same as off', async () => {
@@ -278,24 +278,13 @@ describe('withExplainerFields (the bell list)', () => {
   });
 });
 
-describe('withExplainerFields, GATE_ALERT_CUSTOMER_LINE (the customer line without the AI summary)', () => {
+describe('withExplainerFields, the customer line without the AI summary', () => {
   const listed = () => [
     row({ explainer: { v: 1, version: VERSION, ...answer, provider: 'anthropic' } }),
     row({ id: '00000000-0000-4000-8000-0000000000e2' }),
   ];
-  afterEach(() => { delete process.env.GATE_ALERT_CUSTOMER_LINE; });
 
-  test('explainer on: unchanged, the full shape, whatever the line gate says', async () => {
-    process.env.GATE_ALERT_EXPLAINER = 'true';
-    const withoutLine = await explainer.withExplainerFields(listed(), { role: 'admin' });
-    process.env.GATE_ALERT_CUSTOMER_LINE = 'true';
-    const withLine = await explainer.withExplainerFields(listed(), { role: 'admin' });
-    expect(withLine).toEqual(withoutLine);
-    expect(withLine[0]).toEqual(expect.objectContaining({ explainable: true, customer: { id: CUSTOMER_ID, name: 'Jane Doe' }, explainer: answer }));
-  });
-
-  test('explainer off, line on, admin: only `customer` is added, never explainable or explainer', async () => {
-    process.env.GATE_ALERT_CUSTOMER_LINE = 'true';
+  test('explainer off, admin: only `customer` is added, never explainable or explainer', async () => {
     const rows = await explainer.withExplainerFields(listed(), { role: 'admin' });
     expect(customersForAlerts).toHaveBeenCalledTimes(1);
     expect(rows[0]).toEqual({ ...listed()[0], explainer: undefined, customer: { id: CUSTOMER_ID, name: 'Jane Doe' } });
@@ -308,14 +297,7 @@ describe('withExplainerFields, GATE_ALERT_CUSTOMER_LINE (the customer line witho
     expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
-  test('both off: byte-identical to the bare rows, and no name read', async () => {
-    const rows = await explainer.withExplainerFields(listed(), { role: 'admin' });
-    expect(rows).toEqual(listed().map(({ explainer: _s, ...r }) => r));
-    expect(customersForAlerts).not.toHaveBeenCalled();
-  });
-
-  test('line on, not an admin: the same as off', async () => {
-    process.env.GATE_ALERT_CUSTOMER_LINE = 'true';
+  test('not an admin: no name read', async () => {
     for (const role of ['technician', undefined]) {
       const rows = await explainer.withExplainerFields(listed(), { role });
       expect(rows.some((r) => 'explainable' in r || 'explainer' in r || 'customer' in r)).toBe(false);
@@ -323,16 +305,14 @@ describe('withExplainerFields, GATE_ALERT_CUSTOMER_LINE (the customer line witho
     expect(customersForAlerts).not.toHaveBeenCalled();
   });
 
-  test('line on, a failed name read: the rows are served bare, nothing throws', async () => {
-    process.env.GATE_ALERT_CUSTOMER_LINE = 'true';
+  test('a failed name read: the rows are served bare, nothing throws', async () => {
     customersForAlerts.mockRejectedValue(new Error('db down'));
     const rows = await explainer.withExplainerFields(listed(), { role: 'admin' });
     expect(rows).toHaveLength(2);
     expect(rows.some((r) => 'customer' in r || 'explainable' in r)).toBe(false);
   });
 
-  test('line on, no rows: no name read', async () => {
-    process.env.GATE_ALERT_CUSTOMER_LINE = 'true';
+  test('no rows: no name read', async () => {
     expect(await explainer.withExplainerFields([], { role: 'admin' })).toEqual([]);
     expect(customersForAlerts).not.toHaveBeenCalled();
   });

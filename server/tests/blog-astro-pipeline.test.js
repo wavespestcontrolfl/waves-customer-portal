@@ -49,7 +49,7 @@ jest.mock('../services/content-astro/author-service', () => ({
 }));
 jest.mock('../services/content/image-generator', () => ({
   generate: jest.fn(),
-  planFor: jest.fn(() => ({ style: 'photo', setting: 'inside a residential garage', timeOfDay: 'late afternoon', vantage: 'eye level' })), retryStyleFor: jest.fn(() => 'illustration'), IMAGE_CHAIN_BUDGET_MS: 360000,
+  planFor: jest.fn(() => ({ style: 'photo', setting: 'inside a residential garage', timeOfDay: 'late afternoon', vantage: 'eye level' })), IMAGE_CHAIN_BUDGET_MS: 360000,
 }));
 jest.mock('../services/content/fact-check-gate', () => ({
   evaluate: jest.fn().mockResolvedValue({ pass: true, findings: [], checked: false }),
@@ -2705,6 +2705,23 @@ describe('publishAstro catch persists an already-opened PR marker (Codex round 3
     }
   });
 
+  test('an editor-made hero on a post made an identification post since parks the run; a hero planned for it goes on (pre-push audit P1 on f7db98c765)', async () => {
+    const unmarked = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+    const publishWith = async (overrides) => {
+      db.mockImplementation(() => chain({ first: jest.fn().mockResolvedValue(validPost(overrides)) }));
+      return AstroPublisher.publishAstro('post-1').then(() => null, (err) => err);
+    };
+    const parked = await publishWith({ post_type: 'diagnostic', featured_image_url: unmarked });
+    expect(parked).toMatchObject({ code: 'BLOG_HERO_MEDIA_FAILED', message: expect.stringMatching(/before this post became an identification post/) });
+    expect(gh.createBranch).not.toHaveBeenCalled(); // parked before any branch
+    // The same bytes, marked as planned for an identification post, pass the hero step.
+    const marked = AstroPublisher._internals.stampIdentificationPlan(unmarked);
+    expect(AstroPublisher._internals.parseImageDataUrl(marked)).toMatchObject({ identificationPlan: true, logoReference: false });
+    expect(String((await publishWith({ post_type: 'diagnostic', featured_image_url: marked }))?.message || '')).not.toMatch(/identification post/);
+    // A post that is not an identification post never needs the marker.
+    expect(String((await publishWith({ featured_image_url: unmarked }))?.message || '')).not.toMatch(/identification post/);
+  });
+
   test('a failure BEFORE PR creation stamps publish_failed with NO marker — provably retryable', async () => {
     // FAQ on a rodent post = a guardrails P0 thrown well before any PR.
     const post = validPost({
@@ -2906,6 +2923,17 @@ describe('generateHeroBuffer (publish-time AI hero)', () => {
     );
   });
 
+  test('an identification post (post_type or page_type diagnostic) plans its hero with identification: true', async () => {
+    imageGenerator.generate.mockResolvedValue({ dataUrl: `data:image/png;base64,${PNG_B64}`, model: 'test-model' });
+    const { screenGeneratedImage } = require('../services/content/hero-alt-vision');
+    screenGeneratedImage.mockResolvedValue({ ok: true, checked: true, readableText: [], logos: [], reasons: [] });
+    for (const [extra, expected] of [[{ post_type: 'diagnostic' }, true], [{ page_type: 'diagnostic' }, true], [{ post_type: 'seasonal' }, false], [{}, false]]) {
+      imageGenerator.planFor.mockClear();
+      await AstroPublisher._internals.generateHeroBuffer({ title: 'T', meta_description: 'm', keyword: 'k', slug: 's', ...extra });
+      expect(imageGenerator.planFor.mock.calls[0][0].identification).toBe(expected);
+    }
+  });
+
   test('throws when generation yields no usable image (so publish fails loudly, not hero-less)', async () => {
     imageGenerator.generate.mockResolvedValue({ dataUrl: 'not-a-data-url', model: 'x' });
     await expect(
@@ -2947,8 +2975,8 @@ describe('parseImageDataUrl (bounded data-URL header parse)', () => {
     const { stampLogoReference } = AstroPublisher._internals;
     const stamped = stampLogoReference('data:image/png;base64,AAAA');
     expect(stamped).toBe('data:image/png;waves-logo=1;base64,AAAA');
-    expect(parseImageDataUrl(stamped)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: true, vanWrapReference: false });
-    expect(parseImageDataUrl('data:image/png;base64,AAAA')).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: false, vanWrapReference: false });
+    expect(parseImageDataUrl(stamped)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: true, vanWrapReference: false, identificationPlan: false });
+    expect(parseImageDataUrl('data:image/png;base64,AAAA')).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: false, vanWrapReference: false, identificationPlan: false });
     expect(parseImageDataUrl('data:image/png;evil=1;base64,AAAA').logoReference).toBe(false);
     expect(stampLogoReference('https://example.com/x.png')).toBe('https://example.com/x.png');
     expect(parseImageDataUrl('data:image/png,rawdata')).toBeNull();
@@ -2959,12 +2987,15 @@ describe('parseImageDataUrl (bounded data-URL header parse)', () => {
     const { stampLogoReference, stampVanWrapReference } = AstroPublisher._internals;
     const vanStamped = stampVanWrapReference('data:image/png;base64,AAAA');
     expect(vanStamped).toBe('data:image/png;waves-van-wrap=1;base64,AAAA');
-    expect(parseImageDataUrl(vanStamped)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: false, vanWrapReference: true });
+    expect(parseImageDataUrl(vanStamped)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: false, vanWrapReference: true, identificationPlan: false });
     // Both markers stamped, in either order, both survive the parse.
     const both1 = stampVanWrapReference(stampLogoReference('data:image/png;base64,AAAA'));
     const both2 = stampLogoReference(stampVanWrapReference('data:image/png;base64,AAAA'));
-    expect(parseImageDataUrl(both1)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: true, vanWrapReference: true });
-    expect(parseImageDataUrl(both2)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: true, vanWrapReference: true });
+    expect(parseImageDataUrl(both1)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: true, vanWrapReference: true, identificationPlan: false });
+    expect(parseImageDataUrl(both2)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: true, vanWrapReference: true, identificationPlan: false });
+    // The identification marker stacks on top of both.
+    const all3 = AstroPublisher._internals.stampIdentificationPlan(both2);
+    expect(parseImageDataUrl(all3)).toEqual({ mime: 'image/png', base64: 'AAAA', logoReference: true, vanWrapReference: true, identificationPlan: true });
     expect(stampVanWrapReference('https://example.com/x.png')).toBe('https://example.com/x.png');
   });
 });
@@ -4446,6 +4477,7 @@ describe('PR bodies disclose backfilled schema-required fields (Codex r1)', () =
       expect(body).toContain('gpt-image-2 (cartoon, inside a residential garage, dusk)');
     }
     expect(admin).toContain('- body-1: gemini-image-pro (photo, a pool cage, noon) — screen clean');
+    expect(AstroPublisher._internals.describeImageProvenance('hero', { model: 'm', plan: { style: 'photo', cast: 'technician', setting: 'in a backyard, dew', timeOfDay: 'noon' } })).toBe('- hero: m (photo, technician, in a backyard, noon) — not screened');
     // The label is the committed file name, not the list position: a draft that already carried body-1 gets its generated asset as body-2 (Codex r13 P2 on #3964).
     const shifted = buildPrBody({ post: {}, slug: 'x', branch: 'b', content: 'a b', images: { hero: null, body: [{ ...clean, src: '/images/blog/x/body-2.webp' }] } });
     expect(shifted).toContain('- body-2: gemini-image-pro');
@@ -4498,21 +4530,23 @@ describe('generatePlannedImage — one deadline per slot, safer candidate when b
     expect(out.screen.readableText).toEqual(['ON']);
   });
 
-  test('an infographic that rendered its caption plus one stray label beats a retry that dropped the caption — allowed text is not a defect (Codex r11 P2)', async () => {
+  test('identification rides into BOTH plans (first and screen retry); a body slot passes nothing', async () => {
     const imageGenerator = require('../services/content/image-generator');
     const { screenGeneratedImage } = require('../services/content/hero-alt-vision');
     imageGenerator.generate.mockReset().mockResolvedValue({ dataUrl: PNG, mimeType: 'image/png', model: 'gpt-image-2', attempts: [], alt: 'a' });
+    imageGenerator.planFor.mockClear();
     screenGeneratedImage
-      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['How to Stop Ants', 'ZONE 5'], logos: [], reasons: ['readable text: ZONE 5'], violations: 1 })
-      .mockResolvedValueOnce({ ok: false, checked: true, readableText: [], logos: [], reasons: ['missing caption: "How to Stop Ants"'], violations: 1 })
-      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['How to Stop Ants', 'ZONE 5'], logos: [], reasons: ['readable text: ZONE 5'], violations: 1 })
-      .mockResolvedValueOnce({ ok: false, checked: true, readableText: [], logos: [], reasons: ['missing caption: "How to Stop Ants"', 'readable text: ORKIN'], violations: 2 });
-    // Equal violations → the first candidate (stable sort), never the captionless one by string count.
-    let out = await AstroPublisher.generatePlannedImage({ ...args, captions: ['How to Stop Ants'] });
-    expect(out.screen.readableText).toEqual(['How to Stop Ants', 'ZONE 5']);
-    // More violations on the retry → the first candidate again.
-    out = await AstroPublisher.generatePlannedImage({ ...args, captions: ['How to Stop Ants'] });
-    expect(out.screen.readableText).toEqual(['How to Stop Ants', 'ZONE 5']);
+      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['ZONE 5'], logos: [], reasons: ['readable text: ZONE 5'], violations: 1 })
+      .mockResolvedValueOnce({ ok: true, checked: true, readableText: [], logos: [], reasons: [] });
+    await AstroPublisher.generatePlannedImage({ ...args, identification: true });
+    expect(imageGenerator.planFor).toHaveBeenCalledTimes(2);
+    expect(imageGenerator.planFor.mock.calls[0][0]).toMatchObject({ index: 0, identification: true });
+    expect(imageGenerator.planFor.mock.calls[1][0]).toMatchObject({ index: 1000, identification: true });
+    for (const [plan] of imageGenerator.planFor.mock.calls) expect(plan).not.toHaveProperty('captions');
+    imageGenerator.planFor.mockClear();
+    screenGeneratedImage.mockResolvedValueOnce({ ok: true, checked: true, readableText: [], logos: [], reasons: [] });
+    await AstroPublisher.generatePlannedImage({ ...args, mode: 'blog-body', index: 1 });
+    expect(imageGenerator.planFor.mock.calls[0][0].identification).toBeFalsy();
   });
 
   test('a caller-supplied deadline is honoured by both generate calls (near-duplicate re-framing shares the slot budget — Codex r8 P2)', async () => {
@@ -6348,6 +6382,52 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
       expect(res.body).toContain(a1);
       expect(res.deletes).toEqual([`public${managedSrc}`]);
     }
+  });
+
+  test('bodySlotOfName: odd names plan as slot 1 and even names as slot 2', () => {
+    const { bodySlotOfName } = AstroPublisher._internals;
+    expect([1, 2, 3, 4, 49, 50, '7'].map(bodySlotOfName)).toEqual([1, 2, 1, 2, 1, 2, 1]);
+  });
+
+  test('resolveBodyImages: a new picture takes the body slot the kept picture does not hold, never the hero slot', async () => {
+    const { resolveBodyImages, compressToWebp } = AstroPublisher._internals;
+    const imageGenerator = require('../services/content/image-generator');
+    const w1 = (await compressToWebp(Buffer.from(PATTERNS[1].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const w2 = (await compressToWebp(Buffer.from(PATTERNS[2].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const src = (n) => `/images/blog/pest-control/my-post/body-${n}.webp`;
+    // The post keeps one managed picture (body-<kept>) in its Alpha section; Beta has none.
+    // `orphans` are managed files still on main that the draft no longer shows.
+    const plannedFor = async (kept, orphans = []) => {
+      const liveBody = `## Alpha\n\nAlpha lead prose.\n\n![Kept alt](${src(kept)})\n\n## Beta\n\nBeta prose.\n`;
+      const onMain = new Map([[`public${src(kept)}`, w1], ...orphans.map((n) => [`public${src(n)}`, w2])]);
+      gh.getFile.mockImplementation(async (path) => (onMain.has(path) ? { content: '', sha: `sha-${path}`, raw: { content: onMain.get(path) } } : null));
+      gh.listDir.mockResolvedValue([...onMain.keys()].map((path) => ({ type: 'file', name: path.split('/').pop(), path, sha: `sha-${path}` })));
+      imageGenerator.planFor.mockClear();
+      const res = await resolveBodyImages({
+        frontmatter: { title: 'My Post' },
+        slug: 'pest-control/my-post',
+        body: liveBody,
+        existingFile: { path: 'src/content/blog/pest-control/my-post.mdx', file: { content: `---\ntitle: My Post\n---\n${liveBody}` } },
+      });
+      expect(res.body).toContain(src(kept));
+      const slots = imageGenerator.planFor.mock.calls.map(([plan]) => plan).filter((plan) => plan.mode === 'blog-body').map((plan) => plan.index % 100);
+      expect(slots.length).toBeGreaterThan(0);
+      return { files: res.files.map((f) => f.path), slots: [...new Set(slots)], deletes: res.deletes };
+    };
+    // Kept body-1 (slot 1): the new picture is body-2, slot 2. The loop position alone said slot 1 again.
+    expect(await plannedFor(1)).toEqual({ files: [`public${src(2)}`], slots: [2], deletes: [] });
+    // Kept body-1, and an old body-2 the draft dropped: body-2 is deleted, body-3 is passed over
+    // (slot 1 is held), and body-4 plans as slot 2 — not slot 3, which is the hero's style.
+    const superseded = await plannedFor(1, [2]);
+    expect(superseded).toEqual({ files: [`public${src(4)}`], slots: [2], deletes: [`public${src(2)}`] });
+    // With the real planner that picture's style is neither the hero's nor the kept body-1's.
+    const real = jest.requireActual('../services/content/image-generator');
+    const styleOf = (mode, index) => real.planFor({ slug: 'pest-control/my-post', mode, index }).style;
+    expect(new Set([styleOf('blog-hero', 0), styleOf('blog-body', 1), styleOf('blog-body', superseded.slots[0])]).size).toBe(3);
+    // Kept body-3 (slot 1, named by an earlier refresh): free body-1 is passed over, body-2 plans as slot 2.
+    expect(await plannedFor(3)).toEqual({ files: [`public${src(2)}`], slots: [2], deletes: [] });
+    // Kept body-2 (slot 2): body-1 plans as slot 1.
+    expect(await plannedFor(2)).toEqual({ files: [`public${src(1)}`], slots: [1], deletes: [] });
   });
 
   test('bodyImageRefs: a query or fragment on a local destination is resolved to its pathname — the committed file, not the suffixed URL, is what validates (GH r27)', () => {

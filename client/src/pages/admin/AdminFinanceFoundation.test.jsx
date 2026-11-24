@@ -729,7 +729,7 @@ describe("Finance workflow preservation", () => {
   });
 });
 
-describe("Banking: Cash today card (GATE_CASH_FORECAST)", () => {
+describe("Banking: Cash today card", () => {
   const cashToday = {
     fetched_at: "2026-11-05T15:00:00.000Z",
     accounts: [
@@ -829,7 +829,7 @@ describe("Banking: Cash today card (GATE_CASH_FORECAST)", () => {
     await waitFor(() => expect(requests.filter((r) => r.key === cashKey)).toHaveLength(2));
   });
 
-  it.each([403, 404, 500])("renders nothing when the card read answers %i", async (status) => {
+  it.each([403, 500])("renders nothing when the card read answers %i", async (status) => {
     overrides.set("GET /api/admin/banking/cash-today", () => response({ error: "no" }, status));
     open(BankingPage);
     await waitFor(() =>
@@ -840,7 +840,7 @@ describe("Banking: Cash today card (GATE_CASH_FORECAST)", () => {
   });
 });
 
-describe("Banking: Cash forecast tab (GATE_CASH_FORECAST)", () => {
+describe("Banking: Cash forecast tab", () => {
   const nav = () => within(screen.getByRole("navigation", { name: "Banking section" }));
   const inputsKey = "GET /api/admin/banking/cash-forecast/inputs";
 
@@ -873,8 +873,8 @@ describe("Banking: Cash forecast tab (GATE_CASH_FORECAST)", () => {
     }
   });
 
-  it.each([403, 404])("keeps the tab hidden when the inputs read answers %i", async (status) => {
-    overrides.set(inputsKey, () => response({ error: "no" }, status));
+  it("keeps the tab hidden when the inputs read answers 403", async () => {
+    overrides.set(inputsKey, () => response({ error: "no" }, 403));
     open(BankingPage);
     await waitFor(() => expect(requests.some((r) => r.key === inputsKey)).toBe(true));
     await screen.findByText("MTD Deposited");

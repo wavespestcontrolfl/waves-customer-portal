@@ -784,6 +784,85 @@ describe('processCancellationRequest', () => {
       expect(cust.churn_mrr).toBe(120); // original snapshot preserved
       expect(classifyChurnReason).not.toHaveBeenCalled();
     });
+
+    // 2026-11-19: every churn since July read 'unclassified' — the portal passed
+    // only "Portal cancellation request <id>", so the AI read an id, never the pick.
+    test('a picked reason is the code as is: no AI call, and the customer\'s words are the detail', async () => {
+      db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true, autopay_enabled: true, monthly_rate: 50 }];
+      await processCancellationRequest({
+        customerId: 'c1', reason: 'Portal cancellation request 7a83eb82-a2b6-4b1e-81d2-32382d19d88b', requestId: 'r1',
+        churnReasonCode: 'results_lawn', churnReasonText: 'Customer requested cancellation. Reason: Lawn results. Details: weeds came back',
+      });
+      const cust = db.__tables.customers[0];
+      expect(cust.churn_reason_code).toBe('results');
+      expect(cust.churn_reason_detail).toBe('Customer requested cancellation. Reason: Lawn results. Details: weeds came back');
+      expect(classifyChurnReason).not.toHaveBeenCalled();
+    });
+
+    test('the pick "other": the AI reads the words and may name a code; a miss keeps "other"', async () => {
+      classifyChurnReason.mockResolvedValueOnce({ code: 'price', source: 'live' });
+      db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true, autopay_enabled: true, monthly_rate: 50 }];
+      await processCancellationRequest({ customerId: 'c1', reason: 'Portal cancellation request abcdef12-0000', requestId: 'r1', churnReasonCode: 'other', churnReasonText: 'found it cheaper' });
+      expect(classifyChurnReason).toHaveBeenCalledWith('found it cheaper');
+      expect(db.__tables.customers[0].churn_reason_code).toBe('price');
+
+      classifyChurnReason.mockResolvedValueOnce({ code: 'unclassified', source: 'live' });
+      db.__tables.customers = [{ id: 'c2', pipeline_stage: 'active_customer', active: true, autopay_enabled: true, monthly_rate: 50 }];
+      await processCancellationRequest({ customerId: 'c2', reason: 'Portal cancellation request abcdef12-0001', requestId: 'r2', churnReasonCode: 'other', churnReasonText: 'family reasons' });
+      expect(db.__tables.customers[0].churn_reason_code).toBe('other');
+    });
+
+    test('a late AI answer never overwrites a churn that changed while the model ran', async () => {
+      classifyChurnReason.mockImplementationOnce(async () => {
+        Object.assign(db.__tables.customers[0], { pipeline_stage: 'active_customer' }); // reactivated meanwhile
+        return { code: 'price', source: 'live' };
+      });
+      db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true, autopay_enabled: true, monthly_rate: 50 }];
+      await processCancellationRequest({ customerId: 'c1', reason: 'too expensive', requestId: 'r1' });
+      expect(classifyChurnReason).toHaveBeenCalled();
+      expect(db.__tables.customers[0].churn_reason_code).toBe('unclassified');
+    });
+
+    test('no pick and no words: the AI never reads the system\'s own reason text', async () => {
+      db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true, autopay_enabled: true, monthly_rate: 50 }];
+      await processCancellationRequest({ customerId: 'c1', reason: 'Portal cancellation request 88885abf-8d4a-4bb0-8b25-74b9ced9acfa', requestId: 'r1' });
+      expect(db.__tables.customers[0].churn_reason_code).toBe('unclassified');
+      db.__tables.customers = [{ id: 'c2', pipeline_stage: 'active_customer', active: true, autopay_enabled: true, monthly_rate: 50 }];
+      await processCancellationRequest({ customerId: 'c2', requestId: 'r2' }); // the bare default reason
+      expect(db.__tables.customers[0].churn_reason_code).toBe('unclassified');
+      expect(classifyChurnReason).not.toHaveBeenCalled();
+    });
+
+    test('office pick: the code lands, the detail keeps the note and the actor, no AI call', async () => {
+      db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true, autopay_enabled: true, monthly_rate: 50 }];
+      await processCancellationRequest({
+        customerId: 'c1', requestId: 'r1', actor: { type: 'admin', userId: 'admin-1' },
+        reason: 'moving_or_property_change — selling the house', churnReasonCode: 'moving_or_property_change', churnReasonText: 'selling the house',
+      });
+      const cust = db.__tables.customers[0];
+      expect(cust.churn_reason_code).toBe('moving');
+      expect(cust.churn_reason_detail).toBe('moving_or_property_change — selling the house [Admin (user admin-1)]');
+      expect(classifyChurnReason).not.toHaveBeenCalled();
+    });
+
+    test('office note with no pick: the AI reads the note, even a one-word one', async () => {
+      classifyChurnReason.mockResolvedValueOnce({ code: 'competitor', source: 'live' });
+      db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true, autopay_enabled: true, monthly_rate: 50 }];
+      await processCancellationRequest({ customerId: 'c1', requestId: 'r1', actor: { type: 'admin', userId: 'admin-1' }, reason: 'competitor', churnReasonText: 'competitor' });
+      expect(classifyChurnReason).toHaveBeenCalledWith('competitor');
+      expect(db.__tables.customers[0].churn_reason_code).toBe('competitor');
+    });
+
+    test('a portal form with only its placeholders makes no AI call', async () => {
+      db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true, autopay_enabled: true, monthly_rate: 50 }];
+      await processCancellationRequest({
+        customerId: 'c1', reason: 'Portal cancellation request 7a83eb82-a2b6-4b1e-81d2-32382d19d88b', requestId: 'r1',
+        churnReasonText: 'Customer requested cancellation of Pest Control. Reason: Not specified. Details: None',
+      });
+      expect(db.__tables.customers[0].churn_reason_code).toBe('unclassified');
+      expect(db.__tables.customers[0].churn_reason_detail).toBe('Customer requested cancellation of Pest Control. Reason: Not specified. Details: None');
+      expect(classifyChurnReason).not.toHaveBeenCalled();
+    });
   });
   test('visitReason: the cancelled rows carry the customer-safe copy while the churn columns keep the internal reason', async () => {
     db.__tables.scheduled_services = [

@@ -1,8 +1,8 @@
-// GATE_AUTO_DISPATCH_MOWING_DAYS (owner 2026-11-02): Lawn Care Service visits
+// The mowing-day rule (owner 2026-11-02, always on since its gate's removal 2026-11-23): Lawn Care Service visits
 // stay off the customer's mowing day and one day on each side. The scope
 // predicate, the blocked weekdays, the HARD slot filter (candidate-slots.js and
 // the schedule gap tool), the 'mowing_day' conflict and its precedence, no
-// needs-a-person notice for it, and the shadow audit block. No database.
+// needs-a-person notice for it, and the audit block. No database.
 // The south-zone day funnel's gate resolves at feature-gates require time (the far-south day block below).
 process.env.GATE_SOUTH_ZONE_DAY_FUNNEL = 'true';
 jest.mock('../services/scheduling/find-time', () => ({ findAvailableSlots: jest.fn() }));
@@ -31,7 +31,6 @@ const db = require('../models/db');
 const rebooker = require('../services/rebooker');
 const blackout = require('../services/scheduling/blackout-dates');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
-const { autoDispatchMowingDaysMode } = require('../config/feature-gates');
 const mowingDays = require('../services/auto-dispatch/mowing-days');
 const { normalizePreferences, getCustomerSchedulingPreferences } = require('../services/auto-dispatch/preferences');
 const { findValidCandidateSlots } = require('../services/auto-dispatch/candidate-slots');
@@ -39,23 +38,18 @@ const { currentConflict } = require('../services/auto-dispatch/current-conflict'
 const { analyzeGapCandidate } = require('../services/scheduling/gap-candidates');
 const { _internals: { evaluatePlacement, standingConflict } } = require('../services/auto-dispatch');
 
-const GATE = 'GATE_AUTO_DISPATCH_MOWING_DAYS';
-const SAVED = { mowing: process.env[GATE], drive: process.env.GATE_DRIVE_TIME_CALIBRATION, shared: process.env.GATE_AUTO_DISPATCH_SHARED_MODEL };
+const SAVED = { shared: process.env.GATE_AUTO_DISPATCH_SHARED_MODEL };
 function restore(name, value) {
   if (value === undefined) delete process.env[name]; else process.env[name] = value;
 }
 beforeAll(() => {
-  delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
 });
 afterAll(() => {
-  restore(GATE, SAVED.mowing);
-  restore('GATE_DRIVE_TIME_CALIBRATION', SAVED.drive);
   restore('GATE_AUTO_DISPATCH_SHARED_MODEL', SAVED.shared);
 });
 beforeEach(() => {
   jest.clearAllMocks();
-  delete process.env[GATE];
   blackout.isBlackoutDate.mockResolvedValue(false);
   rebooker.probeMoveConflicts.mockResolvedValue({ rows: [] });
 });
@@ -80,22 +74,7 @@ function tableDb(tables = {}) {
   });
 }
 
-const prefsFor = (mode, row = { mowing_days: ['Mon'] }, serviceType = LAWN) => mowingDays.withMowingRule(normalizePreferences(row, serviceType), row, mode);
-
-describe('gate reader', () => {
-  test('strict shadow | true, read at call time; anything else is off', () => {
-    expect(autoDispatchMowingDaysMode()).toBe('off');
-    for (const v of ['', '1', 'on', 'TRUE', 'Shadow', ' true']) {
-      process.env[GATE] = v;
-      expect(autoDispatchMowingDaysMode()).toBe('off');
-    }
-    process.env[GATE] = 'shadow';
-    expect(autoDispatchMowingDaysMode()).toBe('shadow');
-    expect(mowingDays.mowingDaysMode()).toBe('shadow');
-    process.env[GATE] = 'true';
-    expect(autoDispatchMowingDaysMode()).toBe('true');
-  });
-});
+const prefsFor = (row = { mowing_days: ['Mon'] }, serviceType = LAWN) => mowingDays.withMowingRule(normalizePreferences(row, serviceType), row);
 
 describe('scope and blocked weekdays', () => {
   test('Lawn Care Service plans are in; tree & shrub, aeration, dethatching, pest and palm are out', () => {
@@ -116,7 +95,7 @@ describe('scope and blocked weekdays', () => {
 
   test('the customer\'s preferred day is never blocked', () => {
     expect(mowingDays.blockedWeekdays(['Mon'], [2])).toEqual([0, 1]);
-    const prefs = prefsFor('true', { preferred_day: 'tuesday', mowing_days: ['Mon'] });
+    const prefs = prefsFor({ preferred_day: 'tuesday', mowing_days: ['Mon'] });
     expect(prefs.preferred_day_indexes).toEqual([2]);
     expect(prefs.mowing.blocked_weekdays).toEqual([0, 1]);
   });
@@ -128,14 +107,12 @@ describe('scope and blocked weekdays', () => {
     }
   });
 
-  test('gate off: the prefs object is returned untouched', () => {
-    const base = normalizePreferences({ mowing_days: ['Mon'] }, LAWN);
-    expect(mowingDays.withMowingRule(base, { mowing_days: ['Mon'] }, 'off')).toBe(base);
-    expect(prefsFor('shadow').mowing).toEqual({ mode: 'shadow', days: ['Mon'], blocked_weekdays: [0, 1, 2] });
+  test('the prefs carry the rule as `mowing`', () => {
+    expect(prefsFor().mowing).toEqual({ days: ['Mon'], blocked_weekdays: [0, 1, 2] });
   });
 
   test('a unit is in scope when any member is a Lawn Care Service visit', () => {
-    const prefs = prefsFor('true');
+    const prefs = prefsFor();
     expect(mowingDays.unitRule(prefs, [{ service_type: 'Quarterly Pest Control Service' }])).toBeNull();
     expect(mowingDays.unitRule(prefs, [{ service_type: 'Quarterly Pest Control Service' }, { service_type: LAWN }])).toBe(prefs.mowing);
     expect(mowingDays.unitRule(normalizePreferences(null, LAWN), [{ service_type: LAWN }])).toBeNull();
@@ -152,20 +129,12 @@ describe('preferences read', () => {
     return { conn, first };
   }
 
-  test('gate off: mowing_days is not read and the prefs carry no rule', async () => {
-    const { conn, first } = prefsConn({ preferred_day: null, mowing_days: ['Mon'] });
-    const prefs = await getCustomerSchedulingPreferences('c1', LAWN, conn);
-    expect(first.mock.calls[0]).not.toContain('mowing_days');
-    expect(prefs).not.toHaveProperty('mowing');
-  });
-
-  test('shadow: the same row read gains mowing_days and the prefs carry the rule', async () => {
-    process.env[GATE] = 'shadow';
+  test('the same row read gains mowing_days and the prefs carry the rule', async () => {
     const { conn, first } = prefsConn({ preferred_day: null, mowing_days: ['Mon'] });
     const prefs = await getCustomerSchedulingPreferences('c1', LAWN, conn);
     expect(conn).toHaveBeenCalledTimes(1);
     expect(first.mock.calls[0]).toContain('mowing_days');
-    expect(prefs.mowing).toEqual({ mode: 'shadow', days: ['Mon'], blocked_weekdays: [0, 1, 2] });
+    expect(prefs.mowing).toEqual({ days: ['Mon'], blocked_weekdays: [0, 1, 2] });
   });
 });
 
@@ -190,34 +159,22 @@ const ctx = (extra = {}) => ({
 describe('HARD filter (candidate-slots.js)', () => {
   const SLOTS = [slot(TUE, '10:00'), slot(WED), slot(THU)];
 
-  test('true: a slot on a blocked weekday is dropped and counted as mowing_day', async () => {
+  test('a slot on a blocked weekday is dropped and counted as mowing_day', async () => {
     findAvailableSlots.mockResolvedValue({ slots: SLOTS });
-    const out = await findValidCandidateSlots(SERVICE, prefsFor('true'), ctx());
+    const out = await findValidCandidateSlots(SERVICE, prefsFor(), ctx());
     expect(out.candidates.map((c) => c.date)).toEqual([WED, THU]);
     expect(out.drops.mowing_day).toBe(1);
-    expect(out.mowing).toMatchObject({ mode: 'true', blocked_weekdays: [0, 1, 2] });
+    expect(out.mowing).toMatchObject({ blocked_weekdays: [0, 1, 2] });
   });
 
-  test('shadow and off keep every slot and the same drop tally (no mowing_day key)', async () => {
-    findAvailableSlots.mockResolvedValue({ slots: SLOTS });
-    const off = await findValidCandidateSlots(SERVICE, normalizePreferences({ mowing_days: ['Mon'] }, LAWN), ctx());
-    const shadow = await findValidCandidateSlots(SERVICE, prefsFor('shadow'), ctx());
-    expect(off.candidates.map((c) => c.date)).toEqual([TUE, WED, THU]);
-    expect(shadow.candidates).toEqual(off.candidates);
-    expect(shadow.drops).toEqual(off.drops);
-    expect(off.drops).not.toHaveProperty('mowing_day');
-    expect(off).not.toHaveProperty('mowing');
-    expect(shadow.mowing.mode).toBe('shadow');
-  });
-
-  test('true: a pest visit is not filtered; the preferred-day filter still comes first', async () => {
+  test('a pest visit is not filtered; the preferred-day filter still comes first', async () => {
     findAvailableSlots.mockResolvedValue({ slots: SLOTS });
     const pest = { ...SERVICE, service_type: 'Quarterly Pest Control Service' };
-    const out = await findValidCandidateSlots(pest, prefsFor('true', { mowing_days: ['Mon'] }, pest.service_type), ctx());
+    const out = await findValidCandidateSlots(pest, prefsFor({ mowing_days: ['Mon'] }, pest.service_type), ctx());
     expect(out.candidates).toHaveLength(3);
     expect(out).not.toHaveProperty('mowing');
     // Preferred Wednesday: Tuesday and Thursday fail the preferred day before the mowing rule.
-    const wed = await findValidCandidateSlots(SERVICE, prefsFor('true', { preferred_day: 'wednesday', mowing_days: ['Mon'] }), ctx());
+    const wed = await findValidCandidateSlots(SERVICE, prefsFor({ preferred_day: 'wednesday', mowing_days: ['Mon'] }), ctx());
     expect(wed.candidates.map((c) => c.date)).toEqual([WED]);
     expect(wed.drops).toMatchObject({ preferred_day: 2, mowing_day: 0 });
   });
@@ -235,13 +192,12 @@ describe('schedule gap tool (gap-candidates.js)', () => {
   };
   const candidate = (preferences, svc = service) => ({ service: svc, preferences, holds: [], siblingDates: [], deactivated: [] });
 
-  test('true refuses a blocked date as a customer date preference; shadow and pest work do not', () => {
-    expect(analyzeGapCandidate(candidate(prefsFor('true')), [], options).reason).toBe('customer_date_preference');
-    expect(analyzeGapCandidate(candidate(prefsFor('shadow')), [], options).reason).not.toBe('customer_date_preference');
+  test('a blocked date is refused as a customer date preference; pest work and an open date are not', () => {
+    expect(analyzeGapCandidate(candidate(prefsFor()), [], options).reason).toBe('customer_date_preference');
     const pest = { ...service, service_type: 'Quarterly Pest Control Service' };
-    expect(analyzeGapCandidate(candidate(prefsFor('true', { mowing_days: ['Mon'] }, pest.service_type), pest), [], options).reason)
+    expect(analyzeGapCandidate(candidate(prefsFor({ mowing_days: ['Mon'] }, pest.service_type), pest), [], options).reason)
       .not.toBe('customer_date_preference');
-    expect(analyzeGapCandidate(candidate(prefsFor('true', { mowing_days: ['Thu'] })), [], options).reason).not.toBe('customer_date_preference');
+    expect(analyzeGapCandidate(candidate(prefsFor({ mowing_days: ['Thu'] })), [], options).reason).not.toBe('customer_date_preference');
   });
 });
 
@@ -250,33 +206,21 @@ describe('mowing_day conflict (current-conflict.js)', () => {
     db: tableDb({ property_preferences: { first: prefRow }, ...extra }), conflictMoves: true,
   });
 
-  test('true: a Lawn Care Service visit on a blocked weekday is in conflict', async () => {
-    process.env[GATE] = 'true';
+  test('a Lawn Care Service visit on a blocked weekday is in conflict', async () => {
     expect(await currentConflict(SERVICE, CTX())).toEqual({ kind: 'mowing_day', date: TUE, mowing_days: ['Mon'] });
     expect(await currentConflict({ ...SERVICE, scheduled_date: WED }, CTX())).toBeNull();
     // The preferred day wins.
     expect(await currentConflict(SERVICE, CTX({ preferred_day: 'tuesday', mowing_days: ['Mon'] }))).toBeNull();
   });
 
-  test('true: a pest visit is in conflict only when its unit holds a Lawn Care Service member', async () => {
-    process.env[GATE] = 'true';
+  test('a pest visit is in conflict only when its unit holds a Lawn Care Service member', async () => {
     const pest = { ...SERVICE, service_type: 'Quarterly Pest Control Service' };
     expect(await currentConflict(pest, CTX())).toBeNull();
     const grouped = CTX(undefined, { scheduled_services: { pluck: [LAWN] } });
     expect(await currentConflict(pest, grouped, new Set(['s1', 's1-lawn']))).toMatchObject({ kind: 'mowing_day' });
   });
 
-  test('shadow and off: never a mowing_day conflict, and no preferences read', async () => {
-    for (const mode of ['shadow', undefined]) {
-      if (mode) process.env[GATE] = mode; else delete process.env[GATE];
-      const c = CTX();
-      expect(await currentConflict(SERVICE, c)).toBeNull();
-      expect(c.db).not.toHaveBeenCalledWith('property_preferences');
-    }
-  });
-
   test('a closed day and an overlap come first', async () => {
-    process.env[GATE] = 'true';
     blackout.isBlackoutDate.mockResolvedValue(true);
     expect(await currentConflict(SERVICE, CTX())).toEqual({ kind: 'closed_day', date: TUE });
     blackout.isBlackoutDate.mockResolvedValue(false);
@@ -289,7 +233,6 @@ describe('mowing_day conflict (current-conflict.js)', () => {
 
 describe('no needs-a-person notice for a mowing_day conflict (index.js standingConflict)', () => {
   test('a visit whose only conflict is the mowing day reads clear; an overlap does not', async () => {
-    process.env[GATE] = 'true';
     db.mockImplementation(tableDb({ scheduled_services: { first: { ...SERVICE, status: 'confirmed' } } }));
     const seen = { service: SERVICE, ctx: CTX_FOR_STANDING() };
     expect(await standingConflict(seen, 's1')).toEqual({ clear: true });
@@ -319,96 +262,22 @@ function CTX_FOR_STANDING() {
 describe('evaluation and audit (index.js evaluatePlacement)', () => {
   const CONFIG = { minScoreImprovement: 15, removeStabilityFloor: 35, minDayMoveDriveSavingMinutes: 6 };
   const evalCtx = () => ctx({ conflictMoves: true, db: tableDb({ property_preferences: { first: { preferred_day: null, mowing_days: ['Mon'] } } }) });
-  const without = (result) => {
-    const copy = JSON.parse(JSON.stringify(result));
-    delete copy.audit.constraints.mowing_days;
-    return copy;
-  };
 
-  test('shadow: the decision is the one off makes; the audit row logs the rule and what true would do', async () => {
+  test('the visit is in conflict and moves to the open day without the score bar', async () => {
     findAvailableSlots.mockResolvedValue({ slots: [slot(TUE, '10:00'), slot(WED)] });
-    const off = await evaluatePlacement(SERVICE, normalizePreferences({ mowing_days: ['Mon'] }, LAWN), evalCtx(), CONFIG, '2026-07-03');
-    process.env[GATE] = 'shadow';
-    const shadow = await evaluatePlacement(SERVICE, prefsFor('shadow'), evalCtx(), CONFIG, '2026-07-03');
-    expect(off.audit.constraints).not.toHaveProperty('mowing_days');
-    expect(without(shadow)).toEqual(JSON.parse(JSON.stringify(off)));
-    expect(shadow.kind).toBe('no_change');
-    expect(shadow.audit.constraints.mowing_days).toEqual({
-      mode: 'shadow',
-      mowing_days: ['Mon'],
-      blocked_weekdays: [0, 1, 2],
-      current_blocked: true,
-      chosen_blocked: true,
-      shadow_best: { date: WED, start: '08:00' },
-      would_move: true,
-    });
-  });
-
-  test('true: the visit is in conflict and moves to the open day without the score bar', async () => {
-    process.env[GATE] = 'true';
-    findAvailableSlots.mockResolvedValue({ slots: [slot(TUE, '10:00'), slot(WED)] });
-    const result = await evaluatePlacement(SERVICE, prefsFor('true'), evalCtx(), CONFIG, '2026-07-03');
+    const result = await evaluatePlacement(SERVICE, prefsFor(), evalCtx(), CONFIG, '2026-07-03');
     expect(result.kind).toBe('move');
     // The Tuesday slot never became a candidate (the move row carries no drop tally).
     expect(result.rankedCandidates.map((c) => c.date)).toEqual([WED]);
     expect(result.best).toMatchObject({ date: WED, start_time: '08:00' });
     expect(result.current.conflict).toEqual({ kind: 'mowing_day', date: TUE, mowing_days: ['Mon'] });
     expect(result.audit.constraints.conflict).toMatchObject({ kind: 'mowing_day' });
-    expect(result.audit.constraints.mowing_days).toMatchObject({ mode: 'true', current_blocked: true, chosen_blocked: false });
-    expect(result.audit.constraints.mowing_days).not.toHaveProperty('shadow_best');
+    expect(result.audit.constraints.mowing_days).toEqual({ mowing_days: ['Mon'], blocked_weekdays: [0, 1, 2], current_blocked: true, chosen_blocked: false });
   });
 
-  test('shadow on the legacy model: the pool is filtered before the score cap, so an open slot past the cap still shows', async () => {
-    process.env[GATE] = 'shadow';
-    findAvailableSlots.mockResolvedValue({ slots: [slot(TUE, '10:00'), slot(WED)] });
-    // A cap of 1 keeps only the blocked Tuesday slot in the live list; true would rank the open Wednesday.
-    const result = await evaluatePlacement(SERVICE, prefsFor('shadow'), { ...evalCtx(), scoreCap: 1 }, CONFIG, '2026-07-03');
-    expect(result.kind).toBe('no_change');
-    expect(result.audit.constraints.mowing_days).toMatchObject({
-      current_blocked: true,
-      shadow_best: { date: WED, start: '08:00' },
-      would_move: true,
-    });
-  });
-
-  test('the legacy mowing simulation leaves a grouped visit for staff if every alternative changes its date', async () => {
-    process.env[GATE] = 'shadow';
-    // The separately committed writer cannot guarantee a cross-date move for this group.
-    const sibling = { id: 's2', scheduled_date: TUE, window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 60, service_type: 'Quarterly Pest Control Service' };
-    const groupContext = { excludeIds: new Set(['s1', 's2']), siblings: [sibling], visitWindowStart: '09:00' };
-    findAvailableSlots.mockResolvedValue({ slots: [slot(WED), slot(THU)] });
-    // Another customer's stop holds Wednesday 09:00-10:00, so true would refuse Wednesday for this unit.
-    rebooker.probeMoveConflicts.mockImplementation(async ({ target }) => ({
-      rows: target.date === WED ? [{ id: 'x9', scheduled_date: WED, window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60, status: 'confirmed' }] : [],
-    }));
-    const result = await evaluatePlacement({ ...SERVICE, visit_id: 'v1' }, prefsFor('shadow'), { ...evalCtx(), groupContext }, CONFIG, '2026-07-03');
-    expect(result.audit.constraints.mowing_days).toMatchObject({ current_blocked: true, shadow_best: null, would_move: false });
-  });
-
-  test('shadow with dry-time ordering on: the pool takes the dry-window slots true would add', async () => {
-    process.env[GATE] = 'shadow';
-    // A rain-proof visit (1-5 PM dry window) whose regular search finds only the blocked Tuesday;
-    // the dry-window search adds Wednesday 13:00, which true would rank.
-    findAvailableSlots.mockImplementation(async (args) => ({ slots: args.earliestStartMin ? [slot(WED, '13:00')] : [slot(TUE, '10:00')] }));
-    const prefs = { ...prefsFor('shadow'), dry_time: { mode: 'true', hours: 0, class: 'proof', source: 'test', window_key: 'dry_proof', customer_time: false } };
-    const result = await evaluatePlacement(SERVICE, prefs, evalCtx(), CONFIG, '2026-07-03');
-    expect(result.audit.constraints.mowing_days).toMatchObject({ current_blocked: true, shadow_best: { date: WED, start: '13:00' }, would_move: true });
-  });
-
-  test('simulatedConflict: only with conflict moves on, an arrival window, a blocked date and no other conflict', () => {
-    const rule = mowingDays.ruleFor({ mowing_days: ['Mon'] }, [], 'shadow');
-    const args = { service: SERVICE, dateStr: TUE, conflictMoves: true, existing: null };
-    expect(mowingDays.simulatedConflict(rule, args)).toEqual({ kind: 'mowing_day', date: TUE, mowing_days: ['Mon'] });
-    expect(mowingDays.simulatedConflict(rule, { ...args, dateStr: THU })).toBeNull();
-    expect(mowingDays.simulatedConflict(rule, { ...args, conflictMoves: false })).toBeNull();
-    expect(mowingDays.simulatedConflict(rule, { ...args, service: { ...SERVICE, window_start: null } })).toBeNull();
-    expect(mowingDays.simulatedConflict(rule, { ...args, existing: { kind: 'overlap', date: TUE } })).toBeNull();
-  });
-
-  test('true: no open day -> the visit stays, and the row says why', async () => {
-    process.env[GATE] = 'true';
+  test('no open day -> the visit stays, and the row says why', async () => {
     findAvailableSlots.mockResolvedValue({ slots: [slot(TUE, '10:00')] });
-    const result = await evaluatePlacement(SERVICE, prefsFor('true'), evalCtx(), CONFIG, '2026-07-03');
+    const result = await evaluatePlacement(SERVICE, prefsFor(), evalCtx(), CONFIG, '2026-07-03');
     expect(result.kind).toBe('no_change');
     expect(result.conflict).toMatchObject({ kind: 'mowing_day' });
     expect(result.audit.constraints).toMatchObject({ drops: { mowing_day: 1 }, conflict: { kind: 'mowing_day' }, mowing_days: { current_blocked: true } });
@@ -419,8 +288,7 @@ describe('apply-time destination check (mowing-days.js assertDestinationClear, a
   const refuse = (id, why) => Object.assign(new Error(`service ${id} ${why}`), { code: 'REFUSED' });
   const trxWith = (row) => tableDb({ property_preferences: { first: row } });
 
-  test('true: a destination the rule as saved NOW blocks is refused, whatever the run scored on', async () => {
-    process.env[GATE] = 'true';
+  test('a destination the rule as saved NOW blocks is refused, whatever the run scored on', async () => {
     // Scored with Monday mowing (Wednesday open); the customer now mows Tuesday, which blocks Wednesday.
     await expect(mowingDays.assertDestinationClear(trxWith({ preferred_day: null, mowing_days: ['Tue'] }), SERVICE, WED, refuse, [LAWN]))
       .rejects.toMatchObject({ code: 'REFUSED' });
@@ -428,29 +296,22 @@ describe('apply-time destination check (mowing-days.js assertDestinationClear, a
       .resolves.toBeUndefined();
   });
 
-  test('true: the customer\'s preferred day is never refused', async () => {
-    process.env[GATE] = 'true';
+  test('the customer\'s preferred day is never refused', async () => {
     await expect(mowingDays.assertDestinationClear(trxWith({ preferred_day: 'wednesday', mowing_days: ['Tue'] }), SERVICE, WED, refuse, [LAWN]))
       .resolves.toBeUndefined();
   });
 
-  test('true: a unit with a Lawn Care Service member is held to the rule; shadow, off and a pest-only unit read nothing', async () => {
+  test('a unit with a Lawn Care Service member is held to the rule; a pest-only unit reads nothing', async () => {
     const PEST = 'Quarterly Pest Control Service';
     const pestService = { ...SERVICE, service_type: PEST };
-    process.env[GATE] = 'true';
     await expect(mowingDays.assertDestinationClear(trxWith({ preferred_day: null, mowing_days: ['Tue'] }), pestService, WED, refuse, [PEST, LAWN]))
       .rejects.toMatchObject({ code: 'REFUSED' });
     const trx = trxWith({ preferred_day: null, mowing_days: ['Tue'] });
     await mowingDays.assertDestinationClear(trx, pestService, WED, refuse, [PEST]);
-    process.env[GATE] = 'shadow';
-    await mowingDays.assertDestinationClear(trx, SERVICE, WED, refuse, [LAWN]);
-    delete process.env[GATE];
-    await mowingDays.assertDestinationClear(trx, SERVICE, WED, refuse, [LAWN]);
     expect(trx).not.toHaveBeenCalled();
   });
 
   test('the move guard refuses a destination that turned blocked inside the move transaction', async () => {
-    process.env[GATE] = 'true';
     const { makeMoveGuard } = require('../services/auto-dispatch/apply');
     const guard = makeMoveGuard({ service: SERVICE, best: { date: WED, start_time: '08:00', technician_id: 't1' } });
     await expect(guard({ trx: trxWith({ preferred_day: null, mowing_days: ['Tue'] }), technicianId: 't1' }))
@@ -559,26 +420,77 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
     }
   });
 
+  // Per truck (GATE_MULTI_TECH_CONFIRM, owner 2026-11-19 "build south"): a far-south stop holds its date only for its
+  // own technician's slots; an unassigned far-south stop (STOP_WED carries no technician) holds it for every one.
+  // The switch is the scheduler's tech-scope reader (occupancy.js techScopedConfirmActive), mocked on for this suite.
+  describe('per truck (GATE_MULTI_TECH_CONFIRM)', () => {
+    const { techScopedConfirmActive } = require('../services/scheduling/occupancy');
+    afterEach(() => techScopedConfirmActive.mockImplementation(() => true));
+    const stopOf = (techId) => [{ ...STOP_WED[0], technician_id: techId }];
+    const runWith = (stops, service = NORTH) => findValidCandidateSlots(service, plain(), ctx({ db: southDb({ stops }) }));
+
+    test('on: another technician\'s far-south stop leaves the date open; the same technician\'s or an unassigned one holds it', async () => {
+      techScopedConfirmActive.mockReturnValue(true);
+      const other = await runWith(stopOf('t2'));
+      expect(other.candidates.map((c) => c.date)).toEqual([TUE, WED, THU]);
+      expect(other.drops.south_day_kept).toBe(0);
+      for (const stops of [stopOf('t1'), STOP_WED]) {
+        const held = await runWith(stops);
+        expect(held.candidates.map((c) => c.date)).toEqual([TUE, THU]);
+        expect(held.drops.south_day_kept).toBe(1);
+      }
+    });
+
+    test('on: the slot\'s technician decides, so an unassigned visit keeps only the other truck\'s slot that day', async () => {
+      techScopedConfirmActive.mockReturnValue(true);
+      findAvailableSlots.mockResolvedValue({ slots: [slot(WED, '08:00', 't1'), slot(WED, '10:00', 't2')] });
+      const out = await runWith(stopOf('t1'), { ...NORTH, technician_id: null });
+      expect(out.candidates.map((c) => `${c.date} ${c.technician_id}`)).toEqual([`${WED} t2`]);
+      expect(out.drops.south_day_kept).toBe(1);
+    });
+
+    test('on: a grouped visit keeps the fleet\'s zone days (each member commits on its own technician first)', async () => {
+      techScopedConfirmActive.mockReturnValue(true);
+      findAvailableSlots.mockResolvedValue({ slots: [slot(WED, '10:00', 't2')] });
+      const offered = async (visitId) => {
+        const out = await findValidCandidateSlots({ ...NORTH, visit_id: visitId, technician_id: 't1' }, plain(), ctx({
+          db: southDb({ stops: stopOf('t1') }),
+          ...(visitId ? { groupContext: { excludeIds: new Set(['s1', 's2']), siblings: [{ id: 's2', scheduled_date: TUE, technician_id: 't1' }], visitWindowStart: null } } : {}),
+        }));
+        return out.candidates.map((c) => `${c.date} ${c.technician_id}`);
+      };
+      // Alone, the visit may take t2's slot: the far-south stop is t1's.
+      expect(await offered(null)).toEqual([`${WED} t2`]);
+      // Grouped, any far-south stop holds the date, as with the gate off.
+      expect(await offered('v1')).toEqual([]);
+    });
+
+    test('off: any far-south stop holds the date for the whole fleet, whoever drives it (one truck today)', async () => {
+      techScopedConfirmActive.mockReturnValue(false);
+      const out = await runWith(stopOf('t2'));
+      expect(out.candidates.map((c) => c.date)).toEqual([TUE, THU]);
+      expect(out.drops.south_day_kept).toBe(1);
+    });
+  });
+
   describe('the decision (index.js evaluatePlacement)', () => {
     const CONFIG = { minScoreImprovement: 15, removeStabilityFloor: 35, minDayMoveDriveSavingMinutes: 6 };
     const mowingCtx = (stops) => ctx({ conflictMoves: true, db: southDb({ stops, prefs: { preferred_day: null, mowing_days: ['Mon'] } }) });
 
     test('mowing-day move: the only open date holds a far-south stop -> the visit stays, reason SOUTH_DAY_KEPT', async () => {
-      process.env[GATE] = 'true';
-      findAvailableSlots.mockResolvedValue({ slots: [slot(TUE, '10:00'), slot(WED)] });
-      const result = await evaluatePlacement(NORTH, prefsFor('true'), mowingCtx(STOP_WED), CONFIG, '2026-07-03');
+        findAvailableSlots.mockResolvedValue({ slots: [slot(TUE, '10:00'), slot(WED)] });
+      const result = await evaluatePlacement(NORTH, prefsFor(), mowingCtx(STOP_WED), CONFIG, '2026-07-03');
       expect(result.kind).toBe('no_change');
       expect(result.reason_code).toBe('SOUTH_DAY_KEPT');
       expect(result.audit.constraints.drops).toMatchObject({ mowing_day: 1, south_day_kept: 1 });
     });
 
     test('mowing-day move: another open date still takes the visit; a far-south visit may use the south day', async () => {
-      process.env[GATE] = 'true';
-      findAvailableSlots.mockResolvedValue({ slots: [slot(TUE, '10:00'), slot(WED), slot(THU)] });
-      const north = await evaluatePlacement(NORTH, prefsFor('true'), mowingCtx(STOP_WED), CONFIG, '2026-07-03');
+        findAvailableSlots.mockResolvedValue({ slots: [slot(TUE, '10:00'), slot(WED), slot(THU)] });
+      const north = await evaluatePlacement(NORTH, prefsFor(), mowingCtx(STOP_WED), CONFIG, '2026-07-03');
       expect(north.kind).toBe('move');
       expect(north.rankedCandidates.map((c) => c.date)).toEqual([THU]);
-      const south = await evaluatePlacement(SOUTH, prefsFor('true'), mowingCtx(STOP_WED), CONFIG, '2026-07-03');
+      const south = await evaluatePlacement(SOUTH, prefsFor(), mowingCtx(STOP_WED), CONFIG, '2026-07-03');
       expect(south.rankedCandidates.map((c) => c.date)).toContain(WED);
     });
 
@@ -624,6 +536,58 @@ describe('far-south days stay far-south (south-day-kept.js)', () => {
       await expect(check({ ...NORTH, zone: null, customer_city: null }, WED, southDb({ stops: STOP_WED }))).resolves.toBeUndefined();
       await expect(check(NORTH, WED, southDb({ stops: STOP_WED, zonesFail: true }))).resolves.toBeUndefined();
       await expect(check(NORTH, WED, southDb({ stops: STOP_WED }))).rejects.toMatchObject({ code: 'REFUSED' });
+    });
+
+    test('per truck (GATE_MULTI_TECH_CONFIRM on): each technician a single visit can sit with decides, and the move guard passes them; a grouped visit keeps the fleet\'s view', async () => {
+      const { assertDestinationClear } = require('../services/auto-dispatch/south-day-kept');
+      const refuse = (id, why) => Object.assign(new Error(`service ${id} ${why}`), { code: 'REFUSED' });
+      const stopOf = (techId) => [{ ...STOP_WED[0], technician_id: techId }];
+      const check = (stops, techIds, row = NORTH, snapshot = NORTH) => assertDestinationClear(southDb({ stops }), row, snapshot, WED, refuse, techIds);
+      // The verdict of the guard's own far-south check, for a move to t1 (best.technician_id) whose transaction writes
+      // `written`: true = refused for a far-south stop, false = passed. The guard must reach that check; its later
+      // checks (this mock cannot answer them) are not this test's, and any other error from the check fails the test.
+      const guardHeld = async (stops, written, service = NORTH) => {
+        const southDayKept = require('../services/auto-dispatch/south-day-kept');
+        const spy = jest.spyOn(southDayKept, 'assertDestinationClear');
+        try {
+          await guardFor(service)({ trx: southDb({ stops }), technicianId: written }).catch(() => {});
+          expect(spy).toHaveBeenCalledTimes(1);
+          return await spy.mock.results[0].value.then(() => false, (e) => {
+            if (!String(e.message).includes('far-south stop')) throw e;
+            return true;
+          });
+        } finally {
+          spy.mockRestore();
+        }
+      };
+      const GROUPED = { ...NORTH, visit_id: 'v1' };
+      const { techScopedConfirmActive } = require('../services/scheduling/occupancy');
+      try {
+        techScopedConfirmActive.mockReturnValue(true);
+        await expect(check(stopOf('t2'), ['t1'])).resolves.toBeUndefined();
+        await expect(check(stopOf('t2'), ['t2'])).rejects.toMatchObject({ code: 'REFUSED' });
+        await expect(check(stopOf('t2'), ['t1', 't2'])).rejects.toMatchObject({ code: 'REFUSED' });
+        await expect(check(STOP_WED, ['t1'])).rejects.toMatchObject({ code: 'REFUSED' });
+        // A move whose transaction writes t1 (the rebooker's kept technician) is not held by t2's day.
+        expect(await guardHeld(stopOf('t2'), 't1')).toBe(false);
+        // A transaction that writes t2 (the visit was reassigned after the run ranked it) is held by t2's day, and any
+        // stop holds an unassigned row.
+        expect(await guardHeld(stopOf('t2'), 't2')).toBe(true);
+        expect(await guardHeld(stopOf('t2'), null)).toBe(true);
+        // The receiving technician's own day holds it, whatever this transaction writes.
+        expect(await guardHeld(stopOf('t1'), 't2')).toBe(true);
+        expect(await guardHeld(stopOf('t3'), 't2')).toBe(false);
+        // A grouped visit (the moving row or the pass-1 snapshot) keeps the fleet's view: t2's stop holds a move to t1.
+        await expect(check(stopOf('t2'), ['t1'], GROUPED, NORTH)).rejects.toMatchObject({ code: 'REFUSED' });
+        await expect(check(stopOf('t2'), ['t1'], NORTH, GROUPED)).rejects.toMatchObject({ code: 'REFUSED' });
+        expect(await guardHeld(stopOf('t2'), 't1', GROUPED)).toBe(true);
+        // Off: t2's far-south stop holds the date for t1 as well.
+        techScopedConfirmActive.mockReturnValue(false);
+        await expect(check(stopOf('t2'), ['t1'])).rejects.toMatchObject({ code: 'REFUSED' });
+        expect(await guardHeld(stopOf('t2'), 't1')).toBe(true);
+      } finally {
+        techScopedConfirmActive.mockImplementation(() => true);
+      }
     });
   });
 });

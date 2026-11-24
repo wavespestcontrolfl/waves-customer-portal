@@ -72,7 +72,7 @@ default.
 
 ## 2026-09-06 — New Appointment service-address picker
 
-- When the customer has 2+ active properties AND `GATE_EDIT_APPT_ADDRESS=true`,
+- When the customer has 2+ active properties,
   the New Appointment modal renders a radio list of their saved addresses
   (incomplete rows shown disabled; default = the primary when it is complete,
   else the first complete row) and POSTs `propertyId`. The create route

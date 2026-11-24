@@ -6,7 +6,7 @@
  * them), and nothing else from intake attribution comes along.
  * Needs DATABASE_URL (CI); skipped locally without one.
  */
-const { _test: { TRIAGE_REPLACE_EXTRACTED_SQL } } = require('../routes/lead-webhook');
+const { _test: { TRIAGE_REPLACE_EXTRACTED_SQL, triageExtractedForWrite } } = require('../routes/lead-webhook');
 
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
 describeDb('AI triage extracted_data replace', () => {
@@ -47,6 +47,25 @@ describeDb('AI triage extracted_data replace', () => {
     });
   });
 
+  test('keeps the quiz answers a quiz page lead carries', async () => {
+    const quiz = { kind: 'pest', seeing: 'roaches', property: 'condo' };
+    expect(await replace({ stage: 'lead_webhook_received', timeline: 'now', quiz }, { summary: 'Roaches in a condo' }))
+      .toEqual({ stage: 'lead_webhook_received', timeline: 'now', quiz, summary: 'Roaches in a condo' });
+    // A lead with no quiz gains no key.
+    expect(await replace({ stage: 'lead_webhook_received' }, { summary: 's' })).toEqual({ stage: 'lead_webhook_received', summary: 's' });
+  });
+
+  test('a model-returned timeline or quiz cannot replace or supply the visitor\'s answers', async () => {
+    // The route drops the intake-owned keys before the write (triageExtractedForWrite).
+    const quiz = { kind: 'pest', seeing: 'roaches', property: 'condo' };
+    const conflicting = { summary: 'Wants a price', timeline: 'browsing', quiz: { kind: 'lawn', seeing: 'weeds' } };
+    expect(await replace({ stage: 'lead_webhook_received', timeline: 'now', quiz }, triageExtractedForWrite(conflicting)))
+      .toEqual({ stage: 'lead_webhook_received', timeline: 'now', quiz, summary: 'Wants a price' });
+    // A form that asked neither question gains neither key from the model.
+    expect(await replace({ stage: 'lead_webhook_received' }, triageExtractedForWrite(conflicting)))
+      .toEqual({ stage: 'lead_webhook_received', summary: 'Wants a price' });
+  });
+
   test('an intake with no page URLs adds no attribution key at all', async () => {
     // webhookStageBase stores missing URLs as empty strings
     expect(await replace({ stage: 'lead_webhook_received', attribution: { pageUrl: '', landingUrl: ' ', utm: { source: 'x' } } }, { summary: 's' }))
@@ -62,5 +81,14 @@ describeDb('AI triage extracted_data replace', () => {
       .toEqual({ summary: 's', attribution: { pageUrl: 'https://wavespestcontrol.com/ants' } });
     expect(await replace({}, { summary: 's', attribution: { pageUrl: 'https://chatgpt.com/' } }))
       .toEqual({ summary: 's' });
+  });
+
+  test('the intake source survives triage and a generated source cannot replace or supply it', async () => {
+    const observed = { kind: 'organic_search', label: 'Organic search', detail: 'Google', basis: 'Referring host' };
+    const triage = { summary: 'Ant inquiry', source_evidence: { kind: 'google_ads', label: 'Google Ads' } };
+    expect(await replace({ source_evidence: observed }, triage)).toEqual({
+      source_evidence: observed, summary: 'Ant inquiry',
+    });
+    expect(await replace({}, triage)).toEqual({ summary: 'Ant inquiry' });
   });
 });

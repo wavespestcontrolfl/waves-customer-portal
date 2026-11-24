@@ -25,15 +25,19 @@ function boolEnv(key, defaultValue = false) {
 }
 
 // Best-first, matching the blog engine's policy (owner directive 2026-08-27):
-// gpt-image-2 leads, then the older gpt-image slugs. OpenAI-only since
+// the same OpenAI chain as the blog generator — gpt-image-2.6-sunburst leads
+// since 2026-11-20 (owner: latest model for all ChatGPT image areas), then
+// Images 2.5 and the older gpt-image slugs. OpenAI-only since
 // 2026-09-24 (owner: no invisible watermarks) — every Gemini image model
 // embeds SynthID in the pixels, and image-generator's parseChain drops those
 // slugs from ANY chain, so a SOCIAL_IMAGE_PROVIDER override cannot bring
 // them back without ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS=true.
-const SOCIAL_DEFAULT_CHAIN = 'gpt-image-2,gpt-image-1.5,gpt-image-1';
+const SOCIAL_DEFAULT_CHAIN = 'gpt-image-2.6-sunburst,gpt-image-2.5-sunburst,gpt-image-2,gpt-image-1.5,gpt-image-1';
 // Pre-2026-09-24 order; the default only while the override is set (see
 // image-generator.js — the kill switch alone must restore the old fallbacks).
-const SOCIAL_WATERMARK_ALLOWED_DEFAULT_CHAIN = 'gpt-image-2,gemini-image-best,gemini-image,gpt-image-1.5,gpt-image-1,gemini';
+// The override keeps its shape: Gemini right after the primary OpenAI leg,
+// so one OpenAI timeout still leaves budget for a healthy Gemini leg.
+const SOCIAL_WATERMARK_ALLOWED_DEFAULT_CHAIN = 'gpt-image-2.6-sunburst,gemini-image-best,gemini-image,gpt-image-2.5-sunburst,gpt-image-2,gpt-image-1.5,gpt-image-1,gemini';
 
 const CREATIVE_FLAGS = {
   get enabled() { return boolEnv('SOCIAL_CREATIVE_ENGINE_ENABLED', false); },

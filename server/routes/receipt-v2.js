@@ -15,6 +15,24 @@ const { generateReceiptPDF } = require('../services/pdf/invoice-pdf');
 
 const { loadPaymentForInvoice } = require('../services/receipt-payment');
 const { customerVisibleInvoiceNotes } = require('../services/invoice-notes');
+const { receiptCardsForToken } = require('../services/receipt-cards');
+
+// Token format gate before any database read (AGENTS.md, the public route
+// baseline). The receipt token is the invoice's pay token, so this is the
+// pay router's range (routes/pay-v2.js TOKEN_RE): 64-char hex today, 25 to
+// 32 char url-safe on legacy rows. Production 2026-11-22, read-only: every
+// invoice token on record passes, so no issued receipt link changes. A
+// malformed token gets the unknown token's own 404, on both routes.
+const TOKEN_RE = /^[A-Za-z0-9_-]{20,64}$/;
+router.param('token', (req, res, next, token) => {
+  if (!TOKEN_RE.test(String(token))) return res.status(404).json({ error: 'Receipt not found' });
+  next();
+});
+
+// Add-a-service + referral cards (GATE_DOC_CROSS_SELL, owner 2026-11-21):
+// the GET below carries them for a receipt that may show them
+// (services/receipt-cards.js). Each card is a link into the Waves app; this
+// router has no card tap route (services/app-link-cards.js).
 
 // =========================================================================
 // GET /api/receipt/:token — Receipt view data (paid invoice record)
@@ -46,6 +64,8 @@ router.get('/:token', async (req, res, next) => {
       logger.warn(`[receipt-v2] payment lookup failed: ${err.message}`);
       return null;
     });
+
+    const cards = await receiptCardsForToken(req.params.token);
 
     const refundAmount = payment ? Number(payment.refund_amount || 0) : 0;
     const totalPaid = payment ? Number(payment.amount || 0) : Number(data.total || 0);
@@ -139,6 +159,7 @@ router.get('/:token', async (req, res, next) => {
             : data.status,
         }
         : null,
+      ...cards,
     });
   } catch (err) {
     next(err);

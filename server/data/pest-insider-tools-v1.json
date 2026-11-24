@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "notes": "Reviewed 'A tool we'd use' items for the Pest Insider email (server/services/pest-insider/tools.js). Owner 2026-11-19: Amazon links are allowed in this email only, for opted-in readers, approved registry products only, with Amazon's exact sentence next to the link. product_id names an active, green, Amazon row of the vendored affiliate registry (packages/affiliate-registry; the owner's astro merge is the approval record). The link comes from that row, never from this file. name is a plain generic name made only of its registry row's generic (lowercase) words, so no brand, place or sales word; lines are 1 or 2 short sentences that say what the tool shows or does, with no number, time word, name or price. services are the fact-bank services an issue's lead fact must have for the tool to come first. The KS door sweep is not listed: its Amazon listing is dead (it redirects to a used-only listing, 11-18).",
+  "tools": [
+    {
+      "product_id": "acurite-glass-rain-gauge",
+      "name": "Rain gauge",
+      "lines": [
+        "A rain gauge shows what fell at your house, not at the airport.",
+        "It tells you when to skip a sprinkler run."
+      ],
+      "services": ["lawn"]
+    },
+    {
+      "product_id": "xlux-soil-moisture-meter",
+      "name": "Soil moisture meter",
+      "lines": [
+        "A soil moisture meter reads the water down at the roots, not on top.",
+        "It shows when the soil is still wet and the sprinklers can wait."
+      ],
+      "services": ["lawn", "tree_shrub"]
+    },
+    {
+      "product_id": "orbit-sprinkler-catch-cups",
+      "name": "Sprinkler catch cups",
+      "lines": [
+        "Catch cups set out on the lawn show which zones get less water from the sprinklers."
+      ],
+      "services": ["lawn"]
+    },
+    {
+      "product_id": "stuff-it-copper-mesh",
+      "name": "Copper mesh",
+      "lines": [
+        "Copper mesh fills small gaps where pipes and wires enter the house.",
+        "It does not rust the way steel wool does."
+      ],
+      "services": ["pest", "rodent"]
+    },
+    {
+      "product_id": "police-security-inspector-penlight",
+      "name": "Penlight",
+      "lines": [
+        "A small, bright light shows what hides in cabinet corners and the gaps around pipes."
+      ],
+      "services": ["pest", "rodent", "termite"]
+    }
+  ]
+}

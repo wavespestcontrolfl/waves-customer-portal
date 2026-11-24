@@ -248,7 +248,6 @@ async function appointmentPropertyPreview(conn, plan) {
 }
 
 async function switchAppointmentProperty(input, actionContext) {
-  if (!require('../../config/feature-gates').isEnabled('editApptAddress')) return { error: 'Appointment address changes are not enabled.' };
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   if (!uuid.test(input.appointment_id) || !uuid.test(input.property_id)) return { error: 'Resolve the appointment and saved property IDs first.' };
   const { planAppointmentAddress, lockAppointmentAddress, applyAppointmentAddress, refreshAppointmentAddressBriefs } = require('../appointment-address');
@@ -454,7 +453,6 @@ function routeGuardMessage(reason) {
   if (reason === 'WINDOW_FIT_GATE_OFF') return 'The shortest route breaks a promised arrival window and the window-fit repair is off — nothing was changed.';
   if (reason === 'LIVE_STOP_IN_PROGRESS') return 'A stop on this route is already in progress — reorder it once that visit is complete.';
   if (reason === 'COORDLESS_STOPS') return 'A stop on this route has no map location, so its arrival window cannot be verified — nothing was changed.';
-  if (reason === 'MODEL_UNCALIBRATED') return 'Drive-time calibration is off, so this route\'s arrival windows cannot be verified without live traffic data — nothing was changed.';
   if (reason === 'PROGRESS_ORIGIN_UNKNOWN') return 'This route is already under way and the last completed stop has no map location, so the remaining drive cannot be verified — nothing was changed.';
   return 'No legal stop order keeps every promised arrival window — nothing was changed.';
 }
@@ -1392,11 +1390,11 @@ function moveProposal(plan) {
     // Surfaced on the confirmation card — the operator must see whether
     // committing will text the customers.
     will_text_customers: notifyCustomers,
-    // GATE_DAY_ONLY_PROMISE part B2: shown on the card so the operator sees which promise the notice makes. Gate off: no key.
-    ...(require('../time-promise').dayOnlyPromiseOn() ? { customer_asked_time: plan.customerAskedTime === true } : {}),
+    // GATE_DAY_ONLY_PROMISE part B2: shown on the card so the operator sees which promise the notice makes.
+    customer_asked_time: plan.customerAskedTime === true,
     stops,
     ...plan.skipped,
-    note: `Would move ${stops.length} stop(s) to ${dateStr}${notifyCustomers ? ' and TEXT each customer the new arrival window' : ' silently (no customer texts)'}. Re-call with confirmed:true to apply.`,
+    note: `Would move ${stops.length} stop(s) to ${dateStr}${notifyCustomers ? ' and TEXT each customer about the move' : ' silently (no customer texts)'}. Re-call with confirmed:true to apply.`,
   };
 }
 
@@ -1541,16 +1539,14 @@ async function moveBatchTrx(trx, classified, dateStr, reason, customerAskedTime)
     { techId: c.s.technician_id, date: c.observedDate },
     { techId: c.s.technician_id, date: dateStr },
   ]));
-  // GATE_DAY_ONLY_PROMISE part B3: with the gate on, each stop's reschedule_log row is written in THIS transaction, right after the
+  // GATE_DAY_ONLY_PROMISE part B3: each stop's reschedule_log row is written in THIS transaction, right after the
   // UPDATE that carries the stop's intent, so the intent and its own log row share the transaction's now() (currentIntent reads
-  // the intent as current). A post-commit row would be strictly later and make the intent read stale at once. Gate off: the row is
-  // written after the commit, exactly as before. The flags are reset per attempt (a deadlock retry rolled the rows back).
-  const auditInTrx = require('../time-promise').dayOnlyPromiseOn();
+  // the intent as current). A post-commit row would be strictly later and make the intent read stale at once. The flags are reset per attempt (a deadlock retry rolled the rows back).
   for (const c of classified) {
     c.auditedInTrx = false;
     c.auditFailedInTrx = false;
     await writeMovedStop(trx, c, dateStr, reason, customerAskedTime);
-    if (auditInTrx) await auditMovedStopInTrx(trx, c, dateStr, reason);
+    await auditMovedStopInTrx(trx, c, dateStr, reason);
   }
   // The probe ran on the technician each stop was read with. The CAS does not
   // pin technician_id (the notice follows the stop), so a concurrent

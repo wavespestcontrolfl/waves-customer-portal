@@ -686,6 +686,46 @@ describe('customer pricing AI helpers', () => {
     expect(review(await run({ stories: 2 }))).toBe(false);
   });
 
+  // The lookup answers `stories: 1, storiesSource: 'default'` when nobody knew the count (it fell back to 1), and
+  // it raises no verify flag for that. Such a count is a gap, not a read: adopted, it was graded 'lookup', and the
+  // story-sensitive prices (pest per-story minutes, termite bait perimeter) carried no stories_estimated marker.
+  describe('a story count the lookup itself defaulted', () => {
+    const run = (enrichedStories, extra = {}) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2400, lotSqFt: 8000, ...enrichedStories }, propertyRecord: {} }),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-story-default', property_sqft: null, lot_sqft: null }),
+      propertySeed: null,
+      includeEngineContext: true,
+      ...extra,
+    });
+    const pest = (result) => result.options.find((option) => option.id === 'pest-quarterly');
+    const graded = (result) => {
+      const { stories, storiesSource } = pest(result).engineContext.propertyInput;
+      return { stories, storiesSource, review: pest(result).manualReview };
+    };
+
+    test('is not adopted: the price is marked for review, as for a home with no story count', async () => {
+      expect(graded(await run({ stories: 1, storiesSource: 'default' }))).toEqual({ stories: 1, storiesSource: 'default', review: true });
+      expect(graded(await run({}))).toEqual({ stories: 1, storiesSource: 'default', review: true });
+    });
+
+    test.each([
+      ['no source on the lookup', { stories: 1 }],
+      ['a public record', { stories: 1, storiesSource: 'ai' }],
+      ['a permit', { stories: 2, storiesSource: 'permit' }],
+      ['a staff correction', { stories: 2, storiesSource: 'verified' }],
+    ])('a count with %s is adopted as before', async (_label, enrichedStories) => {
+      expect(graded(await run(enrichedStories))).toEqual({ stories: enrichedStories.stories, storiesSource: 'lookup', review: false });
+    });
+
+    test("is a gap the accepted estimate's count may fill, with that estimate's own grade", async () => {
+      const lookup = { stories: 1, storiesSource: 'default' };
+      expect(graded(await run(lookup, { propertySeed: { stories: 2, storiesSource: 'lookup' } }))).toEqual({ stories: 2, storiesSource: 'lookup', review: false });
+      expect(graded(await run(lookup, { propertySeed: { stories: 2 } }))).toEqual({ stories: 2, storiesSource: 'estimated', review: true });
+    });
+  });
+
   test('with no building footprint at all (lookup failed or carried none), a lot-inferred T&S line parks (Codex #6398 r24 P1)', async () => {
     // missingPropertyFor lets T&S price from the lot alone; a zero footprint
     // would infer beds from nearly the whole lot and publish unreviewed.
@@ -1109,6 +1149,35 @@ describe('ownership lifecycle evidence', () => {
       }],
     }), 'cust-past');
     expect(owned).toEqual([]);
+  });
+
+  // An included follow-up is the $0 second visit of a one-time job. No writer saves one with the recurring flag;
+  // if a row ever carries both, it is still not a recurring service the customer owns, so its family is quoted.
+  test('an included follow-up that carries the recurring flag is not ownership evidence, and its family is still quoted', async () => {
+    const loadOwned = loadOwnedGated();
+    const followUp = {
+      id: 'svc-fu', service_type: 'Quarterly Pest Control', scheduled_date: futureDate,
+      status: 'confirmed', is_recurring: true, followup_included: true,
+    };
+    const mk = (rows) => dbForTables({
+      customers: [{ id: 'cust-fu', active: true, waveguard_tier: null, monthly_rate: null }],
+      scheduled_services: rows,
+    });
+    expect(await loadOwned(mk([followUp]), 'cust-fu')).toEqual([]);
+    expect(await loadOwned(mk([{ ...followUp, followup_included: false }]), 'cust-fu')).toEqual(['pest_control']);
+
+    const quote = (rows) => buildCustomerPricingResponse({
+      db: mk(rows),
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-fu', waveguard_tier: null, monthly_rate: null }),
+    });
+    const quoted = await quote([followUp]);
+    expect(quoted.alreadyIncluded).toEqual([]);
+    expect(quoted.options.some((option) => option.serviceKey === 'pest_control')).toBe(true);
+    const owned = await quote([{ ...followUp, followup_included: false }]);
+    expect(owned.alreadyIncluded).toContain('Pest Control');
+    expect(owned.options).toEqual([]);
   });
 });
 
@@ -2111,5 +2180,882 @@ describe('r9: field-confident tree counts, story evidence, authoritative types, 
     // provider calls to produce the same PROPERTY_DETAILS_NEEDED answer.
     expect(lookedUp).toBe(false);
     expect(result.code).toBe('PROPERTY_DETAILS_NEEDED');
+  });
+});
+
+describe('planStart hint (GATE_PORTAL_PLAN_START)', () => {
+  const restart = require('../services/cancellation-resolution/restart');
+  const ask = (customer, db = null, prompt = 'I am interested in adding lawn care', includePlanStartHint = true) => buildCustomerPricingResponse({
+    db,
+    propertyLookup: async () => ({ enriched: { homeSqFt: 2200 } }),
+    prompt,
+    customer,
+    includePlanStartHint,
+  });
+  // A plain account: no plan membership on the row (propertyCustomer defaults to a Bronze member).
+  const plain = (overrides = {}) => propertyCustomer({
+    id: 'cust-lead', active: true, pipeline_stage: 'new_lead', waveguard_tier: null, monthly_rate: null, ...overrides,
+  });
+  const crossSell = require('../services/service-report/cross-sell');
+  const realPremisesProof = crossSell.customerHasOnlyPrimaryPremises;
+  let owns;
+  let premises;
+  let otherProfile;
+  let seed;
+  beforeEach(() => {
+    // The accepted-estimate seed the mint prices with: none on file unless a test says so.
+    seed = jest.spyOn(crossSell, 'loadEstimateSeed').mockResolvedValue(null);
+    owns = jest.spyOn(restart, 'ownsAnyRecurringService').mockResolvedValue(false);
+    // The strict proof's account read (another profile on the account); plan-start.test.js runs it on rows.
+    otherProfile = jest.spyOn(restart, 'accountHasOtherProfile').mockResolvedValue(false);
+    // The mint's single-premises proof, at its home (cross-sell); the street checks run for real.
+    premises = jest.spyOn(crossSell, 'customerHasOnlyPrimaryPremises').mockResolvedValue(true);
+  });
+  afterEach(() => { delete process.env.GATE_PORTAL_PLAN_START; owns.mockRestore(); premises.mockRestore(); otherProfile.mockRestore(); seed.mockRestore(); });
+
+  test('absent unless the caller asks: the report cross-sell and portal-offer answers run no plan-start reads (codex pre-push P1)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const result = await ask(plain(), null, undefined, false);
+    expect(result.options.some((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview)).toBe(true);
+    expect('planStart' in result).toBe(false);
+    expect(owns).not.toHaveBeenCalled();
+    expect(premises).not.toHaveBeenCalled();
+    expect(seed).not.toHaveBeenCalled();
+  });
+
+  test('a turf profile that cannot be read: no lawn button, as the mint refuses that price; the lawn is still priced (codex pre-push P0)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const turfReadFails = (table) => {
+      const q = dbForTables({})(table);
+      if (table === 'customer_turf_profiles') q.first = () => Promise.reject(new Error('pg down'));
+      return q;
+    };
+    // The same answer with a readable (absent) profile offers the button.
+    expect((await ask(plain(), dbForTables({}))).planStart?.optionIds?.length).toBeGreaterThan(0);
+    const result = await ask(plain(), turfReadFails);
+    expect(result.options.some((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview)).toBe(true);
+    expect('planStart' in result).toBe(false);
+    // A pest price reads no turf facts, so its button stays.
+    const pest = await buildCustomerPricingResponse({
+      db: turfReadFails,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200, lotSqFt: 7000, stories: 1 } }),
+      prompt: 'I am interested in adding pest control',
+      customer: plain(),
+      includePlanStartHint: true,
+    });
+    expect(pest.planStart).toEqual({ optionIds: ['pest-quarterly'] });
+  });
+
+  test('applies the mint\'s seed checks: no button for a price the mint would refuse (codex pre-push P1)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    // The seed is read at the street the strict premises proof returned.
+    expect((await ask(plain())).planStart?.optionIds?.length).toBeGreaterThan(0);
+    expect(seed).toHaveBeenCalledWith(null, 'cust-lead', expect.stringMatching(/^1/));
+    // An accepted estimate there carried its own field-verification markers: no option books.
+    seed.mockResolvedValue({ requiresFieldVerification: true });
+    expect('planStart' in await ask(plain())).toBe(false);
+    // An ambiguous zero tree count refuses only a Tree & Shrub price.
+    seed.mockResolvedValue({ zeroTreeCountAmbiguous: true });
+    expect((await ask(plain())).planStart?.optionIds?.length).toBeGreaterThan(0);
+    const trees = await ask(plain(), null, 'I am interested in adding tree and shrub care');
+    expect(trees.options.some((o) => o.serviceKey === 'tree_shrub')).toBe(true);
+    expect('planStart' in trees).toBe(false);
+    // An unreadable seed fails closed, as the mint does.
+    seed.mockRejectedValue(new Error('seed read failed'));
+    expect('planStart' in await ask(plain())).toBe(false);
+  });
+
+  test('lists the options the route can book, only when the gate is on and the account has no plan', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const result = await ask(plain());
+    expect(result.ok).toBe(true);
+    const bookable = result.options.filter((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview && o.confidence !== 'low').map((o) => o.id);
+    expect(bookable.length).toBeGreaterThan(0);
+    expect(result.planStart).toEqual({ optionIds: bookable });
+    // The account-wide read (rodent and commercial rows, prepay terms) runs only for a plain account.
+    expect(owns).toHaveBeenCalledWith(null, 'cust-lead');
+    // The strict proof, as the mint runs it: an unresolvable visit link fails it (codex pre-push P1).
+    expect(premises).toHaveBeenCalledWith(null, 'cust-lead', expect.objectContaining({ id: 'cust-lead' }), expect.any(String), { unresolvedFails: true });
+    expect(otherProfile).toHaveBeenCalledWith(null, expect.objectContaining({ id: 'cust-lead' }));
+  });
+
+  test('absent for an account with another profile: the strict proof reads the whole account (codex pre-push r16 P0)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    otherProfile.mockResolvedValue(true);
+    expect('planStart' in await ask(plain())).toBe(false);
+    otherProfile.mockRejectedValue(new Error('pg down'));
+    expect('planStart' in await ask(plain())).toBe(false);
+  });
+
+  test('absent for a multi-home account: the mint prices only an account on one provable premises (codex pre-push P1)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    premises.mockImplementation(realPremisesProof);
+    expect('planStart' in await ask(plain({ has_multi_home: true }))).toBe(false);
+    expect(premises).toHaveBeenCalledWith(null, 'cust-lead', expect.objectContaining({ has_multi_home: true }), expect.any(String), { unresolvedFails: true });
+  });
+
+  test('absent when the premises proof says no or fails, or the account has no street with a city or zip, or a first line with no house number (codex pre-push r31 P1)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    premises.mockResolvedValueOnce(false);
+    expect('planStart' in await ask(plain())).toBe(false);
+    premises.mockRejectedValueOnce(new Error('pg down'));
+    expect('planStart' in await ask(plain())).toBe(false);
+    premises.mockClear();
+    for (const street of [{ address_line1: null }, { city: null, zip: null }, { address_line1: '', address_line2: 'Apt 4' }, { address_line1: 'Apt 4' }, { address_line1: '4B' }, { address_line1: 'Main St' }]) {
+      const result = await ask(plain(street));
+      // Still priced: only the street check turns booking off.
+      expect(result.options.some((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview)).toBe(true);
+      expect('planStart' in result).toBe(false);
+    }
+    expect(premises).not.toHaveBeenCalled();
+  });
+
+  test('absent for an address the mint refuses: with no city, a unit line such as "Building 2" reads back as the city (codex pre-push P1)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const result = await ask(plain({ address_line2: 'Building 2', city: null }));
+    // Still priced: only the address check turns booking off.
+    expect(result.options.some((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview)).toBe(true);
+    expect('planStart' in result).toBe(false);
+    // A unit line the parser knows reads back as the same home and keeps the button.
+    expect((await ask(plain({ address_line2: 'Apt 4', city: null }))).planStart?.optionIds?.length).toBeGreaterThan(0);
+  });
+
+  test('never lists a mosquito option: a mosquito-only plan adds a setup fee its line does not declare', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const result = await ask(plain(), null, 'I am interested in adding mosquito service');
+    expect(result.options.some((o) => o.serviceKey === 'mosquito' && o.monthly > 0 && !o.manualReview)).toBe(true);
+    expect((result.planStart?.optionIds || []).filter((id) => id.startsWith('mosquito'))).toEqual([]);
+  });
+
+  test('never lists a low-confidence option, even with no manual-review flag: the mint refuses that line (codex pre-push P1)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const engine = require('../services/pricing-engine');
+    const real = engine.generateEstimate;
+    // Today's engine answer with one field changed: every line graded LOW (any case), no review flag.
+    const spy = jest.spyOn(engine, 'generateEstimate').mockImplementation((...args) => {
+      const estimate = real(...args);
+      for (const line of estimate?.lineItems || []) if (line) line.pricingConfidence = 'LOW';
+      return estimate;
+    });
+    try {
+      const result = await ask(plain());
+      expect(result.options.some((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview && o.confidence === 'LOW')).toBe(true);
+      expect('planStart' in result).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test.each([
+    ['a heuristic turf basis at medium confidence', (line) => { line.turfBasis = 'plausibleMaxTurfCap'; line.pricingConfidence = 'medium'; }],
+    ['a measurement the line still needs', (line) => { line.requiresMeasurement = true; }],
+  ])('never lists an option the mint\'s review check refuses, with no manual-review flag on the card: %s (codex pre-push P1)', async (_label, mark) => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const engine = require('../services/pricing-engine');
+    const real = engine.generateEstimate;
+    const spy = jest.spyOn(engine, 'generateEstimate').mockImplementation((...args) => {
+      const estimate = real(...args);
+      for (const line of estimate?.lineItems || []) if (line) mark(line);
+      return estimate;
+    });
+    try {
+      const result = await ask(plain());
+      expect(result.options.some((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview && o.confidence !== 'low')).toBe(true);
+      expect('planStart' in result).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('absent for an account stored as commercial, even when a trusted lookup prices it residential: the mint refuses it (codex pre-push P0)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const askWith = (customer) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200, propertyType: 'single_family' } }),
+      prompt: 'I am interested in adding lawn care',
+      customer,
+      includePlanStartHint: true,
+    });
+    expect((await askWith(plain())).planStart?.optionIds?.length).toBeGreaterThan(0);
+    const commercial = await askWith(plain({ property_type: 'commercial' }));
+    expect(commercial.options.some((o) => o.serviceKey === 'lawn_care' && o.monthly > 0 && !o.manualReview)).toBe(true);
+    expect('planStart' in commercial).toBe(false);
+  });
+
+  test('absent when the gate is off, so the pricing answer is byte-identical to today', async () => {
+    const result = await ask(plain());
+    expect('planStart' in result).toBe(false);
+    expect(owns).not.toHaveBeenCalled();
+  });
+
+  test('absent for a member (a current or owned recurring service), a member by the row, and a churned account', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const member = propertyCustomer({ id: 'cust-member', active: true, pipeline_stage: 'active_customer' });
+    const owned = await ask(member, activePlanDb(member.id, ['Quarterly Pest Control']));
+    expect(owned.ok).toBe(true);
+    expect('planStart' in owned).toBe(false);
+    for (const membership of [{ waveguard_tier: 'Silver' }, { billing_mode: 'annual_prepay' }, { monthly_rate: 45 }]) {
+      expect('planStart' in await ask(plain(membership))).toBe(false);
+    }
+    const churned = await ask(plain({ id: 'cust-gone', active: false, pipeline_stage: 'churned' }));
+    expect('planStart' in churned).toBe(false);
+    expect(owns).not.toHaveBeenCalled();
+  });
+
+  test('absent when a row the pricing loaders skip (rodent, commercial) or a prepay term owns a plan, or the read fails', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    owns.mockResolvedValueOnce(true);
+    expect('planStart' in await ask(plain())).toBe(false);
+    owns.mockRejectedValueOnce(new Error('pg down'));
+    expect('planStart' in await ask(plain())).toBe(false);
+  });
+
+  test('pest offers quarterly only: the estimate page opens a pest estimate on quarterly', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    // Full property facts, so every pest option prices without a review marker.
+    const result = await buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: async () => ({ enriched: { homeSqFt: 2200, lotSqFt: 7000, stories: 1 } }),
+      prompt: 'I am interested in adding pest control',
+      customer: plain(),
+      includePlanStartHint: true,
+    });
+    const priced = result.options.filter((o) => o.monthly > 0 && !o.manualReview).map((o) => o.id);
+    expect(priced).toEqual(['pest-quarterly', 'pest-bimonthly', 'pest-monthly']);
+    expect(result.planStart).toEqual({ optionIds: ['pest-quarterly'] });
+  });
+
+  test('absent for an account whose active flag is NULL (customer auth reads it as inactive)', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    expect('planStart' in await ask(plain({ active: null }))).toBe(false);
+    expect(owns).not.toHaveBeenCalled();
+  });
+
+  test('a service the route cannot book (rodent bait) is never offered', async () => {
+    process.env.GATE_PORTAL_PLAN_START = 'true';
+    const result = await ask(plain(), null, 'Can you add rodent bait stations?');
+    expect(result.options.every((o) => o.serviceKey === 'rodent_bait')).toBe(true);
+    expect('planStart' in result).toBe(false);
+  });
+});
+
+// GATE_CAGE_TWO_SIZES (owner 2026-11-19, "hold"): the lookup now sizes a cage
+// Medium or Large, but an automatic customer price keeps today's manual-quote
+// hold for a cage the four sizes call Large or Oversized (poolCageLegacySize).
+describe('GATE_CAGE_TWO_SIZES keeps the manual-quote hold in the customer price assistant', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const TWO_SIZES = 'GATE_CAGE_TWO_SIZES';
+  let prior;
+  beforeAll(() => { prior = process.env[TWO_SIZES]; });
+  afterAll(() => {
+    if (prior === undefined) delete process.env[TWO_SIZES];
+    else process.env[TWO_SIZES] = prior;
+  });
+  beforeEach(() => { delete process.env[TWO_SIZES]; });
+
+  const lookupWith = (cage) => async () => ({
+    enriched: {
+      homeSqFt: 2200, lotSqFt: 8000, stories: 1,
+      pool: 'YES', poolSource: 'county', poolCage: 'YES',
+      ...cage,
+    },
+    propertyRecord: {},
+  });
+  const features = async (cage, propertySeed = null) => (await _private.resolvePropertyContext({
+    customer: propertyCustomer({ id: 'cust-cage-hold' }),
+    turfProfile: null,
+    propertyLookup: lookupWith(cage),
+    propertySeed,
+  })).propertyInput.features;
+
+  test('gate on: a trusted Medium cage whose four-size answer is Large is held', async () => {
+    process.env[TWO_SIZES] = 'true';
+    const f = await features({ poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE' });
+    expect(f).toMatchObject({ poolCage: true, poolCageSize: 'medium', poolCageReview: true });
+    // The county area is the first evidence: 750 sq ft is Large in four sizes.
+    const byArea = await features({ poolCageSqft: 750, poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' });
+    expect(byArea.poolCageReview).toBe(true);
+    const oversized = await features({ poolCageSize: 'LARGE', poolCageLegacySize: 'OVERSIZED' });
+    expect(oversized).toMatchObject({ poolCageSize: 'large', poolCageReview: true });
+  });
+
+  test('gate on: a four-size answer of Medium or less, or no answer, is not held', async () => {
+    process.env[TWO_SIZES] = 'true';
+    expect((await features({ poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' })).poolCageReview).toBeUndefined();
+    expect((await features({ poolCageSize: 'MEDIUM' })).poolCageReview).toBeUndefined();
+  });
+
+  test('gate off: no flag, even with a four-size answer on the profile', async () => {
+    const f = await features({ poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE' });
+    expect(f.poolCageReview).toBeUndefined();
+  });
+
+  test('gate on: a seed-backed size with no cage evidence is held (a person quotes); the lookup\'s size does not back it', async () => {
+    process.env[TWO_SIZES] = 'true';
+    // The lookup is silent on the cage size here, so the seed fills it.
+    const f = await features(
+      { poolCage: 'YES', poolCageSize: undefined, poolCageLegacySize: 'LARGE', pool: 'NO' },
+      { homeSqFt: 2200, lotSqFt: 8000, stories: 1, storiesSource: 'lookup', features: { poolCage: true, poolCageSize: 'small' } },
+    );
+    expect(f).toMatchObject({ poolCageSize: 'small', poolCageReview: true });
+    // An undecided cage (POSSIBLE) is not lookup-backed: the seed's size prices, and with no
+    // evidence of its own it is held.
+    const undecided = await features(
+      { poolCage: 'POSSIBLE', poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE', pool: 'NO' },
+      { homeSqFt: 2200, lotSqFt: 8000, stories: 1, storiesSource: 'lookup', features: { poolCage: true, poolCageSize: 'medium' } },
+    );
+    expect(undecided).toMatchObject({ poolCage: true, poolCageSize: 'medium', poolCageReview: true });
+  });
+
+  // The flag follows the same evidence as the size: a current lookup decides it, and a
+  // seed's own flag travels only with a size the seed supplied.
+  const seedWith = (seedFeatures) => ({
+    homeSqFt: 2200, lotSqFt: 8000, stories: 1, storiesSource: 'lookup', features: seedFeatures,
+  });
+
+  test('gate on: a current lookup-backed Medium cage removes a stale seeded flag, and the offer is priced', async () => {
+    process.env[TWO_SIZES] = 'true';
+    const seed = seedWith({ poolCage: true, poolCageSize: 'large', poolCageReview: true });
+    const f = await features({ poolCageSqft: 500, poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' }, seed);
+    expect(f).toMatchObject({ poolCage: true, poolCageSize: 'medium' });
+    expect(f.poolCageReview).toBeUndefined();
+    const offer = await buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: lookupWith({ poolCageSqft: 500, poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' }),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-cage-hold-seed' }),
+      propertySeed: seed,
+    });
+    expect(offer.options[0].manualReview).toBe(false);
+  });
+
+  test('gate on: a lookup-backed held cage sets the flag whether or not the seed carried one', async () => {
+    process.env[TWO_SIZES] = 'true';
+    const held = { poolCageSqft: 750, poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE' };
+    expect((await features(held, seedWith({ poolCage: true, poolCageSize: 'large' }))).poolCageReview).toBe(true);
+    expect((await features(held, seedWith({ poolCage: true, poolCageSize: 'medium', poolCageReview: true }))).poolCageReview).toBe(true);
+  });
+
+  test('a seed-backed size keeps the seed\'s own flag (the lookup did not decide the size)', async () => {
+    process.env[TWO_SIZES] = 'true';
+    const undecided = { poolCage: 'POSSIBLE', poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM', pool: 'NO' };
+    const kept = await features(undecided, seedWith({ poolCage: true, poolCageSize: 'large', poolCageReview: true }));
+    expect(kept).toMatchObject({ poolCageSize: 'large', poolCageReview: true });
+    // With no flag of its own and no evidence, the one resolver still holds it.
+    const noFlag = await features(undecided, seedWith({ poolCage: true, poolCageSize: 'large' }));
+    expect(noFlag.poolCageReview).toBe(true);
+  });
+
+  // A seeded size is held on the seed's OWN cage evidence (a lawn-only estimate never priced the cage).
+  describe('a seeded cage on a lookup miss', () => {
+    const seedFeaturesFor = async (cageEvidence, size = 'medium') => (await _private.resolvePropertyContext({
+      customer: propertyCustomer({ id: 'cust-cage-seed-evidence' }),
+      turfProfile: null,
+      propertyLookup: async () => null,
+      propertySeed: {
+        homeSqFt: 2200, lotSqFt: 8000, stories: 1, storiesSource: 'lookup',
+        features: { poolCage: true, poolCageSize: size },
+        ...(cageEvidence ? { cageEvidence } : {}),
+      },
+    })).propertyInput.features;
+
+    test('gate on: a seeded Medium with a stored area of 750 sq ft, or a stored four-size Large, is held', async () => {
+      process.env[TWO_SIZES] = 'true';
+      expect((await seedFeaturesFor({ poolCageSqft: 750 })).poolCageReview).toBe(true);
+      expect((await seedFeaturesFor({ poolCageLegacySize: 'OVERSIZED' })).poolCageReview).toBe(true);
+    });
+
+    test('gate on: a stored area of 500 sq ft is not held; no evidence at all is held', async () => {
+      process.env[TWO_SIZES] = 'true';
+      expect((await seedFeaturesFor({ poolCageSqft: 500 })).poolCageReview).toBeUndefined();
+      expect((await seedFeaturesFor(null)).poolCageReview).toBe(true);
+    });
+
+    test('gate off: the same evidence gives no flag', async () => {
+      expect((await seedFeaturesFor({ poolCageSqft: 750 })).poolCageReview).toBeUndefined();
+    });
+
+    test('the lookup still decides when it backs the size (a current Medium cage clears the seed evidence)', async () => {
+      process.env[TWO_SIZES] = 'true';
+      const f = (await _private.resolvePropertyContext({
+        customer: propertyCustomer({ id: 'cust-cage-seed-evidence-lookup' }),
+        turfProfile: null,
+        propertyLookup: lookupWith({ poolCageSqft: 500, poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' }),
+        propertySeed: {
+          homeSqFt: 2200, lotSqFt: 8000, stories: 1, storiesSource: 'lookup',
+          features: { poolCage: true, poolCageSize: 'medium' }, cageEvidence: { poolCageSqft: 750 },
+        },
+      })).propertyInput.features;
+      expect(f.poolCageReview).toBeUndefined();
+    });
+  });
+
+  test('gate on: the flag reaches the pest option as manual review', async () => {
+    process.env[TWO_SIZES] = 'true';
+    const run = (cage) => buildCustomerPricingResponse({
+      db: null,
+      propertyLookup: lookupWith(cage),
+      prompt: 'I am interested in adding pest control',
+      customer: propertyCustomer({ id: 'cust-cage-hold-opt' }),
+    });
+    const held = await run({ poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE' });
+    const plain = await run({ poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' });
+    expect(held.options[0].manualReview).toBe(true);
+    expect(plain.options[0].manualReview).toBe(false);
+    expect(held.options[0].perVisit).toBe(plain.options[0].perVisit);
+    delete process.env[TWO_SIZES];
+    const off = await run({ poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE' });
+    expect(off.options[0].manualReview).toBe(false);
+  });
+});
+
+// strictPriceSettings (opt-in, for a caller that prices with nobody watching): the standard pest plan's price
+// for an account that may start a plan, from price settings that are loaded and are the rows' own. The default
+// stays as it was: it answers from what the engine holds, and it asks none of the strict rules.
+// The stamp of the raw price sources (engineContext.pricingSourceStamp): the mint reads the customer row and the
+// turf profile again under its lock and compares them with it, field by field. The pricer makes it once for a
+// request, from those two rows alone, and each option carries its own copy.
+describe('the price source stamp of an option (includeEngineContext)', () => {
+  const customer = propertyCustomer({ id: 'cust-stamp', waveguard_tier: null, monthly_rate: null, bed_sqft: 300, palm_count: 2 });
+  const ask = (turfProfiles, extra = {}) => buildCustomerPricingResponse({
+    db: dbForTables({ customers: [customer], scheduled_services: [], customer_turf_profiles: turfProfiles }),
+    propertyLookup: async () => ({ enriched: { homeSqFt: 2200, stories: 1 } }),
+    prompt: 'I am interested in adding pest control and mosquito service',
+    customer,
+    includeEngineContext: true,
+    ...extra,
+  });
+  const FROM_CUSTOMER = { lot_sqft: 7000, property_sqft: 2200, bed_sqft: 300, palm_count: 2, lawn_type: 'St. Augustine' };
+  const stamps = (result) => result.options.map((option) => option.engineContext.pricingSourceStamp);
+
+  test('every option carries the seven raw sources, and a copy of its own', async () => {
+    const result = await ask([{ customer_id: customer.id, lawn_sqft: 4500, track_key: 'A', grass_type: 'St. Augustine' }]);
+    expect(result.options.length).toBeGreaterThan(1);
+    stamps(result).forEach((stamp) => expect(stamp).toEqual({ ...FROM_CUSTOMER, turf_lawn_sqft: 4500, turf_track_key: 'A' }));
+    expect(new Set(stamps(result)).size).toBe(result.options.length);
+  });
+
+  test('a source that is not on file is null, and the grass type stands in for a missing track', async () => {
+    const noProfile = await ask([], { customer: { ...customer, bed_sqft: undefined, palm_count: undefined } });
+    stamps(noProfile).forEach((stamp) => expect(stamp).toEqual({ ...FROM_CUSTOMER, bed_sqft: null, palm_count: null, turf_lawn_sqft: null, turf_track_key: null }));
+    const noTrack = await ask([{ customer_id: customer.id, lawn_sqft: 0, grass_type: 'Zoysia' }]);
+    stamps(noTrack).forEach((stamp) => expect(stamp).toEqual({ ...FROM_CUSTOMER, turf_lawn_sqft: 0, turf_track_key: 'Zoysia' }));
+  });
+
+  test('without the option no engine context is in the answer', async () => {
+    const result = await ask([], { includeEngineContext: false });
+    expect(result.options.length).toBeGreaterThan(1);
+    expect(result.options.every((option) => option.engineContext === undefined)).toBe(true);
+  });
+});
+
+describe('strictPriceSettings', () => {
+  const pricingEngine = require('../services/pricing-engine');
+  const bridge = require('../services/pricing-engine/db-bridge');
+  const proof = require('../services/plan-start-eligibility');
+  // The bridge's one answer for a price nobody watches (its own suite proves what it means:
+  // pricing-engine-pest-price-rows.test.js). The spy does what the bridge does after a refresh that holds: it
+  // runs the pricer's engine calls and answers their value. The default path never asks it; it uses the shared
+  // refresh.
+  const priceOnHeldSettings = async (priceOptions) => ({ priced: true, value: priceOptions() });
+  let ownSettings;
+  let needsSync;
+  let sync;
+  let blocker;
+  let resolvedBlocker;
+  beforeEach(() => {
+    ownSettings = jest.spyOn(bridge, 'withSettingsForUnattendedPrice').mockImplementation(priceOnHeldSettings);
+    needsSync = jest.spyOn(pricingEngine, 'needsSync').mockReturnValue(false);
+    sync = jest.spyOn(pricingEngine, 'syncConstantsFromDB').mockResolvedValue(true);
+    blocker = jest.spyOn(proof, 'planStartBlocker').mockResolvedValue(null);
+    // The shared answer's rule for the type of the resolved property (its own suite: plan-start-eligibility.test.js).
+    resolvedBlocker = jest.spyOn(proof, 'resolvedPropertyTypeBlocker').mockResolvedValue(null);
+  });
+  afterEach(() => { [ownSettings, needsSync, sync, blocker, resolvedBlocker].forEach((spy) => spy.mockRestore()); });
+
+  const customer = propertyCustomer({ id: 'cust-strict', waveguard_tier: null, monthly_rate: null });
+  // A handle the default path could refresh from (the refresh itself is the spy above).
+  const refreshable = (tables = { customers: [customer], scheduled_services: [] }) => Object.assign(dbForTables(tables), { schema: { hasTable: async () => false } });
+  // A home the engine prices with no review marker: its size and its story count are both known.
+  const price = (extra = {}) => buildCustomerPricingResponse({
+    db: refreshable(),
+    propertyLookup: async () => ({ enriched: { homeSqFt: 2200, stories: 1 } }),
+    prompt: 'I am interested in adding pest control',
+    customer,
+    ...extra,
+  });
+  const strict = (extra = {}) => price({ strictPriceSettings: true, ...extra });
+  const UNAVAILABLE = { code: 'PRICING_CONFIG_UNAVAILABLE' };
+  const expectPriced = (result) => {
+    expect(result.options.length).toBeGreaterThan(0);
+    expect(result.options.every((option) => option.serviceKey === 'pest_control')).toBe(true);
+  };
+
+  test('strict prices pest control for an account that may start a plan', async () => {
+    const result = await strict();
+    expectPriced(result);
+    expect(result.currentServices).toEqual([]);
+  });
+
+  test.each([
+    ['no database handle', { db: null }],
+    ['a customer with no id', { customer: { ...customer, id: null } }],
+  ])('strict with %s is a mistake of the caller, never a price', async (_label, extra) => {
+    await expect(strict(extra)).rejects.toThrow('strictPriceSettings needs a database handle and a customer id');
+    expect(blocker).not.toHaveBeenCalled();
+  });
+
+  // The settings are read on the app's connection, one strict caller at a time. A caller that waits there with a
+  // transaction open keeps a connection of the same pool, and enough of them leave none for that read.
+  test('strict on a transaction is a mistake of the caller, refused before any read; the default takes one as before', async () => {
+    const inTransaction = () => Object.assign(refreshable(), { isTransaction: true });
+    await expect(strict({ db: inTransaction() })).rejects.toThrow('strictPriceSettings needs a database handle that is not a transaction');
+    expect(blocker).not.toHaveBeenCalled();
+    expect(ownSettings).not.toHaveBeenCalled();
+    expectPriced(await price({ db: inTransaction() }));
+    // A handle that only says it is no transaction is taken.
+    expectPriced(await strict({ db: Object.assign(refreshable(), { isTransaction: false }) }));
+  });
+
+  describe('the account', () => {
+    test.each(['not_live', 'commercial', 'has_plan'])('an account the shared answer blocks (%s) is refused before any property lookup or load of the settings', async (reason) => {
+      blocker.mockResolvedValue(reason);
+      const db = refreshable();
+      const propertyLookup = jest.fn(async () => ({ enriched: { homeSqFt: 2200 } }));
+      await expect(strict({ db, propertyLookup })).rejects.toMatchObject({ code: 'PLAN_START_BLOCKED', blocker: reason });
+      expect(blocker).toHaveBeenCalledWith(db, customer.id);
+      expect(propertyLookup).not.toHaveBeenCalled();
+      expect(ownSettings).not.toHaveBeenCalled();
+    });
+
+    test('a failed read of the shared answer throws as it is: an outage is never "this account has no plan"', async () => {
+      blocker.mockRejectedValue(new Error('customers read down'));
+      const propertyLookup = jest.fn(async () => ({ enriched: { homeSqFt: 2200 } }));
+      await expect(strict({ propertyLookup })).rejects.toThrow('customers read down');
+      expect(propertyLookup).not.toHaveBeenCalled();
+    });
+
+    // The pricer's own read of the calendar, at the priced property. The shared answer clears the account here
+    // (the spy), so this is the pricer's rule alone.
+    test.each([
+      ['lawn care', ['Lawn Care']],
+      ['pest control', ['Quarterly Pest Control']],
+      ['termite bait monitoring', ['Termite Bait Monitoring']],
+    ])('a recurring %s visit that the pricer itself reads refuses the account, also when the shared answer clears it', async (_label, serviceTypes) => {
+      const db = Object.assign(activePlanDb(customer.id, serviceTypes), { schema: { hasTable: async () => false } });
+      const propertyLookup = jest.fn(async () => ({ enriched: { homeSqFt: 2200 } }));
+      await expect(strict({ db, propertyLookup })).rejects.toMatchObject({ code: 'PLAN_START_BLOCKED', blocker: 'has_plan' });
+      expect(propertyLookup).not.toHaveBeenCalled();
+    });
+
+    // The shared answer reads the account's records. The property the engine prices is resolved after it, and
+    // an estimate seed (or a lookup) can name a type the account row does not carry. The engine prices a
+    // commercial property by its commercial rules, which the bridge's answer does not cover.
+    test.each(['commercial', 'office', 'warehouse'])('a property that the estimate seed resolves as %s is refused as a business, before the settings are loaded and the engine prices', async (propertyType) => {
+      const engine = jest.spyOn(pricingEngine, 'generateEstimate');
+      try {
+        await expect(strict({ propertySeed: { propertyType } })).rejects.toMatchObject({ code: 'PLAN_START_BLOCKED', blocker: 'commercial' });
+        expect(ownSettings).not.toHaveBeenCalled();
+        expect(engine).not.toHaveBeenCalled();
+      } finally {
+        engine.mockRestore();
+      }
+    });
+
+    test('a property that the lookup resolves as a business is refused too, after the lookup and before the settings are loaded and the engine prices', async () => {
+      const engine = jest.spyOn(pricingEngine, 'generateEstimate');
+      const propertyLookup = jest.fn(async () => ({ enriched: { homeSqFt: 2200, propertyType: 'commercial', aiConfidence: 85 } }));
+      try {
+        await expect(strict({ propertyLookup })).rejects.toMatchObject({ code: 'PLAN_START_BLOCKED', blocker: 'commercial' });
+        expect(propertyLookup).toHaveBeenCalledTimes(1);
+        expect(ownSettings).not.toHaveBeenCalled();
+        expect(engine).not.toHaveBeenCalled();
+      } finally {
+        engine.mockRestore();
+      }
+    });
+
+    test('a home type from the estimate seed is priced, and the default does not refuse a business property', async () => {
+      expectPriced(await strict({ propertySeed: { propertyType: 'townhome_end' } }));
+      await expect(price({ propertySeed: { propertyType: 'commercial' } })).resolves.toMatchObject({ ok: true });
+    });
+
+    // The engine's rule reads a condo as a home. The shared answer reads the condo of a property manager as a
+    // business, and it would have refused the same type saved on the account. So the type the lookup names is
+    // asked of the shared answer's own rule, with this account.
+    describe('the resolved property, by the shared answer', () => {
+      const condoLookup = () => jest.fn(async () => ({ enriched: { homeSqFt: 2200, stories: 1, propertyType: 'condo_ground', aiConfidence: 85 } }));
+
+      test('asks about the very type the engine prices, on the handle of the caller, after the lookup', async () => {
+        const engine = jest.spyOn(pricingEngine, 'generateEstimate');
+        const db = refreshable();
+        const propertyLookup = condoLookup();
+        try {
+          expectPriced(await strict({ db, propertyLookup }));
+          expect(resolvedBlocker).toHaveBeenCalledTimes(1);
+          expect(resolvedBlocker).toHaveBeenCalledWith(db, customer.id, 'condo_ground');
+          expect(engine.mock.calls.length).toBeGreaterThan(0);
+          expect(engine.mock.calls.every(([input]) => input.propertyType === 'condo_ground')).toBe(true);
+          expect(propertyLookup.mock.invocationCallOrder[0]).toBeLessThan(resolvedBlocker.mock.invocationCallOrder[0]);
+        } finally {
+          engine.mockRestore();
+        }
+      });
+
+      test.each(['commercial', 'not_live'])('a type it blocks (%s) is refused with that reason, before the settings are loaded and the engine prices', async (reason) => {
+        resolvedBlocker.mockResolvedValue(reason);
+        const engine = jest.spyOn(pricingEngine, 'generateEstimate');
+        try {
+          await expect(strict({ propertyLookup: condoLookup() })).rejects.toMatchObject({ code: 'PLAN_START_BLOCKED', blocker: reason });
+          expect(ownSettings).not.toHaveBeenCalled();
+          expect(engine).not.toHaveBeenCalled();
+        } finally {
+          engine.mockRestore();
+        }
+      });
+
+      test('a failed read of it throws as it is, never a price', async () => {
+        resolvedBlocker.mockRejectedValue(new Error('customers read down'));
+        await expect(strict({ propertyLookup: condoLookup() })).rejects.toThrow('customers read down');
+        expect(ownSettings).not.toHaveBeenCalled();
+      });
+
+      test('the default does not ask it', async () => {
+        resolvedBlocker.mockResolvedValue('commercial');
+        expectPriced(await price({ propertyLookup: condoLookup() }));
+        expect(resolvedBlocker).not.toHaveBeenCalled();
+      });
+    });
+
+    test('the default asks no shared answer, and prices pest control beside a lawn plan as before', async () => {
+      blocker.mockResolvedValue('has_plan');
+      const result = await price({ db: Object.assign(activePlanDb(customer.id, ['Lawn Care']), { schema: { hasTable: async () => false } }) });
+      expect(blocker).not.toHaveBeenCalled();
+      expect(result.currentServices).toEqual(['Lawn Care']);
+      expectPriced(result);
+    });
+
+    // The first read of the qualifying services is the account row (is this a plan member).
+    test('a failed read of the qualifying services: the default reads it as "none" and prices, strict withholds the price', async () => {
+      const firstCustomersReadFails = () => {
+        const base = refreshable();
+        let reads = 0;
+        return Object.assign((table) => {
+          if (table === 'customers') {
+            reads += 1;
+            if (reads === 1) throw new Error('customers read down');
+          }
+          return base(table);
+        }, { schema: base.schema });
+      };
+      expectPriced(await price({ db: firstCustomersReadFails() }));
+      const withheld = await strict({ db: firstCustomersReadFails() });
+      expect(withheld).toMatchObject({ ok: false, code: 'PRICING_UNAVAILABLE', options: [] });
+      expect(blocker).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('pest control only', () => {
+    test.each([
+      ['lawn care', 'I am interested in adding lawn care'],
+      ['pest control with mosquito', 'I am interested in adding pest control and mosquito service'],
+    ])('a strict request for %s is a mistake of the caller, refused before any read of the account, lookup or load of the settings', async (_label, prompt) => {
+      const propertyLookup = jest.fn(async () => ({ enriched: { homeSqFt: 2200 } }));
+      await expect(strict({ prompt, propertyLookup })).rejects.toThrow('strictPriceSettings prices pest control only');
+      expect(blocker).not.toHaveBeenCalled();
+      expect(propertyLookup).not.toHaveBeenCalled();
+      expect(ownSettings).not.toHaveBeenCalled();
+    });
+
+    test('the same request without strict is priced', async () => {
+      const result = await price({ prompt: 'I am interested in adding pest control and mosquito service' });
+      expect(result.options.length).toBeGreaterThan(0);
+    });
+  });
+
+  // The default shares the bridge's cache and answers a failed refresh with what the engine had. Strict hands
+  // its engine calls to the bridge, which runs them inside a refresh of its own. The pricer asks nothing else
+  // of the cache.
+  describe('the settings, loaded for this call', () => {
+    let engine;
+    let priceForReal;
+    beforeEach(() => {
+      priceForReal = pricingEngine.generateEstimate;
+      engine = jest.spyOn(pricingEngine, 'generateEstimate');
+    });
+    afterEach(() => { engine.mockRestore(); });
+
+    test('default: a refresh that is due and fails still prices, from the values the engine had, and never asks the bridge for settings of its own', async () => {
+      needsSync.mockReturnValue(true);
+      sync.mockResolvedValue(false);
+      expectPriced(await price());
+      expect(sync).toHaveBeenCalledTimes(1);
+      expect(ownSettings).not.toHaveBeenCalled();
+    });
+
+    test('default: settings that read fresh are not loaded again', async () => {
+      expectPriced(await price());
+      expect(sync).not.toHaveBeenCalled();
+    });
+
+    test.each([['read fresh', false], ['are due', true]])('strict: hands the bridge its engine calls, once, and asks nothing of the shared settings, also when they %s', async (_label, due) => {
+      needsSync.mockReturnValue(due);
+      expectPriced(await strict());
+      expect(ownSettings).toHaveBeenCalledTimes(1);
+      expect(ownSettings.mock.calls[0]).toHaveLength(1);
+      expect(typeof ownSettings.mock.calls[0][0]).toBe('function');
+      expect(needsSync).not.toHaveBeenCalled();
+      expect(sync).not.toHaveBeenCalled();
+    });
+
+    // The bridge calls the function it was handed between its refresh and the next one in its queue. So every
+    // engine call of the request must be in that function, and it must answer at once, not with a promise.
+    test("strict: every engine call of the request runs inside the bridge's operation, and the function answers at once", async () => {
+      const order = [];
+      ownSettings.mockImplementation(async (priceOptions) => {
+        order.push('refreshed');
+        const value = priceOptions();
+        order.push('priced');
+        expect(value).toMatchObject({ options: expect.any(Array) });
+        return { priced: true, value };
+      });
+      engine.mockImplementation((...args) => { order.push('engine'); return priceForReal(...args); });
+      expectPriced(await strict());
+      expect(order[0]).toBe('refreshed');
+      expect(order[order.length - 1]).toBe('priced');
+      expect(order.slice(1, -1).length).toBeGreaterThan(0);
+      expect(order.slice(1, -1).every((step) => step === 'engine')).toBe(true);
+    });
+
+    test('strict: the answer is what the bridge returned; the engine does not run outside its operation', async () => {
+      ownSettings.mockResolvedValue({ priced: true, value: { options: [], engineResults: new Map(), currentMonthly: 0 } });
+      await expect(strict()).resolves.toMatchObject({ ok: true, options: [] });
+      expect(engine).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['not_loaded', 'live price settings could not be loaded'],
+      ['edited', 'the price settings were edited while they were loaded'],
+      ['rows', 'the pest price settings are not complete in their rows'],
+    ])('strict: a refusal of the bridge (%s) throws with its reason, never a price', async (reason, message) => {
+      ownSettings.mockResolvedValue({ priced: false, reason });
+      await expect(strict()).rejects.toMatchObject({ ...UNAVAILABLE, message });
+      expect(engine).not.toHaveBeenCalled();
+      // The default prices from what the engine holds, and does not ask.
+      expectPriced(await price());
+      expect(ownSettings).toHaveBeenCalledTimes(1);
+    });
+
+    test.each([
+      ['nothing', null],
+      ['an empty answer', {}],
+      ['a value with no clear yes', { priced: 'yes', value: { options: [{ id: 'x', serviceKey: 'pest_control', monthly: 1 }], engineResults: new Map(), currentMonthly: 0 } }],
+      ['a refusal with a reason it does not know', { priced: false, reason: 'other' }],
+    ])('strict: %s from the bridge is refused, never a price', async (_label, answer) => {
+      ownSettings.mockResolvedValue(answer);
+      await expect(strict()).rejects.toMatchObject(UNAVAILABLE);
+    });
+
+    test('strict: what the bridge throws is thrown as it is', async () => {
+      ownSettings.mockRejectedValue(new Error('pool is down'));
+      await expect(strict()).rejects.toThrow('pool is down');
+    });
+  });
+
+  // With nobody watching, a price the engine marked for a hand check must not go out as a price. The test is
+  // the one the plan-start mint refuses on (engineResultNeedsReview). The default returns the option, marked,
+  // for a card a person reads.
+  describe('a price the engine marked for a hand check', () => {
+    const CAGE_GATE = 'GATE_CAGE_TWO_SIZES';
+    let priorGate;
+    beforeEach(() => { priorGate = process.env[CAGE_GATE]; });
+    afterEach(() => {
+      if (priorGate === undefined) delete process.env[CAGE_GATE];
+      else process.env[CAGE_GATE] = priorGate;
+    });
+    const cageLookup = (cage) => async () => ({
+      enriched: { homeSqFt: 2200, lotSqFt: 8000, stories: 1, pool: 'YES', poolSource: 'county', poolCage: 'YES', ...cage },
+      propertyRecord: {},
+    });
+
+    test('the real engine holds a pool cage whose two sizes disagree: strict returns no option, the default returns it marked', async () => {
+      process.env[CAGE_GATE] = 'true';
+      const held = cageLookup({ poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE' });
+      const plain = cageLookup({ poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' });
+      const marked = await price({ propertyLookup: held });
+      expectPriced(marked);
+      expect(marked.options[0].manualReview).toBe(true);
+      const withheld = await strict({ propertyLookup: held });
+      expect(withheld).toMatchObject({ ok: true, options: [] });
+      // The same home with sizes that agree is priced.
+      expectPriced(await strict({ propertyLookup: plain }));
+    });
+
+    test('the real engine marks a home whose story count is not known: strict returns no option, the default returns it marked', async () => {
+      const propertyLookup = async () => ({ enriched: { homeSqFt: 2200 } });
+      const marked = await price({ propertyLookup });
+      expectPriced(marked);
+      expect(marked.options.every((option) => option.manualReview === true)).toBe(true);
+      expect(await strict({ propertyLookup })).toMatchObject({ ok: true, options: [] });
+    });
+
+    // The estimate seed carries its own hold: the estimate it came from needed field verification. The seed can
+    // still fill sizes that give a clean engine result, and the plan-start mint refuses such a price.
+    describe('by the estimate seed the price was made from', () => {
+      // The seed gives the engine the property type here; the sizes come from the lookup.
+      const seed = (extra = {}) => ({ propertyType: 'townhome_end', ...extra });
+      const restart = require('../services/cancellation-resolution/restart');
+      let engine;
+      beforeEach(() => { engine = jest.spyOn(pricingEngine, 'generateEstimate'); });
+      afterEach(() => { engine.mockRestore(); });
+      // Every engine call priced the seed's type, and no result carries a review marker.
+      const expectCleanEngineResultsFromTheSeed = () => {
+        expect(engine.mock.calls.length).toBeGreaterThan(0);
+        expect(engine.mock.calls.every(([input]) => input.propertyType === 'townhome_end')).toBe(true);
+        expect(engine.mock.results.every((result) => restart.engineResultNeedsReview(result.value) === false)).toBe(true);
+      };
+
+      test('a seed that needs field verification: strict returns no option though the engine result is clean, the default prices', async () => {
+        expectPriced(await strict({ propertySeed: seed() }));
+        expectCleanEngineResultsFromTheSeed();
+        engine.mockClear();
+        expect(await strict({ propertySeed: seed({ requiresFieldVerification: true }) })).toMatchObject({ ok: true, options: [] });
+        // As clean as the result above: the seed alone refused the price.
+        expectCleanEngineResultsFromTheSeed();
+        expectPriced(await price({ propertySeed: seed({ requiresFieldVerification: true }) }));
+      });
+
+      test.each([
+        ['a mark that is not exactly true', { requiresFieldVerification: 'yes' }],
+        ['a tree count of unknown provenance, which holds a Tree & Shrub price only', { zeroTreeCountAmbiguous: true }],
+      ])('%s does not hold a pest price', async (_label, extra) => {
+        expectPriced(await strict({ propertySeed: seed(extra) }));
+      });
+    });
+
+    describe('by each kind of marker', () => {
+      let engine;
+      let priceForReal;
+      beforeEach(() => {
+        priceForReal = pricingEngine.generateEstimate;
+        engine = jest.spyOn(pricingEngine, 'generateEstimate');
+      });
+      afterEach(() => { engine.mockRestore(); });
+      const onEveryLine = (change) => (estimate) => ({ ...estimate, lineItems: estimate.lineItems.map((line) => ({ ...line, ...change })) });
+
+      test.each([
+        ['asks for field verification', (estimate) => ({ ...estimate, fieldVerify: ['pool_cage'] })],
+        ['has a line that requires manual review', onEveryLine({ requiresManualReview: true })],
+        ['has a line graded low confidence', onEveryLine({ pricingConfidence: 'low' })],
+        ['has a line priced from a footprint the engine guessed', onEveryLine({ footprintWasDefaulted: true })],
+      ])("an engine result that %s: strict returns no option, from the bridge's operation as any price", async (_label, mark) => {
+        expectPriced(await strict());
+        ownSettings.mockClear();
+        engine.mockImplementation((...args) => mark(priceForReal(...args)));
+        expect(await strict()).toMatchObject({ ok: true, options: [] });
+        expect(ownSettings).toHaveBeenCalledTimes(1);
+        expectPriced(await price());
+      });
+    });
   });
 });

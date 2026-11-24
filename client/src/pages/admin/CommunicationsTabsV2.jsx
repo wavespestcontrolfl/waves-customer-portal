@@ -861,6 +861,19 @@ export function SmsTemplatesTabV2() {
 const COACH_SECTIONS = ["overview", "tasks", "weeklyRec", "leaderboard", "leadQuality"];
 const OPEN_TASK_STATUSES = ["pending", "in_progress"];
 
+// The last 7 days' new-customer calls and how they ended (server/services/csr/weekly-call-outcomes.js): seven ET dates
+// ending now, not a calendar week (the Friday tip reports the seven completed days instead).
+function WeeklyCallOutcomes({ overview }) {
+  const outcomes = overview?.weeklyCallOutcomes;
+  if (!outcomes?.text) return null;
+  return (
+    <div className="text-13 text-ink-secondary mb-3">
+      <span className="font-medium text-ink-primary">Last 7 days: </span>
+      {outcomes.text}
+    </div>
+  );
+}
+
 export function CSRCoachTabV2() {
   const [overview, setOverview] = useState(null);
   const [tasks, setTasks] = useState(null);
@@ -967,6 +980,7 @@ export function CSRCoachTabV2() {
             <div className="text-13 font-medium text-ink-primary mb-3">
               Team Overview (Last 30 Days)
             </div>{" "}
+            <WeeklyCallOutcomes overview={overview} />
             <div className="overflow-x-auto">
               {" "}
               <Table>
