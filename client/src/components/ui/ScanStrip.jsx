@@ -62,6 +62,7 @@ export function ScanStrip({ items, selectedKey, onSelect, ariaLabel, className }
         className,
       )}
       role="listbox"
+      aria-orientation="horizontal"
       aria-label={ariaLabel}
     >
       {items.map((item, i) => {

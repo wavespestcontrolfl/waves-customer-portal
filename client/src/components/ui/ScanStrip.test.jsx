@@ -36,6 +36,11 @@ describe('ui/ScanStrip', () => {
     expect(screen.getByRole('option', { name: 'Rodent program' })).toBeInTheDocument();
   });
 
+  it('is a horizontal listbox', () => {
+    render(<Harness />);
+    expect(screen.getByRole('listbox')).toHaveAttribute('aria-orientation', 'horizontal');
+  });
+
   it('calls onSelect with the tile key on click', () => {
     const onSelect = vi.fn();
     render(<Harness onSelect={onSelect} />);
