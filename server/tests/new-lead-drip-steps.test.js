@@ -120,6 +120,7 @@ function queues({ steps, reads = {}, enrollment: overrides = {}, passed = [], le
     invoices: noCustomer ? [] : [answer(reads.invoice)],
     customers: noCustomer ? [] : [answer(reads.customerStage ?? { pipeline_stage: 'new_lead' }), answer({ phone: '+19415550100' })],
     // reads.lead = null is a lead row that is gone.
+    newsletter_subscribers: [answer(reads.unsubscribed)],
     leads: leadId ? [answer(reads.lead === null ? undefined : { phone: null, converted_at: null, estimate_id: null, status: 'new', deleted_at: null, ...reads.lead })] : [],
   });
   return { enrollmentUpdate, sendUpdate, stepsChain, estimateRead };
@@ -332,6 +333,13 @@ describe('gate on: stops at step 1 and step 2', () => {
     cancelledWith(enrollmentUpdate, 'new_lead_replied');
     expect(followUp.hasRepliedSince).toHaveBeenCalledWith(
       { id: 'enrollment-n', customer_id: null, customer_phone: '+19415550123', customer_email: 'pat@example.com' }, ENROLLED_AT, { throwOnError: true });
+  });
+
+  test('an address that unsubscribed through the portal newsletter page cancels as new_lead_unsubscribed', async () => {
+    const { enrollmentUpdate } = queues({ steps: STEPS, passed: [STEP_0], reads: { unsubscribed: { id: 'sub-1' } } });
+    await stopped('The lead unsubscribed from the newsletter');
+    cancelledWith(enrollmentUpdate, 'new_lead_unsubscribed');
+    expect(followUp.hasRepliedSince).not.toHaveBeenCalled();
   });
 
   test('a lead enrolled with no customer id that has since booked an assessment (leads.customer_id) cancels as new_lead_booked', async () => {

@@ -544,8 +544,8 @@ function renderAutomationStepContent({ template, htmlBody, textBody, customer, a
  * sender runs; if no, Beehiiv handles it (legacy fallback).
  */
 async function hasLocalContent(templateKey) {
-  const row = await db('automation_steps')
-    .where({ template_key: templateKey, enabled: true })
+  // The same gated step list the runner sends (new_lead's two drip steps count only while GATE_NEW_LEAD_DRIP_STEPS is on).
+  const row = await enabledSequenceSteps(templateKey)
     .where(function () { this.whereNotNull('html_body').orWhereNotNull('text_body'); })
     .where(function () { this.whereRaw("coalesce(html_body,'') <> ''").orWhereRaw("coalesce(text_body,'') <> ''"); })
     .first();

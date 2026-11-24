@@ -9,7 +9,8 @@
  *   2. a visit is booked (any scheduled service that is not cancelled, rescheduled, skipped or a no-show),
  *   3. the lead is a paying customer (a paid invoice, a customer pipeline stage) or the lead row is converted,
  *   4. the enrolling lead row is closed (not an open status), removed or missing,
- *   5. the lead replied by text or email since the enrollment (the engine's two reply arms, estimate-follow-up.hasRepliedSince).
+ *   5. the address unsubscribed through the portal's newsletter unsubscribe page,
+ *   6. the lead replied by text or email since the enrollment (the engine's two reply arms, estimate-follow-up.hasRepliedSince).
  * The existing suppression and email-off checks run before this in automation-runner.js.
  *
  * Any doubt defers, never sends: a failed read returns { defer: true } and the runner leaves the step due for a later tick.
@@ -80,6 +81,14 @@ async function isPayingCustomer(customerId, lead) {
   return !!lead?.converted_at;
 }
 
+// The portal's own newsletter unsubscribe (public-newsletter.js) sets newsletter_subscribers.status. new_lead goes out under the
+// newsletter unsubscribe group, so a lead who unsubscribed there after the first email gets no more of the drip.
+async function newsletterUnsubscribed(email) {
+  if (!email) return false;
+  const row = await db('newsletter_subscribers').whereRaw('lower(email) = ?', [email]).where({ status: 'unsubscribed' }).first('id');
+  return !!row;
+}
+
 // The engine's reply arms read an estimate-shaped row (customer id, phone, email). The phone is the customer's on file, else the
 // enrolling lead's (the lead webhook can enroll a lead with no customer id; its texts are found by phone alone).
 async function repliedSince(enrollment, email, lead) {
@@ -99,6 +108,7 @@ const STOPS = [
   { cancelReason: 'new_lead_customer', reason: 'The lead is a customer', hit: (c) => isPayingCustomer(c.who.customer_id, c.lead) },
   // The office closed, marked spam or lost, or removed the enrolling lead (or the row is gone): no more emails.
   { cancelReason: 'new_lead_lead_closed', reason: 'The enrolling lead is closed or removed', hit: leadGone },
+  { cancelReason: 'new_lead_unsubscribed', reason: 'The lead unsubscribed from the newsletter', hit: (c) => newsletterUnsubscribed(c.email) },
   { cancelReason: 'new_lead_replied', reason: 'The lead replied since enrolling', hit: (c) => repliedSince(c.who, c.email, c.lead) },
 ];
 
