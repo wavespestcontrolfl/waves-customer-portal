@@ -667,6 +667,9 @@ const PRICE_LINE_NO_CONTEXT =
   + ' queued, or the caller declines to give a missing detail, call capture_lead again WITHOUT'
   + ' estimate_requested, say a team member will follow up — nothing stronger — and end normally.';
 
+const { renderCompanyFactsSection } = require('../sms-company-facts');
+const COMPANY_FACTS_SECTION = renderCompanyFactsSection();
+
 const SYSTEM_PROMPT = [
   // The approved company name is "Waves Pest Control" — never an alternate
   // brand form on any customer surface (AGENTS.md; the greeting says the same).
@@ -716,6 +719,15 @@ const SYSTEM_PROMPT = [
   '- ONLY state appointment times that a tool actually returned. Never invent or guess a',
   '  time, date, or that a slot is held. If a tool returns no times, say a team member will',
   '  call to find one.',
+  '',
+  // The same owner-approved list the texting agent and the email auto-draft read: ONE source
+  // (sms-company-facts.COMPANY_FACTS), never a copy here. Rendered text is appended as-is so one
+  // approved fact reaches every channel; the lines below it frame it for speech.
+  COMPANY_FACTS_SECTION.replace(/\n$/, ''),
+  'These facts answer general questions. Say only the one or two that answer what the caller asked,',
+  'in short spoken sentences; never read the list out. They promise no visit time, price, or call',
+  'back, and they do not replace the rules above: a Waves team member still confirms every',
+  'appointment, and you only offer times a tool returned.',
   '',
   'Before you end the call, you MUST call the capture_lead tool with everything you gathered',
   '(a brief call_summary is required; include any time they picked in preferred_date_time).',
