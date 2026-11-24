@@ -36,12 +36,13 @@ const VISIT = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const MIC = /Dictate into this box/;
 let clipRequests;
 let resolveClip;
+let rejectClip;
 
 function stubServer(availability) {
   vi.stubGlobal("fetch", vi.fn(async (url, opts) => {
     if (String(url).includes("/availability")) return { ok: true, json: async () => availability };
     clipRequests.push(String(url));
-    return new Promise((r) => { resolveClip = r; });
+    return new Promise((r, reject) => { resolveClip = r; rejectClip = reject; });
   }));
 }
 
@@ -189,6 +190,22 @@ describe("FocusedBoxMic", () => {
     expect(await screen.findByRole("status")).toHaveTextContent(/closed before the words came back/);
     expect(screen.queryByLabelText("notes")).toBeNull();
     expect(document.body.textContent).not.toContain("lost words");
+  });
+
+  it("a send with no answer shows the error and asks nothing: this mic does not offer a resend", async () => {
+    stubServer({ available: true, everyBox: true });
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    await mount(<textarea aria-label="notes" defaultValue="" />);
+    await focusBox();
+    await act(async () => { fireEvent.click(await screen.findByRole("button", { name: MIC })); });
+    const stop = await screen.findByRole("button", { name: "Stop dictation" });
+    await act(async () => { fireEvent.click(stop); });
+    await waitFor(() => expect(clipRequests).toHaveLength(1));
+    await act(async () => { rejectClip(new TypeError("Load failed")); });
+    await waitFor(() => expect(alert).toHaveBeenCalledWith("Dictation error: The words did not come back."));
+    expect(confirm).not.toHaveBeenCalled();
+    expect(clipRequests).toHaveLength(1);
   });
 
   it("holds a Send button in the box's own dialog until the words land, but not Cancel", async () => {

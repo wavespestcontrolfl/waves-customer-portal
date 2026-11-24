@@ -12,7 +12,7 @@ const {
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
 const { mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('./customer-lifecycle-tools');
-const { gateEnvValue, ibAcceptEstimateLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive, ibPrepaySwitchLive, ibScheduleSmsLive, ibInvoiceEditsLive, ibInvoiceRemindersLive, ibPaymentPlanLive, ibComposeEmailLive, ibSetBillToLive, ibUnblockSenderLive, ibAgentReviewDraftsLive } = require('../../config/feature-gates');
+const { gateEnvValue, ibAcceptEstimateLive, ibSendEstimateLive, ibLeadConvertLive, ibRecordPaymentLive, ibVoidInvoiceLive, ibPrepaySwitchLive, ibScheduleSmsLive, ibInvoiceEditsLive, ibInvoiceRemindersLive, ibPaymentPlanLive, ibComposeEmailLive, ibSetBillToLive, ibUnblockSenderLive, ibAgentReviewDraftsLive } = require('../../config/feature-gates');
 const { invoiceActionsLive } = require('./invoice-action-tools');
 const { repriceVisitsLive } = require('./reprice-visits-tools');
 const { adminReadLive, ADMIN_READ_FIND_TOOL, ADMIN_READ_DATA_TOOL } = require('./admin-read-tools');
@@ -73,6 +73,7 @@ const MODULES = [
   ['billing-reader-tools', 'BILLING_READER_TOOLS', 'executeBillingReaderTool'],
   ['billing-write-tools', 'BILLING_WRITE_TOOLS', 'executeBillingWriteTool'],
   ['estimate-accept-tools', 'ESTIMATE_ACCEPT_TOOLS', 'executeEstimateAcceptTool'],
+  ['estimate-send-tools', 'ESTIMATE_SEND_TOOLS', 'executeEstimateSendTool'],
   ['invoice-action-tools', 'INVOICE_ACTION_TOOLS', 'executeInvoiceActionTool'],
   ['record-payment-tools', 'RECORD_PAYMENT_TOOLS', 'executeRecordPaymentTool'],
   ['lead-convert-tools', 'LEAD_CONVERT_TOOLS', 'executeLeadConvertTool'],
@@ -152,6 +153,7 @@ const GATED_ACTIONS = {
   delete_duplicate_customer: () => deleteDuplicateCustomerEnabled(),
   send_invoice: () => invoiceActionsLive(),
   accept_estimate: () => ibAcceptEstimateLive(),
+  send_estimate: () => ibSendEstimateLive(),
   record_payment: () => ibRecordPaymentLive(),
   convert_lead: () => ibLeadConvertLive(),
   void_invoice: () => ibVoidInvoiceLive(),
@@ -295,7 +297,7 @@ const EVERY_PAGE_TOOL_NAMES = Object.freeze([
 // by domain. Not every page: the Estimates list stays under 40 tools.
 const QUICK_LINKS = 'search_quick_links';
 const PAGE_EXTRA_TOOL_NAMES = Object.freeze({
-  customers: ['accept_estimate', QUICK_LINKS], dashboard: ['accept_estimate', QUICK_LINKS],
+  customers: ['accept_estimate', 'send_estimate', QUICK_LINKS], dashboard: ['accept_estimate', 'send_estimate', QUICK_LINKS],
   schedule: [QUICK_LINKS], dispatch: [QUICK_LINKS], seo: [QUICK_LINKS], blog: [QUICK_LINKS],
   email: [QUICK_LINKS], reviews: [QUICK_LINKS], leads: [QUICK_LINKS],
 });

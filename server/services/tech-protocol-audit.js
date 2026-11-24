@@ -1,0 +1,432 @@
+/**
+ * Tech Rewards Plan D5-3: the owner's monthly protocol audit. Each month the owner opens
+ * five completed lawn / tree & shrub visits per technician, compares what the visit record
+ * says (products, rates, targets, photos) with the protocol, and marks each one match or
+ * mismatch with a note. The mark is one row in tech_protocol_audits; the protocol-audit part
+ * of the season score (tech-rewards-scores.js readAudit) reads those rows. Nothing here
+ * touches scheduled_services, service_records or any customer message.
+ *
+ * Eligible visit (the same visit the score's callbacks part counts): ONE visit per
+ * scheduled_service_id, from its newest completed performed (shared list in visit-outcomes.js)
+ * record that is not a callback, the technician on the record, service date in the ET calendar
+ * month, not an internal test customer. Lawn and tree & shrub only: the record's frozen
+ * service_line, else detectServiceLine (the completion report's own classifier) on its service type.
+ *
+ * A mark stores what the owner reviewed: reviewed_record_id (the visit's canonical record) and evidence_fingerprint
+ * (sha256 of the evidence the board showed: photos, products and rates, counts, area, protocol version and window).
+ * It counts only while both still match; an old row with NULLs keeps the earlier rule (markIsCurrent).
+ *
+ * The sample is DETERMINISTIC, nothing is stored for it: eligible visits are ordered by
+ * sha256(technician id : month : visit id) and the first five are shown. A visit that already
+ * has a mark always stays in the sample (a mark is never hidden), then the lowest hashes fill
+ * the rest up to five. The same eligible set gives the same five on every load.
+ */
+const crypto = require('crypto');
+const db = require('../models/db');
+const logger = require('./logger');
+const { etDateString } = require('../utils/datetime-et');
+const { PERFORMED_OUTCOME_SQL, VISIT_IS_CALLBACK_SQL } = require('./callback-credit');
+const { detectServiceLine } = require('./service-report/service-line-configs');
+const { _private: { internalTestVisitSql } } = require('./completion-record-invariants');
+
+const SAMPLE_SIZE = 5;
+const AUDIT_LINES = Object.freeze(['lawn', 'tree_shrub']);
+const RESULTS = Object.freeze(['match', 'mismatch']);
+const MAX_PHOTOS_PER_VISIT = 12;
+const PHOTO_URL_SECONDS = 900;
+const MAX_NOTE_CHARS = 1000;
+const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+class ProtocolAuditError extends Error {
+  constructor(status, code, message) {
+    super(message);
+    this.name = 'ProtocolAuditError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/** 'YYYY-MM' (default: the current ET month) -> { month: 'YYYY-MM', monthStart: 'YYYY-MM-01' }. */
+function parseMonth(raw) {
+  const month = raw == null || raw === '' ? etDateString().slice(0, 7) : String(raw);
+  if (!MONTH_RE.test(month)) throw new ProtocolAuditError(400, 'INVALID_MONTH', 'month must be YYYY-MM');
+  return { month, monthStart: `${month}-01` };
+}
+
+/**
+ * Eligible visits (see the header), optionally for one month and technician or one visit.
+ * Rows carry month = the visit's ET calendar month as 'YYYY-MM-01'.
+ */
+async function eligibleVisits({ monthStart = null, technicianId = null, scheduledServiceId = null } = {}, conn = db) {
+  // The visit's canonical record (the newest completed performed non-callback sibling) is chosen FIRST over the
+  // whole visit; only then do the month, technician and visit filters apply to it. A visit is a candidate when
+  // any of its records is dated in the month (the candidate list is bounded before the newest is picked).
+  const candidate = [];
+  const outer = [];
+  const params = [];
+  if (monthStart) {
+    candidate.push("AND y.service_date >= ?::date AND y.service_date < (?::date + interval '1 month')");
+    outer.push("AND c.service_date >= ?::date AND c.service_date < (?::date + interval '1 month')");
+    params.push(monthStart, monthStart);
+  }
+  if (scheduledServiceId) candidate.push('AND y.scheduled_service_id = ?');
+  const candidateParams = monthStart ? [monthStart, monthStart] : [];
+  if (scheduledServiceId) candidateParams.push(scheduledServiceId);
+  if (technicianId) { outer.push('AND c.technician_id = ?'); params.push(technicianId); }
+  const { rows } = await conn.raw(`
+    SELECT c.scheduled_service_id, c.id AS record_id, c.technician_id, c.customer_id,
+           c.service_type, c.service_line, c.protocol_name, c.area_serviced_sqft,
+           to_char(c.service_date, 'YYYY-MM-DD') AS service_date,
+           to_char(date_trunc('month', c.service_date), 'YYYY-MM-DD') AS month, c.created_at AS record_created_at
+      FROM (
+        SELECT DISTINCT ON (sr.scheduled_service_id) sr.*
+          FROM service_records sr
+          JOIN scheduled_services ss ON ss.id = sr.scheduled_service_id
+         WHERE sr.status = 'completed'
+           AND NOT ${VISIT_IS_CALLBACK_SQL('sr')}
+           AND ${PERFORMED_OUTCOME_SQL('sr')}
+           AND NOT (${internalTestVisitSql('sr')})
+           AND sr.scheduled_service_id IN (SELECT y.scheduled_service_id FROM service_records y WHERE y.scheduled_service_id IS NOT NULL
+                                           ${candidate.join(' ')})
+         ORDER BY sr.scheduled_service_id, sr.created_at DESC, sr.id DESC
+      ) c
+     WHERE c.technician_id IS NOT NULL ${outer.join(' ')}`, [...candidateParams, ...params]);
+  // the technician check runs AFTER the newest record is picked: a newest record with no technician makes the
+  // visit unauditable instead of letting an older assigned sibling put it in that technician's sample
+  return rows.filter((row) => AUDIT_LINES.includes(row.service_line || detectServiceLine(row.service_type)));
+}
+
+const sampleRank = (technicianId, monthStart, visitId) => crypto.createHash('sha256')
+  .update(`${technicianId}:${monthStart}:${visitId}`).digest('hex');
+
+const compareRank = (x, y) => (x.rank < y.rank ? -1 : x.rank > y.rank ? 1 : 0);
+
+/**
+ * Pure: up to SAMPLE_SIZE of one technician's eligible visits for one month. Counted marks (markedIds) always
+ * stay; `reserved` more counted marks sit on visits that are not on the list (a deleted visit, a corrected
+ * service line) and use up slots; the lowest sha256 ranks fill the rest. Returned in rank order.
+ */
+function pickSample(rows, { technicianId, monthStart, markedIds = new Set(), reserved = 0 }) {
+  const ranked = rows
+    .map((row) => ({ row, rank: sampleRank(technicianId, monthStart, row.scheduled_service_id) }))
+    .sort(compareRank);
+  const kept = ranked.filter(({ row }) => markedIds.has(row.scheduled_service_id));
+  const fill = ranked.filter(({ row }) => !markedIds.has(row.scheduled_service_id)).slice(0, Math.max(0, SAMPLE_SIZE - kept.length - reserved));
+  return [...kept, ...fill].sort(compareRank).map(({ row }) => row);
+}
+
+/**
+ * A mark counts only while it matches its visit's CURRENT eligible record (the ONE eligibility, eligibleVisits):
+ * the same technician and ET month; the record the owner reviewed (reviewed_record_id) is still the canonical one,
+ * or, on an old row with none stored, no record was made after the mark; and the evidence the owner saw is unchanged
+ * (evidence_fingerprint, when stored; a v1 or v2 digest, see fingerprintMatches). A moved visit leaves the old technician's score; a replaced record or a
+ * changed photo set asks for a new mark. A row whose visit was deleted (scheduled_service_id NULL) keeps counting:
+ * nothing is left to compare it with. Pure.
+ */
+function markIsCurrent(mark, visit, evidence) {
+  if (!mark.scheduled_service_id) return true;
+  if (!visit || mark.technician_id !== visit.technician_id || mark.month !== visit.month) return false;
+  if (mark.reviewed_record_id) {
+    if (mark.reviewed_record_id !== visit.record_id) return false;
+  } else if (new Date(visit.record_created_at).getTime() > new Date(mark.audited_at).getTime()) {
+    return false;
+  }
+  return !mark.evidence_fingerprint || fingerprintMatches(mark.evidence_fingerprint, evidence);
+}
+
+/**
+ * Every mark of a technician for audit months fromMonth..toMonth ('YYYY-MM-01'), sorted into
+ *   counted  the current marks (markIsCurrent), at most SAMPLE_SIZE per month, the lowest sample ranks first, so a visit
+ *            that returns to a technician can never make a sixth counted mark: these are the marks that score;
+ *   stale    marks that do not count (a replaced record, changed evidence) on a visit that is still eligible for this
+ *            technician and month: they keep their place in the board sample so the owner can mark them again.
+ * Both lists are in sample-rank order per month.
+ */
+async function markStates(technicianId, { fromMonth, toMonth }, conn = db) {
+  const { rows } = await conn.raw(
+    `SELECT id, scheduled_service_id, technician_id, result, audited_at, reviewed_record_id, evidence_fingerprint,
+            to_char(audit_month, 'YYYY-MM-DD') AS month
+       FROM tech_protocol_audits
+      WHERE technician_id = ? AND audit_month >= ?::date AND audit_month <= ?::date`,
+    [technicianId, fromMonth, toMonth],
+  );
+  const counted = [];
+  const stale = [];
+  for (const month of [...new Set(rows.map((r) => r.month))]) {
+    const visits = new Map((await eligibleVisits({ monthStart: month, technicianId }, conn)).map((v) => [v.scheduled_service_id, v]));
+    const monthRows = rows.filter((r) => r.month === month);
+    // the evidence is read only for visits whose mark stored a fingerprint
+    const evidence = await loadEvidence(
+      monthRows.filter((r) => r.evidence_fingerprint && visits.has(r.scheduled_service_id)).map((r) => visits.get(r.scheduled_service_id)), conn);
+    const ranked = monthRows
+      .map((mark) => ({ mark, rank: sampleRank(technicianId, month, mark.scheduled_service_id || mark.id) }))
+      .sort(compareRank);
+    const current = ranked.filter(({ mark }) => markIsCurrent(mark, visits.get(mark.scheduled_service_id), evidence.get(mark.scheduled_service_id)));
+    const kept = current.slice(0, SAMPLE_SIZE);
+    counted.push(...kept.map(({ mark }) => mark));
+    stale.push(...ranked.filter((entry) => !kept.includes(entry) && entry.mark.scheduled_service_id && visits.has(entry.mark.scheduled_service_id)).map(({ mark }) => mark));
+  }
+  return { counted, stale };
+}
+
+/** The marks that count toward a technician's score (markStates.counted). The board and the score's readAudit read this. */
+async function countedMarks(technicianId, range, conn = db) {
+  return (await markStates(technicianId, range, conn)).counted;
+}
+
+// One technician's sample for one month, from its eligible visits `own`: counted marks stay, then marks that need a re-check
+// (still eligible) keep a place in the slots left, the rest is filled by rank.
+async function sampleFor(own, technicianId, monthStart, conn = db) {
+  const { counted, stale } = await markStates(technicianId, { fromMonth: monthStart, toMonth: monthStart }, conn);
+  const countedIds = new Set(counted.map((m) => m.scheduled_service_id).filter(Boolean));
+  const markedIds = new Set([...countedIds, ...stale.slice(0, Math.max(0, SAMPLE_SIZE - counted.length)).map((m) => m.scheduled_service_id)]);
+  const reserved = counted.length - own.filter((row) => countedIds.has(row.scheduled_service_id)).length;
+  return { sample: pickSample(own, { technicianId, monthStart, markedIds, reserved }), counted: countedIds };
+}
+
+// The frozen lawn protocol assignment of each visit (version and window) from the report module's own batched reader
+// (service-report/report-data.js resolveRecordedProtocolAssignments: the ledger row, else the visit's pin). null = not recorded.
+async function protocolAssignments(rows, conn) {
+  const { resolveRecordedProtocolAssignments } = require('./service-report/report-data');
+  const found = await resolveRecordedProtocolAssignments(conn, rows.map((r) => ({ id: r.record_id, scheduled_service_id: r.scheduled_service_id })));
+  return new Map(rows.map((r) => {
+    const a = found.get(r.record_id);
+    return [r.scheduled_service_id, a.version || a.windowKey || a.windowTitle ? a : null];
+  }));
+}
+
+// Everything the board shows for the canonical records of `rows`, except names and signed photo links:
+// products with rate, area and targets, every photo (id, type, caption, key), counts, area and the protocol assignment.
+async function loadEvidence(rows, conn = db) {
+  const out = new Map();
+  if (!rows.length) return out;
+  const recordIds = rows.map((row) => row.record_id);
+  const [products, photos, protocols] = await Promise.all([
+    conn('service_products').whereIn('service_record_id', recordIds).orderBy('applied_at')
+      .select('service_record_id', 'product_name', 'application_rate', 'rate_unit', 'total_amount', 'amount_unit',
+        'application_area', 'area_value', 'area_unit', 'targets'),
+    conn('service_photos').whereIn('service_record_id', recordIds).orderBy([{ column: 'sort_order' }, { column: 'created_at' }, { column: 'id' }])
+      .select('id', 'service_record_id', 'photo_type', 's3_key', 'caption'),
+    protocolAssignments(rows, conn),
+  ]);
+  for (const row of rows) {
+    const own = products.filter((p) => p.service_record_id === row.record_id);
+    const ownPhotos = photos.filter((p) => p.service_record_id === row.record_id);
+    const photosByType = {};
+    for (const p of ownPhotos) photosByType[p.photo_type] = (photosByType[p.photo_type] || 0) + 1;
+    out.set(row.scheduled_service_id, {
+      recordId: row.record_id,
+      serviceDate: row.service_date,
+      serviceType: row.service_type,
+      serviceLine: row.service_line || detectServiceLine(row.service_type),
+      protocolName: row.protocol_name || null,
+      protocol: protocols.get(row.scheduled_service_id),
+      areaSqft: row.area_serviced_sqft ?? null,
+      products: own.map((p) => ({
+        name: p.product_name,
+        rate: p.application_rate == null ? null : Number(p.application_rate),
+        rateUnit: p.rate_unit || null,
+        totalAmount: p.total_amount == null ? null : Number(p.total_amount),
+        amountUnit: p.amount_unit || null,
+        area: p.area_value == null ? (p.application_area || null) : `${Number(p.area_value)} ${p.area_unit || ''}`.trim(),
+        targets: p.targets || [],
+      })),
+      counts: { products: own.length, photos: ownPhotos.length, photosByType },
+      photoRows: ownPhotos.map((p) => ({ id: p.id, type: p.photo_type, caption: p.caption || null, key: p.s3_key || null })),
+    });
+  }
+  return out;
+}
+
+/**
+ * The v1 fingerprint (the format of the first protocol-audit marks, #8168): sha256 of the evidence in a fixed order:
+ * photos sorted by id, products by name then rate (targets sorted), then the counts, area, protocol version and window.
+ * Kept EXACTLY as it was so a mark stored without a prefix still compares. Pure.
+ */
+function evidenceFingerprintV1(evidence) {
+  const text = (value) => String(value ?? '');
+  const products = evidence.products
+    .map((p) => [p.name, p.rate, p.rateUnit, p.totalAmount, p.amountUnit, p.area, [...p.targets].sort()])
+    .sort((a, b) => text(JSON.stringify(a)).localeCompare(text(JSON.stringify(b))));
+  const photos = evidence.photoRows.map((p) => [p.id, p.type, p.caption, p.key]).sort((a, b) => text(a[0]).localeCompare(text(b[0])));
+  const protocol = evidence.protocol ? [evidence.protocol.version, evidence.protocol.windowKey, evidence.protocol.windowTitle] : null;
+  return crypto.createHash('sha256').update(JSON.stringify({
+    v: 1,
+    record: evidence.recordId,
+    date: evidence.serviceDate,
+    type: evidence.serviceType,
+    line: evidence.serviceLine,
+    protocolName: evidence.protocolName,
+    protocol,
+    area: evidence.areaSqft,
+    counts: [evidence.counts.products, evidence.counts.photos, Object.entries(evidence.counts.photosByType).sort()],
+    products,
+    photos,
+  })).digest('hex');
+}
+
+/**
+ * The v2 fingerprint, 'v2:<sha256>': the v1 digest plus the photos the board actually shows, in the order it shows them
+ * (the first MAX_PHOTOS_PER_VISIT). New marks store this; the board shows this. Pure.
+ */
+const evidenceFingerprintV2 = (evidence) => `v2:${crypto.createHash('sha256').update(JSON.stringify({
+  v: 2,
+  base: evidenceFingerprintV1(evidence),
+  shown: evidence.photoRows.slice(0, MAX_PHOTOS_PER_VISIT).map((p) => p.id),
+})).digest('hex')}`;
+
+/** Whether a stored or submitted fingerprint matches the evidence: a 'v2:' one by the v2 rule, an unprefixed one (a v1 mark) by v1. Pure. */
+const fingerprintMatches = (stored, evidence) => stored === (String(stored).startsWith('v2:') ? evidenceFingerprintV2(evidence) : evidenceFingerprintV1(evidence));
+
+// Map visit id -> the current (v2) fingerprint, for eligible visit rows.
+async function evidenceFingerprints(rows, conn = db) {
+  const evidence = await loadEvidence(rows, conn);
+  return new Map([...evidence].map(([visitId, e]) => [visitId, evidenceFingerprintV2(e)]));
+}
+
+const byTechnician = (rows) => {
+  const groups = new Map();
+  for (const row of rows) groups.set(row.technician_id, [...(groups.get(row.technician_id) || []), row]);
+  return groups;
+};
+
+async function signedPhotoUrl(s3Key) {
+  try {
+    return await require('./photos').getViewUrl(s3Key, PHOTO_URL_SECONDS);
+  } catch (err) {
+    logger.warn(`[tech-protocol-audit] photo presign failed (${err.code || err.name || 'error'})`);
+    return null;
+  }
+}
+
+// The mark a visit shows: counted (audit), or an old mark that no longer counts (needsRecheck).
+function auditState(a, counted) {
+  if (!a) return { audit: null, needsRecheck: false };
+  return counted ? { audit: { result: a.result, note: a.note, auditedAt: a.audited_at }, needsRecheck: false } : { audit: null, needsRecheck: true };
+}
+
+// What the owner compares with the protocol, for the sampled records: the evidence (loadEvidence) with signed photo
+// links, the customer's name, the fingerprint, and the existing mark. Reads only.
+async function visitDetails(sampled, countedIds, conn = db) {
+  if (!sampled.length) return new Map();
+  const [evidence, audits, customers] = await Promise.all([
+    loadEvidence(sampled, conn),
+    conn('tech_protocol_audits').whereIn('scheduled_service_id', sampled.map((row) => row.scheduled_service_id))
+      .select('scheduled_service_id', 'result', 'note', 'audited_at', 'evidence_fingerprint'),
+    conn('customers').whereIn('id', sampled.map((row) => row.customer_id).filter(Boolean)).select('id', 'first_name', 'last_name'),
+  ]);
+  const customerName = new Map(customers.map((c) => [c.id, [c.first_name, c.last_name].filter(Boolean).join(' ') || null]));
+  // A mark shows only while it counts (countedMarks, the score's own rule); otherwise the visit reads as unmarked,
+  // flagged "needs re-check" (a moved visit, a replaced record, changed evidence); marking again re-attributes it.
+  const auditRow = new Map(audits.map((a) => [a.scheduled_service_id, a]));
+  const out = new Map();
+  for (const row of sampled) {
+    const e = evidence.get(row.scheduled_service_id);
+    const fingerprint = evidenceFingerprintV2(e);
+    const mark = auditRow.get(row.scheduled_service_id);
+    // counted by the earlier read AND still on the evidence this card shows (a photo may have arrived in between)
+    const showsAsCounted = countedIds.has(row.scheduled_service_id) && (!mark?.evidence_fingerprint || fingerprintMatches(mark.evidence_fingerprint, e));
+    out.set(row.scheduled_service_id, {
+      scheduledServiceId: row.scheduled_service_id,
+      recordId: row.record_id,
+      technicianId: row.technician_id,
+      month: row.month.slice(0, 7),
+      serviceDate: e.serviceDate,
+      serviceType: e.serviceType,
+      serviceLine: e.serviceLine,
+      protocolName: e.protocolName,
+      protocol: e.protocol,
+      areaSqft: e.areaSqft,
+      customerName: customerName.get(row.customer_id) || null,
+      products: e.products,
+      counts: e.counts,
+      photos: await Promise.all(e.photoRows.slice(0, MAX_PHOTOS_PER_VISIT).map(async (p) => ({
+        id: p.id, type: p.type, caption: p.caption, url: p.key ? await signedPhotoUrl(p.key) : null,
+      }))),
+      evidenceFingerprint: fingerprint,
+      ...auditState(mark, showsAsCounted),
+    });
+  }
+  return out;
+}
+
+/** The month's audit board: every technician with eligible visits, five sampled visits each. */
+async function getBoard(rawMonth, conn = db) {
+  const { month, monthStart } = parseMonth(rawMonth);
+  const rows = await eligibleVisits({ monthStart }, conn);
+  const names = new Map((await conn('technicians').whereIn('id', [...new Set(rows.map((r) => r.technician_id))]).select('id', 'name')).map((t) => [t.id, t.name]));
+  const technicians = [];
+  for (const [technicianId, own] of byTechnician(rows)) {
+    const { sample: sampled, counted } = await sampleFor(own, technicianId, monthStart, conn);
+    const details = await visitDetails(sampled, counted, conn);
+    const visits = sampled.map((row) => details.get(row.scheduled_service_id));
+    technicians.push({
+      id: technicianId,
+      name: names.get(technicianId) || 'Technician',
+      eligibleCount: own.length,
+      markedCount: visits.filter((v) => v.audit).length,
+      visits,
+    });
+  }
+  technicians.sort((a, b) => a.name.localeCompare(b.name));
+  return { month, sampleSize: SAMPLE_SIZE, technicians };
+}
+
+/**
+ * Mark one sampled visit. One row per visit: a second mark changes result, note, audited_at and re-attributes
+ * the row to the technician and month the visit shows now. Refuses a visit that is not eligible or not in its
+ * technician's sample for the month, and a recordId (the record the owner reviewed) that is no longer the
+ * visit's canonical record. The check and the write run under one lock per technician and month, so two
+ * marks can never both pass the five-visit sample.
+ */
+async function saveMark({ scheduledServiceId, technicianId, month, recordId, evidenceFingerprint: shownFingerprint, result, note, auditedBy }, conn = db) {
+  if (typeof scheduledServiceId !== 'string' || !UUID_RE.test(scheduledServiceId)) throw new ProtocolAuditError(400, 'INVALID_VISIT', 'visit id must be a uuid');
+  if (typeof technicianId !== 'string' || !UUID_RE.test(technicianId) || !MONTH_RE.test(String(month))) {
+    throw new ProtocolAuditError(400, 'INVALID_CONTEXT', 'technicianId and month (YYYY-MM) of the board are required');
+  }
+  // the record the owner reviewed is required: without it a replacement record could inherit the judgment
+  if (typeof recordId !== 'string' || !UUID_RE.test(recordId)) throw new ProtocolAuditError(400, 'INVALID_RECORD', 'recordId of the reviewed record is required');
+  if (typeof shownFingerprint !== 'string' || !/^(v2:)?[0-9a-f]{64}$/.test(shownFingerprint)) {
+    throw new ProtocolAuditError(400, 'INVALID_EVIDENCE', 'evidenceFingerprint of the reviewed evidence is required');
+  }
+  if (!RESULTS.includes(result)) throw new ProtocolAuditError(400, 'INVALID_RESULT', "result must be 'match' or 'mismatch'");
+  const text = note == null ? '' : String(note).trim();
+  if (text.length > MAX_NOTE_CHARS) throw new ProtocolAuditError(400, 'NOTE_TOO_LONG', `note must be at most ${MAX_NOTE_CHARS} characters`);
+  if (result === 'mismatch' && !text) throw new ProtocolAuditError(400, 'NOTE_REQUIRED', 'a mismatch needs a note');
+  const [first] = await eligibleVisits({ scheduledServiceId }, conn);
+  if (!first) throw new ProtocolAuditError(404, 'NOT_ELIGIBLE', 'not a completed lawn or tree & shrub visit that can be audited');
+  return conn.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`tech-protocol-audit:${first.technician_id}:${first.month}`]);
+    const [visit] = await eligibleVisits({ scheduledServiceId }, trx);
+    // the mark is filed under the technician and month the board showed; any other current record is refused
+    if (!visit || visit.technician_id !== first.technician_id || visit.month !== first.month
+      || visit.technician_id !== technicianId.toLowerCase() || visit.month.slice(0, 7) !== month || recordId.toLowerCase() !== visit.record_id) {
+      throw new ProtocolAuditError(409, 'STALE_VISIT', 'this visit changed since it was loaded: reload and review it again');
+    }
+    // the evidence the owner saw (photos, products, rates, counts, area, protocol) must still be the visit's evidence
+    const evidence = (await loadEvidence([visit], trx)).get(visit.scheduled_service_id);
+    // a v1 digest ignores the photo order the board showed, so with several photos it cannot prove what the owner saw
+    const legacyUnverifiable = !shownFingerprint.startsWith('v2:') && evidence.photoRows.length > 1;
+    if (legacyUnverifiable || !fingerprintMatches(shownFingerprint, evidence)) {
+      throw new ProtocolAuditError(409, 'STALE_EVIDENCE', "this visit's photos or record details changed since it was loaded: reload and review it again");
+    }
+    const { sample } = await sampleFor(await eligibleVisits({ monthStart: visit.month, technicianId: visit.technician_id }, trx), visit.technician_id, visit.month, trx);
+    if (!sample.some((row) => row.scheduled_service_id === visit.scheduled_service_id)) {
+      throw new ProtocolAuditError(409, 'NOT_IN_SAMPLE', "this visit is not in the technician's sample for the month");
+    }
+    const { rows } = await trx.raw(`
+      INSERT INTO tech_protocol_audits (technician_id, scheduled_service_id, audit_month, result, note, audited_by, audited_at,
+                                        reviewed_record_id, evidence_fingerprint)
+      VALUES (?, ?, ?::date, ?, ?, ?, now(), ?, ?)
+      ON CONFLICT (scheduled_service_id) DO UPDATE
+         SET technician_id = EXCLUDED.technician_id, audit_month = EXCLUDED.audit_month,
+             result = EXCLUDED.result, note = EXCLUDED.note, audited_by = EXCLUDED.audited_by, audited_at = now(),
+             reviewed_record_id = EXCLUDED.reviewed_record_id, evidence_fingerprint = EXCLUDED.evidence_fingerprint
+      RETURNING scheduled_service_id, result, note, audited_at`,
+    [visit.technician_id, visit.scheduled_service_id, visit.month, result, text || null, auditedBy || null, visit.record_id, evidenceFingerprintV2(evidence)]);
+    return { scheduledServiceId: rows[0].scheduled_service_id, result: rows[0].result, note: rows[0].note, auditedAt: rows[0].audited_at };
+  });
+}
+
+module.exports = { _private: { evidenceFingerprintV1, loadEvidence }, SAMPLE_SIZE, ProtocolAuditError, parseMonth, eligibleVisits, pickSample, countedMarks, markStates, evidenceFingerprints, getBoard, saveMark };

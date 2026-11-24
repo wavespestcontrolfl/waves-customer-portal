@@ -51,6 +51,8 @@ function makeDb() {
     jurisdiction_name: 'Sarasota County, FL',
     version: '2026-05-30',
     public_summary: 'Local fertilizer rules may restrict nitrogen and phosphorus applications during the summer rainy season.',
+    nitrogen_restricted: true,
+    phosphorus_restricted: true,
     restricted_start_month: 6,
     restricted_start_day: 1,
     restricted_end_month: 9,
@@ -125,10 +127,10 @@ describe('the gate', () => {
       expect((await build(ST_AUG_ESTIMATE)).meta.contentLibraryVersion).toBe('seed-v1');
     });
     await withGates(V13_ON, async () => {
-      expect(outline.contentLibraryVersion()).toBe('lawn-v13-copy-2');
+      expect(outline.contentLibraryVersion()).toBe('lawn-v13-copy-4');
       expect(outline.CONTENT_LIBRARY_VERSION).toBe('seed-v1');
       const result = await build(ST_AUG_ESTIMATE);
-      expect(result.meta.contentLibraryVersion).toBe('lawn-v13-copy-2');
+      expect(result.meta.contentLibraryVersion).toBe('lawn-v13-copy-4');
       expect(result.meta.protocolVersion).toBe('lawn-v13');
     });
   });
@@ -248,7 +250,7 @@ describe('regenerating an older outline', () => {
       expect(outline.regenerationTurfType(pickedPacket)).toBe('zoysia');
       const regenerated = await build(ST_AUG_ESTIMATE, { month: 10, turfType: outline.regenerationTurfType(guessedPacket) });
       expect(regenerated.meta.turf.turfType).toBe('st_augustine');
-      expect(regenerated.meta.contentLibraryVersion).toBe('lawn-v13-copy-2');
+      expect(regenerated.meta.contentLibraryVersion).toBe('lawn-v13-copy-4');
     });
   });
 });
@@ -269,7 +271,7 @@ describe('the sections', () => {
       expect(text).not.toMatch(/program focuses on/i);
       expect(section(result, 'local_rules').bullets).toEqual([
         'Your rule area: Sarasota County, FL',
-        'What it limits: Local fertilizer rules may restrict nitrogen and phosphorus applications during the summer rainy season.',
+        'What it limits: No nitrogen or phosphorus from June 1 through September 30.',
         'What we do instead: Micronutrients for color, inspection, and spot treatments, with no nitrogen or phosphorus',
       ]);
       // One tile row in place of the report and portal sections; GPS records arrival only.
@@ -320,7 +322,8 @@ describe('the sections', () => {
       // The 9x April bag (pre-emergent with fertilizer) is a plan-size variant: drawn as may-be-added.
       expect(byMonth.Apr.main).toEqual(['feeding']);
       expect(byMonth.Apr.asNeeded).toEqual(expect.arrayContaining(['barrier', 'disease', 'insects']));
-      expect(byMonth.May.main).toEqual(['insects']);
+      expect(byMonth.May).toMatchObject({ main: ['inspection'] });
+      expect(byMonth.May.asNeeded).toContain('insects');
       expect(byMonth.Jul).toMatchObject({ main: ['inspection'], limited: true });
       expect(byMonth.Oct.main).toEqual(['feeding', 'barrier']);
       expect(visual.months.filter((m) => m.limited).map((m) => m.label)).toEqual(['Jun', 'Jul', 'Aug', 'Sep']);
@@ -333,6 +336,23 @@ describe('the sections', () => {
       const chips = section(await build(ST_AUG_ESTIMATE, { month: 10 }), 'season_focus').visual.items;
       expect(chips.filter((c) => c.tier === 'main').map((c) => c.key)).toEqual(byMonth.Oct.main);
       expect(chips.filter((c) => c.tier === 'as_needed').map((c) => c.key)).toEqual(byMonth.Oct.asNeeded);
+    });
+  });
+
+  test('May presents scouting as the main step and insect treatment only after evidence', async () => {
+    await withGates(V13_ON, async () => {
+      const result = await build(ST_AUG_ESTIMATE, { month: 5 });
+      const focus = section(result, 'season_focus');
+      expect(focus.visual.items).toEqual(expect.arrayContaining([
+        { key: 'inspection', label: 'Inspection', tier: 'main' },
+        { key: 'insects', label: 'Insect control', tier: 'as_needed' },
+      ]));
+      expect(focus.bullets).toContain('Insect scouting checks current insect pressure and records the target and observations; treatment is only as needed after evidence is found.');
+      expect(focus.bullets).toContain(`Insect control${CONDITIONAL_TAIL}`);
+      const insectCard = section(result, 'treatment_categories').visual.items.find((item) => item.key === 'insects');
+      expect(insectCard.text).toContain('only as needed after current evidence is recorded');
+      expect(insectCard.text).toContain('A scouting-only May visit is valid.');
+      expect(JSON.stringify(result.content)).not.toMatch(/whole-lawn insect treatment/i);
     });
   });
 

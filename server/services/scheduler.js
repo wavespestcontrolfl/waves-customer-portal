@@ -142,6 +142,23 @@ const SCHEDULED_SMS_STALE_CLAIM_MS = 30 * 60 * 1000;
 // watchdog's page.
 const SCHEDULED_SMS_CLAIM_JOB = 'scheduled-sms-claim';
 const { SCHEDULED_SMS_MAX_ATTEMPTS } = require('./messaging/scheduled-sms-limits');
+// Timed waits a replay's own check names when no provider send was tried. The
+// executor refunds the claimed attempt and waits until nextAllowedAt; the check
+// that names the wait also bounds it.
+//  - BILLING_TEXT_LEG_IN_FLIGHT: another attempt holds this notice's billing Text
+//    claim (messaging/billing-text-leg-dedupe.js). Spent on the bounded ladder, a
+//    claim live across three ticks would terminally block this replay, and the
+//    notice would be lost if that other attempt then ended not_sent. Past
+//    CLAIM_STALE_MS the claim answers with the non-retryable
+//    BILLING_TEXT_LEG_CLAIM_STALE instead of this hold.
+//  - CUSTOMER_MID_CHECKOUT: a queued estimate follow-up whose customer started
+//    checkout after the replay's recheck (estimate-follow-up.js
+//    followupTextProviderCheck). The wait lasts while the card step or a
+//    visit-time hold is live; then the check ends the text or lets it go.
+const TIMED_WAIT_HOLDS = {
+  BILLING_TEXT_LEG_IN_FLIGHT: { at: 'billing_text_in_flight_hold_at', why: 'waiting on an in-flight billing text for the same notice' },
+  CUSTOMER_MID_CHECKOUT: { at: 'customer_checkout_hold_at', why: 'waiting while the customer is mid-checkout' },
+};
 const SCHEDULED_ESTIMATE_CLAIM_LIMIT = 20;
 const SCHEDULED_ESTIMATE_STALE_CLAIM_MS = 30 * 60 * 1000;
 const SCHEDULED_ESTIMATE_MAX_ATTEMPTS = 3;
@@ -1768,6 +1785,133 @@ function initScheduledJobs() {
   }
 
   // =========================================================================
+  // 9:31 PM ET daily + 12:31 PM ET weekdays — New-home mail list, shadow only
+  // (services/mail/new-home-list.js): reads the Manatee Clerk's public deed
+  // list, keeps builder-to-person home sales, matches each to a parcel and a
+  // new-home permit and stores one mail_prospects row per home. Nothing is
+  // sent and nothing reads the table yet. The Clerk fills in names and legal
+  // descriptions over about two days, so the night run re-reads six days and
+  // the noon run (a short two-day read) picks up the same morning's fills.
+  // ONE lease for both ticks and the deploy-kill retry: two runs must never
+  // ask the Clerk site or the parcel map at once. A second run is harmless
+  // (settled deeds are never asked again). A retry after a deploy kill runs
+  // the full night read: the killed run can be the last one that reads its
+  // oldest day, and a short read would leave that day's deeds unjudged.
+  // A run that throws (a day or the parcel map did not answer, a deed
+  // failed, a deed left its last read unjudged) is logged here and recorded
+  // as a failed run by the lease.
+  // Minute 31 at hours 12 and 21: no other job names it (checked against
+  // every cron.schedule in this repo; the nearest are the :30 and :33 / :37
+  // groups, and the hourly :20 jobs stay clear). Only the every-minute and
+  // every-N-minute pollers share it. The run takes 1 to 3 minutes: one page
+  // per day 4 s apart and a map query every 0.6 s, capped at 120.
+  // =========================================================================
+  const runMailNewHomeListTick = async (mode) => {
+    await runExclusive('mail-new-home-list', () => require('./mail/new-home-list').runNewHomeList({ mode }))
+      .catch((err) => logger.error(`Mail new-home list failed: ${err.message}`));
+  };
+  cron.schedule('31 21 * * *', () => runMailNewHomeListTick('night'), { timezone: 'America/New_York' });
+  cron.schedule('31 12 * * 1-5', () => runMailNewHomeListTick('noon'), { timezone: 'America/New_York' });
+  // Mode retry: the wider noon window, so a cut-short noon or night run is read in full.
+  registerDeployKillRetry('mail-new-home-list', () => runMailNewHomeListTick('retry'));
+
+  // =========================================================================
+  // 9:51 PM ET daily + 12:51 PM ET weekdays — New-home mail list: each card
+  // home's facts and the price of its quarterly pest plan, shadow only
+  // (services/mail/home-price.js). For each home of the list that gets a
+  // card: the county parcel map, the county permit page when the map lacks
+  // the size or the stories, then a dry run of the estimate save. It fills
+  // the price columns of mail_prospects. Nothing is sent, nothing reads the
+  // price yet, and no paid or AI service is called.
+  // Twenty minutes after each list tick above (a list run takes 1 to 3
+  // minutes), so a day's new homes are priced the same day.
+  // ONE lease for both ticks and the deploy-kill retry: two runs must never
+  // ask the parcel map or the county permit site at once. A second run is
+  // harmless: a settled home is never read again, and the store refuses a
+  // write from a run that read an older version of the row.
+  // Around it, the permit sync's lease (no health row of its own): the
+  // weekly permit sync is the other reader of the county permit site and
+  // the other writer of a permit's page result. With both leases the two
+  // never run at once, so neither can store a page result over the other's
+  // newer one. The permit sync's lease is the OUTER one, so when the permit
+  // sync holds it, the mail-home-price lease is never taken: its health row
+  // and a deploy-kill retry mark stay as they were (an inner skip would read
+  // as a good run). The tick logs one line and the next tick prices the
+  // homes. A permit sync tick that comes while this run holds the lease
+  // skips, as it would for its own run. By schedule they
+  // do not meet: the permit sync's detail step runs Mondays from 7:41 AM for
+  // at most 60 minutes and its catch-up slots (7:41 AM, 9:11 AM, 1:41 PM,
+  // 5:41 PM) take about 3 minutes; this run has a 20 minute budget.
+  // A run that throws (the parcel map, the permit page or the price engine
+  // was away or turned off, a row could not be read or saved) is logged here
+  // and recorded as a failed run by the lease.
+  // Minute 51 at hours 12 and 21: no other job names it (checked against
+  // every cron.schedule in this repo; the only named :51 jobs run at 11 PM).
+  // Only the every-minute and every-N-minute pollers share it.
+  // =========================================================================
+  // A tick whose price body never started, for any reason but a held lease
+  // (no pool connection, no lock slot in time, a lost session, a lock query
+  // that threw), is a missed tick: the outer lease keeps no health row, so
+  // the tick records it on mail-home-price itself. Once the body starts, the
+  // inner lease records the run. Not on a deploy-kill retry: that row's
+  // dead-run mark must stay so the retry can run again.
+  const runMailHomePriceTick = async ({ retry = false } = {}) => {
+    const tickStartedAt = Date.now();
+    let bodyStarted = false;
+    const priceRun = () => {
+      bodyStarted = true;
+      return require('./mail/home-price').runHomePrices();
+    };
+    let missed = null;
+    try {
+      const out = await runExclusive('permit-sync', () => runExclusive('mail-home-price', priceRun), { recordHealth: false });
+      if (out && out.skipped === true && out.reason === 'lease_held') {
+        logger.info('Mail home prices: not run, the permit sync or another instance holds a lease');
+      } else if (out && out.skipped === true) {
+        missed = `tick skipped: ${out.reason || 'no_connection'}`;
+      }
+    } catch (err) {
+      if (!bodyStarted) missed = `tick skipped: ${err.message}`;
+      else logger.error(`Mail home prices failed: ${err.message}`);
+    }
+    if (missed && !bodyStarted) {
+      logger.error(`Mail home prices failed: ${missed}`);
+      if (!retry) await recordMissedTick('mail-home-price', tickStartedAt, missed).catch(() => {});
+    }
+  };
+  cron.schedule('51 21 * * *', () => runMailHomePriceTick(), { timezone: 'America/New_York' });
+  cron.schedule('51 12 * * 1-5', () => runMailHomePriceTick(), { timezone: 'America/New_York' });
+  registerDeployKillRetry('mail-home-price', () => runMailHomePriceTick({ retry: true }));
+
+  // =========================================================================
+  // MONDAY 10:36 AM ET — Weekly restaurant prospect list (owner 2026-11-19):
+  // new food licenses, ownership changes and violation-35 inspections in
+  // Manatee / Sarasota / Charlotte, less Punta Gorda (not served), from
+  // Florida's public restaurant files. Fills restaurant_prospects only:
+  // sends nothing, calls no AI, no gate. Kill = env
+  // DBPR_PROSPECT_SYNC_DISABLED. Minute 36, not :25: the hourly :25 check
+  // runs then. It is clear of the Monday 6:40-7:15 and the 8:40-9:40 deploy
+  // windows. Every write upserts by (kind, source_key), so a re-run after a
+  // deploy kill is harmless.
+  // =========================================================================
+  const runRestaurantProspectSyncTick = async () => {
+    const prospects = require('./prospects/dbpr-restaurants');
+    // The kill switch returns before the lease: a run that did nothing must not read as a success in job_health.
+    if (prospects.syncDisabled()) return;
+    await runExclusive('restaurant-prospect-sync', async () => {
+      const result = await prospects.syncRestaurantProspects();
+      // A failed file or a database failure must read as a FAILED run in job_health: rethrow (a count only) so
+      // runExclusive records it.
+      if (result.failures > 0) throw new Error(`restaurant prospect sync: ${result.failures} failure(s)`);
+    }).catch((err) => logger.error(`Restaurant prospect sync failed: ${err.message}`));
+  };
+  cron.schedule('36 10 * * 1', () => runRestaurantProspectSyncTick(), { timezone: 'America/New_York' });
+  // The files hold one fiscal year and start over on July 1 (no CSV of the year before), so the last week of June
+  // runs daily: at most the last day of June goes unread. A Monday in that week runs once (one lease).
+  cron.schedule('36 10 24-30 6 *', () => runRestaurantProspectSyncTick(), { timezone: 'America/New_York' });
+  registerDeployKillRetry('restaurant-prospect-sync', () => runRestaurantProspectSyncTick());
+
+  // =========================================================================
   // DAILY 3:45AM — Inventory unit alias auto-fix (pure spelling/plural
   // renames from the unit-review queue only: "Gallons" -> gal at factor 1;
   // missing-unit and ambiguous-oz rows stay parked for review). Gate is
@@ -2163,6 +2307,23 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // HOURLY 7:30 AM-7:30 PM — route check, shadow (owner 2026-11-19, "do whatever you reccomend"). Recalculates the
+  // next staffed days from the live schedule and records the room in each route, in route_check_runs. It changes no
+  // visit, budget or message. Every hour, so a booking or a cancellation made during the day shows at the next hour.
+  cron.schedule('30 7-19 * * *', async () => {
+    try {
+      await runExclusive('route-check', async () => {
+        const result = await require('./day-replan/route-check').runRouteCheck();
+        logger.info(`[route-check] ${result.status} slots=${result.totals?.next?.slots ?? 'n/a'}`);
+        // A failed run or a failed read is recorded first; it still counts as a failed run in job health. A second
+        // instance's run of an hour already recorded writes nothing and reports that hour's recorded status.
+        if (result.status !== 'completed') throw new Error(`route check ${result.status} (recorded)`);
+      });
+    } catch (err) {
+      logger.error(`[route-check] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // DAILY 5:00AM — Auto-Dispatch CATCH-UP (owner 2026-10-26). A deploy that restarts the server during the 4:10 run
   // cuts it off: it moves nothing and nothing re-runs it (2026-09-03,
@@ -2258,13 +2419,10 @@ function initScheduledJobs() {
   // UPDATED ... FOR ALL COMUNNICATION LINES"). Moves a 'new' lead to
   // 'contacted' once a person reached it after its first contact: a delivered
   // staff text, a connected call, a staff email or a visit booked for its
-  // customer. Lead status and history only; sends nothing. Gate
-  // GATE_LEAD_STATUS_FOLLOWS_CONTACT (off / shadow / true) is read at call
-  // time and checked before the lock, so an off gate leaves no job_health row;
-  // kill = unset. runExclusive: an overlapping tick must not judge a stale read.
+  // customer. Lead status and history only; sends nothing.
+  // runExclusive: an overlapping tick must not judge a stale read.
   // =========================================================================
   cron.schedule('*/10 * * * *', async () => {
-    if (require('../config/feature-gates').leadStatusFollowsContactMode() === 'off') return;
     try {
       await runExclusive('lead-contact-sync', () =>
         require('./lead-contact-sync').runLeadContactSync());
@@ -2303,8 +2461,10 @@ function initScheduledJobs() {
   // =========================================================================
   // WEEKLY SITEONE DEALS BELL (gated: cronJobs)
   // Reads the last 7 days of contact@ mail (the emails table), keeps SiteOne and
-  // product-maker deal mail, rings ONE admin bell. Plain rules, no model call and
-  // no paid API. Monday 8:00am ET.
+  // product-maker deal mail, rings ONE admin bell. Plain rules; the one paid step is
+  // dark behind GATE_SITEONE_DEAL_AI_END_DATE (a Claude Haiku read of each deal's end
+  // date, at most 20 a week): this Monday run alone asks for it (aiEndDates), and the
+  // catch-up below keeps the date patterns. Monday 8:00am ET.
   // =========================================================================
   cron.schedule('0 8 * * 1', async () => {
     logger.info('Running: Weekly SiteOne deals digest');
@@ -2313,7 +2473,7 @@ function initScheduledJobs() {
       // dedupes on the ET week either way).
       await runExclusive('siteone-deals-digest', async () => {
         const { runSiteOneDealsDigest } = require('./procurement/siteone-deals-digest');
-        const result = await runSiteOneDealsDigest();
+        const result = await runSiteOneDealsDigest({ aiEndDates: true });
         logger.info(`[siteone-deals] cron run: ${JSON.stringify(result)}`);
       });
     } catch (err) {
@@ -2543,12 +2703,53 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // RECLAIMED WATER METERS — daily 3:47am ET (GATE_LAWN_RECLAIMED_HALF_N, owner 2026-10-23). Downloads Manatee County's public
+  // WEEKLY NEAR-STOPS CHECK — Monday 6:17am ET (owner 2026-11-19, "check" on the
+  // Next-Door and Nearby Stops page): one read-only owner notification with the
+  // next-door stops booked apart and the truck GPS minutes for short drives
+  // (parts 1 and 3 of the page). It runs after the 4:10 night run
+  // and the 4:40 day re-plan, so it reads their newest log. Minute 17 of hours 6
+  // and 11 is free in every schedule here.
+  // =========================================================================
+  // The tick body is shared with the 11:17 catch-up registered below it.
+  const runNearStopsWeeklyTick = async () => {
+    const tickStartedAt = Date.now();
+    try {
+      const lockRes = await runExclusive('near-stops-weekly', async () => {
+        const { runNearStopsWeeklyCheck } = require('./near-stops-weekly-check');
+        const result = await runNearStopsWeeklyCheck();
+        logger.info(`[near-stops-weekly] cron run: ${JSON.stringify({ outcome: result.outcome || null, skipped: result.skipped || null, pairs: result.pairs ?? null })}`);
+        if (result?.skipped === 'query_failed' || result?.error) {
+          throw new Error(`near-stops weekly check did not complete (${result.skipped || 'write_failed'})`);
+        }
+      });
+      if (lockRes?.skipped && lockRes.reason !== 'lease_held') {
+        await recordMissedTick('near-stops-weekly', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw new Error(`near-stops weekly check tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`Weekly near-stops check failed: ${err.message}`);
+    }
+  };
+  cron.schedule('17 6 * * 1', () => runNearStopsWeeklyTick(), { timezone: 'America/New_York' });
+
+  // Catch-up for the Monday 6:17 check: Monday and Tuesday at 11:17, only while this
+  // week's marker is missing. The check re-reads the marker under the lock.
+  cron.schedule('17 11 * * 1,2', async () => {
+    try {
+      if (!(await require('./near-stops-weekly-check').weekIsMissing())) return;
+      logger.warn('[near-stops-weekly] catch-up: this week\'s check has not run, running it now');
+      await runNearStopsWeeklyTick();
+    } catch (err) {
+      logger.error(`Weekly near-stops check catch-up failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // RECLAIMED WATER METERS — daily 3:47am ET (owner 2026-10-23). Downloads Manatee County's public
   // reclaimed-meter layer about weekly (the tick does it only when the stored copy is older than six days) and marks the properties
-  // at a meter, locally: no property data is sent to the county. Minute 47 is free in the 3am hour. Gate off = the tick does nothing.
+  // at a meter, locally: no property data is sent to the county. Minute 47 is free in the 3am hour.
   // =========================================================================
   cron.schedule('47 3 * * *', async () => {
-    if (!require('../config/feature-gates').lawnReclaimedHalfNLive()) return;
     const tickStartedAt = Date.now();
     try {
       const lockRes = await runExclusive('reclaimed-water-meters', async () => {
@@ -2650,6 +2851,64 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`[geocode-review-alert] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Job offers, the 7-day close (job-offers.js closeExpiredOffers; GATE_JOB_OFFERS): every 15 minutes a sent
+  // offer past its expiry is stored as expired and rings one bell for the owner. A catch-up pass: each tick
+  // closes all that is due, so a dropped tick loses nothing. It sends the applicant nothing. The gate is read
+  // before the lock, so off means no query and no job_health write.
+  cron.schedule('0 9,24,39,54 * * * *', async () => {
+    if (!isEnabled('jobOffers')) return;
+    try {
+      await runExclusive('job-offer-close', async () => {
+        const { closed, failed } = await require('./job-offers').closeExpiredOffers();
+        if (closed > 0) logger.info(`[job-offers] close sweep: closed=${closed}`);
+        if (failed > 0) throw new Error(`${failed} offer(s) did not close`);
+      });
+    } catch (err) {
+      logger.error(`[job-offers] close sweep failed: ${err.message}`);
+    }
+    // The staff record of a signed offer (job-offers.js makeDueStaffRecords): a signature makes it at once, and this
+    // pass makes one that is still missing (its own try failed, or a restart came between the two commits). Its own
+    // job, so a failed close does not stop it. It writes a prospective staff row and sends no one anything.
+    try {
+      await runExclusive('job-offer-staff-records', async () => {
+        const { made, refused, failed } = await require('./job-offers').makeDueStaffRecords();
+        if (made + refused > 0) logger.info(`[job-offers] staff record pass: made=${made} refused=${refused}`);
+        if (failed > 0) throw new Error(`${failed} staff record(s) not made`);
+      });
+    } catch (err) {
+      logger.error(`[job-offers] staff record pass failed: ${err.message}`);
+    }
+    // The bell of the first-days checklist (job-offers.js ringDueChecklists): each run keeps the one bell row of a
+    // hire true to the checklist. It rings from 7:00 AM Eastern only. Its own job. It sends no one anything.
+    try {
+      await runExclusive('job-offer-checklist', async () => {
+        const { rung, closed, failed } = await require('./job-offers').ringDueChecklists();
+        if (rung + closed > 0) logger.info(`[job-offers] checklist pass: rung=${rung} closed=${closed}`);
+        if (failed > 0) throw new Error(`${failed} checklist bell(s) failed`);
+      });
+    } catch (err) {
+      logger.error(`[job-offers] checklist pass failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Job offers, the 2-day reminder (job-offers.js sendDueReminders; GATE_JOB_OFFER_REMINDER, and GATE_JOB_OFFERS): every
+  // 15 minutes from 9 AM to 6 PM Eastern, each open offer sent two days ago or more gets its one reminder (an email,
+  // and a text when the applicant agreed to texts). It is the only message of the offer flow that no person presses. A
+  // catch-up pass: each tick takes all that is due, so a dropped tick loses nothing. Both gates are read before the
+  // lock, so off means no query and no job_health write.
+  cron.schedule('0 4,19,34,49 9-17 * * *', async () => {
+    if (!isEnabled('jobOffers') || !isEnabled('jobOfferReminder')) return;
+    try {
+      await runExclusive('job-offer-reminder', async () => {
+        const { reminded, notSent, failed } = await require('./job-offers').sendDueReminders();
+        if (reminded > 0 || notSent > 0) logger.info(`[job-offers] reminder pass: reminded=${reminded} not_sent=${notSent}`);
+        if (failed > 0) throw new Error(`${failed} reminder(s) failed`);
+      });
+    } catch (err) {
+      logger.error(`[job-offers] reminder pass failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -3083,6 +3342,27 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Record-only check for the after-call estimate text: for each call whose caller said yes to an
+  // estimate Waves had sent, writes whether that text WOULD go (call_log.metadata.call_estimate_link_shadow).
+  // Sends nothing, no gate. Same 5-minute cadence as the booking-link text above. Loaded inside the tick:
+  // unlike call-booking-link-text it keeps no boot-time anchor, so nothing needs it at process start.
+  cron.schedule('0 */5 * * * *', async () => {
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const result = await runExclusive('call-estimate-link-shadow', () => require('./call-estimate-link-shadow').sweep());
+      if (result?.skipped && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`Estimate-link check tick skipped: ${result.reason || 'no_connection'}`);
+        await recordJobStart('call-estimate-link-shadow').catch(() => {});
+        await recordJobEnd('call-estimate-link-shadow', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[call-estimate-link-shadow] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // While the follow-up pager is live, the overdue watchdog takes each
   // promise over once it ages off the pager's 24-hour list. With callback
   // cards on it already runs every 5 minutes; with cards off its cadence is
@@ -3278,6 +3558,23 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Weekly newsletter sunset failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // NEWSLETTER GMAIL CHECK (owner 2026-11-22; no gate: reads only, emails no one)
+  // Every hour at :23. For each issue that went out 50 to 72 hours ago, it
+  // compares how many delivered copies Gmail readers opened with all other
+  // readers, and raises one admin alert per issue when Gmail is far behind
+  // (Gmail sends no spam reports, so no other check sees a Gmail spam
+  // placement). The rule lives in newsletter-gmail-check.js.
+  // =========================================================================
+  cron.schedule('23 * * * *', async () => {
+    try {
+      // runExclusive: a deploy overlap must not judge the same issue twice at once.
+      await runExclusive('newsletter-gmail-check', () => require('./newsletter-gmail-check').runNewsletterGmailCheck());
+    } catch (err) {
+      logger.error(`[newsletter-gmail-check] tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -4446,7 +4743,7 @@ function initScheduledJobs() {
   // =========================================================================
   // WEEKLY SUN 4:55AM ET — Correction-loop fix proposals for email labels
   // (owner 2026-11-04, email learning loop), same rules as calls. No model
-  // call. Gate read inside the job (GATE_EMAIL_RECLASSIFY_PICK).
+  // call.
   // =========================================================================
   cron.schedule('55 4 * * 0', async () => {
     try {
@@ -4558,6 +4855,14 @@ function initScheduledJobs() {
       await NewsletterSender.processScheduledSends();
     } catch (err) {
       logger.error(`Newsletter scheduler tick failed: ${err.message}`);
+    }
+    // Then a planned Waves Pest Insider issue that did not go out as its FYI copy said gets its
+    // one admin alert (settlePlannedIssues), retried each minute until it reaches the owner. One
+    // settler at a time: an issue's failure alert and a later tick's recovery of it never overlap.
+    try {
+      await runExclusive('pest-insider-settle', () => require('./newsletter-sender').settlePlannedIssues());
+    } catch (err) {
+      logger.error(`Pest Insider settle tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -5178,12 +5483,10 @@ function initScheduledJobs() {
   // =========================================================================
   // EVERY 10 MIN (offset 6) — Admin alert quiet fall-off (owner 2026-11-04: "IF THE ALERT IS OVER 3 DAYS
   // OLD,, IT SHOULD FALL OFF"). Marks done, never deletes, an open admin bell row with no new activity for
-  // 72 hours (the quiet policy of admin-alert-retention.js). GATE_ALERT_QUIET_FALL_OFF: unset = no query, `shadow` = count and
-  // log, write nothing, `true` = close. runExclusive: a deploy overlap must not run two passes over the same page.
+  // 72 hours (the quiet policy of admin-alert-retention.js). runExclusive: a deploy overlap must not run two passes over the same page.
   // =========================================================================
   cron.schedule('6,16,26,36,46,56 * * * *', async () => {
     try {
-      if (require('../config/feature-gates').alertQuietFallOffMode() === 'off') return;
       await runExclusive('admin-alert-quiet-fall-off', () => require('./admin-alert-retention').runAdminAlertQuietPolicy());
     } catch (err) {
       logger.error(`[alert-quiet-fall-off] tick failed: ${err.message}`);
@@ -5658,30 +5961,46 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 15 MIN, 8AM-8PM — Caller callback late bell (GATE_CALLER_CALLBACK_BELL;
-  // returns before any read when off). Owner 2026-11-04 (option A): a new-lead
+  // EVERY 15 MIN, 8AM-8PM — Caller callback late bell. Owner 2026-11-04 (option A): a new-lead
   // caller who said they would call us back gets ONE Leads bell when that
   // callback is late: at the time they named, else 2 business hours after the
   // call. Each run closes the bells whose caller called or texted, whom a
-  // person reached, who got a visit, or whose lead closed. With
-  // GATE_CALLER_CALLBACK_PROMISE_CLOSE on it also closes the caller's own
-  // promise when they called, texted or a person followed up. Nothing goes to
-  // the caller.
+  // person reached, who got a visit, or whose lead closed. It also closes the
+  // caller's own promise when they called, texted or a person followed up.
+  // Nothing goes to the caller.
   // Minutes 5, 20, 35 and 50 as a LIST: node-cron 3 reads a stepped range such
   // as '5-59/15' as the range values divisible by the step (15, 30, 45), which
   // dropped one run an hour and moved the rest onto the pager's minutes.
   // =========================================================================
   cron.schedule('0 5,20,35,50 8-20 * * *', async () => {
-    if (!require('../config/feature-gates').callerCallbackBellLive()) return;
     try {
       await runExclusive('caller-callback-bell', async () => {
         const result = await require('./caller-callback-bell').runCallerCallbackBell();
-        // The promises part prints only when a promise was closed (GATE_CALLER_CALLBACK_PROMISE_CLOSE), so a gate-off line is unchanged.
+        // The promises part prints only when a promise was closed.
         const promises = result.promisesClosed ? `, ${result.promisesClosed} promises closed` : '';
         logger.info(`Caller callback bell: ${result.raised ?? 0} raised, ${result.closed ?? 0} closed${promises} (${result.outcome || result.skipped})`);
       });
     } catch (err) {
       logger.error(`Caller callback bell failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 15 MIN, 7AM-8PM — Call booking check (owner 2026-11-22, "fix"). One
+  // Schedule bell for each open visit the call agent booked whose service is a
+  // plan while the call named a one-time service. The bell closes itself when
+  // the visit is corrected, done or cancelled. Read-only; nothing goes to a
+  // customer. Minutes 13, 28, 43 and 58 as a list: node-cron 3 reads a stepped
+  // range as the range values divisible by the step.
+  // =========================================================================
+  cron.schedule('0 13,28,43,58 7-20 * * *', async () => {
+    try {
+      await runExclusive('call-booking-check', async () => {
+        const result = await require('./call-booking-check').runCallBookingCheck();
+        logger.info(`Call booking check: ${result.raised ?? 0} raised, ${result.closed ?? 0} closed (${result.outcome || result.skipped})`);
+      });
+    } catch (err) {
+      logger.error(`Call booking check failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -5704,6 +6023,25 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // HOURLY :50, 9 AM to 7 PM ET — Paid-at-the-visit receipt check (owner 2026-11-18). One
+  // Billing bell per invoice paid at its visit that still has no receipt after 2
+  // hours (a tender sheet recorded the payment and no receipt went out); it closes
+  // itself once the receipt goes out. Read-only: sends nothing to a customer,
+  // writes only admin notification rows. No GATE_* (owner rule 2026-11-05).
+  // The plain hour range is deliberate: node-cron 3 reads a stepped range oddly.
+  // =========================================================================
+  cron.schedule('0 50 9-19 * * *', async () => {
+    try {
+      await runExclusive('paid-visit-receipt-check', async () => {
+        const result = await require('./paid-visit-receipt-check').runPaidVisitReceiptCheck();
+        logger.info(`Paid-visit receipt check: ${result.raised} raised, ${result.closed} closed`);
+      });
+    } catch (err) {
+      logger.error(`Paid-visit receipt check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // MONDAYS 9:20AM — Monday review bell. Owner 2026-11-02 ("build all", B2): one needs-you bell a
   // week for the work that sits: needs-you alerts unread 14+ days, overdue
   // promises, completed visits with only a draft invoice, open past visits. The
@@ -5722,6 +6060,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEDNESDAYS 7:00AM + 1:00PM — Waves Pest Insider planner. Issues go out on the 1st and 3rd
+  // Thursday of the month; the day before, this plans and builds the issue with the real builder
+  // and records it in pest_insider_issues. Any other Wednesday it does nothing.
+  // GATE_PEST_INSIDER_AUTO_SEND off (default): the row only (shadow, or skipped with the reason);
+  // nothing is sent. On: the issue becomes a draft for its readers, and the proof step emails the
+  // owner an FYI copy and queues it for Thursday 7:00 AM ET. The 1:00 PM run is the catch-up for a
+  // missed, failed or refused 7:00 AM tick, and the last one (finalTick): an issue that still
+  // cannot go out then raises one admin notification, unless the proof step already raised one.
+  // =========================================================================
+  for (const [expression, finalTick] of [['0 7 * * 3', false], ['0 13 * * 3', true]]) {
+    cron.schedule(expression, async () => {
+      try {
+        await runExclusive('pest-insider-issue-planner', () => require('./pest-insider/schedule').runIssuePlanner({ finalTick }));
+      } catch (err) {
+        logger.error(`Pest Insider planner failed: ${err.message}`);
+      }
+    }, { timezone: 'America/New_York' });
+  }
+
+  // =========================================================================
   // DAILY 8AM — Morning banner. Owner
   // 2026-11-03 ("ok add", choice C): ONE phone banner says how many items wait for the owner and
   // opens his alert list. Push only, admin phones only, nothing when zero wait. runExclusive stops
@@ -5735,6 +6093,29 @@ function initScheduledJobs() {
       await runExclusive('morning-banner', () => require('./morning-banner').runMorningBanner());
     } catch (err) {
       logger.error(`Morning banner failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 9AM — "Call today" estimate banner. Owner 2026-11-19 (plan page "Lead to Customer
+  // Plan", phase 1): ONE phone banner says how many estimates are on the Estimates page's own Call
+  // today list, and opens it. Push only, admin phones only, nothing when the list
+  // is empty. runExclusive stops two instances running together; the send takes a per-ET-day
+  // sms_send_claims row, so a deploy overlap or a restart cannot send a second banner. Sends
+  // nothing to a customer.
+  // =========================================================================
+  cron.schedule('0 9 * * *', async () => {
+    try {
+      // runEstimateCallTodayPush logs its own one line with the count and never throws; it reports a failed count, claim
+      // or delivery in an `error` field (a fixed code). Throw that inside the callback so job health records the run
+      // as failed. A skip (nothing on the list, already sent, no device) stays a success.
+      await runExclusive('estimate-call-today-push', async () => {
+        const result = await require('./estimate-call-today-push').runEstimateCallTodayPush();
+        if (result?.error) throw new Error(`estimate call-today push: ${result.error}`);
+        return result;
+      });
+    } catch (err) {
+      logger.error(`Estimate call-today push failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -5758,15 +6139,13 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 7:37AM — Emailed invoices not linked to Spark (GATE_INVOICE_NOT_ON_SPARK;
-  // returns before any read when off). Owner 2026-11-05: one standing Tax bell
+  // DAILY 7:37AM — Emailed invoices not linked to Spark. Owner 2026-11-05: one standing Tax bell
   // lists, by vendor, the emailed vendor invoices dated 3 to 14 days ago whose
   // paying bank or card line is on an account outside INVOICE_OK_ACCOUNT_LABELS,
   // or was not found. Rings only when a vendor joins and closes itself when the
   // list is empty. Reads expenses and bank lines; sends nothing to a customer.
   // =========================================================================
   cron.schedule('37 7 * * *', async () => {
-    if (!require('../config/feature-gates').invoiceNotOnSparkLive()) return;
     try {
       await runExclusive('invoice-not-on-spark', async () => {
         const result = await require('./invoice-not-on-spark').runInvoiceNotOnSpark();
@@ -5778,15 +6157,13 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 7:43AM — Cash forecast low week (GATE_CASH_FORECAST; returns before any
-  // read when off). Owner 2026-11-04 D4 A: one standing owner-only bell when a week
+  // DAILY 7:43AM — Cash forecast low week. Owner 2026-11-04 D4 A: one standing owner-only bell when a week
   // of the next 13 ends below the owner's floor on the expected line. Rings only when
   // a low week first appears and closes itself when no week is below the floor.
   // Reads the forecast (Plaid's free /accounts/get, Stripe's balance, the portal's
   // own data); sends nothing to a customer.
   // =========================================================================
   cron.schedule('43 7 * * *', async () => {
-    if (!require('../config/feature-gates').cashForecastLive()) return;
     try {
       await runExclusive('cash-forecast-low-week', async () => {
         const result = await require('./cash-forecast/low-week-bell').runCashForecastLowWeek();
@@ -6002,6 +6379,8 @@ function initScheduledJobs() {
           // a reply. Each deferral entry point registers its own recheck;
           // a read failure is retryable-ineligible (fail closed on both
           // sides of the attempt cap — never send unverified state).
+          // The deferred recheck's answer, kept for the real text this replay sends (replayBodyFor).
+          let deferredRecheck = null;
           {
             const { recheckDeferredReplay, runTerminalHookDurably, requiresTerminalHook } = require('./messaging/deferred-replay-registry');
             // Same enrichment the finalize call gets below: several
@@ -6019,6 +6398,7 @@ function initScheduledJobs() {
               to_phone: claimMeta.to_phone || msg.to_phone || null,
             };
             const recheck = await recheckDeferredReplay(claimMeta.entry_point, recheckMeta);
+            deferredRecheck = recheck;
             if (recheck && recheck.eligible === false) {
               // A recheck that names its own retry time (a customer quiet
               // window with a known end) reschedules straight to it and
@@ -6629,6 +7009,14 @@ function initScheduledJobs() {
           // The review spacing guard may durably strip a bundled ask before
           // invoking this callback. Build both replay arguments at that point
           // so the provider receives the rewritten completion body/linkage.
+          // A held job-offer text is stored without its link token: the text it really sends is rebuilt with the token the
+          // recheck above just read from the offer row (in memory only, never written back). Every other entry point
+          // sends its stored body unchanged. A text that should carry a link and has none is never sent.
+          {
+            const replayBody = require('./messaging/deferred-replay-registry').replayBodyFor(claimMeta.entry_point, deferredRecheck, msg.message_body);
+            if (replayBody === null) throw new Error('held job-offer text has no live offer link to send');
+            if (replayBody !== msg.message_body) msg.replay_body = replayBody;
+          }
           const sendReplay = () => {
           const replayDispatchMeta = {
             ...claimMeta,
@@ -6641,7 +7029,8 @@ function initScheduledJobs() {
             to_phone: msg.to_phone || null };
           const replayInput = {
             to: toPhone,
-            body: msg.message_body,
+            // msg.replay_body: set above for a held job-offer text (its real link); every other row sends its stored body.
+            body: msg.replay_body ?? msg.message_body,
             channel: 'sms',
             audience: claimMeta.audience === 'applicant' ? 'applicant' : (msg.customer_id ? 'customer' : 'lead'),
             purpose,
@@ -6814,7 +7203,7 @@ function initScheduledJobs() {
             .dispatchDeferredReplay(claimMeta.entry_point, replayDispatchMeta, () => sendCustomerMessage(replayInput));
           };
           const smsResult = await dispatchScheduledSms(msg, claimMeta, sendReplay,
-          purpose, SCHEDULED_SMS_MAX_ATTEMPTS);
+          purpose, SCHEDULED_SMS_MAX_ATTEMPTS, toPhone);
           if (smsResult.scheduledHold) continue;
           const completedAt = new Date();
           const lawnPipelineRetryAt = claimMeta.entry_point === 'lawn_assessment_notification_deferred'
@@ -6970,23 +7359,19 @@ function initScheduledJobs() {
               `, [completedAt]),
             });
             logger.info(`[scheduled-sms] ${msg.id} waiting on a street-level address hold — rescheduled for ${holdRetryAt.toISOString()} (attempt refunded)`);
-          } else if (smsResult.code === 'BILLING_TEXT_LEG_IN_FLIGHT' && smsResult.nextAllowedAt) {
-            // Another attempt holds this notice's billing Text claim
-            // (messaging/billing-text-leg-dedupe.js), so no provider send
-            // was tried. Refund the attempt like QUIET_HOURS_HOLD above:
-            // spent on the bounded ladder, a claim live across three ticks
-            // would terminally block this replay, and the notice would be
-            // lost if that other attempt then ends not_sent. Still bounded:
-            // past CLAIM_STALE_MS the claim answers with the non-retryable
-            // BILLING_TEXT_LEG_CLAIM_STALE instead of this hold.
-            const inFlightRetryAt = new Date(smsResult.nextAllowedAt);
+          } else if (TIMED_WAIT_HOLDS[smsResult.code] && smsResult.nextAllowedAt) {
+            // A timed wait the replay's own check named (TIMED_WAIT_HOLDS):
+            // no provider send was tried, so refund the attempt like
+            // QUIET_HOURS_HOLD above and wait until nextAllowedAt.
+            const { at: holdKey, why } = TIMED_WAIT_HOLDS[smsResult.code];
+            const waitRetryAt = new Date(smsResult.nextAllowedAt);
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
               status: 'scheduled',
-              scheduled_for: inFlightRetryAt,
+              scheduled_for: waitRetryAt,
               updated_at: completedAt,
               metadata: db.raw(`
                 COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
-                  'billing_text_in_flight_hold_at', ?::timestamptz,
+                  ?::text, ?::timestamptz,
                   'scheduled_sms_attempts',
                   GREATEST(
                     CASE
@@ -6997,9 +7382,9 @@ function initScheduledJobs() {
                     0
                   )
                 )
-              `, [completedAt]),
+              `, [holdKey, completedAt]),
             });
-            logger.info(`[scheduled-sms] ${msg.id} waiting on an in-flight billing text for the same notice — rescheduled for ${inFlightRetryAt.toISOString()} (attempt refunded)`);
+            logger.info(`[scheduled-sms] ${msg.id} ${why} — rescheduled for ${waitRetryAt.toISOString()} (attempt refunded)`);
           } else if ((smsResult.retryable || smsResult.code === 'CONSENT_LOOKUP_FAILED' || smsResult.code === 'MOVE_HOLD')
                      && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
             // MOVE_HOLD: the replay now names its visit (appointmentId, app
@@ -7071,9 +7456,10 @@ function initScheduledJobs() {
                   metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', ?::boolean)", [requiresTerminalHook(claimMeta.entry_point)]),
                 });
                 // A stale linked visit (the shared send step's LINKED_VISIT_ENDED) ends the row with its reason on it.
-                // So does the pre-send customer-link check (scheduled-sms-delivery.js scheduledLinkRefusal): its reason is the
-                // check's own refusal code, and that function has already raised the office alert.
-                if (['LINKED_VISIT_ENDED', 'CUSTOMER_LINK_REFUSED'].includes(smsResult.code)) {
+                // So do the pre-send customer-link check and the website-line check (scheduled-sms-delivery.js
+                // scheduledLinkRefusal, scheduledWebsiteLineRefusal): the reason is the check's own refusal code, and
+                // that function has already raised the office alert.
+                if (['LINKED_VISIT_ENDED', 'CUSTOMER_LINK_REFUSED', 'WEBSITE_LINE_REFUSED'].includes(smsResult.code)) {
                   await db('sms_log').where({ id: msg.id, status: 'blocked' }).update({
                     metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_code', ?::text, 'blocked_reason', ?::text)", [smsResult.code, String(smsResult.reason || '')]),
                   });
@@ -7468,13 +7854,10 @@ function initScheduledJobs() {
       (isEnabled('promiseChaserBell') && isEnabled('callCommitments'))
         ? runExclusive('promise-chaser-bell', () => require('./promise-chaser-bell').sweepPromiseChasers())
         : Promise.resolve(0),
-      // GATE_MISSED_CALL_REPUSH: one more admin push for a missed-call bell
-      // still unread 30 minutes on, in office hours. Gate-checked here so
-      // dark means no module load; the sweep stamps repushed_at atomically,
-      // so overlapping instances cannot send twice.
-      isEnabled('missedCallRepush')
-        ? Promise.resolve().then(() => require('./missed-call-repush').sweepMissedCallRepush())
-        : Promise.resolve(0),
+      // One more admin push for a missed-call bell still unread 30 minutes on,
+      // in office hours. The sweep stamps repushed_at atomically, so
+      // overlapping instances cannot send twice.
+      Promise.resolve().then(() => require('./missed-call-repush').sweepMissedCallRepush()),
     ]);
     results.forEach((result, index) => {
       if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'missed-call-retire', 'repeat-caller', 'missed-call-text-back', 'promise-chaser', 'missed-call-repush'][index]} sweep failed: ${result.reason.message}`);
@@ -7571,11 +7954,12 @@ function initScheduledJobs() {
         if (quarantineIssues > 0) parts.push(`${quarantineIssues} quarantine failure${quarantineIssues > 1 ? 's' : ''} (spam still in inbox)`);
         const unsubscribed = emails.filter(e => e.auto_action && e.auto_action.startsWith('newsletter_unsubscribed')).length;
         if (unsubscribed > 0) parts.push(`${unsubscribed} unsubscribed`);
-        // Real Gmail draft ids only — 'pending' claims and reconciliation
-        // sentinels (reconciled_replied / reconciled_existing_draft) are not
-        // drafts this agent created.
+        // Real Gmail draft ids only — 'pending' claims, reconciliation
+        // sentinels (reconciled_replied / reconciled_existing_draft) and a
+        // draft refused for a blank (refused_blank) are not drafts this agent
+        // created.
         const drafted = emails.filter(e => e.draft_gmail_id
-          && !['pending', 'reconciled_existing_draft', 'reconciled_replied'].includes(e.draft_gmail_id)).length;
+          && !['pending', 'reconciled_existing_draft', 'reconciled_replied', 'refused_blank'].includes(e.draft_gmail_id)).length;
         if (drafted > 0) parts.push(`${drafted} repl${drafted > 1 ? 'ies' : 'y'} drafted`);
 
         // Follow-up nudges: inbound conversation mail nobody has answered.
@@ -7684,6 +8068,8 @@ function initScheduledJobs() {
       await require('./estimate-stuck-alert').closeSettledStuckAlerts();
       // And the no-time-soon bells (estimate-no-time-soon-check.js; no picker run, never throws).
       await require('./estimate-no-time-soon-check').closeSettledNoTimeSoonAlerts();
+      // And the first-visit request bells (GATE_ESTIMATE_APPROVE_PREFERRED_TIME) once their estimate is accepted, declined, expired or archived (never throws).
+      await require('./estimate-first-visit-request').closeSettledRequestBells();
     } catch (err) {
       logger.error(`[est-engage] cron failed: ${err.message}`);
     }
@@ -7873,6 +8259,32 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Text name spelling check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 11:51PM — Tab reload check (read-only). Posts one engineering FIX
+  // row to the ops digest when a staff page view it has not read yet ran an
+  // out-of-date portal build that should have reloaded (the usage beacon logs
+  // the tab's build and what kept it there), and retires it on the first
+  // clean night. Late evening, after the day's staff use. No other fixed or
+  // hourly job runs at this minute (#3208 rule). See
+  // server/services/tab-reload-check.js.
+  // =========================================================================
+  cron.schedule('51 23 * * *', async () => {
+    try {
+      await runExclusive('tab-reload-check', async () => {
+        const { runTabReloadCheck } = require('./tab-reload-check');
+        const result = await runTabReloadCheck();
+        logger.info(`[tab-reload-check] cron run: ${JSON.stringify({ views: result.views })}`);
+        // A finding that could not be delivered must read as a FAILED run in
+        // job_health: rethrow so runExclusive records it.
+        if (result.delivery && result.delivery.ok === false) {
+          throw new Error(`tab-reload-check: the finding was not delivered (${result.delivery.error || 'send failed'})`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Tab reload check failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -8147,6 +8559,31 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Ad budget adjustment failed: ${err.message}`);
     }
+    // Ads follow the route, step 1 (record only, $0): writes down each technician's areas, room and ZIP list.
+    // Its own try, so a failed budget run still records and a failed record never touches the budget run. It
+    // changes no budget, campaign, visit or message and makes no Google Ads call. See ads/route-areas.js.
+    try {
+      await runExclusive('ads-route-areas', () => require('./ads/route-areas').recordRouteAreas());
+    } catch (err) {
+      logger.error(`Ad route-areas record failed: ${err.message}`);
+    }
+    // Ads follow the route, step 2 (record only, $0): for each campaign marked with a route line, what the route rule
+    // would do (base or stop, and the change to its location list). Its own try and its own job_health row, after
+    // the budget run, so it can never delay or fail a budget change. It reads Google Ads and changes nothing. With
+    // no marked campaign it is one read of ad_campaigns. See ads/route-fill.js.
+    try {
+      await runExclusive('ads-route-fill', () => require('./ads/route-fill').recordRouteFill());
+    } catch (err) {
+      logger.error(`Ad route-fill record failed: ${err.message}`);
+    }
+    // Rain-day ads (record only, $0; owner 2026-11-23): what the rain rule would set for each campaign on the day the
+    // ads sell (decided from 2 PM the day before), and the next days' score against measured radar rain. Its own try
+    // and job_health row; NWS only, no Google call, no budget change. See ads/rain-mode.js.
+    try {
+      await runExclusive('ads-rain-mode', () => require('./ads/rain-mode').recordRainMode());
+    } catch (err) {
+      logger.error(`Ad rain-mode record failed: ${err.message}`);
+    }
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
@@ -8239,16 +8676,22 @@ function initScheduledJobs() {
     logger.info('Running: weekly CSR recommendation');
     try {
       const CSRCoach = require('./csr/csr-coach');
-      const rec = await CSRCoach.generateWeeklyTeamRecommendation();
+      // One period for the whole tip: the seven completed ET days before today (completedWeekDates), so one Friday's
+      // tip starts where the last one ended. The scored-call recommendation and the call-outcomes line both read it.
+      const { loadWeeklyCallOutcomes, formatWeeklyCallOutcomes, completedWeekDates } = require('./csr/weekly-call-outcomes');
+      const now = new Date();
+      const rec = await CSRCoach.generateWeeklyTeamRecommendation({ between: completedWeekDates(now) });
       // Was an internal text to the owner's phone, silenced since 2026-09
       // (services/owner-alerts.js). One row per week.
       if (rec.recommendation) {
         const { recordOwnerAlert, whyFromFreeText } = require('./owner-alerts');
+        // The week's new-customer call outcomes lead the tip; a failed read drops the line, never the tip.
+        const outcomesLine = await loadWeeklyCallOutcomes({ now, completedDays: true }).then(formatWeeklyCallOutcomes).catch(() => '');
         await recordOwnerAlert('csr-weekly-tip', {
           action: 'read the weekly call coaching tip',
           why: whyFromFreeText(rec.recommendation),
           subject: { type: 'check', id: 'csr-weekly-tip' },
-          text: `Weekly CSR Tip:\n\n${rec.recommendation}\n\n${rec.dataPoint || ''}\n${rec.estimatedImpact || ''}`,
+          text: `Weekly CSR Tip:\n\n${outcomesLine ? `${outcomesLine}\n\n` : ''}${rec.recommendation}\n\n${rec.dataPoint || ''}\n${rec.estimatedImpact || ''}`,
           link: '/admin/communications',
           dedupeKey: `owner-alert:csr-weekly-tip:${etDateString()}`,
         });
@@ -8299,6 +8742,52 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Google Ads sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 6:10AM — Google Local Services Ads sync (account row, cost, leads)
+  // Local Services runs in its own Google Ads account. The sync mirrors it into
+  // one ad_campaigns row and its ad_performance_daily days (platform='google_lsa'), so the Ads page
+  // shows its cost and its charged leads. Read-only; it runs before the 6:25
+  // cost allocation. runExclusive records job_health ('google-lsa-sync'). A
+  // failed step throws with Google's reason, so the job reads failed.
+  // =========================================================================
+  cron.schedule('10 6 * * *', async () => {
+    try {
+      const googleLsa = require('./ads/google-lsa');
+      if (!googleLsa.isConfigured()) return;
+      await runExclusive('google-lsa-sync', async () => {
+        logger.info('Running: Google Local Services daily sync');
+        await googleLsa.runDailySync();
+        logger.info('Google Local Services daily sync complete');
+      });
+    } catch (err) {
+      logger.error(`Google Local Services sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // HOURLY :12 — Google Local Services lead match, step A (owner 2026-11-23)
+  // Google forbids a tracking number on the Local Services profile, so those
+  // calls ring the Bradenton office line and the portal files them as website
+  // calls. This job stores each Google lead of the last 30 days in lsa_leads and
+  // matches it to the call_log row, lead and customer. It only reads Google and
+  // writes lsa_leads: no existing attribution changes, no message goes out.
+  // runExclusive records job_health ('google-lsa-leads'); a failed read throws
+  // with Google's reason, so the job reads failed.
+  // =========================================================================
+  cron.schedule('12 * * * *', async () => {
+    try {
+      const googleLsa = require('./ads/google-lsa');
+      if (!googleLsa.isConfigured()) return;
+      await runExclusive('google-lsa-leads', async () => {
+        await require('./ads/google-lsa-leads').runLeadSync();
+      });
+    } catch (err) {
+      // err.message is safe here: runLeadSync throws only Google's reason or a
+      // database step, code and constraint (never a row's phone or name).
+      logger.error(`Google Local Services lead match failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -8694,6 +9183,34 @@ function initScheduledJobs() {
       } catch { /* notify best-effort */ }
     }
   }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 2 HOURS at :53 ET — Tell Google about hub changes (owner 2026-11-23,
+  // "build"; services/seo/google-index-ping.js). Resubmits the hub sitemap when
+  // the live sitemap changed, and pings the Indexing API for /careers/ job pages
+  // only (JobPosting JSON-LD; Google allows nothing else). Free write to our own
+  // Search Console: no gate, no customer message. Idempotent: state moves only
+  // after Google accepts a call, so a dropped tick or a deploy kill is caught up
+  // by the next run. Minute 53 at even hours has no other job.
+  // =========================================================================
+  const runGoogleIndexPingTick = async () => {
+    const tickStartedAt = Date.now();
+    try {
+      const lockRes = await runExclusive('google-index-ping', async () => {
+        const out = await require('./seo/google-index-ping').runGoogleIndexPing();
+        // Throw so job_health records the failed run; the catch below still logs and never crashes.
+        if (out?.errors > 0) throw new Error(`google index ping finished with ${out.errors} error(s)`);
+      });
+      if (lockRes?.skipped && lockRes.reason !== 'lease_held') {
+        await recordMissedTick('google-index-ping', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw new Error(`tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[google-index-ping] tick failed: ${err.message}`);
+    }
+  };
+  cron.schedule('53 */2 * * *', runGoogleIndexPingTick, { timezone: 'America/New_York' });
+  registerDeployKillRetry('google-index-ping', runGoogleIndexPingTick);
 
   // =========================================================================
   // DAILY 6AM ET — Converted-estimate archive sweep, THEN estimate expiration
@@ -9197,6 +9714,20 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Review sequence processing failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // DAILY 10:36 AM ET — yearly review ask (GATE_REVIEW_YEARLY_ASK, owner 2026-11-20, Tech Rewards
+  // plan D6-R1). Runs every day, gate on or off: off only counts and logs the volume and writes
+  // nothing; on enrolls one ask per customer near their service anniversary through the normal
+  // review cadence (every guard applies there). A re-run the same day finds the yearly
+  // sequence and picks nobody.
+  cron.schedule('36 10 * * *', async () => {
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      await runExclusive('review-yearly-ask', () => require('./review-yearly-ask').runYearlyReviewAsk());
+    } catch (err) {
+      logger.error(`[review-yearly-ask] daily run failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -9994,6 +10525,29 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 10:13AM — One-time job to plan offer, shadow step (owner 2026-11-19
+  // "build"): prices the Quarterly Pest Control Service plan for each
+  // one-time pest or cockroach job whose service was done 3 to 14 days ago,
+  // for a customer the offer is for, and emails one sample of the offer and of its
+  // reminder to the office inbox. No customer message and no estimate. A
+  // missed morning costs nothing: the next one reads the same jobs. Gate read
+  // per tick (GATE_ONETIME_PLAN_OFFER=shadow; =live makes the customer's
+  // estimate and sends the customer the offer, owner 2026-11-20).
+  // =========================================================================
+  // 10:13: off the busy five-minute marks of the hour.
+  cron.schedule('13 10 * * *', async () => {
+    if (!['shadow', 'live'].includes(require('../config/feature-gates').onetimePlanOfferMode?.())) return;
+    try {
+      await runExclusive('onetime-plan-offer', async () => {
+        const result = await require('./onetime-plan-offer').runOnetimePlanOfferJob();
+        logger.info(`[onetime-plan-offer] ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`[onetime-plan-offer] run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 11AM — Owner heads-up for an imminent visit with a balance 30+ days
   // overdue. The customer-facing reminders (pre-visit tiers, account late
   // check) are retired: the 10:05 pre-visit balance reminder and the invoice
@@ -10321,15 +10875,37 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 10 MIN — a call that BOOKED a pest visit while the customer had an open estimate (GATE_CALL_PHONE_YES_ACCEPT,
+  // checked each tick): files ONE admin card so the office accepts the estimate, closes the cards that stopped being
+  // true, and rings the office's bell and phones for the open ones (call-phone-yes-bell.js). It accepts nothing and sends
+  // a customer nothing. See server/services/call-phone-yes-accept.js.
+  cron.schedule('9,19,29,39,49,59 * * * *', async () => {
+    if (!require('../config/feature-gates').callPhoneYesAcceptLive()) return;
+    try {
+      await runExclusive('call-phone-yes', async () => {
+        const result = await require('./call-phone-yes-accept').runCallPhoneYesSweep();
+        if (result.filed > 0 || result.closed > 0) {
+          logger.info(`[call-phone-yes] scanned=${result.scanned} filed=${result.filed} closed=${result.closed}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`[call-phone-yes] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
-  // Call booking-miss watchdog — every 30 min (offset from the ingest
-  // watchdog), ring an admin bell for any call whose V2 extraction confirmed
-  // a concrete appointment slot that never became a scheduled_services row
+  // Call booking-miss watchdog — every 10 min (owner 2026-11-18: a visit the
+  // call agent held rings about 15 minutes after the call, not 1.5-2 hours
+  // later). Its minutes stay 4 min off the ingest watchdog's :07/:37 and off
+  // the nightly checks' own minutes (23:20-23:32, the #3208 rule in
+  // failing-jobs-check.test.js). It rings an admin bell for any call whose V2
+  // extraction confirmed a concrete appointment slot that never became a
+  // scheduled_services row
   // (outbound skip / v2 routing block / missing fields all park silently in
   // triage otherwise). Dark behind GATE_CALL_BOOKING_MISS_WATCHDOG.
   // See server/services/call-booking-miss-watchdog.js.
   // =========================================================================
-  cron.schedule('22,52 * * * *', async () => {
+  cron.schedule('3,13,23,33,43,53 * * * *', async () => {
     try {
       const { runCallBookingMissWatchdog } = require('./call-booking-miss-watchdog');
       const result = await runCallBookingMissWatchdog();

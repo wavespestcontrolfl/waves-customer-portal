@@ -1,5 +1,5 @@
 /**
- * Customer activity timeline (GATE_CUSTOMER_ACTIVITY_TIMELINE, read-only).
+ * Customer activity timeline (read-only).
  *
  * One newest-first list per customer of what we sent them and what they did,
  * merged from the tables that already record it:

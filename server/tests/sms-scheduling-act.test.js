@@ -88,7 +88,7 @@ describe('gate on', () => {
     expect(typeof options.moveGuard).toBe('function');
     expect(deps.rebooker.rescheduleSeries).not.toHaveBeenCalled();
     // Pinned to the slot this move committed: a newer move's reminder state is never overwritten.
-    expect(deps.reminders.handleReschedule).toHaveBeenCalledWith(VISIT_ID, '2026-10-06T10:00', { expectSchedule: { date: '2026-10-06', windowStart: '10:00' } });
+    expect(deps.reminders.handleReschedule).toHaveBeenCalledWith(VISIT_ID, '2026-10-06T10:00', { expectSchedule: { date: '2026-10-06', windowStart: '10:00' }, timePromise: 'set_time', previousDate: '2026-10-05' });
     expect(deps.emitDispatchJobUpdate).toHaveBeenCalledTimes(1);
   });
 

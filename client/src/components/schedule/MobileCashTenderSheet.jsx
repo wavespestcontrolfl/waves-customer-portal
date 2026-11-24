@@ -26,6 +26,11 @@ export default function MobileCashTenderSheet({
   const [entered, setEntered] = useState(0);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  // Set when the server recorded the payment but sent no receipt ({ receipt: { manual: true } }: a part-paid invoice, whose
+  // receipt would name the whole bill). The sheet then says so and closes on Done. It does not ask for a resend: the Invoices
+  // page receipt names the whole bill too.
+  const [recorded, setRecorded] = useState(null);
+  const finish = () => { onRecorded?.(recorded); onClose?.(); };
 
   const placeholderText = `$${Number(amount || 0).toFixed(2)}`;
 
@@ -67,14 +72,23 @@ export default function MobileCashTenderSheet({
           'Content-Type': 'application/json',
           Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`,
         },
-        body: JSON.stringify({ method: 'cash', note: null, sendReceipt: false }),
+        // checkoutTender + totalSeen: with GATE_CHECKOUT_TENDER_RECEIPT on, the server queues the receipt and records
+        // exactly the amount this sheet showed (a balance that moved since is refused). Gate off, sendReceipt: false
+        // stands, as before.
+        body: JSON.stringify({ method: 'cash', note: null, sendReceipt: false, checkoutTender: true, totalSeen: Number(amount || 0) }),
       });
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));
         throw new Error(d.error || 'Failed to record payment');
       }
       const data = await r.json();
-      onRecorded?.({ amount: submitAmount, method: 'cash', invoice: data.invoice });
+      const payload = { amount: submitAmount, method: 'cash', invoice: data.invoice };
+      if (data.receipt?.manual) {
+        setRecorded(payload);
+        setSaving(false);
+        return;
+      }
+      onRecorded?.(payload);
       onClose?.();
     } catch (e) {
       setError(e.message || 'Failed to record payment');
@@ -93,7 +107,9 @@ export default function MobileCashTenderSheet({
       >
         <button
           type="button"
-          onClick={onClose}
+          onClick={recorded ? finish : onClose}
+          // Disabled while the payment request runs: closing then would drop its result (and the parent's refresh).
+          disabled={saving}
           aria-label="Back"
           className="flex items-center justify-center h-11 w-11 u-focus-ring text-zinc-900"
         >
@@ -128,7 +144,7 @@ export default function MobileCashTenderSheet({
         </div>
         <button
           type="button"
-          onClick={handleTender}
+          onClick={recorded ? finish : handleTender}
           disabled={saving}
           className="w-full u-focus-ring"
           style={{
@@ -142,8 +158,13 @@ export default function MobileCashTenderSheet({
             opacity: saving ? 0.6 : 1,
           }}
         >
-          {saving ? 'Recording…' : 'Tender'}
+          {recorded ? 'Done' : saving ? 'Recording…' : 'Tender'}
         </button>
+        {recorded && (
+          <div className="text-zinc-900" style={{ fontSize: 15, marginTop: 12, textAlign: 'center' }}>
+            Payment recorded. No receipt went out for this payment.
+          </div>
+        )}
         {error && (
           <div className="text-alert-fg" style={{ fontSize: 13, marginTop: 10, textAlign: 'center' }}>
             {error}

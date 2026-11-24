@@ -9,7 +9,7 @@ describe('contract-pdf', () => {
       'Termite Retreatment Bond Agreement',
       '',
       'Coverage — retreatment only: Waves Pest Control, LLC warrants the covered termite treatment.',
-      'Annual renewal: This bond must be renewed each year to keep retreatment coverage active.',
+      'Bond term and renewal: Coverage runs for the bond term shown, billed with each quarterly station check.',
     ].join('\n'),
     esign_disclosure_snapshot: 'I agree to receive and sign this document electronically.',
     shared_at: '2026-06-23',

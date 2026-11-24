@@ -174,6 +174,16 @@ async function autoUnsubscribe(email) {
     logger.info(`[unsubscribe] Refused: government sender (email ${email.id})`);
     return { method: 'none', note: 'government sender — never unsubscribe' };
   }
+  // Same belt for the supplier and maker feeds the weekly SiteOne deals digest
+  // reads (owner 2026-11-18: that agent owns them). On 2026-05-19 one newsletter
+  // verdict unsubscribed contact@ from SiteOne's promo mail, and the digest had
+  // nothing to read for six months. Lazy require: the digest loads
+  // inbox-hygiene, which loads spam-blocker.
+  const { isDealSenderDomain } = require('../procurement/siteone-deals-digest');
+  if (isDealSenderDomain(email.from_address)) {
+    logger.info(`[unsubscribe] Refused: deals digest sender (email ${email.id})`);
+    return { method: 'none', note: 'deals digest sender — never unsubscribe' };
+  }
 
   // The unsubscribe URLs are sender-controlled requests — following them for
   // mail that did not authenticate as its claimed domain hands harvesting

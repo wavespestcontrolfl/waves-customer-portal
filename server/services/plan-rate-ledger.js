@@ -55,7 +55,7 @@ function planRateLedgerEnabled() {
   return isEnabled('planRateLedger');
 }
 
-async function ledgerTableExists(database) {
+async function ledgerTableExists(database, { strictProbe = false } = {}) {
   let exists;
   try {
     exists = await database.schema.hasTable('customer_plan_rates');
@@ -66,7 +66,10 @@ async function ledgerTableExists(database) {
     // stale-component invalidation the converter's error path performs.
     // Authoritative → propagate (the caller's fail-closed machinery runs);
     // advisory → absent-equivalent is safe (nothing reads components).
-    if (planRateLedgerEnabled()) throw probeErr;
+    // strictProbe: a caller that DOES read components in advisory mode (one
+    // that reads a billed component as "this customer holds a plan") takes
+    // the failure itself, in either mode.
+    if (planRateLedgerEnabled() || strictProbe) throw probeErr;
     return false;
   }
   // A genuinely ABSENT table under scalar authority is the same hazard as a
@@ -266,8 +269,10 @@ function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
   return withZeroFamilies(slices);
 }
 
-async function loadComponents(database, customerId) {
-  if (!(await ledgerTableExists(database))) return [];
+// strictProbe (opt-in): a failed table probe throws also in advisory mode.
+// The default answer there is [] ("no ledger"), see ledgerTableExists.
+async function loadComponents(database, customerId, { strictProbe = false } = {}) {
+  if (!(await ledgerTableExists(database, { strictProbe }))) return [];
   return database('customer_plan_rates')
     .where({ customer_id: customerId })
     .select('family_key', 'monthly_rate');

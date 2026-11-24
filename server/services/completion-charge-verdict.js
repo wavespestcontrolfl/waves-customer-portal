@@ -412,4 +412,5 @@ module.exports = {
   resolvePerApplicationCharge,
   resolveCompletionChargeCap,
   billByInvoiceDemotedPrediction,
+  billByInvoiceClosesLane,
 };

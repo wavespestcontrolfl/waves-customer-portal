@@ -1,7 +1,8 @@
 // client/src/lib/lawn-fast-complete.js
 //
 // The one rule for "this visit may open the lawn Fast Complete sheet", used by
-// admin Dispatch (the technician portal is being retired: no tech page uses it).
+// admin Dispatch and the Today page (/admin/today), through
+// shouldOpenLawnFastComplete in lib/dispatchCompletionRouting.js.
 //
 // GATE_LAWN_FAST_COMPLETE: `lawnFastCompleteEnabled` rides the schedule payload
 // per service, true only while the gate is live. This is only the first

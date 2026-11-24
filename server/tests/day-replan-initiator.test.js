@@ -65,7 +65,8 @@ describe('the initiator', () => {
   });
 
   test('a visit the day re-plan moved is not person-placed, so the night pass may still optimize it', async () => {
-    const visit = { id: 's1', scheduled_date: '2026-11-04', window_start: '09:00:00' };
+    // The night pass selects scheduled_services.*, so its row carries the intent and stamp columns (no fresh read).
+    const visit = { id: 's1', scheduled_date: '2026-11-04', window_start: '09:00:00', customer_asked_time: null, date_exception_source: null };
     const moved = (initiated_by) => [{
       id: 'l1', scheduled_service_id: 's1', series_move_id: null, original_date: '2026-11-04', new_date: '2026-11-04',
       original_window: '13:00-14:00', new_window: '09:00-10:00', initiated_by, created_at: T1,
@@ -89,7 +90,7 @@ describe('the initiator', () => {
 
 describe('booking_make_room (the make-room accept, owner 2026-11-09) is an automatic mover too', () => {
   test('a visit it moved is not person-placed', async () => {
-    const visit = { id: 's1', scheduled_date: '2026-11-04', window_start: '10:00:00' };
+    const visit = { id: 's1', scheduled_date: '2026-11-04', window_start: '10:00:00', customer_asked_time: null, date_exception_source: null };
     const log = [{
       id: 'l1', scheduled_service_id: 's1', series_move_id: null, original_date: '2026-11-04', new_date: '2026-11-04',
       original_window: '09:00-10:00', new_window: '10:00-11:00', initiated_by: 'booking_make_room', created_at: T1,

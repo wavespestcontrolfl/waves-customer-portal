@@ -33,8 +33,11 @@ jest.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: jest.fn() }));
 const { randomUUID } = require('node:crypto');
 const express = require('express');
 const router = require('../routes/admin-payroll');
-const { markPaid } = require('../services/review-incentives');
+const {
+  markPaid, savePolicy, getDashboard, overCapPayoutIds, getPolicyStrict, lockPayoutRows,
+} = require('../services/review-incentives');
 const { markPayoutsPaid } = require('../services/payroll-review-bonuses');
+const { reviewPayouts } = require('../services/field-team-program');
 
 jest.setTimeout(60000);
 
@@ -230,7 +233,7 @@ postgres('payroll review bonus import', () => {
       const created = await draft(W1);
       expect(byName(created.body.run, 'Sample Alpha').reviewBonusCents).toBe(1000);
 
-      expect(await markPaid([byHand], { conn: trx, paidBy: ADMIN_ID })).toEqual({ updated: 1 });
+      expect(await markPaid([byHand], { conn: trx, paidBy: ADMIN_ID })).toEqual({ updated: 1, skippedOverCap: 0 });
       const recomputed = await recompute(created.body.run.id);
       expect(byName(recomputed.body.run, 'Sample Alpha').reviewBonusCents).toBe(500);
       expect((await importedLines()).map((l) => l.source_id)).toEqual([kept]);
@@ -317,6 +320,435 @@ postgres('payroll review bonus import', () => {
       const error = await trx.transaction(async (inner) => markPayoutsPaid(inner, created.body.run.id, ADMIN_ID)).catch((err) => err);
       expect(error).toMatchObject({ status: 409, message: 'A review bonus changed while the run was finalized. Review the new numbers.' });
       expect((await payoutRow(bonus)).paid_by).toBeNull();
+    });
+  });
+
+  // Owner 2026-11-20 D4: an optional monthly cap per technician, counted by Eastern calendar
+  // month and computed on read. The cap never changes a payout's status or amount.
+  describe('monthly cap', () => {
+    const setCap = (cap) => savePolicy({ monthlyCapCount: cap }, trx);
+    const lineIds = async () => (await importedLines()).map((l) => l.source_id);
+
+    it('adds no line past the cap, in earned order, and leaves the payouts untouched', async () => {
+      const id = await readyTech('Sample Alpha');
+      await approvedWeek(id, W1);
+      await setCap(2);
+      const third = await payout(id, '2026-09-17T15:00:00Z');
+      const first = await payout(id, '2026-09-15T15:00:00Z');
+      const second = await payout(id, '2026-09-16T15:00:00Z');
+      const created = await draft(W1);
+      expect(byName(created.body.run, 'Sample Alpha').reviewBonusCents).toBe(1000);
+      expect((await lineIds()).sort()).toEqual([first, second].sort());
+      expect(await payoutRow(third)).toMatchObject({ status: 'earned', amount_cents: 500, paid_at: null });
+    });
+
+    it('counts a paid payout first, so a late earlier-dated review cannot push it out', async () => {
+      const id = await readyTech('Sample Alpha');
+      await approvedWeek(id, W1);
+      await setCap(2);
+      await payout(id, '2026-09-16T15:00:00Z', { status: 'paid', paid_at: new Date() });
+      const earlier = await payout(id, '2026-09-15T15:00:00Z');
+      const later = await payout(id, '2026-09-17T15:00:00Z');
+      const created = await draft(W1);
+      expect(byName(created.body.run, 'Sample Alpha').reviewBonusCents).toBe(500);
+      expect(await lineIds()).toEqual([earlier]);
+      expect([...(await overCapPayoutIds(trx, { cap: 2 }))]).toEqual([later]);
+    });
+
+    it('splits months by the Eastern calendar, not UTC', async () => {
+      const id = await readyTech('Sample Alpha');
+      await setCap(1);
+      // 2027-02-01 04:30Z is Jan 31 23:30 Eastern; 05:30Z is Feb 1 00:30 Eastern.
+      const januaryNight = await payout(id, '2027-02-01T04:30:00Z');
+      const februaryNight = await payout(id, '2027-02-01T05:30:00Z');
+      const januaryEarlier = await payout(id, '2027-01-10T15:00:00Z');
+      const februaryLater = await payout(id, '2027-02-20T15:00:00Z');
+      const over = await overCapPayoutIds(trx, { cap: 1 });
+      expect([...over].sort()).toEqual([januaryNight, februaryLater].sort());
+      expect(over.has(januaryEarlier) || over.has(februaryNight)).toBe(false);
+    });
+
+    it('ranks each technician on their own', async () => {
+      const first = await readyTech('Sample Alpha');
+      const second = await readyTech('Sample Bravo');
+      const a1 = await payout(first, '2026-09-15T15:00:00Z');
+      const a2 = await payout(first, '2026-09-16T15:00:00Z');
+      const b1 = await payout(second, '2026-09-16T15:00:00Z');
+      const over = await overCapPayoutIds(trx, { cap: 1 });
+      expect([...over]).toEqual([a2]);
+      expect(over.has(a1) || over.has(b1)).toBe(false);
+    });
+
+    it('with no cap, every payout gets a line as before', async () => {
+      const id = await readyTech('Sample Alpha');
+      await approvedWeek(id, W1);
+      await setCap(null);
+      const ids = [await payout(id, '2026-09-15T15:00:00Z'), await payout(id, '2026-09-16T15:00:00Z'), await payout(id, '2026-09-17T15:00:00Z')];
+      const created = await draft(W1);
+      expect(byName(created.body.run, 'Sample Alpha').reviewBonusCents).toBe(1500);
+      expect((await lineIds()).sort()).toEqual(ids.sort());
+      expect((await overCapPayoutIds(trx, { cap: null })).size).toBe(0);
+    });
+
+    it('drops an open line whose payout falls over the cap after earlier reviews move into that month', async () => {
+      const first = await readyTech('Sample Alpha');
+      const second = await readyTech('Sample Bravo');
+      await approvedWeek(first, W1);
+      await setCap(2);
+      const mine = await payout(first, '2026-09-17T15:00:00Z');
+      const created = await draft(W1);
+      expect(await lineIds()).toEqual([mine]);
+      // Two earlier reviews are re-attributed to this technician: the 09-17 one is now third.
+      const moved1 = await payout(second, '2026-09-15T15:00:00Z');
+      const moved2 = await payout(second, '2026-09-16T15:00:00Z');
+      await trx('review_incentive_payouts').whereIn('id', [moved1, moved2]).update({ technician_id: first });
+      const recomputed = await recompute(created.body.run.id);
+      expect(byName(recomputed.body.run, 'Sample Alpha').reviewBonusCents).toBe(1000);
+      expect((await lineIds()).sort()).toEqual([moved1, moved2].sort());
+      expect(await payoutRow(mine)).toMatchObject({ status: 'earned', amount_cents: 500 });
+      const events = await syncEvents();
+      expect(events.map((e) => e.metadata)).toContainEqual(expect.objectContaining({ added_count: 2, removed_count: 1, removed_payout_ids: [mine] }));
+    });
+
+    it('markPaid skips payouts over the cap and says how many', async () => {
+      const id = await readyTech('Sample Alpha');
+      await setCap(2);
+      const a = await payout(id, '2026-09-15T15:00:00Z');
+      const b = await payout(id, '2026-09-16T15:00:00Z');
+      const c = await payout(id, '2026-09-17T15:00:00Z');
+      expect(await markPaid([a, b, c], { conn: trx, paidBy: ADMIN_ID })).toEqual({ updated: 2, skippedOverCap: 1 });
+      expect((await payoutRow(c)).status).toBe('earned');
+      expect(await markPaid([c], { conn: trx, paidBy: ADMIN_ID })).toEqual({ updated: 0, skippedOverCap: 1 });
+    });
+
+    it('markPaid compares ids in canonical form: an uppercase over-cap id is still skipped', async () => {
+      const id = await readyTech('Sample Alpha');
+      await setCap(1);
+      const a = await payout(id, '2026-09-15T15:00:00Z');
+      const b = await payout(id, '2026-09-16T15:00:00Z');
+      expect(await markPaid([b.toUpperCase()], { conn: trx, paidBy: ADMIN_ID })).toEqual({ updated: 0, skippedOverCap: 1 });
+      expect((await payoutRow(b)).status).toBe('earned');
+      expect(await markPaid([a.toUpperCase()], { conn: trx, paidBy: ADMIN_ID })).toEqual({ updated: 1, skippedOverCap: 0 });
+    });
+
+    it('markPaid re-ranks under the technician lock: a payout re-attributed onto a full month is not paid', async () => {
+      const first = await readyTech('Sample Alpha');
+      const second = await readyTech('Sample Bravo');
+      await setCap(1);
+      await payout(first, '2026-09-15T15:00:00Z', { status: 'paid', paid_at: new Date() });
+      const moved = await payout(second, '2026-09-16T15:00:00Z');
+      await trx('review_incentive_payouts').where({ id: moved }).update({ technician_id: first });
+      expect(await markPaid([moved], { conn: trx, paidBy: ADMIN_ID })).toEqual({ updated: 0, skippedOverCap: 1 });
+      expect((await payoutRow(moved)).status).toBe('earned');
+    });
+
+    it('markPaid stops when the policy cannot be read, and marks nothing', async () => {
+      const id = await readyTech('Sample Alpha');
+      const bonus = await payout(id, '2026-09-15T15:00:00Z');
+      // The rename is inside the test transaction and rolls back with it.
+      await trx.raw('alter table system_settings rename to system_settings_unreadable');
+      await expect(markPaid([bonus], { conn: trx, paidBy: ADMIN_ID })).rejects.toThrow(/system_settings/);
+      await trx.raw('alter table system_settings_unreadable rename to system_settings');
+      expect((await payoutRow(bonus)).status).toBe('earned');
+    });
+
+    it('a payout that lands mid-sync waits for the next sync; payroll never holds both winners', async () => {
+      const id = await readyTech('Sample Alpha');
+      await approvedWeek(id, W1);
+      await setCap(1);
+      const old = await payout(id, '2026-09-17T15:00:00Z');
+      const created = await draft(W1);
+      expect(await lineIds()).toEqual([old]);
+      // An earlier-dated review lands after the sync read its snapshot, as the ranking query starts.
+      let landed;
+      const hooked = new Proxy((...args) => trx(...args), {
+        get(_target, key) {
+          const value = trx[key];
+          if (key !== 'raw') return typeof value === 'function' ? value.bind(trx) : value;
+          return (sql, ...rest) => {
+            if (!landed && /row_number/.test(sql)) {
+              landed = payout(id, '2026-09-15T15:00:00Z');
+              landed.catch(() => {});
+            }
+            return trx.raw(sql, ...rest);
+          };
+        },
+      });
+      const { syncReviewBonusLines } = require('../services/payroll-review-bonuses');
+      await syncReviewBonusLines(hooked, { weekEnd: '2026-09-20', lock: true });
+      const early = await landed;
+      // The late row is not in the snapshot and takes the only slot: the old line is dropped, none added.
+      expect(await lineIds()).toEqual([]);
+      await syncReviewBonusLines(trx, { weekEnd: '2026-09-20', lock: true });
+      expect(await lineIds()).toEqual([early]);
+      expect(created.status).toBe(201);
+    });
+
+    it('a cap that cannot be read stops the pay run sync', async () => {
+      const id = await readyTech('Sample Alpha');
+      await approvedWeek(id, W1);
+      await payout(id, '2026-09-15T15:00:00Z');
+      await trx.raw('alter table system_settings rename to system_settings_unreadable');
+      await expect(trx.transaction((inner) => require('../services/payroll-review-bonuses')
+        .syncReviewBonusLines(inner, { weekEnd: '2026-09-20', lock: true }))).rejects.toThrow(/system_settings/);
+      await trx.raw('alter table system_settings_unreadable rename to system_settings');
+      expect(await importedLines()).toHaveLength(0);
+    });
+
+    const POLICY_ROW = { key: 'review_incentives.policy', category: 'reviews', description: 'Sample policy' };
+    const storePolicy = async (value) => {
+      await trx('system_settings').where({ key: POLICY_ROW.key }).del();
+      await trx('system_settings').insert({ ...POLICY_ROW, value });
+    };
+
+    it('a stored policy that cannot be decoded stops the payment; a missing row or a legacy object does not', async () => {
+      const id = await readyTech('Sample Alpha');
+      const a = await payout(id, '2026-09-15T15:00:00Z');
+      const b = await payout(id, '2026-09-16T15:00:00Z');
+      for (const bad of ['{not json', '[1,2]', '"15"', '']) {
+        await storePolicy(bad);
+        await expect(getPolicyStrict(trx)).rejects.toMatchObject({ code: 'review_policy_malformed' });
+        await expect(markPaid([a], { conn: trx, paidBy: ADMIN_ID })).rejects.toMatchObject({ code: 'review_policy_malformed' });
+        expect((await payoutRow(a)).status).toBe('earned');
+      }
+      await trx('system_settings').where({ key: POLICY_ROW.key }).del();
+      expect((await getPolicyStrict(trx)).monthlyCapCount).toBeNull();
+      await storePolicy(JSON.stringify({ enabled: true, amountCents: 500 }));
+      expect((await getPolicyStrict(trx)).monthlyCapCount).toBeNull();
+      expect(await markPaid([a], { conn: trx, paidBy: ADMIN_ID })).toEqual({ updated: 1, skippedOverCap: 0 });
+      // While the stored row is unreadable a partial patch is refused and the row stays as it was;
+      // only an explicit full replacement overwrites it.
+      await storePolicy('{not json');
+      await expect(savePolicy({ amountCents: 1500 }, trx)).rejects.toMatchObject({ code: 'review_policy_unreadable', statusCode: 409 });
+      expect((await trx('system_settings').where({ key: POLICY_ROW.key }).first()).value).toBe('{not json');
+      await expect(savePolicy({ replace: true, amountCents: 1500 }, trx)).rejects.toMatchObject({ code: 'review_policy_incomplete', statusCode: 422 });
+      expect((await trx('system_settings').where({ key: POLICY_ROW.key }).first()).value).toBe('{not json');
+      const full = {
+        replace: true, enabled: true, amountCents: 1500, currency: 'USD', minRating: 1,
+        requireCustomerMatchForGoogle: true, programStartsAt: null, monthlyCapCount: 1,
+      };
+      expect(await savePolicy(full, trx)).toMatchObject({ amountCents: 1500, monthlyCapCount: 1 });
+      expect(await getPolicyStrict(trx)).toMatchObject({ amountCents: 1500, monthlyCapCount: 1 });
+      expect(await markPaid([b], { conn: trx, paidBy: ADMIN_ID })).toEqual({ updated: 0, skippedOverCap: 1 });
+    });
+
+    it('savePolicy refuses a bad value in any field with a 422 and leaves the stored cap 15 alone', async () => {
+      await storePolicy(JSON.stringify({ enabled: true, amountCents: 1500, monthlyCapCount: 15 }));
+      const stored = async () => (await trx('system_settings').where({ key: POLICY_ROW.key }).first()).value;
+      const before = await stored();
+      const bad = {
+        enabled: ['true', {}], amountCents: [{}, [], NaN, '12abc', -1, 2.5], currency: [{}, 'US'],
+        minRating: [{}, '3', 9], requireCustomerMatchForGoogle: ['no', {}], programStartsAt: [{}, 'junk'],
+        monthlyCapCount: [{}, [], NaN, '15x', 0, 5000],
+      };
+      for (const [field, values] of Object.entries(bad)) {
+        for (const value of values) {
+          await expect(savePolicy({ [field]: value }, trx)).rejects.toMatchObject({ code: 'review_policy_invalid', statusCode: 422 });
+        }
+      }
+      expect(await stored()).toBe(before);
+      expect(await getPolicyStrict(trx)).toMatchObject({ monthlyCapCount: 15, amountCents: 1500 });
+      // A stored row holding a bad field is unreadable to a payment, like a garbled one.
+      await storePolicy(JSON.stringify({ monthlyCapCount: { x: 1 } }));
+      const bonusTech = await readyTech('Sample Alpha');
+      const bonus = await payout(bonusTech, '2026-09-15T15:00:00Z');
+      await expect(markPaid([bonus], { conn: trx, paidBy: ADMIN_ID })).rejects.toMatchObject({ code: 'review_policy_malformed' });
+      expect((await payoutRow(bonus)).status).toBe('earned');
+    });
+
+    it('savePolicy refuses a body that is not a plain object, reading and writing nothing', async () => {
+      await storePolicy(JSON.stringify({ enabled: true, amountCents: 1500, monthlyCapCount: 15 }));
+      const stored = async () => (await trx('system_settings').where({ key: POLICY_ROW.key }).first()).value;
+      const before = await stored();
+      for (const body of [[{ monthlyCapCount: 1 }], Object.assign([], { monthlyCapCount: 1 }), null, 'x', 5]) {
+        await expect(savePolicy(body, trx)).rejects.toMatchObject({ code: 'review_policy_invalid', statusCode: 422 });
+      }
+      await expect(savePolicy({ amountCents: 2147483648 }, trx)).rejects.toMatchObject({ code: 'review_policy_invalid' });
+      expect(await savePolicy({ amountCents: 2147483647 }, trx)).toMatchObject({ amountCents: 2147483647, monthlyCapCount: 15 });
+      expect(JSON.parse(await stored()).monthlyCapCount).toBe(15);
+      expect(before).toContain('"monthlyCapCount":15');
+    });
+
+    it('a save stores the Eastern-midnight instant of a date-only cutoff and refuses an impossible or offset-free one', async () => {
+      await storePolicy(JSON.stringify({ enabled: true, amountCents: 1500, monthlyCapCount: 15, programStartsAt: '2026-01-01T05:00:00.000Z' }));
+      const stored = async () => (await trx('system_settings').where({ key: POLICY_ROW.key }).first()).value;
+      const before = await stored();
+      for (const bad of ['2026-02-31', '2026-11-01T09:00:00']) {
+        await expect(savePolicy({ programStartsAt: bad }, trx)).rejects.toMatchObject({ code: 'review_policy_invalid', statusCode: 422 });
+        expect(await stored()).toBe(before);
+      }
+      expect((await savePolicy({ programStartsAt: '2026-07-01' }, trx)).programStartsAt).toBe('2026-07-01T04:00:00.000Z');
+      expect(JSON.parse(await stored()).programStartsAt).toBe('2026-07-01T04:00:00.000Z');
+      expect((await savePolicy({ programStartsAt: '2026-03-01T10:00:00-05:00' }, trx)).programStartsAt).toBe('2026-03-01T15:00:00.000Z');
+      expect((await getPolicyStrict(trx)).monthlyCapCount).toBe(15);
+    });
+
+    it('the dashboard and the CSV export fail when the policy cannot be read', async () => {
+      await readyTech('Sample Alpha');
+      await trx.raw('alter table system_settings rename to system_settings_unreadable');
+      await expect(trx.transaction((inner) => getDashboard({ conn: inner, days: 30 }))).rejects.toThrow(/system_settings/);
+      await trx.raw('alter table system_settings_unreadable rename to system_settings');
+    });
+
+    it('with the import off, payroll never reads the review policy and still drops stale lines', async () => {
+      const id = await readyTech('Sample Alpha');
+      await approvedWeek(id, W1);
+      const bonus = await payout(id, '2026-09-16T15:00:00Z');
+      const created = await draft(W1);
+      expect(await lineIds()).toEqual([bonus]);
+      delete process.env.GATE_PAYROLL_REVIEW_BONUS_IMPORT;
+      await trx.raw('alter table system_settings rename to system_settings_unreadable');
+      const recomputed = await recompute(created.body.run.id);
+      await trx.raw('alter table system_settings_unreadable rename to system_settings');
+      expect(recomputed.status).toBe(200);
+      expect(await lineIds()).toEqual([]);
+    });
+
+    it('lockPayoutRows locks the whole id set in one statement, ordered by id', async () => {
+      const id = await readyTech('Sample Alpha');
+      const ids = [await payout(id, '2026-09-15T15:00:00Z'), await payout(id, '2026-09-16T15:00:00Z'), await payout(id, '2026-09-17T15:00:00Z')];
+      const locked = await lockPayoutRows(trx, [...ids, ids[0]]);
+      expect(locked.map((row) => row.id)).toEqual([...ids].sort());
+    });
+
+    // The two-connection tests below commit for real, so they use a throwaway settings key (never the
+    // real policy row) and the service takes it as an internal option. Each test deletes its key in its
+    // finally (not in an afterEach: that would wait behind the test transaction's table locks).
+    const throwawayKey = () => `review_incentives.policy.test.${Math.random().toString(36).slice(2, 10)}`;
+    // A connection whose transactions pause (until `release`) at the first statement `pauseWhen` accepts.
+    const pausingConn = (other, pauseWhen) => {
+      let release;
+      const released = new Promise((resolve) => { release = resolve; });
+      let reached;
+      const reachedPause = new Promise((resolve) => { reached = resolve; });
+      // Wraps a query builder (and what its chained calls return) so awaiting it waits for `released`.
+      const gate = (target, seen = new WeakMap()) => {
+        if (seen.has(target)) return seen.get(target);
+        const proxy = new Proxy(target, {
+          get(object, prop) {
+            if (prop === 'then') return (resolve, reject) => { reached(); return released.then(() => object.then(resolve, reject)); };
+            const value = object[prop];
+            if (typeof value !== 'function') return value;
+            return (...args) => {
+              const result = value.apply(object, args);
+              return result && typeof result === 'object' ? gate(result, seen) : result;
+            };
+          },
+        });
+        seen.set(target, proxy);
+        return proxy;
+      };
+      const conn = {
+        transaction: (fn) => other.transaction((real) => {
+          let paused = false;
+          const wrapped = new Proxy((...args) => {
+            const builder = real(...args);
+            if (paused || !pauseWhen(args[0])) return builder;
+            paused = true;
+            return gate(builder);
+          }, { get: (_target, prop) => (typeof real[prop] === 'function' ? real[prop].bind(real) : real[prop]) });
+          return fn(wrapped);
+        }),
+      };
+      return { conn, release, reachedPause };
+    };
+    const newOther = () => require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 4 } });
+
+    it('a policy save waits for an open payment transaction (shared settings lock), then applies', async () => {
+      const other = newOther();
+      const key = throwawayKey();
+      const pause = pausingConn(other, (table) => table === 'review_incentive_payouts');
+      const running = [];
+      try {
+        // The payment takes the shared settings lock, reads the policy, then waits before it touches payouts.
+        const payment = markPaid([randomUUID()], { conn: pause.conn, policyKey: key });
+        running.push(payment);
+        await pause.reachedPause;
+        let saved = false;
+        const save = savePolicy({ monthlyCapCount: 15 }, other, { key }).then((value) => { saved = true; return value; });
+        running.push(save);
+        await new Promise((resolve) => { setTimeout(resolve, 400); });
+        expect(saved).toBe(false);
+        pause.release();
+        await Promise.all([payment, save]);
+        expect((await getPolicyStrict(other, key)).monthlyCapCount).toBe(15);
+      } finally {
+        // Release the held transaction first, so a failed assertion cannot leave it open.
+        pause.release();
+        await Promise.allSettled(running);
+        await other('system_settings').where({ key }).del();
+        await other.destroy();
+      }
+    });
+
+    it('a payment that starts after a save sees the saved policy; the save never waits on a finished payment', async () => {
+      const other = newOther();
+      const key = throwawayKey();
+      try {
+        await savePolicy({ monthlyCapCount: 7 }, other, { key });
+        expect(await markPaid([randomUUID()], { conn: other, policyKey: key })).toEqual({ updated: 0, skippedOverCap: 0 });
+        expect((await getPolicyStrict(other, key)).monthlyCapCount).toBe(7);
+      } finally {
+        await other('system_settings').where({ key }).del();
+        await other.destroy();
+      }
+    });
+
+    it('two policy PATCHes on separate connections serialize and keep both fields', async () => {
+      // Two top-level transactions on separate connections. The first reads the policy and then waits
+      // before it writes; the second must wait on the exclusive settings lock, then see the first's field.
+      // Without the lock the second finishes first and the first overwrites its field.
+      const other = newOther();
+      const key = throwawayKey();
+      let calls = 0;
+      const pause = pausingConn(other, (table) => table === 'system_settings' && (calls += 1) === 2);
+      const running = [];
+      try {
+        const first = savePolicy({ monthlyCapCount: 15 }, pause.conn, { key });
+        running.push(first);
+        await pause.reachedPause;
+        let secondDone = false;
+        const second = savePolicy({ amountCents: 1500 }, other, { key }).then((value) => { secondDone = true; return value; });
+        running.push(second);
+        await new Promise((resolve) => { setTimeout(resolve, 400); });
+        expect(secondDone).toBe(false);
+        pause.release();
+        await Promise.all([first, second]);
+        expect(await getPolicyStrict(other, key)).toMatchObject({ monthlyCapCount: 15, amountCents: 1500 });
+      } finally {
+        pause.release();
+        await Promise.allSettled(running);
+        await other('system_settings').where({ key }).del();
+        await other.destroy();
+      }
+    });
+
+    it('the technician Pay Overview flags the over-cap payout and fails when the policy cannot be read', async () => {
+      const id = await readyTech('Sample Alpha');
+      await savePolicy({ monthlyCapCount: 1, programStartsAt: '2026-01-01T00:00:00Z' }, trx);
+      const a = await payout(id, '2026-09-15T15:00:00Z');
+      const b = await payout(id, '2026-09-16T15:00:00Z');
+      const range = { start: '2026-09-01', end: '2026-10-01' };
+      const rows = await reviewPayouts(trx, id, range);
+      expect(Object.fromEntries(rows.map((r) => [r.id, r.over_monthly_cap]))).toEqual({ [a]: false, [b]: true });
+      expect(rows.every((r) => !('month_rank' in r))).toBe(true);
+      await trx.raw('alter table system_settings rename to system_settings_unreadable');
+      await expect(trx.transaction((inner) => reviewPayouts(inner, id, range))).rejects.toThrow(/system_settings/);
+      await trx.raw('alter table system_settings_unreadable rename to system_settings');
+    });
+
+    it('the dashboard marks over-cap rows, leaves them out of pending, and reports the cap', async () => {
+      const id = await readyTech('Sample Alpha');
+      // savePolicy stamps programStartsAt with today when none is set, which would hide September.
+      await savePolicy({ monthlyCapCount: 1, programStartsAt: '2026-01-01T00:00:00Z' }, trx);
+      const a = await payout(id, '2026-09-15T15:00:00Z');
+      const b = await payout(id, '2026-09-16T15:00:00Z');
+      const dashboard = await getDashboard({
+        conn: trx, periodStart: '2026-09-01T00:00:00Z', periodEnd: '2026-09-30T23:59:59Z',
+      });
+      expect(dashboard.policy.monthlyCapCount).toBe(1);
+      expect(Object.fromEntries(dashboard.payouts.map((p) => [p.id, p.overMonthlyCap]))).toEqual({ [a]: false, [b]: true });
+      expect(dashboard.summary).toMatchObject({ pendingCount: 1, pendingCents: 500, earnedCents: 1000 });
     });
   });
 

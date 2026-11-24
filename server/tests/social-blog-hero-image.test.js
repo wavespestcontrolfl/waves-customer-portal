@@ -239,6 +239,7 @@ describe('blogHeroSocialImageUrl', () => {
       process.env.SOCIAL_AUTOMATION_ENABLED = 'true';
       process.env.SOCIAL_FACEBOOK_ENABLED = 'true';
       process.env.FACEBOOK_ACCESS_TOKEN = 'tok';
+      social._resetFacebookPreviewReads();
     });
     afterEach(() => {
       delete process.env.SOCIAL_AUTOMATION_ENABLED;
@@ -266,11 +267,182 @@ describe('blogHeroSocialImageUrl', () => {
       });
 
       expect(res.platforms).toEqual([expect.objectContaining({ platform: 'facebook', success: true })]);
-      expect(calls).toHaveLength(1);
-      expect(calls[0].url).toContain('/page-1/feed');
-      expect(calls[0].body).toMatchObject({ message: 'Lizard droppings caption', link: PAGE });
+      // Facebook reads the page first, so the post gets the full-size picture.
+      expect(calls).toHaveLength(2);
+      expect(calls[0].url).toBe('https://graph.facebook.com/v25.0/');
+      expect(calls[0].body).toMatchObject({ id: PAGE, scrape: true });
+      expect(calls[1].url).toContain('/page-1/feed');
+      expect(calls[1].body).toMatchObject({ message: 'Lizard droppings caption', link: PAGE });
       // The caption must NOT have the raw URL pasted into it.
-      expect(calls[0].body.message).not.toContain('https://');
+      expect(calls[1].body.message).not.toContain('https://');
+    });
+
+    test('after Facebook reads the page, the post waits for its picture fetch', async () => {
+      process.env.FACEBOOK_PREVIEW_SETTLE_MS = '60';
+      let readAt = null;
+      let postedAt = null;
+      global.fetch = jest.fn(async (url) => {
+        if (String(url) === 'https://graph.facebook.com/v25.0/') {
+          readAt = Date.now();
+          return { ok: true, json: async () => ({ id: PAGE, updated_time: '2026-11-21T02:06:03+0000' }), text: async () => '' };
+        }
+        postedAt = Date.now();
+        return { ok: true, json: async () => ({ id: 'fb-1', post_id: 'fb-1' }), text: async () => '' };
+      });
+
+      try {
+        const res = await social.publishToAll({
+          title: 'T', description: 'D', link: PAGE, source: 'autonomous_blog',
+          imageUrl: 'https://cdn.example.com/social-media/blog-hero-x.jpg',
+          channels: ['facebook'], customContent: { facebook: 'Caption' },
+          noAiImage: true,
+        });
+
+        expect(res.platforms).toEqual([expect.objectContaining({ platform: 'facebook', success: true })]);
+        // The post goes out only after the wait has passed (a timer never fires early
+        // by more than a millisecond or two).
+        expect(postedAt - readAt).toBeGreaterThanOrEqual(55);
+      } finally {
+        delete process.env.FACEBOOK_PREVIEW_SETTLE_MS;
+      }
+    });
+
+    test('a read with no fresh-read time posts at once', async () => {
+      process.env.FACEBOOK_PREVIEW_SETTLE_MS = '4000';
+      let readAt = null;
+      let postedAt = null;
+      global.fetch = jest.fn(async (url) => {
+        if (String(url) === 'https://graph.facebook.com/v25.0/') {
+          readAt = Date.now();
+          return { ok: true, json: async () => ({ id: PAGE }), text: async () => '' };
+        }
+        postedAt = Date.now();
+        return { ok: true, json: async () => ({ id: 'fb-1', post_id: 'fb-1' }), text: async () => '' };
+      });
+
+      try {
+        await social.publishToAll({
+          title: 'T', description: 'D', link: PAGE, source: 'autonomous_blog',
+          imageUrl: 'https://cdn.example.com/social-media/blog-hero-x.jpg',
+          channels: ['facebook'], customContent: { facebook: 'Caption' },
+          noAiImage: true,
+        });
+
+        expect(postedAt - readAt).toBeLessThan(1000);
+      } finally {
+        delete process.env.FACEBOOK_PREVIEW_SETTLE_MS;
+      }
+    });
+
+    test('a retried post reads the page once, not once per attempt', async () => {
+      const calls = [];
+      let feedAttempts = 0;
+      global.fetch = jest.fn(async (url) => {
+        const u = String(url);
+        calls.push(u);
+        if (u === 'https://graph.facebook.com/v25.0/') {
+          return { ok: true, json: async () => ({ id: PAGE }), text: async () => '' };
+        }
+        feedAttempts += 1;
+        // The first feed attempt fails with a transient error; withRetry tries again after 1 s.
+        if (feedAttempts === 1) return { ok: false, status: 500, text: async () => 'temporary' };
+        return { ok: true, json: async () => ({ id: 'fb-1', post_id: 'fb-1' }), text: async () => '' };
+      });
+
+      const res = await social.publishToAll({
+        title: 'T', description: 'D', link: PAGE, source: 'autonomous_blog',
+        imageUrl: 'https://cdn.example.com/social-media/blog-hero-x.jpg',
+        channels: ['facebook'], customContent: { facebook: 'Caption' },
+        noAiImage: true,
+      });
+
+      expect(res.platforms).toEqual([expect.objectContaining({ platform: 'facebook', success: true })]);
+      expect(feedAttempts).toBe(2);
+      expect(calls.filter((u) => u === 'https://graph.facebook.com/v25.0/')).toHaveLength(1);
+    });
+
+    test('a second post of the same link waits for the read in flight', async () => {
+      process.env.FACEBOOK_PREVIEW_SETTLE_MS = '40';
+      let reads = 0;
+      let readDoneAt = null;
+      const postedAt = [];
+      global.fetch = jest.fn(async (url) => {
+        if (String(url) === 'https://graph.facebook.com/v25.0/') {
+          reads += 1;
+          await new Promise((resolve) => setTimeout(resolve, 40));
+          readDoneAt = Date.now();
+          return { ok: true, json: async () => ({ id: PAGE, updated_time: '2026-11-21T02:06:03+0000' }), text: async () => '' };
+        }
+        postedAt.push(Date.now());
+        return { ok: true, json: async () => ({ id: 'fb-1', post_id: 'fb-1' }), text: async () => '' };
+      });
+      const share = () => social.publishToAll({
+        title: 'T', description: 'D', link: PAGE, source: 'autonomous_blog',
+        imageUrl: 'https://cdn.example.com/social-media/blog-hero-x.jpg',
+        channels: ['facebook'], customContent: { facebook: 'Caption' },
+        noAiImage: true,
+      });
+
+      try {
+        const results = await Promise.all([share(), share()]);
+
+        for (const res of results) {
+          expect(res.platforms).toEqual([expect.objectContaining({ platform: 'facebook', success: true })]);
+        }
+        expect(reads).toBe(1);
+        expect(postedAt).toHaveLength(2);
+        // Both posts go out after the read AND its wait, never during them.
+        for (const at of postedAt) expect(at - readDoneAt).toBeGreaterThanOrEqual(35);
+      } finally {
+        delete process.env.FACEBOOK_PREVIEW_SETTLE_MS;
+      }
+    });
+
+    test('a failed read is not repeated on the retry', async () => {
+      let reads = 0;
+      let feedAttempts = 0;
+      global.fetch = jest.fn(async (url) => {
+        if (String(url) === 'https://graph.facebook.com/v25.0/') {
+          reads += 1;
+          throw new Error('socket hang up');
+        }
+        feedAttempts += 1;
+        if (feedAttempts === 1) return { ok: false, status: 500, text: async () => 'temporary' };
+        return { ok: true, json: async () => ({ id: 'fb-1', post_id: 'fb-1' }), text: async () => '' };
+      });
+
+      const res = await social.publishToAll({
+        title: 'T', description: 'D', link: PAGE, source: 'autonomous_blog',
+        imageUrl: 'https://cdn.example.com/social-media/blog-hero-x.jpg',
+        channels: ['facebook'], customContent: { facebook: 'Caption' },
+        noAiImage: true,
+      });
+
+      expect(res.platforms).toEqual([expect.objectContaining({ platform: 'facebook', success: true })]);
+      expect(feedAttempts).toBe(2);
+      expect(reads).toBe(1);
+    });
+
+    test.each([
+      ['rejects', () => { throw new Error('socket hang up'); }],
+      ['returns 500', () => ({ ok: false, status: 500, text: async () => 'boom' })],
+    ])('a preview refresh that %s never blocks the link post', async (_label, refresh) => {
+      const posted = [];
+      global.fetch = jest.fn(async (url, opts = {}) => {
+        if (String(url) === 'https://graph.facebook.com/v25.0/') return refresh();
+        posted.push(String(url));
+        return { ok: true, json: async () => ({ id: 'fb-1', post_id: 'fb-1' }), text: async () => '' };
+      });
+
+      const res = await social.publishToAll({
+        title: 'T', description: 'D', link: PAGE, source: 'autonomous_blog',
+        imageUrl: 'https://cdn.example.com/social-media/blog-hero-x.jpg',
+        channels: ['facebook'], customContent: { facebook: 'Caption' },
+        noAiImage: true,
+      });
+
+      expect(res.platforms).toEqual([expect.objectContaining({ platform: 'facebook', success: true })]);
+      expect(posted).toEqual([expect.stringContaining('/page-1/feed')]);
     });
 
     test('non-blog sources with an image keep the /photos post (caption carries the link — unchanged behavior)', async () => {

@@ -16,6 +16,9 @@
 // getPromoterReferralLink, never a parallel code generator.
 
 
+const { isEnabled } = require('../config/feature-gates');
+const step2 = require('./referral-step2');
+
 const REFERRAL_CARD_COPY = Object.freeze({
   headline: 'Know someone who could use Waves?',
   cta: 'Send My Referral Link',
@@ -24,10 +27,24 @@ const REFERRAL_CARD_COPY = Object.freeze({
 // The render-side card: static copy, shown only while the live program is
 // active. Suppressed (null) on any settings failure — an unconfigured or
 // broken environment must not advertise rewards it cannot honor.
-async function composeReferralCard({ referralEngine = require('./referral-engine') } = {}) {
-  const settings = await referralEngine.getLiveSettings();
-  if (!settings?.program_active) return null;
-  return { ...REFERRAL_CARD_COPY };
+// GATE_REFERRAL_STEP2 on, for a known customer (owner 2026-11-21): adds `offer`,
+// the one line with the friend's credit and the member's reward. That path makes
+// ONE settings read, inside referralOfferDecision (the one place that reads the
+// amounts and the yearly limit from the live row). A skipped decision (the
+// program paused or the row unreadable) is no card, as for an inactive program:
+// the card's button would answer 404. No sentence left: the static copy.
+// `headline` stays as it is: cached client builds print it in an h2.
+// A read: nothing here enrolls a promoter or writes. Gate off, or no customer
+// id: the static copy exactly, from the strict settings read as before.
+async function composeReferralCard({ referralEngine = require('./referral-engine'), customerId = null, conn = null } = {}) {
+  if (customerId && isEnabled('referralStep2')) {
+    const decision = await referralEngine.referralOfferDecision(conn || require('../models/db'), customerId);
+    if (decision.skip) return null;
+    const offer = step2.shareCardOffer(decision);
+    return offer ? { ...REFERRAL_CARD_COPY, offer } : { ...REFERRAL_CARD_COPY };
+  }
+  const settings = conn ? await referralEngine.getLiveSettings(conn) : await referralEngine.getLiveSettings();
+  return settings?.program_active ? { ...REFERRAL_CARD_COPY } : null;
 }
 
 function formatRefereeAmount(cents) {
@@ -71,15 +88,18 @@ async function buildReferralShareForCustomer(customerId, {
 
   const refereeCents = Math.max(0, Math.trunc(Number(settings.referee_discount_cents) || 0));
   const refereeAmount = formatRefereeAmount(refereeCents);
+  // GATE_REFERRAL_STEP2: the friend gets an account credit after the first plan service (owner 2026-11-21), so no "off".
+  const step2On = isEnabled('referralStep2');
   const offerClause = refereeCents > 0
-    ? `they'll take ${refereeAmount} off your first service with my code ${code}`
+    ? (step2On ? step2.friendShareClause(refereeCents, code) : `they'll take ${refereeAmount} off your first service with my code ${code}`)
     : `mention my code ${code} when you book`;
   const bareLink = String(link).replace(/^https?:\/\//i, '');
   return {
     code,
     link,
-    smsBody: `We use Waves Pest Control and ${offerClause}. ${bareLink}`,
-    emailSubject: refereeCents > 0 ? `${refereeAmount} off Waves Pest Control` : 'Waves Pest Control',
+    // Texts say "Waves" (owner 2026-11-04); the email keeps the full name.
+    smsBody: `We use Waves and ${offerClause}. ${bareLink}`,
+    emailSubject: refereeCents > 0 && !step2On ? `${refereeAmount} off Waves Pest Control` : 'Waves Pest Control',
     emailBody: `We use Waves Pest Control and ${offerClause}.\n\n${link}`,
   };
 }

@@ -117,3 +117,15 @@ describe('getAvailableSlots paidCalls: false', () => {
     expect(fetchSpy).toHaveBeenCalled();
   });
 });
+
+describe('resolveEstimateCoords strictReads (the 07:05 fill list, day-replan/fill-list.js)', () => {
+  test('a failed customer read is thrown, not reported as a missing location; without the option it still reads as one', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'customers') return { where: jest.fn().mockReturnThis(), first: jest.fn(async () => { throw new Error('connection reset'); }) };
+      throw new Error(`unexpected table ${table}`);
+    });
+    const { resolveEstimateCoords } = estimateSlotAvailability;
+    await expect(resolveEstimateCoords(ESTIMATE_ROW, { paidCalls: false, strictReads: true })).rejects.toThrow('connection reset');
+    await expect(resolveEstimateCoords(ESTIMATE_ROW, { paidCalls: false })).rejects.toMatchObject({ code: 'COORDS_NEED_GEOCODE' });
+  });
+});

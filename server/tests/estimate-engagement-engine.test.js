@@ -25,6 +25,13 @@ jest.mock('../config/feature-gates', () => ({
   // The gone-quiet consultation offer's own gate — off unless a test turns
   // it on, so every other suite here runs the single-pass path unchanged.
   estimateEmailConsultationOfferLive: jest.fn(() => false),
+  // GATE_ESTIMATE_FOLLOWUP_SERVICE_NAME: off unless a test turns it on.
+  estimateFollowupServiceNameLive: jest.fn(() => false),
+}));
+// The emailed service name has its own suite (estimate-emailed-service-name.test.js);
+// here only WHERE the engine calls it and what it changes in the payload are pinned.
+jest.mock('../services/estimate-emailed-service-name', () => ({
+  emailedServiceName: jest.fn(async () => null),
 }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -67,6 +74,7 @@ jest.mock('../services/estimate-follow-up', () => ({
     estimateEmailPayload: jest.fn((est, firstName, url) => ({ first_name: firstName, estimate_url: url })),
     mintStageLinks: jest.fn(async () => ({ smsUrl: 'url', emailUrl: 'url' })),
     hasRepliedRecently: jest.fn(async () => false),
+    estimateMidCheckout: jest.fn(async () => false),
     wasRecentlyOpened: jest.fn(() => false),
     bumpFollowupCounters: jest.fn(async () => {}),
     repairFollowupCounters: jest.fn(async () => null),
@@ -89,7 +97,8 @@ jest.mock('../services/estimate-email-consultation-offer', () => ({
 }));
 
 const db = require('../models/db');
-const { isEnabled, estimateEmailConsultationOfferLive } = require('../config/feature-gates');
+const { isEnabled, estimateEmailConsultationOfferLive, estimateFollowupServiceNameLive } = require('../config/feature-gates');
+const { emailedServiceName } = require('../services/estimate-emailed-service-name');
 const logger = require('../services/logger');
 const { inferEstimateServiceLines } = require('../services/estimate-service-lines');
 const { customerConvertedSince } = require('../services/estimate-conversion-guard');
@@ -240,12 +249,15 @@ beforeEach(() => {
   followupShared.claimFollowupSend.mockResolvedValue(true);
   followupShared.sendDualChannel.mockResolvedValue(true);
   followupShared.hasRepliedRecently.mockResolvedValue(false);
+  followupShared.estimateMidCheckout.mockResolvedValue(false);
   followupShared.bumpFollowupCounters.mockResolvedValue(undefined);
   followupShared.repairFollowupCounters.mockResolvedValue(null);
   probeGoneQuietConsultation.mockResolvedValue(null);
   mintGoneQuietConsultationUrl.mockResolvedValue('');
   goneQuietConsultationStillValid.mockResolvedValue(true);
   estimateEmailConsultationOfferLive.mockReturnValue(false);
+  estimateFollowupServiceNameLive.mockReturnValue(false);
+  emailedServiceName.mockResolvedValue(null);
 });
 
 describe('onEstimateViewed (view-event rules)', () => {
@@ -437,12 +449,52 @@ describe('processDueJobs', () => {
     expect(result.sent).toBe(1);
     expect(followupShared.sendDualChannel).toHaveBeenCalled();
   });
+  describe('GATE_ESTIMATE_FOLLOWUP_SERVICE_NAME (owner 2026-11-21)', () => {
+    // The `extra` argument the engine hands estimateEmailPayload for one send.
+    async function sendOnce() {
+      enqueueProcessorHappyPath();
+      const result = await Engine.processDueJobs(NOW);
+      expect(result.sent).toBe(1);
+      return followupShared.estimateEmailPayload.mock.calls.pop()[3];
+    }
+
+    test('gate off: no delivery-email read and today\'s payload', async () => {
+      emailedServiceName.mockResolvedValue('lawn care and pest control');
+      const extra = await sendOnce();
+      expect(emailedServiceName).not.toHaveBeenCalled();
+      expect(extra.service_label).toBe('pest control');
+    });
+
+    test('gate on with proof: only service_label differs', async () => {
+      const before = await sendOnce();
+      estimateFollowupServiceNameLive.mockReturnValue(true);
+      emailedServiceName.mockResolvedValue('lawn care and pest control');
+      const after = await sendOnce();
+      // The engine hands the reader today's label; the reader decides whether that label may be replaced.
+      expect(emailedServiceName).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-1' }), 'pest control');
+      expect(after.service_label).toBe('lawn care and pest control');
+      expect({ ...after, service_label: before.service_label }).toEqual(before);
+    });
+
+    test('gate on without proof: identical to today', async () => {
+      const before = await sendOnce();
+      estimateFollowupServiceNameLive.mockReturnValue(true);
+      emailedServiceName.mockResolvedValue(null);
+      const after = await sendOnce();
+      expect(emailedServiceName).toHaveBeenCalledTimes(1);
+      expect(after).toEqual(before);
+    });
+  });
+
   test('sends the email, claims the ledger, marks the job done', async () => {
     enqueueProcessorHappyPath();
 
     const result = await Engine.processDueJobs(NOW);
 
     expect(result.sent).toBe(1);
+    // Only the engine's emails take the since-estimate reply window (GATE_ESTIMATE_REPLY_PAUSE_SINCE_ESTIMATE); the
+    // reader decides whether it applies. safetyGate never passes the flag.
+    expect(followupShared.hasRepliedRecently).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-1' }), 14, { sinceEstimate: true });
     expect(followupShared.claimFollowupSend).toHaveBeenCalledWith(
       'est-1', 'viewed_gone_quiet_72h', 'estimate.engage_gone_quiet', expect.any(Object),
       { blockLegacyFlags: [], blockRuleKeys: [] },
@@ -452,6 +504,7 @@ describe('processDueJobs', () => {
       expect.objectContaining({
         email: expect.objectContaining({ templateKey: 'estimate.engage_gone_quiet' }),
       }),
+      {}, // the outcome object the engine reads a mid-checkout hold from
     );
     // Non-expiring stages keep the plain per-(stage, estimate) key.
     expect(followupShared.sendDualChannel.mock.calls[0][1].email.idempotencySuffix).toBeUndefined();
@@ -537,6 +590,34 @@ describe('processDueJobs', () => {
       expect(followupShared.sendDualChannel.mock.calls[0][0]).toEqual(expect.objectContaining({ customer_email: 'jordan@example.com' }));
       expect(followupShared.estimateEmailPayload.mock.calls[0][1]).toBe('Jordan');
       expect(followupShared.estimateEmailPayload.mock.calls[0][3]).toEqual(expect.objectContaining({ consultation_url: OFFER_URL }));
+    });
+
+    test('checkout is read INSIDE the final snapshot: a hold seen there releases the claim, defers, and nothing is sent', async () => {
+      probeGoneQuietConsultation.mockResolvedValue(CONTEXT);
+      mintGoneQuietConsultationUrl.mockResolvedValue(OFFER_URL);
+      goneQuietConsultationStillValid.mockResolvedValue(true);
+      // Idle on pass 1 and pass 2; the customer is booking by the snapshot.
+      followupShared.estimateMidCheckout
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true);
+      enqueueProcessorHappyPath();
+      enqueueSecondPass();
+      enqueueLastRead();
+
+      const result = await Engine.processDueJobs(NOW);
+
+      expect(result.sent).toBe(0);
+      // The third read took the snapshot's connection (db stands in for the
+      // transaction handle here) and the estimate's group; no fourth read
+      // ran after the snapshot.
+      expect(followupShared.estimateMidCheckout).toHaveBeenCalledTimes(3);
+      expect(followupShared.estimateMidCheckout).toHaveBeenLastCalledWith('est-1', { conn: db, groupId: undefined });
+      expect(db.transaction).toHaveBeenCalledTimes(1);
+      expect(followupShared.releaseFollowupSend).toHaveBeenCalledWith('est-1', 'viewed_gone_quiet_72h');
+      expect(followupShared.sendDualChannel).not.toHaveBeenCalled();
+      expect(lastJobUpdate().payload).toEqual(expect.objectContaining({ due_at: expect.any(Date) }));
+      expect(lastJobUpdate().payload).not.toHaveProperty('status');
     });
 
     test.each([
@@ -919,6 +1000,116 @@ describe('processDueJobs', () => {
     expect(defer.payload.due_at).toBeInstanceOf(Date);
   });
 
+  // return_visit_hot / dark_then_return / multi_view_high_intent
+  // fire ~1 minute after a page view, and 8 of 176 emails since Aug 28 went out
+  // 1-3 minutes before the customer accepted: a follow-up to someone who had
+  // just signed up. A live visit-time hold or a card step touched in the last 20
+  // minutes holds the email, even for the hold-exempt rules.
+  test.each(['return_visit_hot', 'dark_then_return', 'multi_view_high_intent'])(
+    '%s: a customer who is booking right now (live hold or card step) is deferred, never emailed',
+    async (ruleKey) => {
+      followupShared.estimateMidCheckout.mockResolvedValue(true);
+      enqueueProcessorHappyPath({
+        job: pendingJob({ rule_key: ruleKey }),
+        est: baseEstimate({ last_viewed_at: new Date(NOW.getTime() - 1 * MIN) }),
+        rules: RULE_ROWS,
+      });
+
+      const result = await Engine.processDueJobs(NOW);
+
+      expect(result.sent).toBe(0);
+      expect(followupShared.estimateMidCheckout).toHaveBeenCalledWith('est-1', { groupId: undefined });
+      expect(followupShared.claimFollowupSend).not.toHaveBeenCalled();
+      expect(followupShared.sendDualChannel).not.toHaveBeenCalled();
+      // Held, not dropped: still pending, due again after the 15-minute defer.
+      const defer = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+      expect(defer.payload.status).toBeUndefined();
+      expect(defer.payload.due_at.getTime()).toBe(NOW.getTime() + 15 * MIN);
+    },
+  );
+
+  test('checkout that starts AFTER the claim and link minting releases the claim and defers, never emails', async () => {
+    // First look (before the claim): idle. Second look (right before dispatch):
+    // the customer reserved a visit time or opened the card step in between.
+    followupShared.estimateMidCheckout.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    enqueueProcessorHappyPath({
+      job: pendingJob({ rule_key: 'return_visit_hot' }),
+      est: baseEstimate({ last_viewed_at: new Date(NOW.getTime() - 1 * MIN) }),
+      rules: RULE_ROWS,
+    });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(0);
+    expect(followupShared.estimateMidCheckout).toHaveBeenCalledTimes(2);
+    expect(followupShared.claimFollowupSend).toHaveBeenCalledTimes(1);
+    expect(followupShared.releaseFollowupSend).toHaveBeenCalledWith('est-1', 'return_visit_hot');
+    expect(followupShared.sendDualChannel).not.toHaveBeenCalled();
+    expect(followupShared.bumpFollowupCounters).not.toHaveBeenCalled();
+    // Held, not dropped: still pending, due again after the 15-minute defer.
+    const defer = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(defer.payload.status).toBeUndefined();
+    expect(defer.payload.due_at.getTime()).toBe(NOW.getTime() + 15 * MIN);
+  });
+
+  test('a checkout hold found at the provider boundary releases the claim and defers the job, uncounted', async () => {
+    // sendDualChannel reports the veto through the outcome object and returns false.
+    followupShared.sendDualChannel.mockImplementationOnce(async (_est, _spec, outcome) => {
+      outcome.midCheckout = true;
+      return false;
+    });
+    enqueueProcessorHappyPath({
+      job: pendingJob({ rule_key: 'return_visit_hot' }),
+      est: baseEstimate({ last_viewed_at: new Date(NOW.getTime() - 1 * MIN) }),
+      rules: RULE_ROWS,
+    });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(0);
+    expect(followupShared.sendDualChannel).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.any(Object));
+    expect(followupShared.releaseFollowupSend).toHaveBeenCalledWith('est-1', 'return_visit_hot');
+    expect(followupShared.bumpFollowupCounters).not.toHaveBeenCalled();
+    const defer = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(defer.payload.status).toBeUndefined();
+    expect(defer.payload.due_at.getTime()).toBe(NOW.getTime() + 15 * MIN);
+    // Not a failed send: the attempt counter is not bumped.
+    expect(JSON.stringify(defer.payload)).not.toMatch(/attempts/);
+  });
+
+  test('a final no from the boundary predicate (accepted, expired, deadline moved) skips the job and releases the claim', async () => {
+    followupShared.sendDualChannel.mockImplementationOnce(async (_est, _spec, outcome) => {
+      outcome.finalReason = 'terminal-status:accepted';
+      return false;
+    });
+    enqueueProcessorHappyPath({
+      job: pendingJob({ rule_key: 'return_visit_hot' }),
+      est: baseEstimate({ last_viewed_at: new Date(NOW.getTime() - 1 * MIN) }),
+      rules: RULE_ROWS,
+    });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(0);
+    expect(followupShared.releaseFollowupSend).toHaveBeenCalledWith('est-1', 'return_visit_hot');
+    expect(followupShared.bumpFollowupCounters).not.toHaveBeenCalled();
+    const upd = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(upd.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'boundary:terminal-status:accepted' }));
+  });
+
+  test('once the customer is no longer booking, the same job sends', async () => {
+    followupShared.estimateMidCheckout.mockResolvedValue(false);
+    enqueueProcessorHappyPath({
+      job: pendingJob({ rule_key: 'return_visit_hot' }),
+      est: baseEstimate({ last_viewed_at: new Date(NOW.getTime() - 1 * MIN) }),
+    });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(1);
+    expect(followupShared.claimFollowupSend).toHaveBeenCalled();
+  });
+
   test('engaged-moment rules are hold-exempt — the email sends while they are still on the page (owner 2026-07-21)', async () => {
     enqueueProcessorHappyPath({
       job: pendingJob({ rule_key: 'return_visit_hot' }),
@@ -1058,6 +1249,7 @@ describe('processDueJobs', () => {
       expect.objectContaining({
         email: expect.objectContaining({ idempotencySuffix: expires.toISOString() }),
       }),
+      expect.any(Object),
     );
     // codex 2736 r12: the claim is PINNED to the deadline the copy was
     // validated against — a concurrent extension makes it a lost-claim skip

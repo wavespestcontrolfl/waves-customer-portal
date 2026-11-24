@@ -471,8 +471,23 @@ function oneTapPurchaseRefusal(estimate) {
     : null;
 }
 
+// An open portal plan-start quote (GATE_PORTAL_PLAN_START) is the customer's
+// own booking (codex pre-push P0). Only the public accept re-runs the
+// plan-start eligibility under its locks (assertPlanStartAcceptEligible), and
+// the mint priced the option standalone, for an account with no plan. A staff
+// accept could convert that price after the account gained a plan, and the
+// scheduler's accept-on-book runs after its own visits exist. One the customer
+// accepted is not refused here: it answers as already accepted and still books.
+function planStartManualAcceptRefusal(estimate) {
+  return estimate.source === 'plan_start' && estimate.status !== 'accepted'
+    ? refusal('Only the customer can accept this portal plan-start quote, on its estimate page. Book without it, or send a new estimate.', 409, 'plan_start_self_serve')
+    : null;
+}
+
 // Checked after the already-accepted return, on the row as first read.
 function manualAcceptRowRefusal(estimate, { billingTerm = 'standard' } = {}) {
+  const planStartRefusal = planStartManualAcceptRefusal(estimate);
+  if (planStartRefusal) return planStartRefusal;
   if (!MANUAL_ACCEPTABLE_STATUSES.has(estimate.status)) {
     return refusal(`Only sent or viewed estimates can be manually marked accepted. Current status: ${estimate.status}.`, 400);
   }
@@ -841,15 +856,28 @@ function lockedEstimateData(row) {
 // either (codex r11 sweep on #3804). An engine draft pulled by a call-linkage
 // invalidation (archived or marker-bearing) is quarantined: money must not
 // move on it.
-async function assertNotQuarantined(trx, freshLinkRow, data) {
+const REPRICE_HOLD_MESSAGE = 'This estimate is held for a re-price (a customer clarify reply). Revise it with the answered unit before accepting.';
+const CALL_LINKAGE_QUARANTINE_MESSAGE = 'This estimate is quarantined by a call-linkage correction and cannot be accepted. Rebuild it from the corrected call.';
+
+// The row-only part of assertNotQuarantined, with no read and no lock: an active re-price hold, or a call-composed
+// engine draft the row itself marks as pulled (archived, or carrying a call-linkage invalidation marker). Returns
+// { message } or null. The booking form's "bookable" flag uses it too, so a held quote is never offered for linking.
+function rowQuarantineRefusal(row, data = lockedEstimateData(row)) {
   const eng = data?.estimatorEngine;
   const { repricePendingActive } = require('./estimate-clarify-asks');
-  if (repricePendingActive(eng)) {
-    throw httpError('This estimate is held for a re-price (a customer clarify reply). Revise it with the answered unit before accepting.', 409);
+  if (repricePendingActive(eng)) return { message: REPRICE_HOLD_MESSAGE };
+  if (eng?.callLogId && (row?.archived_at || eng.linkage_invalidated_at || eng.invalidation_pending_at)) {
+    return { message: CALL_LINKAGE_QUARANTINE_MESSAGE };
   }
+  return null;
+}
+
+async function assertNotQuarantined(trx, freshLinkRow, data) {
+  const eng = data?.estimatorEngine;
+  const rowRefusalNow = rowQuarantineRefusal(freshLinkRow, data);
+  if (rowRefusalNow) throw httpError(rowRefusalNow.message, 409);
   if (!eng?.callLogId) return;
-  const quarantined = httpError('This estimate is quarantined by a call-linkage correction and cannot be accepted. Rebuild it from the corrected call.', 409);
-  if (freshLinkRow?.archived_at || eng.linkage_invalidated_at || eng.invalidation_pending_at) throw quarantined;
+  const quarantined = httpError(CALL_LINKAGE_QUARANTINE_MESSAGE, 409);
   if (data?.lead_id && ['sid', 'stamp'].includes(data?.lead_linkage)) {
     await trx('leads').where({ id: String(data.lead_id) }).forUpdate().first('id');
   }
@@ -1154,6 +1182,13 @@ async function runConversion(trx, ctx, updatedEstimate, annualPrepayAmount) {
     // Only the annual-prepay manual accept mints an invoice, so only it bills the misting install (a Mark Won that bills nothing raises no install bell).
     ...(ctx.annualPrepaySelected ? { mistingInstallBilled: true } : {}),
     deferCommercialScheduleNotification: true,
+    // The converter seeds the plan's next visits inside this transaction when a visit is linked to the estimate (one
+    // linked before the accept, or by a beforeConvert hook). Registered inline, their reminders go through a second
+    // connection (appointment-reminders), which cannot see this transaction's new visits: each registration failed
+    // its foreign key, and the reminder self-heal sweep armed the rows later. So the converter always hands them back
+    // (conversion.deferredFollowUpReminderRows) and the accept registers them after the commit
+    // (registerDeferredFollowUpReminders), as the public accept and the termite activation do.
+    deferFollowUpReminderRegistration: true,
     ...cardConvertOptions(ctx),
   };
   if (ctx.annualPrepaySelected) await applyAnnualPrepayOptions(trx, ctx, updatedEstimate, annualPrepayAmount, convertOptions);
@@ -1328,6 +1363,10 @@ async function acceptInTransaction(trx, ctx) {
     throw httpError('This estimate changed while it was being accepted. Refresh and try again.', 409);
   }
 
+  // A caller's step before the conversion (the call-phone-yes card's accept, a later PR: lock, re-check and link the
+  // visit the call booked, so the converter books the plan from it). A throw rolls the whole accept back.
+  if (typeof ctx.beforeConvert === 'function') await ctx.beforeConvert(trx, { estimate: updatedEstimate });
+
   let win = { proposalCustomer: null, conversion: null };
   const before = isCommercialProposal ? null : await captureStateBefore(trx, ctx, updatedEstimate);
   if (isCommercialProposal) win = { ...win, ...(await winCommercialProposal(trx, updatedEstimate)) };
@@ -1340,9 +1379,9 @@ async function acceptInTransaction(trx, ctx) {
     estimate, updatedEstimate, adminUserId: ctx.adminUserId, source: ctx.source, billingTerm: ctx.billingTerm,
   });
   await recordTableChanges(trx, ctx, updatedEstimate);
-  // A caller's last step inside this transaction (call-prepay-choice: lock, re-check, link). A throw rolls the
-  // whole accept back: no invoice, no term.
-  if (typeof ctx.beforeCommit === 'function') await ctx.beforeCommit(trx, { estimate: updatedEstimate });
+  // A caller's last step inside this transaction (call-prepay-choice: lock, re-check, link; the call-phone-yes card's
+  // accept, a later PR: check the plan the conversion booked). A throw rolls the whole accept back: no invoice, no term.
+  if (typeof ctx.beforeCommit === 'function') await ctx.beforeCommit(trx, { estimate: updatedEstimate, conversion: win.conversion });
   const outcome = await settleEffects(trx, ctx, {
     acceptedEstimate: updatedEstimate,
     alreadyAccepted: false,
@@ -1351,6 +1390,20 @@ async function acceptInTransaction(trx, ctx) {
     ...win,
   }, isCommercialProposal);
   return finishAccept(ctx, outcome);
+}
+
+// The reminders of the visits the converter seeded inside the accept's transaction, registered now that it
+// committed (the converter defers them for every manual accept: runConversion). The same function and options as the
+// converter's inline path (sendConfirmation: false). Never throws, because the accept has already committed; a failure
+// is logged, as the public accept does (the 15-minute reminder self-heal sweep backfills a missed row).
+async function registerDeferredFollowUpReminders(claim, ctx) {
+  const rows = claim.conversion?.deferredFollowUpReminderRows;
+  if (!Array.isArray(rows) || !rows.length) return;
+  try {
+    await ctx.estimateConverter.registerSeededFollowUpReminders(rows, claim.conversion.customerId || claim.acceptedEstimate?.customer_id);
+  } catch (err) {
+    logger.error(`[estimate-manual-acceptance] deferred follow-up reminders failed for estimate ${ctx.estimateId}: ${err.message}`);
+  }
 }
 
 async function runAcceptTransaction(database, ctx) {
@@ -1431,10 +1484,16 @@ async function markEstimateManuallyAccepted({
   // Run every step in the accept's own transaction, collect the effects, roll
   // back and return them. Nothing commits and nothing is sent.
   dryRun = false,
-  // async (trx, { estimate }) => void: the caller's last step inside the accept's transaction, after the
-  // conversion and before the commit. A throw rolls the whole accept back. Null for every caller but the
-  // call-prepay-choice card.
+  // async (trx, { estimate, conversion }) => void: the caller's last step inside the accept's transaction, after the
+  // conversion and before the commit; `conversion` is the converter's result (null for a commercial proposal). A
+  // throw rolls the whole accept back. Null for every caller but the call-prepay-choice card today.
   beforeCommit = null,
+  // async (trx, { estimate }) => void: the caller's step inside the accept's transaction after the estimate row is
+  // claimed and before the conversion runs. A throw rolls the whole accept back. Null for every caller today; for the
+  // call-phone-yes card's accept (a later PR), which links the visit the call booked here so the converter books the
+  // plan from it. A hook that links a visit works only in a real accept without the noLinkedVisits pin: a dry run and
+  // that pin both make the converter refuse a visit linked to the estimate (cardConvertOptions).
+  beforeConvert = null,
   database = db,
   leadLinkService = { markLinkedLeadEstimateAccepted, resolveLinkedLeadWon },
   estimateConverter = EstimateConverter,
@@ -1445,7 +1504,7 @@ async function markEstimateManuallyAccepted({
     estimateId, adminUserId, source, billingTerm: normalizedBillingTerm,
     annualPrepaySelected: normalizedBillingTerm === 'prepay_annual',
     annualPrepayTermStart, annualPrepayCoverage, agreementStartDate, bookedAppointmentIds,
-    expected, dryRun: dryRun === true, estimateConverter, database, leadLinkService, beforeCommit,
+    expected, dryRun: dryRun === true, estimateConverter, database, leadLinkService, beforeCommit, beforeConvert,
     effects: AcceptEffects.createEffectLog(dryRun === true || !!expected?.effectsKey),
     convertLog: [],
   };
@@ -1459,6 +1518,9 @@ async function markEstimateManuallyAccepted({
 
   const warnings = [];
   if (claim.shouldRunDownstream) {
+    // First after the commit, where the converter's own-transaction path registers them, so a post-commit step that
+    // throws cannot skip them.
+    await registerDeferredFollowUpReminders(claim, ctx);
     await runPostCommitWork(claim, ctx, { leadLinkService, warnings });
     // A promo code the customer typed on this estimate before the office
     // marked it won posts its account credit, as the customer's own accept
@@ -1478,8 +1540,10 @@ module.exports = { MANUAL_ACCEPT_ACTIVE_SQL,
   lawnProfilePin,
   propertyPin,
   oneTapPurchaseRefusal,
+  planStartManualAcceptRefusal,
   manualAcceptRowRefusal,
   manualAcceptLockedRowRefusal,
+  rowQuarantineRefusal,
   persistedAddOnRefusal,
   recurringAcceptWouldDropAreaAddOns,
   AREA_ADDON_RECURRING_MARK_WON_MESSAGE,

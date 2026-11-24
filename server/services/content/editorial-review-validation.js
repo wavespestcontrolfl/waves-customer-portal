@@ -44,22 +44,52 @@ function validateChecks(checks, document, title, sources) {
   return null;
 }
 
+// UF/IFAS EDIS publication numbers (EENY-514, ENY-228, ENH5, LH010, SL21, IN917, CIR1234) name a source;
+// their digits are not figures. Only these prefixes: a rating such as MERV-13 or SEER-16 is a figure. They
+// are removed for the figure test only: an attributed quote is detected on the passage as written.
+const DOCUMENT_CODE_RE = /\b(?:EENY|ENY|ENH|LH|SL|IN|CIR)-?\d+[A-Z]?\b/g;
+// A figure may sit right against its unit ("38mm", "5ft") or inside emphasis ("_5_"), so it needs
+// only no letter or digit right before it ("EENY514" and "CO2" stay names).
+const FIGURE_RE = /(?:\$|%|(?<![A-Za-z0-9])\d+(?:[.,]\d+)?|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b)/i;
+// A Markdown link's destination, with any title, is not read as prose
+// ("[guide](/pest-control/2026-roach-guide/ 'Roaches')"); its text is. A bare URL stays in: it is visible
+// text. A form this misses counts its digits, which costs a repair, never a pass (holdUnsourcedFigures).
+const LINK_DESTINATION_RE = /\]\(\s*(?:<[^>\n]*>|[^\s()]*(?:\([^\s()]*\)[^\s()]*)*)(?:\s+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?\s*\)/g;
+// The text a reader sees: a link destination and its title (a tooltip) are set aside.
+const visibleText = (passage) => String(passage || '').replace(LINK_DESTINATION_RE, '] ');
 function deterministicClaimKind(passage) {
-  const text = String(passage || '');
+  const text = visibleText(passage);
   const hasQuote = /["“][^"”]{3,}["”]/.test(text);
   if (hasQuote && /\b(?:said|says|stated|according to|wrote|called|described)\b/i.test(text)) return 'expert_quote';
-  if (/(?:\$|%|\b\d+(?:[.,]\d+)?\b|\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b)/i.test(text)) return 'quantitative';
+  if (FIGURE_RE.test(text.replace(DOCUMENT_CODE_RE, ' '))) return 'quantitative';
   return null;
 }
 
 function exactQuotedPhrases(passage) {
   const phrases = [];
-  for (const match of String(passage || '').matchAll(/["“]([^"”]{3,})["”]/g)) phrases.push(match[1]);
+  for (const match of visibleText(passage).matchAll(/["“]([^"”]{3,})["”]/g)) phrases.push(match[1]);
   return phrases;
 }
 
-function isTrivialNumericInstruction(passage) {
-  return /^(?:check|empty|inspect|look|remove|walk)\b/i.test(String(passage || '').trim());
+// A non_external passage may carry a number only in the visible "Last updated: Month Year" line every
+// brief asks for (content-brief-builder). Any other figure, an instruction's or link text's included, is
+// held to the deterministic kind: holdUnsourcedFigures turns it into a repairable unsupported claim. This
+// replaces main's first-word instruction allowance ("Check 2 containers"), which let a fact inside an
+// instruction ("Look for larvae that hatch in 3 days") pass with no source; it existed only so that a
+// mislabel did not lose the whole answer, which holdUnsourcedFigures now prevents.
+const DATE_STAMP_RE = /^[*_\s]*(?:last\s+)?(?:updated|reviewed)[*_\s]*:?[*_\s]*(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{4}[.\s*_]*$/i;
+
+// A supported claim meets the rules of BOTH its label and the deterministic kind, so a wrong label
+// cannot loosen anything (Mac test 2026-11-19: a supported nickname quote labeled "general" used to
+// reject a whole 89-claim answer).
+function supportedClaimError(claim, kinds, sources) {
+  if (!validSourceReference(claim.sourceIndex, claim.sourceQuote, sources)) return `claim_quote:${claim.claimId}`;
+  if (claim.sourceSuitability === 'unsuitable' || claim.sourceSuitability === 'not_applicable') return `claim_unsuitable:${claim.claimId}`;
+  if (['quantitative', 'expert_quote', 'named_example'].some((kind) => kinds.has(kind))
+    && claim.sourceSuitability !== 'primary_authoritative') return `claim_primary_source_required:${claim.claimId}`;
+  if (kinds.has('expert_quote')
+    && exactQuotedPhrases(claim.passage).some((phrase) => !sources[claim.sourceIndex].excerpt.includes(phrase))) return `claim_attribution_quote:${claim.claimId}`;
+  return null;
 }
 
 function validateClaimEvidence(claim, sources) {
@@ -68,21 +98,49 @@ function validateClaimEvidence(claim, sources) {
   if (!kinds.includes(claim.claimKind)) return `claim_kind:${claim.claimId}`;
   if (!suitability.includes(claim.sourceSuitability)) return `claim_suitability:${claim.claimId}`;
   const deterministicKind = deterministicClaimKind(claim.passage);
-  const allowedInstruction = `${claim.verdict}:${deterministicKind}` === 'non_external:quantitative'
-    && isTrivialNumericInstruction(claim.passage);
-  if (deterministicKind && !allowedInstruction && claim.claimKind !== deterministicKind) return `claim_kind_mismatch:${claim.claimId}`;
-  if (claim.verdict === 'supported') {
-    if (!validSourceReference(claim.sourceIndex, claim.sourceQuote, sources)) return `claim_quote:${claim.claimId}`;
-    if (claim.sourceSuitability === 'unsuitable' || claim.sourceSuitability === 'not_applicable') return `claim_unsuitable:${claim.claimId}`;
-    if (['quantitative', 'expert_quote', 'named_example'].includes(claim.claimKind)
-      && claim.sourceSuitability !== 'primary_authoritative') return `claim_primary_source_required:${claim.claimId}`;
-    if (claim.claimKind === 'expert_quote'
-      && exactQuotedPhrases(claim.passage).some((phrase) => !sources[claim.sourceIndex].excerpt.includes(phrase))) return `claim_attribution_quote:${claim.claimId}`;
-  } else {
-    if (claim.sourceIndex !== -1 || claim.sourceQuote !== '') return `claim_empty_source:${claim.claimId}`;
-    if (claim.verdict === 'non_external' && (claim.claimKind !== 'non_external' || claim.sourceSuitability !== 'not_applicable')) return `claim_non_external_shape:${claim.claimId}`;
-  }
+  if (claim.verdict === 'supported') return supportedClaimError(claim, new Set([claim.claimKind, deterministicKind].filter(Boolean)), sources);
+  if (claim.sourceIndex !== -1 || claim.sourceQuote !== '') return `claim_empty_source:${claim.claimId}`;
+  // An unsupported claim fails source support whatever its label. A figure or an attributed quote marked
+  // non_external would skip the source rules, so that stays a hard reject.
+  if (claim.verdict !== 'non_external') return null;
+  const allowedNumber = deterministicKind === 'quantitative' && DATE_STAMP_RE.test(String(claim.passage || '').trim());
+  if (deterministicKind && !allowedNumber) return `claim_kind_mismatch:${claim.claimId}`;
+  if (claim.claimKind !== 'non_external' || claim.sourceSuitability !== 'not_applicable') return `claim_non_external_shape:${claim.claimId}`;
   return null;
+}
+
+// A figure or an attributed quote the model marked non_external has no source behind it. That used to
+// fail the whole answer (claim_kind_mismatch), so one label lost a complete review (Mac test 2026-11-19).
+// Such a claim is now held as unsupported, with a source_support finding on its exact passage: the review
+// fails on it, and the repair step gets the passage to cite or remove. It only ever makes a review
+// stricter. Runs before validateReviewJson, which still rejects a mislabel it did not convert.
+const UNSOURCED_ACTION = 'Cite a fetched source that states this figure or quote, or remove it.';
+function holdUnsourcedFigures(json) {
+  if (!json || !Array.isArray(json.claims) || !Array.isArray(json.checks)) return json;
+  const held = json.claims.filter((claim) => {
+    if (claim?.verdict !== 'non_external') return false;
+    const kind = deterministicClaimKind(claim.passage);
+    return Boolean(kind) && !(kind === 'quantitative' && DATE_STAMP_RE.test(String(claim.passage || '').trim()));
+  });
+  if (!held.length) return json;
+  const heldIds = new Set(held.map((claim) => claim.claimId));
+  const claims = json.claims.map((claim) => (!heldIds.has(claim.claimId) ? claim : {
+    ...claim, verdict: 'unsupported', claimKind: deterministicClaimKind(claim.passage),
+    sourceSuitability: 'unsuitable', sourceIndex: -1, sourceQuote: '', action: UNSOURCED_ACTION,
+  }));
+  const checks = json.checks.map((check) => {
+    if (check?.name !== 'source_support' || !Array.isArray(check.findings)) return check;
+    const passages = new Set(check.findings.map((item) => item?.passage));
+    const added = [];
+    for (const claim of held) {
+      if (passages.has(claim.passage)) continue;
+      passages.add(claim.passage);
+      added.push({ passage: claim.passage, detail: 'This passage states a figure or an attributed quote with no fetched source behind it.',
+        action: UNSOURCED_ACTION, sourceIndexes: [], sourceQuote: '' });
+    }
+    return { ...check, status: 'fail', findings: [...check.findings, ...added] };
+  });
+  return { ...json, claims, checks };
 }
 
 function validateClaims(claims, analysis, document, sources) {
@@ -144,4 +202,4 @@ function validatePlanJson(json, sections) {
   return null;
 }
 
-module.exports = { validatePlanJson, validateReviewJson };
+module.exports = { validatePlanJson, validateReviewJson, holdUnsourcedFigures };

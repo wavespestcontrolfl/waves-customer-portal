@@ -217,13 +217,13 @@ describe('the window guard scores from and back to `home`', () => {
     const flat = [sources[1], sources[2], sources[0], t2[1], t2[2], t2[0]];
     const techHomes = new Map([['t1', HOME]]);
     const out = resolveWindowSafeOrderByTechDay({
-      RouteOptimizer, orderedStops: flat, sourceStops: sources, googleSource: 'google_routes_api', techHomes, requireCalibratedModel: false,
+      RouteOptimizer, orderedStops: flat, sourceStops: sources, googleSource: 'google_routes_api', techHomes,
     });
     expect(out.refusal).toBeUndefined();
     expect(out.resolvedByTech.get('t1').afterMeters).toBe(36000);
     expect(out.resolvedByTech.get('t2').afterMeters).toBe(14000);
     const officeOnly = resolveWindowSafeOrderByTechDay({
-      RouteOptimizer, orderedStops: flat, sourceStops: sources, googleSource: 'google_routes_api', requireCalibratedModel: false,
+      RouteOptimizer, orderedStops: flat, sourceStops: sources, googleSource: 'google_routes_api',
     });
     expect(officeOnly.resolvedByTech.get('t1').afterMeters).toBe(14000);
   });
@@ -282,7 +282,6 @@ describe('nightly pass starts and ends each tech at their start point', () => {
     commitReads = 0;
     jest.clearAllMocks();
     delete process.env.GATE_ROUTE_REORDER_WINDOW_FIT;
-    delete process.env.GATE_DRIVE_TIME_CALIBRATION;
     stopsByDate = {};
     ledgerInserts = [];
     technicianQueries = 0;

@@ -36,29 +36,48 @@ function customerPhoneLookupKey(value) {
  * @param {string[]} [columns] columns to select (default id + name)
  * @returns {Promise<object|null>}
  */
-async function findKnownCallerCustomer(dbLike, phone, columns = ['id', 'first_name', 'last_name']) {
+// Live customers whose identity phone columns contain `phone` (at most `limit`).
+// `timeoutMs` (optional) puts a cancelling statement timeout on the read.
+async function knownCallerCustomers(dbLike, phone, columns, limit, timeoutMs) {
   const key = customerPhoneLookupKey(phone);
-  if (!key) return null;
+  if (!key) return [];
   const keys = key.length === 10 ? [key, `1${key}`] : [key];
   const placeholder = keys.map(() => '?').join(', ');
   const frag = KNOWN_CALLER_PHONE_COLS
     .map((col) => `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') IN (${placeholder})`)
     .join(' OR ');
-  const rows = await dbLike('customers')
+  let query = dbLike('customers')
     .select(columns)
     .whereNull('deleted_at')
-    .whereRaw(`(${frag})`, KNOWN_CALLER_PHONE_COLS.flatMap(() => keys))
-    .limit(1);
-  return (rows && rows[0]) || null;
+    .whereRaw(`(${frag})`, KNOWN_CALLER_PHONE_COLS.flatMap(() => keys));
+  if (timeoutMs) query = query.timeout(timeoutMs, { cancel: true });
+  const rows = await query.limit(limit);
+  return rows || [];
 }
 
-async function knownCallerPhoneExists(dbLike, phone) {
-  return Boolean(await findKnownCallerCustomer(dbLike, phone, ['id']));
+async function findKnownCallerCustomer(dbLike, phone, columns = ['id', 'first_name', 'last_name'], timeoutMs) {
+  const rows = await knownCallerCustomers(dbLike, phone, columns, 1, timeoutMs);
+  return rows[0] || null;
+}
+
+/**
+ * The ONE live customer whose identity phone columns contain `phone`; null for
+ * none or for two or more (never guess). Same columns and keys as
+ * findKnownCallerCustomer.
+ */
+async function findOnlyKnownCallerCustomer(dbLike, phone, columns = ['id']) {
+  const rows = await knownCallerCustomers(dbLike, phone, columns, 2);
+  return rows.length === 1 ? rows[0] : null;
+}
+
+async function knownCallerPhoneExists(dbLike, phone, timeoutMs) {
+  return Boolean(await findKnownCallerCustomer(dbLike, phone, ['id'], timeoutMs));
 }
 
 module.exports = {
   KNOWN_CALLER_PHONE_COLS,
   customerPhoneLookupKey,
   findKnownCallerCustomer,
+  findOnlyKnownCallerCustomer,
   knownCallerPhoneExists,
 };

@@ -58,6 +58,17 @@ describe('reply training capture', () => {
         body: 'Quick update - we moved your appointment to Friday.',
       })).toBe(false);
     }
+
+    // An office answer in the portal, texted to the customer (GATE_PORTAL_ANSWER_TEXT): staff words, but an answer to
+    // the customer's portal message, not to their last text.
+    expect(shouldCaptureReply({
+      channel: 'sms',
+      direction: 'outbound',
+      authorType: 'admin',
+      adminUserId: 'admin-7',
+      messageType: 'portal_answer',
+      body: "Hi Pat, here's our answer from Waves: Friday works.",
+    })).toBe(false);
   });
 
   test('classifies common Waves customer reply scenarios', () => {

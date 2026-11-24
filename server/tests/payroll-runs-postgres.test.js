@@ -311,9 +311,9 @@ postgres('payroll pay runs', () => {
     it('blocks everyone when the pay date is in a year with no tables', async () => {
       const id = await readyTech('Sample Alpha');
       await approvedWeek(id, W1);
-      const { run } = (await draft(W1, { payDate: '2027-01-08' })).body;
+      const { run } = (await draft(W1, { payDate: '2028-01-07' })).body;
       expect(run.checks).toEqual([]);
-      expect(run.blocked).toEqual([{ technicianId: id, name: 'Sample Alpha', reason: 'No federal withholding tables for 2027 yet' }]);
+      expect(run.blocked).toEqual([{ technicianId: id, name: 'Sample Alpha', reason: 'No federal withholding tables for 2028 yet' }]);
     });
 
     it('uses the W-4 in force on the pay date', async () => {

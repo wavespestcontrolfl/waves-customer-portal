@@ -7,6 +7,8 @@ import {
   trackAdminPageView,
   __resetAdminUsageForTests,
 } from './adminUsage';
+import { noteServerAnswer, resetPortalVersionForTests } from './portalVersion';
+import { noteMoveOutcome } from './portalReload';
 
 describe('normalizeAdminPath', () => {
   it('maps top-level admin pages to their page key', () => {
@@ -149,6 +151,32 @@ describe('trackAdminPageView', () => {
     const [, opts] = fetchMock.mock.calls.at(-1);
     return JSON.parse(opts.body);
   }
+
+  it('carries the tab build, the start time and build of the server it heard from, and what kept the last page move from reloading the tab for the page that move opened', () => {
+    resetPortalVersionForTests();
+    document.head.insertAdjacentHTML('beforeend', '<meta name="portal-build" content="aaa111aaa111">');
+    try {
+      noteMoveOutcome('/admin/pipeline', 'card-payment');
+      trackAdminPageView({ pathname: '/admin/pipeline', search: '' });
+      settle();
+      expect(lastBody()).toEqual({ pageKey: 'pipeline', path: '/admin/pipeline', source: 'load', build: 'aaa111aaa111', reloadHold: 'card-payment' });
+      // Once a server's answer counts, its start time and build go too, read
+      // as the beacon goes out. Another page, and a page whose move was due a
+      // reload, carry no name.
+      trackAdminPageView({ pathname: '/admin/dashboard', search: '' });
+      noteServerAnswer(new Headers({ 'X-Portal-Build': 'bbb222bbb222', 'X-Portal-Boot': '1700000000000' }));
+      settle();
+      expect(lastBody()).toEqual({ pageKey: 'dashboard', path: '/admin/dashboard', source: 'in-app', build: 'aaa111aaa111', boot: 1700000000000, liveBuild: 'bbb222bbb222' });
+      noteMoveOutcome('/admin/customers', null);
+      trackAdminPageView({ pathname: '/admin/customers', search: '' });
+      settle();
+      expect(lastBody()).not.toHaveProperty('reloadHold');
+    } finally {
+      noteMoveOutcome(null, null);
+      document.head.querySelectorAll('meta[name="portal-build"]').forEach((el) => el.remove());
+      resetPortalVersionForTests();
+    }
+  });
 
   it('posts a normalized page view with the load source first', () => {
     trackAdminPageView({ pathname: '/admin/dashboard', search: '' });

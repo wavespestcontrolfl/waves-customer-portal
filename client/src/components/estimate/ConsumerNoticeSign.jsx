@@ -25,11 +25,16 @@ export function ConsumerNoticeHint({ blocked }) {
  *
  * The tap POSTs /:token/consumer-notice, which issues (or re-opens) the FDACS-13692 form and returns its signing
  * URL; this page then hands the customer to that existing signing page in the same tab.
+ *
+ * `onRefusal(status, body)` is the page's hook for a 409 it owns (a refused plan quote): the route answers the
+ * accept's own 409 to a tab loaded before staff changed the quote. True = the page took it and shows the reason with
+ * the portal link, so this card steps aside (codex pre-push P1).
  */
-export default function ConsumerNoticeSign({ token, consumerNotice }) {
+export default function ConsumerNoticeSign({ token, consumerNotice, onRefusal = null }) {
   const inFlight = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [pageTookRefusal, setPageTookRefusal] = useState(false);
   // A tap leaves the button busy while the signing page loads. Back on this page from the browser's cache (the
   // customer left without signing), it works again.
   useEffect(() => {
@@ -41,8 +46,12 @@ export default function ConsumerNoticeSign({ token, consumerNotice }) {
     window.addEventListener('pageshow', onPageShow);
     return () => window.removeEventListener('pageshow', onPageShow);
   }, []);
-  if (!consumerNotice) return null;
+  if (!consumerNotice || pageTookRefusal) return null;
   const { canSign, state } = consumerNotice;
+  // Never throws into the tap.
+  const handsUpRefusal = (body) => {
+    try { return onRefusal?.(409, body) === true; } catch { return false; }
+  };
 
   const start = async () => {
     if (inFlight.current) return;
@@ -55,6 +64,12 @@ export default function ConsumerNoticeSign({ token, consumerNotice }) {
       const response = await fetch(`${API_BASE}/estimates/${encodeURIComponent(token)}/consumer-notice`, { method: 'POST' });
       const body = await response.json().catch(() => ({}));
       if (!response.ok || !body.signingUrl) {
+        if (response.status === 409 && handsUpRefusal(body)) {
+          setPageTookRefusal(true);
+          setBusy(false);
+          inFlight.current = false;
+          return;
+        }
         if (response.status === 409 && body.error) serverMessage = body.error;
         throw new Error('request_failed');
       }

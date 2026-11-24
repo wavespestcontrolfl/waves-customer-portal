@@ -11,6 +11,12 @@ describe("lookupPretreatProduct", () => {
     expect(lookupPretreatProduct("Talstar P Professional")?.label).toBe("Talstar P");
   });
 
+  it("matches LESCO Crosscheck Plus, the house bifenthrin (label pages 29-32: 0.06%)", () => {
+    expect(lookupPretreatProduct("LESCO Crosscheck Plus")).toMatchObject({ label: "LESCO Crosscheck Plus", kind: "soil_liquid", concentrationPct: "0.060" });
+    expect(computePretreatChemistry({ productName: "lesco crosscheck plus", squareFootage: "1,800", linearFeet: "220", trenchDepthFt: "0.5" }))
+      .toMatchObject({ status: "ok", concentrationPct: "0.060", gallons: 224 });
+  });
+
   it("does not match unrelated products or prefixes without a word break", () => {
     expect(lookupPretreatProduct("Termidor HE")).toBeNull();
     expect(lookupPretreatProduct("Taurus SC")).toBeNull();
@@ -79,6 +85,59 @@ describe("computePretreatChemistry", () => {
       trenchDepthFt: "1.5 ft",
     });
     expect(feet.verticalGallons).toBe(60); // explicit ft stays feet
+    const leadingDot = computePretreatChemistry({
+      productName: "Termidor SC",
+      linearFeet: "100",
+      trenchDepthFt: ".5",
+    });
+    expect(leadingDot.verticalGallons).toBe(20); // half a foot, NOT 5 ft
+  });
+
+  it("puts LESCO Crosscheck Plus at 0.12% on the label chart's half volume, horizontal and vertical", () => {
+    // Label page 31, Volume Adjustment Chart: 0.06% = 1 gal / 10 sq ft and 4 gal / 10 LF; 0.12% = 0.5 gal and 2 gal.
+    // Every value the certificate prints as 0.12 (new-construction-warranty.js withoutUnit + the amount check).
+    for (const typed of ["0.12", "0.120", "0.12%", " 0.12 % ", ".12", "0.12% dilution"]) {
+      const result = computePretreatChemistry({
+        productName: "LESCO Crosscheck Plus",
+        squareFootage: "1,800",
+        linearFeet: "220",
+        trenchDepthFt: "0.5",
+        concentrationPct: typed,
+      });
+      expect(result).toMatchObject({
+        status: "ok",
+        concentrationPct: "0.060", // the auto-fill value stays the label standard
+        volumeAdjusted: true,
+        horizontalGallons: 90,
+        verticalGallons: 22,
+        gallons: 112,
+        gallonsText: "112",
+      });
+      expect(result.note).toBe(
+        "90 gal horizontal (0.5 gal / 10 sq ft, the label's 0.12% volume adjustment)"
+          + " + 22 gal vertical (2 gal / 10 LF per ft of depth, the label's 0.12% volume adjustment)",
+      );
+    }
+  });
+
+  it("keeps the labeled volume at any other dilution, and for products whose chart was not read", () => {
+    // Another dilution, or text the certificate cannot print as one number (another unit, a range), keeps the labeled volume.
+    for (const typed of [undefined, "", "0.060", "0.06", "0.1", "0.125", "1.2", "12", "0.12 fl oz/gal", "0.12-0.125", "0.12%-0.125%"]) {
+      expect(computePretreatChemistry({
+        productName: "LESCO Crosscheck Plus",
+        linearFeet: "200",
+        trenchDepthFt: "1",
+        concentrationPct: typed,
+      })).toMatchObject({ volumeAdjusted: false, verticalGallons: 80, gallons: 80 });
+    }
+    for (const productName of ["Talstar P", "Termidor SC", "Premise 2"]) {
+      expect(computePretreatChemistry({
+        productName,
+        linearFeet: "200",
+        trenchDepthFt: "1",
+        concentrationPct: "0.12",
+      })).toMatchObject({ volumeAdjusted: false, gallons: 80 });
+    }
   });
 
   it("combines horizontal + vertical and assumes the 0.5 ft label-standard depth when blank", () => {

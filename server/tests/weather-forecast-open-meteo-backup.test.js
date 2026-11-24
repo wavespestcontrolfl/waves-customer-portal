@@ -1,7 +1,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const logger = require('../services/logger');
-const { getDailyRainOutlook, getHourlyRainOutlook, _test } = require('../services/weather-forecast');
+const { getDailyRainOutlook, getHourlyRainOutlook, getNwsHourlyRain, _test } = require('../services/weather-forecast');
 const { etOffsetIso } = require('../utils/datetime-et');
 
 // 2026-10-07 10:00 UTC = 06:00 EDT. Hours are unix seconds, as requested.
@@ -41,6 +41,71 @@ describe('weather-forecast Open-Meteo backup', () => {
     expect(etOffsetIso('2026-12-06T20:00:00Z')).toBe('2026-12-06T15:00:00-05:00');
     expect(etOffsetIso('2026-12-07T05:00:00Z')).toBe('2026-12-07T00:00:00-05:00');
     expect(etOffsetIso('not a date')).toBeNull();
+  });
+
+  test('getNwsHourlyRain: NWS only. NWS down gives null and no backup read, even with a key', async () => {
+    process.env.OPEN_METEO_API_KEY = 'test-key';
+    global.fetch.mockResolvedValueOnce({ ok: false });
+    expect(await getNwsHourlyRain(27.61, -82.61)).toBeNull();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(global.fetch.mock.calls.some(([url]) => isOpenMeteo(url))).toBe(false);
+  });
+
+  test('getNwsHourlyRain: fetchTimeoutMs gives each NWS fetch its longer wait; the default stays 2.5 s', async () => {
+    const spy = jest.spyOn(global, 'setTimeout');
+    const nwsOk = () => global.fetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ properties: { forecastHourly: 'https://api.weather.gov/x' } }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ properties: { periods: [{ startTime: '2026-10-07T08:00:00-04:00', probabilityOfPrecipitation: { value: 20 } }] } }) });
+    nwsOk();
+    await getNwsHourlyRain(27.63, -82.63, { fetchTimeoutMs: 10000 });
+    expect(spy.mock.calls.filter(([, ms]) => ms === 10000)).toHaveLength(2);
+    spy.mockClear();
+    nwsOk();
+    await getNwsHourlyRain(27.64, -82.64);
+    expect(spy.mock.calls.filter(([, ms]) => ms === 2500)).toHaveLength(2);
+    spy.mockRestore();
+  });
+
+  test('a long NWS read is not shared: a short reader at the same point makes its own read', async () => {
+    let release;
+    global.fetch.mockImplementationOnce(() => new Promise((r) => { release = r; }));
+    const long = getNwsHourlyRain(27.65, -82.65, { fetchTimeoutMs: 10000 });
+    global.fetch.mockResolvedValueOnce({ ok: false });
+    expect(await getNwsHourlyRain(27.65, -82.65)).toBeNull();
+    expect(global.fetch).toHaveBeenCalledTimes(2); // its own read, not a wait on the long one
+    release({ ok: false });
+    expect(await long).toBeNull();
+  });
+
+  test('getNwsHourlyRain: a cached backup answer is not used; its NWS answer is cached and reused', async () => {
+    process.env.OPEN_METEO_API_KEY = 'test-key';
+    // Another reader cached a backup answer for this point.
+    global.fetch.mockResolvedValueOnce({ ok: false }).mockResolvedValueOnce(omOk([10, 70]));
+    expect((await getHourlyRainOutlook(27.62, -82.62))[0].source).toBe('open-meteo');
+    global.fetch.mockClear();
+    global.fetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ properties: { forecastHourly: 'https://api.weather.gov/x' } }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ properties: { periods: [{ startTime: '2026-10-07T08:00:00-04:00', probabilityOfPrecipitation: { value: 80 } }] } }) });
+    const hours = await getNwsHourlyRain(27.62, -82.62);
+    expect(hours[0].rainChance).toBe(80);
+    expect(hours[0].source).toBeUndefined();
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(global.fetch.mock.calls.some(([url]) => isOpenMeteo(url))).toBe(false);
+    // The NWS answer is cached: a second read fetches nothing.
+    expect(await getNwsHourlyRain(27.62, -82.62)).toBe(hours);
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    // After 10 minutes the cached answer is old: NWS is read again.
+    now += 10 * 60 * 1000;
+    global.fetch.mockResolvedValueOnce({ ok: false });
+    expect(await getNwsHourlyRain(27.62, -82.62)).toBeNull();
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+  });
+
+  test('getNwsHourlyRain: no point, no read', async () => {
+    for (const [lat, lng] of [[null, -82.6], [27.6, undefined], ['', -82.6], ['north', -82.6]]) {
+      expect(await getNwsHourlyRain(lat, lng)).toBeNull();
+    }
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 
   test('NWS ok: Open-Meteo is never called', async () => {

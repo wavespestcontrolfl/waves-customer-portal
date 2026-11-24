@@ -1,5 +1,5 @@
 /**
- * MOVE LIMIT — how many automatic moves one visit may have.
+ * MOVE LIMIT — how many automatic DAY moves one visit may have.
  *
  * Owner 2026-10-09: "at most two automatic day moves for one visit, both
  * inside the +/-5-day window". The count comes from the durable move log,
@@ -7,9 +7,18 @@
  * (apply.js skips that stamp when the row changed after the move). A move is
  * a reschedule_log row the rebooker wrote inside the move transaction with the
  * auto-dispatch writer signature (the one route-tiers.js loadAnchorMap reads)
- * whose date or window changed (eligibility.js SLOT_CHANGED_SQL). Day moves,
- * same-day re-times and forced moves (an unplaced due date, a conflict) all
- * count. config.maxAutoMovesPerVisit sets the limit; 0 turns it off.
+ * whose DATE changed (DAY_MOVE_SQL). config.maxAutoMovesPerVisit sets the
+ * limit; 0 turns it off.
+ *
+ * DAYS ONLY (owner 2026-11-22, "days"): a same-day change of the hour does not
+ * count. Until then every slot change counted, and most same-day changes were
+ * forced repairs of a double booking that a new booking or a staff move made:
+ * on 2026-11-22, 9 of the 12 visits at the limit had reached it that way, and
+ * the run could then not repair their next conflict. A forced move of a
+ * placed visit (a conflict, a closed day) still counts when it changes the
+ * day. The first placement of a visit that had no arrival window never
+ * counted and does not count now (DAY_MOVE_SQL). The told-time and
+ * person-placed locks are separate and unchanged.
  *
  * ONE EXCEPTION (owner 2026-11-17, "pick limit"): a pick fallback row. Quick
  * Move's "let the customer pick a day" text promises that if the customer does
@@ -27,14 +36,18 @@
  * only if every member is under the limit.
  */
 const logger = require('../logger');
-const { SLOT_CHANGED_SQL } = require('./eligibility');
+
+// A counted move: the day changed, and the visit had an arrival window before.
+// The first placement of a visit that had no arrival window is not a move: the
+// customer was never told an earlier time.
+const DAY_MOVE_SQL = 'original_date IS DISTINCT FROM new_date AND original_window IS NOT NULL';
 
 function limitOf(config) {
   const n = Number(config && config.maxAutoMovesPerVisit);
   return n > 0 ? n : 0;
 }
 
-// Map<serviceId, number of automatic slot-changing moves>. Throws on a read
+// Map<serviceId, number of automatic moves to another day>. Throws on a read
 // failure; a service with no such row is absent from the map.
 async function countAutoMoves(conn, serviceIds) {
   const counts = new Map();
@@ -43,9 +56,7 @@ async function countAutoMoves(conn, serviceIds) {
     .whereIn('scheduled_service_id', serviceIds)
     .where('reason_code', 'auto_dispatch')
     .where('initiated_by', 'auto_dispatch')
-    // The first placement of a visit that had no arrival window is not a
-    // move: the customer was never told an earlier time.
-    .whereRaw(`${SLOT_CHANGED_SQL} AND original_window IS NOT NULL`)
+    .whereRaw(DAY_MOVE_SQL)
     .groupBy('scheduled_service_id')
     .count('* as moves')
     .select('scheduled_service_id');
@@ -89,7 +100,7 @@ function limitSkip(service, counts, config) {
   if (!atLimit(counts, service.id, config)) return null;
   return {
     reason_code: 'MOVE_LIMIT_REACHED',
-    reason_description: `Already moved ${counts.get(String(service.id))} times by auto-dispatch (limit ${limit}) — a person must move it`,
+    reason_description: `Already moved to another day ${counts.get(String(service.id))} times by auto-dispatch (limit ${limit}) — a person must move it`,
   };
 }
 
@@ -114,10 +125,10 @@ async function assertUnderLimit(trx, rows, config, refuse) {
   const counts = await countAutoMoves(trx, counted.map((r) => r.id));
   const over = counted.find((r) => atLimit(counts, r.id, config));
   if (over) {
-    throw refuse(over.id, `has already been moved automatically ${counts.get(String(over.id))} times (limit ${limitOf(config)}) — no move`);
+    throw refuse(over.id, `has already been moved to another day automatically ${counts.get(String(over.id))} times (limit ${limitOf(config)}) — no move`);
   }
 }
 
 module.exports = {
-  limitOf, countAutoMoves, loadMoveCounts, atLimit, pickFallbackDue, limitSkip, assertUnderLimit,
+  limitOf, countAutoMoves, loadMoveCounts, atLimit, pickFallbackDue, limitSkip, assertUnderLimit, DAY_MOVE_SQL,
 };

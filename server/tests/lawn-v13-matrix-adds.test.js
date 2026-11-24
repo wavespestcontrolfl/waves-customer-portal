@@ -4,6 +4,8 @@ const v13 = require('../config/lawn-protocol-v13.json');
 const engine = require('../services/waveguard-plan-engine');
 const staged = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
 const october = require('../models/migrations/20261007120500_lawn_v13_october_dimension');
+// The October bag since owner ruling 2026-11-21 ("stonewall"): LESCO Stonewall 0.37% 18-0-10. The 9x April bag stays the Dimension granular.
+const octoberStonewall = require('../models/migrations/20261122120000_lawn_v13_october_stonewall');
 const december = require('../models/migrations/20261008130000_lawn_v13_december_potash');
 const matrix = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
 const granule = require('../models/migrations/20261009100000_lawn_v13_fire_ant_granule');
@@ -49,6 +51,9 @@ describe('the three tracks carry the same adds', () => {
   });
 });
 
+// The recipe names the house bifenthrin LESCO Crosscheck Plus since owner ruling 2026-11-18; the staged Talak rows (N.TAL) are relinked by migration 20261119010000.
+const HOUSE_BIFENTHRIN = 'LESCO Crosscheck Plus';
+
 describe('1. mole crickets: Advion Insect Granule bait on nymph spots in June and the July scout visit (owner 2026-10-23; Talak is no longer the nymph product)', () => {
   test.each([6, 7])('month %i names the Advion bait, the 3 lb rate, the hand shaker and the 3-day no-irrigation rule', (month) => {
     const [line] = lineFor(month, 'Advion Insect Granule');
@@ -56,8 +61,8 @@ describe('1. mole crickets: Advion Insect Granule bait on nymph spots in June an
     expect(line).toMatch(/then no irrigation or rain-dependent watering for 3 days/);
   });
   test('July keeps the 24-hour customer hold on the Talak line and no month has a mole cricket Talak line; Dylox stays the fall adult product', () => {
-    expect(lineFor(7, N.TAL)[0]).toMatch(/delay watering 24 hours$/);
-    for (const month of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]) expect(lineFor(month, N.TAL).filter((l) => /mole cricket/.test(l))).toEqual([]);
+    expect(lineFor(7, HOUSE_BIFENTHRIN)[0]).toMatch(/delay watering 24 hours$/);
+    for (const month of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]) expect(lineFor(month, HOUSE_BIFENTHRIN).filter((l) => /mole cricket/.test(l))).toEqual([]);
     expect(lineFor(10, N.DYL)[0]).toMatch(/spreader visit only, water in/);
   });
   test('the notes and the safety rule keep "delay watering 24 hours" for every bifenthrin use and no longer send nymphs to Talak', () => {
@@ -65,7 +70,7 @@ describe('1. mole crickets: Advion Insect Granule bait on nymph spots in June an
     expect(track.notes.join(' ')).toContain('Bifenthrin: delay watering 24 hours on every use. Grubs and mole crickets');
     expect(track.notes.join(' ')).toMatch(/Mole cricket nymphs, June and the July scout visit/);
     expect(track.notes.join(' ')).not.toMatch(/Mole cricket nymphs, July and August/);
-    expect(track.safety_rules).toContain('Bifenthrin (Atticus Talak 7.9 F): delay watering 24 hours.');
+    expect(track.safety_rules).toContain('Bifenthrin (LESCO Crosscheck Plus): delay watering 24 hours; at least 25 ft from water.');
     expect(JSON.stringify(v13)).not.toMatch(/except mole cricket|water in at once/);
   });
   test('June is a hose visit and July the scout visit with backpack spots: the bait is a hand-shaker spot tool, never a second whole-lawn tool', () => {
@@ -108,7 +113,7 @@ describe('1b. no customer-report override for Talak on mole crickets (the code a
 describe('2. take-all: the second pass of each Artavia pair is Headway', () => {
   test('spring pair Mar (Artavia) then Apr (Headway); fall pair Sep (Artavia) then Oct (Headway)', () => {
     expect(lineFor(3, N.ART)[0]).toMatch(/take-all areas, first spring application/);
-    expect(lineFor(4, matrix.HEAD)[0]).toMatch(/take-all areas, second spring application, 3 fl oz per 1,000 sq ft in 2 to 4 gal of water, 30 days after the first/);
+    expect(lineFor(4, matrix.HEAD)[0]).toMatch(/take-all areas, second spring application, 3 fl oz per 1,000 sq ft in 5 gal of water, 30 days after the first/);
     expect(lineFor(4, N.ART)).toEqual([]);
     expect(lineFor(9, N.ART)[0]).toMatch(/take-all areas, first fall application/);
     expect(lineFor(10, matrix.HEAD)[0]).toMatch(/take-all areas, second fall application, 3 fl oz per 1,000 sq ft/);
@@ -228,7 +233,7 @@ describe('6. July is the scout visit again: no 0-0-50 potash step (owner: Decemb
   });
 
   test('one tool per visit: spreader visits carry granulars, hose visits carry liquids, July none', () => {
-    const SPREADER_PRODUCTS = new Set([N.F24, october.NEW_NAME, december.NEW_NAME, require('../models/migrations/20261022195000_lawn_v13_april_polymer_n_v3').NEW_NAME]);
+    const SPREADER_PRODUCTS = new Set([N.F24, octoberStonewall.NEW_NAME, december.NEW_NAME, require('../models/migrations/20261022195000_lawn_v13_april_polymer_n_v3').NEW_NAME]);
     // The liquid potassium (20261029170000) rides the August and September hose passes beside Nutra-TECH.
     const HOSE_PRODUCTS = new Set([N.NT, N.STW, N.DIM, N.TET, require('../models/migrations/20261029170000_lawn_v13_summer_potassium').NAME]);
     for (const [month, mode] of [[1, 'hose'], [2, 'spreader'], [3, 'hose'], [4, 'spreader'], [5, 'hose'], [6, 'hose'], [7, 'none'], [8, 'hose'], [9, 'hose'], [10, 'spreader'], [11, 'spreader'], [12, 'spreader']]) {
@@ -479,11 +484,11 @@ describe('8. November pre-emergent move: a 2027 note only; the 2026 visits do no
 
   test('the note is clearly labeled, 12-visit plan only, from 2027-10-01', () => {
     expect(note).toMatch(/^Season 2027 \(visits from 2027-10-01\), 12-visit plan only\. This is a note and changes no 2026 visit/);
-    expect(note).toMatch(/The 9-visit plan keeps the October Dimension step/);
+    expect(note).toMatch(/The 9-visit plan keeps the October step\.$/);
   });
 
-  test('2026 behavior is untouched: October Dimension 4.04 lb, November 24-0-11 3.1 lb, December LESCO 10-0-22 4.5 lb', () => {
-    expect(lines(visitFor(10).primary)[0]).toBe(`${october.NEW_NAME} — 4.04 lb per 1,000 sq ft (0.73 lb N, 0.4 lb K2O), spreader`);
+  test('the note moves no visit: October the Stonewall 0.37% 18-0-10 bag 4.04 lb, November 24-0-11 3.1 lb, December LESCO 10-0-22 4.5 lb', () => {
+    expect(lines(visitFor(10).primary)[0]).toBe(`${octoberStonewall.NEW_NAME} — 4.04 lb per 1,000 sq ft (0.73 lb N, 0.4 lb K2O), spreader`);
     expect(lines(visitFor(11).primary)[0]).toMatch(/^LESCO 24-0-11 with PolyPlus OPTI — 3\.1 lb per 1,000 sq ft/);
     expect(lines(visitFor(12).primary)[0]).toBe(`${december.NEW_NAME} — 4.5 lb per 1,000 sq ft (0.45 lb N, 0.99 lb K2O), spreader`);
     expect(lines(visitFor(1).primary)[0]).toMatch(/^LESCO Stonewall 4FL/);
@@ -495,7 +500,7 @@ describe('8. November pre-emergent move: a 2027 note only; the 2026 visits do no
     const dec = 4.5 * 0.10;
     expect([oct, nov, dec].map((n) => Math.round(n * 100) / 100)).toEqual([0.6, 0.73, 0.45]);
     expect(note).toMatch(/October LESCO 24-0-11 with PolyPlus OPTI at 2\.5 lb per 1,000 sq ft \(0\.60 lb N\)/);
-    expect(note).toMatch(/November LESCO Dimension 0\.21% 18-0-10 at 4\.04 lb per 1,000 sq ft \(0\.73 lb N, 0\.37 lb dithiopyr per acre/);
+    expect(note).toMatch(/November LESCO Stonewall 0\.37% 18-0-10 at 4\.04 lb per 1,000 sq ft \(0\.73 lb N, 0\.65 lb prodiamine per acre\)/);
     // December is defined separately (another lane owns it): the note carries no December line.
     expect(note).toMatch(/December is defined separately/);
     expect(note).not.toMatch(/December LESCO|3\.1 lb/);
@@ -505,17 +510,20 @@ describe('8. November pre-emergent move: a 2027 note only; the 2026 visits do no
     expect(0.75 + 0.5 + 0.6 + 0.73 + 0.45).toBeLessThan(4);
   });
 
-  test('dithiopyr stays under 1.5 lb ai per acre: March and June 2EW 0.5 fl oz each plus the November bag at 4.04 lb', () => {
-    const { CAP_GRANULAR, CAP_2EW } = october;
-    const share = 2 * (0.5 / CAP_2EW.limit_value) + 4.04 / CAP_GRANULAR.limit_value;
-    expect(Math.round(share * 1000) / 10).toBe(70);
-    const aiPerAcre = 2 * (0.5 * (2 / 128) * 43.56) + 4.04 * 0.0021 * 43.56;
-    expect(aiPerAcre).toBeCloseTo(1.05, 2);
-    expect(aiPerAcre).toBeLessThan(1.5);
-    // The bag stays under the per-application maximum and its 3 a year; the gaps (Jun to Nov 5 months,
-    // Nov to the next March 4 months) are over the 60-day minimum between applications.
-    expect(4.04).toBeLessThan(october.MAX_LABEL);
-    expect(october.PRODUCT_LIMITS.find((l) => l.limit_type === 'min_interval_days').limit_value).toBeLessThan(4 * 28);
+  test('each pre-emergent stays under its label\'s 1.5 lb ai per acre a year: dithiopyr = March and June 2EW; prodiamine = January 4FL plus the November bag at 4.04 lb', () => {
+    // Dithiopyr: the two 2EW hose passes only (2 lb ai per gallon), since the bag is prodiamine.
+    const dithiopyr = 2 * (0.5 * (2 / 128) * 43.56);
+    expect(dithiopyr).toBeCloseTo(0.68, 2);
+    expect(Math.round(2 * (0.5 / october.CAP_2EW.limit_value) * 1000) / 10).toBe(45.4);
+    // Prodiamine: Stonewall 4FL (4 lb ai per gallon) at 0.5 fl oz, plus the 0.37% bag at 4.04 lb.
+    const january = 0.5 * (4 / 128) * 43.56;
+    const bag = 4.04 * 0.0037 * 43.56;
+    expect([january, bag].map((n) => Math.round(n * 100) / 100)).toEqual([0.68, 0.65]);
+    expect(january + bag).toBeCloseTo(1.33, 2);
+    expect(january + bag).toBeLessThan(1.5);
+    // The bag alone is 43.4% of its yearly cap row (9.3 lb per 1,000 sq ft, the label maximum).
+    expect(Math.round((4.04 / octoberStonewall.CAP_VALUE) * 1000) / 10).toBe(43.4);
+    expect(4.04).toBeLessThan(octoberStonewall.CATALOG_ROW.max_label_rate_per_1000);
   });
 
   test('the 2027 schedule keeps January\'s Stonewall hose visit', () => {

@@ -172,12 +172,12 @@ describe('prompt v32: the day/time conflict rule and billing_choice, in both lay
   const oneMessage = buildExtractionPrompt(TRANSCRIPT, PHONE, '2026-10-29', CALL_OPTS);
   const { system } = buildExtractionPromptParts(TRANSCRIPT, PHONE, '2026-10-29', CALL_OPTS);
 
-  test('this is the v34 cohort, one hash per layout', () => {
-    expect(PROMPT_VERSION).toBe('v34');
-    expect(PROMPT_HASH).toMatch(/^v34-[a-f0-9]{12}$/);
-    expect(APS_PROMPT_HASH).toMatch(/^v34a-[a-f0-9]{12}$/);
-    expect(SYSTEM_PROMPT_HASH).toMatch(/^v34s-[a-f0-9]{12}$/);
-    expect(SYSTEM_APS_PROMPT_HASH).toMatch(/^v34b-[a-f0-9]{12}$/);
+  test('this is the v35 cohort, one hash per layout', () => {
+    expect(PROMPT_VERSION).toBe('v35');
+    expect(PROMPT_HASH).toMatch(/^v35-[a-f0-9]{12}$/);
+    expect(APS_PROMPT_HASH).toMatch(/^v35a-[a-f0-9]{12}$/);
+    expect(SYSTEM_PROMPT_HASH).toMatch(/^v35s-[a-f0-9]{12}$/);
+    expect(SYSTEM_APS_PROMPT_HASH).toMatch(/^v35b-[a-f0-9]{12}$/);
     expect(new Set([PROMPT_HASH, APS_PROMPT_HASH, SYSTEM_PROMPT_HASH, SYSTEM_APS_PROMPT_HASH]).size).toBe(4);
   });
 
@@ -204,6 +204,56 @@ describe('prompt v32: the day/time conflict rule and billing_choice, in both lay
   test('billing_choice sits in the SERVICE REQUEST section, before the price object', () => {
     expect(oneMessage.indexOf('- billing_choice:')).toBeGreaterThan(oneMessage.indexOf('SERVICE REQUEST:'));
     expect(oneMessage.indexOf('- billing_choice:')).toBeLessThan(oneMessage.indexOf('- price: The PRIMARY price'));
+  });
+
+  test('estimate_response: the prompt gives the field, its four answers, the caller-only bar and the evidence pin', () => {
+    for (const text of [oneMessage, system]) {
+      expect(text).toContain('- estimate_response: the CALLER\'s answer to an estimate or quote that Waves ALREADY SENT before this call');
+      expect(text).toContain('A price first quoted on this call is price.caller_response\'s job, not this field\'s, and a call with no earlier estimate is null.');
+      expect(text).toContain('"accepted" when the caller plainly says they go ahead with the service or plan on that estimate ("let\'s do it", "go ahead and sign me up", "yes, book it") and no condition of theirs is still open at hangup');
+      expect(text).toContain('"accepted_with_condition" when the caller says yes but ties it to something not settled at hangup (a day still to be found, a spouse or landlord to ask, a change to the price or the scope, a question still to be answered)');
+      expect(text).toContain('"undecided" when the estimate was discussed and the caller gave no yes and no no ("I\'ll think about it", "let me look at it again")');
+      expect(text).toContain('"declined" when the caller says no, not now, or that they chose another company');
+      expect(text).toContain('Staff offering, recommending or pressing is NOT an answer, and a bare "okay" or "uh-huh" after staff reads a price or explains the plan is not "accepted".');
+      expect(text).toContain('Booking a visit is not by itself "accepted"');
+      expect(text).toContain('When the caller changed their mind, take the FINAL answer at hangup.');
+      expect(text).toContain('null when no estimate that Waves already sent was discussed, or the answer is unclear.');
+      expect(text).toContain('pin the caller\'s own answer sentence to /service_request/estimate_response with speaker "caller"');
+      expect(text).toContain('- service_request.estimate_response (when non-null — the CALLER\'s own sentence answering the estimate Waves already sent; speaker must be "caller")');
+    }
+  });
+
+  test('estimate_response sits right after billing_choice, before the price object', () => {
+    expect(oneMessage.indexOf('- estimate_response:')).toBeGreaterThan(oneMessage.indexOf('- billing_choice:'));
+    expect(oneMessage.indexOf('- estimate_response:')).toBeLessThan(oneMessage.indexOf('- price: The PRIMARY price'));
+  });
+
+  test('the output contract the model is given carries estimate_response', () => {
+    const schema = require('../schemas/call-extraction.model-output.schema.json');
+    expect(schema.properties.service_request.properties.estimate_response).toBeDefined();
+  });
+
+  test('synthetic fixture: every case is synthetic, uses a valid answer and pins the caller\'s own words', () => {
+    const fixture = require('../fixtures/call-extraction-eval/synthetic-estimate-response.json');
+    const allowed = ['accepted', 'accepted_with_condition', 'undecided', 'declined', null];
+    const answers = fixture.cases.map((c) => c.expect.estimate_response);
+    for (const want of ['accepted', 'accepted_with_condition', 'undecided', 'declined', null]) expect(answers).toContain(want);
+    expect(fixture.cases.length).toBeGreaterThanOrEqual(7);
+    for (const c of fixture.cases) {
+      expect(allowed).toContain(c.expect.estimate_response);
+      expect(c.transcript).not.toMatch(/\b\d{3}[-. ]\d{4}\b/); // no phone numbers
+      const evidence = c.expect.estimate_response_evidence;
+      if (c.expect.estimate_response === null) { expect(evidence).toBeUndefined(); continue; }
+      expect(evidence.field_path).toBe('/service_request/estimate_response');
+      expect(evidence.speaker).toBe('caller');
+      expect(c.transcript).toContain(evidence.quote);
+      const turn = c.transcript.split('\n').find((line) => line.includes(evidence.quote));
+      expect(turn.startsWith('Caller:')).toBe(true);
+    }
+    const byId = (id) => fixture.cases.find((c) => c.id === id);
+    expect(byId('estimate-response-changed-mind').expect.estimate_response).toBe('undecided');
+    expect(byId('estimate-response-null-price-first-quoted-on-call').expect.estimate_response).toBeNull();
+    expect(byId('estimate-response-null-only-staff-spoke').expect.estimate_response).toBeNull();
   });
 
   test('household safety notes: the prompt gives each field, its caller-only bar and the evidence pin', () => {

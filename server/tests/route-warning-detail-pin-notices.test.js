@@ -76,10 +76,11 @@ describe('a held-out visit keeps its pin notice only when the run never moves it
     expect(audit.pinNoticeHeldOut(base('y', { customer_confirmed: true }))).toBeNull();
   });
 
-  test('a recurring child that is locked or confirmed is still held out (old rule)', () => {
+  test('a recurring child that is locked is still held out; a confirmed one is not (owner 2026-11-22)', () => {
     const child = { is_recurring: true, recurring_parent_id: 'parent-1' };
     expect(audit.pinNoticeHeldOut(locked(child))).toMatchObject({ reason_code: 'MANUALLY_LOCKED' });
-    expect(audit.pinNoticeHeldOut(base('y', { ...child, customer_confirmed: true }))).toMatchObject({ reason_code: 'CUSTOMER_CONFIRMED' });
+    // A confirmation no longer holds a visit, so the night run may move it and its pin matters.
+    expect(audit.pinNoticeHeldOut(base('y', { ...child, customer_confirmed: true }))).toBeNull();
     expect(audit.pinNoticeHeldOut(base('z', child))).toBeNull();
   });
 });

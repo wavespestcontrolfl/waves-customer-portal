@@ -117,7 +117,7 @@ describe('buildCheck', () => {
     ['a pay rate under the Florida minimum wage on the pay date', { tech: { pay_rate: '14.99' } }, /Hourly rate \$14\.99 is below the Florida minimum wage of \$15\.00 on 2026-10-23/],
     ['no pay rate', { tech: { pay_rate: null } }, /No pay rate set/],
     ['a pay rate of zero', { tech: { pay_rate: '0.00' } }, /No pay rate set/],
-    ['a pay date in a year with no tables', { payDate: '2027-01-08' }, /No federal withholding tables for 2027/],
+    ['a pay date in a year with no tables', { payDate: '2028-01-07' }, /No federal withholding tables for 2028/],
     ['a W-4 from before 2020', { w4: { ...W4, formYear: 2019 } }, /2020 or later/],
   ])('lists %s as blocked with a plain reason', (_name, patch, reason) => {
     const result = base(patch);
@@ -241,6 +241,18 @@ describe('GATE_PAYROLL_TIME_OFF', () => {
   afterEach(() => {
     if (OLD_GATE === undefined) delete process.env.GATE_PAYROLL_TIME_OFF;
     else process.env.GATE_PAYROLL_TIME_OFF = OLD_GATE;
+  });
+
+  it('signs the hours a catch-up check shows as not paid out, and keeps the token of every other check', () => {
+    process.env.GATE_PAYROLL_TIME_OFF = 'true';
+    const bank = { earnedMinutes: 0, payoutMinutes: 0, earlyIllnessMinutes: 0, unpaidMinutes: 0, unpaidRuleMinutes: 0,
+      unpaidBeforeHireMinutes: 0, beforeMinutes: 0, afterMinutes: 0, paidDays: [] };
+    const withBank = (extra) => ({ ...build(), pto_earned_minutes: '0.00', pto_bank: { ...bank, ...extra } });
+    const plain = tokenOf(run, [withBank({})]);
+    expect(tokenOf(run, [withBank({ notPaidOutMinutes: 0 })])).toBe(plain);
+    const shown = tokenOf(run, [withBank({ notPaidOutMinutes: 92.4 })]);
+    expect(shown).not.toBe(plain);
+    expect(tokenOf(run, [withBank({ notPaidOutMinutes: 73.8 })])).not.toBe(shown);
   });
 
   describe('off (unset, or anything but the exact string true)', () => {

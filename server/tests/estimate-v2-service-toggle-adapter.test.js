@@ -554,7 +554,6 @@ describe('estimate v2 service toggle adapter', () => {
       {
         rgTrappingCompleted: true,
         rgExclusionCompleted: true,
-        rgSanitationBaseline: true,
         rgNoActivityAfterFinalCheck: true,
       }
     );
@@ -563,10 +562,10 @@ describe('estimate v2 service toggle adapter', () => {
       eligibility: {
         trappingCompleted: true,
         exclusionCompleted: true,
-        sanitationCompletedOrPhotoBaseline: true,
         noActivityAfterFinalTrapCheck: true,
       },
     });
+    expect(input.services.rodentGuarantee.eligibility).not.toHaveProperty('sanitationCompletedOrPhotoBaseline');
 
     const estimate = generateEstimate(input);
     const item = estimate.lineItems.find((line) => line.service === 'rodent_guarantee');
@@ -575,6 +574,43 @@ describe('estimate v2 service toggle adapter', () => {
     expect(item.eligible).toBe(true);
     expect(item.price).toBeGreaterThan(0);
     expect(item.detail).toContain('renewable annually');
+  });
+
+  test('guarantee is eligible with trapping + exclusion + no activity and no sanitation flag (owner 2026-11-23)', () => {
+    const input = translateV2CallToV1Input(
+      baseProfile(),
+      ['RODENT_GUARANTEE'],
+      { rgTrappingCompleted: true, rgExclusionCompleted: true, rgNoActivityAfterFinalCheck: true }
+    );
+    const item = generateEstimate(input).lineItems.find((line) => line.service === 'rodent_guarantee');
+    expect(item).toMatchObject({ eligible: true, eligibilityMissing: [] });
+    expect(item.price).toBeGreaterThan(0);
+  });
+
+  test('an old saved estimate carrying rgSanitationBaseline false still prices the guarantee, same price', () => {
+    const base = { rgTrappingCompleted: true, rgExclusionCompleted: true, rgNoActivityAfterFinalCheck: true };
+    const price = (extra) => generateEstimate(translateV2CallToV1Input(baseProfile(), ['RODENT_GUARANTEE'], { ...base, ...extra }))
+      .lineItems.find((line) => line.service === 'rodent_guarantee');
+    const withOld = price({ rgSanitationBaseline: false });
+    expect(withOld).toMatchObject({ eligible: true });
+    expect(withOld.price).toBe(price({}).price);
+  });
+
+  test('a stored eligibility list that still names sanitation cannot re-impose it', () => {
+    const { RODENT } = require('../services/pricing-engine/constants');
+    const sp = require('../services/pricing-engine/service-pricing');
+    const saved = RODENT.guarantee.eligibilityRequires;
+    try {
+      RODENT.guarantee.eligibilityRequires = ['trappingCompleted', 'exclusionCompleted', 'sanitationCompletedOrPhotoBaseline', 'noActivityAfterFinalTrapCheck'];
+      const r = sp.priceRodentGuarantee({ eligibility: { trappingCompleted: true, exclusionCompleted: true, noActivityAfterFinalTrapCheck: true } });
+      expect(r.eligible).toBe(true);
+      // Trapping, exclusion and no-activity are still required.
+      const miss = sp.priceRodentGuarantee({ eligibility: { trappingCompleted: true, noActivityAfterFinalTrapCheck: true } });
+      expect(miss.eligible).toBe(false);
+      expect(miss.eligibilityMissing).toEqual(['exclusionCompleted']);
+    } finally {
+      RODENT.guarantee.eligibilityRequires = saved;
+    }
   });
 
   test('tiers the guarantee off the profile home size even without a footprint field', () => {

@@ -75,6 +75,8 @@ const {
   officeCageStartSize,
   agentDraftCageProfile,
   stampEstimateToolCageStart,
+  customerCageHold,
+  seededCageFeatures,
 } = require('../services/property-lookup/office-cage-start');
 const { runDraftPipeline } = require('../services/estimator-engine');
 const { buildEngineInput } = require('../services/estimator-engine/draft-builder');
@@ -84,18 +86,22 @@ const { SQFT_SOURCES } = require('../services/estimator-engine/source-arbitratio
 const { generateEstimate: priceForReal } = require('../services/pricing-engine/estimate-engine');
 
 const GATE = 'GATE_CAGE_START_MEDIUM';
+const TWO_SIZES = 'GATE_CAGE_TWO_SIZES';
 let priorGate;
-beforeAll(() => { priorGate = process.env[GATE]; });
+let priorTwoSizes;
+beforeAll(() => { priorGate = process.env[GATE]; priorTwoSizes = process.env[TWO_SIZES]; });
 afterAll(() => {
   // process.env persists across files on one worker — restore, never leak.
   if (priorGate === undefined) delete process.env[GATE];
   else process.env[GATE] = priorGate;
+  if (priorTwoSizes === undefined) delete process.env[TWO_SIZES];
+  else process.env[TWO_SIZES] = priorTwoSizes;
 });
 const gate = (value) => {
   if (value === undefined) delete process.env[GATE];
   else process.env[GATE] = value;
 };
-beforeEach(() => gate(undefined));
+beforeEach(() => { gate(undefined); delete process.env[TWO_SIZES]; });
 
 const ADDRESS = '123 Example St, Testville, FL 34200';
 // The lookup's own sizes for these areas (classifyPoolCageSize).
@@ -172,6 +178,188 @@ describe('agentDraftCageProfile (the call-agent draft)', () => {
       expect(agentDraftCageProfile(profile)).toEqual({ ...profile, poolCage: 'NO', poolCageSize: 'NONE' });
       expect(profile.poolCage).toBe('YES');
     }
+  });
+});
+
+describe('GATE_CAGE_TWO_SIZES supersedes the Medium start', () => {
+  test('on: no start size even with the start gate on; the lookup\'s two-size answer stands', () => {
+    gate('true');
+    process.env[TWO_SIZES] = 'true';
+    expect(officeCageStartSize(cagedHome(1300, 'LARGE'))).toBeNull();
+    expect(officeCageStartSize(cagedHome(812, 'MEDIUM'))).toBeNull();
+    const profile = cagedHome(1300, 'LARGE');
+    expect(agentDraftCageProfile(profile)).toBe(profile);
+  });
+
+  test('on: the draft still drops a cage on a home with no decided pool (start gate rule)', () => {
+    gate('true');
+    process.env[TWO_SIZES] = 'true';
+    const noPool = cagedHome(704, 'MEDIUM', { pool: 'NO' });
+    expect(agentDraftCageProfile(noPool)).toEqual({ ...noPool, poolCage: 'NO', poolCageSize: 'NONE' });
+  });
+
+  test('on: the estimate tool is told to offer two sizes, beside the profile', () => {
+    process.env[TWO_SIZES] = 'true';
+    const result = { enriched: cagedHome(1300, 'LARGE'), meta: { cache: 'miss' } };
+    expect(stampEstimateToolCageStart(result)).toBe(result);
+    expect(result.meta).toEqual({ cache: 'miss', poolCageTwoSizes: true });
+    expect(result.enriched.poolCageSize).toBe('LARGE');
+  });
+
+  test('off or unset: no poolCageTwoSizes, and the 2,000 sq ft Medium start is as before', () => {
+    for (const value of [undefined, 'false', '1']) {
+      if (value === undefined) delete process.env[TWO_SIZES]; else process.env[TWO_SIZES] = value;
+      gate('true');
+      const result = { enriched: cagedHome(1300, 'OVERSIZED'), meta: {} };
+      expect(stampEstimateToolCageStart(result).meta).toEqual({ poolCageStartSize: 'MEDIUM' });
+    }
+    gate(undefined);
+    const off = { enriched: cagedHome(1300, 'OVERSIZED'), meta: {} };
+    expect(stampEstimateToolCageStart(off).meta).toEqual({});
+  });
+
+  test('a whole-module feature-gates mock without the reader reads as off', () => {
+    process.env[TWO_SIZES] = 'true';
+    jest.isolateModules(() => {
+      jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false }));
+      const isolated = require('../services/property-lookup/office-cage-start');
+      const result = { enriched: cagedHome(1300, 'LARGE'), meta: {} };
+      expect(isolated.stampEstimateToolCageStart(result).meta).toEqual({});
+    });
+    jest.dontMock('../config/feature-gates');
+  });
+});
+
+describe('customerCageHold (automatic customer prices keep today\'s manual-quote hold)', () => {
+  const legacy = (size) => ({ poolCageSize: 'MEDIUM', poolCageLegacySize: size });
+
+  test('on: held for a four-size answer of Large or Oversized, in any letter case', () => {
+    process.env[TWO_SIZES] = 'true';
+    for (const size of ['LARGE', 'OVERSIZED', 'large', 'Oversized']) {
+      expect(customerCageHold(legacy(size))).toBe(true);
+    }
+  });
+
+  test('on: not held for Medium or Small, an absent field, or no profile', () => {
+    process.env[TWO_SIZES] = 'true';
+    for (const profile of [legacy('MEDIUM'), legacy('SMALL'), legacy('NONE'), { poolCageSize: 'MEDIUM' }, {}, null, undefined]) {
+      expect(customerCageHold(profile)).toBe(false);
+    }
+  });
+
+  test('off, unset or a stray value: never held, whatever the profile says', () => {
+    for (const value of [undefined, 'false', '1']) {
+      if (value === undefined) delete process.env[TWO_SIZES]; else process.env[TWO_SIZES] = value;
+      expect(customerCageHold(legacy('LARGE'))).toBe(false);
+      expect(customerCageHold(legacy('OVERSIZED'))).toBe(false);
+    }
+  });
+
+  test('on: the county area comes first, then the four-size answer, then a four-size profile\'s own size', () => {
+    process.env[TWO_SIZES] = 'true';
+    // 750 sq ft is Large in four sizes, whatever the size words say.
+    expect(customerCageHold({ poolCageSqft: 750, poolCageSize: 'MEDIUM' })).toBe(true);
+    expect(customerCageHold({ poolCageSqft: 750, poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM' })).toBe(true);
+    expect(customerCageHold({ poolCageSqft: 500, poolCageSize: 'MEDIUM', poolCageLegacySize: 'LARGE' })).toBe(false);
+    // A profile with no legacy key is a four-size profile: its Large is held; a two-size profile's Large is not a four-size word.
+    expect(customerCageHold({ poolCageSize: 'LARGE' })).toBe(true);
+    expect(customerCageHold({ poolCageSize: 'LARGE', poolCageLegacySize: 'MEDIUM' })).toBe(false);
+  });
+
+  test('the start gate does not matter: two sizes alone holds', () => {
+    process.env[TWO_SIZES] = 'true';
+    gate(undefined);
+    expect(customerCageHold(legacy('LARGE'))).toBe(true);
+  });
+
+  test('a whole-module feature-gates mock without the reader reads as off', () => {
+    process.env[TWO_SIZES] = 'true';
+    jest.isolateModules(() => {
+      jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false }));
+      expect(require('../services/property-lookup/office-cage-start').customerCageHold(legacy('LARGE'))).toBe(false);
+    });
+    jest.dontMock('../config/feature-gates');
+  });
+});
+
+describe('seededCageFeatures (an accepted estimate\'s saved cage replayed on a lookup miss)', () => {
+  const seed = (size = 'medium', over = {}) => ({ pool: true, poolCage: true, poolCageSize: size, ...over });
+
+  describe('gate on', () => {
+    beforeEach(() => { process.env[TWO_SIZES] = 'true'; });
+
+    test('a stored area of 750 sq ft is held, and the size stays Medium', () => {
+      expect(seededCageFeatures(seed(), { poolCageSqft: 750 })).toMatchObject({ poolCageSize: 'medium', poolCageReview: true });
+    });
+
+    test('a stored area of 500 sq ft is not held', () => {
+      const out = seededCageFeatures(seed(), { poolCageSqft: 500 });
+      expect(out.poolCageSize).toBe('medium');
+      expect(out.poolCageReview).toBeUndefined();
+    });
+
+    test('a stored area of 1,200 sq ft reads Large and is held', () => {
+      expect(seededCageFeatures(seed('oversized'), { poolCageSqft: 1200 })).toMatchObject({ poolCageSize: 'large', poolCageReview: true });
+    });
+
+    test('no evidence is held, with the seed\'s size kept (a two-size Medium may be 601 to 1,000 sq ft)', () => {
+      expect(seededCageFeatures(seed(), null)).toMatchObject({ poolCageSize: 'medium', poolCageReview: true });
+      expect(seededCageFeatures(seed('small'), undefined)).toMatchObject({ poolCageSize: 'small', poolCageReview: true });
+      expect(seededCageFeatures(seed(), {})).toMatchObject({ poolCageSize: 'medium', poolCageReview: true });
+    });
+
+    test('a legacy-only Large is held; a legacy-only Medium is not', () => {
+      expect(seededCageFeatures(seed(), { poolCageLegacySize: 'LARGE' })).toMatchObject({ poolCageSize: 'medium', poolCageReview: true });
+      const out = seededCageFeatures(seed('medium'), { poolCageLegacySize: 'MEDIUM' });
+      expect(out.poolCageSize).toBe('medium');
+      expect(out.poolCageReview).toBeUndefined();
+    });
+
+    // Stored evidence can be older than the saved size (a website quote stores the visitor's profile,
+    // while its saved size came from the server re-read): it never releases a saved Large or Oversized.
+    test('a saved Large or Oversized stays held when the stored evidence says Medium', () => {
+      expect(seededCageFeatures(seed('large'), { poolCageLegacySize: 'MEDIUM' })).toMatchObject({ poolCageSize: 'medium', poolCageReview: true });
+      expect(seededCageFeatures(seed('oversized'), { poolCageSqft: 500 })).toMatchObject({ poolCageSize: 'medium', poolCageReview: true });
+      expect(seededCageFeatures(seed('LARGE'), { poolCageSqft: 500, poolCageLegacySize: 'MEDIUM' }).poolCageReview).toBe(true);
+    });
+
+    test('a legacy key with no usable value is not evidence, so a person quotes', () => {
+      expect(seededCageFeatures(seed(), { poolCageLegacySize: null })).toMatchObject({ poolCageSize: 'medium', poolCageReview: true });
+    });
+
+    test('no cage, or no size: the features come back unchanged', () => {
+      const noCage = seed('medium', { poolCage: false });
+      expect(seededCageFeatures(noCage, null)).toBe(noCage);
+      const noSize = { poolCage: true };
+      expect(seededCageFeatures(noSize, null)).toBe(noSize);
+      expect(seededCageFeatures(null, null)).toBeNull();
+    });
+
+    test('a seeded poolCageReview is never removed', () => {
+      expect(seededCageFeatures(seed('medium', { poolCageReview: true }), { poolCageSqft: 500 }).poolCageReview).toBe(true);
+    });
+  });
+
+  describe('gate off (rollback)', () => {
+    test('a seed written under two sizes prices its four-size answer, so the engine holds it', () => {
+      const out = seededCageFeatures(seed(), { poolCageSqft: 750, poolCageLegacySize: 'LARGE' });
+      expect(out.poolCageSize).toBe('large');
+      expect(out.poolCageReview).toBeUndefined();
+    });
+
+    test('a saved Large or Oversized prices as saved (the engine holds it), even when two-size evidence says Medium', () => {
+      const large = seed('large');
+      expect(seededCageFeatures(large, { poolCageLegacySize: 'MEDIUM' })).toBe(large);
+      const oversized = seed('oversized');
+      expect(seededCageFeatures(oversized, { poolCageSqft: 500, poolCageLegacySize: 'MEDIUM' })).toBe(oversized);
+    });
+
+    test('a null legacy key alone, gate-off-era evidence (area, no key) and null evidence are unchanged', () => {
+      const features = seed();
+      expect(seededCageFeatures(features, { poolCageLegacySize: null })).toBe(features);
+      expect(seededCageFeatures(features, { poolCageSqft: 750 })).toBe(features);
+      expect(seededCageFeatures(features, null)).toBe(features);
+    });
   });
 });
 

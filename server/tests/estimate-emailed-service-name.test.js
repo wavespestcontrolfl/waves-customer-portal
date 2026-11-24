@@ -1,0 +1,330 @@
+/**
+ * estimate-emailed-service-name: the follow-up label comes from the words the
+ * estimate delivery email already carried (GATE_ESTIMATE_FOLLOWUP_SERVICE_NAME,
+ * owner 2026-11-21). Pins the closed-label parser and the reader's proofs.
+ */
+
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({
+  info: jest.fn(), warn: jest.fn(), error: jest.fn(),
+}));
+
+const db = require('../models/db');
+const logger = require('../services/logger');
+const { serviceNameFromSummary, emailedServiceName } = require('../services/estimate-emailed-service-name');
+const { inferEstimateServiceInterest } = require('../services/estimate-service-lines');
+
+describe('serviceNameFromSummary', () => {
+  test.each([
+    ['Pest Control', 'pest control'],
+    ['Lawn Care', 'lawn care'],
+    ['Lawn Care + Pest Control', 'lawn care and pest control'],
+    ['Pest Control + Lawn Care', 'lawn care and pest control'],
+  ])('%j gives %j', (summary, expected) => {
+    expect(serviceNameFromSummary(summary)).toBe(expected);
+  });
+
+  test.each([
+    ['a third label', 'Lawn Care + Pest Control + Mosquito'],
+    ['spaces around a label (exact strings only)', '  Pest Control '],
+    ['a repeated label', 'Pest Control + Pest Control'],
+    ['a repeated label after the pair', 'Lawn Care + Pest Control + Lawn Care'],
+    ['an unlisted label', 'Termite'],
+    ['an unlisted label next to a listed one', 'Pest Control + Termite'],
+    ['near-miss casing', 'pest control'],
+    ['free text', 'Quarterly pest and lawn for the whole house'],
+    ['a blank', ''],
+    ['only spaces', '   '],
+  ])('%s gives null', (_label, summary) => {
+    expect(serviceNameFromSummary(summary)).toBeNull();
+  });
+
+  test.each([[null], [undefined], [42], [{}], [['Pest Control']]])('non-string %j gives null', (value) => {
+    expect(serviceNameFromSummary(value)).toBeNull();
+  });
+});
+
+// Priced recurring lines, in the shape the estimator stores them.
+const line = (service, mo) => ({ service, mo });
+const LAWN_AND_PEST_LINES = { result: { recurring: { services: [line('lawn_care', 50), line('pest_control', 40)] } } };
+// Priced one-time rows.
+const item = (name, price) => ({ name, price });
+const PEST_ONE_TIME = { result: { oneTime: { items: [item('One-Time Pest Control', 150)] } } };
+const TERMITE_ONE_TIME = { result: { oneTime: { items: [item('Termite Treatment', 900)] } } };
+const PEST_AND_TERMITE_ONE_TIME = { result: { oneTime: { items: [item('One-Time Pest Control', 150), item('Termite Treatment', 900)] } } };
+const PEST_AND_MOSQUITO_LINES = { result: { recurring: { services: [line('pest_control', 40), line('mosquito', 30)] } } };
+
+// Today's two generic labels, read from the packs (never retyped).
+const { PACKS } = require('../services/estimate-followup-copy')._private;
+const BUNDLE = PACKS.bundle.label;
+const ONE_TIME = PACKS.one_time.label;
+
+describe('emailedServiceName', () => {
+  let builder;
+  let rows;
+  let failure;
+
+  // A lawn + pest estimate whose current inference is "Lawn Care + Pest Control".
+  // The reader re-reads the estimate by id. The fresh row is the fixture last built here, unless a test
+  // sets `freshRow` (a row that changed after the engine read it; `null` = the row is gone).
+  let lastEstimate;
+  let freshRow;
+  function estimate(extra = {}) {
+    lastEstimate = {
+      id: 'est-1',
+      customer_email: ' Jordan@Example.com ',
+      service_interest: 'Lawn Care + Pest Control',
+      estimate_data: LAWN_AND_PEST_LINES,
+      ...extra,
+    };
+    return lastEstimate;
+  }
+  // The stored email shows whatever summary its payload holds, unless a test overrides the text.
+  const row = (extra = {}) => {
+    const payload = extra.payload_snapshot ?? { service_summary: 'Lawn Care + Pest Control' };
+    let shown = payload;
+    if (typeof shown === 'string') { try { shown = JSON.parse(shown); } catch { shown = null; } }
+    return {
+      status: 'sent',
+      payload_snapshot: payload,
+      text_snapshot: `Hi Jordan,\nService: ${shown?.service_summary ?? ''}\nProperty: 1 Test Way`,
+      ...extra,
+    };
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    rows = [];
+    failure = null;
+    builder = {};
+    for (const m of ['where', 'whereIn', 'whereRaw', 'orderByRaw', 'orderBy', 'select']) {
+      builder[m] = jest.fn(() => builder);
+    }
+    builder.then = (resolve, reject) => (failure
+      ? Promise.reject(failure).then(resolve, reject)
+      : Promise.resolve(rows).then(resolve, reject));
+    freshRow = undefined;
+    const estimates = { where: jest.fn(() => estimates), first: jest.fn(async () => (freshRow === undefined ? lastEstimate : freshRow)) };
+    db.mockImplementation((table) => (table === 'estimates' ? estimates : builder));
+  });
+
+  test('the fixture matches the inference the proof uses', () => {
+    const est = estimate();
+    expect(inferEstimateServiceInterest({ ...est, estimateData: est.estimate_data })).toBe('Lawn Care + Pest Control');
+    // The trap the third proof closes: with no stored interest, a description alone names a service
+    // while the only priced row is another one.
+    expect(inferEstimateServiceInterest({ description: 'Pest Control', estimateData: TERMITE_ONE_TIME })).toBe('Pest Control');
+  });
+
+  test('asks for this estimate, the three delivery keys, the current address, newest first, with no limit', async () => {
+    rows = [row()];
+    await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBe('lawn care and pest control');
+    expect(db).toHaveBeenCalledWith('email_messages');
+    expect(builder.where).toHaveBeenCalledWith({ estimate_id: 'est-1' });
+    const keysCall = builder.whereIn.mock.calls.find(([col]) => col === 'template_key');
+    expect(keysCall[1]).toEqual(['estimate.delivery', 'estimate.proposal_delivery', 'estimate.updated_delivery']);
+    expect(builder.whereRaw).toHaveBeenCalledWith('LOWER(TRIM(recipient_email_snapshot)) = ?', ['jordan@example.com']);
+    expect(builder.orderByRaw).toHaveBeenCalledWith('COALESCE(sent_at, queued_at) DESC NULLS LAST');
+    expect(builder.limit).toBeUndefined();
+    const sql = builder.whereRaw.mock.calls.concat(builder.orderByRaw.mock.calls).map((c) => c[0]).join(' ');
+    expect(sql).not.toContain('?|');
+    expect(sql.replace(/= \?/g, '')).not.toContain('?');
+  });
+
+  test('the newest accepted row wins over an older one', async () => {
+    rows = [
+      row({ payload_snapshot: { service_summary: 'Lawn Care + Pest Control' } }),
+      row({ payload_snapshot: { service_summary: 'Pest Control' } }),
+    ];
+    await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBe('lawn care and pest control');
+  });
+
+  test('a failed or queued newest row is skipped for the next accepted one', async () => {
+    rows = [
+      row({ status: 'failed', payload_snapshot: { service_summary: 'Pest Control' } }),
+      row({ status: 'queued', payload_snapshot: { service_summary: 'Lawn Care' } }),
+      row({ status: 'delivered' }),
+    ];
+    await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBe('lawn care and pest control');
+  });
+
+  test('only failed or queued rows: no name', async () => {
+    rows = [row({ status: 'failed' }), row({ status: 'queued' }), row({ status: 'bounced' })];
+    await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBeNull();
+  });
+
+  test('the newest accepted row decides even when an older one would have named a service', async () => {
+    rows = [
+      row({ payload_snapshot: { service_summary: 'Termite' } }),
+      row(),
+    ];
+    await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBeNull();
+  });
+
+  test('no rows (another address, another estimate): no name', async () => {
+    rows = [];
+    await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBeNull();
+  });
+
+  test('no address on the estimate: no name and no email-log read', async () => {
+    await expect(emailedServiceName(estimate({ customer_email: '  ' }), BUNDLE)).resolves.toBeNull();
+    await expect(emailedServiceName(estimate({ customer_email: null }), BUNDLE)).resolves.toBeNull();
+    expect(db).not.toHaveBeenCalledWith('email_messages');
+  });
+
+  describe('the address and the service are judged on a fresh estimate row and its priced rows', () => {
+    test('the service changed after the engine read the row: no name', async () => {
+      rows = [row()];
+      const stale = estimate();
+      freshRow = { ...stale, service_interest: 'Lawn Care + Pest Control + Mosquito' };
+      await expect(emailedServiceName(stale, BUNDLE)).resolves.toBeNull();
+    });
+
+    test('the address changed after the engine read the row: no name, even when the new address has a delivery row', async () => {
+      rows = [row()];
+      const stale = estimate();
+      freshRow = { ...stale, customer_email: 'New@Example.com' };
+      await expect(emailedServiceName(stale, BUNDLE)).resolves.toBeNull();
+      expect(db).not.toHaveBeenCalledWith('email_messages');
+    });
+
+    test('a revision changed only the priced rows (the stored interest still says lawn and pest): no name', async () => {
+      rows = [row()];
+      await expect(emailedServiceName(estimate({ estimate_data: PEST_AND_MOSQUITO_LINES }), BUNDLE)).resolves.toBeNull();
+    });
+
+    test('a stored interest with no priced rows behind it: no name', async () => {
+      rows = [row()];
+      await expect(emailedServiceName(estimate({ estimate_data: null }), BUNDLE)).resolves.toBeNull();
+    });
+
+    test('a description says pest control and the only priced one-time row is a termite treatment: no name', async () => {
+      rows = [row({ payload_snapshot: { service_summary: 'Pest Control' } })];
+      const est = estimate({ service_interest: null, description: 'Pest Control', estimate_data: TERMITE_ONE_TIME });
+      await expect(emailedServiceName(est, ONE_TIME)).resolves.toBeNull();
+    });
+
+    test('a one-time estimate with a second priced row for another service: no name', async () => {
+      rows = [row({ payload_snapshot: { service_summary: 'Pest Control' } })];
+      const est = estimate({ service_interest: 'Pest Control', estimate_data: PEST_AND_TERMITE_ONE_TIME });
+      await expect(emailedServiceName(est, ONE_TIME)).resolves.toBeNull();
+    });
+
+    test('a one-time estimate with no priced row: no name', async () => {
+      rows = [row({ payload_snapshot: { service_summary: 'Pest Control' } })];
+      const est = estimate({ service_interest: 'Pest Control', estimate_data: null });
+      await expect(emailedServiceName(est, ONE_TIME)).resolves.toBeNull();
+    });
+
+    test('recurring rows do not back a one-time name, and one-time rows do not back the two-service name', async () => {
+      rows = [row({ payload_snapshot: { service_summary: 'Pest Control' } })];
+      const recurringPest = { result: { recurring: { services: [line('pest_control', 40)] } } };
+      await expect(emailedServiceName(estimate({ service_interest: 'Pest Control', estimate_data: recurringPest }), ONE_TIME))
+        .resolves.toBeNull();
+      rows = [row()];
+      const oneTimeBoth = { result: { oneTime: { items: [item('Lawn Care', 90), item('One-Time Pest Control', 150)] } } };
+      await expect(emailedServiceName(estimate({ estimate_data: oneTimeBoth }), BUNDLE)).resolves.toBeNull();
+    });
+
+    test('the row is gone: no name and no email-log read', async () => {
+      rows = [row()];
+      const stale = estimate();
+      freshRow = null;
+      await expect(emailedServiceName(stale, BUNDLE)).resolves.toBeNull();
+      expect(db).not.toHaveBeenCalledWith('email_messages');
+    });
+  });
+
+  test('a JSON string payload and an object payload read the same', async () => {
+    rows = [row({ payload_snapshot: JSON.stringify({ service_summary: 'Lawn Care + Pest Control' }) })];
+    await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBe('lawn care and pest control');
+    rows = [row({ payload_snapshot: { service_summary: 'Lawn Care + Pest Control' } })];
+    await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBe('lawn care and pest control');
+  });
+
+  test.each([
+    ['unparseable text', 'not json {'],
+    ['null', null],
+    ['a JSON array', '[]'],
+    ['a payload with no summary', { first_name: 'Jordan' }],
+  ])('a payload that is %s gives no name', async (_label, payload_snapshot) => {
+    rows = [row({ payload_snapshot })];
+    await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBeNull();
+  });
+
+  test('a stored summary outside the closed labels gives no name', async () => {
+    rows = [row({ payload_snapshot: { service_summary: 'Quarterly Pest Control' } })];
+    await expect(emailedServiceName(estimate({ service_interest: 'Quarterly Pest Control' }), BUNDLE)).resolves.toBeNull();
+  });
+
+  test('a stored summary that differs from the current inference gives no name', async () => {
+    rows = [row({ payload_snapshot: { service_summary: 'Pest Control' } })];
+    await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBeNull();
+  });
+
+  test('an estimate that now infers nothing gives no name', async () => {
+    rows = [row()];
+    await expect(emailedServiceName(estimate({ service_interest: null, estimate_data: null }), BUNDLE)).resolves.toBeNull();
+  });
+
+  test('a failed read gives no name and logs only the error code', async () => {
+    failure = Object.assign(new Error('select failed for jordan@example.com'), { code: '57014' });
+    await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBeNull();
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    const logged = logger.warn.mock.calls[0].join(' ');
+    expect(logged).toContain('57014');
+    expect(logged).not.toContain('example.com');
+  });
+
+  describe('the stored email must show the summary on its Service line', () => {
+    const WRAPPER = 'Waves Pest Control & Lawn Care\nWaves Pest Control, LLC';
+    const pestOnly = { service_interest: 'Pest Control', estimate_data: PEST_ONE_TIME };
+    const pestPayload = { service_summary: 'Pest Control' };
+
+    test('the exact Service line counts, with spaces around it', async () => {
+      rows = [row({ text_snapshot: `${WRAPPER}\n  Service: Lawn Care + Pest Control  \nProperty: 1 Test Way` })];
+      await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBe('lawn care and pest control');
+    });
+
+    test('the branded wrapper alone never counts: a template version without the Service row gives no name', async () => {
+      rows = [row({ payload_snapshot: pestPayload, text_snapshot: `${WRAPPER}\nYour estimate is ready.` })];
+      await expect(emailedServiceName(estimate(pestOnly), ONE_TIME)).resolves.toBeNull();
+    });
+
+    test('a Service line with more words than the summary does not count', async () => {
+      rows = [row({ payload_snapshot: pestPayload, text_snapshot: 'Service: Pest Control + Termite' })];
+      await expect(emailedServiceName(estimate(pestOnly), ONE_TIME)).resolves.toBeNull();
+    });
+
+    test('a row with no stored text gives no name', async () => {
+      rows = [row({ text_snapshot: null })];
+      await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBeNull();
+    });
+  });
+
+  describe('only the two generic labels are replaced', () => {
+    const pestOnly = { service_interest: 'Pest Control', estimate_data: PEST_ONE_TIME };
+    const pestRow = () => row({ payload_snapshot: { service_summary: 'Pest Control' } });
+
+    test.each([['pest control'], ['lawn care'], ['termite protection'], [undefined], [null], ['']])(
+      'today\'s label %j is never replaced, and nothing is read', async (label) => {
+        rows = [row()];
+        await expect(emailedServiceName(estimate(), label)).resolves.toBeNull();
+        expect(db).not.toHaveBeenCalled();
+      });
+
+    test('the bundle label takes the two-service name only', async () => {
+      rows = [row()];
+      await expect(emailedServiceName(estimate(), BUNDLE)).resolves.toBe('lawn care and pest control');
+      rows = [pestRow()];
+      await expect(emailedServiceName(estimate(pestOnly), BUNDLE)).resolves.toBeNull();
+    });
+
+    test('the one-time label takes a single-service name only', async () => {
+      rows = [pestRow()];
+      await expect(emailedServiceName(estimate(pestOnly), ONE_TIME)).resolves.toBe('pest control');
+      rows = [row()];
+      await expect(emailedServiceName(estimate(), ONE_TIME)).resolves.toBeNull();
+    });
+  });
+});

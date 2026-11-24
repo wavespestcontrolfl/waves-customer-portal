@@ -110,6 +110,25 @@ function lineHasHeuristicTurf(line = {}) {
     || (line.turfBasis != null && HEURISTIC_TURF_BASES.has(line.turfBasis));
 }
 
+// A priced row whose price a human must check before it stands as exact: a
+// marker lineRequiresReview covers, a heuristic turf grade, a LOW pricing
+// confidence, or a footprint the engine guessed. A guessed footprint is
+// AGENTS.md's "fpSource fallback" marker: the pricers write it as
+// footprintWasDefaulted and a *fallback footprintSource. They set
+// requiresManualReview with it today; the test reads the marker itself, so a
+// row that carries only the marker still counts (codex pre-push r30 P1).
+// The plan mint's result check (engineResultNeedsReview) and the estimate
+// seed's review check (cross-sell) both call it, so the two cannot drift.
+// `turfGrade: false` leaves the heuristic turf grade out, for an object that
+// is not a priced row (the seed check's property summary).
+function lineNeedsReviewBeforeExactPrice(line = {}, { turfGrade = true } = {}) {
+  return lineRequiresReview(line)
+    || (turfGrade && lineHasHeuristicTurf(line))
+    || String(line.pricingConfidence || '').toLowerCase() === 'low'
+    || line.footprintWasDefaulted === true
+    || [line.footprintSource, line.fpSource].some((source) => /fallback/i.test(String(source || '')));
+}
+
 // Bases that describe a REAL treated area for the priced property (an
 // operator/profile measurement, a supplied lawn area, or a confident
 // lookup estimate) — the complement of HEURISTIC_TURF_BASES above.
@@ -1602,6 +1621,7 @@ module.exports = {
   LANES,
   lineRequiresReview,
   lineHasHeuristicTurf,
+  lineNeedsReviewBeforeExactPrice,
   buildEngineInput,
   // Shared story-provenance rule — the customer-facing pricing assistant
   // grades its lookup stories through the same evidence test so a

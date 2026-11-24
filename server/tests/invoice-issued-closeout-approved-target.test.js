@@ -7,7 +7,7 @@
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ reviewAskAfterReportLive: () => false, isEnabled: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ reviewAskAfterReportLive: () => false, reportAfterPayLive: () => false, isEnabled: jest.fn(() => true) }));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => true) }));
 jest.mock('../services/scheduled-invoice-mint', () => ({ assertScheduledInvoiceNotPacketOwned: jest.fn(async () => {}) }));
 jest.mock('../services/service-completion-profiles', () => ({ resolveCompletionProfileForScheduledService: jest.fn(async () => ({})) }));
@@ -51,16 +51,20 @@ describe('closeOutVisitForIssuedInvoice with an approved target', () => {
     expect(completeScheduledService).toHaveBeenCalledTimes(1);
   });
 
+  // A receipt resend's card (`targetBindsRetries: false`) limits its own run only: its refusal carries its own code, which no
+  // retry sweep reads. Every other card's refusal is approved_target_mismatch, which the sweeps keep to.
   test.each([
-    ['another visit was approved', 'visit-other'],
-    ['the card said no visit would close', 'none'],
-  ])('%s: the live visit stays open, the refusal is audited as approved_target_mismatch, nothing is completed', async (_label, approvedTarget) => {
-    const out = await run({ approvedTarget });
-    expect(out).toMatchObject({ closed: false, reason: 'approved_target_mismatch', visitId: 'visit-live', approvedTarget, audited: true });
+    ['another visit was approved', 'visit-other', {}, 'approved_target_mismatch'],
+    ['the card said no visit would close', 'none', {}, 'approved_target_mismatch'],
+    ['a receipt resend\'s card named another visit', 'visit-other', { targetBindsRetries: false }, 'visit_not_on_card'],
+    ['a receipt resend\'s card said no visit would close', 'none', { targetBindsRetries: false }, 'visit_not_on_card'],
+  ])('%s: the live visit stays open, the refusal is audited under its own code, nothing is completed', async (_label, approvedTarget, extra, code) => {
+    const out = await run({ approvedTarget, ...extra });
+    expect(out).toMatchObject({ closed: false, reason: code, visitId: 'visit-live', approvedTarget, audited: true });
     expect(completeScheduledService).not.toHaveBeenCalled();
     expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
       action: 'visit.completion_on_invoice_issued_refused', resource_id: 'visit-live',
-      metadata: expect.objectContaining({ code: 'approved_target_mismatch', invoiceId: 'inv-1' }),
+      metadata: expect.objectContaining({ code, invoiceId: 'inv-1' }),
     }));
   });
 

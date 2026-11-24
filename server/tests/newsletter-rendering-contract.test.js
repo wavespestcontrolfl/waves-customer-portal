@@ -5,7 +5,6 @@ const {
 } = require('../services/email-template');
 const {
   assembleBeehiivNewsletter,
-  assemblePestInsiderNewsletter,
 } = require('../services/newsletter-draft');
 const {
   WAVES_ADDRESS_LINE,
@@ -183,7 +182,7 @@ describe('newsletter rendering contract', () => {
     }
   });
 
-  test('renders the theme rotation inline across flagship and Pest Insider sections', async () => {
+  test('renders the theme rotation inline across flagship sections', async () => {
     const eventHtml = await assembleBeehiivNewsletter({
       selectedSubject: 'Four local picks',
       events: Array.from({ length: 4 }, (_, index) => ({
@@ -193,32 +192,12 @@ describe('newsletter rendering contract', () => {
         description: `Description ${index + 1}`,
       })),
     });
-    const pestHtml = await assemblePestInsiderNewsletter({
-      crawlHeading: "What's Crawling",
-      crawlText: 'Mosquitoes are active.',
-      pestOfMonth: { name: 'Mosquito' },
-      lawnHeading: 'The Lawn Corner',
-      lawnText: 'Watch the turf.',
-      mythQuestion: 'Do dryer sheets work?',
-      mythVerdict: 'No.',
-      pitchHeading: 'Take Back the Yard',
-      closingHeading: 'See You Outside',
-    });
 
     expect({
       flagship: renderedThemeNames(eventHtml, 'evt-[^"]+'),
-      pestInsider: renderedThemeNames(pestHtml, 'pi-[^"]+'),
     }).toMatchInlineSnapshot(`
       {
         "flagship": [
-          "waves-blue",
-          "sunshine",
-          "waves-blue",
-          "sunshine",
-        ],
-        "pestInsider": [
-          "waves-blue",
-          "sunshine",
           "waves-blue",
           "sunshine",
           "waves-blue",

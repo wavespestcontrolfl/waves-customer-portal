@@ -1,6 +1,6 @@
 /**
  * Office "Customer's words" on a pest/lawn re-service
- * (services/reservice-office-request.js, GATE_RESERVICE_OFFICE_REQUEST):
+ * (services/reservice-office-request.js):
  * the suggestion picker (newest of the customer's latest inbound text vs call
  * note inside 72 hours, only that customer's rows, opt-out keywords skipped)
  * and the server-decided source (unchanged text/call keeps its source, an

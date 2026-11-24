@@ -43,12 +43,10 @@
 
 const logger = require('../logger');
 const { DAY_ONLY_ARRIVAL_NOTE, loadDayOnlyCheck } = require('../day-only-ai-context');
-const { dayOnlyPromiseOn } = require('../time-promise');
 
-/** Was the customer told only the DAY of this already-booked re-service? Gate off: false, no read. Gate on: judged by the
+/** Was the customer told only the DAY of this already-booked re-service? Judged by the
  *  visit the entry's reschedule token names; no readable visit id means the day only. Never throws. */
 async function bookedReserviceDayOnly(db, customerId, booked) {
-  if (!dayOnlyPromiseOn()) return false;
   const token = /^\/reschedule\/([^/]+)$/.exec(String(booked.rescheduleUrl || ''))?.[1];
   const row = token
     ? await db('scheduled_services').where({ customer_id: customerId, reschedule_token: token }).first('id').catch(() => null)

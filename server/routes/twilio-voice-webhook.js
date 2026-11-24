@@ -85,6 +85,7 @@ function phoneDigits(value) {
 
 // Shared with the admin spam-disposition guard (utils/known-caller-phone).
 const { customerPhoneLookupKey, knownCallerPhoneExists } = require('../utils/known-caller-phone');
+const press1ScreenAllUnknown = require('../services/press1-screen-all-unknown');
 const {
   isVoicemailAnsweredBy,
   sendOutboundVoicemailText,
@@ -834,20 +835,44 @@ const VOICEMAIL_COMPLETE_ACTION = '/api/webhooks/twilio/voicemail-complete';
 // 6-digit exchange hung up on us in 14 days (missed-call-bell.js
 // exchangeHangupScreenHit). `exchangeHit` is true only with that gate on; off,
 // the webhook stamps metadata.preconnect_screen_exchange='shadow' instead.
-function preconnectScreenDecision({ knownCaller, stirVerstat, gateOn, exchangeHit = false }) {
+//
+// All-unknown trial (GATE_CALL_SCREEN_ALL_UNKNOWN, owner 2026-11-24 "trial"):
+// every unknown caller on any attestation is challenged, except a staff phone,
+// a number on a live lead, and a remembered caller
+// (services/press1-screen-all-unknown.js). `allUnknownHit` is true only with
+// that gate on.
+function preconnectScreenDecision({ knownCaller, stirVerstat, gateOn, exchangeHit = false, allUnknownHit = false }) {
   if (knownCaller) return 'none';
-  if (!/-B$/.test(String(stirVerstat || '')) && !exchangeHit) return 'none';
+  if (!/-B$/.test(String(stirVerstat || '')) && !exchangeHit && !allUnknownHit) return 'none';
   return gateOn ? 'gate' : 'would_gate';
+}
+
+// The call_log.metadata stamps of one first delivery's screen decision.
+//  - preconnect_screen: 'would_gate' (shadow, gate off) or 'gated' (challenge
+//    issued), later 'passed'/'failed'. Absent when nothing triggered.
+//  - preconnect_screen_exchange: 'gated' only when the exchange rule itself
+//    challenged (its gate on); 'shadow' when it only would have, including a
+//    call the all-unknown trial challenged. The shadow week reads these rows.
+//  - preconnect_screen_all_unknown: 'gated' when the trial challenged the call
+//    (not B, not the exchange rule). The 14-day watch reads these rows.
+function preconnectScreenStamps({ screenDecision, exchangeTrigger, allUnknownTrigger, exchangeGateOn }) {
+  const stamps = {};
+  if (screenDecision !== 'none') stamps.preconnect_screen = screenDecision === 'gate' ? 'gated' : 'would_gate';
+  if (exchangeTrigger) stamps.preconnect_screen_exchange = screenDecision === 'gate' && exchangeGateOn ? 'gated' : 'shadow';
+  if (allUnknownTrigger && screenDecision === 'gate') stamps.preconnect_screen_all_unknown = 'gated';
+  return stamps;
 }
 
 // The exchange trigger's read, on the ring path before any TwiML. Fails OPEN:
 // a slow or broken query never challenges a caller.
+// A failed read answers null (falsy, so the exchange rule never challenges),
+// which also tells the all-unknown trial to stand down for this call.
 async function exchangeTriggerHit(from) {
   try {
     return await require('../services/missed-call-bell').exchangeHangupScreenHit(from);
   } catch (err) {
-    logger.warn(`[preconnect-screen] exchange check failed (failing open, no challenge): ${err.message}`);
-    return false;
+    logger.warn(`[preconnect-screen] exchange check failed (failing open, no challenge): ${err?.code || err?.name || 'error'}`);
+    return null;
   }
 }
 
@@ -858,37 +883,83 @@ async function exchangeTriggerHit(from) {
 // screen; checked only when it could change the outcome, so the extra query
 // never runs on ordinary calls. A check failure fails OPEN — never challenge
 // a caller because Postgres hiccupped.
-async function screenCandidate(from, stirVerstat) {
+const NO_SCREEN = Object.freeze({ knownCaller: false, exchangeTrigger: false, allUnknownTrigger: false });
+
+// The customer-slot check. With the all-unknown trial on it sits in front of
+// most unknown calls, so it gets the trial's bounded read (a timeout counts as
+// known). A failure counts as known too: never challenge on a broken read.
+async function screenKnownCaller(from, trialOn) {
+  try {
+    return trialOn
+      ? await press1ScreenAllUnknown.knownCallerWithinLimit(from)
+      : await knownCallerPhoneExists(db, from);
+  } catch (err) {
+    // A code only: a Knex error echoes the bound values, here the caller's number.
+    logger.warn(`[preconnect-screen] known-caller check failed (failing open, no challenge): ${err?.code || err?.name || 'error'}`);
+    return true;
+  }
+}
+
+async function screenCandidate(from, stirVerstat, { redelivery = false } = {}) {
+  const gates = require('../config/feature-gates');
+  const trialOn = gates.isEnabled('callPreconnectScreen') && gates.callScreenAllUnknownLive();
+  // A redelivery's stored trial challenge is replayed by the handler, before
+  // the customer match; here a redelivery never runs the trial read.
   const attestationB = /-B$/.test(String(stirVerstat || ''));
   const exchangeHit = !attestationB && await exchangeTriggerHit(from);
-  if (!attestationB && !exchangeHit) return { knownCaller: false, exchangeTrigger: false };
-  try {
-    const knownCaller = await knownCallerPhoneExists(db, from);
-    return { knownCaller, exchangeTrigger: exchangeHit && !knownCaller };
-  } catch (err) {
-    logger.warn(`[preconnect-screen] known-caller check failed (failing open, no challenge): ${err.message}`);
-    return { knownCaller: true, exchangeTrigger: false };
-  }
+  // Nothing to screen, or a failed exchange read (null) on a non-B caller:
+  // route normally without another read.
+  // A redelivery never runs the trial read, so the trial alone is no reason
+  // to read on.
+  if ((!attestationB && !exchangeHit && !(trialOn && !redelivery)) || exchangeHit === null) return NO_SCREEN;
+  if (await screenKnownCaller(from, trialOn)) return { ...NO_SCREEN, knownCaller: true };
+  // The trial's own read runs only on a first delivery, for a caller B and the
+  // exchange rule do not already challenge (an exchange hit with its gate off
+  // is only a shadow, so the trial still screens it). It fails open inside.
+  const exchangeGates = exchangeHit && gates.isEnabled('callScreenExchangeHistory');
+  const allUnknownTrigger = trialOn && !redelivery && !attestationB && !exchangeGates
+    && await press1ScreenAllUnknown.screenAllUnknownHit(from);
+  return { knownCaller: false, exchangeTrigger: Boolean(exchangeHit), allUnknownTrigger: Boolean(allUnknownTrigger) };
+}
+
+// Press-1 prompt words. The end of the first prompt lives in ONE constant so
+// it can be swapped later (owner 2026-11-20 is choosing between endings).
+const PRECONNECT_PROMPT_END = 'To help us stop spam calls, please press 1 to reach our office.';
+const PRECONNECT_SECOND_TRY = 'This is a recording. To reach our office, press any key, or stay on the line to leave a message.';
+
+// Opening line for the line the caller dialed. A spoke site speaks its own
+// brand (spokenName), never "Waves in <town>"; a location or GBP line speaks
+// Waves plus its town (spokenTown); everything else is plain "Waves".
+function preconnectOpening(numberConfig) {
+  if (numberConfig?.spokenName) return `Thanks for calling ${numberConfig.spokenName}.`;
+  if (numberConfig?.spokenTown) return `Thanks for calling Waves in ${numberConfig.spokenTown}.`;
+  return 'Thanks for calling Waves.';
 }
 
 // Pass/fail re-enter THIS route via query params (?screened=1 / ?screenfail=1)
 // so the normal routing, idempotency claim, and voicemail flows are reused
 // verbatim — no new public webhook route exists.
-function buildPreconnectChallengeTwiML() {
+// Words: owner 2026-11-20. Spoke-site lines never say "Waves in" a town (they
+// say the site's own name). Any key still passes (any digit hits ?screened=1).
+function buildPreconnectChallengeTwiML(numberConfig = null) {
   const twiml = new VoiceResponse();
   const gatherOpts = {
     input: 'dtmf',
     numDigits: 1,
     timeout: 6,
+    // '#' is Twilio's default finish key: pressed alone it ends the Gather
+    // with no digits, so the caller falls through toward voicemail. The
+    // second try says "press any key", so '#' must count as a key too.
+    finishOnKey: '',
     action: '/api/webhooks/twilio/voice?screened=1',
     method: 'POST',
   };
   twiml
     .gather(gatherOpts)
-    .say({ voice: SAY_VOICE }, 'Thank you for calling Waves Pest Control. To be connected, please press one.');
+    .say({ voice: SAY_VOICE }, `${preconnectOpening(numberConfig)} ${PRECONNECT_PROMPT_END}`);
   twiml
     .gather(gatherOpts)
-    .say({ voice: SAY_VOICE }, 'Please press one to be connected.');
+    .say({ voice: SAY_VOICE }, PRECONNECT_SECOND_TRY);
   twiml.redirect({ method: 'POST' }, '/api/webhooks/twilio/voice?screenfail=1');
   return twiml.toString();
 }
@@ -1386,19 +1457,10 @@ router.post('/voice', async (req, res) => {
 
     const numberConfig = TWILIO_NUMBERS.findByNumber(To);
 
-    // Match caller to customer. The raw matches are fetched once: a single
-    // match links the call; 2+ matches deliberately do NOT auto-link (shared
-    // number) but still count as a known caller for the screen bypass below.
-    const customerPhoneMatches = await findCustomerPhoneMatches(db, From);
-    let customer = customerPhoneMatches.length === 1 ? customerPhoneMatches[0] : null;
-    if (customerPhoneMatches.length > 1) {
-      logger.warn(`[voice] ${customerPhoneMatches.length} customers share caller phone ${maskPhone(From)}; not auto-linking call_log`);
-    }
-
-    // Pre-connect screen decision (see helpers above). Re-entries from the
-    // challenge TwiML arrive on this same route with ?screened=1 (a key was
-    // pressed) or ?screenfail=1 (both Gathers timed out) — they are never a
-    // first delivery, so the insert/stamp below doesn't double-fire.
+    // Pre-connect screen re-entries. The challenge TwiML comes back to this
+    // same route with ?screened=1 (a key was pressed) or ?screenfail=1 (both
+    // Gathers timed out); they are never a first delivery, so the insert and
+    // stamp below don't double-fire.
     const screenReentry = req.query.screened === '1'
       ? 'passed'
       : (req.query.screenfail === '1' ? 'failed' : null);
@@ -1408,16 +1470,39 @@ router.post('/voice', async (req, res) => {
     // English exactly as the Gather timeout would have.
     const langReentry = req.query.lang === 'menu';
     const spanishChosen = langReentry && spanishSelected(req.body);
+
+    // Only the delivery that owns the dedupe claim makes a fresh trial
+    // decision. Any other (a Twilio redelivery, or a claim that could not be
+    // written) replays the stored trial challenge before any other read (the
+    // customer match included), so one call never gets two answers. No
+    // stored challenge, or a failed read: no replay (fail open).
+    const replayedTrialChallenge = !voiceClaim.owned && Boolean(CallSid) && !screenReentry && !langReentry
+      && isEnabled('callPreconnectScreen') && require('../config/feature-gates').callScreenAllUnknownLive()
+      && await press1ScreenAllUnknown.storedTrialDecision(CallSid);
+
+    // Match caller to customer. The raw matches are fetched once: a single
+    // match links the call; 2+ matches deliberately do NOT auto-link (shared
+    // number) but still count as a known caller for the screen bypass below.
+    // A replayed challenge needs no match: a redelivery logs nothing.
+    const customerPhoneMatches = replayedTrialChallenge ? [] : await findCustomerPhoneMatches(db, From);
+    let customer = customerPhoneMatches.length === 1 ? customerPhoneMatches[0] : null;
+    if (customerPhoneMatches.length > 1) {
+      logger.warn(`[voice] ${customerPhoneMatches.length} customers share caller phone ${maskPhone(From)}; not auto-linking call_log`);
+    }
+
+    // Pre-connect screen decision (see helpers above).
     let knownCaller = customerPhoneMatches.length > 0;
     let exchangeTrigger = false;
-    if (!knownCaller && !screenReentry && !langReentry) {
-      ({ knownCaller, exchangeTrigger } = await screenCandidate(From, req.body.StirVerstat));
+    let allUnknownTrigger = Boolean(replayedTrialChallenge);
+    if (!knownCaller && !allUnknownTrigger && !screenReentry && !langReentry) {
+      ({ knownCaller, exchangeTrigger, allUnknownTrigger } = await screenCandidate(From, req.body.StirVerstat, { redelivery: !voiceClaim.owned }));
     }
     const screenDecision = (screenReentry || langReentry) ? 'none' : preconnectScreenDecision({
       knownCaller,
       stirVerstat: req.body.StirVerstat,
       gateOn: isEnabled('callPreconnectScreen'),
       exchangeHit: exchangeTrigger && isEnabled('callScreenExchangeHistory'),
+      allUnknownHit: allUnknownTrigger,
     });
 
     // No caller-name lookup here. One used to run on every unknown inbound
@@ -1451,18 +1536,12 @@ router.post('/voice', async (req, res) => {
         // that absence is itself a finding (Marchex was silent for months).
         stir_verstat: req.body.StirVerstat || null,
         addons: parseAddOnsForAudit(req.body.AddOns),
-        // Pre-connect screen lifecycle: 'would_gate' (shadow, gate off) or
-        // 'gated' (challenge issued) → later 'passed'/'failed'. Absent for
-        // known customers and non-B attestation without the exchange trigger.
-        ...(screenDecision !== 'none'
-          ? { preconnect_screen: screenDecision === 'gate' ? 'gated' : 'would_gate' }
-          : {}),
-        // Exchange trigger: 'gated' when it challenged this caller, 'shadow'
-        // when it would have (its gate or the screen gate off). The shadow
-        // week reads these rows before the gate flips.
-        ...(exchangeTrigger
-          ? { preconnect_screen_exchange: screenDecision === 'gate' ? 'gated' : 'shadow' }
-          : {}),
+        ...preconnectScreenStamps({
+          screenDecision,
+          exchangeTrigger,
+          allUnknownTrigger,
+          exchangeGateOn: isEnabled('callScreenExchangeHistory'),
+        }),
         ...promiseChaserEligibilityStamp(),
       });
     await db.transaction(async (trx) => {
@@ -1561,7 +1640,7 @@ router.post('/voice', async (req, res) => {
     } else if (screenDecision === 'gate') {
       // The trigger (B or exchange) is on the row: metadata.preconnect_screen_exchange.
       logger.info(`[preconnect-screen] challenging unknown caller ${maskPhone(From)} (${maskSid(CallSid)})`);
-      return res.type('text/xml').send(buildPreconnectChallengeTwiML());
+      return res.type('text/xml').send(buildPreconnectChallengeTwiML(numberConfig));
     }
 
     // ── Tech line (GATE_TECH_LINES): the holder rings before anything else ──
@@ -2318,10 +2397,7 @@ function isSandboxCall(req) {
 // socket, whose database has no sandbox row for it (codex r14 P1). The
 // request's Host is Twilio-signature-covered, so it is trustworthy here.
 function sandboxRelayHost(req) {
-  return process.env.SERVER_DOMAIN
-    || process.env.RAILWAY_PUBLIC_DOMAIN
-    || (req && req.headers && String(req.headers.host || '').replace(/:\d+$/, ''))
-    || 'portal.wavespestcontrol.com';
+  return require('../services/voice-agent/relay-protocol').publicWsHost(req && req.headers && req.headers.host);
 }
 function sandboxRelayXml({ callSid, cell, req = null }) {
   const { buildRelayTwiML, RELAY_WS_PATH, spanishWelcomeGreeting } = require('../services/voice-agent/relay-protocol');
@@ -2591,6 +2667,166 @@ router.post('/relay-sandbox', async (req, res) => {
   }
 });
 
+// =========================================================================
+// GPT-Live trial (GATE_VOICE_GPT_LIVE_TEST, owner 2026-11-19, spend cap $5).
+// Cell codes 71 / 72 on the sandbox number connect the call to OpenAI's
+// GPT-Live model through Twilio Media Streams (services/voice-agent/
+// live-bridge.js) instead of ConversationRelay, so the owner can compare the
+// two by ear. Twilio does not allow a query string on a <Stream> url, so the
+// CallSid and the per-call token ride as path segments of /ws/voice-live/.
+// =========================================================================
+const GPT_LIVE_COMPLETE_ACTION = '/api/webhooks/twilio/relay-sandbox/live-complete';
+const GPT_LIVE_CELLS = new Map([['71', 'marin'], ['72', 'delta']]);
+const GPT_LIVE_TIME_LIMIT_S = 600;
+const GPT_LIVE_DEFAULT_MAX_USD = 5; // the owner's spend yes, 2026-11-19: $5 of OpenAI charges in all
+const GPT_LIVE_BUDGET_LOCK = 'voice_gpt_live_budget';
+// The spend ledger is its own table (migration 20261120020000), never call_log:
+// call_log rows can be deleted (spam disposition, orphan cleanup), and a
+// deleted row must not give back billed spend. A row counts its settled cost,
+// else its reservation: a call whose summary never landed keeps it for good.
+const GPT_LIVE_LEDGER = 'voice_gpt_live_ledger';
+const GPT_LIVE_SPENT_SQL = 'COALESCE(SUM(COALESCE(cost_usd, reserved_usd)), 0) AS usd';
+// A reservation whose stream never opened within the stream token's life (the
+// caller hung up during the disclosure) used nothing: the next reservation
+// releases it at $0. The upgrade admits only an unreleased row, so a late
+// stream cannot reopen it.
+const GPT_LIVE_ADMIT_WINDOW_S = 6 * 60; // CALL_TOKEN_TTL_MS (5 min) + 1 min
+const GPT_LIVE_UNCLAIMED_SQL = "(metadata->'gpt_live') IS NULL";
+
+function gptLiveCellFor(digits) {
+  if (!GPT_LIVE_CELLS.has(digits)) return null;
+  if (!require('../config/feature-gates').voiceGptLiveTestLive()) return null;
+  return { cell: digits, voice: GPT_LIVE_CELLS.get(digits) };
+}
+
+// The default applies only when the variable is absent. A set value that is
+// not a plain, finite non-negative number with at most 4 decimals (the
+// ledger's $0.0001 scale): "", "$1", "-1", "five", "0.52499", or 400 digits
+// that overflow to Infinity, is a mistake: null, and the reservation refuses
+// the call rather than guess a cap.
+function gptLiveMaxUsd() {
+  const raw = process.env.VOICE_GPT_LIVE_TEST_MAX_USD;
+  if (raw === undefined) return GPT_LIVE_DEFAULT_MAX_USD;
+  const text = String(raw).trim();
+  const value = Number(text);
+  return /^\d+(\.\d{1,4})?$/.test(text) && Number.isFinite(value) ? value : null;
+}
+
+// Reserve one call's worst-case OpenAI cost (live-bridge PER_CALL_RESERVE_USD:
+// the 10 minute cap plus the backend cap) BEFORE a stream token exists, and
+// stamp the call_log row the WS upgrade requires. One transaction-scoped lock
+// makes the ledger read, the ledger claim and the stamp one step, so two calls
+// cannot both spend the same balance. The claim is single-use per CallSid (the
+// ledger's primary key, and a stamp only on a row with no gpt_live yet), so a
+// repeated cell request never mints a second token. Twilio retries a voice
+// webhook only when its connection fails (default retry policy `ct`; this
+// route sets no connection override), so a retry never follows a committed
+// reservation. Returns false when the
+// reservation does not fit under the cap; a database error, or a call already
+// claimed, throws and the caller refuses the call (fail closed).
+async function reserveGptLiveCall(callSid, { cell, voice, token }) {
+  const { callTokenDigest } = require('../services/voice-agent/relay-protocol');
+  const { PER_CALL_RESERVE_USD } = require('../services/voice-agent/live-bridge');
+  return db.transaction(async (trx) => {
+    const maxUsd = gptLiveMaxUsd();
+    if (maxUsd === null) throw new Error('VOICE_GPT_LIVE_TEST_MAX_USD is not a plain non-negative number');
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [GPT_LIVE_BUDGET_LOCK]);
+    await trx(GPT_LIVE_LEDGER)
+      .whereNull('admitted_at')
+      .whereNull('cost_usd')
+      .whereRaw("created_at < now() - (? * interval '1 second')", [GPT_LIVE_ADMIT_WINDOW_S])
+      .update({ cost_usd: 0, settled_at: trx.fn.now() });
+    const row = await trx(GPT_LIVE_LEDGER).first(trx.raw(GPT_LIVE_SPENT_SQL));
+    // Whole ten-thousandths of a dollar (the ledger's numeric(10,4) scale), so
+    // the comparison is exact: 0.0450 + 0.525 must fit a 0.57 cap.
+    const units = (usd) => Math.round(Number(usd) * 10000);
+    if (units(row && row.usd) + units(PER_CALL_RESERVE_USD) > units(maxUsd)) return false;
+    const claimed = await trx(GPT_LIVE_LEDGER)
+      .insert({ call_sid: callSid, reserved_usd: PER_CALL_RESERVE_USD })
+      .onConflict('call_sid').ignore()
+      .returning('call_sid');
+    if (!claimed || !claimed.length) throw new Error('call already claimed a GPT-Live reservation');
+    // stream_token_sha256 binds the reservation to the one token issued here.
+    const stamp = { gpt_live: { cell, voice, started_at: new Date().toISOString(), reserved_usd: PER_CALL_RESERVE_USD, stream_token_sha256: callTokenDigest(token) } };
+    const updated = await trx('call_log')
+      .where({ twilio_call_sid: callSid })
+      .whereRaw(GPT_LIVE_UNCLAIMED_SQL)
+      .update({ metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(stamp)]) });
+    if (!updated) throw new Error('no unstamped call_log row for this call');
+    return true;
+  });
+}
+
+// Twilio's own stop at 10 minutes, in case the bridge never closes. Fail-soft:
+// the bridge's own cap ends the session at the same mark.
+function capGptLiveCall(callSid) {
+  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) return;
+  const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+  void client.calls(callSid).update({ timeLimit: GPT_LIVE_TIME_LIMIT_S })
+    .catch((err) => logger.warn(`[gpt-live] time limit not set for ${maskSid(callSid)} (${String(err?.code || err?.status || 'error')})`));
+}
+
+// The live cell spends money (a ledger reservation and a Twilio REST update),
+// so it needs a verified Twilio signature itself: the shared middleware lets an
+// unsigned request through in its `log` and `disabled` modes. No auth token,
+// no header or a bad one: refused before any write.
+function gptLiveRequestSigned(req) {
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  const signature = typeof req.get === 'function' ? req.get('X-Twilio-Signature') : undefined;
+  if (!authToken || typeof signature !== 'string' || !signature) return false;
+  const { reconstructUrl } = require('../middleware/twilio-signature');
+  return twilio.validateRequest(authToken, signature, reconstructUrl(req), req.body || {});
+}
+
+function gptLiveSayAndHangup(res, text) {
+  const twiml = new VoiceResponse();
+  twiml.say({ voice: SAY_VOICE }, text);
+  twiml.hangup();
+  return res.type('text/xml').send(twiml.toString());
+}
+
+// The disclosure replay the cell handler always plays (a digit cut the
+// answer-time copy short), then the media stream.
+function gptLiveStreamXml(req, callSid, token) {
+  const twiml = new VoiceResponse();
+  twiml.play(wavesGreetingUrl());
+  const connect = twiml.connect({ action: GPT_LIVE_COMPLETE_ACTION });
+  connect.stream({ url: require('../services/voice-agent/relay-protocol').liveStreamUrl(sandboxRelayHost(req), callSid, token) });
+  return twiml.toString();
+}
+
+async function respondGptLiveCell(req, res, callSid, { cell, voice }) {
+  if (!isRelayAttached()) {
+    logger.warn(`[gpt-live] relay not attached — hanging up ${maskSid(callSid)}`);
+    return gptLiveSayAndHangup(res, 'The voice relay is not attached on this deploy. Goodbye.');
+  }
+  try {
+    // Signed for /ws/voice-live/ only: the relay socket refuses it.
+    const { mintCallToken, LIVE_TOKEN_AUDIENCE } = require('../services/voice-agent/relay-protocol');
+    const token = mintCallToken(callSid, { audience: LIVE_TOKEN_AUDIENCE });
+    if (!token) throw new Error('no call token (VOICE_RELAY_WS_SECRET unset)');
+    if (!(await reserveGptLiveCall(callSid, { cell, voice, token }))) {
+      logger.warn(`[gpt-live] budget used up — refused ${maskSid(callSid)} cell ${cell}`);
+      return gptLiveSayAndHangup(res, 'The GPT-Live test budget is used up. Goodbye.');
+    }
+    capGptLiveCall(callSid);
+    logger.info(`[gpt-live] cell ${cell} voice ${voice} ${maskSid(callSid)}`);
+    return res.type('text/xml').send(gptLiveStreamXml(req, callSid, token));
+  } catch (err) {
+    logger.error(`[gpt-live] refused ${maskSid(callSid)} (fail closed): ${err.message}`);
+    return gptLiveSayAndHangup(res, 'The GPT-Live test is not available right now. Goodbye.');
+  }
+}
+
+// The <Connect action> of a GPT-Live call: the stream ended (caller hung up,
+// the 10 minute cap, or the bridge closed). Nothing follows it: hang up.
+router.post('/relay-sandbox/live-complete', (req, res) => {
+  if (!isSandboxCall(req)) return refuseSandbox(req, res, 'not the sandbox number');
+  const twiml = new VoiceResponse();
+  twiml.hangup();
+  return res.type('text/xml').send(twiml.toString());
+});
+
 router.post('/relay-sandbox/cell', async (req, res) => {
   try {
     if (!isSandboxCall(req)) return refuseSandbox(req, res, 'not the sandbox number');
@@ -2600,6 +2836,14 @@ router.post('/relay-sandbox/cell', async (req, res) => {
     // over a row that is not sandbox-sourced.
     if (!(await sandboxRowOwned(CallSid))) return refuseSandbox(req, res, 'call_log row is not sandbox-sourced');
     const digits = String(req.body?.Digits || '').trim();
+    // GATE_VOICE_GPT_LIVE_TEST: 71 / 72 hand the call to the GPT-Live bridge.
+    // Gate off (or any other digits) ⇒ the production code path below.
+    const liveCell = gptLiveCellFor(digits);
+    if (liveCell && !gptLiveRequestSigned(req)) {
+      logger.warn(`[gpt-live] unsigned or invalid Twilio signature — refused ${maskSid(CallSid)}`);
+      return gptLiveSayAndHangup(res, 'The GPT-Live test is not available right now. Goodbye.');
+    }
+    if (liveCell) return await respondGptLiveCell(req, res, CallSid, liveCell);
     const { resolveSandboxCell } = require('../services/voice-agent/relay-profiles');
     const cell = resolveSandboxCell(digits);
     logger.info(`[relay-sandbox] cell "${digits}" → ${cell ? cell.relayProfileId : 'production profile'} ${maskSid(CallSid)}`);
@@ -2807,9 +3051,11 @@ router.post('/recording-status', async (req, res) => {
       // quarantine predicate and a recording_sid fence, so a stamp or a
       // competing delivery landing between this read and the write makes
       // the write skip instead of overwriting.
+      // processing_generation: a duplicate delivery's timers are scheduled
+      // on it (an attach or a replace takes the one its write returns).
       const ATTACH_COLUMNS = [
         'id', 'twilio_call_sid', 'recording_sid', 'recording_url', 'recording_duration_seconds',
-        'processing_status', 'transcription_metadata', 'metadata',
+        'processing_status', 'transcription_metadata', 'metadata', 'processing_generation',
       ];
       let targetRow = null;
       if (ParentCallSid) {
@@ -2842,6 +3088,12 @@ router.post('/recording-status', async (req, res) => {
       }
       let updated = 0;
       let matchedSid = null;
+      // The processing_generation the timers below are scheduled on: the one
+      // the write that landed the recording returned, so only a pass that
+      // claims the row after that write can overtake them (pre-push Codex P1,
+      // rounds 8 and 9). A row read without it gives null: no fence.
+      let matchedGeneration = null;
+      const generationOf = (row) => (row?.processing_generation == null ? null : Number(row.processing_generation));
       let attach = null;
       // A duplicate delivery for a row in a SETTLED state schedules no pass
       // (Codex #3736 r15 P1): the non-force dedup guard skips only
@@ -2880,6 +3132,7 @@ router.post('/recording-status', async (req, res) => {
           if (attach.reason === 'already_parked') await park(targetRow, 'retry');
           duplicateOfSettledRow = !RETRYABLE_STATUSES.has(targetRow.processing_status || null);
           matchedSid = targetRow.twilio_call_sid;
+          matchedGeneration = generationOf(targetRow);
           logger.info(`[recording-status] duplicate delivery of ${maskSid(RecordingSid)} for ${maskSid(matchedSid)} — row untouched`);
           break;
         }
@@ -2950,13 +3203,14 @@ router.post('/recording-status', async (req, res) => {
           );
         }
         const baseline = targetRow;
+        let writtenGeneration = null;
         // A failed attach/replace transaction (a deadlock, a transient
         // error in the swap or the card retirement) must reach the handler's
         // catch as a redelivery request (Codex #3736 r16 P1): a 200 would
         // tell Twilio the SID was stored while it is stored nowhere, and the
         // recovery sweep cannot find it (the row still has its old URL).
         updated = await db.transaction(async (trx) => {
-        const n = await trx('call_log')
+        const written = await trx('call_log')
           .where({ id: baseline.id })
           .where(notQuarantined)
           // Fence on the recording this decision was made against.
@@ -2969,7 +3223,9 @@ router.post('/recording-status', async (req, res) => {
           // write (and start transcribing the old audio, or finalize without
           // the new audio). Re-checked in the write; zero rows re-decides.
           .whereRaw(NOT_LOAD_BEARING_SQL)
-          .update(write);
+          .update(write, ['processing_generation']);
+        const n = written.length;
+        writtenGeneration = generationOf(written[0]);
         // A replace retires the review cards the OLD audio raised (address,
         // scheduling, email, routing): they describe a recording this call
         // no longer has, and the re-run's ON CONFLICT DO NOTHING inserts
@@ -3009,6 +3265,7 @@ router.post('/recording-status', async (req, res) => {
         }).catch((err) => { err.attachFailed = true; throw err; });
         if (updated > 0) {
           matchedSid = baseline.twilio_call_sid;
+          matchedGeneration = writtenGeneration;
           break;
         }
         // Stale decision. Re-read and go round once more; on the second
@@ -3102,11 +3359,15 @@ router.post('/recording-status', async (req, res) => {
               // between the earlier lookup and this transaction means the
               // guarded update silently skips, and the just-arrived
               // recording must be quarantine-deleted, not left at Twilio.
-              const guardedCount = await trx('call_log').where({ id: existing.id }).where(notQuarantined).update(recordingData);
-              if (guardedCount === 0) {
+              // The timers fence on the generation this write left (pre-push
+              // Codex P1, round 9).
+              const guarded = await trx('call_log').where({ id: existing.id }).where(notQuarantined)
+                .update(recordingData, ['processing_generation']);
+              if (guarded.length === 0) {
                 stampedRaceRow = existing;
               } else {
                 matchedSid = primaryCallSid;
+                matchedGeneration = generationOf(guarded[0]);
                 logger.info(`[recording-status] Attached recording ${maskSid(RecordingSid)} to existing Studio-originated call ${maskSid(primaryCallSid)}`);
               }
               return;
@@ -3130,7 +3391,7 @@ router.post('/recording-status', async (req, res) => {
             const numberConfig = TWILIO_NUMBERS.findByNumber(toPhone);
             const customer = fromPhone ? await findSingleCustomerByPhone(trx, fromPhone) : null;
 
-            await trx('call_log').insert({
+            const [created] = await trx('call_log').insert({
               customer_id: customer?.id || null,
               direction: 'inbound',
               from_phone: fromPhone,
@@ -3146,8 +3407,9 @@ router.post('/recording-status', async (req, res) => {
                 source: twilioCall ? 'twilio_recording_status_recovered' : 'twilio_studio_recording_status',
               }),
               ...recordingData,
-            });
+            }, ['processing_generation']);
             matchedSid = primaryCallSid;
+            matchedGeneration = generationOf(created);
             logger.info(`[recording-status] Created Studio-originated call_log row from recording callback ${maskSid(CallSid)}`);
           });
         } catch (insertErr) {
@@ -3224,9 +3486,18 @@ router.post('/recording-status', async (req, res) => {
           const processor = require('../services/call-recording-processor');
           const earlyDelayMs = Number(process.env.CALL_PROC_EARLY_PROCESS_DELAY_MS) || 2 * 60 * 1000;
           const fallbackDelayMs = 10 * 60 * 1000;
-          const attempt = async (label) => {
+          // Each timer carries the claim generation it was scheduled on
+          // (pre-push Codex P1, rounds 8 and 9): a pass that claims the row
+          // while the timer waits (the sweep) leaves a higher generation, and
+          // the claim then runs the timer only on a row still owed a pass. The
+          // early timer takes the generation this webhook's write returned.
+          // The fallback takes the early pass's own claim when it deferred
+          // (that pass must not fence it), and keeps the early timer's when
+          // the early pass returned none (it threw).
+          const scheduledGeneration = matchedGeneration;
+          const attempt = async (label, generation) => {
             try {
-              return await processor.processRecording(matchedSid);
+              return await processor.processRecording(matchedSid, { scheduledGeneration: generation });
             } catch (e) {
               logger.error(`Auto-process recording failed (${label}): ${e.message}`);
               return null;
@@ -3242,10 +3513,11 @@ router.post('/recording-status', async (req, res) => {
           // restarts and both in-memory timers are lost, the 5-min cron is
           // still the backstop, unchanged.
           setTimeout(async () => {
-            const result = await attempt('early');
+            const result = await attempt('early', scheduledGeneration);
             const needsFallback = !result || result.reason === 'recording_not_ready';
             if (needsFallback) {
-              setTimeout(() => attempt('fallback'), Math.max(fallbackDelayMs - earlyDelayMs, 60 * 1000));
+              const fallbackGeneration = result?.generation != null ? Number(result.generation) : scheduledGeneration;
+              setTimeout(() => attempt('fallback', fallbackGeneration), Math.max(fallbackDelayMs - earlyDelayMs, 60 * 1000));
             }
           }, earlyDelayMs);
         } catch (e) { logger.error(`Recording auto-process setup failed: ${e.message}`); }
@@ -4603,9 +4875,11 @@ router._test = {
   SPANISH_MENU_PROMPT,
   LANGUAGE_MENU_ACTION,
   buildPreconnectChallengeTwiML,
+  preconnectOpening,
   findCustomerPhoneMatches,
   knownCallerPhoneExists,
   preconnectScreenDecision,
+  preconnectScreenStamps,
   exchangeTriggerHit,
   screenCandidate,
   connectingAnnouncement,

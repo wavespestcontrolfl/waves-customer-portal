@@ -311,7 +311,10 @@ describe('empty recommendations', () => {
 
     expect(mockSendSMS).not.toHaveBeenCalled();
     expect(mockDeliver).toHaveBeenCalledTimes(1);
-    expect(mockDeliver.mock.calls[0][0]).toMatchObject({ key: 'owner-alert:ads-daily-report', audience: 'fyi', link: '/admin/ads' });
+    // supersedePrior: today's report closes the rows earlier days left open (one open report, not a week of them).
+    expect(mockDeliver.mock.calls[0][0]).toMatchObject({
+      key: 'owner-alert:ads-daily-report', audience: 'fyi', link: '/admin/ads', supersedePrior: true,
+    });
     const body = mockDeliver.mock.calls[0][0].text;
     expect(body).toContain('No changes recommended today.');
     expect(body).not.toContain('Top actions');

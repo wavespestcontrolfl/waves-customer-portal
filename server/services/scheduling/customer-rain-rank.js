@@ -1,7 +1,7 @@
 /**
  * Rain ranking on the customer booking surfaces (owner 2026-10-08,
  * GATE_CUSTOMER_RAIN_RANK, dark): the same rule the New Appointment picker
- * runs under GATE_BOOKING_RAIN_RANK (rain-fit.js), applied to the offers
+ * runs (rain-fit.js), applied to the offers
  * buildBookingAvailability curates for /book, the inspection link and the
  * public reschedule page, and to the estimate page's slot list
  * (estimate-slot-availability.js).
@@ -124,14 +124,14 @@ async function slotRainTierOf(slots, { services = [], profile = null, point = nu
 // for that one row, so the ranking does not depend on the capacity gate
 // (Codex #6127 r2). A lookup that fails or finds nothing leaves the label.
 const MAX_ESTIMATE_SERVICES = 12;
-async function estimateServiceIdentities(rows, { profile, db, deps = {} }) {
+async function estimateServiceIdentities(rows, { profile, db, deps = {}, strict = false }) {
   const out = [];
   const all = Array.isArray(rows) ? rows : [];
   for (const service of all.slice(0, MAX_ESTIMATE_SERVICES)) {
     if (typeof service === 'string') { out.push(service); continue; }
     const name = service?.label || service?.service;
     let serviceKey = service?.catalogServiceKey || service?.resolvedServiceKey || null;
-    if (!serviceKey && profile) serviceKey = await catalogKeyForRow(profile, service, { db, deps });
+    if (!serviceKey && profile) serviceKey = await catalogKeyForRow(profile, service, { db, deps, strict });
     out.push({ name, serviceKey });
   }
   // Rows past the cap are not looked up, so they cannot be called rain-OK:
@@ -141,12 +141,18 @@ async function estimateServiceIdentities(rows, { profile, db, deps = {} }) {
   return out;
 }
 
-async function catalogKeyForRow(profile, service, { db, deps = {} }) {
+// The catalog key for a quote line without one, or null. A failed lookup reads
+// the label alone; with `strict` it throws instead, the lookup's own reads
+// included (catalogLinkForProfile strictAllowanceRead), for the fill list,
+// which keeps a job it cannot read out of rain (day-replan/fill-list.js).
+async function catalogKeyForRow(profile, service, { db, deps = {}, strict = false }) {
   try {
     const lookup = deps.catalogLinkForProfile || require('../slot-reservation').catalogLinkForProfile;
-    const link = await lookup(db, { ...profile, services: [service] });
+    const visit = { ...profile, services: [service] };
+    const link = await (strict ? lookup(db, visit, { strictAllowanceRead: true }) : lookup(db, visit));
     return (link && link.service_key) || null;
   } catch (err) {
+    if (strict) throw err;
     logger.warn(`[customer-rain-rank] estimate catalog lookup failed (label used): ${err.message}`);
     return null;
   }
@@ -184,4 +190,6 @@ function stampRainTiers(candidates, tierOf) {
 // Tier difference for a comparator's first key; 0 for unstamped rows.
 const rainTierDiff = (a, b) => (a.rain_tier ?? 0) - (b.rain_tier ?? 0);
 
-module.exports = { slotRainTierOf, demoteByRainTier, _test: { _forecastStarts, FORECAST_BUDGET }, startCustomerRainRank, customerRainTierOf, stampRainTiers, withDisplayTier, rainTierDiff, GATE };
+module.exports = { slotRainTierOf, demoteByRainTier, _test: { _forecastStarts, FORECAST_BUDGET }, startCustomerRainRank, customerRainTierOf, stampRainTiers, withDisplayTier, rainTierDiff, GATE,
+  // The fill list's rain rule names an estimate's services as this page does (day-replan/fill-list.js).
+  estimateServiceIdentities };

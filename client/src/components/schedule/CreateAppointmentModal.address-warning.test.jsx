@@ -174,7 +174,7 @@ function installModalFetch({
       return Promise.resolve(jsonResponse({ id: 'unexpected-later-appointment' }));
     }
     if (url.includes('/properties?context=appointment_address')) {
-      return Promise.resolve(jsonResponse({ properties: [], canChangeAppointmentAddress: false }));
+      return Promise.resolve(jsonResponse({ properties: [] }));
     }
     if (url.includes('/schedule-source')) {
       const match = url.match(/\/admin\/estimates\/([^/?]+)\/schedule-source/);

@@ -42,7 +42,7 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const {
   COMPANY_FACTS_HEADER, BILLING_DELIMITER, exactStructureRegexSource, hasExactCompanyFacts, hasExactLabelFacts,
-  rebaseCompanyFactsToCurrent, RETIRED_COMPANY_FACT_TOPIC_RE,
+  rebaseCompanyFactsToCurrent, retiredTopicReForBlock, heldPlaceInConversationContext, heldPlaceInOpenTimesLookup,
 } = require('./sms-company-facts');
 const { LABEL_FACTS_MARKER, LABEL_SECTION_REGEX_SRC } = require('./sms-label-facts');
 const { MISSED_VISIT_SCOPE_LINE } = require('./visit-loops-facts');
@@ -510,7 +510,7 @@ async function sealEvalItems(opts) {
       .select(
         'md.id as source_draft_id', 'md.customer_id', 'md.intent',
         'md.inbound_message', 'md.facts_block', 'md.context_summary',
-        'md.scheduling_intent', 'md.created_at',
+        'md.scheduling_intent', 'md.created_at', 'md.intended_actions',
         'j.human_reply_text', 'j.human_reply_sms_id',
         'inbound_sms.created_at as inbound_at'
       )
@@ -526,7 +526,8 @@ async function sealEvalItems(opts) {
     const onto = rebaseCompanyFactsToCurrent(c.facts_block);
     if (!onto) { candidates.push(c); continue; }
     if (!itemCompatibleWith(onto, sealVersion)) continue;
-    if (RETIRED_COMPANY_FACT_TOPIC_RE.test(`${c.inbound_message}\n${c.human_reply_text}`)) { skippedRetiredTopic += 1; continue; }
+    if (retiredTopicReForBlock(c.facts_block)?.test(`${c.inbound_message}\n${c.human_reply_text}`) || heldPlaceInConversationContext(c.facts_block)
+      || heldPlaceInOpenTimesLookup(c.intended_actions)) { skippedRetiredTopic += 1; continue; }
     candidates.push({ ...c, facts_block: onto, rebased: true });
   }
 

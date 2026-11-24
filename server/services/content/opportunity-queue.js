@@ -393,7 +393,7 @@ class OpportunityQueue {
    * if nothing's available. Caller is responsible for calling complete()
    * or skip() (or letting the stale-claim timeout recover it).
    */
-  async claimNext({ minScore = THRESHOLDS.minScoreToAct, actionType = null, bucket = null, claimedBy = 'autonomous-runner', excludeIds = [], onlyIds } = {}) {
+  async claimNext({ minScore = THRESHOLDS.minScoreToAct, actionType = null, bucket = null, claimedBy = 'autonomous-runner', excludeIds = [], onlyIds, availableNowIds = [] } = {}) {
     // First, recover stale claims so they're eligible again.
     await this.recoverStaleClaims();
 
@@ -416,6 +416,14 @@ class OpportunityQueue {
     // still applies; an empty list claims nothing.
     const only = Array.isArray(onlyIds) ? onlyIds.filter((id) => id != null) : null;
     const whereOnly = only ? 'AND id = ANY(?)' : '';
+    // availableNowIds: rows of onlyIds that may be claimed before their available_at (the Mac
+    // pass takes a terminal draft written after a handoff wait), only while that time is within one
+    // handoff wait from now: a later date set since (a seeder, a cap) still holds. Every other rule applies.
+    const availableNow = only && Array.isArray(availableNowIds) ? availableNowIds.filter((id) => id != null && only.includes(id)) : [];
+    const handoffSeconds = availableNow.length ? Math.ceil(require('./terminal-writer').MAC_RECHECK_MS / 1000) : 0;
+    const whereAvailable = availableNow.length
+      ? `AND (available_at IS NULL OR available_at <= now() OR (id = ANY(?) AND available_at <= now() + (?::int * interval '1 second')))`
+      : 'AND (available_at IS NULL OR available_at <= now())';
     // See listicleFamilyLaneOpen — gate-off family rows are unclaimable.
     const whereFamilyGate = listicleFamilyLaneOpen() ? '' : `AND bucket <> 'listicle_family'`;
     // See citabilityBackfillLaneOpen — gate-off backfill rows are unclaimable.
@@ -449,7 +457,7 @@ class OpportunityQueue {
            -- carry a future available_at; they stay invisible to the claim
            -- until their window opens. NULL = available immediately (every
            -- miner row).
-           AND (available_at IS NULL OR available_at <= now())
+           ${whereAvailable}
            -- New policy gives a former approval hold one fresh attempt budget.
            -- New runs cannot enter those approval states, so this resets once.
            -- Ordinary retries keep the existing lifetime budget.
@@ -485,7 +493,7 @@ class OpportunityQueue {
          LIMIT 1
        )
        RETURNING *, ${effectiveActionSql} AS effective_action_type`,
-      [new Date(), maxClaimAttempts(), blogMinScoreFor(minScore), rewriteMinScoreFor(minScore), minScore]
+      [new Date(), ...(availableNow.length ? [availableNow, handoffSeconds] : []), maxClaimAttempts(), blogMinScoreFor(minScore), rewriteMinScoreFor(minScore), minScore]
         .concat(actionType ? [actionType] : [])
         .concat(bucket ? [bucket] : [])
         .concat(exclude.length ? [exclude] : [])

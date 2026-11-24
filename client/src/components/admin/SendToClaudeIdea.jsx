@@ -27,8 +27,6 @@ export function useSendToClaudeIdea({ open, prompt, attachments, attachmentsLoad
   // Whether the box offers the button: asked once per session (kept once answered); a failed ask reads as hidden and is
   // asked again the next time the box opens.
   const [enabled, setEnabled] = useState(false);
-  // GATE_IB_ANSWER_SEND_TO_CLAUDE: the status also says whether a stuck bar answer carries its own line or button.
-  const [answerButton, setAnswerButton] = useState(false);
   const askedRef = useRef(false);
   const [sending, setSending] = useState(false);
   const sendingRef = useRef(false);
@@ -46,8 +44,8 @@ export function useSendToClaudeIdea({ open, prompt, attachments, attachmentsLoad
     if (!open || askedRef.current) return;
     askedRef.current = true;
     adminFetch('/admin/claude-ideas/status')
-      .then((out) => { setEnabled(out?.enabled === true); setAnswerButton(out?.enabled === true && out?.answerButton === true); })
-      .catch(() => { askedRef.current = false; setEnabled(false); setAnswerButton(false); });
+      .then((out) => { setEnabled(out?.enabled === true); })
+      .catch(() => { askedRef.current = false; setEnabled(false); });
   }, [open]);
 
   useEffect(() => () => clearTimeout(timerRef.current), []);
@@ -119,7 +117,7 @@ export function useSendToClaudeIdea({ open, prompt, attachments, attachmentsLoad
     }
   }, [note, pastedRef, dictationUsedRef, onRestore]);
 
-  return { enabled, answerButton, sending, note, send, undo, canSend: Boolean(prompt.trim()) && !sending && !attachmentsLoading && !dictationPending };
+  return { enabled, sending, note, send, undo, canSend: Boolean(prompt.trim()) && !sending && !attachmentsLoading && !dictationPending };
 }
 
 const LOOK = {
@@ -196,7 +194,7 @@ export function SendToClaudeRow({ claude, hidden = false }) {
   );
 }
 
-// A stuck bar answer's one-tap send (GATE_IB_ANSWER_SEND_TO_CLAUDE). Same route and body shape as the box button, but
+// A stuck bar answer's one-tap send. Same route and body shape as the box button, but
 // every part is the answer's own snapshot, taken when the owner pressed Ask: his question, the paste mark, and the page route
 // and record ids of that moment (a thread keeps an old answer on screen after he opens another record). Nothing the bar or
 // a tool wrote ever goes through here. Ten seconds of Undo follow a send; an Undo has no composer text to put back.

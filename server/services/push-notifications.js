@@ -61,6 +61,15 @@ try {
 // for immediate delivery; low-priority pushes stay deferrable on purpose.
 const URGENCY_BY_PRIORITY = { urgent: 'high', high: 'high', normal: 'normal', low: 'low' };
 
+// The push service's TTL. ephemeral is deliver now or never (0). A notification with its own expiresAt (an ISO time)
+// lives only until then: the service drops it undelivered after that, so a phone offline past it never shows a stale
+// banner (Web Push otherwise keeps it for weeks). apns.js and fcm.js read the same field. Otherwise the service default.
+function webPushTtl(notification, now = Date.now()) {
+  if (notification.ephemeral) return { TTL: 0 };
+  const at = Date.parse(notification.expiresAt || '');
+  return Number.isFinite(at) ? { TTL: Math.max(0, Math.floor((at - now) / 1000)) } : {};
+}
+
 // Waves Admin (the iOS staff app) stores its bundle and APNs environment with
 // its token (admin-push.js native-subscribe): its route is the one extra
 // apns.send argument. Every other iOS row passes none, so apns.send keeps the
@@ -115,7 +124,7 @@ async function sendSubscription(sub, notification, options) {
     await webpush.sendNotification(
       JSON.parse(sub.subscription_data),
       JSON.stringify(notification),
-      { timeout: 8000, urgency: URGENCY_BY_PRIORITY[notification.priority] || 'normal', ...(notification.ephemeral ? { TTL: 0 } : {}) },
+      { timeout: 8000, urgency: URGENCY_BY_PRIORITY[notification.priority] || 'normal', ...webPushTtl(notification) },
     );
     return { sent: true };
   } catch (err) {
@@ -205,11 +214,9 @@ async function contactDevicesAllowed(subs, purpose, customerId, database = db) {
 class PushNotificationService {
   // opts.contactKey: a contact session's own status — only that contact's
   // devices count; a holder's status never counts a contact device.
-  // opts.withReachable: routing only (GATE_APP_FIRST_ANY_DEVICE) also reads
-  // `reachable`; the customer-facing status routes keep their exact shape.
-  async customerStatus(customerId, database = db, { contactKey = null, withReachable = false } = {}) {
+  async customerStatus(customerId, database = db, { contactKey = null } = {}) {
     const context = await customerPushContext(customerId, database);
-    if (!context) return { enabled: false, registered: false, fresh: false, ...(withReachable ? { reachable: false } : {}) };
+    if (!context) return { enabled: false, registered: false, fresh: false };
     const rows = (await database('push_subscriptions')
       .whereIn('customer_id', context.ids).where({ active: true, role: 'customer' })
       .whereIn('platform', ['ios', 'android']).select('platform', 'updated_at', 'contact_phone_key'))
@@ -220,9 +227,6 @@ class PushNotificationService {
       enabled: context.enabled,
       registered: rows.length > 0,
       fresh: rows.some((row) => providers[row.platform] && new Date(row.updated_at).getTime() >= cutoff),
-      // Any active holder device whose provider is configured, however long
-      // ago the app last checked in (GATE_APP_FIRST_ANY_DEVICE).
-      ...(withReachable ? { reachable: rows.some((row) => providers[row.platform]) } : {}),
     };
   }
 
@@ -364,7 +368,7 @@ class PushNotificationService {
       }
       const result = await sendSubscription(sub, notification, { shouldContinue: compositeShouldContinue })
         .catch(() => ({ sent: false, failed: true, reason: 'provider_failure' }));
-      results.push({ ...result, contactDevice: Boolean(sub.contact_phone_key) });
+      results.push({ ...result, ...legMeta(sub) });
       if (claimLost) break;
       if (acceptedHolderLeg(sub, result) && opts.notificationId) {
         // Persist the first acceptance before walking another device, so a
@@ -508,6 +512,11 @@ function acceptedHolderLeg(sub, result) {
 // a contact device's accepted push never stands in for a holder whose own
 // device failed. Contact legs are accounted apart, under `contactDevices`,
 // present only when a contact device was in the fan-out.
+// What each fan-out leg carries for summarizeFanOut.
+function legMeta(sub) {
+  return { contactDevice: Boolean(sub.contact_phone_key) };
+}
+
 function summarizeFanOut(results) {
   const holder = results.filter((r) => !r.contactDevice);
   const contact = results.filter((r) => r.contactDevice);
@@ -537,6 +546,9 @@ service.PUSH_HEARTBEAT_HOURS = PUSH_HEARTBEAT_HOURS;
 service.customerPushContext = customerPushContext;
 // Exposed for unit tests (platform routing); not part of the public API.
 service._sendSubscription = sendSubscription;
+// The staff push lookup's two-step filter, for a caller that rereads a staff
+// member's devices at a handoff (tech-visit-notifications namedDevices).
+service.staffMfaPushFilter = staffMfaPushFilter;
 // The saved property a push is ABOUT (uncapped codex r1s P1 — the producer
 // half of the lane's push item, pulled forward from PR 3): a composer that
 // knows the house passes notification.propertyId; one that only knows the

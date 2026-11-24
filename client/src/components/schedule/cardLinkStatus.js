@@ -30,6 +30,11 @@ export function describeCardRequestState(data) {
       text: 'Auto Pay no longer active — card was secured but the method lapsed or was removed. Check the customer\'s saved payment methods.',
     };
   }
+  // The visit no longer takes a card link: say why instead of offering a
+  // send the server can only refuse. Checked before the sent stamp — a link
+  // texted earlier closes too (its /secure page answers "closed"), so
+  // "awaiting customer" would be stale.
+  if (data.closedReason) return closedVisitLine(data.closedReason);
   // A pending row or a consumed one-text-ever stamp both mean a link is
   // (or was) out — the funnel will never text this visit again, so offer
   // no send button, just the state.
@@ -37,6 +42,18 @@ export function describeCardRequestState(data) {
     return { tone: 'muted', text: 'Secure card link sent — awaiting customer' };
   }
   return null;
+}
+
+// Owner 2026-11-19: a card link tapped while the tech was on site came back
+// "not live" three times. The visit's link closes once the tech is on the
+// way. The line names no other action: technicians see it too, and the
+// customer page's Auto Pay link has its own outcomes (it may enroll a saved
+// card instead of texting), so the page that owns it reports them.
+function closedVisitLine(reason) {
+  let why = 'This visit is not live';
+  if (reason === 'visit_in_past') why = "This visit's date has passed";
+  else if (/^visit_not_live:(en_route|on_site|completed)$/.test(reason)) why = 'The tech is on the way or done';
+  return { tone: 'muted', text: `${why}, so its card link is closed.` };
 }
 
 // The send action only renders when the lane is on and there is nothing
@@ -102,8 +119,8 @@ export function describeCardRequestResult(result) {
   if (reason === 'link_already_sent' || reason === 'request_exists') {
     return { tone: 'muted', text: 'Secure link already sent for this visit' };
   }
-  if (reason.startsWith('visit_not_live')) return { tone: 'muted', text: 'Skipped — visit is not in a live status' };
-  if (reason === 'visit_in_past') return { tone: 'muted', text: 'Skipped — visit date is in the past' };
+  // A tap that raced the status change gets the panel's closed line.
+  if (reason.startsWith('visit_not_live') || reason === 'visit_in_past') return closedVisitLine(reason);
   if (reason === 'gate_off' || reason === 'template_inactive') {
     return { tone: 'muted', text: 'Card-link texting is switched off' };
   }

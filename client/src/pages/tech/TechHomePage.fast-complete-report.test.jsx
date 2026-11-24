@@ -30,13 +30,21 @@ vi.mock('../../components/tech/TechServicePhotosModal', () => ({ default: () => 
 vi.mock('../../components/tech/TechTreatmentZoneModal', () => ({ default: () => null }));
 vi.mock('../../components/tech/FieldLeadModal', () => ({ default: () => null }));
 vi.mock('../../components/ServiceRecapModal', () => ({ default: ({ service }) => <div>Existing recap form for {service.id}</div> }));
+// `data-details`: whether the page offers the sheet a Details pill (onViewDetails).
+const details = (onViewDetails) => (onViewDetails ? 'yes' : 'no');
 vi.mock('../../components/tech/FastCompleteSheet', () => ({
-  default: ({ service, onClose }) => (
-    <div data-testid="sheet" data-service={JSON.stringify(service)}>Fast Complete sheet for {service.id}<button type="button" onClick={() => onClose?.()}>Close sheet</button></div>
+  default: ({ service, onClose, onViewDetails }) => (
+    <div data-testid="sheet" data-service={JSON.stringify(service)} data-details={details(onViewDetails)}>Fast Complete sheet for {service.id}<button type="button" onClick={() => onClose?.()}>Close sheet</button></div>
   ),
 }));
-vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({ default: () => <div data-testid="tree-sheet" /> }));
-vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({ default: () => <div data-testid="lawn-sheet" /> }));
+vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({ default: ({ onViewDetails }) => <div data-testid="tree-sheet" data-details={details(onViewDetails)} /> }));
+vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({ default: ({ onViewDetails }) => <div data-testid="lawn-sheet" data-details={details(onViewDetails)} /> }));
+vi.mock('../../components/tech/FastCompleteAssessmentSheet', () => ({
+  default: ({ service, onViewDetails }) => <div data-testid="assessment-sheet" data-service={JSON.stringify(service)} data-details={details(onViewDetails)} />,
+}));
+vi.mock('../../components/tech/FastCompleteLawnSheet', () => ({
+  default: ({ service, catalog, catalogError, onViewDetails }) => <div data-testid="lawn-visit-sheet" data-service={JSON.stringify(service)} data-catalog={JSON.stringify(catalog)} data-catalog-error={catalogError} data-details={details(onViewDetails)} />,
+}));
 import TechHomePage from './TechHomePage';
 import { etDateString } from '../../lib/timezone';
 import { ROUTE_SNAPSHOT_KEY } from './routeSnapshot';
@@ -89,6 +97,7 @@ beforeEach(() => {
   }));
   vi.stubGlobal('fetch', vi.fn(async (path) => {
     if (path.includes('/admin/schedule?')) return { ok: true, status: 200, json: async () => ({ services: rows }) };
+    if (path.includes('/admin/dispatch/products/catalog')) return { ok: true, status: 200, json: async () => ({ products: [{ id: 'prod-fixture', name: 'Fixture granular' }] }) };
     return { ok: true, status: 200, json: async () => ({}) };
   }));
 });
@@ -330,7 +339,7 @@ it('a device that cannot store saved completions at all stays quiet (GitHub Code
   expect(screen.queryByText(/Could not read the completion saved on this device/)).not.toBeInTheDocument();
 });
 
-it('a lawn visit attempt saved on Dispatch opens nothing here and says where to finish it', async () => {
+it('a saved lawn visit attempt reopens the lawn visit sheet here, with the product catalog', async () => {
   // Typed lawn findings, like a lawn re-service body: only the tag tells them apart.
   mocks.attempts.set('svc-lawn', {
     body: { idempotencyKey: 'lawn-key', structuredFindings: { type: 'one_time_lawn_treatment', values: {} } },
@@ -339,27 +348,64 @@ it('a lawn visit attempt saved on Dispatch opens nothing here and says where to 
   rows = [];
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
-  expect(await screen.findByText(/Open the visit on Dispatch to retry or discard it/)).toBeInTheDocument();
+  const sheet = await screen.findByTestId('lawn-visit-sheet');
+  // Off today's route: the row holds only the id and summary, so the sheet offers the attempt alone.
+  expect(JSON.parse(sheet.getAttribute('data-service'))).toMatchObject({ id: 'svc-lawn', recoveryOnly: true });
+  await waitFor(() => expect(JSON.parse(screen.getByTestId('lawn-visit-sheet').getAttribute('data-catalog'))).toEqual([{ id: 'prod-fixture', name: 'Fixture granular' }]));
   expect(screen.queryByTestId('lawn-sheet')).not.toBeInTheDocument();
   expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
 });
 
-it('the Dispatch notice clears once a scan no longer finds that lawn attempt (GitHub Codex P2 on #6001)', async () => {
+it('a saved lawn visit attempt opens with no product catalog: its same-key retry and discard need none', async () => {
   mocks.attempts.set('svc-lawn', {
     body: { idempotencyKey: 'lawn-key', structuredFindings: { type: 'one_time_lawn_treatment', values: {} } },
     summary: 'Lawn visit', sheet: 'lawn_visit',
   });
-  rows = [row('svc-open', { fastCompleteReportEnabled: true })];
+  vi.stubGlobal('fetch', vi.fn(async (path) => {
+    if (path.includes('/admin/dispatch/products/catalog')) throw new TypeError('Failed to fetch');
+    if (path.includes('/admin/schedule?')) return { ok: true, status: 200, json: async () => ({ services: rows }) };
+    return { ok: true, status: 200, json: async () => ({}) };
+  }));
+  rows = [];
   mount();
-  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
-  fireEvent.click(await screen.findByText(/Saved completion/));
-  expect(await screen.findByText(/Open the visit on Dispatch/)).toBeInTheDocument();
-  // Finished on Dispatch: the next scan has no such attempt.
-  mocks.attempts.delete('svc-lawn');
-  fireEvent.click(screen.getByRole('button', { name: /Project Report/ }));
-  fireEvent.click(await screen.findByText('Fixture svc-open'));
-  fireEvent.click(await screen.findByRole('button', { name: 'Close sheet' }));
-  await waitFor(() => expect(screen.queryByText(/Open the visit on Dispatch/)).not.toBeInTheDocument());
+  fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
+  const sheet = await screen.findByTestId('lawn-visit-sheet');
+  expect(JSON.parse(sheet.getAttribute('data-service'))).toMatchObject({ id: 'svc-lawn' });
+  // The sheet stays open; only its form (after a discard) waits on the catalog, and says why.
+  await waitFor(() => expect(screen.getByTestId('lawn-visit-sheet')).toHaveAttribute('data-catalog-error', expect.stringMatching(/Could not load the product list/)));
+  expect(JSON.parse(screen.getByTestId('lawn-visit-sheet').getAttribute('data-catalog'))).toBeNull();
+});
+
+// An off-route saved attempt's row holds only the visit id and summary: no
+// sheet offers its Details pill there, whose appointment editor would show a
+// blank note and could replace the stored one.
+it.each([
+  ['report', { idempotencyKey: 'k-report', reportDraftBase: {} }, undefined, 'sheet'],
+  ['tree & shrub', { idempotencyKey: 'k-ts', structuredFindings: { type: 'tree_shrub', values: {} } }, undefined, 'tree-sheet'],
+  ['lawn re-service', { idempotencyKey: 'k-lr', structuredFindings: { type: 'one_time_lawn_treatment', values: {} } }, undefined, 'lawn-sheet'],
+  ['lawn visit', { idempotencyKey: 'k-lv', structuredFindings: { type: 'one_time_lawn_treatment', values: {} } }, 'lawn_visit', 'lawn-visit-sheet'],
+  ['assessment', { idempotencyKey: 'k-as', technicianNotes: 'Assessment work' }, 'assessment', 'assessment-sheet'],
+])('an off-route saved %s attempt opens its sheet with no Details pill', async (_label, body, sheet, testId) => {
+  mocks.attempts.set('svc-off', { body, summary: 'Saved visit', ...(sheet ? { sheet } : {}) });
+  rows = [];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
+  expect(await screen.findByTestId(testId)).toHaveAttribute('data-details', 'no');
+});
+
+it('a saved lawn visit attempt on a visit that now reads completed reopens the lawn visit sheet', async () => {
+  mocks.attempts.set('svc-lawn-done', {
+    body: { idempotencyKey: 'lawn-done-key', structuredFindings: { type: 'one_time_lawn_treatment', values: {} } },
+    summary: 'Lawn visit', sheet: 'lawn_visit',
+  });
+  rows = [row('svc-lawn-done', { status: 'completed', serviceType: 'Lawn Care', completionProfile: { category: 'lawn_care', serviceKey: 'lawn_care_6week', projectBacked: false } })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
+  // On the route: the sheet has the routed row, so a discard leaves a fresh form, and Details reads the real visit.
+  const sheet = await screen.findByTestId('lawn-visit-sheet');
+  expect(JSON.parse(sheet.getAttribute('data-service'))).toMatchObject({ id: 'svc-lawn-done', recoveryOnly: false });
+  expect(sheet).toHaveAttribute('data-details', 'yes');
+  expect(screen.queryByText(/Existing recap form/)).not.toBeInTheDocument();
 });
 
 it('a visit with a saved retry the device cannot read now opens nothing (GitHub Codex P2 on 458cc517e5)', async () => {
@@ -410,5 +456,45 @@ it('a recovery read failure on an offline route says so on the tool and opens no
   fireEvent.click(tool);
   // The Tools page shows no route notice; the tool's own line says why.
   expect(await screen.findByText(/Could not read the completion saved on this device/)).toBeInTheDocument();
+  expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+});
+
+// The Waves Assessment sheet's saved attempt reopens in that sheet, to retry
+// or discard alone (`recoveryOnly`: a fresh assessment completes on
+// Dispatch's sheet), never in the pest sheet. Its tag decides; an older
+// untagged one reads by the consultation outcome only that sheet sends, or,
+// with none (a converted consultation), by its Waves Assessment visit. The
+// first two stand on a pest row: the attempt, not the row, decides.
+it.each([
+  ['tagged', { idempotencyKey: 'as-1', technicianNotes: 'Assessment work' }, 'assessment', {}],
+  ['untagged, with its outcome', { idempotencyKey: 'as-2', technicianNotes: 'Assessment work', consultationOutcome: { outcome: 'warm' } }, undefined, {}],
+  ['untagged, on a Waves Assessment visit', { idempotencyKey: 'as-3', technicianNotes: 'Assessment work' }, undefined, {
+    serviceType: 'Waves Assessment', completionProfile: { category: 'inspection', serviceKey: 'lawn_inspection' },
+  }],
+])('a saved assessment attempt (%s) reopens in the assessment sheet, to retry or discard alone', async (_label, body, sheet, overrides) => {
+  mocks.attempts.set('svc-as', { body, summary: 'Waves Assessment', ...(sheet ? { sheet } : {}) });
+  rows = [row('svc-as', { status: 'completed', ...overrides })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
+  const opened = await screen.findByTestId('assessment-sheet');
+  expect(JSON.parse(opened.getAttribute('data-service'))).toMatchObject({ id: 'svc-as', recoveryOnly: true });
+  expect(opened).toHaveAttribute('data-details', 'no');
+  expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+  expect(screen.queryByText(/Existing recap form/)).not.toBeInTheDocument();
+});
+
+// An older untagged attempt of a converted consultation (no outcome) whose
+// visit is off today's route: the attempt itself still says assessment, by
+// its summary or by the visit its body froze.
+it.each([
+  ['its summary', { idempotencyKey: 'as-off-1', technicianNotes: 'Assessment work' }, 'Assessment · won'],
+  ['the visit its body froze', { idempotencyKey: 'as-off-2', technicianNotes: 'Assessment work', expectedVisit: { serviceType: 'Waves Assessment' } }, 'Saved visit'],
+])('an older converted assessment attempt off the route reopens in the assessment sheet, by %s', async (_label, body, summary) => {
+  mocks.attempts.set('svc-as-off', { body, summary });
+  rows = [];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
+  const opened = await screen.findByTestId('assessment-sheet');
+  expect(JSON.parse(opened.getAttribute('data-service'))).toMatchObject({ id: 'svc-as-off', recoveryOnly: true });
   expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
 });

@@ -60,6 +60,28 @@ describe('enriched profile addressVerdict (codex #4667 r25 P1)', () => {
     expect(countyRecordVouchesTypedNumber('1260 Example St', { squareFootage: 1623 })).toBe(false);
   });
 
+  // County records write name words short ("EXAMPLE PT DR"). While the
+  // wizard's gate is on, the shared street key reads that as the typed
+  // "Example Point Dr" (lead-address-unverified.js streetKeyNoUnit).
+  test('a county record with a name word written short vouches for the typed full word only while GATE_WIZARD_SUPERSEDES_FORM_DRAFT is on', () => {
+    const GATE = 'GATE_WIZARD_SUPERSEDES_FORM_DRAFT';
+    const before = process.env[GATE];
+    const typed = '1260 Example Point Dr, Parrish, FL 34219';
+    const record = { ...county, addressLine1: '1260 EXAMPLE PT DR', zipCode: '34219' };
+    try {
+      delete process.env[GATE];
+      expect(countyRecordVouchesTypedNumber(typed, record)).toBe(false);
+      process.env[GATE] = 'true';
+      expect(countyRecordVouchesTypedNumber(typed, record)).toBe(true);
+      // Another word, or another number, is still no vouch.
+      expect(countyRecordVouchesTypedNumber(typed, { ...record, addressLine1: '1260 EXAMPLE PORT DR' })).toBe(false);
+      expect(countyRecordVouchesTypedNumber(typed, { ...record, addressLine1: '1250 EXAMPLE PT DR' })).toBe(false);
+    } finally {
+      if (before === undefined) delete process.env[GATE];
+      else process.env[GATE] = before;
+    }
+  });
+
   test('an audited profile reads audited whatever the record says', () => {
     const audited = buildEnrichedProfile(county, null, 27.4, -82.4, null, { county: 'Sample', hasExactMatch: false }, '1260 Example St');
     expect(audited.addressVerdict).toBe('audited');

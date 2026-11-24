@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Customer moving flow, PR 1 (owner 2026-11-02, dark behind GATE_MOVING_FLOW).
+ * Customer moving flow, PR 1 (owner 2026-11-02).
  *
  * The office sends a customer a moving link (email or text, always by a staff
  * click). The link opens /moving/:token, where the customer types a new
@@ -15,7 +15,7 @@
  * may get an estimate for the new house, the $99 setup-fee waiver the estimate
  * save stamps on it (owner Q2), and the link from the move to that estimate.
  *
- * PR B2 (GATE_MOVING_APPLY) adds "Apply move": once the customer has accepted
+ * PR B2 adds "Apply move": once the customer has accepted
  * the new-home estimate, the office's confirm makes the new home the primary
  * property and stops the old house's plans after the move-out date (see the
  * Apply move section). It sends nothing to the customer.
@@ -59,7 +59,7 @@ const { etDateString, addETDays, dateOnlyString } = require('../utils/datetime-e
 const { raiseAdminAlert, cutAtWord, MAX_HEADLINE_CHARS, MAX_WHY_CHARS } = require('./admin-alert-compose');
 const { validateAddress, STATUSES } = require('./address-validation');
 const { moveVerdictLabel } = require('./move-address-verdict');
-const { movingEstimateLive, movingApplyLive, movingAutoApplyLive, movingPauseLive, movingStopAtMoveOutLive } = require('../config/feature-gates');
+const { movingEstimateLive, movingAutoApplyLive, movingPauseLive, movingStopAtMoveOutLive } = require('../config/feature-gates');
 
 const TOKEN_RE = /^[a-f0-9]{48}$/;
 const DAILY_CHECK_CAP = 10;
@@ -1057,7 +1057,7 @@ async function moveForEstimate(estimateId, conn = db) {
 }
 
 
-// ── Apply move (moving PR B2, GATE_MOVING_APPLY) ────────────────────────────
+// ── Apply move (moving PR B2) ────────────────────────────
 //
 // After the customer accepts the new-home estimate, the office presses "Apply
 // move" on the Moving card, reads the preview, and confirms. Apply then:
@@ -1080,7 +1080,6 @@ async function moveForEstimate(estimateId, conn = db) {
 // are refused until a later PR.
 
 const APPLY_REFUSALS = {
-  gate_off: 'Apply move is off.',
   not_found: NEW_HOME_REFUSALS.not_found,
   already_applied: 'This move is already applied.',
   not_submitted: NEW_HOME_REFUSALS.not_submitted,
@@ -1192,7 +1191,6 @@ async function activeProperty(conn, customerId, id) {
 // move-out and today may have been done and not closed out, so it is listed
 // for the office and never cancelled here.
 async function applyMoveRow(conn, customerId, moveId) {
-  if (!movingApplyLive()) throw applyError('gate_off', 404);
   if (!UUID_RE.test(String(moveId || ''))) throw applyError('not_found', 404);
   const move = await conn('customer_moves').where({ id: moveId, customer_id: customerId }).first();
   if (!move) throw applyError('not_found', 404);
@@ -1548,7 +1546,6 @@ function applyStepError(err, step, progress) {
  * happened); confirming again resumes from there.
  */
 async function applyMove(customerId, moveId, opts = {}) {
-  if (!movingApplyLive()) throw applyError('gate_off', 404);
   if (!UUID_RE.test(String(moveId || ''))) throw applyError('not_found', 404);
   const actorId = opts.actorId || null;
   const release = await acquireApplyLock(moveId);
@@ -1640,7 +1637,7 @@ async function applyMove(customerId, moveId, opts = {}) {
 
 /** The Moving card's Apply action for one move: null, or { action: 'review' | 'blocked' | 'applied', reason, steps? }. */
 async function applyAction(move, conn = db) {
-  if (!movingApplyLive() || !move) return null;
+  if (!move) return null;
   if (move.status === 'closed') return move.closed_reason === 'applied' ? { action: 'applied', reason: null } : null;
   if (move.status !== 'submitted' || !move.estimate_id) return null;
   try {
@@ -1670,7 +1667,7 @@ async function applyAction(move, conn = db) {
 
 // Refusals that mean "not yet" or "try again": no office item, the next run
 // reads the preview again. A visit under way finishes on its own.
-const AUTO_APPLY_WAIT = new Set(['gate_off', 'not_found', 'already_applied', 'not_submitted', 'no_estimate',
+const AUTO_APPLY_WAIT = new Set(['not_found', 'already_applied', 'not_submitted', 'no_estimate',
   'estimate_not_accepted', 'apply_in_progress', 'apply_lock_unavailable', 'apply_changed', 'visit_underway',
   // A step's own "changed since the preview" (the primary change, a plan's series).
   'preview_changed', 'series_changed']);
@@ -1887,7 +1884,7 @@ function pauseDue(move, today) {
  * What the move pause (or, for a move with a new address, the old-house stop)
  * will do for this move: 'auto' (the job stops the plans: a customer billed
  * per visit), 'office' (annual prepay, monthly or another billing plan: the
- * office acts by hand), or null (gate off, no move-out date, no plan or no
+ * office acts by hand), or null (the pause is off, no move-out date, no plan or no
  * customer, or an address on file with the old-house stop off).
  */
 async function pauseLane(move, conn = db) {

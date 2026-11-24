@@ -31,6 +31,8 @@ jest.mock('../services/estimate-delivery-options', () => ({
   }),
   commercialRiskTypeReviewNeeded: jest.fn(() => false),
   validateEstimateDeliveryOptions: jest.fn(),
+  // Real: the "no visit needed" email line reads it to tell a home estimate from a commercial one.
+  isCommercialEstimateData: jest.requireActual('../services/estimate-delivery-options').isCommercialEstimateData,
 }));
 jest.mock('../services/estimate-pricing-audit', () => ({
   buildEstimatePricingAudit: jest.fn(),
@@ -143,6 +145,8 @@ describe('delivery email: monthly average', () => {
       service_summary: expect.any(String),
       property_address: '1 Sample St',
       next_step_summary: DEFAULT_NEXT,
+      // A home estimate also carries the "no visit needed" line (owner 2026-11-21).
+      estimate_no_visit_line: 'We measure your home and yard from county records and satellite images, so most quotes need no visit.',
     });
   });
 

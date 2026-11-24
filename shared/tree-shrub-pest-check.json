@@ -6,5 +6,12 @@
     { "key": "caterpillars", "label": "Caterpillars" },
     { "key": "mites", "label": "Mites" },
     { "key": "other", "label": "Other" }
+  ],
+  "lifeStages": [
+    { "key": "eggs", "label": "Eggs" },
+    { "key": "crawlers_nymphs", "label": "Crawlers / nymphs" },
+    { "key": "larvae", "label": "Larvae / caterpillars" },
+    { "key": "adults", "label": "Adults" },
+    { "key": "mixed_other", "label": "Mixed / other" }
   ]
 }

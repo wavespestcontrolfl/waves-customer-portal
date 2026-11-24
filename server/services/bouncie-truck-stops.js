@@ -123,11 +123,12 @@ function tripList(trips) {
 /**
  * The stops of one vehicle that START inside [fromMs, toMs).
  * Reads only that vehicle's trip-data events received from fromMs to toMs + 12 hours (never later than now).
+ * `minMinutes` (default MIN_STOP_MINUTES) lets a caller also read shorter parked gaps; each stop carries its `minutes`.
  */
-async function loadTruckStops(conn, imei, { fromMs, toMs, maxGapMeters, now = Date.now() }) {
+async function loadTruckStops(conn, imei, { fromMs, toMs, maxGapMeters, now = Date.now(), minMinutes = MIN_STOP_MINUTES }) {
   if (!imei) return [];
   const trips = await readTripMap(conn, imei, { fromMs, toMs, now });
-  return stopsFromTrips(trips, { maxGapMeters })
+  return stopsFromTrips(trips, { maxGapMeters, minMinutes })
     .filter((stop) => stop.startMs >= fromMs && stop.startMs < toMs);
 }
 

@@ -13,7 +13,7 @@ jest.mock('../services/portal-payment-history', () => ({ listPortalPayments: jes
 jest.mock('../services/portal-service-history', () => ({ listPortalServiceHistory: jest.fn() }));
 const mockGates = { reserviceStreamline: true };
 jest.mock('../config/feature-gates', () => ({ isEnabled: (name) => mockGates[name] === true }));
-jest.mock('../services/time-promise', () => ({ dayOnlyPromiseOn: jest.fn(), loadTimeDisplay: jest.fn() }));
+jest.mock('../services/time-promise', () => ({ loadTimeDisplay: jest.fn() }));
 const mockOpen = jest.fn();
 jest.mock('../services/reservice-scheduler', () => {
   const actual = jest.requireActual('../services/reservice-scheduler');
@@ -70,7 +70,6 @@ const failedReader = () => async (conn, rows) => {
 beforeEach(() => {
   jest.clearAllMocks();
   mockGates.reserviceStreamline = true;
-  timePromise.dayOnlyPromiseOn.mockReturnValue(true);
   timePromise.loadTimeDisplay.mockImplementation(failedReader());
   reschedulePage.loadById.mockImplementation(async (id) => ({ id }));
   reschedulePage.pageEligibility.mockResolvedValue({ ok: true });
@@ -105,13 +104,6 @@ describe('get_upcoming_services in a turn whose transaction aborts on the promis
     await expect(run(turn)).rejects.toMatchObject({ code: '57014' });
   });
 
-  test('gate off: no transaction and no read', async () => {
-    timePromise.dayOnlyPromiseOn.mockReturnValue(false);
-    const turn = abortedTurn();
-    const out = await run(turn);
-    expect(out.services.map((s) => s.window)).not.toContain(NOTE);
-    expect(turn.transaction).not.toHaveBeenCalled();
-  });
 });
 
 describe('offer_reschedule_link in a turn whose transaction aborts on the promise read', () => {

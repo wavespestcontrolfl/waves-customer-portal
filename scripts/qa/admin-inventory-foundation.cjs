@@ -115,6 +115,8 @@ function responseFor(url) {
         errors: [],
       },
     };
+  if (pathname === "/api/admin/inventory/reorder-suggestions")
+    return { today: "2026-11-24", options: { leadDays: 3, bufferDays: 7, reorderDays: 21 }, forecastError: null, products: [] };
   if (pathname === "/api/admin/inventory/unit-review")
     return { products: [{ ...product, inventoryUnit: "unknown", suggestedUnit: "fl_oz", reasons: [{ code: "unsupported", message: "Choose a supported unit" }] }], forecastRows: [], counts: {} };
   if (pathname === "/api/admin/inventory/restock-requests")
@@ -428,7 +430,7 @@ async function main() {
           "Sourcing",
           ["Prices", "Approvals", "Vendors", "Scraping"],
         ],
-        ["Planning", ["Forecast", "Units", "Restock"]],
+        ["Planning", ["Forecast", "Limits", "Units", "Restock"]],
         ["Content", ["Registry", "Facts", "Lawn"]],
         ["Protocols", ["Protocols", "Margins"]],
       ];
@@ -442,6 +444,7 @@ async function main() {
         Vendors: () => page.getByText(vendor.name, { exact: true }).first().waitFor(),
         Scraping: () => page.getByText(vendor.name, { exact: true }).first().waitFor(),
         Forecast: () => page.getByText("No forecasted WaveGuard product demand in this window.", { exact: true }).waitFor(),
+        Limits: () => page.getByText("No products with use to suggest limits for.", { exact: true }).waitFor(),
         Restock: () => page.getByText("No restock requests in this view.", { exact: true }).waitFor(),
         Facts: () => page.getByText("No products match this status.", { exact: true }).waitFor(),
         Lawn: () => page.getByText("Lawn Outline Content Library", { exact: true }).waitFor(),

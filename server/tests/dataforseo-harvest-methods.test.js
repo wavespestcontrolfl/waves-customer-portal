@@ -60,4 +60,46 @@ describe('dataforseo harvest methods', () => {
     await dataforseo.serpOrganic('pest control', '27.5743,-82.4276,15'); // explicit radius preserved
     expect(calls[2].body[0].location_coordinate).toBe('27.5743,-82.4276,15');
   });
+
+  describe('serpOrganic poisoned-page fix (GATE_DATAFORSEO_RESOLVE_POISONED)', () => {
+    const ENV = 'GATE_DATAFORSEO_RESOLVE_POISONED';
+    let saved;
+    beforeEach(() => { saved = process.env[ENV]; });
+    afterEach(() => { if (saved === undefined) delete process.env[ENV]; else process.env[ENV] = saved; });
+
+    test('gate unset: the task carries no resolve_poisoned_results (no added cost)', async () => {
+      delete process.env[ENV];
+      await dataforseo.serpOrganic('pest control', 'Bradenton,Florida,United States');
+      expect(calls[0].endpoint).toBe('/serp/google/organic/live/advanced');
+      expect(calls[0].body[0]).not.toHaveProperty('resolve_poisoned_results');
+    });
+
+    test('gate exactly "true": every serpOrganic task asks DataForSEO to repair a poisoned page', async () => {
+      process.env[ENV] = 'true';
+      await dataforseo.serpOrganic('pest control', 'Bradenton,Florida,United States');
+      await dataforseo.serpOrganic('pest control', '27.5743,-82.4276', 'desktop');
+      expect(calls[0].body[0]).toMatchObject({
+        resolve_poisoned_results: true, device: 'mobile', os: 'iOS', location_name: 'Bradenton,Florida,United States',
+      });
+      expect(calls[1].body[0]).toMatchObject({
+        resolve_poisoned_results: true, device: 'desktop', os: 'macos', location_coordinate: '27.5743,-82.4276,20',
+      });
+    });
+
+    test('strict: any value other than "true" stays off', async () => {
+      for (const value of ['TRUE', '1', 'yes', '']) {
+        process.env[ENV] = value;
+        await dataforseo.serpOrganic('pest control');
+      }
+      expect(calls).toHaveLength(4);
+      calls.forEach((c) => expect(c.body[0]).not.toHaveProperty('resolve_poisoned_results'));
+    });
+
+    test('checkIndexed keeps its own organic call without the flag', async () => {
+      process.env[ENV] = 'true';
+      await dataforseo.checkIndexed('https://example.com/page');
+      expect(calls[0].endpoint).toBe('/serp/google/organic/live/advanced');
+      expect(calls[0].body[0]).not.toHaveProperty('resolve_poisoned_results');
+    });
+  });
 });

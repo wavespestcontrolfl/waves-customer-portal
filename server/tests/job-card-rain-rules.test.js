@@ -1,10 +1,9 @@
 /**
- * GATE_SPRAY_RAIN_RULES (owner 2026-10-26, plan page "Visit-Day Rain Rule", D1 = A, D2 = A): the
+ * The spray rain rules (owner 2026-10-26, plan page "Visit-Day Rain Rule", D1 = A, D2 = A): the
  * visit-day spray check judges each product's label rain rule, else the Waves rule of the services
  * whose lines name it for a tank spray, on one odds table (caution above 60%). Owner 2026-10-29 ("i just want
  * to warn techs"): nothing holds; a reading past the 80% tier or a wind / temperature limit is a caution that
- * names it, and the dose always shows. Without rainRules the check is today's (job-card-service.test.js covers
- * that path). Owner 2026-10-30 (A, A, A): label wind lines at each label's own number, and the fertilizer
+ * names it, and the dose always shows. Owner 2026-10-30 (A, A, A): label wind lines at each label's own number, and the fertilizer
  * heavy-rain and Green Flo heat lines, are cautions too.
  */
 const jobCard = require('../services/job-card');
@@ -41,9 +40,12 @@ describe('label rain rules config', () => {
       else expect(entry.label).toMatch(/^\d{6}-\d{5}-\d{8}\.pdf$/);
       const rules = ['duringRain', 'dryBeforeRain', 'waterIn', 'heat', 'wind', 'heavyRain'].filter((k) => entry[k]);
       expect(rules.length).toBeGreaterThan(0);
+      // A label with a wind line for each use lists them (LESCO Crosscheck Plus).
       for (const k of rules) {
-        expect(Number.isInteger(entry[k].page)).toBe(true);
-        expect(entry[k].quote.length).toBeGreaterThan(20);
+        for (const line of [].concat(entry[k])) {
+          expect(Number.isInteger(line.page)).toBe(true);
+          expect(line.quote.length).toBeGreaterThan(20);
+        }
       }
       if (entry.dryBeforeRain) expect(entry.dryBeforeRain.hours).toBeGreaterThan(0);
       if (entry.heat) {
@@ -51,10 +53,12 @@ describe('label rain rules config', () => {
         expect(entry.heat.text.length).toBeGreaterThan(5);
         expect(entry.heat.action.length).toBeGreaterThan(10);
       }
-      if (entry.wind) {
-        expect(entry.wind.mph).toBeGreaterThan(0);
-        expect(entry.wind.services?.global ?? false).toBe(false);
+      for (const line of [].concat(entry.wind || [])) {
+        expect(line.mph).toBeGreaterThan(0);
+        expect(line.services?.global ?? false).toBe(false);
       }
+      // Stricter first: only the last line of a list may name no services, or a line after it would never apply.
+      if (Array.isArray(entry.wind)) expect(entry.wind.slice(0, -1).every((line) => line.services)).toBe(true);
     }
   });
 
@@ -183,8 +187,6 @@ describe('buildSprayCheck with rain rules', () => {
     expect(verdict(celsius, [55, 55, 55]).verdict).toBe('ok');
     expect(verdict(celsius, [55, 65, 55])).toMatchObject({ verdict: 'caution', source: 'product limit', reason: 'rain 65% inside 3 h' });
     expect(verdict(celsius, [55, 85, 55])).toMatchObject({ verdict: 'caution', source: 'product limit', reason: 'rain 85% inside 3 h' });
-    // Today's check holds the same row at 55%.
-    expect(buildSprayCheck({ products: [celsius], hourly: hours([55, 55, 55]), now: NOW }).verdicts[0].verdict).toBe('hold');
   });
 
   test('unverified catalog values are skipped and the Waves rule judges rain instead', () => {
@@ -211,8 +213,6 @@ describe('buildSprayCheck with rain rules', () => {
     // One hour of the window has no reading: the known breach is still said, not "unknown".
     const gappy = hours([0, 0, 0], { windMph: 14 }).map((h, i) => (i === 1 ? { ...h, windMph: null } : h));
     expect(buildSprayCheck({ products: [windy], hourly: gappy, now: NOW, rainRules: rulesOn([windy], PEST) }).verdicts[0]).toMatchObject({ verdict: 'caution', kind: 'wind' });
-    // Today's check still holds the same reading.
-    expect(buildSprayCheck({ products: [windy], hourly: hours([0, 0, 0], { windMph: 14 }), now: NOW }).verdicts[0].verdict).toBe('hold');
   });
 
   test('a mid-hour start reads the hour it starts in and the next one, never a third (pre-push audit P1)', () => {
@@ -240,8 +240,6 @@ describe('buildSprayCheck with rain rules', () => {
     expect(at([97]).reason).toBe('97°F at 2 pm — label: no surfactant above 90°F');
     // The catalog minimum still names its own limit.
     expect(at([45]).reason).toBe('45°F at 2 pm — under the 50°F limit');
-    // Off: today's check, the catalog limits on the 4-hour window.
-    expect(buildSprayCheck({ products: [hotCelsius], hourly: hours([0, 0, 0, 0], { temperatureF: 92 }), now: NOW }).verdicts[0].verdict).toBe('ok');
   });
 
   test('label wind lines (owner 2026-10-30): each label\'s own number, at the start hour and the next one', () => {
@@ -264,6 +262,11 @@ describe('buildSprayCheck with rain rules', () => {
     const cyper = { id: 'y', name: 'Cyper TC', category: 'insecticide', formulation: 'EC', epa_reg_number: '53883-92' };
     expect(windAt(cyper, [14, 14], [PEST]).verdict).toBe('ok');
     expect(windAt(cyper, [14, 14], ['Termite Treatment'])).toMatchObject({ verdict: 'caution', kind: 'wind', reason: 'wind 14 mph at 2 pm — label: no on-grade spraying above 10 mph' });
+    // LESCO Crosscheck Plus has a line for each use: 10 mph for on-grade termite work (page 32), 15 mph for the rest (page 5).
+    const crosscheck = { id: 'x', name: 'LESCO Crosscheck Plus', category: 'insecticide', formulation: 'SC', epa_reg_number: '10404-120' };
+    expect(windAt(crosscheck, [12, 12], ['Slab Pre-Treat Termite Service'])).toMatchObject({ verdict: 'caution', kind: 'wind', reason: 'wind 12 mph at 2 pm — label: no on-grade spraying above 10 mph' });
+    expect(windAt(crosscheck, [12, 12], [PEST]).verdict).toBe('ok');
+    expect(windAt(crosscheck, [16], [PEST])).toMatchObject({ verdict: 'caution', kind: 'wind', reason: 'wind 16 mph at 2 pm — label: no spraying above 15 mph' });
     // A catalog wind limit as well: one line, the label's.
     const bifen = { id: 'b', name: 'Bifen XTS', category: 'insecticide', formulation: 'EC', epa_reg_number: '53883-189', max_wind_mph: 15, label_verified_at: '2026-05-28' };
     expect(windAt(bifen, [18], [PEST]).reason).toBe('wind 18 mph at 2 pm — label: no spraying above 10 mph');
@@ -314,25 +317,16 @@ describe('buildSprayCheck with rain rules', () => {
       .toEqual([{ productId: 't', verdict: 'unknown', reason: 'No forecast', forecastGap: true }, { productId: 'h', verdict: 'ok', reason: null }]);
   });
 
-  test('the check says which path ran, and the rain rules never hold', () => {
+  test('the check says the rain rules ran, and they never hold', () => {
     expect(check([talak], [0]).rainRules).toBe(true);
     expect(check([talak, alpine, celsius], [100, 100, 100, 100]).hold).toBe(false);
-    expect(buildSprayCheck({ products: [talak], hourly: hours([0]), now: NOW })).not.toHaveProperty('rainRules');
   });
 });
 
 describe('the Dispatch weather chip', () => {
   const chip = (products, pops, isToday = true) => weatherIssue(check(products, pops), isToday);
 
-  test('without rain rules the chips are today\'s, word for word', () => {
-    const legacy = (pops) => weatherIssue(buildSprayCheck({ products: [talak], hourly: hours(pops), now: NOW }), true);
-    expect(legacy([0])).toEqual({ kind: 'weather', status: 'unknown', label: 'Weather unknown' });
-    expect(weatherIssue({ hold: true, verdicts: [] }, true)).toEqual({ kind: 'weather', status: 'hold', label: 'Weather hold' });
-    expect(weatherIssue({ hold: false, verdicts: [] }, false)).toEqual({ kind: 'weather', status: 'unknown', label: 'Weather on visit day' });
-    expect(weatherIssue({ hold: false, verdicts: [{ verdict: 'ok' }] }, true)).toBeNull();
-  });
-
-  test('with rain rules the chip names the caution, its level and the product, and is never a hold', () => {
+  test('the chip names the caution, its level and the product, and is never a hold', () => {
     expect(chip([talak], [85, 0])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain very likely 2 pm' });
     expect(chip([talak], [65, 0])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain likely 2 pm' });
     expect(chip([alpine], [0, 85])).toEqual({ kind: 'weather', status: 'caution', label: 'Rain warning' });
@@ -364,7 +358,6 @@ describe('the Dispatch weather chip', () => {
 });
 
 describe('the tank search follows the same rule', () => {
-  afterEach(() => { delete process.env.GATE_SPRAY_RAIN_RULES; });
   const product = { ...talak, id: 'p1', default_rate: '1', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
   const visit = { customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', window_start: '14:00', latitude: 27.4, longitude: -82.5 };
   let tables;
@@ -381,22 +374,16 @@ describe('the tank search follows the same rule', () => {
   dbh.raw = (sql) => sql;
   const mix = (pop) => jobCard.mixForProduct('p1', 2, { serviceId: 'svc1', dbh, deps: { getHourly: async () => hours([pop, 0, 0, 0]) }, now: NOW });
 
-  test('on: every reading keeps the dose, above 80% too (owner 2026-10-29); off: today\'s check', async () => {
-    process.env.GATE_SPRAY_RAIN_RULES = 'true';
+  test('every reading keeps the dose, above 80% too (owner 2026-10-29)', async () => {
     const caution = await mix(65);
     expect(caution.sprayCheck).toEqual({ verdict: 'caution', reason: 'rain 65% at 2 pm — label: no spraying during rain', action: 'Spray before the rain starts, or after it stops.' });
     expect(caution.amount).not.toBeNull();
     const likely = await mix(85);
     expect(likely.sprayCheck).toEqual({ verdict: 'caution', reason: 'rain 85% at 2 pm — label: no spraying during rain', level: 'warning', action: 'Spray before the rain starts, or after it stops.' });
     expect(likely.amount).not.toBeNull();
-    delete process.env.GATE_SPRAY_RAIN_RULES;
-    const legacy = await mix(85);
-    expect(legacy.sprayCheck).toEqual({ verdict: 'unknown', reason: 'No limit on file' });
-    expect(legacy.amount).not.toBeNull();
   });
 
   test('a product an add-on\'s line names takes the add-on\'s Waves rule, as on the card (Codex P2)', async () => {
-    process.env.GATE_SPRAY_RAIN_RULES = 'true';
     const talus = { id: 'p2', name: 'Talus IGR', category: 'insecticide', default_rate: '0.5', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
     const protocols = {
       pest: { visits: [{ visit: 1, month: 'Any', primary: 'Talus IGR 0.5 fl oz/gal' }] },
@@ -419,7 +406,6 @@ describe('the tank search follows the same rule', () => {
   });
 
   test('a rain-OK visit (Bora-Care by its catalog key) gets no Waves dry time in the search', async () => {
-    process.env.GATE_SPRAY_RAIN_RULES = 'true';
     const search = () => jobCard.mixForProduct('p1', 2, { serviceId: 'svc1', dbh, deps: { getHourly: async () => hours([0, 95, 95, 0]) }, now: NOW });
     expect((await search()).sprayCheck).toMatchObject({ verdict: 'caution', reason: 'rain 95% inside 2 h — Waves rule' });
     tables.scheduled_services = [{ ...visit, service_type: 'Bora-Care Termite Treatment', service_key: 'bora_care' }];
@@ -427,7 +413,6 @@ describe('the tank search follows the same rule', () => {
   });
 
   test('a label line for one kind of job reads the visit\'s services, as on the card (Cyper TC: termite only)', async () => {
-    process.env.GATE_SPRAY_RAIN_RULES = 'true';
     const cyper = { id: 'p3', name: 'Cyper TC', category: 'insecticide', formulation: 'EC', epa_reg_number: '53883-92', default_rate: '1', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
     tables.products_catalog = [cyper];
     const windy = async () => (await jobCard.mixForProduct('p3', 2, { serviceId: 'svc1', dbh, deps: { getHourly: async () => hours([0, 0, 0, 0], { windMph: 14 }) }, now: NOW })).sprayCheck;
@@ -437,7 +422,7 @@ describe('the tank search follows the same rule', () => {
   });
 });
 
-describe('the shadow record (GATE_SPRAY_RAIN_RULES=shadow)', () => {
+describe('the spray rain record', () => {
   const input = (shadowVerdicts, issue) => ({
     facts: { serviceId: 'svc1', scheduledDate: '2026-09-04', serviceType: 'Quarterly Pest Control' },
     products: [talak, alpine],
@@ -532,9 +517,6 @@ describe('wind direction in the wind caution', () => {
     expect(b).not.toBe(a);
   });
 
-  test('with the rain rules off, the hold text is unchanged', () => {
-    expect(run(withWind([14], ['E']), [windy], null).reason).toBe('wind over 10 mph');
-  });
 });
 
 // Owner 2026-10-31: heat index line for the tech, today's visits only. A warning beside the check, never a verdict.

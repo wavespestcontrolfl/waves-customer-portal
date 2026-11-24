@@ -134,8 +134,8 @@ describe('loadArrivalRouteContext({ planningMinutes })', () => {
 // at vanDepartureMin, no stop starts before its window opens.
 describe('van departure on the capacity route', () => {
   const RouteOptimizer = require('../services/route-optimizer');
-  // The first stop is ~26 drive-minutes from the office (the start point).
-  const firstStop = { id: 'a', technician_id: 't1', lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng - 0.15,
+  // The first stop is ~26 drive-minutes from the office (the start point): 8.2 straight-line miles on the drive clock.
+  const firstStop = { id: 'a', technician_id: 't1', lat: RouteOptimizer.HQ.lat, lng: RouteOptimizer.HQ.lng - 0.134,
     window_start: '08:00:00', window_end: '09:00:00', estimated_duration_minutes: 30, scheduled_date: '2035-03-08' };
   const context = (over = {}) => ({ target: firstStop, rows: [], date: '2035-03-08', now: new Date('2035-01-01T00:00:00Z'),
     grouped: false, preserveCapacity: true, insertTarget: true, blocks: [], home: RouteOptimizer.HQ, ...over });

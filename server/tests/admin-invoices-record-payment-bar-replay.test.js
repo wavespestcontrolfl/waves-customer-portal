@@ -142,6 +142,19 @@ describe('the bar shim runs the same handler', () => {
     expect(recordManualPayment.mock.calls[1][1].sendReceipt).toBe(false);
   });
 
+  test('a checkoutTender marker in the bar body is no checkout tender, even with GATE_CHECKOUT_TENDER_RECEIPT on', async () => {
+    const saved = process.env.GATE_CHECKOUT_TENDER_RECEIPT;
+    process.env.GATE_CHECKOUT_TENDER_RECEIPT = 'true';
+    try {
+      await viaBar({ method: 'check', checkoutTender: true });
+    } finally {
+      if (saved === undefined) delete process.env.GATE_CHECKOUT_TENDER_RECEIPT; else process.env.GATE_CHECKOUT_TENDER_RECEIPT = saved;
+    }
+    const [, args] = recordManualPayment.mock.calls[0];
+    expect(args.sendReceipt).toBe(false);
+    expect(args).not.toHaveProperty('checkoutTender');
+  });
+
   test('the bar never passes a part amount: an amount in its body is dropped, so the settlement is whole-balance only', async () => {
     await viaBar({ ...BODY, amount: 10 });
     const [, args] = recordManualPayment.mock.calls[0];

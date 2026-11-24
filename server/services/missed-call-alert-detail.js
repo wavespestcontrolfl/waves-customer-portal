@@ -1,20 +1,19 @@
 /**
- * Missed-call admin alert detail (GATE_MISSED_CALL_ALERT_DETAIL, owner
- * "ALL" 2026-10-20). Admin bell and push only: nothing here reaches a
- * customer.
+ * Missed-call admin alert detail (owner "ALL" 2026-10-20). Admin bell and
+ * push only: nothing here reaches a customer.
  *
- * Today the customer_missed_call body reads "<phone> called and did not
- * leave a voicemail." With the gate on, the office also sees which line the
- * caller dialed, how long they stayed on, and (for a customer on file) the
- * date of their next visit, so the first glance at the push says whether to
- * call back now.
+ * The customer_missed_call body names which line the caller dialed, how long
+ * they stayed on, and (for a customer on file) the date of their next visit,
+ * so the first glance at the push says whether to call back now. A call with
+ * none of those fields keeps the original sentence ("<phone> called and did
+ * not leave a voicemail.").
  *
- * Two halves, kept apart so the gate-off alert stays byte-identical:
+ * Two halves:
  *   detailPayload(row)      producer side (missed-call-bell.js): the extra
- *                           payload fields, or {} with the gate off.
+ *                           payload fields.
  *   formatMissedCallBody(p) copy side (the trigger's build()): the body from
  *                           the payload; it falls back to the original line
- *                           when the payload carries none of the new fields.
+ *                           when the payload carries none of the detail fields.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -74,12 +73,10 @@ async function nextVisitDate(customerId, now = new Date()) {
 }
 
 /**
- * The extra payload fields for one call_log row. {} with the gate off, so the
- * stored payload (and the copy built from it) is today's, byte for byte.
+ * The extra payload fields for one call_log row: the line, the call length and
+ * the next visit date, each only when known.
  */
 async function detailPayload(row, now = new Date()) {
-  const { isEnabled } = require('../config/feature-gates');
-  if (!isEnabled('missedCallAlertDetail')) return {};
   const out = {};
   const line = shortLineLabel(parseMeta(row?.metadata).location);
   if (line) out.line = line;
@@ -91,7 +88,7 @@ async function detailPayload(row, now = new Date()) {
   return out;
 }
 
-/** True when the payload carries any of the gate-on fields. */
+/** True when the payload carries any detail field. */
 function hasDetail(p) {
   return Boolean(p) && (p.line != null || Number(p.durationSeconds) > 0 || p.nextVisitDate != null);
 }

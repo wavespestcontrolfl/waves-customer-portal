@@ -14,6 +14,13 @@
  * moves DATES, and a customer told only the day was still told that day. The levels reader treats an unknown window
  * as 'hour' (fail closed).
  *
+ * A WITHDRAWN latest promise (`withdrawn: true`: Quick Move's "let the customer pick a day" text, no-show-detector.js
+ * PICK_HANDOFF_MESSAGE_TYPE_PREFIX) is never told, with `anyPromise` too. That text takes the old time back, tells no new
+ * one, and tells the customer the night run books the visit if they do not pick (rain-out.js handOffToCustomer; the
+ * owner's 2026-11-17 "pick limit" exemption in move-limit.js). A time picked afterwards is a newer promise and freezes
+ * again. The levels reader still answers 'hour' for it (an unknown window, fail closed), so a delayed day-only body for
+ * the old date never goes over it (appointment-reminders.js delayedSendIsStale).
+ *
  * Throws when a read fails: every caller must fail closed (route-tiers loadReminderFreeze returns failed: true, the
  * day re-plan keeps every stop fixed). no-show-detector is required lazily, inside the function, so this module can be
  * loaded from route-tiers without a require cycle.
@@ -59,13 +66,13 @@ async function resolvePromises(conn, ids, now) {
 
 /** Set of the given ids whose communicated window (the visit's own latest promise, or its stop's) has a known slot.
  *  With `anyPromise` (GATE_DAY_ONLY_PROMISE) ANY resolved promise counts: a day-only promise or an unknown window
- *  also freezes the visit, because the customer was still told that day. `conn` may be a knex or a transaction. */
+ *  also freezes the visit, because the customer was still told that day. A withdrawn promise never counts (header). `conn` may be a knex or a transaction. */
 async function loadToldVisitIds(conn, ids, now = new Date(), { anyPromise = false } = {}) {
   if (!ids || ids.length === 0) return new Set();
   const promises = await resolvePromises(conn, ids, now);
   return new Set(ids.filter((id) => {
     const promise = promises.get(id);
-    return !!promise && (anyPromise || promise.start_at != null);
+    return !!promise && promise.withdrawn !== true && (anyPromise || promise.start_at != null);
   }));
 }
 

@@ -51,6 +51,11 @@ function metaOf(row) {
 
 function makeDb(tables) {
   const raw = (sql, bindings = []) => ({ __raw: true, sql, bindings });
+  // Column defaults the real table fills in: a fixture row without one reads,
+  // and RETURNs, the default, as Postgres would.
+  const COLUMN_DEFAULTS = { call_log: { processing_generation: 0 } };
+  const withDefaults = (table, row) => ({ ...(COLUMN_DEFAULTS[table] || {}), ...row });
+  const pick = (row, cols) => Object.fromEntries(cols.map((c) => [c, row[c] ?? null]));
 
   function evalClause(row, clause) {
     switch (clause.type) {
@@ -69,6 +74,8 @@ function makeDb(tables) {
           return !(metaOf(row).additional_recordings || []).some((r) => r.recording_sid === wanted);
         }
         if (sql === 'recording_sid IS DISTINCT FROM ?') return row.recording_sid !== clause.bindings[0];
+        // The Studio branch's customer lookup by phone: no fixture customer matches.
+        if (sql.includes("regexp_replace(COALESCE(phone, '')")) return false;
         if (sql.startsWith("(processing_status IS NULL OR processing_status NOT IN (")) {
           const names = [...sql.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
           return row.processing_status == null || !names.includes(String(row.processing_status));
@@ -168,21 +175,25 @@ function makeDb(tables) {
       whereNotIn(...a) { sb.whereNotIn(...a); return builder; },
       whereNot(...a) { sb.whereNot(...a); return builder; },
       select() { return builder; },
+      orderBy() { return builder; },
+      limit() { return builder; },
       first() {
         const hit = rows.find((r) => evalGroup(r, sb.clauses));
-        const snapshot = hit ? { ...hit } : undefined;
+        const snapshot = hit ? withDefaults(table, hit) : undefined;
         // Race hook: mutate the live row AFTER the handler has read it, the
         // way a processing claim lands between a read and a write.
         if (hit && typeof tables.__afterFirst === 'function') tables.__afterFirst(hit, table);
+        // …or add a row after a read that found none (a peer's insert).
+        if (!hit && typeof tables.__afterMiss === 'function') tables.__afterMiss(table);
         return Promise.resolve(snapshot);
       },
       modify(fn) { fn(builder); return builder; },
-      update(patch) {
+      update(patch, returning) {
         const hits = rows.filter((r) => evalGroup(r, sb.clauses));
         hits.forEach((r) => applyUpdate(r, patch));
-        return Promise.resolve(hits.length);
+        return Promise.resolve(returning ? hits.map((r) => pick(withDefaults(table, r), returning)) : hits.length);
       },
-      insert(obj) {
+      insert(obj, returning) {
         const inserted = { id: `row-${rows.length + 1}`, ...obj };
         // The partial unique index the real table carries: one open card per
         // (call, reason). ignore() keeps the existing one; merge() folds the
@@ -202,7 +213,7 @@ function makeDb(tables) {
         }) };
         // A bare insert (no onConflict) lands on await; the conflict paths
         // decide for themselves above.
-        const base = Promise.resolve([inserted]);
+        const base = Promise.resolve([returning ? pick(withDefaults(table, inserted), returning) : inserted]);
         return Object.assign({}, conflict, { then: (res, rej) => { if (!open) rows.push(inserted); return base.then(res, rej); }, catch: (rej) => base.catch(rej) });
       },
       then(resolve, reject) {
@@ -311,7 +322,73 @@ describe('POST /recording-status', () => {
     expect(row.recording_duration_seconds).toBe(45);
     expect(row.transcription_status).toBe('pending');
     jest.advanceTimersByTime(2 * 60 * 1000 + 5);
-    expect(processor.processRecording).toHaveBeenCalledWith(PARENT);
+    expect(processor.processRecording).toHaveBeenCalledWith(PARENT, { scheduledGeneration: 0 });
+  });
+
+  // Each timer carries the claim generation it was scheduled on, so a pass that overtakes it while it waits (the sweep)
+  // makes the claim run it only on a row still owed a pass (pre-push Codex P1, rounds 8 and 9).
+  test('the early timer carries the generation its own attach write returned', async () => {
+    tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, recording_sid: null, recording_url: null, processing_status: null, processing_generation: 3 });
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_1, RecordingUrl: URL_1 }));
+    jest.advanceTimersByTime(2 * 60 * 1000 + 5);
+    expect(processor.processRecording).toHaveBeenCalledTimes(1);
+    expect(processor.processRecording).toHaveBeenCalledWith(PARENT, { scheduledGeneration: 3 });
+  });
+
+  test('the fallback timer carries the early pass\'s own claim, so that deferral never fences it', async () => {
+    tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, recording_sid: null, recording_url: null, processing_status: null, processing_generation: 3 });
+    processor.processRecording.mockImplementationOnce(() => Promise.resolve({ success: false, skipped: true, reason: 'recording_not_ready', generation: 4 }));
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_1, RecordingUrl: URL_1 }));
+    jest.advanceTimersByTime(2 * 60 * 1000 + 5);
+    for (let i = 0; i < 5; i += 1) await Promise.resolve(); // the early attempt settles, then schedules the fallback
+    jest.advanceTimersByTime(8 * 60 * 1000 + 5);
+    expect(processor.processRecording.mock.calls).toEqual([
+      [PARENT, { scheduledGeneration: 3 }],
+      [PARENT, { scheduledGeneration: 4 }],
+    ]);
+  });
+
+  test('an early attempt that throws keeps the fence: the fallback carries the generation the attach write returned', async () => {
+    tables.call_log.push({ id: 'c1', twilio_call_sid: PARENT, recording_sid: null, recording_url: null, processing_status: null, processing_generation: 3 });
+    processor.processRecording.mockImplementationOnce(() => Promise.reject(new Error('fixture failure')));
+    await post('/recording-status', recordingCallback({ RecordingSid: REC_1, RecordingUrl: URL_1 }));
+    jest.advanceTimersByTime(2 * 60 * 1000 + 5);
+    for (let i = 0; i < 5; i += 1) await Promise.resolve(); // the early attempt settles, then schedules the fallback
+    jest.advanceTimersByTime(8 * 60 * 1000 + 5);
+    expect(processor.processRecording.mock.calls).toEqual([
+      [PARENT, { scheduledGeneration: 3 }],
+      [PARENT, { scheduledGeneration: 3 }],
+    ]);
+  });
+
+  // The Studio branch: no row by either SID at the first read, then a peer (/call-status) inserts the call before
+  // this callback's transaction. The timers fence on the generation that branch's write returned (pre-push Codex P1,
+  // round 9), as they do on an attach.
+  test('a Studio call a peer inserted after the first read: its timers carry the generation the write returned', async () => {
+    let inserted = false;
+    tables.__afterMiss = (table) => {
+      if (inserted || table !== 'call_log') return;
+      inserted = true;
+      tables.call_log.push({
+        id: 'c9', twilio_call_sid: PARENT, recording_sid: null, recording_url: null, transcription_metadata: null,
+        processing_status: null, processing_generation: 5,
+      });
+    };
+    await post('/recording-status', recordingCallback({ CallSid: PARENT, ParentCallSid: undefined, RecordingSid: REC_1, RecordingUrl: URL_1, RecordingDuration: '8' }));
+    expect(tables.call_log).toHaveLength(1);
+    expect(tables.call_log[0]).toMatchObject({ id: 'c9', recording_sid: REC_1 });
+    jest.advanceTimersByTime(2 * 60 * 1000 + 5);
+    expect(processor.processRecording).toHaveBeenCalledWith(PARENT, { scheduledGeneration: 5 });
+  });
+
+  test('a Studio call created from the callback fences its timers on the new row\'s generation', async () => {
+    await post('/recording-status', recordingCallback({
+      CallSid: PARENT, ParentCallSid: undefined, From: '+15555550134', To: '+15555550100', RecordingSid: REC_1, RecordingUrl: URL_1,
+    }));
+    expect(tables.call_log).toHaveLength(1);
+    expect(tables.call_log[0]).toMatchObject({ twilio_call_sid: PARENT, recording_sid: REC_1 });
+    jest.advanceTimersByTime(2 * 60 * 1000 + 5);
+    expect(processor.processRecording).toHaveBeenCalledWith(PARENT, { scheduledGeneration: 0 });
   });
 
   test('a retried delivery of the same RecordingSid on a processed row writes NOTHING', async () => {
@@ -454,7 +531,7 @@ describe('POST /recording-status', () => {
     expect(row.recording_sid).toBe(REC_1);
     expect(row.metadata.superseded_recordings).toEqual([expect.objectContaining({ recording_sid: REC_2, superseded_by: REC_1 })]);
     jest.advanceTimersByTime(2 * 60 * 1000 + 5);
-    expect(processor.processRecording).toHaveBeenCalledWith(PARENT);
+    expect(processor.processRecording).toHaveBeenCalledWith(PARENT, { scheduledGeneration: 0 });
   });
 
   test('a replace retires the old audio\'s cards but keeps missing_unit_number open, and the review flag follows the cards (codex #3764 gh-r3 P1 + #3736 gh-r14 P2)', async () => {
@@ -535,7 +612,7 @@ describe('POST /recording-status', () => {
     tables.call_log[0].processing_status = null;
     await post('/recording-status', recordingCallback({ RecordingSid: REC_1, RecordingUrl: URL_1, RecordingDuration: '45' }));
     jest.advanceTimersByTime(15 * 60 * 1000);
-    expect(processor.processRecording).toHaveBeenCalledWith(PARENT);
+    expect(processor.processRecording).toHaveBeenCalledWith(PARENT, { scheduledGeneration: 0 });
   });
 
   test('a duplicate delivery WITHOUT ParentCallSid (voicemail on the parent) writes nothing and never takes the Studio-recovery insert path', async () => {
@@ -761,7 +838,7 @@ describe('POST /recording-status', () => {
     expect(row.metadata.superseded_recordings).toHaveLength(1);
     expect(row.metadata.superseded_recordings[0]).toMatchObject({ recording_sid: REC_1, recording_duration_seconds: 12, superseded_by: REC_2 });
     jest.advanceTimersByTime(2 * 60 * 1000 + 5);
-    expect(processor.processRecording).toHaveBeenCalledWith(PARENT);
+    expect(processor.processRecording).toHaveBeenCalledWith(PARENT, { scheduledGeneration: 0 });
   });
 
   test('a row PAN-stamped between the read and the guarded write (the Studio race) deletes the arriving recording AND the row\'s current one now, not at the next sweep', async () => {

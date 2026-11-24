@@ -41,18 +41,13 @@ const {
   },
 } = require('../services/auto-dispatch/candidate-slots');
 
-const ORIGINAL_DRIVE_GATE = process.env.GATE_DRIVE_TIME_CALIBRATION;
 const ORIGINAL_SHARED_GATE = process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
 beforeEach(() => {
-  delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   jest.clearAllMocks();
   probeMoveConflicts.mockResolvedValue({ rows: [], snapshot: [] }); // default: no occupancy conflicts anywhere
 });
 afterEach(() => {
   if (ORIGINAL_SHARED_GATE === undefined) delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL; else process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = ORIGINAL_SHARED_GATE;
-});
-afterAll(() => {
-  if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION; else process.env.GATE_DRIVE_TIME_CALIBRATION = ORIGINAL_DRIVE_GATE;
 });
 
 const SERVICE = { id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: 't1', window_start: '09:00', estimated_duration_minutes: 60, lat: 27.4, lng: -82.5 };
@@ -905,7 +900,9 @@ test('a version-2 moving stop keeps its planning minutes in the saved route simu
   const candidate = { technician_id: 't1', date: '2026-08-06', start_time: '08:00', end_time: '09:00' };
   const placement = { windows: [{ start: '08:00', end: '09:00' }], targets: [{ id: service.id, start: '08:00', end: '09:00' }] };
   const ctx = { sourceRouteStamp: 'source-stamp', departureMinutes: 8 * 60 };
-  const blocks = [{ startMin: 8 * 60 + 40, endMin: 17 * 60 }];
+  // The drive clock is always on (main), so the origin leg costs about 8 minutes: the 35-minute
+  // table stop ends near 08:43 and fits before 08:50; the 60-minute estimate does not.
+  const blocks = [{ startMin: 8 * 60 + 50, endMin: 17 * 60 }];
 
   const v2 = scoreOnSharedModel(service, geo, candidate, [], [], placement, geo, ctx, blocks);
   const legacy = scoreOnSharedModel({ ...service, reservation_policy_version: 1 }, geo, candidate, [], [], placement, geo, ctx, blocks);

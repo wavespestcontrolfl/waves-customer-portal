@@ -13,6 +13,7 @@ const { etDateString, etParts } = require('../../utils/datetime-et');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const { TERMINAL_ROW_STATUSES } = require('../visit-context/statuses');
 const { dayStopsQuery, guardedCoordSelects, serviceLocationSelects, resolveServiceLocation } = require('./day-stops');
+const { bookedVisitOrLiveHold } = require('./reservation-occupancy');
 const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration,
   staleOrderReasons, promisedWindowOrder } = require('../route-reorder-window-fit');
 const { SHIFT, capacityEnabled, placementFitsShift } = require('./policy');
@@ -179,6 +180,7 @@ function exemptFromPlanning(rows, planningMinutes) {
 
 async function loadArrivalRouteContext({
   conn = db, serviceId, prospective, date, technicianId, excludeServiceIds = [], excludeEstimateId,
+  includeClaimedReservations = false, markLapsedReservations = false,
   changes = {}, now = new Date(), travel, preserveCapacity = false, unit = false, alone = false,
   // false: every stop on the route keeps its own window/estimate length
   // (planning-minutes.js `planning_exempt`, the convention the placed visit
@@ -246,8 +248,9 @@ async function loadArrivalRouteContext({
     select: [...COLUMNS.map(c => `scheduled_services.${c}`), ...guardedCoordSelects(conn),
       // An unstamped row inherits the customer's premise, and the co-visit
       // merge compares EFFECTIVE addresses (codex #4435 r3 P1).
-      ...CUSTOMER_PREMISE_ALIASES],
-  }).where(q => q.whereNull('scheduled_services.reservation_expires_at')
+      ...CUSTOMER_PREMISE_ALIASES,
+      ...(markLapsedReservations ? [conn.raw('scheduled_services.reservation_expires_at <= NOW() AS reservation_lapsed')] : [])],
+  }).where(includeClaimedReservations ? bookedVisitOrLiveHold : q => q.whereNull('scheduled_services.reservation_expires_at')
       .orWhereRaw('scheduled_services.reservation_expires_at > NOW()'));
   const blocks = capacityEnabled() || preserveCapacity ? await conn('tech_schedule_blocks')
     .where({ date }).whereNot('block_type', 'available')
@@ -278,7 +281,8 @@ async function loadArrivalRouteContext({
   const activeTarget = dateOnly(stored.scheduled_date) === date && ['en_route', 'on_site'].includes(stored.status);
   const dayRows = exemptFromPlanning(rows.filter(row => !excluded.has(String(row.id))
     && (!capacity || row.window_start || row.time_window || ['completed', 'en_route', 'on_site'].includes(row.status))
-    && !(excludeEstimateId && row.source_estimate_id === excludeEstimateId && row.reservation_expires_at)), planningMinutes);
+    && !(excludeEstimateId && row.source_estimate_id === excludeEstimateId && row.reservation_expires_at
+      && (!includeClaimedReservations || row.customer_id == null))), planningMinutes);
   const activeStop = fromActiveStop && date === etDateString(now) ? await loadActiveStop(conn, dayRows, techId) : null;
   return { target: movedTarget || target, rows: dayRows,
   date, now, grouped, activeTarget, activeStop, prospective: !!prospective,
@@ -293,6 +297,16 @@ async function loadArrivalRouteContext({
   vanDepartureMin,
   // Where this tech's day starts and ends (GATE_TECH_START_POINTS; off = HQ).
   home: startPoints ? await loadTechStartPoint(conn, techId) : RouteOptimizer.HQ };
+}
+
+// A booked stop travels with its technician and gets a stop number. Treat a
+// retained hold timestamp as cleared in the saved route's simulation only.
+async function loadSavedRouteContext(options) {
+  const context = await loadArrivalRouteContext({ ...options, includeClaimedReservations: true });
+  if (!context) return null;
+  const rows = context.rows.map(row => row.customer_id != null && row.reservation_expires_at != null
+    ? { ...row, reservation_expires_at: null } : row);
+  return { ...context, rows };
 }
 
 // The one stop the tech is at or driving to today, with its clock stamps
@@ -575,6 +589,23 @@ function laterStopTooTight(simulation, order, targetId, rangeForStop, margin, sk
   });
 }
 
+/** True when a simulated order has the technician on a stop after the shift end because of the
+ *  placed visit: some service ends after `shiftEndMin`, and later than in the same order without
+ *  the visit (`endsWithout`). The visit's own row has no end without it, so it must end by the
+ *  shift end. So must a service the visit moves later: the next stop, or another service of the
+ *  same customer worked at the visit's stop in the same arrival. A service that ends after the
+ *  shift end no earlier without the visit was booked before this check: it does not count, so a
+ *  day that already runs long keeps the hours that do not make it longer. */
+function overrunsShiftEnd(simulation, order, { shiftEndMin, endsWithout, collectLegs }) {
+  const after = simulation.arrivals.filter(arrival => arrival.departureMin > shiftEndMin);
+  if (!after.length) return false;
+  const legs = [];
+  const without = endsWithout(order, legs);
+  if (collectLegs) collectLegs.push(...legs);
+  const endWithout = new Map((without ? without.arrivals : []).map(arrival => [arrival.id, arrival.departureMin]));
+  return after.some(arrival => !(endWithout.get(arrival.id) >= arrival.departureMin));
+}
+
 // Whether a day row is a FIXED block on the target technician's simulated route.
 // Capacity: unassigned rows only. Hour mode (legacy placement): every other
 // technician's stop and every live hold, the one-technician shared rule. Hour
@@ -595,12 +626,15 @@ function rowIsFixedBlock(row, target, capacity) {
  *  deadline (returnTooLate) or collides with a FIXED blocker (unassigned
  *  work, another technician's live hold, or a technician-day block), and,
  *  with `marginMinutes`, any order that leaves a later stop less than that
- *  before its window closes (tooTight). */
+ *  before its window closes (tooTight), and, with `shiftEndMin`, any order
+ *  in which the placed visit keeps the technician on a stop after that
+ *  minute (overrunsShiftEnd; pastShiftEnd: the order passed every other check). */
 function selectWinningOrder(orders, { simulate, collectLegs, returnByMin, rows, capacity, target, startMin,
-  marginMinutes = 0, rangeForStop, marginSkipIds = null }) {
+  marginMinutes = 0, rangeForStop, marginSkipIds = null, shiftEndMin, endsWithout }) {
   let winner = null;
   let returnTooLate = false;
   let tooTight = false;
+  let pastShiftEnd = false;
   for (const { order, baselineDrive } of orders) {
     const usedLegs = [];
     const simulation = simulate(order, usedLegs);
@@ -638,12 +672,30 @@ function selectWinningOrder(orders, { simulate, collectLegs, returnByMin, rows, 
       tooTight = true;
       continue;
     }
+    if (Number.isFinite(shiftEndMin) && overrunsShiftEnd(simulation, order, { shiftEndMin, endsWithout, collectLegs })) {
+      pastShiftEnd = true;
+      continue;
+    }
     if (!winner || simulation.travelMin < winner.simulation.travelMin
       || (simulation.travelMin === winner.simulation.travelMin && simulation.waitingMin < winner.simulation.waitingMin)) {
       winner = { simulation, order, usedLegs, baselineDrive };
     }
   }
-  return { winner, returnTooLate, tooTight };
+  return { winner, returnTooLate, tooTight, pastShiftEnd };
+}
+
+/** Which limit refuses a placement no order won, when an order kept every arrival promise and
+ *  broke only a limit. One of three, in this precedence:
+ *  - `shiftEnd`: the technician's shift end (`shiftEndMin`). The caller refuses with it only after
+ *    the late-day pass had its turn: on a day that is already late, an order that leaves a late
+ *    stop as late as it is can still keep the shift end.
+ *  - `returnTime`: the requested return time (`returnByMin`). Refused at once.
+ *  - `margin`: every place the visit fits crowds a later customer. Refused at once. */
+function limitRefusal(winner, { pastShiftEnd, returnTooLate, tooTight }, date) {
+  if (winner) return {};
+  if (pastShiftEnd) return { shiftEnd: { reason: 'shift_end', warning: `With this visit the modeled route ends a stop after the technician's shift end on ${date}.` } };
+  if (returnTooLate) return { returnTime: { reason: 'return_time', warning: `The modeled route returns after the requested workday limit on ${date}.` } };
+  return { margin: tooTight };
 }
 
 /** True when the day's existing stops alone cannot keep their promises in
@@ -960,7 +1012,15 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   // A staff save's own check: a failure carries `diagnostics` for the save's log line, and is
   // worded with the stop, its window, the predicted arrival and the minutes. Never changes whether
   // the placement fits.
-  detail }) {
+  detail,
+  // The technician's shift end, minute of day: a caller passes it to hold the placement to that
+  // technician's shift hours. Only an order in which the placed visit does not keep the technician
+  // on a stop after it is certified (overrunsShiftEnd: the visit ends by it, and no other service
+  // ends after it later than without the visit). The answer is `shift_end` when an order keeps
+  // every arrival promise and each such order breaks that. With `lateDays` the late-day orders are
+  // tried first, under the same rule. A day on which no order keeps every promise keeps its
+  // arrival-window refusal. Unset: nothing reads it and the result is exactly what it was.
+  shiftEndMin }) {
   if (!context) return unverified(null, 'this date');
   const { date, grouped } = context;
   const capacity = capacityEnabled() || context.preserveCapacity;
@@ -1058,9 +1118,13 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
     return baselineSimulation ? baselineSimulation.travelMin : routeDriveMinutes(baseline, origin, context.home || RouteOptimizer.HQ);
   };
   const orders = buildCandidateOrders(context, capacity, groupedPending, target, allowInsertion, sequencers, baselineDriveMinutes, staffInsert);
-  const { winner, returnTooLate, tooTight } = selectWinningOrder(orders,
+  // An order without the placed visit, for the shift end's comparison (overrunsShiftEnd). Only its
+  // departures are read, so a late arrival or the day's end does not stop it: a day that cannot
+  // keep its own promises without the visit is still compared. The order with the visit keeps every limit.
+  const endsWithout = (order, usedLegs) => simulate(order.filter(row => row.id !== target.id), usedLegs, { reportLate: true, dayEndMin: Infinity });
+  const { winner, returnTooLate, tooTight, pastShiftEnd } = selectWinningOrder(orders,
     { simulate, collectLegs, returnByMin, rows, capacity, target, startMin,
-      marginMinutes: staffInsert ? INSERTION_MARGIN_MINUTES : 0, rangeForStop });
+      marginMinutes: staffInsert ? INSERTION_MARGIN_MINUTES : 0, rangeForStop, shiftEndMin, endsWithout });
   const fail = {
     feasible: false, target, reason: 'arrival_window',
     warning: `The route on ${date} cannot keep every promised arrival window with the planned service and driving times. Review the stop order or choose another window.`,
@@ -1078,11 +1142,10 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   const words = describe => (detail === true ? describe() : null);
   const candidateOrders = () => orders.map(entry => entry.order);
   const baselineOrders = () => sequencers.map(sequence => sequence(groupedPending));
-  if (!winner && returnTooLate) {
-    return detailed({ ...fail, reason: 'return_time', warning: `The modeled route returns after the requested workday limit on ${date}.` });
-  }
+  const refusal = limitRefusal(winner, { pastShiftEnd, returnTooLate, tooTight }, date);
+  if (refusal.returnTime) return detailed({ ...fail, ...refusal.returnTime });
   // Every place it fits crowds a later customer (staff route insertion).
-  if (!winner && tooTight) {
+  if (refusal.margin) {
     return detailed({ ...fail, reason: 'arrival_margin',
       warning: `The route on ${date} fits this visit only by leaving a later stop less than ${INSERTION_MARGIN_MINUTES} minutes before its arrival window closes. Choose another window.` },
     words(() => describeTightness({ date, candidates: candidateOrders(), simulate, target, own, rangeForStop, margin: INSERTION_MARGIN_MINUTES })));
@@ -1097,12 +1160,14 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
       return simulation ? simulation.travelMin : null;
     };
     const lateWinner = lateDayWinner(orders, { sequencers, groupedPending, simulate, baselineDrive: lateBaselineDrive, collectLegs, returnByMin,
-      rows, capacity, target, startMin, marginMinutes: staffInsert ? INSERTION_MARGIN_MINUTES : 0, rangeForStop });
+      rows, capacity, target, startMin, marginMinutes: staffInsert ? INSERTION_MARGIN_MINUTES : 0, rangeForStop, shiftEndMin, endsWithout });
     if (lateWinner) {
       return { ...buildFeasibleResult({ target, capacity, staffInsert, startMin, own, windowStart, winner: lateWinner, origin,
         home: context.home || RouteOptimizer.HQ, roadTravel: !!context.travel }), dayAlreadyLate: true };
     }
   }
+  // Only the shift end stopped an order that keeps every promise, and no late-day order took its place.
+  if (refusal.shiftEnd) return detailed({ ...fail, ...refusal.shiftEnd });
   // Tell "this visit breaks the day" apart from "the day is already broken":
   // the existing stops alone cannot keep their promises in any order tried.
   if (!winner && capacity && dayIsOvercommitted(sequencers, groupedPending, simulate)) {
@@ -1176,10 +1241,15 @@ function capacityError(reason = 'route_changed') {
 
 async function prepareArrivalCapacity(options) {
   if (!capacityEnabled() && !options.preserveCapacity) return null;
-  const context = await loadArrivalRouteContext(options);
+  const context = await loadArrivalRouteContext({ ...options, includeClaimedReservations: true, markLapsedReservations: true });
   if (!context) throw capacityError('route_unverified');
-  await certifyArrivalPlacement(context, options);
-  return { options, fingerprint: routeFingerprint(context), travel: context.travel };
+  // Keep the existing road requests. The locked fit below includes every booked
+  // visit and uses the conservative travel model for any leg without a road time.
+  const travelRows = context.rows.filter(row => !row.reservation_lapsed
+    && !(options.excludeEstimateId && row.source_estimate_id === options.excludeEstimateId && row.reservation_expires_at));
+  const travelContext = { ...context, rows: travelRows };
+  await certifyArrivalPlacement(travelContext, options);
+  return { options, fingerprint: routeFingerprint(context), travel: travelContext.travel };
 }
 
 // Self-serve arrival grace (owner ruling 2026-09-28, "I'd rather be more
@@ -1214,7 +1284,7 @@ async function verifyArrivalCapacity(prepared, {
     if (error.code === '55P03') throw capacityError('route_busy');
     throw error;
   }
-  const context = await loadArrivalRouteContext({ ...prepared.options, conn, travel: prepared.travel });
+  const context = await loadArrivalRouteContext({ ...prepared.options, conn, travel: prepared.travel, includeClaimedReservations: true });
   if (!context || routeFingerprint(context) !== prepared.fingerprint) throw capacityError();
   const fit = evaluateArrivalPlacement(context, { ...prepared.options,
     ...(windowStart ? { windowStart } : {}), ...(windowEnd ? { windowEnd } : {}),
@@ -1336,7 +1406,7 @@ async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays }) 
   if (!await require('./tech-day-lock').lockTechDays(sp, [{ techId: row.technician_id, date }], { wait: false })) return refuse('lock_busy');
   // From the office, like every commit-time check (tech-start-point.js):
   // the save probe certified this day from there, so the same order wins.
-  const context = await loadArrivalRouteContext({ conn: sp, serviceId, date, technicianId: row.technician_id });
+  const context = await loadSavedRouteContext({ conn: sp, serviceId, date, technicianId: row.technician_id });
   if (!context) return refuse('no_context');
   if (context.grouped) return refuse('grouped');
   if (staffSave === true) context.travel = staffSaveTravel(date);
@@ -1505,7 +1575,8 @@ async function checkArrivalPlacement({
   windowStart, windowEnd, durationMinutes, roads = false, roadSpender = null, pickerBudget = null, detail = false, lateDays = false, ...options
 }) {
   const live = pickerRoadCheckLive();
-  const context = await loadArrivalRouteContext({ fromActiveStop: live, ...options });
+  const loadContext = options.conn?.isTransaction && roads !== true ? loadSavedRouteContext : loadArrivalRouteContext;
+  const context = await loadContext({ fromActiveStop: live, ...options });
   // `lateDays`: only the staff picked-hour verdict asks for it, so an hour the
   // list offered on an already-late day is judged the same when picked. Saves and every other caller do not.
   const placement = { windowStart, windowEnd, durationMinutes, allowInsertion: false, ...(lateDays === true ? { lateDays: true } : {}) };
@@ -1527,10 +1598,10 @@ async function checkArrivalPlacement({
 
 
 module.exports = {
-  arrivalWindowRoutingEnabled, pickerRoadCheckLive, saveRoadBuyLive, buySaveRoads, loadArrivalRouteContext, evaluateArrivalPlacement, checkArrivalPlacement,
+  arrivalWindowRoutingEnabled, pickerRoadCheckLive, saveRoadBuyLive, buySaveRoads, loadArrivalRouteContext, loadSavedRouteContext, evaluateArrivalPlacement, checkArrivalPlacement,
   enumerateArrivalPlacements,
   groupRouteStops, workDuration,
   prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, persistCapacityAllocation, capacityError,
   placeMovedVisit, writeOrderNumbers, INSERTION_MARGIN_MINUTES,
-  _internals: { clockOrder, storedOrderStale, arrivalExceedsGrace, foldVisitUnit, comboRouteCheckLive, buildPlacementTarget, laterStopTooTight, staffSaveTravel },
+  _internals: { clockOrder, storedOrderStale, groupRouteStops, arrivalExceedsGrace, foldVisitUnit, comboRouteCheckLive, buildPlacementTarget, laterStopTooTight, staffSaveTravel },
 };
