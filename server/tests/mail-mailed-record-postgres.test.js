@@ -30,6 +30,7 @@ const attemptsMigration = require('../models/migrations/20261122200100_mail_pros
 const tokenMigration = require('../models/migrations/20261123200000_mail_prospects_page_token');
 const slugMigration = require('../models/migrations/20261124040000_mail_prospects_page_slug');
 const mailedMigration = require('../models/migrations/20261124160000_mail_prospects_mailed_record');
+const keepViewsMigration = require('../models/migrations/20261124160100_mail_prospects_keep_typed_views');
 const { dueForPrice, savePriceResult } = require('../services/mail/home-price-store');
 const { markBatch, wouldMark, labelsFor } = require('../services/mail/mailed-record');
 const { getHomePage } = require('../services/mail/home-page');
@@ -277,8 +278,9 @@ postgres('mailed record on PostgreSQL', () => {
     // A typed-link visit on a home not yet mailed also blocks the drop.
     const visited = await row();
     await conn('mail_prospects').where({ id: visited }).update({ page_typed_views: 2 });
-    await expect(conn.transaction((trx) => mailedMigration.down(trx))).rejects.toThrow(/typed-link visit counts/);
+    await expect(conn.transaction((trx) => keepViewsMigration.down(trx))).rejects.toThrow(/typed-link visit counts/);
     await conn('mail_prospects').where({ id: visited }).update({ page_typed_views: 0 });
+    await conn.transaction((trx) => keepViewsMigration.down(trx));
     await conn.transaction((trx) => mailedMigration.down(trx));
     const cols = (await conn.raw("SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = 'mail_prospects'", [schema])).rows.map((c) => c.column_name);
     for (const name of ['mailed_at', 'mail_batch', 'mailed_price', 'page_typed_views']) expect(cols).not.toContain(name);
