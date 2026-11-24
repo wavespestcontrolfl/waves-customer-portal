@@ -14,7 +14,7 @@
  *    UPPERCASE letter (the patch's version_tag, handed out once per base identity: UNIQUE
  *    (base_version, version_tag), so two patches on one base never share a version string)
  *    rides at the end of the tags part of the identity,
- *    for example 'house_voice_v12_real_answers38_n+bcA'. Every other tag (category b c l m,
+ *    for example 'house_voice_v12_real_answers42_n+bcA'. Every other tag (category b c l m,
  *    voice input v e) is lowercase, so the letter cannot collide with them. ONE character is
  *    deliberate: the longest identity without a patch is 39 characters (32-character
  *    real-answers base + '+' + six tags), so one more character is exactly the varchar(40)
@@ -61,7 +61,7 @@ function nextFreeTag(usedTags) {
 }
 
 /**
- * Split a prompt identity into its base ('house_voice_v12_real_answers38_n'), the lowercase
+ * Split a prompt identity into its base ('house_voice_v12_real_answers42_n'), the lowercase
  * tags ('bc') and the patch tag ('A' or ''). Pure; tolerates every identity in use.
  */
 function splitPromptVersion(promptVersion) {

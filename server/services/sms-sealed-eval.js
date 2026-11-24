@@ -42,7 +42,6 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const {
   COMPANY_FACTS_HEADER, BILLING_DELIMITER, exactStructureRegexSource, hasExactCompanyFacts, hasExactLabelFacts,
-  rebaseCompanyFactsToCurrent, retiredTopicReForBlock, heldPlaceInConversationContext, heldPlaceInOpenTimesLookup,
 } = require('./sms-company-facts');
 const { LABEL_FACTS_MARKER, LABEL_SECTION_REGEX_SRC } = require('./sms-label-facts');
 const { MISSED_VISIT_SCOPE_LINE } = require('./visit-loops-facts');
@@ -51,7 +50,6 @@ const { splitPromptVersion, stampPatchVersion } = require('./sms-prompt-patch');
 
 const SCHEMA_VERSION = 'sms-sealed-eval.v1';
 // a row whose static COMPANY FACTS section was re-rendered to the identity's at freeze time (varchar(40))
-const REBASED_SCHEMA_VERSION = `${SCHEMA_VERSION}+rebased`;
 
 const envNum = (name, def) => {
   const v = Number(process.env[name]);
@@ -367,10 +365,9 @@ function itemCompatibleWith(factsBlock, promptVersion) {
 // Mirrors factsHasMarker: the structural pattern via Postgres `~` for the
 // line markers, the exact-suffix test for COMPANY FACTS (text before the first
 // BILLING: line ends with the exact render). Bindings follow clause order.
-// `anyCompanyRender` (the freezer's CANDIDATE query only): the COMPANY FACTS / LABEL FACTS / FREE RE-SERVICE
-// tests accept any known earlier render of the static company section, because sealEvalItems rebases a
-// candidate onto today's render before it freezes it (rebaseCompanyFactsToCurrent). The pool counts, the
-// restore and retire queries and the exam itself keep the exact-current test.
+// `anyCompanyRender`: the COMPANY FACTS / LABEL FACTS / FREE RE-SERVICE tests accept any known earlier render of the static
+// company section. No caller passes it now (the freezer's candidate query used it until the 2026-11-24 holidays change, when
+// every earlier render became stale); every query keeps the exact-current test.
 function compatibleWhereRaw(markers, forbidden = [], { anyCompanyRender = false } = {}) {
   const structure = (label) => exactStructureRegexSource(label, { anyRender: anyCompanyRender });
   const col = "COALESCE(facts_block, '')";
@@ -411,13 +408,11 @@ function compatibleWhereRaw(markers, forbidden = [], { anyCompanyRender = false 
  * recent first within each intent) so one chatty intent can't crowd out the
  * exam's coverage of the others.
  *
- * Recent drafts reach the pool (2026-10-24): the contract's COMPANY FACTS test is exact-current, so every
- * wording edit to that STATIC section (10-03, 10-09, 10-22) made every older draft incompatible and left
- * only the drafts of the last few days. A candidate drafted under a KNOWN EARLIER render is rebased onto
- * today's section (rebaseCompanyFactsToCurrent: that section only; every per-draft fact is as drafted),
- * must then pass the exact contract, and is skipped when its inbound or reply touches a reworded line's
- * topic. Rebased rows carry schema_version "sms-sealed-eval.v1+rebased". Per-draft facts are never
- * reconstructed, so a draft that lacks one (PORTAL SELF-CANCEL before 10-09) still cannot be sealed.
+ * Candidates are drafts frozen under today's exact fact contract, static COMPANY FACTS render included (compatibleWhereRaw, the same
+ * predicate the pool counts use). A draft under an EARLIER render is not fetched and not rebased: since 2026-11-24 every earlier render
+ * carries the retired holidays line, so none is a reference answer. (The 2026-10-24 rebase onto today's section is gone; the
+ * helpers stay in sms-company-facts.js.) Per-draft facts are never reconstructed, so a draft that lacks one (PORTAL SELF-CANCEL before
+ * 10-09) still cannot be sealed.
  * Rotation: once the compatible items can carry an exam (SEALED_EXAM_AUTO_MIN_ITEMS), the oldest
  * incompatible items are retired until they no longer outnumber the compatible ones, which is the bar
  * createExamRun applies. dryRun: true plans the same pass and writes nothing.
@@ -486,10 +481,10 @@ async function sealEvalItems(opts) {
 
   // Candidates: only when the plan needs new items.
   const cutoff = new Date(Date.now() - minAgeDays * 86400 * 1000);
-  // only drafts frozen under the current fact contract are representative, where "frozen under the current
-  // contract" reads a static COMPANY FACTS section drafted under a known EARLIER render as current: it is
-  // rebased below (a wording edit must not empty the pool for a week).
-  const candidateCompat = compatibleWhereRaw(markers, forbidden, { anyCompanyRender: true });
+  // Only drafts frozen under the CURRENT fact contract are representative, and that includes today's exact static COMPANY FACTS
+  // render (the same predicate the pool counts use). A draft under any earlier render is never fetched: every earlier render
+  // carries the retired holidays line (owner 2026-11-24), so a replenishment pass neither reads nor rebases the historical backlog.
+  const candidateCompat = compat;
   const rawCandidates = remaining > 0 || missedShort > 0
     ? await dbi({ md: 'message_drafts' })
       .join({ j: 'shadow_draft_judgments' }, 'j.draft_id', 'md.id')
@@ -517,19 +512,7 @@ async function sealEvalItems(opts) {
       .orderBy('md.created_at', 'desc')
     : [];
 
-  // Rebase onto today's static section. Only that section changes; every per-draft fact stays as drafted. The
-  // rebased block must pass the exact contract (the SQL twin above is looser by design), and a reply that may
-  // restate a reworded policy is left out. A block that already carries today's render is sealed as drafted.
-  let skippedRetiredTopic = 0;
-  const candidates = [];
-  for (const c of rawCandidates) {
-    const onto = rebaseCompanyFactsToCurrent(c.facts_block);
-    if (!onto) { candidates.push(c); continue; }
-    if (!itemCompatibleWith(onto, sealVersion)) continue;
-    if (retiredTopicReForBlock(c.facts_block)?.test(`${c.inbound_message}\n${c.human_reply_text}`) || heldPlaceInConversationContext(c.facts_block)
-      || heldPlaceInOpenTimesLookup(c.intended_actions)) { skippedRetiredTopic += 1; continue; }
-    candidates.push({ ...c, facts_block: onto, rebased: true });
-  }
+  const candidates = rawCandidates;
 
   // Stratify: round-robin across intents, newest first within each.
   const picked = candidates.filter((c) => missedShort > 0 && hasRenderedMissedCase(c.facts_block)).slice(0, missedShort);
@@ -557,8 +540,7 @@ async function sealEvalItems(opts) {
     human_reply_sms_id: c.human_reply_sms_id || null,
     scheduling_intent: Boolean(c.scheduling_intent),
     inbound_at: c.inbound_at || c.created_at || null,
-    // a rebased row says so: its static COMPANY FACTS section was re-rendered, nothing else
-    schema_version: c.rebased ? REBASED_SCHEMA_VERSION : SCHEMA_VERSION,
+    schema_version: SCHEMA_VERSION,
   }));
 
   // Retire (active=false, never delete) the OLDEST incompatible items: first the overflow past the target
@@ -584,11 +566,9 @@ async function sealEvalItems(opts) {
   const summary = {
     ...done,
     dryRun,
-    rebased: picked.filter((c) => c.rebased).length,
     activeCount: Number(activeCount) + done.reactivated + done.sealed - done.retired,
     // the plan in counts, never message bodies (the reseal script prints this)
     candidates: candidates.length,
-    skippedRetiredTopic,
     byIntent: picked.reduce((m, c) => ({ ...m, [c.intent || 'GENERAL']: (m[c.intent || 'GENERAL'] || 0) + 1 }), {}),
     oldest: picked.reduce((a, c) => (!a || c.created_at < a ? c.created_at : a), null),
     newest: picked.reduce((a, c) => (!a || c.created_at > a ? c.created_at : a), null),

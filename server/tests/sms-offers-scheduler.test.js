@@ -210,7 +210,7 @@ describe('gate off — a recurring series stays ambiguous (Codex #6172 r1 P1)', 
     expect(mockIdentity.prompts.join('\n')).not.toMatch(/, 20\d\d\)/);
     process.env.GATE_SMS_REAL_ANSWERS = 'true';
     expect(drafter.currentPromptVersion()).toBe(drafter.REAL_ANSWERS_PROMPT_VERSION);
-    expect(drafter.REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers37_n');
+    expect(drafter.REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers41_n');
     const client = makeClient(plainReply());
     const r = await drafter.generateGroundedDraft(argsFor(client, context));
     expect(oldFinder).not.toHaveBeenCalled();
@@ -352,10 +352,10 @@ describe('gate on — an upcoming visit is offered through the reschedule link p
   test('gate on: the effective prompt version is the next-of-series cohort, with or without category tags (Codex r2 P1)', () => {
     const drafter = freshDrafter();
     process.env.GATE_SMS_REAL_ANSWERS = 'true';
-    expect(drafter.currentPromptVersion()).toBe('house_voice_v12_real_answers38_n');
-    expect(drafter.NEXT_OF_SERIES_PROMPT_VERSION).toBe('house_voice_v12_real_answers38_n');
+    expect(drafter.currentPromptVersion()).toBe('house_voice_v12_real_answers42_n');
+    expect(drafter.NEXT_OF_SERIES_PROMPT_VERSION).toBe('house_voice_v12_real_answers42_n');
     process.env.GATE_SMS_AGENT_COMPLAINTS = 'true';
-    expect(drafter.currentPromptVersion()).toBe('house_voice_v12_real_answers38_n+c');
+    expect(drafter.currentPromptVersion()).toBe('house_voice_v12_real_answers42_n+c');
     delete process.env.GATE_SMS_AGENT_COMPLAINTS;
   });
 
