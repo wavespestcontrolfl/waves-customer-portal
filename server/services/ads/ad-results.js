@@ -1,0 +1,327 @@
+/**
+ * Ad results report (owner 2026-11-23, plan v2: "track ad results: paid customers, one-time vs recurring").
+ * READ ONLY. It writes nothing, texts no one and calls no ad platform. One row per (campaign, ET day), plus totals.
+ * Counts and short customer-id lists, no ratios (no ROAS, no cost per lead): the owner reads the counts.
+ *
+ * Where each rule lives (rule 22: call the home, never write the rule again):
+ *   - Spend and clicks: ad_performance_daily, the real cost of that campaign on that day. Never
+ *     ad_service_attribution.ad_cost (that is the month's cost split evenly across leads).
+ *   - Plan or one-time: isMembershipCustomerRow (server/services/waveguard-existing-services.js). It reads the
+ *     customer's tier first and monthly_rate only as the legacy fallback. This file never reads monthly_rate alone.
+ *   - Paid customer: a status 'paid' invoice with paid_at on or after the lead day (its service_type names the
+ *     service). Money paid (paid90): netCollections in customer-lifetime-revenue.js, the same payments and deposits
+ *     net of refunds as the customer's lifetime revenue, dated when the money came in, summed for day 0 to 90.
+ *     billing-lane.js, open-balance.js and payer.js predict, owe and route bills; none says what was collected.
+ *   - Churn: the customer's CURRENT pipeline_stage = 'churned' (waves-db skill: never churned_at, which is sparse and
+ *     survives a reactivation). customer-stages.js has no churn predicate to call; past_customer and dormant are
+ *     archival labels, not churn (owner ruling 2026-08-07).
+ *   - Dates: ET days through datetime-et.js; a pg DATE value through dateOnlyString (utils/date-only.js).
+ *   - Rain day: system_settings 'ads.rain_mode.days', written by ads/rain-mode.js (read here, never imported: that
+ *     module pulls in the Google Ads client).
+ *
+ * A customer is credited to ONE row: the row of their first lead in the window (earliest lead_date, then created_at, then id). So the
+ * paid, plan, cancel and paid90 numbers add up across rows and campaigns without counting a customer twice. Their
+ * leads still count in every row they came in on.
+ */
+const db = require('../../models/db');
+const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
+const { dateOnlyString } = require('../../utils/date-only');
+const { isMembershipCustomerRow } = require('../waveguard-existing-services');
+const { isInternalTestContact } = require('../internal-test-customers');
+const { netCollections } = require('../customer-lifetime-revenue');
+const { wherePaidLead } = require('../ad-cost-allocation');
+
+const RAIN_DAYS_KEY = 'ads.rain_mode.days';
+const PAID90_DAYS = 90;
+const NO_CAMPAIGN = '(no campaign)';
+// Drill-down list size per row; counts always cover every customer.
+const LIST_MAX = 25;
+const ID_CHUNK = 500;
+const BOOKED_STAGES = ['booked', 'completed'];
+
+const cents = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+function parseJson(v, fallback) {
+  if (v && typeof v === 'object') return v;
+  if (typeof v !== 'string') return fallback;
+  try { return JSON.parse(v) ?? fallback; } catch { return fallback; }
+}
+
+// The ET calendar day `n` days after `day` (YYYY-MM-DD), through the shared ET helpers.
+function daysAfter(day, n) {
+  return etDateString(addETDays(parseETDateTime(`${day}T12:00`), n));
+}
+
+function chunks(list, size) {
+  const out = [];
+  for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
+  return out;
+}
+
+function rowFor(rows, { campaignId, campaign, platform, date }) {
+  const key = `${campaignId || `none:${platform || ''}`}|${date}`;
+  if (!rows.has(key)) {
+    rows.set(key, {
+      date,
+      campaign_id: campaignId || null,
+      campaign: campaign || NO_CAMPAIGN,
+      platform: platform || null,
+      spend: 0,
+      clicks: 0,
+      leads: 0,
+      calls: 0,
+      booked: 0,
+      paid_customers: 0,
+      plan_customers: 0,
+      one_time_customers: 0,
+      paid90: 0,
+      cancels: 0,
+      customers: [],
+      rain_day: null,
+    });
+  }
+  return rows.get(key);
+}
+
+async function loadSpend(conn, since, until) {
+  return conn('ad_performance_daily as apd')
+    .join('ad_campaigns as ac', 'ac.id', 'apd.campaign_id')
+    .where('apd.date', '>=', since)
+    .where('apd.date', '<=', until)
+    .select('apd.campaign_id', 'apd.date', 'apd.cost', 'apd.clicks', 'ac.campaign_name', 'ac.platform');
+}
+
+// Paid leads in the window: any lead linked to a campaign, and unlinked leads of a paid source. Soft-deleted leads
+// are left out (the same exclusion the dashboard's channel report uses).
+async function loadLeads(conn, since, until) {
+  return conn('ad_service_attribution as asa')
+    .leftJoin('leads as l', 'l.id', 'asa.lead_id')
+    .leftJoin('ad_campaigns as ac', 'ac.id', 'asa.campaign_id')
+    .where('asa.lead_date', '>=', since)
+    .where('asa.lead_date', '<=', until)
+    .whereRaw('(asa.lead_id IS NULL OR l.deleted_at IS NULL)')
+    .where((qb) => qb
+      .whereNotNull('asa.campaign_id')
+      .orWhere((paid) => wherePaidLead(paid, 'asa')))
+    .select(
+      'asa.id', 'asa.campaign_id', 'asa.lead_date', 'asa.lead_id', 'asa.self_booked_appointment_id',
+      'asa.gclid', 'asa.wbraid', 'asa.gbraid', 'asa.fbclid', 'asa.fbc', 'asa.lead_source', 'asa.funnel_stage',
+      'asa.source_call_id', 'asa.created_at', 'ac.campaign_name', 'ac.platform', 'l.first_name as lead_first_name',
+      'l.last_name as lead_last_name', 'l.phone as lead_phone', 'l.email as lead_email',
+      // The linked lead's current customer wins (it can be filled first, or reassigned); a row with no lead, or a
+      // lead with no customer yet, keeps the funnel row's customer.
+      conn.raw('COALESCE(l.customer_id, asa.customer_id) AS customer_id'),
+    );
+}
+
+async function loadCustomers(conn, ids) {
+  const out = new Map();
+  for (const part of chunks(ids, ID_CHUNK)) {
+    const rows = await conn('customers').whereIn('id', part)
+      .select('id', 'first_name', 'last_name', 'phone', 'email', 'waveguard_tier', 'monthly_rate', 'pipeline_stage', 'created_at');
+    for (const r of rows) out.set(String(r.id), r);
+  }
+  return out;
+}
+
+async function loadPaidInvoices(conn, ids, from) {
+  const out = [];
+  for (const part of chunks(ids, ID_CHUNK)) {
+    const rows = await conn('invoices')
+      .whereIn('customer_id', part)
+      .where('status', 'paid')
+      // A legacy paid invoice can have no paid_at; its created_at is the earliest it could have been paid.
+      .whereRaw('COALESCE(paid_at, created_at) >= ?', [from])
+      .select('id', 'customer_id', 'total', 'paid_at', 'created_at', 'service_type', 'title');
+    out.push(...rows);
+  }
+  return out;
+}
+
+async function loadRainDays(conn) {
+  const row = await conn('system_settings').where({ key: RAIN_DAYS_KEY }).first();
+  const days = parseJson(row?.value, {});
+  return days && typeof days === 'object' && !Array.isArray(days) ? days : {};
+}
+
+function rainDayOf(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  const score = entry.score && typeof entry.score === 'object' ? entry.score : null;
+  return {
+    call: entry.call || null,
+    cutoff_call: entry.cutoff_call || null,
+    scored: !!score,
+    wet_day: score ? score.wet_day ?? null : null,
+    hit: score ? score.hit ?? null : null,
+    cutoff_hit: score ? score.cutoff_hit ?? null : null,
+  };
+}
+
+function sumTotals(out) {
+  return out.reduce((t, r) => ({
+    spend: cents(t.spend + r.spend),
+    clicks: t.clicks + r.clicks,
+    leads: t.leads + r.leads,
+    calls: t.calls + r.calls,
+    booked: t.booked + r.booked,
+    paid_customers: t.paid_customers + r.paid_customers,
+    plan_customers: t.plan_customers + r.plan_customers,
+    one_time_customers: t.one_time_customers + r.one_time_customers,
+    paid90: cents(t.paid90 + r.paid90),
+    cancels: t.cancels + r.cancels,
+  }), {
+    spend: 0, clicks: 0, leads: 0, calls: 0, booked: 0, paid_customers: 0, plan_customers: 0, one_time_customers: 0,
+    paid90: 0, cancels: 0,
+  });
+}
+
+function groupBy(items, keyOf) {
+  const out = new Map();
+  for (const item of items) {
+    const key = String(keyOf(item));
+    if (!out.has(key)) out.set(key, []);
+    out.get(key).push(item);
+  }
+  return out;
+}
+
+// Paid invoices by customer, each with its ET day. A legacy paid invoice with no paid_at uses created_at, the
+// earliest it could have been paid.
+function invoicesByCustomer(invoices) {
+  const dated = invoices
+    .map((inv) => ({ ...inv, at: inv.paid_at || inv.created_at }))
+    .filter((inv) => inv.at)
+    .map((inv) => ({ ...inv, day: etDateString(new Date(inv.at)) }));
+  return groupBy(dated, (inv) => inv.customer_id);
+}
+
+// Money in (payments and deposits, net of refunds) from the lead day to day PAID90_DAYS.
+function moneyIn(collections, leadDay) {
+  const lastDay = daysAfter(leadDay, PAID90_DAYS);
+  return cents(collections.filter((c) => c.day >= leadDay && c.day <= lastDay).reduce((sum, c) => sum + c.net, 0));
+}
+
+function customerEntry(customerId, firstPaid, customer, paid90) {
+  return {
+    customer_id: customerId,
+    first_paid_date: firstPaid.paid_at ? firstPaid.day : null, // null: a legacy invoice with no paid date
+    service: firstPaid.service_type || firstPaid.title || null,
+    plan: isMembershipCustomerRow(customer || {}),
+    churned: customer?.pipeline_stage === 'churned',
+    paid90,
+  };
+}
+
+function leadRow(rows, lead, leadDay) {
+  return rowFor(rows, {
+    campaignId: lead.campaign_id,
+    campaign: lead.campaign_name,
+    platform: lead.campaign_id ? lead.platform : lead.lead_source,
+    date: leadDay,
+  });
+}
+
+/**
+ * Credits each customer to their first-lead row: money in (paid90) counts even before an invoice is paid (an estimate
+ * deposit); paid customer, plan or one-time and cancel need a paid invoice on or after the lead day.
+ */
+async function creditPaid(conn, rows, firstLead, customers) {
+  const ids = [...firstLead.keys()];
+  const earliest = [...firstLead.values()].map((l) => dateOnlyString(l.lead_date)).sort()[0];
+  const from = parseETDateTime(`${earliest}T00:00`);
+  const paidBy = invoicesByCustomer(await loadPaidInvoices(conn, ids, from));
+  const collected = groupBy(await netCollections(conn, ids, from), (c) => c.customer_id);
+  for (const [customerId, lead] of firstLead) {
+    const leadDay = dateOnlyString(lead.lead_date);
+    const paid = (paidBy.get(customerId) || []).filter((inv) => inv.day >= leadDay)
+      .sort((x, y) => new Date(x.at) - new Date(y.at));
+    const paid90 = moneyIn(collected.get(customerId) || [], leadDay);
+    if (!paid.length && !paid90) continue;
+    const row = leadRow(rows, lead, leadDay);
+    row.paid90 = cents(row.paid90 + paid90);
+    if (!paid.length) continue;
+    const entry = customerEntry(customerId, paid[0], customers.get(customerId), paid90);
+    row.paid_customers += 1;
+    row[entry.plan ? 'plan_customers' : 'one_time_customers'] += 1;
+    row.cancels += entry.churned ? 1 : 0;
+    row.customers.push(entry);
+  }
+}
+
+/**
+ * The report. `since` and `until` are ET dates (YYYY-MM-DD), both inclusive. Returns
+ * { since, until, rows, totals }; each row is described in rowFor.
+ */
+async function adResults({ since, until, conn = db } = {}) {
+  const rows = new Map();
+
+  for (const r of await loadSpend(conn, since, until)) {
+    const row = rowFor(rows, { campaignId: r.campaign_id, campaign: r.campaign_name, platform: r.platform, date: dateOnlyString(r.date) });
+    row.spend = cents(row.spend + Number(r.cost || 0));
+    row.clicks += Number(r.clicks) || 0;
+  }
+
+  const leads = (await loadLeads(conn, since, until))
+    .filter((l) => dateOnlyString(l.lead_date))
+    // Same-day ties go to the earlier lead (created_at), as in ad-attribution-sync, then to id.
+    .sort((a, b) => dateOnlyString(a.lead_date).localeCompare(dateOnlyString(b.lead_date))
+      || (new Date(a.created_at || 0) - new Date(b.created_at || 0))
+      || String(a.id).localeCompare(String(b.id)));
+  const customerIds = [...new Set(leads.map((l) => l.customer_id).filter(Boolean).map(String))];
+  const customers = await loadCustomers(conn, customerIds);
+  // The owner's own test accounts never count (the same list the dashboard's channel report excludes).
+  // Both the lead's name and the linked customer's name are checked, as the channel report does.
+  const isTest = (lead) => {
+    const c = lead.customer_id ? customers.get(String(lead.customer_id)) : null;
+    if (isInternalTestContact({
+      customerId: lead.customer_id, firstName: lead.lead_first_name, lastName: lead.lead_last_name,
+      phone: lead.lead_phone, email: lead.lead_email,
+    })) return true;
+    return !!c && isInternalTestContact({
+      customerId: lead.customer_id, firstName: c.first_name, lastName: c.last_name, phone: c.phone, email: c.email,
+    });
+  };
+
+  const counted = leads.filter((l) => !isTest(l));
+  // First-touch row per customer. A self-booking row with no lead is a REPEAT booking, counted in Booked only and
+  // never given first-lead credit, when (a) it carries a click id: a paid click that creates a customer mints a lead,
+  // so a click-id booking row with no lead is recordPaidRepeatBookingAttribution's; or (b) its customer existed
+  // before the booking day. A booking that created its customer with no click id (recordOrganicSelfBookingAttribution)
+  // counts as a lead.
+  const CLICK_IDS = ['gclid', 'wbraid', 'gbraid', 'fbclid', 'fbc'];
+  const isRepeatBooking = (lead) => {
+    if (!lead.self_booked_appointment_id || lead.lead_id) return false;
+    if (CLICK_IDS.some((k) => lead[k])) return true;
+    const created = customers.get(String(lead.customer_id))?.created_at;
+    return !!created && etDateString(new Date(created)) < dateOnlyString(lead.lead_date);
+  };
+  const firstLead = new Map();
+  for (const lead of counted) {
+    const repeatBooking = isRepeatBooking(lead);
+    const key = lead.customer_id && String(lead.customer_id);
+    if (key && !repeatBooking && !firstLead.has(key)) firstLead.set(key, lead);
+    const row = leadRow(rows, lead, dateOnlyString(lead.lead_date));
+    if (!repeatBooking) row.leads += 1;
+    if (lead.source_call_id) row.calls += 1;
+    if (BOOKED_STAGES.includes(lead.funnel_stage)) row.booked += 1;
+  }
+
+  if (firstLead.size) await creditPaid(conn, rows, firstLead, customers);
+
+  const rainDays = await loadRainDays(conn);
+  const out = [...rows.values()].map((row) => ({
+    ...row,
+    customers: row.customers.slice(0, LIST_MAX),
+    rain_day: rainDayOf(rainDays[row.date]),
+  }));
+  out.sort((a, b) => a.campaign.localeCompare(b.campaign) || b.date.localeCompare(a.date));
+
+  const totals = sumTotals(out);
+
+  // Every recorded day in the window, also a day with no spend or lead row: the period's rain total reads this.
+  const rain_days = Object.keys(rainDays).filter((d) => d >= since && d <= until).sort()
+    .map((date) => ({ date, ...rainDayOf(rainDays[date]) }));
+  return { since, until, rows: out, totals, rain_days };
+}
+
+module.exports = { adResults, NO_CAMPAIGN, PAID90_DAYS, LIST_MAX };

@@ -51,14 +51,27 @@ function resolveDb(db) {
 // hasIsPaid guards the new column: the all-time backfill migration (000003) calls
 // allocateAdCosts BEFORE migration 000004 adds is_paid, so on a fresh DB the
 // is_paid clause must be omitted until the column exists.
+function paidSignal(b, col, hasIsPaid) {
+  b.whereNotNull(col('fbclid')).orWhereNotNull(col('fbc'));
+  if (hasIsPaid) b.orWhere(col('is_paid'), true);
+}
+
 function applyPaidFilter(q, channel, hasIsPaid) {
-  if (channel.paidOnly) {
-    q.where((b) => {
-      b.whereNotNull('fbclid').orWhereNotNull('fbc');
-      if (hasIsPaid) b.orWhere('is_paid', true);
-    });
-  }
+  if (channel.paidOnly) q.where((b) => paidSignal(b, (c) => c, hasIsPaid));
   return q;
+}
+
+// The same paid-lead population as allocateAdCosts, for a query that reads ad_service_attribution under `alias`:
+// a PAID_CHANNELS source, and for a paidOnly channel the paid signal above. (The ad results report uses it.)
+function wherePaidLead(qb, alias) {
+  return qb.where((outer) => {
+    for (const channel of PAID_CHANNELS) {
+      outer.orWhere((w) => {
+        w.where(`${alias}.lead_source`, channel.source);
+        if (channel.paidOnly) w.where((b) => paidSignal(b, (c) => `${alias}.${c}`, true));
+      });
+    }
+  });
 }
 
 function round2(n) {
@@ -155,4 +168,5 @@ module.exports = {
   perLeadCost,
   monthBounds,
   PAID_CHANNELS,
+  wherePaidLead,
 };
