@@ -173,8 +173,10 @@ async function saveRun(conn, run, days, now) {
   await conn.transaction(async (trx) => {
     const prior = await trx('system_settings').where({ key: HISTORY_KEY }).first();
     const history = parseJson(prior?.value, []);
-    const entry = { at: run.at, day: run.day, call: run.call, campaigns: run.campaigns.map((c) => [c.campaign_id, c.would]) };
-    const kept = [...(Array.isArray(history) ? history : []), entry].slice(-HISTORY_MAX);
+    // One entry per cron tick (ET date and hour): a retry or a second deploy instance replaces it, never adds one.
+    const entry = { at: run.at, tick: run.tick, day: run.day, call: run.call, campaigns: run.campaigns.map((c) => [c.campaign_id, c.would]) };
+    const others = (Array.isArray(history) ? history : []).filter((e) => !e || e.tick !== run.tick);
+    const kept = [...others, entry].slice(-HISTORY_MAX);
     const keptDays = Object.fromEntries(Object.entries(days).sort(([a], [b]) => a.localeCompare(b)).slice(-DAYS_MAX));
     const upsert = (key, value, description) => trx('system_settings')
       .insert({ key, value, category: 'ads', description })
@@ -244,22 +246,22 @@ async function recordRun({ now = new Date(), conn = db, read, fetchRain } = {}) 
         would: decideCampaign(rainClass, call),
       };
     });
-  // A future day must settle: no settled call for it is a failed tick. On the sold day itself hours already over drop
-  // out of the feed, so open areas are expected there; only NWS down (too few areas answered) fails that tick.
-  const future = day > etDateString(now);
-  if (future ? forecast.call === 'unknown' : forecast.areas.length < MIN_AREAS) {
+  // No call in force (none settled now, none kept from earlier) is a failed tick: every campaign would get nothing.
+  // A sold-day morning whose early hours left the feed keeps its earlier settled call and is not a fault.
+  if (call === 'unknown') {
     problems.push(`forecast unsettled for ${day}: ${forecast.areas.filter((a) => a.rain !== null).length} settled, `
       + `${forecast.areas.length} of ${Object.keys(ZONE_COORDS).length} areas read`);
   }
   if (!campaigns.some((c) => c.rain_class === 'indoor')) logger.info('[ads-rain-mode] no indoor campaign is marked yet');
 
   // mode: this module only records ("shadow"), so later live runs can be told apart.
-  const run = { at: now.toISOString(), mode: 'shadow', ...forecast, call, forecast_call: forecast.call, campaigns };
+  const tick = `${etDateString(now)}T${String(etParts(now).hour).padStart(2, '0')}`;
+  const run = { at: now.toISOString(), tick, mode: 'shadow', ...forecast, call, forecast_call: forecast.call, campaigns };
   let scored = [];
   try {
     // The day's latest settled call stands. A call already scored is never rewritten.
     if (!days[day]?.score) {
-      const next = nextDayRow(days[day], { day, forecast, call, cutoffRun: future && etParts(now).hour >= 14, at: run.at });
+      const next = nextDayRow(days[day], { day, forecast, call, cutoffRun: day > etDateString(now) && etParts(now).hour >= 14, at: run.at });
       if (next) days[day] = next;
     }
     scored = await scorePastDays(days, now, { fetchRain });

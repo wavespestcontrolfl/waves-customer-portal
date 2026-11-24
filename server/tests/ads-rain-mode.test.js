@@ -251,5 +251,18 @@ describe('recordRun', () => {
     const dry = jest.fn(async ({ start }) => ({ days: [{ date: start, inches: 0 }] }));
     expect(await rainMode.scoreDay(row, { fetchRain: dry, now: new Date('2026-11-26T20:00:00Z') })).toMatchObject({ hit: true, cutoff_hit: null });
   });
+
+  test('a sold-day morning with no call in force fails; a second run of one tick replaces its history entry', async () => {
+    const conn = fakeConn({ campaigns });
+    const sixAm = new Date('2026-11-25T11:00:00Z');
+    const open = jest.fn(async () => hours('2026-11-25', 0).slice(0, 1));
+    await expect(rainMode.recordRainMode({ now: sixAm, conn, read: open, fetchRain: jest.fn() })).rejects.toThrow(/forecast unsettled/);
+    const dry = readerFor('2026-11-25', [0, 0, 0, 0, 0, 0]);
+    await rainMode.recordRun({ now: sixAm, conn, read: dry, fetchRain: jest.fn() });
+    await rainMode.recordRun({ now: new Date('2026-11-25T11:20:00Z'), conn, read: dry, fetchRain: jest.fn() });
+    const history = JSON.parse(conn.store[rainMode.HISTORY_KEY]);
+    expect(history.map((e) => e.tick)).toEqual(['2026-11-25T06']);
+    expect(history[0].call).toBe('dry');
+  });
 });
 
