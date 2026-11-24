@@ -23,7 +23,7 @@ const PAGE = {
   address: { line1: '101 EXAMPLE TRL', city: 'SAMPLETON', zip: '34212' },
   price: { monthly: 52.25, annual: 627, setupFee: 0, pricedAt: '2026-11-22T22:00:00.000Z' },
   plan: 'pest_quarterly',
-  heldUntil: '2027-01-23',
+  heldUntil: null, // no hold date until booking honors the printed price
 };
 
 let server;
