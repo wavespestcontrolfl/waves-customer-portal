@@ -270,6 +270,9 @@ app.use('/api/public/watering-plan', (req, res, next) => {
 // for any method but GET/HEAD and for a path that is not one page token) runs first, then its own 60-a-minute limiter.
 // The page is same-origin (/h/:token), so it needs no CORS.
 app.use('/api/public/home', require('./routes/mail-home-public').preLimiterGuard, require('./routes/mail-home-public'));
+// The short typed address of a new home (GET /nh/<101-example>, printed on the postcard as gowavesfl.com/101-example):
+// 302 to /h/<token>, or to the marketing site for anything else (gate off included).
+app.use('/nh', require('./routes/mail-home-short-link'));
 // Public, embeddable endpoints must be CORS-open to ANY origin and must answer
 // their own preflights BEFORE the credentialed allowlist below — the cors()
 // middleware terminates OPTIONS for non-allowlisted origins without an
@@ -646,6 +649,8 @@ app.use('/api/estimates', estimatePublicRoutes.commercialAgreementPreGuard);
 app.use('/api/estimates', estimatePublicRoutes.consumerNoticePreGuard);
 // Commercial first visit picker (GATE_COMMERCIAL_FIRST_VISIT): same reason, same shape.
 app.use('/api/estimates', estimatePublicRoutes.commercialFirstVisitPreGuard);
+// First-visit request (GATE_ESTIMATE_APPROVE_PREFERRED_TIME): same reason, same shape.
+app.use('/api/estimates', estimatePublicRoutes.firstVisitRequestPreGuard);
 
 app.use('/api/', limiter);
 

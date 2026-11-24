@@ -28,7 +28,7 @@
  * Links have no exclude syntax — the shell's existing staff-redirect handles
  * those paths there.
  *
- * The browser-only pages (/card, /careers, /h, /newsletter: the pages Android's
+ * The browser-only pages (/card, /careers, /h, /nh, /newsletter: the pages Android's
  * allowlist leaves out) and the pages that 301 to wavespestcontrol.com
  * (/quote, bare /estimate, /estimate/<service>) are excluded too: claimed,
  * they open the app only for it to hand the link to Safari, and

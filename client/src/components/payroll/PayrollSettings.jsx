@@ -15,6 +15,7 @@ import { etDateString } from '../../lib/timezone';
 import { dayLabel, dollars } from './payrollFormat';
 import PayRuns from './PayRuns';
 import PayrollForms from './PayrollForms';
+import ProductionSharePanel from './ProductionSharePanel';
 import { RateStepsButton } from './RateSteps';
 import { SimpleIraButton, SimpleSummary } from './SimpleIra';
 
@@ -528,6 +529,7 @@ export default function PayrollSettings() {
         </TBody>
       </Table>
     </Card>}
+    <ProductionSharePanel call={call} technicians={technicians} />
     <PayRuns call={call} bankKey={bankKey} onRunsChanged={() => setFormsVersion(v => v + 1)} />
     <PayrollForms call={call} refreshKey={formsVersion} />
     {dialog?.kind === 'w4' && <W4Dialog technician={dialog.tech} onClose={close} onSaved={saved} />}
