@@ -96,35 +96,70 @@ const unitCents = (value) => Number.isInteger(value) ? value : Number(value);
 // A refund of a QA intent, keyed by idempotency key like Stripe's own layer. Only an intent this fake created can be refunded.
 const refundsByIntent = new Map();
 const refundsByIdempotencyKey = new Map();
+// A new refund waits briefly for a second call with the same key, so a double submission always overlaps the first
+// one in flight (a real network round trip leaves that window; a local fake would otherwise close it at once). The
+// second call then waits for the first to finish and gets Stripe's idempotent answer.
+const refundsInFlight = new Map();
+const OVERLAP_WAIT_MS = 1500;
+const stable = (value) => (Array.isArray(value) ? value.map(stable)
+  : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map((k) => [k, stable(value[k])])) : value);
+const sameParams = (a, b) => JSON.stringify(stable(a)) === JSON.stringify(stable(b));
 const refundedCents = (intentId) => (refundsByIntent.get(intentId) || []).reduce((sum, refund) => sum + refund.amount, 0);
+// A repeated idempotency key returns the first refund, and refuses any changed parameter, as Stripe does.
+function replayRefund(key, params) {
+  const replay = refundsByIdempotencyKey.get(key);
+  if (!replay) throw new Stripe.errors.StripeAPIError({ message: 'The earlier request with this key failed', type: 'api_error' });
+  if (!sameParams(replay.params, params)) {
+    throw new Stripe.errors.StripeIdempotencyError({ message: 'Keys for idempotent requests can only be used with the same parameters they were first used with.', type: 'idempotency_error' });
+  }
+  capture('stripe-refund-result', { refundId: replay.refund.id, replayed: true });
+  return replay.refund;
+}
+function createRefund(params, key) {
+  const intent = paymentIntents.get(params.payment_intent);
+  const remaining = unitCents(intent.amount) - refundedCents(intent.id);
+  const requested = params.amount === undefined ? remaining : unitCents(params.amount);
+  if (!Number.isInteger(requested) || requested <= 0 || requested > remaining) {
+    throw new Stripe.errors.StripeInvalidRequestError({ message: `Refund amount ($${(requested / 100).toFixed(2)}) is greater than unrefunded amount on charge ($${(remaining / 100).toFixed(2)})`, type: 'invalid_request_error' });
+  }
+  const refund = { id: `re_qa_${crypto.randomBytes(12).toString('hex')}`, object: 'refund', amount: requested, currency: intent.currency,
+    charge: intent.latest_charge, payment_intent: intent.id, status: 'succeeded', reason: params.reason || null,
+    created: Math.floor(Date.now() / 1000), metadata: { ...params.metadata } };
+  refundsByIntent.set(intent.id, [...(refundsByIntent.get(intent.id) || []), refund]);
+  if (key) refundsByIdempotencyKey.set(key, { params: JSON.parse(JSON.stringify(params)), refund });
+  capture('stripe-refund-result', { refundId: refund.id, replayed: false });
+  return refund;
+}
 const stripeStubs = {
   Refunds: {
     create: async (params, options = {}) => {
-      const intent = paymentIntents.get(params.payment_intent);
-      if (!intent) throw new Error('QA fake Stripe only refunds a payment intent it created');
-      const remaining = unitCents(intent.amount) - refundedCents(intent.id);
-      const requested = params.amount === undefined ? remaining : unitCents(params.amount);
+      if (!paymentIntents.has(params.payment_intent)) throw new Error('QA fake Stripe only refunds a payment intent it created');
       capture('stripe', { method: 'refunds.create', payment_intent: params.payment_intent, amount: params.amount,
         reason: params.reason, idempotencyKey: options.idempotencyKey });
-      // A repeated idempotency key returns the first refund, and refuses different parameters, as Stripe does.
-      const replay = refundsByIdempotencyKey.get(options.idempotencyKey);
-      if (replay) {
-        if (replay.params.payment_intent !== params.payment_intent || replay.params.amount !== params.amount) {
-          throw new Stripe.errors.StripeIdempotencyError({ message: 'Keys for idempotent requests can only be used with the same parameters they were first used with.', type: 'idempotency_error' });
-        }
-        capture('stripe-refund-result', { refundId: replay.refund.id, replayed: true });
-        return replay.refund;
+      const key = options.idempotencyKey;
+      const inFlight = key && refundsInFlight.get(key);
+      if (inFlight) {
+        inFlight.release();
+        await inFlight.done.catch(() => {});
+        return replayRefund(key, params);
       }
-      if (!Number.isInteger(requested) || requested <= 0 || requested > remaining) {
-        throw new Stripe.errors.StripeInvalidRequestError({ message: `Refund amount ($${(requested / 100).toFixed(2)}) is greater than unrefunded amount on charge ($${(remaining / 100).toFixed(2)})`, type: 'invalid_request_error' });
+      if (key && refundsByIdempotencyKey.has(key)) return replayRefund(key, params);
+      if (!key) return createRefund(params, key);
+      let release;
+      let finish;
+      const entry = { release: () => release?.(), done: new Promise((resolve, reject) => { finish = { resolve, reject }; }) };
+      refundsInFlight.set(key, entry);
+      try {
+        await new Promise((resolve) => { const timer = setTimeout(resolve, OVERLAP_WAIT_MS); release = () => { clearTimeout(timer); resolve(); }; });
+        const refund = createRefund(params, key);
+        finish.resolve(refund);
+        return refund;
+      } catch (error) {
+        finish.reject(error);
+        throw error;
+      } finally {
+        refundsInFlight.delete(key);
       }
-      const refund = { id: `re_qa_${crypto.randomBytes(12).toString('hex')}`, object: 'refund', amount: requested, currency: intent.currency,
-        charge: intent.latest_charge, payment_intent: intent.id, status: 'succeeded', reason: params.reason || null,
-        created: Math.floor(Date.now() / 1000), metadata: { ...params.metadata } };
-      refundsByIntent.set(intent.id, [...(refundsByIntent.get(intent.id) || []), refund]);
-      if (options.idempotencyKey) refundsByIdempotencyKey.set(options.idempotencyKey, { params, refund });
-      capture('stripe-refund-result', { refundId: refund.id, replayed: false });
-      return refund;
     },
     // The refund history of a QA charge or intent, newest first, as Stripe lists it.
     // Like the SDK, the result is a promise of one page that also offers autoPagingEach / autoPagingToArray.
