@@ -972,11 +972,16 @@ function StepEditor({
             <input
               type="checkbox"
               checked={enabled}
+              disabled={!!step.gate_controlled}
               onChange={(e) => setEnabled(e.target.checked)}
             />
             Step enabled
           </label>
-          {!enabled && <Badge tone="neutral">Disabled — skipped</Badge>}
+          {step.gate_controlled ? (
+            <Badge tone="neutral">Sent only while GATE_NEW_LEAD_DRIP_STEPS is on</Badge>
+          ) : (
+            !enabled && <Badge tone="neutral">Disabled — skipped</Badge>
+          )}
         </div>{" "}
       </div>{" "}
       <div className="mb-3">

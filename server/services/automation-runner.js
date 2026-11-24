@@ -903,10 +903,7 @@ function nextSequenceStep(enrollment, steps) {
  * customer's prep-send lock, so no tick can be mid-send on this enrollment. Returns true when the enrollment was rewound.
  */
 async function rewindEnrollmentToStep({ enrollment, stepId, email, metadata = {} }, client = db) {
-  const steps = await client('automation_steps')
-    .where({ template_key: enrollment.template_key, enabled: true })
-    .orderBy('step_order', 'asc')
-    .orderBy('id', 'asc');
+  const steps = await enabledSequenceSteps(enrollment.template_key, client);
   const step = steps.find((s) => String(s.id) === String(stepId));
   if (!step) return false;
   const { anchor, passedIds } = sequenceCursor(enrollment, steps);
@@ -1450,9 +1447,7 @@ async function processDueSteps() {
 async function testSequence({ templateKey, toEmail }) {
   const template = await db('automation_templates').where({ key: templateKey }).first();
   if (!template) throw new Error('template not found');
-  const steps = await db('automation_steps')
-    .where({ template_key: templateKey, enabled: true })
-    .orderBy('step_order', 'asc');
+  const steps = await enabledSequenceSteps(templateKey);
   if (!steps.length) throw new Error('no steps to send');
 
   const asmGroupId = automationAsmGroupId(template);

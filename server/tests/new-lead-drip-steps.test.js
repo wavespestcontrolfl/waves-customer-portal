@@ -27,7 +27,7 @@ const path = require('path');
 const db = require('../models/db');
 const sendgrid = require('../services/sendgrid-mail');
 const followUp = require('../services/estimate-follow-up');
-const { sendStep } = require('../services/automation-runner');
+const { sendStep, testSequence, rewindEnrollmentToStep } = require('../services/automation-runner');
 const { NEW_LEAD_DRIP_STEP_IDS } = require('../services/new-lead-drip-stops');
 
 const ENROLLED_AT = new Date('2026-11-20T17:00:00Z');
@@ -358,6 +358,44 @@ describe('gate on: stops at step 1 and step 2', () => {
   });
 });
 
+describe('the Admin sequence test and the hard-bounce rewind read the same step list the runner sends', () => {
+  const stepsReadFor = async (run) => {
+    const stepsChain = chain({ result: [STEP_0] });
+    setDbQueues({ automation_templates: [chain({ first: { key: 'new_lead', name: 'New Lead', asm_group: 'newsletter' } })], automation_steps: [stepsChain] });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-x' });
+    await run();
+    return { stepsChain };
+  };
+  const loadsSeededIds = (stepsChain) => {
+    const filter = stepsChain.where.mock.calls.map(([arg]) => arg).find((arg) => typeof arg === 'function');
+    const own = { where: jest.fn(() => own), orWhereIn: jest.fn() };
+    filter(own);
+    return own.orWhereIn.mock.calls.some(([col, ids]) => col === 'id' && ids === NEW_LEAD_DRIP_STEP_IDS);
+  };
+
+  test('gate on: the Admin test sequence loads the two seeded steps (stored enabled=false)', async () => {
+    const { stepsChain } = await stepsReadFor(() => testSequence({ templateKey: 'new_lead', toEmail: 'owner@example.com' }));
+    expect(loadsSeededIds(stepsChain)).toBe(true);
+  });
+
+  test('gate off: the Admin test sequence never loads them', async () => {
+    delete process.env.GATE_NEW_LEAD_DRIP_STEPS;
+    const { stepsChain } = await stepsReadFor(() => testSequence({ templateKey: 'new_lead', toEmail: 'owner@example.com' }));
+    const rest = { whereNotIn: jest.fn() };
+    stepsChain.where.mock.calls.map(([arg]) => arg).find((arg) => typeof arg === 'function')(rest);
+    expect(rest.whereNotIn).toHaveBeenCalledWith('id', NEW_LEAD_DRIP_STEP_IDS);
+  });
+
+  test('gate on: a hard-bounce rewind finds a seeded step by the same list (the client passed in, one transaction)', async () => {
+    const stepsChain = chain({ result: [STEP_0, STEP_1] });
+    const client = jest.fn(() => stepsChain);
+    const enrollment = { id: 'enrollment-n', template_key: 'new_lead', current_step: 2, metadata: cursorAfter([STEP_0, STEP_1]) };
+    await rewindEnrollmentToStep({ enrollment, stepId: STEP_1.id, email: 'pat@example.com' }, client).catch(() => {});
+    expect(client).toHaveBeenCalledWith('automation_steps');
+    expect(loadsSeededIds(stepsChain)).toBe(true);
+  });
+});
+
 describe('the migration', () => {
   const migrationPath = '../models/migrations/20261124140000_new_lead_drip_steps';
   const migration = require(migrationPath);
@@ -456,6 +494,33 @@ describe('the migration', () => {
     await disable.up(idle);
     expect(idle).not.toHaveBeenCalled();
     await expect(disable.down()).resolves.toBeUndefined();
+  });
+
+  test('the interior-words migration swaps only the one bullet in the seeded step 1 row, and leaves an edited body alone', async () => {
+    const words = require('../models/migrations/20261124140200_new_lead_drip_step1_interior_words');
+    const seeded = makeKnex();
+    await migration.up(seeded.knex);
+    const [one] = seeded.inserts;
+    const updates = [];
+    const knexFor = (row) => {
+      const q = { where: jest.fn(() => q), first: jest.fn(async () => row), update: jest.fn(async (patch) => { updates.push(patch); return 1; }) };
+      const knex = jest.fn(() => q);
+      knex.fn = { now: () => 'NOW' };
+      knex.schema = { hasTable: jest.fn(async () => true) };
+      return knex;
+    };
+    await words.up(knexFor({ html_body: one.html_body, text_body: one.text_body }));
+    expect(updates).toHaveLength(1);
+    const { html_body: html, text_body: text } = updates[0];
+    expect(html).toContain('<li>Outside treatment at every visit, plus an inside spray on your first visit and whenever you ask</li>');
+    expect(text).toContain('- Outside treatment at every visit, plus an inside spray on your first visit and whenever you ask');
+    expect(html + text).not.toContain('Inside and outside treatment');
+    expect(html.replace(/<li>Outside[^<]*<\/li>/, '<li>X</li>')).toBe(one.html_body.replace(/<li>Inside and outside[^<]*<\/li>/, '<li>X</li>'));
+    // An administrator already rewrote the bullet: nothing is written.
+    updates.length = 0;
+    await words.up(knexFor({ html_body: '<li>My own words</li>', text_body: '- My own words' }));
+    expect(updates).toHaveLength(0);
+    await expect(words.down()).resolves.toBeUndefined();
   });
 
   test('never writes step 0: the first email has its own copy migration', () => {
