@@ -1,5 +1,5 @@
 /**
- * runDailySweeps runs all three sweeps every day (a persistent failure in one
+ * runDailySweeps runs all four sweeps every day (a persistent failure in one
  * must not stall the others), then throws when any failed, so the cron's
  * runExclusive records the job as failed in job_health. A single acceptance
  * row's failure inside a sweep is not a sweep failure.
@@ -31,21 +31,32 @@ beforeEach(() => {
 });
 
 describe('runDailySweeps', () => {
-  test('a failed bond sweep still runs the other two, then rejects naming it', async () => {
+  test('a failed bond sweep still runs the others, then rejects naming it', async () => {
     const asked = tables({ termite_bonds: new Error('connection lost') });
-    await expect(runDailySweeps()).rejects.toThrow('lifecycle-email-sweeps: 1 of 3 sweep(s) failed (bond renewal)');
+    await expect(runDailySweeps()).rejects.toThrow('lifecycle-email-sweeps: 1 of 4 sweep(s) failed (bond renewal)');
     // Ownership and copy sweeps each checked their table after the bond sweep failed.
     expect(asked.filter((t) => t === 'estimate_acceptances')).toHaveLength(2);
   });
 
   test('two failed sweeps are both named, and no error text reaches the message', async () => {
     tables({ estimate_acceptances: new Error('boom for pat@example.com') });
-    await expect(runDailySweeps()).rejects.toThrow(/^lifecycle-email-sweeps: 2 of 3 sweep\(s\) failed \(acceptance ownership, acceptance copies\)$/);
+    await expect(runDailySweeps()).rejects.toThrow(/^lifecycle-email-sweeps: 2 of 4 sweep\(s\) failed \(acceptance ownership, acceptance copies\)$/);
   });
 
-  test('three clean sweeps resolve with their counts', async () => {
+  test('four clean sweeps resolve with their counts (the card reminder is off: no query)', async () => {
     tables();
-    await expect(runDailySweeps()).resolves.toEqual({ bondRenewalsSent: 0, acceptanceOwnershipAttached: 0, acceptanceCopiesSent: 0 });
+    await expect(runDailySweeps()).resolves.toEqual({
+      bondRenewalsSent: 0, acceptanceOwnershipAttached: 0, acceptanceCopiesSent: 0, cardRemindersSent: 0, cardRemindersShadow: 0,
+    });
+  });
+
+  test('a failed card reminder sweep is named, and the other three still ran', async () => {
+    const asked = tables();
+    const reminder = require('../services/card-on-file-reminder');
+    const spy = jest.spyOn(reminder, 'runCardOnFileReminderSweep').mockRejectedValue(new Error('read failed'));
+    await expect(runDailySweeps()).rejects.toThrow('lifecycle-email-sweeps: 1 of 4 sweep(s) failed (card on file reminder)');
+    expect(asked).toContain('termite_bonds');
+    spy.mockRestore();
   });
 
   test("one acceptance row's failure is not a sweep failure", async () => {

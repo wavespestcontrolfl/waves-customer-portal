@@ -93,6 +93,15 @@ const SOURCE_TYPE_ATTRIBUTION = {
   // ad_service_attribution funnel row (null ⇒ no funnel row, same as an
   // unmapped source_type).
   ai_assistant:    { leadSource: 'ai_assistant',    isPaid: false },
+  // Printed pieces (owner 2026-11-24): a link or QR on a business card, yard
+  // sign or new-home postcard. Not click-paid. Seeded rows: migration
+  // 20261124150000_print_lead_sources.js; resolved by every web path through
+  // ./print-lead-sources.js. Without these entries a print-tagged quote would
+  // resolve its source_type but get no ad_service_attribution funnel row.
+  business_card:     { leadSource: 'business_card',     isPaid: false },
+  yard_sign:         { leadSource: 'yard_sign',         isPaid: false },
+  new_home_postcard: { leadSource: 'new_home_postcard', isPaid: false },
+  print_other:       { leadSource: 'print_other',       isPaid: false },
 };
 
 /**

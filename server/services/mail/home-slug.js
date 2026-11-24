@@ -46,6 +46,13 @@ function tokensOf(addressLine1) {
     .filter(Boolean);
 }
 
+// The unit part ("APT 9", "UNIT 3", "#7") and everything after it, cut. Looked for after the street's first word, so a street
+// that starts with one of these words is not cut.
+function withoutUnit(tokens) {
+  const unitAt = tokens.slice(1).findIndex((token, i) => token.startsWith('#') || (i >= 1 && UNIT_WORDS.has(token)));
+  return unitAt >= 0 ? tokens.slice(0, 1 + unitAt) : tokens;
+}
+
 /**
  * The slug without a ZIP, or null when the line gives none.
  *   - the first word must be the house number, digits only: "12A", "12-14", "12B" and a fraction ("12 1/2") give null,
@@ -64,9 +71,7 @@ function buildBaseSlug(addressLine1, { keepStreetType = false } = {}) {
   if (!number || number.length > MAX_NUMBER_DIGITS) return null;
   if (/^\d+\/\d+$/.test(tokens[1])) return null; // "12 1/2 MAIN ST": half an address is no address
 
-  let name = tokens.slice(1);
-  const unitAt = name.findIndex((token, i) => token.startsWith('#') || (i >= 1 && UNIT_WORDS.has(token)));
-  if (unitAt >= 0) name = name.slice(0, unitAt);
+  let name = withoutUnit(tokens).slice(1);
 
   // Trailing directionals ("MAIN ST NW"): set aside, then the street type before them.
   // keepStreetType (text-to-book, services/mail/home-text-to-book.js): the words as typed, no street type dropped, so a
@@ -92,8 +97,16 @@ function buildBaseSlug(addressLine1, { keepStreetType = false } = {}) {
  * dropped and matched to another unit's home.
  */
 function hasUnitPart(addressLine1) {
-  const name = tokensOf(addressLine1).slice(1);
-  return name.findIndex((token, i) => token.startsWith('#') || (i >= 1 && UNIT_WORDS.has(token))) >= 0;
+  const tokens = tokensOf(addressLine1);
+  return withoutUnit(tokens).length < tokens.length;
+}
+
+/**
+ * The words of a line exactly as the slug builder reads them (upper case, accents folded, commas and edge dots gone, the unit
+ * part cut): "3 CAF\u00c9 DEL MAR DR" and "3 cafe del mar dr" are the same words. Text-to-book compares street types on these.
+ */
+function streetWords(addressLine1) {
+  return withoutUnit(tokensOf(addressLine1));
 }
 
 const zip5Of = (zip) => (String(zip == null ? '' : zip).match(/\d{5}/) || [null])[0];
@@ -110,4 +123,4 @@ function slugCandidates({ addressLine1, zip } = {}) {
   return withZip && withZip.length <= MAX_SLUG_LENGTH && SLUG_RE.test(withZip) ? [base, withZip] : [base];
 }
 
-module.exports = { buildBaseSlug, hasUnitPart, slugCandidates, SLUG_RE, MAX_SLUG_LENGTH, STREET_SUFFIXES };
+module.exports = { buildBaseSlug, hasUnitPart, streetWords, slugCandidates, SLUG_RE, MAX_SLUG_LENGTH, STREET_SUFFIXES };

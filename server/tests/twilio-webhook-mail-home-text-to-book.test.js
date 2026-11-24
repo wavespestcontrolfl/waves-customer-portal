@@ -220,6 +220,18 @@ test('a consumed stranger text keeps the 4-hour per-sender limit: a repeat sende
   expect(mockOwnerAlert).not.toHaveBeenCalled();
 });
 
+test('an UNCERTAIN reply consumes the text (no ring, no AI reply, office bell) but leaves the inbound row actionable', async () => {
+  mockHomeText.mockResolvedValue({ handled: true, uncertain: true, prospectId: 'prospect-1' });
+  mockState.customer = { ...CUSTOMER, lead_intake_status: null };
+  const res = await receive('101 EXAMPLE');
+  expect(res.body).toBe('<Response></Response>');
+  expect(mockState.smsRetypes).toEqual([]);
+  expect(ringSmsReplyBell).toHaveBeenCalledTimes(1);
+  res.emit('finish');
+  expect(mockRing).not.toHaveBeenCalled();
+  expect(mockDispatch).not.toHaveBeenCalled();
+});
+
 test('a text the service did not answer is handled as any other text', async () => {
   mockState.customer = { ...CUSTOMER, lead_intake_status: null };
   const res = await receive('101 EXAMPLE');

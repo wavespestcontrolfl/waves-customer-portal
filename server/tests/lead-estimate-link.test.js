@@ -2744,6 +2744,38 @@ describe('attributeSelfBooking (click-id capture for cold ad self-bookings)', ()
     expect(row.row.is_paid).toBe(false);
   });
 
+  test('a print-tagged booking (postcard /h, card, sign) gets a funnel row under its print source, unpaid, with no minted lead', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: { observed: true, utm: { source: 'new_home_postcard', medium: 'print' } },
+      customerCreated: false,
+      selfBookedAppointmentId: 'sba-print',
+      bookingSource: 'mail_new_home',
+      database,
+    });
+
+    expect(result).toMatchObject({ attributed: true, organic: true, leadSource: 'new_home_postcard' });
+    expect(database._inserted.some((i) => i.table === 'leads')).toBe(false);
+    const row = database._inserted.find((i) => i.table === 'ad_service_attribution');
+    expect(row.row).toMatchObject({ lead_source: 'new_home_postcard', lead_source_detail: 'New-home postcard', is_paid: false, funnel_stage: 'booked' });
+  });
+
+  test('a gclid on a print-tagged booking is still the paid path, never the print row', async () => {
+    const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
+
+    const result = await attributeSelfBooking({
+      customerId: 'c1',
+      attribution: { gclid: 'g-1', utm: { source: 'business_card', medium: 'print' } },
+      customerCreated: false,
+      selfBookedAppointmentId: 'sba-print-gclid',
+      database,
+    });
+
+    expect(result).toMatchObject({ attributed: true, repeatPaid: true, leadSource: 'google_ads' });
+  });
+
   test('organic REPEAT-customer booking still records a funnel row (per-booking capture, still no lead)', async () => {
     const database = makeAttrDb({ customer: { id: 'c1', phone: '+19415550101' } });
 

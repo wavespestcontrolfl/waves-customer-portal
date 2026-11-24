@@ -568,10 +568,12 @@ export class ApiClient {
   // checkbox (consentAttestation); the server refuses a stale one with
   // 409 CONSENT_VERSION_STALE, which the modal surfaces as "refresh the
   // page" (codex #5434 r1 P1).
-  createSetupIntent(paymentMethodType = 'card') {
+  // enrollAutopay:false mints the save-only SetupIntent (the "add a card" reminder email's form): the saved
+  // card is never enrolled in Auto Pay. Omitted = the usual save-and-enroll form.
+  createSetupIntent(paymentMethodType = 'card', { enrollAutopay = true } = {}) {
     return this.request('/billing/cards/setup-intent', {
       method: 'POST',
-      body: JSON.stringify({ paymentMethodType, ...consentAttestation() }),
+      body: JSON.stringify({ paymentMethodType, ...(enrollAutopay === false ? { enrollAutopay: false } : {}), ...consentAttestation() }),
     });
   }
 

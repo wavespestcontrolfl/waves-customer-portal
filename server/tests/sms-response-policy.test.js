@@ -14,7 +14,7 @@ describe('SMS response policy', () => {
       'manual', 'ai_approved', 'ai_revised', 'ai_assistant', 'ai_assistant_reply',
     ]);
     expect(NON_ACTIONABLE_INBOUND_TYPES).toEqual([
-      'opt_out', 'opt_in', 'sms_reaction', 'help_request', 'reschedule_reply',
+      'opt_out', 'opt_in', 'sms_reaction', 'help_request', 'reschedule_reply', 'mail_home_text_to_book',
     ]);
   });
 

@@ -146,7 +146,8 @@ describe('every consumer consults the preference LIVE (source pins)', () => {
     // billable verdict) uses the same live weekday preference the extension does.
     expect((src.match(/customerPrefersNoWeekends/g) || []).length).toBe(9);
     expect(src).toContain('(input.skipWeekends || await customerPrefersNoWeekends(conn, customerId))');
-    expect(src).toContain('|| (isRecurring && recurringPattern ? await customerPrefersNoWeekends(db, customerId) : false)');
+    // The create route's site now lives in planCreateSeriesDates (shared with the IB book_plan_visits card), on its conn.
+    expect(src).toContain('|| (isRecurring && recurringPattern ? await customerPrefersNoWeekends(conn, customerId) : false)');
     expect(src).toContain('const editPrefNoWeekends = await customerPrefersNoWeekends(db, editPrefRow?.customer_id);');
     expect(src).toContain('prefNoWeekends: editPrefNoWeekends,');
     expect(src).toContain('const skipChild = skipChildStamp || editPrefNoWeekends;');

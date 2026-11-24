@@ -223,7 +223,7 @@ describe("needsSmsReply", () => {
     });
   });
 
-  it.each(["opt_in", "sms_reaction", "help_request", "reschedule_reply", "job_applicant_reply"])(
+  it.each(["opt_in", "sms_reaction", "help_request", "reschedule_reply", "mail_home_text_to_book", "job_applicant_reply"])(
     "does not treat a standalone %s inbound as a customer request",
     (messageType) => {
       expect(needsSmsReply([
