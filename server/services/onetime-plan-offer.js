@@ -35,7 +35,9 @@
  * until then a live run does nothing. One offer per customer per 12 months (notOfferedBefore). The email says
  * "You pay after each visit. Nothing is charged today.", which the estimate page says only for a customer on
  * the card rail: the job asks the page's own two functions and sends nothing to any other customer (the quote
- * stays on file and the next morning asks again). The day-21 reminder is a later step.
+ * stays on file and the next morning asks again). A home the app cannot price gets one office item instead
+ * (raiseOfficeItem), and a person quotes it by hand. Day 21 after the offer day, a live run sends one reminder for
+ * each offer the provider accepted while its estimate is still open (runReminders, reminder template published).
  *
  * An answer of "not today" is not final. The job is read again each morning until day 14, so a home whose
  * property data is saved on day 5 gets its sample on day 5.
@@ -163,6 +165,9 @@ function defaultDeps() {
     unsubscribeUrl: require('./sendgrid-mail').unsubscribeUrl,
     raisePriceSettingsAlert,
     closePriceSettingsAlert,
+    raiseOfficeItem,
+    planStartAcceptRefusal,
+    assertPlanStartAcceptEligible: (...args) => require('./cancellation-resolution/restart').assertPlanStartAcceptEligible(...args),
   };
 }
 
@@ -238,9 +243,11 @@ function qualifyingJobs(database) {
 }
 
 // The qualifying jobs that are due their offer today: the offer day was FIRST_DAY to LAST_DAY days ago (ET).
-function dueJobs(database, today) {
+// The reminder pass reads its own window of days (REMINDER_WINDOW).
+const OFFER_WINDOW = Object.freeze({ first: FIRST_DAY, last: LAST_DAY });
+function dueJobs(database, today, window = OFFER_WINDOW) {
   return qualifyingJobs(database)
-    .whereRaw(`${OFFER_DAY_SQL} BETWEEN ?::date AND ?::date`, [shiftDay(today, -LAST_DAY), shiftDay(today, -FIRST_DAY)]);
+    .whereRaw(`${OFFER_DAY_SQL} BETWEEN ?::date AND ?::date`, [shiftDay(today, -window.last), shiftDay(today, -window.first)]);
 }
 
 // The offer's dates, counted in ET calendar days from its offer day. The email states them (offerPayload) and
@@ -287,12 +294,13 @@ async function dueOfferOfJob(database, { jobId, customerId, now }) {
 // One-time is read from the row by the repository's rule (the reverse of rate-review's PLAN_ROW_SQL, plus no
 // series parent): never a plan visit, a series extra, a free re-service or an included follow-up. A one-time
 // visit stores no pattern, or the 'one_time' marker.
-function dueJobsPage(database, today, after) {
-  const page = dueJobs(database, today)
+function dueJobsPage(database, today, after, window = OFFER_WINDOW, onlyWhere = null) {
+  const page = dueJobs(database, today, window)
     .orderByRaw(`${OFFER_DAY_SQL} ASC`)
     .orderBy('s.id', 'asc')
     .limit(PAGE_SIZE);
   if (after) page.whereRaw(`(${OFFER_DAY_SQL}, s.id) > (?::date, ?::uuid)`, [dateOnlyString(after.service_day), after.id]);
+  if (onlyWhere) page.whereRaw(onlyWhere);
   return page.select('s.id', 's.customer_id', database.raw(`${OFFER_DAY_SQL} AS service_day`), 'done.service_day as job_day');
 }
 
@@ -573,9 +581,10 @@ async function heldByOpenEstimate(database, { customerId, jobId, now }) {
 // the same-day cap, recent human contact). The nurture stream wants an estimate on file, and the offer's
 // estimate is saved only after this verdict. So the job names its completed visit, and the division reads that
 // row as the relationship. Every check behind it runs as it will for the real send.
-async function emailAllowed({ job, now, deps }) {
+// The reminder pass asks it for the reminder's own key (ctx.emailKey).
+async function emailAllowed({ job, now, deps, emailKey = OFFER_TEMPLATE }) {
   const verdict = await deps.eligibleForEmail({
-    customerId: job.customer_id, stream: OFFER_STREAM, emailKey: OFFER_TEMPLATE, now, conn: deps.db, completedVisitId: job.id,
+    customerId: job.customer_id, stream: OFFER_STREAM, emailKey, now, conn: deps.db, completedVisitId: job.id,
   });
   if (verdict.ok) return null;
   // eligibleForEmail turns a failed read into this verdict. Here it is an outage, not a rule: fail the job.
@@ -786,9 +795,9 @@ async function shadowJob(job, { now, deps, priceSettings }) {
 // (resolveTemplateForSend, the first step of every sendTemplate): its refusal codes mean "no published words",
 // and any other error is an outage and fails the run. A run that reads no job also reserves nothing.
 const WORDS_MISSING_CODES = ['EMAIL_TEMPLATE_DISABLED', 'EMAIL_TEMPLATE_UNAVAILABLE'];
-async function offerWordsPublished(deps) {
+async function offerWordsPublished(deps, templateKey = OFFER_TEMPLATE) {
   try {
-    await deps.resolveTemplateForSend({ templateKey: OFFER_TEMPLATE, database: deps.db });
+    await deps.resolveTemplateForSend({ templateKey, database: deps.db });
     return true;
   } catch (err) {
     if (WORDS_MISSING_CODES.includes(err?.code)) return false;
@@ -927,11 +936,28 @@ async function autoPayGuard(trx, { customer, now, deps }) {
 
 // Every refusal the offer owns at the provider handoff, in the order the transaction reads them: the kill switch
 // (no lock), the estimate (takes the customer-comms lock, the last wait), Auto Pay, the opt-outs.
-async function handoffGuard(trx, { customer, jobId, estimateId, now, deps }) {
+// `accountGuard` (the reminder's) runs after the estimate's locks and before the Auto Pay read, the accept's own lock
+// order: comms key, then the preferences key and the customer row.
+async function handoffGuard(trx, { customer, jobId, estimateId, now, deps, accountGuard = null }) {
   if (!liveModeOn()) return { reason: OFFER_GATE_OFF, retryable: true };
   return (await offerEstimateGuard(trx, { customer, jobId, estimateId, now, deps }))
+    || (accountGuard ? await accountGuard(trx) : null)
     || (await autoPayGuard(trx, { customer, now, deps }))
     || optedOutGuard(trx, { customer, deps });
+}
+
+// The plan-start accept's bar at the reminder's handoff, on the handoff's transaction: a plan rate or tier added
+// between the morning's check and the send holds the email. A refusal is held; a failed read settles the reservation
+// `failed`, and the job fails for the morning (the next one asks again).
+const ACCOUNT_CHANGED = 'ACCOUNT_CHANGED';
+async function acceptGuard(trx, { estimate, deps }) {
+  try {
+    await deps.assertPlanStartAcceptEligible(trx, estimate);
+    return null;
+  } catch (err) {
+    if (err?.code === 'PLAN_START_STATE_CHANGED') return { reason: ACCOUNT_CHANGED, retryable: true };
+    return { reason: 'ACCOUNT_RECHECK_FAILED', retryable: true };
+  }
 }
 
 // The opt-outs of Waves marketing again (notOptedOut), on the ledger's own transaction. The division's checks
@@ -956,7 +982,7 @@ async function optedOutGuard(trx, { customer, deps }) {
 // later morning, never "offered". `reserved` is a send in flight, or one a crash left: the ledger settles it on
 // a later morning. Any other row (sent) is the offer.
 // The handoff's own refusals (boundaryGuard): the job is held, whatever the ledger settled the row as.
-const HANDOFF_HOLDS = ['OFFER_ESTIMATE_GONE', 'OFFER_GATE_OFF', 'AUTOPAY_PAUSED', 'AUTOPAY_OFF', 'NO_CUSTOMER'];
+const HANDOFF_HOLDS = ['OFFER_ESTIMATE_GONE', 'OFFER_GATE_OFF', 'AUTOPAY_PAUSED', 'AUTOPAY_OFF', 'NO_CUSTOMER', 'ACCOUNT_CHANGED'];
 const EARLIER_ATTEMPT = Object.freeze({ skipped: 'send_dropped', reserved: 'send_in_flight' });
 async function settleOfferSend(out, { deps }) {
   if (HANDOFF_HOLDS.includes(out.reason)) return { verdict: 'held', reason: out.reason.toLowerCase() };
@@ -1052,7 +1078,247 @@ async function liveJob(job, { now, deps, priceSettings }) {
   };
   const outcome = await evaluateJob(ctx);
   // 'sample' is the shared verdict for "priced and allowed". Live turns it into the customer's offer.
-  return outcome.verdict === 'sample' ? mintAndSend(ctx, outcome.option) : outcome;
+  const result = outcome.verdict === 'sample' ? await mintAndSend(ctx, outcome.option) : outcome;
+  // A home the app cannot price gets one office item: a person prices it by hand. A failed write fails the job, so
+  // the next morning raises it again (the item's key makes it one item per job).
+  if (result.verdict === 'office') await deps.raiseOfficeItem({ job, customer: ctx.customer, offerDay: ctx.offerDay, reason: result.reason });
+  return result;
+}
+
+// ---- The office item: a home the app cannot price (live only). ----
+// The job sends no email for such a home. The office prices it by hand and sends the plan quote, or decides not to.
+// One item per job (the dedupe key holds every row, open or done, so a later morning never raises a second one; it
+// refreshes the one row's terms). It closes by itself once the customer has an estimate made after the item, once the
+// offer's last day has passed, or once the customer is no longer one the offer may go to: opted out of offers, or no
+// longer a live customer (closeOfficeItems). A shadow run raises none: shadow sends nothing to anyone but the office samples.
+const OFFICE_ITEM_PREFIX = 'onetime-plan-offer:office:';
+const OFFICE_REASON_WORDS = Object.freeze({
+  no_setup_fee: 'The plan price for this home has no setup fee, so the offer\'s "$0 setup" line would not be true.',
+  plan_not_below_job: 'The plan visit price for this home is not below what the one-time job cost.',
+  mint_pricing_unavailable: 'The server could not price the plan estimate for this home.',
+  // The pricer's `premises`: a commercial or closed account, or no one service address it can prove. The offer is
+  // for homes only (owner 2026-11-21), so the office checks the account before any quote.
+  premises: 'Check the account first: the app could not prove one residential service address for it (a commercial or '
+    + 'closed account, or no clear service address). Quote the plan only for a home.',
+  not_priced: 'The app has no saved home size or property type it may price this home with, or the price needs a hand check.',
+});
+const officeItemKey = (jobId) => `${OFFICE_ITEM_PREFIX}${jobId}`;
+
+async function raiseOfficeItem({ job, customer, offerDay, reason }) {
+  const { fitAction, fullName } = require('./admin-alert-names');
+  const name = fullName(customer) || 'a customer';
+  const { lastDay } = offerTerms(offerDay);
+  const shortDay = (ymd) => formatDateOnly(ymd, { year: undefined, month: 'short', weekday: 'short' });
+  const notif = await require('./admin-alert-compose').raiseAdminAlert('estimate', {
+    area: 'Estimates',
+    action: fitAction('Estimates', name, [(who) => `quote ${who} the plan by hand`]),
+    why: `Their one-time pest job was done ${shortDay(offerDay)}, and the app cannot price the plan offer.`,
+    severity: 'needs-you',
+    link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
+    subject: { type: 'customer', id: customer.id },
+    doneWhen: 'plan_offer_quoted',
+    who: 'person',
+  }, {
+    detail: [
+      OFFICE_REASON_WORDS[reason] || OFFICE_REASON_WORDS.not_priced,
+      `The plan offer is a Quarterly Pest Control Service estimate with the setup fee waived, good through ${shortDay(lastDay)}.`,
+      'No email went to the customer. Send the estimate by hand, or mark this done.',
+      'This closes by itself when the customer has a new estimate, or when the offer ends.',
+    ].join(' '),
+    bell: true,
+    dedupeKey: officeItemKey(job.id),
+    // A later morning can list the job with another offer day (an included follow-up was done since): the row's text
+    // and its last day follow, quietly. Unchanged text changes nothing, and a done row stays done.
+    refreshOnDedupe: true,
+    ringOnRefresh: () => false,
+    metadata: {
+      source: 'onetime-plan-offer', kind: 'plan_offer_office', customerId: customer.id, jobId: String(job.id), lastDay, reason,
+    },
+  });
+  if (!notif) throw Object.assign(new Error('plan offer office item did not persist'), { code: 'OFFICE_ITEM_FAILED' });
+  return notif;
+}
+
+// The plan-start accept check, run in a transaction of its own (it takes the customer's comms and preferences keys
+// and the customer row lock, as an accept does) that ends before the send. Its refusal is a held reminder; a failed
+// read (PLAN_START_RECHECK_RETRY) or any other error fails the job for the morning.
+async function planStartAcceptRefusal(database, estimate) {
+  try {
+    await database.transaction((trx) => require('./cancellation-resolution/restart').assertPlanStartAcceptEligible(trx, estimate));
+    return null;
+  } catch (err) {
+    if (err?.code === 'PLAN_START_STATE_CHANGED') return 'account_changed';
+    throw err;
+  }
+}
+
+// The customer the item names is no longer one the offer may go to: not a live customer any more, or opted out of
+// Waves offers (the job's own opt-out read, optOutReason). The sentence that closes the item, or null.
+async function officeItemWithdrawn(customerId, deps) {
+  const account = () => deps.db('customers').where({ id: customerId });
+  const customer = await account().whereNull('deleted_at').first('id', 'email', 'active');
+  if (!customer || customer.active === false || !(await whereLiveCustomer(account()).first('id'))) return 'The customer is no longer active';
+  return (await optOutReason(deps.db, { customerId, email: customer.email, deps })) ? 'The customer turned off offers' : null;
+}
+
+// The open office items, closed when their job is handled: an estimate of the customer made after the item (a person
+// quoted the plan, or any other estimate went out), or the offer's last day is over. Sends nothing. A failure never
+// fails the run: the next morning reads the same rows.
+async function closeOfficeItems({ now, deps }) {
+  const today = etDateString(now);
+  const rows = await deps.db('notifications')
+    .where({ recipient_type: 'admin' })
+    .whereRaw("starts_with(metadata->>'dedupeKey', ?)", [OFFICE_ITEM_PREFIX])
+    .whereRaw("metadata->>'autoCleared' IS DISTINCT FROM 'true'")
+    .select('id', 'created_at', 'metadata');
+  const episodes = require('./admin-alert-episodes');
+  for (const row of rows) {
+    const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+    let done = null;
+    if (meta.lastDay && today > meta.lastDay) done = 'The plan offer ended';
+    else if (meta.customerId) {
+      const quoted = await deps.db('estimates').where({ customer_id: meta.customerId })
+        .where('created_at', '>', row.created_at).first('id');
+      if (quoted) done = 'The customer has a new estimate';
+      else done = await officeItemWithdrawn(meta.customerId, deps);
+    }
+    if (done) await episodes.closeAdminAlertKeys(deps.db, [meta.dedupeKey], 'plan_offer_quoted', { now, resolution: done });
+  }
+}
+
+// ---- The day-21 reminder (live only). ----
+// One reminder for each offer the provider accepted, on day 21 after the offer day. A morning the job missed still
+// sends on the next one, up to day 27, so the reminder always lands before the offer's last day (day 30). The
+// reminder links the same estimate as the offer (the one its message names, email_messages.estimate_id) and repeats
+// the offer's price as the offer email stated it (its payload snapshot). It goes only while that estimate is still
+// open for the customer, with the offer's dates, the plan-start accept would still take it (planStartAcceptRefusal),
+// and the customer still passes the send rules that can change after
+// the offer: another visit, reachable, opted out, paid, pays after each visit, Auto Pay, review ask, complaint,
+// another open estimate, and the email division's own verdict for the reminder. The 12-month rule is not asked: it
+// counts offers, and this is the same offer. Words gate: the reminder template must be published too.
+const REMINDER_WINDOW = Object.freeze({ first: 21, last: 27 });
+const REMINDER_CATEGORY = 'onetime_plan_offer_reminder';
+const REMINDER_RULES = [
+  anotherVisit, customerReachable, notOptedOut, jobPaid, paysAfterVisit, autoPayAllowed, reviewAskClear,
+  noComplaint, noLiveEstimate, emailAllowed,
+];
+
+function reminderKey(jobId) {
+  return `onetime-plan-offer:reminder:${jobId}`;
+}
+
+// The jobs in the reminder's window whose offer the provider accepted, a page at a time.
+// The key is offerKey's spelling.
+const ACCEPTED_OFFER_SQL = `EXISTS (SELECT 1 FROM email_messages m
+      WHERE m.idempotency_key = 'onetime-plan-offer:offer:' || s.id::text
+        AND m.sent_at IS NOT NULL AND m.estimate_id IS NOT NULL)`;
+function remindableJobsPage(database, today, after) {
+  return dueJobsPage(database, today, after, REMINDER_WINDOW, ACCEPTED_OFFER_SQL);
+}
+
+// The reminder went out, or may have (the same reading as alreadyOffered).
+async function alreadyReminded(database, jobId) {
+  const row = await database('email_messages')
+    .where({ idempotency_key: reminderKey(jobId) })
+    .where((sent) => sent.whereNotNull('sent_at').orWhere('provider_handoff_phase', 'started'))
+    .first('id');
+  return Boolean(row);
+}
+
+// The accepted offer email of the job: the estimate it linked and the values it stated.
+async function acceptedOffer(database, jobId) {
+  const row = await database('email_messages')
+    .where({ idempotency_key: offerKey(jobId) })
+    .whereNotNull('sent_at')
+    .whereNotNull('estimate_id')
+    .first('estimate_id', 'payload_snapshot');
+  if (!row) return null;
+  const values = typeof row.payload_snapshot === 'string' ? JSON.parse(row.payload_snapshot) : (row.payload_snapshot || {});
+  return { estimateId: row.estimate_id, values };
+}
+
+async function reminderJob(job, { now, deps }) {
+  if (await alreadyReminded(deps.db, job.id)) return { verdict: 'done', reason: null };
+  const offer = await acceptedOffer(deps.db, job.id);
+  if (!offer) return { verdict: 'held', reason: 'not_offered' };
+  const ctx = {
+    job, now, deps, emailKey: REMINDER_TEMPLATE, offerDay: dateOnlyString(job.service_day), jobDay: dateOnlyString(job.job_day),
+  };
+  for (const rule of REMINDER_RULES) {
+    const reason = await rule(ctx);
+    if (reason) return { verdict: 'held', reason };
+  }
+  const { customer } = ctx;
+  const estimate = await deps.db('estimates').where({ id: offer.estimateId }).first();
+  if (!estimate || estimate.customer_id !== customer.id || planOfferOf(estimate.estimate_data)?.jobId !== String(job.id)) {
+    return { verdict: 'held', reason: 'offer_estimate_gone' };
+  }
+  if (ENDED_OFFER_STATUSES.includes(estimate.status)) return { verdict: 'held', reason: 'offer_ended' };
+  const open = !estimate.archived_at && deps.liveEstimateStatuses.includes(estimate.status)
+    && (!estimate.expires_at || new Date(estimate.expires_at) > now);
+  if (!open) return { verdict: 'held', reason: 'offer_estimate_gone' };
+  if (!sameDatesAsEmail(estimate, ctx)) return { verdict: 'held', reason: 'offer_day_moved' };
+  if (!(await onCardRail(estimate, ctx))) return { verdict: 'held', reason: 'not_pay_after_visit' };
+  // The accept's own bar (restart.js assertPlanStartAcceptEligible): no plan, plan tier or prepaid term on the
+  // account since the offer, not commercial, and the quote still for the one home it was priced for (a staff
+  // address change on the open quote fails it). A reminder never advertises a quote the customer cannot accept.
+  const refusal = await deps.planStartAcceptRefusal(deps.db, estimate);
+  if (refusal) return { verdict: 'held', reason: refusal };
+  // The price as the offer email stated it. A snapshot without it is a broken record, never a guess: the job fails.
+  const price = offer.values.price_per_application;
+  if (!(typeof price === 'string' && price.startsWith('$'))) {
+    throw Object.assign(new Error('the offer email has no price on record'), { code: 'OFFER_PRICE_MISSING' });
+  }
+  const terms = offerTerms(ctx.offerDay);
+  const payload = {
+    first_name: greetingFirstName({ customerName: [customer.first_name, customer.last_name].filter(Boolean).join(' '), customer }),
+    price_per_application: price,
+    offer_end_date: formatDateOnly(terms.lastDay, { year: undefined }),
+    estimate_url: portalUrl(`/estimate/${estimate.token}`),
+  };
+  const out = await deps.sendWithLedger({
+    customerId: customer.id,
+    stream: OFFER_STREAM,
+    marketingClass: 'marketing',
+    emailKey: REMINDER_TEMPLATE,
+    idempotencyKey: reminderKey(job.id),
+    now,
+    expectedRecipientEmail: customer.email,
+    guard: (trx) => optedOutGuard(trx, { customer, deps }),
+    boundaryGuard: (trx) => handoffGuard(trx, {
+      customer, jobId: job.id, estimateId: estimate.id, now, deps, accountGuard: (handoff) => acceptGuard(handoff, { estimate, deps }),
+    }),
+    template: { templateKey: REMINDER_TEMPLATE, payload, categories: [REMINDER_CATEGORY], linkEstimateId: estimate.id },
+  });
+  return settleOfferSend(out, ctx);
+}
+
+// The reminder pass of a live morning, after the offers. Counts of its own; one job's failure never stops the others.
+async function runReminders(run) {
+  const counts = { jobs: 0, sent: 0, held: 0, done: 0, failed: 0, reasons: {} };
+  if (!(await offerWordsPublished(run.deps, REMINDER_TEMPLATE))) return { ...counts, words_not_approved: true };
+  const today = etDateString(run.now);
+  let page = await remindableJobsPage(run.deps.db, today, null);
+  while (page.length) {
+    for (const job of page) {
+      counts.jobs += 1;
+      if (!liveModeOn()) {
+        counts.held += 1;
+        counts.reasons.offer_gate_off = (counts.reasons.offer_gate_off || 0) + 1;
+        continue;
+      }
+      try {
+        const { verdict, reason } = await reminderJob(job, run);
+        counts[verdict] += 1;
+        if (reason) counts.reasons[reason] = (counts.reasons[reason] || 0) + 1;
+      } catch (err) {
+        counts.failed += 1;
+        logger.warn(`[onetime-plan-offer] reminder for job ${job.id} failed (code=${err?.code || 'none'})`);
+      }
+    }
+    page = page.length < PAGE_SIZE ? [] : await remindableJobsPage(run.deps.db, today, page[page.length - 1]);
+  }
+  return counts;
 }
 
 // The offers the provider accepted whose estimate does not carry the delivery yet: the stamp write failed, or the run
@@ -1164,9 +1430,11 @@ async function countJob(job, run, summary) {
 
 /**
  * The daily job. Returns counts only: { mode, jobs, sample, office, held, done, failed, reasons }, and in live
- * mode also `sent`, or `words_not_approved: true` when the offer template is not published (nothing is read).
+ * mode also `sent` and `reminder` (the day-21 pass: { jobs, sent, held, done, failed, reasons }, or
+ * `words_not_approved: true` when the reminder template is not published), or `words_not_approved: true` when the
+ * offer template is not published (nothing is read).
  *   sample = both sample emails went to the office today (shadow).   sent = the customer got the offer today (live).
- *   office = the app cannot price this home.   held = the offer is not for this customer today.
+ *   office = the app cannot price this home (live: one office item per job).   held = the offer is not for this customer today.
  *   done   = sampled (shadow) or offered (live) on an earlier morning.
  * One job's failure never stops the others; it is counted and read again the next morning.
  * A morning in which the price settings refused a job and no home was priced raises one admin notification
@@ -1197,6 +1465,12 @@ async function runOnetimePlanOfferJob({ now = new Date(), deps: overrides = {} }
     } catch (err) {
       logger.warn(`[onetime-plan-offer] delivery reconcile failed (code=${err?.code || 'none'})`);
     }
+    try {
+      await closeOfficeItems(run);
+    } catch (err) {
+      logger.warn(`[onetime-plan-offer] office item close failed (code=${err?.code || 'none'})`);
+    }
+    summary.reminder = await runReminders(run);
   }
   return summary;
 }
@@ -1210,5 +1484,7 @@ module.exports = {
   OFFER_TEMPLATE,
   REMINDER_TEMPLATE,
   TEMPLATE_VARIABLES,
-  _test: { defaultDeps, offerPayload, sampleKey, offerKey, PRICE_SETTINGS_ALERT_KEY },
+  _test: {
+    defaultDeps, offerPayload, sampleKey, offerKey, reminderKey, officeItemKey, PRICE_SETTINGS_ALERT_KEY, REMINDER_WINDOW,
+  },
 };
