@@ -620,6 +620,14 @@ describe('one property, one visit', () => {
     expect(Schedule.updateVisitDetails.mock.calls.map((c) => c[0].id)).toEqual(['a-1']);
   });
 
+  test('a visit at the same street and unit in another ZIP is left alone on a property card', async () => {
+    tables.scheduled_services.forEach((r) => Object.assign(r, { service_address_line1: r.property_id === UNIT_A ? '101 Example Ave' : '103 Example Ave', service_address_zip: '34200' }));
+    tables.scheduled_services.find((r) => r.id === 'a-2').service_address_zip = '34999';
+    const card = await preview({ property_id: UNIT_A, new_price: 85.54 });
+    expect(card.visits.map((v) => v.id)).toEqual(['a-1']);
+    expect(card.left_alone).toEqual([expect.objectContaining({ id: 'a-2', reason: expect.stringMatching(/^booked at 101 Example Ave, 34999, not this property/) })]);
+  });
+
   test('a narrowed search with no match says so, not that the customer has none', async () => {
     const res = await preview({ property_id: UNIT_A, service: 'lawn' });
     expect(res).toMatchObject({ code: 'nothing_to_reprice', error: expect.stringMatching(/^No upcoming "lawn" visit for Robin Sample matches the chosen property, visit or dates/) });

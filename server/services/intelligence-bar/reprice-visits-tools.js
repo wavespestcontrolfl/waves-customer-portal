@@ -138,6 +138,7 @@ function visitPin(row) {
     service_address_line1: row.service_address_line1 || null,
     service_address_line2: row.service_address_line2 || null,
     service_address_city: row.service_address_city || null,
+    service_address_zip: row.service_address_zip || null,
     service_type: row.service_type || null,
     service_id: row.service_id == null ? null : String(row.service_id),
     is_recurring: row.is_recurring === true,
@@ -391,23 +392,11 @@ function allExcludedRefusal({ label, customerName, newPrice, excluded, excludedO
 // Where a visit is booked: its address stamp, else its saved property.
 function visitPlace(row) {
   const street = [row.service_address_line1, row.service_address_line2].map((v) => String(v || '').trim()).filter(Boolean).join(' ');
-  const city = String(row.service_address_city || '').trim();
-  if (street) return city ? `${street}, ${city}` : street;
+  const locality = [row.service_address_city, row.service_address_zip].map((v) => String(v || '').trim()).filter(Boolean).join(' ');
+  if (street) return locality ? `${street}, ${locality}` : street;
   return row.property_id ? `property ${String(row.property_id)}` : 'the customer address';
 }
 
-// Two units can share a service, date and price: then each card line names
-// its place, so the operator can see which visit changes. Saved properties
-// count by id (two can render the same street text).
-function visitsAtSeveralPlaces(rows) {
-  return new Set(rows.map((r) => (r.property_id ? `p:${String(r.property_id)}` : `a:${visitPlace(r)}`))).size > 1;
-}
-
-// A property card or a one-visit card names each visit's booked place, as does
-// a card whose visits sit at more than one place.
-function placeShown(property, visitId, rows) {
-  return Boolean(property) || Boolean(visitId) || visitsAtSeveralPlaces(rows);
-}
 
 // The service family inside the narrowed scope. With a property, visits with
 // no saved property stay in so the card lists them as left alone.
@@ -423,9 +412,18 @@ async function pickScopedFamily({ customer, customerName, service, propertyId, v
   return { family: picked.family, property: scoped.property };
 }
 
-// Street + unit only (a stamp can lack the ZIP the property has).
-function streetUnitKey(line1, line2) {
-  return require('../customer-property-address-keys').addressKey({ address_line1: line1, address_line2: line2 });
+// The shared address key, with the locality both sides carry: ZIP when both
+// have one, else city when both have one, else street + unit alone.
+function sameAddress(row, property) {
+  const { addressKey, normalizeZip } = require('../customer-property-address-keys');
+  const zips = [normalizeZip(row.service_address_zip), normalizeZip(property.zip)];
+  const cities = [row.service_address_city, property.city].map((c) => String(c || '').trim());
+  const locality = zips.every(Boolean) ? 'zip' : (cities.every(Boolean) ? 'city' : null);
+  const key = (line1, line2, city, zip) => addressKey({
+    address_line1: line1, address_line2: line2, city: locality === 'city' ? city : '', zip: locality === 'zip' ? zip : '',
+  });
+  return key(row.service_address_line1, row.service_address_line2, row.service_address_city, row.service_address_zip)
+    === key(property.address_line1, property.address_line2, property.city, property.zip);
 }
 
 // With a property: a visit with no saved property, or one whose booked address
@@ -433,8 +431,7 @@ function streetUnitKey(line1, line2) {
 function unstampedReason(row, property) {
   if (!property) return null;
   if (row.property_id == null) return 'no saved property on the visit, so it may not be at this address';
-  if (row.service_address_line1 && property.address_line1
-    && streetUnitKey(row.service_address_line1, row.service_address_line2) !== streetUnitKey(property.address_line1, property.address_line2)) {
+  if (row.service_address_line1 && property.address_line1 && !sameAddress(row, property)) {
     return `booked at ${visitPlace(row)}, not this property's address`;
   }
   return null;
@@ -495,10 +492,11 @@ async function buildPlan(input) {
     return !reason;
   });
 
-  const showPlace = placeShown(property, visitId, family.rows);
   const line = (row) => ({
     id: String(row.id), date: dateOnly(row.scheduled_date), service: row.service_type || family.label,
-    ...(showPlace ? { at: visitPlace(row) } : {}),
+    // Every visit with a booked address or saved property names it, so the
+    // operator always sees where each changed visit is.
+    ...(row.service_address_line1 || row.property_id ? { at: visitPlace(row) } : {}),
     // A one-visit card names the visit itself: two same-day visits at one
     // place can otherwise read the same.
     ...(visitId ? { ref: `visit ${String(row.id)}${row.window_start ? `, ${String(row.window_start).slice(0, 5)}` : ''}` } : {}),
