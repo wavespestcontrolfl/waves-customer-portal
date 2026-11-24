@@ -5943,9 +5943,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     // otherwise leave at "sent". Recomputed from the offered list
                     // on every render (customer, address and property changes all
                     // move it); nothing is linked until staff tap the button, which
-                    // is the same pick as choosing it in the picker above.
+                    // is the same pick as choosing it in the picker above. A pick replaces the
+                    // service list, so the notice shows only while the booking has no lines.
                     const settled = bookingPropertyState === 'ready' || bookingPropertyState === 'hidden';
-                    if (linkedEstimate || saving || partialCommitLocked || !settled) return null;
+                    if (linkedEstimate || saving || partialCommitLocked || !settled || services.length > 0) return null;
                     const notice = openEstimateLinkNotice({ estimates: visibleScheduleEstimates, customerId: selectedCustomer?.id });
                     if (!notice) return null;
                     return (

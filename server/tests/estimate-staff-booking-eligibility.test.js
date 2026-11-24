@@ -5,11 +5,8 @@
  * pure wiring test; the bill-by-invoice predicate is real.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-const mockManual = {
-  planStartManualAcceptRefusal: jest.fn(),
-  persistedAddOnRefusal: jest.fn(),
-};
-jest.mock('../services/estimate-manual-acceptance', () => mockManual);
+// The real accept-on-book predicates (estimate-manual-acceptance) run here. Only the 33k-line public estimate router is
+// replaced, for its retired tree-and-shrub cadence check.
 const mockRetired = jest.fn();
 jest.mock('../routes/estimate-public', () => ({ recurringTreeShrubRowAtRetiredCadence: (...a) => mockRetired(...a) }));
 
@@ -21,24 +18,23 @@ const PROPOSAL = {
   buildings: [{ name: 'Main', lineItems: [{ description: 'Quarterly pest', quantity: 1, unitPrice: 300, frequency: 'quarterly', taxable: true, amount: 300 }] }],
   commercialTerms: { paymentTerms: 'net30' },
 };
-const open = (extra = {}) => ({ id: 'est-1', status: 'sent', source: null, bill_by_invoice: false, estimate_data: {}, ...extra });
-
-beforeEach(() => {
-  mockManual.planStartManualAcceptRefusal.mockReset().mockReturnValue(null);
-  mockManual.persistedAddOnRefusal.mockReset().mockReturnValue(null);
-  mockRetired.mockReset().mockReturnValue(false);
+const open = (extra = {}) => ({
+  id: 'est-1', status: 'sent', customer_id: 'cust-1', source: null, bill_by_invoice: false, show_one_time_option: false,
+  estimate_data: {}, ...extra,
 });
 
-describe('estimateBookableByStaff', () => {
+beforeEach(() => { mockRetired.mockReset().mockReturnValue(false); });
+
+describe('estimateBookableByStaff (real accept-on-book predicates)', () => {
   test('an ordinary open quote is bookable', () => {
     expect(estimateBookableByStaff(open())).toBe(true);
-    expect(mockManual.persistedAddOnRefusal).toHaveBeenCalledWith(expect.objectContaining({ id: 'est-1' }), { action: 'booking from it', billingTerm: 'standard', checkRecurring: true });
+    expect(estimateBookableByStaff(open({ status: 'viewed' }))).toBe(true);
   });
 
   test('a portal plan-start quote is not (only the customer can accept it)', () => {
-    mockManual.planStartManualAcceptRefusal.mockReturnValue({ code: 'plan_start_self_serve', message: 'x' });
-    expect(estimateBookableByStaff(open({ source: 'plan_start' }))).toBe(false);
-    expect(staffBookingRefusalForOpenEstimate(open({ source: 'plan_start' })).code).toBe('plan_start_self_serve');
+    const row = open({ source: 'plan_start' });
+    expect(estimateBookableByStaff(row)).toBe(false);
+    expect(staffBookingRefusalForOpenEstimate(row).code).toBe('plan_start_self_serve');
   });
 
   test('a bill-by-invoice proposal that is not won is not; a won one is', () => {
@@ -48,9 +44,15 @@ describe('estimateBookableByStaff', () => {
     expect(estimateBookableByStaff({ ...proposal, status: 'accepted' })).toBe(true);
   });
 
-  test('a quote whose add-ons the booking would refuse is not', () => {
-    mockManual.persistedAddOnRefusal.mockReturnValue({ code: 'ADDON', message: 'x' });
-    expect(estimateBookableByStaff(open())).toBe(false);
+  test('a sent quote with unresolved manager approval is not (the accept-on-book would refuse it after the visit commits)', () => {
+    const row = open({ estimate_data: { lineItems: [{ name: 'Sample line', requiresManagerApproval: true }] } });
+    expect(estimateBookableByStaff(row)).toBe(false);
+    expect(staffBookingRefusalForOpenEstimate(row).message).toMatch(/Manager approval is required/);
+  });
+
+  test('a normal invoice-mode quote and a one-time-option quote are not (they accept only through the customer link)', () => {
+    expect(estimateBookableByStaff(open({ bill_by_invoice: true }))).toBe(false);
+    expect(estimateBookableByStaff(open({ show_one_time_option: true }))).toBe(false);
   });
 
   test('a retired tree-and-shrub cadence is not', () => {
@@ -60,7 +62,7 @@ describe('estimateBookableByStaff', () => {
 
   test('a missing row, or any unexpected error, reads as not bookable', () => {
     expect(estimateBookableByStaff(null)).toBe(false);
-    mockManual.persistedAddOnRefusal.mockImplementation(() => { throw new Error('boom'); });
+    mockRetired.mockImplementation(() => { throw new Error('boom'); });
     expect(estimateBookableByStaff(open())).toBe(false);
   });
 });

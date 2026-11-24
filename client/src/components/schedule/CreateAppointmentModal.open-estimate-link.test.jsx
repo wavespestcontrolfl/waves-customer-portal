@@ -189,11 +189,14 @@ describe('the New Appointment form for a customer with an open estimate', () => 
     expect(posts(fetcher)[0].sourceEstimateId).toBe('est-1');
   });
 
-  it('a booking made without tapping the button sends no estimate link', async () => {
+  it('the notice goes away once a service is added, and a booking made without the tap sends no estimate link', async () => {
     const fetcher = installFetch();
     mount();
     await screen.findByRole('button', { name: 'Link it' });
     await addService('Pest', 'Pest Control Visit');
+    // A pick would replace the service list, so the notice is gone once staff add a service.
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Link it' })).toBeNull());
+    expect(screen.queryByTestId('open-estimate-link-notice')).toBeNull();
     const submit = screen.getByRole('button', { name: 'Schedule appointment' });
     await waitFor(() => expect(submit.disabled).toBe(false));
     fireEvent.click(submit);
