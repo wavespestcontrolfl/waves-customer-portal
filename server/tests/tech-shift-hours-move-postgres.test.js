@@ -230,11 +230,11 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
     }
   });
 
-  // A visit group moves each member through reschedule (shiftAskedByUnit: the unit judges it) and may name a technician
+  // A visit group moves each member through reschedule (skipVisitSeam) and may name a technician
   // that call does not see. The group is judged as one unit, so a member is not judged alone here.
   test('a visit group\'s member move is not judged alone here', async () => {
     const id = await seed();
-    expect(await move(id, nextDay, { start: '13:00', end: '14:00' }, 'customer', { visitPolicy: 'single', skipVisitSeam: true, shiftAskedByUnit: true })).toMatchObject({ success: true });
+    expect(await move(id, nextDay, { start: '13:00', end: '14:00' }, 'customer', { visitPolicy: 'single', skipVisitSeam: true })).toMatchObject({ success: true });
     expect(await rowOf(id)).toMatchObject({ day: nextDay, window_start: '13:00:00', window_end: '14:00:00' });
   });
 
@@ -468,8 +468,8 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
       }
     });
 
-    // D4 part 3c: the office's own move of the stop is not checked. The office is told once for the stop,
-    // on the technician each service will carry.
+    // D4 part 3c: the office's own move of the stop is not checked. The office is told once for the stop, from the
+    // rows the move leaves, about the technician each service then has.
     test('the office\'s own move of the stop lands outside the shift: it is not refused, and the office is told the shift once', async () => {
       const stop = await seedStop();
       // The first service ends with the shift; the second lands at 12:00 to 13:00.
@@ -565,21 +565,23 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
         expect(await rowOf(stop.b)).toMatchObject(whereSeeded[1]);
       });
 
-      // The office's own move: each service that keeps its technician is told by its own move, which reads the row
-      // in its own transaction and pins the technician and the length its line was about (as one visit's move does).
-      test('the office\'s own move: the first service made longer after its move read it ends the move as a concurrent change, and neither service moves', async () => {
-        const stop = await seedStop();
-        await expect(move(stop.a, nextDay, { start: '10:00', end: '11:00' }, 'admin', lengthen(stop.a))).rejects.toMatchObject({ statusCode: 409 });
-        expect(await stopOf(stop)).toMatchObject(whereSeeded);
-      });
-
-      test('the office\'s own move: the second service made longer after the plan moves, and the office is told about the length it has', async () => {
-        const stop = await seedStop();
-        // Both services fit for 60 minutes (10:00 and 11:00). The second, at 240 minutes, ends at 15:00.
-        const out = await move(stop.a, nextDay, { start: '10:00', end: '11:00' }, 'admin', lengthen(stop.b));
-        expect(out.visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
+      // The office's own move is not stopped by such an edit, as before. The unit reads each moved row after every
+      // write (unitOfficeLines), so the office is told about the length the row has.
+      test('the office\'s own move: a service made longer after the plan moves, and the office is told about the length it has', async () => {
+        // Both services fit for 60 minutes (10:00 and 11:00). The first, at 240 minutes, ends at 14:00.
+        const first = await seedStop();
+        const out = await move(first.a, nextDay, { start: '10:00', end: '11:00' }, 'admin', lengthen(first.a));
+        expect(out.visitMove).toMatchObject({ moved: [first.a, first.b], failed: [] });
         expect(shiftLines(out)).toEqual([OFFICE_LINE]);
-        expect(await rowOf(stop.b)).toMatchObject({ day: nextDay, window_start: '11:00:00' });
+        expect(await rowOf(first.a)).toMatchObject({ day: nextDay, window_start: '10:00:00' });
+        // The second, at 240 minutes, ends at 15:00.
+        await f.db('scheduled_services').del();
+        await f.db('service_visits').del();
+        const second = await seedStop();
+        const late = await move(second.a, nextDay, { start: '10:00', end: '11:00' }, 'admin', lengthen(second.b));
+        expect(late.visitMove).toMatchObject({ moved: [second.a, second.b], failed: [] });
+        expect(shiftLines(late)).toEqual([OFFICE_LINE]);
+        expect(await rowOf(second.b)).toMatchObject({ day: nextDay, window_start: '11:00:00' });
       });
 
       // A caller's own fence drops the plan's fence of the first service. A move of the day alone carries the
@@ -774,7 +776,7 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
           });
 
           // The named technician is marked out that day: each service moves, its assignment is refused, and it
-          // stays on the technician who had it. Its own move stated no line, because it was to be handed over.
+          // stays on the technician who had it. The rows the move leaves are on that technician.
           test('the assignment is refused: the office is told about the technician who keeps each service, once, and the move reports the services', async () => {
             await f.db('technicians').where({ id: f.ids.otherTech }).update({ shift_start: '08:00', shift_end: '10:30' });
             await f.db('technician_absences').insert({ technician_id: f.ids.otherTech, absence_date: nextDay, reason: 'synthetic' });
@@ -791,6 +793,32 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
             } finally {
               await f.db('technician_absences').del();
             }
+          });
+
+          // The office names another technician for the stop where it is, and that technician is marked out. Each
+          // service keeps its day, its hours and its technician: the move changed nothing a line is about. (The second
+          // service, stored as 240 minutes, ends after its technician's shift, as it did before the move.)
+          test('the assignment is refused and the stop keeps its day and its hours: no line', async () => {
+            await f.db('technician_absences').insert({ technician_id: f.ids.otherTech, absence_date: f.date, reason: 'synthetic' });
+            try {
+              const stop = await seedStop({ estimated_duration_minutes: 240 });
+              const out = await move(stop.a, f.date, { start: '09:00', end: '10:00' }, 'admin', { overlapAdvisory: true, technicianId: f.ids.otherTech });
+              expect(out.visitMove.failed.map((x) => x.id).sort()).toEqual([stop.a, stop.b].sort());
+              expect(await stopOf(stop)).toMatchObject(whereSeeded.map((row) => ({ ...row, technician_id: f.ids.technician })));
+              expect(dayLines(out)).toEqual([]);
+            } finally {
+              await f.db('technician_absences').del();
+            }
+          });
+
+          // The same stop, and the named technician can take it: the rows change technician, and the office is told
+          // about the one who gets them (the second service ends after that technician's 12:00 shift end too).
+          test('another technician for the stop where it is: the office is told about the technician who gets it', async () => {
+            const stop = await seedStop({ estimated_duration_minutes: 240 });
+            const out = await move(stop.a, f.date, { start: '09:00', end: '10:00' }, 'admin', { overlapAdvisory: true, technicianId: f.ids.otherTech });
+            expect(out.visitMove.failed).toEqual([]);
+            expect((await stopOf(stop)).map((r) => r.technician_id)).toEqual([f.ids.otherTech, f.ids.otherTech]);
+            expect(dayLines(out)).toEqual([OFFICE_LINE]);
           });
 
           test('gate off: the services\' own moves state the day off of the technician they leave, and none of the one who gets the stop, as before', async () => {
@@ -814,7 +842,7 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
           });
         });
 
-        test('the office\'s own move is not judged at the assignment: it is told there, about the row the assignment writes', async () => {
+        test('the office\'s own move is not judged at the assignment: the office is told about the row as the move leaves it', async () => {
           const stop = await seedStop();
           // Both services fit the named technician's shift as planned. The first is made 240 minutes long after its
           // move and before its assignment: 10:00 to 14:00, after the 12:00 shift end.

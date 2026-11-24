@@ -313,7 +313,7 @@ async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = f
   // not a staff row — the customer moving the stop online — so their own
   // move stays silent and the card never says "by the office" for a
   // customer move (codex r9 P2).
-  const assigned = await assignDispatchJob({
+  await assignDispatchJob({
     jobId: rowId, technicianId, actorId, emit: true, trx: t, skipVisitSeam,
     ...(expectTechnicianId !== undefined ? { expectTechnicianId } : {}),
     // GATE_TECH_SHIFT_HOURS: an automatic unit move asks the assignment to judge the shift too.
@@ -321,10 +321,6 @@ async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = f
     ...(noticeActorId !== undefined ? { noticeActorId } : {}),
     ...(noticePrevious ? { noticePrevious } : {}),
   });
-  // The assignment's own day-off or shift line, about the row it wrote on the
-  // technician who gets it. The office's own unit move returns it with the
-  // shift gate on (unitWarnings, D4 part 3c); no other caller reads it.
-  return assigned.dayWarning;
 }
 
 /**
@@ -1788,44 +1784,40 @@ function memberOutsideShift(shiftOf, date, landings, judged = {}) {
 }
 
 /**
- * GATE_TECH_SHIFT_HOURS (D4 part 3c): the warnings a unit move returns. The
- * office's own move of a grouped stop is told the day off or the shift by the
- * writes themselves: a member that keeps its technician by its own move (the
- * rebooker's office line, in `warnings` with that move's other lines), a
- * member the unit hands to another technician by that assignment
- * (`assignmentLines`, alignMemberTechnician; when that assignment is refused,
- * keptTechnicianLine). Two members can state the same line, so each line is
- * returned once. Gate off, or a move the office did not
- * start: `warnings` as it is, as before (the assignments' lines are dropped).
+ * GATE_TECH_SHIFT_HOURS (D4 part 3c): the office's own move of a grouped stop
+ * is told from the rows it leaves. After every write of the move (each
+ * member's own move, and the assignment to the technician the move names),
+ * each member that moved is read once, and the office is told about the
+ * technician that row now has (memberOfficeLine). No writer's answer is used,
+ * so a line is never about a row as it was planned, and is not lost with a
+ * writer's answer (a refused assignment, a member's failed post-commit work).
+ * Each line once: two members can state the same one. Gate off, or a move the
+ * office did not start: no read and no line (gate off, each member's own move
+ * states its day-off line, as before). A read that fails is logged: the move
+ * is committed, and is not failed for a line.
  */
-function unitWarnings(warnings, assignmentLines, initiatedBy) {
-  if (initiatedBy !== 'admin' || !require('../config/feature-gates').techShiftHoursLive()) return warnings;
-  return [...new Set([...warnings, ...assignmentLines])].filter(Boolean);
+async function unitOfficeLines(targets, moved, initiatedBy) {
+  if (initiatedBy !== 'admin' || !require('../config/feature-gates').techShiftHoursLive()) return [];
+  const lines = await Promise.all(targets.filter((x) => moved.includes(x.id)).map((target) => memberOfficeLine(target).catch((err) => {
+    require('./logger').warn(`[visit-groups] unit move: the office line of moved member ${target.id} was not read: ${err.message}`);
+  })));
+  return [...new Set(lines)].filter(Boolean);
 }
 
-// Does a unit move hand this member to another technician than the plan read
-// on it? Then moveVisitAsUnit re-points it after its own move (alignMember),
-// and that assignment answers for its shift (shiftAskedByUnit).
-const handsOver = (options, target) => options.technicianId !== undefined
-  && String(target.expect.technician_id || '') !== String(options.technicianId || '');
-
-/**
- * GATE_TECH_SHIFT_HOURS (D4 part 3c): a member moved, and its assignment to
- * the technician the office named was refused. It stays on the technician who
- * had it, and its own move stated no line (shiftAskedByUnit). So the office is
- * told here, about the row as it now is and the technician on it: the day-off
- * line, or the shift line; a move that kept the day is asked the shift alone,
- * as the member's own move is. Gate off, or a move the office did not start:
- * no read (the member's own move stated its line, as before).
- */
-async function keptTechnicianLine(target, initiatedBy) {
-  if (initiatedBy !== 'admin' || !require('../config/feature-gates').techShiftHoursLive()) return undefined;
-  const row = await db('scheduled_services').where({ id: target.id })
-    .first('technician_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes').catch(() => null);
+// One moved member's line, about the row as it now is: the day-off line, or the
+// shift line when the shift does not hold the row. `expect` is the row as the
+// plan read it. A member that kept its day and its technician is asked the
+// shift alone (as one visit's hours-only move is); with its hours kept too the
+// move changed nothing a line is about, and it is not asked. An end the plan
+// did not have is not compared (the member's own move derives one).
+async function memberOfficeLine({ id, expect }) {
+  const row = await db('scheduled_services').where({ id })
+    .first('technician_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
   if (!row || !row.technician_id) return undefined;
-  return require('./technician-eligibility').dayWarningFor(row.technician_id, dateOnly(row.scheduled_date), {
-    block: row, shiftOnly: dateOnly(target.expect.scheduled_date) === dateOnly(row.scheduled_date),
-  });
+  const kept = expectMatchesRow(row, { scheduled_date: expect.scheduled_date, technician_id: expect.technician_id });
+  const hours = { window_start: expect.window_start, ...(expect.window_end ? { window_end: expect.window_end } : {}) };
+  if (kept && expectMatchesRow(row, hours)) return undefined;
+  return require('./technician-eligibility').dayWarningFor(row.technician_id, dateOnly(row.scheduled_date), { block: row, shiftOnly: kept });
 }
 
 /**
@@ -2552,7 +2544,6 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   const moved = [];
   const failed = [];
   const warnings = [...(plan.techClashWarnings || [])];
-  const assignmentLines = new Set();
   let primaryResult = null;
   // technicianId is NOT forwarded to sibling moves (codex r15 P1): the
   // rebooker writes technician_id directly, bypassing the canonical
@@ -2687,19 +2678,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // first tell the old tech "visit moved" (tech-visit-notifications.js).
     const unitTechChanges = Object.prototype.hasOwnProperty.call(options, 'technicianId')
       && (options.technicianId || null) !== (target.expect.technician_id || null);
-    // GATE_TECH_SHIFT_HOURS, shiftAskedByUnit: the member's own move reads no
-    // shift and states no line, because the unit answers for it. An automatic
-    // move: always (the plan's verdict above). The office's own move (told,
-    // D4 part 3c): only for a member the unit hands to another technician
-    // (`handedOver`, the test alignMember re-points on), where the assignment
-    // that follows tells the office about the row it writes. A member that
-    // keeps its technician is told by its own move, as one visit's office
-    // move is.
-    const handedOver = handsOver(options, target);
-    const noticeOpts = {
-      ...(unitTechChanges ? { suppressTechNotice: true } : {}),
-      shiftAskedByUnit: initiatedBy !== 'admin' || handedOver,
-    };
+    const noticeOpts = unitTechChanges ? { suppressTechNotice: true } : {};
     // Second technician: a member's rebooker probe is scoped to the row's
     // CURRENT technician when the move keeps it, but a unit move that names a
     // technician strips it from the member calls and re-points the row after
@@ -2728,7 +2707,8 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // technician — reported as a failed member (the detach seam separates
     // it from the re-pointed parent), never silently split-tech.
     const alignMember = async () => {
-      if (!handedOver) return;
+      if (options.technicianId === undefined) return;
+      if (String(target.expect.technician_id || '') === String(options.technicianId || '')) return;
       let lastErr = null;
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
@@ -2740,9 +2720,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           // from the LOCKED plan is the baseline — an operator reassignment
           // that landed after the sibling's move is newer and wins; this
           // member is then reported failed/stale, never overwritten.
-          // The transaction answers the assignment's day-off or shift line
-          // (alignMemberTechnician), kept once it committed.
-          assignmentLines.add(await db.transaction(async (t) => {
+          await db.transaction(async (t) => {
             // The destination technician's slot-reserve lock (the rebooker's
             // and slot-reservation's key shape) serializes this check with
             // every scheduling writer on that tech-day; the tech lock is
@@ -2799,7 +2777,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
                 await options.moveGuard({ trx: t, technicianId: options.technicianId, service: memberRow || { id: target.id } });
               }
             }
-            return alignMemberTechnician(t, target.id, options.technicianId || null, {
+            await alignMemberTechnician(t, target.id, options.technicianId || null, {
               skipVisitSeam: true,
               expectTechnicianId: target.expect.technician_id || null,
               // GATE_TECH_SHIFT_HOURS (D4 part 3b-2b): the plan judged this
@@ -2824,7 +2802,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
               // today/tomorrow change; Codex #5786 P2).
               noticePrevious: { date: target.expect.scheduled_date, windowStart: target.expect.window_start, windowEnd: target.expect.window_end },
             });
-          }));
+          });
           return;
         } catch (err) {
           lastErr = err;
@@ -2859,9 +2837,6 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           snapshot,
         });
       }
-      // The member's own move stated no line, because it was to be handed
-      // over: the office is told now about the technician who keeps it.
-      assignmentLines.add(await keptTechnicianLine(target, initiatedBy));
       await failSibling(target, { code: lastErr.code || 'ASSIGNMENT_FAILED' }, `moved but its technician reassignment failed: ${lastErr.message}`, { movedButUnassigned: true });
     };
     const syncSiblingReminder = async () => {
@@ -3167,7 +3142,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     .filter(Boolean).map((v) => String(v).slice(0, 5)).sort();
   const visitStart = representedStarts[0] || null;
   const visitMove = { visitId: plan.visitId, moved, failed, members, unchanged, visitStart, ...(parentRetargetFailed ? { parentRetargetFailed: true } : {}) };
-  const lines = unitWarnings(warnings, assignmentLines, initiatedBy);
+  const lines = [...warnings, ...await unitOfficeLines(plan.targets, moved, initiatedBy)];
   return { ...(primaryResult || { success: true, newDate }), visitMove, ...(lines.length ? { warnings: lines } : {}) };
 }
 
@@ -3222,6 +3197,7 @@ module.exports = {
   visitSummariesForRows,
   visitSummaryForService,
   _test: {
+    memberOfficeLine,
     memberOutsideShift,
     shiftClock,
     expectMatchesRow,

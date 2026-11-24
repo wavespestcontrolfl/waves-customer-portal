@@ -39,10 +39,10 @@ const automaticShiftLive = (initiatedBy) => initiatedBy !== 'admin' && techShift
 // reads): the day-off line, or, on a day the technician works, the shift line when the
 // shift does not hold `landed`, the row as the move leaves it
 // (technician-eligibility.dayWarningFor). A move that changes only the hours is told
-// the shift line alone. A grouped stop's member that the unit's move hands to another
-// technician after this call (`unitMember`) states nothing with the shift gate on: the
-// assignment that follows tells the office, about the technician who gets the visit
-// (visit-groups alignMemberTechnician). Gate off: the member's day-off line, as before.
+// the shift line alone. A grouped stop's member (`unitMember`) states nothing with the
+// shift gate on: the unit's move may hand it to another technician after this call, so
+// the unit tells the office once every write is done, from the rows the move leaves
+// (visit-groups unitOfficeLines). Gate off: the member's day-off line, as before.
 async function officeSlotTechnician(technicianId, trx, date, { warnings, shiftOnly, landed, unitMember }) {
   if (!shiftOnly) await assertAssignableTechnician(technicianId, { conn: trx, date, workDays: false });
   if (!warnings || (unitMember && techShiftHoursLive())) return;
@@ -2502,18 +2502,15 @@ class SmartRebooker {
       // GATE_TECH_SHIFT_HOURS (shiftRead): an automatic (non-admin) move obeys
       // the kept technician's shift hours. The office's own move does not: the
       // office decides, and is told (D4 part 3c: `landed`). A visit group moves its members
-      // through this function one by one, and says when the member's shift is the
-      // unit's to answer (`shiftAskedByUnit`, visit-groups moveVisitAsUnit): an
-      // automatic move always (the group is judged as one unit, D4 part 3b-2b), the
-      // office's own move when the unit hands the member to another technician after
-      // this call (that assignment tells the office). Such a member is not judged or
-      // told here. A member the office's move leaves on its technician is told here,
-      // as any one visit is.
+      // through this function one by one (skipVisitSeam), and may name a
+      // technician this call does not see, so a member is not judged or told
+      // alone here: an automatic move of the group is judged as one unit (D4
+      // part 3b-2b), the office's own is told by the unit (unitOfficeLines).
       // With shiftRead, a move that changes only the hours is checked too. The
       // day and the technician are the same, but the new hours may be outside
       // the shift: an automatic move is refused, the office's own is told.
       const techChangeForEligibility = Object.prototype.hasOwnProperty.call(updates, 'technician_id');
-      const unitMember = options.shiftAskedByUnit === true;
+      const unitMember = options.skipVisitSeam === true;
       const shiftRead = !unitMember && techShiftHoursLive();
       const hoursMoveForShift = shiftRead && hoursChangedBy(updates, service);
       const dayOrTechMove = techChangeForEligibility || !sameDayTarget;
@@ -2523,8 +2520,7 @@ class SmartRebooker {
         // day's other rules were not asked of it before, and are not asked now.
         // `landed`: the row as this move leaves it. An automatic move is judged on it
         // (`block`); the office's own move is told when the shift does not hold it,
-        // but not for a grouped stop's member whose shift is the unit's to answer
-        // (`unitMember`, officeSlotTechnician).
+        // but not for a grouped stop's member (`unitMember`, officeSlotTechnician).
         const landed = { window_start: updates.window_start, window_end: updates.window_end, estimated_duration_minutes: service.estimated_duration_minutes };
         await assertAssignableSlotTechnician(keptTechId, trx, newDateStr, { initiatedBy, warnings: offDayWarnings, shiftOnly: !dayOrTechMove,
           block: shiftRead ? landed : null, landed, unitMember });

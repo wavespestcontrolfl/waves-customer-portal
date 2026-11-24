@@ -455,25 +455,24 @@ describe('reschedule — shared occupancy conflict gate', () => {
         }
       });
 
-      // A visit group moves each member through reschedule and judges the group as one unit (shiftAskedByUnit).
+      // A visit group moves each member through reschedule (skipVisitSeam) and judges the group as one unit.
       test('gate on, a visit group\'s member move is not judged alone: it commits with no shift read and no extra pin', async () => {
         process.env.GATE_TECH_SHIFT_HOURS = 'true';
         const { trx, trxScheduled } = wireRescheduleMocks(service(tech), { techShift: ['08:00', '10:00'] });
         expect(await SmartRebooker.reschedule(
-          'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'customer_request', 'customer', { visitPolicy: 'single', skipVisitSeam: true, shiftAskedByUnit: true },
+          'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'customer_request', 'customer', { visitPolicy: 'single', skipVisitSeam: true },
         )).toMatchObject({ success: true });
         expect(reads(trx, 'time_entries')).toBe(false);
         expect(trxScheduled.where).not.toHaveBeenCalledWith({ technician_id: 'tech-1' });
         expect(trxScheduled.where).not.toHaveBeenCalledWith({ estimated_duration_minutes: 45 });
       });
 
-      // The unit's move hands this member to another technician after this call (shiftAskedByUnit), so the shift is
-      // not this call's to state: the assignment that follows tells the office.
-      test('gate on, the office\'s own move of a visit group\'s member that goes to another technician is not told the shift here, and the hours are not read', async () => {
+      // The unit's move may hand the member to another technician after this call, so the shift is not this call's to state.
+      test('gate on, the office\'s own move of a visit group\'s member is not told the shift here, and the hours are not read', async () => {
         process.env.GATE_TECH_SHIFT_HOURS = 'true';
         const { trx } = wireRescheduleMocks(service(tech), { techShift: ['08:00', '10:00'] });
         const result = await SmartRebooker.reschedule(
-          'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', { overlapAdvisory: true, visitPolicy: 'single', skipVisitSeam: true, shiftAskedByUnit: true },
+          'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', { overlapAdvisory: true, visitPolicy: 'single', skipVisitSeam: true },
         );
         expect(result.success).toBe(true);
         expect(result.warnings).toBeUndefined();
@@ -481,35 +480,21 @@ describe('reschedule — shared occupancy conflict gate', () => {
         // The member's hours-only move: nothing is asked about the technician, as on main.
         const hoursOnly = wireRescheduleMocks(service(tech), { techShift: ['08:00', '10:00'] });
         const sameDay = await SmartRebooker.reschedule(
-          'svc-1', BASE, { start: '13:00', end: '15:00' }, 'admin', 'admin', { overlapAdvisory: true, visitPolicy: 'single', skipVisitSeam: true, shiftAskedByUnit: true },
+          'svc-1', BASE, { start: '13:00', end: '15:00' }, 'admin', 'admin', { overlapAdvisory: true, visitPolicy: 'single', skipVisitSeam: true },
         );
         expect(sameDay.warnings).toBeUndefined();
         expect(reads(hoursOnly.trx, 'technicians')).toBe(false);
       });
 
-      // The office's move of the stop leaves this member on its technician: its own move tells the office, as one visit's does.
-      test('gate on, the office\'s own move of a visit group\'s member that keeps its technician is told here, and the write pins the technician and the length', async () => {
-        process.env.GATE_TECH_SHIFT_HOURS = 'true';
-        const member = { overlapAdvisory: true, visitPolicy: 'single', skipVisitSeam: true, shiftAskedByUnit: false };
-        const { trxScheduled } = wireRescheduleMocks(service(tech), { techShift: ['08:00', '10:00'] });
-        const result = await SmartRebooker.reschedule('svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', member);
-        expect(result).toMatchObject({ success: true, warnings: ["Tech's shift is 8:00 AM to 10:00 AM. This visit is outside those hours."] });
-        expect(trxScheduled.where).toHaveBeenCalledWith({ technician_id: 'tech-1' });
-        expect(trxScheduled.where).toHaveBeenCalledWith({ estimated_duration_minutes: 45 });
-        // New hours on its day: the shift line alone.
-        wireRescheduleMocks(service(tech), { techShift: ['08:00', '10:00'] });
-        const sameDay = await SmartRebooker.reschedule('svc-1', BASE, { start: '13:00', end: '15:00' }, 'admin', 'admin', member);
-        expect(sameDay.warnings).toEqual(["Tech's shift is 8:00 AM to 10:00 AM. This visit is outside those hours."]);
-      });
-
-      // The assignment that follows tells the office about the technician who gets the member (visit-groups alignMemberTechnician).
-      test('the office\'s own move of a visit group\'s member that goes to another technician, onto a day off: no line with the shift gate on, the day-off line with it off', async () => {
+      // With the shift gate on the unit tells the office once every write is done, from the rows the move leaves
+      // (visit-groups unitOfficeLines), so the member's own move states no line. Gate off: its day-off line, as before.
+      test('the office\'s own move of a visit group\'s member onto a day off: no line with the shift gate on, the day-off line with it off', async () => {
         process.env.GATE_TECH_WORK_DAYS = 'true';
         try {
           const targetDow = new Date(`${TARGET}T12:00:00Z`).getUTCDay();
           const dayOff = { techShift: ['08:00', '10:00'], techWorkDays: [0, 1, 2, 3, 4, 5, 6].filter((d) => d !== targetDow) };
           const member = () => SmartRebooker.reschedule(
-            'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', { overlapAdvisory: true, visitPolicy: 'single', skipVisitSeam: true, shiftAskedByUnit: true },
+            'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', { overlapAdvisory: true, visitPolicy: 'single', skipVisitSeam: true },
           );
           process.env.GATE_TECH_SHIFT_HOURS = 'true';
           wireRescheduleMocks(service(tech), dayOff);

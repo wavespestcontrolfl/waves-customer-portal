@@ -1320,128 +1320,141 @@ describe('shift hours: a grouped stop is judged as one unit', () => {
       expect((await unit(fakeRebooker(), undefined)).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
     });
 
-    describe('the office\'s own move is told by the writes (D4 part 3c)', () => {
+    // The unit reads each moved member once after every write (unitOfficeLines), with its stored length.
+    describe('the office\'s own move is told from the rows it leaves (D4 part 3c)', () => {
       const LINE = "Tech's shift is 8:00 AM to 12:00 PM. This visit is outside those hours.";
-      const askedByUnit = (rebooker) => rebooker.reschedule.mock.calls.map((c) => [c[0], c[5].shiftAskedByUnit]);
-      afterEach(() => assignDispatchJob.mockResolvedValue({ changed: true }));
+      const left = (over = {}) => ({ technician_id: 't1', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00', estimated_duration_minutes: 45, ...over });
+      const leftRead = (ops, cols) => cols.join() === 'technician_id,scheduled_date,window_start,window_end,estimated_duration_minutes';
+      const stop = (rows, from = landed('13:00', '14:00'), members = pair()) => {
+        const base = script({ members, landed: from });
+        const first = (ops, cols) => (leftRead(ops, cols) ? rows[ops.find((o) => o[0] === 'where')[1].id] || null : null);
+        return { ...base, scheduled_services: { ...base.scheduled_services, first } };
+      };
+      const refuse = (...ids) => assignDispatchJob.mockImplementation(async ({ jobId }) => {
+        if (ids.includes(jobId)) throw Object.assign(new Error('refused'), { statusCode: 409, isOperational: true });
+        return { changed: true };
+      });
+      let dayWarningFor;
+      const asked = () => dayWarningFor.mock.calls.map((c) => [c[0], c[1], c[2].shiftOnly]);
+      beforeEach(() => { dayWarningFor = jest.spyOn(eligibility, 'dayWarningFor').mockResolvedValue(LINE); });
+      afterEach(() => { dayWarningFor.mockRestore(); assignDispatchJob.mockResolvedValue({ changed: true }); });
 
-      test('whose answer a member\'s shift is: the unit\'s for an automatic move and for a member the office hands to another technician; the member\'s own move for one the office leaves on its technician', async () => {
+      test('each moved member is asked once, about the row as it now is; a line two members state comes back once, after the members\' other lines', async () => {
         process.env.GATE_TECH_SHIFT_HOURS = 'true';
-        db.__script = script({ members: pair(), landed: landed('10:00', '11:00') });
-        const automatic = fakeRebooker();
-        expect((await unit(automatic, '10:00-11:00', 'tech')).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
-        expect(askedByUnit(automatic)).toEqual([['a', true], ['b', true]]);
-        db.__script = script({ members: pair(), landed: landed('13:00', '14:00') });
-        const kept = fakeRebooker();
-        expect((await unit(kept, '13:00-14:00', 'admin')).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
-        expect(askedByUnit(kept)).toEqual([['a', false], ['b', false]]);
-        // The office names t9: a is on t1 and is handed over; b is on t9 already and keeps it.
-        db.__script = script({ members: pair({ technician_id: 't9' }), landed: landed('13:00', '14:00', 't9') });
-        const mixed = fakeRebooker();
-        expect((await unit(mixed, '13:00-14:00', 'admin', { technicianId: 't9' })).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
-        expect(askedByUnit(mixed)).toEqual([['a', true], ['b', false]]);
-        // Gate off: the same flags (the member's own move reads no shift with the gate off).
-        delete process.env.GATE_TECH_SHIFT_HOURS;
-        db.__script = script({ members: pair(), landed: landed('13:00', '14:00') });
-        const off = fakeRebooker();
-        await unit(off, '13:00-14:00', 'admin');
-        expect(askedByUnit(off)).toEqual([['a', false], ['b', false]]);
+        const rows = { a: left(), b: left({ window_start: '14:00', window_end: '15:00', estimated_duration_minutes: 90 }) };
+        db.__script = stop(rows);
+        const out = await unit(fakeRebooker({ a: { warnings: ['x'] }, b: { warnings: ['x'] } }), '13:00-14:00', 'admin');
+        expect(out.visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+        expect(out.warnings).toEqual(['x', 'x', LINE]);
+        // The stop changed day (08-30 to 09-02): the day-off line or the shift line, on the stored length too.
+        expect(dayWarningFor.mock.calls).toEqual([
+          ['t1', '2026-09-02', { block: rows.a, shiftOnly: false }],
+          ['t1', '2026-09-02', { block: rows.b, shiftOnly: false }],
+        ]);
       });
 
-      test('a line two members state, or two assignments answer, comes back once; an assignment\'s job-type line is not returned', async () => {
+      test('the technician is the one the row has: the named one where the assignment was written, the one who keeps the member where it was refused', async () => {
         process.env.GATE_TECH_SHIFT_HOURS = 'true';
-        db.__script = script({ members: pair(), landed: landed('13:00', '14:00') });
-        const both = fakeRebooker({ a: { warnings: [LINE] }, b: { warnings: [LINE, 'another line'] } });
-        expect((await unit(both, '13:00-14:00', 'admin')).warnings).toEqual([LINE, 'another line']);
-        assignDispatchJob.mockResolvedValue({ changed: true, dayWarning: LINE, warnings: [LINE, 'job type line'], capabilityWarnings: ['job type line'] });
-        db.__script = script({ members: pair(), landed: landed('13:00', '14:00', 't9') });
-        expect((await unit(fakeRebooker(), '13:00-14:00', 'admin', { technicianId: 't9' })).warnings).toEqual([LINE]);
+        refuse('a');
+        db.__script = stop({ a: left(), b: left({ technician_id: 't9', window_start: '14:00', window_end: '15:00' }) }, landed('13:00', '14:00', 't9'));
+        dayWarningFor.mockImplementation(async (technicianId) => `a line about ${technicianId}`);
+        const out = await unit(fakeRebooker(), '13:00-14:00', 'admin', { technicianId: 't9' });
+        expect(out.visitMove.failed.map((x) => x.id)).toEqual(['a']);
+        expect(out.warnings).toEqual([expect.stringContaining('technician reassignment failed'), 'a line about t1', 'a line about t9']);
+        expect(asked()).toEqual([['t1', '2026-09-02', false], ['t9', '2026-09-02', false]]);
       });
 
-      // The member's own move stated no line (it was to be handed over), and it stays on the technician who had it.
-      describe('an assignment that is refused', () => {
-        const KEPT = "Tech's shift is 8:00 AM to 3:00 PM. This visit is outside those hours.";
-        const committed = { technician_id: 't1', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00', estimated_duration_minutes: 45 };
-        let dayWarningFor;
-        const refuse = (id) => assignDispatchJob.mockImplementation(async ({ jobId }) => {
-          if (jobId === id) throw Object.assign(new Error('refused'), { statusCode: 409, isOperational: true });
-          return { changed: true, dayWarning: LINE };
+      // The single mover does not see why a member's own move threw after its commit; the row is asked all the same.
+      test('a member whose own move failed after its commit is asked all the same', async () => {
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        const base = stop({ a: left(), b: left({ window_start: '14:00', window_end: '15:00' }) });
+        const landedAt = { scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00', visit_id: 'v1', technician_id: 't1' };
+        const first = (ops, cols) => (leftRead(ops, cols) ? base.scheduled_services.first(ops, cols) : cols.includes('visit_id') && cols.includes('window_start') ? landedAt : null);
+        db.__script = { ...base, scheduled_services: { ...base.scheduled_services, first } };
+        const out = await unit(fakeRebooker({ a: 'throw' }), '13:00-14:00', 'admin');
+        expect(out.visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+        expect(out.warnings).toEqual([expect.stringContaining('post-move cleanup failed'), LINE]);
+        expect(asked()).toEqual([['t1', '2026-09-02', false], ['t1', '2026-09-02', false]]);
+      });
+
+      describe('a stop that keeps its day', () => {
+        const DAY = '2026-08-30';
+        const onDay = (aStart, bStart, tech = 't1') => landed(aStart, bStart, tech).map((row) => ({ ...row, scheduled_date: DAY }));
+        const sameDay = (newWindow, options = {}) => moveVisitAsUnit({
+          rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: DAY, newWindow, reason: 'office', initiatedBy: 'admin', options,
         });
-        // The one read that asks for the technician and the stored length together: the kept technician's line.
-        const stop = (row = committed, from = landed('13:00', '14:00', 't9')) => {
-          const base = script({ members: pair(), landed: from });
-          const first = (ops, cols) => (cols.includes('technician_id') && cols.includes('estimated_duration_minutes') ? row : null);
-          return { ...base, scheduled_services: { ...base.scheduled_services, first } };
-        };
-        beforeEach(() => { dayWarningFor = jest.spyOn(eligibility, 'dayWarningFor').mockResolvedValue(KEPT); });
-        afterEach(() => dayWarningFor.mockRestore());
 
-        test('the office is told about the technician who keeps the member, on the row as it now is; the move reports that member', async () => {
+        test('new hours: each member is asked the shift alone', async () => {
           process.env.GATE_TECH_SHIFT_HOURS = 'true';
-          refuse('a');
-          db.__script = stop();
-          const out = await unit(fakeRebooker(), '13:00-14:00', 'admin', { technicianId: 't9' });
-          expect(out.visitMove.failed.map((x) => x.id)).toContain('a');
-          // a: the kept technician's line. b: its assignment's line.
-          expect(out.warnings).toEqual(expect.arrayContaining([KEPT, LINE]));
-          expect(dayWarningFor.mock.calls).toEqual([['t1', '2026-09-02', { block: committed, shiftOnly: false }]]);
+          db.__script = stop({ a: left({ scheduled_date: DAY }), b: left({ scheduled_date: DAY, window_start: '14:00', window_end: '15:00' }) }, onDay('13:00', '14:00'));
+          expect((await sameDay('13:00-14:00')).warnings).toEqual([LINE]);
+          expect(asked()).toEqual([['t1', DAY, true], ['t1', DAY, true]]);
         });
 
-        test('a move that kept the day is asked the shift alone; a member with no technician is not asked', async () => {
+        test('another technician, the hours kept: the full line where the assignment was written; a member whose assignment was refused has the day, hours and technician it had, and is not asked', async () => {
           process.env.GATE_TECH_SHIFT_HOURS = 'true';
-          refuse('a');
-          db.__script = stop({ ...committed, scheduled_date: '2026-08-30' });
-          await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-08-30', newWindow: '13:00-14:00', reason: 'office', initiatedBy: 'admin', options: { technicianId: 't9' } }).catch(() => null);
-          expect(dayWarningFor.mock.calls.map((c) => [c[0], c[1], c[2].shiftOnly])).toEqual([['t1', '2026-08-30', true]]);
-          dayWarningFor.mockClear();
-          db.__script = stop({ ...committed, technician_id: null });
-          await unit(fakeRebooker(), '13:00-14:00', 'admin', { technicianId: 't9' });
-          expect(dayWarningFor).not.toHaveBeenCalled();
+          refuse('b');
+          const rows = { a: left({ scheduled_date: DAY, technician_id: 't9', window_start: '09:00', window_end: '10:00' }), b: left({ scheduled_date: DAY, window_start: '10:00', window_end: '11:00' }) };
+          db.__script = stop(rows, onDay('09:00', '10:00', 't9'));
+          const out = await sameDay('09:00-10:00', { technicianId: 't9' });
+          expect(out.visitMove.failed.map((x) => x.id)).toEqual(['b']);
+          expect(asked()).toEqual([['t9', DAY, false]]);
+          expect(out.warnings).toEqual([expect.stringContaining('technician reassignment failed'), LINE]);
         });
 
-        test('gate off, or a move the office did not start: no read, and no line', async () => {
-          refuse('a');
-          db.__script = stop();
-          const off = await unit(fakeRebooker(), '13:00-14:00', 'admin', { technicianId: 't9' });
-          expect((off.warnings || []).includes(KEPT)).toBe(false);
-          process.env.GATE_TECH_SHIFT_HOURS = 'true';
-          db.__script = stop(committed, landed('10:00', '11:00', 't9'));
-          const automatic = await unit(fakeRebooker(), '10:00-11:00', 'auto_dispatch', { technicianId: 't9' });
-          expect((automatic.warnings || []).includes(KEPT)).toBe(false);
-          expect(dayWarningFor).not.toHaveBeenCalled();
+        // memberOfficeLine: `expect` is the row as the plan read it.
+        test('the hours are the start, and the end when the plan had one: an end the member\'s own move derived is not a change', async () => {
+          const { memberOfficeLine } = vg._test;
+          const plan = { scheduled_date: DAY, technician_id: 't1', window_start: '09:00:00', window_end: '10:00:00' };
+          const ask = async (row, expect = plan) => {
+            dayWarningFor.mockClear();
+            db.__script = { scheduled_services: { first: () => row } };
+            return [await memberOfficeLine({ id: 'a', expect }), asked()];
+          };
+          const row = left({ scheduled_date: DAY, window_start: '09:00', window_end: '10:00' });
+          expect(await ask(row)).toEqual([undefined, []]);
+          expect(await ask({ ...row, window_end: '10:30' })).toEqual([LINE, [['t1', DAY, true]]]);
+          expect(await ask({ ...row, window_start: '09:30' })).toEqual([LINE, [['t1', DAY, true]]]);
+          expect(await ask(row, { ...plan, window_end: null })).toEqual([undefined, []]);
+          expect(await ask({ ...row, window_start: '09:30' }, { ...plan, window_end: null })).toEqual([LINE, [['t1', DAY, true]]]);
+          // A row that is gone is not asked.
+          expect(await ask(null)).toEqual([undefined, []]);
         });
       });
 
-      // alignMember re-points a member only for a named technician (or a named null): an own `technicianId: undefined`
-      // names none, so each member keeps its technician and is told by its own move.
-      test('an option object with technicianId undefined hands nobody over', async () => {
+      test('a member with no technician is not asked, and a member that did not move is not read', async () => {
         process.env.GATE_TECH_SHIFT_HOURS = 'true';
-        db.__script = script({ members: pair(), landed: landed('13:00', '14:00') });
-        const rebooker = fakeRebooker();
-        expect((await unit(rebooker, '13:00-14:00', 'admin', { technicianId: undefined })).visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
-        expect(askedByUnit(rebooker)).toEqual([['a', false], ['b', false]]);
-        expect(assignDispatchJob).not.toHaveBeenCalled();
+        db.__script = stop({ a: left({ technician_id: null }), b: left() });
+        const out = await unit(fakeRebooker({ b: 'throw' }), '13:00-14:00', 'admin');
+        expect(out.visitMove).toMatchObject({ moved: ['a'], failed: [expect.objectContaining({ id: 'b' })] });
+        expect(dayWarningFor).not.toHaveBeenCalled();
+        expect(out.warnings).toEqual([expect.stringContaining('did not move with this stop')]);
+        expect(db.__calls.filter((c) => c.table === 'scheduled_services' && c.op === 'first' && leftRead(c.ops, c.cols)).map((c) => c.ops[0][1].id)).toEqual(['a']);
       });
 
-      test('a move the office did not start: its members\' lines come back as they are, and no assignment line', async () => {
+      test('a read that fails is logged; the move is committed and is not failed for a line', async () => {
         process.env.GATE_TECH_SHIFT_HOURS = 'true';
-        db.__script = script({ members: pair(), landed: landed('10:00', '11:00') });
-        const both = fakeRebooker({ a: { warnings: [LINE] }, b: { warnings: [LINE] } });
-        expect((await unit(both, '10:00-11:00', 'tech')).warnings).toEqual([LINE, LINE]);
-        assignDispatchJob.mockResolvedValue({ changed: true, dayWarning: LINE, warnings: [LINE] });
-        db.__script = script({ members: pair(), landed: landed('10:00', '11:00', 't9') });
-        const moved = await unit(fakeRebooker(), '10:00-11:00', 'auto_dispatch', { technicianId: 't9' });
-        expect(moved.visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
-        expect(moved.warnings).toBeUndefined();
+        const base = stop({});
+        const first = (ops, cols) => { if (leftRead(ops, cols)) throw new Error('read failed'); return null; };
+        db.__script = { ...base, scheduled_services: { ...base.scheduled_services, first } };
+        const out = await unit(fakeRebooker(), '13:00-14:00', 'admin');
+        expect(out.visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+        expect(out.warnings).toBeUndefined();
+        expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('the office line of moved member a was not read: read failed'));
       });
 
-      test('gate off: the members\' lines come back as they are, and no assignment line', async () => {
-        db.__script = script({ members: pair(), landed: landed('13:00', '14:00') });
-        const both = fakeRebooker({ a: { warnings: [LINE] }, b: { warnings: [LINE] } });
-        expect((await unit(both, '13:00-14:00', 'admin')).warnings).toEqual([LINE, LINE]);
-        assignDispatchJob.mockResolvedValue({ changed: true, dayWarning: LINE, warnings: [LINE] });
-        db.__script = script({ members: pair(), landed: landed('13:00', '14:00', 't9') });
-        expect((await unit(fakeRebooker(), '13:00-14:00', 'admin', { technicianId: 't9' })).warnings).toBeUndefined();
+      test('gate off, or a move the office did not start: no read and no line; the members\' own lines come back as they are', async () => {
+        const rows = { a: left(), b: left() };
+        const lines = () => fakeRebooker({ a: { warnings: [LINE] }, b: { warnings: [LINE] } });
+        db.__script = stop(rows);
+        expect((await unit(lines(), '13:00-14:00', 'admin')).warnings).toEqual([LINE, LINE]);
+        process.env.GATE_TECH_SHIFT_HOURS = 'true';
+        db.__script = stop(rows, landed('10:00', '11:00'));
+        expect((await unit(lines(), '10:00-11:00', 'tech')).warnings).toEqual([LINE, LINE]);
+        db.__script = stop(rows, landed('10:00', '11:00', 't9'));
+        expect((await unit(fakeRebooker(), '10:00-11:00', 'auto_dispatch', { technicianId: 't9' })).warnings).toBeUndefined();
+        expect(dayWarningFor).not.toHaveBeenCalled();
+        expect(db.__calls.some((c) => c.table === 'scheduled_services' && c.op === 'first' && leftRead(c.ops, c.cols))).toBe(false);
       });
     });
 
