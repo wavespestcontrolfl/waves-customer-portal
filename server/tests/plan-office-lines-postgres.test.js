@@ -253,6 +253,54 @@ postgres('the plan\'s other visits, told from the rows an Edit save leaves (real
     });
   });
 
+  describe('only the rows this save wrote', () => {
+    // The statements one run sends, as text.
+    const sent = async (run) => {
+      const seen = [];
+      const listener = (query) => seen.push(query.sql);
+      db.on('query', listener);
+      try {
+        return { out: await run(), asked: seen.filter((sql) => /pg_xact_status/.test(sql)).length };
+      } finally {
+        db.removeListener('query', listener);
+      }
+    };
+    // Another writer, on its own connection: its change is committed while the save's transaction is open.
+    const otherWriter = (id, values) => db('scheduled_services').where({ id }).update(values);
+
+    test('a change another writer commits during the save is not this save\'s: no line for it', async () => {
+      // Monday to Thursday. Another writer puts one visit on a Friday; this save puts another on a Saturday.
+      const p = await makePlan(monThu, [MON, TUE, WED]);
+      const writes = async (trx) => {
+        await otherWriter(p.others[0], { scheduled_date: FRI });
+        await put(p.others[1], { scheduled_date: SAT })(trx);
+      };
+      expect(await save(p.first, writes)).toEqual([offLine(monThu, 'Saturdays')]);
+      // The other writer's change alone, in a save that writes only the visit it edits: no line.
+      const notesOnly = async (trx) => {
+        await put(p.first, { notes: 'a notes-only save' })(trx);
+        await otherWriter(p.others[1], { scheduled_date: FRI, technician_id: weekMorning.id, window_start: '13:00', window_end: '14:00' });
+      };
+      expect(await save(p.first, notesOnly)).toEqual([]);
+    });
+
+    test('a write the save makes inside a savepoint is this save\'s', async () => {
+      const p = await makePlan(monThu, [MON, TUE, WED]);
+      const writes = (trx) => trx.transaction(async (inner) => {
+        await put(p.others[0], { scheduled_date: FRI })(inner);
+        const added = visitRow({ scheduled_date: SAT, technician_id: monThu.id, is_recurring: true, recurring_parent_id: p.first });
+        await inner('scheduled_services').insert(added);
+      });
+      expect(await save(p.first, writes)).toEqual([offLine(monThu, 'Fridays'), offLine(monThu, 'Saturdays')]);
+    });
+
+    test('who wrote the rows is asked once, and only when a visit is not as it was', async () => {
+      const p = await makePlan(monThu, [MON, TUE]);
+      expect(await sent(() => save(p.first, put(p.first, { scheduled_date: FRI })))).toEqual({ out: [], asked: 0 });
+      expect(await sent(() => save(p.first, put(p.all, { scheduled_date: FRI })))).toEqual({ out: [offLine(monThu, 'Fridays')], asked: 1 });
+    });
+  });
+
   describe('gate off, and a read that fails', () => {
     const counted = async (run) => {
       const seen = [];

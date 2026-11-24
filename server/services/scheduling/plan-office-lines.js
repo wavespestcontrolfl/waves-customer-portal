@@ -25,14 +25,11 @@
  * Gate off: no read and no line.
  *
  * The two reads take no row lock: an advisory line is not worth a lock that can
- * hold or fail another writer. The save takes the first read after the locks it
- * takes ahead of its writes (its fences, the plan's maintenance lock when it
- * takes it, the customer's comms lock and row): the waits for those are over,
- * and a writer that takes one of them cannot change the plan between the
- * reads. A writer that takes none of them (a move of one other visit, an
- * assignment) and commits a change to one of the plan's other visits between
- * the reads is read as this save's: the line is then true of the row, and
- * about another editor's change.
+ * hold or fail another writer. So another writer (a move of one other visit,
+ * an assignment from the board) can commit a change to one of the plan's
+ * visits between the reads. That change is not this save's: of the visits whose
+ * row is not the row it was, only those whose row THIS transaction wrote are
+ * asked about (writtenHere).
  */
 const { techShiftHoursLive } = require('../../config/feature-gates');
 const { failSoftRead } = require('../../utils/savepoint-read');
@@ -54,6 +51,17 @@ async function read(conn, what, query) {
   if (out === FAILED) require('../logger').warn(`[plan-office-lines] the plan's rows ${what} the save were not read: no line for the plan's other visits`);
   return out === FAILED ? null : out;
 }
+
+// The id of the transaction that wrote a row, as pg_xact_status takes it. The row holds 32 bits of it (xmin)
+// and the function takes 64: of the ids that end in those 32 bits, the one nearest this transaction's own.
+const ROW_WRITER = `(pg_current_xact_id()::text::bigint
+  + ((xmin::text::bigint - (pg_current_xact_id()::text::bigint & 4294967295) + 6442450944) % 4294967296) - 2147483648)::text::xid8`;
+
+// The ids among `ids` whose row THIS transaction wrote. A statement sees a row that a committed transaction
+// wrote, or that its own transaction wrote (inside a savepoint too). So a row it sees whose writer is not
+// committed yet is its own, and a row another writer changed and committed meanwhile is not.
+const writtenHere = (c, ids) => c('scheduled_services').whereIn('id', ids)
+  .whereRaw(`pg_xact_status(${ROW_WRITER}) = 'in progress'`).pluck('id');
 
 const openRows = (c, planIds) => c('scheduled_services')
   .where((q) => q.whereIn('id', planIds).orWhereIn('recurring_parent_id', planIds))
@@ -86,13 +94,18 @@ async function planRowsBefore(conn, visitId) {
 async function planOfficeLines(conn, visitId, before) {
   if (!before) return [];
   const rows = await read(conn, 'after', (c) => openRows(c, before.planIds));
-  // One question per technician, block and kind of change: a plan's visits share them, so a plan is one or two reads.
-  const asks = new Map();
+  const changed = [];
   for (const row of (rows || []).filter((other) => !same(other.id, visitId))) {
     // `was`: the visit's row before the save; none for a visit the save added.
     const was = before.rows.get(String(row.id));
     const kept = !!was && was.day === row.day && same(was.technician_id, row.technician_id);
-    if (kept && sameBlock(was, row)) continue;
+    if (!(kept && sameBlock(was, row))) changed.push({ row, kept });
+  }
+  if (!changed.length) return [];
+  const mine = new Set(await read(conn, 'written by', (c) => writtenHere(c, changed.map(({ row }) => row.id))));
+  // One question per technician, block and kind of change: a plan's visits share them, so a plan is one or two reads.
+  const asks = new Map();
+  for (const { row, kept } of changed.filter((visit) => mine.has(visit.row.id))) {
     const { startMin, endMin } = rowBlockMinutes(row);
     const key = [row.technician_id, kept, startMin, endMin].join('|');
     const ask = asks.get(key) || { technicianId: row.technician_id, shiftOnly: kept, block: row, days: [] };
