@@ -10,6 +10,7 @@ const db = require('../../models/db');
 const {
   looseAddressKey, monthsAgoIso, CONSTRUCTION_ACTIVE_MONTHS, ACTIVE_SEEN_WITHIN_DAYS,
 } = require('../property-lookup/manatee-permit-sync');
+const { slugCandidates } = require('./home-slug');
 
 // The two partial unique indexes over the live rows, and the reason a row gets when one of them refuses it.
 const LIVE_INDEX_REASONS = {
@@ -17,6 +18,10 @@ const LIVE_INDEX_REASONS = {
   mail_prospects_one_live_per_permit: 'duplicate_permit',
 };
 const NEW_HOME_CO_MONTHS = 24;
+// The rows that get a page slug (the short typed address on the postcard): live homes of the new-home list.
+const SLUG_LIST_KEY = 'new_home';
+const SLUG_STATUSES = ['eligible', 'held_back'];
+const SLUG_INDEX = 'mail_prospects_page_slug_uniq';
 
 // Every writable column. A save writes all of them, so a row that was `unmatched` and is now matched (or the other
 // way round) never keeps a stale parcel or permit from the earlier read.
@@ -233,9 +238,78 @@ async function upsert(row, conn) {
     })
     .onConflict(['list_key', 'source', 'source_ref'])
     .merge({ ...fields, last_checked_at: now, updated_at: now }) // first_seen_at and created_at stay as they were
-    .returning(['status', 'reason']);
-  return { status: saved.status, reason: saved.reason, written: true };
+    .returning(['id', 'status', 'reason']);
+  return { id: saved.id, status: saved.status, reason: saved.reason, written: true };
 }
+
+/**
+ * Give one live home of the new-home list its page slug, once. A row that has a slug keeps it (the postcard prints it,
+ * so it never changes), and a row that is not a live home of the list gets none. The candidates are the plain slug
+ * ("101-example"), then the same with the ZIP ("101-example-34211"); the unique index decides which is free, so two
+ * runs cannot give one slug to two homes. Each attempt is its own savepoint (or transaction), so a refusal (23505 on the
+ * slug index) never aborts a caller's transaction. When both are taken, or the address gives no slug, the row keeps
+ * NULL (the card prints the QR code only) and a later call tries again. Returns the slug the row holds, or null.
+ */
+async function assignPageSlug(id, conn = db) {
+  const row = await conn('mail_prospects')
+    .where({ id, list_key: SLUG_LIST_KEY })
+    .whereIn('status', SLUG_STATUSES)
+    .first('page_slug', 'address_line1', 'zip');
+  if (!row) return null;
+  if (row.page_slug) return row.page_slug;
+  for (const slug of slugCandidates({ addressLine1: row.address_line1, zip: row.zip })) {
+    try {
+      const changed = await conn.transaction((attempt) => attempt('mail_prospects')
+        .where({ id, list_key: SLUG_LIST_KEY })
+        .whereIn('status', SLUG_STATUSES)
+        .whereNull('page_slug')
+        .update({ page_slug: slug }));
+      if (changed) return slug;
+      // Nobody changed it: another run gave this row a slug in the meantime. Read what it holds.
+      const now = await conn('mail_prospects').where({ id }).first('page_slug');
+      return now ? now.page_slug : null;
+    } catch (err) {
+      const taken = err && err.code === '23505' && String(err.constraint || err.message).includes(SLUG_INDEX);
+      if (!taken) throw err;
+    }
+  }
+  return null;
+}
+
+/**
+ * One-shot backfill for the live homes saved before slugs existed (ops script; the normal path is saveProspect). Oldest
+ * row first, so the older home of two with the same street keeps the plain slug. Reads at most `limit` rows (default
+ * 500) that have no slug and tries each once. Returns `{ tried, assigned, withoutSlug }`; a home left without a slug
+ * has an address that gives none, or both candidates are taken.
+ */
+// `after` is the cursor a previous call returned (`next`): a home that can never get a slug is not read again, so a
+// batch of such homes cannot stop the backfill from reaching the rows after them.
+async function backfillPageSlugs({ limit = 500, after = null } = {}, conn = db) {
+  if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1) throw new TypeError('backfillPageSlugs: limit must be a positive integer');
+  let query = conn('mail_prospects')
+    .where({ list_key: SLUG_LIST_KEY })
+    .whereIn('status', SLUG_STATUSES)
+    .whereNull('page_slug');
+  if (after) {
+    query = query.whereRaw('(created_at, id) > (?::timestamptz, ?)', [after.createdAt, after.id]);
+  }
+  const rows = await query
+    .orderBy([{ column: 'created_at', order: 'asc' }, { column: 'id', order: 'asc' }])
+    .limit(limit)
+    // created_at as text keeps Postgres's microseconds (a JS Date keeps milliseconds, and the cursor would re-read rows).
+    .select('id', conn.raw('created_at::text AS created_at_text'));
+  const last = rows[rows.length - 1];
+  const summary = { tried: 0, assigned: 0, withoutSlug: 0, next: rows.length === limit && last ? { createdAt: last.created_at_text, id: last.id } : null };
+  for (const { id } of rows) {
+    summary.tried += 1;
+    if (await assignPageSlug(id, conn)) summary.assigned += 1;
+    else summary.withoutSlug += 1;
+  }
+  return summary;
+}
+
+// What saveProspect returns: the row's id stays inside the store.
+const publicResult = ({ status, reason, written }) => ({ status, reason, written });
 
 /**
  * Insert the row, or update the one with the same (list_key, source, source_ref). When the home is already live on
@@ -269,18 +343,23 @@ async function saveProspect(row, conn = db) {
       refuseRowTheTableWouldRefuse(row);
       return { status: stored.status, reason: stored.reason, written: false };
     }
+    let saved;
     try {
-      return await trx.transaction((attempt) => upsert(row, attempt));
+      saved = await trx.transaction((attempt) => upsert(row, attempt));
     } catch (err) {
       const refused = err && err.code === '23505' ? String(err.constraint || err.message) : '';
       const index = Object.keys(LIVE_INDEX_REASONS).find((name) => refused.includes(name));
       if (!index) throw err;
-      return upsert({ ...row, status: 'not_eligible', reason: LIVE_INDEX_REASONS[index] }, trx);
+      return publicResult(await upsert({ ...row, status: 'not_eligible', reason: LIVE_INDEX_REASONS[index] }, trx));
     }
+    // A home that is live after this write gets its page slug here, in the same transaction (assignPageSlug does
+    // nothing for a row that has one, or that is not a live home of the new-home list).
+    if (row.list_key === SLUG_LIST_KEY && SLUG_STATUSES.includes(saved.status)) await assignPageSlug(saved.id, trx);
+    return publicResult(saved);
   });
 }
 
 module.exports = {
   findBySourceRefs, newHomePermitsForParcels, addressKnownToWaves, saveProspect, permitPinForms, NEW_HOME_CO_MONTHS,
-  cityNamesOf,
+  cityNamesOf, assignPageSlug, backfillPageSlugs,
 };
