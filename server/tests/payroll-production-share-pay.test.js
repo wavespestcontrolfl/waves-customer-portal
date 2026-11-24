@@ -434,9 +434,9 @@ describe('the credit rules (applyLedger)', () => {
     const run = (row, paid = paidOf()) => productionShare.applyLedger([row], paid, set)[0];
     // a review row (an invoice paid elsewhere) takes the owner's credit, set against the conflict it had
     const elsewhere = paidOf({ invoices: { 'inv-1': '2026-09-14' } });
-    const basis = productionShare.applyLedger([plain('visit-2', ['inv-1'])], elsewhere)[0].conflictBasis;
-    expect(basis).toMatch(/^[0-9a-f]{16}$/);
-    set.set('visit-2', { ...set.get('visit-2'), conflictBasis: basis });
+    const basis = productionShare.applyLedger([plain('visit-2', ['inv-1'])], elsewhere)[0].conflictTuples;
+    expect(basis).toHaveLength(1);
+    set.set('visit-2', { ...set.get('visit-2'), conflictTuples: basis });
     expect(run(plain('visit-2', ['inv-1']), elsewhere)).toMatchObject({
       kind: 'owner_set', creditCents: 45000, needsReview: false, reason: 'Set by the owner: Checked the invoice', invoices: ['inv-1'], bases: [],
     });
@@ -450,57 +450,78 @@ describe('the credit rules (applyLedger)', () => {
     expect(run(plain('visit-2', ['inv-1']), paidOf({ visits: { 'visit-2': '2026-09-14' } }))).toMatchObject({ kind: 'already_paid', creditCents: 0, needsReview: true });
   });
 
-  test('AUDIT :913 STOP OVERRIDE: a NEW conflict (invoice, package or package root paid elsewhere since it was set) ignores the credit as review', () => {
-    const credit = (conflictBasis) => new Map([['visit-2', { creditCents: 45000, reason: 'Checked', technicianId: undefined, conflictBasis, revision: 'rev' }]]);
-    const run = (row, paid, basis) => productionShare.applyLedger([row], paid, credit(basis))[0];
-    const basisOf = (row, paid) => productionShare.applyLedger([row], paid)[0].conflictBasis;
+  test('AUDIT :913 STOP OVERRIDE: a paid row NOT in the stored conflict tuples (paid elsewhere since it was set) ignores the credit as review', () => {
+    const credit = (conflictTuples) => new Map([['visit-2', { creditCents: 45000, reason: 'Checked', technicianId: undefined, conflictTuples, revision: 'rev' }]]);
+    const run = (row, paid, stored) => productionShare.applyLedger([row], paid, credit(stored))[0];
+    const tuplesOf = (row, paid) => productionShare.applyLedger([row], paid)[0].conflictTuples;
     const row = plain('visit-2', ['inv-1']);
-    // set with no conflict: the basis is empty and the credit is used
-    expect(basisOf(row, paidOf())).toBe('');
-    expect(run(row, paidOf(), '')).toMatchObject({ kind: 'owner_set', creditCents: 45000 });
+    // set with no conflict: nothing stored and nothing current, the credit is used
+    expect(tuplesOf(row, paidOf())).toEqual([]);
+    expect(run(row, paidOf(), [])).toMatchObject({ kind: 'owner_set', creditCents: 45000 });
     // the invoice is paid elsewhere afterwards: review, $0, the revision kept so the owner can clear it
     const later = paidOf({ invoices: { 'inv-1': '2026-09-14' } });
-    const out = run(row, later, '');
+    const out = run(row, later, []);
     expect(out).toMatchObject({ kind: 'owner_override_conflict_changed', creditCents: 0, needsReview: true, overrideRevision: 'rev', invoices: [] });
     expect(out.reason).toContain('paid elsewhere since the owner set its credit');
-    // set against that same conflict: it is the owner's knowing choice, the credit is used
-    expect(run(row, later, basisOf(row, later))).toMatchObject({ kind: 'owner_set', creditCents: 45000 });
-    // a different paid-elsewhere state later is new again
+    // set against that same conflict: the owner's knowing choice, the credit is used
+    expect(run(row, later, tuplesOf(row, later))).toMatchObject({ kind: 'owner_set', creditCents: 45000 });
+    // a paid row that is not in the stored list is new, however the stored list looks
     const other = paidOf({ invoices: { 'inv-1': '2026-09-07' } });
-    expect(run(row, other, basisOf(row, later)).kind).toBe('owner_override_conflict_changed');
+    expect(run(row, other, tuplesOf(row, later)).kind).toBe('owner_override_conflict_changed');
+    // ONE tuple added to what was stored is new; the stored list being a SUPERSET of the current (a paid run was voided) is fine
+    const both = { ...later, rows: [...later.rows, ...other.rows] };
+    expect(run(row, both, tuplesOf(row, later)).kind).toBe('owner_override_conflict_changed');
+    expect(run(row, later, tuplesOf(row, both))).toMatchObject({ kind: 'owner_set' });
+    expect(run(row, paidOf(), tuplesOf(row, both))).toMatchObject({ kind: 'owner_set' });
     // a package slot taken since, and a package root fixed since
     const slotRow = { visitId: 'visit-2', workDate: '2026-09-21', kind: 'multi_visit_job', creditCents: 0, needsReview: true, ledger: null, linkedInvoices: [],
       packageSlot: { rootId: 'root', slot: 2, sold: 2, price: null, visits: ['root', 'visit-2'] }, related: ['root', 'visit-2'] };
-    expect(basisOf(slotRow, paidOf())).toBe('');
-    expect(run(slotRow, paidOf({ jobs: { root: [200000, 2, [2]] } }), '').kind).toBe('owner_override_conflict_changed');
-    expect(run({ ...plain('visit-2', []), linkedInvoices: [] }, paidOf({ jobs: { 'visit-2': [200000, 2, [2]] } }), '').kind).toBe('owner_override_conflict_changed');
-    // ONE rule: the package's own earlier paid row is a paid row that touches the stop too, so it is part of the state it was set against
+    expect(tuplesOf(slotRow, paidOf())).toEqual([]);
+    expect(run(slotRow, paidOf({ jobs: { root: [200000, 2, [2]] } }), []).kind).toBe('owner_override_conflict_changed');
+    expect(run({ ...plain('visit-2', []), linkedInvoices: [] }, paidOf({ jobs: { 'visit-2': [200000, 2, [2]] } }), []).kind).toBe('owner_override_conflict_changed');
+    // ONE rule: the package's own earlier paid row touches the stop too, so it is part of what the credit was set against
     const own = paidOf({ jobs: { root: [200000, 2, [1]] } });
-    expect(run(slotRow, own, '').kind).toBe('owner_override_conflict_changed');
-    expect(run(slotRow, own, basisOf(slotRow, own))).toMatchObject({ kind: 'owner_set' });
+    expect(run(slotRow, own, []).kind).toBe('owner_override_conflict_changed');
+    expect(run(slotRow, own, tuplesOf(slotRow, own))).toMatchObject({ kind: 'owner_set' });
   });
 
-  test('AUDIT :952/:973: the conflict state hashes EVERY paid stop row that touches the stop, in stable order, run and week included', () => {
+  test('AUDIT :952/:973: the conflict tuples are EVERY paid stop row that touches the stop, sorted, run and week included', () => {
     const row = plain('visit-2', ['inv-1']);
     const paidRow = (weekStart, visitId, extra = {}) => ({ runId: `run-${weekStart}`, weekStart, visitId, invoices: [], bases: [], ...extra });
-    const basis = (rows) => productionShare.applyLedger([row], { visits: new Map(), invoices: new Map(), jobs: new Map(), rows })[0].conflictBasis;
+    const tuples = (rows, which = row) => productionShare.applyLedger([which], { visits: new Map(), invoices: new Map(), jobs: new Map(), rows })[0].conflictTuples;
     const first = paidRow('2026-09-14', 'visit-1', { invoices: ['inv-1'] });
     const later = paidRow('2026-09-21', 'visit-3', { invoices: ['inv-1'] });
-    expect(basis([])).toBe('');
-    expect(basis([first])).toMatch(/^[0-9a-f]{16}$/);
-    expect(basis([first, later])).not.toBe(basis([first])); // a later payment of the same invoice, the earliest week unchanged
-    expect(basis([later, first])).toBe(basis([first, later])); // stable under the order read
-    expect(basis([paidRow('2026-09-14', 'visit-4', { invoices: ['inv-1'] })])).not.toBe(basis([first]));
-    // a paid row of another run for the same visit and week is another tuple (a voided and redrafted run is a different run)
-    expect(basis([{ ...first, runId: 'run-other' }])).not.toBe(basis([first]));
-    // a visit on one of the stop's invoices, with no invoice recorded on its row, and a paid row that touches nothing related
-    expect(basis([paidRow('2026-09-14', 'visit-1')])).toMatch(/^[0-9a-f]{16}$/);
-    expect(basis([paidRow('2026-09-14', 'visit-77', { invoices: ['inv-77'] })])).toBe('');
-    // a package slot paid in two weeks (a slot is part of the tuple, with its week and run)
+    expect(tuples([])).toEqual([]);
+    expect(tuples([first])).toHaveLength(1);
+    expect(tuples([first, later])).toHaveLength(2); // a later payment of the same invoice, the earliest week unchanged
+    expect(tuples([later, first])).toEqual(tuples([first, later])); // stable under the order read
+    expect(tuples([paidRow('2026-09-14', 'visit-4', { invoices: ['inv-1'] })])).not.toEqual(tuples([first]));
+    expect(tuples([{ ...first, runId: 'run-other' }])).not.toEqual(tuples([first])); // a voided and redrafted run is another run
+    expect(tuples([paidRow('2026-09-14', 'visit-1')])).toHaveLength(1); // a visit on one of the stop's invoices, no invoice recorded
+    expect(tuples([paidRow('2026-09-14', 'visit-77', { invoices: ['inv-77'] })])).toEqual([]);
     const slotRow = { visitId: 'visit-2', workDate: '2026-09-21', kind: 'multi_visit_job', creditCents: 0, needsReview: true, ledger: null, linkedInvoices: [], related: ['root', 'visit-2'] };
-    const slotBasis = (rows) => productionShare.applyLedger([slotRow], { visits: new Map(), invoices: new Map(), jobs: new Map(), rows })[0].conflictBasis;
     const slot = (weekStart) => paidRow(weekStart, 'visit-5', { bases: [{ basisType: 'job', basisId: 'root', slot: 2 }] });
-    expect(slotBasis([slot('2026-09-14'), slot('2026-09-21')])).not.toBe(slotBasis([slot('2026-09-14')]));
+    expect(tuples([slot('2026-09-14'), slot('2026-09-21')], slotRow)).toHaveLength(2);
+  });
+
+  test('AUDIT :1210: the stop revision covers the kind the rules gave it, its pricing facts, its invoices, its package slot and its conflict tuples', () => {
+    const revision = (row, rows = []) => productionShare.applyLedger([row], { visits: new Map(), invoices: new Map(), jobs: new Map(), rows })[0].stopRevision;
+    const base = { ...plain('visit-2', ['inv-1']), pricing: { serviceType: 'General Pest Control', originalId: null } };
+    expect(revision(base)).toMatch(/^[0-9a-f]{16}$/);
+    expect(revision(base)).toBe(revision({ ...base }));
+    expect(revision({ ...base, kind: 'priced' })).toBe(revision(base)); // a field the rules do not read is not part of it
+    // reclassified (a callback of earlier work, another service type, other invoices, another package slot): another revision
+    expect(revision({ ...base, pricing: { serviceType: 'Pest Control Re-Service', originalId: 'orig-1' } })).not.toBe(revision(base));
+    expect(revision({ ...base, pricing: { serviceType: 'General Pest Control', originalId: 'orig-1' } })).not.toBe(revision(base));
+    expect(revision({ ...base, linkedInvoices: ['inv-1', 'inv-2'] })).not.toBe(revision(base));
+    expect(revision({ ...base, packageSlot: { rootId: 'root', slot: 2, visits: [] } })).not.toBe(revision(base));
+    // the kind the RULES gave: not the owner's credit on top of it
+    const withCredit = productionShare.applyLedger([base], { visits: new Map(), invoices: new Map(), jobs: new Map(), rows: [] },
+      new Map([['visit-2', { creditCents: 100, reason: 'x', conflictTuples: [] }]]))[0];
+    expect(withCredit.kind).toBe('owner_set');
+    expect(withCredit.stopRevision).toBe(revision(base));
+    // a paid row that touches the stop
+    expect(revision(base, [{ runId: 'run-1', weekStart: '2026-09-14', visitId: 'visit-1', invoices: ['inv-1'], bases: [] }])).not.toBe(revision(base));
   });
 
   test('AUDIT :306: a check with a share above $0 and the overtime coverage not set is blocked, not stored with zero qualified overtime', () => {

@@ -193,7 +193,7 @@ describe('Production share preview', () => {
       fireEvent.click(set);
       await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/stop-override', expect.anything()));
       expect(call.mock.calls.find(([path]) => path === '/production-share/stop-override')[1]).toEqual({
-        method: 'PUT', body: { technicianId: 'tech-a', visitId: 'v2', weekStart: '2026-09-14', creditCents: 4550, reason: 'checked the invoice', conflictBasis: '' },
+        method: 'PUT', body: { technicianId: 'tech-a', visitId: 'v2', weekStart: '2026-09-14', creditCents: 4550, reason: 'checked the invoice', stopRevision: '' },
       });
       await waitFor(() => expect(call).toHaveBeenLastCalledWith('/production-share/preview?technicianId=tech-a&weekStart=2026-09-14'));
     });
@@ -310,16 +310,16 @@ describe('Production share preview', () => {
       }));
     });
 
-    it('AUDIT :1212: Set credit sends the conflict state of the stop as the page showed it', async () => {
+    it('AUDIT :1210: Set credit sends the revision of the stop as the page showed it', async () => {
       const call = await forms([
-        { visitId: 'v12', workDate: '2026-09-15', conflictBasis: '0123456789abcdef', serviceType: 'Pest Control', kind: 'invoice_paid_elsewhere', creditCents: 0,
+        { visitId: 'v12', workDate: '2026-09-15', stopRevision: '0123456789abcdef', serviceType: 'Pest Control', kind: 'invoice_paid_elsewhere', creditCents: 0,
           reason: 'This invoice also covers a visit paid', needsReview: true, refundCents: 0 },
       ])();
       fireEvent.change(screen.getByLabelText('Credit ($)'), { target: { value: '12' } });
       fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'why' } });
       fireEvent.click(screen.getByRole('button', { name: 'Set credit' }));
       await waitFor(() => expect(call).toHaveBeenCalledWith('/production-share/stop-override', {
-        method: 'PUT', body: { technicianId: 'tech-a', visitId: 'v12', weekStart: '2026-09-14', creditCents: 1200, reason: 'why', conflictBasis: '0123456789abcdef' },
+        method: 'PUT', body: { technicianId: 'tech-a', visitId: 'v12', weekStart: '2026-09-14', creditCents: 1200, reason: 'why', stopRevision: '0123456789abcdef' },
       }));
     });
 

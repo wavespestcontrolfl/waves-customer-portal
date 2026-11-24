@@ -646,15 +646,17 @@ async function callbackCredit(conn, stop, technicianId, inForce) {
   if (found.review) return toReview('callback_review', found.review);
   const original = found.original;
   if (!original) return toReview('callback_review', 'No earlier completed work of the same line at this property.');
-  if (!original.technician_id) return toReview('callback_review', 'The original work has no technician on file.');
+  // The original work's id rides with every answer past this point: it is one of the pricing facts a credit set by the owner is checked against.
+  const withOriginal = (credit) => ({ ...credit, originalId: original.id });
+  if (!original.technician_id) return withOriginal(toReview('callback_review', 'The original work has no technician on file.'));
   if (canonicalId(original.technician_id) === canonicalId(technicianId)) {
     const age = daysBetween(original.work_date, stop.work_date);
-    return age <= OWN_CALLBACK_DAYS
+    return withOriginal(age <= OWN_CALLBACK_DAYS
       ? credited('callback_own', 0, `Callback on own work, ${age} days after it`)
-      : toReview('callback_review', `Callback on own work ${age} days after it. The Terms cover 30 days only.`);
+      : toReview('callback_review', `Callback on own work ${age} days after it. The Terms cover 30 days only.`));
   }
-  if (!inForce) return toReview('callback_review', "A callback on another technician's work, and no production share setting is on file.");
-  return credited('callback_other', inForce.callbackStopValueCents, "Callback on another technician's work");
+  if (!inForce) return withOriginal(toReview('callback_review', "A callback on another technician's work, and no production share setting is on file."));
+  return withOriginal(credited('callback_other', inForce.callbackStopValueCents, "Callback on another technician's work"));
 }
 
 function ownPriceCredit(stop, invoiced) {
@@ -828,6 +830,7 @@ async function creditsOfStops(conn, technicianId, stops, inForce, facts = null) 
     // The package slot of a package visit, review rows too: an owner-set credit keeps it as a job basis (applyLedger, withOverride).
     const packageSlot = packageSlotOf(stop, job, callback, credit);
     const shown = { ...credit };
+    delete shown.originalId;
     delete shown.job;
     delete shown.invoiceBased;
     rows.push({
@@ -839,6 +842,8 @@ async function creditsOfStops(conn, technicianId, stops, inForce, facts = null) 
       unallocatedRefunds: invoiced.unallocated || [],
       ledger: ledgerOf(credit, invoiced),
       packageSlot,
+      // The pricing facts the owner's credit is checked against under the lock (applyLedger, stopRevision).
+      pricing: { serviceType: stop.service_type || null, originalId: credit.originalId || null },
       related: relatedIdsOf(stop, job, billed),
       linkedInvoices: linkedInvoicesOf(invoiced, job, billed),
     });
@@ -919,21 +924,31 @@ const review = (row, kind, reason) => ({ ...row, ...toReview(kind, reason) });
  */
 function applyLedger(rows, paid, overrides = new Map()) {
   return rows.map((row) => {
-    const done = settle(row);
-    const clean = { ...done, conflictBasis: conflictBasisOf(row), invoices: done.creditCents > 0 ? done.linkedInvoices || [] : [], bases: done.bases || [] };
+    const tuples = conflictTuplesOf(row);
+    const base = settle(row);
+    // The owner's credit for this stop and week (stop override) replaces whatever the rules computed, review rows included (a visit a pay
+    // run already paid stays already paid). The invoices linked to the visit are still recorded with a paid row, so a later week of
+    // another visit of them is caught.
+    const done = overrides.has(row.visitId) && base.kind !== 'already_paid' ? withOverride(row, overrides.get(row.visitId), tuples) : base;
+    const clean = {
+      ...done,
+      // What the page is shown of a stop, for the owner's credit to be checked against under the lock: the conflict tuples, and a revision
+      // of the stop as the RULES see it (their kind, never the owner's credit).
+      conflictTuples: tuples, stopRevision: stopRevisionOf(row, base.kind, tuples),
+      invoices: done.creditCents > 0 ? done.linkedInvoices || [] : [], bases: done.bases || [],
+    };
     delete clean.ledger;
     delete clean.linkedInvoices;
     delete clean.technicianId;
     delete clean.packageSlot;
     delete clean.related;
+    delete clean.pricing;
     return clean;
   });
 
+  // The stop as the rules see it (no override): already paid, a package or invoice conflict, or the credit the rules computed.
   function settle(row) {
     if (paid.visits.has(row.visitId)) return alreadyPaid(row, paid.visits.get(row.visitId).weekStart);
-    // The owner's credit for this stop and week (stop override) replaces whatever the rules computed, review rows included. The
-    // invoices linked to the visit are still recorded with a paid row, so a later week of another visit of them is caught.
-    if (overrides.has(row.visitId)) return withOverride(row, overrides.get(row.visitId), conflictBasisOf(row));
     const { ledger } = row;
     // A visit that was the first visit of a package a pay run fixed is that package's: credited on its own it would be paid twice.
     if (paid.jobs.has(row.visitId) && !(ledger && ledger.job && ledger.job.rootId === row.visitId) && !row.needsReview && row.creditCents > 0) {
@@ -945,7 +960,7 @@ function applyLedger(rows, paid, overrides = new Map()) {
   }
 
   // An override belongs to the technician who held the stop when the owner set it, and to a stop whose work is still confirmed.
-  function withOverride(row, set, conflictNow) {
+  function withOverride(row, set, tuples) {
     if (set.technicianId !== row.technicianId) {
       return { ...review(row, 'owner_override_reassigned', 'This stop was reassigned since the owner set its credit: clear that credit, then set it again in the production share preview.'), overrideRevision: set.revision };
     }
@@ -953,25 +968,33 @@ function applyLedger(rows, paid, overrides = new Map()) {
       return { ...review(row, 'owner_override_closeout_changed', 'The closeout of this stop changed since the owner set its credit (its work is no longer confirmed): clear that credit in the production share preview.'), overrideRevision: set.revision };
     }
     // A NEW conflict (an invoice or package of the stop paid elsewhere since the owner set the credit) is checked before the credit is used.
-    if (conflictNow && conflictNow !== set.conflictBasis) {
+    if (tuples.some((tuple) => !(set.conflictTuples || []).includes(tuple))) {
       return { ...review(row, 'owner_override_conflict_changed', 'This stop, its invoice or its package was paid elsewhere since the owner set its credit: clear that credit and look at the stop again in the production share preview.'), overrideRevision: set.revision };
     }
     return { ...row, kind: 'owner_set', creditCents: set.creditCents, reason: `Set by the owner: ${set.reason}`, needsReview: false, ledger: null, bases: slotBasis(row), overrideRevision: set.revision };
   }
 
-  // The conflict state of a stop, ONE rule: a short hash of EVERY paid stop row (finalized, non-void, a share above $0, another week)
-  // that touches what the stop is related to (row.related: itself, its package root and siblings, every invoice linked to any of
-  // those, every visit on those invoices), whole: run, week, visit, the invoice ids it recorded and its package basis. '' = none. The
-  // credit the owner sets stores it; a run ignores the credit when a different, non-empty state shows later.
-  function conflictBasisOf(row) {
+  // The conflict state of a stop, ONE rule: EVERY paid stop row (finalized, non-void, a share above $0, another week) that touches what
+  // the stop is related to (row.related: itself, its package root and siblings, every invoice linked to any of those, every visit on
+  // those invoices), whole: run, week, visit, the invoice ids it recorded and its package basis, as a sorted list of strings. The credit
+  // the owner sets stores the list; a run ignores the credit when a tuple that is NOT in the stored list shows later.
+  function conflictTuplesOf(row) {
     const related = new Set(row.related || []);
-    if (!related.size) return '';
-    const tuples = (paid.rows || [])
+    if (!related.size) return [];
+    return [...new Set((paid.rows || [])
       .filter((one) => related.has(one.visitId) || one.invoices.some((id) => related.has(id)) || one.bases.some((basis) => related.has(basis.basisId)))
       .map((one) => JSON.stringify([one.runId, one.weekStart, one.visitId, [...one.invoices].sort(),
-        one.bases.map((basis) => [basis.basisType, basis.basisId, basis.slot]).sort((x, y) => (JSON.stringify(x) < JSON.stringify(y) ? -1 : 1))]))
-      .sort();
-    return tuples.length ? require('node:crypto').createHash('sha1').update(tuples.join('|')).digest('hex').slice(0, 16) : '';
+        one.bases.map((basis) => [basis.basisType, basis.basisId, basis.slot]).sort((x, y) => (JSON.stringify(x) < JSON.stringify(y) ? -1 : 1))])))].sort();
+  }
+
+  // A short revision of the stop as the rules see it: their kind, the visit, its pricing facts (service type, the original work of a
+  // callback, the invoices linked to it, its package root and slot) and the conflict tuples. The page sends it with the owner's credit.
+  function stopRevisionOf(row, baseKind, tuples) {
+    const at = row.packageSlot;
+    return require('node:crypto').createHash('sha1').update(JSON.stringify([
+      baseKind, row.visitId, (row.pricing || {}).serviceType || null, (row.pricing || {}).originalId || null,
+      [...(row.linkedInvoices || [])].sort(), at ? [at.rootId, at.slot] : null, tuples,
+    ])).digest('hex').slice(0, 16);
   }
 
   // A package visit credited by the owner still consumes its slot of the package: a job basis with the package root and the slot, and the
@@ -1137,11 +1160,14 @@ async function creditsOfWeek(conn, technicianId, weekStart, settings, opts = {})
 const overrideRevision = (row) => require('node:crypto').createHash('sha1')
   .update(JSON.stringify([canonicalId(row.technician_id), Number(row.credit_cents), row.reason, row.conflict_basis || '', new Date(row.created_at).toISOString()])).digest('hex').slice(0, 16);
 
+// The conflict tuples a credit was set against, stored as a JSON array of strings in conflict_basis.
+const tuplesOfStored = (text) => { try { const list = JSON.parse(text || '[]'); return Array.isArray(list) ? list : []; } catch { return []; } };
+
 /** The owner's credits for the stops of a pay week: Map of visit id -> { technicianId, creditCents, reason, revision }. */
 async function overridesOf(conn, weekStart) {
   const rows = await conn('production_share_stop_overrides').where({ week_start: weekStart }).select('visit_id', 'technician_id', 'credit_cents', 'reason', 'conflict_basis', 'created_at');
   return new Map(rows.map((row) => [canonicalId(row.visit_id), {
-    technicianId: canonicalId(row.technician_id), creditCents: Number(row.credit_cents), reason: row.reason, conflictBasis: row.conflict_basis || '', revision: overrideRevision(row),
+    technicianId: canonicalId(row.technician_id), creditCents: Number(row.credit_cents), reason: row.reason, conflictTuples: tuplesOfStored(row.conflict_basis), revision: overrideRevision(row),
   }]));
 }
 
@@ -1153,10 +1179,10 @@ const overrideSchema = Joi.object({
   reason: Joi.string().trim().min(1).max(500).required().error(new Error('Say why (up to 500 characters)')),
   // The revision of the stored credit the page was showing (its stop's `overrideRevision`): required to replace or clear one.
   revision: Joi.string().max(64).error(new Error('The revision must be text')),
-  // The conflict state of the stop as the page showed it (its row's `conflictBasis`, '' = none): refused (409) when the stop changed since.
-  conflictBasis: Joi.string().allow('').max(64).required().error(new Error('Reload the week: the stop must be sent with its conflict state')),
+  // The revision of the stop as the page showed it (its row's `stopRevision`): refused (409) when the stop changed since.
+  stopRevision: Joi.string().max(64).required().error(new Error('Reload the week: the stop must be sent with its revision')),
 });
-const overrideKeySchema = overrideSchema.fork(['technicianId', 'creditCents', 'reason', 'conflictBasis'], (field) => field.optional());
+const overrideKeySchema = overrideSchema.fork(['technicianId', 'creditCents', 'reason', 'stopRevision'], (field) => field.optional());
 
 // A stored credit is replaced or cleared only by the page that saw it: no revision, or another one, is refused.
 function requireSameRevision(stored, revision) {
@@ -1207,13 +1233,13 @@ async function setStopOverride(input, actor, conn = db) {
     const now = rows.find((row) => canonicalId(row.visitId) === visitId);
     if (!now) throw new PayrollError(400, 'That stop is not a completed stop of this technician in that week.');
     // The stop the owner opened is the stop under the lock: its conflict state (invoices, package, what was paid elsewhere) is the same.
-    if ((now.conflictBasis || '') !== v.conflictBasis) throw new PayrollError(409, 'The stop changed since you opened it. Reload the week and look at it again.');
+    if (now.stopRevision !== v.stopRevision) throw new PayrollError(409, 'The stop changed since you opened it. Reload the week and look at it again.');
     if (MANUAL_CREDIT_INELIGIBLE.has(now.kind)) throw new PayrollError(409, 'This stop cannot be credited by hand: its work was not done or confirmed, or a pay run already paid it.');
     if (!now.needsReview && !owned) throw new PayrollError(409, 'This stop no longer needs review.');
     await trx('production_share_stop_overrides').insert({
       technician_id: technicianId, visit_id: visitId, week_start: v.weekStart, credit_cents: v.creditCents, reason: v.reason,
       // The conflict state the stop is in NOW (what the owner looked at): a new conflict later makes a run ignore the credit.
-      conflict_basis: now.conflictBasis || '', created_by: actorId, created_at: trx.fn.now(),
+      conflict_basis: JSON.stringify(now.conflictTuples || []), created_by: actorId, created_at: trx.fn.now(),
     }).onConflict(['visit_id', 'week_start']).merge(['technician_id', 'credit_cents', 'reason', 'conflict_basis', 'created_by', 'created_at']);
     await recordAuditEvent({
       trx, critical: true, actor_type: 'admin', actor_id: actorId,
@@ -1273,6 +1299,8 @@ async function previewWeek(technicianId, weekStart, conn = db) {
   const stops = await creditsOfWeek(conn, id, weekStart, settings);
   const days = shiftDays(stops);
   const result = shareForWeek({ credits: stops, shifts: days.length, settings });
+  // The conflict tuples stay on the server: the page gets the stop's revision.
+  const shown = stops.map((stop) => { const copy = { ...stop }; delete copy.conflictTuples; return copy; });
   return {
     technician: { id, name: technician.name },
     weekStart,
@@ -1281,8 +1309,8 @@ async function previewWeek(technicianId, weekStart, conn = db) {
     history: await settingsHistory(conn, id),
     shiftDays: days,
     ...result,
-    stops,
-    needsReview: stops.filter((stop) => stop.needsReview),
+    stops: shown,
+    needsReview: shown.filter((stop) => stop.needsReview),
     refundCents: stops.reduce((sum, stop) => sum + stop.refundCents, 0),
     // Whole refunds on shared invoices that could not be split, each invoice once.
     unallocatedRefundCents: [...new Map(stops.flatMap((stop) => stop.unallocatedRefunds).map((u) => [u.invoiceId, u.refundCents])).values()]

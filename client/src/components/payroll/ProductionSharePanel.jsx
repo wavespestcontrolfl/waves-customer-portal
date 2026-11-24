@@ -174,7 +174,7 @@ function StopCreditForm({ call, technicianId, weekStart, stop, generation, onCha
   return <>
     <VisitReference stop={stop} />
     <form className="mt-1 flex flex-wrap items-end gap-2" aria-label="Set the credit of this stop"
-      onSubmit={event => { event.preventDefault(); run('PUT', { ...body, creditCents: cents, reason: reason.trim(), conflictBasis: stop.conflictBasis || '' }); }}>
+      onSubmit={event => { event.preventDefault(); run('PUT', { ...body, creditCents: cents, reason: reason.trim(), stopRevision: stop.stopRevision || '' }); }}>
       <Field label="Credit ($)">
         <Input inputMode="decimal" autoComplete="off" value={credit} onChange={event => setCredit(event.target.value)} />
       </Field>

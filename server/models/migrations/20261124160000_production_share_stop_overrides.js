@@ -7,8 +7,9 @@
  *   week_start      the pay week (a Monday) whose run uses the credit
  *   credit_cents    the credit the run uses for the stop in that week, instead of the computed or review row (>= 0)
  *   reason          why, in the owner's words (required)
- *   conflict_basis  the conflict state the stop was in when the owner set the credit (a short hash of the paid-elsewhere facts of its linked
- *                   invoices and package; empty = none). A run ignores the credit, as review, when a NEW conflict exists later.
+ *   conflict_basis  the conflict state the stop was in when the owner set the credit: a JSON array of the paid stop rows (run, week,
+ *                   visit, recorded invoices, package basis) that touched it, as strings. A run ignores the credit, as review, when a
+ *                   paid row that is NOT in that list touches the stop later.
  * A run reads a week's overrides with the rest of the credit (kind 'owner_set'); the service refuses a change once a finalized check of
  * that technician covers the week. A change or a removal is a critical audit event. Rows are never deleted by a migration.
  */
@@ -20,7 +21,7 @@ exports.up = async function up(knex) {
     week_start date NOT NULL CONSTRAINT production_share_stop_overrides_monday_check CHECK (EXTRACT(ISODOW FROM week_start) = 1),
     credit_cents bigint NOT NULL CONSTRAINT production_share_stop_overrides_credit_check CHECK (credit_cents >= 0),
     reason text NOT NULL CONSTRAINT production_share_stop_overrides_reason_check CHECK (length(btrim(reason)) > 0),
-    conflict_basis text NOT NULL DEFAULT '',
+    conflict_basis text NOT NULL DEFAULT '[]',
     created_by uuid NULL REFERENCES technicians(id),
     created_at timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT production_share_stop_overrides_visit_week_unique UNIQUE (visit_id, week_start)

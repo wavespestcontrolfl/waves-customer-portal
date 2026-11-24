@@ -119,12 +119,12 @@ postgres('production share pay line', () => {
   const shownBasis = async ({ technicianId, visitId, weekStart }) => {
     try {
       const shown = await api('GET', `/production-share/preview?technicianId=${technicianId}&weekStart=${weekStart}`);
-      return (shown.body.stops.find((row) => row.visitId === visitId) || {}).conflictBasis || '';
+      return (shown.body.stops.find((row) => row.visitId === visitId) || {}).stopRevision || '';
     } catch { return ''; }
   };
   // A page sends the state it saw: the helper reads it from the preview unless the test says what to send.
   const override = async (body) => api('PUT', '/production-share/stop-override', {
-    body: { ...body, ...(body.conflictBasis === undefined ? { conflictBasis: await shownBasis(body) } : {}) },
+    body: { ...body, ...(body.stopRevision === undefined ? { stopRevision: await shownBasis(body) } : {}) },
   });
   const draft = (weekStart) => api('POST', '/runs', { body: { weekStart } });
   const finalize = async (runId, token) => {
@@ -402,7 +402,7 @@ postgres('production share pay line', () => {
       expect((await override({ ...key, creditCents: -1, reason: 'x' })).status).toBe(400);
       expect((await override({ ...key, creditCents: 10.5, reason: 'x' })).status).toBe(400);
       expect((await override({ ...key, creditCents: 100, reason: '   ' })).status).toBe(400);
-      expect((await override({ ...key, technicianId: randomUUID(), creditCents: 100, reason: 'x' })).status).toBe(404);
+      expect((await override({ ...key, technicianId: randomUUID(), creditCents: 100, reason: 'x', stopRevision: 'abc' })).status).toBe(404);
       expect(await trx('production_share_stop_overrides').where({ technician_id: id })).toEqual([]);
     });
 
@@ -543,7 +543,7 @@ postgres('production share pay line', () => {
       const first = await stop(id, W1, '1000.00', customerId);
       const unpriced = await stop(id, weeks[1], null, customerId); // review: no price
       expect((await override({ technicianId: id, visitId: unpriced, weekStart: weeks[1], creditCents: 50000, reason: 'Checked' })).status).toBe(200);
-      expect((await trx('production_share_stop_overrides').where({ visit_id: unpriced }).first('conflict_basis')).conflict_basis).toBe('');
+      expect((await trx('production_share_stop_overrides').where({ visit_id: unpriced }).first('conflict_basis')).conflict_basis).toBe('[]');
       // week 1 is paid with an invoice that is, from now on, ALSO linked to the unpriced stop of week 2
       const invoiceId = (await trx('invoices').insert({
         token: randomUUID().slice(0, 32), invoice_number: `S-${randomUUID().slice(0, 8)}`, customer_id: customerId, status: 'sent',
@@ -585,13 +585,13 @@ postgres('production share pay line', () => {
     it('AUDIT :1212: a credit is saved only against the stop state the page showed (conflict state), checked under the lock', async () => {
       const { unpriced, key } = await world();
       const shown = await shownBasis(key);
-      expect(shown).toBe('');
+      expect(shown).toMatch(/^[0-9a-f]{16}$/);
       const put = (body) => api('PUT', '/production-share/stop-override', { body: { ...key, creditCents: 5000, reason: 'x', ...body } });
-      expect((await put({})).status).toBe(400); // the conflict state must be sent
-      expect((await put({ conflictBasis: 'deadbeefdeadbeef' })).status).toBe(409);
-      expect((await put({ conflictBasis: 'deadbeefdeadbeef' })).body.error).toContain('changed since you opened it');
+      expect((await put({})).status).toBe(400); // the revision of the stop must be sent
+      expect((await put({ stopRevision: 'deadbeefdeadbeef' })).status).toBe(409);
+      expect((await put({ stopRevision: 'deadbeefdeadbeef' })).body.error).toContain('changed since you opened it');
       expect(await trx('production_share_stop_overrides').where({ visit_id: unpriced })).toEqual([]);
-      expect((await put({ conflictBasis: shown })).status).toBe(200);
+      expect((await put({ stopRevision: shown })).status).toBe(200);
     });
 
     it('AUDIT :1045: the root of the package paid on its own in another week, with no invoice link, is a conflict for a credit set earlier', async () => {
@@ -604,7 +604,7 @@ postgres('production share pay line', () => {
       const followUp = await stop(id, weeks[1], '0.00', customerId, { followup_included: true, followup_source_service_id: root });
       // the follow-up's package is a review row (the visits it was sold with cannot be known): the owner credits it, root not yet paid
       expect((await override({ technicianId: id, visitId: followUp, weekStart: weeks[1], creditCents: 40000, reason: 'Checked' })).status).toBe(200);
-      expect((await trx('production_share_stop_overrides').where({ visit_id: followUp }).first('conflict_basis')).conflict_basis).toBe('');
+      expect((await trx('production_share_stop_overrides').where({ visit_id: followUp }).first('conflict_basis')).conflict_basis).toBe('[]');
       // week 1 is paid with the root as a plain visit (the follow-up is out of the job while it is cancelled), then the follow-up comes back
       await trx('scheduled_services').where({ id: followUp }).update({ status: 'cancelled' });
       await finalize((await draft(W1)).body.run.id);
@@ -631,8 +631,9 @@ postgres('production share pay line', () => {
       const third = await stop(id, w3, null, customerId);
       await relink(third);
       const first = { technicianId: id, visitId: third, weekStart: w3 };
-      expect(await shownBasis(first)).not.toBe('');
       expect((await override({ ...first, creditCents: 30000, reason: 'Checked' })).status).toBe(200);
+      // what it was set against: the one paid row of week 1 that recorded the invoice (the tuples themselves are stored)
+      expect(JSON.parse((await trx('production_share_stop_overrides').where({ visit_id: third }).first('conflict_basis')).conflict_basis)).toHaveLength(1);
       // then it moves to a visit of week 2, which the owner also credits: week 2 pays and records the same invoice
       const second = await stop(id, w2, null, customerId);
       await relink(second);
@@ -664,7 +665,7 @@ postgres('production share pay line', () => {
         await trx('visit_completion_packet_items').insert({ packet_id: packet.id, scheduled_service_id: visitId, derived_idempotency_key: `k-741-${visitId}`, invoice_id: invoiceId });
       }
       const shown = await api('GET', `/production-share/preview?technicianId=${id}&weekStart=${weeks[1]}`);
-      expect(shown.body.stops.find((row) => row.visitId === mine)).toMatchObject({ needsReview: true, conflictBasis: '' });
+      expect(shown.body.stops.find((row) => row.visitId === mine)).toMatchObject({ needsReview: true, stopRevision: expect.any(String) });
       expect((await override({ technicianId: id, visitId: mine, weekStart: weeks[1], creditCents: 100000, reason: 'Checked' })).status).toBe(200);
       // the other visit of that invoice is credited by the owner in week 1 and paid: a paid row that names the invoice and that visit
       expect((await override({ technicianId: id, visitId: other, weekStart: W1, creditCents: 100000, reason: 'Checked' })).status).toBe(200);
@@ -698,9 +699,9 @@ postgres('production share pay line', () => {
         await trx('visit_completion_packet_items').insert({ packet_id: packet.id, scheduled_service_id: visitId, derived_idempotency_key: `k-973-${visitId}`, invoice_id: invoiceId });
       }
       const key = { technicianId: id, visitId: followUp, weekStart: weeks[2] };
-      const before = await shownBasis(key);
-      expect(before).toMatch(/^[0-9a-f]{16}$/); // the package's week 1 payment is already part of what the owner looked at
       expect((await override({ ...key, creditCents: 100000, reason: 'Checked' })).status).toBe(200);
+      // the package's week 1 payment is already part of what the owner looked at
+      expect(JSON.parse((await trx('production_share_stop_overrides').where({ visit_id: followUp }).first('conflict_basis')).conflict_basis)).toHaveLength(1);
       // another visit of the package is credited by the owner in week 2 and paid: a paid row with the package's basis
       expect((await override({ technicianId: id, visitId: extra, weekStart: weeks[1], creditCents: 50000, reason: 'Checked' })).status).toBe(200);
       await finalize((await draft(weeks[1])).body.run.id);
@@ -721,6 +722,20 @@ postgres('production share pay line', () => {
       expect((await api('PUT', `/technicians/${id}/flsa-coverage`, { body: { covered: true } })).status).toBe(200);
       await api('POST', `/runs/${draftRun.id}/void`, { body: { reason: 'test' } });
       expect(await names()).not.toContain('Sample Former'); // the run is closed again
+    });
+
+    it('AUDIT :1210: a stop reclassified to a callback after the page opened is refused under the lock (the stop revision covers its pricing facts)', async () => {
+      const { unpriced, key } = await world();
+      const opened = await shownBasis(key);
+      // the visit is reclassified as a callback after the owner opened the page: the rules now give it another kind
+      await trx('scheduled_services').where({ id: unpriced }).update({ is_callback: true, service_type: 'General Pest Control Re-Service' });
+      const refusal = await api('PUT', '/production-share/stop-override', { body: { ...key, creditCents: 5000, reason: 'x', stopRevision: opened } });
+      expect(refusal.status).toBe(409);
+      expect(refusal.body.error).toContain('changed since you opened it');
+      expect(await trx('production_share_stop_overrides').where({ visit_id: unpriced })).toEqual([]);
+      // the page that reloads sees the new revision, and the credit is accepted against it
+      expect((await shownBasis(key))).not.toBe(opened);
+      expect((await override({ ...key, creditCents: 5000, reason: 'x' })).status).toBe(200);
     });
 
     it('AUDIT :1115: a revision with no stored credit is refused; a credit is created only with neither', async () => {
