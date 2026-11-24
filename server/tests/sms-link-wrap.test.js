@@ -138,6 +138,17 @@ describe('link recognition (ownedPortalLinkSpans)', () => {
       process.env.CLIENT_URL = 'https://';
       process.env.PORTAL_DOMAIN = 'ftp://files.example';
       expect(ownedPortalHosts()).toEqual([HOST]);
+      // A scheme with no host ('https://' reads back as 'https:' from publicPortalUrl()) names no host, a value with
+      // userinfo names none either, and a single-label alias adds nothing in production: any of them would read every
+      // same word in a message as a link.
+      process.env.PUBLIC_PORTAL_URL = 'https://';
+      process.env.CLIENT_URL = 'https://portal';
+      process.env.PORTAL_DOMAIN = 'mailto:office@wavespest.example';
+      process.env.RAILWAY_PUBLIC_DOMAIN = `staff@${RAILWAY}`;
+      expect(ownedPortalHosts()).toEqual([HOST]);
+      // Outside production, with no link base that names a host, the list fails as a bad base always has.
+      delete process.env.RAILWAY_DEPLOYMENT_ID;
+      expect(() => ownedPortalHosts()).toThrow('No portal link host parses');
     });
 
     test('in production an alias with an explicit port adds nothing (production serves its hosts on the default port)', () => {

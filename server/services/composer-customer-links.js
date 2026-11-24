@@ -952,29 +952,40 @@ const PORTAL_HOST_ENV_NAMES = Object.freeze(['PUBLIC_PORTAL_URL', 'PORTAL_URL', 
 function ownedHostKey(host) {
   return String(host).toLowerCase().replace(/\.$/, '');
 }
-// The host a link base or portal origin value names (a full http(s) URL or a bare host); null when it is empty or
-// does not parse. One parser for every value, so one bad value drops only itself: shortLinkBaseUrl() returns
-// PUBLIC_PORTAL_URL as typed (a bare host too), and a throw here would stop every composer link check.
+// The host a link base or portal origin value names (a full http(s) URL or a bare host, as typed); null when it is
+// empty or names no host. One parser for every value, so one bad value drops only itself: shortLinkBaseUrl() returns
+// PUBLIC_PORTAL_URL as typed (a bare host too). A scheme with no `//` ('https:', which publicPortalUrl() makes of
+// 'https://', or 'mailto:x') is no host, and neither is a value with userinfo.
+const SCHEMED_VALUE_RE = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//;
+const SCHEME_WITHOUT_HOST_RE = /^[A-Za-z][A-Za-z0-9+.-]*:(?!\d)/;
 function portalHostOf(value) {
   const raw = String(value || '').trim();
-  if (!raw) return null;
+  const schemed = SCHEMED_VALUE_RE.test(raw);
+  if (!raw || (!schemed && SCHEME_WITHOUT_HOST_RE.test(raw))) return null;
   try {
-    const url = new URL(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(raw) ? raw : `https://${raw}`);
-    return url.protocol === 'https:' || url.protocol === 'http:' ? url.host : null;
+    const url = new URL(schemed ? raw : `https://${raw}`);
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+    return url.hostname && !url.username && !url.password ? url.host : null;
   } catch {
     return null;
   }
 }
-// A host the production deployment owns besides its link bases: port-less only. Production serves its hosts on the
-// default port, so a value with an explicit port names a dev or test setup and adds nothing.
+// A host the production deployment owns besides its link bases: a dotted domain name with no port. Production serves
+// its hosts on the default port, so a value with a port names a dev or test setup and adds nothing; so does a single
+// label, which would read every same word in a message as a link.
+const PRODUCTION_ALIAS_HOST_RE = /^[a-z0-9-]+(?:\.[a-z0-9-]+)+\.?$/i;
 function productionAliasHostOf(value) {
   const host = portalHostOf(value);
-  return host && !/:\d+$/.test(host) ? host : null;
+  return host && PRODUCTION_ALIAS_HOST_RE.test(host) ? host : null;
 }
 function ownedPortalHosts() {
   const hosts = [require('./short-url').shortLinkBaseUrl(), publicPortalUrl()].map(portalHostOf);
   if (isDeployedProduction()) hosts.push(BRANDED_PORTAL_HOST, ...PORTAL_HOST_ENV_NAMES.map((name) => productionAliasHostOf(process.env[name])));
-  return [...new Set(hosts.filter(Boolean).map(ownedHostKey))];
+  const owned = [...new Set(hosts.filter(Boolean).map(ownedHostKey))];
+  // No link base names a host (and this is not production): nothing here is ours to judge, and an empty list would
+  // make every scan match. Fail as main's parse of a bad base did.
+  if (!owned.length) throw new Error('No portal link host parses (SHORTLINK_BASE_URL / PUBLIC_PORTAL_URL)');
+  return owned;
 }
 // Every owned-portal-host link in an outbound body that is NOT already an
 // /l/<code> short link — the recognition the SMS link-wrap seam
