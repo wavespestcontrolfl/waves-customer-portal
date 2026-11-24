@@ -596,6 +596,25 @@ describe('initPurchase', () => {
     expect(db.__state.tables.one_tap_purchases).toHaveLength(1);
   });
 
+  test('office review appearing while pricing finds no offer returns the parked quote, not the stale-offer 409 (codex pre-push P1)', async () => {
+    seedProtectedPurchase();
+    const estimate = db.__state.tables.estimates[0];
+    const initialData = JSON.parse(estimate.estimate_data);
+    delete initialData.oneTapPurchase.officeReview;
+    estimate.estimate_data = JSON.stringify(initialData);
+    buildPortalPurchaseBasis.mockImplementationOnce(async () => {
+      // A staff booking makes the service owned and a confirm parks the purchase, so no offer remains.
+      const data = JSON.parse(estimate.estimate_data);
+      data.oneTapPurchase.officeReview = { version: 1, requiredAt: new Date().toISOString() };
+      estimate.estimate_data = JSON.stringify(data);
+      return null;
+    });
+
+    const out = await oneTap.initPurchase({ customerId: 'cust-1', clicked: CLICKED });
+
+    expect(out).toMatchObject({ purchaseId: 'p-review', officeReviewRequired: true, perVisit: 84 });
+  });
+
   test('a null basis with no completed purchase keeps the stale-offer 409', async () => {
     buildPortalPurchaseBasis.mockImplementationOnce(async () => null);
     await expect(oneTap.initPurchase({ customerId: 'cust-1', clicked: CLICKED }))
@@ -875,6 +894,59 @@ describe('reserve / release', () => {
     expect(db.__state.tables.scheduled_services.some((row) => row.id === 'ss-old')).toBe(true);
     expect(slotReservation.releaseReservation).not.toHaveBeenCalled();
     expect(lockCustomerComms).not.toHaveBeenCalled();
+  });
+
+  test('reserve scans and row-locks no competing visit when the estimate has no office-review marker (codex pre-push P1)', async () => {
+    const purchase = db.__state.tables.one_tap_purchases[0];
+    purchase.status = 'reserved';
+    purchase.scheduled_service_id = 'ss-old';
+    db.__state.tables.scheduled_services[0].id = 'ss-old';
+    slotReservation.reserveSlot.mockImplementationOnce(async (options) => {
+      const estimate = db.__state.tables.estimates[0];
+      db.__state.tables.scheduled_services.push({
+        id: 'ss-other', source_estimate_id: estimate.id, customer_id: purchase.customer_id,
+        scheduled_date: futureIso(), status: 'confirmed', is_callback: false,
+        service_type: 'Lawn Care', reservation_expires_at: null,
+      });
+      db.__state.events.length = 0;
+      const refusal = await db.transaction((trx) => options.revalidateEstimate({ ...estimate, estimate_data: '{}' }, trx, { date: SLOT.date }));
+      expect(refusal).toBeNull();
+      expect(db.__state.events.filter((event) => event.type === 'row' && event.table === 'scheduled_services')).toHaveLength(0);
+      return { scheduledServiceId: 'ss-old', expiresAt: futureIso() };
+    });
+    await oneTap.reserve({ customerId: 'cust-1', purchaseId: 'p-1', slotId: SLOT.slotId });
+  });
+
+  test('reserve takes the catalog lock before row-locking competing visits when a marker needs the scan (codex pre-push P1)', async () => {
+    const policy = require('../services/scheduling/policy');
+    const capacity = jest.spyOn(policy, 'capacityEnabled').mockReturnValue(true);
+    const purchase = db.__state.tables.one_tap_purchases[0];
+    purchase.status = 'reserved';
+    purchase.scheduled_service_id = 'ss-old';
+    db.__state.tables.scheduled_services[0].id = 'ss-old';
+    slotReservation.reserveSlot.mockImplementationOnce(async (options) => {
+      const estimate = db.__state.tables.estimates[0];
+      const marked = JSON.stringify({ oneTapPurchase: { officeReview: { version: 1, requiredAt: new Date().toISOString() } } });
+      db.__state.tables.scheduled_services.push({
+        id: 'ss-office', source_estimate_id: estimate.id, customer_id: purchase.customer_id,
+        scheduled_date: futureIso(), status: 'confirmed', is_callback: false,
+        service_type: 'Lawn Care', reservation_expires_at: null,
+      });
+      db.__state.events.length = 0;
+      try {
+        await db.transaction((trx) => options.revalidateEstimate({ ...estimate, estimate_data: marked }, trx, { date: SLOT.date }));
+      } catch { /* the parked purchase refuses; only the lock order is under test */ }
+      const catalogAt = db.__state.events.findIndex((event) => event.type === 'catalog');
+      const rowAt = db.__state.events.findIndex((event) => event.type === 'row' && event.table === 'scheduled_services');
+      expect(catalogAt).toBeGreaterThanOrEqual(0);
+      expect(rowAt).toBeGreaterThan(catalogAt);
+      throw Object.assign(new Error('stop'), { code: 'SLOT_UNAVAILABLE' });
+    });
+    try {
+      await expect(oneTap.reserve({ customerId: 'cust-1', purchaseId: 'p-1', slotId: SLOT.slotId })).rejects.toMatchObject({ status: 409 });
+    } finally {
+      capacity.mockRestore();
+    }
   });
 
   test('reserve ignores a resolved marker when the only booked row is the original selected visit', async () => {
@@ -1878,6 +1950,24 @@ describe('confirm', () => {
       .rejects.toMatchObject({ status: 409 });
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
     expect(db.__state.tables.one_tap_purchases[0].status).toBe('voided');
+  });
+
+  test('a parked purchase whose option was retired keeps its office-review response on confirm (codex pre-push P1)', async () => {
+    db.__state.tables.one_tap_purchases[0].service_key = 'tree_shrub';
+    db.__state.tables.one_tap_purchases[0].option_id = 'tree-light';
+    const estData = JSON.parse(db.__state.tables.estimates[0].estimate_data);
+    estData.oneTapPurchase.optionId = 'tree-light';
+    estData.oneTapPurchase.officeReview = { version: 1, requiredAt: new Date().toISOString() };
+    db.__state.tables.estimates[0].estimate_data = JSON.stringify(estData);
+    db.__state.tables.scheduled_services.push({
+      id: 'ss-office', source_estimate_id: 'est-1', customer_id: 'cust-1',
+      scheduled_date: futureIso(), status: 'confirmed', is_callback: false,
+      service_type: 'Lawn Care', reservation_expires_at: null,
+    });
+    await expect(oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true }))
+      .rejects.toMatchObject({ status: 422, code: 'APPOINTMENT_OFFICE_REVIEW_REQUIRED' });
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(db.__state.tables.one_tap_purchases[0].status).toBe('reserved');
   });
 
   // ── Concurrent-confirm idempotency (GH r7 P2): a confirm that started

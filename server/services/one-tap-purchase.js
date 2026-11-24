@@ -357,6 +357,11 @@ async function initPurchase({ customerId, clicked }) {
         .first();
       if (completedAfterProbe) return completedRetryResponse(customerId, completedAfterProbe);
     }
+    // A staff booking can make the service count as owned after the probe while a confirm parks the purchase for
+    // office review: repeat the locked reopen check so that customer gets the original quote and office contact.
+    const reprobe = await protectedPurchaseForReopen(customerId, targetKey);
+    if (reprobe?.completed) return completedRetryResponse(customerId, reprobe.completed);
+    if (reprobe?.snapshot) return reprobe.snapshot;
     throw httpError(409, OFFER_CHANGED);
   }
   const offer = basis.payload;
@@ -763,6 +768,17 @@ async function reserve({ customerId, purchaseId, slotId }) {
       // for concurrent re-init and re-pick changes.
       revalidateEstimate: async (lockedEstimate, trx) => {
         const data = parseEstimateData(lockedEstimate.estimate_data);
+        // No office-review marker: nothing is parked, so no competing visit is scanned or row-locked here.
+        if (!data.oneTapPurchase?.officeReview) return null;
+        // Catalog SHARE lock BEFORE any scheduled_services row lock (reserveSlot's later catalog lock is a no-op):
+        // a catalog migration holds `services` and then updates visits.
+        if (require('./scheduling/policy').capacityEnabled()) {
+          try {
+            await require('./scheduling/catalog-lock').lockCatalogIdentity(trx);
+          } catch (lockErr) {
+            throw Object.assign(new Error('slot no longer available'), { code: 'SLOT_UNAVAILABLE', cause: lockErr });
+          }
+        }
         const competitors = (await reviewableOneTapBookedVisits(trx, {
           estimateId: lockedEstimate.id,
           customerId: purchase.customer_id,
@@ -1673,6 +1689,11 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
   } catch (err) {
     const completed = await completedPurchaseAfterConflict(customerId, purchase);
     if (completed) return completed;
+    // A retired option voids an ordinary purchase, but a purchase parked for office review is preserved: keep its
+    // office instructions rather than the generic retirement refusal.
+    const decision = await lockedParkedPurchaseDecision({ purchase, customerId });
+    if (decision.completed) return completedRetryResponse(customerId, decision.completed);
+    if (decision.parked) throw appointmentOfficeReviewRequired();
     throw err;
   }
   const preEstimate = await db('estimates').where({ id: purchase.estimate_id }).first('id', 'status', 'expires_at', 'price_locked_at');
