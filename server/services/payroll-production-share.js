@@ -90,9 +90,12 @@ async function readInputs(conn, weekStart) {
  * statement, never to both and never to neither; the reads after it are keyed by visit. Each technician's reads are in a
  * savepoint, so a failed read marks that technician and does not abort the pay run's transaction.
  */
-async function collectInputs(trx, weekStart, { retry = true } = {}) {
+async function collectInputs(trx, weekStart, { retry = true, technicianIds = null } = {}) {
   const inputs = new Map();
-  const ids = await trx('technicians').where({ employment_type: 'w2' }).orderBy('id').pluck('id');
+  // `technicianIds` narrows the read to the technicians a run can pay a share to (the authoritative read under the lock). The facts
+  // behind their stops (invoice members, weights, jobs) are read for any visit whatever the others' settings, so a split is the same.
+  const only = technicianIds ? new Set(technicianIds.map(String)) : null;
+  const ids = (await trx('technicians').where({ employment_type: 'w2' }).orderBy('id').pluck('id')).filter((id) => !only || only.has(String(id)));
   const settingsById = new Map();
   for (const id of ids) {
     try {
@@ -113,7 +116,12 @@ async function collectInputs(trx, weekStart, { retry = true } = {}) {
   return inputs;
 }
 
-const readInputsUnderLock = (trx, weekStart) => (shareOn() ? collectInputs(trx, weekStart, { retry: false }) : Promise.resolve(new Map()));
+const readInputsUnderLock = (trx, weekStart, technicianIds = null) => (shareOn()
+  ? collectInputs(trx, weekStart, { retry: false, technicianIds })
+  : Promise.resolve(new Map()));
+
+/** The inputs of `technicianIds` only (a wider read narrowed to the technicians of one run). Pure. */
+const restrictInputs = (inputs, technicianIds) => new Map([...inputs].filter(([id]) => technicianIds.map(String).includes(String(id))));
 
 /**
  * A revision of what readInputs returned: the same string for the same settings and the same credit rows (visit, date, kind,
@@ -228,4 +236,4 @@ function reviewNote(name, count) {
   return `${name}: ${count} ${count === 1 ? 'stop needs' : 'stops need'} review for the production share. ${count === 1 ? 'It pays' : 'They pay'} $0 in the share until fixed. Open the production share preview for the week, fix ${count === 1 ? 'it' : 'them'}, then recompute.`;
 }
 
-module.exports = { KIND, shareOn, readInputs, readInputsUnderLock, revisionOf, sharesFor, priceableLine, signature, viewOf, reviewNote, snapshotOf };
+module.exports = { KIND, shareOn, readInputs, readInputsUnderLock, restrictInputs, revisionOf, sharesFor, priceableLine, signature, viewOf, reviewNote, snapshotOf };

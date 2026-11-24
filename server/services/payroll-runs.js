@@ -1031,8 +1031,10 @@ async function evaluate(conn, run, { lock = false, shareInputs = null } = {}) {
   const shareRows = payable.filter((row) => workedIds.has(row.technician_id));
   // The credit inputs come from one snapshot read before the pay run's transaction opened (readShareInputs); a caller that read
   // none (the view of a draft) reads them here, on the connection it has.
-  const shares = productionSharePay.sharesFor(shareInputs || await productionSharePay.readInputs(conn, start),
-    shareRows.map((row) => row.technician_id), start);
+  // finalize passes a function: the authoritative read under the lock is narrowed to exactly the technicians this run can pay a share to.
+  const shareIds = shareRows.map((row) => row.technician_id);
+  const shareSource = typeof shareInputs === 'function' ? await shareInputs(shareIds) : (shareInputs || await productionSharePay.readInputs(conn, start));
+  const shares = productionSharePay.sharesFor(shareSource, shareIds, start);
   const sharePriced = await priceLines(conn, new Map(shareRows
     .filter((row) => shares.get(row.technician_id) && shares.get(row.technician_id).shareCents > 0)
     .map((row) => [row.technician_id, {
@@ -1269,11 +1271,25 @@ async function readShareInputsOfRun(conn, runId) {
 // read of now. The read of now runs on the finalize transaction itself (readInputsUnderLock, no per-technician retry): no second
 // connection is taken while the payroll lock is held, and its consistency comes from listing every technician's stops in ONE
 // statement. It also sees every commit made before the lock was taken.
-async function shareInputsUnderLock(trx, run, earlier) {
+async function shareInputsUnderLock(trx, run, earlier, technicianIds) {
   if (!productionSharePay.shareOn()) return new Map();
-  const now = await productionSharePay.readInputsUnderLock(trx, run.week_start);
+  const now = await productionSharePay.readInputsUnderLock(trx, run.week_start, technicianIds);
   if (!earlier) return now;
-  return productionSharePay.revisionOf(now) === productionSharePay.revisionOf(earlier) ? earlier : now;
+  const before = productionSharePay.restrictInputs(earlier, technicianIds);
+  return productionSharePay.revisionOf(now) === productionSharePay.revisionOf(before) ? before : now;
+}
+
+// The check on the stability of what was frozen. Under the payroll lock the finalize transaction is READ COMMITTED and cannot take a
+// snapshot of its own (a second connection while the lock is held could stall the pool; a REPEATABLE READ transaction takes its snapshot
+// BEFORE it waits for the lock). The stops and the invoice facts are therefore separate statements, and billing edits do not take the
+// payroll lock. So the credits are read a second time just before the run turns final, and finalize refuses (409, nothing is saved)
+// when the two reads differ: what was frozen is then what was stable across the whole finalize.
+async function confirmShareInputs(trx, run, used, technicianIds) {
+  if (!used || !technicianIds || !productionSharePay.shareOn()) return;
+  const again = await productionSharePay.readInputsUnderLock(trx, run.week_start, technicianIds);
+  if (productionSharePay.revisionOf(again) !== productionSharePay.revisionOf(productionSharePay.restrictInputs(used, technicianIds))) {
+    throw new PayrollError(409, 'The production share credits changed while this run was being finalized. Review the run and try again.');
+  }
 }
 
 async function draftRun(input, actor, conn = db) {
@@ -1392,7 +1408,12 @@ async function finalizeRun(runId, input, actor, conn = db) {
     // read again here, in a snapshot taken after the lock (shareInputsUnderLock), and compared: credits that changed in between
     // are never frozen from the old read. The fresh read is used instead, the checks are saved from it, and the token check
     // below answers with the usual stale-run refusal when the owner has not seen those numbers.
-    const evaluation = await evaluate(trx, run, { lock: true, shareInputs: await shareInputsUnderLock(trx, run, shareInputs) });
+    let usedShare = null;
+    let shareIds = null;
+    const evaluation = await evaluate(trx, run, {
+      lock: true,
+      shareInputs: async (ids) => { shareIds = ids; usedShare = await shareInputsUnderLock(trx, run, shareInputs, ids); return usedShare; },
+    });
     if (evaluation.blocked.length || evaluation.waiting.length) throw new PayrollError(409, describeProblems(evaluation));
     // A run with no paycheck can still close a week whose time off was not paid, or settle the payout of an empty
     // bank (see draftRun). The token check below then covers a draft whose checks are gone.
@@ -1451,6 +1472,7 @@ async function finalizeRun(runId, input, actor, conn = db) {
     if (evaluation.bankPayouts.length) {
       await trx('payroll_runs').where({ id: runId }).update({ bank_payouts: JSON.stringify(evaluation.bankPayouts) });
     }
+    await confirmShareInputs(trx, run, usedShare, shareIds);
     const now = trx.fn.now();
     await trx('payroll_checks').where({ run_id: runId, status: 'draft' }).update({ status: 'finalized' });
     // The lines this run paid stay locked from the evaluation above; mark them paid with their check.

@@ -520,8 +520,22 @@ postgres('production share pay line', () => {
       const done = await finalize(created.id, shown.token);
       expect(done.status).toBe(200);
       expect(byName(done.body.run, 'Sample Alpha').productionShareCents).toBe(16200);
-      expect(under).toHaveBeenCalledTimes(1);
+      expect(under).toHaveBeenCalledTimes(2); // the read the checks are made from, and the second read that confirms it
       expect(early).toHaveBeenCalledTimes(1); // only the early read: nothing read apart under the lock
+    });
+
+    it('AUDIT :1115: a revision with no stored credit is refused; a credit is created only with neither', async () => {
+      const { unpriced, key } = await world();
+      expect((await override({ ...key, creditCents: 5000, reason: 'x', revision: 'abc123' })).status).toBe(409);
+      expect((await api('DELETE', '/production-share/stop-override', { body: { ...key, revision: 'abc123' } })).status).toBe(409);
+      expect(await trx('production_share_stop_overrides').where({ visit_id: unpriced })).toEqual([]);
+      expect((await override({ ...key, creditCents: 5000, reason: 'x' })).status).toBe(200);
+      // cleared by someone else meanwhile: the page's own clear, with the revision it saw, is refused
+      const seenRevision = await revisionOf(unpriced);
+      expect((await clear(key)).status).toBe(200);
+      expect((await api('DELETE', '/production-share/stop-override', { body: { ...key, revision: seenRevision } })).status).toBe(409);
+      expect((await override({ ...key, creditCents: 6000, reason: 'again', revision: seenRevision })).status).toBe(409);
+      expect((await api('DELETE', '/production-share/stop-override', { body: key })).status).toBe(404); // no revision, nothing stored
     });
 
     it('AUDIT :1007: a credit belongs to the technician who held the stop: after a reassignment the stop is review, and clearing works for the new holder', async () => {
@@ -692,6 +706,64 @@ postgres('production share pay line', () => {
       const check = byName((await draft(weeks[1])).body.run, 'Sample Alpha');
       const row = (await trx('payroll_checks').where({ id: check.id }).first('calc_snapshot')).calc_snapshot.productionShare.stops.find((r) => r.visitId === followUp);
       expect(row).toMatchObject({ kind: 'owner_set', bases: [{ basisType: 'job', basisId: root, totalCents: 200000, sold: 2, slot: 2 }] });
+    });
+
+    it('AUDIT :1047: credits that change while finalize runs are caught by the second read: 409, nothing saved, still a draft', async () => {
+      const id = await world();
+      const created = (await draft(W1)).body.run;
+      const shown = (await api('GET', `/runs/${created.id}`)).body.run;
+      const real = productionSharePay.readInputsUnderLock;
+      let reads = 0;
+      jest.spyOn(productionSharePay, 'readInputsUnderLock').mockImplementation(async (...args) => {
+        const inputs = await real(...args);
+        reads += 1;
+        // a billing edit lands after the read the checks are made from and before the confirming read
+        if (reads === 1) await trx('scheduled_services').where({ technician_id: id }).whereNotNull('estimated_price').update({ estimated_price: '1270.00' });
+        return inputs;
+      });
+      const refusal = await finalize(created.id, shown.token);
+      jest.restoreAllMocks();
+      expect(reads).toBe(2);
+      expect(refusal.status).toBe(409);
+      expect(refusal.body.error).toContain('changed while this run was being finalized');
+      expect((await api('GET', `/runs/${created.id}`)).body.run.status).toBe('draft');
+      // nothing was saved by the refused finalize: the draft's check still holds the share it was drafted with
+      expect((await trx('payroll_checks').where({ run_id: created.id }).first('production_share_cents', 'status'))).toMatchObject({ production_share_cents: '16200', status: 'draft' });
+    });
+
+    it('AUDIT :1052: finalize reads only the technicians this run can pay a share to, and still splits a shared invoice with an outside technician', async () => {
+      const id = await world();
+      const bravo = (await trx('technicians').where({ name: 'Sample Bravo' }).first('id')).id; // settings, but no approved hours
+      const [first] = await trx('scheduled_services').where({ technician_id: id }).orderBy('scheduled_date').select('id', 'customer_id');
+      const theirs = await stop(bravo, W1, '1260.00');
+      const customerId = first.customer_id;
+      const invoiceId = (await trx('invoices').insert({
+        token: randomUUID().slice(0, 32), invoice_number: `S-${randomUUID().slice(0, 8)}`, customer_id: customerId, status: 'sent',
+        subtotal: '2520.00', discount_amount: '0.00', tax_amount: '0.00', total: '2520.00',
+      }).returning('id'))[0].id;
+      const [visit] = await trx('service_visits').insert({ customer_id: customerId, scheduled_date: W1, stop_base_key: 'k-1052', created_by: 'test' }).returning('id');
+      const [packet] = await trx('visit_completion_packets').insert({ visit_id: visit.id, idempotency_key: 'k-1052', request_hash: 'h', payload: {} }).returning('id');
+      for (const visitId of [first.id, theirs]) {
+        await trx('visit_completion_packet_items').insert({ packet_id: packet.id, scheduled_service_id: visitId, derived_idempotency_key: `k-1052-${visitId}`, invoice_id: invoiceId });
+      }
+      const created = (await draft(W1)).body.run;
+      expect(byName(created, 'Sample Alpha').productionShare).toMatchObject({ creditedCents: 378000 }); // $1,260.00 of the shared invoice + 2 own stops
+      const real = productionSharePay.readInputsUnderLock;
+      const seen = [];
+      jest.spyOn(productionSharePay, 'readInputsUnderLock').mockImplementation(async (conn, week, ids) => {
+        const inputs = await real(conn, week, ids);
+        seen.push({ ids, keys: [...inputs.keys()] });
+        return inputs;
+      });
+      const done = await finalize(created.id);
+      jest.restoreAllMocks();
+      expect(done.status).toBe(200);
+      expect(seen.length).toBeGreaterThan(0);
+      for (const call of seen) {
+        expect(call.ids).toEqual([id]);
+        expect(call.keys).toEqual([id]);
+      }
+      expect(byName(done.body.run, 'Sample Alpha').productionShare).toMatchObject({ creditedCents: 378000 });
     });
 
     it('AUDIT :992: when the shared facts cannot be read, only the technician whose own facts fail is an error; the others keep their rows', async () => {

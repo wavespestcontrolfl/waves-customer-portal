@@ -1112,7 +1112,12 @@ const overrideKeySchema = overrideSchema.fork(['technicianId', 'creditCents', 'r
 
 // A stored credit is replaced or cleared only by the page that saw it: no revision, or another one, is refused.
 function requireSameRevision(stored, revision) {
-  if (!stored) return;
+  // A revision names a credit the page saw: with none stored any more (cleared, or never there) it is refused. A new credit is created
+  // only when there is neither a stored credit nor a revision.
+  if (!stored) {
+    if (revision) throw new PayrollError(409, 'This credit no longer exists. Reload the week to see the stop as it is now.');
+    return;
+  }
   if (!revision) throw new PayrollError(409, 'This stop already has a credit. Reload the week to see it.');
   if (revision !== overrideRevision(stored)) throw new PayrollError(409, 'This credit changed since you loaded the week. Reload the week and try again.');
 }
@@ -1184,7 +1189,7 @@ async function clearStopOverride(input, actor, conn = db) {
     const visitId = canonicalId(v.visitId);
     // The stored row decides whose paid week this is: the technician who held the stop when the credit was set, whatever the caller sent.
     const before = await trx('production_share_stop_overrides').where({ visit_id: visitId, week_start: v.weekStart }).first('technician_id', 'credit_cents', 'reason', 'created_at');
-    if (!before) throw new PayrollError(404, 'No credit was set for that stop.');
+    if (!before && !v.revision) throw new PayrollError(404, 'No credit was set for that stop.');
     requireSameRevision(before, v.revision);
     const technicianId = await guardOverride(trx, { weekStart: v.weekStart, technicianId: before.technician_id });
     await trx('production_share_stop_overrides').where({ visit_id: visitId, week_start: v.weekStart }).del();
