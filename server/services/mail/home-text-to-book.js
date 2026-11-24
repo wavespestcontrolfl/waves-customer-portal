@@ -187,18 +187,24 @@ function replyBody({ address, slug }) {
   return `Here's your Waves page for ${address}: ${publicPortalUrl()}/nh/${slug}\n\nReply STOP to opt out.`;
 }
 
-// The sender's customer, for the opt-out and consent checks. The webhook matches phones on their last ten digits, so a customer
-// counts only when one of its stored numbers is the sender's NANP number (phoneIdentityKey: the same ten digits, and a stored
-// international number never equals it). The webhook's primary match is verified first; otherwise (`knownContact`: a record has
-// the number as a secondary or service-contact phone, or the webhook's own match failed the check) the ONE customer owning it is
-// read and verified the same way. null = no record claims the number (a lead). false = a record claims it that cannot be
-// confirmed as the sender's (two owners, a different number, or a failed read): no reply, consent unknown.
+// The sender's customer, for the opt-out and consent checks. The webhook matches phones on their last ten digits, and so do the
+// helpers that classify a number as the holder's or a contact's and re-read the contact's own choice at the provider handoff
+// (contact-notification-prefs.js contactPhoneSmsTrust / contactPhoneDeclinesText). A customer therefore counts only when one of
+// its stored numbers IS the sender's NANP number (phoneIdentityKey: the same ten digits) AND no stored number merely shares those
+// last ten digits (an international holder or contact whose digits collide would be classified as the wrong person, skipping a
+// contact's opt-out): any such collision is refused. The webhook's primary match is verified first; otherwise (`knownContact`: a
+// record has the number as a secondary or service-contact phone, or the webhook's own match failed the check) the ONE customer
+// owning it is read and held to the same rule. null = no record claims the number (a lead). false = a record claims it that cannot
+// be confirmed as the sender's alone (two owners, a different or colliding number, or a failed read): no reply, consent unknown.
 async function senderCustomerId(from, customer, knownContact) {
   const key = phoneIdentityKey(from);
-  if (customer && phoneIdentityKey(customer.phone) === key) return customer.id;
-  if (!customer && !knownContact) return null;
-  const only = await findOnlyKnownCallerCustomer(db, from, ['id', ...KNOWN_CALLER_PHONE_COLS]);
-  return only && KNOWN_CALLER_PHONE_COLS.some((col) => phoneIdentityKey(only[col]) === key) ? only.id : false;
+  const held = customer && phoneIdentityKey(customer.phone) === key;
+  if (!held && !customer && !knownContact) return null;
+  const row = held ? customer : await findOnlyKnownCallerCustomer(db, from, ['id', ...KNOWN_CALLER_PHONE_COLS]);
+  const stored = row ? KNOWN_CALLER_PHONE_COLS.map((col) => row[col]).filter(Boolean) : [];
+  const same = (number) => phoneIdentityKey(number) === key;
+  const collides = (number) => !same(number) && phoneIdentityKey(number) !== null && String(number).replace(/\D/g, '').slice(-10) === key.slice(-10);
+  return stored.some(same) && !stored.some(collides) ? row.id : false;
 }
 
 /**
@@ -264,7 +270,7 @@ async function handleHomeTextToBook({ from, to, body, customer, knownContact, st
     }
     if (isAmbiguousProviderOutcome(result)) {
       logger.warn(`[mail-home-text-to-book] reply for prospect ${home.id} left uncertain; claim kept, not retried`);
-      return { handled: true, prospectId: home.id };
+      return { handled: true, uncertain: true, prospectId: home.id };
     }
     await releaseClaim(claim.claimId);
     logger.info(`[mail-home-text-to-book] reply for prospect ${home.id} not sent (${String(result.code || 'refused').slice(0, 40)})`);

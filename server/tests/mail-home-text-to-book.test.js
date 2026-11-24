@@ -11,18 +11,22 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const mockGates = {
   mailHomePageLive: jest.fn(() => true),
   mailHomeTextBookLive: jest.fn(() => true),
+  contactLoginLive: jest.fn(() => false),
 };
 jest.mock('../config/feature-gates', () => mockGates);
 
 // The claim table: a transaction holds the (simulated) advisory lock until it settles, so two texts at the same moment
 // run one after the other, as pg_advisory_xact_lock makes them.
-const mockState = { homes: [], claims: [], deleted: [], prospectQueries: 0, claimTxns: 0, lock: Promise.resolve() };
+const mockState = { homes: [], claims: [], deleted: [], prospectQueries: 0, claimTxns: 0, lock: Promise.resolve(), customerRow: null, customerReadFails: false };
 jest.mock('../models/db', () => {
   const db = jest.fn((table) => {
     const q = {};
     for (const m of ['where', 'whereIn', 'whereRaw']) q[m] = () => q;
     if (table === 'mail_prospects') {
       q.select = async () => { mockState.prospectQueries += 1; return mockState.homes; };
+    } else if (table === 'customers') {
+      // contactPhoneSmsTrust (the REAL helper in the contact tests) reads the holder row.
+      q.first = async () => { if (mockState.customerReadFails) throw new Error('customers unavailable'); return mockState.customerRow; };
     } else if (table === 'mail_home_text_replies') {
       q.del = async () => { mockState.deleted.push(table); mockState.claims.pop(); return 1; };
     }
@@ -63,6 +67,7 @@ jest.mock('../utils/known-caller-phone', () => ({
 }));
 const mockTrust = jest.fn();
 jest.mock('../services/contact-notification-prefs', () => ({ contactPhoneSmsTrust: (...a) => mockTrust(...a) }));
+const realPrefs = () => jest.requireActual('../services/contact-notification-prefs');
 const mockSend = jest.fn();
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSend(...a) }));
 
@@ -83,7 +88,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockGates.mailHomePageLive.mockReturnValue(true);
   mockGates.mailHomeTextBookLive.mockReturnValue(true);
-  Object.assign(mockState, { homes: [{ ...HOME }], claims: [], deleted: [], prospectQueries: 0, claimTxns: 0, lock: Promise.resolve() });
+  Object.assign(mockState, { homes: [{ ...HOME }], claims: [], deleted: [], prospectQueries: 0, claimTxns: 0, lock: Promise.resolve(), customerRow: null, customerReadFails: false });
+  mockGates.contactLoginLive.mockReturnValue(false);
   mockFindOnly.mockResolvedValue(null);
   mockTrust.mockResolvedValue('phone_matches_customer');
   mockSend.mockResolvedValue({ ...SENT });
@@ -260,6 +266,54 @@ describe('handleHomeTextToBook', () => {
     mockFindOnly.mockResolvedValue({ id: 'cust-2', phone: '(202) 555-0101' });
     expect((await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer: { id: 'cust-1', phone: stored }, knownContact: true })).handled).toBe(true);
     expect(mockSend.mock.calls[0][0]).toMatchObject({ customerId: 'cust-2', identityTrustLevel: 'phone_matches_customer' });
+  });
+
+  describe('with the REAL contact-prefs helpers (GATE_CONTACT_LOGIN on)', () => {
+    const CONTACT_ROW = { id: 'cust-1', phone: '(941) 555-0000', service_contact_phone: '(202) 555-0101', service_contact_name: 'Tenant' };
+    beforeEach(() => {
+      mockGates.contactLoginLive.mockReturnValue(true);
+      mockTrust.mockImplementation((...a) => realPrefs().contactPhoneSmsTrust(...a));
+    });
+
+    test('a service contact\'s number is classified a contact by the real helper and sent that way', async () => {
+      mockState.customerRow = CONTACT_ROW;
+      mockFindOnly.mockResolvedValue(CONTACT_ROW);
+      expect((await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', knownContact: true })).handled).toBe(true);
+      expect(mockSend.mock.calls[0][0]).toMatchObject({ customerId: 'cust-1', identityTrustLevel: 'service_contact_authorized' });
+    });
+
+    test('country-code collision: an international holder sharing the contact\'s last ten digits would be misclassified by the helper, so no reply', async () => {
+      const colliding = { ...CONTACT_ROW, phone: '+442025550101' };
+      mockState.customerRow = colliding;
+      mockFindOnly.mockResolvedValue(colliding);
+      // The helper reads the numbers by their last ten digits: it calls the sender the HOLDER, which would skip the contact\'s own opt-out.
+      expect(await realPrefs().contactPhoneSmsTrust('cust-1', SENDER)).toBe('phone_matches_customer');
+      expect(await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', knownContact: true, customer: colliding })).toEqual({ handled: false });
+      expect(mockState.claimTxns).toBe(0);
+      expect(mockSend).not.toHaveBeenCalled();
+    });
+
+    test('two slots that share the sender\'s last ten digits (one international) are ambiguous: no reply', async () => {
+      const row = { ...CONTACT_ROW, service_contact2_phone: '+442025550101' };
+      mockState.customerRow = row;
+      mockFindOnly.mockResolvedValue(row);
+      expect(await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', knownContact: true })).toEqual({ handled: false });
+      expect(mockSend).not.toHaveBeenCalled();
+    });
+
+    test('an unreadable customer row: the real helper classifies the number a contact, so the provider handoff re-reads that contact\'s choice (and holds if it cannot)', async () => {
+      mockState.customerReadFails = true;
+      expect((await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer: { id: 'cust-1', phone: SENDER } })).handled).toBe(true);
+      expect(mockSend.mock.calls[0][0]).toMatchObject({ customerId: 'cust-1', identityTrustLevel: 'service_contact_authorized' });
+    });
+
+    test('with GATE_CONTACT_LOGIN off the real helper sends every matched number as the holder (no contact slot re-read, as for every other send)', async () => {
+      mockGates.contactLoginLive.mockReturnValue(false);
+      mockState.customerRow = CONTACT_ROW;
+      mockFindOnly.mockResolvedValue(CONTACT_ROW);
+      await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', knownContact: true });
+      expect(mockSend.mock.calls[0][0]).toMatchObject({ identityTrustLevel: 'phone_matches_customer' });
+    });
   });
 
   test('a secondary-phone owner whose stored number is not the sender\'s full number is refused', async () => {
@@ -491,7 +545,7 @@ describe('handleHomeTextToBook', () => {
 
   test('a send that threw with no outcome may have gone: the claim stays, the text is handled, nothing is retried', async () => {
     mockSend.mockRejectedValue(Object.assign(new Error('boom 101 Example Trl +12025550101'), { code: 'ECONNRESET' }));
-    expect(await text('101 EXAMPLE')).toEqual({ handled: true, prospectId: 'prospect-1' });
+    expect(await text('101 EXAMPLE')).toEqual({ handled: true, uncertain: true, prospectId: 'prospect-1' });
     expect(mockSend).toHaveBeenCalledTimes(1);
     expect(mockState.claims).toHaveLength(1);
     expect(await text('101 EXAMPLE')).toEqual({ handled: false }); // the claim holds the repeat
@@ -500,7 +554,7 @@ describe('handleHomeTextToBook', () => {
 
   test('an uncertain provider outcome is handled, keeps the claim and is never retried', async () => {
     mockSend.mockResolvedValue({ sent: false, deliveryOutcome: 'uncertain', uncertain: true });
-    expect(await text('101 EXAMPLE')).toEqual({ handled: true, prospectId: 'prospect-1' });
+    expect(await text('101 EXAMPLE')).toEqual({ handled: true, uncertain: true, prospectId: 'prospect-1' });
     expect(mockSend).toHaveBeenCalledTimes(1);
     expect(mockState.claims).toHaveLength(1);
   });
