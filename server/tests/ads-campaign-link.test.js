@@ -78,7 +78,7 @@ test('an older click takes the one campaign Google says had spend that day; two 
   const g1 = googleAdsWith({}, ['22594274874']);
   expect((await linkCampaigns({ now: NOW, conn: one, googleAds: g1 })).linked.only_campaign_with_spend).toBe(1);
   expect(one.updates[0]).toMatchObject({ campaign_id: 'local-gbp', campaign_link_basis: 'only_campaign_with_spend' });
-  expect(g1.query.mock.calls[0][0]).toMatch(/FROM campaign WHERE segments.date BETWEEN '2026-04-03' AND '2026-07-01'/);
+  expect(g1.query.mock.calls[0][0]).toMatch(/FROM campaign WHERE segments.date BETWEEN '2026-04-02' AND '2026-07-01'/);
 
   const two = fakeConn({ leads: [lead], campaigns });
   const g2 = googleAdsWith({}, ['22594274874', '24535212391']);
@@ -97,13 +97,13 @@ test('a lead day still inside the 90-day window is looked up exactly, even when 
 
 test('every waiting lead gets a turn: least recently tried first', async () => {
   const leads = Array.from({ length: 55 }, (_, i) => ({ id: `r${i}`, gclid: `${GCLID_NEW}${i}`, lead_date: '2026-11-10' }));
-  const tried = Object.fromEntries(leads.slice(0, 50).map((l) => [l.id, '2026-11-22T11:00:00.000Z']));
+  const tried = Object.fromEntries(leads.slice(0, 50).map((l) => [l.id, { at: '2026-11-22T11:00:00.000Z', back: 7 }]));
   const conn = fakeConn({ leads, campaigns, tried });
   const g = googleAdsWith({});
   await linkCampaigns({ now: NOW, conn, googleAds: g });
   const queried = new Set(g.query.mock.calls.map(([q]) => q.match(/gclid = '([^']+)'/)[1]));
   for (let i = 50; i < 55; i += 1) expect(queried.has(`${GCLID_NEW}${i}`)).toBe(true);
-  expect(JSON.parse(conn.settings['ads.campaign_link.tried']).r50).toBe(NOW.toISOString());
+  expect(JSON.parse(conn.settings['ads.campaign_link.tried']).r50).toEqual({ at: NOW.toISOString(), back: 7 });
 });
 
 test('a campaign Google names that is not in ad_campaigns, or a malformed click id, is never written', async () => {
@@ -143,5 +143,32 @@ test('a click days before the form is found; an organic lead that kept a gclid i
   expect(out).toMatchObject({ checked: 1, linked: { gclid_click_view: 1 } });
   expect(conn.updates).toEqual([{ id: 'e1', campaign_id: 'local-gbp', campaign_link_basis: 'gclid_click_view', updated_at: 'now()' }]);
   expect(query.mock.calls.some(([q]) => q.includes(GCLID_OLD))).toBe(false);
+});
+
+test('retries walk further back each run, then start again at the lead day', async () => {
+  const lead = { id: 'f1', gclid: GCLID_NEW, lead_date: '2026-11-20' };
+  const conn = fakeConn({ leads: [lead], campaigns, tried: { f1: { at: '2026-11-22T11:00:00.000Z', back: 7 } } });
+  const g = googleAdsWith({});
+  await linkCampaigns({ now: NOW, conn, googleAds: g });
+  const dates = g.query.mock.calls.map(([q]) => q.match(/segments.date = '([^']+)'/)[1]);
+  expect(dates).toEqual(['2026-11-13', '2026-11-12', '2026-11-11', '2026-11-10', '2026-11-09', '2026-11-08', '2026-11-07']);
+  expect(JSON.parse(conn.settings['ads.campaign_link.tried']).f1.back).toBe(14);
+
+  // Past the window start: nothing left to search this round, the cursor goes back to the lead day.
+  const late = fakeConn({ leads: [lead], campaigns, tried: { f1: { at: '2026-11-22T11:00:00.000Z', back: 91 } } });
+  const g2 = googleAdsWith({});
+  await linkCampaigns({ now: NOW, conn: late, googleAds: g2 });
+  expect(g2.query).not.toHaveBeenCalled();
+  expect(JSON.parse(late.settings['ads.campaign_link.tried']).f1.back).toBe(0);
+});
+
+test('a Google failure mid-run still saves the tries made so far', async () => {
+  const leads = [{ id: 'g1', gclid: `${GCLID_NEW}a`, lead_date: '2026-11-10' }, { id: 'g2', gclid: `${GCLID_NEW}b`, lead_date: '2026-11-09' }];
+  const conn = fakeConn({ leads, campaigns });
+  const query = jest.fn(async (q) => { if (q.includes(`${GCLID_NEW}b`)) throw new Error('RESOURCE_EXHAUSTED'); return []; });
+  await expect(linkCampaigns({ now: NOW, conn, googleAds: { getCustomer: () => ({ query }) } })).rejects.toThrow('RESOURCE_EXHAUSTED');
+  const saved = JSON.parse(conn.settings['ads.campaign_link.tried']);
+  expect(saved.g1).toEqual({ at: NOW.toISOString(), back: 7 });
+  expect(saved.g2.at).toBe(NOW.toISOString());
 });
 

@@ -17,6 +17,7 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((name) => name === 'cronJobs'), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn(),
   adsNegativesLive: jest.fn(() => false),
 }));
+jest.mock('../services/ads/campaign-link', () => ({ linkCampaigns: jest.fn().mockResolvedValue({ checked: 0, linked: { gclid_click_view: 0, only_campaign_with_spend: 0 }, unlinked: 0 }) }));
 jest.mock('../services/ads/negative-keyword-actions', () => ({ syncOwnerWords: jest.fn().mockResolvedValue({ pushed: 0, failed: 0, removed: 0, googleFailed: 0 }) }));
 // Pass-through lock that (like the real runExclusive) records a failed body
 // by name and rethrows it.
