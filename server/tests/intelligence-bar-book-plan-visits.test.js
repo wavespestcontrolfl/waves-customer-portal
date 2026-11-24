@@ -336,10 +336,14 @@ describe('refusals (nothing is booked, nothing is carded)', () => {
     await refused({ ...INPUT, technician_name: 'Nobody' }, 'technician_not_found');
   });
 
-  test('a visit that no billing would invoice (no catalog price, no dues cover)', async () => {
+  test('no catalog price is refused (a per-application customer would be billed a fee the card does not show), dues cover aside', async () => {
     pricing = { ...pricing, finalPrice: null, primaryBase: null };
-    jest.spyOn(AdminSchedule, 'recurringWithoutBillableAmount').mockReturnValue({ error: 'x' });
-    await refused(INPUT, 'no_billable_amount');
+    seed({ customer: { billing_mode: 'per_application', per_application_fee: 45 } });
+    const result = await refused(INPUT, 'no_catalog_price');
+    expect(result.error).toMatch(/per-application fee/);
+    // A dues-covered member's series carries no per-visit price by design, so it still gets a card.
+    seed({ customer: { billing_mode: 'monthly_membership', monthly_rate: 59, waveguard_tier: 'Gold' } });
+    expect((await propose()).preview).toBe(true);
   });
 });
 
@@ -504,6 +508,8 @@ describe('Confirm', () => {
     expect(arg.approvedBooking).toEqual({
       dates: QUARTERLY_DATES, price: 89, propertyId: PROPERTY_ID, technicianId: null,
       address: { line1: '1 Example Way', line2: '', city: 'Bradenton', state: 'FL', zip: '34205' },
+      // The eligibility facts the handler compares with the locked customer row.
+      customer: { id: CUSTOMER_ID, active: true, billing_mode: 'per_visit', payer_id: null, monthly_rate: null, waveguard_tier: null },
     });
     expect(arg.actor).toEqual({ technicianId: 'staff-1', technicianName: 'Test Admin' });
     expect(arg.body).toEqual({

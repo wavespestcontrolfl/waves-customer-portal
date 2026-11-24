@@ -8669,6 +8669,21 @@ async function customerPlanFingerprint(conn, customerId) {
 const addressKey = (a) => ['line1', 'line2', 'city', 'state', 'zip']
   .map((f) => String(a?.[f] ?? a?.[`service_address_${f}`] ?? '').trim().toLowerCase().replace(/\s+/g, ' ')).join('|');
 
+// The eligibility facts the card judged, against the LOCKED customer row (before any insert): live and active, the billing
+// lane, the payer, the member tier and the monthly rate, and no prepay term the booking would refresh.
+async function assertApprovedCustomer(trx, customerId, approved) {
+  const row = await trx('customers').where({ id: customerId }).forUpdate().first();
+  const str = (v) => String(v ?? '');
+  const cents = (v) => (v == null || v === '' ? '' : String(Math.round(Number(v) * 100)));
+  if (!row || row.deleted_at || (approved && row.active !== approved.active)
+    || (approved && (str(row.billing_mode) !== str(approved.billing_mode) || str(row.payer_id) !== str(approved.payer_id)
+      || str(row.waveguard_tier) !== str(approved.waveguard_tier) || cents(row.monthly_rate) !== cents(approved.monthly_rate)))) {
+    throw approvedBookingChanged('The customer\'s status, billing lane, tier or monthly rate changed since the card was shown.');
+  }
+  const { refreshableTermsForCustomer } = require('../services/annual-prepay-renewals');
+  if ((await refreshableTermsForCustomer(customerId, trx)).length) throw approvedBookingChanged('An annual prepay term would be refreshed by this booking.');
+}
+
 async function assertApprovedBooking(trx, approved, { rows, customerId, planBefore }) {
   const cents = (v) => (v == null || v === '' ? null : Math.round(Number(v) * 100));
   // 1. The inserted dates are the pinned dates.
@@ -9873,6 +9888,8 @@ async function scheduleCreateHandler(req, res, next) {
       if (isRecurring) {
         await trx('customers').where({ id: customerId }).forUpdate().first('id');
       }
+      // The card's eligibility facts, against the locked customer row, before anything is inserted.
+      if (approvedBooking) await assertApprovedCustomer(trx, customerId, approvedBooking.customer);
       // Race-safe duplicate-series backstop (P0: check-then-insert race).
       // The preflight above ran OUTSIDE this transaction, so two concurrent
       // recurring creates for the same customer + service family could both
@@ -9894,6 +9911,8 @@ async function scheduleCreateHandler(req, res, next) {
           serviceAddressScope: bookingSeriesScope,
         });
         if (separateProgram && guardError) throw guardError;
+        // An approved card was shown with no open series, so a guard that could not run is not a pass: roll back.
+        if (approvedBooking && guardError) throw approvedBookingChanged('The duplicate-series check could not run, so the booking cannot be confirmed.');
         if (guardError) logger.warn(`[schedule] locked duplicate-series guard failed (booking proceeds): ${guardError.message}`);
         const canCreate = separateProgram
           ? RecurringAppointmentSeeder.separateProgramMatches(matches, separateProgram.existingSeriesIds)
@@ -11055,7 +11074,8 @@ async function scheduleCreateHandler(req, res, next) {
         } catch (e) { logger.error(`Appointment tagger failed: ${e.message}`); }
 
         try {
-          await refreshAnnualPrepayTermsForCustomer(customerId);
+          // An approved booking was asserted to touch no prepay term inside the transaction, so no refresh is deferred for it.
+          if (!approvedBooking) await refreshAnnualPrepayTermsForCustomer(customerId);
         } catch (e) { logger.error(`[schedule] annual prepay terms refresh failed (non-blocking): ${e.message}`); }
 
         // Keep the live dispatch board in sync when a same-day job is created

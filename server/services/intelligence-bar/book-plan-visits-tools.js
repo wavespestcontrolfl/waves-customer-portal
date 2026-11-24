@@ -307,13 +307,10 @@ async function priceFor({ customer, catalogRow, scheduledDate, bookingProperty }
   // A dues-covered member's series (monthly lane, no payer) carries no per-visit price: the dues cover it.
   const duesCovered = !customer.payer_id && resolveBillingLane(customer).mode === 'monthly_membership';
   const price = duesCovered || pricing.finalPrice == null || !(Number(pricing.finalPrice) > 0) ? null : Number(pricing.finalPrice);
+  // No catalog price means the visits bill from something the card does not show (a per-application fee, a quote): refuse.
+  // Dues cover is the one exception (the visits carry no price by design).
   if (price == null && !duesCovered) {
-    const verdict = AdminSchedule.recurringWithoutBillableAmount({
-      isRecurring: true, recurringFloorPrice: 0, customer, createInvoiceOnComplete: true, typedOneTimeBilling: false, isCallback: false, serviceType: catalogRow.name,
-    });
-    if (verdict) {
-      return { refusal: refuse(`"${catalogRow.name}" has no catalog price and nothing in this customer's billing would invoice its visits, so the bar can't book it without a price.`, 'no_billable_amount') };
-    }
+    return { refusal: refuse(`"${catalogRow.name}" has no catalog price, so what each visit bills (for example a per-application fee) is not on the card. The bar books plan visits only at a catalog price or under monthly dues.`, 'no_catalog_price') };
   }
   return { price, duesCovered, finalPrice: Number(pricing.finalPrice) || 0 };
 }
@@ -462,7 +459,7 @@ async function planBooking(input) {
     technician: tech.tech ? String(tech.tech.id) : null,
     customer: {
       id: String(customer.id), active: customer.active === true, billing_mode: customer.billing_mode || null, payer_id: customer.payer_id || null,
-      monthly_rate: customer.monthly_rate == null ? null : Number(customer.monthly_rate), tier: customer.waveguard_tier || null,
+      monthly_rate: customer.monthly_rate == null ? null : Number(customer.monthly_rate), waveguard_tier: customer.waveguard_tier || null,
     },
     send_texts: sendTexts,
   };
@@ -489,6 +486,8 @@ async function planBooking(input) {
     // What the handler asserts inside its booking transaction before commit (createScheduleBooking's approvedBooking).
     _approved: {
       dates: planned.dates, price: priced.price, propertyId: bookingProperty.property_id, technicianId: tech.tech ? String(tech.tech.id) : null,
+      // The eligibility facts the card judged; the handler compares them with the locked customer row before inserting.
+      customer: pins.customer,
       address: { line1: bookingProperty.service_address_line1, line2: bookingProperty.service_address_line2, city: bookingProperty.service_address_city, state: bookingProperty.service_address_state, zip: bookingProperty.service_address_zip },
     },
   };

@@ -234,6 +234,49 @@ describe('createScheduleBooking approvedBooking (the transaction asserts what th
     expect(result.json.warnings.join(' ')).toMatch(/overlap|already/i);
   });
 
+  test('a locked duplicate-series guard that cannot run rolls an approved booking back (it only warns on the HTTP path)', async () => {
+    const Seeder = require('../services/recurring-appointment-seeder');
+    jest.spyOn(Seeder, 'checkActiveSeriesLocked').mockResolvedValue({ matches: [], guardError: new Error('guard query failed') });
+    const recurring = { ...oneOff, isRecurring: true, recurringPattern: 'quarterly', recurringCount: 2, createInvoice: true };
+    const result = await book({ ...approved, dates: ['2099-07-03', '2099-10-02'] }, recurring);
+    expect(result).toMatchObject({ status: 409, json: { code: 'APPROVED_BOOKING_CHANGED' } });
+    expect(result.json.error).toMatch(/duplicate-series check could not run/);
+    expect(redeemInspectionCreditForBooking).not.toHaveBeenCalled();
+    // Without approvedBooking the same failed guard is logged and the booking proceeds.
+    const http = await book(null, recurring);
+    expect(http.status).toBe(201);
+  });
+
+  test.each([
+    ['the billing lane', { billing_mode: 'monthly_membership' }],
+    ['the member tier', { waveguard_tier: 'Gold' }],
+    ['the monthly rate', { monthly_rate: 59 }],
+    ['the payer', { payer_id: 'payer-1' }],
+    ['the active flag', { active: true }],
+  ])('a customer whose %s differs from the card\'s, read under the lock, rolls the booking back before any insert', async (_label, customer) => {
+    const result = await book({ ...approved, customer });
+    expect(result).toMatchObject({ status: 409, json: { code: 'APPROVED_BOOKING_CHANGED' } });
+    expect(result.json.error).toMatch(/billing lane, tier or monthly rate/);
+    expect(inserts).toEqual([]);
+  });
+
+  test('a customer that matches the card\'s facts books', async () => {
+    const result = await book({ ...approved, customer: {} });
+    expect(result.status).toBe(201);
+  });
+
+  test('an approved booking defers no prepay-term refresh after commit (the transaction asserted none is due); the HTTP path still does', async () => {
+    // Let the earlier bookings' post-commit effects finish before counting this test's own.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const refresh = jest.spyOn(AnnualPrepayRenewals, 'refreshActiveTermsForCustomer').mockResolvedValue(undefined);
+    expect((await book(approved)).status).toBe(201);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(refresh).not.toHaveBeenCalled();
+    expect((await book(null)).status).toBe(201);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(refresh).toHaveBeenCalledWith('cust-1');
+  });
+
   test('a prepay term the post-commit refresh would touch rolls the booking back', async () => {
     refreshable = [{ id: 'term-1', status: 'active', term_end: '2099-01-01' }];
     const result = await book(approved);
