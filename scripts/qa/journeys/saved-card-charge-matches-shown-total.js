@@ -60,10 +60,10 @@ module.exports = {
     assert.equal(charge.success, true);
 
     // (a) What Stripe received is the card total, once, with the fee declared as a surcharge.
-    const calls = captured().slice(before).filter((entry) => entry.kind === 'stripe');
-    assert.equal(calls.length, 1, 'Exactly one PaymentIntent create call');
-    const [call] = calls;
-    assert.equal(call.method, 'paymentIntents.create');
+    const stripeCalls = () => captured().slice(before).filter((entry) => entry.kind === 'stripe');
+    const creates = () => stripeCalls().filter((entry) => entry.method === 'paymentIntents.create');
+    assert.deepEqual(stripeCalls().map((entry) => entry.method), ['paymentIntents.create'], 'The charge makes exactly one Stripe call');
+    const [call] = creates();
     assert.equal(call.amount, expected.totalCents);
     assert.equal(call.currency, 'usd');
     assert.equal(call.customer, fixture.stripeCustomerId);
@@ -97,19 +97,21 @@ module.exports = {
     assert.equal(cents(receiptTotal), call.amount);
     assert.equal(cents(receiptFee), call.amount_details.surcharge.amount);
 
-    // (c) The receipt queue drains by itself (the charge schedules it); exactly one text carries the amount.
-    let receiptTexts = [];
-    for (let attempt = 0; attempt < 100 && !receiptTexts.length; attempt++) {
-      receiptTexts = captured().slice(before).filter((entry) => entry.kind === 'sms' && entry.body?.includes(dollars(call.amount)));
-      if (!receiptTexts.length) await new Promise((resolve) => setTimeout(resolve, 200));
+    // (c) The receipt queue drains by itself (the charge schedules it). Wait for the committed receipt stamp, which the
+    // worker writes after the text transport returns, then count the texts that carry the amount.
+    let receiptSentAt = null;
+    for (let attempt = 0; attempt < 100 && !receiptSentAt; attempt++) {
+      receiptSentAt = (await db('invoices').where({ id: fixture.cardInvoiceId }).first('receipt_sent_at')).receipt_sent_at;
+      if (!receiptSentAt) await new Promise((resolve) => setTimeout(resolve, 200));
     }
+    assert.ok(receiptSentAt, 'Receipt text stamps receipt_sent_at');
+    const receiptTexts = captured().slice(before).filter((entry) => entry.kind === 'sms' && entry.body?.includes(dollars(call.amount)));
     assert.equal(receiptTexts.length, 1, 'Exactly one receipt text must carry the card total');
     assert.equal(receiptTexts[0].to, fixture.phone);
     assert.equal(receiptTexts[0].customerId, fixture.customerId);
     assert.ok(receiptTexts[0].body.includes(fixture.cardInvoiceNumber), 'Receipt text names the invoice');
     const job = await db('receipt_delivery_jobs').where({ invoice_id: fixture.cardInvoiceId }).first();
     assert.equal(job.source, 'card_on_file');
-    assert.ok((await db('invoices').where({ id: fixture.cardInvoiceId }).first()).receipt_sent_at, 'Receipt text stamps receipt_sent_at');
 
     // The same signed Stripe event that normally follows must settle nothing twice.
     const event = { id: fixture.cardEventId, type: 'payment_intent.succeeded', created: Math.floor(Date.now() / 1000),
@@ -122,9 +124,19 @@ module.exports = {
     await json(await page.request.post(`${baseUrl}/api/stripe/webhook`,
       { headers: { 'Content-Type': 'application/json', 'Stripe-Signature': signature }, data: payload }));
     assert.equal((await db('stripe_webhook_events').where({ id: fixture.cardEventId }).first()).processed, true);
-    assert.equal((await db('payments').where({ stripe_payment_intent_id: fixture.cardPaymentIntentId })).length, 1);
+    // The webhook must leave every settled amount as the charge wrote it: one payment row, same amount and fee split,
+    // same invoice total, no second charge and no second receipt text.
+    const settled = await db('payments').where({ stripe_payment_intent_id: fixture.cardPaymentIntentId });
+    assert.equal(settled.length, 1);
+    assert.equal(Math.round(Number(settled[0].amount) * 100), call.amount);
+    assert.equal(settled[0].base_amount_cents, expected.baseCents);
+    assert.equal(settled[0].surcharge_amount_cents, call.amount_details.surcharge.amount);
+    assert.equal(settled[0].status, 'paid');
+    const settledInvoice = await db('invoices').where({ id: fixture.cardInvoiceId }).first();
+    assert.equal(settledInvoice.status, 'paid');
+    assert.equal(Math.round(Number(settledInvoice.total) * 100), call.amount);
     assert.equal(captured().slice(before).filter((entry) => entry.kind === 'sms' && entry.body?.includes(dollars(call.amount))).length, 1);
-    assert.equal(captured().slice(before).filter((entry) => entry.kind === 'stripe').length, 1);
+    assert.equal(creates().length, 1, 'The webhook must not create a second charge');
 
     return { invoiceId: fixture.cardInvoiceId, shownBeforeFee: shownBase, cardTotalCharged: receiptTotal, cardFee: receiptFee,
       stripeAmountCents: call.amount, paymentCount: payments.length, receiptTexts: receiptTexts.length };

@@ -95,6 +95,7 @@ const unitCents = (value) => Number.isInteger(value) ? value : Number(value);
 const stripeStubs = {
   Charges: {
     retrieve: async (id) => {
+      capture('stripe', { method: 'charges.retrieve', id });
       if (id === `ch_${fixture.paymentIntentId}`) {
         return { id, payment_method_details: { type: 'us_bank_account', us_bank_account: { last4: '6789' } } };
       }

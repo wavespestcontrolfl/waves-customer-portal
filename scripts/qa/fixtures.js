@@ -141,7 +141,7 @@ async function cleanup(db, f) {
       [f.paymentIntentId, ...(f.cardPaymentIntentId ? [f.cardPaymentIntentId] : [])]).del();
     await trx('notifications').whereIn('recipient_id', customerIds)
       .orWhereRaw("metadata->'payload'->>'serviceId' = ?", [f.appointmentId])
-      .orWhereRaw("metadata->'payload'->>'invoiceId' = ?", [f.invoiceId]).del();
+      .orWhereIn(trx.raw("metadata->'payload'->>'invoiceId'"), [f.invoiceId, f.cardInvoiceId].filter(Boolean)).del();
     await trx('activity_log').whereIn('customer_id', customerIds).del();
     await trx('visit_billing_dispositions').whereIn('scheduled_service_id',
       trx('scheduled_services').select('id').whereIn('customer_id', customerIds)).del();
