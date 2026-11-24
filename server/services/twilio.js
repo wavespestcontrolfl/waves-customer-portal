@@ -2079,6 +2079,18 @@ const TwilioService = {
     // appointment phone contacts should still get the en-route notice by email
     // (handled by the fallback below).
 
+    // GATE_CALL_GIVEN_VISIT_TEXTS (owner 2026-11-24, "yes, visit only"): a person the caller named on the
+    // call that booked THIS visit also gets this visit's en-route text, read from the visit's own row
+    // (call-visit-recipient.js). Sent after the account contacts and kept out of `results`, so the
+    // recipient's send never decides whether the notice counts as delivered for the account holder.
+    // Same entry rule as safeSendAppointment: a notice with no account contact at all sends no visit-only text either.
+    const visitRecipients = scheduledServiceId && enRouteUnfiltered.length && require("./call-visit-recipient").gateLive()
+      ? require("./call-visit-recipient")
+      : null;
+    const visitOnlyContacts = visitRecipients
+      ? await visitRecipients.contactsForVisit(scheduledServiceId, "en_route", { excludePhones: contacts.map((c) => c.phone) })
+      : [];
+
     const origin = publicPortalUrl();
     const longTrackUrl = trackToken ? `${origin}/track/${trackToken}` : null;
     const trackUrl = longTrackUrl
@@ -2107,7 +2119,7 @@ const TwilioService = {
     let attemptedSms = false;
     let landlineSkipped = false;
     const attemptSms = async () => {
-      for (const contact of contacts) {
+      for (const contact of [...contacts, ...visitOnlyContacts]) {
         // callback_number_needed hold — never text the disclaimed ANI (or
         // any other contact) on this visit; the email fallback below
         // carries the notice instead. Codex round 7 P2: an App-push
@@ -2139,9 +2151,9 @@ const TwilioService = {
           );
           continue;
         }
-        attemptedSms = true;
-        results.push(
-          await sendCustomerMessage({
+        const visitOnly = contact.role === (visitRecipients && visitRecipients.ROLE);
+        if (!visitOnly) attemptedSms = true;
+        const sendEnRouteText = () => sendCustomerMessage({
             to: contact.phone,
             body,
             channel: "sms",
@@ -2163,8 +2175,15 @@ const TwilioService = {
             // never set it (validators/send-window.js).
             ...(operatorInitiated ? { operatorInitiated: true } : {}),
             metadata: { original_message_type: "tech_en_route", useCustomerChannel: true, notificationEventKey, templateKey: "tech_en_route" },
-          }),
-        );
+          });
+        if (visitOnly) {
+          // Once per slot; a failure here never reaches `results`, so it cannot change the holder's outcome.
+          await visitRecipients.sendOnce(contact, sendEnRouteText).catch((visitErr) => logger.warn(
+            `[twilio] visit-only en-route text for visit ${scheduledServiceId} failed: ${visitErr.code || visitErr.name || "error"}`,
+          ));
+        } else {
+          results.push(await sendEnRouteText());
+        }
       }
       return results.some((r) => r?.sent);
     };

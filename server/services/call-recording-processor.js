@@ -4263,6 +4263,61 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
   }
 }
 
+// The same-call booking confirmation for the people the caller named for THIS visit (GATE_CALL_GIVEN_VISIT_TEXTS,
+// owner 2026-11-24 "yes, visit only"; call-visit-recipient.js decides who is owed it). One text per recipient per
+// visit slot (the recipient's delivery claim), and a number that already holds this visit's confirmation (the slot
+// fan-out, an earlier pass) is not texted again. Never throws. Returns false only when this pass lost its claim.
+async function sendVisitOnlyConfirmations({ scheduledServiceId, customerId, call, excludePhones, blocked, claimStillOwned, visit }) {
+  const visitRecipients = require('./call-visit-recipient');
+  if (blocked || !visitRecipients.gateLive()) return true;
+  try {
+    const AppointmentReminders = require('./appointment-reminders');
+    const contacts = await visitRecipients.contactsForVisit(scheduledServiceId, 'confirmation', { excludePhones });
+    for (const contact of contacts) {
+      if (!(await claimStillOwned())) return false;
+      if (await AppointmentReminders.confirmationLoggedForVisitPhone({ scheduledServiceId, phone: contact.phone }).catch(() => false)) continue;
+      const contactFirst = String(contact.name || '').trim().split(/\s+/)[0] || visit.firstName;
+      const body = await AppointmentReminders.renderAppointmentPageTemplate('appointment_confirmation',
+        async () => {
+          const { buildAppointmentLink } = require('./appointment-link');
+          const apptLink = await buildAppointmentLink(scheduledServiceId, { customerId });
+          const window = await AppointmentReminders.confirmationArrivalWindow({ scheduledServiceId });
+          return {
+            first_name: contactFirst, service_type: visit.serviceType, date: visit.parsedDate, time: visit.parsedTime, window, appointment_line: apptLink.line,
+          };
+        },
+        {
+          first_name: contactFirst, service_type: visit.serviceType, date_time: visit.preferredDateTime, date: visit.parsedDate, time: visit.parsedTime, reschedule_line: '',
+        },
+        { workflow: 'call_booking_confirmation', entity_type: 'customer', entity_id: customerId });
+      if (!body) continue;
+      const at = visit.scheduledDate
+        ? parseETDateTime(`${require('../utils/date-only').dateOnlyString(visit.scheduledDate)}T${visit.windowStart ? String(visit.windowStart).slice(0, 5) : '08:00'}`)
+        : null;
+      const sent = await visitRecipients.sendOnce(contact, () => sendCustomerMessage({
+        to: contact.phone,
+        body,
+        channel: 'sms',
+        audience: 'customer',
+        purpose: 'appointment_confirmation',
+        customerId,
+        appointmentId: scheduledServiceId,
+        ...(at && !Number.isNaN(at.getTime()) ? { renderedSlotMs: at.getTime() } : {}),
+        // Not a service-contact slot: phone_matches_customer, so no contact-login check applies.
+        identityTrustLevel: 'phone_matches_customer',
+        ...(isFreshInboundCall(call) ? { customerInitiated: true } : {}),
+        metadata: { original_message_type: 'confirmation', appointment_contact_role: visitRecipients.ROLE },
+      }));
+      if (sent.skipped) logger.info(`[call-proc] visit-only confirmation skipped (${sent.reason}) for visit ${scheduledServiceId}`);
+      else if (!sent.result?.sent) logger.warn(`[call-proc] visit-only confirmation not sent for visit ${scheduledServiceId}: ${sent.result?.code || sent.result?.reason || 'unknown'}`);
+      else logger.info(`[call-proc] visit-only confirmation sent for visit ${scheduledServiceId}`);
+    }
+  } catch (err) {
+    logger.warn(`[call-proc] visit-only confirmation skipped for visit ${scheduledServiceId}: ${err.code || err.name || 'error'}`);
+  }
+  return true;
+}
+
 // Persist a call's secondary contact into the customer's first EMPTY
 // service-contact slot so the existing appointment fan-out
 // (customer-contact.js getAppointmentContacts: confirmation, en-route,
@@ -23094,6 +23149,21 @@ const CallRecordingProcessor = {
                   }
                 }
               }
+              // GATE_CALL_GIVEN_VISIT_TEXTS (owner 2026-11-24, "yes, visit only"): a person the caller named for
+              // THIS visit ("my husband Bob will be home, text him too") is recorded on the visit's own row
+              // (visit_text_recipients). That row, not the account's slots or consent stamp, is what lets the
+              // confirmation, the reminders and the en-route text reach them. Idempotent and fail-soft, so a
+              // reprocess or a reused visit neither duplicates nor loses it and a write error never touches
+              // the booking.
+              await require('./call-visit-recipient').recordForCall({
+                scheduledServiceId: svc.id,
+                customerId,
+                call,
+                contactPhone,
+                extracted,
+                v2Extraction: v2CanonicalExtraction,
+                blocked: v2SmsBlocked || v2DoNotContact || callbackNumberNeededHoldActive,
+              });
               // NOTE: payer_id is stamped only on FRESH bookings (insert +
               // fresh follow-up child). Retroactively backfilling the Bill-To on
               // a REUSED/pre-gate row is intentionally out of scope here — it
@@ -24518,6 +24588,20 @@ const CallRecordingProcessor = {
                       logger.warn(`[call-proc] secondary confirmation fan-out skipped for customer ${customerId}: ${fanErr.code || fanErr.name || 'error'}`);
                     }
                   }
+                  // GATE_CALL_GIVEN_VISIT_TEXTS (owner 2026-11-24, "yes, visit only"): a person the caller named on
+                  // THIS call for THIS visit gets its booking confirmation, from the visit's own row. Independent
+                  // of the secondary-contact gate above and of the account's slots and consent. Not sent when the
+                  // call's SMS is blocked or do-not-contact, or when the re-armed sweep owns the confirmation (its
+                  // canonical send reaches the recipient through safeSendAppointment).
+                  if (!(await sendVisitOnlyConfirmations({
+                    scheduledServiceId,
+                    customerId,
+                    call,
+                    excludePhones: [smsPhone, smsRecipient],
+                    blocked: confirmationRearmed || v2SmsBlocked || v2DoNotContact,
+                    claimStillOwned,
+                    visit: { serviceType, firstName, parsedDate, parsedTime, preferredDateTime: extracted.preferred_date_time, scheduledDate: scheduledDateForLog, windowStart: windowStartForLog },
+                  }))) return false;
                   return primaryOk;
                 },
               });
@@ -27160,6 +27244,7 @@ CallRecordingProcessor._test = {
   shouldWarnOwnershipLost,
   resolveCallBillingPayer,
   persistCallSecondaryContact,
+  sendVisitOnlyConfirmations,
   onSiteOptinAskTrigger,
   decideOnSiteOptinAsk,
   resolveCallBookingPropertyLinkage,

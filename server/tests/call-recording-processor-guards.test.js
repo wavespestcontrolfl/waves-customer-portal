@@ -2761,7 +2761,7 @@ describe('inbound-reply quiet-hours marker is fresh-inbound only (#5466)', () =>
     expect(isFreshInboundCall({ direction: 'inbound', created_at: new Date(NOW + 60 * 1000) }, NOW)).toBe(false);
   });
 
-  test('all three call-pipeline send sites use the fresh-inbound helper, never a bare direction check', () => {
+  test('all four call-pipeline send sites use the fresh-inbound helper, never a bare direction check', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     const cardAt = src.indexOf("trigger: 'ai_call_pipeline',\n                recipientPhone");
     expect(cardAt).toBeGreaterThan(-1);
@@ -2769,7 +2769,8 @@ describe('inbound-reply quiet-hours marker is fresh-inbound only (#5466)', () =>
     const confirmationSites = src.split("purpose: 'appointment_confirmation',").slice(1)
       .map((chunk) => chunk.slice(0, 1400));
     const marked = confirmationSites.filter((c) => c.includes("isFreshInboundCall(call) ? { customerInitiated: true } : {}"));
-    expect(marked).toHaveLength(2);
+    // The primary confirmation, the slot fan-out, and the visit-only confirmation (sendVisitOnlyConfirmations).
+    expect(marked).toHaveLength(3);
     expect(src).not.toContain('!isOutboundCall(call) ? { customerInitiated: true }');
   });
 });
