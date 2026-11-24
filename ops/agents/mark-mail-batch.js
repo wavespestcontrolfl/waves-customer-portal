@@ -21,8 +21,8 @@
 //
 // Run from the repo root:
 //   railway run --service waves-customer-portal -- env -u RAILWAY_TOKEN railway run --service Postgres -- \
-//     node ops/agents/mark-mail-batch.js [--execute --batch <name>] [--ids a,b,c] [--labels <out.json>]
-// (the outer run gives the app's env; the inner one the database's public URL, so the Mac can reach it)
+//     sh -c 'DATABASE_URL="$DATABASE_PUBLIC_URL" exec node ops/agents/mark-mail-batch.js "$@"' _ [--execute --batch <name>] [--ids a,b,c] [--labels <out.json>]
+// (the outer run gives the app's env; the inner one the database's public URL, passed in as DATABASE_URL so the Mac can reach it)
 
 const fs = require('fs');
 const path = require('path');
@@ -75,20 +75,16 @@ async function main() {
 
   // From the Mac the private database host does not resolve: use the public URL the Postgres service provides, and
   // stop with a clear message when only the private one is set.
-  // The public URL replaces DATABASE_URL ONLY inside the nested `railway run --service Postgres` shown above: there the
-  // Postgres service itself sets both URLs, so they name the same database. Anywhere else DATABASE_URL is used as given,
-  // so an inherited DATABASE_PUBLIC_URL can never move a local or QA run onto another database.
-  const PRIVATE_HOST = /\.railway\.internal\b/;
-  if (process.env.DATABASE_PUBLIC_URL && process.env.RAILWAY_SERVICE_NAME === 'Postgres') {
-    process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
+  // The script uses DATABASE_URL exactly as given and never swaps in another variable: the command in the header passes
+  // the public URL explicitly. It must be a real PostgreSQL URL with a host and a database; a private Railway host (not
+  // reachable from the Mac) is refused with the command to use.
+  let target;
+  try { target = new URL(String(process.env.DATABASE_URL || '').trim()); } catch { target = null; }
+  if (!target || !['postgres:', 'postgresql:'].includes(target.protocol) || !target.hostname || target.pathname.length < 2) {
+    throw Object.assign(new Error('DATABASE_URL must name one PostgreSQL database: run the command in the header'), { code: 'DB_URL' });
   }
-  // No silent default: without an explicit DATABASE_URL, models/db would read .env or another fallback and could pick a
-  // database nobody named.
-  if (!process.env.DATABASE_URL) {
-    throw Object.assign(new Error('DATABASE_URL is not set: name the database, or run the nested Postgres command above'), { code: 'PRIVATE_DB_URL' });
-  }
-  if (PRIVATE_HOST.test(process.env.DATABASE_URL || '')) {
-    throw Object.assign(new Error('only the private database URL is set: run it with the nested Postgres command above'), { code: 'PRIVATE_DB_URL' });
+  if (/\.railway\.internal$/.test(target.hostname)) {
+    throw Object.assign(new Error('DATABASE_URL is the private Railway host: run the command in the header, which passes the public URL'), { code: 'DB_URL' });
   }
   const db = require(server('models/db'));
   const { wouldMark, markBatch, labelsFor } = require(server('services/mail/mailed-record'));
@@ -132,7 +128,7 @@ async function main() {
 }
 
 main().catch((err) => {
-  const shown = err.code === 'USAGE' || err.code === 'PRIVATE_DB_URL' || err.name === 'TypeError';
+  const shown = err.code === 'USAGE' || err.code === 'DB_URL' || err.name === 'TypeError';
   console.error(`mark-mail-batch failed: ${err.code || err.name || 'error'}${shown ? ` (${err.message})` : ''}`);
   process.exitCode = 1;
 });
