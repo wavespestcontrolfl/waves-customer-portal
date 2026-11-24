@@ -1720,6 +1720,37 @@ const REGISTRY = {
     },
   },
 
+  // A visit-only text (services/call-visit-recipient.js, GATE_CALL_GIVEN_VISIT_TEXTS) that the send window held: the
+  // confirmation or 72 h reminder for the one visit the caller named this person on. The row belongs to that person's
+  // own number and carries informational copy frozen to the visit slot, so the replay re-asks the SAME module with a
+  // fresh read: the gate is still on, the visit is live and ahead in the same slot, the person is still on it and has
+  // not declined since. An unreadable answer holds the row for a retry. A replay that ends without a send gives the
+  // delivery claim back. The marker keeps a worker that predates this entry from sending the frozen body unchecked.
+  visit_text_recipient_deferred: {
+    async recheck(meta) {
+      const visit = await visitStillUpcoming(meta.scheduled_service_id, 'visit-recipient', slotPinFor(meta));
+      if (visit.eligible === false) return visit;
+      try {
+        const owed = await require('../call-visit-recipient').recipientStillOwedDeferred(meta);
+        if (!owed) return { eligible: false, reason: 'recipient-not-owed' };
+      } catch (err) {
+        return failClosed('visit-recipient', meta.scheduled_service_id, err);
+      }
+      // A queued day-only body is only true while the day promise still stands (the same recheck as the holder's).
+      return meta.promise_level === 'day' ? dayPromiseStillValid(meta) : { eligible: true };
+    },
+    dispatch(meta, defaultDispatch) {
+      return defaultDispatch();
+    },
+    // The same fresh read at the true provider boundary (the permission, the callback-number hold, the slot and the quoted arrival).
+    providerPreSendCheck(meta) {
+      return () => require('../call-visit-recipient').providerCheck({ ...meta, replay: true });
+    },
+    async onTerminal(meta) {
+      await require('../call-visit-recipient').releaseDeferredClaim(meta);
+    },
+  },
+
   // The report text to an on-location contact (services/contact-report-text.js).
   // Same frozen-recipient contract as the
   // held contact notice above: the row belongs to the contact's phone, and

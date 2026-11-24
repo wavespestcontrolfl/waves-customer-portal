@@ -23094,6 +23094,21 @@ const CallRecordingProcessor = {
                   }
                 }
               }
+              // GATE_CALL_GIVEN_VISIT_TEXTS (owner 2026-11-24, "yes, visit only"): a person the caller named for
+              // THIS visit ("my husband Bob will be home, text him too") is recorded on the visit's own row
+              // (visit_text_recipients). That row, not the account's slots or consent stamp, is what lets the
+              // confirmation, the reminders and the en-route text reach them. Idempotent and fail-soft, so a
+              // reprocess or a reused visit neither duplicates nor loses it and a write error never touches
+              // the booking.
+              await require('./call-visit-recipient').recordForCall({
+                scheduledServiceId: svc.id,
+                customerId,
+                call,
+                contactPhone,
+                extracted,
+                v2Extraction: v2CanonicalExtraction,
+                blocked: v2SmsBlocked || v2DoNotContact || callbackNumberNeededHoldActive,
+              });
               // NOTE: payer_id is stamped only on FRESH bookings (insert +
               // fresh follow-up child). Retroactively backfilling the Bill-To on
               // a REUSED/pre-gate row is intentionally out of scope here — it
@@ -23342,9 +23357,12 @@ const CallRecordingProcessor = {
                     // sms_log (no visit id there — key by customer + type
                     // since THIS visit's row was created; a cross-visit match
                     // skips the re-arm, failing toward silence).
+                    // A visit-only recipient's confirmation (call-visit-recipient.js) is NOT the holder's: its delivery is no
+                    // evidence the holder was reached, in either ledger below.
                     let confirmationDelivered = await db('messaging_audit_log')
                       .where({ appointment_id: String(svc.id), purpose: 'appointment_confirmation' })
                       .whereNotNull('sent_at')
+                      .whereRaw("COALESCE(metadata->>'appointment_contact_role', '') <> 'visit_text_recipient'")
                       .first('id');
                     if (!confirmationDelivered) {
                       confirmationDelivered = await db('customer_interactions')
@@ -23364,6 +23382,7 @@ const CallRecordingProcessor = {
                         // customer was reached. Same genuine-SID pattern the
                         // cancellation-notice worker uses.
                         .whereRaw("twilio_sid ~ '^(SM|MM)'")
+                        .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) NOT IN (SELECT phone_key FROM visit_text_recipients WHERE scheduled_service_id = ?)", [svc.id])
                         .first('id');
                     }
                     if (!confirmationDelivered) {

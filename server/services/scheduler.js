@@ -7188,6 +7188,11 @@ function initScheduledJobs() {
               // and the lane stamped at enqueue ride along in metadata for
               // the owner autopay digest to classify the send.
               ...(claimMeta.entry_point ? { original_entry_point: String(claimMeta.entry_point) } : {}),
+              // A held visit-only text (call-visit-recipient.js) keeps the visit and the role it was written for, so a bounce of the
+              // replay is recognised as that person's and never recovered by emailing the account holder.
+              ...(claimMeta.entry_point === 'visit_text_recipient_deferred'
+                ? { appointment_contact_role: String(claimMeta.appointment_contact_role || ''), scheduled_service_id: claimMeta.scheduled_service_id }
+                : {}),
               // The queued invoice notice's trusted dispute-hold exemption (an operator's send, the
               // customer's own accept) rides into the replay's stored Email context.
               ...(claimMeta.entry_point === 'invoice_send_deferred' && ['operator', 'customer'].includes(claimMeta.hold_exempt)
