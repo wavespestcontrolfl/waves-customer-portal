@@ -170,6 +170,8 @@ describe('createScheduleBooking approvedBooking (the transaction asserts what th
     const result = await book(approved);
     expect(result.status).toBe(201);
     expect(inserts.map((d) => [d.scheduled_date, Number(d.estimated_price), d.technician_id])).toEqual([['2099-07-03', 89, 'tech-1']]);
+    // Approved bookings are credit-free: no post-commit credit redemption.
+    expect(redeemInspectionCreditForBooking).not.toHaveBeenCalled();
   });
 
   test.each([
@@ -185,6 +187,51 @@ describe('createScheduleBooking approvedBooking (the transaction asserts what th
     // The transaction callback threw, so the transaction rejected (the database rolls the inserts back) and nothing after it ran.
     await expect(db.transaction.mock.results[0].value).rejects.toMatchObject({ code: 'APPROVED_BOOKING_CHANGED' });
     expect(redeemInspectionCreditForBooking).not.toHaveBeenCalled();
+  });
+
+  test('a drifted stamped address rolls the booking back (the property id alone is not the address)', async () => {
+    const result = await book({ ...approved, address: { line1: '9 Other Street', line2: '', city: 'Venice', state: 'FL', zip: '34285' } });
+    expect(result).toMatchObject({ status: 409, json: { code: 'APPROVED_BOOKING_CHANGED' } });
+    expect(result.json.error).toMatch(/address/);
+    expect(redeemInspectionCreditForBooking).not.toHaveBeenCalled();
+  });
+
+  test('an inspection-credit offer (paused ones included) rolls the booking back, read under the credit lock', async () => {
+    const InspectionCredit = require('../services/inspection-credit');
+    jest.spyOn(InspectionCredit, 'projectRedeemableOfferAmount').mockResolvedValue(35);
+    const lock = jest.spyOn(InspectionCredit, 'lockInspectionCreditCustomer').mockResolvedValue(undefined);
+    const result = await book(approved);
+    expect(result).toMatchObject({ status: 409, json: { code: 'APPROVED_BOOKING_CHANGED' } });
+    expect(result.json.error).toMatch(/inspection-credit/);
+    expect(lock).toHaveBeenCalledWith(expect.anything(), 'cust-1');
+    expect(InspectionCredit.projectRedeemableOfferAmount).toHaveBeenCalledWith('cust-1', expect.objectContaining({ includePaused: true }));
+  });
+
+  test('an approved booking is stamped credit-free and the post-commit credit redemption is skipped', async () => {
+    const InspectionCredit = require('../services/inspection-credit');
+    jest.spyOn(InspectionCredit, 'projectRedeemableOfferAmount').mockResolvedValue(0);
+    const mark = jest.spyOn(InspectionCredit, 'markBookingForInspectionCredit').mockResolvedValue(undefined);
+    const result = await book(approved);
+    expect(result.status).toBe(201);
+    expect(mark).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ source: InspectionCredit.CREDIT_FREE_CARD_EVENT_SOURCE }));
+    expect(redeemInspectionCreditForBooking).not.toHaveBeenCalled();
+  });
+
+  test('another visit now holding the planned slot (the handler\'s own probe, under its date locks) rolls the booking back', async () => {
+    const { findConflictingVisits } = require('../services/scheduling/occupancy');
+    findConflictingVisits.mockResolvedValueOnce([{ id: 'other-visit' }]);
+    const result = await book(approved);
+    expect(result).toMatchObject({ status: 409, json: { code: 'APPROVED_BOOKING_CHANGED' } });
+    expect(result.json.error).toMatch(/holds a planned time/);
+    expect(redeemInspectionCreditForBooking).not.toHaveBeenCalled();
+  });
+
+  test('without approvedBooking a clashing slot still books with a warning (the HTTP path is unchanged)', async () => {
+    const { findConflictingVisits } = require('../services/scheduling/occupancy');
+    findConflictingVisits.mockResolvedValueOnce([{ id: 'other-visit' }]);
+    const result = await book(null);
+    expect(result.status).toBe(201);
+    expect(result.json.warnings.join(' ')).toMatch(/overlap|already/i);
   });
 
   test('a prepay term the post-commit refresh would touch rolls the booking back', async () => {

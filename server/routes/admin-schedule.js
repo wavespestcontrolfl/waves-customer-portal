@@ -8665,6 +8665,10 @@ async function customerPlanFingerprint(conn, customerId) {
   return JSON.stringify(CUSTOMER_PLAN_COLUMNS.map((c) => (row && row[c] != null ? String(row[c]) : null)));
 }
 
+// One comparable key for a stamped service address (a visit row's service_address_* or the card's address object).
+const addressKey = (a) => ['line1', 'line2', 'city', 'state', 'zip']
+  .map((f) => String(a?.[f] ?? a?.[`service_address_${f}`] ?? '').trim().toLowerCase().replace(/\s+/g, ' ')).join('|');
+
 async function assertApprovedBooking(trx, approved, { rows, customerId, planBefore }) {
   const cents = (v) => (v == null || v === '' ? null : Math.round(Number(v) * 100));
   // 1. The inserted dates are the pinned dates.
@@ -8675,6 +8679,8 @@ async function assertApprovedBooking(trx, approved, { rows, customerId, planBefo
   for (const row of rows) {
     if (cents(row.estimated_price) !== cents(approved.price)) throw approvedBookingChanged('The visit price changed since the card was shown.');
     if (approved.propertyId && String(row.property_id || '') !== String(approved.propertyId)) throw approvedBookingChanged('The visit address changed since the card was shown.');
+    // The stamped service address (the booking property's, re-read under its lock) is the address the card showed.
+    if (approved.address && addressKey(row) !== addressKey(approved.address)) throw approvedBookingChanged('The visit address changed since the card was shown.');
     if (String(row.technician_id || '') !== String(approved.technicianId || '')) throw approvedBookingChanged('The technician changed since the card was shown.');
     // 3. No setup fee rides any row (the stamp site refuses an owed one too).
     if (row.pending_setup_fee != null && Number(row.pending_setup_fee) !== 0) throw approvedBookingChanged('A setup fee is now stamped on this booking.');
@@ -9755,6 +9761,15 @@ async function scheduleCreateHandler(req, res, next) {
       // the same lock in the same position, so the #3011 customer-row →
       // series-advisory order below is unchanged relative to it.
       await lockCustomerComms(trx, customerId);
+      // An approved booking carries no inspection credit: the credit lock is taken here (comms -> credit -> customer row, as
+      // create_appointment takes it), and an open offer, paused ones included, is a change since the card.
+      if (approvedBooking) {
+        const InspectionCredit = require('../services/inspection-credit');
+        await InspectionCredit.lockInspectionCreditCustomer(trx, customerId);
+        if ((await InspectionCredit.projectRedeemableOfferAmount(customerId, { dbh: trx, includePaused: true })) > 0) {
+          throw approvedBookingChanged('An inspection-credit offer is now open for this customer.');
+        }
+      }
       // Phone-agent double-booking backstop: the call pipeline inserts its
       // booking under this same customer lock, so re-checking here — not
       // only in the preflight above, before the slow pricing reads — sees
@@ -10042,6 +10057,8 @@ async function scheduleCreateHandler(req, res, next) {
           technicianId: insertData.technician_id || null,
         });
         if (adminCreateClash.length) {
+          // An approved card was shown with no overlap: a visit holding a planned slot now is a change since the card.
+          if (approvedBooking) throw approvedBookingChanged('Another visit now holds a planned time.');
           bookingWarnings.push(slotOverlapWarning(dateOnly(scheduledDate)));
         }
       }
@@ -10085,7 +10102,8 @@ async function scheduleCreateHandler(req, res, next) {
       await require('../services/inspection-credit').markBookingForInspectionCredit(trx, {
         customerId,
         scheduledServiceId: svc.id,
-        source: 'admin_schedule',
+        // A card-approved booking is approved credit-free: its event proves "this customer booked" but no later offer adopts it.
+        source: approvedBooking ? require('../services/inspection-credit').CREDIT_FREE_CARD_EVENT_SOURCE : 'admin_schedule',
       });
 
       // Consultation-outcomes reconciliation (round 10 fast path — see the
@@ -10215,6 +10233,7 @@ async function scheduleCreateHandler(req, res, next) {
             technicianId: childData.technician_id || null, // see the parent probe
           });
           if (childClash.length) {
+            if (approvedBooking) throw approvedBookingChanged('Another visit now holds a planned time.');
             bookingWarnings.push(slotOverlapWarning(nextDateStr));
           }
         }
@@ -10835,7 +10854,7 @@ async function scheduleCreateHandler(req, res, next) {
     // FIRST created appointment only — a recurring series is one booking,
     // not one redemption per visit. Best-effort: a booking must never fail
     // because crediting failed, and the service never throws.
-    if (createdAppointments.length) {
+    if (createdAppointments.length && !approvedBooking) {
       try {
         const InspectionCredit = require('../services/inspection-credit');
         const first = createdAppointments[0];

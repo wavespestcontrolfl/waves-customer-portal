@@ -23,6 +23,10 @@
  *     (a brand-new program starts through the estimate: accept_estimate);
  *   - no open series for that service already exists (the handler's duplicate-series 409 also surfaces; the
  *     override is never passed);
+ *   - the earlier series ran at the SAME saved property (its stamped property_id equals the booking property, which must
+ *     be active); an older row with no property stamp does not qualify and is sent to the estimate;
+ *   - no inspection-credit offer is open (paused ones included): a booking would record it and can mint credit;
+ *   - no other visit holds any planned slot (any overlap refuses, probed at the service's real duration);
  *   - no price, discount, add-on, booster, tier, monthly-rate or prepay change: the body carries no pricing
  *     field, a priced discount or add-on line refuses, a customer on annual prepay refuses, and a booking whose
  *     tier / monthly-rate sync would write the customer row refuses;
@@ -128,44 +132,22 @@ async function resolveService(serviceType) {
   return { row, bookedType: row.name };
 }
 
-// Did this series parent run at the named property? A stamped property_id decides. A legacy row with none is placed the
-// way the duplicate-series guard places it: its source estimate's property, else its stamped service address, else the
-// customer's own primary address. A null property id never matches every property.
-async function seriesRanAtProperty(parent, bookingProperty, primaryPropertyId) {
-  if (!bookingProperty) return true;
-  if (parent.property_id) return String(parent.property_id) === String(bookingProperty.property_id);
-  if (parent.source_estimate_id) {
-    const estimate = await db('estimates').where({ id: parent.source_estimate_id }).first('property_id');
-    if (estimate?.property_id) return String(estimate.property_id) === String(bookingProperty.property_id);
-  }
-  const { normalizedStampedStreet, sameScopeKey } = require('../estimate-property-linkage');
-  const stamped = normalizedStampedStreet(parent.service_address_line1, parent.service_address_line2, parent.service_address_city, parent.service_address_zip);
-  if (stamped) {
-    const target = normalizedStampedStreet(bookingProperty.service_address_line1, bookingProperty.service_address_line2, bookingProperty.service_address_city, bookingProperty.service_address_zip);
-    return !!target && sameScopeKey(stamped, target);
-  }
-  return !!primaryPropertyId && String(primaryPropertyId) === String(bookingProperty.property_id);
-}
-
-// Does this customer already have (or had) a recurring series for the same service family, at this property? The
-// duplicate-series guard's own family classifier (duplicateGuardFamilyKey) decides, over every series parent in any
-// status, so a cancelled or run-out series counts.
+// Does this customer already have (or had) a recurring series for the same service family at the booking property? The
+// duplicate-series guard's own family classifier (duplicateGuardFamilyKey) decides the family, over every series parent in any
+// status, so a cancelled or run-out series counts. The parent's STAMPED property_id must equal the booking property (active,
+// resolved by resolveProperty); a legacy row with no property stamp does not qualify.
 async function hadPlanForService(customerId, catalogRow, bookingProperty) {
   const { duplicateGuardFamilyKey } = require('../recurring-appointment-seeder');
   const target = duplicateGuardFamilyKey(catalogRow.name);
   const parents = await db('scheduled_services')
     .where({ customer_id: customerId, is_recurring: true })
     .whereNull('recurring_parent_id')
-    .select('*');
-  const primary = bookingProperty
-    ? await db('customer_properties').where({ customer_id: customerId, is_primary: true }).first('id')
-    : null;
-  for (const p of parents || []) {
+    .select('id', 'service_id', 'service_type', 'property_id');
+  return (parents || []).some((p) => {
     const sameFamily = (p.service_id != null && String(p.service_id) === String(catalogRow.id))
       || (p.service_type && duplicateGuardFamilyKey(p.service_type) === target);
-    if (sameFamily && await seriesRanAtProperty(p, bookingProperty, primary?.id || null)) return true;
-  }
-  return false;
+    return !!sameFamily && !!p.property_id && String(p.property_id) === String(bookingProperty.property_id);
+  });
 }
 
 // An open series for the service (the handler's duplicate-series guard, asked now so no card is made).
@@ -215,10 +197,20 @@ async function setupFeeRefusal(customerId, catalogRow) {
     : null;
 }
 
-// The property the visits land on: a named one, or none when the customer has a single property.
+// The property the visits land on: the named one, else the customer's only active property. Always an active, fully
+// addressed saved property (its stamp), because the plan history is matched on it and the booking stamps it. A customer with
+// several active properties must name one; a customer with none cannot be booked here.
 async function resolveProperty(customerId, propertyId) {
   const Tools = require('./tools');
-  const proposal = await Tools.ibBookingPropertyProposal(customerId, propertyId);
+  let id = propertyId;
+  if (!id) {
+    const active = await db('customer_properties').where({ customer_id: customerId, active: true }).limit(2).select('id');
+    if (active.length === 0) {
+      return { refusal: { error: `This customer has no saved active property, so the plan visits have no address to match. ${ESTIMATE_PATH}`, code: 'no_saved_property' } };
+    }
+    if (active.length === 1) id = active[0].id;
+  }
+  const proposal = await Tools.ibBookingPropertyProposal(customerId, id);
   if (proposal.error) return { refusal: { error: proposal.error, code: proposal.code, ...(proposal.properties ? { properties: proposal.properties } : {}) } };
   return { stamp: proposal.stamp };
 }
@@ -236,6 +228,42 @@ async function resolveTechnician(input) {
     return { tech };
   }
   return { tech: null };
+}
+
+// An inspection-credit offer, paused ones included: a booking records the customer's booking event and can mint credit on it,
+// money the card does not show. Refused here; the handler's transaction checks it again under the credit lock.
+async function inspectionCreditRefusal(customerId) {
+  let amount = 0;
+  try {
+    const projected = await require('../inspection-credit').projectRedeemableOfferAmount(customerId, { includePaused: true });
+    amount = Number(projected?.amount ?? projected) || 0;
+  } catch (err) {
+    logger.warn(`[intelligence-bar:book-plan-visits] inspection credit read failed: ${err.message}`);
+    return refuse("Could not check this customer's inspection credit, so the bar can't tell whether the booking would redeem one.", 'credit_check_failed');
+  }
+  return amount > 0
+    ? refuse(`This customer has $${amount.toFixed(2)} of open inspection-credit offers (paused ones included). Booking can redeem them, and the card can't show that, so the bar can't book it.`, 'booking_with_credit_unsupported')
+    : null;
+}
+
+// Any other visit in a planned slot, at the window the handler will really book (the service's duration), tech-blind like the
+// handler's own probe. Any overlap refuses (the handler's transaction refuses one too).
+async function overlapRefusal({ dates, windowStart, durationMinutes, technicianId }) {
+  const WindowRules = require('../scheduling/window-rules');
+  let windowEnd;
+  try {
+    ({ window_end: windowEnd } = WindowRules.assertAdminAppointmentWindow({ windowStart, windowEnd: null, durationMinutes }));
+  } catch (err) {
+    if (err?.status === 422) return refuse(err.message, 'invalid_appointment_window');
+    throw err;
+  }
+  for (const date of dates) {
+    const clash = await db.transaction((trx) => WindowRules.probeSlotOverlap({ trx, date, windowStart, windowEnd, technicianId: technicianId || null }));
+    if (clash.length) {
+      return refuse(`Another visit already holds ${weekdayDate(date)} at that time. Pick another time or day, or book it from the Schedule screen, which warns and books anyway.`, 'slot_overlap');
+    }
+  }
+  return null;
 }
 
 // The planned visits for the request: the Schedule create's own series-date plan, never a copy of it.
@@ -393,6 +421,8 @@ async function planBooking(input) {
   if (prepay) return prepay;
   const setupFee = await setupFeeRefusal(customerId, catalogRow);
   if (setupFee) return setupFee;
+  const credit = await inspectionCreditRefusal(customerId);
+  if (credit) return credit;
 
   const tech = await resolveTechnician(input);
   if (tech.refusal) return tech.refusal;
@@ -403,20 +433,15 @@ async function planBooking(input) {
   if (priced.refusal) return priced.refusal;
   const body = bodyFor({
     input: { ...input, scheduled_date: dateStr }, catalogRow, cadence, windowStart,
-    technicianId: tech.tech?.id || null, propertyId: bookingProperty?.property_id || null, visitCount, sendTexts,
+    technicianId: tech.tech?.id || null, propertyId: bookingProperty.property_id, visitCount, sendTexts,
     expectedPrice: priced.finalPrice,
   });
   const planned = await planDates(body, bookingProperty);
   if (planned.dates.length < 2) return refuse('The Schedule screen could not place a second visit for this cadence and date.', 'no_plan_dates');
   const syncRefusal = await planSyncRefusal({ customerId, catalogRow, dates: planned.dates });
   if (syncRefusal) return syncRefusal;
-  // Another visit already in a planned slot: the same overlap preview create_appointment shows, per date, tech-blind (so
-  // unassigned visits count). Pinned with the card, so a conflict that is new at Confirm is a stale card.
-  const overlaps = [];
-  for (const date of planned.dates) {
-    const who = await Tools.ibBookingOverlapWho(date, input.time_window, tech.tech?.id || null);
-    if (who.length) overlaps.push({ date, visits: who.map((w) => ({ customer: w.customer, service: w.service, window: w.window, fact: w.fact })) });
-  }
+  const overlap = await overlapRefusal({ dates: planned.dates, windowStart, durationMinutes, technicianId: tech.tech?.id || null });
+  if (overlap) return overlap;
 
   const windowLabel = Tools.clockLabel(`${windowStart}:00`);
   const visits = planned.dates.map((date, i) => ({ number: i + 1, date, weekday: WEEKDAYS[new Date(`${date}T12:00:00Z`).getUTCDay()], window: windowLabel }));
@@ -426,13 +451,12 @@ async function planBooking(input) {
   const cadenceLabel = effectivePattern === LAWN_ROUNDS_PATTERN ? 'nine lawn rounds a year' : cadence.label;
   const pins = {
     effective_pattern: effectivePattern,
-    overlaps,
     body,
     dates: planned.dates,
     price: priced.price,
     dues_covered: priced.duesCovered,
     catalog: { id: String(catalogRow.id), name: catalogRow.name, frequency: catalogRow.frequency, base_price: catalogRow.base_price == null ? null : Number(catalogRow.base_price) },
-    property: bookingProperty ? { id: bookingProperty.property_id, address: addressOf(customer, bookingProperty), lat: bookingProperty.lat ?? null, lng: bookingProperty.lng ?? null } : null,
+    property: { id: bookingProperty.property_id, address: addressOf(customer, bookingProperty), lat: bookingProperty.lat ?? null, lng: bookingProperty.lng ?? null },
     // The address the card showed (the customer's own when no saved property was named).
     address: addressOf(customer, bookingProperty),
     technician: tech.tech ? String(tech.tech.id) : null,
@@ -453,7 +477,6 @@ async function planBooking(input) {
     cadence_pattern: effectivePattern,
     ongoing: visitCount == null,
     visits,
-    ...(overlaps.length ? { overlaps } : {}),
     visit_count_shown: visits.length,
     technician: technicianLabel,
     price_per_visit: priced.price == null ? null : money(priced.price),
@@ -464,7 +487,10 @@ async function planBooking(input) {
     _version: hashOf(pins),
     _body: body,
     // What the handler asserts inside its booking transaction before commit (createScheduleBooking's approvedBooking).
-    _approved: { dates: planned.dates, price: priced.price, propertyId: bookingProperty?.property_id || null, technicianId: tech.tech ? String(tech.tech.id) : null },
+    _approved: {
+      dates: planned.dates, price: priced.price, propertyId: bookingProperty.property_id, technicianId: tech.tech ? String(tech.tech.id) : null,
+      address: { line1: bookingProperty.service_address_line1, line2: bookingProperty.service_address_line2, city: bookingProperty.service_address_city, state: bookingProperty.service_address_state, zip: bookingProperty.service_address_zip },
+    },
   };
 }
 
@@ -474,9 +500,6 @@ function cardLines(preview) {
   lines.push({ kind: 'customer', text: `Booked for ${preview.customer_name} at ${preview.address}` });
   lines.push({ kind: 'operational', text: `Service: ${preview.service}, ${preview.cadence}` });
   for (const v of preview.visits || []) lines.push({ kind: 'operational', text: `Visit ${String(v.number).padStart(2, '0')} · ${weekdayDate(v.date)} · ${v.window}` });
-  for (const o of preview.overlaps || []) {
-    for (const v of o.visits) lines.push({ kind: 'operational', text: `Overlap on ${weekdayDate(o.date)}: ${[v.customer, v.service, v.window].filter(Boolean).join(' · ')} already holds that time. The booking still goes ahead.` });
-  }
   if (preview.ongoing) lines.push({ kind: 'operational', text: `Ongoing plan: these are the first ${preview.visit_count_shown} visits. The plan adds later visits itself on ${preview.cadence_pattern === LAWN_ROUNDS_PATTERN ? 'the nine fixed lawn rounds' : 'the same cadence'}.` });
   if (preview.shortfall) lines.push({ kind: 'operational', text: preview.shortfall });
   lines.push({ kind: 'operational', text: `Technician: ${preview.technician || 'none picked (the plan leaves the visits unassigned)'}` });

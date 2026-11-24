@@ -44,6 +44,8 @@ const ServiceLibrary = require('../services/service-library');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
 const SecurePlans = require('../services/secure-appointment-plans');
 const Tools = require('../services/intelligence-bar/tools');
+const InspectionCredit = require('../services/inspection-credit');
+const WindowRules = require('../services/scheduling/window-rules');
 const { executeBookPlanVisitsTool, BOOK_PLAN_VISITS_TOOLS } = require('../services/intelligence-bar/book-plan-visits-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
 const { WRITE_TWO_STEP_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
@@ -66,7 +68,8 @@ let openSeries;
 let bookingReply;
 let refreshableTerms;
 let setupOwed;
-let overlapWho;
+let creditOpen;
+let slotClash;
 
 function seed(overrides = {}) {
   tables.customers = [{
@@ -80,9 +83,12 @@ function seed(overrides = {}) {
   // The earlier series: a finished parent for the same service.
   tables.scheduled_services = overrides.series || [{
     id: 'old-parent', customer_id: CUSTOMER_ID, is_recurring: true, recurring_parent_id: null, service_id: SERVICE_ID,
-    service_type: 'Quarterly Pest Control Service', property_id: null, status: 'completed',
+    service_type: 'Quarterly Pest Control Service', property_id: PROPERTY_ID, status: 'completed',
   }];
-  tables.customer_properties = overrides.properties || [{ id: PROPERTY_ID, customer_id: CUSTOMER_ID, active: true, is_primary: true }];
+  tables.customer_properties = overrides.properties || [{
+    id: PROPERTY_ID, customer_id: CUSTOMER_ID, active: true, is_primary: true,
+    address_line1: '1 Example Way', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34205',
+  }];
   tables.annual_prepay_terms = overrides.terms || [];
   tables.technicians = overrides.technicians || [];
 }
@@ -102,10 +108,12 @@ beforeEach(() => {
   jest.spyOn(ServiceLibrary, 'retiredServicesNotHeldBy').mockResolvedValue([]);
   refreshableTerms = [];
   setupOwed = 0;
-  overlapWho = [];
+  creditOpen = 0;
+  slotClash = [];
   jest.spyOn(AnnualPrepayRenewals, 'refreshableTermsForCustomer').mockImplementation(async () => refreshableTerms);
   jest.spyOn(SecurePlans, 'directRodentSetupForRow').mockImplementation(async () => setupOwed);
-  jest.spyOn(Tools, 'ibBookingOverlapWho').mockImplementation(async () => overlapWho);
+  jest.spyOn(InspectionCredit, 'projectRedeemableOfferAmount').mockImplementation(async () => creditOpen);
+  jest.spyOn(WindowRules, 'probeSlotOverlap').mockImplementation(async () => slotClash);
   bookingReply = {
     status: 201,
     json: { id: 'visit-1', recurringCreated: 4, appointments: QUARTERLY_DATES.map((date, i) => ({ id: `visit-${i + 1}`, date })), warnings: [] },
@@ -126,6 +134,9 @@ describe('the card', () => {
       service: 'Quarterly Pest Control Service', cadence: 'quarterly', ongoing: true, technician: null,
       price_per_visit: '$89.00', send_texts: true, notifies_customer: true,
     });
+    // The implicit (only) property is resolved, stamped on the body and pinned for the handler's transaction.
+    expect(card._body.propertyId).toBe(PROPERTY_ID);
+    expect(card._approved).toMatchObject({ propertyId: PROPERTY_ID, address: { line1: '1 Example Way', city: 'Bradenton', state: 'FL', zip: '34205' } });
     expect(card.visits.map((v) => v.date)).toEqual(QUARTERLY_DATES);
     expect(card.visits.every((v) => v.window === '9:00 AM')).toBe(true);
     expect(writes).toEqual([]);
@@ -354,47 +365,48 @@ describe('refusals that read the handler\'s own helpers', () => {
     expect(AnnualPrepayRenewals.refreshableTermsForCustomer).toHaveBeenCalledWith(CUSTOMER_ID);
   });
 
-  describe('a legacy series with no property id never authorizes a plan at every property', () => {
-    const PROP_A = PROPERTY_ID;
+  describe('the earlier series must have run at the booking property (its stamped property id)', () => {
     const PROP_B = '00000000-0000-0000-0000-0000000bc009';
     const twoProps = [
-      { id: PROP_A, customer_id: CUSTOMER_ID, active: true, is_primary: true },
-      { id: PROP_B, customer_id: CUSTOMER_ID, active: true, is_primary: false },
+      { id: PROPERTY_ID, customer_id: CUSTOMER_ID, active: true, is_primary: true, address_line1: '1 Example Way', city: 'Bradenton', state: 'FL', zip: '34205' },
+      { id: PROP_B, customer_id: CUSTOMER_ID, active: true, is_primary: false, address_line1: '9 Rental Row', city: 'Venice', state: 'FL', zip: '34285' },
     ];
-    const stampFor = (id, street) => ({
-      property_id: id, service_address_line1: street, service_address_line2: null, service_address_city: 'Venice',
-      service_address_state: 'FL', service_address_zip: '34285', lat: null, lng: null,
-    });
-    const legacy = (extra = {}) => ({
-      id: 'legacy-parent', customer_id: CUSTOMER_ID, is_recurring: true, recurring_parent_id: null, service_id: SERVICE_ID,
-      service_type: 'Quarterly Pest Control Service', property_id: null, status: 'completed', ...extra,
+    const parent = (extra = {}) => ({
+      id: 'old', customer_id: CUSTOMER_ID, is_recurring: true, recurring_parent_id: null, service_id: SERVICE_ID,
+      service_type: 'Quarterly Pest Control Service', property_id: PROPERTY_ID, status: 'completed', ...extra,
     });
     beforeEach(() => {
       const CustomerProperties = require('../services/customer-properties');
-      jest.spyOn(CustomerProperties, 'bookingPropertyStamp').mockImplementation(async ({ propertyId }) => (
-        propertyId === PROP_B ? stampFor(PROP_B, '9 Rental Row') : stampFor(PROP_A, '1 Example Way')));
+      jest.spyOn(CustomerProperties, 'bookingPropertyStamp').mockImplementation(async ({ propertyId }) => {
+        const row = twoProps.find((p) => p.id === propertyId);
+        return row ? { property_id: row.id, service_address_line1: row.address_line1, service_address_line2: '', service_address_city: row.city, service_address_state: row.state, service_address_zip: row.zip, lat: null, lng: null } : null;
+      });
       jest.spyOn(require('../services/estimate-converter'), 'buildSeriesAddressScope').mockResolvedValue(null);
     });
 
-    test('an unstamped legacy row at the customer\'s primary address is the primary property\'s, not the rental\'s', async () => {
-      seed({ properties: twoProps, series: [legacy()] });
+    test('a series stamped at the primary does not authorize a plan at the rental', async () => {
+      seed({ properties: twoProps, series: [parent()] });
       const rental = await refused({ ...INPUT, property_id: PROP_B }, 'new_program');
       expect(rental.error).toMatch(/brand-new program/);
-      const primary = await propose({ ...INPUT, property_id: PROP_A });
-      expect(primary.preview).toBe(true);
+      expect((await propose({ ...INPUT, property_id: PROPERTY_ID })).preview).toBe(true);
     });
 
-    test('a legacy row stamped with the rental\'s street belongs to the rental', async () => {
-      seed({ properties: twoProps, series: [legacy({ service_address_line1: '9 Rental Row', service_address_city: 'Venice', service_address_zip: '34285' })] });
-      expect((await propose({ ...INPUT, property_id: PROP_B })).preview).toBe(true);
-      await refused({ ...INPUT, property_id: PROP_A }, 'new_program');
+    test('a legacy row with no property stamp qualifies for no property (even with only one active property)', async () => {
+      seed({ series: [parent({ property_id: null })] });
+      await refused(INPUT, 'new_program');
+      seed({ properties: twoProps, series: [parent({ property_id: null })] });
+      await refused({ ...INPUT, property_id: PROPERTY_ID }, 'new_program');
     });
 
-    test('a legacy row with no address follows its source estimate\'s property', async () => {
-      seed({ properties: twoProps, series: [legacy({ source_estimate_id: 'est-1' })] });
-      tables.estimates = [{ id: 'est-1', property_id: PROP_B }];
-      expect((await propose({ ...INPUT, property_id: PROP_B })).preview).toBe(true);
-      await refused({ ...INPUT, property_id: PROP_A }, 'new_program');
+    test('a plan at a former, now-inactive property does not authorize a plan at the current only property', async () => {
+      seed({ series: [parent({ property_id: '00000000-0000-0000-0000-0000000bc0aa' })] });
+      await refused(INPUT, 'new_program');
+    });
+
+    test('a customer with no saved active property is sent to the estimate', async () => {
+      seed({ properties: [] });
+      const result = await refused(INPUT, 'no_saved_property');
+      expect(result.error).toMatch(/accept_estimate/);
     });
   });
 
@@ -414,24 +426,47 @@ describe('refusals that read the handler\'s own helpers', () => {
   });
 });
 
-describe('overlaps across the series', () => {
-  test('the card shows another visit already holding a planned slot (tech-blind, per date) and still books', async () => {
-    overlapWho = [{ id: 'v-9', customer: 'Sam Other', service: 'General Pest Control', window: '9:00 AM-10:00 AM', fact: 'v-9|Sam Other|General Pest Control|x|9' }];
-    const card = await propose();
-    expect(card.overlaps).toHaveLength(QUARTERLY_DATES.length);
-    expect(Tools.ibBookingOverlapWho).toHaveBeenCalledTimes(QUARTERLY_DATES.length);
-    expect(Tools.ibBookingOverlapWho).toHaveBeenCalledWith('2099-03-02', '9:00 AM', null);
-    const contract = AuthorizationContract.buildContract({ toolName: 'book_plan_visits', params: INPUT, preview: card });
-    expect(contract.effects.map((e) => e.label).join('\n')).toMatch(/Overlap on 2099-03-02 \(Mon\): Sam Other/);
-    const result = await propose(confirmedInput(card));
-    expect(result.success).toBe(true);
+describe('overlaps, credit and the same-slot rules', () => {
+  test('any other visit in a planned slot refuses, probed at the service\'s real duration and tech-blind', async () => {
+    tables.services[0].default_duration_minutes = 90;
+    slotClash = [{ id: 'v-9', scheduled_date: '2099-06-01', window_start: '10:00:00', window_end: '11:00:00' }];
+    const result = await propose();
+    expect(result).toMatchObject({ code: 'slot_overlap' });
+    expect(result.error).toMatch(/Nothing was booked/);
+    expect(WindowRules.probeSlotOverlap).toHaveBeenCalledWith(expect.objectContaining({ date: '2099-03-02', windowStart: '09:00', windowEnd: '10:30', technicianId: null }));
+    expect(AdminSchedule.createScheduleBooking).not.toHaveBeenCalled();
   });
 
-  test('a conflict that is new since the card is a stale card', async () => {
+  test('no overlap: every planned date is probed and the card is made', async () => {
     const card = await propose();
-    overlapWho = [{ id: 'v-10', customer: 'Lee Newer', service: 'Lawn Care', window: '9:00 AM-10:00 AM', fact: 'v-10|Lee Newer|Lawn Care|x|9' }];
+    expect(card.preview).toBe(true);
+    expect(WindowRules.probeSlotOverlap.mock.calls.map((c) => c[0].date)).toEqual(QUARTERLY_DATES);
+    expect(WindowRules.probeSlotOverlap.mock.calls[0][0]).toMatchObject({ windowEnd: '10:00' });
+  });
+
+  test('a conflict that appears before Confirm refuses at Confirm', async () => {
+    const card = await propose();
+    slotClash = [{ id: 'v-10' }];
     const result = await propose(confirmedInput(card));
+    expect(result.code).toBe('slot_overlap');
     expect(result.preview_changed).toBe(true);
+    expect(AdminSchedule.createScheduleBooking).not.toHaveBeenCalled();
+  });
+
+  test('any open inspection-credit offer (paused ones included) refuses; the card reads the complete offer set', async () => {
+    creditOpen = 35;
+    const result = await propose();
+    expect(result).toMatchObject({ code: 'booking_with_credit_unsupported' });
+    expect(result.error).toMatch(/\$35\.00/);
+    expect(InspectionCredit.projectRedeemableOfferAmount).toHaveBeenCalledWith(CUSTOMER_ID, { includePaused: true });
+    expect(AdminSchedule.createScheduleBooking).not.toHaveBeenCalled();
+  });
+
+  test('an offer that opens between the card and Confirm refuses at Confirm', async () => {
+    const card = await propose();
+    creditOpen = 35;
+    const result = await propose(confirmedInput(card));
+    expect(result).toMatchObject({ code: 'booking_with_credit_unsupported', preview_changed: true });
     expect(AdminSchedule.createScheduleBooking).not.toHaveBeenCalled();
   });
 });
@@ -439,7 +474,7 @@ describe('overlaps across the series', () => {
 describe('the lawn cadence the plan really follows', () => {
   test('a residential six-week lawn service shows and pins the nine lawn rounds, not "every 6 weeks"', async () => {
     seed({ services: [{ id: SERVICE_ID, name: '6-Week Lawn Care Service', service_key: 'lawn_care', category: 'lawn', billing_type: 'recurring', frequency: 'every_6_weeks', base_price: 55, is_active: true }],
-      series: [{ id: 'old-lawn', customer_id: CUSTOMER_ID, is_recurring: true, recurring_parent_id: null, service_id: SERVICE_ID, service_type: '6-Week Lawn Care Service', property_id: null, status: 'completed' }] });
+      series: [{ id: 'old-lawn', customer_id: CUSTOMER_ID, is_recurring: true, recurring_parent_id: null, service_id: SERVICE_ID, service_type: '6-Week Lawn Care Service', property_id: PROPERTY_ID, status: 'completed' }] });
     jest.spyOn(AdminSchedule, 'lawnRoundsSeriesForBooking').mockResolvedValue({ pattern: 'lawn_rounds_9', intervalDays: undefined });
     const card = await propose({ ...INPUT, service_type: '6-Week Lawn Care Service' });
     expect(card.error).toBeUndefined();
@@ -466,11 +501,14 @@ describe('Confirm', () => {
     const arg = AdminSchedule.createScheduleBooking.mock.calls[0][0];
     expect(arg.body).toEqual(card._body);
     // What the handler asserts inside its transaction before commit.
-    expect(arg.approvedBooking).toEqual({ dates: QUARTERLY_DATES, price: 89, propertyId: null, technicianId: null });
+    expect(arg.approvedBooking).toEqual({
+      dates: QUARTERLY_DATES, price: 89, propertyId: PROPERTY_ID, technicianId: null,
+      address: { line1: '1 Example Way', line2: '', city: 'Bradenton', state: 'FL', zip: '34205' },
+    });
     expect(arg.actor).toEqual({ technicianId: 'staff-1', technicianName: 'Test Admin' });
     expect(arg.body).toEqual({
       customerId: CUSTOMER_ID, scheduledDate: '2099-03-02', serviceType: 'Quarterly Pest Control Service', serviceId: SERVICE_ID,
-      windowStart: '09:00', isRecurring: true, recurringPattern: 'quarterly', recurringOngoing: true, createInvoice: true, expected_price: 89, sendConfirmationSms: true,
+      propertyId: PROPERTY_ID, windowStart: '09:00', isRecurring: true, recurringPattern: 'quarterly', recurringOngoing: true, createInvoice: true, expected_price: 89, sendConfirmationSms: true,
     });
     expect(result).toMatchObject({ success: true, visits_booked: 4, dates: QUARTERLY_DATES });
   });
@@ -503,7 +541,7 @@ describe('Confirm', () => {
   test.each([
     ['the price changed', () => { pricing = { ...pricing, finalPrice: 99 }; }],
     ['the planned dates changed', () => { schedule.mockImplementationOnce(async (_c, o) => { o.plannedChildDates.push('2099-06-02', '2099-09-08', '2099-12-08'); return { plannedCount: 4 }; }); }],
-    ['the address changed', () => { tables.customers[0].address_line1 = '2 Moved Street'; }],
+    ['the address changed', () => { tables.customer_properties[0].address_line1 = '2 Moved Street'; }],
     ['the customer\'s billing changed', () => { tables.customers[0].monthly_rate = 59; }],
     ['the catalog price changed', () => { tables.services[0].base_price = 95; }],
   ])('a stale card is refused when %s, and nothing is booked', async (_label, change) => {
@@ -608,6 +646,35 @@ describe('the pieces it shares with the Schedule create', () => {
       const lawn = [{ ...newRows[0], service_type: 'Bi-Monthly Lawn Care Service' }];
       expect(await real.bookingWouldChangeCustomerPlan({ database, customerId: CUSTOMER_ID, newRows: lawn, today: '2098-12-01' }))
         .toMatchObject({ writes: true, reason: 'label_only_realign' });
+    } finally {
+      delete process.env.GATE_AUTO_WAVEGUARD_TIER;
+    }
+  });
+
+  test('a non-member the enrollment rules would not enroll (commercial, or no qualifying coverage) is not refused', async () => {
+    process.env.GATE_AUTO_WAVEGUARD_TIER = 'true';
+    let real;
+    jest.isolateModules(() => { real = jest.requireActual('../services/self-booking-plan-sync'); });
+    const mk = (customer) => {
+      const database = (table) => {
+        const q = {};
+        for (const m of ['leftJoin', 'where', 'whereNotIn', 'orderBy', 'select']) q[m] = () => q;
+        q.first = () => Promise.resolve(table === 'customers' ? customer : undefined);
+        q.columnInfo = () => Promise.resolve({ waveguard_tier: {}, waveguard_tier_source: {} });
+        q.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+        return q;
+      };
+      database.transaction = async (cb) => cb(database);
+      return database;
+    };
+    const newRows = [{ service_type: 'Quarterly Pest Control Service', scheduled_date: '2099-03-02', is_recurring: true, status: 'pending', is_callback: false }];
+    try {
+      const commercial = mk({ id: CUSTOMER_ID, waveguard_tier: null, monthly_rate: 0, property_type: 'commercial' });
+      expect(await real.bookingWouldChangeCustomerPlan({ database: commercial, customerId: CUSTOMER_ID, newRows, today: '2098-12-01' })).toMatchObject({ writes: false, reason: 'commercial_customer' });
+      const noCoverage = mk({ id: CUSTOMER_ID, waveguard_tier: null, monthly_rate: 0, property_type: 'residential' });
+      expect(await real.bookingWouldChangeCustomerPlan({ database: noCoverage, customerId: CUSTOMER_ID, newRows: [], today: '2098-12-01' })).toMatchObject({ writes: false, reason: 'no_upcoming_recurring_evidence' });
+      // A residential non-member whose new series would enroll a tier still writes.
+      expect(await real.bookingWouldChangeCustomerPlan({ database: noCoverage, customerId: CUSTOMER_ID, newRows, today: '2098-12-01' })).toMatchObject({ writes: true, reason: 'would_enroll_tier' });
     } finally {
       delete process.env.GATE_AUTO_WAVEGUARD_TIER;
     }

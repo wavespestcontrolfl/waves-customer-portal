@@ -1055,17 +1055,22 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
 // Would the recurring-row sync the Schedule create runs after a series commit write this customer's row (tier,
 // monthly rate, active, member_since)? `newRows` are the rows the series will add (service_type, service_id-joined
 // fields, scheduled_date, is_recurring, status). Read only: the same alignment the sync would write, over the
-// customer's live rows plus the new ones. The no-plan and label-only branches only write while the auto-tier gate is on, so
-// the no-plan branch reports a write whenever it is (a label-only tier is judged by the sync's own realignment rule). Returns { writes: boolean, reason }.
+// customer's live rows plus the new ones. Each of the sync's three branches (no-plan enrollment, label-only realignment, member
+// alignment) is judged by that branch's own update builder, so an unchanged result passes. Returns { writes: boolean, reason }.
 async function bookingWouldChangeCustomerPlan({ database = db, customerId, newRows = [], today = etDateString() }) {
   const customer = await database('customers').where({ id: customerId }).first();
   if (!customer) return { writes: true, reason: 'customer_not_found' };
-  if (!isMembershipCustomerRow(customer)) {
-    return isEnabled('autoWaveguardTierEnroll')
-      ? { writes: true, reason: 'would_enroll_tier' }
-      : { writes: false, reason: 'not_waveguard_enrolled' };
-  }
   const customerColumns = await columnInfo(database, 'customers');
+  if (!isMembershipCustomerRow(customer)) {
+    if (!isEnabled('autoWaveguardTierEnroll')) return { writes: false, reason: 'not_waveguard_enrolled' };
+    // The sync's own enrollment rules over the existing and proposed rows: a commercial account, or no qualifying
+    // upcoming coverage, enrolls nothing.
+    if (isCommercialAccount(customer)) return { writes: false, reason: 'commercial_customer' };
+    const keys = await detectUpcomingRecurringPlanKeys(database, customerId, today, newRows);
+    const enrollment = buildNoPlanTierEnrollmentUpdates(customer, keys, customerColumns);
+    const fields = Object.keys(enrollment.updates);
+    return enrollment.inferredTier && fields.length ? { writes: true, reason: 'would_enroll_tier', fields } : { writes: false, reason: 'no_upcoming_recurring_evidence' };
+  }
   if (isAutoDerivedTierLabelRow(customer)) {
     if (!isEnabled('autoWaveguardTierEnroll')) return { writes: false, reason: 'auto_label_gate_off' };
     // The real sync's own evidence and rule: an unchanged derived tier writes nothing.
