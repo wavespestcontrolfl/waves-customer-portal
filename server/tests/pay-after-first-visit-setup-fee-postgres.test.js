@@ -249,7 +249,37 @@ postgres('PAF setup fee — the stamped fee rides the first performed visit', ()
       expect(out).toMatchObject({ status: 200 });
       const { chargeInvoiceWithSavedCard } = require('../services/stripe');
       expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
-      expect(await parkAlerts(f)).toHaveLength(1);
+      const alerts = await parkAlerts(f);
+      expect(alerts).toHaveLength(1);
+      // Both charges are unbilled in full: the row carries the bell's Bill and send button (GATE_SETUP_FEE_BILL_BUTTON)
+      // with the visit's own price and the accepted fee.
+      const meta = typeof alerts[0].metadata === 'string' ? JSON.parse(alerts[0].metadata) : alerts[0].metadata;
+      expect(meta.buttons).toEqual(require('../services/setup-fee-bill-button').billButtons({
+        applicationCents: Math.round(VISIT_PRICE * 100), feeCents: Math.round(SETUP_FEE * 100),
+        visit: await mockPg('scheduled_services').where({ id: f.parentId }).first('estimated_price', 'primary_line_price'),
+      }));
+      // The tap's locked check passes on this real parked row (the detector still reads the fee as owed in full):
+      // nothing on the account covers either charge yet.
+      const Button = require('../services/setup-fee-bill-button')._private;
+      const facts = Button.readRow({ id: alerts[0].id, metadata: meta }, meta.buttons.items[0]);
+      expect(facts.refusal).toBeUndefined();
+      await expect(mockPg.transaction(async (trx) => {
+        await Button.customerPreLock(facts)(trx);
+        await Button.coverageRecheck(facts)(trx);
+      })).resolves.toBeUndefined();
+      // The send claim's check, on a real transaction: it passes with nothing else billed, and while its transaction
+      // is open a second connection cannot take the KEY SHARE a new invoice's foreign key needs on the customer.
+      const check = Button.sendVerify(facts);
+      const sendTrx = await mockPg.transaction();
+      try {
+        const claimed = { id: '00000000-0000-4000-8000-00000000d1a7', customer_id: f.customerId, total: (VISIT_PRICE + SETUP_FEE), credit_applied: 0, amount_paid: 0 };
+        expect(await check.verify(claimed, sendTrx)).toBeNull();
+        expect(check.conflict).toBe(false);
+        await expect(mockPg.transaction(async (other) => {
+          await other.raw("SET LOCAL lock_timeout = '300ms'");
+          await other.raw('SELECT 1 FROM customers WHERE id = ? FOR KEY SHARE', [f.customerId]);
+        })).rejects.toMatchObject({ code: '55P03' });
+      } finally { await sendTrx.rollback(); }
     } finally { await cleanup(f); }
   });
 
