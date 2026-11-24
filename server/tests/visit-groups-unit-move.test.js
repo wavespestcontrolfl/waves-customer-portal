@@ -1400,19 +1400,22 @@ describe('shift hours: a grouped stop is judged as one unit', () => {
           expect(out.warnings).toEqual([expect.stringContaining('technician reassignment failed'), LINE]);
         });
 
-        // memberOfficeLine(row, expect): `expect` is the row as the plan read it. The blocks are compared as a shift reads them.
+        // memberOfficeLine(row, target): `expect` and `plannedMinutes` are the row as the plan read it. The blocks are compared as a shift reads them.
         test('the block is the hours and the stored length: an end the member\'s own move derived is no change, a later end is', async () => {
           const { memberOfficeLine } = vg._test;
           const plan = { scheduled_date: DAY, technician_id: 't1', window_start: '09:00:00', window_end: '10:00:00' };
-          const ask = async (row, expect = plan) => { dayWarningFor.mockClear(); return [await memberOfficeLine(row, expect), asked()]; };
+          const ask = async (row, expect = plan, plannedMinutes = 60) => { dayWarningFor.mockClear(); return [await memberOfficeLine(row, { expect, plannedMinutes }), asked()]; };
           const row = left('a', { scheduled_date: DAY, window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 });
           expect(await ask(row)).toEqual([undefined, []]);
           expect(await ask({ ...row, window_end: '10:30' })).toEqual([LINE, [['t1', DAY, true]]]);
           expect(await ask({ ...row, window_start: '09:30', window_end: '10:30' })).toEqual([LINE, [['t1', DAY, true]]]);
           // An earlier start with the end kept (30 minutes stored: the block ends at 10:00 both times).
-          expect(await ask({ ...row, window_start: '08:30', estimated_duration_minutes: 30 })).toEqual([LINE, [['t1', DAY, true]]]);
+          expect(await ask({ ...row, window_start: '08:30', estimated_duration_minutes: 30 }, plan, 30)).toEqual([LINE, [['t1', DAY, true]]]);
           // A stored length that runs past the end both times: the same block.
-          expect(await ask({ ...row, estimated_duration_minutes: 240 })).toEqual([undefined, []]);
+          expect(await ask({ ...row, estimated_duration_minutes: 240 }, plan, 240)).toEqual([undefined, []]);
+          // The office set the end to 11:00, and another editor made the length 120 minutes after the plan: the block
+          // the member had ends at 10:00 (the 60 minutes the plan read), so it changed.
+          expect(await ask({ ...row, window_end: '11:00', estimated_duration_minutes: 120 })).toEqual([LINE, [['t1', DAY, true]]]);
           // The plan read no end. The end the member's own move derived from the 60 minutes is no change; an end the office set later is.
           const open = { ...plan, window_end: null };
           expect(await ask(row, open)).toEqual([undefined, []]);
@@ -1436,6 +1439,14 @@ describe('shift hours: a grouped stop is judged as one unit', () => {
         const diverged = await unit(fakeRebooker(), '13:00-14:00', 'admin');
         expect(diverged.visitMove).toMatchObject({ moved: ['a'], failed: [expect.objectContaining({ id: 'b', code: 'VISIT_MEMBER_DIVERGED' })] });
         expect(asked()).toEqual([['t1', '2026-09-02', false]]);
+        // The same, for a member whose assignment was refused (the mover does not test that one for divergence): b moved
+        // to 14:00, stayed on t1, and another editor then put it at 16:00.
+        dayWarningFor.mockClear();
+        refuse('b');
+        db.__script = stop(pairLeft({ technician_id: 't9' }, { window_start: '16:00', window_end: '17:00' }));
+        const refused = await unit(fakeRebooker(), '13:00-14:00', 'admin', { technicianId: 't9' });
+        expect(refused.visitMove.failed.map((x) => x.id)).toEqual(['b']);
+        expect(asked()).toEqual([['t9', '2026-09-02', false]]);
       });
 
       test('a line that cannot be read is logged; the move is committed and is not failed for a line', async () => {

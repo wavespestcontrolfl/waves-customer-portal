@@ -1787,8 +1787,9 @@ function memberOutsideShift(shiftOf, date, landings, judged = {}) {
  * GATE_TECH_SHIFT_HOURS (D4 part 3c): the office's own move of a grouped stop
  * is told from the rows it leaves. `rows` is the visit's rows as the mover
  * itself read them FOR UPDATE to retarget the visit, after every member's own
- * move and its assignment to the technician the move names: a reassignment
- * linearizes after that read. Each member that moved is asked once, about the
+ * move and its assignment to the technician the move names (a reassignment
+ * linearizes after that read), less the rows that are no longer on the day and
+ * hours this move wrote. Each member that moved is asked once, about the
  * technician its row has there (memberOfficeLine). No writer's answer is used,
  * so a line is never about a row as it was planned, and is not lost with a
  * writer's answer (a refused assignment, a member's failed post-commit work).
@@ -1799,7 +1800,7 @@ function memberOutsideShift(shiftOf, date, landings, judged = {}) {
  */
 async function unitOfficeLines(targets, moved, rows, initiatedBy) {
   if (initiatedBy !== 'admin' || !require('../config/feature-gates').techShiftHoursLive()) return [];
-  const lineOf = async ({ id, expect }) => memberOfficeLine(rows.find((row) => String(row.id) === String(id)), expect);
+  const lineOf = async (target) => memberOfficeLine(rows.find((row) => String(row.id) === String(target.id)), target);
   const lines = await Promise.all(targets.filter((x) => moved.includes(x.id)).map((target) => lineOf(target).catch((err) => {
     require('./logger').warn(`[visit-groups] unit move: the office line of moved member ${target.id} was not read: ${err.message}`);
   })));
@@ -1807,18 +1808,18 @@ async function unitOfficeLines(targets, moved, rows, initiatedBy) {
 }
 
 // One moved member's line, about its row as the move left it: the day-off line,
-// or the shift line when the shift does not hold the row. `expect` is the row
-// as the plan read it. A member that kept its day and its technician is asked
-// the shift alone (as one visit's hours-only move is); when its block is the
-// one it had too, the move changed nothing a line is about, and it is not
-// asked. The blocks are compared as a shift reads them (rowBlockMinutes, on
-// the stored length): an end the member's own move derived is no change, an
-// end the office set later than the length is.
-function memberOfficeLine(row, expect) {
+// or the shift line when the shift does not hold the row. `expect` and
+// `plannedMinutes` are the row as the plan read it. A member that kept its day
+// and its technician is asked the shift alone (as one visit's hours-only move
+// is); when its block is the one it had too, the move changed nothing a line
+// is about, and it is not asked. The blocks are compared as a shift reads them
+// (rowBlockMinutes: the hours and the stored length): an end the member's own
+// move derived is no change, an end the office set later than the length is.
+function memberOfficeLine(row, { expect, plannedMinutes }) {
   if (!row || !row.technician_id) return undefined;
   const { rowBlockMinutes } = require('./scheduling/window-rules');
   const kept = expectMatchesRow(row, { scheduled_date: expect.scheduled_date, technician_id: expect.technician_id });
-  const was = rowBlockMinutes({ window_start: expect.window_start, window_end: expect.window_end, estimated_duration_minutes: row.estimated_duration_minutes });
+  const was = rowBlockMinutes({ window_start: expect.window_start, window_end: expect.window_end, estimated_duration_minutes: plannedMinutes });
   const now = rowBlockMinutes(row);
   if (kept && was.startMin === now.startMin && was.endMin === now.endMin) return undefined;
   return require('./technician-eligibility').dayWarningFor(row.technician_id, dateOnly(row.scheduled_date), { block: row, shiftOnly: kept });
@@ -2158,6 +2159,9 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           return {
             id: m.id, isPrimary, window, alreadyAtTarget, previousStatus: String(m.status),
             startHHMM: norm(targetStart) || norm(m.window_start) || null,
+            // The stored length the plan read, beside the write fence (`expect`): the office's lines
+            // compare the block the member had with the one it is left with (memberOfficeLine).
+            plannedMinutes: m.estimated_duration_minutes,
             // Original bounds kept SEPARATELY (local audit): a null end must
             // roll back as { start, end: null }, never as a zero-length
             // "09:00-09:00" window.
@@ -2956,8 +2960,9 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         .whereNotIn('status', TERMINAL_ROW_STATUSES)
         .orderBy('id').forUpdate()
         .select('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id', 'estimated_duration_minutes');
-      // The rows as this move left them, for the office's lines (unitOfficeLines).
-      leftRows = rows;
+      // The rows as this move left them, for the office's lines (unitOfficeLines): a row that is not
+      // on the day and hours this move wrote for it is another editor's by now, and is left out.
+      leftRows = rows.filter((row) => expectMatchesRow(row, landedState[row.id]));
       // Every member reported MOVED must still be a member of this visit
       // sitting at its landed target under these locks (codex r17): a
       // newer assignment/move between a member's move and this retarget can
