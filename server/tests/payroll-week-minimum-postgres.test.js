@@ -32,7 +32,7 @@ jest.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: jest.fn() }));
 const { randomUUID } = require('node:crypto');
 const express = require('express');
 const router = require('../routes/admin-payroll');
-const { EARLIER_STAY, NO_HIRE_DATE } = require('../services/payroll-week-minimum');
+const { NO_HIRE_DATE } = require('../services/payroll-week-minimum');
 const { addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
 const { etDateString } = require('../utils/datetime-et');
 
@@ -322,17 +322,13 @@ postgres('payroll minimum paid week', () => {
     expect((await api('GET', '/technicians?formerBank=1')).body.technicians.map((row) => row.id)).not.toContain(id);
   });
 
-  it('holds a week of an earlier stay: work before the hire date on file', async () => {
-    // Rehired later: the hire date moved past this week, which has shifts on Monday and Tuesday.
+  it('a week of an earlier stay counts all its scheduled days, and no row is blocked', async () => {
+    // Rehired later: the hire date moved past this week, which has 15 hours of shifts.
     const id = await tech('Sample Alpha', { hired: addDays(W1, 21) });
     await worked(id, W1, 15);
-    await trx('time_entry_daily_summary').insert({ technician_id: id, work_date: W1, total_shift_minutes: 900 });
     const run = (await draft(W1)).body.run;
-    expect(run.blocked).toEqual([{ technicianId: id, name: 'Sample Alpha', reason: EARLIER_STAY }]);
-    // Clearing the minimum now applies from this week on: the old week keeps its own minimum and stays held.
-    await api('PUT', `/technicians/${id}/week-minimum`, { body: { hours: null }, email: OWNER });
-    const again = (await api('POST', `/runs/${run.id}/recompute`)).body.run;
-    expect(again.blocked).toEqual([{ technicianId: id, name: 'Sample Alpha', reason: EARLIER_STAY }]);
+    expect(run.blocked).toEqual([]);
+    expect(byName(run, 'Sample Alpha')).toMatchObject({ regularHours: '15.00', minimumWeekHours: '25.00', grossCents: 88000 });
   });
 
   it('a day of time off before the hire date is not an earlier stay', async () => {

@@ -16,13 +16,14 @@
  * day, and a later week pays no minimum; time off the bank did not pay lowers the minimum only up to that day. The
  * setter refuses a change of the last day once a final check covers its week (payroll-time-off.js setWeekMinimum),
  * so nothing is guessed and a paid week never changes. A week before the hire date on file is in an earlier stay (a
- * rehire moved the hire date): a week with work in it is held with a reason (its first day is not on file), and a
- * last day on file before the hire date ends that stay. No readable hire date: the week is held with a reason.
+ * rehire moved the hire date): its first day is not on file, so all its scheduled days count (the most a stay can
+ * owe: a minimum is never short), its own unpaid time off lowers it, and a last day on file before the hire date
+ * ends that stay. No readable hire date: the week is held with a reason (Staff: enter it).
  *
  * Not here: a week with no recorded work and no time off gets none from the minimum (also a check for a pay line
  * alone).
  */
-const { STAFF_WORK_DATE_SQL, STAFF_DAILY_WORK_SQL, addStaffWorkDays } = require('../utils/staff-time-work-date');
+const { addStaffWorkDays } = require('../utils/staff-time-work-date');
 
 const SCHEDULED_DAYS = 4;
 // Read lazily: tech-rewards-pay-lines.js reads the pay run module at call time too.
@@ -53,30 +54,6 @@ function minimumWeekMinutes({ minimumHours, weekStart, hireDate = null, lastDay 
   return { target: target / 100, added: Math.max(0, target - hundredths(paidMinutes)) / 100 };
 }
 
-// The first day of the week [start, end] with recorded WORK (a time entry, or a daily summary with worked time), per
-// technician among `ids`: Map of id -> 'YYYY-MM-DD' (absent = none). Time off is not work: a day of time off before
-// the hire date is the bank's to refuse, not an earlier stay.
-async function firstWorkDays(conn, ids, start, end) {
-  const byTech = new Map();
-  if (!ids.length) return byTech;
-  const keep = (rows) => {
-    for (const row of rows) if (row.day && (!byTech.has(row.technician_id) || row.day < byTech.get(row.technician_id))) byTech.set(row.technician_id, row.day);
-  };
-  keep(await conn('time_entries')
-    .whereIn('technician_id', ids)
-    .whereRaw(`${STAFF_WORK_DATE_SQL} BETWEEN ?::date AND ?::date`, [start, end])
-    .where('status', '!=', 'voided')
-    .groupBy('technician_id')
-    .select('technician_id', conn.raw(`to_char(MIN(${STAFF_WORK_DATE_SQL}), 'YYYY-MM-DD') AS day`)));
-  keep(await conn('time_entry_daily_summary')
-    .whereIn('technician_id', ids)
-    .whereBetween('work_date', [start, end])
-    .whereRaw(STAFF_DAILY_WORK_SQL)
-    .groupBy('technician_id')
-    .select('technician_id', conn.raw("to_char(MIN(work_date), 'YYYY-MM-DD') AS day")));
-  return byTech;
-}
-
 // The time off of the week the bank did NOT pay on the days [from, to], from the week's own figures: booked minutes
 // (payroll_time_off, kind pto) less the minutes the bank paid that day (pto_bank.paidDays). Per technician among
 // `rows` (each { technician_id, pto_bank, from, to }): Map of id -> minutes.
@@ -104,9 +81,6 @@ async function unpaidOnDays(conn, rows, start, end) {
 const NO_HIRE_DATE = 'This employee has a minimum paid week and no readable hire date on file, so the days of the first week '
   + 'cannot be counted. Enter the hire date (Staff).';
 
-const EARLIER_STAY = 'This week holds work before the hire date on file (an earlier stay, before a rehire moved the '
-  + 'hire date), so the days the minimum paid week covers cannot be counted. Pay the week by hand.';
-
 // The stay a pay week [start, end] belongs to, as the days the minimum counts: { hireDate, lastDay }. A week that
 // reaches the hire date on file is in the current stay: from the hire date, to a last day on or after it. A week
 // before it is in an earlier stay (a rehire moved the hire date past it): its first day is not on file, and a last
@@ -123,7 +97,7 @@ function stayOf(tech, end) {
  * overtime_minutes, pto_minutes, holiday_minutes and, for a technician with a bank, pto_bank) of a technician with a
  * minimum in this pay week, when the week has recorded work or time off and is not after their last day. Rows of
  * every other technician come back unchanged. Returns { rows, holds }: holds = Map of technician id -> reason (no
- * readable hire date, or a week of an earlier stay). With `lock` (finalize), the technician rows are read FOR SHARE: a change of the setting or
+ * readable hire date). With `lock` (finalize), the technician rows are read FOR SHARE: a change of the setting or
  * the hire date waits for the finalize, or the finalize waits for it and reads the new values.
  */
 async function applyMinimum(conn, rows, { start, end, lock = false }) {
@@ -161,32 +135,29 @@ async function applyMinimum(conn, rows, { start, end, lock = false }) {
     return { ...row, from: stay.hireDate && stay.hireDate > start ? stay.hireDate : start, to: stay.lastDay };
   });
   const unpaidToLastDay = await unpaidOnDays(conn, lastWeekRows, start, end);
-  const firstWork = await firstWorkDays(conn, [...techs.keys()], start, end);
   const out = rows.map((row) => {
     const tech = techs.get(row.technician_id);
     if (!tech) return row;
     const bank = row.pto_bank || {};
     const paidOff = Number(row.pto_minutes || 0) - Number(bank.payoutMinutes || 0);
     const paidMinutes = Number(row.regular_minutes || 0) + Number(row.overtime_minutes || 0) + paidOff + Number(row.holiday_minutes || 0);
-    let unpaidMinutes = Math.max(0, Number(bank.unpaidMinutes || 0) - Number(bank.unpaidBeforeHireMinutes || 0));
-    if (inLastWeek(tech)) unpaidMinutes = unpaidToLastDay.get(row.technician_id) || 0;
-    // A check with no work and no time off in the week (a pay line alone, such as a bonus after leaving) is not a
-    // week on the job: no minimum.
-    if (paidMinutes + unpaidMinutes <= 0) return row;
+    // A check with no work and no time off on file in the week (a pay line alone, such as a bonus after leaving) is
+    // not a week on the job: no minimum. Every booked hour counts here, before any is set aside by date below.
+    if (paidMinutes + Number(bank.unpaidMinutes || 0) <= 0) return row;
     // The hire date first: it says which stay the week and a last day on file belong to.
     if (!tech.stay) {
       holds.set(row.technician_id, NO_HIRE_DATE);
       return row;
     }
+    // Unpaid time off lowers the minimum (rule a). The bank sets aside the hours before the CURRENT hire date; in a
+    // week of an earlier stay they are that stay's own, so all of them count. In the week of the last day, only the
+    // hours up to it count.
+    let unpaidMinutes = tech.stay.hireDate
+      ? Math.max(0, Number(bank.unpaidMinutes || 0) - Number(bank.unpaidBeforeHireMinutes || 0))
+      : Number(bank.unpaidMinutes || 0);
+    if (inLastWeek(tech)) unpaidMinutes = unpaidToLastDay.get(row.technician_id) || 0;
     // A week after the last day of its stay: no minimum.
     if (tech.stay.lastDay && start > tech.stay.lastDay) return row;
-    // Work before the hire date on file is an earlier stay: its first day is not on file, so its days cannot be counted.
-    const first = firstWork.get(row.technician_id);
-    const workedMinutes = Number(row.regular_minutes || 0) + Number(row.overtime_minutes || 0);
-    if (first ? first < tech.hire_date : workedMinutes > 0 && end < tech.hire_date) {
-      holds.set(row.technician_id, EARLIER_STAY);
-      return row;
-    }
     const minimum = minimumWeekMinutes({
       minimumHours: tech.minimumHours, weekStart: start, ...tech.stay, paidMinutes, unpaidMinutes,
     });
@@ -195,4 +166,4 @@ async function applyMinimum(conn, rows, { start, end, lock = false }) {
   return { rows: out, holds };
 }
 
-module.exports = { SCHEDULED_DAYS, NO_HIRE_DATE, EARLIER_STAY, minimumWeekMinutes, firstWorkDays, stayOf, unpaidOnDays, applyMinimum };
+module.exports = { SCHEDULED_DAYS, NO_HIRE_DATE, minimumWeekMinutes, stayOf, unpaidOnDays, applyMinimum };

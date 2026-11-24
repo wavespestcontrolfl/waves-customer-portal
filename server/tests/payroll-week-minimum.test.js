@@ -83,6 +83,21 @@ describe('applyMinimum', () => {
     expect(out.rows[0].minimum_week_minutes).toBe(600);
   });
 
+  test('a week of an earlier stay: all its unpaid time off lowers the minimum (the bank set it aside as before the hire date)', async () => {
+    const out = await applyMinimum(fakeConn([{ id: 'a', paid_week_minimum_hours: '40', hire_date: '2026-09-07', last_day: null }]), [
+      row('a', { holiday_minutes: 480, pto_bank: { unpaidMinutes: 600, unpaidBeforeHireMinutes: 600 } }),
+    ], { start: WEEK, end: '2026-06-07' });
+    expect([out.rows[0].minimum_week_target_minutes, out.rows[0].minimum_week_minutes]).toEqual([1800, 1320]);
+  });
+
+  test('a week with only unpaid time off after the last day still pays the days up to it', async () => {
+    // Last day Tuesday: Monday and Tuesday are owed; the 10 unpaid hours on Thursday are after the last day.
+    const out = await applyMinimum(fakeConn([{ id: 'a', paid_week_minimum_hours: '40', hire_date: '2026-01-05', last_day: '2026-06-02' }]), [
+      row('a', { pto_bank: { unpaidMinutes: 600, paidDays: [] } }),
+    ], { start: WEEK, end: '2026-06-07' });
+    expect(out.rows[0].minimum_week_minutes).toBe(1200);
+  });
+
   test('a check with no work and no time off (a pay line alone) gets no minimum', async () => {
     const lone = row('a');
     const out = await applyMinimum(fakeConn([{ id: 'a', paid_week_minimum_hours: '40', hire_date: '2026-01-05', last_day: null }]), [lone], { start: WEEK, end: '2026-06-07' });
