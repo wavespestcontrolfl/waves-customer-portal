@@ -32,7 +32,7 @@ describe('composeStatement', () => {
       firstPayDate: '2027-01-08',
       lastPayDate: '2027-12-24',
       pay: {
-        regularPayCents: 700000, overtimePayCents: 50000, ptoPayCents: 20000, holidayPayCents: 10000, minimumWeekPayCents: 0,
+        regularPayCents: 700000, overtimePayCents: 50000, ptoPayCents: 20000, holidayPayCents: 10000, minimumWeekPayCents: 0, holidayWorkPremiumCents: 0,
         commissionCents: 60000, reviewBonusCents: 4500, healthAllowanceCents: 30000,
         seasonBonusCents: 80000, stayBonusCents: 10000, decemberGiftCents: 30000,
         lineOvertimePremiumCents: 5500, otherCents: 0, grossCents: 1000000,

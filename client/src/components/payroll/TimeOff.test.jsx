@@ -461,6 +461,34 @@ describe('Time off in the pay run table and stub', () => {
     expect(within(stub).getByText('Minimum week pay (10.00 h at $22.00/h, not hours worked)')).toBeInTheDocument();
   });
 
+  it('adds a holiday work premium column only when a check has one, and its line on the stub', async () => {
+    const withPremium = { ...RUN, checks: [check({ holidayWorkHours: '4.00', holidayWorkMinutes: 240, holidayWorkPremiumCents: 4400 })] };
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options) => {
+      if (path === '/admin/payroll/runs/run-1') return reply({ run: withPremium });
+      if (path === '/admin/payroll/checks/check-a/stub') {
+        return reply({ stub: { ...STUB, hours: { ...STUB.hours, holidayWork: '4.00' }, earnings: { ...STUB.earnings, holidayWorkPremiumCents: 4400 } } });
+      }
+      return original(path, options);
+    });
+    render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open pay run for Oct 12, 2026 to Oct 18, 2026' }));
+    const detail = await screen.findByLabelText(/Pay run for/);
+    const table = within(detail).getByRole('table', { name: 'Paychecks' });
+    expect(within(table).getByRole('columnheader', { name: 'Holiday work premium' })).toBeInTheDocument();
+    expect(within(table).getByText(/4\.00 h · \$44\.00/)).toBeInTheDocument();
+    fireEvent.click(within(detail).getByRole('button', { name: 'Stub for Sample Alpha' }));
+    const stub = await screen.findByLabelText('Pay stub');
+    expect(within(stub).getByText('Holiday work premium (extra half on 4.00 h worked on a holiday; the hours are paid above)')).toBeInTheDocument();
+  });
+
+  it('shows no holiday work premium column on a run without one', async () => {
+    render(<PayrollSettings />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open pay run for Oct 12, 2026 to Oct 18, 2026' }));
+    const table = within(await screen.findByLabelText(/Pay run for/)).getByRole('table', { name: 'Paychecks' });
+    expect(within(table).queryByRole('columnheader', { name: 'Holiday work premium' })).toBeNull();
+  });
+
   it('shows no minimum week column on a run without one', async () => {
     render(<PayrollSettings />);
     fireEvent.click(await screen.findByRole('button', { name: 'Open pay run for Oct 12, 2026 to Oct 18, 2026' }));

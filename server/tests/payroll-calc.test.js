@@ -365,6 +365,59 @@ describe('computePaycheck: minimum paid week (payroll-week-minimum.js)', () => {
   });
 });
 
+describe('computePaycheck: holiday work premium (GATE_PAYROLL_TIME_OFF)', () => {
+  test('adds the extra half of the hours worked on a holiday: 4 h at $22.00 adds $44.00', () => {
+    const base = paycheck({ hourlyRate: '22.00', regularMinutes: '2400.00', ptoMinutes: 0, holidayMinutes: '600.00' });
+    const result = paycheck({ hourlyRate: '22.00', regularMinutes: '2400.00', ptoMinutes: 0, holidayMinutes: '600.00', holidayWorkMinutes: '240.00' });
+    expect(result.holidayWorkPremiumCents).toBe(4400);
+    expect(result.grossPayCents).toBe(base.grossPayCents + 4400);
+    // The worked hours and the holiday pay keep their own lines at the straight rate.
+    expect(result.regularPayCents).toBe(base.regularPayCents);
+    expect(result.holidayPayCents).toBe(base.holidayPayCents);
+  });
+
+  test('rounds the half to the cent, half up, in whole hundredths of a minute', () => {
+    // $22.33 x 0.5 x 60.60 min / 60 = 11.2766...: 1128 cents.
+    expect(paycheck({ hourlyRate: '22.33', ptoMinutes: 0, holidayMinutes: 0, holidayWorkMinutes: '60.60' }).holidayWorkPremiumCents).toBe(1128);
+    // $22.33 x 0.5 x 1 h = 11.165 exactly: the half cent rounds up.
+    expect(paycheck({ hourlyRate: '22.33', ptoMinutes: 0, holidayMinutes: 0, holidayWorkMinutes: '60' }).holidayWorkPremiumCents).toBe(1117);
+    // $22.33 x 0.5 x 0.01 min: well under half a cent.
+    expect(paycheck({ hourlyRate: '22.33', ptoMinutes: 0, holidayMinutes: 0, holidayWorkMinutes: '0.01' }).holidayWorkPremiumCents).toBe(0);
+    // A ten hour day at $23.45 pays $117.25 extra.
+    expect(paycheck({ hourlyRate: '23.45', ptoMinutes: 0, holidayMinutes: 0, holidayWorkMinutes: '600' }).holidayWorkPremiumCents).toBe(11725);
+  });
+
+  test('zero minutes pay nothing, no minutes passed carry no key, a mistyped figure is refused', () => {
+    expect(paycheck({ ptoMinutes: 0, holidayMinutes: 0, holidayWorkMinutes: 0 }).holidayWorkPremiumCents).toBe(0);
+    expect(paycheck({ ptoMinutes: 0, holidayMinutes: 0 })).not.toHaveProperty('holidayWorkPremiumCents');
+    expect(paycheck({})).not.toHaveProperty('holidayWorkPremiumCents');
+    expect(() => paycheck({ ptoMinutes: 0, holidayMinutes: 0, holidayWorkMinutes: '-1' })).toThrow(/Holiday work minutes/);
+    expect(() => paycheck({ ptoMinutes: 0, holidayMinutes: 0, holidayWorkMinutes: 'abc' })).toThrow(/Holiday work minutes/);
+  });
+
+  test('is excluded from the regular rate and never credited against overtime: overtime pay does not move', () => {
+    // 45 h worked, 8 of them on a holiday: 40 h regular, 5 h overtime at 1.5 times the straight rate. The premium is
+    // paid on top, 29 USC 207(e)(6): overtime pay and its premium are those of the same week without it.
+    const week = { hourlyRate: '22.00', regularMinutes: '2400.00', overtimeMinutes: '300.00', ptoMinutes: 0, holidayMinutes: '600.00' };
+    const base = paycheck(week);
+    const result = paycheck({ ...week, holidayWorkMinutes: '480.00' });
+    expect(result.overtimePayCents).toBe(base.overtimePayCents);
+    expect(result.overtimePremiumCents).toBe(base.overtimePremiumCents);
+    expect(result.overtimePayCents).toBe(16500);
+    expect(result.holidayWorkPremiumCents).toBe(8800);
+    expect(result.grossPayCents).toBe(base.grossPayCents + 8800);
+  });
+
+  test('is taxed as wages with the rest of the gross', () => {
+    const base = paycheck({ hourlyRate: '22.00', ptoMinutes: 0, holidayMinutes: 0 });
+    const result = paycheck({ hourlyRate: '22.00', ptoMinutes: 0, holidayMinutes: 0, holidayWorkMinutes: '240.00' });
+    expect(result.socialSecurityEmployeeCents).toBeGreaterThan(base.socialSecurityEmployeeCents);
+    expect(result.medicareEmployeeCents).toBe(Math.round((base.grossPayCents + 4400) * 0.0145));
+    expect(result.taxableWages.medicareCents).toBe(base.grossPayCents + 4400);
+    expect(result.netPayCents).toBeGreaterThan(base.netPayCents);
+  });
+});
+
 describe('computePaycheck: family employee (GATE_PAYROLL_FAMILY_EMPLOYEE)', () => {
   const stripExempt = ({ unemploymentExempt, ...rest }) => rest;
 
