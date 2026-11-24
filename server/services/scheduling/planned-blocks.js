@@ -1,6 +1,7 @@
 // Where each visit sits on the admin Schedule's Day grid: the PLANNED route
 // arrival (`plannedArrivalMin`, minutes after midnight, Eastern wall clock)
-// and the PLANNED on-site minutes (`plannedMinutes`), stamped on each day-feed
+// and the PLANNED on-site minutes (`plannedMinutes`), plus the arrival at the
+// stop (`plannedStopArrivalMin`, the same for every service of a group), stamped on each day-feed
 // row (owner 2026-11-24, "option A"). DISPLAY ONLY: the booked visit row stays
 // one hour and its window stays on the hour; nothing is written and no stop
 // is reordered.
@@ -37,6 +38,7 @@ function clearPlanned(services) {
   for (const s of services || []) {
     s.plannedArrivalMin = null;
     s.plannedMinutes = null;
+    s.plannedStopArrivalMin = null;
   }
 }
 
@@ -110,6 +112,9 @@ function attachPlannedBlocks(services, { departureMin = DEFAULT_DEPARTURE_MIN, h
       if (!s || !isPlaceable(s) || !(slot.minutes > 0)) continue;
       s.plannedArrivalMin = Math.round(slot.start);
       s.plannedMinutes = Math.round(slot.minutes);
+      // Where the van reaches the stop: the promise is kept or missed here,
+      // whichever service of a group starts later inside it.
+      s.plannedStopArrivalMin = Math.round(a.arrivalMin);
     }
   }
 }

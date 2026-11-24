@@ -196,7 +196,7 @@ function plannedInterval(svc) {
 // A moved or resized row's plan is the old route's: until the refreshed
 // plan arrives it draws from its booked window (optimistic edits only).
 function withoutPlan(s) {
-  return { ...s, plannedArrivalMin: null, plannedMinutes: null };
+  return { ...s, plannedArrivalMin: null, plannedMinutes: null, plannedStopArrivalMin: null };
 }
 // Shortest drawn planned block: one 14px text line. Smaller real heights
 // (a 15-minute stop is 16px) are drawn as they are down to this.
@@ -506,7 +506,9 @@ function AppointmentBlock({ service, top, height, planned = null, durationMin, l
   const showDrive = drive && effectiveHeight >= SLOT_HEIGHT * 2 && !readinessAtFoot;
   // Planned block (route model): the planned arrival leads, the promised
   // window moves to a chip, and a short block is one line.
-  const promise = planned ? plannedWindow(service, planned.start) : null;
+  // The promise is kept or missed when the van reaches the stop (a group's
+  // later service starts after earlier ones, still inside the same promise).
+  const promise = planned ? plannedWindow(service, Number.isFinite(service.plannedStopArrivalMin) ? service.plannedStopArrivalMin : planned.start) : null;
   const outsideWindow = promise?.outside === true;
   const oneLine = planned != null && compact;
   // A 15-minute stop is drawn at its real 16px: one text line, small buttons.
@@ -774,13 +776,11 @@ export function isBookableSlotIdx(slotIdx, durationMin = 60) {
   return startMin + dur <= DAY_END_HOUR * 60;
 }
 
-// A drop's new booked start (whole hour). A block drawn at its planned time
-// moves by the hours of vertical drag; any other block takes the slot it
-// was dropped on.
-function droppedStartMin(svc, fromMin, slotMin, delta) {
-  if (!plannedInterval(svc) || fromMin == null) return Math.floor(slotMin / 60) * 60;
-  const hours = Math.round(((delta?.y || 0) / SLOT_HEIGHT) * SLOT_MIN / 60);
-  return fromMin + hours * 60;
+// A drop that leaves the booked time alone: onto the rail, or a block drawn
+// at its planned time that was not dragged a slot up or down.
+function keepsBookedTime(svc, drop, delta) {
+  if (drop.slotMin == null) return true;
+  return plannedInterval(svc) != null && Math.abs(delta?.y || 0) < SLOT_HEIGHT;
 }
 
 function SlotDroppable({ techId, slotIdx, onCreateStart, takesNew = true }) {
@@ -1490,13 +1490,13 @@ export default function TimeGridDay({
     const toTech = drop.techId;
     const fromMin = parseHHMM(svc.windowStart);
     // Rail droppable has no slotMin — keep the original time when unassigning.
-    // A visit drawn at its PLANNED time is not under the booked hour's slot,
-    // so its hour change is the whole hours the block was dragged vertically
-    // (a sideways or same-place drop keeps the booked start).
-    const toMin = drop.slotMin == null ? fromMin : droppedStartMin(svc, fromMin, drop.slotMin, delta);
+    // A block drawn at its PLANNED time that was not dragged up or down (under
+    // one slot) is a technician-only move: the booking is not touched.
+    const keepBooked = keepsBookedTime(svc, drop, delta);
+    const toMin = keepBooked ? fromMin : Math.floor(drop.slotMin / 60) * 60;
     // Past-day-end landings are disabled droppables; belt-and-braces for a
     // stale drop payload — the server would 422 it anyway.
-    if (drop.slotMin != null && (toMin < DAY_START_HOUR * 60 || toMin + effectiveDuration(svc) > DAY_END_HOUR * 60)) return;
+    if (!keepBooked && toMin + effectiveDuration(svc) > DAY_END_HOUR * 60) return;
     if (dropRefused(fromTech, toTech, fromMin, toMin, techList.find((lane) => lane.id === toTech))) return;
 
     const dur = effectiveDuration(svc);

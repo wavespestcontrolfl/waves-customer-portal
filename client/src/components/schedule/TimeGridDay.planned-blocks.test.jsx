@@ -247,24 +247,63 @@ describe('TimeGridDay planned blocks', () => {
     });
     beforeEach(() => localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' })));
 
-    it('keeps the booked start when it is dropped straight across onto another technician', () => {
-      // Drawn at 11:15 (the pointer is in the 11 AM slot), booked at 10:00.
-      const svc = visit('a', 'Across Al', '10:00', { plannedArrivalMin: 11 * 60 + 15, plannedMinutes: 35 });
-      render(<TimeGridDay date="2026-11-25" services={[svc]} technicians={[...TECHS, { id: 'tech-2', name: 'Bo Tech' }]} />);
-      drag(svc, { techId: 'tech-2', slotMin: 11 * 60 }, { x: 200, y: 0 });
+    const TWO = [...TECHS, { id: 'tech-2', name: 'Bo Tech' }];
+
+    it('keeps a legacy 09:30 booking exactly when it is dropped straight across onto another technician', () => {
+      // Booked 09:30, drawn at 11:15: the pointer sits in the 11 AM slot.
+      const svc = visit('a', 'Across Al', '09:30', { windowEnd: '10:30', plannedArrivalMin: 11 * 60 + 15, plannedMinutes: 35 });
+      render(<TimeGridDay date="2026-11-25" services={[svc]} technicians={TWO} />);
+      drag(svc, { techId: 'tech-2', slotMin: 11 * 60 }, { x: 200, y: 8 });
       expect(modal.props.open).toBe(true);
-      expect(modal.props.fromMinutes).toBe(10 * 60);
-      expect(modal.props.toMinutes).toBe(10 * 60);
+      expect(modal.props.fromMinutes).toBe(9 * 60 + 30);
+      expect(modal.props.toMinutes).toBe(9 * 60 + 30);
+      expect(modal.props.toWindow).toBe('09:30-10:30');
       expect(modal.props.technicianChange).toBeTruthy();
     });
 
-    it('moves the booking by the hours it was dragged', () => {
+    it('moves a 17:00 two-hour booking drawn at 19:00 straight across, past the cutoff check', () => {
+      const svc = visit('a', 'Late Lou', '17:00', { windowEnd: '19:00', estimatedDuration: 120, plannedArrivalMin: 19 * 60, plannedMinutes: 35 });
+      render(<TimeGridDay date="2026-11-25" services={[svc]} technicians={TWO} />);
+      // The pointer is on the 19:00 slot, where a two-hour visit would not fit.
+      drag(svc, { techId: 'tech-2', slotMin: 19 * 60 }, { x: 200, y: 0 });
+      expect(modal.props.open).toBe(true);
+      expect(modal.props.toMinutes).toBe(17 * 60);
+    });
+
+    it('takes the slot under the pointer when the block is dragged up or down, like any other block', () => {
       const svc = visit('a', 'Down Dan', '10:00', { plannedArrivalMin: 11 * 60 + 15, plannedMinutes: 35 });
       renderDay([svc]);
-      drag(svc, { techId: 'tech-1', slotMin: 13 * 60 }, { x: 0, y: 128 }); // two hours down
+      // Dropped on the highlighted 13:00 fit.
+      drag(svc, { techId: 'tech-1', slotMin: 13 * 60 }, { x: 0, y: 128 });
       expect(modal.props.open).toBe(true);
       expect(modal.props.fromMinutes).toBe(10 * 60);
-      expect(modal.props.toMinutes).toBe(12 * 60);
+      expect(modal.props.toMinutes).toBe(13 * 60);
+      // A half-hour row snaps down to its hour.
+      drag(svc, { techId: 'tech-1', slotMin: 13 * 60 }, { x: 0, y: 160 });
+      expect(modal.props.toMinutes).toBe(13 * 60);
+    });
+
+    it('still refuses a real vertical move to a slot the visit does not fit', () => {
+      const svc = visit('a', 'Long Len', '17:00', { windowEnd: '19:00', estimatedDuration: 120, plannedArrivalMin: 18 * 60, plannedMinutes: 35 });
+      renderDay([svc]);
+      drag(svc, { techId: 'tech-1', slotMin: 19 * 60 }, { x: 0, y: 64 });
+      expect(modal.props.open).toBeFalsy();
+    });
+
+    it('judges a group\'s late alert at the stop arrival, not a later service\'s own start', () => {
+      // Van reaches the stop at 10:45, inside the told 9-11 window; the second
+      // service starts at 11:20 after the first one's work.
+      const told = { level: 'hour', dayOnly: false, date: '2026-11-25', window: '9:00 AM - 11:00 AM' };
+      renderDay([
+        visit('g1', 'First Fi', '09:00', { visitId: 'v1', told, plannedArrivalMin: 10 * 60 + 45, plannedMinutes: 35, plannedStopArrivalMin: 10 * 60 + 45 }),
+        visit('g2', 'Second Si', '09:00', { visitId: 'v1', told, plannedArrivalMin: 11 * 60 + 20, plannedMinutes: 35, plannedStopArrivalMin: 10 * 60 + 45 }),
+      ]);
+      expect(block('Second Si').style.borderLeft).not.toContain('220, 38, 38');
+      expect(block('Second Si').getAttribute('title')).not.toMatch(/outside/);
+      cleanup();
+      // Reached at 11:30 the stop is late for every service of it.
+      renderDay([visit('g2', 'Second Si', '09:00', { visitId: 'v1', told, plannedArrivalMin: 12 * 60 + 5, plannedMinutes: 35, plannedStopArrivalMin: 11 * 60 + 30 })]);
+      expect(block('Second Si').style.borderLeft).toContain('220, 38, 38');
     });
   });
 

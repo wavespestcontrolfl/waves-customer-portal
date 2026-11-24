@@ -127,6 +127,17 @@ describe('attachPlannedBlocks', () => {
     attachPlannedBlocks(services, EARLY);
     expect(services[0]).toMatchObject({ plannedArrivalMin: 9 * 60, plannedMinutes: 60 });
     expect(services[1]).toMatchObject({ plannedArrivalMin: 10 * 60, plannedMinutes: 60 });
+    // Both answer to the one arrival at the stop, for the promise check.
+    expect(services[0].plannedStopArrivalMin).toBe(9 * 60);
+    expect(services[1].plannedStopArrivalMin).toBe(9 * 60);
+  });
+
+  it('stamps the stop arrival on a single stop as its own arrival, and null where unplanned', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'plan';
+    const services = [row('a', '08:00', A), row('x', '09:00', A, { status: 'cancelled' })];
+    attachPlannedBlocks(services, EARLY);
+    expect(services[0].plannedStopArrivalMin).toBe(services[0].plannedArrivalMin);
+    expect(services[1].plannedStopArrivalMin).toBeNull();
   });
 
   it('does not add a return trip for a visit group whose members are not next to each other', () => {
