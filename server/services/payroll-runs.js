@@ -1216,6 +1216,14 @@ async function readShareInputsOfRun(conn, runId) {
   return run ? productionSharePay.readInputs(conn, run.week_start) : null;
 }
 
+// The share inputs finalize works from, under the payroll lock: the ones read before the lock when a read of now (on the run's own
+// transaction) agrees with them, else the read of now. null when the gate is off or nothing was read before.
+async function shareInputsUnderLock(trx, run, earlier) {
+  if (!earlier || !productionSharePay.shareOn()) return earlier;
+  const now = await productionSharePay.readInputs(trx, run.week_start);
+  return productionSharePay.revisionOf(now) === productionSharePay.revisionOf(earlier) ? earlier : now;
+}
+
 async function draftRun(input, actor, conn = db) {
   const v = validate(createSchema, input);
   const { start, end } = validateWeek(v.weekStart);
@@ -1328,7 +1336,11 @@ async function finalizeRun(runId, input, actor, conn = db) {
     await syncCommission(trx, run.week_start, actorId);
     await applyDueSteps(trx);
     await syncTechRewards(trx, run, actorId, seasonScores);
-    const evaluation = await evaluate(trx, run, { lock: true, shareInputs });
+    // The credit inputs were read before the payroll lock (one snapshot, no second connection under the lock). The pay run may
+    // have waited for the lock, so they are read again here, on this connection, and compared: credits that changed in between
+    // are never frozen from the old read. The fresh read is used instead, the checks are saved from it, and the token check
+    // below answers with the usual stale-run refusal when the owner has not seen those numbers.
+    const evaluation = await evaluate(trx, run, { lock: true, shareInputs: await shareInputsUnderLock(trx, run, shareInputs) });
     if (evaluation.blocked.length || evaluation.waiting.length) throw new PayrollError(409, describeProblems(evaluation));
     // A run with no paycheck can still close a week whose time off was not paid, or settle the payout of an empty
     // bank (see draftRun). The token check below then covers a draft whose checks are gone.
@@ -1665,6 +1677,8 @@ const CSV_HEADERS = [
 const CSV_TIME_OFF_HEADERS = ['PTO Hours', 'PTO Pay', 'Holiday Hours', 'Holiday Pay'];
 // After those, gate GATE_PAYROLL_PAY_LINES on only. HSA From Waves is not in Gross Pay.
 const CSV_PAY_LINE_HEADERS = ['Review Bonus', 'Commission', 'Health Allowance', 'Overtime On Bonus And Allowance', 'HSA From Waves'];
+// The same column in a run that paid a production share: the overtime is on the share too, so the old name would be wrong there.
+const csvPayLineHeaders = (withShare) => CSV_PAY_LINE_HEADERS.map((name) => (withShare && name === 'Overtime On Bonus And Allowance' ? 'Overtime On Additional Earnings' : name));
 // Only when a check in the run holds a season bonus, stay bonus or December gift. It is in Gross Pay.
 const CSV_TECH_REWARDS_HEADERS = ['Tech Rewards Bonus'];
 // Only when a check in the run has a minimum paid week. The pay is in Gross Pay; the hours are not hours worked.
@@ -1682,7 +1696,7 @@ function checksToCsv(rows) {
   const withTechRewards = withLines && rows.some((row) => row.tech_rewards_cents != null);
   const withMinimum = rows.some((row) => row.minimum_week_minutes != null);
   const withShare = rows.some((row) => Number(row.production_share_cents) > 0);
-  const lines = [csvRow([...CSV_HEADERS, ...(withTimeOff ? CSV_TIME_OFF_HEADERS : []), ...(withLines ? CSV_PAY_LINE_HEADERS : []), ...(withTechRewards ? CSV_TECH_REWARDS_HEADERS : []), ...(withMinimum ? CSV_MINIMUM_WEEK_HEADERS : []), ...(withShare ? CSV_PRODUCTION_SHARE_HEADERS : []), ...(withSimple ? CSV_SIMPLE_HEADERS : [])])];
+  const lines = [csvRow([...CSV_HEADERS, ...(withTimeOff ? CSV_TIME_OFF_HEADERS : []), ...(withLines ? csvPayLineHeaders(withShare) : []), ...(withTechRewards ? CSV_TECH_REWARDS_HEADERS : []), ...(withMinimum ? CSV_MINIMUM_WEEK_HEADERS : []), ...(withShare ? CSV_PRODUCTION_SHARE_HEADERS : []), ...(withSimple ? CSV_SIMPLE_HEADERS : [])])];
   for (const row of rows) {
     const c = serializeCheck(row);
     lines.push(csvRow([

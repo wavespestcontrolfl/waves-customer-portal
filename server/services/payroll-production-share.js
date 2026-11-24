@@ -75,16 +75,35 @@ async function readInputs(conn, weekStart) {
   await conn.transaction(async (trx) => {
     const ids = await trx('technicians').where({ employment_type: 'w2' }).orderBy('id').pluck('id');
     for (const id of ids) {
+      // Each technician in a savepoint of its own: a failed read (a statement error aborts a Postgres transaction) is rolled
+      // back to the savepoint and caught, so the reads of the other technicians go on in the same snapshot.
       try {
-        const settings = await productionShare.settingsFor(trx, id, weekStart);
-        if (!settings) continue;
-        inputs.set(id, { settings, stops: await productionShare.weekCredits(trx, id, weekStart, { settings }) });
+        await trx.transaction(async (sp) => {
+          const settings = await productionShare.settingsFor(sp, id, weekStart);
+          if (settings) inputs.set(id, { settings, stops: await productionShare.weekCredits(sp, id, weekStart, { settings }) });
+        });
       } catch (err) {
         inputs.set(id, { error: `The production share could not be worked out: ${(err && err.message) || 'unknown problem'}` });
       }
     }
   }, { isolationLevel: 'repeatable read', readOnly: true });
   return inputs;
+}
+
+/**
+ * A revision of what readInputs returned: the same string for the same settings and the same credit rows (visit, date, kind,
+ * credit, review mark), whatever the order. The pay run's finalize reads the inputs again under the payroll lock and compares
+ * revisions, so credits that changed between its first read and the lock are never frozen onto a check. Pure.
+ */
+function revisionOf(inputs) {
+  const rows = [...inputs.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map(([id, input]) => {
+    if (input.error) return [id, 'error', input.error];
+    const { settings } = input;
+    const stops = input.stops.map((stop) => [stop.visitId, stop.workDate, stop.kind, Number(stop.creditCents), stop.needsReview === true])
+      .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+    return [id, settings.id, settings.rateBps, settings.barType, settings.barCents, settings.callbackStopValueCents, stops];
+  });
+  return JSON.stringify(rows);
 }
 
 /**
@@ -172,4 +191,4 @@ function reviewNote(name, count) {
   return `${name}: ${count} ${count === 1 ? 'stop needs' : 'stops need'} review for the production share. ${count === 1 ? 'It pays' : 'They pay'} $0 in the share until fixed. Open the production share preview for the week, fix ${count === 1 ? 'it' : 'them'}, then recompute.`;
 }
 
-module.exports = { KIND, shareOn, readInputs, sharesFor, priceableLine, signature, viewOf, reviewNote, snapshotOf };
+module.exports = { KIND, shareOn, readInputs, revisionOf, sharesFor, priceableLine, signature, viewOf, reviewNote, snapshotOf };

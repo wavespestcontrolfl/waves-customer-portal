@@ -200,7 +200,9 @@ describe('one snapshot for the whole run', () => {
   const reads = [];
   // A stand-in connection: transaction() hands its handler one fake trx and records the options.
   const fakeConn = () => {
+    // trx.transaction() is the savepoint of one technician's reads: it hands its handler a fake savepoint that knows its parent.
     const trx = () => ({ where: () => ({ orderBy: () => ({ pluck: async () => ['tech-a', 'tech-b', 'tech-c'] }) }) });
+    trx.transaction = jest.fn(async (handler) => handler(Object.assign(() => {}, { parent: trx })));
     const conn = { transaction: jest.fn(async (handler, options) => { conn.options = options; return handler(trx); }), trx };
     return conn;
   };
@@ -223,9 +225,11 @@ describe('one snapshot for the whole run', () => {
     const inputs = await share.readInputs(conn, WEEK);
     expect(conn.transaction).toHaveBeenCalledTimes(1);
     expect(conn.options).toEqual({ isolationLevel: 'repeatable read', readOnly: true });
-    // 3 settings reads and 2 credit reads (tech-c has no settings), all on the one trx, none on the pool
+    // 3 settings reads and 2 credit reads (tech-c has no settings), each technician in a savepoint of the one trx, none on the pool
     expect(reads.map(([, c]) => c)).toHaveLength(5);
-    expect(new Set(reads.map(([, c]) => c))).toEqual(new Set([conn.trx]));
+    expect(new Set(reads.map(([, c]) => c.parent))).toEqual(new Set([conn.trx]));
+    expect(conn.trx.transaction).toHaveBeenCalledTimes(3);
+    expect(conn.transaction).toHaveBeenCalledTimes(1);
     expect([...inputs.keys()].sort()).toEqual(['tech-a', 'tech-b']);
   });
 
@@ -245,6 +249,72 @@ describe('one snapshot for the whole run', () => {
     const shares = share.sharesFor(inputs, ['tech-a', 'tech-b'], WEEK);
     expect(shares.get('tech-a').shareCents).toBe(7800);
     expect(shares.get('tech-b')).toEqual({ error: 'The production share could not be worked out: boom' });
+  });
+});
+
+describe('the revision of the inputs', () => {
+  const inputs = (stopRows, settings = SETTINGS) => new Map([['tech-a', { settings, stops: stopRows }]]);
+
+  test('the same credits give the same revision in any order; a changed credit, review mark or setting changes it', () => {
+    const base = share.revisionOf(inputs(WEEK_STOPS));
+    expect(share.revisionOf(inputs([...WEEK_STOPS].reverse()))).toBe(base);
+    expect(share.revisionOf(inputs(stops([['v1', '2026-09-14', 100000], ['v2', '2026-09-15', 110000], ['v3', '2026-09-16', 100000], ['v4', '2026-09-17', 102001]])))).not.toBe(base);
+    expect(share.revisionOf(inputs(stops([['v1', '2026-09-14', 100000], ['v2', '2026-09-15', 110000], ['v3', '2026-09-16', 100000], ['v4', '2026-09-17', 102000, true]])))).not.toBe(base);
+    expect(share.revisionOf(inputs(WEEK_STOPS, { ...SETTINGS, id: 8, rateBps: 1600 }))).not.toBe(base);
+    expect(share.revisionOf(new Map([['tech-a', { error: 'x' }]]))).not.toBe(base);
+  });
+});
+
+describe('the run CSV header of the overtime column', () => {
+  const rowOf = (made) => {
+    const { check } = build(made ? { production_share: made } : {});
+    const { calc_snapshot: text, ...rest } = check;
+    return { ...rest, id: 'c1', employee_name: 'Sample Alpha', ...(made ? { production_share: JSON.parse(text).productionShare } : {}) };
+  };
+  afterEach(() => { delete process.env.GATE_PAYROLL_PAY_LINES; });
+
+  test('a run that paid a share says Overtime On Additional Earnings; an older run keeps the old header', () => {
+    process.env.GATE_PAYROLL_PAY_LINES = 'true';
+    const paid = checksToCsv([rowOf(workedOut())]).split('\n')[0].split(',');
+    expect(paid).toContain('Overtime On Additional Earnings');
+    expect(paid).not.toContain('Overtime On Bonus And Allowance');
+    const older = checksToCsv([rowOf(null)]).split('\n')[0].split(',');
+    expect(older).toContain('Overtime On Bonus And Allowance');
+    expect(older).not.toContain('Overtime On Additional Earnings');
+  });
+});
+
+describe('the down guard migration', () => {
+  const migration = require('../models/migrations/20261124130000_payroll_production_share_down_guard');
+  const fakeKnex = (stored) => {
+    const calls = [];
+    const knex = (table) => ({ whereNotNull: () => ({ first: async () => { calls.push(`read ${table}`); return stored ? { id: 1 } : undefined; } }) });
+    knex.raw = async (sql) => { calls.push(sql.trim().split('\n')[0]); };
+    knex.schema = { hasColumn: async () => true };
+    return { knex, calls };
+  };
+
+  test('sorts after the migration that adds the column, and its up changes nothing', async () => {
+    expect('20261124130000_payroll_production_share_down_guard' > '20261124070000_payroll_production_share').toBe(true);
+    const { knex, calls } = fakeKnex(false);
+    await migration.up(knex);
+    expect(calls).toEqual([]);
+  });
+
+  test('takes the table lock BEFORE it looks for a stored share, and refuses when one is there', async () => {
+    const { knex, calls } = fakeKnex(true);
+    await expect(migration.down(knex)).rejects.toThrow(/production share figures/);
+    expect(calls).toEqual(['LOCK TABLE payroll_checks IN ACCESS EXCLUSIVE MODE', 'read payroll_checks']);
+  });
+
+  test('with nothing stored it drops the constraint and the column after the lock', async () => {
+    const { knex, calls } = fakeKnex(false);
+    await migration.down(knex);
+    expect(calls[0]).toBe('LOCK TABLE payroll_checks IN ACCESS EXCLUSIVE MODE');
+    expect(calls.slice(-2).map((sql) => sql.replace(/\s+/g, ' '))).toEqual([
+      'ALTER TABLE payroll_checks DROP CONSTRAINT IF EXISTS payroll_checks_production_share_check',
+      'ALTER TABLE payroll_checks DROP COLUMN IF EXISTS production_share_cents',
+    ]);
   });
 });
 

@@ -37,6 +37,8 @@ const { getYearStatement } = require('../services/tech-rewards-year-statement');
 const { loadFinalizedW2Checks } = require('../services/tax-package-w2');
 const { w2PayrollToCSV } = require('../services/csv-generators');
 const { readBonusPay } = require('../services/tech-rewards-scoreboard');
+const productionSharePay = require('../services/payroll-production-share');
+const productionShare = require('../services/production-share');
 
 jest.setTimeout(60000);
 
@@ -193,6 +195,7 @@ postgres('production share pay line', () => {
 
     const csv = (await api('GET', `/runs/${done.id}/export.csv`, { raw: true })).text.split('\n');
     expect(csv[0].endsWith(',Production Share')).toBe(true);
+    expect(csv[0].split(',')).toContain('Overtime On Additional Earnings');
     expect(csv.find((line) => line.startsWith('Sample Alpha,')).endsWith(',162.00')).toBe(true);
     expect(csv.find((line) => line.startsWith('Sample Bravo,')).endsWith(',0.00')).toBe(true);
 
@@ -366,6 +369,107 @@ postgres('production share pay line', () => {
     expect((await readBonusPay(trx, id, W1, addDays(W1, 1), W1)).cents).toBe(Math.round(80000 * 2 / 7) + 10800);
     // Thu-Sun: 4/7 of the wages and none of the share
     expect((await readBonusPay(trx, id, addDays(W1, 3), addDays(W1, 6), W1)).cents).toBe(Math.round(80000 * 4 / 7));
+  });
+
+  it('finalize reads the credits again under the payroll lock: a credit edited after its first read is never frozen, the run answers 409', async () => {
+    const id = await tech('Sample Alpha');
+    await settings(id);
+    await worked(id, W1, 40);
+    await threeShifts(id);
+    const created = (await draft(W1)).body.run;
+    expect(byName(created, 'Sample Alpha').productionShareCents).toBe(16200);
+    const shown = (await api('GET', `/runs/${created.id}`)).body.run;
+    // The first read (before the lock) is the real one; the credit is edited, committed, before the read under the lock.
+    const real = productionSharePay.readInputs;
+    let reads = 0;
+    const spy = jest.spyOn(productionSharePay, 'readInputs').mockImplementation(async (conn, week) => {
+      reads += 1;
+      if (reads === 2) await trx('scheduled_services').where({ technician_id: id }).update({ estimated_price: '1360.00' });
+      return real(conn, week);
+    });
+    let refused409;
+    try {
+      refused409 = await api('POST', `/runs/${created.id}/finalize`, { body: { token: shown.token } });
+    } finally { spy.mockRestore(); }
+    expect(reads).toBe(2);
+    expect(refused409.status).toBe(409);
+    const fresh = (await api('GET', `/runs/${created.id}`)).body.run;
+    expect(fresh.status).toBe('draft');
+    // 3 x $1,360.00 = $4,080.00 - $2,700.00 = $1,380.00 above; 15% = $207.00: the draft now holds the new credit
+    expect(byName(fresh, 'Sample Alpha').productionShareCents).toBe(20700);
+    expect(fresh.stale).toBe(false);
+    expect((await finalize(created.id)).body.run.status).toBe('finalized');
+  });
+
+  it('a credit that did not change under the lock finalizes with the snapshot it read first', async () => {
+    const id = await tech('Sample Alpha');
+    await settings(id);
+    await worked(id, W1, 40);
+    await threeShifts(id);
+    const created = (await draft(W1)).body.run;
+    const done = (await finalize(created.id)).body.run;
+    expect(done.status).toBe('finalized');
+    expect(byName(done, 'Sample Alpha').productionShareCents).toBe(16200);
+  });
+
+  it('one technician whose read fails (a statement error) does not abort the reads of the others', async () => {
+    process.env.GATE_PAYROLL_PRODUCTION_SHARE = 'true';
+    const a = await tech('Sample Alpha');
+    const b = await tech('Sample Bravo');
+    await settings(a);
+    await settings(b);
+    await threeShifts(a);
+    const real = productionShare.weekCredits;
+    const spy = jest.spyOn(productionShare, 'weekCredits').mockImplementation(async (conn, id, week, options) => {
+      if (id === b) await conn.raw('SELECT 1/0');
+      return real(conn, id, week, options);
+    });
+    let inputs;
+    try { inputs = await productionSharePay.readInputs(trx, W1); } finally { spy.mockRestore(); }
+    expect(inputs.get(a).stops).toHaveLength(3);
+    expect(inputs.get(b).error).toMatch(/could not be worked out.*division by zero/);
+    // the transaction is still usable: the failure was rolled back to its savepoint
+    expect((await trx.raw('SELECT 1 AS ok')).rows[0].ok).toBe(1);
+    const shares = productionSharePay.sharesFor(inputs, [a, b], W1);
+    expect(shares.get(a).shareCents).toBe(16200);
+    expect(shares.get(b).error).toBeDefined();
+  });
+
+  it('the down guard takes the payroll_checks table lock first and holds it while it drops the column', async () => {
+    const guard = require('../models/migrations/20261124130000_payroll_production_share_down_guard');
+    await trx.raw('SAVEPOINT lockcheck');
+    await guard.down(trx);
+    const held = await trx.raw(`SELECT l.mode FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
+      WHERE c.relname = 'payroll_checks' AND l.pid = pg_backend_pid() AND l.granted`);
+    expect(held.rows.map((row) => row.mode)).toContain('AccessExclusiveLock');
+    const column = await trx.raw("SELECT 1 FROM information_schema.columns WHERE table_name = 'payroll_checks' AND column_name = 'production_share_cents'");
+    expect(column.rows).toHaveLength(0);
+    await trx.raw('ROLLBACK TO SAVEPOINT lockcheck');
+  });
+
+  it('a rollback runs the guard down first and the older down after it, with no column left and no error', async () => {
+    const guard = require('../models/migrations/20261124130000_payroll_production_share_down_guard');
+    const older = require('../models/migrations/20261124070000_payroll_production_share');
+    await trx.raw('SAVEPOINT rollback');
+    await guard.down(trx);
+    await expect(older.down(trx)).resolves.toBeUndefined();
+    const left = await trx.raw(`SELECT 1 FROM information_schema.columns WHERE table_name = 'payroll_checks' AND column_name = 'production_share_cents'
+      UNION ALL SELECT 1 FROM pg_constraint WHERE conname = 'payroll_checks_production_share_check'`);
+    expect(left.rows).toHaveLength(0);
+    await trx.raw('ROLLBACK TO SAVEPOINT rollback');
+  });
+
+  it('the guard down refuses while a check holds a share figure, and drops nothing', async () => {
+    const guard = require('../models/migrations/20261124130000_payroll_production_share_down_guard');
+    const id = await tech('Sample Alpha');
+    await settings(id);
+    await worked(id, W1, 40);
+    await threeShifts(id);
+    await draft(W1);
+    const error = await refused(() => guard.down(trx));
+    expect(error && error.message).toMatch(/production share figures/);
+    const column = await trx.raw("SELECT 1 FROM information_schema.columns WHERE table_name = 'payroll_checks' AND column_name = 'production_share_cents'");
+    expect(column.rows).toHaveLength(1);
   });
 
   it('the migration refuses to go down while a check holds a share figure', async () => {
