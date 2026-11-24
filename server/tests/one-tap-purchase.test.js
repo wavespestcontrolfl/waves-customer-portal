@@ -555,6 +555,25 @@ describe('initPurchase', () => {
     expect(getAvailableSlots).not.toHaveBeenCalled();
   });
 
+  test('an open attempt another tab completes while pricing runs returns its receipt, never a second draft', async () => {
+    seedProtectedPurchase();
+    const estimate = db.__state.tables.estimates[0];
+    const open = JSON.parse(estimate.estimate_data);
+    delete open.oneTapPurchase.officeReview;
+    estimate.estimate_data = JSON.stringify(open);
+    db.__state.tables.scheduled_services = [];
+    buildPortalPurchaseBasis.mockImplementationOnce(async () => {
+      db.__state.tables.one_tap_purchases[0].status = 'completed';
+      return { ...BASIS, customer: db.__state.tables.customers[0] };
+    });
+
+    const out = await oneTap.initPurchase({ customerId: 'cust-1', clicked: CLICKED });
+
+    expect(out).toMatchObject({ success: true, perVisit: 84 });
+    expect(db.__state.tables.one_tap_purchases).toHaveLength(1);
+    expect(db.__state.tables.estimates).toHaveLength(1);
+  });
+
   test('a protected reopen that completed before its row lock returns the frozen receipt, never office review', async () => {
     seedProtectedPurchase();
     db.__state.tables.scheduled_services.push({

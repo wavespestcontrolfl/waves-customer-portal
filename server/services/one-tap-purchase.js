@@ -204,7 +204,8 @@ async function protectedPurchaseForReopen(customerId, serviceKey) {
         return { snapshot: await purchaseStateSnapshot({ purchase, officeState: state }) };
       }
     }
-    return null;
+    // Nothing protected. The ids tell the creation lock which open attempts this probe saw.
+    return { probedIds: purchases.map((row) => row.id) };
   });
 }
 
@@ -547,7 +548,7 @@ async function initPurchase({ customerId, clicked }) {
   // holds, so a committed visit is untouchable either way).
   const token = crypto.randomBytes(16).toString('hex');
   const {
-    reopenedSnapshot, superseded, estimate, purchase,
+    reopenedSnapshot, completedMeanwhile, superseded, estimate, purchase,
   } = await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`one_tap_init:${customerId}`]);
     await lockCustomerComms(trx, customerId);
@@ -555,7 +556,21 @@ async function initPurchase({ customerId, clicked }) {
       .where({ customer_id: customerId })
       .whereIn('status', ['initiated', 'reserved'])
       .forUpdate()
-      .select('id', 'customer_id', 'estimate_id', 'scheduled_service_id', 'service_key', 'status');
+      .select('id', 'customer_id', 'estimate_id', 'scheduled_service_id', 'service_key', 'status',
+        'per_visit', 'slot_id', 'terms_version', 'terms_snapshot');
+    // An attempt the early probe saw open can complete (another tab confirmed) while pricing ran. The ownership
+    // read behind this draft predates that purchase, so answer with its receipt instead of minting a second draft.
+    if (protectedProbe?.probedIds?.length) {
+      const completedMeanwhile = await trx('one_tap_purchases')
+        .whereIn('id', protectedProbe.probedIds)
+        .where({ customer_id: customerId, service_key: targetKey, status: 'completed' })
+        .first();
+      if (completedMeanwhile) {
+        return {
+          reopenedSnapshot: null, completedMeanwhile, superseded: [], estimate: null, purchase: null,
+        };
+      }
+    }
     const supersedableIds = [];
     let protectedMatch = null;
     for (const prior of priorRows) {
@@ -648,6 +663,7 @@ async function initPurchase({ customerId, clicked }) {
     return { reopenedSnapshot: null, superseded: priorOpen, estimate: estimateRow, purchase: purchaseRow };
   });
 
+  if (completedMeanwhile) return completedRetryResponse(customerId, completedMeanwhile);
   if (reopenedSnapshot) return reopenedSnapshot;
 
   // Hold release AFTER commit — a rolled-back init must not have freed a
@@ -1362,9 +1378,13 @@ async function oneTapOfficeReviewState(database, {
   const selected = selectedQuery
     ? await selectedQuery.first('id', 'source_estimate_id', 'customer_id', 'reservation_expires_at', 'scheduled_date', 'window_start')
     : null;
-  // A reconciliation can wait behind either row lock. Judge strict liveness
-  // against the wall clock only after those waits finish; otherwise a hold
-  // that expired while blocked could still earn a durable office marker.
+  const competitors = (await reviewableOneTapBookedVisits(database, {
+    estimateId, customerId, lockRows: lockEstimate || lockSelected,
+  }))
+    .filter((row) => String(row.id) !== String(selectedId));
+  // A reconciliation can wait behind the estimate, selected-row or competing-row locks. Judge strict liveness
+  // against the wall clock only after ALL those waits finish; otherwise a hold that expired while blocked could
+  // still earn a durable office marker.
   const holdJudgedAt = now || new Date();
   const selectedMatches = !!selected
     && String(selected.source_estimate_id || '') === String(estimateId || '');
@@ -1376,10 +1396,6 @@ async function oneTapOfficeReviewState(database, {
     && (selected.customer_id != null || !selected.reservation_expires_at)
     ? 'SLOT_UNAVAILABLE'
     : 'RESERVATION_EXPIRED';
-  const competitors = (await reviewableOneTapBookedVisits(database, {
-    estimateId, customerId, lockRows: lockEstimate || lockSelected,
-  }))
-    .filter((row) => String(row.id) !== String(selectedId));
   const reviewableDraft = ['draft', 'expired'].includes(estimate?.status) && !estimate.archived_at;
   const marker = parseEstimateData(estimate?.estimate_data)?.oneTapPurchase?.officeReview || null;
   const officeReviewProtected = oneTapOfficeReviewIsParked({ purchase, estimate, marker, competitors });
