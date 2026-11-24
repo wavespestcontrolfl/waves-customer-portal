@@ -65,13 +65,21 @@ postgres('production share credit', () => {
     await trx('customers').insert({ id, first_name: 'Sample', phone: `+1941${phone}`, ...patch });
     return id;
   };
-  // One completed stop.
-  const stop = async (technicianId, customerId, date, patch = {}) => {
+  // One completed stop, with its closeout record (`record`: 'completed' by default; 'incomplete', 'inspection_only' or
+  // 'customer_declined' for a visit that did no work; false for none).
+  const stop = async (technicianId, customerId, date, { record = 'completed', ...patch } = {}) => {
     const id = randomUUID();
     await trx('scheduled_services').insert({
       id, customer_id: customerId, technician_id: technicianId, scheduled_date: date, service_type: 'General Pest Control',
       status: 'completed', completed_at: noon(date), estimated_price: '100.00', ...patch,
     });
+    if (record) {
+      await trx('service_records').insert({
+        customer_id: customerId, technician_id: technicianId, service_date: date, service_type: patch.service_type || 'General Pest Control',
+        scheduled_service_id: id, status: record === 'incomplete' ? 'incomplete' : 'completed',
+        structured_notes: JSON.stringify({ visitOutcome: record }),
+      });
+    }
     return id;
   };
   const invoice = async (customerId, patch = {}) => {
@@ -179,29 +187,41 @@ postgres('production share credit', () => {
       expect(row.refundCents).toBe(10000);
     });
 
-    it('splits a multi-visit job price across its planned visits and ignores a cancelled follow-up', async () => {
+    it('splits a two-treatment package price across its two sold visits, whatever is booked: a missing or replaced visit 2 never moves a credit', async () => {
       const a = await tech('Sample Alpha');
       const c1 = await customer();
-      const first = await stop(a, c1, day(0), { service_type: 'Cockroach Treatment', estimated_price: '300.00' });
-      const second = await stop(a, c1, day(3), { service_type: 'Cockroach Follow-up', estimated_price: '0.00', followup_included: true, followup_source_service_id: first });
-      await stop(a, c1, day(5), { service_type: 'Cockroach Follow-up', estimated_price: '0.00', followup_included: true, followup_source_service_id: first, status: 'cancelled' });
-      let rows = await credits(a);
+      const pkg = { service_type: 'Cockroach Treatment', service_key_snapshot: 'cockroach_control' };
+      const first = await stop(a, c1, day(0), { ...pkg, estimated_price: '300.00' });
+      // Visit 2 not booked yet: visit 1 still earns half, not the whole price.
+      expect(byVisit(await credits(a), first)).toMatchObject({ kind: 'multi_visit_job', creditCents: 15000, reason: 'Part 1 of 2 of the job price' });
+      // Visit 2 booked, cancelled and booked again: the replacement is the second visit.
+      await stop(a, c1, day(2), { ...pkg, estimated_price: '0.00', followup_included: true, followup_source_service_id: first, status: 'cancelled', record: false });
+      const second = await stop(a, c1, day(3), { ...pkg, estimated_price: '0.00', followup_included: true, followup_source_service_id: first });
+      const rows = await credits(a);
       expect([byVisit(rows, first), byVisit(rows, second)].map((row) => [row.kind, row.creditCents])).toEqual([['multi_visit_job', 15000], ['multi_visit_job', 15000]]);
-      // A third planned visit (not yet done), booked from the second, makes each part a third.
-      await trx('scheduled_services').insert({
-        customer_id: c1, technician_id: a, scheduled_date: day(10), service_type: 'Cockroach Follow-up', status: 'pending',
-        estimated_price: '0.00', followup_included: true, followup_source_service_id: second,
-      });
-      rows = await credits(a);
-      expect([byVisit(rows, first), byVisit(rows, second)].map((row) => row.creditCents)).toEqual([10000, 10000]);
+    });
+
+    it('lists a job whose sold visit count is unknown, or that has more visits than were sold, for review at $0', async () => {
+      const a = await tech('Sample Alpha');
+      const c1 = await customer();
+      const unknown = await stop(a, c1, day(0), { service_type: 'Trapping Program', service_key_snapshot: 'rodent_trapping', estimated_price: '300.00' });
+      await stop(a, c1, day(3), { service_type: 'Trapping Check', estimated_price: '0.00', followup_included: true, followup_source_service_id: unknown });
+      expect(byVisit(await credits(a), unknown)).toMatchObject({ creditCents: 0, needsReview: true, reason: expect.stringMatching(/sold with cannot be established/) });
+      const c2 = await customer();
+      const pkg = { service_type: 'Cockroach Treatment', service_key_snapshot: 'cockroach_control' };
+      const root = await stop(a, c2, day(0), { ...pkg, estimated_price: '300.00' });
+      const second = await stop(a, c2, day(1), { ...pkg, estimated_price: '0.00', followup_included: true, followup_source_service_id: root });
+      const third = await stop(a, c2, day(2), { ...pkg, estimated_price: '0.00', followup_included: true, followup_source_service_id: second });
+      const rows = await credits(a);
+      for (const id of [root, second, third]) expect(byVisit(rows, id)).toMatchObject({ creditCents: 0, needsReview: true });
     });
 
     it('lists an included follow-up with no job, and a job with no price, for review at $0', async () => {
       const a = await tech('Sample Alpha');
       const c1 = await customer();
       const orphan = await stop(a, c1, day(0), { service_type: 'Cockroach Follow-up', estimated_price: '0.00', followup_included: true });
-      const unpricedFirst = await stop(a, c1, day(1), { service_type: 'Bed Bug Treatment', estimated_price: null });
-      await stop(a, c1, day(2), { service_type: 'Bed Bug Follow-up', estimated_price: '0.00', followup_included: true, followup_source_service_id: unpricedFirst });
+      const unpricedFirst = await stop(a, c1, day(1), { service_type: 'Bed Bug Treatment', service_key_snapshot: 'bed_bug_treatment', estimated_price: null });
+      await stop(a, c1, day(2), { service_type: 'Bed Bug Follow-up', service_key_snapshot: 'bed_bug_treatment', estimated_price: '0.00', followup_included: true, followup_source_service_id: unpricedFirst });
       const rows = await credits(a);
       expect(byVisit(rows, orphan)).toMatchObject({ creditCents: 0, needsReview: true });
       expect(byVisit(rows, unpricedFirst)).toMatchObject({ kind: 'multi_visit_job', creditCents: 0, needsReview: true });
@@ -313,9 +333,25 @@ postgres('production share credit', () => {
       const a = await tech('Sample Alpha');
       const c1 = await customer();
       const visit = await stop(a, c1, day(0), { estimated_price: '120.00' });
-      const [record] = await trx('service_records').insert({ customer_id: c1, service_date: day(0), service_type: 'General Pest Control', scheduled_service_id: visit }).returning('id');
+      const record = await trx('service_records').where({ scheduled_service_id: visit }).first('id'); // the closeout record the stop was given
       await invoice(c1, { service_record_id: record.id, subtotal: '90.00', total: '90.00' });
       expect(byVisit(await credits(a), visit)).toMatchObject({ creditCents: 9000 });
+    });
+
+    it('keeps a standalone initial-cleanout invoice whole, and leaves out the fee line only of a combined setup + application invoice', async () => {
+      const a = await tech('Sample Alpha');
+      const c1 = await customer();
+      const c2 = await customer();
+      const alone = await stop(a, c1, day(0), { estimated_price: '150.00' });
+      await invoice(c1, { scheduled_service_id: alone, subtotal: '150.00', total: '150.00', line_items: JSON.stringify([{ name: 'Initial Pest Cleanout', amount: 150 }]) });
+      const combined = await stop(a, c2, day(1), { estimated_price: '219.00' });
+      await invoice(c2, {
+        scheduled_service_id: combined, subtotal: '219.00', total: '219.00',
+        line_items: JSON.stringify([{ name: 'Setup fee', amount: 99 }, { name: 'Quarterly Pest Service', amount: 120 }]),
+      });
+      const rows = await credits(a);
+      expect(byVisit(rows, alone)).toMatchObject({ kind: 'priced', creditCents: 15000 });
+      expect(byVisit(rows, combined)).toMatchObject({ kind: 'priced', creditCents: 12000 });
     });
 
     it('splits a completion-packet invoice across all its visits by visit price, to the cent, and counts its refund once', async () => {
@@ -338,23 +374,29 @@ postgres('production share credit', () => {
       expect(mine[0].creditCents).toBeGreaterThanOrEqual(6000);
     });
 
-    it('leaves a shared invoice out when a member has no price, and falls back to the visit price', async () => {
+    it('flags the stops of a shared invoice that cannot be split, and keeps its refund visible instead of pricing them from the visit', async () => {
       const a = await tech('Sample Alpha');
       const c1 = await customer();
       const v1 = await stop(a, c1, day(0), { estimated_price: '60.00' });
       const v2 = await stop(a, c1, day(1), { estimated_price: null, primary_line_price: null });
-      const shared = await invoice(c1, { subtotal: '99.00', total: '99.00' });
+      const shared = await invoice(c1, { subtotal: '99.00', total: '99.00', stripe_payment_intent_id: 'pi_unsplit' });
       await packet(c1, shared, [v1, v2], 'k2');
+      await refund(c1, 'pi_unsplit', '12.00');
       const rows = await credits(a);
-      expect(byVisit(rows, v1)).toMatchObject({ creditCents: 6000 });
-      expect(byVisit(rows, v2)).toMatchObject({ kind: 'unpriced', needsReview: true });
+      for (const id of [v1, v2]) {
+        expect(byVisit(rows, id)).toMatchObject({ creditCents: 0, needsReview: true, reason: expect.stringMatching(/cannot be split/) });
+        expect(byVisit(rows, id).unallocatedRefunds).toEqual([{ invoiceId: shared, refundCents: 1200 }]);
+      }
+      const shown = await productionShare.previewWeek(a, W, trx);
+      expect(shown.unallocatedRefundCents).toBe(1200); // the one invoice, once
+      expect(shown.needsReview).toHaveLength(2);
     });
 
     it('takes a job price from the first visit\'s invoice', async () => {
       const a = await tech('Sample Alpha');
       const c1 = await customer();
-      const first = await stop(a, c1, day(0), { service_type: 'Cockroach Treatment', estimated_price: '300.00' });
-      await stop(a, c1, day(3), { service_type: 'Cockroach Follow-up', estimated_price: '0.00', followup_included: true, followup_source_service_id: first });
+      const first = await stop(a, c1, day(0), { service_type: 'Cockroach Treatment', service_key_snapshot: 'cockroach_control', estimated_price: '300.00' });
+      await stop(a, c1, day(3), { service_type: 'Cockroach Follow-up', service_key_snapshot: 'cockroach_control', estimated_price: '0.00', followup_included: true, followup_source_service_id: first });
       await invoice(c1, { scheduled_service_id: first, subtotal: '200.00', total: '200.00' });
       expect(byVisit(await credits(a), first)).toMatchObject({ kind: 'multi_visit_job', creditCents: 10000 });
     });
@@ -362,9 +404,9 @@ postgres('production share credit', () => {
     it('counts a rescheduled follow-up as a planned visit of its job', async () => {
       const a = await tech('Sample Alpha');
       const c1 = await customer();
-      const first = await stop(a, c1, day(0), { service_type: 'Bed Bug Treatment', estimated_price: '300.00' });
+      const first = await stop(a, c1, day(0), { service_type: 'Bed Bug Treatment', service_key_snapshot: 'bed_bug_treatment', estimated_price: '300.00' });
       await trx('scheduled_services').insert({
-        customer_id: c1, technician_id: a, scheduled_date: day(10), service_type: 'Bed Bug Follow-up', status: 'rescheduled',
+        customer_id: c1, technician_id: a, scheduled_date: day(10), service_type: 'Bed Bug Follow-up', service_key_snapshot: 'bed_bug_treatment', status: 'rescheduled',
         estimated_price: '0.00', followup_included: true, followup_source_service_id: first,
       });
       expect(byVisit(await credits(a), first)).toMatchObject({ creditCents: 15000, reason: 'Part 1 of 2 of the job price' });
@@ -410,6 +452,67 @@ postgres('production share credit', () => {
       const inWeek = await stop(a, c1, day(0), stamp);
       await stop(a, c1, day(14), stamp);
       expect(byVisit(await credits(a), inWeek).refundCents).toBe(500);
+    });
+  });
+
+  describe('whether the work was performed', () => {
+    it('credits $0 to a stop closed out incomplete, declined or inspection only (still a shift), and lists a stop with no closeout record for review', async () => {
+      const a = await tech('Sample Alpha');
+      const c1 = await customer();
+      const incomplete = await stop(a, c1, day(0), { estimated_price: '100.00', record: 'incomplete' });
+      const inspection = await stop(a, c1, day(1), { estimated_price: '100.00', record: 'inspection_only' });
+      const declined = await stop(a, c1, day(2), { estimated_price: '100.00', record: 'customer_declined' });
+      const none = await stop(a, c1, day(3), { estimated_price: '100.00', record: false });
+      const done = await stop(a, c1, day(4), { estimated_price: '100.00' });
+      const rows = await credits(a);
+      for (const id of [incomplete, inspection, declined]) expect(byVisit(rows, id)).toMatchObject({ kind: 'not_performed', creditCents: 0, needsReview: false });
+      expect(byVisit(rows, none)).toMatchObject({ kind: 'unverified', creditCents: 0, needsReview: true });
+      expect(byVisit(rows, done)).toMatchObject({ kind: 'priced', creditCents: 10000 });
+      expect(productionShare.shiftDays(rows)).toHaveLength(5);
+    });
+
+    it('never takes a visit that did no work as the original of a callback', async () => {
+      const a = await tech('Sample Alpha');
+      const b = await tech('Sample Bravo');
+      await settings(null, '2026-01-05');
+      const c1 = await customer();
+      await stop(b, c1, '2026-09-01', { ...HOME, estimated_price: '110.00' });
+      await stop(a, c1, '2026-09-10', { ...HOME, estimated_price: '110.00', record: 'inspection_only' });
+      const callback = await stop(a, c1, day(0), { ...HOME, service_type: 'Pest Control Re-Service', is_callback: true });
+      // Own inspection-only visit is skipped: the original is the other technician's real treatment.
+      expect(byVisit(await credits(a), callback)).toMatchObject({ kind: 'callback_other', creditCents: 9500 });
+      // An earlier visit with no closeout record cannot be called the original, or not the original.
+      const c2 = await customer();
+      await stop(b, c2, '2026-09-10', { ...HOME, estimated_price: '110.00', record: false });
+      const lost = await stop(a, c2, day(1), { ...HOME, service_type: 'Pest Control Re-Service', is_callback: true });
+      expect(byVisit(await credits(a), lost)).toMatchObject({ needsReview: true, reason: expect.stringMatching(/no completion record/) });
+    });
+  });
+
+  describe('annual prepay stamps', () => {
+    const term = async (c1, invoiceKey) => {
+      const termInvoice = await invoice(c1, { total: '100.00', stripe_payment_intent_id: invoiceKey, status: 'paid' });
+      const id = randomUUID();
+      await trx('annual_prepay_terms').insert({
+        id, customer_id: c1, term_start: '2026-09-01', term_end: '2027-08-31', status: 'active', prepay_amount: '100.00',
+        prepay_invoice_id: termInvoice, coverage_visit_count: 2,
+      });
+      return id;
+    };
+
+    it('reads the annual stamp, not the term link: a stamp with no term is listed for review, a cash prepayment on a term visit is priced as a visit', async () => {
+      const a = await tech('Sample Alpha');
+      const c1 = await customer();
+      const termId = await term(c1, 'pi_stamp');
+      const detached = await stop(a, c1, day(0), { prepaid_method: 'annual_prepay_invoice', prepaid_amount: '50.00', estimated_price: '120.00' });
+      const cash = await stop(a, c1, day(1), { annual_prepay_term_id: termId, prepaid_method: 'cash', prepaid_amount: '70.00', estimated_price: '90.00' });
+      const annual = await stop(a, c1, day(2), { annual_prepay_term_id: termId, prepaid_method: 'annual_prepay_invoice', prepaid_amount: '50.00', estimated_price: '120.00' });
+      await refund(c1, 'pi_stamp', '10.00');
+      const rows = await credits(a);
+      expect(byVisit(rows, detached)).toMatchObject({ kind: 'prepaid_plan', creditCents: 0, needsReview: true });
+      expect(byVisit(rows, cash)).toMatchObject({ kind: 'priced', creditCents: 9000, refundCents: 0 });
+      // The term's refund goes to the one annual-stamped visit of the term, not to the cash-prepaid one.
+      expect(byVisit(rows, annual)).toMatchObject({ kind: 'prepaid_plan', creditCents: 5000, refundCents: 1000 });
     });
   });
 
@@ -472,6 +575,45 @@ postgres('production share credit', () => {
       await stop(b, c2, '2026-09-01', { estimated_price: '110.00' });
       const lost = await stop(a, c2, day(0), { service_type: 'Pest Control Re-Service', is_callback: true, ...HOME });
       expect(byVisit(await credits(a), lost)).toMatchObject({ needsReview: true, reason: expect.stringMatching(/cannot be tied to this property/) });
+    });
+
+    it('reads the unit as part of the address: another unit is another home, an unnamed unit is ambiguous', async () => {
+      const { a, b, c1 } = await setup();
+      await stop(b, c1, '2026-09-01', { ...HOME, service_address_line2: 'Apt 2', estimated_price: '110.00' });
+      const apt1 = await stop(a, c1, day(0), { ...HOME, service_address_line2: 'Apt 1', service_type: 'Pest Control Re-Service', is_callback: true });
+      expect(byVisit(await credits(a), apt1)).toMatchObject({ needsReview: true, reason: expect.stringMatching(/No earlier completed work/) });
+      const noUnit = await stop(a, c1, day(1), { ...HOME, service_type: 'Pest Control Re-Service', is_callback: true });
+      expect(byVisit(await credits(a), noUnit)).toMatchObject({ needsReview: true, reason: expect.stringMatching(/cannot be tied to this property/) });
+      const apt2 = await stop(a, c1, day(2), { ...HOME, service_address_line2: 'apt  2', service_type: 'Pest Control Re-Service', is_callback: true });
+      expect(byVisit(await credits(a), apt2)).toMatchObject({ kind: 'callback_other' });
+    });
+
+    it('checks every plausible latest visit before choosing the original technician', async () => {
+      const { a, b, c1 } = await setup();
+      // Same earlier day: one timed visit by Bravo and one with no completion time by Alpha. Which came last is unknown.
+      await stop(b, c1, '2026-09-10', { ...HOME, estimated_price: '110.00', completed_at: '2026-09-10T15:00:00Z' });
+      await stop(a, c1, '2026-09-10', { ...HOME, estimated_price: '110.00', completed_at: null });
+      const callback = await stop(a, c1, day(0), { ...HOME, service_type: 'Pest Control Re-Service', is_callback: true });
+      expect(byVisit(await credits(a), callback)).toMatchObject({ needsReview: true, reason: expect.stringMatching(/which came last cannot be read/) });
+      // The same pair by one technician is not ambiguous about who did the work.
+      const c2 = await customer();
+      await stop(a, c2, '2026-09-10', { ...HOME, estimated_price: '110.00', completed_at: '2026-09-10T15:00:00Z' });
+      await stop(a, c2, '2026-09-10', { ...HOME, estimated_price: '110.00', completed_at: null });
+      const own = await stop(a, c2, day(0), { ...HOME, service_type: 'Pest Control Re-Service', is_callback: true });
+      expect(byVisit(await credits(a), own)).toMatchObject({ kind: 'callback_own' });
+    });
+
+    it('compares technician ids as the database spells them, whatever case the caller used', async () => {
+      const { a, b, c1 } = await setup();
+      await trx('production_share_settings').insert({ technician_id: a, from_week: '2026-09-07', rate_bps: 2000, bar_type: 'weekly', bar_cents: 1, callback_stop_value_cents: 7700 });
+      await stop(a, c1, '2026-09-01', { ...HOME, estimated_price: '110.00' });
+      await stop(b, c1, '2026-09-02', { ...HOME, estimated_price: '110.00' });
+      const own = await stop(a, c1, day(0), { ...HOME, service_type: 'Pest Control Re-Service', is_callback: true });
+      const rows = await productionShare.weekCredits(trx, a.toUpperCase(), W);
+      // The latest earlier work is Bravo's, so the callback is credited at Alpha's own setting (7700), found with the capitalised id.
+      expect(byVisit(rows, own)).toMatchObject({ kind: 'callback_other', creditCents: 7700 });
+      expect((await productionShare.previewWeek(a.toUpperCase(), W, trx)).technician.id).toBe(a);
+      expect((await productionShare.settingsFor(trx, a.toUpperCase(), W))).toMatchObject({ technicianId: a, rateBps: 2000 });
     });
 
     it('matches by property id when both visits carry one', async () => {

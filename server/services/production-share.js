@@ -50,7 +50,9 @@ const Joi = require('joi');
 const db = require('../models/db');
 const { roundDiv } = require('./payroll-calc');
 const { PayrollError } = require('./payroll-w4');
-const { completionInvoiceAmount, hasAuthoritativeZeroPrice, resolveBillingLane } = require('./billing-lane');
+const { completionInvoiceAmount, hasAuthoritativeZeroPrice, resolveBillingLane, ANNUAL_PREPAY_PREPAID_METHOD } = require('./billing-lane');
+const { NON_CHARGEABLE_CLOSEOUT_OUTCOMES } = require('./visit-outcomes');
+const { TWO_TREATMENT_PACKAGE_KEYS } = require('./typed-followup-obligation');
 const { isReService } = require('./re-service');
 const {
   isAlwaysFreeServiceType, isConsultationServiceType,
@@ -68,6 +70,10 @@ const UNPLANNED_STATUSES = ['cancelled', 'skipped', 'no_show'];
 // An invoice in one of these states is no charge to the customer.
 const NOT_CHARGED_INVOICE_STATUSES = ['draft', 'void', 'canceled', 'cancelled'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// The id as Postgres spells it (lowercase): every comparison of technician ids in this module is between canonical ids, so an id
+// typed in capitals never reads as another technician's.
+const canonicalId = (id) => (id == null ? id : String(id).toLowerCase());
 
 const WORK_DATE_SQL = `COALESCE(${staffWorkDateSql('s.completed_at')}, s.scheduled_date)`;
 
@@ -141,7 +147,8 @@ const settingsRow = (row) => ({
  * The settings in force in a pay week: the newest row on or before it, and a row of the technician wins over the
  * default (technician_id NULL), as the minimum paid week reads payroll_week_minimum_changes. null = none on file.
  */
-async function settingsFor(conn, technicianId, weekStart) {
+async function settingsFor(conn, technicianIdIn, weekStart) {
+  const technicianId = canonicalId(technicianIdIn);
   const rows = await conn('production_share_settings')
     .where('from_week', '<=', weekStart)
     .where((q) => q.where('technician_id', technicianId).orWhereNull('technician_id'))
@@ -152,7 +159,8 @@ async function settingsFor(conn, technicianId, weekStart) {
 }
 
 // Every row on file for the technician and the default, newest first (the preview shows it).
-async function settingsHistory(conn, technicianId) {
+async function settingsHistory(conn, technicianIdIn) {
+  const technicianId = canonicalId(technicianIdIn);
   const rows = await conn('production_share_settings')
     .where((q) => q.where('technician_id', technicianId).orWhereNull('technician_id'))
     .select(...SETTINGS_COLUMNS, conn.raw("to_char(from_week, 'YYYY-MM-DD') AS from_week"))
@@ -232,19 +240,22 @@ function requireWeek(weekStart) {
 // The planned visits of the multi-visit job a stop belongs to, or null when it belongs to none. A job is a chain: the
 // first visit carries the price, and each included follow-up (followup_included) points at the visit before it
 // (followup_source_service_id; one live follow-up per visit, uq_scheduled_services_followup_source_open). A visit is in a
-// job when it is an included follow-up or has one. { root, planned: [ids in order] }, or { broken } when the chain
+// job when it is an included follow-up or has one, or is the first visit of a two-treatment package. { root, planned: [ids in order] }, or { broken } when the chain
 // cannot be followed to a first visit.
 const CHAIN_LIMIT = 12;
 async function jobOf(conn, stop, hasFollowUp, cache) {
-  if (!stop.followup_included && !hasFollowUp.has(stop.id)) return null;
+  // A two-treatment package's first visit is a job even before its follow-up is booked: the package was sold with two visits.
+  const packageFirstVisit = TWO_TREATMENT_PACKAGE_KEYS.has(stop.service_key || stop.service_key_snapshot) && !isCallbackVisit(stop);
+  if (!stop.followup_included && !hasFollowUp.has(stop.id) && !packageFirstVisit) return null;
   let root = {
     id: stop.id, estimated_price: stop.estimated_price, followup_included: stop.followup_included,
-    followup_source_service_id: stop.followup_source_service_id,
+    followup_source_service_id: stop.followup_source_service_id, service_key: stop.service_key || stop.service_key_snapshot || null,
   };
   for (let hops = 0; root.followup_included; hops += 1) {
     const source = hops < CHAIN_LIMIT && root.followup_source_service_id
-      ? await conn('scheduled_services').where({ id: root.followup_source_service_id })
-        .first('id', 'estimated_price', 'followup_included', 'followup_source_service_id')
+      ? await conn('scheduled_services as s').leftJoin('services as sv', 'sv.id', 's.service_id').where({ 's.id': root.followup_source_service_id })
+        .first('s.id', 's.estimated_price', 's.followup_included', 's.followup_source_service_id',
+          conn.raw('COALESCE(sv.service_key, s.service_key_snapshot) AS service_key'))
       : null;
     if (!source) return { broken: true };
     root = source;
@@ -269,28 +280,51 @@ const isCallbackVisit = (visit) => visit.is_callback === true || isReService({
 });
 
 const normalizedText = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-// A visit's address as text: its own, else its property's. null = no address on file.
-function addressKey(visit) {
-  const line = normalizedText(visit.service_address_line1 || visit.prop_line1);
+// A visit's address as text: its own, else its property's. null = no street and zip on file. The unit (line 2) is part of
+// it: two units of one building are two homes.
+function addressParts(visit) {
+  const own = normalizedText(visit.service_address_line1);
+  const line = own ? visit.service_address_line1 : visit.prop_line1;
+  const unit = own ? visit.service_address_line2 : visit.prop_line2;
+  const street = normalizedText(line);
   const zip = normalizedText(visit.service_address_zip || visit.prop_zip);
-  return line && zip ? `${line}|${zip}` : null;
+  return street && zip ? { street: `${street}|${zip}`, unit: normalizedText(unit) } : null;
 }
-// Same property: equal property ids, else equal addresses on file. 'unknown' when neither can say (a missing id with no address).
+// Same property: equal property ids, else equal addresses on file. 'unknown' when neither can say: a missing id with no
+// address, or one side names a unit and the other does not.
 function sameProperty(a, b) {
   if (a.property_id && b.property_id) return a.property_id === b.property_id ? 'yes' : 'no';
-  const keys = [addressKey(a), addressKey(b)];
-  if (!keys[0] || !keys[1]) return 'unknown';
-  return keys[0] === keys[1] ? 'yes' : 'no';
+  const [x, y] = [addressParts(a), addressParts(b)];
+  if (!x || !y) return 'unknown';
+  if (x.street !== y.street) return 'no';
+  if (x.unit === y.unit) return 'yes';
+  return x.unit && y.unit ? 'no' : 'unknown';
+}
+
+// Whether the visit's work was performed, by its latest completion record (service_records): 'yes' (completed, an outcome
+// that did work), 'no' (incomplete, declined, inspection only: no application), 'unknown' (no record, or a record that is
+// not a completion). The outcome lists are the ones the completion route and the card charge use (visit-outcomes.js).
+const RECORD_JOIN_SQL = `LEFT JOIN LATERAL (SELECT r.status AS record_status, r.structured_notes AS record_notes
+    FROM service_records r WHERE r.scheduled_service_id = s.id ORDER BY r.created_at DESC LIMIT 1) rec ON true`;
+function performedState(visit) {
+  if (!visit.record_status) return 'unknown';
+  let notes = visit.record_notes;
+  if (typeof notes === 'string') { try { notes = JSON.parse(notes); } catch { notes = null; } }
+  const outcome = String((notes && notes.visitOutcome) || '');
+  if (visit.record_status === 'incomplete' || NON_CHARGEABLE_CLOSEOUT_OUTCOMES.includes(outcome)) return 'no';
+  return visit.record_status === 'completed' ? 'yes' : 'unknown';
 }
 
 const NEW_ORIGINAL_LIMIT = 80;
-// The work a callback follows: the customer's latest completed, non-callback visit of the same line at the same property that
-// came BEFORE it (by completion time; a same-day pair whose order cannot be read is never guessed). Returns
-// { original } or { review: reason }; { original: null } when there is none.
+// The work a callback follows: the customer's latest PERFORMED, non-callback visit of the same line at the same property
+// that came BEFORE it (by completion time). Returns { original } (null = none) or { review: reason } whenever the answer is
+// not certain: the latest candidates cannot be ordered (a same-day pair, a missing completion time) and they are not all one
+// technician's, the property cannot be verified, or a candidate's completion record is missing.
 async function originalWork(conn, callback) {
   const candidates = await conn('scheduled_services as s')
     .leftJoin('services as sv', 'sv.id', 's.service_id')
     .leftJoin('customer_properties as cp', 'cp.id', 's.property_id')
+    .joinRaw(RECORD_JOIN_SQL)
     .where({ 's.customer_id': callback.customer_id, 's.status': 'completed' })
     .whereNot('s.id', callback.id)
     .whereRaw(`${require('./rate-review').PLAN_LINE_SQL.LINE_SQL} = ?`, [callback.line])
@@ -299,29 +333,45 @@ async function originalWork(conn, callback) {
     .orderByRaw(`${WORK_DATE_SQL} DESC, s.completed_at DESC NULLS LAST, s.id`)
     .limit(NEW_ORIGINAL_LIMIT)
     .select('s.id', 's.technician_id', 's.property_id', 's.service_type', 's.service_key_snapshot', 's.is_callback', 's.completed_at',
-      's.service_address_line1', 's.service_address_zip', 'sv.service_key', 'sv.name as service_name',
-      'cp.address_line1 as prop_line1', 'cp.zip as prop_zip',
+      's.service_address_line1', 's.service_address_line2', 's.service_address_zip', 'sv.service_key', 'sv.name as service_name',
+      'cp.address_line1 as prop_line1', 'cp.address_line2 as prop_line2', 'cp.zip as prop_zip', 'rec.record_status', 'rec.record_notes',
       conn.raw(`to_char(${WORK_DATE_SQL}, 'YYYY-MM-DD') AS work_date`));
-  let original = null;
+  const kept = [];
   for (const candidate of candidates) {
     if (isCallbackVisit(candidate)) continue; // a re-service is never the original work
     const where = sameProperty(callback, candidate);
     if (where === 'no') continue;
-    let earlier = candidate.work_date < callback.work_date;
+    const performed = performedState(candidate);
+    if (performed === 'no') continue; // nothing was applied: not the work a callback follows
+    let order = 'earlier';
     if (candidate.work_date === callback.work_date) {
       // Same day: only completion times can say which came first.
       const [then, now] = [candidate.completed_at, callback.completed_at].map((at) => (at ? new Date(at).getTime() : null));
-      if (then == null || now == null || then === now) {
-        return { review: 'A visit of the same line the same day as this callback, and the order of the two cannot be read.' };
-      }
-      earlier = then < now;
+      if (then == null || now == null || then === now) order = 'ambiguous';
+      else if (then > now) order = 'later';
     }
-    if (!earlier) continue;
-    if (where === 'unknown') return { review: 'Earlier work of the same line, but it cannot be tied to this property (no property or address on file).' };
-    original = candidate;
-    break;
+    if (order !== 'later') kept.push({ candidate, where, performed, order });
   }
-  return { original };
+  if (!kept.length) return { original: null };
+  const latestDay = kept.reduce((max, k) => (k.candidate.work_date > max ? k.candidate.work_date : max), '');
+  const plausible = kept.filter((k) => k.candidate.work_date === latestDay);
+  // The latest of that day: the newest completion time, and any visit with no completion time (it could be later).
+  const stamped = plausible.filter((k) => k.candidate.completed_at);
+  const newest = stamped.length ? Math.max(...stamped.map((k) => new Date(k.candidate.completed_at).getTime())) : null;
+  const latest = plausible.filter((k) => !k.candidate.completed_at || new Date(k.candidate.completed_at).getTime() === newest);
+  if (kept.some((k) => k.order === 'ambiguous')) {
+    return { review: 'A visit of the same line the same day as this callback, and the order of the two cannot be read.' };
+  }
+  if (latest.some((k) => k.performed === 'unknown')) {
+    return { review: 'Earlier work of the same line has no completion record, so it cannot be known whether it was performed.' };
+  }
+  if (latest.some((k) => k.where === 'unknown')) {
+    return { review: 'Earlier work of the same line, but it cannot be tied to this property (no property, address or unit match on file).' };
+  }
+  if (new Set(latest.map((k) => canonicalId(k.candidate.technician_id))).size > 1) {
+    return { review: 'Two visits of the same line on the same day, and which came last cannot be read, by different technicians.' };
+  }
+  return { original: latest[0].candidate };
 }
 
 // How much of a total each member gets, in whole cents, split in proportion to its weight: the floors, then the remaining
@@ -338,15 +388,26 @@ function allocateCents(totalCents, members) {
   return new Map(parts.map((part) => [part.id, Number(part.floor)]));
 }
 
+// Evidence that an invoice (`i`) combines a setup/initial fee with application work: line items include at least one setup or
+// initial line AND at least one other line (not the deposit credit). Only then are the fee lines left out of the visit's credit
+// (rate-review.js APPLICATION_LINES_SQL). A title that says "setup" or an invoice whose only line is "Initial Pest Cleanout" is
+// the visit's own work, billed in full.
+const COMBINED_SETUP_AND_APPLICATION_SQL = `(jsonb_typeof(COALESCE(i.line_items::jsonb, 'null'::jsonb)) = 'array'
+  AND EXISTS (SELECT 1 FROM jsonb_array_elements(i.line_items::jsonb) fl
+    WHERE COALESCE(fl ->> 'name', fl ->> 'description', '') ILIKE '%setup%' OR COALESCE(fl ->> 'name', fl ->> 'description', '') ILIKE '%initial%')
+  AND EXISTS (SELECT 1 FROM jsonb_array_elements(i.line_items::jsonb) al
+    WHERE NOT (COALESCE(al ->> 'name', al ->> 'description', '') ILIKE '%setup%' OR COALESCE(al ->> 'name', al ->> 'description', '') ILIKE '%initial%')
+      AND COALESCE(al ->> 'category', '') <> 'deposit_credit'))`;
+
 /**
  * What each visit was BILLED, before sales tax, and what was refunded on it, from the invoices linked to the visit by the
  * links the rate review reads (rate-review.js VISIT_INVOICE_LINK_SQL: direct, through the service record, the combined
  * first-application invoice, a completion packet). An unpaid invoice counts: the credit is the price charged, and a later
  * fee change never moves it. An invoice shared by several visits is split across ALL of them in proportion to their visit
- * prices, with the cents settled exactly; when a member has no price the split is unknowable and that invoice is left out
- * (the visit then falls back to its own price). Draft and void invoices are no charge. The prepay invoice of an annual term
+ * prices, with the cents settled exactly; when a member has no price the split is unknowable: the visit is flagged with that
+ * invoice (`unallocated`, with the invoice's whole refund kept visible) and never priced from the visit instead. Draft and void invoices are no charge. The prepay invoice of an annual term
  * is never attributed here: its refunds go to the term's visits (termRefunds).
- * Returns Map visitId -> { billedCents: number|null, refundCents }.
+ * Returns Map visitId -> { billedCents, refundCents, unallocated: [{ invoiceId, refundCents }] }.
  */
 async function billedByVisit(conn, visitIds) {
   const out = new Map();
@@ -360,7 +421,7 @@ async function billedByVisit(conn, visitIds) {
         OR p.metadata::jsonb ->> 'invoice_id' = i.id::text))`;
   const links = await conn.raw(`
     SELECT s.id AS visit_id, i.id AS invoice_id,
-      CASE WHEN ${rr.COMBINED_SETUP_INVOICE_SQL} THEN ${rr.APPLICATION_LINES_SQL}
+      CASE WHEN ${COMBINED_SETUP_AND_APPLICATION_SQL} THEN ${rr.APPLICATION_LINES_SQL}
            WHEN COALESCE(i.subtotal, 0) > 0 THEN i.subtotal - COALESCE(i.discount_amount, 0)
            ELSE i.total - COALESCE(i.tax_amount, 0) + ${rr.depositCreditSql('i')} END AS pretax,
       ${refundOf} AS refunded
@@ -388,7 +449,7 @@ async function billedByVisit(conn, visitIds) {
     if (!byInvoice.has(row.invoice_id)) byInvoice.set(row.invoice_id, []);
     byInvoice.get(row.invoice_id).push({ id: row.visit_id, weight: cents(row.weight) });
   }
-  const shares = new Map(); // invoice id -> { billed: Map, refunded: Map } by visit
+  const shares = new Map(); // invoice id -> { billed: Map, refunded: Map } by visit, or { unallocated: refunded cents }
   for (const row of links.rows) {
     if (shares.has(row.invoice_id)) continue;
     const list = byInvoice.get(row.invoice_id) || [];
@@ -398,15 +459,17 @@ async function billedByVisit(conn, visitIds) {
       shares.set(row.invoice_id, { billed: new Map([[row.visit_id, billed]]), refunded: new Map([[row.visit_id, refunded]]) });
     } else {
       const billedParts = allocateCents(billed, list);
-      shares.set(row.invoice_id, billedParts ? { billed: billedParts, refunded: allocateCents(refunded, list) } : null);
+      shares.set(row.invoice_id, billedParts ? { billed: billedParts, refunded: allocateCents(refunded, list) } : { unallocated: refunded });
     }
   }
   for (const row of links.rows) {
     const share = shares.get(row.invoice_id);
-    if (!share || !share.billed.has(row.visit_id)) continue;
-    const entry = out.get(row.visit_id) || { billedCents: 0, refundCents: 0 };
-    entry.billedCents += share.billed.get(row.visit_id);
-    entry.refundCents += (share.refunded && share.refunded.get(row.visit_id)) || 0;
+    const entry = out.get(row.visit_id) || { billedCents: 0, refundCents: 0, unallocated: [] };
+    if (share.unallocated !== undefined) entry.unallocated.push({ invoiceId: row.invoice_id, refundCents: share.unallocated });
+    else if (share.billed.has(row.visit_id)) {
+      entry.billedCents += share.billed.get(row.visit_id);
+      entry.refundCents += (share.refunded && share.refunded.get(row.visit_id)) || 0;
+    }
     out.set(row.visit_id, entry);
   }
   return out;
@@ -419,7 +482,7 @@ async function billedByVisit(conn, visitIds) {
  */
 async function termRefunds(conn, stops) {
   const out = new Map();
-  const termIds = [...new Set(stops.filter((stop) => stop.annual_prepay_term_id).map((stop) => stop.annual_prepay_term_id))];
+  const termIds = [...new Set(stops.filter(isAnnualPrepayStamp).filter((stop) => stop.annual_prepay_term_id).map((stop) => stop.annual_prepay_term_id))];
   if (!termIds.length) return out;
   const { REFUND_BASE_SQL } = require('./rate-review');
   const terms = await conn.raw(`
@@ -433,8 +496,8 @@ async function termRefunds(conn, stops) {
   for (const term of terms.rows) {
     const refunded = cents(term.refunded) || 0;
     if (!(refunded > 0)) continue;
-    const stamped = await conn('scheduled_services').where({ annual_prepay_term_id: term.id }).where('prepaid_amount', '>', 0)
-      .select('id', 'prepaid_amount');
+    const stamped = await conn('scheduled_services').where({ annual_prepay_term_id: term.id, prepaid_method: ANNUAL_PREPAY_PREPAID_METHOD })
+      .where('prepaid_amount', '>', 0).select('id', 'prepaid_amount');
     const parts = allocateCents(refunded, stamped.map((row) => ({ id: row.id, weight: cents(row.prepaid_amount) })));
     if (!parts) continue;
     for (const stop of stops) if (parts.has(stop.id)) out.set(stop.id, parts.get(stop.id));
@@ -442,20 +505,32 @@ async function termRefunds(conn, stops) {
   return out;
 }
 
+// The annual prepay payment stamp of a visit (the stamp annual-prepay-renewals.js writes: prepaid_method + the slice). It, not the
+// term link, says a visit was paid by an annual prepay: a visit detached from its term keeps the stamp, and a term-linked visit
+// can carry a separate cash/Zelle prepayment (a different prepaid_method), which is not annual prepay.
+const isAnnualPrepayStamp = (visit) => visit.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD && Number(visit.prepaid_amount) > 0;
+
 // The credit of one stop: { kind, creditCents, reason, needsReview }. A stop that cannot be credited with certainty is $0
 // and needsReview, never a guess.
 const credited = (kind, creditCents, reason) => ({ kind, creditCents, reason, needsReview: false });
 const toReview = (kind, reason) => ({ kind, creditCents: 0, reason, needsReview: true });
 
-// The job price is what the first visit was billed (its invoice, before tax), else its own price.
+const UNALLOCATED_REASON = 'A shared invoice covers this visit and cannot be split across its visits (a visit on it has no price).';
+
+// The job price is what the first visit was billed (its invoice, before tax), else its own price, split across the visits the
+// job was SOLD with: two for a two-treatment package (typed-followup-obligation.js), never the visits booked so far, so a
+// missing or replaced follow-up never moves a credit. A job whose sold count cannot be established is listed for review.
 function jobCredit(stop, job, billed) {
   if (job.broken) return toReview('multi_visit_job', 'An included follow-up whose first visit cannot be found. Link it to its job.');
+  const sold = TWO_TREATMENT_PACKAGE_KEYS.has(job.root.service_key) ? 2 : null;
+  if (!sold) return toReview('multi_visit_job', 'The number of visits this job was sold with cannot be established (only the two-treatment packages are known).');
   const invoiced = billed.get(job.root.id);
+  if (invoiced && invoiced.unallocated.length) return toReview('multi_visit_job', UNALLOCATED_REASON);
   const price = invoiced ? invoiced.billedCents : cents(job.root.estimated_price);
   const nth = job.planned.indexOf(stop.id) + 1;
   if (!(price > 0)) return toReview('multi_visit_job', "The job's first visit has no price on file.");
-  if (nth < 1) return toReview('multi_visit_job', "This visit is not among the job's planned visits.");
-  return credited('multi_visit_job', jobPartCents(price, job.planned.length, nth), `Part ${nth} of ${job.planned.length} of the job price`);
+  if (nth < 1 || nth > sold || job.planned.length > sold) return toReview('multi_visit_job', "This visit is not among the job's sold visits.");
+  return credited('multi_visit_job', jobPartCents(price, sold, nth), `Part ${nth} of ${sold} of the job price`);
 }
 
 async function callbackCredit(conn, stop, technicianId, inForce) {
@@ -465,7 +540,7 @@ async function callbackCredit(conn, stop, technicianId, inForce) {
   const original = found.original;
   if (!original) return toReview('callback_review', 'No earlier completed work of the same line at this property.');
   if (!original.technician_id) return toReview('callback_review', 'The original work has no technician on file.');
-  if (original.technician_id === technicianId) {
+  if (canonicalId(original.technician_id) === canonicalId(technicianId)) {
     const age = daysBetween(original.work_date, stop.work_date);
     return age <= OWN_CALLBACK_DAYS
       ? credited('callback_own', 0, `Callback on own work, ${age} days after it`)
@@ -477,9 +552,12 @@ async function callbackCredit(conn, stop, technicianId, inForce) {
 
 function ownPriceCredit(stop, invoiced) {
   if (isAlwaysFreeServiceType(stop.service_type)) return credited('free_visit', 0, 'A visit type that is always free');
-  if (Number(stop.prepaid_amount) > 0 && stop.annual_prepay_term_id) {
+  if (isAnnualPrepayStamp(stop)) {
+    // The stamp is the credit; a stamp with no term left cannot be traced to its prepay invoice, so its refunds could not be found.
+    if (!stop.annual_prepay_term_id) return toReview('prepaid_plan', 'The visit carries an annual prepay stamp but no term, so its prepay invoice and refunds cannot be traced.');
     return credited('prepaid_plan', cents(stop.prepaid_amount), "The prepaid plan's value for one visit");
   }
+  if (invoiced && invoiced.unallocated.length) return toReview('unpriced', UNALLOCATED_REASON);
   // What the visit's invoice charged, before tax, whether or not it is paid; a fee change later never moves it.
   if (invoiced) {
     if (invoiced.billedCents > 0) return credited('priced', invoiced.billedCents, "Pre-tax amount of the visit's invoice");
@@ -510,7 +588,8 @@ function ownPriceCredit(stop, invoiced) {
  * Stops that earn $0 are rows too, because they still make their day a shift. `settings` (optional) are the settings in
  * force for the week; read here when not passed (the callback value comes from them).
  */
-async function weekCredits(conn, technicianId, weekStart, { settings } = {}) {
+async function weekCredits(conn, technicianIdIn, weekStart, { settings } = {}) {
+  const technicianId = canonicalId(technicianIdIn);
   requireWeek(weekStart);
   const weekEnd = addStaffWorkDays(weekStart, 6);
   const inForce = settings === undefined ? await settingsFor(conn, technicianId, weekStart) : settings;
@@ -519,12 +598,14 @@ async function weekCredits(conn, technicianId, weekStart, { settings } = {}) {
     .leftJoin('services as sv', 'sv.id', 's.service_id')
     .leftJoin('customers as c', 'c.id', 's.customer_id')
     .leftJoin('customer_properties as cp', 'cp.id', 's.property_id')
+    .joinRaw(RECORD_JOIN_SQL)
     .where({ 's.technician_id': technicianId, 's.status': 'completed' })
     .whereRaw(`${WORK_DATE_SQL} BETWEEN ? AND ?`, [weekStart, weekEnd])
     .select('s.id', 's.customer_id', 's.property_id', 's.service_type', 's.estimated_price', 's.primary_line_price',
       's.is_callback', 's.followup_included', 's.followup_source_service_id', 's.annual_prepay_term_id', 's.prepaid_amount',
-      's.service_key_snapshot', 's.completed_at', 's.service_address_line1', 's.service_address_zip',
-      'sv.service_key', 'sv.name as service_name', 'cp.address_line1 as prop_line1', 'cp.zip as prop_zip',
+      's.prepaid_method', 's.service_key_snapshot', 's.completed_at', 's.service_address_line1', 's.service_address_line2',
+      's.service_address_zip', 'sv.service_key', 'sv.name as service_name', 'cp.address_line1 as prop_line1',
+      'cp.address_line2 as prop_line2', 'cp.zip as prop_zip', 'rec.record_status', 'rec.record_notes',
       'c.billing_mode', 'c.waveguard_tier', 'c.monthly_rate', 'c.per_application_fee',
       conn.raw(`to_char(${WORK_DATE_SQL}, 'YYYY-MM-DD') AS work_date`), conn.raw(`${LINE_SQL} AS line`))
     .orderByRaw(`${WORK_DATE_SQL}, s.completed_at NULLS LAST, s.id`);
@@ -545,14 +626,22 @@ async function weekCredits(conn, technicianId, weekStart, { settings } = {}) {
     const callback = isCallbackVisit(stop);
     const job = jobs.get(stop.id);
     let credit;
+    const performed = performedState(stop);
+    // Whether any work was done comes first: a stop closed out incomplete, declined or inspection only earns nothing, and a
+    // stop with no completion record cannot be credited with certainty.
+    if (performed === 'no') credit = credited('not_performed', 0, 'The visit was closed out with no work performed (incomplete, declined or inspection only).');
+    else if (performed === 'unknown') credit = toReview('unverified', 'The visit has no completed closeout record, so it cannot be known that the work was done.');
     // An included follow-up (even of a re-service type) and the first visit of a job are parts of the job; any other callback is
     // judged by the work it follows.
-    if (job && (stop.followup_included || !callback)) credit = jobCredit(stop, job, billed);
+    else if (job && (stop.followup_included || !callback)) credit = jobCredit(stop, job, billed);
     else if (callback) credit = await callbackCredit(conn, stop, technicianId, inForce);
     else credit = ownPriceCredit(stop, billed.get(stop.id));
+    const invoiced = billed.get(stop.id) || {};
     rows.push({
       visitId: stop.id, workDate: stop.work_date, serviceType: stop.service_type, ...credit,
-      refundCents: ((billed.get(stop.id) || {}).refundCents || 0) + (prepaidRefunds.get(stop.id) || 0),
+      refundCents: (invoiced.refundCents || 0) + (prepaidRefunds.get(stop.id) || 0),
+      // Refunds on a shared invoice that cannot be split across its visits: the invoice's whole refund, kept visible.
+      unallocatedRefunds: invoiced.unallocated || [],
     });
   }
   return rows;
@@ -567,21 +656,26 @@ async function previewWeek(technicianId, weekStart, conn = db) {
   requireWeek(weekStart);
   const technician = await conn('technicians').where({ id: technicianId }).first('id', 'name');
   if (!technician) throw new PayrollError(404, 'Technician not found.');
-  const settings = await settingsFor(conn, technicianId, weekStart);
-  const stops = await weekCredits(conn, technicianId, weekStart, { settings });
+  // From here on the id is the one the database holds (lowercase), whatever the caller typed.
+  const id = canonicalId(technician.id);
+  const settings = await settingsFor(conn, id, weekStart);
+  const stops = await weekCredits(conn, id, weekStart, { settings });
   const days = shiftDays(stops);
   const result = shareForWeek({ credits: stops, shifts: days.length, settings });
   return {
-    technician: { id: technician.id, name: technician.name },
+    technician: { id, name: technician.name },
     weekStart,
     weekEnd: addStaffWorkDays(weekStart, 6),
     settings,
-    history: await settingsHistory(conn, technicianId),
+    history: await settingsHistory(conn, id),
     shiftDays: days,
     ...result,
     stops,
     needsReview: stops.filter((stop) => stop.needsReview),
     refundCents: stops.reduce((sum, stop) => sum + stop.refundCents, 0),
+    // Whole refunds on shared invoices that could not be split, each invoice once.
+    unallocatedRefundCents: [...new Map(stops.flatMap((stop) => stop.unallocatedRefunds).map((u) => [u.invoiceId, u.refundCents])).values()]
+      .reduce((sum, cents2) => sum + cents2, 0),
   };
 }
 

@@ -18,6 +18,7 @@ const KIND_WORDS = {
   priced: 'Priced visit', prepaid_plan: 'Prepaid plan visit', multi_visit_job: 'Part of a multi-visit job',
   callback_own: 'Callback, own work', callback_other: "Callback, another technician's work", callback_review: 'Callback',
   free_assessment: 'Free assessment', free_visit: 'Free visit', unpriced: 'No price',
+  not_performed: 'No work performed', unverified: 'No closeout record',
 };
 
 // '15' -> 1500, '12.5' -> 1250. Anything else -> null.
@@ -104,6 +105,21 @@ function SettingsForm({ call, technicians, technicianId, weekStart, current, onS
   </form>;
 }
 
+function PreviewNotes({ preview }) {
+  return <>
+        {!preview.configured && <p className="m-0 text-ui-caption text-ink-secondary">No numbers are set for this week, so the share shows $0.</p>}
+        {preview.refundCents > 0 && <p className="m-0 text-ui-caption text-ink-secondary">
+          Refunds on these stops total {centsToDollars(preview.refundCents)}. They are not taken back yet.
+        </p>}
+        {preview.unallocatedRefundCents > 0 && <p role="status" className="m-0 text-ui-caption text-warn-fg">
+          Refunds of {centsToDollars(preview.unallocatedRefundCents)} are on shared invoices that cannot be split across their visits. They are not in any stop above.
+        </p>}
+        {preview.needsReview.length > 0 && <p role="status" className="m-0 text-ui-caption text-warn-fg">
+          {preview.needsReview.length} stop{preview.needsReview.length === 1 ? '' : 's'} need review. Each shows $0 until the office fixes it, so pay is never guessed.
+        </p>}
+  </>;
+}
+
 export default function ProductionSharePanel({ call, technicians }) {
   const [open, setOpen] = useState(false);
   const [technicianId, setTechnicianId] = useState('');
@@ -172,13 +188,7 @@ export default function ProductionSharePanel({ call, technicians }) {
           <div><dt className="text-ui-caption text-ink-secondary">Above the bar</dt><dd className="m-0 text-zinc-900">{centsToDollars(preview.aboveBarCents)}</dd></div>
           <div><dt className="text-ui-caption text-ink-secondary">Share (not paid)</dt><dd className="m-0 text-zinc-900">{centsToDollars(preview.shareCents)}</dd></div>
         </dl>
-        {!preview.configured && <p className="m-0 text-ui-caption text-ink-secondary">No numbers are set for this week, so the share shows $0.</p>}
-        {preview.refundCents > 0 && <p className="m-0 text-ui-caption text-ink-secondary">
-          Refunds on these stops total {centsToDollars(preview.refundCents)}. They are not taken back yet.
-        </p>}
-        {preview.needsReview.length > 0 && <p role="status" className="m-0 text-ui-caption text-warn-fg">
-          {preview.needsReview.length} stop{preview.needsReview.length === 1 ? '' : 's'} need review. Each shows $0 until the office fixes it, so pay is never guessed.
-        </p>}
+        <PreviewNotes preview={preview} />
         {preview.stops.length === 0
           ? <p className="m-0">No completed stops in this week.</p>
           : <Table aria-label="Stops and their credit">

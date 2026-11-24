@@ -63,6 +63,15 @@ describe('Production share preview', () => {
     expect(put.body).toEqual({ technicianId: 'tech-a', rateBps: 1600, barType: 'per_shift', barCents: 42550, callbackStopValueCents: 9500 });
   });
 
+  it('shows refunds on shared invoices that could not be split', async () => {
+    const call = vi.fn(async (path) => answerFor(path, { unallocatedRefundCents: 1200 }));
+    render(<ProductionSharePanel call={call} technicians={TECHS} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Open the production share preview' }));
+    fireEvent.change(screen.getByLabelText('Employee'), { target: { value: 'tech-a' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Show the week' }));
+    expect(await screen.findByText(/Refunds of \$12\.00 are on shared invoices/)).toBeInTheDocument();
+  });
+
   it('says so when no numbers are set, and shows a server refusal', async () => {
     const call = vi.fn(async (path) => {
       if (path.startsWith('/production-share/preview')) return answerFor(path, { configured: false, barCents: null, settings: null, shareCents: 0, needsReview: [], refundCents: 0, stops: [] });
