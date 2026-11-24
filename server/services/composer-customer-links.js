@@ -1095,7 +1095,8 @@ function wrappedOwnedLinkIn(body) {
       return true;
     }
     if (url.protocol !== 'https:' && url.protocol !== 'http:') return true;
-    if (!hosts.includes(ownedHostKey(url.hostname))) return true;
+    // url.host, port included, as every other owned-host check compares it: an owned host on another port is foreign.
+    if (!hosts.includes(ownedHostKey(url.host))) return true;
     if (url.username || url.password) return true;
     return nestedOwnedLinkRuns(`${url.pathname}${url.search}${url.hash}`).length > 0;
   });

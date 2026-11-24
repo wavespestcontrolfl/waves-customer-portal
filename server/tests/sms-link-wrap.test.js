@@ -140,6 +140,16 @@ describe('link recognition (ownedPortalLinkSpans)', () => {
       expect(ownedPortalHosts()).toEqual([HOST]);
     });
 
+    test('a host configured with a port is owned with that port in every check: its direct link is not read as wrapped', () => {
+      deployedIn('production');
+      process.env.PORTAL_DOMAIN = 'portal-alt.example:8443';
+      expect(ownedPortalHosts()).toEqual([HOST, 'portal-alt.example:8443']);
+      const link = prep('portal-alt.example:8443');
+      expect(ownedPortalLinkSpans(`Prep: ${link}`).map((s) => s.url)).toEqual([link]);
+      expect(wrappedOwnedLinkIn(`Prep: ${link}`)).toBe(false);
+      expect(wrappedOwnedLinkIn(`See https://evil.example/?next=${link}`)).toBe(true);
+    });
+
     test('a host configured with a trailing DNS dot is owned in both spellings, like an incoming FQDN link', () => {
       deployedIn('production');
       process.env.CLIENT_URL = `https://${RAILWAY}.`;
