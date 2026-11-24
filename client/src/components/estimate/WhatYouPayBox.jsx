@@ -29,7 +29,7 @@ const applicationsText = (visits) => (visits === 1 ? 'once a year' : `${visits} 
 
 // The waiver clause only when the page offers the annual prepay and the server marks this fee waivable with it.
 function setupFeeSentence(fee, prepayWaivable) {
-  const base = `The ${fmtMoney(fee.amount)} setup fee is a one-time charge to start a plan with one service. Plans with two or more services do not pay it.`;
+  const base = `The ${fmtMoney(fee.amount)} setup fee is a one-time charge to start a plan with one recurring service. Plans with two or more recurring services do not pay it.`;
   return prepayWaivable ? `${base} It is also waived if you prepay the year.` : base;
 }
 
@@ -62,7 +62,6 @@ export function buildWhatYouPay(input = {}) {
     firstVisitTotal: round2(firstApplications + feeAmount),
     setupSentence: setupFee ? setupFeeSentence(setupFee, prepayWaivable) : null,
     // The page also shows a monthly figure; say once that it is the year averaged, not a bill.
-    averageSentence: input.monthlyShown ? 'Any monthly figure on this page is the year averaged out. It is not a bill.' : null,
   };
 }
 
@@ -98,7 +97,7 @@ export default function WhatYouPayBox({ box }) {
         <div style={{ ...HEADING, paddingTop: 8, borderTop: `1px solid ${W.offWhite}` }}>Each application after that</div>
         {box.lines.map((line) => <Row key={line.key} label={line.label} amount={fmtMoney(line.amount)} sub={applicationsText(line.visits)} />)}
       </div>
-      {[box.setupSentence, box.averageSentence].filter(Boolean).map((text) => (
+      {[box.setupSentence].filter(Boolean).map((text) => (
         <div key={text} style={{ marginTop: 10, ...SUB }}>{text}</div>
       ))}
     </section>

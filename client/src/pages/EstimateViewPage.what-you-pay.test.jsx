@@ -127,7 +127,7 @@ describe('estimate page: what you pay and when', () => {
     // AGENTS.md: no combined plan total ($X/yr) on a customer estimate; units are "application", never "visit".
     expect(t).not.toMatch(/year total|first year|\$495|\$1,098|\$702/i);
     expect(t).not.toMatch(/visits? a year|each visit/i);
-    expect(t).toContain('The $99.00 setup fee is a one-time charge to start a plan with one service. Plans with two or more services do not pay it. It is also waived if you prepay the year.');
+    expect(t).toContain('The $99.00 setup fee is a one-time charge to start a plan with one recurring service. Plans with two or more recurring services do not pay it. It is also waived if you prepay the year.');
     // Inside the price section, with the price it explains.
     expect(container.querySelector('#estimate-price-section').contains(box(container))).toBe(true);
   });
@@ -144,7 +144,6 @@ describe('estimate page: what you pay and when', () => {
     expect(t).not.toMatch(/year total|\$1,098/i);
     expect(t).not.toMatch(/setup fee/i);
     // The monthly figure is explained as an average, never as the price.
-    expect(t).toContain('Any monthly figure on this page is the year averaged out. It is not a bill.');
   });
 
   it('lawn only: the per-application price and the visit count, with no setup fee', async () => {
@@ -163,7 +162,7 @@ describe('estimate page: what you pay and when', () => {
     payload.pricing.annualPrepayEligible = false;
     const { container } = await renderPage(payload);
     await waitFor(() => expect(box(container)).not.toBeNull());
-    expect(text(container)).toContain('Plans with two or more services do not pay it.');
+    expect(text(container)).toContain('Plans with two or more recurring services do not pay it.');
     expect(text(container)).not.toMatch(/waived/i);
   });
 
@@ -209,7 +208,7 @@ describe('buildWhatYouPay', () => {
   });
   const pest = model([['pest_control', 'Pest Control', 99, 4]]);
   const input = (extra = {}) => ({ model: pest, fees: [setupFee], serviceMode: 'recurring', invoiceFirstVisit: 99, ...extra });
-  const FEE_SENTENCE = 'The $99.00 setup fee is a one-time charge to start a plan with one service. Plans with two or more services do not pay it.';
+  const FEE_SENTENCE = 'The $99.00 setup fee is a one-time charge to start a plan with one recurring service. Plans with two or more recurring services do not pay it.';
 
   it('the annual prepay choice renders no box (the Reserve your spot box owns payment timing and prepay)', () => {
     expect(buildWhatYouPay(input({ paymentPreference: 'prepay_annual', annualPrepayOffered: true }))).toBeNull();
@@ -225,7 +224,7 @@ describe('buildWhatYouPay', () => {
 
   it('prints no plan total and no payment-timing or prepay field', () => {
     const result = buildWhatYouPay(input({ annualPrepayOffered: true, monthlyShown: true }));
-    expect(Object.keys(result).sort()).toEqual(['averageSentence', 'firstVisitTotal', 'lines', 'setup', 'setupSentence']);
+    expect(Object.keys(result).sort()).toEqual(['firstVisitTotal', 'lines', 'setup', 'setupSentence']);
     expect(result.firstVisitTotal).toBe(198);
   });
 
