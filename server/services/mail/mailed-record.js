@@ -57,6 +57,11 @@ function heldUntilLabel(day) {
   return m ? `${MONTHS[Number(m[1]) - 1]} ${Number(m[2])}` : null;
 }
 
+/** The price of one application, from whole cents (a quarterly plan is 4 applications a year), formatted like labelPrice. */
+function perApplicationLabel(annual) {
+  return labelPrice(Math.round(Math.round(Number(annual) * 100) / 4) / 100);
+}
+
 /** The monthly price as the label and the page print it: whole dollars bare, else two decimals. */
 function labelPrice(monthly) {
   const n = Number(monthly);
@@ -149,13 +154,18 @@ async function wouldMark({ ids } = {}, conn = db) {
 /**
  * Mark the mailable homes (all of them, or `ids`) as mailed in `batch`, in ONE transaction: mailed_at = `now`, the batch
  * name and the frozen snapshot of the price the label prints. A mailed row is never touched again (the select skips it and
- * the update names mailed_at IS NULL), so a second run of the same call marks nothing.
- * @returns {Promise<{ marked: string[], notMailable: string[] }>}
+ * the update names mailed_at IS NULL), and a batch name that already has homes marks nothing (batchExists), so a second run of
+ * the same call is a no-op even when more homes have been priced since.
+ * @returns {Promise<{ marked: string[], notMailable: string[], batchExists?: boolean }>}
  */
 async function markBatch({ batch, ids, now = new Date() }, conn = db) {
   checkBatch(batch);
   const list = checkIds(ids);
   return conn.transaction(async (trx) => {
+    // A batch name is used once, so a retry (or a second operator) can never add homes that priced since to a print run that
+    // was already exported. The advisory lock makes two runs with one name take turns; the second sees the first's rows.
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`mail_batch:${batch}`]);
+    if (await trx('mail_prospects').where({ mail_batch: batch }).first('id')) return { marked: [], notMailable: list || [], batchExists: true };
     const rows = await mailable(trx, list).forUpdate().select(...PRICE_COLUMNS);
     const marked = [];
     for (const row of rows) {
@@ -195,8 +205,9 @@ async function labelsFor({ batch, ids, now = new Date() } = {}, conn = db) {
   const officeByDefault = [];
   for (const row of rows) {
     const printed = row.mailed_at ? printedPriceOf(row) : null;
-    const monthly = printed ? printed.monthly : (snapshotOf(row) || {}).monthly;
-    if (monthly == null) continue;
+    const priceNow = printed || snapshotOf(row);
+    if (!priceNow || priceNow.monthly == null) continue;
+    const { monthly, annual } = priceNow;
     const { name, check } = labelName(row.recipient_names);
     const office = officeLineOf(row);
     if (check) nameCheck.push(row.id);
@@ -204,6 +215,7 @@ async function labelsFor({ batch, ids, now = new Date() } = {}, conn = db) {
     labels.push({
       name,
       price: labelPrice(monthly),
+      perApplication: perApplicationLabel(annual),
       slug: row.page_slug || null,
       token: row.page_token,
       textNumber: office.number,
@@ -214,6 +226,6 @@ async function labelsFor({ batch, ids, now = new Date() } = {}, conn = db) {
 }
 
 module.exports = {
-  markBatch, wouldMark, labelsFor, snapshotOf, printedPriceOf, heldUntilOf, heldUntilLabel, labelPrice, labelName, officeLineOf,
+  markBatch, wouldMark, labelsFor, snapshotOf, printedPriceOf, heldUntilOf, heldUntilLabel, labelPrice, perApplicationLabel, labelName, officeLineOf,
   PRICE_HOLD_DAYS, PLAN, BATCH_RE,
 };

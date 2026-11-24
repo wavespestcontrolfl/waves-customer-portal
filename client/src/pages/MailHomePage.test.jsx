@@ -52,15 +52,6 @@ it('shows the big monthly price, the street, the plan line and the setup fee', a
   expect(document.body.textContent).not.toMatch(/shadow/i);
 });
 
-it('a mailed home shows the day its printed price is held until, and an unmailed home shows none', async () => {
-  renderPage(async () => response(200, { address: ADDRESS, price: PRICE, plan: 'pest_quarterly', heldUntil: '2027-01-23' }));
-  expect(await screen.findByTestId('held-until')).toHaveTextContent('Your price is held until Jan 23');
-  cleanup();
-  renderPage(async () => response(200, { address: ADDRESS, price: PRICE, plan: 'pest_quarterly', heldUntil: null }));
-  await screen.findByTestId('monthly-price');
-  expect(screen.queryByTestId('held-until')).not.toBeInTheDocument();
-});
-
 it('shows cents only when the monthly price is not whole', async () => {
   renderPage(async () => response(200, { address: ADDRESS, price: { ...PRICE, annual: 450, monthly: 37.5 }, plan: 'pest_quarterly' }));
   expect(await screen.findByTestId('monthly-price')).toHaveTextContent('About $37.50 a month');

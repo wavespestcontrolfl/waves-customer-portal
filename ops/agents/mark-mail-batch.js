@@ -7,12 +7,14 @@
 //   mailed. --ids a,b,c limits the run to those prospect ids.
 // - Dry run: prints how many homes would be marked and each one's id and monthly price. Nothing is written.
 // - --execute --batch <name>: marks them in ONE transaction: mailed_at = now, the batch name, and a frozen snapshot of the
-//   price the label prints. A second run marks nothing: a mailed home is never touched again, and the table refuses any
-//   later change to its price. The price hold on the label (60 days) counts from this day.
+//   price the label prints. A batch name is used once: a second run with the same name marks nothing (homes priced later
+//   go in a new batch, so a label export of a batch is always the run that was printed), a mailed home is never touched
+//   again, and the table refuses any later change to its price. The price hold on the label (60 days) counts from this day.
 // - --labels <out.json> (read only unless --execute is also given): writes, for the homes of --batch (or, with no --batch,
 //   the homes a dry run would mark), [{ name, price, slug, token, textNumber, heldUntil }] for the label print tool:
-//   name = the buyers as the label shows them, price = the monthly price (whole dollars bare), textNumber = the
-//   office line of the home's city or ZIP, heldUntil = "Mon D". The file holds buyer names: keep it out of the repo.
+//   name = the buyers as the label shows them, price = the monthly price (whole dollars bare), perApplication = the price
+//   of one application (annual / 4, from whole cents; 4 a year), textNumber = the office line of the home's city or ZIP,
+//   heldUntil = "Mon D". The file holds buyer names and page tokens: it is written 0600; keep it out of the repo.
 // - No customer comms, no paid calls.
 //
 // Run from the repo root:
@@ -35,13 +37,23 @@ const value = (name) => {
   return v;
 };
 
-async function main() {
+function parseArgs() {
   const execute = flag('--execute');
   const batch = value('--batch');
+  // A flag that is present must carry a real value: an empty one (a shell variable that expanded to nothing) must never read
+  // as "no filter" and widen the run to every eligible home.
   const idsText = value('--ids');
-  const ids = idsText ? idsText.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
+  const ids = idsText === undefined ? undefined : idsText.split(',').map((s) => s.trim()).filter(Boolean);
   const labelsPath = value('--labels');
+  if (ids && !ids.length) throw usage('--ids is empty: give prospect ids, or leave the flag out');
+  if (labelsPath !== undefined && !labelsPath.trim()) throw usage('--labels is empty: give an output file');
+  if (batch !== undefined && !batch.trim()) throw usage('--batch is empty: give a batch name');
   if (execute && !batch) throw usage('--execute needs --batch <name>');
+  return { execute, batch, ids, labelsPath };
+}
+
+async function main() {
+  const { execute, batch, ids, labelsPath } = parseArgs();
 
   // From the Mac the private database host does not resolve: use the public URL the Postgres service provides, and
   // stop with a clear message when only the private one is set.
@@ -54,7 +66,8 @@ async function main() {
   try {
     if (execute) {
       const result = await markBatch({ batch, ids });
-      console.log(`Marked ${result.marked.length} home(s) as mailed in batch "${batch}".`);
+      if (result.batchExists) console.log(`Batch "${batch}" already exists: nothing marked. A batch name is used once; pick a new name for new homes.`);
+      else console.log(`Marked ${result.marked.length} home(s) as mailed in batch "${batch}".`);
       if (result.notMailable.length) console.log(`  ${result.notMailable.length} id(s) not marked (not eligible, not priced, or already mailed)`);
     } else if (!labelsPath || !batch) {
       const { homes, notMailable } = await wouldMark({ ids });
@@ -66,7 +79,11 @@ async function main() {
     }
     if (labelsPath) {
       const { labels, nameCheck, officeByDefault } = await labelsFor({ batch, ids });
-      fs.writeFileSync(labelsPath, `${JSON.stringify(labels, null, 2)}\n`, { mode: 0o600 });
+      // A new 0600 file renamed into place: an existing file keeps its old permissions when it is written over, and this one
+      // holds buyer names and page tokens.
+      const tmp = `${labelsPath}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, `${JSON.stringify(labels, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+      fs.renameSync(tmp, labelsPath);
       console.log(`Wrote ${labels.length} label row(s) for ${batch ? `batch "${batch}"` : 'the homes a dry run would mark'}.`);
       if (nameCheck.length) console.log(`  Look at the name of ${nameCheck.length} home(s) before printing: ${nameCheck.join(', ')}`);
       if (officeByDefault.length) console.log(`  No city or ZIP named an office for ${officeByDefault.length} home(s) (Lakewood Ranch line used): ${officeByDefault.join(', ')}`);

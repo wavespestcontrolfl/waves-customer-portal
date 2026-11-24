@@ -6,7 +6,7 @@
 jest.mock('../models/db', () => jest.fn());
 
 const {
-  snapshotOf, printedPriceOf, heldUntilOf, heldUntilLabel, labelPrice, labelName, officeLineOf, markBatch, PRICE_HOLD_DAYS,
+  snapshotOf, printedPriceOf, heldUntilOf, heldUntilLabel, labelPrice, perApplicationLabel, labelName, officeLineOf, markBatch, PRICE_HOLD_DAYS,
 } = require('../services/mail/mailed-record');
 
 describe('snapshotOf', () => {
@@ -55,6 +55,11 @@ describe('label price and name', () => {
     expect(labelPrice(42)).toBe('42');
     expect(labelPrice(41.5)).toBe('41.50');
     expect(labelPrice(50.09)).toBe('50.09');
+  });
+  test('the price of one application is annual / 4 from whole cents', () => {
+    expect(perApplicationLabel(600)).toBe('150');
+    expect(perApplicationLabel('601.02')).toBe('150.26');
+    expect(perApplicationLabel(450)).toBe('112.50');
   });
   test('buyers as "LAST FIRST M": one name, one family, two families', () => {
     expect(labelName(['TESTER ALEX J'])).toEqual({ name: 'Alex Tester', check: false });

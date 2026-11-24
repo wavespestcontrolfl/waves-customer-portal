@@ -161,6 +161,19 @@ postgres('mailed record on PostgreSQL', () => {
     expect((await stored(a)).mailed_at.toISOString()).toBe(NOW.toISOString());
   });
 
+  test('a batch name is used once: a retry marks nothing, even for homes priced since, and a concurrent twin waits its turn', async () => {
+    const a = await row();
+    expect((await markBatch({ batch: 'run-1', now: NOW })).marked).toEqual([a]);
+    const late = await row(); // priced after the print run was exported
+    const retry = await markBatch({ batch: 'run-1', now: NOW });
+    expect(retry).toMatchObject({ marked: [], batchExists: true });
+    expect((await stored(late)).mailed_at).toBeNull();
+    expect((await labelsFor({ batch: 'run-1' })).labels).toHaveLength(1);
+    // Two runs of one new name at the same moment: one marks, the other sees its rows.
+    const [x, y] = await Promise.all([markBatch({ batch: 'run-2', now: NOW }), markBatch({ batch: 'run-2', now: NOW })]);
+    expect([x.marked.length, y.marked.length].sort()).toEqual([0, 1]);
+  });
+
   test('markBatch with ids marks just those homes and reports the ones that could not be marked; bad input is refused before any write', async () => {
     const a = await row();
     const b = await row();
@@ -237,10 +250,10 @@ postgres('mailed record on PostgreSQL', () => {
     const bySlug = (list, slug) => list.find((l) => l.slug === slug);
     const first = (list) => list.find((l) => l.name === 'Alex & Jamie Tester');
     expect(first(before.labels)).toEqual({
-      name: 'Alex & Jamie Tester', price: '50.09', slug: (await stored(lwr)).page_slug, token: (await stored(lwr)).page_token,
+      name: 'Alex & Jamie Tester', price: '50.09', perApplication: '150.26', slug: (await stored(lwr)).page_slug, token: (await stored(lwr)).page_token,
       textNumber: '(941) 318-7612', heldUntil: 'Jan 23',
     });
-    expect(bySlug(before.labels, null)).toMatchObject({ name: 'Sam Sample', price: '50', textNumber: '(941) 297-3337', token: (await stored(venice)).page_token });
+    expect(bySlug(before.labels, null)).toMatchObject({ name: 'Sam Sample', price: '50', perApplication: '150', textNumber: '(941) 297-3337', token: (await stored(venice)).page_token });
     expect((await stored(lwr)).mailed_at).toBeNull(); // read only
 
     await markBatch({ batch: 'b-1', now: NOW });
