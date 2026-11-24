@@ -198,6 +198,28 @@ describe('attachPlannedBlocks', () => {
     expect(query.whereNot).toHaveBeenCalledWith('block_type', 'available');
   });
 
+  it('gives the services of one physical stop one stop key, and a different stop another', () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'plan';
+    const premise = { line1: '1 Test St', line2: null, city: 'Bradenton', zip: '34205' };
+    const co = { customerId: 'c1', premise, rawEstimateMinutes: null };
+    const services = [
+      row('p', '09:00', A, { ...co, visitId: 'v1' }),
+      row('l', '09:00', A, { ...co, visitId: 'v1', serviceTypeRaw: 'Lawn Care' }),
+      row('done', '08:00', A, { status: 'completed', visitId: 'v1' }),
+      row('next', '11:00', B),
+      row('cx', '12:00', B, { status: 'cancelled' }),
+    ];
+    attachPlannedBlocks(services, EARLY);
+    const by = Object.fromEntries(services.map((s) => [s.id, s]));
+    expect(by.p.plannedStopKey).toBeTruthy();
+    expect(by.l.plannedStopKey).toBe(by.p.plannedStopKey);
+    // A completed member of the group still sits in its stop.
+    expect(by.done.plannedStopKey).toBe(by.p.plannedStopKey);
+    expect(by.next.plannedStopKey).toBeTruthy();
+    expect(by.next.plannedStopKey).not.toBe(by.p.plannedStopKey);
+    expect(by.cx.plannedStopKey).toBeNull();
+  });
+
   it('stamps nulls on every row of an empty or unplaceable day', () => {
     const services = [row('a', '08:00', A, { status: 'cancelled' })];
     attachPlannedBlocks(services);

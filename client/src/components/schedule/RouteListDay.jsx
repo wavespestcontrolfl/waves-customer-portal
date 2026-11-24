@@ -9,7 +9,7 @@
 import { useCallback, useMemo, useState } from 'react';
 import { cn } from '../ui';
 import {
-  CloseoutOwedChip, OUTSIDE_WINDOW_EDGE, blockPromise, clockWithAp, parseHHMM, plannedTitleLine,
+  CloseoutOwedChip, OUTSIDE_WINDOW_EDGE, blockPromise, clockWithAp, driveInLabel, parseHHMM, plannedTitleLine,
   promiseChipTitle, serviceDisplayName, statusBlockClasses, statusBlockFill,
 } from './TimeGridDay';
 
@@ -61,32 +61,47 @@ function planOf(service) {
   return Number.isFinite(at) && Number.isFinite(minutes) && minutes > 0 ? { start: at, minutes } : null;
 }
 
-// Route order: the planned arrival, else the booked start; the day list's
-// own order breaks ties. A stop with no time at all goes last.
-function routeOrder(services) {
-  const key = (s) => planOf(s)?.start ?? parseHHMM(s.windowStart) ?? Infinity;
-  return services
-    .map((service, index) => ({ service, index }))
-    .sort((a, b) => key(a.service) - key(b.service)
-      || (a.service.displayOrder ?? Infinity) - (b.service.displayOrder ?? Infinity)
-      || a.index - b.index)
-    .map(({ service }) => service);
+// The physical stops of one technician's day, in route order. The services
+// of one stop (a visit group, or two services at one address) share the
+// route model's `plannedStopKey`, or a visit id where the route could not
+// place them: one number, each service its own line. A stop sorts by its
+// earliest planned arrival, else booked start; the day list's own order
+// breaks ties; a stop with no time at all goes last.
+function routeStops(services) {
+  const stops = new Map();
+  services.forEach((service, index) => {
+    const key = service.plannedStopKey || (service.visitId ? `visit-${service.visitId}` : `row-${service.id}`);
+    if (!stops.has(key)) stops.set(key, { key, services: [], index });
+    stops.get(key).services.push(service);
+  });
+  const timeOf = (s) => planOf(s)?.start ?? parseHHMM(s.windowStart) ?? Infinity;
+  const list = [...stops.values()];
+  for (const stop of list) {
+    stop.services.sort((a, b) => timeOf(a) - timeOf(b) || (a.displayOrder ?? Infinity) - (b.displayOrder ?? Infinity));
+    stop.at = timeOf(stop.services[0]);
+  }
+  return list.sort((a, b) => a.at - b.at || a.index - b.index);
 }
 
 // Planned minutes of the day and its finish (the last planned departure).
 // Rows of one co-visit share a stretch of work: counted once.
+const CLOSED = new Set(['completed', 'skipped', 'cancelled', 'no_show']);
+
 function dayTotals(stops) {
   const seen = new Set();
   let minutes = 0;
   let finish = null;
-  for (const s of stops) {
+  // Stops still to be worked with a service the route could not place (no pin,
+  // no time): the last modeled departure is then not the day's finish.
+  const unplanned = stops.filter((stop) => stop.services.some((s) => !CLOSED.has(s.status) && !planOf(s))).length;
+  for (const s of stops.flatMap((stop) => stop.services)) {
     const plan = planOf(s);
     if (!plan) continue;
     const key = `${plan.start}:${plan.minutes}`;
     if (!seen.has(key)) { seen.add(key); minutes += plan.minutes; }
     finish = Math.max(finish ?? 0, plan.start + plan.minutes);
   }
-  return { minutes, finish };
+  return { minutes, finish, unplanned };
 }
 
 const STATUS_WORD = {
@@ -103,29 +118,29 @@ function StopTime({ plan, bookedStart }) {
   );
 }
 
-function StopLine({ service, number, onEdit, owesCompletion }) {
+function StopLine({ service, onEdit, owesCompletion }) {
   const plan = planOf(service);
   const { promise } = plan ? blockPromise(service, plan) : { promise: null };
   const outside = promise?.outside === true;
   const bookedStart = parseHHMM(service.windowStart);
   const status = service.status;
   const flat = status === 'completed' || status === 'skipped';
-  const drive = Number.isFinite(service.driveFromPrevMin) ? `~${service.driveFromPrevMin} min drive` : null;
+  // Once per stop: the feed marks the first card of a stop (driveInShown).
+  const drive = driveInLabel(service);
   const name = service.customerName || 'Unassigned';
   return (
-    <li>
+    <div>
       <button
         type="button"
         onClick={() => onEdit?.(service)}
         title={`${name} · ${serviceDisplayName(service)}${plan ? plannedTitleLine(plan, promise) : ''}`}
         className={cn(
-          'w-full text-left flex flex-wrap items-center gap-x-2 gap-y-0.5 px-3 py-2 text-14 leading-tight border-l-[3px] u-focus-ring',
+          'w-full text-left flex flex-wrap items-center gap-x-2 gap-y-0.5 pl-1 pr-3 py-2 text-14 leading-tight border-l-[3px] u-focus-ring',
           flat ? statusBlockClasses(status) : 'bg-white text-zinc-900 hover:bg-zinc-50',
           status === 'cancelled' && 'text-zinc-500 line-through',
         )}
         style={{ borderLeftColor: outside ? OUTSIDE_WINDOW_EDGE : (statusBlockFill(status) || '#A1A1AA') }}
       >
-        <span className="u-nums shrink-0 w-6 font-medium text-ink-secondary" data-testid="stop-number">{number}</span>
         <StopTime plan={plan} bookedStart={bookedStart} />
         <span className="font-medium truncate min-w-0 flex-1 basis-40">{name}</span>
         <span className="opacity-80 truncate min-w-0 basis-32 shrink">{serviceDisplayName(service)}</span>
@@ -140,26 +155,37 @@ function StopLine({ service, number, onEdit, owesCompletion }) {
           >{promise.label}</span>
         )}
       </button>
-    </li>
+    </div>
   );
 }
 
 function RouteCard({ name, stops, onEdit, owesCompletion }) {
-  const { minutes, finish } = dayTotals(stops);
+  const { minutes, finish, unplanned } = dayTotals(stops);
   return (
     <section className="rounded-sm border border-zinc-200 bg-white overflow-hidden" aria-label={`${name} route`}>
       <header className="flex flex-wrap items-center gap-x-3 gap-y-0.5 px-3 py-2 bg-zinc-50 border-b border-zinc-200 text-14">
         <h3 className="font-medium text-zinc-900 truncate min-w-0">{name}</h3>
         <span className="u-nums text-ink-secondary">{stops.length} {stops.length === 1 ? 'stop' : 'stops'}</span>
         {minutes > 0 && <span className="u-nums text-ink-secondary">{minutes} min planned</span>}
-        {finish != null && <span className="u-nums text-ink-secondary">Planned finish {clockWithAp(finish)}</span>}
+        {unplanned > 0 ? (
+          <span className="u-nums text-ink-secondary">
+            Finish not known ({unplanned} {unplanned === 1 ? 'stop' : 'stops'} unplanned)
+          </span>
+        ) : finish != null && <span className="u-nums text-ink-secondary">Planned finish {clockWithAp(finish)}</span>}
       </header>
       {stops.length === 0 ? (
         <p className="px-3 py-3 text-14 text-ink-tertiary">No stops</p>
       ) : (
         <ol className="divide-y divide-zinc-100">
-          {stops.map((service, i) => (
-            <StopLine key={service.id} service={service} number={i + 1} onEdit={onEdit} owesCompletion={owesCompletion} />
+          {stops.map((stop, i) => (
+            <li key={stop.key} className="flex items-stretch" data-testid="stop">
+              <span className="u-nums shrink-0 w-8 pl-3 py-2 text-14 font-medium text-ink-secondary" data-testid="stop-number">{i + 1}</span>
+              <div className="min-w-0 flex-1 divide-y divide-zinc-50">
+                {stop.services.map((service) => (
+                  <StopLine key={service.id} service={service} onEdit={onEdit} owesCompletion={owesCompletion} />
+                ))}
+              </div>
+            </li>
           ))}
         </ol>
       )}
@@ -177,15 +203,15 @@ export default function RouteListDay({ services = [], technicians = [], onEdit, 
       byTech.get(s.technicianId).push(s);
     }
     const out = [];
-    if (unassigned.length) out.push({ id: '__unassigned__', name: 'Unassigned', stops: routeOrder(unassigned) });
+    if (unassigned.length) out.push({ id: '__unassigned__', name: 'Unassigned', stops: routeStops(unassigned) });
     const seen = new Set();
     for (const t of technicians) {
       seen.add(t.id);
-      out.push({ id: t.id, name: t.name, stops: routeOrder(byTech.get(t.id) || []) });
+      out.push({ id: t.id, name: t.name, stops: routeStops(byTech.get(t.id) || []) });
     }
     // A technician with visits who is not on the roster still gets a card.
     for (const [id, list] of byTech) {
-      if (!seen.has(id)) out.push({ id, name: list[0].technicianName || 'Technician', stops: routeOrder(list) });
+      if (!seen.has(id)) out.push({ id, name: list[0].technicianName || 'Technician', stops: routeStops(list) });
     }
     return out;
   }, [services, technicians]);

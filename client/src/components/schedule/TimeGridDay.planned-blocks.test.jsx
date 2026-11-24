@@ -340,7 +340,19 @@ describe('TimeGridDay planned blocks', () => {
     expect(parseFloat(el.style.height)).toBeCloseTo(64);
     // ...with the alert and the planned time.
     expect(el.style.borderLeft).toContain('220, 38, 38');
-    expect(el.getAttribute('title')).toMatch(/Planned 8:15 PM, after the 5–7 PM promise/);
+    expect(el.getAttribute('title')).toMatch(/Service planned 8:15 PM \(off the grid\) · stop reached 8:15 PM · window 5–7 PM · after the promise/);
+  });
+
+  it('shows both times, labelled, for a later service of a group planned off the grid', () => {
+    // The stop is reached at 5:45 PM (inside 5-7), the second service starts at 8:15 PM, off the grid.
+    renderDay([visit('g2', 'Second Si', '17:00', {
+      visitId: 'v1', scheduledDate: '2026-11-25', plannedArrivalMin: 20 * 60 + 15, plannedMinutes: 35, plannedStopArrivalMin: 17 * 60 + 45,
+      told: { level: 'hour', dayOnly: false, date: '2026-11-25', window: '5:00 PM - 7:00 PM' },
+    })]);
+    const title = block('Second Si').getAttribute('title');
+    expect(title).toMatch(/Service planned 8:15 PM \(off the grid\) · stop reached 5:45 PM · window 5–7 PM/);
+    expect(title).not.toMatch(/after the promise/);
+    expect(block('Second Si').style.borderLeft).not.toContain('220, 38, 38');
   });
 
   it('labels the window chip by its source, and says exactly why a booked window is not a promise', () => {

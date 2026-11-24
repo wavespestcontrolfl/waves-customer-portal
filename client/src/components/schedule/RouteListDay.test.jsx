@@ -54,6 +54,7 @@ describe('Grid / Route toggle', () => {
 describe('RouteListDay', () => {
   const lines = (card) => within(card).getAllByRole('button');
   const card = (name) => screen.getByRole('region', { name: `${name} route` });
+  const numbers = (name) => within(card(name)).getAllByTestId('stop-number').map((n) => n.textContent);
 
   it('gives Unassigned first (only with visits), then a card per technician, each stop list in route order', () => {
     render(<RouteListDay technicians={TECHS} services={[
@@ -65,7 +66,7 @@ describe('RouteListDay', () => {
     const sections = screen.getAllByRole('region');
     expect(sections.map((s) => s.getAttribute('aria-label'))).toEqual(['Unassigned route', 'Alex Tech route', 'Blair Tech route']);
     // Planned arrival first, the booked start for a stop with no plan: 08:30, 10:00 booked, 11:00.
-    expect(lines(card('Alex Tech')).map((b) => within(b).getByTestId('stop-number').textContent)).toEqual(['1', '2', '3']);
+    expect(numbers('Alex Tech')).toEqual(['1', '2', '3']);
     expect(lines(card('Alex Tech')).map((b) => b.textContent)).toEqual([
       expect.stringContaining('Early Ed'), expect.stringContaining('No Plan Pia'), expect.stringContaining('Late Lou'),
     ]);
@@ -75,17 +76,17 @@ describe('RouteListDay', () => {
   it('shows each line\'s fields: number, planned time, customer, service, minutes, drive, window chip', () => {
     render(<RouteListDay technicians={TECHS} services={[
       stop('a', 'Planned Pat', '10:00', {
-        plannedArrivalMin: 10 * 60 + 45, plannedMinutes: 35, driveFromPrevMin: 9, told: told('10:00 AM - 12:00 PM'),
+        plannedArrivalMin: 10 * 60 + 45, plannedMinutes: 35, driveFromPrevMin: 9, driveInShown: true, told: told('10:00 AM - 12:00 PM'),
       }),
     ]} />);
     const line = lines(card('Alex Tech'))[0];
-    expect(within(line).getByTestId('stop-number')).toHaveTextContent('1');
+    expect(numbers('Alex Tech')).toEqual(['1']);
     expect(within(line).getByTestId('stop-time')).toHaveTextContent('10:45 AM');
     expect(within(line).getByTestId('stop-time')).not.toHaveTextContent('booked');
     expect(within(line).getByText('Planned Pat')).toBeInTheDocument();
     expect(within(line).getByText('General Pest Control')).toBeInTheDocument();
     expect(within(line).getByTestId('stop-minutes')).toHaveTextContent('35 min');
-    expect(within(line).getByText('~9 min drive')).toBeInTheDocument();
+    expect(within(line).getByText('~9 min drive in')).toBeInTheDocument();
     const chip = within(line).getByText('window 10–12');
     expect(chip).toHaveAttribute('title', 'Promised arrival window');
     expect(line.style.borderLeftColor).not.toBe('rgb(220, 38, 38)');
@@ -126,15 +127,15 @@ describe('RouteListDay', () => {
 
   it('counts the rows of one co-visit once in the minutes, and keeps completed, skipped and cancelled stops in order with their look', () => {
     render(<RouteListDay technicians={TECHS} services={[
-      stop('a', 'Pair A', '10:00', { plannedArrivalMin: 600, plannedMinutes: 60 }),
-      stop('b', 'Pair B', '10:00', { plannedArrivalMin: 600, plannedMinutes: 60 }),
+      stop('a', 'Pair A', '10:00', { plannedStopKey: 'stop-1', plannedArrivalMin: 600, plannedMinutes: 60 }),
+      stop('b', 'Pair B', '10:00', { plannedStopKey: 'stop-1', plannedArrivalMin: 600, plannedMinutes: 60 }),
       stop('c', 'Done Dee', '08:00', { status: 'completed' }),
       stop('s', 'Skip Sam', '09:00', { status: 'skipped' }),
       stop('x', 'Cancelled Cy', '12:00', { status: 'cancelled' }),
     ]} />);
     expect(card('Alex Tech').querySelector('header')).toHaveTextContent('60 min planned');
     const all = lines(card('Alex Tech'));
-    expect(all.map((b) => within(b).getByTestId('stop-number').textContent)).toEqual(['1', '2', '3', '4', '5']);
+    expect(numbers('Alex Tech')).toEqual(['1', '2', '3', '4']);
     expect(all[0]).toHaveTextContent('Done Dee');
     expect(all[0]).toHaveClass('bg-zinc-200');
     expect(all[1]).toHaveTextContent('Skip Sam');
@@ -157,5 +158,43 @@ describe('RouteListDay', () => {
     render(<RouteListDay technicians={TECHS} services={many} />);
     expect(lines(card('Alex Tech'))).toHaveLength(16);
     expect(screen.getByTestId('route-list')).toHaveClass('grid-cols-1');
+  });
+
+  it('numbers physical stops: the services of one stop share a number, stay clickable one by one, and the header counts stops', () => {
+    const onEdit = vi.fn();
+    const pest = stop('p', 'Pair Pia', '09:00', { plannedStopKey: 'stop-0', plannedArrivalMin: 540, plannedMinutes: 35, driveInShown: true, driveFromPrevMin: 12 });
+    const lawn = stop('l', 'Pair Pia', '09:00', { plannedStopKey: 'stop-0', plannedArrivalMin: 575, plannedMinutes: 35, serviceType: 'Lawn Care', driveInShown: false, driveFromPrevMin: null });
+    const next = stop('n', 'Next Ned', '11:00', { plannedStopKey: 'stop-1', plannedArrivalMin: 660, plannedMinutes: 35 });
+    render(<RouteListDay technicians={TECHS} services={[next, lawn, pest]} onEdit={onEdit} />);
+    // Three services, two stops: numbers 1 and 2, later numbers do not shift.
+    expect(numbers('Alex Tech')).toEqual(['1', '2']);
+    expect(card('Alex Tech').querySelector('header')).toHaveTextContent('2 stops');
+    const first = within(card('Alex Tech')).getAllByTestId('stop')[0];
+    const inFirst = within(first).getAllByRole('button');
+    expect(inFirst.map((b) => b.textContent)).toEqual([expect.stringContaining('General Pest Control'), expect.stringContaining('Lawn Care')]);
+    fireEvent.click(inFirst[1]);
+    expect(onEdit).toHaveBeenLastCalledWith(lawn);
+    fireEvent.click(inFirst[0]);
+    expect(onEdit).toHaveBeenLastCalledWith(pest);
+  });
+
+  it('shows the drive into a stop once, the way the grid does, and nothing for an unmarked leg', () => {
+    render(<RouteListDay technicians={TECHS} services={[
+      stop('p', 'Pair Pia', '09:00', { plannedStopKey: 'stop-0', plannedArrivalMin: 540, plannedMinutes: 35, driveInShown: true, driveFromPrevMin: 12 }),
+      stop('l', 'Pair Pia', '09:00', { plannedStopKey: 'stop-0', plannedArrivalMin: 575, plannedMinutes: 35, driveInShown: false, driveFromPrevMin: 12 }),
+    ]} />);
+    expect(screen.getAllByText('~12 min drive in')).toHaveLength(1);
+  });
+
+  it('does not call the last modeled departure the finish when an open stop has no plan', () => {
+    render(<RouteListDay technicians={TECHS} services={[
+      stop('a', 'Planned Pat', '08:00', { plannedArrivalMin: 480, plannedMinutes: 35 }),
+      stop('b', 'No Pin Pete', '10:00'),
+      stop('c', 'Done Dee', '07:00', { status: 'completed' }),
+    ]} />);
+    const header = card('Alex Tech').querySelector('header');
+    expect(header).toHaveTextContent('Finish not known (1 stop unplanned)');
+    expect(header).not.toHaveTextContent('Planned finish');
+    expect(header).toHaveTextContent('35 min planned');
   });
 });

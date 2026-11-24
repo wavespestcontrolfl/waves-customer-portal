@@ -205,7 +205,7 @@ function plannedInterval(svc) {
 // A moved or resized row's plan is the old route's: until the refreshed
 // plan arrives it draws from its booked window (optimistic edits only).
 function withoutPlan(s) {
-  return { ...s, plannedArrivalMin: null, plannedMinutes: null, plannedStopArrivalMin: null };
+  return { ...s, plannedArrivalMin: null, plannedMinutes: null, plannedStopArrivalMin: null, plannedStopKey: null };
 }
 // Shortest drawn planned block: one 14px text line. Smaller real heights
 // (a 15-minute stop is 16px) are drawn as they are down to this.
@@ -291,10 +291,14 @@ function offGridPlannedStart(svc) {
 
 // Tooltip line for a block drawn at its booked spot with a planned time off the grid.
 function offGridTitleLine(at, promise) {
-  if (promise?.outside) {
-    return `\nPlanned ${clockWithAp(promise.at)}, ${promise.side} the ${promise.range} promise`;
-  }
-  return `\nPlanned ${clockWithAp(at)} (off the grid)`;
+  // Both times, labelled: the service's own planned start, and where the van
+  // reaches the stop (which the promise is judged at; they differ for a later
+  // service of a group).
+  const own = `Service planned ${clockWithAp(at)} (off the grid)`;
+  if (!promise) return `\n${own}`;
+  const window = `${promise.source === 'told' ? 'window' : 'booked window'} ${promise.range}`;
+  const verdict = promise.outside ? ` · ${promise.side} the promise` : '';
+  return `\n${own} · stop reached ${clockWithAp(promise.at)} · ${window}${verdict}`;
 }
 
 // Square-style flat color blocks. Default/scheduled → blue-500;
@@ -2033,5 +2037,5 @@ export default function TimeGridDay({
 export {
   blockPromise, plannedTitleLine, promiseChipTitle, plannedClock, clockWithAp,
   OUTSIDE_WINDOW_EDGE, statusBlockClasses, statusBlockFill, serviceDisplayName,
-  parseHHMM, CloseoutOwedChip,
+  parseHHMM, CloseoutOwedChip, driveInLabel,
 };

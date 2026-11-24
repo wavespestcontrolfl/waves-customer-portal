@@ -39,6 +39,7 @@ function clearPlanned(services) {
     s.plannedArrivalMin = null;
     s.plannedMinutes = null;
     s.plannedStopArrivalMin = null;
+    s.plannedStopKey = null;
   }
 }
 
@@ -109,6 +110,13 @@ function attachPlannedBlocks(services, { departureMin = DEFAULT_DEPARTURE_MIN, h
   for (const a of day.sim.arrivals) {
     if (!Number.isFinite(a.arrivalMin) || !(a.departureMin > a.arrivalMin)) continue;
     const members = day.membersOf.get(a.id) || [];
+    // The physical stop (planRoute's stop index; a piece id is "stop:piece"):
+    // every row of one stop, planned or not, so a list numbers it once.
+    const stopKey = `stop-${String(a.id).split(':')[0]}`;
+    for (const id of members) {
+      const row = byId.get(id);
+      if (row) row.plannedStopKey = stopKey;
+    }
     for (const slot of memberSlots(day.pieceOf.get(a.id), a, members)) {
       const s = byId.get(slot.id);
       if (!s || !isPlaceable(s) || !(slot.minutes > 0)) continue;
