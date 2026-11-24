@@ -131,11 +131,67 @@ describe('whatYouPayForData', () => {
     expect(whatYouPayForData(input)).toBeNull();
   });
 
-  test('a one-time option: the alternate one-time row does not hide the box', () => {
-    const input = pestOnly();
-    input.estimate.show_one_time_option = true;
-    input.pricingBundle.oneTimeBreakdown = { total: 348, items: [{ service: 'one_time_pest', amount: 249 }, { service: 'waveguard_setup', amount: 99 }] };
-    expect(whatYouPayForData(input)).not.toBeNull();
+  describe('with a one-time option on the estimate', () => {
+    const optionInput = (items) => {
+      const input = pestOnly();
+      input.estimate.show_one_time_option = true;
+      input.pricingBundle.oneTimeBreakdown = { total: 0, items };
+      return input;
+    };
+    const choiceRow = { service: 'one_time_pest', label: 'One-Time Pest Control', amount: 249, kind: 'charge' };
+    const setupRow = { service: 'waveguard_setup', amount: 99 };
+
+    test('only the alternate one-time choice row (and the setup row) may sit in the breakdown', () => {
+      expect(whatYouPayForData(optionInput([choiceRow, setupRow]))).not.toBeNull();
+    });
+
+    test.each([
+      ['Bora-Care', { service: 'bora_care', label: 'Bora-Care Wood Treatment', amount: 400, kind: 'charge' }],
+      ['a pest specialty row', { service: 'pest_initial_cleanout', label: 'Initial pest cleanout', amount: 150, kind: 'charge' }],
+      ['an area add-on', { service: 'area_addon_garage', label: 'Garage treatment', amount: 60, kind: 'charge' }],
+      ['an unclassified row', { service: 'mystery', label: 'Mystery charge', amount: 20, kind: 'charge' }],
+    ])('%s beside the choice row is billed with either choice: null', (_label, extra) => {
+      expect(whatYouPayForData(optionInput([choiceRow, setupRow, extra]))).toBeNull();
+    });
+  });
+
+  describe('a tier plan (lawn): billingFrequencyKey is "monthly" even when it bills per application', () => {
+    // The production tier shape (lawn/tree builders): key = tier key, billingFrequencyKey 'monthly',
+    // billedPerApplication true, perTreatment x visitsPerYear = annual.
+    const tierInput = (frequencyExtra = {}) => {
+      const input = lawnOnly();
+      input.pricingBundle.services = [{ ...lawnSection, defaultFrequencyKey: 'enhanced', frequencies: [{ key: 'enhanced' }] }];
+      input.pricingBundle.frequencies = [{
+        key: 'enhanced', label: 'Enhanced (9 visits)', serviceCategory: 'lawn_care', serviceTierKey: 'enhanced',
+        monthly: 58.5, annual: 702, perTreatment: 78, visitsPerYear: 9,
+        billingFrequencyKey: 'monthly', billedPerApplication: true,
+        perServiceTreatments: [row('lawn_care', 'Lawn Care', 78, 9)],
+        ...frequencyExtra,
+      }];
+      return input;
+    };
+
+    test('lawn only on the tier shape: the box is built (price = the per-visit charge the accept stamps)', () => {
+      const out = whatYouPayForData(tierInput());
+      expect(out).toEqual({
+        selection: { frequency: 'enhanced', serviceCadences: null },
+        lines: [{ key: 'lawn_care', label: 'Lawn Care', perApplication: 78, applicationsPerYear: 9 }],
+        setupFee: null,
+        setupWaivedWithPrepay: false,
+        firstVisitTotal: 78,
+      });
+    });
+
+    test('a real monthly account (no billedPerApplication flag): null', () => {
+      expect(whatYouPayForData(tierInput({ billedPerApplication: false }))).toBeNull();
+      const noFlag = tierInput();
+      delete noFlag.pricingBundle.frequencies[0].billedPerApplication;
+      expect(whatYouPayForData(noFlag)).toBeNull();
+    });
+
+    test('a printed price that is not the accept per-visit charge (annual / visits): null', () => {
+      expect(whatYouPayForData(tierInput({ annual: 720, monthly: 60 }))).toBeNull();
+    });
   });
 
   test('per-line amounts that do not add up to the first invoice amount to the cent: null', () => {

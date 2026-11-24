@@ -31708,9 +31708,36 @@ function whatYouPayFirstBillIsPlain({ estimate, estData, pricingBundle, frequenc
   if (EstimateConverter.frozenRodentBaitSetupAmount(estData) > 0 || EstimateConverter.frozenMistingInstall(estData)) return false;
   const fees = Array.isArray(pricingBundle?.firstVisitFees) ? pricingBundle.firstVisitFees : [];
   if (fees.some((fee) => fee?.service !== 'waveguard_setup' && Number(fee?.amount) > 0)) return false;
-  // With a one-time option the breakdown is the alternate price, not a charge beside the plan.
+  // Only the setup row (read through the setup fee path) and, with a one-time option, the ALTERNATE one-time
+  // choice row(s) may sit in the breakdown. Anything else (Bora-Care, a pest specialty, an area add-on) is billed
+  // with either choice, so the first bill is more than the plain lines.
   const items = Array.isArray(pricingBundle?.oneTimeBreakdown?.items) ? pricingBundle.oneTimeBreakdown.items : [];
-  return estimate.show_one_time_option === true || items.every((item) => item?.service === 'waveguard_setup');
+  const choiceCategory = estimate.show_one_time_option === true ? serviceCategoryForOneTimeChoice(estData, pricingBundle) : null;
+  return items.every((item) => item?.service === 'waveguard_setup'
+    || (choiceCategory && isOneTimeChoiceItemForCategory(item, choiceCategory)));
+}
+
+// A tier plan carries billingFrequencyKey 'monthly' even when it bills per application (billedPerApplication).
+// A real monthly account is out; a per-application tier is in, but only when the printed price is the per-visit
+// charge the accept stamps (perApplicationChargeAmount over the plan annual and visit count), to the cent.
+function whatYouPayTierBillsPerApplication({ estData, frequency, lines }) {
+  if (frequency.billingFrequencyKey !== 'monthly') return true;
+  if (frequency.billedPerApplication !== true || lines.length !== 1) return false;
+  const cadence = BillingCadence.resolveBillingCadence({
+    monthlyRate: Number(frequency.monthly),
+    annualRate: Number(frequency.annual),
+    frequencyKey: 'monthly',
+    estimateData: estData,
+    fallbackFrequencyKey: 'quarterly',
+  });
+  const charge = BillingCadence.perApplicationChargeAmount({
+    billingCadence: cadence,
+    annualRate: Number(frequency.annual),
+    monthlyRate: Number(frequency.monthly),
+    visitsPerYear: Number(frequency.visitsPerYear) || null,
+    serviceKey: frequency.key || null,
+  });
+  return charge != null && centsOfWyp(charge) === centsOfWyp(lines[0].perApplication);
 }
 
 // The estimate shapes the box never describes: not open, held, invoiced, monthly-billed, commercial, a frozen offer.
@@ -31769,8 +31796,6 @@ function whatYouPayForData(input = {}) {
     const selection = whatYouPayDefaultSelection(pricingBundle);
     const frequency = selection?.frequency;
     if (!frequency || frequency.quoteRequired === true || Number(frequency.lowConfidenceRangePct) > 0) return null;
-    // A monthly-billed tier is not paid per application.
-    if (frequency.billingFrequencyKey && (frequency.billingFrequencyKey || frequency.key) === 'monthly') return null;
     const services = whatYouPayServices(estimate, estData);
     const prefs = normalizePrefs(estData?.preferences);
     const rowAmounts = services.length ? sameDayVisitRowAmounts(frequency, { preferences: prefs, services }) : null;
@@ -31778,6 +31803,7 @@ function whatYouPayForData(input = {}) {
     if (!whatYouPayFirstBillIsPlain({ estimate, estData, pricingBundle, frequency, services, prefs, rowAmounts })) return null;
     const total = sameDayVisitTotalForPricingFrequency(frequency, { preferences: prefs, services });
     const lines = whatYouPayLines({ rowAmounts, pricingBundle, total });
+    if (lines && !whatYouPayTierBillsPerApplication({ estData, frequency, lines })) return null;
     const setup = lines ? whatYouPaySetupFee({ estimate, estData, frequency, services, lineCount: lines.length }) : null;
     if (!lines || !setup) return null;
     return {
