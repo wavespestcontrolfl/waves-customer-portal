@@ -36,6 +36,7 @@ const TWILIO_NUMBERS = require('../../config/twilio-numbers');
 const { mailHomePageLive, mailHomeTextBookLive } = require('../../config/feature-gates');
 const { buildBaseSlug, hasUnitPart, SLUG_RE, MAX_SLUG_LENGTH, STREET_SUFFIXES } = require('./home-slug');
 const { USPS_STREET_SUFFIXES } = require('../property-lookup/usps-street-suffixes');
+const { findOnlyKnownCallerCustomer } = require('../../utils/known-caller-phone');
 const { publicPortalUrl } = require('../../utils/portal-url');
 
 const LIST_KEY = 'new_home'; // services/mail/new-home-list.js LIST_KEY
@@ -182,38 +183,51 @@ function replyBody({ address, slug }) {
   return `Here's your Waves page for ${address}: ${publicPortalUrl()}/nh/${slug}\n\nReply STOP to opt out.`;
 }
 
+// The sender's customer, for the opt-out and consent checks: the webhook's own match (primary phone), else the ONE customer
+// that owns the number as a secondary or service-contact phone (`knownContact`: the webhook found such a record). false = a
+// known contact that cannot be pinned to one customer (two owners, or a failed read): no reply, consent cannot be established.
+async function senderCustomerId(from, customer, knownContact) {
+  if (customer) return customer.id;
+  if (!knownContact) return null;
+  const only = await findOnlyKnownCallerCustomer(db, from);
+  return only ? only.id : false;
+}
+
 /**
- * Answer a postcard text. `customer` is the webhook's matched customer for the sender, if any; `standAside` is an optional
- * async predicate that makes the reply stand down. Resolves { handled: true } only when a reply was handed to the provider (sent or uncertain),
- * so the webhook can keep the AI auto-reply from answering the same text; every other outcome is { handled: false } and
- * the text goes on through the normal inbound handling. Never throws.
+ * Answer a postcard text. `customer` is the webhook's matched customer for the sender, `knownContact` says the webhook found a
+ * customer record that has the number as a secondary or service-contact phone, and `standAside` is an async predicate that
+ * makes the reply stand down. Resolves { handled: true } when a reply was handed to the provider (sent, uncertain or threw
+ * with no outcome: it may have gone, so the claim stays and nothing is retried), so the webhook can keep the AI auto-reply
+ * from answering the same text; every other outcome is { handled: false } and the text goes on through the normal inbound
+ * handling. Never throws.
  */
-async function handleHomeTextToBook({ from, to, body, customer = null, standAside = null }) {
+async function handleHomeTextToBook({ from, to, body, customer, knownContact, standAside = async () => false }) {
   try {
     if (!mailHomePageLive() || !mailHomeTextBookLive()) return { handled: false };
     // Only the office location lines (the GBP numbers the card prints); never the AI line, a tech line or a tracking line.
     // findByNumber alone is not enough: it also reports the AI chat line (the toll-free number) as a location.
-    const line = Object.entries(TWILIO_NUMBERS.locations).find(([, loc]) => loc.number === to);
-    if (!line) return { handled: false };
-    const locationId = line[0];
+    const locationId = Object.keys(TWILIO_NUMBERS.locations).find((id) => TWILIO_NUMBERS.locations[id].number === to);
     const parsed = parseAddressText(body);
-    if (!parsed) return { handled: false };
-    const home = await findLiveHome(parsed);
+    const home = locationId && parsed && await findLiveHome(parsed);
     if (!home) return { handled: false };
 
-    // Another inbound handler may own this text (an estimate address question waiting on its answer): checked only now, for a
-    // text that matched a live home, so an ordinary text costs no extra read.
-    if (typeof standAside === 'function' && await standAside()) return { handled: false };
+    // Checked only now, for a text that matched a live home, so an ordinary text costs no extra read: an estimate address
+    // question waiting on its answer comes first, and a known contact must resolve to one customer whose consent is read.
+    const customerId = await senderCustomerId(from, customer, knownContact);
+    if (customerId === false || await standAside()) return { handled: false };
 
     const claim = await claimReply({ from, to, prospectId: home.id });
     if (!claim.claimId) {
       logger.info(`[mail-home-text-to-book] no reply for prospect ${home.id} (${claim.refused})`);
       return { handled: false };
     }
-    const claimId = claim.claimId;
 
     const { sendCustomerMessage } = require('../messaging/send-customer-message');
     const { isRealProviderSend, isAmbiguousProviderOutcome } = require('../sms-auto-send');
+    // A known customer's SMS opt-out and consent are checked as for every other known-customer auto-reply; no match is a lead.
+    const who = customerId
+      ? { customerId, identityTrustLevel: 'phone_matches_customer' }
+      : { identityTrustLevel: 'phone_provided_unverified' };
     let result;
     try {
       result = await sendCustomerMessage({
@@ -222,28 +236,18 @@ async function handleHomeTextToBook({ from, to, body, customer = null, standAsid
         channel: 'sms',
         audience: 'lead',
         purpose: 'conversational',
-        // The webhook's own match for this phone (it reads legacy phone formats): the customer's SMS opt-out and consent are
-        // checked, as for every other known-customer auto-reply. No match: a lead, as before.
-        ...(customer && customer.id ? { customerId: customer.id } : {}),
-        identityTrustLevel: customer && customer.id ? 'phone_matches_customer' : 'phone_provided_unverified',
+        ...who,
         consentBasis: { status: 'transactional_allowed', source: ENTRY_POINT },
         entryPoint: 'mail_home_text_to_book', // a literal: staff-reply-surfaces-interlock.test.js reads it from the source
-        metadata: {
-          original_message_type: ENTRY_POINT,
-          templateKey: ENTRY_POINT,
-          // The reply leaves from the line the text came to.
-          fromNumber: to,
-        },
+        // The reply leaves from the line the text came to.
+        metadata: { original_message_type: ENTRY_POINT, templateKey: ENTRY_POINT, fromNumber: to },
       });
     } catch (err) {
-      result = err && err.providerOutcome && typeof err.providerOutcome === 'object' ? err.providerOutcome : null;
-      if (!result) {
-        // No outcome at all: the text may have reached the provider. The claim stays; nothing is retried.
-        logger.warn(`[mail-home-text-to-book] send threw for prospect ${home.id} (${errCode(err)})`);
-        return { handled: false };
-      }
+      // A thrown outcome is the provider's own; a bare throw may have reached it, so it counts as uncertain.
+      logger.warn(`[mail-home-text-to-book] send threw for prospect ${home.id} (${errCode(err)})`);
+      result = err.providerOutcome || { deliveryOutcome: 'uncertain' };
     }
-    if (result && result.sent && isRealProviderSend(result)) {
+    if (isRealProviderSend(result)) {
       logger.info(`[mail-home-text-to-book] replied for prospect ${home.id} from the ${locationId} line`);
       return { handled: true, prospectId: home.id };
     }
@@ -251,8 +255,8 @@ async function handleHomeTextToBook({ from, to, body, customer = null, standAsid
       logger.warn(`[mail-home-text-to-book] reply for prospect ${home.id} left uncertain; claim kept, not retried`);
       return { handled: true, prospectId: home.id };
     }
-    await releaseClaim(claimId);
-    logger.info(`[mail-home-text-to-book] reply for prospect ${home.id} not sent (${String((result && result.code) || 'refused').slice(0, 40)})`);
+    await releaseClaim(claim.claimId);
+    logger.info(`[mail-home-text-to-book] reply for prospect ${home.id} not sent (${String(result.code || 'refused').slice(0, 40)})`);
     return { handled: false };
   } catch (err) {
     logger.warn(`[mail-home-text-to-book] failed (${errCode(err)})`);

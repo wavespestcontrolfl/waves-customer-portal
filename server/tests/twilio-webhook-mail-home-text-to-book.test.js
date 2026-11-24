@@ -143,13 +143,29 @@ afterAll(() => { process.env = savedEnv; });
 test('an office line text goes to the service with the line, the sender and the body', async () => {
   await receive('101 EXAMPLE');
   expect(mockHomeText).toHaveBeenCalledTimes(1);
-  expect(mockHomeText.mock.calls[0][0]).toMatchObject({ from: sender, to: parrishLine, body: '101 EXAMPLE', customer: null });
+  expect(mockHomeText.mock.calls[0][0]).toMatchObject({ from: sender, to: parrishLine, body: '101 EXAMPLE', customer: null, knownContact: false });
 });
 
 test('the webhook\'s matched customer goes to the service (so that customer\'s SMS consent is checked)', async () => {
   mockState.customer = { ...CUSTOMER, lead_intake_status: null };
   await receive('101 EXAMPLE');
   expect(mockHomeText.mock.calls[0][0].customer).toMatchObject({ id: CUSTOMER.id });
+});
+
+test('Twilio is acked BEFORE the office bell finishes (a slow push must not hold the webhook open)', async () => {
+  mockHomeText.mockResolvedValue({ handled: true, prospectId: 'prospect-1' });
+  let finishBell;
+  ringUnknownOfficeText.mockImplementationOnce(() => new Promise((resolve) => { finishBell = () => resolve(true); }));
+  const res = new EventEmitter();
+  res.status = (code) => { res.statusCode = code; return res; };
+  res.type = () => res;
+  res.send = (value) => { res.body = value; return res; };
+  const done = handler({ body: { From: sender, To: parrishLine, Body: '101 EXAMPLE', MessageSid: `SM-ack-${Date.now()}`, NumMedia: '0' } }, res);
+  await done; // the handler returned while the bell is still pending
+  expect(res.body).toBe('<Response></Response>');
+  expect(ringUnknownOfficeText).toHaveBeenCalledTimes(1);
+  finishBell();
+  await new Promise((r) => setTimeout(r, 10));
 });
 
 test('an estimate address question waiting on this sender stands the postcard reply aside (read-only check, answer left to handleClarifyReply)', async () => {

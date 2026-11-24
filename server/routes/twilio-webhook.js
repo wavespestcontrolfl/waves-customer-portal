@@ -1224,19 +1224,23 @@ router.post('/sms', async (req, res) => {
     // gets one reply with the home's page link (services/mail/home-text-to-book.js). Runs after STOP/HELP/START and
     // the lead-intake machine, never for the AI line, a tech line or a tracking line (the service checks the line is
     // an office location line), a staff sender, a reaction, a media text or a reschedule ask. A reply that went out
-    // consumes the text (no AI auto-reply on top; the office thread bell still rings); every other outcome falls through untouched.
+    // consumes the text (no AI auto-reply on top; the office thread bell still rings, after the ack); every other outcome falls through untouched.
     if (Body && inboundMedia.length === 0 && !smsReaction && !staffSender && !complianceCommand && !rescheduleAsk
       && !pendingTimeAnswer && numberConfig.type === 'location' && !isAiNumber && !TWILIO_NUMBERS.isTechLine(To)) {
       const homeText = await require('../services/mail/home-text-to-book').handleHomeTextToBook({
         from: From, to: To, body: Body, customer,
+        // A number a customer record has as a secondary or service-contact phone: its consent is read, or no reply.
+        knownContact: Boolean(knownCallerRecord || knownCallerLookupFailed),
         // An estimate address question waiting on this sender's answer comes first (handleClarifyReply records it below).
         standAside: () => require('../services/estimate-clarify-asks').hasAwaitingClarifyAsk({ phone: From }),
       });
       if (homeText.handled) {
         await retypeConsumedInbound(smsLogEntry.id, 'mail_home_text_to_book', 'mail-home-text-to-book');
-        // The office still sees the text: the same thread bell the post-ack block below rings for any text to an office line.
-        await ringConsumedOfficeText({ customer, staffSender, smsReaction, courtesyOnly, isAiNumber, numberConfig, To, From, MessageSid, Body, smsLogEntry });
-        return res.type('text/xml').send('<Response></Response>');
+        // Ack Twilio first, then ring the office thread bell the post-ack block below rings for any text to an office line
+        // (a slow push must not hold the webhook open: Twilio retries a late ack). The bell never throws.
+        res.type('text/xml').send('<Response></Response>');
+        void ringConsumedOfficeText({ customer, staffSender, smsReaction, courtesyOnly, isAiNumber, numberConfig, To, From, MessageSid, message: Body, smsLogEntry });
+        return;
       }
     }
 
@@ -1390,8 +1394,7 @@ router.post('/sms', async (req, res) => {
         // suppressed counts as HANDLED: an internal-test/demo customer's
         // inbound must not fall through to the legacy owner-SMS forward —
         // that would re-create the exact alert the suppression removed.
-        knownInboundNotified = Boolean(stats && !stats.error &&
-          (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0));
+        knownInboundNotified = bellLanded(stats);
       } catch (e) {
         if (e.alreadyRead) { knownInboundNotified = true; logger.info('[notifications] sms_reply skipped — thread read before the bell'); }
         else logger.error(`[notifications] sms_reply trigger failed: ${e.message}`);
@@ -2068,31 +2071,33 @@ async function isRepeatUnknownSender({ customer, hasContent, smsLogEntry, From, 
   }
 }
 
-// The office thread bell for an inbound text a branch consumed and answered itself (the new-home postcard reply): what the
-// post-ack block of POST /sms rings for any text to an office line, in the same order and with the same fallbacks (the
-// unknown-sender bell, the known customer's sms_reply bell, then the quiet Activity row when neither landed, skipped for an
-// unknown sender who texted in the last 4 hours and for the owner texting himself). One bell per text, no customer reply.
-// Never throws.
-async function ringConsumedOfficeText({ customer, staffSender, smsReaction, courtesyOnly, isAiNumber, numberConfig, To, From, MessageSid, Body, smsLogEntry }) {
+// Did the sms_reply bell/push land? suppressed counts as HANDLED (an internal-test/demo customer's inbound must not fall
+// through to the legacy owner-SMS forward). One rule for the main post-ack block and ringConsumedOfficeText.
+function bellLanded(stats) {
+  return Boolean(stats && !stats.error && (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0));
+}
+
+// The office thread bell for an inbound text a branch consumed and answered itself (the new-home postcard reply), run AFTER
+// the ack. What the post-ack block of POST /sms rings for any text to an office line, in the same order and with the same
+// fallbacks: the unknown-sender bell, the known customer's sms_reply bell, then the quiet Activity row when neither landed,
+// skipped for an unknown sender who texted in the last 4 hours (isRepeatUnknownSender). The caller has excluded reactions and
+// a text to the owner's own phone (the line is an office line). One bell per text, no customer reply. Never throws.
+async function ringConsumedOfficeText(ctx) {
+  const { customer, courtesyOnly, From, MessageSid, message, smsLogEntry } = ctx;
   try {
-    let notified = await require('../services/sms-reply-alert-delivery').ringUnknownOfficeText({
-      customer, staffSender, smsReaction, courtesyOnly, isAiNumber, numberConfig, To, From, MessageSid, message: Body, mediaCount: 0,
-    });
-    if (customer && !smsReaction && !courtesyOnly) {
+    let notified = await require('../services/sms-reply-alert-delivery').ringUnknownOfficeText({ ...ctx, mediaCount: 0 });
+    if (customer && !courtesyOnly) {
       try {
-        const stats = await ringSmsReplyBell({ customer, From, MessageSid, message: Body });
-        notified = Boolean(stats && !stats.error && (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0));
+        notified = bellLanded(await ringSmsReplyBell({ customer, From, MessageSid, message }));
       } catch (e) {
         if (e.alreadyRead) notified = true;
-        else logger.error(`[notifications] sms_reply trigger failed: ${e.code || e.name || 'error'}`);
+        else logger.error(`[notifications] sms_reply trigger failed: ${e.code || e.name}`);
       }
     }
-    const repeat = await isRepeatUnknownSender({ customer, hasContent: Boolean(Body), smsLogEntry, From, MessageSid });
-    if (!notified && !repeat && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
-      await recordInboundTextAlert({ customer, From, MessageSid, Body });
-    }
+    const repeat = await isRepeatUnknownSender({ customer, hasContent: true, smsLogEntry, From, MessageSid });
+    if (!notified && !repeat) await recordInboundTextAlert({ customer, From, MessageSid, Body: message });
   } catch (e) {
-    logger.error(`[twilio-webhook] consumed-text bell failed: ${e.code || e.name || 'error'}`);
+    logger.error(`[twilio-webhook] consumed-text bell failed: ${e.code || e.name}`);
   }
 }
 

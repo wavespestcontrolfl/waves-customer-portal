@@ -56,6 +56,8 @@ jest.mock('../models/db', () => {
   };
   return db;
 });
+const mockFindOnly = jest.fn();
+jest.mock('../utils/known-caller-phone', () => ({ findOnlyKnownCallerCustomer: (...a) => mockFindOnly(...a) }));
 const mockSend = jest.fn();
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSend(...a) }));
 
@@ -76,6 +78,7 @@ beforeEach(() => {
   mockGates.mailHomePageLive.mockReturnValue(true);
   mockGates.mailHomeTextBookLive.mockReturnValue(true);
   Object.assign(mockState, { homes: [{ ...HOME }], claims: [], deleted: [], prospectQueries: 0, claimTxns: 0, lock: Promise.resolve() });
+  mockFindOnly.mockResolvedValue(null);
   mockSend.mockResolvedValue({ ...SENT });
 });
 
@@ -184,6 +187,27 @@ describe('handleHomeTextToBook', () => {
     const notCalled = jest.fn(async () => true);
     await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: 'thanks!', standAside: notCalled });
     expect(notCalled).not.toHaveBeenCalled();
+  });
+
+  test('a number that is a secondary or service-contact phone of ONE customer: that customer\'s consent is read', async () => {
+    mockFindOnly.mockResolvedValue({ id: 'cust-9' });
+    expect((await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', knownContact: true })).handled).toBe(true);
+    expect(mockSend.mock.calls[0][0]).toMatchObject({ customerId: 'cust-9', identityTrustLevel: 'phone_matches_customer' });
+  });
+
+  test('a known contact that cannot be pinned to one customer (two owners, or a failed read): no claim, no reply', async () => {
+    mockFindOnly.mockResolvedValue(null);
+    expect(await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', knownContact: true })).toEqual({ handled: false });
+    mockFindOnly.mockRejectedValue(new Error('db down'));
+    expect(await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', knownContact: true })).toEqual({ handled: false });
+    expect(mockState.claimTxns).toBe(0);
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  test('the webhook\'s own customer match wins: no second lookup', async () => {
+    await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer: { id: 'cust-1' }, knownContact: true });
+    expect(mockFindOnly).not.toHaveBeenCalled();
+    expect(mockSend.mock.calls[0][0].customerId).toBe('cust-1');
   });
 
   test('every office location line answers from itself', async () => {
@@ -340,12 +364,12 @@ describe('handleHomeTextToBook', () => {
     expect(mockState.claims).toHaveLength(0);
   });
 
-  test('a send that threw with no outcome keeps the claim, is not handled and is not retried', async () => {
+  test('a send that threw with no outcome may have gone: the claim stays, the text is handled, nothing is retried', async () => {
     mockSend.mockRejectedValue(Object.assign(new Error('boom 101 Example Trl +12025550101'), { code: 'ECONNRESET' }));
-    expect(await text('101 EXAMPLE')).toEqual({ handled: false });
+    expect(await text('101 EXAMPLE')).toEqual({ handled: true, prospectId: 'prospect-1' });
     expect(mockSend).toHaveBeenCalledTimes(1);
     expect(mockState.claims).toHaveLength(1);
-    expect(await text('101 EXAMPLE')).toEqual({ handled: false });
+    expect(await text('101 EXAMPLE')).toEqual({ handled: false }); // the claim holds the repeat
     expect(mockSend).toHaveBeenCalledTimes(1);
   });
 
