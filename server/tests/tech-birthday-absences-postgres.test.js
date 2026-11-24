@@ -90,6 +90,7 @@ postgres('technician days off (real Postgres, rolled back)', () => {
     t.twice = await makeTech('Synthetic Twice', { dob: '1988-04-10' });
     t.noDob = await makeTech('Synthetic NoDob');
     t.inactive = await makeTech('Synthetic Former', { dob: '1985-03-05', status: 'inactive' });
+    t.office = await makeTech('Synthetic Office Staff', { dob: '1987-03-05', role: 'admin', field_dispatchable: false, employment_type: 'w2' });
     t.leap = await makeTech('Synthetic Leap', { dob: '1992-02-29' });
     t.sick = await makeTech('Synthetic Sick', { dob: '1991-03-05' });
     t.cleared = await makeTech('Synthetic Cleared', { dob: '1993-03-05' });
@@ -116,6 +117,7 @@ postgres('technician days off (real Postgres, rolled back)', () => {
     expect(await dates(t.leap.id)).toEqual(['2031-02-28']);
     expect(await rowsFor(t.noDob.id)).toEqual([]);
     expect(await rowsFor(t.inactive.id)).toEqual([]);
+    expect(await rowsFor(t.office.id)).toEqual([]); // office staff and admins are not field-dispatchable
     const [row] = await rowsFor(t.plain.id);
     expect(row).toMatchObject({ reason: 'other', note: null, created_by: null, cleared_at: null, redistribution: null });
     // the pay half is dark: nothing reaches payroll

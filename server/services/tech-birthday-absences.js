@@ -23,7 +23,8 @@
  *   - reason is the existing generic 'other' (tech-out's own list: sick, emergency,
  *     no_show, other), with no note, so the tech-out screens and alert cards show a
  *     plain "other" and no wording about why. Logs say "days off" only.
- *   - Inactive and prospective technicians, and a NULL dob, get nothing. A row
+ *   - Inactive and prospective technicians, office staff and admins (not field-dispatchable), and a NULL dob,
+ *     get nothing. A row
  *     already written stays if a dob later changes; the office clears it in the
  *     tech-out screen.
  *   - Idempotent: a second tick the same day writes nothing.
@@ -106,6 +107,13 @@ async function recordPaidDay(conn, tech, date) {
   if (tech.employment_type !== 'w2') return 'skipped';
   return conn.transaction(async (trx) => {
     await lockTechDays(trx, [{ techId: tech.id, date }]);
+    // The roster was read at the start of the pass: read the technician again, so a deactivation, a change of
+    // employment or a corrected date of birth since then pays nothing. A plain read, not a row lock: payroll
+    // settings take the payroll lock and then this row, so holding the row first would invert that order.
+    const current = await trx('technicians').where({ id: tech.id })
+      .first('employment_status', 'field_dispatchable', 'employment_type', trx.raw("to_char(dob, 'YYYY-MM-DD') AS dob"));
+    if (!current || current.employment_status !== 'active' || current.field_dispatchable !== true || current.employment_type !== 'w2'
+      || birthdayDateInYear(current.dob, Number(date.slice(0, 4))) !== date) return 'skipped';
     const open = await trx('technician_absences').where({ technician_id: tech.id, absence_date: date }).whereNull('cleared_at').first('id');
     if (!open) return 'skipped';
     if (await trx('payroll_time_off').where({ technician_id: tech.id, work_date: date }).first('id')) return 'skipped';
@@ -172,7 +180,8 @@ async function syncTechDaysOff({ now, conn = db, horizonDays = HORIZON_DAYS, tec
   const today = etDateString(instant);
   const horizon = etDateString(addETDays(instant, horizonDays));
   const catchUpFrom = etDateString(addETDays(instant, -CATCH_UP_DAYS));
-  const query = conn('technicians').where('employment_status', 'active').whereNotNull('dob');
+  // The assignment rule (technician-eligibility.js): active and field-dispatchable. Office staff and admins have none.
+  const query = conn('technicians').where('employment_status', 'active').where('field_dispatchable', true).whereNotNull('dob');
   if (Array.isArray(technicianIds)) query.whereIn('id', technicianIds);
   const techs = await query.select('id', 'employment_type', conn.raw("to_char(dob, 'YYYY-MM-DD') AS dob"));
   const payLive = require('../config/feature-gates').techBirthdayPayLive();

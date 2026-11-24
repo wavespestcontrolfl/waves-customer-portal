@@ -216,6 +216,10 @@ describe('the pay half (GATE_TECH_BIRTHDAY_PAY)', () => {
           }
           if (table === 'payroll_time_off') return timeOff.find((r) => r.technician_id === filter.technician_id && r.work_date === filter.work_date);
           if (table === 'audit_log') return audit.find((r) => r.technician_id === raw[0] && r.work_date === raw[1]);
+          if (table === 'technicians') {
+            const row = techs.find((x) => x.id === filter.id);
+            return row && { employment_status: 'active', field_dispatchable: true, ...row };
+          }
           return undefined;
         }),
       };
@@ -294,6 +298,35 @@ describe('the pay half (GATE_TECH_BIRTHDAY_PAY)', () => {
     const out = await syncTechDaysOff({ now: NOW, conn });
     expect(out).toMatchObject({ paid: 0, paySkipped: 1 });
     expect(createTimeOff).not.toHaveBeenCalled();
+  });
+
+  test('a technician who changed since the roster was read pays nothing: deactivated, office staff, or a corrected date of birth', async () => {
+    for (const change of [{ employment_status: 'inactive' }, { field_dispatchable: false }, { dob: '1990-11-25' }, { employment_type: '1099' }]) {
+      const { conn } = conn2({ techs: [w2()] });
+      // the pass reads the roster once, then the pay transaction reads the row again
+      let reads = 0;
+      const base = conn.getMockImplementation();
+      conn.mockImplementation((table) => {
+        const q = base(table);
+        if (table === 'technicians') {
+          const select = q.select;
+          const first = q.first;
+          q.select = jest.fn(async (...a) => { reads += 1; return select(...a); });
+          q.first = jest.fn(async (...a) => ({ ...(await first(...a)), ...change }));
+        }
+        return q;
+      });
+      const out = await syncTechDaysOff({ now: NOW, conn });
+      expect(out).toMatchObject({ paid: 0, paySkipped: 1 });
+      expect(reads).toBe(1);
+    }
+    expect(createTimeOff).not.toHaveBeenCalled();
+  });
+
+  test('the roster read takes only field-dispatchable active technicians (office staff and admins get no days off)', async () => {
+    const { conn } = conn2({ techs: [] });
+    await syncTechDaysOff({ now: NOW, conn });
+    expect(conn.mock.results[0].value.where).toHaveBeenCalledWith('field_dispatchable', true);
   });
 
   test('a cleared absence row pays nothing, and neither does a technician who is not W-2', async () => {
