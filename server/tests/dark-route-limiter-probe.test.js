@@ -204,28 +204,7 @@ function loadApp(value) {
 
 const GLOBAL = 'the global /api/ limiter counts the dark request before the gate answers; needs an index.js PreGuard or an earlier gate.';
 const BOTH = 'the global /api/ limiter and the route\'s own limiter both count the dark request before the gate answers.';
-const KNOWN = {
-  'GET /api/integrations/commitments-worker/open': GLOBAL,
-  'GET /api/integrations/watchdog-worker/status': GLOBAL,
-  'GET /api/photo-id/': GLOBAL,
-  'GET /api/photo-id/:type/:id': GLOBAL,
-  'PATCH /api/admin/roof-entry-read/:id/tech-count': GLOBAL,
-  'POST /api/admin/roof-entry-read/': GLOBAL,
-  'POST /api/estimates/:token/change-request': GLOBAL,
-  'POST /api/estimates/:token/extension-request': GLOBAL,
-  'POST /api/estimates/:token/measurement-review': GLOBAL,
-  'POST /api/estimates/:token/promo-code': GLOBAL,
-  'POST /api/estimates/:token/referral-link': GLOBAL,
-  'POST /api/pay/:token/plan-choice': GLOBAL,
-  'POST /api/photo-id/:type': GLOBAL,
-  'POST /api/public/experiments/exposure': GLOBAL,
-  'PUT /api/estimates/:token/service-opt-out': GLOBAL,
-  'GET /api/estimates/:token/service-details/:serviceKey/pdf': BOTH,
-  'GET /api/estimates/:token/warranty-comparison/pdf': BOTH,
-  'POST /api/estimates/:token/service-details/send': BOTH,
-  'POST /api/pay/:token/promo-code': BOTH,
-  'POST /api/public/secure-card/:token/select-plan': BOTH,
-};
+const KNOWN = {};
 
 describe('dark routes answer 404 before any limiter (real app)', () => {
   test('every violation on main is listed, and every listed one still exists', async () => {

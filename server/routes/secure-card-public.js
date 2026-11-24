@@ -54,6 +54,10 @@ router.use(rateLimit({
   max: 60,
   standardHeaders: true,
   legacyHeaders: false,
+  // A dark POST /:token/select-plan (GATE_SECURE_PLAN_CHOICE off) is answered by server/index.js before the global limiter;
+  // skip it here too, so a probe never sees a revealing 429 or spends the quota of the live routes.
+  skip: (req) => req.method === 'POST' && /^\/[^/]+\/select-plan\/?$/i.test(req.path)
+    && !require('../config/feature-gates').isEnabled('securePlanChoice'),
   message: { error: 'Too many requests. Please try again in a minute.' },
 }));
 
