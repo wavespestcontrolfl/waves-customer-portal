@@ -53,6 +53,8 @@ const transcriptWith = (choice) => (choice
 
 describeDb('phone-yes bell (PostgreSQL)', () => {
   let database; let trx;
+  // True once beforeAll has turned autovacuum off for `services` (the CI database only).
+  let autovacuumOff = false;
 
   beforeAll(async () => {
     const url = new URL(process.env.DATABASE_URL);
@@ -62,14 +64,19 @@ describeDb('phone-yes bell (PostgreSQL)', () => {
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
     // The ring takes the catalog lock without waiting (holdCardRows: LOCK TABLE services IN SHARE MODE NOWAIT), and a
     // VACUUM or ANALYZE of `services` holds a lock that refuses it (SHARE UPDATE EXCLUSIVE). Other suites leave dead rows
-    // in `services`, so autovacuum reaches it at random times, and a ring this suite expects then rang nothing (CI
-    // 2026-11-21 and 2026-11-24). So autovacuum skips `services` while this suite runs, and afterAll turns it back on.
-    // An autovacuum already running makes this ALTER wait, and PostgreSQL cancels it after deadlock_timeout.
-    await database.raw('ALTER TABLE services SET (autovacuum_enabled = false)');
+    // in `services`, so in CI autovacuum reaches it at random times, and a ring this suite expects then rang nothing
+    // (CI 2026-11-21 and 2026-11-24). So on the CI database, autovacuum skips `services` while this suite runs, and
+    // afterAll turns it back on; an autovacuum already running makes the ALTER wait, and PostgreSQL cancels it after
+    // deadlock_timeout. The CI database only: each job migrates a new one (no migration sets an option on `services`)
+    // and discards it after the job, so the setting cannot outlive it. A private QA database is left as it is.
+    if (ciTest) {
+      await database.raw('ALTER TABLE services SET (autovacuum_enabled = false)');
+      autovacuumOff = true;
+    }
   });
   afterAll(async () => {
     try {
-      await database.raw('ALTER TABLE services RESET (autovacuum_enabled)');
+      if (autovacuumOff) await database.raw('ALTER TABLE services RESET (autovacuum_enabled)');
     } finally {
       await database.destroy();
     }
