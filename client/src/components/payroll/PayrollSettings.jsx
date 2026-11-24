@@ -509,19 +509,20 @@ export default function PayrollSettings() {
             <TD>{payMethodLabel(tech)}</TD>
             <TD><W4Summary w4={tech.currentW4} /></TD>
             <TD><SimpleSummary election={tech.currentSimple} /></TD>
-            {showAllowance && <TD><AllowanceCell key={`${tech.id}:${tech.ptoHoursPerYear}`} technician={tech} onSaved={saved} /></TD>}
+            {/* A person who is not W-2 now is listed only to clear a minimum: no W-2 setting or action on the row. */}
+            {showAllowance && <TD>{!tech.notW2 && <AllowanceCell key={`${tech.id}:${tech.ptoHoursPerYear}`} technician={tech} onSaved={saved} />}</TD>}
             {showAllowance && <TD><WeekMinimumCell key={`${tech.id}:${tech.paidWeekMinimumHours}:${tech.paidWeekMinimumLastDay}`} technician={tech} onSaved={saved} /></TD>}
-            {showCoverage && <TD><CoverageCell key={`${tech.id}:${tech.flsaOvertimeCovered}`} technician={tech} onSaved={saved} /></TD>}
-            {showFamily && <TD><FamilyCell key={`${tech.id}:${JSON.stringify(tech.familyEmployment)}`} technician={tech} onSaved={saved} /></TD>}
-            {showMercury && <TD><MercuryRecipientCell key={`${tech.id}:${tech.mercuryRecipientId}`} technician={tech} onSaved={saved} /></TD>}
+            {showCoverage && <TD>{!tech.notW2 && <CoverageCell key={`${tech.id}:${tech.flsaOvertimeCovered}`} technician={tech} onSaved={saved} />}</TD>}
+            {showFamily && <TD>{!tech.notW2 && <FamilyCell key={`${tech.id}:${JSON.stringify(tech.familyEmployment)}`} technician={tech} onSaved={saved} />}</TD>}
+            {showMercury && <TD>{!tech.notW2 && <MercuryRecipientCell key={`${tech.id}:${tech.mercuryRecipientId}`} technician={tech} onSaved={saved} />}</TD>}
             <TD>
-              <div className="flex flex-wrap gap-2">
+              {!tech.notW2 && <div className="flex flex-wrap gap-2">
                 <Button onClick={() => setDialog({ kind: 'w4', tech })}>Enter W-4</Button>
                 <Button variant="secondary" onClick={() => setDialog({ kind: 'history', tech })}>History</Button>
                 <SimpleIraButton call={call} technician={tech} onSaved={saved} />
                 <RateStepsButton call={call} technician={tech} onSaved={saved} />
                 <Button variant="secondary" onClick={() => setDialog({ kind: 'pay', tech })}>Pay method</Button>
-              </div>
+              </div>}
             </TD>
           </TR>)}
         </TBody>

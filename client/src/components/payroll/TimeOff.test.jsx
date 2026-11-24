@@ -393,6 +393,19 @@ describe('Time off in the pay run table and stub', () => {
     await waitFor(() => expect(calls.find(c => c.path === '/admin/payroll/technicians/tech-b/week-minimum')).toMatchObject({ method: 'PUT', body: { hours: '40', lastDay: '2026-10-14' } }));
   });
 
+  it('shows a person who is no longer W-2 with the minimum only, and no W-2 action', async () => {
+    const original = adminFetch.getMockImplementation();
+    adminFetch.mockImplementation((path, options = {}) => {
+      if (TECH_LIST.includes(path)) return reply({ technicians: TECHS.map(tech => ({ ...tech, paidWeekMinimumHours: 40, paidWeekMinimumLastDay: null, ...(tech.id === 'tech-b' ? { notW2: true } : {}) })) });
+      return original(path, options);
+    });
+    render(<PayrollSettings />);
+    const row = (await screen.findByText('Not W-2 now: clear the minimum')).closest('tr');
+    expect(within(row).getByLabelText('Minimum paid hours a week for Sample Beta')).toBeInTheDocument();
+    expect(within(row).queryByRole('button', { name: 'Enter W-4' })).toBeNull();
+    expect(within(row).queryByLabelText('Paid time off hours per year for Sample Beta')).toBeNull();
+  });
+
   it('does not send a last day typed and then hidden by clearing the hours', async () => {
     const original = adminFetch.getMockImplementation();
     adminFetch.mockImplementation((path, options = {}) => {
