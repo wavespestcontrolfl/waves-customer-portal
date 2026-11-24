@@ -25,13 +25,22 @@ const { randomUUID } = require('node:crypto');
 const db = require('../models/db');
 const constructionMigration = require('../models/migrations/20260813000031_construction_permit_records');
 const mailMigration = require('../models/migrations/20261122160000_mail_prospects');
+const priceMigration = require('../models/migrations/20261122200000_mail_prospects_home_price');
+const attemptsMigration = require('../models/migrations/20261122200100_mail_prospects_price_attempts');
+const tokenMigration = require('../models/migrations/20261123200000_mail_prospects_page_token');
+const slugMigration = require('../models/migrations/20261124040000_mail_prospects_page_slug');
 const {
-  findBySourceRefs, newHomePermitsForParcels, addressKnownToWaves, saveProspect,
+  findBySourceRefs, newHomePermitsForParcels, addressKnownToWaves, saveProspect, assignPageSlug, backfillPageSlugs,
 } = require('../services/mail/prospect-store');
 const { monthsAgoIso } = require('../services/property-lookup/manatee-permit-sync');
 const { runNewHomeList, daysToRead, holdBack, LIST_KEY } = require('../services/mail/new-home-list');
 
 jest.setTimeout(60000);
+
+// The table as production has it: the first migration and every one that adds a column (saveProspect writes the page slug).
+async function migrateMailProspects(conn) {
+  for (const migration of [mailMigration, priceMigration, attemptsMigration, tokenMigration, slugMigration]) await migration.up(conn);
+}
 
 postgres('mail prospect store on PostgreSQL', () => {
   const schema = `mail_prospects_${randomUUID().replaceAll('-', '')}`;
@@ -63,7 +72,7 @@ postgres('mail prospect store on PostgreSQL', () => {
     db.connection = conn;
     await conn.raw('CREATE EXTENSION IF NOT EXISTS pgcrypto').catch(() => {});
     await constructionMigration.up(conn);
-    await mailMigration.up(conn);
+    await migrateMailProspects(conn);
     // Only the two columns the known-address read uses; the real table is far larger.
     await conn.schema.createTable('customers', (t) => {
       t.increments('id');
@@ -121,7 +130,7 @@ postgres('mail prospect store on PostgreSQL', () => {
     await mailMigration.up(conn); // second run: no-op
     await mailMigration.down(conn);
     expect(await conn.schema.hasTable('mail_prospects')).toBe(false);
-    await mailMigration.up(conn);
+    await migrateMailProspects(conn);
     expect(await conn.schema.hasTable('mail_prospects')).toBe(true);
   });
 
@@ -296,6 +305,135 @@ postgres('mail prospect store on PostgreSQL', () => {
       expect((await saveProspect(prospect('202699000003'), trx)).status).toBe('unmatched');
     });
     expect(await conn('mail_prospects').count('* as n').first()).toMatchObject({ n: '3' });
+  });
+
+  describe('page slug (the short typed address on the postcard)', () => {
+    const slugOf = async (ref) => (await conn('mail_prospects').where({ source_ref: ref }).first('page_slug')).page_slug;
+    const home = (ref, pin, address, zip = '34212', extra = {}) => live(ref, pin, { address_line1: address, zip, ...extra });
+
+    test('migration: the column, the partial unique index and the shape CHECK; a clean down and a second up', async () => {
+      const idx = (await conn.raw('SELECT indexdef FROM pg_indexes WHERE schemaname = ? AND indexname = ?', [schema, 'mail_prospects_page_slug_uniq'])).rows;
+      expect(idx[0].indexdef).toMatch(/UNIQUE.*page_slug.*WHERE/);
+      await saveProspect(home('202699000001', '5133090590', '101 EXAMPLE TRL'));
+      for (const bad of ['101', 'example', '101-Example', '101--example', '-101-example', '101-example-', '101_example']) {
+        await expect(conn('mail_prospects').where({ source_ref: '202699000001' }).update({ page_slug: bad })).rejects.toMatchObject({ code: '23514' });
+      }
+      await conn('mail_prospects').where({ source_ref: '202699000001' }).update({ page_slug: null }); // NULL is allowed
+      await saveProspect(home('202699000002', '6000000060', '102 EXAMPLE TRL', '34212', { status: 'held_back' }));
+      await conn('mail_prospects').update({ page_slug: null });
+      await conn('mail_prospects').where({ source_ref: '202699000001' }).update({ page_slug: '101-example' });
+      await expect(conn('mail_prospects').where({ source_ref: '202699000002' }).update({ page_slug: '101-example' })).rejects.toMatchObject({ code: '23505' });
+      await slugMigration.up(conn); // second run: no-op
+      await conn('mail_prospects').update({ page_slug: null }); // a clean rollback: no slug assigned yet
+      await conn.transaction((trx) => slugMigration.down(trx));
+      expect(await conn.schema.hasColumn('mail_prospects', 'page_slug')).toBe(false);
+      await conn.transaction((trx) => slugMigration.down(trx)); // down twice: no-op
+      await slugMigration.up(conn);
+      expect(await conn.schema.hasColumn('mail_prospects', 'page_slug')).toBe(true);
+    });
+
+    test('a live home gets its slug in the save: the street name without its type, for eligible and held_back alike', async () => {
+      await saveProspect(home('202699000001', '5133090590', '101 EXAMPLE TRL'));
+      await saveProspect(home('202699000002', '6000000060', '4512 N RIVER OAKS DR', '34212', { status: 'held_back' }));
+      expect(await slugOf('202699000001')).toBe('101-example');
+      expect(await slugOf('202699000002')).toBe('4512-n-river-oaks');
+    });
+
+    test('the other statuses and the other lists get none', async () => {
+      await saveProspect(prospect('202699000001', { address_line1: '101 EXAMPLE TRL' })); // unmatched
+      await saveProspect(prospect('202699000002', { status: 'not_eligible', reason: 'company_buyer', address_line1: '102 EXAMPLE TRL' }));
+      await saveProspect(home('202699000003', '5133090590', '103 EXAMPLE TRL', '34212', { list_key: 'other_list' }));
+      for (const ref of ['202699000001', '202699000002', '202699000003']) expect(await slugOf(ref)).toBeNull();
+    });
+
+    test('a slug is given once and never changes: a second save, a changed address and a new price run keep it', async () => {
+      await saveProspect(home('202699000001', '5133090590', '101 EXAMPLE TRL'));
+      expect(await slugOf('202699000001')).toBe('101-example');
+      await saveProspect(home('202699000001', '5133090590', '101 EXAMPLE TRL'));
+      await saveProspect(home('202699000001', '5133090590', '999 OTHER ST'));
+      expect(await slugOf('202699000001')).toBe('101-example');
+      const row = await conn('mail_prospects').where({ source_ref: '202699000001' }).first('id');
+      expect(await assignPageSlug(row.id)).toBe('101-example');
+      expect(await slugOf('202699000001')).toBe('101-example');
+    });
+
+    test('a clash: the second home takes the ZIP form, a third with the same ZIP too has none, and none ever moves', async () => {
+      await saveProspect(home('202699000001', '5133090590', '101 EXAMPLE TRL', '34212'));
+      await saveProspect(home('202699000002', '6000000060', '101 EXAMPLE DR', '34211'));
+      await saveProspect(home('202699000003', '7000000070', '101 EXAMPLE CT', '34211'));
+      expect(await slugOf('202699000001')).toBe('101-example');
+      expect(await slugOf('202699000002')).toBe('101-example-34211');
+      expect(await slugOf('202699000003')).toBeNull(); // both forms are taken: the card prints the QR code only
+      // The save still worked, and a later save of the same home tries again without touching the others.
+      expect((await conn('mail_prospects').where({ source_ref: '202699000003' }).first('status')).status).toBe('eligible');
+      await saveProspect(home('202699000003', '7000000070', '101 EXAMPLE CT', '34211'));
+      expect(await slugOf('202699000003')).toBeNull();
+      expect(await slugOf('202699000001')).toBe('101-example');
+    });
+
+    test('the unique-index refusal (23505) is retried with the ZIP form without failing the save, also inside a caller transaction', async () => {
+      await saveProspect(home('202699000001', '5133090590', '101 EXAMPLE TRL', '34212'));
+      await conn.transaction(async (trx) => {
+        // Another run took the plain slug between the read and the write: here the table already holds it.
+        const saved = await saveProspect(home('202699000002', '6000000060', '101 EXAMPLE DR', '34212'), trx);
+        expect(saved).toEqual({ status: 'eligible', reason: null, written: true });
+        expect((await trx('mail_prospects').where({ source_ref: '202699000002' }).first('page_slug')).page_slug).toBe('101-example-34212');
+        // The transaction is alive after the refusal: it can still write.
+        expect((await saveProspect(prospect('202699000003'), trx)).status).toBe('unmatched');
+      });
+      expect(await slugOf('202699000002')).toBe('101-example-34212');
+    });
+
+    test('an address that gives no slug leaves NULL and does not fail the save', async () => {
+      expect((await saveProspect(home('202699000001', '5133090590', '12A EXAMPLE TRL'))).status).toBe('eligible');
+      expect(await slugOf('202699000001')).toBeNull();
+    });
+
+    test('a home that turns not_eligible keeps its slug, and the slug stays taken', async () => {
+      await saveProspect(home('202699000001', '5133090590', '101 EXAMPLE TRL'));
+      await saveProspect(prospect('202699000001', { status: 'not_eligible', reason: 'known_address' }));
+      expect(await slugOf('202699000001')).toBe('101-example');
+      await saveProspect(home('202699000002', '6000000060', '101 EXAMPLE DR', '34212'));
+      expect(await slugOf('202699000002')).toBe('101-example-34212');
+    });
+
+    test('assignPageSlug gives nothing for a row that is not live, or not there', async () => {
+      await saveProspect(prospect('202699000001', { address_line1: '101 EXAMPLE TRL' }));
+      const row = await conn('mail_prospects').where({ source_ref: '202699000001' }).first('id');
+      expect(await assignPageSlug(row.id)).toBeNull();
+      expect(await assignPageSlug('00000000-0000-4000-8000-000000000000')).toBeNull();
+    });
+
+    test('backfillPageSlugs gives the live homes with no slug theirs, oldest first, and counts what it did', async () => {
+      await saveProspect(home('202699000001', '5133090590', '101 EXAMPLE TRL', '34212'));
+      await saveProspect(home('202699000002', '6000000060', '101 EXAMPLE DR', '34212'));
+      await saveProspect(home('202699000003', '7000000070', '55 TESTER WAY', '34212'));
+      await saveProspect(home('202699000004', '8000000080', '12A EXAMPLE TRL', '34212'));
+      await saveProspect(home('202699000005', '9000000090', '101 EXAMPLE CT', '34212'));
+      await conn('mail_prospects').update({ page_slug: null }); // as before this feature
+      const first = await backfillPageSlugs({ limit: 3 });
+      expect(first).toMatchObject({ tried: 3, assigned: 3, withoutSlug: 0 });
+      expect(first.next).toEqual(expect.objectContaining({ id: expect.anything() }));
+      expect(await backfillPageSlugs()).toEqual({ tried: 2, assigned: 0, withoutSlug: 2, next: null });
+      expect(await slugOf('202699000001')).toBe('101-example');
+      expect(await slugOf('202699000002')).toBe('101-example-34212');
+      expect(await slugOf('202699000003')).toBe('55-tester');
+      expect(await slugOf('202699000004')).toBeNull();
+      expect(await slugOf('202699000005')).toBeNull();
+      expect(await backfillPageSlugs()).toEqual({ tried: 2, assigned: 0, withoutSlug: 2, next: null }); // nothing moves on a re-run
+      await expect(backfillPageSlugs({ limit: 0 })).rejects.toThrow(TypeError);
+      // The cursor walks past homes that can never get a slug: one row a batch still reaches the last one.
+      const one = await backfillPageSlugs({ limit: 1 });
+      expect(one).toMatchObject({ tried: 1, withoutSlug: 1 });
+      expect(await backfillPageSlugs({ limit: 1, after: one.next })).toMatchObject({ tried: 1, withoutSlug: 1 });
+    });
+
+    test('the migration refuses to roll back once a slug is assigned (slugs are printed on postcards)', async () => {
+      await saveProspect(home('202699000011', '5133090591', '77 EXAMPLE TRL', '34212'));
+      const migration = require('../models/migrations/20261124040000_mail_prospects_page_slug');
+      await expect(conn.transaction((trx) => migration.down(trx))).rejects.toThrow(/refusing to drop/);
+      expect(await slugOf('202699000011')).toBe('77-example');
+    });
   });
 
   test('findBySourceRefs reads by key and by list', async () => {

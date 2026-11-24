@@ -25,6 +25,7 @@ const journeys = [
   require('./journeys/completion-invoice-lineage'),
   require('./journeys/payment-webhook-settles-once'),
   require('./journeys/saved-card-charge-matches-shown-total'),
+  require('./journeys/refund-matches-entered-amount-once'),
   require('./journeys/prepayment-and-series-cancellation-race'),
   // Last: accepting an annual prepay enrolls the saved card in Auto Pay, which earlier journeys' invoices must not see.
   require('./journeys/prepay-at-booking-matches-quoted-total'),
