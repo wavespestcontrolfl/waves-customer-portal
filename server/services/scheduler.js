@@ -9242,6 +9242,14 @@ function initScheduledJobs() {
       }
       return;
     }
+    // Expired estimates whose customer booked later count as won. Own
+    // try/catch: a failure here must not stop expiration.
+    try {
+      const { reclaimExpiredConvertedEstimates } = require('./estimate-conversion-guard');
+      await reclaimExpiredConvertedEstimates();
+    } catch (err) {
+      logger.error(`Expired-estimate booked-won reclaim failed: ${err.message}`);
+    }
     logger.info('Running: Estimate expiration sweep');
     try {
       const { runEstimateExpiration } = require('./estimate-expiration');

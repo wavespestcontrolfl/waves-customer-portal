@@ -47,6 +47,8 @@ const logger = require('../services/logger');
 const {
   customerConvertedSince,
   archiveConvertedOpenEstimates,
+  reclaimExpiredConvertedEstimates,
+  BOOKED_WON_WINDOW_DAYS,
   excludePendingFirstBookings,
   NON_LIVE_APPOINTMENT_STATUSES,
 } = require('../services/estimate-conversion-guard');
@@ -66,7 +68,7 @@ function makeBuilder(table, cfg = {}, calls = []) {
   for (const m of [
     'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereNot',
     'whereRaw', 'select', 'from', 'groupBy', 'max', 'as', 'join', 'andWhere',
-    'orWhereNull', 'leftJoin',
+    'orWhereNull', 'orWhereIn', 'leftJoin',
   ]) {
     b[m] = jest.fn(record(m));
   }
@@ -492,6 +494,57 @@ describe('archiveConvertedOpenEstimates', () => {
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringContaining('nothing to archive'),
     );
+  });
+});
+
+describe('reclaimExpiredConvertedEstimates', () => {
+  test('stamps the disposition only, scoped to expired un-archived rows, inside the 90-day window', async () => {
+    const calls = wireDb({ estimates: { returning: [{ id: 'est-9' }] } });
+    const res = await reclaimExpiredConvertedEstimates();
+    expect(res).toEqual({ reclaimed: 1, rows: [{ id: 'est-9' }] });
+    expect(BOOKED_WON_WINDOW_DAYS).toBe(90);
+
+    const est = (m) => calls.filter((c) => c.table === 'estimates' && c.m === m);
+    expect(est('where').find((c) => c.args[0] === 'status').args).toEqual(['status', 'expired']);
+    expect(est('whereNull').map((c) => c.args[0])).toEqual(
+      expect.arrayContaining(['archived_at', 'disposition', 'disposition_source']),
+    );
+    expect(est('whereNotNull').map((c) => c.args[0])).toEqual(
+      expect.arrayContaining(['customer_id', 'sent_at']),
+    );
+    // Only the system's own expiry classification may be replaced.
+    expect(est('orWhereIn')[0].args).toEqual(['disposition', ['expired_viewed', 'expired_unviewed']]);
+    expect(est('orWhere').find((c) => c.args[0] === 'disposition_source').args).toEqual(['disposition_source', 'system']);
+
+    // The shared signal helper carries the window on BOTH signal sources
+    // (paid invoice, completed visit): bound to sent_at, 90 days.
+    const windowed = calls.filter(
+      (c) => c.m === 'whereRaw' && /estimates\.sent_at \+ make_interval/.test(c.args[0]),
+    );
+    expect(windowed).toHaveLength(2);
+    windowed.forEach((c) => expect(c.args[1]).toEqual([90]));
+    // The same none-before helper as the open sweep runs.
+    expect(calls.filter((c) => c.m === 'whereNotExists').length).toBeGreaterThanOrEqual(5);
+
+    // Disposition + updated_at ONLY: status, archived_at, expires_at stay.
+    const update = calls.find((c) => c.m === 'update');
+    expect(Object.keys(update.args[0]).sort()).toEqual([
+      'disposition', 'disposition_at', 'disposition_source', 'updated_at',
+    ]);
+    expect(update.args[0]).toMatchObject({ disposition: 'converted_other_path', disposition_source: 'system' });
+  });
+
+  test('quiet run reclaims nothing and says so', async () => {
+    wireDb({ estimates: { returning: [] } });
+    const res = await reclaimExpiredConvertedEstimates();
+    expect(res.reclaimed).toBe(0);
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('nothing to reclaim'));
+  });
+
+  test('the open sweep stays un-windowed', async () => {
+    const calls = wireDb({ estimates: { returning: [] } });
+    await archiveConvertedOpenEstimates();
+    expect(calls.filter((c) => c.m === 'whereRaw' && /make_interval/.test(String(c.args[0])))).toHaveLength(0);
   });
 });
 

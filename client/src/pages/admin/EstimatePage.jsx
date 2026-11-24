@@ -520,6 +520,9 @@ function classifyEstimate(e) {
   // filter-count math in the pills.
   if (e.archivedAt) return "archived";
   if (e.status === "accepted") return "won";
+  // Expired, then the customer booked another way: a win, not a loss.
+  if (e.status === "expired" && e.disposition === "converted_other_path")
+    return "won";
   if (e.status === "declined" || e.status === "expired") return "lost";
   if (e.status === "draft" && (!e.monthlyTotal || e.monthlyTotal === 0))
     return "needs_estimate";

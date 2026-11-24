@@ -473,6 +473,31 @@ describe("PipelineAnalytics", () => {
     expect(screen.getByText("50%")).toBeInTheDocument();
   });
 
+  it("counts an expired offer whose customer booked another way as accepted, and keeps dead rows out", () => {
+    renderAnalytics({
+      estimates: [
+        estimate({ id: "won", status: "accepted", monthlyTotal: 40 }),
+        estimate({
+          id: "booked-late",
+          status: "expired",
+          expiresAt: daysAgo(30),
+          disposition: "converted_other_path",
+          monthlyTotal: 40,
+        }),
+        estimate({ id: "lost", status: "expired", expiresAt: daysAgo(3), disposition: "expired_viewed" }),
+        estimate({ id: "dead", status: "expired", expiresAt: daysAgo(3), disposition: "invalid_lead" }),
+      ],
+    });
+
+    // 2 of 3 counted (dead is out) → 67%; the booked-late row is named.
+    expect(screen.getByText("67%")).toBeInTheDocument();
+    expect(
+      screen.getByText("2 accepted of 3 resolved (incl. 1 booked another way)"),
+    ).toBeInTheDocument();
+    // MRR won stays accepted-only: one $40 offer, not two.
+    expect(screen.getByText("1 new accounts")).toBeInTheDocument();
+  });
+
   it("counts archived wins in MRR won but keeps them out of every other metric", () => {
     renderAnalytics({
       estimates: [

@@ -31,6 +31,10 @@
  *     signal (owner ruling 2026-09-08, assessment-booking.js): it is a free
  *     consultation, not a sale, so an estimate whose only completed visit is
  *     an assessment stays open.
+ *  3. reclaimExpiredConvertedEstimates() — the same classification for an
+ *     estimate that already EXPIRED before the customer converted (booked
+ *     late, paid late). Stamps the disposition only, so win/loss reports
+ *     count it as won; status and archive state stay as they were.
  */
 
 const db = require("../models/db");
@@ -100,14 +104,23 @@ async function customerConvertedSince(est) {
  * outreach but not for CLASSIFYING a conversion) — exported so the admin
  * archive route classifies with exactly the sweep's criteria.
  */
-function whereConversionEligibilitySignal(query) {
+function whereConversionEligibilitySignal(query, { withinDaysOfSent = null } = {}) {
+  // Optional window (the expired-estimate reclaim): the signal must land
+  // within N days of the estimate's sent_at. Judged on the same signal
+  // sources, so there is still ONE definition of "conversion signal".
+  const windowSql = (timeSql) =>
+    withinDaysOfSent == null
+      ? null
+      : [`${timeSql} <= estimates.sent_at + make_interval(days => ?)`, [withinDaysOfSent]];
   return query.where((q) =>
     q
       .whereExists(function () {
-        this.select(db.raw("1"))
+        const paid = this.select(db.raw("1"))
           .from("invoices")
           .whereRaw("invoices.customer_id = estimates.customer_id")
           .where("invoices.status", "paid");
+        const w = windowSql("COALESCE(invoices.paid_at, invoices.created_at)");
+        if (w) paid.whereRaw(...w);
       })
       .orWhereExists(function () {
         // status='completed' alone is the signal — legacy rows (pre
@@ -129,6 +142,10 @@ function whereConversionEligibilitySignal(query) {
           .leftJoin("services", "services.id", "scheduled_services.service_id")
           .whereRaw("scheduled_services.customer_id = estimates.customer_id")
           .where("scheduled_services.status", "completed");
+        const w = windowSql(
+          "COALESCE(scheduled_services.completed_at, scheduled_services.scheduled_date::timestamp AT TIME ZONE 'America/New_York')",
+        );
+        if (w) completedVisit.whereRaw(...w);
         excludeAssessmentBookings(completedVisit);
       }),
   );
@@ -318,15 +335,68 @@ async function archiveConvertedOpenEstimates() {
   return { archived: archived.length, rows: archived };
 }
 
+// How long after the estimate went out a first conversion still counts as
+// "this estimate's customer booked" (owner 2026-11-24). Past it the sale is
+// not credited to the estimate. Prod read 11-24: 9 of 10 candidates fell
+// inside 90 days.
+const BOOKED_WON_WINDOW_DAYS = 90;
+
+// Expired estimates whose customer's first-ever paid invoice or completed
+// visit landed within BOOKED_WON_WINDOW_DAYS of sent_at, with no conversion
+// evidence predating the estimate (same two helpers as the open sweep).
+// Only the system's own expiry classification (or none) may be replaced:
+// a staff reason or a customer decline is never overwritten.
+function expiredConvertedEstimatesQuery() {
+  return db("estimates")
+    .where("status", "expired")
+    .whereNull("archived_at")
+    .whereNotNull("customer_id")
+    .whereNotNull("sent_at")
+    .where((q) =>
+      q.whereNull("disposition").orWhereIn("disposition", ["expired_viewed", "expired_unviewed"]),
+    )
+    .where((q) => q.whereNull("disposition_source").orWhere("disposition_source", "system"))
+    .modify(whereConversionEligibilitySignal, { withinDaysOfSent: BOOKED_WON_WINDOW_DAYS })
+    .modify(whereNoConversionBeforeEstimate);
+}
+
+/**
+ * Daily pass after the archive sweep: an estimate that expired before its
+ * customer converted is a WIN routed around the estimate, so win/loss
+ * reports count it as won (group 'won_elsewhere'). Stamps the disposition
+ * only: status, archived_at, expires_at and deposits stay untouched, and
+ * nothing is sent to the customer. One set-based UPDATE on estimates; it
+ * never row-locks visits or invoices.
+ */
+async function reclaimExpiredConvertedEstimates() {
+  const now = new Date();
+  const rows = await expiredConvertedEstimatesQuery()
+    .update({
+      disposition: "converted_other_path",
+      disposition_source: "system",
+      disposition_at: now,
+      updated_at: now,
+    })
+    .returning(["id"]);
+  const reclaimed = Array.isArray(rows) ? rows : [];
+  logger.info(
+    reclaimed.length > 0
+      ? `[est-conversion-guard] Reclaimed ${reclaimed.length} expired estimate(s) as booked another way: ${reclaimed.map((r) => r.id).join(", ")}`
+      : "[est-conversion-guard] Expired reclaim: nothing to reclaim",
+  );
+  return { reclaimed: reclaimed.length, rows: reclaimed };
+}
+
 /**
  * Expiration hold (knex `.modify` helper for the expiration worker's
  * `estimates` queries): keep an estimate out of the daily expiration flips
  * while the customer's FIRST booking is still pending. Booking suppresses
  * follow-ups (customerConvertedSince) but the archive sweep above waits for
  * a completion/payment, so a visit scheduled beyond ESTIMATE_EXPIRATION_DAYS
- * would otherwise flip to `expired` mid-courtship — and the sweep's
- * sent/viewed filter can never reclaim an expired row, so the booked
- * conversion would be counted lost forever.
+ * would otherwise flip to `expired` mid-courtship — and the archive
+ * sweep's sent/viewed filter can never archive an expired row (the expired
+ * reclaim below only stamps it as won, so a late conversion is not counted
+ * lost).
  *
  * Self-resolving, never a permanent park: the visit completes → the sweep
  * (which runs BEFORE expiration in the 6am chain) archives the estimate;
@@ -358,6 +428,9 @@ function excludePendingFirstBookings(query) {
 
 module.exports = {
   convertedOpenEstimatesQuery,
+  expiredConvertedEstimatesQuery,
+  reclaimExpiredConvertedEstimates,
+  BOOKED_WON_WINDOW_DAYS,
   customerConvertedSince,
   whereConversionEligibilitySignal,
   whereNoConversionBeforeEstimate,

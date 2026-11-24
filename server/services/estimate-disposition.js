@@ -13,8 +13,9 @@
  *     expired_unviewed      sweep expired it and the customer NEVER opened it
  *     expired_viewed        sweep expired it after at least one real open
  *     archived_unresolved   staff archived a live sent/viewed row w/o a reason
- *     converted_other_path  converted-customer sweep archived it — the
- *                           customer bought some other way (a win, not a loss)
+ *     converted_other_path  converted-customer sweep archived it, or the daily
+ *                           expired-estimate reclaim stamped it — the customer
+ *                           bought some other way (counts as WON)
  *   staff-stamped (decline modal / pipeline action):
  *     declined_price, declined_competitor (+competitor name/price),
  *     declined_timing, not_needed, diy, invalid_lead, no_response,
@@ -28,7 +29,8 @@
 const DISPOSITIONS = [
   // group: how analytics buckets it. 'lost' counts against win rate,
   // 'dead' is removed from the denominator (never real demand), 'won_elsewhere'
-  // is excluded from loss rates (customer converted through another path).
+  // counts as WON in every win rate (customer converted through another path,
+  // including after the estimate expired).
   { code: 'expired_unviewed', label: 'Expired — never opened', group: 'lost', source: 'system' },
   { code: 'expired_viewed', label: 'Expired — opened, no decision', group: 'lost', source: 'system' },
   // Internal drafts age out too (every draft gets expires_at at creation) —

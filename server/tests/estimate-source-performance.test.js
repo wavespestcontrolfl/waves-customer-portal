@@ -115,6 +115,22 @@ describe('sourcePerformance', () => {
     expect(report.resolved).toBe(3);
   });
 
+  test('an expired estimate booked another way is a win in the source win rate; dead rows stay out', async () => {
+    mockQueues.estimates = [
+      [],
+      [
+        { id: 'w', source: 'estimator_engine', status: 'accepted', accepted_at: daysAgo(3), created_at: daysAgo(9) },
+        { id: 'late', source: 'estimator_engine', status: 'expired', expires_at: daysAgo(20), updated_at: daysAgo(1), created_at: daysAgo(30), disposition: 'converted_other_path' },
+        { id: 'lost', source: 'estimator_engine', status: 'expired', expires_at: daysAgo(5), updated_at: daysAgo(5), created_at: daysAgo(12), disposition: 'expired_viewed' },
+        { id: 'dead', source: 'estimator_engine', status: 'expired', expires_at: daysAgo(5), updated_at: daysAgo(5), created_at: daysAgo(12), disposition: 'invalid_lead' },
+      ],
+    ];
+    mockQueues.estimate_learning_events = [[]];
+    const engine = (await sourcePerformance({ days: 90 })).sources.find((s) => s.source === 'estimator_engine');
+    expect(engine).toMatchObject({ resolved: 3, won: 2 });
+    expect(engine.winRatePct).toBe(66.7);
+  });
+
   test('report click-mints count as sent ONLY on real delivery — never the publish-without-delivery stamp (audit on 65af7c027 P1)', async () => {
     const created = daysAgo(5);
     mockQueues.estimates = [

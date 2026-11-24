@@ -31,6 +31,7 @@ function LineRow({ line }) {
         {line.accepted != null && (
           <Sub>{fmtInt(line.accepted)}/{fmtInt(resolved)} resolved</Sub>
         )}
+        {line.booked_other_way > 0 && <Sub>incl. {fmtInt(line.booked_other_way)} booked another way</Sub>}
         {line.accepted != null && resolved > 0 && <SampleBadge n={resolved} />}
       </TD>
       <TD align="right" nums className="whitespace-nowrap text-ink-secondary">

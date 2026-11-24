@@ -1,7 +1,8 @@
 /**
  * Win/loss slicing by fieldVerifyFlags and price band (estimator backlog).
  *
- * Pins: resolved-only semantics (won = accepted, lost = declined/expired,
+ * Pins: resolved-only semantics (won = accepted or booked another way
+ * (disposition converted_other_path), lost = declined/expired,
  * resolution-date filter mirrors the client's fallback chain), dual
  * estimate_data shapes (engineRequest.profile vs engineInputs), flag
  * bucketing (presence / field / priority), price banding, and the
@@ -248,7 +249,7 @@ describe('winLossSlices — audit slices', () => {
   const lawnData = { result: { recurring: { tier: 'gold', services: [{ service: 'lawn', name: 'Lawn Care', mo: 48 }] } } };
   const wizardData = { engineResult: { waveGuard: { tier: 'silver' } } };
 
-  test('why-we-lose counts stamped dispositions and derives unstamped ones; dead/won-elsewhere leave the rates', async () => {
+  test('why-we-lose counts stamped dispositions and derives unstamped ones; dead leaves the rates', async () => {
     mockDbHandler = estimatesTable([
       row({ id: 'w', lead_source: 'Google', waveguard_tier: 'silver', estimate_data: lawnData }),
       row({ id: 'x', status: 'expired', accepted_at: null, expires_at: daysAgo(2), disposition: 'expired_unviewed', lead_source: 'google', service_interest: 'Pest Control' }),
@@ -263,14 +264,17 @@ describe('winLossSlices — audit slices', () => {
       row({ id: 'parked', status: 'viewed', accepted_at: null, archived_at: daysAgo(4), disposition: 'archived_unresolved', disposition_at: daysAgo(4) }),
       // Quote-wizard shape: tier persisted ONLY at engineResult.waveGuard.
       row({ id: 'wiz', status: 'expired', accepted_at: null, expires_at: daysAgo(1), estimate_data: wizardData, view_count: 1 }),
-      // Archived converted row (the conversion sweep's shape): listed, and
-      // COUNTED in excludedFromRates even though archived (GH codex P2).
+      // Archived converted row (the conversion sweep's shape): listed in
+      // "why we lose", out of the rates with every archived row. Since
+      // 2026-11-24 it is a win, so it no longer counts as excluded.
       row({ id: 'conv', status: 'sent', accepted_at: null, archived_at: daysAgo(3), disposition: 'converted_other_path', disposition_at: daysAgo(3) }),
     ]);
 
     const result = await winLossSlices({ days: 90 });
 
-    expect(result).toMatchObject({ resolved: 5, won: 1, lost: 4, winRatePct: 20, excludedFromRates: 2 });
+    // excludedFromRates was 2 (dead + archived converted row) before
+    // booked-another-way became a win; now only the dead lead is excluded.
+    expect(result).toMatchObject({ resolved: 5, won: 1, lost: 4, winRatePct: 20, excludedFromRates: 1, wonBookedOtherWay: 0 });
     // pctOfLosses denominator = group 'lost' only (4 here); the dead lead
     // is listed for visibility with a null percentage.
     expect(result.byDisposition).toEqual([
@@ -295,6 +299,45 @@ describe('winLossSlices — audit slices', () => {
     expect(result.byWaveguardTier.find((t) => t.key === 'silver')).toMatchObject({ label: 'Silver', won: 1, lost: 1, total: 2 });
     expect(result.byWaveguardTier.find((t) => t.key === 'gold')).toMatchObject({ label: 'Gold', lost: 1 });
     expect(result.byWaveguardTier.find((t) => t.key === 'none')).toMatchObject({ label: 'No bundle', total: 2 });
+  });
+
+  test('an expired estimate reclaimed as booked another way counts as won in both numerator and denominator; dead stays out', async () => {
+    mockDbHandler = estimatesTable([
+      row({ id: 'w' }),
+      row({ id: 'lost', status: 'expired', accepted_at: null, expires_at: daysAgo(3), disposition: 'expired_viewed' }),
+      // Expired 30 days ago, customer booked later; the daily pass stamped it.
+      row({ id: 'late', status: 'expired', accepted_at: null, expires_at: daysAgo(30), disposition: 'converted_other_path', disposition_at: daysAgo(1), updated_at: daysAgo(1), lead_source: 'google' }),
+      row({ id: 'dead', status: 'expired', accepted_at: null, expires_at: daysAgo(3), disposition: 'invalid_lead', lead_source: 'google' }),
+    ]);
+
+    const result = await winLossSlices({ days: 90 });
+
+    // 2 won (accepted + booked another way) of 3 counted; dead is out.
+    expect(result).toMatchObject({ resolved: 3, won: 2, lost: 1, winRatePct: 66.7, wonBookedOtherWay: 1, excludedFromRates: 1 });
+    expect(result.byLeadSource.find((s) => s.key === 'google')).toMatchObject({ won: 1, lost: 0, total: 1 });
+    // pctOfLosses still divides by real losses only (1 here).
+    expect(result.byDisposition.find((d) => d.code === 'expired_viewed')).toMatchObject({ pctOfLosses: 100 });
+    expect(result.byDisposition.find((d) => d.code === 'converted_other_path')).toMatchObject({ count: 1, pctOfLosses: null });
+  });
+
+  test('a reclaimed expired row resolves at its expiry, so the window it counts in never moves', () => {
+    expect(_private.resolutionDateMs({
+      status: 'expired', expires_at: '2026-09-01T00:00:00Z', disposition: 'converted_other_path',
+      disposition_at: '2026-11-20T00:00:00Z', updated_at: '2026-11-20T00:00:00Z', created_at: '2026-08-20T00:00:00Z',
+    })).toBe(Date.parse('2026-09-01T00:00:00Z'));
+  });
+
+  test('sent cohorts: a booked-after-expiry row reads lost until the booking, won after it', () => {
+    const cohorts = _private.sentCohorts([
+      row({
+        id: 'late', status: 'expired', accepted_at: null, sent_at: daysAgo(35), created_at: daysAgo(36),
+        expires_at: daysAgo(29), disposition: 'converted_other_path', disposition_at: daysAgo(20),
+      }),
+    ], { days: 30, nowMs: NOW }).cohorts;
+    const at = (m) => cohorts.find((c) => c.maturityDays === m);
+    expect(at(7)).toMatchObject({ sent: 1, won: 0, lost: 1 });
+    expect(at(14)).toMatchObject({ sent: 1, won: 0, lost: 1 });
+    expect(at(30)).toMatchObject({ sent: 1, won: 1, lost: 0, winRatePct: 100 });
   });
 
   test('sent cohorts: outcome as of N days after send, open offers counted, immature ages skipped', async () => {
@@ -487,7 +530,8 @@ describe('still-deciding signal (soft exit)', () => {
     };
     const out = await winLossSlices({ days: 30 });
     expect(activityCalls).toBe(1);
-    expect(out.stillDeciding).toEqual({ signaled: 3, wonAfter: 1, lostAfter: 1, expiredViewedAfter: 1 });
+    // wonAfter was 1 before booked-another-way became a win (e-elsewhere).
+    expect(out.stillDeciding).toEqual({ signaled: 3, wonAfter: 2, lostAfter: 1, expiredViewedAfter: 1 });
     // The disposition vocabulary is untouched — the signal is a side channel.
     expect(out.byDisposition.find((d) => d.code === 'expired_viewed').count).toBe(2);
   });
