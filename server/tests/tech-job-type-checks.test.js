@@ -17,7 +17,7 @@ const SERVICE_ID = '11111111-1111-4111-8111-111111111111';
 const SERVICE_ID_2 = '22222222-2222-4222-8222-222222222222';
 
 const {
-  CATALOG_CATEGORY_LINES, categoryForCatalogCategory, classifyServiceCategory,
+  CATALOG_CATEGORY_LINES, CATALOG_KEY_LINES, categoryForCatalogCategory, classifyServiceCategory, lineForCatalogRow,
 } = require('../services/auto-dispatch/service-category');
 const capabilities = require('../services/technician-capabilities');
 const { capabilityOffWarningsFor } = require('../services/technician-eligibility');
@@ -83,6 +83,49 @@ describe('the catalog category table (one table, shared with the service-line ma
     expect(require('../services/scheduling/line-technician').CATALOG_CATEGORY_LINES).toBe(CATALOG_CATEGORY_LINES);
   });
 
+  test('lineForCatalogRow: the key decides the rodent line; an unlisted rodent row is rodent only when its name says trapping or bait', () => {
+    // Owner 2026-11-21 (rodent jobs = A): the second technician takes trapping and bait stations. Sealing,
+    // sanitation, the rodent inspection, dead-rodent removal and the general first visit are the owner's line.
+    const keysOf = (line) => Object.keys(CATALOG_KEY_LINES).filter((key) => CATALOG_KEY_LINES[key] === line).sort();
+    expect(keysOf('exclusion')).toEqual([
+      'rodent_bird_box', 'rodent_dead_animal_removal', 'rodent_exclusion', 'rodent_exclusion_only', 'rodent_general_one_time',
+      'rodent_inspection', 'rodent_sanitation_heavy', 'rodent_sanitation_light', 'rodent_sanitation_standard',
+      'rodent_trapping_exclusion', 'rodent_trapping_exclusion_sanitation', 'rodent_trapping_sanitation', 'rodent_wire_mesh',
+    ]);
+    expect(keysOf('rodent')).toEqual([
+      'rodent_bait_quarterly', 'rodent_bait_setup', 'rodent_monitoring', 'rodent_trap_check_additional', 'rodent_trapping',
+      'rodent_trapping_followup', 'trap_only_retainer_monthly', 'trap_only_retainer_plus', 'trap_only_retainer_standard',
+    ]);
+    expect(new Set(Object.values(CATALOG_KEY_LINES))).toEqual(new Set(['exclusion', 'rodent']));
+    expect(lineForCatalogRow({ service_key: 'rodent_exclusion', category: 'rodent', name: 'Rodent Exclusion & Trapping Service' })).toBe('exclusion');
+    expect(lineForCatalogRow({ service_key: 'rodent_inspection', category: 'inspection', name: 'Rodent Inspection Service' })).toBe('exclusion');
+    expect(lineForCatalogRow({ service_key: 'rodent_general_one_time', category: 'rodent', name: 'Rodent Pest Control Service' })).toBe('exclusion');
+    expect(lineForCatalogRow({ service_key: 'rodent_dead_animal_removal', category: 'rodent', name: 'Dead Rodent Removal & Odor Treatment' })).toBe('exclusion');
+    // A listed key keeps its line when staff rename the row to a general name, and the other way round.
+    for (const key of keysOf('rodent')) {
+      expect(lineForCatalogRow({ service_key: key, category: 'rodent', name: 'Rodent Control' })).toBe('rodent');
+    }
+    expect(lineForCatalogRow({ service_key: 'rodent_inspection', category: 'inspection', name: 'Rodent Trap Check' })).toBe('exclusion');
+    // A rodent row added to the library later, with a key this list has not got: rodent only when its own name
+    // says trapping or bait; anything else (no name too) is exclusion, never the trapping line by default.
+    expect(lineForCatalogRow({ service_key: 'rodent_new_trap_plan', category: 'rodent', name: 'Rodent Trap Plan' })).toBe('rodent');
+    expect(lineForCatalogRow({ service_key: 'rodent_bait_monthly', category: 'rodent', name: 'Monthly Rodent Bait Station Service' })).toBe('rodent');
+    expect(lineForCatalogRow({ service_key: 'rodent_exclusion_whole_home', category: 'rodent', name: 'Whole-Home Rodent Exclusion Service' })).toBe('exclusion');
+    expect(lineForCatalogRow({ service_key: 'rodent_visit', category: 'rodent', name: 'Rodent Control Service' })).toBe('exclusion');
+    expect(lineForCatalogRow({ service_key: 'rodent_unnamed', category: 'rodent' })).toBe('exclusion');
+    // The category already says rodent, so the name needs no rodent word: a bait or trap label is the rodent line,
+    // and exclusion work beside it (a combined job is the first visit) is exclusion.
+    expect(lineForCatalogRow({ service_key: 'station_refill', category: 'rodent', name: 'Bait Station Refill' })).toBe('rodent');
+    expect(lineForCatalogRow({ service_key: 'retainer_new', category: 'rodent', name: 'Premium Trap-Only Retainer Service' })).toBe('rodent');
+    expect(lineForCatalogRow({ service_key: 'trap_clean', category: 'rodent', name: 'Trapping & Sanitation' })).toBe('exclusion');
+    expect(lineForCatalogRow({ service_key: 'attic_seal', category: 'rodent', name: 'Attic Sealing' })).toBe('exclusion');
+    // The name check is for rodent rows only: another category keeps its line whatever the name says.
+    expect(lineForCatalogRow({ service_key: 'k', category: 'lawn_care', name: 'Rodent Exclusion' })).toBe('lawn');
+    expect(lineForCatalogRow({ service_key: 'k', category: 'other', name: 'Rodent Exclusion' })).toBeNull();
+    expect(lineForCatalogRow(null)).toBeNull();
+    expect(lineForCatalogRow({})).toBeNull();
+  });
+
   test('the name regex alone reads the bug visits as general (why the catalog is needed)', () => {
     for (const name of ['Palm Tree Nutritional Treatment', 'Semiannual Palm', 'Palm Fert', 'Top Dress']) {
       expect(classifyServiceCategory(name)).toBe('general');
@@ -107,7 +150,7 @@ describe('categoriesForServices', () => {
   test('gate on: a service_id wins, then the service key; a key alone resolves too', async () => {
     process.env.GATE_TECH_JOB_TYPE_CHECKS = 'true';
     const conn = fakeConn({ catalog: [
-      { id: SERVICE_ID, service_key: 'a', category: 'rodent' },
+      { id: SERVICE_ID, service_key: 'a', category: 'termite' },
       { id: SERVICE_ID_2, service_key: 'b', category: 'mosquito' },
     ] });
     const rows = [
@@ -115,7 +158,7 @@ describe('categoriesForServices', () => {
       { service_type: 'Visit', service_id: '33333333-3333-4333-8333-333333333333', service_key: 'b' },
       { service_type: 'Visit', service_key: 'a' },
     ];
-    expect(await capabilities.categoriesForServices(conn, rows)).toEqual(['rodent', 'mosquito', 'rodent']);
+    expect(await capabilities.categoriesForServices(conn, rows)).toEqual(['termite', 'mosquito', 'termite']);
   });
 
   test('gate on: a catalog row that names no category (other, inspection) falls to the name', async () => {
@@ -129,8 +172,30 @@ describe('categoriesForServices', () => {
     process.env.GATE_TECH_JOB_TYPE_CHECKS = 'true';
     const conn = fakeConn({ catalog: CATALOG });
     expect(await capabilities.categoriesForServices(conn, [{ service_type: 'Rodent Exclusion' }, { service_type: 'Quarterly Pest' }]))
-      .toEqual(['rodent', 'general']);
+      .toEqual(['exclusion', 'general']);
     expect(conn).not.toHaveBeenCalled();
+  });
+
+  test('gate off: a key-only slot search (the key stands in for the name) reads the exclusion keys as exclusion', async () => {
+    // The capacity finder has no visit name for a key-only request and passes the key as service_type.
+    // A technician set Off for exclusion and On for trapping must not be offered a sealing job.
+    const conn = fakeConn({ catalog: CATALOG });
+    const rows = ['rodent_inspection', 'rodent_wire_mesh', 'rodent_bird_box', 'rodent_general_one_time', 'rodent_trapping'].map((key) => ({ service_type: key }));
+    expect(await capabilities.categoriesForServices(conn, rows)).toEqual(['exclusion', 'exclusion', 'exclusion', 'exclusion', 'rodent']);
+    expect(conn).not.toHaveBeenCalled();
+  });
+
+  test('gate on: an exclusion job reads exclusion and its trap check reads rodent, by service key', async () => {
+    process.env.GATE_TECH_JOB_TYPE_CHECKS = 'true';
+    const conn = fakeConn({ catalog: [
+      { id: SERVICE_ID, service_key: 'rodent_exclusion', category: 'rodent', name: 'Rodent Exclusion & Trapping Service' },
+      { id: SERVICE_ID_2, service_key: 'rodent_trapping_followup', category: 'rodent', name: 'Rodent Trapping Follow-Up Visit Service' },
+    ] });
+    const rows = [
+      { service_type: 'Rodent Exclusion & Trapping Service', service_id: SERVICE_ID },
+      { service_type: 'Rodent Trapping Follow-Up Visit Service', service_key_snapshot: 'rodent_trapping_followup' },
+    ];
+    expect(await capabilities.categoriesForServices(conn, rows)).toEqual(['exclusion', 'rodent']);
   });
 
   test('gate on: a service_id that is not a UUID is never sent to the database', async () => {

@@ -138,7 +138,7 @@ async function ringTrackingLineTextBell({ From, MessageSid, source, message }) {
   }, { dedupeKey: trackingThreadBellKey(From, MessageSid), refreshOnDedupe: true, bumpOnRefresh: true, refreshPayload: threadRefresh(MessageSid, arrivedAtMs) });
 }
 
-// GATE_RING_NEW_CONTACTS (owner 2026-11-04, "ring new"): a text from a number with no customer record to a customer-facing
+// Owner 2026-11-04, "ring new": a text from a number with no customer record to a customer-facing
 // office line (a location line or a Google Business Profile tracking line) rings the SAME one-row-per-sender new_lead
 // bell as a website or van-wrap line, and pushes. Before this it wrote only a quiet Activity row (owner-alerts
 // inbound-text), so 32 such texts from 16 numbers in 30 days never reached the owner's phone.
@@ -164,11 +164,10 @@ function isRingableUnknownText({ customer, staffSender, smsReaction, courtesyOnl
 }
 
 // True when the ring landed (a bell row written or refreshed, or a push sent): the caller then skips the quiet row.
-// False when the gate is off, the text is not eligible, or the ring failed (the quiet row stays as the fallback).
+// False when the text is not eligible, or the ring failed (the quiet row stays as the fallback).
 // Never throws.
 async function ringUnknownOfficeText({ From, MessageSid, message, mediaCount = 0, ...rest }) {
   try {
-    if (!require('../config/feature-gates').ringNewContactsLive?.()) return false;
     if (!isRingableUnknownText({ ...rest, message, mediaCount })) return false;
     const stats = await ringTrackingLineTextBell({ From, MessageSid, source: officeLineWords(rest.numberConfig), message });
     return Boolean(stats && !stats.error && (stats.bellWritten || Number(stats.push?.sent || 0) > 0));

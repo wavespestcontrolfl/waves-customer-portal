@@ -1,8 +1,13 @@
 jest.mock('../models/db', () => {
-  const db = jest.fn(() => chain);
+  const db = jest.fn((table) => (table === 'scheduled_services as ss' ? addressChain : chain));
   const chain = { where: jest.fn().mockReturnThis(), whereNotIn: jest.fn().mockReturnThis(),
     modify: fn => { fn(chain); return chain; }, first: jest.fn() };
+  // The Plan tab's address read (scheduled_services as ss, joined to customers) has its own chain, so the
+  // visit-scope reads keep their order.
+  const addressChain = { join: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis(), select: jest.fn().mockReturnThis(), first: jest.fn() };
   db.chain = chain;
+  db.addressChain = addressChain;
+  db.raw = jest.fn((sql) => sql);
   return db;
 });
 jest.mock('../middleware/admin-auth', () => ({
@@ -26,6 +31,7 @@ beforeEach(() => {
   process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
   process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
   db.chain.first.mockResolvedValue({ id: 'visit' });
+  db.addressChain.first.mockResolvedValue({ address_diverges: false });
   buildPlanForService.mockResolvedValue({ completionDefaults: { enabled: true } });
 });
 afterEach(() => { delete process.env.GATE_LAWN_COMPLETION_DEFAULTS; delete process.env.GATE_LAWN_PROPERTY_HISTORY; });
@@ -130,4 +136,110 @@ test('an admin plan keeps every price and cost field', async () => {
     expect(json).toContain(`"${key}"`);
   }
   expect(res.body.plan.protocol.base[0].raw).toBe('K-Flow 0-0-25 ($2.18)');
+});
+
+// The Plan tab shows each protocol line's `description`, the Job tab's own text rule: no rate and no price, for every viewer.
+test.each([true, false])('every protocol line carries a description with no rate and no price (technician=%s); raw stays', async tech => {
+  const raw = 'Stonewall 4FL 0.5 fl oz per 1,000 ($3.51)';
+  buildPlanForService.mockResolvedValue({
+    propertyGate: { service: 'Lawn Care' },
+    protocol: { base: [{ raw, matched: true }], conditional: [{ raw: 'If needed: Fungicide 2 oz/1000 sq ft ($15.00)', matched: false }] },
+  });
+  const { protocol } = (await run({ tech })).body.plan;
+  expect(protocol.base[0].description).toBe('Stonewall 4FL');
+  expect(protocol.conditional[0].description).toBe('If needed: Fungicide');
+  for (const item of [...protocol.base, ...protocol.conditional]) expect(item.description).not.toMatch(/\$|0\.5|1,000|fl oz| oz|15\.00/);
+  expect(protocol.base[0].raw).toBe(tech ? 'Stonewall 4FL 0.5 fl oz per 1,000' : raw);
+});
+
+// A threshold is not a dose: the February St. Augustine irrigation audit keeps "VWC >40% = reduce 20%", while every other
+// percentage goes (a dose share, "0.25% of the spray volume" in the v13 surfactant line). Real protocol lines.
+test.each([true, false])('a protocol line keeps its irrigation thresholds and loses its dose percentages (technician=%s)', async tech => {
+  const feb = require('../config/protocols.json').lawn.st_augustine.visits.find((v) => v.month === 'Feb').secondary.split('\n').find((l) => /IRRIGATION AUDIT/.test(l));
+  const nis = require('../config/lawn-protocol-v13.json').st_augustine.visits[0].secondary.split('\n').find((l) => /Nonionic Surfactant/.test(l));
+  expect(feb).toMatch(/VWC >40% = reduce 20%/);
+  expect(nis).toMatch(/0\.25% of the spray volume/);
+  buildPlanForService.mockResolvedValue({ propertyGate: { service: 'Lawn Care' }, protocol: { base: [], conditional: [{ raw: feb, matched: false }, { raw: nis, matched: true }] } });
+  const { protocol } = (await run({ tech })).body.plan;
+  expect(protocol.conditional[0].description).toContain('VWC >40% = reduce 20%');
+  expect(protocol.conditional[1].description).toContain('Nonionic Surfactant');
+  expect(protocol.conditional[1].description).not.toMatch(/0\.25|%/);
+});
+
+// A dose range written with "to" goes whole: the v13 protocol writes its ranges that way ("0.3 to 0.5 oz per 1,000 sq ft"),
+// and a hyphen-only rule left the first endpoint ("rust on zoysia, 0.3 to every 14 days"). An interval range stays. Real v13 lines.
+test.each([true, false])('a dose range written with "to" leaves no endpoint; an interval range stays (technician=%s)', async tech => {
+  const lines = [];
+  const walk = (o) => (typeof o === 'string' ? lines.push(...o.split('\n')) : o && typeof o === 'object' && Object.values(o).forEach(walk));
+  walk(require('../config/lawn-protocol-v13.json'));
+  const velista = lines.find((l) => /^Velista — fairy ring, 0\.5 to 0\.7 oz .*rust on zoysia, 0\.3 to 0\.5 oz per 1,000 sq ft every 14 days/.test(l));
+  const acelepryn = lines.find((l) => /^Acelepryn Insecticide — caterpillars, 0\.046 to 0\.092 fl oz per 1,000 sq ft/.test(l));
+  expect([typeof velista, typeof acelepryn]).toEqual(['string', 'string']);
+  buildPlanForService.mockResolvedValue({ propertyGate: { service: 'Lawn Care' }, protocol: { base: [], conditional: [{ raw: velista, matched: true }, { raw: acelepryn, matched: true }] } });
+  const [v, a] = (await run({ tech })).body.plan.protocol.conditional.map((item) => item.description);
+  expect(v).toContain('rust on zoysia, every 14 days');
+  expect(v).toContain('every 14 to 21 days');
+  expect(v).not.toMatch(/0\.[357]|\boz\b|\d to (?!\d)/);
+  expect(a).toBe('Acelepryn Insecticide — caterpillars, recheck in 7 days, delay watering (irrigation) or mowing for 24 hours after application');
+});
+
+// The Plan tab's address rule is the Job card's own (its SQL, its block): at a non-primary address the plan on file is
+// the primary home's. The plan still comes back for the completion form; an unchecked address fails closed.
+test.each([true, false])('a visit at a non-primary address carries the Job card\'s address block; an unchecked address fails closed (technician=%s)', async tech => {
+  const { ALTERNATE_ADDRESS_BLOCK } = require('../services/job-card');
+  buildPlanForService.mockResolvedValue({ propertyGate: { service: 'Lawn Care' }, protocol: { base: [], conditional: [] } });
+  const answer = async (row) => {
+    if (row instanceof Error) db.addressChain.first.mockRejectedValueOnce(row);
+    else db.addressChain.first.mockResolvedValueOnce(row);
+    return (await run({ tech })).body.plan;
+  };
+  const elsewhere = await answer({ address_diverges: true });
+  expect(elsewhere.addressNotice).toEqual(ALTERNATE_ADDRESS_BLOCK);
+  expect(elsewhere.protocol).toBeDefined();
+  expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('ss.service_address_line1'));
+  expect(db.addressChain.where).toHaveBeenCalledWith('ss.id', 'visit');
+  expect(await answer({ address_diverges: false })).not.toHaveProperty('addressNotice');
+  // No row (no visit, no customer), an answer that is not the read's boolean, or a failed read: unchecked.
+  for (const row of [undefined, { address_diverges: null }, new Error('read failed')]) {
+    expect((await answer(row)).addressNotice).toMatchObject({ code: 'address_unchecked' });
+  }
+});
+
+// The visit-scope check stays the last read (codex #5568 r2): a technician taken off the visit while the address
+// read runs gets no plan.
+test.each([false, true])('a technician reassigned during the address read gets no plan (post=%s)', async post => {
+  db.addressChain.first.mockImplementationOnce(async () => {
+    db.chain.first.mockResolvedValueOnce(null);
+    return { address_diverges: false };
+  });
+  const response = await run({ post, tech: true });
+  expect(response.statusCode).toBe(404);
+  expect(response.body).not.toHaveProperty('plan');
+});
+
+// The Plan tab's notice text: a stock block names no planned quantity and an unmatched line is described, not raw.
+// `message` stays as the engine writes it (summarizeInventoryStatus) for the completion form, which reads these lists.
+test.each([true, false])('a stock block and an unmatched line carry a description with no planned amount, rate or price (technician=%s); message stays', async tech => {
+  const stock = { productId: 'p1', productName: 'Fixture Granule', code: 'inventory_insufficient_stock', severity: 'block', message: 'Fixture Granule requires 12.5 lb, but only 4 lb is on hand.' };
+  const unmatched = { code: 'inventory_product_unmatched', severity: 'warning', message: 'Protocol line is not mapped to inventory: Fixture Liquid 0.5 fl oz per 1,000 ($1.91+$21.79)' };
+  const blackout = { code: 'nitrogen_blackout', severity: 'block', message: 'Fixture County restricts nitrogen during this visit window.' };
+  buildPlanForService.mockResolvedValue({ propertyGate: { service: 'Lawn Care', blocks: [stock, blackout], warnings: [unmatched] }, protocol: { base: [], conditional: [] } });
+  const { propertyGate } = (await run({ tech })).body.plan;
+  expect(propertyGate.blocks[0].description).toBe('Fixture Granule: not enough on hand for this visit.');
+  expect(propertyGate.warnings[0].description).toBe('Protocol line is not mapped to inventory: Fixture Liquid');
+  expect(propertyGate.blocks[1]).not.toHaveProperty('description');
+  expect(propertyGate.blocks[0].message).toBe(stock.message);
+  expect(propertyGate.warnings[0].message).toContain('Fixture Liquid 0.5 fl oz per 1,000');
+});
+
+// The engine copies the visit's notes into protocol.objective, and a June lawn note names an Advion rate and a price can ride in a note too.
+test.each([true, false])('the plan objective carries a description with no rate and no price, from the real June lawn note (technician=%s)', async tech => {
+  const protocols = require('../config/protocols.json');
+  const note = JSON.stringify(protocols).match(/"notes": ?"([^"]*Advion Insect Granule bait, 3 lb per 1,000 sq ft[^"]*)"/)?.[1];
+  expect(note).toBeTruthy();
+  buildPlanForService.mockResolvedValue({ propertyGate: { service: 'Lawn Care' }, protocol: { objective: `${note} ($4.20)`, base: [], conditional: [] } });
+  const { protocol } = (await run({ tech })).body.plan;
+  expect(protocol.objectiveDescription).toContain('Advion Insect Granule bait');
+  expect(protocol.objectiveDescription).not.toMatch(/\$|3 lb|1,000|\blb\b/);
+  expect(protocol.objective).toContain('3 lb per 1,000 sq ft');
 });

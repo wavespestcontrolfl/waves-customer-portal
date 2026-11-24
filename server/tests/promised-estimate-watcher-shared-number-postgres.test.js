@@ -68,6 +68,28 @@ const HOUR = 3600000;
     expect(await stillListed()).toBe(false);
   });
 
+  test('a self-serve quote minted before the call keeps the promise once staff deliver it after the call, whatever its sent_at (codex pre-push P1)', async () => {
+    const quote = async (lastDeliveredAt) => {
+      const id = randomUUID();
+      await db('estimates').insert({
+        id, customer_id: null, customer_phone: PHONE, source: 'plan_start', status: 'accepted',
+        // Minted the day before the call; an acceptance during the later staff send kept that sent_at.
+        sent_at: new Date(Date.now() - 72 * HOUR), accepted_at: new Date(Date.now() - 24 * HOUR),
+        estimate_data: JSON.stringify({ deliveryState: lastDeliveredAt ? { firstDeliveredAt: lastDeliveredAt, lastDeliveredAt } : {} }),
+      });
+      made.estimates.push(id);
+    };
+    const fresh = async () => { await db('estimates').whereIn('id', made.estimates).del(); made.estimates.length = 0; };
+    await quote(null);
+    expect(await stillListed()).toBe(true);
+    await fresh();
+    await quote(new Date(Date.now() - 60 * HOUR).toISOString());
+    expect(await stillListed()).toBe(true);
+    await fresh();
+    await quote(new Date(Date.now() - 24 * HOUR).toISOString());
+    expect(await stillListed()).toBe(false);
+  });
+
   test('a linked estimate owned by a same-name duplicate record clears it', async () => {
     await customer('Martin', 'Fixtureson');
     const owner = await customer(' martin', 'FIXTURESON');

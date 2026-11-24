@@ -1,5 +1,5 @@
 /**
- * Missed-call re-push (GATE_MISSED_CALL_REPUSH, owner "ALL" 2026-10-20).
+ * Missed-call re-push (owner "ALL" 2026-10-20).
  * Admin push only: nothing here reaches a customer.
  *
  * A customer_missed_call bell that is still unread and not done 30 minutes
@@ -18,8 +18,6 @@
  * consumes the one re-push. Only the writer that stamped it sends. A crash
  * after the stamp loses the re-push rather than repeating it; that is the
  * deliberate trade.
- *
- * Off (gate unset) the sweep returns before any query.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -27,10 +25,9 @@ const { soundForTrigger } = require('./alert-sounds');
 
 const TRIGGER_KEY = 'customer_missed_call';
 // call_log.metadata.missed_call_spam_wave values the bell stamps on a call whose push it quieted.
-const QUIET_SPAM_WAVE = ['block_quiet', 'burst_quiet', 'screen_quiet'];
+const QUIET_SPAM_WAVE = ['block_quiet', 'burst_quiet', 'repeat_quiet', 'screen_quiet'];
 const REPUSH_AFTER_MS = 30 * 60 * 1000;
-// A bell older than this is the office's to close by hand; the window also
-// bounds the first sweep after the gate is turned on.
+// A bell older than this is the office's to close by hand.
 const WINDOW_MS = 48 * 60 * 60 * 1000;
 
 /**
@@ -102,18 +99,23 @@ async function repushOne(row, { triggers, trigger, to, PushService, hours, clock
   // The call itself is still unreturned: no later answered call-back or
   // call-in (the answered-proof called-back SQL), so a caller who got through
   // after this tick's retire never buzzes again (Codex #6383 r3).
+  // The bell's own quiet decision (payload.pushQuieted, pre-push audit r17): a
+  // bell the missed-call bell quieted says so, and one that pushed says that,
+  // so a quiet marker an earlier pass left on the call never decides for it.
+  // The candidate read leaves out a bell that says it was quieted; its payload
+  // is written once. A bell written before the payload carried the key: the
+  // call's marker decides, here and in the candidate read.
+  const ownDecision = Object.prototype.hasOwnProperty.call(payload, 'pushQuieted');
   const callStillMissed = async () => {
     if (!payload.callLogId) return true;
-    const { calledBackSql, visitUnderwaySql } = require('./missed-call-bell');
+    const { CALLED_BACK_ANSWERED_SQL, VISIT_UNDERWAY_SQL } = require('./missed-call-bell');
     const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
-    // GATE_MISSED_CALL_VISIT_UNDERWAY: the customer's visit moved after the call, so no re-push.
-    // Gate off: visitUnderwaySql() is null and the select is exactly as before.
-    const underway = visitUnderwaySql();
+    // The customer's visit moved after the call: no re-push.
     const call = await db('call_log').where('id', payload.callLogId)
       .modify((qb) => whereNotSandboxCall(qb))
-      .first('id', db.raw(`(${calledBackSql({ retire: true })}${underway ? ` AND NOT ${underway}` : ''}) AS still_missed`), db.raw("metadata->>'missed_call_spam_wave' AS spam_wave"));
+      .first('id', db.raw(`(${CALLED_BACK_ANSWERED_SQL} AND NOT ${VISIT_UNDERWAY_SQL}) AS still_missed`), db.raw("metadata->>'missed_call_spam_wave' AS spam_wave"));
     // A call whose push the bell deliberately quieted (a robodialer wave or burst) is never buzzed later.
-    if (QUIET_SPAM_WAVE.includes(call?.spam_wave)) return false;
+    if (!ownDecision && QUIET_SPAM_WAVE.includes(call?.spam_wave)) return false;
     // No call row proves nothing either way: the bell stays eligible.
     return !call || call.still_missed === true;
   };
@@ -166,8 +168,6 @@ async function repushOne(row, { triggers, trigger, to, PushService, hours, clock
 }
 
 async function sweepMissedCallRepush({ now = new Date(), limit = 20, hours = undefined, clock = () => new Date() } = {}) {
-  const { isEnabled } = require('../config/feature-gates');
-  if (!isEnabled('missedCallRepush')) return 0;
   try {
     const nowMs = now.getTime();
     const officeHours = hours !== undefined ? hours : await require('./voice-agent/relay-context').loadOfficeHours();
@@ -183,7 +183,11 @@ async function sweepMissedCallRepush({ now = new Date(), limit = 20, hours = und
       .whereRaw("COALESCE(metadata->>'repushed_at', '') = ''")
       // A quiet robodialer call never re-pushes; leaving it out here also keeps it from
       // filling the oldest-first batch ahead of real bells. callStillMissed checks again.
-      .whereRaw("NOT EXISTS (SELECT 1 FROM call_log quiet WHERE quiet.id::text = notifications.metadata->'payload'->>'callLogId' AND COALESCE(quiet.source, '') <> ? AND quiet.metadata->>'missed_call_spam_wave' = ANY(?))", [require('./voice-agent/relay-protocol').VOICE_RELAY_SANDBOX_SOURCE, QUIET_SPAM_WAVE])
+      // The bell's own decision first (payload.pushQuieted); a bell without the key: the call's marker.
+      .whereRaw("(CASE WHEN notifications.metadata->'payload'->'pushQuieted' IS NOT NULL"
+        + " THEN notifications.metadata->'payload'->>'pushQuieted' = 'true'"
+        + " ELSE EXISTS (SELECT 1 FROM call_log quiet WHERE quiet.id::text = notifications.metadata->'payload'->>'callLogId' AND COALESCE(quiet.source, '') <> ? AND quiet.metadata->>'missed_call_spam_wave' = ANY(?)) END) IS NOT TRUE",
+      [require('./voice-agent/relay-protocol').VOICE_RELAY_SANDBOX_SOURCE, QUIET_SPAM_WAVE])
       .where('created_at', '<=', new Date(nowMs - REPUSH_AFTER_MS))
       .where('created_at', '>', new Date(nowMs - WINDOW_MS))
       .orderBy('created_at', 'asc')

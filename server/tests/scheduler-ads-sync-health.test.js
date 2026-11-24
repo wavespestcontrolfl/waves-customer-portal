@@ -17,6 +17,7 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((name) => name === 'cronJobs'), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn(),
   adsNegativesLive: jest.fn(() => false),
 }));
+jest.mock('../services/ads/campaign-link', () => ({ linkCampaigns: jest.fn().mockResolvedValue({ checked: 0, linked: { gclid_click_view: 0 }, unlinked: 0 }) }));
 jest.mock('../services/ads/negative-keyword-actions', () => ({ syncOwnerWords: jest.fn().mockResolvedValue({ pushed: 0, failed: 0, removed: 0, googleFailed: 0 }) }));
 // Pass-through lock that (like the real runExclusive) records a failed body
 // by name and rethrows it.
@@ -46,6 +47,11 @@ jest.mock('../services/ads/meta-ads', () => ({
   syncCampaigns: jest.fn(),
   syncDailyPerformance: jest.fn(),
 }));
+jest.mock('../services/ads/google-lsa', () => ({
+  isConfigured: jest.fn(() => true),
+  runDailySync: jest.fn(),
+}));
+jest.mock('../services/ads/google-lsa-leads', () => ({ runLeadSync: jest.fn() }));
 
 const cron = require('../utils/scheduled-cron');
 const logger = require('../services/logger');
@@ -54,6 +60,8 @@ const googleAds = require('../services/ads/google-ads');
 const gates = require('../config/feature-gates');
 const negativeActions = require('../services/ads/negative-keyword-actions');
 const metaAds = require('../services/ads/meta-ads');
+const googleLsa = require('../services/ads/google-lsa');
+const googleLsaLeads = require('../services/ads/google-lsa-leads');
 const { initScheduledJobs } = require('../services/scheduler');
 
 function tick(expr, marker) {
@@ -68,6 +76,9 @@ beforeEach(() => {
   for (const k of Object.keys(mockJobOutcomes)) delete mockJobOutcomes[k];
   googleAds.isConfigured.mockReturnValue(true);
   metaAds.isConfigured.mockReturnValue(true);
+  googleLsa.isConfigured.mockReturnValue(true);
+  googleLsa.runDailySync.mockResolvedValue({ configured: true, synced: {} });
+  googleLsaLeads.runLeadSync.mockResolvedValue({ configured: true, leads: 0 });
   for (const fn of [googleAds.syncCampaigns, googleAds.syncDailyPerformance, googleAds.syncSearchTerms,
     metaAds.syncCampaigns, metaAds.syncDailyPerformance]) fn.mockResolvedValue([]);
 });
@@ -159,5 +170,56 @@ describe('Meta Ads 6:15 cron', () => {
     metaAds.isConfigured.mockReturnValue(false);
     await metaTick()();
     expect(metaAds.syncCampaigns).not.toHaveBeenCalled();
+  });
+});
+
+describe('Local Services Ads 6:10 cron', () => {
+  const lsaTick = () => tick('10 6 * * *', 'google-lsa');
+
+  test('runs the sync under runExclusive("google-lsa-sync")', async () => {
+    await lsaTick()();
+    expect(runExclusive).toHaveBeenCalledWith('google-lsa-sync', expect.any(Function));
+    expect(googleLsa.runDailySync).toHaveBeenCalledTimes(1);
+    expect(mockJobOutcomes['google-lsa-sync']).toBe('success');
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  test('a failed sync fails the job (job_health failed) and the tick does not throw', async () => {
+    googleLsa.runDailySync.mockRejectedValue(new Error('invalid_grant'));
+    await lsaTick()();
+    expect(mockJobOutcomes['google-lsa-sync']).toBe('failed: invalid_grant');
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('Google Local Services sync failed: invalid_grant'));
+  });
+
+  test('not configured is a silent no-op: no lock, no job_health row', async () => {
+    googleLsa.isConfigured.mockReturnValue(false);
+    await lsaTick()();
+    expect(runExclusive).not.toHaveBeenCalled();
+    expect(googleLsa.runDailySync).not.toHaveBeenCalled();
+  });
+});
+
+describe('Local Services Ads lead match, hourly at :12', () => {
+  const leadsTick = () => tick('12 * * * *', 'google-lsa-leads');
+
+  test('runs the lead match under runExclusive("google-lsa-leads")', async () => {
+    await leadsTick()();
+    expect(runExclusive).toHaveBeenCalledWith('google-lsa-leads', expect.any(Function));
+    expect(googleLsaLeads.runLeadSync).toHaveBeenCalledTimes(1);
+    expect(mockJobOutcomes['google-lsa-leads']).toBe('success');
+  });
+
+  test('a failed run fails the job (job_health failed) and the tick does not throw', async () => {
+    googleLsaLeads.runLeadSync.mockRejectedValue(new Error('read: invalid_grant'));
+    await leadsTick()();
+    expect(mockJobOutcomes['google-lsa-leads']).toBe('failed: read: invalid_grant');
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('Google Local Services lead match failed'));
+  });
+
+  test('not configured is a silent no-op: no lock, no job_health row', async () => {
+    googleLsa.isConfigured.mockReturnValue(false);
+    await leadsTick()();
+    expect(runExclusive).not.toHaveBeenCalled();
+    expect(googleLsaLeads.runLeadSync).not.toHaveBeenCalled();
   });
 });

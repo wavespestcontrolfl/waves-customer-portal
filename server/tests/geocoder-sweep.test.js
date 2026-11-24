@@ -191,7 +191,7 @@ describe('sweepUngeocodedCustomers', () => {
   });
 
   it('generic geocoding used by dry runs never starts route repair, even with every repair gate enabled', async () => {
-    const gates = ['GATE_ROUTE_REORDER', 'GATE_ROUTE_REORDER_REPAIR', 'GATE_DRIVE_TIME_CALIBRATION', 'GATE_SCHEDULE_QUALITY_MEASUREMENTS'];
+    const gates = ['GATE_ROUTE_REORDER', 'GATE_ROUTE_REORDER_REPAIR', 'GATE_SCHEDULE_QUALITY_MEASUREMENTS'];
     const saved = gates.map(gate => process.env[gate]);
     try {
       gates.forEach(gate => { process.env[gate] = 'true'; });

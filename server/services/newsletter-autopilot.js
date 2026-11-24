@@ -597,6 +597,19 @@ async function autoDraftFlagship() {
   //    two paths can't both create a draft for the same week.
   const lockKey = weekLockKey(weekOf);
 
+  // The issue's poll (owner-approved list, 2026-11-20): at most every 3rd sent
+  // issue, in the owner's order, none once the list is used up
+  // (newsletter-quiz.js chooseNewsletterPoll). A failed read leaves this issue
+  // without a poll; it never blocks the draft.
+  let pollQuizId = null;
+  try {
+    const { chooseNewsletterPoll, newsletterIssuePolls } = require('./newsletter-quiz');
+    pollQuizId = chooseNewsletterPoll(await newsletterIssuePolls({ newsletterType: NEWSLETTER_TYPE }));
+    if (pollQuizId) logger.info(`[newsletter-autopilot] this issue carries poll ${pollQuizId}`);
+  } catch (e) {
+    logger.warn(`[newsletter-autopilot] poll choice failed (${e.message}); this issue has no poll`);
+  }
+
   // Paid/network work stays outside the DB transaction and advisory lock.
   // The short locked section below only dedupes + persists. Two truly
   // concurrent runners may both generate, but only one can create a row.
@@ -608,6 +621,7 @@ async function autoDraftFlagship() {
     newsletterType: NEWSLETTER_TYPE,
     issueReference: defaultTargetSendAt(weekOf),
     persist: false,
+    pollQuizId,
   });
 
   // The model may return only a SUBSET of the locked ids, and
@@ -642,6 +656,7 @@ async function autoDraftFlagship() {
         newsletterType: NEWSLETTER_TYPE,
         issueReference: defaultTargetSendAt(weekOf),
         persist: false,
+        pollQuizId,
       });
     } catch (retryErr) {
       logger.warn(`[newsletter-autopilot] coverage retry failed (${retryErr.message}) — keeping the first draft`);

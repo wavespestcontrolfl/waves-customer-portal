@@ -14,25 +14,39 @@ import {
   listFastCompletionMarkers,
   pruneFastCompletionAttempts,
 } from '../lib/completion-resume-store';
+import { isConsultationVisit } from '../lib/consultationVisit';
 
 export const SAVED_COMPLETION_READ_NOTICE = 'Could not read the completion saved on this device. Tap to try again.';
-// Tech Home has no lawn visit sheet: its saved attempt is retried where it was
-// made, so nothing here races it with a fresh completion.
-export const SAVED_ON_DISPATCH_NOTICE = 'This visit has a lawn completion saved on this device. Open the visit on Dispatch to retry or discard it.';
 
 // A durable retry must reopen the sheet that prepared its exact body even if
 // the live route now says completed. Report-flow bodies overlap the typed
 // findings used by the lawn and Tree & Shrub sheets, so their frozen report
 // base wins; the remaining findings type identifies the focused sheet.
-export function savedCompletionKind(attempt) {
+// An assessment attempt saved before the sheet tagged them, read from the
+// attempt itself: its summary ('Assessment · <outcome>', 'won' for a converted
+// consultation, which sends no outcome; no other sheet's summary has this
+// shape) or the visit its body froze (expectedVisit, the Waves Assessment
+// name). On today's route, the row says the same; an off-route row has none.
+const UNTAGGED_ASSESSMENT_SUMMARY = /^Assessment · (won|warm|cold|lost)$/;
+function isUntaggedAssessment(attempt, service) {
+  if (UNTAGGED_ASSESSMENT_SUMMARY.test(String(attempt.summary || ''))) return true;
+  if (isConsultationVisit({ serviceType: attempt.body.expectedVisit?.serviceType })) return true;
+  return !service?.fastCompletionRecoveryOnly && isConsultationVisit(service);
+}
+
+export function savedCompletionKind(attempt, service) {
   const body = attempt?.body;
   if (!body || typeof body !== 'object') return null;
   // A tag the sheet saved wins: the lawn visit sheet shares its findings type
   // with the lawn re-service sheet.
   if (attempt.sheet === 'lawn_visit') return 'lawn_visit';
+  // The Waves Assessment sheet's attempt. One it saved before it tagged them
+  // reads by the consultation outcome, which no other sheet sends.
+  if (attempt.sheet === 'assessment' || Object.hasOwn(body, 'consultationOutcome')) return 'assessment';
   if (Object.hasOwn(body, 'reportDraftBase')) return 'report';
   if (body.structuredFindings?.type === 'tree_shrub') return 'tree_shrub';
   if (body.structuredFindings?.type === 'one_time_lawn_treatment') return 'lawn_reservice';
+  if (isUntaggedAssessment(attempt, service)) return 'assessment';
   return 'pest';
 }
 
@@ -94,7 +108,7 @@ function withoutAttempt(scan, serviceId) {
 // `schedule` and `openSheets` only re-trigger the scan: a route refresh or a
 // sheet that opened or closed may have changed what the device holds.
 export default function useSavedFastCompletions({ operatorId, schedule, openSheets = [] }) {
-  const [sheetA, sheetB, sheetC] = openSheets;
+  const [sheetA, sheetB, sheetC, sheetD, sheetE] = openSheets;
   const [scan, setScan] = useState(() => ({ operatorId: null, attempts: new Map() }));
   const [readNotice, setReadNotice] = useState('');
   // Bumped by a tap while the device read failed: the tap scans again.
@@ -105,8 +119,6 @@ export default function useSavedFastCompletions({ operatorId, schedule, openShee
   // The services this device's last scan holds a saved attempt for, as a tap
   // reads them.
   const knownIds = useRef(new Set());
-  // The service whose saved lawn attempt the Dispatch notice names.
-  const dispatchNoticeId = useRef('');
 
   // The store's own retention only: /complete takes an overdue visit's retry
   // from its assigned technician at any age (no date cutoff;
@@ -139,16 +151,11 @@ export default function useSavedFastCompletions({ operatorId, schedule, openShee
       }
       const listed = new Map(result.attempts.map((attempt) => [attempt.serviceId, attempt]));
       setScan({ operatorId, attempts: listed });
-      // A good scan clears a read failure, and a Dispatch notice whose attempt
-      // is gone (finished or discarded elsewhere; GitHub Codex P2 on #6001).
-      setReadNotice((notice) => {
-        if (notice === SAVED_COMPLETION_READ_NOTICE) return '';
-        if (notice === SAVED_ON_DISPATCH_NOTICE && !listed.has(dispatchNoticeId.current)) return '';
-        return notice;
-      });
+      // A good scan clears a read failure.
+      setReadNotice('');
     });
     return () => { active = false; };
-  }, [schedule, operatorId, scanTick, sheetA, sheetB, sheetC]);
+  }, [schedule, operatorId, scanTick, sheetA, sheetB, sheetC, sheetD, sheetE]);
 
   // Once this operator's device has been scanned, its attempts stand while a
   // later route refresh or sheet close re-scans: keying the scan to the
@@ -173,12 +180,10 @@ export default function useSavedFastCompletions({ operatorId, schedule, openShee
       ? await getFastCompletionAttempt(service.id, tapOperator)
       : { attempt: null };
     if (seq !== tapSeq.current || operatorRef.current !== tapOperator) return null;
-    const kind = savedCompletionKind(result.attempt);
-    if (kind === 'lawn_visit') {
-      dispatchNoticeId.current = String(service.id);
-      setReadNotice(SAVED_ON_DISPATCH_NOTICE);
-      return null;
-    }
+    // The lawn visit sheet's own attempt ('lawn_visit') included: Tech Home
+    // opens that sheet too, so its saved attempt is retried here as well. So
+    // is the assessment sheet's ('assessment'), to retry or discard only.
+    const kind = savedCompletionKind(result.attempt, service);
     if (kind) return { kind };
     const id = String(service.id);
     // A saved attempt this device knows of that cannot be read now: a fresh

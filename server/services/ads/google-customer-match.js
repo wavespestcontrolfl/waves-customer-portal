@@ -30,8 +30,11 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { runExclusive } = require('../../utils/cron-lock');
-const { collectCustomerMembers, collectUnbookedLeadMembers } = require('./meta-audiences')._private;
+const {
+  collectCustomerMembers, collectUnbookedLeadMembers, staleLeadLeavingKeys, staleCustomerLeavingKeys,
+} = require('./meta-audiences')._private;
 const { sha256Hex, normalizePhone, cleanNumericId } = require('./data-manager')._private;
+const matchFields = require('./ad-match-fields');
 
 const DATA_MANAGER_SCOPE = 'https://www.googleapis.com/auth/datamanager';
 const INGEST_URL = 'https://datamanager.googleapis.com/v1/audienceMembers:ingest';
@@ -53,11 +56,13 @@ const AUDIENCES = {
     name: 'Customers (suppression)',
     listIdEnv: 'GOOGLE_CM_CUSTOMERS_LIST_ID',
     collect: collectCustomerMembers,
+    staleLeavingKeys: staleCustomerLeavingKeys,
   },
   unbooked_leads: {
     name: 'Unbooked leads (retargeting)',
     listIdEnv: 'GOOGLE_CM_UNBOOKED_LEADS_LIST_ID',
     collect: collectUnbookedLeadMembers,
+    staleLeavingKeys: staleLeadLeavingKeys,
   },
 };
 
@@ -139,20 +144,46 @@ function destination(listId) {
   return dest;
 }
 
-// A member hash row [emailSha256, phoneSha256] -> Data Manager UserData.
-function toUserData(d) {
+// Google AddressInfo needs hashed first + last name, regionCode and a 5-digit
+// ZIP together; null unless both names and a ZIP are known (shared formatter in
+// ad-match-fields, also used by the conversion lane).
+function addressFor(member) {
+  return matchFields.googleAddressParts(member, sha256Hex);
+}
+// A row stores its address as this signature (name hashes, region, ZIP; no
+// plaintext name), and every request rebuilds the address from it, so the
+// ingest and the later removal of a row carry the same address.
+const addressSig = (addr) => (addr ? [addr.givenName, addr.familyName, addr.regionCode, addr.postalCode].join('|') : '');
+function addressFromSig(sig) {
+  const [givenName, familyName, regionCode, postalCode] = String(sig || '').split('|');
+  return givenName && familyName && regionCode && postalCode ? { givenName, familyName, regionCode, postalCode } : null;
+}
+
+// A stored row [emailSha256, phoneSha256] + its address signature -> Data
+// Manager UserData. Ingest and remove send the same keys; a row stored before
+// addresses were added (no signature) is removed by email/phone only.
+function toUserData(d, a = '') {
   const userIdentifiers = [];
   if (d[0]) userIdentifiers.push({ emailAddress: d[0] });
   if (d[1]) userIdentifiers.push({ phoneNumber: d[1] });
+  const address = addressFromSig(a);
+  if (address) userIdentifiers.push({ address });
   return { userIdentifiers };
 }
+
+// The fields a row keeps in state and in a pending op: entity key, hash row,
+// address signature.
+const storedRow = ({ k, d, a }) => ({ k, d, ...(a ? { a } : {}) });
+// Every key a request for a row carries. A remove matches by any of them.
+const idsOf = (e) => [e.d[0], e.d[1], e.a ? `a:${e.a}` : ''].filter(Boolean);
+const sharesAny = (e, ids) => idsOf(e).some((id) => ids.has(id));
 
 function batchSize() {
   const n = Number(process.env.GOOGLE_CM_MAX_MEMBERS_PER_CALL);
   return n > 0 && n <= MAX_MEMBERS_PER_CALL ? n : MAX_MEMBERS_PER_CALL;
 }
 
-// POST member ENTRIES ({k,d}) to ingest/remove in batches. Returns { count, batches }
+// POST stored rows ({k,d,a}) to ingest/remove in batches. Returns { count, batches }
 // where each batch is { requestId, members } — one per Data Manager request, so the
 // caller persists a pending entry PER batch (a later batch's success can't mask an
 // earlier batch's failure). termsOfService is valid only on :ingest (the :remove
@@ -168,7 +199,7 @@ async function pushMembers(listId, entries, op, { fetchImpl = global.fetch, toke
     const batch = entries.slice(i, i + size);
     const body = {
       destinations: [dest],
-      audienceMembers: batch.map((e) => ({ userData: toUserData(e.d) })),
+      audienceMembers: batch.map((e) => ({ userData: toUserData(e.d, e.a) })),
       validateOnly: false,
       encoding: 'HEX',
     };
@@ -185,7 +216,7 @@ async function pushMembers(listId, entries, op, { fetchImpl = global.fetch, toke
       throw new Error(`Data Manager audienceMembers:${op} ${resp.status}: ${e.message || 'request failed'}`);
     }
     count += batch.length;
-    batches.push({ requestId: (json && json.requestId) || null, members: batch });
+    batches.push({ requestId: (json && json.requestId) || null, members: batch.map(storedRow) });
   }
   return { count, batches };
 }
@@ -236,8 +267,8 @@ function asEntries(value) {
 
 /**
  * Reconcile in-flight requests from the previous run against the optimistic state.
- * Returns the EFFECTIVE member set (failures reverted so they re-send) plus the
- * pending ops that are still processing. Polls are read-only; a transient poll error
+ * Returns the EFFECTIVE member set (a failed op's rows kept: an ingest's flagged
+ * to re-send, a remove's to remove again) plus the pending ops still processing. Polls are read-only; a transient poll error
  * leaves the op pending (re-checked next run, unless it has aged out).
  */
 async function reconcilePending({ members, pending, token, nowMs }) {
@@ -257,10 +288,16 @@ async function reconcilePending({ members, pending, token, nowMs }) {
     }
     if (status === 'SUCCESS') continue; // durably applied — optimistic state stands
     if ((status === 'PROCESSING' || status === 'UNKNOWN') && !aged) { stillPending.push(p); continue; }
-    // FAILED / PARTIAL / aged-out: revert this op so the delta re-sends it (idempotent).
+    // FAILED / PARTIAL / aged-out: the op did not durably apply; the delta re-sends it.
     if (p.op === 'ingest') {
-      const drop = new Set(p.members.map((e) => hashId(e.d)));
-      effective = effective.filter((e) => !drop.has(hashId(e.d)));
+      // Google may still hold part of it (PARTIAL, aged out), and an enrichment's
+      // row was in the list before it. So each row stays in state with the keys
+      // it sent, flagged (r) to re-send while it is current and to be removed
+      // with those keys once it is not.
+      const failed = new Map(asEntries(p.members).map((e) => [hashId(e.d), e]));
+      effective = effective.map((e) => (failed.has(hashId(e.d)) ? { ...storedRow(e), r: 1 } : e));
+      const have = new Set(effective.map((e) => hashId(e.d)));
+      for (const [h, e] of failed) if (!have.has(h)) effective.push({ ...storedRow(e), r: 1 });
     } else { // remove did not durably apply -> the members are still in Google; keep them
       const have = new Set(effective.map((e) => hashId(e.d)));
       for (const e of asEntries(p.members)) {
@@ -269,6 +306,31 @@ async function reconcilePending({ members, pending, token, nowMs }) {
     }
   }
   return { effective, stillPending };
+}
+
+// What each current member sends this run and keeps in state. A row's address,
+// once sent, stays its address: an edit is not re-sent, so a removal always
+// carries every address Google may hold for the row. A member is sent when it
+// is new, when it was stored before addresses were added and now has one (once:
+// an enrichment), or when its last ingest did not apply (r: re-sent with the
+// keys it stored). A send that shares a key with a remove still in flight is
+// held for a later run; a held row keeps its stored entry.
+function planAdds(currentByHash, priorByHash, hasPendingRemove) {
+  const out = { addEntries: [], heldAdds: 0, enrichCount: 0, keep: new Map() };
+  for (const [h, e] of currentByHash) {
+    const prior = priorByHash.get(h);
+    const row = storedRow({ k: e.k, d: e.d, a: (prior && prior.a) || e.a });
+    const enrich = !!prior && !prior.r && !prior.a && !!e.a;
+    if (prior && !prior.r && !enrich) { out.keep.set(h, row); continue; }
+    if (hasPendingRemove(row)) {
+      if (prior) out.keep.set(h, prior); else out.heldAdds += 1;
+      continue;
+    }
+    out.addEntries.push(row);
+    out.keep.set(h, row);
+    if (enrich) out.enrichCount += 1;
+  }
+  return out;
 }
 
 async function syncAudience(audienceKey, { validateOnly = false } = {}) {
@@ -289,7 +351,14 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
     // calculation below — separate loads could disagree about an opt-out
     // landing between them (see meta-audiences for the same contract).
     const suppression = await loadMarketingSuppression();
-    const members = await def.collect({ suppression });
+    const collected = await def.collect({ partition: true, suppression });
+    const members = collected.kept;
+    // Member keys whose uploaded rows leave whatever they share with a current
+    // member: dropped test records, and opted-out leads (their own opt-out or a
+    // linked customer's). Current records here, stored ones once the state loads
+    // (staleLeavingKeys).
+    const testKeys = new Set(collected.testKeys);
+    const leavingKeys = new Set([...testKeys, ...(collected.optOutKeys || [])]);
 
     // Keep only members with usable match keys; store the hash row so removals survive
     // a hard-deleted source row and a corrected identifier re-uploads later.
@@ -297,7 +366,8 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
     let skippedNoKeys = 0;
     for (const m of members) {
       const d = hashMember(m);
-      if (d) current.push({ k: m.key, d }); else skippedNoKeys++;
+      if (!d) { skippedNoKeys++; continue; }
+      current.push(storedRow({ k: m.key, d, a: addressSig(addressFor(m)) }));
     }
 
     // Diff by HASH ROW (Google matches/removes users by the hashed identifiers).
@@ -333,38 +403,9 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
       stillPending = rec.stillPending;
     }
 
-    const priorByHash = new Map();
-    for (const e of effectivePrior) if (!priorByHash.has(hashId(e.d))) priorByHash.set(hashId(e.d), e);
-
-    // Never remove a row whose email/phone is still held by a current member (a remove
-    // matches by any identifier, so it would drop a person we keep) — retain + retry.
-    const currentHashes = new Set();
-    for (const e of currentByHash.values()) {
-      if (e.d[0]) currentHashes.add(e.d[0]);
-      if (e.d[1]) currentHashes.add(e.d[1]);
-    }
-    const safeToDelete = (d) => !((d[0] && currentHashes.has(d[0])) || (d[1] && currentHashes.has(d[1])));
-
-    // Data Manager applies ingest/remove ASYNChronously and possibly out of order, and
-    // matches/removes by ANY identifier — so we hold a conflicting op while one is still
-    // in flight, keyed on INDIVIDUAL identifier hashes (like safeToDelete), NOT the exact
-    // [email,phone] row (the same person can reappear with a changed identifier and a
-    // different row hash, yet a pending remove would still match them by the shared one).
-    const pendingIngestIds = new Set();
-    const pendingRemoveIds = new Set();
-    for (const p of stillPending) {
-      const target = p.op === 'ingest' ? pendingIngestIds : pendingRemoveIds;
-      for (const e of asEntries(p.members)) { if (e.d[0]) target.add(e.d[0]); if (e.d[1]) target.add(e.d[1]); }
-    }
-    const hasPendingIngest = (d) => !!((d[0] && pendingIngestIds.has(d[0])) || (d[1] && pendingIngestIds.has(d[1])));
-    const hasPendingRemove = (d) => !!((d[0] && pendingRemoveIds.has(d[0])) || (d[1] && pendingRemoveIds.has(d[1])));
-
-    const addEntries = [];            // new members we send this run
-    const heldAddHashes = new Set();  // new members deferred (a remove for an identifier is in flight)
-    for (const [h, e] of currentByHash) {
-      if (priorByHash.has(h)) continue;
-      if (hasPendingRemove(e.d)) heldAddHashes.add(h); else addEntries.push(e);
-    }
+    const stale = await def.staleLeavingKeys(effectivePrior, members, suppression);
+    for (const k of stale.testKeys) testKeys.add(k);
+    for (const k of [...stale.testKeys, ...stale.optOutKeys]) leavingKeys.add(k);
 
     // Identifier hashes of active marketing opt-outs (and wrong_number phones),
     // hashed exactly like uploaded members (canonical email; phone WITH '+').
@@ -382,44 +423,85 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
     }
     const hasSuppressedId = (d) => !!((d[0] && suppressedIdHashes.has(d[0])) || (d[1] && suppressedIdHashes.has(d[1])));
 
+    // A leaving row goes whatever it shares with a current member: a row under a
+    // leaving key, or a stored row (not current) that carries an opted-out
+    // identifier. It is kept out of planAdds, so a current member with the same
+    // email and phone is sent with its own address, never handed the leaving row's.
+    const isLeaving = (e) => leavingKeys.has(e.k) || (!currentByHash.has(hashId(e.d)) && hasSuppressedId(e.d));
+    const leaving = effectivePrior.filter(isLeaving);
+    const priorByHash = new Map();
+    for (const e of effectivePrior) if (!isLeaving(e) && !priorByHash.has(hashId(e.d))) priorByHash.set(hashId(e.d), e);
+
+    // Data Manager applies ingest/remove ASYNChronously and possibly out of order, and
+    // matches/removes by ANY identifier — so we hold a conflicting op while one is still
+    // in flight, keyed on INDIVIDUAL identifiers (email, phone, address: idsOf), NOT the
+    // exact [email,phone] row (the same person can reappear with a changed identifier and
+    // a different row hash, yet a pending remove would still match them by the shared one).
+    const pendingIngestIds = new Set();
+    const pendingRemoveIds = new Set();
+    for (const p of stillPending) {
+      const target = p.op === 'ingest' ? pendingIngestIds : pendingRemoveIds;
+      for (const e of asEntries(p.members)) for (const id of idsOf(e)) target.add(id);
+    }
+
     const removeEntries = []; // members we remove this run
     const retained = [];      // can't remove: still shares an identifier with a current member
     const heldRemoves = [];   // can't remove yet: an ingest for an identifier is in flight
-    const removedSuppressedIds = new Set(); // ALL identifiers on consent-removed rows
+    const removedSuppressedIds = new Set(); // ALL identifiers on force-removed rows
     let consentRemovals = 0;
+    let testRemovals = 0;
+    // Consent removal, and removal of a leaving row, override shared-identifier
+    // retention. Still deferred while an ingest for one of its identifiers is in
+    // flight (out-of-order apply could make the remove a no-op): heldRemoves retries
+    // next run.
+    const forceRemove = (e) => {
+      if (sharesAny(e, pendingIngestIds)) { heldRemoves.push(e); return; }
+      removeEntries.push(e);
+      if (testKeys.has(e.k)) testRemovals += 1; else consentRemovals += 1;
+      for (const id of idsOf(e)) removedSuppressedIds.add(id);
+    };
+    leaving.forEach(forceRemove);
+
+    // heldAdds: new members deferred, because a remove for one of their identifiers
+    // is in flight or is sent this run (Google may apply this run's ingest before its
+    // remove, and a member left out of state would then never be removed). A held
+    // enrichment or re-send keeps its stored entry in `keep`, so it retries next run.
+    const {
+      addEntries, heldAdds, enrichCount, keep,
+    } = planAdds(currentByHash, priorByHash, (e) => sharesAny(e, pendingRemoveIds) || sharesAny(e, removedSuppressedIds));
+
+    // Never remove a row whose email, phone or address is still held by a current member
+    // (a remove matches by any identifier, so it would drop a person we keep) — retain +
+    // retry. A current member holds its email and phone, and the address stored for it
+    // or sent this run (an edit that was never sent is not on Google).
+    const currentIds = new Set();
+    for (const e of currentByHash.values()) for (const id of e.d.filter(Boolean)) currentIds.add(id);
+    for (const e of keep.values()) for (const id of idsOf(e)) currentIds.add(id);
+
     for (const [h, e] of priorByHash) {
       if (currentByHash.has(h)) continue;
-      if (hasSuppressedId(e.d)) {
-        // Consent removal overrides shared-identifier retention. Still defer
-        // while an ingest for one of its identifiers is in flight (out-of-order
-        // apply could make the remove a no-op) — heldRemoves retries next run.
-        if (hasPendingIngest(e.d)) { heldRemoves.push(e); continue; }
-        removeEntries.push(e);
-        consentRemovals += 1;
-        if (e.d[0]) removedSuppressedIds.add(e.d[0]);
-        if (e.d[1]) removedSuppressedIds.add(e.d[1]);
-        continue;
-      }
-      if (!safeToDelete(e.d)) { retained.push(e); continue; }
-      if (hasPendingIngest(e.d)) heldRemoves.push(e); else removeEntries.push(e);
+      if (sharesAny(e, currentIds)) retained.push(e);
+      else if (sharesAny(e, pendingIngestIds)) heldRemoves.push(e);
+      else removeEntries.push(e);
     }
     // Optimistic state: current members EXCEPT held adds (so they re-add once the remove
     // settles), plus retained orphans, plus held removes (kept so they remove next run).
-    // Current members sharing an identifier with a consent-removed row are also dropped
-    // from state: the remove matches by ANY identifier and may knock them out; absent
-    // from state they re-add next run, and hasPendingRemove holds that re-add until the
-    // remove settles — guaranteed consent removal, one-cycle flicker for the housemate.
+    // Current members sharing an identifier with a force-removed row are also
+    // dropped from state (and not sent this run: held above): the remove matches by
+    // ANY identifier and may knock them out;
+    // absent from state they re-add next run, and the pending-remove hold keeps that
+    // re-add until the remove settles — guaranteed removal, one-cycle flicker for the
+    // housemate.
     let deferredReAdds = 0;
-    const persisted = [
-      ...[...currentByHash.values()].filter((e) => {
-        if (heldAddHashes.has(hashId(e.d))) return false;
-        const sharesRemoved = (e.d[0] && removedSuppressedIds.has(e.d[0])) || (e.d[1] && removedSuppressedIds.has(e.d[1]));
-        if (sharesRemoved) { deferredReAdds += 1; return false; }
-        return true;
-      }),
-      ...retained,
-      ...heldRemoves,
-    ];
+    const persisted = [];
+    for (const row of keep.values()) {
+      if (sharesAny(row, removedSuppressedIds)) {
+        deferredReAdds += 1;
+        continue;
+      }
+      persisted.push(row);
+    }
+    persisted.push(...retained, ...heldRemoves);
 
     const summary = {
       audienceKey,
@@ -430,12 +512,14 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
       eligible: members.length,
       withMatchKeys: currentByHash.size,
       skippedNoKeys,
-      toAdd: addEntries.length,
+      toAdd: addEntries.length - enrichCount,
+      toEnrich: enrichCount,
       toRemove: removeEntries.length,
       retained: retained.length,
-      heldAdds: heldAddHashes.size,
+      heldAdds,
       heldRemoves: heldRemoves.length,
       consentRemovals,
+      testRemovals,
       deferredReAdds,
     };
 
@@ -534,6 +618,8 @@ module.exports = {
     AUDIENCES,
     destination,
     toUserData,
+    addressFor,
+    addressSig,
     hashMember,
     canonicalEmail,
     customerId,

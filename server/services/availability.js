@@ -537,9 +537,8 @@ class AvailabilityEngine {
   // unlinked live self-bookings and live estimate holds, as [{ start, end }]
   // minutes.
   async loadZoneOccupied(conn, zone, dateStr, options = {}) {
-    // Mirror getAvailableSlots' occupied set: zone services + live
-    // self-bookings. Any overlap means the slot was taken since the
-    // customer loaded the picker.
+    // At confirmation a staff-booked visit occupies its zone even when its
+    // original hold timestamp has lapsed since the customer loaded the picker.
     const occupied = [];
     const scheduledInZone = await conn('scheduled_services')
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')

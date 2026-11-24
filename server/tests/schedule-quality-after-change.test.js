@@ -34,7 +34,7 @@ beforeEach(() => {
   }] }));
 });
 afterEach(() => {
-  ['GATE_SCHEDULE_QUALITY_MEASUREMENTS', 'GATE_ROUTE_REORDER', 'GATE_ROUTE_REORDER_REPAIR', 'GATE_DRIVE_TIME_CALIBRATION']
+  ['GATE_SCHEDULE_QUALITY_MEASUREMENTS', 'GATE_ROUTE_REORDER', 'GATE_ROUTE_REORDER_REPAIR']
     .forEach(gate => { delete process.env[gate]; });
 });
 
@@ -157,7 +157,7 @@ test('a full gate shutdown during alert reconciliation leaves the measured reque
 });
 
 test('a committed change repairs first and measures the resulting route', async () => {
-  ['GATE_ROUTE_REORDER', 'GATE_ROUTE_REORDER_REPAIR', 'GATE_DRIVE_TIME_CALIBRATION'].forEach(gate => { process.env[gate] = 'true'; });
+  ['GATE_ROUTE_REORDER', 'GATE_ROUTE_REORDER_REPAIR'].forEach(gate => { process.env[gate] = 'true'; });
   let commit;
   const trx = { executionPromise: new Promise(resolve => { commit = resolve; }) };
   runRouteRepairAfterChange.mockImplementationOnce(async () => {
@@ -174,7 +174,7 @@ test('a committed change repairs first and measures the resulting route', async 
 
 test('the repair gate can run independently of observational snapshots', async () => {
   delete process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS;
-  ['GATE_ROUTE_REORDER', 'GATE_ROUTE_REORDER_REPAIR', 'GATE_DRIVE_TIME_CALIBRATION'].forEach(gate => { process.env[gate] = 'true'; });
+  ['GATE_ROUTE_REORDER', 'GATE_ROUTE_REORDER_REPAIR'].forEach(gate => { process.env[gate] = 'true'; });
   runRouteRepairAfterChange.mockResolvedValueOnce({ status: 'completed', applied: 1 });
   expect(await refreshScheduleQualityAfterChange({ jobId: 'job', now }, conn)).toMatchObject({ status: 'repair_checked', repair: { applied: 1 } });
   expect(getScheduleQualityMeasurements).not.toHaveBeenCalled();
@@ -185,7 +185,7 @@ test.each([
   { status: 'completed_with_errors', failed: 1 },
   { status: 'failed', failed: 0 },
 ])('returned repair failure %# retains the durable request', async repair => {
-  ['GATE_ROUTE_REORDER', 'GATE_ROUTE_REORDER_REPAIR', 'GATE_DRIVE_TIME_CALIBRATION'].forEach(gate => { process.env[gate] = 'true'; });
+  ['GATE_ROUTE_REORDER', 'GATE_ROUTE_REORDER_REPAIR'].forEach(gate => { process.env[gate] = 'true'; });
   runRouteRepairAfterChange.mockResolvedValueOnce(repair);
   expect(await refreshScheduleQualityAfterChange({ dates: ['2040-09-10'], now }, conn)).toMatchObject({ status: 'recorded', repair });
   expect(queue.retryQualityRefresh).toHaveBeenCalledWith(expect.objectContaining({ id: 'refresh-job' }),
@@ -250,7 +250,7 @@ test('retry leases and settlement use fresh clocks when no clock is supplied', a
 test('a delayed repair timestamps the measured plan after repair, not when the request started', async () => {
   jest.useFakeTimers().setSystemTime(now);
   const measuredAt = new Date(now.getTime() + 20 * 60 * 1000);
-  ['GATE_ROUTE_REORDER', 'GATE_ROUTE_REORDER_REPAIR', 'GATE_DRIVE_TIME_CALIBRATION'].forEach(gate => { process.env[gate] = 'true'; });
+  ['GATE_ROUTE_REORDER', 'GATE_ROUTE_REORDER_REPAIR'].forEach(gate => { process.env[gate] = 'true'; });
   runRouteRepairAfterChange.mockImplementationOnce(async () => {
     jest.setSystemTime(measuredAt);
     return { status: 'completed', applied: 1 };

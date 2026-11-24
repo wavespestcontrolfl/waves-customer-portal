@@ -1,6 +1,6 @@
 /**
  * GATE_DAY_ONLY_PROMISE part D: the voice agent's context states only the DATE for a visit whose customer was told only
- * the day, plus the plain "do not state or guess an hour" note. Gate off = today's text. No model call, no database:
+ * the day, plus the plain "do not state or guess an hour" note.  No model call, no database:
  * the schedule rows are fakes and the promise reader (time-promise.js) is mocked.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -12,7 +12,7 @@ jest.mock('../services/open-balance', () => ({
   openBalanceSummary: jest.fn(async () => ({ total: 0, count: 0, moreCount: 0, invoices: [] })),
   openBalanceExists: jest.fn(async () => false),
 }));
-jest.mock('../services/time-promise', () => ({ dayOnlyPromiseOn: jest.fn(), loadTimeDisplay: jest.fn() }));
+jest.mock('../services/time-promise', () => ({ loadTimeDisplay: jest.fn() }));
 
 const db = require('../models/db');
 const timePromise = require('../services/time-promise');
@@ -40,19 +40,12 @@ const overview = () => relayContext.accountOverviewText('c-1111', { tier: 'full'
 
 beforeEach(() => {
   jest.clearAllMocks();
-  timePromise.dayOnlyPromiseOn.mockReturnValue(false);
   primeSchedule([VISIT]);
 });
 
 describe('account overview (lookup tool text)', () => {
-  test('gate off: today\'s text, the window is stated, the promise reader is never called', async () => {
-    const out = await overview();
-    expect(out).toContain('Next appointment: Tuesday August 18 for Pest Control, arrival window 9:00 AM to 11:00 AM.');
-    expect(timePromise.loadTimeDisplay).not.toHaveBeenCalled();
-  });
 
-  test('gate on + day-only visit: the date and the note, no hour anywhere in the line', async () => {
-    timePromise.dayOnlyPromiseOn.mockReturnValue(true);
+  test('day-only visit: the date and the note, no hour anywhere in the line', async () => {
     timePromise.loadTimeDisplay.mockResolvedValue(new Map([['visit-1', { showHour: false, level: 'none', eligible: true }]]));
     const out = await overview();
     const line = out.match(/Next appointment:[^.]*\./)[0];
@@ -62,16 +55,14 @@ describe('account overview (lookup tool text)', () => {
     expect(timePromise.loadTimeDisplay).toHaveBeenCalledTimes(1);
   });
 
-  test('gate on + customer-picked visit: the hour is kept exactly as today', async () => {
-    timePromise.dayOnlyPromiseOn.mockReturnValue(true);
+  test('customer-picked visit: the hour is kept exactly as today', async () => {
     timePromise.loadTimeDisplay.mockResolvedValue(new Map([['visit-1', { showHour: true, level: 'hour', eligible: false }]]));
     const out = await overview();
     expect(out).toContain('Next appointment: Tuesday August 18 for Pest Control, arrival window 9:00 AM to 11:00 AM.');
     expect(out).not.toContain('texted the day before');
   });
 
-  test('gate on + the read failed: the day-only wording, never the hour', async () => {
-    timePromise.dayOnlyPromiseOn.mockReturnValue(true);
+  test('the read failed: the day-only wording, never the hour', async () => {
     timePromise.loadTimeDisplay.mockRejectedValue(new Error('db down'));
     const out = await overview();
     expect(out).toContain(NOTE);
@@ -82,7 +73,7 @@ describe('account overview (lookup tool text)', () => {
 describe('KNOWN CALLER block', () => {
   const base = { customer: { first_name: 'Pat', member_since: '2023-04-01T00:00:00Z' }, services: [], lastVisit: null, balance: null, priorCall: null, tier: 'full', attested: true };
 
-  test('gate off / hour visit: today\'s line', () => {
+  test('hour visit: today\'s line', () => {
     const out = relayContext.buildKnownCallerBlock({ ...base, nextAppointment: { date: 'Tuesday, August 18th', service: 'Pest Control', window: '9:00 AM to 11:00 AM' } });
     expect(out).toContain('Next appointment: Tuesday, August 18th — Pest Control (window starts 9:00 AM to 11:00 AM)');
   });

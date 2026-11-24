@@ -243,6 +243,30 @@ describe("MobileEstimateRow send and booking-link actions", () => {
     expect(screen.getByRole("button", { name: "Retry sending estimate" })).toBeEnabled();
   });
 
+  it("offers no staff accept on an open plan-start quote: only the customer accepts it (codex pre-push P1)", () => {
+    renderRow({ estimate: { ...ESTIMATE, source: "plan_start" } });
+    openActions();
+    expect(screen.queryByRole("button", { name: "Mark won (verbal yes)" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Mark annual prepay" })).not.toBeInTheDocument();
+    cleanup();
+    renderRow();
+    openActions();
+    expect(screen.getByRole("button", { name: "Mark won (verbal yes)" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Mark annual prepay" })).toBeInTheDocument();
+  });
+
+  it("offers no Edit estimate on a customer's own mint, which the server refuses to revise (codex pre-push P1)", () => {
+    for (const source of ["plan_start", "plan_restart"]) {
+      renderRow({ estimate: { ...ESTIMATE, source } });
+      openActions();
+      expect(screen.queryByRole("button", { name: "Edit estimate" })).not.toBeInTheDocument();
+      cleanup();
+    }
+    renderRow();
+    openActions();
+    expect(screen.getByRole("button", { name: "Edit estimate" })).toBeInTheDocument();
+  });
+
   it("offers Send booking link only on a row the server marks eligible", () => {
     renderRow({ estimate: { ...ESTIMATE, bookingLinkEligible: false } });
     openActions();

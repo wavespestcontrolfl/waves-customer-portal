@@ -32,10 +32,37 @@ it('shows recurring prices and additional one-time work without repeating a setu
   expect(screen.getByText('Available times')).toBeInTheDocument();
 });
 
+it('a locked section (a fixed quote) has no cadence step and no way back to one', () => {
+  const pest = { key: 'pest_control', label: 'Pest Control', isRecurring: true, frequencies: [
+    { key: 'quarterly', visitsPerYear: 4, perTreatment: 99 }, { key: 'monthly', visitsPerYear: 12, perTreatment: 45 }] };
+  const flow = (lockedSection) => (
+    <WebsiteEstimateFlow {...base} oneTime={false} services={[pest]} selected={{ pest_control: 'quarterly' }} lockedSection={lockedSection} />
+  );
+  const { unmount } = render(flow(() => true));
+  expect(screen.getByRole('heading', { name: 'Your Quote' })).toBeInTheDocument();
+  expect(screen.getByText('Quarterly Pest Control Service')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /change frequency/i })).not.toBeInTheDocument();
+  unmount();
+  // The same section unlocked opens on the cadence step.
+  render(flow(() => false));
+  expect(screen.getByRole('heading', { name: 'How often for Pest Control?' })).toBeInTheDocument();
+});
+
 it('keeps booking unavailable when a line has no quoted amount', () => {
   render(<WebsiteEstimateFlow {...base} oneTimeBreakdown={{ items: [{ label: 'Inspection', amount: null }] }} />);
   expect(screen.getByText('We’ll confirm your price')).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: /book my service/i })).not.toBeInTheDocument();
+});
+
+it('a notice from the page (a refused plan quote) takes the place of booking and the contact line on the quote step (codex pre-push P1)', () => {
+  const priced = { items: [{ service: 'wasp', label: 'Wasp Nest Removal', amount: 150 }] };
+  const { rerender } = render(<WebsiteEstimateFlow {...base} canBook={false} oneTimeBreakdown={priced}
+    quoteNotice={<div role="status">This quote changed. Get a current quote from your portal.</div>} />);
+  expect(screen.getByRole('status')).toHaveTextContent('This quote changed. Get a current quote from your portal.');
+  expect(screen.queryByText('Our team will contact you to arrange your service.')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /book my service/i })).not.toBeInTheDocument();
+  rerender(<WebsiteEstimateFlow {...base} canBook={false} oneTimeBreakdown={priced} />);
+  expect(screen.getByText('Our team will contact you to arrange your service.')).toBeInTheDocument();
 });
 
 it('preserves a server-supplied one-time label without doubling its prefix', () => {

@@ -49,10 +49,10 @@ describe('every product the v13 program can log has a decision', () => {
   const inventory = readInventoryNames();
   const recipe = readRecipeNames();
 
-  test('the readiness list was read whole (26 names today; every v13_ key in the block is read)', () => {
+  test('the readiness list was read whole (27 names today; every v13_ key in the block is read)', () => {
     const src = fs.readFileSync(path.join(__dirname, '../routes/admin-inventory.js'), 'utf8');
     const block = src.slice(src.indexOf('const V13_LAWN_PROTOCOL_PRODUCT_DEFINITIONS = ['), src.indexOf('].map(', src.indexOf('const V13_LAWN_PROTOCOL_PRODUCT_DEFINITIONS = [')));
-    expect(inventory).toHaveLength(26);
+    expect(inventory).toHaveLength(27);
     expect(inventory).toHaveLength((block.match(/\['v13_/g) || []).length);
     expect(new Set(inventory).size).toBe(inventory.length);
     expect(recipe.length).toBeGreaterThan(15);
@@ -80,6 +80,7 @@ describe('the mapping, name by name', () => {
     ['LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide', 'pre_emergent', null, []],
     ['Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide', 'pre_emergent', null, []],
     ['LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer', 'pre_emergent', null, ['granular_fertilizer']],
+    ['LESCO Stonewall 0.37% 18-0-10', 'pre_emergent', null, ['granular_fertilizer']],
     ['LESCO Nutra-TECH T&O Micronutrient Package', 'iron_micros', null, []],
     ['Velista', 'fungicide', null, []],
     ['Gravex 20 EW', 'fungicide', null, []],
@@ -127,6 +128,14 @@ describe('the engine prints the existing approved sentence for each name', () =>
     expect(one.rows.map((r) => r.id)).toEqual(two.rows.map((r) => r.id));
     expect(lines(one)).toEqual(lines(two));
     expect(visible(one)).toEqual([PRODUCT_ROWS.granular_fertilizer.visibleChange, PRODUCT_ROWS.pre_emergent.visibleChange]);
+  });
+
+  test('Stonewall 0.37% 18-0-10 (the October bag) reads the same two rows as the Dimension granular', () => {
+    const stonewall = buildLawnExpectations({ applications: apps('LESCO Stonewall 0.37% 18-0-10'), visitDate: '2026-10-08' });
+    const dimension = buildLawnExpectations({ applications: apps('LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer'), visitDate: '2026-10-08' });
+    expect(stonewall.rows.map((r) => r.id).sort()).toEqual(['granular_fertilizer', 'pre_emergent']);
+    expect(stonewall.rows.map((r) => r.id)).toEqual(dimension.rows.map((r) => r.id));
+    expect(lines(stonewall)).toEqual(lines(dimension));
   });
 
   test('fungicides: preventive until a target or named issue says curative (the rule is unchanged)', () => {

@@ -191,6 +191,15 @@ describe('the register data', () => {
   });
 });
 
+describe('the house bifenthrin facts (owner 2026-11-18)', () => {
+  test('only the LESCO Crosscheck Plus fact names a product as the bifenthrin Waves applies; Talak is scoped to the visits that record it', () => {
+    expect(FACTS.filter((fact) => /is the bifenthrin Waves applies/.test(fact.content)).map((fact) => fact.slug)).toEqual(['fact-bifenthrin-crosscheck-label']);
+    const talak = FACTS.find((fact) => fact.slug === 'fact-bifenthrin-talak-label');
+    expect(talak.content).toContain('is the bifenthrin on the visit records that name it; since November 2026 Waves applies LESCO Crosscheck Plus instead.');
+    expect(FACTS.find((fact) => fact.slug === 'fact-bifenthrin-crosscheck-label').verifiedOn).toBe('2026-11-18');
+  });
+});
+
 describe('planFactSync (pure)', () => {
   const fact = FACTS[0];
   const TODAY = '2026-09-28';

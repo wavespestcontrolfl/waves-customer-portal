@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useRef, useSyncExternalStore } from "react";
+import { registerReloadHold } from "../lib/reloadHolds";
 
 export const SMS_DRAFT_STORAGE_KEY = "waves_admin_sms_drafts_v1";
 export const SMS_DRAFT_RECOVERY_WARNING =
@@ -40,6 +41,11 @@ const emptyDraft = () => ({
 // temporarily unavailable. Drafts without an owner remain private to one hook
 // instance, which keeps synthetic/test contexts from sharing account data.
 const ownerMemory = new Map();
+// Drafts whose last write to sessionStorage failed (an edit kept only in this
+// memory, or a sent text still stored) hold an automatic reload of an
+// out-of-date tab until a later write succeeds.
+const unstoredDrafts = new Set();
+registerReloadHold("text-draft", () => unstoredDrafts.size > 0);
 
 function createStore() {
   return { entries: new Map(), listeners: new Map() };
@@ -129,8 +135,12 @@ function persist(ownerId, recipientKey, draft) {
     if (Object.keys(accountDrafts).length) owners[ownerId] = accountDrafts;
     else delete owners[ownerId];
     sessionStorage.setItem(SMS_DRAFT_STORAGE_KEY, JSON.stringify({ owners }));
+    unstoredDrafts.delete(`${ownerId}\n${recipientKey}`);
     return null;
   } catch {
+    // Storage now disagrees with this tab: an unsaved edit, or a sent text
+    // whose stored draft could not be removed and would come back on reload.
+    unstoredDrafts.add(`${ownerId}\n${recipientKey}`);
     return SMS_DRAFT_RECOVERY_WARNING;
   }
 }

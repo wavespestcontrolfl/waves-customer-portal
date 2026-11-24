@@ -2,9 +2,12 @@ const {
   sourceEvidenceFromAttribution,
   sourceEvidenceForLead,
   sourceEvidenceLabelSql,
+  withSourceEvidence,
   attributionWithSourceEvidence,
   classifyAttributionSignals,
 } = require('../services/lead-source-evidence');
+const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { websiteOnlyLines } = require('../config/shared-phone-lines');
 // Vendored snapshot of astro/src/lib/paid-source-fixtures.json; root integration
 // byte-compares the two repos, while portal CI remains standalone.
 const sharedPaidSourceFixtures = require('./fixtures/paid-source-fixtures.json');
@@ -256,6 +259,101 @@ describe('sourceEvidenceForLead', () => {
     })).toMatchObject({ kind: 'unknown', label: 'Source unknown', detail: 'Shared phone line' });
     expect(sourceEvidenceForLead({ first_contact_channel: 'phone' })).toMatchObject({ kind: 'unknown', label: 'Source unknown' });
     expect(sourceEvidenceForLead({ first_contact_channel: 'manual' })).toMatchObject({ kind: 'unknown', label: 'Source unknown' });
+  });
+});
+
+describe('call leads on website sources: only a call that dialed a website-only line proves a website visit', () => {
+  const callLead = (dialed, extra = {}) => ({
+    source_type: 'main_site', source_name: 'Main Site web-only line', source_channel: 'organic',
+    first_contact_channel: 'call', lead_type: 'inbound_call', call_dialed_phone: dialed, ...extra,
+  });
+
+  test('a call that dialed a website-only line proves a website visit, and the line names the site', () => {
+    for (const [number, detail] of [
+      ['+19412542617', 'Main site web-only line'], ['(941) 254-2617', 'Main site web-only line'],
+      ['19412542617', 'Main site web-only line'], ['+19412402066', 'wavespestcontrol.com'],
+    ]) {
+      expect(sourceEvidenceForLead(callLead(number))).toMatchObject({ kind: 'website', label: 'Website', detail });
+    }
+    // A spoke-site source row typed website_organic, not main_site.
+    expect(sourceEvidenceForLead(callLead('+19412535279', { source_type: 'phone_tracking', source_channel: 'website_organic', source_name: 'Spoke Pest — Parrish' })))
+      .toMatchObject({ kind: 'website', label: 'Website', detail: 'parrishpestcontrol.com' });
+  });
+
+  test('a call lead with no source row that dialed a website-only line reads Website', () => {
+    expect(sourceEvidenceForLead(callLead('+19412535279', { source_type: null, source_channel: null, source_name: null })))
+      .toMatchObject({ kind: 'website', label: 'Website', detail: 'parrishpestcontrol.com' });
+  });
+
+  test('an office-set source keeps its label on a website-only line call', () => {
+    expect(sourceEvidenceForLead(callLead('+19412542617', { source_type: 'referral', source_channel: null, source_name: 'Neighbor referral' })))
+      .toMatchObject({ kind: 'referral', label: 'Referral', detail: 'Neighbor referral' });
+  });
+
+  test('the dialed line names the site, not a later source row from another website', () => {
+    expect(sourceEvidenceForLead(callLead('+19412542617', { source_type: 'phone_tracking', source_channel: 'website_organic', source_name: 'parrishpestcontrol.com' })))
+      .toMatchObject({ kind: 'website', detail: 'Main site web-only line' });
+  });
+
+  test('a web form lead keeps its source row: the dialed-line rule is for calls only', () => {
+    expect(sourceEvidenceForLead(callLead('+19412542617', { first_contact_channel: 'form', lead_type: 'quote_wizard', source_name: 'Main Site' })))
+      .toMatchObject({ kind: 'website', detail: 'Main Site' });
+  });
+
+  test('a call to the main line or any office line stays unknown, in any stored format', () => {
+    for (const number of ['+19412975749', '(941) 297-5749', '+19413187612', '9412972817', '+19412972606', '+19412973337']) {
+      expect(sourceEvidenceForLead(callLead(number))).toMatchObject({
+        kind: 'unknown', label: 'Source unknown', detail: 'Shared phone line',
+      });
+    }
+  });
+
+  test('the call decides, not the source row: a website row whose call dialed the main line stays unknown', () => {
+    // A later quote can fill an empty lead_source_id with a spoke row.
+    expect(sourceEvidenceForLead(callLead('+19412975749', { source_type: 'phone_tracking', source_channel: 'website_organic', source_name: 'parrishpestcontrol.com' })))
+      .toMatchObject({ kind: 'unknown', label: 'Source unknown' });
+  });
+
+  test('an office-made website row with the toll-free line or an unregistered number stays unknown', () => {
+    for (const number of [TWILIO_NUMBERS.tollFree.number, '+15555550100']) {
+      expect(sourceEvidenceForLead(callLead(number, { source_type: 'phone_tracking', source_channel: 'website_organic' })))
+        .toMatchObject({ kind: 'unknown', label: 'Source unknown' });
+    }
+  });
+
+  test('a number that only ends in a website line\'s digits, or has them after a + as another country\'s number, is not that line', () => {
+    for (const number of ['+449412542617', '0019412542617', '29412542617', '+9412542617']) {
+      expect(sourceEvidenceForLead(callLead(number))).toMatchObject({ kind: 'unknown', label: 'Source unknown' });
+    }
+  });
+
+  test('a lead with no recorded call, or an unreadable dialed number, stays unknown', () => {
+    for (const number of [undefined, null, '', '555']) {
+      expect(sourceEvidenceForLead(callLead(number))).toMatchObject({ kind: 'unknown', detail: 'Shared phone line' });
+    }
+  });
+
+  test('a persisted source_evidence label wins over the line rule', () => {
+    expect(sourceEvidenceForLead(callLead('+19412975749', {
+      extracted_data: { source_evidence: { kind: 'organic_search', label: 'Organic search', basis: 'Saw a search referral.' } },
+    }))).toMatchObject({ kind: 'organic_search', label: 'Organic search' });
+  });
+
+  test('withSourceEvidence uses the dialed number but does not return it', () => {
+    const [row] = withSourceEvidence([{ id: 1, ...callLead('+19412542617') }]);
+    expect(row.source_evidence).toMatchObject({ label: 'Website' });
+    expect(row).not.toHaveProperty('call_dialed_phone');
+  });
+
+  test('the sort SQL reads the dialed number and carries the website-only lines as bindings, after the evidence kinds', () => {
+    const db = { raw: jest.fn((sql, bindings) => ({ sql, bindings })) };
+    const raw = sourceEvidenceLabelSql(db);
+    const websiteOnly = websiteOnlyLines(TWILIO_NUMBERS).map((line) => line.number.replace(/\D/g, '').slice(-10));
+    expect(raw.sql).toContain('lead_call.to_phone');
+    expect(raw.sql).not.toContain('lead_sources.twilio_phone_number');
+    expect(raw.bindings.slice(-websiteOnly.length)).toEqual(websiteOnly);
+    expect(websiteOnly).toContain('9412542617');
+    expect(websiteOnly).not.toContain('9412975749');
   });
 });
 

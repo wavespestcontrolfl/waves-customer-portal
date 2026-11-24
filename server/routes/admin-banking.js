@@ -10,7 +10,6 @@ const plaidSync = require('../services/plaid-sync');
 const CashForecastInputs = require('../services/cash-forecast/inputs');
 const { loadForecastInput } = require('../services/cash-forecast/load');
 const { computeForecast } = require('../services/cash-forecast/engine');
-const featureGates = require('../config/feature-gates');
 const { parseETDateTime, etWeekStart, etMonthStart, etDateString } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireAdmin);
@@ -423,7 +422,7 @@ router.get('/stats', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// GET /cash-today — owner-only Cash today card (GATE_CASH_FORECAST)
+// GET /cash-today — owner-only Cash today card
 // ═══════════════════════════════════════════════════════════════
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const isUsd = (currency) => String(currency || 'USD').toUpperCase() === 'USD';
@@ -465,7 +464,6 @@ async function readInTransit() {
 }
 
 router.get('/cash-today', requireFullAccess, async (req, res) => {
-  if (!featureGates.cashForecastLive()) return res.status(404).json({ error: 'Not found' });
   try {
     const { accounts, cards, unavailable } = await plaidSync.readCashBalances();
     const inTransit = await readInTransit();
@@ -489,19 +487,15 @@ router.get('/cash-today', requireFullAccess, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// /cash-forecast — owner-only 13-week cash forecast (GATE_CASH_FORECAST, step 2)
+// /cash-forecast — owner-only 13-week cash forecast (step 2)
 // ═══════════════════════════════════════════════════════════════
 // Owner 2026-11-04 "A A A A" (Banking decision page). The read works only from data the portal already
 // has (services/cash-forecast/load.js reads; engine.js computes; the free Plaid /accounts/get and
 // Stripe's balance read). The input routes store what the owner types: planned items, the settings
 // (floor, last year's receipts by month) and the business/household mark of each repeating bill (step
-// 2c; a label only). Owner only; 404 while the gate is off.
-function cashForecastGate(req, res, next) {
-  if (!featureGates.cashForecastLive()) return res.status(404).json({ error: 'Not found' });
-  return next();
-}
+// 2c; a label only). Owner only.
 
-router.get('/cash-forecast', requireFullAccess, cashForecastGate, async (req, res) => {
+router.get('/cash-forecast', requireFullAccess, async (req, res) => {
   try {
     const input = await loadForecastInput();
     res.json({ fetched_at: new Date().toISOString(), ...computeForecast(input) });
@@ -511,7 +505,7 @@ router.get('/cash-forecast', requireFullAccess, cashForecastGate, async (req, re
   }
 });
 
-router.get('/cash-forecast/inputs', requireFullAccess, cashForecastGate, async (req, res) => {
+router.get('/cash-forecast/inputs', requireFullAccess, async (req, res) => {
   try {
     const [items, settings] = await Promise.all([CashForecastInputs.listItems(db), CashForecastInputs.getSettings(db)]);
     res.json({ items, settings, kinds: CashForecastInputs.KINDS, cadences: CashForecastInputs.CADENCES });
@@ -536,18 +530,18 @@ function cashForecastWrite(handler, { created = false } = {}) {
   };
 }
 
-router.post('/cash-forecast/items', requireFullAccess, cashForecastGate,
+router.post('/cash-forecast/items', requireFullAccess,
   cashForecastWrite((req) => CashForecastInputs.createItem(db, req.body, req.technicianId), { created: true }));
-router.patch('/cash-forecast/items/:id', requireFullAccess, cashForecastGate,
+router.patch('/cash-forecast/items/:id', requireFullAccess,
   cashForecastWrite((req) => CashForecastInputs.updateItem(db, req.params.id, req.body, req.technicianId)));
-router.delete('/cash-forecast/items/:id', requireFullAccess, cashForecastGate,
+router.delete('/cash-forecast/items/:id', requireFullAccess,
   cashForecastWrite((req) => CashForecastInputs.deactivateItem(db, req.params.id, req.technicianId)));
-router.put('/cash-forecast/settings', requireFullAccess, cashForecastGate,
+router.put('/cash-forecast/settings', requireFullAccess,
   cashForecastWrite((req) => CashForecastInputs.saveSettings(db, req.body, req.technicianId)));
 // :key is a repeating bill's merchant key from the forecast, URL-encoded ("ACME%20CLOUD").
-router.put('/cash-forecast/marks/:key', requireFullAccess, cashForecastGate,
+router.put('/cash-forecast/marks/:key', requireFullAccess,
   cashForecastWrite((req) => CashForecastInputs.saveMark(db, req.params.key, req.body, req.technicianId)));
-router.delete('/cash-forecast/marks/:key', requireFullAccess, cashForecastGate,
+router.delete('/cash-forecast/marks/:key', requireFullAccess,
   cashForecastWrite((req) => CashForecastInputs.clearMark(db, req.params.key)));
 
 module.exports = router;

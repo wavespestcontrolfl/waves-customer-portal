@@ -52,7 +52,7 @@ const {
   isServiceDateToday,
   isPlacedOrLegacyDateOnly,
 } = require('../services/stops-ahead');
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, isEnabled } = require('../config/feature-gates');
 const { customerTrackState } = require('../services/track-transitions');
 const { dayOnlyVisit } = require('../services/time-display');
 const { dateOnlyString } = require('../utils/date-only');
@@ -823,6 +823,8 @@ router.get('/:token', async (req, res, next) => {
         ? await buildApproxVehicle(row)
         : null,
       summary: customerState === 'complete' ? await buildSummary(row) : null,
+      // GATE_DOC_CROSS_SELL: absent keys = no cards (see trackCards).
+      ...(customerState === 'complete' ? await trackCards(req.params.token) : {}),
       cancellation: customerState === 'cancelled'
         ? { reason: row.cancellation_reason || null, cancelledAt: row.cancelled_at }
         : null,
@@ -952,6 +954,81 @@ router.post('/:token/view', async (req, res) => {
   }
 });
 
+// ── Add-a-service + referral cards (GATE_DOC_CROSS_SELL, owner 2026-11-21) ──
+// On a COMPLETED visit's tracker. Each card is a link into the Waves app;
+// this router has no card tap route (services/app-link-cards.js). The track
+// link also goes to the account's service contacts (tenant, home buyer,
+// property manager — see the identity block above), so the cards show only
+// on an account whose links go to the account holder alone: no service
+// contact on the account and no third-party payer on the job, the visit's
+// invoice or the account. A display rule: the app's sign-in decides who may
+// act.
+
+// Does any invoice of the visit bill a third party? An invoice can do that
+// by itself, with no payer on the job or the account (buildSummary hides
+// the pay link for the same reason). Any invoice of this visit counts, by
+// either link an invoice carries: the job, or ANY service record of the job
+// (a visit can have more than one).
+async function visitInvoiceBillsThirdParty(database, visitId, recordIds) {
+  const payerInvoice = await database('invoices')
+    .where((q) => {
+      q.where({ scheduled_service_id: visitId });
+      if (recordIds.length) q.orWhereIn('service_record_id', recordIds);
+    })
+    .whereNotNull('payer_id')
+    .first('id');
+  return Boolean(payerInvoice);
+}
+
+// → the customer id when the token's visit may show the cards, else null.
+async function trackCardCustomerId(token) {
+  if (!isEnabled('docCrossSell') || !TOKEN_RE.test(token || '')) return null;
+  const row = await db('scheduled_services as s')
+    .leftJoin('customers as c', 's.customer_id', 'c.id')
+    .where('s.track_view_token', token)
+    .first(
+      's.id', 's.customer_id', 's.status', 's.track_token_expires_at', 's.is_callback',
+      's.payer_id as job_payer_id', 'c.payer_id as customer_payer_id',
+      'c.active as customer_active', 'c.deleted_at as customer_deleted_at',
+      ...SERVICE_CONTACT_COLUMNS.map((col) => `c.${col}`),
+    );
+  if (!row?.customer_id || !isTrackTokenLive(row.track_token_expires_at)) return null;
+  // The cards live only as long as the link does (it expires a day after the
+  // visit's window). isTrackTokenLive reads a link with no expiry on record
+  // as live for good, so such a link carries no cards (owner 2026-11-22,
+  // "week": no card on a link months later).
+  if (!row.track_token_expires_at) return null;
+  if (row.status !== 'completed') return null;
+  const { linkReachesOnlyAccountHolder, appOpensForCustomer } = require('../services/app-link-cards');
+  // A customer who has since cancelled: the app would not open the cards' tabs.
+  if (!appOpensForCustomer(row)) return null;
+  if (!linkReachesOnlyAccountHolder(row, [row.job_payer_id, row.customer_payer_id])) return null;
+  const records = await db('service_records')
+    .where({ scheduled_service_id: row.id })
+    .select('id', 'is_callback');
+  if (await visitInvoiceBillsThirdParty(db, row.id, records.map((r) => r.id))) return null;
+  // A complaint-driven visit gets neither card (owner 2026-08-30, the
+  // report's rule): no upsell and no referral ask after a callback. The
+  // flag sits on the job and on the service records (any of them); a
+  // completed visit can have no service record.
+  const { reserviceReportCopyGateOn } = require('../services/service-report/reservice-report');
+  const callback = row.is_callback === true || records.some((r) => r.is_callback === true);
+  if (reserviceReportCopyGateOn() && callback) return null;
+  return row.customer_id;
+}
+
+// Best-effort: any failure renders the tracker without the cards.
+async function trackCards(token) {
+  try {
+    const customerId = await trackCardCustomerId(token);
+    if (!customerId) return {};
+    return await require('../services/app-link-cards').appLinkCardsForCustomer(customerId);
+  } catch (err) {
+    logger.warn(`[track-public] cards suppressed (code=${err?.code || 'none'})`);
+    return {};
+  }
+}
+
 router._test = {
   isFreshVehicleTimestamp,
   ensureEnRouteDestinationGeocoded,
@@ -964,6 +1041,7 @@ router._test = {
   trackWindow,
   allowsScheduledRouteTracking,
   publicTrackState,
+  trackCards,
 };
 
 module.exports = router;

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Award,
   Building2,
+  CalendarDays,
   MessageSquareText,
   CheckCircle2,
   Download,
@@ -350,6 +351,9 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
   // Set by "AI Reply": binds the generated text to the review + account facts
   // it was grounded on (validated at publish time).
   const [groundingToken, setGroundingToken] = useState(null);
+  // Set by "Use Draft" on a machine-authored draft (Agent Ops, or a restored
+  // attempt from an AI draft): the server checks its app name strictly.
+  const [fromAgentDraft, setFromAgentDraft] = useState(false);
   // The card keeps its key across reloads; when the live reply changes
   // underneath it (retract, sync, Google-side edit) the editor must follow,
   // or a retracted reply could be re-posted from stale editor text.
@@ -362,6 +366,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
     setEditing(false);
     setDraftToken(null);
     setGroundingToken(null);
+    setFromAgentDraft(false);
     setObservedDraft(review.draftReply || null);
   }, [review.reply, review.draftReply, review.reviewToken]);
   const [submitting, setSubmitting] = useState(false);
@@ -374,6 +379,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
       await onReplySubmit(review.id, replyText.trim(), {
         draftToken,
         groundingToken,
+        fromAgentDraft,
         expectedReply: review.reply || null,
         expectedDraft: observedDraft,
         expectedReview: review.reviewToken || null,
@@ -397,6 +403,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
         setReplyText(data.reply);
         setGroundingToken(data.groundingToken || null);
         setDraftToken(null);
+        setFromAgentDraft(false);
         setEditing(true);
       }
     } catch (e) {
@@ -509,6 +516,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
                   setReplyText(review.draftReply);
                   setDraftToken(review.draftToken || null);
                   setGroundingToken(null);
+                  setFromAgentDraft(Boolean(review.draftFromAgent));
                   setEditing(true);
                 }}
                 variant="secondary"
@@ -639,6 +647,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
                     // An ordinary manual edit carries no draft identity (codex r55).
                     setDraftToken(null);
                     setGroundingToken(null);
+                    setFromAgentDraft(false);
                     setEditing(true);
                     setReplyText(review.reply);
                   }}
@@ -720,6 +729,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
                     setReplyText(review.reply || "");
                     setDraftToken(null);
                     setGroundingToken(null);
+                    setFromAgentDraft(false);
                   }}
                   variant="secondary"
                 >
@@ -813,6 +823,37 @@ function fmtDateTime(value) {
   } catch {
     return "";
   }
+}
+// Owner 2026-11-20 D4: the monthly cap on paid reviews per technician (null = none).
+// "No monthly cap" only for a policy that loaded; a failed load shows "Unavailable", never a guess.
+function monthlyCapLabel(policy, readFailed) {
+  // A failed policy read, first or a later refresh, means the policy on screen may be stale: say so.
+  if (!policy || readFailed) return "Unavailable";
+  return policy.monthlyCapCount
+    ? `${policy.monthlyCapCount} reviews a month`
+    : "No monthly cap";
+}
+// Owner 2026-11-20 D4: say so when the server skipped payouts over the monthly cap.
+function paidNoticeFor(result) {
+  if (!(result?.skippedOverCap > 0)) return null;
+  return `Marked ${result.updated || 0} paid; ${result.skippedOverCap} skipped (over the monthly cap)`;
+}
+function PaidNotice({ text }) {
+  if (!text) return null;
+  return (
+    <Card className="p-[12px] mb-[14px] text-ui-body text-zinc-900" role="status">
+      {text}
+    </Card>
+  );
+}
+// A fresh dashboard response carries the policy: the cap card takes it and drops any earlier failure.
+function applyCapPolicy(dashboard, setCapPolicy, setCapReadFailed) {
+  setCapPolicy(dashboard?.policy || null);
+  setCapReadFailed(false);
+}
+function payoutStatusLabel(p) {
+  if (p.status === "paid") return "Paid";
+  return p.overMonthlyCap ? "Over monthly cap — not paid" : "Pending";
 }
 function PolicyInfoCard({ Icon, label, value, sub, color }) {
   return (
@@ -1005,6 +1046,10 @@ function ReviewIncentivesPanel() {
   const [markingPaid, setMarkingPaid] = useState(false);
   const [readError, setReadError] = useState(null);
   const [actionError, setActionError] = useState(null);
+  const [paidNotice, setPaidNotice] = useState(null);
+  // The cap card follows the policy read alone, so a failed attribution-queue read never hides the cap.
+  const [capPolicy, setCapPolicy] = useState(null);
+  const [capReadFailed, setCapReadFailed] = useState(false);
   const [queue, setQueue] = useState([]);
   const [queueLoading, setQueueLoading] = useState(false);
   const [activeRepairId, setActiveRepairId] = useState(null);
@@ -1025,8 +1070,18 @@ function ReviewIncentivesPanel() {
     if (!background) setLoading(true);
     if (!background) setQueueLoading(true);
     if (!background) setReadError(null);
+    const incentivesRead = adminFetch(`/admin/reviews/incentives?days=${days}`).then(
+      (d) => {
+        if (gen === loadGen.current) applyCapPolicy(d, setCapPolicy, setCapReadFailed);
+        return d;
+      },
+      (e) => {
+        if (gen === loadGen.current) setCapReadFailed(true);
+        throw e;
+      },
+    );
     return Promise.all([
-      adminFetch(`/admin/reviews/incentives?days=${days}`),
+      incentivesRead,
       adminFetch(`/admin/reviews/incentives/attribution-queue?days=${days}`),
     ])
       .then(([d, q]) => {
@@ -1065,6 +1120,8 @@ function ReviewIncentivesPanel() {
         method: "POST",
         body: JSON.stringify({ days: Number(days) || 30 }),
       });
+      // The sync's response is a fresh dashboard: its policy replaces the card's, before the queue read.
+      applyCapPolicy(d, setCapPolicy, setCapReadFailed);
       const q = await adminFetch(`/admin/reviews/incentives/attribution-queue?days=${days}`);
       setData(d);
       setQueue(q.items || []);
@@ -1076,20 +1133,21 @@ function ReviewIncentivesPanel() {
     }
   };
   const markPendingPaid = async () => {
-    const ids = (data?.payouts || [])
-      .filter((p) => p.status !== "paid")
-      .map((p) => p.id);
+    // The same list that enabled the button: over-cap rows never go in (owner 2026-11-20 D4).
+    const ids = pendingIds;
     if (!ids.length) return;
     loadGen.current += 1;
     setLoading(false);
     setQueueLoading(false);
     setMarkingPaid(true);
     setActionError(null);
+    setPaidNotice(null);
     try {
-      await adminFetch("/admin/reviews/incentives/mark-paid", {
+      const result = await adminFetch("/admin/reviews/incentives/mark-paid", {
         method: "POST",
         body: JSON.stringify({ ids }),
       });
+      setPaidNotice(paidNoticeFor(result));
       load();
     } catch (e) {
       setActionError(e.message);
@@ -1226,9 +1284,10 @@ function ReviewIncentivesPanel() {
   const summary = data?.summary || {};
   const payouts = data?.payouts || [];
   const pendingIds = payouts
-    .filter((p) => p.status !== "paid")
+    .filter((p) => p.status !== "paid" && !p.overMonthlyCap)
     .map((p) => p.id);
   const policy = data?.policy || {};
+
   const needsAttributionCount = queueLoading
     ? "..."
     : queue.length ||
@@ -1308,6 +1367,7 @@ function ReviewIncentivesPanel() {
           {actionError}
         </Card>
       )}
+      <PaidNotice text={paidNotice} />
 
       {loading ? (
         <div className="text-ink-secondary p-[48px] text-center">
@@ -1315,7 +1375,7 @@ function ReviewIncentivesPanel() {
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-[10px] mb-[14px]">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-[10px] mb-[14px]">
             <PolicyInfoCard
               Icon={Award}
               label="Program active since"
@@ -1328,6 +1388,12 @@ function ReviewIncentivesPanel() {
               value="Confirmed public Google reviews after activation"
               sub="A bonus row is created only after the review is synced from Google and matched to a technician."
               color="text-green-700"
+            />
+            <PolicyInfoCard
+              Icon={CalendarDays}
+              label="Monthly cap"
+              value={monthlyCapLabel(capPolicy, capReadFailed)}
+              sub="Per technician, by Eastern calendar month. Reviews past the cap are not paid."
             />
             <PolicyInfoCard
               Icon={Search}
@@ -1661,7 +1727,7 @@ function ReviewIncentivesPanel() {
                       <div className="text-ui-body font-medium">
                         {/* The summary calls unpaid bonuses "Pending Payroll";
                             keep the ledger vocab aligned (status is 'earned'). */}
-                        {p.status === "paid" ? "Paid" : "Pending"}
+                        {payoutStatusLabel(p)}
                       </div>
                       <div className="font-medium">{money(p.amountCents)}</div>
                     </Card>
@@ -1859,6 +1925,7 @@ export default function ReviewsPage() {
     {
       draftToken = null,
       groundingToken = null,
+      fromAgentDraft = false,
       expectedReply = null,
       expectedDraft = null,
       expectedReview = null,
@@ -1873,6 +1940,7 @@ export default function ReviewsPage() {
         ...(expectedReview ? { expectedReview } : {}),
         ...(draftToken ? { draftToken } : {}),
         ...(groundingToken ? { groundingToken } : {}),
+        ...(fromAgentDraft ? { fromAgentDraft: true } : {}),
       }),
     });
     // A reply removes the row from the server-side "needs reply" result set.
@@ -1898,6 +1966,7 @@ export default function ReviewsPage() {
               // follow-up edit does not report the obsolete draft as observed.
               draftReply: null,
               draftToken: null,
+              draftFromAgent: false,
               draftStale: false,
               // A manual post closes out the auto-reply state server-side
               // (skipped/manual_reply); mirror it so Retract — which deletes

@@ -18,6 +18,23 @@ vi.mock("./BidKitPage", () => ({
   },
 }));
 
+vi.mock("./BuilderProspectsPage", () => ({
+  default: function BuildersStub({ embedded }) {
+    return <div data-testid="builders" data-embedded={String(Boolean(embedded))}>builders</div>;
+  },
+}));
+vi.mock("./RestaurantProspectsPage", () => ({
+  default: function RestaurantsStub({ embedded }) {
+    return <div data-testid="restaurants" data-embedded={String(Boolean(embedded))}>restaurants</div>;
+  },
+}));
+
+vi.mock("./MailProspectsPage", () => ({
+  default: function MailStub({ embedded }) {
+    return <div data-testid="mail" data-embedded={String(Boolean(embedded))}>mail</div>;
+  },
+}));
+
 import BidsPage from "./BidsPage";
 import AdminTabRedirect from "../../components/admin/AdminTabRedirect";
 
@@ -100,4 +117,44 @@ it("redirects /admin/bid-kit to the kit tab and keeps ?item= and the hash", () =
 it("redirects plain /admin/bid-kit to /admin/bids?tab=kit", () => {
   renderAt("/admin/bid-kit");
   expect(screen.getByTestId("where").textContent).toBe("/admin/bids?tab=kit");
+});
+
+it("opens the Builders tab for ?tab=builders", () => {
+  renderAt("/admin/bids?tab=builders");
+  expect(screen.getByTestId("builders")).toHaveAttribute("data-embedded", "true");
+  expect(screen.queryByTestId("desk")).toBeNull();
+  expect(screen.queryByTestId("kit")).toBeNull();
+  expect(screen.getByRole("button", { name: "Builders" })).toHaveAttribute("aria-current", "page");
+});
+
+it("switching to Builders sets ?tab=builders, and an unknown tab falls back to Open bids", () => {
+  renderAt("/admin/bids?tab=nope");
+  expect(screen.getByTestId("desk")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Builders" }));
+  expect(new URLSearchParams(screen.getByTestId("where").textContent.split("?")[1]).get("tab")).toBe("builders");
+  expect(screen.getByTestId("builders")).toBeInTheDocument();
+});
+
+it("opens the Restaurants tab for ?tab=restaurants; switching to it sets the param", () => {
+  renderAt("/admin/bids?tab=restaurants");
+  expect(screen.getByTestId("restaurants")).toHaveAttribute("data-embedded", "true");
+  expect(screen.queryByTestId("builders")).toBeNull();
+  expect(screen.getByRole("button", { name: "Restaurants" })).toHaveAttribute("aria-current", "page");
+  fireEvent.click(screen.getByRole("button", { name: "Builders" }));
+  expect(screen.getByTestId("builders")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Restaurants" }));
+  expect(new URLSearchParams(screen.getByTestId("where").textContent.split("?")[1]).get("tab")).toBe("restaurants");
+  expect(screen.getByTestId("restaurants")).toBeInTheDocument();
+});
+
+it("opens the Mail tab for ?tab=mail; switching to it sets the param", () => {
+  renderAt("/admin/bids?tab=mail");
+  expect(screen.getByTestId("mail")).toHaveAttribute("data-embedded", "true");
+  expect(screen.queryByTestId("restaurants")).toBeNull();
+  expect(screen.getByRole("button", { name: "Mail" })).toHaveAttribute("aria-current", "page");
+  fireEvent.click(screen.getByRole("button", { name: "Restaurants" }));
+  expect(screen.getByTestId("restaurants")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Mail" }));
+  expect(new URLSearchParams(screen.getByTestId("where").textContent.split("?")[1]).get("tab")).toBe("mail");
+  expect(screen.getByTestId("mail")).toBeInTheDocument();
 });

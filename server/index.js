@@ -264,6 +264,12 @@ app.use('/api/public/watering-plan', (req, res, next) => {
   }
   next();
 });
+// New-home postcard page (GATE_MAIL_HOME_PAGE, dark): the WHOLE route is mounted here, BEFORE the wildcard CORS
+// handler below, cors(), the global /api limiter and the body parsers, so every answer (the dark 404, the unknown-token
+// 404, the page) leaves from one place with the same headers. Its guard (privacy headers; the generic 404 while dark,
+// for any method but GET/HEAD and for a path that is not one page token) runs first, then its own 60-a-minute limiter.
+// The page is same-origin (/h/:token), so it needs no CORS.
+app.use('/api/public/home', require('./routes/mail-home-public').preLimiterGuard, require('./routes/mail-home-public'));
 // Public, embeddable endpoints must be CORS-open to ANY origin and must answer
 // their own preflights BEFORE the credentialed allowlist below — the cors()
 // middleware terminates OPTIONS for non-allowlisted origins without an
@@ -323,6 +329,14 @@ app.use('/api/social/series', require('./middleware/no-store').noStore, (req, re
 // response the page never reads, so this route sets no CORS headers.
 app.use('/api/public/blog-read-depth', require('./routes/public-blog-read-depth'));
 
+// Anonymous, cookie-free quote-form and quiz step counter — a near copy of
+// the read-depth beacon above (routes/public-form-steps.js). Same position
+// rules: ABOVE the global cors(), the `/api/` limiter and the body parsers,
+// its own per-IP limiter and capped text parse, terminal 404, no CORS
+// headers. No gate: it only counts anonymous daily totals and cannot message,
+// charge, reprice, delete data or spend money.
+app.use('/api/public/form-steps', require('./routes/public-form-steps'));
+
 // /book "Can't find a time?" preferred-time request (GATE_BOOK_PREFERRED_TIME,
 // dark). The guard (no-store/noindex/no-referrer headers + the generic
 // unknown-route 404 while the gate is off) is mounted ABOVE the global cors()
@@ -362,6 +376,17 @@ app.use('/api/admin/typed-decisions', require('./routes/typed-decisions-labeler'
 // sees a 204 or a 429 and never costs parse work (Codex #7294 r1).
 app.use('/api/public/bug-id-extension', (req, res, next) => {
   if (!require('./config/feature-gates').bugIdExtensionLive()) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
+
+// Job offer family (routes/public-careers-offer.js, GATE_JOB_OFFERS): privacy headers on EVERY answer, then the dark
+// gate — both ABOVE the global cors() (which would answer an OPTIONS preflight 204 on its own) and the global /api/
+// limiter (429), so while the gate is off every request, any method, is the generic 404 with no-store/noindex.
+app.use('/api/public/careers/offer', require('./middleware/no-store').noStore);
+app.use('/api/public/careers/offer', (req, res, next) => {
+  if (!require('./config/feature-gates').isEnabled('jobOffers')) {
     return res.status(404).json({ error: 'Not found' });
   }
   next();
@@ -437,6 +462,8 @@ app.use('/api/public/careers', (req, res, next) => {
   // GATE_JOB_APPLICATIONS off stops new applications without killing the
   // bearer links applicants already hold (Codex r5 P0).
   if (req.path.startsWith('/interview')) return next();
+  // Sent job offers stay live when intake closes: /offer/* answers to GATE_JOB_OFFERS alone (next mount).
+  if (/^\/offer(\/|$)/.test(req.path)) return next();
   if (!require('./config/feature-gates').isEnabled('jobApplications')) {
     return res.status(404).json({ error: 'Not found' });
   }
@@ -619,6 +646,8 @@ app.use('/api/estimates', estimatePublicRoutes.commercialAgreementPreGuard);
 app.use('/api/estimates', estimatePublicRoutes.consumerNoticePreGuard);
 // Commercial first visit picker (GATE_COMMERCIAL_FIRST_VISIT): same reason, same shape.
 app.use('/api/estimates', estimatePublicRoutes.commercialFirstVisitPreGuard);
+// First-visit request (GATE_ESTIMATE_APPROVE_PREFERRED_TIME): same reason, same shape.
+app.use('/api/estimates', estimatePublicRoutes.firstVisitRequestPreGuard);
 
 app.use('/api/', limiter);
 
@@ -858,10 +887,13 @@ app.use('/api/service-preferences', require('./routes/service-preferences'));
 app.use('/api/referrals', referralRoutes);
 app.use('/r', require('./routes/referral-links'));
 app.use('/l', require('./routes/public-shortlinks'));
+// Printed-card review QR: 302 to the nearest office's Google review form (no page).
+app.use('/rv', require('./routes/review-geo-link'));
 // Outside-link click redirect for prep guides — registered destinations only.
 app.use('/go', require('./routes/outbound-redirect'));
 // Digital business card — public token-scoped data + Save-contact vCard.
 app.use('/api/card', require('./routes/card-public'));
+// One new home's page (QR code on a postcard): the address and its stored price by 32-hex token. Dark behind GATE_MAIL_HOME_PAGE.
 // Universal-link association files (apple-app-site-association / assetlinks.json).
 // Dark behind GATE_UNIVERSAL_LINKS — both files 404 until flipped.
 app.use('/.well-known', require('./routes/well-known'));
@@ -889,13 +921,15 @@ app.use('/api/admin/customers/intelligence', adminCustomerIntelRoutes);
 app.use('/api/admin/schedule/:serviceId/property-areas', require('./routes/admin-property-service-areas').serviceRouter);
 app.use('/api/admin/customers/:customerId/properties/:propertyId/areas', require('./routes/admin-property-service-areas').propertyRouter);
 app.use('/api/admin/customers', require('./routes/admin-customer-turf-profile'));
-// Moving link routes (GATE_MOVING_FLOW): per-route requireAdmin, so technician paths on the shared prefix fall through.
+// Moving link routes: per-route requireAdmin, so technician paths on the shared prefix fall through.
 app.use('/api/admin/customers', require('./routes/admin-customer-moves'));
 app.use('/api/admin/customers/:customerId/consumer-notices', require('./routes/admin-consumer-notices'));
 app.use('/api/admin/customers', adminCustomerRoutes);
 app.use('/api/admin/customer-duplicates', require('./routes/admin-customer-duplicates'));
 app.use('/api/admin/neighborhood-access', require('./routes/admin-neighborhood-access'));
 app.use('/api/admin/payroll', require('./routes/admin-payroll'));
+app.use('/api/admin/tech-protocol-audits', require('./routes/admin-tech-protocol-audit'));
+app.use('/api/admin/tech-rewards-scoreboard', require('./routes/admin-tech-rewards-scoreboard'));
 app.use('/api/admin/access-codes', require('./routes/admin-access-codes'));
 app.use('/api/admin/customer-geocodes', require('./routes/admin-customer-geocodes'));
 app.use('/api/admin/dashboard', adminDashboardRoutes);
@@ -908,6 +942,7 @@ app.use('/api/admin/estimates', adminEstimateRoutes);
 app.use('/api/admin/service-outlines', adminServiceOutlineRoutes);
 app.use('/api/admin/estimates', require('./routes/admin-estimate-slots'));
 app.use('/api/admin/estimates', require('./routes/admin-estimate-misting-layout'));
+app.use('/api/admin/roof-entry-read', require('./routes/admin-roof-entry-read'));
 app.use('/api/admin/misting-records', require('./routes/admin-misting-records'));
 app.use('/api/admin/pipeline', require('./routes/admin-pipeline'));
 app.use('/api/admin/lookup', adminPropertyLookupRoutes);
@@ -990,13 +1025,14 @@ app.use('/api/public/appointment', require('./routes/appointment-public'));
 app.use('/api/public/secure-card', require('./routes/secure-card-public'));
 app.use('/api/public/prep', require('./routes/prep-public'));
 app.use('/api/public/price-change', require('./routes/price-change-public'));
-// Customer moving page (GATE_MOVING_FLOW): the link the office sends a customer who is moving. Token-gated on
-// customer_moves.token; every route 404s until the gate is on.
+// Customer moving page: the link the office sends a customer who is moving. Token-gated on
+// customer_moves.token.
 app.use('/api/public/moving', require('./routes/moving-public'));
 app.use('/api/public/lawn-diagnostic', require('./routes/public-lawn-diagnostic'));
 app.use('/api/public/lawn-assessment', photoAssessmentDailyLimiter, require('./routes/public-lawn-assessment'));
 app.use('/api/public/pest-identifier', photoAssessmentDailyLimiter, require('./routes/public-pest-identifier'));
 app.use('/api/public/bug-id-extension', require('./routes/public-bug-id-extension'));
+app.use('/api/public/careers/offer', require('./routes/public-careers-offer'));
 app.use('/api/public/careers', require('./routes/public-careers'));
 app.use('/api/public/estimates', require('./routes/estimate-slots-public'));
 app.use('/api/public/products', require('./routes/public-products'));
@@ -1154,6 +1190,7 @@ app.use('/api/admin/timesheets', require('./routes/admin-timesheet-approval'));
 app.use('/api/tech/timetracking', require('./routes/tech-timetracking'));
 app.use('/api/tech/pay-growth', require('./routes/tech-pay-growth'));
 app.use('/api/tech/payroll', require('./routes/tech-payroll'));
+app.use('/api/tech/rewards-scoreboard', require('./routes/tech-rewards-scoreboard'));
 app.use('/api/admin/leads', require('./routes/admin-leads'));
 app.use('/api/admin/consultations', require('./routes/admin-consultations'));
 app.use('/api/admin/equipment-maintenance', require('./routes/admin-equipment-maintenance'));
@@ -1170,6 +1207,8 @@ app.use('/api/admin/email', require('./routes/admin-email'));
 app.use('/api/admin/bid-desk', require('./routes/admin-bid-desk'));
 // Bid kit (admin only).
 app.use('/api/admin/bid-kit', require('./routes/admin-bid-kit'));
+// Prospects: the Builders permit list (admin only, read only).
+app.use('/api/admin/prospects', require('./routes/admin-prospects'));
 // Trip link summary (staff only, read only).
 app.use('/api/admin/trip-link', require('./routes/admin-trip-link'));
 app.use('/api/admin/pricing-config', require('./routes/admin-pricing-config'));

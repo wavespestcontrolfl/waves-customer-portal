@@ -258,7 +258,7 @@ function completionAddOns(plan, defaults, protocolProductFor) {
     // The bermuda removal step's three lines are one grouped selection (the `options`, with their
     // group, spot mode, no-prefill marker and spray conditions), never three loose one-tap add-ons:
     // a lone Recognition or Fusilade II is refused at completion.
-    if (!id || item.bermudaStep || seen.has(id) || item.product.active === false || !protocolProductFor(item)) continue;
+    if (!id || item.bermudaStep || item.fieldHold || seen.has(id) || item.product.active === false || !protocolProductFor(item)) continue;
     seen.add(id);
     addOns.push(completionItem(item, protocolProductFor(item)));
   }
@@ -306,7 +306,7 @@ function buildLawnCompletionDefaults(plan, context) {
     // the completion writer rejects an inactive product row, so the option
     // would be an action that cannot be completed (Codex r12 P2).
     options: eligible ? [...plan.mixCalculator.items, ...plan.mixCalculator.conditionalOptions]
-      .filter(item => protocolProductFor(item) && item.product?.active !== false)
+      .filter(item => !item.fieldHold && protocolProductFor(item) && item.product?.active !== false)
       .map(item => ({ product: { id: item.product.id, name: item.product.name }, applicationMethod: completionMethod(item, protocolProductFor(item)), ...(item.bermudaStep ? stepOptionFields(item) : {}) })) : [],
     message: !context.propertyMatchesProfile ? 'The saved turf profile could not be matched to this property. Enter the actual work.'
       : !programApplies ? 'No assigned lawn plan for this visit. Add the products actually applied.'

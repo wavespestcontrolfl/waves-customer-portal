@@ -40,7 +40,7 @@ import useUnreadConversations from "../hooks/useUnreadConversations";
 import GlobalCommandPalette from "./admin/GlobalCommandPalette";
 import FocusedBoxMic from "./admin/FocusedBoxMic";
 import { clearEmailDrafts } from "../lib/emailDrafts";
-import { AdminNavigationProvider } from "../hooks/useAdminNavigation";
+import useAdminNavigation, { AdminNavigationProvider } from "../hooks/useAdminNavigation";
 import AdminWorkspaceNavigation from "./admin/AdminWorkspaceNavigation";
 import { confirmLeaveIfGuarded } from "../lib/navigation-guard";
 import { useTechNavigationLock } from "./tech/TechNavigationLock";
@@ -91,6 +91,75 @@ const MAIN_PADDING = [
   { top: 24, bottom: 24, x: 28 },
   { top: "calc(52px + env(safe-area-inset-top) + 16px)", bottom: "calc(56px + env(safe-area-inset-bottom) + 16px)", x: 16 },
 ];
+
+// The phone's bottom tabs. Inside the navigation provider, so Field view (the
+// admin's saved switch) reaches the same rule the Settings page reads.
+function MobileTabLinks({ role, location, navigate, unreadConversations }) {
+  const fieldView = useAdminNavigation()?.fieldView === true;
+  const tabs = getAdminMobileTabs(role, { fieldView });
+  return tabs.map((item) => {
+    const { path, icon: Icon, label } = item;
+    const active = isAdminNavItemActive(
+      item,
+      location.pathname,
+      location.search,
+      { fieldView },
+    );
+    return (
+      <Link
+        key={path}
+        to={path}
+        onClick={(e) => {
+          if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+          // Same stale-mark guard as the sidebar: a no-op re-tap
+          // fires no route change and must not leave a mark.
+          if (`${location.pathname}${location.search}` !== path) {
+            markUsageSource("tabbar");
+          }
+          if (location.pathname === path || location.pathname.startsWith(path + "/")) {
+            e.preventDefault();
+            navigate(path);
+          }
+        }}
+        aria-current={active ? "page" : undefined}
+        className={cn(
+          "flex-1 flex flex-col items-center justify-center gap-[3px] select-none no-underline",
+        )}
+        style={{
+          color: active
+            ? "var(--text-primary)"
+            : "var(--text-tertiary)",
+          minHeight: 44,
+        }}
+      >
+        <span style={{ position: "relative", display: "inline-flex" }}>
+          <Icon
+            size={22}
+            strokeWidth={active ? 2.25 : 1.75}
+            aria-hidden
+          />
+          {item.id === "communications" ? (
+            <UnreadBadge
+              count={unreadConversations}
+              style={{ fontSize: 14, minWidth: 22, height: 22, borderRadius: 11, position: "absolute", top: -6, right: -12 }}
+            />
+          ) : null}
+        </span>
+        <span
+          style={{
+            fontSize: 14,
+            lineHeight: 1.1,
+            letterSpacing: "0.02em",
+            fontWeight: 500,
+          }}
+        >
+          {label}
+          {item.id === "communications" ? <UnreadSrText count={unreadConversations} /> : null}
+        </span>
+      </Link>
+    );
+  });
+}
 
 export default function AdminLayoutV2() {
   const navigate = useNavigate();
@@ -384,67 +453,7 @@ export default function AdminLayoutV2() {
           }}
         >
           <div style={{ display: "flex", alignItems: "stretch", height: 56 }}>
-            {getAdminMobileTabs(user?.role).map((item) => {
-              const { path, icon: Icon, label } = item;
-              const active = isAdminNavItemActive(
-                item,
-                location.pathname,
-                location.search,
-              );
-              return (
-                <Link
-                  key={path}
-                  to={path}
-                  onClick={(e) => {
-                    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
-                    // Same stale-mark guard as the sidebar: a no-op re-tap
-                    // fires no route change and must not leave a mark.
-                    if (`${location.pathname}${location.search}` !== path) {
-                      markUsageSource("tabbar");
-                    }
-                    if (location.pathname === path || location.pathname.startsWith(path + "/")) {
-                      e.preventDefault();
-                      navigate(path);
-                    }
-                  }}
-                  aria-current={active ? "page" : undefined}
-                  className={cn(
-                    "flex-1 flex flex-col items-center justify-center gap-[3px] select-none no-underline",
-                  )}
-                  style={{
-                    color: active
-                      ? "var(--text-primary)"
-                      : "var(--text-tertiary)",
-                    minHeight: 44,
-                  }}
-                >
-                  <span style={{ position: "relative", display: "inline-flex" }}>
-                    <Icon
-                      size={22}
-                      strokeWidth={active ? 2.25 : 1.75}
-                      aria-hidden
-                    />
-                    {item.id === "communications" ? (
-                      <UnreadBadge
-                        count={unreadConversations}
-                        style={{ fontSize: 14, minWidth: 22, height: 22, borderRadius: 11, position: "absolute", top: -6, right: -12 }}
-                      />
-                    ) : null}
-                  </span>
-                  <span
-                    style={{
-                      fontSize: 14,
-                      lineHeight: 1.1,
-                      letterSpacing: "0.02em",
-                      fontWeight: 500,
-                    }}
-                  >
-                    {label}
-                    {item.id === "communications" ? <UnreadSrText count={unreadConversations} /> : null}
-                  </span>
-                </Link>
-              );
-            })}
+            <MobileTabLinks role={user?.role} location={location} navigate={navigate} unreadConversations={unreadConversations} />
           </div>
         </nav>
       )}

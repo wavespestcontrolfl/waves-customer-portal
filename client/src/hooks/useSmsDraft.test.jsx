@@ -5,6 +5,7 @@ import useSmsDraft, {
   SMS_DRAFT_RECOVERY_WARNING,
   SMS_DRAFT_STORAGE_KEY,
 } from "./useSmsDraft";
+import { reloadHoldName } from "../lib/reloadHolds";
 
 beforeEach(() => {
   sessionStorage.clear();
@@ -379,6 +380,12 @@ describe("useSmsDraft", () => {
     expect(result.current.msgBody).toBe("");
     expect(result.current.recoveryWarning).toBe(SMS_DRAFT_RECOVERY_WARNING);
     expect(sessionStorage.getItem(SMS_DRAFT_STORAGE_KEY)).toBe(persistedBeforeClear);
+    // A reload would bring the sent text back as a draft, so it waits.
+    expect(reloadHoldName()).toBe("text-draft");
+
+    Storage.prototype.setItem.mockRestore();
+    act(() => result.current.setMsgBody("Next message"));
+    expect(reloadHoldName()).toBeNull();
   });
 
   it("retains in-memory edits and exposes a recovery warning when storage fails", () => {
@@ -397,10 +404,16 @@ describe("useSmsDraft", () => {
     expect(result.current.msgBody).toBe("Keep this edit");
     expect(result.current.attachments[0].previewUrl).toBe("blob:keep");
     expect(result.current.recoveryWarning).toBe(SMS_DRAFT_RECOVERY_WARNING);
+    // Kept in memory only: an automatic reload of an out-of-date tab waits.
+    expect(reloadHoldName()).toBe("text-draft");
 
     rerender({ recipientKey: "recipient-b" });
     rerender({ recipientKey: "recipient-a" });
     expect(result.current.msgBody).toBe("Keep this edit");
     expect(result.current.recoveryWarning).toBe(SMS_DRAFT_RECOVERY_WARNING);
+
+    Storage.prototype.setItem.mockRestore();
+    act(() => result.current.setMsgBody("Keep this edit, saved"));
+    expect(reloadHoldName()).toBeNull();
   });
 });

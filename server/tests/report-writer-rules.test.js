@@ -710,13 +710,16 @@ describe('product facts for the pest writer', () => {
     const pests = (name) => findReportProductCopyEntry({ name }).mainPests;
     expect(pests('Taurus SC')).toEqual(['ants']);
     expect(pests('Atticus Talak')).toEqual(['spiders', 'crawling insects']);
+    // The house bifenthrin since 2026-11-18 (owner): same wording as Talak, matched by name or EPA 10404-120.
+    expect(pests('LESCO Crosscheck Plus')).toEqual(['spiders', 'crawling insects']);
+    expect(findReportProductCopyEntry({ name: 'Bifenthrin', epaReg: '10404-120' })?.mainPests).toEqual(['spiders', 'crawling insects']);
     expect(pests('Alpine WSG')).toEqual(['ants', 'roaches']);
     expect(pests('Atticus Antapex WSG')).toEqual(['ants', 'roaches']);
     expect(pests('Gentrol IGR')).toEqual(['roaches']);
     expect(pests('Gentrol Complete EC3')).toEqual(['roaches']);
     expect(pests('Advion Evolution Cockroach Gel Bait')).toEqual(['roaches']);
-    // Only the five reviewed products carry a list.
-    expect(REPORT_PRODUCT_COPY.filter((entry) => entry.mainPests)).toHaveLength(5);
+    // Only the five reviewed products, and Crosscheck (Talak's wording, owner 2026-11-18), carry a list.
+    expect(REPORT_PRODUCT_COPY.filter((entry) => entry.mainPests)).toHaveLength(6);
   });
 
   test('an ant visit: main pests and the floored label count, by job, never a name', () => {

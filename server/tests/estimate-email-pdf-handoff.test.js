@@ -155,8 +155,11 @@ describe('the provider-boundary fence on a PDF-bearing send', () => {
     for (const file of ['estimate-follow-up.js', 'estimate-extension.js']) {
       const src = fs.readFileSync(path.join(root, file), 'utf8');
       expect(src).toMatch(/attachments: pdfCopy\.attachments/);
-      // The fence rides every prepared send, with the file or without it.
-      expect(src).toMatch(/withProviderHandoff: pdfCopy\.withProviderHandoff/);
+      // The fence rides every prepared send, with the file or without it. The
+      // follow-up composes it into its handoff chain (the final-send check goes last).
+      expect(src).toMatch(file === 'estimate-follow-up.js'
+        ? /: pdfCopy\.withProviderHandoff;[\s\S]*withProviderHandoff: checkoutProviderHandoff\(est, outcome, innerHandoff, \{ stage: followupStage, quotedExpiresAt \}\)/
+        : /withProviderHandoff: pdfCopy\.withProviderHandoff/);
     }
   });
 });

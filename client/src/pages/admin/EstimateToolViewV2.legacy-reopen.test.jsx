@@ -109,3 +109,124 @@ describe('reopening an estimate saved before the lookup guards', () => {
     expect(reviewAndSend()).toBeEnabled();
   });
 });
+
+// Owner 2026-11-18: talstar_p / bifen_it became LESCO Crosscheck Plus under the same keys, so a pre-slab label check saved
+// before the swap was made for the earlier bottle.
+describe('reopening a bifenthrin pre-slab estimate saved before the Crosscheck Plus swap', () => {
+  const PRESLAB = { svcPreslab: true, preslabSqft: '4500', preslabProductKey: 'talstar_p', preslabLabelConfirmed: true, homeSqFt: '2400', lotSqFt: '9000', stories: '2' };
+  const labelCheck = () => screen.getByLabelText('Label rate and finished dilution confirmed');
+
+  it('clears the label check, says why, and sends it unchecked on regenerate', async () => {
+    reopen(PRESLAB, HOUSE);
+    expect(await screen.findByText(/pre-slab label check was for the earlier bifenthrin bottle/)).toBeInTheDocument();
+    expect(screen.getByText(NOTICE)).toBeInTheDocument();
+    expect(labelCheck()).not.toBeChecked();
+    expect(reviewAndSend()).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: /^(Generate Estimate|Regenerate)$/ }));
+    await waitFor(() => expect(callsTo('/calculate-estimate')).toHaveLength(1));
+    // The form now carries the Crosscheck Plus bottle mark, so a check ticked again counts on the server and on its replay.
+    expect(JSON.parse(callsTo('/calculate-estimate')[0][1].body).options)
+      .toMatchObject({ preslabLabelConfirmed: false, bifenthrinLabelBottle: 'lesco_crosscheck_plus' });
+  });
+
+  it('restores a saved alias as its option key, so the picker and the panel name the bottle the engine prices', async () => {
+    reopen({ ...PRESLAB, preslabProductKey: 'talak' }, HOUSE);
+    expect(await screen.findByText(/pre-slab label check was for the earlier bifenthrin bottle/)).toBeInTheDocument();
+    expect(document.getElementById('estimate-preslabProductKey')).toHaveValue('talstar_p');
+    expect(labelCheck()).not.toBeChecked();
+    expect(screen.getAllByText(/LESCO Crosscheck Plus, EPA 10404-120/).length).toBeGreaterThan(0);
+  });
+
+  it('keeps a label check the form made for Crosscheck Plus', async () => {
+    reopen({ ...PRESLAB, _bifenthrinLabelBottle: 'lesco_crosscheck_plus' }, HOUSE);
+    await waitFor(() => expect(labelCheck()).toBeChecked());
+    expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+    expect(reviewAndSend()).toBeEnabled();
+  });
+
+  // A saved null or an earlier bottle's mark never rides along: the reopened form carries today's mark, so the check the operator
+  // ticks again counts on the server, also when the saved box was already clear (pre-push audit 22).
+  it.each([
+    ['a null mark, its check cleared', { ...PRESLAB, _bifenthrinLabelBottle: null }, true],
+    ["an earlier bottle's mark, its box already clear", { ...PRESLAB, preslabLabelConfirmed: false, _bifenthrinLabelBottle: 'atticus_talak' }, false],
+  ])('reopens %s with the Crosscheck Plus mark, and a check ticked again is sent for it', async (_label, inputs, cleared) => {
+    reopen(inputs, HOUSE);
+    if (cleared) expect(await screen.findByText(/pre-slab label check was for the earlier bifenthrin bottle/)).toBeInTheDocument();
+    await waitFor(() => expect(labelCheck()).not.toBeChecked());
+    fireEvent.click(labelCheck());
+    await waitFor(() => expect(labelCheck()).toBeChecked());
+    fireEvent.click(screen.getByRole('button', { name: /^(Generate Estimate|Regenerate)$/ }));
+    await waitFor(() => expect(callsTo('/calculate-estimate')).toHaveLength(1));
+    expect(JSON.parse(callsTo('/calculate-estimate')[0][1].body).options)
+      .toMatchObject({ preslabLabelConfirmed: true, bifenthrinLabelBottle: 'lesco_crosscheck_plus' });
+  });
+
+  // A deselected service keeps its fields. Its earlier-bottle check is cleared, but the saved price, which does not include that
+  // service, stays current (pre-push audit 29).
+  it('clears the check of a deselected pre-slab service and keeps a pest-only estimate sendable', async () => {
+    reopen({ svcPest: true, homeSqFt: '2400', lotSqFt: '9000', stories: '2', preslabProductKey: 'talstar_p', preslabLabelConfirmed: true }, HOUSE);
+    await waitFor(() => expect(screen.getByLabelText('Home Sq Ft')).toHaveValue(2400));
+    expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+    expect(screen.queryByText(/label check was for the earlier bifenthrin bottle/)).not.toBeInTheDocument();
+    expect(reviewAndSend()).toBeEnabled();
+
+    fireEvent.click(screen.getByRole('button', { name: /^(Generate Estimate|Regenerate)$/ }));
+    await waitFor(() => expect(callsTo('/calculate-estimate')).toHaveLength(1));
+    expect(JSON.parse(callsTo('/calculate-estimate')[0][1].body).options)
+      .toMatchObject({ preslabLabelConfirmed: false, bifenthrinLabelBottle: 'lesco_crosscheck_plus' });
+  });
+
+  it('clears a label check when another product is chosen, so a check is never carried to a bottle it was not made for', async () => {
+    reopen({ ...PRESLAB, preslabProductKey: 'termidor_sc', _bifenthrinLabelBottle: 'lesco_crosscheck_plus' }, HOUSE);
+    await waitFor(() => expect(labelCheck()).toBeChecked());
+    fireEvent.change(document.getElementById('estimate-preslabProductKey'), { target: { value: 'talstar_p' } });
+    await waitFor(() => expect(labelCheck()).not.toBeChecked());
+    fireEvent.click(screen.getByRole('button', { name: /^(Generate Estimate|Regenerate)$/ }));
+    await waitFor(() => expect(callsTo('/calculate-estimate')).toHaveLength(1));
+    const options = JSON.parse(callsTo('/calculate-estimate')[0][1].body).options;
+    expect(options).toMatchObject({ preslabProductKey: 'talstar_p', preslabLabelConfirmed: false, bifenthrinLabelBottle: 'lesco_crosscheck_plus' });
+  });
+});
+
+// The trenching box reads "Label rate and trench depth confirmed": a check is for the rate and depth it was ticked for (pre-push audit 9).
+describe('the trenching label check', () => {
+  const TRENCH = { svcTrenching: true, trenchingPerimeterLF: '240', trenchingProductKey: 'taurus_sc', trenchingLabelConfirmed: true, homeSqFt: '2400', lotSqFt: '9000', stories: '2' };
+  const labelCheck = () => screen.getByLabelText('Label rate and trench depth confirmed');
+
+  it.each([
+    ['application rate', 'estimate-trenchingApplicationRate', 'high'],
+    ['trench depth', 'estimate-trenchingDepthFt', '1'],
+  ])('clears when the %s changes, and sends the quote unchecked', async (_name, id, value) => {
+    reopen(TRENCH, HOUSE);
+    await waitFor(() => expect(labelCheck()).toBeChecked());
+    fireEvent.change(document.getElementById(id), { target: { value } });
+    await waitFor(() => expect(labelCheck()).not.toBeChecked());
+    fireEvent.click(screen.getByRole('button', { name: /^(Generate Estimate|Regenerate)$/ }));
+    await waitFor(() => expect(callsTo('/calculate-estimate')).toHaveLength(1));
+    expect(JSON.parse(callsTo('/calculate-estimate')[0][1].body).options).toMatchObject({ trenchingLabelConfirmed: false });
+  });
+
+  // Whether the bifenthrin high rate reduces the volume depends on the server's configured dilution, which the tool cannot see, so the
+  // box never names a volume: the server's line names the label's conditions when it reduces the volume, and stays in review (pre-push
+  // audit at the second push: a configured 1.5 fl oz high rate keeps the full volume).
+  it('reads the same at every rate and product: the box makes no volume claim', async () => {
+    reopen({ ...TRENCH, trenchingProductKey: 'talstar_p', _bifenthrinLabelBottle: 'lesco_crosscheck_plus' }, HOUSE);
+    await waitFor(() => expect(labelCheck()).toBeChecked());
+    fireEvent.change(document.getElementById('estimate-trenchingApplicationRate'), { target: { value: 'high' } });
+    await waitFor(() => expect(labelCheck()).not.toBeChecked());
+    expect(screen.queryByLabelText(/reduced volume/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/High rate requires label confirmation\./)).toBeInTheDocument();
+  });
+
+  // The server reads a saved "high_rate" as the high rate, so the reopen does too: the picker, the rate hint and the server agree, and
+  // the saved price stays current (pre-push audit 31).
+  it('reopens a saved rate alias as the high rate, its check kept', async () => {
+    reopen({ ...TRENCH, trenchingProductKey: 'talstar_p', trenchingApplicationRate: 'high_rate', _bifenthrinLabelBottle: 'lesco_crosscheck_plus' }, HOUSE);
+    await waitFor(() => expect(labelCheck()).toBeChecked());
+    expect(document.getElementById('estimate-trenchingApplicationRate')).toHaveValue('high');
+    expect(screen.getByText(/High rate requires label confirmation\./)).toBeInTheDocument();
+    expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+    expect(reviewAndSend()).toBeEnabled();
+  });
+});

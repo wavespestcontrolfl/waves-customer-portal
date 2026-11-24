@@ -3622,30 +3622,15 @@ function scopeCommitmentRows(builder, { customerId = null, leadId = null, leadSi
 // A call that is not a customer or prospect: a vendor or partner (disposition vendor_logged, which a job applicant
 // shares when GATE_CALL_APPLICANT_HANDLING is on), a spam call (spam_discarded), or one whose valid extraction says the
 // caller is a job applicant. A promise made on it stays on the Owed tab, but the promise-chaser bell, the follow-up
-// SLA pager and the overdue watchdog do not page for it (GATE_PROMISE_PHONE_MATCH_CLOSE, owner 2026-11-04). Over a
+// SLA pager and the overdue watchdog do not page for it (owner 2026-11-04). Over a
 // call_log alias; no bare question mark (a knex raw would read it as a binding).
 const quietCallSql = (cl = 'cl') => `(COALESCE(${cl}.disposition, '') IN ('vendor_logged', 'spam_discarded')
   OR (${cl}.v2_extraction_status = 'valid' AND ${cl}.ai_extraction_enriched->>'call_nature' = 'job_applicant'))`;
 
 // What the promise pagers (promise-chaser bell, follow-up SLA pager, overdue watchdog) page for, from a page of
-// listOpenCommitments rows: under GATE_PROMISE_PHONE_MATCH_CLOSE=true a promise on a vendor, spam or applicant call
-// (the row's quiet_call) is left out; `shadow` leaves every row in and logs, once an Eastern day, how many it would
-// leave out. The Owed tab reads listOpenCommitments directly and keeps every promise.
-const QUIET_FILTERS = {
-  off: (rows) => rows,
-  shadow: (rows) => {
-    const day = etDateString(new Date());
-    if (quietShadowDay !== day) {
-      quietShadowDay = day;
-      logger.info(`[call-commitments] shadow: ${rows.filter((r) => r.quiet_call).length} of ${rows.length} open Waves promise(s) on this page are on vendor, spam or applicant calls and would raise no pager alert`);
-    }
-    return rows;
-  },
-  true: (rows) => rows.filter((r) => !r.quiet_call),
-};
-let quietShadowDay = null;
-// (A test that mocks feature-gates without the reader reads off.)
-const pagerRows = (rows) => QUIET_FILTERS[require('../config/feature-gates').promisePhoneMatchCloseMode?.() ?? 'off'](rows);
+// listOpenCommitments rows: a promise on a vendor, spam or applicant call (the row's quiet_call) is left out.
+// The Owed tab reads listOpenCommitments directly and keeps every promise.
+const pagerRows = (rows) => rows.filter((r) => !r.quiet_call);
 
 async function listOpenCommitments(conn, { party = null, kind = null, kinds = null, customerId = null, leadId = null, phone = null, limit = 100, offset = 0, includeHints = true, prepare = false, now = new Date(), activeSince = null, customerScope = null } = {}) {
   let leadSid = null;
@@ -4443,6 +4428,9 @@ module.exports = {
   terminalNonSpamCallbackSql,
   terminalParentSql,
   obsoleteParentSql,
+  // Shared with call-phone-yes-word.js: a failed read no pass revisits.
+  exhaustedExtractionSql,
+  FIRST_HANDOFF_SQL,
   UNSETTLED_CALLBACK_STATUSES,
   CALLBACK_SPAM,
   renewalBoundaryUnknown,

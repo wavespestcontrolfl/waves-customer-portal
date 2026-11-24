@@ -775,6 +775,10 @@ module.exports = {
   findConstructionActivity,
   looseAddressKey,
   looseKeyFromFreeform,
+  // The "permit is still open" rule, shared with services/mail/prospect-store.js (one definition).
+  monthsAgoIso,
+  CONSTRUCTION_ACTIVE_MONTHS,
+  ACTIVE_SEEN_WITHIN_DAYS,
   _private: {
     fetchPoolPermitCsv,
     fetchAcaReportCsv,

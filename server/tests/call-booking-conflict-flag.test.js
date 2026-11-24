@@ -456,6 +456,88 @@ describe('booking conflict wiring (source-level — behavior needs a live DB)', 
     expect(slice).not.toContain('throw ');
   });
 
+  // GATE_TECH_SHIFT_HOURS (D4 part 3b): the after-call booking's automatic technician checks read
+  // the visit's own block (window-rules rowBlockMinutes), so a shift that does not hold it ends as
+  // every other refusal there does: the visit is written unassigned.
+  test('the automatic technician checks read the visit\'s own block for the shift', () => {
+    const block = "require\\('\\./scheduling/window-rules'\\)\\.rowBlockMinutes";
+    // A new visit and a reused one: `hours` on the technician check each already makes. The
+    // reused row's block is the row as it stands under the locks (the next test).
+    const reused = new RegExp(`assertAssignableTechnician\\(reuseTechId, \\{ conn: trx, date: dayRow\\?\\.day, workDays: true,\\s*hours: ${block}\\(reuseLock\\?\\.row\\) \\}\\);`);
+    const created = new RegExp(`assertAssignableTechnician\\(insertData\\.technician_id, \\{ conn: trx, date: String\\(scheduledDate\\)\\.slice\\(0, 10\\), workDays: true,\\s*hours: ${block}\\(insertData\\) \\}\\);`);
+    // A follow-up child (a package visit 2 or a follow-up asked for on the call): its planned
+    // block with the job's length, before its fence and its hour search, so both run for the
+    // technician it keeps (the hour search then stays inside the shift: plan-taken-hour.test.js).
+    const childBlock = new RegExp(`const fuBlock = ${block}\\(\\{ window_start: fuStart, window_end: fuWindowEnd, estimated_duration_minutes: fuDurationMin \\}\\);`);
+    // The read has its own nested savepoint, and a failed read answers "outside": the promised
+    // child is still written, unassigned. The gate is read first: off, no savepoint opens and
+    // the child keeps its technician.
+    const child = new RegExp(`const fuOffShift = followUpTechId && require\\('\\.\\./config/feature-gates'\\)\\.techShiftHoursLive\\?\\.\\(\\)\\s*&& await sp\\.transaction\\(\\(shiftSp\\) => require\\('\\./technician-eligibility'\\)\\.shiftExcluding\\(shiftSp, followUpTechId, fuPlan\\.scheduledDate, fuBlock\\)\\)\\s*\\.catch\\(\\(shiftErr\\) => \\{`);
+    for (const site of [reused, created, childBlock, child]) expect(src).toMatch(site);
+    // Each anchor must exist: a missing one would read as position -1 and pass an order check.
+    const at = (text) => {
+      const index = src.indexOf(text, src.search(child));
+      expect(index).toBeGreaterThan(-1);
+      return index;
+    };
+    const failedRead = src.slice(src.search(child), at('if (fuOffShift) {'));
+    expect(failedRead).toContain('return true;');
+    expect(failedRead).not.toContain('throw ');
+    const dayCheck = src.indexOf('if (followUpTechId && packageFollowUp) {');
+    expect(dayCheck).toBeGreaterThan(-1);
+    expect(dayCheck).toBeLessThan(src.search(child));
+    expect(src.search(childBlock)).toBeLessThan(src.search(child));
+    expect(at('fenceBookingDay(fenceSp, { date: fuPlan.scheduledDate, techId: followUpTechId })')).toBeGreaterThan(at('if (fuOffShift) {'));
+    expect(at("callFollowUpWindow(sp, {")).toBeGreaterThan(at('fenceBookingDay(fenceSp, { date: fuPlan.scheduledDate, techId: followUpTechId })'));
+    // Nothing clears the technician between the hour search and the insert.
+    expect(src.slice(at("callFollowUpWindow(sp, {"), at("const [fuRow] = await sp('scheduled_services')"))).not.toContain('followUpTechId = null');
+    // The one technician check left without `hours` is the package visit 2's day check: the
+    // child's block is read right after it.
+    expect(src.match(/assertAssignableTechnician\([^)]*workDays: true \}\)/g)).toEqual([expect.stringContaining('followUpTechId')]);
+    // Each refusal there is recovered as unassigned.
+    const after = (site, text) => src.slice(src.search(site)).slice(0, 2200).includes(text);
+    expect(after(child, 'followUpTechId = null;')).toBe(true);
+    expect(after(reused, 'reuseTechId = null;')).toBe(true);
+    expect(after(created, 'insertData.technician_id = null;')).toBe(true);
+  });
+
+  // The reuse path reads the visit it reuses once, early, with no lock, and picks a technician for
+  // that read. With GATE_TECH_SHIFT_HOURS on, the block that assigns the technician reads the row
+  // again under the day locks, with a row lock (lockVisitAsRead; the query, the lock and the
+  // comparison run on PostgreSQL in tech-shift-hours-commit-postgres.test.js). The second read
+  // decides one thing: a row that changed gets no technician. Every other step is as it was.
+  test('a reused visit is read again under the day locks and its own row lock before it is assigned', () => {
+    const start = src.indexOf("const dayRow = await trx('scheduled_services')");
+    const end = src.indexOf('if (reuseTechId && updatedExisting) reuseAssignedTechId = reuseTechId;', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const block = src.slice(start, end);
+    const at = (text) => {
+      const index = block.indexOf(text);
+      expect(index).toBeGreaterThan(-1);
+      return index;
+    };
+    // The second read: gate first (off = no read and no lock), against the first read, on the day
+    // this path fenced. After the day locks, before the first check.
+    const reread = block.search(/const reuseLock = require\('\.\.\/config\/feature-gates'\)\.techShiftHoursLive\?\.\(\)\s*\? await require\('\.\/scheduling\/visit-row-lock'\)\.lockVisitAsRead\(trx, existing, dayRow\?\.day\)\s*: null;/);
+    expect(reread).toBeGreaterThan(at('await lockTechDays(trx, ['));
+    expect(reread).toBeLessThan(at('await assertAssignableTechnician(reuseTechId,'));
+    // A changed row keeps no technician pick: cleared on the whole list, before the first check.
+    const cleared = at('if (reuseLock?.changed.length) {');
+    expect(cleared).toBeGreaterThan(at('let reuseTechId = reuseCandidateTechId;'));
+    expect(cleared).toBeLessThan(at('await assertAssignableTechnician(reuseTechId,'));
+    expect(block.slice(cleared, at('try {'))).toMatch(/^if \(reuseLock\?\.changed\.length\) \{\s*logger\.info\([^\n]*\);\s*reuseTechId = null;\s*\}\s*$/);
+    // The write and what goes on to the later steps are as they were: by id, only with a
+    // technician left, and the first read when nothing is written.
+    expect(block).toMatch(/const \[updatedExisting\] = reuseTechId\s*\? await trx\('scheduled_services'\)\s*\.where\(\{ id: existing\.id \}\)\s*\.update\(\{ technician_id: reuseTechId, route_order: null, updated_at: new Date\(\) \}\)\s*\.returning\('\*'\)\s*: \[existing\];/);
+    // The second read is used for the pick and for the shift check's block, and nowhere else.
+    expect(src.split('reuseLock').length - 1).toBe(4);
+    expect(src.split('const reuseLock = ').length - 1).toBe(1);
+    expect(src.split('reuseLock?.changed.length').length - 1).toBe(1);
+    expect(src.split("reuseLock.changed.join(', ')").length - 1).toBe(1);
+    expect(src.split('rowBlockMinutes(reuseLock?.row)').length - 1).toBe(1);
+  });
+
   test('owner ruling 2026-09-11: the follow-up child tries the fence for ITS OWN date/tech inside the savepoint, before its insert', () => {
     const seederIdx = src.indexOf('return await trx.transaction(async (sp) => {');
     expect(seederIdx).toBeGreaterThan(-1);

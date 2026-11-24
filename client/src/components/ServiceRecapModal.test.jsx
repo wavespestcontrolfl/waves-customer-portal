@@ -58,6 +58,8 @@ function makeRequest({ existingProducts = [], products = CATALOG, catalogLoadFai
         service: { id: 'svc-1', customerName: 'Pat Jones', hasPhone: false },
         timeline: [],
         products,
+        // Room under the yearly Taurus label limit, so the house mix keeps Taurus.
+        taurusYearly: { count: 0, high: 0, low: 0, eligible: true, year: 2026 },
         catalogLoadFailed,
         existingRecord: existingProducts.length
           ? { id: 'rec-1', technician_notes: 'prior note', status: 'completed', products: existingProducts }
@@ -87,7 +89,7 @@ const MIX_CATALOG = [
   },
   {
     id: 5,
-    name: 'Atticus Talak 7.9 F',
+    name: 'LESCO Crosscheck Plus',
     category: 'Insecticide',
     active_ingredient: 'Bifenthrin',
     moa_group: '3A',
@@ -211,7 +213,7 @@ describe('ServiceRecapModal application rates', () => {
 // The default pest tank mix (lib/pest-default-mix) seeds the primary
 // field-tech completion too (codex P1 on #3611): a FRESH recurring
 // general-pest, one-time pest, or pest re-service recap pre-selects
-// Taurus SC, Atticus Talak 7.9 F, and the LESCO 90/10 Nonionic
+// Taurus SC, LESCO Crosscheck Plus, and the LESCO 90/10 Nonionic
 // Surfactant (owner ruling 2026-09-26 — supersedes the 2026-08-29
 // Talstar P / bare-surfactant list), rates prefilled exactly as a manual
 // tap would.
@@ -227,20 +229,20 @@ describe('ServiceRecapModal default pest tank mix', () => {
     );
 
     expect(await screen.findByRole('button', { name: 'Taurus SC', pressed: true })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Atticus Talak 7.9 F', pressed: true })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'LESCO Crosscheck Plus', pressed: true })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'LESCO 90/10 Nonionic Surfactant', pressed: true })).toBeTruthy();
     // The bare "Non-ionic Surfactant" row is never substituted into the mix —
     // exact catalog identity only.
     expect(screen.getByRole('button', { name: 'Non-ionic Surfactant' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Non-ionic Surfactant', pressed: true })).toBeNull();
     // Rates seed from the same catalog prefill a manual tap would use —
-    // for Taurus the pest 4-oz house default (it outranks the dilution
+    // for Taurus the house mix's own 1.6 fl oz (it outranks the dilution
     // band's low bound, same precedence the Adjourn SC test pins). The
     // surfactant gets its own real label rate (0.2 fl_oz/gal) — an
     // adjuvant with a genuine catalog rate is never overridden by the
     // insecticide 4-oz house default (isAdjuvantProduct only suppresses
     // that default for a RATELESS adjuvant).
-    expect(screen.getByLabelText('Application rate for Taurus SC').value).toBe('4');
+    expect(screen.getByLabelText('Application rate for Taurus SC').value).toBe('1.6');
     expect(screen.getByLabelText('Application rate for LESCO 90/10 Nonionic Surfactant').value).toBe('0.2');
   });
 
@@ -269,7 +271,7 @@ describe('ServiceRecapModal default pest tank mix', () => {
     );
 
     expect(await screen.findByRole('button', { name: 'Taurus SC', pressed: true })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Atticus Talak 7.9 F', pressed: true })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'LESCO Crosscheck Plus', pressed: true })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'LESCO 90/10 Nonionic Surfactant', pressed: true })).toBeTruthy();
   });
 
@@ -286,7 +288,7 @@ describe('ServiceRecapModal default pest tank mix', () => {
     );
 
     expect(await screen.findByRole('button', { name: 'Taurus SC', pressed: true })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Atticus Talak 7.9 F', pressed: true })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'LESCO Crosscheck Plus', pressed: true })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'LESCO 90/10 Nonionic Surfactant', pressed: true })).toBeTruthy();
   });
 

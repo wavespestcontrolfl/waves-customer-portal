@@ -46,6 +46,7 @@ function previewFixture(overrides = {}) {
     email_subject: "Let's set up your interview with Waves",
     email_body: 'Pick a time: [interview link]',
     interview_url: null,
+    offers: { held: false, draft: false, owner_only: false, stamp: '0'.repeat(32) },
     ...overrides,
   };
 }
@@ -491,6 +492,19 @@ describe('RecruitingPage — the detail says what was stored, in plain words', (
     expect(await screen.findByText(/sms · Applicant text · received/)).toBeInTheDocument();
     expect(screen.getByText(/sms · Office text · sent/)).toBeInTheDocument();
     expect(screen.queryByText(/applicant_reply|owner_reply/)).not.toBeInTheDocument();
+  });
+
+  it('names the job offer messages, the automatic reminder included, never the stored stage key', async () => {
+    await openDetailWith({
+      comms_history: [
+        { id: 'm-1', at: '2026-11-05T17:53:22Z', stage: 'offer_sent', channel: 'sms', outcome: 'sent' },
+        { id: 'm-2', at: '2026-11-07T17:54:00Z', stage: 'offer_reminder', channel: 'email', outcome: 'sent' },
+      ],
+    });
+
+    expect(await screen.findByText(/sms · Job offer · sent/)).toBeInTheDocument();
+    expect(screen.getByText(/email · Job offer reminder · sent/)).toBeInTheDocument();
+    expect(screen.queryByText(/offer_sent|offer_reminder/)).not.toBeInTheDocument();
   });
 });
 

@@ -91,3 +91,20 @@ test('perishable advisories cannot queue for an offline Android device', () => {
   expect(buildFcmMessage('synthetic-device', { title: 'Plan', ephemeral: true }).message.android.ttl).toBe('0s');
   expect(buildFcmMessage('synthetic-device', { title: 'Appointment' }).message.android).not.toHaveProperty('ttl');
 });
+
+test('a notification with its own expiry queues for an offline Android device only until then', () => {
+  const now = Date.parse('2026-11-19T14:00:00Z');
+  const spy = jest.spyOn(Date, 'now').mockReturnValue(now);
+  try {
+    expect(buildFcmMessage('synthetic-device', { title: 'Call today', expiresAt: '2026-11-20T05:00:00.000Z' })
+      .message.android.ttl).toBe(`${15 * 3600}s`);
+    // A time already past is deliver now or never.
+    expect(buildFcmMessage('synthetic-device', { title: 'Call today', expiresAt: '2026-11-19T13:00:00.000Z' })
+      .message.android.ttl).toBe('0s');
+    // ephemeral wins over a later expiry.
+    expect(buildFcmMessage('synthetic-device', { title: 'Plan', ephemeral: true, expiresAt: '2026-11-20T05:00:00.000Z' })
+      .message.android.ttl).toBe('0s');
+  } finally {
+    spy.mockRestore();
+  }
+});

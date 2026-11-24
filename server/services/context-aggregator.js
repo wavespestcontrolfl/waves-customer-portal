@@ -14,7 +14,7 @@ const {
   OWN_COLLECTIBLE_INVOICE_STATUSES, PARTIALLY_PAID_STATUS, isUncountedPartialDueInvoice,
 } = require('./invoice-helpers');
 const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
-const { technicianReportCustomerCopy } = require('./service-report/technician-report-copy');
+const { visitReportCustomerCopy, carriesReportNote } = require('./service-report/technician-report-copy');
 const { etDateString, formatETTime } = require('../utils/datetime-et');
 const { arrivalWindowRange } = require('../utils/sms-time-format');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
@@ -230,15 +230,21 @@ function customerSafeVisitNotes(record, { projectLine = false } = {}) {
     if (suppressesCustomerArtifacts(structured)) return null;
     const { customerSafeServiceNotes } = require('./project-types');
     let copy = null;
-    if (projectLine && (record.completion_source === 'project_completion' || structured.projectCompletion === true)) {
+    // A record that carries the technician's own note keeps the raw note in
+    // technician_notes, so it never takes the project path (which reads that
+    // column): its notes are the note or nothing. Both read the stored value,
+    // not `structured`: stored notes that cannot be read count as a note
+    // (carriesReportNote), and visitStructuredNotes reads them as {}.
+    const ownNote = carriesReportNote(record.structured_notes);
+    if (projectLine && !ownNote && (record.completion_source === 'project_completion' || structured.projectCompletion === true)) {
       copy = customerSafeServiceNotes(record.technician_notes, structured);
     } else {
       const serviceData = typeof record.service_data === 'string'
         ? JSON.parse(record.service_data || '{}')
         : (record.service_data || {});
-      const body = technicianReportCustomerCopy(record.technician_notes)?.body || null;
+      const body = visitReportCustomerCopy(record)?.body || null;
       const { technicianReportDrivesSummary } = require('./service-report/activity-indicators');
-      if (!technicianReportDrivesSummary({ serviceData, body })) return null;
+      if (!technicianReportDrivesSummary({ serviceData, body, ownNote })) return null;
       copy = customerSafeServiceNotes(body, structured);
     }
     const safe = copy ? redactAccessCodes(copy) : null;
@@ -253,22 +259,27 @@ function customerSafeVisitNotes(record, { projectLine = false } = {}) {
 async function loadLatestVisitFindings(record) {
   if (!record?.id || !require('../config/feature-gates').smsPromptB1Live() || !customerSafeVisitNotes(record)) return null;
   try {
-    // the provenance rule runs in SQL, before the cap, so title-only rows cannot use up the five
+    // The provenance rule runs in SQL. Every row of the visit is read (production, 2026-11-20: at most 4 on
+    // one visit) and the cut to five runs after the filters: on a record that carries the technician's own
+    // note, provenFindingRows screens each row as the report does (finding-provenance.js), so a cap before
+    // the screen could fill with refused rows and hide one that passes. voice-agent/relay-visit.js reads the
+    // same way.
     const rows = await db('service_findings').where({ service_record_id: record.id })
       .whereRaw("(btrim(COALESCE(detail, '')) <> '' OR btrim(COALESCE(recommendation, '')) <> '')")
-      .orderBy('created_at').limit(5)
+      .orderBy('created_at').orderBy('id')
       .select('title', 'detail', 'recommendation', 'severity', 'category');
+    const { provenFindingRows } = require('./service-report/finding-provenance');
     // PROVENANCE, not category (the customer report's own rule, ServiceReportDocument.jsx; voice-agent/relay-visit.js applies the same one):
     // findings synthesized from RAW technician notes are inserted title-only, so a bare title is never shown. Only a row carrying
     // structured detail or recommendation came from the findings pipeline (owner ruling 2026-07-16: internal notes never reach a prompt).
     // The SQL above already enforces it; the check here keeps the rule if a redaction empties a field.
-    const findings = rows.map((r) => ({
+    const findings = provenFindingRows(rows, record.structured_notes).map((r) => ({
       title: redactAccessCodes(r.title) || null,
       detail: redactAccessCodes(r.detail) || null,
       recommendation: redactAccessCodes(r.recommendation) || null,
       severity: r.severity || null,
       category: r.category || null,
-    })).filter((f) => f.title && (String(f.detail || '').trim() || String(f.recommendation || '').trim()));
+    })).filter((f) => f.title && (String(f.detail || '').trim() || String(f.recommendation || '').trim())).slice(0, 5);
     return findings.length ? findings : null;
   } catch (err) {
     logger.warn(`[context-aggregator] latest visit findings read failed: ${err.code || err.name || 'error'}`);

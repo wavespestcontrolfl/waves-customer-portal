@@ -34,7 +34,10 @@ const APP_LINK_PATH_PREFIXES = Object.freeze([
 const BROWSER_ONLY_PATH_ROOTS = Object.freeze([
   '/card', // a tech's business card for prospects: Save contact downloads a vCard
   '/careers', // job applicants, not customers
+  '/h', // new-home postcard page: strangers with no account, so the app must not claim it
+  '/help', // static how-to pages (client/public/help): no app screens, so Safari opens them
   '/newsletter', // public newsletter pages
+  '/rv', // printed-card review QR: 302 to a Google review form, so the app would only bounce it to the browser
 ]);
 
 // /quote, bare /estimate and the /estimate/<service> pages redirect to the

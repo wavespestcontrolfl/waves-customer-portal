@@ -1528,3 +1528,96 @@ describe('review bonus attribution: the ask that reached the customer (GATE_REVI
     expect(await payout(conn)).toMatchObject({ technician_id: 'tech-owner' });
   });
 });
+
+describe('monthly cap policy (owner 2026-11-20 D4)', () => {
+  const { parsePolicy } = ReviewIncentives.__private;
+
+  test('default policy has no monthly cap', () => {
+    expect(ReviewIncentives.DEFAULT_POLICY.monthlyCapCount).toBeNull();
+    expect(parsePolicy(null).monthlyCapCount).toBeNull();
+    expect(parsePolicy({ amountCents: 1500 }).monthlyCapCount).toBeNull();
+  });
+
+  test.each([
+    [null, null], [undefined, null], [0, null], [-1, null], [2.5, null], ['15', null], [1001, null], [5000, null],
+    [NaN, null], [1, 1], [15, 15], [1000, 1000],
+  ])('monthlyCapCount %p normalizes to %p', (input, expected) => {
+    expect(parsePolicy({ monthlyCapCount: input }).monthlyCapCount).toBe(expected);
+  });
+
+  test('a stored JSON policy keeps its cap', () => {
+    expect(parsePolicy(JSON.stringify({ amountCents: 1500, monthlyCapCount: 15 }))).toMatchObject({ amountCents: 1500, monthlyCapCount: 15 });
+  });
+
+  test('no cap: overCapPayoutIds returns an empty set without querying', async () => {
+    const conn = jest.fn(() => { throw new Error('no query expected'); });
+    expect((await ReviewIncentives.overCapPayoutIds(conn, { cap: null })).size).toBe(0);
+    expect((await ReviewIncentives.overCapPayoutIds(conn, { cap: 0 })).size).toBe(0);
+  });
+
+  test('toCsv labels an over-cap payout in the Status column', () => {
+    const csv = ReviewIncentives.toCsv([{
+      technicianName: 'Sample Alpha', customerName: 'Sample Customer', source: 'google_review', amount: 15,
+      status: 'earned', overMonthlyCap: true, earnedAt: '2027-01-10', payPeriodStart: null, payPeriodEnd: null,
+    }]);
+    expect(csv).toContain('"over monthly cap - not paid"');
+  });
+
+  const storedRow = (value) => () => ({ where: () => ({ first: async () => (value === undefined ? undefined : { value }) }) });
+
+  test('getPolicyStrict: a missing row or a legacy object has no cap; a garbled row or a read error throws', async () => {
+    expect((await ReviewIncentives.getPolicyStrict(storedRow(undefined))).monthlyCapCount).toBeNull();
+    expect((await ReviewIncentives.getPolicyStrict(storedRow('{"amountCents":500}'))).monthlyCapCount).toBeNull();
+    expect((await ReviewIncentives.getPolicyStrict(storedRow({ monthlyCapCount: 15 }))).monthlyCapCount).toBe(15);
+    for (const bad of ['{nope', '[]', '"x"', '', 'null']) {
+      await expect(ReviewIncentives.getPolicyStrict(storedRow(bad))).rejects.toMatchObject({ code: 'review_policy_malformed' });
+    }
+    const failing = () => ({ where: () => ({ first: async () => { throw new Error('connection lost'); } }) });
+    await expect(ReviewIncentives.getPolicyStrict(failing)).rejects.toThrow('connection lost');
+  });
+
+  test('validatePolicyStrict refuses a bad value in any field and never coerces', () => {
+    const { validatePolicyStrict } = ReviewIncentives;
+    const bad = {
+      enabled: ['true', 1, {}, []],
+      amountCents: ['500', {}, [], NaN, Infinity, -1, 2.5, '12abc', 2147483648, Number.MAX_SAFE_INTEGER],
+      currency: [5, {}, 'US', 'USDX'],
+      eligibleSources: ['google_review', {}, [1]],
+      minRating: ['3', {}, 0, 6, 2.5, NaN],
+      requireCustomerMatchForGoogle: ['yes', 0, {}],
+      programStartsAt: [{}, [], 5, 'not a date', '2026-13-45'],
+      monthlyCapCount: ['15', '12abc', {}, [], NaN, 0, 2.5, 1001],
+    };
+    for (const [field, values] of Object.entries(bad)) {
+      for (const value of values) {
+        let thrown = null;
+        try { validatePolicyStrict({ monthlyCapCount: 15, [field]: value }); } catch (err) { thrown = err; }
+        expect([field, String(value), thrown?.code, thrown?.statusCode]).toEqual([field, String(value), 'review_policy_invalid', 422]);
+      }
+    }
+    expect(validatePolicyStrict({ monthlyCapCount: 15, programStartsAt: '2026-01-01T00:00:00Z', note: 'kept' }))
+      .toMatchObject({ monthlyCapCount: 15, amountCents: 500, programStartsAt: '2026-01-01T00:00:00.000Z', note: 'kept' });
+    expect(validatePolicyStrict({ monthlyCapCount: null, programStartsAt: null }).monthlyCapCount).toBeNull();
+    expect(validatePolicyStrict({ amountCents: 2147483647 }).amountCents).toBe(2147483647);
+    expect(validatePolicyStrict({ amountCents: 0, minRating: 5, monthlyCapCount: 1000 })).toMatchObject({ amountCents: 0, minRating: 5, monthlyCapCount: 1000 });
+    expect(() => validatePolicyStrict([])).toThrow(expect.objectContaining({ code: 'review_policy_invalid' }));
+  });
+
+  test('getPolicyStrict treats a stored row with a bad field as unreadable', async () => {
+    await expect(ReviewIncentives.getPolicyStrict(storedRow('{"monthlyCapCount":"15"}')))
+      .rejects.toMatchObject({ code: 'review_policy_malformed' });
+    await expect(ReviewIncentives.getPolicyStrict(storedRow({ amountCents: {} })))
+      .rejects.toMatchObject({ code: 'review_policy_malformed' });
+  });
+
+  test('the save-only cutoff parser stores an unambiguous instant and refuses the rest', () => {
+    const { parseProgramCutoffForSave: parse } = ReviewIncentives.__private;
+    expect(parse('2026-07-01')).toBe('2026-07-01T04:00:00.000Z');
+    expect(parse('2026-03-01')).toBe('2026-03-01T05:00:00.000Z');
+    expect(parse('2026-11-19T23:30:15.743Z')).toBe('2026-11-19T23:30:15.743Z');
+    expect(parse('2026-03-01T10:00:00-05:00')).toBe('2026-03-01T15:00:00.000Z');
+    for (const bad of ['2026-02-31', '2026-11-01T09:00:00', '2026-03-01T00:00', '2026-03-01T25:00:00Z', '2026-03-01T10:00:00+25:00', 'junk', 5, {}, null]) {
+      expect([String(bad), parse(bad)]).toEqual([String(bad), null]);
+    }
+  });
+});

@@ -5,7 +5,8 @@
  * direct performPropertyLookup; the pending-ledger check in
  * call-property-lookup only defends one ordering, so the shared mechanism
  * must coalesce concurrent same-address callers itself (codex P1). Pins:
- * the mode gate (refresh/cacheOnly/persist:false never coalesce), the join
+ * the mode gate (refresh/cacheOnly/persist:false/strictCacheReads never
+ * coalesce), the join
  * path returning a CLONE of the in-flight result (no cross-caller
  * aliasing), and rejection propagating to joiners. The join tests seed the
  * in-flight map directly — if the joiner ever fell through to the real
@@ -44,6 +45,12 @@ describe('lookupCoalesceKey', () => {
     expect(lookupCoalesceKey(ADDR, { persist: false })).toBeNull();
   });
 
+  test('a strict-read run never coalesces; without the option the key is unchanged', () => {
+    expect(lookupCoalesceKey(ADDR, { strictCacheReads: true })).toBeNull();
+    expect(lookupCoalesceKey(ADDR, { strictCacheReads: false })).toBe(lookupCoalesceKey(ADDR, {}));
+    expect(lookupCoalesceKey(ADDR, {})).toBeTruthy();
+  });
+
   test('a background full-vision-budget run never joins an interactive run, nor the reverse', () => {
     // The background run may outlast an interactive caller's response budget.
     const background = lookupCoalesceKey(ADDR, { fullVisionBudget: true });
@@ -68,6 +75,13 @@ describe('join path', () => {
     // One caller's mutation must never alias into another's result.
     res.enriched.lat = 0;
     expect(shared.enriched.lat).toBe(27.5);
+  });
+
+  test('a strict-read caller never adopts a default run in flight: it runs its own reads', async () => {
+    inFlightLookups.set(lookupCoalesceKey(ADDR, {}), Promise.resolve({ enriched: { lotSqFt: 1 } }));
+    // Its own reads reach the db mock, which throws. A strict read reports that failure;
+    // adopting the default run's result here would have resolved instead.
+    await expect(performPropertyLookup(ADDR, { strictCacheReads: true })).rejects.toMatchObject({ code: 'LOOKUP_CACHE_READ_FAILED' });
   });
 
   test('an in-flight failure propagates to joiners (same outcome as running it)', async () => {

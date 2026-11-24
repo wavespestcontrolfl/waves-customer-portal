@@ -1,11 +1,19 @@
 'use strict';
 
-// Staff can book a visit before its original hold expires. Expiry only
-// releases rows that still have no customer.
-function bookedVisitOrLiveHold(query) {
-  query.whereNull('scheduled_services.reservation_expires_at')
-    .orWhereRaw('scheduled_services.customer_id IS NOT NULL OR scheduled_services.reservation_expires_at > NOW()');
+// Staff can book a held visit without clearing its original expiration.
+// Only an unclaimed hold releases its time when the database clock reaches expiry.
+// The clock is NOW() (the transaction's start), or clock_timestamp() (the
+// statement's own time) for a read under a lock taken after a wait, so a hold
+// that ran out during the wait no longer counts (zone-day-funnel.js zoneStopDays).
+function bookedVisitOrHoldLiveAt(clock) {
+  return (query) => {
+    query.whereNull('scheduled_services.reservation_expires_at')
+      .orWhereRaw(`scheduled_services.customer_id IS NOT NULL OR scheduled_services.reservation_expires_at > ${clock}`);
+  };
 }
+
+const bookedVisitOrLiveHold = bookedVisitOrHoldLiveAt('NOW()');
+const bookedVisitOrLiveHoldByRealClock = bookedVisitOrHoldLiveAt('clock_timestamp()');
 
 // A booked visit restored solely by bookedVisitOrLiveHold: its old hold
 // timestamp is already past, but staff attached a customer so it remains an
@@ -27,4 +35,6 @@ function reservationRoadContext(context, excludeEstimateId) {
   return { ...context, rows, restoredOnRoute };
 }
 
-module.exports = { bookedVisitOrLiveHold, restoredBookedVisit, reservationRoadContext };
+module.exports = {
+  bookedVisitOrLiveHold, bookedVisitOrLiveHoldByRealClock, restoredBookedVisit, reservationRoadContext,
+};

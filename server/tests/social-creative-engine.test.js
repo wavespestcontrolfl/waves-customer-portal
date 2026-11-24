@@ -54,15 +54,15 @@ describe('CREATIVE_FLAGS', () => {
     expect(Engine.CREATIVE_FLAGS.variantCount).toBe(3);
   });
 
-  test('provider chain leads with gpt-image-2 (blog-engine parity), env-overridable', () => {
+  test('provider chain leads with gpt-image-2.6-sunburst (blog-engine parity, owner 2026-11-20), env-overridable', () => {
     delete process.env.SOCIAL_IMAGE_PROVIDER;
     delete process.env.ALLOW_PIXEL_WATERMARKED_IMAGE_PROVIDERS; // default-policy assertion must not inherit the caller's override
     expect(Engine.CREATIVE_FLAGS.chain).toBe(Engine.SOCIAL_DEFAULT_CHAIN);
-    expect(Engine.SOCIAL_DEFAULT_CHAIN.startsWith('gpt-image-2')).toBe(true);
+    expect(Engine.SOCIAL_DEFAULT_CHAIN.startsWith('gpt-image-2.6-sunburst')).toBe(true);
     // OpenAI-only since 2026-09-24 (owner: no invisible watermarks — Gemini
     // image output is SynthID-marked in the pixels; image-generator drops
     // those slugs from any chain anyway).
-    expect(Engine.SOCIAL_DEFAULT_CHAIN.split(',')).toEqual(['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1']);
+    expect(Engine.SOCIAL_DEFAULT_CHAIN.split(',')).toEqual(['gpt-image-2.6-sunburst', 'gpt-image-2.5-sunburst', 'gpt-image-2', 'gpt-image-1.5', 'gpt-image-1']);
     process.env.SOCIAL_IMAGE_PROVIDER = 'gpt-image-1.5';
     expect(Engine.CREATIVE_FLAGS.chain).toBe('gpt-image-1.5');
     delete process.env.SOCIAL_IMAGE_PROVIDER;

@@ -111,6 +111,19 @@ const MOVABLE_STATUSES = ['pending', 'confirmed'];
 const CARD_REASON_CODES = ['reschedule_or_cancel', 'existing_appointment_coordination'];
 const ACTIVITY_ACTION = 'call_reschedule_applied';
 const RESCHEDULE_REASON_CODE = 'ai_call_reschedule'; // reschedule_log.reason_code varchar(30)
+
+// The caller asked for the slot the visit already holds: record "the customer asked for this time" on it, as a move to that
+// slot records it (sourceSurface 'call_reschedule'), so the night jobs keep it (local audit 2026-11-22: a staff placement alone
+// no longer holds a visit). Only while the locked row still holds that slot.
+async function recordAskedAtCurrentSlot(trx, visitId, plan, locked = null) {
+  const timePromise = require('./time-promise');
+  const row = locked || await trx('scheduled_services').where({ id: visitId }).forUpdate().first('scheduled_date', 'window_start');
+  const start = (v) => String(v || '').slice(0, 5);
+  if (!row || require('../utils/date-only').dateOnlyString(row.scheduled_date) !== plan.newDate
+    || start(row.window_start) !== start(plan.newWindow?.start)) return false;
+  await timePromise.recordCustomerAskedTime(trx, [visitId], true);
+  return true;
+}
 const INITIATED_BY = 'ai_call_pipeline'; // reschedule_log.initiated_by varchar(20)
 const DEFAULT_DURATION_MINUTES = 60;
 // The catch-all booking placeholder ("Waves Pest Control Appointment"): its
@@ -483,6 +496,7 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
     await conn.transaction(async (trx) => {
       await beforeMove(trx);
       await writeReview({ trx });
+      await recordAskedAtCurrentSlot(trx, visit.id, plan);
     });
     return { outcome: 'noop', visitId: visit.id };
   }
@@ -808,6 +822,7 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
         await beforeMove(trx);
         const service = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first();
         await writeDecision({ trx, service });
+        await recordAskedAtCurrentSlot(trx, visit.id, plan, service);
       });
       return { outcome: 'noop', reason: 'already_at_requested_time', visitId: visit.id, cardsResolved };
     }
@@ -1305,6 +1320,7 @@ async function applyCallMakeupMove({ conn, call, plan, procToken = null, procGen
 }
 
 module.exports = {
+  recordAskedAtCurrentSlot,
   applyReviewedCallReschedule,
   applyCallReschedule,
   applyCallMakeupMove,

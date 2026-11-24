@@ -1,4 +1,4 @@
-// GATE_LAWN_RECLAIMED_HALF_N (owner 2026-10-05, 2026-10-23): the gate reader, the property read, and the plan engine's one nitrogen decision
+// Reclaimed-water half nitrogen (owner 2026-10-05, 2026-10-23): the property read, and the plan engine's one nitrogen decision
 // (nitrogenDecision / visitNutrientTargets) that the plan, the tank sheet and the previsit brief share. Synthetic knex and stores; no database.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const mockLoadActive = jest.fn();
@@ -8,13 +8,12 @@ jest.mock('../services/lawn-trouble-areas', () => ({
   loadActiveLargePatch: (...args) => mockLoadActive(...args),
 }));
 
-const featureGates = require('../config/feature-gates');
 const { RECLAIMED_N_FRACTION, RECLAIMED_NITROGEN_NOTE_KEY, FUNGUS_NITROGEN_NOTE_KEY } = require('../config/lawn-v13-nitrogen-targets');
 const engine = require('../services/waveguard-plan-engine');
 const reclaimed = require('../services/lawn-reclaimed-water');
 const v13 = require('../config/lawn-protocol-v13.json');
 
-const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET', 'GATE_LAWN_RECLAIMED_HALF_N'];
+const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET'];
 const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
 const PROPERTY = '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
 const service = { id: 'svc-1', property_id: PROPERTY };
@@ -49,13 +48,6 @@ afterEach(() => { for (const name of GATES) { if (saved[name] === undefined) del
 
 const visitOf = (month, track = 'st_augustine') => v13[track].visits.find((visit) => visit.month === month);
 const run = (knex, month, extra = {}) => engine.visitNutrientTargets(knex, service, { visit: visitOf(month), month, v13Active: true, ...extra });
-
-describe('lawnReclaimedHalfNLive', () => {
-  test.each([[undefined, false], ['', false], ['1', false], ['TRUE', false], ['false', false], ['true', true]])('the variable %j gives %s, read at call time', (value, expected) => {
-    if (value === undefined) delete process.env.GATE_LAWN_RECLAIMED_HALF_N; else process.env.GATE_LAWN_RECLAIMED_HALF_N = value;
-    expect(featureGates.lawnReclaimedHalfNLive()).toBe(expected);
-  });
-});
 
 describe('every N visit of a reclaimed lawn is halved (all three tracks)', () => {
   test.each([
@@ -104,16 +96,7 @@ describe('every N visit of a reclaimed lawn is halved (all three tracks)', () =>
   });
 });
 
-describe('the gate off, or a lawn that is not reclaimed, changes nothing', () => {
-  test('gate off: the answer is the old shape exactly and nothing is read, not even the property', async () => {
-    delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
-    const knex = REC();
-    const found = await run(knex, 'Nov');
-    expect(found).toEqual({ visit: visitOf('Nov'), targets: { targetNPer1000: 0.75, targetKPer1000: null }, nitrogenCut: null });
-    expect(found.visit).toBe(visitOf('Nov'));
-    expect(knex.calls).toEqual([]);
-  });
-
+describe('a lawn that is not reclaimed changes nothing', () => {
   test.each([['not reclaimed', NOT_REC()], ['no property row', fakeKnex(undefined)], ['unknown (NULL)', fakeKnex({ reclaimed_water: null })]])('%s: the normal target stands', async (_label, knex) => {
     const found = await run(knex, 'Nov');
     expect(found).toEqual({ visit: visitOf('Nov'), targets: { targetNPer1000: 0.75, targetKPer1000: null }, nitrogenCut: null });
@@ -146,17 +129,17 @@ describe('the pre-emergent plus fertilizer bags keep their rate (the pre-emergen
   const OCT = () => visitOf('Oct');
   const APRIL_9X = () => visitOf('Apr').cadenceVariants[9];
 
-  test.each([['October Dimension 18-0-10 at 4.04 lb', OCT], ['the 9x April Dimension at 2.78 lb', APRIL_9X]])('%s: not halved, the visit is returned as it is, and it says so', async (_label, pick) => {
+  test.each([['October Stonewall 0.37% 18-0-10 at 4.04 lb', OCT], ['the 9x April Dimension at 2.78 lb', APRIL_9X]])('%s: not halved, the visit is returned as it is, and it says so', async (_label, pick) => {
     const knex = REC();
     const visit = pick();
-    expect(visit.primary).toMatch(/Pre-Emergent Plus Fertilizer/);
+    expect(engine.isPreEmergentBag(visit.primary)).toBe(true); // by the catalog name: "Pre-Emergent Plus Fertilizer" (Dimension) or Stonewall 0.37% 18-0-10
     const found = await engine.visitNutrientTargets(knex, service, { visit, month: visit === OCT() ? 'Oct' : 'Apr', v13Active: true });
     expect(found.nitrogenCut).toBeNull();
     expect(found.reclaimedWater).toBe('kept');
     expect(found.keptFor).toBe('pre_emergent');
     expect(found.visit).toBe(visit);
     expect(found.targets.targetNPer1000).toBe(engine.parseVisitNutrientTargets(visit.notes).targetNPer1000);
-    const dimension = { analysis_k: 10, name: 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer' };
+    const dimension = { analysis_k: 10, name: pick === OCT ? 'LESCO Stonewall 0.37% 18-0-10' : 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer' };
     expect(engine.nitrogenCutNotes({ rateSource: 'protocol_rate' }, dimension, found)).toEqual([{
       key: RECLAIMED_NITROGEN_NOTE_KEY, severity: 'note', text: 'Reclaimed water: this bag carries the pre-emergent, so its full rate stays today.',
     }]);
@@ -198,12 +181,8 @@ describe('the winter potash bag keeps its rate (reclaimed water adds N, not K)',
     expect(found.keptFor).toBe('pre_emergent');
   });
 
-  test('a not-reclaimed lawn, or the gate off, leaves December exactly as it was', async () => {
+  test('a not-reclaimed lawn leaves December exactly as it was', async () => {
     expect(await engine.visitNutrientTargets(NOT_REC(), service, { visit: DEC(), month: 'Dec', v13Active: true })).toEqual({ visit: DEC(), targets: { targetNPer1000: 0.45, targetKPer1000: 0.99 }, nitrogenCut: null });
-    delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
-    const knex = REC();
-    expect(await engine.visitNutrientTargets(knex, service, { visit: DEC(), month: 'Dec', v13Active: true })).toEqual({ visit: DEC(), targets: { targetNPer1000: 0.45, targetKPer1000: 0.99 }, nitrogenCut: null });
-    expect(knex.calls).toEqual([]);
   });
 
   test('an ordinary N bag (no potassium target, no pre-emergent) is still halved: February and November', async () => {
@@ -257,7 +236,7 @@ describe('with the November large patch cut too: the smaller target wins, not bo
     expect(engine.nitrogenCutNotes({ rateSource: 'protocol_rate', targetNPer1000: 0.375 }, f24, found)).toEqual([]);
   });
 
-  test('the fungus rule applied but the reclaimed gate is off or the lawn is not reclaimed: the fungus note alone, with its own figures', async () => {
+  test('the fungus rule applied but the lawn is not reclaimed: the fungus note alone, with its own figures', async () => {
     const found = await run(NOT_REC(), 'Nov');
     expect(found.fungusAlso).toBeUndefined();
     const f24 = { id: 'f24', analysis_n: 24, analysis_k: 11, default_rate_per_1000: 4.2, rate_unit: 'lb' };
@@ -380,7 +359,7 @@ describe('the property read (isReclaimedService)', () => {
   });
 });
 
-describe('the recipe text the readers get (lawnProtocols), true with the gate off and on', () => {
+describe('the recipe text the readers get (lawnProtocols)', () => {
   const programs = require('../services/lawn-program');
   const OFF_NOTE = 'Reclaimed-water lawns (purple pipes or caps): the tech logs half the N at every N visit; the app does not adjust it yet.';
   const OFF_RULE = 'N and P blackout Jun 1 - Sep 30 (North Port Apr 1); the tech logs half the N on reclaimed-water lawns (the app does not adjust it yet).';
@@ -394,7 +373,7 @@ describe('the recipe text the readers get (lawnProtocols), true with the gate of
   const savedGates = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
   afterEach(() => { for (const name of GATES) { if (savedGates[name] === undefined) delete process.env[name]; else process.env[name] = savedGates[name]; } });
 
-  test('the recipe file holds the original, gate-off wording in every track (and states no future behavior)', () => {
+  test('the recipe file holds the original wording in every track (and states no future behavior)', () => {
     for (const track of Object.values(v13)) {
       expect(reclaimedNote(track)).toContain(OFF_NOTE);
       expect(reclaimedRule(track)).toBe(OFF_RULE);
@@ -402,45 +381,24 @@ describe('the recipe text the readers get (lawnProtocols), true with the gate of
     expect(JSON.stringify(v13)).not.toMatch(/winter potassium|half nitrogen today/);
   });
 
-  test.each([['bermuda removal off', undefined], ['bermuda removal on', 'true']])('%s: the gate off serves the original text, the gate on the new text, in every track; nothing else differs', (_label, removal) => {
+  test.each([['bermuda removal off', undefined], ['bermuda removal on', 'true']])('%s: the v13 program serves the new text in every track', (_label, removal) => {
     process.env.GATE_LAWN_V13 = 'true';
     if (removal) process.env.GATE_LAWN_BERMUDA_REMOVAL = 'true'; else delete process.env.GATE_LAWN_BERMUDA_REMOVAL;
-    delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
-    const off = programs.lawnProtocols();
-    process.env.GATE_LAWN_RECLAIMED_HALF_N = 'true';
     const on = programs.lawnProtocols();
-    expect(on).not.toBe(off);
     for (const track of Object.keys(v13)) {
-      expect(reclaimedNote(off[track])).toContain(OFF_NOTE);
-      expect(reclaimedRule(off[track])).toBe(OFF_RULE);
       expect(reclaimedNote(on[track])).toContain(ON_NOTE);
       expect(reclaimedRule(on[track])).toBe(ON_RULE);
       expect(reclaimedNote(on[track])).not.toMatch(/does not adjust it yet/);
-      const strip = (program) => ({ ...program[track], notes: program[track].notes.filter((l) => l !== reclaimedNote(program[track])), safety_rules: program[track].safety_rules.filter((l) => l !== reclaimedRule(program[track])) });
-      expect(strip(on)).toEqual(strip(off));
     }
   });
 
-  test('gate off serves the same recipe view on every call (identity kept), and the reclaimed variant is memoized', () => {
+  test('the reclaimed variant is memoized: the same recipe view on every call', () => {
     process.env.GATE_LAWN_V13 = 'true';
     process.env.GATE_LAWN_BERMUDA_REMOVAL = 'true';
-    delete process.env.GATE_LAWN_RECLAIMED_HALF_N;
-    // Gate off: the view the readers held before (main's per-gate recipe view), the same object on every call.
-    const off = programs.lawnProtocols();
-    expect(programs.lawnProtocols()).toBe(off);
-    expect(JSON.stringify(off)).not.toMatch(/half nitrogen today/);
-    process.env.GATE_LAWN_RECLAIMED_HALF_N = 'true';
     expect(programs.lawnProtocols()).toBe(programs.lawnProtocols());
-    expect(programs.lawnProtocols()).not.toBe(off);
   });
 
-  test('strict opt-in: only exactly true swaps the wording, and GATE_LAWN_V13 off serves the old program regardless', () => {
-    process.env.GATE_LAWN_V13 = 'true';
-    for (const value of ['TRUE', '1', 'false', '']) {
-      process.env.GATE_LAWN_RECLAIMED_HALF_N = value;
-      expect(reclaimedNote(programs.lawnProtocols().bermuda)).toContain(OFF_NOTE);
-    }
-    process.env.GATE_LAWN_RECLAIMED_HALF_N = 'true';
+  test('GATE_LAWN_V13 off serves the old program, without the reclaimed wording', () => {
     delete process.env.GATE_LAWN_V13;
     expect(JSON.stringify(programs.lawnProtocols())).not.toContain('Reclaimed water: half nitrogen today');
   });

@@ -36,6 +36,7 @@ jest.mock('../services/lawn-fast-complete', () => ({
   buildLawnFastContext: jest.fn(),
   buildLawnFastWateringPreview: jest.fn(),
   buildLawnTreatmentGuide: jest.fn(),
+  prepareLawnRecommendations: jest.fn(),
   resolveLawnFastEligibility: jest.fn(),
 }));
 jest.mock('../services/lawn-trouble-areas', () => ({ clearArea: jest.fn(), propertyOf: jest.fn(async (_knex, visit) => visit.property_id || null) }));
@@ -617,3 +618,73 @@ describe('the sheet names its spot products after a refused place', () => {
   });
 });
 
+// POST lawn-fast/prepare-recommendations (GATE_LAWN_REC_PREPARE, report speed plan step 4): the sheet names its products
+// before the Complete tap. Regression these guard: a paid model call started with the gate off, or for another
+// technician's visit.
+describe('POST lawn-fast/prepare-recommendations', () => {
+  const PREPARE = '/:lawnFastServiceId/lawn-fast/prepare-recommendations';
+  const GATES = ['GATE_LAWN_FAST_COMPLETE', 'GATE_LAWN_REC_PREPARE'];
+  const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
+  const ASSESSMENT = '00000000-0000-4000-8000-0000000000c3';
+  const PRODUCT = '00000000-0000-4000-8000-0000000000a1';
+  const { prepareLawnRecommendations } = require('../services/lawn-fast-complete');
+  const body = { assessmentId: ASSESSMENT, productIds: [PRODUCT] };
+  beforeEach(() => {
+    for (const name of GATES) process.env[name] = 'true';
+    mockDbCurrent = dbWithOwner('tech-1');
+    prepareLawnRecommendations.mockReset().mockResolvedValue({ ok: true, started: true });
+  });
+  afterEach(() => {
+    for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
+    mockDbCurrent = null;
+  });
+
+  test('is registered on the router after the router-level auth', () => {
+    const layer = routeLayer('post', PREPARE);
+    expect(layer).toBeTruthy();
+    expect(router.stack.indexOf(layer)).toBeGreaterThan(router.stack.findIndex((l) => !l.route && l.name === 'adminAuthenticate'));
+  });
+
+  test.each([
+    ['GATE_LAWN_REC_PREPARE', undefined], ['GATE_LAWN_REC_PREPARE', 'false'], ['GATE_LAWN_REC_PREPARE', '1'], ['GATE_LAWN_FAST_COMPLETE', undefined],
+  ])('%s = %p answers 404 {enabled:false} and reads nothing', async (name, value) => {
+    if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    const calls = [];
+    mockDbCurrent = dbWithOwner('tech-1', calls);
+    const res = await invoke('post', PREPARE, { params, body });
+    expect(res.statusCode).toBe(404);
+    expect(res.body).toEqual({ enabled: false });
+    expect(calls).toEqual([]);
+    expect(prepareLawnRecommendations).not.toHaveBeenCalled();
+  });
+
+  test("a technician cannot reach another technician's visit", async () => {
+    mockDbCurrent = dbWithOwner('tech-2');
+    const res = await invoke('post', PREPARE, { params, body, actor: { techRole: 'technician', technicianId: 'tech-1' } });
+    expect(res.statusCode).toBe(403);
+    expect(prepareLawnRecommendations).not.toHaveBeenCalled();
+  });
+
+  test("the technician's own visit: 202, and the service gets the visit, the assessment and the product ids", async () => {
+    const res = await invoke('post', PREPARE, { params, body, actor: { techRole: 'technician', technicianId: 'tech-1' } });
+    expect(res.statusCode).toBe(202);
+    expect(res.body).toEqual({ enabled: true, started: true });
+    expect(prepareLawnRecommendations).toHaveBeenCalledWith({ serviceId: VISIT, assessmentId: ASSESSMENT, productIds: [PRODUCT] });
+  });
+
+  test.each([
+    ['invalid_assessment', 400], ['invalid_products', 400], ['not_found', 404], ['not_eligible', 409], ['not_confirmed', 409], ['not_usable', 409],
+  ])('the service refuses with %s: %i and the code', async (reason, status) => {
+    prepareLawnRecommendations.mockResolvedValue({ ok: false, reason });
+    const res = await invoke('post', PREPARE, { params, body });
+    expect(res.statusCode).toBe(status);
+    expect(res.body).toEqual({ error: reason, code: reason });
+  });
+
+  test('a request with no body is handed to the service, which refuses it', async () => {
+    prepareLawnRecommendations.mockResolvedValue({ ok: false, reason: 'invalid_assessment' });
+    const res = await invoke('post', PREPARE, { params });
+    expect(res.statusCode).toBe(400);
+    expect(prepareLawnRecommendations).toHaveBeenCalledWith({ serviceId: VISIT, assessmentId: undefined, productIds: undefined });
+  });
+});

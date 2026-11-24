@@ -49,8 +49,8 @@
  *   - Overlap:  window_start < :end  AND
  *               COALESCE(window_end, window_start + COALESCE(NULLIF(
  *                 estimated_duration_minutes, 0), 60) minutes) > :start
- *   - A customer-linked visit occupies its time even if it retains its hold
- *     timestamp. An unclaimed estimate hold occupies time until database expiry.
+ *   - Single-date conflict checks count a customer-linked visit even if it retains
+ *     its hold timestamp. An unclaimed estimate hold occupies time until database expiry.
  *   - Windowless rows (window_start IS NULL — converter/seeder placeholder
  *     rows): the SQL overlap predicate above evaluates NULL for them, so
  *     every existing gate ignores them. This module deliberately keeps that
@@ -935,16 +935,30 @@ async function findConflictingVisitsWithTravel({
   return rows.filter((row) => reasonByRow.has(row.id)).map((row) => ({ ...row, conflict_reason: reasonByRow.get(row.id) }));
 }
 
+// listOccupiedWindows' hold filter: the offer side's unexpired-hold rule, or
+// (includeClaimedReservations) every visit staff have booked too.
+function occupiedHoldFilter(includeClaimedReservations, column) {
+  if (includeClaimedReservations) return bookedVisitOrLiveHold;
+  return (q) => {
+    q.whereNull(column)
+      .orWhereRaw(`${column} > NOW()`);
+  };
+}
+
 /**
- * Range variant for offer builders: every occupying row (same status/hold/
- * windowless conventions as findConflictingVisits) across [dateFrom, dateTo],
- * for JS-side overlap filtering of many candidate slots in one query.
+ * Offer builders load rows across [dateFrom, dateTo] for JS-side overlap
+ * filtering. They filter by the hold timestamp. Reservation and confirmation
+ * recheck the selected date and also count visits staff have already booked.
  * Returns rows with a normalized `date` ('YYYY-MM-DD') plus `startMin` /
  * `endMin` (minutes from midnight, window_end defaulted from
  * estimated_duration_minutes or 60 — same fallback as the SQL predicate).
  * withCoords:true adds the divergence-guarded `lat`/`lng` (customers LEFT
  * JOIN) so offer builders can apply the travel-gap rule; default false keeps
  * the legacy query byte for byte.
+ * includeClaimedReservations:true also counts every visit staff have booked,
+ * one that keeps an old hold timestamp too (bookedVisitOrLiveHold, the commit
+ * side's rule), for a read that must never show booked time as free (the
+ * day-replan route check). Unset keeps the hold-timestamp filter.
  */
 async function listOccupiedWindows({
   db = defaultDb,
@@ -953,6 +967,7 @@ async function listOccupiedWindows({
   excludeServiceIds = [],
   excludeStatuses = DEFAULT_EXCLUDE_STATUSES,
   withCoords = false,
+  includeClaimedReservations,
 } = {}) {
   if (!dateFrom || !dateTo) return [];
   const excludeIds = (excludeServiceIds || []).filter(Boolean).map(String);
@@ -963,7 +978,7 @@ async function listOccupiedWindows({
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
       .whereNotIn('scheduled_services.status', excludeStatuses)
-      .where(bookedVisitOrLiveHold)
+      .where(occupiedHoldFilter(includeClaimedReservations, 'scheduled_services.reservation_expires_at'))
       .whereNotNull('scheduled_services.window_start');
     if (excludeIds.length) query.whereNotIn('scheduled_services.id', excludeIds);
     rows = await query.select(...CONFLICT_COLUMNS.map((c) => `scheduled_services.${c}`), ...guardedCoordSelects(db),
@@ -972,7 +987,7 @@ async function listOccupiedWindows({
     const query = db('scheduled_services')
       .whereBetween('scheduled_date', [dateFrom, dateTo])
       .whereNotIn('status', excludeStatuses)
-      .where(bookedVisitOrLiveHold)
+      .where(occupiedHoldFilter(includeClaimedReservations, 'reservation_expires_at'))
       // Windowless placeholder rows are inert to conflicts (see header).
       .whereNotNull('window_start');
     if (excludeIds.length) query.whereNotIn('id', excludeIds);

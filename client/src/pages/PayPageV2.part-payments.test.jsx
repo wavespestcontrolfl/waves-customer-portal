@@ -4,7 +4,8 @@
 // Subtotal, any credit and Total due, so the deductions did not add up. The
 // page now shows the part payment as its own "Paid so far" row. After /setup
 // answers, the page derives credit from the setup amount; a part payment
-// must not be read as account credit there.
+// must not be read as account credit there. Each discount is its own row too
+// (owner 2026-11-22), so the summary rows still add up to the total due.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
@@ -29,7 +30,7 @@ function response(status, body = {}) {
   return { ok: status >= 200 && status < 300, status, json: async () => body, text: async () => JSON.stringify(body) };
 }
 
-function payload({ amountPaid = 40, creditApplied = 0, stripe = { available: false, publishableKey: null } } = {}) {
+function payload({ amountPaid = 40, creditApplied = 0, stripe = { available: false, publishableKey: null }, invoice = {} } = {}) {
   return {
     invoice: {
       id: 'inv-1',
@@ -54,6 +55,7 @@ function payload({ amountPaid = 40, creditApplied = 0, stripe = { available: fal
       notes: null,
       annualPrepay: null,
       attachments: [],
+      ...invoice,
     },
     service: { type: 'Pest control', date: '2026-10-20', productsApplied: [], photos: [] },
     customer: { firstName: 'Pat', lastName: 'Doe', email: 'pat@example.com', city: 'Parrish', state: 'FL', zip: '34219' },
@@ -138,5 +140,23 @@ describe('pay page — part-paid invoice summary', () => {
     expect(rowValue('Paid so far')).toHaveTextContent('− $40.00');
     if (creditRow) expect(rowValue('Account credit applied')).toHaveTextContent(creditRow);
     else expect(screen.queryByText('Account credit applied')).not.toBeInTheDocument();
+  });
+
+  it('shows each discount as its own row, not one combined row', async () => {
+    const invoice = {
+      lineItems: [
+        { description: 'Quarterly Pest Control', quantity: 1, unit_price: 110, amount: 110 },
+        { _kind: 'discount', description: 'WaveGuard Silver', quantity: 1, unit_price: -11, amount: -11 },
+        { _kind: 'discount', description: 'Military Discount', quantity: 1, unit_price: -4.95, amount: -4.95 },
+      ],
+      subtotal: 110, discountAmount: 15.95, discountLabel: 'WaveGuard Silver + Military Discount', total: 94.05, amountDue: 94.05,
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => response(200, payload({ amountPaid: 0, invoice }))));
+    renderPage();
+    await screen.findByText('Review and pay');
+    expect(rowValue('WaveGuard Silver')).toHaveTextContent('− $11.00');
+    expect(rowValue('Military Discount')).toHaveTextContent('− $4.95');
+    expect(screen.queryByText('WaveGuard Silver + Military Discount')).not.toBeInTheDocument();
+    expect(rowValue('Total due')).toHaveTextContent('$94.05');
   });
 });

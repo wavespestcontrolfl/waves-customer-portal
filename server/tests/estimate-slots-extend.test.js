@@ -463,7 +463,9 @@ describe('availability excludes the estimate\'s own hold', () => {
   const fs = require('fs');
   const path = require('path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-slot-availability.js'), 'utf8');
-  const fn = src.slice(src.indexOf('async function filterCollidingSlots'), src.indexOf('async function dropLiveMakeRoomDestinations'));
+  // The whole function, to the next one: a fixed length stopped reaching the hold exclusion when the function grew.
+  const fnStart = src.indexOf('async function filterCollidingSlots');
+  const fn = src.slice(fnStart, src.indexOf('\nasync function ', fnStart + 1));
 
   test('the collision query skips this estimate\'s uncommitted hold only', () => {
     expect(fn).toContain('ownEstimateId = null');
@@ -520,7 +522,9 @@ describe('extendReservation revalidates technician and blackout', () => {
   const fn = src.slice(src.indexOf('async function extendReservation'), src.indexOf('module.exports'));
 
   test('the held technician must still be assignable, with the commit error code', () => {
-    expect(fn).toContain("await assertAssignableTechnician(row.technician_id, { conn: trx, date: scheduledDate, workDays: true });");
+    expect(fn).toContain("await assertAssignableTechnician(row.technician_id, { conn: trx, date: scheduledDate, workDays: true,");
+    // The hold's own block, against the technician's shift (GATE_TECH_SHIFT_HOURS). Behavior: tech-shift-hours-commit-postgres.test.js.
+    expect(fn).toContain("hours: require('./scheduling/window-rules').rowBlockMinutes(row) });");
     const at = fn.indexOf('assertAssignableTechnician');
     expect(fn.slice(at, at + 420)).toContain("err.code = 'SLOT_UNAVAILABLE';");
   });

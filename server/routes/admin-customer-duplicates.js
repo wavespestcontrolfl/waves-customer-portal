@@ -30,7 +30,7 @@ const { duplicatesSameAddressLive, duplicatesSameNameLive } = require('../config
 const {
   findDuplicateGroups, findSameAddressGroups, SAME_ADDRESS_KIND, findSameNameGroups, SAME_NAME_KIND, duplicatePairEligibility, executeMerge, revertMerge, recordLinkedProperty, acquirePairAdjudicationLock,
   REVERT_FINANCIAL_TABLES, CONSENT_CRITICAL_TABLES,
-  countActivityRows, activityColumnsFor, UNDO_MERGE_DISMISSAL_REASON,
+  countActivityRows, activityColumnsFor, UNDO_MERGE_DISMISSAL_REASON, movedPrefUndoRefusals,
 } = require('../services/customer-dedupe');
 
 const router = express.Router();
@@ -371,6 +371,13 @@ router.get('/merges', async (req, res) => {
         }
       }
     }
+    // Moved-preference-row mirror: revertMerge refuses when a whole record the
+    // merge cleared on a preferences row it moved whole (the new-sod record,
+    // the sprinkler timer) holds a value now (guardMovedPrefRecords). One
+    // batched read with the endpoint's own predicate (movedPrefUndoRefusals);
+    // a failed read marks affected merges non-revertible (fail closed).
+    const movedPrefRefused = await movedPrefUndoRefusals(db, rows.filter((row) => !row.undone_at)
+      .map((row) => ({ id: row.id, winnerId: row.winner_customer_id, recorded: parse(row.repointed_ids) })));
     const invoiceBearingRows = rows.filter((row) => !row.undone_at
       && journaledIdsOf(parse(row.repointed_ids), 'invoices').size > 0);
     const allJournaledInvoiceIds = [...new Set(
@@ -594,8 +601,9 @@ router.get('/merges', async (req, res) => {
           // auto-revertible; neither is a merge whose winner is gone/retired,
           // nor one revertMerge would refuse (collisions, missing pm flags,
           // unrecorded linked property, stranded cards/visits, invoice
-          // activity/children). The winner must be POSITIVELY live
-          // (=== true): a purged winner row leaves the left-join columns
+          // activity/children, a sod record or sprinkler timer entered since
+          // on a preferences row the merge moved). The winner must be
+          // POSITIVELY live          // (=== true): a purged winner row leaves the left-join columns
           // null, and null must read dead, not alive.
           //
           // MIRRORED activity refusals (batchable — a fixed number of
@@ -609,7 +617,8 @@ router.get('/merges', async (req, res) => {
           // endpoint 409s with a clear, actionable reason instead):
           // email/name-bound identity artifact probes (EMAIL_BOUND_SURFACES),
           // the billing-identity, address-clear and service-contact-clear
-          // activity gates,
+          // activity gates (address-clear includes the kept customer's
+          // sprinkler timer: it needs the undo's own address patch),
           // a same-address merge's carried phone whose contact slot was
           // edited since (the undo would lift its text hold),
           // non-invoice journaled-row activity (estimates / visits /
@@ -637,6 +646,7 @@ router.get('/merges', async (req, res) => {
             && !postMergeCardsStrand
             && !postMergeVisitStrand
             && !invoiceActivityRefuses
+            && !movedPrefRefused.has(row.id)
             // LIFO mirror (r20): only the newest non-undone merge for a
             // winner is offered; a failed newest-lookup fails closed.
             && !newestLookupFailed

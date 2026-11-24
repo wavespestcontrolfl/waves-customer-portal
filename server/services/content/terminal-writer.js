@@ -47,6 +47,22 @@
  * the environment), so only an account with push access can supply a draft.
  * The file is still untrusted input: it is size-bounded, shape-checked and
  * then judged by the same gates as an agent draft.
+ *
+ * Blog fact check on the Mac (CONTENT_EDITORIAL_REVIEW_HOST=mac, owner
+ * 2026-11-19). With GATE_EDITORIAL_EVIDENCE on, an agent session must get its
+ * answer plan approved (validate_answer_plan) before it can emit a draft, and a
+ * draft file used to be unable to carry that approval, so supporting-blog,
+ * customer-question and refresh briefs stayed on the paid agent. In Mac mode
+ * the file carries the plan as `answer_plan: { sections: [...] }` (the
+ * validate_answer_plan input) and those briefs stay in the terminal. The
+ * server leaves EVERY terminal draft and hold to the Mac job (it reads no
+ * GitHub branch and consumes nothing: draftSourceFor waits with
+ * terminal_draft_awaits_mac). The Mac job runs this module with
+ * CONTENT_EDITORIAL_REVIEW_RUNNER=mac, where its model calls ride the Claude
+ * plan: fetchTerminalDraft only shape-checks the plan (it never calls a
+ * model; the listing reads every waiting row), and draftSourceFor reviews it
+ * (editorial-review reviewPlan) and binds it to the body headings, as emit_draft
+ * does for an agent. Both variables are strict `=== 'mac'`; unset = no change.
  */
 
 const crypto = require('crypto');
@@ -102,16 +118,74 @@ function terminalWriterLive() {
   return process.env.GATE_CONTENT_WRITER_TERMINAL === 'true';
 }
 
+// Config, not gates (owner 2026-11-19). Read at call time, strict.
+// HOST: Railway sets it; the Mac job takes the drafts that need the fact check.
+const editorialReviewOnMac = () => process.env.CONTENT_EDITORIAL_REVIEW_HOST === 'mac';
+// RUNNER: only the Mac job sets it ("this process is the Mac job").
+const runningOnMac = () => process.env.CONTENT_EDITORIAL_REVIEW_RUNNER === 'mac';
+const AWAITS_MAC = 'terminal_draft_awaits_mac';
+const PLAN_UNAVAILABLE = 'terminal_plan_review_unavailable';
+// The Mac job's full editorial review could not run (autonomous-runner _awaitTerminalReviewer).
+const REVIEW_UNAVAILABLE = 'terminal_review_unavailable';
+// A Mac process without the Max-plan adapter (draftSourceFor): the draft is not read.
+const MAX_PLAN_MISSING = 'terminal_max_plan_missing';
+// The Mac job's run on a row with no handed brief, or one the terminal does not write (autonomous-runner runNext).
+const MAC_BRIEF_MISSING = 'terminal_mac_brief_missing';
+const MAC_NO_AGENT = 'terminal_mac_no_agent';
+const MAX_PLAN_REASON_CHARS = 700;
+// In Mac mode a wait is rechecked soon, not after RECHECK_MS: the Mac job takes a
+// draft the terminal wrote after the server's look at the row, and its claim
+// cannot take a row still deferred. Other queue deferrals are not touched.
+const MAC_RECHECK_MS = 30 * 60 * 1000;
+const recheckMs = () => (editorialReviewOnMac() ? MAC_RECHECK_MS : RECHECK_MS);
+// A rejected plan stays on its run so the listing does not offer the same commit again.
+const REJECTED_AT_RE = /\s*\[terminal revision ([^\]\s]+)\]$/;
+
+// The model lanes of the fact check the Mac job runs (one list: llm/max-plan-lanes.js, which also
+// keeps them on the Anthropic route there). The owner's spend line (2026-11-19, "A").
+const { MAC_MODEL_LANES } = require('../llm/max-plan-lanes');
+
+// ANTHROPIC_BASE_URL unset, or naming api.anthropic.com itself.
+function anthropicHostIsDefault(baseUrl) {
+  if (!baseUrl) return true;
+  try { return new URL(baseUrl).hostname === 'api.anthropic.com'; } catch { return false; }
+}
+
+/**
+ * True when the Max-plan adapter (~/max-runner/claude-code-fetch.js) is the live fetch and answers
+ * every lane in MAC_MODEL_LANES: in lane mode it lists them and reads the lane from this very
+ * agent-control context module (a different copy of the portal reads another context, so its calls
+ * would pass through to the paid API). The adapter marks itself on the global when it wraps fetch.
+ */
+function maxPlanAdapterCovers({ target = globalThis, lanes = MAC_MODEL_LANES, env = process.env } = {}) {
+  const adapter = target.__maxRunnerAdapter;
+  if (!adapter || typeof target.fetch !== 'function' || adapter.fetch !== target.fetch) return false;
+  // The adapter answers only api.anthropic.com: an SDK base-URL override would send the calls past it.
+  if (!anthropicHostIsDefault(env.ANTHROPIC_BASE_URL)) return false;
+  if (adapter.answers === 'all') return true;
+  if (!Array.isArray(adapter.answers) || !lanes.every((lane) => adapter.answers.includes(lane))) return false;
+  try {
+    const fs = require('fs');
+    return fs.realpathSync(require.resolve('../agent-control/context')) === fs.realpathSync(String(adapter.contextModule || ''));
+  } catch {
+    return false;
+  }
+}
+
 // Briefs the editorial-evidence gate covers (the same test as
 // brief-driven-tools.js registerSessionEditorial). With that gate on, the
 // agent session must get its answer plan approved and its headings are
-// checked against the plan before a draft is captured. A terminal draft
-// cannot carry that approval, so those briefs stay on the agent.
-function needsEditorialPlan(brief) {
+// checked against the plan before a draft is captured.
+function editorialPlanRequired(brief) {
   if (!require('./editorial-evidence').enabled()) return false;
   const refresh = brief?.page_type === 'refresh' || brief?.action_type === 'refresh_existing_page';
   return refresh || ['supporting-blog', 'customer-question'].includes(brief?.page_type);
 }
+
+// A terminal draft file normally cannot carry that approval, so those briefs
+// stay on the agent. In Mac mode the file carries the plan and the Mac job
+// reviews it, so the terminal keeps them.
+const needsEditorialPlan = (brief) => !editorialReviewOnMac() && editorialPlanRequired(brief);
 
 // A title/meta rewrite is a different, tiny draft shape with its own agent
 // and its own handler; it stays on the agent. Everything else the dispatch
@@ -136,7 +210,16 @@ function draftProblem(parsed, opportunityId, expectedBriefId) {
   if (parsed.schema != null && !isObject(parsed.schema)) return 'schema must be an object';
   if (parsed.claims_ledger != null && !Array.isArray(parsed.claims_ledger)) return 'claims_ledger must be an array';
   if (parsed.notes_for_reviewer != null && typeof parsed.notes_for_reviewer !== 'string') return 'notes_for_reviewer must be text';
-  return null;
+  // The plan is read only while the blog fact check reviews it; with the gate off a bad plan is ignored.
+  return require('./editorial-evidence').enabled() ? answerPlanProblem(parsed.answer_plan) : null;
+}
+
+// Shape only (no model): the validate_answer_plan input, when the file has one,
+// with the same per-section rules reviewPlan applies before it calls a model.
+function answerPlanProblem(plan) {
+  if (plan == null) return null;
+  if (!isObject(plan)) return 'answer_plan must be an object with a sections list';
+  return require('./editorial-plan-shape').planSectionsProblem(plan.sections);
 }
 
 const holdText = (v) => (typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim() : '');
@@ -210,7 +293,55 @@ async function fetchTerminalDraft(opportunityId, { gh = require('../content-astr
   // draft (brief-driven-tools.js) and what the publisher's canPublishRefresh /
   // canPublishDraftBrief require. Set here, never read from the file.
   const draft = { type: 'draft', ...Object.fromEntries(DRAFT_FIELDS.filter((f) => parsed[f] != null).map((f) => [f, parsed[f]])) };
-  return result({ ok: true, draft, brief_id: expectedBriefId, revision });
+  return result({ ok: true, draft, brief_id: expectedBriefId, revision, ...(parsed.answer_plan != null ? { answer_plan: parsed.answer_plan } : {}) });
+}
+
+const waitResult = (code, reason) => ({ ok: false, wait: true, code, reason, agent_id: TERMINAL_AGENT_ID, session_id: null });
+// `revision` (the commit that was read) rides on the reason so awaitingTerminalDrafts can tell this file from a rewrite.
+const invalidPlan = (why, revision) => waitResult(INVALID, `${`terminal draft rejected: ${why}`.slice(0, MAX_PLAN_REASON_CHARS + 60)}${revision ? ` [terminal revision ${revision}]` : ''}`);
+
+// The reviewer's own findings, in a bounded sentence.
+function planFindingsText(findings) {
+  const text = (Array.isArray(findings) ? findings : []).map((f) => `section ${Number(f?.sectionIndex) + 1}: ${f?.detail || ''} ${f?.action || ''}`.trim()).join(' | ');
+  return text.slice(0, MAX_PLAN_REASON_CHARS);
+}
+
+/**
+ * Mac mode, a brief the fact check covers: the plan the draft file carries must
+ * pass the reviewer and match the body (the same two steps an agent's
+ * validate_answer_plan + emit_draft make). Takes a fetched ok result; returns
+ * it, or a wait: INVALID when the draft is wrong (the terminal rewrites it),
+ * PLAN_UNAVAILABLE when the check could not run (the row retries and the draft
+ * stays). Runs only where a model call is free (the Mac job).
+ */
+async function checkAnswerPlan(brief, fetched) {
+  const tools = require('./agents/brief-driven-tools');
+  let context;
+  let review;
+  try {
+    context = await tools.editorialPlanContextForBrief(brief);
+    if (context.applicable === false) return fetched; // a refresh of a page outside the blog contract
+    // No retry can help: the writer pushes a hold (blog-run step 5), which parks the row for a new brief.
+    if (context.unresolved && context.permanent) {
+      return invalidPlan('the answer-plan review has no title to check against (the brief has no title, or the refresh target is gone or has no title). Push a hold with reason brief_unusable that names this check', fetched.revision);
+    }
+    if (context.unresolved) return waitResult(PLAN_UNAVAILABLE, 'the title for the answer-plan review could not be read; the row looks again later');
+    if (!fetched.answer_plan) return invalidPlan('answer_plan is missing: this brief needs the answer plan the blog fact check reviews (see answer_plan_shape in the writing pack)', fetched.revision);
+    review = await require('./editorial-review').reviewPlan({ title: context.title, sections: fetched.answer_plan.sections });
+  } catch (err) {
+    return waitResult(PLAN_UNAVAILABLE, `the answer-plan review could not run: ${err.message}`);
+  }
+  // The reviewer answered, but not with a valid review of this plan: rejected at this commit, so the
+  // same revision does not stop every Mac pass.
+  if (review?.invalidResponse) {
+    return invalidPlan(`the answer-plan reviewer could not give a valid review of this plan (${planFindingsText(review.findings)}). Check that each section has one heading, one reader question and one direct answer, then push the draft again`, fetched.revision);
+  }
+  // reviewPlan fails closed with no model when it could not reach one.
+  if (review?.pass !== true && !review?.model) return waitResult(PLAN_UNAVAILABLE, 'the answer-plan reviewer was unavailable; the row looks again later');
+  if (review?.pass !== true) return invalidPlan(`the answer plan failed review: ${planFindingsText(review?.findings)}`, fetched.revision);
+  const mismatch = tools.planSectionMismatch(fetched.answer_plan.sections, fetched.draft.body, { partial: context.partial });
+  if (mismatch) return invalidPlan(`the body does not match the answer plan. ${tools.planMismatchDirectives(mismatch).join(' ')}`, fetched.revision);
+  return fetched;
 }
 
 /**
@@ -231,12 +362,27 @@ function draftSourceFor(opportunityId, brief, { handed = false, dryRun = false, 
   if (dryRun || !writesInTerminal(brief)) return null;
   return {
     async runWithBrief() {
+      // Mac mode: the Mac job takes every terminal draft and hold. The server
+      // reads no branch and takes nothing, so nothing is consumed here.
+      if (editorialReviewOnMac() && !runningOnMac()) {
+        return waitResult(AWAITS_MAC, 'the Mac job takes terminal drafts; this row waits for it');
+      }
+      // The owner's spend line, at the one place a draft is consumed (any caller of runNext): on the Mac
+      // the fact-check calls ride the Max plan, or the draft is not read.
+      if (runningOnMac() && !maxPlanAdapterCovers()) {
+        return waitResult(MAX_PLAN_MISSING, 'the Max-plan adapter does not answer the fact-check lanes in this process; the draft is not read');
+      }
       const fetched = await fetchTerminalDraft(opportunityId, { ...(gh ? { gh } : {}), expectedBriefId: handed ? brief.id : null })
         .catch((err) => ({ ok: false, code: UNREADABLE, reason: `terminal draft could not be read: ${err.message}`, agent_id: TERMINAL_AGENT_ID, session_id: null }));
-      if (fetched.ok) return fetched;
+      if (fetched.ok) return editorialPlanRequired(brief) ? checkAnswerPlan(brief, fetched) : fetched;
       return fetched.code === HELD ? { ...fetched, held: true } : { ...fetched, wait: true };
     },
   };
+}
+
+// The Mac job's draft source for a row the terminal does not write: a wait, never an agent session.
+function macNoAgentSource() {
+  return { runWithBrief: async () => waitResult(MAC_NO_AGENT, 'the Mac job starts no agent session; the server drafts this row') };
 }
 
 /**
@@ -270,11 +416,19 @@ async function cleanupConsumedDrafts(runs, { gh } = {}) {
   }
 }
 
+// The reason a run on this brief rejected this commit's answer plan, or null.
+function rejectedPlanProblem(row, revision) {
+  if (typeof row.rejected_notes !== 'string') return null;
+  const match = REJECTED_AT_RE.exec(row.rejected_notes);
+  return match && match[1] === revision ? row.rejected_notes.replace(REJECTED_AT_RE, '') : null;
+}
+
 /**
  * Pending rows by what their LATEST run says, best score first:
  *   due      it ended waiting and no usable draft for its brief is pushed
  *            (a file the run would reject counts as not pushed)
- *   written  a usable draft is on the branch; the next run takes it
+ *   written  a usable draft is on the branch; the next run takes it (not one
+            whose answer plan the last run rejected at this commit: that is due)
  *   held     a usable hold is on the branch; the next run parks the row
  *   rebrief  the row needs a new brief before the terminal can write: its
  *            draft failed a gate (the next run writes the retry brief), or
@@ -283,8 +437,16 @@ async function cleanupConsumedDrafts(runs, { gh } = {}) {
 async function awaitingTerminalDrafts({ now = new Date(), deps = {} } = {}) {
   const conn = deps.db || db;
   const gh = deps.gh || require('../content-astro/github-client');
+  // rejected_notes: the newest rejection on the same brief, so a wait recorded after it (a server
+  // pass in Mac mode) does not hide it and offer the same commit again.
   const { rows } = await conn.raw(`
-    SELECT * FROM (
+    SELECT latest.*,
+           (SELECT x.reviewer_notes FROM autonomous_runs x
+             WHERE x.opportunity_id = latest.opportunity_id AND x.brief_id = latest.brief_id AND x.skip_reason = ?
+             ORDER BY x.created_at DESC LIMIT 1) AS rejected_notes,
+           (SELECT max(c.created_at) FROM autonomous_runs c
+             WHERE c.opportunity_id = latest.opportunity_id AND c.outcome = ? AND c.agent_id IS NULL) AS capped_at
+      FROM (
       SELECT DISTINCT ON (r.opportunity_id)
              r.opportunity_id, r.brief_id, r.action_type, r.outcome, r.agent_id, r.skip_reason, r.reviewer_notes, r.created_at,
              q.query, q.page_url, q.service, q.city, q.score, b.created_at AS brief_created_at
@@ -297,11 +459,13 @@ async function awaitingTerminalDrafts({ now = new Date(), deps = {} } = {}) {
        ORDER BY r.opportunity_id, r.created_at DESC
     ) latest
     WHERE outcome = ? OR (outcome = ? AND agent_id = ?)
-    ORDER BY score DESC`, [AWAITING_WINDOW_DAYS, PRE_DRAFT_CAP_OUTCOME, AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID]);
+    ORDER BY score DESC`, [INVALID, PRE_DRAFT_CAP_OUTCOME, AWAITING_WINDOW_DAYS, PRE_DRAFT_CAP_OUTCOME, AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID]);
   const due = [];
   const written = [];
   const held = [];
   const rebrief = [];
+  // Rejections come from the answer-plan review, which runs only while the blog fact check is on.
+  const plansReviewed = require('./editorial-evidence').enabled();
   for (const row of rows) {
     const item = { ...row, branch: branchFor(row.opportunity_id), draft_path: draftPathFor(row.opportunity_id) };
     // Same rule as the runner (_briefHandedToTerminal): a brief that is gone
@@ -309,11 +473,24 @@ async function awaitingTerminalDrafts({ now = new Date(), deps = {} } = {}) {
     const briefAge = row.brief_created_at ? now.getTime() - new Date(row.brief_created_at).getTime() : Infinity;
     if (row.outcome !== AWAITING_OUTCOME || briefAge > MAX_BRIEF_AGE_MS) { rebrief.push(item); continue; }
     const fetched = await fetchTerminalDraft(row.opportunity_id, { gh, expectedBriefId: row.brief_id });
-    if (fetched.ok) written.push(item);
-    else if (fetched.code === HELD) held.push({ ...item, hold: fetched.hold });
+    // A plan the last run rejected at this very commit is not offered again: it is due,
+    // with the reviewer's reason, until the branch tip changes.
+    const rejected = fetched.ok && plansReviewed ? rejectedPlanProblem(row, fetched.revision) : null;
+    if (rejected) due.push({ ...item, problem: rejected });
+    else if (fetched.ok) written.push({ ...item, handoff: handoffWait(row) });
+    else if (fetched.code === HELD) held.push({ ...item, hold: fetched.hold, handoff: handoffWait(row) });
     else due.push({ ...item, problem: fetched.code === INVALID ? fetched.reason : null });
   }
   return { due, written, held, rebrief };
+}
+
+// The waits that only stood for "no usable draft yet" (a server handoff in Mac mode, no file, a
+// rejected file): once a draft or a hold is pushed, the Mac pass may take it before the recheck time. A
+// publish-cap deferral after that wait, or a reviewer outage, keeps its time.
+const HANDOFF_WAITS = new Set([AWAITS_MAC, MISSING, INVALID]);
+function handoffWait(row) {
+  if (!HANDOFF_WAITS.has(row.skip_reason)) return false;
+  return !(row.capped_at && new Date(row.capped_at) > new Date(row.created_at));
 }
 
 /**
@@ -328,6 +505,23 @@ async function closeTerminalItems({ now = new Date(), deps = {} } = {}) {
     for (const key of await episodes.openAdminAlertKeys(conn, prefix)) open.add(key);
   }
   return episodes.closeAdminAlertKeys(conn, [...open], 'terminal_writer_off', { now, resolution: 'Cleared: the portal writes these drafts itself again' });
+}
+
+/**
+ * Mac mode: a blog whose draft or hold is pushed waits for the Mac job, not for a
+ * writer, so the terminal item may be closed while it waits; "no blog today" is
+ * false news then too. False outside Mac mode and on any read failure (the
+ * drought alert is the fallback signal, so doubt keeps it).
+ */
+async function macHoldsBlogDraft({ deps = {} } = {}) {
+  if (!terminalWriterLive() || !editorialReviewOnMac()) return false;
+  try {
+    const { written, held } = await awaitingTerminalDrafts({ deps });
+    return [...written, ...held].some((row) => row.action_type === 'new_supporting_blog');
+  } catch (err) {
+    logger.warn(`[terminal-writer] could not tell whether a blog waits for the Mac job: ${err.message}`);
+    return false;
+  }
 }
 
 /**
@@ -583,9 +777,10 @@ async function syncHoldQuestions({ now = new Date(), deps = {} } = {}) {
 }
 
 module.exports = {
-  terminalWriterLive, writesInTerminal, waitingBriefId, fetchTerminalDraft, retireTerminalDraft, draftSourceFor, cleanupConsumedDrafts, awaitingTerminalDrafts, raiseTerminalDue, closeTerminalItems, blogDraftRequested,
+  terminalWriterLive, editorialReviewOnMac, runningOnMac, editorialPlanRequired, needsEditorialPlan, writesInTerminal, waitingBriefId, fetchTerminalDraft, retireTerminalDraft, draftSourceFor, cleanupConsumedDrafts, awaitingTerminalDrafts, raiseTerminalDue, closeTerminalItems, blogDraftRequested, macHoldsBlogDraft,
   raiseHoldQuestion, syncHoldQuestions, holdSkipReason,
   branchFor, draftPathFor, draftProblem, holdProblem,
+  AWAITS_MAC, PLAN_UNAVAILABLE, REVIEW_UNAVAILABLE, MAX_PLAN_MISSING, MAC_BRIEF_MISSING, MAC_NO_AGENT, macNoAgentSource, MAC_RECHECK_MS, recheckMs, MAC_MODEL_LANES, maxPlanAdapterCovers,
   AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID, MISSING, INVALID, UNREADABLE, RECHECK_MS, MAX_BRIEF_AGE_MS, BRANCH_PREFIX, DRAFT_DIR, DRAFT_FIELDS,
   HELD, HOLD_OUTCOME, HOLD_MS, HOLD_REASONS,
 };

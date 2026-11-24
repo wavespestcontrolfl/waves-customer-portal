@@ -6,6 +6,10 @@
  * Run: DATABASE_URL=postgres://localhost:5432/<migrated disposable db> \
  *   ~/.claude/bin/jest-slot --runInBand server/tests/tech-estimates-postgres.test.js
  */
+// The new-lead re-alert pass (new-lead-reminder.js) is not this suite's subject. It has no gate, so the sweep run here in
+// office hours would judge, stamp and push every open lead bell in the connected database. Its own suite
+// (new-lead-reminder-postgres.test.js) runs it inside rolled-back transactions with the push mocked.
+jest.mock('../services/new-lead-reminder', () => ({ runNewLeadReminder: jest.fn(async () => ({ skipped: true, reason: 'not_this_suite' })) }));
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.setTimeout(60000);
 

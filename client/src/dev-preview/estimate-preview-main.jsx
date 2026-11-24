@@ -397,6 +397,28 @@ function pestMosquitoMonthsScenario() {
   };
 }
 
+// First-visit line (owner 2026-11-21): the pest plan with the $99 WaveGuard setup fee, so the
+// line under the price and the "Reserve your spot" total can be compared. It carries the
+// plan-level frequency list the server sends beside the sections. No bundle twin: the setup
+// fee exists only on a pest-only or mosquito-only plan.
+const FIRST_VISIT_SETUP = {
+  setupFee: { amount: 99, service: 'waveguard_setup', label: 'WaveGuard setup', waivedWithPrepay: true },
+  oneTimeBreakdown: { total: 99, items: [{ service: 'waveguard_setup', label: 'WaveGuard setup', amount: 99, kind: 'charge' }] },
+};
+
+function pestFirstVisitScenario() {
+  const base = pestAverageScenario();
+  return {
+    ...base,
+    pricing: {
+      ...base.pricing,
+      ...FIRST_VISIT_SETUP,
+      frequencies: base.pricing.services[0].frequencies,
+      renderFlags: { ...base.pricing.renderFlags, showWaveGuardSetupFee: true },
+    },
+  };
+}
+
 function acceptedScenario() {
   const base = pestScenario();
   return {
@@ -1077,6 +1099,7 @@ const PAYLOADS = {
   pest_average: pestAverageScenario,
   bundle_average: bundleAverageScenario,
   pest_mosquito_months: pestMosquitoMonthsScenario,
+  pest_first_visit: pestFirstVisitScenario,
   mosquito: mosquitoScenario,
   tree_shrub: treeShrubScenario,
   termite_bait: termiteBaitScenario,
@@ -1184,7 +1207,7 @@ window.fetch = async (input, init) => {
       lawnCalendar: { programs: { standard: { visitsPerYear: 9 } } },
       ...referral,
       // softExit mirrors the GATE_ESTIMATE_SOFT_EXIT /data flag on a live row so
-      // the "Not what you expected?" sheet is exercised in preview.
+      // the "Not ready yet?" sheet is exercised in preview.
       softExit: true,
       softExitChange: true,
       ...(pdfPass && documentRenderAffirmed(proposal) ? { documentRender: true } : {}),
@@ -1205,7 +1228,9 @@ window.fetch = async (input, init) => {
       : respond({ error: 'invalid_code' }, 400);
   }
   if (url.includes('/change-request') || url.endsWith('/decline')) {
-    return respond({ success: true, deduped: false });
+    // The server promises a call for "Talking to a person first" when the estimate has a phone; the preview has one.
+    const wantsPerson = /"reason":"person"/.test(String(init?.body || ''));
+    return respond({ success: true, deduped: false, ...(wantsPerson ? { callPromised: true } : {}) });
   }
   if (url.includes('/available-slots')) {
     const params = new URL(url, window.location.origin).searchParams;

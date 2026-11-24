@@ -24,7 +24,7 @@ const CATALOG = [
   { id: IDS.celsius, name: 'Celsius WG', category: 'herbicide', formulation: 'WG', inventory_on_hand: '120.0000', inventory_unit: 'oz' },
   { id: IDS.headway, name: 'Headway G', category: 'fungicide', formulation: 'granular', inventory_on_hand: '300.0000', inventory_unit: 'lb' },
   { id: IDS.taurus, name: 'Taurus SC', category: 'Insecticide', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' },
-  { id: 'talak', name: 'Atticus Talak 7.9 F', category: 'Insecticide', default_rate: '0.33-1', default_unit: 'fl_oz/gal', inventory_on_hand: '0.0000', inventory_unit: 'fl_oz' },
+  { id: 'crosscheck', name: 'LESCO Crosscheck Plus', category: 'Insecticide', default_rate: '0.33-1', default_unit: 'fl_oz/gal', inventory_on_hand: '0.0000', inventory_unit: 'fl_oz' },
   { id: 'surfactant', name: 'LESCO 90/10 Nonionic Surfactant', category: 'Adjuvant', inventory_on_hand: '64.0000', inventory_unit: 'fl_oz' },
 ];
 const ADDRESS = { line1: '100 Sample Street', line2: null, city: 'Bradenton', state: 'FL', zip: '34205' };

@@ -5,6 +5,7 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { hideRecruitingThreadsFromNonAdmin, isRecruitingMessageType } = require('../utils/recruiting-thread-scope');
 const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');
+const { websiteLineRefusal } = require('../services/website-line-contact');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -104,6 +105,11 @@ router.post('/inbox/:id/reply', async (req, res, next) => {
     const replyTo = original.contact_phone
       || (await db('customers').where({ id: original.customer_id }).first())?.phone;
     if (!replyTo) return res.status(400).json({ error: 'No reply destination on this thread' });
+    // A website-only line texts only someone who already called or texted it: the thread's line, checked against the
+    // number this reply goes to (the customer's current phone when the thread has no contact phone). An applicant
+    // reply above resolves its own number; the check at the Twilio send boundary covers it.
+    const websiteLineBlock = await websiteLineRefusal(original.our_endpoint_id, replyTo);
+    if (websiteLineBlock) return res.status(400).json({ error: websiteLineBlock, code: 'WEBSITE_LINE_FIRST_CONTACT' });
 
     // Staff reply: the interlocked wrapper, so it never crosses an automatic reply on the thread.
     const result = await sendManualCustomerSms({

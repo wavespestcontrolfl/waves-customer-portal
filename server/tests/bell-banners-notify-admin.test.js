@@ -235,19 +235,15 @@ describe('on the caller\'s transaction', () => {
   });
 });
 
-// New-lead email banner (GATE_RING_NEW_CONTACTS, owner 2026-11-04 "ring new"): the writer names the kind with
-// notifyAdmin's bannerKind option, so the row itself carries no triggerKey. Its own gate, any hour, once per email.
-describe('new-lead email banner (GATE_RING_NEW_CONTACTS)', () => {
+// New-lead email banner (owner 2026-11-04 "ring new"): the writer names the kind with
+// notifyAdmin's bannerKind option, so the row itself carries no triggerKey. Any hour, once per email.
+describe('new-lead email banner', () => {
   const lead = (opts = {}) => NotificationService.notifyAdmin('new_lead', 'New lead from email: Jane Prospect', 'Prospect wants a pest control quote', {
     icon: 'mail', link: '/admin/email', metadata: { emailId: 'e-1', leadId: 'l-1' },
     dedupeKey: 'email-lead:lead:e-1', bannerKind: 'new_lead_email', ...opts,
   });
-  beforeEach(() => {
-    process.env.GATE_RING_NEW_CONTACTS = 'true';
-  });
-  afterEach(() => { delete process.env.GATE_RING_NEW_CONTACTS; });
 
-  test('one banner with the row\'s words, on its own gate, the kind never stored, and a retry sends no second', async () => {
+  test('one banner with the row\'s words, the kind never stored, and a retry sends no second', async () => {
     const written = await lead();
     await flush();
     expect(triggerNotification).toHaveBeenCalledTimes(1);
@@ -274,12 +270,42 @@ describe('new-lead email banner (GATE_RING_NEW_CONTACTS)', () => {
     await flush();
     expect(triggerNotification).toHaveBeenCalledTimes(1);
   });
+});
 
-  test('gate off: no banner and the row is the plain write', async () => {
-    delete process.env.GATE_RING_NEW_CONTACTS;
-    await lead();
+// Website quote banner (owner 2026-11-19 "do phase 1 first"): routes/public-quote.js names the kind with bannerKind on
+// its unkeyed new-lead bell. Any hour; one banner for each row that rings.
+describe('website quote banner', () => {
+  const quote = (leadId, opts = {}) => NotificationService.notifyAdmin('new_lead', 'Calculator quote: Pat Sample', 'Pest Control · $39.00/mo · 123 Sample St, Parrish, FL 34219', {
+    icon: 'money', link: `/admin/leads?lead=${leadId}`, bannerKind: 'new_lead_quote', metadata: { leadId, createdLead: true }, ...opts,
+  });
+
+  test('one banner with the row\'s words, and the kind never stored on the row', async () => {
+    const written = await quote('l-1');
     await flush();
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+    const [key, payload, opts] = triggerNotification.mock.calls[0];
+    expect(key).toBe('new_lead_quote');
+    expect(payload).toMatchObject({ alertRowId: written.id, alertTitle: 'Calculator quote: Pat Sample', alertLink: '/admin/leads?lead=l-1' });
+    expect(opts).toMatchObject({ pushOnly: true, adminOnly: true, bellAuthorized: true });
     expect(mockRows.notifications).toHaveLength(1);
-    expect(triggerNotification).not.toHaveBeenCalled();
+    expect(JSON.stringify(mockRows.notifications[0])).not.toContain('bannerKind');
+    expect(JSON.stringify(mockRows.notifications[0])).not.toContain('triggerKey');
+    // The re-alert reads these two keys from the row: they are stored as the writer gave them.
+    expect(JSON.parse(mockRows.notifications[0].metadata)).toMatchObject({ leadId: 'l-1', createdLead: true });
+  });
+
+  test('a second wizard run is a second row and sends its own banner', async () => {
+    await quote('l-1');
+    await quote('l-2', { metadata: { leadId: 'l-2', duplicateOfLeadId: 'l-1' } });
+    await flush();
+    expect(mockRows.notifications).toHaveLength(2);
+    expect(triggerNotification.mock.calls.map(([key]) => key)).toEqual(['new_lead_quote', 'new_lead_quote']);
+  });
+
+  test('rings at night too (the kind keeps no quiet hours)', async () => {
+    jest.setSystemTime(new Date('2026-11-04T04:30:00Z')); // 11:30 PM Eastern
+    await quote('l-1');
+    await flush();
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,7 +1,7 @@
 /**
- * Lawn lighting-aware color, part 1 (GATE_LAWN_LIGHTING, owner 2026-10-04): the
+ * Lawn lighting-aware color, part 1 (owner 2026-10-04): the
  * visit assessment reads each photo's light under its own prompt variants.
- * Gate off = prompt, schema, version, digest, hash, stored rows byte-identical
+ * Visit assessment gate off = prompt, schema, version, digest, hash, stored rows byte-identical
  * (pinned against the original constants). Gate on = enum-only light read per
  * photo, no numeric bounds, the instruction to judge color in even light, stored
  * beside the photo's quality and kept off the technician's response.
@@ -18,50 +18,33 @@ const result = require('../services/lawn-visit-result');
 const { analyzeVisit } = require('../services/lawn-visit-assessment');
 const { refereeVisit } = require('../services/lawn-visit-referee');
 const { runRowFor, responseForRun } = require('../services/lawn-visit-runs');
-const { lawnLightingLive } = require('../config/feature-gates');
 const MODELS = require('../config/models');
 const { photo, answer, finding } = require('./helpers/lawn-visit-fixtures');
 
-const GATE = 'GATE_LAWN_LIGHTING';
 const ASSESS = 'GATE_LAWN_VISIT_ASSESSMENT';
-const saved = { [GATE]: process.env[GATE], [ASSESS]: process.env[ASSESS] };
+const saved = { [ASSESS]: process.env[ASSESS] };
 const restore = (name) => { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; };
-afterEach(() => { restore(GATE); restore(ASSESS); });
-beforeEach(() => { dispatchWithFallback.mockReset(); delete process.env[GATE]; delete process.env[ASSESS]; });
-// The reader needs BOTH gates: the light is read only by the one-call visit assessment.
-const on = () => { process.env[GATE] = 'true'; process.env[ASSESS] = 'true'; };
+afterEach(() => { restore(ASSESS); });
+beforeEach(() => { dispatchWithFallback.mockReset(); delete process.env[ASSESS]; });
+// The light is read only by the one-call visit assessment.
+const on = () => { process.env[ASSESS] = 'true'; };
 
 const sha = (...parts) => { const h = crypto.createHash('sha256'); for (const part of parts) h.update(part); return h.digest('hex'); };
 const lit = (rows) => rows.map(([photoNumber, quality, lighting, hardShadows]) => ({ photo: photoNumber, quality, issue: '', lighting, hard_shadows: hardShadows }));
 const lightAnswer = () => answer({ photo_quality: lit([[1, 'adequate', 'full_sun', 'yes'], [2, 'limited', 'overcast', 'no']]) });
 const okOutcome = (json) => ({ ok: true, json, provider: 'gemini', model: MODELS.GEMINI_VISION_BEST, fallbackUsed: false, usage: null, failures: [] });
 
-describe('the gate', () => {
-  test('is dark: on only for exactly "true" AND the visit assessment gate on, read at call time (truth table)', () => {
-    const cases = [
-      [undefined, undefined, false], ['true', undefined, false], [undefined, 'true', false], ['true', 'true', true],
-      ['true', 'on', true], ['true', '1', true], ['true', 'false', false], ['true', '', false],
-      ['1', 'true', false], ['on', 'true', false], ['TRUE', 'true', false], ['yes', 'true', false], ['', 'true', false],
-    ];
-    for (const [light, assess, expected] of cases) {
-      if (light === undefined) delete process.env[GATE]; else process.env[GATE] = light;
-      if (assess === undefined) delete process.env[ASSESS]; else process.env[ASSESS] = assess;
-      expect([light, assess, lawnLightingLive()]).toEqual([light, assess, expected]);
+describe('the default', () => {
+  test('lighting follows the visit assessment gate (1, true or on), read at call time', async () => {
+    for (const [value, version] of [[undefined, 'lawn-visit-v1'], ['', 'lawn-visit-v1'], ['false', 'lawn-visit-v1'], ['TRUE', 'lawn-visit-v1-lighting'], ['true', 'lawn-visit-v1-lighting'], ['on', 'lawn-visit-v1-lighting'], ['1', 'lawn-visit-v1-lighting']]) {
+      if (value === undefined) delete process.env[ASSESS]; else process.env[ASSESS] = value;
+      dispatchWithFallback.mockResolvedValue(okOutcome(answer()));
+      expect([value, (await analyzeVisit({ photos: [photo('YQ==')] })).promptVersion]).toEqual([value, version]);
     }
-    on();
-    expect(lawnLightingLive()).toBe(true);
-    delete process.env[GATE];
-    expect(lawnLightingLive()).toBe(false);
-  });
-
-  test('without the visit assessment gate no effect can run: analyzeVisit reads the legacy variant even with GATE_LAWN_LIGHTING set', async () => {
-    process.env[GATE] = 'true';
-    dispatchWithFallback.mockResolvedValue(okOutcome(answer()));
-    expect((await analyzeVisit({ photos: [photo('YQ==')] })).promptVersion).toBe('lawn-visit-v1');
   });
 });
 
-describe('gate off: byte-identical to before', () => {
+describe('visit assessment gate off: byte-identical to before', () => {
   test('the four original variants are unchanged and know nothing about light', () => {
     expect(input.promptFor()).toEqual({ version: 'lawn-visit-v1', system: input.SYSTEM_PROMPT, schema: input.RESPONSE_SCHEMA, digest: input.PROMPT_DIGEST });
     expect(input.promptFor({ shotList: true }).version).toBe('lawn-visit-v1-shot-list');
@@ -99,7 +82,7 @@ describe('gate off: byte-identical to before', () => {
   });
 });
 
-describe('gate on: the light read', () => {
+describe('visit assessment gate on: the light read', () => {
   const variant = input.promptFor({ lighting: true });
   const shotVariant = input.promptFor({ lighting: true, shotList: true });
 
@@ -150,7 +133,7 @@ describe('gate on: the light read', () => {
     expect(shotVariant.schema.properties.findings.items.properties.zone.enum).toContain('blade_crown');
   });
 
-  test('analyzeVisit with the gate env on reads under the lighting variant, validates its shape, and stores a normalized read per photo', async () => {
+  test('analyzeVisit with the visit assessment gate on reads under the lighting variant, validates its shape, and stores a normalized read per photo', async () => {
     on();
     dispatchWithFallback.mockResolvedValue(okOutcome(lightAnswer()));
     const out = await analyzeVisit({ photos: [photo('YQ==', 'front'), photo('Yg==')] });
@@ -240,33 +223,5 @@ describe('the PDF document prints no color trend (so the trend rule needs no PDF
     expect(code).not.toMatch(/LawnTrends|LawnReportV2Section|\.trends\b|reportV2\??\.trends/);
     const view = fs.readFileSync(path.join(client, 'pages/ReportViewPage.jsx'), 'utf8');
     expect(view).toMatch(/if \(mode === 'pdf'\) return <ServiceReportDocument data=\{data\} token=\{token\} \/>;/);
-  });
-});
-
-describe('every reader of the gate is listed in the public route contract', () => {
-  const fs = require('fs');
-  const path = require('path');
-  const root = path.join(__dirname, '..');
-  const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
-    const full = path.join(dir, e.name);
-    if (e.isDirectory()) return e.name === 'tests' || e.name === 'node_modules' || e.name === 'migrations' ? [] : walk(full);
-    return e.name.endsWith('.js') ? [full] : [];
-  });
-
-  test('only these server files CALL lawnLightingLive() or read the env var, and the contract names each', () => {
-    const readers = walk(root)
-      .filter((file) => /lawnLightingLive\(|process\.env\.GATE_LAWN_LIGHTING/.test(fs.readFileSync(file, 'utf8')))
-      .map((file) => path.relative(root, file))
-      .sort();
-    expect(readers).toEqual([
-      'config/feature-gates.js',
-      'routes/lawn-health.js',
-      'services/lawn-paired-recheck.js',
-      'services/lawn-visit-assessment.js',
-      'services/service-report/report-copy-context.js',
-      'services/service-report/report-data.js',
-    ]);
-    const contract = fs.readFileSync(path.join(root, '../docs/public-route-contracts.md'), 'utf8');
-    for (const file of readers.filter((f) => f !== 'config/feature-gates.js')) expect(contract).toContain(`server/${file}`);
   });
 });

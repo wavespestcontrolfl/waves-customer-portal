@@ -27,6 +27,7 @@ const config = require('../config');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
 const { etParts } = require('../utils/datetime-et');
+const { linkedinArticleCard } = require('./linkedin-article');
 
 const FACEBOOK_PAGE_ID = process.env.FACEBOOK_PAGE_ID;
 const INSTAGRAM_ACCOUNT_ID = process.env.INSTAGRAM_ACCOUNT_ID;
@@ -193,6 +194,19 @@ const ALERT_WINDOW = 20; // recent posts to scan — enough to find THRESHOLD at
 const ALERTED_PLATFORMS = ['facebook', 'instagram', 'gbp', 'linkedin', 'twitter'];
 const PLATFORM_LABELS = { facebook: 'Facebook', instagram: 'Instagram', gbp: 'Google Business', linkedin: 'LinkedIn', twitter: 'X (Twitter)' };
 const SOCIAL_ALERT_KEY = 'social_consecutive_failures_alert';
+// The error a platform result carries when the content check refused the post
+// before any request: the publish paths below write it, the streak reads it.
+const VALIDATION_ERROR_PREFIX = 'Validation: ';
+// A post the content check refused never reached the platform: it is no
+// attempt for the streak, and its error never becomes the alert's latest error
+// (a refused card is not a broken login). Rows stored before this rule carry
+// the same prefix.
+const refusedByContentCheck = (entry) => String(entry.error || '').startsWith(VALIDATION_ERROR_PREFIX);
+// A real request to the platform: not disabled or skipped (a compliance-judge
+// rejection is stored as skipped), not a dry run, not refused by the content
+// check. The streak and its latest error read the same entries.
+const isPlatformAttempt = (entry, platform) => !!entry && entry.platform === platform
+  && !entry.skipped && !entry.dryRun && !refusedByContentCheck(entry);
 
 function parsePlatformResults(value) {
   if (!value) return [];
@@ -207,7 +221,7 @@ function parsePlatformResults(value) {
 // ANY location succeeded (mirrors the post-level "any success" rule) and a
 // fail only if every attempted location failed.
 function platformOutcomeForPost(entries, platform) {
-  const attempts = entries.filter(e => e && e.platform === platform && !e.skipped && !e.dryRun);
+  const attempts = entries.filter(e => isPlatformAttempt(e, platform));
   if (!attempts.length) return null;
   if (attempts.some(e => e.success === true)) return 'success';
   if (attempts.some(e => e.success === false)) return 'fail';
@@ -216,7 +230,7 @@ function platformOutcomeForPost(entries, platform) {
 
 function firstPlatformError(parsedPosts, platform) {
   for (const entries of parsedPosts) {
-    const e = entries.find(x => x && x.platform === platform && x.success === false && x.error);
+    const e = entries.find(x => isPlatformAttempt(x, platform) && x.success === false && x.error);
     if (e) return String(e.error).slice(0, 120);
   }
   return null;
@@ -690,10 +704,15 @@ function stripFixedReentryTiming(value, replacement = '') {
 
 const PHONE_PATTERN = /(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}|\+1\d{10})/g;
 
+// The phone numbers a post may carry: the shared lines only (the main line
+// and the office lines). A website-only line proves a website visit
+// (config/shared-phone-lines), so a post never shows one.
 const KNOWN_PHONES = new Set();
 try {
   const twilioNumbers = require('../config/twilio-numbers');
+  const shared = new Set(require('../config/shared-phone-lines').sharedLineNumbers(twilioNumbers));
   const addPhone = (n) => {
+    if (!shared.has(n.number)) return;
     if (n.number) KNOWN_PHONES.add(n.number.replace(/\D/g, ''));
     if (n.formatted) KNOWN_PHONES.add(n.formatted.replace(/\D/g, ''));
   };
@@ -701,6 +720,30 @@ try {
   if (twilioNumbers.domainTracking) twilioNumbers.domainTracking.forEach(addPhone);
   if (twilioNumbers.lawnDomainTracking) twilioNumbers.lawnDomainTracking.forEach(addPhone);
 } catch { /* twilio config not available */ }
+
+// One issue for each phone number in `text` that is not a shared line.
+function unknownPhoneIssues(text) {
+  return (String(text || '').match(PHONE_PATTERN) || []).flatMap((phone) => {
+    const digits = phone.replace(/\D/g, '');
+    const normalized = digits.length === 11 && digits.startsWith('1') ? digits : `1${digits}`;
+    return KNOWN_PHONES.has(digits) || KNOWN_PHONES.has(normalized) ? [] : [`Unknown phone number: ${phone} — may be hallucinated`];
+  });
+}
+
+// A validation issue names the phone number it found, and that may be a
+// customer's: logs and stored post results get the issues with every phone
+// number masked.
+const maskPhones = (text) => String(text).replace(PHONE_PATTERN, '[phone]');
+const issuesForLog = (issues) => maskPhones(issues.join('; '));
+
+// LinkedIn also shows an article card under a post with a link: the card
+// createPost sends (linkedin-article.js). A phone number in its title or
+// description gets the same check as the post text. A post with no link has
+// no card, so its title and description are not shown and not checked.
+const linkedinCardIssues = (platform, link, title, description) => {
+  const card = platform === 'linkedin' ? linkedinArticleCard({ link, title, description }) : null;
+  return card ? unknownPhoneIssues([card.title, card.description].filter(Boolean).join('\n')) : [];
+};
 
 const PLATFORM_LENGTH_LIMITS = { facebook: 500, instagram: 2200, linkedin: 3000, gbp: 1500, tiktok: 2200, twitter: 250 };
 
@@ -736,14 +779,7 @@ function validateContent(text, platform) {
     issues.push('AFFILIATE_LINK_IN_UNAPPROVED_CHANNEL: contains affiliate material — affiliate links publish on the blog only');
   }
 
-  const phones = text.match(PHONE_PATTERN) || [];
-  for (const phone of phones) {
-    const digits = phone.replace(/\D/g, '');
-    const normalized = digits.length === 11 && digits.startsWith('1') ? digits : `1${digits}`;
-    if (!KNOWN_PHONES.has(digits) && !KNOWN_PHONES.has(normalized)) {
-      issues.push(`Unknown phone number: ${phone} — may be hallucinated`);
-    }
-  }
+  issues.push(...unknownPhoneIssues(text));
 
   const limit = PLATFORM_LENGTH_LIMITS[platform];
   if (limit && text.length > limit) {
@@ -1416,6 +1452,71 @@ async function renderBrandCardUrl(cardInput, platform) {
 
 // ── Platform Posting ──
 
+// Facebook reads a link's page when it first sees the link, then fetches the
+// picture afterwards on its own clock. About 1 in 11 first shares of a blog
+// post got a small 200x200 thumbnail in place of the full picture (8 of 88,
+// 2026-08 to 2026-11-20), and a later re-read never changed a post already
+// made. So ask Facebook to read the page before the post, then give its picture
+// fetch a moment. Best-effort: a miss never blocks the post.
+//
+// The read took about 1.1 s on 2026-11-20. Read timeout + wait stay under 10 s
+// together, so a request-bound publish (Instagram alone may wait 45 s) keeps
+// its place under the proxy timeout.
+const FACEBOOK_PREVIEW_READ_TIMEOUT_MS = 6000;
+const FACEBOOK_PREVIEW_SETTLE_DEFAULT_MS = 3000;
+const FACEBOOK_PREVIEW_SETTLE_MAX_MS = 4000;
+
+// One read per link per 10 minutes. withRetry may call postToFacebook up to
+// three times for one post, and a photo post may fall back to a link post: a
+// read (and its wait) on every attempt would add up to 30 s to one publish.
+// The map holds the read's promise, so a second post of the same link that
+// arrives while the read or its wait is in flight waits for the same read; it
+// never reaches /feed first. A finished read resolves at once for a retry, and
+// a failed read counts too, so a retry never repeats a slow one.
+const FACEBOOK_PREVIEW_READ_TTL_MS = 10 * 60 * 1000;
+const facebookPreviewReads = new Map(); // link -> { at, done: Promise<void> }
+
+function facebookPreviewSettleMs() {
+  const raw = process.env.FACEBOOK_PREVIEW_SETTLE_MS;
+  const ms = raw === undefined || raw === '' ? NaN : Number(raw);
+  if (!Number.isFinite(ms) || ms < 0) return FACEBOOK_PREVIEW_SETTLE_DEFAULT_MS;
+  return Math.min(ms, FACEBOOK_PREVIEW_SETTLE_MAX_MS);
+}
+
+// Never rejects.
+async function readFacebookLinkPreview(link, token) {
+  try {
+    const res = await fetch('https://graph.facebook.com/v25.0/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: link, scrape: true, access_token: token }),
+      signal: AbortSignal.timeout(FACEBOOK_PREVIEW_READ_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      logger.warn(`[social] Facebook link preview refresh returned ${res.status}`);
+      return;
+    }
+    const data = await res.json();
+    // updated_time means Facebook read the page just now; its picture fetch
+    // starts after that read.
+    if (data && data.updated_time) await sleep(facebookPreviewSettleMs());
+  } catch (err) {
+    logger.warn(`[social] Facebook link preview refresh failed: ${err.name}`);
+  }
+}
+
+function refreshFacebookLinkPreview(link, token) {
+  const now = Date.now();
+  for (const [seen, read] of facebookPreviewReads) {
+    if (now - read.at >= FACEBOOK_PREVIEW_READ_TTL_MS) facebookPreviewReads.delete(seen);
+  }
+  const known = facebookPreviewReads.get(link);
+  if (known) return known.done;
+  const done = readFacebookLinkPreview(link, token);
+  facebookPreviewReads.set(link, { at: now, done });
+  return done;
+}
+
 async function postToFacebook(message, link, imageUrl) {
   const token = process.env.FACEBOOK_ACCESS_TOKEN;
   if (!token) throw new Error('FACEBOOK_ACCESS_TOKEN not configured');
@@ -1438,7 +1539,10 @@ async function postToFacebook(message, link, imageUrl) {
   }
 
   const body = { message, access_token: token };
-  if (link) body.link = link;
+  if (link) {
+    body.link = link;
+    await refreshFacebookLinkPreview(link, token);
+  }
 
   const res = await fetch(`https://graph.facebook.com/v25.0/${FACEBOOK_PAGE_ID}/feed`, {
     method: 'POST',
@@ -1608,8 +1712,8 @@ async function postToFacebookVideo(message, link, videoUrl) {
 
 // LinkedIn posting goes through the OAuth-backed service (services/linkedin.js):
 // stored company-page tokens + the versioned Posts API (/rest/posts). The legacy
-// env-token ugcPosts path is retired. imageUrl is accepted for call-site
-// compatibility but unused (LinkedIn image posts need the Images API — deferred).
+// env-token ugcPosts path is retired. imageUrl becomes the article thumbnail on
+// a link post, or a single-image post when there is no link (linkedin.js).
 async function postToLinkedIn(text, link, title, description, imageUrl) {
   const linkedin = require('./linkedin');
   return linkedin.createPost({ text, link, title, description, imageUrl });
@@ -2423,10 +2527,12 @@ const SocialMediaService = {
       try {
         const content = customContent?.[p.key] || await generateContent(p.key, { title, description, link, source });
 
-        const validation = validateContent(content, p.key);
-        if (!validation.valid) {
-          logger.warn(`[social] Content validation failed for ${p.key}: ${validation.issues.join('; ')}`);
-          platformResults.push({ platform: p.key, success: false, error: `Validation: ${validation.issues[0]}`, validationIssues: validation.issues });
+        const issues = [...validateContent(content, p.key).issues, ...linkedinCardIssues(p.key, link, title, description)];
+        if (issues.length) {
+          logger.warn(`[social] Content validation failed for ${p.key}: ${issuesForLog(issues)}`);
+          platformResults.push({
+            platform: p.key, success: false, error: `${VALIDATION_ERROR_PREFIX}${maskPhones(issues[0])}`, validationIssues: issues.map(maskPhones),
+          });
           continue;
         }
         // Semantic second pass (owner ruling 2026-07-30): the deterministic
@@ -2620,8 +2726,8 @@ const SocialMediaService = {
 
         const gbpValidation = validateContent(gbpContent, 'gbp');
         if (!gbpValidation.valid) {
-          logger.warn(`[social] GBP content validation failed for ${loc.name}: ${gbpValidation.issues.join('; ')}`);
-          platformResults.push({ platform: 'gbp', location: loc.id, success: false, error: `Validation: ${gbpValidation.issues[0]}` });
+          logger.warn(`[social] GBP content validation failed for ${loc.name}: ${issuesForLog(gbpValidation.issues)}`);
+          platformResults.push({ platform: 'gbp', location: loc.id, success: false, error: `${VALIDATION_ERROR_PREFIX}${maskPhones(gbpValidation.issues[0])}` });
           continue;
         }
         // Semantic second pass — same contract as the platforms loop above.
@@ -2777,9 +2883,9 @@ const SocialMediaService = {
 
     const text = content || await generateContent(platform, { title, description, link, locationName: locationId });
 
-    const validation = validateContent(text, platform);
-    if (!validation.valid) {
-      return { platform, success: false, error: `Validation: ${validation.issues[0]}`, validationIssues: validation.issues };
+    const issues = [...validateContent(text, platform).issues, ...linkedinCardIssues(platform, link, title, description)];
+    if (issues.length) {
+      return { platform, success: false, error: `${VALIDATION_ERROR_PREFIX}${maskPhones(issues[0])}`, validationIssues: issues.map(maskPhones) };
     }
     // Semantic second pass (owner ruling 2026-07-30) — postToSingle serves
     // the tech no-admin-queue flow, which must not bypass the judge. A
@@ -2897,6 +3003,8 @@ module.exports.isGbpMediaError = isGbpMediaError;
 // besides real photos/blog heroes that GBP posts may use (no AI imagery on
 // GBP, owner rule). Consumed by autonomous-runner's GBP action.
 module.exports.renderBrandCardUrl = renderBrandCardUrl;
+// Tests only: forget which links Facebook was asked to read.
+module.exports._resetFacebookPreviewReads = () => facebookPreviewReads.clear();
 module.exports.normalizePublishChannels = normalizePublishChannels;
 module.exports.normalizeGbpLocationIds = normalizeGbpLocationIds;
 module.exports.checkAndRaiseAlert = checkAndRaiseAlert;

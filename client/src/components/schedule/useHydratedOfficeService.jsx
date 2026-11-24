@@ -1,17 +1,16 @@
-// GATE_DAY_ONLY_PROMISE part E: the office fields of a visit row (`customerAskedTime`, `told`, `reminder24hOn`).
+// Day-only promise (part E): the office fields of a visit row (`customerAskedTime`, `told`, `reminder24hOn`).
 // The day, week and list feeds stamp them on every row (server attachOfficeToldFields). A row from anywhere else (the month
 // view, a customer page, any other payload) has none, and an editor that opened on such a row would start the "Customer asked
 // for this time" box unchecked and send `customerAskedTime: false` over the customer's choice. This hook reads the fields for
 // that one visit (GET /admin/schedule/:id/visit-summary, the read Edit appointment already makes on open) and hands back the
 // row with them merged in. A read that stays UNKNOWN after one retry (failed, non-OK, no `office`, no stored choice) never opens
-// an editor on a default: a failed-load panel with Try again opens instead. Gate off, or a row that already carries them: the row
+// an editor on a default: a failed-load panel with Try again opens instead. A row that already carries them: the row
 // itself, no request.
 import { useEffect, useState } from 'react';
 import { adminFetch } from '../../lib/adminFetch';
-import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { Button, Dialog, DialogBody, DialogFooter } from '../ui';
 
-/** True when this row needs the read: gate on and no office fields on it (`customerAskedTime` is set on every stamped row). */
+/** True when this row needs the read: enabled and no office fields on it (`customerAskedTime` is set on every stamped row). */
 export function needsOfficeFields(service, enabled) {
   return enabled === true && !!service && !!service.id && service.customerAskedTime === undefined;
 }
@@ -34,7 +33,7 @@ async function readOfficeFields(id) {
 /**
  * The visit's office fields: { status, service, retry }. status 'ready' = the row (with the fields merged in when it had none),
  * 'loading' = the read is out, 'failed' = still UNKNOWN after the retry (the row without fields: a moving save from it would
- * send the box's default over the stored choice, so an editor must not open on it). Gate off, or a row that already carries
+ * send the box's default over the stored choice, so an editor must not open on it). Not enabled, or a row that already carries
  * the fields: 'ready' with the row itself and no request.
  */
 export function useOfficeFields(service, enabled) {
@@ -86,14 +85,13 @@ function OfficeFieldsFailed({ onRetry, onClose }) {
 
 /**
  * Wraps an office editor or sheet so it opens on a row WITH the office fields: `withOfficeFields(Component, { block })`.
- * Gate off (flag `day_only_promise`), a technician's sheet (`adminActions === false`: the read is office-only) or a row that
+ * A technician's sheet (`adminActions === false`: the read is office-only) or a row that
  * already carries the fields: the component renders at once, untouched. An editor (`block`) whose read stays unknown after the
  * retry does not open: it shows OfficeFieldsFailed with Try again and Close.
  */
 export function withOfficeFields(Component, { block }) {
   function WithOfficeFields({ service, ...rest }) {
-    const flag = useFeatureFlag('day_only_promise');
-    const { status, service: merged, retry } = useOfficeFields(service, flag && rest.adminActions !== false);
+    const { status, service: merged, retry } = useOfficeFields(service, rest.adminActions !== false);
     if (status === 'ready') return <Component service={merged} {...rest} />;
     if (!block) return <Component service={service} {...rest} />;
     return status === 'failed' ? <OfficeFieldsFailed onRetry={retry} onClose={rest.onClose} /> : null;
@@ -106,12 +104,12 @@ export function withOfficeFields(Component, { block }) {
  * for the visit's CURRENT property; when staff pick a different address (`selectedPropertyId`, empty = unchanged) the visit's
  * texts follow THAT property, so the answer comes from the customer's schedule-estimates reply, the same one the booking
  * window reads: that property's own answer while property texts are enforced, else the customer row's. Until the reply is in
- * (or if it fails) the answer is unknown (undefined), which the hint reads as "will not go out". Gate off, or no address
+ * (or if it fails) the answer is unknown (undefined), which the hint reads as "will not go out". With no address
  * change: the row's own answer and no request.
  */
-export function usePropertyReminderAnswer(service, selectedPropertyId, enabled) {
+export function usePropertyReminderAnswer(service, selectedPropertyId) {
   const customerId = service ? service.customerId : null;
-  const changed = enabled === true && !!selectedPropertyId && !!customerId && String(selectedPropertyId) !== String(service.propertyId || '');
+  const changed = !!selectedPropertyId && !!customerId && String(selectedPropertyId) !== String(service.propertyId || '');
   const [reply, setReply] = useState(null);
   useEffect(() => {
     if (!changed) return undefined;

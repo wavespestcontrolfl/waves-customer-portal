@@ -14,7 +14,7 @@ jest.mock('../services/scheduling/arrival-route', () => ({
 
 const logger = require('../services/logger');
 const arrivalRoute = require('../services/scheduling/arrival-route');
-const { filterOfferedSlots } = require('../services/scheduling/customer-route-check');
+const { filterOfferedSlots, uncheckedReason } = require('../services/scheduling/customer-route-check');
 const { etDateString } = require('../utils/datetime-et');
 
 const addDays = (date, n) => {
@@ -224,6 +224,17 @@ describe('filterOfferedSlots — list safety', () => {
     expect(report.removed).toBe(2);
   });
 
+  test('floor: false keeps every removal, even one that leaves the week empty (the hourly route check\'s crew asks)', async () => {
+    arrivalRoute.loadArrivalRouteContext.mockImplementation(async ({ date }) => ({ rows: [], date }));
+    arrivalRoute.evaluateArrivalPlacement.mockImplementation((ctx) => (ctx.date === FAR ? feasible : fail('arrival_window')));
+    const slots = [slot(SOON, '09:00'), slot(SOON, '10:00'), slot(FAR, '09:00')];
+    const { slots: out, report } = await run(slots, { floor: false });
+    expect(out).toEqual([slots[2]]);
+    expect(report).toMatchObject({ floorKept: false, removed: 2 });
+    // Unset is the floor, as before.
+    expect((await run(slots)).report.floorKept).toBe(true);
+  });
+
   test('floor does not hold when a near-term slot survives', async () => {
     arrivalRoute.evaluateArrivalPlacement.mockImplementation((_c, { windowStart }) => (windowStart === '09:00' ? fail('arrival_window') : feasible));
     const { slots: out, report } = await run([slot(SOON, '09:00'), slot(SOON, '10:00')]);
@@ -306,6 +317,31 @@ describe('filterOfferedSlots — list safety', () => {
     expect((await run(slots, { target: { prospective: { lat: null, lng: null } } })).slots).toBe(slots);
     expect((await run([])).slots).toEqual([]);
     expect(arrivalRoute.loadArrivalRouteContext).not.toHaveBeenCalled();
+  });
+});
+
+describe('uncheckedReason — a list that still holds a slot the check did not pass (a caller counting openings)', () => {
+  const reasonOf = async (slots, extra) => uncheckedReason((await run(slots, extra)).report);
+
+  test('null when every kept slot passed, or the check filters nothing by rule (shadow, skipped)', async () => {
+    arrivalRoute.evaluateArrivalPlacement.mockImplementation((_c, { windowStart }) => (windowStart === '09:00' ? fail('arrival_window') : feasible));
+    expect(await reasonOf([slot(SOON, '09:00'), slot(SOON, '10:00')])).toBeNull();
+    expect(await reasonOf([slot(SOON, '09:00')], { mode: 'shadow', budgetMs: 0 })).toBeNull();
+    arrivalRoute.arrivalWindowRoutingEnabled.mockReturnValue(false);
+    expect(await reasonOf([slot(SOON, '09:00')], { budgetMs: 0 })).toBeNull();
+  });
+
+  test('names each fallback that keeps an unchecked slot: error, time budget, a failed route, no technician, the floor', async () => {
+    expect(await reasonOf([slot(SOON, '09:00')], { budgetMs: 0 })).toBe('timed_out');
+    arrivalRoute.loadArrivalRouteContext.mockRejectedValueOnce(new Error('pool exhausted'));
+    expect(await reasonOf([slot(SOON, '09:00')])).toBe('errors=1');
+    expect(await reasonOf([slot(SOON, '09:00', null)])).toBe('kept_unverified=1');
+    arrivalRoute.evaluateArrivalPlacement.mockReturnValue(fail('arrival_window'));
+    expect(await reasonOf([slot(SOON, '09:00')])).toBe('floor_kept');
+    expect(await reasonOf([slot(SOON, '09:00')], { floor: false })).toBeNull();
+    arrivalRoute.arrivalWindowRoutingEnabled.mockImplementation(() => { throw new Error('gates unreadable'); });
+    expect(await reasonOf([slot(SOON, '09:00')])).toBe('error gates unreadable');
+    expect(uncheckedReason(undefined)).toBe('no_report');
   });
 });
 

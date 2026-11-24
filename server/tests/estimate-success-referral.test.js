@@ -5,7 +5,7 @@
  * program is active — and never enroll anyone.
  */
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
-const mockEngine = { getLiveSettings: jest.fn(), enrollPromoter: jest.fn(), getPromoterReferralLink: jest.fn() };
+const mockEngine = { getLiveSettings: jest.fn(), enrollPromoter: jest.fn(), getPromoterReferralLink: jest.fn(), referralOfferDecision: jest.fn() };
 jest.mock('../services/referral-engine', () => mockEngine);
 
 const { isEnabled } = require('../config/feature-gates');
@@ -38,5 +38,15 @@ test('not accepted, no customer, inactive program, or a settings failure → no 
   mockEngine.getLiveSettings.mockResolvedValue({ program_active: false });
   expect(await estimateReferralCardFor(accepted)).toBeNull();
   mockEngine.getLiveSettings.mockRejectedValue(new Error('db down'));
+  expect(await estimateReferralCardFor(accepted)).toBeNull();
+});
+
+test('GATE_REFERRAL_STEP2 on → the same card plus the offer line for the estimate\'s own customer; a failed decision suppresses the card', async () => {
+  isEnabled.mockImplementation((k) => k === 'estimateSuccessReferral' || k === 'referralStep2');
+  mockEngine.referralOfferDecision.mockResolvedValue({ gateOn: true, skip: false, atLimit: false, memberCents: 2500, refereeCents: 5000 });
+  expect(await estimateReferralCardFor(accepted)).toEqual({ ...REFERRAL_CARD_COPY, offer: 'They get a $50 credit after their first plan service. You get $25.' });
+  expect(mockEngine.referralOfferDecision).toHaveBeenCalledWith(expect.anything(), 'cust-1');
+  expect(mockEngine.enrollPromoter).not.toHaveBeenCalled();
+  mockEngine.referralOfferDecision.mockRejectedValue(new Error('db down'));
   expect(await estimateReferralCardFor(accepted)).toBeNull();
 });
