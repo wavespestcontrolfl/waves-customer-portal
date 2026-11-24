@@ -322,6 +322,16 @@ describe('accept maps a missing hold at commit to the coded expiry', () => {
 // they are booked while the hold silently lapses. Re-reserving the same slot
 // is idempotent for its owner, so the normal picker (with its own countdown)
 // is the correct surface there.
+describe('a booked visit survives its old hold timestamp', () => {
+  test('the linked-appointment lookup keeps the customer\'s own booked row on every read, not only an accept', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
+    const start = src.indexOf('async function findLinkedUpcomingAppointment');
+    const fn = src.slice(start, src.indexOf('\nasync function ', start + 1));
+    expect(fn).toContain("if (estimate.customer_id) {\n        builder.orWhere('scheduled_services.customer_id', estimate.customer_id);");
+    expect(fn).not.toMatch(/requestedId && estimate\.customer_id/);
+  });
+});
+
 describe('legacy renderer never adopts a live hold', () => {
   const fs = require('fs');
   const path = require('path');

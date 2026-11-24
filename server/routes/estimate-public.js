@@ -1855,9 +1855,10 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
     .andWhere((builder) => {
       builder.whereNull('scheduled_services.reservation_expires_at')
         .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-      // A booked visit explicitly selected from this estimate remains adoptable
-      // if its old hold timestamp lapses between the page load and acceptance.
-      if (requestedId && estimate.customer_id) {
+      // The customer's own booked visit is not a hold: it stays visible and
+      // adoptable after its old hold timestamp lapses, on the page read and on
+      // an accept that selected it alike.
+      if (estimate.customer_id) {
         builder.orWhere('scheduled_services.customer_id', estimate.customer_id);
       }
       if (holdGraceMinutes > 0 && estimate.id) {

@@ -574,6 +574,21 @@ describe('getAvailableSlots — wrapper cache keyed by the travel policy', () =>
       });
       await getAvailableSlots('est-rain-1', wide);
       expect(getHourlyRainOutlook).not.toHaveBeenCalled();
+
+      // Fixed-hour search: the lapsed stamp comes from the collision query and
+      // names its own day; the 05-19 offer still starts the forecast.
+      estimateSlotAvailability._internals.clearCaches();
+      getHourlyRainOutlook.mockClear();
+      findAvailableSlots.mockReset();
+      findAvailableSlots.mockResolvedValue({ slots: [slot('2027-05-19'), slot('2027-05-20')], total_feasible: 2 });
+      scheduledRows = [{
+        id: 'stamped-booking', technician_id: 'tech-1', scheduled_date: '2027-05-20',
+        window_start: '15:00:00', window_end: '16:00:00', estimated_duration_minutes: 60,
+        customer_id: 'office-customer', reservation_expires_at: '2027-05-18T14:00:00Z',
+        reservation_lapsed: true, zone: null, customer_city: null,
+      }];
+      await getAvailableSlots('est-rain-1', wide);
+      expect(getHourlyRainOutlook).toHaveBeenCalledTimes(1);
     } finally {
       delete process.env.GATE_CUSTOMER_RAIN_RANK;
       findAvailableSlots.mockReset();

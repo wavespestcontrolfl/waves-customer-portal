@@ -1822,7 +1822,14 @@ async function filterCollidingSlots(slots, {
         : []),
       ...(onStampedBooking ? [conn.raw('scheduled_services.reservation_expires_at <= NOW() AS reservation_lapsed')] : []),
     ), shiftedServiceMinutes);
-  if (onStampedBooking && rows.some(row => row.customer_id != null && row.reservation_lapsed === true)) onStampedBooking();
+  if (onStampedBooking) {
+    for (const row of rows) {
+      if (row.customer_id != null && row.reservation_lapsed === true) {
+        const day = row.scheduled_date instanceof Date ? row.scheduled_date.toISOString() : String(row.scheduled_date);
+        onStampedBooking(day.slice(0, 10), row.technician_id);
+      }
+    }
+  }
   const candidatePin = { lat: coords?.lat ?? null, lng: coords?.lng ?? null };
   if (checkTravelGap) await ensureCatalogLoaded(conn);
 
