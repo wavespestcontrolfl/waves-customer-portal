@@ -29,21 +29,23 @@ export function ScanStrip({ items, selectedKey, onSelect, ariaLabel, className }
     scrollIntoView(listRef.current?.children[selectedIndex]);
   }, [selectedIndex]);
 
-  // Roving focus: only the selected tile sits in the tab order; arrows move the
-  // selection and focus together.
+  // Roving focus: only the selected tile sits in the tab order. Arrows, Home
+  // and End move focus only; Enter, Space or a tap picks the focused tile.
+  // Picking on focus would load every program the user arrows past, and a
+  // pick the parent rolls back (a failed load) would trap the arrows.
   const handleKeyDown = (e) => {
     if (items.length === 0) return;
-    const from = Math.max(selectedIndex, 0);
+    const tiles = Array.from(listRef.current?.children || []);
+    const focused = tiles.indexOf(document.activeElement);
+    const from = focused >= 0 ? focused : Math.max(selectedIndex, 0);
     let to;
     if (e.key === 'Home') to = 0;
     else if (e.key === 'End') to = items.length - 1;
     else if (KEY_STEP[e.key]) to = Math.min(Math.max(from + KEY_STEP[e.key], 0), items.length - 1);
     else return;
     e.preventDefault();
-    if (to !== selectedIndex) onSelect(items[to].key);
-    const next = listRef.current?.children[to];
-    next?.focus();
-    scrollIntoView(next);
+    tiles[to]?.focus();
+    scrollIntoView(tiles[to]);
   };
 
   return (

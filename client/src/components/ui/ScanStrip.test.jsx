@@ -44,19 +44,26 @@ describe('ui/ScanStrip', () => {
     expect(screen.getByRole('option', { name: /Pest/ })).toHaveAttribute('aria-selected', 'true');
   });
 
-  it('ArrowRight / ArrowLeft / End / Home move the selection and stop at the ends', () => {
-    render(<Harness />);
-    const selected = () => screen.getByRole('option', { selected: true });
-    fireEvent.keyDown(selected(), { key: 'ArrowRight' });
-    expect(selected()).toHaveTextContent('Pest');
-    fireEvent.keyDown(selected(), { key: 'End' });
-    expect(selected()).toHaveTextContent('Rodent');
-    fireEvent.keyDown(selected(), { key: 'ArrowRight' });
-    expect(selected()).toHaveTextContent('Rodent');
-    fireEvent.keyDown(selected(), { key: 'ArrowLeft' });
-    expect(selected()).toHaveTextContent('Pest');
-    fireEvent.keyDown(selected(), { key: 'Home' });
-    expect(selected()).toHaveTextContent('Lawn');
+  it('ArrowRight / ArrowLeft / End / Home move focus only; Enter picks', () => {
+    const onSelect = vi.fn();
+    render(<Harness onSelect={onSelect} />);
+    const focused = () => document.activeElement;
+    const start = screen.getByRole('option', { selected: true });
+    start.focus();
+    fireEvent.keyDown(focused(), { key: 'ArrowRight' });
+    expect(focused()).toHaveTextContent('Pest');
+    fireEvent.keyDown(focused(), { key: 'End' });
+    expect(focused()).toHaveTextContent('Rodent');
+    fireEvent.keyDown(focused(), { key: 'ArrowRight' });
+    expect(focused()).toHaveTextContent('Rodent');
+    fireEvent.keyDown(focused(), { key: 'ArrowLeft' });
+    expect(focused()).toHaveTextContent('Pest');
+    fireEvent.keyDown(focused(), { key: 'Home' });
+    expect(focused()).toHaveTextContent('Lawn');
+    expect(onSelect).not.toHaveBeenCalled();
+    fireEvent.keyDown(focused(), { key: 'ArrowRight' });
+    fireEvent.click(focused()); // Enter / Space on a <button> fire click
+    expect(onSelect).toHaveBeenCalledWith('b');
   });
 
   it('scrolls only the strip, never the page', () => {
