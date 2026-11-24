@@ -1067,10 +1067,24 @@ or code. A grouped stop (two or more services at one address) is not moved
 from this route, gate on or off: the page answers its `grouped` verdict and the
 mover refuses a customer's move of the stop before any shift check, as before.
 So the stop's own shift check (D4 part 3b-2b: a technician's rain-out,
-auto-dispatch) adds no answer to a public route. Not yet
-checked at a commit: a public reschedule that shifts a recurring series (the
-next D4 part), and the day as the route would run it (capacity mode). Gate
-off: byte-identical.
+auto-dispatch) adds no answer to a public route.
+A public reschedule that shifts a recurring plan is checked too (D4 part
+3b-2c; `SmartRebooker.rescheduleSeries`): the picked visit as the move leaves
+it, against the picked technician's shift, as for one visit. A shift that does
+not hold it answers the same 409 `{ error, code: 'SLOT_TAKEN' }` and moves no
+visit of the plan. The picked visit's write also pins its stored length, so a
+dispatch edit that lands between the move's read and its write answers the
+series move's existing concurrent-change 409 (`{ error, code: 'SLOT_TAKEN' }`).
+The plan's later visits keep their hours and their technician and change
+their day only (or land with no time, `disclosed_future_placement_days`), so
+they are not checked: a later visit the office placed outside a shift does
+not refuse the customer's move. One exception: a later visit that keeps its
+hours and leaves today, or lands on today, is refused, with the same 409, when
+the shift held it on the day it leaves and does not hold it on the day it
+lands (today's shift follows the technician's clock-in). No new status, field
+or code. Not yet checked
+at a commit: the day as the route would run it (capacity mode). Gate off:
+byte-identical.
 `GET /api/public/estimates/:token/available-slots?date=` with a date past the
 browse horizon answers `400 { error: 'date is beyond the booking horizon',
 lastBookableDate, horizonDays }` (owner 2026-11-06, new-customer walk E2):

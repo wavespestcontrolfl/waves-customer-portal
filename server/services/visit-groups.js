@@ -1769,14 +1769,12 @@ const CALLER_FENCE_KEYS = [
  */
 function memberOutsideShift(shiftOf, date, landings, judged = {}) {
   const { shiftBounds } = require('./technician-eligibility');
-  const { rowBlockMinutes, parseHHMM } = require('./scheduling/window-rules');
-  // PostgreSQL's TIME also holds 24:00:00 as an end; rowBlockMinutes reads it.
-  const unread = (v, isEnd) => v != null && v !== '' && parseHHMM(v) == null && !(isEnd && /^24:00(?::00(?:\.0+)?)?$/.test(String(v).trim()));
+  const { rowBlockMinutes, unreadableBound } = require('./scheduling/window-rules');
   for (const landing of landings) {
     const shift = landing.technicianId ? shiftOf(landing.technicianId, date) : null;
     if (!shift) continue;
     judged[landing.id] = landing.durationMinutes ?? null;
-    if (unread(landing.start, false) || unread(landing.end, true)) return landing.id;
+    if (unreadableBound(landing.start) || unreadableBound(landing.end, true)) return landing.id;
     const { startMin, endMin } = rowBlockMinutes({ window_start: landing.start, window_end: landing.end, estimated_duration_minutes: landing.durationMinutes });
     if (startMin == null) continue;
     const held = shiftBounds(shift, startMin, endMin);

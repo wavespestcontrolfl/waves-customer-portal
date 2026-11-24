@@ -73,6 +73,35 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
     expect(await rowOf(id)).toMatchObject({ day: f.date, window_start: '11:00:00', window_end: '12:00:00' });
   });
 
+  test('a new start or end the shift check cannot read as a clock time is refused, on the same day too: the write would still store it', async () => {
+    // PostgreSQL reads "4:05 PM" as 16:05 and "1:00 PM" as 13:00, holds 24:00 as a start, and keeps the 30 seconds of
+    // 12:00:30, past the 12:00 shift end. The shift check reads none of them exactly.
+    for (const window of [{ start: '4:05 PM', end: '5:05 PM' }, { start: '24:00', end: '24:00' }, { start: '10:00', end: '1:00 PM' }, { start: '11:00', end: '12:00:30' }]) {
+      const id = await seed();
+      await expect(move(id, nextDay, window)).rejects.toMatchObject(refused);
+      expect(await rowOf(id)).toEqual(asSeeded);
+      await f.db('scheduled_services').del();
+    }
+    // "09:00 PM" begins like the stored 09:00, and "10:00 PM" like the stored 10:00. On the same day each is still a change of hours.
+    const id = await seed();
+    await expect(move(id, f.date, { start: '09:00 PM', end: '10:00 PM' })).rejects.toMatchObject(refused);
+    await expect(move(id, f.date, { start: '09:00', end: '10:00 PM' })).rejects.toMatchObject(refused);
+    // So is an end thirty seconds later.
+    await expect(move(id, f.date, { start: '09:00:00', end: '10:00:30' })).rejects.toMatchObject(refused);
+    expect(await rowOf(id)).toEqual(asSeeded);
+    // The same hours with zero seconds are the same hours: nothing is placed, nothing is judged.
+    await f.db('scheduled_services').where({ id }).update({ window_start: '12:00', window_end: '13:00' });
+    expect(await move(id, f.date, { start: '12:00:00', end: '13:00:00' })).toMatchObject({ success: true });
+    // The office is not checked, and a technician with no set hours is not judged: the same request lands as before.
+    expect(await move(id, f.date, { start: '09:00 PM', end: '10:00 PM' }, 'admin', { overlapAdvisory: true })).toMatchObject({ success: true });
+    expect(await rowOf(id)).toMatchObject({ day: f.date, window_start: '21:00:00', window_end: '22:00:00' });
+    await f.db('scheduled_services').del();
+    await setShift(null, null);
+    const noHours = await seed();
+    expect(await move(noHours, f.date, { start: '09:00 PM', end: '10:00 PM' })).toMatchObject({ success: true });
+    expect(await rowOf(noHours)).toMatchObject({ day: f.date, window_start: '21:00:00', window_end: '22:00:00' });
+  });
+
   // On main a same-day, same-technician move asks nothing about the technician. With the gate on it asks
   // about the shift, and only that: the technician's day off (GATE_TECH_WORK_DAYS) still does not refuse it.
   test('a move that changes only the hours is judged on the shift alone: the technician\'s day off does not refuse it', async () => {
@@ -524,6 +553,300 @@ describeDb('technician shift hours at a move (PostgreSQL)', () => {
       delete process.env.GATE_TECH_SHIFT_HOURS;
       const stop = await seedStop();
       expect((await moveStop(stop, { start: '11:00', end: '12:00' })).visitMove).toMatchObject({ moved: [stop.a, stop.b], failed: [] });
+    });
+  });
+
+  // D4 part 3b-2c: a series move (rescheduleSeries) writes the tapped visit and every later visit of
+  // its plan in one transaction. The tapped visit takes the new hours; each later one keeps its own
+  // hours and its own technician and lands on a new day.
+  describe('a series move', () => {
+    const plusDays = (days) => new Date(Date.parse(`${f.date}T12:00:00Z`) + days * 86400000).toISOString().slice(0, 10);
+    beforeAll(async () => {
+      for (const table of ['series_moves', 'property_preferences']) {
+        await f.db.raw('CREATE TABLE IF NOT EXISTS ?? (LIKE public.?? INCLUDING ALL)', [table, table]);
+      }
+    });
+    // A plan every 6 weeks: a completed first visit, then three to come, 09:00 to 10:00 for one hour.
+    // `each`: changes to one of the three by its position (0 = the tapped visit). `from`: the tapped visit's day, in days from the fixture's.
+    const seedSeries = async (each = {}, from = 0) => {
+      const row = (extra) => f.baseStop({ is_recurring: true, recurring_ongoing: true, recurring_pattern: 'every_6_weeks',
+        window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60, ...extra });
+      const parent = row({ status: 'completed', scheduled_date: plusDays(from - 42) });
+      const visits = [0, 1, 2].map((i) => row({ status: 'pending', recurring_parent_id: parent.id, scheduled_date: plusDays(from + 42 * i), ...each[i] }));
+      await f.db('scheduled_services').insert([parent, ...visits]);
+      return visits.map((v) => v.id);
+    };
+    const seriesOf = (ids) => Promise.all(ids.map(rowOf));
+    const daysOf = async (ids) => (await seriesOf(ids)).map((r) => r.day);
+    const seeded = [f.date, plusDays(42), plusDays(84)];
+    const moved = [nextDay, plusDays(43), plusDays(85)];
+    // A technician's own rain-out of the plan: the tapped visit goes to the next day at `window`, and every later visit moves one day.
+    const moveSeries = (ids, window, by = 'tech', options = {}) => SmartRebooker.rescheduleSeries(ids[0], nextDay, window, 'rain_out', by, { sourceSurface: 'quick_move', ...options });
+    const fits = { start: '10:00', end: '11:00' };
+
+    test('the tapped visit must fit its technician\'s shift: one that ends after it, or starts before it, is refused and no visit of the plan moves', async () => {
+      const ids = await seedSeries();
+      await expect(moveSeries(ids, { start: '11:30', end: '12:30' })).rejects.toMatchObject(refused);
+      await expect(moveSeries(ids, { start: '07:00', end: '08:00' })).rejects.toMatchObject(refused);
+      expect(await daysOf(ids)).toEqual(seeded);
+      // 11:00 to 12:00 ends at the shift end: the plan moves, and each later visit keeps its own hours.
+      expect(await moveSeries(ids, { start: '11:00', end: '12:00' })).toMatchObject({ success: true, occurrencesRescheduled: 3 });
+      expect((await seriesOf(ids)).map((r) => [r.day, r.window_start, r.window_end])).toEqual([
+        [nextDay, '11:00:00', '12:00:00'], [plusDays(43), '09:00:00', '10:00:00'], [plusDays(85), '09:00:00', '10:00:00'],
+      ]);
+      await f.db('scheduled_services').del();
+      // The office placed the tapped visit at 11:30 to 12:30. A move of its day alone, same hours, is this move's placement too.
+      const placed = await seedSeries({ 0: { window_start: '11:30', window_end: '12:30' } });
+      await expect(moveSeries(placed, { start: '11:30', end: '12:30' })).rejects.toMatchObject(refused);
+      expect(await daysOf(placed)).toEqual(seeded);
+    });
+
+    test('the tapped visit is judged with its stored length', async () => {
+      // A three-hour job: from 10:00 it ends at 13:00, after the shift, whatever end the request names.
+      const ids = await seedSeries({ 0: { estimated_duration_minutes: 180 } });
+      await expect(moveSeries(ids, fits)).rejects.toMatchObject(refused);
+      expect(await daysOf(ids)).toEqual(seeded);
+    });
+
+    test('a later visit keeps its hours and its technician and changes its day only: it is not judged, so one the office placed outside the shift does not stop the plan', async () => {
+      // The second visit sits at 11:30 to 12:30, past the 12:00 shift end. The third is a four-hour job: from 09:00 it ends at 13:00.
+      const ids = await seedSeries({ 1: { window_start: '11:30', window_end: '12:30' }, 2: { estimated_duration_minutes: 240 } });
+      expect(await moveSeries(ids, fits)).toMatchObject({ success: true, occurrencesRescheduled: 3 });
+      expect((await seriesOf(ids)).map((r) => [r.day, r.window_start, r.window_end])).toEqual([
+        [nextDay, '10:00:00', '11:00:00'], [plusDays(43), '11:30:00', '12:30:00'], [plusDays(85), '09:00:00', '10:00:00'],
+      ]);
+    });
+
+    const sameDay = (ids, window, options = {}) => SmartRebooker.rescheduleSeries(ids[0], f.date, window, 'rain_out', 'tech', { sourceSurface: 'quick_move', ...options });
+
+    test('a series move that changes only the tapped visit\'s hours, same day, is checked too; a later visit it leaves where it is is not judged', async () => {
+      // The office placed the second visit at 12:00 to 13:00, past the shift end. A same-day move does not touch it.
+      const ids = await seedSeries({ 1: { window_start: '12:00', window_end: '13:00' } });
+      // Both hours later; only the end later; only the start earlier.
+      for (const window of [{ start: '11:30', end: '12:30' }, { start: '09:00', end: '12:30' }, { start: '07:30', end: '10:00' }]) {
+        await expect(sameDay(ids, window)).rejects.toMatchObject(refused);
+      }
+      expect(await rowOf(ids[0])).toMatchObject({ window_start: '09:00:00', window_end: '10:00:00' });
+      expect(await sameDay(ids, { start: '11:00', end: '12:00' })).toMatchObject({ success: true });
+      expect(await rowOf(ids[0])).toMatchObject({ day: f.date, window_start: '11:00:00', window_end: '12:00:00' });
+      expect(await daysOf(ids)).toEqual(seeded);
+      // A request that leaves the tapped visit on its day, its hours and its technician places nothing: it is not judged.
+      await f.db('scheduled_services').where({ id: ids[0] }).update({ window_start: '12:00', window_end: '13:00' });
+      expect(await sameDay(ids, { start: '12:00', end: '13:00' })).toMatchObject({ success: true });
+    });
+
+    test('an hours-only series move is judged on the shift alone: the technician\'s day off does not refuse it', async () => {
+      process.env.GATE_TECH_WORK_DAYS = 'true';
+      await f.db('technicians').where({ id: f.ids.technician }).update({ work_days: [new Date(`${nextDay}T12:00:00Z`).getUTCDay()] });
+      try {
+        const ids = await seedSeries();
+        expect(await sameDay(ids, { start: '11:00', end: '12:00' })).toMatchObject({ success: true });
+        await expect(sameDay(ids, { start: '11:30', end: '12:30' })).rejects.toMatchObject(refused);
+        expect(await rowOf(ids[0])).toMatchObject({ day: f.date, window_start: '11:00:00', window_end: '12:00:00' });
+      } finally {
+        delete process.env.GATE_TECH_WORK_DAYS;
+        await f.db('technicians').where({ id: f.ids.technician }).update({ work_days: null });
+      }
+    });
+
+    test('a move that names a technician for the tapped visit is judged on that technician\'s shift', async () => {
+      // 13:00 to 14:00 on the technician without set hours. The move hands the tapped visit to the one who works 08:00 to 12:00.
+      const ids = await seedSeries({ 0: { technician_id: f.ids.otherTech, window_start: '13:00', window_end: '14:00' } });
+      const late = { start: '13:00', end: '14:00' };
+      await expect(moveSeries(ids, late, 'tech', { technicianId: f.ids.technician })).rejects.toMatchObject(refused);
+      // The same hand-over with no change of day or hours is judged too.
+      await expect(sameDay(ids, late, { technicianId: f.ids.technician })).rejects.toMatchObject(refused);
+      expect(await seriesOf(ids)).toMatchObject(seeded.map((day) => ({ day })));
+      expect((await rowOf(ids[0])).technician_id).toBe(f.ids.otherTech);
+      // The same move that keeps the visit's technician lands.
+      expect(await moveSeries(ids, late)).toMatchObject({ success: true, occurrencesRescheduled: 3 });
+      expect(await daysOf(ids)).toEqual(moved);
+    });
+
+    // A dispatch edit on a second connection, made while the mover's transaction is open. Its wait for a row lock is
+    // bounded: an edit that meets a lock the mover itself holds would wait on a transaction that waits on it, and the
+    // open transaction then stalls every later suite on the same database. With the bound that test fails at once.
+    const dispatchEdit = (id, patch) => f.db.transaction(async (t) => {
+      await t.raw("SET LOCAL lock_timeout = '5s'");
+      await t('scheduled_services').where({ id }).update(patch);
+    });
+    // An edit of a later visit's length, after the mover's locked read of the plan and before its first write.
+    const lengthenAt = (id) => ({ moveGuard: () => dispatchEdit(id, { estimated_duration_minutes: 240 }) });
+
+    test('a dispatch edit of the tapped visit\'s length after its verdict ends the move as a concurrent change; an edit of a later visit\'s does not', async () => {
+      const ids = await seedSeries();
+      // On a second connection, right after the shift check judged the tapped visit and before its write. The new length
+      // (90 minutes, to 11:30) still fits the shift: only the write's pin on the length it judged stops the move.
+      const eligibility = require('../services/technician-eligibility');
+      const judge = eligibility.shiftExcluding;
+      const spy = jest.spyOn(eligibility, 'shiftExcluding').mockImplementation(async (...args) => {
+        const verdict = await judge(...args);
+        await dispatchEdit(ids[0], { estimated_duration_minutes: 90 });
+        return verdict;
+      });
+      try {
+        await expect(moveSeries(ids, fits)).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN', message: expect.stringMatching(/changed concurrently/) });
+        expect(spy).toHaveBeenCalledTimes(1);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await daysOf(ids)).toEqual(seeded);
+      await f.db('scheduled_services').del();
+      const later = await seedSeries();
+      expect(await moveSeries(later, fits, 'tech', lengthenAt(later[1]))).toMatchObject({ success: true, occurrencesRescheduled: 3 });
+      expect(await daysOf(later)).toEqual(moved);
+    });
+
+    test('a new start or end the shift check cannot read as a clock time is refused: the write would still store it', async () => {
+      // PostgreSQL reads "4:05 PM" as 16:05 and "1:00 PM" as 13:00, holds 24:00 as a start, and keeps the 30 seconds of
+      // 12:00:30, past the 12:00 shift end. The shift check reads none of them exactly.
+      for (const window of [{ start: '4:05 PM', end: '5:05 PM' }, { start: '24:00', end: '24:00' }, { start: '10:00', end: '1:00 PM' }, { start: '11:00', end: '12:00:30' }]) {
+        const ids = await seedSeries();
+        await expect(moveSeries(ids, window)).rejects.toMatchObject(refused);
+        expect(await daysOf(ids)).toEqual(seeded);
+        await f.db('scheduled_services').del();
+      }
+      // "09:00 PM" begins like the stored 09:00, and "10:00 PM" like the stored 10:00. On the same day each is still a change of hours.
+      const kept = await seedSeries();
+      await expect(sameDay(kept, { start: '09:00 PM', end: '10:00 PM' })).rejects.toMatchObject(refused);
+      await expect(sameDay(kept, { start: '09:00', end: '10:00 PM' })).rejects.toMatchObject(refused);
+      await expect(sameDay(kept, { start: '09:00:00', end: '10:00:30' })).rejects.toMatchObject(refused);
+      expect(await rowOf(kept[0])).toEqual(asSeeded);
+      await f.db('scheduled_services').del();
+      // The office is not checked, and a technician with no set hours is not judged: the same request lands as before.
+      const office = await seedSeries();
+      expect(await moveSeries(office, { start: '10:00', end: '1:00 PM' }, 'admin', { sourceSurface: 'dispatch_board', overlapAdvisory: true })).toMatchObject({ success: true, occurrencesRescheduled: 3 });
+      expect(await rowOf(office[0])).toMatchObject({ day: nextDay, window_start: '10:00:00', window_end: '13:00:00' });
+      await f.db('scheduled_services').del();
+      await setShift(null, null);
+      const ids = await seedSeries();
+      expect(await moveSeries(ids, { start: '10:00', end: '1:00 PM' })).toMatchObject({ success: true, occurrencesRescheduled: 3 });
+      expect(await rowOf(ids[0])).toMatchObject({ day: nextDay, window_start: '10:00:00', window_end: '13:00:00' });
+    });
+
+    // Today's shift follows the clock-in; every other day's is the set hours. So a later visit that leaves today,
+    // or lands on it, can sit inside its technician's shift on one day and outside it on the other.
+    describe('a later visit that leaves today, or lands on it', () => {
+      const { etDateString, parseETDateTime } = require('../utils/datetime-et');
+      let today;
+      // The fixture's day is two weeks out: the tapped visit is six weeks overdue and the next visit is today's.
+      const seedAroundToday = (todays = {}) => seedSeries({ 1: { scheduled_date: today, ...todays } }, -56);
+      const landed = [nextDay, plusDays(43), plusDays(85)];
+      // Set hours 08:00 to 20:00. A clock-in at midnight makes today's shift the first twelve hours of the day.
+      beforeEach(async () => {
+        today = etDateString();
+        await setShift('08:00', '20:00');
+        await f.db('time_entries').insert({ id: randomUUID(), technician_id: f.ids.technician, entry_type: 'shift', status: 'completed',
+          clock_in: parseETDateTime(`${today}T00:00`), clock_out: parseETDateTime(`${today}T00:30`), duration_minutes: 30 });
+      });
+      afterEach(() => f.db('time_entries').del());
+      beforeAll(async () => {
+        // What a grouped stop reads (the grouped-stop cases above make the same copies when they run).
+        for (const table of ['service_visits', 'visit_effects', 'visit_completion_packets', 'service_completion_attempts', 'service_records', 'invoices']) {
+          await f.db.raw('CREATE TABLE IF NOT EXISTS ?? (LIKE public.?? INCLUDING ALL)', [table, table]);
+        }
+      });
+
+      test('one that today\'s shift holds and the set hours do not is refused, and no visit of the plan moves', async () => {
+        const ids = await seedAroundToday({ window_start: '07:00', window_end: '08:00' });
+        expect((await daysOf(ids))[1]).toBe(today);
+        const before = await daysOf(ids);
+        await expect(moveSeries(ids, fits)).rejects.toMatchObject(refused);
+        expect(await daysOf(ids)).toEqual(before);
+      });
+
+      test('one that today\'s shift does not hold is the office\'s placement: the plan moves and it keeps its hours', async () => {
+        // 13:00 to 14:00 ends after today's shift and sits inside the set hours; 21:00 to 22:00 is outside both.
+        for (const hours of [{ window_start: '13:00', window_end: '14:00' }, { window_start: '21:00', window_end: '22:00' }]) {
+          const ids = await seedAroundToday(hours);
+          expect(await moveSeries(ids, fits)).toMatchObject({ success: true, occurrencesRescheduled: 3 });
+          expect(await daysOf(ids)).toEqual(landed);
+          expect(await rowOf(ids[1])).toMatchObject({ window_start: `${hours.window_start}:00`, window_end: `${hours.window_end}:00` });
+          await f.db('scheduled_services').del();
+        }
+      });
+
+      test('one both shifts hold moves, and a dispatch edit of its length after the plan was read ends the move as a concurrent change', async () => {
+        const ids = await seedAroundToday();
+        const before = await daysOf(ids);
+        await expect(moveSeries(ids, fits, 'tech', lengthenAt(ids[1]))).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN', message: expect.stringMatching(/changed concurrently/) });
+        expect(await daysOf(ids)).toEqual(before);
+        await f.db('scheduled_services').del();
+        const again = await seedAroundToday();
+        expect(await moveSeries(again, fits)).toMatchObject({ success: true, occurrencesRescheduled: 3 });
+        expect(await daysOf(again)).toEqual(landed);
+      });
+
+      // A visit moved off its cadence day (a date exception) keeps its distance from the tapped visit. One that sits on
+      // tomorrow lands on today when the tapped visit moves one day back.
+      test('one that lands on today is judged the same way: refused when the set hours hold it and today\'s shift does not', async () => {
+        const tomorrow = new Date(Date.parse(`${today}T12:00:00Z`) + 86400000).toISOString().slice(0, 10);
+        // The tapped visit sits two days after the fixture's day, so the move to `nextDay` takes the plan one day back.
+        const seedBeforeToday = (hours) => seedSeries({ 1: { scheduled_date: tomorrow, date_exception: true, date_exception_cadence_date: plusDays(44), ...hours } }, 2);
+        // 13:00 to 14:00 sits inside the set hours and ends after today's shift.
+        const held = await seedBeforeToday({ window_start: '13:00', window_end: '14:00' });
+        const before = await daysOf(held);
+        expect(before[1]).toBe(tomorrow);
+        await expect(moveSeries(held, fits)).rejects.toMatchObject(refused);
+        expect(await daysOf(held)).toEqual(before);
+        await f.db('scheduled_services').del();
+        // 21:00 to 22:00 is outside the set hours: the office's placement. It lands on today and keeps its hours.
+        const placed = await seedBeforeToday({ window_start: '21:00', window_end: '22:00' });
+        expect(await moveSeries(placed, fits)).toMatchObject({ success: true, occurrencesRescheduled: 3 });
+        expect(await rowOf(placed[1])).toMatchObject({ day: today, window_start: '21:00:00', window_end: '22:00:00' });
+      });
+
+      test('a grouped partner at today\'s stop is judged the same way: refused when today\'s shift holds it and the set hours do not', async () => {
+        process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+        // Set hours 10:00 to 22:00, and today's shift is still midnight to noon. Today's visit of the plan (10:00 to
+        // 11:00, inside both) shares its stop with a one-time service whose hours overlap it.
+        await setShift('10:00', '22:00');
+        const seedWithPartner = async (hours) => {
+          const ids = await seedAroundToday({ window_start: '10:00', window_end: '11:00' });
+          const visitId = randomUUID();
+          await f.db('service_visits').insert({ id: visitId, customer_id: f.ids.customer, scheduled_date: today, window_start: '09:00', window_end: '14:00',
+            stop_base_key: require('../services/visit-groups').stopBaseKey({ propertyId: null, customerId: f.ids.customer, scheduledDate: today }),
+            status: 'open', technician_id: f.ids.technician, created_by: 'shift_hours_fixture' });
+          const partner = f.baseStop({ visit_id: visitId, scheduled_date: today, estimated_duration_minutes: 60, ...hours });
+          await f.db('scheduled_services').insert(partner);
+          await f.db('scheduled_services').where({ id: ids[1] }).update({ visit_id: visitId });
+          return { ids, partner: partner.id };
+        };
+        // A staff series move from the board carries a grouped stop (a rain-out's quick move never does).
+        const fromBoard = { sourceSurface: 'dispatch_board', overlapAdvisory: true };
+        try {
+          // 09:00 to 11:00 starts before the set hours and ends inside today's shift.
+          const held = await seedWithPartner({ window_start: '09:00', window_end: '11:00', estimated_duration_minutes: 120 });
+          await expect(moveSeries(held.ids, fits, 'tech', fromBoard)).rejects.toMatchObject(refused);
+          expect((await rowOf(held.partner)).day).toBe(today);
+          await f.db('scheduled_services').del();
+          await f.db('service_visits').del();
+          // 09:00 to 14:00 also ends after today's shift: the office's placement. It moves with its stop and keeps its hours.
+          const placed = await seedWithPartner({ window_start: '09:00', window_end: '14:00', estimated_duration_minutes: 300 });
+          expect(await moveSeries(placed.ids, fits, 'tech', fromBoard)).toMatchObject({ success: true, occurrencesRescheduled: 3 });
+          expect(await rowOf(placed.partner)).toMatchObject({ day: plusDays(43), window_start: '09:00:00', window_end: '14:00:00' });
+        } finally {
+          delete process.env.GATE_SERIES_MOVE_CARRIES_VISIT;
+          await f.db('service_visits').del();
+        }
+      });
+    });
+
+    test('the office\'s own series move is not checked', async () => {
+      const ids = await seedSeries({ 1: { window_start: '12:00', window_end: '13:00' } });
+      expect(await moveSeries(ids, { start: '12:00', end: '13:00' }, 'admin', { sourceSurface: 'dispatch_board', overlapAdvisory: true })).toMatchObject({ success: true, occurrencesRescheduled: 3 });
+      expect(await daysOf(ids)).toEqual(moved);
+    });
+
+    test('gate off: the same moves land and the same edit does not stop the move, as before', async () => {
+      delete process.env.GATE_TECH_SHIFT_HOURS;
+      const late = await seedSeries({ 0: { estimated_duration_minutes: 180 }, 1: { window_start: '11:30', window_end: '12:30' } });
+      expect(await moveSeries(late, { start: '11:30', end: '12:30' })).toMatchObject({ success: true, occurrencesRescheduled: 3 });
+      expect(await daysOf(late)).toEqual(moved);
+      await f.db('scheduled_services').del();
+      const ids = await seedSeries();
+      expect(await moveSeries(ids, fits, 'tech', lengthenAt(ids[1]))).toMatchObject({ success: true, occurrencesRescheduled: 3 });
+      expect(await daysOf(ids)).toEqual(moved);
     });
   });
 

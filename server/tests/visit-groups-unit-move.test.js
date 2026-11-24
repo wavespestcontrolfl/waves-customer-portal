@@ -1281,6 +1281,10 @@ describe('shift hours: a grouped stop is judged as one unit', () => {
       expect(vg._test.memberOutsideShift(allDay, '2026-09-02', [{ id: 'a', technicianId: 't1', start: '23:00', end: '24:00:00', durationMinutes: 60 }])).toBe(null);
       expect(vg._test.memberOutsideShift(allDay, '2026-09-02', [{ id: 'a', technicianId: 't1', start: '24:00:00', end: null, durationMinutes: 60 }])).toBe('a');
       expect(vg._test.memberOutsideShift(allDay, '2026-09-02', [{ id: 'a', technicianId: 't1', start: '09:00', end: '10:00x', durationMinutes: 60 }])).toBe('a');
+      // Seconds that are not zero are no clock minute: PostgreSQL keeps them (and reads :60 as the next minute), and the check would drop them.
+      expect(vg._test.memberOutsideShift(allDay, '2026-09-02', [{ id: 'a', technicianId: 't1', start: '09:00:00', end: '10:00:30', durationMinutes: 60 }])).toBe('a');
+      expect(vg._test.memberOutsideShift(allDay, '2026-09-02', [{ id: 'a', technicianId: 't1', start: '09:00:60', end: null, durationMinutes: 60 }])).toBe('a');
+      expect(vg._test.memberOutsideShift(allDay, '2026-09-02', [{ id: 'a', technicianId: 't1', start: '09:00:00', end: '10:00:00.000', durationMinutes: 60 }])).toBe(null);
       // No bound at all is a member with no window: not judged, as before.
       expect(vg._test.memberOutsideShift(allDay, '2026-09-02', [{ id: 'a', technicianId: 't1', start: null, end: null, durationMinutes: 60 }])).toBe(null);
       // No technician with set hours: nothing judges the request, and the mover hands it on as on main.
