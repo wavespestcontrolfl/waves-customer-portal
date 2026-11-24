@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// "What you pay and when" under the price (owner 2026-11-23). Estimate customers asked what the
+// "What you pay" under the price (owner 2026-11-23). Estimate customers asked what the
 // $99 line was, why booking showed $177 against "$91.50 a month", and whether the lawn was billed
 // monthly. The box states due today, the first visit itemised, each visit after, the first year
 // and the setup fee, from the figures the page already shows.
@@ -117,7 +117,7 @@ describe('estimate page: what you pay and when', () => {
     const { container } = await renderPage(pestOnly());
     await waitFor(() => expect(box(container)).not.toBeNull());
     const t = text(container);
-    expect(t).toContain('What you pay and when');
+    expect(t).toContain('What you pay');
     expect(t).not.toMatch(/due today|prepay the year in one payment|exact total/i);
     expect(t).toContain('Pest Control$99.00');
     expect(t).toContain('Setup fee$99.00');

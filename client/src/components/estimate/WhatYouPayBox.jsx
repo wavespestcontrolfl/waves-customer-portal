@@ -5,7 +5,7 @@ import { estimateCard } from './cardStyles';
 import { W } from './tokens';
 
 /**
- * "What you pay and when" (owner 2026-11-23): a plain box under the price on a residential recurring
+ * "What you pay" (owner 2026-11-23): a plain box under the price on a residential recurring
  * estimate. People who got an estimate asked what the $99 line was, why booking showed $177 when the
  * estimate said $91.50 a month, and whether a service was billed monthly. The box shows the first
  * visit itemised, each application after that, and the setup fee in a sentence. It states no plan
@@ -90,7 +90,7 @@ export default function WhatYouPayBox({ box }) {
   return (
     <section data-what-you-pay="" style={estimateCard()}>
       <div style={{ display: 'grid', gap: 8 }}>
-        <div style={HEADING}>What you pay and when</div>
+        <div style={HEADING}>What you pay</div>
         <div style={{ ...HEADING, paddingTop: 4 }}>First visit</div>
         {box.lines.map((line) => <Row key={line.key} label={line.label} amount={fmtMoney(line.amount)} />)}
         {box.setup ? <Row label="Setup fee" amount={fmtMoney(box.setup.amount)} /> : null}

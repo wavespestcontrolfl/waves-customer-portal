@@ -9860,7 +9860,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       ? averageModel.services[0].perApplication
       : null,
   });
-  // "What you pay and when" under the price (owner 2026-11-23). It reads the same per-application figures
+  // "What you pay" under the price (owner 2026-11-23). It reads the same per-application figures
   // as the monthly average (so it is absent on the annual-prepay choice, which hides the average), and
   // shows only when the first bill is proven to be those figures: the same credit and extra-fee checks as
   // the first-visit line, plus the "Reserve your spot" box's own first application agreeing to the cent.
