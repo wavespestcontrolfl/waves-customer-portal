@@ -114,7 +114,10 @@ module.exports = {
     const job = await db('receipt_delivery_jobs').where({ invoice_id: fixture.cardInvoiceId }).first();
     assert.equal(job.source, 'card_on_file');
 
-    // The same signed Stripe event that normally follows must settle nothing twice.
+    // The same signed Stripe event that normally follows must settle nothing twice. Snapshot the receipt job first:
+    // the webhook must leave that same job as it is (no requeue, no new attempt).
+    const jobBefore = await db('receipt_delivery_jobs').where({ invoice_id: fixture.cardInvoiceId })
+      .first('id', 'status', 'attempts', 'next_attempt_at');
     const event = { id: fixture.cardEventId, type: 'payment_intent.succeeded', created: Math.floor(Date.now() / 1000),
       data: { object: { id: fixture.cardPaymentIntentId, object: 'payment_intent', status: 'succeeded', amount: call.amount,
         amount_received: call.amount, currency: call.currency, payment_method_types: call.payment_method_types,
@@ -146,7 +149,9 @@ module.exports = {
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
     assert.equal(jobs.length, 1, 'The webhook must not queue a second receipt');
-    assert.notEqual(jobs[0].status, 'running', 'The receipt job must settle');
+    assert.deepEqual({ id: jobs[0].id, status: jobs[0].status, attempts: jobs[0].attempts, next: String(jobs[0].next_attempt_at) },
+      { id: jobBefore.id, status: jobBefore.status, attempts: jobBefore.attempts, next: String(jobBefore.next_attempt_at) },
+      'The webhook must not requeue or retry the receipt job');
     assert.equal(captured().slice(before).filter((entry) => entry.kind === 'sms' && entry.body?.includes(dollars(call.amount))).length, 1);
     assert.equal(creates().length, 1, 'The webhook must not create a second charge');
 
