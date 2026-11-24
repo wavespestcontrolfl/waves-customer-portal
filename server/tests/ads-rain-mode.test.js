@@ -1,0 +1,150 @@
+/**
+ * Rain-day ads record (services/ads/rain-mode.js). Record only: these tests prove the day it decides for, the rain-day
+ * rule (4+ work hours at 70%+ in half the areas read), what each campaign class would get, that unknown is never
+ * dry, and the next-day score against measured radar rain.
+ */
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/weather-forecast', () => ({ getNwsHourlyRain: jest.fn() }));
+jest.mock('../services/mrms-qpe', () => ({ fetchMrmsDailyRain: jest.fn() }));
+
+const rainMode = require('../services/ads/rain-mode');
+const { ZONE_COORDS } = require('../services/scheduling/forecast-zones');
+
+const ZONES = Object.keys(ZONE_COORDS);
+
+// NWS-shaped hours for `day`, 8 AM to 4 PM ET, with `wetHours` of them at `pct`.
+function hours(day, wetHours, pct = 80) {
+  return Array.from({ length: 9 }, (_, i) => ({
+    startTime: `${day}T${String(8 + i).padStart(2, '0')}:00:00-05:00`,
+    rainChance: i < wetHours ? pct : 10,
+  }));
+}
+
+// A reader that answers each area by its order in ZONES.
+function readerFor(day, plan) {
+  return jest.fn(async (lat, lng) => {
+    const i = ZONES.findIndex((z) => ZONE_COORDS[z].lat === lat && ZONE_COORDS[z].lng === lng);
+    const p = plan[i];
+    if (p === null) return null;
+    return hours(day, p);
+  });
+}
+
+function fakeConn({ campaigns = [], settings = {} } = {}) {
+  const store = { ...settings };
+  const conn = jest.fn((table) => ({
+    where(cond) {
+      if (table === 'ad_campaigns') return Promise.resolve(campaigns);
+      return { first: async () => (store[cond.key] != null ? { key: cond.key, value: store[cond.key] } : undefined) };
+    },
+  }));
+  conn.transaction = async (cb) => cb((table) => ({
+    where: (cond) => ({ first: async () => (store[cond.key] != null ? { key: cond.key, value: store[cond.key] } : undefined) }),
+    insert: (row) => ({ onConflict: () => ({ merge: async () => { store[row.key] = row.value; } }) }),
+  }));
+  conn.store = store;
+  return conn;
+}
+
+// Tuesday 2026-11-24, 3 PM ET (EST): the ads sell Wednesday.
+const AFTER_TWO = new Date('2026-11-24T20:00:00Z');
+
+describe('soldDay', () => {
+  test('before 2 PM ET the ads sell today, from 2 PM tomorrow, on Sunday Monday', () => {
+    expect(rainMode.soldDay(new Date('2026-11-24T18:59:00Z'))).toBe('2026-11-24');
+    expect(rainMode.soldDay(new Date('2026-11-24T19:00:00Z'))).toBe('2026-11-25');
+    expect(rainMode.soldDay(new Date('2026-11-22T14:00:00Z'))).toBe('2026-11-23');
+  });
+});
+
+describe('rainClassOf and decideCampaign', () => {
+  test('marked classes and route lines; the brand campaign is left alone', () => {
+    expect(rainMode.rainClassOf({ metadata: { rain_class: 'indoor' } })).toBe('indoor');
+    expect(rainMode.rainClassOf({ metadata: JSON.stringify({ route_line: 'pest' }) })).toBe('outdoor');
+    expect(rainMode.rainClassOf({ metadata: {} })).toBeNull();
+    expect(rainMode.decideCampaign('outdoor', 'rain')).toBe('stop');
+    expect(rainMode.decideCampaign('outdoor', 'dry')).toBe('base');
+    expect(rainMode.decideCampaign('indoor', 'rain')).toBe('base');
+    expect(rainMode.decideCampaign('indoor', 'dry')).toBe('stop');
+    expect(rainMode.decideCampaign(null, 'rain')).toBeNull();
+    expect(rainMode.decideCampaign('outdoor', 'unknown')).toBeNull();
+  });
+});
+
+describe('forecastDay', () => {
+  test('an area is wet at 4 work hours at 70%+, not at 3 or at 69%', async () => {
+    expect(rainMode.countWetHours(hours('2026-11-25', 4), '2026-11-25').wet).toBe(4);
+    expect(rainMode.countWetHours(hours('2026-11-25', 9, 69), '2026-11-25').wet).toBe(0);
+    const out = await rainMode.forecastDay('2026-11-25', { read: readerFor('2026-11-25', [4, 4, 4, 3, 0, 0]) });
+    expect(out.areas.map((a) => a.rain)).toEqual([true, true, true, false, false, false]);
+    expect(out.call).toBe('rain'); // half the areas read
+  });
+
+  test('fewer than half wet is a dry day', async () => {
+    const out = await rainMode.forecastDay('2026-11-25', { read: readerFor('2026-11-25', [9, 9, 0, 0, 0, 0]) });
+    expect(out.call).toBe('dry');
+  });
+
+  test('unread areas are never counted dry; too few read = unknown', async () => {
+    const out = await rainMode.forecastDay('2026-11-25', { read: readerFor('2026-11-25', [0, 0, null, null, null, null]) });
+    expect(out.unread).toHaveLength(4);
+    expect(out.call).toBe('unknown');
+  });
+});
+
+describe('recordRun', () => {
+  const campaigns = [
+    { id: 1, campaign_name: 'Brand', status: 'active', metadata: {} },
+    { id: 2, campaign_name: 'Pest route', status: 'paused', metadata: { route_line: 'pest' } },
+    { id: 3, campaign_name: 'Indoor', status: 'active', metadata: { rain_class: 'indoor' } },
+    { id: 4, campaign_name: 'Old', status: 'removed', metadata: { rain_class: 'outdoor' } },
+  ];
+
+  test('records what each campaign would get on a rain day and writes nothing else', async () => {
+    const conn = fakeConn({ campaigns });
+    const run = await rainMode.recordRun({ now: AFTER_TWO, conn, read: readerFor('2026-11-25', [6, 6, 6, 6, 0, 0]), fetchRain: jest.fn() });
+    expect(run.day).toBe('2026-11-25');
+    expect(run.call).toBe('rain');
+    expect(run.campaigns.map((c) => [c.campaign_id, c.would])).toEqual([[1, null], [2, 'stop'], [3, 'base']]);
+    expect(run.problems).toEqual([]);
+    const days = JSON.parse(conn.store[rainMode.DAYS_KEY]);
+    expect(days['2026-11-25']).toMatchObject({ call: 'rain', areas: ZONES.slice(0, 4) });
+    expect(JSON.parse(conn.store[rainMode.LAST_KEY]).mode).toBe('shadow');
+  });
+
+  test('an unknown forecast is a problem and the record throws for job_health', async () => {
+    const conn = fakeConn({ campaigns });
+    await expect(rainMode.recordRainMode({ now: AFTER_TWO, conn, read: jest.fn(async () => null), fetchRain: jest.fn() }))
+      .rejects.toThrow(/forecast unread for 2026-11-25/);
+  });
+
+  test('scores a past day against measured rain once, and never rewrites a scored day', async () => {
+    const settings = {
+      [rainMode.DAYS_KEY]: JSON.stringify({
+        '2026-11-23': { day: '2026-11-23', call: 'rain', areas: [] },
+        '2026-11-22': { day: '2026-11-22', call: 'dry', areas: [], score: { hit: true } },
+      }),
+    };
+    const conn = fakeConn({ campaigns, settings });
+    const inches = [0.6, 0.4, 0.3, 0.1, 0, null];
+    const fetchRain = jest.fn(async ({ latitude }) => {
+      const i = ZONES.findIndex((z) => ZONE_COORDS[z].lat === latitude);
+      return { days: [{ date: '2026-11-23', inches: inches[i] }] };
+    });
+    const run = await rainMode.recordRun({ now: AFTER_TWO, conn, read: readerFor('2026-11-25', [0, 0, 0, 0, 0, 0]), fetchRain });
+    expect(run.scored).toEqual(['2026-11-23']);
+    const days = JSON.parse(conn.store[rainMode.DAYS_KEY]);
+    expect(days['2026-11-23'].score).toMatchObject({ wet_areas: ZONES.slice(0, 3), wet_day: true, hit: true });
+    expect(days['2026-11-22'].score).toEqual({ hit: true });
+    expect(fetchRain).toHaveBeenCalledTimes(ZONES.length);
+  });
+
+  test('a day with too little measured rain read stays unscored for the next run', async () => {
+    const settings = { [rainMode.DAYS_KEY]: JSON.stringify({ '2026-11-23': { day: '2026-11-23', call: 'dry', areas: [] } }) };
+    const conn = fakeConn({ campaigns, settings });
+    const run = await rainMode.recordRun({ now: AFTER_TWO, conn, read: readerFor('2026-11-25', [0, 0, 0, 0, 0, 0]), fetchRain: jest.fn(async () => null) });
+    expect(run.scored).toEqual([]);
+    expect(JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-23'].score).toBeUndefined();
+  });
+});

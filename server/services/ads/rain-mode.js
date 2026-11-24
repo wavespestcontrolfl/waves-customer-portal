@@ -1,0 +1,238 @@
+/**
+ * Rain-day ads record. Owner 2026-11-23 ("only run ads for specific indoor services, on days before or during a
+ * rain"; "we can stop at 2pm the day before"; "ok lets build this out").
+ *
+ * This module RECORDS what the rain rule would do. It changes nothing: it writes nothing to Google, sets no budget,
+ * sends no message and pays for no lookup. A two-week record, scored against measured radar rain, comes before any
+ * rule that acts on it.
+ *
+ * The 2-hour ad cron runs it as its own step (recordRainMode, job_health 'ads-rain-mode'), after the budget run.
+ * One run:
+ *   1. picks the day the ads sell, as the budget run does (budget-manager.js adjustBudgets): Sunday = Monday; before
+ *      2 PM ET = today; from 2 PM ET = tomorrow. So the switch for a rain day is decided at 2 PM the day before, and
+ *      the morning runs of that day check it again.
+ *   2. reads the NWS hourly forecast (never the paid backup) at each forecast area of the day board
+ *      (scheduling/forecast-zones.js ZONE_COORDS) and counts the work hours (DAY_OPEN to DAY_CLOSE) at RAIN_PCT or more.
+ *      An area with RAIN_HOURS or more such hours is a rain area. The day is a rain day when at least half of the
+ *      areas read are rain areas. Unknown is not dry: an area NWS does not answer is unread, and with fewer than
+ *      MIN_AREAS read the day is 'unknown' and nothing would change.
+ *   3. decides, for each Google campaign, what the rule would set: an 'outdoor' campaign stops (the budget run's 1%
+ *      floor) on a rain day, an 'indoor' campaign runs at its base on a rain day and stops on a dry day, and any other
+ *      campaign (the brand campaign) is left alone. A campaign's class is ad_campaigns.metadata.rain_class
+ *      ('indoor' | 'outdoor'); a campaign marked with a route line (pest, lawn: ads/route-fill.js) is outdoor.
+ *   4. writes the run to system_settings 'ads.rain_mode.last' and 'ads.rain_mode.history' (last HISTORY_MAX), and the
+ *      day's latest call to 'ads.rain_mode.days' (one row per sold day, kept DAYS_MAX), the record the ad results
+ *      report joins on.
+ *   5. scores past days: a day whose call is recorded and not yet scored reads the measured radar rain (mrms-qpe.js)
+ *      at each area. An area with WET_INCHES or more was wet. The score is kept on the day's row: the call, the areas
+ *      measured wet, and hit (rain day and wet half or more, or dry day and wet under half).
+ */
+const db = require('../../models/db');
+const logger = require('../logger');
+const { getNwsHourlyRain } = require('../weather-forecast');
+const { fetchMrmsDailyRain } = require('../mrms-qpe');
+const { ZONE_COORDS } = require('../scheduling/forecast-zones');
+const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
+const { etDateString, etParts, addETDays } = require('../../utils/datetime-et');
+
+const LAST_KEY = 'ads.rain_mode.last';
+const HISTORY_KEY = 'ads.rain_mode.history';
+const DAYS_KEY = 'ads.rain_mode.days';
+const HISTORY_MAX = 200; // 12 runs a day: about 16 days
+const DAYS_MAX = 400;
+// Plan v2 (owner page, 11-23): 4 or more work hours at 70% or more. A daily chance would call most summer days wet.
+const RAIN_PCT = 70;
+const RAIN_HOURS = 4;
+const MIN_AREAS = 3;
+// Measured radar rain that counts an area as wet that day.
+const WET_INCHES = 0.25;
+// Past days scored in one run, oldest first; the rest wait for the next run.
+const SCORE_MAX = 3;
+const HOUR = 60;
+
+function parseJson(v, fallback) {
+  if (v && typeof v === 'object') return v;
+  if (typeof v !== 'string') return fallback;
+  try { return JSON.parse(v) ?? fallback; } catch { return fallback; }
+}
+
+/** The day the ads sell at `now` (budget-manager.js adjustBudgets): Sunday -> Monday, < 2 PM -> today, else tomorrow. */
+function soldDay(now) {
+  const { dayOfWeek, hour } = etParts(now);
+  if (dayOfWeek === 0 || hour >= 14) return etDateString(addETDays(now, 1));
+  return etDateString(now);
+}
+
+/** The campaign's rain class: 'indoor' | 'outdoor' | null (left alone). */
+function rainClassOf(campaign) {
+  const meta = parseJson(campaign?.metadata, {});
+  if (meta && ['indoor', 'outdoor'].includes(meta.rain_class)) return meta.rain_class;
+  if (meta && ['pest', 'lawn'].includes(meta.route_line)) return 'outdoor';
+  return null;
+}
+
+/** Work hours of `day` at RAIN_PCT or more, and the hours with no reading. */
+function countWetHours(hours, day) {
+  let wet = 0;
+  let missing = 0;
+  for (let m = DAY_OPEN; m < DAY_CLOSE; m += HOUR) {
+    const key = `${day}T${String(Math.floor(m / HOUR)).padStart(2, '0')}`;
+    const hour = hours.find((h) => String(h?.startTime || '').slice(0, 13) === key);
+    const chance = hour && Number.isFinite(hour.rainChance) ? hour.rainChance : null;
+    if (chance == null) missing += 1;
+    else if (chance >= RAIN_PCT) wet += 1;
+  }
+  return { wet, missing };
+}
+
+/**
+ * The forecast call for `day`: { day, call: 'rain' | 'dry' | 'unknown', areas: [{ zone, wet, missing, rain }],
+ * unread: [zone] }. An area with every hour missing counts as unread.
+ */
+async function forecastDay(day, { read = getNwsHourlyRain } = {}) {
+  const zones = Object.keys(ZONE_COORDS);
+  const areas = [];
+  const unread = [];
+  await Promise.all(zones.map(async (zone) => {
+    const hours = await Promise.resolve().then(() => read(ZONE_COORDS[zone].lat, ZONE_COORDS[zone].lng)).catch(() => null);
+    const counted = Array.isArray(hours) ? countWetHours(hours, day) : null;
+    const total = (DAY_CLOSE - DAY_OPEN) / HOUR;
+    if (!counted || counted.missing >= total) { unread.push(zone); return; }
+    areas.push({ zone, wet: counted.wet, missing: counted.missing, rain: counted.wet >= RAIN_HOURS });
+  }));
+  areas.sort((a, b) => zones.indexOf(a.zone) - zones.indexOf(b.zone));
+  unread.sort((a, b) => zones.indexOf(a) - zones.indexOf(b));
+  let call = 'unknown';
+  if (areas.length >= MIN_AREAS) call = areas.filter((a) => a.rain).length * 2 >= areas.length ? 'rain' : 'dry';
+  return { day, call, areas, unread };
+}
+
+/** What the rule would set for a campaign of `rainClass` under `call`: 'base' | 'stop' | null (no change). */
+function decideCampaign(rainClass, call) {
+  if (!rainClass || call === 'unknown') return null;
+  if (rainClass === 'outdoor') return call === 'rain' ? 'stop' : 'base';
+  return call === 'rain' ? 'base' : 'stop';
+}
+
+/** The day's call is scored once its measured rain is complete for the areas read. */
+async function scoreDay(row, { fetchRain = fetchMrmsDailyRain } = {}) {
+  const zones = Object.keys(ZONE_COORDS);
+  const measured = await Promise.all(zones.map(async (zone) => {
+    const out = await Promise.resolve()
+      .then(() => fetchRain({ latitude: ZONE_COORDS[zone].lat, longitude: ZONE_COORDS[zone].lng, start: row.day, end: row.day }))
+      .catch(() => null);
+    const inches = out?.days?.[0]?.inches;
+    return { zone, inches: Number.isFinite(inches) ? inches : null };
+  }));
+  const read = measured.filter((m) => m.inches != null);
+  if (read.length < MIN_AREAS) return null;
+  const wetAreas = read.filter((m) => m.inches >= WET_INCHES).map((m) => m.zone);
+  const wetDay = wetAreas.length * 2 >= read.length;
+  return {
+    scored_at: new Date().toISOString(),
+    measured: Object.fromEntries(measured.map((m) => [m.zone, m.inches])),
+    wet_areas: wetAreas,
+    wet_day: wetDay,
+    hit: row.call === 'unknown' ? null : (row.call === 'rain') === wetDay,
+  };
+}
+
+async function loadDays(conn) {
+  const row = await conn('system_settings').where({ key: DAYS_KEY }).first();
+  const days = parseJson(row?.value, {});
+  return days && typeof days === 'object' && !Array.isArray(days) ? days : {};
+}
+
+async function saveRun(conn, run, days, now) {
+  await conn.transaction(async (trx) => {
+    const prior = await trx('system_settings').where({ key: HISTORY_KEY }).first();
+    const history = parseJson(prior?.value, []);
+    const entry = { at: run.at, day: run.day, call: run.call, campaigns: run.campaigns.map((c) => [c.campaign_id, c.would]) };
+    const kept = [...(Array.isArray(history) ? history : []), entry].slice(-HISTORY_MAX);
+    const keptDays = Object.fromEntries(Object.entries(days).sort(([a], [b]) => a.localeCompare(b)).slice(-DAYS_MAX));
+    const upsert = (key, value, description) => trx('system_settings')
+      .insert({ key, value, category: 'ads', description })
+      .onConflict('key')
+      .merge({ value, updated_at: now });
+    await upsert(LAST_KEY, JSON.stringify(run), 'Latest rain-day ads record run');
+    await upsert(HISTORY_KEY, JSON.stringify(kept), `Recent rain-day ads record runs (last ${HISTORY_MAX})`);
+    await upsert(DAYS_KEY, JSON.stringify(keptDays), 'Rain-day ads call and measured score, one row per sold day');
+  });
+}
+
+/** Scores up to SCORE_MAX past, unscored days (in place). Returns the days scored. */
+async function scorePastDays(days, now, opts) {
+  const today = etDateString(now);
+  const due = Object.keys(days).filter((d) => d < today && !days[d].score).sort().slice(0, SCORE_MAX);
+  const scored = [];
+  for (const day of due) {
+    const score = await scoreDay(days[day], opts);
+    if (score) { days[day] = { ...days[day], score }; scored.push(day); }
+  }
+  return scored;
+}
+
+/**
+ * One run. Returns { day, call, campaigns, scored, problems }. Problems: an unknown call, a failed save.
+ */
+async function recordRun({ now = new Date(), conn = db, read, fetchRain } = {}) {
+  const problems = [];
+  const day = soldDay(now);
+  const forecast = await forecastDay(day, { read });
+  const rows = await conn('ad_campaigns').where('platform', 'google_ads');
+  const campaigns = rows
+    .filter((c) => ['active', 'paused'].includes(c.status))
+    .map((c) => {
+      const rainClass = rainClassOf(c);
+      return {
+        campaign_id: c.id,
+        campaign_name: c.campaign_name,
+        status: c.status,
+        rain_class: rainClass,
+        would: decideCampaign(rainClass, forecast.call),
+      };
+    });
+  if (forecast.call === 'unknown') problems.push(`forecast unread for ${day}: ${forecast.areas.length} of ${Object.keys(ZONE_COORDS).length} areas read`);
+  if (!campaigns.some((c) => c.rain_class === 'indoor')) logger.info('[ads-rain-mode] no indoor campaign is marked yet');
+
+  // mode: this module only records ("shadow"), so later live runs can be told apart.
+  const run = { at: now.toISOString(), mode: 'shadow', ...forecast, campaigns };
+  let scored = [];
+  try {
+    const days = await loadDays(conn);
+    // The day's latest call stands. A call already scored is never rewritten.
+    if (!days[day]?.score) days[day] = { day, call: forecast.call, at: run.at, areas: forecast.areas.filter((a) => a.rain).map((a) => a.zone) };
+    scored = await scorePastDays(days, now, { fetchRain });
+    await saveRun(conn, run, days, now);
+  } catch (err) {
+    problems.push(`the run was not saved: ${err.message}`);
+  }
+  logger.info(`[ads-rain-mode] ${day}: ${forecast.call} (${forecast.areas.filter((a) => a.rain).length}/${forecast.areas.length} areas wet`
+    + `${forecast.unread.length ? `, unread ${forecast.unread.join(', ')}` : ''}); scored ${scored.length}`);
+  return { day, call: forecast.call, campaigns, scored, problems };
+}
+
+/** The cron's step: throws when the run had a problem, so job_health shows the failed tick with its cause. */
+async function recordRainMode(opts) {
+  const run = await recordRun(opts);
+  for (const problem of run.problems) logger.error(`[ads-rain-mode] ${run.day}: ${problem}`);
+  if (run.problems.length) throw new Error(`rain mode record: ${run.problems[0]}`);
+  return run;
+}
+
+module.exports = {
+  LAST_KEY,
+  HISTORY_KEY,
+  DAYS_KEY,
+  RAIN_PCT,
+  RAIN_HOURS,
+  WET_INCHES,
+  soldDay,
+  rainClassOf,
+  countWetHours,
+  forecastDay,
+  decideCampaign,
+  scoreDay,
+  recordRun,
+  recordRainMode,
+};
