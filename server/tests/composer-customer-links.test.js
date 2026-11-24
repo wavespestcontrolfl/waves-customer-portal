@@ -551,11 +551,13 @@ describe('buildReferralLink', () => {
     expect(customerForCode).toHaveBeenCalledTimes(lookups);
   });
 
-  test('GATE_REFERRAL_STEP2 on: a member link on the short-link host, with one trailing slash, or with a query is read the same', async () => {
+  test('GATE_REFERRAL_STEP2 on: a member link on the short-link host, with one trailing slash, with a query or in the FQDN spelling is read the same', async () => {
     for (const link of [
       'https://wavespest.co/r/WAVES-ABC12345',
       'https://portal.wavespestcontrol.com/r/WAVES-ABC12345/',
       'https://portal.wavespestcontrol.com/r/WAVES-ABC12345?x=1',
+      // The terminal DNS dot is the same host (ownedHostKey), as in every other owned-host check.
+      'https://Portal.WavesPestControl.com./r/WAVES-ABC12345',
     ]) {
       resolvePromoter.mockResolvedValue({ promoter: { id: 'p1', referral_link: link }, alreadyEnrolled: true });
       step2FriendCreditCentsOf.mockReturnValueOnce(5000);
@@ -3571,7 +3573,12 @@ describe('ownedPortalHosts: every host the portal answers on', () => {
   const { ownedPortalHosts, ownedPortalLinkSpans } = require('../services/composer-customer-links');
   const RAILWAY = 'waves-portal-production.up.railway.app';
   const PREP = `https://${RAILWAY}/prep/${'a'.repeat(32)}`;
-  const NAMES = ['PUBLIC_PORTAL_URL', 'PORTAL_URL', 'CLIENT_URL', 'PORTAL_DOMAIN', 'RAILWAY_PUBLIC_DOMAIN', 'RAILWAY_ENVIRONMENT_NAME', 'RAILWAY_ENVIRONMENT'];
+  const NAMES = ['PUBLIC_PORTAL_URL', 'PORTAL_URL', 'CLIENT_URL', 'PORTAL_DOMAIN', 'RAILWAY_PUBLIC_DOMAIN', 'RAILWAY_ENVIRONMENT_NAME', 'RAILWAY_ENVIRONMENT', 'RAILWAY_DEPLOYMENT_ID', 'RAILWAY_REPLICA_ID'];
+  // The running production deployment (utils/railway-deployment.js isDeployedProduction).
+  const asProduction = () => {
+    process.env.RAILWAY_ENVIRONMENT_NAME = 'production';
+    process.env.RAILWAY_DEPLOYMENT_ID = 'deployment-test';
+  };
   let saved;
   beforeEach(() => {
     saved = Object.fromEntries(NAMES.map((name) => [name, process.env[name]]));
@@ -3584,15 +3591,20 @@ describe('ownedPortalHosts: every host the portal answers on', () => {
     }
   });
 
-  test('the short host and the portal origin, plus every host a portal origin value names (production keeps the raw Railway host in CLIENT_URL)', () => {
-    expect(ownedPortalHosts()).toEqual(['wavespest.co', 'portal.wavespestcontrol.com']);
+  test('the production deployment adds every host a portal origin value names (its CLIENT_URL keeps the raw Railway host); elsewhere the list is the link-building hosts', () => {
     process.env.CLIENT_URL = `https://${RAILWAY}/`;
     process.env.RAILWAY_PUBLIC_DOMAIN = 'Portal.WavesPestControl.com';
     process.env.PORTAL_DOMAIN = 'not a host';
+    expect(ownedPortalHosts()).toEqual(['wavespest.co', 'portal.wavespestcontrol.com']);
+    // `railway run` sets the environment name but runs no deployment: still not the production deployment.
+    process.env.RAILWAY_ENVIRONMENT_NAME = 'production';
+    expect(ownedPortalHosts()).toEqual(['wavespest.co', 'portal.wavespestcontrol.com']);
+    asProduction();
     expect(ownedPortalHosts()).toEqual(['wavespest.co', 'portal.wavespestcontrol.com', RAILWAY]);
   });
 
-  test('a link on the Railway host is judged like a portal link: the SMS link wrap finds it, and a foreign URL carrying it is refused', () => {
+  test('in production a link on the Railway host is judged like a portal link: the SMS link wrap finds it, and a foreign URL carrying it is refused', () => {
+    asProduction();
     expect(ownedPortalLinkSpans(`Prep: ${PREP}`)).toEqual([]);
     expect(wrappedOwnedLinkIn(`See https://evil.example/?next=${PREP}`)).toBe(false);
     process.env.CLIENT_URL = `https://${RAILWAY}`;
