@@ -117,9 +117,52 @@ const TAX_YEARS = {
     socialSecurityWageBase: 184500,
     // IRS Notice 2025-67: the 2026 SIMPLE IRA employee deferral limit, and the 401(a)(17) compensation
     // limit that caps the 2% employer contribution. In cents. The catch-up and the 110% limit are not
-    // modelled. The 2027 block arrives with the 2027 tables.
+    // modelled.
     simpleDeferralLimitCents: 1700000,
     simpleCompensationCapCents: 36000000,
+  },
+  2027: {
+    // DRAFT Pub. 15-T (2027): the IRS has posted only a draft (Nov 12 2026), and that draft's own note says its tables
+    // "illustrate what the 2027 tables would look like by using the 2026 tax parameters". So these schedules are
+    // built from the 2027 tax law instead: Rev. Proc. 2026-35 (tax rate tables + standard deductions) by Pub. 15-T's
+    // own construction, which rebuilds every 2026 cell above exactly (payroll-calc.test.js). Owner 2026-11-23 "merge
+    // now": the bell payroll-2027-tables rings when the final is out; replace with the final and drop this marker.
+    // Worksheet 1A line 1g: unchanged in the 2027 draft.
+    noCheckboxAdjustment: { married_jointly: 12900, single: 8600, head_of_household: 8600 },
+    standard: {
+      married_jointly: [
+        [0, 0, 0], [20300, 0, 10], [45900, 2560, 12], [124350, 11974, 22],
+        [238550, 37098, 24], [436950, 84714, 32], [549400, 120698, 35], [813950, 213290.50, 37],
+      ],
+      single: [
+        [0, 0, 0], [8000, 0, 10], [20800, 1280, 12], [60025, 5987, 22],
+        [117125, 18549, 24], [216325, 42357, 32], [272550, 60349, 35], [669375, 199237.75, 37],
+      ],
+      head_of_household: [
+        [0, 0, 0], [16325, 0, 10], [34575, 1825, 12], [85975, 7993, 22],
+        [125425, 16672, 24], [224625, 40480, 32], [280875, 58480, 35], [677675, 197360, 37],
+      ],
+    },
+    step2Checkbox: {
+      married_jointly: [
+        [0, 0, 0], [16600, 0, 10], [29400, 1280, 12], [68625, 5987, 22],
+        [125725, 18549, 24], [224925, 42357, 32], [281150, 60349, 35], [413425, 106645.25, 37],
+      ],
+      single: [
+        [0, 0, 0], [8300, 0, 10], [14700, 640, 12], [34313, 2993.50, 22],
+        [62863, 9274.50, 24], [112463, 21178.50, 32], [140575, 30174.50, 35], [338988, 99618.88, 37],
+      ],
+      head_of_household: [
+        [0, 0, 0], [12463, 0, 10], [21588, 912.50, 12], [47288, 3996.50, 22],
+        [67013, 8336, 24], [116613, 20240, 32], [144738, 29240, 35], [343138, 98680, 37],
+      ],
+    },
+    // SSA 2027 fact sheet (announced 2026-10-14): the 2027 Social Security wage base.
+    socialSecurityWageBase: 192300,
+    // IRS Notice 2026-66: the 2027 SIMPLE IRA deferral limit ($17,500; the $19,100 limit of section 408(p)(2)(E)(i)(I)
+    // or (II) for certain eligible employers waits on the CPA's word) and the 401(a)(17) compensation limit ($375,000).
+    simpleDeferralLimitCents: 1750000,
+    simpleCompensationCapCents: 37500000,
   },
 };
 

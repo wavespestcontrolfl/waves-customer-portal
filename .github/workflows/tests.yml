@@ -1042,7 +1042,11 @@ jobs:
           check-latest: true # newest patch of the .nvmrc major; the dev runtime floor is 24.22.1
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
+      # No --with-deps: ubuntu-24.04 already has every library Chromium needs,
+      # and the QA pages load their own fonts (scripts/qa/browser.js
+      # waitForFonts). The apt step only added system fonts from a slow mirror:
+      # 5.4-7.1 min in 10 of 12 runs on 2026-11-23, against 6 s for the browser.
+      - run: npx playwright install chromium
       - run: npm run worktree:setup
       - name: Select the disposable CI database cluster
         run: |
@@ -1061,7 +1065,7 @@ jobs:
         run: npm run qa:cleanup
       - name: Verify retained journey results survived cleanup
         run: |
-          node -e "const r = require('./.tmp/qa/e2e/report.json'); require('node:assert/strict').equal(r.steps.filter(s => s.passed).length, 13)"
+          node -e "const r = require('./.tmp/qa/e2e/report.json'); const a = require('node:assert/strict'); a.ok(r.steps.length >= 13, 'fewer journey steps than expected'); a.deepEqual(r.steps.filter(s => !s.passed).map(s => s.name), [])"
       - name: Application QA evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
