@@ -42,12 +42,61 @@ describe('computePaycheck: federal income tax', () => {
     expect(Math.abs(result.federalIncomeTaxCents - dollars * 100)).toBeLessThanOrEqual(50);
   });
 
-  test('every 2026 schedule row continues the row before it (catches a mistyped table cell)', () => {
+  test('the 2026 and 2027 schedules are Pub. 15-T\'s construction from the Rev. Proc. tax tables', () => {
+    // Pub. 15-T builds its automated tables from the year's tax rate tables and standard deduction: the STANDARD
+    // schedule starts its 10% band at the standard deduction less the Worksheet 1A line 1g amount; the Step 2
+    // checkbox schedule uses half the standard deduction, half each band (rounded to the dollar, half up) and half
+    // each base tax (to the cent). Inputs: Rev. Proc. 2025-32 (2026) and Rev. Proc. 2026-35 (2027). The rule
+    // rebuilding every 2026 cell is the proof that the 2027 cells (built the same way) are right.
+    const IN = {
+      2026: { sd: { married_jointly: 32200, single: 16100, head_of_household: 24150 },
+        br: { married_jointly: [[24800, 2480], [100800, 11600], [211400, 35932], [403550, 82048], [512450, 116896], [768700, 206583.50]],
+              single: [[12400, 1240], [50400, 5800], [105700, 17966], [201775, 41024], [256225, 58448], [640600, 192979.25]],
+              head_of_household: [[17700, 1770], [67450, 7740], [105700, 16155], [201750, 39207], [256200, 56631], [640600, 191171]] } },
+      2027: { sd: { married_jointly: 33200, single: 16600, head_of_household: 24925 },
+        br: { married_jointly: [[25600, 2560], [104050, 11974], [218250, 37098], [416650, 84714], [529100, 120698], [793650, 213290.50]],
+              single: [[12800, 1280], [52025, 5987], [109125, 18549], [208325, 42357], [264550, 60349], [661375, 199237.75]],
+              head_of_household: [[18250, 1825], [69650, 7993], [109100, 16672], [208300, 40480], [264550, 58480], [661350, 197360]] } },
+    };
+    const G = { married_jointly: 12900, single: 8600, head_of_household: 8600 };
+    const RATES = [10, 12, 22, 24, 32, 35, 37];
+    const dollarUp = (x) => Math.floor(x + 0.5);
+    const centUp = (x) => Math.floor(x * 100 + 0.5) / 100;
+    function tables(year) {
+      const { sd, br } = IN[year]; const standard = {}; const step2Checkbox = {};
+      for (const st of Object.keys(sd)) {
+        const z = sd[st] - G[st];
+        standard[st] = [[0, 0, 0], [z, 0, 10], ...br[st].map(([t, b], i) => [z + t, b, RATES[i + 1]])];
+        const h = sd[st] / 2;
+        step2Checkbox[st] = [[0, 0, 0], [dollarUp(h), 0, 10], ...br[st].map(([t, b], i) => [dollarUp(h + t / 2), centUp(b / 2), RATES[i + 1]])];
+      }
+      return { standard, step2Checkbox };
+    }
+    for (const year of [2026, 2027]) {
+      const { standard, step2Checkbox } = TAX_YEARS[year];
+      expect({ standard, step2Checkbox }).toEqual(tables(year));
+      expect(TAX_YEARS[year].noCheckboxAdjustment).toEqual(G);
+    }
+  });
+
+  test('2027: the Social Security wage base and the SIMPLE limits', () => {
+    expect(TAX_YEARS[2027].socialSecurityWageBase).toBe(192300);
+    expect(TAX_YEARS[2027].simpleDeferralLimitCents).toBe(1750000);
+    expect(TAX_YEARS[2027].simpleCompensationCapCents).toBe(37500000);
+  });
+
+  test('2027: a $1,000 single week withholds by the 2027 table', () => {
+    // 52,000 a year less the 8,600 line 1g amount = 43,400; 1,280 + 12% of (43,400 - 20,800) = 3,992; / 52 = 76.77.
+    const result = computePaycheck({ ...FULL_WEEK, payDate: '2027-01-15', hourlyRate: '25.00', w4: { ...W4_SINGLE, formYear: 2027 } });
+    expect(result.grossPayCents).toBe(100000);
+    expect(result.federalIncomeTaxCents).toBe(7677);
+  });
+
+  test('every 2026 and 2027 schedule row continues the row before it (catches a mistyped table cell)', () => {
     // Column C of a row equals the previous row's C plus the previous rate on
     // the band. Two Step 2 checkbox thresholds are rounded halves in the IRS
     // table, so allow under a dollar.
-    const { standard, step2Checkbox } = TAX_YEARS[2026];
-    for (const schedules of [standard, step2Checkbox]) {
+    for (const schedules of [2026, 2027].flatMap((year) => [TAX_YEARS[year].standard, TAX_YEARS[year].step2Checkbox])) {
       for (const rows of Object.values(schedules)) {
         for (let i = 1; i < rows.length; i += 1) {
           const [prevAtLeast, prevTentative, prevPercent] = rows[i - 1];
@@ -232,7 +281,7 @@ describe('Florida minimum wage floor (Fla. Const. art. X, s. 24)', () => {
 
 describe('computePaycheck: refuses to guess', () => {
   test.each([
-    ['a pay date in a year without tables', { payDate: '2027-01-08' }, /No federal withholding tables for 2027/],
+    ['a pay date in a year without tables', { payDate: '2028-01-07' }, /No federal withholding tables for 2028/],
     ['an impossible pay date', { payDate: '2026-02-30' }, /real YYYY-MM-DD/],
     ['no pay rate', { hourlyRate: null }, /No pay rate set/],
     ['no W-4', { w4: null }, /No Form W-4 on file/],

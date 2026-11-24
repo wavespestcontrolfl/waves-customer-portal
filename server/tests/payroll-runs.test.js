@@ -117,7 +117,7 @@ describe('buildCheck', () => {
     ['a pay rate under the Florida minimum wage on the pay date', { tech: { pay_rate: '14.99' } }, /Hourly rate \$14\.99 is below the Florida minimum wage of \$15\.00 on 2026-10-23/],
     ['no pay rate', { tech: { pay_rate: null } }, /No pay rate set/],
     ['a pay rate of zero', { tech: { pay_rate: '0.00' } }, /No pay rate set/],
-    ['a pay date in a year with no tables', { payDate: '2027-01-08' }, /No federal withholding tables for 2027/],
+    ['a pay date in a year with no tables', { payDate: '2028-01-07' }, /No federal withholding tables for 2028/],
     ['a W-4 from before 2020', { w4: { ...W4, formYear: 2019 } }, /2020 or later/],
   ])('lists %s as blocked with a plain reason', (_name, patch, reason) => {
     const result = base(patch);

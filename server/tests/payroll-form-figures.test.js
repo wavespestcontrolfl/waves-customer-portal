@@ -267,9 +267,7 @@ describe('Form 941', () => {
   });
 
   test('the lookback and last year come from the earlier checks (priorRows), each year with its own wage base', () => {
-    // Only 2026 has tax tables here; borrow them for 2027 for this test.
-    TAX_YEARS[2027] = TAX_YEARS[2026];
-    try {
+    {
       const prior = [
         // Lookback for 2027 is July 1, 2025 to June 30, 2026: $60,000 of tax in Q2 2026.
         check('2026-04-06', '2026-04-17', { tech: 1, gross_cents: 20000000, federal_income_tax_cents: 6000000 }),
@@ -286,8 +284,6 @@ describe('Form 941', () => {
       expect(line(out.f940, '3').value).toBe(100000);
       // Without the lookback tax: monthly.
       expect(line(buildFormFigures({ year: 2027, quarter: 1, rows, priorRows: prior.slice(1) }).f941, '16').value).toBe('Monthly schedule depositor');
-    } finally {
-      delete TAX_YEARS[2027];
     }
   });
 

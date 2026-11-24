@@ -48,8 +48,8 @@ it("technician: the full calendar has no Mat$/Lab$ columns and the service-progr
   expect(screen.queryByText("Mat$")).not.toBeInTheDocument();
   expect(screen.queryByText("Lab$")).not.toBeInTheDocument();
   expect(screen.getByText("Tiers")).toBeInTheDocument();
-  fireEvent.change(screen.getByLabelText("Protocol"), { target: { value: "qa_pest" } });
-  await screen.findByText("Synthetic protocol");
+  fireEvent.click(screen.getByRole("option", { name: "Synthetic Pest, 0 templates" }));
+  await screen.findByText(/VISIT 1/);
   expect(screen.queryByText(/Materials:/)).not.toBeInTheDocument();
   expect(screen.queryByText(/Labor:/)).not.toBeInTheDocument();
   expect(screen.queryByText(/Expected:/)).not.toBeInTheDocument();
@@ -64,8 +64,8 @@ it("control: an admin still sees the Mat$/Lab$ columns with their figures and th
   expect(screen.getByText("Mat$")).toBeInTheDocument();
   expect(screen.getByText("Lab$")).toBeInTheDocument();
   expect(screen.getByText("$14.17")).toBeInTheDocument();
-  fireEvent.change(screen.getByLabelText("Protocol"), { target: { value: "qa_pest" } });
-  await screen.findByText("Synthetic protocol");
+  fireEvent.click(screen.getByRole("option", { name: "Synthetic Pest, 0 templates" }));
+  await screen.findByText(/VISIT 1/);
   expect(screen.getByText(/Materials:/)).toBeInTheDocument();
   expect(screen.getByText(/Expected:/)).toBeInTheDocument();
 });
