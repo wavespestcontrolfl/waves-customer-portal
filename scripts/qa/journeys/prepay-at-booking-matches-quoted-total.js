@@ -153,7 +153,12 @@ module.exports = {
       { id: jobBefore.id, status: jobBefore.status, attempts: jobBefore.attempts, next: String(jobBefore.next_attempt_at) });
     assert.equal(texts().length, 1, 'Still one text with the total');
     assert.deepEqual(await newInvoiceIds(), [invoice.id], 'The repeat and the webhook create no other invoice');
-    assert.equal((await db('annual_prepay_terms').where({ source_estimate_id: fixture.prepayEstimateId })).length, 1);
+    // The paid term is live and records the year's price the customer was quoted.
+    const settledTerms = await db('annual_prepay_terms').where({ source_estimate_id: fixture.prepayEstimateId });
+    assert.equal(settledTerms.length, 1);
+    assert.equal(settledTerms[0].status, 'active', `The paid prepay term must be active (status ${settledTerms[0].status})`);
+    assert.equal(Math.round(Number(settledTerms[0].prepay_amount) * 100), expected.baseCents,
+      `The term records the quoted year price (prepay_amount ${settledTerms[0].prepay_amount})`);
     return { quotedTotalCents: quote.totalCents, stripeAmountCents: call.amount, invoiceId: invoice.id, paymentCount: settled.length,
       textsWithTotal: texts().length, allTexts: since().filter((entry) => entry.kind === 'sms').length };
   },
