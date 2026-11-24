@@ -160,3 +160,29 @@ describe('staffDispositionUpdates — PATCH payload', () => {
     expect(updates.decline_reason).toBe('Other');
   });
 });
+
+describe('the reclaim SYSTEM booked-another-way stamp sheds when the offer is revived or declined', () => {
+  const { isSystemBookedRow, SYSTEM_BOOKED_ROW_SQL, SYSTEM_BOOKED_CLEARED_UPDATES } = require('../services/estimate-disposition');
+  const fs = require('fs');
+
+  test('only a SYSTEM converted_other_path stamp counts (a staff or customer one is not the reclaim\'s)', () => {
+    expect(isSystemBookedRow({ disposition: 'converted_other_path', disposition_source: 'system' })).toBe(true);
+    expect(isSystemBookedRow({ disposition: 'converted_other_path', disposition_source: 'staff' })).toBe(false);
+    expect(isSystemBookedRow({ disposition: 'expired_viewed', disposition_source: 'system' })).toBe(false);
+    expect(isSystemBookedRow(null)).toBe(false);
+    expect(SYSTEM_BOOKED_ROW_SQL).toContain("disposition = 'converted_other_path'");
+    expect(SYSTEM_BOOKED_ROW_SQL).toContain("disposition_source = 'system'");
+    expect(SYSTEM_BOOKED_CLEARED_UPDATES).toEqual({ disposition: null, disposition_source: null, disposition_at: null, disposition_note: null });
+  });
+
+  test('every revival path clears it: sibling SQL, fixed-bid revival, and the public decline overwrites it', () => {
+    const ext = fs.readFileSync(require.resolve('../services/estimate-extension'), 'utf8');
+    // The four sibling SET expressions carry the SQL twin.
+    expect(ext.split('OR ${SYSTEM_BOOKED_ROW_SQL})').length - 1).toBe(4);
+    const admin = fs.readFileSync(require.resolve('../routes/admin-estimates'), 'utf8');
+    expect(admin).toContain('revivingBid && require(\'../services/estimate-disposition\').isSystemBookedRow(locked)');
+    const pub = fs.readFileSync(require.resolve('../routes/estimate-public'), 'utf8');
+    // disposition (with and without a stated reason), disposition_source and disposition_at.
+    expect(pub.split('CASE WHEN ${SYSTEM_BOOKED_ROW_SQL} THEN').length - 1).toBe(4);
+  });
+});

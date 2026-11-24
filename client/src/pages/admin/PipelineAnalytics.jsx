@@ -8,7 +8,11 @@ import {
   ShieldCheck,
   Trees,
 } from "lucide-react";
-import { classifyEstimateForPipeline } from "./EstimatePage";
+import {
+  classifyEstimateForPipeline,
+  isBookedOtherWayEstimate,
+  isWonEstimate,
+} from "./EstimatePage";
 import { Button, Card } from "../../components/ui";
 import { etParts } from "../../lib/timezone";
 // The "Call today" rule lives in shared/estimate-call-today.cjs so the 9 AM push counts the same list.
@@ -191,7 +195,8 @@ function serviceLineEntriesForEstimate(estimate) {
 
 // Aggregate offers/won/avg-ticket per service line. Offers = any non-draft
 // estimate in the window, counted once per quoted service line when the API
-// provides line-level service data. Won = status === 'accepted'. Monthly and
+// provides line-level service data. Won = accepted, or expired and then booked
+// another way (disposition converted_other_path). Monthly and
 // one-time amounts are averaged separately — the displayed ticket uses
 // whichever basis dominates the line so a one-time job can't inflate a
 // "/mo recurring" average (and vice versa).
@@ -212,7 +217,7 @@ export function aggregateServiceLineRows(estimates) {
         });
       const b = buckets.get(line);
       b.sent += 1;
-      if (e.status === "accepted") b.won += 1;
+      if (isWonEstimate(e)) b.won += 1;
       if (entry.amount > 0) {
         if (entry.basis === "one_time") {
           b.oneTimeSum += entry.amount;
@@ -516,22 +521,26 @@ export default function PipelineAnalytics({
     // the window but accepted inside it counts in both, not just one).
     // One denominator rule with the win/loss and source cards (GH codex
     // P1): rows classified never-winnable (invalid/duplicate lead,
-    // converted through another path) leave the close-rate math.
-    const NEVER_WINNABLE = [
-      "invalid_lead",
-      "converted_other_path",
-      "expired_unsent",
-    ];
+    // invalid/duplicate) leave the close-rate math. A customer who converted
+    // through another path after the estimate expired (converted_other_path)
+    // is a WIN, as on the server (estimate-winloss.js). Archived rows never
+    // reach this list, as before.
+    const NEVER_WINNABLE = ["invalid_lead", "expired_unsent"];
     const resolvedInRange = activeRows.filter((e) => {
       if (NEVER_WINNABLE.includes(e.disposition)) return false;
+      // The code on any row but an expired one is not a booked win: it leaves
+      // the denominator, as the server's excludedFromRatesRow does.
+      if (e.disposition === "converted_other_path" && !isBookedOtherWayEstimate(e))
+        return false;
       const resolvedAt = resolutionDate(e);
       return (
         resolvedAt != null && withinDateRange(resolvedAt, selectedRange, nowMs)
       );
     });
-    const accepted = resolvedInRange.filter(
-      (e) => e.status === "accepted",
-    ).length;
+    const bookedOtherWay = resolvedInRange.filter(isBookedOtherWayEstimate).length;
+    const accepted =
+      resolvedInRange.filter((e) => e.status === "accepted").length +
+      bookedOtherWay;
     const conversionDenominator = resolvedInRange.length;
     // Won/MRR KPIs key off the acceptance date (createdAt fallback for rows
     // that predate accepted_at): "MRR won (30d)" means won IN the window,
@@ -588,13 +597,15 @@ export default function PipelineAnalytics({
         (e._class === "archived" && e.status === "accepted"),
     );
     const lost = classified.filter((e) => e._class === "lost");
-    const wonMrr = won.reduce((sum, e) => sum + amount(e), 0);
-    const declinedCount = activeRows.filter(
-      (e) => e.status === "declined",
-    ).length;
-    const expiredCount = activeRows.filter(
-      (e) => e.status === "expired",
-    ).length;
+    // MRR added counts accepted offers only: a customer who booked another
+    // way did not necessarily buy at this offer's price.
+    const wonMrr = won
+      .filter((e) => e.status === "accepted")
+      .reduce((sum, e) => sum + amount(e), 0);
+    // The Lost tile's parts come from the rows classified lost, so a reclaimed
+    // expired row (classified won) is in neither subtotal.
+    const declinedCount = lost.filter((e) => e.status === "declined").length;
+    const expiredCount = lost.filter((e) => e.status === "expired").length;
 
     const followUpOverdue = activeRows.filter((e) =>
       isFollowUpOverdueEstimate(e, nowMs),
@@ -635,6 +646,7 @@ export default function PipelineAnalytics({
             ? Math.round((accepted / conversionDenominator) * 100)
             : 0,
         accepted,
+        bookedOtherWay,
         closed: conversionDenominator,
         totalMRRWon,
         wonAccounts: acceptedEstimates.length,
@@ -729,7 +741,11 @@ export default function PipelineAnalytics({
         <StatCard
           label="Offer acceptance"
           value={`${metrics.kpis.acceptanceRate}%`}
-          sub={`${metrics.kpis.accepted} accepted of ${metrics.kpis.closed} resolved`}
+          sub={`${metrics.kpis.accepted} accepted of ${metrics.kpis.closed} resolved${
+            metrics.kpis.bookedOtherWay > 0
+              ? ` (incl. ${metrics.kpis.bookedOtherWay} booked another way)`
+              : ""
+          }`}
         />
         <StatCard
           label="MRR won"

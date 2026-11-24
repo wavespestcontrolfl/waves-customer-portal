@@ -5477,6 +5477,9 @@ router.put('/:id/proposal', async (req, res, next) => {
       // the LOCKED row: a Pick reason saved after the pre-read must not ride into the live offer.
       ...(revivingBid && require('../services/estimate-disposition').isStaffLossRow(locked)
         ? require('../services/estimate-disposition').STAFF_LOSS_CLEARED_UPDATES : {}),
+      // A SYSTEM booked-another-way stamp (the daily reclaim's) goes too: the revived offer is live again.
+      ...(revivingBid && require('../services/estimate-disposition').isSystemBookedRow(locked)
+        ? require('../services/estimate-disposition').SYSTEM_BOOKED_CLEARED_UPDATES : {}),
       updated_at: db.fn.now(),
     });
     if (!count) return { updatedCount: 0 };

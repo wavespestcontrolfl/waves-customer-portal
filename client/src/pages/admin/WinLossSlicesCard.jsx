@@ -162,7 +162,11 @@ export default function WinLossSlicesCard() {
             <div>
               <div className="text-ui-body text-zinc-500 mb-1">
                 Win rate by lookup state ({data.resolved} resolved,{" "}
-                {data.winRatePct ?? 0}% overall)
+                {data.winRatePct ?? 0}% overall
+                {data.wonBookedOtherWay > 0
+                  ? `, incl. ${data.wonBookedOtherWay} booked another way`
+                  : ""}
+                )
               </div>
               <Table>
                 <TBody>

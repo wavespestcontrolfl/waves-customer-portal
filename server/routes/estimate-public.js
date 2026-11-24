@@ -20551,6 +20551,7 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
     // reconciler's not-yet-written marker. Linked LEAD locked first
     // (repo-wide leads → call_log order). Stale linkage → same generic
     // 404 as the marker path: the row is dead to this token.
+    const { SYSTEM_BOOKED_ROW_SQL } = require('../services/estimate-disposition');
     const declineTxn = await db.transaction(async (trx) => {
       const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
       // ESTIMATE row first — one lock order everywhere (estimates → leads
@@ -20599,11 +20600,14 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
           // customer's own code lands. COALESCE keeps any earlier staff
           // stamp either way — a staff ruling on a live row is rare and
           // deliberate, and the customer's words survive in the note.
+          // …except a SYSTEM booked-another-way stamp (the daily reclaim's), which the
+          // customer's own decline overwrites: the customer's word is the newer fact.
+          // Every SET expression reads the pre-update row.
           disposition: customerReason
-            ? trx.raw('COALESCE(disposition, ?)', [customerReason.disposition])
-            : trx.raw("COALESCE(disposition, 'declined_by_customer')"),
-          disposition_source: trx.raw("COALESCE(disposition_source, 'customer')"),
-          disposition_at: trx.raw('COALESCE(disposition_at, NOW())'),
+            ? trx.raw(`CASE WHEN ${SYSTEM_BOOKED_ROW_SQL} THEN ? ELSE COALESCE(disposition, ?) END`, [customerReason.disposition, customerReason.disposition])
+            : trx.raw(`CASE WHEN ${SYSTEM_BOOKED_ROW_SQL} THEN 'declined_by_customer' ELSE COALESCE(disposition, 'declined_by_customer') END`),
+          disposition_source: trx.raw(`CASE WHEN ${SYSTEM_BOOKED_ROW_SQL} THEN 'customer' ELSE COALESCE(disposition_source, 'customer') END`),
+          disposition_at: trx.raw(`CASE WHEN ${SYSTEM_BOOKED_ROW_SQL} THEN NOW() ELSE COALESCE(disposition_at, NOW()) END`),
           ...(customerReason ? {
             disposition_note: trx.raw('COALESCE(disposition_note, ?)', [customerReason.disposition_note]),
             competitor_name: trx.raw('COALESCE(competitor_name, ?)', [customerReason.competitor_name]),

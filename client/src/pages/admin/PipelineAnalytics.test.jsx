@@ -473,6 +473,56 @@ describe("PipelineAnalytics", () => {
     expect(screen.getByText("50%")).toBeInTheDocument();
   });
 
+  it("counts an expired offer whose customer booked another way as accepted, and keeps dead rows out", () => {
+    renderAnalytics({
+      estimates: [
+        estimate({ id: "won", status: "accepted", monthlyTotal: 40 }),
+        estimate({
+          id: "booked-late",
+          status: "expired",
+          expiresAt: daysAgo(30),
+          disposition: "converted_other_path",
+          monthlyTotal: 40,
+        }),
+        estimate({ id: "lost", status: "expired", expiresAt: daysAgo(3), disposition: "expired_viewed" }),
+        estimate({ id: "dead", status: "expired", expiresAt: daysAgo(3), disposition: "invalid_lead" }),
+      ],
+    });
+
+    // 2 of 3 counted (dead is out) → 67%; the booked-late row is named.
+    expect(screen.getByText("67%")).toBeInTheDocument();
+    expect(
+      screen.getByText("2 accepted of 3 resolved (incl. 1 booked another way)"),
+    ).toBeInTheDocument();
+    // MRR won stays accepted-only: one $40 offer, not two.
+    expect(screen.getByText("1 new accounts")).toBeInTheDocument();
+  });
+
+  it("builds the Lost tile's declined and expired parts from the rows classified lost", () => {
+    renderAnalytics({
+      estimates: [
+        estimate({ id: "d", status: "declined", declinedAt: daysAgo(2) }),
+        estimate({ id: "e", status: "expired", expiresAt: daysAgo(3), disposition: "expired_viewed" }),
+        estimate({ id: "late", status: "expired", expiresAt: daysAgo(30), disposition: "converted_other_path" }),
+      ],
+    });
+    // The reclaimed expired row is a win, so it is in neither part.
+    expect(screen.getByText("1 declined · 1 expired")).toBeInTheDocument();
+  });
+
+  it("keeps a declined row carrying converted_other_path out of the close rate, as the server does", () => {
+    renderAnalytics({
+      estimates: [
+        estimate({ id: "late", status: "expired", expiresAt: daysAgo(30), disposition: "converted_other_path" }),
+        estimate({ id: "stray", status: "declined", declinedAt: daysAgo(2), disposition: "converted_other_path" }),
+      ],
+    });
+    expect(screen.getByText("100%")).toBeInTheDocument();
+    expect(
+      screen.getByText("1 accepted of 1 resolved (incl. 1 booked another way)"),
+    ).toBeInTheDocument();
+  });
+
   it("counts archived wins in MRR won but keeps them out of every other metric", () => {
     renderAnalytics({
       estimates: [

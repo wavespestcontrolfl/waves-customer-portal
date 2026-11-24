@@ -1,7 +1,8 @@
 /**
  * Win/loss slicing by fieldVerifyFlags and price band (estimator backlog).
  *
- * Pins: resolved-only semantics (won = accepted, lost = declined/expired,
+ * Pins: resolved-only semantics (won = accepted or booked another way
+ * (disposition converted_other_path), lost = declined/expired,
  * resolution-date filter mirrors the client's fallback chain), dual
  * estimate_data shapes (engineRequest.profile vs engineInputs), flag
  * bucketing (presence / field / priority), price banding, and the
@@ -248,7 +249,7 @@ describe('winLossSlices — audit slices', () => {
   const lawnData = { result: { recurring: { tier: 'gold', services: [{ service: 'lawn', name: 'Lawn Care', mo: 48 }] } } };
   const wizardData = { engineResult: { waveGuard: { tier: 'silver' } } };
 
-  test('why-we-lose counts stamped dispositions and derives unstamped ones; dead/won-elsewhere leave the rates', async () => {
+  test('why-we-lose counts stamped dispositions and derives unstamped ones; dead leaves the rates', async () => {
     mockDbHandler = estimatesTable([
       row({ id: 'w', lead_source: 'Google', waveguard_tier: 'silver', estimate_data: lawnData }),
       row({ id: 'x', status: 'expired', accepted_at: null, expires_at: daysAgo(2), disposition: 'expired_unviewed', lead_source: 'google', service_interest: 'Pest Control' }),
@@ -263,14 +264,17 @@ describe('winLossSlices — audit slices', () => {
       row({ id: 'parked', status: 'viewed', accepted_at: null, archived_at: daysAgo(4), disposition: 'archived_unresolved', disposition_at: daysAgo(4) }),
       // Quote-wizard shape: tier persisted ONLY at engineResult.waveGuard.
       row({ id: 'wiz', status: 'expired', accepted_at: null, expires_at: daysAgo(1), estimate_data: wizardData, view_count: 1 }),
-      // Archived converted row (the conversion sweep's shape): listed, and
-      // COUNTED in excludedFromRates even though archived (GH codex P2).
+      // Archived converted row (the conversion sweep's shape): listed in
+      // "why we lose", COUNTED in excludedFromRates even though archived
+      // (GH codex P2), out of every rate as on main.
       row({ id: 'conv', status: 'sent', accepted_at: null, archived_at: daysAgo(3), disposition: 'converted_other_path', disposition_at: daysAgo(3) }),
     ]);
 
     const result = await winLossSlices({ days: 90 });
 
-    expect(result).toMatchObject({ resolved: 5, won: 1, lost: 4, winRatePct: 20, excludedFromRates: 2 });
+    // Unchanged from main: the archived converted row ('conv') stays excluded
+    // with the dead lead (2); only an UNARCHIVED reclaimed row counts as won.
+    expect(result).toMatchObject({ resolved: 5, won: 1, lost: 4, winRatePct: 20, excludedFromRates: 2, wonBookedOtherWay: 0 });
     // pctOfLosses denominator = group 'lost' only (4 here); the dead lead
     // is listed for visibility with a null percentage.
     expect(result.byDisposition).toEqual([
@@ -295,6 +299,116 @@ describe('winLossSlices — audit slices', () => {
     expect(result.byWaveguardTier.find((t) => t.key === 'silver')).toMatchObject({ label: 'Silver', won: 1, lost: 1, total: 2 });
     expect(result.byWaveguardTier.find((t) => t.key === 'gold')).toMatchObject({ label: 'Gold', lost: 1 });
     expect(result.byWaveguardTier.find((t) => t.key === 'none')).toMatchObject({ label: 'No bundle', total: 2 });
+  });
+
+  test('an expired estimate reclaimed as booked another way counts as won in both numerator and denominator; dead stays out', async () => {
+    mockDbHandler = estimatesTable([
+      row({ id: 'w' }),
+      row({ id: 'lost', status: 'expired', accepted_at: null, expires_at: daysAgo(3), disposition: 'expired_viewed' }),
+      // Expired 30 days ago, customer booked later; the daily pass stamped it.
+      row({ id: 'late', status: 'expired', accepted_at: null, expires_at: daysAgo(30), disposition: 'converted_other_path', disposition_at: daysAgo(1), updated_at: daysAgo(1), lead_source: 'google' }),
+      row({ id: 'dead', status: 'expired', accepted_at: null, expires_at: daysAgo(3), disposition: 'invalid_lead', lead_source: 'google' }),
+    ]);
+
+    const result = await winLossSlices({ days: 90 });
+
+    // 2 won (accepted + booked another way) of 3 counted; dead is out.
+    expect(result).toMatchObject({ resolved: 3, won: 2, lost: 1, winRatePct: 66.7, wonBookedOtherWay: 1, excludedFromRates: 1 });
+    expect(result.byLeadSource.find((s) => s.key === 'google')).toMatchObject({ won: 1, lost: 0, total: 1 });
+    // pctOfLosses still divides by real losses only (1 here).
+    expect(result.byDisposition.find((d) => d.code === 'expired_viewed')).toMatchObject({ pctOfLosses: 100 });
+    expect(result.byDisposition.find((d) => d.code === 'converted_other_path')).toMatchObject({ count: 1, pctOfLosses: null });
+  });
+
+  test('a booked win is code AND status expired: a declined row carrying the code is excluded, neither won nor lost', async () => {
+    mockDbHandler = estimatesTable([
+      row({ id: 'late', status: 'expired', accepted_at: null, expires_at: daysAgo(30), disposition: 'converted_other_path', disposition_at: daysAgo(1) }),
+      row({ id: 'stray', status: 'declined', accepted_at: null, declined_at: daysAgo(2), disposition: 'converted_other_path' }),
+      row({ id: 'lost', status: 'expired', accepted_at: null, expires_at: daysAgo(3), disposition: 'expired_viewed' }),
+    ]);
+
+    const result = await winLossSlices({ days: 90 });
+
+    expect(result).toMatchObject({ resolved: 2, won: 1, lost: 1, wonBookedOtherWay: 1, excludedFromRates: 1 });
+    const { isBookedOtherWayRow, excludedFromRatesRow } = require('../services/estimate-winloss');
+    expect(isBookedOtherWayRow({ status: 'expired' }, 'converted_other_path')).toBe(true);
+    expect(isBookedOtherWayRow({ status: 'declined' }, 'converted_other_path')).toBe(false);
+    expect(excludedFromRatesRow({ status: 'declined' }, 'converted_other_path')).toBe(true);
+    expect(excludedFromRatesRow({ status: 'expired' }, 'converted_other_path')).toBe(false);
+    // Cohorts agree: the declined row with the code never counts.
+    const cohorts = _private.sentCohorts([row({ id: 's', status: 'declined', accepted_at: null, declined_at: daysAgo(2), sent_at: daysAgo(35), disposition: 'converted_other_path' })], { days: 30, nowMs: NOW }).cohorts;
+    expect(cohorts.every((c) => c.sent === 0)).toBe(true);
+  });
+
+  test('an ARCHIVED converted_other_path row stays out of every rate and cohort exactly as before; only a reclaimed unarchived one wins', async () => {
+    const archivedConv = row({ id: 'conv', status: 'viewed', accepted_at: null, archived_at: daysAgo(3), disposition: 'converted_other_path', disposition_at: daysAgo(3) });
+    mockDbHandler = estimatesTable([
+      row({ id: 'lost', status: 'expired', accepted_at: null, expires_at: daysAgo(3), disposition: 'expired_viewed' }),
+      archivedConv,
+      row({ id: 'parked', status: 'viewed', accepted_at: null, archived_at: daysAgo(4), disposition: 'archived_unresolved', disposition_at: daysAgo(4) }),
+      row({ id: 'late', status: 'expired', accepted_at: null, expires_at: daysAgo(30), disposition: 'converted_other_path', disposition_at: daysAgo(1) }),
+    ]);
+
+    const result = await winLossSlices({ days: 90 });
+
+    expect(result).toMatchObject({ resolved: 2, won: 1, lost: 1, winRatePct: 50, wonBookedOtherWay: 1, excludedFromRates: 1 });
+    const cohorts = _private.sentCohorts([archivedConv], { days: 30, nowMs: NOW }).cohorts;
+    expect(cohorts.every((c) => c.sent === 0)).toBe(true);
+  });
+
+  test('an archived EXPIRED reclaimed row keeps its timed cohort outcome; only an archived sent/viewed sweep row is excluded', () => {
+    const base = { sent_at: daysAgo(35), created_at: daysAgo(36), accepted_at: null, expires_at: daysAgo(29), disposition: 'converted_other_path', disposition_at: daysAgo(25), archived_at: daysAgo(10) };
+    const cohorts = (rows) => _private.sentCohorts(rows, { days: 30, nowMs: NOW }).cohorts;
+    const at = (list, m) => list.find((c) => c.maturityDays === m);
+    const expired = cohorts([row({ ...base, id: 'x', status: 'expired' })]);
+    expect(at(expired, 14)).toMatchObject({ sent: 1, won: 1, lost: 0 });
+    expect(at(expired, 7)).toMatchObject({ sent: 1, won: 0, lost: 1 });
+    const swept = cohorts([row({ ...base, id: 'y', status: 'viewed' })]);
+    expect(swept.every((c) => c.sent === 0)).toBe(true);
+  });
+
+  test('a viewed-only delivery (no sent_at) reaches the cohort query and its timed outcome', async () => {
+    const viewedOnly = row({
+      id: 'v', status: 'expired', accepted_at: null, sent_at: null, viewed_at: daysAgo(34), created_at: daysAgo(36),
+      expires_at: daysAgo(29), disposition: 'converted_other_path', disposition_at: daysAgo(22),
+    });
+    let call = 0;
+    const calls = [];
+    mockDbHandler = () => {
+      const isCohortRead = call++ === 1;
+      const recorder = new Proxy({}, { get: (_t, m) => (...args) => { calls.push([m, args[0]]); return recorder; } });
+      const builder = {
+        whereIn: () => builder, whereNotNull: () => builder, whereNull: () => builder,
+        where: (fn) => { if (isCohortRead && typeof fn === 'function') fn(recorder); return builder; },
+        select: async () => (isCohortRead ? [viewedOnly] : []),
+      };
+      return builder;
+    };
+    const { sentCohorts } = await winLossSlices({ days: 30 });
+    // The cohort read admits a row whose only delivery evidence is viewed_at...
+    expect(calls).toContainEqual(['orWhereNotNull', 'viewed_at']);
+    // ...and outcomeTimes reads it: won once the payment landed, lost before.
+    expect(sentCohorts.cohorts.find((c) => c.maturityDays === 14)).toMatchObject({ sent: 1, won: 1 });
+  });
+
+  test('a reclaimed expired row resolves at its expiry, so the window it counts in never moves', () => {
+    expect(_private.resolutionDateMs({
+      status: 'expired', expires_at: '2026-09-01T00:00:00Z', disposition: 'converted_other_path',
+      disposition_at: '2026-11-20T00:00:00Z', updated_at: '2026-11-20T00:00:00Z', created_at: '2026-08-20T00:00:00Z',
+    })).toBe(Date.parse('2026-09-01T00:00:00Z'));
+  });
+
+  test('sent cohorts: a booked-after-expiry row reads lost until the booking, won after it', () => {
+    const cohorts = _private.sentCohorts([
+      row({
+        id: 'late', status: 'expired', accepted_at: null, sent_at: daysAgo(35), created_at: daysAgo(36),
+        expires_at: daysAgo(29), disposition: 'converted_other_path', disposition_at: daysAgo(20),
+      }),
+    ], { days: 30, nowMs: NOW }).cohorts;
+    const at = (m) => cohorts.find((c) => c.maturityDays === m);
+    expect(at(7)).toMatchObject({ sent: 1, won: 0, lost: 1 });
+    expect(at(14)).toMatchObject({ sent: 1, won: 0, lost: 1 });
+    expect(at(30)).toMatchObject({ sent: 1, won: 1, lost: 0, winRatePct: 100 });
   });
 
   test('sent cohorts: outcome as of N days after send, open offers counted, immature ages skipped', async () => {

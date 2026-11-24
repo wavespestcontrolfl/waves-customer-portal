@@ -317,6 +317,41 @@ describe('extendEstimate post-write SMS: annual-offer delivery guard (delivery-g
   });
 });
 
+describe('a revived offer sheds the reclaim\'s SYSTEM booked-another-way stamp (locked anchor row)', () => {
+  async function extendWithLockedRow(locked) {
+    const updates = [];
+    const orig = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const b = orig(table);
+      if (table === 'estimates') {
+        b.first = jest.fn(async () => ({ estimate_data: {}, ...locked }));
+        b.update = jest.fn((payload) => { updates.push(payload); return Promise.resolve(1); });
+      }
+      return b;
+    });
+    try {
+      await extendEstimate({
+        estimate: { id: 'est-sys', status: 'expired', archived_at: null, expires_at: PAST, sent_at: PAST, viewed_at: PAST },
+        days: 7, silent: true, entryPoint: 'test', workflow: 'test',
+      });
+    } finally {
+      db.mockImplementation(orig);
+    }
+    return updates[0];
+  }
+
+  it('clears a SYSTEM converted_other_path on the revived anchor', async () => {
+    const update = await extendWithLockedRow({ disposition: 'converted_other_path', disposition_source: 'system' });
+    expect(update.status).toBe('viewed');
+    expect(update).toMatchObject({ disposition: null, disposition_source: null, disposition_at: null, disposition_note: null });
+  });
+
+  it('leaves a staff-stamped converted_other_path alone', async () => {
+    const update = await extendWithLockedRow({ disposition: 'converted_other_path', disposition_source: 'staff' });
+    expect(update).not.toHaveProperty('disposition');
+  });
+});
+
 describe('EXTENDABLE_STATUSES', () => {
   it('covers every published status the public eligibility predicate can admit', () => {
     // Superset requirement: isEstimateExtensionRequestEligible admits
