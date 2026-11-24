@@ -81,6 +81,7 @@ describe('AdsResultsCard', () => {
   it('counts the recorded 2 PM forecast call, not a later forecast', async () => {
     const changed = [
       { ...zero, date: '2026-10-05', campaign_id: 'c', campaign: 'Test Campaign C', platform: 'google_ads', rain_day: { call: 'rain', cutoff_call: 'dry', wet_day: false } },
+      { ...zero, date: '2026-10-08', campaign_id: 'c', campaign: 'Test Campaign C', platform: 'google_ads', rain_day: { call: 'dry', cutoff_call: 'dry', scored: true, wet_day: null } },
       { ...zero, date: '2026-10-07', campaign_id: 'c', campaign: 'Test Campaign C', platform: 'google_ads', rain_day: { call: null, cutoff_call: 'unknown', wet_day: null } },
       { ...zero, date: '2026-10-06', campaign_id: 'c', campaign: 'Test Campaign C', platform: 'google_ads', rain_day: { call: 'rain', cutoff_call: null, wet_day: null } },
     ];
@@ -92,6 +93,7 @@ describe('AdsResultsCard', () => {
     expect(screen.getByText('2 PM call dry, stayed dry')).toBeInTheDocument();
     expect(screen.getByText('No 2 PM call (later forecast rain), not measured yet')).toBeInTheDocument();
     expect(screen.getByText('2 PM call unknown, not measured yet')).toBeInTheDocument();
+    expect(screen.getByText('2 PM call dry, no radar reading')).toBeInTheDocument();
   });
 
   it('the period rain total counts a recorded day with no ad row', async () => {

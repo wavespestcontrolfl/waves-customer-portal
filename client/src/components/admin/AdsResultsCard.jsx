@@ -47,7 +47,8 @@ const PLATFORM_NAMES = { google_ads: "Google Ads", google_lsa: "Google LSA", fac
 
 function rainDayText(rain) {
   if (!rain || (!rain.call && !rain.cutoff_call)) return "";
-  const measured = rain.wet_day === null || rain.wet_day === undefined ? "not measured yet" : rain.wet_day ? "it rained" : "stayed dry";
+  const unread = rain.scored ? "no radar reading" : "not measured yet"; // scored with no wet_day = final, ungraded
+  const measured = rain.wet_day === null || rain.wet_day === undefined ? unread : rain.wet_day ? "it rained" : "stayed dry";
   if (!rain.cutoff_call) return `No 2 PM call (later forecast ${rain.call}), ${measured}`;
   return `2 PM call ${rain.cutoff_call}, ${measured}`;
 }
