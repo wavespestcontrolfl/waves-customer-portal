@@ -3,20 +3,20 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/scheduling/tech-day-lock', () => ({ lockTechDays: jest.fn(async () => []) }));
-jest.mock('../config/feature-gates', () => ({ techBirthdayPayLive: jest.fn(() => false) }));
-jest.mock('../services/payroll-time-off', () => ({ createTimeOff: jest.fn(async () => ({ entry: {} })) }));
+jest.mock('../services/admin-alert-compose', () => ({
+  ...jest.requireActual('../services/admin-alert-compose'),
+  raiseAdminAlert: jest.fn(async () => ({ id: 'bell-1' })),
+}));
 
 const logger = require('../services/logger');
 const { lockTechDays } = require('../services/scheduling/tech-day-lock');
-const { techBirthdayPayLive } = require('../config/feature-gates');
-const { createTimeOff } = require('../services/payroll-time-off');
+const { raiseAdminAlert, composeAdminAlert } = require('../services/admin-alert-compose');
 const {
-  HORIZON_DAYS, ABSENCE_REASON, CATCH_UP_DAYS, PAY_KIND, PAY_HOURS, PAY_NOTE, birthdayDateInYear, birthdayDatesBetween, syncTechDaysOff,
+  HORIZON_DAYS, ABSENCE_REASON, ALERT_KEY, birthdayDateInYear, birthdayDatesBetween, syncTechDaysOff,
 } = require('../services/tech-birthday-absences');
 
 beforeEach(() => {
   jest.clearAllMocks();
-  techBirthdayPayLive.mockReturnValue(false);
 });
 
 describe('date logic (pure)', () => {
@@ -55,42 +55,34 @@ describe('date logic (pure)', () => {
   });
 });
 
-describe('syncTechDaysOff (knex double)', () => {
-  // technicians -> `techs`; technician_absences -> the rows already there (any, cleared or not); payroll_time_off -> `timeOff`;
-  // audit_log -> `audit`; inserts into technician_absences are recorded.
-  function makeConn({ techs = [], absences = [], timeOff = [], audit = [] } = {}) {
-    const inserted = [];
-    const tableOf = (table) => {
-      if (table === 'technicians') {
-        const q = {
-          where: jest.fn(() => q), whereNotNull: jest.fn(() => q), whereIn: jest.fn(() => q), select: jest.fn(async () => techs),
-        };
-        return q;
-      }
-      if (table === 'payroll_time_off') {
-        const q = { where: jest.fn((c) => { q.c = c; return q; }), first: jest.fn(async () => timeOff.find((r) => r.technician_id === q.c.technician_id && r.work_date === q.c.work_date)) };
-        return q;
-      }
-      if (table === 'audit_log') {
-        const q = { where: jest.fn(() => q), whereRaw: jest.fn((_sql, [id, date]) => { q.k = [id, date]; return q; }), first: jest.fn(async () => audit.find((r) => r.technician_id === q.k[0] && r.work_date === q.k[1])) };
-        return q;
-      }
-      const filter = {};
-      let openOnly = false;
+// technicians -> `techs`; technician_absences -> the rows already there (any, cleared or not); inserts are recorded.
+function makeConn({ techs = [], absences = [] } = {}) {
+  const inserted = [];
+  const tableOf = (table) => {
+    if (table === 'technicians') {
       const q = {
-        where: jest.fn((cond) => { Object.assign(filter, cond); return q; }),
-        whereNull: jest.fn(() => { openOnly = true; return q; }),
-        first: jest.fn(async () => absences.find((a) => a.technician_id === filter.technician_id && a.absence_date === filter.absence_date
-          && (!openOnly || !a.cleared_at))),
-        insert: jest.fn(async (row) => { inserted.push(row); absences.push({ ...row }); }),
+        where: jest.fn(() => q), whereNotNull: jest.fn(() => q), whereIn: jest.fn(() => q), select: jest.fn(async () => techs),
       };
       return q;
+    }
+    const filter = {};
+    let openOnly = false;
+    const q = {
+      where: jest.fn((cond) => { Object.assign(filter, cond); return q; }),
+      whereNull: jest.fn(() => { openOnly = true; return q; }),
+      first: jest.fn(async () => absences.find((a) => a.technician_id === filter.technician_id && a.absence_date === filter.absence_date
+        && (!openOnly || !a.cleared_at))),
+      insert: jest.fn(async (row) => { inserted.push(row); absences.push({ ...row }); }),
     };
-    const conn = jest.fn(tableOf);
-    conn.raw = jest.fn((sql) => sql);
-    conn.transaction = jest.fn(async (fn) => fn(conn));
-    return { conn, inserted, absences };
-  }
+    return q;
+  };
+  const conn = jest.fn(tableOf);
+  conn.raw = jest.fn((sql) => sql);
+  conn.transaction = jest.fn(async (fn) => fn(conn));
+  return { conn, inserted, absences };
+}
+
+describe('syncTechDaysOff (knex double)', () => {
   // 2026-11-24 12:00 ET
   const NOW = new Date('2026-11-24T17:00:00Z');
 
@@ -110,7 +102,6 @@ describe('syncTechDaysOff (knex double)', () => {
     // each row is written under the tech-day fence, never through markTechOut (no alert, no parked stop)
     expect(lockTechDays).toHaveBeenCalledWith(expect.anything(), [{ techId: 't1', date: '2026-12-02' }]);
     expect(conn.mock.calls.every(([table]) => table === 'technicians' || table === 'technician_absences')).toBe(true);
-    expect(createTimeOff).not.toHaveBeenCalled(); // the pay half is dark
   });
 
   test('today counts: a birthday today is written', async () => {
@@ -191,171 +182,79 @@ describe('syncTechDaysOff (knex double)', () => {
   });
 });
 
-describe('the pay half (GATE_TECH_BIRTHDAY_PAY)', () => {
+describe('the office reminder (one admin bell on the day; nothing is written to payroll)', () => {
   const NOW = new Date('2026-11-24T17:00:00Z');
   const TODAY = '2026-11-24';
-  const w2 = (extra = {}) => ({ id: 't1', dob: '1990-11-24', employment_type: 'w2', ...extra });
+  const tech = (extra = {}) => ({ id: 't1', name: 'Sam Tester', dob: '1990-11-24', ...extra });
+  const plainRow = (extra = {}) => ({ technician_id: 't1', absence_date: TODAY, reason: 'other', note: null, created_by: null, cleared_at: null, ...extra });
 
-  // reuse the harness from the block above through a small copy
-  function conn2({ techs, absences = [], timeOff = [], audit = [] }) {
-    const inserted = [];
-    const tableOf = (table) => {
-      const filter = {};
-      let raw = null;
-      const q = {
-        where: jest.fn((c) => { Object.assign(filter, c); return q; }),
-        whereNull: jest.fn(() => { filter.open = true; return q; }),
-        whereNotNull: jest.fn(() => q),
-        whereIn: jest.fn(() => q),
-        whereRaw: jest.fn((_s, args) => { raw = args; return q; }),
-        select: jest.fn(async () => techs),
-        insert: jest.fn(async (row) => { inserted.push(row); absences.push({ ...row }); }),
-        first: jest.fn(async () => {
-          if (table === 'technician_absences') {
-            return absences.find((a) => a.technician_id === filter.technician_id && a.absence_date === filter.absence_date && (!filter.open || !a.cleared_at));
-          }
-          if (table === 'payroll_time_off') return timeOff.find((r) => r.technician_id === filter.technician_id && r.work_date === filter.work_date);
-          if (table === 'audit_log') return audit.find((r) => r.technician_id === raw[0] && r.work_date === raw[1]);
-          if (table === 'technicians') {
-            const row = techs.find((x) => x.id === filter.id);
-            return row && { employment_status: 'active', field_dispatchable: true, ...row };
-          }
-          return undefined;
-        }),
-      };
-      return q;
-    };
-    const conn = jest.fn(tableOf);
-    conn.raw = jest.fn((sql) => sql);
-    conn.transaction = jest.fn(async (fn) => fn(conn));
+  function reminderConn(techs, absences = []) {
+    const { conn, inserted } = makeConn({ techs, absences });
     return { conn, inserted };
   }
 
-  const syncOneTick = (conn) => syncTechDaysOff({ now: NOW, conn });
-
-  beforeEach(() => techBirthdayPayLive.mockReturnValue(true));
-
-  test('gate off: nothing is recorded for pay, and no pay table is read', async () => {
-    techBirthdayPayLive.mockReturnValue(false);
-    const { conn } = conn2({ techs: [w2()] });
+  test('raises one bell on the day, deduped per technician and date, with a generic reason and no payroll write', async () => {
+    const { conn } = reminderConn([tech()]);
     const out = await syncTechDaysOff({ now: NOW, conn });
-    expect(out).toMatchObject({ written: 1, paid: 0, paySkipped: 0 });
-    expect(createTimeOff).not.toHaveBeenCalled();
-    expect(conn.mock.calls.map(([t]) => t)).not.toContain('payroll_time_off');
+    expect(out).toMatchObject({ written: 1, reminded: 1, failed: 0 });
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    const [category, spec, opts] = raiseAdminAlert.mock.calls[0];
+    expect(category).toBe('payroll');
+    expect(spec).toMatchObject({
+      area: 'Billing', severity: 'needs-you', who: 'person', link: '/admin/timetracking?tab=payroll',
+      subject: { type: 'check', id: `tech-day-off-pay:t1:${TODAY}` },
+    });
+    expect(opts).toMatchObject({ dedupeKey: `tech-day-off-pay:t1:${TODAY}`, bellDefault: true });
+    expect(ALERT_KEY('t1', TODAY)).toBe(opts.dedupeKey);
+    // the copy obeys the notification rules, names the technician, and carries no birthday wording
+    const alert = composeAdminAlert(spec);
+    expect(alert.headline).toBe("Billing — record Sam Tester's paid day off");
+    expect(alert.why).toBe('Off today: add 10 paid holiday hours in Payroll, Time off.');
+    expect(`${alert.headline} ${alert.why} ${JSON.stringify(opts)}`).not.toMatch(/birth/i);
+    // payroll is untouched: the only tables read or written are the technician and absence ones
+    expect(conn.mock.calls.every(([table]) => table === 'technicians' || table === 'technician_absences')).toBe(true);
   });
 
-  test('gate on, on the day: one 10 hour holiday entry through the payroll time-off service, with a generic note', async () => {
-    const { conn } = conn2({ techs: [w2()] });
-    const out = await syncTechDaysOff({ now: NOW, conn });
-    expect(out).toMatchObject({ written: 1, paid: 1, paySkipped: 0, failed: 0 });
-    expect(createTimeOff).toHaveBeenCalledTimes(1);
-    expect(createTimeOff).toHaveBeenCalledWith({
-      technicianId: 't1', workDate: TODAY, kind: 'holiday', hours: 10, note: 'Paid day off',
-    }, null, conn);
-    expect([PAY_KIND, PAY_HOURS, PAY_NOTE]).toEqual(['holiday', 10, 'Paid day off']);
-    expect(PAY_NOTE).not.toMatch(/birth/i);
-  });
-
-  test('the entry is written under the tech-day lock, in the transaction that re-reads the open absence', async () => {
-    const { conn } = conn2({ techs: [w2()] });
-    await syncOneTick(conn);
-    // one fence for the absence row, one for the pay transaction; the service call gets the transaction handle
-    expect(lockTechDays).toHaveBeenCalledTimes(2);
-    expect(lockTechDays).toHaveBeenLastCalledWith(conn, [{ techId: 't1', date: TODAY }]);
-    expect(createTimeOff.mock.calls[0][2]).toBe(conn);
-  });
-
-  test('a missed tick is made up for CATCH_UP_DAYS days: a past birthday is paid, no absence row is written for it, and nothing older', async () => {
-    const recent = conn2({ techs: [w2({ dob: '1990-11-20' })], absences: [{ technician_id: 't1', absence_date: '2026-11-20', reason: 'other', cleared_at: null }] });
-    expect(await syncTechDaysOff({ now: NOW, conn: recent.conn })).toMatchObject({ written: 0, paid: 1 });
-    expect(recent.inserted).toEqual([]);
-    expect(createTimeOff).toHaveBeenCalledWith(expect.objectContaining({ workDate: '2026-11-20' }), null, recent.conn);
-    createTimeOff.mockClear();
-    const old = conn2({ techs: [w2({ dob: String(`1990-11-${24 - CATCH_UP_DAYS - 1}`) })], absences: [{ technician_id: 't1', absence_date: `2026-11-${24 - CATCH_UP_DAYS - 1}`, reason: 'other', cleared_at: null }] });
-    expect(await syncTechDaysOff({ now: NOW, conn: old.conn })).toMatchObject({ paid: 0 });
-    expect(createTimeOff).not.toHaveBeenCalled();
-    // a past birthday with no absence row (the tick never wrote one) pays nothing
-    const none = conn2({ techs: [w2({ dob: '1990-11-20' })] });
-    expect(await syncTechDaysOff({ now: NOW, conn: none.conn })).toMatchObject({ written: 0, paid: 0, paySkipped: 1 });
-  });
-
-  test('a birthday still ahead pays nothing yet', async () => {
-    const { conn } = conn2({ techs: [w2({ dob: '1990-12-02' })] });
-    const out = await syncTechDaysOff({ now: NOW, conn });
-    expect(out).toMatchObject({ written: 1, paid: 0, paySkipped: 0 });
-    expect(createTimeOff).not.toHaveBeenCalled();
-  });
-
-  test('never over an entry the office made for that date', async () => {
-    const { conn } = conn2({ techs: [w2()], timeOff: [{ technician_id: 't1', work_date: TODAY }] });
-    const out = await syncTechDaysOff({ now: NOW, conn });
-    expect(out).toMatchObject({ paid: 0, paySkipped: 1 });
-    expect(createTimeOff).not.toHaveBeenCalled();
-  });
-
-  test('never again for an entry once added and since removed (audit log)', async () => {
-    const { conn } = conn2({ techs: [w2()], audit: [{ technician_id: 't1', work_date: TODAY }] });
-    const out = await syncTechDaysOff({ now: NOW, conn });
-    expect(out).toMatchObject({ paid: 0, paySkipped: 1 });
-    expect(createTimeOff).not.toHaveBeenCalled();
-  });
-
-  test('a technician who changed since the roster was read pays nothing: deactivated, office staff, or a corrected date of birth', async () => {
-    for (const change of [{ employment_status: 'inactive' }, { field_dispatchable: false }, { dob: '1990-11-25' }, { employment_type: '1099' }]) {
-      const { conn } = conn2({ techs: [w2()] });
-      // the pass reads the roster once, then the pay transaction reads the row again
-      let reads = 0;
-      const base = conn.getMockImplementation();
-      conn.mockImplementation((table) => {
-        const q = base(table);
-        if (table === 'technicians') {
-          const select = q.select;
-          const first = q.first;
-          q.select = jest.fn(async (...a) => { reads += 1; return select(...a); });
-          q.first = jest.fn(async (...a) => ({ ...(await first(...a)), ...change }));
-        }
-        return q;
-      });
-      const out = await syncTechDaysOff({ now: NOW, conn });
-      expect(out).toMatchObject({ paid: 0, paySkipped: 1 });
-      expect(reads).toBe(1);
-    }
-    expect(createTimeOff).not.toHaveBeenCalled();
-  });
-
-  test('the roster read takes only field-dispatchable active technicians (office staff and admins get no days off)', async () => {
-    const { conn } = conn2({ techs: [] });
+  test('a long name still fits the headline limit', async () => {
+    const { conn } = reminderConn([tech({ name: 'Bartholomew Maximilian Featherstonehaugh-Cholmondeley' })]);
     await syncTechDaysOff({ now: NOW, conn });
-    expect(conn.mock.results[0].value.where).toHaveBeenCalledWith('field_dispatchable', true);
+    expect(() => composeAdminAlert(raiseAdminAlert.mock.calls[0][1])).not.toThrow();
   });
 
-  test('a cleared absence row pays nothing, and neither does a technician who is not W-2', async () => {
-    const cleared = conn2({ techs: [w2()], absences: [{ technician_id: 't1', absence_date: TODAY, reason: 'other', cleared_at: new Date() }] });
-    expect(await syncTechDaysOff({ now: NOW, conn: cleared.conn })).toMatchObject({ paid: 0, paySkipped: 1 });
-    const contractor = conn2({ techs: [w2({ employment_type: '1099' })] });
-    expect(await syncTechDaysOff({ now: NOW, conn: contractor.conn })).toMatchObject({ paid: 0, paySkipped: 1 });
-    expect(createTimeOff).not.toHaveBeenCalled();
+  test('a birthday still ahead raises nothing yet', async () => {
+    const { conn } = reminderConn([tech({ dob: '1990-12-02' })]);
+    expect(await syncTechDaysOff({ now: NOW, conn })).toMatchObject({ written: 1, reminded: 0 });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
 
-  test('a 409 from the service (a final week, a row that appeared) is a skip; any other error is a failure', async () => {
-    createTimeOff.mockRejectedValueOnce(Object.assign(new Error('final'), { name: 'PayrollError', status: 409 }));
-    const a = conn2({ techs: [w2()] });
-    expect(await syncTechDaysOff({ now: NOW, conn: a.conn })).toMatchObject({ paid: 0, paySkipped: 1, failed: 0 });
-    createTimeOff.mockRejectedValueOnce(new Error('db down'));
-    const b = conn2({ techs: [w2()] });
-    expect(await syncTechDaysOff({ now: NOW, conn: b.conn })).toMatchObject({ paid: 0, failed: 1 });
+  test('raises nothing for a row the office cleared, or for a sick or noted row on the same date', async () => {
+    for (const row of [plainRow({ cleared_at: new Date() }), plainRow({ reason: 'sick' }), plainRow({ note: 'flu' }), plainRow({ created_by: 'office-1' })]) {
+      const { conn } = reminderConn([tech()], [row]);
+      expect(await syncTechDaysOff({ now: NOW, conn })).toMatchObject({ written: 0, reminded: 0 });
+    }
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('an existing plain open row from an earlier tick still raises the bell on the day (the dedupe key keeps it to one)', async () => {
+    const { conn } = reminderConn([tech()], [plainRow()]);
+    expect(await syncTechDaysOff({ now: NOW, conn })).toMatchObject({ written: 0, skipped: 1, reminded: 1 });
+  });
+
+  test('a bell that is refused (a dedupe hit writes no row) is not counted, and a thrown error is a failure without birthday wording', async () => {
+    raiseAdminAlert.mockResolvedValueOnce({ id: null });
+    const a = reminderConn([tech()]);
+    expect(await syncTechDaysOff({ now: NOW, conn: a.conn })).toMatchObject({ reminded: 0, failed: 0 });
+    raiseAdminAlert.mockRejectedValueOnce(new Error('bell down'));
+    const b = reminderConn([tech()]);
+    expect(await syncTechDaysOff({ now: NOW, conn: b.conn })).toMatchObject({ reminded: 0, failed: 1 });
     const logged = [...logger.error.mock.calls, ...logger.warn.mock.calls, ...logger.info.mock.calls].map(([m]) => m).join('\n');
-    expect(logged).toMatch(/\[tech-days-off\]/);
+    expect(logged).toMatch(/\[tech-days-off\].*reminder/);
     expect(logged).not.toMatch(/birth/i);
   });
 
-  test('a second tick the same day does not pay again once the entry exists', async () => {
-    const timeOff = [];
-    createTimeOff.mockImplementation(async ({ technicianId, workDate }) => { timeOff.push({ technician_id: technicianId, work_date: workDate }); return { entry: {} }; });
-    const { conn } = conn2({ techs: [w2()], timeOff });
-    expect((await syncTechDaysOff({ now: NOW, conn })).paid).toBe(1);
-    expect((await syncTechDaysOff({ now: NOW, conn })).paid).toBe(0);
-    expect(createTimeOff).toHaveBeenCalledTimes(1);
-    createTimeOff.mockImplementation(async () => ({ entry: {} }));
+  test('the roster read takes only active, field-dispatchable technicians (office staff and admins get no days off)', async () => {
+    const { conn } = makeConn({ techs: [] });
+    await syncTechDaysOff({ now: NOW, conn });
+    expect(conn.mock.results[0].value.where).toHaveBeenCalledWith('field_dispatchable', true);
   });
 });
