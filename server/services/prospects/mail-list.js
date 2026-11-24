@@ -14,6 +14,9 @@
  * Each row also carries its shadow price (mailer step 2b): the quarterly pest plan price the price pass
  * (services/mail/home-price.js) stored, the home facts it used, and why a home has no price. Nothing is sent or quoted to
  * anyone from it. The engine digest stays in the table.
+ *
+ * A live row also carries its page slug (mailer step 2d-2): the short typed address the postcard prints, shown as
+ * "gowavesfl.com/<slug>" (null until the home has one).
  */
 
 const db = require('../../models/db');
@@ -59,6 +62,7 @@ function toRow(row) {
     addressLine1: row.address_line1 || null,
     city: row.city || null,
     zip: row.zip || null,
+    pageSlug: row.page_slug || null,
     subdivision: row.subdivision || null,
     matchBasis: row.match_basis || null,
     coDate: row.co_day || null,
@@ -96,7 +100,7 @@ async function listMailProspects({ view = VIEWS[0] } = {}) {
       .whereIn('status', VIEW_STATUSES[view])
       .orderBy([{ column: 'recorded_date', order: 'desc' }, { column: 'address_line1', order: 'asc' }, { column: 'id', order: 'asc' }])
       .limit(ROW_LIMIT + 1)
-      .select('id', 'status', 'reason', 'recipient_names', 'address_line1', 'city', 'zip', 'subdivision', 'match_basis',
+      .select('id', 'status', 'reason', 'recipient_names', 'address_line1', 'city', 'zip', 'page_slug', 'subdivision', 'match_basis',
         'living_sqft', 'legal_description', 'price_status', 'price_reason', 'price_annual', 'price_setup_fee', 'home_sqft',
         'home_sqft_source', 'home_stories', 'lot_sqft', 'priced_at', 'price_checked_at',
         trx.raw(`${DAY('recorded_date')} AS recorded_day`), trx.raw(`${DAY('co_date')} AS co_day`)),

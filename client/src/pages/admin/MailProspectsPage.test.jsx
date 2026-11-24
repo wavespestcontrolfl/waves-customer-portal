@@ -29,13 +29,13 @@ const UNPRICED = { ...PRICED, status: "untried", annual: null, monthly: null, se
 const base = { counts: COUNTS, priceCounts: PRICE_COUNTS, reasons: REASONS, newestRecordedDate: "2026-11-20", lastCheckedAt: CHECKED, truncated: false };
 const home = (over) => ({
   id: "m-1", recordedDate: "2026-11-20", status: "eligible", reason: null, recipientNames: ["TESTER ALEX J", "TESTER BEA K"],
-  addressLine1: "101 EXAMPLE TRL", city: "SAMPLETON", zip: "34212", subdivision: "SAMPLETON ESTATES", matchBasis: "lot_block",
+  addressLine1: "101 EXAMPLE TRL", city: "SAMPLETON", zip: "34212", pageSlug: null, subdivision: "SAMPLETON ESTATES", matchBasis: "lot_block",
   coDate: "2026-10-30", livingSqft: 2100, legalDescription: "LOT 12 SAMPLETON ESTATES PH 2", price: PRICED, ...over,
 });
 const LIVE = {
   ...base, view: "live",
   rows: [
-    home(),
+    home({ pageSlug: "101-example" }),
     home({ id: "m-2", recordedDate: "2026-11-19", status: "held_back", price: UNPRICED, recipientNames: ["TESTER CAL D"], addressLine1: "102 EXAMPLE TRL", subdivision: null }),
   ],
 };
@@ -82,6 +82,7 @@ it("opens on Homes with the intro, the four counts, the run line and one row per
   const card = rowOf(table, "TESTER ALEX J, TESTER BEA K");
   expect(within(card).getByText("Nov 20, 2026")).toBeInTheDocument();
   expect(within(card).getByText("101 EXAMPLE TRL, SAMPLETON, 34212")).toBeInTheDocument();
+  expect(within(card).getByText("gowavesfl.com/101-example")).toBeInTheDocument();
   expect(within(card).getByText("SAMPLETON ESTATES")).toBeInTheDocument();
   expect(within(card).getByText("Card")).toBeInTheDocument();
   expect(within(card).getByText("$37.00 a month + $99.00 setup")).toBeInTheDocument();
@@ -90,6 +91,7 @@ it("opens on Homes with the intro, the four counts, the run line and one row per
   expect(within(held).getByText("Held back")).toBeInTheDocument();
   expect(within(held).getByText("No card")).toBeInTheDocument();
   expect(within(held).getByText("Not listed")).toBeInTheDocument(); // no subdivision
+  expect(within(held).queryByText(/gowavesfl\.com/)).toBeNull(); // no slug yet: no line
   // Nothing on the screen changes data, and the live view has no reasons list.
   expect(screen.queryByRole("list", { name: "Reasons" })).toBeNull();
   expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Homes", "Not eligible", "No match yet"]);
