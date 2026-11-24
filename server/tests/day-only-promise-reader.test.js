@@ -194,4 +194,41 @@ describe('loadPromiseFacts', () => {
     expect(spy).toHaveBeenCalledTimes(1);
     spy.mockRestore();
   });
+  // Owner 2026-11-24 "fix": an hour told for ANOTHER date (a no-show, then an office move with no text) is not an hour
+  // for the visit's new date. SLOT is 2026-11-12 09:00 ET.
+  describe('an hour told for another date', () => {
+    const row = (date, over = {}) => ({ id: 's1', visit_id: null, status: 'pending', scheduled_date: date, ...over });
+
+    test('a slot on the visit date stays hour with its start', async () => {
+      const out = await facts(fakeConn({ messages: [msg('s1')], members: [row('2026-11-12')] }));
+      expect(out.s1.level).toBe('hour');
+      expect(out.s1.start).toEqual(new Date(SLOT));
+    });
+
+    test('a slot on an older date reads as none, with no start', async () => {
+      expect(await facts(fakeConn({ messages: [msg('s1')], members: [row('2026-11-23')] }))).toEqual({ s1: { level: 'none', start: null } });
+      expect(Object.fromEntries(await loadPromiseLevels(fakeConn({ messages: [msg('s1')], members: [row('2026-11-23')] }), ['s1'], NOW))).toEqual({ s1: 'none' });
+    });
+
+    test('a pg Date value for the visit date is read as its calendar day', async () => {
+      const out = await facts(fakeConn({ messages: [msg('s1')], members: [row(new Date('2026-11-12T00:00:00Z'))] }));
+      expect(out.s1.level).toBe('hour');
+    });
+
+    test('an unknown visit date, or an unknown window, keeps hour (fail closed)', async () => {
+      expect((await facts(fakeConn({ messages: [msg('s1')] }))).s1.level).toBe('hour');
+      expect((await facts(fakeConn({ messages: [msg('s1')], members: [row(null)] }))).s1.level).toBe('hour');
+      const legacy = msg('s1', { purpose: 'appointment', metadata: { rendered_slot_ms: undefined, original_message_type: 'reschedule_series_confirmation' } });
+      expect(await facts(fakeConn({ messages: [legacy], members: [row('2026-11-23')] }))).toEqual({ s1: { level: 'hour', start: null } });
+    });
+
+    test('a day promise is untouched by the date check', async () => {
+      expect(await facts(fakeConn({ messages: [dayMsg('s1')], members: [row('2026-11-23')] }))).toEqual({ s1: { level: 'day', start: null } });
+    });
+
+    test('loadToldVisitIds (the night freeze) is unchanged: the old-date hour still freezes', async () => {
+      const told = await loadToldVisitIds(fakeConn({ messages: [msg('s1')], members: [row('2026-11-23')] }), ['s1'], NOW);
+      expect([...told]).toEqual(['s1']);
+    });
+  });
 });
