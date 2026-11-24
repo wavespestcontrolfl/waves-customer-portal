@@ -340,22 +340,53 @@ const SLICE_COLUMNS = [
   'decline_reason', 'service_interest', 'notes',
 ];
 
-// Estimate ids that carry the customer's "still deciding" signal. Best-effort:
-// an activity_log read failure degrades the card to "no signals", never to a
+// The customer's "still deciding" signal per estimate: id -> the EARLIEST signal
+// time in ms (null when the row carries none readable). Best-effort: an
+// activity_log read failure degrades the card to "no signals", never to a
 // failed slice build.
-async function stillDecidingEstimateIds(estimateIds) {
+async function stillDecidingSignals(estimateIds) {
+  const signals = new Map();
   const ids = (estimateIds || []).map(String).filter(Boolean);
-  if (!ids.length) return new Set();
+  if (!ids.length) return signals;
   try {
     const marks = await db('activity_log')
       .whereIn('estimate_id', ids)
       .where({ action: 'estimate_customer_still_deciding' })
-      .select('estimate_id');
-    return new Set((Array.isArray(marks) ? marks : []).map((m) => String(m?.estimate_id || '')).filter(Boolean));
+      .select('estimate_id', 'created_at');
+    for (const mark of Array.isArray(marks) ? marks : []) {
+      const id = String(mark?.estimate_id || '');
+      if (!id) continue;
+      const at = ms(mark.created_at);
+      const prior = signals.get(id);
+      if (!signals.has(id) || (at != null && (prior == null || at < prior))) signals.set(id, at);
+    }
+    return signals;
   } catch (err) {
     logger.warn(`[estimate-winloss] still-deciding read skipped: ${err.message}`);
-    return new Set();
+    return new Map();
   }
+}
+
+// When the row's win landed: acceptance, or (a booked win) the reclaim's
+// earliest-conversion stamp, else its expiry.
+function winTimeMs(row, accepted) {
+  return accepted ? ms(row.accepted_at) : (ms(row.disposition_at) ?? ms(row.expires_at));
+}
+
+// One "still deciding" row into the card's counts. A win counts "afterwards"
+// only when it landed at or after the signal (an unreadable time on either
+// side counts, as before): accepted rows in wonAfter, booked wins apart in
+// wonBookedAfter. A real loss counts as lost; dead and other converted-code
+// rows leave every loss metric (GH codex r3 P2).
+function tallyStillDeciding(card, signalAt, row, outcome) {
+  const { accepted, bookedOtherWay, disposition, leavesRates } = outcome;
+  card.signaled += 1;
+  const winAt = winTimeMs(row, accepted);
+  const afterSignal = signalAt == null || winAt == null || winAt >= signalAt;
+  if (accepted && afterSignal) card.wonAfter += 1;
+  else if (bookedOtherWay && afterSignal) card.wonBookedAfter += 1;
+  else if (!accepted && !bookedOtherWay && disposition && !leavesRates) card.lostAfter += 1;
+  if (disposition === 'expired_viewed') card.expiredViewedAfter += 1;
 }
 
 async function winLossSlices({ days = 90 } = {}) {
@@ -437,8 +468,8 @@ async function winLossSlices({ days = 90 } = {}) {
   // never an estimate write). Joined here so an expired estimate whose
   // customer said "still deciding" can be told apart from one that went
   // silent (GH codex P2 on #3706). Read AFTER both estimate reads.
-  const stillDecidingIds = await stillDecidingEstimateIds(rows.map((r) => r.id));
-  const stillDeciding = { signaled: 0, wonAfter: 0, lostAfter: 0, expiredViewedAfter: 0 };
+  const stillDecidingAt = await stillDecidingSignals(rows.map((r) => r.id));
+  const stillDeciding = { signaled: 0, wonAfter: 0, wonBookedAfter: 0, lostAfter: 0, expiredViewedAfter: 0 };
   const byServiceLine = new Map();
   const byLeadSource = new Map();
   const byWaveguardTier = new Map();
@@ -462,14 +493,8 @@ async function winLossSlices({ days = 90 } = {}) {
     if (leavesRates && isBookedOtherWay(disposition)) bookedCodeNotWinCount += 1;
     const isWon = accepted || bookedOtherWay;
     if (disposition) byDispositionCount.set(disposition, (byDispositionCount.get(disposition) || 0) + 1);
-    if (stillDecidingIds.has(String(row.id))) {
-      stillDeciding.signaled += 1;
-      // Only a REAL loss counts as lost — a reclaimed booked-another-way row
-      // is a win; dead and other converted-code rows leave every loss metric
-      // (GH codex r3 P2).
-      if (isWon) stillDeciding.wonAfter += 1;
-      else if (disposition && !leavesRates) stillDeciding.lostAfter += 1;
-      if (disposition === 'expired_viewed') stillDeciding.expiredViewedAfter += 1;
+    if (stillDecidingAt.has(String(row.id))) {
+      tallyStillDeciding(stillDeciding, stillDecidingAt.get(String(row.id)), row, { accepted, bookedOtherWay, disposition, leavesRates });
     }
     // Archived rows still drop from every RATE symmetrically (archived
     // losses and wins leave together — same reasoning as PipelineAnalytics'

@@ -78,10 +78,15 @@ const ZONED_STAMP_PATTERN = '[0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]+){0,1}){0,1} {
 // zone, so a bad stamp never aborts a query and every session reads the same
 // instant; a watcher then keeps its task open. `key` is a code constant,
 // never input.
-function deliveryInstantSql(alias, key) {
-  const stamp = `(${alias}.estimate_data #>> '{deliveryState,${key}}')`;
+function instantAtPathSql(alias, path) {
+  const stamp = `(${alias}.estimate_data #>> '{${path}}')`;
   return `(CASE WHEN ${isoInstantSql(stamp)} AND ${stamp} ~ '${ZONED_STAMP_PATTERN}' THEN ${stamp}::timestamptz END)`;
 }
+function deliveryInstantSql(alias, key) {
+  return instantAtPathSql(alias, `deliveryState,${key}`);
+}
+// When the website quote's link was texted (estimate_data.websiteLinkText.at, a TOP-LEVEL key staff sends never touch).
+const websiteLinkTextAtSql = (alias) => instantAtPathSql(alias, 'websiteLinkText,at');
 
 // The reports date a send by firstDeliveredAt in SQL (the Intelligence Bar)
 // and in JavaScript (win/loss, the service-line card). Both must read the
@@ -146,7 +151,9 @@ function sentAtSql(alias) {
 //    unreadable, or absent, is NULL (its sent_at is only the mint stamp);
 //  - any other row takes the earliest of its firstDeliveredAt (lenient:
 //    deliveryInstantSql, any zoned stamp such as '2026-10-01 12:00:00.000+00'),
-//    its first view and its acceptance. sent_at counts only on a legacy row:
+//    its website-link text (estimate_data.websiteLinkText.at, recorded when the
+//    quote wizard's text was accepted), its first view and its acceptance.
+//    sent_at counts only on a legacy row:
 //    created before #3391 began stamping firstDeliveredAt (2026-08-13; the same
 //    cutoff lead-reach-stats uses) and with no deliveryState at all;
 //  - a staff row whose stamp is PRESENT but unreadable in SQL (unzoned) is NULL,
@@ -160,7 +167,7 @@ function firstDeliveryEvidenceSql(alias) {
   // rollout, with every send suppressed, has a deliveryState and is not delivered.
   const legacySentAt = `CASE WHEN ${alias}.created_at < '${FIRST_DELIVERY_STAMP_SINCE}'::timestamptz AND (${alias}.estimate_data -> 'deliveryState') IS NULL THEN ${alias}.sent_at END`;
   return selfServeOr(alias, firstDeliveredAtSql(alias),
-    `CASE WHEN ${unreadableStaffStamp} THEN NULL ELSE LEAST(${staffStamp}, ${legacySentAt}, ${alias}.viewed_at, ${alias}.accepted_at) END`);
+    `CASE WHEN ${unreadableStaffStamp} THEN NULL ELSE LEAST(${staffStamp}, ${websiteLinkTextAtSql(alias)}, ${legacySentAt}, ${alias}.viewed_at, ${alias}.accepted_at) END`);
 }
 
 // A delivery stamp is present (firstDeliveredAt, not empty or JSON null): the

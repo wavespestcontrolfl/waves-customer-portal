@@ -43,4 +43,6 @@ router.get('/status', async (req, res, next) => {
 });
 
 module.exports = router;
+// Also mounted in server/index.js BEFORE the global /api/ limiter, so the dark 404 never reads as a 429.
+module.exports.watchdogGate = watchdogGate;
 module.exports._test = { watchdogGate };

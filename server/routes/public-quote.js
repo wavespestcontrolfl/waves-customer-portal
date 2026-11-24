@@ -4276,6 +4276,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             logger.warn(`[public-quote] Customer SMS blocked/failed for lead ${lead.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
           } else {
             logger.info(`[public-quote] Customer SMS sent for lead ${lead.id}`);
+            // The website quote's own link went out: record the delivery (never fails the quote).
+            if (websiteEstimateUrl && bookingUrl === websiteEstimateUrl && draftEstimateId) {
+              await require('../services/website-quote-publication').recordWebsiteLinkTexted(draftEstimateId, { result: smsResult, url: bookingUrl })
+                .catch((e) => logger.warn(`[public-quote] website link delivery not recorded: ${e.message}`));
+            }
           }
         }
       } catch (e) { logger.error(`[public-quote] Customer SMS failed: ${e.message}`); }
