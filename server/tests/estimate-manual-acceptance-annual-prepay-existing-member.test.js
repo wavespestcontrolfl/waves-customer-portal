@@ -11,6 +11,11 @@
 // These tests assert the CORRECT behaviour (refuse / ineligible), so they FAIL
 // on current code if the bug is real. Mocks copied from
 // tests/estimate-manual-acceptance.test.js.
+// The accept now reads the customer's first paid visit for the prepay term start; these fixtures have none.
+jest.mock('../services/assessment-booking', () => ({
+  ...jest.requireActual('../services/assessment-booking'),
+  paidEstimateVisitsQuery: () => ({ first: async () => null }),
+}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
 jest.mock('../services/estimate-converter', () => ({
