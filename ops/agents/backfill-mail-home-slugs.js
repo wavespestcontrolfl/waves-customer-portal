@@ -13,7 +13,9 @@
 // - No customer comms, no paid calls.
 //
 // Run from the repo root:
-//   railway run --service waves-customer-portal -- node ops/agents/backfill-mail-home-slugs.js [--execute]
+//   railway run --service waves-customer-portal -- env -u RAILWAY_TOKEN railway run --service Postgres -- \
+//     node ops/agents/backfill-mail-home-slugs.js [--execute]
+// (the outer run gives the app's env; the inner one the database's public URL, so the Mac can reach it)
 
 const path = require('path');
 
