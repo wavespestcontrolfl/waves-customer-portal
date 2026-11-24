@@ -94,6 +94,10 @@ function isPuntaGordaZip(zip) {
 function isPortCharlotteLocality(city) {
   return normalizeLocality(city) === 'port charlotte';
 }
+// A ZIP usable as evidence: five digits, or ZIP+4. A fragment ("3398") or text never counts.
+function hasUsableZip(zip) {
+  return /^\d{5}(?:-\d{4})?$/.test(String(zip == null ? '' : zip).trim());
+}
 function isNotYetServedLocality(city) {
   return NOT_YET_SERVED_LOCALITIES.has(normalizeLocality(city));
 }
@@ -114,6 +118,6 @@ module.exports = {
   NOT_YET_SERVED_LOCALITIES, NOT_YET_SERVED_ZIPS,
   normalizeLocality,
   isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip,
-  isNotYetServedLocality, isNotYetServedZip, isPortCharlotteLocality,
+  isNotYetServedLocality, isNotYetServedZip, isPortCharlotteLocality, hasUsableZip,
   isExcludedLocality, isExcludedZip,
 };

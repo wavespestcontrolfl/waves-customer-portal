@@ -194,6 +194,47 @@ describe('performPropertyLookup cache integration', () => {
     expect(hit.satellite._closeB64).toBeUndefined();
   });
 
+  // Port Charlotte is served, but the held shared ZIPs 33980 / 33981 / 33983 carry the name too: with no usable ZIP
+  // anywhere the verdict is unknown (null), fresh and cached alike (owner ruling 2026-11-23).
+  it('a Port Charlotte address with no ZIP anywhere answers inServiceArea null, live and from the cache', async () => {
+    const NO_ZIP = '2965 Rock Creek Dr, Port Charlotte, FL';
+    global.fetch = jest.fn(async (url) => {
+      const urlText = String(url);
+      if (urlText.includes('geocode')) {
+        return {
+          ok: true,
+          json: async () => ({
+            status: 'OK',
+            results: [{
+              formatted_address: '2965 Rock Creek Dr, Port Charlotte, FL, USA',
+              types: ['street_address'],
+              geometry: { location: { lat: 26.9897, lng: -82.139 }, location_type: 'ROOFTOP' },
+              address_components: [],
+            }],
+          }),
+        };
+      }
+      if (urlText.includes('staticmap')) return { ok: true, arrayBuffer: async () => new ArrayBuffer(8) };
+      throw new Error(`unexpected fetch: ${urlText}`);
+    });
+    mockDbHandler = () => fakeTable({ row: null });
+    // the provider record carries no ZIP either (the default mock record names 33948)
+    const defaultImpl = lookupPropertyFromAITrio.getMockImplementation();
+    lookupPropertyFromAITrio.mockImplementationOnce(async (...args) => ({ ...(await defaultImpl(...args)), formattedAddress: NO_ZIP }));
+    const live = await performPropertyLookup(NO_ZIP);
+    expect(live.satellite.inServiceArea).toBeNull();
+
+    const base = cachedRow();
+    mockDbHandler = () => fakeTable({ row: cachedRow({ property_record: { ...base.property_record, formattedAddress: NO_ZIP } }) });
+    const hit = await performPropertyLookup(NO_ZIP);
+    expect(hit.meta.cache).toBe('hit');
+    expect(hit.satellite.inServiceArea).toBeNull();
+
+    // a ZIP on the typed address (or a malformed fragment that is not one) decides the verdict again
+    mockDbHandler = () => fakeTable({ row: cachedRow({ property_record: { ...base.property_record, formattedAddress: ADDRESS } }) });
+    expect((await performPropertyLookup(ADDRESS)).satellite.inServiceArea).toBe(true);
+  });
+
   it('refresh forces a live lookup even with a fresh row', async () => {
     mockDbHandler = () => fakeTable({ row: cachedRow() });
 

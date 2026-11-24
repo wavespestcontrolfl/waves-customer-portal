@@ -5927,7 +5927,9 @@ renders `closeUrl` as a plain `<img src>`, which is why the URL is absolute.
 address part naming DeSoto, Punta Gorda or one of the places held until a second technician is hired
 (owner ruling 2026-11-23: Rotonda West, Placida, Boca Grande, Babcock Ranch, Gulf Cove / El Jobean, Charlotte Harbor
 and Deep Creek; Englewood and Port Charlotte are served again, same day), `namesExcludedPlace` over
-`services/excluded-localities.js`, is `false`, for a fresh lookup and a cached one alike.
+`services/excluded-localities.js`, is `false`, for a fresh lookup and a cached one alike. A Port Charlotte property
+with no usable ZIP (five digits or ZIP+4) in the geocode, the record or the typed address is `null`, unknown: the held
+shared ZIPs 33980 / 33981 / 33983 carry the name too (`namesPortCharlotteWithoutZip`).
 `/api/public/map-image/:token` (GET/HEAD, read-only signed satellite image
 proxy; the ONLY way the public lookup, the customer service report
 (`treatmentMap.satellite.live.url`, `stationMap.image.url`) and the customer

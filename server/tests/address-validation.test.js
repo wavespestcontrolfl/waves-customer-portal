@@ -187,6 +187,8 @@ describe('deriveStatus: places held until a second technician is hired (owner ru
       expect(r.inServiceArea).toBeNull();
     }
     expect(deriveStatus(placeResult('port charlotte', ''), 'Charlotte County').status).toBe(STATUSES.CONFIRM_NEEDED);
+    // a malformed ZIP fragment is not a ZIP
+    expect(deriveStatus(placeResult('Port Charlotte', '3398'), 'Charlotte County').status).toBe(STATUSES.CONFIRM_NEEDED);
     // with a served ZIP it is accepted, with a held one it is out, and a county outside the area stays out
     expect(deriveStatus(placeResult('Port Charlotte', '33948'), 'Charlotte County').status).toBe(STATUSES.VALIDATED_ACCEPT);
     expect(deriveStatus(placeResult('Port Charlotte', '33981'), 'Charlotte County').status).toBe(STATUSES.OUT_OF_SERVICE_AREA);

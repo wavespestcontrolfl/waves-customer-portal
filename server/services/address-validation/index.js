@@ -28,7 +28,7 @@
 
 const logger = require('../logger');
 const { isInServiceAreaCounty } = require('../call-triage-flags');
-const { isExcludedLocality, isExcludedZip, isPortCharlotteLocality } = require('../excluded-localities');
+const { isExcludedLocality, isExcludedZip, isPortCharlotteLocality, hasUsableZip } = require('../excluded-localities');
 const { normalizeState, normalizeStreetLine, parseRawAddress } = require('../../utils/address-normalizer');
 
 // Google address calls are fail-open by design — a HUNG call must fail the
@@ -150,7 +150,7 @@ function deriveStatus(result, county) {
   const heldPlace = isExcludedLocality(normalized.city) || isExcludedZip(normalized.postal_code);
   // A Port Charlotte city with no ZIP could sit on a held shared ZIP (33980 / 33981 / 33983): the area is unknown (null),
   // which lands on confirm_needed below, never validated_accept (owner ruling 2026-11-23).
-  const portCharlotteNoZip = isPortCharlotteLocality(normalized.city) && !normalized.postal_code;
+  const portCharlotteNoZip = isPortCharlotteLocality(normalized.city) && !hasUsableZip(normalized.postal_code);
   let inServiceArea = county ? (isInServiceAreaCounty(county) && !heldPlace) : null;
   if (inServiceArea === true && portCharlotteNoZip) inServiceArea = null;
 

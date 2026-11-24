@@ -35,7 +35,7 @@ const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks'
 const { callStartedAt } = require('../utils/call-timeline');
 const { resolveLocation } = require('../config/locations');
 const { isInDesotoExclusion, isServedSouthHillsboroughTown } = require('./service-area');
-const { isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip, isNotYetServedLocality, isNotYetServedZip, isPortCharlotteLocality } = require('./excluded-localities');
+const { isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip, isNotYetServedLocality, isNotYetServedZip, isPortCharlotteLocality, hasUsableZip } = require('./excluded-localities');
 const { zipToCity } = require('../utils/zip-to-city');
 const { safeErrorToken } = require('../utils/sentry-scrub');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
@@ -2246,11 +2246,14 @@ function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, e
   //    being a Port Charlotte one with its own ZIP;
   //  - the call names no Port Charlotte but the stored address does (the booking can retain it): that stored ZIP must exist,
   //    whatever the call said about another town.
+  // A ZIP counts only when it is five digits or ZIP+4: a fragment on file ("3398") clears nothing.
   const statedPortCharlotte = statedCities.some(isPortCharlotteLocality);
   const onFilePortCharlotte = onFileCities.some(isPortCharlotteLocality);
+  const statedUsableZips = [extracted?.zip, svc?.postal_code, av?.normalized?.postal_code].filter(hasUsableZip);
+  const onFileUsableZip = !!onFile && !onFile.lookupFailed && hasUsableZip(onFile.zip);
   if (statedPortCharlotte
-    ? (!statedZips.length && !(onFilePortCharlotte && onFileZips.length))
-    : (onFilePortCharlotte && !onFileZips.length)) {
+    ? (!statedUsableZips.length && !(onFilePortCharlotte && onFileUsableZip))
+    : (onFilePortCharlotte && !onFileUsableZip)) {
     return { reason: 'port_charlotte_zip_unknown', county: null };
   }
   if (av && av.inServiceArea === true) return null;

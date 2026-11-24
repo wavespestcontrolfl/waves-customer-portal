@@ -20,7 +20,7 @@ const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, condoUnitFolioEnabled, addressMayNameUnit, buildPropertyDataQuality, detectUnassessedVacantParcel, detectVacantRollBareLandImagery, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict, COUNTY_LOT_SQFT_MAX } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
-const { isInServiceAreaBox, zipFromAddressText, namesExcludedPlace } = require('../services/service-area');
+const { isInServiceAreaBox, zipFromAddressText, namesExcludedPlace, namesPortCharlotteWithoutZip } = require('../services/service-area');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { lookupSubdivisionMedianLivingSqft, SUBDIVISION_MEDIAN_MIN_SAMPLES } = require('../services/property-lookup/county-parcel-gis');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
@@ -983,14 +983,13 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
         wideUrl: wideUrlWithKey,
         // The box AND no excluded place: DeSoto, Punta Gorda and the places held until a second technician is
         // hired (owner ruling 2026-11-23) sit inside served counties, so the coordinate alone cannot say no.
-        inServiceArea: isInServiceAreaBox(lat, lng, { county: geo.county, zip: geo.zip })
-          && !namesExcludedPlace({
-            city: geo.city,
-            zip: geo.zip,
-            // the same evidence a cache hit reads (record + stored geocode): a county record naming a held town counts here too
-            places: [{ city: result.propertyRecord?.city, zip: result.propertyRecord?.zipCode }],
-            text: [geo.formattedAddress, result.propertyRecord?.formattedAddress, address],
-          }),
+        inServiceArea: serviceAreaVerdict(isInServiceAreaBox(lat, lng, { county: geo.county, zip: geo.zip }), {
+          city: geo.city,
+          zip: geo.zip,
+          // the same evidence a cache hit reads (record + stored geocode): a county record naming a held town counts here too
+          places: [{ city: result.propertyRecord?.city, zip: result.propertyRecord?.zipCode }],
+          text: [geo.formattedAddress, result.propertyRecord?.formattedAddress, address],
+        }),
         _microCloseB64: microCloseB64,
         _ultraCloseB64: ultraCloseB64,
         _superCloseB64: superCloseB64,
@@ -1376,6 +1375,14 @@ async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0, 
 
 // Client-facing satellite URL set (no vision base64s — cache hits skip the
 // vision pipeline entirely; the stored aiAnalysis already covers it).
+// The public lookup's area verdict: false outside the box or at an excluded place; null (unknown) for a Port Charlotte
+// property with no usable ZIP, since the held shared ZIPs 33980 / 33981 / 33983 carry the name too (owner ruling
+// 2026-11-23); true otherwise. Staff readers treat only `false` as a stop and the call lookup uses only `true`.
+function serviceAreaVerdict(inBox, evidence) {
+  if (!inBox || namesExcludedPlace(evidence)) return false;
+  return namesPortCharlotteWithoutZip(evidence) ? null : true;
+}
+
 function buildSatelliteUrlSet(lat, lng, areaEvidence = {}) {
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
   const mapsKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
@@ -1389,7 +1396,7 @@ function buildSatelliteUrlSet(lat, lng, areaEvidence = {}) {
     superCloseUrl: urlAtZoom(20),
     closeUrl: urlAtZoom(19),
     wideUrl: urlAtZoom(18),
-    inServiceArea: isInServiceAreaBox(lat, lng, areaEvidence) && !namesExcludedPlace(areaEvidence),
+    inServiceArea: serviceAreaVerdict(isInServiceAreaBox(lat, lng, areaEvidence), areaEvidence),
   };
 }
 

@@ -207,7 +207,7 @@ const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { reverseGeocodeCounty, reverseGeocodeLocality } = require('../services/address-validation');
 const { isInServiceAreaCounty } = require('../services/call-triage-flags');
 const { isInServiceAreaBox, isInServiceAreaCoarseBox, servedSouthHillsborough, isServedSouthHillsboroughTown } = require('../services/service-area');
-const { isExcludedLocality, isExcludedZip, isPortCharlotteLocality } = require('../services/excluded-localities');
+const { isExcludedLocality, isExcludedZip, isPortCharlotteLocality, hasUsableZip } = require('../services/excluded-localities');
 const { isAssessmentBooking, scopeToAssessmentBookings, ASSESSMENT_SERVICE_KEY } = require('../services/assessment-booking');
 const { isOpenLeadRow } = require('../services/lead-statuses');
 // The Waves Assessment's catalog identity for travel-gap padding — shared by
@@ -810,7 +810,7 @@ async function checkServiceArea(location, address = null) {
   if (!key) {
     // No lookup can place the pin, so a Port Charlotte address with no ZIP cannot be told from one on a held shared ZIP
     // (33980 / 33981 / 33983): unavailable (recoverable), never served.
-    if (isPortCharlotteLocality(address?.city) && !String(address?.zip || '').trim()) return { ok: false, county: null, unavailable: true };
+    if (isPortCharlotteLocality(address?.city) && !hasUsableZip(address?.zip)) return { ok: false, county: null, unavailable: true };
     return { ok: isInServiceAreaBox(location.lat, location.lng, { zip: address?.zip }), county: null };
   }
   let county = null;
@@ -836,7 +836,7 @@ async function checkServiceArea(location, address = null) {
       if (isExcludedLocality(place.city) || isExcludedZip(place.zip)) return { ok: false, county: null };
       // Port Charlotte is served, but ZIPs 33980 / 33981 / 33983 hold by ZIP and Google names some of their addresses
       // "Port Charlotte": a Port Charlotte locality with no ZIP cannot be told from a held address: unknowable.
-      if ((isPortCharlotteLocality(place.city) || (!place.city && isPortCharlotteLocality(address?.city))) && !place.zip) return { ok: false, county: null, unavailable: true };
+      if ((isPortCharlotteLocality(place.city) || (!place.city && isPortCharlotteLocality(address?.city))) && !hasUsableZip(place.zip)) return { ok: false, county: null, unavailable: true };
     }
     return { ok: true, county };
   }

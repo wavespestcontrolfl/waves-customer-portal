@@ -281,6 +281,11 @@ describe('legacyGeographicVeto: Punta Gorda', () => {
     expect(legacyGeographicVeto({ extracted: { city: 'Port Charlotte' }, onFile: { city: 'Port Charlotte', zip: '33954' } })).toBeNull();
     expect(legacyGeographicVeto({ extracted: {}, onFile: { city: 'Port Charlotte', zip: '33954' } })).toBeNull();
     expect(legacyGeographicVeto({ extracted: { city: 'Venice', zip: '34285' }, onFile: { city: 'Port Charlotte', zip: '33948' } })).toBeNull();
+    // a malformed ZIP fragment is not a ZIP: it clears nothing (stated, address-validation normalized, or on file)
+    expect(legacyGeographicVeto({ extracted: { city: 'Port Charlotte', zip: '3398' } })).toEqual(unknown);
+    expect(legacyGeographicVeto({ addressValidation: { ...av, normalized: { city: 'Port Charlotte', postal_code: '339' } }, extracted: { city: 'Port Charlotte' } })).toEqual(unknown);
+    expect(legacyGeographicVeto({ extracted: {}, onFile: { city: 'Port Charlotte', zip: '3398' } })).toEqual(unknown);
+    expect(legacyGeographicVeto({ extracted: { city: 'Port Charlotte' }, onFile: { city: 'Port Charlotte', zip: '33948-1234' } })).toBeNull();
     // the shared ZIPs hold by ZIP whatever the city says
     expect(legacyGeographicVeto({ addressValidation: av, extracted: { city: 'Port Charlotte', zip: '33981' } }))
       .toEqual({ reason: 'not_yet_served_locality', county: null });

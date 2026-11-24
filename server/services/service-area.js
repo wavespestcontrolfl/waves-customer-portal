@@ -23,7 +23,7 @@
 
 const { isInServiceAreaCounty } = require('./call-triage-flags');
 const { zipToCity } = require('../utils/zip-to-city');
-const { isExcludedLocality, isExcludedZip, normalizeLocality } = require('./excluded-localities');
+const { isExcludedLocality, isExcludedZip, normalizeLocality, isPortCharlotteLocality, hasUsableZip } = require('./excluded-localities');
 const { parseRawAddress } = require('../utils/address-normalizer');
 
 const SERVICE_AREA_BOUNDS = Object.freeze({
@@ -88,6 +88,23 @@ function namesExcludedPlace({ city = null, zip = null, text = null, places = nul
     return isExcludedZip(zipFromAddressText(raw)) || isExcludedLocality(parseRawAddress(raw)?.city)
       || raw.split(',').some((part) => isExcludedLocality(normalizeLocality(part)));
   });
+}
+
+/**
+ * True when the evidence names Port Charlotte but carries no usable ZIP anywhere. Port Charlotte is served, but the
+ * held shared ZIPs 33980 / 33981 / 33983 carry the name too (owner ruling 2026-11-23), so such a property is
+ * UNVERIFIED: the public property lookup answers `inServiceArea: null` (unknown), never true. Same evidence shape as
+ * namesExcludedPlace; a ZIP is a five-digit or ZIP+4 value, in the zip, a place, or an address text.
+ */
+function namesPortCharlotteWithoutZip({ city = null, zip = null, text = null, places = null } = {}) {
+  const texts = (Array.isArray(text) ? text : [text]).map((t) => String(t || '')).filter(Boolean);
+  const named = isPortCharlotteLocality(city) || (places || []).some((p) => isPortCharlotteLocality(p?.city))
+    || texts.some((raw) => isPortCharlotteLocality(parseRawAddress(raw)?.city)
+      || raw.split(',').some((part) => isPortCharlotteLocality(part)));
+  if (!named) return false;
+  const hasZip = hasUsableZip(zip) || (places || []).some((p) => hasUsableZip(p?.zip))
+    || texts.some((raw) => !!zipFromAddressText(raw));
+  return !hasZip;
 }
 
 function isInDesotoExclusion(lat, lng) {
@@ -162,7 +179,7 @@ function servedSouthHillsborough(county, address) {
 module.exports = {
   isServedSouthHillsboroughTown, servedSouthHillsborough,
   SERVICE_AREA_BOUNDS, DESOTO_EXCLUSION,
-  namesExcludedPlace,
+  namesExcludedPlace, namesPortCharlotteWithoutZip,
   isInServiceAreaBox, isInServiceAreaCoarseBox, isInDesotoExclusion,
   zipFromAddressText,
 };

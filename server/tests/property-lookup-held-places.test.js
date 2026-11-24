@@ -10,7 +10,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const fs = require('fs');
 const { buildSatelliteUrlSet } = require('../routes/property-lookup-v2');
-const { namesExcludedPlace } = require('../services/service-area');
+const { namesExcludedPlace, namesPortCharlotteWithoutZip } = require('../services/service-area');
 
 const PORT_CHARLOTTE = [26.9759, -82.0909];
 const VENICE = [27.0998, -82.4543];
@@ -77,6 +77,32 @@ describe('namesExcludedPlace', () => {
   });
 });
 
+describe('Port Charlotte with no usable ZIP is unknown (null), never true (owner ruling 2026-11-23)', () => {
+  test('namesPortCharlotteWithoutZip reads the city, the places and the text; a five-digit or ZIP+4 ZIP anywhere clears it', () => {
+    expect(namesPortCharlotteWithoutZip({ city: 'Port Charlotte' })).toBe(true);
+    expect(namesPortCharlotteWithoutZip({ places: [{ city: 'port charlotte', zip: '' }] })).toBe(true);
+    expect(namesPortCharlotteWithoutZip({ text: '9 Sample Rd, Port Charlotte, FL, USA' })).toBe(true);
+    expect(namesPortCharlotteWithoutZip({ text: '9 Sample Rd Port Charlotte FL' })).toBe(true);
+    expect(namesPortCharlotteWithoutZip({ city: 'Port Charlotte', zip: '3398' })).toBe(true); // a fragment is not a ZIP
+    expect(namesPortCharlotteWithoutZip({ city: 'Port Charlotte', zip: 'abcde' })).toBe(true);
+    expect(namesPortCharlotteWithoutZip({ city: 'Port Charlotte', zip: '33948' })).toBe(false);
+    expect(namesPortCharlotteWithoutZip({ city: 'Port Charlotte', zip: '33948-1234' })).toBe(false);
+    expect(namesPortCharlotteWithoutZip({ city: 'Port Charlotte', places: [{ zip: '33952' }] })).toBe(false);
+    expect(namesPortCharlotteWithoutZip({ text: ['9 Sample Rd, Port Charlotte, FL', '9 Sample Rd, Port Charlotte, FL 33954'] })).toBe(false);
+    expect(namesPortCharlotteWithoutZip({ city: 'Venice' })).toBe(false);
+    expect(namesPortCharlotteWithoutZip({})).toBe(false);
+    expect(namesPortCharlotteWithoutZip()).toBe(false);
+  });
+
+  test('buildSatelliteUrlSet: null for a ZIP-less Port Charlotte, true with a ZIP, false for a held place or outside the box', () => {
+    expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', text: '1 Sample Way, Port Charlotte, FL, USA' }).inServiceArea).toBeNull();
+    expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', city: 'Port Charlotte', zip: '3398' }).inServiceArea).toBeNull();
+    expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', city: 'Port Charlotte', zip: '33948' }).inServiceArea).toBe(true);
+    expect(buildSatelliteUrlSet(...PORT_CHARLOTTE, { county: 'Charlotte', city: 'Port Charlotte', zip: '33981' }).inServiceArea).toBe(false);
+    expect(buildSatelliteUrlSet(40.7, -74.0, { city: 'Port Charlotte' }).inServiceArea).toBe(false);
+  });
+});
+
 describe('the fresh lookup uses the same rule', () => {
   test('the geocoded city and ZIP ride on the cached record, so a cache hit reaches the same verdict', () => {
     const source = fs.readFileSync(require.resolve('../routes/property-lookup-v2'), 'utf8');
@@ -89,8 +115,8 @@ describe('the fresh lookup uses the same rule', () => {
 
   test('the geocoded verdict is the box AND no excluded place', () => {
     const source = fs.readFileSync(require.resolve('../routes/property-lookup-v2'), 'utf8');
-    expect(source).toContain('inServiceArea: isInServiceAreaBox(lat, lng, { county: geo.county, zip: geo.zip })');
-    expect(source).toContain('&& !namesExcludedPlace({');
+    expect(source).toContain('inServiceArea: serviceAreaVerdict(isInServiceAreaBox(lat, lng, { county: geo.county, zip: geo.zip }), {');
+    expect(source).toContain('inServiceArea: serviceAreaVerdict(isInServiceAreaBox(lat, lng, areaEvidence), areaEvidence),');
     expect(source).toContain('places: [{ city: result.propertyRecord?.city, zip: result.propertyRecord?.zipCode }],');
     expect(source).toContain('text: [geo.formattedAddress, result.propertyRecord?.formattedAddress, address],');
     expect(source).toMatch(/city: record\?\.city \|\| null,/);
