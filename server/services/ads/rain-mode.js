@@ -124,25 +124,35 @@ function decideCampaign(rainClass, call) {
 }
 
 /**
- * The day's measured score, or null while radar gaps could still change it. Wet day = half or more of all areas
- * measured wet. A gap counts both ways: the score waits until the areas still missing could not flip it, or, after
- * SCORE_GIVE_UP_DAYS, is taken from the areas read (marked partial; none read = no score).
+ * The day's measured radar rain by area: readings kept from earlier tries (`row.measured_so_far`) stand, and only the
+ * areas still without a reading are read again.
  */
-async function scoreDay(row, { fetchRain = fetchMrmsDailyRain, now = new Date() } = {}) {
-  const zones = Object.keys(ZONE_COORDS);
-  const measured = await Promise.all(zones.map(async (zone) => {
+async function measureDay(row, { fetchRain = fetchMrmsDailyRain } = {}) {
+  const kept = parseJson(row.measured_so_far, {}) || {};
+  const entries = await Promise.all(Object.keys(ZONE_COORDS).map(async (zone) => {
+    if (Number.isFinite(kept[zone])) return [zone, kept[zone]];
     const out = await Promise.resolve()
       .then(() => fetchRain({ latitude: ZONE_COORDS[zone].lat, longitude: ZONE_COORDS[zone].lng, start: row.day, end: row.day }))
       .catch(() => null);
     const inches = out?.days?.[0]?.inches;
-    return { zone, inches: Number.isFinite(inches) ? inches : null };
+    return [zone, Number.isFinite(inches) ? inches : null];
   }));
-  const read = measured.filter((m) => m.inches != null);
-  const wetAreas = read.filter((m) => m.inches >= WET_INCHES).map((m) => m.zone);
-  const missing = measured.length - read.length;
+  return Object.fromEntries(entries);
+}
+
+/**
+ * The score from `measured`, or null while radar gaps could still change it. Wet day = half or more of all areas
+ * measured wet. A gap counts both ways: the score waits until the areas still missing could not flip it, or, after
+ * SCORE_GIVE_UP_DAYS, is taken from the areas read (marked partial; none read = no score).
+ */
+function scoreFrom(row, measured, now) {
+  const all = Object.entries(measured);
+  const read = all.filter(([, inches]) => inches != null);
+  const wetAreas = read.filter(([, inches]) => inches >= WET_INCHES).map(([zone]) => zone);
+  const missing = all.length - read.length;
   let wetDay = null;
-  if (wetAreas.length * 2 >= measured.length) wetDay = true;
-  else if ((wetAreas.length + missing) * 2 < measured.length) wetDay = false;
+  if (wetAreas.length * 2 >= all.length) wetDay = true;
+  else if ((wetAreas.length + missing) * 2 < all.length) wetDay = false;
   const partial = wetDay === null;
   if (partial) {
     const ageDays = (Date.parse(`${etDateString(now)}T00:00:00Z`) - Date.parse(`${row.day}T00:00:00Z`)) / 86400000;
@@ -152,12 +162,17 @@ async function scoreDay(row, { fetchRain = fetchMrmsDailyRain, now = new Date() 
   return {
     partial,
     scored_at: new Date().toISOString(),
-    measured: Object.fromEntries(measured.map((m) => [m.zone, m.inches])),
+    measured,
     wet_areas: wetAreas,
     wet_day: wetDay,
     hit: row.call === 'unknown' ? null : (row.call === 'rain') === wetDay,
     cutoff_hit: ['rain', 'dry'].includes(row.cutoff_call) ? (row.cutoff_call === 'rain') === wetDay : null,
   };
+}
+
+/** The day's score (measureDay + scoreFrom), or null while it must wait. */
+async function scoreDay(row, { fetchRain, now = new Date() } = {}) {
+  return scoreFrom(row, await measureDay(row, { fetchRain }), now);
 }
 
 async function loadDays(conn) {
@@ -213,9 +228,15 @@ async function scorePastDays(days, now, opts) {
     .slice(0, SCORE_MAX);
   const scored = [];
   for (const day of due) {
-    const score = await scoreDay(days[day], { ...opts, now });
-    if (score) { days[day] = { ...days[day], score }; scored.push(day); }
-    else days[day] = { ...days[day], score_tried_at: now.toISOString() };
+    const measured = await measureDay(days[day], opts);
+    const score = scoreFrom(days[day], measured, now);
+    if (score) {
+      const { measured_so_far: _kept, ...row } = days[day];
+      days[day] = { ...row, score };
+      scored.push(day);
+    } else {
+      days[day] = { ...days[day], score_tried_at: now.toISOString(), measured_so_far: measured };
+    }
   }
   return scored;
 }

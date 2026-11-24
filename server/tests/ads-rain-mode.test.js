@@ -274,5 +274,25 @@ describe('recordRun', () => {
     expect(run.campaigns.find((c) => c.campaign_id === 3).would).toBe('base');
     expect(run.problems).toEqual([expect.stringMatching(/forecast unsettled for 2026-11-25: 0 settled, 0 of 6 areas read/)]);
   });
+
+  test('radar readings from earlier tries are kept and merged, never re-read', async () => {
+    const settings = { [rainMode.DAYS_KEY]: JSON.stringify({ '2026-11-23': { day: '2026-11-23', call: 'rain', areas: [] } }) };
+    const conn = fakeConn({ campaigns, settings });
+    const first = [0.6, 0.4, 0.3, null, null, null]; // with the kept two: 3 wet of 6 = a wet day
+    const firstTry = [0.6, 0.4, null, null, null, null]; // 2 wet, 4 missing: must wait
+    const zoneIndex = (lat) => ZONES.findIndex((z) => ZONE_COORDS[z].lat === lat);
+    const try1 = jest.fn(async ({ latitude }) => ({ days: [{ date: '2026-11-23', inches: firstTry[zoneIndex(latitude)] }] }));
+    await rainMode.recordRun({ now: AFTER_TWO, conn, read: readerFor('2026-11-25', [0, 0, 0, 0, 0, 0]), fetchRain: try1 });
+    const kept = JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-23'];
+    expect(kept.score).toBeUndefined();
+    expect(kept.measured_so_far).toMatchObject({ [ZONES[0]]: 0.6, [ZONES[1]]: 0.4 });
+    // Second try: the first two areas are not read again; a third wet area settles a wet day.
+    const try2 = jest.fn(async ({ latitude }) => ({ days: [{ date: '2026-11-23', inches: first[zoneIndex(latitude)] }] }));
+    await rainMode.recordRun({ now: new Date('2026-11-24T22:00:00Z'), conn, read: readerFor('2026-11-25', [0, 0, 0, 0, 0, 0]), fetchRain: try2 });
+    expect(try2).toHaveBeenCalledTimes(4);
+    const row = JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-23'];
+    expect(row.score).toMatchObject({ wet_day: true, hit: true, partial: false });
+    expect(row.measured_so_far).toBeUndefined();
+  });
 });
 
