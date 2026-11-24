@@ -19,6 +19,7 @@ const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-c
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { wrapServiceEmail, ensureLegalTextFooter, blockPalette } = require('./email-template');
+const { newLeadDripStop, isNewLeadDripStep, NEW_LEAD_DRIP_STEP_IDS } = require('./new-lead-drip-stops');
 
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
 const GLOBAL_SUPPRESSION_TYPES = new Set(['bounce', 'spam_complaint', 'do_not_email']);
@@ -315,8 +316,18 @@ async function automationDeliveryBlock({ enrollment, template, recipient, sendId
     const stop = await estimateSentStop(enrollment, step);
     if (stop) return blockSendAndCancelEnrollment({ enrollment, sendId, ...stop });
   }
+  if (isNewLeadDripStep(template.key, step)) return newLeadDripBlock({ enrollment, sendId });
   if (template.key === 'referral_nudge') return referralNudgeBlock({ enrollment, sendId, nudge });
   return null;
+}
+
+// The new_lead drip's later steps (GATE_NEW_LEAD_DRIP_STEPS), read at delivery: a stop ends the enrollment with nothing sent; a
+// doubt (a read failed) leaves the step due for a later tick and never sends.
+async function newLeadDripBlock({ enrollment, sendId }) {
+  const stop = await newLeadDripStop(enrollment);
+  if (!stop) return null;
+  if (stop.defer) return deferPaymentFailedForHold({ enrollment, sendId, reason: stop.reason });
+  return blockSendAndCancelEnrollment({ enrollment, sendId, ...stop });
 }
 
 const REFERRAL_NUDGE_STOPS = Object.freeze({
@@ -827,11 +838,19 @@ async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normaliz
 // step"). An enrollment last advanced before this change has no metadata cursor:
 // its place is the enabled step just before current_step, which is the step it
 // would have sent next anyway.
+//
+// GATE_NEW_LEAD_DRIP_STEPS (owner 2026-11-24): the new_lead sequence has steps 1 and 2 in the table, but with the gate off the
+// runner never loads them (the two seeded rows, by id: a step the owner adds by hand is never hidden), so an enrollment completes after step 0 exactly as before (one that was waiting on step 1 when the gate
+// was switched off completes without a send). Read at call time; a suite that mocks the whole gates module has no function there.
 function enabledSequenceSteps(templateKey) {
-  return db('automation_steps')
+  const query = db('automation_steps')
     .where({ template_key: templateKey, enabled: true })
     .orderBy('step_order', 'asc')
     .orderBy('id', 'asc');
+  if (templateKey === 'new_lead' && require('../config/feature-gates').newLeadDripStepsLive?.() !== true) {
+    query.where((rest) => rest.whereNotIn('id', NEW_LEAD_DRIP_STEP_IDS));
+  }
+  return query;
 }
 
 const stepKey = (step) => [Number(step.step_order), String(step.id)];

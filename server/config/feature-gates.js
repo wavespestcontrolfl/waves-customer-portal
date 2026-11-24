@@ -78,6 +78,7 @@
  *   GATE_IB_GENERAL_EDIT=true (needs GATE_IB_PLATFORM; the Intelligence Bar's find_admin_edits and propose_admin_edit tools, owner ruling 2026-10-12: a general EDIT tool for a reviewed allow-list of small internal edits only, on the owner login only, ALWAYS a confirm card, never owner-direct. propose_admin_edit takes one method and endpoint pattern from the generated catalog (server/services/intelligence-bar/admin-write-catalog.json), the path parameters and a body limited to the fields the reviewed row lists (any other field is refused), shows each field's new value (and the current one when a reviewed read supplies it), and on Confirm sends that exact body as a PUT or PATCH to this server as the logged-in owner, so the screen's own checks apply. Never a customer message, money, price, delete, bulk change, setting, user or credential; address text shows an ADDRESS CHANGE card. Read at call time via ibGeneralEditLive(), strict 'true', dark by default; off = the tools are not offered and refuse every call.)
  *   GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT=true (an estimate sent to a customer after their Waves Assessment closes that assessment visit quietly — no report, text, review ask or invoice; a sweep every ten minutes, owner ruling 2026-10-04; off = nothing runs)
  *   GATE_ESTIMATE_TWO_HOUR_EMAIL_STOPS=true (owner 2026-11-21: with the gate on, the 2-hour "estimate_sent" email (step 0) is not sent and its enrollment ends when the estimate is archived, declined, accepted, expired, void or past its expiry, when the estimate opted out of follow-ups, or when the customer replied by text or email since the send that enrolled them; it sends no new message and changes no words; a wrong stop ends an enrollment for good, so this is the off switch; off = every email and stop exactly as today)
+ *   GATE_NEW_LEAD_DRIP_STEPS=true (owner 2026-11-24: with the gate on, a new lead's new_lead email sequence continues past the first email: a price email 48 hours later and a one-question email 72 hours after that; each is checked just before it sends and the enrollment ends, with nothing sent, when the lead has since been given an estimate, booked a visit, replied by text or email, or become a paying customer; this emails customers, so it is the off switch; off = the sequence ends after the first email exactly as today)
  *   GATE_ESTIMATE_REPLY_PAUSE_SINCE_ESTIMATE=true (owner 2026-11-21: with the gate on, the 14-day reply pause on the engagement engine's follow-up EMAILS counts only messages since the estimate was made, for a person who has been sent no other estimate (same customer record, same phone in any format, or an address a reply can come from); a text or email from before the estimate existed no longer skips those emails, so follow-up emails go that are skipped today; the text stages, the deferred text replay and the payment-step follow-up keep the full 14-day pause; a person who was sent another estimate, before or after this one, keeps the full 14 days; off = today's 14-day window; it sends no message by itself; read at call time via estimateReplyPauseSinceEstimateLive(), strict 'true')
  *   GATE_ESTIMATE_DUE_FIRST_VISIT=true (owner 2026-11-06 "walk all": an estimate-accept invoice is due on the day of the first booked visit linked to the accept, when that day is after today, and its reminder cadence starts on that due date; off = due on the accept day, reminders count from the send)
  *   GATE_ESTIMATE_FOLLOWUP_SERVICE_NAME=true (owner 2026-11-21: the estimate follow-up emails from the engagement engine name the service the estimate delivery email already named. The stored delivery email's service summary must be exactly Pest Control, Lawn Care, or both, and must still equal what the estimate infers now; then the follow-up says pest control, lawn care, or lawn care and pest control where it said home protection (the two-service name only) or service quote (a single-service name only); no other label is replaced. Every other word, subject, audience, cap and spacing is unchanged, and any other summary keeps today's label. Read at call time via estimateFollowupServiceNameLive(), strict 'true', dark by default; the owner flips it because it changes words in a customer email; off = byte-identical to today with no extra read)
@@ -4998,6 +4999,10 @@ const gates = {
   // GATE_ESTIMATE_TWO_HOUR_EMAIL_STOPS at call time via estimateTwoHourEmailStopsLive(). Kill switch: unset.
   estimateTwoHourEmailStops: process.env.GATE_ESTIMATE_TWO_HOUR_EMAIL_STOPS === 'true',
 
+  // The new_lead drip's steps 1 and 2 (owner 2026-11-24). Ships DARK: exactly 'true'. It emails customers. This entry is for
+  // logGateStatus only: automation-runner.js reads GATE_NEW_LEAD_DRIP_STEPS at call time via newLeadDripStepsLive(). Kill switch: unset.
+  newLeadDripSteps: process.env.GATE_NEW_LEAD_DRIP_STEPS === 'true',
+
   // The engagement engine's follow-up emails: the reply pause counts only messages since the estimate was made, for a person who has been sent no other
   // estimate (owner 2026-11-21; the text stages, the deferred text replay and the payment-step follow-up keep 14 days). Ships DARK:
   // exactly 'true'. This entry is for logGateStatus only: estimate-follow-up.js reads
@@ -7168,6 +7173,14 @@ function estimateTwoHourEmailStopsLive() {
   return process.env.GATE_ESTIMATE_TWO_HOUR_EMAIL_STOPS === 'true';
 }
 
+// GATE_NEW_LEAD_DRIP_STEPS read at CALL time, strict `=== 'true'`, dark (owner 2026-11-24).
+// On, the new_lead sequence (automation-runner.js) continues past step 0 into its price email (step 1) and its one-question email
+// (step 2), each with the stops in services/new-lead-drip-stops.js. Off = the runner never loads those steps: an enrollment ends
+// after step 0 exactly as before, and an enrollment already waiting on step 1 ends without a send.
+function newLeadDripStepsLive() {
+  return process.env.GATE_NEW_LEAD_DRIP_STEPS === 'true';
+}
+
 // GATE_ESTIMATE_REPLY_PAUSE_SINCE_ESTIMATE read at CALL time, strict `=== 'true'`, dark (owner 2026-11-21).
 // On, the 14-day reply pause on the engagement engine's follow-up EMAILS (estimate-follow-up.js hasRepliedRecently, called with
 // { sinceEstimate: true } by estimate-engagement-engine.js only) counts only messages since the estimate was made, for a person who
@@ -8544,6 +8557,7 @@ module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
 module.exports.billingEmailDetailsLive = billingEmailDetailsLive;
 module.exports.estimateTwoHourEmailStopsLive = estimateTwoHourEmailStopsLive;
 module.exports.estimateReplyPauseSinceEstimateLive = estimateReplyPauseSinceEstimateLive;
+module.exports.newLeadDripStepsLive = newLeadDripStepsLive;
 module.exports.billingMonthlyCatchupLive = billingMonthlyCatchupLive;
 module.exports.multiTechConfirmLive = multiTechConfirmLive;
 // GATE_ADS_CAPACITY_WORK_DAYS reader, on its own line so gate PRs never conflict.
