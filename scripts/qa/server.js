@@ -126,6 +126,18 @@ const stripeStubs = {
       capture('stripe-refund-result', { refundId: refund.id, replayed: false });
       return refund;
     },
+    // The refund history of a QA charge or intent, newest first, as Stripe lists it.
+    // Like the SDK, the result is a promise of one page that also offers autoPagingEach / autoPagingToArray.
+    list: (params = {}) => {
+      capture('stripe', { method: 'refunds.list', charge: params.charge, payment_intent: params.payment_intent });
+      const intentId = params.payment_intent || String(params.charge || '').replace(/^ch_/, '');
+      if (!paymentIntents.has(intentId)) return Promise.reject(new Error('QA fake Stripe only lists refunds of a payment intent it created'));
+      const data = [...(refundsByIntent.get(intentId) || [])].reverse();
+      const page = Promise.resolve({ object: 'list', data, has_more: false, url: '/v1/refunds' });
+      page.autoPagingToArray = async () => [...data];
+      page.autoPagingEach = async (onItem) => { for (const item of data) if (await onItem(item) === false) break; };
+      return page;
+    },
   },
   Charges: {
     retrieve: async (id) => {

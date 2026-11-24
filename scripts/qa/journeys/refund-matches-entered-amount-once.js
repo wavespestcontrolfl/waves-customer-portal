@@ -15,7 +15,6 @@ module.exports = {
     const headers = { Authorization: `Bearer ${ctx.adminToken}` };
     const captured = () => fs.readFileSync(ctx.captureFile, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
     const before = captured().length;
-    const startedAt = new Date();
     const since = () => captured().slice(before);
     const stripeCalls = (from = 0) => since().filter((entry) => entry.kind === 'stripe').slice(from);
     const refundTexts = () => since().filter((entry) => entry.kind === 'sms');
@@ -74,22 +73,24 @@ module.exports = {
       payment_intent: fixture.cardPaymentIntentId, amount: paidCents, amount_refunded: amountRefunded, refunded, currency: 'usd',
       refunds: { object: 'list', data: [{ id: refundIdsNow, object: 'refund', amount: refundAmount, status: 'succeeded', reason: 'requested_by_customer',
         created: Math.floor(Date.now() / 1000), charge: `ch_${fixture.cardPaymentIntentId}`, payment_intent: fixture.cardPaymentIntentId }] } });
-    // The office notice a refund event raises carries only the amount, so its id is stored for the run's own cleanup.
-    const recordNotices = async () => {
-      const notices = await db('notifications').where('created_at', '>=', startedAt).whereRaw("metadata->>'triggerKey' = 'payment_refunded'").select('id');
-      fixture.refundNoticeIds = notices.map((row) => row.id);
-      fs.writeFileSync(ctx.fixtureFile, JSON.stringify(fixture, null, 2), { mode: 0o600 });
-    };
-    const post = async (id, charge) => {
-      const payload = JSON.stringify({ id, type: 'charge.refunded', created: Math.floor(Date.now() / 1000), data: { object: charge } });
+    const signed = (id, charge) => JSON.stringify({ id, type: 'charge.refunded', created: Math.floor(Date.now() / 1000), data: { object: charge } });
+    const deliver = async (payload) => {
       const signature = require('stripe').webhooks.generateTestHeaderString({ payload, secret: webhookSecret });
-      const result = await json(await page.request.post(`${baseUrl}/api/stripe/webhook`, { headers: { 'Content-Type': 'application/json', 'Stripe-Signature': signature }, data: payload }));
-      await recordNotices();
-      return result;
+      return json(await page.request.post(`${baseUrl}/api/stripe/webhook`, { headers: { 'Content-Type': 'application/json', 'Stripe-Signature': signature }, data: payload }));
     };
+    const post = (id, charge) => deliver(signed(id, charge));
+    // Reads are allowed after an event (the card lookup, and the refund history when the charge comes without it).
+    const writes = (from) => stripeCalls(from).filter((entry) => !['charges.retrieve', 'refunds.list'].includes(entry.method));
     const stripeBefore = stripeCalls().length;
-    await post(fixture.refundEventIds[0], eventCharge(false, refundIds[0], enteredCents + share, enteredCents + share));
-    await post(fixture.refundEventIds[1], eventCharge(false, refundIds[0], enteredCents + share, enteredCents + share));
+    const firstEvent = signed(fixture.refundEventIds[0], eventCharge(false, refundIds[0], enteredCents + share, enteredCents + share));
+    await deliver(firstEvent);
+    // Stripe redelivers the same event (same id, same body): it is acknowledged as a duplicate and does nothing.
+    assert.equal((await deliver(firstEvent)).duplicate, true, 'A redelivered event is acknowledged as a duplicate');
+    // A second event about the same refund whose charge comes without its refund list (the pinned API version can omit
+    // it): the webhook reads the history from Stripe and must still find the one refund.
+    const unexpanded = { ...eventCharge(false, refundIds[0], enteredCents + share, enteredCents + share) };
+    delete unexpanded.refunds;
+    await post(fixture.refundEventIds[1], unexpanded);
     await new Promise((resolve) => setTimeout(resolve, 3000));
     const afterEvent = await payment();
     assert.equal(cents(afterEvent.refund_amount), enteredCents + share);
@@ -97,7 +98,8 @@ module.exports = {
     assert.equal(afterEvent.stripe_refund_id, refundIds[0]);
     assert.equal(afterEvent.refunded_surcharge_cents, share);
     assert.equal((await db('invoices').where({ id: fixture.cardInvoiceId }).first()).status, 'paid');
-    assert.deepEqual(stripeCalls(stripeBefore).filter((entry) => entry.method !== 'charges.retrieve'), [], 'The event creates nothing at Stripe');
+    assert.deepEqual(writes(stripeBefore), [], 'The events create nothing at Stripe');
+    assert.ok(stripeCalls(stripeBefore).some((entry) => entry.method === 'refunds.list'), 'The charge without a refund list is resolved from Stripe');
 
     // 4. Refunding the rest sends no amount (Stripe returns what remains), and the whole payment ends refunded.
     const remaining = paidCents - (enteredCents + share);
@@ -135,8 +137,9 @@ module.exports = {
     assert.equal((await db('invoices').where({ id: fixture.cardInvoiceId }).first()).status, 'refunded');
     assert.equal(since().filter((entry) => entry.kind === 'stripe-refund-result' && !entry.replayed).length, 2, 'Exactly two refunds exist at Stripe');
 
-    // 6. The customer's refund notice is an email, which QA has no transport for; the attempt log shows one per refund,
-    // and nothing is texted.
+    // 6. The customer's refund notice is an email, which QA has no transport for, so every attempt fails and may be
+    // retried: this cannot prove one email per refund. It proves no text is sent, each refund has an attempt, and no
+    // attempt names any other refund.
     assert.deepEqual(refundTexts(), [], 'A refund sends no text');
     const notices = (await db('customer_interactions').where({ customer_id: fixture.customerId, interaction_type: 'email_outbound' })
       .whereRaw("metadata::jsonb ->> 'event_type' = 'payment.refund_issued'")).map((row) => meta(row).refund_id);

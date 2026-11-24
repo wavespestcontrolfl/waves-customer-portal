@@ -43,9 +43,8 @@ function fixtureIdentity(runId = crypto.randomUUID()) {
     // Prepay-at-booking journey: its own recurring estimate, so the one-time estimate above stays untouched.
     prepayEstimateId: id('prepay-estimate'), prepayToken: crypto.randomBytes(32).toString('hex'),
     prepayConsentId: id('prepay-consent'), prepayAppointmentId: id('prepay-appointment'), prepayEventId: `evt_qa_prepay_${suffix}`,
-    // Refund journey: its signed Stripe events (one repeats the first) and the office notices a refund event raises, which
-    // name no run-owned record, so the journey stores their ids as it finds them.
-    refundEventIds: ['a', 'a2', 'b'].map((part) => `evt_qa_refund_${part}_${suffix}`), refundNoticeIds: [] };
+    // Refund journey: its signed Stripe events (a2 is a second event about the first refund).
+    refundEventIds: ['a', 'a2', 'b'].map((part) => `evt_qa_refund_${part}_${suffix}`) };
 }
 
 async function seed(db, f) {
@@ -167,7 +166,6 @@ async function cleanup(db, f) {
   // records; an unhandled restrictive FK fails visibly, never broadens cleanup.
   await db.transaction(async (trx) => {
     await trx('stripe_webhook_events').whereIn('id', [f.eventId, f.cardEventId, f.prepayEventId, ...(f.refundEventIds || [])].filter(Boolean)).del();
-    if (f.refundNoticeIds?.length) await trx('notifications').whereIn('id', f.refundNoticeIds).del();
     // Receipt jobs and payment notices follow the run's own invoices and card payments, whichever journey made them.
     await trx('receipt_delivery_jobs').whereIn('invoice_id', trx('invoices').select('id').whereIn('customer_id', customerIds)).del();
     await trx('stripe_payment_notification_log').whereIn('payment_intent_id',
