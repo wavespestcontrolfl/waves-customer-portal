@@ -15,7 +15,7 @@ jest.setTimeout(180000);
 
 (SKIP ? describe.skip : describe)('sealEvalItems on PostgreSQL', () => {
   const schema = `sealed_reseal_${randomUUID().replaceAll('-', '')}`;
-  const VERSION = 'house_voice_v12_real_answers25_n';
+  const VERSION = 'house_voice_v12_real_answers29_n';
   const GATE = 'GATE_SMS_REAL_ANSWERS';
   const DAY = 86400 * 1000;
   let database;
@@ -37,7 +37,8 @@ jest.setTimeout(180000);
     await database.raw('CREATE TABLE sms_log (id uuid PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now())');
     await database.raw(`CREATE TABLE message_drafts (
       id uuid PRIMARY KEY, customer_id uuid, intent text, inbound_message text, facts_block text, context_summary text,
-      scheduling_intent boolean DEFAULT false, created_at timestamptz NOT NULL, prompt_version varchar(40), sms_log_id uuid)`);
+      scheduling_intent boolean DEFAULT false, created_at timestamptz NOT NULL, prompt_version varchar(40), sms_log_id uuid,
+      intended_actions jsonb)`);
     await database.raw(`CREATE TABLE shadow_draft_judgments (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), draft_id uuid NOT NULL, human_replied boolean, human_reply_text text, human_reply_sms_id uuid)`);
     await database.raw(`CREATE TABLE sms_sealed_eval_items (
@@ -74,11 +75,13 @@ jest.setTimeout(180000);
     return now.replace(section, companyFacts.knownCompanyFactsRenders()[1]);
   };
   // frozen before the PORTAL SELF-CANCEL line existed (2026-10-09): not recoverable
+  // a block drafted under the 19-line render (live 2026-10-09 to 2026-10-22), whose payment and inside-spray lines were reworded since
+  const nineteenLineBlock = () => currentBlock().replace(companyFacts.renderCompanyFactsSection(), companyFacts.knownCompanyFactsRenders()[2]);
   const prePortalBlock = () => currentBlock().replace(/^PORTAL SELF-CANCEL:.*\n/m, '');
 
   const addDraft = async ({
     facts, ageDays = 12, inbound = 'when is my next visit?', reply = 'Thursday morning.', replied = true,
-    promptVersion = 'house_voice_v12_real_answers14_n', intent = 'SCHEDULING',
+    promptVersion = 'house_voice_v12_real_answers14_n', intent = 'SCHEDULING', intendedActions = null,
   }) => {
     const id = randomUUID();
     const smsId = randomUUID();
@@ -87,6 +90,7 @@ jest.setTimeout(180000);
     await database('message_drafts').insert({
       id, customer_id: randomUUID(), intent, inbound_message: inbound, facts_block: facts, context_summary: 'summary',
       created_at: at, prompt_version: promptVersion, sms_log_id: smsId,
+      intended_actions: intendedActions ? JSON.stringify(intendedActions) : null,
     });
     await database('shadow_draft_judgments').insert({
       draft_id: id, human_replied: replied, human_reply_text: reply, human_reply_sms_id: randomUUID(),
@@ -131,8 +135,16 @@ jest.setTimeout(180000);
     // no company section at all
     await addDraft({ facts: currentBlock().replace(companyFacts.renderCompanyFactsSection(), '') });
     // an earlier render whose reworded line the reply may restate: not rebased
-    await addDraft({ facts: priorRenderBlock(), inbound: 'Do you take cash?', reply: 'We take cards, never cash.' });
-    await addDraft({ facts: priorRenderBlock(), reply: 'We spray the inside on the first visit.' });
+    await addDraft({ facts: nineteenLineBlock(), inbound: 'Do you take cash?', reply: 'We take cards, never cash.' });
+    await addDraft({ facts: nineteenLineBlock(), reply: 'We spray the inside on the first visit.' });
+    // the 26-line render (live to 2026-11-23) already had the payment and inside lines: only the service area line was reworded
+    await addDraft({ facts: priorRenderBlock(), inbound: 'Do you cover 33948?', reply: 'Yes, we do.' });
+    // a held place (owner ruling 2026-11-23) named only earlier in the thread, or only in the frozen OPEN TIMES lookup
+    await addDraft({ facts: `${priorRenderBlock()}\nRECENT SMS THREAD:\n[CUSTOMER] I'm in Englewood\n`, inbound: 'Can I book?', reply: 'Tuesday works.' });
+    await addDraft({
+      facts: priorRenderBlock(), inbound: 'Can I book?', reply: 'Tuesday works.',
+      intendedActions: { actions: [], open_times_snapshot: { lookup: { source: 'website_engine', city: 'Port Charlotte' } } },
+    });
 
     const out = await sealedEval.sealEvalItems({ target: 100, dbi: database });
 
