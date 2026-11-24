@@ -328,12 +328,12 @@ describe('GET /pay/:token manualPayOptions', () => {
     }
   });
 
-  test('env set ⇒ key absent when the invoice must capture a saved method (codex P1)', async () => {
+  test('env set ⇒ Zelle is still offered when the invoice must capture a saved method (owner 2026-11-24)', async () => {
     process.env.ZELLE_RECIPIENT = 'pay@example.com';
     // per_application billing ⇒ invoiceRequiresSavedMethod() is true.
     const { body } = await getPayPage(invoiceData(), { customerRow: { billing_mode: 'per_application', monthly_rate: null } });
     expect(body.invoice.saveRequired).toBe(true);
-    expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);
+    expect(body.manualPayOptions).toEqual({ zelle: { recipient: 'pay@example.com' }, amountDue: 150, version: null });
   });
 
   test('env set ⇒ key absent when account credit will settle the whole invoice (codex P1)', async () => {
@@ -740,19 +740,18 @@ describe('payPageZelleVisibility re-reads the invoice row last', () => {
   });
 });
 
-// Codex round-66 P1 / owner ruling 2026-10-02: the final full pass reruns the saved-method requirement with no caller override
-test('a saved-method requirement that appears during the probes withholds Zelle (the caller override is not trusted)', async () => {
+// Owner ruling 2026-11-24: a saved-method requirement no longer withholds Zelle - not on the first pass, not on the final full pass
+test('a customer who must keep a method on file is still offered Zelle through the final pass', async () => {
   process.env.ZELLE_RECIPIENT = 'pay@example.com';
   require('../services/payer').resolveForInvoice.mockResolvedValue({ payerId: null });
   const inv = invoiceData({ status: 'overdue' });
-  // the caller's pre-await override says "not required"; the live customer row now says required - the final pass must read it
   setDbImpl((table) => {
     if (table === 'invoices') return chain({ first: inv });
     if (table === 'customers') return chain({ first: { billing_mode: 'per_application', monthly_rate: 50 } });
     return chain({ first: null });
   });
-  const verdict = await visibilityOf({ invoice: inv, creditWillCoverAnchor: false, saveRequired: false });
-  expect(verdict).toEqual({ visible: false, reason: 'invoice_changed' });
+  const verdict = await visibilityOf({ invoice: inv, creditWillCoverAnchor: false });
+  expect(verdict).toMatchObject({ visible: true, reason: null });
   delete process.env.ZELLE_RECIPIENT;
 });
 
