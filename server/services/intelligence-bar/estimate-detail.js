@@ -278,6 +278,89 @@ function blockedRecord(row) {
   };
 }
 
+// ── The accepted choice ──────────────────────────────────────────────
+// An accepted estimate's page still carries EVERY offered cadence. Real miss
+// 2026-11-22: the customer took bi-monthly, the reader quoted the monthly
+// option as "the price", and called the visits overpriced. The choice lives
+// in estimates.accepted_service_mode + accepted_frequency_key (migration
+// 20260626000002, stamped by the /accept handler as the UI selection key that
+// matches pricing.services[].frequencies[].key). Legacy accepts predate those
+// columns and carry neither, so the choice is then unknown, never implied.
+// Rows are marked in place: the page object is this tool's own sanitized copy.
+const ACCEPTED_OPTIONS_NOTE = 'quote this block as what the customer agreed to; options marked accepted:false are offers the customer did not take';
+
+function markOptions(rows, acceptedKey) {
+  for (const row of rows) row.accepted = acceptedKey != null && row.key === acceptedKey;
+}
+
+function acceptedServiceEntry(section, row, basis) {
+  const perVisit = row.perTreatment ?? row.perVisit ?? null;
+  const entry = {
+    service_key: section.key, service_label: section.label || section.key,
+    frequency_key: row.key, frequency_label: row.label || null, basis,
+    per_visit: perVisit, visits_per_year: row.visitsPerYear ?? null, monthly: row.monthly ?? null,
+  };
+  if (row.monthlyBase != null && row.monthly != null && row.monthlyBase !== row.monthly) entry.monthly_before_discount = row.monthlyBase;
+  if (row.ranged) entry.price_unavailable = 'this cadence is a confirmed-on-site range; the page shows no exact price';
+  else if (row.combined_total_withheld) entry.price_unavailable = 'a combined plan is priced per application; open the estimate link';
+  return entry;
+}
+
+// One section's accepted row: the stored key, else the page's own default
+// (what the customer's recap shows), else the section's only cadence.
+function pickAcceptedRow(section, acceptedKey) {
+  const rows = Array.isArray(section.frequencies) ? section.frequencies : [];
+  const byKey = rows.find((row) => row.key === acceptedKey);
+  if (byKey) return { row: byKey, basis: 'accepted_key' };
+  const byDefault = rows.find((row) => row.key === section.defaultFrequencyKey) || (rows.length === 1 ? rows[0] : null);
+  return byDefault ? { row: byDefault, basis: 'section_default' } : null;
+}
+
+function markAcceptedRecurring(pricing, acceptedKey) {
+  const services = [];
+  for (const section of pricing.services || []) {
+    const rows = Array.isArray(section.frequencies) ? section.frequencies : [];
+    if (!section.isRecurring) { markOptions(rows, null); continue; }
+    const picked = pickAcceptedRow(section, acceptedKey);
+    for (const row of rows) row.accepted = !!picked && row === picked.row;
+    if (picked) services.push(acceptedServiceEntry(section, picked.row, picked.basis));
+  }
+  if (Array.isArray(pricing.frequencies)) markOptions(pricing.frequencies, acceptedKey);
+  return services;
+}
+
+function markAllOptions(pricing, value) {
+  for (const section of pricing.services || []) for (const row of section.frequencies || []) row.accepted = value;
+  for (const key of ['frequencies', 'serviceCadenceCombos']) {
+    for (const row of pricing[key] || []) row.accepted = value;
+  }
+}
+
+function acceptedBlock(row, projection) {
+  const page = projection.page;
+  if (!row.accepted_at && String(row.status || '').trim().toLowerCase() !== 'accepted') return null;
+  const mode = row.accepted_service_mode || null;
+  const key = row.accepted_frequency_key || null;
+  const block = { at: row.accepted_at || null, service_mode: mode, frequency: key };
+  const pricing = page && page.pricing && !page.pricing.withheld ? page.pricing : null;
+  if (!mode && !key) {
+    return { ...block, accepted_choice_unknown: 'no accepted service mode or frequency was stored for this acceptance (legacy accept); do not treat any listed option as the agreed one' };
+  }
+  if (mode === 'one_time') {
+    if (pricing) markAllOptions(pricing, false);
+    return { ...block, services: [], other_options_not_accepted: true, note: `one-time acceptance: no recurring option was taken. ${ACCEPTED_OPTIONS_NOTE}` };
+  }
+  if (!pricing) {
+    return { ...block, services: [], price_unavailable: (page ? 'the page withholds pricing for this estimate' : (projection.page_unavailable || 'the estimate page is unavailable')), note: ACCEPTED_OPTIONS_NOTE };
+  }
+  const services = markAcceptedRecurring(pricing, key);
+  return {
+    ...block, services, discount: pricing.manualDiscount || null, other_options_not_accepted: true,
+    ...(services.length ? {} : { price_unavailable: 'no recurring option on the page matches the accepted frequency' }),
+    note: ACCEPTED_OPTIONS_NOTE,
+  };
+}
+
 async function shapeEstimate(row) {
   const reconciliation_error = await reconcileMembership(row);
   // Parsed AFTER the reconcile, never before (pre-push audit P1): the
@@ -311,7 +394,7 @@ async function shapeEstimate(row) {
     price_locked_at: row.price_locked_at || null,
     ...projection,
     ...(reconciliation_error ? { reconciliation_error } : {}),
-    accepted: row.accepted_at ? { at: row.accepted_at, service_mode: row.accepted_service_mode || null, frequency: row.accepted_frequency_key || null } : null,
+    accepted: acceptedBlock(row, projection),
     customer_notes: row.notes || null,
     ...links,
     sent_at: row.sent_at,
@@ -381,7 +464,7 @@ async function getEstimateDetail({ estimate_id, customer_id, limit } = {}) {
 
 const GET_ESTIMATE_DETAIL_TOOL = {
   name: 'get_estimate_detail',
-  description: `Read estimates as the customer's own estimate page prices them: estimate_id returns exactly one, even when customer_id is also given; customer_id alone returns the latest nonarchived estimates (default 3, max 10). Returns status, timestamps, customer or staff preview link state, and the composed page under \`page\`. \`page.pricing\` includes plan cadences, per-application prices, selectable additions, and one-time breakdowns; an authored commercial quote is in \`page.proposal\`. Quote-required pricing is withheld with a reason; low-confidence cadences are marked ranged without exact figures. Residential combined plan totals are withheld while itemized application prices remain; commercial and monthly-billed totals remain where displayed. A verified \`page.propertyGroup\` lists sibling id, address, status and links only; use its id to read that sibling's pricing separately. Deposits report captured face amount plus card surcharge as total_paid, credited/refunded amounts, status and received_at; pending, failed and unknown statuses have total_paid null. A failed deposit read yields deposits:null and deposits_unavailable, never an empty ledger. A failed live membership verification sets \`page\` to null with page_unavailable. Provenance blocks withhold the entire record, including deposits. Accepted service mode/frequency and price_locked_at identify the accepted basis, but stored aggregate totals do not establish the final invoice amount. Use staff_preview_link for staff inspection so it does not register customer engagement; customer_link is the shareable customer URL. Never reconstruct hidden totals or infer final invoice amounts.`,
+  description: `Read estimates as the customer's own estimate page prices them: estimate_id returns exactly one, even when customer_id is also given; customer_id alone returns the latest nonarchived estimates (default 3, max 10). Returns status, timestamps, customer or staff preview link state, and the composed page under \`page\`. \`page.pricing\` includes plan cadences, per-application prices, selectable additions, and one-time breakdowns; an authored commercial quote is in \`page.proposal\`. Quote-required pricing is withheld with a reason; low-confidence cadences are marked ranged without exact figures. Residential combined plan totals are withheld while itemized application prices remain; commercial and monthly-billed totals remain where displayed. A verified \`page.propertyGroup\` lists sibling id, address, status and links only; use its id to read that sibling's pricing separately. Deposits report captured face amount plus card surcharge as total_paid, credited/refunded amounts, status and received_at; pending, failed and unknown statuses have total_paid null. A failed deposit read yields deposits:null and deposits_unavailable, never an empty ledger. A failed live membership verification sets \`page\` to null with page_unavailable. Provenance blocks withhold the entire record, including deposits. Accepted service mode/frequency and price_locked_at identify the accepted basis, but stored aggregate totals do not establish the final invoice amount. For an accepted estimate, quote the \`accepted\` block (accepted service, frequency, per-visit price, discount) as what the customer agreed to: every cadence option on the page carries accepted:true|false, and the accepted:false options are offers the customer did not take, never the quoted price; accepted_choice_unknown means the choice was not stored, so say so instead of picking an option. Use staff_preview_link for staff inspection so it does not register customer engagement; customer_link is the shareable customer URL. Never reconstruct hidden totals or infer final invoice amounts.`,
   input_schema: {
     type: 'object',
     properties: {
