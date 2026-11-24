@@ -360,111 +360,167 @@ function billingRefusal(billing) {
   return refuse(`The billing on the last plan differs (${billing.mismatches.map((m) => m.field).join(', ')}); restart through an estimate.`, 'billing_differs_from_last_plan', { fields: billing.mismatches.map((m) => m.field) });
 }
 
-// The full card for one call, or { error, code } the model relays. Reads only.
-async function planBooking(input) {
-  if (!ibBookPlanVisitsLive()) {
-    return refuse('Booking plan visits from the bar is not switched on yet (GATE_IB_BOOK_PLAN_VISITS), so the bar can\'t do it from here yet.', 'book_plan_visits_not_enabled');
+// Every reason the bar refuses to book, in the order they are asked. One loop runs the table (firstRefusal); a step may `load`
+// facts into the context first, then either `test` (true = refuse with `code` and `text`) or `check` (returns a refusal object
+// from one of the helpers above, or null). Later steps read what earlier steps loaded. Card construction is below, separate.
+const tools = () => require('./tools');
+const ELIGIBILITY = [
+  { code: 'book_plan_visits_not_enabled', test: () => !ibBookPlanVisitsLive(), text: () => "Booking plan visits from the bar is not switched on yet (GATE_IB_BOOK_PLAN_VISITS), so the bar can't do it from here yet." },
+  { code: 'invalid_input', test: (c) => !c.customerId, text: () => 'customer_id is required.' },
+  {
+    code: 'invalid_date',
+    load: (c) => { c.dateStr = validScheduleDate(c.input.scheduled_date); },
+    test: (c) => !c.dateStr,
+    text: (c) => `scheduled_date must be a valid YYYY-MM-DD date that is not in the past (got "${c.input.scheduled_date}").`,
+  },
+  { check: (c) => { const r = tools().ibBookingWindowRefusal(c.input.time_window); return r ? refuse(r.error, r.code) : null; } },
+  {
+    code: 'time_window_required',
+    load: (c) => { c.windowStart = tools().parseTimeWindowStart(c.input.time_window).start; },
+    test: (c) => !c.windowStart,
+    text: () => 'time_window is required: "morning", "afternoon" or a time on the hour like "9:00 AM".',
+  },
+  { code: 'customer_not_found', load: async (c) => { c.customer = await db('customers').where({ id: c.customerId }).first(); }, test: (c) => !c.customer, text: () => 'No customer with that id.' },
+  { code: 'customer_not_live', test: (c) => !!c.customer.deleted_at, text: () => 'This customer record is no longer live (deleted or merged).' },
+  { code: 'customer_not_active', test: (c) => c.customer.active !== true, text: (c) => `${privateName(c.customer)} is not an active customer. ${ESTIMATE_PATH}` },
+  {
+    check: async (c) => {
+      const service = await resolveService(c.input.service_type);
+      if (service.error) return service;
+      c.catalogRow = service.row;
+      c.cadence = CADENCES[service.row.frequency];
+      return null;
+    },
+  },
+  {
+    code: 'cadence_not_in_catalog',
+    test: (c) => !!c.input.recurring_pattern && c.input.recurring_pattern !== c.catalogRow.frequency,
+    text: (c) => `"${c.catalogRow.name}" is a ${c.cadence.label} plan in the catalog, so it can't be booked ${CADENCES[c.input.recurring_pattern]?.label || c.input.recurring_pattern}. Use the catalog service with that cadence.`,
+  },
+  {
+    // Today's first visit: its window must not already be over (create_appointment's own rule, at the service's duration).
+    code: 'window_elapsed',
+    load: (c) => { c.durationMinutes = Number(c.catalogRow.default_duration_minutes) > 0 ? Number(c.catalogRow.default_duration_minutes) : 60; },
+    test: (c) => sameDayWindowElapsed(c.dateStr, deriveWindowEnd(c.windowStart, c.durationMinutes) || c.windowStart),
+    text: () => 'That time has already passed today. Pick a later window or a future date.',
+  },
+  {
+    code: 'retired_service',
+    load: async (c) => {
+      c.retired = await require('../service-library').retiredServicesNotHeldBy({
+        customerId: c.customerId, serviceTypes: [c.catalogRow.name], recurrence: { pattern: c.cadence.pattern, intervalDays: c.cadence.intervalDays },
+      });
+    },
+    test: (c) => c.retired.length > 0,
+    text: (c) => `${c.retired.map((r) => r.name).join(', ')} is retired for new sales and this customer is not on that plan.`,
+  },
+  {
+    check: async (c) => {
+      const property = await resolveProperty(c.customerId, c.input.property_id);
+      if (property.refusal) {
+        const { error, code, properties } = property.refusal;
+        return refuse(error.replace(/ Nothing was (proposed|booked)\.?$/, ''), code, properties ? { properties } : {});
+      }
+      c.bookingProperty = property.stamp;
+      return null;
+    },
+  },
+  {
+    // The earlier plan: the NEWEST series of this service family stamped with the booking property (newest visit, then created_at,
+    // then id). It is pinned, and the handler's transaction confirms it is still the newest qualifying one.
+    code: 'new_program',
+    load: async (c) => {
+      const { duplicateGuardFamilyKey } = require('../recurring-appointment-seeder');
+      c.priorSeries = await newestQualifyingPriorSeries(db, {
+        customerId: c.customerId, serviceId: c.catalogRow.id, family: duplicateGuardFamilyKey(c.catalogRow.name), propertyId: c.bookingProperty.property_id,
+      });
+    },
+    test: (c) => !c.priorSeries,
+    text: (c) => `${privateName(c.customer)} has no earlier ${c.catalogRow.name} plan, so this would be a brand-new program. ${ESTIMATE_PATH}`,
+  },
+  {
+    code: 'duplicate_series',
+    load: async (c) => { c.open = await openSeriesFor(c.customerId, c.catalogRow, c.bookingProperty); },
+    test: (c) => c.open.length > 0,
+    text: (c) => `${privateName(c.customer)} already has an open ${c.catalogRow.name} series.${c.open[0].next_upcoming_date ? ` Its next visit is ${c.open[0].next_upcoming_date}.` : ''} Move or extend that series instead of booking another.`,
+  },
+  { check: (c) => prepayTermRefusal(c.customer) },
+  { check: (c) => setupFeeRefusal(c.customerId, c.catalogRow) },
+  { check: (c) => inspectionCreditRefusal(c.customerId) },
+  {
+    check: async (c) => {
+      const tech = await resolveTechnician(c.input);
+      c.tech = tech.tech;
+      return tech.refusal || null;
+    },
+  },
+  {
+    code: 'invalid_input',
+    load: (c) => { c.visitCount = Number.isInteger(c.input.visit_count) ? c.input.visit_count : null; },
+    test: (c) => c.visitCount != null && (c.visitCount < 2 || c.visitCount > MAX_VISIT_COUNT),
+    text: () => `visit_count must be 2 to ${MAX_VISIT_COUNT}.`,
+  },
+  {
+    check: async (c) => {
+      const priced = await priceFor({ customer: c.customer, catalogRow: c.catalogRow, scheduledDate: c.dateStr, bookingProperty: c.bookingProperty });
+      c.priced = priced;
+      return priced.refusal || null;
+    },
+  },
+  {
+    // Owner ruling 2026-11-24 (option A) and the audit's generalization: the plan restarts only when EVERY billing fact of the
+    // earlier series (PRIOR_SERIES_BILLING_FIELDS: price, discounts, add-ons, the invoice-on-completion setting, payer and prepay
+    // fields, separate-program marker, ...) already equals what this booking stamps. Otherwise it goes through an estimate.
+    // What this booking stamps is pinned, and the handler's transaction re-reads the same facts under lock.
+    check: async (c) => {
+      c.expected = { price: c.priced.price, primaryBase: c.priced.primaryBase, createInvoice: !c.priced.duesCovered };
+      const billing = await priorSeriesBillingMismatches(db, c.priorSeries.id, c.expected);
+      return billing.gone || billing.mismatches.length ? billingRefusal(billing) : null;
+    },
+  },
+  {
+    code: 'no_plan_dates',
+    load: async (c) => {
+      c.body = bodyFor({
+        input: { ...c.input, scheduled_date: c.dateStr }, catalogRow: c.catalogRow, cadence: c.cadence, windowStart: c.windowStart,
+        technicianId: c.tech?.id || null, propertyId: c.bookingProperty.property_id, visitCount: c.visitCount, sendTexts: c.sendTexts,
+        expectedPrice: c.priced.finalPrice,
+      });
+      c.planned = await planDates(c.body, c.bookingProperty);
+    },
+    test: (c) => c.planned.dates.length < 2,
+    text: () => 'The Schedule screen could not place a second visit for this cadence and date.',
+  },
+  { check: (c) => planSyncRefusal({ customerId: c.customerId, catalogRow: c.catalogRow, dates: c.planned.dates }) },
+  { check: (c) => overlapRefusal({ dates: c.planned.dates, windowStart: c.windowStart, durationMinutes: c.durationMinutes, technicianId: c.tech?.id || null }) },
+];
+
+async function firstRefusal(c) {
+  for (const step of ELIGIBILITY) {
+    if (step.load) await step.load(c);
+    const refusal = step.check ? await step.check(c) : (await step.test(c) && refuse(step.text(c), step.code));
+    if (refusal) return refusal;
   }
-  const customerId = uuid(input.customer_id);
-  if (!customerId) return refuse('customer_id is required.', 'invalid_input');
-  const dateStr = validScheduleDate(input.scheduled_date);
-  if (!dateStr) return refuse(`scheduled_date must be a valid YYYY-MM-DD date that is not in the past (got "${input.scheduled_date}").`, 'invalid_date');
-  const sendTexts = input.send_texts !== false;
+  return null;
+}
 
-  const Tools = require('./tools');
-  const windowRefusal = Tools.ibBookingWindowRefusal(input.time_window);
-  if (windowRefusal) return refuse(windowRefusal.error, windowRefusal.code);
-  const windowStart = Tools.parseTimeWindowStart(input.time_window).start;
-  if (!windowStart) return refuse('time_window is required: "morning", "afternoon" or a time on the hour like "9:00 AM".', 'time_window_required');
+const customerPin = (customer) => ({
+  id: String(customer.id), active: customer.active === true, billing_mode: customer.billing_mode || null, payer_id: customer.payer_id || null,
+  monthly_rate: customer.monthly_rate == null ? null : Number(customer.monthly_rate), waveguard_tier: customer.waveguard_tier || null,
+});
 
-  const customer = await db('customers').where({ id: customerId }).first();
-  if (!customer) return refuse('No customer with that id.', 'customer_not_found');
-  if (customer.deleted_at) return refuse('This customer record is no longer live (deleted or merged).', 'customer_not_live');
-  if (customer.active !== true) return refuse(`${privateName(customer)} is not an active customer. ${ESTIMATE_PATH}`, 'customer_not_active');
+const addressPin = (stamp) => ({
+  line1: stamp.service_address_line1, line2: stamp.service_address_line2, city: stamp.service_address_city,
+  state: stamp.service_address_state, zip: stamp.service_address_zip,
+});
 
-  const service = await resolveService(input.service_type);
-  if (service.error) return service;
-  const { row: catalogRow } = service;
-  const catalogCadence = CADENCES[catalogRow.frequency];
-  if (input.recurring_pattern && input.recurring_pattern !== catalogRow.frequency) {
-    return refuse(`"${catalogRow.name}" is a ${catalogCadence.label} plan in the catalog, so it can't be booked ${CADENCES[input.recurring_pattern]?.label || input.recurring_pattern}. Use the catalog service with that cadence.`, 'cadence_not_in_catalog');
-  }
-  const cadence = catalogCadence;
-
-  // Today's first visit: its window must not already be over (create_appointment's own rule, at the service's duration).
-  const durationMinutes = Number(catalogRow.default_duration_minutes) > 0 ? Number(catalogRow.default_duration_minutes) : 60;
-  if (sameDayWindowElapsed(dateStr, deriveWindowEnd(windowStart, durationMinutes) || windowStart)) {
-    return refuse('That time has already passed today. Pick a later window or a future date.', 'window_elapsed');
-  }
-
-  const notHeldRetired = await require('../service-library').retiredServicesNotHeldBy({
-    customerId, serviceTypes: [catalogRow.name], recurrence: { pattern: cadence.pattern, intervalDays: cadence.intervalDays },
-  });
-  if (notHeldRetired.length) {
-    return refuse(`${notHeldRetired.map((r) => r.name).join(', ')} is retired for new sales and this customer is not on that plan.`, 'retired_service');
-  }
-
-  const property = await resolveProperty(customerId, input.property_id);
-  if (property.refusal) return refuse(property.refusal.error.replace(/ Nothing was (proposed|booked)\.?$/, ''), property.refusal.code, property.refusal.properties ? { properties: property.refusal.properties } : {});
-  const bookingProperty = property.stamp;
-
-  // The earlier plan: the NEWEST series of this service family stamped with the booking property (newest visit, then created_at,
-  // then id). It is pinned, and the handler's transaction confirms it is still the newest qualifying one.
-  const { duplicateGuardFamilyKey } = require('../recurring-appointment-seeder');
-  const priorSeries = await newestQualifyingPriorSeries(db, {
-    customerId, serviceId: catalogRow.id, family: duplicateGuardFamilyKey(catalogRow.name), propertyId: bookingProperty.property_id,
-  });
-  if (!priorSeries) {
-    return refuse(`${privateName(customer)} has no earlier ${catalogRow.name} plan, so this would be a brand-new program. ${ESTIMATE_PATH}`, 'new_program');
-  }
-  const open = await openSeriesFor(customerId, catalogRow, bookingProperty);
-  if (open.length) {
-    const next = open[0].next_upcoming_date ? ` Its next visit is ${open[0].next_upcoming_date}.` : '';
-    return refuse(`${privateName(customer)} already has an open ${catalogRow.name} series.${next} Move or extend that series instead of booking another.`, 'duplicate_series');
-  }
-  const prepay = await prepayTermRefusal(customer);
-  if (prepay) return prepay;
-  const setupFee = await setupFeeRefusal(customerId, catalogRow);
-  if (setupFee) return setupFee;
-  const credit = await inspectionCreditRefusal(customerId);
-  if (credit) return credit;
-
-  const tech = await resolveTechnician(input);
-  if (tech.refusal) return tech.refusal;
-
-  const visitCount = Number.isInteger(input.visit_count) ? input.visit_count : null;
-  if (visitCount != null && (visitCount < 2 || visitCount > MAX_VISIT_COUNT)) return refuse(`visit_count must be 2 to ${MAX_VISIT_COUNT}.`, 'invalid_input');
-  const priced = await priceFor({ customer, catalogRow, scheduledDate: dateStr, bookingProperty });
-  if (priced.refusal) return priced.refusal;
-  // Owner ruling 2026-11-24 (option A) and the audit's generalization: the plan restarts only when EVERY billing fact of the
-  // earlier series (PRIOR_SERIES_BILLING_FIELDS: price, discounts, add-ons, the invoice-on-completion setting, payer and prepay
-  // fields, separate-program marker, ...) already equals what this booking stamps. Otherwise it goes through an estimate.
-  // What this booking stamps is pinned, and the handler's transaction re-reads the same facts under lock.
-  const expected = { price: priced.price, primaryBase: priced.primaryBase, createInvoice: !priced.duesCovered };
-  const billing = await priorSeriesBillingMismatches(db, priorSeries.id, expected);
-  if (billing.gone || billing.mismatches.length) return billingRefusal(billing);
-  const body = bodyFor({
-    input: { ...input, scheduled_date: dateStr }, catalogRow, cadence, windowStart,
-    technicianId: tech.tech?.id || null, propertyId: bookingProperty.property_id, visitCount, sendTexts,
-    expectedPrice: priced.finalPrice,
-  });
-  const planned = await planDates(body, bookingProperty);
-  if (planned.dates.length < 2) return refuse('The Schedule screen could not place a second visit for this cadence and date.', 'no_plan_dates');
-  const syncRefusal = await planSyncRefusal({ customerId, catalogRow, dates: planned.dates });
-  if (syncRefusal) return syncRefusal;
-  const overlap = await overlapRefusal({ dates: planned.dates, windowStart, durationMinutes, technicianId: tech.tech?.id || null });
-  if (overlap) return overlap;
-
-  const windowLabel = Tools.clockLabel(`${windowStart}:00`);
-  const visits = planned.dates.map((date, i) => ({ number: i + 1, date, weekday: WEEKDAYS[new Date(`${date}T12:00:00Z`).getUTCDay()], window: windowLabel }));
-  const technicianLabel = tech.tech ? tech.tech.name : null;
-  // The cadence the Schedule create will really write: a residential six-week lawn plan becomes the nine fixed lawn rounds.
-  const effectivePattern = planned.pattern;
-  const cadenceLabel = effectivePattern === LAWN_ROUNDS_PATTERN ? 'nine lawn rounds a year' : cadence.label;
-  const pins = {
-    effective_pattern: effectivePattern,
-    prior_series: { ...priorSeries, expected },
-    body,
+// Everything the card judged, hashed into its _version: Confirm re-plans and refuses on any difference.
+function pinsFor(c) {
+  const { customer, catalogRow, bookingProperty, tech, priced, planned } = c;
+  return {
+    effective_pattern: planned.pattern,
+    prior_series: { ...c.priorSeries, expected: c.expected },
+    body: c.body,
     dates: planned.dates,
     price: priced.price,
     dues_covered: priced.duesCovered,
@@ -472,43 +528,54 @@ async function planBooking(input) {
     property: { id: bookingProperty.property_id, address: addressOf(customer, bookingProperty), lat: bookingProperty.lat ?? null, lng: bookingProperty.lng ?? null },
     // The address the card showed (the customer's own when no saved property was named).
     address: addressOf(customer, bookingProperty),
-    technician: tech.tech ? String(tech.tech.id) : null,
-    customer: {
-      id: String(customer.id), active: customer.active === true, billing_mode: customer.billing_mode || null, payer_id: customer.payer_id || null,
-      monthly_rate: customer.monthly_rate == null ? null : Number(customer.monthly_rate), waveguard_tier: customer.waveguard_tier || null,
-    },
-    send_texts: sendTexts,
+    technician: tech ? String(tech.id) : null,
+    customer: customerPin(customer),
+    send_texts: c.sendTexts,
   };
+}
 
+// The card, once every refusal has passed.
+function cardFor(c) {
+  const { customer, catalogRow, bookingProperty, tech, priced, planned } = c;
+  const pins = pinsFor(c);
+  const windowLabel = tools().clockLabel(`${c.windowStart}:00`);
+  const visits = planned.dates.map((date, i) => ({ number: i + 1, date, weekday: WEEKDAYS[new Date(`${date}T12:00:00Z`).getUTCDay()], window: windowLabel }));
   return {
     preview: true,
-    customer_id: customerId,
+    customer_id: c.customerId,
     customer_name: privateName(customer),
-    address: addressOf(customer, bookingProperty),
+    address: pins.address,
     service: catalogRow.name,
-    cadence: cadenceLabel,
-    cadence_pattern: effectivePattern,
-    ongoing: visitCount == null,
+    // The cadence the Schedule create will really write: a residential six-week lawn plan becomes the nine fixed lawn rounds.
+    cadence: planned.pattern === LAWN_ROUNDS_PATTERN ? 'nine lawn rounds a year' : c.cadence.label,
+    cadence_pattern: planned.pattern,
+    ongoing: c.visitCount == null,
     visits,
     visit_count_shown: visits.length,
-    technician: technicianLabel,
+    technician: tech ? tech.name : null,
     price_per_visit: priced.price == null ? null : money(priced.price),
-    price_note: priced.duesCovered ? 'covered by the customer\'s monthly dues (no per-visit price is stamped)' : null,
-    send_texts: sendTexts,
-    notifies_customer: sendTexts,
+    price_note: priced.duesCovered ? "covered by the customer's monthly dues (no per-visit price is stamped)" : null,
+    send_texts: c.sendTexts,
+    notifies_customer: c.sendTexts,
     ...(planned.shortfall ? { shortfall: planned.shortfall } : {}),
     _version: hashOf(pins),
-    _body: body,
+    _body: c.body,
     // What the handler asserts inside its booking transaction before commit (createScheduleBooking's approvedBooking).
     _approved: {
-      dates: planned.dates, price: priced.price, propertyId: bookingProperty.property_id, technicianId: tech.tech ? String(tech.tech.id) : null,
+      dates: planned.dates, price: priced.price, propertyId: bookingProperty.property_id, technicianId: tech ? String(tech.id) : null,
       // The eligibility facts the card judged; the handler compares them with the locked customer row before inserting.
       customer: pins.customer,
       // The earlier series that made this a rebook; the handler re-reads it under lock.
-      priorSeries: { id: priorSeries.id, family: priorSeries.family, serviceId: String(catalogRow.id), expected },
-      address: { line1: bookingProperty.service_address_line1, line2: bookingProperty.service_address_line2, city: bookingProperty.service_address_city, state: bookingProperty.service_address_state, zip: bookingProperty.service_address_zip },
+      priorSeries: { id: c.priorSeries.id, family: c.priorSeries.family, serviceId: String(catalogRow.id), expected: c.expected },
+      address: addressPin(bookingProperty),
     },
   };
+}
+
+// The full card for one call, or { error, code } the model relays. Reads only.
+async function planBooking(input) {
+  const ctx = { input, customerId: uuid(input.customer_id), sendTexts: input.send_texts !== false };
+  return (await firstRefusal(ctx)) || cardFor(ctx);
 }
 
 // Card lines (authorization-contract.js reads these for the curated card).
@@ -558,9 +625,31 @@ function replyRefusal(reply) {
   if (reply.status === 409 && Array.isArray(json.existingSeries || json.existing_series || json.conflicts)) {
     return refuse('The customer already has an open series for this service, so the Schedule screen refused a second one.', 'duplicate_series', { status: reply.status });
   }
-  return refuse(json.error || `The Schedule screen refused the booking (${reply.status}).`, json.code || 'schedule_refused', {
-    status: reply.status, ...(STALE_CARD_CODES.has(json.code) ? { preview_changed: true } : {}),
-  });
+  return handlerRefusal(json.error || `The Schedule screen refused the booking (${reply.status}).`, json.code, reply.status);
+}
+
+// A refusal that came back from the Schedule handler: its words, its code and its status; a code that means "not the booking the
+// card showed" also marks the card stale.
+function handlerRefusal(message, code, status) {
+  return refuse(message, code || 'schedule_refused', { status, ...(STALE_CARD_CODES.has(code) ? { preview_changed: true } : {}) });
+}
+
+// What Confirm answers once the handler booked the series.
+function bookedResult(plan, json) {
+  const booked = Array.isArray(json.appointments) ? json.appointments : [];
+  const warnings = Array.isArray(json.warnings) ? json.warnings : [];
+  logger.info(`[intelligence-bar:book-plan-visits] ${plan.customer_id}: ${booked.length} visit(s) booked`);
+  return {
+    success: true,
+    customer_id: plan.customer_id,
+    service: plan.service,
+    visits_booked: json.recurringCreated ?? booked.length,
+    dates: booked.map((a) => dateOnlyString(a.date)).filter(Boolean).sort(),
+    confirmation_text: plan.send_texts ? "requested for the first visit (it sends only if the customer's settings allow)" : 'not sent, as asked',
+    warnings,
+    ...(warnings.length ? { warning: warnings.join(' ') } : {}),
+    message: `${plan.customer_name}'s ${plan.service} plan is booked: ${booked.length} visit${booked.length === 1 ? '' : 's'}.`,
+  };
 }
 
 async function commit(input, actionContext) {
@@ -576,7 +665,7 @@ async function commit(input, actionContext) {
     // Some operational errors carry only statusCode (CUSTOMER_CHANGED_RETRY): classify on either.
     const status = err?.status || err?.statusCode;
     if (status && status < 500 && err.isOperational) {
-      return refuse(err.message, err.code || 'schedule_refused', { status, ...(STALE_CARD_CODES.has(err.code) ? { preview_changed: true } : {}) });
+      return handlerRefusal(err.message, err.code, status);
     }
     logger.error(`[intelligence-bar:book-plan-visits] booking interrupted for ${plan.customer_id}: ${err?.code || err?.name || 'error'}`);
     return {
@@ -585,21 +674,7 @@ async function commit(input, actionContext) {
     };
   }
   if (!(reply.status === 200 || reply.status === 201) || !reply.json?.id) return replyRefusal(reply);
-  const json = reply.json;
-  const booked = Array.isArray(json.appointments) ? json.appointments : [];
-  logger.info(`[intelligence-bar:book-plan-visits] ${plan.customer_id}: ${booked.length} visit(s) booked`);
-  const warnings = Array.isArray(json.warnings) ? json.warnings : [];
-  return {
-    success: true,
-    customer_id: plan.customer_id,
-    service: plan.service,
-    visits_booked: json.recurringCreated ?? booked.length,
-    dates: booked.map((a) => dateOnlyString(a.date)).filter(Boolean).sort(),
-    confirmation_text: plan.send_texts ? 'requested for the first visit (it sends only if the customer\'s settings allow)' : 'not sent, as asked',
-    warnings,
-    ...(warnings.length ? { warning: warnings.join(' ') } : {}),
-    message: `${plan.customer_name}'s ${plan.service} plan is booked: ${booked.length} visit${booked.length === 1 ? '' : 's'}.`,
-  };
+  return bookedResult(plan, reply.json);
 }
 
 async function executeBookPlanVisitsTool(toolName, input = {}, actionContext = {}) {
