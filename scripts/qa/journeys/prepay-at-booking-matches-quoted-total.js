@@ -77,6 +77,7 @@ module.exports = {
     const booked = await db('scheduled_services').where({ id: fixture.prepayAppointmentId }).first();
     assert.equal(booked.reservation_expires_at, null, 'The paid booking must clear the slot hold expiry');
     assert.equal(booked.source_estimate_id, fixture.prepayEstimateId);
+    assert.equal(booked.customer_id, fixture.customerId, 'The paid visit belongs to the customer who paid');
     assert.equal(booked.payment_method_preference, 'prepay_annual');
     assert.ok(['pending', 'confirmed'].includes(booked.status), `The booked visit stays scheduled (status ${booked.status})`);
     // Exactly one new invoice: the one Stripe charged and the one the estimate's prepay term points at.
