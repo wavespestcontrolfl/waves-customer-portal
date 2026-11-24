@@ -80,7 +80,6 @@ jest.mock('../models/db', () => mockDb);
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((gate) => gate === 'webhooks'),
   gateEnvValue: (gate) => process.env[gate] === 'true',
-  smsCourtesyAfterTemplateLive: () => process.env.GATE_SMS_COURTESY_AFTER_TEMPLATE === 'true',
   customerTextToVisitTechLive: () => process.env.GATE_CUSTOMER_TEXT_TO_VISIT_TECH === 'true',
   smsBareYesReplyLive: () => process.env.GATE_SMS_BARE_YES_REPLY === 'true',
 }));

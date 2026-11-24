@@ -250,8 +250,9 @@ function toolMoveChains(moveRows, auditRows) {
  * The date a re-date auto-dispatch did not make restarted the drift budget
  * at (D2), or null: the visit's current date when it is no longer where the
  * newest auto move left it, else the chain's own restart. Null for a visit no
- * auto move touched, or for an incomplete chain. A person's re-date is still the person's: eligibility.js
- * isPersonPlacedVisit keeps such a visit out of every move first.
+ * auto move touched, or for an incomplete chain. A staff re-date no longer holds the visit (owner 2026-11-22,
+ * eligibility.js isPersonPlacedVisit holds only a customer's pick or asked time, or the staff lock box); a flex move of
+ * such a visit still stays inside its band around both its current date and its anchor (flex-tier.flexTierMoveWindow).
  */
 function redateRestart(service, anchorMap) {
   const chain = anchorMap.redates && anchorMap.redates.get(service.id);

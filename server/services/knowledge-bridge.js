@@ -17,9 +17,11 @@
  *  5. Powers contextual recommendations on lawn assessments
  */
 
+const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { loadCustomerGrassContext } = require('./lawn-grass-context');
+const { etParts } = require('../utils/datetime-et');
 const { TRUSTED_STATUSES } = require('./agronomic-wiki');
 
 let Anthropic;
@@ -51,8 +53,9 @@ function objectAnswerProblem(value) {
 }
 
 async function callClaude(systemPrompt, userPrompt, maxTokens = 2048) {
-  // Live model — GPT-5.5 (ROUTES.knowledgeAnswer). callClaude's sole caller
-  // (generateAssessmentRecommendations) strict-JSON.parses the result, so require
+  // Live model — GPT-5.5 (ROUTES.knowledgeAnswer). callClaude's callers
+  // (generateAssessmentRecommendations and the early call it may use,
+  // prepareAssessmentRecommendations) strict-JSON.parse the result, so require
   // PARSEABLE JSON here: dispatch with jsonMode and return the normalized JSON string.
   // Invalid/preamble OpenAI output → { ok:false } → fall through to the Claude
   // fallback below rather than returning text the caller can't parse.
@@ -615,6 +618,194 @@ function sanitizeRecommendationsAgainstTreatment(parsed, appliedProducts) {
   return { parsed, dropped, appliedClasses };
 }
 
+// What the recommendation prompt reads besides the assessment and its
+// applications: the customer, the grass, and the Claudeopedia and wiki pages.
+// Pool reads (see _generateAssessmentRecommendationsInner).
+async function loadRecommendationContext(assessment) {
+  const customer = await db('customers').where({ id: assessment.customer_id }).first();
+  // Grass context lives on customer_turf_profiles, not customers.
+  // track_key is the protocol track id (e.g. 'st_augustine'); it may be
+  // null when the customer has no turf profile yet.
+  const grassContext = await loadCustomerGrassContext(assessment.customer_id);
+  const grassType = grassContext.grassTypeLabel || 'St. Augustine';
+  const grassTrack = grassContext.trackKey || null;
+  // Pull relevant Claudeopedia entries (protocols, product info).
+  // Wiki-sync MIRRORS inherit the wiki's review gate (customer-visible
+  // recs); merely-linked curated articles stay visible.
+  const protocolEntries = await db('knowledge_base')
+    .whereIn('category', ['protocol', 'product', 'lawn_care', 'seasonal'])
+    .where({ status: 'active' })
+    .whereRaw('active IS NOT FALSE')
+    .whereNot(function untrustedWikiMirror() {
+      this.where('source', 'wiki-sync').whereIn(
+        'wiki_entry_id',
+        db('knowledge_entries').select('id').whereNotIn('review_status', TRUSTED_STATUSES),
+      );
+    })
+    .where(function () {
+      this.where('content', 'ilike', `%${grassType}%`)
+        .orWhere('category', 'seasonal');
+      if (grassTrack) this.orWhere('content', 'ilike', `%track ${grassTrack}%`);
+    })
+    .select('title', 'content', 'category')
+    .limit(10);
+  // Trusted wiki outcome pages only — these feed customer-visible
+  // recommendations (exception-based gate).
+  const outcomeEntries = await db('knowledge_entries')
+    .whereIn('review_status', TRUSTED_STATUSES)
+    .where(function () {
+      this.where('category', 'seasonal');
+      if (grassTrack) {
+        this.orWhere(function () {
+          this.where('category', 'track').where('slug', 'ilike', `%${slugify(grassTrack)}%`);
+        });
+      }
+    })
+    .select('title', 'summary', 'data_point_count', 'confidence')
+    .limit(5);
+  return { customer, grassType, grassTrack, protocolEntries, outcomeEntries };
+}
+
+// The recommendation prompt. `promptKey` is a hash of that prompt with its lists
+// in a fixed order: each applied product once, in name order, and the reference
+// lines in text order (their reads have no order). Two prompts with one key ask
+// the same question from the same facts and the same reference pages, whatever
+// the order and the number of their rows. The prompt itself lists the rows as
+// they came. The month is the Eastern one (the business day), so an evening
+// run on a month's last day names that month.
+function recommendationPrompt({ assessment, appliedProducts }, context, now = new Date()) {
+  const { customer, grassType, grassTrack, protocolEntries, outcomeEntries } = context;
+
+  // Build scores context
+  const scores = {
+    turf_density: assessment.turf_density,
+    weed_suppression: assessment.weed_suppression,
+    color_health: assessment.color_health,
+    fungus_control: assessment.fungus_control,
+    thatch_level: assessment.thatch_level,
+    // Tech-confirmed consolidated damage score (higher = healthier), folding
+    // disease/thatch/insect/drought/mechanical. This is the score the tech can
+    // correct on completion, so it — not the raw AI fungus/thatch sub-reads —
+    // is authoritative for whether damage recommendations are warranted.
+    stress_damage: assessment.stress_damage,
+    observations: assessment.observations,
+    season: assessment.season,
+  };
+
+  const { month } = etParts(now);
+  const monthName = ['January','February','March','April','May','June','July','August','September','October','November','December'][month - 1];
+  const appliedLines = appliedProducts.map((p) => `- ${p.product_name}${p.product_category ? ` (${p.product_category})` : ''}`);
+
+  const systemPrompt = `You are the agronomic intelligence engine for Waves Pest Control in Southwest Florida. You generate clear, actionable lawn care recommendations by combining protocol knowledge with real treatment outcome data. Write in a professional but warm tone suitable for both the tech and the customer. Be specific and SWFL-relevant.`;
+
+  const visitPart = (lines) => `Generate lawn care recommendations for this assessment:
+
+Customer: ${customer?.first_name} ${customer?.last_name}
+Grass Type: ${grassType} (Track ${grassTrack || 'unspecified'})
+Month: ${monthName} (Season: ${assessment.season})
+
+Current Scores (all 0-100, higher = healthier):
+- Turf Density: ${scores.turf_density}%
+- Weed Suppression: ${scores.weed_suppression}%
+- Color Health: ${scores.color_health}%${scores.stress_damage != null ? `
+- Stress / Damage (TECH-CONFIRMED, consolidates disease, thatch, insect, drought & mechanical): ${scores.stress_damage}%
+  ↳ Fungus Control ${scores.fungus_control}% and Thatch Level ${scores.thatch_level}% are the AI's raw sub-reads only. When the tech-confirmed Stress/Damage is healthy, do NOT recommend NEW fungicide/dethatch treatments those raw sub-reads might otherwise imply (but never contradict an application that already happened today — see the applied-today rule below); when it is low but fungus/thatch look fine, the damage is drought/mechanical/insect — recommend accordingly.` : `
+- Fungus Control: ${scores.fungus_control}%
+- Thatch Level: ${scores.thatch_level}%`}
+- Observations: ${scores.observations || 'None'}
+${lines.length ? `
+Applied TODAY on this visit (already done — authoritative):
+${lines.join('\n')}
+HARD RULE: these applications have already been made. Never recommend against, question, or defer a product class applied today (no "before making a fungicide application" when a fungicide was applied) — frame follow-up as monitoring the lawn's response to today's treatment.` : ''}`;
+
+  const protocolLines = protocolEntries.map(e => `[${e.category}] ${e.title}: ${(e.content || '').substring(0, 300)}`);
+  const outcomeLines = outcomeEntries.map(e => `${e.title} (${e.data_point_count} data points, ${e.confidence} confidence): ${e.summary || 'No summary'}`);
+  const promptOf = (applied, protocols, outcomes) => `${visitPart(applied)}
+
+Protocol References (from Claudeopedia):
+${protocols.join('\n')}
+
+Real Outcome Data (from Agronomic Wiki):
+${outcomes.join('\n')}
+
+Return a JSON object with:
+{
+  "summary": "<one sentence customer-friendly lawn status summary>",
+  "recommendations": [
+    { "priority": 1, "action": "<specific action>", "reason": "<why based on data>", "timeframe": "<when>" }
+  ],
+  "nextVisitFocus": "<what to prioritize on the next visit>",
+  "customerTip": "<one simple thing the customer can do between visits>"
+}`;
+
+  const userPrompt = promptOf(appliedLines, protocolLines, outcomeLines);
+  const keyed = promptOf([...new Set(appliedLines)].sort(), [...protocolLines].sort(), [...outcomeLines].sort());
+  const promptKey = crypto.createHash('sha256').update(`${systemPrompt}\n${keyed}`).digest('hex');
+  return { systemPrompt, userPrompt, promptKey };
+}
+
+// The answer made before the Complete tap (report speed plan step 4, owner
+// 2026-11-19 "GO"). A lawn completion waits about 14 s on the grounded
+// recommendation call, and that call cannot start earlier, because it reads
+// the visit's saved product rows. prepareAssessmentRecommendations asks the
+// same prompt early, with the products the sheet is about to record, and keeps
+// the answer IN THIS PROCESS only, under the prompt's promptKey. It is stored
+// nowhere, so no report, send or reader can see it. The completion's grounded
+// run takes it only when its own prompt, built from the saved rows and the
+// reference pages as they are then, has that same promptKey. A restart, another
+// instance, a changed score, a changed product list, a reference page changed
+// or withdrawn, or an answer older than 30 minutes all end in an ordinary call.
+// One assessment holds an answer for each prompt it asked (a product added and
+// then removed asks the first prompt again: no second call for it).
+const PREPARED_ANSWER_TTL_MS = 30 * 60 * 1000;
+const PREPARED_ANSWER_MAX = 100;
+const PREPARED_CALLS_MAX = 5;
+const PREPARED_CALLS_KEPT = 10000;
+const _preparedAnswers = new Map(); // assessmentId -> Map<promptKey, { at, answer: Promise<string|null> }>
+// The early calls made for an assessment, in a map of its own: the count stays
+// when the answers are used or pushed out by newer assessments.
+const _preparedCalls = new Map(); // assessmentId -> number
+const dropOldest = (map, max) => { while (map.size > max) map.delete(map.keys().next().value); };
+
+function heldPreparedAnswer(held, promptKey) {
+  const one = held?.get(promptKey);
+  return one && Date.now() - one.at <= PREPARED_ANSWER_TTL_MS ? one : null;
+}
+
+// The grounded run's read. It always empties the assessment's slot: the visit's
+// rows are saved, so an answer made for another prompt can serve no later run,
+// and the one that fits is used once (a later regeneration asks the model
+// again).
+async function preparedAnswer(assessmentId, promptKey) {
+  const one = heldPreparedAnswer(_preparedAnswers.get(assessmentId), promptKey);
+  _preparedAnswers.delete(assessmentId);
+  // GATE_LAWN_REC_PREPARE is the off switch for the use too: with it off, an
+  // answer held from before the flip is dropped and the run makes its own call.
+  // `?.`: a suite that mocks the whole gate module reads as off.
+  if (!one || require('../config/feature-gates').lawnRecPrepareLive?.() !== true) return null;
+  const answer = await one.answer;
+  if (answer) logger.info(`[knowledge-bridge] grounded recommendations for ${assessmentId} use the answer prepared before completion`);
+  return answer;
+}
+
+const everyString = (value) => {
+  if (typeof value === 'string') return [value];
+  return value && typeof value === 'object' ? Object.values(value).flatMap(everyString) : [];
+};
+
+// Only an answer the grounded run would accept is held (callClaude's own rule
+// for its primary leg): an unusable one would fail that run, where a new call
+// could still succeed. An early answer is also a new source of report copy, so
+// every string in it passes the complete report copy screen
+// (customerCopyViolations) or the answer is not held.
+function usablePreparedAnswer(text) {
+  let parsed;
+  try { parsed = JSON.parse(String(text).replace(/```json|```/g, '').trim()); } catch { return false; }
+  if (objectAnswerProblem(parsed)) return false;
+  const { customerCopyViolations } = require('./service-report/technician-report-copy');
+  return everyString(parsed).every((line) => customerCopyViolations(line).length === 0);
+}
+
 const KnowledgeBridge = {
 
   // ────────────────────────────────────────────────────────────
@@ -1049,6 +1240,45 @@ const KnowledgeBridge = {
     });
   },
 
+  // The early call (see _preparedAnswers). `plannedProducts` are the rows the
+  // sheet is about to record, as the completion will save them:
+  // { product_name, product_category }. Returns as soon as the call is running.
+  // One prompt is asked once in 30 minutes (answered, running or failed), and
+  // one assessment gets at most PREPARED_CALLS_MAX calls while this process
+  // lives. Writes nothing.
+  async prepareAssessmentRecommendations(assessmentId, plannedProducts) {
+    // A linked assessment's grounded run has started or finished: a call
+    // started now would serve no run.
+    const before = await db('lawn_assessments').where({ id: assessmentId }).first('customer_id', 'service_record_id');
+    if (!before || before.service_record_id) return { started: false };
+    const context = await loadRecommendationContext(before);
+    // Read again after the context reads, which take time: a completion may
+    // have linked the assessment meanwhile. From this read to the held answer
+    // nothing waits, so a completion that links it later finds the answer
+    // when its grounded run looks.
+    const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
+    if (!assessment || assessment.service_record_id) return { started: false };
+    // The spend gate, read last: turned off during the reads above, no call starts.
+    if (require('../config/feature-gates').lawnRecPrepareLive?.() !== true) return { started: false };
+    const { systemPrompt, userPrompt, promptKey } = recommendationPrompt({ assessment, appliedProducts: plannedProducts }, context);
+    const held = _preparedAnswers.get(assessmentId) || new Map();
+    if (heldPreparedAnswer(held, promptKey)) return { started: true };
+    const calls = _preparedCalls.get(assessmentId) || 0;
+    if (calls >= PREPARED_CALLS_MAX) return { started: false };
+    const answer = callClaude(systemPrompt, userPrompt, 1500)
+      .catch((err) => { logger.warn(`[knowledge-bridge] prepared recommendation call failed for ${assessmentId}: ${err.message}`); return null; })
+      .then((text) => (text && usablePreparedAnswer(text) ? text : null));
+    held.set(promptKey, { at: Date.now(), answer });
+    // Deleted first so the newest request is also the newest key of each map.
+    _preparedAnswers.delete(assessmentId);
+    _preparedAnswers.set(assessmentId, held);
+    _preparedCalls.delete(assessmentId);
+    _preparedCalls.set(assessmentId, calls + 1);
+    dropOldest(_preparedAnswers, PREPARED_ANSWER_MAX);
+    dropOldest(_preparedCalls, PREPARED_CALLS_KEPT);
+    return { started: true };
+  },
+
   async generateAssessmentRecommendations(assessmentId) {
     // Serialize runs per assessment: the confirm-time run can still be in
     // flight when the post-completion grounded regen starts, and both write
@@ -1100,48 +1330,7 @@ const KnowledgeBridge = {
     try {
       const preAssessment = await db('lawn_assessments').where({ id: assessmentId }).first();
       if (!preAssessment) { await liftFence(); return null; }
-      const customer = await db('customers').where({ id: preAssessment.customer_id }).first();
-      // Grass context lives on customer_turf_profiles, not customers.
-      // track_key is the protocol track id (e.g. 'st_augustine'); it may be
-      // null when the customer has no turf profile yet.
-      const grassContext = await loadCustomerGrassContext(preAssessment.customer_id);
-      const grassType = grassContext.grassTypeLabel || 'St. Augustine';
-      const grassTrack = grassContext.trackKey || null;
-      // Pull relevant Claudeopedia entries (protocols, product info).
-      // Wiki-sync MIRRORS inherit the wiki's review gate (customer-visible
-      // recs); merely-linked curated articles stay visible.
-      const protocolEntries = await db('knowledge_base')
-        .whereIn('category', ['protocol', 'product', 'lawn_care', 'seasonal'])
-        .where({ status: 'active' })
-        .whereRaw('active IS NOT FALSE')
-        .whereNot(function untrustedWikiMirror() {
-          this.where('source', 'wiki-sync').whereIn(
-            'wiki_entry_id',
-            db('knowledge_entries').select('id').whereNotIn('review_status', TRUSTED_STATUSES),
-          );
-        })
-        .where(function () {
-          this.where('content', 'ilike', `%${grassType}%`)
-            .orWhere('category', 'seasonal');
-          if (grassTrack) this.orWhere('content', 'ilike', `%track ${grassTrack}%`);
-        })
-        .select('title', 'content', 'category')
-        .limit(10);
-      // Trusted wiki outcome pages only — these feed customer-visible
-      // recommendations (exception-based gate).
-      const outcomeEntries = await db('knowledge_entries')
-        .whereIn('review_status', TRUSTED_STATUSES)
-        .where(function () {
-          this.where('category', 'seasonal');
-          if (grassTrack) {
-            this.orWhere(function () {
-              this.where('category', 'track').where('slug', 'ilike', `%${slugify(grassTrack)}%`);
-            });
-          }
-        })
-        .select('title', 'summary', 'data_point_count', 'confidence')
-        .limit(5);
-      context = { customer, grassType, grassTrack, protocolEntries, outcomeEntries };
+      context = await loadRecommendationContext(preAssessment);
     } catch (ctxErr) {
       logger.error(`[knowledge-bridge] recommendation context load failed: ${ctxErr.message}`);
       await liftFence();
@@ -1210,69 +1399,16 @@ const KnowledgeBridge = {
 
   async _generateAssessmentRecommendationsUnlocked(assessmentId, { assessment, appliedProducts, applicationsVerified }, context, runId) {
     try {
-      const { customer, grassType, grassTrack, protocolEntries, outcomeEntries } = context;
-
-      // Build scores context
-      const scores = {
-        turf_density: assessment.turf_density,
-        weed_suppression: assessment.weed_suppression,
-        color_health: assessment.color_health,
-        fungus_control: assessment.fungus_control,
-        thatch_level: assessment.thatch_level,
-        // Tech-confirmed consolidated damage score (higher = healthier), folding
-        // disease/thatch/insect/drought/mechanical. This is the score the tech can
-        // correct on completion, so it — not the raw AI fungus/thatch sub-reads —
-        // is authoritative for whether damage recommendations are warranted.
-        stress_damage: assessment.stress_damage,
-        observations: assessment.observations,
-        season: assessment.season,
-      };
-
       // appliedProducts came from the locked Phase A read — the visit's
       // ACTUAL applications (product rows only; raw technician notes are NOT
       // parser-approved copy and must not feed customer-facing prompts).
-      const month = new Date().getMonth() + 1;
-      const monthName = ['January','February','March','April','May','June','July','August','September','October','November','December'][month - 1];
-
-      const systemPrompt = `You are the agronomic intelligence engine for Waves Pest Control in Southwest Florida. You generate clear, actionable lawn care recommendations by combining protocol knowledge with real treatment outcome data. Write in a professional but warm tone suitable for both the tech and the customer. Be specific and SWFL-relevant.`;
-
-      const userPrompt = `Generate lawn care recommendations for this assessment:
-
-Customer: ${customer?.first_name} ${customer?.last_name}
-Grass Type: ${grassType} (Track ${grassTrack || 'unspecified'})
-Month: ${monthName} (Season: ${assessment.season})
-
-Current Scores (all 0-100, higher = healthier):
-- Turf Density: ${scores.turf_density}%
-- Weed Suppression: ${scores.weed_suppression}%
-- Color Health: ${scores.color_health}%${scores.stress_damage != null ? `
-- Stress / Damage (TECH-CONFIRMED, consolidates disease, thatch, insect, drought & mechanical): ${scores.stress_damage}%
-  ↳ Fungus Control ${scores.fungus_control}% and Thatch Level ${scores.thatch_level}% are the AI's raw sub-reads only. When the tech-confirmed Stress/Damage is healthy, do NOT recommend NEW fungicide/dethatch treatments those raw sub-reads might otherwise imply (but never contradict an application that already happened today — see the applied-today rule below); when it is low but fungus/thatch look fine, the damage is drought/mechanical/insect — recommend accordingly.` : `
-- Fungus Control: ${scores.fungus_control}%
-- Thatch Level: ${scores.thatch_level}%`}
-- Observations: ${scores.observations || 'None'}
-${appliedProducts.length ? `
-Applied TODAY on this visit (already done — authoritative):
-${appliedProducts.map((p) => `- ${p.product_name}${p.product_category ? ` (${p.product_category})` : ''}`).join('\n')}
-HARD RULE: these applications have already been made. Never recommend against, question, or defer a product class applied today (no "before making a fungicide application" when a fungicide was applied) — frame follow-up as monitoring the lawn's response to today's treatment.` : ''}
-
-Protocol References (from Claudeopedia):
-${protocolEntries.map(e => `[${e.category}] ${e.title}: ${(e.content || '').substring(0, 300)}`).join('\n')}
-
-Real Outcome Data (from Agronomic Wiki):
-${outcomeEntries.map(e => `${e.title} (${e.data_point_count} data points, ${e.confidence} confidence): ${e.summary || 'No summary'}`).join('\n')}
-
-Return a JSON object with:
-{
-  "summary": "<one sentence customer-friendly lawn status summary>",
-  "recommendations": [
-    { "priority": 1, "action": "<specific action>", "reason": "<why based on data>", "timeframe": "<when>" }
-  ],
-  "nextVisitFocus": "<what to prioritize on the next visit>",
-  "customerTip": "<one simple thing the customer can do between visits>"
-}`;
-
-      const result = await callClaude(systemPrompt, userPrompt, 1500);
+      const { systemPrompt, userPrompt, promptKey } = recommendationPrompt({ assessment, appliedProducts }, context);
+      // Only the grounded run takes an answer made before the Complete tap: its
+      // application set was read from the visit's own rows, and the answer was
+      // made for this same prompt (preparedAnswer). Every check and the locked
+      // write below then run on it as on a new answer.
+      const prepared = applicationsVerified ? await preparedAnswer(assessmentId, promptKey) : null;
+      const result = prepared || await callClaude(systemPrompt, userPrompt, 1500);
       if (!result) return null;
 
       try {
@@ -1565,7 +1701,7 @@ Return a JSON object with:
 };
 
 module.exports = KnowledgeBridge;
-module.exports._test = { kbFtsQuery, kbIlikeQuery, callClaude, recommendationPayloadHasContent, sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses, generationInFlight, activeGenerationRuns, recommendationPayloadShapeValid, sendSealActive };
+module.exports._test = { kbFtsQuery, kbIlikeQuery, callClaude, recommendationPayloadHasContent, sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses, generationInFlight, activeGenerationRuns, recommendationPayloadShapeValid, sendSealActive, recommendationPrompt, preparedAnswers: _preparedAnswers, preparedCalls: _preparedCalls, PREPARED_ANSWER_TTL_MS };
 // Pure render-time guard surface (no DB, no LLM) — consumed by report-data
 // as the last line of defense for instantly opened report links.
 module.exports.sealRecommendationsForSend = sealForSend;

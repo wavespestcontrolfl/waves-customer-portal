@@ -30,9 +30,13 @@ const { buildPropertyRecommendations, mosquitoNoteCard } = require('../services/
 const { buildPortalOffer } = require('../services/service-report/cross-sell');
 const { normalizeRequestedServiceKey } = require('../services/estimate-add-service-request');
 const { writeOrRefreshCtaRequest } = require('../services/cta-service-request');
-const { accountCanOneTap } = require('../services/one-tap-purchase');
+const { oneTapShownTo } = require('../services/one-tap-purchase');
 
 router.use(authenticate);
+
+// The offer card's two tabs, in the words the office reads (owner 2026-11-21:
+// the Billing tab shows the card too).
+const OFFER_TAB_PLACES = { home: 'portal home', billing: 'portal Billing' };
 
 // Same posture as the customer requests route: per-customer, low ceiling —
 // a tap-through is a staff-bell write, not a browsing action.
@@ -57,7 +61,7 @@ router.get('/', async (req, res, next) => {
     // refusals (monthly-membership lanes, non-members, payer-billed
     // accounts), so the button never renders for an account init would
     // deterministically 409. The write side re-checks each.
-    const oneTap = gateEnvValue('GATE_ONE_TAP_PURCHASE') && await accountCanOneTap(req.customerId);
+    const oneTap = await oneTapShownTo(req.customerId);
     return res.json({ available: true, oneTap, ...result });
   } catch (err) {
     next(err);
@@ -125,15 +129,25 @@ router.post('/request', requestLimiter, async (req, res, next) => {
 
     const requestedService = normalizeRequestedServiceKey(offer.serviceKey) || offer.serviceKey;
     const perApplication = Number(offer.option?.perVisit);
+    // The same card also shows on the Billing tab (owner 2026-11-21). The
+    // office text (subject, description, bell) names the tab the customer
+    // tapped on. The `source` column and the price-lock snapshot stay
+    // 'portal_home': they name the card and its shared open-request slot
+    // (CTA_REQUEST_SOURCES), not the tab. So a Home tap stores exactly what
+    // it stored before, and the identical offer tapped on the second tab is
+    // the writer's no-op: one request, one bell (sameAskSubjects).
+    const place = metadata.surface === 'billing' ? OFFER_TAB_PLACES.billing : OFFER_TAB_PLACES.home;
+    const subjectFor = (tabPlace) => `Add ${offer.label} — requested from ${tabPlace}`;
     const priceText = Number.isFinite(perApplication) && perApplication > 0
-      ? `(shown $${perApplication.toFixed(2)} per application on portal home)`
-      : '(quote requested from portal home)';
+      ? `(shown $${perApplication.toFixed(2)} per application on ${place})`
+      : `(quote requested from ${place})`;
     const outcome = await writeOrRefreshCtaRequest(db, {
       customerId: req.customerId,
       requestedService,
       source: 'portal_home',
-      subject: `Add ${offer.label} — requested from portal home`,
-      description: `Customer tapped "${offer.label}" on the portal home recommendations ${priceText}. Review and follow up — no customer message has been sent.`,
+      subject: subjectFor(place),
+      sameAskSubjects: Object.values(OFFER_TAB_PLACES).map(subjectFor),
+      description: `Customer tapped "${offer.label}" on the ${place} recommendations ${priceText}. Review and follow up — no customer message has been sent.`,
       // The server-computed offer snapshot — the shown price is the honored
       // price (sent-quote price-lock doctrine).
       revisionSnapshot: { source: 'portal_home', offer },

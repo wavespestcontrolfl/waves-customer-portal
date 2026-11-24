@@ -32,9 +32,6 @@ function conn(failTable = null) {
   return c;
 }
 
-const OLD = process.env.GATE_DAY_ONLY_PROMISE;
-beforeEach(() => { process.env.GATE_DAY_ONLY_PROMISE = 'true'; });
-afterEach(() => { if (OLD === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = OLD; });
 
 describe('a forced read failure through the real loadTimeDisplay', () => {
   test('every row is marked failed, and a screen still shows the hour', async () => {

@@ -36,9 +36,10 @@ function customerPhoneLookupKey(value) {
  * @param {string[]} [columns] columns to select (default id + name)
  * @returns {Promise<object|null>}
  */
-async function findKnownCallerCustomer(dbLike, phone, columns = ['id', 'first_name', 'last_name']) {
+// Live customers whose identity phone columns contain `phone` (at most `limit`).
+async function knownCallerCustomers(dbLike, phone, columns, limit) {
   const key = customerPhoneLookupKey(phone);
-  if (!key) return null;
+  if (!key) return [];
   const keys = key.length === 10 ? [key, `1${key}`] : [key];
   const placeholder = keys.map(() => '?').join(', ');
   const frag = KNOWN_CALLER_PHONE_COLS
@@ -48,8 +49,23 @@ async function findKnownCallerCustomer(dbLike, phone, columns = ['id', 'first_na
     .select(columns)
     .whereNull('deleted_at')
     .whereRaw(`(${frag})`, KNOWN_CALLER_PHONE_COLS.flatMap(() => keys))
-    .limit(1);
-  return (rows && rows[0]) || null;
+    .limit(limit);
+  return rows || [];
+}
+
+async function findKnownCallerCustomer(dbLike, phone, columns = ['id', 'first_name', 'last_name']) {
+  const rows = await knownCallerCustomers(dbLike, phone, columns, 1);
+  return rows[0] || null;
+}
+
+/**
+ * The ONE live customer whose identity phone columns contain `phone`; null for
+ * none or for two or more (never guess). Same columns and keys as
+ * findKnownCallerCustomer.
+ */
+async function findOnlyKnownCallerCustomer(dbLike, phone, columns = ['id']) {
+  const rows = await knownCallerCustomers(dbLike, phone, columns, 2);
+  return rows.length === 1 ? rows[0] : null;
 }
 
 async function knownCallerPhoneExists(dbLike, phone) {
@@ -60,5 +76,6 @@ module.exports = {
   KNOWN_CALLER_PHONE_COLS,
   customerPhoneLookupKey,
   findKnownCallerCustomer,
+  findOnlyKnownCallerCustomer,
   knownCallerPhoneExists,
 };

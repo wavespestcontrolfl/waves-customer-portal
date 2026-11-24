@@ -72,9 +72,15 @@ const CTA_REQUEST_SOURCES = ['service_report', 'portal_home', 'portal_chat'];
 // linkage the previous snapshot carried (mintedEstimate) would otherwise be
 // unreachable exactly when the hook needs it to supersede. A withRow throw
 // rolls back the whole outcome, row write included.
+// sameAskSubjects: the subjects one card files from its different places
+// (the portal offer card is on Home and on Billing; each subject names its
+// tab). An open row whose subject is in the list counts as the same subject,
+// so the identical offer tapped on a second tab is the no-op and rings no
+// second bell. The row keeps the subject of the first tap. A moved snapshot
+// still refreshes, whatever the subjects are.
 async function writeOrRefreshCtaRequest(db, {
   customerId, requestedService, source, subject, description, revisionSnapshot,
-  onWrite = null, withRow = null,
+  onWrite = null, withRow = null, sameAskSubjects = [],
 }) {
   return db.transaction(async (trx) => {
     await trx('customers').where({ id: customerId }).forUpdate().first('id');
@@ -91,7 +97,7 @@ async function writeOrRefreshCtaRequest(db, {
       : null;
     if (existing) {
       if (storedRevisionMatches(existing.pricing_revision, revisionSnapshot)
-        && existing.subject === subject) {
+        && (existing.subject === subject || sameAskSubjects.includes(existing.subject))) {
         if (withRow) {
           await withRow(trx, {
             row: existing, deduped: true, refreshed: false, priorPricingRevision,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applicationMonthsBreakdown, oneTimeBesidePlan, pageAverageEligible, pageMonthlyAverage, planCreditSource, resolvePageMonthlyAverage, sectionAverageLine, singleServiceAverageContext } from './estimateMonthlyAverage';
+import { applicationMonthsBreakdown, oneTimeBesidePlan, pageAverageEligible, pageMonthlyAverage, planCreditSource, resolvePageMonthlyAverage, sectionAverageLine, selectedPlanCreditDeclared, singleServiceAverageContext } from './estimateMonthlyAverage';
 
 // Real-shaped sections: net per-application price + application count + the
 // selected cadence's monthly, exactly what a ServiceSection card reads.
@@ -203,5 +203,49 @@ describe('applicationMonthsBreakdown (EST-2026-1185)', () => {
     expect(applicationMonthsBreakdown(model(services, 103.1, { credit: { label: 'Referral Credit', monthly: 10 } }))).toBeNull();
     expect(applicationMonthsBreakdown(model(services, 120))).toBeNull();
     expect(applicationMonthsBreakdown(null)).toBeNull();
+  });
+});
+
+// The first-visit line (owner 2026-11-21) needs to know whether the accept will take a credit
+// slice off the first application. That is the SELECTED cadence's credit, however displayed.
+describe('selectedPlanCreditDeclared', () => {
+  const credit = { label: 'Neighbor discount', amount: 60, recurringAmount: 60 };
+  const withCredit = (section, extra = {}) => ({ ...section, frequencies: section.frequencies.map((f) => ({ ...f, ...extra })) });
+
+  it('no credit anywhere: false', () => {
+    expect(selectedPlanCreditDeclared({ services: [pest(), lawn()], selected: {}, combinedFrequency: { monthly: 72.3 }, pricing: {} })).toBe(false);
+  });
+
+  it('a credit on the selected combo, the plan frequency or a section\'s selected cadence: true', () => {
+    const base = { services: [pest(), lawn()], selected: {}, pricing: {} };
+    expect(selectedPlanCreditDeclared({ ...base, selectedCombo: { manualDiscount: credit } })).toBe(true);
+    expect(selectedPlanCreditDeclared({ ...base, combinedFrequency: { manualDiscount: credit } })).toBe(true);
+    expect(selectedPlanCreditDeclared({ ...base, services: [withCredit(pest(), { manualDiscount: credit })] })).toBe(true);
+    // Itemized into the sections or not: the accept takes the slice either way.
+    expect(selectedPlanCreditDeclared({ ...base, combinedFrequency: { manualDiscount: credit }, renderFlags: { manualDiscountItemizedInSections: true } })).toBe(true);
+  });
+
+  it('the pricing floor capped the credit away on the selected cadence: false, whatever the estimate-level fields say', () => {
+    const pricing = { manualDiscount: credit, combinedRecurring: { manualDiscount: credit } };
+    expect(selectedPlanCreditDeclared({ services: [pest(), lawn()], selected: {}, selectedCombo: { manualDiscount: credit, manualDiscountSuppressed: true }, pricing })).toBe(false);
+    expect(selectedPlanCreditDeclared({ services: [pest(), lawn()], selected: {}, combinedFrequency: { manualDiscountSuppressed: true }, pricing })).toBe(false);
+  });
+
+  it('another cadence\'s credit does not count; only the selected one does', () => {
+    const twoCadences = pest({
+      frequencies: [
+        { key: 'quarterly', monthly: 30, visitsPerYear: 4, perTreatment: 90 },
+        { key: 'monthly', monthly: 55, visitsPerYear: 12, perTreatment: 55, manualDiscount: credit },
+      ],
+    });
+    expect(selectedPlanCreditDeclared({ services: [twoCadences], selected: { pest_control: 'quarterly' }, pricing: {} })).toBe(false);
+    expect(selectedPlanCreditDeclared({ services: [twoCadences], selected: { pest_control: 'monthly' }, pricing: {} })).toBe(true);
+  });
+
+  it('a silent selection falls back to the estimate-level credit; a zero credit is none', () => {
+    const base = { services: [pest(), lawn()], selected: {}, combinedFrequency: { monthly: 72.3 } };
+    expect(selectedPlanCreditDeclared({ ...base, pricing: { manualDiscount: credit } })).toBe(true);
+    expect(selectedPlanCreditDeclared({ ...base, pricing: { combinedRecurring: { manualDiscount: credit } } })).toBe(true);
+    expect(selectedPlanCreditDeclared({ ...base, pricing: { manualDiscount: { label: 'x', amount: 0 } } })).toBe(false);
   });
 });

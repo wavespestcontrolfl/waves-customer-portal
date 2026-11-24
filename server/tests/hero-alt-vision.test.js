@@ -206,10 +206,11 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
     expect((await screenGeneratedImage({ buffer: PNG_BUFFER })).reasons).toEqual(['readable text: WAVES']);
   });
 
-  test('captions still match inside the allowance (the caption logic is shared)', async () => {
+  test('with the uniform logo allowed, every other readable string still fails (there is no caption allowance)', async () => {
     mockDispatch.mockResolvedValue(branded({ readable_text: ['How to', 'Stop Ants', 'SALE'] }));
-    const r = await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true, allowedText: ['How to Stop Ants'] });
-    expect(r.reasons).toEqual(['readable text: SALE']);
+    const r = await screenGeneratedImage({ buffer: PNG_BUFFER, allowUniformLogo: true });
+    expect(r.reasons).toEqual(['readable text: How to, Stop Ants, SALE']);
+    expect(r.violations).toBe(3);
   });
 
   test('an answer without the technicians list, the elsewhere list, or a per-technician boolean is unusable → unchecked (fail-open), never clean', async () => {

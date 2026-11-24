@@ -125,6 +125,8 @@ const FIELD_GROUPS = {
     'phone_note',
     // The plan the caller chose for a recurring plan (schema 1.29.0): drift must show.
     'billing_choice',
+    // The caller's answer to an estimate Waves already sent (schema 1.31.0): drift must show.
+    'estimate_response',
     // Household safety notes the caller stated (schema 1.30.0): children or elderly at the
     // home, areas not to spray, a chemical sensitivity. They file onto the technician's visit
     // brief, so an extractor that drops, invents or rewrites one must show in the replay.

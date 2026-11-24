@@ -101,8 +101,9 @@ describe('markAdminDone', () => {
     const version = 'b'.repeat(32);
     await NotificationService.markAdminDone(['a'], { by: '7', expectedVersion: version });
     expect(db.__q.whereRaw).toHaveBeenCalledWith(`${NotificationService._private.NOTIFICATION_VERSION_SQL} = ?`, [version]);
-    // A JSON array keeps field boundaries and NULL vs '' distinct (never concat_ws).
-    expect(NotificationService._private.NOTIFICATION_VERSION_SQL).toBe('md5(jsonb_build_array(title, body, link, detail, metadata)::text)');
+    // A JSON array keeps field boundaries and NULL vs '' distinct (never concat_ws). The lead reminders' stamps, and the
+    // new-lead reminder's per-lead record, are bookkeeping the bell never shows, so they are left out (REMINDER_STAMP_KEYS).
+    expect(NotificationService._private.NOTIFICATION_VERSION_SQL).toBe("md5(jsonb_build_array(title, body, link, detail, CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata - 'leadCallReminderAt' - 'newLeadRealertAt' - 'newLeadRealertLeads' ELSE metadata END)::text)");
   });
 
   test('an Activity-only row (metadata.feed = activity) can be marked done: the done writer never applies the bell-only exclusion', async () => {

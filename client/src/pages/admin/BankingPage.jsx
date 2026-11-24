@@ -1863,9 +1863,9 @@ function PayoutModal({
 // ═══════════════════════════════════════════════════════════════
 // MAIN PAGE
 // ═══════════════════════════════════════════════════════════════
-// ── Cash today (owner only, GATE_CASH_FORECAST) ─────────────────────────
+// ── Cash today (owner only) ─────────────────────────
 // Reads the checking balances from the bank feed. Any failure (not the
-// owner, gate off, server or network error) renders nothing, so everyone
+// owner, server or network error) renders nothing, so everyone
 // else sees the page exactly as before. The Stripe numbers come from the
 // page's own balance read (props), not a second Stripe call.
 const fmtAsOf = (iso) =>

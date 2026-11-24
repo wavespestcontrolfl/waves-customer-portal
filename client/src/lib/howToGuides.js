@@ -1,11 +1,14 @@
 import { APP_STORE_URL, PLAY_STORE_URL } from "../components/estimate/AppShowcaseCard";
 
 // How-to guides for the composers' Quick Links sheet ("How-to guides"
-// group). Picking one inserts short steps plus a link that opens the right
+// group). Picking one opens the send form, which emails the guide (the
+// howto.* email templates, owner 2026-11-20). The form's other button puts
+// the steps below in the draft instead, with a link that opens the right
 // portal screen after sign-in (LoginPage honors ?next=, same encoded form as
-// the cancel plan link). Nothing is sent on pick: the operator reads the
-// draft and sends it. Plain ASCII on purpose, since the same rows go into
-// texts. Every step names a real button label in PortalPage.jsx; when a
+// the cancel plan link); the operator reads that draft and sends it. Plain
+// ASCII on purpose, since the same rows go into texts. The email carries the
+// same steps: when one changes here, publish the new wording in Email
+// Templates too (howToGuides.test.js compares them to the seed). Every step names a real button label in PortalPage.jsx; when a
 // label there changes, change it here too. A guide is static, so each step
 // must hold for every account shape (paused Auto Pay, several properties,
 // dark gates). Where it cannot, the step sends the customer to us instead,
@@ -14,13 +17,23 @@ import { APP_STORE_URL, PLAY_STORE_URL } from "../components/estimate/AppShowcas
 
 // A cancelled account keeps only Plan, Visits history, Billing and Documents
 // (CANCELLED_TABS), so the caption tells staff the guides are for active plans.
-export const HOW_TO_CAPTION = "For customers with an active plan. Each guide gives steps and a link that opens the right app screen after sign-in.";
+export const HOW_TO_CAPTION = "For customers with an active plan. Each guide is sent as an email with steps and a button that opens the right app screen. You can put the steps in your message instead.";
 
 const portalLink = (path) => `portal.wavespestcontrol.com/login?next=${encodeURIComponent(path)}`;
 
 const HELP_LINE = "Don't see one of these buttons? Reply here and we will help.";
 
 const SIGN_IN = "Sign in to the Waves app with your phone number.";
+
+// The app-alert guides' last step and closing line. The quoted status and the
+// button names are the labels in PortalPage.jsx AppNotificationSettings, under
+// Service notifications: "This device is connected.", Connect this device and
+// Turn on app notifications. The step checks only this phone's connection; each
+// alert's switch and delivery choice sit in rows that differ by account shape
+// (per-property switches, menu-only rows), so the closing line sends the
+// customer to that screen instead of describing its rows.
+const ALERTS_APP_STEP = "Open the Waves app, tap Visits and scroll down to Service notifications. It should say \"This device is connected.\" If you see Connect this device or Turn on app notifications, tap it.";
+const ALERTS_TEXT_CHOICE = "Want to change which alerts you get, or get some by text instead? Use the choices under Service notifications in the same place.";
 
 const GUIDES = [
   {
@@ -84,6 +97,47 @@ const GUIDES = [
       "If your phone asks, allow notifications.",
     ],
     linkLabel: "Or sign in on the web",
+  },
+  // App alerts that the phone accepts but never shows (owner 2026-11-20): the
+  // app can only see that notifications are allowed, not the banner, sound,
+  // Scheduled Summary or Focus settings, so the customer checks them. Visit
+  // reminders go out in the morning, when a Sleep schedule can still be on.
+  {
+    key: "alerts_iphone",
+    name: "Make app alerts show on iPhone",
+    title: "How to make Waves alerts show on your iPhone",
+    keywords: "alerts notifications push banner pop up sound iphone ios apple not getting missing silent focus sleep do not disturb lock screen",
+    path: "/?tab=visits",
+    // The composers send plain text, so the picture of the settings screen
+    // lives on a static page (client/public/help/iphone-alerts.html). /help
+    // is a browser-only root (email-link-policy.js), so iOS opens it in Safari,
+    // not inside the Waves app the customer is about to check.
+    pictures: "https://portal.wavespestcontrol.com/help/iphone-alerts.html",
+    steps: [
+      "Open Settings, tap Notifications, then tap Waves.",
+      "Turn on Allow Notifications. Under Alerts, check Lock Screen, Notification Center and Banners. Turn on Sounds.",
+      "If you see Immediate Delivery, choose it.",
+      // A Focus can allow listed apps or silence them, so the step names both lists.
+      "Reminders go out in the morning. If you use Sleep, open Settings, tap Focus, then Sleep, then tap Apps under Allow Notifications. If it says Allow Notifications From, tap Add, choose Waves and tap Done. If it says Silence Notifications From, take Waves off that list. Do the same for Do Not Disturb if you use it.",
+      ALERTS_APP_STEP,
+    ],
+    after: ALERTS_TEXT_CHOICE,
+  },
+  {
+    key: "alerts_android",
+    name: "Make app alerts show on Android",
+    title: "How to make Waves alerts show on your Android phone",
+    keywords: "alerts notifications push banner pop up sound android samsung pixel google not getting missing silent battery do not disturb bedtime",
+    path: "/?tab=visits",
+    steps: [
+      "Press and hold the Waves app icon, then tap App info.",
+      "Tap Notifications and turn on Allow notifications.",
+      "If you see a list of alert types, tap each one and choose Alert (some phones say Default), not Silent. Turn on Pop on screen if you see it.",
+      "Back in App info, tap Battery and choose Unrestricted. On a Samsung phone, also search Settings for Background usage limits and make sure Waves is not under Sleeping apps or Deep sleeping apps.",
+      "Reminders go out in the morning. If you use Do Not Disturb or Bedtime mode, search Settings for Do Not Disturb, open its apps list, tap Add apps and choose Waves.",
+      ALERTS_APP_STEP,
+    ],
+    after: ALERTS_TEXT_CHOICE,
   },
   {
     key: "documents",
@@ -165,7 +219,7 @@ export const HOW_TO_GUIDE_LINKS = GUIDES.map(({ path, ...guide }) => ({
   category: "howto",
   url: portalLink(path),
   // On the row, not only the group caption: a search hides captions.
-  description: "Active plans only. Steps plus a link to the app screen",
+  description: "Active plans only. Send by email, or put the steps in your message",
 }));
 
 // The inserted text: title, numbered steps, optional closing line, then the
@@ -173,6 +227,8 @@ export const HOW_TO_GUIDE_LINKS = GUIDES.map(({ path, ...guide }) => ({
 // composer adds https://).
 export function howToGuideText(link) {
   const lines = [`${link.title}:`];
+  // A full https address, so mail apps make it a link.
+  if (link.pictures) lines.push(`See these steps with a picture: ${link.pictures}`);
   link.steps.forEach((step, index) => lines.push(`${index + 1}. ${step}`));
   if (link.after) lines.push(link.after);
   lines.push(HELP_LINE);

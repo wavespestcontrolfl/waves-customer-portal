@@ -638,13 +638,10 @@ describe('POST / — admin create — save road buy wiring', () => {
     const converter = require('../services/estimate-converter');
     const stamp = (pin) => ({ property_id: 'prop-2', service_address_line1: '2 Side St', service_address_city: 'Bradenton',
       service_address_state: 'FL', service_address_zip: '34202', lat: pin.lat, lng: pin.lng });
-    const gates = require('../config/feature-gates').gates;
-    const savedAddressGate = gates.editApptAddress;
     beforeEach(() => {
-      gates.editApptAddress = true;
       jest.spyOn(converter, 'buildSeriesAddressScope').mockResolvedValue(null);
     });
-    afterEach(() => { gates.editApptAddress = savedAddressGate; jest.restoreAllMocks(); });
+    afterEach(() => { jest.restoreAllMocks(); });
     const book = (pin) => {
       jest.spyOn(customerProps, 'bookingPropertyStamp').mockResolvedValue(stamp(pin));
       return post({ ...body, technicianId: 'tech-no-absence', propertyId: 'prop-2' });

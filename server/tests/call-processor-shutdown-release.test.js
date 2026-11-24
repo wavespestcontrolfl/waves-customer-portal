@@ -211,9 +211,15 @@ maybeDescribe('deploy-interrupted call passes (live Postgres)', () => {
     const holder = await db.transaction();
     await holder('call_log').where({ twilio_call_sid: SID }).forUpdate().first('id');
     let releaseDownload;
-    fetchSpy.mockImplementationOnce(() => new Promise((resolve) => {
+    const heldDownload = new Promise((resolve) => {
       releaseDownload = () => resolve(new Response('not found', { status: 404 }));
-    }));
+    });
+    let markDownloadStarted;
+    const downloadStarted = new Promise((resolve) => { markDownloadStarted = resolve; });
+    fetchSpy.mockImplementationOnce(() => {
+      markDownloadStarted();
+      return heldDownload;
+    });
     const pass = processor.processRecording(SID);
     await new Promise((r) => setTimeout(r, 400));
     expect(processor._test.pendingClaimWriteCount()).toBe(1);
@@ -227,6 +233,10 @@ maybeDescribe('deploy-interrupted call passes (live Postgres)', () => {
     expect(stamped.processing_status).toBe('processing');
     expect(stamped.metadata.shutdown_interrupted_at).toEqual(expect.any(String));
 
+    // The marker returns after the claim and stamp settle, which may be one
+    // event-loop turn before the pass reaches its held download. Wait for that
+    // boundary instead of assuming the callback is already initialized.
+    await downloadStarted;
     releaseDownload();
     expect((await pass).reason).toBe('recording_not_ready');
     expect(processor.inFlightPassCount()).toBe(0);

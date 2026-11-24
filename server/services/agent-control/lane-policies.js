@@ -288,6 +288,10 @@ const LANE_RUNTIME = {
   // M3: admin-dispatch completion auto-generates the recap when the tech supplies none, persists it in structured_notes and
   // sends it in the customer completion SMS with no approval step (Codex r15).
   completion_recap: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M3' },
+  // The technician's own note, tidied (report-own-note-writer.js): the sheet
+  // shows the text and the technician reads it before Complete & send, so it
+  // drafts for a human like report_copy.
+  report_own_note: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M2' },
   lawn_visit_narratives: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
   // GATE_FAST_COMPLETE_REPORT: reads where the technician treated and the
   // pests they named from their own note, each fact quoted word for word;
@@ -467,6 +471,9 @@ const LANE_RUNTIME = {
   job_screen: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification', maturity: 'M1' },
   // draft_for_human: the answer only pre-fills taps a technician reviews and completes themselves; nothing is saved or sent. offline: one Anthropic call, no second provider; a failure leaves the typed sheet.
   fast_complete_voice_fill: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', maturity: 'M0' },
+  // SiteOne deals bell end date (GATE_SITEONE_DEAL_AI_END_DATE): one Haiku read per deal email on the Monday run; the answer is a
+  // line in the admin bell. offline: no second provider; a miss keeps the bell's date-pattern line.
+  siteone_deal_end_date: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', expected_duration_ms: 10_000, stall_after_ms: 60_000, hard_timeout_ms: 60_000 },
 };
 
 /**

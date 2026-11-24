@@ -46,7 +46,8 @@ const QUOTE_HEADER_SHAPE = [
   String.raw`\b\d{1,2}:\d{2}\b`,
   String.raw`[^\s<>@]+@[^\s<>@]+\.[a-z]{2,}`,
 ].join('|');
-const CUT_PATTERNS = [
+// The reply-history headers, found inline too. The SiteOne deal end-date read cuts at these as well.
+const HISTORY_HEADERS = [
   // Gmail/most clients, weekday OR numeric-date form, decoded-entity email
   // address tolerated: "On Tue, Sep 22, 2026 at 3:21 PM, Jane <jane@x.com>
   // wrote:" / "On 09/09/2026 8:29 AM, Jane <jane@x.com> wrote:". Bounded gap
@@ -62,6 +63,9 @@ const CUT_PATTERNS = [
   /_{10,}\s*From:/i,
   /-{2,}\s*Original Message\s*-{2,}/i,
   /-{2,}\s*Forwarded message\s*-{2,}/i,
+];
+const CUT_PATTERNS = [
+  ...HISTORY_HEADERS,
   // A quote marker: a line starting with '>' (optional leading whitespace),
   // or an inline " > " — real bodies run the quote marker directly into the
   // "On ... wrote:" text with no line break at all ("...1563 > On 09/09...").
@@ -128,6 +132,12 @@ function withoutReplyPrefixes(subject) {
 // A forwarded subject is someone else's words, never the sender's: "Fwd:
 // Please cancel service" asks nothing of its own.
 const FORWARD_PREFIX = new RegExp(String.raw`^\s*(?:(?:re|r|aw|sv|vs|antw)\s*(?:\[\d+\])?\s*:\s*)*(?:${FORWARD_WORDS})\s*(?:\[\d+\])?\s*:`, 'i');
+// The message is itself a forward: its subject's FIRST prefix is a forward word. "Re: Fwd: ..." is a
+// reply (to a forward), so it is not one.
+const OWN_FORWARD_PREFIX = new RegExp(String.raw`^\s*(?:${FORWARD_WORDS})\s*(?:\[\d+\])?\s*:`, 'i');
+function isForwardSubject(subject) {
+  return OWN_FORWARD_PREFIX.test(decodeEntities(String(subject || '')));
+}
 function ownReplySubject(subject, threadSubjects = []) {
   if (FORWARD_PREFIX.test(decodeEntities(subject))) return '';
   const own = withoutReplyPrefixes(subject);
@@ -174,4 +184,4 @@ async function ownSubjectsInThreads(conn, rows) {
   return own;
 }
 
-module.exports = { stripQuotedAndSignature, decodeEntities, emailPlainText, ownReplySubject, ownSubjectsInThreads, settledSql };
+module.exports = { stripQuotedAndSignature, decodeEntities, emailPlainText, ownReplySubject, ownSubjectsInThreads, settledSql, HISTORY_HEADERS, isForwardSubject };

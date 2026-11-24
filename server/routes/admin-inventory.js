@@ -26,6 +26,7 @@ const {
   parsePackSize,
   unitPriceBreakdown,
 } = require('../services/product-costing');
+const { shippingFor } = require('../services/price-scan/shipping-rules');
 const { syncPricesToEstimator } = require('../services/price-sync');
 const protocols = require('../config/protocols.json');
 const { lawnProtocols } = require('../services/lawn-program');
@@ -781,14 +782,16 @@ const LAWN_PROTOCOL_PRODUCT_DEFINITIONS = [
   { key: 'dismiss', label: 'Dismiss', aliases: ['Dismiss NXT', 'Dismiss'], type: 'pesticide', category: 'sedge herbicide' },
   { key: 'carbonpro_l', label: 'CarbonPro-L', aliases: ['CarbonPro-L', 'CarbonPro', 'LESCO CarbonPro'], type: 'biostimulant', category: 'soil amendment / biostimulant' },
   { key: 'hydretain', label: 'Hydretain', aliases: ['Hydretain'], type: 'wetting_agent', category: 'moisture manager' },
-  { key: 'talstar', label: 'Talstar', aliases: ['Talstar P', 'Talstar'], type: 'pesticide', category: 'insecticide' },
+  // Owner 2026-11-18: LESCO Crosscheck Plus is the house bifenthrin. Both June lines name it, and the July "Bifen" and "bifenthrin"
+  // mentions are the same product. It is looked up by its full catalog name only, so a missing row never stands in Bifen XTS or the
+  // retired Talstar P and Bifen I/T rows (inactive; migration 20261119010400 moved their links to Crosscheck).
+  { key: 'crosscheck', label: 'LESCO Crosscheck Plus', aliases: ['LESCO Crosscheck Plus', 'Bifen'], catalogNames: ['LESCO Crosscheck Plus'], type: 'pesticide', category: 'insecticide' },
   { key: 'arena_50_wdg', label: 'Arena 50 WDG', aliases: ['Arena 50 WDG', 'Arena'], type: 'pesticide', category: 'insecticide' },
   { key: 'atrazine_4l', label: 'Atrazine 4L', aliases: ['Atrazine 4L', 'Atrazine'], type: 'pesticide', category: 'herbicide' },
   { key: 'three_way', label: 'Three-Way', aliases: ['Three-Way', 'Three Way'], type: 'pesticide', category: 'herbicide' },
   { key: 'bio_kmag', label: 'LESCO 0-0-18 Bio KMAG', aliases: ['LESCO 0-0-18 Bio KMAG', 'Bio KMAG', 'KMAG'], type: 'fertilizer', category: 'potassium and magnesium support' },
   { key: 'lesco_elite_0_0_28', label: 'LESCO Elite 0-0-28', aliases: ['LESCO Elite 0-0-28', 'Elite 0-0-28', '0-0-28'], type: 'fertilizer', category: 'potassium support' },
   { key: 'armada_50_wdg', label: 'Armada 50 WDG', aliases: ['Armada 50 WDG', 'Armada'], type: 'pesticide', category: 'fungicide' },
-  { key: 'bifen_it', label: 'Bifen I/T', aliases: ['Bifen I/T', 'Bifen'], type: 'pesticide', category: 'insecticide' },
   { key: 'dylox_420_sl', label: 'Dylox 420 SL', aliases: ['Dylox 420 SL', 'Dylox'], type: 'pesticide', category: 'insecticide' },
   { key: 'topchoice', label: 'Topchoice Granular Insecticide', aliases: ['Topchoice Granular Insecticide', 'Topchoice'], type: 'pesticide', category: 'fire ant insecticide' },
   { key: 'drive_xlr8', label: 'Drive XLR8', aliases: ['Drive XLR8'], type: 'pesticide', category: 'post-emergent herbicide' },
@@ -809,6 +812,7 @@ const V13_LAWN_PROTOCOL_PRODUCT_DEFINITIONS = [
   ['v13_stonewall_4fl', 'LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide', 'pesticide', 'pre-emergent herbicide'],
   ['v13_dimension_2ew', 'Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide', 'pesticide', 'pre-emergent herbicide'],
   ['v13_dimension_18_0_10', 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer', 'pesticide', 'pre-emergent herbicide with fertilizer'],
+  ['v13_stonewall_0_37_18_0_10', 'LESCO Stonewall 0.37% 18-0-10', 'pesticide', 'pre-emergent herbicide with fertilizer'],
   ['v13_lesco_24_0_11', 'LESCO 24-0-11 with PolyPlus OPTI', 'fertilizer', 'fertilizer'],
   ['v13_lesco_10_0_22', 'LESCO 10-0-22 50% PolyPlus OPTI45 50% YaraRega 2% Fe 2% Mg KMAG MOP SOP Turfgrass Granular Fertilizer', 'fertilizer', 'fertilizer'],
   ['v13_lesco_44_0_0', 'LESCO 44-0-0 100% PolyPlus OPTI120 Turfgrass Granular Fertilizer', 'fertilizer', 'fertilizer'],
@@ -816,7 +820,7 @@ const V13_LAWN_PROTOCOL_PRODUCT_DEFINITIONS = [
   ['v13_nutra_tech_k_acetate', 'LESCO Nutra-TECH 0-0-20 K-Acetate Turfgrass Liquid Fertilizer', 'fertilizer', 'potassium support'],
   ['v13_tetrino', 'Tetrino Insecticide', 'pesticide', 'insecticide'],
   ['v13_arena', 'Arena 50 WDG', 'pesticide', 'insecticide'],
-  ['v13_talak', 'Atticus Talak 7.9 F', 'pesticide', 'insecticide'],
+  ['v13_crosscheck', 'LESCO Crosscheck Plus', 'pesticide', 'insecticide'], // owner 2026-11-18: replaced Atticus Talak 7.9 F
   ['v13_advion_insect_granule', 'Advion Insect Granule', 'pesticide', 'insecticide'],
   ['v13_acelepryn', 'Acelepryn Insecticide', 'pesticide', 'insecticide'],
   ['v13_dylox_6_2_g', 'Dylox 6.2 G Granular Insecticide', 'pesticide', 'insecticide'],
@@ -1071,7 +1075,7 @@ router.get('/lawn-outline-facts', async (req, res, next) => {
       const references = protocolProductReferences(definition);
       if (!references.length) continue;
       let product = null;
-      for (const alias of definition.aliases) {
+      for (const alias of definition.catalogNames || definition.aliases) {
         product = await db('products_catalog')
           .whereILike('name', `%${alias}%`)
           .select(
@@ -2318,6 +2322,10 @@ router.put('/:productId/pricing', async (req, res, next) => {
     // multipack forms ("4 x 32 oz"), leaving normalized/landed unit costs
     // null and the recalculation blind to entered shipping/tax.
     const sizeOz = quantityToOz(quantity);
+    // A numeric 0 is an ENTERED free-shipping quote, not a blank field: it is
+    // stored as 0, so the row states its shipping and the delivered ranking
+    // does not add the vendor's shipping rule to it.
+    const enteredShipping = shippingCost === 0 ? 0 : shippingCost || null;
     const landed = calcLandedCost(price, shippingCost, taxRate);
     const perOz = sizeOz ? Math.round(parseFloat(price) / sizeOz * 10000) / 10000 : null;
     const landedPerOz = sizeOz && landed != null ? Math.round(landed / sizeOz * 10000) / 10000 : perOz;
@@ -2335,7 +2343,7 @@ router.put('/:productId/pricing', async (req, res, next) => {
       is_active: true,
       availability_status: availabilityStatus || 'unknown',
       branch_name: branchLocation || null,
-      shipping_estimate: shippingCost || null,
+      shipping_estimate: enteredShipping,
       landed_unit_price: landedPerOz,
     };
 
@@ -2345,7 +2353,7 @@ router.put('/:productId/pricing', async (req, res, next) => {
     // those columns).
     const priceColumns = {
       ...skuColumn,
-      shipping_cost: shippingCost || null,
+      shipping_cost: enteredShipping,
       tax_rate: taxRate || null,
       landed_cost: landed,
       unit_normalized: sizeOz ? 'oz' : null,
@@ -2412,7 +2420,7 @@ router.put('/:productId/pricing', async (req, res, next) => {
         availability_status: availabilityStatus || 'unknown',
         branch_location: branchLocation || null,
         branch_name: branchLocation || null,
-        shipping_estimate: shippingCost || null,
+        shipping_estimate: enteredShipping,
         landed_unit_price: landedPerOz,
         fetched_at: db.fn.now(),
         captured_at: db.fn.now(),
@@ -2727,7 +2735,8 @@ router.get('/protocol-health', async (req, res, next) => {
       .join('products_catalog', 'service_product_usage.product_id', 'products_catalog.id')
       .select('service_product_usage.*', 'products_catalog.name as product_name',
         'products_catalog.best_price', 'products_catalog.cost_per_unit',
-        'products_catalog.cost_unit', 'products_catalog.unit_size_oz')
+        'products_catalog.cost_unit', 'products_catalog.unit_size_oz',
+        'products_catalog.container_size', 'products_catalog.inventory_unit')
       .orderBy('service_type');
 
     const servicesByLine = {};
@@ -2797,7 +2806,7 @@ router.get('/service-usage', async (req, res, next) => {
       .select('service_product_usage.*', 'products_catalog.name as product_name',
         'products_catalog.best_price', 'products_catalog.best_vendor',
         'products_catalog.container_size', 'products_catalog.cost_per_unit',
-        'products_catalog.cost_unit', 'products_catalog.unit_size_oz')
+        'products_catalog.cost_unit', 'products_catalog.unit_size_oz', 'products_catalog.inventory_unit')
       .orderBy('service_type');
 
     // Group by service type
@@ -3297,17 +3306,109 @@ function cogsResetFor(product, unitSizeOz) {
 // fell back to raw pack price where this writer ranked per unit, so the two
 // could name different winners). Three modes, chosen for the product:
 //   'oz'    — any row has a per-oz basis: rank by landed per-oz, else sticker
-//             per-oz (the r22 / landed contracts unchanged);
+//             per-oz (the r22 / landed contracts unchanged); a row that gives
+//             no delivered price ranks on its sticker per-oz with shipping
+//             added (deliveryShape);
 //   'count' — no measured row, the catalog container reads as a count, and a
 //             row's count noun is compatible with it: rank by landed per-UNIT
 //             (landed total rebuilt from shipping/tax on the current price,
 //             else price, / pack count — a $10/10 pack with $20
-//             shipping must not beat a delivered $20/10 pack), persist the
-//             sticker per-unit;
+//             shipping must not beat a delivered $20/10 pack; a row that gives
+//             no delivered price has shipping added the same way), persist
+//             the sticker per-unit;
 //   'raw'   — nothing scalable: rank by raw price (the r19 guard decides).
 // `ranked` = the pool first, then the unrankable rows by raw price; each entry
 // carries `rank` on the mode's basis (null when unrankable) for callers that
 // report spreads.
+// ── Delivered basis: the shipping to count for a row that gives no delivered price ──
+// Owner 2026-11-21: compare "the lower price per oz, lb, g, etc, and we always
+// should include shipping". A vendor_pricing row almost never says what
+// shipping costs: the manual route stores null for a blank field, and on
+// 2026-11-21 no row in production carried a shipping figure, so a seller with
+// a cheaper sticker price took the catalog best price even when it lost once
+// delivered. Such a row is now ranked on its CURRENT price plus shipping, so
+// the catalog and the weekly price scan compare on ONE basis. Ranking only:
+// the persisted best price stays the winner's sticker figure.
+//
+// deliveryShape is an ALLOW-LIST. Two row shapes get shipping added; every
+// other row carries a statement of some kind about its delivered price and
+// is ranked EXACTLY as before this rule existed ('stated'), so an unknown
+// shape never gets a figure added.
+//   'silent'   — the row says nothing: no shipping, tax, fee or rebate
+//                figure, and no landed unit price (or one the manual route /
+//                a seed wrote that repeats the sticker stored beside it).
+//                It takes the vendor's rule from the price scan
+//                (price-scan/shipping-rules.js).
+//   'estimate' — the one statement is a shipping_estimate of 0 or more with
+//                no landed unit price to hold it (a price snapshot's
+//                estimate). It takes that estimate.
+// A landed unit price a price REPORT carries is a delivered quote by the
+// reporter's contract even when it equals the sticker (the listing ships
+// free), so that row is 'stated'; a report with no landed figure is silent.
+// The stored pair is kept to four decimals in the row's own unit
+// (unit_normalized), so it is compared as stored, with one stored step of
+// slack for a writer that rounded the half the other way.
+const SELF_WRITTEN_SOURCES = new Set(['manual', 'manual_seed']);
+const OTHER_DELIVERY_COLUMNS = ['shipping_cost', 'hazmat_fee_estimate', 'rebate_estimate', 'tax_rate'];
+const STORED_UNIT_STEP = 0.0001;
+function deliveryShape(row) {
+  if (OTHER_DELIVERY_COLUMNS.some((column) => row[column] != null)) return 'stated';
+  if (row.shipping_estimate != null) {
+    const estimate = numberOrNull(row.shipping_estimate);
+    return row.landed_unit_price == null && estimate != null && estimate >= 0 ? 'estimate' : 'stated';
+  }
+  if (row.landed_unit_price == null) return 'silent';
+  if (row.source_type != null && !SELF_WRITTEN_SOURCES.has(String(row.source_type))) return 'stated';
+  const landed = numberOrNull(row.landed_unit_price);
+  const sticker = numberOrNull(row.normalized_unit_price);
+  return landed != null && sticker != null && Math.abs(landed - sticker) <= STORED_UNIT_STEP + 1e-9 ? 'silent' : 'stated';
+}
+
+// The shipping to add to a row's current price, as { amount, basis, note },
+// or null: a 'stated' row, a row with no current price, and a silent row
+// with no vendor identity (no vendor name and no listing URL, so no rule).
+// basis 'estimated' is a labelled guess. A vendor rule that depends on facts
+// the row does not carry (a free-over-threshold or weight-table rule: the
+// catalog has no listing weight and no hazardous / oversize freight tag) is
+// counted at its published amount and labelled an estimate; only an
+// unconditional rule ('free', 'flat') is stated as firm.
+const UNCONDITIONAL_RULES = new Set(['free', 'flat']);
+function shippingToCount(row, price, shape) {
+  if (!(price > 0)) return null;
+  if (shape === 'estimate') return { amount: numberOrNull(row.shipping_estimate), basis: 'estimated', note: 'the row\'s own shipping estimate' };
+  if (shape !== 'silent') return null;
+  const vendorName = row.vendor_name ? String(row.vendor_name).trim() : '';
+  const url = row.vendor_product_url ? String(row.vendor_product_url).trim() : '';
+  if (!vendorName && !url) return null;
+  const rule = shippingFor({ vendor: url ? { url } : {}, vendorName, price, quantity: row.quantity });
+  const amount = Number(rule && rule.amount);
+  if (!Number.isFinite(amount) || amount < 0) return null;
+  return { amount, basis: UNCONDITIONAL_RULES.has(rule.basis) ? rule.basis : 'estimated', note: rule.note || '' };
+}
+
+// A row's delivered basis: its shape, the shipping it is ranked with, and the
+// factor that shipping puts on the row's sticker unit price (null: none added).
+function deliveredBasis(row, price, ranked) {
+  const shape = deliveryShape(row);
+  const shipping = ranked ? shippingToCount(row, price, shape) : null;
+  return { shape, shipping, factor: shipping ? (price + shipping.amount) / price : null };
+}
+// The per-ounce price with delivery in it: the sticker with shipping added,
+// else a 'stated' row's own landed figure, else null (the row gives none).
+function perOzWithDelivery(perOz, landedPerOz, { shape, factor }) {
+  if (perOz == null) return null;
+  if (factor != null) return perOz * factor;
+  return shape === 'stated' ? landedPerOz : null;
+}
+// A count row's per-unit rank: the sticker with shipping added, else the row's
+// own landed total over its pack count, else its per-item landed figure, else
+// the sticker.
+function perUnitRank(perUnit, factor, landedTotal, packCount, perItemLanded) {
+  if (factor != null) return perUnit * factor;
+  if (landedTotal > 0) return landedTotal / packCount;
+  return perItemLanded ?? perUnit;
+}
+
 function scoreVendorRows(rows, product) {
   const unitSizeOz = numberOrNull(product?.unit_size_oz);
   const catalog = unitSizeOz > 0 ? null : parsePackCount(product?.container_size);
@@ -3331,13 +3432,26 @@ function scoreVendorRows(rows, product) {
     // is then one item; a measured or absent unit cannot be read per item.
     const rowUnitIsCount = !!row.unit_normalized && parsePackCount(`1 ${row.unit_normalized}`) != null;
     const perItemLanded = countable && rowUnitIsCount && numberOrNull(row.landed_unit_price) > 0 ? numberOrNull(row.landed_unit_price) : null;
+    const perUnit = countable ? price / pack.count : null;
+    // Delivered basis (see deliveryShape): a 'silent' or 'estimate' row
+    // ranks on its CURRENT price plus shipping, per ounce or per item. A
+    // 'stated' row keeps the ranking it had before the rule.
+    const basis = deliveredBasis(row, price, perOz != null || countable);
+    const deliveredPerOz = perOzWithDelivery(perOz, landedPerOz, basis);
     return {
       row,
       perOz,
-      rankPerOz: landedPerOz ?? perOz,
-      perUnit: countable ? price / pack.count : null,
-      rankPerUnit: countable ? (landedTotal > 0 ? landedTotal / pack.count : perItemLanded ?? price / pack.count) : null,
+      rankPerOz: deliveredPerOz ?? landedPerOz ?? perOz,
+      // The per-ounce figure WITH delivery in it, or null when the row gives
+      // none and no shipping could be added (it is then ranked on its sticker
+      // or stored figure, and must not be reported as a delivered price).
+      deliveredPerOz,
+      perUnit,
+      rankPerUnit: countable ? perUnitRank(perUnit, basis.factor, landedTotal, pack.count, perItemLanded) : null,
       price,
+      // The shipping this row was ranked with, or null when the row was
+      // ranked as before. basis 'estimated' is a labelled guess.
+      shipping: basis.shipping,
     };
   });
   const sized = scored.filter((s) => s.perOz != null);
@@ -4160,6 +4274,10 @@ router._test = {
 // catalog through this instead of writing best_price by hand.
 router.recalcBestPrice = recalcBestPrice;
 router.approvedPerOzFields = approvedPerOzFields;
+// What approving a review-queue event writes onto its quote besides the
+// snapshot's price, so a data fix can tell what a pending event would put
+// back (migration 20261119020000).
+router.snapshotPricingFields = snapshotPricingFields;
 // The ONE atomic legacy-approval writer (claim pending → vendor price →
 // history → canonical recalc, one transaction) — the Intelligence Bar
 // approve_price tool reuses it instead of re-implementing the sequence.

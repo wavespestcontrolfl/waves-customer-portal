@@ -354,6 +354,30 @@ function ymdFromToday(days) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+// A plan offer's quote books no visit before its own first day: the date box starts there.
+describe('date before a quote\'s first visit day', () => {
+  it('starts the date box on that day, names it for an earlier typed date, and never calls the slots API', async () => {
+    const first = ymdFromToday(40);
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ primary: [slot('initial', first)], expander: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SlotPicker token="synthetic-token" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} firstVisitFrom={first} />);
+    const box = await screen.findByLabelText(/pick one that works for you/i);
+    expect(box).toHaveAttribute('min', first);
+    const firstDay = new Date(`${first}T12:00:00Z`)
+      .toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+    fireEvent.change(box, { target: { value: ymdFromToday(10) } });
+    expect(await screen.findByRole('alert')).toHaveTextContent(`Your next visit can be on or after ${firstDay}. Pick that date or a later one.`);
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a first day already behind today leaves the box starting today', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(jsonResponse({ primary: [slot('initial', '2099-06-01')], expander: [] })));
+    render(<SlotPicker token="synthetic-token" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} firstVisitFrom={ymdFromToday(-5)} />);
+    expect(await screen.findByLabelText(/pick one that works for you/i)).toHaveAttribute('min', ymdFromToday(0));
+  });
+});
+
 describe('date past the booking limit', () => {
   it('names the last day and never calls the slots API for a date beyond the box limit', async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ primary: [slot('initial', '2099-06-01')], expander: [] }));
@@ -400,6 +424,47 @@ describe('date availability failures', () => {
     await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
     await screen.findByText(/Arrival window:/);
     expect(fetchMock.mock.calls[2][0]).toContain(`date=${pickedYmd}`);
+  });
+});
+
+// A refused plan quote (codex pre-push P1): the slot reads answer the accept's own 409, and the page owns its banner.
+describe('SlotPicker (a 409 the page owns: onRefusal)', () => {
+  const REFUSED = { error: 'This estimate changed since it was created — please go back to your portal for a current price.', code: 'PLAN_START_STATE_CHANGED' };
+  const refused = () => ({ ok: false, status: 409, json: async () => REFUSED });
+
+  it('the slot list hands its 409 body up, and shows no load error when the page takes it', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(refused()));
+    const onRefusal = vi.fn(() => true);
+    render(<SlotPicker token="tok" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} onRefusal={onRefusal} />);
+    await waitFor(() => expect(onRefusal).toHaveBeenCalledWith(409, REFUSED));
+    await waitFor(() => expect(screen.queryByText(/Loading available times/)).not.toBeInTheDocument());
+    expect(screen.queryByText(/Couldn't load times right now/)).not.toBeInTheDocument();
+  });
+
+  it('a 409 the page does not take (or no page hook) keeps the existing load error', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(refused()));
+    const onRefusal = vi.fn(() => false);
+    const { unmount } = render(<SlotPicker token="tok" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} onRefusal={onRefusal} />);
+    expect(await screen.findByText(/Couldn't load times right now/)).toBeInTheDocument();
+    expect(onRefusal).toHaveBeenCalledTimes(1);
+    unmount();
+    render(<SlotPicker token="tok" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} />);
+    expect(await screen.findByText(/Couldn't load times right now/)).toBeInTheDocument();
+  });
+
+  it('a picked date and the date search hand their 409 up too, with no date or search error', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ primary: [slot('initial', '2099-06-01')], expander: [] }));
+    fetchMock.mockResolvedValue(refused());
+    vi.stubGlobal('fetch', fetchMock);
+    const onRefusal = vi.fn(() => true);
+    render(<SlotPicker token="tok" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} onRefusal={onRefusal} />);
+    fireEvent.change(await screen.findByLabelText(/pick one that works for you/i), { target: { value: ymdFromToday(10) } });
+    await waitFor(() => expect(onRefusal).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText(/We couldn’t load times for that day/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'run-date-search' }));
+    await waitFor(() => expect(onRefusal).toHaveBeenCalledTimes(2));
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/find-slots'))).toBe(true);
+    expect(onRefusal).toHaveBeenLastCalledWith(409, REFUSED);
   });
 });
 
@@ -542,6 +607,39 @@ describe('SlotPicker look-ahead (the next 2 weeks are full)', () => {
     await act(async () => { pending.resolve(jsonResponse({ primary: [SLOT_NOV21], expander: [], metadata: { firstDayAvailability: { date: '2099-11-21' } } })); });
     await screen.findByText('The next 2 weeks are full. Here are open times after that:');
     expect(screen.queryByText('Looking further ahead…')).not.toBeInTheDocument();
+  });
+
+  // A refused plan quote (codex pre-push P1): the look-ahead reads the same slot route, so its 409 goes to the page too.
+  const LOOKAHEAD_REFUSED = { error: 'This estimate changed since it was created — please go back to your portal for a current price.', code: 'PLAN_START_STATE_CHANGED' };
+  const refusedRead = () => ({ ok: false, status: 409, json: async () => LOOKAHEAD_REFUSED });
+
+  it('a 409 on the 90-day read goes to the page (onRefusal), and the look-ahead shows nothing more (codex pre-push P1)', async () => {
+    const fetchMock = vi.fn(async (url) => (String(url).includes('windowDays=90') ? refusedRead() : jsonResponse(EMPTY_14)));
+    vi.stubGlobal('fetch', fetchMock);
+    const onRefusal = vi.fn(() => true);
+    renderPicker({ onRefusal });
+    await waitFor(() => expect(onRefusal).toHaveBeenCalledWith(409, LOOKAHEAD_REFUSED));
+    await waitFor(() => expect(screen.queryByText('Looking further ahead…')).not.toBeInTheDocument());
+    expect(screen.queryByText('The next 2 weeks are full. Here are open times after that:')).not.toBeInTheDocument();
+    expect(wideCalls(fetchMock)).toHaveLength(1);
+  });
+
+  it('a 409 on the first-open-day read goes to the page too, and the 90-day times are not shown over it (codex pre-push P1)', async () => {
+    const fetchMock = vi.fn(async (url) => {
+      const u = String(url);
+      if (u.includes('windowDays=90')) {
+        return jsonResponse({ primary: [SLOT_DEC06], expander: [], metadata: { firstDayAvailability: { date: '2099-11-21', openCount: 1 } } });
+      }
+      if (u.includes('windowDays=14')) return jsonResponse(EMPTY_14);
+      return refusedRead();
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const onRefusal = vi.fn(() => true);
+    renderPicker({ onRefusal });
+    await waitFor(() => expect(onRefusal).toHaveBeenCalledWith(409, LOOKAHEAD_REFUSED));
+    await waitFor(() => expect(screen.queryByText('Looking further ahead…')).not.toBeInTheDocument());
+    expect(screen.queryByText('The next 2 weeks are full. Here are open times after that:')).not.toBeInTheDocument();
+    expect(dateCalls(fetchMock)).toHaveLength(1);
   });
 
   it('adds the true first open day (one ?date= read) when the capped list misses it', async () => {
@@ -724,6 +822,14 @@ describe('SlotPicker look-ahead (the next 2 weeks are full)', () => {
       expect(screen.getByTestId(NOTE)).toHaveStyle({ fontSize: '16px' });
       expect(screen.getByRole('link', { name: 'Text (941) 297-5749' })).toHaveAttribute('href', 'sms:+19412975749');
       expect(screen.getAllByRole('link', { name: 'Call (941) 297-5749' })[0]).toHaveAttribute('href', 'tel:+19412975749');
+    });
+
+    // A plan offer's quote opens weeks out by design: the line would show on every one and offer a visit it does not sell.
+    it('stays away on a quote whose first visit is later by design', async () => {
+      stubFetch({ list: { primary: [OPEN('late', '2099-12-17')], expander: [], metadata: { firstDayAvailability: { date: '2099-12-17' } } } });
+      renderPicker({ firstVisitFrom: '2099-12-17' });
+      await screen.findAllByText(/Arrival window|Pick/);
+      expect(screen.queryByTestId(NOTE)).not.toBeInTheDocument();
     });
 
     // 08:00 ET: today's 09:00 opening is inside the 2-hour booking lead, so the glass picker drops it.

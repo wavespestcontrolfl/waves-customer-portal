@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // Tree & Shrub Fast Complete, GATE_TS_PEST_CHECK: the "Live insects found?"
 // block (only when the context carries pestCheck), the insect chips, the Merit
-// block with its Remove button, the live-finds-only note, and the
+// block with its Remove button, the treatment-evidence hold, and the
 // treeShrubReview.pestCheck payload. Gate off: nothing rendered, nothing sent.
 // Synthetic data only.
 import React from 'react';
@@ -28,6 +28,7 @@ afterEach(() => {
 const CATALOG = [
   { id: 'merit', name: 'Merit 2F', category: 'insecticide', active_ingredient: 'Imidacloprid', tsFlags: {} },
   { id: 'tristar', name: 'TriStar 8.5 SL', category: 'insecticide', active_ingredient: 'Acetamiprid', tsFlags: {} },
+  { id: 'distance', name: 'Distance IGR', category: 'insecticide', active_ingredient: 'Pyriproxyfen', tsFlags: {} },
   { id: 'iron', name: 'Chelated Iron Plus', category: 'micronutrient', tsFlags: {} },
 ];
 const VISIT = {
@@ -51,13 +52,14 @@ const BASE_CONTEXT = {
     { productId: 'iron', method: 'foliar_spray' },
     { productId: 'merit', method: 'foliar_spray' },
     { productId: 'tristar', method: 'foliar_spray' },
+    { productId: 'distance', method: 'foliar_spray' },
   ],
   lastVisit: { plantGroups: ['Palms'], areasTreated: [], products: [] },
   warnings: [],
 };
 const CONTEXT = { ...BASE_CONTEXT, pestCheck: PEST_CHECK };
-const MERIT_LINE = 'Merit does not control armored scale. Use Distance or oil on crawlers, or a Zylam drench.';
-const TRISTAR_LINE = 'TriStar does not control armored scale. Use Distance or oil on crawlers, or a Zylam drench.';
+const MERIT_LINE = 'Merit does not control armored scale. Distance scale use is on hold; use oil on live crawlers or a label-supported Zylam drench.';
+const TRISTAR_LINE = 'TriStar does not control armored scale. Distance scale use is on hold; use oil on live crawlers or a label-supported Zylam drench.';
 
 function makeRequest({ context = CONTEXT } = {}) {
   const calls = [];
@@ -144,7 +146,7 @@ describe('the block', () => {
       expect(screen.getByRole('button', { name: label })).toBeTruthy();
     }
     // "Other" is also a plant group and an area: this one sits under its own heading.
-    const group = screen.getByRole('heading', { name: 'Which insects?' }).closest('section');
+    const group = screen.getByRole('heading', { name: 'Target found' }).closest('section');
     expect(within(group).getAllByRole('button').map((b) => b.textContent)).toEqual([
       'Armored scale', 'Soft scale', 'Whitefly', 'Caterpillars', 'Mites', 'Other',
     ]);
@@ -159,8 +161,9 @@ describe('the block', () => {
     tick('Yes');
     tick('Mites');
     tick('Whitefly');
+    tick('Crawlers / nymphs');
     const body = await completeBody(request);
-    expect(body.treeShrubReview.pestCheck).toEqual({ liveInsectsFound: true, insectTypes: ['whitefly', 'mites'] });
+    expect(body.treeShrubReview.pestCheck).toEqual({ liveInsectsFound: true, insectTypes: ['whitefly', 'mites'], lifeStage: 'crawlers_nymphs' });
   });
 
   test('No rides the body with no types', async () => {
@@ -178,9 +181,10 @@ describe('the Merit rule', () => {
     const request = makeRequest();
     await readyVisit(request);
     await useProduct('Merit 2F');
-    expect(completeButton().disabled).toBe(false);
+    expect(completeButton().disabled).toBe(true);
     tick('Yes');
     tick('Armored scale');
+    tick('Crawlers / nymphs');
     expect(screen.getAllByText(MERIT_LINE).length).toBeGreaterThan(0);
     expect(completeButton().disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Remove Merit from this visit' }));
@@ -197,7 +201,7 @@ describe('the Merit rule', () => {
     expect(completeButton().disabled).toBe(false);
     const body = await completeBody(request);
     expect(body.products.map((p) => p.productId)).toEqual(['tristar']);
-    expect(body.treeShrubReview.pestCheck).toEqual({ liveInsectsFound: true, insectTypes: ['armored_scale', 'whitefly'] });
+    expect(body.treeShrubReview.pestCheck).toEqual({ liveInsectsFound: true, insectTypes: ['armored_scale', 'whitefly'], lifeStage: 'crawlers_nymphs' });
   });
 
   test('armored scale with soft scale: the line is a note and Complete stays open', async () => {
@@ -206,6 +210,7 @@ describe('the Merit rule', () => {
     tick('Yes');
     tick('Armored scale');
     tick('Soft scale');
+    tick('Crawlers / nymphs');
     expect(screen.getByText(MERIT_LINE)).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Remove Merit from this visit' })).toBeNull();
     expect(completeButton().disabled).toBe(false);
@@ -219,22 +224,56 @@ describe('the Merit rule', () => {
   });
 });
 
-describe('the live-finds-only note', () => {
-  test('No with TriStar on the visit: a note, and Complete is not held', async () => {
-    const request = makeRequest();
-    await readyVisit(request);
+describe('the Distance scale hold', () => {
+  test('soft scale holds Distance until the product is removed; whitefly stays allowed', async () => {
+    await readyVisit();
+    await useProduct('Distance IGR');
+    tick('Yes');
+    tick('Soft scale');
+    tick('Crawlers / nymphs');
+    expect(screen.getByText('Distance IGR scale use is on hold. Remove Distance or record a non-scale target supported by the label.', { selector: '[role="alert"]' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Remove Distance from this visit' })).toBeTruthy();
+    expect(completeButton().disabled).toBe(true);
+    tick('Whitefly');
+    // Scale is still selected, so an added whitefly target cannot erase the hold.
+    expect(completeButton().disabled).toBe(true);
+    tick('Soft scale');
+    expect(screen.queryByRole('button', { name: 'Remove Distance from this visit' })).toBeNull();
+    expect(completeButton().disabled).toBe(false);
+  });
+});
+
+describe('treatment evidence', () => {
+  test('No with TriStar on the visit holds because it is live-finds-only', async () => {
+    await readyVisit();
     await useProduct('TriStar 8.5 SL');
     tick('No');
-    expect(screen.getByText('No live insects recorded. TriStar is for live finds only.')).toBeTruthy();
-    expect(completeButton().disabled).toBe(false);
-    const body = await completeBody(request);
-    expect(body.treeShrubReview.pestCheck.liveInsectsFound).toBe(false);
+    fireEvent.change(screen.getByLabelText('Label-supported preventive reason'), { target: { value: 'Routine calendar treatment.' } });
+    expect(screen.getByText('TriStar requires a live target and stage. Remove the treatment or record what was found.', { selector: '[role="alert"]' })).toBeTruthy();
+    expect(completeButton().disabled).toBe(true);
   });
 
-  test('No with an ordinary product: no note', async () => {
+  test('No with a systemic treatment requires and records a label-supported preventive reason', async () => {
+    const request = makeRequest();
+    await readyVisit(request);
+    await useProduct('Merit 2F');
+    tick('No');
+    expect(completeButton().disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText('Label-supported preventive reason'), { target: { value: 'Spring systemic timing supported by the label and property history.' } });
+    expect(completeButton().disabled).toBe(false);
+    const body = await completeBody(request);
+    expect(body.treeShrubReview.pestCheck).toEqual({
+      liveInsectsFound: false,
+      insectTypes: [],
+      preventiveReason: 'Spring systemic timing supported by the label and property history.',
+    });
+  });
+
+  test('No with an ordinary product remains scout-only evidence and does not hold', async () => {
     await readyVisit();
     await useProduct('Chelated Iron Plus');
     tick('No');
-    expect(screen.queryByText(/is for live finds only/)).toBeNull();
+    expect(screen.getByText('Leave products off for a scout-only visit.')).toBeTruthy();
+    expect(completeButton().disabled).toBe(false);
   });
 });

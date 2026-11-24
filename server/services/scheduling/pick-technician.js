@@ -31,7 +31,7 @@
  * Reads only. The route estimate spends none of the shared Google allowance
  * (providerTravel: false, the conservative model the save checks with).
  */
-const { liveServiceOrHold } = require('./reservation-occupancy');
+const { bookedVisitOrLiveHold } = require('./reservation-occupancy');
 const defaultDb = require('../../models/db');
 const logger = require('../logger');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
@@ -91,7 +91,7 @@ async function stopsByTechnician(conn, date, technicianIds) {
     // The occupancy and route models' own predicates: a windowless
     // placeholder row and an expired estimate hold are not stops.
     .whereNotNull('window_start')
-    .where(liveServiceOrHold)
+    .where(bookedVisitOrLiveHold)
     .groupBy('technician_id')
     .select('technician_id')
     .count('* as stops');
@@ -168,6 +168,8 @@ async function pickByServiceLine(conn, techs, visit) {
 async function pickTechnicianForVisit({
   conn = defaultDb, date, windowStart, windowEnd, durationMinutes = DEFAULT_DURATION_MINUTES,
   lat = null, lng = null, zip = null, serviceType = null, serviceId = null, serviceKey = null, customerId = null, excludeServiceIds = [],
+  // The lead the visit is booked for, when the caller has it: a Waves Assessment's line (line-technician).
+  leadId = null,
   // Whose rows the availability probe skips. Default: the customer's own (a
   // fresh booking, where the caller's same-day guard owns same-customer
   // overlaps — parity with its save probe). A caller assigning an EXISTING
@@ -193,7 +195,7 @@ async function pickTechnicianForVisit({
   // The visit's place (customer, map position) rides along for GATE_TERRITORY_ROUTING.
   const linePick = await pickByServiceLine(conn, techs, {
     serviceId, serviceKey, serviceType, date, windowStart, windowEnd, durationMinutes, excludeCustomerId, excludeServiceIds,
-    zip, customerId, lat, lng,
+    zip, customerId, leadId, lat, lng,
   });
   if (linePick) return linePick;
 

@@ -825,6 +825,22 @@ describe('caller on file and the lead rule (owner ruling 2026-11-04, D1 A)', () 
     }
   });
 
+  // Fix proposal 52a648ce (11-15): the auditor flagged prospects already on file
+  // (known_caller other_account) who called to check a visit already booked,
+  // while production filed those calls as scheduling. Both readers (the audit and
+  // the call-incidents second reader) read auditPromptFor, so the rule sits in both prompts.
+  test('a call about a visit set before the call is not a new lead, also from a prospect', () => {
+    for (const prompt of [AUDIT_PROMPT, AUDIT_PROMPT_V1]) {
+      expect(prompt).toContain('A call about a visit set before this call is not a new lead either, even from a caller who is not yet a customer');
+      expect(prompt).toContain('a visit already booked or promised for a stated day or time, or asking why no one came for it, is scheduling for that visit');
+      expect(prompt).toContain('such a caller is a new lead only when they also ask for service beyond that visit.');
+      // A first ask stays a lead: service, prices, a first booking, a quote callback,
+      // and a prospect promised only a callback who books the first visit on the call.
+      expect(prompt).toContain('asks about service, prices or a first booking (a prospect calling back about an earlier quote still counts)');
+      expect(prompt).toContain('A prospect who was only promised a callback and gets a first visit set on this call is still a new lead.');
+    }
+  });
+
   test('renders the caller stamp the call processor stored', () => {
     expect(callerOnFileBlock(call('current_customer'))).toMatch(/^CALLER ON FILE: .*CURRENT Waves customer\.\n$/);
     expect(callerOnFileBlock(call('other_account'))).toMatch(/not a current customer/);

@@ -39,12 +39,8 @@ const { findValidCandidateSlots } = require('../services/auto-dispatch/candidate
 const { applyAutoDispatchMove } = require('../services/auto-dispatch/apply');
 const { techChangeRefusal } = require('../services/auto-dispatch/keep-tech');
 
-const ORIGINAL_DRIVE_GATE = process.env.GATE_DRIVE_TIME_CALIBRATION;
 const ORIGINAL_KEEP = process.env.GATE_AUTO_DISPATCH_KEEP_TECH;
-beforeAll(() => { delete process.env.GATE_DRIVE_TIME_CALIBRATION; });
 afterAll(() => {
-  if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
-  else process.env.GATE_DRIVE_TIME_CALIBRATION = ORIGINAL_DRIVE_GATE;
   if (ORIGINAL_KEEP === undefined) delete process.env.GATE_AUTO_DISPATCH_KEEP_TECH;
   else process.env.GATE_AUTO_DISPATCH_KEEP_TECH = ORIGINAL_KEEP;
 });

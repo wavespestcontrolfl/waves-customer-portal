@@ -16,6 +16,7 @@ const { isEnabled } = require('../config/feature-gates');
 const {
   listPickableCalls, bookNewCallerVisit, linkNewCallerVisit, armLinkedVisitComms,
 } = require('../services/booking/new-caller-visit');
+const { getZone } = require('../services/scheduling/forecast-zones');
 const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireAdmin);
@@ -37,7 +38,6 @@ router.get('/calls', async (req, res, next) => {
 router.post('/', async (req, res, next) => {
   try {
     // The zone the office create route stamps for the same address.
-    const { getZone } = require('./admin-schedule');
     const address = req.body?.address && typeof req.body.address === 'object' ? req.body.address : {};
     const zone = getZone(typeof address.city === 'string' ? address.city : '', typeof address.zip === 'string' ? address.zip : '');
     const { visit, warnings } = await bookNewCallerVisit({

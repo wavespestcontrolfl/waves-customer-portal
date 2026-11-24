@@ -89,7 +89,7 @@ describe('PrepGuidePage block rendering', () => {
     expect(telLink).toHaveAttribute('href', 'tel:+19415550100');
   });
 
-  it('day-only (GATE_DAY_ONLY_PROMISE): an upcoming visit shows the date and the arrival note, never an hour', async () => {
+  it('day-only: an upcoming visit shows the date and the arrival note, never an hour', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
       ...BASE_PAYLOAD,
       blocks: [{ type: 'paragraph', content: 'Plain paragraph.' }],

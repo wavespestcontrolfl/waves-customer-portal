@@ -99,7 +99,7 @@ describe("comboMove 'together'", () => {
       newDate: TARGET,
       newWindow: { start: '11:00', end: '12:00' },
       notifyCustomer: true,
-      body: { technicianId: 'tech-2', expectVisit: SUMMARY },
+      body: { technicianId: 'tech-2', customerAskedTime: false, expectVisit: SUMMARY },
       actor: { techRole: 'admin', technicianId: 'staff-1' },
       sourceSurface: 'edit_modal',
       keepSlot: false,
@@ -111,46 +111,29 @@ describe("comboMove 'together'", () => {
     expect(mockDispatch.runPlannedVisitMove).toHaveBeenCalledWith(expect.objectContaining({ serviceId: 'svc-a', newDate: TARGET, notifyCustomer: true, actor: { techRole: 'admin', technicianId: 'staff-1' } }));
   });
 
-  describe('GATE_DAY_ONLY_PROMISE part E: the office\'s "customer asked for this time" rides the whole-stop move', () => {
-    const withGate = async (value, fn) => {
-      const prior = process.env.GATE_DAY_ONLY_PROMISE;
-      if (value === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = value;
-      try { await fn(); } finally { if (prior === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = prior; }
-    };
-
-    test('gate on: a checked box is forwarded as true, an unchecked one (or none) as false; the per-row edit keeps nothing that moves', async () => {
-      await withGate('true', async () => {
-        const checked = request({ scheduledDate: TARGET, windowStart: '11:00', windowEnd: '12:00', customerAskedTime: true, comboMove: 'together' });
-        await planComboEditMove(checked);
-        expect(mockDispatch.planVisitMoveForStaff.mock.calls[0][0].body).toEqual({ customerAskedTime: true, expectVisit: SUMMARY });
-        // The move's own UPDATE writes the intent once per member (B3); the per-row edit has no date or time left, so
-        // update-details' recordOfficeMoveIntent (which fires only on a slot change) cannot write a second time.
-        expect(checked.body).not.toHaveProperty('scheduledDate');
-        expect(checked.body).not.toHaveProperty('windowStart');
-        mockDispatch.planVisitMoveForStaff.mockClear();
-        await planComboEditMove(request({ scheduledDate: TARGET, windowStart: '11:00', windowEnd: '12:00', customerAskedTime: false, comboMove: 'together' }));
-        expect(mockDispatch.planVisitMoveForStaff.mock.calls[0][0].body.customerAskedTime).toBe(false);
-        mockDispatch.planVisitMoveForStaff.mockClear();
-        await planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'together' }));
-        expect(mockDispatch.planVisitMoveForStaff.mock.calls[0][0].body.customerAskedTime).toBe(false);
-      });
-    });
-
-    test('gate off: the planner body is byte for byte today\'s even if the request carries the field', async () => {
-      await withGate(undefined, async () => {
-        await planComboEditMove(request({ scheduledDate: TARGET, windowStart: '11:00', windowEnd: '12:00', customerAskedTime: true, technicianId: 'tech-2', assignmentScope: 'this_only', comboMove: 'together' }));
-        expect(mockDispatch.planVisitMoveForStaff.mock.calls[0][0].body).toEqual({ technicianId: 'tech-2', expectVisit: SUMMARY });
-      });
+  describe('day-only promise part E: the office\'s "customer asked for this time" rides the whole-stop move', () => {
+    test('a checked box is forwarded as true, an unchecked one (or none) as false; the per-row edit keeps nothing that moves', async () => {
+      const checked = request({ scheduledDate: TARGET, windowStart: '11:00', windowEnd: '12:00', customerAskedTime: true, comboMove: 'together' });
+      await planComboEditMove(checked);
+      expect(mockDispatch.planVisitMoveForStaff.mock.calls[0][0].body).toEqual({ customerAskedTime: true, expectVisit: SUMMARY });
+      // The move's own UPDATE writes the intent once per member (B3); the per-row edit has no date or time left, so
+      // update-details' recordOfficeMoveIntent (which fires only on a slot change) cannot write a second time.
+      expect(checked.body).not.toHaveProperty('scheduledDate');
+      expect(checked.body).not.toHaveProperty('windowStart');
+      mockDispatch.planVisitMoveForStaff.mockClear();
+      await planComboEditMove(request({ scheduledDate: TARGET, windowStart: '11:00', windowEnd: '12:00', customerAskedTime: false, comboMove: 'together' }));
+      expect(mockDispatch.planVisitMoveForStaff.mock.calls[0][0].body.customerAskedTime).toBe(false);
+      mockDispatch.planVisitMoveForStaff.mockClear();
+      await planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'together' }));
+      expect(mockDispatch.planVisitMoveForStaff.mock.calls[0][0].body.customerAskedTime).toBe(false);
     });
 
     test('Separate does not plan a move here: the split row then moves through the ordinary edit, which writes the intent once', async () => {
-      await withGate('true', async () => {
-        const req = request({ scheduledDate: TARGET, customerAskedTime: true, comboMove: 'separate' });
-        expect(await planComboEditMove(req)).toMatchObject({ separated: true });
-        expect(mockDispatch.planVisitMoveForStaff).not.toHaveBeenCalled();
-        expect(req.body.customerAskedTime).toBe(true);
-        expect(req.body.scheduledDate).toBe(TARGET);
-      });
+      const req = request({ scheduledDate: TARGET, customerAskedTime: true, comboMove: 'separate' });
+      expect(await planComboEditMove(req)).toMatchObject({ separated: true });
+      expect(mockDispatch.planVisitMoveForStaff).not.toHaveBeenCalled();
+      expect(req.body.customerAskedTime).toBe(true);
+      expect(req.body.scheduledDate).toBe(TARGET);
     });
   });
 
@@ -159,7 +142,7 @@ describe("comboMove 'together'", () => {
     await planComboEditMove(req);
     expect(mockDispatch.planVisitMoveForStaff).toHaveBeenCalledWith(expect.objectContaining({
       newDate: FUTURE, newWindow: undefined, notifyCustomer: false, keepSlot: true,
-      body: { technicianId: 'tech-2', expectVisit: SUMMARY },
+      body: { technicianId: 'tech-2', customerAskedTime: false, expectVisit: SUMMARY },
     }));
   });
 

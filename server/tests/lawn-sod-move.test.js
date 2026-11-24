@@ -72,6 +72,21 @@ describe('a move clears the whole new-sod record', () => {
     expect(fs.readFileSync(path.join(__dirname, '../services/property-role-proposals.js'), 'utf8')).toMatch(/if \(!sameHomeFlip\) await require\('\.\/customer-address-fanout'\)\.markSprinklerSettingsMoved\(customerId, trx\);/);
   });
 
+  test('the sprinkler timer on file is a fact about the home just left: the same stamp clears it, and the merge path keeps it', async () => {
+    const timer = { irrigation_controller_brand: 'hunter', irrigation_controller_model: 'x2', irrigation_controller_app: 'yes' };
+    const timerOf = (prefs) => Object.fromEntries(Object.keys(timer).map((c) => [c, prefs[c]]));
+    const moved = makeStore({ ...record(), ...timer, irrigation_controller_location: 'Garage wall' });
+    await propagateCustomerAddressChange({ before: HOME, after: NEW_HOME }, moved.db);
+    expect(timerOf(moved.prefs)).toEqual({ irrigation_controller_brand: null, irrigation_controller_model: null, irrigation_controller_app: null });
+    expect(moved.prefs.irrigation_controller_location).toBe('Garage wall'); // the settings themselves are never touched
+    const sameHome = makeStore({ ...record(), ...timer });
+    await propagateCustomerAddressChange({ before: HOME, after: { ...HOME, address_line1: '100 EXAMPLE CT.' } }, sameHome.db);
+    expect(timerOf(sameHome.prefs)).toEqual(timer);
+    const merged = makeStore({ ...record(), ...timer });
+    await markSprinklerSettingsMoved('cust-1', merged.db, { clearNewSod: false });
+    expect(timerOf(merged.prefs)).toEqual(timer);
+  });
+
   test('the merge path stamps the move WITHOUT clearing the record, so an undo returns the row with it', async () => {
     const store = makeStore(record());
     await markSprinklerSettingsMoved('cust-1', store.db, { clearNewSod: false });

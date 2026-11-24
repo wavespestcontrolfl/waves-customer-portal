@@ -13,6 +13,10 @@ const { validateRule } = require('../services/service-report/lawn-watering-rule'
 const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
 
 const ALL = [...migration.FILL, ...migration.REPLACE];
+const productNamesOf = (text) => String(text || '').split('\n')
+  .filter((line) => line.includes(' — '))
+  .map((line) => line.split(' — ')[0].trim())
+  .filter(Boolean);
 
 describe('the v13 watering rules', () => {
   test.each(ALL.map((item) => [item.name, item.rule]))('%s is a valid rule', (_name, rule) => {
@@ -33,17 +37,17 @@ describe('the v13 watering rules', () => {
         // ... and every add-on step (addOns.bermudaRemoval, PR #6035).
         for (const source of [visit, ...Object.values(visit.cadenceVariants || {}), ...Object.values(visit.addOns || {})]) {
           for (const field of ['primary', 'secondary']) {
-            for (const line of String(source[field] || '').split('\n')) {
-              const name = line.split(' — ')[0].trim();
-              if (name && !/^Scout visit/.test(name)) names.add(name);
-            }
+            for (const name of productNamesOf(source[field])) names.add(name);
           }
         }
       }
     }
+    expect(names).toContain('Tetrino Insecticide');
+    expect([...names].some((name) => name.startsWith('Scout May'))).toBe(false);
     // Stored on main by earlier label reads (20260930000001 seed).
     const matrix = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
-    const storedOnMain = new Set(['Arena 50 WDG', 'Celsius WG', 'Atticus Talak 7.9 F']);
+    // LESCO Crosscheck Plus: the house bifenthrin since owner ruling 2026-11-18; its 24 h hold is stored by 20261027190000.
+    const storedOnMain = new Set(['Arena 50 WDG', 'Celsius WG', 'Atticus Talak 7.9 F', 'LESCO Crosscheck Plus']);
     // Blindside (the v13 fallback weed spot) has its own migration.
     const blindside = require('../models/migrations/20261006090000_watering_rule_blindside');
     const dimensionGranular = require('../models/migrations/20261006120000_watering_rule_dimension_18_0_10');
@@ -54,6 +58,13 @@ describe('the v13 watering rules', () => {
     const advion = require('../models/migrations/20261023140000_lawn_v13_advion_insect_granule');
     const summerPotassium = require('../models/migrations/20261029170000_lawn_v13_summer_potassium');
     const covered = new Set([...ALL.map((item) => item.name), ...storedOnMain, ...migration.FAIL_CLOSED.map((item) => item.name), blindside.NAME, dimensionGranular.NAME, ...bermuda.ITEMS.map((item) => item.name), ...matrix.WATERING.map((item) => item.name), ...matrix.FAIL_CLOSED.map((item) => item.name), ...require('../models/migrations/20261007181000_lawn_v13_matrix_adds_fixes').WATERING.map((item) => item.name), ...december.WATERING.map((item) => item.name), ...granule.WATERING.map((item) => item.name), ...aprilPolymer.WATERING.map((item) => item.name), ...advion.WATERING.map((item) => item.name), ...summerPotassium.WATERING.map((item) => item.name)]);
+    // The October bag (LESCO Stonewall 0.37% 18-0-10, 20261122120000): the 10-22 label pass stores its rule on the production row; a
+    // database built from migrations gets the same rule with the catalog row the October migration inserts.
+    const labelPass = require('../models/migrations/20261022120000_watering_rule_lawn_label_pass');
+    const octoberStonewall = require('../models/migrations/20261122120000_lawn_v13_october_stonewall');
+    const octoberRule = labelPass.FILL.find((item) => item.name === octoberStonewall.NEW_NAME);
+    expect(JSON.parse(octoberStonewall.CATALOG_ROW.post_application_watering)).toEqual(octoberRule.rule);
+    covered.add(octoberRule.name);
     expect([...names].filter((name) => !covered.has(name))).toEqual([]);
   });
 

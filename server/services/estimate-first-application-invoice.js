@@ -388,6 +388,17 @@ async function stampGroupRevalidated(conn, { invoiceId, anchorId, siblingIds, ex
   });
 }
 
+// The first application's visits: the accept's anchor visit and every other
+// series parent the estimate booked for that day, in id order. None when the
+// anchor is not one of this estimate's series parents.
+async function firstApplicationMembers(conn, { estimateId, customerId, scheduledServiceId }) {
+  const first = await conn('scheduled_services').where({ id: scheduledServiceId,
+    customer_id: customerId, source_estimate_id: estimateId }).first();
+  if (!first || first.recurring_parent_id) return [];
+  return conn('scheduled_services').where({ customer_id: customerId,
+    source_estimate_id: estimateId, scheduled_date: first.scheduled_date }).whereNull('recurring_parent_id').orderBy('id');
+}
+
 // Freeze the accept route's per-service authority while it still exists.
 // Later closeout must never reconstruct this split from mutable plan prices.
 // Unknown composition keeps the existing aggregate and requires office review.
@@ -395,11 +406,8 @@ async function itemizeFirstApplication({ estimateId, customerId, scheduledServic
   if (process.env.GATE_VISIT_CLOSEOUT !== 'true' || !scheduledServiceId
       || !Array.isArray(rowAmounts) || rowAmounts.length < 2) return [line];
   if (!Array.isArray(rowDiscounts) || rowDiscounts.some((amount) => !Number.isFinite(amount) || amount < 0)) return [line];
-  const first = await conn('scheduled_services').where({ id: scheduledServiceId,
-    customer_id: customerId, source_estimate_id: estimateId }).first();
-  if (!first || first.recurring_parent_id) return [line];
-  const members = await conn('scheduled_services').where({ customer_id: customerId,
-    source_estimate_id: estimateId, scheduled_date: first.scheduled_date }).whereNull('recurring_parent_id').orderBy('id');
+  const members = await firstApplicationMembers(conn, { estimateId, customerId, scheduledServiceId });
+  if (!members.length) return [line];
   const { recurringServiceKey, reservedAcceptPerVisitSplit } = require('./estimate-converter');
   const identity = (member) => ({ name: member.service_type });
   // The invoice's separate labeled credit stays intact. Restore only each
@@ -418,6 +426,85 @@ async function itemizeFirstApplication({ estimateId, customerId, scheduledServic
       || member.service_type,
     quantity: 1, unit_price: amounts[index], amount: amounts[index],
   }));
+}
+
+function lineCents(line) {
+  const quantity = line?.quantity != null ? Number(line.quantity) : 1;
+  return Math.round((line?.amount != null ? Number(line.amount) : Number(line?.unit_price) * quantity) * 100);
+}
+const discountKey = (name) => String(name || '').trim().toLowerCase();
+
+// `lines` (the first application's line, or one line per visit, plus any
+// labeled credit the accept itemized) rebuilt from each visit's accepted
+// estimate breakdown: the application at the accepted price, then one line per
+// discount name. Null unless every visit has a breakdown, the breakdowns net to
+// exactly what `lines` bill, each labeled credit is one of those discounts at
+// the same amount, and a per-visit line still bills its own visit's share.
+function firstApplicationDiscountLines(lines, visits) {
+  const { lineIsBaseApplication } = require('./invoice');
+  if (visits.some(({ breakdown }) => !breakdown)) return null;
+  const cents = (value) => Math.round(Number(value) * 100);
+  const amounts = lines.map(lineCents);
+  if (lines.some((line, index) => !Number.isSafeInteger(amounts[index]) || !amounts[index]
+      || Number(line?.quantity ?? 1) !== 1)) return null;
+  const base = lines.filter((line, index) => amounts[index] > 0 && lineIsBaseApplication(line));
+  const credits = lines.filter((line, index) => amounts[index] < 0);
+  if (!base.length || base.length + credits.length !== lines.length) return null;
+  const discounts = new Map();
+  for (const { breakdown } of visits) {
+    for (const row of breakdown.discounts) {
+      const key = discountKey(row.name);
+      if (!discounts.has(key)) discounts.set(key, { name: row.name, cents: 0 });
+      discounts.get(key).cents += cents(row.dollars);
+    }
+  }
+  if (!discounts.size) return null;
+  const creditByKey = new Map(credits.map((credit) => [discountKey(credit.description), credit]));
+  if (creditByKey.size !== credits.length
+      || credits.some((credit) => discounts.get(discountKey(credit.description))?.cents !== -lineCents(credit))) return null;
+  const billed = amounts.reduce((sum, amount) => sum + amount, 0);
+  if (visits.reduce((sum, { breakdown }) => sum + cents(breakdown.amount), 0) !== billed) return null;
+  // One combined line bills every visit; a per-visit line (itemizeFirstApplication)
+  // bills its own visit's price plus that visit's share of the labeled credits.
+  const combined = base.length === 1 && !/_primary$/.test(String(base[0].client_id || ''));
+  const byLine = combined ? [visits]
+    : base.map((line) => visits.filter(({ member }) => line.client_id === `scheduled_${member.id}_primary`));
+  const share = ({ breakdown }) => cents(breakdown.amount) + breakdown.discounts
+    .filter((row) => creditByKey.has(discountKey(row.name))).reduce((sum, row) => sum + cents(row.dollars), 0);
+  if (!combined && (base.length !== visits.length || byLine.some((group) => group.length !== 1)
+      || new Set(base.map((line) => line.client_id)).size !== base.length
+      || base.some((line, index) => lineCents(line) !== share(byLine[index][0])))) return null;
+  const gross = base.map((line, index) => {
+    const price = byLine[index].reduce((sum, { breakdown }) => sum + cents(breakdown.base), 0) / 100;
+    return { ...line, unit_price: price, ...(line.amount != null ? { amount: price } : {}) };
+  });
+  return [...gross, ...[...discounts].map(([key, row]) => creditByKey.get(key)
+    || { _kind: 'discount', description: row.name, quantity: 1, unit_price: -row.cents / 100 })];
+}
+
+// The first bill lists the accepted estimate's discounts too (owner 2026-11-22,
+// GATE_INVOICE_ESTIMATE_DISCOUNT_LINES): the WaveGuard tier and the estimate's
+// own discount as their own lines, from the same breakdown each visit's later
+// bills print (completion-pricing.js acceptedVisitBreakdown). `lines` come back
+// unchanged when the gate is off, a read fails (on its own savepoint, so the
+// accept's transaction survives), or the numbers do not reconcile to the cent.
+async function itemizeFirstApplicationDiscounts({ estimateId, customerId, scheduledServiceId, lines }, conn = db) {
+  if (!scheduledServiceId || !require('../config/feature-gates').invoiceEstimateDiscountLinesLive()) return lines;
+  const read = async (q) => {
+    const { acceptedVisitBreakdown } = require('./completion-pricing');
+    const visits = [];
+    for (const member of await firstApplicationMembers(q, { estimateId, customerId, scheduledServiceId })) {
+      visits.push({ member, breakdown: (await acceptedVisitBreakdown(member, { database: q, firstApplication: true })).breakdown });
+    }
+    return visits;
+  };
+  try {
+    const visits = conn.isTransaction === true ? await conn.transaction(read) : await read(conn);
+    return firstApplicationDiscountLines(lines, visits) || lines;
+  } catch (err) {
+    require('./logger').warn(`[estimate-first-application-invoice] first-bill discount lines skipped for estimate ${estimateId}: ${err?.message || err}`);
+    return lines;
+  }
 }
 
 // The visit's accept-time first-application stamp
@@ -860,6 +947,7 @@ function sumVisitChargeCents(rows, visitId) {
 
 module.exports = {
   itemizeFirstApplication,
+  itemizeFirstApplicationDiscounts,
   dateOnly,
   findFirstApplicationInvoiceForEstimateService,
   // Shared with billing-lane.js's REFUSE-AFTER-A-VOID guard so the lookup and

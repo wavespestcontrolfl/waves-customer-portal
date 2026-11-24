@@ -173,7 +173,8 @@ describe('customer confirm of a visit the office already confirmed', () => {
     const res = await postConfirm(body);
     expect(res.status).toBe(409);
     expect(res.body.error).toContain('Refresh');
-    expect(db).toHaveBeenCalledTimes(1); // the read only: no update
+    // The read, plus (only when no hour was echoed) the day-only lookup; never an update.
+    expect(db).toHaveBeenCalledTimes(body.windowStart === undefined ? 2 : 1);
   });
 
   test('a pending visit moved after the card loaded is refused when the app sends its slot', async () => {

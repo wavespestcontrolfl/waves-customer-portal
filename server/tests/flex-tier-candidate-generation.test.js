@@ -31,12 +31,6 @@ const db = require('../models/db');
 const { findValidCandidateSlots } = require('../services/auto-dispatch/candidate-slots');
 const { parseETDateTime } = require('../utils/datetime-et');
 
-const ORIGINAL_DRIVE_GATE = process.env.GATE_DRIVE_TIME_CALIBRATION;
-beforeAll(() => { delete process.env.GATE_DRIVE_TIME_CALIBRATION; });
-afterAll(() => {
-  if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
-  else process.env.GATE_DRIVE_TIME_CALIBRATION = ORIGINAL_DRIVE_GATE;
-});
 
 function chain(result) {
   const c = {};
@@ -83,4 +77,23 @@ test('flex tier: an open gap on the freeze-boundary date yields its first legal 
   // Route tiers (no freeze floor): the same gap collapses to 09:00.
   const tiers = await findValidCandidateSlots(service, prefs, { ...ctx, tierMeta: { mode: 'tiers' } });
   expect(tiers.candidates.map((c) => c.start_time)).toEqual(['09:00']);
+});
+
+test('flex tier: a destination 7 days out is admitted for a +/-7 visit and dropped as flex_floor for a +/-5 visit', () => {
+  const { flexCandidateRules, flexTierMoveWindow } = require('../services/auto-dispatch/flex-tier');
+  const { shiftDateStr } = require('../services/auto-dispatch/dates');
+  const service = { id: 's1', scheduled_date: DATE, window_start: '09:00' };
+  const nowDate = new Date('2026-08-31T16:00:00Z');
+  const slots = [{ date: shiftDateStr(DATE, 7), start_time: '09:00' }, { date: shiftDateStr(DATE, 5), start_time: '09:00' }];
+  const admitted = (radiusDays) => {
+    const tierWindow = flexTierMoveWindow({
+      origDate: DATE, anchorDate: DATE, today: '2026-08-31', neighbors: { nearestDays: null }, radiusDays,
+    });
+    const drops = { flex_frozen: 0, flex_floor: 0 };
+    const kept = flexCandidateRules(service, { tierMeta: { mode: 'flex' }, nightLock24h: true, nowDate, tierWindow }).admit(slots, drops);
+    return { dates: kept.map((s) => s.date), drops };
+  };
+  expect(admitted(7)).toEqual({ dates: [shiftDateStr(DATE, 7), shiftDateStr(DATE, 5)], drops: { flex_frozen: 0, flex_floor: 0 } });
+  expect(admitted(5)).toEqual({ dates: [shiftDateStr(DATE, 5)], drops: { flex_frozen: 0, flex_floor: 1 } });
+  expect(admitted(undefined).dates).toEqual([shiftDateStr(DATE, 5)]);
 });

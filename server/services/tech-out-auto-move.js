@@ -48,7 +48,8 @@ const { applyAssignable, assertAssignableTechnician, NOT_ASSIGNABLE } = require(
 const { assertCapabilitiesActive, inactiveCapabilitiesForServices } = require('./technician-capabilities');
 const { dayStopsQuery, guardedCoordSelects } = require('./scheduling/day-stops');
 const { DEFAULT_EXCLUDE_STATUSES, windowsOverlap } = require('./scheduling/occupancy');
-const { liveServiceOrHold, serviceOrHoldIsLive } = require('./scheduling/reservation-occupancy');
+const { bookedVisitOrLiveHold, bookedVisitOrHoldIsLive } = require('./scheduling/reservation-occupancy');
+const { rowBlockMinutes } = require('./scheduling/window-rules');
 const { arrivalWindowRoutingEnabled, checkArrivalPlacement } = require('./scheduling/arrival-route');
 const { resolveGeo, driveMin, HQ } = require('./auto-dispatch/geo');
 const { resolveAlert, emitAlert } = require('./dispatch-alerts');
@@ -142,7 +143,7 @@ async function fitsWindow(stop, tech, date, conn = db) {
       .whereNotIn('status', FIT_EXCLUDE_STATUSES)
       // Only a lapsed, unclaimed estimate hold releases the hour. A booked
       // visit remains occupancy when an old hold stamp was not cleared.
-      .where(liveServiceOrHold)
+      .where(bookedVisitOrLiveHold)
       .select('window_start', 'window_end', 'estimated_duration_minutes');
     const conflict = others.some((row) => {
       const oStart = timeToMinutes(row.window_start);
@@ -176,7 +177,7 @@ async function detourForTech(stop, techId, date) {
   // and the rebooker's commit check) — never a count or an anchor.
   const now = Date.now();
   const neighbors = rows.filter((r) => r.id !== stop.id
-    && serviceOrHoldIsLive(r, now));
+    && bookedVisitOrHoldIsLive(r, now));
   if (!geo) return { detour_minutes: null, stops_that_day: neighbors.length + 1 };
 
   const myStart = timeToMinutes(stop.window_start) ?? 0;
@@ -296,7 +297,9 @@ function makeMoveGuard(stop, date) {
     // mover runs as 'admin' (no work-days guard of its own). A work-days edit between
     // ranking and this commit must not land the stop on a tech who now has the day off.
     // Failing here is a failed candidate: attemptMoves tries the next one.
-    await assertAssignableTechnician(technicianId, { conn: trx, date, workDays: true });
+    // `hours` (GATE_TECH_SHIFT_HOURS): the same re-check for the receiving technician's shift,
+    // on the stop's own block (the move keeps its window).
+    await assertAssignableTechnician(technicianId, { conn: trx, date, workDays: true, hours: rowBlockMinutes(stop) });
     await assertCapabilitiesActive(trx, technicianId, [service], (rowId, why) => Object.assign(
       new Error(`Cannot auto-move stop ${rowId}: ${why}`),
       { statusCode: 409, status: 409, code: 'TECH_OUT_AUTO_MOVE_CAPABILITY_GUARD', isOperational: true },
@@ -512,7 +515,9 @@ async function eligibleRankedCandidates(stop, absentTechId, date) {
   const eligible = [];
   for (const tech of crew) {
     try {
-      await assertAssignableTechnician(tech.id, { conn: db, date, workDays: true });
+      // `hours` (GATE_TECH_SHIFT_HOURS): a technician whose shift does not hold the stop's own
+      // block is not a candidate, as one who has the day off is not.
+      await assertAssignableTechnician(tech.id, { conn: db, date, workDays: true, hours: rowBlockMinutes(stop) });
       eligible.push(tech);
     } catch (err) {
       if (err.code !== NOT_ASSIGNABLE) throw err;

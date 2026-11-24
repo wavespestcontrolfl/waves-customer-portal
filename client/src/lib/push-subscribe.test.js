@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { disablePush } from './push-subscribe.js';
+import { disablePush, ensurePushSubscription, syncPushSubscription } from './push-subscribe.js';
+import { reloadHoldNames } from './reloadHolds';
 
 const OPT_IN_KEY = 'waves_push_admin_opt_ins';
 const token = `header.${btoa(JSON.stringify({ technicianId: 'admin-1' }))}.signature`;
@@ -41,6 +42,19 @@ describe('disablePush', () => {
   function expectOptedOut() {
     expect(JSON.parse(localStorage.getItem(OPT_IN_KEY))).toEqual({ 'admin-1': false });
   }
+
+  it('holds an out-of-date tab reload until the server and the browser both drop the endpoint', async () => {
+    let finishServer;
+    fetch.mockImplementationOnce(() => new Promise((resolve) => { finishServer = resolve; }));
+    const disabling = disablePush({ apiBase: '/api', token });
+    expect(reloadHoldNames()).toContain('push-setup');
+    await vi.waitFor(() => expect(finishServer).toBeTypeOf('function'));
+    expect(reloadHoldNames()).toContain('push-setup');
+    finishServer({ ok: true, status: 200 });
+    await expect(disabling).resolves.toEqual({ ok: true });
+    expect(unsubscribe).toHaveBeenCalled();
+    expect(reloadHoldNames()).not.toContain('push-setup');
+  });
 
   it('preserves the browser endpoint for retry when the server request rejects', async () => {
     fetch.mockRejectedValueOnce(new TypeError('Network unavailable'));
@@ -131,5 +145,66 @@ describe('disablePush', () => {
     });
     expect(unsubscribe).toHaveBeenCalledOnce();
     expectOptedOut();
+  });
+});
+
+describe('ensurePushSubscription', () => {
+  const originalPushManager = Object.getOwnPropertyDescriptor(window, 'PushManager');
+  const originalSecure = Object.getOwnPropertyDescriptor(window, 'isSecureContext');
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    if (originalServiceWorker) Object.defineProperty(navigator, 'serviceWorker', originalServiceWorker);
+    else delete navigator.serviceWorker;
+    if (originalPushManager) Object.defineProperty(window, 'PushManager', originalPushManager);
+    else delete window.PushManager;
+    if (originalSecure) Object.defineProperty(window, 'isSecureContext', originalSecure);
+    else delete window.isSecureContext;
+    localStorage.clear();
+  });
+
+  it('holds an out-of-date tab reload while the browser asks for permission, until the server has the endpoint', async () => {
+    let grant;
+    vi.stubGlobal('Notification', { permission: 'default', requestPermission: () => new Promise((resolve) => { grant = resolve; }) });
+    Object.defineProperty(window, 'PushManager', { configurable: true, value: function PushManager() {} });
+    Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
+    const subscription = { endpoint: 'https://push.example/subscription-2', toJSON: () => ({ endpoint: 'https://push.example/subscription-2' }) };
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      value: {
+        getRegistration: vi.fn().mockResolvedValue({
+          pushManager: { getSubscription: vi.fn().mockResolvedValue(null), subscribe: vi.fn().mockResolvedValue(subscription) },
+        }),
+        ready: Promise.resolve(),
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn(async (url) => ({
+      ok: true,
+      status: 200,
+      json: async () => (String(url).endsWith('/vapid-key') ? { publicKey: 'AAAA' } : {}),
+    })));
+    const enabling = ensurePushSubscription({ apiBase: '/api', token });
+    expect(reloadHoldNames()).toContain('push-setup');
+    grant('granted');
+    await expect(enabling).resolves.toEqual({ ok: true, endpoint: 'https://push.example/subscription-2' });
+    expect(fetch).toHaveBeenCalledWith('/api/admin/push/subscribe', expect.objectContaining({ method: 'POST' }));
+    expect(reloadHoldNames()).not.toContain('push-setup');
+  });
+
+  it('the silent self-heal does not hold the reload, as a reload only runs it again at the next load', async () => {
+    localStorage.setItem(OPT_IN_KEY, JSON.stringify({ 'admin-1': true }));
+    vi.stubGlobal('Notification', { permission: 'granted', requestPermission: vi.fn().mockResolvedValue('granted') });
+    Object.defineProperty(window, 'PushManager', { configurable: true, value: function PushManager() {} });
+    Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
+    const getRegistration = vi.fn().mockResolvedValue({ pushManager: { getSubscription: vi.fn() } });
+    // A service worker that never starts: the self-heal waits for good.
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      value: { getRegistration, ready: new Promise(() => {}) },
+    });
+    vi.stubGlobal('fetch', vi.fn());
+    syncPushSubscription({ apiBase: '/api', token });
+    await vi.waitFor(() => expect(getRegistration).toHaveBeenCalled());
+    expect(reloadHoldNames()).not.toContain('push-setup');
   });
 });

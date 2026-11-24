@@ -1,15 +1,14 @@
 /**
- * GATE_ALERT_BELL_ORDER (owner 2026-11-05, admin-bell plan D1) against live Postgres, through the real service query and
+ * The needs-you-first bell order (owner 2026-11-05, admin-bell plan D1) against live Postgres, through the real service query and
  * the real GET /api/admin/notifications handler. Proves the SQL side: needs-you rows first, then rows with no severity
  * label, then the rest, newest first inside a rank; paging by the three-part cursor never skips or repeats a row (rows
  * that share a millisecond, and rows that share a timestamp exactly, included); offset paging gives the same order; a
- * cursor of the other order (the gate flipped under an open panel, either way) restarts at page 1 with restart: true and the
- * panel's walk then covers every open row once; the gate off keeps the old order and the old cursor; a technician list is ordered the
- * same way. It reads the whole open admin feed, so it asserts on its own rows only (each carries metadata.beoRun).
+ * old two-part (chronological) cursor from a panel left open across a deploy restarts at page 1 with restart: true and the
+ * panel's walk then covers every open row once; a technician list is ordered the same way. It reads the whole open admin feed, so it asserts on its own rows only (each carries metadata.beoRun).
  * It refuses any database but a private QA one or CI's.
  */
 // Read once, when feature-gates loads (the bell policy keeps the live dashboard overlay out of the list).
-const ENV_BEFORE = { GATE_ADMIN_BELL_POLICY: process.env.GATE_ADMIN_BELL_POLICY, GATE_ALERT_BELL_ORDER: process.env.GATE_ALERT_BELL_ORDER };
+const ENV_BEFORE = { GATE_ADMIN_BELL_POLICY: process.env.GATE_ADMIN_BELL_POLICY };
 process.env.GATE_ADMIN_BELL_POLICY = 'true';
 const { randomUUID } = require('crypto');
 
@@ -65,7 +64,6 @@ maybeDescribe('admin bell order (live Postgres)', () => {
   };
   const expectedOrder = (rows) => [...rows].sort((a, b) => (rankOf(a.severity) - rankOf(b.severity))
     || (microsOf(b.at) - microsOf(a.at)) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0)).map((r) => r.id);
-  const timeOrder = (rows) => [...rows].sort((a, b) => (microsOf(b.at) - microsOf(a.at)) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0)).map((r) => r.id);
 
   const own = (list) => list.filter((n) => n.metadata && n.metadata.beoRun === RUN);
   const handler = () => router.stack.find((layer) => layer.route?.path === '/' && layer.route.methods.get).route.stack[0].handle;
@@ -118,8 +116,8 @@ maybeDescribe('admin bell order (live Postgres)', () => {
   });
 
   describe('service order', () => {
-    test('gate on: needs-you first, unlabeled next, the rest last, newest first inside a rank', async () => {
-      const got = own(await NotificationService.getAdminNotifications(500, 0, { role: 'admin', ranked: true, fullAccess: true })).map((n) => n.id);
+    test('needs-you first, unlabeled next, the rest last, newest first inside a rank', async () => {
+      const got = own(await NotificationService.getAdminNotifications(500, 0, { role: 'admin', fullAccess: true })).map((n) => n.id);
       expect(got).toEqual(expectedOrder(rows));
       // unlabeled sit above fyi and broken, below every needs-you
       const keyAt = (id) => rows.find((r) => r.id === id).key;
@@ -130,32 +128,23 @@ maybeDescribe('admin bell order (live Postgres)', () => {
       expect(keys.indexOf('x-u')).toBeLessThan(keys.indexOf('x-f'));
     });
 
-    test('gate on: every row carries its rank', async () => {
-      const all = await NotificationService.getAdminNotifications(500, 0, { role: 'admin', ranked: true, fullAccess: true });
+    test('every row carries its rank', async () => {
+      const all = await NotificationService.getAdminNotifications(500, 0, { role: 'admin', fullAccess: true });
       for (const n of own(all)) {
         const stored = rows.find((r) => r.id === n.id);
         expect(Number(n.bell_rank)).toBe(rankOf(stored.severity));
       }
     });
 
-    test('gate off: plain newest first, no rank column', async () => {
-      const all = await NotificationService.getAdminNotifications(500, 0, { role: 'admin', fullAccess: true });
-      expect(own(all).map((n) => n.id)).toEqual(timeOrder(rows));
-      expect(own(all).every((n) => !('bell_rank' in n))).toBe(true);
-    });
-
     test('done rows and Activity-only rows stay out', async () => {
-      const all = own(await NotificationService.getAdminNotifications(500, 0, { role: 'admin', ranked: true, fullAccess: true }));
+      const all = own(await NotificationService.getAdminNotifications(500, 0, { role: 'admin', fullAccess: true }));
       expect(all).toHaveLength(rows.length);
       expect(all.map((n) => n.title)).not.toContain('bell order done');
       expect(all.map((n) => n.title)).not.toContain('bell order activity');
     });
   });
 
-  describe('paging by cursor, gate on', () => {
-    beforeEach(() => { process.env.GATE_ALERT_BELL_ORDER = 'true'; });
-    afterEach(() => { delete process.env.GATE_ALERT_BELL_ORDER; });
-
+  describe('paging by cursor', () => {
     test.each([1, 2, 3, 5, 7, 100])('limit %i: every row once, in the ranked order', async (limit) => {
       const { seen, first } = await pageAll(limit);
       expect(seen.map((n) => n.id)).toEqual(expectedOrder(rows));
@@ -227,57 +216,7 @@ maybeDescribe('admin bell order (live Postgres)', () => {
     });
   });
 
-  describe('gate off', () => {
-    beforeEach(() => { delete process.env.GATE_ALERT_BELL_ORDER; });
-
-    test('plain newest first, a two-part cursor, no order field, no areaChip', async () => {
-      const body = await list({ limit: '100' });
-      expect(own(body.notifications).map((n) => n.id).filter((id) => rows.some((r) => r.id === id))).toEqual(timeOrder(rows));
-      expect(body).not.toHaveProperty('order');
-      expect(body.notifications.every((n) => !('areaChip' in n))).toBe(true);
-      const small = await list({ limit: '1' });
-      expect(small.next.split('~')).toHaveLength(2);
-    });
-
-    test('paging by cursor walks the time order, once each', async () => {
-      const seen = [];
-      let before;
-      for (let i = 0; i < 500; i += 1) {
-        const body = await list({ limit: '3', ...(before ? { before } : {}) });
-        seen.push(...own(body.notifications).map((n) => n.id));
-        if (!body.next) break;
-        before = body.next;
-      }
-      expect(seen.filter((id) => rows.some((r) => r.id === id))).toEqual(timeOrder(rows));
-    });
-
-  });
-
   // The bell as the panel behaves: a load-more answer with restart: true REPLACES the held list, anything else appends.
-  async function panelWalk({ startGate, pagesBeforeFlip, limit }) {
-    let held = [];
-    let next = null;
-    let restarts = 0;
-    const flip = () => { if (startGate) delete process.env.GATE_ALERT_BELL_ORDER; else process.env.GATE_ALERT_BELL_ORDER = 'true'; };
-    if (startGate) process.env.GATE_ALERT_BELL_ORDER = 'true'; else delete process.env.GATE_ALERT_BELL_ORDER;
-    let body = await list({ limit: String(limit) });
-    held = [...body.notifications];
-    next = body.next;
-    for (let i = 1; i < pagesBeforeFlip && next; i += 1) {
-      body = await list({ limit: String(limit), before: next });
-      held.push(...body.notifications);
-      next = body.next;
-    }
-    const heldBeforeFlip = [...held];
-    flip();
-    const flippedFrom = next;
-    for (let i = 0; i < 500 && next; i += 1) {
-      body = await list({ limit: String(limit), before: next });
-      if (body.restart === true) { held = [...body.notifications]; restarts += 1; } else held.push(...body.notifications);
-      next = body.next;
-    }
-    return { held, heldBeforeFlip, restarts, flippedFrom };
-  }
   const coverage = (held) => {
     const fixture = new Set(rows.map((r) => r.id));
     const ids = own(held).map((n) => n.id).filter((id) => fixture.has(id));
@@ -286,47 +225,31 @@ maybeDescribe('admin bell order (live Postgres)', () => {
     return ids;
   };
 
-  describe('the gate flips while a panel is part way through its list', () => {
-    afterEach(() => { delete process.env.GATE_ALERT_BELL_ORDER; });
+  describe('a panel left open across a deploy still holds a two-part (chronological) cursor', () => {
+    const { formatCursor } = require('../routes/admin-notifications')._cursor;
 
-    test.each([[2, 3], [1, 4], [3, 2]])('ranked list, gate unset after %i page(s) of %i rows: the old cursor restarts and every open row is covered, none skipped or repeated', async (pages, limit) => {
-      const { held, restarts, heldBeforeFlip } = await panelWalk({ startGate: true, pagesBeforeFlip: pages, limit });
-      expect(own(heldBeforeFlip).length).toBeLessThan(rows.length);
-      expect(restarts).toBe(1);
-      expect(coverage(held)).toEqual(timeOrder(rows));
-    });
-
-    test.each([[2, 3], [1, 4], [3, 2]])('chronological list, gate set after %i page(s) of %i rows: the old cursor restarts and every open row is covered, none skipped or repeated', async (pages, limit) => {
-      const { held, restarts, heldBeforeFlip } = await panelWalk({ startGate: false, pagesBeforeFlip: pages, limit });
-      expect(own(heldBeforeFlip).length).toBeLessThan(rows.length);
-      expect(restarts).toBe(1);
+    test.each([2, 3, 5])('limit %i: the old cursor restarts at page 1 and every open row is covered, none skipped or repeated', async (limit) => {
+      const all = await NotificationService.getAdminNotifications(500, 0, { role: 'admin', fullAccess: true });
+      const oldCursor = formatCursor(own(all)[3]);
+      let body = await list({ limit: String(limit), before: oldCursor });
+      expect(body.restart).toBe(true);
+      expect(body.order).toBe('needs-you-first');
+      expect(body.page).toBe(1);
+      expect(body.notifications.map((n) => n.id)).toEqual((await list({ limit: String(limit) })).notifications.map((n) => n.id));
+      let held = [...body.notifications];
+      let next = body.next;
+      for (let i = 0; i < 500 && next; i += 1) {
+        body = await list({ limit: String(limit), before: next });
+        expect(body).not.toHaveProperty('restart');
+        held.push(...body.notifications);
+        next = body.next;
+      }
       expect(coverage(held)).toEqual(expectedOrder(rows));
     });
 
-    test('the restart answer is page 1 of the current order, flagged, with the order named', async () => {
-      process.env.GATE_ALERT_BELL_ORDER = 'true';
-      const ranked = await list({ limit: '3' });
-      delete process.env.GATE_ALERT_BELL_ORDER;
-      const off = await list({ limit: '3', before: ranked.next });
-      expect(off.restart).toBe(true);
-      expect(off).not.toHaveProperty('order');
-      expect(off.page).toBe(1);
-      expect(off.notifications.map((n) => n.id)).toEqual((await list({ limit: '3' })).notifications.map((n) => n.id));
-      const chronoNext = off.next;
-      process.env.GATE_ALERT_BELL_ORDER = 'true';
-      const on = await list({ limit: '3', before: chronoNext });
-      expect(on.restart).toBe(true);
-      expect(on.order).toBe('needs-you-first');
-      expect(on.notifications.map((n) => n.id)).toEqual(ranked.notifications.map((n) => n.id));
-    });
-
     test('a cursor of the current order never restarts', async () => {
-      process.env.GATE_ALERT_BELL_ORDER = 'true';
       const first = await list({ limit: '3' });
       expect(await list({ limit: '3', before: first.next })).not.toHaveProperty('restart');
-      delete process.env.GATE_ALERT_BELL_ORDER;
-      const chrono = await list({ limit: '3' });
-      expect(await list({ limit: '3', before: chrono.next })).not.toHaveProperty('restart');
     });
   });
 });

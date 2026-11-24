@@ -19,9 +19,10 @@ const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
 const {
   subscribeOrResubscribe, lookupByToken, confirmByToken, EMAIL_RE, whereOptOutNeedsWrite, hasLiveConfirmation,
-  WAITLIST_SOURCE, applyWaitlistTags,
+  WAITLIST_SOURCE, applyWaitlistTags, signupEmailError,
 } = require('../services/newsletter-subscribers');
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
+const { screenPublicSignup, sourceLabel } = require('../services/newsletter-signup-screen');
 const AutomationRunner = require('../services/automation-runner');
 const { resolveAnswer, recordQuizResponse, getQuiz, quizBookingUrl } = require('../services/newsletter-quiz');
 const {
@@ -211,15 +212,28 @@ router.get('/quiz/:token/:quizId/:answer', quizLimiter, async (req, res) => {
     const quizIdSafe = encodeURIComponent(quizId);
     const answerSafe = encodeURIComponent(answer);
 
-    const heading = 'One tap to confirm.';
+    // A poll vote that names one of its answers reads like a poll: its question,
+    // "Count my vote", and the way to change the vote. A vote counts once per
+    // email and the last confirmed one wins (recordQuizResponse overwrites the
+    // delivery row). Every other quiz, and a poll link with no such answer,
+    // keeps the confirm page below. Nothing is written on a GET.
+    const quiz = getQuiz(quizId);
+    const pollVote = quiz?.poll && label;
+    const heading = pollVote ? escapeHtml(quiz.question) : 'One tap to confirm.';
+    // A poll is just for fun and nothing follows a vote (no tag, no call, no
+    // visit), so its page names the answer and promises no next step.
+    const picked = label ? `You picked <strong>${escapeHtml(label)}</strong>.` : '';
+    const lead = quiz?.poll ? picked : `${picked}${picked ? ' ' : ''}Tap confirm and we'll take it from here.`;
+    const buttonText = pollVote ? 'Count my vote' : `Confirm${label ? ` — ${escapeHtml(label)}` : ''}`;
+    const smallLine = pollVote
+      ? 'Changed your mind? Tap another answer in the email. Your last vote counts.'
+      : "If you didn't tap this, just close this tab — nothing changes until you click the button.";
     const bodyHtml = `
-          <p>${label
-            ? `You picked <strong>${escapeHtml(label)}</strong>. Tap confirm and we'll take it from here.`
-            : `Tap confirm and we'll take it from here.`}</p>
+          ${lead ? `<p>${lead}</p>` : ''}
           <form method="POST" action="/api/public/newsletter/quiz/${tokenSafe}/${quizIdSafe}/${answerSafe}">
-            <button type="submit" class="btn">Confirm${label ? ` — ${escapeHtml(label)}` : ''}</button>
+            <button type="submit" class="btn">${buttonText}</button>
           </form>
-          <p style="margin-bottom:0; font-size:14px; color:#4F5B70;">If you didn't tap this, just close this tab — nothing changes until you click the button.</p>
+          <p style="margin-bottom:0; font-size:14px; color:#4F5B70;">${smallLine}</p>
         `;
     res.type('html').send(renderConfirmPage(heading, bodyHtml));
   } catch (err) {
@@ -437,8 +451,22 @@ router.post('/feedback/:token/:reaction', feedbackLimiter, async (req, res) => {
 // Layered rate-limited: global /api/ limiter (index.js) plus the per-IP
 // subscribeLimiter above to cap signup-spam without affecting other
 // public endpoints.
+//
+// Bot check (services/newsletter-signup-screen.js): a signup that fills the
+// website form's hidden field, a website-form signup with too-short form
+// timing, or one with no form timing that does not come from a fleet page's
+// browser (Origin), is dropped before any row or email. It gets the same
+// answer as a real signup so a bot cannot tell; a missing or malformed address
+// is refused first, with the same 400 the signup itself gives.
 router.post('/subscribe', subscribeLimiter, async (req, res) => {
   try {
+    const emailError = signupEmailError(req.body.email);
+    if (emailError) return res.status(400).json({ error: emailError.message });
+    const screen = screenPublicSignup(req.body, { origin: req.headers?.origin });
+    if (screen.drop) {
+      logger.info(`[newsletter] public signup dropped reason=${screen.reason} source=${sourceLabel(req.body)}`);
+      return res.json({ success: true, pending: true });
+    }
     const result = await subscribeOrResubscribe({
       email: req.body.email,
       firstName: req.body.firstName || null,
@@ -665,7 +693,9 @@ router.post('/confirm/:token', async (req, res) => {
 
     res.type('html').send(renderConfirmPage(heading, bodyHtml));
   } catch (err) {
-    logger.error(`[newsletter] confirm POST failed: ${err.message}`);
+    // A code, not the message: knex puts a failed query's bound values in its message, and this
+    // path binds the confirmation token and the subscriber's address (AGENTS.md: no PII in logs).
+    logger.error(`[newsletter] confirm POST failed: code=${err.code || err.name || 'unknown'}`);
     res.status(500).json({ error: 'confirm failed' });
   }
 });

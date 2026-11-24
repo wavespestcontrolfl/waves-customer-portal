@@ -1,6 +1,6 @@
 /**
  * Emailed invoices not linked to Spark in its own daily 7:37 ET cron (server/services/scheduler.js, '37 7 * * *'):
- * gate off reads nothing; on, the list runs under runExclusive, so a deploy overlap never raises it twice,
+ * the list runs under runExclusive, so a deploy overlap never raises it twice,
  * and a failed run is logged, never thrown out of the tick.
  *
  * Mock baseline copied from scheduler-quiet-overdue-invoices-cron.test.js.
@@ -18,7 +18,7 @@ jest.mock('../services/twilio', () => ({}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn(),
-  recurringSeriesTopUpLive: jest.fn(() => false), invoiceNotOnSparkLive: jest.fn(() => false),
+  recurringSeriesTopUpLive: jest.fn(() => false),
 }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, task) => task()), settleDeadRunningJobs: jest.fn(async () => []) }));
 jest.mock('../services/auto-dispatch', () => ({ runAutoDispatch: jest.fn() }));
@@ -35,7 +35,7 @@ jest.mock('../services/invoice-not-on-spark', () => ({ runInvoiceNotOnSpark: jes
 
 const cron = require('../utils/scheduled-cron');
 const { runExclusive } = require('../utils/cron-lock');
-const { isEnabled, invoiceNotOnSparkLive } = require('../config/feature-gates');
+const { isEnabled } = require('../config/feature-gates');
 const { runInvoiceNotOnSpark } = require('../services/invoice-not-on-spark');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
@@ -51,17 +51,9 @@ function sparkTick() {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  invoiceNotOnSparkLive.mockReturnValue(false);
 });
 
-test('gate off: the tick returns before the lock or any read', async () => {
-  await sparkTick();
-  expect(runExclusive).not.toHaveBeenCalledWith('invoice-not-on-spark', expect.any(Function));
-  expect(runInvoiceNotOnSpark).not.toHaveBeenCalled();
-});
-
-test('gate on: the list runs once inside runExclusive and its outcome is logged', async () => {
-  invoiceNotOnSparkLive.mockReturnValue(true);
+test('the list runs once inside runExclusive and its outcome is logged', async () => {
   await sparkTick();
   expect(runExclusive).toHaveBeenCalledWith('invoice-not-on-spark', expect.any(Function));
   expect(runInvoiceNotOnSpark).toHaveBeenCalledTimes(1);
@@ -69,7 +61,6 @@ test('gate on: the list runs once inside runExclusive and its outcome is logged'
 });
 
 test('a failed run is logged, never thrown out of the tick', async () => {
-  invoiceNotOnSparkLive.mockReturnValue(true);
   runInvoiceNotOnSpark.mockRejectedValueOnce(new Error('connection reset'));
   await expect(sparkTick()).resolves.toBeUndefined();
   expect(logger.error).toHaveBeenCalledWith('Invoice not on Spark failed: connection reset');

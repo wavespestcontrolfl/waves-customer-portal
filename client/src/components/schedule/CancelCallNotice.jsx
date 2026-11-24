@@ -1,6 +1,6 @@
 // Shown on New Appointment under the chosen customer when that customer's latest
-// call was a cancellation (GET /admin/schedule/cancel-call-notice,
-// GATE_CALL_CANCEL_GUARD). A warning only: nothing here stops the save.
+// call was a cancellation (GET /admin/schedule/cancel-call-notice).
+// A warning only: nothing here stops the save.
 // 2026-10-30: a caller canceled at 7:08 AM while nothing was booked, and the
 // office booked her at 11:22 from this form, which showed nothing about it.
 // Same palette as CallBookingConflictNotice.

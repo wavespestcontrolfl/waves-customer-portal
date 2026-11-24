@@ -1,14 +1,13 @@
 /**
- * POST /admin/intelligence-bar/query: `answerClaude` (GATE_IB_ANSWER_SEND_TO_CLAUDE, owner 2026-11-05).
+ * POST /admin/intelligence-bar/query: `answerClaude` (owner 2026-11-05).
  *
  * Observable behavior: under a bar answer that searched its capabilities and changed nothing, the owner login gets
  * `answerClaude: { stuck: true, gapId }` so the palette can show "Claude has this as gap #N." or a "Send to Claude"
- * button. Every other request keeps today's payload with no such key. The payload is read from the task checkpoint
+ * button. Every other request carries no such key. The payload is read from the task checkpoint
  * (the task store is stubbed here, as in the refusal-records suite, whose harness this mirrors).
  *
- * Credible regressions this guards: the key reaching a non-owner admin, the tech context, a request with no search, a
- * request with a card, or a request with either gate off; and the key carrying anything beyond `stuck` and a gap id
- * (never the answer text).
+ * Credible regressions this guards: the key reaching a non-owner admin, the tech context, a request with no search or a
+ * request with a card; and the key carrying anything beyond `stuck` and a gap id (never the answer text).
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 process.env.ANTHROPIC_API_KEY = 'test-key';
@@ -161,15 +160,14 @@ beforeEach(() => {
   mockGapMerges.length = 0;
   mockSavedStatus = 'new';
   process.env.GATE_IB_PLATFORM = 'true';
-  process.env.GATE_IB_ANSWER_SEND_TO_CLAUDE = 'true';
   delete process.env.AGENT_GAP_REPORTS;
 });
 afterAll(() => {
-  for (const name of ['GATE_IB_PLATFORM', 'GATE_IB_ANSWER_SEND_TO_CLAUDE', 'IB_FULL_ACCESS_EMAILS']) delete process.env[name];
+  for (const name of ['GATE_IB_PLATFORM', 'IB_FULL_ACCESS_EMAILS']) delete process.env[name];
 });
 
 describe('answerClaude on /query', () => {
-  test('owner, the gate on, a capability search and no write: stuck, with the gap id the flush saved', async () => {
+  test('owner, a capability search and no write: stuck, with the gap id the flush saved', async () => {
     script(DECLINE_REPLY);
     const payload = await ask();
     expect(mockGapRows).toHaveLength(1);
@@ -203,16 +201,6 @@ describe('answerClaude on /query', () => {
     process.env.AGENT_GAP_REPORTS = 'off';
     script(DECLINE_REPLY);
     expect((await ask()).answerClaude).toEqual({ stuck: true, gapId: null });
-  });
-
-  test.each([
-    ['the answer gate is off', () => { delete process.env.GATE_IB_ANSWER_SEND_TO_CLAUDE; }],
-    ['the answer gate is not exactly true', () => { process.env.GATE_IB_ANSWER_SEND_TO_CLAUDE = 'yes'; }],
-  ])('no key at all when %s', async (_name, change) => {
-    change();
-    script(DECLINE_REPLY);
-    const payload = await ask();
-    expect('answerClaude' in payload).toBe(false);
   });
 
   test('no key for an admin login that is not the owner', async () => {

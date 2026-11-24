@@ -252,6 +252,21 @@ describe('templateIssueWithWarnings (server-built warranty)', () => {
     await expect(issue({ projectId: project.id, values: office }, customer, project, { ...customer, contact_role: 'tenant' })).rejects.toMatchObject({ status: 409 });
   });
 
+  test('LESCO Crosscheck Plus, the house bifenthrin (owner 2026-11-18), issues with the catalog\'s ingredient spelling', async () => {
+    for (const active_ingredient of ['7.9% Bifenthrin', 'Bifenthrin 7.9%', 'bifenthrin']) {
+      const row = { ...project, findings: { ...findings, product_name: 'LESCO Crosscheck Plus', active_ingredient } };
+      await expect(issue({ projectId: project.id, values: office }, customer, row))
+        .resolves.toMatchObject({ treatment: { product: 'LESCO Crosscheck Plus', active_ingredient } });
+    }
+    for (const active_ingredient of ['fipronil', '7.9% Bifenthrin 7.9%', '7.9% bifenthrin + fipronil']) {
+      const row = { ...project, findings: { ...findings, product_name: 'LESCO Crosscheck Plus', active_ingredient } };
+      await expect(issue({ projectId: project.id, values: office }, customer, row)).rejects.toMatchObject({ status: 409 });
+    }
+    const percentFirst = { ...project, findings: { ...findings, product_name: 'Termidor SC', active_ingredient: '9.1% Fipronil' } };
+    await expect(issue({ projectId: project.id, values: office }, customer, percentFirst))
+      .resolves.toMatchObject({ treatment: { product: 'Termidor SC', active_ingredient: '9.1% Fipronil' } });
+  });
+
   test('round 16: legacy plan label passes the send gate as its current label; built-in products; address clauses; notice before contract', async () => {
     const legacy = { ...project, findings: { ...findings, warranty_type: 'Builder 1-year' } };
     await expect(issue({ projectId: project.id, values: office }, customer, legacy)).resolves.toBeTruthy();

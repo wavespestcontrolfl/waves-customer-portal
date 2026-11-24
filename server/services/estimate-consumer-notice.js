@@ -129,9 +129,11 @@ function todayUs() {
 // one issued now (same form version, name, representative and date); otherwise it is cancelled and replaced.
 // `blockedFor(trx, lockedEstimate)` is the route's eligibility re-run on the estimate row locked here (the same
 // check the commercial agreement issuer runs): true = the estimate is no longer open for online signing.
+// `quoteRefusalFor(lockedEstimate)` is the accept's refusal for a quote it will not take (the estimate page passes the
+// staff-changed plan quote check): a `{ code, message }` answers that 409 and nothing is issued.
 // `source`, `actorType` and `gateLive` default to the estimate page; the Mark accepted send passes its own.
 async function ensureEstimateConsumerNotice({
-  estimate, req = {}, conn = db, blockedFor = async () => false,
+  estimate, req = {}, conn = db, blockedFor = async () => false, quoteRefusalFor = () => null,
   source = SNAPSHOT_SOURCE, actorType = 'customer', gateLive = () => require('../config/feature-gates').estimateConsumerNoticeLive(),
 }) {
   if (!estimate.customer_id) return refusal(409, 'no_account', CALL_US);
@@ -162,6 +164,8 @@ async function ensureEstimateConsumerNotice({
     const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
     if (!locked || String(locked.customer_id) !== String(customer.id)) return refusal(404, 'not_available', 'Estimate not found');
     if (await blockedFor(trx, locked) || !estimateNeedsConsumerNotice(locked)) return refusal(404, 'not_available', 'Estimate not found');
+    const quoteRefusal = quoteRefusalFor(locked);
+    if (quoteRefusal) return refusal(409, quoteRefusal.code, quoteRefusal.message);
     if (await findConsumerNotice(trx, customer.id, { onOrBefore: etDateString() })) {
       return refusal(409, 'already_signed', 'Your consumer notice is already signed. Please reload the page.');
     }

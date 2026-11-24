@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
-// GATE_DAY_ONLY_PROMISE part E: the visit sheet shows what the customer was told, from the feed's `told` field (present
-// only with the gate on): "Told: day only" for level day, "Told: {the promised window}" for level hour, nothing for none or no field.
+// Day-only promise part E: the visit sheet shows what the customer was told, from the feed's `told` field: "Told: day only" for level day, "Told: {the promised window}" for level hour, nothing for none or no field.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
@@ -49,7 +48,7 @@ describe('Told badge on the visit sheet', () => {
     expect(screen.getByTestId('told-badge')).toHaveTextContent('Told: time not recorded');
   });
 
-  it('level none, or no field (gate off), shows nothing', () => {
+  it('level none, or no field, shows nothing', () => {
     const none = render(<MobileAppointmentDetailSheet service={{ ...VISIT, told: { level: 'none', dayOnly: false } }} onClose={() => {}} />);
     expect(screen.queryByTestId('told-badge')).toBeNull();
     none.unmount();

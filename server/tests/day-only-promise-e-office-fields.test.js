@@ -1,6 +1,6 @@
 /**
  * GATE_DAY_ONLY_PROMISE part E, second round: (1) the office fields reach every editor entry point: the list feed and the
- * visit-summary read (the fallback for a row from any other feed) carry customerAskedTime / told / reminder24hOn, gate on only;
+ * visit-summary read (the fallback for a row from any other feed) carry customerAskedTime / told / reminder24hOn;
  * (2) `reminder24hOn` follows the senders' own rule (appointment-reminders.loadReminder24hAnswers over reminder24hWillSend),
  * from bulk reads; (3) the client's 24.25-hour cutoff equals the server's DAY_PROMISE_CUTOFF_HOURS. Synthetic ids only.
  */
@@ -32,14 +32,6 @@ const { DAY_PROMISE_CUTOFF_HOURS } = require('../services/time-promise');
 const reminders = require('../services/appointment-reminders');
 const adminSchedule = require('../routes/admin-schedule');
 const adminCustomers = require('../routes/admin-customers');
-
-const withGate = (value, fn) => async () => {
-  const prior = process.env.GATE_DAY_ONLY_PROMISE;
-  if (value === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = value;
-  try { await fn(); } finally {
-    if (prior === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = prior;
-  }
-};
 
 /** A knex-shaped fake over in-memory tables: whereIn / where({}) / select, with a call log per table. */
 function fakeTables(tables, { fail = false } = {}) {
@@ -212,13 +204,7 @@ describe('GET /:id/visit-summary (the fallback read for a row from any other fee
     resolvePromises.mockReset();
   });
 
-  test('gate off: the reply is exactly {visit}; nothing else is read', withGate(undefined, async () => {
-    expect(await run()).toEqual({ visit: null });
-    expect(db).not.toHaveBeenCalled();
-    expect(resolvePromises).not.toHaveBeenCalled();
-  }));
-
-  test('gate on: {visit, office} with customerAskedTime, told and reminder24hOn', withGate('true', async () => {
+  test('{visit, office} with customerAskedTime, told and reminder24hOn', async () => {
     const soon = new Date(Date.now() + 4 * 86400000);
     const tables = {
       scheduled_services: [{ id: 'v1', customer_id: 'c-default', scheduled_date: soon.toISOString().slice(0, 10), status: 'confirmed', customer_asked_time: true, customer_asked_time_at: null, has_slot_change: false, slot_after_intent: false }],
@@ -233,21 +219,17 @@ describe('GET /:id/visit-summary (the fallback read for a row from any other fee
     expect(reply.visit).toBeNull();
     expect(reply.office).toMatchObject({ customerAskedTime: true, reminder24hOn: true, told: { level: 'hour', dayOnly: false } });
     expect(resolvePromises).toHaveBeenCalledTimes(1);
-  }));
+  });
 
-  test('gate on, a failed read: the reply is still {visit}', withGate('true', async () => {
+  test('a failed read: the reply is still {visit}', async () => {
     db.mockImplementation(() => { throw new Error('db down'); });
     expect(await run()).toEqual({ visit: null });
-  }));
+  });
 });
 
 describe('schedule-estimates carries the reminder answers for the booking window', () => {
-  test('gate off: {} and no read; gate on: the customer row\'s answer and, while enforced, each property\'s', async () => {
+  test('the customer row\'s answer and, while enforced, each property\'s', async () => {
     db.mockReset();
-    expect(await adminCustomers.reminder24hField('c-default')).toEqual({});
-    expect(db).not.toHaveBeenCalled();
-    const prior = process.env.GATE_DAY_ONLY_PROMISE;
-    process.env.GATE_DAY_ONLY_PROMISE = 'true';
     const data = {
       customers: [{ id: 'c-off', account_id: 'a2', is_primary_profile: true }],
       notification_prefs: [{ customer_id: 'c-off', service_reminder_24h: false }],
@@ -265,7 +247,6 @@ describe('schedule-estimates carries the reminder answers for the booking window
       expect(await adminCustomers.reminder24hField('c-off')).toEqual({});
     } finally {
       mockEnforced.on = false;
-      if (prior === undefined) delete process.env.GATE_DAY_ONLY_PROMISE; else process.env.GATE_DAY_ONLY_PROMISE = prior;
     }
   });
 });

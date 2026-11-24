@@ -1,3 +1,4 @@
+const { provenFindingRows } = require('./finding-provenance');
 const db = require('../../models/db');
 const { reserviceReportCopyGateOn } = require('./reservice-report');
 const { detectServiceLine } = require('./service-line-configs');
@@ -191,7 +192,7 @@ async function buildPressureTrendContext({
   if (!record?.id || !record.customer_id) return undefined;
   const serviceLine = record.service_line || detectServiceLine(record.service_type);
   const priorRows = await knex('service_records')
-    .select('id', 'started_at', 'ended_at', 'service_date', 'created_at', 'pressure_index')
+    .select('id', 'started_at', 'ended_at', 'service_date', 'created_at', 'pressure_index', 'structured_notes')
     .where({ customer_id: record.customer_id, status: 'completed' })
     .whereNot({ id: record.id })
     // Customer-facing trend line: callback visits are not data points while
@@ -238,12 +239,19 @@ async function buildPressureTrendContext({
   const ids = [...priorRows.map((row) => row.id), record.id].filter(Boolean);
   const scales = await loadScaleMap(knex, ids);
   const withScale = (row) => (scales.has(String(row.id)) ? { ...row, pressure_scale: scales.get(String(row.id)) } : row);
-  const findings = ids.length
+  const rows = ids.length
     ? await knex('service_findings')
       .whereIn('service_record_id', ids)
-      .select('service_record_id', 'severity', 'title')
+      .select('service_record_id', 'severity', 'title', 'detail', 'recommendation')
       .catch(() => [])
     : [];
+  // Only the rows a customer may see, each against its own visit's form
+  // snapshot (finding-provenance.js): a bare title can be a line of the raw
+  // technician note.
+  const notesById = new Map([...priorRows, record].map((row) => [String(row.id), row.structured_notes]));
+  const findings = [...notesById.keys()].flatMap((id) => provenFindingRows(
+    rows.filter((row) => String(row.service_record_id) === id), notesById.get(id),
+  ));
 
   return buildPressureTrendContextFromRows({
     record: withScale(record),

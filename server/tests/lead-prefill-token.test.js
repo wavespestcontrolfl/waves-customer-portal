@@ -10,7 +10,10 @@
 const {
   mintLeadPrefillToken,
   verifyLeadPrefillToken,
+  mintLeadAttachToken,
+  verifyLeadAttachToken,
   TTL_SECONDS,
+  ATTACH_TTL_SECONDS,
 } = require('../utils/lead-prefill-token');
 
 describe('lead prefill token', () => {
@@ -70,6 +73,44 @@ describe('lead prefill token', () => {
     delete process.env.JWT_SECRET;
     expect(mintLeadPrefillToken(LEAD, NOW)).toBeNull();
     expect(verifyLeadPrefillToken(LEAD, token, NOW)).toBe(false);
+  });
+
+  // The attach token (quiz -> price page hand-off) is a separate purpose on
+  // the same format: it authorizes the lookup's lead UPDATE and nothing else.
+  describe('attach token', () => {
+    test('mint -> verify round-trip, bound to the lead, for 2 hours', () => {
+      const token = mintLeadAttachToken(LEAD, NOW);
+      expect(token).toEqual(expect.stringMatching(/^\d+\.[A-Za-z0-9_-]+$/));
+      expect(ATTACH_TTL_SECONDS).toBe(2 * 60 * 60);
+      expect(verifyLeadAttachToken(LEAD, token, NOW)).toBe(true);
+      expect(verifyLeadAttachToken(OTHER_LEAD, token, NOW)).toBe(false);
+      expect(verifyLeadAttachToken(LEAD, token, NOW + ATTACH_TTL_SECONDS - 1)).toBe(true);
+      expect(verifyLeadAttachToken(LEAD, token, NOW + ATTACH_TTL_SECONDS + 1)).toBe(false);
+    });
+
+    test('is never a prefill token, and a prefill token is never an attach token', () => {
+      const attach = mintLeadAttachToken(LEAD, NOW);
+      const prefill = mintLeadPrefillToken(LEAD, NOW);
+      expect(verifyLeadPrefillToken(LEAD, attach, NOW)).toBe(false);
+      expect(verifyLeadAttachToken(LEAD, prefill, NOW)).toBe(false);
+      // Same lead, same expiry, different purpose: the signatures differ.
+      const exp = NOW + ATTACH_TTL_SECONDS;
+      const sameExpPrefill = mintLeadPrefillToken(LEAD, exp - TTL_SECONDS);
+      expect(sameExpPrefill.split('.')[0]).toBe(String(exp));
+      expect(sameExpPrefill).not.toBe(attach);
+    });
+
+    test('rejects a tampered or extended token and fails closed with no secret', () => {
+      const token = mintLeadAttachToken(LEAD, NOW);
+      const [exp, sig] = token.split('.');
+      expect(verifyLeadAttachToken(LEAD, `${Number(exp) + 9999}.${sig}`, NOW)).toBe(false);
+      expect(verifyLeadAttachToken(LEAD, `${exp}.${sig[0] === 'A' ? 'B' : 'A'}${sig.slice(1)}`, NOW)).toBe(false);
+      expect(verifyLeadAttachToken(LEAD, '', NOW)).toBe(false);
+      delete process.env.LEAD_PREFILL_SECRET;
+      delete process.env.JWT_SECRET;
+      expect(mintLeadAttachToken(LEAD, NOW)).toBeNull();
+      expect(verifyLeadAttachToken(LEAD, token, NOW)).toBe(false);
+    });
   });
 
   test('falls back to JWT_SECRET when no dedicated secret is set', () => {

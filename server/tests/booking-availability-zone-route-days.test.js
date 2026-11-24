@@ -11,7 +11,11 @@ process.env.GATE_SOUTH_ZONE_DAY_FUNNEL = 'true';
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/scheduling/find-time', () => ({ findAvailableSlots: jest.fn() }));
-jest.mock('../services/scheduling/occupancy', () => ({ listOccupiedWindows: jest.fn() }));
+// techScopedConfirmActive: the funnel's per-truck reader (zone-day-funnel.js perTruckLive), the gate at call time.
+jest.mock('../services/scheduling/occupancy', () => ({
+  listOccupiedWindows: jest.fn(),
+  techScopedConfirmActive: () => process.env.GATE_MULTI_TECH_CONFIRM === 'true',
+}));
 
 const db = require('../models/db');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
@@ -163,6 +167,33 @@ describe('buildAvailabilityForLead — south-zone day funnel', () => {
     expect(datesOf(await buildLead(VENICE))).toEqual([D]);
   });
 
+  // The zone comes from the address's own city, as createSelfBooking stamps the visit's zone (zoneAddress), so the
+  // commit's truck check (callbackVisit.slotGuard) never refuses a time this list showed. Here the text alone names
+  // Sarasota, the zone listed first.
+  test('the city decides the zone: a Venice address on a Sarasota street is funneled', async () => {
+    stopRows = [{ scheduled_date: D1, zone: 'venice', service_city: 'Venice', customer_city: null }];
+    expect(datesOf(await buildLead({ ...VENICE, line1: '9 Sarasota St' }))).toEqual([D1]);
+  });
+
+  // An address in a town no zone lists takes the trusted customer's city on file, the zone its booking falls back to
+  // (slot-zone.js leadBookingZone), so the list never offers a time that booking's zone check refuses (pre-push P1 on
+  // aa30bd86f1). Only for that customer's own property (pre-push P1 on 1ef6ba1b16): on another street the city on
+  // file named the old address, and phase 1 books that street with its own city. With no customer city, or on another
+  // street, the address stays in no zone and gets the full list, as before.
+  test.each([
+    ['Venice, at that address', { city: 'Venice' }, [D1]],
+    ['empty', { city: null }, [D, D1, D2]],
+    ['Venice, for another street', { city: 'Venice', address_line1: '1 Other Test St' }, [D, D1, D2]],
+  ])('an address in no zone, the customer\'s city on file %s', async (_label, edit, dates) => {
+    stopRows = [{ scheduled_date: D1, zone: 'venice', service_city: 'Venice', customer_city: null }];
+    const customer = { address_line1: VENICE.line1, zip: VENICE.zip, ...edit };
+    const built = await require('../routes/inspection-public')._test.buildAvailabilityForLead(
+      { lat: 27.12, lng: -82.44 },
+      { rangeFrom: D, rangeTo: D2, config: CONFIG, duration: 60, offer: true, address: { ...VENICE, city: 'Laurel' }, customer },
+    );
+    expect(datesOf(built)).toEqual(dates);
+  });
+
   test('a lead outside the funneled zones, and a build with no address, get the full list with no zone-stop read', async () => {
     stopRows = [{ scheduled_date: D1, zone: 'venice', service_city: 'Venice', customer_city: null }];
     const sarasota = await buildLead(SARASOTA);
@@ -184,14 +215,166 @@ describe('buildAvailabilityForLead — south-zone day funnel', () => {
     expect(datesOf(await buildLead(VENICE))).toEqual([D, D1, D2]);
   });
 
-  test('every list the route OFFERS passes the address; the commit and re-validation rebuilds omit it', () => {
+  // Owner rule B per truck (GATE_MULTI_TECH_CONFIRM on, 2026-11-19): tech-1 drives south on D1. /book keeps one
+  // technician per date and start, so another truck's better-scored D1 slot must not claim that start, and with the
+  // zone truck full on D1 the other truck opens one new day instead of joining D1.
+  const truckSlot = (date, tech, rank) => ({ ...slotOn(date, rank), technician: { id: tech } });
+  const TECH1_ON_D1 = { scheduled_date: D1, zone: 'venice', service_city: 'Venice', customer_city: null, technician_id: 'tech-1' };
+  const withTruckGate = async (value, fn) => {
+    const prev = process.env.GATE_MULTI_TECH_CONFIRM;
+    if (value == null) delete process.env.GATE_MULTI_TECH_CONFIRM; else process.env.GATE_MULTI_TECH_CONFIRM = value;
+    try { return await fn(); } finally {
+      if (prev === undefined) delete process.env.GATE_MULTI_TECH_CONFIRM; else process.env.GATE_MULTI_TECH_CONFIRM = prev;
+    }
+  };
+  const slotsOf = (availability) => availability.days.flatMap((d) => d.slots.map((s) => [d.date, s.start_time, s.technician_id]));
+
+  test.each([[undefined, 'tech-2'], ['true', 'tech-1']])('GATE_MULTI_TECH_CONFIRM=%s: the zone day\'s 10:00 goes to %s', async (gate, techId) => {
+    await withTruckGate(gate, async () => {
+      stopRows = [TECH1_ON_D1];
+      findAvailableSlots.mockResolvedValue({
+        slots: [truckSlot(D1, 'tech-2', 1), truckSlot(D1, 'tech-1', 2), truckSlot(D2, 'tech-2', 3)], total_feasible: 3,
+      });
+      expect(slotsOf(await buildLead(VENICE))).toEqual([[D1, '10:00', techId]]);
+    });
+  });
+
+  test.each([[undefined, D1], ['true', D2]])('GATE_MULTI_TECH_CONFIRM=%s, the zone truck full on its day: the list offers %s', async (gate, date) => {
+    await withTruckGate(gate, async () => {
+      stopRows = [TECH1_ON_D1];
+      findAvailableSlots.mockResolvedValue({
+        slots: [truckSlot(D1, 'tech-2', 1), truckSlot(D2, 'tech-2', 2), truckSlot(D, 'tech-2', 3)], total_feasible: 3,
+      });
+      expect(slotsOf(await buildLead(VENICE))).toEqual([[date, '10:00', 'tech-2']]);
+    });
+  });
+
+  // The commit's single-day rebuild passes the address: per truck it drops the same openings, so it finds the zone
+  // truck's start, or none when that truck lost the hour (the route then answers SLOT_TAKEN). The fleet view reads
+  // nothing and books the start's first claim, as before.
+  test.each([
+    [undefined, [1, 2], 'tech-2', 0],
+    ['true', [1, 2], 'tech-1', 1],
+    [undefined, [1], 'tech-2', 0],
+    ['true', [1], null, 1],
+  ])('the commit\'s one-day rebuild, GATE_MULTI_TECH_CONFIRM=%s, D1 slots of trucks %j: books %s, %i zone-stop reads', async (gate, trucks, techId, reads) => {
+    await withTruckGate(gate, async () => {
+      stopRows = [TECH1_ON_D1];
+      const slots = [truckSlot(D1, 'tech-2', 1), truckSlot(D1, 'tech-1', 2)];
+      findAvailableSlots.mockResolvedValue({ slots: slots.slice(0, trucks.length), total_feasible: trucks.length });
+      const inspection = require('../routes/inspection-public');
+      const day = await inspection._test.buildAvailabilityForLead(
+        { lat: 27.12, lng: -82.44 },
+        { rangeFrom: D1, rangeTo: D1, config: CONFIG, duration: 60, address: VENICE },
+      );
+      expect(inspection._internals.findSlotIn(day, D1, '10:00')?.technician_id ?? null).toBe(techId);
+      expect(stopLookups).toBe(reads);
+    });
+  });
+
+  test('every build the route runs passes the address: the offered lists and the commit\'s one-day rebuilds', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/inspection-public.js'), 'utf8');
     const calls = [...src.matchAll(/await buildAvailabilityForLead\(([^;]*?)\);/gs)].map((m) => m[1]);
-    const withAddress = calls.filter((c) => /\baddress\b/.test(c));
-    // GET, /availability, /find-slots, the email block's slots and the SLOT_TAKEN refresh.
-    expect(withAddress).toHaveLength(5);
-    // The commit's single-day anti-forgery build and revalidateSlotAt: unfunneled, like the estimate page's redeem side.
-    expect(calls.filter((c) => !/\baddress\b/.test(c))).toHaveLength(2);
-    expect(calls.filter((c) => !/\baddress\b/.test(c)).every((c) => /rangeFrom: date, rangeTo: date/.test(c))).toBe(true);
+    // GET, /availability, /find-slots, the email block's slots, the SLOT_TAKEN refresh, the commit's single-day
+    // anti-forgery build and revalidateSlotAt (per truck those two drop the same openings as the list).
+    expect(calls).toHaveLength(7);
+    expect(calls.filter((c) => !/\baddress\b/.test(c))).toEqual([]);
+    expect(calls.filter((c) => /rangeFrom: date, rangeTo: date/.test(c))).toHaveLength(2);
+    // Every build reads the trusted customer's fallback city too, so an address in no zone takes the zone of its city
+    // on file, as the booking does: the lists pass the customer (pre-push P1 on aa30bd86f1), and the commit's two
+    // one-day builds pass the city they read from it, the first build's before phase 1 and the re-check's after it,
+    // so the commit gives the hour to the truck its list offered (pre-push P1s on 4eb9c11d2a and cebd106404).
+    expect(calls.filter((c) => !/\b(customer|fallbackCity)\b/.test(c))).toEqual([]);
+    expect(calls.filter((c) => /\bfallbackCity\b/.test(c))).toHaveLength(2);
+  });
+});
+
+// A Waves Assessment offer list names the line its lead asked for, only while the line map is live (owner
+// 2026-11-21, choice 4 = A): the builder then ranks that line's home and gap technician, and no lead is read
+// otherwise.
+describe('buildAvailabilityForLead — the assessment line (GATE_SERVICE_LINE_MAP)', () => {
+  const lineTech = require('../services/scheduling/line-technician');
+  const buildFor = (customer, leadId) => require('../routes/inspection-public')._test.buildAvailabilityForLead(
+    { lat: 27.12, lng: -82.44 },
+    { rangeFrom: D, rangeTo: D, config: CONFIG, duration: 60, offer: true, ...(customer ? { customer } : {}), ...(leadId ? { leadId } : {}) },
+  );
+  let ranking;
+  let lead;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    wireDb();
+    listOccupiedWindows.mockResolvedValue([]);
+    findAvailableSlots.mockResolvedValue({ slots: [], total_feasible: 0 });
+    ranking = jest.spyOn(lineTech, 'lineOfferRanking').mockResolvedValue(null);
+    lead = jest.spyOn(lineTech, 'assessmentLineFor').mockResolvedValue({ line: 'general', lineFrom: 'lead' });
+  });
+  afterEach(() => {
+    ranking.mockRestore();
+    lead.mockRestore();
+    delete process.env.GATE_SERVICE_LINE_MAP;
+  });
+
+  test.each([[undefined], ['shadow'], ['off']])('GATE_SERVICE_LINE_MAP=%s: no lead read, no line named', async (mode) => {
+    if (mode) process.env.GATE_SERVICE_LINE_MAP = mode;
+    await buildFor({ id: 'cust-1' }, 'lead-1');
+    expect(lead).not.toHaveBeenCalled();
+    expect(ranking).not.toHaveBeenCalled();
+  });
+
+  test('live: the assessment line of the page\'s lead and customer is the one line the ranking is asked for', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'live';
+    await buildFor({ id: 'cust-1' }, 'lead-1');
+    expect(lead).toHaveBeenCalledWith(expect.anything(), { customerId: 'cust-1', leadId: 'lead-1', strict: false });
+    expect(ranking).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ lines: ['general'] }));
+  });
+
+  test('live, a commit passes the line scope it read: the build uses it and reads no lead again', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'live';
+    await require('../routes/inspection-public')._test.buildAvailabilityForLead(
+      { lat: 27.12, lng: -82.44 },
+      { rangeFrom: D, rangeTo: D, config: CONFIG, duration: 60, customer: { id: 'cust-1' }, leadId: 'lead-1', lineScope: { serviceLines: ['lawn'] } },
+    );
+    expect(lead).not.toHaveBeenCalled();
+    expect(ranking).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ lines: ['lawn'] }));
+  });
+
+  // The booking transaction's own re-check (pre-push P0): staff can change the lead's service interest between the
+  // commit's build and its save.
+  describe('assessmentLineUnchanged', () => {
+    const trx = { the: 'booking transaction' };
+    const unchanged = (lineScope) => require('../routes/inspection-public')._internals
+      .assessmentLineUnchanged(trx, { lineScope, customer: { id: 'cust-1' }, leadId: 'lead-1' });
+
+    test('live: the line is read again on the transaction, strictly; the same line passes, another one refuses', async () => {
+      process.env.GATE_SERVICE_LINE_MAP = 'live';
+      expect(await unchanged({ serviceLines: ['general'] })).toBe(true);
+      expect(lead).toHaveBeenCalledWith(trx, { customerId: 'cust-1', leadId: 'lead-1', strict: true });
+      lead.mockResolvedValue({ line: 'lawn', lineFrom: 'lead' });
+      expect(await unchanged({ serviceLines: ['general'] })).toBe(false);
+    });
+
+    test('not live: the scope is empty on both sides and nothing is read', async () => {
+      expect(await unchanged({})).toBe(true);
+      expect(lead).not.toHaveBeenCalled();
+    });
+
+    test('live, a failed read rejects: the save must not go on with a default line', async () => {
+      process.env.GATE_SERVICE_LINE_MAP = 'live';
+      lead.mockRejectedValue(new Error('read failed'));
+      await expect(unchanged({ serviceLines: ['general'] })).rejects.toThrow('read failed');
+    });
+  });
+
+  test('live, a new lead with no customer yet: the lead itself is still read', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'live';
+    await buildFor(null, 'lead-1');
+    expect(lead).toHaveBeenCalledWith(expect.anything(), { customerId: null, leadId: 'lead-1', strict: false });
+  });
+
+  test('live, no lead and no customer passed: the no-lead default is asked for', async () => {
+    process.env.GATE_SERVICE_LINE_MAP = 'live';
+    await buildFor(null);
+    expect(lead).toHaveBeenCalledWith(expect.anything(), { customerId: null, leadId: null, strict: false });
   });
 });

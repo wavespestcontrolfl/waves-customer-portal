@@ -52,13 +52,13 @@ const visit = (id, overrides = {}) => ({
   ...overrides,
 });
 
-function mount(services) {
+function mount(services, path = '/admin/dispatch?date=2026-09-12') {
   vi.mocked(adminFetch).mockImplementation(async (url) => (
     url === '/admin/dispatch/products/catalog'
       ? { products: [] }
       : { services, technicians: [], techSummary: [], products: [], types: [] }
   ));
-  return render(<MemoryRouter initialEntries={['/admin/dispatch?date=2026-09-12']}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
+  return render(<MemoryRouter initialEntries={[path]}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
 }
 
 beforeEach(() => {
@@ -82,6 +82,24 @@ describe('Dispatch completion routing for the Waves Assessment', () => {
     mount([visit('svc-as-off', { assessmentFastCompleteEnabled: false })]);
     fireEvent.click(await screen.findByRole('button', { name: 'Open mobile svc-as-off' }));
     expect(await screen.findByText('Completion panel for svc-as-off')).toBeInTheDocument();
+    expect(screen.queryByText(/Assessment sheet/)).not.toBeInTheDocument();
+  });
+
+  // The Today page has no assessment sheet: its link adds completeSheet=1,
+  // which opens the visit as the Complete button does. The plain link is a
+  // sheet's "Full form" escape and keeps the full form.
+  it('opens the sheet from the Today page\'s ?completeService link with completeSheet=1', async () => {
+    mount([visit('svc-as-link')], '/admin/dispatch?date=2026-09-12&completeService=svc-as-link&completeSheet=1');
+    expect(await screen.findByText(/Assessment sheet for svc-as-link/)).toBeInTheDocument();
+    expect(screen.queryByText(/Completion panel/)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['the plain link', '', {}],
+    ['completeSheet=1 with the row flag off', '&completeSheet=1', { assessmentFastCompleteEnabled: false }],
+  ])('keeps CompletionPanel for %s', async (_label, param, overrides) => {
+    mount([visit('svc-as-plain', overrides)], `/admin/dispatch?date=2026-09-12&completeService=svc-as-plain${param}`);
+    expect(await screen.findByText('Completion panel for svc-as-plain')).toBeInTheDocument();
     expect(screen.queryByText(/Assessment sheet/)).not.toBeInTheDocument();
   });
 

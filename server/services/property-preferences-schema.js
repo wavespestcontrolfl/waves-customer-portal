@@ -15,6 +15,7 @@
  */
 
 const Joi = require('joi');
+const { CONTROLLER_BRANDS, CONTROLLER_MODELS, CONTROLLER_APP_ANSWERS } = require('@waves/irrigation-runtime');
 const { hasLawnServiceEvidence, hasIrrigationEmailOptIn } = require('./irrigation-weekly-email');
 const { validCalendarDate } = require('../utils/datetime-et');
 const AwayWatch = require('./away-watch');
@@ -96,6 +97,13 @@ const PREFS_FIELD_SCHEMAS = {
   awayWatchUntil: awayWatchDay(),
   // 20260401000005_property_preferences.js — varchar(200).
   irrigationControllerLocation: shortTextMax(200),
+  // The sprinkler timer on file: brand, Hunter model, and whether the customer runs it from the maker's phone app.
+  // Each is a key from the shared list (@waves/irrigation-runtime); '' or null clears. Not watering inputs: they stay
+  // out of IRRIGATION_INPUT_FIELDS, the revision trigger and the confirmed-fields ledger. The three save as one
+  // record: both writers settle them under their lock (services/controller-timer.js).
+  irrigationControllerBrand: enumOrNull(Object.keys(CONTROLLER_BRANDS)),
+  irrigationControllerModel: enumOrNull(Object.keys(CONTROLLER_MODELS)),
+  irrigationControllerApp: enumOrNull(Object.keys(CONTROLLER_APP_ANSWERS)),
   irrigationZones: Joi.number().integer().min(0).max(100).allow(null),
   irrigationInchesPerWeek: Joi.number().min(0).max(5).precision(2).allow(null),
   // Minutes each zone runs on a watering day — the natural-unit schedule
@@ -163,6 +171,7 @@ const ALLOWED_FIELDS = [
   'blackout_start', 'blackout_end',
   'away_watch_from', 'away_watch_until',
   'irrigation_system', 'irrigation_controller_location', 'irrigation_zones',
+  'irrigation_controller_brand', 'irrigation_controller_model', 'irrigation_controller_app',
   'irrigation_inches_per_week', 'irrigation_run_minutes', 'irrigation_schedule_notes', 'watering_days', 'irrigation_system_type',
   'rain_sensor', 'irrigation_water_source', 'irrigation_issues',
   'mowing_days', 'mowing_time_of_day', 'mowing_notes',
@@ -277,6 +286,25 @@ async function customerQualifiesForLawnInches(customer = {}) {
   return hasIrrigationEmailOptIn(customer.id);
 }
 
+// The render-time home stamp a prefs request carries (codex gh-r43): { sent, ms }. The portal sends
+// confirmed_as_of with every save; the staff form echoes the row's irrigation_home_changed_at as confirmedAsOf.
+function prefsRenderStamp(body) {
+  const raw = body || {};
+  const sent = 'confirmed_as_of' in raw || 'confirmedAsOf' in raw;
+  const value = raw.confirmed_as_of ?? raw.confirmedAsOf ?? null;
+  const ms = value ? new Date(value).getTime() : null;
+  return { sent, ms: Number.isFinite(ms) ? ms : null };
+}
+
+// Was the request rendered against the home on the row now? No move on record always passes; after a move the
+// request must carry the matching stamp (an absent one, an old bundle, fails closed). Read `current` inside the
+// preference lock: the lock orders the writes but says nothing about when the form was rendered.
+function renderedAgainstCurrentHome(current, renderStamp) {
+  const movedAt = current?.irrigation_home_changed_at ? new Date(current.irrigation_home_changed_at).getTime() : null;
+  if (movedAt == null) return true;
+  return !!renderStamp && renderStamp.sent && renderStamp.ms === movedAt;
+}
+
 // Normalizes a snake_case `updates` object (already filtered to an allowed-
 // fields list) for storage: irrigation_system_type coerced to an array
 // (accepts a legacy scalar), and every JSON_FIELDS value stringified
@@ -311,4 +339,6 @@ module.exports = {
   customerHasLawnCare,
   customerQualifiesForLawnInches,
   normalizeUpdatesForStorage,
+  prefsRenderStamp,
+  renderedAgainstCurrentHome,
 };

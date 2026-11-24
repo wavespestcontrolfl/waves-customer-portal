@@ -54,6 +54,8 @@ jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
 }));
 jest.mock('../services/autopay-setup-link', () => ({ KIND: 'customer', setupLinkIneligibility: jest.fn() }));
+// The website-only line check (website-line-contact.js) has its own suites; here it answers per test.
+jest.mock('../services/website-line-contact', () => ({ websiteLineRefusal: jest.fn(async () => null) }));
 // The card funnel + its marker finalizer, re-run / invoked by the composer send.
 jest.mock('../services/appointment-card-request', () => ({
   LIVE_VISIT_STATUSES: ['pending', 'confirmed'],
@@ -463,6 +465,21 @@ describe('admin communications SMS route', () => {
     });
   });
 
+  test('a website-only line the recipient never called or texted is refused with its code, and nothing is sent', async () => {
+    const { websiteLineRefusal } = require('../services/website-line-contact');
+    websiteLineRefusal.mockResolvedValueOnce('WEBSITE_LINE_REFUSAL');
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'A plain synthetic text.', messageType: 'manual', fromNumber: '+19412542617' }),
+      });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'WEBSITE_LINE_REFUSAL', code: 'WEBSITE_LINE_FIRST_CONTACT' });
+    });
+    expect(websiteLineRefusal).toHaveBeenCalledWith('+19412542617', '+15551234567');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('a suggested reply whose facts changed is refused with 409 before the thread lock, and nothing is sent', async () => {
     mockTranslationFacts.mockResolvedValueOnce({ reason: 'open-times stale (slot_taken)' });
     mockTranslationClaim.mockClear();
@@ -865,7 +882,7 @@ describe('admin communications SMS route', () => {
         const first = jest.fn();
         if (table === 'payer_statements') first.mockResolvedValue({ id: 31, payer_id: 7, status: 'finalized' });
         else if (table === 'payers') first.mockResolvedValue({ id: 7, ap_phone: '+15551234567' });
-        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), whereRaw: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1) };
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), whereNot: jest.fn(function () { return this; }), whereRaw: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1) };
       });
       sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM3' });
       await withServer(async (baseUrl) => {
@@ -1209,7 +1226,7 @@ describe('admin communications SMS route', () => {
     // A prepared (composer-inserted) contract link in the body: activated
     // BEFORE the provider call, restored on every no-send exit, recorded
     // after a real send (GH Codex #3844 r3 P1).
-    // A composer-carried moving link (GATE_MOVING_FLOW): a REAL provider send
+    // A composer-carried moving link: a REAL provider send
     // is its delivery, stamped for the Customer 360 Moving card; a blocked
     // send stamps nothing; an accepted-then-thrown send still stamps.
     describe('moving link in the body', () => {
@@ -1413,7 +1430,7 @@ describe('admin communications SMS route', () => {
         const first = jest.fn();
         if (table === 'payer_statements') first.mockResolvedValue({ id: 31, payer_id: 7, status: 'sent' });
         else if (table === 'payers') first.mockResolvedValue({ id: 7, ap_phone: '+15551234567' });
-        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), whereRaw: jest.fn(function () { return this; }), first, select: jest.fn(async () => (table === 'customers' ? owners : [])), update: jest.fn(async () => 1) };
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), whereNot: jest.fn(function () { return this; }), whereRaw: jest.fn(function () { return this; }), first, select: jest.fn(async () => (table === 'customers' ? owners : [])), update: jest.fn(async () => 1) };
       });
       sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM9' });
       wireOwners([{ id: 'cust-A' }]);
@@ -1452,7 +1469,7 @@ describe('admin communications SMS route', () => {
         const first = jest.fn();
         if (table === 'payer_statements') first.mockResolvedValue({ id: 31, payer_id: 7, status: 'finalized' });
         else if (table === 'payers') first.mockResolvedValue({ id: 7, ap_phone: '+15551234567' });
-        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), whereRaw: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1) };
+        return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), whereNot: jest.fn(function () { return this; }), whereRaw: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1) };
       });
       const accepted = new Error('audit row failed');
       accepted.providerOutcome = { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM9' };

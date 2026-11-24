@@ -18,6 +18,7 @@ const { generateEstimate, priceAreaAddOn } = require('../services/pricing-engine
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 const { areaAddOnKnobSignalForReplay } = require('../services/estimate-area-addon-knob-replay');
 const migration = require('../models/migrations/20261010110000_area_addon_pricing_config');
+const arenaMove = require('../models/migrations/20261120201500_arena_spot_material_per_1000');
 
 const HOME = { homeSqFt: 2000, lotSqFt: 7500 };
 const LABEL_BOUND = ['maxPerYear', 'minDaysApart', 'requiresGrassTrack', 'limitProduct', 'serviceKey', 'name', 'category', 'areaLabel'];
@@ -47,7 +48,9 @@ afterEach(() => { config.rebaseAreaAddOns(); });
 
 describe('the seed row is the code table, and the code table is the default', () => {
   test('the migration seeds exactly the in-code values (rate, setup, minutes, tiers, margin, admin) and no label-bound field', () => {
-    expect(migration.SEED).toEqual(seed());
+    // The seed is frozen; 20261120201500 later moved one value (Arena at the 2026-11-20 SiteOne price). Seed + that move = the code table.
+    expect(migration.SEED.items.lawn_insect_spot.materialPer1000).toBe(arenaMove.OLD_MATERIAL);
+    expect({ ...migration.SEED, items: { ...migration.SEED.items, lawn_insect_spot: { ...migration.SEED.items.lawn_insect_spot, materialPer1000: arenaMove.NEW_MATERIAL } } }).toEqual(seed());
     for (const item of Object.values(migration.SEED.items)) for (const field of LABEL_BOUND) expect(item).not.toHaveProperty(field);
     expect(migration.SEED.items.web_sweep).not.toHaveProperty('tiers');
     expect(config.normalizeAreaAddOnPricingConfig(migration.SEED)).toMatchObject({ ok: true });
@@ -254,6 +257,18 @@ describe('replay: a sent estimate keeps the knobs it was priced with', () => {
     expect(areaAddOnKnobSignalForReplay({ result: { oneTime: { items: [{ service: 'area_addon', addOnKey: 'web_sweep', price: 89, quoteRequired: true }] } } })).toBeNull();
     expect(areaAddOnKnobSignalForReplay(null)).toBeNull();
     expect(areaAddOnKnobSignalForReplay('{not json')).toBeNull();
+  });
+
+  // Codex pre-push P0 on the Arena move (2026-11-20): a row with no stamp was priced with the seed table (Arena material
+  // 1.45), so it replays 1.45, not today's 1.09 default. At $32.50/h, 1,000 sq ft on its own visit, the two sit on either
+  // side of a round-up step: $79 at 1.45, $69 at 1.09.
+  test('an unstamped Arena row replays the 1.45 it was priced with, not the 1.09 code default', () => {
+    expect(AREA_ADDONS.items.lawn_insect_spot.materialPer1000).toBe(arenaMove.NEW_MATERIAL);
+    const signal = areaAddOnKnobSignalForReplay({ result: { oneTime: { items: [{ service: 'area_addon', addOnKey: 'lawn_insect_spot', price: 79 }] } } });
+    expect(signal.items.lawn_insect_spot).toEqual({ materialPer1000: arenaMove.OLD_MATERIAL, setupMin: 8, minPer1000: 6, tiers: [1000, 2000, 3500] });
+    const priceWith = (knobs) => priceAreaAddOn('lawn_insect_spot', { areaSqFt: 1000, grassType: 'St. Augustine', pricingKnobs: { ...knobs, laborRate: 32.5, driveMinutes: 20 } }).price;
+    expect(priceWith(signal)).toBe(79);
+    expect(priceWith({ ...signal, items: { lawn_insect_spot: { ...signal.items.lawn_insect_spot, materialPer1000: arenaMove.NEW_MATERIAL } } })).toBe(69);
   });
 
   // Codex round 11 P1 on #6135: the stamp froze the margin, admin charge, material, minutes and tiers, but the labor rate and

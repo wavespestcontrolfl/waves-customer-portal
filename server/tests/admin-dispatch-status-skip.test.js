@@ -75,9 +75,17 @@ jest.mock('../models/db', () => {
           const anyOf = [];
           const group = {
             where(col, val) { anyOf.push((row) => row[norm(col)] === val); return group; },
-            orWhere(col, val) { anyOf.push((row) => row[norm(col)] === val); return group; },
+            orWhere(col, val) {
+              anyOf.push(typeof col === 'object'
+                ? (row) => Object.entries(col).every(([key, expected]) => (row[norm(key)] ?? null) === expected)
+                : (row) => row[norm(col)] === val);
+              return group;
+            },
+            whereNull(col) { anyOf.push((row) => row[norm(col)] == null); return group; },
+            whereNotNull(col) { anyOf.push((row) => row[norm(col)] != null); return group; },
+            orWhereNotNull(col) { anyOf.push((row) => row[norm(col)] != null); return group; },
           };
-          column.call(group);
+          column.call(group, group);
           filters.push((row) => anyOf.some((match) => match(row)));
         } else if (column && typeof column === 'object') {
           filters.push((row) => Object.entries(column).every(([key, val]) => row[norm(key)] === val));
@@ -91,6 +99,7 @@ jest.mock('../models/db', () => {
         return b;
       },
       whereIn(column, values) { filters.push((row) => values.includes(row[norm(column)])); return b; },
+      whereNotNull(column) { filters.push((row) => row[norm(column)] != null); return b; },
       leftJoin() { return b; },
       forUpdate() { return b; },
       orderBy(column, direction) { order = [norm(column), direction]; return b; },
@@ -153,6 +162,7 @@ const skip = (id = 'visit-2', body = {}) => call('PUT', `${id}/status`, { status
 const planVisit = (over = {}) => ({
   id: 'visit-2', customer_id: 'customer-1', technician_id: 'tech-9', status: 'pending', track_state: 'scheduled',
   scheduled_date: '2040-03-20', window_start: '13:00', window_end: '15:00', service_type: 'Pest Control',
+  service_id: 'pest-service', property_id: 'house-1',
   is_recurring: true, recurring_parent_id: 'visit-1', recurring_pattern: 'quarterly', is_callback: false,
   followup_included: false, source_action: null, customer_confirmed: true, ...over,
 });

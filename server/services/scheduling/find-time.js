@@ -19,13 +19,13 @@ const { HQ, driveMin } = require('../auto-dispatch/geo');
 const { techColumns, techStartPoint } = require('./tech-start-point');
 const { etParts, etDateString } = require('../../utils/datetime-et');
 const { stampedDivergesSql } = require('../stamped-address');
-const { applyAssignable, absentTechDays } = require('../technician-eligibility');
+const { applyAssignable, absentTechDays, loadTechShifts, shiftBounds } = require('../technician-eligibility');
 const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements, evaluateArrivalPlacement } = require('./arrival-route');
 const { SHIFT, capacityEnabled, placementFitsShift, customerMaxDetourMinutes, selfServeArrivalGraceMinutes } = require('./policy');
 const { zoneRouteDaysLive, schedulingPlanMinutesOnly } = require('../../config/feature-gates');
 const { readZoneRouteDays } = require('./zone-route-days');
 const { serviceFamilyPreference } = require('../auto-dispatch/service-category');
-const { liveServiceOrHold } = require('./reservation-occupancy');
+const { bookedVisitOrLiveHold } = require('./reservation-occupancy');
 const { travelGapEnabled, violatesTravelGap, travelGapConflicts, isHoldStop } = require('./travel-gap');
 const { bookGapAdmits, delayWithinGrace } = require('./book-arrival-grace');
 const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service-minutes');
@@ -210,17 +210,41 @@ function arrivalSlot({ date, tech, dateFrom, windowStart, windowEnd, fit }) {
   };
 }
 
+// The shift rule (GATE_TECH_SHIFT_HOURS; owner 2026-11-19, page item D4:
+// "offers and confirmations allow only jobs that end by that tech's shift
+// end"). On every finder in this file, for every caller, a technician with
+// set hours is offered only a job that starts at or after the shift start
+// and ends (start + its length) by the shift end. The shift only narrows:
+// each finder keeps its own day (its open, its close, its drive rules), and
+// a technician without set hours, or the gate off, keeps that day as it is.
+// The hours are read once per request, next to the absent tech-days
+// (technician-eligibility.js loadTechShifts; today's shift follows the
+// clock-in), and shiftBounds in that file is the rule.
+//
+// The two finders that check an hour on the route (the staff arrival finder
+// and the capacity finder) also hand the route engine the shift end
+// (arrival-route.js `shiftEndMin`), because the route may reach a visit late
+// in its hour: a 14:00 hour reached at 14:20 ends at 15:20, not at 15:00. The
+// engine certifies only a stop order in which the visit ends by the shift
+// end and moves no other service to end after it (the next stop, or another
+// service of the same customer worked at the visit's stop). An hour no order
+// fits is refused: as 'shift_end' when an order keeps every arrival promise
+// and only the shift end stops it (arrival-route.js limitRefusal names the
+// other cases). No shift: the option is not passed.
+const shiftEndOf = (shift) => (shift ? { shiftEndMin: shift.endMin } : {});
+
 async function findArrivalWindowSlots(opts) {
   const { dateFrom, dateTo, durationMinutes = 60, technicianId, topN = 10 } = opts;
   let query = applyAssignable(db('technicians'));
   if (technicianId) query = query.where('technicians.id', technicianId);
   const techs = await query.select('id', 'name');
+  const now = new Date();
   // Loaded once per request, right where the techs are (technician-
   // eligibility.js) — an absent tech-day is never offered here, matching
   // the commit-time date-scoped assertAssignableTechnician check.
   const absentDays = await absentTechDays(db, { dateFrom, dateTo, technicianIds: techs.map((tech) => tech.id) });
+  const shiftOf = await loadTechShifts(db, { technicianIds: techs.map((tech) => tech.id), now });
   const { ADMIN_DAY_END_MINUTES } = require('./window-rules');
-  const now = new Date();
   const today = etDateString(now);
   const parts = etParts(now);
   // Off (Codex #6881 r2): no route gets a travel source, so nothing is
@@ -271,8 +295,11 @@ async function findArrivalWindowSlots(opts) {
       // (the capacity path below applies the same filter).
       if (context.target.memberServices && (await require('../technician-capabilities')
         .inactiveCapabilitiesForServices(db, [tech.id], context.target.memberServices)).length) continue;
-      const floor = Math.max(DAY_START_HOUR * 60, date === today ? parts.hour * 60 + parts.minute + 30 : 0);
-      routes.push({ date, tech, context, limits: { durationMinutes, earliestStartMin: floor, latestServiceEndMin: ADMIN_DAY_END_MINUTES, lateDays: true } });
+      const shift = shiftOf(tech.id, date);
+      const day = shiftBounds(shift, DAY_START_HOUR * 60, ADMIN_DAY_END_MINUTES);
+      const floor = Math.max(day.openMin, date === today ? parts.hour * 60 + parts.minute + 30 : 0);
+      routes.push({ date, tech, context,
+        limits: { durationMinutes, earliestStartMin: floor, latestServiceEndMin: day.closeMin, lateDays: true, ...shiftEndOf(shift) } });
     }
   }
   // The road days' routes are driven on Google, only each route's hours near
@@ -313,9 +340,11 @@ async function findCapacitySlots(opts) {
   let query = applyAssignable(db('technicians'));
   if (technicianId) query = query.where('technicians.id', technicianId);
   const techs = await query.select('id', 'name');
+  const now = new Date();
   // Loaded once per request, right where the techs are — see
   // findArrivalWindowSlots above.
   const absentDays = await absentTechDays(db, { dateFrom, dateTo, technicianIds: techs.map((tech) => tech.id) });
+  const shiftOf = await loadTechShifts(db, { technicianIds: techs.map((tech) => tech.id), now });
   const { getBlackoutLayers } = require('./blackout-dates');
   // `service_key`: the new job's catalog identity, when it is the one service asked about
   // (GATE_TECH_JOB_TYPE_CHECKS reads it; the name-only path ignores it).
@@ -328,7 +357,6 @@ async function findCapacitySlots(opts) {
     : await require('../technician-capabilities').inactiveCapabilitiesForServices(db, techs.map(tech => tech.id), requestedServices);
   const inactiveTechs = new Set(inactive.map(row => row.technician_id));
   const blackout = opts.includeBlackoutDates ? new Set() : (await getBlackoutLayers(dateFrom, dateTo)).dates;
-  const now = new Date();
   const today = etDateString(now);
   const parts = etParts(now);
   const travel = require('../route-optimizer').createSchedulingTravel(travelAllowance(opts));
@@ -389,7 +417,11 @@ async function findCapacitySlots(opts) {
         // A whole visit carries every member's service: the technician must
         // be able to do all of them.
         .inactiveCapabilitiesForServices(db, [tech.id], context.target.memberServices || [context.target])).length) continue;
-      const floor = Math.max(SHIFT.startMinutes, startFloorFor(date, opts.earliestStartMin, opts.startFloorByDate),
+      // This technician's own hours inside the shared shift (shiftBounds): no
+      // set hours = the shared shift, and the loop below admits what it did.
+      const shift = shiftOf(tech.id, date);
+      const day = shiftBounds(shift, SHIFT.startMinutes, SHIFT.endMinutes);
+      const floor = Math.max(day.openMin, startFloorFor(date, opts.earliestStartMin, opts.startFloorByDate),
         date === today ? parts.hour * 60 + parts.minute + 30 : 0);
       // Enumerate every on-the-hour start through the shift close and let
       // placementFitsShift (scheduling/policy.js) decide admission from the
@@ -409,11 +441,16 @@ async function findCapacitySlots(opts) {
       // shift bound below (Codex r3 P0, r4 P2 on #4663).
       for (let start = Math.ceil(floor / 60) * 60; start < SHIFT.endMinutes; start += 60) {
         if (opts.customerFacing && !customerWindowAdmits({ startMin: start, endMin: start + durationMinutes })) continue;
-        if (!placementFitsShift(start, start + durationMinutes)) continue;
+        // The job must also end by this technician's own close. The hours tried stay those of
+        // the shared shift whatever the job's length is: a stored length that is not positive
+        // is refused hour by hour by placementFitsShift, as before.
+        if (start + durationMinutes > day.closeMin || !placementFitsShift(start, start + durationMinutes)) continue;
         candidates.push({ context, date, tech, start, options: {
           windowStart: minutesToTime(start), windowEnd: minutesToTime(start + durationMinutes),
           // Owner policy: ordinary setup/closeout is already in the on-site allowance.
           durationMinutes, bufferMinutes: 0, allowInsertion: opts.capacityPlacement === true,
+          // The route must also end the visit inside this technician's shift (both checks below).
+          ...shiftEndOf(shift),
         } });
       }
     }
@@ -1120,6 +1157,18 @@ function packedEndsStarts({ prevIsStop, nextIsStop, earliestFloor, latestStartFl
   return starts;
 }
 
+// One technician's day inside that technician's shift (the shift rule,
+// above findArrivalWindowSlots), as candidatesForDay's params. The shift
+// start is a start floor for every gap, exactly as a caller's own
+// earliestStartMin is: a gap offers its earliest start, so a floor applied
+// afterwards would hide the gap's later hours. The shift end is the last
+// minute a job may end. No shift = the params as they are.
+function withShift(dayParams, shift) {
+  if (!shift) return dayParams;
+  const day = shiftBounds(shift, dayParams.geo.earliestStartMin || 0, dayParams.dayClose);
+  return { ...dayParams, lastEndMin: day.closeMin, geo: { ...dayParams.geo, earliestStartMin: day.openMin } };
+}
+
 // Every candidate for ONE (date, tech) pair: builds that day's virtual
 // route (HQ ... stops ... HQ), evaluates each gap's geometry, and collects
 // its packed-ends or single-candidate output. Extracted from
@@ -1129,12 +1178,16 @@ function packedEndsStarts({ prevIsStop, nextIsStop, earliestFloor, latestStartFl
 // date/tech enumeration around it.
 // `params`: { services, geo, excludeSet, wantsPackedEnds,
 //   wantsExpectedMinutesCredit, slotStepMinutes, durationMinutes, dayOpen, dayClose,
-//   everyStepStart }.
+//   everyStepStart, lastEndMin }.
 function candidatesForDay(date, tech, params) {
   const {
     services, geo, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
     durationMinutes, dayOpen, dayClose,
   } = params;
+  // The last minute a job may end: the day's close, or this technician's
+  // shift end when that is earlier (withShift). The home-base anchors below
+  // stay at the day's own open and close.
+  const lastEndMin = params.lastEndMin ?? dayClose;
   const dayStops = buildDayStops(services, {
     tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
   });
@@ -1153,16 +1206,16 @@ function candidatesForDay(date, tech, params) {
   // Evaluate each gap between anchor[i] and anchor[i+1]
   for (let i = 0; i < anchors.length - 1; i++) {
     evaluatedGaps++;
-    const gap = evaluateGap(anchors[i], anchors[i + 1], { date, tech, dayStops, geo, dayClose });
+    const gap = evaluateGap(anchors[i], anchors[i + 1], { date, tech, dayStops, geo, dayClose: lastEndMin });
 
     if (wantsPackedEnds && dayStops.length > 0) {
-      for (const startMin of packedEndsStarts(gap, durationMinutes, dayClose)) {
+      for (const startMin of packedEndsStarts(gap, durationMinutes, lastEndMin)) {
         found.push(gap.makeCandidate(startMin));
       }
       continue;
     }
 
-    for (const startMin of legacyGapStarts(gap, params)) found.push(gap.makeCandidate(startMin));
+    for (const startMin of legacyGapStarts(gap, { ...params, dayClose: lastEndMin })) found.push(gap.makeCandidate(startMin));
   }
   return { candidates: found, evaluatedGaps, restoredCalendar: dayStops.some(stop => stop.roadPricingEligible === false) };
 }
@@ -1321,19 +1374,22 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
   let techQuery = applyAssignable(db('technicians'));
   if (technicianId) techQuery = techQuery.where('technicians.id', technicianId);
   const techs = await techQuery.select(techColumns(['id', 'name'], techStartPoints));
-  if (!techs.length) return { techs, services: [], dates: [], absentDays: new Set() };
+  if (!techs.length) return { techs, services: [], dates: [], absentDays: new Set(), shiftOf: () => null };
 
   // Loaded once per request, right where the techs are — see
   // findArrivalWindowSlots above. The per-(date,tech) loop below (in
   // findAvailableSlots) skips a pair this names.
   const absentDays = await absentTechDays(db, { dateFrom, dateTo, technicianIds: techs.map((tech) => tech.id) });
+  // Each technician's shift for a date, read the same way (the shift rule,
+  // above findArrivalWindowSlots).
+  const shiftOf = await loadTechShifts(db, { technicianIds: techs.map((tech) => tech.id) });
 
   // Load all scheduled services in date range, per tech, with coords
   const services = await db('scheduled_services')
     .whereBetween('scheduled_date', [dateFrom, dateTo])
     .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
     .whereNotNull('scheduled_services.window_start')
-    .where(liveServiceOrHold)
+    .where(bookedVisitOrLiveHold)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .select(
       'scheduled_services.id',
@@ -1347,7 +1403,7 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
       'scheduled_services.customer_id',
       'scheduled_services.reservation_expires_at',
       // Keep the provider-spend decision on the old occupancy boundary.
-      // liveServiceOrHold above intentionally restores customer-linked rows
+      // bookedVisitOrLiveHold above intentionally restores customer-linked rows
       // for calendar correctness; only null/future expiry rows were already
       // eligible to price chip legs before that restoration.
       db.raw('(scheduled_services.reservation_expires_at IS NULL OR scheduled_services.reservation_expires_at > NOW()) as road_pricing_eligible'),
@@ -1395,7 +1451,7 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
     const blackout = await getBlackoutDates(dates[0], dates[dates.length - 1], undefined, { strict: strictBlackout === true });
     if (blackout.size) dates = dates.filter((d) => !blackout.has(d));
   }
-  return { techs, services, dates, absentDays };
+  return { techs, services, dates, absentDays, shiftOf };
 }
 
 /**
@@ -1446,7 +1502,7 @@ async function findAvailableSlots(opts) {
   const dayOpen = dayStartHour * 60;
   const dayClose = dayEndHour * 60;
 
-  const { techs, services, dates, absentDays } = await loadFindTimeContext({
+  const { techs, services, dates, absentDays, shiftOf } = await loadFindTimeContext({
     dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates: opts.includeBlackoutDates, strictBlackout: opts.strictBlackout,
     techStartPoints: opts.techStartPoints === true,
   });
@@ -1492,7 +1548,7 @@ async function findAvailableSlots(opts) {
     for (const tech of techs) {
       if (absentDays.has(`${tech.id}:${date}`)) continue;
       searched = true;
-      const { candidates: dayCandidates, evaluatedGaps, restoredCalendar: restoredDay } = candidatesForDay(date, tech, dayParams);
+      const { candidates: dayCandidates, evaluatedGaps, restoredCalendar: restoredDay } = candidatesForDay(date, tech, withShift(dayParams, shiftOf(tech.id, date)));
       if (restoredDay) restoredCalendar = true;
       evaluated += evaluatedGaps;
       candidates.push(...dayCandidates);

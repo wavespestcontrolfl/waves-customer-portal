@@ -1,4 +1,4 @@
-// The lead call-back reminder banner (GATE_LEAD_CALL_REMINDER, owner 2026-11-05 "remind"): a "Missed call request" or
+// The lead call-back reminder banner (owner 2026-11-05 "remind"): a "Missed call request" or
 // night call-back bell still open one business hour after its latest event sends ONE banner, only while nobody has
 // reached the lead, only 8 AM to 8 PM ET. The database is a stub here: the rows, the fenced stamp's result and the
 // open check are set per test.
@@ -38,6 +38,8 @@ jest.mock('../models/db', () => {
   });
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   db.fn = { now: () => 'now()' };
+  // The stamp's transaction runs on the same stub.
+  db.transaction = jest.fn(async (work) => work(db));
   return db;
 });
 jest.mock('../services/notification-service', () => ({
@@ -63,7 +65,10 @@ const { triggerNotification } = require('../services/notification-triggers');
 const { loadContactBundles } = require('../services/admin-alert-contact-witnesses');
 const reminder = require('../services/lead-call-reminder');
 
-const { runLeadCallReminder, __private: { inSendHours, dueAtFor } } = reminder;
+const { __private: { inSendHours, dueAtFor } } = reminder;
+// The 8 PM cutoff is asked with a fresh clock at the stamp and at dispatch. That clock is the pass's `now` unless a test
+// sets one: the real clock is not part of these cases.
+const runLeadCallReminder = (opts = {}) => reminder.runLeadCallReminder({ clock: () => opts.now, ...opts });
 
 // Eastern wall-clock times in November 2026 (EST, UTC-5).
 const est = (day, hhmm) => new Date(`2026-11-${day}T${hhmm}:00-05:00`);
@@ -90,25 +95,9 @@ const run = async (now = NOW) => {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  process.env.GATE_LEAD_CALL_REMINDER = 'true';
   Object.assign(mockState, { rows: [row('n-1')], leads: [{ id: LEAD, customer_id: CUST, phone: '+19415550100', status: 'new', deleted_at: null }], stampResult: 1, open: {}, estimate: null, calls: [], failLeads: false, failOpen: false });
   Object.assign(mockBundles, { byId: {}, fail: false });
 });
-afterEach(() => { delete process.env.GATE_LEAD_CALL_REMINDER; });
-
-describe('the gate', () => {
-  test.each([[undefined], [''], ['1'], ['on'], ['TRUE'], ['shadow'], [' true']])('GATE_LEAD_CALL_REMINDER = %j reads and sends nothing', async (value) => {
-    if (value === undefined) delete process.env.GATE_LEAD_CALL_REMINDER; else process.env.GATE_LEAD_CALL_REMINDER = value;
-    expect(require('../config/feature-gates').leadCallReminderLive()).toBe(false);
-    expect(await runLeadCallReminder({ now: NOW })).toEqual({ skipped: true, reason: 'gate_off' });
-    expect(mockState.calls).toEqual([]);
-    expect(triggerNotification).not.toHaveBeenCalled();
-  });
-  test('exactly "true" is live', () => {
-    expect(require('../config/feature-gates').leadCallReminderLive()).toBe(true);
-  });
-});
-
 describe('the clock', () => {
   test.each([
     ['a ring missed at 10:09 AM -> 11:09 AM', est('04', '10:09'), est('04', '11:09')],
@@ -170,6 +159,8 @@ describe('the banner', () => {
       alertBody: 'Missed call request: Pat replied CALL to our lead text and nobody pressed 1.',
       alertLink: `/admin/leads?lead=${LEAD}`,
       customerId: CUST,
+      // 8 PM that day: the banner's send hours end then.
+      expiresAt: est('05', '20:00').toISOString(),
     });
     expect(opts).toMatchObject({ pushOnly: true, adminOnly: true, bellAuthorized: true });
     // The witnesses read the lead's own customer and phone, from the bell's event.
@@ -208,6 +199,37 @@ describe('the banner', () => {
     mockState.open = {};
     mockState.failOpen = true;
     expect(await beforePush()).toBe(false);
+  });
+
+  test('just before the push the lead is judged again: a person who reached it meanwhile, or a failed read, says no', async () => {
+    await run();
+    const { beforePush } = reminders()[0][2];
+    expect(await beforePush()).toBe(true);
+    // A person texted the lead after the sweep read its page.
+    mockBundles.byId['n-1'] = { textAt: est('05', '15:01') };
+    expect(await beforePush()).toBe(false);
+    mockBundles.byId = {};
+    mockBundles.fail = true;
+    expect(await beforePush()).toBe(false);
+  });
+
+  test('the 8 PM cutoff is asked again at dispatch and before each device: a banner stamped at 7:58 PM sends nothing after 8', async () => {
+    let at = est('05', '19:58');
+    const result = await runLeadCallReminder({ now: at, clock: () => at });
+    await Promise.all(result.sends || []);
+    const { beforePush, beforeHandoff } = reminders()[0][2];
+    expect(await beforePush()).toBe(true);
+    expect(await beforeHandoff()).toBe(true);
+    at = est('05', '20:01');
+    expect(await beforePush()).toBe(false);
+    // A device whose turn comes after 8 PM, behind a slow earlier device, sends nothing either.
+    expect(await beforeHandoff()).toBe(false);
+  });
+
+  test('the banner expires at 8 PM that day, so a phone that comes online later never shows it', async () => {
+    const result = await runLeadCallReminder({ now: NOW });
+    await Promise.all(result.sends || []);
+    expect(reminders()[0][1].expiresAt).toBe(est('05', '20:00').toISOString());
   });
 
   test('a banner that throws is logged and never reaches the sweep', async () => {
@@ -282,19 +304,22 @@ describe('the alert-relevance sweep runs the pass after its closes', () => {
   const { runAdminAlertRelevanceSweep } = require('../services/admin-alert-relevance');
   beforeEach(() => { mockState.rows = []; });
 
-  test('gate on: the pass runs with the sweep\'s time and its count is reported', async () => {
+  test('the pass runs with the sweep\'s time and its count is reported', async () => {
     const spy = jest.spyOn(reminder, 'runLeadCallReminder').mockResolvedValueOnce({ skipped: false, due: 2, reminded: 2, sends: [] });
     const result = await runAdminAlertRelevanceSweep({ now: NOW });
     expect(spy).toHaveBeenCalledWith({ now: NOW });
     expect(result.leadCallReminders).toBe(2);
+    // A test's clock reaches the pass; the cron passes none, so the pass reads the real time.
+    const clock = () => NOW;
+    spy.mockResolvedValueOnce({ skipped: false, due: 0, reminded: 0, sends: [] });
+    await runAdminAlertRelevanceSweep({ now: NOW, clock });
+    expect(spy).toHaveBeenLastCalledWith({ now: NOW, clock });
     spy.mockRestore();
   });
 
-  test('gate off: the pass is never called', async () => {
-    delete process.env.GATE_LEAD_CALL_REMINDER;
-    const spy = jest.spyOn(reminder, 'runLeadCallReminder');
+  test('a pass that reminds nobody adds nothing to the sweep result', async () => {
+    const spy = jest.spyOn(reminder, 'runLeadCallReminder').mockResolvedValueOnce({ skipped: false, due: 0, reminded: 0, sends: [] });
     const result = await runAdminAlertRelevanceSweep({ now: NOW });
-    expect(spy).not.toHaveBeenCalled();
     expect(result).not.toHaveProperty('leadCallReminders');
     spy.mockRestore();
   });

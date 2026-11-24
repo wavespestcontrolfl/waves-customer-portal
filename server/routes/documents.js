@@ -25,6 +25,7 @@ const {
 } = require('../services/project-types');
 const { authenticate } = require('../middleware/auth');
 const { customerSafeVisitNotes } = require('../services/context-aggregator');
+const { carriesReportNote, customerCopyViolations, heldAccessCode, noteRecordCopyViolations } = require('../services/service-report/technician-report-copy');
 const logger = require('../services/logger');
 const { formatAddress } = require('../utils/address-normalizer');
 const { applyReportIdentitySnapshotToLegacyPdf, readReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
@@ -153,16 +154,6 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
       try { weather = typeof service[field] === 'string' ? JSON.parse(service[field]) : service[field]; } catch { /* ignore */ }
       if (weather) break;
     }
-  }
-
-  // Parse structured notes / AI report
-  let structuredNotes = null;
-  if (service.structured_notes) {
-    try { structuredNotes = typeof service.structured_notes === 'string' ? JSON.parse(service.structured_notes) : service.structured_notes; } catch { /* ignore */ }
-  }
-  let aiReport = null;
-  if (service.ai_report) {
-    try { aiReport = typeof service.ai_report === 'string' ? JSON.parse(service.ai_report) : service.ai_report; } catch { /* ignore */ }
   }
 
   // Parse areas serviced
@@ -403,15 +394,25 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   // not customer-facing (see the same classification in routes/services.js),
   // and dumping every key/value put raw internal flags on a customer PDF.
   // ══════════════════════════════════════════════════════
-  const observations = [];
-  if (structuredNotes?.observations) {
-    const obs = Array.isArray(structuredNotes.observations) ? structuredNotes.observations : [structuredNotes.observations];
-    observations.push(...obs);
-  }
-  if (aiReport?.observations) {
-    const obs = Array.isArray(aiReport.observations) ? aiReport.observations : [aiReport.observations];
-    observations.push(...obs);
-  }
+  // Every record prints the web report's customer lists (report-data.js
+  // buildProtocolPayload: structuredObservations, structuredRecommendations):
+  // only what the completion form recorded. Never the merged
+  // structured_notes.observations / recommendations, which fold in raw
+  // [Found] / [Next] lines of technician_notes, and never ai_report: no
+  // reviewed path prints either (AGENTS.md, report egress; #3516;
+  // docs/public-route-contracts.md). On every record each value passes the
+  // complete customer-copy screen before it prints (customerCopyViolations,
+  // AGENTS.md; the web payload screens its recommendations with it too,
+  // report-data.js buildReportV1Data), and a value the note's access check
+  // catches drops (heldAccessCode: a code-shaped number, or any word about
+  // getting in, such as a gate, a lock, a key, a code or access). On a
+  // record that carries the technician's own
+  // note each value has passed the note's screen as well
+  // (noteRecordCopyViolations). A refused value is left out; the rest print.
+  const { buildProtocolPayload } = require('../services/service-report/report-data');
+  const formLists = buildProtocolPayload(service);
+  const printable = (lines) => lines.filter((line) => !heldAccessCode(line) && !customerCopyViolations(line).length);
+  const observations = printable(formLists.structuredObservations);
 
   if (observations.length) {
     if (y > 620) y = addContinuationPage();
@@ -428,21 +429,21 @@ function generateServiceReportPDF(customer, service, products, res, extra = {}) 
   // ══════════════════════════════════════════════════════
   // WHAT WE RECOMMEND — property-specific tips
   // ══════════════════════════════════════════════════════
-  const recommendations = [];
-  if (structuredNotes?.recommendations) {
-    const recs = Array.isArray(structuredNotes.recommendations) ? structuredNotes.recommendations : [structuredNotes.recommendations];
-    recommendations.push(...recs);
-  }
-  if (aiReport?.recommendations) {
-    const recs = Array.isArray(aiReport.recommendations) ? aiReport.recommendations : [aiReport.recommendations];
-    recommendations.push(...recs);
-  }
+  // The irrigation line joins the form's recommendations before the screen,
+  // so it passes every screen they pass: printable, and on a note record the
+  // note's screen, as buildProtocolPayload screens the form's values (pre-push
+  // audit round 30). No code writes the column today (production 2026-11-20,
+  // read-only: 0 of 656 records).
+  const recommendationLines = [...formLists.structuredRecommendations];
   if (service.irrigation_recommendation) {
     try {
       const irr = typeof service.irrigation_recommendation === 'string' ? JSON.parse(service.irrigation_recommendation) : service.irrigation_recommendation;
-      if (irr.recommendation) recommendations.push(irr.recommendation);
+      if (irr.recommendation && !(carriesReportNote(service.structured_notes) && noteRecordCopyViolations(String(irr.recommendation)).length)) {
+        recommendationLines.push(irr.recommendation);
+      }
     } catch { /* ignore */ }
   }
+  const recommendations = printable(recommendationLines);
 
   if (recommendations.length) {
     if (y > 620) y = addContinuationPage();

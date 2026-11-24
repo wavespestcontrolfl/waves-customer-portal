@@ -49,7 +49,7 @@ const { ratesForTable } = require('./irrigation-rates');
 const { resolveRestrictionCounty, currentRestrictionPolicy } = require('../config/irrigation-restrictions');
 const { fetchServiceWeekWeather, sumPrecipInches, et0SumToInches } = require('./service-report/application-conditions');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
-const { isEnabled, gateEnvValue, autoDispatchMowingDaysMode } = require('../config/feature-gates');
+const { isEnabled, gateEnvValue } = require('../config/feature-gates');
 const { parseDays } = require('../utils/mowing-schedule');
 const { resolveRateTable, storedRateTable, rateOptionsForTable } = require('./irrigation-rates');
 const { CUSTOMER_STAGES } = require('./customer-stages');
@@ -215,8 +215,8 @@ async function loadSetupAskHistory({ customerId, weekEnding, conn = db }) {
 // The mowing-days ask (owner-approved copy 2026-11-02, do not reword). Every
 // weekly template places {{mowing_ask}} and a small "Add my mowing days" link
 // on {{mowing_ask_url}} (20261102120000); both are empty when the line is off,
-// so neither block renders. It shows only while autoDispatchMowingDaysMode()
-// is 'true', the customer has nothing saved under Mowing, and the ask is due
+// so neither block renders. It shows only when the customer has nothing saved
+// under Mowing, and the ask is due
 // on the setup ask's cadence (first SETUP_ASK_FREE_SENDS sends, then once
 // every SETUP_ASK_SPACING_DAYS).
 const MOWING_ASK = "When does your lawn get mowed? Mowing right before or right after a lawn treatment can undo it. Add your mowing days under Mowing in your portal, and we'll plan your lawn treatments around them.";
@@ -275,7 +275,7 @@ function mowingAskDue(history, now = new Date()) {
 // irrigation_email tag (no recurring lawn program) never gets it; an
 // unreadable lawn check also means no line.
 async function mowingAskLive(customer, { weekEnding, now }) {
-  if (autoDispatchMowingDaysMode() !== 'true' || !mowingNothingSaved(customer)) return false;
+  if (!mowingNothingSaved(customer)) return false;
   if (!mowingAskDue(await loadMowingAskHistory({ customerId: customer.id, weekEnding }), now)) return false;
   return hasRecurringLawnEvidence(customer.id, { now }).catch((err) => {
     logger.warn(`[irrigation-weekly-email] lawn program check unreadable for ${customer.id}; no mowing ask: ${err.message}`);

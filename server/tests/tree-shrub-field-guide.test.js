@@ -2,11 +2,8 @@ const { treeShrubFieldGuide } = require('../services/tree-shrub-field-guide');
 const { treeShrubDueReason } = require('../services/tree-shrub-completion-defaults');
 const { tree_shrub: program } = require('../config/protocols.json');
 const visit = month => program.visits.find(row => row.month === month);
-afterEach(() => { delete process.env.GATE_TREE_SHRUB_FIELD_GUIDE; });
-
-test('dark guide stays off; scheduled month projects only its own product details and equipment', () => {
-  expect(treeShrubFieldGuide(visit('Jan'))).toBeNull();
-  process.env.GATE_TREE_SHRUB_FIELD_GUIDE = 'true';
+test('scheduled month projects only its own product details and equipment', () => {
+  expect(treeShrubFieldGuide({ month: 'Jan' })).toBeNull();
   const january = treeShrubFieldGuide(visit('Jan'));
   expect(january.products.snapshot.equipment).toEqual(['hand', 'push']);
   expect(january.products.merit.equipment).toEqual(['soil']);
@@ -341,7 +338,7 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
     const lines = visits.flatMap((v) => `${v.primary}\n${v.secondary}`.split('\n')).filter((line) => /^Distance IGR/.test(line));
     expect(lines).toHaveLength(7);
     for (const line of lines) {
-      expect(line).toMatch(/whiteflies 6–8 fl oz\/100 gal at the label volume of 5 gal of mix per 1,000 sq ft, one 8 fl oz spray a year or 6 then 6 with 21 to 28 days between; scale: HOLD, call the office first/);
+      expect(line).toMatch(/6–8 fl oz\/100 gal at the label volume of 5 gal of mix per 1,000 sq ft, one 8 fl oz spray a year or 6 then 6 with 21 to 28 days between; scale: HOLD — do not apply it for scale/);
       expect(line).not.toMatch(/listed scales 8–12/);
     }
     const distance = guide.products.distance;
@@ -353,6 +350,7 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
     expect(limits).toMatch(/6 fl oz followed by 6 fl oz 21 to 28 days later/);
     expect(distance.apply).toMatch(/Use the label volume/);
     expect(limits).toMatch(/Scale and mealybug use is on hold\./);
+    expect(limits).toMatch(/Do not apply Distance for scale or mealybug/);
     expect(limits).not.toMatch(/two per six months/);
     for (const visit of visits) {
       for (const row of visit.fieldGuide.conditional) if (row.key === 'distance') expect(row.where).toBe('Whitefly nymphs; scale on hold');
@@ -470,7 +468,6 @@ describe('palm-type table (owner 2026-10-23; every fact from UF/IFAS)', () => {
   });
 
   test('the visit payload carries the table only where it carries the palm chart', () => {
-    process.env.GATE_TREE_SHRUB_FIELD_GUIDE = 'true';
     let withPalm = 0;
     for (const row of program.visits) {
       const guide = treeShrubFieldGuide(row);

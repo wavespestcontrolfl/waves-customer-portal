@@ -11,7 +11,7 @@
  * enforcer).
  */
 
-const { bookingRainFit, rainTierOf, rankingNeedsForecast, boundedHourlyRain } = require('./rain-fit');
+const { rainFitFor, rainTierOf, rankingNeedsForecast, boundedHourlyRain } = require('./rain-fit');
 const logger = require('../logger');
 const { loadOccupancy, conflictsForTarget } = require('../rain-out');
 const { checkArrivalPlacement } = require('./arrival-route');
@@ -101,8 +101,13 @@ function markUnknownDetours(slots) {
  * walked to latest_start_min and every clear start kept, so a free
  * 09:00–12:00 gap lists 09:00, 10:00 and 11:00 for a one-hour visit. The
  * ranked answer is unchanged by it: one start per gap, deduped, sliced.
+ *
+ * `strict` (the route check's slot rule, day-replan/route-check.js, which
+ * counts the open-times list): a failure throws instead of failing open, so
+ * an unchecked gap is never an answer. Only a walked gap reads the snapshot;
+ * an arrival-search slot was checked by its own simulation.
  */
-async function guardHintStarts(slots, { today, sameDayFloorMin, step, spanMin, excluded, topN, every = false, perTech = false }) {
+async function guardHintStarts(slots, { today, sameDayFloorMin, step, spanMin, excluded, topN, every = false, perTech = false, strict = false }) {
   const floorFor = (date) => (date === today && Number.isInteger(sameDayFloorMin) ? sameDayFloorMin : 0);
   const restart = (s, m) => (m === toMin(s.start_time) ? s : { ...s, start_time: toHHMM(m), end_time: toHHMM(m + spanMin) });
   // A gap's starts at the request's step, from the picker's floor through
@@ -127,7 +132,7 @@ async function guardHintStarts(slots, { today, sameDayFloorMin, step, spanMin, e
   let keptPerGap;
   try {
     const occupancyByDate = new Map();
-    await Promise.all([...new Set(slots.map((s) => s.date))].map(async (d) => {
+    await Promise.all([...new Set(slots.filter((s) => s.route_mode !== 'arrival_windows').map((s) => s.date))].map(async (d) => {
       occupancyByDate.set(d, await loadOccupancy({ dateFrom: d, dateTo: d }));
     }));
     // The slot's own technician scopes the check when GATE_MULTI_TECH_CONFIRM is on (the
@@ -147,6 +152,7 @@ async function guardHintStarts(slots, { today, sameDayFloorMin, step, spanMin, e
       return kept;
     });
   } catch (guardErr) {
+    if (strict) throw guardErr;
     logger.warn('[find-time] hint occupancy guard failed (fail-open):', guardErr.message);
     keptPerGap = slots.map((s) => {
       if (every) return gapStarts(s).map((m) => restart(s, m));
@@ -431,6 +437,16 @@ function hintSearchPlan({ hint, summary, openTimes = false, from, to, maxTo, tod
   return { summary: true, from: start, to: end, verdictDate, step: 60 };
 }
 
+/**
+ * True while New Appointment shows its open-times box: the box asks (GATE_OPEN_TIMES_BOX) and the hints answer
+ * (GATE_BEST_TIME_HINTS; off, every hint search returns `gated`). Read at call time: the pickers ask it through
+ * GET /admin/schedule/find-time/ui, and the route check's slot rule counts that list only while it is shown.
+ */
+function openTimesBoxLive() {
+  const { gateEnvValue } = require('../../config/feature-gates');
+  return gateEnvValue('GATE_BEST_TIME_HINTS') && gateEnvValue('GATE_OPEN_TIMES_BOX');
+}
+
 /** Last date a summary search may cover: `from` + maxDays - 1. */
 function summaryRangeEnd(from, to, maxDays = SUMMARY_MAX_DAYS) {
   let last = from;
@@ -519,7 +535,7 @@ function byBest(a, b) {
     || a.start_time.localeCompare(b.start_time);
 }
 
-// `tierOf` (GATE_BOOKING_RAIN_RANK) ranks by rain fit BEFORE drive: an
+// `tierOf` ranks by rain fit BEFORE drive: an
 // outdoor booking's wet hours sort after its dry ones, a rain-OK booking's
 // wet hours before. Absent = the drive-only order, unchanged.
 function pickBestRows(days, { pickedDate, today, tierOf = null }) {
@@ -581,9 +597,8 @@ async function buildBestRows(days, {
   paidRoads, cacheOnlyRoads = false, roadSpender, deps = {},
 }) {
   const rainLookup = deps.hourlyRain || boundedHourlyRain;
-  // One forecast read serves the labels and, with GATE_BOOKING_RAIN_RANK on,
-  // the ranking. No hour on screen: no lookup (Codex #6045 r1).
-  const fit = bookingRainFit(serviceTypes);
+  // One forecast read serves the labels and the ranking. No hour on screen: no lookup (Codex #6045 r1).
+  const fit = rainFitFor(serviceTypes);
   const ranking = rankingNeedsForecast(fit, days, today, pickedDate);
   const forecast = days.some((day) => day.hours.length) || picked?.fits === true
     ? rainLookup(lat, lng, ranking).catch(() => null) : Promise.resolve(null);
@@ -697,13 +712,13 @@ function withChipValues(days, rows, hourly) {
 }
 
 // The open-times box's day rows: every hour that fits, each with its
-// technician. For a booking the rain ranking reads (GATE_BOOKING_RAIN_RANK),
+// technician. For a booking the rain ranking reads,
 // each hour also carries its rain tier (rain-fit.js rainTier: 0 sorts
 // first), so the box's Best order puts an outdoor job's wet hours after its
 // dry ones, as the best-times rows do. The forecast lookup fails open: no
 // tiers, drive order only.
 async function buildOpenTimes(days, { today, lat, lng, serviceTypes = [], rainSpan = null, deps = {} }) {
-  const fit = bookingRainFit(serviceTypes);
+  const fit = rainFitFor(serviceTypes);
   const hourly = rankingNeedsForecast(fit, days, today, null)
     ? await (deps.hourlyRain || boundedHourlyRain)(lat, lng, true).catch(() => null) : null;
   const tierOf = rainTierOf(fit, hourly, today, rainSpan);
@@ -746,6 +761,6 @@ async function buildHintSummary(plan, everyStart, {
 
 module.exports = {
   validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour, scorePickedHourByTech,
-  hintSearchPlan, buildHintSummary, summarizeHintDays, summaryRangeEnd, SUMMARY_MAX_DAYS, OPEN_TIMES_MAX_DAYS, loadSummaryDayFacts,
+  hintSearchPlan, buildHintSummary, summarizeHintDays, summaryRangeEnd, SUMMARY_MAX_DAYS, OPEN_TIMES_MAX_DAYS, loadSummaryDayFacts, openTimesBoxLive,
   pickBestRows, buildBestRows, buildOpenTimes, rainForWindow,
 };

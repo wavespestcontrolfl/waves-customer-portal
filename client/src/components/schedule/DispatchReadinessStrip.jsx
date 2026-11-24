@@ -6,7 +6,7 @@ export default function DispatchReadinessStrip({ readiness, onOpen, compact = fa
   const issues = readiness.issues || [];
   const hasHold = issues.some(issue => issue.status === 'hold');
   const label = issues.length ? issues.map(issue => issue.label).join(' · ') : 'View Job Card';
-  // A rain caution (GATE_SPRAY_RAIN_RULES) stays monochrome like any non-hold: red is for holds only.
+  // A rain caution stays monochrome like any non-hold: red is for holds only.
   const hasCaution = issues.some(issue => issue.status === 'caution');
   const Icon = hasHold ? AlertTriangle : (hasCaution ? CloudRain : HelpCircle);
   return (

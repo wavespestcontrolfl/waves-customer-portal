@@ -461,6 +461,8 @@ function buildRows() {
       ({ footprint, complexity, productKey }) => sp.priceTrenching({ footprint }, {
         perimeterLF: calculatePerimeter(footprint, complexity),
         productKey, applicationRate: 'standard', trenchDepthFt: 1, warrantyTier: 'none', concretePct: 0.2, labelConfirmed: true,
+        // A label check made for each product's current bottle (bifenthrin: LESCO Crosscheck Plus, owner 2026-11-18).
+        labelBottle: sp.BIFENTHRIN_LABEL_BOTTLE,
       }),
       (r) => (r.quoteRequired || !Number.isFinite(r.price) ? NaN : r.price)),
     notes: 'Priced by treated perimeter and product; longer measured perimeters, deeper trenching, a higher application rate, added warranty terms, and greater concrete coverage price higher; exact footage measured on site.',
@@ -477,6 +479,8 @@ function buildRows() {
         Object.keys(constants.SPECIALTY.preSlabTermiticide.products).map((productKey) => ({ slabSqFt, productKey }))),
       ({ slabSqFt, productKey }) => sp.pricePreSlabTermiticide({ slabSqFt }, {
         productKey, jobContext: 'standalone', volumeDiscount: 'none', includeWarrantyExtended: false, labelConfirmed: true,
+        // A label check made for each product's current bottle (bifenthrin: LESCO Crosscheck Plus, owner 2026-11-18).
+        labelBottle: sp.BIFENTHRIN_LABEL_BOTTLE,
       }),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : (r.price ?? r.treatmentPrice))),
     notes: 'New-construction slab pre-treatment priced by slab area and product for a standalone job — larger slabs price higher by the same usage-step formula. Builder-batch or same-trip scheduling and volume discounts can lower the price; extended warranty adds cost.',
@@ -674,7 +678,7 @@ function buildRows() {
       ],
       (opts) => sp.priceRodentGuarantee(opts),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : r.price)),
-    notes: 'Renewable 12-month rodent-free guarantee; eligibility requires completed trapping, completed exclusion, sanitation completed (or photo baseline), and no activity after the final trap check. Priced by property tier — larger, more complex properties price higher.',
+    notes: 'Renewable 12-month rodent exclusion guarantee covering up to 4 callbacks and re-sealing of the original exclusion points; eligibility requires completed trapping and completed exclusion. Priced by property tier — larger, more complex properties price higher.',
   }));
 
   add('trap_only_retainer', () => rangeRow({

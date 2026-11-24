@@ -78,6 +78,110 @@ describe('link recognition (ownedPortalLinkSpans)', () => {
     ].join(' ');
     expect(ownedPortalLinkSpans(body)).toEqual([]);
   });
+
+  describe('the hosts each environment owns (the real URL helpers)', () => {
+    const RAILWAY = 'waves-portal-production.up.railway.app';
+    const PREVIEW = 'waves-portal-pr-8400.up.railway.app';
+    const NAMES = ['PUBLIC_PORTAL_URL', 'PORTAL_URL', 'CLIENT_URL', 'PORTAL_DOMAIN', 'RAILWAY_PUBLIC_DOMAIN', 'SHORTLINK_BASE_URL',
+      'RAILWAY_ENVIRONMENT_NAME', 'RAILWAY_ENVIRONMENT', 'RAILWAY_DEPLOYMENT_ID', 'RAILWAY_REPLICA_ID'];
+    const { ownedPortalHosts, wrappedOwnedLinkIn } = require('../services/composer-customer-links');
+    const prep = (host) => `https://${host}/prep/${TOKEN}`;
+    // A running Railway deployment of the named environment (utils/railway-deployment.js).
+    const deployedIn = (environment) => {
+      process.env.RAILWAY_ENVIRONMENT_NAME = environment;
+      process.env.RAILWAY_DEPLOYMENT_ID = 'deployment-test';
+    };
+    let saved;
+    beforeEach(() => {
+      saved = Object.fromEntries(NAMES.map((name) => [name, process.env[name]]));
+      for (const name of NAMES) delete process.env[name];
+    });
+    afterEach(() => {
+      for (const name of NAMES) {
+        if (saved[name] === undefined) delete process.env[name];
+        else process.env[name] = saved[name];
+      }
+    });
+
+    test('production owns the branded portal even when its env values name only aliases: its links are found and judged', () => {
+      // publicPortalUrl() then reads the raw Railway host, and the short links have a domain of their own.
+      deployedIn('production');
+      process.env.CLIENT_URL = `https://${RAILWAY}`;
+      process.env.SHORTLINK_BASE_URL = 'https://wvs.example';
+      expect(ownedPortalHosts()).toEqual(['wvs.example', RAILWAY, HOST]);
+      expect(ownedPortalLinkSpans(`Prep: ${prep(HOST)} or ${prep(RAILWAY)}`).map((s) => s.url)).toEqual([prep(HOST), prep(RAILWAY)]);
+      // A branded bearer link inside a foreign URL is refused (fail closed), as on the configured portal origin.
+      expect(wrappedOwnedLinkIn(`See https://evil.example/?next=${prep(HOST)}`)).toBe(true);
+    });
+
+    test('a preview owns only the hosts it builds links on: a production link, even one a copied CLIENT_URL names, is not judged against its rows', () => {
+      deployedIn('waves-customer-portal-pr-8400');
+      process.env.PUBLIC_PORTAL_URL = `https://${PREVIEW}`;
+      process.env.RAILWAY_PUBLIC_DOMAIN = PREVIEW;
+      process.env.SHORTLINK_BASE_URL = 'https://wvs-preview.example';
+      process.env.CLIENT_URL = `https://${RAILWAY}`;
+      expect(ownedPortalHosts()).toEqual(['wvs-preview.example', PREVIEW]);
+      expect(ownedPortalLinkSpans(`Prep: ${prep(HOST)} or ${prep(RAILWAY)} or ${prep(PREVIEW)}`).map((s) => s.url)).toEqual([prep(PREVIEW)]);
+      expect(wrappedOwnedLinkIn(`See https://evil.example/?next=${prep(HOST)}`)).toBe(false);
+      expect(wrappedOwnedLinkIn(`See https://evil.example/?next=${prep(RAILWAY)}`)).toBe(false);
+      expect(wrappedOwnedLinkIn(`See https://evil.example/?next=${prep(PREVIEW)}`)).toBe(true);
+    });
+
+    test('in production an alias that names no host, or names a single label, drops only itself', () => {
+      // A single label would read every same word in a message as a link.
+      deployedIn('production');
+      process.env.PUBLIC_PORTAL_URL = `https://${HOST}`;
+      process.env.CLIENT_URL = 'https://';
+      process.env.PORTAL_URL = 'https://portal';
+      process.env.PORTAL_DOMAIN = 'mailto:office@wavespest.example';
+      for (const alias of ['/links', '/links.example/path', '//links.example', 'https:///links.example/path', 'ftp://files.example',
+        'https:links.example', `staff@${RAILWAY}`, `https://staff@${RAILWAY}`, `${RAILWAY}/path`, '']) {
+        process.env.RAILWAY_PUBLIC_DOMAIN = alias;
+        expect(ownedPortalHosts()).toEqual([HOST]);
+      }
+      // The two forms production uses still name their hosts.
+      process.env.RAILWAY_PUBLIC_DOMAIN = RAILWAY;
+      process.env.CLIENT_URL = `https://${RAILWAY}/`;
+      expect(ownedPortalHosts()).toEqual([HOST, RAILWAY]);
+    });
+
+    // The SMS wrap mints its short links on the short-link base as typed, so a base that is not a full URL must stop
+    // every check and the wrap, never become a host ('https:///links' parses to a host named 'links').
+    test.each([
+      ['a bare-host PUBLIC_PORTAL_URL (the short-link base returns it as typed)', { PUBLIC_PORTAL_URL: HOST }],
+      ['a path-only SHORTLINK_BASE_URL', { PUBLIC_PORTAL_URL: `https://${HOST}`, SHORTLINK_BASE_URL: '/links' }],
+      ['a SHORTLINK_BASE_URL with no host', { PUBLIC_PORTAL_URL: `https://${HOST}`, SHORTLINK_BASE_URL: 'https://' }],
+      ['a PUBLIC_PORTAL_URL with no host', { PUBLIC_PORTAL_URL: 'https://', SHORTLINK_BASE_URL: `https://${HOST}` }],
+    ])('a link base that is not a full URL stops every check and the wrap, as on main: %s', async (_label, env) => {
+      deployedIn('production');
+      Object.assign(process.env, env);
+      expect(() => ownedPortalHosts()).toThrow();
+      const body = `Your prep guide: ${prep(HOST)}`;
+      expect(await wrapPortalLinks({ ...base, body })).toEqual({ body, codes: [] });
+      expect(createShortCode).not.toHaveBeenCalled();
+    });
+
+    test('in production an alias with an explicit port adds nothing (production serves its hosts on the default port)', () => {
+      deployedIn('production');
+      process.env.PUBLIC_PORTAL_URL = `https://${HOST}`;
+      process.env.CLIENT_URL = `https://${RAILWAY}:8443`;
+      process.env.PORTAL_DOMAIN = `${RAILWAY}:443`;
+      expect(ownedPortalHosts()).toEqual([HOST, RAILWAY]);
+      process.env.PORTAL_DOMAIN = '';
+      expect(ownedPortalHosts()).toEqual([HOST]);
+    });
+
+    test('a host configured with a trailing DNS dot is owned in both spellings, like an incoming FQDN link', () => {
+      deployedIn('production');
+      process.env.CLIENT_URL = `https://${RAILWAY}.`;
+      process.env.RAILWAY_PUBLIC_DOMAIN = `${HOST}.`;
+      expect(ownedPortalHosts()).toEqual([HOST, RAILWAY]);
+      expect(ownedPortalLinkSpans(`Prep: ${prep(RAILWAY)} or https://${RAILWAY}./prep/${TOKEN}`).map((s) => s.url))
+        .toEqual([prep(RAILWAY), `https://${RAILWAY}./prep/${TOKEN}`]);
+      expect(wrappedOwnedLinkIn(`See https://evil.example/?next=${prep(RAILWAY)}`)).toBe(true);
+      expect(wrappedOwnedLinkIn(`See https://evil.example/?next=https://${RAILWAY}./prep/${TOKEN}`)).toBe(true);
+    });
+  });
 });
 
 describe('wrapPortalLinks', () => {

@@ -375,7 +375,8 @@ describe('GATE_AUTO_DISPATCH_DRY_TIME_ORDER dry time', () => {
       const conn = fakeConn([{ preferred_day: 'tuesday', preferred_time: 'no_preference' }]);
       const out = await getCustomerSchedulingPreferences('c1', 'Quarterly Pest Control', conn);
       expect(conn.calls).toEqual(['property_preferences']);
-      expect(out).toEqual(normalizePreferences({ preferred_day: 'tuesday', preferred_time: 'no_preference' }, 'Quarterly Pest Control'));
+      const row = { preferred_day: 'tuesday', preferred_time: 'no_preference' };
+      expect(out).toEqual(require('../services/auto-dispatch/mowing-days').withMowingRule(normalizePreferences(row, 'Quarterly Pest Control'), row));
       expect(out).not.toHaveProperty('dry_time');
     });
     test('true: two reads give the same prefs every time (no spurious change)', async () => {

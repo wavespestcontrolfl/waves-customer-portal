@@ -10,6 +10,7 @@ import { IntelligenceBarPageDataProvider, usePublishIntelligenceBarPageData } fr
 import { AdminNavigationProvider } from '../../hooks/useAdminNavigation';
 import { markUsageSource } from '../../lib/adminUsage';
 import { encodeJpegDataUrl } from '../../utils/imageCompression';
+import { reloadHoldNames } from '../../lib/reloadHolds';
 
 vi.mock('../../lib/adminUsage', () => ({ markUsageSource: vi.fn(), trackAdminPageView: vi.fn() }));
 
@@ -1288,4 +1289,30 @@ describe('IB UI audit 2026-10-29 fixes', () => {
     fireEvent.change(input, { target: { files: [png('broken-a.png'), png('broken-b.png')] } });
     expect(await screen.findByText(/^2 files could not be attached because they are not readable images\./)).toBeInTheDocument();
   });
+});
+
+test('an unsent question holds the Reload bar of an out-of-date tab until it is cleared or the palette unmounts', async () => {
+  await mount();
+  const input = screen.getByPlaceholderText(/Ask anything/);
+  expect(reloadHoldNames()).not.toContain('ask-draft');
+  fireEvent.change(input, { target: { value: 'Unsent question' } });
+  expect(reloadHoldNames()).toContain('ask-draft');
+  fireEvent.change(input, { target: { value: '   ' } });
+  expect(reloadHoldNames()).not.toContain('ask-draft');
+  fireEvent.change(input, { target: { value: 'Unsent question' } });
+  cleanup();
+  expect(reloadHoldNames()).not.toContain('ask-draft');
+});
+
+test('a picked photo holds the Reload bar while it is still converting, with no question typed', async () => {
+  let finish;
+  encodeJpegDataUrl.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  await mount();
+  expect(reloadHoldNames()).not.toContain('ask-draft');
+  fireEvent.change(document.querySelector('input[type=file]'), { target: { files: [new File(['x'], 'fixture-slow.png', { type: 'image/png' })] } });
+  expect(await screen.findByText('Attaching…')).toBeInTheDocument();
+  expect(reloadHoldNames()).toContain('ask-draft');
+  await act(async () => finish('data:image/jpeg;base64,QUJD'));
+  expect(screen.queryByText('Attaching…')).not.toBeInTheDocument();
+  expect(reloadHoldNames()).toContain('ask-draft');
 });

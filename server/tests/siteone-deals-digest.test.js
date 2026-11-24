@@ -6,6 +6,9 @@
  * names and addresses are synthetic.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The AI end-date read (GATE_SITEONE_DEAL_AI_END_DATE) has its own suite; here it is a fake.
+const mockReadEndDates = jest.fn();
+jest.mock('../services/procurement/siteone-deal-end-date', () => ({ readDealEndDates: (...args) => mockReadEndDates(...args) }));
 
 const logger = require('../services/logger');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
@@ -43,6 +46,10 @@ describe('isDealEmail', () => {
     ['Price increase with attachment', { subject: 'Price increase', has_attachments: true, body_text: 'See the Early Order Program with cash discounts.' }],
     ['price-match reply with attachment', { subject: 'RE: Price-match request: 3 items (up to 16% per unit)', has_attachments: true }],
     ['maker domain subdomain', { from_address: 'news@mail.basf.com', subject: 'Fall rebate is open' }],
+    ['sold by the case, no case number', { subject: 'Buy 5 cases, get 1 case free: 10% off' }],
+    ['case price with a product code', { subject: '10% off by the case: SKU12345' }],
+    ['case price with a CS-like product code', { subject: '10% off by the case: CS12345XL' }],
+    ['case code in the middle of a deal subject', { subject: 'Fall promo by the case: CS0012345' }],
   ])('deal: %s', (_label, over) => {
     expect(isDealEmail(email(over))).toBe(true);
   });
@@ -54,6 +61,11 @@ describe('isDealEmail', () => {
     ['shopping cart', { subject: 'Your SiteOne shopping cart is ready to go.' }],
     ['eWallet', { subject: 'Important: A credit card has been deleted from your eWallet.' }],
     ['automatic reply', { subject: 'Automatic reply: SDS request' }],
+    // Nov 9, 2026 bell: a support reply about redeeming points, with four inline logo images.
+    ['SiteOne case notice', { from_address: 'customersupport@ec.siteone.com', subject: 'Case: CS0012345 has been updated.', has_attachments: true, body_text: 'You can redeem the points by logging into your siteone.com account.' }],
+    ['case number reply', { subject: 'RE: Case Number: CS0012345', body_text: 'Special pricing and a rebate are listed below.' }],
+    ['case # notice', { subject: 'Case #01234567 updated', has_attachments: true, body_text: 'Ask about the promo.' }],
+    ['forwarded case notice', { subject: 'FW: Case: CS0012345 has been updated.', has_attachments: true, body_text: 'Ask about the promo.' }],
     ['order is ready', { subject: 'Order 55555 is ready for pickup', body_text: 'promo special' }],
     ['deal words from an unlisted domain', { from_address: 'sales@example.com', subject: 'Big promo and rebate sale' }],
     ['lookalike domain', { from_address: 'srep@siteone.com.evil.example', subject: 'Pest Specials' }],
@@ -98,6 +110,13 @@ describe('isDealEmail', () => {
     expect(isDealEmail(email({ subject: 'Hello', body_text: 'Rebate here, rebates there.' }))).toBe(false);
     // "cash discount" is one idea, not two.
     expect(isDealEmail(email({ subject: 'Hello', body_text: 'A cash discount applies.' }))).toBe(false);
+  });
+
+  test('a long run of spaces after "Case Number" is checked in linear time, and is no case ID', () => {
+    // Overlapping \s* runs made this take about 3 s at 1,200 spaces; one way to match takes under 1 ms.
+    const started = Date.now();
+    expect(isDealEmail(email({ subject: `Case Number${' '.repeat(1200)}x: 10% off` }))).toBe(true);
+    expect(Date.now() - started).toBeLessThan(200);
   });
 
   test('reads body_html when body_text is empty', () => {
@@ -188,8 +207,9 @@ describe('matchProducts', () => {
 describe('runSiteOneDealsDigest', () => {
   const now = new Date('2026-11-02T13:00:00Z'); // Monday 8:00 AM ET
 
-  function fakeDb({ emails, products = [{ name: 'Taurus SC 1 gal' }, { name: 'Demand CS' }], productsFail = false }) {
-    const calls = { wheres: [], tables: [], selects: [] };
+  // `claim` answers the week's AI-pass claim: 'granted', 'taken' (a run this week has it) or 'fails'.
+  function fakeDb({ emails, products = [{ name: 'Taurus SC 1 gal' }, { name: 'Demand CS' }], productsFail = false, claim = 'granted' }) {
+    const calls = { wheres: [], tables: [], selects: [], claims: [] };
     const db = (table) => {
       calls.tables.push(table);
       const preds = [];
@@ -219,7 +239,12 @@ describe('runSiteOneDealsDigest', () => {
       };
       return chain;
     };
-    db.raw = (sql, bindings) => ({ sql, bindings });
+    db.raw = (sql, bindings) => {
+      if (!/ops_email_send_state/.test(sql)) return { sql, bindings };
+      calls.claims.push({ sql, bindings });
+      if (claim === 'fails') return Promise.reject(new Error('claim boom'));
+      return Promise.resolve({ rows: claim === 'granted' ? [{ email_key: bindings[0] }] : [] });
+    };
     return { db, calls };
   }
 
@@ -324,6 +349,124 @@ describe('runSiteOneDealsDigest', () => {
   test('a bell that was not saved fails the run so job health goes red', async () => {
     const { db } = fakeDb({ emails: weekEmails() });
     await expect(runSiteOneDealsDigest({ now, db, notify: jest.fn().mockResolvedValue(null) })).rejects.toThrow(/not saved/);
+  });
+
+  describe('GATE_SITEONE_DEAL_AI_END_DATE (AI end dates)', () => {
+    const GATE = 'GATE_SITEONE_DEAL_AI_END_DATE';
+    beforeEach(() => mockReadEndDates.mockReset());
+    afterEach(() => { delete process.env[GATE]; });
+
+    const at = (iso) => new Date(iso);
+    const gateEmails = () => [
+      email({ id: 31, subject: 'Pest Specials', has_attachments: true, received_at: at('2026-10-30T15:00:00Z'), body_text: "Flyer attached. I'll be on PTO Thursday Nov 5." }),
+      email({ id: 32, from_name: 'SiteOne', from_address: 'news@grow.siteone.com', subject: 'Last Chance for 10% Off', received_at: at('2026-10-31T15:00:00Z'), body_text: 'Stock up now on Demand CS.' }),
+      email({ id: 33, subject: 'Fall rebate', received_at: at('2026-10-29T15:00:00Z'), body_text: 'Rebate through Nov 12.' }),
+      email({ id: 34, subject: 'Early order program', received_at: at('2026-10-28T15:00:00Z'), body_text: 'Book now.' }),
+    ];
+
+    const PATTERN_NOTES = ['deadline not stated', 'deadline 2026-11-05', 'deadline 2026-11-12', 'deadline not stated'];
+
+    test.each([['unset', undefined], ['not exactly true', '1']])('gate %s: no AI read even on the Monday run, the date patterns decide', async (_label, value) => {
+      if (value !== undefined) process.env[GATE] = value;
+      const { db, calls } = fakeDb({ emails: gateEmails() });
+      const notify = jest.fn().mockResolvedValue({ id: 1 });
+      await runSiteOneDealsDigest({ now, db, notify, aiEndDates: true });
+      expect(mockReadEndDates).not.toHaveBeenCalled();
+      expect(calls.claims).toEqual([]);
+      expect(notify.mock.calls[0][2].detail.split('\n').map((line) => line.split(' · ')[3])).toEqual(PATTERN_NOTES);
+      // As today: a rerun rewrites the week's bell.
+      expect(notify.mock.calls[0][2].refreshOnDedupe).toBe(true);
+    });
+
+    // Pre-push audit on 69adaa08d8 (P1): a catch-up after a Monday run that saved its bell but not
+    // its job_health stamp rewrote the AI dates with pattern-only lines. It now adds a bell only
+    // when none was saved this week.
+    test('gate on, but not the Monday run (no aiEndDates): no AI read, the date patterns decide, a saved bell stays', async () => {
+      process.env[GATE] = 'true';
+      const { db, calls } = fakeDb({ emails: gateEmails() });
+      const notify = jest.fn().mockResolvedValue({ id: 1 });
+      await runSiteOneDealsDigest({ now, db, notify });
+      expect(mockReadEndDates).not.toHaveBeenCalled();
+      expect(calls.claims).toEqual([]);
+      expect(notify.mock.calls[0][2].detail.split('\n').map((line) => line.split(' · ')[3])).toEqual(PATTERN_NOTES);
+      expect(notify.mock.calls[0][2]).toMatchObject({ dedupeKey: 'siteone-deals:2026-11-02', refreshOnDedupe: false });
+    });
+
+    test('gate on: an AI date shows with its words, an AI "no end" wins over a pattern date, a failed read keeps the pattern', async () => {
+      process.env[GATE] = 'true';
+      const { db, calls } = fakeDb({ emails: gateEmails() });
+      mockReadEndDates.mockResolvedValue(new Map([
+        [31, { endDate: null, quote: null }],
+        [32, { endDate: '2026-11-30', quote: 'Offers valid November 1 – November 30, 2026.' }],
+        [34, { endDate: '2027-01-15', quote: 'Orders must be placed by January 15, 2027' }],
+      ]));
+      const notify = jest.fn().mockResolvedValue({ id: 1 });
+      await runSiteOneDealsDigest({ now, db, notify, aiEndDates: true });
+
+      // The week's claim first: one row, stamped only when its stamp is older than this ET week's Monday 00:00.
+      expect(calls.claims).toHaveLength(1);
+      expect(calls.claims[0].sql.replace(/\s+/g, ' ')).toBe('INSERT INTO ops_email_send_state (email_key, last_sent_at, updated_at) VALUES (?, ?, ?) '
+        + 'ON CONFLICT (email_key) DO UPDATE SET last_sent_at = EXCLUDED.last_sent_at, updated_at = EXCLUDED.updated_at '
+        + 'WHERE ops_email_send_state.last_sent_at IS NULL OR ops_email_send_state.last_sent_at < ? RETURNING email_key');
+      expect(calls.claims[0].bindings).toEqual(['siteone-deal-end-date-pass', now, now, new Date('2026-11-02T05:00:00Z')]);
+      // One read for the week's deals, newest first, on the same connection.
+      expect(mockReadEndDates).toHaveBeenCalledTimes(1);
+      // This run's paid pass may rewrite the week's bell.
+      expect(notify.mock.calls[0][2].refreshOnDedupe).toBe(true);
+      const [conn, deals] = mockReadEndDates.mock.calls[0];
+      expect(conn).toBe(db);
+      expect(deals.map((e) => e.id)).toEqual([32, 31, 33, 34]);
+      expect(notify.mock.calls[0][2].detail.split('\n')).toEqual([
+        'Oct 31 · SiteOne · Last Chance for 10% Off · ends Nov 30 ("Offers valid November 1 – November 30, 2026.") · your products: Demand CS',
+        'Oct 30 · Sam Rep · Pest Specials · deadline not stated · your products: none named',
+        'Oct 29 · Sam Rep · Fall rebate · deadline 2026-11-12 · your products: none named',
+        'Oct 28 · Sam Rep · Early order program · ends Jan 15, 2027 ("Orders must be placed by January 15, 2027") · your products: none named',
+      ]);
+    });
+
+    // Pre-push audit on b21fc449c9 (P1): a second Monday run in one week (a deploy-overlap tick
+    // that waited out the first run's lock) paid for the reads again. And on c9a07148db (P1): its
+    // pattern-only lines then rewrote the bell the paid pass saved. Now it adds a bell only when
+    // none was saved this week (refreshOnDedupe false: a saved one stays as it is).
+    test.each([
+      ['a run this week already has the claim', 'taken', 'info', "[siteone-deals] end dates: this week's AI pass already ran; date patterns kept"],
+      ['the claim cannot be written', 'fails', 'warn', '[siteone-deals] end dates not read by AI: weekly claim not written: claim boom'],
+    ])('gate on, Monday run, %s: no AI read, the date patterns decide', async (_label, claim, level, line) => {
+      process.env[GATE] = 'true';
+      logger.info.mockClear();
+      logger.warn.mockClear();
+      const { db, calls } = fakeDb({ emails: gateEmails(), claim });
+      const notify = jest.fn().mockResolvedValue({ id: 1 });
+      await runSiteOneDealsDigest({ now, db, notify, aiEndDates: true });
+      expect(calls.claims).toHaveLength(1);
+      expect(mockReadEndDates).not.toHaveBeenCalled();
+      expect(logger[level]).toHaveBeenCalledWith(line);
+      expect(notify.mock.calls[0][2].detail.split('\n').map((l) => l.split(' · ')[3])).toEqual(PATTERN_NOTES);
+      expect(notify.mock.calls[0][2]).toMatchObject({ dedupeKey: 'siteone-deals:2026-11-02', refreshOnDedupe: false });
+    });
+
+    test('gate on: a long quote is clipped in the line', async () => {
+      process.env[GATE] = 'true';
+      const { db } = fakeDb({ emails: [gateEmails()[1]] });
+      const quote = `Offers valid November 1 – November 30, 2026. ${'Terms apply to select items only. '.repeat(6)}`;
+      mockReadEndDates.mockResolvedValue(new Map([[32, { endDate: '2026-11-30', quote }]]));
+      const notify = jest.fn().mockResolvedValue({ id: 1 });
+      await runSiteOneDealsDigest({ now, db, notify, aiEndDates: true });
+      const note = notify.mock.calls[0][2].detail.split(' · ')[3];
+      expect(note.startsWith('ends Nov 30 ("Offers valid November 1 – November 30, 2026. Terms apply')).toBe(true);
+      expect(note.endsWith('…")')).toBe(true);
+      expect(note.length).toBe('ends Nov 30 ("'.length + 140 + '")'.length);
+    });
+
+    // Pre-push audit on be6684f834 (P1): the day a price increase starts read as the day the offer ends.
+    test('gate on: a price increase says "price rises" on the day the new price starts', async () => {
+      process.env[GATE] = 'true';
+      const { db } = fakeDb({ emails: [gateEmails()[1]] });
+      mockReadEndDates.mockResolvedValue(new Map([[32, { endDate: '2026-12-01', quote: 'Prices increase effective December 1', priceIncrease: true }]]));
+      const notify = jest.fn().mockResolvedValue({ id: 1 });
+      await runSiteOneDealsDigest({ now, db, notify, aiEndDates: true });
+      expect(notify.mock.calls[0][2].detail.split(' · ')[3]).toBe('price rises Dec 1 ("Prices increase effective December 1")');
+    });
   });
 });
 

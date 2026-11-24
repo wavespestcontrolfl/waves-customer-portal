@@ -5,7 +5,7 @@ import { render, screen, cleanup } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../utils/admin-fetch", () => ({ adminFetch: vi.fn() }));
-vi.mock("./CommunicationsPage", () => ({ ALL_NUMBERS: [], NUMBER_LABEL_MAP: {} }));
+vi.mock("./CommunicationsPage", () => ({ ALL_NUMBERS: [], NUMBER_LABEL_MAP: {}, REPLY_LINE_NUMBERS: [] }));
 
 import { SandyTransferCard } from "./CallLogTabV2";
 

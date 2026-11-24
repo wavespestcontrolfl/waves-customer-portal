@@ -25,6 +25,8 @@ const micros = (text) => {
 // A row's full-precision value for a column: the *_cursor / *_token text the
 // real query selects (a fixture may set it), else the column itself.
 const fullAt = (r, col) => micros(r[col === 'done_at' ? 'done_at_token' : 'created_at_cursor'] ?? r[col]);
+// The bell list's rank (services/notification-service.js BELL_RANK_SQL): 0 needs-you, 1 no severity label, 2 any other.
+const rankOf = (r) => { const v = r.metadata?.severity; return v === 'needs-you' ? 0 : v == null || v === '' ? 1 : 2; };
 const PERSON = /^([0-9]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|claude)$/i;
 const makeQuery = () => {
   let rows = [...mockRows];
@@ -46,6 +48,13 @@ const makeQuery = () => {
     // The one raw predicate the bell list adds: Activity-only rows
     // (metadata.feed = 'activity') never reach the bell.
     whereRaw(sql, bindings) {
+      // The bell's ranked keyset cursor: a higher rank, or the same rank and (created_at, id) strictly after it.
+      if (/CASE WHEN metadata->>'severity'.*> \? OR/.test(sql)) {
+        const [rank, , at, id] = bindings;
+        const atUs = micros(at);
+        rows = rows.filter(r => rankOf(r) > rank || (rankOf(r) === rank && (fullAt(r, 'created_at') < atUs || (fullAt(r, 'created_at') === atUs && r.id < id))));
+        return q;
+      }
       // The keyset cursor: (created_at, id) strictly after it, at full precision.
       const cursor = /^\((created_at|done_at), id\) < \(\?::timestamptz, \?::uuid\)$/.exec(sql);
       if (cursor) {
@@ -77,9 +86,12 @@ const makeQuery = () => {
     },
     // The feed order: plain created_at (or done_at) DESC, id DESC: no
     // date_trunc, so an index on the column can serve it.
+    // The bell list puts its rank first (needs-you, unlabeled, the rest).
     orderByRaw(sql) {
-      const m = /^(created_at|done_at) DESC, id DESC$/.exec(sql);
+      const ranked = /^\(CASE WHEN metadata->>'severity'.* END\) ASC, created_at DESC, id DESC$/.test(sql);
+      const m = ranked ? ['', 'created_at'] : /^(created_at|done_at) DESC, id DESC$/.exec(sql);
       if (!m) throw new Error(`unexpected orderByRaw: ${sql}`);
+      if (ranked) sorts.push(['__rank', 'asc', 'rank']);
       sorts.push([m[1], 'desc', true], ['id', 'desc']);
       return q;
     },
@@ -89,7 +101,7 @@ const makeQuery = () => {
       rows.sort((a, b) => {
         for (const [key, direction, full] of sorts) {
           let comparison;
-          if (full) { const x = fullAt(a, key); const y = fullAt(b, key); comparison = x < y ? -1 : x > y ? 1 : 0; }
+          if (full === 'rank') { comparison = rankOf(a) - rankOf(b); } else if (full) { const x = fullAt(a, key); const y = fullAt(b, key); comparison = x < y ? -1 : x > y ? 1 : 0; }
           else comparison = String(a[key]).localeCompare(String(b[key]));
           if (comparison) return direction === 'desc' ? -comparison : comparison;
         }
@@ -100,6 +112,7 @@ const makeQuery = () => {
       const shaped = (r) => ({
         ...r,
         ...(selectsVersion ? { version: `v-${r.id}` } : {}),
+        ...(rawSelected.some((x) => /AS bell_rank/.test(x)) ? { bell_rank: rankOf(r) } : {}),
         ...(rawSelected.some((x) => /created_at::text AS created_at_cursor/.test(x)) ? { created_at_cursor: r.created_at_cursor ?? r.created_at } : {}),
         ...(rawSelected.some((x) => /done_at::text AS done_at_token/.test(x)) ? { done_at_token: r.done_at_token ?? r.done_at } : {}),
         ...(rawSelected.some((x) => /AS reopenable/.test(x)) ? { reopenable: PERSON.test(r.done_by ?? '') } : {}),
@@ -195,7 +208,7 @@ describe('keyset cursor', () => {
   test('rows closed elsewhere between pages (an auto-close, another admin) never make Load more skip an open row', async () => {
     const first = await list({ limit: '30' });
     expect(first.notifications).toHaveLength(30);
-    expect(first.next).toBe(`${mockRows[29].created_at}~${uuid(29)}`);
+    expect(first.next).toBe(`1~${mockRows[29].created_at}~${uuid(29)}`);
     // Five first-page rows go done before the next request.
     for (const i of [0, 3, 7, 11, 20]) mockRows[i].done_at = '2026-09-30T13:00:00Z';
     const offsetPage = (await list({ limit: '30', page: '2' })).notifications.map(n => n.id);
@@ -229,7 +242,7 @@ describe('keyset cursor', () => {
     const first = await list({ limit: '10' });
     expect(first.notifications.map(n => n.id)).toEqual(Array.from({ length: 10 }, (_, i) => uuid(i)));
     // The cursor carries the microseconds (and the offset), not the rounded millisecond.
-    expect(first.next).toBe(`${mockRows[9].created_at_cursor}~${uuid(9)}`);
+    expect(first.next).toBe(`1~${mockRows[9].created_at_cursor}~${uuid(9)}`);
     const seen = first.notifications.map(n => n.id);
     let next = first.next;
     while (next) {
@@ -248,9 +261,26 @@ describe('keyset cursor', () => {
       await handler({ query: { limit: '30', before: bad }, techRole: 'admin' }, res, (err) => { throw err; });
       expect(res.status).toHaveBeenCalledWith(400);
     }
-    // A Postgres-text cursor is accepted.
-    const ok = await list({ limit: '30', before: `2026-09-30 12:00:00.123456+00~${uuid(1)}` });
+    // A Postgres-text cursor with its rank is accepted.
+    const ok = await list({ limit: '30', before: `1~2026-09-30 12:00:00.123456+00~${uuid(1)}` });
     expect(Array.isArray(ok.notifications)).toBe(true);
+    expect(ok).not.toHaveProperty('restart');
+  });
+
+  test('a two-part (chronological) cursor restarts at page 1 of the ranked list', async () => {
+    const body = await list({ limit: '30', page: '2', before: `2026-09-30 12:00:00.123456+00~${uuid(1)}` });
+    expect(body).toMatchObject({ restart: true, page: 1, order: 'needs-you-first' });
+    expect(body.notifications.map(n => n.id)).toEqual(Array.from({ length: 30 }, (_, i) => uuid(i)));
+  });
+
+  test('needs-you rows come first even when older, then unlabeled, then the rest', async () => {
+    mockRows[34].metadata = { severity: 'needs-you' };
+    mockRows[0].metadata = { severity: 'fyi' };
+    const body = await list({ limit: '100' });
+    const ids = body.notifications.map(n => n.id);
+    expect(ids[0]).toBe(uuid(34));
+    expect(ids[ids.length - 1]).toBe(uuid(0));
+    expect(body.order).toBe('needs-you-first');
   });
 
   test('a malformed cursor is a 400, not a silent first page', async () => {

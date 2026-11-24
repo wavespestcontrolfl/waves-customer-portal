@@ -3,6 +3,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PestRecapCard } from './SchedulePage';
+import { reloadHoldNames } from '../../lib/reloadHolds';
 
 let glassesFlag = false;
 vi.mock('../../hooks/useFeatureFlag', () => ({
@@ -84,6 +85,42 @@ describe('PestRecapCard late clips (recap-glasses-v1)', () => {
     render(<PestRecapCard serviceId="visit-1" />);
     await screen.findByText(/Approved/);
     expect(screen.queryByRole('button', { name: 'From Photos' })).not.toBeInTheDocument();
+  });
+
+  it('holds the reload of an out-of-date tab until the clip is confirmed', async () => {
+    glassesFlag = true;
+    const calls = stubServer({ current: READY });
+    const serve = fetch;
+    let finishPut;
+    vi.stubGlobal('fetch', vi.fn((url, options) => (String(url).startsWith('https://upload.test')
+      ? new Promise((resolve) => { finishPut = () => resolve(json({})); })
+      : serve(url, options))));
+    render(<PestRecapCard serviceId="visit-1" />);
+    await screen.findByRole('button', { name: 'From Photos' });
+
+    const library = Array.from(document.querySelectorAll('input[type="file"]')).find((input) => !input.hasAttribute('capture'));
+    fireEvent.change(library, { target: { files: [new File(['clip'], 'glasses.mp4', { type: 'video/mp4' })] } });
+    fireEvent.click(await screen.findByRole('button', { name: 'Spray — perimeter' }));
+    await waitFor(() => expect(finishPut).toBeTypeOf('function'));
+    expect(reloadHoldNames()).toContain('recap-upload');
+    finishPut();
+    await waitFor(() => expect(calls.some((c) => c.path.endsWith('/media-1/confirm'))).toBe(true));
+    await waitFor(() => expect(reloadHoldNames()).not.toContain('recap-upload'));
+  });
+
+  it('a picked clip waiting for its tag holds the reload; closing the picker ends the hold', async () => {
+    glassesFlag = true;
+    stubServer({ current: READY });
+    render(<PestRecapCard serviceId="visit-1" />);
+    await screen.findByRole('button', { name: 'From Photos' });
+
+    const library = Array.from(document.querySelectorAll('input[type="file"]')).find((input) => !input.hasAttribute('capture'));
+    fireEvent.change(library, { target: { files: [new File(['clip'], 'glasses.mp4', { type: 'video/mp4' })] } });
+    const picker = await screen.findByRole('dialog', { name: 'What were you doing?' });
+    expect(reloadHoldNames()).toContain('recap-upload');
+    fireEvent.click(picker.parentElement);
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'What were you doing?' })).not.toBeInTheDocument());
+    expect(reloadHoldNames()).not.toContain('recap-upload');
   });
 
   it('adds a library clip to an unapproved recap and shows the re-render', async () => {

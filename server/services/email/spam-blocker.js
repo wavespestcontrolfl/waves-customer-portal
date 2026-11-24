@@ -193,6 +193,11 @@ async function blockSpamSender(email) {
   // auth is still trashed by the sweep, but the agency itself must never
   // land on the block list.
   if (isGovernmentDomain(domain)) return;
+  // Nor a feed the weekly SiteOne deals digest reads (owner 2026-11-18): a
+  // spam verdict still quarantines that one email, but a block row and its
+  // Gmail filter would trash every later promo or price notice. Lazy require:
+  // the digest loads inbox-hygiene, which loads this module.
+  if (require('../procurement/siteone-deals-digest').isDealSenderDomain(fromAddress)) return;
 
   // Don't block known good domains
   const isVendor = await db('vendor_email_domains').where('domain', domain).first();

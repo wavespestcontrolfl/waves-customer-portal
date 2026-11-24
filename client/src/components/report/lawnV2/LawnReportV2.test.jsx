@@ -151,7 +151,7 @@ describe('LawnTrends first-visit baseline (owner 2026-08-04)', () => {
     expect(screen.queryByText('Progress Tracking')).not.toBeInTheDocument();
   });
 
-  it('a payload with the color series left out (GATE_LAWN_LIGHTING) draws no Color & Vigor chart and keeps the others', () => {
+  it('a payload with the color series left out (photos in different light) draws no Color & Vigor chart and keeps the others', () => {
     const points = [
       { date: '2026-06-01', label: 'Jun 1', value: 62 },
       { date: '2026-07-01', label: 'Jul 1', value: 70 },

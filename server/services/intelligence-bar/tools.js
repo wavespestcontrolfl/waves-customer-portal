@@ -27,6 +27,7 @@ const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-r
 const { whereCompletedCall } = require('../missed-call-text-back');
 const { whereNotSandboxCall } = require('../voice-agent/relay-protocol');
 const { resolveCloseCatalogService } = require('./booking-service-match');
+const { loadServiceRecordFacts } = require('./service-record-facts');
 const { resolveBillingLane } = require('../billing-lane');
 const { stampPrimaryLineDiscount, stampPricingRegimeMarker, capsSnapshotFromPricing } = require('../booking/visit-financial-stamps');
 const { discountStackingLive } = require('../../config/feature-gates');
@@ -34,7 +35,8 @@ const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed, dateOnlyString,
   windowDurationMinutes, deriveWindowEnd,
 } = require('../../utils/datetime-et');
-const { FORMER_CUSTOMER_STAGES, ALL_PIPELINE_STAGES, stageLifecycleStamps } = require('../customer-stages');
+const { FORMER_CUSTOMER_STAGES, ALL_PIPELINE_STAGES, stageLifecycleStamps, whereLiveCustomer } = require('../customer-stages');
+const { controllerTimerCounts } = require('../controller-timer');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { effectiveServiceAddress } = require('../stamped-address');
 const { formatAddress } = require('../../utils/address-normalizer');
@@ -360,6 +362,13 @@ property_id: a customer with more than one active property needs one — the too
     },
   },
   {
+    name: 'get_sprinkler_timer_counts',
+    description: `Sprinkler timer (irrigation controller) counts for live customers: each timer on file (brand, Hunter model) and the answer to "do you run it from the maker's app?". Totals only.
+Use for: "how many customers have a Hunter X2?", "how many use the Hydrawise app?", "Rain Bird timer count".
+Waves records the timer and links a guide; nothing connects to a timer. These are planning figures: never say a timer is connected.`,
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
     name: 'get_recent_completions',
     description: `The most recently completed visits, newest first — resolves "the customer we just finished" and "what did we complete today". Returns customer, service, technician, and completion time.
 Use for: "build the report for the customer we just finished", "who did we finish today?", "what was the last completed stop?"`,
@@ -458,6 +467,7 @@ async function executeTool(toolName, input, actionContext = {}) {
       case 'cancel_plan': return await cancelPlan(input, actionContext);
       case 'create_appointment': return await createAppointment(input, actionContext);
       case 'get_recent_completions': return await getRecentCompletions(input);
+      case 'get_sprinkler_timer_counts': return await getSprinklerTimerCounts();
       case 'reschedule_appointment': return await rescheduleAppointment(input, actionContext);
       case 'cancel_appointment': return await cancelAppointment(input, actionContext);
       case 'draft_sms': return await draftSms(input);
@@ -1057,6 +1067,7 @@ async function getCustomerDetail(customerId) {
     .where('customer_id', customerId)
     .orderBy('service_date', 'desc')
     .limit(10);
+  const serviceFacts = await loadServiceRecordFacts(services);
 
   const upcoming = await db('scheduled_services')
     .where({ customer_id: customerId })
@@ -1143,8 +1154,9 @@ async function getCustomerDetail(customerId) {
       id: s.id,
       date: s.service_date,
       type: s.service_type,
-      technician: s.technician_name,
-      notes: s.notes,
+      technician: serviceFacts.technicianFor(s),
+      notes: serviceFacts.notesFor(s),
+      products: serviceFacts.productsFor(s).map((p) => p.name),
       status: s.status,
     })),
     upcoming_services: upcoming.map(s => ({
@@ -3073,6 +3085,17 @@ const CLOSED_OUT_AT_SQL = `COALESCE(
     WHERE jsh.job_id = ss.id AND jsh.to_status = 'completed'),
   ss.completed_at)`;
 
+// Live customers' sprinkler timers on file, totalled by timer and phone-app answer (controllerTimerCounts).
+async function getSprinklerTimerCounts() {
+  const rows = await db('property_preferences')
+    .whereNotNull('irrigation_controller_brand')
+    .whereIn('customer_id', db('customers').modify(whereLiveCustomer).select('id'))
+    .groupBy('irrigation_controller_brand', 'irrigation_controller_model', 'irrigation_controller_app')
+    .select({ brand: 'irrigation_controller_brand', model: 'irrigation_controller_model', app: 'irrigation_controller_app' })
+    .count({ customers: '*' });
+  return controllerTimerCounts(rows);
+}
+
 async function getRecentCompletions(input = {}) {
   // Floor defensively even though the schema says integer — a fractional
   // limit binds into Postgres's integer LIMIT and errors, and a fractional
@@ -3537,7 +3560,7 @@ function ibBookingBillingRefusal(customer, serviceType, price) {
 // Why the customer booked a re-service (scheduled_services.customer_request,
 // migration 20260927100000): the operator's words for it, saved exactly as the
 // Schedule screen's "Customer's words" box saves typed words — trimmed, capped,
-// source 'office' (never a quote; the operator relayed it). Same gate and same
+// source 'office' (never a quote; the operator relayed it). Same
 // two catalog rows as that box (reservice-office-request.js). Returns
 // { text } to stamp, null when no reason was given, or { error } when a reason
 // was given for a visit that cannot carry one — refused rather than dropped,
@@ -3546,9 +3569,7 @@ function ibBookingCustomerRequest(rawRequest, catalogRow) {
   const reserviceOfficeRequest = require('../reservice-office-request');
   const text = reserviceOfficeRequest.cleanRequestText(rawRequest);
   if (!text) return null;
-  const { isEnabled } = require('../../config/feature-gates');
-  if (!isEnabled('reserviceOfficeRequest')
-    || !reserviceOfficeRequest.isOfficeRequestServiceKey(catalogRow?.service_key)) {
+  if (!reserviceOfficeRequest.isOfficeRequestServiceKey(catalogRow?.service_key)) {
     return { error: 'customer_request is saved only on a Pest Control Re-Service or Lawn Care Re-Service visit — nothing was booked. Propose the booking again with the reason in notes instead, or without it.' };
   }
   return { text };
@@ -3646,18 +3667,16 @@ async function ibBookingOverlapRows(scheduledDate, timeWindow, technicianId = nu
 }
 
 // Which saved property the visit is at (the Schedule screen's "Service
-// address" picker, same GATE_EDIT_APPT_ADDRESS switch and the same
+// address" picker, the same
 // customer-properties.bookingPropertyStamp check). A named property returns
 // its stamp, which the route pins and shows on the card. With no property
 // named, a customer with two or more active properties is asked which one
 // (the sole-property anchor would leave the visit with no address); one
-// property, or the switch off, keeps the sole-property anchor as before.
+// property keeps the sole-property anchor as before.
 const BOOKING_PROPERTY_CHANGED_ERROR = 'The visit\'s address changed after the card was shown (edited, removed or deactivated) — nothing was booked. Ask again for a fresh confirmation card.';
 async function ibBookingPropertyProposal(customerId, propertyId) {
-  const addressSwitchOn = require('../../config/feature-gates').isEnabled('editApptAddress');
   const CustomerProperties = require('../customer-properties');
   if (propertyId !== undefined && propertyId !== null && propertyId !== '') {
-    if (!addressSwitchOn) return { error: 'Choosing the visit\'s address is not enabled — omit property_id.', code: 'booking_property_not_enabled' };
     try {
       return { stamp: await CustomerProperties.bookingPropertyStamp({ customerId, propertyId: String(propertyId) }) };
     } catch (err) {
@@ -3665,7 +3684,6 @@ async function ibBookingPropertyProposal(customerId, propertyId) {
       throw err;
     }
   }
-  if (!addressSwitchOn) return { stamp: null };
   const properties = await db('customer_properties').where({ customer_id: customerId, active: true })
     .orderBy([{ column: 'is_primary', order: 'desc' }, { column: 'created_at', order: 'asc' }])
     .select('id', 'is_primary', 'label', 'address_line1', 'address_line2', 'city', 'state', 'zip');
@@ -3771,7 +3789,7 @@ const sameBookingProperty = (a, b) => BOOKING_PROPERTY_FIELDS.every((f) => Strin
 async function lockedBookingProperty(trx, customerId, input) {
   if (input.property_id === undefined || input.property_id === null || input.property_id === '') return null;
   const changed = () => Object.assign(new Error('booking_property_changed'), { bookingPropertyChanged: true });
-  if (!input._booking_property || !require('../../config/feature-gates').isEnabled('editApptAddress')) throw changed();
+  if (!input._booking_property) throw changed();
   let live;
   try {
     live = await require('../customer-properties').bookingPropertyStamp({ customerId, propertyId: String(input.property_id) }, trx, { lock: true });

@@ -168,17 +168,24 @@ async function labelFactsBlock({ decision, outgoingBody }) {
 // (prompt 25_n / 26_n; 15-24 were earlier wordings inside PR #6447, never in production) saw the old inside-spray policy (every visit unless declined) and the old payment policy (technicians take
 // cards, never cash). No word list can tell a restated old policy from a correct answer, so an UNEDITED draft from those prompts
 // is refused at send whatever it says; a person rewrites it, and a staff-edited body (it differs from the stored draft) goes out.
-// Drafts from 25_n on are not affected. (Prod 2026-10-22: 107 such drafts pending review, 1 ever accepted.)
-const ANSWER_BOOK_PROMPT_NUMBER = 25;
+// (Prod 2026-10-22: 107 such drafts pending review, 1 ever accepted.)
+// SERVICE AREA HELD (owner ruling 2026-11-23): the same refusal now reaches prompts 25 to 28, whose COMPANY FACTS still said
+// Charlotte County is served. A pending or scheduled unedited draft from them could offer service in Port Charlotte, Englewood,
+// Rotonda, Placida, Boca Grande or Babcock Ranch, so it is refused the same way; a person rewrites it.
+// SERVICE AREA REOPENED (owner "ok do this", 2026-11-23, hours later): Englewood and Port Charlotte are served again, so prompts
+// 29 to 32 (the six-place hold) said "we are not taking new customers" there. An unedited draft from them could turn a customer
+// away who is now served, so the refusal reaches them too. Drafts from 33_n on (sms-shadow-drafter.js) are not affected.
+const COMPANY_FACTS_CURRENT_PROMPT_NUMBER = 33;
 function draftedBeforeAnswerBook(decision) {
   const m = /^house_voice_v12_real_answers(\d*)/.exec(String(decision?.prompt_version || ''));
-  return !!m && (!m[1] || Number(m[1]) < ANSWER_BOOK_PROMPT_NUMBER);
+  return !!m && (!m[1] || Number(m[1]) < COMPANY_FACTS_CURRENT_PROMPT_NUMBER);
 }
+const RETIRED_COMPANY_FACT_REASON = 'company fact retired (an unedited draft written under earlier company facts)';
 const RETIRED_COMPANY_FACT_REASON_PREFIX = 'company fact retired';
 const blockReasonIsRetiredCompanyFact = (reason) => typeof reason === 'string' && reason.startsWith(RETIRED_COMPANY_FACT_REASON_PREFIX);
 function retiredCompanyFactBlock({ decision, outgoingBody }) {
   if (!draftedBeforeAnswerBook(decision) || bodyIsStaffEdited(decision.suggested_message, outgoingBody)) return null;
-  return 'company fact retired (an unedited draft from before the 2026-10-22 company facts)';
+  return RETIRED_COMPANY_FACT_REASON;
 }
 
 // The scheduled-send version of the same check: the scheduler reads the decision row itself, and a row it cannot read (missing,
@@ -396,7 +403,7 @@ function labelFactsSnapshotProviderPreSendCheck({ labelFactsSnapshot = null, inb
     let reason;
     try {
       // an auto-send body is the AI draft itself, so a pre-answer-book prompt is refused outright
-      reason = draftedBeforeAnswerBook({ prompt_version: promptVersion }) ? 'company fact retired (an unedited draft from before the 2026-10-22 company facts)'
+      reason = draftedBeforeAnswerBook({ prompt_version: promptVersion }) ? RETIRED_COMPANY_FACT_REASON
         : await require('./sms-label-facts').labelFactsSendBlockReason({ snapshot: labelFactsSnapshot, body: outgoingBody, inbound: inboundMessage, ...(dbi ? { conn: dbi } : {}) });
     } catch (err) {
       require('./logger').warn(`[agent-decision-send-checks] LABEL FACTS boundary recheck failed: ${err.message}; blocking send`);

@@ -66,8 +66,8 @@
  * is ever read or printed here.
  *
  * Usage (repo root) — run against the PORTAL service, NOT `--service
- * Postgres`: the reorder pass reads GATE_ROUTE_REORDER*, GATE_DRIVE_TIME_
- * CALIBRATION and GOOGLE_MAPS_API_KEY, none of which a Postgres-only
+ * Postgres`: the reorder pass reads GATE_ROUTE_REORDER* and
+ * GOOGLE_MAPS_API_KEY, none of which a Postgres-only
  * `railway run` injects, so a Postgres-service run would silently stand
  * down Google/window-fit and canonicalize with the fallback-less baseline
  * only:

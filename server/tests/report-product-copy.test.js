@@ -27,7 +27,7 @@ describe('reportProductCopyGateOn', () => {
   });
 });
 
-// The 12 owner-approved products, matched by their REAL products_catalog
+// The 12 owner-approved products plus LESCO Crosscheck Plus (owner ruling 2026-11-18: the house bifenthrin, Talak's approved wording), matched by their REAL products_catalog
 // name (per the migrations that seed them — 20260712100000_catalog_label_
 // rate_backfill.js and 20260507000004_mosquito_program_pricing_products.js)
 // and EPA registration number, exactly as they read on the approved wording
@@ -35,6 +35,7 @@ describe('reportProductCopyGateOn', () => {
 const APPROVED_CATALOG_PRODUCTS = [
   { name: 'Taurus SC', epaReg: '53883-279' },
   { name: 'Atticus Talak', epaReg: '91234-145' }, // catalog's canonical name — NOT "... 7.9 F"
+  { name: 'LESCO Crosscheck Plus', epaReg: '10404-120' }, // the house bifenthrin since 2026-11-18; own registration, never Talak's
   { name: 'Alpine WSG', epaReg: '499-561' },
   { name: 'Atticus Antapex WSG', epaReg: '91234-401' }, // same entry: the catalog row since 2026-10-26
   { name: 'Demand CS', epaReg: '100-1066' },
@@ -50,8 +51,8 @@ const APPROVED_CATALOG_PRODUCTS = [
 ];
 
 describe('REPORT_PRODUCT_COPY config', () => {
-  it('carries exactly the 12 owner-approved products, no more, no fewer', () => {
-    expect(REPORT_PRODUCT_COPY).toHaveLength(12);
+  it('carries exactly the 12 owner-approved products plus Crosscheck (2026-11-18), no more, no fewer', () => {
+    expect(REPORT_PRODUCT_COPY).toHaveLength(13);
   });
 
   it('every entry\'s wording clears the shared banned-copy guard (premium-experience.js validateCustomerCopy)', () => {
@@ -103,6 +104,14 @@ describe('findReportProductCopyEntry / reportProductCopyFor — matching', () =>
     const entry = findReportProductCopyEntry({ epaReg: null, name: 'Atticus Talak 7.9 F' });
     expect(entry).not.toBeNull();
     expect(entry.epaReg).toBe('91234-145');
+  });
+
+  it('Crosscheck and Talak are two entries: each registration and name finds its own, and the moved EPA number finds Crosscheck', () => {
+    const crosscheck = findReportProductCopyEntry({ epaReg: '10404-120', name: 'Atticus Talak' });
+    expect(crosscheck.names).toContain('lesco crosscheck plus');
+    expect(findReportProductCopyEntry({ epaReg: '279-3206-10404', name: 'x' })).toBe(crosscheck);
+    expect(findReportProductCopyEntry({ epaReg: null, name: 'Atticus Talak' })).not.toBe(crosscheck);
+    expect(findReportProductCopyEntry({ epaReg: '91234-145', name: 'LESCO Crosscheck Plus' })).not.toBe(crosscheck);
   });
 
   it('EPA registration number wins over a non-matching name (label-truth over display spelling)', () => {

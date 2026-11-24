@@ -1899,6 +1899,7 @@ async function refuseBillingLaneDriftInTrx(trx, svc) {
 }
 
 module.exports = {
+  ANNUAL_PREPAY_PREPAID_METHOD,
   refuseBillingLaneDriftInTrx,
   visitCarriesUnappliedPrepayment,
   stampedZeroFreeLive,

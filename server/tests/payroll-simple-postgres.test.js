@@ -229,7 +229,10 @@ postgres('payroll SIMPLE IRA elections and pay runs', () => {
       expect(listed.body.elections.map((e) => e.effectiveOn)).toEqual(['2027-01-04', '2027-01-01']);
       const audit = await trx('audit_log').where({ action: 'payroll.simple_ira_recorded' });
       expect(audit).toHaveLength(2);
-      expect(JSON.stringify(audit[0].metadata)).not.toMatch(/350|Typed/);
+      // Audit metadata is the two ids and nothing else: never an amount (350 bp, 2550 cents) or the typed note.
+      // Exact equality, not a text match: the ids are random UUIDs, and one that held "350" failed the old
+      // /350|Typed/ check on three main runs (2026-11-19 and 11-20).
+      for (const row of audit) expect(row.metadata).toEqual({ technician_id: id, election_id: row.resource_id });
 
       const both = await api('POST', `/technicians/${id}/simple-ira`, { body: { participant: true, deferralPercent: '3', deferralDollars: '10', signedOn: '2026-09-01' } });
       expect(both.status).toBe(400);

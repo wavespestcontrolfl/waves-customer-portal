@@ -37,6 +37,7 @@ function replayAndCheck(inp, result, { promise = 120, margin = 15 } = {}) {
   let t = inp.departureMin;
   let prev = inp.origin;
   let drive = 0;
+  let lastSlot = -Infinity;
   expect(result.best.order).toHaveLength(inp.stops.length);
   for (const id of result.best.order) {
     const s = byId.get(id);
@@ -45,6 +46,9 @@ function replayAndCheck(inp, result, { promise = 120, margin = 15 } = {}) {
     t += d;
     const slot = result.best.slots[id];
     expect(t).toBeLessThanOrEqual(slot + promise - margin);
+    // The route reads in hour order: no stop follows a stop with a later hour.
+    expect(slot).toBeGreaterThanOrEqual(lastSlot);
+    lastSlot = slot;
     if (s.movable) {
       expect(slot % 60).toBe(0);
       expect(slot / 60).toBeGreaterThanOrEqual(8);
@@ -196,6 +200,69 @@ describe('search', () => {
         replayAndCheck(inp, r);
       }
     }
+  });
+});
+
+// Auto-dispatch audit 2026-11-22, finding 2 (owner "build"): the writer refuses a route in which a stop is numbered
+// ahead of a stop with an earlier hour (apply.js finalRoute, 'route_order_not_coherent'). The planner made such a
+// plan for Nov 25 on three nights in a row.
+describe('the route reads in hour order', () => {
+  const hoursInOrder = (result) => result.best.order.map((id) => result.best.slots[id]);
+  const neverGoDown = (hours) => hours.every((h, i) => i === 0 || h >= hours[i - 1]);
+
+  test('a movable stop reached after a 09:00 stop does not take 08:00', () => {
+    // The van waits at F until 09:00, works 30 minutes and reaches M at 09:45. 08:00 is free and inside the
+    // promise (105 minutes), and it ends the day earlier, but M would then be numbered after a later hour.
+    const inp = input([stop('F', 5, 9, { movable: false }), stop('M', 20, 10), stop('C', 40, 11)]);
+    const result = planDay(inp);
+    expect(result.best.order).toEqual(['F', 'M', 'C']);
+    expect(result.best.slots).toEqual({ F: 540, M: 600, C: 660 });
+    expect(result.changes).toEqual([]);
+    replayAndCheck(inp, result);
+  });
+
+  test('a fixed stop does not follow a stop with a later hour, even when that order drives less', () => {
+    // 08:00 is held by another row and 09:00 by F, so M reached first can only take 10:00. M, F, G drives 80 and
+    // keeps every arrival promise, but it numbers the 10:00 stop ahead of the 09:00 stop. F, M, G drives 100.
+    const inp = input(
+      [stop('F', 20, 9, { movable: false }), stop('M', 10, 10), stop('G', 40, 12, { movable: false })],
+      { options: { blockedHours: [8] } },
+    );
+    const result = planDay(inp);
+    expect(result.best.order).toEqual(['F', 'M', 'G']);
+    expect(result.best.driveMin).toBe(100);
+    expect(result.accepted).toBe(false);
+    replayAndCheck(inp, result);
+  });
+
+  test('fixed stops that share an hour as booked are still one route', () => {
+    const inp = input([stop('a', 10, 9, { movable: false }), stop('b', 12, 9, { movable: false }), stop('c', 30, 11)]);
+    const result = planDay(inp);
+    expect(result.best).not.toBeNull();
+    expect(neverGoDown(hoursInOrder(result))).toBe(true);
+  });
+
+  test('every plan the search returns has hours that never go down (exhaustive and local search)', () => {
+    // A fixed pseudo-random stream (the high bits of a linear congruential generator), so the days are the same on
+    // every run. Each stop is booked on its own hour, so the day as booked is a feasible plan and the search
+    // always returns one.
+    let seed = 20261122;
+    const next = (n) => { seed = (seed * 1103515245 + 12345) % 2147483648; return Math.floor(seed / 65536) % n; };
+    const checked = { exhaustive: 0, local: 0, movedAnHour: 0 };
+    for (let day = 0; day < 40; day += 1) {
+      const count = day % 2 === 0 ? 4 + next(5) : 10 + next(2); // 4 to 8 stops: every order; 10 or 11: local search
+      const stops = Array.from({ length: count }, (_, i) => stop(`s${i}`, next(50) - 25, 6 + i, { lng: next(50) - 25, workMin: 20, movable: next(4) !== 0 }));
+      const inp = input(stops, { departureMin: 6 * 60, options: { firstHour: 6, closeMin: 20 * 60 } });
+      const result = planDay(inp);
+      expect(result.best).not.toBeNull();
+      expect(neverGoDown(hoursInOrder(result))).toBe(true);
+      checked[count <= 9 ? 'exhaustive' : 'local'] += 1;
+      if (result.best.order.some((id) => result.best.slots[id] !== inp.stops.find((x) => x.id === id).slotStartMin)) checked.movedAnHour += 1;
+    }
+    expect(checked.exhaustive).toBe(20);
+    expect(checked.local).toBe(20);
+    // The sweep is not only days left as booked: on most of them the best plan gives a stop a new hour.
+    expect(checked.movedAnHour).toBeGreaterThanOrEqual(10);
   });
 });
 

@@ -28,7 +28,7 @@ const { confirmPhotoSubject } = require('./photo-subject-confirmer');
 // (single grammar — a mined listicle opportunity must actually receive the
 // overlay). Never fork a private copy of the regexes here.
 const { isListicleQuery } = require('./listicle-query');
-const { isEnabled, contentPiiAllLanesLive } = require('../../config/feature-gates');
+const { isEnabled } = require('../../config/feature-gates');
 
 const queue = require('./opportunity-queue');
 const router = require('./decision-router');
@@ -469,6 +469,43 @@ function briefTargetKeyword(opportunity) {
   return opportunity?.query || opportunity?.signal_metadata?.representative_query || null;
 }
 
+// A run that ended before any draft existed: the publish-cap pre-check (autonomous-runner step 2c) and a
+// wait for the terminal's draft (terminal-writer AWAITING_OUTCOME) that read no draft. The
+// same two outcomes can also end a run that had a draft (the cap filled between claim and publish; the
+// editorial review could not run; the draft file was invalid). Those runs are tries: the stored draft
+// or the skip reason tells them apart.
+const NO_DRAFT_OUTCOMES = new Set(['deferred_publish_cap', 'deferred_terminal_draft']);
+// Terminal waits that read no draft: no file yet, the Mac job has not come, GitHub could not be read, or
+// the Mac process could not take the row (terminal-writer MISSING, AWAITS_MAC, UNREADABLE,
+// MAX_PLAN_MISSING, MAC_BRIEF_MISSING, MAC_NO_AGENT).
+const NO_DRAFT_TERMINAL_WAITS = new Set([
+  'terminal_draft_missing',
+  'terminal_draft_awaits_mac',
+  'terminal_draft_unreadable',
+  'terminal_max_plan_missing',
+  'terminal_mac_brief_missing',
+  'terminal_mac_no_agent',
+]);
+
+function isNoDraftWait(row) {
+  if (row.has_draft) return false;
+  if (row.outcome === 'deferred_publish_cap') return true;
+  return row.outcome === 'deferred_terminal_draft' && NO_DRAFT_TERMINAL_WAITS.has(row.skip_reason);
+}
+
+// rows: one per (brief, run) pair; `outcome` is null when the brief has no run. A brief counts toward the
+// loop review unless it has runs and every one of them ended before a draft.
+function countLoopBriefs(rows) {
+  const waitedOnly = new Map();
+  for (const row of rows || []) {
+    const wait = isNoDraftWait(row);
+    waitedOnly.set(row.brief_id, waitedOnly.has(row.brief_id) ? waitedOnly.get(row.brief_id) && wait : wait);
+  }
+  let n = 0;
+  for (const onlyWaits of waitedOnly.values()) if (!onlyWaits) n += 1;
+  return n;
+}
+
 class ContentBriefBuilder {
   /**
    * Compose a brief for a specific opportunity (does not claim).
@@ -521,8 +558,13 @@ class ContentBriefBuilder {
       ? { serp_profile: null, customer_signal: null, conversion_feedback: null }
       : await this._gatherSignals(opp, { skipSerp });
     const existingBriefVersions = await this._countExistingBriefs(opp.id);
+    const loopBriefVersions = await this._countLoopBriefs(opp.id, existingBriefVersions);
 
-    let decision = router.route(opp, { ...signals, existing_brief_versions: existingBriefVersions });
+    let decision = router.route(opp, {
+      ...signals,
+      existing_brief_versions: existingBriefVersions,
+      loop_brief_versions: loopBriefVersions,
+    });
     if (citabilityResolution) {
       // The runner skips a do_not_publish brief with this reason.
       decision = {
@@ -702,6 +744,28 @@ class ContentBriefBuilder {
       return parseInt(r?.c || 0, 10);
     } catch {
       return 0;
+    }
+  }
+
+  // The briefs that count toward the router's "likely loop" review. Every claim composes a new brief,
+  // also a claim that then waits for a publish cap or for the terminal's draft before any draft exists.
+  // Such a brief is not a try (2026-11: three waits parked a refresh for good, and an operator requeue
+  // could not free it). A failed read gives the full count, which is the old rule.
+  async _countLoopBriefs(opportunityId, allBriefs) {
+    try {
+      const rows = await db('content_briefs as b')
+        .leftJoin('autonomous_runs as r', 'r.brief_id', 'b.id')
+        .where('b.opportunity_id', opportunityId)
+        .select(
+          'b.id as brief_id',
+          'r.outcome',
+          'r.skip_reason',
+          // finalize() stores '{}' for a run that had no draft.
+          db.raw("(r.draft_payload is not null and r.draft_payload::text not in ('{}', 'null')) as has_draft"),
+        );
+      return countLoopBriefs(rows);
+    } catch {
+      return allBriefs;
     }
   }
 
@@ -1087,12 +1151,9 @@ class ContentBriefBuilder {
             source_counts: signals.customer_signal.source_counts,
             funnel_stage: signals.customer_signal.funnel_stage,
             urgency: signals.customer_signal.urgency,
-            // GATE_CONTENT_PII_ALL_LANES: pass the topic (normalized_question),
-            // never the customer's own words. The example is regex-redacted,
-            // not paraphrased, and its name/gate-code misses are known.
-            ...(contentPiiAllLanesLive()
-              ? {}
-              : { example_phrasing_anonymized: signals.customer_signal.example_phrasing_anonymized }),
+            // Pass the topic (normalized_question), never the customer's own
+            // words. The example is regex-redacted, not paraphrased, and its
+            // name/gate-code misses are known.
           }
         : null,
       conversion_signal: signals.conversion_feedback
@@ -1338,6 +1399,9 @@ function nextWeekday9amET() {
 module.exports = new ContentBriefBuilder();
 module.exports.ContentBriefBuilder = ContentBriefBuilder;
 module.exports._internals = {
+  countLoopBriefs,
+  NO_DRAFT_OUTCOMES,
+  NO_DRAFT_TERMINAL_WAITS,
   CITABILITY_GAP_SECTIONS,
   REQUIRED_SECTIONS,
   SCHEMA_TYPES,

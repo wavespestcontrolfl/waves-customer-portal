@@ -1,8 +1,10 @@
-// GATE_APP_FIRST_ANY_DEVICE, owner 2026-11-04: "only the customer can change back to
-// text, if they prefer". The save route stamps an explicit-choice marker on each routed
-// channel the customer writes; the GET payload shows App for an untouched Text default
-// once the account holder has the phone app; a save that echoes the shown App stores
-// nothing.
+// Owner 2026-11-20: "lets revert to text, if they want to setup app notifications, let
+// them do it on their own". The settings page shows the stored channel: an untouched
+// default reads Text, even when the account holder has the phone app, and an App pick is
+// always the customer's own write. The save route still stamps an explicit-choice marker
+// on each routed channel the customer writes (an explicit Text stops the companion app
+// alert). The 2026-11-04 rule (App shown for an untouched Text default; an echo of the
+// shown App stores nothing) is withdrawn.
 
 jest.mock('express', () => ({ Router: () => ({ use: jest.fn(), get: jest.fn(), put: jest.fn(), post: jest.fn() }) }));
 jest.mock('joi', () => ({}));
@@ -26,16 +28,15 @@ const db = require('../models/db');
 const { resolvePrimaryProfileId } = require('../services/account-properties');
 const notificationsRoute = require('../routes/notifications');
 
-const { notificationPrefsDbUpdates, loadPreferencePayload, settleShownAppChoices, CHANNEL_DB_COLUMNS } = notificationsRoute._private;
+const { notificationPrefsDbUpdates, dropLegacyReceiptAppEcho, loadPreferencePayload, CHANNEL_DB_COLUMNS } = notificationsRoute._private;
 
-const ENV_KEYS = ['GATE_APP_FIRST_ANY_DEVICE', 'GATE_PUSH_CHANNEL_ROUTING', 'GATE_CUSTOMER_APP_NOTIFICATIONS', 'GATE_APP_FIRST_STALE_TEXT'];
+const ENV_KEYS = ['GATE_PUSH_CHANNEL_ROUTING', 'GATE_CUSTOMER_APP_NOTIFICATIONS'];
 let saved;
 beforeEach(() => {
   saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
   ENV_KEYS.forEach((k) => { process.env[k] = 'true'; });
-  delete process.env.GATE_APP_FIRST_STALE_TEXT;
   mockCustomerStatus.mockReset();
-  mockCustomerStatus.mockResolvedValue({ enabled: true, registered: true, fresh: false, reachable: true });
+  mockCustomerStatus.mockResolvedValue({ enabled: true, registered: true, fresh: false });
   resolvePrimaryProfileId.mockResolvedValue('primary-1');
 });
 afterEach(() => {
@@ -74,12 +75,12 @@ describe('save route: explicit-choice markers', () => {
       .toEqual({ payment_receipt_channel: 'sms', billing_channel: 'sms' });
   });
 
-  test('while the page shows App for the untouched Text default, picking Text is a choice', () => {
-    expect(notificationPrefsDbUpdates({ paymentConfirmationChannel: 'sms' }, { payment_receipt_channel: 'sms' }, { appShown: true }))
-      .toEqual({ payment_receipt_channel: 'sms', payment_receipt_channel_explicit: true });
-    // An explicit Text row is shown as Text, so saving Text again changes nothing.
+  test('a receipt Text save over the untouched Text default is an echo of what the page showed, not a choice', () => {
+    // The page shows the stored Text (never App) for an untouched default, so Text again stores no marker.
+    expect(notificationPrefsDbUpdates({ paymentConfirmationChannel: 'sms' }, { payment_receipt_channel: 'sms' }))
+      .toEqual({ payment_receipt_channel: 'sms' });
     expect(notificationPrefsDbUpdates({ paymentConfirmationChannel: 'sms' },
-      { payment_receipt_channel: 'sms', payment_receipt_channel_explicit: true }, { appShown: true }))
+      { payment_receipt_channel: 'sms', payment_receipt_channel_explicit: true }))
       .toEqual({ payment_receipt_channel: 'sms' });
   });
 
@@ -90,49 +91,130 @@ describe('save route: explicit-choice markers', () => {
   });
 });
 
-describe('save route: echoing the shown App stores nothing', () => {
-  const appReq = (customerId = 'c-1') => ({ customerId, query: { appPreferences: '1' } });
-  const primaryRow = (row) => db.mockImplementation(() => ({ where: () => ({ first: async () => row }) }));
-
-  test('drops an App echo for an untouched Text default, keeps everything else', async () => {
-    primaryRow({ en_route_channel: 'sms', en_route_channel_explicit: false });
-    const updates = { enRouteChannel: 'push', serviceReminder24hChannel: 'sms' };
-    const shown = await settleShownAppChoices(appReq(), updates, { payment_receipt_channel: 'sms' });
-    expect(shown).toBe(true);
-    expect(updates).toEqual({ serviceReminder24hChannel: 'sms' });
+describe('save route: an App pick is the customer\'s own choice and is stored (owner 2026-11-20)', () => {
+  test('App over an untouched Text default is stored with its marker: the page showed Text, so App is no echo', () => {
+    expect(notificationPrefsDbUpdates({ enRouteChannel: 'push', serviceReminder24hChannel: 'sms' }, { en_route_channel: 'sms' }))
+      .toEqual({
+        en_route_channel: 'push', en_route_channel_explicit: true,
+        service_reminder_24h_channel: 'sms', service_reminder_24h_channel_explicit: true,
+      });
   });
 
-  test('keeps an App choice over an explicit Text row (the customer switches to App)', async () => {
-    primaryRow({ en_route_channel: 'sms', en_route_channel_explicit: true });
-    const updates = { enRouteChannel: 'push' };
-    await settleShownAppChoices(appReq(), updates, {});
-    expect(updates).toEqual({ enRouteChannel: 'push' });
+  test('a receipt App value over the customer\'s own earlier choice is stored with its marker', () => {
+    for (const existing of [
+      { payment_receipt_channel: 'sms', payment_receipt_channel_explicit: true },
+      { payment_receipt_channel: 'email', payment_receipt_channel_explicit: false },
+    ]) {
+      expect(notificationPrefsDbUpdates({ paymentConfirmationChannel: 'push' }, existing))
+        .toEqual({ payment_receipt_channel: 'push', payment_receipt_channel_explicit: true });
+    }
   });
 
-  test('a receipt App echo is judged on the current customer row', async () => {
-    const updates = { paymentConfirmationChannel: 'push' };
-    await settleShownAppChoices(appReq('primary-1'), updates, { payment_receipt_channel: 'sms', payment_receipt_channel_explicit: false });
-    expect(updates).toEqual({});
+  // A stale tab still shows App for what was an untouched Text default. The customer then picks Text in
+  // another tab. The stale tab's email-only save must not write App over that choice (pre-push audit, 6cedc6d6db).
+  test('an unmarked App value in a legacy form save is never written, whatever the stored row holds', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../routes/notifications.js'), 'utf8');
+    expect(source).toContain('function dropLegacyReceiptAppEcho(updates) {');
+    for (const existing of [
+      { payment_receipt_channel: 'sms', payment_receipt_channel_explicit: true },
+      { payment_receipt_channel: 'email', payment_receipt_channel_explicit: false },
+      { payment_receipt_channel: 'both', payment_receipt_channel_explicit: true },
+      { payment_receipt_channel: 'push', payment_receipt_channel_explicit: true },
+    ]) {
+      const updates = dropLegacyReceiptAppEcho(
+        { paymentConfirmationChannel: 'push', billingEmail: 'a@example.com', billingReminderChannel: 'sms' }, existing);
+      expect(updates).toEqual({ billingEmail: 'a@example.com', billingReminderChannel: 'sms' });
+      const write = notificationPrefsDbUpdates(updates, existing);
+      expect(write).not.toHaveProperty('payment_receipt_channel');
+      expect(write).not.toHaveProperty('payment_receipt_channel_explicit');
+    }
   });
 
-  test('gate off, no app device, or a page that cannot render App: nothing is dropped', async () => {
-    const run = async (request = appReq('primary-1')) => {
-      const updates = { paymentConfirmationChannel: 'push' };
-      const shown = await settleShownAppChoices(request, updates, { payment_receipt_channel: 'sms' });
-      return { shown, updates };
-    };
-    const untouched = { shown: false, updates: { paymentConfirmationChannel: 'push' } };
-    delete process.env.GATE_APP_FIRST_ANY_DEVICE;
-    expect(await run()).toEqual(untouched);
-    process.env.GATE_APP_FIRST_ANY_DEVICE = 'true';
-    mockCustomerStatus.mockResolvedValue({ enabled: true, registered: false, reachable: false });
-    expect(await run()).toEqual(untouched);
-    mockCustomerStatus.mockResolvedValue({ enabled: true, reachable: true });
-    expect(await run({ customerId: 'primary-1', query: {} })).toEqual(untouched);
+  // The legacy billing form sends its receipt channel on every save. A page loaded before
+  // 2026-11-20 showed App for an untouched Text default, so saving only the billing email
+  // echoes 'push'. That echo must never become an App choice (pre-push audit P1, 2026-11-20).
+  test('the legacy billing form\'s App echo over an untouched Text default is dropped; the rest of the save is kept', () => {
+    for (const existing of [
+      { payment_receipt_channel: 'sms', payment_receipt_channel_explicit: false },
+      { payment_receipt_channel: 'sms' },
+      { payment_receipt_channel: null },
+      {},
+      undefined,
+    ]) {
+      const updates = dropLegacyReceiptAppEcho(
+        { paymentConfirmationChannel: 'push', billingEmail: 'a@example.com', billingReminderChannel: 'sms' }, existing);
+      expect(updates).toEqual({ billingEmail: 'a@example.com', billingReminderChannel: 'sms' });
+      expect(notificationPrefsDbUpdates(updates, existing || {})).not.toHaveProperty('payment_receipt_channel');
+      expect(notificationPrefsDbUpdates(updates, existing || {})).not.toHaveProperty('payment_receipt_channel_explicit');
+    }
+  });
+
+  test('App over an untouched Text default is stored when the form marks it as the customer\'s change; the mark never reaches the write', () => {
+    for (const existing of [{ payment_receipt_channel: 'sms', payment_receipt_channel_explicit: false }, {}, undefined]) {
+      const updates = dropLegacyReceiptAppEcho(
+        { paymentConfirmationChannel: 'push', paymentConfirmationChannelEdited: true, billingEmail: 'a@example.com', billingReminderChannel: 'sms' }, existing);
+      expect(updates).toEqual({ paymentConfirmationChannel: 'push', billingEmail: 'a@example.com', billingReminderChannel: 'sms' });
+      expect(notificationPrefsDbUpdates(updates, existing || {}))
+        .toMatchObject({ payment_receipt_channel: 'push', payment_receipt_channel_explicit: true });
+    }
+    // A false mark is no mark, and the mark is removed whatever the channel value.
+    expect(dropLegacyReceiptAppEcho(
+      { paymentConfirmationChannel: 'push', paymentConfirmationChannelEdited: false, billingEmail: '', billingReminderChannel: 'sms' }, {}))
+      .toEqual({ billingEmail: '', billingReminderChannel: 'sms' });
+    expect(dropLegacyReceiptAppEcho({ paymentConfirmationChannel: 'email', paymentConfirmationChannelEdited: true }, {}))
+      .toEqual({ paymentConfirmationChannel: 'email' });
+  });
+
+  // Only the legacy form save can be that form's echo: it always carries billingEmail and
+  // billingReminderChannel. A save of the receipt channel alone is a choice (pre-push audit, f01a40995c).
+  test('a receipt App value sent outside the legacy form save is stored, with no mark needed', () => {
+    for (const existing of [{ payment_receipt_channel: 'sms', payment_receipt_channel_explicit: false }, {}, undefined]) {
+      for (const sent of [
+        { paymentConfirmationChannel: 'push' },
+        { paymentConfirmationChannel: 'push', billingEmail: 'a@example.com' },
+        { paymentConfirmationChannel: 'push', billingReminderChannel: 'sms' },
+        { paymentConfirmationChannel: 'push', pushEnabled: true },
+      ]) {
+        const updates = dropLegacyReceiptAppEcho({ ...sent }, existing);
+        expect(updates).toEqual(sent);
+        expect(notificationPrefsDbUpdates(updates, existing || {}))
+          .toMatchObject({ payment_receipt_channel: 'push', payment_receipt_channel_explicit: true });
+      }
+    }
+  });
+
+  test('the payload tells the page that this server accepts the mark, and the save schema accepts it', () => {
+    expect(notificationsRoute._private.preferencePayload({}, { includeChannels: true })).toMatchObject({ receiptChannelEditMark: true });
+    const source = fs.readFileSync(path.join(__dirname, '../routes/notifications.js'), 'utf8');
+    expect(source).toContain('paymentConfirmationChannelEdited: Joi.boolean(),');
+  });
+
+  test('the echo guard touches only an App value on the legacy receipt key', () => {
+    const untouched = { payment_receipt_channel: 'sms', payment_receipt_channel_explicit: false };
+    for (const updates of [
+      { paymentConfirmationChannel: 'sms' }, { paymentConfirmationChannel: 'email' }, { paymentConfirmationChannel: 'both' },
+      { enRouteChannel: 'push' }, { paymentConfirmationChannels: ['push'] }, { billingEmail: '' },
+    ]) {
+      expect(dropLegacyReceiptAppEcho({ ...updates }, untouched)).toEqual(updates);
+    }
+  });
+
+  test('the save route runs the echo guard before it builds the write', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../routes/notifications.js'), 'utf8');
+    const guard = source.indexOf('    dropLegacyReceiptAppEcho(updates);');
+    const write = source.indexOf('const allDbUpdates = notificationPrefsDbUpdates(updates, existing || {});');
+    expect(guard).toBeGreaterThan(-1);
+    expect(write).toBeGreaterThan(guard);
+  });
+
+  test('the route no longer drops a saved App value', () => {
+    expect(notificationsRoute._private.settleShownAppChoices).toBeUndefined();
+    const source = fs.readFileSync(path.join(__dirname, '../routes/notifications.js'), 'utf8');
+    for (const gone of ['settleShownAppChoices', 'appFirstDisplayActive', 'withAppFirstDisplay']) expect(source).not.toContain(gone);
   });
 });
 
-describe('GET payload: App is shown for an untouched Text default', () => {
+describe('GET payload: the stored channel is shown, Text for an untouched default (owner 2026-11-20)', () => {
   function mockRows({ own, primary }) {
     db.mockImplementation((table) => {
       if (table === 'notification_prefs') {
@@ -155,88 +237,36 @@ describe('GET payload: App is shown for an untouched Text default', () => {
     appointment_confirmation_channel: 'sms',
   };
 
-  test('gate on + app device + untouched Text: App on every routed key, other keys untouched', async () => {
+  test('every gate on + a reachable phone app + untouched Text: Text on every routed key, and no device read', async () => {
     mockRows({ own: defaults, primary: defaults });
     const payload = await loadPreferencePayload(req());
-    for (const key of KEYS) expect(payload[key]).toBe('push');
+    for (const key of KEYS) expect(payload[key]).toBe('sms');
     expect(payload.appointmentConfirmationChannel).toBe('sms');
     expect(payload.billingReminderChannel).toBe('sms');
+    expect(mockCustomerStatus).not.toHaveBeenCalled();
   });
 
-  test('an explicit Text shows as Text; Email and Both show as stored', async () => {
+  test('the customer\'s own App, Email and Both choices show as stored', async () => {
     const primary = {
-      ...defaults, service_reminder_24h_channel_explicit: true, service_reminder_72h_channel_explicit: true,
+      ...defaults, service_reminder_24h_channel: 'push', service_reminder_24h_channel_explicit: true,
       en_route_channel: 'email', tech_arrived_channel: 'both',
     };
-    mockRows({ own: { ...defaults, payment_receipt_channel_explicit: true }, primary });
+    mockRows({ own: { ...defaults, payment_receipt_channel: 'push', payment_receipt_channel_explicit: true }, primary });
     const payload = await loadPreferencePayload(req());
     expect(payload).toMatchObject({
-      serviceReminder72hChannel: 'sms', serviceReminder24hChannel: 'sms', enRouteChannel: 'email', techArrivedChannel: 'both',
-      serviceCompleteChannel: 'push', paymentConfirmationChannel: 'sms',
+      serviceReminder72hChannel: 'sms', serviceReminder24hChannel: 'push', enRouteChannel: 'email', techArrivedChannel: 'both',
+      serviceCompleteChannel: 'sms', paymentConfirmationChannel: 'push',
     });
   });
 
   test('channels are read from the primary profile, the receipt from the current row', async () => {
     mockRows({
-      own: { ...defaults, service_reminder_24h_channel_explicit: true, payment_receipt_channel_explicit: true },
-      primary: { ...defaults, service_reminder_24h_channel_explicit: false },
+      own: { ...defaults, service_reminder_24h_channel: 'email', payment_receipt_channel: 'email' },
+      primary: { ...defaults, service_reminder_24h_channel: 'both' },
     });
     const payload = await loadPreferencePayload(req());
-    expect(payload.serviceReminder24hChannel).toBe('push');
-    expect(payload.paymentConfirmationChannel).toBe('sms');
-  });
-
-  describe('GATE_APP_FIRST_STALE_TEXT: a phone not opened in 30 days still shows App (its app alert still goes, with the text)', () => {
-    // customerStatus applies the floor itself; the stub stands in for it: with the gate on, a stale phone is
-    // not reachable but appStale.
-    const floorInStatus = () => {
-      const stale = process.env.GATE_APP_FIRST_STALE_TEXT === 'true';
-      return { enabled: true, registered: true, fresh: false, reachable: !stale, appStale: stale };
-    };
-
-    test('both gates on: App shows, so the customer can pick Text, and that Text save is kept (not dropped as an echo)', async () => {
-      process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
-      mockCustomerStatus.mockImplementation(floorInStatus);
-      mockRows({ own: defaults, primary: defaults });
-      const payload = await loadPreferencePayload(req());
-      for (const key of KEYS) expect(payload[key]).toBe('push');
-      expect(mockCustomerStatus.mock.calls[0][2]).toEqual({ withReachable: true });
-      // Picking Text on that page is a real choice: kept, and the page reports it showed App
-      // (the caller then stores the explicit Text marker that stops the app alerts).
-      db.mockImplementation(() => ({ where: () => ({ first: async () => ({ en_route_channel: 'sms', en_route_channel_explicit: false }) }) }));
-      const updates = { enRouteChannel: 'sms' };
-      expect(await settleShownAppChoices({ customerId: 'c-1', query: { appPreferences: '1' } }, updates, {})).toBe(true);
-      expect(updates).toEqual({ enRouteChannel: 'sms' });
-    });
-
-    test('new gate off: App shows as today', async () => {
-      mockCustomerStatus.mockImplementation(floorInStatus);
-      mockRows({ own: defaults, primary: defaults });
-      const payload = await loadPreferencePayload(req());
-      for (const key of KEYS) expect(payload[key]).toBe('push');
-    });
-
-    test('no phone app at all (not stale): the stored values', async () => {
-      process.env.GATE_APP_FIRST_STALE_TEXT = 'true';
-      mockCustomerStatus.mockResolvedValue({ enabled: true, registered: false, fresh: false, reachable: false, appStale: false });
-      mockRows({ own: defaults, primary: defaults });
-      const payload = await loadPreferencePayload(req());
-      for (const key of KEYS) expect(payload[key]).toBe('sms');
-    });
-  });
-
-  test.each([
-    ['gate off', () => { delete process.env.GATE_APP_FIRST_ANY_DEVICE; }],
-    ['routing gate off', () => { delete process.env.GATE_PUSH_CHANNEL_ROUTING; }],
-    ['no app device', () => { mockCustomerStatus.mockResolvedValue({ enabled: true, registered: false, reachable: false }); }],
-    ['app alerts turned off', () => { mockCustomerStatus.mockResolvedValue({ enabled: false, registered: true, reachable: true }); }],
-    ['status lookup fails', () => { mockCustomerStatus.mockRejectedValue(new Error('db down')); }],
-  ])('%s: the stored values', async (_label, arrange) => {
-    arrange();
-    mockRows({ own: defaults, primary: defaults });
-    const payload = await loadPreferencePayload(req());
-    for (const key of KEYS.filter((key) => key !== 'serviceCompleteChannel')) expect(payload[key]).toBe('sms');
-    expect(payload.serviceCompleteChannel).toBe('sms');
+    expect(payload.serviceReminder24hChannel).toBe('both');
+    expect(payload.paymentConfirmationChannel).toBe('email');
   });
 
   test('a page that cannot render App (no appPreferences) and a contact session see the stored values', async () => {

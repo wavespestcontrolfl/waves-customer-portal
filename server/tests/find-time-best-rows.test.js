@@ -133,12 +133,13 @@ describe('priceChipsOnRoads', () => {
     process.env.GATE_BEST_TIMES_ROAD_TIMES = 'true';
     const travel = fakeTravel({ 'prev>new': 21, 'new>next': 28, 'prev>next': 15 });
     const [chip] = await priceChipsOnRoads([hour('2026-10-08', '12:00', 34, 19)], { travelFactory: travel.factory, ...STAFF });
-    expect(chip).toMatchObject({ drive_in_minutes: 21, detour_minutes: 34, drive_source: 'google' });
+    // Google's 21 / 28 / 15, each plus the drive clock's 4 park minutes.
+    expect(chip).toMatchObject({ drive_in_minutes: 25, detour_minutes: 38, drive_source: 'google' });
     expect(travel.calls).toEqual([3]);
 
     const again = fakeTravel({});
     const [cached] = await priceChipsOnRoads([hour('2026-10-08', '12:00', 34, 19)], { travelFactory: again.factory, ...STAFF });
-    expect(cached).toMatchObject({ drive_in_minutes: 21, drive_source: 'google' });
+    expect(cached).toMatchObject({ drive_in_minutes: 25, drive_source: 'google' });
     expect(again.calls).toEqual([]);
   });
 
@@ -238,7 +239,8 @@ describe('priceChipsOnRoads', () => {
     const [cached] = await priceChipsOnRoads([chip], {
       travelFactory: () => { throw new Error('cached restored legs must not buy'); }, ...STAFF,
     });
-    expect(cached).toMatchObject({ drive_in_minutes: 21, detour_minutes: 34, drive_source: 'google' });
+    // Google's 21 / 28 / 15, each plus the drive clock's 4 park minutes.
+    expect(cached).toMatchObject({ drive_in_minutes: 25, detour_minutes: 38, drive_source: 'google' });
   });
 });
 

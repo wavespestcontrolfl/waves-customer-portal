@@ -53,7 +53,12 @@ const {
   transformKeys: prefsTransformKeys,
   customerQualifiesForLawnInches,
   normalizeUpdatesForStorage: normalizePrefsUpdatesForStorage,
+  // The render-time home stamp (the portal's token, codex gh-r43) and its test against the row: one rule for
+  // both preference writers.
+  prefsRenderStamp,
+  renderedAgainstCurrentHome,
 } = require('../services/property-preferences-schema');
+const { CONTROLLER_TIMER_FIELDS, controllerTimerSeen, settleControllerTimer } = require('../services/controller-timer');
 const {
   IRRIGATION_INPUT_FIELDS: PREFS_IRRIGATION_INPUT_FIELDS,
   changedSizingFields: prefsChangedSizingFields,
@@ -3103,19 +3108,17 @@ router.delete('/:id/multi-home-family', requireAdmin, async (req, res, next) => 
 
 router.get('/:id/properties', requireAdmin, async (req, res, next) => {
   try {
-    const canChangeAppointmentAddress = require('../config/feature-gates').isEnabled('editApptAddress');
-    if (req.query?.context === 'appointment_address' && !canChangeAppointmentAddress) {
-      return res.json({ properties: [], canChangeAppointmentAddress: false });
-    }
     const customerProperties = require('../services/customer-properties');
     await customerProperties.ensurePrimaryProperty(req.params.id).catch(() => {});
     const properties = await customerProperties.listProperties(req.params.id);
     res.json({
-      properties, canChangeAppointmentAddress, canChangePrimary: require('../config/feature-gates').gateEnvValue('GATE_IB_PLATFORM'),
+      // canChangeAppointmentAddress stays true for Schedule tabs opened before the gate came out (they hide the picker without it).
+      properties, canChangeAppointmentAddress: true, canChangePrimary: require('../config/feature-gates').gateEnvValue('GATE_IB_PLATFORM'),
       // Read once here so the panel mounts per-row area editors only when on.
       propertyServiceAreas: require('../services/property-service-areas').propertyServiceAreasEnabled(),
-      // GATE_LAWN_RECLAIMED_HALF_N: the panel mounts the reclaimed-water control only while it is on; off, the key is not sent at all.
-      ...((require('../config/feature-gates').lawnReclaimedHalfNLive?.() === true) ? { reclaimedWater: true } : {}),
+      // Always true. A staff tab opened before the reclaimed-water gate left the code still reads this key to show the
+      // reclaimed-water control and to send the picker's coordinates. The current panel does not read it.
+      reclaimedWater: true,
     });
   } catch (err) { next(err); }
 });
@@ -3135,12 +3138,11 @@ router.patch('/:id/properties/:propertyId', requireAdmin, async (req, res, next)
   } catch (err) { next(err); }
 });
 
-// GATE_LAWN_RECLAIMED_HALF_N: the office says a property's water is reclaimed (true), not (false), or hands it back to the automatic
+// The office says a property's water is reclaimed (true), not (false), or hands it back to the automatic
 // county meter match (null). The office value always wins over the county's. It changes a nitrogen dose, so it goes through the same
 // audited, locked domain writer as the other property edits (editManualProperty: customer comms lock, row locks, a critical audit event
 // with the actor, a verified read-back); answers with the list, like the PATCH above.
 router.put('/:id/properties/:propertyId/reclaimed-water', requireAdmin, async (req, res, next) => {
-  if (!(require('../config/feature-gates').lawnReclaimedHalfNLive?.() === true)) return res.status(404).json({ error: 'Not found' });
   try {
     const value = req.body?.reclaimed;
     if (value !== null && typeof value !== 'boolean') return res.status(400).json({ error: 'reclaimed must be true, false or null' });
@@ -3182,13 +3184,10 @@ router.get('/:id/timeline', requireAdmin, async (req, res, next) => {
 });
 
 // GET /api/admin/customers/:id/activity — read-only "what they were sent and
-// what they did" feed (GATE_CUSTOMER_ACTIVITY_TIMELINE, dark by default).
-// requireAdmin: it shows message previews, link clicks and page views.
-// Dark = 200 { enabled: false } so the panel hides itself; no other read or
-// write happens. Query: before (ISO cursor from the previous page), limit.
+// what they did" feed. requireAdmin: it shows message previews, link clicks
+// and page views. Read-only. Query: before (ISO cursor from the previous page), limit.
 router.get('/:id/activity', requireAdmin, async (req, res, next) => {
   try {
-    if (!require('../config/feature-gates').customerActivityTimelineLive()) return res.json({ enabled: false });
     const { getCustomerActivity } = require('../services/customer-activity-timeline');
     const { before, limit } = req.query || {};
     const result = await getCustomerActivity(req.params.id, {
@@ -3196,6 +3195,7 @@ router.get('/:id/activity', requireAdmin, async (req, res, next) => {
       limit,
     });
     if (!result) return res.status(404).json({ error: 'Customer not found' });
+    // `enabled: true` stays for admin tabs opened before this deploy: their old bundle drops the feed without it.
     res.json({ enabled: true, ...result });
   } catch (err) {
     if (err?.status === 400) return res.status(400).json({ error: err.message });
@@ -3220,12 +3220,10 @@ router.get('/:id/comms', requireAdmin, async (req, res, next) => {
 });
 
 // { reminder24hOn, reminder24hByProperty } for ONE customer (appointment-reminders.loadBookingReminder24hAnswers, the senders'
-// own rule, read-only): the customer row's answer, and while property texts are enforced each saved property's own. {} with the
-// gate off or on a failed read: the client reads a missing field as "the reminder will not go out", which is what the senders
+// own rule, read-only): the customer row's answer, and while property texts are enforced each saved property's own. {} on a failed read: the client reads a missing field as "the reminder will not go out", which is what the senders
 // do with unreadable preferences.
 async function reminder24hField(customerId) {
   try {
-    if (!require('../services/time-promise').dayOnlyPromiseOn()) return {};
     const answers = await require('../services/appointment-reminders').loadBookingReminder24hAnswers(db, customerId);
     return { reminder24hOn: answers.customer, reminder24hByProperty: answers.properties };
   } catch {
@@ -3288,6 +3286,8 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
           'id', 'customer_id', 'status', 'token', 'service_interest', 'estimate_data',
           'estimate_slug', 'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
           'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at', 'property_id',
+          // Read-only inputs for `bookable` and the booking-win notice.
+          'sent_at', 'source', 'pricing_authority', 'price_locked_at', 'category', 'address',
         ),
       db('services')
         // mosquito_seasonal is active as of 20260805000010, making the
@@ -3387,6 +3387,16 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
         serviceInterest: estimate.service_interest,
         acceptedAt: estimate.accepted_at,
         createdAt: estimate.created_at,
+        // When it went out: the booking modal offers to link a quote sent in
+        // the last 60 days so the booking records the win.
+        sentAt: estimate.sent_at || null,
+        // Would a staff booking accept this quote? Same row refusals as POST
+        // /admin/schedule (plan-start, unwon bill-by-invoice proposal, gated or
+        // dropped add-ons, retired T&S cadence). An accepted row runs the helper's accepted branch; a quote with no schedulable line (quote-required-only items) is not bookable.
+        bookable: require('../services/estimate-staff-booking-eligibility').estimateBookableByStaff(estimate, { schedulableLineCount: lines.length }),
+        // Whether the quote carries a street of its own (the text itself is not sent). A quote tied to no property
+        // that carries one may be for another address, so the booking form offers no link for it.
+        hasQuotedAddress: !!String(estimate.address || '').trim(),
         monthlyTotal,
         annualTotal,
         onetimeTotal,
@@ -3406,7 +3416,7 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
       };
     }));
     // GATE_DAY_ONLY_PROMISE part E: will this customer's 24-hour reminder go out? The booking window's phone-script hint needs
-    // it (a day-only promise is made only when that text will go out). Gate off: the reply is exactly today's, nothing read.
+    // it (a day-only promise is made only when that text will go out).
     res.json({ estimates: out, ...(await reminder24hField(customer.id)) });
   } catch (err) { next(err); }
 });
@@ -5302,17 +5312,6 @@ const ADMIN_ONLY_PREFS_FIELD_SCHEMAS = {
 const SOD_PREFS_INPUT_FIELDS = NEW_SOD_COLUMNS.filter((c) => c !== 'sod_rooted_on');
 const SOD_PREFS_INPUT_CAMEL = ['sodLaidOn', 'sodCovers', 'sodArea'];
 
-// The render-time home stamp a prefs request carries (the portal's token, codex
-// gh-r43): { sent, ms }. The admin form echoes the row's
-// irrigation_home_changed_at back as confirmedAsOf.
-function prefsRenderStamp(body) {
-  const raw = body || {};
-  const sent = 'confirmed_as_of' in raw || 'confirmedAsOf' in raw;
-  const value = raw.confirmed_as_of ?? raw.confirmedAsOf ?? null;
-  const ms = value ? new Date(value).getTime() : null;
-  return { sent, ms: Number.isFinite(ms) ? ms : null };
-}
-
 // A sod record is a fact about one home. A move clears it under the same
 // advisory lock this write takes, so a form rendered BEFORE the move that waits
 // out the lock would re-read the cleared row and write the old home's sod onto
@@ -5329,26 +5328,27 @@ function sodWriteIsFresh(current, sodInput, renderStamp) {
   // faces the same stamp as a set: a form rendered before a move must not delete the new home's record.
   const clears = 'sod_laid_on' in sodInput && sodInput.sod_laid_on == null;
   if (clears && !current?.sod_laid_on) return true;
-  const movedAt = current?.irrigation_home_changed_at ? new Date(current.irrigation_home_changed_at).getTime() : null;
-  if (movedAt == null) return true;
-  return !!renderStamp && renderStamp.sent && renderStamp.ms === movedAt;
+  return renderedAgainstCurrentHome(current, renderStamp);
 }
 
 // The sod record saves whole or not at all: one rejected sod field drops the
 // other sod fields of the batch too (a valid date with a bad covers value must
 // not persist as a whole-lawn record). Other fields still save.
-// A sod record the stored row could not accept joins `rejected`; true when it
-// was the only thing in the batch (nothing was written).
-function sodRejectedWithNothingSaved(outcome, rejected) {
-  if (!outcome.sodRejected) return false;
-  rejected.push(outcome.sodRejected);
-  return !outcome.written.length;
+// A sod record the stored row could not accept joins `rejected`. So does a sprinkler timer on file, which follows
+// the same contract (services/controller-timer.js). Returns the 400 message when those were the only things in the
+// batch (nothing was written), else null.
+function recordsRejectedWithNothingSaved(outcome, rejected) {
+  const refused = [outcome.sodRejected, ...(outcome.timerRejected || [])].filter(Boolean);
+  rejected.push(...refused);
+  if (!refused.length || outcome.written.length) return null;
+  return [...new Set(refused.map((r) => r.message))].join('; ');
 }
 
 // The field names a prefs write saved, for the audit trail (names only, sorted).
 function savedPrefFieldNames(updates, outcome) {
   return Object.keys(updates)
     .filter((f) => !(outcome.sodRejected && SOD_PREFS_INPUT_FIELDS.includes(f)))
+    .filter((f) => !(outcome.timerRejected?.length && CONTROLLER_TIMER_FIELDS.includes(f)))
     .sort();
 }
 
@@ -5388,7 +5388,10 @@ function blackoutPairError(updates) {
 // (resolveSodRecord): a record the stored row cannot accept is dropped from the
 // write and its message reported through `outcome.sodRejected` ({ field, message }); `outcome.written`
 // lists the columns that were written.
-async function writeAdminPreferences(customerId, updates, outcome = {}, { renderStamp = null } = {}) {
+// The sprinkler timer on file is settled here too (settleControllerTimer): it saves whole, only from a form rendered
+// against the current home, and only over the timer the form showed (`timerSeen`); its rejections come back in
+// `outcome.timerRejected`.
+async function writeAdminPreferences(customerId, updates, outcome = {}, { renderStamp = null, timerSeen = null } = {}) {
   return db.transaction(async (trx) => {
     // Same advisory-lock key/order the portal PUT and the customer-edit
     // route's address sync already take on this customer — one shared lock
@@ -5417,6 +5420,7 @@ async function writeAdminPreferences(customerId, updates, outcome = {}, { render
     const row = PREFS_IRRIGATION_INPUT_FIELDS.some((f) => f in updates)
       ? { ...updates, irrigation_system: true }
       : { ...updates };
+    outcome.timerRejected = settleControllerTimer(row, { fresh: renderedAgainstCurrentHome(current, renderStamp), stored: current, seen: timerSeen });
     if (SOD_PREFS_INPUT_FIELDS.some((f) => f in updates)) {
       const sodInput = {};
       for (const f of SOD_PREFS_INPUT_FIELDS) {
@@ -5520,11 +5524,12 @@ router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => 
     // A missing or archived customer is a 404, not a foreign-key 500 on
     // the insert, and a stale tab must not edit a soft-deleted customer.
     const outcome = {};
-    if (!(await writeAdminPreferences(customerId, updates, outcome, { renderStamp: prefsRenderStamp(req.body) }))) {
+    if (!(await writeAdminPreferences(customerId, updates, outcome, { renderStamp: prefsRenderStamp(req.body), timerSeen: controllerTimerSeen(req.body) }))) {
       return res.status(404).json({ error: 'Customer not found' });
     }
-    if (sodRejectedWithNothingSaved(outcome, rejected)) {
-      return res.status(400).json({ error: outcome.sodRejected.message, rejected });
+    const nothingSaved = recordsRejectedWithNothingSaved(outcome, rejected);
+    if (nothingSaved) {
+      return res.status(400).json({ error: nothingSaved, rejected });
     }
 
     const preferences = await db('property_preferences')

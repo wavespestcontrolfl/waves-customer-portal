@@ -248,11 +248,22 @@ function dateProblem(v, date, ctx) {
   return null;
 }
 
+/**
+ * A visit carries work a run does not move: the line of its own service, or of one of its add-ons, is not in the
+ * run's lines (null = unknown service). A row with no `line` field goes with its series.
+ */
+const carriesOtherLine = (v, lines) => (v.line !== undefined && !lines.includes(v.line))
+  || (v.addon_lines || []).some((line) => !lines.includes(line));
+
 /** Why a visit that must change date cannot (the app keeps it still), or null. */
 function stayStillReason(v, from, facts) {
   if (!v.recurring_parent_id) return 'first_visit';
   if (v.is_recurring !== true) return 'booster_visit';
   if (v.technician_id !== from) return v.technician_id ? 'other_technician' : 'unassigned';
+  // One appointment changed to a service this run does not move (lawn, rodent exclusion), or carrying such an add-on:
+  // it stays with --from on its date, so a projection that needs it re-dated keeps the customer whole.
+  // `facts.lines` = the run's --lines.
+  if (facts.lines && carriesOtherLine(v, facts.lines)) return 'visit_other_line';
   return facts.stayStill.get(v.id) || null;
 }
 
@@ -479,7 +490,9 @@ async function loadStayStill(db, visits, now) {
     ['grouped', (v) => !!v.visit_id && v.group_status !== 'dissolved'],
     ['date_exception', (v) => v.date_exception === true],
     ['dispatch_handoff', (v) => !!v.recurring_dispatch_due_date && !v.window_start],
-    ['held', (v) => !!heldOutOfAutoDispatch(v)],
+    // A customer confirmation keeps a visit still for this agent, as its execute step re-checks under the locks
+    // (second-tech-handover-execute.js). The night jobs no longer hold it (owner 2026-11-22); this agent's rule is unchanged.
+    ['held', (v) => !!heldOutOfAutoDispatch(v) || v.customer_confirmed === true],
     ['reminder_sent', (v) => freeze.failed || freeze.frozen.has(v.id)],
   ];
   const out = new Map();
@@ -512,7 +525,7 @@ async function decideWeekend(db, { plan, parents, visits, from, to, workDays, st
     }),
   }));
   if (!candidates.length) return { kept: new Map(), newDates: new Map(), anchors: [] };
-  const facts = await loadWeekendFacts(db, { to, from, start, today, now, candidates, lockNeighbors });
+  const facts = { ...(await loadWeekendFacts(db, { to, from, start, today, now, candidates, lockNeighbors })), lines: plan.lines };
   // The hours the run's technician-only moves give --to: other customers' always; a weekend customer's own only while that
   // customer moves and the visit keeps its date (resolveWeekendMoves gives the rest back).
   const weekendIds = new Set(candidates.map((c) => c.customer_id));
@@ -534,5 +547,5 @@ async function decideWeekend(db, { plan, parents, visits, from, to, workDays, st
 }
 
 module.exports = {
-  decideWeekend, MIN_DAYS_OUT, effectiveWindowEnd, isMonthBased, candidateDates, projectChain, changeLabel, spanOf, resolveWeekendMoves, loadWeekendFacts, anchorChange,
+  decideWeekend, carriesOtherLine, MIN_DAYS_OUT, effectiveWindowEnd, isMonthBased, candidateDates, projectChain, changeLabel, spanOf, resolveWeekendMoves, loadWeekendFacts, anchorChange,
 };

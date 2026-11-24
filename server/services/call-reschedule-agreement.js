@@ -1234,4 +1234,4 @@ function spokenFiguresIn(text) {
   return spokenNumbersIn(text).filter((value) => Number.isNaN(value) || value >= 20);
 }
 
-module.exports = { groundRescheduleAgreement, groundNewBookingAgreement, groundingTools: { parseTurns, turnsHolding, spokenFiguresIn, spokenNumbersIn, numbersStatedIn } };
+module.exports = { groundRescheduleAgreement, groundNewBookingAgreement, groundingTools: { parseTurns, turnsHolding, normalize, spokenFiguresIn, spokenNumbersIn, numbersStatedIn } };

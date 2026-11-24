@@ -145,6 +145,66 @@ function lookupFeatureReadIsFlagged(enriched) {
   ));
 }
 
+// GATE_PEST_PRICE_PHOTO_FACTS (owner 2026-11-21, reply "1, 2"): is the lawn
+// AREA the only thing a flagged feature read doubts? Then the photo itself is
+// not in question, and a pest price may keep the three photo facts it reads
+// (shrubs, complexity, near water) instead of the neutral defaults. An audit
+// of 106 estimates found the lawn-area flag on about half of homes, and the
+// owner's final value agreed with the photo on 87% of those three facts with
+// or without the flag.
+//
+// A NEW consumption, so it fails closed, and it reads machine fields only,
+// never a flag's prose. Refused:
+//   - no grade or a low grade (unscored or weak photo);
+//   - turfObservation 'unobservable': the photo conflicts with county records
+//     (an old photo of bare land), so every read off it is of the wrong scene;
+//   - turfSource other than 'vision': the photo gave no lawn number of its
+//     own (a county prior, or no basis), so nothing shows it read the yard;
+//   - ANY flag outside the allow-list below. The list is closed on purpose:
+//     a flag this rule has never sorted refuses. That covers a wrong premise
+//     ('address', 'all'), a lot shared by a whole development ('lotSize',
+//     scope 'unit_parcel': the photo shows the development's landscaping, not
+//     this home's), a doubted home size or property type, and a flag on any
+//     vision read (pool, shrubs, trees, palms, bed area, the analysis itself).
+// Every flag the lookup raises on estimatedTurfSf is one of the cases above or
+// a doubt about the lawn number alone; a new kind of estimatedTurfSf flag must
+// be sorted here (pest-price-photo-facts.test.js counts them).
+// One fact can still be in doubt by itself: see lookupDisputedPhotoFields.
+//
+// The allow-list, by exact field name:
+//   estimatedTurfSf       the lawn-area doubt itself;
+//   constructionMaterial  unknown or wood-frame structure: a termite note
+//                         from the records;
+//   foundationType        unknown, raised or flood-zone foundation: a termite
+//                         note from the records;
+//   vegetation            plants touch the structure: a note for the
+//                         technician. The photo saw it; it doubts nothing.
+// The three notes say nothing against the photo or the premises it shows, and
+// a lookup with no lawn-area flag prices on the photo facts with them today.
+const LAWN_AREA_DOUBT_ALLOWED_FLAG_FIELDS = new Set([
+  'estimatedturfsf', 'constructionmaterial', 'foundationtype', 'vegetation',
+]);
+function lookupLawnAreaIsTheOnlyFeatureDoubt(enriched) {
+  if (!enriched) return false;
+  if (!lookupConfidenceIsAdequate(enriched, { requireExplicitScore: true })) return false;
+  if (String(enriched.turfObservation || '').trim().toLowerCase() === 'unobservable') return false;
+  if (String(enriched.turfSource || '').trim().toLowerCase() !== 'vision') return false;
+  const fields = (Array.isArray(enriched.fieldVerifyFlags) ? enriched.fieldVerifyFlags : [])
+    .map((flag) => String(flag?.field || '').trim().toLowerCase());
+  if (!fields.every((field) => LAWN_AREA_DOUBT_ALLOWED_FLAG_FIELDS.has(field))) return false;
+  return fields.includes('estimatedturfsf');
+}
+
+// The fields the vision providers DISAGREED on. mergeAiAnalyses
+// (routes/property-lookup-v2.js) records each as an aiDivergences entry on the
+// lookup's aiAnalysis, beside the enriched profile; they raise no verify flag,
+// so no predicate above sees them. A disputed value is one provider's word
+// against another's on the same photo.
+function lookupDisputedPhotoFields(aiAnalysis) {
+  const list = Array.isArray(aiAnalysis?.aiDivergences) ? aiAnalysis.aiDivergences : [];
+  return new Set(list.map((entry) => String(entry?.field || '')).filter(Boolean));
+}
+
 // Vision-derived FEATURE modifiers (pool, cage, shrub/tree density,
 // landscape complexity, tree count, water adjacency) all come off the same
 // imagery read. When the lookup grades that read low, none of them should
@@ -171,6 +231,22 @@ const DIMENSION_FLAG_MATCHERS = {
 function lookupDimensionIsTrustworthy(enriched, dimension) {
   const names = DIMENSION_FLAG_MATCHERS[dimension] || [String(dimension || '').toLowerCase()];
   return !hasVerifyFlagMatching(enriched, (field) => names.some((name) => field.includes(name)));
+}
+
+// A HIGH-priority verify flag on a core dimension (home size, lot size,
+// stories) or on the whole lookup ('address', 'all'): the lookup's own
+// "verify before pricing" grade. The priority is part of the test here, where
+// lookupDimensionIsTrustworthy above takes a flag of any priority: this one
+// reads a profile that was stored with a quote the office then priced, and
+// the MEDIUM form of 'all' marks a record for the right address.
+function hasHighPriorityDimensionFlag(enriched) {
+  const flags = Array.isArray(enriched?.fieldVerifyFlags) ? enriched.fieldVerifyFlags : [];
+  const names = Object.values(DIMENSION_FLAG_MATCHERS).flat();
+  return flags.some((flag) => {
+    if (String(flag?.priority || '').trim().toUpperCase() !== 'HIGH') return false;
+    const field = String(flag?.field || '').trim().toLowerCase();
+    return GLOBAL_VERIFY_FIELDS.has(field) || names.some((name) => field.includes(name));
+  });
 }
 
 // applyVisionPropertyTypeEvidence MUTATES the property record itself
@@ -318,9 +394,12 @@ module.exports = {
   lookupBedAreaIsTrustworthy,
   lookupBedAreaReadIsFlagged,
   lookupFeatureReadIsFlagged,
+  lookupLawnAreaIsTheOnlyFeatureDoubt,
+  lookupDisputedPhotoFields,
   lookupFeaturesAreTrustworthy,
   lookupPropertyTypeIsTrustworthy,
   lookupDimensionIsTrustworthy,
+  hasHighPriorityDimensionFlag,
   recordPropertyTypeIsTrustworthy,
   lookupTurfEstimateIsTrustworthy,
   // Value-agnostic turf trust: a consumer distinguishing "the lookup

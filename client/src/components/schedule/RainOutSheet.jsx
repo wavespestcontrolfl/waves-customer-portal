@@ -640,7 +640,7 @@ export default function RainOutSheet({ service, onClose, onDone, allowRouteScope
     sameDayFloorMin: minTodayStartMin,
     // The same two best-times rows as New Appointment (owner 2026-10-08):
     // road-priced chips with the chance of rain for each hour, ranked by
-    // rain fit (GATE_BOOKING_RAIN_RANK). The server reads what the visit
+    // rain fit. The server reads what the visit
     // books from its own rows (serviceId), add-ons and a shared stop included.
     bestRows: true,
     // The open-times box (GATE_OPEN_TIMES_BOX), on the visit's own route.
