@@ -314,10 +314,11 @@ describe('archiveConvertedOpenEstimates', () => {
     // and the customer row itself — applied to every row (a pre-estimate
     // signal of ANY kind disqualifies — judging sources independently would
     // archive live upsell estimates). The sixth NOT EXISTS is the
-    // received-deposit money guard.
+    // received-deposit money guard. A seventh sits INSIDE the completed-visit
+    // signal: a closeout that performed nothing (customer_declined etc.) is not a sale.
     expect(calls.filter((c) => c.m === 'whereExists')).toHaveLength(1);
     expect(calls.filter((c) => c.m === 'orWhereExists')).toHaveLength(1);
-    expect(calls.filter((c) => c.m === 'whereNotExists')).toHaveLength(6);
+    expect(calls.filter((c) => c.m === 'whereNotExists')).toHaveLength(7);
 
     // A booking CREATED before the estimate (live or since completed)
     // disqualifies even before its completion/payment evidence lands —

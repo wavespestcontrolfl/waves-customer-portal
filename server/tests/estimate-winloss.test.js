@@ -601,9 +601,40 @@ describe('still-deciding signal (soft exit)', () => {
     };
     const out = await winLossSlices({ days: 30 });
     expect(activityCalls).toBe(1);
-    expect(out.stillDeciding).toEqual({ signaled: 3, wonAfter: 1, lostAfter: 1, expiredViewedAfter: 1 });
+    expect(out.stillDeciding).toEqual({ signaled: 3, wonAfter: 1, wonBookedAfter: 0, lostAfter: 1, expiredViewedAfter: 1 });
     // The disposition vocabulary is untouched — the signal is a side channel.
     expect(out.byDisposition.find((d) => d.code === 'expired_viewed').count).toBe(2);
+  });
+
+  test('"Accepted afterwards" counts accepted rows only, booked wins go to wonBookedAfter, and a win must come AFTER the signal', async () => {
+    const base = { viewed_at: daysAgo(12), sent_at: daysAgo(14), created_at: daysAgo(14), monthly_total: '40', onetime_total: '0', estimate_data: '{}' };
+    const rows = [
+      { ...base, id: 'accepted-after', status: 'accepted', accepted_at: daysAgo(3), updated_at: daysAgo(3) },
+      { ...base, id: 'accepted-before', status: 'accepted', accepted_at: daysAgo(9), updated_at: daysAgo(9) },
+      { ...base, id: 'booked-after', status: 'expired', expires_at: daysAgo(8), disposition: 'converted_other_path', disposition_at: daysAgo(4), updated_at: daysAgo(4) },
+      { ...base, id: 'booked-before', status: 'expired', expires_at: daysAgo(8), disposition: 'converted_other_path', disposition_at: daysAgo(7), updated_at: daysAgo(7) },
+      { ...base, id: 'lost', status: 'expired', expires_at: daysAgo(3), disposition: 'expired_viewed', updated_at: daysAgo(3) },
+    ];
+    const estimates = estimatesTable(rows, []);
+    // Signals: the earliest of several counts; times come from activity_log.created_at.
+    const signals = [
+      { estimate_id: 'accepted-after', created_at: daysAgo(6) },
+      { estimate_id: 'accepted-before', created_at: daysAgo(6) },
+      { estimate_id: 'booked-after', created_at: daysAgo(6) },
+      { estimate_id: 'booked-before', created_at: daysAgo(6) },
+      { estimate_id: 'booked-before', created_at: daysAgo(1) },
+      { estimate_id: 'lost', created_at: daysAgo(6) },
+    ];
+    mockDbHandler = (table) => {
+      if (table === 'activity_log') {
+        const b = { whereIn: () => b, where: () => b, select: async () => signals };
+        return b;
+      }
+      return estimates(table);
+    };
+    const out = await winLossSlices({ days: 30 });
+    // accepted-before and booked-before won BEFORE their signal: signaled, but not "afterwards".
+    expect(out.stillDeciding).toEqual({ signaled: 5, wonAfter: 1, wonBookedAfter: 1, lostAfter: 1, expiredViewedAfter: 1 });
   });
 
   test('an activity_log failure degrades to "no signals", never a failed slice', async () => {
@@ -613,6 +644,6 @@ describe('still-deciding signal (soft exit)', () => {
       return estimates(table);
     };
     const out = await winLossSlices({ days: 30 });
-    expect(out.stillDeciding).toEqual({ signaled: 0, wonAfter: 0, lostAfter: 0, expiredViewedAfter: 0 });
+    expect(out.stillDeciding).toEqual({ signaled: 0, wonAfter: 0, wonBookedAfter: 0, lostAfter: 0, expiredViewedAfter: 0 });
   });
 });

@@ -2073,6 +2073,7 @@ async function resolveEstimateWritePayload({
     delete trustedEstimateData.groupLinkViewableThrough;
     delete trustedEstimateData.groupPublishedByEstimateId;
     delete trustedEstimateData.deliveryState;
+    delete trustedEstimateData.websiteLinkText;
   }
   // Moving PR B1 (GATE_MOVING_ESTIMATE): estimate_data.move and its setup-fee
   // waiver are server-owned. A create naming a move (body.moveId) takes them
@@ -3057,10 +3058,13 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
 // staff revision must carry it (codex #4815 r9 P2). It is server-owned:
 // the locked pass mirrors the locked row exactly, so a client payload can
 // neither drop it nor invent one.
-const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id', 'manualSendAttempts', 'deliveryState', 'assessment_exception'];
+// websiteLinkText: the website quote's link-text receipt ({ at }, website-quote-publication.js
+// recordWebsiteLinkTexted), the delivery evidence the booked-win reclaim anchors on. Server-owned
+// like assessment_exception: a revision mirrors the locked row, a browser copy is dropped.
+const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id', 'manualSendAttempts', 'deliveryState', 'assessment_exception', 'websiteLinkText'];
 // move: a new-home estimate's link to its customer_moves row (moving PR B1),
 // stamped only by a create that names a verified move.
-const REVISE_SERVER_OWNED_ESTIMATE_DATA_KEYS = ['assessment_exception', 'move'];
+const REVISE_SERVER_OWNED_ESTIMATE_DATA_KEYS = ['assessment_exception', 'move', 'websiteLinkText'];
 // The wizard's county-roll verdict (addressUnverified + addressUnverifiedFlag)
 // is carried across an ORDINARY revision (the public link and the send
 // guard both refuse while it stands), and cleared by the two staff actions
