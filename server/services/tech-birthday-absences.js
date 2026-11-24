@@ -95,7 +95,7 @@ async function syncOneDay(conn, tech, date, result) {
     });
   } catch (err) {
     result.failed += 1;
-    logger.error(`[tech-days-off] could not write a day off for technician ${tech.id} on ${date}: ${err.message}`);
+    logger.error(`[tech-days-off] could not write a day off for technician ${tech.id}: ${err.code || "write_failed"}`);
   }
 }
 

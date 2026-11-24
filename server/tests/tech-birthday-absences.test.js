@@ -169,6 +169,8 @@ describe('syncTechDaysOff (knex double)', () => {
     const logged = [...logger.error.mock.calls, ...logger.info.mock.calls].map(([m]) => m).join('\n');
     expect(logged).toMatch(/\[tech-days-off\]/);
     expect(logged).not.toMatch(/birth/i);
+    expect(logged).not.toMatch(/12-0[23]/); // no date: it would reveal the birthday
+    expect(logged).not.toMatch(/db hiccup/);
   });
 
   test('the horizon comes from one captured instant, across a DST change', async () => {
