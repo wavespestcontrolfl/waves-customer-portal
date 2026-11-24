@@ -345,10 +345,11 @@ async function planSyncRefusal({ customerId, catalogRow, dates }) {
 }
 
 // The refusal for an earlier series whose billing differs from what this booking stamps. One reason is worded: add-ons first,
-// then the invoice setting, then price and discounts, then any other billing fact.
+// then the invoice setting, then a plan changed after booking (template overrides, a moved or re-priced series), then price and discounts, then any other billing fact.
 const BILLING_REFUSALS = [
   ['addons', 'plan_had_addons', 'The last plan had add-ons; restart through an estimate.'],
   ['billing_setting', 'billing_setting_differs', 'The billing setting differs from the last plan; restart through an estimate.'],
+  ['changed', 'last_plan_changed', 'The last plan was changed after booking; restart through an estimate.'],
   ['price', 'price_changed_since_last_plan', 'The price changed since the last plan; restart through an estimate. The bar books a plan again only at the price and discounts it last billed.'],
 ];
 function billingRefusal(billing) {

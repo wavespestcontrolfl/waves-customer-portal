@@ -15,24 +15,28 @@
  *   kind 'empty'  the new booking stamps nothing there, so the earlier series must carry nothing (null, '', 0, false, [], {})
  * `read` says where the value comes from: 'row' (the column on the series parent AND on its latest live visit), 'price' (the
  * per-visit price the series bills going forward), 'cioc' (the series' effective invoice-on-completion setting), 'overrides'
- * (the price/service template override), 'addons' (any add-on line on any visit of the series), 'separate' (a separate-program
- * marker). `group` picks the refusal the caller words.
+ * (the RAW recurring_template_overrides column, so keys the parsed overlay filters out, such as a renewal price or a moved
+ * address, still count), 'addons' (any add-on line on any visit of the series), 'separate' (a separate-program marker of this
+ * customer's, matched on the leading "Series <id>;" field), 'priceDrift' (the latest live visit still bills the parent's own
+ * price), 'moved' (every live visit still sits at the parent's property and service address). `group` picks the refusal the
+ * caller words.
  */
-const { overlayRecurringTemplateOverrides, parseTemplateOverrides } = require('./recurring-template-overrides');
-const { isEnabled } = require('../config/feature-gates');
 
 const rowFields = (group, kind, fields) => fields.map((field) => ({ field, group, kind, read: 'row' }));
 
 const PRIOR_SERIES_BILLING_FIELDS = [
   // What a visit bills.
   { field: 'estimated_price', group: 'price', kind: 'money', read: 'price', expect: (x) => x.price },
+  { field: 'series_price_drift', group: 'changed', kind: 'bool', read: 'priceDrift', expect: () => true },
   { field: 'primary_line_price', group: 'price', kind: 'money', read: 'row', expect: (x) => x.primaryBase },
   ...rowFields('price', 'empty', [
     'discount_id', 'discount_name', 'discount_type', 'discount_amount', 'discount_dollars', 'discount_max_dollars',
     'discount_service_key_filter', 'discount_service_category_filter',
     'line_discount_id', 'line_discount_name', 'line_discount_type', 'line_discount_amount', 'line_discount_dollars',
   ]),
-  { field: 'recurring_template_overrides', group: 'price', kind: 'empty', read: 'overrides' },
+  // Any template override at all (a price, a renewal price, a moved address): the plan was changed after booking.
+  { field: 'recurring_template_overrides', group: 'changed', kind: 'empty', read: 'overrides' },
+  { field: 'series_moved', group: 'changed', kind: 'bool', read: 'moved', expect: () => true },
   // Whether completing a visit invoices it.
   { field: 'create_invoice_on_complete', group: 'billing_setting', kind: 'bool', read: 'cioc', expect: (x) => x.createInvoice },
   // Add-on lines, which make a visit's price a bundle.
@@ -100,7 +104,6 @@ async function newestQualifyingPriorSeries(conn, { customerId, serviceId, family
 // Returns { gone: true } when the parent is not a live series root, else { mismatches: [{ field, group }] } (empty = restartable).
 async function priorSeriesBillingMismatches(conn, parentId, expected, { lock = false } = {}) {
   if (!parentId) return { gone: true };
-  const cols = await conn('scheduled_services').columnInfo();
   const parentQuery = conn('scheduled_services').where({ id: parentId, is_recurring: true }).whereNull('recurring_parent_id');
   if (lock) parentQuery.forShare();
   const parent = await parentQuery.first();
@@ -111,16 +114,24 @@ async function priorSeriesBillingMismatches(conn, parentId, expected, { lock = f
     .orderBy('scheduled_date', 'desc')
     .first();
   const basis = latest || parent;
-  const template = overlayRecurringTemplateOverrides(parent, cols);
-  const overrides = parseTemplateOverrides(parent.recurring_template_overrides);
-  const priceOverridden = !!overrides && Object.prototype.hasOwnProperty.call(overrides, 'estimated_price') && isEnabled('editApptPriceServiceScope');
 
   const lazy = {};
   const read = async (entry) => {
     switch (entry.read) {
       case 'row': return [parent[entry.field], basis[entry.field]];
-      case 'price': return [priceOverridden ? template.estimated_price : basis.estimated_price];
-      case 'overrides': return [overrides];
+      case 'price': return [basis.estimated_price];
+      case 'priceDrift': return [cents(basis.estimated_price) === cents(parent.estimated_price)];
+      // The raw column: parseTemplateOverrides filters keys (anchored_split_per_visit, appointment_address) that still change the plan.
+      case 'overrides': return [parent.recurring_template_overrides];
+      case 'moved': {
+        const visits = (await conn('scheduled_services')
+          .where({ recurring_parent_id: parentId })
+          .whereNotIn('status', SERIES_LIVE_EXCLUDED)
+          .select('property_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip')) || [];
+        const place = (r) => [r.property_id, r.service_address_line1, r.service_address_line2, r.service_address_city, r.service_address_zip]
+          .map((v) => String(v ?? '').trim().toLowerCase()).join('|');
+        return [visits.every((v) => place(v) === place(parent))];
+      }
       case 'cioc': {
         if (!('cioc' in lazy)) lazy.cioc = await require('../routes/admin-schedule').resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent);
         return [lazy.cioc];
@@ -132,7 +143,11 @@ async function priorSeriesBillingMismatches(conn, parentId, expected, { lock = f
         return [(rows || []).length ? rows : null];
       }
       case 'separate': {
-        const marker = await conn('activity_log').where({ action: 'separate_recurring_program_created' }).where('description', 'like', `%${parentId}%`).first('id');
+        // This customer's own marker, whose leading field names this series as the one created (not a series it merely reviewed).
+        const marker = await conn('activity_log')
+          .where({ customer_id: parent.customer_id, action: 'separate_recurring_program_created' })
+          .where('description', 'like', `Series ${parentId};%`)
+          .first('id');
         return [marker || null];
       }
       default: throw new Error(`prior-series-billing: unknown read ${entry.read}`);

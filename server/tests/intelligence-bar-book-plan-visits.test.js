@@ -13,6 +13,7 @@ jest.setTimeout(30000);
 
 const tables = {};
 const writes = [];
+const wheres = [];
 
 // Table-aware fake: where/first/select return the seeded rows for that table; any write is recorded so the suite can
 // prove the preview never writes.
@@ -20,7 +21,7 @@ jest.mock('../models/db', () => {
   const builder = (table) => {
     const q = {};
     for (const m of ['whereNull', 'whereNotNull', 'whereNotIn', 'whereNot', 'whereIn', 'andWhere', 'orderBy', 'orWhereNot', 'limit', 'whereRaw', 'leftJoin', 'forUpdate', 'forShare', 'modify']) q[m] = () => q;
-    q.where = () => q;
+    q.where = (...args) => { wheres.push({ table, args }); return q; };
     q.first = () => Promise.resolve((tables[table] || [])[0]);
     q.select = () => q;
     q.columnInfo = () => Promise.resolve({});
@@ -97,6 +98,7 @@ function seed(overrides = {}) {
 beforeEach(() => {
   jest.restoreAllMocks();
   writes.length = 0;
+  wheres.length = 0;
   process.env.GATE_IB_BOOK_PLAN_VISITS = 'true';
   seed();
   pricing = { finalPrice: 89, primaryBase: 89, primaryDiscount: null, appointmentDiscount: null, addonLines: [] };
@@ -536,11 +538,6 @@ describe('the price the plan last billed (owner 2026-11-24, option A)', () => {
     await refusedPrice();
   });
 
-  test('a series template price override on the earlier plan refuses', async () => {
-    tables.scheduled_services[0].recurring_template_overrides = { estimated_price: 89 };
-    await refusedPrice();
-  });
-
   test('an earlier plan priced nothing while today\'s visit is priced refuses', async () => {
     tables.scheduled_services[0].estimated_price = null;
     await refusedPrice();
@@ -572,11 +569,11 @@ describe('every billing fact of the earlier plan must equal what the new booking
     expect(names).toEqual(expect.arrayContaining([
       'estimated_price', 'primary_line_price', 'discount_id', 'line_discount_id', 'recurring_template_overrides', 'create_invoice_on_complete',
       'scheduled_service_addons', 'payer_id', 'self_pay_override', 'prepaid_amount', 'annual_prepay_term_id', 'paf_held_term_id', 'pending_setup_fee',
-      'separate_program_marker', 'booster_months', 'is_callback']));
+      'separate_program_marker', 'booster_months', 'is_callback', 'series_moved', 'series_price_drift']));
     for (const e of PRIOR_SERIES_BILLING_FIELDS) {
       expect(['money', 'bool', 'empty']).toContain(e.kind);
-      expect(['row', 'price', 'cioc', 'overrides', 'addons', 'separate']).toContain(e.read);
-      expect(['price', 'billing_setting', 'addons', 'billing']).toContain(e.group);
+      expect(['row', 'price', 'priceDrift', 'cioc', 'overrides', 'addons', 'separate', 'moved']).toContain(e.read);
+      expect(['price', 'billing_setting', 'changed', 'addons', 'billing']).toContain(e.group);
       if (e.kind !== 'empty') expect(typeof e.expect).toBe('function');
     }
   });
@@ -630,6 +627,78 @@ describe('every billing fact of the earlier plan must equal what the new booking
   test('empty-looking values (0, false, [], {}) are not billing differences', async () => {
     Object.assign(tables.scheduled_services[0], { discount_amount: 0, is_callback: false, booster_months: '[]', self_pay_override: false, recurring_template_overrides: {} });
     expect((await propose()).preview).toBe(true);
+  });
+});
+
+describe('a plan changed after booking is not restarted ("the last plan was changed after booking")', () => {
+  const refusedChanged = async (fields) => {
+    const result = await propose();
+    expect(result.code).toBe('last_plan_changed');
+    expect(result.error).toMatch(/last plan was changed after booking; restart through an estimate/i);
+    expect(result.fields).toEqual(expect.arrayContaining(fields));
+    expect(result.preview).toBeUndefined();
+    expect(AdminSchedule.createScheduleBooking).not.toHaveBeenCalled();
+  };
+
+  test.each([
+    ['a price override', { estimated_price: 89 }],
+    ['a renewal price the parsed overlay filters out (anchored_split_per_visit)', { anchored_split_per_visit: 79 }],
+    ['a moved address (appointment_address)', { appointment_address: '9 Rental Row' }],
+    ['any unknown key at all', { whatever: 1 }],
+  ])('a raw recurring_template_overrides value with %s refuses', async (_label, overrides) => {
+    tables.scheduled_services[0].recurring_template_overrides = overrides;
+    await refusedChanged(['recurring_template_overrides']);
+  });
+
+  test('the raw column counts as a string too, and an empty one does not', async () => {
+    tables.scheduled_services[0].recurring_template_overrides = '{"anchored_split_per_visit":79}';
+    await refusedChanged(['recurring_template_overrides']);
+    tables.scheduled_services[0].recurring_template_overrides = '{}';
+    expect((await propose()).preview).toBe(true);
+  });
+
+  test('a visit of the series at another property or service address means the series moved', async () => {
+    const parent = tables.scheduled_services[0];
+    tables.scheduled_services = [parent, { ...parent, id: 'child-1', recurring_parent_id: 'old-parent', property_id: '00000000-0000-0000-0000-0000000bc0bb' }];
+    await refusedChanged(['series_moved']);
+    tables.scheduled_services = [parent, { ...parent, id: 'child-2', recurring_parent_id: 'old-parent', service_address_line1: '9 Rental Row' }];
+    await refusedChanged(['series_moved']);
+  });
+
+  test('the latest live visit billing a price other than the parent\'s refuses (a renewal price the series carries)', async () => {
+    const { priorSeriesBillingMismatches } = require('../services/prior-series-billing');
+    const parent = { id: 'p1', customer_id: CUSTOMER_ID, estimated_price: 79, primary_line_price: 89, create_invoice_on_complete: true };
+    // The latest live visit (the ordered read) bills 89 while the parent bills 79.
+    const conn = (table) => {
+      const q = {};
+      let ordered = false;
+      for (const m of ['whereNull', 'whereNotIn', 'forShare', 'select', 'where', 'whereIn', 'orWhere']) q[m] = () => q;
+      q.orderBy = () => { ordered = true; return q; };
+      q.first = () => Promise.resolve(table === 'scheduled_services' ? (ordered ? { ...parent, id: 'v9', estimated_price: 89 } : parent) : undefined);
+      q.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+      return q;
+    };
+    const result = await priorSeriesBillingMismatches(conn, 'p1', { price: 89, primaryBase: 89, createInvoice: true });
+    expect(result.mismatches.map((m) => [m.field, m.group])).toEqual([['series_price_drift', 'changed']]);
+  });
+
+  test('the recheck under lock sees an override added between the card and Confirm', async () => {
+    const card = await propose();
+    tables.scheduled_services[0].recurring_template_overrides = { anchored_split_per_visit: 79 };
+    const result = await propose(confirmedInput(card));
+    expect(result).toMatchObject({ code: 'last_plan_changed', preview_changed: true });
+  });
+
+  test('the separate-program marker is looked up for this customer and matches only the created series in the leading field', async () => {
+    tables.activity_log = [{ id: 'log-1' }];
+    try {
+      await propose();
+      const call = wheres.filter((w) => w.table === 'activity_log');
+      expect(call.map((w) => w.args)).toEqual(expect.arrayContaining([
+        [{ customer_id: CUSTOMER_ID, action: 'separate_recurring_program_created' }],
+        ['description', 'like', 'Series old-parent;%'],
+      ]));
+    } finally { delete tables.activity_log; }
   });
 });
 
