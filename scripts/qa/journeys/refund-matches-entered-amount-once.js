@@ -45,9 +45,13 @@ module.exports = {
     assert.ok(share > 0 && share < surchargeCents);
     const partial = { paymentId: original.id, amount: enteredCents / 100, reason: 'requested_by_customer' };
     const attempts = await Promise.all([refund(partial), refund(partial)]);
-    assert.ok(attempts.some((response) => response.status() === 200), JSON.stringify(await Promise.all(attempts.map((response) => response.text()))));
+    // The fake holds the first refund until the second arrives, so the second always runs while the first is in flight:
+    // both submissions succeed, both reach Stripe with one key, and Stripe answers the second with the first refund.
+    assert.deepEqual(attempts.map((response) => response.status()), [200, 200], JSON.stringify(await Promise.all(attempts.map((response) => response.text()))));
     const creates = stripeCalls().filter((entry) => entry.method === 'refunds.create');
-    assert.ok(creates.length >= 1);
+    assert.equal(creates.length, 2, 'Both submissions reach Stripe');
+    assert.deepEqual(since().filter((entry) => entry.kind === 'stripe-refund-result').map((entry) => entry.replayed), [false, true],
+      'Stripe creates one refund and replays it for the second submission');
     for (const entry of creates) {
       assert.equal(entry.payment_intent, fixture.cardPaymentIntentId);
       assert.equal(entry.amount, enteredCents + share);
@@ -106,6 +110,8 @@ module.exports = {
     const rest = await json(await refund({ paymentId: original.id, reason: 'requested_by_customer' }));
     const restCreates = stripeCalls().filter((entry) => entry.method === 'refunds.create' && entry.amount === undefined);
     assert.equal(restCreates.length, 1);
+    assert.equal(typeof restCreates[0].idempotencyKey, 'string');
+    assert.ok(restCreates[0].idempotencyKey.length > 0, 'The refund of the rest carries an idempotency key');
     assert.notEqual(restCreates[0].idempotencyKey, creates[0].idempotencyKey);
     const restResult = since().filter((entry) => entry.kind === 'stripe-refund-result').pop();
     assert.notEqual(restResult.refundId, refundIds[0]);

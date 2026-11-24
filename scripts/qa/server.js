@@ -148,6 +148,8 @@ const stripeStubs = {
       let release;
       let finish;
       const entry = { release: () => release?.(), done: new Promise((resolve, reject) => { finish = { resolve, reject }; }) };
+      // Waiters read the outcome; without one, a failed refund must not surface as an unhandled rejection.
+      entry.done.catch(() => {});
       refundsInFlight.set(key, entry);
       try {
         await new Promise((resolve) => { const timer = setTimeout(resolve, OVERLAP_WAIT_MS); release = () => { clearTimeout(timer); resolve(); }; });
