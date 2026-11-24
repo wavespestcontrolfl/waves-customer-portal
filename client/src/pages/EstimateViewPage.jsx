@@ -54,7 +54,7 @@ import { approveSlotLabel, firstVisitDayAndWindow } from '../lib/estimate-glass-
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import OfferTierPicker from '../components/estimate/OfferTierPicker';
 import SlotPicker from '../components/estimate/SlotPicker';
-import PreferredTimeApproval, { preferredTimeSummary } from '../components/estimate/PreferredTimeApproval';
+import FirstVisitRequest from '../components/estimate/FirstVisitRequest';
 import WebsiteCallbackButton from '../components/estimate/WebsiteCallbackButton';
 import WebsiteEstimateFlow, { WebsiteEstimateFrame } from '../components/estimate/WebsiteEstimateFlow';
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, confirmStepFirstVisitAmount, firstVisitTotalPreview, setupFeeBilledWithFirstVisit, standardInvoiceShape } from '../components/estimate/PaymentPreferenceButtons';
@@ -175,8 +175,6 @@ const UNIVERSAL_HEADLINE = 'Hello {first}, your estimate is ready!';
 // to the standard "Your estimate · {service}" kicker.
 const TERMINAL_HERO = {
   accepted: { h1: 'Hello {first}, your plan is booked!', eyebrow: 'Your Waves plan' },
-  // Approved with preferred days and no booked visit (GATE_ESTIMATE_APPROVE_PREFERRED_TIME): nothing is booked yet.
-  acceptedPending: { h1: 'Hello {first}, your plan is approved!', eyebrow: 'Your Waves plan' },
   quote_required: { h1: 'Hello {first}, your custom quote is in the works.', eyebrow: 'Your custom quote' },
   declined: { h1: "Hello {first}, here's your Waves estimate.", eyebrow: null },
   expired: { h1: "Hello {first}, here's your Waves estimate.", eyebrow: null },
@@ -4373,7 +4371,7 @@ function ConfirmFirstVisitAmount({ amount }) {
   );
 }
 
-export function ReviewPhase({ website = false, firstVisitAmount, slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, preferredTimeLine = '', serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, contactSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayAfterVisit = false, prepayCardCapture = false, captureMethodType = 'card', paymentTiming = null, holdExpiresAt = null, holdChecking = false, holdLimitReached = false, extendingHold = false, onExtendHold = null, onPickNewTime = null }) {
+export function ReviewPhase({ website = false, firstVisitAmount, slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, contactSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayAfterVisit = false, prepayCardCapture = false, captureMethodType = 'card', paymentTiming = null, holdExpiresAt = null, holdChecking = false, holdLimitReached = false, extendingHold = false, onExtendHold = null, onPickNewTime = null }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
   // A held (site-confirmation) recurring accept mints NO invoice whatever the
@@ -4465,7 +4463,7 @@ export function ReviewPhase({ website = false, firstVisitAmount, slotId, slotMet
           ? 'Confirm your acceptance'
           : heldForSiteConfirmation
             ? 'Confirm your approval'
-            : usingExistingAppointment ? 'Confirm invoice option' : (preferredTimeLine ? 'Confirm your approval' : 'Confirm your booking')}
+            : usingExistingAppointment ? 'Confirm invoice option' : 'Confirm your booking'}
       </div>
       <div style={{ fontSize: 18, color: COLORS.navy, marginTop: 12, lineHeight: 1.5 }}>
         {heldForSiteConfirmation ? 'Payment: ' : usingExistingAppointment ? 'Selected invoice option: ' : 'Pay option: '}
@@ -4477,9 +4475,7 @@ export function ReviewPhase({ website = false, firstVisitAmount, slotId, slotMet
           : usingExistingAppointment
             ? `Appointment: ${formatAppointmentLabel(existingAppointment)}`
             : manualScheduling
-              ? (preferredTimeLine
-                ? `Your first visit: no time is set yet. Our office will contact you to confirm it. Your days: ${preferredTimeLine}.`
-                : 'Scheduling: a Waves team member will reach out to set up your visit.')
+              ? 'Scheduling: a Waves team member will reach out to set up your visit.'
               : slotMeta?.date
                 // Human-readable date/time; the raw internal slot id only
                 // appears when the slot metadata is missing.
@@ -4571,14 +4567,6 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, firstVisit,
   const prepayAmountText = Number.isFinite(prepayInvoiceAmount) && prepayInvoiceAmount > 0
     ? ` for ${fmtMoney(prepayInvoiceAmount)}`
     : '';
-  // Approved with preferred days and no booked visit (GATE_ESTIMATE_APPROVE_PREFERRED_TIME): say plainly that the office
-  // confirms the first visit, never a date or time.
-  const pendingFirstVisit = acceptResult?.preferredTimePending === true;
-  const pendingFirstVisitNote = pendingFirstVisit ? (
-    <div style={{ fontSize: 17, fontWeight: 600, color: COLORS.navy, marginTop: 10 }} data-testid="preferred-time-pending-note">
-      Thank you. Our office will contact you soon to confirm your first visit, using the days you gave us.
-    </div>
-  ) : null;
 
   if (nextStep === 'pay_invoice') {
     const title = reservationCommitted
@@ -4598,7 +4586,6 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, firstVisit,
           {title}
         </div>
         <FirstVisitLine committed={reservationCommitted} firstVisit={firstVisit} />
-        {pendingFirstVisitNote}
         <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
           {invoicePayUrl
             ? (isOneTimeInvoice
@@ -4734,9 +4721,8 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, firstVisit,
     <div data-glass="card" style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${W.green}` }}>
       <img src="/waves-logo.png" alt="Waves" style={{ height: 40, display: 'block', margin: '0 auto' }} />
       <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 12 }}>
-        {pendingFirstVisit ? "You're approved!" : "You're booked!"}
+        You're booked!
       </div>
-      {pendingFirstVisitNote}
       {appointmentLabel ? (
         // Date/time only — no "First visit:" prefix (owner ask 2026-07-12).
         <div style={{ fontSize: 17, fontWeight: 600, color: COLORS.navy, marginTop: 10 }}>
@@ -6355,11 +6341,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   const [selected, setSelected] = useState({});
   const [selectedAddOns, setSelectedAddOns] = useState({});
   const [selectedSlotId, setSelectedSlotId] = useState(null);
-  // GATE_ESTIMATE_APPROVE_PREFERRED_TIME: the days the customer gave instead of a time slot ({ days, window, note }), or
-  // null. Picking a time clears it. `preferredTimeApplyRef` counts saves so the seamless advance runs once per save.
-  const [preferredTime, setPreferredTime] = useState(null);
-  const preferredTimeApplyRef = useRef(0);
-  const preferredTimeAdvancedRef = useRef(0);
+  // GATE_ESTIMATE_APPROVE_PREFERRED_TIME: the first-visit request this tab just sent ({ days, window }); a reopened link gets
+  // the same pending state from /data (acceptance.preferredTime.requestPending).
+  const [sentFirstVisitRequest, setSentFirstVisitRequest] = useState(null);
   // Website flow: counts customer time picks. The payment choices mount under
   // the slot list, far below a phone screen, so a pick scrolls to them. A
   // selection restored at mount or after a review cancel never bumps it.
@@ -6757,11 +6741,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // commercial-manual list), so the accept CTA renders WITHOUT a slot pick —
   // the team schedules after approval.
   const manualScheduleAccept = acceptance.mode === 'commercial_site_confirmation';
-  // Preferred days instead of a time (server-offered only, standard recurring accepts): while saved, the page skips the
-  // slot, hides annual prepay and sends the days with the accept. A saved time pick, a one-time choice or an existing
-  // appointment each take over.
-  const preferredTimeOffered = acceptance.preferredTime?.offered === true && !restartQuote;
-  const preferredTimeActive = preferredTimeOffered && !!preferredTime && !selectedSlotId && !existingAppointment && serviceMode !== 'one_time';
+  const firstVisitRequestOffered = acceptance.preferredTime?.offered === true && !restartQuote;
+  const pendingFirstVisitRequest = sentFirstVisitRequest
+    || (acceptance.preferredTime?.requestPending ? { days: acceptance.preferredTime.days, window: acceptance.preferredTime.window } : null);
   const selectedFrequency = useMemo(() => selectedPricingFrequencyKey(data?.pricing, services, selected), [data?.pricing, services, selected]);
   // Per-service cadence (bundles): the precomputed combo matching every section's
   // independent selection, plus the non-pest selection map sent on accept.
@@ -8104,16 +8086,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       setError(null);
       return;
     }
-    if (preferredTimeActive) {
-      // Preferred days, no slot to reserve: same sentinel as a held commercial accept. Annual prepay needs a booked
-      // visit, so only pay per application goes on from here.
-      if (pref === 'prepay_annual') return;
-      setPaymentPreference(pref);
-      setReservation({ manualScheduling: true, preferredTime: true });
-      setCtaPhase('review');
-      setError(null);
-      return;
-    }
     if (!selectedSlotId) return;
     const attemptId = reserveAttemptRef.current + 1;
     reserveAttemptRef.current = attemptId;
@@ -8188,7 +8160,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       setError(err.message);
       setCtaPhase('configure');
     }
-  }, [readOnlyPreview, consumerNoticeBlocked, staleQuoteNote, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, preferredTimeActive, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, serviceCadences, token]);
+  }, [readOnlyPreview, consumerNoticeBlocked, staleQuoteNote, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, serviceCadences, token]);
 
   const handleFrequencyChange = useCallback((sectionKey, nextFrequency) => {
     // With per-service combos: combo-axis sections (pest + lawn/tree) are
@@ -8385,8 +8357,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         body: JSON.stringify({
           slotId: existingAppointment ? undefined : selectedSlotId,
           existingAppointmentId: existingAppointment?.id,
-          // GATE_ESTIMATE_APPROVE_PREFERRED_TIME: the days given instead of a slot; absent whenever a time is picked.
-          preferredTime: preferredTimeActive ? preferredTime : undefined,
           paymentMethodPreference: paymentPreference,
           // Attests which card-hold fee-policy copy THIS TAB RENDERED —
           // render-bound, never a constant: sent only under the same
@@ -8765,7 +8735,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     } finally {
       acceptInFlightRef.current = false;
     }
-  }, [readOnlyPreview, consumerNoticeBlocked, staleQuoteNote, data, existingAppointment, loadEstimate, token, selectedSlotId, preferredTimeActive, preferredTime, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, contactPhoneGap, contactFirstNameGap, contactFirstNameMissing, contactFirstName, contactLastNameGap, contactEmailGap, contactLastName, contactEmail, contactEmailInvalid]);
+  }, [readOnlyPreview, consumerNoticeBlocked, staleQuoteNote, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, contactPhoneGap, contactFirstNameGap, contactFirstNameMissing, contactFirstName, contactLastNameGap, contactEmailGap, contactLastName, contactEmail, contactEmailInvalid]);
 
   // Deposit-gated confirm (flat $49/$99, PR #1660). When the resolved policy
   // requires a deposit and none is collected yet, mint the intent and open
@@ -9353,17 +9323,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     handlePaymentChoice('pay_at_visit');
   }, [seamlessAutoPay, serviceMode, ctaPhase, selectedSlotId, readOnlyPreview, consumerNoticeBlocked, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, data, handlePaymentChoice]);
 
-  // Same single-screen step for preferred days (GATE_ESTIMATE_APPROVE_PREFERRED_TIME): saving the days IS the payment
-  // choice, pay per application, once per save. Back from review lands on configure without bouncing forward again.
-  useEffect(() => {
-    if (!seamlessAutoPay || !preferredTimeActive || ctaPhase !== 'configure') return;
-    if (readOnlyPreview || consumerNoticeBlocked || invoiceOnlyAccept || manualScheduleAccept) return;
-    if (data?.estimate?.billByInvoice || data?.estimate?.siteConfirmationHold) return;
-    if (preferredTimeAdvancedRef.current === preferredTimeApplyRef.current) return;
-    preferredTimeAdvancedRef.current = preferredTimeApplyRef.current;
-    handlePaymentChoice('pay_at_visit');
-  }, [seamlessAutoPay, preferredTimeActive, ctaPhase, readOnlyPreview, consumerNoticeBlocked, invoiceOnlyAccept, manualScheduleAccept, data, handlePaymentChoice]);
-
   const handleAddServiceRequest = useCallback(async () => {
     // Draft preview: don't file a real bundle inquiry (it notifies the team)
     // from a staff preview click — show what the customer would get instead.
@@ -9728,8 +9687,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // it can RESTORE prepay for a monthly12 axis on a seasonal-default
   // estimate, which the estimate-level flag alone cannot); a seasonal axis
   // without a stamped combo still disables prepay.
-  // Preferred days (no booked visit) cannot be prepaid: annual prepay needs the visit.
-  const annualPrepayEligibleEffective = !preferredTimeActive && (() => {
+  const annualPrepayEligibleEffective = (() => {
     if (selectedCombo && typeof selectedCombo.annualPrepayEligible === 'boolean') {
       return selectedCombo.annualPrepayEligible;
     }
@@ -10542,10 +10500,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           // validated existing appointment.
           appointmentLabel={existingAppointment
             ? formatAppointmentLabel(existingAppointment)
-            : (selectedSlotMeta?.date && !acceptResult?.preferredTimePending
+            : (selectedSlotMeta?.date
               ? `${new Date(`${selectedSlotMeta.date}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })}${selectedSlotMeta.time ? ` · ${selectedSlotMeta.time}` : ''}`
               : null)}
-          firstVisit={acceptResult?.preferredTimePending ? null : successFirstVisit(existingAppointment, selectedSlotMeta)}
+          firstVisit={successFirstVisit(existingAppointment, selectedSlotMeta)}
           recurring={serviceMode !== 'one_time'}
         />
     );
@@ -10557,8 +10515,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           {...headerContactProps}
           serviceLabel={getServiceLabel(currentFrequency, estimate, pricing, serviceMode)}
           // Just accepted — the booked hero, not the sales pitch.
-          headline={(acceptResult?.preferredTimePending ? TERMINAL_HERO.acceptedPending : TERMINAL_HERO.accepted).h1}
-          eyebrowOverride={(acceptResult?.preferredTimePending ? TERMINAL_HERO.acceptedPending : TERMINAL_HERO.accepted).eyebrow}
+          headline={TERMINAL_HERO.accepted.h1}
+          eyebrowOverride={TERMINAL_HERO.accepted.eyebrow}
         />
         {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} preview={readOnlyPreview} /> : null}
         {successCard}
@@ -10828,7 +10786,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             invoiceOnly={invoiceOnlyAccept}
             siteConfirmationHold={!!estimate.siteConfirmationHold}
             manualScheduling={!!reservation?.manualScheduling}
-            preferredTimeLine={reservation?.preferredTime ? preferredTimeSummary(preferredTime) : ''}
             serviceMode={serviceMode}
             prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
             prepayAfterVisit={prepayAfterVisit}
@@ -10931,10 +10888,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             confirmLabelOverride={inlineAutoPayActive && inlineCardIntent
               ? (paymentPreference === 'prepay_annual'
                 ? (prepayAfterVisit ? 'Confirm the 12-month plan' : 'Confirm & pay the 12-month plan')
-                : (reservation?.preferredTime
-                  ? (inlineCardState.methodType === 'us_bank_account' ? 'Approve my plan & save bank account' : 'Approve my plan & save card')
-                  : (inlineCardState.methodType === 'us_bank_account' ? 'Confirm booking & save bank account' : 'Confirm booking & save card')))
-              : (reservation?.preferredTime ? 'Approve my plan' : null)}
+                : (inlineCardState.methodType === 'us_bank_account' ? 'Confirm booking & save bank account' : 'Confirm booking & save card'))
+              : null}
             confirmDisabled={consumerNoticeBlocked
               || !!prepayChargeQuote
               // While the exact-total quote card is up, ITS button is the
@@ -10948,7 +10903,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               || (inlineAutoPayActive && inlineCardIntent
                 ? !(inlineCardState.ready && inlineCardState.agreed)
                 : false)}
-            submittingLabel={reservation?.preferredTime ? 'Approving your plan…' : (seamlessAutoPay && !invoiceOnlyAccept ? 'Booking your visit…' : null)}
+            submittingLabel={seamlessAutoPay && !invoiceOnlyAccept ? 'Booking your visit…' : null}
             prefSwitch={seamlessAutoPay && !existingAppointment && serviceMode !== 'one_time'
               && !estimate.billByInvoice && !estimate.siteConfirmationHold
               // Tier-aware: the stored setupFee flag reflects the default
@@ -11042,8 +10997,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                   onSelect={(slotId) => {
                     if (SLOT_SELECTION_LOCKED_PHASES.has(ctaPhaseRef.current)) return;
                     setSelectedSlotId(slotId);
-                    // A picked time takes over from preferred days.
-                    if (slotId) setPreferredTime(null);
                     if (websiteMode && slotId) setWebsitePickTick((t) => t + 1);
                   }}
                   onSelectMeta={(meta) => { if (!SLOT_SELECTION_LOCKED_PHASES.has(ctaPhaseRef.current)) setSelectedSlotMeta(meta); }}
@@ -11059,12 +11012,12 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                   // A refused plan quote from a slot read (codex pre-push P1): the same banner.
                   onRefusal={(status, body) => refuseStaleQuoteRef.current(status, body)}
                 />
-                {preferredTimeOffered && serviceMode !== 'one_time' && !selectedSlotId && !existingAppointment ? (
-                  <PreferredTimeApproval
-                    value={preferredTime}
+                {firstVisitRequestOffered && serviceMode !== 'one_time' && !selectedSlotId && !existingAppointment ? (
+                  <FirstVisitRequest
+                    token={token}
+                    pending={pendingFirstVisitRequest}
                     disabled={readOnlyPreview || ctaPhase === 'submitting'}
-                    onApply={(v) => { preferredTimeApplyRef.current += 1; setPreferredTime(v); }}
-                    onClear={() => setPreferredTime(null)}
+                    onSent={setSentFirstVisitRequest}
                   />
                 ) : null}
               </div>
@@ -11077,7 +11030,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     ? <SoftExitLink onOpen={() => setSoftExitOpen(true)} /> : null;
 
   const paymentContent = (
-    (existingAppointment || invoiceOnlyAccept || (canShowSlotPicker && selectedSlotId) || preferredTimeActive || (manualScheduleAccept && serviceMode !== 'one_time')) ? (
+    (existingAppointment || invoiceOnlyAccept || (canShowSlotPicker && selectedSlotId) || (manualScheduleAccept && serviceMode !== 'one_time')) ? (
             <div id={PAYMENT_SECTION_ID} style={{ scrollMarginTop: 76 }}>
               <ConsumerNoticeHint blocked={consumerNoticeBlocked} />
               <PaymentPreferenceButtons

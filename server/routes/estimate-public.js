@@ -186,7 +186,7 @@ const {
   renderedConsentVersionIsCurrent: paymentConsentVersionIsCurrent,
 } = require('../services/payment-method-consent-text');
 const { acceptanceRecordForEstimate } = require('../services/estimate-acceptance-record');
-const estimatePreferredTime = require('../services/estimate-preferred-time');
+const firstVisitRequestService = require('../services/estimate-first-visit-request');
 const { buildEstimateConsultationOffer } = require('../services/estimate-consultation-offer');
 const { getCachedLookup } = require('../services/property-lookup/lookup-cache');
 const estimateMapImage = require('../services/estimate-map-image');
@@ -11005,26 +11005,6 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     // plan and drop the sold add-on. Refused before any write (the staff books it by hand): the 409 below.
     assertAreaAddOnsAcceptedOneTime(estimate, treatAsOneTime);
 
-    // Preferred days instead of a time slot (GATE_ESTIMATE_APPROVE_PREFERRED_TIME, owner 2026-11-23). Only a standard
-    // recurring pay-per-visit accept with no slot and no existing appointment may carry one: annual prepay, one-time
-    // (card hold), invoice-mode and commercial accepts keep requiring their own steps, so those answer 400 and write
-    // nothing. Gate off: the field is ignored and the accept is exactly what it was. The converter then schedules
-    // nothing for it (skipAutoSchedule below) and the office books the first visit from the bell raised after commit.
-    let preferredTime = null;
-    if (req.body?.preferredTime != null && featureGates.estimateApprovePreferredTimeLive()) {
-      const parsedPreferredTime = estimatePreferredTime.normalizePreferredTime(req.body.preferredTime);
-      if (!parsedPreferredTime.ok) {
-        return res.status(400).json({ error: parsedPreferredTime.error, code: 'PREFERRED_TIME_INVALID' });
-      }
-      if (slotId || existingAppointmentId || treatAsOneTime || annualPrepaySelected || billByInvoice || isCommercialAccept) {
-        return res.status(400).json({
-          error: 'Please pick one of the available times to approve this service.',
-          code: 'PREFERRED_TIME_UNAVAILABLE',
-        });
-      }
-      preferredTime = parsedPreferredTime.value;
-    }
-
     // Acceptance terms scope (codex #5434 r1 P0): the record must carry the
     // Services line this tab rendered. Re-derived here from the SAME rule
     // /data served it with (acceptanceTermsScopeFor — the page's plan-terms
@@ -14080,7 +14060,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           // commercial estimate is held for on-site price confirmation and is
           // handled the same way (hold implies commercial, but fold it in
           // explicitly so the invariant can't depend on the detector shape).
-          skipAutoSchedule: isCommercialAccept || holdFirstInvoiceForSiteConfirmation || !!preferredTime,
+          skipAutoSchedule: isCommercialAccept || holdFirstInvoiceForSiteConfirmation,
           autoSendInvoice: false,
           skipMembershipEmail: true,
           deferFollowUpReminderRegistration: true,
@@ -14706,17 +14686,6 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           ...(setupFeeDeferredToFirstVisit ? { setupFeeDeferredToFirstVisit: true } : {}),
         };
         await trx('estimates').where({ id: estimate.id }).update(withServedDisclosurePreserved(trx, { estimate_data: JSON.stringify(stamped) }));
-      }
-
-      // The customer's preferred days (GATE_ESTIMATE_APPROVE_PREFERRED_TIME): kept with the acceptance, in the same
-      // transaction, for the office to book from. A jsonb key write, so the estimate's other stamps are untouched.
-      if (preferredTime) {
-        await trx('estimates').where({ id: estimate.id }).update({
-          estimate_data: trx.raw(
-            "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{acceptPreferredTime}', ?::jsonb)",
-            [JSON.stringify({ ...preferredTime, at: new Date().toISOString() })],
-          ),
-        });
       }
 
       // Durable prepay auto-charge job (pre-push Codex P0 r3): persisted
@@ -15503,8 +15472,6 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           || (Array.isArray(recurringSvcList) && (recurringSvcList[0]?.name || recurringSvcList[0]?.label))
           || 'service',
         appointment: firstAcceptedAppointment,
-        // GATE_ESTIMATE_APPROVE_PREFERRED_TIME: no visit is booked yet, so the email's visit line says the office will confirm one.
-        ...(preferredTime ? { firstVisitPending: true } : {}),
       };
       if (foldMembership) {
         // The combined signup email, then membership.started unless that send
@@ -15515,16 +15482,6 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       } else {
         void sendEstimateAcceptedOnboarding(onboardingArgs);
       }
-    }
-    // The office bell to book the first visit (GATE_ESTIMATE_APPROVE_PREFERRED_TIME): once per estimate, never throws.
-    if (preferredTime) {
-      await estimatePreferredTime.raisePreferredTimeAlert({
-        estimate,
-        customerId,
-        preferredTime,
-        serviceLabel: invoiceServiceLabel || (Array.isArray(recurringSvcList) && (recurringSvcList[0]?.name || recurringSvcList[0]?.label)) || null,
-        invoiceHeld: !!invoiceId && standardInvoiceMinted,
-      });
     }
     if (customerId) {
       try {
@@ -16553,9 +16510,7 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
     // an auto-charged (paid) prepay invoice has nothing to deliver — the
     // charge path already handles the receipt.
     if (invoiceId && !['paid', 'processing', 'ambiguous', 'deferred', 'after_first_visit'].includes(prepayAutoCharge?.status) && (billByInvoice || annualPrepaySelected
-      // GATE_ESTIMATE_APPROVE_PREFERRED_TIME: no visit is booked, so the setup/first-application pay link would name a
-      // service date that does not exist ("on today"). The invoice is kept, unsent, and the office bell says so.
-      || (standardInvoiceMinted && !preferredTime && (
+      || (standardInvoiceMinted && (
         !recurringCardLaneActive
         // Setup-only invoices never attached, so completion reuse can't
         // auto-charge them — they stay payable + delivered (r3).
@@ -16954,9 +16909,6 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         firstVisitBooked: acceptedFirstVisit.firstVisitBooked,
         billingVisitDate: acceptedFirstVisit.billingVisitDate,
       });
-      // GATE_ESTIMATE_APPROVE_PREFERRED_TIME: the dedicated "book the first visit" bell raised above is the one row of work
-      // for the visit, so this accept row stays a fact and never asks for the same visit twice.
-      if (preferredTime && notificationPayload.adminDoneWhen === 'visit_booked') notificationPayload.adminDoneWhen = null;
       // bell: true \u2014 accepted estimates must ring the admin bell even under
       // GATE_ADMIN_BELL_POLICY (category 'estimate' is otherwise silenced).
       // link carries ?estimateId= so the deep link lands on this estimate,
@@ -17053,7 +17005,6 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         : null,
       prepayCoveredByCredit: prepayAutoCharge?.coveredByCredit === true,
       setupFeeAfterFirstVisit: txResult.setupFeeDeferredToFirstVisit === true,
-      preferredTimePending: !!preferredTime && !reservationCommitted,
       }),
       // The agreement this customer was just issued (or, with none issued,
       // the one GATE_PAF_TERMITE would issue) charges after the station
@@ -19667,6 +19618,99 @@ router.post('/:token/commercial-agreement', commercialAgreementLimiter, async (r
   } catch (err) {
     // err.code only, never err.message (PG constraint errors can quote customer data).
     logger.warn(`[estimate-public] commercial-agreement failed (code=${err?.code || 'none'})`);
+    next(err);
+  }
+});
+
+// ── First-visit request (GATE_ESTIMATE_APPROVE_PREFERRED_TIME, owner 2026-11-23 "do all") ─────────────────────────────────
+// Under the time picker a customer whose offered times do not work sends preferred days instead. It is a REQUEST, never an
+// acceptance: the estimate keeps its status and nothing is converted, invoiced, scheduled or charged; the office books with
+// the existing accept-on-book. services/estimate-first-visit-request.js owns the storage, the expiry hold and the one bell.
+
+// The row-derived half of "this estimate may take a first-visit request", the one verdict /data, the route's unlocked read and
+// the route's locked re-check all apply: a published, open standard recurring plan, not one of the frozen or manual shapes.
+function firstVisitRequestRowOpen(row, estData) {
+  if (!row || !['sent', 'viewed'].includes(row.status)) return false;
+  return isEstimateCustomerViewable(row) && isEstimateAcceptActive(row)
+    && !frozenOfferRefusal(row)
+    && row.source !== 'plan_start'
+    && !isStructuralOneTimeOnlyEstimate(estData, row)
+    && !resolveEstimateInvoiceMode(row)
+    && !isCommercialAutoAcceptEstimate(row)
+    && !estimateTrenchingReviewRequired(estData);
+}
+
+// What /data tells the page: null (gate off or not eligible, so /data is byte-identical), { offered: true } or, once a
+// request is stored, { offered: true, requestPending: true, days, window } so a reopened link shows the pending state.
+// A linked visit or a quote-required estimate never reaches here: their acceptance modes ignore it.
+function firstVisitRequestState(estimate, estData) {
+  if (!featureGates.estimateApprovePreferredTimeLive() || !firstVisitRequestRowOpen(estimate, estData)) return null;
+  const stored = firstVisitRequestService.storedRequest(parseEstimateDataSafe(estimate));
+  return stored ? { offered: true, requestPending: true, days: stored.days, window: stored.window } : { offered: true };
+}
+
+const firstVisitRequestLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => !featureGates.estimateApprovePreferredTimeLive(),
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many requests. Please call our office and we’ll get you sorted.' },
+});
+
+// Mounted in server/index.js on /api/estimates BEFORE the global /api/ limiter, like commercialAgreementPreGuard: the privacy
+// headers and the dark gate's generic 404 land ahead of any limiter. POST only.
+const FIRST_VISIT_REQUEST_PATH_RE = /^\/[^/]+\/first-visit-request\/?$/i;
+function firstVisitRequestPreGuard(req, res, next) {
+  if (req.method !== 'POST' || !FIRST_VISIT_REQUEST_PATH_RE.test(req.path || '')) return next();
+  stampCommercialAgreementHeaders(res);
+  if (!featureGates.estimateApprovePreferredTimeLive()) return res.status(404).json({ error: 'Estimate not found' });
+  return next();
+}
+
+// POST /api/estimates/:token/first-visit-request — { days: ['mon'..'sat'], window: 'morning' | 'afternoon' | 'either', note? }.
+// Every ineligible token (dark gate, unknown, not viewable, accepted, declined, expired, archived, unpublished, frozen offer,
+// one-time-only, invoice-mode, commercial, trenching review, quote required, a linked visit, call-side block, staff preview)
+// answers the same generic 404. The body is validated only after that, so a probe cannot read gate state from a 400. The
+// checks are re-run on the estimate row locked in the writing transaction; a change landing in between answers 409
+// REQUEST_UNAVAILABLE and writes nothing. A second request answers 200 with the stored one and writes nothing.
+router.post('/:token/first-visit-request', firstVisitRequestLimiter, async (req, res, next) => {
+  stampCommercialAgreementHeaders(res);
+  const notFound = () => res.status(404).json({ error: 'Estimate not found' });
+  try {
+    if (!featureGates.estimateApprovePreferredTimeLive() || req.query.adminPreview === '1') return notFound();
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate) return notFound();
+    const estData = parseEstimateDataSafe(estimate);
+    if (await callSideBlockForEstimateData(db, estData, { estimateStatus: estimate.status })) return notFound();
+    if (!firstVisitRequestRowOpen(estimate, estData)) return notFound();
+    const supplemented = withSupplementedRecurringServices(estData) || estData;
+    const pricingBundle = await buildPricingBundle(supplemented === estData ? estimate : { ...estimate, estimate_data: supplemented });
+    if (resolveEstimateQuoteRequirement(pricingBundle).quoteRequired) return notFound();
+    if (await findLinkedUpcomingAppointment(estimate, estData, { serviceModes: adoptionServiceModesForContract(estimate, estData) })) return notFound();
+
+    const parsed = firstVisitRequestService.normalizeFirstVisitRequest(req.body);
+    if (!parsed.ok) return res.status(400).json({ error: parsed.error, code: 'PREFERRED_TIME_INVALID' });
+
+    const outcome = await db.transaction(async (trx) => {
+      const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
+      const lockedData = parseEstimateDataSafe(locked);
+      // The gate is read again after the lock: a kill switch thrown while this waited writes nothing.
+      if (!featureGates.estimateApprovePreferredTimeLive() || !firstVisitRequestRowOpen(locked, lockedData)) return { refused: true };
+      if (await estimateCallLinkageBlockedFor(trx, locked)) return { refused: true };
+      if (await findLinkedUpcomingAppointment(locked, lockedData, { serviceModes: adoptionServiceModesForContract(locked, lockedData), database: trx })) return { refused: true };
+      return firstVisitRequestService.storeFirstVisitRequest({ trx, locked, request: parsed.value });
+    });
+    if (outcome.refused) {
+      return res.status(409).json({ error: 'This estimate was just updated. Please reload the page.', code: 'REQUEST_UNAVAILABLE' });
+    }
+    return res.status(outcome.deduped ? 200 : 201).json({
+      success: true, requestPending: true, days: outcome.request.days, window: outcome.request.window,
+    });
+  } catch (err) {
+    // err.code only, never err.message (PG constraint errors can quote customer data).
+    logger.warn(`[estimate-public] first-visit-request failed (code=${err?.code || 'none'})`);
     next(err);
   }
 });
@@ -22841,9 +22885,6 @@ function buildAcceptSuccessPayload({
   // than invoiced at accept — the success card says it is billed with that
   // visit. Present in the payload only when true (gate-off byte-identical).
   setupFeeAfterFirstVisit = false,
-  // GATE_ESTIMATE_APPROVE_PREFERRED_TIME: approved with preferred days and no booked visit; the success card says the office
-  // will confirm the first visit. Present in the payload only when true (gate-off byte-identical).
-  preferredTimePending = false,
 } = {}) {
   let nextStep = 'confirmed';
   // A narrow low-confidence commercial estimate is approved online but its first
@@ -22909,7 +22950,6 @@ function buildAcceptSuccessPayload({
     prepayChargedTotal,
     prepayCoveredByCredit,
     ...(setupFeeAfterFirstVisit ? { setupFeeAfterFirstVisit: true } : {}),
-    ...(preferredTimePending ? { preferredTimePending: true } : {}),
   };
 }
 
@@ -23295,7 +23335,6 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       reservationCommitted,
       siteConfirmationHold,
       setupFeeAfterFirstVisit: rawEstData?.setupFeeDeferredToFirstVisit === true,
-      preferredTimePending: !!rawEstData?.acceptPreferredTime && !reservationCommitted,
       // An unresolved auto-charge job renders as a confirmed outcome with
       // no pay step — the sweep owns the resolution (hook P0 r13). A
       // 'pending' stamp means no attempt is in flight (initial state, or a
@@ -29152,26 +29191,12 @@ async function resolveEstimateAcceptance(estimate, estData, pricingBundle) {
     invoiceOnly: guaranteeOnlyAccept && invoiceOnlyBillable,
     invoiceOnlyContactRequired: guaranteeOnlyAccept && !invoiceOnlyBillable,
     commercialNoSlotAccept,
-    preferredTimeOffered: preferredTimeOfferedFor(estimate, estData),
+    preferredTime: firstVisitRequestState(estimate, estData),
   });
   return { defaultServiceMode, quoteRequirement, siteConfirmationHold, guaranteeOnlyAccept, acceptance };
 }
 
-// GATE_ESTIMATE_APPROVE_PREFERRED_TIME: whether the page may offer "approve now and tell us when suits you" under the time
-// picker. The same shapes the accept refuses a preferred time for stay out (one-time only, invoice-mode, commercial, a
-// plan-start or restart quote, a termite trenching review); a customer who toggles to one-time or annual prepay is
-// refused by the accept itself, and the page hides the option for them. Gate off: false, so /data is byte-identical.
-function preferredTimeOfferedFor(estimate, estData) {
-  if (!featureGates.estimateApprovePreferredTimeLive()) return false;
-  return !isStructuralOneTimeOnlyEstimate(estData, estimate)
-    && !resolveEstimateInvoiceMode(estimate)
-    && !isCommercialAutoAcceptEstimate(estimate)
-    && !estimateTrenchingReviewRequired(estData)
-    && estimate.source !== 'plan_start'
-    && estimate.source !== 'plan_restart';
-}
-
-function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppointment = null, invoiceOnly = false, invoiceOnlyContactRequired = false, commercialNoSlotAccept = false, preferredTimeOffered = false } = {}) {
+function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppointment = null, invoiceOnly = false, invoiceOnlyContactRequired = false, commercialNoSlotAccept = false, preferredTime = null } = {}) {
   if (quoteRequirement.quoteRequired) {
     return {
       mode: 'quote_required',
@@ -29226,7 +29251,8 @@ function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppoin
     mode: 'standard_slot_pick',
     ctaLabel: 'Pick appointment',
     reason: null,
-    ...(preferredTimeOffered ? { preferredTime: { offered: true } } : {}),
+    // GATE_ESTIMATE_APPROVE_PREFERRED_TIME: the first-visit request under the picker (absent with the gate off).
+    ...(preferredTime ? { preferredTime } : {}),
   };
 }
 
@@ -33419,6 +33445,8 @@ module.exports.mapImagePreGuard = mapImagePreGuard;
 module.exports.contactPhonePreGuard = contactPhonePreGuard;
 module.exports.commercialAgreementPreGuard = commercialAgreementPreGuard;
 module.exports.consumerNoticePreGuard = consumerNoticePreGuard;
+module.exports.firstVisitRequestPreGuard = firstVisitRequestPreGuard;
+module.exports.firstVisitRequestState = firstVisitRequestState;
 module.exports.commercialFirstVisitPreGuard = commercialFirstVisitPreGuard;
 module.exports.commercialAgreementBlockedFor = commercialAgreementBlockedFor;
 module.exports.sendEstimatePage = sendEstimatePage;
@@ -33482,7 +33510,6 @@ module.exports.resolveEstimateQuoteRequirement = resolveEstimateQuoteRequirement
 module.exports.estimateTrenchingReviewRequired = estimateTrenchingReviewRequired;
 module.exports.renderPage = renderPage;
 module.exports.isStructuralOneTimeOnlyEstimate = isStructuralOneTimeOnlyEstimate;
-module.exports.preferredTimeOfferedFor = preferredTimeOfferedFor;
 module.exports.isRodentGuaranteeOnlyEstimate = isRodentGuaranteeOnlyEstimate;
 module.exports.resolveEstimateInvoiceMode = resolveEstimateInvoiceMode;
 module.exports.reconcileFrozenMembershipSnapshot = reconcileFrozenMembershipSnapshot;
