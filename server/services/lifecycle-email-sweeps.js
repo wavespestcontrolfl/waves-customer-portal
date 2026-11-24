@@ -586,12 +586,20 @@ async function runDailySweeps() {
   const bond = await attempt('bond renewal', runBondRenewalSweep, { sent: 0 });
   const ownership = await attempt('acceptance ownership', runAcceptanceOwnershipSweep, { attached: 0, checked: 0 });
   const acceptanceCopies = await attempt('acceptance copies', runAcceptanceCopySweep, { sent: 0, checked: 0, escalated: 0 });
-  // All three have run. Throw so job_health records the failure (the cron's
+  // GATE_CARD_ON_FILE_REMINDER (off = no query): the "add a card" reminder, 3 days after a card was removed or expired.
+  const cardReminders = await attempt('card on file reminder', () => require('./card-on-file-reminder').runCardOnFileReminderSweep(), { sent: 0, shadow: 0 });
+  // All four have run. Throw so job_health records the failure (the cron's
   // runExclusive records one only when the body throws).
   if (failed.length > 0) {
-    throw new Error(`lifecycle-email-sweeps: ${failed.length} of 3 sweep(s) failed (${failed.join(', ')})`);
+    throw new Error(`lifecycle-email-sweeps: ${failed.length} of 4 sweep(s) failed (${failed.join(', ')})`);
   }
-  return { bondRenewalsSent: bond.sent, acceptanceOwnershipAttached: ownership.attached, acceptanceCopiesSent: acceptanceCopies.sent };
+  return {
+    bondRenewalsSent: bond.sent,
+    acceptanceOwnershipAttached: ownership.attached,
+    acceptanceCopiesSent: acceptanceCopies.sent,
+    cardRemindersSent: cardReminders.sent,
+    cardRemindersShadow: cardReminders.shadow,
+  };
 }
 
 module.exports = { runDailySweeps, runBondRenewalSweep, runAcceptanceCopySweep, runAcceptanceOwnershipSweep, syncTermiteBonds, _private: { termYearsFrom, termYearsForVisit, displayDate } };

@@ -42,6 +42,10 @@ jest.mock('../services/payment-method-consents', () => ({
   hasConsentFor: jest.fn(async () => false),
   hasEnrollmentScopedConsent: jest.fn(async () => false),
 }));
+jest.mock('../services/portal-save-only-card', () => ({
+  ...jest.requireActual('../services/portal-save-only-card'),
+  finishSaveOnlyAdd: jest.fn(async ({ method }) => ({ ...method })),
+}));
 jest.mock('../services/autopay-enrollment', () => ({
   enrollConsentedMethod: jest.fn(async () => ({ enrolled: true })),
 }));
@@ -57,6 +61,7 @@ const db = require('../models/db');
 const StripeService = require('../services/stripe');
 const PayerService = require('../services/payer');
 const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+const { finishSaveOnlyAdd } = require('../services/portal-save-only-card');
 const { isExpiredCardMethod } = require('../services/autopay-eligibility');
 const NotificationService = require('../services/notification-service');
 const router = require('../routes/billing-v2');
@@ -186,6 +191,44 @@ describe('POST /cards payer fence', () => {
       expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
         'billing', expect.stringMatching(/payer check failed/), expect.any(String), expect.any(Object),
       );
+    });
+  });
+});
+
+// The "add a card" reminder email links to a save-only add form: its SetupIntent carries enroll_autopay=false, and
+// adding a card there must never turn Auto Pay on (owner 2026-11-24, GATE_CARD_ON_FILE_REMINDER).
+describe('POST /cards save-only form', () => {
+  const ConsentService = require('../services/payment-method-consents');
+  const { CONSENT_VERSION } = require('../services/payment-method-consent-text');
+
+  test('a SetupIntent stamped enroll_autopay=false saves the card and records consent, but never enrolls Auto Pay', async () => {
+    StripeService.retrieveSetupIntent.mockResolvedValue({
+      status: 'succeeded',
+      payment_method: { id: 'pm_stripe_1', type: 'card' },
+      metadata: { consent_text_version: CONSENT_VERSION, enroll_autopay: 'false' },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await postCard(baseUrl);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toMatchObject({ success: true, enrolled: false, enrollReason: 'save_only' });
+      expect(body.card.id).toBe('pm-row-1');
+      // No consent row is written (a row is what every enrollment gate reads), so no later workflow can enroll this
+      // card and turning Auto Pay on asks for the Auto Pay checkbox. The audit record and the default role are
+      // settled by the helper, which the real-schema suite (portal-save-only-card-postgres) covers.
+      expect(finishSaveOnlyAdd).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', method: expect.objectContaining({ id: 'pm-row-1' }), via: 'portal_add_card' }));
+      expect(ConsentService.recordConsent).not.toHaveBeenCalled();
+      expect(enrollConsentedMethod).not.toHaveBeenCalled();
+      expect(PayerService.resolveForInvoice).not.toHaveBeenCalled();
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    });
+  });
+
+  test('without the stamp the same save still enrolls (the usual add form is unchanged)', async () => {
+    await withServer(async (baseUrl) => {
+      expect((await postCard(baseUrl)).status).toBe(200);
+      expect(enrollConsentedMethod).toHaveBeenCalledTimes(1);
+      expect(ConsentService.recordConsent).toHaveBeenCalledWith(expect.objectContaining({ source: 'portal_add_card' }));
     });
   });
 });

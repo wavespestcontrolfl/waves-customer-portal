@@ -70,6 +70,8 @@ const ORIGINAL_PLATFORM_GATE = process.env.GATE_IB_PLATFORM;
 beforeAll(() => {
   // reprice_future_visits is dark behind GATE_IB_REPRICE_VISITS; off, its preview refuses.
   process.env.GATE_IB_REPRICE_VISITS = 'true';
+  // book_plan_visits is dark behind GATE_IB_BOOK_PLAN_VISITS; off, its preview refuses.
+  process.env.GATE_IB_BOOK_PLAN_VISITS = 'true';
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   process.env.GATE_IB_PLATFORM = 'true';
   process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
@@ -94,6 +96,7 @@ beforeAll(() => {
   process.env.GATE_IB_GENERAL_EDIT = 'true';
 });
 afterAll(() => {
+  delete process.env.GATE_IB_BOOK_PLAN_VISITS;
   delete process.env.GATE_IB_GENERAL_EDIT;
   delete process.env.GATE_IB_INVOICE_ACTIONS;
   delete process.env.GATE_IB_RECORD_PAYMENT;
@@ -194,6 +197,8 @@ const WRITE_TWO_STEP = [
   'remove_saved_payment_method',
   'correct_invoice_address',
   'accept_estimate',
+  // book_plan_visits: the Schedule create's own handler behind a card; the unconfirmed call is a preview only.
+  'book_plan_visits',
   'send_estimate',
   'send_invoice',
   'record_payment',
@@ -743,6 +748,18 @@ const UNCONFIRMED_CALLS = [
       invoices: [],
       scheduled_service_addons: [],
     }],
+    // book_plan_visits' preview reads the customer, the catalog service, the customer's earlier series and
+    // property, then plans dates and prices through the Schedule create's own helpers (spied below). It may
+    // not write without confirmed (intelligence-bar-book-plan-visits.test.js covers the card itself).
+    ['book-plan-visits-tools', 'executeBookPlanVisitsTool', 'book_plan_visits', {
+      customer_id: '00000000-0000-0000-0000-00000000c701', service_type: 'Quarterly Pest Control Service',
+      scheduled_date: '2099-03-02', time_window: '9:00 AM',
+    }, {
+      customers: [{ id: '00000000-0000-0000-0000-00000000c701', first_name: 'Robin', last_name: 'Sample', active: true, billing_mode: 'per_visit', payer_id: null, address_line1: '1 Example Way', city: 'Bradenton', state: 'FL', zip: '34205' }],
+      services: [{ id: 'svc-quarterly-pest', name: 'Quarterly Pest Control Service', service_key: 'pest_quarterly', billing_type: 'recurring', frequency: 'quarterly', base_price: 89, is_active: true }],
+      scheduled_services: [{ id: 'old-parent', customer_id: '00000000-0000-0000-0000-00000000c701', is_recurring: true, recurring_parent_id: null, service_id: 'svc-quarterly-pest', service_type: 'Quarterly Pest Control Service', property_id: '00000000-0000-0000-0000-00000000c702', status: 'completed', scheduled_date: '2098-11-02', estimated_price: 89, primary_line_price: 89, create_invoice_on_complete: true }],
+      customer_properties: [{ id: '00000000-0000-0000-0000-00000000c702', customer_id: '00000000-0000-0000-0000-00000000c701', active: true, address_line1: '1 Example Way', city: 'Bradenton', state: 'FL', zip: '34205' }],
+    }],
     // resend_receipt's preview reads the paid invoice and the receipt resolvers
     // (spied below — their own paths are covered by intelligence-bar-receipt-resend.test.js).
     // create_customer_link's preview reads only the customer (the composer
@@ -1150,6 +1167,25 @@ const UNCONFIRMED_CALLS = [
         eligible: true, annualBase: 600, discountLabel: '10%', supersedes: [], setupFee: null,
         mintPayload: { amount: 540, visitCount: 4, coverageCadence: 'quarterly', serviceType: 'Quarterly Pest Control', termStart: '2099-02-03' },
       }) : null;
+    // book_plan_visits plans its dates, prices the visit and judges the plan sync through the Schedule create's own helpers,
+    // each covered by its own suite; this stand-in recorder answers a clean quarterly plan with no billing change.
+    const bookPlanSpies = toolName === 'book_plan_visits'
+      ? [
+        jest.spyOn(require('../routes/admin-schedule'), 'planCreateSeriesDates').mockImplementation(async (_conn, opts) => {
+          opts.plannedChildDates.push('2099-06-02', '2099-09-02', '2099-12-02');
+          return { plannedCount: 4, rOpts: {}, shiftDir: 'forward', skipWeekendsEffective: false, seriesBlackoutDates: null, shortfallWarning: null };
+        }),
+        jest.spyOn(require('../routes/admin-schedule'), 'buildAppointmentPricing')
+          .mockResolvedValue({ finalPrice: 89, primaryBase: 89, primaryDiscount: null, appointmentDiscount: null, addonLines: [] }),
+        jest.spyOn(require('../services/recurring-appointment-seeder'), 'findActiveRecurringSeries').mockResolvedValue([]),
+        jest.spyOn(require('../services/self-booking-plan-sync'), 'bookingWouldChangeCustomerPlan').mockResolvedValue({ writes: false, reason: 'no_change' }),
+        jest.spyOn(require('../services/service-library'), 'retiredServicesNotHeldBy').mockResolvedValue([]),
+        // The prepay-term refresh selection, the direct rodent setup resolver and the per-date overlap probe have their own suites.
+        jest.spyOn(require('../services/annual-prepay-renewals'), 'refreshableTermsForCustomer').mockResolvedValue([]),
+        jest.spyOn(require('../services/secure-appointment-plans'), 'directRodentSetupForRow').mockResolvedValue(0),
+        jest.spyOn(require('../services/inspection-credit'), 'projectRedeemableOfferAmount').mockResolvedValue(0),
+        jest.spyOn(require('../services/scheduling/window-rules'), 'probeSlotOverlap').mockResolvedValue([]),
+      ] : [];
     const repriceCoverage = toolName === 'reprice_future_visits'
       ? jest.spyOn(require('../routes/admin-schedule'), 'findBillingCoveredVisits').mockResolvedValue(new Map()) : null;
     // accept_estimate's card is the accept run as a dry run (rolled back in its
@@ -1240,6 +1276,7 @@ const UNCONFIRMED_CALLS = [
       createInvoiceSpies.forEach((spy) => spy.mockRestore());
       dedupeReaders.forEach((spy) => spy.mockRestore());
       repriceCoverage?.mockRestore();
+      bookPlanSpies.forEach((spy) => spy.mockRestore());
       prepaySwitchPreview?.mockRestore();
       acceptDryRun?.mockRestore();
       sendEstimatePreview?.mockRestore();

@@ -87,6 +87,14 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "book_plan_visits": {
+    "module": "book-plan-visits-tools.js",
+    "domain": "schedule",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "bulk_update_customers": {
     "module": "tools.js",
     "domain": "customers",

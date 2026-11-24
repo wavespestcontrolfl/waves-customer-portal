@@ -40,6 +40,13 @@ describe('api consent-version attestation', () => {
     ]);
   });
 
+  it('the save-only form (the "add a card" email link) mints with enrollAutopay:false and still attests; the usual form never sends the key', async () => {
+    await api.createSetupIntent('card', { enrollAutopay: false });
+    expect(calls).toEqual([
+      { url: '/billing/cards/setup-intent', method: 'POST', body: { paymentMethodType: 'card', enrollAutopay: false, consentTextVersion: CONSENT_VERSION } },
+    ]);
+  });
+
   it('a consent_accepted retry attests; a plain Auto Pay change or default swap does not', async () => {
     await api.updateAutopay({ autopay_enabled: false });
     await api.updateAutopay({ autopay_enabled: true, autopay_payment_method_id: 'pm-row', consent_accepted: true });
