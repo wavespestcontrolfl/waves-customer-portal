@@ -98,11 +98,12 @@ describe('buildBaseSlug', () => {
 
   test('the suffix list holds the owner\'s examples and the USPS abbreviations', () => {
     for (const word of ['TRL', 'TRAIL', 'ST', 'AVE', 'DR', 'CT', 'LN', 'RD', 'BLVD', 'CIR', 'WAY', 'PL', 'TER', 'LOOP',
-      'PKWY', 'CV', 'PT', 'RUN', 'PATH', 'XING', 'PASS', 'ROW', 'SQ', 'HWY']) {
+      'PKWY', 'CV', 'PT', 'RUN', 'PATH', 'XING', 'PASS', 'ROW', 'SQ', 'HWY', 'CURVE', 'CURV']) {
       expect(STREET_SUFFIXES.has(word)).toBe(true);
     }
+    // The shared USPS table (property-lookup/usps-street-suffixes.js) also lists TRLR (trailer) as a suffix.
     // A directional or a unit word is never a street type.
-    for (const word of ['N', 'S', 'E', 'W', 'NE', 'NW', 'SE', 'SW', 'UNIT', 'APT', 'TRLR']) expect(STREET_SUFFIXES.has(word)).toBe(false);
+    for (const word of ['N', 'S', 'E', 'W', 'NE', 'NW', 'SE', 'SW', 'UNIT', 'APT']) expect(STREET_SUFFIXES.has(word)).toBe(false);
   });
 });
 

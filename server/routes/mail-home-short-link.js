@@ -62,7 +62,8 @@ router.use((req, res, next) => {
 router.use(rateLimit({
   windowMs: 60 * 1000,
   max: 60,
-  standardHeaders: true,
+  // No RateLimit headers: gate off answers before the limiter, so their presence would tell the gate's state.
+  standardHeaders: false,
   legacyHeaders: false,
   keyGenerator: (req) => ipFallbackKey(req.ip),
   handler: (req, res) => {

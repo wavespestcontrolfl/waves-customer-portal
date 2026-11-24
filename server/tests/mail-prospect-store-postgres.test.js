@@ -325,9 +325,9 @@ postgres('mail prospect store on PostgreSQL', () => {
       await expect(conn('mail_prospects').where({ source_ref: '202699000002' }).update({ page_slug: '101-example' })).rejects.toMatchObject({ code: '23505' });
       await slugMigration.up(conn); // second run: no-op
       await conn('mail_prospects').update({ page_slug: null }); // a clean rollback: no slug assigned yet
-      await slugMigration.down(conn);
+      await conn.transaction((trx) => slugMigration.down(trx));
       expect(await conn.schema.hasColumn('mail_prospects', 'page_slug')).toBe(false);
-      await slugMigration.down(conn); // down twice: no-op
+      await conn.transaction((trx) => slugMigration.down(trx)); // down twice: no-op
       await slugMigration.up(conn);
       expect(await conn.schema.hasColumn('mail_prospects', 'page_slug')).toBe(true);
     });
@@ -431,7 +431,7 @@ postgres('mail prospect store on PostgreSQL', () => {
     test('the migration refuses to roll back once a slug is assigned (slugs are printed on postcards)', async () => {
       await saveProspect(home('202699000011', '5133090591', '77 EXAMPLE TRL', '34212'));
       const migration = require('../models/migrations/20261124040000_mail_prospects_page_slug');
-      await expect(migration.down(conn)).rejects.toThrow(/refusing to drop/);
+      await expect(conn.transaction((trx) => migration.down(trx))).rejects.toThrow(/refusing to drop/);
       expect(await slugOf('202699000011')).toBe('77-example');
     });
   });

@@ -19,48 +19,11 @@ const SLUG_RE = /^[0-9]+-[a-z0-9]+(-[a-z0-9]+)*$/;
 const MAX_SLUG_LENGTH = 60;
 const MAX_NUMBER_DIGITS = 7;
 
-// USPS Publication 28, appendix C1: the primary street suffix names and their standard abbreviations, plus the
-// common variants the county's data uses. A word is a suffix only when it is the LAST word of the street (see
-// buildBaseSlug), so a name such as "LAKE VIEW" keeps "LAKE".
-const STREET_SUFFIXES = new Set([
-  'ALY', 'ALLEY', 'ALLEE', 'ANX', 'ANNEX', 'ARC', 'ARCADE', 'AVE', 'AV', 'AVN', 'AVENUE', 'AVENU',
-  'BCH', 'BEACH', 'BG', 'BURG', 'BGS', 'BLF', 'BLUFF', 'BLFS', 'BLVD', 'BOULEVARD', 'BND', 'BEND', 'BR', 'BRANCH',
-  'BRG', 'BRIDGE', 'BRK', 'BROOK', 'BRKS', 'BTM', 'BOTTOM', 'BYP', 'BYPASS', 'BYU', 'BAYOU',
-  'CIR', 'CIRCLE', 'CIRC', 'CIRS', 'CLB', 'CLUB', 'CLF', 'CLIFF', 'CLFS', 'CMN', 'COMMON', 'CMNS', 'COR', 'CORNER',
-  'CORS', 'CP', 'CAMP', 'CPE', 'CAPE', 'CRES', 'CRESCENT', 'CRK', 'CREEK', 'CRSE', 'COURSE', 'CRST', 'CREST',
-  'CSWY', 'CAUSEWAY', 'CT', 'COURT', 'CTS', 'COURTS', 'CTR', 'CENTER', 'CTRS', 'CV', 'COVE', 'CVS', 'CYN', 'CANYON',
-  'DL', 'DALE', 'DM', 'DAM', 'DR', 'DRIVE', 'DRV', 'DRS', 'DRIVES', 'DV', 'DIVIDE',
-  'EST', 'ESTATE', 'ESTS', 'ESTATES', 'EXPY', 'EXPRESSWAY', 'EXP', 'EXPR', 'EXT', 'EXTENSION', 'EXTS',
-  'FALL', 'FLS', 'FALLS', 'FRY', 'FERRY', 'FLD', 'FIELD', 'FLDS', 'FIELDS', 'FLT', 'FLAT', 'FLTS', 'FRD', 'FORD',
-  'FRG', 'FORGE', 'FRK', 'FORK', 'FRKS', 'FORKS', 'FRST', 'FOREST', 'FT', 'FORT', 'FWY', 'FREEWAY',
-  'GDN', 'GARDEN', 'GDNS', 'GARDENS', 'GLN', 'GLEN', 'GLNS', 'GRN', 'GREEN', 'GRNS', 'GRV', 'GROVE', 'GRVS',
-  'GTWY', 'GATEWAY',
-  'HBR', 'HARBOR', 'HBRS', 'HVN', 'HAVEN', 'HL', 'HILL', 'HLS', 'HILLS', 'HOLW', 'HOLLOW', 'HWY', 'HIGHWAY', 'HTS',
-  'HEIGHTS',
-  'INLT', 'INLET', 'IS', 'ISLAND', 'ISS', 'ISLANDS', 'ISLE', 'JCT', 'JUNCTION',
-  'KY', 'KEY', 'KYS', 'KEYS', 'KNL', 'KNOLL', 'KNLS', 'KNOLLS',
-  'LK', 'LAKE', 'LKS', 'LAKES', 'LN', 'LANE', 'LNDG', 'LANDING', 'LGT', 'LIGHT', 'LGTS', 'LF', 'LOAF', 'LCK', 'LOCK',
-  'LCKS', 'LDG', 'LODGE', 'LOOP',
-  'MALL', 'MNR', 'MANOR', 'MNRS', 'MDW', 'MEADOW', 'MDWS', 'MEADOWS', 'ML', 'MILL', 'MLS', 'MILLS', 'MSN', 'MISSION',
-  'MT', 'MOUNT', 'MTN', 'MOUNTAIN', 'MTNS', 'MOUNTAINS', 'MTWY', 'MOTORWAY',
-  'NCK', 'NECK',
-  'OPAS', 'ORCH', 'ORCHARD', 'OVAL',
-  'PARK', 'PRK', 'PKWY', 'PARKWAY', 'PKY', 'PKWYS', 'PARKWAYS', 'PASS', 'PSGE', 'PASSAGE', 'PATH', 'PIKE', 'PNE',
-  'PINE', 'PNES', 'PINES', 'PL', 'PLACE', 'PLN', 'PLAIN', 'PLNS', 'PLAINS', 'PLZ', 'PLAZA', 'PT', 'POINT', 'PTS',
-  'POINTS', 'PRT', 'PORT', 'PRTS', 'PR', 'PRAIRIE',
-  'RADL', 'RADIAL', 'RAMP', 'RNCH', 'RANCH', 'RPD', 'RAPID', 'RPDS', 'RAPIDS', 'RST', 'REST', 'RDG', 'RIDGE', 'RDGS',
-  'RIDGES', 'RIV', 'RIVER', 'RD', 'ROAD', 'RDS', 'ROADS', 'RTE', 'ROUTE', 'ROW', 'RUE', 'RUN',
-  'SHL', 'SHOAL', 'SHLS', 'SHOALS', 'SHR', 'SHORE', 'SHRS', 'SHORES', 'SKWY', 'SKYWAY', 'SPG', 'SPRING', 'SPGS',
-  'SPRINGS', 'SPUR', 'SQ', 'SQUARE', 'SQS', 'SQUARES', 'STA', 'STATION', 'STRA', 'STRAVENUE', 'STRM', 'STREAM', 'ST',
-  'STREET', 'STR', 'STS', 'STREETS', 'SMT', 'SUMMIT',
-  'TER', 'TERRACE', 'TERR', 'TRWY', 'THROUGHWAY', 'TRCE', 'TRACE', 'TRAK', 'TRACK', 'TRFY', 'TRAFFICWAY', 'TRL',
-  'TRAIL', 'TRLS', 'TRAILS', 'TUNL', 'TUNNEL', 'TPKE', 'TURNPIKE',
-  'UN', 'UNION', 'UNS', 'UNIONS', 'UPAS',
-  'VLY', 'VALLEY', 'VLYS', 'VALLEYS', 'VIA', 'VIADUCT', 'VW', 'VIEW', 'VWS', 'VIEWS', 'VLG', 'VILLAGE', 'VLGS',
-  'VILLAGES', 'VL', 'VILLE', 'VIS', 'VISTA',
-  'WALK', 'WALKS', 'WALL', 'WAY', 'WAYS', 'WL', 'WELL', 'WLS', 'WELLS', 'XING', 'CROSSING', 'XRD', 'CROSSROAD',
-  'XRDS', 'CROSSROADS',
-]);
+// USPS Publication 28, appendix C1, from the shared table (property-lookup/usps-street-suffixes.js): every suffix name,
+// variant and standard abbreviation. A word is a suffix only when it is the LAST word of the street (see buildBaseSlug),
+// so a name such as "LAKE VIEW" keeps "LAKE".
+const { USPS_STREET_SUFFIXES } = require('../property-lookup/usps-street-suffixes');
+const STREET_SUFFIXES = new Set([...Object.keys(USPS_STREET_SUFFIXES), ...Object.values(USPS_STREET_SUFFIXES)]);
 
 // A directional that follows the street type ("123 MAIN ST NW"). The suffix before it is dropped, the directional stays.
 const DIRECTIONALS = new Set(['N', 'S', 'E', 'W', 'NE', 'NW', 'SE', 'SW']);
