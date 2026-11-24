@@ -564,4 +564,100 @@ postgres('combined capacity conversion on the migrated application schema', () =
     expect(await mockPg('scheduled_services').where({ source_estimate_id: f.estimateId })).toHaveLength(0);
     expect(await mockPg('customers').where({ id: f.customerId })).toHaveLength(0);
   });
+
+  // GATE_TECH_SHIFT_HOURS (D4). Hour mode, as production runs: the accept judged the reserved visit's own block
+  // (slot-reservation.js). The second program copies that visit's hour and technician and runs for its own length.
+  describe('hour mode: a second program on the reserved visit\'s trip and its technician\'s shift', () => {
+    const eligibility = require('../services/technician-eligibility');
+    const GATES = ['GATE_SCHEDULING_CAPACITY', 'GATE_TECH_SHIFT_HOURS'];
+    // Converts pest (the reserved visit, 09:00 to 10:00) with termite bait (90 minutes, so 09:00 to 10:30), in a
+    // transaction that is rolled back. Bait: the converter takes its length from the catalog (pest, lawn and
+    // tree & shrub are booked flat at 60). 90 and not 60: a row with no stored length is judged as one hour.
+    const convert = async ({ gate, shift }) => {
+      const trx = await mockPg.transaction();
+      const saved = GATES.map((name) => process.env[name]);
+      delete process.env.GATE_SCHEDULING_CAPACITY;
+      if (gate) process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      else delete process.env.GATE_TECH_SHIFT_HOURS;
+      try {
+        const selected = [lines[0], termiteLine];
+        for (const line of selected) {
+          if (!await trx('services').where({ service_key: line.catalog }).first('id')) {
+            await trx('services').insert({ id: randomUUID(), service_key: line.catalog, name: line.name,
+              category: line.service, billing_type: 'recurring', is_active: true, default_duration_minutes: 60 });
+          }
+        }
+        await trx('services').where({ service_key: termiteLine.catalog }).update({ default_duration_minutes: 90,
+          scheduling_duration_policy: { version: 1, default_duration_minutes: 90, min_duration_minutes: 30, max_duration_minutes: 120 } });
+        const f = await fixture(trx, selected);
+        // An hour-mode hold: one hour for the reserved program, no combined allocation.
+        await trx('scheduled_services').where({ id: f.anchor.id }).update({ customer_id: f.customerId, reservation_expires_at: null,
+          reservation_policy_version: null, reservation_service_mix: null, estimated_duration_minutes: 60, window_end: '10:00' });
+        await trx('technicians').where({ id: f.anchor.technician_id }).update({ shift_start: shift[0], shift_end: shift[1] });
+        await converter.convertEstimate(f.estimateId, { ...options, database: trx });
+        const parents = await trx('scheduled_services').where({ source_estimate_id: f.estimateId }).whereNull('recurring_parent_id');
+        const second = parents.find((row) => row.id !== f.anchor.id);
+        return {
+          technicianId: f.anchor.technician_id,
+          count: parents.length,
+          reserved: parents.find((row) => row.id === f.anchor.id),
+          second,
+          later: await trx('scheduled_services').where({ recurring_parent_id: second.id }),
+        };
+      } finally {
+        await trx.rollback();
+        GATES.forEach((name, index) => {
+          if (saved[index] === undefined) delete process.env[name];
+          else process.env[name] = saved[index];
+        });
+      }
+    };
+
+    test('a shift that holds its block: it keeps the reserved visit\'s hour and technician, as with the gate off', async () => {
+      for (const gate of [true, false]) {
+        const { technicianId, count, reserved, second, later } = await convert({ gate, shift: ['08:00', '18:00'] });
+        expect(count).toBe(2);
+        expect(reserved).toMatchObject({ technician_id: technicianId, window_start: '09:00:00' });
+        expect(second).toMatchObject({ technician_id: technicianId, window_start: '09:00:00', window_end: '10:30:00', estimated_duration_minutes: 90 });
+        expect(later.length).toBeGreaterThan(0);
+        expect(later.every((row) => row.technician_id === technicianId)).toBe(true);
+      }
+    });
+
+    test('a shift that ends before its block ends: it is inserted unassigned at the same hour, and so are its later visits; the reserved visit is not judged here', async () => {
+      // Shift 08:00 to 10:15. The reserved visit runs 09:00 to 10:00 and fits; the program runs 09:00 to 10:30.
+      const { technicianId, count, reserved, second, later } = await convert({ gate: true, shift: ['08:00', '10:15'] });
+      expect(count).toBe(2);
+      expect(reserved).toMatchObject({ technician_id: technicianId, window_start: '09:00:00', window_end: '10:00:00' });
+      expect(second).toMatchObject({ technician_id: null, window_start: '09:00:00', window_end: '10:30:00', estimated_duration_minutes: 90 });
+      expect(later.length).toBeGreaterThan(0);
+      expect(later.every((row) => row.technician_id === null)).toBe(true);
+    });
+
+    test('gate off: the same shift is not read and the program keeps the technician', async () => {
+      const read = jest.spyOn(eligibility, 'shiftExcluding');
+      try {
+        const { technicianId, second } = await convert({ gate: false, shift: ['08:00', '10:15'] });
+        expect(second).toMatchObject({ technician_id: technicianId, window_start: '09:00:00' });
+        expect(read).not.toHaveBeenCalled();
+      } finally {
+        read.mockRestore();
+      }
+    });
+
+    test('hours that cannot be read never assign, and the failed read does not lose the program', async () => {
+      // A real failed statement on the read's own savepoint: without the savepoint it aborts the accept's transaction.
+      const read = jest.spyOn(eligibility, 'shiftExcluding').mockImplementation((conn) => conn.raw('select 1 from no_such_relation_for_this_test'));
+      try {
+        const { technicianId, count, reserved, second, later } = await convert({ gate: true, shift: ['08:00', '18:00'] });
+        expect(read).toHaveBeenCalledTimes(1);
+        expect(count).toBe(2);
+        expect(reserved).toMatchObject({ technician_id: technicianId });
+        expect(second).toMatchObject({ technician_id: null, window_start: '09:00:00', estimated_duration_minutes: 90 });
+        expect(later.length).toBeGreaterThan(0);
+      } finally {
+        read.mockRestore();
+      }
+    });
+  });
 });
