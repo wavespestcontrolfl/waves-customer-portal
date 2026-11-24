@@ -314,17 +314,22 @@ async function bookInSavepoint(sp, outerTrx, primary, cols) {
   // Inherit the primary's tech; one no longer assignable on the child's
   // day lands the child unassigned (same posture as the closeout CTA).
   let technicianId = primary.technician_id || null;
+  const insertData = buildChildInsert(primary, catalogRow, columns, { date, technicianId, now: new Date() });
   if (technicianId) {
     try {
       const { assertAssignableTechnician } = require('./technician-eligibility');
-      await assertAssignableTechnician(technicianId, { conn: sp, date, workDays: true });
+      const { rowBlockMinutes } = require('./scheduling/window-rules');
+      // `hours` (GATE_TECH_SHIFT_HOURS): the block visit 2 will carry (visit 1's window; with no
+      // stored end, visit 1's length or else the catalog's). A shift on the child's day that
+      // does not hold it lands the child unassigned, as a day off does.
+      await assertAssignableTechnician(technicianId, { conn: sp, date, workDays: true, hours: rowBlockMinutes(insertData) });
     } catch (eligErr) {
       if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
       logger.warn(`[package-followup] technician ${technicianId} not assignable on ${date}; booking visit 2 unassigned`);
       technicianId = null;
+      insertData.technician_id = null;
     }
   }
-  const insertData = buildChildInsert(primary, catalogRow, columns, { date, technicianId, now: new Date() });
   // Bounded try-only fence on the child's own tech-day, in its own savepoint.
   let fenceMissed = false;
   try {

@@ -3,6 +3,7 @@ import '@testing-library/jest-dom/vitest';
 import { act, renderHook, cleanup } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { useIntelligenceBar } from './useIntelligenceBar';
+import { reloadHoldNames } from '../lib/reloadHolds';
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 it('Clear prevents a late response or cleanup from replacing the next request', async () => {
@@ -90,4 +91,17 @@ it('a server failure keeps the request key so the retry replays the saved task; 
   expect(bodies[2].request_key).toBe(bodies[0].request_key);
   await act(async () => result.current.submit('Same request'));
   expect(bodies[3].request_key).not.toBe(bodies[0].request_key);
+});
+
+it('an unsent question holds the reload of an out-of-date tab until it is cleared or the bar unmounts', () => {
+  vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: async () => ({ actions: [], tasks: [] }) })));
+  const { result, unmount } = renderHook(() => useIntelligenceBar({ context: 'dispatch' }));
+  expect(reloadHoldNames()).not.toContain('ask-draft');
+  act(() => result.current.setPrompt('Who is next?'));
+  expect(reloadHoldNames()).toContain('ask-draft');
+  act(() => result.current.setPrompt(''));
+  expect(reloadHoldNames()).not.toContain('ask-draft');
+  act(() => result.current.setPrompt('Who is next?'));
+  unmount();
+  expect(reloadHoldNames()).not.toContain('ask-draft');
 });

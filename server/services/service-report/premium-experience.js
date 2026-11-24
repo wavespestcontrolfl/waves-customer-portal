@@ -1,3 +1,4 @@
+const { provenFindingRows } = require('./finding-provenance');
 const crypto = require('crypto');
 const db = require('../../models/db');
 const { validateCustomerCopy } = require('./customer-copy-forbidden');
@@ -207,7 +208,9 @@ async function loadPremiumRows(record, knex = db) {
   ]);
 
   return {
-    findings: findings.map(normalizeFinding),
+    // Only the rows a customer may see (finding-provenance.js): a bare title
+    // can be a line of the raw technician note.
+    findings: provenFindingRows(findings, record.structured_notes).map(normalizeFinding),
     applications: products.map((product) => normalizeApplication(product, record)),
     zones: zones.map((zone) => ({
       id: String(zone.id),

@@ -1,6 +1,6 @@
 /**
- * The reclaimed-water meter cron (GATE_LAWN_RECLAIMED_HALF_N): registered once, daily 3:47am ET through the shared scheduler (a locked
- * runExclusive job, so a double fire runs the body once), does nothing while the gate is off, and reports a failed run or a missed tick
+ * The reclaimed-water meter cron: registered once, daily 3:47am ET through the shared scheduler (a locked
+ * runExclusive job, so a double fire runs the body once), and reports a failed run or a missed tick
  * to job_health like its neighbours. Same mocking shape as scheduler-neighborhood-access-health.test.js.
  */
 jest.mock('../utils/scheduled-cron', () => ({ schedule: jest.fn(), scheduleTimeout: jest.fn(), scheduleInterval: jest.fn() }));
@@ -12,10 +12,8 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/twilio', () => ({}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-const mockGate = { on: true };
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn((name) => name === 'cronJobs'), gateEnvValue: jest.fn(() => false), logGateStatus: jest.fn(),
-  lawnReclaimedHalfNLive: jest.fn(() => mockGate.on),
 }));
 const mockJobOutcomes = {};
 const mockLock = { skip: null };
@@ -52,7 +50,6 @@ beforeEach(() => {
   jest.clearAllMocks();
   for (const k of Object.keys(mockJobOutcomes)) delete mockJobOutcomes[k];
   mockLock.skip = null;
-  mockGate.on = true;
   runDailyTick.mockResolvedValue({ refreshed: 40347, checked: 12, reclaimed: 3 });
 });
 
@@ -67,13 +64,6 @@ test('a clean tick records success under its own lock name', async () => {
   expect(runExclusive).toHaveBeenCalledWith('reclaimed-water-meters', expect.any(Function));
   expect(runDailyTick).toHaveBeenCalledTimes(1);
   expect(mockJobOutcomes['reclaimed-water-meters']).toBe('success');
-});
-
-test('the gate off: the tick takes no lock and runs nothing', async () => {
-  mockGate.on = false;
-  await registration()[1]();
-  expect(runExclusive).not.toHaveBeenCalled();
-  expect(runDailyTick).not.toHaveBeenCalled();
 });
 
 test('a failed run (nothing usable stored, county refused) records a failed run', async () => {

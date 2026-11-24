@@ -160,9 +160,9 @@ describe('billing reminder channel selects', () => {
 
     render(<BillingTab customer={customer} />);
 
-    expect(await screen.findByRole('button', { name: 'Turn on' })).toBeInTheDocument();
-    const row = document.querySelector('[data-payment-confirm-row]');
-    expect(row.lastElementChild.style.flex).toContain('1 0 100%');
-    expect(row.firstElementChild.style.flex).toContain('1 1 160px');
+    const turnOn = await screen.findByRole('button', { name: 'Turn on' });
+    // The opt-out note and its button take their own full-width line under the select.
+    expect(turnOn.parentElement).toHaveTextContent('Text receipts are off.');
+    expect(turnOn.parentElement.style.flex).toContain('1 0 100%');
   });
 });

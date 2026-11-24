@@ -77,7 +77,10 @@ export default function CancelledPlanPanel({ customer, compact, styles, navigate
       // 409 = the server could not build a restart estimate for this account
       // (nothing to restart, or the property cannot be priced online) — the
       // office finishes it by hand. 404 = the lane is dark.
-      if (err?.status === 409 || err?.status === 404) {
+      // 409 busy = every mint slot was taken for a moment (restart.js
+      // mintTransaction). Nothing is wrong with the account and nothing was
+      // made, so the button stays and the next tap works (#8256 pre-push r5).
+      if ((err?.status === 409 && err?.code !== 'busy') || err?.status === 404) {
         setMessage(err?.status === 409 && err?.message ? err.message : 'Online restart is not available for this account yet.');
         setState('unavailable');
         return;

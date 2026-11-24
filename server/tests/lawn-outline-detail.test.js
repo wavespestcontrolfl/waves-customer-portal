@@ -6,7 +6,7 @@
 // Pins: the gate needs GATE_LAWN_V13 and is strict; off = the v13 outline exactly; on = the layout's content
 // stamp, the month list (the report's own month text, one thing to do at home, the build month and the next two open)
 // for a plan drawn by month, the product list from the v13 track with the catalog's active ingredient and never a
-// rate, the watering-order tile only for Manatee and Sarasota and only until the order ends, and every word passing
+// rate, the watering-order tile only for Manatee and Sarasota (including North Port) and only until the order ends, and every word passing
 // the customer-copy checks for every grass and month.
 
 const outline = require('../services/lawn-service-outline');
@@ -36,6 +36,7 @@ async function withGates(values, fn) {
 
 const RULES = {
   sarasota_county_fl: 'Sarasota County, FL',
+  north_port_fl: 'City of North Port, FL',
   manatee_county_fl: 'Manatee County, FL',
   charlotte_county_fl: 'Charlotte County, FL',
 };
@@ -86,6 +87,7 @@ function makeDb({ jurisdictionId = 'sarasota_county_fl', catalog = CATALOG, cata
 
 const ADDRESSES = {
   sarasota_county_fl: '100 Test Way, Sarasota, FL 34240',
+  north_port_fl: '100 Test Way, North Port, FL 34286',
   manatee_county_fl: '100 Test Way, Bradenton, FL 34202',
   charlotte_county_fl: '100 Test Way, Port Charlotte, FL 33948',
 };
@@ -129,15 +131,15 @@ describe('the gate', () => {
       'lawn_program', 'season_focus', 'program_year', 'treatment_categories', 'typical_visit',
       'local_rules', 'safety', 'after_visit', 'not_included',
     ]);
-    expect(unset.meta.contentLibraryVersion).toBe('lawn-v13-copy-2');
+    expect(unset.meta.contentLibraryVersion).toBe('lawn-v13-copy-4');
   });
 
   test('on: the layout\'s own content version, so outlines built before it show as updated', async () => {
     await withGates(DETAIL, async () => {
-      expect(outline.contentLibraryVersion()).toBe('lawn-v13-visual-2');
-      expect((await build()).meta.contentLibraryVersion).toBe('lawn-v13-visual-2');
+      expect(outline.contentLibraryVersion()).toBe('lawn-v13-visual-4');
+      expect((await build()).meta.contentLibraryVersion).toBe('lawn-v13-visual-4');
     });
-    await withGates(V13, async () => expect(outline.contentLibraryVersion()).toBe('lawn-v13-copy-2'));
+    await withGates(V13, async () => expect(outline.contentLibraryVersion()).toBe('lawn-v13-copy-4'));
   });
 });
 
@@ -209,7 +211,7 @@ describe('Products We May Use (decision D1-B)', () => {
 });
 
 describe('the watering order tile (decision D2-A)', () => {
-  test.each(['sarasota_county_fl', 'manatee_county_fl'])('%s: shown second, carrying the day it ends', async (jurisdictionId) => {
+  test.each(['sarasota_county_fl', 'north_port_fl', 'manatee_county_fl'])('%s: shown second, carrying the day it ends', async (jurisdictionId) => {
     await withGates(DETAIL, async () => {
       const watering = section(await build({ jurisdictionId }), 'your_watering');
       expect(watering.visual.items[1]).toEqual(expect.objectContaining({ title: 'Your watering day', until: '2027-03-31' }));

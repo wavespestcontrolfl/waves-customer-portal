@@ -84,6 +84,17 @@ describe('POST /api/admin/push/native-subscribe', () => {
     expect(upsert.merge).toHaveBeenCalledWith({ ...row, updated_at: 'NOW()' });
   });
 
+  test('stores when the registering sign-in ends, so a push names a visit only while it stands', async () => {
+    const { upsert } = installTransaction(TECH);
+    const res = response();
+    const req = request({ token: TOKEN, environment: 'production', reg: 'reg-0002' });
+    req.staffToken.exp = 1800000000;
+    await nativeSubscribe(req, res, jest.fn());
+    expect(JSON.parse(upsert.insert.mock.calls[0][0].subscription_data)).toEqual({
+      token: TOKEN, topic: 'com.wavespestcontrol.wavespay', environment: 'production', reg: 'reg-0002', session_exp: 1800000000,
+    });
+  });
+
   test('a session whose staff version rotated registers nothing', async () => {
     const { upsert } = installTransaction(TECH);
     const res = response();

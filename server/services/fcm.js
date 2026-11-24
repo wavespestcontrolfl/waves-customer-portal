@@ -97,6 +97,10 @@ function buildFcmMessage(deviceToken, notification = {}) {
   }
   const android = { priority: 'high', notification: { sound: 'default' } };
   if (notification.ephemeral) android.ttl = '0s';
+  else if (Number.isFinite(Date.parse(notification.expiresAt || ''))) {
+    // The notification's own expiry (push-notifications.js webPushTtl): FCM keeps it for an offline phone only that long.
+    android.ttl = `${Math.max(0, Math.floor((Date.parse(notification.expiresAt) - Date.now()) / 1000))}s`;
+  }
   // Same-tag redelivery REPLACES the banner on Android (mirrors the web-push
   // `tag` contract and apns-collapse-id): a stale-lease retry after a crash
   // never stacks a second phone notification.

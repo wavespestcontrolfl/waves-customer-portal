@@ -152,6 +152,9 @@ beforeEach(() => {
 function wireTrx(queues) {
   const trx = jest.fn((table) => {
     const q = queues[table];
+    // The last scheduled_services call of a moved row is the office's "customer asked for this time" write (day-only
+    // promise, recordOfficeMoveIntent): a plain chain answers it, so each test keeps its own queue of reads and the CAS.
+    if ((!q || q.length === 0) && table === 'scheduled_services') return chain();
     if (!q || q.length === 0) throw new Error(`Unexpected trx('${table}') call`);
     return q.shift();
   });

@@ -40,6 +40,9 @@ const { addMonthsSameDay } = require('../utils/date-only');
 // to an ingredient or a formulation. An application with any other number, or none, gets NOTE_TEXT: the app never
 // states a wait it does not hold.
 //   - 10404-87 (LESCO Dimension 0.21% Plus Fertilizer): "delayed until 12 weeks from the time of application".
+//   - 10404-114 (LESCO Stonewall 0.37% 18-0-10, the October step since 2026-11-21) is NOT held on purpose: its label (read
+//     2026-11-21) has an overseeding table (4 months in the South at 4.0 lb per 1,000 sq ft) and says nothing about laying sod,
+//     so it gets NOTE_TEXT below, like any registration this table does not hold.
 //   - 62719-542 (Dimension 2EW): "within 3 months after a single application of this product, or within 4 months
 //     after a sequential application program totaling more than 2 pints per acre". This lookup does not know the
 //     program, so the warning states both waits and stays for the longer one.
@@ -52,6 +55,10 @@ const LABEL_WAITS = Object.freeze({
     over: (date, referenceDay) => referenceDay >= addMonthsSameDay(date, 4),
   }),
 });
+// Pre-emergent registrations whose label wait LABEL_WAITS does not hold (see 10404-114 above). A row with one of these
+// numbers is a pre-emergent even when its snapshot froze no ingredient and its name spells none ("LESCO Stonewall 0.37%
+// 18-0-10"); it gets NOTE_TEXT.
+const PRE_EMERGENT_REGISTRATIONS = Object.freeze(new Set(['10404-114']));
 const warningText = (wait) => `Its label delays seeding or sprigging ${wait.words}. Sod laid on treated soil may root slowly. Tell the customer in writing today.`;
 const NOTE_TEXT = 'The app does not hold this product\'s label wait for seeding or sod. Read the label.';
 // An incomplete visit still records the products applied before it stopped.
@@ -92,9 +99,10 @@ function wordsFor(row, { date, referenceDay, sodDate, rooted }) {
 
 // A pre-emergent, judged from what the application row itself froze at completion (name, category, ingredient) by
 // the sheet's one classifier. The current catalog is not read: a later rename or correction cannot rewrite history.
-// A row whose snapshot has no ingredient is still known by its exact EPA registration (LABEL_WAITS), or by an ingredient
-// word in its frozen product name ("Prodiamine 65 WDG").
-const isPreEmergent = (row) => !!LABEL_WAITS[String(row.epa_reg_number || '').trim()]
+// A row whose snapshot has no ingredient is still known by its exact EPA registration (LABEL_WAITS or
+// PRE_EMERGENT_REGISTRATIONS), or by an ingredient word in its frozen product name ("Prodiamine 65 WDG").
+const epaOf = (row) => String(row.epa_reg_number || '').trim();
+const isPreEmergent = (row) => !!LABEL_WAITS[epaOf(row)] || PRE_EMERGENT_REGISTRATIONS.has(epaOf(row))
   || classesOf({ name: row.product_name, category: row.product_category, active_ingredient: row.active_ingredient || row.product_name }).includes('preEmergent');
 
 // Every product applied on this customer's visits on or before the reference day, newest visit first. No product

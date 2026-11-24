@@ -11,7 +11,7 @@ const { getScheduleQualityMeasurements } = require('./day-quality');
 const queue = require('./quality-refresh-queue');
 
 function repairEnabled() {
-  return ['GATE_ROUTE_REORDER', 'GATE_ROUTE_REORDER_REPAIR', 'GATE_DRIVE_TIME_CALIBRATION'].every(gateEnvValue);
+  return ['GATE_ROUTE_REORDER', 'GATE_ROUTE_REORDER_REPAIR'].every(gateEnvValue);
 }
 const enabled = () => gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS') || repairEnabled();
 const parsePayload = payload => typeof payload === 'string' ? JSON.parse(payload) : (payload || {});

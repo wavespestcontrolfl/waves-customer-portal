@@ -82,11 +82,10 @@ function formatEventBlock(events) {
  * styled metadata blocks, and per-event sections server-side.
  */
 // Topics only — no figure, duration, temperature, date range or named-source
-// number lives here (codex round 14 P1, the same rule as the Pest Insider
-// rotation): a fact restated in a static prompt outlives its withdrawal from
-// the register, and the flagship lane has no claim scan to catch it. The
-// numbers reach the writer through factsPromptBlock alone.
-// pest-insider.test.js pins this.
+// number lives here (codex round 14 P1): a fact restated in a static prompt
+// outlives its withdrawal from the register, and the flagship lane has no
+// claim scan to catch it. The numbers reach the writer through
+// factsPromptBlock alone. pest-insider.test.js pins this.
 const FLAGSHIP_SEASONAL_CONTEXT = [
   '- Jan–Feb: snowbird peak, dry lawns, red tide drift; winter termite flights only as the verified facts state them',
   '- Mar: spring break, citrus bloom, native and Asian subterranean termite flight season (from the verified facts)',
@@ -102,11 +101,10 @@ const FLAGSHIP_SEASONAL_CONTEXT = [
   '- SWFL pests: subterranean termites, German cockroaches, palmetto bugs, no-see-ums, salt-marsh mosquitoes, fire ants, chinch bugs, sod webworms',
 ].join('\n');
 
-async function loadFactsBlock({ required }) {
+async function loadFactsBlock() {
   try {
     return await require('./email-division/fact-register').factsPromptBlock();
   } catch (err) {
-    if (required) throw err;
     logger.warn(`[newsletter-draft] flagship facts block unavailable, drafting without pest facts: ${err.message}`);
     return '';
   }
@@ -203,350 +201,6 @@ Return STRICT JSON (no HTML, no prose outside the JSON):
 }`;
 }
 
-// ── Pest Insider (monthly) ───────────────────────────────────────────
-//
-// The humor-sandwich format from the shipped Beehiiv "Pest Watch" issues
-// (docs/design/newsletter-fresh-this-week-style-guide.md): ~60% genuinely
-// fun pest edutainment → ONE sincere featured-service section → voice-y
-// close with a phone CTA. Sell stays ≤ ~3.5/10; urgency is biological
-// ("by March they're out in full force"), never commercial.
-
-// Month → editorial slate (owner decision 2026-06-11: auto-rotate by
-// season, override any month via the draft prompt). Built from the
-// SWFL pest calendar: each month carries the featured service (the ONE
-// pitch), the Lawn Corner beat, and the content angles that month owns.
-//
-// Every slate names TOPICS only — never a figure, a duration, a
-// temperature, a date or a named-source number (codex PR #5187 r11). The
-// numbers live in the fact register alone and reach the prompt through
-// factsPromptBlock, so a fact withdrawn from the register (deactivated or
-// flagged) stops reaching the writer; a figure restated here would outlive
-// it. pest-insider.test.js pins this.
-const PEST_INSIDER_ROTATION = {
-  January: {
-    service: 'rodent control & pest inspections (snowbirds reopening closed-up homes — the "welcome-back inspection"; roof rat exclusion from the verified facts — the source gives no rodent season, so do not invent one)',
-    lawn: 'dry-season lawn watering discipline + winter annuals',
-    beats: 'surprises in snowbird homes; how roof rats get in (reach and jumping, from the verified facts); winter termite flights — only what the verified facts say about native subterranean flight season',
-  },
-  February: {
-    service: 'termite protection & WDO inspections (pre-swarm prep — the single most important content window of the year starts NOW)',
-    lawn: 'pre-emergent timing before spring weeds wake up',
-    beats: 'flying ants vs termites — the quick look test; drywood vs subterranean',
-  },
-  March: {
-    service: 'subterranean termite treatment (swarm season is ON — native and Asian subterranean flight seasons, from the verified facts)',
-    lawn: 'spring lawn wake-up: first mow height for St. Augustine (from the verified facts), aeration timing',
-    beats: 'termite swarmers after warm rain; citrus bloom (pure engagement — everyone in SWFL has opinions)',
-  },
-  April: {
-    service: 'termite & WDO inspections (spring home-buying season) + fire ant control (mating flights after spring rain, from the verified facts)',
-    lawn: 'weed pre-emergents last call + aeration',
-    beats: 'lovebugs on the road (their flight season, from the verified facts); spring buyers need WDO',
-  },
-  May: {
-    service: 'mosquito treatment (rainy-season kickoff — container mosquitoes after rain: the egg-to-adult timeline and the dump-and-scrub rhythm, from the verified facts — the biggest add-on push of the year)',
-    lawn: 'rainy-season mowing and watering rhythm for St. Augustine (from the verified facts); watch for early chinch activity',
-    beats: 'standing-water audit checklist ("walk your yard with this list"); Memorial Day backyard prep',
-  },
-  June: {
-    service: 'mosquito treatment (daily thunderstorms = standing water everywhere; container mosquitoes, from the verified facts)',
-    lawn: 'chinch bugs on St. Augustine (their season, from the verified facts); the summer fertilizer restrictions — dates and places only as the verified facts state them',
-    beats: 'hurricane season opens — the post-storm yard checklist (standing water and container mosquitoes, from the verified facts; clear debris); say only what the register supports about pests after storms',
-  },
-  July: {
-    service: 'quarterly pest defense (palmetto bugs indoors — why they wander in, from the verified facts; ghost ants in kitchens — where they nest, from the verified facts)',
-    lawn: 'chinch bug damage (their peak, from the verified facts) — brown patches that aren\'t drought; the coffee-can flotation test',
-    beats: 'ghost ants, palmetto bugs, the coffee-can chinch test',
-  },
-  August: {
-    service: 'lawn pest control (chinch bugs shredding St. Augustine — before/after season)',
-    lawn: 'recovery plan for chinch damage (mowing height and watering for St. Augustine, from the verified facts)',
-    beats: 'peak hurricane risk — post-storm yard checklist; back-to-school',
-  },
-  September: {
-    service: 'termite & WDO inspection (drywood flight seasons from the verified facts — native subterranean termites have ONE flight season and no second swarm after storms) + lawn recovery',
-    lawn: 'fall fertilization window opens as the summer restrictions end (dates only as the verified facts state them)',
-    beats: 'hurricane peak; post-storm yard checklist (standing water and container mosquitoes, from the verified facts; clear debris) — say only what the register supports about pests after storms; drywood termite flights in fall — never a "second subterranean swarm after storms"',
-  },
-  October: {
-    service: 'rodent exclusion (roof rat access and exclusion, from the verified facts — the source gives no rodent season)',
-    lawn: 'fall fertilization (as the summer restrictions end — dates only as the verified facts state them) + watering days — state a district restriction ONLY if the verified facts below carry a current one; if they do not, say nothing about a schedule',
-    beats: 'spooky season fun: spider myths, which Florida bugs are ACTUALLY dangerous — sourced facts only, no invented seasonality',
-  },
-  November: {
-    service: 'rodent control (attic checks as snowbirds return — roof rat exclusion from the verified facts; the source gives no rodent season)',
-    lawn: 'winter annuals in; last fertilization call',
-    beats: 'pantry pests before holiday baking; firewood hitchhikers',
-  },
-  December: {
-    service: 'pest inspections (pest-proof the house before holiday guests; gift-a-service for elderly parents)',
-    lawn: 'cool-season lawn care + holiday lighting vs irrigation',
-    beats: 'Christmas tree hitchhikers; pantry pests; winter termite flights — only what the verified facts say about native subterranean flight season',
-  },
-};
-
-function buildPestInsiderSystemPrompt(voice, month) {
-  const slate = PEST_INSIDER_ROTATION[month]
-    || { service: 'general home pest defense', lawn: 'seasonal lawn upkeep', beats: 'seasonal pest pressure' };
-  return `You write "Pest Insider" — Waves Pest Control's monthly pest + lawn deep-dive for Southwest Florida homeowners. It should read like a knowledgeable neighbor texting you what's about to crawl out of the ground this month — NEVER corporate marketing.
-
-The four jobs, in priority order: (1) retention — readers who feel informed keep their quarterly service; (2) tier upgrades — seasonal content naturally introduces the matching add-on; (3) referrals; (4) eventual conversion of non-customers who subscribed for the tips. Jobs 2-4 get exactly ONE pitch and ONE CTA; job 1 is every section.
-
-CURRENT MONTH: ${month}
-FEATURED SERVICE (the one pitch): ${slate.service}
-LAWN CORNER BEAT: ${slate.lawn}
-CONTENT ANGLES THIS MONTH OWNS: ${slate.beats}
-
-VOICE (same narrator as the weekly events guide, signed by a real person):
-- Funny, blunt, zero fearmongering-for-sales. "So, your place has bed bugs. Fantastic." energy.
-- Dense phrase-level interleave — **bold** the payoff facts, _italic_ the jokes and asides.
-- Anthropomorphize the pest ("that mosquito keeping you up at night? Probably a mom-to-be").
-- Jokes at the PEST's expense, never pressure on the reader.
-- Parenthetical asides as a second comedic voice: "(which, we assume you are)", "(no judgment)".
-
-SUBJECT LINES: max ${voice.subjectLineRules.maxLength} chars, one leading thematic emoji. SPECIFIC AND LOCAL BEATS CLEVER: "🐜 Termites are swarming in Sarasota this week" crushes "Your March Pest Insider". Use honest alert framing whenever the season supports it. PREVIEW TEXT: short punchline, never a summary ("Bite Me? Nope. Not Anymore.").
-
-HARD RULES:
-- NO dollar amounts, prices, discounts, or "free" offers anywhere.
-- NO invented technology names, product brands, percentages, statistics, or study citations — honest capability terms only.
-- NO safety/efficacy claims: never "pet-safe", "child-safe", "guaranteed", "100% effective", "EPA-approved".
-- Facts must be true, mainstream pest/lawn knowledge for SWFL — nothing obscure enough to be wrong.
-- NO invented customer stories, tech anecdotes, or "we saw this in [city]" claims — you have no field data. Stay in general seasonal-biology territory.
-- Urgency is seasonal/biological only — never "limited time", never commercial pressure.
-- The pitch section is SINCERE: plain feature-benefit, no jokes inside the bullets. The humor lives in everything around it.
-
-ISSUE SKELETON (every issue, same order — train the reader):
-1. "What's Crawling This Month" — the lead story: 150-250 words on the pest about to peak, why now, what the reader will actually notice.
-2. "Pest of the Month" ID card — where you'll see it, how worried to be (honest), one genuinely useful DIY tip, and when it's time to call someone.
-3. "The Lawn Corner" — one timely lawn task or threat (${slate.lawn}). Most pest newsletters ignore lawns; we have a whole lawn division.
-4. "Myth-Buster" — one forwardable myth verdict ("Do dryer sheets repel mosquitoes?" / "Does mulch attract termites?").
-5. Featured service — the ONE earnest pitch section tied to the month.
-6. Close — voice returns; one-line call CTA; quarterly tie-in ("this is what your quarterly visit is handling right now"); referral nudge.
-
-GIF CAPTIONS (introGifCaption, crawlGifCaption, pitchGifCaption): max 12 words, punchline genre, never descriptive. The three Giphy search terms (introGifTerm, crawlGifTerm, pitchGifTerm) must be clearly DISTINCT from each other — different moods and meme genres, never near-synonyms.
-
-SIGN-OFF: "${voice.pestInsiderSignoff || '— Adam, Waves Pest Control'}" (a real person, not "The Team" — the renderer appends the 🌊).
-
-Return STRICT JSON (no HTML, no prose outside the JSON):
-{
-  "subjectVariants": ["string", "string", "string"],
-  "selectedSubject": "string",
-  "previewText": "string, 30-90 chars (punchline)",
-  "introGifTerm": "string (Giphy search, pest/seasonal reaction meme)",
-  "introGifCaption": "string",
-  "greeting": "string (e.g. 'Hey there!')",
-  "introText": "string (1-2 short paragraphs, seasonal hook, **bold**/_italic_ interleave)",
-  "crawlHeading": "string (emoji + hook, e.g. '🦟 What's Crawling This Month')",
-  "crawlGifTerm": "string (Giphy search)",
-  "crawlGifCaption": "string",
-  "crawlText": "string (the 150-250 word lead story)",
-  "pestOfMonth": {
-    "name": "string (common name)",
-    "emoji": "string",
-    "whereYoullSeeIt": "string (1-2 sentences)",
-    "threatLevel": "string (honest, e.g. 'Annoying, not dangerous' or 'Call sooner than later')",
-    "diyTip": "string (one genuinely useful tip)",
-    "whenToCall": "string (the honest escalation line)"
-  },
-  "lawnHeading": "string (e.g. '🌱 The Lawn Corner')",
-  "lawnText": "string (one timely task/threat, 60-120 words)",
-  "mythQuestion": "string (e.g. 'Do dryer sheets repel mosquitoes?')",
-  "mythVerdict": "string (the answer with a punchline, 40-90 words)",
-  "pitchHeading": "string (emoji + benefit-framed, e.g. '✈️ Turn Your Yard Into a No-Fly Zone')",
-  "pitchGifTerm": "string (Giphy search)",
-  "pitchGifCaption": "string",
-  "pitchIntro": "string (1 paragraph framing what Waves does about this — sincere)",
-  "pitchBullets": [{ "title": "string (e.g. 'Stops the Cycle')", "text": "string (plain feature-benefit, no jokes)" }],
-  "closingHeading": "string (e.g. '😎 Want Your Backyard Back?')",
-  "closingText": "string (voice returns; include the quarterly tie-in sentence)",
-  "ctaLine": "string (one line ending in the call prompt — the renderer attaches the phone number)",
-  "signoff": "string",
-  "ps": "string or null (forwardable nudge, no 'P.S.' prefix — the renderer adds the label)"
-}`;
-}
-
-const PEST_INSIDER_PROSE_FIELDS = [
-  'greeting', 'introText', 'introGifCaption',
-  'crawlHeading', 'crawlGifCaption', 'crawlText',
-  'lawnHeading', 'lawnText', 'mythQuestion', 'mythVerdict',
-  'pitchHeading', 'pitchGifCaption', 'pitchIntro',
-  'closingHeading', 'closingText', 'ctaLine', 'signoff', 'ps',
-];
-const PEST_OF_MONTH_FIELDS = ['name', 'emoji', 'whereYoullSeeIt', 'threatLevel', 'diyTip', 'whenToCall'];
-
-function sanitizePestInsiderDraft(draft) {
-  for (const k of PEST_INSIDER_PROSE_FIELDS) {
-    if (typeof draft[k] === 'string') draft[k] = stripCommentaryUrls(draft[k]);
-  }
-  if (draft.pestOfMonth && typeof draft.pestOfMonth === 'object') {
-    const card = {};
-    for (const k of PEST_OF_MONTH_FIELDS) {
-      card[k] = typeof draft.pestOfMonth[k] === 'string' ? stripCommentaryUrls(draft.pestOfMonth[k]) : null;
-    }
-    draft.pestOfMonth = card.name ? card : null;
-  } else {
-    draft.pestOfMonth = null;
-  }
-  draft.pitchBullets = (Array.isArray(draft.pitchBullets) ? draft.pitchBullets : [])
-    .map((item) => (item && typeof item === 'object' ? {
-      title: typeof item.title === 'string' ? stripCommentaryUrls(item.title) : null,
-      text: typeof item.text === 'string' ? stripCommentaryUrls(item.text) : null,
-    } : null))
-    .filter((item) => item && (item.title || item.text));
-  return draft;
-}
-
-// Customer-facing referral page (verified live 2026-06-11).
-const WAVES_REFERRAL_URL = 'https://www.wavespestcontrol.com/referral/';
-
-async function assemblePestInsiderNewsletter(draft) {
-  const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
-  const parts = [];
-
-  // Parallel candidate prefetch — same rationale as the flagship assembler.
-  // Selection runs sequentially afterward so the same GIF can never appear
-  // twice in one issue.
-  const usedGifIds = new Set();
-  const gifRetryBudget = { remaining: 3 };
-  const [introCandidates, crawlCandidates, pitchCandidates] = await Promise.all([
-    searchGiphyCandidates(draft.introGifTerm),
-    searchGiphyCandidates(draft.crawlGifTerm),
-    searchGiphyCandidates(draft.pitchGifTerm),
-  ]);
-  const introGif = await pickUniqueGifWithRetry(draft.introGifTerm, introCandidates, usedGifIds, gifRetryBudget);
-  const crawlGif = await pickUniqueGifWithRetry(draft.crawlGifTerm, crawlCandidates, usedGifIds, gifRetryBudget);
-  const pitchGif = await pickUniqueGifWithRetry(draft.pitchGifTerm, pitchCandidates, usedGifIds, gifRetryBudget);
-
-  // The generator already paid for and uploaded this issue-specific artwork.
-  // Render it as the lead image just like the flagship assembler does; keeping
-  // it out of the body silently burned an image-generation call every month.
-  const heroUrl = safeUrl(draft.heroImageUrl);
-  if (heroUrl) {
-    parts.push(`<div style="text-align:center;margin:0 0 24px 0;">
-<img src="${heroUrl}" alt="${escapeHtml(draft.selectedSubject || draft.subject || 'Pest Insider')}" style="max-width:100%;height:auto;border-radius:12px;display:block;margin:0 auto;" />
-</div>`);
-  }
-
-  // TOC — the repeatable skeleton trains the reader.
-  const tocItems = [
-    draft.crawlHeading && `<li style="margin:0 0 6px 0;"><a href="#pi-crawl" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">${markdownToHtml(draft.crawlHeading)}</a></li>`,
-    draft.pestOfMonth?.name && `<li style="margin:0 0 6px 0;"><a href="#pi-pest" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">${escapeHtml(draft.pestOfMonth.emoji || '🪲')} Pest of the Month</a></li>`,
-    draft.lawnHeading && `<li style="margin:0 0 6px 0;"><a href="#pi-lawn" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">${markdownToHtml(draft.lawnHeading)}</a></li>`,
-    draft.mythQuestion && `<li style="margin:0 0 6px 0;"><a href="#pi-myth" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">🔍 Myth-Buster</a></li>`,
-    draft.pitchHeading && `<li style="margin:0 0 6px 0;"><a href="#pi-pitch" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">${markdownToHtml(draft.pitchHeading)}</a></li>`,
-  ].filter(Boolean);
-  if (tocItems.length) {
-    parts.push(`<div class="dm-box" style="margin:0 0 24px 0;padding:16px 20px;background:${COLORS.cardBg};border-radius:10px;">
-<p style="margin:0 0 10px 0;font-size:14px;text-transform:uppercase;letter-spacing:0.05em;color:${COLORS.muted};font-weight:600;">In this email:</p>
-<ul style="list-style:none;padding:0;margin:0;font-size:14px;line-height:2;">${tocItems.join('\n')}</ul>
-</div>`);
-  }
-
-  // Cold open + intro — 22px greeting with the per-recipient first-name
-  // token (same device as the flagship assembler).
-  if (introGif) parts.push(gifBlock(introGif, draft.introGifCaption));
-  if (draft.greeting) {
-    parts.push(`<p style="margin:0 0 8px 0;font-size:22px;line-height:1.4;">👋 <strong><em>${markdownToHtml(greetingWithNameToken(draft.greeting))}</em></strong></p>`);
-  }
-  if (draft.introText) {
-    parts.push(`<p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.introText).replace(/\n+/g, '<br/><br/>')}</p>`);
-  }
-
-  // 1. What's Crawling This Month — the lead story
-  if (draft.crawlHeading || draft.crawlText) {
-    parts.push(dividerHtml());
-    if (draft.crawlHeading) {
-      parts.push(`<h2 id="pi-crawl" class="dm-chip" style="${sectionHeadingStyle(0, 8)}"><strong><em>${markdownToHtml(draft.crawlHeading)}</em></strong></h2>`);
-    }
-    if (crawlGif) parts.push(gifBlock(crawlGif, draft.crawlGifCaption));
-    if (draft.crawlText) {
-      parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.crawlText).replace(/\n+/g, '<br/><br/>')}</p>`);
-    }
-  }
-
-  // 2. Pest of the Month — ID card
-  if (draft.pestOfMonth?.name) {
-    const card = draft.pestOfMonth;
-    parts.push(dividerHtml());
-    parts.push(`<h2 id="pi-pest" class="dm-chip" style="${sectionHeadingStyle(1, 8)}">${escapeHtml(card.emoji || '🪲')} <strong><em>Pest of the Month: ${markdownToHtml(card.name)}</em></strong></h2>`);
-    const rows = [
-      card.whereYoullSeeIt && `📍 <strong>Where you'll see it:</strong> ${markdownToHtml(card.whereYoullSeeIt)}`,
-      card.threatLevel && `⚠️ <strong>How worried to be:</strong> ${markdownToHtml(card.threatLevel)}`,
-      card.diyTip && `🛠️ <strong>DIY tip:</strong> ${markdownToHtml(card.diyTip)}`,
-      card.whenToCall && `📞 <strong>When to call:</strong> ${markdownToHtml(card.whenToCall)}`,
-    ].filter(Boolean);
-    parts.push(`<div class="dm-box" style="margin:0 0 14px 0;padding:14px 18px;background:${COLORS.cardBg};border-radius:10px;font-size:14px;line-height:1.8;">\n${rows.join('<br/>\n')}\n</div>`);
-  }
-
-  // 3. The Lawn Corner
-  if (draft.lawnHeading || draft.lawnText) {
-    parts.push(dividerHtml());
-    if (draft.lawnHeading) {
-      parts.push(`<h2 id="pi-lawn" class="dm-chip" style="${sectionHeadingStyle(2, 8)}"><strong><em>${markdownToHtml(draft.lawnHeading)}</em></strong></h2>`);
-    }
-    if (draft.lawnText) {
-      parts.push(`<div class="dm-box" style="margin:0 0 14px 0;padding:14px 18px;background:#F2F8F0;border-radius:10px;border-left:4px solid #5BA862;">
-<p style="margin:0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.lawnText)}</p>
-</div>`);
-    }
-  }
-
-  // 4. Myth-Buster
-  if (draft.mythQuestion && draft.mythVerdict) {
-    parts.push(dividerHtml());
-    parts.push(`<h2 id="pi-myth" class="dm-chip" style="${sectionHeadingStyle(3, 8)}">🔍 <strong><em>Myth-Buster: ${markdownToHtml(draft.mythQuestion)}</em></strong></h2>`);
-    parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.mythVerdict)}</p>`);
-  }
-
-  // 5. The pitch (sincere middle of the sandwich)
-  if (draft.pitchHeading) {
-    parts.push(dividerHtml());
-    parts.push(`<h2 id="pi-pitch" class="dm-chip" style="${sectionHeadingStyle(4, 8)}"><strong><em>${markdownToHtml(draft.pitchHeading)}</em></strong></h2>`);
-    if (pitchGif) parts.push(gifBlock(pitchGif, draft.pitchGifCaption));
-    if (draft.pitchIntro) {
-      parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.pitchIntro)}</p>`);
-    }
-    const bullets = (draft.pitchBullets || []).slice(0, 5).map((b) =>
-      `<li style="margin:0 0 10px 0;font-size:15px;line-height:1.6;">🔹 <strong>${markdownToHtml(b.title || '')}</strong>${b.title && b.text ? ' – ' : ''}${markdownToHtml(b.text || '')}</li>`
-    ).join('\n');
-    if (bullets) parts.push(`<ul style="list-style:none;padding:0;margin:0 0 14px 0;">${bullets}</ul>`);
-  }
-
-  // Close + phone CTA
-  if (draft.closingHeading || draft.closingText || draft.ctaLine) {
-    parts.push(dividerHtml());
-    if (draft.closingHeading) {
-      parts.push(`<h2 id="pi-close" class="dm-chip" style="${sectionHeadingStyle(5)}"><strong><em>${markdownToHtml(draft.closingHeading)}</em></strong></h2>`);
-    }
-    if (draft.closingText) {
-      parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.closingText).replace(/\n+/g, '<br/><br/>')}</p>`);
-    }
-    const cta = draft.ctaLine ? markdownToHtml(draft.ctaLine) : 'Tired of sharing your yard? Give us a call';
-    parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">👉 ${cta} <a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${COLORS.blue};text-decoration:underline;font-weight:600;">${escapeHtml(WAVES_SUPPORT_PHONE_DISPLAY)}</a></p>`);
-    // Referral nudge — every issue carries it; readers are the warmest
-    // referral audience (job #3). One line, never a second pitch.
-    parts.push(`<p style="margin:0 0 14px 0;font-size:14px;line-height:1.6;color:${COLORS.muted};">Know a neighbor fighting the same bugs? <a href="${WAVES_REFERRAL_URL}" style="color:${COLORS.blue};text-decoration:underline;font-weight:500;">Send them our way</a> — referrals are the nicest compliment we get.</p>`);
-  }
-
-  // Sign-off — a real person, not "The Team" (reviews mention Adam by
-  // name constantly; that's an asset).
-  const signoffText = draft.signoff || '— Adam, Waves Pest Control';
-  parts.push(`<p style="margin:20px 0 0 0;font-size:15px;line-height:1.6;">${markdownToHtml(signoffText)} 🌊</p>`);
-  if (draft.ps) {
-    const psText = psBodyText(draft.ps);
-    if (psText) {
-      parts.push(`<p style="margin:20px 0 0 0;font-size:14px;color:${COLORS.muted};line-height:1.5;"><strong>P.S.</strong> <em>${markdownToHtml(psText)}</em></p>`);
-    }
-  }
-
-  // ── Reaction footer ── every edition ends with the feedback ask (owner
-  // directive 2026-07-17). Per-recipient links substitute at send time;
-  // archive/preview surfaces neutralize to inert chips.
-  parts.push(FEEDBACK_HTML_TOKEN);
-
-  return parts.join('\n\n');
-}
-
 // ── Beehiiv-Quality Newsletter Assembly ──────────────────────────────
 //
 // Renders structured event JSON into styled email HTML matching the
@@ -576,13 +230,6 @@ function sectionHeadingStyle(index, marginBottom = 12) {
   const theme = newsletterSectionTheme(index);
   return `font-family:${COLORS.font};font-size:20px;line-height:1.35;font-weight:800;color:${theme.text};background:${theme.background};border-left:4px solid ${theme.accent};border-radius:8px;padding:10px 12px;margin:0 0 ${marginBottom}px 0;`;
 }
-
-// Animated circular mascot badge built from the CURRENT brand mascot
-// (client/public/waves-logo-2026.png art, wordmark cropped out — illegible
-// at divider size anyway), self-hosted on our CDN. Replaces the Beehiiv-era
-// mascot GIF that (a) was the old logo art and (b) lived on media.beehiiv.com,
-// a platform we left — that asset can vanish without notice.
-const WAVES_DIVIDER_GIF = 'https://d2riygw2ap9mi.cloudfront.net/social-media/waves-divider-2026-v2.gif';
 
 // The exact words the hero poster letters into the artwork: the issue's
 // subject line, emoji stripped (image models render emoji glyphs as mush;
@@ -721,15 +368,6 @@ function slugify(text) {
   return (text || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
 }
 
-function dividerHtml() {
-  // Deliberately NOT a link (owner-accepted critique 2026-07-29): a linked
-  // decorative divider is an accidental tap target on mobile and pollutes
-  // click analytics with non-editorial homepage clicks.
-  return `<div style="text-align:center;margin:28px 0;">
-<img src="${WAVES_DIVIDER_GIF}" alt="" width="48" style="width:48px;height:auto;display:inline-block;" />
-</div>`;
-}
-
 // ── Greeting personalization ─────────────────────────────────────────
 // The assembler injects this token into the greeting ("Hey
 // there{{greeting-name}}!"); sendBatch substitutes it per recipient with
@@ -793,8 +431,12 @@ function stripPersonalizationTokens(content) {
   // url map) fall back to the homepage — defense-in-depth; the archive
   // and proof paths resolve them to the real event URLs first.
   const { resolveEvclickDirect } = require('./newsletter-event-clicks');
+  // A Waves Pest Insider issue's tokens (pest-insider/referral-line.js, a leaf
+  // module): the "Your home" tokens go, since that block is per reader and
+  // never shows here, and the referral line stands in its form with no amount.
+  const { neutralizeIssueTokens } = require('./pest-insider/referral-line');
   return resolveEvclickDirect(neutralizeFeedbackTokens(neutralizeQuizTokens(
-    stripGreetingNameToken(content)
+    neutralizeIssueTokens(stripGreetingNameToken(content))
       .split(CITY_TOKEN).join(DEFAULT_CITY_LABEL)
       .split(GRASS_TYPE_TOKEN).join(DEFAULT_GRASS_LABEL),
   )));
@@ -1290,7 +932,7 @@ ${noteLines.join('\n')}
   return parts.join('\n\n');
 }
 
-async function assembleBeehiivNewsletter(draft) {
+async function assembleBeehiivNewsletter(draft, { pollQuizId = null } = {}) {
   const parts = [];
   const events = draft.events || [];
 
@@ -1549,6 +1191,17 @@ async function assembleBeehiivNewsletter(draft) {
     }
   }
 
+  // ── Quick poll ── at most every 3rd issue (newsletter-quiz.js
+  // chooseNewsletterPoll, owner-approved list 2026-11-20). The token becomes
+  // each reader's own answer buttons at send time and an inert copy on the
+  // archive and the owner's Monday copy. An unknown id adds nothing.
+  const poll = issuePoll(pollQuizId);
+  if (poll) {
+    parts.push(sectionSpacer);
+    parts.push(`<h2 class="dm-chip" style="${sectionHeadingStyle(events.length + 2)}">🗳️ <strong><em>Quick poll</em></strong></h2>`);
+    parts.push(`{{quiz:${poll}}}`);
+  }
+
   // ── Sign-off ──
   parts.push(`<p style="margin:20px 0 4px 0;font-size:15px;line-height:1.6;"><strong>Catch you out there this week.</strong></p>`);
   const signoffText = draft.signoff || '— The Waves Team';
@@ -1603,7 +1256,14 @@ function stripMd(text) {
     .trim();
 }
 
-function buildFlagshipTextBody(draft) {
+// The issue's poll id when it is one of the Waves Newsletter polls, else null.
+function issuePoll(pollQuizId) {
+  // require here, as in stripPersonalizationTokens: newsletter-quiz requires db.
+  const { isNewsletterPoll } = require('./newsletter-quiz');
+  return pollQuizId && isNewsletterPoll(pollQuizId) ? pollQuizId : null;
+}
+
+function buildFlagshipTextBody(draft, { pollQuizId = null } = {}) {
   const out = [];
   if (draft.greeting) out.push(stripMd(greetingWithNameToken(draft.greeting)));
   if (draft.introText) out.push(stripMd(draft.introText));
@@ -1665,6 +1325,8 @@ function buildFlagshipTextBody(draft) {
   if (checklist.length) {
     out.push(checklist.map((c) => `[ ] ${stripMd(c)}`).join('\n'));
   }
+  const poll = issuePoll(pollQuizId);
+  if (poll) out.push(`== Quick poll ==\n{{quiz-text:${poll}}}`);
   out.push(stripMd(draft.signoff || '— The Waves Team'));
   if (draft.ps) {
     const psText = psBodyText(draft.ps);
@@ -1706,11 +1368,19 @@ const NEWSLETTER_WRITE_TIMEOUT_MS = 10 * 60 * 1000;
  * @param {boolean} [opts.includeCTA] - Whether to include CTA
  * @param {string|Date} [opts.issueReference] - Issue Tuesday/target used for event policy windows
  * @param {import('knex').Knex.Transaction} [opts.trx] - Optional Knex transaction
+ * @param {string|null} [opts.pollQuizId] - the issue's poll (flagship only)
  * @param {string} [opts.effort] - Anthropic effort override for the
  *   newsletterWriter policy's primary leg (default: the policy's own 'max').
  *   No caller passes it since the admin composer was removed.
  * @returns {Promise<{send: Object, draft: Object}>}
  */
+// persistNewsletterDraft refuses a Waves Pest Insider issue: it saves no audience plan.
+const PEST_INSIDER_UNSAVED = 'a Waves Pest Insider issue needs its planned audience, which this draft writer does not save';
+// createNewsletterDraft refuses one too. The Waves Pest Insider is built from
+// its reviewed facts by services/pest-insider (planner: schedule.js); the old
+// model-written monthly format this writer once produced is gone.
+const PEST_INSIDER_NOT_WRITTEN_HERE = 'a Waves Pest Insider issue is built by its planner (services/pest-insider), not by this draft writer';
+
 async function createNewsletterDraft({
   prompt,
   eventIds,
@@ -1729,7 +1399,13 @@ async function createNewsletterDraft({
   // that passed 'high' were removed (owner 2026-10-30).
   effort,
   timeoutMs = NEWSLETTER_WRITE_TIMEOUT_MS,
+  // The issue's Waves Newsletter poll (newsletter-quiz.js chooseNewsletterPoll),
+  // or null. Only the weekly autopilot passes one; only the flagship shows it.
+  pollQuizId = null,
 }) {
+  // Refused before any facts load or paid generation, saved or not: this
+  // writer has no Waves Pest Insider format.
+  if (newsletterType === 'pest-insider-monthly') throw new Error(PEST_INSIDER_NOT_WRITTEN_HERE);
   const knex = trx || db;
   // The issue's Tuesday (not "now") anchors both the seasonal-month framing
   // and every event-policy window — cross-provider dispatch happens below.
@@ -1813,26 +1489,16 @@ async function createNewsletterDraft({
     }
   }
 
-  // 2. Build the system prompt — Pest Insider gets the humor-sandwich
-  //    prompt (no events, no anchoring); everything else gets the
-  //    flagship events prompt.
-  const isPestInsider = typeConfig?.key === 'pest-insider-monthly';
-  // Pest Insider is grounded in the email fact register: the verified facts
-  // and the rule binding the writer to them are part of its system prompt.
-  // A draft that cannot load its facts fails rather than being written
-  // ungrounded.
-  // Both lanes are grounded in the same live register: the flagship's
-  // seasonal context names topics only, so its pest facts too come from the
-  // block appended here and stop reaching the writer the moment a fact is
-  // withdrawn (codex round 14 P1). The Pest Insider IS its facts and fails
-  // closed without them; the weekly events guide is not — an empty or
-  // unreachable register logs, the block is omitted, and the prompt's own
-  // rule ("from the verified facts block, or left out") keeps pest facts
-  // out of that issue (pre-push audit P1 on e0dd938596).
-  const factsBlock = await loadFactsBlock({ required: isPestInsider });
-  const systemPrompt = (isPestInsider
-    ? buildPestInsiderSystemPrompt(voice, month)
-    : buildFlagshipSystemPrompt(voice, month)) + factsBlock;
+  // 2. Build the system prompt: the flagship events prompt.
+  // Its seasonal context names topics only, so its pest facts come from the
+  // live register block appended here and stop reaching the writer the moment
+  // a fact is withdrawn (codex round 14 P1). The weekly events guide does not
+  // depend on them: an empty or unreachable register logs, the block is
+  // omitted, and the prompt's own rule ("from the verified facts block, or
+  // left out") keeps pest facts out of that issue (pre-push audit P1 on
+  // e0dd938596).
+  const factsBlock = await loadFactsBlock();
+  const systemPrompt = buildFlagshipSystemPrompt(voice, month) + factsBlock;
 
   // Homeowner Minute RETIRED from the flagship (owner 2026-07-30) —
   // homeownerMinuteTopic is accepted for caller compatibility but no
@@ -1872,7 +1538,7 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   //     never reach the rendered HTML.
   // Compact-format normalization: fold the hero into the events array
   // (hero first, deduped) so the shared factual lock anchors it too.
-  if (!isPestInsider && draft.hero && draft.hero.eventId) {
+  if (draft.hero && draft.hero.eventId) {
     const heroId = String(draft.hero.eventId).toLowerCase();
     const rest = (Array.isArray(draft.events) ? draft.events : [])
       .filter((e) => String(e?.eventId || '').toLowerCase() !== heroId);
@@ -1886,9 +1552,9 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   // are fetched or supplied to the model, so anything it wrote here is
   // invented. Force the section empty until a real sourcing pipeline
   // exists (operator-curated notice records, locked by id like events).
-  if (!isPestInsider) draft.communityNotes = null;
+  draft.communityNotes = null;
 
-  if (!isPestInsider && Array.isArray(draft.events) && draft.events.length > 0) {
+  if (Array.isArray(draft.events) && draft.events.length > 0) {
     if (approvedEvents.length === 0) {
       // No DB pool to anchor against — every event is unverifiable.
       throw new Error(
@@ -1927,21 +1593,18 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   // 4b. Generate hero image (non-flagship lanes only — the compact
   //     flagship format uses the hero EVENT's own image, not a generated
   //     collage, per the 2026-07-28 spec; this also ends that image spend).
-  if ((draft.events?.length || isPestInsider) && !draft.heroImageUrl) {
+  if (draft.events?.length && !draft.heroImageUrl) {
     draft.heroImageUrl = await generateHeroImage(draft.selectedSubject || draft.subjectVariants?.[0] || 'Waves Newsletter');
   }
 
   // 4c. Assemble HTML from structured data. Flagship uses the compact
   //     2026-07-28 format; other event-carrying types keep the legacy
   //     Beehiiv-style assembler.
-  if (isPestInsider) {
-    sanitizePestInsiderDraft(draft);
-    draft.htmlBody = await assemblePestInsiderNewsletter(draft);
-  } else if (draft.events?.length) {
+  if (draft.events?.length) {
     // Owner reversal 2026-07-28 (late evening): the flagship keeps the
     // Beehiiv-formula renderer + comedic devices. assembleWavesNewsletter
     // (the compact format) is retained, unused by the pipeline.
-    draft.htmlBody = await assembleBeehiivNewsletter(draft);
+    draft.htmlBody = await assembleBeehiivNewsletter(draft, { pollQuizId: typeConfig?.flagship ? pollQuizId : null });
   } else if (typeConfig?.flagship) {
     // Flagship drafts must come through the locked structured-events path.
     // If the model returned no events (e.g. the legacy `sections` shape, or
@@ -1962,13 +1625,15 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
     }).filter(Boolean).join('\n\n');
   }
 
-  if (!draft.textBody && draft.events?.length && typeConfig?.flagship) {
+  if (draft.events?.length && typeConfig?.flagship) {
     // Structured plain-text alternative (owner-accepted critique
     // 2026-07-29): real sections, event names, dates, prices, and full
     // destination urls — not tag-stripped HTML collapsed into one
     // paragraph. Direct event urls on purpose: text-only clients get no
-    // per-recipient substitution pass for evclick tokens.
-    draft.textBody = buildFlagshipTextBody(draft);
+    // per-recipient substitution pass for evclick tokens. Always built from
+    // the locked draft: a textBody the writer added on its own (the prompt
+    // asks for none) would skip the factual lock and the issue's poll.
+    draft.textBody = buildFlagshipTextBody(draft, { pollQuizId });
   }
   if (!draft.textBody && draft.htmlBody) {
     draft.textBody = decodeEscapedEntities(draft.htmlBody.replace(/<[^>]+>/g, ''))
@@ -2039,6 +1704,10 @@ function lockedEventOccurrences(events) {
 }
 
 async function persistNewsletterDraft({ draft, prompt, newsletterType, knex = db }) {
+  // This writer saves no audience plan, and a Waves Pest Insider send goes
+  // out only with one (audienceRefusal in newsletter-sender.js): it refuses
+  // the type rather than save an issue that could never be sent.
+  if (newsletterType === 'pest-insider-monthly') throw new Error(PEST_INSIDER_UNSAVED);
   // Generate slug only at persistence time. This lets callers do paid/network
   // generation before opening a short advisory-locked DB transaction.
   const slug = generateSlug(draft.subject);
@@ -2103,11 +1772,6 @@ module.exports = {
   displayCity,
   formatLockedLocation,
   linkifyFirst,
-  // Pest Insider (monthly humor-sandwich) pieces
-  buildPestInsiderSystemPrompt,
-  sanitizePestInsiderDraft,
-  assemblePestInsiderNewsletter,
-  PEST_INSIDER_ROTATION,
   FLAGSHIP_SEASONAL_CONTEXT,
   // Greeting personalization — token + per-recipient value + archive strip
   GREETING_NAME_TOKEN,

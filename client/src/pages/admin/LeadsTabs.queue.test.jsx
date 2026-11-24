@@ -46,6 +46,31 @@ function deferred() {
   return { promise, resolve, reject };
 }
 describe('Pipeline queue navigation', () => {
+  it('sorts source before pagination and shows observed evidence separately from the caller’s answer', async () => {
+    const source = { kind: 'copilot', label: 'Microsoft Copilot', detail: 'AI assistant referral', basis: 'The saved referral identifies Microsoft Copilot.' };
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, opts) => {
+      const response = await base(url, opts);
+      if (String(url).includes('/lead-qa?include_outcomes=1')) {
+        return { ok: true, json: async () => ({ related_visits: [{ id: 'visit-5', scheduled_date: '2022-05-01', status: 'pending', invoices: [] }] }) };
+      }
+      if (!String(url).includes('/admin/leads?')) return response;
+      return { ok: true, json: async () => ({ leads: [{ ...lead, heard_about: 'neighbor', source_evidence: source }], total: 88 }) };
+    });
+    mount('/admin/pipeline?leadPage=2&tableControls=1');
+    expect(await screen.findByText('Microsoft Copilot')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by source, ascending' }));
+    await waitFor(() => {
+      const q = new URL(queueCalls().at(-1).path, 'http://localhost').searchParams;
+      expect([q.get('sort'), q.get('order'), q.get('page')]).toEqual(['source', 'asc', '1']);
+    });
+    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect', exact: true }));
+    expect(await screen.findByText(source.basis)).toBeInTheDocument();
+    expect(screen.getByText(/Heard about us/)).toHaveTextContent(/neighbor/i);
+    expect(calls.some(({path}) => path.includes('include_outcomes=1'))).toBe(false);
+    fireEvent.click(screen.getByText('Linked visits and invoices'));
+    expect(await screen.findByRole('link', { name: 'May 1 visit · pending' })).toHaveAttribute('href', '/admin/dispatch?tab=schedule&date=2022-05-01&appointment=visit-5');
+  });
   it('keeps legacy leadId alerts on the Leads tab instead of opening the estimate builder', async () => {
     mountWorkspace('/admin/pipeline?tab=leads&leadId=lead-qa&source=notification');
     expect(await screen.findByRole('button', { name: 'QA Prospect', exact: true })).toHaveAttribute('aria-expanded', 'true');

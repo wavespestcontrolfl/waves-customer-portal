@@ -3,7 +3,7 @@ const router = express.Router();
 const Joi = require('joi');
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
-const { authenticate, authenticateAllowInactive } = require('../middleware/auth');
+const { authenticate, authenticateAllowInactive, isCancelledCustomerRow } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { raiseAdminAlert, cutAtWord, firstSentence, MAX_HEADLINE_CHARS, MAX_WHY_CHARS } = require('../services/admin-alert-compose');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -14,6 +14,7 @@ const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer
 const AccountMembershipEmail = require('../services/account-membership-email');
 const { processCancellationRequest, PORTAL_CANCEL_REASON_PREFIX } = require('../services/cancellation-processor');
 const { sendCancellationConfirmations } = require('../services/cancellation-confirmations');
+const { onlyStaleVisitErrorsLeft } = require('../services/cancellation-stale-visit-verdict');
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
 const { isSecondarySelection, resolveSessionScope } = require('../services/account-properties');
 const CancellationResolution = require('../services/cancellation-resolution');
@@ -37,29 +38,113 @@ const { requestPhotoIdEvidence } = require('../services/customer-photo-id-eviden
 // Scope a cancellation request was COMMITTED with — retries and repairs
 // must never widen an empty response into a whole-account churn (codex r1
 // P1: the 60s dedupe re-ran without families). The case row is the durable
-// record; no case or empty scope = whole account, exactly as committed.
-async function committedScopeFor(serviceRequestId) {
+// record (empty scope = whole account, exactly as committed); no case = unknown.
+// Its reason_code is the pick the customer made THEN: a retry body's pick may
+// differ or be missing, and it must not become the churn reason. A case a
+// retry built is flagged (retryBuilt) — see retryInputs.
+async function committedCaseFor(serviceRequestId) {
   try {
-    const row = await db('cancellation_cases').where({ service_request_id: serviceRequestId }).first('scope');
+    const row = await db('cancellation_cases').where({ service_request_id: serviceRequestId }).first('scope', 'reason_code', 'snapshot');
     if (!row) return null; // case write failed or not yet landed — fail closed (codex P0)
     const scope = typeof row.scope === 'string' ? JSON.parse(row.scope) : row.scope;
-    return Array.isArray(scope) ? scope.filter(Boolean) : [];
+    const snapshot = typeof row.snapshot === 'string' ? JSON.parse(row.snapshot) : row.snapshot;
+    return {
+      scope: Array.isArray(scope) ? scope.filter(Boolean) : [],
+      reasonCode: row.reason_code || null,
+      // Inserted by a retry (the original writes were lost): its scope and
+      // pick are retry input, not the customer's submission.
+      retryBuilt: !!(snapshot && snapshot.written_on_retry === true),
+    };
   } catch (err) {
     logger.warn(`[requests] scope recovery failed for request ${serviceRequestId}: ${err.message}`);
     return null; // unknown — caller must fail safe, never assume whole account
   }
 }
 
+// What the customer SUBMITTED with a cancel request: its scope ([] = whole
+// account), reason pick (null = none) and incident flags, written to its
+// metadata at creation. Retries and repairs read this, never their own body.
+// null = a request from before submissions were recorded (all unknown).
+function submittedCancel(requestRow) {
+  let meta = null;
+  try {
+    meta = typeof requestRow.metadata === 'string' ? JSON.parse(requestRow.metadata) : requestRow.metadata;
+  } catch { meta = null; }
+  const sub = meta && meta.cancelSubmission;
+  if (!sub || typeof sub !== 'object' || !Array.isArray(sub.scope)) return null;
+  return {
+    scope: sub.scope.filter(Boolean),
+    reasonCode: sub.reasonCode || null,
+    adverseEvent: sub.adverseEvent === true,
+    safetyComplaint: sub.safetyComplaint === true,
+  };
+}
+
+// The scope and churn pick a retry runs with, or null = unknown (the retry
+// parks; never widen to the whole account — codex P0). The original case
+// holds the scope the processor ran with. A case a retry built holds retry
+// input, so only the recorded submission counts; an older request has none.
+function retryInputs(committed, submitted) {
+  if (!committed) return null;
+  if (!committed.retryBuilt) return { scope: committed.scope, churnReasonCode: submitted ? submitted.reasonCode : committed.reasonCode };
+  if (!submitted) return null;
+  return { scope: submitted.scope, churnReasonCode: submitted.reasonCode };
+}
+
+// A case rebuilt on a retry: the original submission's scope, pick and
+// incident verdict. An unknown submission gets none of them (the case is
+// marked written_on_retry, so a later retry parks on it).
+function rebuiltCaseInputs(value, submitted) {
+  if (!submitted) return { families: [], value: { ...value, reasonCode: null }, resolution: null };
+  return {
+    families: submitted.scope,
+    value: { ...value, reasonCode: submitted.reasonCode },
+    resolution: situationalHardStop(submitted.reasonCode, { adverseEvent: submitted.adverseEvent, safetyComplaint: submitted.safetyComplaint }),
+  };
+}
+
 // The ONE definition of "this cancellation is done": the processor reported
 // ok and either churned the account or wound down the selected families.
-// Every writer that depends on completion (portal outcome, case promotion,
-// ticket close) reads this — a churn-only reading in one place let a clean
+// Every writer that depends on completion (case promotion, ticket close, the
+// office alert) reads this, and the customer verdict below builds on it — a
+// churn-only reading in one place let a clean
 // scoped retry close its ticket while its case stayed 'open' (codex P1).
 function cancellationCompleted(result) {
   return !!(result && result.ok && (result.churned || result.scopedWoundDown));
 }
 
-function cancellationOutcome(result, confirmation, effectiveAt, confirmationChannels = []) {
+// What the CUSTOMER is told (the confirmation text + email and the post-submit
+// screen): done when the cancel completed, and also when a WHOLE-PLAN cancel
+// churned the account and the only errors are visits stuck "on site" from an
+// earlier day (owner 2026-10-30, the rule the admin Cancel plan path uses).
+// Whole-plan only here: a scoped cancel never churns, and its retry replies
+// cannot always name the families that stopped and stay, so a scoped run with
+// a stale visit keeps the by-hand copy. The office side still reads
+// cancellationCompleted: the ticket stays 'new', the case stays open and the
+// review alert still fires, so the stuck visit gets closed out.
+function cancellationConfirmedToCustomer(result) {
+  return cancellationCompleted(result) || !!(result && result.churned && onlyStaleVisitErrorsLeft(result));
+}
+
+// The account's state AFTER a retry ran: req.customer is the auth-time
+// snapshot, and a whole-plan cancel may have committed since. A failed or
+// empty read falls back to the snapshot.
+async function accountCancelledNow(customer) {
+  try {
+    const row = await db('customers').where({ id: customer.id }).first('active', 'pipeline_stage');
+    return isCancelledCustomerRow(row || customer);
+  } catch (err) {
+    logger.warn(`[requests] account state re-read failed: ${err.message}`);
+    return isCancelledCustomerRow(customer);
+  }
+}
+
+// accountCancelled: the route KNOWS the account is a processed cancellation
+// (auth's isCancelledCustomerRow: active false + churned). A retry may replay
+// an older SCOPED request whose result says churned:false, so the reply
+// states the account's real state. An account inactive for another reason
+// (not churned) is not reported as churned.
+function cancellationOutcome(result, confirmation, effectiveAt, confirmationChannels = [], { accountCancelled = false } = {}) {
   let effectiveDate = null;
   try {
     const at = effectiveAt ? new Date(effectiveAt) : new Date();
@@ -71,18 +156,27 @@ function cancellationOutcome(result, confirmation, effectiveAt, confirmationChan
     // Scoped cancels never churn — "processed" means the selected families'
     // visits are pulled AND the remaining plan repriced (codex r1 P2: the
     // portal showed the manual-closeout copy while the scoped SMS said done).
-    processed: cancellationCompleted(result),
+    // Same customer verdict as the confirmation text, so the screen and the
+    // text agree on a run whose only errors are stale stuck visits.
+    processed: cancellationConfirmedToCustomer(result),
     // The server's ACTUAL churn state, independent of `processed` (codex GH
     // #3671 r28 P1): the churn write runs FIRST, so a later best-effort
     // step failing (an in-progress visit needing manual handling) returns
     // churned:true, ok:false — the account is already inactive and the
     // portal must refresh its auth snapshot even though the request is
     // parked for office review.
-    churned: !!(result && result.churned),
+    churned: !!(result && result.churned) || accountCancelled,
     visitsPulled: result ? Number(result.cancelledCount) || 0 : 0,
     confirmation: confirmation || null,
     confirmationChannels: Array.isArray(confirmationChannels) ? confirmationChannels.filter(Boolean) : [],
     effectiveDate,
+    // Scoped cancels report exactly what stopped and what stays, on EVERY
+    // reply: a dedupe retry without them rendered a one-service cancel as
+    // "your plan is cancelled". A repair-only retry knows the scope but not
+    // the continuing families (remaining []).
+    scope: Array.isArray(result?.scope) ? result.scope : [],
+    remaining: Array.isArray(result?.remaining) ? result.remaining : [],
+    ...(result?.tierAfter !== undefined ? { tierBefore: result.tierBefore, tierAfter: result.tierAfter } : {}),
   };
 }
 const {
@@ -324,9 +418,12 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       // the original request's alert already carries the review flag.
       let retryOutcome = null;
       if (category === 'cancellation') {
+        // The ORIGINAL submission, for the churn reason and a rebuilt case.
+        const submitted = submittedCancel(dupe);
         try {
-          const recoveredScope = await committedScopeFor(dupe.id);
-          if (recoveredScope === null) throw new Error('scope unrecoverable — retry skipped');
+          const inputs = retryInputs(await committedCaseFor(dupe.id), submitted);
+          if (inputs === null) throw new Error('scope unrecoverable — retry skipped');
+          const recoveredScope = inputs.scope;
           const { acquireCancelCommitLock, adminCoverageBoundaryInForce } = require('../services/admin-cancellation');
           // Same customer-scoped lock as the admin commit: an unlocked
           // portal run racing an admin end_of_coverage confirm can pull the
@@ -349,6 +446,8 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
               reason: `${PORTAL_CANCEL_REASON_PREFIX} ${dupe.id}`,
               requestId: dupe.id,
               families: recoveredScope,
+              churnReasonCode: inputs.churnReasonCode,
+              churnReasonText: dupe.description || null,
             });
           } finally { await releaseCancelLock(); }
           retryOutcome = retry;
@@ -361,22 +460,23 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         }
         // Promote the original request's case to committed if this retry
         // completed the cancel. When the original writes BOTH failed and no
-        // case row exists at all, the retry's structured inputs are the only
-        // reconstruction available — openCancellationCase only fills MISSING
-        // fields, so an intact original record is never overwritten by retry
-        // input, and the taxonomy re-derives the hard-stop/review verdict.
+        // case row exists at all, the request's recorded submission rebuilds
+        // it (scope, pick, incident verdict) — never this retry's body, which
+        // a later retry would trust. openCancellationCase only fills MISSING
+        // fields, so an intact original record is never overwritten.
         // The post-churn snapshot is marked degraded (tier/rate already
-        // cleared, no card can be reconstructed).
+        // cleared, no card can be reconstructed) and written_on_retry.
+        const rebuilt = rebuiltCaseInputs(value, submitted);
         await recordCancellationCase({
           customerId: req.customer.id,
           requestId: dupe.id,
-          value,
-          families: [], // scope unverifiable post-churn — never retry input
+          value: rebuilt.value,
+          families: rebuilt.families, // the submission's; never retry input
           reasonText: dupe.description || null,
           // Situational hard stops (adverse event / safety complaint) are
           // derivable from reason+context alone — reconstruct them so a
           // repaired-from-nothing case still reaches the incident lane.
-          resolution: situationalHardStop(value.reasonCode, { adverseEvent: value.adverseEvent === true, safetyComplaint: value.safetyComplaint === true }),
+          resolution: rebuilt.resolution,
           snapshot: { written_on_retry: true, degraded: true },
           processed: cancellationCompleted(retryOutcome),
         });
@@ -402,7 +502,9 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         // A retry is still a truthful outcome (H0): the sweep above is the
         // authority on whether the plan is closed. No confirmation is sent
         // from this branch — the original request's already went out.
-        ...(category === 'cancellation' ? { cancellation: cancellationOutcome(retryOutcome, null, dupe.created_at) } : {}),
+        // An account cancelled since the original submit says so
+        // (accountCancelled), like the inactive-account branch below.
+        ...(category === 'cancellation' ? { cancellation: cancellationOutcome(retryOutcome, null, dupe.created_at, [], { accountCancelled: await accountCancelledNow(req.customer) }) } : {}),
       });
     }
 
@@ -442,11 +544,14 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         return res.status(401).json({ error: 'Customer not found or inactive' });
       }
       let retryOutcome = null;
+      // The ORIGINAL submission, for the churn reason and a rebuilt case.
+      const submitted = submittedCancel(priorCancellation);
       try {
-        const recoveredScope = await committedScopeFor(priorCancellation.id);
         // Fail closed exactly like the dedupe branch: an unrecoverable
         // scope must never widen into a whole-account churn (codex P0).
-        if (recoveredScope === null) throw new Error('scope unrecoverable — retry skipped');
+        const inputs = retryInputs(await committedCaseFor(priorCancellation.id), submitted);
+        if (inputs === null) throw new Error('scope unrecoverable — retry skipped');
+        const recoveredScope = inputs.scope;
         const { acquireCancelCommitLock, adminCoverageBoundaryInForce } = require('../services/admin-cancellation');
         // Locked like every other cancellation writer (see the dedupe
         // branch above) — never process unlocked beside an admin commit.
@@ -463,6 +568,8 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
             reason: `${PORTAL_CANCEL_REASON_PREFIX} ${priorCancellation.id}`,
             requestId: priorCancellation.id,
             families: recoveredScope,
+            churnReasonCode: inputs.churnReasonCode,
+            churnReasonText: priorCancellation.description || null,
           });
         } finally { await releaseCancelLock(); }
         retryOutcome = retry;
@@ -475,13 +582,14 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       }
       // Same semantics as the dedupe branch above: promote when a row
       // exists, reconstruct what little can be reconstructed when none does.
+      const rebuilt = rebuiltCaseInputs(value, submitted);
       await recordCancellationCase({
         customerId: req.customer.id,
         requestId: priorCancellation.id,
-        value,
-        families: [], // scope unverifiable post-churn — never retry input
+        value: rebuilt.value,
+        families: rebuilt.families, // the submission's; never retry input
         reasonText: priorCancellation.description || null,
-        resolution: situationalHardStop(value.reasonCode, { adverseEvent: value.adverseEvent === true, safetyComplaint: value.safetyComplaint === true }),
+        resolution: rebuilt.resolution,
         snapshot: { written_on_retry: true, degraded: true },
         processed: cancellationCompleted(retryOutcome),
       });
@@ -502,7 +610,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           photoCount: 0,
           createdAt: priorCancellation.created_at,
         },
-        cancellation: cancellationOutcome(retryOutcome, null, priorCancellation.created_at),
+        cancellation: cancellationOutcome(retryOutcome, null, priorCancellation.created_at, [], { accountCancelled: await accountCancelledNow(req.customer) }),
       });
     }
 
@@ -646,9 +754,16 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         location_on_property: validLocation,
         photos: JSON.stringify(photoData),
         status: 'new',
-        ...((requestProperty || value.photoIdSource) ? { metadata: JSON.stringify({
+        ...((requestProperty || value.photoIdSource || isCancellation) ? { metadata: JSON.stringify({
           ...(requestProperty ? { propertyId: requestProperty.id, property: requestProperty } : {}),
           ...(value.photoIdSource ? { photoIdSource: value.photoIdSource } : {}),
+          // The submission as made: retries read it (submittedCancel).
+          ...(isCancellation ? { cancelSubmission: {
+            scope: scopedFamilies,
+            reasonCode: value.reasonCode || null,
+            adverseEvent: value.adverseEvent === true,
+            safetyComplaint: value.safetyComplaint === true,
+          } } : {}),
         }) } : {}),
       })
       .returning('*');
@@ -688,6 +803,10 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
             reason: `${PORTAL_CANCEL_REASON_PREFIX} ${request.id}`,
             requestId: request.id,
             families: scopedFamilies,
+            // The customer's pick and words: the churn reason (the id
+            // reason above stays the cancelled rows' marker).
+            churnReasonCode: value.reasonCode || null,
+            churnReasonText: cleanDescription || null,
           });
         } finally { await releaseCancelLock(); }
       } catch (cancelErr) {
@@ -882,7 +1001,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         customer: req.customer,
         request,
         result: cancellationResult,
-        processed: cancellationProcessed,
+        processed: cancellationConfirmedToCustomer(cancellationResult),
         urgency: validUrgency,
       });
       confirmationSmsSent = confirmations.smsSent;
@@ -950,18 +1069,12 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       // account is already churned when `processed` is true.
       ...(isCancellation
         ? {
-            cancellation: {
-              ...cancellationOutcome(
-                cancellationResult,
-                confirmationSmsSent ? 'sms' : (confirmationEmailSent ? 'email' : null),
-                request.created_at,
-                [confirmationSmsSent ? 'sms' : null, confirmationEmailSent ? 'email' : null]
-              ),
-              // Scoped cancels report exactly what stopped and what stays.
-              scope: Array.isArray(cancellationResult?.scope) ? cancellationResult.scope : [],
-              remaining: Array.isArray(cancellationResult?.remaining) ? cancellationResult.remaining : [],
-              ...(cancellationResult?.tierAfter !== undefined ? { tierBefore: cancellationResult.tierBefore, tierAfter: cancellationResult.tierAfter } : {}),
-            },
+            cancellation: cancellationOutcome(
+              cancellationResult,
+              confirmationSmsSent ? 'sms' : (confirmationEmailSent ? 'email' : null),
+              request.created_at,
+              [confirmationSmsSent ? 'sms' : null, confirmationEmailSent ? 'email' : null]
+            ),
           }
         : {}),
     });
@@ -1089,7 +1202,71 @@ router.post('/restart-plan', authenticate, cancelResolutionLimiter, async (req, 
       if (err && err.restartUnavailable) {
         return res.status(409).json({ error: err.message, code: err.code });
       }
-      throw err;
+      // Knex puts an insert's bound values (the customer's name, phone, email and street) in
+      // err.message, and the error handler logs message + stack (AGENTS.md "PII in logs"): log
+      // and forward the database code and the customer id only, as start-plan does.
+      logger.error(`[plan-restart] mint failed for customer ${req.customerId}: ${err?.code || err?.name || 'error'}`);
+      throw Object.assign(new Error('plan restart could not mint the estimate'), { code: err?.code });
+    }
+    res.json({ ok: true, url: minted.url, estimateId: minted.estimateId, reused: minted.reused === true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/requests/start-plan (GATE_PORTAL_PLAN_START, owner 2026-11-19) — a
+// signed-in customer with NO live recurring plan taps the priced option on the
+// portal pricing card. Mints (or reuses) a normal server-priced estimate for
+// THAT option through the same mint core restart uses and hands back its
+// /estimate path; they pick a time and save a card there, through the existing
+// public accept flow. Nothing is sent, no request row, no bell. 404 dark; 409
+// { error, code } for a member, a cancelled account, an option or price that
+// changed, or anything that cannot be priced online (the card then files its
+// ordinary request).
+// `shown` carries every amount the card displayed for the option (the mint
+// compares each with today's price, to the cent); null = not shown.
+const shownAmount = Joi.number().min(0).max(100000).allow(null);
+const startPlanSchema = Joi.object({
+  serviceKey: Joi.string().valid('pest_control', 'lawn_care', 'tree_shrub', 'termite').required(),
+  optionId: Joi.string().trim().max(60).required(),
+  shown: Joi.object({
+    monthly: Joi.number().greater(0).max(100000).required(),
+    perVisit: shownAmount,
+    dueAtStart: shownAmount,
+    oneTime: shownAmount,
+    setupFee: shownAmount,
+  }).required(),
+});
+
+// Dark = 404 BEFORE the limiter (codex pre-push P1): calls while the gate is
+// off never spend the customer's shared cancellation and restart allowance.
+// Optional call: a whole-module feature-gates mock reads as off (dark).
+const planStartLiveOr404 = (req, res, next) => (require('../config/feature-gates').portalPlanStartLive?.() === true
+  ? next()
+  : res.status(404).json({ error: 'Not found' }));
+
+router.post('/start-plan', authenticate, planStartLiveOr404, cancelResolutionLimiter, async (req, res, next) => {
+  try {
+    const { value, error } = startPlanSchema.validate(req.body, { stripUnknown: true });
+    if (error) return res.status(400).json({ error: error.details[0].message });
+    const { mintPlanStartEstimate } = require('../services/cancellation-resolution/restart');
+    let minted;
+    try {
+      minted = await mintPlanStartEstimate({
+        customer: req.customer,
+        serviceKey: value.serviceKey,
+        optionId: value.optionId,
+        shown: value.shown,
+      });
+    } catch (err) {
+      if (err && err.restartUnavailable) {
+        return res.status(409).json({ error: err.message, code: err.code });
+      }
+      // Knex puts an insert's bound values (the customer's name, phone, email and street) in
+      // err.message (codex pre-push P1, AGENTS.md "PII in logs"): log and forward the database
+      // code and the customer id only.
+      logger.error(`[plan-start] mint failed for customer ${req.customerId}: ${err?.code || err?.name || 'error'}`);
+      throw Object.assign(new Error('plan start could not mint the estimate'), { code: err?.code });
     }
     res.json({ ok: true, url: minted.url, estimateId: minted.estimateId, reused: minted.reused === true });
   } catch (err) {

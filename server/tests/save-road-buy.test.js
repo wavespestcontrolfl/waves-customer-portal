@@ -42,7 +42,7 @@ const ROAD_DAY = dayAhead(1);
 const PLAIN_DAY = dayAhead(4);
 const NON_ROAD_DAY = dayAhead(12);
 const GATES = ['GATE_ADMIN_ARRIVAL_WINDOWS',
-  'GATE_SCHEDULING_CAPACITY', 'GATE_DRIVE_TIME_CALIBRATION'];
+  'GATE_SCHEDULING_CAPACITY'];
 const savedEnv = Object.fromEntries(GATES.map((key) => [key, process.env[key]]));
 afterAll(() => {
   GATES.forEach((key) => { if (savedEnv[key] === undefined) delete process.env[key]; else process.env[key] = savedEnv[key]; });

@@ -17,6 +17,8 @@ const {
   createPublicToken,
   hashToken,
   regenerationTurfType,
+  resolveOutlineJurisdictionId,
+  parseJsonMaybe,
 } = require('../services/lawn-service-outline');
 const { outlineProgram } = require('../services/service-outline-programs');
 
@@ -78,6 +80,19 @@ function publicUrlForToken(token) {
   return `${publicPortalUrl()}/service-outlines/${encodeURIComponent(token)}`;
 }
 
+function isFertilizerOutline(packet) {
+  return !outlineProgram(packet?.service_line) || packet.service_line === 'tree_shrub';
+}
+
+function legacySarasotaRule(packet) {
+  const snapshot = packet?.input_snapshot_json || {};
+  return isFertilizerOutline(packet) && !snapshot.jurisdictionSource
+    && (packet?.jurisdiction_id || snapshot.jurisdictionId) === 'sarasota_county_fl';
+}
+
+// Older packets may hold the JSON object {} for an empty PostgreSQL array.
+const validationList = (value) => Array.isArray(value) ? value : [];
+
 function safePacket(row, rawToken = null) {
   if (!row) return null;
   return {
@@ -96,9 +111,10 @@ function safePacket(row, rawToken = null) {
     month: row.month,
     seasonBand: row.season_band,
     jurisdictionId: row.jurisdiction_id,
+    ...(legacySarasotaRule(row) && { legacySarasotaRule: true }),
     validationStatus: row.validation_status,
-    validationErrors: row.validation_errors_json || [],
-    adminWarnings: row.admin_warnings_json || [],
+    validationErrors: validationList(row.validation_errors_json),
+    adminWarnings: validationList(row.admin_warnings_json),
     summary: row.summary_json || {},
     content: row.content_json || {},
     expiresAt: row.expires_at,
@@ -149,7 +165,10 @@ function coerceInput(body = {}, { partial = false } = {}) {
     if (hasOwn(body, 'includeExclusions')) input.includeExclusions = body.includeExclusions !== false;
     if (hasOwn(body, 'serviceTier')) input.serviceTier = body.serviceTier || null;
     if (hasOwn(body, 'month')) input.month = body.month || null;
-    if (hasOwn(body, 'jurisdictionId')) input.jurisdictionId = body.jurisdictionId || null;
+    if (hasOwn(body, 'jurisdictionId')) {
+      input.jurisdictionId = body.jurisdictionId || null;
+      input.jurisdictionSource = input.jurisdictionId ? 'staff' : 'estimate';
+    }
     if (hasOwn(body, 'customerNote')) input.customerNote = body.customerNote || '';
     return input;
   }
@@ -168,6 +187,7 @@ function coerceInput(body = {}, { partial = false } = {}) {
     serviceTier: body.serviceTier || null,
     month: body.month || null,
     jurisdictionId: body.jurisdictionId || null,
+    jurisdictionSource: body.jurisdictionId ? 'staff' : 'estimate',
     customerNote: body.customerNote || '',
   };
 }
@@ -224,8 +244,8 @@ async function insertPacket(trx, { estimate, outline, input, req, rawToken, stat
     content_json: outline.content,
     content_html: outline.contentHtml,
     validation_status: outline.validation.status,
-    validation_errors_json: outline.validation.errors,
-    admin_warnings_json: outline.validation.warnings,
+    validation_errors_json: JSON.stringify(validationList(outline.validation.errors)),
+    admin_warnings_json: JSON.stringify(validationList(outline.validation.warnings)),
     token_hash: tokenHash,
     token_last_four: rawToken.slice(-4),
     token_created_at: trx.fn.now(),
@@ -256,6 +276,9 @@ async function insertPacket(trx, { estimate, outline, input, req, rawToken, stat
 
 function inputFromPacket(packet) {
   const snapshot = packet?.input_snapshot_json || {};
+  const savedJurisdiction = packet?.jurisdiction_id || snapshot.jurisdictionId || null;
+  const jurisdictionSource = snapshot.jurisdictionSource ||
+    (isFertilizerOutline(packet) && savedJurisdiction === 'generic_swfl' ? 'estimate' : null);
   return {
     // A regenerated outline keeps its program.
     ...(outlineProgram(packet?.service_line) ? { serviceLine: packet.service_line } : {}),
@@ -269,7 +292,8 @@ function inputFromPacket(packet) {
     includeExclusions: true,
     serviceTier: packet?.service_tier || snapshot.serviceTier || null,
     month: packet?.month || snapshot.month || null,
-    jurisdictionId: packet?.jurisdiction_id || snapshot.jurisdictionId || null,
+    jurisdictionId: isFertilizerOutline(packet) && jurisdictionSource === 'estimate' ? null : savedJurisdiction,
+    ...(jurisdictionSource && { jurisdictionSource }),
     customerNote: snapshot.customerNote || '',
   };
 }
@@ -405,7 +429,7 @@ router.post('/:id/approve', async (req, res, next) => {
     const packet = await db('service_outline_packets').where({ id: req.params.id }).first();
     if (!packet) return res.status(404).json({ error: 'Service outline not found' });
     if (packet.validation_status === 'blocked') {
-      return res.status(422).json({ error: 'Blocked service outlines cannot be approved', validationErrors: packet.validation_errors_json || [] });
+      return res.status(422).json({ error: 'Blocked service outlines cannot be approved', validationErrors: validationList(packet.validation_errors_json) });
     }
     const [updated] = await db.transaction(async (trx) => {
       const [row] = await trx('service_outline_packets')
@@ -454,16 +478,33 @@ router.post('/:id/regenerate', async (req, res, next) => {
     const input = { ...inputFromPacket(sourcePacket), ...coerceInput(req.body || {}, { partial: true }) };
     const offError = programOffError(input.serviceLine);
     if (offError) return res.status(409).json({ error: offError });
+    // Older packets stored the result but did not record whether staff selected the county.
+    // Resolve the conflict before the transaction can revoke the previous customer link.
+    if (legacySarasotaRule(sourcePacket) && !['north_port_fl', 'sarasota_county_fl'].includes(req.body?.jurisdictionId)) {
+      const data = parseJsonMaybe(estimate.estimate_data || estimate.estimateData) || {};
+      if (resolveOutlineJurisdictionId({}, estimate, data) === 'north_port_fl') {
+        return res.status(409).json({
+          code: 'outline_jurisdiction_confirmation_required',
+          error: 'The saved outline uses Sarasota County and the service address indicates North Port. Confirm the property’s fertilizer jurisdiction before regenerating.',
+        });
+      }
+    }
     const outline = await buildServiceOutline({ estimate, input });
     const rawToken = createPublicToken();
-    const revokeOld = req.body.revokeOld !== false;
-    const packet = await db.transaction(async (trx) => {
-      if (revokeOld && !sourcePacket.revoked_at) {
-        const [revoked] = await trx('service_outline_packets')
-          .where({ id: sourcePacket.id })
+    const status = req.body.approve === false || outline.validation.status === 'blocked' ? 'draft' : 'approved';
+    const revokeOld = status === 'approved' && req.body.revokeOld !== false && !sourcePacket.revoked_at;
+    const result = await db.transaction(async (trx) => {
+      let source;
+      if (revokeOld) {
+        [source] = await trx('service_outline_packets')
+          .where({ id: sourcePacket.id, revoked_at: null })
           .update({ status: 'revoked', revoked_at: trx.fn.now(), updated_at: trx.fn.now() })
           .returning('*');
-        await logEvent(trx, revoked, 'revoked', req, { reason: 'regenerated', replacementPending: true });
+        if (!source) return null;
+        await logEvent(trx, source, 'revoked', req, { reason: 'regenerated', replacementPending: true });
+      } else {
+        source = await trx('service_outline_packets').where({ id: sourcePacket.id }).first();
+        if (!source) return null;
       }
       const inserted = await insertPacket(trx, {
         estimate,
@@ -471,7 +512,7 @@ router.post('/:id/regenerate', async (req, res, next) => {
         input,
         req,
         rawToken,
-        status: req.body.approve === false || outline.validation.status === 'blocked' ? 'draft' : 'approved',
+        status,
       });
       await logEvent(trx, inserted, 'regenerated_from_packet', req, {
         sourcePacketId: sourcePacket.id,
@@ -480,13 +521,14 @@ router.post('/:id/regenerate', async (req, res, next) => {
         sourceProductRegistryVersion: sourcePacket.product_registry_version,
         revokedSource: revokeOld,
       });
-      return inserted;
+      return { packet: inserted, source };
     });
-
+    if (!result) return res.status(409).json({ error: 'The original outline changed. Reload it before regenerating.' });
+    const { packet, source } = result;
     res.status(201).json({
       packet: safePacket(packet, canExposePublicToken(packet) ? rawToken : null),
       validation: outline.validation,
-      sourcePacket: safePacket({ ...sourcePacket, status: revokeOld ? 'revoked' : sourcePacket.status }),
+      sourcePacket: safePacket(source),
       publicUrl: canExposePublicToken(packet) ? publicUrlForToken(rawToken) : null,
     });
   } catch (err) {
@@ -499,7 +541,7 @@ router.post('/:id/send', async (req, res, next) => {
     const packet = await db('service_outline_packets').where({ id: req.params.id }).first();
     if (!packet) return res.status(404).json({ error: 'Service outline not found' });
     if (packet.validation_status === 'blocked') {
-      return res.status(422).json({ error: 'Blocked service outlines cannot be sent', validationErrors: packet.validation_errors_json || [] });
+      return res.status(422).json({ error: 'Blocked service outlines cannot be sent', validationErrors: validationList(packet.validation_errors_json) });
     }
     if (!canExposePublicToken(packet)) {
       return res.status(422).json({ error: 'Service outline must be approved before it can be sent' });

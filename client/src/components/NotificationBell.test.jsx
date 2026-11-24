@@ -872,7 +872,7 @@ describe('NotificationBell admin "What to do" and the customer line (GATE_ALERT_
     expect(customerNameFor(plan, 'customer')).toBeNull();
   });
 
-  it('a customer with no `explainable` mark (GATE_ALERT_CUSTOMER_LINE alone) shows the line and keeps "Show full text", with no "What to do"', async () => {
+  it('a customer with no `explainable` mark (the customer line alone) shows the line and keeps "Show full text", with no "What to do"', async () => {
     await withWidth(1280, async () => {
       const { explainable: _a, ...plan } = rows()[0];
       setup({ list: [plan] });
@@ -2078,7 +2078,7 @@ describe('NotificationBell voicemail Listen', () => {
   });
 });
 
-// GATE_ALERT_BELL_ORDER (owner 2026-11-05, admin-bell plan D1): the server ranks the list (order: 'needs-you-first')
+// Needs-you-first order (owner 2026-11-05, admin-bell plan D1): the server ranks the list (order: 'needs-you-first')
 // and names each row's Area (areaChip). The bell draws one Area chip per row that has one, and keeps the server's
 // order everywhere: first page, load more, Done, a refresh.
 describe('NotificationBell admin — ranked list with an Area chip', () => {

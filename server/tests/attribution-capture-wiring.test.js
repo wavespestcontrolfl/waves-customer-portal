@@ -102,8 +102,9 @@ describe('migration 20260705000201 — ad_service_attribution.self_booked_appoin
 describe('booking.js self-booking attribution wiring', () => {
   const src = read('../routes/booking.js');
 
-  test('persists the full client attribution object on the self_booked_appointments insert', () => {
-    expect(src).toMatch(/attribution:\s*\(attribution && typeof attribution === 'object'\)\s*\n?\s*\?\s*JSON\.stringify\(attribution\)\s*:\s*null/);
+  test('persists client attribution plus server-owned source evidence on the self_booked_appointments insert', () => {
+    expect(src).toMatch(/attribution:\s*\(attribution && typeof attribution === 'object'\)\s*\n?\s*\?\s*JSON\.stringify\(attributionWithSourceEvidence\(attribution\)\)\s*:\s*null/);
+    expect(src).toMatch(/attribution:\s*b\.attribution \? JSON\.stringify\(attributionWithSourceEvidence\(b\.attribution\)\) : null/);
   });
 
   test('hands attributeSelfBooking the booking id (the per-booking funnel-row dedupe key)', () => {
@@ -229,11 +230,13 @@ describe('lead-estimate-link organic self-booking row wiring', () => {
     expect((src.match(/\.onConflict\('self_booked_appointment_id'\)\.ignore\(\)/g) || []).length).toBe(2);
   });
 
-  test('classifier compares NORMALIZED utm source/medium in the paid/social branches (casing fix, webhook included)', () => {
+  test('classifier delegates normalized paid/social precedence to the shared evidence classifier', () => {
     const classify = read('../services/lead-source-classify.js');
-    expect(classify).toMatch(/source === 'google' && medium === 'cpc'/);
-    expect(classify).toMatch(/source === 'facebook' \|\| source === 'fb'/);
-    expect(classify).not.toMatch(/utmSource === 'google'/);
+    const { determineLeadSource } = require('../services/lead-source-classify');
+    expect(classify).toMatch(/classifyAttributionSignals\(\{/);
+    expect(determineLeadSource('', '', ' Google ', 'PPC')).toMatchObject({ source: 'google_ads', channel: 'paid' });
+    expect(determineLeadSource('', '', 'IG', 'Paid Social')).toMatchObject({ source: 'facebook', channel: 'paid' });
+    expect(determineLeadSource('', '', 'Facebook', 'organic')).toMatchObject({ source: 'facebook', channel: 'organic' });
   });
 
   test('lead-webhook still owns the same classifier (extraction, not a fork)', () => {

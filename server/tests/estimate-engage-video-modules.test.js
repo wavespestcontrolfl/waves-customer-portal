@@ -141,21 +141,30 @@ describe('placement plan', () => {
 describe('render QA', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  // Report tours retired from emails 2026-09-26 (they state the removed
-  // 90-day money-back claim on camera): the module must drop cleanly even
-  // for the packs that carry a tour config.
-  for (const packKey of ['pest', 'lawn', 'tree_shrub']) {
-    test(`unopened drops the retired ${packKey} report tour cleanly`, () => {
+  // Report tours are back on with the 2026-11-22 re-cut (no 90-day claim on
+  // camera): a pack that carries a tour config renders the whole module.
+  for (const packKey of ['pest', 'tree_shrub']) {
+    test(`unopened renders the ${packKey} report tour: preview linked to the mp4, with its caption`, () => {
       const rendered = renderWith(byKey.get('estimate.engage_unopened'), packKey);
       expect(rendered.validation.ok).toBe(true);
       expect(rendered.missingPayload).toEqual([]);
       expect(rendered.html).not.toMatch(/\{\{|\}\}/);
-      const slug = copyPrivate.PACKS[packKey].video.slug;
-      expect(rendered.html).not.toContain(`/app-email/videos/waves-${slug}-tour-preview.gif`);
-      expect(rendered.html).not.toContain(`/app-email/videos/waves-${slug}-tour.mp4`);
-      expect(rendered.text).not.toContain('Tap to watch — what a real Waves');
+      const { slug, caption } = copyPrivate.PACKS[packKey].video;
+      const cut = copyPrivate.REPORT_TOUR_CUT;
+      expect(rendered.html).toContain(`/app-email/videos/waves-${slug}-tour-preview.gif?v=${cut}`);
+      expect(rendered.html).toContain(`/app-email/videos/waves-${slug}-tour.mp4?v=${cut}`);
+      expect(rendered.text).toContain(caption);
     });
   }
+
+  test('the held lawn tour drops the report module cleanly', () => {
+    const rendered = renderWith(byKey.get('estimate.engage_unopened'), 'lawn');
+    expect(rendered.validation.ok).toBe(true);
+    expect(rendered.missingPayload).toEqual([]);
+    expect(rendered.html).not.toMatch(/\{\{|\}\}/);
+    expect(rendered.html).not.toContain('/app-email/videos/waves-lawn-tour');
+    expect(rendered.text).not.toContain('Tap to watch — what a real Waves');
+  });
 
   test('a no-video category drops the report module cleanly (no broken image, no leftovers)', () => {
     const rendered = renderWith(byKey.get('estimate.engage_gone_quiet'), 'mosquito');

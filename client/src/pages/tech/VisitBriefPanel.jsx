@@ -33,6 +33,7 @@ import { Camera, ClipboardCheck, ClipboardList, FileText, Flag, Map, MessageSqua
 import { DEAD_ASSIGNMENT_STATUSES, stopPropertyAlerts, TERMINAL_STATUSES } from './routeStops';
 import { withPassLinks } from './passLinks';
 import { canRecordConsultationOutcome } from '../../lib/consultationVisit';
+import { isProjectBackedCompletion, projectReportClosed } from '../../lib/dispatchCompletionRouting';
 import { isMlUnit, mlToFlOz } from '../../lib/measure-units';
 import { formatETDateTime, formatETTime } from '../../lib/timezone';
 import {
@@ -47,6 +48,8 @@ import {
   visitMoneySummary,
 } from './visitBrief';
 import { useVisitPrepPhotoUrls } from '../../hooks/useVisitPrepPhotoUrls';
+import PropertyFertilizerMap from '../../components/tech/PropertyFertilizerMap';
+import { detectServiceCategory } from '../../lib/service-colors';
 
 // Inside the field workspace (.tech-field, tech-field.css) these resolve to the
 // Waves Admin look; the fallbacks are the same light values, for a render
@@ -937,8 +940,11 @@ function ConsultationOutcomeAction({ service, onOutcome, style }) {
 // trace-eligibility guard — one row per member service on a grouped stop.
 function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead, onOutcome, onEstimate = null }) {
   const closeoutAvailable = !!service.visitCloseoutPacket || recordlessVisitNeedsCloseout(service);
-  const reportDisabled = !closeoutAvailable
-    && (TERMINAL_STATUSES.has(service.status) || ['sent', 'closed'].includes(service.linkedProject?.status));
+  // A linked report speaks for the button only on a visit that completes
+  // through its project: a service-report visit with a leftover legacy project
+  // opens its own sheet or form, as the page routes it.
+  const project = isProjectBackedCompletion(service) ? service.linkedProject : null;
+  const reportDisabled = !closeoutAvailable && (TERMINAL_STATUSES.has(service.status) || projectReportClosed(service));
   const btn = { flex: '1 1 auto' };
   return (
     <div style={{ marginTop: 8 }}>
@@ -964,11 +970,11 @@ function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead
           {/* A visit with an existing linked report continues it (in-place
               editor) instead of creating a duplicate; a sent/closed report
               or completed visit is terminal (openProjectOrContinue no-ops). */}
-          {closeoutAvailable ? 'Open closeout' : service.linkedProject?.status === 'sent'
+          {closeoutAvailable ? 'Open closeout' : project?.status === 'sent'
             ? 'Sent'
-            : service.linkedProject?.status === 'closed' || service.status === 'completed'
+            : project?.status === 'closed' || service.status === 'completed'
               ? 'Completed'
-              : service.linkedProject?.id ? 'Continue' : 'Report'}
+              : project?.id ? 'Continue' : 'Report'}
         </button>
         <button className="tf-button" onClick={(event) => { event.currentTarget.focus(); onPhotos(service); }} style={btn}><Camera aria-hidden="true" />Photos</button>
         {/* Hidden when the schedule feed marks the service trace-ineligible
@@ -1204,6 +1210,14 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   // The day row marks a member whose neighborhood takes gate codes from the visit.
   const gateVisit = request ? stop.services.find((m) => m.neighborhoodGateActions === true) : null;
   const grouped = stop.services.length > 1;
+  const mappedProperties = new Set();
+  const fertilizerVisits = stop.services.filter(member => {
+    if (!member.id || !['tree', 'lawn'].includes(detectServiceCategory(member.serviceType || member.service_type))) return false;
+    const propertyKey = member.propertyId || member.property_id || member.id;
+    if (mappedProperties.has(propertyKey)) return false;
+    mappedProperties.add(propertyKey);
+    return true;
+  });
   const loading = detail?.status === 'loading';
   const failed = detail?.status === 'error';
   const byService = detail?.byService || {};
@@ -1283,6 +1297,10 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
       )}
       {line && <SetTextsSection line={line} service={service} visitIds={stop.services.map((m) => m.id).filter(Boolean)} request={request} onBusyChange={setPresetBusy} />}
       <AccessSection alerts={alerts} access={access} gate={gateVisit ? { visitId: gateVisit.id, request, onChanged: onGateChanged } : null} />
+      {request && fertilizerVisits.map(member => <div key={member.id}>
+        {fertilizerVisits.length > 1 && <strong>{member.serviceType || member.service_type}</strong>}
+        <PropertyFertilizerMap request={request} endpoint={`/admin/schedule/${member.id}/property-areas/fertilizer-map`} />
+      </div>)}
       <VisitAccessCodes
         request={request}
         customerId={service.customer_id || service.customerId || null}

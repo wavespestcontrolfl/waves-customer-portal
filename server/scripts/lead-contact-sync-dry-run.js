@@ -1,13 +1,12 @@
 #!/usr/bin/env node
 /**
- * Dry run for the lead contact sync (GATE_LEAD_STATUS_FOLLOWS_CONTACT, owner
- * 2026-11-04). SELECTs only: it judges the same 'new' leads the sweep judges
+ * Dry run for the lead contact sync (owner 2026-11-04). SELECTs only: it judges the same 'new' leads the sweep judges
  * and prints COUNTS, no names, phones, emails or ids:
  *   - how many 'new' leads would move to 'contacted', by evidence type;
  *   - how many stay 'new', by reason (no contact, shared phone, ...).
  *
  * Usage: node server/scripts/lead-contact-sync-dry-run.js [--json]
- * The gate does not need to be on: nothing is written.
+ * Nothing is written.
  */
 const db = require('../models/db');
 const { candidateLeadsQuery, judgeLeads, LOOKBACK_DAYS } = require('../services/lead-contact-sync');

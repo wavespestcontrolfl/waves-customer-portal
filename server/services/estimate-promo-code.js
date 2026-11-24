@@ -30,6 +30,9 @@ const CREATED_BY = 'system:estimate_promo_code';
 // An estimate outside these states can still be accepted, so its entered
 // code still holds one of the discount's uses.
 const DEAD_ESTIMATE_STATUSES = ['declined', 'expired', 'send_failed'];
+// An invoice in one of these states takes no more payment setup, so a code
+// still waiting on it will never be redeemed.
+const CLOSED_INVOICE_STATUSES = ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'];
 // Rules of a discount row that an account credit cannot honor: they scope the
 // discount to one service, one tier, one tender or one customer group.
 const UNSUPPORTED_RULES = [
@@ -81,18 +84,35 @@ function creditAmountOf(discount, now = new Date()) {
   return amount > 0 ? amount : null;
 }
 
-async function customerHasCompletedService(conn, customerId) {
+// `exceptVisit`: the visit an invoice bills ({ serviceRecordId,
+// scheduledServiceId }). A new customer paying their first invoice has that
+// one completed visit and is still new for a code entered on it.
+async function customerHasCompletedService(conn, customerId, exceptVisit = null) {
   const row = await conn('service_records').where({ customer_id: customerId })
-    .whereRaw("COALESCE(status, 'completed') = 'completed'").first('id');
+    .whereRaw("COALESCE(status, 'completed') = 'completed'")
+    .modify((q) => {
+      if (exceptVisit?.serviceRecordId) q.whereNot('id', exceptVisit.serviceRecordId);
+      if (exceptVisit?.scheduledServiceId) {
+        q.where(function otherVisit() {
+          this.whereNull('scheduled_service_id').orWhereNot('scheduled_service_id', exceptVisit.scheduledServiceId);
+        });
+      }
+    })
+    .first('id');
   return Boolean(row);
 }
 
 // Did this customer redeem this discount's code as an account credit? The
 // office promo path (DiscountEngine.applyPromoCode) reads it too, so a code
 // is good once per customer whichever way it is used.
+// On an accepted estimate or on an invoice's pay page (invoice-promo-code.js).
 async function customerRedeemedPromoCredit(conn, customerId, discountId) {
-  return Boolean(await conn('estimate_promo_codes')
-    .where({ discount_id: discountId, redeemed_customer_id: customerId, status: 'redeemed' }).first('id'));
+  return Boolean(
+    await conn('estimate_promo_codes')
+      .where({ discount_id: discountId, redeemed_customer_id: customerId, status: 'redeemed' }).first('id')
+    || await conn('invoice_promo_codes')
+      .where({ discount_id: discountId, customer_id: customerId, status: 'redeemed' }).first('id'),
+  );
 }
 
 // Has this customer had this discount before: redeemed here, or assigned by
@@ -102,13 +122,14 @@ async function customerAlreadyUsed(conn, customerId, discountId) {
   return Boolean(await conn('customer_discounts').where({ customer_id: customerId, discount_id: discountId }).first('id'));
 }
 
-async function customerBlocked(conn, customerId, discount) {
+async function customerBlocked(conn, customerId, discount, { exceptVisit = null } = {}) {
   if (!customerId) return false;
-  if (discount.requires_new_customer && await customerHasCompletedService(conn, customerId)) return true;
+  if (discount.requires_new_customer && await customerHasCompletedService(conn, customerId, exceptVisit)) return true;
   return customerAlreadyUsed(conn, customerId, discount.id);
 }
 
-// Uses already counted plus codes waiting on estimates that can still be accepted.
+// Uses already counted, plus codes waiting on estimates that can still be
+// accepted, plus codes entered on a pay page and not redeemed yet.
 async function usesLeft(conn, discount) {
   const max = Number(discount.promo_code_max_uses);
   if (!(max > 0)) return true;
@@ -118,7 +139,32 @@ async function usesLeft(conn, discount) {
     .whereNotIn('e.status', DEAD_ESTIMATE_STATUSES)
     .whereNull('e.archived_at')
     .count('* as c').first();
-  return Number(discount.promo_code_current_uses || 0) + Number(held?.c || 0) < max;
+  // Only on invoices still open: a code left on one that was paid another way
+  // or voided is never redeemed and holds nothing.
+  const onInvoices = await conn('invoice_promo_codes as p')
+    .join('invoices as i', 'i.id', 'p.invoice_id')
+    .where({ 'p.discount_id': discount.id, 'p.status': 'entered' })
+    .whereNotIn('i.status', CLOSED_INVOICE_STATUSES)
+    .count('* as c').first();
+  return Number(discount.promo_code_current_uses || 0) + Number(held?.c || 0) + Number(onInvoices?.c || 0) < max;
+}
+
+// Count one use of the code and post its credit, in the caller's transaction.
+// The count and its cap are one statement: two redemptions can never both take
+// the last use. Returns the ledger entry, or null when the uses ran out (then
+// nothing was written).
+async function mintPromoCredit(trx, { discountId, customerId, amount, note }) {
+  const counted = await trx('discounts').where({ id: discountId })
+    .where(function underCap() {
+      this.whereNull('promo_code_max_uses').orWhere('promo_code_max_uses', '<=', 0)
+        .orWhereRaw('COALESCE(promo_code_current_uses, 0) < promo_code_max_uses');
+    })
+    .update({ promo_code_current_uses: trx.raw('COALESCE(promo_code_current_uses, 0) + 1') });
+  if (!counted) return null;
+  const { entry } = await postCreditMovement({
+    customerId, delta: round2(amount), source: 'promo_code', note, createdBy: CREATED_BY,
+  }, trx);
+  return entry;
 }
 
 // Is this text a promo code in admin Discounts, in any state? The estimate
@@ -225,27 +271,17 @@ async function redeemInTransaction(trx, estimateId) {
   // Accepted with no customer account to credit: closed with its audit row so
   // the office sees the promise, never left waiting on a step that will not run.
   if (!customerId) return voidRow(trx, { row, customerId: null, reason: 'no_customer' });
-  const discount = await trx('discounts').where({ id: row.discount_id }).first();
+  // Locked: a redemption of the same code on a pay page (invoice-promo-code.js)
+  // takes this lock too, so the once-per-customer check below sees it.
+  const discount = await trx('discounts').where({ id: row.discount_id }).forUpdate().first();
   if (!discount || discount.is_active !== true) return voidRow(trx, { row, customerId, reason: 'code_inactive' });
   if (await customerBlocked(trx, customerId, discount)) return voidRow(trx, { row, customerId, reason: 'customer_not_eligible' });
 
-  // The count and its cap in one statement: two accepts can never both take the last use.
-  const counted = await trx('discounts').where({ id: discount.id })
-    .where(function underCap() {
-      this.whereNull('promo_code_max_uses').orWhere('promo_code_max_uses', '<=', 0)
-        .orWhereRaw('COALESCE(promo_code_current_uses, 0) < promo_code_max_uses');
-    })
-    .update({ promo_code_current_uses: trx.raw('COALESCE(promo_code_current_uses, 0) + 1') });
-  if (!counted) return voidRow(trx, { row, customerId, reason: 'uses_exhausted' });
-
   const amount = round2(row.credit_amount);
-  const { entry } = await postCreditMovement({
-    customerId,
-    delta: amount,
-    source: 'promo_code',
-    note: `Promo code ${row.code} (estimate ${estimateId})`,
-    createdBy: CREATED_BY,
-  }, trx);
+  const entry = await mintPromoCredit(trx, {
+    discountId: discount.id, customerId, amount, note: `Promo code ${row.code} (estimate ${estimateId})`,
+  });
+  if (!entry) return voidRow(trx, { row, customerId, reason: 'uses_exhausted' });
   await trx('estimate_promo_codes').where({ id: row.id }).update({
     status: 'redeemed',
     redeemed_at: trx.fn.now(),
@@ -314,6 +350,9 @@ async function sweepAcceptedPromoCodes() {
 }
 
 module.exports = {
+  customerBlocked,
+  usesLeft,
+  mintPromoCredit,
   isPromoCode,
   sweepAcceptedPromoCodes,
   customerRedeemedPromoCredit,

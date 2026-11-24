@@ -25,7 +25,7 @@ const {
   makeSection,
   parseJsonMaybe,
   renderOutlineHtml,
-  resolveJurisdictionId,
+  resolveOutlineJurisdictionId,
   resolveSeasonBand,
   validateContent,
 } = require('./lawn-service-outline');
@@ -176,11 +176,11 @@ const MOSQUITO_COPY = Object.freeze({
 });
 
 // The product list: catalog rows read by name at build time (decision D1-B, as on the lawn and pest outlines), never a
-// typed-in name. Talak is "Atticus Talak 7.9 F" in production and "Atticus Talak" in a repo-built catalog: the first
-// name found prints. The dunk and station rows print only when the estimate's program row holds that add-on. Left off:
-// Tekko Trio (indoor-only, owner 2026-10-01), Bifen I/T and Talstar P (inactive; they are Talak), Cyzmic CS, Altosid.
+// typed-in name. The house bifenthrin is LESCO Crosscheck Plus (owner ruling 2026-11-18; it replaced Atticus Talak 7.9 F).
+// The dunk and station rows print only when the estimate's program row holds that add-on. Left off:
+// Tekko Trio (indoor-only, owner 2026-10-01), Bifen I/T and Talstar P (inactive; they are Talak, which is no longer the house bifenthrin), Cyzmic CS, Altosid.
 const MOSQUITO_PRODUCTS = Object.freeze([
-  { step: 'insects', names: ['Atticus Talak 7.9 F', 'Atticus Talak'] },
+  { step: 'insects', names: ['LESCO Crosscheck Plus'] },
   { step: 'insects', names: ['Scion Insecticide'] },
   { step: 'spots', names: ['Tekko Pro IGR'] },
   { step: 'spots', names: ['Summit Mosquito Dunk Tablets'], addOn: 'dunks' },
@@ -277,7 +277,7 @@ async function buildMosquitoOutline({ db, estimate, input = {}, now = new Date()
   const month = Number(input.month || currentMonthNumber(now));
   const seasonBand = resolveSeasonBand(month);
   // Mosquito has no fertilizer rule, but the packet records its rule area as every outline does (validateContent).
-  const jurisdictionId = input.jurisdictionId || resolveJurisdictionId(estimate.address);
+  const jurisdictionId = resolveOutlineJurisdictionId(input, estimate, estimateData);
   const jurisdictionRule = await loadFertilizerRule(db, jurisdictionId);
   const ruleJurisdictionId = jurisdictionRule?.jurisdiction_id || jurisdictionId;
   const productList = await loadMosquitoProductList(db, addOns);

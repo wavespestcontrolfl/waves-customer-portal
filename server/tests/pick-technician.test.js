@@ -197,6 +197,9 @@ describe('pickTechnicianForVisit — service-line map live', () => {
     expect(lineTech.pickLineTechnician).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({
       customerId: 'cust-1', lat: 27.05, lng: -82.4,
     }));
+    // The lead the visit is booked for (an after-call booking has the call's lead): a Waves Assessment's line.
+    await pickTechnicianForVisit({ conn: makeConn(), ...base, leadId: 'lead-7' });
+    expect(lineTech.pickLineTechnician).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ customerId: 'cust-1', leadId: 'lead-7' }));
   });
 
   test('the gap technician, and nobody, keep the line reason', async () => {

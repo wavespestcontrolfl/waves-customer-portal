@@ -23,7 +23,7 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async (url) => ({
     ok: true,
     json: async () => (String(url).includes('/properties?context=appointment_address')
-      ? { properties: PROPERTIES, canChangeAppointmentAddress: true }
+      ? { properties: PROPERTIES }
       : (String(url).endsWith('/admin/discounts') ? [] : {})),
   })));
 });

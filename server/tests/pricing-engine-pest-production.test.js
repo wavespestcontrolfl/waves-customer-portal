@@ -153,4 +153,42 @@ describe('pest production burden pricing inputs', () => {
       'estimated_service_time_60_plus',
     ]));
   });
+
+  // GATE_CAGE_TWO_SIZES website hold: the engine reads no gate. The public quote
+  // sets features.poolCageReview when today's four sizes call the cage Large or
+  // Oversized; the engine then holds it the way a Large cage is held.
+  describe('poolCageReview (two-size website hold)', () => {
+    const cageHome = (features) => pestLine({
+      homeSqFt: 2500,
+      lotSqFt: 10000,
+      features: { pool: true, poolCage: true, shrubs: 'moderate', trees: 'moderate', complexity: 'moderate', ...features },
+    });
+
+    test('a Medium cage flagged for review is held and keeps the Medium price', () => {
+      const plain = cageHome({ poolCageSize: 'medium' });
+      const flagged = cageHome({ poolCageSize: 'medium', poolCageReview: true });
+      expect(plain.productionDiagnostics.reviewReasons).not.toContain('large_pool_cage');
+      expect(flagged.productionDiagnostics.reviewReasons).toContain('large_pool_cage');
+      expect(flagged.manualReviewReasons).toContain('pest_large_or_oversized_pool_cage');
+      expect(flagged.additionalAdj).toBe(plain.additionalAdj);
+      expect(flagged.productionDiagnostics.poolCageSize).toBe('medium');
+    });
+
+    test('a large or oversized cage keeps its own reason, never doubled', () => {
+      const large = cageHome({ poolCageSize: 'large', poolCageReview: true });
+      expect(large.productionDiagnostics.reviewReasons.filter((r) => r === 'large_pool_cage')).toHaveLength(1);
+      const oversized = cageHome({ poolCageSize: 'oversized', poolCageReview: true });
+      expect(oversized.productionDiagnostics.reviewReasons).toContain('oversized_pool_cage');
+      expect(oversized.productionDiagnostics.reviewReasons).not.toContain('large_pool_cage');
+    });
+
+    test('the flag does nothing without a cage, or unset', () => {
+      const noCage = pestLine({
+        homeSqFt: 2500, lotSqFt: 10000,
+        features: { pool: true, poolCage: false, poolCageReview: true, shrubs: 'moderate', trees: 'moderate', complexity: 'moderate' },
+      });
+      expect(noCage.productionDiagnostics.reviewReasons).not.toContain('large_pool_cage');
+      expect(cageHome({ poolCageSize: 'small' }).productionDiagnostics.reviewReasons).not.toContain('large_pool_cage');
+    });
+  });
 });

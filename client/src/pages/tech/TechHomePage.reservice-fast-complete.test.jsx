@@ -127,7 +127,7 @@ it('sends the sheet\'s full-form escape to the full completion screen, not the r
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
   fireEvent.click(await screen.findByRole('button', { name: 'Sheet full form' }));
-  expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-escape');
+  expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&date=2099-01-01&completeService=svc-escape');
   expect(screen.queryByText(/Existing recap form/)).not.toBeInTheDocument();
 });
 

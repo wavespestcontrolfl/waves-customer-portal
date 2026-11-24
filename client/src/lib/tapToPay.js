@@ -13,11 +13,16 @@
 import { adminFetch } from './adminFetch';
 import { snapshotForHandoff } from './tapToPayReturn';
 import { isWavesAdminApp } from '../native/platform';
+import { registerReloadHold } from './reloadHolds';
 
 // The app's one answer per request (ios/WavesPay/Sources/PortalView.swift):
 // detail = { requestId, status: 'succeeded' | 'failed' | 'canceled',
 //            invoiceId?, paymentIntentId?, message? }.
 const IN_APP_RESULT_EVENT = 'wavesadmin:taptopay';
+// A payment waiting for the app's answer holds a reload: the answer comes to
+// this page only.
+let openInAppPayments = 0;
+registerReloadHold('tap-to-pay', () => openInAppPayments > 0);
 
 function collectInApp(deepLink) {
   const requestId = typeof crypto !== 'undefined' && crypto.randomUUID
@@ -28,6 +33,7 @@ function collectInApp(deepLink) {
       const detail = event?.detail || {};
       if (detail.requestId !== requestId) return;
       window.removeEventListener(IN_APP_RESULT_EVENT, onResult);
+      openInAppPayments -= 1;
       resolve({
         inApp: true,
         status: detail.status,
@@ -36,7 +42,13 @@ function collectInApp(deepLink) {
       });
     };
     window.addEventListener(IN_APP_RESULT_EVENT, onResult);
-    window.webkit.messageHandlers.wavesAdmin.postMessage({ type: 'tapToPay', requestId, deepLink });
+    openInAppPayments += 1;
+    try {
+      window.webkit.messageHandlers.wavesAdmin.postMessage({ type: 'tapToPay', requestId, deepLink });
+    } catch (err) {
+      openInAppPayments -= 1;
+      throw err;
+    }
   });
 }
 

@@ -186,6 +186,48 @@ describe('mapSharedResultToVerdict', () => {
     expect(result.verdict).toBe('noindex');
   });
 
+  // 2026-11-23: a spoke's own terms page (200, full page, robots noindex) rang
+  // as a broken cited page. A legal page is noindex on purpose.
+  describe('noindex on a legal page', () => {
+    const SPOKE_TERMS = 'https://www.parrishexterminator.com/terms-of-service/';
+    test.each([
+      SPOKE_TERMS,
+      'https://www.wavespestcontrol.com/privacy-policy/',
+      'https://bradentonflpestcontrol.com/privacy',
+      'https://www.wavespestcontrol.com/Accessibility/',
+    ])('%s is ok', (url) => {
+      const result = mapSharedResultToVerdict(shared({ target_url: url, final_url: url, live_status: 'noindex', noindex_detected: true }));
+      expect(result.verdict).toBe('ok');
+    });
+
+    test('a legal page reached through a redirect is redirect_ok', () => {
+      const result = mapSharedResultToVerdict(shared({
+        target_url: 'https://parrishexterminator.com/terms-of-service/', final_url: SPOKE_TERMS, http_status: '301',
+        redirect_target_url: SPOKE_TERMS, live_status: 'noindex', noindex_detected: true,
+      }));
+      expect(result.verdict).toBe('redirect_ok');
+    });
+
+    test('a legal page that reads as not found still fails', () => {
+      const result = mapSharedResultToVerdict(shared({ final_url: SPOKE_TERMS, live_status: 'noindex', noindex_detected: true, soft_not_found: true }));
+      expect(result.verdict).toBe('noindex');
+    });
+
+    test.each([
+      'https://www.wavespestcontrol.com/pest-control-costs/',
+      'https://www.wavespestcontrol.com/blog/terms-of-service-explained/',
+      'https://www.wavespestcontrol.com/terms-of-service/extra/',
+    ])('noindex on a non-legal path %s still fails', (url) => {
+      const result = mapSharedResultToVerdict(shared({ target_url: url, final_url: url, live_status: 'noindex', noindex_detected: true }));
+      expect(result.verdict).toBe('noindex');
+    });
+
+    test('a legal path with another bad status is not excused', () => {
+      expect(mapSharedResultToVerdict(shared({ final_url: SPOKE_TERMS, live_status: 'missing', http_status: '404' })).verdict).toBe('not_found');
+      expect(mapSharedResultToVerdict(shared({ final_url: SPOKE_TERMS, live_status: 'challenge' })).verdict).toBe('challenge');
+    });
+  });
+
   test('a shared "canonicalized" classifies as canonical_elsewhere, carrying the canonical target', () => {
     const result = mapSharedResultToVerdict(shared({ live_status: 'canonicalized', canonical_target_url: 'https://wavespestcontrol.com/other-page/' }));
     expect(result).toMatchObject({ verdict: 'canonical_elsewhere', detail: { canonicalUrl: 'https://wavespestcontrol.com/other-page/' } });

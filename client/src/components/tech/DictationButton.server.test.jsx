@@ -75,6 +75,50 @@ describe("DictationButton with server dictation on", () => {
     expect(browserMic).not.toHaveBeenCalled();
   });
 
+  it("a send with no answer asks to resend only for a field that says it takes the words (resendWanted, the IB bar)", async () => {
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    let posts = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      if (String(url).endsWith("/availability")) return { ok: true, json: async () => ({ available: true }) };
+      posts += 1;
+      if (posts === 1) throw new TypeError("Load failed");
+      return { ok: true, json: async () => ({ text: "Gate is on the left." }) };
+    }));
+    const onAppend = vi.fn();
+    render(<DictationButton onAppend={onAppend} title="Dictate" resendWanted={() => true} />);
+    const mic = await screen.findByRole("button", { name: "Dictate" });
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    await act(async () => { fireEvent.click(mic); });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Stop dictation" })).toBeInTheDocument());
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Stop dictation" })); });
+    await waitFor(() => expect(onAppend).toHaveBeenCalledWith("Gate is on the left."));
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(posts).toBe(2);
+    expect(browserMic).not.toHaveBeenCalled();
+  });
+
+  it("without resendWanted a send with no answer shows the error and asks nothing", async () => {
+    // "no" if asked, so a mic that wrongly asks fails here instead of resending forever
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirm);
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      if (String(url).endsWith("/availability")) return { ok: true, json: async () => ({ available: true }) };
+      throw new TypeError("Load failed");
+    }));
+    const onAppend = vi.fn();
+    render(<DictationButton onAppend={onAppend} title="Dictate" />);
+    const mic = await screen.findByRole("button", { name: "Dictate" });
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    await act(async () => { fireEvent.click(mic); });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Stop dictation" })).toBeInTheDocument());
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Stop dictation" })); });
+    await waitFor(() => expect(alert).toHaveBeenCalledWith("Dictation error: The words did not come back."));
+    expect(confirm).not.toHaveBeenCalled();
+    expect(onAppend).not.toHaveBeenCalled();
+    expect(browserMic).not.toHaveBeenCalled();
+  });
+
   it("gate off: Send is never held and the browser mic is the one that listens", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ available: false }) })));
     render(<><DictationButton onAppend={vi.fn()} title="Dictate" /><SendButton /></>);

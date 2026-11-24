@@ -1,7 +1,7 @@
 /**
  * GET /api/admin/schedule/reservice-request-suggestion and the
  * `customerRequest` intake on POST /api/admin/schedule
- * (GATE_RESERVICE_OFFICE_REQUEST — reserviceOfficeRequest in feature-gates).
+ * (the Schedule screen's "Customer's words" box).
  *
  * Harness mirrors admin-schedule-create-tech-absence.test.js: a strict-ish db
  * mock, the real router, real HTTP. What is pinned here: gate off = route
@@ -53,15 +53,6 @@ jest.mock('../services/call-booking-catalog', () => ({
   ...jest.requireActual('../services/call-booking-catalog'),
   shiftCallFollowUpsForParentMove: jest.fn().mockResolvedValue(0),
 }));
-
-const gateState = { reserviceOfficeRequest: true };
-jest.mock('../config/feature-gates', () => {
-  const actual = jest.requireActual('../config/feature-gates');
-  return {
-    ...actual,
-    isEnabled: jest.fn((name) => (name === 'reserviceOfficeRequest' ? gateState.reserviceOfficeRequest : actual.isEnabled(name))),
-  };
-});
 
 const db = require('../models/db');
 const express = require('express');
@@ -122,7 +113,6 @@ afterAll((done) => { server.close(done); });
 let inserts;
 beforeEach(() => {
   jest.clearAllMocks();
-  gateState.reserviceOfficeRequest = true;
   inserts = [];
   tables = {
     columns: { scheduled_services: { source_action: {}, customer_request: {}, customer_request_source: {}, is_callback: {} } },
@@ -164,18 +154,9 @@ async function post(body) {
 }
 
 describe('GET /reservice-request-suggestion', () => {
-  test('gate off: {enabled:false, suggestion:null} and no read', async () => {
-    gateState.reserviceOfficeRequest = false;
+  test('the customer\'s latest inbound text, with kind and time', async () => {
     const { status, body } = await get(`/reservice-request-suggestion?customerId=${CUST}`);
     expect(status).toBe(200);
-    expect(body).toEqual({ enabled: false, suggestion: null });
-    expect(db).not.toHaveBeenCalledWith('sms_log');
-  });
-
-  test('gate on: the customer\'s latest inbound text, with kind and time', async () => {
-    const { status, body } = await get(`/reservice-request-suggestion?customerId=${CUST}`);
-    expect(status).toBe(200);
-    expect(body.enabled).toBe(true);
     expect(body.suggestion).toMatchObject({ id: SMS_ID, kind: 'text', text: 'Ants are back in the kitchen' });
     expect(typeof body.suggestion.at).toBe('string');
   });
@@ -225,13 +206,6 @@ describe('POST / — customerRequest intake', () => {
     tables.services = [{ id: 'svc-pest-re', service_key: 'pest_control_quarterly', name: 'Quarterly Pest Control' }];
     await post({ ...base, serviceType: 'Quarterly Pest Control', customerRequest: { text: 'Ants' } });
     expect(inserts[0]).not.toHaveProperty('customer_request');
-  });
-
-  test('gate off: the field is ignored and the row is untouched', async () => {
-    gateState.reserviceOfficeRequest = false;
-    await post({ ...base, customerRequest: { text: 'Ants', suggestionId: SMS_ID, suggestionKind: 'text' } });
-    expect(inserts[0]).not.toHaveProperty('customer_request');
-    expect(inserts[0]).not.toHaveProperty('customer_request_source');
   });
 
   test('a pre-migration schema (no customer_request column) books without it', async () => {

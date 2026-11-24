@@ -181,6 +181,16 @@ maybeDescribe('portal messages: office-hours Waves AI step-in (live Postgres)', 
     await park(sent.id);
   }, 60000);
 
+  test('a message with a photo is never taken: a photo is for a person to look at', async () => {
+    const pat = await customer('Photo');
+    const sent = await written(pat, 'What is this bug?');
+    await db('messages').where({ id: sent.id }).update({ media: JSON.stringify([{ type: 'photo', key: `photos/portal-messages/${pat.id}/photo_0_${RUN}.jpg` }]) });
+    await DayAi.answerWaitingMessages({ now: DUE });
+    expect((await metaOf(sent.id)).dayAi).toBeUndefined();
+    expect(mockCreate).not.toHaveBeenCalled();
+    await park(sent.id);
+  }, 60000);
+
   test('nothing is taken while the clock is outside office hours', async () => {
     const pat = await customer('Late');
     const sent = await written(pat, 'Is anyone there?');

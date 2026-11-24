@@ -1,5 +1,5 @@
 /**
- * GATE_DEAD_NUMBER_ALERT against live Postgres: the real sms_log reads, the real notifyAdmin dedupe under the
+ * The dead-number alert against live Postgres: the real sms_log reads, the real notifyAdmin dedupe under the
  * key's lock, and the real close. The rules themselves are in dead-number-alert.test.js. Synthetic customer and
  * numbers only; every row this suite writes is found by its customer id and removed afterwards.
  */
@@ -21,7 +21,6 @@ maybeDescribe('dead number alert (live Postgres)', () => {
   beforeAll(async () => {
     db = require('../models/db');
     deadNumber = require('../services/dead-number-alert');
-    process.env.GATE_DEAD_NUMBER_ALERT = 'true';
     await db('customers').insert({ id: customerId, first_name: 'Jane', last_name: 'Doe', phone: PHONE });
   });
   const clean = async () => {
@@ -30,7 +29,6 @@ maybeDescribe('dead number alert (live Postgres)', () => {
   };
   beforeEach(clean);
   afterAll(async () => {
-    delete process.env.GATE_DEAD_NUMBER_ALERT;
     await clean();
     await db('customers').where({ id: customerId }).del();
   });

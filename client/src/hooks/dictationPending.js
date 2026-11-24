@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { registerReloadHold } from "../lib/reloadHolds";
 
 // Which dictation mics hold words that have not arrived yet: a clip being
 // recorded or transcribed (server dictation, GATE_SERVER_DICTATION). The words
@@ -23,6 +24,8 @@ const subscribe = (fn) => {
   return () => listeners.delete(fn);
 };
 const snapshot = () => pendingIds.size > 0;
+// Words still on their way hold an automatic reload of an out-of-date tab.
+registerReloadHold("dictation", snapshot);
 
 export default function useDictationPending() {
   return useSyncExternalStore(subscribe, snapshot, () => false);

@@ -89,6 +89,11 @@ function setupDb(firstResults = {}, updateResults = {}) {
     return builder;
   });
   db.transaction = jest.fn(async (callback) => callback(db));
+  // notifyAdmin's dedupe transaction takes an advisory lock with trx.raw (always on since the ring-new gate went).
+  db.raw = jest.fn(async (sql, bindings) => {
+    state.raws.push({ table: null, sql, bindings });
+    return { rows: [] };
+  });
 
   return state;
 }
@@ -469,6 +474,19 @@ describe('handleLeadInquiry — lead-creation guards', () => {
     expect(result.action).toBe('lead_created');
   });
 
+  test('an email that joins an existing lead writes no source evidence to it', async () => {
+    const state = setupDb({ leads: [{ id: 'lead-77' }, { id: 'lead-77' }] });
+
+    const result = await handleLeadInquiry(
+      makeEmail({ to_address: 'contact+gads_home@wavespestcontrol.com' }),
+      makeClassification()
+    );
+
+    expect(result.action).toBe('linked_to_existing_lead');
+    expect(insertsFor(state, 'leads')).toHaveLength(0);
+    expect(state.updates.filter((u) => u.table === 'leads')).toEqual([]);
+  });
+
   test('existing open lead still links instead of creating (unchanged behavior)', async () => {
     const state = setupDb({ leads: [{ id: 'lead-77' }, { id: 'lead-77' }] });
 
@@ -583,10 +601,10 @@ describe('lead-guard helpers', () => {
   });
 });
 
-// GATE_RING_NEW_CONTACTS (owner 2026-11-04, "ring new"): a new-lead email also puts one banner on the owner's phone.
+// Owner 2026-11-04, "ring new": a new-lead email also puts one banner on the owner's phone.
 // The bell row is keyed on the email id (a retry or re-sync finds it and sends no second banner) and the banner kind
 // rides on notifyAdmin's bannerKind option. The banner itself is proven in bell-banners-notify-admin.test.js.
-describe('handleLeadInquiry — new-lead banner (GATE_RING_NEW_CONTACTS)', () => {
+describe('handleLeadInquiry — new-lead banner', () => {
   const NotificationService = require('../services/notification-service');
   let notifySpy;
   beforeEach(() => {
@@ -596,20 +614,9 @@ describe('handleLeadInquiry — new-lead banner (GATE_RING_NEW_CONTACTS)', () =>
   });
   afterEach(() => {
     notifySpy.mockRestore();
-    delete process.env.GATE_RING_NEW_CONTACTS;
   });
 
-  test('gate off: the lead bell is the plain unkeyed write, exactly as before', async () => {
-    setupDb();
-    await handleLeadInquiry(makeEmail(), makeClassification());
-    expect(notifySpy).toHaveBeenCalledTimes(1);
-    const [category, , , opts] = notifySpy.mock.calls[0];
-    expect(category).toBe('new_lead');
-    expect(Object.keys(opts).sort()).toEqual(['icon', 'link', 'metadata']);
-  });
-
-  test('gate on: the lead bell is keyed on the email id and names the banner kind, in one write', async () => {
-    process.env.GATE_RING_NEW_CONTACTS = 'true';
+  test('the lead bell is keyed on the email id and names the banner kind, in one write', async () => {
     setupDb();
     await handleLeadInquiry(makeEmail(), makeClassification());
     expect(notifySpy).toHaveBeenCalledTimes(1);
@@ -621,9 +628,7 @@ describe('handleLeadInquiry — new-lead banner (GATE_RING_NEW_CONTACTS)', () =>
     expect(opts.metadata.triggerKey).toBeUndefined();
   });
 
-  test('the two lead alerts of one email key separate rows; no email id or gate off adds nothing', () => {
-    expect(ringNewLeadEmailOpts('e-1', 'draft')).toEqual({});
-    process.env.GATE_RING_NEW_CONTACTS = 'true';
+  test('the two lead alerts of one email key separate rows; no email id adds nothing', () => {
     expect(ringNewLeadEmailOpts('e-1', 'draft')).toEqual({ dedupeKey: 'email-lead:draft:e-1', bannerKind: 'new_lead_email' });
     expect(ringNewLeadEmailOpts('e-1', 'lead').dedupeKey).not.toBe(ringNewLeadEmailOpts('e-1', 'draft').dedupeKey);
     expect(ringNewLeadEmailOpts(null, 'lead')).toEqual({});

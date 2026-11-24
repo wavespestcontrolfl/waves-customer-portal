@@ -1937,6 +1937,8 @@ Everything else from the day's hardening stands: image-first visuals, pair-verif
 
 **Verification.** New suites: `estimate-soft-exit-disposition` (reason map, clipping, competitor price validation, "Other" note rule), `estimate-change-request` (no-estimate-write, 404 contract, dedupe, bell category), client `EstimateViewPage.soft-exit` (three exits, one server call each, decline reload on Done). Measurement-review suite unchanged and green after the notify-core extraction.
 
+**Changed 2026-11-21 (owner, estimate page changes, change 1).** The link reads "Not ready yet? Tell us why" and shows twice: under the approve area and at the page bottom. The sheet opens as "Not ready yet?" with "Tell us where you are. Nothing here sends you a message." The tap on "I'm still deciding" still writes the one `activity_log` row; a step after it asks "What would help you decide?" (A lower price, Talking to a person first, Comparing other quotes, Not the right time yet, Something else; Send or Skip). A reason sent there is saved on the row and rings the estimate's one `estimate_stuck` bell; Skip sends nothing more. "Talking to a person first" answers "We will call you" only when the server says so (`callPromised`: the office bell was raised for the request and the estimate has a phone); otherwise the sheet gives our number. Still no message to the customer and no estimate write.
+
 ## 2026-09-01 — Lawn program calendar + referral card on the accepted estimate (feat/estimate-calendar-referral)
 
 **Why.** Two concepts from the 2026-09-01 estimate research. (1) The lawn card says "9 applications per year" as a number; TruGreen/RealGreen-style program pages show WHEN, and homeowners picture a calendar better than a count. (2) Referred customers carry 13–16% higher lifetime value in pest-control program data; the portal and the service report already run the share module, but the estimate's accepted / just-accepted screens — the warmest moment — did not.
@@ -2936,13 +2938,10 @@ nothing. The words land in `scheduled_services.customer_request` /
 primary inserted row only, never on recurring children or boosters;
 `customer_request_pests` is untouched.
 
-`GATE_RESERVICE_OFFICE_REQUEST` (registry key `reserviceOfficeRequest`, off
-unless exactly `true`, dark in every environment). Gate off: the suggestion
-route answers `{ enabled: false, suggestion: null }`, the modal shows nothing
-new, and `POST /api/admin/schedule` ignores `customerRequest` — byte-identical
-to before. The modal learns the gate from that route's `enabled` answer, the
-same probe pattern as the annual-prepay and card-link controls, and only asks
-once a re-service line is on the form. Kill switch: unset the gate.
+The box is always on. The modal only asks the suggestion route once a
+re-service line is on the form, and `POST /api/admin/schedule` saves
+`customerRequest` on a pest/lawn re-service. (It shipped behind a gate that
+was removed 2026-11-21.)
 
 Source rule (owner ruling 2026-09-26: exact words may be quoted, a call
 paraphrase is shown without quotes), decided on the SERVER and never taken
@@ -3510,3 +3509,83 @@ Owner 2026-11-13: "Use your approved texting voice for the portal AI" (asked in 
 **Change.** `GATE_ESTIMATE_REFERRAL_CODE` (dev-open, prod dark). The estimate page's code field (shared with the promo code; either gate shows it) takes a referrer's code and saves it as one `estimate_referral_codes` row: one code of either kind per estimate. `referral-inbound.js` reads that row as a third kind of evidence, source `code`, ahead of a link or a spoken name, so everything downstream (the Queue card, the new-referral bell, the confirm, the first-service credit) is the existing path. After the estimate is accepted and the customer is on a plan, the code's owner is confirmed as the referrer by the same deferred-only confirm the bell's Confirm button runs: nothing is sent or paid then. Whatever that confirm refuses (first plan visit already done, a milestone conversion, rewards paid at once) stays in the Queue for the office. A household's own code, a code nobody holds, a paused program and a customer Waves has already serviced are refused at entry with the generic answer.
 
 **Not in this change.** The code field on the pay page (step 3). No up-front discount for the friend. The page shows the referee's reward sentence from live program settings and nothing about who the referrer is. Kill: unset the gate.
+
+## 2026-11-18 — Promo code on the invoice pay page applies a one-time credit to that invoice
+
+**Context.** Step 3 of the owner's ask for a promo or referral code on the estimate and at checkout. Same credit model as the estimate page (entry above): a code is a one-time account credit, never a repriced invoice. Offered to the owner as promo codes only here, since someone paying an invoice has usually been serviced already and the referral program is for new customers.
+
+**Change.** `GATE_PAY_PROMO_CODE` (dev-open, prod dark). The pay page shows "Have a promo code?" on an invoice that can take one. `POST /api/pay/:token/promo-code` only saves the code (`invoice_promo_codes`); the page reloads, and the payment setup that follows redeems it inside its own transaction: the credit posts once, one use is counted, and that amount is applied to the invoice before the payment is priced. That setup step is the one place that already retires and re-prices an open Stripe payment when account credit applies, so the new entry route never calls Stripe. The draw ignores the customer's automatic-credit setting because they asked for this credit, and is capped at the promo amount (`applyAtMost` on `applyAccountCreditToInvoice`), so a balance they have not chosen to apply stays untouched; the 2026-08-28 ruling is otherwise unchanged. A new-customer-only code works on the first invoice: the visit it bills does not count. Once per customer across estimates and invoices, checked under the discount row lock on both paths.
+
+**Not in this change.** Referral codes on the pay page. Invoices that must save a payment method first (per-application and annual-prepay customers, recurring plan visits from an estimate), payer-billed and statement-billed invoices take no code. Percent codes. Kill: unset the gate, or switch the discount off.
+
+## 2026-11-19 — Messages badge counts unread texts that need a reply; Mark read on each inbox row
+
+**Context.** The red Messages badge read 99+ (124 conversations). It counted needs-a-reply texts from 2026-09-28 and ignored read state, so opening a text never lowered it: 66 of the 124 were already opened. Adam asked for a mark-as-read on each text and a way to clear the 99, because opening each text and going back to the list was too much work. Offered two options on a before-and-after page; Adam chose A.
+
+**Change.** (1) The badge (`GET /admin/communications/unread-count`, also the Customer 360 Message badge and a technician's own-customer count) counts a needs-a-reply text only while nobody has read it. This restores the 2026-09-07 meaning ("a customer is waiting on a reply and nobody has read it"); the 2026-09-28 start date stays. (2) Each unread inbox row has a Mark read button, and the list header has Mark all read while the whole list is shown (no search, type filter, Unanswered or Unknown filter). Mark all read covers every unread inbound text up to the newest loaded one (`POST /admin/communications/messages/read-all`; office roles only, since a technician reads thread by thread through the scoped `/messages/read`; recruiting replies stay for the Recruiting page). A row's Mark read covers that sender's texts up to the row's newest one (`read-all` with `contactPhone`; a technician's sends the row's loaded texts to `/messages/read`). (3) Both write through `inbound-sms-read.js`, the one read writer, 5 seconds after the tap; an Undo bar takes the tap back before then.
+
+**Not in this change.** The Unanswered filter and the unworked-comms digest still list every text with no reply, read or not. Read state stays shared by all staff. No mark-unread after the 5 seconds. No gate (no texts, charges or deletes); revert to undo.
+
+## 2026-11-20: Waves Chat pill opens the thread in a sheet (customer portal)
+
+**Asked.** Adam, on the Help pill's menu: "this chat bot needs just to be the chat, not the photo ID", name it "Waves chat", and "the pop-up needs to be like a screen where they can actually type into". He reviewed phone mockups and picked: label "Waves Chat"; a broad first starter because Waves does lawn and pest; a person answers now and Waves AI later, in one thread; leave the Messages row under More.
+
+**Change.** The floating pill reads "Waves Chat" and opens the customer's Messages thread in a sheet that fills the screen, with the message box pinned at the bottom (`PortalChat` in `client/src/components/portal/PortalMessages.jsx`, `WavesChatSheet` in `PortalPage.jsx`). The Help menu and its Photo ID row are gone; Photo ID stays under More and on the Learn tab. The pill shows only while Messages is offered (`GATE_PORTAL_MESSAGES`); with Messages off there is no pill, where the old pill opened Photo ID. A new chat shows four starters (Pest, lawn or plant problem; Schedule or move a visit; Question about my bill; Something else) that fill the message box and send nothing. The header reads "Open until 8 PM" or "Closed. Back at 8 AM" from the Eastern clock, the hours the Messages copy already promises; a day the office is closed in Settings still reads open. After hours, a customer's unanswered message shows "We got your message".
+
+**Not in this change.** The thread, its endpoints and the Waves AI gates are untouched. The separate Ask Waves AI chat still opens from its own entry points; merging it into this thread, and photos in the thread, are later changes. No gate (no texts, charges or deletes); revert to undo.
+
+## 2026-11-20: Customers can send photos in Waves Chat
+
+**Asked.** Adam: "photos can go in chat. We can use the compression we use for the text for the Waves admin", and on the count, "One's fine, more is better". He approved the plan: up to 3 photos a message at 5 MB each, a photo with no words allowed, staff answers stay text, and the Waves AI leaves a photo to a person.
+
+**Change.** The message box (the Waves Chat sheet and the Messages page) has a camera button; picked photos show as thumbnails with a Remove button and are compressed with the admin texting composer's budget ladder (`fitImagesToBudget`) before they are sent. `POST /api/portal-messages` also takes a multipart form with up to 3 `photos`. Each is checked and re-encoded by the prep-photo sanitizer (`prepareUploadFile` in `server/services/visit-prep.js`: real image, HEIC converted, location data dropped, size capped), stored in the private photo bucket under `portal-messages/<customer id>/`, and named on the message row's `media`. Thread pages carry a signed view link per photo, never the key: 24 hours for the customer, 1 hour for the office. The Portal tab's whole thread shows the photos, the item preview marks them `[Photo]`, and the office bell for a photo with no words reads "They sent a photo in the portal". The after-hours and office-hours Waves AI steps skip a message with a photo, so it stays the office's open item.
+
+**Not in this change.** Staff cannot attach photos to an answer. The Ask Waves AI chat is untouched. No new gate: photos ride `GATE_PORTAL_MESSAGES` and its 20 messages an hour per customer; revert to undo (stored photos stay in the bucket).
+
+## 2026-11-20: My Property asks which sprinkler timer the home has
+
+**Context.** Owner asked whether customers could run a Hunter or Rain Bird timer from the Waves app (scope and screens: PR #8009). Hunter's API terms say Hydrawise "is not currently accepting any new commercial API connections", and Rain Bird has no API for home timers, so nothing can connect today. The owner chose to build the one part that needs neither vendor (2026-11-19, "build step 1 now"): record each lawn customer's timer, and whether they run it from the maker's phone app. His field read is that most customers already use the Wi-Fi module and the app; the count checks that.
+
+**Change.** A "Your sprinkler timer" card on My Property, under the weekly watering plan, for customers on lawn care by the Lawn Health card's rule (owner ruling 2026-08-28: an active turf profile or a recurring lawn program; a tier or a turf type on file is not lawn care). A customer who only takes the Monday irrigation email, or who has only a tier or a turf type, sees the plan, not the card. The customer picks a brand (Hunter, Rain Bird, another brand) and, for a Hunter, a model (X2, X-Core, Pro-C, Hydrawise touchscreen). The card then names the timer, links the Waves guide for it (`/sprinkler-timers/hunter/`, `/sprinkler-timers/rain-bird/`, or the guide index), and asks whether they run it from the maker's phone app (Yes, No, Not sure; asked for a Rain Bird and for the Hunter models that can go on Hydrawise, one rule in `@waves/irrigation-runtime`). Three nullable columns on `property_preferences` (`irrigation_controller_brand`, `_model`, `_app`), validated by the shared preferences validator, so staff set the same three in Customer 360 → Property. The three are one record about one home (`server/services/controller-timer.js`): each writer saves them whole or not at all, only from a screen rendered against the current home, and only over a timer that screen saw on file or sent itself (`controller_timer_seen`; a page left open never puts back a timer someone else replaced); an address move clears them with the new-sod record; a customer merge never gives one customer's timer to the other (the kept customer's own timer stays while the merge leaves their home unchanged, else it is cleared). After each save the card shows the timer the server holds, except a pick of the customer's own that is still queued or was refused; a refusal shows the server's reason. They are not watering inputs: no irrigation-system stamp, no revision bump, no confirmed-fields entry, no plan reload, and no account-updated email. No gate: the change cannot text, charge, delete or spend, and it adds no public page.
+
+**Not in this change.** Anything that touches a timer. The card must not say the portal connects to, pauses or starts a timer, and it does not mention a Wi-Fi module: whether the app may tell an X2 owner that a module would let them connect is an open owner decision (PR #8009, decision 5), and the published guides tell plan customers they do not need one. Connect, pause after a treatment and automatic runs wait on Hunter's answer to the access request sent 2026-11-19. No Rain Bird model list, no change to the weekly email or to any text. The staff total by timer (Intelligence Bar) is its own change.
+
+## 2026-11-20 — Orbit B-hyve and Rachio join the sprinkler timer list
+
+**Decision:** The "Your sprinkler timer" card, the Customer 360 inputs and the staff count offer Orbit B-hyve and Rachio beside Hunter, Rain Bird and another brand, and both get the phone-app question (#8171).
+
+**Context:** The owner saw a customer run an Orbit timer from the B-hyve phone app. The card offered Hunter, Rain Bird and another brand, so that customer would get no phone-app question and the staff count would miss the app use. The Waves guides already covered both brands (`/sprinkler-timers/orbit-b-hyve/`, `/sprinkler-timers/rachio/`), and the identify page the card links names both.
+
+**Reasoning:** The card's brands now match the brands with a Waves guide, and each links its own guide. A B-hyve or a Rachio runs from its app, but the app may never have been set up, so the answer still says something. One rule in `@waves/irrigation-runtime` serves the card, the staff form, the validator and the count.
+
+**Revisit if:** the step 1 count shows many timers under "another brand", or the Waves guides add a brand.
+
+## 2026-11-20 — Sprinkler timer connect closed: Hunter declined API access
+
+**Decision:** The portal will not connect to, pause or start a customer's sprinkler timer. The owner closed the connect plan (2026-11-20, "close"), and scope PR #8009 closed unmerged. Step 1 stays: the timer record, the Waves guides and the staff count.
+
+**Context:** Steps 2 to 4 (run, pause after a treatment, automatic runs) waited on Hunter's answer to the access request sent 2026-11-19. Hunter answered on 2026-11-20: Hydrawise gives no commercial API access, its RESTful API is for homeowners to read their own account, and Hunter has no way to feed that information into a contractor's system. Rain Bird has no API for home timers.
+
+**Reasoning:** Hunter's API terms forbid sharing a homeowner's key with a third party without Hunter's written permission, and Hunter declined. With no sanctioned route for a Hunter or a Rain Bird timer, there is nothing to build. The owner did not choose the hand pilot through a Hydrawise contractor account (2026-11-19).
+
+**Revisit if:** Hunter or Rain Bird opens API access to contractors, or the step 1 count shows many Orbit B-hyve or Rachio timers (their developer terms were not checked).
+
+## 2026-11-21 — Estimate tool shows Tree density only when a picked service can read it
+
+**Decision:** The Tree density box in the staff estimate tool (`EstimateToolViewV2.jsx`) renders only when a picked service can read tree density: Tree & Shrub, recurring mosquito, the lawn family priced from lawn area (lawn care, one-time lawn, dethatching, top dressing) and the flea exterior spray. The one rule is `pickedServiceCanReadTreeDensity(form)` in `client/src/lib/estimateEngine.js`. The box is hidden, never cleared: the lookup still fills the value, the estimate still saves it, and the engine request is the same.
+
+**Context:** An audit of 106 estimates (2026-09-08 to 2026-11-21) found the owner lowered tree density by hand on 28 homes and never raised it. On 27 of the 28, no picked service was Tree & Shrub, palm or mosquito. Tree density has not moved a pest price since 2026-07-30 (entry above).
+
+**Reasoning:** A box that cannot change the price on screen invites a correction that does nothing. The owner approved the change on 2026-11-21 (reply "1, 2" to the audit page). The rule is service-level on purpose. Whether a picked service reads the density for one estimate also depends on other inputs (a tree count, a measured lawn area, the exterior flea area, a commercial property), and three tries at mirroring those engine rules in the form each missed a case, one of which hid the box where it changed a price. So the box may still show where it changes nothing, as it did on every estimate before; it hides only when no picked service has any read of it.
+
+**Revisit if:** a new service starts to read tree density (add its form flag to the rule), or pest pricing reads tree density again.
+
+## 2026-11-22 — An office answer in the portal reaches the customer by text
+
+Owner 2026-11-22 ("portal text", then "ok do your rec" on the portal-answers-by-text page). **Decision.** With `GATE_PORTAL_ANSWER_TEXT` on, an answer the office saves with Reply in portal reaches the customer as the in-app bell plus ONE text that carries the answer: "Hi {first name}, here's our answer from Waves: {answer}". An answer longer than 3 segments sends its first part, cut at a space, and ends "… Read the rest in your portal: {link}". No app push. When no text can go (no number, an answer that carries a Waves link, STOP, no consent, a refusal or a failure), the reply email goes, as before. A Waves AI answer (night or day) gets the in-app bell only. The owner flips the gate.
+
+**Context:** The 2026-11-05 rule was the app push, else one email. The owner's 2026-11-20 ruling makes a text the default notice (the app only on the customer's own app pick).
+
+**Reasoning:** The text carries the answer itself, so the customer does not need to sign in to read it. A reply to the text lands in Communications like any text. Only the staff press texts, at any hour, as a staff text does (2026-11-05: a night answer sends at once). The 10-minute sweep that finishes a stopped notice sends the email, never a text, so no automatic step texts a customer. The number is the one on file when the answer is saved, re-checked under a lock at the send, so a number corrected after the save gets no text. An answer that carries a Waves link is not texted: the SMS composer checks who owns such a link before it texts one, and this text does not. A text whose outcome is unknown counts as sent: a second text is worse than a missing email. The way (text or push) is set when the answer is saved, so a flip never sends one answer both an app push and a text, and no later try needs to read what an earlier push did. Before Send, the reply form tells staff the answer goes by text, at any hour. The text uses purpose `support_resolution` (as a request update's text), not the SMS-thread reply interlock, because it answers a portal item, not the SMS thread's waiting question. A Waves AI answer gets no text, so a model's words never reach a phone.
+
+**Revisit if:** customers reply to the answer texts in a way the office cannot follow, or the email fallback stops being needed.

@@ -16,7 +16,8 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
-const { detectBidEmail, parseBidEmail, classifyKind, passesGmailSpam } = require('./detector');
+const { detectBidEmail, parseBidEmail, classifyKind, passesGmailSpam, mfmpUnreadCloseLine } = require('./detector');
+const { etDateString } = require('../../utils/datetime-et');
 const { attachPatch, reminderDue, datesDue, lapsedBid, OPEN_STATUSES, AUTO_CLOSE_NOTE, LAPSED_AFTER_MS, LAPSED_FLAGGED_AFTER_MS, notOurWork, NOT_OUR_WORK_NOTE } = require('./rules');
 const alerts = require('./alerts');
 const { closeDoneAlerts } = require('./close-alerts');
@@ -95,15 +96,76 @@ const columnsFor = () => [...BID_COLUMNS, ...BID_CHECKLIST_COLUMNS];
 // ---------- one email ----------
 
 const ADDS_TO_EXISTING = new Set(['addendum', 'reminder']);
+// MFMP re-sends one advertisement as a new notice (ITB-17200 came three times in Nov 2026). Its key is the state's
+// advertisement number, which never names new work, so a repeat joins the bid even after a decision and rings
+// nothing there (attachPatch: closed).
+const REPEAT_JOINS_DECIDED = new Set(['mfmp']);
+// Templates whose due date is a day with no hour (see autoConfirmsDate and patchInput).
+const DAY_ONLY_TEMPLATES = new Set(['mfmp']);
+const MFMP_SENDER_DOMAIN = 'dms.myflorida.com';
 
-async function findBid(trx, email, groupKey, groupBase = null, kind = null) {
+// The bid a repeat MFMP advertisement belongs to, open or decided. Candidates are the bids with its key AND the bids
+// filed from its notices before the template existed (no key): such a bid is found by reading its own linked notices
+// with today's parser and sender check, so only a verified MFMP notice of this advertisement counts (a forged one
+// never verifies), and the caller then gives it the key (`!existing.group_key && parsed.group_key`). One order for
+// all of them, as a keyed lookup: the oldest open bid, else the newest decided one. No row cap: a verified MFMP
+// notice now always files with a key, so the keyless set is the few bids filed before the template (plus any filed
+// while the template no longer parses).
+async function mfmpRepeatBid(trx, groupKey) {
+  const keyed = await trx('bid_opportunities').where({ group_key: groupKey }).select('id', 'status', 'created_at');
+  // Only the notice that created the bid names it (a later email the old thread rule attached does not).
+  const keyless = await trx('bid_opportunities as b').join('emails as e', 'e.id', 'b.first_email_id')
+    .whereNull('b.group_key').whereRaw('lower(e.from_address) like ?', [`%${MFMP_SENDER_DOMAIN}`])
+    .select('b.id', 'b.status', 'b.created_at', 'e.from_address', 'e.subject', 'e.body_text', 'e.body_html', 'e.authentication_results');
+  // A legacy notice counts only as a solicitation of this advertisement (an Agency Decision the old subject rule
+  // filed is not one, so a real solicitation never joins it).
+  const legacy = keyless.filter((row) => {
+    const checked = withProviderCheck(row);
+    const parsed = parseBidEmail(checked);
+    return parsed.template === 'mfmp' && parsed.group_key === groupKey && detectBidEmail(checked).bid === true;
+  });
+  const all = [...keyed, ...legacy].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const hit = all.find((row) => OPEN_STATUSES.includes(row.status)) || all[all.length - 1];
+  return hit ? trx('bid_opportunities').where({ id: hit.id }).first() : null;
+}
+
+// What a later email tells attachPatch. MFMP's Close Date names a day, not an hour: a repeat for the same Eastern day
+// is not a new date (an operator may have confirmed the agency's 2:00 PM), so it carries no date at all.
+function patchInput(existing, parsed) {
+  if (!DAY_ONLY_TEMPLATES.has(parsed.template) || !parsed.due_at || !existing.due_at) return parsed;
+  if (etDateString(new Date(existing.due_at)) !== etDateString(new Date(parsed.due_at))) return parsed;
+  return { ...parsed, due_at: null, due_source_line: null };
+}
+
+// attachPatch for a later email, plus one MFMP rule: a repeat whose Close Date line is there but unreadable flags the
+// bid (the stored date stays; a flag pauses its reminders and rings on an open bid), as a changed date would.
+function attachFor(live, parsed, kind, email) {
+  const result = attachPatch(live, patchInput(live, parsed), kind);
+  if (!live.due_at || !mfmpUnreadCloseLine(email)) return result;
+  const patch = live.needs_date_confirmation ? result.patch : { ...result.patch, needs_date_confirmation: true };
+  const open = OPEN_STATUSES.includes(live.status) && !live.historical;
+  return { patch, notifyAddendum: result.notifyAddendum || (open && patch.needs_date_confirmation === true) };
+}
+
+// The bid an email's Gmail thread belongs to. One thread can hold two bids (a keyed MFMP solicitation files apart
+// from a decision notice in its thread): a follow-up then joins the thread's one open bid, else the oldest.
+async function threadBid(trx, thread) {
+  const rows = await trx('bid_opportunities')
+    .where({ gmail_thread_id: thread })
+    .orWhereIn('id', trx('bid_opportunity_emails as l').join('emails as e', 'e.id', 'l.email_id')
+      .where('e.gmail_thread_id', thread).select('l.bid_id'))
+    .orderBy('created_at');
+  const open = rows.filter((row) => OPEN_STATUSES.includes(row.status));
+  return (open.length === 1 ? open[0] : rows[0]) || null;
+}
+
+async function findBid(trx, email, groupKey, groupBase = null, kind = null, template = null) {
+  // A keyed MFMP notice joins by its advertisement number only (mfmpRepeatBid also finds keyless bids filed before the
+  // template): Gmail threads MFMP notices by subject, so a thread is no identity for it.
+  if (groupKey && REPEAT_JOINS_DECIDED.has(template)) return mfmpRepeatBid(trx, groupKey);
   const thread = email.gmail_thread_id;
   if (thread) {
-    const byThread = await trx('bid_opportunities')
-      .where({ gmail_thread_id: thread })
-      .orWhereIn('id', trx('bid_opportunity_emails as l').join('emails as e', 'e.id', 'l.email_id')
-        .where('e.gmail_thread_id', thread).select('l.bid_id'))
-      .orderBy('created_at').first();
+    const byThread = await threadBid(trx, thread);
     if (byThread) return byThread;
   }
   if (!groupKey) return null;
@@ -143,8 +205,10 @@ async function detectWithThread(email) {
 // A date read from a provider's fixed template counts as confirmed when the bid is first
 // filed. Not history, and not a first email that is an addendum (the date may have moved). A later email still goes
 // through attachPatch, which flags a changed or late date for the operator.
+// MFMP's Close Date names a day and no hour: 23:59 is our default, not the agency's, so it stays for the operator to
+// confirm (reminders ring once it is confirmed). An unconfirmed date still closes a lapsed new bid (rules.lapsedBid).
 function autoConfirmsDate(parsed, kind, historical) {
-  return !historical && Boolean(parsed.template && parsed.due_at) && kind !== 'addendum';
+  return !historical && Boolean(parsed.template && parsed.due_at) && kind !== 'addendum' && !DAY_ONLY_TEMPLATES.has(parsed.template);
 }
 
 async function ingestEmail(rawEmail, { historical = false, manual = false } = {}) {
@@ -164,7 +228,7 @@ async function ingestEmail(rawEmail, { historical = false, manual = false } = {}
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', ['bid-desk:ingest']);
     if (await trx('bid_opportunity_emails').where({ email_id: email.id }).first('id')) return { skipped: 'already_filed' };
 
-    const found = await findBid(trx, email, parsed.group_key, parsed.group_base, kind);
+    const found = await findBid(trx, email, parsed.group_key, parsed.group_base, kind, parsed.template);
     // Re-read the bid under a row lock: an operator saving a date between the read and the update must not be
     // overwritten (the advisory lock only orders intake writers).
     const existing = found ? await trx('bid_opportunities').where({ id: found.id }).forUpdate().first() : null;
@@ -172,7 +236,7 @@ async function ingestEmail(rawEmail, { historical = false, manual = false } = {}
       // Current mail on a bid the backfill filed as history makes it live again: alerts and reminders apply.
       const promote = !historical && existing.historical;
       const live = promote ? { ...existing, historical: false } : existing;
-      const { patch, notifyAddendum } = attachPatch(live, parsed, kind);
+      const { patch, notifyAddendum } = attachFor(live, parsed, kind, email);
       if (promote) patch.historical = false;
       // A bid first filed from a plain email (no cross-thread key) takes the key of the first template email in it.
       if (!existing.group_key && parsed.group_key) patch.group_key = parsed.group_key;

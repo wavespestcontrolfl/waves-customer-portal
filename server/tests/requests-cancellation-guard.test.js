@@ -12,13 +12,19 @@ jest.mock('express-rate-limit', () => () => (_req, _res, next) => next());
 // Per-test: the inactive-account retry branch (churned customer, unexpired
 // portal JWT) is entered by flipping this before the request.
 let mockAuthInactive = false;
+// An inactive account's pipeline stage: 'churned' = a processed cancellation.
+let mockAuthStage = 'churned';
 jest.mock('../middleware/auth', () => ({
+  isCancelledCustomerRow: jest.requireActual('../middleware/auth').isCancelledCustomerRow,
   authenticate: (req, _res, next) => {
     req.customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Tester', phone: '+15550000000' };
     next();
   },
   authenticateAllowInactive: (req, _res, next) => {
-    req.customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Tester', phone: '+15550000000' };
+    req.customer = {
+      id: 'cust-1', first_name: 'Pat', last_name: 'Tester', phone: '+15550000000',
+      ...(mockAuthInactive ? { active: false, pipeline_stage: mockAuthStage } : { active: true }),
+    };
     req.customerInactive = mockAuthInactive;
     next();
   },
@@ -160,6 +166,7 @@ function postCancellation(baseUrl, body = {}) {
 
 beforeEach(() => {
   mockAuthInactive = false;
+  mockAuthStage = 'churned';
   mockState = {
     // dupe check + prior-cancellation lookup both read service_requests.
     service_requests: [],
@@ -277,6 +284,97 @@ describe('POST /api/requests cancellation guard', () => {
     expect(processCancellationRequest).toHaveBeenCalledTimes(1);
   }));
 
+  test('the customer\'s pick and words reach the processor as the churn reason; the row marker stays the request id', () => withServer(async (baseUrl) => {
+    mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
+    const description = 'Customer requested cancellation. Reason: Cost. Details: too much for us';
+    const res = await postCancellation(baseUrl, { reasonCode: 'price', description });
+    expect(res.status).toBe(201);
+    const arg = processCancellationRequest.mock.calls[0][0];
+    expect(arg.churnReasonCode).toBe('price');
+    expect(arg.churnReasonText).toBe(description);
+    expect(arg.reason).toMatch(/^Portal cancellation request /);
+    // The pick as submitted is on the request itself, for any retry to read.
+    expect(JSON.parse(mockState.service_requests_inserted[0].metadata)).toEqual({
+      cancelSubmission: { scope: [], reasonCode: 'price', adverseEvent: false, safetyComplaint: false },
+    });
+  }));
+
+  test('a dedupe retry takes the pick SUBMITTED with the original request, even "none", over a case a retry rebuilt', () => withServer(async (baseUrl) => {
+    mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
+    mockState.service_requests = [{
+      id: 'req-portal', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
+      source: null, description: 'x', metadata: { cancelSubmission: { scope: [], reasonCode: null, adverseEvent: false, safetyComplaint: false } }, created_at: new Date(Date.now() - 10 * 1000),
+    }];
+    mockState.cancellation_cases = [{ service_request_id: 'req-portal', scope: [], reason_code: 'price' }];
+    await postCancellation(baseUrl, { reasonCode: 'competitor' });
+    expect(processCancellationRequest.mock.calls[0][0].churnReasonCode).toBeNull();
+  }));
+
+  test('a case rebuilt on a retry takes the pick and incident verdict from the ORIGINAL submission, never the retry\'s', () => withServer(async (baseUrl) => {
+    const CancellationResolution = require('../services/cancellation-resolution');
+    const v2 = jest.spyOn(CancellationResolution, 'cancelFlowV2Enabled').mockReturnValue(true);
+    const openCase = jest.spyOn(CancellationResolution, 'openCancellationCase').mockResolvedValue({ id: 'case-1' });
+    try {
+      mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
+      const original = (sub) => [{
+        id: 'req-portal', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
+        source: null, description: 'x', metadata: sub ? { cancelSubmission: sub } : null, created_at: new Date(Date.now() - 10 * 1000),
+      }];
+      mockState.cancellation_cases = []; // both original writes lost
+      // A blank retry keeps the original scope and incident.
+      mockState.service_requests = original({ scope: ['mosquito'], reasonCode: 'service_experience', adverseEvent: false, safetyComplaint: true });
+      await postCancellation(baseUrl, { reasonCode: undefined });
+      expect(openCase).toHaveBeenLastCalledWith(expect.objectContaining({
+        families: ['mosquito'], reasonCode: 'service_experience', resolution: expect.objectContaining({ kind: 'hard_stop', reviewType: 'incident' }),
+      }));
+      // A retry reporting a safety complaint never marks a price cancel as one.
+      mockState.service_requests = original({ scope: [], reasonCode: 'price', adverseEvent: false, safetyComplaint: false });
+      await postCancellation(baseUrl, { reasonCode: 'service_experience', safetyComplaint: true });
+      expect(openCase).toHaveBeenLastCalledWith(expect.objectContaining({ families: [], reasonCode: 'price', resolution: null }));
+      // An older request: neither pick nor verdict is known.
+      mockState.service_requests = original(null);
+      await postCancellation(baseUrl, { reasonCode: 'service_experience', safetyComplaint: true });
+      expect(openCase).toHaveBeenLastCalledWith(expect.objectContaining({ reasonCode: null, resolution: null }));
+      expect(processCancellationRequest).not.toHaveBeenCalled(); // no case: every retry parked
+    } finally {
+      v2.mockRestore();
+      openCase.mockRestore();
+    }
+  }));
+
+  test('a case a retry built: the recorded submission\'s scope and pick run; with no submission the retry parks, never whole-account', () => withServer(async (baseUrl) => {
+    mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
+    const original = (sub) => [{
+      id: 'req-portal', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
+      source: null, description: 'x', metadata: sub ? { cancelSubmission: sub } : null, created_at: new Date(Date.now() - 10 * 1000),
+    }];
+    const retryBuiltCase = { service_request_id: 'req-portal', scope: [], reason_code: 'competitor', snapshot: { written_on_retry: true, degraded: true } };
+    mockState.cancellation_cases = [retryBuiltCase];
+    mockState.service_requests = original({ scope: ['mosquito'], reasonCode: 'price', adverseEvent: false, safetyComplaint: false });
+    await postCancellation(baseUrl, { reasonCode: 'competitor' });
+    expect(processCancellationRequest).toHaveBeenLastCalledWith(expect.objectContaining({ families: ['mosquito'], churnReasonCode: 'price' }));
+    processCancellationRequest.mockClear();
+    mockState.cancellation_cases = [retryBuiltCase];
+    mockState.service_requests = original(null);
+    await postCancellation(baseUrl, { reasonCode: 'competitor' });
+    expect(processCancellationRequest).not.toHaveBeenCalled();
+  }));
+
+  test('a dedupe retry of a request from before picks were recorded takes its case\'s pick, never the retry body', () => withServer(async (baseUrl) => {
+    mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
+    mockState.service_requests = [{
+      id: 'req-portal', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
+      source: null, description: 'Customer requested cancellation. Reason: Cost. Details: None', created_at: new Date(Date.now() - 10 * 1000),
+    }];
+    mockState.cancellation_cases = [{ service_request_id: 'req-portal', scope: [], reason_code: 'price' }];
+    const res = await postCancellation(baseUrl, { reasonCode: 'competitor' });
+    expect((await res.json()).deduped).toBe(true);
+    const arg = processCancellationRequest.mock.calls[0][0];
+    expect(arg.requestId).toBe('req-portal');
+    expect(arg.churnReasonCode).toBe('price');
+    expect(arg.churnReasonText).toBe('Customer requested cancellation. Reason: Cost. Details: None');
+  }));
+
   test('truth gate: a fully processed cancel confirms "done"; a partial one says the office is finishing by hand', () => withServer(async (baseUrl) => {
     const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
     mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
@@ -321,6 +419,54 @@ describe('POST /api/requests cancellation guard', () => {
     expect(sendCancellationReceived).toHaveBeenCalledTimes(1);
   }));
 
+  test('a visit stuck on site from an EARLIER day: the customer is told "cancelled"; the ticket and the alert stay for the office (owner 2026-10-30)', () => withServer(async (baseUrl) => {
+    const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCancellationReceived } = require('../services/account-membership-email');
+    const { notifyAdmin } = require('../services/notification-service');
+    mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
+
+    // The 2026-11-17 case: 9 future visits pulled, the Nov 15 visit still "on_site".
+    processCancellationRequest.mockResolvedValueOnce({
+      ok: false, churned: true, cancelledCount: 9, recurrenceStopped: 1,
+      errors: ['in_progress_visit:svc-old'], staleInProgressVisitIds: ['svc-old'],
+    });
+    renderRequiredSmsTemplate.mockClear();
+    sendCancellationReceived.mockClear();
+    let res = await postCancellation(baseUrl, { subject: 'Cancel — stale visit' });
+    let body = await res.json();
+    expect(res.status).toBe(201);
+    expect(renderRequiredSmsTemplate.mock.calls[0][0]).toBe('service_cancellation_confirmation');
+    expect(sendCancellationReceived).toHaveBeenLastCalledWith(expect.objectContaining({ processed: true }));
+    // The screen says the same thing as the text.
+    expect(body.cancellation).toEqual(expect.objectContaining({ processed: true, churned: true, visitsPulled: 9 }));
+    // The office still owns the stuck visit: ticket open, review alert says so.
+    expect(body.request.status).toBe('new');
+    expect(mockState.service_requests_inserted.find((r) => r.subject === 'Cancel — stale visit').status).toBe('new');
+    expect(JSON.stringify(notifyAdmin.mock.calls.at(-1))).toContain('in_progress_visit:svc-old');
+
+    // A visit live TODAY next to the stale one keeps the by-hand copy.
+    processCancellationRequest.mockResolvedValueOnce({
+      ok: false, churned: true, cancelledCount: 9, recurrenceStopped: 1,
+      errors: ['in_progress_visit:svc-old', 'in_progress_visit:svc-today'], staleInProgressVisitIds: ['svc-old'],
+    });
+    renderRequiredSmsTemplate.mockClear();
+    res = await postCancellation(baseUrl, { subject: 'Cancel — live visit' });
+    body = await res.json();
+    expect(renderRequiredSmsTemplate.mock.calls[0][0]).toBe('service_cancellation_received');
+    expect(body.cancellation.processed).toBe(false);
+
+    // So does any other error beside the stale visit.
+    processCancellationRequest.mockResolvedValueOnce({
+      ok: false, churned: true, cancelledCount: 9, recurrenceStopped: 1,
+      errors: ['in_progress_visit:svc-old', 'void_invoice:inv-1'], staleInProgressVisitIds: ['svc-old'],
+    });
+    renderRequiredSmsTemplate.mockClear();
+    res = await postCancellation(baseUrl, { subject: 'Cancel — other error' });
+    body = await res.json();
+    expect(renderRequiredSmsTemplate.mock.calls[0][0]).toBe('service_cancellation_received');
+    expect(body.cancellation.processed).toBe(false);
+  }));
+
   test('a cleanly processed cancel closes its own ticket; a partial one stays new for the office', () => withServer(async (baseUrl) => {
     mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
 
@@ -345,7 +491,7 @@ describe('POST /api/requests cancellation guard', () => {
   }));
 
   test('a clean SCOPED wind-down completed on retry closes the original row too — dedupe and inactive-account paths', () => withServer(async (baseUrl) => {
-    const scopedOk = { ok: true, churned: false, scopedWoundDown: true, scope: ['mosquito'], cancelledCount: 1, recurrenceStopped: 1, errors: [] };
+    const scopedOk = { ok: true, churned: false, scopedWoundDown: true, scope: ['mosquito'], remaining: ['pest_control'], cancelledCount: 1, recurrenceStopped: 1, errors: [] };
     mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
 
     // Short-window dedupe: the original row is 10s old, its committed scope recoverable.
@@ -362,9 +508,64 @@ describe('POST /api/requests cancellation guard', () => {
     expect(body.request.status).toBe('resolved');
     expect(mockState.service_requests[0].status).toBe('resolved');
     expect(mockState.service_requests[0].resolved_at).toBeInstanceOf(Date);
+    // The retry reply names what stopped and what stays, like the first
+    // reply — without them the screen read a one-service cancel as whole-plan.
+    expect(body.cancellation).toEqual(expect.objectContaining({ processed: true, churned: false, scope: ['mosquito'], remaining: ['pest_control'] }));
+
+    // Same 60 s dedupe, but a whole-plan cancel committed after auth read the
+    // account (the snapshot still says active): the route re-reads the row,
+    // so the reply says churned though the replayed scoped run did not churn.
+    mockState.customers = [{ id: 'cust-1', active: false, pipeline_stage: 'churned' }];
+    mockState.service_requests = [{
+      id: 'req-portal-dedupe-inactive', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
+      source: null, created_at: new Date(Date.now() - 10 * 1000),
+    }];
+    mockState.cancellation_cases = [{ service_request_id: 'req-portal-dedupe-inactive', scope: ['mosquito'] }];
+    processCancellationRequest.mockResolvedValueOnce(scopedOk);
+    res = await postCancellation(baseUrl);
+    body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.deduped).toBe(true);
+    expect(body.cancellation).toEqual(expect.objectContaining({ churned: true, scope: ['mosquito'] }));
+
+    // Inactive for another reason (not a processed cancellation): the reply
+    // keeps the run's own churn state and the scoped copy.
+    mockAuthInactive = true;
+    mockAuthStage = 'won';
+    mockState.customers = [{ id: 'cust-1', active: false, pipeline_stage: 'won' }];
+    mockState.service_requests = [{
+      id: 'req-portal-dedupe-inactive-other', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
+      source: null, created_at: new Date(Date.now() - 10 * 1000),
+    }];
+    mockState.cancellation_cases = [{ service_request_id: 'req-portal-dedupe-inactive-other', scope: ['mosquito'] }];
+    processCancellationRequest.mockResolvedValueOnce(scopedOk);
+    res = await postCancellation(baseUrl);
+    body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.cancellation).toEqual(expect.objectContaining({ churned: false, scope: ['mosquito'] }));
+    mockAuthStage = 'churned';
+    mockAuthInactive = false;
+
+    // A SCOPED run whose only error is an earlier-day stuck visit is not
+    // promoted on the portal (the stale-visit rule is whole-plan only here,
+    // #7951): a repair-only retry cannot name the continuing families.
+    mockState.service_requests = [{
+      id: 'req-portal-stale', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
+      source: null, created_at: new Date(Date.now() - 10 * 1000),
+    }];
+    mockState.cancellation_cases = [{ service_request_id: 'req-portal-stale', scope: ['mosquito'] }];
+    processCancellationRequest.mockResolvedValueOnce({
+      ...scopedOk, ok: false, errors: ['in_progress_visit:svc-old'], staleInProgressVisitIds: ['svc-old'],
+    });
+    res = await postCancellation(baseUrl);
+    body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.cancellation.processed).toBe(false);
+    expect(body.request.status).toBe('new');
 
     // Inactive-account repair: the row is hours old and the account is churned.
     mockAuthInactive = true;
+    mockState.customers = [{ id: 'cust-1', active: false, pipeline_stage: 'churned' }];
     mockState.service_requests = [{
       id: 'req-portal-2', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
       source: null, created_at: new Date(Date.now() - 3 * 60 * 60 * 1000),
@@ -378,6 +579,10 @@ describe('POST /api/requests cancellation guard', () => {
     expect(body.request.status).toBe('resolved');
     expect(mockState.service_requests[0].status).toBe('resolved');
     expect(mockState.service_requests[0].resolved_at).toBeInstanceOf(Date);
+    // The account row says cancelled: the reply says so even though
+    // the replayed SCOPED run reports churned:false, so the screen refreshes
+    // and never claims other services continue.
+    expect(body.cancellation).toEqual(expect.objectContaining({ churned: true, scope: ['mosquito'] }));
   }));
 
   test('live membership dues alone → allowed', () => withServer(async (baseUrl) => {

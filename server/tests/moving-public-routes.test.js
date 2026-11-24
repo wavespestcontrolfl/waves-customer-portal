@@ -1,12 +1,10 @@
 /**
- * Public moving page routes (GATE_MOVING_FLOW): /api/public/moving/:token.
+ * Public moving page routes: /api/public/moving/:token.
  * The service is mocked here; moving-flow-postgres.test.js runs it for real.
- * Pins: dark = 404 everywhere, malformed/unknown tokens = the same 404, only
+ * Pins: malformed/unknown tokens = the same 404, only
  * the allowed fields leave the check route, a MoveError keeps its status and
  * words, and submit passes a checkId only when it is a non-empty string.
  */
-let mockGateOn = true;
-jest.mock('../config/feature-gates', () => ({ movingFlowLive: () => mockGateOn }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/customer-moves', () => {
   class MoveError extends Error {
@@ -71,27 +69,15 @@ function app() {
 }
 
 beforeEach(() => {
-  mockGateOn = true;
   jest.clearAllMocks();
   Moves.loadMoveByToken.mockResolvedValue(MOVE);
-});
-
-test('dark: every route answers the same 404 and never reads a move', async () => {
-  mockGateOn = false;
-  const a = app();
-  for (const [method, path] of [['get', `/api/public/moving/${TOKEN}`], ['post', `/api/public/moving/${TOKEN}/check`], ['post', `/api/public/moving/${TOKEN}/submit`]]) {
-    const res = await request(a)[method](path).send({});
-    expect(res.status).toBe(404);
-    expect(res.body).toEqual({ error: 'Not found' });
-    expect(res.headers['cache-control']).toBe('private, no-store');
-  }
-  expect(Moves.loadMoveByToken).not.toHaveBeenCalled();
 });
 
 test('a malformed token or an unknown move is the same 404', async () => {
   const a = app();
   const bad = await request(a).get('/api/public/moving/not-a-token');
   expect(bad.status).toBe(404);
+  expect(bad.headers['cache-control']).toBe('private, no-store');
   expect(Moves.loadMoveByToken).not.toHaveBeenCalled();
   Moves.loadMoveByToken.mockResolvedValueOnce(null);
   const unknown = await request(a).get(`/api/public/moving/${TOKEN}`);

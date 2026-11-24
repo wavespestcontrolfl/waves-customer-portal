@@ -125,6 +125,12 @@ describe('StripeService.createInvoicePaymentIntent', () => {
         if (applyCreditSideEffect) applyCreditSideEffect();
       }),
     }));
+    // No promo code on the invoice unless a case says so (a doMock outlives
+    // resetModules, so every case starts from this one).
+    jest.doMock('../services/invoice-promo-code', () => ({
+      pendingPromoCredit: jest.fn(async () => 0),
+      redeemAndApplyPromoCode: jest.fn(async () => 0),
+    }));
   });
 
   test('rechecks the saved-card fence while holding the invoice lock', async () => {
@@ -705,6 +711,96 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     // Replacement is minted at AMOUNT DUE ($25 = 2500 cents), not the $75 gross.
     expect(stripeClient.paymentIntents.create.mock.calls[0][0].amount).toBe(2500);
     expect(result.paymentIntentId).toBe('pi_fresh_credit');
+  });
+
+  describe('a promo code entered on the pay page (GATE_PAY_PROMO_CODE)', () => {
+    // The redemption and its draw (ledger, use count, once per customer, all
+    // or nothing) are covered against real Postgres in
+    // estimate-promo-code-postgres.test.js. Here: what the setup step does
+    // around them.
+    const withPromoWaiting = (amount) => {
+      const promo = {
+        pendingPromoCredit: jest.fn(async () => amount),
+        // The real step posts the credit and draws it against the invoice.
+        redeemAndApplyPromoCode: jest.fn(async () => {
+          invoiceRow.credit_applied = String(amount);
+          return amount;
+        }),
+      };
+      jest.doMock('../services/invoice-promo-code', () => promo);
+      return promo;
+    };
+    const staleCardIntent = () => {
+      invoiceRow.stripe_payment_intent_id = 'pi_stale_card';
+      stripeClient.paymentIntents.retrieve.mockResolvedValue({
+        id: 'pi_stale_card', status: 'requires_payment_method', metadata: { waves_invoice_id: invoiceRow.id },
+      });
+      stripeClient.paymentIntents.cancel.mockResolvedValue({ id: 'pi_stale_card', status: 'canceled' });
+      stripeClient.paymentIntents.create = jest.fn().mockResolvedValue({
+        id: 'pi_after_promo', status: 'requires_payment_method', client_secret: 'pi_after_promo_secret',
+      });
+    };
+
+    test('with no balance the customer chose to apply, the open payment is retired, the code is redeemed and the payment is priced at what is left', async () => {
+      customerAccountCredits = '0.00';
+      const promo = withPromoWaiting(25);
+      staleCardIntent();
+
+      const StripeService = require('../services/stripe');
+      const result = await StripeService.createInvoicePaymentIntent(invoiceRow.id);
+
+      // The open payment is cleared BEFORE the code is redeemed: the draw refuses an attached payment.
+      expect(stripeClient.paymentIntents.cancel).toHaveBeenCalledWith('pi_stale_card');
+      expect(stripeClient.paymentIntents.cancel.mock.invocationCallOrder[0])
+        .toBeLessThan(promo.redeemAndApplyPromoCode.mock.invocationCallOrder[0]);
+      expect(promo.redeemAndApplyPromoCode).toHaveBeenCalledWith(trxMock, invoiceRow);
+      // The customer's own balance is not drawn: only the promo step ran.
+      expect(require('../services/customer-credit').applyAccountCreditToInvoice).not.toHaveBeenCalled();
+      // The new payment is the amount due ($75 − $25).
+      expect(stripeClient.paymentIntents.create.mock.calls[0][0].amount).toBe(5000);
+      expect(result.paymentIntentId).toBe('pi_after_promo');
+    });
+
+    test('with automatic credit on, the code is redeemed first and the customer\'s own balance is then drawn as before', async () => {
+      customerAccountCredits = '15.00';
+      const promo = withPromoWaiting(25);
+      applyCreditSideEffect = () => { invoiceRow.credit_applied = '40.00'; };
+      staleCardIntent();
+
+      const StripeService = require('../services/stripe');
+      await StripeService.createInvoicePaymentIntent(invoiceRow.id);
+
+      const { applyAccountCreditToInvoice } = require('../services/customer-credit');
+      expect(applyAccountCreditToInvoice).toHaveBeenCalledWith({ invoiceId: invoiceRow.id }, trxMock);
+      expect(promo.redeemAndApplyPromoCode.mock.invocationCallOrder[0])
+        .toBeLessThan(applyAccountCreditToInvoice.mock.invocationCallOrder[0]);
+      expect(stripeClient.paymentIntents.create.mock.calls[0][0].amount).toBe(3500);
+    });
+
+    test('no code waiting: the open payment is left alone and nothing is redeemed or applied', async () => {
+      customerAccountCredits = '0.00';
+      const promo = withPromoWaiting(0);
+      invoiceRow.stripe_payment_intent_id = 'pi_open';
+      stripeClient.paymentIntents.retrieve.mockResolvedValue({
+        id: 'pi_open', status: 'requires_payment_method', client_secret: 'pi_open_secret', amount: 7500,
+        metadata: { waves_invoice_id: invoiceRow.id },
+      });
+
+      const StripeService = require('../services/stripe');
+      await StripeService.createInvoicePaymentIntent(invoiceRow.id);
+
+      expect(promo.redeemAndApplyPromoCode).not.toHaveBeenCalled();
+      expect(require('../services/customer-credit').applyAccountCreditToInvoice).not.toHaveBeenCalled();
+      expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
+    });
+
+    test('a setup that holds credit coverage for a card capture never looks for a code', async () => {
+      const promo = withPromoWaiting(25);
+      const StripeService = require('../services/stripe');
+      await StripeService.createInvoicePaymentIntent(invoiceRow.id, { holdCoverageForCapture: true });
+      expect(promo.pendingPromoCredit).not.toHaveBeenCalled();
+      expect(promo.redeemAndApplyPromoCode).not.toHaveBeenCalled();
+    });
   });
 
   test('does NOT cancel an ACH micro-deposit PI in the credit triage even with credit available', async () => {

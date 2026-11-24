@@ -40,7 +40,8 @@
  */
 
 const crypto = require('crypto');
-const { findBannedCustomerCopy } = require('./activity-indicators');
+const { findBannedCustomerCopy, REENTRY_VERB_SRC } = require('./activity-indicators');
+const { formatTechnicianForCustomer, isGenericTechnicianLabel } = require('../../utils/technician-name');
 
 // Code-noun anchored credential detector (shared with the generate-report
 // output gate): a token counts as a credential only beside an actual
@@ -243,14 +244,19 @@ function contentLines(lines) {
 const SAFE_IDIOM_RE = /(?<![-\w])(?<!\b(?:pets?|kids?|child|children|family)\s)safe\s+(?:once|when|after|as\s+soon\s+as)\s+(?:it\s+is\s+|everything\s+is\s+|the\s+(?:product|application|treatment|area)\s+is\s+)?(?:fully\s+|completely\s+)?dry\b/gi;
 const TIMING_CONFIRM_RE = /\b(?:technician|tech)\b(?:(?!\b(?:not|never|no|didn['’]t|doesn['’]t|don['’]t|won['’]t|cannot|can['’]t|couldn['’]t|isn['’]t|aren['’]t|wasn['’]t|weren['’]t|hasn['’]t|haven['’]t|hadn['’]t|shouldn['’]t|wouldn['’]t|fail(?:s|ed|ing)?|unable|without|refus(?:es|ed|ing)?|forg(?:ot|ets?|etting)|neglect(?:s|ed|ing)?|omit(?:s|ted|ting)?|declin(?:es|ed|ing)?|miss(?:es|ed|ing)?|need(?:s|ed|ing)?|yet|wait(?:s|ed|ing)?|await(?:s|ed|ing)?|pending|remain(?:s|ed|ing)?|plan(?:s|ned|ning)?|intend(?:s|ed|ing)?|expect(?:s|ed|ing)?|hop(?:es|ed|ing)?|tr(?:y|ies|ied|ying)|attempt(?:s|ed|ing)?|schedul(?:es|ed|ing)?|going|will|would|should|must|supposed)\b)[^.!?]){0,40}\bconfirm(?:s|ed|ing)?\b(?:(?!\b(?:not|nothing|neither|never|no)\b)[^.!?]){0,25}(?<!\b(?!(?:the|its|confirm(?:s|ed|ing)?|re-?entry|entry|reentry|drying|dry(?:ing)?|dry[-\s]?time|time|treatment)\b)[a-z][a-z'’-]*\s+)\btiming\b(?![^.!?]{0,30}\b(?:not|never|no|nothing|unavailable|unknown|unconfirmed|undetermined|pending|(?:wasn|weren|isn|aren|won|didn|doesn|hasn|haven|hadn|couldn|shouldn|wouldn)['’]t|cannot|can['’]t)\b)/i;
 
+// The four-section shape of the notes, whatever the switch: the sections, or
+// null. The PDF key reads it in both states (reportDependsOnWriterRules).
+function fourSectionShape(notes) {
+  const text = String(notes || '');
+  return text.trim() && text.length <= MAX_FOUR_SECTION_CHARS ? parseFourSections(text) : null;
+}
+
 // The four-section report's structure and its customer-copy violations,
 // whether or not it would publish (the edit heads-up names what an edit
 // added even when a refused word would drop the whole body). Null unless
 // the switch is live and the shape holds.
 function fourSectionReport(notes) {
-  const text = String(notes || '');
-  if (!text.trim() || !reportWriterRulesLive() || text.length > MAX_FOUR_SECTION_CHARS) return null;
-  const sections = parseFourSections(text);
+  const sections = reportWriterRulesLive() ? fourSectionShape(notes) : null;
   if (!sections) return null;
   const body = sections.map((section) => section.paragraphs.join(' ')).join(' ').trim();
   return { sections, body, violations: customerCopyViolations(body) };
@@ -334,6 +340,215 @@ function technicianReportCustomerCopy(notes) {
   };
 }
 
+// The technician's own note (owner 2026-11-19): a report whose summary is the
+// note the technician gave, cleaned up, in place of the titled report. The
+// completion will write it to structured_notes.reportNote = { v: 1, text,
+// source } after its own screens; technician_notes then holds the raw note,
+// which is internal. `source` is 'cleaned' (the technician's words: the
+// report signs it with their first name) or 'fixed' (the standard sentence
+// code wrote: no signature). Read from the record alone, never from a gate:
+// a report that went out keeps its note. The customer-copy screens run again
+// on every read.
+const REPORT_NOTE_VERSION = 1;
+const REPORT_NOTE_SOURCES = Object.freeze(['cleaned', 'fixed']);
+const MAX_REPORT_NOTE_CHARS = 900;
+
+// Stored notes that cannot be read (a string that does not parse, or any
+// value but an object: a number or boolean as pg decodes a JSONB scalar, an
+// array) may hold a note: they count as one, so the raw column beside them
+// is never customer copy.
+const UNREADABLE_NOTES = Symbol('unreadable structured_notes');
+
+// The record's stored note, in whatever shape: undefined = it carries none
+// (no notes, blank notes, JSON null, or an object without the key).
+function storedReportNote(structuredNotes) {
+  let notes = structuredNotes;
+  if (typeof notes === 'string') {
+    if (!notes.trim()) return undefined;
+    try { notes = JSON.parse(notes); } catch { return UNREADABLE_NOTES; }
+  }
+  if (notes === null || notes === undefined) return undefined;
+  if (typeof notes !== 'object' || Array.isArray(notes)) return UNREADABLE_NOTES;
+  return notes.reportNote;
+}
+
+// A record that carries a note (in any shape), or notes that cannot be read,
+// keeps the technician's raw note in technician_notes: no line of that
+// column is customer copy.
+function carriesReportNote(structuredNotes) {
+  return storedReportNote(structuredNotes) !== undefined;
+}
+
+// Any line or paragraph break: a note is one paragraph, and the text after a
+// break is not part of it.
+const REPORT_NOTE_LINE_BREAK = /[\n\v\f\r\u0085\u2028\u2029]/;
+
+// null = the record carries no note, so the titled report may stand. A record
+// that carries one gets that note or nothing: a note in any other shape, or
+// one the screens refuse, reads as { body: null }, because the raw notes
+// column beside it holds the technician's raw note.
+function reportNoteCustomerCopy(structuredNotes) {
+  const note = storedReportNote(structuredNotes);
+  if (note === undefined) return null;
+  if (note === UNREADABLE_NOTES) return { body: null, violations: ['report_note_unreadable'], source: null };
+  // One paragraph: a note is never titled, and a second line is not part of it.
+  const valid = Boolean(note) && note.v === REPORT_NOTE_VERSION && REPORT_NOTE_SOURCES.includes(note.source)
+    && typeof note.text === 'string' && !REPORT_NOTE_LINE_BREAK.test(note.text.trim());
+  const text = valid ? note.text.replace(/\s+/g, ' ').trim() : '';
+  if (!text || text.length > MAX_REPORT_NOTE_CHARS) return { body: null, violations: ['report_note_shape'], source: null };
+  const violations = noteRecordCopyViolations(text);
+  return { body: violations.length ? null : text, violations, source: note.source };
+}
+
+// The words of the generic technician labels (utils/technician-name): a
+// signature that is one of them names no technician.
+const GENERIC_SIGNER_WORDS = new Set(['your', 'waves', 'technician', 'tech', 'team']);
+
+// The first name a report prints for its technician (the signature on a
+// technician's own note): the record's technician row as its identity
+// snapshot froze it. A generic label in any name field signs nothing: the
+// first name alone, the first and last name together, the name column, or
+// one word of a label.
+function reportTechnicianFirstName(service = {}) {
+  // Required here: the identity snapshot loads the address helpers and the
+  // db module, which the copy rules do not need.
+  const { applyReportIdentitySnapshot } = require('./report-identity-snapshot');
+  const row = applyReportIdentitySnapshot(service || {});
+  const first = String(row.technician_first_name || '').trim();
+  const last = String(row.technician_last_name || '').trim();
+  const full = first ? `${first} ${last}`.trim() : formatTechnicianForCustomer({ name: row.technician_name });
+  if (isGenericTechnicianLabel(first) || isGenericTechnicianLabel(full)) return null;
+  const signer = first || full.split(/\s+/)[0];
+  return GENERIC_SIGNER_WORDS.has(signer.toLowerCase()) ? null : signer;
+}
+
+// The summary a visit's report text prints as: a note in the technician's
+// own words ('cleaned') signed " — <first name>" when the record names its
+// technician; the standard sentence ('fixed') and the titled report as they
+// are.
+function printedReportSummary(parsed, service = {}) {
+  if (!parsed?.body) return null;
+  const signer = parsed.source === 'cleaned' ? reportTechnicianFirstName(service) : null;
+  return signer ? `${parsed.body} — ${signer}` : parsed.body;
+}
+
+// The 8-hex digest of a summary as it prints. The PDF key's `-tr` part
+// (summaryCopySignature) and a shown note's state (reportNoteRenderState)
+// name the same digest of the same string.
+function printedSummaryDigest(text) {
+  return crypto.createHash('sha256').update(String(text ?? '')).digest('hex').slice(0, 8);
+}
+
+// The service lines whose report may print the technician's own note. Phase 1
+// of the report speed plan (owner 2026-11-19) is the pest report alone: the
+// lawn and tree & shrub reports take the note in their own later step, with
+// its own place on their page (*lawn note*), and termite, rodent, mosquito
+// and palm visits come with the typed visits.
+const REPORT_NOTE_SERVICE_LINES = new Set(['pest']);
+
+// The line a record's report renders as, by the rule report-data.js uses to
+// pick the layout: the stored service_line, else the line its service type
+// names (a record with no line and no type renders as pest). A row read
+// without the service_line column cannot tell a lawn visit with a generic
+// type from a pest visit, so it has no line, and a note on it is no text.
+function reportServiceLine(record) {
+  if (!record || !Object.prototype.hasOwnProperty.call(record, 'service_line')) return null;
+  // Required here: the line table loads the service-type normalizer, which
+  // the copy rules do not need.
+  const { detectServiceLine } = require('./service-line-configs');
+  return record.service_line || detectServiceLine(record.service_type);
+}
+
+// The customer copy of a visit record's report text: the technician's own
+// note when the record carries one (a refused or malformed note shows
+// nothing: the raw notes column is never the fallback), else the titled
+// report parsed from technician_notes. One rule for every reader that holds
+// the record. A note on a record of any other line reads as no text, as a
+// refused one does: no lawn or tree & shrub page edits it, and the raw notes
+// column beside it stays internal. A visit whose recorded outcome applied
+// nothing (inspection_only, customer_declined) shows no note either: on a
+// callback its report leads with the outcome copy and its PDF prints no
+// summary (ServiceReportDocument), and a note can name a treatment the visit
+// did not make. The outcome is the one the callback copy reads
+// (reservice-report.js: the stored service_data and structured notes), on
+// any record, so no reader needs the is_callback column. service_data that is
+// present but cannot be read (serviceDataUnreadable) shows no note either: it
+// hides the outcome and the frozen typed cards the note rule checks, so no
+// reader can show that the note may stand (the voice reader's parse refused
+// it before; now every reader does). Absent service_data reads as none.
+function visitReportCustomerCopy(record) {
+  const note = reportNoteCustomerCopy(record?.structured_notes);
+  if (note && !REPORT_NOTE_SERVICE_LINES.has(reportServiceLine(record))) {
+    return { body: null, violations: ['report_note_service_line'], source: null };
+  }
+  if (note && serviceDataUnreadable(record || {})) {
+    return { body: null, violations: ['report_note_unreadable_service_data'], source: null };
+  }
+  // Required here: the callback copy loads the card and asks modules, which
+  // the copy rules do not need.
+  if (note && require('./reservice-report').recordedOutcomeAppliedNothing(record || {})) {
+    return { body: null, violations: ['report_note_no_application'], source: null };
+  }
+  return note || technicianReportCustomerCopy(record?.technician_notes);
+}
+
+// A value stored as an object or as its JSON: { data } when it reads as an
+// object (not an array), { absent: true } when it is null, undefined or an
+// empty string, and null when it cannot be read.
+function readStoredObject(value) {
+  if (value === null || value === undefined || value === '') return { absent: true };
+  let data = value;
+  if (typeof value === 'string') {
+    try { data = JSON.parse(value); } catch { return null; }
+  }
+  return data && typeof data === 'object' && !Array.isArray(data) ? { data } : null;
+}
+
+// Whether a record's service_data is present but cannot be read: a string
+// that does not parse to an object, or any value that is not one (an array,
+// a number, a JSON string inside the column), or an object whose `protocol`
+// (the visit outcome's first source, reservice-report.js outcomeOf, which
+// reads it as JSON too) is present but cannot be read. Production
+// (2026-11-20, read-only): 654 of 654 completed visits store an object, and
+// each protocol is an object or absent.
+function serviceDataUnreadable(service = {}) {
+  const stored = readStoredObject(service?.service_data);
+  if (!stored) return true;
+  return !stored.absent && readStoredObject(stored.data.protocol) === null;
+}
+
+// A record's service_data as an object ({} when absent or unreadable).
+function recordServiceData(service = {}) {
+  try {
+    const data = typeof service.service_data === 'string'
+      ? JSON.parse(service.service_data)
+      : service.service_data;
+    return data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+// Whether a record's customer render depends on GATE_REPORT_WRITER_RULES.
+// The switch acts on a render in two places only: notes with the four-section
+// shape print as the summary only while it is on (fourSectionReport), and a
+// Today's Result card the render prints (the primary card and auto_send
+// companions) loses a four-section body while it is off (activity-indicators
+// withoutDarkFourSectionBody). Every other record renders the same in both
+// states. Read in both states: the shape, never the gated parse.
+function reportDependsOnWriterRules(service = {}) {
+  const serviceData = recordServiceData(service);
+  const cards = [
+    serviceData.typedReportSnapshot,
+    ...(Array.isArray(serviceData.companionReportSnapshots)
+      ? serviceData.companionReportSnapshots.filter((snap) => snap?.delivery === 'auto_send')
+      : []),
+  ];
+  return cards.some((snap) => snap && typeof snap === 'object' && snap.type
+    && snap.todaysResult?.bodyFormat === 'four_section')
+    || Boolean(fourSectionShape(service.technician_notes));
+}
+
 /**
  * PDF cache-key component. Stored report PDFs are keyed on the Pest
  * Pressure visibility signature only, so a summary now driven by the
@@ -343,49 +558,75 @@ function technicianReportCustomerCopy(notes) {
  *
  * Returns '' when the summary is recap/template-driven (keys unchanged, so
  * every existing cached PDF stays a valid hit) and a content-hashed suffix
- * when the technician report drives the rendered summary. Mirrors
- * report-data's summary-source decision: non-typed reports use the parsed
- * copy directly; typed reports only when the frozen snapshot's Today's
- * Result body came from the technician report.
+ * when the technician report drives the rendered summary, by the report's
+ * own rule (technicianReportDrivesSummary). A record whose render depends on
+ * GATE_REPORT_WRITER_RULES (reportDependsOnWriterRules) also gets '-fson' or
+ * '-fsoff': a flip changes its key both ways, and neither state matches a key
+ * stored before this suffix existed (that render's state is unknown, also
+ * when the parse is null in the state it was stored in). Every other record
+ * keeps its key.
  */
+
+// The writer-rules state, as a PDF key and a PDF payload name it. The browser
+// that renders a PDF fetches its own /data from the web process, so /data in
+// PDF mode names the state it built the payload in (`writerRules`), the
+// PDF document shows it on its root element (data-writer-rules), and for a
+// record whose render depends on the switch (reportDependsOnWriterRules) the
+// renderer prints only once the page shows the state the key was computed
+// under (pdf.js reportPdfReadySelector). A page built in the other state (a
+// rolling restart's overlap), or by a page bundle or server from before this
+// rule, never shows it: the render times out and nothing is stored. Every
+// other record renders the same in both states and waits for the root alone.
+function renderWriterRulesState() {
+  return reportWriterRulesLive() ? 'on' : 'off';
+}
+
+// The note state, in the same way. A record that carries the technician's own
+// note (carriesReportNote, stored notes that cannot be read included) keys
+// its PDF with `-rn` (summaryCopySignature), and the page it prints must be
+// built by the note reader in the same state: /data in PDF mode names it
+// (`reportNote`), the PDF document shows it on its root element
+// (data-report-note), and the renderer prints only once the page shows the
+// state of its own build (pdf.js reportPdfReadySelector). 'shown:<digest>'
+// when the summary is the note (summaryIsOwnNote): the digest of the signed
+// note as it prints, the one the key's `-tr` part names, so a page built from
+// another read of the record (the note or the signing name changed between
+// the two reads) never matches either. 'withheld' when it is not (a refused
+// note, a typed visit, another line). 'none' on every other record: its page
+// shows that state too, so a record that gained a note after the caller read
+// it never prints under the caller's key. A page bundle or server from before
+// the note reader shows no state at all, so it never matches any of the three:
+// the render times out and nothing is stored (pre-push audit round 29).
+function reportNoteRenderState(service, payload) {
+  if (!carriesReportNote(service?.structured_notes)) return 'none';
+  return payload?.summaryIsOwnNote === true ? `shown:${printedSummaryDigest(payload.summary)}` : 'withheld';
+}
+
 function summaryCopySignature(service = {}) {
-  let snapshot = null;
-  let companionSnapshots = [];
-  try {
-    const data = typeof service.service_data === 'string'
-      ? JSON.parse(service.service_data)
-      : service.service_data;
-    snapshot = data && typeof data === 'object' && !Array.isArray(data)
-      && data.typedReportSnapshot && typeof data.typedReportSnapshot === 'object'
-      && data.typedReportSnapshot.type
-      ? data.typedReportSnapshot
-      : null;
-    // Companion-only completions govern through their customer-visible
-    // companion snapshots (PDFs are customer-facing → auto_send only).
-    companionSnapshots = !snapshot && data && Array.isArray(data.companionReportSnapshots)
-      ? data.companionReportSnapshots.filter((snap) => snap
-        && typeof snap === 'object' && snap.delivery === 'auto_send')
-      : [];
-  } catch {
-    snapshot = null;
-    companionSnapshots = [];
-  }
-  const parsed = technicianReportCustomerCopy(service.technician_notes);
-  // Mirrors report-data's promotion gate exactly (codex r35 #3420): the
-  // governing typed story must have ACCEPTED the body — bodySource stamped
-  // or a frozen reconcileConfirmed (the person's override) — else the PDF
-  // signature would diverge from the live summary and serve a stale cache.
-  const governing = [snapshot, ...(snapshot ? [] : companionSnapshots)]
-    .filter((snap) => snap?.todaysResult);
-  const typedStoryAcceptedBody = !governing.length
-    || governing.some((snap) => snap.todaysResult?.bodySource === 'technician_report'
-      // mirror report-data: a reconcile confirmation never accepts the body
-      // on a zero-state snapshot (codex r42)
-      || (snap.todaysResult?.reconcileConfirmed === true
-        && snap.activity?.score !== 0));
-  const drivesSummary = !!parsed?.body && typedStoryAcceptedBody;
-  if (!drivesSummary) return '';
-  return `-tr${crypto.createHash('sha256').update(parsed.body).digest('hex').slice(0, 8)}`;
+  const serviceData = recordServiceData(service);
+  const parsed = visitReportCustomerCopy(service);
+  const ownNote = carriesReportNote(service.structured_notes);
+  // THE summary rule, as the report runs it for a customer (a PDF is
+  // customer-facing): technicianReportDrivesSummary on the frozen snapshots,
+  // through the dark four-section transform, with the completion's rejection
+  // and the trapping screens. The key then changes whenever the printed
+  // summary does, a gate flip included, and a cached PDF never keeps a
+  // summary the live report dropped (codex r35 #3420).
+  let state = '';
+  if (reportDependsOnWriterRules(service)) state = reportWriterRulesLive() ? '-fson' : '-fsoff';
+  // A record that carries the technician's own note (or stored notes that
+  // cannot be read) prints its cards without report text and its actions
+  // from the form alone (report-data.js), with or without a summary. Its key
+  // always says so: a PDF cached before the record carried a note never
+  // stands after it.
+  if (ownNote) state = `-rn${state}`;
+  if (!parsed?.body || !require('./activity-indicators').technicianReportDrivesSummary({
+    serviceData, body: parsed.body, ownNote,
+  })) return state;
+  // The key hashes the summary as the report prints it (a note in the
+  // technician's own words signed), so every other summary keeps its key:
+  // its body.
+  return `-tr${printedSummaryDigest(printedReportSummary(parsed, service))}${state}`;
 }
 
 // The full customer-copy screen the notes parser applies — shared banned
@@ -422,12 +663,263 @@ function completionSummarySentence(value) {
   return customerCopyViolations(excerpt).length ? null : excerpt;
 }
 
+// The copy screen for a record that carries the technician's own note: the
+// note, and every list value and finding field such a record prints
+// (report-data.js buildProtocolPayload, finding-provenance.js). The complete
+// screen above; the access check (heldAccessCode, below: a code-shaped
+// number, or any word about getting in); and any time a technician can give
+// for re-entry or drying:
+// any word that names hours, minutes or seconds, with or without a figure
+// ("30+ minutes", "eighteen minutes", "½ hour", "a few minutes", "30min"); a
+// figure with h, m or s ("2h", "90s"); a clock time, written in any of its marked forms
+// ("3:30", any pm or a.m., "4am" or "four am", "3 o'clock", "half past three",
+// "four in the afternoon") or as an hour after at, after, until, till, by,
+// before, around, past, between or from ("after four", "until 4"), the
+// hour written as a 24-hour clock too ("at 1600", "after 0830"); or
+// overnight, tonight, tomorrow, noon or midnight. AGENTS.md bans a fixed
+// re-entry or drying time in customer copy. A figure can be written in more
+// ways than any list names (each pre-push audit round on this PR found one
+// more: "dries", a hyphen, a plus, a number word, a fraction, a spelled-out
+// hour), so a marker alone decides: the unit word, or the clock marker, or a
+// time word before an hour. On such a record each match withholds the copy: a
+// refused note shows nothing, and a refused list value or finding field is
+// left out. Days stay legal: they name the next visit and when results show.
+// The one exception is a sentence that names drying or re-entry ("dry",
+// "re-enter", "keep … off", "stay … inside", "off-limits", "avoid"), the
+// people and pets a re-entry line is about, or a customer's permission to
+// use the place again ("you can use it", "feel free to use"): there any figure or number word
+// decides ("pets can return 11/22", "keep off 2d"), and so does a day word: a
+// unit ("dries in half a day", "keep pets off for two days"), a weekday (also
+// short: "until Sat."),
+// "today", a part of the day ("dry by this evening"), a month or a season.
+// Inside such a sentence the only time a note may give is the idiom "until
+// dry". The re-entry verbs the complete screen pairs with minutes and hours
+// (REENTRY_VERB_SRC) withhold a sentence with a day word as well ("You can
+// return to the treated area in two days"), but not after I, we, the
+// technician or the team: that is a follow-up. A full
+// stop ends a sentence only before a capital letter or the end of the text,
+// and never after "approx." or a like abbreviation, so "1.5 days",
+// "approx. 2 days" and "approx. Two days" stay in their sentence; a line
+// break does not end one. The text is cut into sentences before the
+// sentence rules run, with a split that tells a capital from a small letter:
+// the rules ignore case, and under that flag \p{Lu} matches a small letter
+// too. Singular "second" stays legal: it is the ordinal ("second visit"), and no
+// re-entry time is one second. So do "am" after anything but a number ("I am")
+// and, outside a drying or re-entry sentence, a part of the day with no hour
+// ("Have a great afternoon!"). A count
+// after one of those time words ("at 3 stations") is withheld too: nothing
+// tells it from a clock time. A read-only production count of this rule
+// (2026-11-20): a match in 47 of 474 pest customer recaps (2 clock times; in
+// 41 a drying word and a day unit share a sentence) and in 56 of 401
+// technician notes, none in the form lists or the finding fields. The access
+// check below catches 12 of the 56 too.
+const NOTE_HOUR_SRC = '(?:\\p{N}{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)';
+// A 24-hour clock with no colon: 3 or 4 digits, hour 0 to 23 and minutes 00
+// to 59, or 2400 (midnight).
+const NOTE_24H_CLOCK_SRC = '(?:(?:[01]?\\p{Nd}|2[0-3])[0-5]\\p{Nd}|2400)';
+// The number words of a clock's hour and minutes (0 to 59: "four thirty am").
+const NOTE_CLOCK_WORD_SRC = '(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|oh)';
+// Where a sentence ends: a question or exclamation mark or a semicolon, or a
+// full stop before a capital letter or the end of the text, unless the full
+// stop closes an abbreviation that comes before a quantity ("approx. Two
+// days"). This split tells case apart (no i flag); the sentence rules below
+// run on one sentence at a time.
+const NOTE_SENTENCE_ABBREVIATION_SRC = ['approx', 'apprx', 'appx', 'est', 'ca', 'abt', 'e.g', 'i.e']
+  .map((word) => word.replace(/\p{L}/gu, (letter) => `[${letter.toLowerCase()}${letter.toUpperCase()}]`).replace(/\./g, '\\.'))
+  .join('|');
+const NOTE_SENTENCE_END_RE = new RegExp(
+  `[!?;]|(?<!(?<!\\p{L})(?:${NOTE_SENTENCE_ABBREVIATION_SRC}))\\.(?=\\s*(?:\\p{Lu}|$))`,
+  'u',
+);
+// Any character inside one sentence: the text is split before the sentence
+// rules run.
+const NOTE_SENTENCE_CHAR_SRC = '[\\s\\S]';
+// What marks a drying or re-entry sentence: a drying word, re-entry, keep or
+// stay with off, out, away, inside, indoors or clear ("keep an eye out" is
+// not one), off-limits, avoid, the people and pets a re-entry line names, or
+// a customer's permission to use the place again: "you can use", "you're
+// free to enjoy", "feel free to use", "it is safe to use", "the treated
+// patio is fine to use".
+const NOTE_DRY_REENTRY_SRC = `(?<!\\p{L})(?:${[
+  '(?:dry|dries|drying|dried|wet|damp)',
+  're-?\\s?ent(?:er|ers|ered|ering|ry|ries|rance)',
+  `(?:keep|keeps|keeping|kept)(?!\\s+an\\s+eye)${NOTE_SENTENCE_CHAR_SRC}{0,40}?(?<!\\p{L})(?:off|out|outside|away|inside|indoors|clear)`,
+  `(?:stay|stays|staying|stayed)${NOTE_SENTENCE_CHAR_SRC}{0,40}?(?<!\\p{L})(?:off|out|outside|away|inside|indoors|clear)`,
+  'off[\\s-]?limits',
+  '(?:avoid|avoids|avoiding|avoided)',
+  '(?:pets?|dogs?|cats?|pupp(?:y|ies)|kittens?|kids?|child(?:ren)?|toddlers?|bab(?:y|ies)|people|family|anyone|everyone|guests?)',
+  `(?:you(?:\\s*['\u2019]ll|\\s+will|\\s+can|\\s+may|\\s+could|\\s+should|\\s+might)(?:\\s+(?:safely|then|now|also|soon|easily))?(?:\\s+be\\s+able\\s+to)?|you(?:\\s+are|['\u2019]re)\\s+(?:free|welcome|able|good|okay|ok|fine|clear|cleared|safe)\\s+to|feel\\s+free\\s+to|(?:\\p{L}+['\u2019](?:s|re|ll\\s+be)|is|are|will\\s+be|should\\s+be|would\\s+be|be)\\s+(?:safe|fine|ok|okay|alright|all\\s+right|good|ready|free|clear)\\s+to)\\s+(?:use|enjoy|resume|reopen)`,
+].join('|')})(?!\\p{L})`;
+// A day word: a unit from a day up, a weekday (full or short: "Sat",
+// "Thurs"), today, a part of the day or a
+// meal, a month (not "may", the verb), a season (not "fall", the verb), a
+// date written with a slash ("11/22"), or a figure with d or w ("2d").
+const NOTE_DAY_WORD_SRC = `(?:(?<!\\p{L})(?:${[
+  'days?|nights?|weeks?|weekends?|fortnights?|months?|today',
+  'monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?|wed|weds|thu|thur|thurs|fri|sat|sun',
+  'mornings?|afternoons?|evenings?|sunset|sundown|sunrise|dawn|dusk|lunch(?:time)?|dinner(?:time)?|bedtime|breakfast',
+  'january|february|march|april|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec',
+  'spring|summer|autumn|winter',
+].join('|')})(?!\\p{L})|(?<!\\p{N})\\p{N}{1,2}\\s*\\/\\s*\\p{N}{1,2}(?!\\p{N})|\\p{N}\\s*(?:d|w|wks?)(?!\\p{L}))`;
+// What withholds a drying or re-entry sentence: a day word, any figure, or
+// any number word.
+const NOTE_MARKED_TIME_SRC = `(?:${NOTE_DAY_WORD_SRC}|\\p{N}|(?<!\\p{L})(?:${[
+  'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen',
+  'twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|dozen|half|couple',
+].join('|')})(?!\\p{L}))`;
+// The re-entry verbs the complete screen already pairs with minutes and hours
+// (activity-indicators.js REENTRY_VERB_SRC: return, come back, walk on, use the
+// treated area, ready for use, …) pair with a day word here. A follow-up says
+// the same verbs with the technician as the one who comes back ("I will
+// return in two weeks to check the stations"), so a verb after I, we, the
+// technician or the team, with or without a modal, is no re-entry.
+const NOTE_REENTRY_VERB_SRC = `(?<!\\b(?:i|we|technician|tech|team)(?:\\s*['\u2019]ll|\\s+will|\\s+can|\\s+would|\\s+should|\\s+may|\\s+might|\\s+plan\\s+to)?\\s+)\\b(?:${REENTRY_VERB_SRC})\\b`;
+const NOTE_RECORD_TIME_RE = new RegExp([
+  '(?<!\\p{L})(?:half-?|quarter-?)?(?:hours?|minutes?|mins?|hrs?|secs?|seconds)(?!\\p{L})',
+  '\\p{N}\\s*[hms](?!\\p{L})',
+  '(?<!\\p{N})\\p{N}{1,2}\\s*:\\s*\\p{N}{2}(?!\\p{N})',
+  '(?<!\\p{L})p\\.?\\s?m\\.?(?!\\p{L})',
+  '(?<!\\p{L})a\\.\\s?m\\.?(?!\\p{L})',
+  `(?:\\p{N}|(?<!\\p{L})${NOTE_CLOCK_WORD_SRC})[\\s-]*a\\.?\\s?m(?!\\p{L})`,
+  "(?<!\\p{L})o['\\u2019]?\\s*clock(?!\\p{L})",
+  '\\bhalf\\s+past\\b|\\bquarter\\s+(?:past|to|after|till|til)\\b',
+  `(?<!\\p{L})${NOTE_HOUR_SRC}\\s+(?:in\\s+the\\s+(?:morning|afternoon|evening|night)|at\\s+night|this\\s+(?:morning|afternoon|evening))`,
+  `(?<!\\p{L})(?:at|after|until|till|til|by|before|around|past|between|from)\\s+(?:about\\s+|around\\s+)?(?:${NOTE_HOUR_SRC}|${NOTE_24H_CLOCK_SRC})(?![\\p{L}\\p{N}])`,
+  '\\b(?:overnight|tonight|tomorrow|noon|midnight)\\b',
+].join('|'), 'iu');
+// The sentence rules: each runs on one sentence (NOTE_SENTENCE_END_RE).
+const NOTE_MARKED_SENTENCE_RE = new RegExp([
+  `${NOTE_DRY_REENTRY_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_MARKED_TIME_SRC}`,
+  `${NOTE_MARKED_TIME_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_DRY_REENTRY_SRC}`,
+  `${NOTE_REENTRY_VERB_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_DAY_WORD_SRC}`,
+  `${NOTE_DAY_WORD_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_REENTRY_VERB_SRC}`,
+].join('|'), 'iu');
+
+// A code-shaped number, whatever words surround it: 3 or more digits, with
+// up to 3 spaces, line breaks or hyphens between any two ("I punched 1234
+// into the padlock.", "12-34", "1 2 3 4"), or 3 or more number words in a
+// row ("one two three four", "twelve thirty-four"). Pre-push audit rounds 18,
+// 24 and 26 each found one more phrasing around a code ("Side access 4417",
+// "I used 1234 to get through the gate", "The pedestrian entrance unlocks
+// with 1234"), and main's report check went through the same rounds (its
+// comments cite codex r83, r84, r86): no word list ends that, so the note
+// screen judges the code's own shape. A figure with a unit ("150 feet") is
+// refused too. Production (2026-11-20, read-only, counts only): it adds 10 of
+// 401 raw pest technician notes (the screen already refused 97), and no
+// recap, finding field or form value. A word of 3 or more letters and digits
+// mixed is a code's shape too ("Use B7X2 at the front door.", pre-push audit
+// round 30), except a number with an ordinal or unit ending ("2nd", "10ft",
+// "4pm"). Production: it adds no raw note, recap or finding field.
+const NOTE_NUMBER_WORD_SRC = '(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)';
+const CODE_SHAPED_NUMBER_RE = new RegExp([
+  '(?<!\\p{N})\\p{N}(?:[\\s\\-\\u2010-\\u2015]{0,3}\\p{N}){2,}',
+  `(?<!\\p{L})${NOTE_NUMBER_WORD_SRC}(?:[\\s,\\-\\u2010-\\u2015]+${NOTE_NUMBER_WORD_SRC}){2,}(?!\\p{L})`,
+  '(?<![\\p{L}\\p{N}])(?=[\\p{L}\\p{N}]*\\p{L})(?=[\\p{L}\\p{N}]*\\p{N})(?!\\p{N}+(?:st|nd|rd|th|ft|in|yds?|sq|oz|gal|lbs?|ml|hrs?|mins?|am|pm|x)(?![\\p{L}\\p{N}]))[\\p{L}\\p{N}]{3,}(?![\\p{L}\\p{N}])',
+].join('|'), 'iu');
+
+// What speaks of getting in, whatever the code is. A code can be a word
+// ("I used the word ROSE to unlock the side gate.", pre-push audit round
+// 27), and a word has no shape; main's report check went through codex r3
+// to r88 on such phrasings. So the screen withholds the subject itself: a
+// gate; a lock, latch, key, keypad, lockbox, fob, buzzer, intercom or
+// opener; a code, PIN, passcode, password, passphrase or combination
+// ("a combination of ants" too: no list tells it from a lock's); a magic,
+// secret or pass word; access, or gaining entry. And it fails closed on
+// how anyone or anything gets in (round 28: "I punched rose into the
+// security panel to get inside."): getting or letting in, inside, into,
+// through or past, entering, keying a word in (punch, tap, dial, input, key
+// or type in, press, say), and a security panel, alarm, call box or touch
+// pad. Pests that get in are refused too ("Ants enter through gaps"): no
+// list tells their way in from a person's. "Entry points" and "inside"
+// alone stay legal. Production (2026-11-20, read-only, counts only), with
+// the door rules below and the code shape's line breaks: 15 more of 401 raw
+// pest technician notes withheld (the screen refused 107) and 7 more of 474
+// pest recaps; no finding field or form value. It catches every value the
+// two checks it replaces caught.
+const NOTE_ACCESS_WORD_RE = new RegExp(`(?<!\\p{L})(?:${[
+  'gates?',
+  '(?:un|re)?lock(?:s|ed|ing)?|padlocks?|deadbolts?|lock\\s?box(?:es)?|keypads?|latch(?:es|ed|ing)?',
+  'keys?|keyed|keyless|fobs?|buzzers?|buzz(?:ed)?\\s+in|intercoms?|openers?|clickers?',
+  'codes?|pins?|passcodes?|passwords?|passphrases?|combos?|combinations?',
+  '(?:magic|secret|pass|code|safe)\\s?words?|the\\s+words?',
+  'access(?:es|ed|ing|ible)?|gain(?:s|ed|ing)?\\s+(?:entry|entrance)',
+  '(?:get|gets|got|getting|gotten|let|lets|letting)(?:\\s+\\p{L}+){0,2}?\\s+(?:in|inside|into|through|past)',
+  'enter(?:s|ed|ing)?',
+  'punch(?:es|ed|ing)?|tapped|tapping|tap\\s+in|dial(?:s|ed|ing)?|input(?:s|ted|ting)?|keyed|keying|key\\s+in|typed|typing|type\\s+(?:in|it)|press(?:es|ed|ing)?|say|says|saying',
+  'panels?|alarms?|security|call\\s?box(?:es)?|touch\\s?pads?',
+].join('|')})(?!\\p{L})`, 'iu');
+// A door, garage, entrance, entry (not "entry points") or lanai is named
+// in about half of all pest notes (the treatment goes around them:
+// production, 193 of 401), so it counts only in a sentence that opens it
+// or keys a word in (open, unlatch, say, type, punch, press), with a colon
+// or a dash after it, or with a word in capitals on its line. "Through" and
+// "with" stay legal: a technician treats around a door with a product.
+const NOTE_DOOR_WORDS_SRC = 'doors?|doorways?|garages?|entrances?|entryways?|entry(?! +points?)|entries|lanais?|sliders?';
+const NOTE_DOOR_SRC = `(?<!\\p{L})(?:${NOTE_DOOR_WORDS_SRC})(?!\\p{L})`;
+const NOTE_DOOR_KEYING_SRC = '(?<!\\p{L})(?:open(?:s|ed|ing)?|unlatch(?:es|ed|ing)?|say|says|said|saying|type[ds]?|typing|punch(?:es|ed|ing)?|press(?:es|ed|ing)?)(?!\\p{L})';
+const NOTE_DOOR_KEYED_RE = new RegExp([
+  `${NOTE_DOOR_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_DOOR_KEYING_SRC}`,
+  `${NOTE_DOOR_KEYING_SRC}${NOTE_SENTENCE_CHAR_SRC}*?${NOTE_DOOR_SRC}`,
+  `${NOTE_DOOR_SRC}(?:\\s*[:=\\u2013\\u2014]|\\s+-|-\\s)`,
+].join('|'), 'iu');
+// The capitals rule tells case apart (no i flag), so the door words carry
+// both cases themselves. It stays on one line: a title line in capitals
+// ("WHAT WE FOUND:") holds no code.
+const NOTE_DOOR_CASELESS_SRC = `(?<!\\p{L})(?:${NOTE_DOOR_WORDS_SRC.replace(/\p{Ll}/gu, (letter) => `[${letter}${letter.toUpperCase()}]`)})(?!\\p{L})`;
+const NOTE_CAPITALS_SRC = '(?<!\\p{L})\\p{Lu}{2,}(?!\\p{L})';
+const NOTE_DOOR_CAPITALS_RE = new RegExp(
+  `${NOTE_DOOR_CASELESS_SRC}[^\\n]*?${NOTE_CAPITALS_SRC}|${NOTE_CAPITALS_SRC}[^\\n]*?${NOTE_DOOR_CASELESS_SRC}`,
+  'u',
+);
+
+// The access check of each customer reader that screens with this module:
+// the note record (noteRecordCopyViolations) and the Documents PDF lists on
+// every record (routes/documents.js). A value is withheld when it holds a
+// code-shaped number or speaks of getting in. Both checks this replaces
+// need a run of digits or a code noun to catch a value, and those two
+// catch it here: the completion check (COMPLETION_ACCESS_CODE_RE) and the
+// visit-history reader's redactor (context-aggregator.js
+// redactAccessCodes).
+function heldAccessCode(text) {
+  const value = String(text || '');
+  return CODE_SHAPED_NUMBER_RE.test(value)
+    || NOTE_ACCESS_WORD_RE.test(value)
+    || value.split(NOTE_SENTENCE_END_RE).some((sentence) => NOTE_DOOR_KEYED_RE.test(sentence)
+      || NOTE_DOOR_CAPITALS_RE.test(sentence));
+}
+
+function noteRecordCopyViolations(text) {
+  const value = String(text || '');
+  const violations = customerCopyViolations(value);
+  if (heldAccessCode(value)) violations.push('note_record_access_code');
+  if (NOTE_RECORD_TIME_RE.test(value)
+    || value.split(NOTE_SENTENCE_END_RE).some((sentence) => NOTE_MARKED_SENTENCE_RE.test(sentence))) {
+    violations.push('note_record_time');
+  }
+  return violations;
+}
+
 module.exports = {
   completionSummarySentence,
   technicianReportCustomerCopy,
+  reportNoteCustomerCopy,
+  visitReportCustomerCopy,
+  carriesReportNote,
+  printedReportSummary,
+  reportTechnicianFirstName,
+  REPORT_NOTE_VERSION,
+  REPORT_NOTE_SOURCES,
+  MAX_REPORT_NOTE_CHARS,
   fourSectionReport,
   containsReportAccessCode,
   customerCopyViolations,
+  heldAccessCode,
+  CODE_SHAPED_NUMBER_RE,
+  REPORT_NOTE_LINE_BREAK,
+  noteRecordCopyViolations,
   summaryCopySignature,
+  renderWriterRulesState,
+  reportNoteRenderState,
+  reportDependsOnWriterRules,
   MAX_REPORT_CHARS,
 };

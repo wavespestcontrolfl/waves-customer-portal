@@ -168,7 +168,7 @@ describe('wiring', () => {
     const groups = read('services/visit-groups.js');
     expect(groups).toMatch(/techProbeOpts = Object\.prototype\.hasOwnProperty\.call\(options, 'technicianId'\)\s*\? \{ occupancyTechBlind: true \} : \{\}/);
     expect(groups).toContain('...noticeOpts, ...techProbeOpts, expect: primaryExpect');
-    expect(groups).toContain('...noticeOpts, ...techProbeOpts, expect: { ...target.expect, ...optOutFence }');
+    expect(groups).toContain('...noticeOpts, ...techProbeOpts, expect: { ...target.expect, ...optOutFence, ...shiftPin }');
     // Tech-out's preview targets the ABSENT technician, so it stays the tech-blind selection gate.
     expect(read('services/tech-out-auto-move.js')).toContain('previewMoveConflicts(stop.id, date, window, { occupancyTechBlind: true })');
     // Auto-dispatch's all-day candidate read stays tech-blind (explicit null): its commit may be

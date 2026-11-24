@@ -236,7 +236,8 @@ function bookingItem(row) {
 // AI_TYPE_SQL repeats portal-messages.js AI_MESSAGE_TYPE (a test pins the two together).
 const AI_TYPE_SQL = `'portal_ai_reply'`;
 const UNANSWERED_SQL = `(
-  SELECT string_agg(m.body, E'\\n' ORDER BY m.created_at) FROM messages m
+  SELECT string_agg(concat_ws(' ', nullif(m.body, ''), CASE WHEN coalesce(m.media, '[]'::jsonb) <> '[]'::jsonb THEN '[Photo]' END),
+    E'\\n' ORDER BY m.created_at) FROM messages m
   WHERE m.conversation_id = cv.id AND m.direction = 'inbound'
     AND m.created_at > coalesce((SELECT max(o.created_at) FROM messages o
       WHERE o.conversation_id = cv.id AND o.direction = 'outbound' AND o.message_type IS DISTINCT FROM ${AI_TYPE_SQL}), '-infinity'::timestamptz)

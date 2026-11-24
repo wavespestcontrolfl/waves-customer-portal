@@ -249,7 +249,10 @@ router.post('/sms', async (req, res) => {
       return res.type('text/xml').send('<Response></Response>');
     }
 
-    const { From, To, Body, MessageSid } = req.body;
+    const { From, To, MessageSid } = req.body;
+    // An applicant can reply with a quoted job-offer text: the signing link in it is never stored, by any of the
+    // inbound writers below (sms_log, the unified message, the recruiting history). utils/offer-link-redaction.js.
+    const Body = require('../utils/offer-link-redaction').redactOfferLinks(req.body.Body);
     const smsReaction = isSmsReaction(Body);
     const contactCorrection = require('../services/contact-correction');
     const correctionQueue = require('../services/contact-correction-queue');
@@ -368,7 +371,7 @@ router.post('/sms', async (req, res) => {
 
     // Event-driven health rescore on a hot inbound signal (competitor mention,
     // cancellation, price complaint). Fire-and-forget so it never delays the
-    // webhook ack; gated behind GATE_EVENT_RESCORE (no-op when off). Defined
+    // webhook ack. Defined
     // here so it can fire on BOTH the early-return branches (opt-out/cancel —
     // the strongest churn signal) and the general inbound path.
     const fireEventRescore = (src) => {
@@ -1354,9 +1357,9 @@ router.post('/sms', async (req, res) => {
     // knownInboundNotified records whether this modern bell/push actually
     // landed — when it did, the legacy owner-SMS forward below is suppressed
     // so a single inbound message can't raise two admin notifications.
-    // GATE_RING_NEW_CONTACTS (owner 2026-11-04, "ring new"): a text from a number with no customer record to a location
+    // Owner 2026-11-04, "ring new": a text from a number with no customer record to a location
     // or Google profile line rings the same one-row-per-sender bell as a tracking line, and it too counts as
-    // delivered here, so the quiet Activity row below is skipped. Ring failed, gate off or not eligible: false, as before.
+    // delivered here, so the quiet Activity row below is skipped. Ring failed or not eligible: false, the quiet row stays.
     let knownInboundNotified = await require('../services/sms-reply-alert-delivery').ringUnknownOfficeText({
       customer, staffSender, smsReaction, courtesyOnly, isAiNumber, numberConfig, To, From, MessageSid, message: Body, mediaCount: inboundMedia.length,
     });
@@ -1577,7 +1580,7 @@ router.post('/status', async (req, res) => {
       } catch (bookkeepingErr) {
         logger.error(`[twilio-status] status bookkeeping failed (continuing to handlers): ${bookkeepingErr.message}`);
       }
-      // GATE_DEAD_NUMBER_ALERT (off = returns at once): a 2nd failed text (30003 / 30005) to a customer's number
+      // Dead-number alert: a 2nd failed text (30003 / 30005) to a customer's number
       // raises one bell naming the customer; a delivered text closes it. Isolated: neither a sync throw nor a
       // rejection can reach the handlers below or the response.
       await Promise.resolve()
@@ -2088,7 +2091,7 @@ async function lastOutboundOnThread(toPhone, ourNumber) {
   return last;
 }
 
-// GATE_SMS_COURTESY_AFTER_TEMPLATE (owner 2026-10-14): an automated visit text
+// Courtesy reply after an automated visit text (owner 2026-10-14): an automated visit text
 // asks nothing a person is waiting to hear back on, even when its template
 // carries a "reply"/"confirm" line. Only the explicit allowlist counts; a
 // person's text ('manual', AI-approved drafts) and every unlisted type keep
@@ -2097,8 +2100,7 @@ async function lastOutboundOnThread(toPhone, ourNumber) {
 // came before it (Codex #6331).
 const DELIVERED_STATUSES = new Set(['sent', 'delivered']);
 function isAutomatedVisitText(row) {
-  return require('../config/feature-gates').smsCourtesyAfterTemplateLive()
-    && DELIVERED_STATUSES.has(String(row?.status || '').toLowerCase())
+  return DELIVERED_STATUSES.has(String(row?.status || '').toLowerCase())
     && AUTOMATED_VISIT_TEXT_TYPES.has(String(row?.message_type || '').toLowerCase());
 }
 
@@ -2116,14 +2118,13 @@ async function lastOutboundAskedQuestion(toPhone, ourNumber) {
   }
 }
 
-// Gate on: an affirmative tapback (Liked/Loved/👍-type emoji, the same ACK
+// An affirmative tapback (Liked/Loved/👍-type emoji, the same ACK
 // list as isQuietSmsReaction) on a thread whose last Waves text was automated
 // is quiet even though that template quoted a "reply"/"confirm" line, but
 // only when the tapback quotes that last text. ❓/👎
 // and every other reaction keep their loud path. Fails closed (loud).
 async function isAffirmativeReactionToAutomatedText(body, toPhone, ourNumber) {
   try {
-    if (!require('../config/feature-gates').smsCourtesyAfterTemplateLive()) return false;
     if (!isAffirmativeSmsReaction(body)) return false;
     const last = await lastOutboundOnThread(toPhone, ourNumber);
     if (!isAutomatedVisitText(last)) return false;
@@ -2131,7 +2132,7 @@ async function isAffirmativeReactionToAutomatedText(body, toPhone, ourNumber) {
     // text must not go quiet because a reminder went out after it, and prefix
     // or substring matches let a staff text that is a prefix of (or sits inside)
     // the reminder through. Anything but an exact match (after whitespace and
-    // case are collapsed) stays loud, as before the gate.
+    // case are collapsed) stays loud.
     const collapse = (t) => String(t || '').replace(/\s+/g, ' ').trim().toLowerCase();
     const quoted = collapse(reactionQuotedTarget(body));
     return quoted !== '' && quoted === collapse(last.message_body);

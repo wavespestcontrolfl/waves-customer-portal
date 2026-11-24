@@ -18,7 +18,7 @@
     {
       "router": "server/index.js",
       "mount": "/",
-      "reason": "Pre-router middleware inventoried as USE surface: the global helmet CSP selector (embed vs strict headers, always next()s), embed-CORS + privacy header stamps (pest-forecast, yard-calendar, watering-plan and pest-pressure-index share one handler, secure-card), and unobservable-when-dark 404 gates (payer statements, lawn assessment, careers, pest identifier, bug-id extension (GATE_BUG_ID_EXTENSION), watering plan (GATE_PUBLIC_WATERING_PLAN, ahead of the wildcard CORS handler), AI content report, public MCP/A2A, ops-digest ingest while OPS_DIGEST_INGEST_TOKEN is unset, social series intake while SOCIAL_SERIES_INGEST_TOKEN is unset) — each either sets headers and next()s or 404s while its GATE_* is off. Also the consultation page's pre-parser guard (/api/public/inspection): 404s while GATE_LEAD_INSPECTION_LINK is dark or the token is not validly signed (live for non-GET), before the limiter and body parsers. Its estimate twin (/api/public/estimate-assessment, the \"Book a free Waves Assessment first\" page) stamps no-store and answers the generic 404 when the token is not estimate-token shaped, before the limiter and body parsers (always next() or 404). The appointment and re-service pre-limiter guards likewise return only a generic 404 while their gates are dark, before shared rate limiting and body parsing. The reservicePhotosPreParserGuard entry is the re-service photos twin of it (GATE_RESERVICE_PHOTOS + GATE_VISIT_PREP_PHOTOS, token and visit-id shape, multipart only), acting only on /:token/visits/:visitId/photos (always next() or 404). The visitPrepPreParserGuard entry is the visit-prep photos sub-gate + token-shape check (GATE_VISIT_PREP_PHOTOS) mounted ahead of the shared body parsers so a dark or malformed photos request 404s before any parse (always next() or 404). The mapImagePreGuard entry is the estimate map-image proxy's pre-limiter guard (GET/HEAD /api/estimates/:token/map/(satellite|overlay) only, case-insensitive): it stamps no-store/CORP/no-referrer headers and answers the generic 404 for the overlay while GATE_ESTIMATE_SHOW_YOUR_WORK is dark, before the global limiter (always next() or 404). The commercialAgreementPreGuard entry is the commercial proposal signing route's pre-limiter guard (POST /api/estimates/:token/commercial-agreement only, case-insensitive): it stamps no-store/noindex/no-referrer headers and answers the generic 404 while GATE_COMMERCIAL_PROPOSAL_SIGN is dark, before the global limiter (always next() or 404). The commercialFirstVisitPreGuard entry is the commercial first-visit picker's pre-limiter guard (POST /api/estimates/:token/first-visit and /first-visit/availability only, case-insensitive): it stamps the same no-store/noindex/no-referrer headers and answers the generic 404 while GATE_COMMERCIAL_FIRST_VISIT is dark, before the global limiter (always next() or 404). The consumerNoticePreGuard entry is the estimate page's Florida consumer notice route's pre-limiter guard (POST /api/estimates/:token/consumer-notice only, case-insensitive): it stamps the same no-store/noindex/no-referrer headers and answers the generic 404 while GATE_ESTIMATE_CONSUMER_NOTICE is dark, before the global limiter (always next() or 404). The /api/booking/preferred-time entry is the /book \"Can't find a time?\" request's pre-router guard (GATE_BOOK_PREFERRED_TIME): it stamps no-store/noindex/no-referrer and answers the generic 404 for every method while the gate is dark, ahead of cors(), the global limiter and the body parsers (always next() or 404). The /api/admin/auth/login/mfa entry is the staff two-step code step's pre-router guard (GATE_ADMIN_MFA): it stamps no-store/noindex/no-referrer and answers the generic 404 while the gate is dark, ahead of cors(), the global limiter, the login limiter and the body parsers (always next() or 404). The /api/stripe/terminal/save-card-handoff entry is the Tap to Pay card-save mint's pre-router guard (GATE_TAP_SAVE_CARD): for POST it answers the generic 404 while the gate is dark, ahead of the global limiter and the body parsers (always next() or 404); the route itself is adminAuthenticate + requireAdmin. The second /api/public/secure-card entry is the estimate-terms route's pre-router guard (GATE_IN_PERSON_CARD): POST /:token/accept-terms answers the generic 404 while the gate is dark, ahead of the global limiter and the body parsers (always next() or 404). The /api/public/email-resubscribe pre-router guard (GATE_PORTAL_EMAIL_RESUBSCRIBE) stamps the privacy headers and answers the generic expired page while the gate is dark, ahead of the global limiter and the body parsers (always next() or 404).",
+      "reason": "Pre-router middleware inventoried as USE surface: the global helmet CSP selector (embed vs strict headers, always next()s), embed-CORS + privacy header stamps (pest-forecast, yard-calendar, watering-plan and pest-pressure-index share one handler, secure-card), and unobservable-when-dark 404 gates (payer statements, lawn assessment, careers, pest identifier, bug-id extension (GATE_BUG_ID_EXTENSION), watering plan (GATE_PUBLIC_WATERING_PLAN, ahead of the wildcard CORS handler), AI content report, public MCP/A2A, ops-digest ingest while OPS_DIGEST_INGEST_TOKEN is unset, social series intake while SOCIAL_SERIES_INGEST_TOKEN is unset) — each either sets headers and next()s or 404s while its GATE_* is off. Also the consultation page's pre-parser guard (/api/public/inspection): 404s while GATE_LEAD_INSPECTION_LINK is dark or the token is not validly signed (live for non-GET), before the limiter and body parsers. Its estimate twin (/api/public/estimate-assessment, the \"Book a free Waves Assessment first\" page) stamps no-store and answers the generic 404 when the token is not estimate-token shaped, before the limiter and body parsers (always next() or 404). The appointment and re-service pre-limiter guards likewise return only a generic 404 while their gates are dark, before shared rate limiting and body parsing. The reservicePhotosPreParserGuard entry is the re-service photos twin of it (GATE_RESERVICE_PHOTOS + GATE_VISIT_PREP_PHOTOS, token and visit-id shape, multipart only), acting only on /:token/visits/:visitId/photos (always next() or 404). The visitPrepPreParserGuard entry is the visit-prep photos sub-gate + token-shape check (GATE_VISIT_PREP_PHOTOS) mounted ahead of the shared body parsers so a dark or malformed photos request 404s before any parse (always next() or 404). The mapImagePreGuard entry is the estimate map-image proxy's pre-limiter guard (GET/HEAD /api/estimates/:token/map/(satellite|overlay) only, case-insensitive): it stamps no-store/CORP/no-referrer headers and answers the generic 404 for the overlay while GATE_ESTIMATE_SHOW_YOUR_WORK is dark, before the global limiter (always next() or 404). The commercialAgreementPreGuard entry is the commercial proposal signing route's pre-limiter guard (POST /api/estimates/:token/commercial-agreement only, case-insensitive): it stamps no-store/noindex/no-referrer headers and answers the generic 404 while GATE_COMMERCIAL_PROPOSAL_SIGN is dark, before the global limiter (always next() or 404). The commercialFirstVisitPreGuard entry is the commercial first-visit picker's pre-limiter guard (POST /api/estimates/:token/first-visit and /first-visit/availability only, case-insensitive): it stamps the same no-store/noindex/no-referrer headers and answers the generic 404 while GATE_COMMERCIAL_FIRST_VISIT is dark, before the global limiter (always next() or 404). The consumerNoticePreGuard entry is the estimate page's Florida consumer notice route's pre-limiter guard (POST /api/estimates/:token/consumer-notice only, case-insensitive): it stamps the same no-store/noindex/no-referrer headers and answers the generic 404 while GATE_ESTIMATE_CONSUMER_NOTICE is dark, before the global limiter (always next() or 404). The firstVisitRequestPreGuard entry is the estimate page's first-visit request route's pre-limiter guard (POST /api/estimates/:token/first-visit-request only, case-insensitive): it stamps the same no-store/noindex/no-referrer headers and answers the generic 404 while GATE_ESTIMATE_APPROVE_PREFERRED_TIME is dark, before the global limiter (always next() or 404). The /api/booking/preferred-time entry is the /book \"Can't find a time?\" request's pre-router guard (GATE_BOOK_PREFERRED_TIME): it stamps no-store/noindex/no-referrer and answers the generic 404 for every method while the gate is dark, ahead of cors(), the global limiter and the body parsers (always next() or 404). The /api/admin/auth/login/mfa entry is the staff two-step code step's pre-router guard (GATE_ADMIN_MFA): it stamps no-store/noindex/no-referrer and answers the generic 404 while the gate is dark, ahead of cors(), the global limiter, the login limiter and the body parsers (always next() or 404). The /api/stripe/terminal/save-card-handoff entry is the Tap to Pay card-save mint's pre-router guard (GATE_TAP_SAVE_CARD): for POST it answers the generic 404 while the gate is dark, ahead of the global limiter and the body parsers (always next() or 404); the route itself is adminAuthenticate + requireAdmin. The second /api/public/secure-card entry is the estimate-terms route's pre-router guard (GATE_IN_PERSON_CARD): POST /:token/accept-terms answers the generic 404 while the gate is dark, ahead of the global limiter and the body parsers (always next() or 404). The /api/public/email-resubscribe pre-router guard (GATE_PORTAL_EMAIL_RESUBSCRIBE) stamps the privacy headers and answers the generic expired page while the gate is dark, ahead of the global limiter and the body parsers (always next() or 404). The /api/public/home pre-limiter guard (GATE_MAIL_HOME_PAGE, the new-home postcard page) stamps no-store/noindex and answers the generic 404 while the gate is dark or the request is not one of GET/HEAD /:token, GET /:token/times or POST /:token/book, ahead of the global limiter and the body parsers (always next() or 404).",
       "routes": [
         "USE / (inline function#1fe36153)",
         "USE /api/admin/auth/login/mfa (inline function#6bca0a9b)",
@@ -27,6 +27,7 @@
         "USE /api/estimates (commercialAgreementPreGuard#e5a34636)",
         "USE /api/estimates (commercialFirstVisitPreGuard#43d317cd)",
         "USE /api/estimates (contactPhonePreGuard#69762e2c)",
+        "USE /api/estimates (firstVisitRequestPreGuard#b4a0f55c)",
         "USE /api/estimates (consumerNoticePreGuard#0a953129)",
         "USE /api/estimates (mapImagePreGuard#f8502fdf)",
         "USE /api/ops/digest (inline function#4a372dfc)",
@@ -35,8 +36,9 @@
         "USE /api/public/appointment (inline function#e6220f30)",
         "USE /api/public/appointment (visitPrepPreParserGuard#0755b055)",
         "USE /api/public/bug-id-extension (inline function#2801442c)",
-        "USE /api/public/careers (inline function#1ef2d7c2)",
+        "USE /api/public/careers (inline function#d3c28fc6)",
         "USE /api/public/careers/interview (inline function#656a8908)",
+        "USE /api/public/careers/offer (inline function#6885abc0)",
         "USE /api/public/estimate-assessment (inline function#b8185035)",
         "USE /api/public/inspection (inline function#ae857f75)",
         "USE /api/public/lawn-assessment (inline function#8e4982f2)",
@@ -53,6 +55,7 @@
         "USE /api/public/secure-card (inline function#8abc12e6)",
         "USE /api/public/track (trackPublicPreparser#a6e0dc6f)",
         "USE /api/public/email-resubscribe (preParserGuard#ea6eeb70)",
+        "USE /api/public/home (preLimiterGuard#fcbfa1c4)",
         "USE /api/social/series (inline function#033624d5)",
         "USE /api/stripe/terminal/save-card-handoff (inline function#371094d5)"
       ]
@@ -67,6 +70,17 @@
         "USE /api/public/blog-read-depth (inline function#0943925b)",
         "USE /api/public/blog-read-depth (inline function#af835d81)",
         "USE /api/public/blog-read-depth (inline function#e7d9b29e)"
+      ]
+    },
+    {
+      "router": "server/routes/public-form-steps.js",
+      "mount": "/api/public/form-steps",
+      "reason": "Anonymous, cookie-free form step counter for the marketing sites' quote form and the hub's two quiz pages (owner *build* 2026-11-19, quiz funnel scope: step counts with no cookie; a near copy of the blog read-depth beacon above). No gate: it only counts, and cannot message, charge, reprice, delete data or spend money. Mounted above the global cors(), the /api/ limiter and the body parsers; own per-IP limiter (120/min) ahead of a 1 KB text parse; a fixed form + step allowlist; site from the Origin header only, through the fleet registry; the same 204 for every POST, sent before any write; each (day, site, form, step) bucket stops at 2000 a day; terminal 404. Every answer is marked Cross-Origin-Resource-Policy: cross-origin so a browser accepts the no-cors reply (two answers have no body, the 404 is the generic one). Stores only the ET day, site, form, step and a count: no IP, user agent, referrer, cookie or body.",
+      "routes": [
+        "POST /api/public/form-steps",
+        "USE /api/public/form-steps (express-rate-limit({ handler#8c637dbe }))",
+        "USE /api/public/form-steps (inline function#c72894ce)",
+        "USE /api/public/form-steps (inline function#e7d9b29e)"
       ]
     },
     {
@@ -172,6 +186,16 @@
       ]
     },
     {
+      "router": "server/routes/review-geo-link.js",
+      "mount": "/rv",
+      "reason": "Printed business-card review QR (owner 2026-11-21) — GET /rv is a 302 to a Google review form chosen from Cloudflare visitor-location headers; the target is only a googleReviewUrl from config/locations.js (nothing in the request names it, so not an open redirect), no token and no row lookup; location values are never logged or stored; per-route limiter; see docs/public-route-contracts.md",
+      "routes": [
+        "GET /rv",
+        "USE /rv (express-rate-limit({ handler#8859f1ea }))",
+        "USE /rv (inline function#29df873e)"
+      ]
+    },
+    {
       "router": "server/routes/og-preview.js",
       "mount": "/og",
       "reason": "Link-preview images for iMessage/SMS/email crawlers (no login possible; owner sign-off 2026-09-28). Only /og/report/:token.jpg reads its token: 32-hex gate, typedReportDelivery suppression, no-store/noindex/no-referrer, per-IP limiter; unknown links get the byte-identical default card. /og/<kind>.jpg are fixed brand images with no token and no lookup.",
@@ -190,6 +214,26 @@
         "GET /api/card/:token",
         "GET /api/card/:token/contact.vcf",
         "GET /api/card/:token/wallet.pkpass"
+      ]
+    },
+    {
+      "router": "server/routes/mail-home-public.js",
+      "mount": "/api/public/home",
+      "reason": "One new home's page (QR code on a later postcard, mailer steps 2c and 2d) by unguessable 32-hex token, dark behind GATE_MAIL_HOME_PAGE (generic 404 while off, same as an unknown token). GET /:token reads only, apart from one atomic view-counter update on the home's own row; returns the address and the stored plan price only, never names, parcel, permit or deed fields. GET /:token/times lists the open first-visit offers of that address from the /book finder (15 a minute per IP). POST /:token/book (5 a minute per IP, its own 4 KB JSON parser) makes a real booking for that home through createSelfBooking, the /book funnel's own commit: it saves the home's estimate from stored facts and sends the normal booking confirmation, so the token plus a signed, expiring offer are its credentials. Every limiter's 429 keeps the private no-store headers",
+      "routes": [
+        "GET /api/public/home/:token",
+        "GET /api/public/home/:token/times",
+        "POST /api/public/home/:token/book"
+      ]
+    },
+    {
+      "router": "server/routes/mail-home-short-link.js",
+      "mount": "/nh",
+      "reason": "The short typed address printed on the new-home postcard (mailer step 2d-2, owner 2026-11-23): GET /nh/101-example is a 302 to that home's page /h/<token>, or to https://www.wavespestcontrol.com/ for everything else (gate GATE_MAIL_HOME_PAGE off, bad slug shape, unknown slug, a home that is not live, a failed lookup). Not an open redirect: both targets are fixed (the marketing site, or a path built from a stored 32-hex token); nothing in the request names them. The slug is not a credential (house number + street name, guessing is accepted by the owner); the Location it returns is the home's bearer link, so every answer carries no-store, noindex and no-referrer. Its own root: /go (the outside-link redirect) is not shared. Per-route limiter 60 a minute per IP",
+      "routes": [
+        "GET /nh/:slug",
+        "USE /nh (inline function#8a7457de)",
+        "USE /nh (express-rate-limit({ handler#4df7abdf }))"
       ]
     },
     {
@@ -244,7 +288,7 @@
     {
       "router": "server/routes/estimate-public.js",
       "mount": "/api/estimates",
-      "reason": "Public estimate viewer + accept/decline flow by unguessable token (format-gated, rate-limited; the AGENTS.md estimate-public contract). change-request (#3706), referral-link (#3710) and service-opt-out (#3684) are the same token contract, each rate-limited and dark behind its own GATE_ESTIMATE_* flag; commercial-agreement is the same contract behind GATE_COMMERCIAL_PROPOSAL_SIGN; first-visit and first-visit/availability are the same contract behind GATE_COMMERCIAL_FIRST_VISIT (owner 2026-10-26 decision page choice 1B: a signed commercial proposal's customer books the first visit; open, signed estimates only); consumer-notice is the same contract behind GATE_ESTIMATE_CONSUMER_NOTICE; promo-code is the same contract behind GATE_ESTIMATE_PROMO_CODE (owner 2026-11-18: the customer types a promo code on an open estimate; it saves the code only, the account credit posts at acceptance)",
+      "reason": "Public estimate viewer + accept/decline flow by unguessable token (format-gated, rate-limited; the AGENTS.md estimate-public contract). change-request (#3706), referral-link (#3710) and service-opt-out (#3684) are the same token contract, each rate-limited and dark behind its own GATE_ESTIMATE_* flag; commercial-agreement is the same contract behind GATE_COMMERCIAL_PROPOSAL_SIGN; first-visit and first-visit/availability are the same contract behind GATE_COMMERCIAL_FIRST_VISIT (owner 2026-10-26 decision page choice 1B: a signed commercial proposal's customer books the first visit; open, signed estimates only); consumer-notice is the same contract behind GATE_ESTIMATE_CONSUMER_NOTICE; promo-code is the same contract behind GATE_ESTIMATE_PROMO_CODE (owner 2026-11-18: the customer types a promo code on an open estimate; it saves the code only, the account credit posts at acceptance); first-visit-request is the same contract behind GATE_ESTIMATE_APPROVE_PREFERRED_TIME (owner 2026-11-23: a customer whose offered times do not work sends preferred days on an open estimate; a request, never an acceptance, one office bell, no customer message)",
       "routes": [
         "GET /api/estimates/:token",
         "GET /api/estimates/:token/data",
@@ -258,6 +302,7 @@
         "POST /api/estimates/:token/commercial-agreement",
         "POST /api/estimates/:token/first-visit/availability",
         "POST /api/estimates/:token/first-visit",
+        "POST /api/estimates/:token/first-visit-request",
         "POST /api/estimates/:token/consumer-notice",
         "POST /api/estimates/:token/extension-request",
         "POST /api/estimates/:token/measurement-review",
@@ -554,9 +599,9 @@
     {
       "router": "server/routes/moving-public.js",
       "mount": "/api/public/moving",
-      "reason": "Tokenized moving page (GATE_MOVING_FLOW, dark): the link the office sends a customer who is moving; the USE entries are the router's 404-when-dark gate (always next() or 404) and its rate limiter",
+      "reason": "Tokenized moving page: the link the office sends a customer who is moving; the USE entries are the router's privacy-header middleware (always next()) and its rate limiter",
       "routes": [
-        "USE /api/public/moving (inline function#42a28bfa)",
+        "USE /api/public/moving (inline function#d9c5db2c)",
         "GET /api/public/moving/:token",
         "POST /api/public/moving/:token/check",
         "POST /api/public/moving/:token/submit"
@@ -609,6 +654,23 @@
         "GET /api/public/careers/interview/:token",
         "POST /api/public/careers/interview/:token/book",
         "POST /api/public/careers/interview/:token/withdraw"
+      ]
+    },
+    {
+      "router": "server/routes/public-careers-offer.js",
+      "mount": "/api/public/careers/offer",
+      "reason": "Owner-approved 2026-11-19 (job offer flow): the applicant's private job offer by 64-hex bearer token (job_offers.token, set when the owner presses Send) to read the frozen personal terms + issued Technician Terms, then sign by typing a name, ask for another start date, or decline. GATE_JOB_OFFERS dark-404 before the limiter (the index.js USE entry is that gate; this router's USE is noStore + the same gate), router.param format gate before any DB read, generic 404 for unknown/draft tokens, 30/10min per-IP limiter, every action one transaction locking the application then the offer row, reads only the snapshot frozen at Send (docs/public-route-contracts.md)",
+      "routes": [
+        "USE /api/public/careers/offer (inline function#2ffb8b22)",
+        "GET /api/public/careers/offer/:token",
+        "POST /api/public/careers/offer/:token/v2/text-consent",
+        "POST /api/public/careers/offer/:token/v2/accept",
+        "POST /api/public/careers/offer/:token/v2/date-request",
+        "POST /api/public/careers/offer/:token/v2/decline",
+        "POST /api/public/careers/offer/:token/text-consent",
+        "POST /api/public/careers/offer/:token/accept",
+        "POST /api/public/careers/offer/:token/date-request",
+        "POST /api/public/careers/offer/:token/decline"
       ]
     },
     {
@@ -758,7 +820,7 @@
     {
       "router": "server/routes/pay-v2.js",
       "mount": "/api/pay",
-      "reason": "Tokenized invoice payment page (format-gated tokens; the /pay contract)",
+      "reason": "Tokenized invoice payment page (format-gated tokens; the /pay contract). promo-code is the same token contract behind GATE_PAY_PROMO_CODE (owner 2026-11-18: the customer types a promo code on the pay page; it saves the code on the invoice only, the credit posts and applies at the /setup that follows). plan-choice is the same token contract behind GATE_PAY_PLAN_CHOICE (owner 2026-11-19: on the first invoice of an accepted plan the customer picks annual prepay; it mints one unpaid prepay invoice at a server-derived price and charges, sends and voids nothing)",
       "routes": [
         "GET /api/pay/:token",
         "GET /api/pay/:token/attachments/:attachmentId",
@@ -768,6 +830,8 @@
         "POST /api/pay/:token/consent",
         "POST /api/pay/:token/error",
         "POST /api/pay/:token/finalize",
+        "POST /api/pay/:token/plan-choice",
+        "POST /api/pay/:token/promo-code",
         "POST /api/pay/:token/quote",
         "POST /api/pay/:token/setup",
         "POST /api/pay/:token/setup-complete",

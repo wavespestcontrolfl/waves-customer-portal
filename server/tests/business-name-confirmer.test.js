@@ -345,6 +345,31 @@ describe('assertOwnerListForCommit', () => {
     expect(draft.competitors_approved_by_list).toEqual(['Aptive Environmental', 'Orkin', 'Terminix']);
   });
 
+  test('a ranking word only in the unchanged protected service metaTitle is waived; the title is still read for companies (owner rule 2026-07-16)', async () => {
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: [] } });
+    const liveTitle = 'Lawn Care Near Me in Parrish, FL | Best Lawn Care Near Me in Parrish, FL';
+    const serviceFm = { title: 'Lawn Care in Parrish, FL', metaTitle: liveTitle, metaDescription: 'Lawn care in Parrish.' };
+    const body = 'Plain body about lawn care in Parrish.';
+    // Without the live value the ranking word in the metaTitle refuses the commit.
+    await expect(assertOwnerListForCommit({ draft: {}, brief: {}, frontmatter: serviceFm, body }))
+      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'comparison_table_failed' });
+    // The live metaTitle carried over unchanged: the ranking finding is waived,
+    // and the company extraction still reads the title.
+    await expect(assertOwnerListForCommit({ draft: {}, brief: {}, frontmatter: serviceFm, body, liveProtectedMetaTitle: liveTitle })).resolves.toBeTruthy();
+    expect(dispatchWithFallback.mock.calls.at(-1)[1].text).toContain('Best Lawn Care Near Me in Parrish');
+    // A ranking word the body adds is not waived.
+    await expect(assertOwnerListForCommit({ draft: {}, brief: {}, frontmatter: serviceFm, body: 'Waves is the best lawn care company in Parrish.', liveProtectedMetaTitle: liveTitle }))
+      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'comparison_table_failed' });
+    // A metaTitle that differs from the live one is judged as usual.
+    await expect(assertOwnerListForCommit({ draft: {}, brief: {}, frontmatter: { ...serviceFm, metaTitle: `${liveTitle} | Best Lawn Service Near Me` }, body, liveProtectedMetaTitle: liveTitle }))
+      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'comparison_table_failed' });
+    // A company named only in the protected title is still refused.
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Bug Out'] } });
+    const namedTitle = `Bug Out Alternative Near Me in Parrish, FL | ${liveTitle}`;
+    await expect(assertOwnerListForCommit({ draft: {}, brief: {}, frontmatter: { ...serviceFm, metaTitle: namedTitle }, body, liveProtectedMetaTitle: namedTitle }))
+      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED' });
+  });
+
   test('a failed check refuses the commit', async () => {
     dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'no_key' });
     await expect(assertOwnerListForCommit({ draft: {}, brief: BLOG_BRIEF, frontmatter: finalFm, body: 'Plain body.' }))

@@ -41,6 +41,10 @@ const payLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: unauthenticatedAuthLimitKey,
+  // AGENTS.md: a dark GATE_* route skips its limiter, so a probe never sees
+  // a revealing 429 or spends the caller's quota for the live pay routes.
+  skip: (req) => req.method === 'POST' && /\/plan-choice\/?$/.test(req.path)
+    && !require('../config/feature-gates').isEnabled('payPlanChoice'),
   message: { error: 'Too many requests — please slow down.' },
 });
 router.use(payLimiter);
@@ -264,14 +268,20 @@ async function invoiceCaptureNeeded(invoice) {
 // Account credit /setup WILL auto-apply to this invoice (same gate + opt-in
 // as invoiceCreditWouldFullyCover), so the pay page can show the post-credit
 // amount before /setup answers. 0 when the gate is off / opted out / no credit.
+// A promo code entered on this invoice and not redeemed yet
+// (GATE_PAY_PROMO_CODE) is credit /setup will post and draw too, whatever the
+// customer's automatic-credit choice, so it is projected the same way: until
+// /setup answers, the page never offers a transfer for the pre-credit amount.
 async function invoiceProjectedCreditApplied(invoice, { database = db } = {}) {
-  if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return 0;
   if (!invoice?.customer_id || invoice?.payer_id) return 0;
+  const cappedAtDue = (credit) => Math.min(Math.round(credit * 100), Math.round(invoiceAmountDue(invoice) * 100)) / 100;
+  const promo = await require('../services/invoice-promo-code').pendingPromoCredit(invoice, database);
+  if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return cappedAtDue(promo);
   const row = await database('customers').where({ id: invoice.customer_id }).first('account_credits', 'auto_apply_account_credit');
-  if (row?.auto_apply_account_credit !== true) return 0;
-  const credit = Number(row?.account_credits) || 0;
+  if (row?.auto_apply_account_credit !== true) return cappedAtDue(promo);
+  const credit = (Number(row?.account_credits) || 0) + promo;
   if (!(credit > 0)) return 0;
-  return Math.min(Math.round(credit * 100), Math.round(invoiceAmountDue(invoice) * 100)) / 100;
+  return cappedAtDue(credit);
 }
 
 // The SINGLE eligibility predicate for offering an off-Stripe transfer
@@ -621,6 +631,18 @@ router.get('/:token', async (req, res, next) => {
     });
 
     const getSaveRequired = await invoiceRequiresSavedMethod(data);
+    // A read failure hides the block and never fails the page.
+    const promoCode = await require('../services/invoice-promo-code')
+      .promoCodeViewForInvoice(data, { saveRequired: getSaveRequired })
+      .catch((err) => {
+        logger.warn(`[pay-v2] promo code block suppressed for invoice ${data.id}: ${err.code || err.message}`);
+        return null;
+      });
+    // Never on a bill a payer owns (the live resolve above). The read
+    // answers null on any failure, so it never fails the page.
+    const planChoice = payerOwnedLive
+      ? null
+      : await require('../services/pay-plan-choice').planChoiceForInvoice(data);
     // Off-Stripe tenders (see isZelleTransferEligible for the full
     // predicate and its history) — extracted so every other caller that
     // needs to know "would the pay page offer Zelle for this invoice"
@@ -699,12 +721,17 @@ router.get('/:token', async (req, res, next) => {
     // text only. The invoice
     // keeps the note as it stood when billed (the raw note, on older
     // invoices), so it is screened here with the visit record's own flags; a
-    // combined-visit invoice keeps none and shows none.
+    // combined-visit invoice keeps none and shows none. A visit that carries
+    // the technician's own note shows none: its invoice kept the raw note,
+    // and the note on the record is not the copy that was billed.
+    const { carriesReportNote } = require('../services/service-report/technician-report-copy');
     const techNotes = data.tech_notes && data.service_record_id
       ? await db('service_records')
         .where({ id: data.service_record_id, customer_id: data.customer_id })
         .first('structured_notes', 'service_data', 'completion_source')
-        .then((record) => (record ? customerSafeVisitNotes({ ...record, technician_notes: data.tech_notes }, { projectLine: true }) : null))
+        .then((record) => (record && !carriesReportNote(record.structured_notes)
+          ? customerSafeVisitNotes({ ...record, technician_notes: data.tech_notes }, { projectLine: true })
+          : null))
         .catch(() => null)
       : null;
 
@@ -812,6 +839,15 @@ router.get('/:token', async (req, res, next) => {
       // FAQ accordion under the Pay button (GATE_PAY_PAGE_FAQ). Absent when
       // the gate is off so the gate-off payload stays byte-identical.
       ...(require('../config/feature-gates').gates.payPageFaq ? { payFaq: true } : {}),
+      // Promo code (GATE_PAY_PROMO_CODE): the field while a code can be
+      // entered on this invoice, and the code already on it. Absent with the
+      // gate off, so the gate-off payload stays byte-identical. A read only.
+      ...(promoCode ? { promoCode } : {}),
+      // Pay per application vs. annual prepay (GATE_PAY_PLAN_CHOICE) on the
+      // first invoice of an accepted plan. Absent with the gate off or when
+      // the choice is not offered, so that payload stays byte-identical. A
+      // read only; it never carries the prepay invoice's token.
+      ...(planChoice ? { planChoice } : {}),
     });
   } catch (err) {
     if (err.code === 'DEPOSIT_RECONCILIATION_REQUIRED') {
@@ -960,8 +996,13 @@ router.post('/:token/setup', async (req, res, next) => {
     // leaves it null (client falls back to the GET version: safe direction).
     const postMintRow = await db('invoices').where({ id: invoice.id }).first('updated_at').catch(() => null);
     const postMintVersion = postMintRow?.updated_at ? new Date(postMintRow.updated_at).getTime() : null;
+    // A promo code on this invoice (GATE_PAY_PROMO_CODE) was redeemed in the
+    // mint above, or was not: the page's note follows this, never the GET it
+    // loaded before the setup ran. Absent with the gate off or no code.
+    const promoVerdict = await require('../services/invoice-promo-code').promoCodeVerdictAfterSetup(invoice.id);
 
     res.json({
+      ...(promoVerdict !== undefined ? { promoCode: promoVerdict } : {}),
       version: postMintVersion,
       clientSecret: result.clientSecret,
       paymentIntentId: result.paymentIntentId,
@@ -1044,6 +1085,84 @@ router.post('/:token/setup', async (req, res, next) => {
       metadata: { save_card: !!req.body?.saveCard },
     });
     next(err);
+  }
+});
+
+// =========================================================================
+// POST /api/pay/:token/promo-code — the customer types a promo code on the
+// pay page (GATE_PAY_PROMO_CODE). Body { code }. A valid fixed-dollar code
+// from admin Discounts is saved on the invoice and nothing else happens
+// here: no money moves and no Stripe call is made. The page reloads, and the
+// /setup that follows posts the credit, applies it to this invoice and
+// re-prices the payment (services/invoice-promo-code.js). Dark gate = the
+// generic 404 an unknown token gets, with the limiter skipped. A refused
+// code answers 400 with `invalid_code` (never saying why) or
+// `code_already_entered`.
+// =========================================================================
+const promoCodeGateOn = () => require('../config/feature-gates').isEnabled('payPromoCode');
+// Keyed per caller and token: the cap is on guesses against one invoice.
+const promoCodeLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => !promoCodeGateOn(),
+  keyGenerator: (req) => `${unauthenticatedAuthLimitKey(req)}:${req.params.token}`,
+  message: { error: 'Too many requests — please slow down.' },
+});
+router.post('/:token/promo-code', promoCodeLimiter, async (req, res) => {
+  const notFound = () => res.status(404).json({ error: 'Invoice not found' });
+  if (!promoCodeGateOn()) return notFound();
+  // Log identity: the invoice id once resolved, never the token or the code.
+  let invoiceId = null;
+  try {
+    const invoice = await db('invoices').where({ token: req.params.token }).first('id');
+    if (!invoice) return notFound();
+    invoiceId = invoice.id;
+    if (typeof req.body?.code !== 'string') return res.status(400).json({ error: 'invalid_code' });
+    // The code is saved under the invoice row lock, the lock /setup holds
+    // when it redeems it: an invoice that was paid, voided or moved to a
+    // payer meanwhile takes no code.
+    const outcome = await db.transaction(async (trx) => {
+      const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
+      if (!locked) return null;
+      // No code on an invoice that must save a payment method first: its
+      // credit coverage is held for the capture step, not applied at /setup.
+      if (await invoiceRequiresSavedMethod(locked, { database: trx })) return { ok: false, reason: 'invalid_code' };
+      return require('../services/invoice-promo-code').enterPromoCodeOnInvoice({ invoice: locked, rawCode: req.body.code }, trx);
+    });
+    if (!outcome) return notFound();
+    if (!outcome.ok) return res.status(400).json({ error: outcome.reason });
+    return res.json({ success: true, promoCode: { canEnter: false, applied: outcome.applied } });
+  } catch (err) {
+    logger.warn(`[pay-v2] promo-code failed (code=${err?.code || 'none'}, invoice=${invoiceId || 'unresolved'})`);
+    return res.status(503).json({ error: 'Promo code unavailable — please try again' });
+  }
+});
+
+// =========================================================================
+// POST /api/pay/:token/plan-choice — the customer picks annual prepay on the
+// first invoice of an accepted plan (GATE_PAY_PLAN_CHOICE, 404 while off).
+// Body { plan: 'prepay_annual' }: the only plan with an action. Paying per
+// application is paying this invoice as it stands. Every amount is derived
+// server-side (services/pay-plan-choice.js); the answer is the prepay
+// invoice's own pay link. Nothing is charged, sent or voided here.
+// =========================================================================
+router.post('/:token/plan-choice', async (req, res) => {
+  const notFound = () => res.status(404).json({ error: 'Invoice not found' });
+  if (!require('../config/feature-gates').isEnabled('payPlanChoice')) return notFound();
+  let invoiceId = null;
+  try {
+    const invoice = await db('invoices').where({ token: req.params.token }).first();
+    if (!invoice) return notFound();
+    invoiceId = invoice.id;
+    if (req.body?.plan !== 'prepay_annual') return res.status(400).json({ error: 'invalid_plan' });
+    const outcome = await require('../services/pay-plan-choice').selectAnnualPrepay(invoice);
+    if (outcome.refused) return res.status(409).json({ error: 'plan_choice_unavailable' });
+    return res.json({ success: true, payUrl: outcome.payUrl });
+  } catch (err) {
+    logger.warn(`[pay-v2] plan-choice failed (invoice=${invoiceId || 'unresolved'}): ${err.message}`);
+    return res.status(503).json({ error: 'Plan choice unavailable — please try again' });
   }
 });
 

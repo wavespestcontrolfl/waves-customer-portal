@@ -203,7 +203,7 @@ export function normalizePickedByTech(rows) {
 // false one.
 // `rainArgs` carries the booking's services on every best-rows request, the
 // week fallback included, so the server's rain ranking
-// (GATE_BOOKING_RAIN_RANK) classifies each one (Codex #6102 r1).
+// classifies each one (Codex #6102 r1).
 async function searchSummary(search, { date, today, pickedArgs, bestRows, rainArgs = {} }) {
   const back = addDays(date, -SUMMARY_BACK);
   const data = await search({
@@ -397,7 +397,7 @@ export function useBestTimes({
     return listMode && checking ? OPEN_TIMES_PENDING : null;
   }, [answer, enabled, requestKey, subjectKey, listMode, checking]);
   // The booking's services ride every best-rows or list request, so the
-  // server's rain ranking (GATE_BOOKING_RAIN_RANK) classifies each one
+  // server's rain ranking classifies each one
   // (Codex #6102 r1).
   const rainArgs = useMemo(() => (bestRows && serviceTypesKey ? {
     serviceTypes: serviceTypesKey.split('\n'),

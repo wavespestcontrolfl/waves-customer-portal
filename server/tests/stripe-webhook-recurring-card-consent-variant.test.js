@@ -49,7 +49,9 @@ jest.mock('../services/notification-service', () => ({
 const mockRaiseAdminAlert = jest.fn(async () => ({}));
 jest.mock('../services/admin-alert-compose', () => ({ raiseAdminAlert: (...a) => mockRaiseAdminAlert(...a) }));
 const mockCompleteEnrollment = jest.fn(async () => ({ enrolled: true }));
+const mockRetireOrphan = jest.fn(async () => ({ ok: true, retired: true }));
 jest.mock('../services/recurring-card-on-file', () => ({
+  retireOrphanedCaptureIntent: (...a) => mockRetireOrphan(...a),
   isRecurringCardOnFileEnabled: jest.fn(() => true),
   ACCEPTED_NO_CAPTURE_MARKER: 'no_capture_at_accept',
   resolveRecurringCaptureTender: jest.fn(async () => 'card'),
@@ -259,5 +261,69 @@ describe('estimate_recurring_card recovery honors an explicit Auto Pay opt-out (
     }));
     await handleSetupIntentSucceeded(SETUP_INTENT);
     expect(mockCompleteEnrollment).not.toHaveBeenCalled();
+  });
+});
+
+// A customer's own plan quote that staff changed is never accepted (the accept refuses it, and no writer turns its
+// options back off), and the page drops a card it captured there by several paths (codex pre-push P1 x2, eleventh
+// audit). This branch retires that capture on the event's next delivery: one place for every path the tab took.
+describe('estimate_recurring_card retires a capture on a plan quote staff changed', () => {
+  const estimatePublic = require('../routes/estimate-public');
+  const planQuote = (overrides = {}) => ({
+    id: 'est-1', status: 'sent', source: 'plan_start', customer_id: 'cust-1', accepted_service_mode: null,
+    bill_by_invoice: true, show_one_time_option: false, estimate_data: {}, ...overrides,
+  });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    estimatePublic.isEstimateAcceptActive.mockReturnValue(true);
+  });
+  afterEach(() => { estimatePublic.isEstimateAcceptActive.mockReturnValue(false); });
+
+  test.each([
+    ['plan_start', { bill_by_invoice: true }],
+    ['plan_restart', { bill_by_invoice: false, show_one_time_option: true }],
+  ])('a %s quote with an option on: the capture is retired and the event acked, never enrolled', async (source, options) => {
+    const estimate = planQuote({ source, ...options });
+    wireDb(estimate);
+    await expect(handleSetupIntentSucceeded(SETUP_INTENT)).resolves.toBeUndefined();
+    expect(mockRetireOrphan).toHaveBeenCalledWith({ estimate, setupIntentId: 'seti_1' });
+    expect(mockCompleteEnrollment).not.toHaveBeenCalled();
+  });
+
+  test('the kill switch off: the capture is still retired, never left for a drop (codex pre-push P1)', async () => {
+    const cards = require('../services/recurring-card-on-file');
+    cards.isRecurringCardOnFileEnabled.mockReturnValue(false);
+    try {
+      const estimate = planQuote();
+      wireDb(estimate);
+      await expect(handleSetupIntentSucceeded(SETUP_INTENT)).resolves.toBeUndefined();
+      expect(mockRetireOrphan).toHaveBeenCalledWith({ estimate, setupIntentId: 'seti_1' });
+      expect(mockCompleteEnrollment).not.toHaveBeenCalled();
+    } finally {
+      cards.isRecurringCardOnFileEnabled.mockReturnValue(true);
+    }
+  });
+
+  test('a replaced (archived) refused quote retires its capture too', async () => {
+    estimatePublic.isEstimateAcceptActive.mockReturnValue(false);
+    const estimate = planQuote({ archived_at: '2026-11-20T12:00:00Z' });
+    wireDb(estimate);
+    await handleSetupIntentSucceeded(SETUP_INTENT);
+    expect(mockRetireOrphan).toHaveBeenCalledWith({ estimate, setupIntentId: 'seti_1' });
+  });
+
+  test('Stripe unable to confirm the retirement: the event retries, and nothing enrolls', async () => {
+    mockRetireOrphan.mockResolvedValueOnce({ ok: false, reason: 'retire_failed' });
+    wireDb(planQuote());
+    await expect(handleSetupIntentSucceeded(SETUP_INTENT)).rejects.toMatchObject({ code: 'refused_quote_retire_failed', retryClass: 'expected_retry' });
+    expect(mockCompleteEnrollment).not.toHaveBeenCalled();
+  });
+
+  test('controls: a clean plan quote and a staff estimate with an option on still wait for the accept, and nothing is retired', async () => {
+    wireDb(planQuote({ bill_by_invoice: false }));
+    await expect(handleSetupIntentSucceeded(SETUP_INTENT)).rejects.toMatchObject({ code: 'awaiting_accept' });
+    wireDb(planQuote({ source: 'admin' }));
+    await expect(handleSetupIntentSucceeded(SETUP_INTENT)).rejects.toMatchObject({ code: 'awaiting_accept' });
+    expect(mockRetireOrphan).not.toHaveBeenCalled();
   });
 });

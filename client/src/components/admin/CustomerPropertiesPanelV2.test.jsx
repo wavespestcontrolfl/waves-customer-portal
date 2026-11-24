@@ -43,11 +43,11 @@ describe('CustomerPropertiesPanelV2', () => {
     expect(screen.getAllByTestId('customer-property-row')[1]).toHaveTextContent('Primary');
   });
 
-  it('shows the reclaimed-water control only while the gate is on, saves the office answer, and hands a property back to automatic', async () => {
+  it('shows the reclaimed-water control, saves the office answer, and hands a property back to automatic', async () => {
     const county = { ...PRIMARY, reclaimed_water: true, reclaimed_water_source: 'county_meter', reclaimed_water_checked_at: '2026-10-23T08:00:00Z' };
     const fetchMock = vi.fn((url, opts = {}) => {
       if (opts.method === 'PUT') return jsonResponse({ properties: [{ ...PRIMARY, reclaimed_water: false, reclaimed_water_source: 'office' }] });
-      return jsonResponse({ properties: [county], reclaimedWater: true });
+      return jsonResponse({ properties: [county] });
     });
     vi.stubGlobal('fetch', fetchMock);
     render(<CustomerPropertiesPanelV2 customerId="c1" canEdit />);
@@ -70,7 +70,7 @@ describe('CustomerPropertiesPanelV2', () => {
   });
 
   it('a property the county job checked and found at no meter says so', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => jsonResponse({ properties: [{ ...PRIMARY, reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: '2026-10-23T08:00:00Z' }], reclaimedWater: true })));
+    vi.stubGlobal('fetch', vi.fn(() => jsonResponse({ properties: [{ ...PRIMARY, reclaimed_water: null, reclaimed_water_source: null, reclaimed_water_checked_at: '2026-10-23T08:00:00Z' }] })));
     render(<CustomerPropertiesPanelV2 customerId="c1" canEdit />);
     expect(await screen.findByText('No county reclaimed meter at this address. No reclaimed-water nitrogen cut.')).toBeInTheDocument();
   });
@@ -79,7 +79,7 @@ describe('CustomerPropertiesPanelV2', () => {
     const inherited = { ...PRIMARY, reclaimed_water: true, reclaimed_water_source: 'office', reclaimed_water_inherited: true };
     const fetchMock = vi.fn((url, opts = {}) => {
       if (opts.method === 'PUT') return jsonResponse({ properties: [{ ...PRIMARY, reclaimed_water: null, reclaimed_water_source: null }] });
-      return jsonResponse({ properties: [inherited], reclaimedWater: true });
+      return jsonResponse({ properties: [inherited] });
     });
     vi.stubGlobal('fetch', fetchMock);
     render(<CustomerPropertiesPanelV2 customerId="c1" canEdit />);
@@ -91,13 +91,8 @@ describe('CustomerPropertiesPanelV2', () => {
     expect(JSON.parse(fetchMock.mock.calls.find(([, o]) => o?.method === 'PUT')[1].body)).toEqual({ reclaimed: null });
   });
 
-  it('shows no reclaimed-water control while the gate is off, and a read-only view cannot change it', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => jsonResponse({ properties: [PRIMARY], reclaimedWater: false })));
-    const view = render(<CustomerPropertiesPanelV2 customerId="c1" canEdit />);
-    await screen.findByText(/10 Palm Ave/);
-    expect(screen.queryByLabelText('Reclaimed water for 10 Palm Ave')).not.toBeInTheDocument();
-    view.unmount();
-    vi.stubGlobal('fetch', vi.fn(() => jsonResponse({ properties: [{ ...PRIMARY, reclaimed_water: null }], reclaimedWater: true })));
+  it('a read-only view cannot change the reclaimed-water control', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => jsonResponse({ properties: [{ ...PRIMARY, reclaimed_water: null }] })));
     render(<CustomerPropertiesPanelV2 customerId="c1" canEdit={false} />);
     expect(await screen.findByLabelText('Reclaimed water for 10 Palm Ave')).toBeDisabled();
     expect(screen.getByText('Not checked against the county meters. No reclaimed-water nitrogen cut.')).toBeInTheDocument();

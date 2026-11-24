@@ -3,7 +3,6 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { isValidFeatureFlagKey } = require('../services/feature-flags');
-const { dayOnlyPromiseLive } = require('../config/feature-gates');
 const { soldByLive: commissionSoldByLive } = require('../services/estimate-sold-by');
 const {
   VISUAL_SERVICE_NOTES_FLAG,
@@ -33,9 +32,10 @@ router.get('/', async (req, res, next) => {
     // Neighbor flag in the tech app (GATE_COMMISSION_SOLD_BY), the same way.
     if (commissionSoldByLive()) flags.commission_sold_by = true;
     else delete flags.commission_sold_by;
-    // "Customer asked for this time" box and the Told badge (GATE_DAY_ONLY_PROMISE), the same way.
-    if (dayOnlyPromiseLive?.()) flags.day_only_promise = true;
-    else delete flags.day_only_promise;
+    // "Customer asked for this time" box and the Told badge: always on. No current client reads this key; it stays true so a
+    // browser tab still running an older client build (which hides the box and badge without it) keeps them. Remove it once
+    // old builds are gone.
+    flags.day_only_promise = true;
     res.json({ flags });
   } catch (err) {
     next(err);

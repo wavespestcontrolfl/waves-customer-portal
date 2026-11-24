@@ -16,6 +16,7 @@ const {
   reServiceLaneForPlanRow,
   resolveCallBookingCatalogService,
   resolveCallBookingPrice,
+  callServiceBooksAtPrice,
   resolveCallFollowUpPlan,
   callBookingInvoiceOnComplete,
   callFollowUpBillingShape,
@@ -887,6 +888,42 @@ describe('resolveCallBookingPrice', () => {
   test('catalog base_price backstops a one_time service with no quote', () => {
     expect(resolveCallBookingPrice({ quotedPrice: null, catalogRow: roach }))
       .toEqual({ price: 350, source: 'catalog' });
+  });
+
+  // The call booker's agreed-one-time-job hold: it keeps a one-time service only when a call booking can
+  // price that service.
+  test('callServiceBooksAtPrice: the named service is a one-time row a call booking can put that price on', () => {
+    expect(callServiceBooksAtPrice(CATALOG, roach.name, 250)).toBe(true);
+    expect(callServiceBooksAtPrice(CATALOG, ` ${roach.name.toUpperCase()} `, 250)).toBe(true);
+    // A plan row never takes a visit price; a name the catalog does not hold has no row.
+    expect(callServiceBooksAtPrice(CATALOG, CATALOG[2].name, 250)).toBe(false);
+    expect(callServiceBooksAtPrice(CATALOG, 'Some Service Nobody Sells', 250)).toBe(false);
+    expect(callServiceBooksAtPrice(CATALOG, null, 250)).toBe(false);
+    // No price, a price out of the booking's bounds, or a price the booking would round: not that price.
+    expect(callServiceBooksAtPrice(CATALOG, roach.name, null)).toBe(false);
+    expect(callServiceBooksAtPrice(CATALOG, roach.name, 3.5)).toBe(false);
+    expect(callServiceBooksAtPrice(CATALOG, roach.name, 250.004)).toBe(false);
+    // A fixed row's list price that equals a rejected quote is not the quote (the fallback, not the call's price).
+    const fixedAtBound = { ...roach, pricing_type: 'fixed', base_price: 3.5 };
+    expect(resolveCallBookingPrice({ quotedPrice: 3.5, catalogRow: fixedAtBound })).toEqual({ price: 3.5, source: 'catalog' });
+    expect(callServiceBooksAtPrice([fixedAtBound], roach.name, 3.5)).toBe(false);
+    // No catalog.
+    expect(callServiceBooksAtPrice(null, roach.name, 250)).toBe(false);
+    expect(callServiceBooksAtPrice([], roach.name, 250)).toBe(false);
+  });
+
+  // The call booking check ties a price to a visit by the service name alone. The booking's own lookup also
+  // bridges a short name, a key and a renamed label; a reading that names the row that way is no hold.
+  test('callServiceBooksAtPrice: the name must be the row\'s own current name, not a bridged one', () => {
+    const named = { id: 'svc-one-time', service_key: 'pest_one_time', name: 'One-Time Pest Control Service', short_name: 'One-Time Pest', billing_type: 'one_time', pricing_type: 'variable', base_price: null };
+    const services = [...CATALOG, named];
+    expect(callServiceBooksAtPrice(services, named.name, 250)).toBe(true);
+    expect(callServiceBooksAtPrice(services, ` ${named.name.toUpperCase()} `, 250)).toBe(true); // case and outer spaces do not count
+    for (const bridged of [named.short_name, named.service_key, 'One-Time Pest Control']) {
+      // The booking's lookup still finds the row by each of these.
+      expect(resolveCallBookingCatalogService({ extracted: { specific_service_name: bridged }, transcription: '', services })).toBe(named);
+      expect(callServiceBooksAtPrice(services, bridged, 250)).toBe(false);
+    }
   });
 
   test('recurring services never take the catalog fallback', () => {

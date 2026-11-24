@@ -457,6 +457,205 @@ describeDb('Bid Desk (PostgreSQL)', () => {
       expect(rung('addendum')).toHaveLength(0);
     });
 
+    test('a repeat MFMP notice joins its bid in a new thread and after a decision; the day-only Close Date waits for the operator', async () => {
+      // MFMP sends each notice as its own Gmail thread. Its stored header as delivered: DKIM and DMARC pass for dms.myflorida.com.
+      const mfmpEmail = (threadId, receivedAt) => storeEmail({
+        from_address: 'MFMP.NoReply@dms.myflorida.com', from_name: 'MFMP Notifications', gmail_thread_id: threadId, received_at: receivedAt,
+        authentication_results: 'mx.google.com; dkim=pass header.i=@dms.myflorida.com header.s=selector1; spf=pass smtp.mailfrom=bounce@mail.dms.myflorida.com; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=dms.myflorida.com',
+        subject: 'Advertisement Posted - ITB-17200', body_text: [
+          ' A bid advertisement was posted to the MyFloridaMarketPlace (MFMP) Vendor Information Portal (VIP).',
+          ' Organization: Sample Water Management District', ' Advertisement Number: ITB-17200 ', ' Agency Advertisement Number: ITB 99Z-001',
+          ' Advertisement Type: Invitation to Bid', ' Title: ITB 99Z-001 Sample Site Preparation and Weed Control',
+          ' Open Date: Oct 20, 2026', ' Close Date: Oct 29, 2026', ' Agency Contact: Casey Sample', ' Phone: (555) 010-0100',
+          ' Address: 1 Fixture Agency Way', ' Email: casey.sample@fixture-agency.example',
+        ].join('\n'),
+      });
+      const first = await service.ingestEmail(await mfmpEmail('t-mfmp-1', new Date(NOW.getTime() - 3 * DAY)));
+      expect(first.created).toBe(true);
+      expect(await bidRow(first.bidId)).toMatchObject({
+        source: 'gov_email', gc_or_agency: 'Sample Water Management District', project_title: 'ITB 99Z-001 Sample Site Preparation and Weed Control',
+        solicitation_number: 'ITB-17200', location: null, due_confirmed: false, due_source_line: 'Close Date: Oct 29, 2026',
+      });
+      expect((await bidRow(first.bidId)).due_at.toISOString()).toBe('2026-10-30T03:59:00.000Z');
+      const second = await service.ingestEmail(await mfmpEmail('t-mfmp-2', new Date(NOW.getTime() - 60000)));
+      expect(second).toMatchObject({ created: false, bidId: first.bidId });
+      expect(await mockPg('bid_opportunities').where({ solicitation_number: 'ITB-17200' })).toHaveLength(1);
+      expect(await links(first.bidId)).toHaveLength(2);
+      // Declined, then the state sends the advertisement again: it joins the declined bid and rings nothing.
+      await mockPg('bid_opportunities').where({ id: first.bidId }).update({ status: 'no_bid' });
+      raiseAdminAlert.mockClear();
+      const third = await service.ingestEmail(await mfmpEmail('t-mfmp-3', new Date(NOW.getTime() - 30000)));
+      expect(third).toMatchObject({ created: false, bidId: first.bidId });
+      expect(await mockPg('bid_opportunities').where({ solicitation_number: 'ITB-17200' })).toHaveLength(1);
+      expect(await links(first.bidId)).toHaveLength(3);
+      expect(await bidRow(first.bidId)).toMatchObject({ status: 'no_bid' });
+      expect(rung('new')).toHaveLength(0);
+    });
+
+    test('a repeat MFMP notice for the same day keeps an operator-confirmed hour; another day is flagged', async () => {
+      const notice = (threadId, close) => storeEmail({
+        from_address: 'MFMP.NoReply@dms.myflorida.com', from_name: 'MFMP Notifications', gmail_thread_id: threadId,
+        authentication_results: 'mx.google.com; dkim=pass header.i=@dms.myflorida.com header.s=selector1; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=dms.myflorida.com',
+        subject: 'Advertisement Posted - ITB-17300', body_text: [
+          ' Organization: Sample Water Management District', ' Advertisement Number: ITB-17300', ' Advertisement Type: Invitation to Bid',
+          ' Title: Sample Aquatic Weed Control', ` Close Date: ${close}`,
+        ].join('\n'),
+      });
+      const first = await service.ingestEmail(await notice('t-mfmp-day-1', 'Oct 29, 2026'));
+      // The operator reads the agency's hour (2:00 PM EDT) and confirms it.
+      const twoPm = new Date('2026-10-29T18:00:00Z');
+      await mockPg('bid_opportunities').where({ id: first.bidId }).update({ due_at: twoPm, due_confirmed: true });
+      raiseAdminAlertWithReopen.mockClear();
+      raiseAdminAlert.mockClear();
+      const same = await service.ingestEmail(await notice('t-mfmp-day-2', 'Oct 29, 2026'));
+      expect(same).toMatchObject({ created: false, bidId: first.bidId });
+      const kept = await bidRow(first.bidId);
+      expect(kept).toMatchObject({ due_confirmed: true, needs_date_confirmation: false });
+      expect(kept.due_at.toISOString()).toBe(twoPm.toISOString());
+      expect(rung('addendum')).toHaveLength(0);
+      // A Close Date the parser cannot read flags the bid and rings; the confirmed date stays.
+      const unread = await service.ingestEmail(await notice('t-mfmp-day-4', 'Oct 30, 2026 2:00 PM'));
+      expect(unread).toMatchObject({ created: false, bidId: first.bidId });
+      const flagged = await bidRow(first.bidId);
+      expect(flagged).toMatchObject({ needs_date_confirmation: true, due_confirmed: true });
+      expect(flagged.due_at.toISOString()).toBe(twoPm.toISOString());
+      expect(rung('addendum')).toHaveLength(1);
+      const moved = await service.ingestEmail(await notice('t-mfmp-day-3', 'Nov 5, 2026'));
+      expect(moved).toMatchObject({ created: false, bidId: first.bidId });
+      expect(await bidRow(first.bidId)).toMatchObject({ needs_date_confirmation: true });
+    });
+
+    test('a bid filed from an MFMP notice before the template (no key) is found by its first repeat, even declined', async () => {
+      const legacyNotice = (threadId) => storeEmail({
+        from_address: 'MFMP.NoReply@dms.myflorida.com', from_name: 'MFMP Notifications', gmail_thread_id: threadId,
+        authentication_results: 'mx.google.com; dkim=pass header.i=@dms.myflorida.com header.s=selector1; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=dms.myflorida.com',
+        subject: 'Advertisement Posted - ITB-17400', body_text: [
+          ' Organization: Sample Water Management District', ' Advertisement Number: ITB-17400', ' Advertisement Type: Invitation to Bid',
+          ' Title: Sample Right of Way Herbicide', ' Close Date: Oct 29, 2026',
+        ].join('\n'),
+      });
+      const first = await service.ingestEmail(await legacyNotice('t-mfmp-old-1'));
+      // As the subject-only rule stored it before this template: no key, no fields, then declined.
+      await mockPg('bid_opportunities').where({ id: first.bidId }).update({
+        group_key: null, gc_or_agency: null, project_title: null, solicitation_number: null, due_at: null, due_source_line: null, status: 'no_bid',
+      });
+      raiseAdminAlert.mockClear();
+      const repeat = await service.ingestEmail(await legacyNotice('t-mfmp-old-2'));
+      expect(repeat).toMatchObject({ created: false, bidId: first.bidId });
+      expect(await bidRow(first.bidId)).toMatchObject({ status: 'no_bid', group_key: 'mfmp|itb 17400' });
+      expect(await mockPg('bid_opportunities').whereIn('id', mockPg('bid_opportunity_emails').select('bid_id')).where('group_key', 'mfmp|itb 17400')).toHaveLength(1);
+      expect(rung('new')).toHaveLength(0);
+    });
+
+    test('of two keyless legacy copies of one advertisement, a repeat joins the open one before the declined one', async () => {
+      const body = (number) => [
+        ' Organization: Sample Water Management District', ` Advertisement Number: ${number}`, ' Advertisement Type: Invitation to Bid',
+        ' Title: Sample Canal Weed Control', ' Close Date: Oct 29, 2026',
+      ].join('\n');
+      const authFor = (domain) => `mx.google.com; dkim=pass header.i=@${domain} header.s=selector1; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=${domain}`;
+      const legacyNotice = (threadId, number = 'ITB-17500', domain = 'dms.myflorida.com') => storeEmail({
+        from_address: `MFMP.NoReply@${domain}`, from_name: 'MFMP Notifications', gmail_thread_id: threadId,
+        authentication_results: authFor(domain), subject: `Advertisement Posted - ${number}`, body_text: body(number),
+      });
+      const blank = { group_key: null, gc_or_agency: null, project_title: null, solicitation_number: null, due_at: null, due_source_line: null };
+      // Two rows the subject-only rule filed for one advertisement before this template: the older declined, the newer
+      // open. (The newer is filed under another number first, then its stored notice is set to this advertisement.)
+      const older = await service.ingestEmail(await legacyNotice('t-mfmp-dup-1'));
+      await mockPg('bid_opportunities').where({ id: older.bidId }).update({ ...blank, status: 'no_bid' });
+      const newerEmail = await legacyNotice('t-mfmp-dup-2', 'ITB-17599');
+      const newer = await service.ingestEmail(newerEmail);
+      expect(newer.created).toBe(true);
+      await mockPg('emails').where({ id: newerEmail.id }).update({ subject: 'Advertisement Posted - ITB-17500', body_text: body('ITB-17500') });
+      await mockPg('bid_opportunities').where({ id: newer.bidId }).update(blank);
+      // A repeat even in the declined copy's own Gmail thread joins the open copy: a keyed MFMP notice joins by number only.
+      const sameThread = await service.ingestEmail(await legacyNotice('t-mfmp-dup-1'));
+      expect(sameThread).toMatchObject({ created: false, bidId: newer.bidId });
+      expect(await bidRow(older.bidId)).toMatchObject({ status: 'no_bid', group_key: null });
+      // A repeat in a new thread joins the open copy too, from a verified subdomain as well.
+      const repeat = await service.ingestEmail(await legacyNotice('t-mfmp-dup-3'));
+      expect(repeat).toMatchObject({ created: false, bidId: newer.bidId });
+      expect(await bidRow(newer.bidId)).toMatchObject({ status: 'new', group_key: 'mfmp|itb 17500' });
+      const sub = await service.ingestEmail(await legacyNotice('t-mfmp-dup-4', 'ITB-17500', 'vip.dms.myflorida.com'));
+      expect(sub).toMatchObject({ created: false, bidId: newer.bidId });
+    });
+
+    test('a keyless legacy Agency Decision of the same number never takes a real solicitation', async () => {
+      const notice = (threadId, type) => storeEmail({
+        from_address: 'MFMP.NoReply@dms.myflorida.com', from_name: 'MFMP Notifications', gmail_thread_id: threadId,
+        authentication_results: 'mx.google.com; dkim=pass header.i=@dms.myflorida.com header.s=selector1; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=dms.myflorida.com',
+        subject: 'Advertisement Posted - ITB-17700', body_text: [
+          ' Organization: Sample Water Management District', ' Advertisement Number: ITB-17700', ` Advertisement Type: ${type}`,
+          ' Title: Sample Lake Weed Control', ' Close Date: Oct 29, 2026',
+        ].join('\n'),
+      });
+      // As the old subject rule filed a decision notice: a keyless row, declined. (Filed here as an ITB, then its stored
+      // notice is set to the decision.)
+      const decisionEmail = await notice('t-mfmp-dec-1', 'Invitation to Bid');
+      const decision = await service.ingestEmail(decisionEmail);
+      await mockPg('emails').where({ id: decisionEmail.id }).update({ body_text: decisionEmail.body_text.replace('Invitation to Bid', 'Agency Decision') });
+      await mockPg('bid_opportunities').where({ id: decision.bidId }).update({ group_key: null, status: 'no_bid' });
+      raiseAdminAlert.mockClear();
+      const real = await service.ingestEmail(await notice('t-mfmp-dec-2', 'Invitation to Bid'));
+      expect(real.created).toBe(true);
+      expect(real.bidId).not.toBe(decision.bidId);
+      expect(rung('new')).toHaveLength(1);
+    });
+
+    test('a real solicitation in the thread of a declined legacy decision notice files as new; a hand-filed decision holds no key', async () => {
+      const notice = (threadId, type, number = 'ITB-17800') => storeEmail({
+        from_address: 'MFMP.NoReply@dms.myflorida.com', from_name: 'MFMP Notifications', gmail_thread_id: threadId,
+        authentication_results: 'mx.google.com; dkim=pass header.i=@dms.myflorida.com header.s=selector1; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=dms.myflorida.com',
+        subject: `Advertisement Posted - ${number}`, body_text: [
+          ' Organization: Sample Water Management District', ` Advertisement Number: ${number}`, ` Advertisement Type: ${type}`,
+          ' Title: Sample Marsh Weed Control', ' Close Date: Oct 29, 2026',
+        ].join('\n'),
+      });
+      // A decision notice filed by hand: fields, no key. Declined.
+      const decided = await service.ingestEmail(await notice('t-mfmp-thr-1', 'Agency Decision'), { manual: true });
+      expect(await bidRow(decided.bidId)).toMatchObject({ solicitation_number: 'ITB-17800', group_key: null });
+      await mockPg('bid_opportunities').where({ id: decided.bidId }).update({ status: 'no_bid' });
+      raiseAdminAlert.mockClear();
+      // The real solicitation lands in the same Gmail thread: it is new work, filed with the key, and rings.
+      const real = await service.ingestEmail(await notice('t-mfmp-thr-1', 'Invitation to Bid'));
+      expect(real.created).toBe(true);
+      expect(await bidRow(real.bidId)).toMatchObject({ status: 'new', group_key: 'mfmp|itb 17800' });
+      expect(rung('new')).toHaveLength(1);
+     // A later keyless follow-up in that thread (no type line, an ITB subject) joins the thread's one open bid.
+      const followUp = await service.ingestEmail(await storeEmail({
+        from_address: 'MFMP.NoReply@dms.myflorida.com', from_name: 'MFMP Notifications', gmail_thread_id: 't-mfmp-thr-1',
+        authentication_results: 'mx.google.com; dkim=pass header.i=@dms.myflorida.com header.s=selector1; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=dms.myflorida.com',
+        subject: 'Advertisement Posted - ITB-17800 addendum', body_text: 'An addendum was posted. Log in to VIP to view it.',
+      }));
+      expect(followUp).toMatchObject({ created: false, bidId: real.bidId });
+    });
+
+    test('of two open copies of one advertisement, an older keyless one and a newer keyed one, a repeat joins the older', async () => {
+      const body = (number) => [
+        ' Organization: Sample Water Management District', ` Advertisement Number: ${number}`, ' Advertisement Type: Invitation to Bid',
+        ' Title: Sample Pond Weed Control', ' Close Date: Oct 29, 2026',
+      ].join('\n');
+      const notice = (threadId, number = 'ITB-17600') => storeEmail({
+        from_address: 'MFMP.NoReply@dms.myflorida.com', from_name: 'MFMP Notifications', gmail_thread_id: threadId,
+        authentication_results: 'mx.google.com; dkim=pass header.i=@dms.myflorida.com header.s=selector1; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=dms.myflorida.com',
+        subject: `Advertisement Posted - ${number}`, body_text: body(number),
+      });
+      // The older open copy was filed keyless before the template; the newer open copy carries the key.
+      const olderEmail = await notice('t-mfmp-open-1', 'ITB-17699');
+      const older = await service.ingestEmail(olderEmail);
+      await mockPg('emails').where({ id: olderEmail.id }).update({ subject: 'Advertisement Posted - ITB-17600', body_text: body('ITB-17600') });
+      // created_at is the transaction's time in this suite, so the older copy's is set apart.
+      await mockPg('bid_opportunities').where({ id: older.bidId }).update({
+        group_key: null, gc_or_agency: null, project_title: null, solicitation_number: null, created_at: new Date(NOW.getTime() - 5 * DAY),
+      });
+      const newerEmail = await notice('t-mfmp-open-2', 'ITB-17698');
+      const newer = await service.ingestEmail(newerEmail);
+      await mockPg('emails').where({ id: newerEmail.id }).update({ subject: 'Advertisement Posted - ITB-17600', body_text: body('ITB-17600') });
+      await mockPg('bid_opportunities').where({ id: newer.bidId }).update({ group_key: 'mfmp|itb 17600', solicitation_number: 'ITB-17600' });
+      const repeat = await service.ingestEmail(await notice('t-mfmp-open-3'));
+      expect(repeat).toMatchObject({ created: false, bidId: older.bidId });
+      expect(await bidRow(older.bidId)).toMatchObject({ status: 'new', group_key: 'mfmp|itb 17600' });
+    });
+
     test('an addendum naming no package joins the project\'s one open package bid before a decided bid of the project', async () => {
       const bare = BC_BODY().replace(': Pest Control', '');
       const decided = await service.ingestEmail(await storeEmail({ body_text: bare }));

@@ -92,8 +92,8 @@ describe('gate on', () => {
 
   test('prompt version is bumped, distinguishable, and fits the column', () => {
     // '_cf' = COMPANY FACTS, '_cfl' = + LABEL FACTS (PR #5416), '_cflv' = + VISIT STATUS & OPEN LOOPS (PR #5499), 'cflvp' = + PAYMENT FACTS (PR #5331), numeric token 5 = FREE RE-SERVICE (PR #5336) + a fresh identity above PR #5334's 3 (LIVE ETA) and #5416's 3_cfl (4 was the pre-contract claim checker, never merged); '7_m' (#5610) = the compact scheme: number 6 + one cumulative key 'm' (+ MISSED VISIT).
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers25_n');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers25_n+e');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers37_n');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers37_n+e');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers_cf');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers2');
@@ -149,7 +149,7 @@ describe('service knowledge (owner-approved 2026-10-03)', () => {
 // Owner rulings 2026-10-21/22 (Waves AI answer book).
 describe('answer-book facts (owner 2026-10-21/22)', () => {
   const section = () => renderCompanyFactsSection();
-  const { RETIRED_COMPANY_FACT_LINES } = require('../services/sms-company-facts');
+  const { RETIRED_COMPANY_FACT_LINES, OLDER_RETIRED_COMPANY_FACT_LINES } = require('../services/sms-company-facts');
   const NEW_LINES = [
     'On a residential general pest plan that includes inside service (not mosquito service), the first visit includes an inside spray. After that, the inside is up to the customer: we treat it whenever they ask. A customer who chose exterior-only service can ask the office to add inside service back. Commercial accounts follow their sold service scope.',
     'Rodent trapping includes the setup visit and at least one trap check. For more trap checks, the office confirms what the job includes.',
@@ -177,9 +177,23 @@ describe('answer-book facts (owner 2026-10-21/22)', () => {
     expect(section()).not.toMatch(/@|\d{3}[-.\s]\d{4}/);
   });
   test('the retired wording is kept verbatim so earlier stored renders can be rebuilt', () => {
-    expect(Object.keys(RETIRED_COMPANY_FACT_LINES).sort()).toEqual(['0', '10']);
+    expect(Object.keys(RETIRED_COMPANY_FACT_LINES).sort()).toEqual(['0', '10', '22']);
     expect(RETIRED_COMPANY_FACT_LINES[0]).toMatch(/include an interior spray as well as the exterior/);
     expect(RETIRED_COMPANY_FACT_LINES[10]).toMatch(/accept cards at the visit, never cash/);
+    // line 22 was reworded twice on 2026-11-23 (a hold of places until a second technician was hired); the hold ended with the
+    // hire, so the line says again what it said before. The seven-place hold wording is the newest retired one, the six-place one the older.
+    expect(RETIRED_COMPANY_FACT_LINES[22]).toMatch(/not taking new customers in Rotonda, Placida, Boca Grande, Babcock Ranch, Gulf Cove, Charlotte Harbor or Deep Creek yet/);
+    expect(Object.keys(OLDER_RETIRED_COMPANY_FACT_LINES)).toEqual(['22']);
+    expect(OLDER_RETIRED_COMPANY_FACT_LINES[22]).toMatch(/not taking new customers in Port Charlotte, Englewood, Rotonda, Placida, Boca Grande or Babcock Ranch yet/);
+  });
+  test('the service-area line serves Charlotte County except Punta Gorda again (second technician hired)', () => {
+    const line = COMPANY_FACTS[22];
+    for (const place of ['Manatee', 'Sarasota', 'Charlotte County except Punta Gorda', 'Ruskin', 'Riverview']) expect(line).toContain(place);
+    expect(line).toContain('We do not serve Punta Gorda, DeSoto County, Tampa, St. Petersburg or Lee County.');
+    expect(line).not.toMatch(/not taking new customers|second technician|Existing customers/);
+    for (const place of ['Rotonda', 'Placida', 'Boca Grande', 'Babcock', 'Gulf Cove', 'Deep Creek']) expect(line).not.toContain(place);
+    expect(section()).not.toContain('not taking new customers');
+    expect(hasBannedCustomerCopy(line)).toBeFalsy();
   });
   test('no price, product brand, EPA claim, or rain return-visit promise is in the section', () => {
     expect(COMPANY_FACTS.join('\n')).not.toMatch(/\$\d|\bEPA\b|\bsafe\b|Alpine|Termidor|Talstar|Taurus|Fusilade/i);
@@ -395,8 +409,10 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
   const facts = require('../services/sms-company-facts');
   const { LABEL_FACTS_NONE_SECTION } = require('../services/sms-label-facts');
   const { exactLabelFactsSection: labelSectionOf } = facts;
-  const oldRender = facts.knownCompanyFactsRenders()[1]; // the 19-line render live from 2026-10-09 to 2026-10-22
-  const oldestRender = facts.knownCompanyFactsRenders()[2]; // the 16-line render of 2026-10-03
+  const holdRender = facts.knownCompanyFactsRenders()[1]; // the 26-line render of the seven-place hold (prompts 33 to 36), live 2026-11-23 for hours
+  const serviceAreaRender = facts.knownCompanyFactsRenders()[2]; // the 26-line render of the six-place hold (prompts 29 to 32)
+  const oldRender = facts.knownCompanyFactsRenders()[3]; // the 19-line render live from 2026-10-09 to 2026-10-22
+  const oldestRender = facts.knownCompanyFactsRenders()[4]; // the 16-line render of 2026-10-03
   // per-customer head long enough that the company section would not fit a raw 6,000-char prefix
   const head = `CUSTOMER: synthetic\n${Array.from({ length: 110 }, (_, n) => `SERVICE HISTORY ${n}: Quarterly Pest completed`).join('\n')}\n`;
   const tail = 'BILLING:\n- balance: none\nRECENT PHONE CALLS:\n- 2026-10-01: caller was told the tech arrives Thursday\nRECENT SMS THREAD:\n[CUSTOMER] THREAD_SENTINEL';
@@ -407,7 +423,9 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
     const renders = facts.knownCompanyFactsRenders();
     expect(renders[0]).toBe(facts.renderCompanyFactsSection());
     facts.PRIOR_COMPANY_FACTS_RENDERS.forEach((prior, i) => {
-      expect(prior.lines).toBeLessThan(COMPANY_FACTS.length);
+      // fewer lines than today's list, or the same count when a line was reworded in place (then its index is in `retired`)
+      expect(prior.lines).toBeLessThanOrEqual(COMPANY_FACTS.length);
+      if (prior.lines === COMPANY_FACTS.length) expect((Array.isArray(prior.retired) && prior.retired.length > 0) || (Array.isArray(prior.olderRetired) && prior.olderRetired.length > 0)).toBe(true);
       expect(crypto.createHash('sha256').update(renders[i + 1]).digest('hex')).toBe(prior.sha256);
     });
     expect(oldRender.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(19);
@@ -418,6 +436,22 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
       expect(r).toContain('accept cards at the visit, never cash');
     }
     expect(facts.renderCompanyFactsSection()).not.toContain('accept cards at the visit');
+    // the 2026-11-23 hold renders have the 2026-10-22 wording of lines 0 and 10 (current) and the hold wording of line 22 only
+    for (const hold of [holdRender, serviceAreaRender]) {
+      expect(hold.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(26);
+      expect(hold).toContain('not taking new customers in ');
+      expect(hold).not.toContain('Charlotte County except Punta Gorda');
+      expect(hold).not.toContain('accept cards at the visit, never cash');
+      expect(hold).not.toContain('include an interior spray as well as the exterior');
+      expect(facts.renderCompanyFactsSection().split('\n').filter((l, i) => l !== hold.split('\n')[i])).toHaveLength(1);
+    }
+    // today's render (the hold ended with the second technician) says again what the 2026-10-22 render said: Charlotte County except Punta Gorda
+    expect(facts.renderCompanyFactsSection()).toContain('Charlotte County except Punta Gorda');
+    expect(facts.renderCompanyFactsSection()).not.toContain('not taking new customers');
+    expect(holdRender).toContain('We are not taking new customers in Rotonda, Placida, Boca Grande, Babcock Ranch, Gulf Cove, Charlotte Harbor or Deep Creek yet');
+    expect(serviceAreaRender).toContain('We are not taking new customers in Port Charlotte, Englewood, Rotonda, Placida, Boca Grande or Babcock Ranch yet');
+    // the 19 and 16-line renders predate line 22
+    expect(oldRender).not.toContain('We serve Manatee');
   });
 
   test('the judge keeps the size exemption for a block with the earlier render: the thread survives', () => {
@@ -428,6 +462,8 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
     expect(out).toContain('- 2026-10-01: caller was told the tech arrives Thursday');
     expect(out).toContain(oldRender.trim().split('\n').pop()); // the old section itself is still shown, whole
     expect(sanitizeFactsForJudge(blockWith(oldestRender))).toContain('THREAD_SENTINEL'); // and so is the 16-line one
+    expect(sanitizeFactsForJudge(blockWith(serviceAreaRender))).toContain('THREAD_SENTINEL'); // and the six-place hold one
+    expect(sanitizeFactsForJudge(blockWith(holdRender))).toContain('THREAD_SENTINEL'); // and the seven-place hold one
     // today's render behaves the same
     expect(sanitizeFactsForJudge(blockWith(facts.renderCompanyFactsSection()))).toContain('THREAD_SENTINEL');
     // an UNKNOWN company section gets no exemption (the exact match is still the rule)
@@ -439,10 +475,16 @@ describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
     const oldBlock = blockWith(oldRender);
     expect(labelSectionOf(oldBlock)).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
     expect(labelSectionOf(blockWith(oldestRender))).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
+    expect(labelSectionOf(blockWith(serviceAreaRender))).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
+    expect(labelSectionOf(blockWith(holdRender))).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
     expect(labelSectionOf(blockWith(facts.renderCompanyFactsSection()))).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
     // contract: today's exact render only, so an old item never grades the new identity
     expect(hasExactCompanyFacts(oldBlock)).toBe(false);
     expect(hasExactCompanyFacts(blockWith(oldestRender))).toBe(false);
+    expect(hasExactCompanyFacts(blockWith(serviceAreaRender))).toBe(false);
+    expect(hasExactCompanyFacts(blockWith(holdRender))).toBe(false);
+    expect(facts.hasExactLabelFacts(blockWith(holdRender))).toBe(false);
+    expect(facts.hasExactLabelFacts(blockWith(serviceAreaRender))).toBe(false);
     expect(facts.hasExactLabelFacts(oldBlock)).toBe(false);
     expect(hasExactCompanyFacts(blockWith(facts.renderCompanyFactsSection()))).toBe(true);
     expect(facts.hasExactLabelFacts(blockWith(facts.renderCompanyFactsSection()))).toBe(true);
@@ -536,8 +578,30 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
     expect(verdict.reason).toMatch(/company fact retired/);
     const snap = await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: 'house_voice_v12_real_answers14_n', getBody: () => body })({});
     expect(snap.ok).toBe(false);
-    const fresh = await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: 'house_voice_v12_real_answers25_n', getBody: () => 'See you Tuesday!' })({});
+    const fresh = await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: 'house_voice_v12_real_answers37_n', getBody: () => 'See you Tuesday!' })({});
     expect(fresh.ok).toBe(true);
+  });
+  // Owner ruling 2026-11-23, ended when the second technician was hired: a draft from prompts 29 to 36 carries a line that turned
+  // places away ("not taking new customers"), so an unedited one is refused. 25 to 28 carry today's line again; 37 and later are current.
+  test('an unedited draft from prompts 29 to 36 is refused; 25 to 28 and 37 and later are not', async () => {
+    const sc = require('../services/agent-decision-send-checks');
+    const body = 'We are not taking new customers in Englewood yet.';
+    for (const v of ['29_n', '30_n', '31_n', '32_n', '33_n', '34_n', '35_n', '36_n', '29_n+e', '32_n+bcelmvA', '33_n+c', '36_n+bcelmvA']) {
+      const row = { id: 'd1', input_snapshot: '{}', prompt_version: `house_voice_v12_real_answers${v}`, suggested_message: body };
+      // immediate send, scheduled send, the provider-boundary row check and the auto-send snapshot check
+      expect(retiredCompanyFactBlock({ decision: row, outgoingBody: body })).toMatch(/company fact retired/);
+      expect(sc.blockReasonIsRetiredCompanyFact(await sc.scheduledLabelFactsBlock({ decision: row, outgoingBody: body }))).toBe(true);
+      const dbi = () => ({ where: () => ({ first: async () => row }) });
+      expect((await sc.labelFactsProviderPreSendCheck({ decisionId: 'd1', getBody: () => body })({ dbi })).reason).toMatch(/company fact retired/);
+      expect((await sc.labelFactsSnapshotProviderPreSendCheck({ promptVersion: row.prompt_version, getBody: () => body })({})).ok).toBe(false);
+      // a staff-edited body goes out
+      expect(retiredCompanyFactBlock({ decision: row, outgoingBody: `${body} Please confirm.` })).toBeNull();
+    }
+    for (const v of ['25_n', '26_n', '27_n', '28_n', '26_n+c', '28_n+bcA', '37_n', '38_n', '39_n', '40_n', '38_n+c', '37_n+e']) {
+      expect(retiredCompanyFactBlock({ decision: { prompt_version: `house_voice_v12_real_answers${v}`, suggested_message: body }, outgoingBody: body })).toBeNull();
+    }
+    // older than the answer book is still refused
+    expect(retiredCompanyFactBlock({ decision: { prompt_version: 'house_voice_v12_real_answers24_n', suggested_message: body }, outgoingBody: body })).toMatch(/company fact retired/);
   });
   test('a scheduled refusal carries its own reason, not the label-timing one', async () => {
     const sc = require('../services/agent-decision-send-checks');
@@ -554,7 +618,7 @@ describe('answer-book facts pass the reply guards (Codex #6447 r1/r2)', () => {
     expect(retiredCompanyFactBlock({ decision, outgoingBody: RETIRED_COMPANY_FACT_LINES[10] })).toMatch(/company fact retired/);
   });
   test('a draft from the answer-book prompts, or not a real-answers draft, is never refused by it', () => {
-    for (const prompt_version of ['house_voice_v12_real_answers25_n', 'house_voice_v12_real_answers26_n+c', 'house_voice_v11', null]) {
+    for (const prompt_version of ['house_voice_v12_real_answers37_n', 'house_voice_v12_real_answers38_n+c', 'house_voice_v11', null]) {
       for (const body of [COMPANY_FACTS[10], 'We don’t take cash during your visit; please pay cash through the office.', COMPANY_FACTS[0]]) {
         expect(retiredCompanyFactBlock({ decision: { prompt_version }, outgoingBody: body })).toBeNull();
       }
@@ -585,10 +649,62 @@ describe('rebaseCompanyFactsToCurrent (sealed-eval freezer)', () => {
   });
   test('an earlier render with extra typed text after it is not rebased', () => {
     expect(cf.rebaseCompanyFactsToCurrent(block(knownCompanyFactsRenders()[1], 'Pets: a dog\n'))).toBeNull();
+    expect(cf.rebaseCompanyFactsToCurrent(block(knownCompanyFactsRenders()[2], 'Pets: a dog\n'))).toBeNull();
+  });
+  test('the earlier conversation is screened too: a held place said three messages up (owner ruling 2026-11-23)', () => {
+    const { heldPlaceInConversationContext } = cf;
+    const withThread = (company, thread) => `UPCOMING SERVICES:\n- none\n${company}BILLING:\n- Payment options: card\nRECENT SMS THREAD:\n${thread}`;
+    for (const company of knownCompanyFactsRenders()) {
+      // the static section names the held places in every block and never counts
+      expect(heldPlaceInConversationContext(withThread(company, '[CUSTOMER] Can I book my first visit?\n[STAFF] Yes, Tuesday works'))).toBe(false);
+      expect(heldPlaceInConversationContext(withThread(company, "[CUSTOMER] I'm in Englewood\n[CUSTOMER] Can I book my first visit?"))).toBe(true);
+      expect(heldPlaceInConversationContext(withThread(company, '[CUSTOMER] my zip is 33948'))).toBe(true);
+      expect(heldPlaceInConversationContext(withThread(company, '[CUSTOMER] we are in Deep Creek'))).toBe(true);
+    }
+    expect(heldPlaceInConversationContext('CUSTOMER: synthetic\nADDRESS: 1 Sample Way, Port Charlotte, FL 33952\n')).toBe(true);
+    expect(heldPlaceInConversationContext(null)).toBe(false);
+  });
+  test('the retired topics are those of the block\'s own render: the 26-line render keeps payment and inside-spray exchanges', () => {
+    const block = (render) => `UPCOMING SERVICES:\n- none\n${render}BILLING:\n- Payment options: card\nRECENT SMS THREAD:\n`;
+    const [, hold26, current26, nineteen, sixteen] = [null, ...knownCompanyFactsRenders().slice(1)];
+    // both 26-line renders (the six-place hold and the Charlotte County one) keep today's payment and inside-spray lines
+    for (const render of [hold26, current26]) {
+      const re26 = cf.retiredTopicReForBlock(block(render));
+      expect(re26.test('Do you take cash?\nWe take cards or cash at the visit.')).toBe(false);
+      expect(re26.test('Do you spray inside?')).toBe(false);
+      expect(re26.test('Do you cover 33948?\nYes, we do')).toBe(true);
+      expect(re26.test('Is Port Charlotte served?')).toBe(true);
+      // Englewood and Port Charlotte are served again, but an exchange drafted under the hold line about them is stale
+      expect(re26.test('Can you service Englewood?\nWe are not taking new customers there yet.')).toBe(true);
+      expect(re26.test('Do you cover 34223?')).toBe(true);
+    }
+    for (const r of [nineteen, sixteen]) {
+      const re = cf.retiredTopicReForBlock(block(r));
+      expect(re.test('Do you take cash?')).toBe(true);
+      expect(re.test('Do you cover 33948?')).toBe(true);
+    }
+    expect(cf.retiredTopicReForBlock(block(cf.renderCompanyFactsSection()))).toBeNull();
+    expect(cf.retiredTopicReForBlock('no billing line')).toBeNull();
+  });
+  test('a frozen OPEN TIMES lookup in a held place keeps the exchange out (owner ruling 2026-11-23)', () => {
+    const { heldPlaceInOpenTimesLookup } = cf;
+    const actions = (lookup) => ({ actions: [], open_times_snapshot: { lookup } });
+    expect(heldPlaceInOpenTimesLookup(actions({ source: 'website_engine', city: 'Port Charlotte', zip: '33948' }))).toBe(true);
+    expect(heldPlaceInOpenTimesLookup(JSON.stringify(actions({ city: 'Englewood' })))).toBe(true);
+    expect(heldPlaceInOpenTimesLookup(actions({ city: 'North Port', zip: '34287' }))).toBe(false);
+    expect(heldPlaceInOpenTimesLookup(actions({ scheduledServiceId: 'sv-1' }))).toBe(false);
+    expect(heldPlaceInOpenTimesLookup({ actions: [] })).toBe(false);
+    expect(heldPlaceInOpenTimesLookup(null)).toBe(false);
+    expect(heldPlaceInOpenTimesLookup('not json {')).toBe(false);
   });
   test('the retired-topic filter names the two reworded lines\' topics', () => {
-    for (const t of ['do you take cash', 'can I pay by check', 'do you spray inside', 'the interior too?']) expect(cf.RETIRED_COMPANY_FACT_TOPIC_RE.test(t)).toBe(true);
+    for (const t of ['do you take cash', 'can I pay by check', 'do you spray inside', 'the interior too?', 'do you serve Port Charlotte', 'are you in Englewood']) expect(cf.RETIRED_COMPANY_FACT_TOPIC_RE.test(t)).toBe(true);
     expect(cf.RETIRED_COMPANY_FACT_TOPIC_RE.test('when is my next visit?')).toBe(false);
+    // the held places' ZIPs and aliases too (owner ruling 2026-11-23), on either side of an exchange
+    for (const t of ['Do you cover 33948?\nYes, we do', 'my house is in Deep Creek', 'zip 33983-1234', 'Gulf Cove or El Jobean?', 'Charlotte Harbor', 'is 34223 ok', 'Rotunda West', 'Boca Grande']) {
+      expect(cf.RETIRED_COMPANY_FACT_TOPIC_RE.test(t)).toBe(true);
+    }
+    for (const t of ['call me at 4155551234', 'order 123456', 'zip 34287']) expect(cf.RETIRED_COMPANY_FACT_TOPIC_RE.test(t)).toBe(false);
     expect(exactSectionSuffix().startsWith('\nCOMPANY FACTS')).toBe(true);
   });
 });

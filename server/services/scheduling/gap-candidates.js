@@ -1,6 +1,6 @@
 /** Candidate-specific read analysis for the existing schedule gap tool.
  * Reuses staff arrival-placement checks and the optimizer's hard preference
- * filters (the mowing-day rule included, GATE_AUTO_DISPATCH_MOWING_DAYS).
+ * filters (the mowing-day rule included, mowing-days.js).
  * No holds, geocoding, reassignment, or customer promises are made. */
 const { guardedCoordSelects } = require('./day-stops');
 const { enumerateArrivalPlacements } = require('./arrival-route');
@@ -10,6 +10,7 @@ const { getCustomerSchedulingPreferences } = require('../auto-dispatch/preferenc
 const { inBlackout, violatesPreferredDay, violatesPreferredTime, _internals: { weekdayOf } } = require('../auto-dispatch/candidate-slots');
 const { toDateStr, shiftDateStr } = require('../auto-dispatch/dates');
 const mowingDays = require('../auto-dispatch/mowing-days');
+const { categoriesForServices } = require('../technician-capabilities');
 
 async function loadGapCandidate(serviceId, conn) {
   const service = await conn('scheduled_services').leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -21,13 +22,8 @@ async function loadGapCandidate(serviceId, conn) {
   if (service.auto_dispatch_locked || service.auto_dispatch_excluded) return { unavailable: 'candidate_locked_or_excluded' };
   const preferences = await getCustomerSchedulingPreferences(service.customer_id, service.service_type, conn, { serviceId: service.service_id, serviceKey: service.service_key_snapshot });
   const deactivated = await conn('technician_capabilities').where({ service_category: preferences.service_category, active: false }).pluck('technician_id');
-  const { seedingFamilyKey, comboRouteFamiliesFromCatalogKey } = require('../estimate-converter');
-  const catalog = service.service_id ? await conn('services').where('id', service.service_id).first('service_key') : null;
-  const identity = catalog?.service_key || service.service_key_snapshot;
-  const combo = comboRouteFamiliesFromCatalogKey(identity);
-  const families = combo.length ? combo : [seedingFamilyKey({ service: identity, name: service.service_type })];
-  const holds = await conn('plan_holds').where({ customer_id: service.customer_id, status: 'active' })
-    .whereIn('family_key', families).select('starts_on', 'resume_on');
+  const families = await planFamilies(conn, service);
+  const holds = await planHoldsFor(conn, service.customer_id, families);
   let siblingDates = [];
   if (service.is_recurring) {
     const parentId = service.recurring_parent_id || service.id;
@@ -44,7 +40,129 @@ async function loadGapCandidate(serviceId, conn) {
       .whereNotIn('status', service.recurring_dispatch_due_date ? ['cancelled'] : ['cancelled', 'rescheduled'])
       .pluck('scheduled_date')).map(toDateStr);
   }
-  return { service, preferences, holds, siblingDates, deactivated };
+  return { service, preferences, holds, siblingDates, deactivated, families };
+}
+
+/**
+ * An open estimate's first visit as a gap candidate (the 07:05 notice's fill list, day-replan/fill-list.js). It is a
+ * new stop, under the office's new-stop id ('__candidate__', arrival-route.js), at the customer's stored location:
+ * never geocoded (resolveEstimateCoords paidCalls false). Its service and length are the ones the estimate's booking
+ * page offers: resolveCatalogSlotProfile with the page picker's service mode and default selection (`picker`,
+ * estimate-slots-public.js pageSlotPicker), as the page's first fetch sizes the visit. The customer's day and time
+ * rules apply as for loadGapCandidate, and a
+ * technician needs the capability for every service the visit performs (a combined visit's too). It is checked as a new
+ * visit (`prospective`, analyzeGapCandidate): at every place in the route, as the staff finder checks a new customer.
+ * `dayOpen(date)` holds the visit's own day rules beyond analyzeGapCandidate's: the booking page's first-visit dates
+ * (a seasonal mosquito program starts in season; a new-home estimate not before the move-in date) and the mowing-day
+ * rule over every service the visit performs (a pest-first visit with lawn care too). `rainServices()` names those
+ * services as the estimate page's rain ranking does (customer-rain-rank.js estimateServiceIdentities), for the fill
+ * list's rain rule; it reads the catalog only for a service without a key, and a failed read throws (the fill list keeps
+ * that job out of rain; the page reads the label instead). `{ unavailable:
+ * 'no_stored_location' }` when no stored location can stand in. A failed read throws.
+ */
+async function estimateGapCandidate(estimate, conn, picker = {}) {
+  const slots = require('../estimate-slot-availability');
+  let coords;
+  try {
+    coords = await slots.resolveEstimateCoords(estimate, { paidCalls: false, strictReads: true });
+  } catch (err) {
+    if (err.code === 'COORDS_NEED_GEOCODE') return { unavailable: 'no_stored_location' };
+    throw err;
+  }
+  const profile = await slots.resolveCatalogSlotProfile(estimate,
+    { ...(picker.serviceMode ? { serviceMode: picker.serviceMode } : {}), ...(picker.selection || {}) }, conn);
+  const performed = slots.appointmentServicesFor(profile);
+  const performs = performed.map((row) => ({
+    service_type: row.label || profile.serviceLabel, service_key_snapshot: row.resolvedServiceKey || row.service || null,
+  }));
+  const [primary = { service_type: profile.serviceLabel, service_key_snapshot: null }] = performs;
+  const service = {
+    id: '__candidate__', customer_id: estimate.customer_id, status: 'pending', lat: coords.lat, lng: coords.lng,
+    estimated_duration_minutes: profile.durationMinutes, ...primary,
+    // Several services on this one visit name no single planning-minutes row, so the route plans its full length, as
+    // the reservation plans it (slot-reservation.js; planning-minutes.js). Only the services the visit performs count: a
+    // companion program that books its own visits is not on this one, though plan-only mode keeps it in the profile.
+    ...(performs.length > 1 ? { combined_services: true } : {}),
+  };
+  const preferences = await getCustomerSchedulingPreferences(estimate.customer_id, service.service_type, conn,
+    { serviceKey: service.service_key_snapshot });
+  const deactivated = await deactivatedFor(conn, performs.length ? performs : [primary]);
+  const seasonal = slots.seasonalSelectionProfile(profile);
+  const moveInDate = await slots.estimateMoveInDate(estimate);
+  const mowing = mowingDays.unitRule(preferences, performs);
+  const dayOpen = (date) => (!seasonal || slots.inMosquitoSeason(date)) && (!moveInDate || date >= moveInDate)
+    && !mowingDays.blocksDay(date, mowing);
+  // The line names the services this visit performs, in the page's words: plan-only mode keeps a companion program that
+  // books its own visits in the profile's label.
+  return { service, preferences, holds: [], siblingDates: [], deactivated,
+    label: slots.formatServiceProfileLabel(performed) || profile.serviceLabel, prospective: true, dayOpen,
+    rainServices: () => require('./customer-rain-rank').estimateServiceIdentities(performed, { profile, db: conn, strict: true }) };
+}
+
+/**
+ * An open lead's visit as a gap candidate (the 07:05 fill list, owner 2026-11-20 *1a*): the Waves Assessment or the
+ * inspection the lead asked for (`visit`: its catalog row, day-replan/fill-list.js leadVisit), at the length the Leads
+ * screen's Schedule button books: admin-leads.js schedule-appointment reads the catalog row itself (its stored default,
+ * else 60 minutes), never the scheduling policy getServices applies in capacity mode (service-library.js
+ * withSchedulingDuration). It stands at the lead's customer's stored location (`lead.latitude`/`lead.longitude`, the customer row the
+ * booking routes by), never geocoded. A new stop, checked as an estimate's first visit is (`prospective`). The
+ * customer's day and time rules and the capability rule apply as for estimateGapCandidate; `rainServices()` names the
+ * one visit by its catalog key. `{ unavailable: 'no_stored_location' }` when the customer has none. A failed read
+ * throws.
+ */
+async function leadGapCandidate(lead, visit, conn) {
+  const lat = Number(lead.latitude);
+  const lng = Number(lead.longitude);
+  if (lead.latitude == null || lead.longitude == null || !Number.isFinite(lat) || !Number.isFinite(lng) || !lat || !lng) {
+    return { unavailable: 'no_stored_location' };
+  }
+  const catalog = visit.id ? await conn('services').where('id', visit.id).first('default_duration_minutes') : null;
+  const length = Number(catalog?.default_duration_minutes);
+  const service = {
+    id: '__candidate__', customer_id: lead.customer_id, status: 'pending', lat, lng,
+    estimated_duration_minutes: Number.isInteger(length) && length > 0 ? length : 60,
+    service_type: visit.name, service_id: visit.id, service_key_snapshot: visit.service_key || null,
+  };
+  const preferences = await getCustomerSchedulingPreferences(lead.customer_id, service.service_type, conn,
+    { serviceId: visit.id, serviceKey: service.service_key_snapshot });
+  const deactivated = await deactivatedFor(conn, [service]);
+  return { service, preferences, holds: [], siblingDates: [], deactivated, label: visit.name, prospective: true, dayOpen: () => true,
+    rainServices: async () => [{ name: service.service_type, serviceKey: service.service_key_snapshot }] };
+}
+
+/** A catalog service's key (services.service_key) by its id, or null (no id, no row, no key). A failed read throws. */
+async function catalogKeyById(conn, serviceId) {
+  if (!serviceId) return null;
+  return (await conn('services').where('id', serviceId).first('service_key'))?.service_key || null;
+}
+
+/**
+ * The plan families a service belongs to ({ service_type, service_id?, service_key_snapshot? }): its catalog key (by
+ * service_id, else its key snapshot) names a combined row's families (estimate-converter.js
+ * comboRouteFamiliesFromCatalogKey: pest + termite bait), else its one seeding family (seedingFamilyKey). A failed read
+ * throws.
+ */
+async function planFamilies(conn, row) {
+  const { seedingFamilyKey, comboRouteFamiliesFromCatalogKey } = require('../estimate-converter');
+  const identity = (await catalogKeyById(conn, row.service_id)) || row.service_key_snapshot;
+  const combo = comboRouteFamiliesFromCatalogKey(identity);
+  return combo.length ? combo : [seedingFamilyKey({ service: identity, name: row.service_type })];
+}
+
+/** The customer's active plan holds ({ starts_on, resume_on }) on any of the plan `families`. A failed read throws. */
+function planHoldsFor(conn, customerId, families) {
+  return conn('plan_holds').where({ customer_id: customerId, status: 'active' })
+    .whereIn('family_key', [...new Set(families)]).select('starts_on', 'resume_on');
+}
+
+/**
+ * The technicians set to Off for any of the services in `rows` ({ service_type, service_id?, service_key_snapshot? }):
+ * the office list's capability rule, by each service's catalog category or name (technician-capabilities.js
+ * categoriesForServices). A failed read throws.
+ */
+async function deactivatedFor(conn, rows) {
+  const categories = [...new Set(await categoriesForServices(conn, rows))];
+  return conn('technician_capabilities').whereIn('service_category', categories).where('active', false).pluck('technician_id');
 }
 
 function analyzeGapCandidate(candidate, rows, {
@@ -53,11 +171,14 @@ function analyzeGapCandidate(candidate, rows, {
   home,
   // The van's departure when the caller gave none (day-quality.js); 08:00 by default.
   modeledDepartureMinutes = 480,
+  // The day's schedule blocks for this technician (tech_schedule_blocks rows: start_time, end_time), when the caller
+  // read them (the 07:05 fill list); absent = none, as before.
+  blocks,
 }) {
   const response = { candidateId: candidate.service?.id || null, routeFits: [], feasibleInsertionWindows: null,
     automaticMoveAuthorized: false, reviewRequirements: ['customer_commitments_and_access', 'locked_save_recheck'] };
   if (candidate.unavailable) return { ...response, reason: candidate.unavailable };
-  const { service, preferences, holds, siblingDates, deactivated } = candidate;
+  const { service, preferences, holds, siblingDates, deactivated, prospective } = candidate;
   if (date <= today) return { ...response, reason: 'actual_progress_required' };
   if (closed) return { ...response, reason: 'scheduled_day_off' };
   if (deactivated.includes(technicianId)) return { ...response, reason: 'technician_category_deactivated' };
@@ -66,12 +187,12 @@ function analyzeGapCandidate(candidate, rows, {
     return { ...response, reason: 'plan_paused_on_date' };
   }
   // The customer's date rules, all cheap and pure, so a list rather than a
-  // chain. GATE_AUTO_DISPATCH_MOWING_DAYS='true': a Lawn Care Service visit is
+  // chain. A Lawn Care Service visit is
   // not offered on or next to the customer's mowing day (mowing-days.js).
   const dateRefused = [
     inBlackout(date, preferences.blackout),
     violatesPreferredDay(date, preferences),
-    mowingDays.blocksLive(date, mowingDays.unitRule(preferences, [service])),
+    mowingDays.blocksDay(date, mowingDays.unitRule(preferences, [service])),
     service.skip_weekends && [0, 6].includes(weekdayOf(date)),
   ].some(Boolean);
   if (dateRefused) return { ...response, reason: 'customer_date_preference' };
@@ -118,12 +239,20 @@ function analyzeGapCandidate(candidate, rows, {
   // vanDepartureMin: with GATE_SCHEDULING_CAPACITY on the route opens at the
   // van's departure (the Settings time; 08:00 with the day rules off), not at
   // the 08:00 shift open, the way the night tool's arrival search plans it.
-  const context = { target, rows: others, date, now, grouped: false, activeTarget: false, home, vanDepartureMin: modeledDepartureMinutes };
+  // A new stop on the day (`prospective`: an estimate's or a lead's first visit, or a booked plan visit tried on an
+  // earlier day, day-replan/fill-list.js) is tried at every place in the route: the staff finder's check of a new
+  // customer (arrival-route.js staffPlacement, with its margin for later stops). A saved visit keeps the order its save
+  // would produce.
+  const context = { target, rows: others, date, now, grouped: false, activeTarget: false, home, vanDepartureMin: modeledDepartureMinutes,
+    prospective, blocks };
   const result = enumerateArrivalPlacements(context, { durationMinutes: duration, earliestStartMin: earliestStart,
     latestServiceEndMin: Math.min(ADMIN_DAY_END_MINUTES, returnBy ?? ADMIN_DAY_END_MINUTES),
     dayEndMin: Math.min(ADMIN_DAY_END_MINUTES, returnBy ?? ADMIN_DAY_END_MINUTES), departureMin: departure, returnByMin: returnBy });
   const routeFits = result.placements.filter(item => !violatesPreferredTime(item.windowStart, preferences)).map(({ windowStart, windowEnd, fit }) => ({
     windowStart, windowEnd, estimatedArrival: fit.estimatedArrival,
+    // When the visit ends on the modeled route: its arrival plus its planned minutes on site, which can be shorter
+    // than the window (owner planning minutes, arrival-route.js buildPlacementTarget).
+    estimatedDeparture: (fit.arrivals || []).find(row => String(row.id) === String(target.id))?.departure || null,
     addedDriveMinutes: fit.detourMinutes, modeledDriveMinutes: fit.driveMinutes, modeledWaitingMinutes: fit.waitingMinutes,
     modeledReturnMinuteBeforeBreaks: fit.returnMinuteBeforeBreaks,
     modeledReturnMinuteWithAllowance: configured ? fit.returnMinuteBeforeBreaks + breakMinutes : null,
@@ -133,7 +262,9 @@ function analyzeGapCandidate(candidate, rows, {
     reason: !configured ? 'workday_or_break_allowance_unset' : (routeFits.length ? 'route_fit_requires_staff_review' : 'no_fit_in_saved_order'),
     evaluatedWindows: result.evaluated, rejections: { ...result.rejections, customer_time_preference: result.placements.length - routeFits.length },
     workdayVerified: configured, departureMinutes: departure, breakPlacement: 'daily_allowance_not_a_timed_break',
-    note: 'Fits preserve the dispatch order produced by the existing save. They do not authorize a date/time change or create a booking hold.' };
+    note: prospective ? 'Fits place the new visit where the staff finder would. They do not book it or create a booking hold.'
+      : 'Fits preserve the dispatch order produced by the existing save. They do not authorize a date/time change or create a booking hold.' };
 }
 
-module.exports = { loadGapCandidate, analyzeGapCandidate };
+module.exports = { loadGapCandidate, estimateGapCandidate, leadGapCandidate, planFamilies, planHoldsFor, deactivatedFor, analyzeGapCandidate,
+  catalogKeyById };

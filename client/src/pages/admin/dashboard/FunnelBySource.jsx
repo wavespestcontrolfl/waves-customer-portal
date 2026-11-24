@@ -22,6 +22,7 @@ const VIEWS = [
   { key: "service", label: "Service" },
   { key: "city", label: "City" },
   { key: "heard", label: "Heard about (self-reported)" },
+  { key: "quiz", label: "Quiz" },
 ];
 const viewRows = (data, view) =>
   view === "source"
@@ -156,7 +157,9 @@ export default function FunnelBySource({ data, loading, error }) {
         a web lead with none captured, the customer&apos;s first landing page);
         calls and other non-web leads show as unknown. Heard about is the visitor&apos;s own
         answer on the form, shown separately from observed attribution; an
-        unknown answer stays unknown. Shaping: server/services/lead-funnel.js.
+        unknown answer stays unknown. Quiz splits the leads from the two quiz
+        pages (Pest Quiz, Lawn Quiz); a quiz lead keeps its real source in the
+        Source view. Shaping: server/services/lead-funnel.js.
       </FormulaNote>
     </UiSurface>
   );

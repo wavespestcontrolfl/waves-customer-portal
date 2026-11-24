@@ -40,7 +40,7 @@ const COLORS = { card: '#fff', border: '#ddd', text: '#111', muted: '#666', erro
 
 // The block holding its own closeout state, as CompletionPanel does.
 let latest;
-function Block({ injectionProducts, initial = {} }) {
+function Block({ injectionProducts, initial = {}, fertilizerContext, productFlags = { hasInjectionProduct: true, missingActuals: [] } }) {
   const [value, setValue] = useState({ injectionPerformed: true, injectionRecord: {}, ...initial });
   latest = value;
   return (
@@ -48,13 +48,43 @@ function Block({ injectionProducts, initial = {} }) {
       value={value}
       onChange={setValue}
       blocks={[]}
-      productFlags={{ hasInjectionProduct: true, missingActuals: [] }}
+      productFlags={productFlags}
+      fertilizerContext={fertilizerContext}
       injectionProducts={injectionProducts}
       inputStyle={{}}
       colors={COLORS}
     />
   );
 }
+describe('NutriRoot evidence on custom closeouts', () => {
+  const flags = { hasNutriRoot: true, missingActuals: [] };
+  const soil = 'P-deficient soil documented by soil test';
+  const review = 'Already applied — office review';
+  it('holds submission until an eligible visit has a soil-test reference or the crew reports an existing application', () => {
+    const evidenceBlocks = (eligible, basis, reference) => treeShrubCloseoutBlocksClient({
+      closeout: { ordinanceZone: 'manatee_parrish', nutriroot_application_basis: basis, nutriroot_soil_test_reference: reference },
+      productFlags: flags, fertilizerContext: { nutriRootSoilTestEligible: eligible },
+      servicePhotos: [], service: {}, customerRecap: '', notes: '',
+    }).map(block => block.field).filter(field => field?.startsWith('nutriroot_'));
+    expect(evidenceBlocks(true, soil, '  ')).toEqual(['nutriroot_soil_test_reference']);
+    expect(evidenceBlocks(true, soil, 'Fixture report')).toEqual([]);
+    expect(evidenceBlocks(false, soil, 'Fixture report')).toEqual(['nutriroot_application_basis']);
+    expect(evidenceBlocks(false, review)).toEqual([]);
+  });
+
+  it('offers a referenced soil test only for a confirmed eligible property, even when a draft says Manatee', () => {
+    const { rerender } = render(<Block productFlags={flags} initial={{ ordinanceZone: 'manatee_parrish' }}
+      fertilizerContext={{ ordinanceZone: 'sarasota_venice', nutriRootSoilTestEligible: false }} />);
+    expect(screen.queryByRole('option', { name: soil })).toBeNull();
+    fireEvent.change(screen.getByLabelText('Application basis'), { target: { value: review } });
+    expect(latest.nutriroot_application_basis).toBe(review);
+    rerender(<Block productFlags={flags} fertilizerContext={{ ordinanceZone: 'manatee_parrish', nutriRootSoilTestEligible: true }} />);
+    fireEvent.change(screen.getByLabelText('Application basis'), { target: { value: soil } });
+    fireEvent.change(screen.getByLabelText('Soil-test report date or file reference'), { target: { value: 'Fixture report' } });
+    expect(latest).toMatchObject({ nutriroot_application_basis: soil, nutriroot_soil_test_reference: 'Fixture report' });
+  });
+});
+
 const record = () => latest.injectionRecord;
 
 afterEach(() => {

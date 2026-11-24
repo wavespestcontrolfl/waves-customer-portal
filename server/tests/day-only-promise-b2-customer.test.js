@@ -120,12 +120,11 @@ beforeEach(() => {
   jest.clearAllMocks();
   countRestorations.mockResolvedValue(0);
   process.env.GATE_MOVE_NOTICE_EMAIL = 'true';
-  process.env.GATE_DAY_ONLY_PROMISE = 'true';
   base();
   rows();
   sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-ok' });
 });
-afterAll(() => { delete process.env.GATE_MOVE_NOTICE_EMAIL; delete process.env.GATE_DAY_ONLY_PROMISE; });
+afterAll(() => { delete process.env.GATE_MOVE_NOTICE_EMAIL; });
 
 describe('handleReschedule: a customer move', () => {
   test("timePromise 'day', another date, far out: the day row, no window or time vars, the day marker, and no slot recorded as the promise", async () => {
@@ -202,14 +201,6 @@ describe('handleReschedule: a customer move', () => {
     expect(meta).not.toHaveProperty('guard_slot_ms');
     expect(meta.move_notice_slot_ms).toBe(Date.parse('2099-11-04T21:00:00.000Z'));
     getTemplate.mockImplementation(async () => 'Your visit moved.');
-  });
-
-  test('gate off: a day choice is ignored, byte for byte today', async () => {
-    delete process.env.GATE_DAY_ONLY_PROMISE;
-    await reschedule({ timePromise: 'day', previousDate: '2099-11-02' });
-    expect(templateKeys()).toEqual(['appointment_rescheduled']);
-    expect(lastMeta()).not.toHaveProperty('promise_level');
-    expect(mockDb.updates.filter((u) => u.table === 'scheduled_services')).toEqual([]);
   });
 
   test('handleReschedule writes no intent itself: the move that set the slot writes it in its own UPDATE (rebooker.js moveIntentColumns)', async () => {
@@ -382,12 +373,9 @@ describe('a held or merged move notice re-sent as a confirmation keeps the recor
     expect(replay).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ reminder24hEnabled: false }));
   });
 
-  test('a windowless pre-closed placeholder is never day-only; gate off asks nothing', async () => {
+  test('a windowless pre-closed placeholder is never day-only', async () => {
     replay.mockResolvedValue(true);
     expect(await run({ record: { windows_preclosed: true } })).toBe(false);
-    delete process.env.GATE_DAY_ONLY_PROMISE;
-    replay.mockClear();
-    expect(await run()).toBe(false);
     expect(replay).not.toHaveBeenCalled();
   });
 });

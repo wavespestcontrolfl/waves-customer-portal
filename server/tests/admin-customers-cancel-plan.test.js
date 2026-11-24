@@ -466,6 +466,10 @@ describe('POST /:id/cancel-plan', () => {
       // the request-id boilerplate when the operator said why. Repairs key
       // on the IMMUTABLE request-scoped marker instead.
       reason: 'price — Too expensive',
+      // The office's pick is the churn code as is; the note is the only text
+      // the AI may read (with no pick, or the pick 'other').
+      churnReasonCode: 'price',
+      churnReasonText: 'Too expensive',
       // The cancelled rows (and the public tracker) never carry the note.
       visitReason: 'Service plan cancelled',
       historyNote: `Admin cancellation request ${request.id}`,
@@ -530,6 +534,54 @@ describe('POST /:id/cancel-plan', () => {
     mockHoldPreview.mockRejectedValueOnce(new Error('hold lookup down'));
     const preview = await (await post(baseUrl, '/cancel-plan/preview')).json();
     expect(preview.visitFees).toEqual(expect.objectContaining({ applies: true, unresolved: true, total: null }));
+  }));
+
+  test('a repair retry keeps the ACCEPTED reason pick and note as the churn reason, whatever its dialog says', () => withServer(async (baseUrl) => {
+    mockProcess.mockResolvedValueOnce({ ...PROCESSED, ok: false, churned: true, errors: ['visit_cancel_flip:s1'] });
+    const first = await (await postCancel(baseUrl, { reasonCode: 'price', note: 'Too expensive' })).json();
+    expect(first.processed).toBe(false);
+    const second = await (await postCancel(baseUrl, { reasonCode: 'competitor', note: 'changed my mind' })).json();
+    expect(second.requestId).toBe(first.requestId);
+    expect(mockProcess.mock.calls[1][0]).toEqual(expect.objectContaining({
+      reason: 'price — Too expensive', churnReasonCode: 'price', churnReasonText: 'Too expensive',
+    }));
+    expect(mockOpenCase).toHaveBeenLastCalledWith(expect.objectContaining({ reasonCode: 'price', reasonText: 'Too expensive' }));
+  }));
+
+  test('an acceptance from before picks were recorded, with no case: its note stands and its pick is unknown', () => withServer(async (baseUrl) => {
+    mockState.service_requests = [{
+      id: 'req-old', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+      subject: 'Cancel plan (Admin (user admin-1))', description: 'old note',
+      metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true } }),
+      created_at: new Date(Date.now() - 60 * 1000),
+    }];
+    mockState.cancellation_cases = [];
+    const body = await (await postCancel(baseUrl, { reasonCode: 'competitor', note: 'new note' })).json();
+    expect(body.requestId).toBe('req-old');
+    expect(mockProcess.mock.calls[0][0]).toEqual(expect.objectContaining({ reason: 'old note', churnReasonCode: null, churnReasonText: 'old note' }));
+  }));
+
+  test('an older acceptance whose case cannot be read still repairs — the wind-down never waits on the churn pick', () => withServer(async (baseUrl) => {
+    mockState.service_requests = [{
+      id: 'req-old', customer_id: 'cust-1', category: 'cancellation', source: 'admin', status: 'new',
+      subject: 'Cancel plan (Admin (user admin-1))', description: 'old note',
+      metadata: JSON.stringify({ cancel_plan: { scope: [], waiveLateFee: false, sendConfirmation: true } }),
+      created_at: new Date(Date.now() - 60 * 1000),
+    }];
+    db.mockImplementation((table) => {
+      const b = builderFor(table);
+      if (table === 'cancellation_cases') {
+        const first = b.first;
+        b.first = async (...cols) => {
+          if (cols.includes('reason_code')) throw new Error('cases table down');
+          return first(...cols);
+        };
+      }
+      return b;
+    });
+    const body = await (await postCancel(baseUrl, { reasonCode: 'competitor', note: 'new note' })).json();
+    expect(body.requestId).toBe('req-old');
+    expect(mockProcess.mock.calls[0][0]).toEqual(expect.objectContaining({ churnReasonCode: null, churnReasonText: 'old note' }));
   }));
 
   test('a retry after a partial run reuses the SAME accepted request — the repair pass can find the first attempt\'s rows', () => withServer(async (baseUrl) => {

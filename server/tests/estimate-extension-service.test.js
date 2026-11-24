@@ -340,6 +340,35 @@ describe('extendEstimate — engine-authoritative pricing gate (#3750, GH codex 
   });
 });
 
+describe('a plan offer quote is never revived as a grouped sibling (owner 2026-11-19; pre-push audit P0)', () => {
+  // The offer quote ends on its own date with the setup fee waived. Its own link cannot ask for an extension, and
+  // the extension of a sibling in its group must not bring it back: the revive UPDATE and the verdict that judges
+  // "what this extension would revive" both carry the stamp's SQL mirror.
+  const { PLAN_OFFER_ABSENT_SQL } = require('../services/plan-offer-estimate');
+  const src = require('fs').readFileSync(require.resolve('../services/estimate-extension'), 'utf8');
+  const OFFER_RULE = ".whereRaw(require('./plan-offer-estimate').PLAN_OFFER_ABSENT_SQL)";
+
+  test('the revivable-sibling verdict leaves an offer quote out', () => {
+    const verdict = src.slice(src.indexOf('function revivableSiblingsQuery('), src.indexOf('async function extensionDeliverableUnderGate('));
+    expect(verdict).toContain(OFFER_RULE);
+  });
+
+  test('the sibling revive UPDATE leaves an offer quote as it is', () => {
+    const start = src.indexOf('Multi-property group: the ONE link renders every sibling');
+    const revive = src.slice(start, src.indexOf('followup_expiring_sent: true', start));
+    expect(start).toBeGreaterThan(-1);
+    expect(revive).toContain(".whereNot({ id: estimate.id })");
+    expect(revive).toContain(OFFER_RULE);
+    // Before the write, never after it.
+    expect(revive.indexOf(OFFER_RULE)).toBeLessThan(revive.indexOf('.update({'));
+  });
+
+  test('the two predicates are the only uses: the anchor write stays open to a staff extension of the offer itself', () => {
+    expect(src.split(OFFER_RULE).length - 1).toBe(2);
+    expect(PLAN_OFFER_ABSENT_SQL).toContain("'planStart'->'offer'");
+  });
+});
+
 describe('extensionDeliverableUnderGate — the siblings an extension would REVIVE are judged too (uncapped codex P0 r20)', () => {
   afterEach(() => { mockGateState.sendRequiresServerPricing = false; });
   function fakeDatabase(visible, revivable) {

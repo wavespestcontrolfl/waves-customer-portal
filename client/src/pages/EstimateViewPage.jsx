@@ -49,14 +49,16 @@ import { useParams } from 'react-router-dom';
 import PriceCard, { RowInclusions } from '../components/estimate/PriceCard';
 import PromoCodeSection from '../components/estimate/PromoCodeSection';
 import { CONTEXT_LINE as MONTHLY_AVERAGE_CONTEXT, monthlyText, planLabel as monthlyAveragePlanLabel } from '@estimate-monthly-average';
-import { applicationMonthsBreakdown, oneTimeBesidePlan, resolvePageMonthlyAverage, sectionAverageLine, singleServiceAverageContext } from '../lib/estimateMonthlyAverage';
+import { applicationMonthsBreakdown, oneTimeBesidePlan, resolvePageMonthlyAverage, sectionAverageLine, selectedPlanCreditDeclared, singleServiceAverageContext } from '../lib/estimateMonthlyAverage';
 import { approveSlotLabel, firstVisitDayAndWindow } from '../lib/estimate-glass-slots';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import OfferTierPicker from '../components/estimate/OfferTierPicker';
 import SlotPicker from '../components/estimate/SlotPicker';
+import FirstVisitRequest from '../components/estimate/FirstVisitRequest';
 import WebsiteCallbackButton from '../components/estimate/WebsiteCallbackButton';
 import WebsiteEstimateFlow, { WebsiteEstimateFrame } from '../components/estimate/WebsiteEstimateFlow';
-import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, confirmStepFirstVisitAmount, setupFeeBilledWithFirstVisit, standardInvoiceShape } from '../components/estimate/PaymentPreferenceButtons';
+import WhatYouPayBox, { whatYouPayForSelection } from '../components/estimate/WhatYouPayBox';
+import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, confirmStepFirstVisitAmount, firstVisitTotalPreview, setupFeeBilledWithFirstVisit, standardInvoiceShape } from '../components/estimate/PaymentPreferenceButtons';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
 import {
@@ -71,7 +73,7 @@ import useIsMobile from '../hooks/useIsMobile';
 import DocumentActionBar from '../components/DocumentActionBar';
 import EstimateGlassTheme, { fireGlassConfetti } from '../components/estimate/glass/EstimateGlassTheme';
 import { useWavesShell } from '../components/brand/WavesShellContext';
-import { hasPurchasedTrenchingWarranty, preSlabSelectedWarrantyPart, PURCHASED_TRENCHING_WARRANTY_BULLET } from '@estimate-purchased-warranty';
+import { hasPurchasedTrenchingWarranty, hasIncludedReentryGuarantee, includedReentryTerms, preSlabSelectedWarrantyPart, INCLUDED_REENTRY_GUARANTEE_BULLET, PURCHASED_TRENCHING_WARRANTY_BULLET } from '@estimate-purchased-warranty';
 
 // Payment Element renders inside Stripe's iframe, so the glass theme can't
 // restyle it via CSS — when the theme is mounted the modals pass brand-tuned
@@ -79,6 +81,7 @@ import { hasPurchasedTrenchingWarranty, preSlabSelectedWarrantyPart, PURCHASED_T
 const glassAppearanceActive = () => document.documentElement.hasAttribute('data-glass-theme');
 import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
 import MistingLayoutCard from '../components/estimate/MistingLayoutCard';
+import RoofPointsCard, { hasRoofPoints } from '../components/estimate/RoofPointsCard';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import ProposalDetailCard from '../components/estimate/ProposalDetailCard';
 import CommercialAgreementSign from '../components/estimate/CommercialAgreementSign';
@@ -194,6 +197,7 @@ const PRICE_SECTION_ID = 'estimate-price-section';
 const PAYMENT_SECTION_ID = 'estimate-payment-section';
 const ASK_SECTION_ID = 'estimate-ask-section';
 const REVIEW_SECTION_ID = 'estimate-review-section';
+const SLOT_ISSUE_SECTION_ID = 'estimate-slot-issue';
 
 function scrollToPriceSection() {
   const el = typeof document !== 'undefined' ? document.getElementById(PRICE_SECTION_ID) : null;
@@ -205,9 +209,15 @@ function scrollToBookingSection() {
   if (el) el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
 }
 
+// Scrolls to the Ask box and moves keyboard focus onto it (the box is focusable by script,
+// tabIndex -1), so the next Tab lands in the question field instead of walking the booking
+// controls in between. The box itself takes the focus, not the field: focusing the field
+// would open the on-screen keyboard over a link that only says where the box is.
 function scrollToAskSection() {
   const el = typeof document !== 'undefined' ? document.getElementById(ASK_SECTION_ID) : null;
-  if (el) el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
+  if (!el) return;
+  el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
+  el.focus({ preventScroll: true });
 }
 
 // Once a slot is picked the approve CTAs land on the payment step (the actual
@@ -297,6 +307,9 @@ function pricingServices(pricing = {}) {
   }];
 }
 
+// The opening entry (with pricingServices above) has a server mirror for the
+// plan-start mint and page reader: openingEntryForService in
+// server/services/estimate-pricing-bundle-utils.js. Change both together.
 function defaultSelectedForServices(services = [], previous = {}, preserveSelection = false) {
   return services.reduce((next, section) => {
     const frequencies = Array.isArray(section.frequencies) ? section.frequencies : [];
@@ -968,18 +981,33 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
   );
 }
 
-function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork = null, lockInCta = null, mistingLayout = null }) {
+function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork = null, lockInCta = null, mistingLayout = null, roofPoints, noVisitLine }) {
   const phone = useIsMobile(560);
   // GATE_MISTING_LAYOUT_DESIGNER: the staff-drawn misting layout (/data `mistingLayout`) takes the satellite photo's
   // place. A picture that fails to load puts the satellite photo back, so there is never a hole.
   const [mistingFailed, setMistingFailed] = useState(false);
+  // The roof points the Waves technician confirmed (/data `roofPoints`, frozen when the estimate was sent) take the
+  // satellite photo's place too, unless a misting layout is showing (misting wins). A photo that fails to load puts the
+  // satellite photo back.
+  const [roofPointsFailed, setRoofPointsFailed] = useState(false);
+  // The satellite photo that failed to load, by its URL, so a card that later gets another photo starts clean.
+  const [failedSatelliteUrl, setFailedSatelliteUrl] = useState(null);
   if (!intelligence) return null;
   const showMisting = Boolean(mistingLayout?.imageUrl) && !mistingFailed;
+  const showRoofPoints = !showMisting && !roofPointsFailed && hasRoofPoints(roofPoints);
+  // A staff-made picture (misting layout or roof points) is showing in the satellite photo's place.
+  const photoReplaced = showMisting || showRoofPoints;
   const metrics = Array.isArray(intelligence.metrics) ? intelligence.metrics : [];
   const signals = Array.isArray(intelligence.signals) ? intelligence.signals : [];
   // "Show your work" (estimateShowYourWork gate): the parcel-outline
   // satellite image replaces the plain one when the server resolved it.
   const satelliteUrl = showYourWork?.overlaySatelliteUrl || intelligence.satelliteUrl;
+  // The owner's "no visit needed" sentence (2026-11-22, option B) sits under the satellite photo. The server decides who
+  // gets it and sends the words (/data `noVisitLine`): an open home estimate whose every service Waves prices from the
+  // measured home and yard alone. The card adds one condition of its own: the satellite photo itself is the picture on the
+  // card. A staff-made picture in its place (misting layout, roof points) means a visit happened, and a photo that did
+  // not load leaves the sentence with nothing to describe.
+  const showNoVisitLine = Boolean(noVisitLine) && Boolean(satelliteUrl) && !photoReplaced && failedSatelliteUrl !== satelliteUrl;
   const showYourWorkFacts = Array.isArray(showYourWork?.facts) ? showYourWork.facts : [];
 
   return (
@@ -1002,7 +1030,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
       </div>
 
       <p className="gc-lead" style={{
-        margin: satelliteUrl || showMisting || metrics.length ? '0 0 14px' : '0',
+        margin: satelliteUrl || photoReplaced || metrics.length ? '0 0 14px' : '0',
         color: '#3F4A65',
         fontSize: 14,
         lineHeight: 1.5,
@@ -1012,11 +1040,14 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
 
       {showMisting ? (
         <MistingLayoutCard layout={mistingLayout} address={address} onImageError={() => setMistingFailed(true)} />
+      ) : showRoofPoints ? (
+        <RoofPointsCard points={roofPoints} address={address} onImageError={() => setRoofPointsFailed(true)} />
       ) : satelliteUrl ? (
         <img
           src={resolveApiAssetUrl(satelliteUrl)}
           alt={`Satellite view of ${address || 'your property'}`}
           loading="lazy"
+          onError={() => setFailedSatelliteUrl(satelliteUrl)}
           style={{
             display: 'block',
             width: '100%',
@@ -1029,7 +1060,13 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
         />
       ) : null}
 
-      {showYourWork?.overlaySatelliteUrl && !showMisting ? (
+      {showNoVisitLine ? (
+        <div data-testid="no-visit-line" style={{ marginTop: 8, fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
+          {noVisitLine}
+        </div>
+      ) : null}
+
+      {showYourWork?.overlaySatelliteUrl && !photoReplaced ? (
         <div style={{ marginTop: 8, fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
           Red outline: your property boundary from county records.
         </div>
@@ -1329,7 +1366,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
   }, [asking, askToken, question, selectedFrequency, serviceMode, token, preview]);
 
   return (
-    <section id={ASK_SECTION_ID} {...(glassCard ? { 'data-glass': 'card' } : {})} style={{ ...estimateCard(), display: 'grid', gap: 12 }}>
+    <section id={ASK_SECTION_ID} tabIndex={-1} {...(glassCard ? { 'data-glass': 'card' } : {})} style={{ ...estimateCard(), display: 'grid', gap: 12, scrollMarginTop: 76, outline: 'none' }}>
       <div>
         <div style={{
           fontSize: 14,
@@ -2096,16 +2133,20 @@ function oneTimeOutcomeWithoutGuarantee(text, scope = 'none') {
 function oneTimeCopyWithoutGuarantee(copy, item = {}, scope = 'none') {
   if (!copy) return null;
   const retainPurchasedWarranty = hasPurchasedTrenchingWarranty(item);
+  // A whole-home exclusion includes its 1-year re-entry guarantee in the price: the row's own flag keeps it.
+  const retainReentry = hasIncludedReentryGuarantee(item);
+  const reentryTerms = includedReentryTerms(item);
   return {
     ...copy,
     outcome: copyAllowedInScope(copy.outcome, scope) ? copy.outcome : oneTimeOutcomeWithoutGuarantee(copy.outcome, scope),
     includes: Array.isArray(copy.includes)
       ? copy.includes.filter((line) => (
         retainPurchasedWarranty && line === PURCHASED_TRENCHING_WARRANTY_BULLET
-      ) || copyAllowedInScope(line, scope))
+      ) || (retainReentry && line === INCLUDED_REENTRY_GUARANTEE_BULLET) || copyAllowedInScope(line, scope))
       : [],
     assurance: scope !== 'none' && copyAllowedInScope(copy.assurance, scope) ? copy.assurance : null,
-    terms: copyAllowedInScope(copy.terms, scope) ? copy.terms : withoutClaimsOutsideScope(copy.terms, scope),
+    terms: copyAllowedInScope(copy.terms, scope) || (reentryTerms && copy.terms === reentryTerms)
+      ? copy.terms : withoutClaimsOutsideScope(copy.terms, scope),
   };
 }
 
@@ -3670,13 +3711,17 @@ function MeasurementReviewSheet({ token, measuredBasis, onClose }) {
   );
 }
 
-// Soft exit (GATE_ESTIMATE_SOFT_EXIT) — the "Not what you expected?" sheet.
+// Soft exit (GATE_ESTIMATE_SOFT_EXIT) — the "Not ready yet?" sheet.
 // Chip keys are the API contract (estimate-disposition.js
-// CUSTOMER_DECLINE_REASONS / estimate-change-request.js CHANGE_REQUEST_TOPICS);
-// labels are the customer's words. Three exits, none of which message the
-// customer: a reason-tagged decline (the only one that closes the estimate),
-// a change request the office answers with a revision, and a "still
-// deciding" signal that writes one activity row and nothing else.
+// CUSTOMER_DECLINE_REASONS / estimate-change-request.js CHANGE_REQUEST_TOPICS
+// and STILL_DECIDING_REASONS); labels are the customer's words. Three exits,
+// none of which message the customer: a reason-tagged decline (the only one
+// that closes the estimate), a change request the office answers with a
+// revision, and a "still deciding" signal. The tap on "I'm still deciding"
+// writes one activity row; the step after it asks what would help, and a
+// reason sent there goes to the office on one bell (Skip sends nothing more).
+// The sheet's words are owner-approved (2026-11-21, estimate page changes,
+// change 1): change them only on the owner's word.
 export const SOFT_EXIT_REASONS = [
   { key: 'price', label: 'Too expensive' },
   { key: 'timing', label: 'Not the right time' },
@@ -3688,6 +3733,14 @@ export const SOFT_EXIT_TOPICS = [
   { key: 'price', label: 'The price' },
   { key: 'services', label: 'Which services are included' },
   { key: 'schedule', label: 'How often you visit' },
+  { key: 'other', label: 'Something else' },
+];
+
+export const SOFT_EXIT_DECIDING_REASONS = [
+  { key: 'price', label: 'A lower price' },
+  { key: 'person', label: 'Talking to a person first' },
+  { key: 'quotes', label: 'Comparing other quotes' },
+  { key: 'timing', label: 'Not the right time yet' },
   { key: 'other', label: 'Something else' },
 ];
 
@@ -3715,11 +3768,42 @@ const softExitInputStyle = {
   padding: '10px 12px', fontSize: 14, fontFamily: 'inherit', color: COLORS.glassNavy,
 };
 
+// What the sheet says once an exit is done: [heading, text]. `callPromised`: the customer asked to talk to a person
+// and the server answered that the estimate has a phone to call.
+function softExitDoneCopy(doneKind, callPromised, expiresDisplay) {
+  if (doneKind === 'change') {
+    return ['Got it — we’ll send a revised estimate',
+      'We’ll take a look and send an updated estimate. Your current one stays as-is in the meantime, through its normal expiration date.'];
+  }
+  if (doneKind === 'decline') {
+    return ['Thanks for letting us know', 'We’ve closed this estimate. If anything changes, call (941) 297-5749 and we’ll put together a fresh one.'];
+  }
+  if (callPromised) return ['We will call you', expiresDisplay ? `This estimate stays open through ${expiresDisplay}.` : ''];
+  return ['No rush', `Take your time${expiresDisplay ? ` — this estimate stays open through ${expiresDisplay}` : ''}. Questions? Call (941) 297-5749.`];
+}
+
+const softExitQuietButtonStyle = { padding: '10px 16px', borderRadius: 10, border: 'none', background: 'none', color: ESTIMATE_BODY, fontSize: 14, cursor: 'pointer' };
+
+// The two buttons of the "What would help you decide?" step.
+function SoftExitDecidingButtons({ picked, submitting, onSend, onSkip }) {
+  const canSend = !submitting && picked;
+  return (
+    <>
+      <button type="button" data-glass-accent="" onClick={onSend} disabled={!canSend} style={softExitPrimaryStyle(canSend)}>
+        {submitting ? 'Sending…' : 'Send'}
+      </button>
+      <button type="button" onClick={onSkip} disabled={submitting} style={softExitQuietButtonStyle}>Skip</button>
+    </>
+  );
+}
+
 export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, onClose, onDeclined }) {
-  const [step, setStep] = useState('choose'); // choose | change | decline | done
+  const [step, setStep] = useState('choose'); // choose | deciding | change | decline | done
   const [doneKind, setDoneKind] = useState(null); // change | still_deciding | decline
   const [topics, setTopics] = useState(() => new Set());
   const [reason, setReason] = useState(null);
+  const [help, setHelp] = useState(null); // the picked SOFT_EXIT_DECIDING_REASONS key
+  const [callPromised, setCallPromised] = useState(false);
   const [note, setNote] = useState('');
   const [competitorName, setCompetitorName] = useState('');
   const [competitorPrice, setCompetitorPrice] = useState('');
@@ -3737,14 +3821,13 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
     return payload;
   };
 
-  const run = async (kind, fn) => {
+  const run = async (fn, then) => {
     if (submitting) return;
     setSubmitting(true);
     setError('');
     try {
       await fn();
-      setDoneKind(kind);
-      setStep('done');
+      then();
     } catch (err) {
       setError(err?.message || 'That didn’t go through. Try again.');
     } finally {
@@ -3752,20 +3835,39 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
     }
   };
 
-  const submitChange = () => run('change', () => post('change-request', 'POST', {
+  const finish = (kind) => {
+    // Skip can follow a reason that failed to send: the closing screen never carries that error.
+    setError('');
+    setDoneKind(kind);
+    setStep('done');
+  };
+  const submitChange = () => run(() => post('change-request', 'POST', {
     kind: 'change',
     topics: Array.from(topics),
     note: note.trim(),
-  }));
-  const submitStillDeciding = () => run('still_deciding', () => post('change-request', 'POST', { kind: 'still_deciding' }));
-  const submitDecline = () => run('decline', () => post('decline', 'PUT', {
+  }), () => finish('change'));
+  // The tap is the signal, as before the reasons step existed: a customer who
+  // leaves the sheet on that step has still said "still deciding".
+  const startStillDeciding = () => run(
+    () => post('change-request', 'POST', { kind: 'still_deciding' }),
+    () => goTo('deciding'),
+  );
+  // "We will call you" shows only on the server's word (callPromised): it read the phone as it saved the reason.
+  const sendHelp = () => run(
+    async () => {
+      const saved = await post('change-request', 'POST', { kind: 'still_deciding', reason: help });
+      setCallPromised(saved?.callPromised === true);
+    },
+    () => finish('still_deciding'),
+  );
+  const submitDecline = () => run(() => post('decline', 'PUT', {
     reason,
     note: note.trim() || undefined,
     ...(reason === 'competitor' ? {
       competitorName: competitorName.trim() || undefined,
       competitorPrice: competitorPrice.trim() || undefined,
     } : {}),
-  }));
+  }), () => finish('decline'));
 
   const toggleTopic = (key) => setTopics((prev) => {
     const next = new Set(prev);
@@ -3796,6 +3898,7 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
   const goTo = (next) => {
     setNote('');
     setReason(null);
+    setHelp(null);
     setTopics(new Set());
     setCompetitorName('');
     setCompetitorPrice('');
@@ -3803,12 +3906,12 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
     setStep(next);
   };
 
+  const [doneHeading, doneText] = softExitDoneCopy(doneKind, callPromised, expiresDisplay);
   const heading = step === 'change' ? 'What would you like changed?'
     : step === 'decline' ? 'What made this a no?'
-    : step === 'done' ? (doneKind === 'change' ? 'Got it — we’ll send a revised estimate'
-      : doneKind === 'still_deciding' ? 'No rush'
-      : 'Thanks for letting us know')
-    : 'Not what you expected?';
+    : step === 'deciding' ? 'What would help you decide?'
+    : step === 'done' ? doneHeading
+    : 'Not ready yet?';
 
   return (
     <div
@@ -3824,7 +3927,7 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
         {step === 'choose' ? (
           <>
             <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 14px' }}>
-              Tell us where this landed. Nothing here sends you a message &mdash; it just helps us get it right.
+              Tell us where you are. Nothing here sends you a message.
             </div>
             <div style={{ display: 'grid', gap: 10 }}>
               {/* A change request needs a customer the office can answer; an
@@ -3832,18 +3935,31 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
                   says so via softExitChange), so the branch is withheld
                   rather than failing on submit (GH codex P2). */}
               {changeEligible ? (
-                <button type="button" onClick={() => goTo('change')} style={softExitOptionStyle}>
+                <button type="button" onClick={() => goTo('change')} disabled={submitting} style={softExitOptionStyle}>
                   I&rsquo;d like to change something
                 </button>
               ) : null}
-              <button type="button" onClick={submitStillDeciding} disabled={submitting} style={softExitOptionStyle}>
+              <button type="button" onClick={startStillDeciding} disabled={submitting} style={softExitOptionStyle}>
                 {submitting ? 'One moment…' : 'I’m still deciding'}
               </button>
-              <button type="button" onClick={() => goTo('decline')} style={softExitOptionStyle}>
+              {/* The other two choices are locked while the still-deciding tap is in flight: its answer moves the
+                  sheet to the next step, and must not replace a form the customer opened meanwhile. */}
+              <button type="button" onClick={() => goTo('decline')} disabled={submitting} style={softExitOptionStyle}>
                 This isn&rsquo;t for me
               </button>
             </div>
           </>
+        ) : null}
+
+        {step === 'deciding' ? (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, margin: '14px 0' }}>
+            {SOFT_EXIT_DECIDING_REASONS.map(({ key, label }) => (
+              // Locked while Send is in flight: the request already carries the picked reason.
+              <button key={key} type="button" onClick={() => setHelp(key)} disabled={submitting} aria-pressed={help === key} style={softExitChipStyle(help === key)}>
+                {label}
+              </button>
+            ))}
+          </div>
         ) : null}
 
         {step === 'change' ? (
@@ -3918,13 +4034,7 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
         ) : null}
 
         {step === 'done' ? (
-          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>
-            {doneKind === 'change'
-              ? 'We’ll take a look and send an updated estimate. Your current one stays as-is in the meantime, through its normal expiration date.'
-              : doneKind === 'still_deciding'
-                ? `Take your time${expiresDisplay ? ` — this estimate stays open through ${expiresDisplay}` : ''}. Questions? Call (941) 297-5749.`
-                : 'We’ve closed this estimate. If anything changes, call (941) 297-5749 and we’ll put together a fresh one.'}
-          </div>
+          <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>{doneText}</div>
         ) : null}
 
         {error ? (
@@ -3941,6 +4051,9 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
             <button type="button" data-glass-accent="" onClick={submitDecline} disabled={!canSubmitDecline} style={softExitPrimaryStyle(canSubmitDecline)}>
               {submitting ? 'Sending…' : 'Close this estimate'}
             </button>
+          ) : null}
+          {step === 'deciding' ? (
+            <SoftExitDecidingButtons picked={!!help} submitting={submitting} onSend={sendHelp} onSkip={() => finish('still_deciding')} />
           ) : null}
           {step === 'done' ? (
             <button type="button" data-glass-accent="" onClick={close} style={softExitPrimaryStyle(true)}>Done</button>
@@ -3961,9 +4074,44 @@ export function SoftExitSheet({ token, expiresAt = null, changeEligible = true, 
   );
 }
 
-// The sheet's entry point — a quiet text link under the page's ask/support
-// blocks. Rendered only when the payload stamped `softExit` (gate on, live
-// row, not a staff preview), so the page never offers a write it refuses.
+// The sheet's entry point — a quiet text link under the approve area and
+// again under the page's ask/support blocks. Rendered only when the payload
+// stamped `softExit` (gate on, live row, not a staff preview), so the page
+// never offers a write it refuses.
+// Under the price (owner 2026-11-21, "ok a"). The first-visit line states the first bill
+// as one number before a time is picked: the same setup fee, first application and total
+// the "Reserve your spot" box lists afterwards (firstVisitTotalPreview), so that total is
+// no surprise. It is one real bill, not a plan total. It exists only on a one-service plan
+// (the setup fee is charged on a pest-only or mosquito-only plan, never on a bundle), so
+// "each visit after that" is that plan's one per-application price. The link goes down to
+// the Ask Waves box, which sits at the end of the page.
+// The sentence is the owner-approved one, word for word (decision page, 2026-11-21). "First
+// visit" and "Each visit after that" name bills; the unit on every price stays "per
+// application" (AGENTS.md). Change these words only on the owner's word.
+export function PriceFollowUps({ firstVisit = null, onAsk = null }) {
+  if (!firstVisit && !onAsk) return null;
+  return (
+    <div data-price-follow-ups="" style={{ display: 'grid', gap: 4, justifyItems: 'center', textAlign: 'center', margin: '4px 0 12px' }}>
+      {firstVisit ? (
+        <div data-first-visit-line="" style={{ fontSize: 16, color: ESTIMATE_TEXT, lineHeight: 1.5 }}>
+          First visit: <strong style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(firstVisit.total)}</strong>
+          {` (${fmtMoney(firstVisit.firstApplication)} application + ${fmtMoney(firstVisit.setup)} one-time setup).`}
+          {` Each visit after that: ${fmtMoney(firstVisit.firstApplication)}.`}
+        </div>
+      ) : null}
+      {onAsk ? (
+        <button
+          type="button"
+          onClick={onAsk}
+          style={{ background: 'none', border: 'none', padding: '8px 12px', fontSize: 14, fontWeight: 600, color: ESTIMATE_BODY, textDecoration: 'underline', cursor: 'pointer' }}
+        >
+          Questions about this estimate? Ask Waves
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function SoftExitLink({ onOpen }) {
   return (
     <div style={{ textAlign: 'center', margin: '4px 0 12px' }}>
@@ -3972,7 +4120,7 @@ function SoftExitLink({ onOpen }) {
         onClick={onOpen}
         style={{ background: 'none', border: 'none', padding: '8px 12px', fontSize: 14, fontWeight: 600, color: ESTIMATE_BODY, textDecoration: 'underline', cursor: 'pointer' }}
       >
-        Not what you expected? Tell us
+        Not ready yet? Tell us why
       </button>
     </div>
   );
@@ -4795,13 +4943,17 @@ export function SlotIssueBanner({ kind = 'conflict', note = null, onRetry }) {
   // needs a time, and a bare scroll back to the times read as the page
   // starting over (a customer gave up and phoned in).
   const pickTime = kind === 'pick_time';
+  // 'stale_quote': the server refused the customer's own plan quote as
+  // changed. No time fixes that, so the banner gives the server's reason and
+  // a link back to the portal for a fresh quote, never "Refresh times".
+  const staleQuote = kind === 'stale_quote';
   return (
     <div role="status" style={{
       background: '#fff4e5', borderRadius: 12, padding: 16,
       border: `1px solid #f5bb5c`, marginBottom: 16,
     }}>
       <div style={{ fontSize: 14, color: COLORS.navy }}>
-        {pickTime ? (
+        {staleQuote ? (note || 'This quote changed since it was created — please go back to your portal for a current quote.') : pickTime ? (
           <>
             <strong>Pick a visit time below to approve your plan.</strong>{' '}
             Starting later? Use &ldquo;Can&apos;t find a date?&rdquo; under the times, or call{' '}
@@ -4811,10 +4963,19 @@ export function SlotIssueBanner({ kind = 'conflict', note = null, onRetry }) {
         ) : staleHold
           ? "We couldn't release your earlier time hold, so your options may be out of date. Tap refresh to try again."
           : expired
-            ? 'Your time-slot hold expired — pick a time again to finish signing up.'
+            ? 'Your held time ran out and nothing was booked. Pick a time below to finish.'
             : note || "That slot was just taken. We've refreshed the options below — pick another."}
       </div>
-      {onRetry ? (
+      {staleQuote ? (
+        <a
+          href="/"
+          style={{
+            display: 'inline-block', marginTop: 12, padding: '8px 16px',
+            background: ESTIMATE_BUTTON_BG, color: COLORS.white, textDecoration: 'none',
+            borderRadius: 8, fontSize: 14, fontWeight: 600,
+          }}
+        >Back to your Waves portal</a>
+      ) : onRetry ? (
         <button
           type="button"
           onClick={onRetry}
@@ -5353,8 +5514,8 @@ export function ExistingPlanUpgradeCard({ membership, waveGuardTier, readOnly = 
 
 // Referral share card on the accepted / just-accepted screens
 // (GATE_ESTIMATE_SUCCESS_REFERRAL). The render payload carries only the
-// headline + CTA; the tap POSTs /:token/referral-link, which enrolls the
-// promoter — so a render never does. Same shared card as the service report.
+// headline + CTA (and the offer line while GATE_REFERRAL_STEP2 is on); the tap
+// POSTs /:token/referral-link, which enrolls the promoter — so a render never does. Same shared card as the service report.
 // `staffView` — a staff preview of a PUBLISHED accepted estimate
 // (?adminPreview=1) must never enroll the customer as a promoter: the card
 // renders its staff state and never fetches, and the fetch it would make
@@ -5377,6 +5538,7 @@ export function EstimateReferralCard({ referral, token, staffView = false }) {
       // are inert here, so the estimate's own card typography rides inline.
       styles={{
         heading: { fontSize: 20, lineHeight: 1.35, fontWeight: 600, color: COLORS.navy, margin: '0 0 14px' },
+        offer: { fontSize: 16, lineHeight: 1.5, color: COLORS.navy, margin: '-6px 0 14px' },
         button: { ...estimateCtaStyle, display: 'inline-block', fontSize: 16 },
         link: { ...estimateCtaStyle, display: 'inline-block', fontSize: 16, textDecoration: 'none', margin: '10px 6px 0' },
         code: { fontSize: 20, fontWeight: 700, color: COLORS.navy, letterSpacing: '0.04em', marginRight: 10 },
@@ -5390,7 +5552,9 @@ export function EstimateReferralCard({ referral, token, staffView = false }) {
 // payload's `promoCode` block. The page owns the endpoint; a staff preview
 // never posts, and the request it would make carries the same marker so the
 // route refuses it too.
-export function EstimatePromoCode({ promoCode, token, staffView = false }) {
+// `onApplied` tells the page a code went on in this session: the section keeps its own
+// state, so without it the page would still read the served `promoCode` until a reload.
+export function EstimatePromoCode({ promoCode, token, staffView = false, onApplied = null }) {
   if (!promoCode) return null;
   const submitCode = async (code) => {
     const url = `${API_BASE}/estimates/${token}/promo-code${staffView ? '?adminPreview=1' : ''}`;
@@ -5400,6 +5564,7 @@ export function EstimatePromoCode({ promoCode, token, staffView = false }) {
       body: JSON.stringify({ code }),
     });
     const result = await response.json().catch(() => ({}));
+    if (response.ok && result.promoCode?.applied && onApplied) onApplied();
     return response.ok ? { ok: true, promoCode: result.promoCode } : { ok: false, error: result.error };
   };
   // Keyed on the served state so a /data reload that changes it (the accept,
@@ -6050,6 +6215,9 @@ export function ServiceSection({
 // this set — those render the picker for the customer to (re)pick a slot,
 // and every path back to them clears the reservation first.
 const SLOT_SELECTION_LOCKED_PHASES = new Set(['submitting', 'review', 'success']);
+// The two codes a refused plan quote answers with, from the accept and from both card steps: the page keeps the
+// server's message in its stale-quote banner and links back to the portal (docs/public-route-contracts.md).
+const STALE_QUOTE_CODES = new Set(['RESTART_STATE_CHANGED', 'PLAN_START_STATE_CHANGED']);
 
 // Remount the estimate view whenever the bearer :token changes, so NO state
 // survives an A→B navigation: reservation, the live Stripe deposit / card-hold
@@ -6174,6 +6342,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   const [selected, setSelected] = useState({});
   const [selectedAddOns, setSelectedAddOns] = useState({});
   const [selectedSlotId, setSelectedSlotId] = useState(null);
+  // GATE_ESTIMATE_APPROVE_PREFERRED_TIME: the first-visit request this tab just sent ({ days, window }). Nothing is stored, so a
+  // reopened link shows the normal picker and the request link again.
+  const [sentFirstVisitRequest, setSentFirstVisitRequest] = useState(null);
   // Website flow: counts customer time picks. The payment choices mount under
   // the slot list, far below a phone screen, so a pick scrolls to them. A
   // selection restored at mount or after a review cancel never bumps it.
@@ -6213,6 +6384,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // payload flags measurementReviewEnabled.
   const [measurementReviewBasis, setMeasurementReviewBasis] = useState(null);
   const [softExitOpen, setSoftExitOpen] = useState(false);
+  // A promo or referral code applied in this session (the served promoCode block is older).
+  const [codeAppliedHere, setCodeAppliedHere] = useState(false);
   // Mirrors ctaPhase SYNCHRONOUSLY. ctaPhase is React state, so async work
   // started before a phase change — e.g. a SlotPicker AI slot search —
   // captures the OLD phase in its closure: when it resolved mid-submission
@@ -6425,6 +6598,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // The hold a recovery could not finish releasing/refreshing — the banner's
   // Retry re-runs that recovery instead of only re-fetching slots.
   const pendingRecoveryHoldRef = useRef(null);
+  // The hold a refused plan quote's /data load already released (the hydration effect): once per hold, so a /data
+  // that still lists it cannot start a release-and-reload loop.
+  const refusedQuoteHoldReleaseRef = useRef(null);
   // Rendered state for the same fact: a ref cannot drive the banner, and a
   // no_booking recovery lands on 'configure', which has no slot banner — so
   // a failed release left the stale contract in place with nothing to tap
@@ -6433,6 +6609,16 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // The server's reason for a slot_conflict recovery that is not a taken
   // slot (a visit before the move-in date); null keeps the default copy.
   const [deadHoldNote, setDeadHoldNote] = useState(null);
+  // The server's reason when it refused the customer's own plan quote as
+  // changed (RESTART_STATE_CHANGED / PLAN_START_STATE_CHANGED). No time on
+  // this page can accept that quote, so its banner stays up and links back
+  // to the portal for a fresh quote; null = no such refusal. /data marks a
+  // quote staff changed before this load (estimate.quoteRefusal), so that
+  // banner is up from the start (codex pre-push P1).
+  const [staleQuoteReply, setStaleQuoteNote] = useState(null);
+  const staleQuoteNote = staleQuoteReply || data?.estimate?.quoteRefusal?.error || null;
+  // The /data mark alone (the hold hydration below releases the hold such a load still offers).
+  const quoteRefusalCode = data?.estimate?.quoteRefusal?.code || null;
   // Recovery releases the hold and re-reads the contract. Until BOTH land,
   // `data.estimate.acceptance` still describes the dead hold, so leaving the
   // payment buttons live let a customer re-adopt the very hold being deleted
@@ -6545,7 +6731,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   const acceptance = data?.estimate?.acceptance || { mode: 'standard_slot_pick' };
   // C4 plan-restart quote: server-frozen offer (see /data planRestart) —
   // the repricing controls and the one-time mode toggle are omitted.
-  const restartQuote = data?.estimate?.planRestart === true;
+  // A plan offer's quote (/data planOffer: the quarterly plan with the setup fee waived) is frozen the same way.
+  const restartQuote = data?.estimate?.planRestart === true || data?.estimate?.planOffer === true;
   const existingAppointment = acceptance.mode === 'existing_appointment' ? acceptance.appointment : null;
   // Payment-only accept (guarantee-only renewal): no slot picker, no
   // reservation — accept goes straight to review, then invoice.
@@ -6555,6 +6742,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // commercial-manual list), so the accept CTA renders WITHOUT a slot pick —
   // the team schedules after approval.
   const manualScheduleAccept = acceptance.mode === 'commercial_site_confirmation';
+  const firstVisitRequestOffered = acceptance.preferredTime?.offered === true && !restartQuote;
+  const pendingFirstVisitRequest = sentFirstVisitRequest;
   const selectedFrequency = useMemo(() => selectedPricingFrequencyKey(data?.pricing, services, selected), [data?.pricing, services, selected]);
   // Per-service cadence (bundles): the precomputed combo matching every section's
   // independent selection, plus the non-pest selection map sent on accept.
@@ -7021,6 +7210,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           await enterContactReviewRef.current(body);
           return 'contact_review';
         }
+        // A refused plan quote (codex pre-push P1) is a no-booking answer too:
+        // the settle releases the hold and reloads, and the reload's /data
+        // marks the quote (estimate.quoteRefusal), so the page shows its banner.
+        // A recurring card the recovery drops here is retired server-side: such
+        // a quote is never accepted, so its setup_intent.succeeded webhook
+        // retires the capture (stripe-webhook.js), whichever request saw it.
+        if (STALE_QUOTE_CODES.has(body.code)) return 'no_booking';
         // The route's specialized no-booking bodies (codex r7 P2): staff can
         // reshape an estimate mid-checkout into a commercial-manual,
         // guarantee-only or trenching-review contract, and /extend preserves
@@ -7126,7 +7322,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // a payment method re-adopted the dead hold. Refreshing the contract is
   // what actually reopens the picker, so every caller goes through here
   // rather than repeating the reset.
-  const recoverFromDeadHold = useCallback((phase, note = null) => {
+  const recoverFromDeadHold = useCallback((phase, note = null, holdId = null) => {
     // Never DURING Stripe's confirmation (codex r16 P1): recovery clears the
     // reservation, unmounts payment capture and DELETEs the hold, which
     // mid-confirmSetup would cancel a hold the confirmation is about to use
@@ -7149,8 +7345,12 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     // it first is what returns the contract to standard_slot_pick. A hold
     // that is already gone (expired, swept) just 404s the release.
     // On a retry the reservation is already cleared, so fall back to the
-    // hold the previous attempt could not release.
-    const deadHoldId = reservationRef.current?.scheduledServiceId
+    // hold the previous attempt could not release. A caller that names the
+    // hold releases that one (codex pre-push P1): the refused-quote
+    // hydration names the hold /data lists, which another tab may have
+    // swapped for the one this tab still holds.
+    const deadHoldId = holdId
+      || reservationRef.current?.scheduledServiceId
       || pendingRecoveryHoldRef.current
       || null;
     setCtaPhase(phase);
@@ -7205,6 +7405,16 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         recoveryInFlightRef.current = false;
       });
   }, [loadEstimate, releaseHeldReservation]);
+  // A refused plan quote (STALE_QUOTE_CODES), from the accept or a card step: keep the server's message in the
+  // stale-quote banner, release the hold and re-read the estimate. True when it took the answer. A ref, like
+  // enterContactReviewRef, so every handler and effect reads the live callback.
+  const refuseStaleQuoteRef = useRef(null);
+  refuseStaleQuoteRef.current = (status, body) => {
+    if (status !== 409 || !STALE_QUOTE_CODES.has(body?.code)) return false;
+    setStaleQuoteNote(body.error || 'This quote changed since it was created — please go back to your portal for a current quote.');
+    recoverFromDeadHold('configure');
+    return true;
+  };
 
   // A RELOADED page must start the clock immediately (codex r9 P1). The
   // adopted hold used to be hydrated only inside handlePaymentChoice, so a
@@ -7226,6 +7436,21 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     const held = existingAppointment?.isHold && existingAppointment?.reservationExpiresAt
       ? existingAppointment
       : null;
+    // A refused plan quote holds no time (codex pre-push P1): when /data marks it (estimate.quoteRefusal) and still
+    // offers a live hold, the hold is released through the same release-then-refresh recovery a refused answer runs
+    // (refuseStaleQuoteRef), and never adopted. Not mid-confirmSetup (recoverFromDeadHold refuses then, and the
+    // confirm's own extend or accept gets the refusal). A recurring card this tab restored (a 3DS return) is never
+    // used on such a quote, and the setup_intent.succeeded webhook retires it (stripe-webhook.js). Only the customer's
+    // own page releases it: a staff preview (its print view included) and the headless PDF capture (?mode=pdf) never
+    // act on the customer's hold (codex pre-push P1).
+    if (held && quoteRefusalCode) {
+      if (!readOnlyPreview && !pdfDocumentMode
+        && !inlineConfirmBusyRef.current && refusedQuoteHoldReleaseRef.current !== held.id) {
+        refusedQuoteHoldReleaseRef.current = held.id;
+        recoverFromDeadHold('configure', null, held.id);
+      }
+      return;
+    }
     if (!held) {
       // Refreshed server data no longer offers a hold: drop an adopted one we
       // seeded earlier rather than leaving a countdown on a row that is gone.
@@ -7253,7 +7478,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     // Re-seeding is idempotent: the updater returns `prev` unchanged once the
     // same hold+expiry is in place, so this cannot loop.
   }, [existingAppointment?.id, existingAppointment?.isHold, existingAppointment?.reservationExpiresAt,
-    reservation?.scheduledServiceId, ctaPhase]);
+    reservation?.scheduledServiceId, ctaPhase, quoteRefusalCode, readOnlyPreview, pdfDocumentMode,
+    recoverFromDeadHold]);
 
   // ONE place that turns an extend outcome into page state (codex r7 P1).
   // The wrapper and the 0:00 rescue both needed identical handling three
@@ -7809,6 +8035,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       setError(CONSUMER_NOTICE_HINT);
       return;
     }
+    // A refused plan quote takes no hold (codex pre-push P1): its banner sends the customer to the portal.
+    if (staleQuoteNote) return;
     // Belt and braces behind the disabled buttons (codex r11 P2): a retained
     // callback or a keyboard event that skips `disabled` must not re-adopt a
     // hold that recovery is deleting, or one it failed to delete.
@@ -7891,6 +8119,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           await enterContactReviewRef.current(body);
           return;
         }
+        // A refused plan quote holds no time (codex pre-push P1): the shared answer shows the portal banner.
+        if (refuseStaleQuoteRef.current(r.status, body)) return;
         const message = body.error || 'Unable to reserve this slot.';
         if (body.code === 'CUSTOMER_BUSY_RETRY') {
           // The matched customer row was being updated for a moment (nothing was reserved): retryable, with the
@@ -7930,7 +8160,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       setError(err.message);
       setCtaPhase('configure');
     }
-  }, [readOnlyPreview, consumerNoticeBlocked, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, serviceCadences, token]);
+  }, [readOnlyPreview, consumerNoticeBlocked, staleQuoteNote, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, serviceCadences, token]);
 
   const handleFrequencyChange = useCallback((sectionKey, nextFrequency) => {
     // With per-service combos: combo-axis sections (pest + lawn/tree) are
@@ -8027,6 +8257,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       setError(CONSUMER_NOTICE_HINT);
       return;
     }
+    // A refused plan quote accepts nothing, also from a card or deposit
+    // step that finishes later (codex pre-push P1).
+    if (staleQuoteNote) return;
     // Required-field guard mirrors confirmDisabled below (defense in depth —
     // the button is disabled while this is true, but a stale disabled-state
     // read should never let a request through with a required field blank).
@@ -8396,8 +8629,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             setPrepayConsentChecked(false);
             throw new Error(body.error || 'Your total changed while confirming — please confirm the updated amount.');
           }
-          if (['ACCEPT_INVOICE_BUSY_RETRY', 'DEPOSIT_LEDGER_BUSY_RETRY'].includes(body.code)) {
-            // Invoice/deposit settlement is briefly holding a lock. The
+          if (['ACCEPT_INVOICE_BUSY_RETRY', 'DEPOSIT_LEDGER_BUSY_RETRY', 'PLAN_START_RECHECK_RETRY', 'RESTART_RECHECK_RETRY'].includes(body.code)) {
+            // Invoice/deposit settlement is briefly holding a lock, or the
+            // plan start or plan restart re-check could not read its state (a
+            // read failure, not a changed account). The
             // acceptance transaction rolled back without invalidating this
             // reservation, so keep the held time, plan selections, payment
             // preference and any acknowledged prepay quote intact. Falling
@@ -8413,6 +8648,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             // call-the-office message instead of a slot-picker retry loop.
             throw new Error(body.error || 'We couldn\'t confirm this plan\'s pricing online — please call the office and we\'ll finish it for you.');
           }
+          // The customer's own plan quote no longer fits the account, or
+          // staff changed it (docs/public-route-contracts.md). No new time
+          // or reload can accept it, so the slot-conflict recovery below
+          // offered "Refresh times" on a dead quote (codex pre-push P1).
+          // The shared answer releases the hold like the no-booking
+          // refusals do, and keeps a banner that links back to the portal.
+          if (refuseStaleQuoteRef.current(r.status, body)) return;
           if (/estimate is no longer active/i.test(body.error || '')) {
             setCtaPhase('configure');
             setReservation(null);
@@ -8493,7 +8735,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     } finally {
       acceptInFlightRef.current = false;
     }
-  }, [readOnlyPreview, consumerNoticeBlocked, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, contactPhoneGap, contactFirstNameGap, contactFirstNameMissing, contactFirstName, contactLastNameGap, contactEmailGap, contactLastName, contactEmail, contactEmailInvalid]);
+  }, [readOnlyPreview, consumerNoticeBlocked, staleQuoteNote, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, contactPhoneGap, contactFirstNameGap, contactFirstNameMissing, contactFirstName, contactLastNameGap, contactEmailGap, contactLastName, contactEmail, contactEmailInvalid]);
 
   // Deposit-gated confirm (flat $49/$99, PR #1660). When the resolved policy
   // requires a deposit and none is collected yet, mint the intent and open
@@ -8507,6 +8749,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       setError(CONSUMER_NOTICE_HINT);
       return;
     }
+    // A refused plan quote mints no intent and accepts nothing (codex pre-push P1).
+    if (staleQuoteNote) return;
     // No card step and no accept while the estimate has no phone: the server
     // refuses both. The review button is disabled for it; this covers every
     // other entry (the annual-prepay confirm).
@@ -8553,6 +8797,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
           throw new Error(await enterContactReviewRef.current(body));
         }
+        // A refused plan quote takes no card: its banner sends the customer back to the portal.
+        if (refuseStaleQuoteRef.current(r.status, body)) return;
         if (r.status === 409 && body.exemptReason) {
           // Policy says no hold owed — fall through to accept. 'saved_method'
           // means the hold still stands (a saved card backs it); any other
@@ -8657,6 +8903,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
           throw new Error(await enterContactReviewRef.current(body));
         }
+        // A refused plan quote takes no card: its banner sends the customer back to the portal.
+        if (refuseStaleQuoteRef.current(r.status, body)) return;
         if (r.status === 409 && body.exemptReason) {
           // Policy says no card owed — fall through to the deposit/accept.
           // Only saved_method_consented / autopay_already_active keep the
@@ -8746,7 +8994,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       }
     }
     await performAccept();
-  }, [data, inlineCardIntent, paymentPreference, serviceMode, token, performAccept, readOnlyPreview, consumerNoticeBlocked, extendHoldAndSettle, noteRenderedRecurringConsent]);
+  }, [data, inlineCardIntent, paymentPreference, serviceMode, token, performAccept, readOnlyPreview, consumerNoticeBlocked, staleQuoteNote, extendHoldAndSettle, noteRenderedRecurringConsent]);
 
   const handleDepositSuccess = useCallback(async (paymentIntentId) => {
     depositPaymentIntentIdRef.current = paymentIntentId;
@@ -8893,6 +9141,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         await enterContactReviewRef.current(body);
         return false;
       }
+      if (refuseStaleQuoteRef.current(r.status, body)) return false;
       if (!r.ok || !body?.clientSecret) return false;
       if (recurringCardIntentOpenRef.current) {
         setRecurringCardIntent(body);
@@ -8951,6 +9200,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     // slot_conflict handling.
   }, []);
 
+  // An expired hold's banner renders right above the time list, and the page
+  // scrolls to it (owner 2026-11-20, D2 B). At the page top it sat far above
+  // the confirm card, and a customer whose hold ran out at Confirm read the
+  // page as done (Sep 11). A refused quote keeps its place. The website flow
+  // already shows the banner above its time list and scrolls to its own top.
+  const slotIssueInBooking = !websiteMode && ctaPhase === 'reservation_expired' && !staleQuoteNote;
+
   // Entering review (and success) swaps the tall configure page for a much
   // shorter layout, but the browser keeps the old scroll offset — the
   // customer who tapped a payment option ~2000px down was left staring at
@@ -8964,8 +9220,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       if (el) el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
     } else if (ctaPhase === 'success') {
       window.scrollTo({ top: 0, behavior: scrollBehavior() });
+    } else if (slotIssueInBooking) {
+      const el = document.getElementById(SLOT_ISSUE_SECTION_ID);
+      if (el) el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
     }
-  }, [ctaPhase, reservation]);
+  }, [ctaPhase, reservation, slotIssueInBooking]);
 
   // Seamless single-screen booking (owner 2026-07-12). All UX below is gated
   // on the RECURRING_CARD_ON_FILE flag (recurringCardPolicy.enforced) so the
@@ -9007,6 +9266,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           await enterContactReviewRef.current(body);
           return;
         }
+        if (refuseStaleQuoteRef.current(r.status, body)) return;
         // Staleness re-check at RESOLVE time (r3 P2): a confirm tapped before
         // this pre-mint resolved fell back to the modal path with its own
         // intent — accepting this late response would render the inline
@@ -9207,6 +9467,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   }
 
   const { estimate, pricing, cta } = data;
+  // The owner's "no visit needed" sentence for the Waves AI card: the words the server sent (/data `noVisitLine`), or ''.
+  const noVisitLine = typeof data.noVisitLine === 'string' ? data.noVisitLine.trim() : '';
   const canAccept = cta?.canAccept === true;
   // Review-before-booking (e.g. priced termite trenching) is NOT terminal: the
   // price + Ask-Waves stay visible and only self-booking is gated. A genuine
@@ -9374,7 +9636,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     slug: estimate.slug,
   };
   const renderFlags = pricing?.renderFlags || {};
-  const canShowSlotPicker = acceptance.mode === 'standard_slot_pick';
+  // A refused plan quote (staleQuoteNote) books nothing: the picker, the pick-a-time prompts, the sticky
+  // booking bar and every "book" button read this one condition, so the banner's portal link is the
+  // only way forward (codex pre-push P1).
+  const canShowSlotPicker = acceptance.mode === 'standard_slot_pick' && !staleQuoteNote;
   // Resolve the tier label unconditionally; whether the badge actually renders
   // is decided by per-section eligibility (server-authoritative
   // section.waveGuardTierEligible — true iff the section covers >=1 WaveGuard
@@ -9560,6 +9825,54 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // shape is covered, the summary card carries the per-application prices and month
   // amounts, so the cards above drop their per-service "$X a month" slices (codex #6399 r2).
   const applicationMonths = monthlyAverage ? applicationMonthsBreakdown(monthlyAverage.model) : null;
+  // First-visit line under the price: the inputs are the ones the "Reserve your spot" box
+  // gets below, so the line and that box's "Invoice total" are one figure. The monthly
+  // average is the proof the helper asks for: its model exists only when the card price
+  // adds up to the plan's own monthly, and a plan credit shows as `credit`. One service
+  // only: the setup fee is never charged on a bundle.
+  const averageModel = monthlyAverage?.model || null;
+  // Credits the accept takes off the first invoice, which the box does not show: the booking
+  // deposit, a promo or referral code on this estimate (served, or entered in this session),
+  // a plan credit on the selected cadence and a pest service the customer turned off. The
+  // last two are read directly, not through the average: its rounding band would let a very
+  // small credit pass.
+  // Known limit: deposit collection is retired, so `required` is always false now, yet the
+  // accept still credits a deposit paid before that. /data carries no ledger balance, so the
+  // page cannot see one (the "Reserve your spot" box has the same blind spot). No open
+  // estimate held such a deposit on 2026-11-21. If deposits return, send the balance in
+  // /data and add it here.
+  const serviceTurnedOff = services.filter((section) => section?.isRecurring).some((section) => {
+    const chosen = selectedAddOns[section.key];
+    return (selectedFrequencyForSection(section, selected)?.addOns || [])
+      .some((addOn) => (chosen ? !chosen.has(addOn.key) : addOn.preChecked === false));
+  });
+  const firstBillCreditApplies = data?.depositPolicy?.required === true
+    || !!data?.promoCode?.applied
+    || codeAppliedHere
+    || serviceTurnedOff
+    || selectedPlanCreditDeclared({ services, selected, selectedCombo, combinedFrequency, pricing });
+  const firstVisitLine = invoiceOnlyAccept ? null : firstVisitTotalPreview({
+    serviceMode,
+    paymentPreference,
+    invoiceMode: !!estimate.billByInvoice,
+    siteConfirmationHold: !!estimate.siteConfirmationHold,
+    setupFee: setupFeeEffective,
+    extraInvoiceRows: rodentSetupInvoiceRows,
+    selectedFrequency: combinedFrequency,
+    oneTimeExtrasTotal: oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode),
+    firstVisitFees: pricing.firstVisitFees,
+    creditApplies: firstBillCreditApplies,
+    cardPerApplicationTotal: averageModel && !averageModel.credit && averageModel.services.length === 1
+      ? averageModel.services[0].perApplication
+      : null,
+  });
+  // "What you pay" under the price (owner 2026-11-23): the server's own figures (/data whatYouPay), printed as
+  // given while the customer is on the selection the server priced. Hidden for the same reasons the first-visit
+  // line hides: a one-time pick, the annual prepay choice (the Reserve your spot box owns it), and a credit, code
+  // or deposit the server cannot see per selection.
+  const whatYouPay = invoiceOnlyAccept || serviceMode !== 'recurring' || paymentPreference === 'prepay_annual' || firstBillCreditApplies
+    ? null
+    : whatYouPayForSelection(data?.whatYouPay, { frequency: selectedFrequency, serviceCadences });
 
   // Service/price cards — shared by the live configurator (below) and the
   // read-only recap on an accepted estimate, so reopening an accepted link
@@ -10150,7 +10463,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
             not for an authored commercial proposal — the PDF document drops
             `intelligence` for it the same way. */}
         {authoredProposalOnPage ? null : (
-          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} mistingLayout={data.mistingLayout || null} />
+          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} mistingLayout={data.mistingLayout || null} roofPoints={data.roofPoints || null} noVisitLine={noVisitLine} />
         )}
         {showAskBar && !isRegulatedCertificateSurface ? (
           <EstimateAskBar
@@ -10240,7 +10553,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     <>
       {!isRegulatedCertificateSurface ? (
         <>
-          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} mistingLayout={data.mistingLayout || null} />
+          <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} mistingLayout={data.mistingLayout || null} roofPoints={data.roofPoints || null} noVisitLine={noVisitLine} />
           <EstimateAskBar
             preview={readOnlyPreview}
             token={token}
@@ -10298,7 +10611,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     <>
           {/* The booking step (with the notice card) is hidden during review: a notice asked for after the customer
               reached review (the gate turned on, or a refused accept) is signed right here. */}
-          {consumerNoticeBlocked ? <ConsumerNoticeSign token={token} consumerNotice={cta?.consumerNotice} /> : null}
+          {consumerNoticeBlocked ? <ConsumerNoticeSign token={token} consumerNotice={cta?.consumerNotice} onRefusal={(status, body) => refuseStaleQuoteRef.current(status, body)} /> : null}
           <ConsumerNoticeHint blocked={consumerNoticeBlocked} />
           {existingAppointment ? (
             <>
@@ -10316,7 +10629,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 // unmounts the inline Payment Element mid-confirmSetup and
                 // the in-flight handleConfirm closure would book the OLD
                 // choice the UI no longer shows.
-                disabled={readOnlyPreview || consumerNoticeBlocked || ctaPhase === 'submitting' || inlineConfirmBusy || recoveryInFlight || recoveryStuck}
+                disabled={readOnlyPreview || consumerNoticeBlocked || !!staleQuoteNote || ctaPhase === 'submitting' || inlineConfirmBusy || recoveryInFlight || recoveryStuck}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
                 extraInvoiceRows={rodentSetupInvoiceRows}
@@ -10660,7 +10973,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   const bookingContent = (
     <div id={BOOKING_SECTION_ID} style={{ scrollMarginTop: 76 }}>
             {/* Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): right above the accept controls; absent with the gate off. */}
-            <ConsumerNoticeSign token={token} consumerNotice={cta?.consumerNotice} />
+            <ConsumerNoticeSign token={token} consumerNotice={cta?.consumerNotice} onRefusal={(status, body) => refuseStaleQuoteRef.current(status, body)} />
             {canShowSlotPicker && pickTimePrompt > 0 && !selectedSlotId
               ? <SlotIssueBanner key={pickTimePrompt} kind="pick_time" /> : null}
             {canShowSlotPicker ? (
@@ -10684,6 +10997,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 <SlotPicker
                   website={websiteMode}
                   preview={readOnlyPreview}
+                  firstVisitFrom={data?.estimate?.planOffer === true ? data.estimate.planOfferFirstVisitFrom || null : null}
                   token={token}
                   askToken={estimate.askToken}
                   selectedSlotId={selectedSlotId}
@@ -10702,13 +11016,26 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                   onFirstSlotDate={setFirstSlotDate}
                   cityLabel={estimateCity}
                   onContactReview={(body) => enterContactReviewRef.current(body).catch(() => {})}
+                  // A refused plan quote from a slot read (codex pre-push P1): the same banner.
+                  onRefusal={(status, body) => refuseStaleQuoteRef.current(status, body)}
                 />
+                {firstVisitRequestOffered && serviceMode !== 'one_time' && !selectedSlotId && !existingAppointment ? (
+                  <FirstVisitRequest
+                    token={token}
+                    pending={pendingFirstVisitRequest}
+                    disabled={readOnlyPreview || ctaPhase === 'submitting'}
+                    onSent={setSentFirstVisitRequest}
+                  />
+                ) : null}
               </div>
             ) : (
               <AcceptanceModeCard acceptance={acceptance} />
             )}
           </div>
   );
+  const softExitLink = data?.softExit === true && !readOnlyPreview && !isRegulatedCertificateSurface && ctaPhase !== 'submitting'
+    ? <SoftExitLink onOpen={() => setSoftExitOpen(true)} /> : null;
+
   const paymentContent = (
     (existingAppointment || invoiceOnlyAccept || (canShowSlotPicker && selectedSlotId) || (manualScheduleAccept && serviceMode !== 'one_time')) ? (
             <div id={PAYMENT_SECTION_ID} style={{ scrollMarginTop: 76 }}>
@@ -10720,7 +11047,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 // payment options the customer will get. Forcing cta.canAccept
                 // false server-side would fall through to the null-terminal
                 // "expired" card and destroy the preview's purpose.
-                disabled={readOnlyPreview || consumerNoticeBlocked || ctaPhase === 'submitting' || recoveryInFlight || recoveryStuck}
+                disabled={readOnlyPreview || consumerNoticeBlocked || !!staleQuoteNote || ctaPhase === 'submitting' || recoveryInFlight || recoveryStuck}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
                 extraInvoiceRows={rodentSetupInvoiceRows}
@@ -10742,7 +11069,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   );
 
   // A stuck recovery outranks the phase-specific banners: it is the reason
-  // the options on screen may be wrong (codex r10 P2).
+  // the options on screen may be wrong (codex r10 P2). A refused plan quote
+  // comes next: no time or retry on this page can accept it, so the way
+  // forward is a fresh quote from the portal (codex pre-push P1).
   const slotIssueBanner = recoveryStuck ? (
     <SlotIssueBanner
       kind="stale_hold"
@@ -10750,6 +11079,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         ? ctaPhase
         : 'configure', ctaPhase === 'slot_conflict' ? deadHoldNote : null)}
     />
+  ) : staleQuoteNote ? (
+    <SlotIssueBanner kind="stale_quote" note={staleQuoteNote} />
   ) : ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
     <SlotIssueBanner
       kind={ctaPhase === 'reservation_expired' ? 'expired' : 'conflict'}
@@ -10771,10 +11102,14 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     return (
       <WebsiteEstimateFlow
         services={services} selected={selected} onFrequencyChange={handleFrequencyChange}
-        lockedSection={isLockedMirrorSection} oneTime={serviceMode === 'one_time'}
+        // A fixed quote (a restart, a plan offer) has no cadence step: the accept refuses any other cadence.
+        lockedSection={(section) => restartQuote || isLockedMirrorSection(section)} oneTime={serviceMode === 'one_time'}
         oneTimeBreakdown={pricing.oneTimeBreakdown} combinedFrequency={combinedFrequency}
         fees={(pricing.firstVisitFees?.length ? pricing.firstVisitFees : (setupFeeEffective ? [setupFeeEffective] : [])).map(tierAwareFee).filter(fee => Number(fee.amount) > 0)}
         bookingContent={<>{slotIssueBanner}{bookingContent}{paymentContent}</>} reviewContent={reviewContent}
+        // A refused plan quote turns booking off, so the booking step (and its banner) is never offered: the quote
+        // step shows the banner with the portal link instead of "Our team will contact you" (codex pre-push P1).
+        quoteNotice={staleQuoteNote ? slotIssueBanner : null}
         reviewing={!!reservation && (ctaPhase === 'review' || (ctaPhase === 'submitting' && !!inlineCardIntent))}
         busy={ctaPhase === 'submitting'} timer={reservation?.expiresAt ? (
           <HoldCountdownBarWhenTimed
@@ -10813,7 +11148,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
 
       {data.returnVisit ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={!isRegulatedCertificateSurface} /> : null}
 
-      {slotIssueBanner}
+      {slotIssueInBooking ? null : slotIssueBanner}
 
       {measurementReviewBasis ? (
         <MeasurementReviewSheet
@@ -10891,6 +11226,12 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
 
           <div id={PRICE_SECTION_ID} style={{ scrollMarginTop: 76 }}>
             {renderQuoteDetailCards()}
+            <WhatYouPayBox box={whatYouPay} />
+            <PriceFollowUps
+              firstVisit={firstVisitLine}
+              // The link exists only where this layout renders the Ask bar at its end.
+              onAsk={glassContent && !isRegulatedCertificateSurface ? scrollToAskSection : null}
+            />
           </div>
 
           {/* Waves AI panel + Ask bar render AFTER the price/plan (matches the
@@ -10906,15 +11247,19 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
 
           {data.consultationOffer ? <ConsultationOfferSection consultationOffer={data.consultationOffer} /> : null}
           {data.assessmentFirst ? <AssessmentFirstSection assessmentFirst={data.assessmentFirst} /> : null}
-          <EstimatePromoCode promoCode={data.promoCode} token={token} staffView={readOnlyPreview} />
+          <EstimatePromoCode promoCode={data.promoCode} token={token} staffView={readOnlyPreview} onApplied={() => setCodeAppliedHere(true)} />
 
+          {slotIssueInBooking ? (
+            <div id={SLOT_ISSUE_SECTION_ID} style={{ scrollMarginTop: 76 }}>{slotIssueBanner}</div>
+          ) : null}
           {bookingContent}
 
           {/* Pest visit-preference toggles ("Skip parts you don't need")
               live BELOW the schedule card (owner directive). Glass removes
               the customize section entirely — zero lifetime toggle clicks
-              (owner directive); pre-checked defaults still apply. */}
-          {serviceMode === 'recurring' && !glassContent && renderFlags.showPestRecurringAddOns === true
+              (owner directive); pre-checked defaults still apply. A fixed quote
+              (a restart, a plan offer) shows none: PUT /preferences refuses it. */}
+          {serviceMode === 'recurring' && !glassContent && !restartQuote && renderFlags.showPestRecurringAddOns === true
             ? services
               .filter((section) => section.isPest && section.isRecurring)
               .map((section) => {
@@ -10947,6 +11292,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
 
           <EstimateErrorBanner error={error} />
 
+          {/* Beside the decision: under the Approve button once a time is
+              picked, under the time list before that (owner 2026-11-21). */}
+          {softExitLink}
+
           {/* Glass-ordered tail (approved section positioning): why-price-
               custom with its lock-in CTA, reviews with the join CTA, the app
               section, Ask, then the lawn upsell — replaces both the
@@ -10959,6 +11308,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 copy={copy}
                 showYourWork={data.showYourWork || null}
                 mistingLayout={data.mistingLayout || null}
+                roofPoints={data.roofPoints || null}
+                noVisitLine={noVisitLine}
                 lockInCta={canShowSlotPicker
                   ? <GlassSectionCta label="This price fits my home — lock it in →" onClick={promptPickTime} style={{ justifyContent: 'center' }} />
                   : null}
@@ -10981,8 +11332,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                   chips={askChips}
                 />
               ) : null}
-              {data?.softExit === true && !readOnlyPreview && !isRegulatedCertificateSurface && ctaPhase !== 'submitting'
-                ? <SoftExitLink onOpen={() => setSoftExitOpen(true)} /> : null}
+              {softExitLink}
               <EstimateAddServiceRequestCard
                 offer={offerCardOffer}
                 requestState={addServiceRequestState}
@@ -11002,8 +11352,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         <>
           <AppShowcaseCard onBookToday={canShowSlotPicker && !(ctaPhase === 'review' && reservation) ? scrollToBookingSection : null} />
           <CustomerReviews />
-          {data?.softExit === true && !readOnlyPreview && !isRegulatedCertificateSurface && ctaPhase !== 'submitting' && !(ctaPhase === 'review' && reservation)
-            ? <SoftExitLink onOpen={() => setSoftExitOpen(true)} /> : null}
+          {ctaPhase === 'review' && reservation ? null : softExitLink}
         </>
       )}
       {/* Sticky mobile book bar (glass, ≤640px via CSS): live price/period +

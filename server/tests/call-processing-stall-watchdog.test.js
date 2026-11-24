@@ -6,9 +6,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const {
   computeStalledCalls,
   GRACE_MINUTES,
-  MIN_DURATION_SECONDS,
   CLAIM_STALE_MINUTES,
 } = require('../services/call-processing-stall-watchdog');
+// The longest recording the processor's length rule skips (gate off).
+const { SWEEP_MIN_SECONDS } = require('../config/call-extraction-retry');
 const CallRecordingProcessor = require('../services/call-recording-processor');
 const { leadFirstContactAt } = CallRecordingProcessor._test;
 
@@ -276,12 +277,31 @@ describe('computeStalledCalls', () => {
   test('dead-air blips below the processing floor are skipped', () => {
     const rows = [{
       ...base,
-      recording_duration_seconds: MIN_DURATION_SECONDS - 1,
-      duration_seconds: MIN_DURATION_SECONDS - 1,
+      recording_duration_seconds: SWEEP_MIN_SECONDS,
+      duration_seconds: SWEEP_MIN_SECONDS,
       created_at: mins(120),
       processing_status: null,
     }];
     expect(computeStalledCalls(rows, { now: NOW })).toHaveLength(0);
+  });
+
+  // Owner 2026-11-19 "FIX": an 8 s cancel call that ended during a deploy
+  // never got a transcript. With GATE_SHORT_CALL_RECORDING_SWEEP on the sweep
+  // takes a short recording while its call is under 24 h old, so a short call
+  // still unprocessed past the grace window is a stall; one older is not.
+  test('a short call under 24 hours old is a stall only with GATE_SHORT_CALL_RECORDING_SWEEP on', () => {
+    const short = (ageMinutes) => ({ ...base, recording_duration_seconds: 8, duration_seconds: 29, created_at: mins(ageMinutes), processing_status: null });
+    const rows = [short(GRACE_MINUTES + 5), short(25 * 60)];
+    const before = process.env.GATE_SHORT_CALL_RECORDING_SWEEP;
+    try {
+      delete process.env.GATE_SHORT_CALL_RECORDING_SWEEP;
+      expect(computeStalledCalls(rows, { now: NOW })).toHaveLength(0);
+      process.env.GATE_SHORT_CALL_RECORDING_SWEEP = 'true';
+      expect(computeStalledCalls(rows, { now: NOW })).toEqual([rows[0]]);
+    } finally {
+      if (before === undefined) delete process.env.GATE_SHORT_CALL_RECORDING_SWEEP;
+      else process.env.GATE_SHORT_CALL_RECORDING_SWEEP = before;
+    }
   });
 });
 
@@ -457,8 +477,8 @@ describe('runCallProcessingStallWatchdog — paging past ineligible rows', () =>
       Array.from({ length: PAGE_SIZE }, (_, i) => ({
         ...base,
         twilio_call_sid: `CA-blip-${i}`,
-        recording_duration_seconds: MIN_DURATION_SECONDS - 1,
-        duration_seconds: MIN_DURATION_SECONDS - 1,
+        recording_duration_seconds: SWEEP_MIN_SECONDS,
+        duration_seconds: SWEEP_MIN_SECONDS,
         created_at: mins(120),
         processing_status: null,
       })),

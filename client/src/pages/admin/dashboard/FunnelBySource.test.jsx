@@ -25,6 +25,10 @@ const data = {
     ],
     city: [],
     heard: [{ key: "chatgpt", label: "ChatGPT", leads: 1, contacted: 0, estimate: 0, booked: 0, completed: 0, lost: 0, revenue: 0 }],
+    quiz: [
+      { key: "(unknown)", label: "Not a quiz lead", leads: 5, contacted: 0, estimate: 0, booked: 1, completed: 1, lost: 1, revenue: 300 },
+      { key: "pest_quiz", label: "Pest Quiz", leads: 1, contacted: 0, estimate: 0, booked: 1, completed: 0, lost: 0, revenue: 0 },
+    ],
   },
 };
 
@@ -46,6 +50,15 @@ describe("FunnelBySource views", () => {
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "service" } });
     expect(screen.getAllByText(/\$[0-9.,]+k? won/)).toHaveLength(1);
     expect(screen.getByText(/\$0 won/)).toBeInTheDocument();
+  });
+
+  test("quiz leads are their own view, apart from the source", () => {
+    render(<FunnelBySource data={data} />);
+    expect(screen.getByRole("option", { name: "Quiz" })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "quiz" } });
+    expect(screen.getByText("Pest Quiz")).toBeInTheDocument();
+    expect(screen.getByText("Not a quiz lead")).toBeInTheDocument();
+    expect(screen.queryByText("Organic")).not.toBeInTheDocument();
   });
 
   test("the self-reported answer is its own view", () => {

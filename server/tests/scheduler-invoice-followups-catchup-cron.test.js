@@ -31,6 +31,7 @@ jest.mock('../services/intelligence-bar/tasks', () => ({ purgeExpiredTasks: jest
 jest.mock('../services/recurring-series-topup', () => ({ runRecurringSeriesTopUpSweep: jest.fn() }));
 jest.mock('../services/invoice-followups', () => ({
   releaseStaleAutopayHolds: jest.fn().mockResolvedValue({ mode: 'true' }),
+  clearAtRiskForSettledLongOverdue: jest.fn().mockResolvedValue([]),
   runPending: jest.fn().mockResolvedValue({ sent: 0, skipped: 0 }),
 }));
 
@@ -78,6 +79,7 @@ describe('1:16 PM catch-up tick (Tue–Fri)', () => {
     expect(runExclusive).toHaveBeenCalledWith('invoice-followups', expect.any(Function));
     expect(InvoiceFollowUps.runPending).toHaveBeenCalledWith({ catchUp: true });
     expect(InvoiceFollowUps.releaseStaleAutopayHolds).not.toHaveBeenCalled();
+    expect(InvoiceFollowUps.clearAtRiskForSettledLongOverdue).not.toHaveBeenCalled();
   });
 
   test('a lock the 10:16 run (or another instance) still holds runs nothing', async () => {

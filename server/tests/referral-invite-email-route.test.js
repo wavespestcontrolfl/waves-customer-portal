@@ -17,6 +17,7 @@ jest.mock('../services/referral-engine', () => ({
   getSettings: jest.fn(async () => ({ referee_discount_cents: 2500 })),
   getPromoterReferralLink: jest.fn(() => 'https://portal.wavespestcontrol.com/r/WAVES-J4KM'),
   buildRefereeOfferLine: jest.fn(() => 'Book your first service through their referral link and you’ll get $25 off — our way of saying welcome.'),
+  step2FriendCreditCents: jest.fn(async () => 0),
 }));
 
 jest.mock('../services/email-template-library', () => ({
@@ -144,6 +145,31 @@ describe('POST /api/referrals/invite-email — atomic dedupe', () => {
     expect(recordedDeletes).toHaveLength(0);
     // Successful real send bumps the share timestamp.
     expect(recordedUpdates.some((u) => u.table === 'referral_promoters')).toBe(true);
+  });
+
+  test('the offer line reads the fallback settings with the gate off and only the live amount with GATE_REFERRAL_STEP2 on', async () => {
+    const engine = require('../services/referral-engine');
+    const { gates } = require('../config/feature-gates');
+    installDb();
+    EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true });
+
+    await post('/api/referrals/invite-email', { email: 'friend-off@example.com', friendName: 'Jordan' });
+    expect(engine.buildRefereeOfferLine).toHaveBeenLastCalledWith({ referee_discount_cents: 2500 });
+    expect(engine.step2FriendCreditCents).not.toHaveBeenCalled();
+
+    gates.referralStep2 = true;
+    try {
+      installDb();
+      engine.step2FriendCreditCents.mockResolvedValueOnce(5000);
+      await post('/api/referrals/invite-email', { email: 'friend-on@example.com', friendName: 'Jordan' });
+      expect(engine.buildRefereeOfferLine).toHaveBeenLastCalledWith({ referee_discount_cents: 5000 });
+      // The live row unreadable or the program paused: 0, so the line states no amount.
+      installDb();
+      await post('/api/referrals/invite-email', { email: 'friend-none@example.com', friendName: 'Jordan' });
+      expect(engine.buildRefereeOfferLine).toHaveBeenLastCalledWith({ referee_discount_cents: 0 });
+    } finally {
+      gates.referralStep2 = false;
+    }
   });
 
   test('idempotency key stays within varchar(260) even for a maximum-length address', async () => {
@@ -335,6 +361,35 @@ describe('household sibling on the Refer tab (GH codex #3850 r2)', () => {
       referral_link: 'https://portal.wavespestcontrol.com/r/WAVES-J4KM',
     }), expect.objectContaining({ entity_id: 'promo-h' }));
   });
+  // POST /invite does not check that the phone belongs to a new customer (submitReferral does), so it promises no
+  // credit: the saved text goes out as rendered in both gate states.
+  describe('/invite text: the referral_invite row is sent as rendered, with GATE_REFERRAL_STEP2 on or off', () => {
+    const SEED = require('../models/migrations/20261006220000_sms_template_tighten')._SWAPS.find(([key]) => key === 'referral_invite')[2];
+    const LINK = 'https://portal.wavespestcontrol.com/r/WAVES-J4KM';
+    const rendered = () => SEED.replace('{referee_name}', 'Jo').replace('{referrer_name}', 'Sam').replace('{referral_link}', LINK);
+    const { gates } = require('../config/feature-gates');
+
+    test.each([false, true])('gate %s: no credit is promised and no amount is read', async (gateOn) => {
+      const saved = gates.referralStep2;
+      gates.referralStep2 = gateOn;
+      try {
+        installDb({ firstResults: { customers: { id: 'cust-1', first_name: 'Sam', email: 'sam@example.com' } } });
+        referralEngine.resolvePromoter.mockResolvedValueOnce({ promoter: household, household: true });
+        referralEngine.step2FriendCreditCents.mockClear();
+        const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
+        const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+        renderRequiredSmsTemplate.mockResolvedValueOnce(rendered());
+        sendCustomerMessage.mockResolvedValueOnce({ sent: true });
+        const res = await post('/api/referrals/invite', { phone: '(941) 555-0123', friendName: 'Jo' });
+        expect(res.status).toBe(200);
+        expect(sendCustomerMessage.mock.calls[0][0].body).toBe(rendered());
+        expect(referralEngine.step2FriendCreditCents).not.toHaveBeenCalled();
+      } finally {
+        gates.referralStep2 = saved;
+      }
+    });
+  });
+
   test('POST / submits under the household promoter but names the acting sibling to the friend', async () => {
     installDb({ firstResults: { customers: { id: 'cust-1', first_name: 'Sam', email: 'sam@example.com' } } });
     referralEngine.resolvePromoter.mockResolvedValueOnce({ promoter: household, household: true });

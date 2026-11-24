@@ -115,7 +115,9 @@ function revivableSiblingsQuery(database, estimate) {
     // public reader rejects it first) — it is neither judged here nor
     // revived below (GH codex P2 r26).
     .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
-    .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''");
+    .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+    // A plan offer's quote ends on its own date and is never revived (the sibling update below).
+    .whereRaw(require('./plan-offer-estimate').PLAN_OFFER_ABSENT_SQL);
 }
 
 // The ONE question the public extension-request (generic 404, before the
@@ -373,6 +375,11 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         // the group renderer drops it as off-surface (codex r23 P2).
         .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL)
         .whereRaw(require('./proposal-bid').FIXED_BID_VALIDITY_ABSENT_SQL)
+        // A plan offer's quote (plan-offer-estimate.js; owner 2026-11-19) is good until its own end date,
+        // with the setup fee waived. Its own link cannot ask for an extension
+        // (isEstimateExtensionRequestEligible), and a grouped sibling's extension, from the customer or from
+        // staff, must not bring it back with the waiver past that date. It keeps its expiry and its status.
+        .whereRaw(require('./plan-offer-estimate').PLAN_OFFER_ABSENT_SQL)
         // Atomic belt to the pre-mutation verdict (uncapped codex P0 r20):
         // while the gate is on a sibling that fails the authority predicate
         // is never revived, whatever raced between the verdict and here.

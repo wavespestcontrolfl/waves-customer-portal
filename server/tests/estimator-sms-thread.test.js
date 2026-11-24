@@ -13,14 +13,31 @@
 // Chainable stub for the cooldown lookup (notifications table); tests set
 // mockRecentBell to simulate a run inside the cooldown window.
 let mockRecentBell = null;
+// sms_log row (the triggering text's Twilio SID) for the placeholder link anchor.
+let mockSmsLogRow = null;
+let mockSmsLogThrows = false;
+let mockSmsLogHangs = false;
 jest.mock('../models/db', () => {
+  let table = null;
   const chain = {
     whereRaw: () => chain,
     where: () => chain,
     orderBy: () => chain,
-    first: async () => mockRecentBell,
+    select: () => chain,
+    timeout: () => chain,
+    first: async () => {
+      if (table === 'sms_log') {
+        if (mockSmsLogHangs) return new Promise(() => {});
+        if (mockSmsLogThrows) throw new Error('sms_log down');
+        return mockSmsLogRow;
+      }
+      return mockRecentBell;
+    },
   };
-  return jest.fn(() => chain);
+  return jest.fn((t) => {
+    table = t;
+    return chain;
+  });
 });
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -43,6 +60,12 @@ jest.mock('../services/estimator-engine/index', () => ({
   runDraftPipeline: (...args) => mockRunDraftPipeline(...args),
   notify: (...args) => mockNotify(...args),
   estimatorEngineEnabled: () => mockEngineEnabled(),
+}));
+
+// The codebase's own "who is this number" helper (the inbound-text bell uses it too).
+const mockNameOnFileForPhone = jest.fn();
+jest.mock('../services/admin-alert-names', () => ({
+  nameOnFileForPhone: (...args) => mockNameOnFileForPhone(...args),
 }));
 
 const mockBuildSmsThreadContext = jest.fn();
@@ -77,6 +100,9 @@ const PHONE = '+19415550123';
 beforeEach(() => {
   jest.clearAllMocks();
   mockRecentBell = null;
+  mockSmsLogRow = null;
+  mockSmsLogThrows = false;
+  mockSmsLogHangs = false;
   process.env.GATE_ESTIMATOR_SMS_DRAFTS = 'true';
   mockEngineEnabled.mockReturnValue(true);
   // Re-pin defaults every test — mockReturnValue survives clearAllMocks
@@ -89,6 +115,7 @@ beforeEach(() => {
   mockBuildSmsThreadContext.mockResolvedValue({ call: null, transcript: 'x'.repeat(60), phone: PHONE });
   mockRunDraftPipeline.mockImplementation(async ({ result }) => ({ ...result, lane: 'yellow', created: true }));
   mockNotify.mockResolvedValue(true);
+  mockNameOnFileForPhone.mockResolvedValue(null);
 });
 
 afterAll(() => {
@@ -152,6 +179,87 @@ describe('startSmsThreadDraft', () => {
     expect(args.origin.threadKey).toBe('sms:9415550123');
     expect(args.quotePromised).toBe(true);
     expect(args.context.origin).toBe(args.origin);
+  });
+
+  describe('the placeholder names who texted and links to the message', () => {
+    const TEXT = 'what would a quote for pest control run me?';
+    const BARE = '/admin/communications';
+    const placeholderArgs = () => mockNotify.mock.calls[0][0];
+    const MAIN_SENTENCE = 'The estimator engine is drafting now — if no draft notification follows, review the thread and send the estimate manually.';
+    const cleanLink = (link) => {
+      expect(link).not.toMatch(/thread=/);
+      expect(link).not.toMatch(/phone=/);
+      expect(link).not.toMatch(/9415550123/);
+      expect(link).not.toMatch(/%2B1/);
+    };
+
+    test('a name on file is used, main\'s sentence follows it, and the message link anchors on the text', async () => {
+      mockNameOnFileForPhone.mockResolvedValue('Jane Doe');
+      mockSmsLogRow = { twilio_sid: 'SM123abc' };
+      const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT, triggerSmsLogId: 'log-1' });
+      const args = placeholderArgs();
+      expect(args.title).toBe('Quote asked by text — send it');
+      expect(args.body).toBe(`Jane Doe asked for a quote by text. ${MAIN_SENTENCE}`);
+      expect(args.link).toBe('/admin/communications?message=SM123abc');
+      cleanLink(args.link);
+      // Each query is bounded: the helper gets a conn that applies the cancel timeout.
+      expect(mockNameOnFileForPhone).toHaveBeenCalledWith(expect.any(Function), PHONE);
+      await result.draftPromise;
+      // Outcome bells are untouched: the pipeline origin carries nothing new.
+      expect(mockRunDraftPipeline.mock.calls[0][0].origin).not.toHaveProperty('bellLink');
+    });
+
+    test('no name on file gives the last four digits; with no triggering text the link is the bare page', async () => {
+      await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT });
+      expect(placeholderArgs().body).toBe(`Texter …0123 asked for a quote by text. ${MAIN_SENTENCE}`);
+      expect(placeholderArgs().body).not.toMatch(/9415550123/);
+      expect(placeholderArgs().link).toBe(BARE);
+    });
+
+    test('the sid is URL-encoded and never leaks a phone', async () => {
+      mockSmsLogRow = { twilio_sid: 'SM9/x y' };
+      await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT, triggerSmsLogId: 'log-1' });
+      expect(placeholderArgs().link).toBe(`${BARE}?message=${encodeURIComponent('SM9/x y')}`);
+      cleanLink(placeholderArgs().link);
+    });
+
+    test('a lookup that throws falls back, the bell is still written, and the log carries no phone digits', async () => {
+      const logger = require('../services/logger');
+      mockNameOnFileForPhone.mockRejectedValue(Object.assign(new Error("select ... where phone = '9415550123' failed"), { code: '57014' }));
+      mockSmsLogThrows = true;
+      mockSmsLogRow = { twilio_sid: 'SM1' };
+      const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT, triggerSmsLogId: 'log-1' });
+      expect(result.started).toBe(true);
+      expect(placeholderArgs().body).toMatch(/^Texter …0123 asked for a quote by text\./);
+      expect(placeholderArgs().link).toBe(BARE);
+      const warned = logger.warn.mock.calls.map((c) => c.join(' ')).join('\n');
+      expect(warned).toMatch(/sender name lookup failed/);
+      expect(warned).toContain('57014');
+      expect(warned).not.toMatch(/9415550123/);
+      expect(warned).not.toMatch(/failed\b.*select/);
+    });
+
+    test('a slow NAME lookup with a fast SID keeps the message link (only the label falls back)', async () => {
+      mockNameOnFileForPhone.mockReturnValue(new Promise(() => {}));
+      mockSmsLogRow = { twilio_sid: 'SMfast' };
+      await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT, triggerSmsLogId: 'log-1' });
+      expect(placeholderArgs().body).toMatch(/^Texter …0123/);
+      expect(placeholderArgs().link).toBe('/admin/communications?message=SMfast');
+    }, 10000);
+
+    test('a slow SID read with a fast name keeps the name (only the anchor is dropped)', async () => {
+      mockNameOnFileForPhone.mockResolvedValue('Jane Doe');
+      mockSmsLogHangs = true;
+      await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT, triggerSmsLogId: 'log-1' });
+      expect(placeholderArgs().body).toMatch(/^Jane Doe asked for a quote/);
+      expect(placeholderArgs().link).toBe(BARE);
+    }, 10000);
+
+    test('a dry run writes no bell and does no lookup', async () => {
+      await startSmsThreadDraft({ phone: PHONE, triggerBody: TEXT, dryRun: true });
+      expect(mockNameOnFileForPhone).not.toHaveBeenCalled();
+      expect(mockNotify).not.toHaveBeenCalled();
+    });
   });
 
   test('a clarify-reply re-draft carries the draft it supersedes into the pipeline context (retired atomically on insert)', async () => {

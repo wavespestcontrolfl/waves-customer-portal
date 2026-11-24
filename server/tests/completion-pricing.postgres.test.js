@@ -273,5 +273,169 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
     const lawn = (await pricing.loadCompletionPricing(jobId, { database: trx, role: 'admin' })).view;
     expect(lawn).toMatchObject({ canApply: true, proposedAmount: 85 });
   }));
+  test('an estimate-booked visit invoices its named tier discount behind the gate; the report finds the visit', () => rollbackTest(async (trx) => {
+    const { jobId, customerId, estimateId, soldLine } = await fixture(trx, { jobPrice: 85 });
+    // The converter's shape: the accepted net and no primary price; the estimate line records its tier.
+    await trx('scheduled_services').where({ id: jobId }).update({ primary_line_price: null });
+    await trx('estimates').where({ id: estimateId }).update({ estimate_data: { result: { recurring: { services: [{ ...soldLine,
+      discount: { effectiveDiscount: 0.15, appliedDiscounts: [{ type: 'waveguard', tier: 'gold', amount: 0.15 }] } }] } } } });
+    const job = await trx('scheduled_services').where({ id: jobId }).first();
+    expect(await pricing.acceptedVisitBreakdown(job, { database: trx })).toEqual(expect.objectContaining({ breakdown: {
+      base: 100, amount: 85, discounts: [{ name: 'WaveGuard Gold', dollars: 15 }] } }));
+    process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES = 'true';
+    try {
+      const { lineItems } = await Invoice.buildLineItemsForScheduledService(jobId, { database: trx, fallbackAmount: 85 });
+      expect(lineItems.map((row) => [row.description, Number(row.amount)])).toEqual([['Pest Control', 100], ['WaveGuard Gold', -15]]);
+    } finally { delete process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES; }
+    // ops/agents/estimate-discount-lines-report.js and the nightly check read this visit on the migrated schema.
+    await trx('customers').where({ id: customerId }).update({ pipeline_stage: 'active_customer' });
+    const { upcomingEstimateVisits } = require('../services/invoice-tier-line-check');
+    const today = require('../utils/date-only').dateOnlyString(job.scheduled_date);
+    expect((await upcomingEstimateVisits(trx, { today, days: 1 })).map((row) => row.id)).toContain(jobId);
+  }));
+  // The saved engine shape (v1-legacy-mapper): the row keeps its list price and the after-discount annual, and the
+  // tier with its rate sits on the recurring block. Before, this saving had no name and the invoice kept one net line.
+  test('a saved engine estimate with the tier on its recurring block invoices that tier discount behind the gate', () => rollbackTest(async (trx) => {
+    const { jobId, estimateId } = await fixture(trx, { jobPrice: 85 });
+    await trx('scheduled_services').where({ id: jobId }).update({ primary_line_price: null });
+    await trx('estimates').where({ id: estimateId }).update({ estimate_data: { result: { recurring: { tier: 'Gold', waveGuardTier: 'Gold', discount: 0.15,
+      services: [{ service: 'pest_control', name: 'Pest Control', mo: 33.33, monthly: 33.33, basePrice: 100, perTreatment: 100, visitsPerYear: 4, annualAfterDiscount: 340 }] } } } });
+    const job = await trx('scheduled_services').where({ id: jobId }).first();
+    expect(await pricing.acceptedVisitBreakdown(job, { database: trx })).toEqual(expect.objectContaining({ breakdown: {
+      base: 100, amount: 85, discounts: [{ name: 'WaveGuard Gold', dollars: 15 }] } }));
+    process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES = 'true';
+    try {
+      const { lineItems } = await Invoice.buildLineItemsForScheduledService(jobId, { database: trx, fallbackAmount: 85 });
+      expect(lineItems.map((row) => [row.description, Number(row.amount)])).toEqual([['Pest Control', 100], ['WaveGuard Gold', -15]]);
+    } finally { delete process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES; }
+    // An empty tier column reads the saved recurring block, as the accept does.
+    await trx('estimates').where({ id: estimateId }).update({ waveguard_tier: null });
+    expect((await pricing.acceptedVisitBreakdown(job, { database: trx })).breakdown.discounts).toEqual([{ name: 'WaveGuard Gold', dollars: 15 }]);
+  }));
+  // The nightly check (lead-to-cash sweep, tier_saving_left_off_invoice) reads the engine's own line record for the saved
+  // row the invoice matched: a saving that record priced at the tier rate and the invoice cannot name is a finding; one
+  // the invoice names is not, and neither is one a staff change shares.
+  test('the nightly check flags a tier saving the invoice leaves unnamed, and passes one it names', () => rollbackTest(async (trx) => {
+    const { jobId, customerId, estimateId, parentId } = await fixture(trx, { jobPrice: 85 });
+    // The visit's label is display text: the invoice matches its line by service id, and the check reads that line.
+    await trx('scheduled_services').where({ id: jobId }).update({ primary_line_price: null, service_type: 'Home Protection Plan' });
+    await trx('customers').where({ id: customerId }).update({ pipeline_stage: 'active_customer' });
+    const item = { service: 'pest_control', perApp: 100, visitsPerYear: 4, annualBeforeDiscount: 400,
+      annualAfterDiscount: 340, discount: { appliedDiscounts: [{ type: 'waveguard', tier: 'gold', amount: 0.15 }] } };
+    const row = { service: 'pest_control', name: 'Pest Control', mo: 33.33, monthly: 33.33, basePrice: 100, perTreatment: 100,
+      visitsPerYear: 4, annualAfterDiscount: 340 };
+    const save = (lineItems, recurring, columns = {}, extra = {}) => trx('estimates').where({ id: estimateId }).update({ ...columns,
+      estimate_data: { engineResult: { lineItems }, result: { recurring: { tier: 'Gold', waveGuardTier: 'Gold', services: [row], ...recurring } }, ...extra } });
+    const { tierSavingsLeftOffInvoices } = require('../services/invoice-tier-line-check');
+    const job = await trx('scheduled_services').where({ id: jobId }).first();
+    const today = require('../utils/date-only').dateOnlyString(job.scheduled_date);
+    const findingsFor = async () => (await tierSavingsLeftOffInvoices(trx, { today, days: 1 })).findings.filter((f) => f.visitId === jobId);
+    const reason = async (visit) => (await pricing.acceptedVisitBreakdown(visit, { database: trx })).reason;
+    process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES = 'true';
+    try {
+      // The recurring block saved the tier with its rate: the invoice names it.
+      await save([item], { discount: 0.15 });
+      expect(await findingsFor()).toEqual([]);
+      // The block saved no rate and the tier column is empty, so the invoice cannot name the saving the engine priced at
+      // the Gold rate.
+      await save([item], {}, { waveguard_tier: null });
+      expect(await reason(job)).toBe('discount_unnamed');
+      expect(await findingsFor()).toEqual([{ visitId: jobId, estimateId, serviceKey: 'pest_control', lineKey: 'recurring:0', tier: 'gold' }]);
+      // A staff discount kept only in the estimate's saved summary: one line by design.
+      await save([item], {}, {}, { summary: { manualDiscount: { amount: 0.04, recurringAmount: 0.04, label: 'Courtesy' } } });
+      expect(await reason(job)).toBe('discount_unnamed');
+      expect(await findingsFor()).toEqual([]);
+      // The block saved a Gold rate of 0: the records disagree with the engine's 15%, so one line by design.
+      await save([item], { discount: 0 });
+      expect(await reason(job)).toBe('discount_unnamed');
+      expect(await findingsFor()).toEqual([]);
+      // The block saved the Gold rate, but the row recorded another rate for itself: one line by design.
+      await save([item], { discount: 0.15, services: [{ ...row, discount: { effectiveDiscount: 0.1 } }] });
+      expect(await reason(job)).toBe('discount_unnamed');
+      expect(await findingsFor()).toEqual([]);
+      // Staff moved the line to $339.96 a year ($84.99 a visit): one line by design, 1 cent off the tier's share.
+      await save([{ ...item, manualFinalAnnual: 339.96 }], { services: [{ ...row, manualFinalAnnual: 339.96 }] });
+      await trx('scheduled_services').where({ id: jobId }).update({ estimated_price: 84.99 });
+      expect(await reason({ ...job, estimated_price: 84.99 })).toBe('discount_unnamed');
+      expect(await findingsFor()).toEqual([]);
+      // An engine result saved whole (result.lineItems, no mapped services), with the engine's own discount record (pre-push
+      // audit rounds 10 and 11): the completion reader keeps the line's net only as `annual`, so it gives the rated line no
+      // per-visit price and the invoice keeps one line (no_breakdown). The engine's own record proves that net at the
+      // visit's price, so the check flags the visit.
+      const rated = { ...item, discount: { effectiveDiscount: 0.15, appliedDiscountPercent: 0.15,
+        appliedDiscounts: [{ type: 'waveguard', tier: 'gold', amount: 0.15 }] } };
+      const whole = (lineItems) => trx('estimates').where({ id: estimateId }).update({
+        estimate_data: { result: { lineItems, recurring: { tier: 'Gold', waveGuardTier: 'Gold' } } } });
+      await whole([rated]);
+      await trx('scheduled_services').where({ id: jobId }).update({ estimated_price: 85 });
+      expect(await reason({ ...job, estimated_price: 85 })).toBe('no_breakdown');
+      expect(await findingsFor()).toEqual([{ visitId: jobId, estimateId, serviceKey: 'pest_control', lineKey: 'recurring:0', tier: 'gold' }]);
+      // A visit whose price moved off the engine's net keeps one line by design.
+      await trx('scheduled_services').where({ id: jobId }).update({ estimated_price: 84.99 });
+      expect(await findingsFor()).toEqual([]);
+      await trx('scheduled_services').where({ id: jobId }).update({ estimated_price: 85 });
+      // The plan's first-visit fee saved beside it: the reader counts the fee as a second line of the plan's key, so the
+      // visit has no single line (line_ambiguous) and the check has none to price. Out of this PR's scope (its body, "Not
+      // covered").
+      const fee = { service: 'pest_initial_roach', price: 49, priceBeforeDiscount: 49, priceAfterDiscount: 49 };
+      await whole([rated, fee]);
+      expect(await reason({ ...job, estimated_price: 85 })).toBe('line_ambiguous');
+      expect(await findingsFor()).toEqual([]);
+      // The admin estimate tool's save: its mapped result only, with no engine lines (pre-push audit round 5). The
+      // invoice names the tier the block saved at its rate, so nothing is found; with no rate saved, nothing proves one.
+      const admin = (recurring) => trx('estimates').where({ id: estimateId }).update({ waveguard_tier: 'Gold', estimate_data: { inputs: {},
+        result: { recurring: { tier: 'Gold', waveGuardTier: 'Gold', services: [row], ...recurring } }, summary: { manualDiscount: null, serviceSpecificDiscounts: [] } } });
+      await admin({ discount: 0.15 });
+      expect((await pricing.acceptedVisitBreakdown({ ...job, estimated_price: 85 }, { database: trx })).breakdown.discounts)
+        .toEqual([{ name: 'WaveGuard Gold', dollars: 15 }]);
+      expect(await findingsFor()).toEqual([]);
+      await admin({});
+      expect(await reason({ ...job, estimated_price: 85 })).toBe('discount_unnamed');
+      expect(await findingsFor()).toEqual([]);
+      // A row whose own tier record names no tier prints a bare "WaveGuard" (pre-push audit): the estimate's records
+      // agree on Gold, so the check flags the line, with no saved rate needed.
+      await admin({ services: [{ ...row, discount: { appliedDiscounts: [{ type: 'waveguard', amount: 0.15 }] } }] });
+      expect((await pricing.acceptedVisitBreakdown({ ...job, estimated_price: 85 }, { database: trx })).breakdown.discounts)
+        .toEqual([{ name: 'WaveGuard', dollars: 15 }]);
+      const flagged = [{ visitId: jobId, estimateId, serviceKey: 'pest_control', lineKey: 'recurring:0', tier: 'gold' }];
+      expect(await findingsFor()).toEqual(flagged);
+      // Only a new bill of the visit at its own price is judged (pre-push audit round 14), with the billing facts read on
+      // this schema. Dues cover the plan visit of a member: no bill of it.
+      await trx('customers').where({ id: customerId }).update({ billing_mode: 'monthly_membership', monthly_rate: 49 });
+      expect(await findingsFor()).toEqual([]);
+      await trx('customers').where({ id: customerId }).update({ billing_mode: 'per_application', monthly_rate: null });
+      expect(await findingsFor()).toEqual(flagged);
+      // An invoice made already bills the visit: its own (a refunded one still holds the visit for manual billing; a void
+      // one bills nothing, so the new bill is judged again), or the combined first-application invoice its stamp names,
+      // by the schedule's own verdict.
+      const stored = async (columns) => (await trx('invoices').insert({ customer_id: customerId, token: randomUUID(),
+        invoice_number: `QA-${randomUUID().slice(0, 20)}`, status: 'sent', total: 85, ...columns }).returning('id'))[0].id;
+      const own = await stored({ scheduled_service_id: jobId });
+      expect(await findingsFor()).toEqual([]);
+      await trx('invoices').where({ id: own }).update({ status: 'refunded' });
+      expect(await findingsFor()).toEqual([]);
+      await trx('invoices').where({ id: own }).update({ status: 'void' });
+      expect(await findingsFor()).toEqual(flagged);
+      const { siblingCoverageForSchedule } = require('../services/billing-lane');
+      const coverage = async () => (await siblingCoverageForSchedule({ svc: await trx('scheduled_services').where({ id: jobId }).first(), dbConn: trx })).coverage;
+      const firstBill = await stored({ scheduled_service_id: parentId });
+      await trx('scheduled_services').where({ id: jobId }).update({ first_application_invoice_id: firstBill });
+      expect(await coverage()).toMatchObject({ state: 'collect_on_combined_invoice', invoiceId: firstBill });
+      expect(await findingsFor()).toEqual([]);
+      // A voided combined invoice holds the visit for review (owner ruling: refuse after a void): not a new bill either.
+      await trx('invoices').where({ id: firstBill }).update({ status: 'void' });
+      expect(await coverage()).toMatchObject({ state: 'review', reason: 'combined_invoice_voided' });
+      expect(await findingsFor()).toEqual([]);
+      // With no stamp, another visit's invoice never covers a priced visit: its new bill is judged again.
+      await trx('scheduled_services').where({ id: jobId }).update({ first_application_invoice_id: null });
+      expect(await coverage()).toMatchObject({ state: 'none' });
+      expect(await findingsFor()).toEqual(flagged);
+      const { checked, notJudged } = await tierSavingsLeftOffInvoices(trx, { today, days: 1 });
+      expect(checked).toBeGreaterThanOrEqual(1);
+      expect(notJudged).toBeGreaterThanOrEqual(0);
+    } finally { delete process.env.GATE_INVOICE_ESTIMATE_DISCOUNT_LINES; }
+    // Gate off: every invoice keeps one line by design, so the check reads nothing.
+    expect(await tierSavingsLeftOffInvoices(trx, { today, days: 1 })).toEqual({ checked: 0, notJudged: 0, findings: [] });
+  }));
 
 });

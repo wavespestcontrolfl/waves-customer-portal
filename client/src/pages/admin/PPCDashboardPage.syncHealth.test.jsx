@@ -106,6 +106,15 @@ describe("PPC dashboard last-synced line", () => {
     expect(line("google_ads")).toHaveClass("text-amber-700");
   });
 
+  it("lists Local Service Ads under its own name", async () => {
+    const line = await mountWith([
+      sync("google_ads", "google-ads-sync"),
+      sync("google_lsa", "google-lsa-sync", { last_success_at: null, last_status: "failed", last_error: "invalid_grant" }),
+    ]);
+    expect(line("google_lsa")).toHaveTextContent(/^Local Service Ads last synced: never -- latest sync failed \(invalid_grant\)/);
+    expect(line("google_lsa")).toHaveClass("text-amber-700");
+  });
+
   it("Meta shows its oldest job's success and any job's failure", async () => {
     const line = await mountWith([
       sync("facebook", "meta-ads-campaigns", { last_success_at: hoursAgo(1) }),

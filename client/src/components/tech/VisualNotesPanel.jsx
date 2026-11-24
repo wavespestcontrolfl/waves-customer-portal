@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getAdminAuthToken } from '../../lib/adminAuth';
+import { holdReloadWhileSending } from '../../lib/reloadHolds';
 
 const API = import.meta.env.VITE_API_URL || '';
 
@@ -174,7 +175,7 @@ export default function VisualNotesPanel({ service }) {
     }
   };
 
-  const saveMoment = async () => {
+  const sendMoment = async () => {
     if (!selectedTag || !service?.id || saving) return;
     setSaving(true);
     setMessage('');
@@ -205,6 +206,11 @@ export default function VisualNotesPanel({ service }) {
       setSaving(false);
     }
   };
+
+  // A visual note waits up to 1.4 s for the location before its upload
+  // starts, so no save is open yet: it holds an out-of-date tab's reload
+  // until it settles (lib/reloadHolds.js).
+  const saveMoment = () => holdReloadWhileSending('visual-note', sendMoment);
 
   return (
     <div style={{

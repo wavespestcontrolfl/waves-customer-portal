@@ -385,7 +385,7 @@ function asserted(compiled, answer) {
 // match ("bond is not optional") also denies it, unless the pattern
 // deliberately matched a negated phrase from its first word ("not a
 // franchise" as evidence of independence). Only the match's final clause
-// counts: "bond is not optional but renews annually" still asserts renewal.
+// counts: "bond is not optional but comes in 1-, 5- or 10-year terms" still asserts the terms.
 // A determiner "no" inside a prepositional modifier ("with no annual
 // contracts, plus termite") governs only its own phrase, up to the next list
 // separator; it does not deny the items that follow.
