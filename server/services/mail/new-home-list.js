@@ -29,9 +29,9 @@ const LIST_KEY = 'new_home';
 const SOURCE = 'manatee_clerk_deed';
 const MIN_PRICE = 150000;
 const NIGHT_DAYS = 6;
-// The noon run reads the same days as the night run, so a day the night run could not read (the Clerk site sits behind
+// The noon run reads every day the night run before it read (and today), so a day the night run could not read (the Clerk site sits behind
 // Cloudflare and refused every night day on 11-22) is read again at noon, not lost.
-const NOON_DAYS = NIGHT_DAYS;
+const NOON_DAYS = NIGHT_DAYS + 1; // one more: the night run before it reached back one calendar day further
 const RETRY_AFTER_MS = 20 * 60 * 60 * 1000;
 const DAY_PAUSE_MS = 4000; // the Clerk site sits behind Cloudflare: one page at a time, slowly
 const PARCEL_PAUSE_MS = 600;
@@ -207,10 +207,10 @@ function daysToRead(mode, now = Date.now()) {
 }
 
 // A day is on its last read when the next run no longer reads it: after a noon run, tonight's night run; after a night
-// run, tomorrow's noon run (both read the same days as a night run).
+// run, tomorrow's noon run, which reads every day tonight's run read.
 function daysTheNextRunReads(mode, nowMs) {
-  const nextRunAt = mode === 'noon' ? new Date(nowMs) : addETDays(new Date(nowMs), 1);
-  return new Set(daysToRead('night', nextRunAt));
+  if (mode === 'noon') return new Set(daysToRead('night', nowMs));
+  return new Set(daysToRead('noon', addETDays(new Date(nowMs), 1)));
 }
 
 const sleepFor = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });

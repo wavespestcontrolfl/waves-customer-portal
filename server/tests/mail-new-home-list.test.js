@@ -190,9 +190,11 @@ describe('daysToRead', () => {
     // Sun 2026-11-01 11:00 PM EST is Monday in UTC; still the weekend, so Friday is the newest day.
     expect(daysToRead('night', Date.UTC(2026, 10, 2, 4, 0))[0]).toBe('2026-10-30');
   });
-  test('noon mode reads the same days as a night run, so a day the night run could not read is read again', () => {
-    expect(daysToRead('noon', Date.UTC(2026, 10, 17, 17, 31))).toEqual(['2026-11-17', '2026-11-16', '2026-11-13', '2026-11-12']);
-    expect(daysToRead('noon', Date.UTC(2026, 10, 17, 17, 31))).toEqual(daysToRead('night', Date.UTC(2026, 10, 17, 17, 31)));
+  test('noon mode reads every day the night run before it read, so a day that night could not read is read again', () => {
+    // Tue 11-17 noon; the night run before it was Mon 11-16 at 9:31 PM.
+    const noon = daysToRead('noon', Date.UTC(2026, 10, 17, 17, 31));
+    expect(noon).toEqual(['2026-11-17', '2026-11-16', '2026-11-13', '2026-11-12', '2026-11-11']);
+    for (const day of daysToRead('night', Date.UTC(2026, 10, 17, 2, 31))) expect(noon).toContain(day);
   });
 });
 
@@ -314,6 +316,9 @@ describe('runNewHomeList', () => {
     };
   }
   const run = (deps, mode = 'night') => runNewHomeList({ mode, now: () => NOW, deps });
+  // The noon run after NOW (Wed 11-18 12:31 PM ET): the last read of 2026-11-12, which tonight's night run no longer reads.
+  const LAST_READ_NOON = Date.UTC(2026, 10, 18, 17, 31);
+  const runLastRead = (deps) => runNewHomeList({ mode: 'noon', now: () => LAST_READ_NOON, deps });
   const person = (n, extra = {}) => deed({ instrument: String(202699100000 + n), description: `LOT ${n} SAMPLE GROVE`, ...extra });
   // The map's parcel and the store's permit for person(12) ("LOT 12 SAMPLE GROVE"): with these the run saves a live home.
   const HOME = {
@@ -392,7 +397,7 @@ describe('runNewHomeList', () => {
       rowsByDay: { '2026-11-17': newer, '2026-11-12': [person(700, { date: '2026-11-12' })] },
       existing: [{ source_ref: '202699100700', status: 'unmatched', last_checked_at: new Date(NOW - 30 * 3600 * 1000) }],
     });
-    const summary = await run(deps);
+    const summary = await runLastRead(deps);
     expect(deps.saveProspect.mock.calls[0][0].source_ref).toBe('202699100700');
     expect(deps.saveProspect).toHaveBeenCalledTimes(MAX_PARCEL_QUERIES);
     expect(summary.skipped.waits_for_next_run).toBe(1); // one newer deed, read again tomorrow
@@ -419,7 +424,7 @@ describe('runNewHomeList', () => {
       rowsByDay: { '2026-11-12': [person(1, { date: '2026-11-12' })], '2026-11-17': [person(2)] },
       existing: [unmatched(1), unmatched(2)], // both checked two hours ago
     });
-    const summary = await run(deps);
+    const summary = await runLastRead(deps);
     // The deed of the 12th leaves the read tomorrow, so it is asked about now; the deed of the 17th waits.
     expect(deps.saveProspect.mock.calls.map(([row]) => row.source_ref)).toEqual(['202699100001']);
     expect(summary.skipped.retry_wait).toBe(1);
@@ -459,7 +464,7 @@ describe('runNewHomeList', () => {
     const oldest = Array.from({ length: MAX_PARCEL_QUERIES + 5 }, (_, i) => person(i + 1, { date: '2026-11-12' }));
     const deps = makeDeps({ rowsByDay: { '2026-11-12': oldest, '2026-11-17': [person(800), person(801)] } });
     let thrown;
-    await run(deps).catch((err) => { thrown = err; });
+    await runLastRead(deps).catch((err) => { thrown = err; });
     expect(thrown.message).toBe('Mail new-home list: 5 deeds were not judged on the last day a run reads them (2026-11-12: 5)');
     expect(deps.saveProspect).toHaveBeenCalledTimes(MAX_PARCEL_QUERIES);
     // The two deeds of the 17th wait too, but a later run reads their day: they are not in the error.
@@ -472,11 +477,11 @@ describe('runNewHomeList', () => {
     // Lot 3 is on a day that tomorrow's run reads again: stored as unmatched / lookup_failed, tried again, no error.
     const later = makeDeps({ rowsByDay: rows });
     later.queryParcels.mockImplementation(failFor(['3']));
-    expect((await run(later)).leftOnLastDay).toEqual({});
+    expect((await runLastRead(later)).leftOnLastDay).toEqual({});
     // Lot 1 is on the 12th, which no later run reads.
     const last = makeDeps({ rowsByDay: rows });
     last.queryParcels.mockImplementation(failFor(['1']));
-    await expect(run(last)).rejects.toThrow('Mail new-home list: 1 deeds were not judged on the last day a run reads them (2026-11-12: 1)');
+    await expect(runLastRead(last)).rejects.toThrow('Mail new-home list: 1 deeds were not judged on the last day a run reads them (2026-11-12: 1)');
     expect(last.saveProspect).toHaveBeenCalledTimes(4);
     // Another run answered that deed in the meantime: the store kept the answer, so the deed is not lost.
     const kept = makeDeps({ rowsByDay: rows });
@@ -484,7 +489,7 @@ describe('runNewHomeList', () => {
     kept.saveProspect.mockImplementation(async (row) => (row.reason === 'lookup_failed'
       ? { status: 'eligible', reason: null, written: false }
       : stored(row)));
-    expect((await run(kept)).leftOnLastDay).toEqual({});
+    expect((await runLastRead(kept)).leftOnLastDay).toEqual({});
   });
 
   test('a deed the Clerk has not filled in on its last read is counted by day, and the run does not throw', async () => {
@@ -499,7 +504,7 @@ describe('runNewHomeList', () => {
         '2026-11-17': [unfilled(4)], // read again tomorrow
       },
     });
-    const summary = await run(deps);
+    const summary = await runLastRead(deps);
     expect(summary.skipped).toEqual({ not_filled: 4 });
     expect(summary.unfilledOnLastDay).toEqual({ '2026-11-12': 2 });
     expect(deps.saveProspect).not.toHaveBeenCalled();
@@ -712,7 +717,7 @@ describe('runNewHomeList', () => {
   test('the noon mode reads the night days, so a day the night run could not read is read again', async () => {
     const deps = makeDeps();
     await run(deps, 'noon');
-    expect(deps.fetchDayList.mock.calls.map((c) => c[0])).toEqual(['2026-11-17', '2026-11-16', '2026-11-13', '2026-11-12']);
+    expect(deps.fetchDayList.mock.calls.map((c) => c[0])).toEqual(['2026-11-17', '2026-11-16', '2026-11-13', '2026-11-12', '2026-11-11']);
   });
 
   test('a refused day names its HTTP status number in the failure, never the page', async () => {
