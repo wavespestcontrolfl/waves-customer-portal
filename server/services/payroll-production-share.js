@@ -58,19 +58,49 @@ function snapshotOf({ weekStart, settings, result, stops }) {
 }
 
 /**
- * The shares of the technicians in `technicianIds` for the pay week `weekStart`: Map of technician id ->
- * { shareCents, snapshot } for each one with settings in force, or { error } when the share could not be worked out (the
- * pay run lists that technician as blocked, in these words). A technician with no settings has no entry. Empty with the gate
- * off. Reads only; the connection is the pay run's transaction.
+ * The credit inputs of EVERY W-2 technician with settings in force for the pay week, read in ONE REPEATABLE READ, read-only
+ * transaction: Map of technician id -> { settings, stops } (stops = weekCredits rows), or { error } for one that could not be
+ * read. One snapshot for the whole run, so a visit reassigned from one technician to another while the run reads is credited
+ * to exactly one of them, never to both or neither, and a price edited between two technicians' reads cannot split them.
+ * Empty with the gate off (nothing is read).
+ *
+ * The pay run calls this BEFORE its own transaction opens, as the season bonus scores are read (tech-rewards-pay-lines.js
+ * readSeasonScores): the run then never holds the payroll lock while it waits for a second connection. `conn` is the pool.
+ * Given a transaction (a caller with no earlier read) the isolation level cannot be raised after its first query, so the reads
+ * run on it as they are; the pay run does not do that.
  */
-async function sharesFor(conn, technicianIds, weekStart) {
+async function readInputs(conn, weekStart) {
+  const inputs = new Map();
+  if (!shareOn()) return inputs;
+  await conn.transaction(async (trx) => {
+    const ids = await trx('technicians').where({ employment_type: 'w2' }).orderBy('id').pluck('id');
+    for (const id of ids) {
+      try {
+        const settings = await productionShare.settingsFor(trx, id, weekStart);
+        if (!settings) continue;
+        inputs.set(id, { settings, stops: await productionShare.weekCredits(trx, id, weekStart, { settings }) });
+      } catch (err) {
+        inputs.set(id, { error: `The production share could not be worked out: ${(err && err.message) || 'unknown problem'}` });
+      }
+    }
+  }, { isolationLevel: 'repeatable read', readOnly: true });
+  return inputs;
+}
+
+/**
+ * The shares of the technicians in `technicianIds` for the pay week `weekStart`, from the inputs readInputs returned: Map of
+ * technician id -> { shareCents, snapshot } for each one with settings in force, or { error } when the share could not be
+ * worked out (the pay run lists that technician as blocked, in these words). A technician with no settings has no entry.
+ * Pure: reads nothing, so every share of a run comes from the one snapshot.
+ */
+function sharesFor(inputs, technicianIds, weekStart) {
   const shares = new Map();
-  if (!shareOn() || !technicianIds.length) return shares;
   for (const id of technicianIds) {
+    const input = inputs.get(id);
+    if (!input) continue;
+    if (input.error) { shares.set(id, { error: input.error }); continue; }
     try {
-      const settings = await productionShare.settingsFor(conn, id, weekStart);
-      if (!settings) continue;
-      const stops = await productionShare.weekCredits(conn, id, weekStart, { settings });
+      const { settings, stops } = input;
       const result = productionShare.shareForWeek({ credits: stops, shifts: productionShare.shiftDays(stops).length, settings });
       shares.set(id, { shareCents: result.shareCents, snapshot: snapshotOf({ weekStart, settings, result, stops }) });
     } catch (err) {
@@ -142,4 +172,4 @@ function reviewNote(name, count) {
   return `${name}: ${count} ${count === 1 ? 'stop needs' : 'stops need'} review for the production share. ${count === 1 ? 'It pays' : 'They pay'} $0 in the share until fixed. Open the production share preview for the week, fix ${count === 1 ? 'it' : 'them'}, then recompute.`;
 }
 
-module.exports = { KIND, shareOn, sharesFor, priceableLine, signature, viewOf, reviewNote, snapshotOf };
+module.exports = { KIND, shareOn, readInputs, sharesFor, priceableLine, signature, viewOf, reviewNote, snapshotOf };

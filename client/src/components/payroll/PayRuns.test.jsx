@@ -382,6 +382,34 @@ describe('Finalized run', () => {
     expect(plain).not.toHaveTextContent('Production share');
   });
 
+  it('a check whose only extra pay is a production share still labels its overtime "Overtime on additional earnings", on the run table and the stub', async () => {
+    const shareOnly = check({
+      productionShareCents: 16200, lineOvertimePremiumCents: 900, reviewBonusCents: 0, commissionCents: 0, healthAllowanceCents: 0,
+      productionShare: { needsReviewCount: 0 },
+    });
+    const detail = await startRun({ checks: [shareOnly], totals: { ...totals, productionShareCents: 16200 } });
+    const view = within(detail);
+    expect(view.getByRole('columnheader', { name: 'Overtime on additional earnings' })).toBeInTheDocument();
+    expect(view.getByRole('columnheader', { name: 'Production share' })).toBeInTheDocument();
+    const cells = Array.from(view.getByRole('table', { name: 'Paychecks' }).querySelectorAll('tbody tr')[0].querySelectorAll('td')).map(cell => cell.textContent);
+    expect(cells).toContain('$9.00');
+    expect(cells).toContain('$162.00');
+    cleanup();
+    const saved = { ...STUB };
+    STUB.earnings = { ...STUB.earnings, productionShareCents: 16200, lineOvertimePremiumCents: 900, grossCents: 112100 };
+    try {
+      const final = await openFinal();
+      fireEvent.click(within(final).getByRole('button', { name: 'Stub for Sample Alpha' }));
+      const stub = await within(await screen.findByRole('dialog')).findByLabelText('Pay stub');
+      const table = within(stub).getByRole('table', { name: 'Pay stub amounts' });
+      expect(within(table).getByText('Overtime on additional earnings').closest('tr')).toHaveTextContent('$9.00');
+      expect(stub).not.toHaveTextContent('Overtime on bonus, commission and allowance');
+    } finally {
+      for (const key of Object.keys(STUB)) delete STUB[key];
+      Object.assign(STUB, saved);
+    }
+  });
+
   it('shows the breakdown on a stub with a $0 share (under the bar) and no earning row', async () => {
     const saved = { ...STUB };
     STUB.earnings = {

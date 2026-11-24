@@ -871,7 +871,7 @@ async function payoutAsksFrom(conn, ids) {
  * With lock, the approved weekly rows are locked FOR UPDATE, so an unlock of
  * that week waits for this transaction (unlockWeek then sees the finalized check).
  */
-async function evaluate(conn, run, { lock = false } = {}) {
+async function evaluate(conn, run, { lock = false, shareInputs = null } = {}) {
   const start = run.week_start;
   const end = addStaffWorkDays(start, 6);
   const approvedQuery = conn('time_weekly_summary as w')
@@ -982,7 +982,10 @@ async function evaluate(conn, run, { lock = false } = {}) {
   // $0 is priced again with the share as one more line of the week (payroll-production-share.js says how).
   const workedIds = new Set(withHours.map((row) => row.technician_id));
   const shareRows = payable.filter((row) => workedIds.has(row.technician_id));
-  const shares = await productionSharePay.sharesFor(conn, shareRows.map((row) => row.technician_id), start);
+  // The credit inputs come from one snapshot read before the pay run's transaction opened (readShareInputs); a caller that read
+  // none (the view of a draft) reads them here, on the connection it has.
+  const shares = productionSharePay.sharesFor(shareInputs || await productionSharePay.readInputs(conn, start),
+    shareRows.map((row) => row.technician_id), start);
   const sharePriced = await priceLines(conn, new Map(shareRows
     .filter((row) => shares.get(row.technician_id) && shares.get(row.technician_id).shareCents > 0)
     .map((row) => [row.technician_id, {
@@ -1204,6 +1207,15 @@ async function lockRunWrite(trx, today) {
   if (payLinesOn() || timeOffOn() || productionSharePay.shareOn() || await hasDueSteps(trx, today)) await lockPayrollMutations(trx);
 }
 
+// The production share credit inputs of a pay week, read in one snapshot BEFORE a pay run write opens its transaction (see
+// payroll-production-share.js readInputs). The week of an existing run is read first; an unknown run reads nothing (the
+// transaction then refuses it as it always did).
+async function readShareInputsOfRun(conn, runId) {
+  if (!productionSharePay.shareOn()) return null;
+  const run = await conn('payroll_runs').where({ id: runId }).first(conn.raw("to_char(week_start, 'YYYY-MM-DD') as week_start"));
+  return run ? productionSharePay.readInputs(conn, run.week_start) : null;
+}
+
 async function draftRun(input, actor, conn = db) {
   const v = validate(createSchema, input);
   const { start, end } = validateWeek(v.weekStart);
@@ -1212,6 +1224,7 @@ async function draftRun(input, actor, conn = db) {
   const taken = new PayrollError(409, 'That week already has a pay run. Open it, or void it first.');
   const today = etDateString();
   const seasonScores = await readSeasonScores(conn, payDate);
+  const shareInputs = await productionSharePay.readInputs(conn, start);
   let runId;
   try {
     runId = await conn.transaction(async (trx) => {
@@ -1224,7 +1237,7 @@ async function draftRun(input, actor, conn = db) {
       await syncCommission(trx, start, actorId);
       await applyDueSteps(trx, { today });
       await syncTechRewards(trx, run, actorId, seasonScores);
-      const evaluation = await evaluate(trx, run, { lock: true });
+      const evaluation = await evaluate(trx, run, { lock: true, shareInputs });
       // A week whose time off a time-off bank did not pay still gets a run, also with no paycheck: finalizing it
       // closes the week, so the unpaid decision is kept and those hours stop waiting for a pay run. The same for a
       // week whose only decision is the payout of an empty bank: finalizing it settles the owner's instruction.
@@ -1250,6 +1263,7 @@ async function recomputeRun(runId, actor, conn = db) {
   const actorId = actorOf(actor);
   const today = etDateString();
   const seasonScores = await readSeasonScoresOfRun(conn, runId);
+  const shareInputs = await readShareInputsOfRun(conn, runId);
   await conn.transaction(async (trx) => {
     await lockRunWrite(trx, today);
     const run = await loadRun(trx, runId, { lock: true });
@@ -1258,7 +1272,7 @@ async function recomputeRun(runId, actor, conn = db) {
     await syncCommission(trx, run.week_start, actorId);
     await applyDueSteps(trx, { today });
     await syncTechRewards(trx, run, actorId, seasonScores);
-    const evaluation = await evaluate(trx, run, { lock: true });
+    const evaluation = await evaluate(trx, run, { lock: true, shareInputs });
     await replaceDraftChecks(trx, runId, evaluation.checks);
     await audit(trx, actorId, 'payroll.run_recomputed', 'payroll_runs', runId, { run_id: runId });
   });
@@ -1305,6 +1319,7 @@ async function finalizeRun(runId, input, actor, conn = db) {
   const actorId = actorOf(actor);
   let changed = false;
   const seasonScores = await readSeasonScoresOfRun(conn, runId);
+  const shareInputs = await readShareInputsOfRun(conn, runId);
   await conn.transaction(async (trx) => {
     await lockPayrollMutations(trx);
     const run = await loadRun(trx, runId, { lock: true });
@@ -1313,7 +1328,7 @@ async function finalizeRun(runId, input, actor, conn = db) {
     await syncCommission(trx, run.week_start, actorId);
     await applyDueSteps(trx);
     await syncTechRewards(trx, run, actorId, seasonScores);
-    const evaluation = await evaluate(trx, run, { lock: true });
+    const evaluation = await evaluate(trx, run, { lock: true, shareInputs });
     if (evaluation.blocked.length || evaluation.waiting.length) throw new PayrollError(409, describeProblems(evaluation));
     // A run with no paycheck can still close a week whose time off was not paid, or settle the payout of an empty
     // bank (see draftRun). The token check below then covers a draft whose checks are gone.

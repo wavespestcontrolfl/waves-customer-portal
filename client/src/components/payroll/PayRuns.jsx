@@ -137,7 +137,7 @@ export function StubDialog({ call, check, onClose }) {
               {stub.earnings.commissionCents > 0 && <TR><TD>Commission</TD><TD nums align="right">{centsToDollars(stub.earnings.commissionCents)}</TD><TD nums align="right" /></TR>}
               {stub.earnings.healthAllowanceCents > 0 && <TR><TD>Health allowance</TD><TD nums align="right">{centsToDollars(stub.earnings.healthAllowanceCents)}</TD><TD nums align="right" /></TR>}
               {stub.earnings.techRewardsCents > 0 && <TR><TD>Tech rewards (season bonus, stay bonus or December gift)</TD><TD nums align="right">{centsToDollars(stub.earnings.techRewardsCents)}</TD><TD nums align="right" /></TR>}
-              {stub.earnings.lineOvertimePremiumCents > 0 && <TR><TD>Overtime on bonus, commission and allowance</TD><TD nums align="right">{centsToDollars(stub.earnings.lineOvertimePremiumCents)}</TD><TD nums align="right" /></TR>}
+              {stub.earnings.lineOvertimePremiumCents > 0 && <TR><TD>Overtime on additional earnings</TD><TD nums align="right">{centsToDollars(stub.earnings.lineOvertimePremiumCents)}</TD><TD nums align="right" /></TR>}
               <TR><TD><strong>Gross pay</strong></TD><TD nums align="right"><strong>{centsToDollars(stub.earnings.grossCents)}</strong></TD><TD nums align="right">{centsToDollars(stub.ytd.grossCents)}</TD></TR>
               <TR><TD>Federal income tax</TD><TD nums align="right">{centsToDollars(stub.taxes.federalIncomeTaxCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.federalIncomeTaxCents)}</TD></TR>
               <TR><TD>Social Security</TD><TD nums align="right">{centsToDollars(stub.taxes.socialSecurityCents)}</TD><TD nums align="right">{centsToDollars(stub.ytd.socialSecurityCents)}</TD></TR>
@@ -384,7 +384,7 @@ function ChecksTable({ call, run, isFinal, onStub, onSaved }) {
         {showHoliday && <TH align="right">Holiday</TH>}
         {showMinimum && <TH align="right">Minimum week</TH>}
         {showLines && <TH align="right">Bonus, commission, allowance</TH>}
-        {showLines && <TH align="right">Overtime on those</TH>}
+        {showLines && <TH align="right">Overtime on additional earnings</TH>}
         {showShare && <TH align="right">Production share</TH>}
         <TH align="right">Rate</TH><TH align="right">Gross</TH>
         <TH align="right">Federal income tax</TH><TH align="right">Social Security</TH><TH align="right">Medicare</TH><TH align="right">Net</TH>

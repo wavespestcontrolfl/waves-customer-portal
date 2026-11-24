@@ -186,11 +186,89 @@ describe('buildCheck with a share', () => {
     expect(JSON.parse(check.calc_snapshot)).not.toHaveProperty('productionShare');
   });
 
-  test('the gate off: sharesFor reads nothing and returns nothing', async () => {
+  test('the gate off: readInputs opens no transaction and reads nothing', async () => {
     delete process.env.GATE_PAYROLL_PRODUCTION_SHARE;
-    const conn = jest.fn(() => { throw new Error('read'); });
-    expect((await share.sharesFor(conn, ['tech-1'], WEEK)).size).toBe(0);
-    expect(conn).not.toHaveBeenCalled();
+    const conn = { transaction: jest.fn(() => { throw new Error('read'); }) };
+    expect((await share.readInputs(conn, WEEK)).size).toBe(0);
+    expect(conn.transaction).not.toHaveBeenCalled();
+    expect(share.sharesFor(new Map(), ['tech-1'], WEEK).size).toBe(0);
+  });
+});
+
+describe('one snapshot for the whole run', () => {
+  const productionShare = require('../services/production-share');
+  const reads = [];
+  // A stand-in connection: transaction() hands its handler one fake trx and records the options.
+  const fakeConn = () => {
+    const trx = () => ({ where: () => ({ orderBy: () => ({ pluck: async () => ['tech-a', 'tech-b', 'tech-c'] }) }) });
+    const conn = { transaction: jest.fn(async (handler, options) => { conn.options = options; return handler(trx); }), trx };
+    return conn;
+  };
+  beforeEach(() => {
+    process.env.GATE_PAYROLL_PRODUCTION_SHARE = 'true';
+    reads.length = 0;
+    jest.spyOn(productionShare, 'settingsFor').mockImplementation(async (c, id) => {
+      reads.push(['settings', c, id]);
+      return id === 'tech-c' ? null : SETTINGS;
+    });
+    jest.spyOn(productionShare, 'weekCredits').mockImplementation(async (c, id) => {
+      reads.push(['credits', c, id]);
+      return id === 'tech-a' ? WEEK_STOPS : stops([['v9', '2026-09-14', 1000]]);
+    });
+  });
+  afterEach(() => { jest.restoreAllMocks(); delete process.env.GATE_PAYROLL_PRODUCTION_SHARE; });
+
+  test('every technician is read on the same connection, inside one REPEATABLE READ read-only transaction', async () => {
+    const conn = fakeConn();
+    const inputs = await share.readInputs(conn, WEEK);
+    expect(conn.transaction).toHaveBeenCalledTimes(1);
+    expect(conn.options).toEqual({ isolationLevel: 'repeatable read', readOnly: true });
+    // 3 settings reads and 2 credit reads (tech-c has no settings), all on the one trx, none on the pool
+    expect(reads.map(([, c]) => c)).toHaveLength(5);
+    expect(new Set(reads.map(([, c]) => c))).toEqual(new Set([conn.trx]));
+    expect([...inputs.keys()].sort()).toEqual(['tech-a', 'tech-b']);
+  });
+
+  test('the shares are worked out from those inputs alone: a visit credited to one technician is not credited to another', () => {
+    const inputs = new Map([['tech-a', { settings: SETTINGS, stops: WEEK_STOPS }], ['tech-b', { settings: SETTINGS, stops: stops([['v9', '2026-09-14', 1000]]) }]]);
+    const shares = share.sharesFor(inputs, ['tech-a', 'tech-b', 'tech-c'], WEEK);
+    expect(shares.get('tech-a').shareCents).toBe(7800);
+    expect(shares.get('tech-b').shareCents).toBe(0);
+    expect(shares.has('tech-c')).toBe(false);
+    const credited = [...shares.values()].flatMap((one) => one.snapshot.stops.map((stop) => stop.visitId));
+    expect(new Set(credited).size).toBe(credited.length);
+  });
+
+  test('a technician whose read fails is an error row for that technician only', async () => {
+    productionShare.weekCredits.mockImplementation(async (c, id) => { if (id === 'tech-b') throw new Error('boom'); return WEEK_STOPS; });
+    const inputs = await share.readInputs(fakeConn(), WEEK);
+    const shares = share.sharesFor(inputs, ['tech-a', 'tech-b'], WEEK);
+    expect(shares.get('tech-a').shareCents).toBe(7800);
+    expect(shares.get('tech-b')).toEqual({ error: 'The production share could not be worked out: boom' });
+  });
+});
+
+describe('the migration down', () => {
+  const migration = require('../models/migrations/20261124070000_payroll_production_share');
+  const fakeKnex = (stored) => {
+    const calls = [];
+    const knex = (table) => ({ whereNotNull: () => ({ first: async () => { calls.push(`read ${table}`); return stored ? { id: 1 } : undefined; } }) });
+    knex.raw = async (sql) => { calls.push(sql.trim().split('\n')[0]); };
+    knex.schema = { hasColumn: async () => true };
+    return { knex, calls };
+  };
+
+  test('takes the table lock BEFORE it looks for a stored share, and refuses when one is there', async () => {
+    const { knex, calls } = fakeKnex(true);
+    await expect(migration.down(knex)).rejects.toThrow(/production share figures/);
+    expect(calls).toEqual(['LOCK TABLE payroll_checks IN ACCESS EXCLUSIVE MODE', 'read payroll_checks']);
+  });
+
+  test('with nothing stored it drops the column after the lock', async () => {
+    const { knex, calls } = fakeKnex(false);
+    await migration.down(knex);
+    expect(calls[0]).toBe('LOCK TABLE payroll_checks IN ACCESS EXCLUSIVE MODE');
+    expect(calls.at(-1)).toMatch(/DROP COLUMN/);
   });
 });
 

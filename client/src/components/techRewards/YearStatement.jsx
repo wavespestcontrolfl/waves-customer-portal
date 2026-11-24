@@ -28,7 +28,7 @@ const PAY_ROWS = [
   ['seasonBonusCents', 'Season bonus'],
   ['stayBonusCents', 'Stay bonus'],
   ['decemberGiftCents', 'December gift'],
-  ['lineOvertimePremiumCents', 'Overtime on bonus, commission and allowance'],
+  ['lineOvertimePremiumCents', 'Overtime on additional earnings'],
   ['otherCents', 'Other pay'],
 ];
 const TAX_ROWS = [
@@ -47,7 +47,10 @@ const AmountRow = ({ label, cents, strong = false }) => <TR>
   <TD>{strong ? <strong>{label}</strong> : label}</TD>
   <TD nums align="right">{strong ? <strong>{centsToDollars(cents)}</strong> : centsToDollars(cents)}</TD>
 </TR>;
-const amountRows = (rows, figures) => rows.filter(([key]) => Boolean(figures[key]))
+// A part shows when it is not 0. The production share also shows as $0 once a paycheck of the year stored one (the server sends the
+// row only then), so a technician sees a year at or under the bar; a year with none has no such key.
+const SHOWN_WHEN_STORED = new Set(['productionShareCents']);
+const amountRows = (rows, figures) => rows.filter(([key]) => (SHOWN_WHEN_STORED.has(key) ? figures[key] != null : Boolean(figures[key])))
   .map(([key, label]) => <AmountRow key={key} label={label} cents={figures[key]} />);
 
 export function YearStatementView({ statement }) {
