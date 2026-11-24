@@ -66,7 +66,7 @@ describe('getHomePage', () => {
     const read = mockCalls[0];
     expect(read.q.wheres).toEqual([{ page_token: TOKEN, list_key: 'new_home' }]);
     expect(read.q.inLists).toEqual([['status', ['eligible', 'held_back']]]);
-    expect(read.columns).toEqual(['id', 'status', 'address_line1', 'city', 'zip', 'price_status', 'price_annual', 'price_setup_fee', 'priced_at']);
+    expect(read.columns).toEqual(['id', 'status', 'address_line1', 'city', 'zip', 'price_status', 'price_annual', 'price_setup_fee', 'priced_at', 'mailed_at', 'mailed_price']);
   });
 
   test('a priced eligible home: address, price to the cent, plan; nothing else', async () => {
@@ -75,8 +75,28 @@ describe('getHomePage', () => {
       address: { line1: '101 EXAMPLE TRL', city: 'SAMPLETON', zip: '34212' },
       price: { monthly: 52.25, annual: 627.01, setupFee: 0, pricedAt: '2026-11-22T22:00:00.000Z' },
       plan: 'pest_quarterly',
+      heldUntil: null,
     });
-    expect(Object.keys(page).sort()).toEqual(['address', 'plan', 'price']);
+    expect(Object.keys(page).sort()).toEqual(['address', 'heldUntil', 'plan', 'price']);
+  });
+
+  test('a mailed home shows the printed price, not the columns, and the day it is held until (60 days, Eastern)', async () => {
+    // The columns say 700; the card was printed with 52.25 a month. The page must agree with the card.
+    mockRow = row({
+      price_annual: '700.00',
+      mailed_at: new Date('2026-11-24T15:00:00Z'),
+      mailed_price: { plan: 'pest_quarterly', annual: 627.01, monthly: 52.25, setupFee: 0, pricedAt: '2026-11-22T22:00:00.000Z' },
+    });
+    const page = await getHomePage(TOKEN);
+    expect(page.price).toEqual({ monthly: 52.25, annual: 627.01, setupFee: 0, pricedAt: '2026-11-22T22:00:00.000Z' });
+    expect(page.heldUntil).toBeNull(); // no hold until booking honors the printed price
+  });
+
+  test('a mailed home whose snapshot cannot be read shows no price and no hold date', async () => {
+    mockRow = row({ mailed_at: new Date('2026-11-24T15:00:00Z'), mailed_price: { plan: 'pest_quarterly' } });
+    const page = await getHomePage(TOKEN);
+    expect(page.price).toBeNull();
+    expect(page.heldUntil).toBeNull();
   });
 
   test('the monthly price is rounded from whole cents (301.02 / 12 = 25.085 is 25.09, not the float 25.08)', async () => {

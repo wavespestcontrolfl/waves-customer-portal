@@ -7,6 +7,12 @@
  * The postcard prints "gowavesfl.com/101-example". A Cloudflare rule (NOT part of this build; docs/public-route-contracts.md)
  * sends the paths that look like a slug to portal.wavespestcontrol.com/nh/<slug>; this route does the lookup.
  *
+ * A known slug also adds one to the home's page_typed_views (not awaited: the redirect never waits for it; no IP and no
+ * user agent is stored; link-preview and scanner agents, staff browsers and staff IPs are not counted, as for the page's own
+ * page_views). Every dead answer carries utm_source=new_home_postcard&utm_medium=print&utm_campaign=typed_link_miss on the
+ * marketing site address, so a mistyped card shows in analytics; the gate-off and bad-shape answers carry it too, so the
+ * gate is still not an oracle.
+ *
  * A dead slug never errors: the gate off (GATE_MAIL_HOME_PAGE), a bad shape, an unknown slug, a home that is not live
  * (not_eligible, unmatched), a row of another list and a failed lookup all give the same redirect to the marketing site,
  * so a printed card never lands on an error page and the gate is not an oracle. The only other answer is 429 when a
@@ -26,9 +32,12 @@ const db = require('../models/db');
 const { mailHomePageLive } = require('../config/feature-gates');
 const { SLUG_RE, MAX_SLUG_LENGTH } = require('../services/mail/home-slug');
 const { ipFallbackKey } = require('../middleware/rate-limit-key');
+const { shouldRecord } = require('../services/customer-page-views');
 const logger = require('../services/logger');
 
-const MARKETING_SITE = 'https://www.wavespestcontrol.com/';
+const MARKETING_SITE = 'https://www.wavespestcontrol.com/?utm_source=new_home_postcard&utm_medium=print&utm_campaign=typed_link_miss';
+// A typed-view write that waits longer (a row lock) is canceled, so it never holds a pool connection for long.
+const VIEW_WRITE_TIMEOUT_MS = 2000;
 const LIST_KEY = 'new_home'; // services/mail/new-home-list.js LIST_KEY
 const LIVE_STATUSES = ['eligible', 'held_back'];
 const TOKEN_RE = /^[0-9a-f]{32}$/;
@@ -44,6 +53,18 @@ function privacyHeaders(res) {
   });
 }
 const toSite = (res) => res.redirect(302, MARKETING_SITE);
+
+const codeOf = (err) => (err && (typeof err.code === 'string' || typeof err.code === 'number') ? String(err.code).slice(0, 32) : 'unknown');
+
+// One atomic add, fire and forget. It never throws and logs only the error code (a Knex message carries SQL and bound values).
+async function countTypedView(id) {
+  try {
+    await db('mail_prospects').where({ id }).update({ page_typed_views: db.raw('page_typed_views + 1') })
+      .timeout(VIEW_WRITE_TIMEOUT_MS, { cancel: true });
+  } catch (err) {
+    try { logger.warn(`[mail-home-short-link] typed view write failed (code=${codeOf(err)})`); } catch { /* never throw */ }
+  }
+}
 
 // The privacy headers on every answer; a method other than GET and HEAD finds no handler below (Express answers 404).
 router.use((req, res, next) => {
@@ -77,13 +98,14 @@ router.get('/:slug', async (req, res) => {
     const row = await db('mail_prospects')
       .where({ page_slug: req.pageSlug, list_key: LIST_KEY })
       .whereIn('status', LIVE_STATUSES)
-      .first('page_token');
+      .first('id', 'page_token');
     if (!row || typeof row.page_token !== 'string' || !TOKEN_RE.test(row.page_token)) return toSite(res);
+    // Only a GET is a use of the printed address (HEAD is served here too); not awaited.
+    if (req.method === 'GET' && shouldRecord(req)) void countTypedView(row.id);
     return res.redirect(302, `/h/${row.page_token}`);
   } catch (err) {
     // The error code only: a Knex message carries the SQL and its bound values.
-    const code = err && (typeof err.code === 'string' || typeof err.code === 'number') ? String(err.code).slice(0, 32) : 'unknown';
-    logger.error(`[mail-home-short-link] lookup failed (code=${code})`);
+    logger.error(`[mail-home-short-link] lookup failed (code=${codeOf(err)})`);
     return toSite(res);
   }
 });

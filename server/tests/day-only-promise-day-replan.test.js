@@ -17,7 +17,13 @@ jest.mock('../services/scheduling/occupancy', () => ({ techScopedConfirmActive: 
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({
   DAY_OPEN: 8 * 60, DAY_CLOSE: 17 * 60, violatesPreferredTime: jest.fn(), _internals: { isSaturday: jest.fn(), isWeekendDay: jest.fn() },
 }));
-jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: jest.fn(), loadPromiseLevels: jest.fn() }));
+// loadPromiseFacts (the day re-plan's one promise read) answers from the loadPromiseLevels fake, with no told start.
+jest.mock('../services/auto-dispatch/told-visits', () => {
+  const loadPromiseLevels = jest.fn();
+  const loadPromiseFacts = jest.fn(async (...args) => new Map([...(await loadPromiseLevels(...args))].map(([id, level]) => [id, { level, start: null }])));
+  return { loadToldVisitIds: jest.fn(), loadPromiseLevels, loadPromiseFacts };
+});
+const factsFrom = (levelsFn) => async (...args) => new Map([...(await levelsFn(...args))].map(([id, level]) => [id, { level, start: null }]));
 jest.mock('../services/time-promise', () => ({ ...jest.requireActual('../services/time-promise'), dayOnlyEligibility: jest.fn() }));
 jest.mock('../services/auto-dispatch/eligibility', () => ({
   ...jest.requireActual('../services/auto-dispatch/eligibility'),
@@ -292,14 +298,14 @@ describe('recheckVisit inside the move transaction (apply mode)', () => {
   const deps = ({ levels = {}, placed = false, setTime = [] } = {}) => ({
     isPersonPlacedVisit: jest.fn(async () => ({ placed })),
     loadSetTime: jest.fn(async (_conn, rows) => new Map(rows.map((r) => r.id).filter((id) => setTime.includes(id)).map((id) => [id, 'set_time']))),
-    loadPromiseLevels: jest.fn(levelsOf(levels)),
+    loadPromiseFacts: jest.fn(factsFrom(levelsOf(levels))),
   });
 
   test('a one-time visit told only the day is written (no first_or_one_time)', async () => {
     const over = deps({ levels: { a: 'day', b: 'day' } });
     const w = world({ rowExtra: oneTime, over });
     expect(await w.run()).toEqual({ status: 'applied', reason: 'applied', moved: 2 });
-    expect(over.loadPromiseLevels).toHaveBeenCalled();
+    expect(over.loadPromiseFacts).toHaveBeenCalled();
   });
 
   test('a person-placed visit told only the day is written', async () => {
@@ -354,7 +360,7 @@ describe('recheckVisit inside the move transaction (apply mode)', () => {
 
   test('a level read that throws fails closed (time_told), nothing written', async () => {
     const over = deps();
-    over.loadPromiseLevels = jest.fn(async () => { throw new Error('level read down'); });
+    over.loadPromiseFacts = jest.fn(async () => { throw new Error('level read down'); });
     const w = world({ rowExtra: recurring, over });
     expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:time_told', moved: 0 });
     expect(w.rowWrites()).toEqual([]);
@@ -366,10 +372,11 @@ describe('recheckVisit inside the move transaction (apply mode)', () => {
     expect(await w.run()).toEqual({ status: 'skipped', reason: 'visit_not_movable:first_or_one_time', moved: 0 });
   });
 
-  test('applyDeps carries loadPromiseLevels and loadSetTime', () => {
+  test('applyDeps carries loadPromiseFacts, toldFactsOf and loadSetTime', () => {
     const real = _internals.applyDeps();
     expect(typeof real.loadSetTime).toBe('function');
-    expect(typeof real.loadPromiseLevels).toBe('function');
+    expect(typeof real.loadPromiseFacts).toBe('function');
+    expect(typeof real.toldFactsOf).toBe('function');
     expect(real).not.toHaveProperty('dayOnlyOn');
   });
 });

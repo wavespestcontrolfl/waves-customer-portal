@@ -34,6 +34,9 @@ export default function SaveCardConsent({
   // choice must not diverge from the PaymentIntent's consent stamp mid-flight.
   disabled = false,
   methodType = 'card',
+  // 'save_only' = the save-only add form (the "add a card" reminder email link): its own short statement, never the
+  // Auto Pay authorization.
+  variant = null,
   headline,
   style,
   collapsible = false,
@@ -61,7 +64,7 @@ export default function SaveCardConsent({
   const resolvedHeadline = headline ?? (isAch
     ? 'Save this bank account on file with Waves Pest Control'
     : 'Save this payment method on file with Waves Pest Control');
-  const consentText = getConsentText(methodType);
+  const consentText = getConsentText(methodType, { variant });
   // Display-only paragraph breaks — the canonical consent string (and its
   // CONSENT_VERSION) is unchanged; splitting must never alter characters:
   // each segment keeps its trailing ". ", so joining the segments — DOM

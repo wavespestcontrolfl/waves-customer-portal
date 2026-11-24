@@ -79,4 +79,5 @@ runbook. User-visible features ship dark behind `GATE_*` env switches
 - `AGENTS.md` — code-review rulebook (P0/P1) used by the Codex hook + bot
 - `CODEX.md` — sandbox/DB setup for agent sessions
 - `docs/design/DECISIONS.md` — append-only architectural decision log
+- `docs/scheduling-days-off.md` — closed days: blackouts, weekly days off, the six closed holidays, technician birthdays, tech-out, and who reads each
 - `.claude/skills/` — operating procedures for ship flow, DB, billing, content

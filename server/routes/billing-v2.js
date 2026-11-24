@@ -10,13 +10,13 @@ const logger = require('../services/logger');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const { logAutopay } = require('../services/autopay-log');
 const { isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { saveOnlyMetadata, saveOnlyEvidence, setupIntentSavesOnly, finishSaveOnlyAdd } = require('../services/portal-save-only-card');
+const { saveOnlyMetadata, saveOnlyEvidence, setupIntentSavesOnly, saveOnlyStampIsCurrent, finishSaveOnlyAdd } = require('../services/portal-save-only-card');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 const { loadFailedPaymentFacts, standaloneFailedTotal, isNeverAttemptedDeferral } = require('../services/failed-payments');
 const { isEnabled } = require('../config/feature-gates');
 const { removePaymentMethod } = require('../services/payment-method-removal');
 const {
-  CONSENT_VERSION_METADATA_KEY, consentVersionStaleResponse, renderedConsentVersionIsCurrent,
+  CONSENT_VERSION_METADATA_KEY, consentVersionStaleResponse, renderedConsentVersionIsCurrent, saveOnlyConsentVersionIsCurrent,
 } = require('../services/payment-method-consent-text');
 
 router.use(authenticate);
@@ -239,7 +239,10 @@ router.post('/cards/setup-intent', async (req, res, next) => {
     // portal_add_method webhook record the consent only under a current
     // stamp — never the posting bundle's constant, which a redirect return
     // re-sends from a freshly loaded, possibly newer bundle.
-    if (!renderedConsentVersionIsCurrent(consentTextVersion)) {
+    // The save-only form shows its own short statement, so it attests its own version; the usual form attests the Auto
+    // Pay authorization's.
+    const attestedVersionIsCurrent = enrollAutopay ? renderedConsentVersionIsCurrent(consentTextVersion) : saveOnlyConsentVersionIsCurrent(consentTextVersion);
+    if (!attestedVersionIsCurrent) {
       return res.status(409).json(consentVersionStaleResponse());
     }
     // Portal bank saves are gated (GATE_PORTAL_ACH_AUTOPAY): with the gate
@@ -336,9 +339,14 @@ router.post('/cards', async (req, res, next) => {
     // absent stamp is refused BEFORE any mirror/consent/enrollment — the
     // customer refreshes and re-adds under the current text (codex #5434
     // r1 P1). The portal_add_method webhook applies the same rule.
-    if (!renderedConsentVersionIsCurrent(setupIntent?.metadata?.[CONSENT_VERSION_METADATA_KEY])) {
+    const stampIsCurrent = setupIntentSavesOnly(setupIntent)
+      ? saveOnlyStampIsCurrent(setupIntent)
+      : renderedConsentVersionIsCurrent(setupIntent?.metadata?.[CONSENT_VERSION_METADATA_KEY]);
+    if (!stampIsCurrent) {
       logger.warn(`[billing-v2] add-method refused — SI ${setupIntentId} stamped consent text version ${setupIntent?.metadata?.[CONSENT_VERSION_METADATA_KEY] || 'absent'}, not the current one (customer ${req.customerId})`);
-      return res.status(409).json(consentVersionStaleResponse());
+      // save_only tells the client which form to reopen after the refresh it asks for (a Stripe redirect return has no
+      // other way to know the intent came from the save-only form).
+      return res.status(409).json({ ...consentVersionStaleResponse(), ...(setupIntentSavesOnly(setupIntent) ? { save_only: true } : {}) });
     }
 
     // Micro-deposit deferred save (portal ACH lane): a bank SetupIntent

@@ -8,7 +8,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const { adminFetch } = vi.hoisted(() => ({ adminFetch: vi.fn() }));
 vi.mock("../../lib/adminFetch", () => ({ adminFetch }));
 
-import MailProspectsPage, { factsText, priceCountsText, priceText, runText } from "./MailProspectsPage";
+import MailProspectsPage, { factsText, mailedText, priceCountsText, priceText, runText } from "./MailProspectsPage";
 
 const reply = (body, { ok = true, status = 200 } = {}) => Promise.resolve({ ok, status, json: async () => body });
 
@@ -29,7 +29,7 @@ const UNPRICED = { ...PRICED, status: "untried", annual: null, monthly: null, se
 const base = { counts: COUNTS, priceCounts: PRICE_COUNTS, reasons: REASONS, newestRecordedDate: "2026-11-20", lastCheckedAt: CHECKED, truncated: false };
 const home = (over) => ({
   id: "m-1", recordedDate: "2026-11-20", status: "eligible", reason: null, recipientNames: ["TESTER ALEX J", "TESTER BEA K"],
-  addressLine1: "101 EXAMPLE TRL", city: "SAMPLETON", zip: "34212", pageSlug: null, subdivision: "SAMPLETON ESTATES", matchBasis: "lot_block",
+  addressLine1: "101 EXAMPLE TRL", city: "SAMPLETON", zip: "34212", pageSlug: null, mailedAt: null, mailBatch: null, typedViews: 0, subdivision: "SAMPLETON ESTATES", matchBasis: "lot_block",
   coDate: "2026-10-30", livingSqft: 2100, legalDescription: "LOT 12 SAMPLETON ESTATES PH 2", price: PRICED, ...over,
 });
 const LIVE = {
@@ -67,7 +67,7 @@ it("opens on Homes with the intro, the four counts, the run line and one row per
   route({ "/admin/prospects/mail?view=live": () => reply(LIVE) });
   renderPage();
   expect(await screen.findByText("TESTER ALEX J, TESTER BEA K")).toBeInTheDocument();
-  expect(screen.getByText("New-home buyers from the county deed list. Nothing is mailed yet, and the prices are shadow prices: nobody sees them.")).toBeInTheDocument();
+  expect(screen.getByText("New-home buyers from the county deed list. The prices are shadow prices until a home is marked as mailed; a mailed home's price is frozen.")).toBeInTheDocument();
   expect(screen.getByText("Get a card").nextSibling).toHaveTextContent("2");
   expect(screen.getByText("Held back", { selector: "div" }).nextSibling).toHaveTextContent("1");
   expect(screen.getByText("No card: the comparison group")).toBeInTheDocument();
@@ -198,6 +198,21 @@ it("runText names the Eastern day and time, and either half can be missing", () 
   expect(runText({ newestRecordedDate: null, lastCheckedAt: CHECKED })).toBe("Newest deed: none · Last checked: Nov 21, 2026, 4:30 PM");
   expect(runText({ newestRecordedDate: "2026-11-20", lastCheckedAt: null })).toBe("Newest deed: Nov 20, 2026 · Last checked: never");
   expect(runText({ newestRecordedDate: null, lastCheckedAt: null })).toBe("No run yet.");
+});
+
+it("a mailed home that is no longer eligible still shows its mailing record in the other views", async () => {
+  const mailed = home({ id: "n-9", status: "not_eligible", reason: "company_buyer", mailedAt: "2026-11-24T15:00:00.000Z", mailBatch: "b-1", typedViews: 2 });
+  route({ "/admin/prospects/mail?view=not_eligible": () => reply({ ...NOT_ELIGIBLE, rows: [mailed] }), "/admin/prospects/mail?view=live": () => reply(LIVE) });
+  renderPage();
+  await screen.findByText("TESTER ALEX J, TESTER BEA K");
+  fireEvent.click(screen.getByRole("button", { name: "Not eligible" }));
+  expect(await screen.findByText("Mailed Nov 24, 2026 · batch b-1 · 2 typed visits")).toBeInTheDocument();
+});
+
+it("mailedText says when a home was mailed, in which batch, and how often its typed address was used; nothing before it is mailed", () => {
+  expect(mailedText(home())).toBe("");
+  expect(mailedText(home({ mailedAt: "2026-11-24T15:00:00.000Z", mailBatch: "2026-11-a", typedViews: 3 }))).toBe("Mailed Nov 24, 2026 · batch 2026-11-a · 3 typed visits");
+  expect(mailedText(home({ mailedAt: "2026-11-24T15:00:00.000Z", mailBatch: null, typedViews: 1 }))).toBe("Mailed Nov 24, 2026 · 1 typed visit");
 });
 
 it("priceText gives the monthly price, or the status and its reason; an unknown code shows as it is", () => {

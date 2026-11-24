@@ -214,7 +214,7 @@ describe('every mover of a booked visit\'s date or property asks it, in its own 
     const carry = src.slice(src.indexOf('const carryVisitPartners = async ('));
     const ask = carry.indexOf("assertMovedVisitLimitsOpen(trx, { visitId: partner.id, scheduledDate: dateStr, staff: initiatedBy === 'admin' });");
     expect(ask).toBeGreaterThan(0);
-    expect(ask).toBeLessThan(carry.indexOf('await writePartnerCas(trx, partner, pUpdate);'));
+    expect(ask).toBeLessThan(carry.indexOf('await writePartnerCas(trx, partner, pUpdate, shiftLive);'));
     expect(carry.slice(ask - 120, ask)).toContain('if (partnerDateChanges) {');
   });
 

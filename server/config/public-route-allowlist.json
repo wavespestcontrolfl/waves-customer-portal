@@ -236,10 +236,10 @@
     {
       "router": "server/routes/mail-home-short-link.js",
       "mount": "/nh",
-      "reason": "The short typed address printed on the new-home postcard (mailer step 2d-2, owner 2026-11-23): GET /nh/101-example is a 302 to that home's page /h/<token>, or to https://www.wavespestcontrol.com/ for everything else (gate GATE_MAIL_HOME_PAGE off, bad slug shape, unknown slug, a home that is not live, a failed lookup). Not an open redirect: both targets are fixed (the marketing site, or a path built from a stored 32-hex token); nothing in the request names them. The slug is not a credential (house number + street name, guessing is accepted by the owner); the Location it returns is the home's bearer link, so every answer carries no-store, noindex and no-referrer. Its own root: /go (the outside-link redirect) is not shared. Per-route limiter 60 a minute per IP",
+      "reason": "The short typed address printed on the new-home postcard (mailer step 2d-2, owner 2026-11-23): GET /nh/101-example is a 302 to that home's page /h/<token>, or to https://www.wavespestcontrol.com/?utm_source=new_home_postcard&utm_medium=print&utm_campaign=typed_link_miss for everything else (gate GATE_MAIL_HOME_PAGE off, bad slug shape, unknown slug, a home that is not live, a failed lookup). Not an open redirect: both targets are fixed (the marketing site, or a path built from a stored 32-hex token); nothing in the request names them. The slug is not a credential (house number + street name, guessing is accepted by the owner); the Location it returns is the home's bearer link, so every answer carries no-store, noindex and no-referrer. Its own root: /go (the outside-link redirect) is not shared. A live GET also adds one to the home's page_typed_views (not awaited, no IP or user agent stored; scanners and staff are skipped). Per-route limiter 60 a minute per IP",
       "routes": [
         "GET /nh/:slug",
-        "USE /nh (inline function#8a7457de)",
+        "USE /nh (inline function#186f2f53)",
         "USE /nh (express-rate-limit({ handler#4df7abdf }))"
       ]
     },

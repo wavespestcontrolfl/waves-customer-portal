@@ -205,7 +205,7 @@ async function fenceFlexSeries(trx, rows, refuse) {
 // note: the fence alone never stops an ordinary single-occurrence
 // reschedule of a neighbor) and the durable drift anchor (route-tiers'
 // loadAnchorMap/resolveAnchor — the earliest pre-auto-dispatch date on
-// record), so the ±5 days (±7 for a plan of 2 months or longer) are measured from the visit's original date and an
+// record), so the ±5 days (±6 for a 2-month plan, ±7 for 3 months or longer) are measured from the visit's original date and an
 // earlier night's move never resets them. Refuses (fail closed) on an
 // unreadable or busy read, an unknown anchor or neighbor set, or best.date
 // outside a window.

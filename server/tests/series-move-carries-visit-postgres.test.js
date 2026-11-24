@@ -133,7 +133,7 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     return new Map(rows.map((r) => [String(r.id), r]));
   }
 
-  function moveLawnSeries(f, { by = 'admin', days = 1 } = {}) {
+  function moveLawnSeries(f, { by = 'admin', days = 1, ...more } = {}) {
     const anchor = f.lawn[0];
     return rebooker.rescheduleSeries(anchor.id, addDays(dateOnly(anchor.scheduled_date), days), '09:00-10:00', 'admin', by, {
       allowLive: true,
@@ -141,6 +141,7 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
       sourceSurface: 'dispatch_board',
       notifyRequested: false,
       overlapAdvisory: true,
+      ...more,
     });
   }
 
@@ -468,6 +469,77 @@ postgres('staff series move carries grouped visit partners (GATE_SERIES_MOVE_CAR
     } finally {
       delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
     }
+  });
+
+  // GATE_TECH_SHIFT_HOURS (D4 part 3b-2c): a series move the office did not start judges each
+  // carried partner on the technician it keeps, as it judges the plan's own visits.
+  describe('shift hours', () => {
+    afterEach(() => { delete process.env.GATE_TECH_SHIFT_HOURS; });
+    const allIds = (f) => [...f.lawn.map((r) => r.id), ...f.pest.map((r) => r.id)];
+    const datesOf = async (f) => [...(await rowsOf(allIds(f))).entries()].map(([id, r]) => [id, dateOnly(r.scheduled_date)]).sort();
+    // The technician works 08:00 to 12:00. The first stop's pest partner is a four-hour job: from 09:00 it ends at 13:00.
+    const buildLongPartner = async () => {
+      const f = await build();
+      await db('technicians').where({ id: f.techId }).update({ shift_start: '08:00', shift_end: '12:00' });
+      await db('scheduled_services').where({ id: f.pest[0].id }).update({ estimated_duration_minutes: 240 });
+      return f;
+    };
+
+    test('a technician\'s series move does not carry a partner its technician\'s shift does not hold, and nothing moves; a partner that fits is carried', async () => {
+      process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      const long = await buildLongPartner();
+      const before = await datesOf(long);
+      await expect(moveLawnSeries(long, { by: 'tech' })).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN' });
+      expect(await datesOf(long)).toEqual(before);
+      // The same plan with the partner at its seeded 30 minutes.
+      const fits = await build();
+      await db('technicians').where({ id: fits.techId }).update({ shift_start: '08:00', shift_end: '12:00' });
+      expect((await moveLawnSeries(fits, { by: 'tech' })).success).not.toBe(false);
+      expect(dateOnly((await rowsOf([fits.pest[0].id])).get(String(fits.pest[0].id)).scheduled_date)).toBe(addDays(dateOnly(fits.pest[0].scheduled_date), 1));
+    });
+
+    test('an edit of the partner\'s length after the plan was read ends the technician\'s move as a concurrent change; with shift hours off it does not', async () => {
+      process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      // On a second connection, after the mover's locked read of the plan and before its first write.
+      const lengthenAt = (f) => ({ moveGuard: async () => { await db('scheduled_services').where({ id: f.pest[0].id }).update({ estimated_duration_minutes: 45 }); } });
+      const on = await build();
+      const before = await datesOf(on);
+      await expect(moveLawnSeries(on, { by: 'tech', ...lengthenAt(on) })).rejects.toMatchObject({ statusCode: 409 });
+      expect(await datesOf(on)).toEqual(before);
+      delete process.env.GATE_TECH_SHIFT_HOURS;
+      const off = await build();
+      expect((await moveLawnSeries(off, { by: 'tech', ...lengthenAt(off) })).success).not.toBe(false);
+      expect(dateOnly((await rowsOf([off.pest[0].id])).get(String(off.pest[0].id)).scheduled_date)).toBe(addDays(dateOnly(off.pest[0].scheduled_date), 1));
+    });
+
+    test('a partner at a later stop keeps its hours and changes its day only: it is not judged', async () => {
+      process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      const f = await build();
+      await db('technicians').where({ id: f.techId }).update({ shift_start: '08:00', shift_end: '12:00' });
+      await db('scheduled_services').where({ id: f.pest[1].id }).update({ estimated_duration_minutes: 240 });
+      // Its write pins no length either: an edit of it after the plan was read does not stop the move.
+      const edit = { moveGuard: async () => { await db('scheduled_services').where({ id: f.pest[1].id }).update({ estimated_duration_minutes: 200 }); } };
+      expect((await moveLawnSeries(f, { by: 'tech', ...edit })).success).not.toBe(false);
+      expect(dateOnly((await rowsOf([f.pest[1].id])).get(String(f.pest[1].id)).scheduled_date)).toBe(addDays(dateOnly(f.pest[1].scheduled_date), 1));
+    });
+
+    test('the office\'s own series move carries that partner: it is not checked', async () => {
+      process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+      process.env.GATE_TECH_SHIFT_HOURS = 'true';
+      const f = await buildLongPartner();
+      expect((await moveLawnSeries(f)).success).not.toBe(false);
+      expect(dateOnly((await rowsOf([f.pest[0].id])).get(String(f.pest[0].id)).scheduled_date)).toBe(addDays(dateOnly(f.pest[0].scheduled_date), 1));
+    });
+
+    test('shift hours off: the technician\'s move carries that partner, as before', async () => {
+      process.env.GATE_SERIES_MOVE_CARRIES_VISIT = 'true';
+      const f = await buildLongPartner();
+      expect((await moveLawnSeries(f, { by: 'tech' })).success).not.toBe(false);
+      expect(dateOnly((await rowsOf([f.pest[0].id])).get(String(f.pest[0].id)).scheduled_date)).toBe(addDays(dateOnly(f.pest[0].scheduled_date), 1));
+    });
   });
 
   test('gate off: the grouped series move is refused exactly as before and nothing moves', async () => {

@@ -1626,6 +1626,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 3:25AM — Technician days off (owner 2026-11-24): writes the technician_absences
+  // rows for each active, field-dispatchable technician's day off in the next 120 days
+  // (services/tech-birthday-absences.js). Direct writes, nothing parked or sent, never re-creates a
+  // cleared row (it starts a new episode only after its own system clears), and clears its own future rows (source tech_days_off) a corrected dob or a leaver no longer gives. Each new or cleared row is announced like a tech-out mark (slot cache, board roster). Pay is
+  // recorded by the office (an ops bell outside the portal prompts it): nothing here writes pay.
+  // =========================================================================
+  cron.schedule('25 3 * * *', async () => {
+    try {
+      await runExclusive('tech-days-off', async () => {
+        const result = await require('./tech-birthday-absences').syncTechDaysOff();
+        // A pass that failed for any day must not be recorded as a success: throw after the whole pass ran.
+        if (result && result.failed > 0) throw new Error(`${result.failed} day(s) could not be written`);
+        return result;
+      });
+    } catch (err) {
+      logger.error(`[tech-days-off] daily sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 3:15AM — Data Hygiene deterministic normalization scan
   // =========================================================================
   cron.schedule('15 3 * * *', async () => {
@@ -8618,6 +8638,23 @@ function initScheduledJobs() {
       await runExclusive('ads-health-alerts', () => require('./ads/ads-health-alerts').runAdsHealthAlerts());
     } catch (err) {
       logger.error(`Ads health alerts failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // 6:06, 14:06 and 15:06 ET — Schedule rain record (record only, $0; owner 2026-11-23, plan v2). What the rain rule
+  // would do to the next work day's schedule: a same-day re-time, or a one-off move to another day when the whole day
+  // is wet, at most 10 a day. The 14:06 run is the 2 PM cutoff (frozen); 15:06 only retries a cutoff that failed; 6:06 on
+  // the day itself rechecks beside it and scores past days against measured radar rain. Writes only its own
+  // system_settings rows: no visit change, text, email or admin notification, no paid call (NWS + MRMS), so no gate.
+  // Off the :00 beat the ad crons use. runExclusive records job_health ('schedule-rain-record') and keeps a deploy
+  // overlap from writing twice. See scheduling/rain-schedule-record.js.
+  // =========================================================================
+  cron.schedule('6 6,14,15 * * *', async () => {
+    try {
+      await runExclusive('schedule-rain-record', () => require('./scheduling/rain-schedule-record').runScheduleRainRecord());
+    } catch (err) {
+      logger.error(`Schedule rain record failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

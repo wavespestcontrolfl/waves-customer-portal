@@ -201,12 +201,27 @@ function occupancyBlockFor(row) {
 // day's. A start that cannot be read gives nulls, and the shift check then leaves the row to the
 // caller's other checks. occupancyBlockFor above is the clock form for the overlap probes (the
 // stored end first; it clamps at 23:59).
+// PostgreSQL's TIME also holds 24:00:00, the end of the day; parseHHMM does not read it.
+const END_OF_DAY = /^24:00(?::00(?:\.0+)?)?$/;
+
+// A window bound that is there but is no clock time rowBlockMinutes reads exactly: a start parseHHMM
+// cannot read, an end it reads neither as a clock time nor as 24:00, or a time whose seconds are not
+// zero. A request can carry one, and PostgreSQL's TIME stores what parseHHMM does not read (24:00:00
+// as a start) or drops (it keeps 12:00:30 and reads 12:00:60 as 12:01), so a write can store a time
+// the shift check did not judge.
+const WHOLE_MINUTE = /^\d{1,2}:\d{2}(?::00(?:\.0+)?)?$/;
+function unreadableBound(value, isEnd = false) {
+  if (value == null || value === '') return false;
+  const text = String(value).trim();
+  if (isEnd && END_OF_DAY.test(text)) return false;
+  return parseHHMM(text) == null || !WHOLE_MINUTE.test(text);
+}
+
 function rowBlockMinutes(row, minutes = null) {
   const startMin = parseHHMM(row?.window_start);
   if (startMin == null) return { startMin: null, endMin: null };
   if (Number(minutes) > 0) return { startMin, endMin: startMin + Number(minutes) };
-  // PostgreSQL's TIME also holds 24:00:00, the end of the day; parseHHMM does not read it.
-  const storedEnd = /^24:00(?::00(?:\.0+)?)?$/.test(String(row?.window_end ?? '').trim()) ? 1440 : parseHHMM(row?.window_end);
+  const storedEnd = END_OF_DAY.test(String(row?.window_end ?? '').trim()) ? 1440 : parseHHMM(row?.window_end);
   const windowEnd = storedEnd == null ? 0 : (storedEnd < startMin ? storedEnd + 1440 : storedEnd);
   const lengthEnd = Number(row?.estimated_duration_minutes) > 0 ? startMin + Number(row.estimated_duration_minutes) : 0;
   const endMin = Math.max(windowEnd, lengthEnd);
@@ -242,6 +257,7 @@ module.exports = {
   parseHHMM,
   occupancyBlockFor,
   rowBlockMinutes,
+  unreadableBound,
   seriesCandidateDateClashRows,
   minutesToHHMM,
   assertAdminAppointmentWindow,

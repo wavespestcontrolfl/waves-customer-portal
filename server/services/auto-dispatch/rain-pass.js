@@ -215,14 +215,15 @@ async function judgeStop(visit, ctx) {
   const { db, deps, today, nowMin, occupancy, day } = ctx;
   const date = dateOnly(visit.scheduled_date);
   if (!inRainHorizon(date, today)) return { wet: false, reason: 'past_horizon' };
-  const services = await (deps.withCatalogKeys || withCatalogKeys)(visit.services, db, { gate: GATE });
+  const services = await (deps.withCatalogKeys || withCatalogKeys)(visit.services, db, { gate: deps.catalogGate === undefined ? GATE : deps.catalogGate });
   if (rainFitFor(services) !== 'avoid') return { wet: false, reason: 'not_outdoor' };
   // The service the notice names: the one that needs dry weather, which on a
   // shared stop or a visit with add-ons is not always the visit's own.
   const outdoor = services.find((service) => rainClassOf(service) === 'outdoor');
   const work = String((outdoor && outdoor.name) ?? outdoor ?? visit.service_type ?? 'visit');
   const { reach } = visit;
-  const earliestMin = date === today ? nowMin + LEAD_MINUTES : 0;
+  // `deps.catalogGate` (null = always use the catalog) and `deps.leadMinutes` are for the schedule rain record, which judges rain for every visit and has no notice to lead.
+  const earliestMin = date === today ? nowMin + (deps.leadMinutes ?? LEAD_MINUTES) : 0;
   if (reach.ownStartMin < earliestMin) return { wet: false, reason: 'too_soon' };
   const point = areaPoint(visit.point);
   if (!point) return { wet: false, reason: 'no_point' };
@@ -427,4 +428,5 @@ async function runRainPass({ now = new Date(), db = require('../../models/db'), 
   }
 }
 
-module.exports = { runRainPass, planRainPass, GATE, KEY_PREFIX, MOVE_PCT, DRY_PCT, MAX_NOTICES_PER_DAY, _test: { spanRain, dryStart, groupStops, pickPoint, VISIT_COLUMNS } };
+// loadStops, loadPoints, spanRain, dryStart and serviceDay are read-only; the schedule rain record (scheduling/rain-schedule-record.js) reuses them.
+module.exports = { runRainPass, planRainPass, loadStops, loadPoints, spanRain, dryStart, serviceDay, GATE, KEY_PREFIX, MOVE_PCT, DRY_PCT, MAX_NOTICES_PER_DAY, _test: { spanRain, dryStart, groupStops, pickPoint, VISIT_COLUMNS } };

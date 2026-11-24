@@ -87,14 +87,32 @@ function promiseLevelOf(promise) {
   return 'hour';
 }
 
-/** Map<id, 'none' | 'day' | 'hour'>: what the customer was told about each visit (same stop-wide resolution as
- *  loadToldVisitIds; the rule is promiseLevelOf). Throws when a read fails; every caller must fail closed. */
-async function loadPromiseLevels(conn, ids, now = new Date()) {
-  const levels = new Map();
-  if (!ids || ids.length === 0) return levels;
+/** Map<id, { level, start }>: what the customer was told about each visit (same stop-wide resolution as
+ *  loadToldVisitIds; the level rule is promiseLevelOf) and, for an 'hour' level with a known slot, that slot's start
+ *  (`start`, a Date; null otherwise, and for a withdrawn promise). ONE promise read gives both facts, so they always
+ *  agree (the day re-plan's 2-hour told shift, owner 2026-11-24). Throws when a read fails; every caller must fail closed. */
+async function loadPromiseFacts(conn, ids, now = new Date()) {
+  const facts = new Map();
+  if (!ids || ids.length === 0) return facts;
   const promises = await resolvePromises(conn, ids, now);
-  for (const id of ids) levels.set(id, promiseLevelOf(promises.get(id)));
-  return levels;
+  for (const id of ids) {
+    const promise = promises.get(id);
+    const level = promiseLevelOf(promise);
+    let start = null;
+    if (level === 'hour' && promise.withdrawn !== true && promise.start_at != null) {
+      const at = promise.start_at instanceof Date ? promise.start_at : new Date(promise.start_at);
+      if (!Number.isNaN(at.getTime())) start = at;
+    }
+    facts.set(id, { level, start });
+  }
+  return facts;
 }
 
-module.exports = { loadToldVisitIds, loadPromiseLevels, resolvePromises, promiseLevelOf };
+/** Map<id, 'none' | 'day' | 'hour'>: what the customer was told about each visit (loadPromiseFacts' level). Throws when
+ *  a read fails; every caller must fail closed. */
+async function loadPromiseLevels(conn, ids, now = new Date()) {
+  const facts = await loadPromiseFacts(conn, ids, now);
+  return new Map([...facts].map(([id, fact]) => [id, fact.level]));
+}
+
+module.exports = { loadToldVisitIds, loadPromiseLevels, loadPromiseFacts, resolvePromises, promiseLevelOf };

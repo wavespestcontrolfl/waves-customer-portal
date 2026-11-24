@@ -9,6 +9,13 @@
  * The rules reproduce Google's published 2026 Florida dates exactly
  * (tests/schedule-holidays.test.js).
  *
+ * Owner 2026-11-24: Waves is closed every year on the Big 6 (new_years_day,
+ * memorial_day, independence_day, labor_day, thanksgiving, christmas; the fixed-date
+ * ones also close the observed weekday). Every other holiday here (Black Friday,
+ * Christmas Eve, New Year's Eve, MLK, Presidents' Day, Easter, ...) is a normal work
+ * day. The closures live in system_settings, set in production; this file keeps
+ * its default, every holiday open. See docs/scheduling-days-off.md.
+ *
  * A closed holiday is stored by key in system_settings
  * `schedule_holiday_closures` (a JSON array of keys). A missing or empty list
  * means every holiday is open: nothing closes until the owner closes it in

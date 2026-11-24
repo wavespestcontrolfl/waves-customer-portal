@@ -15,6 +15,25 @@ const { WAVES_BRAND_NAME, WAVES_ADDRESS_LINE } = require('../constants/business'
 
 const COMPANY_FACTS_HEADER = 'COMPANY FACTS (owner-approved; state these plainly):';
 
+// The holidays the closed-days line (COMPANY_FACTS[6]) names, as scheduling/holidays.js keys (owner 2026-11-24). The line is static on
+// purpose: the voice agent renders this section when its module loads and the sealed exam pins the render by hash, so it cannot follow
+// the editable `schedule_holiday_closures` setting. PUT /admin/schedule/blackout-dates/holidays raises one admin alert when a saved
+// closed set differs from this list, and sms-company-facts.test.js checks that the line names exactly these.
+const FACT_CLOSED_HOLIDAY_KEYS = Object.freeze(['new_years_day', 'memorial_day', 'independence_day', 'labor_day', 'thanksgiving', 'christmas']);
+/**
+ * True when Settings still says what the closed-days line says: the closed holidays are exactly the six AND no weekday is a weekly
+ * day off. The line says "We work Sundays and all other holidays", and any weekly day off closes holidays that fall on it (a Friday
+ * off closes Good Friday and Black Friday), so ANY weekly day off is a mismatch. `weeklyDaysOff`: any iterable of 0 to 6. Pure.
+ */
+function factsLineMatchesSettings({ closedHolidays, weeklyDaysOff } = {}) {
+  return closedHolidaysMatchFactsLine(closedHolidays) && new Set(weeklyDaysOff || []).size === 0;
+}
+/** True when `closedKeys` (any iterable of holiday keys) is exactly the set the facts line names. Pure. */
+function closedHolidaysMatchFactsLine(closedKeys) {
+  const closed = new Set(closedKeys || []);
+  return closed.size === FACT_CLOSED_HOLIDAY_KEYS.length && FACT_CLOSED_HOLIDAY_KEYS.every((key) => closed.has(key));
+}
+
 const COMPANY_FACTS = Object.freeze([
   'On a residential general pest plan that includes inside service (not mosquito service), the first visit includes an inside spray. After that, the inside is up to the customer: we treat it whenever they ask. A customer who chose exterior-only service can ask the office to add inside service back. Commercial accounts follow their sold service scope.',
   'The customer does not need to be home for the exterior treatment. For the inside spray, someone needs to be home, or the customer leaves us access.',
@@ -22,7 +41,10 @@ const COMPANY_FACTS = Object.freeze([
   'Wasps, mud daubers and hornet nests on the house are included on regular pest visits.',
   'We treat honeybees. Offer the soonest available time.',
   'Wildlife: we do rodent trapping only. Snakes, raccoons, squirrels and other wildlife are referred to a wildlife company.',
-  'We work Sundays and holidays, same as any other day.',
+  // Owner 2026-11-24: Waves is closed on the Big 6 holidays (scheduling/holidays.js keys new_years_day,
+  // memorial_day, independence_day, labor_day, thanksgiving, christmas); every other day works. The three fixed-date ones
+  // (New Year's Day, 4th of July, Christmas) also close the observed weekday when they fall on a weekend (holidays.js).
+  'We are closed on New Year\'s Day, Memorial Day, the 4th of July, Labor Day, Thanksgiving and Christmas. When New Year\'s Day, the 4th of July or Christmas falls on a Saturday, we are also closed the Friday before. When one falls on a Sunday, we are also closed the Monday after. We work Sundays and all other holidays. For a given date, the open times we offer are the final word.',
   'Rain: a treatment needs to dry and bond to surfaces; after that it holds up to weather.',
   'Lawn program: fertilizer, weed control and insect control only. No mowing. Treatments follow a seasonal rotation. Never name product brands.',
   'Watering advice you may give: follow the county\'s watering days, water early in the morning, and water deeply and less often.',
@@ -84,11 +106,13 @@ const moneyPolicyFacts = () => COMPANY_FACTS.filter((f) => MONEY_POLICY_FACT_PRE
 // Lines retired by a wording change, keyed by their index in COMPANY_FACTS (0 and 10: owner 2026-10-22;
 // 22, the service area: owner 2026-11-23 held places until a second technician was hired, in two wordings (six places,
 // then seven the same day); the hold ended with the hire and the line says again what it said before 2026-11-23. So the
-// newest hold wording is here and the first one is in OLDER_RETIRED_COMPANY_FACT_LINES).
+// newest hold wording is here and the first one is in OLDER_RETIRED_COMPANY_FACT_LINES;
+// 6, holidays: owner 2026-11-24 closed Waves on six holidays, so "we work Sundays and holidays, same as any other day" ended).
 // A stored facts_block keeps the render it was drafted with, so the text each retired line had
 // is kept here, verbatim, to rebuild those earlier renders (PRIOR_COMPANY_FACTS_RENDERS below).
 const RETIRED_COMPANY_FACT_LINES = Object.freeze({
   0: 'Recurring, one-time and re-service pest visits include an interior spray as well as the exterior. The only exception is a customer who does not want the inside done.',
+  6: 'We work Sundays and holidays, same as any other day.',
   10: `Paying: technicians accept cards at the visit, never cash. Checks are mailed to ${WAVES_BRAND_NAME}, ${WAVES_ADDRESS_LINE}.`,
   22: 'We serve Manatee and Sarasota counties, plus Englewood, Port Charlotte, Ruskin, Apollo Beach, Sun City Center, Wimauma, Gibsonton and Riverview. We are not taking new customers in Rotonda, Placida, Boca Grande, Babcock Ranch, Gulf Cove, Charlotte Harbor or Deep Creek yet; we plan to start there once we add a second technician. Existing customers there keep their visits, reschedules and re-service. We do not serve Punta Gorda, DeSoto County, Tampa, St. Petersburg or Lee County.',
 });
@@ -105,10 +129,10 @@ function renderCompanyFactsSection() {
   return renderCompanyFactsLines(COMPANY_FACTS.length);
 }
 // `retired` says which lines of an earlier render still had the wording RETIRED_COMPANY_FACT_LINES keeps:
-// true = lines 0 and 10 (the renders before 2026-10-22), or a list of indexes (the seven-place hold render has line 22 only).
+// true = lines 0, 6 and 10 (the renders before 2026-10-22), or a list of indexes (the seven-place hold render has lines 6 and 22).
 // `olderRetired` lists indexes that still had the OLDER wording of a line reworded twice (OLDER_RETIRED_COMPANY_FACT_LINES).
 // Every other line is the first `count` of today's list.
-const LEGACY_RETIRED_INDEXES = Object.freeze([0, 10]);
+const LEGACY_RETIRED_INDEXES = Object.freeze([0, 10, 6]);
 function renderCompanyFactsLines(count, { retired = false, olderRetired = [] } = {}) {
   const put = retired === true ? LEGACY_RETIRED_INDEXES : (Array.isArray(retired) ? retired : []);
   const older = Array.isArray(olderRetired) ? olderRetired : [];
@@ -133,11 +157,13 @@ function renderCompanyFactsLines(count, { retired = false, olderRetired = [] } =
 // (hasExactCompanyFacts): an old item must never grade the new identity. Any change to the
 // render also moves both prompt version numbers in sms-shadow-drafter.
 const PRIOR_COMPANY_FACTS_RENDERS = Object.freeze([
+  // 2026-11-24 holidays line 6 (owner: closed on six holidays): the 26-line render live 2026-10-22 to 2026-11-23 (prompts 25 to 28)
+  // and again until this change (prompts 37 to 40, the service area served again), with the old holidays line 6 only.
+  { lines: 26, retired: [6], sha256: 'f58c532ee993a9b46b3af4505b5ab82f000c68e3a3209b0f65c51397804f02f0' },
   // Service area held places ended with the second hire (prompts 33 to 36): the 26-line render of the seven-place hold, with that
-  // service-area line 22 only. The render before it (six places, prompts 29 to 32) follows. The 26-line render live from 2026-10-22
-  // to 2026-11-23 (prompts 25 to 28) is today's render again, so it is not listed.
-  { lines: 26, retired: [22], sha256: '73b8adba115c4c1eb3bd8c306a37b8ba3609f39cda15ac6aeb99e64080c9aa69' },
-  { lines: 26, olderRetired: [22], sha256: '468057aeb7bdddbca9bb3c796decc7f34f86800e6957c00a0c2e7b435356891e' },
+  // service-area line 22 and the old holidays line 6. The render before it (six places, prompts 29 to 32) follows.
+  { lines: 26, retired: [22, 6], sha256: '73b8adba115c4c1eb3bd8c306a37b8ba3609f39cda15ac6aeb99e64080c9aa69' },
+  { lines: 26, olderRetired: [22], retired: [6], sha256: '468057aeb7bdddbca9bb3c796decc7f34f86800e6957c00a0c2e7b435356891e' },
   // 2026-10-09 aftercare lines (#6197): identities 9_m to 14_n, the last render with the old inside-spray and paying wording
   { lines: 19, retired: true, sha256: '3a72b3d4acb47ca8f95cfe6ddb9aedf65c696f6cc3f60efb5999725bf7880577' },
   // 2026-10-03 service knowledge (#5723): identities 6_cflvp, 7_m, 8_m
@@ -254,16 +280,38 @@ const RETIRED_COMPANY_FACT_TOPIC_RE = new RegExp(
   `\\b(?:${PAYMENT_AND_INSIDE_TOPIC_WORDS}|${HELD_PLACE_TOPIC_WORDS}|(?:${HELD_PLACE_TOPIC_ZIPS})(?:-\\d{4})?)\\b`, 'i');
 // The topics a block's OWN earlier render had reworded since: the 26-line renders live until 2026-11-23 already carried today's
 // payment and inside-spray lines, so only the service area counts for it; the older renders had all of them. null = no earlier render.
-function retiredTopicReForBlock(factsBlock) {
+// The prior-render entry a stored block carries (PRIOR_COMPANY_FACTS_RENDERS), or null: the block's own recorded render, not its text.
+function priorRenderForBlock(factsBlock) {
   const before = textBeforeFirstBilling(factsBlock);
   if (before === null) return null;
   const renders = knownCompanyFactsRenders().slice(1);
   for (let i = 0; i < renders.length; i += 1) {
-    if (!before.includes(`\n${renders[i].replace(/\n$/, '')}`)) continue;
-    const { retired } = PRIOR_COMPANY_FACTS_RENDERS[i];
-    return retired === true ? RETIRED_COMPANY_FACT_TOPIC_RE : SERVICE_AREA_TOPIC_RE;
+    if (before.includes(`\n${renders[i].replace(/\n$/, '')}`)) return PRIOR_COMPANY_FACTS_RENDERS[i];
   }
   return null;
+}
+// `retired: true` (the renders before 2026-10-22) had every reworded line of the time; a list names its lines.
+const renderHadRetiredLine = ({ retired, olderRetired }, index) => retired === true
+  || (Array.isArray(retired) && retired.includes(index)) || (Array.isArray(olderRetired) && olderRetired.includes(index));
+// True when the block's own render carries the retired holidays line (RETIRED_COMPANY_FACT_LINES[6], "we work Sundays and holidays,
+// same as any other day", owner 2026-11-24): every earlier render does, so the model drafting under it was told Waves works every
+// holiday. The sealed exam never takes such an exchange as a reference answer. Keyed on the recorded render, never on message text.
+function carriesRetiredHolidayLine(factsBlock) {
+  const prior = priorRenderForBlock(factsBlock);
+  return !!prior && renderHadRetiredLine(prior, 6);
+}
+// True when the block's own render carries a retired service-area wording (line 22, or the older renders that predate it): the
+// held-place checks of the sealed exam apply to these only (the render live until 2026-11-24 carried today's service-area line).
+function carriesRetiredServiceAreaLine(factsBlock) {
+  const prior = priorRenderForBlock(factsBlock);
+  return !!prior && renderHadRetiredLine(prior, 22);
+}
+function retiredTopicReForBlock(factsBlock) {
+  const prior = priorRenderForBlock(factsBlock);
+  if (!prior) return null;
+  if (prior.retired === true) return RETIRED_COMPANY_FACT_TOPIC_RE;
+  // Newer renders carried today's payment and inside-spray lines: only the service area counts for them, and only when the render had it reworded.
+  return renderHadRetiredLine(prior, 22) ? SERVICE_AREA_TOPIC_RE : null;
 }
 
 // The earlier conversation: does the rest of the frozen facts block (the customer's address, the calls, the SMS thread) name a held
@@ -297,6 +345,8 @@ module.exports = {
   SERVICE_AREA_TOPIC_RE,
   heldPlaceInOpenTimesLookup,
   heldPlaceInConversationContext,
+  carriesRetiredHolidayLine,
+  carriesRetiredServiceAreaLine,
   HELD_PLACE_CONTEXT_RE,
   rebaseCompanyFactsToCurrent,
   RETIRED_COMPANY_FACT_TOPIC_RE,
@@ -307,6 +357,9 @@ module.exports = {
   hasExactLabelFacts,
   exactLabelFactsSection,
   COMPANY_FACTS,
+  FACT_CLOSED_HOLIDAY_KEYS,
+  closedHolidaysMatchFactsLine,
+  factsLineMatchesSettings,
   RETIRED_COMPANY_FACT_LINES, OLDER_RETIRED_COMPANY_FACT_LINES,
   moneyPolicyFacts,
   COMPANY_FACTS_HEADER,
