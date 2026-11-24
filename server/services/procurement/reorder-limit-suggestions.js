@@ -95,15 +95,14 @@ function packInInventoryUnit(packRaw, inventoryUnit) {
 // Nitrogen or phosphorus fertilizer: the closeout's own blackout test
 // (name analysis, then catalog fertilizer_analysis / analysis_n / analysis_p).
 function isBlackoutFertilizer(catalog) {
-  const { productHasNpFertilizer } = require('../tree-shrub-closeout');
-  return productHasNpFertilizer(typeof catalog === 'string' ? { name: catalog } : catalog || {});
+  return require('./fertilizer-blackout').isNpFertilizer(typeof catalog === 'string' ? { name: catalog } : catalog || {});
 }
 
 // Days from `today` (YYYY-MM-DD, ET) to the next June 1, and whether today is
 // inside June 1 - Sept 30.
 function blackoutWindow(today) {
   const [y, mo, d] = today.split('-').map(Number);
-  const inBlackout = mo >= 6 && mo <= 9;
+  const inBlackout = require('./fertilizer-blackout').isBlackoutDate(today);
   const start = Date.UTC(y, mo - 1, d);
   const june1 = Date.UTC(mo >= 6 ? y + 1 : y, 5, 1);
   return { inBlackout, daysToJune1: Math.round((june1 - start) / 86400000) };

@@ -590,7 +590,8 @@ async function deliverBell(conn, { notify, ledgerId, requestId, productName, ven
 }
 
 /** Re-ring every terminal ledger row whose persisted bell never landed. */
-async function reringPendingBells({ conn = db, notify = null } = {}) {
+async function reringPendingBells({ conn = db, notify = null, now = new Date() } = {}) {
+  const { FERTILIZER_COLUMNS, fertilizerBlackoutHold } = require('./fertilizer-blackout');
   const rows = await conn('vendor_orders as vo')
     .join('product_restock_requests as prr', 'prr.id', 'vo.restock_request_id')
     .leftJoin('products_catalog as pc', 'pc.id', 'prr.product_id')
@@ -614,16 +615,21 @@ async function reringPendingBells({ conn = db, notify = null } = {}) {
     .whereRaw("(vo.placed_at IS NOT NULL OR (prr.status = 'open' AND NOT EXISTS (SELECT 1 FROM vendor_order_emails voe WHERE voe.restock_request_id = prr.id AND voe.status IN ('sending', 'sent'))))")
     .whereRaw("jsonb_exists(vo.evidence, 'bell')")
     .whereRaw("NULLIF(vo.evidence->>'bellAt', '') IS NULL")
-    .select('vo.id', 'vo.evidence', 'prr.id as request_id', 'pc.name as product_name', 'v.name as vendor_name');
+    .select('vo.id', 'vo.evidence', 'vo.placed_at', 'prr.id as request_id', 'pc.name as product_name', 'v.name as vendor_name', ...FERTILIZER_COLUMNS.map((c) => `pc.${c}`));
   const rung = [];
   const pending = [];
+  const held = [];
   for (const row of rows) {
     const bell = meta(row.evidence).bell;
     if (!bell?.title) continue;
+    // June 1 - Sept 30: a pre-submit park's "order manually" for N/P
+    // fertilizer waits (unsent) for the first run after Sept 30. A dispatched
+    // order's reconciliation bell (placed_at set) still goes out.
+    if (!row.placed_at && fertilizerBlackoutHold({ name: row.product_name, ...row }, now)) { held.push(row.id); continue; }
     const ok = await deliverBell(conn, { notify, ledgerId: row.id, requestId: row.request_id, productName: row.product_name || '?', vendorName: row.vendor_name || '?', title: bell.title, body: bell.body || '', v: bell.v || null });
     (ok ? rung : pending).push(row.id);
   }
-  return { rung, pending };
+  return { rung, pending, held };
 }
 
 // The bell a park rings — persisted with the outcome (evidence.bell) so a
@@ -914,7 +920,7 @@ async function insertClaim(trx, { request, product, vendor, adapterKey, registry
   return { ledger, pricing, order };
 }
 
-async function claimRequest(trx, { requestId, registry, deadAdapters = null, login = null }) {
+async function claimRequest(trx, { requestId, registry, deadAdapters = null, login = null, now = new Date() }) {
   // The product's pricing advisory lock FIRST — the lock every
   // vendor_pricing writer holds to commit — then the request row, then the
   // product row: the sweep's order (auto-reorder.js lockProductPricing), so
@@ -939,12 +945,17 @@ async function claimRequest(trx, { requestId, registry, deadAdapters = null, log
   const resolved = await resolveClaimVendor(trx, { request, registry, deadAdapters, login });
   if (resolved.skipped) return resolved;
   const { vendor, adapterKey, m, credentials = null } = resolved;
-  const product = await trx('products_catalog').where({ id: request.product_id }).forUpdate().first('id', 'name', 'active', 'auto_reorder_enabled', 'inventory_on_hand', 'low_stock_threshold', 'auto_reorder_vendor_id', 'reorder_quantity', 'inventory_unit');
+  const { FERTILIZER_COLUMNS, fertilizerBlackoutHold } = require('./fertilizer-blackout');
+  const product = await trx('products_catalog').where({ id: request.product_id }).forUpdate().first('id', 'name', 'active', 'auto_reorder_enabled', 'inventory_on_hand', 'low_stock_threshold', 'auto_reorder_vendor_id', 'reorder_quantity', 'inventory_unit', ...FERTILIZER_COLUMNS);
   if (!product) return { skipped: 'no_product' };
   const ineligible = claimIneligibility({ product, request, vendor });
   if (ineligible) return cancelAtClaim(trx, { request, product, m, ineligible });
   const guarded = await lockedProductGuards(trx, { request });
   if (guarded) return guarded;
+  // June 1 - Sept 30: order no N/P fertilizer. Checked after the cancel
+  // checks, so only a still-valid request waits (open, unclaimed, no hand-off
+  // bell) for the first run after Sept 30.
+  if (fertilizerBlackoutHold(product, now)) return { skipped: 'fertilizer_blackout' };
   const quantity = Number(request.requested_quantity);
   if (!Number.isFinite(quantity) || quantity <= 0) return { skipped: 'no_quantity' };
   // A manual-order bell an earlier (gated) sweep rang for this request is
@@ -1362,7 +1373,7 @@ const withAdapterDown = (result, err) => (err.adapterDown ? { ...result, adapter
 // was received or cancelled since it was scanned / claimed, so no bell:
 // staff must never be told to buy a closed need (Codex r26 P2).
 const HANDOFF_SKIPS = new Set(['no_adapter', 'vendor_gated', 'adapter_unconfigured']);
-async function bellUndispatchable(conn, requestId, notify) {
+async function bellUndispatchable(conn, requestId, notify, now = new Date()) {
   const request = await conn('product_restock_requests').where({ id: requestId }).first();
   if (!request || request.status !== 'open' || request.source !== 'auto_reorder') return { requestClosed: true };
   // An automatic order already out for the product (this request's own
@@ -1372,8 +1383,11 @@ async function bellUndispatchable(conn, requestId, notify) {
   if (await findLiveAutoOrder(conn, request.product_id)) return { autoOrderLive: true };
   // The order was emailed to the vendor (sent, or sending with the outcome unknown): same stand-down.
   if (await emailOrderOutFor(conn, requestId)) return { emailOrderOut: true };
-  const product = await conn('products_catalog').where({ id: request.product_id }).first('id', 'name', 'inventory_unit', 'inventory_on_hand');
+  const { FERTILIZER_COLUMNS, fertilizerBlackoutHold } = require('./fertilizer-blackout');
+  const product = await conn('products_catalog').where({ id: request.product_id }).first('id', 'name', 'inventory_unit', 'inventory_on_hand', ...FERTILIZER_COLUMNS);
   if (!product) return { bellLost: true };
+  // June 1 - Sept 30: no "order manually" hand-off for N/P fertilizer (owner 2026-11-24).
+  if (fertilizerBlackoutHold(product, now)) return { held: 'fertilizer_blackout' };
   // notifyAdmin resolves null when it could not persist the row: a null
   // hand-off is NOT a delivered bell (Codex r17 P2).
   const rung = await require('./auto-reorder').ringRestockBell({ notify, product, request });
@@ -1408,14 +1422,14 @@ async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapt
   // bell because this lane would order) and the dispatch is the same
   // hand-off as a vendor gate: the request gets the sweep's deduped bell
   // now, not after another silent day (Codex r18 P2).
-  if (!gateEnvValue(GATE)) return { requestId, skipped: 'gated', ...(await bellUndispatchable(conn, requestId, notify)) };
+  if (!gateEnvValue(GATE)) return { requestId, skipped: 'gated', ...(await bellUndispatchable(conn, requestId, notify, now)) };
   const registry = adapters || loadAdapters();
   const login = await prefetchVendorLogin(conn, requestId, registry, deadAdapters);
-  const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry, deadAdapters, login }));
+  const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry, deadAdapters, login, now }));
   if (claim.skipped) {
     // A lost hand-off bell is reported, not swallowed: the request stays open
     // and unclaimed, so the next run re-rings it — and this run goes red.
-    const bellState = HANDOFF_SKIPS.has(claim.skipped) ? await bellUndispatchable(conn, requestId, notify) : {};
+    const bellState = HANDOFF_SKIPS.has(claim.skipped) ? await bellUndispatchable(conn, requestId, notify, now) : {};
     return { requestId, skipped: claim.skipped, ...(claim.cancelled ? { cancelled: true } : {}), ...bellState };
   }
   return dispatchClaimed(conn, claim, { registry, notify, now, env });
@@ -1539,7 +1553,7 @@ async function runVendorOrderDispatch({ conn = db, notify = null, adapters = nul
   // bury it (pre-push P0). Bells first: the one outcome that must not wait
   // another day. A gated run still walks the dispatchable requests: each is
   // handed off with its bell instead of ordered (Codex r18 P2).
-  const bells = await reringPendingBells({ conn, notify });
+  const bells = await reringPendingBells({ conn, notify, now });
   const recovered = await recoverStalePlacing({ conn, notify, now });
   const gated = !gateEnvValue(GATE);
   const { results, seen, runLevelError } = await dispatchPasses({ conn, notify, adapters, now, env });
