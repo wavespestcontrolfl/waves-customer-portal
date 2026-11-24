@@ -560,8 +560,8 @@ describe('one property, one visit', () => {
 
   test('a supplied blank selector is refused, never read as no narrowing', async () => {
     for (const field of ['appointment_id', 'property_id', 'from_date']) {
-      for (const blank of ['', '   ']) {
-        expect(await preview({ [field]: blank })).toMatchObject({ code: 'invalid_input', error: expect.stringMatching(new RegExp(`^${field} is blank`)) });
+      for (const blank of ['', '   ', null]) {
+        expect(await preview({ [field]: blank })).toMatchObject({ code: 'invalid_input', error: expect.stringMatching(new RegExp(`^${field} is empty`)) });
       }
     }
   });
@@ -590,6 +590,23 @@ describe('one property, one visit', () => {
     expect(await check({ appointment_id: MINE, property_id: UNIT_B })).toMatchObject({ code: 'target_relationship_mismatch' });
     tables.customer_properties[1].customer_id = OTHER;
     expect(await check({ property_id: UNIT_B })).toMatchObject({ code: 'target_relationship_mismatch' });
+  });
+
+  test('two units on one street show their unit line', async () => {
+    tables.scheduled_services.forEach((r) => Object.assign(r, { service_address_line1: '101 Example Ave', service_address_line2: r.property_id === UNIT_A ? 'Unit A' : 'Unit B' }));
+    const card = await preview({ new_price: 70 });
+    expect(card.visits.map((v) => v.at)).toEqual(['101 Example Ave Unit A', '101 Example Ave Unit B', '101 Example Ave Unit A', '101 Example Ave Unit B']);
+  });
+
+  test('an address change on a later visit between saves stops the batch', async () => {
+    const card = await preview({ new_price: 70 });
+    Schedule.updateVisitDetails.mockImplementationOnce(async () => {
+      Object.assign(tables.scheduled_services.find((r) => r.id === 'b-1'), { service_address_line1: '999 Example Ave', row_version: 'b-1:v2' });
+      return { status: 200, json: { success: true } };
+    });
+    const res = await confirm(ask({ new_price: 70 }), card._version);
+    expect(Schedule.updateVisitDetails.mock.calls.map((c) => c[0].id)).toEqual(['a-1']);
+    expect(res).toMatchObject({ partial: true, failed_visit: { id: 'b-1', code: 'preview_changed' } });
   });
 
   test('a visit moved to another unit between saves is not saved at the old unit price', async () => {

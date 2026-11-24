@@ -134,6 +134,9 @@ function visitPin(row) {
     // The unit the visit is booked for: a visit moved to another property
     // between saves is drift, never repriced at the old unit's price.
     property_id: row.property_id == null ? null : String(row.property_id),
+    // The address the card may show for the visit: a change between saves is drift.
+    service_address_line1: row.service_address_line1 || null,
+    service_address_line2: row.service_address_line2 || null,
     service_type: row.service_type || null,
     service_id: row.service_id == null ? null : String(row.service_id),
     is_recurring: row.is_recurring === true,
@@ -176,16 +179,16 @@ function parseInput(input) {
   return { service, newPrice: Math.round(price * 100) / 100, through, ...scope };
 }
 
-// An omitted selector is null; a supplied blank one is refused, never read
-// as "no narrowing" (it would widen the card).
+// Only an omitted selector means "no narrowing"; a supplied null or blank one
+// is refused (it would widen the card).
 function optionalText(value) {
-  if (value === undefined || value === null) return null;
-  const text = String(value).trim();
+  if (value === undefined) return null;
+  const text = value === null ? '' : String(value).trim();
   return text === '' ? { blank: true } : text;
 }
 
 function blankRefusal(field) {
-  return { error: `${field} is blank. Leave it out, or give a real value. Nothing was changed.`, code: 'invalid_input' };
+  return { error: `${field} is empty. Leave it out, or give a real value. Nothing was changed.`, code: 'invalid_input' };
 }
 
 // The optional narrowing (gaps #25 + #26): a first date and one saved property.
@@ -384,7 +387,8 @@ function allExcludedRefusal({ label, customerName, newPrice, excluded, excludedO
 
 // Where a visit is booked: its address stamp, else its saved property.
 function visitPlace(row) {
-  return String(row.service_address_line1 || '').trim() || (row.property_id ? `property ${String(row.property_id).slice(0, 8)}` : 'the customer address');
+  const street = [row.service_address_line1, row.service_address_line2].map((v) => String(v || '').trim()).filter(Boolean).join(' ');
+  return street || (row.property_id ? `property ${String(row.property_id)}` : 'the customer address');
 }
 
 // Two units can share a service, date and price: then each card line names
