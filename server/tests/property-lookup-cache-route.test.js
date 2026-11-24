@@ -187,10 +187,10 @@ describe('performPropertyLookup cache integration', () => {
 
     // Satellite URLs regenerated with the CURRENT key, never stored ones.
     expect(hit.satellite.closeUrl).toContain('current-maps-key');
-    // Port Charlotte is held until a second technician is hired (owner ruling
-    // 2026-11-23): the cached verdict matches the live one, and both say not served.
+    // Port Charlotte is served again (owner "ok do this", 2026-11-23, after a few hours on the hold list):
+    // the cached verdict matches the live one, and both say in area.
     expect(hit.satellite.inServiceArea).toBe(live.satellite.inServiceArea);
-    expect(hit.satellite.inServiceArea).toBe(false);
+    expect(hit.satellite.inServiceArea).toBe(true);
     expect(hit.satellite._closeB64).toBeUndefined();
   });
 

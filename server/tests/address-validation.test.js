@@ -141,7 +141,7 @@ describe('deriveStatus: Punta Gorda is not served (owner ruling 2026-10-22)', ()
   });
 });
 
-describe('deriveStatus: six places held until a second technician is hired (owner ruling 2026-11-23)', () => {
+describe('deriveStatus: places held until a second technician is hired (owner ruling 2026-11-23)', () => {
   function placeResult(city, zip) {
     const r = result();
     r.address.addressComponents = r.address.addressComponents.map((c) => {
@@ -153,9 +153,10 @@ describe('deriveStatus: six places held until a second technician is hired (owne
   }
 
   test.each([
-    ['Port Charlotte', '33980', 'Charlotte County'], ['Port Charlotte', '33948', 'Charlotte County'],
-    ['Englewood', '34223', 'Sarasota County'], ['Englewood', '34224', 'Charlotte County'],
-    ['Rotonda West', '33947', 'Charlotte County'], ['Placida', '33946', 'Charlotte County'],
+    ['Port Charlotte', '33980', 'Charlotte County'], ['Port Charlotte', '33981', 'Charlotte County'],
+    ['Charlotte Harbor', '33980', 'Charlotte County'], ['Deep Creek', '33983', 'Charlotte County'],
+    ['Gulf Cove', '33981', 'Charlotte County'], ['El Jobean', '33981', 'Charlotte County'],
+    ['Rotonda West', '33947', 'Charlotte County'], ['Placida', '33946', 'Charlotte County'], ['Placida', '33927', 'Charlotte County'],
     ['Boca Grande', '33921', 'Charlotte County'], ['Babcock Ranch', '33982', 'Charlotte County'],
   ])('%s %s in %s is out_of_service_area', (city, zip, county) => {
     const r = deriveStatus(placeResult(city, zip), county);
@@ -164,8 +165,17 @@ describe('deriveStatus: six places held until a second technician is hired (owne
   });
 
   test('a held ZIP with no locality is out; a held city with no ZIP is out', () => {
-    expect(deriveStatus(placeResult('', '33948'), 'Charlotte County').status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
-    expect(deriveStatus(placeResult('Englewood', ''), 'Sarasota County').status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
+    expect(deriveStatus(placeResult('', '33947'), 'Charlotte County').status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
+    expect(deriveStatus(placeResult('Rotonda West', ''), 'Charlotte County').status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
+  });
+
+  test('Englewood and Port Charlotte are served again (owner "ok do this", 2026-11-23)', () => {
+    expect(deriveStatus(placeResult('Port Charlotte', '33948'), 'Charlotte County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+    expect(deriveStatus(placeResult('Port Charlotte', '33952'), 'Charlotte County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+    expect(deriveStatus(placeResult('', '33954'), 'Charlotte County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+    expect(deriveStatus(placeResult('Englewood', '34223'), 'Sarasota County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+    expect(deriveStatus(placeResult('Englewood', '34224'), 'Charlotte County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+    expect(deriveStatus(placeResult('', '34295'), 'Sarasota County').status).toBe(STATUSES.VALIDATED_ACCEPT);
   });
 
   test('North Port and Venice stay served', () => {

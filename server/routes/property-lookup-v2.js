@@ -981,7 +981,7 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
         superCloseUrl,
         closeUrl: closeUrlWithKey,
         wideUrl: wideUrlWithKey,
-        // The box AND no excluded place: DeSoto, Punta Gorda and the six places held until a second technician is
+        // The box AND no excluded place: DeSoto, Punta Gorda and the places held until a second technician is
         // hired (owner ruling 2026-11-23) sit inside served counties, so the coordinate alone cannot say no.
         inServiceArea: isInServiceAreaBox(lat, lng, { county: geo.county, zip: geo.zip })
           && !namesExcludedPlace({

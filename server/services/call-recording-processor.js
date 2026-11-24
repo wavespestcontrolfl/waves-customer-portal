@@ -35,7 +35,7 @@ const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks'
 const { callStartedAt } = require('../utils/call-timeline');
 const { resolveLocation } = require('../config/locations');
 const { isInDesotoExclusion, isServedSouthHillsboroughTown } = require('./service-area');
-const { isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip, isNotYetServedLocality, isNotYetServedZip } = require('./excluded-localities');
+const { isDesotoLocality, isDesotoZip, isPuntaGordaLocality, isPuntaGordaZip, isNotYetServedLocality, isNotYetServedZip, normalizeLocality } = require('./excluded-localities');
 const { zipToCity } = require('../utils/zip-to-city');
 const { safeErrorToken } = require('../utils/sentry-scrub');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
@@ -2181,6 +2181,7 @@ function agreedOneTimeJobCardPrice(v2Extraction, bookedService) {
 //      on-file read FAILED (onFile.lookupFailed), the booking fails closed to
 //      review (reason on_file_address_unavailable) instead of passing on no
 //      evidence.
+const isPortCharlotte = (city) => normalizeLocality(city) === 'port charlotte';
 function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, extracted = null, onFile = null } = {}) {
   const av = addressValidation || null;
   const svc = v2Extraction?.property?.service_address || null;
@@ -2227,11 +2228,18 @@ function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, e
     || onFileCities.some(isPuntaGordaLocality) || onFileZips.some(isPuntaGordaZip)) {
     return { reason: 'punta_gorda_locality', county: 'Charlotte' };
   }
-  // The six places held until a second technician is hired (owner ruling 2026-11-23: Rotonda, Englewood, Placida,
-  // Boca Grande, Port Charlotte, Babcock Ranch) veto the same way. Englewood straddles two counties, so no county is named.
+  // The places held until a second technician is hired (owner ruling 2026-11-23: Rotonda, Placida, Boca Grande,
+  // Babcock Ranch, Gulf Cove, El Jobean, Charlotte Harbor, Deep Creek) veto the same way. No county is named.
+  // Englewood and Port Charlotte were held for a few hours and are served again.
   if (cities.some(isNotYetServedLocality) || zips.some(isNotYetServedZip)
     || onFileCities.some(isNotYetServedLocality) || onFileZips.some(isNotYetServedZip)) {
     return { reason: 'not_yet_served_locality', county: null };
+  }
+  // Port Charlotte is served, but ZIPs 33980 / 33981 / 33983 hold by ZIP and carry the name too: a Port Charlotte city with
+  // no ZIP anywhere (call, address validation, on file) cannot be told from a held address, so staff review it until the
+  // ZIP is known. A served Port Charlotte ZIP (33948 and the others) on any of them clears it.
+  if ((cities.some(isPortCharlotte) || onFileCities.some(isPortCharlotte)) && ![...zips, ...onFileZips].length) {
+    return { reason: 'port_charlotte_zip_unknown', county: null };
   }
   if (av && av.inServiceArea === true) return null;
   if (countyKey === 'desoto') {

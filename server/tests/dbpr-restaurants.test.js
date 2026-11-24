@@ -99,13 +99,15 @@ describe('parseInspectionRows', () => {
     expect(counts).toEqual({ malformed: 5, valid: 1 });
   });
 
-  test('keeps only code-35 visits in the three counties outside Punta Gorda and the held places, with trimmed headers and a plain date', () => {
+  test('keeps only code-35 visits in the three counties outside Punta Gorda and the held places (Port Charlotte and Englewood are served again), with trimmed headers and a plain date', () => {
     const rows = parseDbprCsv(inspCsv([
       inspRow({ visit: '9001' }),
       inspRow({ visit: '9002', county: 'Sarasota' }),
-      // Port Charlotte is held until a second technician is hired (owner ruling 2026-11-23).
+      // Port Charlotte is served again (owner "ok do this", 2026-11-23); its shared ZIP 33981 and Rotonda West are held
+      // until a second technician is hired.
       inspRow({ visit: '9003', county: 'Charlotte', city: 'PORT CHARLOTTE', zip: '33952' }),
-      inspRow({ visit: '9012', county: 'Charlotte', city: '', zip: '33948' }),
+      inspRow({ visit: '9012', county: 'Charlotte', city: '', zip: '33981' }),
+      inspRow({ visit: '9014', county: 'Charlotte', city: 'ROTONDA WEST', zip: '33947' }),
       inspRow({ visit: '9013', county: 'Sarasota', city: 'NORTH PORT', zip: '34287' }),
       inspRow({ visit: '9004', county: 'Hillsborough' }),
       inspRow({ visit: '9005', v35: 0 }),
@@ -120,7 +122,7 @@ describe('parseInspectionRows', () => {
       inspRow({ visit: '9010', county: 'Lee County' }),
     ]));
     const out = svc.parseInspectionRows(rows);
-    expect(out.map((r) => r.source_key)).toEqual(['9001', '9002', '9013', '9009']);
+    expect(out.map((r) => r.source_key)).toEqual(['9001', '9002', '9003', '9013', '9009']);
     expect(out[0]).toMatchObject({
       kind: 'inspection', license_id: '5001', license_number: 'SEA0000001', license_type_code: '2010', business_name: 'SAMPLE DINER',
       address: '200 SAMPLE TRL', city: 'BRADENTON', zip: '34208', county: 'Manatee', event_date: '2026-11-16',

@@ -221,10 +221,13 @@ describe('legacyGeographicVeto: Punta Gorda', () => {
       .toEqual(expect.objectContaining({ reason: 'punta_gorda_locality' }));
   });
 
-  // Owner ruling 2026-11-23: six places are held until a second technician is hired.
+  // Owner ruling 2026-11-23: these places are held until a second technician is hired. Englewood and Port Charlotte
+  // were held for a few hours and are served again (owner "ok do this"); Port Charlotte addresses on the shared ZIPs
+  // 33980 / 33981 / 33983 stay held by ZIP.
   test.each([
-    [{ city: 'Port Charlotte', zip: '33980' }], [{ city: 'Port Charlotte', zip: '33948' }], [{ zip: '33983' }],
-    [{ city: 'Englewood', zip: '34223' }], [{ city: 'Rotonda West' }], [{ zip: '33947' }],
+    [{ city: 'Port Charlotte', zip: '33980' }], [{ city: 'Port Charlotte', zip: '33981' }], [{ zip: '33983' }],
+    [{ city: 'Charlotte Harbor' }], [{ city: 'Gulf Cove' }], [{ city: 'El Jobean' }], [{ city: 'Deep Creek' }],
+    [{ city: 'Rotonda West' }], [{ zip: '33947' }], [{ zip: '33927' }],
     [{ city: 'Placida' }], [{ city: 'Boca Grande' }], [{ city: 'Babcock Ranch', zip: '33982' }],
   ])('held place %j is vetoed even with a positive AV verdict', (extracted) => {
     expect(legacyGeographicVeto({ addressValidation: avCharlotte, extracted }))
@@ -234,7 +237,7 @@ describe('legacyGeographicVeto: Punta Gorda', () => {
   test('an on-file held address vetoes even when the call names a served town', () => {
     expect(legacyGeographicVeto({
       extracted: { city: 'Venice', zip: '34285' },
-      onFile: { city: 'Port Charlotte', zip: '33948' },
+      onFile: { city: 'Rotonda West', zip: '33947' },
     })).toEqual({ reason: 'not_yet_served_locality', county: null });
   });
 
@@ -244,6 +247,32 @@ describe('legacyGeographicVeto: Punta Gorda', () => {
   test('a held place also closes the make-up gate and the booking branch', () => {
     expect(source).toMatch(/const makeupGateOn = isEnabled\('callMakeupMove'\) && !v2RoutingBlocked && !legacyGeoVeto/);
     expect(source).toContain('&& legacyGeoVeto) {');
+  });
+
+  test('Englewood and Port Charlotte are served again', () => {
+    const av = { status: 'validated_accept', inServiceArea: true, county: 'Charlotte County' };
+    expect(legacyGeographicVeto({ addressValidation: av, extracted: { city: 'Port Charlotte', zip: '33948' } })).toBeNull();
+    expect(legacyGeographicVeto({ addressValidation: av, extracted: { city: 'Englewood', zip: '34223' } })).toBeNull();
+    expect(legacyGeographicVeto({ addressValidation: av, extracted: { city: 'Englewood', zip: '34224' } })).toBeNull();
+    expect(legacyGeographicVeto({
+      extracted: { city: 'Venice', zip: '34285' },
+      onFile: { city: 'Port Charlotte', zip: '33948' },
+    })).toBeNull();
+  });
+
+  // Port Charlotte is served, but its shared ZIPs 33980 / 33981 / 33983 hold by ZIP: no ZIP anywhere means review.
+  test('a Port Charlotte address with no ZIP anywhere is held for review; any ZIP clears the name', () => {
+    const av = { status: 'validated_accept', inServiceArea: true, county: 'Charlotte County' };
+    const held = { reason: 'port_charlotte_zip_unknown', county: null };
+    expect(legacyGeographicVeto({ extracted: { city: 'Port Charlotte' } })).toEqual(held);
+    expect(legacyGeographicVeto({ addressValidation: av, extracted: { city: 'Port Charlotte' } })).toEqual(held);
+    expect(legacyGeographicVeto({ extracted: {}, onFile: { city: 'Port Charlotte', zip: '' } })).toEqual(held);
+    expect(legacyGeographicVeto({ extracted: { city: 'Venice', zip: '34285' }, onFile: { city: 'Port Charlotte' } })).toBeNull();
+    expect(legacyGeographicVeto({ addressValidation: av, extracted: { city: 'Port Charlotte', zip: '33952' } })).toBeNull();
+    expect(legacyGeographicVeto({ extracted: { city: 'Port Charlotte' }, onFile: { city: 'Port Charlotte', zip: '33954' } })).toBeNull();
+    // the shared ZIPs hold by ZIP whatever the city says
+    expect(legacyGeographicVeto({ addressValidation: av, extracted: { city: 'Port Charlotte', zip: '33981' } }))
+      .toEqual({ reason: 'not_yet_served_locality', county: null });
   });
 
   test('North Port and Venice are served', () => {

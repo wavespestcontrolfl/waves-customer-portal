@@ -144,8 +144,8 @@ function deriveStatus(result, county) {
     postal_code: pickComponent(components, 'postal_code') || null,
   };
 
-  // A served county does not make Punta Gorda served (owner ruling 2026-10-22), nor Rotonda, Englewood, Placida,
-  // Boca Grande, Port Charlotte or Babcock Ranch until a second technician is hired (owner ruling 2026-11-23):
+  // A served county does not make Punta Gorda served (owner ruling 2026-10-22), nor Rotonda, Placida, Boca Grande,
+  // Babcock Ranch, Gulf Cove, El Jobean, Charlotte Harbor or Deep Creek until a second technician is hired (owner ruling 2026-11-23):
   // the validated city, or a ZIP that belongs only to such a place, is out.
   const heldPlace = isExcludedLocality(normalized.city) || isExcludedZip(normalized.postal_code);
   const inServiceArea = county ? (isInServiceAreaCounty(county) && !heldPlace) : null;

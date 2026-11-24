@@ -71,26 +71,9 @@ function zipFromAddressText(text) {
 }
 
 /**
- * The part of Sarasota County where a held place can sit behind a pin that names none: Englewood spans Sarasota
- * and Charlotte counties (owner ruling 2026-11-23, services/excluded-localities.js), so a Sarasota-county pin
- * there needs the same locality read a Charlotte pin gets. A coarse rectangle over ZIPs 34223 and 34224 (Census
- * 2020 ZCTA bounds 26.87-27.06 N, -82.45 to -82.26 W) with a small margin; it only decides whether a locality
- * lookup is worth making, never whether an address is served.
- */
-const HELD_LOCALITY_PIN_BOX = Object.freeze({ latMin: 26.86, latMax: 27.08, lngMin: -82.48, lngMax: -82.23 });
-
-function isInHeldLocalityPinBox(lat, lng) {
-  const a = Number(lat);
-  const b = Number(lng);
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
-  return a >= HELD_LOCALITY_PIN_BOX.latMin && a <= HELD_LOCALITY_PIN_BOX.latMax
-    && b >= HELD_LOCALITY_PIN_BOX.lngMin && b <= HELD_LOCALITY_PIN_BOX.lngMax;
-}
-
-/**
  * True when the city, the ZIP or the address text names a place Waves does not serve inside a served county or
- * box: DeSoto, Punta Gorda, or one of the six places held until a second technician is hired (owner ruling
- * 2026-11-23). `text` is one address or a list of them, each read on its own, by comma-separated part ("123 Main St, Port Charlotte, FL 33948") and by its
+ * box: DeSoto, Punta Gorda, or one of the places held until a second technician is hired (owner ruling
+ * 2026-11-23: Rotonda, Placida, Boca Grande, Babcock Ranch, Gulf Cove, El Jobean, Charlotte Harbor, Deep Creek). `text` is one address or a list of them, each read on its own, by comma-separated part ("123 Main St, Port Charlotte, FL 33948") and by its
  * ZIP. The public property lookup's verdict reads it beside the coordinate box, for fresh and cached results.
  */
 function namesExcludedPlace({ city = null, zip = null, text = null, places = null } = {}) {
@@ -178,8 +161,8 @@ function servedSouthHillsborough(county, address) {
 
 module.exports = {
   isServedSouthHillsboroughTown, servedSouthHillsborough,
-  SERVICE_AREA_BOUNDS, DESOTO_EXCLUSION, HELD_LOCALITY_PIN_BOX,
-  isInHeldLocalityPinBox, namesExcludedPlace,
+  SERVICE_AREA_BOUNDS, DESOTO_EXCLUSION,
+  namesExcludedPlace,
   isInServiceAreaBox, isInServiceAreaCoarseBox, isInDesotoExclusion,
   zipFromAddressText,
 };
