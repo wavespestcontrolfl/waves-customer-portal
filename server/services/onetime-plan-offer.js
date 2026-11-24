@@ -763,7 +763,7 @@ async function alreadySampled(database, jobId) {
   const row = await database('email_messages')
     .where({ idempotency_key: sampleKey(REMINDER_TEMPLATE, jobId) })
     .whereNotNull('sent_at')
-    .first('id', 'sent_at');
+    .first('id', 'sent_at', 'estimate_id');
   return row || null;
 }
 
@@ -809,40 +809,44 @@ async function alreadyOffered(database, jobId) {
 }
 
 // The confirmed send on the estimate: estimate_data.deliveryState, in the shape sendEstimateNow writes for an email
-// the provider accepted (admin-estimates.js: sentChannels, channels, firstDeliveredAt kept across later sends,
-// lastDeliveredAt, deliveredAt history capped at DELIVERY_HISTORY_MAX). That function sends and stamps in one
-// piece for the office's own sends, so there is no separate writer to call. Staff views, the win/loss report and
-// the click-mint reports read this stamp: without it an emailed offer reads as never delivered. Idempotent: a time
-// already in the history is a no-op, and a run that only finds the send confirmed (ifUnstamped) writes nothing
-// when the estimate already carries a first delivery. The row is
-// locked for the read-modify-write. The estimate is read by id, or (the earlier run's send) as the newest quote
-// that carries this job's stamp. The email is out by now: a failure here never fails the job (the next morning
-// finds the send confirmed and records it, alreadyOffered below).
+// the provider accepted (admin-estimates.js: sentChannels, channels, firstDeliveredAt, lastDeliveredAt, deliveredAt
+// history capped at DELIVERY_HISTORY_MAX). That function sends and stamps in one piece for the office's own sends, so
+// there is no separate writer to call. Staff views, the win/loss report and the click-mint reports read this stamp:
+// without it an emailed offer reads as never delivered. The estimate is the one the email linked
+// (email_messages.estimate_id, set by the send), never a guess. A handoff is merged into whatever the estimate
+// already carries, by its time: deduplicated, the history in time order, firstDeliveredAt the earliest and
+// lastDeliveredAt the latest of all (call-commitments.js reads them as a set of instants). A staff resend before
+// or after it stays. Idempotent: a time already in the history changes nothing. The row is locked for the
+// read-modify-write.
 const DELIVERY_HISTORY_MAX = 25;
+const earliest = (...times) => times.filter(Boolean).sort()[0];
+const latest = (...times) => times.filter(Boolean).sort().pop();
 async function writeOfferDelivery(database, {
-  customerId, jobId, estimateId, deliveredAt, ifUnstamped = false,
+  customerId, jobId, estimateId, deliveredAt,
 }) {
   const at = deliveredAt.toISOString();
   return database.transaction(async (trx) => {
-    const found = trx('estimates').where({ customer_id: customerId, source: 'plan_start' })
-      .whereRaw("estimate_data->'planStart'->'offer'->>'jobId' = ?", [String(jobId)]);
-    const row = await (estimateId ? found.where({ id: estimateId }) : found.orderBy('created_at', 'desc'))
+    const row = await trx('estimates').where({ id: estimateId, customer_id: customerId, source: 'plan_start' })
+      .whereRaw("estimate_data->'planStart'->'offer'->>'jobId' = ?", [String(jobId)])
       .forUpdate().first('id', 'estimate_data');
     if (!row) return false;
     const data = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : (row.estimate_data || {});
     const prior = data.deliveryState || {};
     const history = Array.isArray(prior.deliveredAt) ? prior.deliveredAt.filter((time) => typeof time === 'string') : [];
-    // `ifUnstamped`: a run that only finds the send confirmed (it did not make it) never adds a second time.
-    if (history.includes(at) || (ifUnstamped && prior.firstDeliveredAt)) return false;
+    if (history.includes(at)) return false;
+    const newest = !prior.lastDeliveredAt || at > prior.lastDeliveredAt;
     const deliveryState = {
       ...prior,
-      attemptedAt: at,
-      sentChannels: ['email'],
-      failedChannels: [],
-      channels: { ...prior.channels, email: { ok: true, providerAttempted: true, providerAccepted: true, provider: OFFER_TEMPLATE } },
-      firstDeliveredAt: prior.firstDeliveredAt || at,
-      lastDeliveredAt: at,
-      deliveredAt: [...history, at].slice(-DELIVERY_HISTORY_MAX),
+      // The latest attempt's details stay when a recovered handoff is an older one.
+      ...(newest ? {
+        attemptedAt: at,
+        channels: { ...prior.channels, email: { ok: true, providerAttempted: true, providerAccepted: true, provider: OFFER_TEMPLATE } },
+      } : {}),
+      sentChannels: [...new Set([...(prior.sentChannels || []), 'email'])],
+      failedChannels: prior.failedChannels || [],
+      firstDeliveredAt: earliest(prior.firstDeliveredAt, at),
+      lastDeliveredAt: latest(prior.lastDeliveredAt, at),
+      deliveredAt: [...history, at].sort().slice(-DELIVERY_HISTORY_MAX),
     };
     await trx('estimates').where({ id: row.id }).update({ estimate_data: JSON.stringify({ ...data, deliveryState }) });
     return true;
@@ -1019,7 +1023,8 @@ async function mintAndSend(ctx, option) {
     guard: async (trx) => (await offeredBeforeGuard(trx, { customerId: customer.id, jobId: job.id, now }))
       || optedOutGuard(trx, { customer, deps }),
     boundaryGuard: (trx) => handoffGuard(trx, { customer, jobId: job.id, estimateId: minted.estimateId, now, deps }),
-    template: { templateKey: OFFER_TEMPLATE, payload, categories: [OFFER_CATEGORY] },
+    // linkEstimateId: provenance only (email_messages.estimate_id), the estimate this email links to.
+    template: { templateKey: OFFER_TEMPLATE, payload, categories: [OFFER_CATEGORY], linkEstimateId: minted.estimateId },
   });
   const settled = await settleOfferSend(out, ctx);
   if (settled.verdict === 'sent' || settled.verdict === 'done') {
@@ -1030,7 +1035,7 @@ async function mintAndSend(ctx, option) {
       const mail = await alreadyOffered(deps.db, job.id);
       if (mail?.sent_at) {
         await recordOfferDelivery(deps, {
-          customerId: customer.id, jobId: job.id, estimateId: minted.estimateId, deliveredAt: new Date(mail.sent_at), ifUnstamped: settled.verdict === 'done',
+          customerId: customer.id, jobId: job.id, estimateId: minted.estimateId, deliveredAt: new Date(mail.sent_at),
         });
       }
     } catch (err) {
@@ -1041,22 +1046,41 @@ async function mintAndSend(ctx, option) {
 }
 
 async function liveJob(job, { now, deps, priceSettings }) {
-  const earlier = await alreadyOffered(deps.db, job.id);
-  if (earlier) {
-    // A send the provider took, whose estimate was never stamped (the run died or the write failed): record it now.
-    if (earlier.sent_at) {
-      await recordOfferDelivery(deps, {
-        customerId: job.customer_id, jobId: job.id, estimateId: null, deliveredAt: new Date(earlier.sent_at), ifUnstamped: true,
-      });
-    }
-    return { verdict: 'done', reason: null };
-  }
+  if (await alreadyOffered(deps.db, job.id)) return { verdict: 'done', reason: null };
   const ctx = {
     job, now, deps, priceSettings, offerDay: dateOnlyString(job.service_day), jobDay: dateOnlyString(job.job_day),
   };
   const outcome = await evaluateJob(ctx);
   // 'sample' is the shared verdict for "priced and allowed". Live turns it into the customer's offer.
   return outcome.verdict === 'sample' ? mintAndSend(ctx, outcome.option) : outcome;
+}
+
+// The offers the provider accepted whose estimate does not carry the delivery yet: the stamp write failed, or the run
+// died after the send. Independent of the job's 3 to 14 day window, so a job that has left it is still recorded.
+// Bounded: the messages of the last RECONCILE_DAYS days, newest first, RECONCILE_LIMIT at most, only those that link
+// an estimate (email_messages.estimate_id), whose time is not yet in the estimate's history. Sends nothing, and a
+// failure here never fails the run (the next morning reads the same rows).
+const RECONCILE_DAYS = 30;
+const RECONCILE_LIMIT = 200;
+async function reconcileOfferDeliveries({ now, deps }) {
+  const since = new Date(now.getTime() - RECONCILE_DAYS * 24 * 60 * 60 * 1000);
+  const messages = await deps.db('email_messages as m')
+    .join('estimates as e', 'e.id', 'm.estimate_id')
+    .where('m.template_key', OFFER_TEMPLATE)
+    .whereNotNull('m.sent_at')
+    .where('m.sent_at', '>', since)
+    .orderBy('m.sent_at', 'desc')
+    .limit(RECONCILE_LIMIT)
+    .select('m.estimate_id', 'm.sent_at', 'e.customer_id', 'e.estimate_data');
+  for (const message of messages) {
+    const at = new Date(message.sent_at);
+    const data = typeof message.estimate_data === 'string' ? JSON.parse(message.estimate_data) : message.estimate_data;
+    const stamp = planOfferOf(data);
+    const stamped = Array.isArray(data?.deliveryState?.deliveredAt) && data.deliveryState.deliveredAt.includes(at.toISOString());
+    if (stamp && !stamped) {
+      await recordOfferDelivery(deps, { customerId: message.customer_id, jobId: stamp.jobId, estimateId: message.estimate_id, deliveredAt: at });
+    }
+  }
 }
 
 // ---- The price settings. ----
@@ -1163,6 +1187,13 @@ async function runOnetimePlanOfferJob({ now = new Date(), deps: overrides = {} }
     page = page.length < PAGE_SIZE ? [] : await dueJobsPage(deps.db, today, page[page.length - 1]);
   }
   await reportPriceSettings(run, run.priceSettings);
+  if (mode === 'live') {
+    try {
+      await reconcileOfferDeliveries(run);
+    } catch (err) {
+      logger.warn(`[onetime-plan-offer] delivery reconcile failed (code=${err?.code || 'none'})`);
+    }
+  }
   return summary;
 }
 

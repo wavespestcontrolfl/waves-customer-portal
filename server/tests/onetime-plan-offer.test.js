@@ -992,7 +992,9 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
         expectedRecipientEmail: 'jordan@example.test',
         guard: expect.any(Function),
         boundaryGuard: expect.any(Function),
-        template: { templateKey: OFFER_TEMPLATE, payload: expect.any(Object), categories: ['onetime_plan_offer'] },
+        template: {
+          templateKey: OFFER_TEMPLATE, payload: expect.any(Object), categories: ['onetime_plan_offer'], linkEstimateId: 'est-1',
+        },
       });
       expect(_test.offerKey('job-1')).toBe('onetime-plan-offer:offer:job-1');
       // The payload carries exactly the template's variables, with the price and the dates of the offer.
@@ -1510,7 +1512,7 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       expect(liveCounts(await run(deps))).toEqual({ ...ZERO, sent: 1 });
       expect(deps.writeOfferDelivery).toHaveBeenCalledTimes(1);
       expect(deps.writeOfferDelivery).toHaveBeenCalledWith(deps.db, {
-        customerId: 'cust-1', jobId: 'job-1', estimateId: 'est-1', deliveredAt: new Date(MAIL_SENT_AT), ifUnstamped: false,
+        customerId: 'cust-1', jobId: 'job-1', estimateId: 'est-1', deliveredAt: new Date(MAIL_SENT_AT),
       });
     });
 
@@ -1520,7 +1522,7 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
         sendWithLedger: jest.fn(async () => ({ ok: true, sent: false, reason: 'duplicate', row: { id: 'led-1', status: 'sent' }, duplicate: true })),
       });
       expect(liveCounts(await run(deps))).toEqual({ ...ZERO, done: 1 });
-      expect(deps.writeOfferDelivery).toHaveBeenCalledWith(deps.db, expect.objectContaining({ estimateId: 'est-1', ifUnstamped: true }));
+      expect(deps.writeOfferDelivery).toHaveBeenCalledWith(deps.db, expect.objectContaining({ estimateId: 'est-1' }));
     });
 
     test('a handoff that started and was lost (no acceptance time) is no confirmed delivery: nothing is recorded', async () => {
@@ -1557,12 +1559,53 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       expect(deps.writeOfferDelivery).not.toHaveBeenCalled();
     });
 
-    test('a later morning that finds the send confirmed records it on the quote that carries the job\'s stamp, once', async () => {
-      const sentAt = '2030-03-06T15:00:00.000Z';
-      const deps = liveWorld({ tables: { email_messages: [{ id: 'm-1', sent_at: sentAt }] } });
-      expect(liveCounts(await run(deps))).toEqual({ ...ZERO, done: 1 });
-      expect(deps.writeOfferDelivery).toHaveBeenCalledWith(deps.db, {
-        customerId: 'cust-1', jobId: 'job-1', estimateId: null, deliveredAt: new Date(sentAt), ifUnstamped: true,
+    // The sweep: accepted offers whose estimate does not carry the delivery, whatever the job's own window says.
+    describe('the daily sweep of accepted offers the estimate does not carry yet', () => {
+      const SENT_AT = '2030-03-06T15:00:00.000Z';
+      const message = (change = {}) => ({
+        estimate_id: 'est-1', sent_at: SENT_AT, customer_id: 'cust-1', estimate_data: stamp('job-1'), ...change,
+      });
+      const sweepWorld = (rows, change = {}) => liveWorld({ jobs: [], tables: { 'email_messages as m': rows }, ...change });
+
+      test('an accepted offer the estimate lacks is recorded on the estimate the email linked, with no job due', async () => {
+        const deps = sweepWorld([message()]);
+        expect((await run(deps)).jobs).toBe(0);
+        expect(deps.writeOfferDelivery).toHaveBeenCalledWith(deps.db, {
+          customerId: 'cust-1', jobId: 'job-1', estimateId: 'est-1', deliveredAt: new Date(SENT_AT),
+        });
+        expect(deps.sendWithLedger).not.toHaveBeenCalled();
+        expect(deps.sendTemplate).not.toHaveBeenCalled();
+      });
+
+      test.each([
+        ['already in the estimate\'s history', { estimate_data: { ...stamp('job-1'), deliveryState: { deliveredAt: [SENT_AT] } } }],
+        ['an estimate with no offer stamp', { estimate_data: {} }],
+      ])('%s: nothing is written', async (_name, change) => {
+        const deps = sweepWorld([message(change)]);
+        await run(deps);
+        expect(deps.writeOfferDelivery).not.toHaveBeenCalled();
+      });
+
+      test('the read is bounded: this template, an accepted time inside 30 days, newest first, 200 at most, linked estimates only', async () => {
+        const deps = sweepWorld([]);
+        await run(deps);
+        const [read] = deps.db.queriesOf('email_messages as m');
+        expect(called(read, 'join', 'estimates as e', 'e.id', 'm.estimate_id')).toBe(true);
+        expect(called(read, 'where', 'm.template_key', OFFER_TEMPLATE)).toBe(true);
+        expect(called(read, 'whereNotNull', 'm.sent_at')).toBe(true);
+        expect(called(read, 'where', 'm.sent_at', '>', new Date(NOW.getTime() - 30 * 24 * HOUR))).toBe(true);
+        expect(called(read, 'orderBy', 'm.sent_at', 'desc')).toBe(true);
+        expect(called(read, 'limit', 200)).toBe(true);
+      });
+
+      test('shadow never runs it; a failed read never fails the run', async () => {
+        process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+        const shadow = sweepWorld([message()]);
+        await run(shadow);
+        expect(shadow.db.queriesOf('email_messages as m')).toHaveLength(0);
+        process.env.GATE_ONETIME_PLAN_OFFER = 'live';
+        const failing = sweepWorld(() => { throw new Error('read failed'); });
+        expect(await run(failing)).toMatchObject({ failed: 0 });
       });
     });
 
