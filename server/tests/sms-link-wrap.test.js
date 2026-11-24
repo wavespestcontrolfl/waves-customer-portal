@@ -78,6 +78,34 @@ describe('link recognition (ownedPortalLinkSpans)', () => {
     ].join(' ');
     expect(ownedPortalLinkSpans(body)).toEqual([]);
   });
+
+  describe('with only aliases configured (the real URL helpers)', () => {
+    const RAILWAY = 'waves-portal-production.up.railway.app';
+    const NAMES = ['PUBLIC_PORTAL_URL', 'PORTAL_URL', 'CLIENT_URL', 'PORTAL_DOMAIN', 'RAILWAY_PUBLIC_DOMAIN', 'SHORTLINK_BASE_URL'];
+    let saved;
+    beforeEach(() => {
+      saved = Object.fromEntries(NAMES.map((name) => [name, process.env[name]]));
+      for (const name of NAMES) delete process.env[name];
+      // publicPortalUrl() then reads the raw Railway host, and the short links have a domain of their own.
+      process.env.CLIENT_URL = `https://${RAILWAY}`;
+      process.env.SHORTLINK_BASE_URL = 'https://wvs.example';
+    });
+    afterEach(() => {
+      for (const name of NAMES) {
+        if (saved[name] === undefined) delete process.env[name];
+        else process.env[name] = saved[name];
+      }
+    });
+
+    test('the branded portal stays owned next to both aliases: its links are found and judged, not treated as foreign', () => {
+      const { ownedPortalHosts, wrappedOwnedLinkIn } = require('../services/composer-customer-links');
+      expect(ownedPortalHosts()).toEqual(['wvs.example', RAILWAY, HOST]);
+      const body = `Prep: https://${HOST}/prep/${TOKEN} or https://${RAILWAY}/prep/${TOKEN}`;
+      expect(ownedPortalLinkSpans(body).map((s) => s.url)).toEqual([`https://${HOST}/prep/${TOKEN}`, `https://${RAILWAY}/prep/${TOKEN}`]);
+      // A branded bearer link inside a foreign URL is refused (fail closed), as on the configured portal origin.
+      expect(wrappedOwnedLinkIn(`See https://evil.example/?next=https://${HOST}/prep/${TOKEN}`)).toBe(true);
+    });
+  });
 });
 
 describe('wrapPortalLinks', () => {
