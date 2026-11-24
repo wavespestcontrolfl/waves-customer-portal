@@ -59,6 +59,7 @@ import {
   MonthViewV2,
 } from "../../components/schedule/CalendarViewsV2";
 import TimeGridDay from "../../components/schedule/TimeGridDay";
+import RouteListDay, { DayLayoutToggle, useDayLayout } from "../../components/schedule/RouteListDay";
 import TimeGridDays from "../../components/schedule/TimeGridDays";
 import MobileWeekGrid from "../../components/schedule/MobileWeekGrid";
 import MobileDayStrip from "../../components/schedule/MobileDayStrip";
@@ -441,6 +442,8 @@ export default function DispatchPageV2({
     const current = SCHEDULE_TABS.find((t) => t.id === activeTab);
     if (current?.desktopOnly) setInternalActiveTab("board");
   }, [isControlled, isMobile, activeTab]);
+  // Day view layout: Grid (time grid) or Route (stop list per technician).
+  const [dayLayout, setDayLayout] = useDayLayout();
   // Default desktop to Week (multi-day grid); phones still open on Day,
   // which is what techs and Virginia want when triaging in the field.
   const [viewMode, setViewMode] = useState(() => {
@@ -1210,6 +1213,17 @@ export default function DispatchPageV2({
     [completingService, handleStatusChange, isMobile, data, deliverPaymentHandoff],
   );
 
+  // What opening a visit on the desktop Day board does (grid block or route
+  // line): a block wearing the "Closeout owed" chip must open the completion
+  // panel (resume), not the appointment editor, same routing the mobile list uses.
+  const editBoardVisit = (svc) => {
+    if (completionResumeMarked(svc) || (svc.visitId && svc.visitCloseoutEnabled === true) || svc.visitCloseoutPacket) {
+      handleComplete(svc);
+    } else {
+      openVisitEditor(svc);
+    }
+  };
+
   const handleCompleteSubmit = useCallback(
     async (serviceId, body) => {
       const r = await adminFetch(`/admin/dispatch/${serviceId}/complete`, {
@@ -1968,21 +1982,25 @@ export default function DispatchPageV2({
               already mirrors TimeGridDays. */}
           <div className="hidden md:block">
             {" "}
+            {/* Grid (the time grid) or Route (a stop list per technician):
+                the same day payload, the choice remembered in this browser. */}
+            <div className="flex justify-end px-3 py-2">
+              <DayLayoutToggle layout={dayLayout} onChange={setDayLayout} />
+            </div>
+            {dayLayout === "route" ? (
+              <RouteListDay
+                services={services}
+                technicians={technicians}
+                owesCompletion={completionResumeMarked}
+                onEdit={editBoardVisit}
+              />
+            ) : (
             <TimeGridDay
               date={date}
               services={services}
               technicians={technicians}
               owesCompletion={completionResumeMarked}
-              onEdit={(svc) => {
-                // A block wearing the "Closeout owed" chip must open the
-                // completion panel (resume), not the appointment editor —
-                // same routing the mobile list uses.
-                if (completionResumeMarked(svc) || (svc.visitId && svc.visitCloseoutEnabled === true) || svc.visitCloseoutPacket) {
-                  handleComplete(svc);
-                } else {
-                  openVisitEditor(svc);
-                }
-              }}
+              onEdit={editBoardVisit}
               onProtocol={(svc) => setProtocolService(svc)}
               onTreatmentPlan={openTreatmentPlan}
               onViewCustomer={openCustomerSidebar}
@@ -2000,7 +2018,8 @@ export default function DispatchPageV2({
                 setNewApptDefaults({ date: slotDate, windowStart, techId });
                 setShowNewAppt(true);
               } : undefined}
-            />{" "}
+            />
+            )}{" "}
           </div>
           {/* Mobile: inline scrollable day list (replaces the multi-day calendar) */}
           <div className="md:hidden">
