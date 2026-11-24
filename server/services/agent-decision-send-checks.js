@@ -71,9 +71,12 @@ async function openTimesBlock({ decision, outgoingBody }) {
 // FOLLOW-UP PROMISE: an escalated real-answers draft's timing phrase must
 // still match the current ET window, and an edit may not turn it into
 // timing copy the phrase list does not know.
-function followupBlock({ decision, outgoingBody }) {
-  const { followupPromiseBlockReason, slaDraftedAt } = require('./sms-followup-sla');
+async function followupBlock({ decision, outgoingBody }) {
+  const { followupPromiseBlockReason, slaDraftedAt, replyPromisesFollowup, loadFollowupClosedDates } = require('./sms-followup-sla');
+  // The phrase a draft quotes can name the next open day when Waves is closed: read the closed days only for a body that carries one.
+  const closedDates = replyPromisesFollowup(outgoingBody) ? await loadFollowupClosedDates(new Date()) : null;
   const reason = followupPromiseBlockReason({
+    closedDates,
     inputSnapshot: decision.input_snapshot,
     promptVersion: decision.prompt_version,
     originalBody: decision.suggested_message,
@@ -237,9 +240,12 @@ function blockReasonIsBillingInfrastructure(blockReason) {
 }
 // OPEN LOOPS (PR #5499): an open-loop recheck that could not read its rows is infrastructure too.
 const blockReasonIsOpenLoopsInfrastructure = (blockReason) => String(blockReason || '') === 'open-loop facts stale (open_loops_recheck_failed)';
-/** Any send-time recheck that could not read its state (live ETA, label facts, open loops or billing): refuse, keep the decision retryable. */
+// FOLLOW-UP PROMISE: the closed days could not be read just now (sms-followup-sla CLOSED_DAYS_UNREADABLE_REASON): about the read, not
+// the message, so the attempt is refused but the decision is not retired.
+const blockReasonIsFollowupInfrastructure = (blockReason) => String(blockReason || '') === 'follow-up promise unsendable (closed_days_unreadable)';
+/** Any send-time recheck that could not read its state (live ETA, label facts, open loops, billing or the closed days): refuse, keep the decision retryable. */
 const blockReasonIsRecheckInfrastructure = (blockReason) => blockReasonIsEtaInfrastructure(blockReason) || blockReasonIsLabelInfrastructure(blockReason)
-  || blockReasonIsOpenLoopsInfrastructure(blockReason) || blockReasonIsBillingInfrastructure(blockReason);
+  || blockReasonIsOpenLoopsInfrastructure(blockReason) || blockReasonIsBillingInfrastructure(blockReason) || blockReasonIsFollowupInfrastructure(blockReason);
 
 async function etaBlockReason({ decision, outgoingBody, dbh }) {
   const snapshot = parseInputSnapshot(decision.input_snapshot);
@@ -475,6 +481,39 @@ function gratitudeOpenLoopsProviderPreSendCheck({ customerId }) {
   return markRepeatable(check);
 }
 
+// FOLLOW-UP PROMISE at the true provider boundary: the phrase the body carries is revalidated against the clock and the closed days
+// as they are NOW. An unreadable closure read refuses RETRYABLY (the bounded retry rail), never as a stale phrase; a read decision
+// row that cannot be loaded does the same. A phrase that is no longer true refuses for good.
+function followupProviderPreSendCheck({ decisionId, getBody }) {
+  const check = async ({ dbi } = {}) => {
+    const sla = require('./sms-followup-sla');
+    const body = typeof getBody === 'function' ? getBody() : null;
+    if (!sla.replyPromisesFollowup(body)) return { ok: true };
+    let reason;
+    try {
+      const conn = dbi || require('../models/db');
+      const row = await conn('agent_decisions').where({ id: decisionId }).first('input_snapshot', 'prompt_version', 'suggested_message', 'created_at');
+      if (!row) return { ok: true }; // the earlier send-time check already failed closed on an absent row
+      reason = sla.followupPromiseBlockReason({
+        inputSnapshot: row.input_snapshot, promptVersion: row.prompt_version, originalBody: row.suggested_message, body,
+        draftedAt: sla.slaDraftedAt(row), closedDates: await sla.loadFollowupClosedDates(new Date(), dbi),
+      });
+    } catch (err) {
+      require('./logger').warn(`[agent-decision-send-checks] follow-up boundary recheck failed for decision ${decisionId}: ${err.message}; refusing retryably`);
+      reason = sla.CLOSED_DAYS_UNREADABLE_REASON;
+    }
+    if (reason == null) return { ok: true };
+    const retryable = reason === sla.CLOSED_DAYS_UNREADABLE_REASON;
+    return {
+      ok: false,
+      code: retryable ? 'CLOSED_DAYS_UNREADABLE_AT_BOUNDARY' : 'FOLLOWUP_PROMISE_STALE_AT_BOUNDARY',
+      reason: `follow-up promise unsendable (${reason})`,
+      ...(retryable ? { retryable: true } : {}),
+    };
+  };
+  return markRepeatable(check);
+}
+
 // The decision-row form (reviewer composer send, scheduled replay): reads the
 // decision through the handoff's connection, then the same verdicts. Like the
 // LIVE ETA boundary form, a row that reads back absent carries nothing to recheck
@@ -655,7 +694,7 @@ async function scheduledOpenLoopsBlockReason({ agentDecisionId, dbh }) {
  */
 async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
   return (await openTimesBlock({ decision, outgoingBody }))
-    || followupBlock({ decision, outgoingBody })
+    || (await followupBlock({ decision, outgoingBody }))
     || (await labelFactsBlock({ decision, outgoingBody }))
     || (await amountsBlock({ decision, outgoingBody }))
     || (await reserviceBlock({ decision, outgoingBody }))
@@ -694,4 +733,4 @@ async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fa
   }
 }
 
-module.exports = { bodyIsStaffEdited, agentDecisionSendBlockReason, scheduledReserviceBlockReason, scheduledOpenLoopsBlockReason, openLoopsBlockReason, openLoopsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, gratitudeOpenLoopsProviderPreSendCheck, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, retiredCompanyFactBlock, blockReasonIsRetiredCompanyFact, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, amountsProviderPreSendCheck, billingFingerprintForSend, composeProviderPreSendChecks, markRepeatable, isLabelRecheckInfrastructureFailure, blockReasonIsLabelInfrastructure, blockReasonIsBillingInfrastructure, blockReasonIsRecheckInfrastructure };
+module.exports = { followupProviderPreSendCheck, blockReasonIsFollowupInfrastructure, bodyIsStaffEdited, agentDecisionSendBlockReason, scheduledReserviceBlockReason, scheduledOpenLoopsBlockReason, openLoopsBlockReason, openLoopsProviderPreSendCheck, openLoopsDecisionProviderPreSendCheck, gratitudeOpenLoopsProviderPreSendCheck, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock, retiredCompanyFactBlock, blockReasonIsRetiredCompanyFact, scheduledEtaBlockReason, isEtaInfrastructureFailure, blockReasonIsEtaInfrastructure, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, labelFactsProviderPreSendCheck, labelFactsSnapshotProviderPreSendCheck, amountsProviderPreSendCheck, billingFingerprintForSend, composeProviderPreSendChecks, markRepeatable, isLabelRecheckInfrastructureFailure, blockReasonIsLabelInfrastructure, blockReasonIsBillingInfrastructure, blockReasonIsRecheckInfrastructure };
