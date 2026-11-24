@@ -70,11 +70,7 @@ function parseArgs() {
   return { execute, batch, ids, labelsPath };
 }
 
-async function main() {
-  const { execute, batch, ids, labelsPath } = parseArgs();
-
-  // From the Mac the private database host does not resolve: use the public URL the Postgres service provides, and
-  // stop with a clear message when only the private one is set.
+function checkDatabaseUrl() {
   // The script uses DATABASE_URL exactly as given and never swaps in another variable: the command in the header passes
   // the public URL explicitly. It must be a real PostgreSQL URL with a host and a database; a private Railway host (not
   // reachable from the Mac) is refused with the command to use.
@@ -86,6 +82,14 @@ async function main() {
   if (/\.railway\.internal$/.test(target.hostname)) {
     throw Object.assign(new Error('DATABASE_URL is the private Railway host: run the command in the header, which passes the public URL'), { code: 'DB_URL' });
   }
+}
+
+async function main() {
+  const { execute, batch, ids, labelsPath } = parseArgs();
+
+  // From the Mac the private database host does not resolve: use the public URL the Postgres service provides, and
+  // stop with a clear message when only the private one is set.
+  checkDatabaseUrl();
   const db = require(server('models/db'));
   const { wouldMark, markBatch, labelsFor } = require(server('services/mail/mailed-record'));
   try {
