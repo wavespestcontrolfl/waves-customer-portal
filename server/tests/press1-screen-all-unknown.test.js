@@ -8,6 +8,7 @@ jest.mock('../models/db', () => {
   const db = jest.fn();
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   db.select = jest.fn();
+  db.client = { pool: {}, releaseConnection: jest.fn(async () => {}) };
   return db;
 });
 
@@ -18,8 +19,16 @@ const { screenAllUnknownHit, withinLimit, callerKey } = require('../services/pre
 
 // Fake: the three subquery builders record their SQL; the outer select answers
 // `first()` with the given row (or a promise, or rejects with an Error).
+// The pool hands out a connection at once unless `acquire` is given.
+function fakePool(acquire) {
+  const abort = jest.fn();
+  db.client.pool.acquire = jest.fn(() => (acquire ? acquire(abort) : { promise: Promise.resolve('conn-1'), abort }));
+  return abort;
+}
+
 function fakeDb(answer = { tech: false, lead: false, remembered: false }) {
-  const seen = { tables: [], sql: [], bindings: [], whereIn: [], timeout: null };
+  fakePool();
+  const seen = { tables: [], sql: [], bindings: [], whereIn: [], timeout: null, connection: null };
   db.mockImplementation((table) => {
     seen.tables.push(table);
     const b = {};
@@ -32,6 +41,7 @@ function fakeDb(answer = { tech: false, lead: false, remembered: false }) {
   });
   db.select.mockImplementation(() => {
     const outer = {
+      connection: jest.fn((c) => { seen.connection = c; return outer; }),
       timeout: jest.fn((ms, opts) => { seen.timeout = [ms, opts]; return outer; }),
       first: jest.fn(() => {
         if (answer instanceof Promise) return answer;
@@ -53,7 +63,11 @@ test('an unknown caller with no lead, no staff phone and no earlier conversation
   await expect(screenAllUnknownHit(CALLER)).resolves.toBe(true);
   expect(seen.tables).toEqual(['technicians', 'leads', 'call_log']);
   expect(db.select).toHaveBeenCalledTimes(1);
-  expect(seen.timeout).toEqual([1500, { cancel: true }]);
+  expect(seen.connection).toBe('conn-1');
+  expect(seen.timeout[1]).toEqual({ cancel: true });
+  expect(seen.timeout[0]).toBeGreaterThan(0);
+  expect(seen.timeout[0]).toBeLessThanOrEqual(1500);
+  expect(db.client.releaseConnection).toHaveBeenCalledWith('conn-1');
 });
 
 test.each([
@@ -152,6 +166,7 @@ test('the trial statement runs once per call (a Knex builder runs once per then)
   let runs = 0;
   db.select.mockImplementation(() => {
     const outer = {
+      connection: () => outer,
       timeout: () => outer,
       // A thenable like a Knex builder: every then() is another execution.
       first: () => ({ then: (ok, bad) => { runs += 1; return Promise.resolve({ tech: false, lead: false, remembered: false }).then(ok, bad); } }),
@@ -160,4 +175,28 @@ test('the trial statement runs once per call (a Knex builder runs once per then)
   });
   await expect(screenAllUnknownHit(CALLER)).resolves.toBe(true);
   expect(runs).toBe(1);
+});
+
+test('a connection that does not come within 1.5 s: the request is aborted and no statement runs', async () => {
+  jest.useFakeTimers();
+  try {
+    fakeDb();
+    let rejectAcquire;
+    const abort = fakePool((ab) => ({ promise: new Promise((_ok, bad) => { rejectAcquire = bad; }), abort: jest.fn(() => { ab(); rejectAcquire(new Error('aborted')); }) }));
+    const pending = screenAllUnknownHit(CALLER);
+    await jest.advanceTimersByTimeAsync(1600);
+    await expect(pending).resolves.toBe(false);
+    expect(abort).toHaveBeenCalled();
+    expect(db.select).not.toHaveBeenCalled();
+    expect(db.client.releaseConnection).not.toHaveBeenCalled();
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test('the inbound history read uses the indexed last-10 expression', async () => {
+  const seen = fakeDb();
+  await screenAllUnknownHit(CALLER);
+  expect(seen.sql).toContain("right(regexp_replace(from_phone, '\\D', '', 'g'), 10) = ?");
+  expect(seen.bindings).toContain('9415550101');
 });

@@ -77,6 +77,9 @@ function rememberedRows(key) {
     .where((who) => who
       .where((inbound) => inbound
         .where('direction', 'inbound')
+        // The last-10 expression matches call_log_from_phone_last10_index, so
+        // the inbound history is an index lookup; the full key check follows.
+        .whereRaw("right(regexp_replace(from_phone, '\\D', '', 'g'), 10) = ?", [key.slice(-10)])
         .whereRaw(`${phoneKeySql('from_phone')} = ?`, [key])
         .where((proof) => proof
           // Sandy's time counts toward duration_seconds on a transfer, so any
@@ -126,21 +129,47 @@ function rememberedRows(key) {
  * with no customer match on a first delivery. Never throws.
  * @returns {Promise<boolean>}
  */
+// Run `build()`.first() inside one wall-clock limit that covers the wait for
+// a pool connection too (the pattern of ai-assistant/portal-turn.js
+// withBoundedConnection). Knex starts a query timeout only after it has a
+// connection, so the connection is taken here: when the limit passes first, a
+// queued request is aborted and never runs; a statement already sent keeps its
+// cancelling timeout. Answers 'timeout' when the limit passed.
+async function boundedFirst(build) {
+  const deadline = Date.now() + READ_TIMEOUT_MS;
+  const acquisition = db.client.pool.acquire();
+  let connection = null;
+  const work = (async () => {
+    connection = await acquisition.promise;
+    try {
+      const left = deadline - Date.now();
+      if (left <= 0) return 'timeout';
+      return await build().connection(connection).timeout(left, { cancel: true }).first();
+    } finally {
+      await db.client.releaseConnection(connection);
+    }
+  })();
+  try {
+    return await withinLimit(work, 'timeout');
+  } finally {
+    if (!connection) acquisition.abort();
+    // Tarn removes an aborted queued request in its promise handler.
+    await acquisition.promise.catch(() => {});
+    work.catch(() => {}); // a failure after the limit has no one left to tell
+  }
+}
+
 async function screenAllUnknownHit(from) {
   const key = callerKey(from);
   if (key.length < 10) return false;
   if (TWILIO_NUMBERS.isInternalNumber(from)) return false;
   try {
-    // ONE statement (one connection, one cancelling timeout) answers all three
-    // questions, and the wall-clock limit also covers the wait for a connection.
-    const read = db.select(
+    // ONE statement answers all three questions (boundedFirst below).
+    const row = await boundedFirst(() => db.select(
       db.raw('EXISTS (?) AS tech', [technicianRows(key)]),
       db.raw('EXISTS (?) AS lead', [liveLeadRows(key)]),
       db.raw('EXISTS (?) AS remembered', [rememberedRows(key)]),
-    ).timeout(READ_TIMEOUT_MS, { cancel: true }).first();
-    // A Knex builder runs once per then(); turn it into ONE promise first.
-    // Promise.race keeps a handler on it, so a late failure is handled.
-    const row = await withinLimit(Promise.resolve(read), 'timeout');
+    ));
     if (row === 'timeout') {
       logger.warn('[preconnect-screen] all-unknown check ran past its limit (failing open, no challenge)');
       return false;
