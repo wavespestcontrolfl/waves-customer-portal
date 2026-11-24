@@ -25,11 +25,12 @@ function authHeaders() {
 const money = (n) => `$${Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const count = (n) => Number(n || 0).toLocaleString("en-US");
 
-// One rain call per date: every campaign row of a date carries the same call, so count each date once.
+// One rain call per date: every campaign row of a date carries the same call, so count each date once. The ads
+// follow the 2 PM call (cutoff_call); a later forecast can change `call`, never the ads.
 function rainText(rows) {
   const byDate = new Map();
   for (const r of rows) if (r.rain_day && !byDate.has(r.date)) byDate.set(r.date, r);
-  const called = [...byDate.values()].filter((r) => r.rain_day.call === "rain");
+  const called = [...byDate.values()].filter((r) => r.rain_day.cutoff_call === "rain");
   if (!called.length) return "0";
   const measured = called.filter((r) => r.rain_day.wet_day !== null && r.rain_day.wet_day !== undefined);
   const wet = measured.filter((r) => r.rain_day.wet_day).length;
@@ -41,7 +42,8 @@ const PLATFORM_NAMES = { google_ads: "Google Ads", google_lsa: "Google LSA", fac
 function rainDayText(rain) {
   if (!rain || !rain.call) return "";
   const measured = rain.wet_day === null || rain.wet_day === undefined ? "not measured yet" : rain.wet_day ? "it rained" : "stayed dry";
-  return `Called ${rain.call}, ${measured}`;
+  if (!rain.cutoff_call) return `No 2 PM call (later forecast ${rain.call}), ${measured}`;
+  return `2 PM call ${rain.cutoff_call}, ${measured}`;
 }
 
 // Campaign lines, days added up. A customer is counted on one day only (the server credits their first lead), so the
@@ -176,7 +178,8 @@ export default function AdsResultsCard() {
       </div>
       <div className="text-ui-body text-ink-secondary [margin:4px_0_12px]">
         Leads from paid ads and what they paid. Paid means a paid invoice on or after the lead day. Plan / one-time
-        is the customer today. Each customer counts once, on their first lead. Leads are tracked funnel leads: an LSA message or call with no
+        is the customer today. Each customer counts once, on their first lead. Calls are leads linked to a call (links start Aug 9, 2026). Rain days follow the 2 PM call that set the ads.
+        Leads are tracked funnel leads: an LSA message or call with no
         funnel record is not counted here.
       </div>
       {state === "loading" && <div className="text-ui-body text-ink-secondary">Loading.</div>}

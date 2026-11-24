@@ -106,9 +106,11 @@ async function loadLeads(conn, since, until) {
       .orWhere((fb) => fb.where('asa.lead_source', 'facebook').where((p) => p
         .where('asa.is_paid', true).orWhereNotNull('asa.fbclid').orWhereNotNull('asa.fbc'))))
     .select(
-      'asa.id', 'asa.campaign_id', 'asa.customer_id', 'asa.lead_date', 'asa.lead_source', 'asa.funnel_stage',
+      'asa.id', 'asa.campaign_id', 'asa.lead_date', 'asa.lead_source', 'asa.funnel_stage',
       'asa.source_call_id', 'asa.created_at', 'ac.campaign_name', 'ac.platform', 'l.first_name as lead_first_name',
       'l.last_name as lead_last_name', 'l.phone as lead_phone', 'l.email as lead_email',
+      // A funnel row can predate the customer; the lead may carry the customer id first.
+      conn.raw('COALESCE(asa.customer_id, l.customer_id) AS customer_id'),
     );
 }
 

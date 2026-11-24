@@ -14,7 +14,7 @@ const zero = {
   paid90: 0, cancels: 0, customers: [], rain_day: null,
 };
 const rows = [
-  { ...zero, date: '2026-10-01', campaign_id: 'a', campaign: 'Test Campaign A', platform: 'google_ads', spend: 10, leads: 2, paid_customers: 1, plan_customers: 1, paid90: 40, rain_day: { call: 'rain', wet_day: true } },
+  { ...zero, date: '2026-10-01', campaign_id: 'a', campaign: 'Test Campaign A', platform: 'google_ads', spend: 10, leads: 2, paid_customers: 1, plan_customers: 1, paid90: 40, rain_day: { call: 'rain', cutoff_call: 'rain', wet_day: true } },
   { ...zero, date: '2026-10-02', campaign_id: 'a', campaign: 'Test Campaign A', platform: 'google_ads', spend: 5, leads: 1 },
   { ...zero, date: '2026-10-01', campaign_id: null, campaign: '(no campaign)', platform: 'google_lsa', leads: 3, one_time_customers: 1, paid_customers: 1 },
 ];
@@ -40,7 +40,7 @@ describe('AdsResultsCard', () => {
   it('counts a rain date once in the total, and names the source of an unlinked line', async () => {
     const twoCampaigns = [
       ...rows,
-      { ...zero, date: '2026-10-01', campaign_id: 'b', campaign: 'Test Campaign B', platform: 'google_ads', spend: 1, rain_day: { call: 'rain', wet_day: true } },
+      { ...zero, date: '2026-10-01', campaign_id: 'b', campaign: 'Test Campaign B', platform: 'google_ads', spend: 1, rain_day: { call: 'rain', cutoff_call: 'rain', wet_day: true } },
     ];
     reply({ period: '90d', since: 'x', until: 'y', rows: twoCampaigns, totals: zero });
     render(<AdsResultsCard />);
@@ -56,9 +56,9 @@ describe('AdsResultsCard', () => {
     await screen.findByText('Test Campaign A');
     expect(globalThis.fetch.mock.calls[0][0]).toContain('/admin/ads/results?period=90d');
     expect(screen.getAllByText('1 called, 1 of 1 wet').length).toBeGreaterThan(0);
-    expect(screen.queryByText('Called rain, it rained')).toBeNull();
+    expect(screen.queryByText('2 PM call rain, it rained')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Show days for Test Campaign A' }));
-    expect(screen.getByText('Called rain, it rained')).toBeInTheDocument();
+    expect(screen.getByText('2 PM call rain, it rained')).toBeInTheDocument();
   });
 
   it('a slow old reply never replaces the newer period', async () => {
@@ -76,6 +76,20 @@ describe('AdsResultsCard', () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(screen.queryByText('Test Campaign A')).toBeNull();
     expect(screen.getByText('Newer Campaign')).toBeInTheDocument();
+  });
+
+  it('counts the 2 PM call that set the ads, not a later forecast', async () => {
+    const changed = [
+      { ...zero, date: '2026-10-05', campaign_id: 'c', campaign: 'Test Campaign C', platform: 'google_ads', rain_day: { call: 'rain', cutoff_call: 'dry', wet_day: false } },
+      { ...zero, date: '2026-10-06', campaign_id: 'c', campaign: 'Test Campaign C', platform: 'google_ads', rain_day: { call: 'rain', cutoff_call: null, wet_day: null } },
+    ];
+    reply({ period: '90d', since: 'x', until: 'y', rows: changed, totals: zero });
+    render(<AdsResultsCard />);
+    await screen.findByText('Test Campaign C');
+    expect(screen.getAllByRole('row').at(-1).textContent).not.toContain('called');
+    fireEvent.click(screen.getByRole('button', { name: 'Show days for Test Campaign C' }));
+    expect(screen.getByText('2 PM call dry, stayed dry')).toBeInTheDocument();
+    expect(screen.getByText('No 2 PM call (later forecast rain), not measured yet')).toBeInTheDocument();
   });
 
   it('asks again when the period changes', async () => {
