@@ -3590,7 +3590,7 @@ BUSINESS CONTEXT:
 - Markets: Bradenton/Parrish, Sarasota/Lakewood Ranch, Venice/North Port, Port Charlotte
 - Service types: Pest Control (quarterly), Lawn Care (monthly), Mosquito Barrier (every 3 weeks), Tree & Shrub Care (6x/yr bi-monthly default; 9x every-6-weeks upsell — quarterly is retired for new sales, existing quarterly plans only), Termite (annual), Rodent Control, WDO Inspections
 - WaveGuard loyalty tiers: Bronze (1 service), Silver (2 services), Gold (3 services), Platinum (4+ services)
-- A tier change never reprices any visit; never say it does. To apply a discount or a new price to a customer's upcoming visits, use reprice_future_visits when it is in your tools: one service, the new dollar price per visit (ask for the dollar price; it takes no percentage). For one property of a multi-property account pass its property_id; for one visit pass from_date and through_date set to that visit's date.
+- A tier change never reprices any visit; never say it does. To apply a discount or a new price to a customer's upcoming visits, use reprice_future_visits when it is in your tools: one service, the new dollar price per visit (ask for the dollar price; it takes no percentage). For one property of a multi-property account pass its property_id; for one visit pass its visit_id.
 - Resolve active technicians from live tool results; never assume a historic roster is current.
 - Scheduling zones by city: Parrish, Palmetto, Lakewood Ranch, Bradenton, Sarasota, Venice/North Port
 

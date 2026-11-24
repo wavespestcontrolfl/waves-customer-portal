@@ -524,10 +524,10 @@ describe('one property, one visit', () => {
     const card = await preview({ property_id: UNIT_B, new_price: 68.9 });
     expect(card.preview).toBe(true);
     expect(card.visits.map((v) => [v.id, v.old_price, v.new_price])).toEqual([['b-1', '$76.56', '$68.90'], ['b-2', '$76.56', '$68.90']]);
-    expect(card.property_label).toBe('103 Example Ave');
-    expect(cardLines(card)[0].text).toBe("Only visits booked for 103 Example Ave. The customer's other properties keep their prices.");
+    expect(card.property_label).toBe('Unit B · 103 Example Ave');
+    expect(cardLines(card)[0].text).toBe("Only visits booked for Unit B · 103 Example Ave. The customer's other properties keep their prices.");
     const contract = buildContract({ toolName: 'reprice_future_visits', params: ask({ property_id: UNIT_B }), displayParams: {}, preview: card });
-    expect(contract.effects.map((e) => e.label)).toContain("Only visits booked for 103 Example Ave. The customer's other properties keep their prices.");
+    expect(contract.effects.map((e) => e.label)).toContain("Only visits booked for Unit B · 103 Example Ave. The customer's other properties keep their prices.");
   });
 
   test('the confirmed run saves only the listed property visits', async () => {
@@ -539,9 +539,33 @@ describe('one property, one visit', () => {
     expect(Schedule.updateVisitDetails.mock.calls[0][0].body).toEqual({ estimatedPrice: 85.54, expectedTotal: 85.54 });
   });
 
-  test('from_date = through_date changes one visit', async () => {
+  test('from_date = through_date narrows to that day', async () => {
     const card = await preview({ property_id: UNIT_A, from_date: '2099-05-10', through_date: '2099-05-10', new_price: 85.54 });
     expect(card.visits.map((v) => v.id)).toEqual(['a-2']);
+  });
+
+  test('visit_id changes that one visit, even with another unit on the same day', async () => {
+    const id = '00000000-0000-0000-0000-0000000000d1';
+    tables.scheduled_services.find((r) => r.id === 'b-1').id = id;
+    const card = await preview({ visit_id: id, new_price: 68.9 });
+    expect(card.visits.map((v) => v.id)).toEqual([id]);
+    const missing = await preview({ visit_id: '00000000-0000-0000-0000-0000000000d9' });
+    expect(missing.code).toBe('visit_not_found');
+    expect((await preview({ visit_id: 'b-1' })).code).toBe('invalid_input');
+    // Another unit's visit under property_id is not found.
+    expect((await preview({ visit_id: id, property_id: UNIT_A })).code).toBe('visit_not_found');
+  });
+
+  test('a visit moved to another unit between saves is not saved at the old unit price', async () => {
+    const input = ask({ property_id: UNIT_A, new_price: 85.54 });
+    const card = await preview({ property_id: UNIT_A, new_price: 85.54 });
+    Schedule.updateVisitDetails.mockImplementationOnce(async () => {
+      Object.assign(tables.scheduled_services.find((r) => r.id === 'a-2'), { property_id: UNIT_B, row_version: 'a-2:v2' });
+      return { status: 200, json: { success: true } };
+    });
+    const res = await confirm(input, card._version);
+    expect(Schedule.updateVisitDetails.mock.calls.map((c) => c[0].id)).toEqual(['a-1']);
+    expect(res).toMatchObject({ partial: true, failed_visit: { id: 'a-2', code: 'preview_changed' } });
   });
 
   test('a visit with no saved property is left alone, never guessed onto the property', async () => {
@@ -564,7 +588,7 @@ describe('one property, one visit', () => {
     const res = await preview({ property_id: UNIT_A, from_date: '2099-06-01' });
     expect(res.error).toBeTruthy();
     tables.scheduled_services = tables.scheduled_services.filter((r) => r.property_id !== UNIT_A).concat(visit('n-1', '2099-04-10', { property_id: null }));
-    expect(await preview({ property_id: UNIT_A })).toMatchObject({ code: 'nothing_to_reprice', error: expect.stringMatching(/no upcoming .* visits booked for 101 Example Ave/) });
+    expect(await preview({ property_id: UNIT_A })).toMatchObject({ code: 'nothing_to_reprice', error: expect.stringMatching(/no upcoming .* visits booked for Unit A · 101 Example Ave/) });
   });
 
   test('the version binds the property and range', async () => {
