@@ -14,13 +14,13 @@
  * - Shifts are chosen by their work date; a shift of any length counts for every holiday it overlaps (a corrected shift from
  *   Monday 11 PM to Wednesday 1 AM overlaps Tuesday and Wednesday). The holidays read run from the week's start to the day
  *   the last of the week's shifts ends (their actual clock-outs): no fixed look-ahead.
- * - An entry wholly inside a holiday counts its stored duration_minutes (what the pay run pays); an entry that crosses a
- *   midnight counts the clipped clock span.
- * - The unpaid meal is the shift's work date's unpaid_meal_minutes (what the pay deducts; 0 with GATE_AUTO_LUNCH off).
- *   Recorded meal breaks (completed, 30 minutes or more) count only in the deduction of THEIR OWN work date (the date of their
- *   clock-in, as the daily summary groups them), clipped to that date's shifts: that part of the deduction is placed by clock
- *   time, and only the rest of it (an automatic one, which has no clock time, or the part of a break outside the shift) is shared by the share of the shift inside the
- *   holiday.
+ * - Every figure is a whole number of hundredths of a minute and the split of a work date is ONE exact procedure
+ *   (splitWorkDate): each shift's STORED paid hundredths (duration_minutes, what the pay pays) are shared across the holidays it
+ *   overlaps and the rest of it by the clock milliseconds in each; the recorded meal (breaks of 30 minutes or more of THAT work
+ *   date, clipped to its shifts) is placed in the parts by clock time, each part capped at its own paid hundredths and the
+ *   total at the deduction; the rest of the deduction (the day summary's unpaid_meal_minutes: what the pay deducts, 0 with
+ *   GATE_AUTO_LUNCH off, never more than the paid total) is shared by the hundredths each part has left. Every share is a
+ *   largest-remainder allocation (allocate), so the parts add up to exactly the stored total less the deduction.
  * - Fallback, per work date: when the time entries cannot give clock times for that date (a shift with no clock-out, or no
  *   shift entries while the day's summary holds shift minutes), the date's summary row is read as a whole (shift minutes
  *   less unpaid meal, as the weekly pay sums them) and counts for that date only, when that date is itself a holiday. The
@@ -47,29 +47,22 @@ const fullHundredths = (entry) => (entry.duration_minutes == null
   ? Math.round((new Date(entry.clock_out).getTime() - new Date(entry.clock_in).getTime()) * HUNDREDTHS_PER_MS)
   : hundredths(entry.duration_minutes));
 
-// Minutes (hundredths) of one entry inside [start, end): its stored duration when it lies wholly inside.
-function insideHundredths(entry, bounds) {
-  const from = new Date(entry.clock_in).getTime();
-  const to = new Date(entry.clock_out).getTime();
-  if (from >= bounds.start && to <= bounds.end) return fullHundredths(entry);
-  const clipped = Math.min(to, bounds.end) - Math.max(from, bounds.start);
-  return clipped > 0 ? Math.round(clipped * HUNDREDTHS_PER_MS) : 0;
-}
+const msOf = (value) => new Date(value).getTime();
+// The milliseconds of [from, to) that fall inside the day `bounds`.
+const overlapMs = (from, to, bounds) => Math.max(0, Math.min(to, bounds.end) - Math.max(from, bounds.start));
 
-// The parts of a work date's recorded meals that lie inside its shifts: the completed breaks of 30 minutes or more
-// (the pay's own test, on the whole break), each clipped to every shift it overlaps. [{ length, insideHolidays(bounds) }].
+// The completed breaks of 30 minutes or more (the pay's own test, on the whole break), each clipped to every shift it overlaps:
+// [{ from, to, hundredths }] in ms. A break wholly inside its shift keeps its stored duration, as the pay counts it.
 function recordedMealPieces(breaks, shifts, floor) {
   const pieces = [];
   for (const b of breaks) {
     if (!b.clock_out || fullHundredths(b) < floor) continue;
     for (const s of shifts) {
-      const from = Math.max(new Date(b.clock_in).getTime(), new Date(s.clock_in).getTime());
-      const to = Math.min(new Date(b.clock_out).getTime(), new Date(s.clock_out).getTime());
+      const from = Math.max(msOf(b.clock_in), msOf(s.clock_in));
+      const to = Math.min(msOf(b.clock_out), msOf(s.clock_out));
       if (to <= from) continue;
-      // a break wholly inside the shift keeps its stored duration, as the pay counts it
-      const whole = from === new Date(b.clock_in).getTime() && to === new Date(b.clock_out).getTime();
-      const piece = { clock_in: new Date(from), clock_out: new Date(to), duration_minutes: whole ? b.duration_minutes : null };
-      pieces.push({ length: fullHundredths(piece), insideHolidays: (bounds) => insideHundredths(piece, bounds) });
+      const whole = from === msOf(b.clock_in) && to === msOf(b.clock_out);
+      pieces.push({ from, to, hundredths: whole ? fullHundredths(b) : Math.round((to - from) * HUNDREDTHS_PER_MS) });
     }
   }
   return pieces;
@@ -95,6 +88,64 @@ function allocate(total, weights) {
 }
 
 /**
+ * ONE exact split of a work date's paid minutes, in whole hundredths, across the holidays its shifts overlap and the rest of
+ * the shifts (the last part, holiday null). Pure. Every figure is an integer and the parts add up exactly.
+ *   shifts    the date's completed shifts { clock_in, clock_out, duration_minutes }
+ *   breaks    the date's own breaks (completed; recorded meals are the ones of 30 minutes or more)
+ *   held      the technician's holiday dates, sorted
+ *   meal      the unpaid meal the day summary deducted (hundredths)
+ * 1. Each shift's STORED paid hundredths (duration_minutes, what the pay pays) are shared across its parts by allocate(),
+ *    weighted by the clock milliseconds in each: the parts of a shift add up to its stored duration, never a rounded side each.
+ * 2. The recorded meal, clipped to the shifts, is placed in the parts by clock time (each piece shared across the parts by
+ *    allocate() the same way); a part's placed meal is capped at its own paid hundredths, and the placed total at the deduction.
+ * 3. What is left of the deduction is shared by allocate(), weighted by each part's hundredths left after step 2 (never more).
+ * 4. A part's premium minutes = paid - placed - shared (never below 0).
+ * The deduction is capped at the date's paid total (the pay never deducts more than the shift: unpaid-meal.js), so the parts
+ * add up to the stored total less the deduction exactly.
+ * Returns { parts: [{ holiday, paid, placed, shared, premium }], deduction } (parts with nothing paid are left out).
+ */
+function splitWorkDate({ shifts, breaks = [], held, meal = 0 }) {
+  const keys = [...held.filter((day) => {
+    const bounds = dayBounds(day);
+    return shifts.some((s) => overlapMs(msOf(s.clock_in), msOf(s.clock_out), bounds) > 0);
+  }), null];
+  const bounds = keys.map((key) => (key ? dayBounds(key) : null));
+  // The clock milliseconds of [from, to) in each part: each holiday, then the rest of it.
+  const weightsOf = (from, to) => {
+    const inside = bounds.map((b) => (b ? overlapMs(from, to, b) : 0));
+    const rest = Math.max(0, (to - from) - inside.reduce((sum, w) => sum + w, 0));
+    return inside.map((w, n) => (n === inside.length - 1 ? rest : w));
+  };
+  const paid = keys.map(() => 0);
+  for (const s of shifts) {
+    const weights = weightsOf(msOf(s.clock_in), msOf(s.clock_out));
+    // a shift with no clock span at all is all "rest"
+    const shares = allocate(fullHundredths(s), weights.some((w) => w > 0) ? weights : weights.map((_, n) => (n === weights.length - 1 ? 1 : 0)));
+    shares.forEach((share, n) => { paid[n] += share; });
+  }
+  const paidTotal = paid.reduce((sum, v) => sum + v, 0);
+  const deduction = Math.min(Math.max(0, meal), paidTotal);
+  const floor = hundredths(UNPAID_MEAL_MIN_BREAK_MINUTES);
+  const placedRaw = keys.map(() => 0);
+  if (deduction > 0) {
+    for (const piece of recordedMealPieces(breaks, shifts, floor)) {
+      const weights = weightsOf(piece.from, piece.to);
+      allocate(piece.hundredths, weights.some((w) => w > 0) ? weights : weights.map((_, n) => (n === weights.length - 1 ? 1 : 0)))
+        .forEach((share, n) => { placedRaw[n] += share; });
+    }
+  }
+  let placed = placedRaw.map((v, n) => Math.min(v, paid[n]));
+  if (placed.reduce((sum, v) => sum + v, 0) > deduction) placed = allocate(deduction, placed);
+  const left = paid.map((v, n) => v - placed[n]);
+  const shared = allocate(deduction - placed.reduce((sum, v) => sum + v, 0), left);
+  return {
+    deduction,
+    parts: keys.map((holiday, n) => ({ holiday, paid: paid[n], placed: placed[n], shared: shared[n], premium: Math.max(0, paid[n] - placed[n] - shared[n]) }))
+      .filter((part) => part.paid > 0),
+  };
+}
+
+/**
  * The paid minutes one technician earns on holidays from the shifts of ONE pay week, pure.
  *   dates      the work dates ('YYYY-MM-DD') of the week, Monday to Sunday
  *   shifts     shift entries { clock_in, clock_out, duration_minutes, work_date } whose work date is in the week, not voided
@@ -107,7 +158,6 @@ function holidayWorkForWeek({ dates, shifts, breaks = [], daily, holidays }) {
   const held = [...new Set(holidays)].sort();
   const totals = new Map();
   const add = (day, units) => { if (units > 0) totals.set(day, (totals.get(day) || 0) + units); };
-  const floor = hundredths(UNPAID_MEAL_MIN_BREAK_MINUTES);
   for (const date of dates) {
     const group = shifts.filter((s) => s.work_date === date);
     const row = daily.get(date) || null;
@@ -118,34 +168,15 @@ function holidayWorkForWeek({ dates, shifts, breaks = [], daily, holidays }) {
       continue;
     }
     if (!group.length) continue;
-    const total = group.reduce((sum, s) => sum + fullHundredths(s), 0);
     const meal = row ? hundredths(row.unpaid_meal_minutes) : 0;
-    // The recorded meals of THIS work date's deduction, clipped to its shifts. A break counts in the deduction of the work date
-    // of its own clock-in (time-tracking.js computeDailySummaryInTransaction groups breaks by that date, and
-    // dayUnpaidMealUnits reads only that group), so only breaks of this date are read here, and only the part inside this
-    // date's shifts. A break of ANOTHER work date (a 1 AM meal in a shift that started the evening before) is in that other
-    // date's deduction, never in this one: so a break edited in another pay week can never change this shift's premium or a
-    // check that is already final, and no lock on break edits is needed. The deduction left without a recorded part inside the
-    // shifts is shared by the share of the shift inside the holiday.
-    const pieces = meal > 0 ? recordedMealPieces(breaks.filter((b) => b.work_date === date), group, floor) : [];
-    const recordedTotal = pieces.reduce((sum, p) => sum + p.length, 0);
-    const placed = Math.min(meal, recordedTotal);
-    // The parts of the shift the holidays cut it into, in date order: each holiday it overlaps, then (last) the rest of it.
-    const parts = held.map((holiday) => {
-      const bounds = dayBounds(holiday);
-      return {
-        holiday,
-        inside: group.reduce((sum, s) => sum + insideHundredths(s, bounds), 0),
-        recorded: pieces.reduce((sum, piece) => sum + piece.insideHolidays(bounds), 0),
-      };
-    }).filter((part) => part.inside > 0);
-    if (!parts.length) continue;
-    // The deduction is shared in whole hundredths, by largest remainder, so the shares of the holidays and of the rest of
-    // the shift add up to EXACTLY the deduction (never a hundredth lost to rounding each share alone): the placed part by the
-    // recorded meal inside each holiday, the rest by the shift inside each.
-    const placedShares = allocate(placed, [...parts.map((part) => part.recorded), Math.max(0, recordedTotal - parts.reduce((sum, part) => sum + part.recorded, 0))]);
-    const restShares = allocate(meal - placed, [...parts.map((part) => part.inside), Math.max(0, total - parts.reduce((sum, part) => sum + part.inside, 0))]);
-    parts.forEach((part, n) => add(part.holiday, Math.max(0, part.inside - placedShares[n] - restShares[n])));
+    // The recorded meals of THIS work date's deduction. A break counts in the deduction of the work date of its own clock-in
+    // (time-tracking.js computeDailySummaryInTransaction groups breaks by that date, and dayUnpaidMealUnits reads only that
+    // group), so only breaks of this date are read, clipped to this date's shifts. A break of ANOTHER work date (a 1 AM meal in
+    // a shift that started the evening before) is in that other date's deduction, never in this one: so a break edited in
+    // another pay week can never change this shift's premium or a check that is already final, and no lock on break edits is
+    // needed. The deduction is then split by splitWorkDate, one exact procedure in whole hundredths.
+    const split = splitWorkDate({ shifts: group, breaks: breaks.filter((b) => b.work_date === date), held, meal });
+    for (const part of split.parts) if (part.holiday) add(part.holiday, part.premium);
   }
   return [...totals.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([workDate, units]) => ({ workDate, minutes: units / 100 }));
 }
@@ -250,4 +281,4 @@ async function otherWeeksOfShiftsInto(conn, technicianId, days) {
   return [...weeks].sort();
 }
 
-module.exports = { allocate, holidayWorkForWeek, holidayWorkByDay, capHolidayDays, dayBounds, otherWeeksOfShiftsInto };
+module.exports = { allocate, splitWorkDate, holidayWorkForWeek, holidayWorkByDay, capHolidayDays, dayBounds, otherWeeksOfShiftsInto };

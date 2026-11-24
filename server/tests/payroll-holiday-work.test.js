@@ -4,7 +4,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { allocate, holidayWorkForWeek, capHolidayDays, dayBounds } = require('../services/payroll-holiday-work');
+const { allocate, splitWorkDate, holidayWorkForWeek, capHolidayDays, dayBounds } = require('../services/payroll-holiday-work');
 const { computePaycheck } = require('../services/payroll-calc');
 const { parseETDateTime, etDateString } = require('../utils/datetime-et');
 const { addStaffWorkDays, staffWeekStartForWorkDate } = require('../utils/staff-time-work-date');
@@ -150,12 +150,14 @@ describe('holidayWorkForWeek: the unpaid meal inside the day', () => {
     expect(week(HOLIDAY_WEEK, { shifts: [shift], breaks: [meal], daily: daily([HOLIDAY, 350, 40]) }).get(HOLIDAY)).toBe(310);
   });
 
-  test('only the deduction without a recorded time is shared by the share of the shift inside the day', () => {
-    // 8 PM to 4 AM, 45 minutes deducted, a recorded 30 minute meal at 11 PM (before the holiday): the recorded 30 is placed
-    // before midnight, and only the other 15 is shared (half the shift is inside): 240 - 7.5 = 232.5.
+  test('only the deduction left after the recorded meal is shared, by each part\'s minutes left', () => {
+    // 8 PM to 4 AM (240 inside the holiday, 240 outside), 45 minutes deducted, a recorded 30 minute meal at 11 PM (before the
+    // holiday): the recorded 30 is placed in the outside part, so 240 and 210 minutes are left; the other 15 is shared by
+    // those, 240/450 to the holiday = 8.00: 240 - 8 = 232. (Earlier this was 232.5, the share of the whole shift inside the
+    // holiday: it took 7.5 from the holiday although the placed meal had already used 30 of the outside part.)
     const shift = entry('2026-09-06T20:00', '2026-09-07T04:00');
     const meal = entry('2026-09-06T23:00', '2026-09-06T23:30');
-    expect(week(PRIOR, { shifts: [shift], breaks: [meal], daily: daily(['2026-09-06', 480, 45]) }).get(HOLIDAY)).toBe(232.5);
+    expect(week(PRIOR, { shifts: [shift], breaks: [meal], daily: daily(['2026-09-06', 480, 45]) }).get(HOLIDAY)).toBe(232);
   });
 
   test('an automatic deduction has no clock time: the share of the shift inside the day bears the same share of it', () => {
@@ -215,6 +217,116 @@ describe('the unpaid meal is shared to the exact hundredth', () => {
         expect(allocate(total, weights).reduce((a, b) => a + b, 0)).toBe(total);
       }
     }
+  });
+});
+
+describe('splitWorkDate: one exact split in whole hundredths', () => {
+  const split = (input) => splitWorkDate({ held: [HOLIDAY, '2026-09-08'], breaks: [], meal: 0, ...input });
+  const premiumOf = (result, day) => (result.parts.find((p) => p.holiday === day) || { premium: 0 }).premium;
+
+  test('a recorded meal from 11 PM to midnight in a 11:30 PM to 7:30 AM shift: 420 paid minutes, none deducted twice', () => {
+    // The first 30 shift minutes are the meal itself (placed in the first holiday, which has only those 30 paid minutes);
+    // the other 30 deducted minutes can only come from the second holiday's minutes: 0 and 420, not 0.00 and 421.87.
+    const shift = entry('2026-09-07T23:30', '2026-09-08T07:30');
+    const meal = entry('2026-09-07T23:00', '2026-09-08T00:00');
+    const result = split({ shifts: [shift], breaks: [meal], meal: 6000 });
+    expect(result.deduction).toBe(6000);
+    expect(premiumOf(result, HOLIDAY)).toBe(0);
+    expect(premiumOf(result, '2026-09-08')).toBe(42000);
+    const summed = result.parts.reduce((sum, p) => sum + p.premium, 0);
+    expect(summed).toBe(42000);
+  });
+
+  test('a shift with millisecond clock times keeps its stored 60.00 minutes across two holidays: $22.33 an hour pays $11.17', () => {
+    // 23:30:00.360 to 00:30:00.240: 29.99 and 30.00 when each side is rounded alone (59.99 in all), 60.00 stored.
+    const shift = { ...entry('2026-09-07T23:30', '2026-09-08T00:30'), clock_in: new Date(at('2026-09-07T23:30').getTime() + 360), clock_out: new Date(at('2026-09-08T00:30').getTime() + 240), duration_minutes: '60.00' };
+    const result = split({ shifts: [shift] });
+    const minutes = result.parts.reduce((sum, p) => sum + p.premium, 0);
+    expect(minutes).toBe(6000);
+    // each holiday is within a hundredth of its 30.00 minutes (the clock gives 29.9940 and 30.0040), and they add up to 60.00
+    for (const part of result.parts) expect(Math.abs(part.premium - 3000)).toBeLessThanOrEqual(1);
+    const pay = computePaycheck({
+      payDate: '2026-09-18', hourlyRate: '22.33', holidayMinutes: 0, ptoMinutes: 0, holidayWorkMinutes: String(minutes / 100),
+      w4: { formYear: 2026, filingStatus: 'single', step2Checkbox: false },
+    });
+    expect(pay.holidayWorkPremiumCents).toBe(1117);
+  });
+
+  test('a deduction larger than the paid minutes is capped at them', () => {
+    const shift = entry('2026-09-07T10:00', '2026-09-07T10:20');
+    const result = split({ shifts: [shift], meal: 6000 });
+    expect(result.deduction).toBe(2000);
+    expect(result.parts).toEqual([expect.objectContaining({ holiday: HOLIDAY, paid: 2000, premium: 0 })]);
+  });
+
+  describe('seeded property test', () => {
+    // mulberry32: a small seeded generator, so a failure repeats
+    const seeded = (seed) => () => {
+      let t = (seed += 0x6D2B79F5);
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const DAYS = ['2026-09-07', '2026-11-01', '2026-10-31', '2027-03-14', '2027-03-13', '2026-12-25'];
+
+    test('2000 random dates: every part is whole and non-negative, the parts add up to the stored total less the deduction, no part is paid more than its clock minutes', () => {
+      const rand = seeded(20261124);
+      const int = (lo, hi) => lo + Math.floor(rand() * (hi - lo + 1));
+      for (let n = 0; n < 2000; n += 1) {
+        const day = DAYS[int(0, DAYS.length - 1)];
+        const dayStart = dayBounds(day).start;
+        // 1-3 shifts that do not overlap, with millisecond clock times, anywhere from the start of the work date
+        const shifts = [];
+        let cursor = dayStart + int(0, 20 * 3600000);
+        const jitter = rand() < 0.3 ? int(-5, 5) : 0; // sometimes the stored duration is a few hundredths off the clock
+        for (let k = int(1, 3); k > 0; k -= 1) {
+          const length = int(10 * 60000, 14 * 3600000);
+          const from = cursor;
+          const to = from + length;
+          shifts.push({ clock_in: new Date(from), clock_out: new Date(to), duration_minutes: String((Math.round((to - from) / 600) + jitter) / 100) });
+          cursor = to + int(0, 4 * 3600000);
+        }
+        const first = shifts[0].clock_in.getTime();
+        const last = shifts[shifts.length - 1].clock_out.getTime();
+        // 0-3 breaks of 0-90 minutes anywhere in or around the shifts
+        const breaks = Array.from({ length: int(0, 3) }, () => {
+          const from = first - 3600000 + int(0, last - first + 7200000);
+          const to = from + int(0, 90 * 60000);
+          return { clock_in: new Date(from), clock_out: new Date(to), duration_minutes: String(Math.round((to - from) / 600) / 100) };
+        });
+        // 0-3 holidays among the day before and the three after
+        const held = [-1, 0, 1, 2].filter(() => rand() < 0.5).slice(0, 3).map((d) => addStaffWorkDays(day, d));
+        const meal = int(0, 6000) + (rand() < 0.1 ? int(0, 50000) : 0);
+        const result = splitWorkDate({ shifts, breaks, held, meal });
+        const label = `case ${n} ${day} meal ${meal}`;
+        const stored = shifts.reduce((sum, sh) => sum + Math.round(Number(sh.duration_minutes) * 100), 0);
+        const paid = result.parts.reduce((sum, p) => sum + p.paid, 0);
+        // the parts add up to the stored total, and the deduction never exceeds it
+        expect([label, paid]).toEqual([label, stored]);
+        expect(result.deduction).toBe(Math.min(meal, stored));
+        let deducted = 0;
+        let premiums = 0;
+        for (const p of result.parts) {
+          for (const key of ['paid', 'placed', 'shared', 'premium']) {
+            expect([label, p.holiday, key, Number.isInteger(p[key]) && p[key] >= 0]).toEqual([label, p.holiday, key, true]);
+          }
+          expect([label, p.paid - p.placed - p.shared >= 0]).toEqual([label, true]);
+          expect([label, p.premium]).toEqual([label, p.paid - p.placed - p.shared]);
+          deducted += p.placed + p.shared;
+          premiums += p.premium;
+          if (p.holiday) {
+            const bounds = dayBounds(p.holiday);
+            const clockInside = shifts.reduce((sum, sh) => sum + Math.max(0, Math.min(sh.clock_out.getTime(), bounds.end) - Math.max(sh.clock_in.getTime(), bounds.start)), 0);
+            // a part is paid its share of the stored duration: the clock minutes inside, within the stored jitter and the
+            // one hundredth each shift's largest remainder can add
+            expect([label, p.holiday, p.paid <= Math.ceil(clockInside / 600) + Math.abs(jitter) * shifts.length + shifts.length]).toEqual([label, p.holiday, true]);
+          }
+        }
+        // the deduction is placed in full, and the premium and the rest of the shift are the stored total less it, exactly
+        expect([label, deducted]).toEqual([label, result.deduction]);
+        expect([label, premiums]).toEqual([label, stored - result.deduction]);
+      }
+    });
   });
 });
 
