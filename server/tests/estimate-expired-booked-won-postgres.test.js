@@ -270,6 +270,68 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
     expect(at(30)).toMatchObject({ sent: 1, won: 1, lost: 0 });
   });
 
+  test('(j) a resend rewrites sent_at, but the window runs from the first delivery: resend day 80 + pay day 120 is not reclaimed', async () => {
+    const stamp = (days) => JSON.stringify({ deliveryState: { firstDeliveredAt: sentPlus(days).toISOString() } });
+    // First delivered day 0, resent day 80 (sent_at overwritten), paid day 120.
+    const resentCust = await customer(mockTransaction);
+    const resentId = await expiredEstimate(mockTransaction, resentCust, { sent_at: sentPlus(80), estimate_data: stamp(0) });
+    await paidInvoice(mockTransaction, resentCust, { paidAt: sentPlus(120) });
+    // No stamp (older row): the first view bounds the first delivery.
+    const viewedCust = await customer(mockTransaction);
+    const viewedId = await expiredEstimate(mockTransaction, viewedCust, { sent_at: sentPlus(80), viewed_at: sentPlus(5) });
+    await paidInvoice(mockTransaction, viewedCust, { paidAt: sentPlus(120) });
+    // Control: resent day 80, paid day 60 (inside 90 days of the first delivery).
+    const okCust = await customer(mockTransaction);
+    const okId = await expiredEstimate(mockTransaction, okCust, { sent_at: sentPlus(80), estimate_data: stamp(0) });
+    await paidInvoice(mockTransaction, okCust, { paidAt: sentPlus(85) });
+
+    await guard.reclaimExpiredConvertedEstimates();
+
+    expect((await row(resentId)).disposition).toBe('expired_viewed');
+    expect((await row(viewedId)).disposition).toBe('expired_viewed');
+    expect((await row(okId)).disposition).toBe('converted_other_path');
+  });
+
+  test('(k) one payment wins ONE offer: of two expired quotes only the latest delivered before it', async () => {
+    const cust = await customer(mockTransaction);
+    const older = await expiredEstimate(mockTransaction, cust, { sent_at: sentPlus(0), created_at: sentPlus(0) });
+    const newer = await expiredEstimate(mockTransaction, cust, { sent_at: sentPlus(30), created_at: sentPlus(30), expires_at: sentPlus(37) });
+    await paidInvoice(mockTransaction, cust, { paidAt: sentPlus(50) });
+
+    await guard.reclaimExpiredConvertedEstimates();
+
+    expect((await row(older)).disposition).toBe('expired_viewed');
+    expect((await row(newer)).disposition).toBe('converted_other_path');
+    // A second run does not pick the older one up either (the sale is spoken for).
+    await guard.reclaimExpiredConvertedEstimates();
+    expect((await row(older)).disposition).toBe('expired_viewed');
+  });
+
+  test('(l) an accepted replacement estimate, or an offer sent after the payment started, means no reclaim', async () => {
+    const acceptedCust = await customer(mockTransaction);
+    const expiredId = await expiredEstimate(mockTransaction, acceptedCust);
+    await expiredEstimate(mockTransaction, acceptedCust, { status: 'accepted', accepted_at: sentPlus(40), disposition: null, disposition_source: null, disposition_at: null, sent_at: sentPlus(30), created_at: sentPlus(30) });
+    await paidInvoice(mockTransaction, acceptedCust, { paidAt: sentPlus(50) });
+
+    // A delivered LATER quote that is not expired (declined) is the offer the payment belongs to: ambiguous, stays lost.
+    const declinedCust = await customer(mockTransaction);
+    const earlierId = await expiredEstimate(mockTransaction, declinedCust);
+    await expiredEstimate(mockTransaction, declinedCust, { status: 'declined', disposition: 'declined_price', disposition_source: 'staff', sent_at: sentPlus(30), created_at: sentPlus(30) });
+    await paidInvoice(mockTransaction, declinedCust, { paidAt: sentPlus(50) });
+
+    // Control: a quote delivered AFTER the first signal does not make the earlier one ambiguous.
+    const lateCust = await customer(mockTransaction);
+    const firstId = await expiredEstimate(mockTransaction, lateCust);
+    await expiredEstimate(mockTransaction, lateCust, { status: 'sent', expires_at: null, disposition: null, disposition_source: null, disposition_at: null, sent_at: sentPlus(70), created_at: sentPlus(70) });
+    await paidInvoice(mockTransaction, lateCust, { paidAt: sentPlus(50) });
+
+    await guard.reclaimExpiredConvertedEstimates();
+
+    expect((await row(expiredId)).disposition).toBe('expired_viewed');
+    expect((await row(earlierId)).disposition).toBe('expired_viewed');
+    expect((await row(firstId)).disposition).toBe('converted_other_path');
+  });
+
   test('(f) a live sent estimate is not this pass\'s business (the archive sweep owns it)', async () => {
     const cust = await customer(mockTransaction);
     const id = await expiredEstimate(mockTransaction, cust, { status: 'sent', expires_at: null, disposition: null, disposition_source: null, disposition_at: null });

@@ -119,10 +119,6 @@ export function resolutionDate(estimate) {
     return estimate.declinedAt || estimate.updatedAt || estimate.createdAt;
   if (estimate?.status === "expired")
     return estimate.expiresAt || estimate.updatedAt || estimate.createdAt;
-  // A live offer the sweep archived because the customer converted another
-  // way resolved when it was classified (server resolutionDateMs).
-  if (estimate?.archivedAt && isBookedOtherWayEstimate(estimate))
-    return estimate.dispositionAt || estimate.archivedAt;
   return null;
 }
 
@@ -135,9 +131,7 @@ export function resolutionDate(estimate) {
 // card): the customer opened it from the portal, and it carries a
 // zero-follow-up contract.
 export function isFollowUpOverdueEstimate(estimate, nowMs = Date.now()) {
-  // An archived row (a booked-another-way win rides along in the page list)
-  // is never a follow-up.
-  if (estimate?.undeliveredSelfServe || estimate?.archivedAt) return false;
+  if (estimate?.undeliveredSelfServe) return false;
   if (estimate?.status === "sent" && !estimate.viewedAt && estimate.sentAt) {
     const sentAt = new Date(estimate.sentAt).getTime();
     return !Number.isNaN(sentAt) && nowMs - sentAt > 72 * HOUR;
@@ -165,11 +159,7 @@ export function isSentGroupEstimate(estimate) {
 // offer crosses into follow-up-overdue too — so this is the complement slice,
 // disjoint from isFollowUpOverdueEstimate.
 export function isGoingColdEstimate(estimate, nowMs = Date.now()) {
-  if (
-    estimate?.status !== "viewed" ||
-    estimate.undeliveredSelfServe ||
-    estimate.archivedAt
-  )
+  if (estimate?.status !== "viewed" || estimate.undeliveredSelfServe)
     return false;
   const last = lastEngagementMs(estimate);
   if (last == null) return false;
@@ -532,24 +522,18 @@ export default function PipelineAnalytics({
     // One denominator rule with the win/loss and source cards (GH codex
     // P1): rows classified never-winnable (invalid/duplicate lead,
     // invalid/duplicate) leave the close-rate math. A customer who converted
-    // through another path (converted_other_path, incl. after the estimate
-    // expired) is a WIN, as on the server (estimate-winloss.js).
+    // through another path after the estimate expired (converted_other_path)
+    // is a WIN, as on the server (estimate-winloss.js). Archived rows never
+    // reach this list, as before.
     const NEVER_WINNABLE = ["invalid_lead", "expired_unsent"];
-    // Archived rows stay out, except a customer who converted another way:
-    // that is a resolved win (the server readers keep it too).
-    const closeRows = estimates.filter(
-      (e) => !e.archivedAt || isBookedOtherWayEstimate(e),
-    );
-    const resolvedInRange = closeRows.filter((e) => {
+    const resolvedInRange = activeRows.filter((e) => {
       if (NEVER_WINNABLE.includes(e.disposition)) return false;
       const resolvedAt = resolutionDate(e);
       return (
         resolvedAt != null && withinDateRange(resolvedAt, selectedRange, nowMs)
       );
     });
-    const bookedOtherWay = resolvedInRange.filter(
-      (e) => e.status !== "accepted" && e.disposition === "converted_other_path",
-    ).length;
+    const bookedOtherWay = resolvedInRange.filter(isBookedOtherWayEstimate).length;
     const accepted =
       resolvedInRange.filter((e) => e.status === "accepted").length +
       bookedOtherWay;

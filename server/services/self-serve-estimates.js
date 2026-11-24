@@ -137,6 +137,16 @@ function sentAtSql(alias) {
   return selfServeOr(alias, deliveredAtSql(alias), `${alias}.sent_at`);
 }
 
+// The earliest durable delivery evidence of a row, in SQL: the twin of
+// estimate-winloss.js sentAnchorMs. A self-serve row reads its delivery
+// instant (deliveredAtSql); any other row takes the earliest of its
+// firstDeliveredAt (the first real handoff, which a resend never moves), its
+// sent_at (every resend rewrites it), its first view and its acceptance.
+function firstDeliveryEvidenceSql(alias) {
+  return selfServeOr(alias, deliveredAtSql(alias),
+    `LEAST(${firstDeliveredAtSql(alias)}, ${alias}.sent_at, ${alias}.viewed_at, ${alias}.accepted_at)`);
+}
+
 // The instant a row counts as viewed. A self-serve quote is opened in the
 // portal before any send, so a later staff send must not turn that look into
 // a viewed send (codex pre-push r15): only a view at or after its delivery
@@ -157,6 +167,6 @@ function countableViewAtSql(alias) {
 
 
 module.exports = {
-  SELF_SERVE_ESTIMATE_SOURCES, whereNotUndeliveredSelfServe, isUndeliveredSelfServe, undeliveredSelfServeSql,
+  SELF_SERVE_ESTIMATE_SOURCES, firstDeliveryEvidenceSql, whereNotUndeliveredSelfServe, isUndeliveredSelfServe, undeliveredSelfServeSql,
   sentAtSql, countableViewAtSql, isoInstantSql, deliveryInstantSql, firstDeliveredAtMs,
 };

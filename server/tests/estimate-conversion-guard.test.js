@@ -535,8 +535,11 @@ describe('reclaimExpiredConvertedEstimates', () => {
       (c) => c.m === 'whereRaw' && !/make_interval/.test(c.args[0]) && /< \(CASE WHEN estimates\.source/.test(c.args[0]),
     );
     expect(before).toHaveLength(2);
-    // The same none-before-created helper as the open sweep runs.
-    expect(calls.filter((c) => c.m === 'whereNotExists').length).toBeGreaterThanOrEqual(5);
+    // The same none-before-created helper as the open sweep runs, plus the
+    // two competing-estimate guards (accepted / already won elsewhere, and a
+    // later delivery before the first signal).
+    expect(calls.filter((c) => c.m === 'whereNotExists').length).toBeGreaterThanOrEqual(7);
+    expect(calls.filter((c) => c.m === 'from' && c.args[0] === 'estimates as other')).toHaveLength(2);
 
     // Disposition + updated_at ONLY: status, archived_at, expires_at stay.
     const update = calls.find((c) => c.m === 'update');
@@ -546,7 +549,7 @@ describe('reclaimExpiredConvertedEstimates', () => {
     expect(update.args[0]).toMatchObject({ disposition: 'converted_other_path', disposition_source: 'system' });
     // disposition_at is the customer's EARLIEST conversion signal (a subquery
     // over the same two sources), falling back to the run time; updated_at is now.
-    expect(String(update.args[0].disposition_at)).toMatch(/COALESCE\(LEAST/);
+    expect(String(update.args[0].disposition_at)).toMatch(/^COALESCE\(\(\?\), \?\)$/);
     expect(calls.filter((c) => c.table === 'invoices' && c.m === 'select')).not.toHaveLength(0);
   });
 

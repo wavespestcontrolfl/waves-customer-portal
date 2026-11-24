@@ -72,8 +72,7 @@ beforeEach(() => {
     const u = new URL(String(url), "http://localhost");
     if (u.pathname.endsWith("/unarchive")) return mutate();
     if (u.pathname === "/api/admin/estimates") {
-      // The KPI side-fetches (archived accepted / archived booked-another-way) are not the Archived tab load.
-      if (u.searchParams.get("archived") === "only" && !u.searchParams.has("status") && !u.searchParams.has("disposition")) return loadArchive();
+      if (u.searchParams.get("archived") === "only" && !u.searchParams.has("status")) return loadArchive();
       if (u.searchParams.get("sentOnly") === "1") return loadActive();
       return response({ estimates: [] });
     }

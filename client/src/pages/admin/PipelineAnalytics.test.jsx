@@ -12,7 +12,6 @@ import PipelineAnalytics, {
   withinDateRange,
 } from "./PipelineAnalytics";
 import { isCallableEstimate, isCallTodayEstimate } from "@estimate-call-today";
-import { classifyEstimate } from "./EstimatePage";
 
 const NOW = new Date("2026-05-15T12:00:00.000Z");
 
@@ -499,46 +498,6 @@ describe("PipelineAnalytics", () => {
     expect(screen.getByText("1 new accounts")).toBeInTheDocument();
   });
 
-  it("counts an archived booked-another-way row as a resolved win in the window it was classified; other archived rows stay out", () => {
-    renderAnalytics({
-      estimates: [
-        estimate({ id: "won", status: "accepted", monthlyTotal: 40 }),
-        estimate({ id: "no", status: "declined", declinedAt: daysAgo(2), monthlyTotal: 40 }),
-        estimate({
-          id: "swept",
-          status: "viewed",
-          archivedAt: daysAgo(3),
-          disposition: "converted_other_path",
-          dispositionAt: daysAgo(3),
-          monthlyTotal: 40,
-        }),
-        estimate({ id: "parked", status: "viewed", archivedAt: daysAgo(3), disposition: "archived_unresolved", dispositionAt: daysAgo(3) }),
-      ],
-    });
-
-    // 2 accepted (one booked another way) of 3 resolved; the parked row is out.
-    expect(
-      screen.getByText("2 accepted of 3 resolved (incl. 1 booked another way)"),
-    ).toBeInTheDocument();
-    // MRR won stays accepted-only.
-    expect(screen.getByText("1 new accounts")).toBeInTheDocument();
-  });
-
-  it("keeps an archived booked-another-way row out of Going cold and Follow-up overdue", () => {
-    const archivedWin = {
-      status: "viewed",
-      archivedAt: daysAgo(3),
-      disposition: "converted_other_path",
-      viewedAt: daysAgo(5),
-      lastViewedAt: daysAgo(5),
-      sentAt: daysAgo(6),
-    };
-    expect(isGoingColdEstimate(archivedWin, NOW.getTime())).toBe(false);
-    expect(isFollowUpOverdueEstimate({ ...archivedWin, lastViewedAt: daysAgo(10), viewedAt: daysAgo(10) }, NOW.getTime())).toBe(false);
-    // The same row un-archived is still listed: the guard is the archive.
-    expect(isGoingColdEstimate({ ...archivedWin, archivedAt: null }, NOW.getTime())).toBe(true);
-  });
-
   it("builds the Lost tile's declined and expired parts from the rows classified lost", () => {
     renderAnalytics({
       estimates: [
@@ -549,16 +508,6 @@ describe("PipelineAnalytics", () => {
     });
     // The reclaimed expired row is a win, so it is in neither part.
     expect(screen.getByText("1 declined · 1 expired")).toBeInTheDocument();
-  });
-
-  it("classifies an archived booked-another-way row as won, other archived rows as archived", () => {
-    expect(
-      classifyEstimate({ status: "viewed", archivedAt: daysAgo(1), disposition: "converted_other_path" }),
-    ).toBe("won");
-    expect(
-      classifyEstimate({ status: "viewed", archivedAt: daysAgo(1), disposition: "archived_unresolved" }),
-    ).toBe("archived");
-    expect(classifyEstimate({ status: "accepted", archivedAt: daysAgo(1) })).toBe("archived");
   });
 
   it("counts archived wins in MRR won but keeps them out of every other metric", () => {

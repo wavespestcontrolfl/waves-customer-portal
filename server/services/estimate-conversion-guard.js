@@ -41,7 +41,7 @@ const db = require("../models/db");
 const logger = require("./logger");
 const { CUSTOMER_STAGES } = require("./customer-stages");
 const { excludeAssessmentBookings } = require("./assessment-booking");
-const { sentAtSql, whereNotUndeliveredSelfServe } = require("./self-serve-estimates");
+const { firstDeliveryEvidenceSql, whereNotUndeliveredSelfServe } = require("./self-serve-estimates");
 
 // Appointment rows that leave NO live booking behind — the repo's terminal
 // convention (waveguard-existing-services TERMINAL_STATUSES) minus
@@ -368,19 +368,62 @@ async function archiveConvertedOpenEstimates() {
 // inside 90 days.
 const BOOKED_WON_WINDOW_DAYS = 90;
 
-// The instant an estimate counts as delivered: a delivered self-serve quote's
-// firstDeliveredAt (its sent_at is only the mint stamp), any other row's
-// sent_at (self-serve-estimates.js sentAtSql).
-const DELIVERED_AT_SQL = sentAtSql("estimates");
+// The instant an estimate counts as delivered: the earliest durable delivery
+// evidence (self-serve-estimates.js firstDeliveryEvidenceSql, the SQL twin of
+// estimate-winloss sentAnchorMs). A resend rewrites sent_at, so sent_at alone
+// would slide the window forward; firstDeliveredAt and the first view do not.
+const deliveredAtSql = (alias) => firstDeliveryEvidenceSql(alias);
+
+// The earliest conversion signal (payment or completion) of the row's
+// customer, as a correlated subquery over the same two signal sources.
+function earliestConversionSignal() {
+  const paid = paidInvoiceSignal(
+    db("invoices").select(db.raw(`MIN(${PAID_INVOICE_TIME_SQL})`)),
+  );
+  const visit = completedVisitSignal(
+    db("scheduled_services").select(db.raw(`MIN(${COMPLETED_VISIT_TIME_SQL})`)),
+  );
+  return db.raw("LEAST((?), (?))", [paid, visit]);
+}
+
+// One conversion must not win several offers. The customer's other estimates
+// that make this one ambiguous: any accepted one or one already marked
+// converted another way (the sale is spoken for), and any estimate delivered
+// after this one but no later than the first signal (that one is the offer
+// the customer converted on). Ambiguous stays lost.
+function whereNoCompetingEstimate(query) {
+  return query
+    .whereNotExists(function () {
+      this.select(db.raw("1"))
+        .from("estimates as other")
+        .whereRaw("other.customer_id = estimates.customer_id")
+        .whereRaw("other.id <> estimates.id")
+        .where((q) =>
+          q.where("other.status", "accepted").orWhere("other.disposition", "converted_other_path"),
+        );
+    })
+    .whereNotExists(function () {
+      const other = deliveredAtSql("other");
+      const mine = deliveredAtSql("estimates");
+      this.select(db.raw("1"))
+        .from("estimates as other")
+        .whereRaw("other.customer_id = estimates.customer_id")
+        .whereRaw("other.id <> estimates.id")
+        .whereRaw(`(${other} > ${mine} OR (${other} = ${mine} AND other.id > estimates.id))`)
+        .whereRaw(`${other} <= (?)`, [earliestConversionSignal()]);
+    });
+}
 
 // Expired estimates whose customer's first-ever paid invoice or completed
 // visit landed within BOOKED_WON_WINDOW_DAYS AFTER delivery, with no
 // conversion evidence predating the estimate and no qualifying signal
-// between its creation and delivery (same signal helpers as the open sweep).
+// between its creation and delivery (same signal helpers as the open sweep),
+// and no competing estimate for the same sale (whereNoCompetingEstimate).
 // Only the system's own expiry classification (or none) may be replaced:
 // a staff reason or a customer decline is never overwritten. A self-serve
 // quote nobody delivered never reaches the customer, so it never qualifies.
 function expiredConvertedEstimatesQuery() {
+  const delivered = deliveredAtSql("estimates");
   return db("estimates")
     .where("status", "expired")
     .whereNull("archived_at")
@@ -392,26 +435,12 @@ function expiredConvertedEstimatesQuery() {
     )
     .where((q) => q.whereNull("disposition_source").orWhere("disposition_source", "system"))
     .modify(whereConversionEligibilitySignal, {
-      during: { from: DELIVERED_AT_SQL, days: BOOKED_WON_WINDOW_DAYS },
+      during: { from: delivered, days: BOOKED_WON_WINDOW_DAYS },
     })
     // The FIRST signal must be inside the window: none before delivery.
-    .whereNot((q) =>
-      whereConversionEligibilitySignal(q, { before: DELIVERED_AT_SQL }),
-    )
-    .modify(whereNoConversionBeforeEstimate);
-}
-
-// The earliest qualifying signal time (payment or completion) for the row's
-// customer, as a correlated subquery over the same signal sources: the win
-// is dated when the customer converted, not when the daily pass noticed.
-function earliestConversionSignalSql(fallback) {
-  const paid = paidInvoiceSignal(
-    db("invoices").select(db.raw(`MIN(${PAID_INVOICE_TIME_SQL})`)),
-  );
-  const visit = completedVisitSignal(
-    db("scheduled_services").select(db.raw(`MIN(${COMPLETED_VISIT_TIME_SQL})`)),
-  );
-  return db.raw("COALESCE(LEAST((?), (?)), ?)", [paid, visit, fallback]);
+    .whereNot((q) => whereConversionEligibilitySignal(q, { before: delivered }))
+    .modify(whereNoConversionBeforeEstimate)
+    .modify(whereNoCompetingEstimate);
 }
 
 /**
@@ -429,7 +458,7 @@ async function reclaimExpiredConvertedEstimates() {
     .update({
       disposition: "converted_other_path",
       disposition_source: "system",
-      disposition_at: earliestConversionSignalSql(now),
+      disposition_at: db.raw("COALESCE((?), ?)", [earliestConversionSignal(), now]),
       updated_at: now,
     })
     .returning(["id"]);
