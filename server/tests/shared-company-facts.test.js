@@ -25,6 +25,8 @@ describe('voice agent prompt', () => {
     expect(SYSTEM_PROMPT.indexOf(SECTION)).toBeGreaterThan(-1);
     expect(SYSTEM_PROMPT.indexOf(SECTION)).toBeLessThan(SYSTEM_PROMPT.indexOf('Before you end the call'));
     expect(SYSTEM_PROMPT).toMatch(/never read the list out/);
+    expect(SYSTEM_PROMPT).toMatch(/Never stretch one to a nearby case/);
+    expect(SYSTEM_PROMPT).toMatch(/Never promise a free, no-charge, or return visit/);
     expect(SYSTEM_PROMPT).toMatch(/only offer times a tool returned/);
   });
 
