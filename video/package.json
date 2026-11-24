@@ -9,8 +9,8 @@
     "studio": "remotion studio src/index.jsx"
   },
   "dependencies": {
-    "@remotion/bundler": "4.0.490",
-    "@remotion/cli": "4.0.490",
+    "@remotion/bundler": "4.0.546",
+    "@remotion/cli": "4.0.546",
     "@remotion/renderer": "4.0.490",
     "react": "19.0.0",
     "react-dom": "19.0.0",
