@@ -271,7 +271,7 @@ describe('winLossSlices — audit slices', () => {
       // "why we lose", COUNTED in excludedFromRates even though archived
       // (GH codex P2), out of every rate as on main.
       row({ id: 'conv', status: 'sent', accepted_at: null, archived_at: daysAgo(3), disposition: 'converted_other_path', disposition_at: daysAgo(3) }),
-    ], [], [{ id: 'c-w', lead_source: 'square' }, { id: 'c-y', lead_source: ' Referral ' }]);
+    ], [], [{ id: 'c-w', lead_source: 'mailer' }, { id: 'c-y', lead_source: ' Referral ' }]);
 
     const result = await winLossSlices({ days: 90 });
 
@@ -297,7 +297,7 @@ describe('winLossSlices — audit slices', () => {
     expect(result.byLeadSource.find((s) => s.key === 'google')).toMatchObject({ won: 1, lost: 1, total: 2 });
     expect(result.byLeadSource.find((s) => s.key === 'referral')).toMatchObject({ lost: 2, total: 2 }); // declined row + mosquito row via its customer
     expect(result.byLeadSource.find((s) => s.key === 'unknown')).toMatchObject({ lost: 1, total: 1 }); // wizard row: no source anywhere
-    expect(result.byLeadSource.find((s) => s.key === 'square')).toBeUndefined(); // the estimate's own column wins
+    expect(result.byLeadSource.find((s) => s.key === 'mailer')).toBeUndefined(); // the estimate's own column wins
     expect(result.byLeadSource.find((s) => s.key === 'thumbtack')).toBeUndefined(); // dead row left the rates
 
     // Column wins; falls back to the persisted recurring.tier; else "none".
