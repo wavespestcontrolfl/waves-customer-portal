@@ -143,6 +143,7 @@ function world({ tables = {}, jobs = [JOB], reminderJobs = [], ...deps } = {}) {
     raisePriceSettingsAlert: jest.fn(async () => ({ id: 'alert-1' })),
     closePriceSettingsAlert: jest.fn(async () => 0),
     raiseOfficeItem: jest.fn(async () => ({ id: 'n-office' })),
+    planStartAcceptRefusal: jest.fn(async () => null),
     ...deps,
   };
 }
@@ -1956,6 +1957,15 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       expect(options.detail).toContain('No email went to the customer.');
     });
 
+    test.each([
+      ['premises', 'Check the account first'],
+      ['not_priced', 'no saved home size'],
+      ['some_new_reason', 'no saved home size'],
+    ])('reason %s: its own words in the detail', async (reason, words) => {
+      await _test.defaultDeps().raiseOfficeItem({ job: JOB, customer: CUSTOMER, offerDay: '2030-03-05', reason });
+      expect(notifyAdmin.mock.calls[0][3].detail).toContain(words);
+    });
+
     test('a write that returns no row throws', async () => {
       notifyAdmin.mockResolvedValue(null);
       await expect(_test.defaultDeps().raiseOfficeItem({ job: JOB, customer: CUSTOMER, offerDay: '2030-03-05', reason: 'not_priced' }))
@@ -2091,6 +2101,30 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       const deps = remindWorld(change);
       expect(reminderOf(await run(deps))).toEqual({ ...R0, held: 1, reasons: { [reason]: 1 } });
       expect(deps.sendWithLedger).not.toHaveBeenCalled();
+    });
+
+    test('the plan-start accept would refuse the quote (a plan since the offer, or another home): held', async () => {
+      const deps = remindWorld({ planStartAcceptRefusal: jest.fn(async () => 'account_changed') });
+      expect(reminderOf(await run(deps))).toEqual({ ...R0, held: 1, reasons: { account_changed: 1 } });
+      expect(deps.planStartAcceptRefusal).toHaveBeenCalledWith(deps.db, expect.objectContaining({ id: 'est-r', customer_id: 'cust-1' }));
+      expect(deps.sendWithLedger).not.toHaveBeenCalled();
+    });
+
+    test('the accept check itself: a refusal is account_changed; a failed read fails the job', async () => {
+      const restart = require('../services/cancellation-resolution/restart');
+      const db = { transaction: (fn) => fn('trx') };
+      const spy = jest.spyOn(restart, 'assertPlanStartAcceptEligible');
+      try {
+        spy.mockRejectedValueOnce(Object.assign(new Error('changed'), { code: 'PLAN_START_STATE_CHANGED' }));
+        expect(await _test.defaultDeps().planStartAcceptRefusal(db, { id: 'est-r' })).toBe('account_changed');
+        spy.mockRejectedValueOnce(Object.assign(new Error('retry'), { code: 'PLAN_START_RECHECK_RETRY' }));
+        await expect(_test.defaultDeps().planStartAcceptRefusal(db, { id: 'est-r' })).rejects.toMatchObject({ code: 'PLAN_START_RECHECK_RETRY' });
+        spy.mockResolvedValueOnce(undefined);
+        expect(await _test.defaultDeps().planStartAcceptRefusal(db, { id: 'est-r' })).toBeNull();
+        expect(spy).toHaveBeenLastCalledWith('trx', { id: 'est-r' });
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     test('the 12-month rule is not asked: the reminder is the same offer', async () => {

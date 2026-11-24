@@ -1424,8 +1424,8 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
         const { job } = await seedJob();
         expect((await run({})).sent).toBe(1);
         expect((await runAt(dayAt(15))).reminder).toMatchObject({ jobs: 0, sent: 0 });
-        // Another job, 21 days ago, never offered (its offer email row does not exist).
-        await seedJob({ daysAgo: 21 });
+        // Another job, 21 days old at that run (6 days ago now), never offered: its offer email row does not exist.
+        await seedJob({ daysAgo: 6 });
         expect((await runAt(dayAt(15))).reminder).toMatchObject({ jobs: 0 });
         expect(await reminderMail(job.id)).toBeUndefined();
       });
@@ -1437,6 +1437,17 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
         expect((await run({})).sent).toBe(1);
         await trx('estimates').where({ customer_id: customer.id }).update({ status: 'accepted' });
         expect((await runAt(dayAt(16))).reminder).toMatchObject({ jobs: 1, held: 1, sent: 0, reasons: { offer_ended: 1 } });
+        expect(await reminderMail(job.id)).toBeUndefined();
+        expect(Sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      });
+
+      test('a plan rate on the account since the offer: the accept would refuse the quote, so no reminder', async () => {
+        await publishOffer();
+        await publishReminder();
+        const { customer, job } = await seedJob();
+        expect((await run({})).sent).toBe(1);
+        await trx('customers').where({ id: customer.id }).update({ monthly_rate: 35 });
+        expect((await runAt(dayAt(16))).reminder).toMatchObject({ jobs: 1, held: 1, sent: 0, reasons: { account_changed: 1 } });
         expect(await reminderMail(job.id)).toBeUndefined();
         expect(Sendgrid.sendOne).toHaveBeenCalledTimes(1);
       });

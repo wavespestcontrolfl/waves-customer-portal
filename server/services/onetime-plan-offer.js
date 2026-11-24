@@ -166,6 +166,7 @@ function defaultDeps() {
     raisePriceSettingsAlert,
     closePriceSettingsAlert,
     raiseOfficeItem,
+    planStartAcceptRefusal,
   };
 }
 
@@ -1076,6 +1077,11 @@ const OFFICE_REASON_WORDS = Object.freeze({
   no_setup_fee: 'The plan price for this home has no setup fee, so the offer\'s "$0 setup" line would not be true.',
   plan_not_below_job: 'The plan visit price for this home is not below what the one-time job cost.',
   mint_pricing_unavailable: 'The server could not price the plan estimate for this home.',
+  // The pricer's `premises`: a commercial or closed account, or no one service address it can prove. The offer is
+  // for homes only (owner 2026-11-21), so the office checks the account before any quote.
+  premises: 'Check the account first: the app could not prove one residential service address for it (a commercial or '
+    + 'closed account, or no clear service address). Quote the plan only for a home.',
+  not_priced: 'The app has no saved home size or property type it may price this home with, or the price needs a hand check.',
 });
 const officeItemKey = (jobId) => `${OFFICE_ITEM_PREFIX}${jobId}`;
 
@@ -1095,7 +1101,7 @@ async function raiseOfficeItem({ job, customer, offerDay, reason }) {
     who: 'person',
   }, {
     detail: [
-      OFFICE_REASON_WORDS[reason] || 'The app has no saved home size or property type it may price this home with.',
+      OFFICE_REASON_WORDS[reason] || OFFICE_REASON_WORDS.not_priced,
       `The plan offer is a Quarterly Pest Control Service estimate with the setup fee waived, good through ${shortDay(lastDay)}.`,
       'No email went to the customer. Send the estimate by hand, or mark this done.',
       'This closes by itself when the customer has a new estimate, or when the offer ends.',
@@ -1108,6 +1114,19 @@ async function raiseOfficeItem({ job, customer, offerDay, reason }) {
   });
   if (!notif) throw Object.assign(new Error('plan offer office item did not persist'), { code: 'OFFICE_ITEM_FAILED' });
   return notif;
+}
+
+// The plan-start accept check, run in a transaction of its own (it takes the customer's comms and preferences keys
+// and the customer row lock, as an accept does) that ends before the send. Its refusal is a held reminder; a failed
+// read (PLAN_START_RECHECK_RETRY) or any other error fails the job for the morning.
+async function planStartAcceptRefusal(database, estimate) {
+  try {
+    await database.transaction((trx) => require('./cancellation-resolution/restart').assertPlanStartAcceptEligible(trx, estimate));
+    return null;
+  } catch (err) {
+    if (err?.code === 'PLAN_START_STATE_CHANGED') return 'account_changed';
+    throw err;
+  }
 }
 
 // The open office items, closed when their job is handled: an estimate of the customer made after the item (a person
@@ -1139,7 +1158,8 @@ async function closeOfficeItems({ now, deps }) {
 // sends on the next one, up to day 27, so the reminder always lands before the offer's last day (day 30). The
 // reminder links the same estimate as the offer (the one its message names, email_messages.estimate_id) and repeats
 // the offer's price as the offer email stated it (its payload snapshot). It goes only while that estimate is still
-// open for the customer, with the offer's dates, and the customer still passes the send rules that can change after
+// open for the customer, with the offer's dates, the plan-start accept would still take it (planStartAcceptRefusal),
+// and the customer still passes the send rules that can change after
 // the offer: another visit, reachable, opted out, paid, pays after each visit, Auto Pay, review ask, complaint,
 // another open estimate, and the email division's own verdict for the reminder. The 12-month rule is not asked: it
 // counts offers, and this is the same offer. Words gate: the reminder template must be published too.
@@ -1206,6 +1226,11 @@ async function reminderJob(job, { now, deps }) {
   if (!open) return { verdict: 'held', reason: 'offer_estimate_gone' };
   if (!sameDatesAsEmail(estimate, ctx)) return { verdict: 'held', reason: 'offer_day_moved' };
   if (!(await onCardRail(estimate, ctx))) return { verdict: 'held', reason: 'not_pay_after_visit' };
+  // The accept's own bar (restart.js assertPlanStartAcceptEligible): no plan, plan tier or prepaid term on the
+  // account since the offer, not commercial, and the quote still for the one home it was priced for (a staff
+  // address change on the open quote fails it). A reminder never advertises a quote the customer cannot accept.
+  const refusal = await deps.planStartAcceptRefusal(deps.db, estimate);
+  if (refusal) return { verdict: 'held', reason: refusal };
   // The price as the offer email stated it. A snapshot without it is a broken record, never a guess: the job fails.
   const price = offer.values.price_per_application;
   if (!(typeof price === 'string' && price.startsWith('$'))) {
