@@ -427,4 +427,5 @@ async function runRainPass({ now = new Date(), db = require('../../models/db'), 
   }
 }
 
-module.exports = { runRainPass, planRainPass, GATE, KEY_PREFIX, MOVE_PCT, DRY_PCT, MAX_NOTICES_PER_DAY, _test: { spanRain, dryStart, groupStops, pickPoint, VISIT_COLUMNS } };
+// loadStops, loadPoints and spanRain are read-only; the schedule rain record (scheduling/rain-schedule-record.js) reuses them.
+module.exports = { runRainPass, planRainPass, loadStops, loadPoints, spanRain, GATE, KEY_PREFIX, MOVE_PCT, DRY_PCT, MAX_NOTICES_PER_DAY, _test: { spanRain, dryStart, groupStops, pickPoint, VISIT_COLUMNS } };
