@@ -9861,18 +9861,12 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       : null,
   });
   // "What you pay and when" under the price (owner 2026-11-23). It reads the same per-application figures
-  // as the monthly average, so on the annual-prepay choice (which hides the average) it asks for the
-  // model again as if the plan were pay-per-application. It shows only when the first bill is proven
-  // to be those figures: the same credit and extra-fee checks as the first-visit line, plus the
-  // "Reserve your spot" box's own first application agreeing to the cent.
-  const whatYouPayModel = (paymentPreference === 'prepay_annual'
-    ? resolvePageMonthlyAverage({
-      serviceMode, estimate, billsMonthly, isCommercialEstimate, cta, paymentPreference: null,
-      services, selected, selectedCombo, combinedFrequency, pricing, renderFlags,
-    }, manualDiscountMonthlyAmount)
-    : monthlyAverage)?.model || null;
+  // as the monthly average (so it is absent on the annual-prepay choice, which hides the average), and
+  // shows only when the first bill is proven to be those figures: the same credit and extra-fee checks as
+  // the first-visit line, plus the "Reserve your spot" box's own first application agreeing to the cent.
+  // Payment timing and the prepay choice stay in that box.
   const whatYouPay = invoiceOnlyAccept ? null : buildWhatYouPay({
-    model: whatYouPayModel,
+    model: monthlyAverage?.model || null,
     fees: (pricing.firstVisitFees?.length ? pricing.firstVisitFees : (setupFeeEffective ? [setupFeeEffective] : [])).map(tierAwareFee),
     serviceMode,
     invoiceMode: !!estimate.billByInvoice,
@@ -9885,16 +9879,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     paymentPreference,
     annualPrepayOffered: annualPrepayEligibleEffective && !estimate.billByInvoice,
     monthlyShown: !!monthlyAverage,
-    listAnnual: combinedFrequency?.annual,
-    prepayQuoteBase: prepayChargeQuote?.base,
-    due: {
-      prepayInLane: !!data?.recurringCardPolicy?.prepayInLane,
-      prepayAfterVisit,
-      prepayCardCapture: !!data?.recurringCardPolicy?.required,
-      paymentTiming,
-      setupBilledWithFirstVisit: !!setupFeeAfterVisitCopy,
-      hasUpFrontInvoice: afterVisitInvoiceShape.hasSetupInvoice || afterVisitInvoiceShape.hasFirstVisitInvoice,
-    },
   });
 
   // Service/price cards — shared by the live configurator (below) and the

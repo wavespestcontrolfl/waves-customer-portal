@@ -8,7 +8,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import EstimateViewPage from './EstimateViewPage';
-import { buildWhatYouPay, dueTodayText } from '../components/estimate/WhatYouPayBox';
+import { buildWhatYouPay } from '../components/estimate/WhatYouPayBox';
 import { setGlassDefault } from '../lib/estimate-glass-copy';
 
 vi.mock('react-router-dom', () => ({ useParams: () => ({ token: 'what-you-pay-token' }) }));
@@ -118,7 +118,7 @@ describe('estimate page: what you pay and when', () => {
     await waitFor(() => expect(box(container)).not.toBeNull());
     const t = text(container);
     expect(t).toContain('What you pay and when');
-    expect(t).toContain('Due today');
+    expect(t).not.toMatch(/due today|prepay the year in one payment|exact total/i);
     expect(t).toContain('Pest Control$99.00');
     expect(t).toContain('Setup fee$99.00');
     expect(t).toContain('First visit total$198.00');
@@ -128,7 +128,6 @@ describe('estimate page: what you pay and when', () => {
     expect(t).not.toMatch(/year total|first year|\$495|\$1,098|\$702/i);
     expect(t).not.toMatch(/visits? a year|each visit/i);
     expect(t).toContain('The $99.00 setup fee is a one-time charge to start a plan with one service. Plans with two or more services do not pay it. It is also waived if you prepay the year.');
-    expect(t).toContain('Prepay the year and the $99.00 setup fee is waived.');
     // Inside the price section, with the price it explains.
     expect(container.querySelector('#estimate-price-section').contains(box(container))).toBe(true);
   });
@@ -203,46 +202,31 @@ describe('estimate page: what you pay and when', () => {
   });
 });
 
-describe('buildWhatYouPay and dueTodayText', () => {
+describe('buildWhatYouPay', () => {
   const model = (services) => ({
     planMonthly: 0, credit: null, multi: services.length > 1,
     services: services.map(([key, label, perApplication, visits]) => ({ key, label, perApplication, visits, monthly: 0 })),
   });
   const pest = model([['pest_control', 'Pest Control', 99, 4]]);
   const input = (extra = {}) => ({ model: pest, fees: [setupFee], serviceMode: 'recurring', invoiceFirstVisit: 99, ...extra });
+  const FEE_SENTENCE = 'The $99.00 setup fee is a one-time charge to start a plan with one service. Plans with two or more services do not pay it.';
 
-  it('annual prepay chosen, fee waivable: the fee is waived and the 12-month LIST annual is the only dollar line, never visits x price', () => {
-    const result = buildWhatYouPay(input({ paymentPreference: 'prepay_annual', listAnnual: 395.52, due: { prepayInLane: true, prepayAfterVisit: true } }));
-    expect(result.setup.waived).toBe(true);
-    expect(result.prepay).toEqual({ amount: 395.52, note: 'List price. We show your exact total before you confirm.' });
-    expect(result.yearTotal).toBeUndefined();
-    expect(result.dueToday).toBe('Nothing due today. You pay the year in one payment, after your first visit.');
-    expect(result.prepaySentence).toBeNull();
+  it('the annual prepay choice renders no box (the Reserve your spot box owns payment timing and prepay)', () => {
+    expect(buildWhatYouPay(input({ paymentPreference: 'prepay_annual', annualPrepayOffered: true }))).toBeNull();
+    expect(buildWhatYouPay(input({ paymentPreference: 'pay_at_visit' }))).not.toBeNull();
   });
 
-  it('annual prepay chosen with a server quote on the page: the quote is shown, not a list price', () => {
-    const result = buildWhatYouPay(input({ paymentPreference: 'prepay_annual', listAnnual: 395.52, prepayQuoteBase: 380, due: { prepayInLane: true } }));
-    expect(result.prepay).toEqual({ amount: 380, note: 'Your quoted prepay price.' });
+  it('the waiver clause needs both the page offering prepay and the server marking the fee waivable', () => {
+    expect(buildWhatYouPay(input({ annualPrepayOffered: true })).setupSentence).toBe(`${FEE_SENTENCE} It is also waived if you prepay the year.`);
+    expect(buildWhatYouPay(input({ annualPrepayOffered: false })).setupSentence).toBe(FEE_SENTENCE);
+    const notWaivable = { ...setupFee, waivedWithPrepay: false };
+    expect(buildWhatYouPay(input({ fees: [notWaivable], annualPrepayOffered: true })).setupSentence).toBe(FEE_SENTENCE);
   });
 
-  it('annual prepay chosen with no list annual: no figure, only when the exact total arrives (lane picks the timing)', () => {
-    const lawn = model([['lawn_care', 'Lawn Care', 78, 9]]);
-    const lane = buildWhatYouPay(input({ model: lawn, fees: [], invoiceFirstVisit: 78, paymentPreference: 'prepay_annual', due: { prepayInLane: true } }));
-    expect(lane.prepay).toEqual({ amount: null, note: 'We show your exact total before you confirm.' });
-    const noLane = buildWhatYouPay(input({ model: lawn, fees: [], invoiceFirstVisit: 78, paymentPreference: 'prepay_annual' }));
-    expect(noLane.prepay.note).toBe('Your exact total is on your 12-month invoice, which we open after you approve.');
-    expect(noLane.dueToday).toBe('We open your 12-month invoice after you approve.');
-  });
-
-  it('offers prepay in words: the fee sentence names the fee; without a fee the exact-total timing follows the lane', () => {
-    expect(buildWhatYouPay(input({ annualPrepayOffered: true, due: { prepayInLane: true } })).prepaySentence)
-      .toBe('Prepay the year and the $99.00 setup fee is waived. You pay once, when you approve.');
-    const lawn = model([['lawn_care', 'Lawn Care', 78, 9]]);
-    const lawnInput = (due) => input({ model: lawn, fees: [], invoiceFirstVisit: 78, annualPrepayOffered: true, due });
-    expect(buildWhatYouPay(lawnInput({ prepayInLane: true })).prepaySentence)
-      .toBe('You can also prepay the year in one payment. We show your exact total before you confirm.');
-    expect(buildWhatYouPay(lawnInput({ prepayInLane: false })).prepaySentence)
-      .toBe('You can also prepay the year in one payment. Your exact total is on your 12-month invoice, which we open after you approve.');
+  it('prints no plan total and no payment-timing or prepay field', () => {
+    const result = buildWhatYouPay(input({ annualPrepayOffered: true, monthlyShown: true }));
+    expect(Object.keys(result).sort()).toEqual(['averageSentence', 'firstVisitTotal', 'lines', 'setup', 'setupSentence']);
+    expect(result.firstVisitTotal).toBe(198);
   });
 
   it('the box first application must equal the sum of the prices to the cent', () => {
@@ -254,16 +238,5 @@ describe('buildWhatYouPay and dueTodayText', () => {
     const both = model([['pest_control', 'Pest Control', 99, 4], ['lawn_care', 'Lawn Care', 78, 9]]);
     expect(buildWhatYouPay(input({ model: both, invoiceFirstVisit: 177 }))).toBeNull();
     expect(buildWhatYouPay(input({ model: both, fees: [], invoiceFirstVisit: 177 })).firstVisitTotal).toBe(177);
-  });
-
-  it('due today for pay per application follows the one timing answer', () => {
-    expect(dueTodayText({ prepayCardCapture: true })).toBe('Nothing due today — Auto Pay bills your card after your first application.');
-    expect(dueTodayText({ setupBilledWithFirstVisit: true })).toBe('Nothing due today — your setup fee is billed with your first visit.');
-    expect(dueTodayText({ paymentTiming: { firstInvoice: 'after_visit', held: 'paused' } }))
-      .toBe('Nothing due today. Your Auto Pay is paused, so we send you a pay link after your first visit.');
-    expect(dueTodayText({ paymentTiming: { firstInvoice: 'at_confirm', held: null } }))
-      .toBe('Your first invoice is sent when you confirm, with a link to pay it.');
-    expect(dueTodayText({ hasUpFrontInvoice: true })).toBe('We send your first invoice after you approve, with a link to pay.');
-    expect(dueTodayText({ hasUpFrontInvoice: false })).toBe('Nothing due today. Your first visit is billed after it is completed.');
   });
 });

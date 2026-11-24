@@ -3,21 +3,21 @@ import { fmtMoney } from '../../lib/money';
 import { CUSTOMER_SURFACE } from '../../theme-customer';
 import { estimateCard } from './cardStyles';
 import { W } from './tokens';
-import { FIRST_INVOICE_AT_CONFIRM_COPY } from '../../lib/paymentTiming';
-import { payPerApplicationTimingNote } from './PaymentPreferenceButtons';
 
 /**
  * "What you pay and when" (owner 2026-11-23): a plain box under the price on a residential recurring
  * estimate. People who got an estimate asked what the $99 line was, why booking showed $177 when the
- * estimate said $91.50 a month, and whether a service was billed monthly. The box answers in order:
- * what is due today, the first visit itemised, each application after, and the setup fee. It states no plan total (AGENTS.md).
+ * estimate said $91.50 a month, and whether a service was billed monthly. The box shows the first
+ * visit itemised, each application after that, and the setup fee in a sentence. It states no plan
+ * total (AGENTS.md) and says nothing about when money moves or about prepay: the "Reserve your spot"
+ * box owns payment timing and the prepay choice.
  *
  * It prices nothing. Every dollar is a figure the page already shows: the per-application price and
- * visit count of each service (the monthly-average model, which reconciles them to the plan's own
- * monthly), and the server's setup fee. The per-application price stays THE price; a monthly figure
- * never appears here. `buildWhatYouPay` returns null whenever the first bill is not proven to be
- * those figures (a credit, another first-visit fee, an up-front row beside the setup fee), so the
- * page then renders exactly as before.
+ * application count of each service (the monthly-average model, which reconciles them to the plan's
+ * own monthly), and the server's setup fee. The per-application price stays THE price; a monthly
+ * figure never appears here. `buildWhatYouPay` returns null whenever the first bill is not proven to
+ * be those figures (a credit, another first-visit fee, an up-front row beside the setup fee, the
+ * annual prepay choice), so the page then renders exactly as before.
  */
 
 const round2 = (n) => Math.round(Number(n) * 100) / 100;
@@ -25,54 +25,19 @@ const sameCents = (a, b) => Math.round(Number(a) * 100) === Math.round(Number(b)
 const isSetupFee = (fee) => fee?.service === 'waveguard_setup';
 const positiveFees = (fees) => (Array.isArray(fees) ? fees : []).filter((fee) => Number(fee?.amount) > 0);
 
-const visitsText = (visits) => (visits === 1 ? 'once a year' : `${visits} applications a year, counting the first`);
+const applicationsText = (visits) => (visits === 1 ? 'once a year' : `${visits} applications a year, counting the first`);
 
-// The one answer to "what is due today", for the choice the customer is looking at. Pay per
-// application reads the same sentence the "Reserve your spot" box prints; the prepay lines mirror
-// that box's and the confirm step's.
-export function dueTodayText({
-  paymentPreference = null, prepayInLane = false, prepayAfterVisit = false, prepayCardCapture = false,
-  paymentTiming = null, setupBilledWithFirstVisit = false, hasUpFrontInvoice = true,
-} = {}) {
-  if (paymentPreference === 'prepay_annual') return prepayText({ prepayInLane, prepayAfterVisit });
-  const note = payPerApplicationTimingNote({ setupBilledWithFirstVisit, paymentTiming, prepayCardCapture });
-  if (note) return note;
-  if (paymentTiming?.firstInvoice === 'at_confirm') return FIRST_INVOICE_AT_CONFIRM_COPY;
-  return hasUpFrontInvoice
-    ? 'We send your first invoice after you approve, with a link to pay.'
-    : 'Nothing due today. Your first visit is billed after it is completed.';
-}
-
-function prepayText({ prepayInLane, prepayAfterVisit }) {
-  if (prepayInLane && prepayAfterVisit) return 'Nothing due today. You pay the year in one payment, after your first visit.';
-  if (prepayInLane) return 'You pay the year in one payment when you approve.';
-  return 'We open your 12-month invoice after you approve.';
-}
-
+// The waiver clause only when the page offers the annual prepay and the server marks this fee waivable with it.
 function setupFeeSentence(fee, prepayWaivable) {
-  const amount = fmtMoney(fee.amount);
-  const base = `The ${amount} setup fee is a one-time charge to start a plan with one service. Plans with two or more services do not pay it.`;
+  const base = `The ${fmtMoney(fee.amount)} setup fee is a one-time charge to start a plan with one service. Plans with two or more services do not pay it.`;
   return prepayWaivable ? `${base} It is also waived if you prepay the year.` : base;
-}
-
-// When the exact prepay total reaches the customer depends on the lane: in the card lane the page quotes
-// it before the confirm button; outside it the 12-month invoice carries it after approval.
-const exactTotalText = (prepayInLane) => (prepayInLane
-  ? 'We show your exact total before you confirm.'
-  : 'Your exact total is on your 12-month invoice, which we open after you approve.');
-
-function prepayOfferSentence({ setupFee, prepayWaivable, prepayInLane, prepayAfterVisit }) {
-  if (!prepayWaivable) return `You can also prepay the year in one payment. ${exactTotalText(prepayInLane)}`;
-  const when = prepayInLane
-    ? (prepayAfterVisit ? 'You pay once, after your first visit.' : 'You pay once, when you approve.')
-    : 'You pay once, by invoice after you approve.';
-  return `Prepay the year and the ${fmtMoney(setupFee.amount)} setup fee is waived. ${when}`;
 }
 
 // The plan the box describes: recurring, per application, billed by card, nothing else on the first bill.
 function describablePlan(input) {
   const { model, serviceMode, invoiceMode, siteConfirmationHold, commercial, creditApplies, oneTimeExtrasTotal, upFrontRowCount } = input;
   if (serviceMode !== 'recurring' || invoiceMode || siteConfirmationHold || commercial) return false;
+  if (input.paymentPreference === 'prepay_annual') return false;
   if (!model || model.credit || creditApplies || upFrontRowCount > 0 || Number(oneTimeExtrasTotal) > 0) return false;
   const charged = positiveFees(input.fees);
   // Another first-visit fee (the initial cockroach treatment): the first bill is more than the lines here.
@@ -81,40 +46,21 @@ function describablePlan(input) {
   return !(charged.length > 0 && model.multi);
 }
 
-// The prepay choice shows the server's own quote when the page holds one; else the 12-month LIST annual
-// line item the "Reserve your spot" box shows (AGENTS.md exempts that line). Never a total built here.
-function prepayFigures({ listAnnual, quoteBase, prepayInLane }) {
-  const quoted = Number(quoteBase);
-  if (quoted > 0) return { amount: round2(quoted), note: 'Your quoted prepay price.' };
-  const list = Number(listAnnual);
-  if (list > 0) return { amount: round2(list), note: `List price. ${exactTotalText(prepayInLane)}` };
-  return { amount: null, note: exactTotalText(prepayInLane) };
-}
-
-const sumOf = (services, pick) => round2(services.reduce((sum, s) => sum + pick(s), 0));
-
 // Everything the box prints, or null when the first bill is not proven to be these figures.
 export function buildWhatYouPay(input = {}) {
   if (!describablePlan(input)) return null;
-  const { model, paymentPreference = null, due = {} } = input;
-  const firstApplications = sumOf(model.services, (s) => s.perApplication);
+  const { model } = input;
+  const firstApplications = round2(model.services.reduce((sum, s) => sum + s.perApplication, 0));
   // The proof: the "Reserve your spot" box's first application is the sum of these prices to the cent.
   if (!(input.invoiceFirstVisit > 0) || !sameCents(input.invoiceFirstVisit, firstApplications)) return null;
   const setupFee = positiveFees(input.fees).find(isSetupFee) || null;
-  const prepayWaivable = setupFee?.waivedWithPrepay === true;
-  const prepaySelected = paymentPreference === 'prepay_annual';
   const feeAmount = setupFee ? round2(setupFee.amount) : 0;
+  const prepayWaivable = input.annualPrepayOffered === true && setupFee?.waivedWithPrepay === true;
   return {
-    dueToday: dueTodayText({ ...due, paymentPreference }),
-    prepaySelected,
     lines: model.services.map((s) => ({ key: s.key, label: s.label, amount: s.perApplication, visits: s.visits })),
-    setup: setupFee ? { amount: feeAmount, waived: prepaySelected && prepayWaivable } : null,
+    setup: setupFee ? { amount: feeAmount } : null,
     firstVisitTotal: round2(firstApplications + feeAmount),
-    prepay: prepaySelected ? prepayFigures({ listAnnual: input.listAnnual, quoteBase: input.prepayQuoteBase, prepayInLane: due.prepayInLane }) : null,
     setupSentence: setupFee ? setupFeeSentence(setupFee, prepayWaivable) : null,
-    prepaySentence: input.annualPrepayOffered && !prepaySelected
-      ? prepayOfferSentence({ setupFee, prepayWaivable, prepayInLane: due.prepayInLane, prepayAfterVisit: due.prepayAfterVisit })
-      : null,
     // The page also shows a monthly figure; say once that it is the year averaged, not a bill.
     averageSentence: input.monthlyShown ? 'Any monthly figure on this page is the year averaged out. It is not a bill.' : null,
   };
@@ -138,42 +84,21 @@ function Row({ label, amount, sub = null }) {
   );
 }
 
-function FirstVisitRows({ box }) {
-  const itemised = box.lines.length > 1 || box.setup;
-  return (
-    <>
-      <div style={HEADING}>First visit</div>
-      {box.lines.map((line) => <Row key={line.key} label={line.label} amount={fmtMoney(line.amount)} />)}
-      {box.setup ? <Row label="Setup fee" amount={fmtMoney(box.setup.amount)} /> : null}
-      {itemised ? <div data-first-visit-total="" style={TOTAL}><span>First visit total</span><span style={NUM}>{fmtMoney(box.firstVisitTotal)}</span></div> : null}
-      <div style={{ ...HEADING, paddingTop: 8, borderTop: `1px solid ${W.offWhite}` }}>Each application after that</div>
-      {box.lines.map((line) => <Row key={line.key} label={line.label} amount={fmtMoney(line.amount)} sub={visitsText(line.visits)} />)}
-    </>
-  );
-}
-
-function PrepayRows({ box }) {
-  return (
-    <>
-      <div style={HEADING}>If you prepay the year</div>
-      {box.setup?.waived ? <Row label="Setup fee" amount="Waived" /> : null}
-      <Row label="12-month plan" amount={box.prepay.amount == null ? null : fmtMoney(box.prepay.amount)} sub={box.prepay.note} />
-    </>
-  );
-}
-
 export default function WhatYouPayBox({ box }) {
   if (!box) return null;
+  const itemised = box.lines.length > 1 || box.setup;
   return (
     <section data-what-you-pay="" style={estimateCard()}>
       <div style={{ display: 'grid', gap: 8 }}>
         <div style={HEADING}>What you pay and when</div>
-        <div style={{ ...HEADING, paddingTop: 4 }}>Due today</div>
-        <div data-due-today="" style={{ fontSize: 16, color: CUSTOMER_SURFACE.text, lineHeight: 1.5 }}>{box.dueToday}</div>
-        <div style={{ borderTop: `1px solid ${W.offWhite}` }} />
-        {box.prepaySelected ? <PrepayRows box={box} /> : <FirstVisitRows box={box} />}
+        <div style={{ ...HEADING, paddingTop: 4 }}>First visit</div>
+        {box.lines.map((line) => <Row key={line.key} label={line.label} amount={fmtMoney(line.amount)} />)}
+        {box.setup ? <Row label="Setup fee" amount={fmtMoney(box.setup.amount)} /> : null}
+        {itemised ? <div data-first-visit-total="" style={TOTAL}><span>First visit total</span><span style={NUM}>{fmtMoney(box.firstVisitTotal)}</span></div> : null}
+        <div style={{ ...HEADING, paddingTop: 8, borderTop: `1px solid ${W.offWhite}` }}>Each application after that</div>
+        {box.lines.map((line) => <Row key={line.key} label={line.label} amount={fmtMoney(line.amount)} sub={applicationsText(line.visits)} />)}
       </div>
-      {[box.setupSentence, box.prepaySentence, box.averageSentence].filter(Boolean).map((text) => (
+      {[box.setupSentence, box.averageSentence].filter(Boolean).map((text) => (
         <div key={text} style={{ marginTop: 10, ...SUB }}>{text}</div>
       ))}
     </section>
