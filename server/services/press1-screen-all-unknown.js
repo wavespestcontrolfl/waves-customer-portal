@@ -84,9 +84,10 @@ function rememberedRows(key) {
     // Sandy's time counts toward duration_seconds on a transfer, so any call
     // Sandy touched proves nothing here.
     .whereRaw(`COALESCE(call_outcome, '') NOT IN (${AI_OUTCOMES.map(() => '?').join(', ')})`, AI_OUTCOMES)
-    // The webhook's isTransferredRow markers: a Sandy transfer can end with a
-    // voicemail outcome.
-    .whereRaw("NOT COALESCE(jsonb_typeof(metadata->'relay_handoff') = 'object' OR jsonb_exists(metadata, 'relay_transfer_ring_at'), FALSE)")
+    // Any Sandy session evidence (relay_handoff, relay_transfer_ring_at,
+    // relay_reconnects, ...): a transfer or a reconnect can end in voicemail,
+    // and its transcript then holds Sandy's words.
+    .whereRaw("NOT EXISTS (SELECT 1 FROM jsonb_object_keys(CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END) AS k WHERE k LIKE 'relay\\_%')")
     .where((proof) => proof
       // Talk time runs from the staff press 1 (forward_acceptance.accepted_at)
       // to the call's end (metadata.ended_at, Twilio's own end time; the status
@@ -99,7 +100,9 @@ function rememberedRows(key) {
           ELSE (metadata->>'ended_at')::timestamptz
             - (metadata->'forward_acceptance'->>'accepted_at')::timestamptz >= make_interval(secs => ?) END`, [TALK_SECONDS]))
       .orWhere((message) => message
-        .where((unanswered) => unanswered.whereIn('answered_by', UNANSWERED).orWhereNull('answered_by'))
+        // answered_by must say nobody answered: an empty one can be a
+        // completed (answered) Studio fallback call.
+        .whereIn('answered_by', UNANSWERED)
         // A call staff accepted is a conversation, not a message, even when
         // answered_by stayed empty (the caller hung up first): the 30 s rule above.
         .whereRaw("metadata->'forward_acceptance' IS NULL")

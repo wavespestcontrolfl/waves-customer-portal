@@ -133,7 +133,7 @@ describe('the remembered-caller proof', () => {
   test('any call Sandy handled or transferred proves nothing', () => {
     expect(seen.sql.some((q) => q.startsWith("COALESCE(call_outcome, '') NOT IN"))).toBe(true);
     expect(seen.bindings).toEqual(expect.arrayContaining(['ai_handled', 'ai_transferred']));
-    expect(seen.sql.some((q) => q.includes("jsonb_exists(metadata, 'relay_transfer_ring_at')"))).toBe(true);
+    expect(seen.sql.some((q) => q.includes('jsonb_object_keys') && q.includes("LIKE 'relay\\_%'"))).toBe(true);
   });
 
   test('staff talk needs no answered_by (empty when the caller hangs up first)', () => {
