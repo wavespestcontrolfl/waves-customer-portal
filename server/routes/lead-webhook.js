@@ -60,6 +60,7 @@ const leadAttribution = require('../services/lead-attribution');
 // (lead-estimate-link.js) classifies with the exact same semantics. This route
 // keeps using — and re-exporting via `_test` — the shared implementation.
 const { determineLeadSource } = require('../services/lead-source-classify');
+const { printSourceByKey } = require('../services/print-lead-sources');
 const { sourceEvidenceFromAttribution } = require('../services/lead-source-evidence');
 const { GOOGLE_ADS_WEB_FORM_NAME } = require('../services/lead-source-resolver');
 const { sanitizeHeardAbout, sanitizeHeardAboutPrompt } = require('../services/heard-about');
@@ -221,6 +222,15 @@ async function resolveLeadSourceId(leadSource, utmContent) {
         .where('source_type', 'ai_assistant')
         .where('is_active', true)
         .first();
+    }
+    // Printed piece (seed: 20261124150000_print_lead_sources). By source_type,
+    // not is_active: a paused piece still names the true channel. Without this
+    // a business-card or yard-sign form lead keeps lead_source_id NULL.
+    if (!sourceRecord) {
+      const printSource = printSourceByKey(leadSource.source);
+      if (printSource) {
+        sourceRecord = await db('lead_sources').where('source_type', printSource.sourceType).first();
+      }
     }
     if (!sourceRecord && leadSource.source === 'facebook') {
       // Match the Facebook row for the right channel: paid ad clicks
@@ -2387,6 +2397,7 @@ module.exports._test = {
   LEAD_AGENT_FALLBACK_AFTER_MS,
   applyLeadEstimateAutomationGate,
   determineLeadSource,
+  resolveLeadSourceId,
   isHoneypotTripped,
   enrollNewLeadAutomation,
   sanitizeHeardAbout,

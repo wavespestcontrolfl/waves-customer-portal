@@ -24,6 +24,11 @@ const SOURCE_NAMES = {
   facebook_organic: 'Facebook (organic)',
   nextdoor: 'Nextdoor',
   van_wrap: 'Van Wrap',
+  // Printed pieces (print-lead-sources.js): QR / link on a card, sign or mailer.
+  business_card: 'Business Card',
+  yard_sign: 'Yard Sign',
+  new_home_postcard: 'New-Home Postcard',
+  print_other: 'Print (other)',
   // Fallback bucket from the lead webhook (lead-webhook.js) when a form URL
   // matches no known domain/UTM — includes UNMAPPED spoke domains. NOT the Waves
   // hub (that's always waves_website). Label it distinctly so it doesn't read as
