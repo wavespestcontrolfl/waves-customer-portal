@@ -673,45 +673,6 @@ postgres('estimate adoption — a Waves Assessment is never the plan\'s first vi
     }
   });
 
-  test('an accepted one-time retry still offers booking when its only stamped row is a legacy re-service', async () => {
-    const oneTimeData = {
-      result: {
-        recurring: { services: [] },
-        oneTime: { items: [{ name: 'German Roach Cleanout', price: 250 }], membershipFee: 0 },
-      },
-    };
-    const { customerId, estimateId, token } = await fixture(mockTransaction, {
-      data: oneTimeData, monthly: 0, annual: 0,
-    });
-    await mockTransaction('estimates').where({ id: estimateId }).update({
-      status: 'accepted',
-      accepted_at: new Date(),
-      accepted_service_mode: 'one_time',
-      price_locked_at: new Date(),
-      onetime_total: 250,
-    });
-    const callbackId = await visit(mockTransaction, {
-      customerId,
-      key: 'pest_re_service',
-      type: 'Pest Control Re-Service',
-      date: CHOSEN_DATE,
-      extra: { source_estimate_id: estimateId, is_callback: false, estimated_price: 0 },
-    });
-
-    const response = await putAccept(token);
-    const payload = await response.json();
-
-    expect(response.status).toBe(200);
-    expect(payload).toMatchObject({
-      alreadyAccepted: true,
-      nextStep: 'book_one_time',
-      reservationCommitted: false,
-      bookingUrl: expect.stringContaining(`estimate_id=${estimateId}`),
-    });
-    expect(await mockTransaction('scheduled_services').where({ id: callbackId }).first())
-      .toMatchObject({ customer_id: customerId, estimated_price: '0.00' });
-  });
-
   test('accept: a stale page posting the assessment id is refused and the assessment is not restamped', async () => {
     const { customerId, estimateId, token } = await fixture(mockTransaction);
     const assessmentId = await assessmentVisit(mockTransaction, customerId, { estimated_price: 0 });

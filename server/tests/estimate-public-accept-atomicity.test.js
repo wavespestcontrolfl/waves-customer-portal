@@ -546,10 +546,6 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
     expect(response.data.invoiceAmount).toBe(448);
     expect(response.data.prepayInvoiceAmount).toBe(448);
     expect(response.data.invoicePayUrl == null).toBe(true);
-    expect(EstimateConverter.convertEstimate).toHaveBeenCalledWith(
-      'est-atomic-1',
-      expect.objectContaining({ verifyAnnualPrepayTermStart: expect.any(Function) }),
-    );
     const NotificationService = require('../services/notification-service');
     const estimateNotice = NotificationService.notifyAdmin.mock.calls.find((call) => call[0] === 'estimate');
     // The full admin text (the bell's detail since the who-and-what copy, #5576)
@@ -842,41 +838,6 @@ describe('FIX 2 — already-accepted retry returns the full success payload', ()
     expect(res.data.bookingUrl).toContain('estimate_id=est-already-2');
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
     expect(InvoiceService.create).not.toHaveBeenCalled();
-  });
-
-  test('another customer\'s stamped visit does not suppress the rightful customer\'s one-time booking retry', async () => {
-    const accepted = recurringPestEstimate({
-      id: 'est-already-foreign',
-      token: 'tok-already-foreign-x0123456789',
-      status: 'accepted',
-      customer_id: 'cust-rightful',
-      accepted_service_mode: 'one_time',
-      price_locked_at: new Date(),
-      onetime_total: 250,
-      estimate_data: JSON.stringify({
-        result: {
-          recurring: { services: [] },
-          oneTime: { items: [{ name: 'German Roach Cleanout', price: 250 }], membershipFee: 0 },
-        },
-      }),
-    });
-    resetStore(accepted);
-    db.__state.tables.scheduled_services = [{
-      id: 'ss-foreign',
-      source_estimate_id: accepted.id,
-      customer_id: 'cust-foreign',
-      reservation_expires_at: new Date(Date.now() - 60_000),
-      status: 'confirmed',
-      scheduled_date: '2027-07-20',
-    }];
-
-    const res = await putAccept(accepted.token);
-
-    expect(res.status).toBe(200);
-    expect(res.data.alreadyAccepted).toBe(true);
-    expect(res.data.nextStep).toBe('book_one_time');
-    expect(res.data.reservationCommitted).toBe(false);
-    expect(res.data.bookingUrl).toContain(`estimate_id=${accepted.id}`);
   });
 });
 

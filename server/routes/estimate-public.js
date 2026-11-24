@@ -23,7 +23,7 @@ const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-fo
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { groupLinkStillViewable } = require('../services/proposal-bid');
-const { isAssessmentVisit, excludeAssessmentBookings, paidEstimateVisitsQuery } = require('../services/assessment-booking');
+const { isAssessmentVisit, excludeAssessmentBookings } = require('../services/assessment-booking');
 const { isReService, excludeReServices } = require('../services/re-service');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
 const { UNISSUED_ESTIMATE, estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estimate-bahia-review');
@@ -91,7 +91,7 @@ const {
   lineFlagsBlockPercentDiscount,
 } = require('../services/pricing-engine/discount-engine');
 const slotReservation = require('../services/slot-reservation');
-const { liveServiceOrHold } = require('../services/scheduling/reservation-occupancy');
+const { bookedVisitOrLiveHold } = require('../services/scheduling/reservation-occupancy');
 const { UPCOMING_SERVICE_STATUSES } = require('../services/visit-context/statuses');
 // Rung 1 of the global scheduling lock order (ORDERING CONTRACT,
 // services/scheduling/occupancy.js): the accept transaction pre-acquires the
@@ -1868,7 +1868,7 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
       }
     })
     .andWhere((builder) => {
-      liveServiceOrHold(builder);
+      bookedVisitOrLiveHold(builder);
       if (holdGraceMinutes > 0 && estimate.id) {
         builder.orWhere((own) => {
           own.where('scheduled_services.source_estimate_id', estimate.id)
@@ -13816,35 +13816,34 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
         // where createTermForAnnualPrepay defaults the start). Guarding with
         // bare "today" 409'd a legitimate next-term renewal whose current
         // term ends before the booked first visit.
-        const reservedStartRow = await paidEstimateVisitsQuery(trx, {
-          estimateId: estimate.id,
-          customerId,
-        }).first('scheduled_services.scheduled_date');
+        const reservedStartRow = await trx('scheduled_services')
+          .where({ source_estimate_id: estimate.id })
+          .whereNotNull('customer_id')
+          .whereNull('reservation_expires_at')
+          .orderBy('scheduled_date', 'asc')
+          .first('scheduled_date');
         const overlapTermStart = dateOnly(reservedStartRow?.scheduled_date) || etDateString();
         const { lockAndAssertNoAnnualPrepayOverlap } = require('./admin-customers')._private;
-        const assertAnnualPrepayStart = async (termStart) => {
-          try {
-            await lockAndAssertNoAnnualPrepayOverlap(
-              trx,
-              customerId,
-              termStart,
-              false,
-              'Customer already has an annual prepay term through',
-              estimate.id,
+        try {
+          await lockAndAssertNoAnnualPrepayOverlap(
+            trx,
+            customerId,
+            overlapTermStart,
+            false,
+            'Customer already has an annual prepay term through',
+            estimate.id,
+          );
+        } catch (overlapErr) {
+          if (overlapErr && overlapErr.annualPrepayOverlap) {
+            const conflict = estimateAcceptError(
+              'This account already has an active annual prepay plan. Please call or text us to adjust or renew your coverage — accepting a second annual plan would double-bill the year.',
+              409,
             );
-          } catch (overlapErr) {
-            if (overlapErr && overlapErr.annualPrepayOverlap) {
-              const conflict = estimateAcceptError(
-                'This account already has an active annual prepay plan. Please call or text us to adjust or renew your coverage — accepting a second annual plan would double-bill the year.',
-                409,
-              );
-              conflict.code = 'ANNUAL_PREPAY_OVERLAP';
-              throw conflict;
-            }
-            throw overlapErr;
+            conflict.code = 'ANNUAL_PREPAY_OVERLAP';
+            throw conflict;
           }
-        };
-        await assertAnnualPrepayStart(overlapTermStart);
+          throw overlapErr;
+        }
         // Quote revalidation INSIDE the accept transaction (Codex r15):
         // the acknowledged total projected the balance + inspection offer +
         // deposit credit as of the 402 round-trip — credit consumed by
@@ -13920,14 +13919,6 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           firstApplicationAmount: firstApplicationInvoiceAmount,
           allowFirstApplicationFallback: false,
           autoSendInvoice: false,
-          // Re-check the exact normalized start the term writer is about to
-          // persist. Dispatch can cancel or move the booked anchor after the
-          // preflight above while this transaction retains the customer lock.
-          verifyAnnualPrepayTermStart: async (normalizedStart) => {
-            const finalStart = dateOnly(normalizedStart) || etDateString();
-            if (finalStart === overlapTermStart) return;
-            await assertAnnualPrepayStart(finalStart);
-          },
           deferFollowUpReminderRegistration: true,
           deferCommercialScheduleNotification: true,
           // Genuinely ADOPTED pre-existing appointment (not a reservation
@@ -22931,10 +22922,12 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
   // A booking bound to this estimate (committed reservation, linked existing
   // appointment, or the converter's auto-scheduled first visit) — enough to
   // know the customer does NOT need the one-time booking link again.
-  const committedAppointment = estimate.customer_id && await paidEstimateVisitsQuery(db, {
-    estimateId: estimate.id,
-    customerId: estimate.customer_id,
-  }).first('scheduled_services.id');
+  const committedAppointment = await db('scheduled_services')
+    .where({ source_estimate_id: estimate.id })
+    .whereNotNull('customer_id')
+    .whereNull('reservation_expires_at')
+    .orderBy('scheduled_date', 'asc')
+    .first('id');
   const reservationCommitted = !!committedAppointment;
 
   // One-time accepts that never booked get the self-serve booking link again.

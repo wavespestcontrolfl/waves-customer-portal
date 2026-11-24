@@ -4,7 +4,6 @@
  * Only shows slots when a tech is already working in the customer's zone.
  * Finds 1-hour gaps between existing jobs with buffer enforcement.
  */
-const { liveServiceOrHold } = require('./scheduling/reservation-occupancy');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
 const db = require('../models/db');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
@@ -188,7 +187,10 @@ class AvailabilityEngine {
         .where('scheduled_services.scheduled_date', dateStr)
         .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
         .whereNotNull('scheduled_services.window_start')
-        .where(liveServiceOrHold)
+        .where((q) => {
+          q.whereNull('scheduled_services.reservation_expires_at')
+            .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
+        })
         .modify((q) => {
           // Empty city list matches nothing — same as knex's empty whereIn.
           if (!zoneCitiesLower.length) return q.whereRaw('1 = 0');
@@ -546,7 +548,10 @@ class AvailabilityEngine {
       .where('scheduled_services.scheduled_date', dateStr)
       .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
       .whereNotNull('scheduled_services.window_start')
-      .where(liveServiceOrHold)
+      .where((q) => {
+        q.whereNull('scheduled_services.reservation_expires_at')
+          .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
+      })
       .modify((q) => {
         // Case-insensitive city match — same reasoning as the slot
         // builder above; empty list matches nothing like an empty whereIn.
