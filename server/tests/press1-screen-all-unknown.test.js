@@ -160,3 +160,10 @@ test('a Sandy transfer and the staff talk time are part of the remembered-caller
   expect(seen.sql.some((q) => q.includes("jsonb_exists(metadata, 'relay_transfer_ring_at')"))).toBe(true);
   expect(seen.sql.some((q) => q.includes("forward_acceptance'->>'accepted_at'"))).toBe(true);
 });
+
+test('talk time needs the recorded end; an older bridge counts by its 30 s recording', async () => {
+  const seen = fakeDb();
+  await screenAllUnknownHit(CALLER);
+  expect(seen.sql.some((q) => q.includes("(metadata->>'ended_at')::timestamptz"))).toBe(true);
+  expect(seen.sql).toContain("metadata->'customer_leg' IS NULL");
+});

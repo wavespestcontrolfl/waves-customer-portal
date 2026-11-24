@@ -889,6 +889,9 @@ async function screenCandidate(from, stirVerstat) {
   const gates = require('../config/feature-gates');
   const trialOn = gates.isEnabled('callPreconnectScreen') && gates.callScreenAllUnknownLive();
   if (!attestationB && !exchangeHit && !trialOn) return { knownCaller: false, exchangeTrigger: false, allUnknownTrigger: false };
+  // A failed exchange read (null) on a non-B caller rules out every trigger:
+  // route normally without another read.
+  if (exchangeHit === null) return { knownCaller: false, exchangeTrigger: false, allUnknownTrigger: false };
   let knownCaller;
   try {
     // With the trial on, this read sits in front of most unknown calls, so it
@@ -905,9 +908,7 @@ async function screenCandidate(from, stirVerstat) {
   // already challenge (an exchange hit with its gate off is only a shadow, so
   // the trial still screens it); screenAllUnknownHit fails open inside.
   const exchangeGates = exchangeHit && gates.isEnabled('callScreenExchangeHistory');
-  // A failed exchange read (null) means this caller's history is unknown: the
-  // trial stands down too (fail open).
-  const allUnknownTrigger = trialOn && !knownCaller && !attestationB && !exchangeGates && exchangeHit !== null
+  const allUnknownTrigger = trialOn && !knownCaller && !attestationB && !exchangeGates
     && await press1ScreenAllUnknown.screenAllUnknownHit(from);
   return { knownCaller, exchangeTrigger: Boolean(exchangeHit) && !knownCaller, allUnknownTrigger };
 }

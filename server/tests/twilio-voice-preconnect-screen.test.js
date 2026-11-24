@@ -245,6 +245,7 @@ describe('screenCandidate (who the screen may challenge)', () => {
       slotRows([]);
       await expect(screenCandidate('+19412360303', A)).resolves.toEqual({ knownCaller: false, exchangeTrigger: false, allUnknownTrigger: false });
       expect(hit).not.toHaveBeenCalled();
+      expect(db).not.toHaveBeenCalled();
     });
 
     test('a B caller is screened by B, not counted as a trial call', async () => {

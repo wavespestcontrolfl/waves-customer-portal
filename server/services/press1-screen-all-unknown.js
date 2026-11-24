@@ -100,24 +100,34 @@ async function rememberedCaller(key, deadline) {
           .whereRaw("NOT COALESCE(jsonb_typeof(metadata->'relay_handoff') = 'object' OR jsonb_exists(metadata, 'relay_transfer_ring_at'), FALSE)")
           .where((proof) => proof
             // Talk time runs from the staff press 1 (forward_acceptance.accepted_at)
-            // to the call's end: duration_seconds alone includes the prompt and
-            // the ringing.
+            // to the call's end (metadata.ended_at, Twilio's own end time; the
+            // status callback writes it). created_at + duration_seconds is not
+            // the end, so a call with no ended_at proves nothing here.
             .where((talked) => talked
               .where('answered_by', 'human')
-              .whereRaw(`CASE WHEN metadata->'forward_acceptance'->>'accepted_at' IS NULL THEN FALSE
-                ELSE created_at + make_interval(secs => COALESCE(duration_seconds, 0))
+              .whereRaw(`CASE WHEN metadata->'forward_acceptance'->>'accepted_at' IS NULL OR metadata->>'ended_at' IS NULL THEN FALSE
+                ELSE (metadata->>'ended_at')::timestamptz
                   - (metadata->'forward_acceptance'->>'accepted_at')::timestamptz >= make_interval(secs => ?) END`, [TALK_SECONDS]))
             .orWhere((message) => message
               .where((unanswered) => unanswered.whereIn('answered_by', UNANSWERED).orWhereNull('answered_by'))
               .where('recording_duration_seconds', '>', MESSAGE_SECONDS)
               .where((rec) => rec.whereNotNull('recording_sid').orWhereNotNull('recording_url'))))))
       // An outbound parent call runs while the customer's phone only rings, so
-      // its own length proves nothing: the customer leg must have connected.
+      // its own length proves nothing: the customer leg must have connected
+      // for 30 s, or (older bridges with no customer_leg) the bridge recorded
+      // from the answer for 30 s, the missed-call service's own fallback proof.
       .orWhere((outbound) => outbound
         .where('direction', 'outbound')
         .whereRaw(`${phoneKeySql('to_phone')} = ?`, [key])
-        .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
-        .whereRaw("CASE WHEN metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (metadata->'customer_leg'->>'duration_seconds')::numeric >= ? ELSE FALSE END", [TALK_SECONDS])))
+        .where((leg) => leg
+          .where((connected) => connected
+            .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
+            .whereRaw("CASE WHEN metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (metadata->'customer_leg'->>'duration_seconds')::numeric >= ? ELSE FALSE END", [TALK_SECONDS]))
+          .orWhere((recorded) => recorded
+            .whereRaw("metadata->'customer_leg' IS NULL")
+            .whereNotNull('bridged_at')
+            .where('recording_duration_seconds', '>=', TALK_SECONDS)
+            .where((rec) => rec.whereNotNull('recording_sid').orWhereNotNull('recording_url'))))))
     .timeout(ms, { cancel: true })
     .first('id');
   return Boolean(row);
