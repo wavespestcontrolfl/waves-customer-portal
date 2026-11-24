@@ -229,7 +229,9 @@ async function holidayWorkByDay(conn, start, end) {
     .whereNot({ status: 'voided' })
     .whereNot({ status: 'active' })
     .whereNotNull('clock_out')
-    .where('clock_in', '>=', new Date(dayBounds(start).start))
+    // By interval overlap with the range the week's shifts can cover: a meal that starts on the Sunday before the week
+    // (11:30 PM) and runs into a Monday midnight shift overlaps it, so it is read too.
+    .where('clock_out', '>', new Date(dayBounds(start).start))
     .where('clock_in', '<', new Date(dayBounds(reach).end))
     .select('id', 'technician_id', 'clock_in', 'clock_out', 'duration_minutes',
       conn.raw(`to_char(${STAFF_WORK_DATE_SQL}, 'YYYY-MM-DD') AS work_date`));

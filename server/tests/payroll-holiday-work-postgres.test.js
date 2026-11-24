@@ -422,6 +422,22 @@ postgres('payroll holiday work premium', () => {
     expect((await holidayWorkByDay(trx, W0, addDays(W0, 6))).get(without).days).toEqual([{ workDate: W1, minutes: 90 }]);
   });
 
+  it('reads a meal that starts on the Sunday before the week and runs into a Monday midnight shift', async () => {
+    // Monday's two shifts: midnight to 4 AM and 10 PM to Tuesday 2 AM; Monday's 30-minute deduction is the meal from
+    // Sunday 11:30 PM to Monday 12:30 AM, which overlaps the first shift. Tuesday is the holiday: its 120 minutes keep all of it.
+    const { holidayWorkByDay } = require('../services/payroll-holiday-work');
+    const id = await tech('Sample Alpha');
+    const TUE = addDays(W1, 1);
+    await shift(id, `${W1}T00:00`, `${W1}T04:00`, { meal: 30 });
+    await shift(id, `${W1}T22:00`, `${TUE}T02:00`, { meal: 30 });
+    await offDay(id, TUE, 10);
+    await trx('time_entries').insert({
+      technician_id: id, entry_type: 'break', status: 'completed', duration_minutes: '60.00',
+      clock_in: parseETDateTime(`${addDays(W1, -1)}T23:30`), clock_out: parseETDateTime(`${W1}T00:30`),
+    });
+    expect((await holidayWorkByDay(trx, W1, addDays(W1, 6))).get(id).days).toEqual([{ workDate: TUE, minutes: 120 }]);
+  });
+
   it('the fallback is per work date: a holiday summary with no shift entries still pays beside a measured shift', async () => {
     const id = await tech('Sample Alpha');
     await approved(id, W1, 12);
