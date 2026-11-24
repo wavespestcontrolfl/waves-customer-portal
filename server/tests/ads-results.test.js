@@ -331,6 +331,18 @@ describe('adResults', () => {
     expect(rowOf(out, CAMP, '2026-10-01')).toMatchObject({ leads: 1, booked: 1, paid_customers: 1, paid90: 10 });
   });
 
+  test('a click-id booking with no lead is a repeat even when the customer was created that day', async () => {
+    const conn = fakeConn({
+      ad_service_attribution: [
+        lead({ id: 'r1', customer_id: 'c1', lead_id: null, self_booked_appointment_id: 'appt-r1', gclid: 'g-1', funnel_stage: 'booked' }),
+      ],
+      customers: [customer('c1', { created_at: new Date('2026-10-01T13:00:00Z') })],
+      invoices: [invoice('c1', '2026-10-04T15:00:00Z', 10)],
+    });
+    const out = await adResults({ ...WINDOW, conn });
+    expect(rowOf(out, CAMP, '2026-10-01')).toMatchObject({ leads: 0, booked: 1, paid_customers: 0 });
+  });
+
   test('two leads on one day: the earlier-created lead gets the paid credit', async () => {
     const conn = fakeConn({
       ad_service_attribution: [

@@ -104,7 +104,8 @@ async function loadLeads(conn, since, until) {
       .whereNotNull('asa.campaign_id')
       .orWhere((paid) => wherePaidLead(paid, 'asa')))
     .select(
-      'asa.id', 'asa.campaign_id', 'asa.lead_date', 'asa.lead_id', 'asa.self_booked_appointment_id', 'asa.lead_source', 'asa.funnel_stage',
+      'asa.id', 'asa.campaign_id', 'asa.lead_date', 'asa.lead_id', 'asa.self_booked_appointment_id',
+      'asa.gclid', 'asa.wbraid', 'asa.gbraid', 'asa.fbclid', 'asa.fbc', 'asa.lead_source', 'asa.funnel_stage',
       'asa.source_call_id', 'asa.created_at', 'ac.campaign_name', 'ac.platform', 'l.first_name as lead_first_name',
       'l.last_name as lead_last_name', 'l.phone as lead_phone', 'l.email as lead_email',
       // The linked lead's current customer wins (it can be filled first, or reassigned); a row with no lead, or a
@@ -282,12 +283,15 @@ async function adResults({ since, until, conn = db } = {}) {
   };
 
   const counted = leads.filter((l) => !isTest(l));
-  // First-touch row per customer. A self-booking row with no lead is a REPEAT booking when its customer existed
-  // before the booking day (recordPaidRepeatBookingAttribution); it counts in Booked only and never wins first-lead
-  // credit. A booking that created its customer (a new customer, e.g. recordOrganicSelfBookingAttribution) counts
-  // as a lead.
+  // First-touch row per customer. A self-booking row with no lead is a REPEAT booking, counted in Booked only and
+  // never given first-lead credit, when (a) it carries a click id: a paid click that creates a customer mints a lead,
+  // so a click-id booking row with no lead is recordPaidRepeatBookingAttribution's; or (b) its customer existed
+  // before the booking day. A booking that created its customer with no click id (recordOrganicSelfBookingAttribution)
+  // counts as a lead.
+  const CLICK_IDS = ['gclid', 'wbraid', 'gbraid', 'fbclid', 'fbc'];
   const isRepeatBooking = (lead) => {
     if (!lead.self_booked_appointment_id || lead.lead_id) return false;
+    if (CLICK_IDS.some((k) => lead[k])) return true;
     const created = customers.get(String(lead.customer_id))?.created_at;
     return !!created && etDateString(new Date(created)) < dateOnlyString(lead.lead_date);
   };
