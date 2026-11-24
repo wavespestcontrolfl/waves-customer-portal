@@ -15,7 +15,7 @@ jest.setTimeout(180000);
 
 (SKIP ? describe.skip : describe)('sealEvalItems on PostgreSQL', () => {
   const schema = `sealed_reseal_${randomUUID().replaceAll('-', '')}`;
-  const VERSION = 'house_voice_v12_real_answers33_n';
+  const VERSION = 'house_voice_v12_real_answers37_n';
   const GATE = 'GATE_SMS_REAL_ANSWERS';
   const DAY = 86400 * 1000;
   let database;
@@ -68,15 +68,16 @@ jest.setTimeout(180000);
     { now: new Date('2026-10-20T15:00:00Z') },
   );
   // the block an earlier identity drafted: the same day-of facts, the earlier static company section
-  // (the six-place hold render of 2026-11-23, prompts 29 to 32, is the newest earlier render)
+  // (the seven-place hold render of 2026-11-23, prompts 33 to 36, is the newest earlier render)
   const priorRenderBlock = () => {
     const now = currentBlock();
     const section = companyFacts.renderCompanyFactsSection();
     expect(now).toContain(section);
     return now.replace(section, companyFacts.knownCompanyFactsRenders()[1]);
   };
-  // the 26-line render live 2026-10-22 to 2026-11-23 (Charlotte County served except Punta Gorda)
-  const charlotteCountyRenderBlock = () => currentBlock().replace(companyFacts.renderCompanyFactsSection(), companyFacts.knownCompanyFactsRenders()[2]);
+  // the six-place hold render of 2026-11-23 (prompts 29 to 32): the render before it (Charlotte County served except Punta Gorda,
+  // prompts 25 to 28) is today's render again, so it needs no rebase
+  const sixPlaceHoldRenderBlock = () => currentBlock().replace(companyFacts.renderCompanyFactsSection(), companyFacts.knownCompanyFactsRenders()[2]);
   // frozen before the PORTAL SELF-CANCEL line existed (2026-10-09): not recoverable
   // a block drafted under the 19-line render (live 2026-10-09 to 2026-10-22), whose payment and inside-spray lines were reworded since
   const nineteenLineBlock = () => currentBlock().replace(companyFacts.renderCompanyFactsSection(), companyFacts.knownCompanyFactsRenders()[3]);
@@ -142,7 +143,7 @@ jest.setTimeout(180000);
     await addDraft({ facts: nineteenLineBlock(), reply: 'We spray the inside on the first visit.' });
     // the 26-line renders (live to 2026-11-23) already had the payment and inside lines: only the service area line was reworded
     await addDraft({ facts: priorRenderBlock(), inbound: 'Do you cover 33948?', reply: 'Yes, we do.' });
-    await addDraft({ facts: charlotteCountyRenderBlock(), inbound: 'Do you cover 33948?', reply: 'Yes, we do.' });
+    await addDraft({ facts: sixPlaceHoldRenderBlock(), inbound: 'Do you cover 33948?', reply: 'Yes, we do.' });
     // an exchange drafted under the hold line that turned Englewood or Port Charlotte away: stale now that both are served again
     await addDraft({ facts: priorRenderBlock(), inbound: 'Can you service Englewood?', reply: 'Not yet, we are not taking new customers there.' });
     await addDraft({ facts: priorRenderBlock(), inbound: 'Is Port Charlotte covered?', reply: 'Not yet.' });
@@ -159,8 +160,8 @@ jest.setTimeout(180000);
     expect(await items()).toHaveLength(0);
   });
 
-  test('a block drafted under the Charlotte County render rebases onto today\'s when no service-area word is in the exchange', async () => {
-    const rebased = await addDraft({ facts: charlotteCountyRenderBlock(), ageDays: 9 });
+  test('a block drafted under the six-place hold render rebases onto today\'s when no service-area word is in the exchange', async () => {
+    const rebased = await addDraft({ facts: sixPlaceHoldRenderBlock(), ageDays: 9 });
     const out = await sealedEval.sealEvalItems({ target: 100, dbi: database });
     expect(out).toMatchObject({ sealed: 1, rebased: 1 });
     const [row] = await items();

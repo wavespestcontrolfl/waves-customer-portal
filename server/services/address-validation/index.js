@@ -28,7 +28,7 @@
 
 const logger = require('../logger');
 const { isInServiceAreaCounty } = require('../call-triage-flags');
-const { isExcludedLocality, isExcludedZip, isPortCharlotteLocality, hasUsableZip } = require('../excluded-localities');
+const { isExcludedLocality, isExcludedZip, sharedZipNeedsCity } = require('../excluded-localities');
 const { normalizeState, normalizeStreetLine, parseRawAddress } = require('../../utils/address-normalizer');
 
 // Google address calls are fail-open by design — a HUNG call must fail the
@@ -144,15 +144,14 @@ function deriveStatus(result, county) {
     postal_code: pickComponent(components, 'postal_code') || null,
   };
 
-  // A served county does not make Punta Gorda served (owner ruling 2026-10-22), nor Rotonda, Placida, Boca Grande,
-  // Babcock Ranch, Gulf Cove, El Jobean, Charlotte Harbor or Deep Creek until a second technician is hired (owner ruling 2026-11-23):
-  // the validated city, or a ZIP that belongs only to such a place, is out.
+  // A served county does not make Punta Gorda served (owner ruling 2026-10-22), nor any place held until a second
+  // technician is hired (services/excluded-localities.js; none is held now): the validated city, or a ZIP that
+  // belongs only to such a place, is out.
   const heldPlace = isExcludedLocality(normalized.city) || isExcludedZip(normalized.postal_code);
-  // A Port Charlotte city with no ZIP could sit on a held shared ZIP (33980 / 33981 / 33983): the area is unknown (null),
-  // which lands on confirm_needed below, never validated_accept (owner ruling 2026-11-23).
-  const portCharlotteNoZip = isPortCharlotteLocality(normalized.city) && !hasUsableZip(normalized.postal_code);
   let inServiceArea = county ? (isInServiceAreaCounty(county) && !heldPlace) : null;
-  if (inServiceArea === true && portCharlotteNoZip) inServiceArea = null;
+  // 33980 / 33982 / 33983 are shared between Punta Gorda (not served) and a served town: with no validated city the ZIP
+  // cannot tell them apart, so the area is unknown (null), which lands on confirm_needed below, never validated_accept.
+  if (inServiceArea === true && sharedZipNeedsCity(normalized.city, normalized.postal_code)) inServiceArea = null;
 
   const base = {
     inServiceArea,

@@ -93,11 +93,16 @@ const INVOICE = { id: 'inv-1', status: 'paid', total: '225.00', scheduled_servic
 const ownInvoice = (query) => [{ ...INVOICE, scheduled_service_id: whereValue(query, 'i.scheduled_service_id') }];
 
 // A world where job-1 passes every send rule and prices. Each test changes one thing.
-// `jobs` is the first page of due jobs (a later page is empty).
-function world({ tables = {}, jobs = [JOB], ...deps } = {}) {
+// `jobs` is the first page of due jobs (a later page is empty). `reminderJobs` is the first page of the live
+// reminder pass (the read that asks for an accepted offer email): none unless the test says so.
+const isReminderPageRead = (query) => query.calls.some(([method, sql]) => method === 'whereRaw' && String(sql).startsWith('EXISTS (SELECT 1 FROM email_messages m'));
+function world({ tables = {}, jobs = [JOB], reminderJobs = [], ...deps } = {}) {
   return {
     db: fakeDb({
-      'scheduled_services as s': (query) => (isLaterPageRead(query) ? [] : jobs),
+      'scheduled_services as s': (query) => {
+        if (isLaterPageRead(query)) return [];
+        return isReminderPageRead(query) ? reminderJobs : jobs;
+      },
       customers: [CUSTOMER],
       'invoices as i': ownInvoice,
       'email_template_versions as v': (query) => [{ id: `ver:${whereValue(query, 't.template_key')}` }],
@@ -137,6 +142,10 @@ function world({ tables = {}, jobs = [JOB], ...deps } = {}) {
     unsubscribeUrl: (token) => `https://unsub.test/${token}`,
     raisePriceSettingsAlert: jest.fn(async () => ({ id: 'alert-1' })),
     closePriceSettingsAlert: jest.fn(async () => 0),
+    raiseOfficeItem: jest.fn(async () => ({ id: 'n-office' })),
+    planStartAcceptRefusal: jest.fn(async () => null),
+    assertPlanStartAcceptEligible: jest.fn(async () => undefined),
+    planStartBlocker: jest.fn(async () => null),
     ...deps,
   };
 }
@@ -920,7 +929,8 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       expect(await run(deps)).toEqual({
         mode: 'live', jobs: 0, ...ZERO, reasons: {}, words_not_approved: true,
       });
-      expect(deps.db.queries).toHaveLength(0);
+      // No job is read. The one read is the office items' close, which runs before the words gate.
+      expect(deps.db.queries.map((query) => query.table)).toEqual(['notifications']);
       expect(deps.mintPlanStartEstimate).not.toHaveBeenCalled();
       expect(deps.sendWithLedger).not.toHaveBeenCalled();
       expect(deps.sendTemplate).not.toHaveBeenCalled();
@@ -929,8 +939,10 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
     test('the library is asked about the offer template, the way a real send asks it; a published template runs the job', async () => {
       const deps = liveWorld();
       const summary = await run(deps);
-      expect(deps.resolveTemplateForSend).toHaveBeenCalledTimes(1);
-      expect(deps.resolveTemplateForSend).toHaveBeenCalledWith({ templateKey: OFFER_TEMPLATE, database: deps.db });
+      // The offer template first; the reminder pass asks about its own template after the offers.
+      expect(deps.resolveTemplateForSend).toHaveBeenCalledTimes(2);
+      expect(deps.resolveTemplateForSend.mock.calls[0][0]).toEqual({ templateKey: OFFER_TEMPLATE, database: deps.db });
+      expect(deps.resolveTemplateForSend.mock.calls[1][0]).toEqual({ templateKey: REMINDER_TEMPLATE, database: deps.db });
       expect(summary).not.toHaveProperty('words_not_approved');
       expect(summary.sent).toBe(1);
     });
@@ -945,7 +957,9 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
   describe('a job that passes every send rule and prices', () => {
     test('the run counts one offer sent, sends no office sample, and keeps the summary keys', async () => {
       const deps = liveWorld();
-      expect(await run(deps)).toEqual({ mode: 'live', jobs: 1, ...ZERO, sent: 1, reasons: {} });
+      expect(await run(deps)).toEqual({
+        mode: 'live', jobs: 1, ...ZERO, sent: 1, reasons: {}, reminder: { jobs: 0, sent: 0, held: 0, done: 0, failed: 0, reasons: {} },
+      });
       expect(deps.sendTemplate).not.toHaveBeenCalled();
       expect(deps.db.queriesOf('email_template_versions as v')).toHaveLength(0);
     });
@@ -1869,5 +1883,562 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
     const summary = await run(deps);
     expect(liveCounts(summary)).toEqual({ ...ZERO, failed: 1, sent: 1 });
     expect(deps.sendWithLedger.mock.calls.map(([call]) => call.idempotencyKey)).toEqual(['onetime-plan-offer:offer:job-2']);
+  });
+
+  describe('a home the app cannot price: one office item (live only)', () => {
+    test('the office item names the job, the customer, the offer day and the reason; no estimate and no email', async () => {
+      const deps = liveWorld({ buildStartOffer: jest.fn(async () => ({ option: null, reason: 'not_priced' })) });
+      expect(liveCounts(await run(deps))).toEqual({ ...ZERO, office: 1 });
+      expect(deps.raiseOfficeItem).toHaveBeenCalledTimes(1);
+      expect(deps.raiseOfficeItem).toHaveBeenCalledWith({
+        job: expect.objectContaining({ id: 'job-1' }), customer: expect.objectContaining({ id: 'cust-1' }), offerDay: '2030-03-05', reason: 'not_priced',
+      });
+      expect(deps.mintPlanStartEstimate).not.toHaveBeenCalled();
+      expect(deps.sendWithLedger).not.toHaveBeenCalled();
+    });
+
+    test.each([['commercial'], ['not_live'], ['has_plan']])('the pricer answers premises for a %s account: held, no item', async (blocker) => {
+      const deps = liveWorld({
+        buildStartOffer: jest.fn(async () => ({ option: null, reason: 'premises' })),
+        planStartBlocker: jest.fn(async () => blocker),
+      });
+      const summary = await run(deps);
+      expect(liveCounts(summary)).toEqual({ ...ZERO, held: 1 });
+      expect(summary.reasons).toEqual({ [blocker]: 1 });
+      expect(deps.raiseOfficeItem).not.toHaveBeenCalled();
+    });
+
+    test('premises for an address the app cannot prove: the office item, with its own words', async () => {
+      const deps = liveWorld({ buildStartOffer: jest.fn(async () => ({ option: null, reason: 'premises' })) });
+      expect(liveCounts(await run(deps))).toEqual({ ...ZERO, office: 1 });
+      expect(deps.planStartBlocker).toHaveBeenCalledWith(deps.db, 'cust-1');
+      expect(deps.raiseOfficeItem.mock.calls[0][0].reason).toBe('premises');
+    });
+
+    test('a mint that cannot price the estimate on the server raises it too', async () => {
+      const deps = liveWorld({
+        mintPlanStartEstimate: jest.fn(async () => { throw Object.assign(new Error('hand'), { restartUnavailable: true, code: 'pricing_unavailable' }); }),
+      });
+      expect(liveCounts(await run(deps))).toEqual({ ...ZERO, office: 1 });
+      expect(deps.raiseOfficeItem.mock.calls[0][0].reason).toBe('mint_pricing_unavailable');
+    });
+
+    test('a held job and a sent offer raise none', async () => {
+      const held = liveWorld({ tables: { notification_prefs: [{ marketing_offers: false }] } });
+      await run(held);
+      const sent = liveWorld();
+      await run(sent);
+      expect(held.raiseOfficeItem).not.toHaveBeenCalled();
+      expect(sent.raiseOfficeItem).not.toHaveBeenCalled();
+    });
+
+    test('a failed write fails the job, so the next morning raises it again', async () => {
+      const deps = liveWorld({
+        buildStartOffer: jest.fn(async () => ({ option: null, reason: 'not_priced' })),
+        raiseOfficeItem: jest.fn(async () => { throw Object.assign(new Error('db'), { code: 'ECONNRESET' }); }),
+      });
+      expect(liveCounts(await run(deps))).toEqual({ ...ZERO, failed: 1 });
+    });
+
+    test('shadow raises none: the office gets no item, as before', async () => {
+      process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+      const deps = liveWorld({ buildStartOffer: jest.fn(async () => ({ option: null, reason: 'not_priced' })) });
+      expect(counts(await run(deps))).toEqual({ ...NONE, office: 1 });
+      expect(deps.raiseOfficeItem).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('the office item itself', () => {
+    let notifyAdmin;
+    beforeEach(() => {
+      notifyAdmin = jest.spyOn(require('../services/notification-service'), 'notifyAdmin').mockResolvedValue({ id: 'n-1' });
+    });
+    afterEach(() => notifyAdmin.mockRestore());
+
+    test('one row per job for a person: who, what to do, the customer link, the offer\'s last day', async () => {
+      await _test.defaultDeps().raiseOfficeItem({ job: JOB, customer: CUSTOMER, offerDay: '2030-03-05', reason: 'plan_not_below_job' });
+      expect(notifyAdmin).toHaveBeenCalledTimes(1);
+      const [category, headline, why, options] = notifyAdmin.mock.calls[0];
+      expect([category, headline]).toEqual(['estimate', 'Estimates — quote Jordan Example the plan by hand']);
+      expect(why).toBe('Their one-time pest job was done Tue, Mar 5, and the app cannot price the plan offer.');
+      expect(options).toMatchObject({
+        link: '/admin/customers?customerId=cust-1',
+        dedupeKey: _test.officeItemKey('job-1'),
+        bell: true,
+        metadata: {
+          source: 'onetime-plan-offer', kind: 'plan_offer_office', customerId: 'cust-1', jobId: 'job-1', lastDay: '2030-04-04',
+          reason: 'plan_not_below_job', area: 'Estimates', severity: 'needs-you', who: 'person', doneWhen: 'plan_offer_quoted',
+          subject: { type: 'customer', id: 'cust-1' },
+        },
+      });
+      // Raised once per job: a done row keeps its key, so a later morning never raises a second one. A later morning
+      // with other terms (a moved offer day) rewrites the one row quietly.
+      expect(options).not.toHaveProperty('dedupeOpenOnly');
+      expect(options.refreshOnDedupe).toBe(true);
+      expect(options.ringOnRefresh()).toBe(false);
+      expect(options.detail).toContain('not below what the one-time job cost');
+      expect(options.detail).toContain('good through Thu, Apr 4');
+      expect(options.detail).toContain('No email went to the customer.');
+    });
+
+    test.each([
+      ['premises', 'Check the account first'],
+      ['not_priced', 'no saved home size'],
+      ['some_new_reason', 'no saved home size'],
+    ])('reason %s: its own words in the detail', async (reason, words) => {
+      await _test.defaultDeps().raiseOfficeItem({ job: JOB, customer: CUSTOMER, offerDay: '2030-03-05', reason });
+      expect(notifyAdmin.mock.calls[0][3].detail).toContain(words);
+    });
+
+    test('a write that returns no row throws', async () => {
+      notifyAdmin.mockResolvedValue(null);
+      await expect(_test.defaultDeps().raiseOfficeItem({ job: JOB, customer: CUSTOMER, offerDay: '2030-03-05', reason: 'not_priced' }))
+        .rejects.toMatchObject({ code: 'OFFICE_ITEM_FAILED' });
+    });
+  });
+
+  describe('the office item closes by itself', () => {
+    let closeKeys;
+    beforeEach(() => {
+      closeKeys = jest.spyOn(require('../services/admin-alert-episodes'), 'closeAdminAlertKeys').mockResolvedValue(1);
+    });
+    afterEach(() => closeKeys.mockRestore());
+    const item = (jobId, meta) => ({
+      id: `n-${jobId}`, created_at: '2030-03-08T14:00:00Z', metadata: { dedupeKey: _test.officeItemKey(jobId), customerId: 'cust-1', ...meta },
+    });
+
+    test('when the offer has ended, or the customer has an estimate made after the item; otherwise it stays', async () => {
+      const deps = liveWorld({
+        jobs: [],
+        tables: {
+          notifications: [item('ended', { lastDay: '2030-03-11' }), item('quoted', { lastDay: '2030-04-04', customerId: 'cust-q' }), item('open', { lastDay: '2030-04-04' })],
+          estimates: (query) => (called(query, 'where', { customer_id: 'cust-q' }) ? [{ id: 'est-new' }] : []),
+        },
+      });
+      await run(deps);
+      expect(closeKeys.mock.calls.map(([, keys, reason, opts]) => [keys, reason, opts.resolution])).toEqual([
+        [[_test.officeItemKey('ended')], 'plan_offer_quoted', 'The plan offer ended'],
+        [[_test.officeItemKey('quoted')], 'plan_offer_quoted', 'The customer has a new estimate'],
+      ]);
+      const [read] = deps.db.queriesOf('estimates');
+      expect(called(read, 'where', 'created_at', '>', '2030-03-08T14:00:00Z')).toBe(true);
+    });
+
+    test.each([
+      ['turned off offers', { notification_prefs: [{ marketing_offers: false }] }, 'The customer turned off offers'],
+      ['is no longer a customer', { customers: [] }, 'The customer is no longer active'],
+      ['was made inactive', { customers: [{ ...CUSTOMER, active: false }] }, 'The customer is no longer active'],
+    ])('the customer %s: the instruction is withdrawn', async (_name, change, resolution) => {
+      const deps = liveWorld({
+        jobs: [],
+        tables: { notifications: [item('open', { lastDay: '2030-04-04' })], estimates: [], ...change },
+      });
+      await run(deps);
+      expect(closeKeys.mock.calls.map(([, keys, , opts]) => [keys, opts.resolution])).toEqual([[[_test.officeItemKey('open')], resolution]]);
+    });
+
+    test.each([
+      ['staff do-not-contact', 'STAFF_DNC'],
+      ['email turned off for the customer', 'EMAIL_SWITCH_OFF'],
+      ['a suppression of the address', 'EMAIL_SUPPRESSED_GLOBAL'],
+    ])('the email division says %s: the instruction is withdrawn', async (_name, reason) => {
+      // The item's job still qualifies (the run also holds it today, by the same verdict).
+      const deps = liveWorld({
+        tables: { notifications: [item('open', { lastDay: '2030-04-04', jobId: 'job-1' })], estimates: [] },
+        ...emailVerdict(reason),
+      });
+      await run(deps);
+      expect(closeKeys.mock.calls.map(([, keys, , opts]) => [keys, opts.resolution])).toEqual([[[_test.officeItemKey('open')], 'The customer may not be contacted']]);
+      expect(deps.eligibleForEmail).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', emailKey: OFFER_TEMPLATE, completedVisitId: 'job-1' }));
+    });
+
+    test.each([['the same-day cap', 'CAP_SAME_DAY'], ['a failed read', 'LOOKUP_FAILED']])('%s is "not today": the item stays', async (_name, reason) => {
+      const deps = liveWorld({
+        jobs: [],
+        tables: { notifications: [item('open', { lastDay: '2030-04-04' })], estimates: [] },
+        ...emailVerdict(reason),
+      });
+      await run(deps);
+      expect(closeKeys).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['in shadow', 'shadow', {}],
+      ['while the offer template is not published', 'live', { resolveTemplateForSend: jest.fn(async () => { throw Object.assign(new Error('draft'), { code: 'EMAIL_TEMPLATE_DISABLED' }); }) }],
+    ])('the close runs %s too', async (_name, mode, change) => {
+      process.env.GATE_ONETIME_PLAN_OFFER = mode;
+      const deps = liveWorld({ jobs: [], tables: { notifications: [item('ended', { lastDay: '2030-03-11' })] }, ...change });
+      await run(deps);
+      expect(closeKeys.mock.calls.map(([, keys]) => keys)).toEqual([[_test.officeItemKey('ended')]]);
+    });
+
+    test('a live run closes after its jobs: a home priced today is not judged on yesterday', async () => {
+      const order = [];
+      closeKeys.mockImplementation(async () => { order.push('close'); return 1; });
+      const deps = liveWorld({
+        tables: { notifications: [item('ended', { lastDay: '2030-03-11' })] },
+        sendWithLedger: jest.fn(async () => { order.push('send'); return { ok: true, sent: true, row: { id: 'led-1' }, duplicate: false }; }),
+      });
+      await run(deps);
+      expect(order).toEqual(['send', 'close']);
+    });
+
+    test('a job whose offer day moved refreshes its item before the close reads the last day', async () => {
+      const order = [];
+      closeKeys.mockImplementation(async () => { order.push('close'); return 1; });
+      const deps = liveWorld({
+        buildStartOffer: jest.fn(async () => ({ option: null, reason: 'not_priced' })),
+        raiseOfficeItem: jest.fn(async () => { order.push('raise'); return { id: 'n-1' }; }),
+        tables: { notifications: [item('ended', { lastDay: '2030-03-11' })] },
+      });
+      await run(deps);
+      expect(order).toEqual(['raise', 'close']);
+    });
+
+    test.each([
+      ['a follow-up moved the offer day: the stored day has passed, the current one has not', '2030-03-05', 0],
+      ['the current day has passed too', '2030-02-01', 1],
+    ])('the last day is the job\'s current one: %s', async (_name, serviceDay, closes) => {
+      const deps = liveWorld({
+        jobs: [{ ...JOB, service_day: serviceDay }],
+        buildStartOffer: jest.fn(async () => ({ option: null, reason: 'has_plan' })),
+        tables: { notifications: [item('job-1', { lastDay: '2030-03-01', jobId: 'job-1' })], estimates: [] },
+      });
+      process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+      await run(deps);
+      expect(closeKeys).toHaveBeenCalledTimes(closes);
+      const read = deps.db.queriesOf('scheduled_services as s').find((query) => called(query, 'where', 's.id', 'job-1'));
+      expect(read).toBeDefined();
+    });
+
+    test('an item that stays open with a moved offer day is rewritten with the current terms, quietly', async () => {
+      process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+      const deps = liveWorld({
+        buildStartOffer: jest.fn(async () => ({ option: null, reason: 'has_plan' })),
+        tables: { notifications: [item('job-1', { lastDay: '2030-03-20', jobId: 'job-1', reason: 'not_priced' })], estimates: [] },
+      });
+      await run(deps);
+      expect(closeKeys).not.toHaveBeenCalled();
+      expect(deps.raiseOfficeItem).toHaveBeenCalledWith({
+        job: { id: 'job-1' }, customer: expect.objectContaining({ id: 'cust-1', first_name: 'Jordan' }), offerDay: '2030-03-05', reason: 'not_priced',
+      });
+    });
+
+    test('the customer has a plan now: the item is withdrawn, never rewritten with a later deadline', async () => {
+      process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+      const deps = liveWorld({
+        buildStartOffer: jest.fn(async () => ({ option: null, reason: 'has_plan' })),
+        planStartBlocker: jest.fn(async () => 'has_plan'),
+        tables: { notifications: [item('job-1', { lastDay: '2030-03-20', jobId: 'job-1', reason: 'not_priced' })], estimates: [] },
+      });
+      await run(deps);
+      expect(closeKeys.mock.calls.map(([, keys, , opts]) => [keys, opts.resolution])).toEqual([[[_test.officeItemKey('job-1')], 'The customer has a plan now']]);
+      expect(deps.raiseOfficeItem).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['commercial', 'The account reads as commercial'],
+      ['not_live', 'The customer is no longer active'],
+    ])('the pricer\'s account proof answers %s: the item is withdrawn', async (blocker, resolution) => {
+      const deps = liveWorld({
+        planStartBlocker: jest.fn(async () => blocker),
+        tables: { notifications: [item('job-1', { lastDay: '2030-04-04', jobId: 'job-1' })], estimates: [] },
+      });
+      process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+      await run(deps);
+      expect(closeKeys.mock.calls.map(([, , , opts]) => opts.resolution)).toEqual([resolution]);
+      expect(deps.planStartBlocker).toHaveBeenCalledWith(deps.db, 'cust-1');
+    });
+
+    test('the default proof is the pricer\'s own planStartBlocker', async () => {
+      const eligibility = require('../services/plan-start-eligibility');
+      const spy = jest.spyOn(eligibility, 'planStartBlocker').mockResolvedValue('has_plan');
+      try {
+        expect(await _test.defaultDeps().planStartBlocker('db', 'cust-1')).toBe('has_plan');
+        expect(spy).toHaveBeenCalledWith('db', 'cust-1');
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    test('an opt-out closes the item even when the plan proof fails', async () => {
+      process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+      const deps = liveWorld({
+        planStartBlocker: jest.fn(async () => { throw new Error('bad json'); }),
+        ...emailVerdict('STAFF_DNC'),
+        tables: { notifications: [item('job-1', { lastDay: '2030-04-04', jobId: 'job-1' })], estimates: [] },
+      });
+      await run(deps);
+      expect(closeKeys.mock.calls.map(([, , , opts]) => opts.resolution)).toEqual(['The customer may not be contacted']);
+      expect(deps.planStartBlocker).not.toHaveBeenCalled();
+    });
+
+    test('one item that fails never stops the others', async () => {
+      process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+      const deps = liveWorld({
+        planStartBlocker: jest.fn(async (_db, customerId) => {
+          if (customerId === 'cust-bad') throw new Error('db');
+          return 'has_plan';
+        }),
+        tables: {
+          notifications: [item('bad', { lastDay: '2030-04-04', customerId: 'cust-bad' }), item('good', { lastDay: '2030-04-04' })],
+          estimates: [],
+        },
+      });
+      await run(deps);
+      expect(closeKeys.mock.calls.map(([, keys]) => keys)).toEqual([[_test.officeItemKey('good')]]);
+    });
+
+    test('an item whose terms are current is not rewritten', async () => {
+      process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+      const deps = liveWorld({
+        buildStartOffer: jest.fn(async () => ({ option: null, reason: 'has_plan' })),
+        tables: { notifications: [item('job-1', { lastDay: '2030-04-04', jobId: 'job-1' })], estimates: [] },
+      });
+      await run(deps);
+      expect(deps.raiseOfficeItem).not.toHaveBeenCalled();
+    });
+
+    test('the job no longer qualifies for this customer: the item is withdrawn', async () => {
+      process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+      const deps = liveWorld({
+        tables: {
+          'scheduled_services as s': (query) => (called(query, 'where', 's.id', 'job-1') ? [] : [JOB]),
+          notifications: [item('job-1', { lastDay: '2030-04-04', jobId: 'job-1' })],
+          estimates: [],
+        },
+      });
+      await run(deps);
+      expect(closeKeys.mock.calls.map(([, keys, , opts]) => [keys, opts.resolution]))
+        .toEqual([[[_test.officeItemKey('job-1')], 'The one-time job no longer qualifies for the offer']]);
+      const read = deps.db.queriesOf('scheduled_services as s').find((query) => called(query, 'where', 's.id', 'job-1'));
+      expect(called(read, 'where', 's.customer_id', 'cust-1')).toBe(true);
+    });
+
+    test('off reads nothing', async () => {
+      process.env.GATE_ONETIME_PLAN_OFFER = 'off';
+      const deps = liveWorld({ tables: { notifications: [item('ended', { lastDay: '2030-03-11' })] } });
+      await run(deps);
+      expect(deps.db.queries).toHaveLength(0);
+      expect(closeKeys).not.toHaveBeenCalled();
+    });
+
+    test('a failed read never fails the run', async () => {
+      const deps = liveWorld({ tables: { notifications: () => { throw new Error('db'); } } });
+      expect((await run(deps)).sent).toBe(1);
+    });
+  });
+
+  describe('the day-21 reminder', () => {
+    // Offer day February 19: day 21 is March 12, the run's ET day. Good through March 21 (it ends when March 22
+    // starts in ET, after the clocks went forward), next visit from May 7.
+    const RJOB = { id: 'job-r', customer_id: 'cust-1', service_day: '2030-02-19', job_day: '2030-02-19' };
+    const OFFER_ROW = { estimate_id: 'est-r', payload_snapshot: { price_per_application: '$104.50', estimate_url: 'https://old.test' } };
+    const ESTIMATE = {
+      id: 'est-r', customer_id: 'cust-1', source: 'plan_start', status: 'viewed', token: 'tok-r', archived_at: null, expires_at: null,
+      estimate_data: stamp('job-r', { endsAt: '2030-03-22T03:59:59.999Z', firstVisitFrom: '2030-05-07' }),
+    };
+    const messages = ({ reminded = [], offered = [OFFER_ROW] } = {}) => (query) => (
+      called(query, 'where', { idempotency_key: _test.reminderKey('job-r') }) ? reminded
+        : called(query, 'where', { idempotency_key: 'onetime-plan-offer:offer:job-r' }) ? offered : []);
+    const reminderEstimates = (row = ESTIMATE) => (query) => {
+      if (called(query, 'where', { id: 'est-r' })) return [row];
+      return called(query, 'whereIn', 'status', ['declined', 'accepted']) ? [] : [row];
+    };
+    const remindWorld = ({ estimate = ESTIMATE, mail = {}, tables = {}, ...deps } = {}) => liveWorld({
+      jobs: [],
+      reminderJobs: [RJOB],
+      tables: { email_messages: messages(mail), estimates: reminderEstimates(estimate), ...tables },
+      ...deps,
+    });
+    const reminderOf = (summary) => summary.reminder;
+    const R0 = { jobs: 1, sent: 0, held: 0, done: 0, failed: 0 };
+
+    test('sends one reminder through the ledger: its own key, the offer\'s estimate, the price the offer stated', async () => {
+      const deps = remindWorld();
+      const summary = await run(deps);
+      expect(reminderOf(summary)).toEqual({ ...R0, sent: 1, reasons: {} });
+      expect(deps.sendWithLedger).toHaveBeenCalledTimes(1);
+      const call = sendOf(deps);
+      expect(call).toEqual({
+        customerId: 'cust-1',
+        stream: 'nurture',
+        marketingClass: 'marketing',
+        emailKey: REMINDER_TEMPLATE,
+        idempotencyKey: 'onetime-plan-offer:reminder:job-r',
+        now: NOW,
+        expectedRecipientEmail: 'jordan@example.test',
+        guard: expect.any(Function),
+        boundaryGuard: expect.any(Function),
+        template: {
+          templateKey: REMINDER_TEMPLATE, payload: expect.any(Object), categories: ['onetime_plan_offer_reminder'], linkEstimateId: 'est-r',
+        },
+      });
+      expect(Object.keys(call.template.payload)).toEqual(TEMPLATE_VARIABLES[REMINDER_TEMPLATE]);
+      // The link is the estimate's own, never the snapshot's.
+      expect(call.template.payload).toEqual({
+        first_name: 'Jordan', price_per_application: '$104.50', offer_end_date: 'March 21', estimate_url: portalUrl('/estimate/tok-r'),
+      });
+      expect(deps.mintPlanStartEstimate).not.toHaveBeenCalled();
+      // The email division is asked about the reminder's own key.
+      expect(deps.eligibleForEmail).toHaveBeenCalledWith(expect.objectContaining({ emailKey: REMINDER_TEMPLATE, completedVisitId: 'job-r' }));
+    });
+
+    test('reads the jobs 21 to 27 days after the offer day whose offer email the provider accepted', async () => {
+      const deps = remindWorld();
+      await run(deps);
+      const page = deps.db.queriesOf('scheduled_services as s').find(isReminderPageRead);
+      expect(called(page, 'whereRaw', `${OFFER_DAY} BETWEEN ?::date AND ?::date`, ['2030-02-13', '2030-02-19'])).toBe(true);
+      const exists = page.calls.find(([method, sql]) => method === 'whereRaw' && String(sql).startsWith('EXISTS'))[1];
+      expect(exists).toContain("m.idempotency_key = 'onetime-plan-offer:offer:' || s.id::text");
+      expect(exists).toContain('m.sent_at IS NOT NULL AND m.estimate_id IS NOT NULL');
+    });
+
+    test('a reminder that went out, or may have, is done', async () => {
+      const deps = remindWorld({ mail: { reminded: [{ id: 'm-r' }] } });
+      expect(reminderOf(await run(deps))).toEqual({ ...R0, done: 1, reasons: {} });
+      expect(deps.sendWithLedger).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['the customer accepted the offer', { ...ESTIMATE, status: 'accepted' }, 'offer_ended'],
+      ['the customer declined it', { ...ESTIMATE, status: 'declined' }, 'offer_ended'],
+      ['the estimate was archived', { ...ESTIMATE, archived_at: '2030-03-01T00:00:00Z' }, 'offer_estimate_gone'],
+      ['the estimate has ended', { ...ESTIMATE, expires_at: '2030-03-10T00:00:00Z' }, 'offer_estimate_gone'],
+      // Another job's quote the customer can open holds by the open-estimate rule, before the estimate is read.
+      ['the estimate is another job\'s quote', { ...ESTIMATE, estimate_data: stamp('job-x') }, 'open_estimate'],
+      ['the offer day moved', { ...ESTIMATE, estimate_data: stamp('job-r', { endsAt: '2030-03-23T03:59:59.999Z', firstVisitFrom: '2030-05-08' }) }, 'offer_day_moved'],
+    ])('%s: no reminder', async (_name, estimate, reason) => {
+      const deps = remindWorld({ estimate });
+      expect(reminderOf(await run(deps))).toEqual({ ...R0, held: 1, reasons: { [reason]: 1 } });
+      expect(deps.sendWithLedger).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['offers turned off', { tables: { notification_prefs: [{ marketing_offers: false }] } }, 'offers_off'],
+      ['another visit booked', { tables: { 'scheduled_services as o': [{ id: 'job-2' }] } }, 'another_visit'],
+      ['Auto Pay paused', { isAutopayPaused: jest.fn(() => true) }, 'autopay_paused'],
+      ['off the card rail', { payAfterFirstVisitCardRail: jest.fn(() => false) }, 'not_pay_after_visit'],
+      ['the email division says no', emailVerdict('CAP_SAME_DAY'), 'cap_same_day'],
+    ])('%s: held', async (_name, change, reason) => {
+      const deps = remindWorld(change);
+      expect(reminderOf(await run(deps))).toEqual({ ...R0, held: 1, reasons: { [reason]: 1 } });
+      expect(deps.sendWithLedger).not.toHaveBeenCalled();
+    });
+
+    test('the plan-start accept would refuse the quote (a plan since the offer, or another home): held', async () => {
+      const deps = remindWorld({ planStartAcceptRefusal: jest.fn(async () => 'account_changed') });
+      expect(reminderOf(await run(deps))).toEqual({ ...R0, held: 1, reasons: { account_changed: 1 } });
+      expect(deps.planStartAcceptRefusal).toHaveBeenCalledWith(deps.db, expect.objectContaining({ id: 'est-r', customer_id: 'cust-1' }));
+      expect(deps.sendWithLedger).not.toHaveBeenCalled();
+    });
+
+    test('the accept check itself: a refusal is account_changed; a failed read fails the job', async () => {
+      const restart = require('../services/cancellation-resolution/restart');
+      const db = { transaction: (fn) => fn('trx') };
+      const spy = jest.spyOn(restart, 'assertPlanStartAcceptEligible');
+      try {
+        spy.mockRejectedValueOnce(Object.assign(new Error('changed'), { code: 'PLAN_START_STATE_CHANGED' }));
+        expect(await _test.defaultDeps().planStartAcceptRefusal(db, { id: 'est-r' })).toBe('account_changed');
+        spy.mockRejectedValueOnce(Object.assign(new Error('retry'), { code: 'PLAN_START_RECHECK_RETRY' }));
+        await expect(_test.defaultDeps().planStartAcceptRefusal(db, { id: 'est-r' })).rejects.toMatchObject({ code: 'PLAN_START_RECHECK_RETRY' });
+        spy.mockResolvedValueOnce(undefined);
+        expect(await _test.defaultDeps().planStartAcceptRefusal(db, { id: 'est-r' })).toBeNull();
+        expect(spy).toHaveBeenLastCalledWith('trx', { id: 'est-r' });
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    test('the 12-month rule is not asked: the reminder is the same offer', async () => {
+      const deps = remindWorld();
+      await run(deps);
+      expect(deps.settleStaleReservations).not.toHaveBeenCalled();
+      expect(deps.db.queriesOf('marketing_email_ledger')).toHaveLength(0);
+    });
+
+    test('an offer record with no price fails the reminder, and nothing is sent', async () => {
+      const deps = remindWorld({ mail: { offered: [{ ...OFFER_ROW, payload_snapshot: {} }] } });
+      expect(reminderOf(await run(deps))).toEqual({ ...R0, failed: 1, reasons: {} });
+      expect(deps.sendWithLedger).not.toHaveBeenCalled();
+    });
+
+    test('the reminder template not published: no reminder is read, and the offers still run', async () => {
+      const deps = remindWorld({
+        jobs: [JOB],
+        // The offer's mint answers with its own quote; the customer has no other estimate.
+        tables: { estimates: (query) => (called(query, 'where', { id: 'est-1' }) ? [MINTED_ROW] : []) },
+        resolveTemplateForSend: jest.fn(async ({ templateKey }) => {
+          if (templateKey === REMINDER_TEMPLATE) throw Object.assign(new Error('draft'), { code: 'EMAIL_TEMPLATE_DISABLED' });
+          return {};
+        }),
+      });
+      const summary = await run(deps);
+      expect(summary.sent).toBe(1);
+      expect(summary.reminder).toEqual({ jobs: 0, sent: 0, held: 0, done: 0, failed: 0, reasons: {}, words_not_approved: true });
+      expect(deps.db.queriesOf('scheduled_services as s').some(isReminderPageRead)).toBe(false);
+    });
+
+    describe('the accept check again at the provider handoff', () => {
+      const handoff = async (deps, estimate = ESTIMATE) => {
+        await run(deps);
+        const trx = fakeDb({ estimates: [estimate], customers: [CUSTOMER] });
+        return { verdict: await sendOf(deps).boundaryGuard(trx), trx };
+      };
+
+      test('on the handoff transaction, after the estimate is read: an account that still passes lets the email go', async () => {
+        const deps = remindWorld();
+        const { verdict, trx } = await handoff(deps);
+        expect(verdict).toBeNull();
+        expect(deps.assertPlanStartAcceptEligible).toHaveBeenCalledWith(trx, expect.objectContaining({ id: 'est-r' }));
+      });
+
+      test('a plan added after the morning check: held, retryable', async () => {
+        const deps = remindWorld({
+          assertPlanStartAcceptEligible: jest.fn(async () => { throw Object.assign(new Error('changed'), { code: 'PLAN_START_STATE_CHANGED' }); }),
+        });
+        expect((await handoff(deps)).verdict).toEqual({ reason: 'ACCOUNT_CHANGED', retryable: true });
+      });
+
+      test('a failed read: retryable, so the reservation settles failed and the next morning asks again', async () => {
+        const deps = remindWorld({
+          assertPlanStartAcceptEligible: jest.fn(async () => { throw Object.assign(new Error('busy'), { code: 'PLAN_START_RECHECK_RETRY' }); }),
+        });
+        expect((await handoff(deps)).verdict).toEqual({ reason: 'ACCOUNT_RECHECK_FAILED', retryable: true });
+      });
+
+      test('an estimate gone at the handoff answers first; the account is not read', async () => {
+        const deps = remindWorld();
+        expect((await handoff(deps, { ...ESTIMATE, archived_at: '2030-03-12T00:00:00Z' })).verdict).toEqual({ reason: 'OFFER_ESTIMATE_GONE', retryable: true });
+        expect(deps.assertPlanStartAcceptEligible).not.toHaveBeenCalled();
+      });
+
+      test('the ledger reports the refusal: the reminder is held', async () => {
+        const deps = remindWorld({
+          sendWithLedger: jest.fn(async () => ({ ok: false, sent: false, reason: 'ACCOUNT_CHANGED', row: { id: 'led-r' }, duplicate: false })),
+        });
+        expect(reminderOf(await run(deps))).toEqual({ ...R0, held: 1, reasons: { account_changed: 1 } });
+      });
+
+      test('the offer email has no account guard at its handoff', async () => {
+        const deps = liveWorld();
+        await run(deps);
+        await sendOf(deps).boundaryGuard(fakeDb({ estimates: [MINTED_ROW], customers: [CUSTOMER] }));
+        expect(deps.assertPlanStartAcceptEligible).not.toHaveBeenCalled();
+      });
+    });
+
+    test('the provider handoff refuses an estimate the customer can no longer open: held', async () => {
+      const deps = remindWorld({
+        sendWithLedger: jest.fn(async () => ({ ok: false, sent: false, reason: 'OFFER_ESTIMATE_GONE', row: { id: 'led-r' }, duplicate: false })),
+      });
+      expect(reminderOf(await run(deps))).toEqual({ ...R0, held: 1, reasons: { offer_estimate_gone: 1 } });
+    });
+
+    test('shadow has no reminder pass', async () => {
+      process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+      const summary = await run(remindWorld());
+      expect(summary).not.toHaveProperty('reminder');
+    });
   });
 });

@@ -23,7 +23,7 @@
 
 const { isInServiceAreaCounty } = require('./call-triage-flags');
 const { zipToCity } = require('../utils/zip-to-city');
-const { isExcludedLocality, isExcludedZip, normalizeLocality, isPortCharlotteLocality, hasUsableZip } = require('./excluded-localities');
+const { isExcludedLocality, isExcludedZip, normalizeLocality, isPuntaGordaSharedZip, namesSharedZipTown } = require('./excluded-localities');
 const { parseRawAddress } = require('../utils/address-normalizer');
 
 const SERVICE_AREA_BOUNDS = Object.freeze({
@@ -72,9 +72,9 @@ function zipFromAddressText(text) {
 
 /**
  * True when the city, the ZIP or the address text names a place Waves does not serve inside a served county or
- * box: DeSoto, Punta Gorda, or one of the places held until a second technician is hired (owner ruling
- * 2026-11-23: Rotonda, Placida, Boca Grande, Babcock Ranch, Gulf Cove, El Jobean, Charlotte Harbor, Deep Creek). `text` is one address or a list of them, each read on its own, by comma-separated part ("123 Main St, Port Charlotte, FL 33948") and by its
- * ZIP. The public property lookup's verdict reads it beside the coordinate box, for fresh and cached results.
+ * box: DeSoto, Punta Gorda, or a place held until a second technician is hired (services/excluded-localities.js;
+ * none is held now). `text` is one address or a list of them, each read on its own, by comma-separated part
+ * ("123 Main St, Port Charlotte, FL 33948") and by its ZIP. The public property lookup's verdict reads it beside the coordinate box, for fresh and cached results.
  */
 function namesExcludedPlace({ city = null, zip = null, text = null, places = null } = {}) {
   if (isExcludedLocality(city) || isExcludedZip(zip)) return true;
@@ -85,26 +85,30 @@ function namesExcludedPlace({ city = null, zip = null, text = null, places = nul
   return (Array.isArray(text) ? text : [text]).some((one) => {
     const raw = String(one || '');
     if (!raw) return false;
-    return isExcludedZip(zipFromAddressText(raw)) || isExcludedLocality(parseRawAddress(raw)?.city)
+    const parsedCity = parseRawAddress(raw)?.city;
+    return isExcludedZip(zipFromAddressText(raw)) || isExcludedLocality(parsedCity)
       || raw.split(',').some((part) => isExcludedLocality(normalizeLocality(part)));
   });
 }
 
 /**
- * True when the evidence names Port Charlotte but carries no usable ZIP anywhere. Port Charlotte is served, but the
- * held shared ZIPs 33980 / 33981 / 33983 carry the name too (owner ruling 2026-11-23), so such a property is
- * UNVERIFIED: the public property lookup answers `inServiceArea: null` (unknown), never true. Same evidence shape as
- * namesExcludedPlace; a ZIP is a five-digit or ZIP+4 value, in the zip, a place, or an address text.
+ * True when the evidence carries a ZIP Punta Gorda shares with a served town (33980 / 33982 / 33983) and NO city anywhere
+ * (the city, a place, or an address text): the ZIP alone cannot tell the served town from Punta Gorda, so the area is
+ * UNKNOWN. The public property lookup answers `inServiceArea: null` for it, fresh and cached alike. Same evidence shape
+ * as namesExcludedPlace.
  */
-function namesPortCharlotteWithoutZip({ city = null, zip = null, text = null, places = null } = {}) {
+function namesSharedZipWithoutCity({ city = null, zip = null, text = null, places = null } = {}) {
   const texts = (Array.isArray(text) ? text : [text]).map((t) => String(t || '')).filter(Boolean);
-  const named = isPortCharlotteLocality(city) || (places || []).some((p) => isPortCharlotteLocality(p?.city))
-    || texts.some((raw) => isPortCharlotteLocality(parseRawAddress(raw)?.city)
-      || raw.split(',').some((part) => isPortCharlotteLocality(part)));
-  if (!named) return false;
-  const hasZip = hasUsableZip(zip) || (places || []).some((p) => hasUsableZip(p?.zip))
-    || texts.some((raw) => !!zipFromAddressText(raw));
-  return !hasZip;
+  const zips = [zip, ...(places || []).map((p) => p?.zip), ...texts.map(zipFromAddressText)];
+  const shared = zips.filter(isPuntaGordaSharedZip);
+  if (!shared.length) return false;
+  // City evidence is a structured city (the geocode's, a place's) or a comma-separated PART of an address text after its first
+  // (street) part, never an address parse's guess: a parse can take "NE" or "FL 33982" for a city. A part counts only when it
+  // names a town (namesTown): no digit, not a direction, unit or state word.
+  const textParts = texts.flatMap((t) => t.split(',').slice(1));
+  // It must also be a town known on that shared ZIP (namesSharedZipTown), so "USA" or a town on the wrong ZIP never counts.
+  const cities = [city, ...(places || []).map((p) => p?.city), ...textParts];
+  return !shared.some((z) => cities.some((c) => namesSharedZipTown(c, z)));
 }
 
 function isInDesotoExclusion(lat, lng) {
@@ -179,7 +183,7 @@ function servedSouthHillsborough(county, address) {
 module.exports = {
   isServedSouthHillsboroughTown, servedSouthHillsborough,
   SERVICE_AREA_BOUNDS, DESOTO_EXCLUSION,
-  namesExcludedPlace, namesPortCharlotteWithoutZip,
+  namesExcludedPlace, namesSharedZipWithoutCity,
   isInServiceAreaBox, isInServiceAreaCoarseBox, isInDesotoExclusion,
   zipFromAddressText,
 };

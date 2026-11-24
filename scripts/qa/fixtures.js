@@ -2,7 +2,7 @@
 const crypto = require('node:crypto');
 const bcrypt = require('bcryptjs');
 const { v5 } = require('uuid');
-const { etDateString, addETDays, etParts } = require('../../server/utils/datetime-et');
+const { etDateString, addETDays, etParts, deriveWindowEnd } = require('../../server/utils/datetime-et');
 const { createScheduledService } = require('../../server/services/booking/create-scheduled-service');
 
 // MUTATES only the dedicated dev database supplied by the managed launcher.
@@ -42,7 +42,11 @@ function fixtureIdentity(runId = crypto.randomUUID()) {
     cardEventId: `evt_qa_card_${suffix}`,
     // Prepay-at-booking journey: its own recurring estimate, so the one-time estimate above stays untouched.
     prepayEstimateId: id('prepay-estimate'), prepayToken: crypto.randomBytes(32).toString('hex'),
-    prepayConsentId: id('prepay-consent'), prepayAppointmentId: id('prepay-appointment'), prepayEventId: `evt_qa_prepay_${suffix}` };
+    prepayConsentId: id('prepay-consent'), prepayAppointmentId: id('prepay-appointment'), prepayEventId: `evt_qa_prepay_${suffix}`,
+    // Reminder journey: books its own visit for the fixture customer.
+    reminderAppointmentId: id('reminder-appointment'),
+    // Refund journey: its signed Stripe events (a2 is a second event about the first refund).
+    refundEventIds: ['a', 'a2', 'b'].map((part) => `evt_qa_refund_${part}_${suffix}`) };
 }
 
 async function seed(db, f) {
@@ -151,6 +155,18 @@ async function seed(db, f) {
   return f;
 }
 
+// One more visit for the fixture customer, written through the same booking insert the seed uses. A journey that texts about
+// a visit needs its own, because the earlier journeys complete and move the seeded one.
+async function insertVisit(db, f, { id, scheduledDate, windowStart, status = 'confirmed', estimatedPrice = 45, ...extra }) {
+  await db.transaction(async (trx) => {
+    await createScheduledService({ trx, cols: await trx('scheduled_services').columnInfo(), source: { sourceAction: 'qa_fixture' },
+      idempotencyKey: `qa:${id}`,
+      insertData: { id, customer_id: f.customerId, technician_id: f.technicianId, service_id: f.serviceId, service_type: f.serviceName,
+        scheduled_date: scheduledDate, window_start: windowStart, window_end: deriveWindowEnd(windowStart, 90), status,
+        estimated_duration_minutes: 90, estimated_price: estimatedPrice, is_recurring: false, create_invoice_on_complete: true, ...extra } });
+  });
+}
+
 async function cleanup(db, f) {
   const customerIds = [f.customerId, f.siblingCustomerId, f.foreignCustomerId].filter(Boolean);
   for (const [id, email] of [[f.siblingCustomerId, f.siblingEmail], [f.foreignCustomerId, f.foreignEmail]]) {
@@ -163,7 +179,7 @@ async function cleanup(db, f) {
   // Only these run-owned root IDs are eligible. FK cascades remove dependent
   // records; an unhandled restrictive FK fails visibly, never broadens cleanup.
   await db.transaction(async (trx) => {
-    await trx('stripe_webhook_events').whereIn('id', [f.eventId, f.cardEventId, f.prepayEventId].filter(Boolean)).del();
+    await trx('stripe_webhook_events').whereIn('id', [f.eventId, f.cardEventId, f.prepayEventId, ...(f.refundEventIds || [])].filter(Boolean)).del();
     // Receipt jobs and payment notices follow the run's own invoices and card payments, whichever journey made them.
     await trx('receipt_delivery_jobs').whereIn('invoice_id', trx('invoices').select('id').whereIn('customer_id', customerIds)).del();
     await trx('stripe_payment_notification_log').whereIn('payment_intent_id',
@@ -206,4 +222,4 @@ async function cleanup(db, f) {
     await trx('technicians').whereIn('id', [f.adminId, f.technicianId, f.otherTechnicianId].filter(Boolean)).del();
   });
 }
-module.exports = { fixtureDates, fixtureIdentity, seed, cleanup };
+module.exports = { fixtureDates, fixtureIdentity, seed, insertVisit, cleanup };

@@ -95,6 +95,8 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   // Accepting locks the estimate's price, starts the plan's billing and may
   // email the customer; no portal path un-accepts an estimate.
   'accept_estimate',
+  // An estimate sent to the customer (text and/or email) cannot be unsent.
+  'send_estimate',
   // The Dispatch board has no Reopen for a resolved Action Queue card.
   'resolve_dispatch_alert',
   // An email cannot be unsent.
@@ -142,6 +144,8 @@ const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
   // The invoice text (one text with the pay link), or under GATE_IB_INVOICE_EMAIL the invoice email (PDF + pay link) with at most
   // one CC, which the card names.
   'send_invoice',
+  // The confirmed run texts and/or emails the customer the estimate (the card names the channel and the exact message).
+  'send_estimate',
   // The confirmed run texts and/or emails the customer their next payment reminder, or the payment plan confirmation.
   'send_invoice_reminder_now',
   'create_payment_plan',
@@ -153,6 +157,8 @@ const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
 // send_invoice: its card lines come from its own preview
 // (invoice-action-tools.js cardLines), never the generic dump; it bills the customer.
 CURATED_PREVIEW_TOOL_NAMES.add('send_invoice');
+// send_estimate: its card lines come from its own preview (estimate-send-tools.js cardLines): the recipient, channel, exact message and totals.
+CURATED_PREVIEW_TOOL_NAMES.add('send_estimate');
 // record_payment: its card lines come from its own preview (record-payment-tools.js cardLines). Money, not a charge.
 CURATED_PREVIEW_TOOL_NAMES.add('record_payment');
 // propose_admin_edit (owner ruling 2026-10-12): its card lines come from its own
@@ -250,6 +256,7 @@ const ACTION_LABELS = {
   trigger_review_request: 'Send a review request',
   resend_receipt: 'Re-send a paid receipt',
   send_invoice: 'Send an invoice to the customer',
+  send_estimate: 'Send a draft estimate to the customer',
   record_payment: 'Record a payment received outside the portal (never charges a card)',
   propose_admin_edit: 'Edit an admin record',
   convert_lead: 'Convert a lead to a customer (sends nothing)',
@@ -1006,6 +1013,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // unblock_sender: the address or domain, when and why it was blocked, its block count and every effect of the unblock.
   if (toolName === 'unblock_sender' && preview?.preview === true) {
     for (const line of require('./unblock-sender-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // send_estimate: the estimate, the masked recipients, the channel, the exact message and the totals.
+  if (toolName === 'send_estimate' && preview?.preview === true) {
+    for (const line of require('./estimate-send-tools').cardLines(toolName, preview)) {
+      if (line.more) moreEffects.push({ kind: line.kind, label: line.text });
+      else push(line.kind, line.text);
+    }
   }
   // send_invoice: invoice, money and who is contacted.
   if (toolName === 'send_invoice' && preview?.preview === true) {
