@@ -31,6 +31,7 @@
  */
 
 const crypto = require('crypto');
+const xml2js = require('xml2js');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { isAllowedSitemapChild } = require('./sitemap-manager')._internals;
@@ -128,46 +129,52 @@ async function fetchHubOk(fetchFn, url) {
 
 // ── sitemap ──────────────────────────────────────────────────────────
 
-const decodeXml = (s) => s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'");
-
-function xmlBlocks(xml, tag) {
-  const out = [];
-  const re = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, 'g');
-  let m;
-  while ((m = re.exec(xml))) {
-    const loc = /<loc>\s*([^<]*?)\s*<\/loc>/.exec(m[1]);
-    if (!loc) continue;
-    const lastmod = /<lastmod>\s*([^<]*?)\s*<\/lastmod>/.exec(m[1]);
-    out.push({ loc: decodeXml(loc[1]), lastmod: lastmod ? lastmod[1] : null });
+// Parsed with xml2js, so a truncated or malformed 200 body throws instead of
+// reading as a shorter sitemap. A throw anywhere aborts the run before state moves.
+async function parseSitemapXml(xml, where) {
+  let doc;
+  try {
+    doc = await xml2js.parseStringPromise(xml);
+  } catch (err) {
+    throw new Error(`${where} is not valid XML: ${String(err.message).split('\n')[0]}`);
   }
-  return out;
+  return doc || {};
+}
+
+const xmlText = (v) => String(v && typeof v === 'object' ? v._ || '' : v || '').trim();
+
+// [{ loc, lastmod }] of one <urlset> / <sitemapindex> child list.
+function xmlEntries(list) {
+  return (list || []).map((e) => ({ loc: xmlText(e.loc?.[0]), lastmod: xmlText(e.lastmod?.[0]) || null })).filter((e) => e.loc);
 }
 
 // The <url> entries of one urlset document. Anything else (an HTML 200 page, an
 // empty set) throws: a partial read would look like "left the sitemap".
-function readUrlset(xml, where) {
-  if (!/<urlset\b/.test(xml)) throw new Error(`${where} is not sitemap XML`);
-  const entries = xmlBlocks(xml, 'url');
+async function readUrlset(xml, where) {
+  const doc = await parseSitemapXml(xml, where);
+  if (!doc.urlset) throw new Error(`${where} is not a sitemap urlset`);
+  const entries = xmlEntries(doc.urlset.url);
   if (!entries.length) throw new Error(`${where} has no URLs`);
   return entries;
 }
 
 // Every URL of the live hub sitemap with its lastmod, or a throw.
 async function readSitemap(fetchFn) {
-  const index = await fetchHubOk(fetchFn, SITEMAP_URL);
+  const indexXml = await fetchHubOk(fetchFn, SITEMAP_URL);
+  const indexDoc = await parseSitemapXml(indexXml, SITEMAP_URL);
   const entries = [];
-  if (/<sitemapindex\b/.test(index)) {
-    const children = xmlBlocks(index, 'sitemap').map((s) => s.loc);
+  if (indexDoc.sitemapindex) {
+    const children = xmlEntries(indexDoc.sitemapindex.sitemap).map((c) => c.loc);
     if (!children.length) throw new Error('sitemap index lists no child sitemaps');
     if (children.length > MAX_CHILD_SITEMAPS) throw new Error(`sitemap index lists ${children.length} children, over the ${MAX_CHILD_SITEMAPS} cap`);
     const docs = await Promise.all(children.map((c) => fetchHubOk(fetchFn, c)));
-    docs.forEach((xml, i) => entries.push(...readUrlset(xml, children[i])));
+    for (let i = 0; i < docs.length; i += 1) entries.push(...await readUrlset(docs[i], children[i]));
   } else {
-    entries.push(...readUrlset(index, SITEMAP_URL));
+    entries.push(...await readUrlset(indexXml, SITEMAP_URL));
   }
   const urls = new Map(entries.map((e) => [e.loc, e.lastmod]));
   const fingerprint = crypto.createHash('sha256')
-    .update([...urls].sort(([a], [b]) => (a < b ? -1 : 1)).map(([loc, mod]) => `${loc}|${mod || ''}`).join('\n'))
+    .update([...urls].sort(([x], [y]) => (x < y ? -1 : 1)).map(([loc, mod]) => `${loc}|${mod || ''}`).join('\n'))
     .digest('hex');
   return { urls, fingerprint };
 }
@@ -199,15 +206,47 @@ const htmlHasJobPosting = (html) => extractJobPostings(html).length > 0;
 
 const jobFingerprint = (postings) => crypto.createHash('sha256').update(JSON.stringify(postings)).digest('hex');
 
-// robots noindex: X-Robots-Tag header or <meta name="robots|googlebot">.
-function isNoindex(headers, html) {
-  const header = headers?.get?.('x-robots-tag') || '';
-  if (/noindex|none/i.test(header)) return true;
-  const re = /<meta\b[^>]*name=["'](?:robots|googlebot)["'][^>]*>/gi;
-  let m;
-  while ((m = re.exec(html))) if (/content=["'][^"']*\b(?:noindex|none)\b/i.test(m[0])) return true;
+// Robots directives that take a value after a colon; their "name:" is a directive,
+// not a crawler name (so `max-image-preview:none` is NOT noindex).
+const VALUE_DIRECTIVES = new Set(['max-snippet', 'max-image-preview', 'max-video-preview', 'unavailable_after']);
+const isNoindexDirective = (d) => d === 'noindex' || d === 'none';
+// Crawler scopes that bind Google's web index: no prefix, or googlebot.
+const GOOGLE_SCOPES = new Set(['all', 'googlebot']);
+
+// X-Robots-Tag: "[bot:] directive, directive, [bot:] directive". A bot prefix
+// scopes itself and the unprefixed directives after it, until the next prefix.
+function headerNoindexForGoogle(value) {
+  let scope = 'all';
+  for (const raw of String(value || '').split(',')) {
+    let token = raw.trim().toLowerCase();
+    const m = /^([a-z0-9_.-]+)\s*:\s*(.*)$/.exec(token);
+    if (m && !VALUE_DIRECTIVES.has(m[1])) { scope = m[1]; token = m[2].trim(); }
+    if (GOOGLE_SCOPES.has(scope) && isNoindexDirective(token)) return true;
+  }
   return false;
 }
+
+// <meta name="robots|googlebot" content="...">. Other crawler names (bingbot...) do not bind Google.
+function metaNoindexForGoogle(html) {
+  const tag = /<meta\b[^>]*>/gi;
+  let m;
+  while ((m = tag.exec(html))) {
+    const attrs = {};
+    const attr = /([a-z-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
+    let a;
+    while ((a = attr.exec(m[0]))) attrs[a[1].toLowerCase()] = a[2] ?? a[3];
+    const name = String(attrs.name || '').toLowerCase();
+    if (name !== 'robots' && name !== 'googlebot') continue;
+    if (String(attrs.content || '').split(',').some((d) => isNoindexDirective(d.trim().toLowerCase()))) return true;
+  }
+  return false;
+}
+
+const isNoindex = (headers, html) => headerNoindexForGoogle(headers?.get?.('x-robots-tag')) || metaNoindexForGoogle(html);
+
+// A status that says nothing about whether the page is a job: rate limit, timeout,
+// server error, auth/WAF block. Never a reason to delete, drop or cache a page.
+const isConclusive = (status) => status === 200 || status === 404 || status === 410 || (status >= 300 && status < 400);
 
 // A URL may reach urlNotifications.publish only when it is a hub page under
 // /careers/. Policy: the Indexing API is for JobPosting / BroadcastEvent pages
@@ -328,7 +367,7 @@ async function pingJobPages({ state, sitemap, fetchFn, indexing, result, warn, n
     if (!page) {
       try { page = await fetchHub(fetchFn, loc); } catch (err) { warn(`job URL not checked, retry next run: ${err.message}`); return false; }
     }
-    if (page.status >= 500) { warn(`job URL answered HTTP ${page.status}, retry next run: ${loc}`); return false; }
+    if (!isConclusive(page.status)) { warn(`job URL answered HTTP ${page.status}, retry next run: ${loc}`); return false; }
     const evidence = page.status === 404 || page.status === 410 || (page.status === 200 && isNoindex(page.headers, page.text));
     if (evidence && !(await send(loc, 'URL_DELETED'))) return false;
     if (evidence) result.deleted += 1;
@@ -382,4 +421,4 @@ async function pingJobPages({ state, sitemap, fetchFn, indexing, result, warn, n
   return dirty;
 }
 
-module.exports = { runGoogleIndexPing, htmlHasJobPosting, assertJobUrl, isHubUrl, STATE_KEY, MAX_PUBLISHES_PER_RUN, HUB_ORIGIN, UNDATED_RECHECK_MS };
+module.exports = { runGoogleIndexPing, htmlHasJobPosting, assertJobUrl, isHubUrl, isNoindex, STATE_KEY, MAX_PUBLISHES_PER_RUN, HUB_ORIGIN, UNDATED_RECHECK_MS };

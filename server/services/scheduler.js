@@ -9195,7 +9195,9 @@ function initScheduledJobs() {
     const tickStartedAt = Date.now();
     try {
       const lockRes = await runExclusive('google-index-ping', async () => {
-        await require('./seo/google-index-ping').runGoogleIndexPing();
+        const out = await require('./seo/google-index-ping').runGoogleIndexPing();
+        // Throw so job_health records the failed run; the catch below still logs and never crashes.
+        if (out?.errors > 0) throw new Error(`google index ping finished with ${out.errors} error(s)`);
       });
       if (lockRes?.skipped && lockRes.reason !== 'lease_held') {
         await recordMissedTick('google-index-ping', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});

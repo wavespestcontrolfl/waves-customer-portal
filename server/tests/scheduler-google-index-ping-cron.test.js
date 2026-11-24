@@ -65,6 +65,18 @@ test('a tick another instance already holds never runs a second ping', async () 
   expect(runGoogleIndexPing).not.toHaveBeenCalled();
 });
 
+test('a run that reports errors fails the lease body so job_health records it, and the tick still never throws', async () => {
+  runGoogleIndexPing.mockResolvedValueOnce({ errors: 2 });
+  await expect(pingTick()).resolves.toBeUndefined();
+  expect(logger.error).toHaveBeenCalledWith('[google-index-ping] tick failed: google index ping finished with 2 error(s)');
+});
+
+test('a clean run does not fail the lease body', async () => {
+  runGoogleIndexPing.mockResolvedValueOnce({ errors: 0, updated: 1 });
+  await pingTick();
+  expect(logger.error).not.toHaveBeenCalled();
+});
+
 test('a failed run is logged, never thrown out of the tick', async () => {
   runGoogleIndexPing.mockRejectedValueOnce(new Error('boom'));
   await expect(pingTick()).resolves.toBeUndefined();

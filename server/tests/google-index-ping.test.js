@@ -24,7 +24,7 @@ jest.mock('../services/seo/search-console-v2', () => ({
 
 const SearchConsole = require('../services/seo/search-console-v2');
 const logger = require('../services/logger');
-const { runGoogleIndexPing, htmlHasJobPosting, assertJobUrl, MAX_PUBLISHES_PER_RUN } = require('../services/seo/google-index-ping');
+const { runGoogleIndexPing, htmlHasJobPosting, assertJobUrl, isNoindex, MAX_PUBLISHES_PER_RUN } = require('../services/seo/google-index-ping');
 
 const ORIGIN = 'https://www.wavespestcontrol.com';
 const JOB_LD = '<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"WebPage"},{"@type":"JobPosting","title":"Tech"}]}</script>';
@@ -269,6 +269,68 @@ test('at most MAX_PUBLISHES_PER_RUN notifications per run; the rest catch up nex
 test('unconfigured service account skips quietly', async () => {
   delete process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
   await expect(run({ fetchFn: jest.fn() })).resolves.toEqual({ skipped: 'not_configured' });
+});
+
+test('an inconclusive answer (429, 408, 5xx, 403 or a network error) keeps a known job untouched and never caches a page as a non-job', async () => {
+  const first = await run({ fetchFn: makeFetch({ entries: [[JOB, '2026-11-01'], [`${ORIGIN}/`, null]], pages: { [JOB]: JOB_LD } }) });
+  expect(first.updated).toBe(1);
+  const before = mockState;
+  indexing.urlNotifications.publish.mockClear();
+  for (const status of [429, 408, 500, 503, 403]) {
+    // Still in the sitemap with a moved lastmod: the page check is inconclusive.
+    await run({ fetchFn: makeFetch({ entries: [[JOB, '2026-11-09'], [`${ORIGIN}/`, null]], pages: { [JOB]: { status } } }) });
+    // Left the sitemap: the deletion check is inconclusive.
+    await run({ fetchFn: makeFetch({ entries: [[`${ORIGIN}/`, null]], pages: { [JOB]: { status } } }) });
+  }
+  const network = (entries) => {
+    const inner = makeFetch({ entries, pages: { [JOB]: JOB_LD } });
+    return jest.fn(async (url, init) => { if (url === JOB) throw new Error('socket hang up'); return inner(url, init); });
+  };
+  await run({ fetchFn: network([[JOB, '2026-11-09'], [`${ORIGIN}/`, null]]) });
+  await run({ fetchFn: network([[`${ORIGIN}/`, null]]) });
+  expect(indexing.urlNotifications.publish).not.toHaveBeenCalled();
+  const after = JSON.parse(mockState);
+  expect(after.jobs[JOB]).toEqual(JSON.parse(before).jobs[JOB]);
+  expect(after.nonJobs[JOB]).toBeUndefined();
+  // An unknown page that answers 429 is not remembered as a non-job either.
+  mockState = undefined;
+  await run({ fetchFn: makeFetch({ entries: [[JOB, '2026-11-01']], pages: { [JOB]: { status: 429 } } }) });
+  expect(mockState === undefined || JSON.parse(mockState).nonJobs[JOB] === undefined).toBe(true);
+});
+
+test('noindex counts only when it binds Google: no prefix or googlebot, never another crawler or a value directive', () => {
+  const header = (value) => ({ get: (k) => (k === 'x-robots-tag' ? value : null) });
+  const meta = (name, content) => `<meta name="${name}" content="${content}">`;
+  const yes = [
+    [header('noindex')], [header('none')], [header('googlebot: noindex')], [header('GoogleBot: NONE')],
+    [header('nofollow, noindex')], [header('bingbot: nofollow, googlebot: noindex')],
+    [header('max-snippet: 5, noindex')],
+    [null, meta('robots', 'noindex, follow')], [null, meta('googlebot', 'none')], [null, "<meta content='noindex' name='robots'>"],
+  ];
+  const no = [
+    [header('bingbot: noindex')], [header('bingbot: noindex, nofollow')], [header('googlebot: nofollow, bingbot: noindex')],
+    [header('max-image-preview: none')], [header('max-snippet: 0, nofollow')], [header('nofollow')], [header(null)],
+    [null, meta('bingbot', 'noindex')], [null, meta('robots', 'max-image-preview:none')], [null, meta('robots', 'index, follow')],
+    [null, meta('description', 'noindex')], [null, '<p>noindex</p>'],
+  ];
+  for (const [h, html] of yes) expect([h?.get('x-robots-tag'), html, isNoindex(h, html || '')]).toEqual([h?.get('x-robots-tag'), html, true]);
+  for (const [h, html] of no) expect([h?.get('x-robots-tag'), html, isNoindex(h, html || '')]).toEqual([h?.get('x-robots-tag'), html, false]);
+});
+
+test('a truncated 200 sitemap body (index or child) aborts the run before state changes', async () => {
+  await run({ fetchFn: makeFetch({ entries: [[JOB, '2026-11-01']], pages: { [JOB]: JOB_LD } }) });
+  const before = mockState;
+  SearchConsole.submitSitemap.mockClear();
+  indexing.urlNotifications.publish.mockClear();
+  const full = sitemapXml([[`${ORIGIN}/`, null], [JOB, '2026-11-01']]);
+  const truncatedChild = full.slice(0, full.indexOf('</url>', full.indexOf('careers')) - 3);
+  const out = await run({ fetchFn: makeFetch({ sitemaps: { [`${ORIGIN}/sitemap-0.xml`]: truncatedChild } }) });
+  expect(out.errors).toBe(1);
+  const truncatedIndex = jest.fn(async () => response(200, `<sitemapindex><sitemap><loc>${ORIGIN}/sitemap-0.xml</loc>`));
+  expect((await run({ fetchFn: truncatedIndex })).errors).toBe(1);
+  expect(mockState).toBe(before);
+  expect(SearchConsole.submitSitemap).not.toHaveBeenCalled();
+  expect(indexing.urlNotifications.publish).not.toHaveBeenCalled();
 });
 
 test('guards: assertJobUrl refuses anything outside hub /careers/; JSON-LD detection', () => {
