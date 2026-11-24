@@ -1,24 +1,29 @@
 /**
  * Holiday work minutes (the extra half of "hours worked on the day a holiday is taken", payroll-calc.js).
  *
- * A holiday is a payroll_time_off row of kind holiday on an Eastern calendar date D. The paid minutes worked ON it are
- * the minutes of the day's shifts that fall inside D, from the clock times of the time entries, less the unpaid meal
- * that falls inside D. The daily summary cannot say this: it gives a whole shift to the Eastern date of its clock-in,
- * so a 10 PM to 2 AM shift that starts the night before a holiday would earn nothing, and the same shift starting on
- * the holiday would earn four hours of premium. Both earn the two hours that fall on the holiday.
+ * THE RULE (owner-approved design, 2026-11-23): the premium belongs to the SHIFT that earned it, and is paid in the pay week
+ * that pays that shift's hours. The shift's work date is its clock-in Eastern date, as the weekly summary has it. For a pay
+ * week, take the completed shifts whose work date is in the week, clip each to every holiday it overlaps, and sum. A holiday
+ * is a payroll_time_off row of kind holiday on an Eastern calendar date; it may fall in the NEXT pay week (a Sunday 10 PM to
+ * Monday 2 AM shift earns its 2 holiday hours on the Sunday's check, and the Monday holiday week pays nothing for it, so it
+ * is never paid twice, and it is paid even when the technician works no other shift in the holiday week). The result keeps
+ * the holiday's own date (calc_snapshot.holidayWorkDays), which is the date Tech Rewards dates the premium by.
  *
- * - The day is [ET midnight of D, ET midnight of D + 1) as instants (datetime-et.js parseETDateTime: DST-safe, a day
+ * - A holiday day is [ET midnight of D, ET midnight of D + 1) as instants (datetime-et.js parseETDateTime: DST-safe, a day
  *   is 23 or 25 hours twice a year). Never a fixed offset.
- * - The shifts read are those whose clock-in is on D - 1 or D (a shift is closed after 14 hours at most).
- * - An entry wholly inside the day counts its stored duration_minutes (what the pay run pays); an entry that crosses a
+ * - Shifts are chosen by their work date; a shift of any length counts for every holiday it overlaps (a corrected shift from
+ *   Monday 11 PM to Wednesday 1 AM overlaps Tuesday and Wednesday). Holidays are read up to 7 days after the week ends.
+ * - An entry wholly inside a holiday counts its stored duration_minutes (what the pay run pays); an entry that crosses a
  *   midnight counts the clipped clock span.
- * - The unpaid meal is the daily summary's unpaid_meal_minutes of the shift's work date (what the pay deducts, 0 with
- *   GATE_AUTO_LUNCH off). With recorded meal breaks (completed, 30 minutes or more) it is the part of those breaks that
- *   falls inside D; an automatic deduction has no clock time, so the share of the shift that falls inside D bears the
- *   same share of it.
- * - Fallback: when the time entries cannot give clock times for the day (a shift with no clock-out, or no shift
- *   entries at all while the daily summary of D holds shift minutes), the day's summary row is read as a whole
- *   (shift minutes less unpaid meal, as the weekly pay sums them).
+ * - The unpaid meal is the shift's work date's unpaid_meal_minutes (what the pay deducts; 0 with GATE_AUTO_LUNCH off).
+ *   Recorded meal breaks (completed, 30 minutes or more) are matched to the shift by INTERVAL (a break at 1 AM belongs to the
+ *   shift it lies in, whatever its own work date): the deduction up to their length is placed by their clock times, and only
+ *   the rest of the deduction (an automatic one, which has no clock time) is shared by the share of the shift inside the
+ *   holiday.
+ * - Fallback, per work date: when the time entries cannot give clock times for that date (a shift with no clock-out, or no
+ *   shift entries while the day's summary holds shift minutes), the date's summary row is read as a whole (shift minutes
+ *   less unpaid meal, as the weekly pay sums them) and counts for that date only, when that date is itself a holiday. The
+ *   other dates of the week keep their measured overlap.
  * All figures are whole hundredths of a minute inside; minutes out are numbers with two decimals.
  */
 const { parseETDateTime } = require('../utils/datetime-et');
@@ -26,6 +31,8 @@ const { addStaffWorkDays, STAFF_WORK_DATE_SQL } = require('../utils/staff-time-w
 const { UNPAID_MEAL_MIN_BREAK_MINUTES } = require('../constants/staff-time');
 
 const HUNDREDTHS_PER_MS = 1 / 600; // 1 ms = 1/60000 minute = 1/600 hundredth
+// Holidays after the week ends that a shift of the week can still reach.
+const DAYS_AFTER_WEEK = 7;
 
 const hundredths = (minutes) => Math.round(Number(minutes || 0) * 100);
 
@@ -37,98 +44,118 @@ function dayBounds(day) {
   };
 }
 
-// Minutes (hundredths) of one entry inside [start, end): its stored duration when it lies wholly inside.
-function insideHundredths(entry, bounds) {
-  const from = new Date(entry.clock_in).getTime();
-  const to = new Date(entry.clock_out).getTime();
-  if (from >= bounds.start && to <= bounds.end) return entry.duration_minutes == null ? Math.round((to - from) * HUNDREDTHS_PER_MS) : hundredths(entry.duration_minutes);
-  const clipped = Math.min(to, bounds.end) - Math.max(from, bounds.start);
-  return clipped > 0 ? Math.round(clipped * HUNDREDTHS_PER_MS) : 0;
-}
 const fullHundredths = (entry) => (entry.duration_minutes == null
   ? Math.round((new Date(entry.clock_out).getTime() - new Date(entry.clock_in).getTime()) * HUNDREDTHS_PER_MS)
   : hundredths(entry.duration_minutes));
 
+// Minutes (hundredths) of one entry inside [start, end): its stored duration when it lies wholly inside.
+function insideHundredths(entry, bounds) {
+  const from = new Date(entry.clock_in).getTime();
+  const to = new Date(entry.clock_out).getTime();
+  if (from >= bounds.start && to <= bounds.end) return fullHundredths(entry);
+  const clipped = Math.min(to, bounds.end) - Math.max(from, bounds.start);
+  return clipped > 0 ? Math.round(clipped * HUNDREDTHS_PER_MS) : 0;
+}
+
+const overlaps = (a, b) => new Date(a.clock_in).getTime() < new Date(b.clock_out).getTime()
+  && new Date(b.clock_in).getTime() < new Date(a.clock_out).getTime();
+
 /**
- * The paid minutes worked on the holiday `day` by one technician, pure.
- *   shifts   shift entries { clock_in, clock_out, duration_minutes, work_date } of the technician, not voided
- *   breaks   break entries of the same shape (only completed ones with a clock-out count)
- *   daily    Map of work date -> { total_shift_minutes, unpaid_meal_minutes } (the day's summary row)
- * Returns minutes as a number (two decimals).
+ * The paid minutes one technician earns on holidays from the shifts of ONE pay week, pure.
+ *   dates      the work dates ('YYYY-MM-DD') of the week, Monday to Sunday
+ *   shifts     shift entries { clock_in, clock_out, duration_minutes, work_date } whose work date is in the week, not voided
+ *   breaks     break entries of the same shape (only completed ones with a clock-out count), any work date
+ *   daily      Map of work date -> { total_shift_minutes, unpaid_meal_minutes } (the day's summary row)
+ *   holidays   the holiday dates of the technician ('YYYY-MM-DD'), from the week's start to a week after its end
+ * Returns [{ workDate, minutes }] in holiday date order (minutes > 0), the date being the holiday's.
  */
-function holidayWorkMinutes({ day, shifts, breaks = [], daily }) {
-  const summary = (date) => daily.get(date) || null;
-  const workDates = [addStaffWorkDays(day, -1), day];
-  const own = shifts.filter((s) => workDates.includes(s.work_date));
-  const summaryPaid = () => {
-    const row = summary(day);
-    return row ? Math.max(0, hundredths(row.total_shift_minutes) - hundredths(row.unpaid_meal_minutes)) / 100 : 0;
-  };
-  // No clock times to read: a shift not closed, or no shift entries while the day's summary holds shift minutes.
-  if (own.some((s) => !s.clock_out)) return summaryPaid();
-  if (!own.length) return summary(day) && hundredths(summary(day).total_shift_minutes) > 0 ? summaryPaid() : 0;
-  const bounds = dayBounds(day);
+function holidayWorkForWeek({ dates, shifts, breaks = [], daily, holidays }) {
+  const held = [...new Set(holidays)].sort();
+  const totals = new Map();
+  const add = (day, units) => { if (units > 0) totals.set(day, (totals.get(day) || 0) + units); };
   const floor = hundredths(UNPAID_MEAL_MIN_BREAK_MINUTES);
-  let paid = 0;
-  for (const date of workDates) {
-    const group = own.filter((s) => s.work_date === date);
-    const inside = group.reduce((sum, s) => sum + insideHundredths(s, bounds), 0);
-    if (inside <= 0) continue;
-    const total = group.reduce((sum, s) => sum + fullHundredths(s), 0);
-    const row = summary(date);
-    const meal = row ? hundredths(row.unpaid_meal_minutes) : 0;
-    let mealInside = 0;
-    if (meal > 0) {
-      const recorded = breaks.filter((b) => b.work_date === date && b.clock_out && fullHundredths(b) >= floor);
-      mealInside = recorded.length
-        ? Math.min(meal, recorded.reduce((sum, b) => sum + insideHundredths(b, bounds), 0))
-        : Math.round((meal * inside) / (total || inside));
+  const meals = breaks.filter((b) => b.clock_out && fullHundredths(b) >= floor);
+  for (const date of dates) {
+    const group = shifts.filter((s) => s.work_date === date);
+    const row = daily.get(date) || null;
+    const summaryPaid = () => (row ? Math.max(0, hundredths(row.total_shift_minutes) - hundredths(row.unpaid_meal_minutes)) : 0);
+    // No clock times to read for this date: a shift not closed, or no shift entries while its summary holds shift minutes.
+    if (group.some((s) => !s.clock_out) || (!group.length && row && hundredths(row.total_shift_minutes) > 0)) {
+      if (held.includes(date)) add(date, summaryPaid());
+      continue;
     }
-    paid += Math.max(0, inside - mealInside);
+    if (!group.length) continue;
+    const total = group.reduce((sum, s) => sum + fullHundredths(s), 0);
+    const meal = row ? hundredths(row.unpaid_meal_minutes) : 0;
+    // The recorded meals that lie in this date's shifts, matched by interval.
+    const recorded = meal > 0 ? meals.filter((b) => group.some((s) => overlaps(s, b))) : [];
+    const recordedTotal = recorded.reduce((sum, b) => sum + fullHundredths(b), 0);
+    const placed = Math.min(meal, recordedTotal);
+    for (const holiday of held) {
+      const bounds = dayBounds(holiday);
+      const inside = group.reduce((sum, s) => sum + insideHundredths(s, bounds), 0);
+      if (inside <= 0) continue;
+      let mealInside = 0;
+      if (meal > 0) {
+        const recordedInside = recorded.reduce((sum, b) => sum + insideHundredths(b, bounds), 0);
+        mealInside = (recordedTotal > 0 ? Math.round((recordedInside * placed) / recordedTotal) : 0)
+          + Math.round(((meal - placed) * inside) / (total || inside));
+      }
+      add(holiday, Math.max(0, inside - mealInside));
+    }
   }
-  return paid / 100;
+  return [...totals.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([workDate, units]) => ({ workDate, minutes: units / 100 }));
 }
 
 /**
- * The paid minutes worked on each holiday of a pay week [start, end] (Monday to Sunday): Map of technician id ->
- * [{ workDate, minutes }] in date order, only for a date with minutes. W-2 technicians only.
+ * The paid minutes worked on holidays by each technician from the shifts of the pay week [start, end] (Monday to Sunday):
+ * Map of technician id -> [{ workDate, minutes }] in holiday date order, only for a date with minutes. W-2 technicians only.
  */
 async function holidayWorkByDay(conn, start, end) {
+  const reach = addStaffWorkDays(end, DAYS_AFTER_WEEK);
   const holidays = await conn('payroll_time_off as o')
     .join('technicians as t', 't.id', 'o.technician_id')
     .where('o.kind', 'holiday')
     .where('o.work_date', '>=', start)
-    .where('o.work_date', '<=', end)
+    .where('o.work_date', '<=', reach)
     .where('t.employment_type', 'w2')
-    .orderBy([{ column: 'o.technician_id' }, { column: 'o.work_date' }])
     .select('o.technician_id', conn.raw("to_char(o.work_date, 'YYYY-MM-DD') AS work_date"));
   const out = new Map();
   if (!holidays.length) return out;
   const ids = [...new Set(holidays.map((row) => row.technician_id))];
-  const before = addStaffWorkDays(start, -1);
-  const entries = await conn('time_entries')
+  const shifts = await conn('time_entries')
     .whereIn('technician_id', ids)
-    .whereIn('entry_type', ['shift', 'break'])
+    .where('entry_type', 'shift')
     .whereNot({ status: 'voided' })
-    .where('clock_in', '>=', new Date(dayBounds(before).start))
+    .where('clock_in', '>=', new Date(dayBounds(start).start))
     .where('clock_in', '<', new Date(dayBounds(end).end))
-    .select('technician_id', 'entry_type', 'status', 'clock_in', 'clock_out', 'duration_minutes',
+    .select('technician_id', 'clock_in', 'clock_out', 'duration_minutes',
       conn.raw(`to_char(${STAFF_WORK_DATE_SQL}, 'YYYY-MM-DD') AS work_date`));
+  // A break still running is not a meal (time-tracking.js dayUnpaidMealUnits).
+  const breaks = await conn('time_entries')
+    .whereIn('technician_id', ids)
+    .where('entry_type', 'break')
+    .whereNot({ status: 'voided' })
+    .whereNot({ status: 'active' })
+    .whereNotNull('clock_out')
+    .where('clock_in', '>=', new Date(dayBounds(start).start))
+    .where('clock_in', '<', new Date(dayBounds(reach).end))
+    .select('technician_id', 'clock_in', 'clock_out', 'duration_minutes');
   const dailyRows = await conn('time_entry_daily_summary')
     .whereIn('technician_id', ids)
-    .where('work_date', '>=', before)
+    .where('work_date', '>=', start)
     .where('work_date', '<=', end)
     .select('technician_id', 'total_shift_minutes', 'unpaid_meal_minutes', conn.raw("to_char(work_date, 'YYYY-MM-DD') AS work_date"));
-  for (const { technician_id: id, work_date: day } of holidays) {
-    const mine = entries.filter((e) => e.technician_id === id);
-    const minutes = holidayWorkMinutes({
-      day,
-      shifts: mine.filter((e) => e.entry_type === 'shift'),
-      // A break still running is not a meal (time-tracking.js dayUnpaidMealUnits).
-      breaks: mine.filter((e) => e.entry_type === 'break' && e.status !== 'active'),
+  const dates = Array.from({ length: 7 }, (_, n) => addStaffWorkDays(start, n));
+  for (const id of ids) {
+    const days = holidayWorkForWeek({
+      dates,
+      shifts: shifts.filter((e) => e.technician_id === id),
+      breaks: breaks.filter((e) => e.technician_id === id),
       daily: new Map(dailyRows.filter((r) => r.technician_id === id).map((r) => [r.work_date, r])),
+      holidays: holidays.filter((h) => h.technician_id === id).map((h) => h.work_date),
     });
-    if (minutes > 0) out.set(id, [...(out.get(id) || []), { workDate: day, minutes }]);
+    if (days.length) out.set(id, days);
   }
   return out;
 }
@@ -149,4 +176,4 @@ function capHolidayDays(days, paidMinutes) {
   return { minutes: kept.reduce((sum, d) => sum + hundredths(d.minutes), 0) / 100, days: kept };
 }
 
-module.exports = { holidayWorkMinutes, holidayWorkByDay, capHolidayDays, dayBounds };
+module.exports = { holidayWorkForWeek, holidayWorkByDay, capHolidayDays, dayBounds };

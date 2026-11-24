@@ -499,7 +499,9 @@ async function readGrossAndChecks(conn, technicianId, from, to, { throughWeek = 
   const query = conn('payroll_checks as c')
     .join('payroll_runs as r', 'r.id', 'c.run_id')
     .where({ 'c.technician_id': technicianId, 'c.status': 'finalized', 'r.status': 'finalized' })
-    .whereRaw('c.week_start + 6 >= ?::date', [from]);
+    // A week before the window can still hold pay earned inside it: the holiday work premium is paid with the shift's own
+    // week and dated by the holiday it overlapped, which can be the Monday after (payroll-holiday-work.js). One week back.
+    .whereRaw('c.week_start + 13 >= ?::date', [from]);
   if (throughWeek) query.whereRaw('c.week_start <= ?::date', [throughWeek]);
   const rows = await query
     .select('c.id', conn.raw("to_char(c.week_start, 'YYYY-MM-DD') AS week_start"), 'c.gross_cents', 'c.regular_pay_cents',
