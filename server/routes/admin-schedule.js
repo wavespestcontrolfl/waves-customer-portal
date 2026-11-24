@@ -15666,6 +15666,10 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
         await acquireScheduledInvoiceMintLock(trx, req.params.id);
       }
+      // Shift hours (GATE_TECH_SHIFT_HOURS, D4 part 3c): the plan's open rows as this save finds them, read
+      // after the fences above and before any write. The save's last step compares them with the rows it
+      // leaves and tells the office about the plan's other visits (planOfficeLines). Gate off: null, no read.
+      const planBefore = await require('../services/scheduling/plan-office-lines').planRowsBefore(trx, req.params.id);
       // Save-time eligibility for the FINAL technician on the FINAL date
       // this save lands on (tech-out P1 pre-push audit): assignScheduleJobs
       // below only runs when the technician itself is changing, so a
@@ -18070,6 +18074,12 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           }
         }
       }
+      // Shift hours (GATE_TECH_SHIFT_HOURS, D4 part 3c): every write of this save to the plan's visits is done
+      // (the assignment's scope, the cadence rewrite, the hours it copies, the visits it adds). The office is
+      // told about the plan's OTHER visits from the rows the save leaves: the day-off line, or the shift line,
+      // of each one it added or left on another day, technician or block. The edited visit was told above.
+      editWarnings.push(...(await require('../services/scheduling/plan-office-lines').planOfficeLines(trx, req.params.id, planBefore))
+        .filter((line) => !editWarnings.includes(line)));
       // Staff route insertion:
       // an edit that moved this visit (another day, start or technician)
       // numbers its technician's day in the order the save check certified,
