@@ -97,7 +97,7 @@ postgres('technician days off (real Postgres, rolled back)', () => {
     expect(await rowsFor(t.inactive.id)).toEqual([]);
     expect(await rowsFor(t.office.id)).toEqual([]); // office staff and admins are not field-dispatchable
     const [row] = await rowsFor(t.plain.id);
-    expect(row).toMatchObject({ reason: 'other', note: null, created_by: null, cleared_at: null, redistribution: null });
+    expect(row).toMatchObject({ reason: 'other', note: null, created_by: null, cleared_at: null, redistribution: null, source: 'tech_days_off', system_cleared_at: null });
     // nothing reaches payroll
     expect(await trx('payroll_time_off').whereIn('technician_id', [t.plain.id, t.twice.id, t.leap.id]).first()).toBeUndefined();
   });
@@ -154,23 +154,23 @@ postgres('technician days off (real Postgres, rolled back)', () => {
     expect(out.rows[0].out_today).toBe(true);
   });
 
-  describe('reconcile (real rows, real fence)', () => {
+  describe('reconcile and reopen (real rows, real fence)', () => {
     const open = async (id) => (await rowsFor(id)).filter((r) => r.cleared_at === null);
+    const day = (r) => r.absence_date.toISOString().slice(0, 10);
 
-    test('a corrected dob clears the old future row and writes the new one; the clear is a system clear', async () => {
+    test('a corrected dob clears the old future row (a system clear) and writes the new one', async () => {
       const tech = await makeTech('Synthetic Fixed', { dob: '1990-03-05' });
       await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] });
       expect(await dates(tech.id)).toEqual([IN_WINDOW]);
       await trx('technicians').where({ id: tech.id }).update({ dob: '1990-03-09' });
       expect(await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] })).toMatchObject({ written: 1, cleared: 1, failed: 0 });
       const rows = await rowsFor(tech.id);
-      expect(rows.map((r) => [r.absence_date.toISOString().slice(0, 10), r.cleared_at !== null])).toEqual([['2031-03-05', true], ['2031-03-09', false]]);
-      expect(rows[0].cleared_by).toBeNull();
-      // the readers now see only the new day
+      expect(rows.map((r) => [day(r), r.cleared_at !== null])).toEqual([['2031-03-05', true], ['2031-03-09', false]]);
+      expect(rows[0]).toMatchObject({ cleared_by: null, source: 'tech_days_off' });
+      expect(rows[0].system_cleared_at).not.toBeNull();
       await expect(eligibility.assertAssignableTechnician(tech.id, { conn: trx, date: IN_WINDOW })).resolves.toMatchObject({ id: tech.id });
       await expect(eligibility.assertAssignableTechnician(tech.id, { conn: trx, date: '2031-03-09' })).rejects.toMatchObject({ code: 'TECH_NOT_ASSIGNABLE' });
-      // a second tick changes nothing
-      expect(await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] })).toMatchObject({ written: 0, cleared: 0 });
+      expect(await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] })).toMatchObject({ written: 0, cleared: 0, reopened: 0 });
     });
 
     test('a technician who became inactive, not field-dispatchable, or lost the dob has the future row cleared', async () => {
@@ -186,7 +186,38 @@ postgres('technician days off (real Postgres, rolled back)', () => {
       for (const id of ids) expect(await open(id)).toEqual([]);
     });
 
-    test('rows the office made, rows already cleared and rows in the past are never touched', async () => {
+    test('a dob removed and then restored reopens the same row; an unrelated pass leaves it open', async () => {
+      const tech = await makeTech('Synthetic Restored', { dob: '1990-03-05' });
+      await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] });
+      const [original] = await rowsFor(tech.id);
+      await trx('technicians').where({ id: tech.id }).update({ dob: null });
+      await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] });
+      expect(await open(tech.id)).toEqual([]);
+      await trx('technicians').where({ id: tech.id }).update({ dob: '1990-03-05' });
+      expect(await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] })).toMatchObject({ written: 0, reopened: 1, failed: 0 });
+      const rows = await rowsFor(tech.id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ id: original.id, cleared_at: null, cleared_by: null, system_cleared_at: null, source: 'tech_days_off' });
+      expect(await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] })).toMatchObject({ written: 0, reopened: 0, cleared: 0 });
+    });
+
+    test('a row the office cleared through clearTechOut records the office user and is never reopened', async () => {
+      const tech = await makeTech('Synthetic Works', { dob: '1990-03-05' });
+      const office = await makeTech('Synthetic Office User');
+      await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] });
+      await require('../services/tech-out').clearTechOut({ technicianId: tech.id, date: IN_WINDOW, actorId: office.id });
+      const [cleared] = await rowsFor(tech.id);
+      expect(cleared).toMatchObject({ cleared_by: office.id, system_cleared_at: null, source: 'tech_days_off' });
+      expect(cleared.cleared_at).not.toBeNull();
+      expect(await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] })).toMatchObject({ written: 0, reopened: 0, skipped: 1 });
+      expect(await open(tech.id)).toEqual([]);
+      // even an office clear with no recorded user (cleared_by empty) has no system stamp, so it stays cleared
+      await trx('technician_absences').where({ id: cleared.id }).update({ cleared_by: null });
+      expect(await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] })).toMatchObject({ reopened: 0 });
+      expect(await open(tech.id)).toEqual([]);
+    });
+
+    test('rows with another source (the office\'s, even a plain "other" with no note), cleared rows and past rows are never touched', async () => {
       const tech = await makeTech('Synthetic Office Rows', { dob: null });
       const author = await makeTech('Synthetic Author');
       const insert = (patch) => trx('technician_absences').insert({ technician_id: tech.id, reason: 'other', ...patch });
@@ -194,13 +225,14 @@ postgres('technician days off (real Postgres, rolled back)', () => {
       await insert({ absence_date: '2031-02-02', note: 'family' });
       await insert({ absence_date: '2031-02-03', created_by: author.id });
       await insert({ absence_date: '2031-02-04', cleared_at: new Date('2031-01-10T15:00:00Z') });
-      await insert({ absence_date: '2031-01-14' }); // yesterday: past, of the sync's own shape
-      await insert({ absence_date: '2031-02-05' }); // own shape, dob null: this one IS cleared
+      await insert({ absence_date: '2031-01-14', source: 'tech_days_off' }); // yesterday: past, the sync's own
+      await insert({ absence_date: '2031-02-05' }); // a plain 'other', no note, no author, source NULL: NOT the sync's
+      await insert({ absence_date: '2031-02-06', source: 'tech_days_off' }); // the sync's own, dob null: this one IS cleared
       const before = await rowsFor(tech.id);
       expect(await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] })).toMatchObject({ cleared: 1, failed: 0 });
       const after = await rowsFor(tech.id);
       const changed = after.filter((row, n) => JSON.stringify(row) !== JSON.stringify(before[n]));
-      expect(changed.map((r) => r.absence_date.toISOString().slice(0, 10))).toEqual(['2031-02-05']);
+      expect(changed.map(day)).toEqual(['2031-02-06']);
     });
 
     test('an office-made row on the new birthday blocks a write, and the old own row still clears', async () => {
@@ -210,6 +242,26 @@ postgres('technician days off (real Postgres, rolled back)', () => {
       await trx('technician_absences').insert({ technician_id: tech.id, absence_date: '2031-03-09', reason: 'sick', note: 'office' });
       expect(await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] })).toMatchObject({ written: 0, skipped: 1, cleared: 1 });
       expect((await open(tech.id)).map((r) => r.reason)).toEqual(['sick']);
+    });
+
+    test('a reconcile clear resolves the open parked overflow alerts of that tech-day, and only those', async () => {
+      const tech = await makeTech('Synthetic Parked', { dob: '1990-03-05' });
+      await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] });
+      const alert = (patch) => trx('dispatch_alerts').insert({
+        type: 'tech_out_overflow', severity: 'warn', tech_id: tech.id, payload: { date: IN_WINDOW }, ...patch,
+      }).returning('id').then(([r]) => r.id || r);
+      const mine = await alert({});
+      const otherDay = await alert({ payload: { date: '2031-03-06' } });
+      const otherType = await alert({ type: 'tech_late' });
+      await trx('technicians').where({ id: tech.id }).update({ dob: null });
+      expect(await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] })).toMatchObject({ cleared: 1, failed: 0 });
+      const state = async (id) => (await trx('dispatch_alerts').where({ id }).first('resolved_at', 'resolved_by', 'payload'));
+      const resolved = await state(mine);
+      expect(resolved.resolved_at).not.toBeNull();
+      expect(resolved.resolved_by).toBeNull();
+      expect(resolved.payload.superseded_at).toBeTruthy(); // an automatic resolve, as clearTechOut does
+      expect((await state(otherDay)).resolved_at).toBeNull();
+      expect((await state(otherType)).resolved_at).toBeNull();
     });
   });
 
