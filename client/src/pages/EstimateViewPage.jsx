@@ -9885,6 +9885,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     paymentPreference,
     annualPrepayOffered: annualPrepayEligibleEffective && !estimate.billByInvoice,
     monthlyShown: !!monthlyAverage,
+    listAnnual: combinedFrequency?.annual,
+    prepayQuoteBase: prepayChargeQuote?.base,
     due: {
       prepayInLane: !!data?.recurringCardPolicy?.prepayInLane,
       prepayAfterVisit,

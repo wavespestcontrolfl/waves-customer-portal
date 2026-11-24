@@ -122,11 +122,11 @@ describe('estimate page: what you pay and when', () => {
     expect(t).toContain('Pest Control$99.00');
     expect(t).toContain('Setup fee$99.00');
     expect(t).toContain('First visit total$198.00');
-    expect(t).toContain('Each visit after that');
-    expect(t).toContain('4 visits a year, counting the first');
-    expect(t).toContain('First year total');
-    expect(t).toContain('$495.00');
-    expect(t).toContain('Includes the $99.00 setup fee.');
+    expect(t).toContain('Each application after that');
+    expect(t).toContain('4 applications a year, counting the first');
+    // AGENTS.md: no combined plan total ($X/yr) on a customer estimate; units are "application", never "visit".
+    expect(t).not.toMatch(/year total|first year|\$495|\$1,098|\$702/i);
+    expect(t).not.toMatch(/visits? a year|each visit/i);
     expect(t).toContain('The $99.00 setup fee is a one-time charge to start a plan with one service. Plans with two or more services do not pay it. It is also waived if you prepay the year.');
     expect(t).toContain('Prepay the year and the $99.00 setup fee is waived.');
     // Inside the price section, with the price it explains.
@@ -140,9 +140,9 @@ describe('estimate page: what you pay and when', () => {
     expect(t).toContain('Pest Control$99.00');
     expect(t).toContain('Lawn Care$78.00');
     expect(t).toContain('First visit total$177.00');
-    expect(t).toContain('4 visits a year, counting the first');
-    expect(t).toContain('9 visits a year, counting the first');
-    expect(t).toContain('First year total$1,098.00');
+    expect(t).toContain('4 applications a year, counting the first');
+    expect(t).toContain('9 applications a year, counting the first');
+    expect(t).not.toMatch(/year total|\$1,098/i);
     expect(t).not.toMatch(/setup fee/i);
     // The monthly figure is explained as an average, never as the price.
     expect(t).toContain('Any monthly figure on this page is the year averaged out. It is not a bill.');
@@ -153,8 +153,8 @@ describe('estimate page: what you pay and when', () => {
     await waitFor(() => expect(box(container)).not.toBeNull());
     const t = text(container);
     expect(t).toContain('Lawn Care$78.00');
-    expect(t).toContain('9 visits a year, counting the first');
-    expect(t).toContain('First year total$702.00');
+    expect(t).toContain('9 applications a year, counting the first');
+    expect(t).not.toMatch(/year total|\$702/i);
     expect(t).not.toMatch(/setup fee/i);
     expect(t).not.toContain('First visit total');
   });
@@ -211,27 +211,38 @@ describe('buildWhatYouPay and dueTodayText', () => {
   const pest = model([['pest_control', 'Pest Control', 99, 4]]);
   const input = (extra = {}) => ({ model: pest, fees: [setupFee], serviceMode: 'recurring', invoiceFirstVisit: 99, ...extra });
 
-  it('annual prepay chosen on a one-service plan with the fee waivable: the fee is waived and the year is visits x price', () => {
-    const result = buildWhatYouPay(input({ paymentPreference: 'prepay_annual', due: { prepayInLane: true, prepayAfterVisit: true } }));
+  it('annual prepay chosen, fee waivable: the fee is waived and the 12-month LIST annual is the only dollar line, never visits x price', () => {
+    const result = buildWhatYouPay(input({ paymentPreference: 'prepay_annual', listAnnual: 395.52, due: { prepayInLane: true, prepayAfterVisit: true } }));
     expect(result.setup.waived).toBe(true);
-    expect(result.yearTotal).toBe(396);
+    expect(result.prepay).toEqual({ amount: 395.52, note: 'List price. We show your exact total before you confirm.' });
+    expect(result.yearTotal).toBeUndefined();
     expect(result.dueToday).toBe('Nothing due today. You pay the year in one payment, after your first visit.');
     expect(result.prepaySentence).toBeNull();
   });
 
-  it('annual prepay chosen on a plan that carries a server-side prepay discount: no year figure is promised', () => {
-    const lawn = model([['lawn_care', 'Lawn Care', 78, 9]]);
-    const result = buildWhatYouPay(input({ model: lawn, fees: [], invoiceFirstVisit: 78, paymentPreference: 'prepay_annual' }));
-    expect(result.yearTotal).toBeNull();
-    expect(result.dueToday).toBe('We open your 12-month invoice after you approve.');
+  it('annual prepay chosen with a server quote on the page: the quote is shown, not a list price', () => {
+    const result = buildWhatYouPay(input({ paymentPreference: 'prepay_annual', listAnnual: 395.52, prepayQuoteBase: 380, due: { prepayInLane: true } }));
+    expect(result.prepay).toEqual({ amount: 380, note: 'Your quoted prepay price.' });
   });
 
-  it('offers prepay in words: with the fee waived the sentence names the fee; without it no figure is promised', () => {
+  it('annual prepay chosen with no list annual: no figure, only when the exact total arrives (lane picks the timing)', () => {
+    const lawn = model([['lawn_care', 'Lawn Care', 78, 9]]);
+    const lane = buildWhatYouPay(input({ model: lawn, fees: [], invoiceFirstVisit: 78, paymentPreference: 'prepay_annual', due: { prepayInLane: true } }));
+    expect(lane.prepay).toEqual({ amount: null, note: 'We show your exact total before you confirm.' });
+    const noLane = buildWhatYouPay(input({ model: lawn, fees: [], invoiceFirstVisit: 78, paymentPreference: 'prepay_annual' }));
+    expect(noLane.prepay.note).toBe('Your exact total is on your 12-month invoice, which we open after you approve.');
+    expect(noLane.dueToday).toBe('We open your 12-month invoice after you approve.');
+  });
+
+  it('offers prepay in words: the fee sentence names the fee; without a fee the exact-total timing follows the lane', () => {
     expect(buildWhatYouPay(input({ annualPrepayOffered: true, due: { prepayInLane: true } })).prepaySentence)
       .toBe('Prepay the year and the $99.00 setup fee is waived. You pay once, when you approve.');
     const lawn = model([['lawn_care', 'Lawn Care', 78, 9]]);
-    expect(buildWhatYouPay(input({ model: lawn, fees: [], invoiceFirstVisit: 78, annualPrepayOffered: true })).prepaySentence)
+    const lawnInput = (due) => input({ model: lawn, fees: [], invoiceFirstVisit: 78, annualPrepayOffered: true, due });
+    expect(buildWhatYouPay(lawnInput({ prepayInLane: true })).prepaySentence)
       .toBe('You can also prepay the year in one payment. We show your exact total before you confirm.');
+    expect(buildWhatYouPay(lawnInput({ prepayInLane: false })).prepaySentence)
+      .toBe('You can also prepay the year in one payment. Your exact total is on your 12-month invoice, which we open after you approve.');
   });
 
   it('the box first application must equal the sum of the prices to the cent', () => {

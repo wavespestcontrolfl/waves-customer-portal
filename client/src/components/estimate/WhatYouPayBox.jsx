@@ -10,7 +10,7 @@ import { payPerApplicationTimingNote } from './PaymentPreferenceButtons';
  * "What you pay and when" (owner 2026-11-23): a plain box under the price on a residential recurring
  * estimate. People who got an estimate asked what the $99 line was, why booking showed $177 when the
  * estimate said $91.50 a month, and whether a service was billed monthly. The box answers in order:
- * what is due today, the first visit itemised, each visit after, the first year, and the setup fee.
+ * what is due today, the first visit itemised, each application after, and the setup fee. It states no plan total (AGENTS.md).
  *
  * It prices nothing. Every dollar is a figure the page already shows: the per-application price and
  * visit count of each service (the monthly-average model, which reconciles them to the plan's own
@@ -25,7 +25,7 @@ const sameCents = (a, b) => Math.round(Number(a) * 100) === Math.round(Number(b)
 const isSetupFee = (fee) => fee?.service === 'waveguard_setup';
 const positiveFees = (fees) => (Array.isArray(fees) ? fees : []).filter((fee) => Number(fee?.amount) > 0);
 
-const visitsText = (visits) => (visits === 1 ? 'once a year' : `${visits} visits a year, counting the first`);
+const visitsText = (visits) => (visits === 1 ? 'once a year' : `${visits} applications a year, counting the first`);
 
 // The one answer to "what is due today", for the choice the customer is looking at. Pay per
 // application reads the same sentence the "Reserve your spot" box prints; the prepay lines mirror
@@ -55,8 +55,14 @@ function setupFeeSentence(fee, prepayWaivable) {
   return prepayWaivable ? `${base} It is also waived if you prepay the year.` : base;
 }
 
+// When the exact prepay total reaches the customer depends on the lane: in the card lane the page quotes
+// it before the confirm button; outside it the 12-month invoice carries it after approval.
+const exactTotalText = (prepayInLane) => (prepayInLane
+  ? 'We show your exact total before you confirm.'
+  : 'Your exact total is on your 12-month invoice, which we open after you approve.');
+
 function prepayOfferSentence({ setupFee, prepayWaivable, prepayInLane, prepayAfterVisit }) {
-  if (!prepayWaivable) return 'You can also prepay the year in one payment. We show your exact total before you confirm.';
+  if (!prepayWaivable) return `You can also prepay the year in one payment. ${exactTotalText(prepayInLane)}`;
   const when = prepayInLane
     ? (prepayAfterVisit ? 'You pay once, after your first visit.' : 'You pay once, when you approve.')
     : 'You pay once, by invoice after you approve.';
@@ -75,11 +81,14 @@ function describablePlan(input) {
   return !(charged.length > 0 && model.multi);
 }
 
-// A prepaid year with the setup fee waived is the visits at their price. Any other prepay carries a
-// server-side discount this page does not know, so no figure is promised for it.
-function yearFigures({ prepaySelected, prepayWaivable, visitsTotal, feeAmount }) {
-  if (prepaySelected) return { yearTotal: prepayWaivable ? visitsTotal : null, yearNote: null };
-  return { yearTotal: round2(visitsTotal + feeAmount), yearNote: feeAmount > 0 ? `Includes the ${fmtMoney(feeAmount)} setup fee.` : null };
+// The prepay choice shows the server's own quote when the page holds one; else the 12-month LIST annual
+// line item the "Reserve your spot" box shows (AGENTS.md exempts that line). Never a total built here.
+function prepayFigures({ listAnnual, quoteBase, prepayInLane }) {
+  const quoted = Number(quoteBase);
+  if (quoted > 0) return { amount: round2(quoted), note: 'Your quoted prepay price.' };
+  const list = Number(listAnnual);
+  if (list > 0) return { amount: round2(list), note: `List price. ${exactTotalText(prepayInLane)}` };
+  return { amount: null, note: exactTotalText(prepayInLane) };
 }
 
 const sumOf = (services, pick) => round2(services.reduce((sum, s) => sum + pick(s), 0));
@@ -95,14 +104,13 @@ export function buildWhatYouPay(input = {}) {
   const prepayWaivable = setupFee?.waivedWithPrepay === true;
   const prepaySelected = paymentPreference === 'prepay_annual';
   const feeAmount = setupFee ? round2(setupFee.amount) : 0;
-  const visitsTotal = sumOf(model.services, (s) => s.perApplication * s.visits);
   return {
     dueToday: dueTodayText({ ...due, paymentPreference }),
     prepaySelected,
     lines: model.services.map((s) => ({ key: s.key, label: s.label, amount: s.perApplication, visits: s.visits })),
     setup: setupFee ? { amount: feeAmount, waived: prepaySelected && prepayWaivable } : null,
     firstVisitTotal: round2(firstApplications + feeAmount),
-    ...yearFigures({ prepaySelected, prepayWaivable, visitsTotal, feeAmount }),
+    prepay: prepaySelected ? prepayFigures({ listAnnual: input.listAnnual, quoteBase: input.prepayQuoteBase, prepayInLane: due.prepayInLane }) : null,
     setupSentence: setupFee ? setupFeeSentence(setupFee, prepayWaivable) : null,
     prepaySentence: input.annualPrepayOffered && !prepaySelected
       ? prepayOfferSentence({ setupFee, prepayWaivable, prepayInLane: due.prepayInLane, prepayAfterVisit: due.prepayAfterVisit })
@@ -138,7 +146,7 @@ function FirstVisitRows({ box }) {
       {box.lines.map((line) => <Row key={line.key} label={line.label} amount={fmtMoney(line.amount)} />)}
       {box.setup ? <Row label="Setup fee" amount={fmtMoney(box.setup.amount)} /> : null}
       {itemised ? <div data-first-visit-total="" style={TOTAL}><span>First visit total</span><span style={NUM}>{fmtMoney(box.firstVisitTotal)}</span></div> : null}
-      <div style={{ ...HEADING, paddingTop: 8, borderTop: `1px solid ${W.offWhite}` }}>Each visit after that</div>
+      <div style={{ ...HEADING, paddingTop: 8, borderTop: `1px solid ${W.offWhite}` }}>Each application after that</div>
       {box.lines.map((line) => <Row key={line.key} label={line.label} amount={fmtMoney(line.amount)} sub={visitsText(line.visits)} />)}
     </>
   );
@@ -149,11 +157,7 @@ function PrepayRows({ box }) {
     <>
       <div style={HEADING}>If you prepay the year</div>
       {box.setup?.waived ? <Row label="Setup fee" amount="Waived" /> : null}
-      <Row
-        label="12 months of service"
-        amount={box.yearTotal == null ? 'Shown before you confirm' : fmtMoney(box.yearTotal)}
-        sub={box.lines.map((line) => `${line.label}: ${fmtMoney(line.amount)} × ${line.visits}`).join(' · ')}
-      />
+      <Row label="12-month plan" amount={box.prepay.amount == null ? null : fmtMoney(box.prepay.amount)} sub={box.prepay.note} />
     </>
   );
 }
@@ -168,15 +172,6 @@ export default function WhatYouPayBox({ box }) {
         <div data-due-today="" style={{ fontSize: 16, color: CUSTOMER_SURFACE.text, lineHeight: 1.5 }}>{box.dueToday}</div>
         <div style={{ borderTop: `1px solid ${W.offWhite}` }} />
         {box.prepaySelected ? <PrepayRows box={box} /> : <FirstVisitRows box={box} />}
-        {!box.prepaySelected && box.yearTotal != null ? (
-          <div data-year-total="" style={TOTAL}>
-            <span>
-              First year total
-              {box.yearNote ? <div style={SUB}>{box.yearNote}</div> : null}
-            </span>
-            <span style={NUM}>{fmtMoney(box.yearTotal)}</span>
-          </div>
-        ) : null}
       </div>
       {[box.setupSentence, box.prepaySentence, box.averageSentence].filter(Boolean).map((text) => (
         <div key={text} style={{ marginTop: 10, ...SUB }}>{text}</div>
