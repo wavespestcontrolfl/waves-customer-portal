@@ -2819,7 +2819,12 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
               // after the time move therefore reaches moveGuard and stays
               // locked through assignDispatchJob instead of being split.
               const row = await t('scheduled_services').where({ id: target.id }).forUpdate()
-                .first('window_start', 'window_end', 'estimated_duration_minutes', 'service_type', 'reservation_service_mix');
+                .first('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'service_type', 'reservation_service_mix');
+              // The tech-days locked above are for newDateStr: a row another writer
+              // moved to a different day since the time move is not assigned here.
+              if (row && row.scheduled_date && dateOnly(row.scheduled_date) !== newDateStr) {
+                throw Object.assign(new Error('That time slot is no longer available. Please pick another.'), { statusCode: 409, status: 409, isOperational: true, code: 'SLOT_TAKEN', memberId: target.id });
+              }
               const windowStart = (row && row.window_start) || landed.window_start || target.startHHMM || null;
               const windowEnd = (row && row.window_end) || landed.window_end || null;
               const probeEnd = windowEnd ? String(windowEnd).slice(0, 5) : (windowStart ? shiftClock(String(windowStart).slice(0, 5), Number(row && row.estimated_duration_minutes) || 60) : null);

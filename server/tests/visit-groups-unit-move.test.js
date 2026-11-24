@@ -1768,7 +1768,9 @@ describe('the member assignment transaction locks both tech-days before it locks
     const block = src.slice(at, src.indexOf('const windowStart = (row && row.window_start)', at));
     expect(block.indexOf('lockTechDays')).toBeGreaterThan(0);
     expect(block.indexOf('lockTechDays')).toBeLessThan(block.indexOf('.forUpdate()'));
-    expect(block).toContain('technician_id: options.technicianId');
+    expect(block).toContain('techId: options.technicianId');
+    // The locked row must still sit on the day whose tech-days were locked.
+    expect(block).toContain('dateOnly(row.scheduled_date) !== newDateStr');
     expect(block).not.toContain('.catch(');
   });
 });
