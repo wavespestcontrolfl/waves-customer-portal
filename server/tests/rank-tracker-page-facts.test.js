@@ -55,6 +55,7 @@ describe('pageFacts', () => {
     expect(resultHost('https://Example-Rival.com/pests')).toBe('example-rival.com');
     expect(resultHost('https://www.google.com/url?url=https://www.example-site.com/x')).toBe('www.google.com>www.example-site.com');
     expect(resultHost('https://www.google.com/search?q=pest+control')).toBe('www.google.com');
+    expect(resultHost('https://www.google.com/search?q=https://example-site.com')).toBe('www.google.com');
     expect(resultHost('not a url')).toBe('');
     expect(resultHost(undefined)).toBe('');
   });
