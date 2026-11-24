@@ -279,6 +279,8 @@ postgres('mailed record on PostgreSQL', () => {
     const visited = await row();
     await conn('mail_prospects').where({ id: visited }).update({ page_typed_views: 2 });
     await expect(conn.transaction((trx) => keepViewsMigration.down(trx))).rejects.toThrow(/typed-link visit counts/);
+    // A hand-named down of the older migration alone refuses too.
+    await expect(conn.transaction((trx) => mailedMigration.down(trx))).rejects.toThrow(/typed-link visit counts/);
     await conn('mail_prospects').where({ id: visited }).update({ page_typed_views: 0 });
     await conn.transaction((trx) => keepViewsMigration.down(trx));
     // The guard drops the counter in its own transaction; its up puts it back (a re-run of only the newer migration).

@@ -105,6 +105,12 @@ exports.down = async function down(knex) {
     const mailed = await knex(TABLE).whereNotNull('mailed_at').first('id');
     if (mailed) throw new Error('mail_prospects has homes marked as mailed (their printed price is recorded here); refusing to drop the columns');
   }
+  // Typed-link visits are counted before any home is mailed: keep those counts too (same lock, same transaction).
+  if (await knex.schema.hasColumn(TABLE, 'page_typed_views')) {
+    await knex.raw('LOCK TABLE ?? IN SHARE ROW EXCLUSIVE MODE', [TABLE]);
+    const visited = await knex(TABLE).where('page_typed_views', '>', 0).first('id');
+    if (visited) throw new Error('mail_prospects has typed-link visit counts; refusing to drop the columns');
+  }
   await knex.raw('DROP TRIGGER IF EXISTS ?? ON ??', [TRIGGER, TABLE]);
   await knex.raw(`DROP FUNCTION IF EXISTS ${FUNCTION}()`);
   await knex.raw('ALTER TABLE ?? DROP CONSTRAINT IF EXISTS ??', [TABLE, MAILED_CHECK]);
