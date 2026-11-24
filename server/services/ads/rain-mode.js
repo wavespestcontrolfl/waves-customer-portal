@@ -13,9 +13,10 @@
  *      the morning runs of that day check it again.
  *   2. reads the NWS hourly forecast (never the paid backup) at each forecast area of the day board
  *      (scheduling/forecast-zones.js ZONE_COORDS) and counts the work hours (DAY_OPEN to DAY_CLOSE) at RAIN_PCT or more.
- *      An area with RAIN_HOURS or more such hours is a rain area. The day is a rain day when at least half of the
- *      areas read are rain areas. Unknown is not dry: an area NWS does not answer is unread, and with fewer than
- *      MIN_AREAS read the day is 'unknown' and nothing would change.
+ *      An area with RAIN_HOURS or more such hours is a rain area; one whose missing hours could still make it one is
+ *      open and not counted. The day is a rain day when at least half of the settled areas are rain areas. Unknown is
+ *      not dry: with fewer than MIN_AREAS settled the forecast is 'unknown', and the day keeps its last settled call
+ *      (none yet = nothing would change). Fewer than MIN_AREAS answered fails the tick.
  *   3. decides, for each Google campaign, what the rule would set: an 'outdoor' campaign stops (the budget run's 1%
  *      floor) on a rain day, an 'indoor' campaign runs at its base on a rain day and stops on a dry day, and any other
  *      campaign (the brand campaign) is left alone. A campaign's class is ad_campaigns.metadata.rain_class
@@ -24,8 +25,9 @@
  *      day's latest call to 'ads.rain_mode.days' (one row per sold day, kept DAYS_MAX), the record the ad results
  *      report joins on.
  *   5. scores past days: a day whose call is recorded and not yet scored reads the measured radar rain (mrms-qpe.js)
- *      at each area. An area with WET_INCHES or more was wet. The score is kept on the day's row: the call, the areas
- *      measured wet, and hit (rain day and wet half or more, or dry day and wet under half).
+ *      at each area, least recently tried first. An area with WET_INCHES or more was wet; a wet day has half or more
+ *      of all areas wet. A radar gap that could flip that waits (SCORE_GIVE_UP_DAYS, then the areas read decide,
+ *      marked partial). The score is kept on the day's row: the areas measured wet, wet_day, and hit.
  */
 const db = require('../../models/db');
 const logger = require('../logger');
@@ -48,6 +50,8 @@ const MIN_AREAS = 3;
 const WET_INCHES = 0.25;
 // Past days scored in one run, oldest first; the rest wait for the next run.
 const SCORE_MAX = 3;
+// A day still not settled by measured rain this many days later is scored from the areas read.
+const SCORE_GIVE_UP_DAYS = 7;
 const HOUR = 60;
 
 function parseJson(v, fallback) {
@@ -87,7 +91,10 @@ function countWetHours(hours, day) {
 
 /**
  * The forecast call for `day`: { day, call: 'rain' | 'dry' | 'unknown', areas: [{ zone, wet, missing, rain }],
- * unread: [zone] }. An area with every hour missing counts as unread.
+ * unread: [zone] }. An area NWS does not answer, or answers with no hour of the day, is unread. An area whose missing
+ * hours could still make it wet (wet < RAIN_HOURS <= wet + missing: NWS drops hours already over, so on the sold day's
+ * morning a wet early span can be gone) is open (`rain: null`) and is not counted either way. The call needs
+ * MIN_AREAS settled areas.
  */
 async function forecastDay(day, { read = getNwsHourlyRain } = {}) {
   const zones = Object.keys(ZONE_COORDS);
@@ -98,12 +105,16 @@ async function forecastDay(day, { read = getNwsHourlyRain } = {}) {
     const counted = Array.isArray(hours) ? countWetHours(hours, day) : null;
     const total = (DAY_CLOSE - DAY_OPEN) / HOUR;
     if (!counted || counted.missing >= total) { unread.push(zone); return; }
-    areas.push({ zone, wet: counted.wet, missing: counted.missing, rain: counted.wet >= RAIN_HOURS });
+    let rain = null;
+    if (counted.wet >= RAIN_HOURS) rain = true;
+    else if (counted.wet + counted.missing < RAIN_HOURS) rain = false;
+    areas.push({ zone, wet: counted.wet, missing: counted.missing, rain });
   }));
   areas.sort((a, b) => zones.indexOf(a.zone) - zones.indexOf(b.zone));
   unread.sort((a, b) => zones.indexOf(a) - zones.indexOf(b));
+  const settled = areas.filter((a) => a.rain !== null);
   let call = 'unknown';
-  if (areas.length >= MIN_AREAS) call = areas.filter((a) => a.rain).length * 2 >= areas.length ? 'rain' : 'dry';
+  if (settled.length >= MIN_AREAS) call = settled.filter((a) => a.rain).length * 2 >= settled.length ? 'rain' : 'dry';
   return { day, call, areas, unread };
 }
 
@@ -114,8 +125,12 @@ function decideCampaign(rainClass, call) {
   return call === 'rain' ? 'base' : 'stop';
 }
 
-/** The day's call is scored once its measured rain is complete for the areas read. */
-async function scoreDay(row, { fetchRain = fetchMrmsDailyRain } = {}) {
+/**
+ * The day's measured score, or null while radar gaps could still change it. Wet day = half or more of all areas
+ * measured wet. A gap counts both ways: the score waits until the areas still missing could not flip it, or, after
+ * SCORE_GIVE_UP_DAYS, is taken from the areas read (marked partial; none read = no score).
+ */
+async function scoreDay(row, { fetchRain = fetchMrmsDailyRain, now = new Date() } = {}) {
   const zones = Object.keys(ZONE_COORDS);
   const measured = await Promise.all(zones.map(async (zone) => {
     const out = await Promise.resolve()
@@ -125,10 +140,19 @@ async function scoreDay(row, { fetchRain = fetchMrmsDailyRain } = {}) {
     return { zone, inches: Number.isFinite(inches) ? inches : null };
   }));
   const read = measured.filter((m) => m.inches != null);
-  if (read.length < MIN_AREAS) return null;
   const wetAreas = read.filter((m) => m.inches >= WET_INCHES).map((m) => m.zone);
-  const wetDay = wetAreas.length * 2 >= read.length;
+  const missing = measured.length - read.length;
+  let wetDay = null;
+  if (wetAreas.length * 2 >= measured.length) wetDay = true;
+  else if ((wetAreas.length + missing) * 2 < measured.length) wetDay = false;
+  const partial = wetDay === null;
+  if (partial) {
+    const ageDays = (Date.parse(`${etDateString(now)}T00:00:00Z`) - Date.parse(`${row.day}T00:00:00Z`)) / 86400000;
+    if (ageDays < SCORE_GIVE_UP_DAYS || !read.length) return null;
+    wetDay = wetAreas.length * 2 >= read.length;
+  }
   return {
+    partial,
     scored_at: new Date().toISOString(),
     measured: Object.fromEntries(measured.map((m) => [m.zone, m.inches])),
     wet_areas: wetAreas,
@@ -160,14 +184,22 @@ async function saveRun(conn, run, days, now) {
   });
 }
 
-/** Scores up to SCORE_MAX past, unscored days (in place). Returns the days scored. */
+/**
+ * Scores up to SCORE_MAX past, unscored days (in place), least recently tried first, so a day waiting on radar gaps
+ * never blocks the days after it. Returns the days scored.
+ */
 async function scorePastDays(days, now, opts) {
   const today = etDateString(now);
-  const due = Object.keys(days).filter((d) => d < today && !days[d].score).sort().slice(0, SCORE_MAX);
+  const tried = (d) => days[d].score_tried_at || '';
+  const due = Object.keys(days)
+    .filter((d) => d < today && !days[d].score)
+    .sort((a, b) => tried(a).localeCompare(tried(b)) || a.localeCompare(b))
+    .slice(0, SCORE_MAX);
   const scored = [];
   for (const day of due) {
-    const score = await scoreDay(days[day], opts);
+    const score = await scoreDay(days[day], { ...opts, now });
     if (score) { days[day] = { ...days[day], score }; scored.push(day); }
+    else days[day] = { ...days[day], score_tried_at: now.toISOString() };
   }
   return scored;
 }
@@ -179,6 +211,9 @@ async function recordRun({ now = new Date(), conn = db, read, fetchRain } = {}) 
   const problems = [];
   const day = soldDay(now);
   const forecast = await forecastDay(day, { read });
+  const days = await loadDays(conn);
+  // An unknown forecast never replaces the day's last settled call (made at 2 PM the day before, or later).
+  const call = forecast.call === 'unknown' ? (days[day]?.call || 'unknown') : forecast.call;
   const rows = await conn('ad_campaigns').where('platform', 'google_ads');
   const campaigns = rows
     .filter((c) => ['active', 'paused'].includes(c.status))
@@ -189,27 +224,29 @@ async function recordRun({ now = new Date(), conn = db, read, fetchRain } = {}) 
         campaign_name: c.campaign_name,
         status: c.status,
         rain_class: rainClass,
-        would: decideCampaign(rainClass, forecast.call),
+        would: decideCampaign(rainClass, call),
       };
     });
-  if (forecast.call === 'unknown') problems.push(`forecast unread for ${day}: ${forecast.areas.length} of ${Object.keys(ZONE_COORDS).length} areas read`);
+  // NWS down = a failed tick. Areas only open (hours already over on the sold day's morning) are not a fault.
+  if (forecast.areas.length < MIN_AREAS) problems.push(`forecast unread for ${day}: ${forecast.areas.length} of ${Object.keys(ZONE_COORDS).length} areas read`);
   if (!campaigns.some((c) => c.rain_class === 'indoor')) logger.info('[ads-rain-mode] no indoor campaign is marked yet');
 
   // mode: this module only records ("shadow"), so later live runs can be told apart.
-  const run = { at: now.toISOString(), mode: 'shadow', ...forecast, campaigns };
+  const run = { at: now.toISOString(), mode: 'shadow', ...forecast, call, forecast_call: forecast.call, campaigns };
   let scored = [];
   try {
-    const days = await loadDays(conn);
-    // The day's latest call stands. A call already scored is never rewritten.
-    if (!days[day]?.score) days[day] = { day, call: forecast.call, at: run.at, areas: forecast.areas.filter((a) => a.rain).map((a) => a.zone) };
+    // The day's latest settled call stands. A call already scored is never rewritten.
+    if (forecast.call !== 'unknown' && !days[day]?.score) {
+      days[day] = { day, call: forecast.call, at: run.at, areas: forecast.areas.filter((a) => a.rain).map((a) => a.zone) };
+    }
     scored = await scorePastDays(days, now, { fetchRain });
     await saveRun(conn, run, days, now);
   } catch (err) {
     problems.push(`the run was not saved: ${err.message}`);
   }
-  logger.info(`[ads-rain-mode] ${day}: ${forecast.call} (${forecast.areas.filter((a) => a.rain).length}/${forecast.areas.length} areas wet`
+  logger.info(`[ads-rain-mode] ${day}: ${call}${forecast.call === call ? '' : ' (kept)'} (${forecast.areas.filter((a) => a.rain).length}/${forecast.areas.length} areas wet`
     + `${forecast.unread.length ? `, unread ${forecast.unread.join(', ')}` : ''}); scored ${scored.length}`);
-  return { day, call: forecast.call, campaigns, scored, problems };
+  return { day, call, forecast_call: forecast.call, campaigns, scored, problems };
 }
 
 /** The cron's step: throws when the run had a problem, so job_health shows the failed tick with its cause. */

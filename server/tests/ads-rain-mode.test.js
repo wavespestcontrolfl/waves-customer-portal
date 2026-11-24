@@ -147,4 +147,54 @@ describe('recordRun', () => {
     expect(run.scored).toEqual([]);
     expect(JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-23'].score).toBeUndefined();
   });
+
+  test('an open area (missing hours could still make it wet) is not counted, and unknown keeps the settled call', async () => {
+    // Morning of the sold day: hours already over are gone from the feed.
+    const partHours = (day) => hours(day, 2).slice(4); // 8-11 AM gone: 5 dry hours left, 4 missing = open
+    const open = rainMode.countWetHours(partHours('2026-11-25'), '2026-11-25');
+    expect(open).toEqual({ wet: 0, missing: 4 });
+    const forecast = await rainMode.forecastDay('2026-11-25', { read: jest.fn(async () => partHours('2026-11-25')) });
+    expect(forecast.areas.every((a) => a.rain === null)).toBe(true);
+    expect(forecast.call).toBe('unknown');
+
+    const settings = { [rainMode.DAYS_KEY]: JSON.stringify({ '2026-11-25': { day: '2026-11-25', call: 'rain', areas: ZONES } }) };
+    const conn = fakeConn({ campaigns, settings });
+    const morning = new Date('2026-11-25T17:00:00Z'); // noon ET on the sold day
+    const run = await rainMode.recordRun({ now: morning, conn, read: jest.fn(async () => partHours('2026-11-25')), fetchRain: jest.fn(async () => null) });
+    expect(run.problems).toEqual([]);
+    expect(run.forecast_call).toBe('unknown');
+    expect(run.call).toBe('rain');
+    expect(run.campaigns.find((c) => c.campaign_id === 2).would).toBe('stop');
+    expect(JSON.parse(conn.store[rainMode.DAYS_KEY])['2026-11-25'].call).toBe('rain');
+  });
+
+  test('a radar gap that could flip the score waits; after the give-up days the areas read decide', async () => {
+    const inches = [0.6, 0.4, 0, 0, null, null]; // 2 wet, 2 dry, 2 missing: could be 4 of 6 wet or 2 of 6
+    const fetchRain = jest.fn(async ({ latitude }) => {
+      const i = ZONES.findIndex((z) => ZONE_COORDS[z].lat === latitude);
+      return { days: [{ date: '2026-11-23', inches: inches[i] }] };
+    });
+    const row = { day: '2026-11-23', call: 'rain', areas: [] };
+    expect(await rainMode.scoreDay(row, { fetchRain, now: new Date('2026-11-24T20:00:00Z') })).toBeNull();
+    const late = await rainMode.scoreDay(row, { fetchRain, now: new Date('2026-12-01T20:00:00Z') });
+    expect(late).toMatchObject({ partial: true, wet_day: true, hit: true });
+  });
+
+  test('a day waiting on radar does not block the days after it', async () => {
+    const settings = {
+      [rainMode.DAYS_KEY]: JSON.stringify({
+        '2026-11-18': { day: '2026-11-18', call: 'dry', areas: [], score_tried_at: '2026-11-24T18:00:00Z' },
+        '2026-11-19': { day: '2026-11-19', call: 'dry', areas: [], score_tried_at: '2026-11-24T18:00:00Z' },
+        '2026-11-20': { day: '2026-11-20', call: 'dry', areas: [], score_tried_at: '2026-11-24T18:00:00Z' },
+        '2026-11-21': { day: '2026-11-21', call: 'dry', areas: [] },
+      }),
+    };
+    const conn = fakeConn({ campaigns, settings });
+    const fetchRain = jest.fn(async ({ start }) => ({ days: [{ date: start, inches: start === '2026-11-21' ? 0 : null }] }));
+    const run = await rainMode.recordRun({ now: AFTER_TWO, conn, read: readerFor('2026-11-25', [0, 0, 0, 0, 0, 0]), fetchRain });
+    expect(run.scored).toEqual(['2026-11-21']);
+    const days = JSON.parse(conn.store[rainMode.DAYS_KEY]);
+    expect(days['2026-11-18'].score_tried_at).toBe(AFTER_TWO.toISOString());
+  });
 });
+
