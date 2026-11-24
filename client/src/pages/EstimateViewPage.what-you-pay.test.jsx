@@ -199,6 +199,20 @@ describe('estimate page: what you pay and when', () => {
     }
   });
 
+  it('page: a frozen bundle with a bait-station setup row in the breakdown, and a fee row with no amount: no box', async () => {
+    const withRodent = bundle();
+    withRodent.pricing.oneTimeBreakdown = { total: 150, items: [{ service: 'rodent_bait_setup', label: 'Bait Station Setup', amount: 150, kind: 'charge' }] };
+    const first = await renderPage(withRodent);
+    await waitFor(() => expect(first.container.querySelector('[data-price-follow-ups]')).not.toBeNull());
+    expect(box(first.container)).toBeNull();
+    cleanup();
+    const noAmount = pestOnly();
+    noAmount.pricing.setupFee = { service: 'waveguard_setup', label: 'WaveGuard setup', price: 99, priceAfterDiscount: 99, waivedWithPrepay: true };
+    const second = await renderPage(noAmount);
+    await waitFor(() => expect(second.container.querySelector('[data-price-follow-ups]')).not.toBeNull());
+    expect(box(second.container)).toBeNull();
+  });
+
   it('never prints a price as a monthly bill: no "/mo" and no "about"', async () => {
     const { container } = await renderPage(bundle());
     await waitFor(() => expect(box(container)).not.toBeNull());
@@ -244,10 +258,10 @@ describe('buildWhatYouPay', () => {
   const line = { firstApplication: 99, setup: 99, total: 198 };
   // Pest only with the page's first-visit line, as the page builds it.
   const input = (extra = {}) => ({
-    model: pest, fees: [setupFee], serviceMode: 'recurring', invoiceFirstVisit: 99, firstVisit: line, setupAnywhere: true, ...extra,
+    model: pest, fees: [setupFee], serviceMode: 'recurring', invoiceFirstVisit: 99, firstVisit: line, oneTimeItems: [{ service: 'waveguard_setup', amount: 99, kind: 'charge' }], ...extra,
   });
   // A plan with no setup charge anywhere and so no first-visit line (bundle, lawn only).
-  const noFee = (extra = {}) => input({ model: both, fees: [], invoiceFirstVisit: 177, firstVisit: null, setupAnywhere: false, ...extra });
+  const noFee = (extra = {}) => input({ model: both, fees: [], invoiceFirstVisit: 177, firstVisit: null, oneTimeItems: [], ...extra });
   const FEE_SENTENCE = 'This plan has a one-time $99.00 setup fee.';
 
   it('the annual prepay choice renders no box (the Reserve your spot box owns payment timing and prepay)', () => {
@@ -280,11 +294,40 @@ describe('buildWhatYouPay', () => {
     expect(buildWhatYouPay(input(extra))).toBeNull();
   });
 
-  it('no first-visit line: a fee anywhere (fee list, stored fee or breakdown setup row) means no box, never a plan without its fee', () => {
-    expect(buildWhatYouPay(noFee({ setupAnywhere: true }))).toBeNull();
-    expect(buildWhatYouPay(noFee({ model: pest, invoiceFirstVisit: 99, setupAnywhere: true }))).toBeNull();
-    // The signal missing is doubt too.
-    expect(buildWhatYouPay(noFee({ setupAnywhere: undefined }))).toBeNull();
+  it('no first-visit line: a fee row with a positive amount anywhere (fee list or stored fee) means no box, never a plan without its fee', () => {
+    expect(buildWhatYouPay(noFee({ fees: [setupFee] }))).toBeNull();
+    expect(buildWhatYouPay(noFee({ otherFeeRows: [setupFee] }))).toBeNull();
+    expect(buildWhatYouPay(noFee({ model: pest, invoiceFirstVisit: 99, fees: [setupFee] }))).toBeNull();
+  });
+
+  // Fail closed on frozen and legacy shapes (round 6).
+  it.each([
+    ['a fee row with price and priceAfterDiscount but no amount (fee list)', { fees: [{ service: 'waveguard_setup', price: 99, priceAfterDiscount: 99 }] }],
+    ['a stored setup fee with a price but a zero amount', { otherFeeRows: [{ service: 'waveguard_setup', price: 99, amount: 0 }] }],
+    ['a stored setup fee with a price and a non-numeric amount', { otherFeeRows: [{ service: 'waveguard_setup', priceAfterDiscount: 99, amount: 'n/a' }] }],
+  ])('unreadable fee row, even with a first-visit line: no box (%s)', (_label, extra) => {
+    expect(buildWhatYouPay(input(extra))).toBeNull();
+    expect(buildWhatYouPay(noFee(extra))).toBeNull();
+  });
+
+  it.each([
+    ['a bait-station setup row (frozen bundle)', [{ service: 'rodent_bait_setup', amount: 150, kind: 'charge' }]],
+    ['an add-on charge row', [{ service: 'flea_treatment', amount: 85, kind: 'charge' }]],
+    ['a discount row', [{ service: 'courtesy', amount: -10, kind: 'discount' }]],
+    ['a setup row beside another row', [{ service: 'waveguard_setup', amount: 99 }, { service: 'rodent_bait_setup', amount: 150 }]],
+    ['a setup row whose amount is not the first-visit line fee', [{ service: 'waveguard_setup', amount: 49 }]],
+  ])('any other one-time breakdown row: no box (%s)', (_label, oneTimeItems) => {
+    expect(buildWhatYouPay(input({ oneTimeItems }))).toBeNull();
+    expect(buildWhatYouPay(noFee({ oneTimeItems }))).toBeNull();
+  });
+
+  it('a setup row in the breakdown with no first-visit line to prove it: no box', () => {
+    expect(buildWhatYouPay(noFee({ oneTimeItems: [{ service: 'waveguard_setup', amount: 99 }] }))).toBeNull();
+  });
+
+  it('the one breakdown row the first-visit line itself proves (its own setup) is allowed', () => {
+    expect(buildWhatYouPay(input()).firstVisitTotal).toBe(198);
+    expect(buildWhatYouPay(input({ oneTimeItems: [] })).firstVisitTotal).toBe(198);
   });
 
   it('no first-visit line and no setup charge anywhere: the prices alone, with no fee row', () => {

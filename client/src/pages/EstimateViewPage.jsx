@@ -9865,12 +9865,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // shows only when the first bill is proven to be those figures: the same credit and extra-fee checks as
   // the first-visit line, plus the "Reserve your spot" box's own first application agreeing to the cent.
   // Payment timing and the prepay choice stay in that box.
-  // Any setup charge the page knows of, from any source: fee lists, the stored setup fee, or a setup row in
-  // the one-time breakdown. With none, and no first-visit line, the box states no fee.
-  const setupChargeAnywhere = [...(pricing.firstVisitFees || []), pricing.setupFee, setupFeeEffective]
-    .some((fee) => Number(fee?.amount) > 0)
-    || (Array.isArray(pricing.oneTimeBreakdown?.items) ? pricing.oneTimeBreakdown.items : [])
-      .some((row) => isWaveGuardSetupBreakdownRow(row));
   const whatYouPay = invoiceOnlyAccept ? null : buildWhatYouPay({
     model: monthlyAverage?.model || null,
     fees: (pricing.firstVisitFees?.length ? pricing.firstVisitFees : (setupFeeEffective ? [setupFeeEffective] : [])).map(tierAwareFee),
@@ -9885,7 +9879,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     paymentPreference,
     annualPrepayOffered: annualPrepayEligibleEffective && !estimate.billByInvoice,
     firstVisit: firstVisitLine,
-    setupAnywhere: setupChargeAnywhere,
+    otherFeeRows: [pricing.setupFee, setupFeeEffective],
+    oneTimeItems: pricing.oneTimeBreakdown?.items,
   });
 
   // Service/price cards — shared by the live configurator (below) and the

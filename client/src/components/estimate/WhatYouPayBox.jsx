@@ -23,7 +23,6 @@ import { W } from './tokens';
 const round2 = (n) => Math.round(Number(n) * 100) / 100;
 const sameCents = (a, b) => Math.round(Number(a) * 100) === Math.round(Number(b) * 100);
 const isSetupFee = (fee) => fee?.service === 'waveguard_setup';
-const positiveFees = (fees) => (Array.isArray(fees) ? fees : []).filter((fee) => Number(fee?.amount) > 0);
 
 const applicationsText = (visits) => (visits === 1 ? 'once a year' : `${visits} applications a year, counting the first`);
 
@@ -35,25 +34,43 @@ function setupFeeSentence(fee, prepayWaivable) {
   return prepayWaivable ? `${base} It is waived if you prepay the year.` : base;
 }
 
+// Fee rows the page holds, from every source. A row that carries a price but no usable `amount` (a frozen
+// or legacy shape) cannot be read as "no fee", so it blocks the box.
+const PRICE_KEYS = ['price', 'priceAfterDiscount', 'displayPrice', 'perTreatment'];
+const hasPositiveAmount = (row) => Number.isFinite(Number(row?.amount)) && Number(row.amount) > 0;
+const carriesPrice = (row) => PRICE_KEYS.some((key) => row?.[key] != null);
+const feeRowsOf = (input) => [...(Array.isArray(input.fees) ? input.fees : []), ...(Array.isArray(input.otherFeeRows) ? input.otherFeeRows : [])]
+  .filter((row) => row && typeof row === 'object');
+const feeRowsUnreadable = (input) => feeRowsOf(input).some((row) => carriesPrice(row) && !hasPositiveAmount(row));
+
+// The one-time breakdown must hold nothing, except the WaveGuard setup row the first-visit line itself
+// proves (same amount as the line's setup). Any other row, of any kind, means a first bill this box
+// cannot describe (a bait-station setup, an add-on, a discount): no box.
+function breakdownIsClean(input) {
+  const items = Array.isArray(input.oneTimeItems) ? input.oneTimeItems : [];
+  const setup = Number(input.firstVisit?.setup);
+  return items.every((item) => item?.service === 'waveguard_setup' && setup > 0 && sameCents(Number(item.amount), setup));
+}
+
 // The plan the box describes: recurring, per application, billed by card, nothing else on the first bill.
+// Fails closed: any doubt about a fee row or the one-time breakdown returns false.
 function describablePlan(input) {
   const { model, serviceMode, invoiceMode, siteConfirmationHold, commercial, creditApplies, oneTimeExtrasTotal, upFrontRowCount } = input;
   if (serviceMode !== 'recurring' || invoiceMode || siteConfirmationHold || commercial) return false;
   if (input.paymentPreference === 'prepay_annual') return false;
-  return !!model && !model.credit && !creditApplies && !(upFrontRowCount > 0) && !(Number(oneTimeExtrasTotal) > 0);
+  if (!model || model.credit || creditApplies || upFrontRowCount > 0 || Number(oneTimeExtrasTotal) > 0) return false;
+  return !feeRowsUnreadable(input) && breakdownIsClean(input);
 }
 
 // The setup fee comes from ONE place: the page's existing first-visit line (`firstVisit`, the figure
-// PriceFollowUps prints, from firstVisitTotalPreview). Fee lists and the one-time breakdown are not read
-// to build a fee row: they can disagree with what acceptance charges (a legacy split estimate, a frozen
-// bundle whose only setup row sits in the breakdown). So:
+// PriceFollowUps prints, from firstVisitTotalPreview). Fee lists are not read to build a fee row:
 // - the line exists: its application must be the sum of these prices to the cent; the fee is its setup
 //   and the box's first-visit total is its total, never another figure;
-// - no line: the box states no fee, and only when no setup charge appears anywhere on the page.
+// - no line: the box states no fee, and only when no fee row with a positive amount appears anywhere.
 // Any mismatch or doubt returns null.
 function proofOfFirstVisit(input, applications) {
   const line = input.firstVisit || null;
-  if (!line) return input.setupAnywhere === false ? { fee: 0, total: applications } : null;
+  if (!line) return feeRowsOf(input).some(hasPositiveAmount) ? null : { fee: 0, total: applications };
   if (input.model.services.length !== 1 || !sameCents(line.firstApplication, applications)) return null;
   const fee = round2(line.setup);
   return sameCents(line.total, applications + fee) && fee > 0 ? { fee, total: round2(line.total) } : null;
@@ -68,7 +85,7 @@ export function buildWhatYouPay(input = {}) {
   if (!(input.invoiceFirstVisit > 0) || !sameCents(input.invoiceFirstVisit, applications)) return null;
   const proof = proofOfFirstVisit(input, applications);
   if (!proof) return null;
-  const feeRow = positiveFees(input.fees).find(isSetupFee) || null;
+  const feeRow = feeRowsOf(input).find((row) => isSetupFee(row) && hasPositiveAmount(row)) || null;
   const prepayWaivable = input.annualPrepayOffered === true && feeRow?.waivedWithPrepay === true;
   return {
     lines: model.services.map((s) => ({ key: s.key, label: s.label, amount: s.perApplication, visits: s.visits })),
