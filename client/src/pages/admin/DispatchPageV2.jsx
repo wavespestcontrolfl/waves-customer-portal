@@ -1993,6 +1993,7 @@ export default function DispatchPageV2({
                 technicians={technicians}
                 owesCompletion={completionResumeMarked}
                 onEdit={editBoardVisit}
+                onViewCustomer={openCustomerSidebar}
               />
             ) : (
             <TimeGridDay

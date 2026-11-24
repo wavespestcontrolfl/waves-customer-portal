@@ -228,7 +228,10 @@ function parseToldWindow(text) {
   const m = String(text || '').match(/(\d{1,2}):(\d{2})\s*([AP]M)\s*[-–—]\s*(\d{1,2}):(\d{2})\s*([AP]M)/i);
   if (!m) return null;
   const at = (h, mm, ap) => ((Number(h) % 12) + (/p/i.test(ap) ? 12 : 0)) * 60 + Number(mm);
-  return { start: at(m[1], m[2], m[3]), end: at(m[4], m[5], m[6]) };
+  const start = at(m[1], m[2], m[3]);
+  const end = at(m[4], m[5], m[6]);
+  // A window across midnight (11 PM - 1 AM) ends the next day.
+  return { start, end: end < start ? end + 24 * 60 : end };
 }
 
 // "5–7 PM" / "11 AM–1 PM" for the tooltips.

@@ -151,7 +151,29 @@ function StopTime({ plan, bookedStart }) {
   );
 }
 
-function StopLine({ service, onEdit, owesCompletion }) {
+// The grid's all-day rule: a technician's untimed visit with a customer opens
+// the customer profile (when the page gives a way to).
+function opensCustomerProfile(service, bookedStart, onViewCustomer) {
+  return Boolean(onViewCustomer && service.technicianId && bookedStart == null && (service.customerId || service.customer_id));
+}
+
+// The status word, the closeout chip (when it is not its own action) and the window chip.
+function StopTail({ status, showOwed, promise }) {
+  return (
+    <>
+      {STATUS_WORD[status] && <span className="shrink-0 opacity-80">{STATUS_WORD[status]}</span>}
+      {showOwed && <CloseoutOwedChip />}
+      {promise && (
+        <span
+          className="shrink-0 ml-auto rounded-xs bg-zinc-100 px-1 u-nums text-zinc-700 whitespace-nowrap"
+          title={promiseChipTitle(promise)}
+        >{promise.label}</span>
+      )}
+    </>
+  );
+}
+
+function StopLine({ service, onEdit, onViewCustomer, owesCompletion }) {
   const plan = planOf(service);
   const { promise } = plan ? blockPromise(service, plan) : { promise: null };
   const outside = promise?.outside === true;
@@ -161,14 +183,19 @@ function StopLine({ service, onEdit, owesCompletion }) {
   // Once per stop: the feed marks the first card of a stop (driveInShown).
   const drive = driveInLabel(service);
   const name = service.customerName || 'Unassigned';
+  // An untimed visit of a technician with a customer opens the customer
+  // profile, as the grid's all-day strip does; its closeout is a separate
+  // action beside the line.
+  const opensCustomer = opensCustomerProfile(service, bookedStart, onViewCustomer);
+  const owed = owesCompletion?.(service);
   return (
-    <div>
+    <div className="flex items-stretch">
       <button
         type="button"
-        onClick={() => onEdit?.(service)}
-        title={`${name} · ${serviceDisplayName(service)}${plan ? plannedTitleLine(plan, promise) : ''}`}
+        onClick={() => (opensCustomer ? onViewCustomer(service) : onEdit?.(service))}
+        title={opensCustomer ? 'Open customer profile' : `${name} · ${serviceDisplayName(service)}${plan ? plannedTitleLine(plan, promise) : ''}`}
         className={cn(
-          'w-full text-left flex flex-wrap items-center gap-x-2 gap-y-0.5 pl-1 pr-3 py-2 text-14 leading-tight border-l-[3px] u-focus-ring',
+          'min-w-0 flex-1 text-left flex flex-wrap items-center gap-x-2 gap-y-0.5 pl-1 pr-3 py-2 text-14 leading-tight border-l-[3px] u-focus-ring',
           flat ? statusBlockClasses(status) : 'bg-white text-zinc-900 hover:bg-zinc-50',
           status === 'cancelled' && 'text-zinc-500 line-through',
         )}
@@ -179,20 +206,16 @@ function StopLine({ service, onEdit, owesCompletion }) {
         <span className="opacity-80 truncate min-w-0 basis-32 shrink">{serviceDisplayName(service)}</span>
         {plan && <span className="u-nums shrink-0 opacity-80" data-testid="stop-minutes">{plan.minutes} min</span>}
         {drive && <span className="u-nums shrink-0 opacity-70">{drive}</span>}
-        {STATUS_WORD[status] && <span className="shrink-0 opacity-80">{STATUS_WORD[status]}</span>}
-        {owesCompletion?.(service) && <CloseoutOwedChip />}
-        {promise && (
-          <span
-            className="shrink-0 ml-auto rounded-xs bg-zinc-100 px-1 u-nums text-zinc-700 whitespace-nowrap"
-            title={promiseChipTitle(promise)}
-          >{promise.label}</span>
-        )}
+        <StopTail status={status} showOwed={owed && !opensCustomer} promise={promise} />
       </button>
+      {owed && opensCustomer && (
+        <span className="shrink-0 self-center px-2"><CloseoutOwedChip onClick={() => onEdit?.(service)} /></span>
+      )}
     </div>
   );
 }
 
-function RouteCard({ name, stops, outToday, onEdit, owesCompletion }) {
+function RouteCard({ name, stops, outToday, onEdit, onViewCustomer, owesCompletion }) {
   const { minutes, finish, unplanned } = dayTotals(stops);
   return (
     <section className="rounded-sm border border-zinc-200 bg-white overflow-hidden" aria-label={`${name} route`}>
@@ -216,7 +239,7 @@ function RouteCard({ name, stops, outToday, onEdit, owesCompletion }) {
               <span className="u-nums shrink-0 w-8 pl-3 py-2 text-14 font-medium text-ink-secondary" data-testid="stop-number">{i + 1}</span>
               <div className="min-w-0 flex-1 divide-y divide-zinc-50">
                 {stop.services.map((service) => (
-                  <StopLine key={service.id} service={service} onEdit={onEdit} owesCompletion={owesCompletion} />
+                  <StopLine key={service.id} service={service} onEdit={onEdit} onViewCustomer={onViewCustomer} owesCompletion={owesCompletion} />
                 ))}
               </div>
             </li>
@@ -227,7 +250,7 @@ function RouteCard({ name, stops, outToday, onEdit, owesCompletion }) {
   );
 }
 
-export default function RouteListDay({ services = [], technicians = [], onEdit, owesCompletion }) {
+export default function RouteListDay({ services = [], technicians = [], onEdit, onViewCustomer, owesCompletion }) {
   const cards = useMemo(() => {
     const byTech = new Map();
     const unassigned = [];
@@ -252,7 +275,7 @@ export default function RouteListDay({ services = [], technicians = [], onEdit, 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 p-3" data-testid="route-list">
       {cards.map((card) => (
-        <RouteCard key={card.id} name={card.name} stops={card.stops} outToday={card.outToday} onEdit={onEdit} owesCompletion={owesCompletion} />
+        <RouteCard key={card.id} name={card.name} stops={card.stops} outToday={card.outToday} onEdit={onEdit} onViewCustomer={onViewCustomer} owesCompletion={owesCompletion} />
       ))}
     </div>
   );
