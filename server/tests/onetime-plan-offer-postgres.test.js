@@ -1414,6 +1414,63 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
         expect(await run({})).toMatchObject({ sent: 1, held: 0, failed: 0 });
       });
 
+      // The ledger settles a `failed` row from email_messages for 30 days only. Past that, an offer whose email the
+      // provider took (or whose handoff started) still counts for the whole year.
+      describe('a failed ledger row whose email went out, or may have', () => {
+        const failedOffer = async (customer, { daysAgo, message }) => {
+          const key = `onetime-plan-offer:offer:${crypto.randomUUID()}`;
+          await earlierOffer(customer, { daysAgo, status: 'failed', key });
+          if (message) {
+            await trx('email_messages').insert({
+              idempotency_key: key, recipient_email_snapshot: customer.email, recipient_type: 'customer', recipient_id: customer.id,
+              template_key: OFFER, ...message,
+            });
+          }
+        };
+
+        test.each([
+          ['accepted, 100 days ago', { daysAgo: 100, message: { status: 'sent', sent_at: new Date() } }],
+          ['handoff started, 200 days ago', { daysAgo: 200, message: { status: 'queued', provider_handoff_phase: 'started' } }],
+        ])('%s: holds the job', async (_name, earlier) => {
+          await publishOffer();
+          const { customer, job } = await seedJob();
+          await failedOffer(customer, earlier);
+          const summary = await run({});
+          expect(summary).toMatchObject({ sent: 0, held: 1, failed: 0 });
+          expect(summary.reasons).toEqual({ offered_before: 1 });
+          expect(await estimatesOf(customer)).toEqual([]);
+          expect(await offerMail(job.id)).toBeUndefined();
+        });
+
+        test.each([
+          ['no message', { daysAgo: 100, message: null }],
+          ['a message the provider refused', { daysAgo: 100, message: { status: 'failed', provider_handoff_phase: 'rejected' } }],
+          ['accepted 366 days ago', { daysAgo: 366, message: { status: 'sent', sent_at: new Date() } }],
+        ])('not a hold: %s', async (_name, earlier) => {
+          await publishOffer();
+          const { customer } = await seedJob();
+          await failedOffer(customer, earlier);
+          expect(await run({})).toMatchObject({ sent: 1, held: 0, failed: 0 });
+        });
+
+        test('the guard inside the reservation counts it too: an offer that landed after the job\'s own check; the quote stays', async () => {
+          await publishOffer();
+          const { customer, job } = await seedJob();
+          const real = require('../services/cancellation-resolution/restart').mintPlanStartEstimate;
+          const summary = await run({
+            mintPlanStartEstimate: async (args) => {
+              const minted = await real(args);
+              await failedOffer(customer, { daysAgo: 100, message: { status: 'sent', sent_at: new Date() } });
+              return minted;
+            },
+          });
+          expect(summary).toMatchObject({ sent: 0, held: 1, failed: 0 });
+          expect(summary.reasons).toEqual({ offered_before: 1 });
+          expect(await estimatesOf(customer)).toHaveLength(1);
+          expect(await ledgerRow(job.id)).toBeUndefined();
+        });
+      });
+
       // A worker that died after it reserved and before the provider leaves a `reserved` row. The ledger settles it
       // after RESERVATION_LIFETIME_MS, but only inside a reservation, so the job's own rule settles it first.
       describe('a reservation a crash left behind (older than the ledger\'s lifetime)', () => {
@@ -1672,6 +1729,67 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
       expect(await ledgerRow(job.id)).toMatchObject({ status: 'failed', reason: 'OFFER_GATE_OFF' });
       process.env.GATE_ONETIME_PLAN_OFFER = 'live';
       expect(await runAt(tomorrow)).toMatchObject({ sent: 1, held: 0, failed: 0 });
+    });
+
+    // The customer turns Auto Pay off while the quote is made. The card policy for the estimate does not read an
+    // explicit turn-off of a customer who is no plan member, so the handoff asks the account again.
+    test('Auto Pay turned off after the estimate was made: the provider is never called; back on, the next morning sends', async () => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      const real = require('../services/cancellation-resolution/restart').mintPlanStartEstimate;
+      const providerRequest = jest.fn();
+      Sendgrid.sendOne.mockImplementationOnce(async ({ database, providerBoundaryCheck }) => {
+        await providerBoundaryCheck({ database });
+        providerRequest();
+        return { messageId: 'sg-sample' };
+      });
+      const first = await run({
+        mintPlanStartEstimate: async (args) => {
+          const minted = await real(args);
+          await trx('customers').where({ id: customer.id }).update({ autopay_enabled: false });
+          await trx('autopay_log').insert({ customer_id: customer.id, event_type: 'autopay_disabled' });
+          return minted;
+        },
+      });
+      expect(first).toMatchObject({ sent: 0, held: 1, failed: 0 });
+      expect(first.reasons).toEqual({ autopay_off: 1 });
+      expect(providerRequest).not.toHaveBeenCalled();
+      expect(await ledgerRow(job.id)).toMatchObject({ status: 'failed', reason: 'AUTOPAY_OFF' });
+      // Still off the next morning: the job's own rule holds it. Back on, it sends.
+      expect((await runAt(tomorrow)).reasons).toEqual({ autopay_off: 1 });
+      await trx('customers').where({ id: customer.id }).update({ autopay_enabled: true });
+      await trx('autopay_log').insert({ customer_id: customer.id, event_type: 'autopay_enabled', created_at: new Date(Date.now() + 1000) });
+      expect(await runAt(new Date(tomorrow.getTime() + 24 * HOUR))).toMatchObject({ sent: 1, held: 0, failed: 0 });
+    });
+
+    // Staff views, the win/loss report and the click-mint reports date a send by deliveryState.firstDeliveredAt.
+    test('a sent offer is recorded on the estimate once: first and last delivery, the email channel, and a later morning adds nothing', async () => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      expect(await run({})).toMatchObject({ sent: 1, failed: 0 });
+      const [quote] = await estimatesOf(customer);
+      const state = readPlan(quote.estimate_data).deliveryState;
+      expect(state).toMatchObject({
+        sentChannels: ['email'], failedChannels: [], firstDeliveredAt: NOW.toISOString(), lastDeliveredAt: NOW.toISOString(), deliveredAt: [NOW.toISOString()],
+        channels: { email: { ok: true, providerAccepted: true } },
+      });
+      expect(readPlan(quote.estimate_data).planStart.offer.jobId).toBe(String(job.id));
+      expect(await runAt(tomorrow)).toMatchObject({ sent: 0, done: 1 });
+      expect(readPlan((await estimatesOf(customer))[0].estimate_data).deliveryState).toEqual(state);
+    });
+
+    test('a send the provider took whose estimate was never stamped: the next morning stamps it, with the message\'s time', async () => {
+      await publishOffer();
+      const { customer, job } = await seedJob();
+      expect(await run({ writeOfferDelivery: async () => { throw new Error('write failed'); } })).toMatchObject({ sent: 1, failed: 0 });
+      expect(readPlan((await estimatesOf(customer))[0].estimate_data).deliveryState).toBeUndefined();
+      const mail = await offerMail(job.id);
+      expect(await runAt(tomorrow)).toMatchObject({ sent: 0, done: 1 });
+      const state = readPlan((await estimatesOf(customer))[0].estimate_data).deliveryState;
+      expect(state.firstDeliveredAt).toBe(new Date(mail.sent_at).toISOString());
+      expect(state.deliveredAt).toHaveLength(1);
+      await runAt(new Date(tomorrow.getTime() + 24 * HOUR));
+      expect(readPlan((await estimatesOf(customer))[0].estimate_data).deliveryState).toEqual(state);
     });
 
     test('offers turned off after the estimate was made: the reservation is denied and leaves no row; back on, the next morning sends', async () => {
