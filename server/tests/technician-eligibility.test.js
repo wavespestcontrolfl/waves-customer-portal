@@ -857,6 +857,17 @@ describe('shift hours (GATE_TECH_SHIFT_HOURS)', () => {
         expect(off.conn).not.toHaveBeenCalled();
       }
     });
+
+    // The movers judge a time they cannot read as a block one minute longer than a day (rebooker.js shiftBlockMinutes).
+    test('shiftExcluding: a shift that is the whole day holds the whole day, and no shift holds a block longer than a day', async () => {
+      gateOn();
+      // 2031-03-09 is the March clock change: a clock-in at midnight with 23 set hours ends at the next midnight.
+      jest.useFakeTimers({ now: new Date('2031-03-09T06:00:00Z') });
+      const wholeDay = { shiftRows: [{ id: 'tech-1', shift_start: '00:00:00', shift_end: '23:00:00' }], clockRows: [{ technician_id: 'tech-1', clock_in: new Date('2031-03-09T05:00:00Z') }] };
+      const at = (hours) => shiftExcluding(commitConn(wholeDay).conn, 'tech-1', '2031-03-09', hours);
+      expect(await at({ startMin: 0, endMin: 1440 })).toBeNull();
+      expect(await at({ startMin: 0, endMin: 1441 })).toEqual({ startMin: 0, endMin: 1440, source: 'clock_in' });
+    });
   });
 });
 

@@ -803,6 +803,9 @@ async function planCallFollowUpShift({ conn, parentServiceId, fromDate, toDate }
       conn.raw("to_char(scheduled_date + (?::date - ?::date), 'YYYY-MM-DD') as new_day", [toStr, fromStr]));
 }
 
+// Why a follow-up kept its date when its parent moved (the admin card's words; no reason = its slot is booked).
+const KEPT_DATE_WHY = { changed: 'changed meanwhile', added: 'added meanwhile', shift: "outside the technician's shift" };
+
 // The block a child occupies on its destination day, for the canonical
 // occupancy probe: stored end, else start + duration (60 default), null
 // when the block would cross midnight (then nothing is probed — the child
@@ -832,7 +835,17 @@ function followUpProbeEnd(windowStart, windowEnd, estimatedDurationMinutes) {
 // so the helper rings the durable schedule_conflict admin card itself
 // (codex r12 P2) — a follow-up that silently lost its spacing is an
 // operator problem either way.
-async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate, toDate, occupancyHeld = false, plan = null, report = null, noticeActorId = null, suppressTechNotice = false }) {
+//
+// options.shiftLive (GATE_TECH_SHIFT_HOURS; an automatic move passes it, the
+// office's own move does not): a child keeps its hours and its technician and
+// changes its day only, so the move does not place it. It is skipped like a
+// booked slot (it keeps its date and is reported, reason 'shift') only when
+// the change of day takes it out of its technician's shift: the shift held
+// its block on its day and does not hold it on the new one. A technician's
+// set hours are the same every day and only today's follow a clock-in, so
+// that is a child that leaves today or lands on it. A block the shift did not
+// hold where it was is the office's placement and moves as before.
+async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate, toDate, occupancyHeld = false, plan = null, report = null, shiftLive = false, noticeActorId = null, suppressTechNotice = false }) {
   const fromStr = callBookingDateOnly(fromDate);
   const toStr = callBookingDateOnly(toDate);
   if (!parentServiceId || !fromStr || !toStr || fromStr === toStr) return 0;
@@ -890,6 +903,14 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
         // spacing (codex r17 P2).
         skipped.push({ id: planned.id, day: planned.day, newDay: planned.new_day, reason: 'changed' });
         continue;
+      }
+      if (shiftLive) {
+        const { shiftExcluding } = require('./technician-eligibility');
+        const hours = require('./scheduling/window-rules').rowBlockMinutes(k);
+        if (!(await shiftExcluding(trx, k.technician_id, k.day, hours)) && await shiftExcluding(trx, k.technician_id, k.new_day, hours)) {
+          skipped.push({ id: k.id, day: k.day, newDay: k.new_day, reason: 'shift' });
+          continue;
+        }
       }
       // Canonical occupancy check on the destination block (a windowless
       // child occupies nothing and is not probed): a clash — or a block
@@ -963,7 +984,7 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
           await NotificationService.notifyAdmin(
             'schedule_conflict',
             'Follow-up visit kept its date',
-            `The primary visit moved, but ${skipped.length} linked follow-up visit(s) kept their date (${skipped.map((k) => `${k.day} → ${k.newDay}${k.reason === 'changed' ? ' — changed meanwhile' : (k.reason === 'added' ? ' — added meanwhile' : ' — slot booked')}`).join(', ')}). Re-space them from dispatch.`,
+            `The primary visit moved, but ${skipped.length} linked follow-up visit(s) kept their date (${skipped.map((k) => `${k.day} → ${k.newDay} — ${KEPT_DATE_WHY[k.reason] || 'slot booked'}`).join(', ')}). Re-space them from dispatch.`,
             // The earliest follow-up proven to still sit on its day (slot booked or added meanwhile).
             { link: kept ? `/admin/dispatch?tab=schedule&date=${kept.day}&appointment=${encodeURIComponent(kept.id)}` : '/admin/dispatch?tab=schedule',
               metadata: { parentServiceId, skipped } },

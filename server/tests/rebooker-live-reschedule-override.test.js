@@ -485,6 +485,8 @@ describe('live-status reschedule override (allowLive)', () => {
       // Out-param: the child's own source/destination days feed the route
       // refresh, which the parent's two dates do not cover (#4295 r1 P2).
       report: expect.any(Object),
+      // The office's own move: the follow-up is not judged on shift hours (GATE_TECH_SHIFT_HOURS).
+      shiftLive: false,
     });
   });
 
