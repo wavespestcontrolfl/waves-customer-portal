@@ -170,6 +170,9 @@ function defaultDeps() {
     // The offer pricer's own account proof (plan-start-eligibility.js, which buildStartOffer asks): 'has_plan',
     // 'commercial' or 'not_live', or null for an account that may start a plan.
     planStartBlocker: (...args) => require('./plan-start-eligibility').planStartBlocker(...args),
+    // Closes the job's office item, if one is open (a closed or missing one is left as it is).
+    closeOfficeItem: ({ jobId, now, resolution }) => require('./admin-alert-episodes')
+      .closeAdminAlertKeys(db, [officeItemKey(jobId)], 'plan_offer_quoted', { now, resolution }),
     assertPlanStartAcceptEligible: (...args) => require('./cancellation-resolution/restart').assertPlanStartAcceptEligible(...args),
   };
 }
@@ -660,13 +663,23 @@ const SEND_RULES = [
   noComplaint, offerNotEnded, noLiveEstimate, emailAllowed,
 ];
 
+const PRICER_HOLDS = Object.freeze(['has_plan', 'commercial', 'not_live']);
 // The plan price, or the reason this home goes to the office to price by hand. The pricer gets the job: it
 // answers only for a visit of this customer, on an account whose every visit is at the home it prices. It is
 // given the app's own connection, never a transaction: its strict price refuses one. A failed read throws
 // (countJob), so an outage never reads as "this home cannot be priced".
 async function pricePlan(ctx) {
-  const { option, reason } = await ctx.deps.buildStartOffer(ctx.job.customer_id, ctx.deps.db, PLAN_FAMILY, { visitId: ctx.job.id });
-  if (reason === 'has_plan') return { verdict: 'held', reason };
+  const { option, reason: priced } = await ctx.deps.buildStartOffer(ctx.job.customer_id, ctx.deps.db, PLAN_FAMILY, { visitId: ctx.job.id });
+  // The pricer's `premises` covers an account its proof refuses before the price (a commercial or closed account)
+  // as well as an address it cannot prove. The account proof names the first; shadow and live read it alike.
+  const reason = priced === 'premises' ? ((await ctx.deps.planStartBlocker(ctx.deps.db, ctx.job.customer_id)) || priced) : priced;
+  // A plan, a business (the account or the priced property) or a closed account: no home for the offer (owner
+  // 2026-11-21, homes only). Held, and an office item an earlier morning raised for the job closes: the sweep's
+  // account proof cannot see a business that only the property lookup names.
+  if (PRICER_HOLDS.includes(reason)) {
+    await closeJobOfficeItem(ctx, reason);
+    return { verdict: 'held', reason };
+  }
   if (!option) return { verdict: 'office', reason };
   // A price came back: the price settings loaded whole this morning (reportPriceSettings).
   ctx.priceSettings.priced += 1;
@@ -675,6 +688,10 @@ async function pricePlan(ctx) {
   if (!(Number(option.setupFee) > 0)) return { verdict: 'office', reason: 'no_setup_fee' };
   if (!(Number(option.perVisit) < ctx.jobPrice)) return { verdict: 'office', reason: 'plan_not_below_job' };
   return { verdict: 'sample', reason: null, option };
+}
+
+async function closeJobOfficeItem(ctx, reason) {
+  await ctx.deps.closeOfficeItem({ jobId: ctx.job.id, now: ctx.now, resolution: BLOCKER_WORDS[reason] });
 }
 
 async function evaluateJob(ctx) {
@@ -1084,15 +1101,7 @@ async function liveJob(job, { now, deps, priceSettings }) {
   const result = outcome.verdict === 'sample' ? await mintAndSend(ctx, outcome.option) : outcome;
   // A home the app cannot price gets one office item: a person prices it by hand. A failed write fails the job, so
   // the next morning raises it again (the item's key makes it one item per job).
-  if (result.verdict === 'office') {
-    // The pricer's `premises` covers a confirmed commercial or closed account as well as an address it cannot prove.
-    // The first is no home to quote (owner 2026-11-21, homes only): held, no item. Only the second goes to the office.
-    if (result.reason === 'premises') {
-      const blocker = await deps.planStartBlocker(deps.db, job.customer_id);
-      if (blocker) return { verdict: 'held', reason: blocker };
-    }
-    await deps.raiseOfficeItem({ job, customer: ctx.customer, offerDay: ctx.offerDay, reason: result.reason });
-  }
+  if (result.verdict === 'office') await deps.raiseOfficeItem({ job, customer: ctx.customer, offerDay: ctx.offerDay, reason: result.reason });
   return result;
 }
 
@@ -1109,8 +1118,8 @@ const OFFICE_REASON_WORDS = Object.freeze({
   mint_pricing_unavailable: 'The server could not price the plan estimate for this home.',
   // The pricer's `premises`: a commercial or closed account, or no one service address it can prove. The offer is
   // for homes only (owner 2026-11-21), so the office checks the account before any quote.
-  premises: 'Check the account first: the app could not prove one residential service address for it (a commercial or '
-    + 'closed account, or no clear service address). Quote the plan only for a home.',
+  premises: 'Check the account first: the app could not prove one service address for it (no clear service address, '
+    + 'or visits at more than one home). Quote the plan only for a home.',
   not_priced: 'The app has no saved home size or property type it may price this home with, or the price needs a hand check.',
 });
 const officeItemKey = (jobId) => `${OFFICE_ITEM_PREFIX}${jobId}`;

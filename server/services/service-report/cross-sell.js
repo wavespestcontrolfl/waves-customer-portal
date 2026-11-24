@@ -1590,7 +1590,9 @@ async function visitIsOfCustomer(database, customerId, visitId) {
 const START_OFFER_FAMILIES = Object.freeze(['pest_control']);
 // The pricer's refusal of the account (PLAN_START_BLOCKED, the shared proof
 // in plan-start-eligibility.js), as the reason this function answers.
-const START_OFFER_REASON_OF_BLOCKER = Object.freeze({ has_plan: 'has_plan', commercial: 'premises', not_live: 'premises' });
+// Each keeps its own word: the job holds a commercial or a closed account, and sends only an unproven address to
+// the office to quote by hand.
+const START_OFFER_REASON_OF_BLOCKER = Object.freeze({ has_plan: 'has_plan', commercial: 'commercial', not_live: 'not_live' });
 
 // buildStartOffer(customerId, database, targetKey, { visitId }) → { option, reason }.
 // The one-time job to plan offer's price (owner 2026-11-19): the standard
@@ -1609,6 +1611,10 @@ const START_OFFER_REASON_OF_BLOCKER = Object.freeze({ has_plan: 'has_plan', comm
 //                home, or with a link that cannot be resolved, fails it), or
 //                the visit is not this customer's;
 //   'has_plan'   the customer already holds a plan;
+//   'commercial' the pricer's proof refused the account or the priced
+//                property as a business (a saved record, or the property
+//                lookup it resolved): no home to offer a plan to;
+//   'not_live'   the pricer's proof refused the account as not live;
 //   'not_priced' the home has no standard price the app may show alone.
 // `visitId` is the visit the offer follows, and it is REQUIRED: it must be a
 // visit of this customer (visitIsOfCustomer). The price is for the primary

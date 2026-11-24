@@ -146,6 +146,7 @@ function world({ tables = {}, jobs = [JOB], reminderJobs = [], ...deps } = {}) {
     planStartAcceptRefusal: jest.fn(async () => null),
     assertPlanStartAcceptEligible: jest.fn(async () => undefined),
     planStartBlocker: jest.fn(async () => null),
+    closeOfficeItem: jest.fn(async () => 1),
     ...deps,
   };
 }
@@ -555,6 +556,8 @@ describe('pricing outcomes', () => {
     ['the customer already has a plan', { option: null, reason: 'has_plan' }, { held: 1 }, 'has_plan'],
     ['the app cannot price the home', { option: null, reason: 'not_priced' }, { office: 1 }, 'not_priced'],
     ['the account fails the premises proof', { option: null, reason: 'premises' }, { office: 1 }, 'premises'],
+    ['the pricer reads the property as a business', { option: null, reason: 'commercial' }, { held: 1 }, 'commercial'],
+    ['the pricer reads the account as not live', { option: null, reason: 'not_live' }, { held: 1 }, 'not_live'],
     ['the plan has no setup fee to remove', { option: { ...OPTION, setupFee: null }, reason: null }, { office: 1 }, 'no_setup_fee'],
     ['a plan visit costs as much as the job did', { option: { ...OPTION, perVisit: 225 }, reason: null }, { office: 1 }, 'plan_not_below_job'],
   ])('%s: no sample', async (_name, priced, expected, reason) => {
@@ -1906,6 +1909,25 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       expect(liveCounts(summary)).toEqual({ ...ZERO, held: 1 });
       expect(summary.reasons).toEqual({ [blocker]: 1 });
       expect(deps.raiseOfficeItem).not.toHaveBeenCalled();
+    });
+
+    test.each([['commercial'], ['has_plan']])('the pricer answers %s on a rerun: the job\'s earlier office item closes', async (reason) => {
+      const deps = liveWorld({ buildStartOffer: jest.fn(async () => ({ option: null, reason })) });
+      await run(deps);
+      expect(deps.closeOfficeItem.mock.calls.map(([arg]) => [arg.jobId, arg.resolution]))
+        .toEqual([[JOB.id, reason === 'commercial' ? 'The account reads as commercial' : 'The customer has a plan now']]);
+      expect(deps.raiseOfficeItem).not.toHaveBeenCalled();
+    });
+
+    test('shadow reads premises as live does: an account the proof refuses is held, not counted for the office', async () => {
+      process.env.GATE_ONETIME_PLAN_OFFER = 'shadow';
+      const deps = liveWorld({
+        buildStartOffer: jest.fn(async () => ({ option: null, reason: 'premises' })),
+        planStartBlocker: jest.fn(async () => 'commercial'),
+      });
+      const summary = await run(deps);
+      expect(summary.office).toBe(0);
+      expect(summary.reasons).toEqual({ commercial: 1 });
     });
 
     test('premises for an address the app cannot prove: the office item, with its own words', async () => {

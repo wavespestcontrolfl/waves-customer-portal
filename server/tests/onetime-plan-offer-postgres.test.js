@@ -910,13 +910,13 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
   test.each([
     ['the account is a business', async (customer) => trx('customers').where({ id: customer.id }).update({ building_use: 'nonresidential' }), {}],
     ['the job itself was a commercial service, under a one-time pest key', async () => {}, { service_type: 'Commercial One-Time Pest Control' }],
-  ])('the real offer pricing: %s, so the home is not priced; it is counted for the office', async (_name, arrange, visit) => {
+  ])('the real offer pricing: %s, so the home is not priced; it is held as commercial, never an office item', async (_name, arrange, visit) => {
     const { customer } = await seedJob(visit);
     await arrange(customer);
     Lookup.performPropertyLookup.mockResolvedValue(SAVED_LOOKUP);
     const summary = await run({});
-    expect(summary).toMatchObject({ sample: 0, office: 1, held: 0, failed: 0 });
-    expect(summary.reasons).toEqual({ premises: 1 });
+    expect(summary).toMatchObject({ sample: 0, office: 0, held: 1, failed: 0 });
+    expect(summary.reasons).toEqual({ commercial: 1 });
     expect(Sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
@@ -1509,6 +1509,20 @@ postgres('one-time job to plan offer, shadow step (live Postgres)', () => {
       const officeRows = (jobId) => trx('notifications').where({ recipient_type: 'admin' })
         .whereRaw("metadata->>'dedupeKey' = ?", [`onetime-plan-offer:office:${jobId}`]);
       const unpriced = () => ({ buildStartOffer: jest.fn(async () => ({ option: null, reason: 'not_priced' })) });
+
+      test('a later morning whose pricer reads the property as a business closes the job\'s open row', async () => {
+        await publishOffer();
+        const { job } = await seedJob();
+        expect(await run(unpriced())).toMatchObject({ office: 1 });
+        expect((await officeRows(job.id))[0].done_at).toBeNull();
+        // Only the property lookup names the business: the sweep's account proof still clears the account.
+        const summary = await runAt(tomorrow, { buildStartOffer: jest.fn(async () => ({ option: null, reason: 'commercial' })) });
+        expect(summary).toMatchObject({ office: 0, held: 1 });
+        expect(summary.reasons).toEqual({ commercial: 1 });
+        const rows = await officeRows(job.id);
+        expect(rows).toHaveLength(1);
+        expect(rows[0].done_at).not.toBeNull();
+      });
 
       test('one row for a person, never a second one; no estimate and no email; it closes once the offer has ended', async () => {
         await publishOffer();

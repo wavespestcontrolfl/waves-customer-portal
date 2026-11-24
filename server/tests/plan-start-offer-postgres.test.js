@@ -155,7 +155,7 @@ postgres('plan start offer price (live Postgres)', () => {
       ['a plan member with no visit on the calendar', { waveguard_tier: 'Bronze' }, null, 'has_plan'],
       ['an account with no membership and a live recurring lawn visit', {}, 'Bi-Monthly Lawn Care Service', 'has_plan'],
       ['an account with no membership and a recurring palm injection', {}, 'Palm Injection', 'has_plan'],
-      ['a business by the building use of the account', { building_use: 'nonresidential' }, null, 'premises'],
+      ['a business by the building use of the account', { building_use: 'nonresidential' }, null, 'commercial'],
     ])('%s: no price, with the reason', async (_label, account, serviceType, reason) => {
       const worker = freshWorker();
       const customer = await seedCustomer(account);
@@ -167,10 +167,10 @@ postgres('plan start offer price (live Postgres)', () => {
       expect(worker.bridge.needsSync()).toBe(true);
     });
 
-    test('an account that the lookup resolves as a business: no price, reason premises', async () => {
+    test('an account that the lookup resolves as a business: no price, reason commercial', async () => {
       const worker = freshWorker();
       const propertyLookup = async () => ({ enriched: { ...SAVED_LOOKUP.enriched, propertyType: 'commercial', aiConfidence: 85 }, propertyRecord: {} });
-      expect(await priceJobOf(worker, await seedCustomer(), { propertyLookup })).toEqual(refused('premises'));
+      expect(await priceJobOf(worker, await seedCustomer(), { propertyLookup })).toEqual(refused('commercial'));
     });
 
     test('the account is priced once the visit that blocked it is gone', async () => {
