@@ -174,63 +174,77 @@ function sumTotals(out) {
   });
 }
 
+function groupBy(items, keyOf) {
+  const out = new Map();
+  for (const item of items) {
+    const key = String(keyOf(item));
+    if (!out.has(key)) out.set(key, []);
+    out.get(key).push(item);
+  }
+  return out;
+}
+
+// Paid invoices by customer, each with its ET day. A legacy paid invoice with no paid_at uses created_at, the
+// earliest it could have been paid.
+function invoicesByCustomer(invoices) {
+  const dated = invoices
+    .map((inv) => ({ ...inv, at: inv.paid_at || inv.created_at }))
+    .filter((inv) => inv.at)
+    .map((inv) => ({ ...inv, day: etDateString(new Date(inv.at)) }));
+  return groupBy(dated, (inv) => inv.customer_id);
+}
+
+// Money in (payments and deposits, net of refunds) from the lead day to day PAID90_DAYS.
+function moneyIn(collections, leadDay) {
+  const lastDay = daysAfter(leadDay, PAID90_DAYS);
+  return cents(collections.filter((c) => c.day >= leadDay && c.day <= lastDay).reduce((sum, c) => sum + c.net, 0));
+}
+
+function customerEntry(customerId, firstPaid, customer, paid90) {
+  return {
+    customer_id: customerId,
+    first_paid_date: firstPaid.paid_at ? firstPaid.day : null, // null: a legacy invoice with no paid date
+    service: firstPaid.service_type || firstPaid.title || null,
+    plan: isMembershipCustomerRow(customer || {}),
+    churned: customer?.pipeline_stage === 'churned',
+    paid90,
+  };
+}
+
+function leadRow(rows, lead, leadDay) {
+  return rowFor(rows, {
+    campaignId: lead.campaign_id,
+    campaign: lead.campaign_name,
+    platform: lead.campaign_id ? lead.platform : lead.lead_source,
+    date: leadDay,
+  });
+}
+
 /**
- * Credits each customer's paid invoices to their first-lead row: paid customer, plan or one-time, cancel and paid90.
+ * Credits each customer to their first-lead row: money in (paid90) counts even before an invoice is paid (an estimate
+ * deposit); paid customer, plan or one-time and cancel need a paid invoice on or after the lead day.
  */
 async function creditPaid(conn, rows, firstLead, customers) {
+  const ids = [...firstLead.keys()];
   const earliest = [...firstLead.values()].map((l) => dateOnlyString(l.lead_date)).sort()[0];
   const from = parseETDateTime(`${earliest}T00:00`);
-  const invoices = await loadPaidInvoices(conn, [...firstLead.keys()], from);
-  // paid90 is money that came in (payments and deposits, net of refunds), dated when it came in.
-  const collected = new Map();
-  for (const c of await netCollections(conn, [...firstLead.keys()], from)) {
-    const key = String(c.customer_id);
-    if (!collected.has(key)) collected.set(key, []);
-    collected.get(key).push({ day: c.day, net: c.net });
-  }
-  const byCustomer = new Map();
-  for (const inv of invoices) {
-    const key = String(inv.customer_id);
-    if (!byCustomer.has(key)) byCustomer.set(key, []);
-    const at = inv.paid_at || inv.created_at;
-    if (!at) continue;
-    byCustomer.get(key).push({ ...inv, at, day: etDateString(new Date(at)) });
-  }
+  const paidBy = invoicesByCustomer(await loadPaidInvoices(conn, ids, from));
+  const collected = groupBy(await netCollections(conn, ids, from), (c) => c.customer_id);
   for (const [customerId, lead] of firstLead) {
     const leadDay = dateOnlyString(lead.lead_date);
-    const paid = (byCustomer.get(customerId) || [])
-      .filter((inv) => inv.day >= leadDay)
-      .sort((a, b) => new Date(a.at) - new Date(b.at));
-    const lastDay = daysAfter(leadDay, PAID90_DAYS);
-    // Money in counts even before an invoice is paid (an estimate deposit); the customer counts need a paid invoice.
-    const paid90 = cents((collected.get(customerId) || [])
-      .filter((c) => c.day >= leadDay && c.day <= lastDay)
-      .reduce((sum, c) => sum + c.net, 0));
+    const paid = (paidBy.get(customerId) || []).filter((inv) => inv.day >= leadDay)
+      .sort((x, y) => new Date(x.at) - new Date(y.at));
+    const paid90 = moneyIn(collected.get(customerId) || [], leadDay);
     if (!paid.length && !paid90) continue;
-    const row = rowFor(rows, {
-      campaignId: lead.campaign_id,
-      campaign: lead.campaign_name,
-      platform: lead.campaign_id ? lead.platform : lead.lead_source,
-      date: leadDay,
-    });
-    const customer = customers.get(customerId);
-    const plan = isMembershipCustomerRow(customer || {});
-    const churned = customer?.pipeline_stage === 'churned';
+    const row = leadRow(rows, lead, leadDay);
     row.paid90 = cents(row.paid90 + paid90);
     if (!paid.length) continue;
+    const entry = customerEntry(customerId, paid[0], customers.get(customerId), paid90);
     row.paid_customers += 1;
-    if (plan) row.plan_customers += 1; else row.one_time_customers += 1;
-    if (churned) row.cancels += 1;
-    row.customers.push({
-      customer_id: customerId,
-      first_paid_date: paid[0].paid_at ? paid[0].day : null, // null: a legacy invoice with no paid date
-      service: paid[0].service_type || paid[0].title || null,
-      plan,
-      churned,
-      paid90,
-    });
+    row[entry.plan ? 'plan_customers' : 'one_time_customers'] += 1;
+    row.cancels += entry.churned ? 1 : 0;
+    row.customers.push(entry);
   }
-
 }
 
 /**
