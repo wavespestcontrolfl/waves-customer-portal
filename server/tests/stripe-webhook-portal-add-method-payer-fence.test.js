@@ -51,7 +51,7 @@ jest.mock('../services/stripe', () => ({
 }));
 jest.mock('../services/payment-method-consents', () => ({
   hasEnrollmentScopedConsent: jest.fn(async () => true),
-  hasConsentFor: jest.fn(async () => false),
+  hasSaveOnlyConsent: jest.fn(async () => false),
   deferredCaptureConsentVersionCurrent: jest.fn(async () => true),
   recordConsent: jest.fn(async () => ({})),
   linkPaymentMethodId: jest.fn(async () => ({})),
@@ -144,7 +144,7 @@ describe('portal-add-method webhook save-only form', () => {
   });
 
   test('a re-delivered event does not record the card-on-file consent twice', async () => {
-    ConsentService.hasConsentFor.mockResolvedValueOnce(true);
+    ConsentService.hasSaveOnlyConsent.mockResolvedValueOnce(true);
     await handleSetupIntentSucceeded({ ...SETUP_INTENT, metadata: { ...SETUP_INTENT.metadata, enroll_autopay: 'false' } });
     expect(ConsentService.recordConsent).not.toHaveBeenCalled();
     expect(enrollConsentedMethod).not.toHaveBeenCalled();

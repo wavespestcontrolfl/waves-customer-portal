@@ -212,6 +212,18 @@ describe('Billing tab Add Payment Method modal — save-only form from the remin
     expect(window.location.search).toBe('?tab=billing');
   });
 
+  it('closing the opened form ends the save-only mode: the next Add payment is the full form again', async () => {
+    api.createSetupIntent.mockResolvedValue({ publishableKey: 'pk_test_1', clientSecret: 'seti_secret', paymentMethodTypes: ['card'] });
+    getStripe.mockResolvedValue(fakeStripe());
+    render(<BillingTab customer={customer} openAddCard />);
+    await screen.findByRole('dialog', { name: 'Add payment method' }, SETTLE);
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(screen.queryByRole('dialog', { name: 'Add payment method' })).toBeNull();
+    fireEvent.click(await screen.findByRole('button', { name: 'Add payment' }, SETTLE));
+    await screen.findByRole('dialog', { name: 'Add payment method' }, SETTLE);
+    expect(api.createSetupIntent).toHaveBeenLastCalledWith('card_or_bank');
+  });
+
   it('the usual Add payment button still mints the full form and shows no save-only line', async () => {
     await openModal(['card', 'us_bank_account']);
     expect(api.createSetupIntent).toHaveBeenCalledWith('card_or_bank');

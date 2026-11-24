@@ -6649,6 +6649,9 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
   const closeAddCard = () => {
     if (stripeLoading) return;
     setShowAddCard(false);
+    // A deliberate dismissal ends the save-only mode (the normal Add payment button offers the bank tab again); a
+    // failed start never reaches here, so it keeps the mode for its retry.
+    setSaveOnlyAdd(false);
     paymentElementRef.current = null;
     elementsRef.current = null;
   };

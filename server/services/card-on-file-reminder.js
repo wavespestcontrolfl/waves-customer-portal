@@ -317,7 +317,7 @@ async function record(customerId, event, outcome, { nextVisitDate = null, idempo
     .ignore();
 }
 
-async function decideOne(customerId, event, mode, today, now) {
+async function decideOne(customerId, event, mode, today, now, clock = () => new Date()) {
   const verdict = await liveVerdict(customerId, event, today, now);
   if (!verdict.ok) return { result: 'skipped', reason: verdict.reason };
   if (await sentWithinRepeatWindow(customerId, mode, now)) return { result: 'skipped', reason: 'sent_within_30_days' };
@@ -338,7 +338,7 @@ async function decideOne(customerId, event, mode, today, now) {
     // the send, and so does a change to what the email says (a visit moved or cancelled, the address edited): the next
     // daily pass decides again and sends the current facts.
     beforeProviderHandoff: async () => {
-      const handoffAt = new Date();
+      const handoffAt = clock();
       const handoffToday = etDateString(handoffAt);
       // The customer's newest loss must still be the due event this send was decided on: a card removed after the
       // sweep read its events makes a newer one that is not due yet.
@@ -357,16 +357,19 @@ async function decideOne(customerId, event, mode, today, now) {
   return { result: 'sent' };
 }
 
-// `customerIds` narrows one run to those customers (the Postgres test's own rows); the daily sweep passes none.
-async function runCardOnFileReminderSweep({ now = new Date(), customerIds = null } = {}) {
+// `customerIds` narrows one run to those customers and `now` fixes the clock, for the handoff re-check too (both are the
+// Postgres test's); the daily sweep passes neither.
+async function runCardOnFileReminderSweep({ now: fixedNow = null, customerIds = null } = {}) {
   const mode = require('../config/feature-gates').cardOnFileReminderMode();
   if (mode === 'off') return { mode, candidates: 0, sent: 0, shadow: 0 };
+  const clock = fixedNow ? () => fixedNow : () => new Date();
+  const now = clock();
   const today = etDateString(now);
   const events = await collectEvents(today, now, customerIds);
   const summary = { mode, candidates: events.size, sent: 0, shadow: 0, skipped: {}, failed: 0 };
   for (const [customerId, event] of events) {
     try {
-      const outcome = await decideOne(customerId, event, mode, today, now);
+      const outcome = await decideOne(customerId, event, mode, today, now, clock);
       if (outcome.result === 'sent') summary.sent += 1;
       else if (outcome.result === 'shadow') summary.shadow += 1;
       else {

@@ -5656,7 +5656,7 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       // consent row" means no row at all, and the record is never an enrollment-scoped one.
       const saveOnly = require('../services/portal-save-only-card').setupIntentSavesOnly(setupIntent);
       const needsEnrollmentScopedConsent = saveOnly
-        ? !(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId))
+        ? !(await ConsentService.hasSaveOnlyConsent(wavesCustomerId, stripePmId))
         : !(await ConsentService.hasEnrollmentScopedConsent(wavesCustomerId, stripePmId));
       if (needsEnrollmentScopedConsent
         && !(await ConsentService.deferredCaptureConsentVersionCurrent(setupIntent, { context: 'portal add-method webhook', customerId: wavesCustomerId }))) {
