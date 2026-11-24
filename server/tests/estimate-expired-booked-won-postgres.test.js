@@ -627,27 +627,32 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
     };
     const url = 'https://portal.example.test/estimate/tok?website=1';
     // What sendCustomerMessage returns after the pipeline: sentBody has the scheme stripped.
-    const accepted = { sent: true, deliveryOutcome: 'accepted', sentBody: `Your quote: ${url.replace(/^https?:\/\//, '')}` };
+    const accepted = { sent: true, deliveryOutcome: 'accepted', sentAt: '2026-10-01T12:01:00.000Z', sentBody: `Your quote: ${url.replace(/^https?:\/\//, '')}` };
     const texted = await mk();
     const suppressed = await mk();
     const noLink = await mk();
     const uncertain = await mk();
     const never = await mk();
     const textedAt = new Date('2026-10-01T12:01:00Z');
-    expect(await recordWebsiteLinkTexted(texted, { result: accepted, url, at: textedAt, conn: mockTransaction })).toBe(true);
+    expect(await recordWebsiteLinkTexted(texted, { result: accepted, url, conn: mockTransaction })).toBe(true);
     // A second text keeps the first time (atomic: the write only fires while the key is absent).
-    expect(await recordWebsiteLinkTexted(texted, { result: accepted, url, at: new Date('2026-10-02T12:00:00Z'), conn: mockTransaction })).toBe(false);
+    expect(await recordWebsiteLinkTexted(texted, { result: { ...accepted, sentAt: '2026-10-02T12:00:00.000Z' }, url, conn: mockTransaction })).toBe(false);
     // The link must be COMPLETE in the sent text: embedded in another URL's path or query, or extended, is not it.
     const bare = url.replace(/^https?:\/\//, '');
     const embedded = await mk();
     const extended = await mk();
     const whole = await mk();
-    const sentWith = (sentBody) => ({ sent: true, deliveryOutcome: 'accepted', sentBody });
+    const sentWith = (sentBody) => ({ sent: true, deliveryOutcome: 'accepted', sentAt: '2026-10-01T12:01:00.000Z', sentBody });
     expect(await recordWebsiteLinkTexted(embedded, { result: sentWith(`See evil.example/go?u=${bare} now`), url, conn: mockTransaction })).toBe(false);
     expect(await recordWebsiteLinkTexted(embedded, { result: sentWith(`See https://evil.example/${bare}/x`), url, conn: mockTransaction })).toBe(false);
     expect(await recordWebsiteLinkTexted(extended, { result: sentWith(`See ${bare}&extra=1 now`), url, conn: mockTransaction })).toBe(false);
     expect(await recordWebsiteLinkTexted(extended, { result: sentWith(`See ${bare}.pdf`), url, conn: mockTransaction })).toBe(false);
-    // Whole: after a space or '(', before the end, a space, ')' or sentence punctuation.
+    // A redirect wrapper carrying the link in parentheses is another URL's path, not the link.
+    expect(await recordWebsiteLinkTexted(embedded, { result: sentWith(`See redirect.example/go/(${bare}) now`), url, conn: mockTransaction })).toBe(false);
+    // No provider handoff time, nothing recorded (an invalid one too).
+    expect(await recordWebsiteLinkTexted(whole, { result: { sent: true, deliveryOutcome: 'accepted', sentBody: `Your quote: ${bare}` }, url, conn: mockTransaction })).toBe(false);
+    expect(await recordWebsiteLinkTexted(whole, { result: { ...sentWith(`Your quote: ${bare}`), sentAt: 'not a date' }, url, conn: mockTransaction })).toBe(false);
+    // Whole: a token, optionally in parentheses and/or ending in sentence punctuation.
     expect(await recordWebsiteLinkTexted(whole, { result: sentWith(`Your quote (${bare}).`), url, conn: mockTransaction })).toBe(true);
     // Suppressed / blocked, a text without the link, and an uncertain handoff record nothing.
     expect(await recordWebsiteLinkTexted(suppressed, { result: { sent: false, blocked: true, deliveryOutcome: 'not_sent', sentBody: accepted.sentBody }, url, conn: mockTransaction })).toBe(false);
@@ -677,7 +682,7 @@ postgres('expired estimate reclaim — booked after expiry counts as won', () =>
     const id = await expiredEstimate(mockTransaction, cust, {
       source: 'quote_wizard', created_at: oct, sent_at: oct, expires_at: new Date('2026-10-08T12:00:00Z'),
     });
-    await recordWebsiteLinkTexted(id, { result: { sent: true, deliveryOutcome: 'accepted', sentBody: `Your quote: ${url.slice(8)}` }, url, at: new Date('2026-10-01T12:01:00Z'), conn: mockTransaction });
+    await recordWebsiteLinkTexted(id, { result: { sent: true, deliveryOutcome: 'accepted', sentAt: '2026-10-01T12:01:00.000Z', sentBody: `Your quote: ${url.slice(8)}` }, url, conn: mockTransaction });
     // What sendEstimateNow writes on a Nov resend: sent_at rewritten, deliveryState replaced wholesale, merged top-level.
     const patch = { deliveryState: { attemptedAt: nov.toISOString(), sentChannels: [], channels: {}, firstDeliveredAt: nov.toISOString() } };
     await mockTransaction('estimates').where({ id }).update({

@@ -132,19 +132,23 @@ async function publishInTransaction(trx, { estimateId, leadId, engineInput, engi
 // that) and never firstDeliveredAt (lead-reach and the watchers read it as a person's
 // handoff). One atomic write that only fires while the key is absent: first text wins.
 // Returns whether it recorded.
-// The link as a COMPLETE link: at the start, or after whitespace or '(', and followed by the end,
-// whitespace, ')' or sentence punctuation that itself ends the word. Never inside another URL's
-// path or query (a longer URL that merely starts with, or contains, this one).
+// The link as a WHOLE whitespace-delimited token of the sent text (one leading '(' and one
+// trailing sentence punctuation and/or ')' removed), equal to the URL with or without its
+// scheme. Never a part of another URL, a path segment or a query.
 // (GATE_SMS_LINK_WRAP is dark; a link the pipeline wrapped no longer matches, so no receipt: fail closed, no win.)
-function carriesLinkWhole(body, bare) {
-  const escaped = bare.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(?:^|[\\s(])${escaped}(?=$|[\\s)]|[.,;:!]($|[\\s)]))`).test(String(body || ''));
+function carriesLinkWhole(body, url) {
+  const bare = stripSmsUrlScheme(String(url || ''));
+  return String(body || '').split(/\s+/).some((raw) => {
+    const token = raw.replace(/^\(/, '').replace(/[.,!?]$/, '').replace(/\)$/, '');
+    return token !== '' && (token === url || token === bare);
+  });
 }
 
-async function recordWebsiteLinkTexted(estimateId, { result, url, at = new Date(), conn = db } = {}) {
+async function recordWebsiteLinkTexted(estimateId, { result, url, conn = db } = {}) {
   const accepted = result?.sent === true && result.deliveryOutcome === 'accepted' && result.deduped !== true;
-  const bare = stripSmsUrlScheme(String(url || ''));
-  if (!accepted || !bare || !carriesLinkWhole(result.sentBody, bare)) return false;
+  // The receipt's time is the provider handoff (result.sentAt); without it, nothing is recorded.
+  const at = result?.sentAt ? new Date(result.sentAt) : null;
+  if (!accepted || !url || !at || Number.isNaN(at.getTime()) || !carriesLinkWhole(result.sentBody, url)) return false;
   // No receipt on any error path (a thrown write included): the quote then has no anchor, which fails closed.
   const updated = await conn('estimates')
     .where({ id: estimateId })
