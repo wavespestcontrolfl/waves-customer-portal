@@ -3,7 +3,7 @@
  * functions; the unique-index clash rule is tested against PostgreSQL in mail-prospect-store-postgres.test.js.
  * Synthetic addresses only.
  */
-const { buildBaseSlug, hasUnitPart, slugCandidates, SLUG_RE, STREET_SUFFIXES } = require('../services/mail/home-slug');
+const { buildBaseSlug, hasUnitPart, streetWords, slugCandidates, SLUG_RE, STREET_SUFFIXES } = require('../services/mail/home-slug');
 
 describe('buildBaseSlug', () => {
   test.each([
@@ -157,5 +157,19 @@ describe('buildBaseSlug keepStreetType (text-to-book: the words as typed)', () =
   test('the default drops the street type, as the postcard slug does', () => {
     expect(buildBaseSlug('88 LAKE VIEW BLVD')).toBe('88-lake-view');
     expect(buildBaseSlug('88 LAKE VIEW BLVD', { keepStreetType: false })).toBe('88-lake-view');
+  });
+});
+
+describe('streetWords (the slug builder\'s own word rules)', () => {
+  test.each([
+    ['3 CAF\u00c9 DEL MAR DR', ['3', 'CAFE', 'DEL', 'MAR', 'DR']],
+    ['3 cafe del mar dr', ['3', 'CAFE', 'DEL', 'MAR', 'DR']],
+    ['5 ST. JAMES CT', ['5', 'ST', 'JAMES', 'CT']],
+    ['101 EXAMPLE TRL APT 9', ['101', 'EXAMPLE', 'TRL']],
+    ['5 MAIN ST #7', ['5', 'MAIN', 'ST']],
+    ['5 APT ROAD', ['5', 'APT', 'ROAD']],
+    ['88, LAKE VIEW BLVD', ['88', 'LAKE', 'VIEW', 'BLVD']],
+  ])('%s', (line, words) => {
+    expect(streetWords(line)).toEqual(words);
   });
 });

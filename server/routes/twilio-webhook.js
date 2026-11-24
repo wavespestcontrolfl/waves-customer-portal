@@ -1235,7 +1235,9 @@ router.post('/sms', async (req, res) => {
         standAside: () => require('../services/estimate-clarify-asks').hasAwaitingClarifyAsk({ phone: From }),
       });
       if (homeText.handled) {
-        await retypeConsumedInbound(smsLogEntry.id, 'mail_home_text_to_book', 'mail-home-text-to-book');
+        // Only a confirmed handoff leaves the needs-reply queue; an uncertain one consumes the text (no AI reply, no retry) but
+        // the row stays actionable so the office still sees a possibly unanswered request.
+        if (!homeText.uncertain) await retypeConsumedInbound(smsLogEntry.id, 'mail_home_text_to_book', 'mail-home-text-to-book');
         // Ack Twilio first, then ring the office thread bell the post-ack block below rings for any text to an office line
         // (a slow push must not hold the webhook open: Twilio retries a late ack). The bell never throws.
         res.type('text/xml').send('<Response></Response>');

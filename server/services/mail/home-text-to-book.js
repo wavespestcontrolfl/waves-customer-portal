@@ -35,7 +35,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const TWILIO_NUMBERS = require('../../config/twilio-numbers');
 const { mailHomePageLive, mailHomeTextBookLive } = require('../../config/feature-gates');
-const { buildBaseSlug, hasUnitPart, SLUG_RE, MAX_SLUG_LENGTH, STREET_SUFFIXES } = require('./home-slug');
+const { buildBaseSlug, hasUnitPart, streetWords, SLUG_RE, MAX_SLUG_LENGTH, STREET_SUFFIXES } = require('./home-slug');
 const { USPS_STREET_SUFFIXES } = require('../property-lookup/usps-street-suffixes');
 const { findOnlyKnownCallerCustomer, KNOWN_CALLER_PHONE_COLS } = require('../../utils/known-caller-phone');
 const { phoneIdentityKey } = require('../../utils/phone');
@@ -57,8 +57,6 @@ const MAX_BODY_LENGTH = 120;
 // ten international digits as a +1 number.
 const NANP_SENDER = /^\+1[2-9]\d{2}[2-9]\d{6}$/;
 const DIRECTIONALS = new Set(['N', 'S', 'E', 'W', 'NE', 'NW', 'SE', 'SW']);
-// Where a county address line's unit part starts (home-slug.js UNIT_WORDS).
-const UNIT_WORDS = new Set(['UNIT', 'APT', 'APTS', 'APARTMENT', 'STE', 'SUITE', 'BLDG', 'LOT', 'SPC', 'TRLR', 'RM', 'FLOOR']);
 
 const errCode = (err) => String((err && (err.code || err.name)) || 'error').slice(0, 32);
 const zip5Of = (zip) => (String(zip == null ? '' : zip).match(/\d{5}/) || [null])[0];
@@ -121,18 +119,17 @@ const sameWords = (a, b) => a.length === b.length && a.every((word, i) => word =
 /**
  * The type-stripped slug of a text only counts when the text agrees with the home's own address line: the same words, a
  * street type spelled any USPS way, or a county line that has no street type. "88 LAKE VIEW" typed for a home on
- * "88 LAKE ST" does not (VIEW is not ST). A line this cannot read (a directional, a unit) is not matched: no reply.
+ * "88 LAKE ST" does not (VIEW is not ST). Both lines are read with the slug builder's own word rules (streetWords: accents
+ * folded, punctuation and the unit part gone), so "3 CAFE DEL MAR DR" agrees with a stored "3 CAF\u00c9 DEL MAR DR".
+ * A line this cannot read (a directional it cannot place) is not matched: no reply.
  */
 function streetTypeAgrees(street, addressLine1) {
-  const typed = street.split(' ').map((w) => w.replace(/[,.]/g, '')).filter(Boolean).map(canonWord);
-  let row = String(addressLine1 || '').toUpperCase().replace(/[,.]/g, ' ').split(/\s+/).filter(Boolean);
-  const unitAt = row.findIndex((word, i) => word.startsWith('#') || (i >= 2 && UNIT_WORDS.has(word)));
-  if (unitAt >= 0) row = row.slice(0, unitAt);
-  row = row.map(canonWord);
+  const typed = streetWords(street).map(canonWord);
+  const row = streetWords(addressLine1).map(canonWord);
   if (sameWords(typed, row)) return true;
   const n = typed.length;
   const typeAt = n > 2 && DIRECTIONALS.has(typed[n - 1]) && STREET_SUFFIXES.has(typed[n - 2]) ? n - 2 : n - 1;
-  return sameWords(typed.filter((_, i) => i !== typeAt), row);
+  return sameWords(typed.filter((_, k) => k !== typeAt), row);
 }
 
 async function findLiveHome({ candidates, zip, street, fallback }) {
@@ -189,23 +186,26 @@ function replyBody({ address, slug }) {
   return `Here's your Waves page for ${address}: ${publicPortalUrl()}/nh/${slug}\n\nReply STOP to opt out.`;
 }
 
-// The sender's customer, for the opt-out and consent checks. The webhook matches phones on their last ten digits, so a customer
-// counts only when one of its stored numbers is the sender's NANP number (phoneIdentityKey: the same ten digits, and a stored
-// international number never equals it). The webhook's primary match is verified first; otherwise (`knownContact`: a record has
-// the number as a secondary or service-contact phone, or the webhook's own match failed the check) the ONE customer owning it is
-// read and verified the same way. null = no record claims the number (a lead). false = a record claims it that cannot be
-// confirmed as the sender's (two owners, a different number, or a failed read): no reply, consent unknown.
+// Who the sender is, for the opt-out and consent checks. Postcards go to new homeowners, so only two senders are answered:
+// a lead (no customer record claims the number) and a customer texting from its PRIMARY phone. A number that only a secondary
+// or service-contact slot holds, a failed or ambiguous lookup (two owners, a different owner than the webhook's match), or a
+// primary phone that another stored number of the customer merely shares the last ten digits with (an international number
+// would be classified as the wrong person) all get no reply and no claim: the text takes the ordinary path. The webhook
+// matches on the last ten digits, so the primary phone must equal the sender's NANP number (phoneIdentityKey) exactly.
+// null = a lead. false = no reply. Otherwise the customer's id.
 async function senderCustomerId(from, customer, knownContact) {
+  if (!customer) return knownContact ? false : null;
   const key = phoneIdentityKey(from);
-  if (customer && phoneIdentityKey(customer.phone) === key) return customer.id;
-  if (!customer && !knownContact) return null;
-  const only = await findOnlyKnownCallerCustomer(db, from, ['id', ...KNOWN_CALLER_PHONE_COLS]);
-  return only && KNOWN_CALLER_PHONE_COLS.some((col) => phoneIdentityKey(only[col]) === key) ? only.id : false;
+  if (phoneIdentityKey(customer.phone) !== key) return false;
+  const row = await findOnlyKnownCallerCustomer(db, from, ['id', ...KNOWN_CALLER_PHONE_COLS]);
+  if (!row || row.id !== customer.id || phoneIdentityKey(row.phone) !== key) return false;
+  const collides = (number) => number && phoneIdentityKey(number) !== key && String(number).replace(/\D/g, '').slice(-10) === key.slice(-10);
+  return KNOWN_CALLER_PHONE_COLS.some((col) => collides(row[col])) ? false : row.id;
 }
 
 /**
- * Answer a postcard text. `customer` is the webhook's matched customer for the sender, `knownContact` says the webhook found a
- * customer record that has the number as a secondary or service-contact phone, and `standAside` is an async predicate that
+ * Answer a postcard text. `customer` is the webhook's primary-phone match for the sender, `knownContact` says the webhook found a
+ * customer record for the number through any phone column (or its lookup failed), and `standAside` is an async predicate that
  * makes the reply stand down. Resolves { handled: true } when a reply was handed to the provider (sent, uncertain or threw
  * with no outcome: it may have gone, so the claim stays and nothing is retried), so the webhook can keep the AI auto-reply
  * from answering the same text; every other outcome is { handled: false } and the text goes on through the normal inbound
@@ -226,6 +226,11 @@ async function handleHomeTextToBook({ from, to, body, customer, knownContact, st
     // question waiting on its answer comes first, and a known contact must resolve to one customer whose consent is read.
     const customerId = await senderCustomerId(from, customer, knownContact);
     if (customerId === false || await standAside()) return { handled: false };
+    // A customer texting from its primary phone has its SMS opt-out and consent checked as for every other known-customer
+    // auto-reply; no match is a lead.
+    const who = customerId
+      ? { customerId, identityTrustLevel: 'phone_matches_customer' }
+      : { identityTrustLevel: 'phone_provided_unverified' };
 
     const claim = await claimReply({ from, to, prospectId: home.id });
     if (!claim.claimId) {
@@ -235,10 +240,6 @@ async function handleHomeTextToBook({ from, to, body, customer, knownContact, st
 
     const { sendCustomerMessage } = require('../messaging/send-customer-message');
     const { isRealProviderSend, isAmbiguousProviderOutcome } = require('../sms-auto-send');
-    // A known customer's SMS opt-out and consent are checked as for every other known-customer auto-reply; no match is a lead.
-    const who = customerId
-      ? { customerId, identityTrustLevel: 'phone_matches_customer' }
-      : { identityTrustLevel: 'phone_provided_unverified' };
     let result;
     try {
       result = await sendCustomerMessage({
@@ -264,7 +265,7 @@ async function handleHomeTextToBook({ from, to, body, customer, knownContact, st
     }
     if (isAmbiguousProviderOutcome(result)) {
       logger.warn(`[mail-home-text-to-book] reply for prospect ${home.id} left uncertain; claim kept, not retried`);
-      return { handled: true, prospectId: home.id };
+      return { handled: true, uncertain: true, prospectId: home.id };
     }
     await releaseClaim(claim.claimId);
     logger.info(`[mail-home-text-to-book] reply for prospect ${home.id} not sent (${String(result.code || 'refused').slice(0, 40)})`);

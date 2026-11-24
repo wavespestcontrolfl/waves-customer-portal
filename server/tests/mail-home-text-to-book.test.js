@@ -82,7 +82,8 @@ beforeEach(() => {
   mockGates.mailHomePageLive.mockReturnValue(true);
   mockGates.mailHomeTextBookLive.mockReturnValue(true);
   Object.assign(mockState, { homes: [{ ...HOME }], claims: [], deleted: [], prospectQueries: 0, claimTxns: 0, lock: Promise.resolve() });
-  mockFindOnly.mockResolvedValue(null);
+  // The one live customer that owns the sender's number, as its primary phone (read only when the webhook matched a customer).
+  mockFindOnly.mockResolvedValue({ id: 'cust-1', phone: SENDER });
   mockSend.mockResolvedValue({ ...SENT });
 });
 
@@ -156,6 +157,7 @@ describe('streetTypeAgrees', () => {
     ['101 EXAMPLE TRL', '101 EXAMPLE TRL', true],
     ['101 EXAMPLE TRAIL', '101 EXAMPLE TRL', true], // any USPS spelling of the same type
     ['101 EXAMPLE TRL', '101 EXAMPLE', true], // the county line has no street type
+    ['3 CAFE DEL MAR DR', '3 CAF\u00c9 DEL MAR DR', true], // the slug builder's accent folding
     ['88 LAKE VIEW', '88 LAKE ST', false], // VIEW is not ST: another street
     ['101 EXAMPLE DR', '101 EXAMPLE TRL', false], // another street type: another street
     ['88 LAKE VIEW BLVD', '88 LAKE VIEW BLVD UNIT 3', true], // the unit part is not typed
@@ -231,36 +233,55 @@ describe('handleHomeTextToBook', () => {
     expect(notCalled).not.toHaveBeenCalled();
   });
 
-  test('a number that is a secondary or service-contact phone of ONE customer: that customer\'s consent is read', async () => {
-    mockFindOnly.mockResolvedValue({ id: 'cust-9', secondary_phone: '(202) 555-0101' });
-    expect((await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', knownContact: true })).handled).toBe(true);
-    expect(mockSend.mock.calls[0][0]).toMatchObject({ customerId: 'cust-9', identityTrustLevel: 'phone_matches_customer' });
+  test('a customer texting from its PRIMARY phone: its opt-out is checked as the holder', async () => {
+    const customer = { id: 'cust-1', phone: '(202) 555-0101' };
+    expect((await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer, knownContact: true })).handled).toBe(true);
+    expect(mockSend.mock.calls[0][0]).toMatchObject({ customerId: 'cust-1', identityTrustLevel: 'phone_matches_customer' });
   });
 
-  test('a known contact that cannot be pinned to one customer (two owners, or a failed read): no claim, no reply', async () => {
-    mockFindOnly.mockResolvedValue(null);
+  test('a number held only by a secondary or service-contact slot (no primary match) gets no claim and no reply', async () => {
+    mockFindOnly.mockResolvedValue({ id: 'cust-9', phone: '(941) 555-0000', service_contact_phone: '(202) 555-0101' });
     expect(await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', knownContact: true })).toEqual({ handled: false });
-    mockFindOnly.mockRejectedValue(new Error('db down'));
-    expect(await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', knownContact: true })).toEqual({ handled: false });
+    expect(mockFindOnly).not.toHaveBeenCalled();
     expect(mockState.claimTxns).toBe(0);
     expect(mockSend).not.toHaveBeenCalled();
   });
 
-  test('a customer whose stored number is international but shares the sender\'s last ten digits is NOT that customer', async () => {
-    const stored = '+442025550101';
-    // The webhook matched on the last ten digits: not verified, and the lookup finds the same customer: no reply.
-    mockFindOnly.mockResolvedValue({ id: 'cust-1', phone: stored });
-    expect(await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer: { id: 'cust-1', phone: stored }, knownContact: true })).toEqual({ handled: false });
+  test.each([
+    ['the webhook matched a customer whose primary phone is a different number', { id: 'cust-1', phone: '(941) 555-0000' }, { id: 'cust-1', phone: '(941) 555-0000' }],
+    ['the one-owner read finds nobody (two owners, or the record is gone)', { id: 'cust-1', phone: SENDER }, null],
+    ['the one-owner read finds a different customer than the webhook\'s', { id: 'cust-1', phone: SENDER }, { id: 'cust-2', phone: SENDER }],
+    ['the one-owner read has the number only as a service contact', { id: 'cust-1', phone: SENDER }, { id: 'cust-1', phone: '(941) 555-0000', service_contact_phone: SENDER }],
+  ])('%s: no claim, no reply', async (_label, customer, owner) => {
+    mockFindOnly.mockResolvedValue(owner);
+    expect(await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer, knownContact: true })).toEqual({ handled: false });
+    expect(mockState.claimTxns).toBe(0);
     expect(mockSend).not.toHaveBeenCalled();
-    // The one customer that really owns the sender's NANP number is read instead, and its consent is the one checked.
-    mockFindOnly.mockResolvedValue({ id: 'cust-2', phone: '(202) 555-0101' });
-    expect((await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer: { id: 'cust-1', phone: stored }, knownContact: true })).handled).toBe(true);
-    expect(mockSend.mock.calls[0][0]).toMatchObject({ customerId: 'cust-2', identityTrustLevel: 'phone_matches_customer' });
   });
 
-  test('a secondary-phone owner whose stored number is not the sender\'s full number is refused', async () => {
-    mockFindOnly.mockResolvedValue({ id: 'cust-9', secondary_phone: '+442025550101' });
+  test('an unreadable lookup (the webhook\'s own failed, or the one-owner read throws): no claim, no reply', async () => {
     expect(await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', knownContact: true })).toEqual({ handled: false });
+    mockFindOnly.mockRejectedValue(new Error('db down'));
+    expect(await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer: { id: 'cust-1', phone: SENDER }, knownContact: true })).toEqual({ handled: false });
+    expect(mockState.claimTxns).toBe(0);
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['an international secondary', { secondary_phone: '+442025550101' }],
+    ['an international service contact', { service_contact2_phone: '+442025550101' }],
+  ])('country-code collision, %s sharing the sender\'s last ten digits: no claim, no reply', async (_label, extra) => {
+    const owner = { id: 'cust-1', phone: '(202) 555-0101', ...extra };
+    mockFindOnly.mockResolvedValue(owner);
+    expect(await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer: { id: 'cust-1', phone: SENDER }, knownContact: true })).toEqual({ handled: false });
+    expect(mockState.claimTxns).toBe(0);
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  test('an international primary phone that shares the sender\'s last ten digits is not the sender: no reply', async () => {
+    const stored = '+442025550101';
+    mockFindOnly.mockResolvedValue({ id: 'cust-1', phone: stored });
+    expect(await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer: { id: 'cust-1', phone: stored }, knownContact: true })).toEqual({ handled: false });
     expect(mockSend).not.toHaveBeenCalled();
   });
 
@@ -297,10 +318,20 @@ describe('handleHomeTextToBook', () => {
     expect(mockState.claims[0]).toMatchObject({ phone_digits: '2025550999', line_digits: '9412972817' });
   });
 
-  test('the webhook\'s own customer match wins: no second lookup', async () => {
-    await handleHomeTextToBook({ from: SENDER, to: PARRISH, body: '101 EXAMPLE', customer: { id: 'cust-1', phone: SENDER }, knownContact: true });
+  test('a lead (no customer, no known contact) is sent as phone_provided_unverified and costs no customer read', async () => {
+    await text('101 EXAMPLE');
     expect(mockFindOnly).not.toHaveBeenCalled();
-    expect(mockSend.mock.calls[0][0].customerId).toBe('cust-1');
+    expect(mockSend.mock.calls[0][0]).toMatchObject({ identityTrustLevel: 'phone_provided_unverified' });
+    expect(mockSend.mock.calls[0][0].customerId).toBeUndefined();
+  });
+
+  test('the full lookup: "3 CAFE DEL MAR DR" finds a stored "3 CAF\u00c9 DEL MAR DR" (accents folded like the slug)', async () => {
+    mockState.homes = [{ ...HOME, id: 'p-cafe', page_slug: '3-cafe-del-mar', address_line1: '3 CAF\u00c9 DEL MAR DR' }];
+    for (const typed of ['3 CAFE DEL MAR DR', '3 Cafe del Mar Dr.', '3 CAF\u00c9 DEL MAR', '3 cafe del mar']) {
+      mockState.claims = [];
+      mockSend.mockClear();
+      expect(await text(typed)).toEqual({ handled: true, prospectId: 'p-cafe' });
+    }
   });
 
   test('every office location line answers from itself', async () => {
@@ -459,7 +490,7 @@ describe('handleHomeTextToBook', () => {
 
   test('a send that threw with no outcome may have gone: the claim stays, the text is handled, nothing is retried', async () => {
     mockSend.mockRejectedValue(Object.assign(new Error('boom 101 Example Trl +12025550101'), { code: 'ECONNRESET' }));
-    expect(await text('101 EXAMPLE')).toEqual({ handled: true, prospectId: 'prospect-1' });
+    expect(await text('101 EXAMPLE')).toEqual({ handled: true, uncertain: true, prospectId: 'prospect-1' });
     expect(mockSend).toHaveBeenCalledTimes(1);
     expect(mockState.claims).toHaveLength(1);
     expect(await text('101 EXAMPLE')).toEqual({ handled: false }); // the claim holds the repeat
@@ -468,7 +499,7 @@ describe('handleHomeTextToBook', () => {
 
   test('an uncertain provider outcome is handled, keeps the claim and is never retried', async () => {
     mockSend.mockResolvedValue({ sent: false, deliveryOutcome: 'uncertain', uncertain: true });
-    expect(await text('101 EXAMPLE')).toEqual({ handled: true, prospectId: 'prospect-1' });
+    expect(await text('101 EXAMPLE')).toEqual({ handled: true, uncertain: true, prospectId: 'prospect-1' });
     expect(mockSend).toHaveBeenCalledTimes(1);
     expect(mockState.claims).toHaveLength(1);
   });
