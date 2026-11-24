@@ -925,6 +925,21 @@ jobs:
         # Three workers on the 4-vCPU runner: shards took 3-7 min against 5-8 with two.
         # The default 5 s test timeout is raised to 15 s because a third worker slows
         # cold module loads; a test that sets its own timeout keeps it.
+        #
+        # NODE_OPTIONS lifts V8's old-space limit from its ~4 GB default to 6 GB for the
+        # jest workers (child processes inherit it). tests/public-route-allowlist.test.js
+        # scans the whole app in beforeAll (route-surface/scan.js keeps the AST of every
+        # route file live while it runs). Measured 2026-11-23: that scan needs more than
+        # 2 GB of live heap and peaks near 2.9 GB. workerIdleMemoryLimit only checks
+        # BETWEEN files, so a worker that arrives with up to 2 GB left over from earlier
+        # files hit the 4 GB wall inside this one file: "FATAL ERROR: Ineffective
+        # mark-compacts near heap limit" then ChildProcessWorker._onExit, with 0 failed
+        # tests (jobs 137272891557, 137362224816, 137363786155; always this file; the
+        # time-balanced sequencer puts it in shard 4). 6 GB keeps three workers inside the 16 GB runner:
+        # the other files stay under the 2 GB recycle limit, so only the worker running
+        # this file grows that large.
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
         run: npx jest --ci --silent --maxWorkers=3 --shard=${{ matrix.shard }}/4 --testSequencer=./tests/helpers/time-balanced-sequencer.js --config='{"workerIdleMemoryLimit":"2GB","testTimeout":15000}'
 
   client:
