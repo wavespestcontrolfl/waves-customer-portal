@@ -55,7 +55,7 @@ import { formatETDate, formatETTime } from '../../lib/timezone';
 import InPersonCardSheet from './InPersonCardSheet';
 import { AskedTimeBoxLegacy } from './DayOnlyPromiseLegacy';
 import { askedTimeCreateFields, reminderAnswerFor } from './dayOnlyPromise';
-import { openEstimateLinkNotice, recentOpenEstimates } from './openEstimateLink';
+import { openEstimateLinkNotice } from './openEstimateLink';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -520,23 +520,12 @@ export function pickAutoScheduleEstimate({
   linkedEstimate = null,
   serviceCount = 0,
   appliedKey = null,
-  nowMs = Date.now(),
-  propertiesSettled = true,
 } = {}) {
   if (!customerId || isLoading || error || linkedEstimate || serviceCount > 0) return null;
-  // A formally ACCEPTED quote links first. With none, exactly one open quote
-  // (sent/viewed) this customer was sent in the last 60 days links by default
-  // so the booking records the win through the normal accept-on-book path
-  // (owner 2026-11-23). Staff untick it with Clear. Two or more open quotes
-  // never auto-link: the notice asks staff to pick the one the customer
-  // said yes to.
-  const accepted = estimates.filter((estimate) => estimate.status === 'accepted' && !estimate.linkedAppointment);
-  // While the customer's addresses are still loading (or failed), the offered
-  // list hides property-scoped quotes, so an open quote must wait: a second
-  // eligible quote or a higher-priority accepted one may still appear, and the
-  // applied key would block reconsidering it.
-  const openCandidates = propertiesSettled ? recentOpenEstimates(estimates, customerId, nowMs) : [];
-  const candidates = accepted.length > 0 ? accepted : openCandidates;
+  // Only auto-apply a formally ACCEPTED quote. Open quotes (sent/viewed) are
+  // surfaced in the picker but must be picked deliberately — auto-applying one
+  // would let an unrelated booking silently mark it accepted on submit.
+  const candidates = estimates.filter((estimate) => estimate.status === 'accepted' && !estimate.linkedAppointment);
   if (candidates.length !== 1) return null;
   const estimate = candidates[0];
   const key = `${customerId}:${estimate.id}`;
@@ -1771,7 +1760,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [scheduleEstimateError, setScheduleEstimateError] = useState('');
   const [linkedEstimate, setLinkedEstimate] = useState(null);
   const autoAppliedScheduleEstimateRef = useRef(null);
-  const autoLinkedOpenEstimateIdRef = useRef(null);
 
   // Lock body scroll while the modal is open. The modal is portaled to
   // document.body (so it isn't trapped inside the admin shell's
@@ -1855,14 +1843,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       && (!linkedEstimate.customerId || String(linkedEstimate.customerId) === String(customerId || ''))
       ? String(linkedEstimate.id)
       : null;
-    // Lines the PREVIOUS customer's quote filled (they carry its id) cannot
-    // ride the new customer: the link is cleared below, and the lines would
-    // book at that quote's prices and block this customer's own auto-link. A
-    // pinned default estimate keeps its lines (the estimate effect below
-    // unlinks one owned by another customer).
-    const fromPreviousQuote = (line) => !defaultEstimateId && line.sourceEstimateId != null;
-    const drops = (line) => fromPreviousQuote(line)
-      || (lineIsRetiredSale(line) && !(keptQuote && String(line.sourceEstimateId ?? '') === keptQuote));
+    const drops = (line) => lineIsRetiredSale(line) && !(keptQuote && String(line.sourceEstimateId ?? '') === keptQuote);
     setServices((arr) => (arr.some(drops) ? arr.filter((line) => !drops(line)) : arr));
     // The previous customer's search results (a retired row among them) are
     // not offered to the next one while their own search is in flight.
@@ -1881,7 +1862,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (!defaultEstimateId) {
       setLinkedEstimate(null);
       autoAppliedScheduleEstimateRef.current = null;
-      autoLinkedOpenEstimateIdRef.current = null;
     } else if (linkedEstimate?.customerId && customerId && String(linkedEstimate.customerId) !== String(customerId)) {
       // ...but a pinned quote OWNED by a different customer cannot ride this
       // one: the server refuses it ("Linked estimate belongs to a different
@@ -2476,20 +2456,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const amount = formatScheduleEstimateAmount(estimate);
     return [servicesLabel, amount, statusLabel].filter(Boolean).join(' - ');
   };
-  // Clear / "No estimate" on an auto-linked open quote also takes back the
-  // service lines that quote filled (they carry its id); services staff added
-  // themselves stay.
-  const dropAutoLinkedLines = () => {
-    const autoId = autoLinkedOpenEstimateIdRef.current;
-    if (!autoId) return;
-    autoLinkedOpenEstimateIdRef.current = null;
-    setServices((arr) => arr.filter((line) => String(line.sourceEstimateId ?? '') !== autoId));
-  };
   const applyScheduleEstimate = (estimateId) => {
     if (partialCommitLocked) return;
     if (!estimateId) {
       setLinkedEstimate(null);
-      dropAutoLinkedLines();
       // Lines priced for a property other than the one being booked cannot
       // ride an unlinked (manual) booking either — the server's mismatch
       // check only sees linked quotes. Lines for the selected property and
@@ -2557,16 +2527,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       linkedEstimate,
       serviceCount: services.length,
       appliedKey: autoAppliedScheduleEstimateRef.current,
-      propertiesSettled: bookingPropertyState === 'ready' || bookingPropertyState === 'hidden',
     });
     if (!auto) return;
     autoAppliedScheduleEstimateRef.current = auto.key;
-    // Remember an auto-linked OPEN quote so Clear can take back the lines it
-    // filled (and only those, never a service staff added themselves).
-    autoLinkedOpenEstimateIdRef.current = auto.estimate.status === 'accepted' ? null : String(auto.estimate.id);
     applyScheduleEstimate(auto.estimate.id);
     // Deliberately keyed on the schedule-estimate pipeline state only.
-  }, [visibleScheduleEstimates, scheduleEstimatesLoading, scheduleEstimateError, linkedEstimate, selectedCustomer?.id, services.length, bookingPropertyState]);
+  }, [visibleScheduleEstimates, scheduleEstimatesLoading, scheduleEstimateError, linkedEstimate, selectedCustomer?.id, services.length]);
 
   const defaultEstimateAppliedRef = useRef(false);
   useEffect(() => {
@@ -5973,18 +5939,35 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     </div>
                   )}
                   {(() => {
-                    // Booking-win tracking: tell staff about an open estimate
-                    // this booking would otherwise leave sitting at "sent".
-                    const notice = openEstimateLinkNotice({
-                      estimates: visibleScheduleEstimates,
-                      linkedEstimate,
-                      customerId: selectedCustomer?.id,
-                    });
-                    return notice ? (
-                      <div data-testid="open-estimate-link-notice" style={{ fontSize: 14, color: D.text, marginTop: 8 }}>
-                        {notice}
+                    // Booking-win tracking: an open estimate this booking would
+                    // otherwise leave at "sent". Recomputed from the offered list
+                    // on every render (customer, address and property changes all
+                    // move it); nothing is linked until staff tap the button, which
+                    // is the same pick as choosing it in the picker above.
+                    const settled = bookingPropertyState === 'ready' || bookingPropertyState === 'hidden';
+                    if (linkedEstimate || saving || partialCommitLocked || !settled) return null;
+                    const notice = openEstimateLinkNotice({ estimates: visibleScheduleEstimates, customerId: selectedCustomer?.id });
+                    if (!notice) return null;
+                    return (
+                      <div data-testid="open-estimate-link-notice" style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', fontSize: 14, color: D.text }}>
+                        <span style={{ minWidth: 0 }}>{notice.text}</span>
+                        {notice.estimateId != null && (
+                          <button
+                            type="button"
+                            onClick={() => applyScheduleEstimate(notice.estimateId)}
+                            style={{
+                              border: `1px solid ${D.border}`, borderRadius: 6,
+                              background: 'transparent', color: D.text, cursor: 'pointer',
+                              fontSize: isMobile ? 14 : 12, fontWeight: 500, whiteSpace: 'nowrap',
+                              padding: isMobile ? '10px 14px' : '6px 10px',
+                              minHeight: isMobile ? 40 : undefined,
+                            }}
+                          >
+                            Link it
+                          </button>
+                        )}
                       </div>
-                    ) : null;
+                    );
                   })()}
                   {linkedEstimate && (
                     <>
@@ -6143,7 +6126,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         </span>
                         <button
                           type="button"
-                          onClick={() => { setLinkedEstimate(null); dropAutoLinkedLines(); }}
+                          onClick={() => setLinkedEstimate(null)}
                           style={{
                             // Real tap target (owner report 2026-08-02: the
                             // 12px text button was near-untappable on iPhone).

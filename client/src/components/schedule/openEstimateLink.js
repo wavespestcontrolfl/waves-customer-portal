@@ -4,9 +4,12 @@
 // link the estimate stays sent/viewed and later reads as "expired / no answer"
 // even though the customer said yes by phone or text.
 //
-// Pure helpers only. Linking itself reuses the modal's applyScheduleEstimate
-// and the server's markEstimateManuallyAccepted path; nothing here sends,
-// charges or changes a price.
+// Nothing here links anything. The form shows a notice with a "Link it"
+// button, and the button is the same pick as choosing the estimate in the
+// Estimate source picker (applyScheduleEstimate), so the server's accept-on-book
+// path and its refusals are exactly what they are today.
+//
+// Pure helpers only.
 
 import { formatETDate } from '../../lib/timezone';
 
@@ -22,11 +25,16 @@ function sentMs(estimate) {
 
 // An estimate the office should be offered a link to: still open (sent or
 // viewed), owned by THIS customer (matched on id, never on a phone or a
-// name), not already tied to a visit, and sent within the last 60 days. A
-// missing or unreadable date is "not recent" so the prompt stays quiet.
+// name), not already tied to a visit, sent within the last 60 days, and one
+// the server says a staff booking can accept (`bookable`, computed from the
+// same refusals POST /admin/schedule applies: portal plan-start quotes, bill-
+// by-invoice proposals not yet won, gated or dropped add-ons, the retired
+// tree-and-shrub cadence). A missing flag or an unreadable date is "no", so the
+// prompt stays quiet.
 export function isRecentOpenEstimate(estimate, customerId, nowMs = Date.now()) {
   if (!estimate || customerId == null || customerId === '') return false;
   if (estimate.status !== 'sent' && estimate.status !== 'viewed') return false;
+  if (estimate.bookable !== true) return false;
   if (estimate.linkedAppointment) return false;
   if (estimate.customerId == null || String(estimate.customerId) !== String(customerId)) return false;
   const ms = sentMs(estimate);
@@ -49,17 +57,20 @@ function shortDate(estimate) {
   return ms == null ? '' : formatETDate(ms, { month: 'short', day: 'numeric' });
 }
 
-// The words staff see under the Estimate source picker. Null when there is
-// nothing to say.
-export function openEstimateLinkNotice({ estimates = [], linkedEstimate = null, customerId, nowMs = Date.now() } = {}) {
-  if (linkedEstimate) {
-    if (!isRecentOpenEstimate({ ...linkedEstimate, linkedAppointment: null }, customerId, nowMs)) return null;
-    return `This customer has an open estimate from ${shortDate(linkedEstimate)}. It is linked so this booking counts as won. Press Clear to book without it.`;
-  }
+// The words staff see under the Estimate source picker, and the estimate the
+// "Link it" button picks (null when staff must choose among several). Null
+// when there is nothing to say.
+export function openEstimateLinkNotice({ estimates = [], customerId, nowMs = Date.now() } = {}) {
   const open = recentOpenEstimates(estimates, customerId, nowMs);
   if (open.length === 0) return null;
   if (open.length === 1) {
-    return `This customer has an open estimate from ${shortDate(open[0])}. Pick it above so this booking counts as won.`;
+    return {
+      text: `This customer has an open estimate from ${shortDate(open[0])}. Link it so this booking counts as won.`,
+      estimateId: open[0].id,
+    };
   }
-  return `This customer has ${open.length} open estimates (newest from ${shortDate(open[0])}). Pick the one they said yes to so this booking counts as won.`;
+  return {
+    text: `This customer has ${open.length} open estimates (newest from ${shortDate(open[0])}). Pick the one they said yes to above so this booking counts as won.`,
+    estimateId: null,
+  };
 }
