@@ -45,7 +45,7 @@ module.exports = {
     assert.equal(first.sent72h, 1, 'The job reports one 72-hour reminder sent');
     assert.equal(texts().length, 1, 'Exactly one text goes out');
     const [text] = texts();
-    assert.equal(text.to, fixture.phone);
+    assert.ok(text.to === fixture.phone, 'The text goes to the customer\'s phone');
     // The fake transport only sees the phone, which the sibling fixture shares; the app's own log names the customer.
     const logged = await db('sms_log').where({ twilio_sid: text.sid, direction: 'outbound' });
     assert.equal(logged.length, 1, 'The reminder is logged once');

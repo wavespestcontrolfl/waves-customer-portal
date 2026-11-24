@@ -45,7 +45,8 @@ module.exports = {
     // Messages never print the text body or its links: report.json and the CI log are uploaded.
     assert.equal(texts().length, 1, 'Exactly one text goes out');
     const [text] = texts();
-    assert.equal(text.to, fixture.phone);
+    // A fixed message: a wrong recipient must not print either phone number into the uploaded report.
+    assert.ok(text.to === fixture.phone, 'The text goes to the customer\'s phone');
     // The fake transport only sees the phone, which the sibling fixture shares; the app's own log names the customer.
     const logged = await db('sms_log').where({ twilio_sid: text.sid, direction: 'outbound' });
     assert.equal(logged.length, 1, 'The completion text is logged once');
@@ -55,16 +56,23 @@ module.exports = {
     assert.ok(!text.body.includes('QA-PRIVATE-'), 'The text carries no private note');
     // Each link the customer receives is a direct /report/ or /pay/ path, or a short /l/ link; a short link is followed
     // through the QA server (as the customer's phone would) and must redirect, not answer 404 or 410.
-    const links = text.body.match(/(?:https?:\/\/)?[\w-]+(?:\.[\w-]+)+\/(?:report|pay|l)\/[\w-]+/g) || [];
+    // Only the app's own origins count: the portal this QA server serves, and the short-link base the app falls back to
+    // (short-url.js). A link anywhere else fails, even if its path holds the right token.
+    const origins = new Set([new URL(baseUrl).origin, 'https://portal.wavespestcontrol.com',
+      ...[process.env.SHORTLINK_BASE_URL, process.env.PUBLIC_PORTAL_URL].filter(Boolean).map((value) => new URL(value).origin)]);
+    const links = text.body.match(/(?:https?:\/\/)?[\w-]+(?:\.[\w-]+)*(?::\d+)?\/(?:report|pay|l)\/[\w-]+/g) || [];
     assert.ok(links.length >= 2, `The text carries the report and invoice links (${links.length} found)`);
     const targets = [];
     for (const link of links) {
-      const path = new URL(/^https?:/.test(link) ? link : `https://${link}`).pathname;
-      const short = /^\/l\/([\w-]+)$/.exec(path);
-      if (!short) { targets.push(path); continue; }
+      const url = new URL(/^https?:/.test(link) ? link : `https://${link}`);
+      assert.ok(origins.has(url.origin), 'Every link in the text is on one of the app\'s own origins');
+      const short = /^\/l\/([\w-]+)$/.exec(url.pathname);
+      if (!short) { targets.push(url.pathname); continue; }
       const hop = await page.request.get(`${baseUrl}/l/${short[1]}`, { maxRedirects: 0 });
       assert.ok([301, 302, 303, 307, 308].includes(hop.status()), `A short link redirects (status ${hop.status()})`);
-      targets.push(new URL(hop.headers().location, baseUrl).pathname);
+      const destination = new URL(hop.headers().location, baseUrl);
+      assert.ok(origins.has(destination.origin), 'A short link redirects to one of the app\'s own origins');
+      targets.push(destination.pathname);
     }
     assert.ok(targets.includes(`/report/${record.report_view_token}`), 'The text links this visit\'s report');
     assert.ok(targets.includes(`/pay/${invoices[0].token}`), 'The text links the invoice this visit billed');
