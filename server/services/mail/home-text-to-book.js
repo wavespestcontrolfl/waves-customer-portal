@@ -9,40 +9,54 @@
  * Dark behind GATE_MAIL_HOME_TEXT_BOOK (it texts a person; the flip is the owner's) and GATE_MAIL_HOME_PAGE (the page the
  * link opens). Hooked in routes/twilio-webhook.js after STOP/HELP/START and after the lead-intake machine.
  *
- *   - The body is matched with the shared slug builder (home-slug.js): a street type is dropped ("101 Example Trl" is
- *     "101-example"), a trailing 5-digit ZIP selects the ZIP form ("101 Example 34211" is "101-example-34211"). The slug
- *     must equal a live row's page_slug exactly (list_key new_home, status eligible or held_back). A bare address whose
- *     home only has the ZIP form is not guessed: no reply, the text is handled as any other.
+ *   - The body is matched with the shared slug builder (home-slug.js). The words as typed are tried first ("88 LAKE VIEW"
+ *     is "88-lake-view", a street whose name ends in a suffix word); then the type-stripped form ("101 Example Trl" is
+ *     "101-example"), which must also agree with the home's own address line, so "88 LAKE VIEW" never lands on "88 LAKE ST".
+ *     A trailing 5-digit ZIP selects the ZIP form ("101-example-34211"); a typed ZIP must be the home's own ZIP on every
+ *     match that does not carry the ZIP in its slug. The slug must equal a live row's page_slug exactly (list_key
+ *     new_home, status eligible or held_back). A bare address whose home only has the ZIP form is not guessed.
  *   - Any other text (most of them) costs no database read: the shape check alone turns it away.
- *   - One reply per sender, home and office line per 24 hours, read from the outbound sms_log.
+ *   - One reply per sender, office line and home per 24 hours. The reply is CLAIMED before the provider call
+ *     (mail_home_text_replies, keyed by the home's prospect id, under a per-key advisory lock): two texts at the same
+ *     moment send once; a sent or uncertain reply keeps its claim, a provable non-send releases it. sms_log is not the
+ *     witness: link wrapping can rewrite the link in the stored body, and an uncertain handoff may have no row.
+ *   - The copy promises "pick a time" only for a home whose page offers times (an eligible, priced home, with
+ *     self-booking on); any other home gets a neutral line, as its page shows "call us".
  *   - No lead and no customer is created here; the booking page creates the customer. No counter: no existing column fits.
- *   - Logs carry the slug and ids only, never an address or a phone.
+ *   - Logs carry the prospect id and error codes only, never an address, a slug or a phone.
  */
 
 const db = require('../../models/db');
 const logger = require('../logger');
 const TWILIO_NUMBERS = require('../../config/twilio-numbers');
-const { mailHomePageLive, mailHomeTextBookLive } = require('../../config/feature-gates');
-const { buildBaseSlug, SLUG_RE, MAX_SLUG_LENGTH } = require('./home-slug');
+const { mailHomePageLive, mailHomeTextBookLive, isEnabled } = require('../../config/feature-gates');
+const { buildBaseSlug, SLUG_RE, MAX_SLUG_LENGTH, STREET_SUFFIXES } = require('./home-slug');
+const { USPS_STREET_SUFFIXES } = require('../property-lookup/usps-street-suffixes');
 const { publicPortalUrl } = require('../../utils/portal-url');
 
 const LIST_KEY = 'new_home'; // services/mail/new-home-list.js LIST_KEY
 const LIVE_STATUSES = ['eligible', 'held_back'];
 const ENTRY_POINT = 'mail_home_text_to_book';
+const CLAIM_TABLE = 'mail_home_text_replies';
 const REPLY_WINDOW_HOURS = 24;
 // A house number, a street, at most a street type, a directional and a ZIP: more words than this is a sentence.
 const MAX_WORDS = 8;
 const MAX_BODY_LENGTH = 80;
 const DIRECTIONALS = new Set(['N', 'S', 'E', 'W', 'NE', 'NW', 'SE', 'SW']);
+// Where a county address line's unit part starts (home-slug.js UNIT_WORDS).
+const UNIT_WORDS = new Set(['UNIT', 'APT', 'APTS', 'APARTMENT', 'STE', 'SUITE', 'BLDG', 'LOT', 'SPC', 'TRLR', 'RM', 'FLOOR']);
 
 const errCode = (err) => String((err && (err.code || err.name)) || 'error').slice(0, 32);
+const digits10 = (phone) => String(phone || '').replace(/\D/g, '').slice(-10);
+const zip5Of = (zip) => (String(zip == null ? '' : zip).match(/\d{5}/) || [null])[0];
 
 /**
- * The slugs a text may name, best first, and the ZIP it gave; null when the text is not that shape.
- *   "101 example"        -> { candidates: ['101-example'], zip: null }
- *   "101 Example Trl"    -> { candidates: ['101-example'], zip: null }
- *   "101 EXAMPLE 34211"  -> { candidates: ['101-example-34211', '101-example'], zip: '34211' }
- * The plain slug after a ZIP is only a candidate: the caller accepts it when the home's own ZIP is the one typed.
+ * What a text may name, or null when it is not that shape. `candidates` are slugs, best first: the words as typed, then the
+ * type-stripped form (each with its ZIP form first when a ZIP was typed). `fallback` holds the slugs reachable only by
+ * stripping a street type. `street` is the text without its ZIP.
+ *   "101 example"        -> candidates ['101-example'], zip null
+ *   "101 Example Trl"    -> candidates ['101-example-trl', '101-example'], fallback ['101-example']
+ *   "101 EXAMPLE 34211"  -> candidates ['101-example-34211', '101-example'], zip '34211'
  */
 function parseAddressText(body) {
   if (typeof body !== 'string') return null;
@@ -59,10 +73,19 @@ function parseAddressText(body) {
     street = withZip[1];
     zip = withZip[2];
   }
-  const base = buildBaseSlug(street);
-  if (!base) return null;
-  const candidates = zip ? [`${base}-${zip}`, base] : [base];
-  return { candidates: candidates.filter((slug) => slug.length <= MAX_SLUG_LENGTH && SLUG_RE.test(slug)), zip };
+  const stripped = buildBaseSlug(street);
+  if (!stripped) return null;
+  const exact = buildBaseSlug(street, { keepStreetType: true });
+  const candidates = [];
+  const fallback = new Set();
+  for (const base of [...new Set([exact, stripped].filter(Boolean))]) {
+    for (const slug of (zip ? [`${base}-${zip}`, base] : [base])) {
+      if (slug.length > MAX_SLUG_LENGTH || !SLUG_RE.test(slug) || candidates.includes(slug)) continue;
+      candidates.push(slug);
+      if (base !== exact) fallback.add(slug);
+    }
+  }
+  return { candidates, zip, street, fallback };
 }
 
 // "101 EXAMPLE TRL" -> "101 Example Trl" (a directional stays in capitals).
@@ -76,42 +99,82 @@ function displayAddress(addressLine1) {
     .join(' ');
 }
 
-const zip5Of = (zip) => (String(zip == null ? '' : zip).match(/\d{5}/) || [null])[0];
+const canonWord = (word) => USPS_STREET_SUFFIXES[word] || word;
+const sameWords = (a, b) => a.length === b.length && a.every((word, i) => word === b[i]);
 
-async function findLiveHome({ candidates, zip }) {
+/**
+ * The type-stripped slug of a text only counts when the text agrees with the home's own address line: the same words, a
+ * street type spelled any USPS way, or a county line that has no street type. "88 LAKE VIEW" typed for a home on
+ * "88 LAKE ST" does not (VIEW is not ST). A line this cannot read (a directional, a unit) is not matched: no reply.
+ */
+function streetTypeAgrees(street, addressLine1) {
+  const typed = street.split(' ').map((w) => w.replace(/[,.]/g, '')).filter(Boolean).map(canonWord);
+  let row = String(addressLine1 || '').toUpperCase().replace(/[,.]/g, ' ').split(/\s+/).filter(Boolean);
+  const unitAt = row.findIndex((word, i) => word.startsWith('#') || (i >= 2 && UNIT_WORDS.has(word)));
+  if (unitAt >= 0) row = row.slice(0, unitAt);
+  row = row.map(canonWord);
+  if (sameWords(typed, row)) return true;
+  const n = typed.length;
+  const typeAt = n > 2 && DIRECTIONALS.has(typed[n - 1]) && STREET_SUFFIXES.has(typed[n - 2]) ? n - 2 : n - 1;
+  return sameWords(typed.filter((_, i) => i !== typeAt), row);
+}
+
+async function findLiveHome({ candidates, zip, street, fallback }) {
   if (!candidates.length) return null;
   const rows = await db('mail_prospects')
     .where({ list_key: LIST_KEY })
     .whereIn('status', LIVE_STATUSES)
     .whereIn('page_slug', candidates)
-    .select('page_slug', 'address_line1', 'zip');
+    .select('id', 'page_slug', 'address_line1', 'zip', 'status', 'price_status', 'price_annual');
   const bySlug = new Map(rows.map((row) => [row.page_slug, row]));
   for (const slug of candidates) {
     const row = bySlug.get(slug);
     if (!row) continue;
-    // The plain slug after a typed ZIP belongs to a home of that ZIP only; another ZIP is another home's address.
-    if (zip && slug === candidates[candidates.length - 1] && slug !== candidates[0] && zip5Of(row.zip) !== zip) continue;
+    // A typed ZIP is the home's own ZIP on every match whose slug does not carry it (another ZIP is another home's address).
+    if (zip && !slug.endsWith(`-${zip}`) && zip5Of(row.zip) !== zip) continue;
+    if (fallback.has(slug) && !streetTypeAgrees(street, row.address_line1)) continue;
     return row;
   }
   return null;
 }
 
-const digits10 = (phone) => String(phone || '').replace(/\D/g, '').slice(-10);
-
-async function repliedRecently({ from, to, slug }) {
-  // The reply carries the link as its own line, so the slug ends at white space or the end of the body.
-  const row = await db('sms_log')
-    .where({ direction: 'outbound', message_type: ENTRY_POINT })
-    .whereRaw("RIGHT(regexp_replace(to_phone, '[^0-9]', '', 'g'), 10) = ?", [digits10(from)])
-    .whereRaw("RIGHT(regexp_replace(from_phone, '[^0-9]', '', 'g'), 10) = ?", [digits10(to)])
-    .whereRaw("message_body ~ ('/nh/' || ? || '(\\s|$)')", [slug])
-    .whereRaw(`created_at > now() - interval '${REPLY_WINDOW_HOURS} hours'`)
-    .first('id');
-  return Boolean(row);
+/**
+ * The 24-hour claim, taken and committed before the provider call. Returns the claim id, or null when this sender already
+ * has one for this home on this office line. The per-key advisory lock makes check-then-insert atomic: a second text at
+ * the same moment waits, then sees the first's committed row.
+ */
+async function claimReply({ from, to, prospectId }) {
+  const key = { phone_digits: digits10(from), line_digits: digits10(to), prospect_id: prospectId };
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${CLAIM_TABLE}:${key.phone_digits}:${key.line_digits}:${prospectId}`]);
+    const recent = await trx(CLAIM_TABLE).where(key)
+      .whereRaw(`claimed_at > now() - interval '${REPLY_WINDOW_HOURS} hours'`)
+      .first('id');
+    if (recent) return null;
+    const [row] = await trx(CLAIM_TABLE).insert(key).returning('id');
+    return (row && row.id) || row;
+  });
 }
 
-function replyBody({ address, slug }) {
-  return `Here's your Waves page for ${address}: ${publicPortalUrl()}/nh/${slug}\n\nPick a time and you're booked. Reply STOP to opt out.`;
+// A provable non-send frees the claim; a failed release keeps it (a missed reply beats a doubled one).
+async function releaseClaim(claimId) {
+  try {
+    await db(CLAIM_TABLE).where({ id: claimId }).del();
+  } catch (err) {
+    logger.warn(`[mail-home-text-to-book] claim release failed (${errCode(err)})`);
+  }
+}
+
+// Only a home whose page offers times is told to pick one: eligible and priced (home-page.js priceOf), self-booking on.
+function offersTimes(home) {
+  return home.status === 'eligible' && home.price_status === 'priced' && home.price_annual != null && isEnabled('selfBooking') === true;
+}
+
+function replyBody({ address, slug, offerTimes }) {
+  const next = offerTimes
+    ? "Pick a time and you're booked."
+    : 'See your page, and call us with any questions.';
+  return `Here's your Waves page for ${address}: ${publicPortalUrl()}/nh/${slug}\n\n${next} Reply STOP to opt out.`;
 }
 
 /**
@@ -131,8 +194,10 @@ async function handleHomeTextToBook({ from, to, body }) {
     if (!parsed) return { handled: false };
     const home = await findLiveHome(parsed);
     if (!home) return { handled: false };
-    if (await repliedRecently({ from, to, slug: home.page_slug })) {
-      logger.info(`[mail-home-text-to-book] repeat text for ${home.page_slug} inside ${REPLY_WINDOW_HOURS} h, no second reply`);
+
+    const claimId = await claimReply({ from, to, prospectId: home.id });
+    if (!claimId) {
+      logger.info(`[mail-home-text-to-book] repeat text for prospect ${home.id} inside ${REPLY_WINDOW_HOURS} h, no second reply`);
       return { handled: false };
     }
 
@@ -142,7 +207,7 @@ async function handleHomeTextToBook({ from, to, body }) {
     try {
       result = await sendCustomerMessage({
         to: from,
-        body: replyBody({ address: displayAddress(home.address_line1), slug: home.page_slug }),
+        body: replyBody({ address: displayAddress(home.address_line1), slug: home.page_slug, offerTimes: offersTimes(home) }),
         channel: 'sms',
         audience: 'lead',
         purpose: 'conversational',
@@ -159,19 +224,21 @@ async function handleHomeTextToBook({ from, to, body }) {
     } catch (err) {
       result = err && err.providerOutcome && typeof err.providerOutcome === 'object' ? err.providerOutcome : null;
       if (!result) {
-        logger.warn(`[mail-home-text-to-book] send threw for ${home.page_slug} (${errCode(err)})`);
+        // No outcome at all: the text may have reached the provider. The claim stays; nothing is retried.
+        logger.warn(`[mail-home-text-to-book] send threw for prospect ${home.id} (${errCode(err)})`);
         return { handled: false };
       }
     }
     if (result && result.sent && isRealProviderSend(result)) {
-      logger.info(`[mail-home-text-to-book] replied for ${home.page_slug} from the ${locationId} line`);
-      return { handled: true, slug: home.page_slug };
+      logger.info(`[mail-home-text-to-book] replied for prospect ${home.id} from the ${locationId} line`);
+      return { handled: true, prospectId: home.id };
     }
     if (isAmbiguousProviderOutcome(result)) {
-      logger.warn(`[mail-home-text-to-book] reply for ${home.page_slug} left uncertain; not retried`);
-      return { handled: true, slug: home.page_slug };
+      logger.warn(`[mail-home-text-to-book] reply for prospect ${home.id} left uncertain; claim kept, not retried`);
+      return { handled: true, prospectId: home.id };
     }
-    logger.info(`[mail-home-text-to-book] reply for ${home.page_slug} not sent (${String((result && result.code) || 'refused').slice(0, 40)})`);
+    await releaseClaim(claimId);
+    logger.info(`[mail-home-text-to-book] reply for prospect ${home.id} not sent (${String((result && result.code) || 'refused').slice(0, 40)})`);
     return { handled: false };
   } catch (err) {
     logger.warn(`[mail-home-text-to-book] failed (${errCode(err)})`);
@@ -179,4 +246,4 @@ async function handleHomeTextToBook({ from, to, body }) {
   }
 }
 
-module.exports = { handleHomeTextToBook, ENTRY_POINT, _test: { parseAddressText, displayAddress, replyBody, findLiveHome } };
+module.exports = { handleHomeTextToBook, ENTRY_POINT, _test: { parseAddressText, displayAddress, replyBody, findLiveHome, streetTypeAgrees, claimReply } };

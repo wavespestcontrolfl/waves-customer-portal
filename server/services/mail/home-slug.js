@@ -54,9 +54,10 @@ function tokensOf(addressLine1) {
  *   - the last word is dropped when it is a street type (TRL, DR, BLVD, ...), also when a directional follows it
  *     ("123 MAIN ST NW" is "123-main-nw"); a street that is only its type word keeps it ("5 PARK");
  *   - the rest (directionals, numbers, the name) is lowercase, every run of other characters becomes one dash.
+ * With keepStreetType the type (and the directional rule that goes with it) is kept: "88 LAKE VIEW BLVD" is "88-lake-view-blvd".
  * Nothing left after the number: null. A slug over 60 characters: null (the card prints the QR code only).
  */
-function buildBaseSlug(addressLine1) {
+function buildBaseSlug(addressLine1, { keepStreetType = false } = {}) {
   const tokens = tokensOf(addressLine1);
   if (tokens.length < 2 || !/^\d+$/.test(tokens[0])) return null;
   const number = tokens[0].replace(/^0+/, '');
@@ -68,12 +69,16 @@ function buildBaseSlug(addressLine1) {
   if (unitAt >= 0) name = name.slice(0, unitAt);
 
   // Trailing directionals ("MAIN ST NW"): set aside, then the street type before them.
-  const tail = [];
-  while (name.length > 2 && DIRECTIONALS.has(name[name.length - 1]) && STREET_SUFFIXES.has(name[name.length - 2])) {
-    tail.unshift(name.pop());
+  // keepStreetType (text-to-book, services/mail/home-text-to-book.js): the words as typed, no street type dropped, so a
+  // street whose name ends in a suffix word ("88 LAKE VIEW") can be matched before the type-stripped form.
+  if (!keepStreetType) {
+    const tail = [];
+    while (name.length > 2 && DIRECTIONALS.has(name[name.length - 1]) && STREET_SUFFIXES.has(name[name.length - 2])) {
+      tail.unshift(name.pop());
+    }
+    if (name.length > 1 && STREET_SUFFIXES.has(name[name.length - 1])) name.pop();
+    name = name.concat(tail);
   }
-  if (name.length > 1 && STREET_SUFFIXES.has(name[name.length - 1])) name.pop();
-  name = name.concat(tail);
 
   const text = name.join(' ').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
   if (!text) return null;
