@@ -739,7 +739,7 @@ function frozenReminderLabel() {
 // Bulk per-run guard context for the active mode. ROUTE-TIERS needs the
 // reminder freeze (its 24.25h band) + drift-anchor evidence; FLEX-TIER needs
 // the reminder freeze (its own, tighter 25h band) + the SAME drift-anchor
-// evidence (its ±5 or ±7 days are measured from the durable original date too) +
+// evidence (its ±5, ±6 or ±7 days are measured from the durable original date too) +
 // each visit's series neighbors. Both FAIL CLOSED: a failed read must
 // freeze/guard-unknown every visit rather than move without the check.
 // Pulled out of runAutoDispatch to keep its complexity budget (see
@@ -805,8 +805,8 @@ function staleAnchorMeta(window, origDate, anchor, radius = flexTier.FLEX_TIER_R
 // reminder row at all is invisible to that check, and the flex ctx skips
 // eligibility.js's days-out lock entirely, so the 25h cutoff is ALSO
 // enforced directly from the visit's own canonical arrival (Codex pre-push
-// P1; an unreadable arrival throws, and the run records it). The ±5-day (±7 for a
-// plan of 2 months or longer) window is anchored to the durable original date (route-tiers'
+// P1; an unreadable arrival throws, and the run records it). The ±5-day (±6 for a
+// 2-month plan, ±7 for 3 months or longer) window is anchored to the durable original date (route-tiers'
 // resolveAnchor), so it is never reset by an earlier move. A null neighbor
 // map is a failed read — skip.degraded, so the caller folds it into the
 // run's health (Codex #4995 r6 P2); a visit merely missing from the map is
@@ -823,7 +823,7 @@ async function flexWindowFor(service, {
   const neighbors = neighborMap.get(service.id);
   if (!neighbors) return skip('SERIES_NEIGHBORS_UNKNOWN', 'Visit missing from its own series read — no move (fail closed)');
   if (!anchor) return skip('DRIFT_ANCHOR_UNKNOWN', 'Recurrence anchor could not be derived — no move (fail closed)');
-  // The band is this visit's own (±7 for a plan of 2 months or longer whose nearest live sibling is 56 days away or more, else ±5),
+  // The band is this visit's own (±7 for a plan of 3 months or longer, ±6 for 2 months, when its nearest live sibling is 56 days away or more, else ±5),
   // from the pattern THIS series read saw (`neighbors.radiusDays`), never the pass-1 snapshot: the pass-2 recheck
   // must rank moves by the band the move transaction will enforce (apply.js assertFlexWindows reads the same fact).
   const radius = flexTier.flexBandRadius({ radiusDays: neighbors.radiusDays, neighbors });

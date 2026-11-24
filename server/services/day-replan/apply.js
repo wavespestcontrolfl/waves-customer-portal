@@ -170,7 +170,7 @@ const TOLD_ROW_COLUMNS = [
  * isPersonPlacedVisit fails closed too (an unreadable history = placed).
  */
 async function toldLockFacts(trx, deps, { row, id, dateStr }) {
-  const levels = await promiseLevelFacts(trx, deps, id);
+  const levels = await promiseLevelFacts(trx, deps, { id, dateStr });
   // askRecorded: the app records whether the customer asked for the time (owner 2026-11-22): a set time (the visit may not
   // be promised as a day only) stops the write as set_time, and an answer that cannot be read (a thrown read included) as
   // set_time_unread.
@@ -179,19 +179,18 @@ async function toldLockFacts(trx, deps, { row, id, dateStr }) {
   return { toldLock: true, ...levels, ...ask, personPlaced: new Set(!verdict || verdict.placed !== false ? [id] : []) };
 }
 
+
 /**
- * The visit's promise level, re-read inside its move transaction. 'hour' = told, 'day' = dayTold.
- * A read that throws fails CLOSED: the visit counts as told an hour, so the write stops (time_told).
+ * The visit's promise facts, re-read inside its move transaction in ONE read (deps.loadPromiseFacts): 'hour' = told,
+ * 'day' = dayTold, and the told slot's start on `dateStr` (toldStart, the 2-hour told shift, owner 2026-11-24).
+ * A read that throws fails CLOSED: the visit counts as told an hour with no told start, so the write stops (time_told).
  */
-async function promiseLevelFacts(trx, deps, id) {
-  let level = 'hour';
+async function promiseLevelFacts(trx, deps, { id, dateStr }) {
   try {
-    const levels = await deps.loadPromiseLevels(trx, [id], deps.now());
-    level = levels.get(id) || levels.get(String(id)) || 'none';
+    return deps.toldFactsOf(await deps.loadPromiseFacts(trx, [id], deps.now()), [id], dateStr);
   } catch (_) {
-    level = 'hour';
+    return { told: new Set([id]), dayTold: new Set(), toldStart: new Map() };
   }
-  return { told: new Set(level === 'hour' ? [id] : []), dayTold: new Set(level === 'day' ? [id] : []) };
 }
 
 /**

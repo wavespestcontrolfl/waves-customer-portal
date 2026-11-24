@@ -24,7 +24,7 @@ jest.mock('../services/auto-dispatch/preferences', () => ({ getCustomerSchedulin
 // The night told-lock's reads (its own suite: night-told-lock-day-replan.test.js): nobody was told anything, no person placed any visit.
 jest.mock('../services/auto-dispatch/told-visits', () => ({
   loadToldVisitIds: jest.fn(async () => new Set()),
-  loadPromiseLevels: jest.fn(async (_conn, ids) => new Map(ids.map((id) => [id, 'none']))),
+  loadPromiseFacts: jest.fn(async (_conn, ids) => new Map(ids.map((id) => [id, { level: 'none', start: null }]))),
 }));
 jest.mock('../services/time-promise', () => ({
   ...jest.requireActual('../services/time-promise'),

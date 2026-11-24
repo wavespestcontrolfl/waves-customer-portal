@@ -303,12 +303,12 @@ function getAutoDispatchConfig(overrides = {}) {
 
 // What the admin page states for a flex run (AutoDispatchPage policyText), saved in config_snapshot so a run keeps
 // the rule it ran under: the night freeze in hours (the run always passes lock24h, owner 2026-11-03) and the widest
-// band (±7, owner 2026-11-22; flexBandRadius decides which visits get it). A run saved before these fields existed
+// band (±7, owner 2026-11-22) and the 2-month band (±6, owner 2026-11-24); flexBandRadius decides which visits get them. A run saved before these fields existed
 // has neither, and the page then states only what every flex run had in common.
 function flexPolicyFacts(flexTierEnabled) {
   if (!flexTierEnabled) return {};
   const flexTier = require('./flex-tier');
-  return { flexFreezeHours: flexTier.flexFreezeHoursFor(true), flexWideRadiusDays: flexTier.FLEX_TIER_WIDE_RADIUS_DAYS };
+  return { flexFreezeHours: flexTier.flexFreezeHoursFor(true), flexWideRadiusDays: flexTier.FLEX_TIER_WIDE_RADIUS_DAYS, flexBimonthlyRadiusDays: flexTier.FLEX_TIER_BIMONTHLY_RADIUS_DAYS };
 }
 
 module.exports = {
