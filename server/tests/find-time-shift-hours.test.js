@@ -115,7 +115,7 @@ describe('the hour finder (findAvailableSlots, the customer path in production)'
     delete process.env.GATE_TECH_SHIFT_HOURS;
     expect(startsOf(await findAvailableSlots(EVERY_HOUR))).toEqual(OWN_DAY);
     expect(reads('time_entries')).toBe(0);
-    expect(reads('technicians')).toBe(2); // the technician list, and the birthday read (technicians.dob, absentTechDays)
+    expect(reads('technicians')).toBe(1);
   });
 
   test('a technician without set hours keeps the path\'s own day', async () => {
@@ -283,7 +283,7 @@ describe('the staff arrival finder (findArrivalWindowSlots, the office and techn
   test('no technician matches the search: the hours are not read', async () => {
     tables.technicians = [];
     expect((await findAvailableSlots({ ...STAFF, technicianId: 't9' })).slots).toEqual([]);
-    expect(reads('technicians')).toBe(2); // the technician list, and the birthday read (technicians.dob, absentTechDays)
+    expect(reads('technicians')).toBe(1);
   });
 
   test('the gate off: the picker\'s own day for everyone, and no shift or clock-in read', async () => {
@@ -292,7 +292,7 @@ describe('the staff arrival finder (findArrivalWindowSlots, the office and techn
     expect(limitsOf()).toEqual({ [`t1:${WED}`]: [8 * 60, 20 * 60] });
     expect(shiftEndsOf()).toEqual({ [`t1:${WED}`]: 'not passed' });
     expect(reads('time_entries')).toBe(0);
-    expect(reads('technicians')).toBe(2); // the technician list, and the birthday read (technicians.dob, absentTechDays)
+    expect(reads('technicians')).toBe(1);
   });
 });
 
@@ -388,7 +388,7 @@ describe('the capacity finder (findCapacitySlots: capacity mode, and the night s
   test('no technician matches the search: the hours are not read', async () => {
     tables.technicians = [];
     expect((await findAvailableSlots({ ...CAPACITY, technicianId: 't9' })).slots).toEqual([]);
-    expect(reads('technicians')).toBe(2); // the technician list, and the birthday read (technicians.dob, absentTechDays)
+    expect(reads('technicians')).toBe(1);
   });
 
   test('the night search (arrivalSearch) gets the same hours with the capacity gate off', async () => {
@@ -406,11 +406,11 @@ describe('the capacity finder (findCapacitySlots: capacity mode, and the night s
 
 describe('a failed read of the hours fails the search: no hour is offered on a guess', () => {
   const BASE = { lat: 27.4, lng: -82.5, durationMinutes: 60, dateFrom: WED, dateTo: WED, topN: 50 };
-  // Each finder reads `technicians` three times: the technician list, the birthdays (absentTechDays, fail-soft), then the hours. The third read fails.
+  // Each finder reads `technicians` twice: the technician list, then the hours. The second read fails.
   beforeEach(() => {
     let technicianReads = 0;
     db.mockImplementation((table) => {
-      if (table === 'technicians' && ++technicianReads === 3) throw new Error('hours read refused');
+      if (table === 'technicians' && ++technicianReads === 2) throw new Error('hours read refused');
       return chain(tables[table] || []);
     });
     loadArrivalRouteContext.mockImplementation(async ({ date, technicianId }) => ({ date, technicianId, target: { id: 'candidate' }, rows: [] }));

@@ -2543,7 +2543,7 @@ async function assignableRecurringTemplateTechnicianId(conn, parent, date) {
   let q = conn('technicians').where({ id: techId });
   if (conn.isTransaction) q = q.forShare();
   const workDaysLive = techWorkDaysLive();
-  const tech = await q.first('id', 'employment_status', 'field_dispatchable', ...(date ? ['dob'] : []), ...(workDaysLive ? ['work_days'] : []));
+  const tech = await q.first('id', 'employment_status', 'field_dispatchable', ...(workDaysLive ? ['work_days'] : []));
   if (!isAssignable(tech)) {
     logger.warn(`[recurring] parent=${parent?.id} technician ${techId} is not assignable; seeding child unassigned`);
     return null;
@@ -2559,11 +2559,6 @@ async function assignableRecurringTemplateTechnicianId(conn, parent, date) {
       .first('id');
     if (absence) {
       logger.warn(`[recurring] parent=${parent?.id} technician ${techId} is marked out on ${date}; seeding child unassigned`);
-      return null;
-    }
-    // The technician's own birthday is a day off (owner 2026-11-24): same as a mark-out.
-    if (require('../services/technician-eligibility').isBirthdayOn(tech.dob, date)) {
-      logger.warn(`[recurring] parent=${parent?.id} technician ${techId} is unavailable on ${date}; seeding child unassigned`);
       return null;
     }
   }

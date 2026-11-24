@@ -10,7 +10,7 @@ const { lockCustomerComms, withCustomerCommsLock } = require('../utils/customer-
 const { isMistingSystemIdentity } = require('../utils/mosquito-misting-system');
 const { clearOfBlackout: nudgeOffBlackoutDates, isBlackedOut } = require('./scheduling/blackout-nudge');
 const { resolveSeriesChildIdentity } = require('./service-catalog-names');
-const { isAssignable } = require('./technician-eligibility');
+const { isAssignable, absentTechDays } = require('./technician-eligibility');
 const { LAWN_ROUNDS_9, lawnRoundDate, lawnRoundDateFrom, roundOf, roundTaken, SeriesDates } = require('./lawn-rounds');
 const { newSeriesAreaAnchor } = require('./lawn-area-days');
 
@@ -1574,11 +1574,9 @@ async function seedFollowUpsForParent(conn, inputParent, inputOpts = {}) {
       .filter(Boolean)
       .sort();
     if (inheritedDates.length) {
-      // An unreadable absence or birthday list (technician_absences, technicians.dob) seeds every follow-up unassigned:
-      // read in a savepoint, a failure marks every date absent (seriesSlotAbsentDays), so auto-dispatch places them.
-      const absentDays = await require('./annual-prepay-series-slot').seriesSlotAbsentDays(
-        conn, { technicianId: inheritedTechId }, inheritedDates,
-      );
+      const absentDays = await absentTechDays(conn, {
+        dateFrom: inheritedDates[0], dateTo: inheritedDates[inheritedDates.length - 1], technicianIds: [inheritedTechId],
+      });
       if (absentDays.size) {
         rows = rows.map((r) => (
           r.technician_id === inheritedTechId && absentDays.has(`${inheritedTechId}:${dateOnly(r.scheduled_date)}`)

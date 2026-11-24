@@ -16,7 +16,7 @@ closure** stops one technician and leaves the others working.
 | One-off blackout dates | business | table `schedule_blackout_dates` | Office: Settings, Scheduling, Blackouts |
 | Weekly days off | business | `system_settings` key `schedule_weekly_days_off` (JSON array of 0 to 6, 0 = Sunday) | Office: Settings, Scheduling, Blackouts |
 | Yearly holiday closures | business | `system_settings` key `schedule_holiday_closures` (JSON array of holiday keys) | Office: Settings, Scheduling, Blackouts |
-| Technician birthday | technician | `technicians.dob`, no table of days | Office: Time Tracking, Team, Edit Technician, Payroll & personal info, Date of birth |
+| Technician birthday | technician | owner policy; enforcement through `technician_absences` rows is a separate change | Office: date of birth on the technician's payroll profile |
 | Technician out | technician | table `technician_absences` (an uncleared row) | Office: the tech-out flow |
 
 ### One-off blackout dates and weekly days off
@@ -49,31 +49,22 @@ observed weekday: Saturday closes the Friday before, Sunday closes the Monday af
 Black Friday, Christmas Eve, New Year's Eve, Martin Luther King Jr. Day, Presidents' Day,
 Easter and the rest are normal work days.
 
-### Technician birthday (`server/services/technician-eligibility.js`)
+### Technician birthday (owner policy)
 
-Each technician gets their own birthday off, one paid day (benefits ruling E6, 2026-11-20).
+Owner policy 2026-11-24 (benefits ruling E6, 2026-11-20): each technician gets their own
+birthday off, one paid day. The date of birth lives in `technicians.dob` (Time Tracking, Team,
+Edit Technician, Payroll & personal info, Date of birth).
 
-- The date comes from `technicians.dob`. Only the month and day matter.
-- A Feb 29 birthday is kept on Feb 28 in a year with no Feb 29.
-- Only technicians with `employment_status = 'active'` count. A NULL `dob`, an inactive
-  technician or a prospective one has no birthday day.
-- It is derived, never stored. There is no row to create or clear, and no gate. The
-  office sets the date of birth and the day is off from then on.
-- It counts exactly like an absence. `absentTechDays` (the shared seam) adds
-  `<technicianId>:<date>` for the birthday, and `assertAssignableTechnician` refuses the
-  technician on that date with "is unavailable on <date>" (generic on purpose: the text reaches logs).
-- A failed read of `technicians.dob` throws, like a failed `technician_absences` read, so each
-  caller applies its own policy. Booking surfaces fail as they do on an absence read error. The
-  recurring seeder and the annual-prepay seeder read in a savepoint and, on a failure, seed the
-  visits with no technician for auto-dispatch to place.
-- Payroll is unchanged. Whether the day pays is a payroll matter and lives in the payroll
-  code (`payroll-time-off.js`), not here.
+The scheduler does **not** enforce this yet. Enforcement is coming in a separate change that
+writes a birthday as an ordinary `technician_absences` row, so every reader in the table
+below, the dispatch board and the locked rechecks treat it exactly like a technician out.
+Until that ships, the office keeps a technician's birthday clear by hand (the tech-out flow).
 
 ### Technician out (`technician_absences`)
 
 An uncleared row marks one technician out for one date. The tech-out flow
 (`tech-out.js`, `tech-out-auto-move.js`) also parks and moves the visits the technician
-already held. A birthday does not run that flow: there is no row, so nothing is parked.
+already held.
 
 ## Who reads each layer
 
@@ -82,11 +73,11 @@ Business closures go through `server/services/scheduling/blackout-dates.js`
 open: an unreadable list reads as "open" so an outage never blocks booking. The
 auto-dispatch readers pass `{ strict: true }`, so an unreadable list stops a move instead.
 
-| Reader | Business closures | Technician closures (birthday and out) |
+| Reader | Business closures | Technician closures (technician out) |
 | --- | --- | --- |
 | Find a time and booking (`scheduling/find-time.js`, the `/book` page, reschedule, estimate slots, AI searches) | Skips the date | `absentTechDays` skips the technician on that date. If every technician is out, no slot. |
 | Slot hold and confirm (`slot-reservation.js`, `routes/booking.js /confirm`) | Re-checked at redemption, so an offer minted before a closure cannot be booked | `assertAssignableTechnician` with the date refuses the technician |
-| Recurring seeder (`recurring-appointment-seeder.js`) | Nudges a child visit off a closed day | A child on a day its technician is out, or on their birthday, is seeded with no technician. The office or auto-dispatch places it. |
+| Recurring seeder (`recurring-appointment-seeder.js`) | Nudges a child visit off a closed day | A child on a day its technician is out is seeded with no technician. The office or auto-dispatch places it. |
 | Office assignment (`dispatch-assignment.js`, board drag, `admin-dispatch.js /technicians?date=`) | Not applicable | Refused with a 422. The picker does not offer the technician for that date. |
 | Series children (`admin-schedule.js assignableRecurringTemplateTechnicianId`) | Not applicable | The child is created with no technician |
 | Auto-dispatch candidate slots (`auto-dispatch/candidate-slots.js`, via find-time) and `scheduling/pick-technician.js` | Skips the date | Skips the technician on that date |
@@ -106,25 +97,19 @@ guards, which still apply:
 A visit that stays on a closed day raises a needs-a-person notice. The nightly path reads
 the closed days with `strict`, so an unreadable list stops the move.
 
-A technician birthday is not a `closed_day` conflict. It stops a new placement on that
-technician and date. It does not move a visit already on the day. Reassign such a visit by
-hand, or enter the date of birth before visits are booked that far out.
-
 ## How the office changes things
 
 - **A closed day, a weekly day off or a holiday:** Settings, Scheduling, Blackouts
   (`/admin/settings?tab=blackout-days`). Holiday switches are there too. Adding a closure
   takes the closure-state lock, so a hold in flight cannot slip onto the new closed day.
-- **A technician birthday:** Time Tracking, Team, Edit Technician, Show Payroll & personal
-  info, Date of birth. It takes effect on the next search or booking. No restart.
+- **A technician birthday:** set the date of birth on the technician's payroll profile (Time
+  Tracking, Team, Edit Technician, Show Payroll & personal info). Scheduling does not read it yet.
 - **A technician out:** the tech-out flow on the dispatch board.
 
 ## Tests
 
 - `server/tests/schedule-holidays.test.js`: the 14 yearly rules and the observed-weekday rule.
-- `server/tests/technician-birthday-off.test.js`: the birthday date logic (Feb 29, NULL
-  `dob`, ranges across years), the shared seam and the assignment refusal.
-- `server/tests/technician-eligibility.test.js`: absences and work days through the same seam.
+- `server/tests/technician-eligibility.test.js`: absences and work days through the shared seam.
 - `server/tests/sms-company-facts.test.js`: the customer-facing line about closed days.
 
 The texting agent, the phone agent and the portal chat all read the same company-facts line

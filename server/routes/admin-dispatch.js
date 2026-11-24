@@ -7626,18 +7626,6 @@ router.get('/technicians', requireAdmin, async (req, res, next) => {
       })
       .select('technicians.id', 'technicians.name', 'technicians.role')
       .orderBy('name', 'asc');
-    // Birthday off (owner 2026-11-24): with ?date, a technician whose own birthday
-    // it is is not offered, exactly like one marked out (the commit-time check
-    // refuses them too).
-    if (date && techs.length) {
-      const { birthdayTechDays } = require('../services/technician-eligibility');
-      const birthdays = await birthdayTechDays(db, { dateFrom: date, dateTo: date, technicianIds: techs.map((t) => t.id) });
-      if (birthdays.size) {
-        for (let i = techs.length - 1; i >= 0; i -= 1) {
-          if (birthdays.has(`${techs[i].id}:${date}`)) techs.splice(i, 1);
-        }
-      }
-    }
     // Work days (GATE_TECH_WORK_DAYS, with ?date): a technician who does not
     // work that weekday stays in the list (office placements warn, never block)
     // and is flagged offDay so the picker can say so. Gate off: no key, no read.

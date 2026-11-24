@@ -485,8 +485,7 @@ describe('recipient, absence, and failure outcomes (Codex r1)', () => {
       const r = await runTechOpenVisitNudge({ now: new Date('2026-10-30T23:00:00Z') });
       expect(r).toMatchObject({ sent: 1, skipped: 0 });
       expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
-      // The off-days read selects work_days; the one technicians read left is the birthday read (dob), which the nudge keeps.
-      expect(db.mock.calls.map((c) => c[0]).filter((t) => t === 'technicians')).toHaveLength(1);
+      expect(db.mock.calls.map((c) => c[0])).not.toContain('technicians');
     } finally {
       delete process.env.GATE_TECH_WORK_DAYS;
     }
