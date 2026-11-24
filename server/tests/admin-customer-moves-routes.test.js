@@ -1,20 +1,15 @@
 /**
- * Admin moving routes (GATE_MOVING_FLOW) behind Customer 360's Moving card:
+ * Admin moving routes behind Customer 360's Moving card:
  * GET /:id/moves, POST /:id/moving-link, POST /:id/moving-email, and (moving
  * PR B1, GATE_MOVING_ESTIMATE) the new-home action on each listed move and
- * GET /:id/moves/:moveId/estimate-source, and (moving PR B2, GATE_MOVING_APPLY)
+ * GET /:id/moves/:moveId/estimate-source, and (moving PR B2)
  * the apply action on each listed move, GET .../apply-preview and POST
- * .../apply. Pins: admin only, dark = { enabled: false } for the read and 404
- * for the writes, the source and the apply routes, an unknown customer is a
- * 404, and each route calls the one service function.
+ * .../apply. Pins: admin only, an unknown customer is a 404, and each route
+ * calls the one service function.
  */
-let mockGateOn = true;
 let mockEstimateOn = false;
-let mockApplyOn = false;
 jest.mock('../config/feature-gates', () => ({
-  movingFlowLive: () => mockGateOn,
-  movingEstimateLive: () => mockGateOn && mockEstimateOn,
-  movingApplyLive: () => mockGateOn && mockApplyOn,
+  movingEstimateLive: () => mockEstimateOn,
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => ({
@@ -103,9 +98,7 @@ function app() {
 }
 
 beforeEach(() => {
-  mockGateOn = true;
   mockEstimateOn = false;
-  mockApplyOn = false;
   mockCustomerRow = { id: CUSTOMER };
   jest.clearAllMocks();
 });
@@ -116,32 +109,16 @@ test('technicians and anonymous callers are refused', async () => {
   expect(Moves.openMoveForCustomer).not.toHaveBeenCalled();
 });
 
-test('dark: the read says enabled false and both writes 404 without touching a move', async () => {
-  mockGateOn = false;
-  const read = await request(app()).get(`/api/admin/customers/${CUSTOMER}/moves`).set(ADMIN);
-  expect(read.status).toBe(200);
-  expect(read.body).toEqual({ enabled: false, moves: [] });
-  expect((await request(app()).post(`/api/admin/customers/${CUSTOMER}/moving-link`).set(ADMIN)).status).toBe(404);
-  expect((await request(app()).post(`/api/admin/customers/${CUSTOMER}/moving-email`).set(ADMIN)).status).toBe(404);
-  expect(Moves.recentMoves).not.toHaveBeenCalled();
-  expect(Moves.textTarget).not.toHaveBeenCalled();
-  expect(Moves.openMoveForCustomer).not.toHaveBeenCalled();
-  expect(Moves.sendMovingEmail).not.toHaveBeenCalled();
-});
-
 test('the read lists the latest moves and where "Text moving link" opens', async () => {
   const res = await request(app()).get(`/api/admin/customers/${CUSTOMER}/moves`).set(ADMIN);
   expect(res.body).toEqual({
-    enabled: true,
     estimateEnabled: false,
-    applyEnabled: false,
-    moves: [{ id: 'move-1', status: 'open', new_home: null, apply: null }],
+    moves: [{ id: 'move-1', status: 'open', new_home: null, apply: { action: 'review', reason: null } }],
     text: { phone: '+19415550100', hasTexts: false },
   });
   expect(Moves.recentMoves).toHaveBeenCalledWith(CUSTOMER, 5);
   expect(Moves.textTarget).toHaveBeenCalledWith(CUSTOMER);
   expect(Moves.newHomeAction).not.toHaveBeenCalled();
-  expect(Moves.applyAction).not.toHaveBeenCalled();
 });
 
 test('with GATE_MOVING_ESTIMATE on, each move carries its new-home action', async () => {
@@ -153,38 +130,26 @@ test('with GATE_MOVING_ESTIMATE on, each move carries its new-home action', asyn
   const res = await request(app()).get(`/api/admin/customers/${CUSTOMER}/moves`).set(ADMIN);
   expect(res.body.estimateEnabled).toBe(true);
   expect(res.body.moves).toEqual([
-    { id: 'move-1', status: 'submitted', new_home: { action: 'start', estimateId: null, reason: null }, apply: null },
-    { id: 'move-0', status: 'closed', new_home: null, apply: null },
+    { id: 'move-1', status: 'submitted', new_home: { action: 'start', estimateId: null, reason: null }, apply: { action: 'review', reason: null } },
+    { id: 'move-0', status: 'closed', new_home: null, apply: { action: 'review', reason: null } },
   ]);
 });
 
-test('with GATE_MOVING_APPLY on, each move carries its apply action', async () => {
-  mockApplyOn = true;
+test('each move carries its apply action', async () => {
   Moves.recentMoves.mockResolvedValueOnce([{ id: 'move-1', status: 'submitted' }, { id: 'move-0', status: 'closed' }]);
   Moves.applyAction
     .mockResolvedValueOnce({ action: 'review', reason: null })
     .mockResolvedValueOnce({ action: 'applied', reason: null });
   const res = await request(app()).get(`/api/admin/customers/${CUSTOMER}/moves`).set(ADMIN);
-  expect(res.body.applyEnabled).toBe(true);
   expect(res.body.moves).toEqual([
     { id: 'move-1', status: 'submitted', new_home: null, apply: { action: 'review', reason: null } },
     { id: 'move-0', status: 'closed', new_home: null, apply: { action: 'applied', reason: null } },
   ]);
 });
 
-test('apply-preview and apply call the service, answer a refusal with its progress, and 404 dark', async () => {
+test('apply-preview and apply call the service, answer a refusal with its progress', async () => {
   const MOVE = '7c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f';
   const base = `/api/admin/customers/${CUSTOMER}/moves/${MOVE}`;
-  // Dark (GATE_MOVING_APPLY off, or GATE_MOVING_FLOW off): 404 before the service.
-  expect((await request(app()).get(`${base}/apply-preview`).set(ADMIN)).status).toBe(404);
-  expect((await request(app()).post(`${base}/apply`).set(ADMIN).send({ version: 'v-1' })).status).toBe(404);
-  mockApplyOn = true;
-  mockGateOn = false;
-  expect((await request(app()).post(`${base}/apply`).set(ADMIN).send({ version: 'v-1' })).status).toBe(404);
-  mockGateOn = true;
-  expect(Moves.applyMovePreview).not.toHaveBeenCalled();
-  expect(Moves.applyMove).not.toHaveBeenCalled();
-
   expect((await request(app()).get(`${base}/apply-preview`).set({ Authorization: 'Bearer tech' })).status).toBe(403);
   expect((await request(app()).post(`${base}/apply`).set({ Authorization: 'Bearer tech' }).send({ version: 'v-1' })).status).toBe(403);
 
@@ -215,7 +180,7 @@ test('apply-preview and apply call the service, answer a refusal with its progre
   expect(failed.body).toEqual({ error: 'Could not read what Apply move would do' });
 });
 
-test('estimate-source answers the service payload, a refusal as its status, and 404 dark', async () => {
+test('estimate-source answers the service payload and a refusal as its status', async () => {
   const MOVE = '7c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f';
   const ok = await request(app()).get(`/api/admin/customers/${CUSTOMER}/moves/${MOVE}/estimate-source`).set(ADMIN);
   expect(ok.status).toBe(200);
@@ -230,8 +195,6 @@ test('estimate-source answers the service payload, a refusal as its status, and 
   expect(conflict.body).toEqual({ error: taken.message, code: 'estimate_exists', estimateId: 'est-9' });
 
   expect((await request(app()).get(`/api/admin/customers/${CUSTOMER}/moves/${MOVE}/estimate-source`).set({ Authorization: 'Bearer tech' })).status).toBe(403);
-  mockGateOn = false;
-  expect((await request(app()).get(`/api/admin/customers/${CUSTOMER}/moves/${MOVE}/estimate-source`).set(ADMIN)).status).toBe(404);
   expect(Moves.moveEstimateSource).toHaveBeenCalledTimes(2);
 });
 

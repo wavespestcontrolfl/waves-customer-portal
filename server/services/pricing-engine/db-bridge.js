@@ -14,6 +14,19 @@ const MOSQUITO_DEFAULT_LOT_CATEGORIES = constants.MOSQUITO.lotCategories.map(c =
 // removes from the DB row reverts to the code default on the NEXT sync
 // instead of lingering until a process restart.
 const PEST_INITIAL_ROACH_DISPLAY_DEFAULTS = JSON.parse(JSON.stringify(constants.PEST.pestInitialRoach.display));
+// Pristine in-code values for standardPestPriceRowsAreComplete (below), read
+// before any sync changes the constants: the value of the one optional pest
+// field, the property types and the tiers the engine knows, and the service
+// count that earns each tier.
+const PEST_ATTACHED_GARAGE_DEFAULT = constants.PEST.additionalAdjustments.attachedGarage;
+const PEST_PROPERTY_TYPE_KEYS = Object.freeze(Object.keys(constants.PROPERTY_TYPE_ADJ));
+const WAVEGUARD_TIER_KEYS = Object.freeze(Object.keys(constants.WAVEGUARD.tiers));
+// The engine's tier picker (determineWaveGuardTier, discount-engine.js) counts
+// by these fixed thresholds and never reads the minServices a sync loads. The
+// pest price rows suite pins the picker to them.
+const WAVEGUARD_TIER_ENGINE_MIN_SERVICES = Object.freeze(Object.fromEntries(
+  WAVEGUARD_TIER_KEYS.map((tier) => [tier, constants.WAVEGUARD.tiers[tier].minServices]),
+));
 // Pristine code defaults for the rodent bracket ladder (codex #3591 r54
 // P1): a DB row that disappears or invalidates after a prior sync must
 // fall back to these, not keep the stale process-global values.
@@ -769,6 +782,177 @@ function syncBedBugPricingConfig(bedBugConfig) {
 
 let _lastSync = 0;
 const SYNC_INTERVAL = 60_000; // 1 minute cache
+// Counted for withSettingsForUnattendedPrice (near the end of this file).
+let _invalidations = 0; // every invalidatePricingConfigCache()
+
+// Are the rows of the standard pest price complete?
+// A sync keeps what the engine had for a row or a field that is missing: the
+// in-code default on a cold start, an earlier value on a warm process (two
+// processes can then hold different prices). That is the answer every
+// surface a person reads shows. A price that nobody watches must come from
+// the rows, so that caller asks standardPestPriceRowsAreComplete() (same
+// idea as mistingRefillPriceIsFromRow).
+//
+// The rows are every pricing_config row that the engine's standard pest price
+// reads (the footprint ladder, pricePestControl): the four pest rows and the
+// tier row. The frequency discounts, the roach modifiers and the home-age
+// steps are in-code only. The answer is yes when the rows of the last
+// SUCCESSFUL sync carried EVERY required field as a number:
+//   pest_base           base and floor, each above 0
+//   pest_footprint      breakpoints: a list, each entry with sqft and adj
+//   pest_features       each field the sync reads but attached_garage
+//   pest_property_type  each property type the engine knows
+//   waveguard_tiers     for each tier the engine knows: discount (0 up to,
+//                       not including, 1, the bound the Pricing Logic route
+//                       saves) and min_services (the count the engine's tier
+//                       picker uses for that tier: 1, 2, 3, 4)
+// That is what the migrated schema seeds and what production carries, and
+// the route refuses a save that drops a stored key. A direct write or a
+// migration can still leave a row without a field.
+// min_services is the one field the engine's own picker does not read: it
+// counts by fixed thresholds, and the estimate converter picks the tier of an
+// accepted estimate from the loaded ones. The route saves any whole number of
+// 1 or more, and with a threshold other than the picker's the two disagree
+// (a silver threshold of 1: the engine quotes one pest service at bronze, the
+// converter starts it at silver). Such a row does not state the price the
+// engine quotes, so the answer is no for it.
+// The answer is about ROWS and the CONSTANTS they feed: the constants of the
+// standard pest price and of the tier table are what the rows state. It is
+// not about a quote. A quote can get its pest price in a way these rows do
+// not decide, and a caller that vouches for a quote must check the path that
+// quote took:
+// - another price source: a trusted bedroom band (trustedUnitBand; the
+//   ladder never runs for that line) or the commercial pricer;
+// - an input of the ladder that the quote overrides: a saved quote's own
+//   floor (pestProgramFloorArmed, pestProgramFloorPerVisit) or an explicit
+//   legacy pricing version;
+// - a bundle, or a home that already has a service: the other service's own
+//   rows, and the rodent rows that say whether rodent bait counts toward the
+//   tier (rodent_waveguard, or rodent_rules), which decide the tier discount
+//   of the pest line.
+// The first caller (the pricer's strict option) prices pest control alone on
+// the standard ladder with no override, for a home with no other service,
+// and checks that itself.
+// The answer is a function of the rows of that ONE sync. It does not depend
+// on what an earlier sync of the process loaded, so a process that just
+// started and a warm one answer the same for the same rows.
+// Two fields are optional, and each has one value in every process when the
+// row leaves it out. A row that carries one must carry the kind the sync
+// reads it as; null is "left out", as the sync reads it.
+// - pest_features.attached_garage (no row has carried it). The sync rebases
+//   it to its in-code value before it reads the row, so a process that once
+//   took a value from a row does not keep it either. A row that carries it
+//   must carry a number, like a required field: the sync applies what its
+//   arithmetic can read (true becomes 1, "5" becomes 5), and such a value is
+//   not a price input the row states.
+// - pest_base.enforce_floor_post_discount (the program floor switch, false
+//   when left out). The sync takes it only as a boolean and reads anything
+//   else as false. A row that carries "true" as text, or 1, asks for the
+//   floor and the engine would price without it, so the row must carry a
+//   boolean.
+// The answer moves together with _lastSync: a failed sync restores the
+// constants and leaves this answer as it was.
+// While a sync is in flight the answer is no. A sync puts the rows into the
+// engine first and then awaits its other reads. Only at its end does it
+// succeed (this answer moves) or fail (the constants go back). In between,
+// the engine can hold values of rows that this answer has not judged, or
+// values that will not stay. So a caller asks in the same tick as it
+// computes the price, with no await in between: yes then means that the
+// engine holds what the last successful sync loaded, and nothing newer.
+//
+// The fields the sync loads from these rows, one line per field. The sync's
+// loaders and the answer walk the SAME tables, so the sync cannot load a
+// field through them that the answer does not judge. A field is required
+// unless its line says optional. An optional field needs one value in every
+// process when the row leaves it out, so the sync must rebase it to its
+// in-code value before it reads the row (as it does for attached_garage).
+// pest_property_type has no table: its loader and the answer both go by the
+// property types the engine holds.
+const roundSigned = (val) => (val >= 0 ? r(val) : -r(Math.abs(val)));
+const asStored = (val) => val;
+// A value a row carries as a number. Not isFiniteNumber above, which also
+// takes null and text.
+const isRowNumber = (value) => typeof value === 'number' && Number.isFinite(value);
+// pest_base: the price fields. Each sets the PEST constant of its own name,
+// rounded whole. (The sync reads two more fields of this row by name: the
+// floor switch, which the answer judges below, and initial_roach, the
+// visit-1 knockdown, which is not this price.)
+const PEST_BASE_PRICE_ROW_FIELDS = Object.freeze(['base', 'floor']);
+// pest_footprint: the fields of one breakpoint and how the sync reads each.
+const PEST_FOOTPRINT_BREAKPOINT_FIELDS = Object.freeze([
+  { field: 'sqft', read: asStored },
+  { field: 'adj', read: roundSigned },
+]);
+// pest_features: the adjustment each field sets (PEST.additionalAdjustments)
+// and how the sync reads its value.
+const PEST_FEATURE_ROW_FIELDS = Object.freeze([
+  { field: 'pool_cage', adjustment: 'poolCage', read: r },
+  { field: 'pool_cage_small', adjustment: 'poolCageSmall', read: r },
+  { field: 'pool_cage_medium', adjustment: 'poolCageMedium', read: r },
+  { field: 'pool_cage_large', adjustment: 'poolCageLarge', read: r },
+  { field: 'pool_cage_oversized', adjustment: 'poolCageOversized', read: r },
+  { field: 'pool_no_cage', adjustment: 'poolNoCage', read: r },
+  { field: 'shrubs_heavy', adjustment: 'shrubs_heavy', read: r },
+  { field: 'shrubs_moderate', adjustment: 'shrubs_moderate', read: r },
+  { field: 'shrubs_light', adjustment: 'shrubs_light', read: roundSigned },
+  { field: 'landscape_complex', adjustment: 'complexity_complex', read: roundSigned },
+  { field: 'landscape_moderate', adjustment: 'complexity_moderate', read: roundSigned },
+  { field: 'landscape_simple', adjustment: 'complexity_simple', read: roundSigned },
+  { field: 'near_water', adjustment: 'nearWater', read: asStored },
+  { field: 'indoor', adjustment: 'indoor', read: r },
+  { field: 'attached_garage', adjustment: 'attachedGarage', read: r, optional: true },
+]);
+const PEST_REQUIRED_FEATURE_ROW_FIELDS = Object.freeze(PEST_FEATURE_ROW_FIELDS.filter((entry) => !entry.optional).map((entry) => entry.field));
+const PEST_OPTIONAL_FEATURE_ROW_FIELDS = Object.freeze(PEST_FEATURE_ROW_FIELDS.filter((entry) => entry.optional).map((entry) => entry.field));
+// waveguard_tiers: the fields of one tier, the key each sets in
+// WAVEGUARD.tiers[tier] (as stored), and when a row states it: a discount
+// from 0 up to, not including, 1, and the service count the engine's tier
+// picker uses for that tier.
+const WAVEGUARD_TIER_ROW_FIELDS = Object.freeze([
+  { field: 'discount', key: 'discount', states: (value) => isRowNumber(value) && value >= 0 && value < 1 },
+  { field: 'min_services', key: 'minServices', states: (value, tier) => isRowNumber(value) && value === WAVEGUARD_TIER_ENGINE_MIN_SERVICES[tier] },
+]);
+const pestPriceRow = (config, key) => (config[key] && typeof config[key] === 'object' ? config[key] : {});
+const RECURRING_PEST_PRICE_ROW_FIELDS = Object.freeze([
+  ...PEST_BASE_PRICE_ROW_FIELDS.map((field) => `pest_base.${field}`),
+  'pest_footprint.breakpoints',
+  ...PEST_REQUIRED_FEATURE_ROW_FIELDS.map((field) => `pest_features.${field}`),
+  ...PEST_PROPERTY_TYPE_KEYS.map((type) => `pest_property_type.${type}`),
+  ...WAVEGUARD_TIER_KEYS.flatMap((tier) => WAVEGUARD_TIER_ROW_FIELDS.map(({ field }) => `waveguard_tiers.${tier}.${field}`)),
+]);
+// The required fields that the rows of one sync (its parsed `config`) carry.
+function recurringPestPriceFieldsInRows(config) {
+  const fields = new Set();
+  const add = (name, carried) => { if (carried) fields.add(name); };
+  const row = (key) => pestPriceRow(config, key);
+  for (const field of PEST_BASE_PRICE_ROW_FIELDS) add(`pest_base.${field}`, isRowNumber(row('pest_base')[field]) && row('pest_base')[field] > 0);
+  const breakpoints = row('pest_footprint').breakpoints;
+  add('pest_footprint.breakpoints', Array.isArray(breakpoints) && breakpoints.length > 0
+    && breakpoints.every((bp) => PEST_FOOTPRINT_BREAKPOINT_FIELDS.every(({ field }) => isRowNumber(bp?.[field]))));
+  for (const field of PEST_REQUIRED_FEATURE_ROW_FIELDS) add(`pest_features.${field}`, isRowNumber(row('pest_features')[field]));
+  for (const type of PEST_PROPERTY_TYPE_KEYS) add(`pest_property_type.${type}`, isRowNumber(row('pest_property_type')[type]));
+  for (const tier of WAVEGUARD_TIER_KEYS) {
+    const values = row('waveguard_tiers')[tier] || {};
+    for (const { field, states } of WAVEGUARD_TIER_ROW_FIELDS) add(`waveguard_tiers.${tier}.${field}`, states(values[field], tier));
+  }
+  return fields;
+}
+// Do the rows of one sync (its parsed `config`) state every price input the
+// sync applies? Every required field is carried, and an optional field is
+// left out or of its kind: a number in the features row, a boolean for the
+// floor switch.
+function rowsStateRecurringPestPrice(config) {
+  const carried = recurringPestPriceFieldsInRows(config);
+  const features = pestPriceRow(config, 'pest_features');
+  const floorSwitch = pestPriceRow(config, 'pest_base').enforce_floor_post_discount;
+  return RECURRING_PEST_PRICE_ROW_FIELDS.every((name) => carried.has(name))
+    && PEST_OPTIONAL_FEATURE_ROW_FIELDS.every((field) => features[field] == null || isRowNumber(features[field]))
+    && (floorSwitch == null || typeof floorSwitch === 'boolean');
+}
+let _pestPriceRowsComplete = false; // the answer of the last successful sync
+function standardPestPriceRowsAreComplete() {
+  return _pestPriceRowsComplete && !isSyncInFlight();
+}
 
 // ── Pre-slab inventory-price link (owner decision 2026-07-10) ─────────────
 // Approved inventory prices drive pre-slab container costs: each product
@@ -1196,8 +1380,9 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
         ? config.pest_base.enforce_floor_post_discount
         : false;
     if (config.pest_base) {
-      if (config.pest_base.base) constants.PEST.base = r(config.pest_base.base);
-      if (config.pest_base.floor) constants.PEST.floor = r(config.pest_base.floor);
+      for (const field of PEST_BASE_PRICE_ROW_FIELDS) {
+        if (config.pest_base[field]) constants.PEST[field] = r(config.pest_base[field]);
+      }
       // Initial Roach Knockdown sliding scale — DB shape mirrors the constants:
       //   { regular: [{sqft, price}, ...], german: [{sqft, price}, ...],
       //     regular_standalone: [{sqft, price}, ...] }
@@ -1242,30 +1427,22 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
         constants.PEST.pestInitialRoach = next;
       }
     }
+    // attached_garage is the one optional field of the pest rows (no row has
+    // carried it). It rebases to its in-code value on EVERY sync, like the
+    // flag above: a process that took a value from a row must not keep it
+    // after the row loses the field, and then price differently from a
+    // process that just started (standardPestPriceRowsAreComplete).
+    constants.PEST.additionalAdjustments.attachedGarage = PEST_ATTACHED_GARAGE_DEFAULT;
     if (config.pest_features) {
-      const f = config.pest_features;
       const adj = constants.PEST.additionalAdjustments;
-      if (f.pool_cage != null) adj.poolCage = r(f.pool_cage);
-      if (f.pool_cage_small != null) adj.poolCageSmall = r(f.pool_cage_small);
-      if (f.pool_cage_medium != null) adj.poolCageMedium = r(f.pool_cage_medium);
-      if (f.pool_cage_large != null) adj.poolCageLarge = r(f.pool_cage_large);
-      if (f.pool_cage_oversized != null) adj.poolCageOversized = r(f.pool_cage_oversized);
-      if (f.pool_no_cage != null) adj.poolNoCage = r(f.pool_no_cage);
-      if (f.shrubs_heavy != null) adj.shrubs_heavy = r(f.shrubs_heavy);
-      if (f.shrubs_moderate != null) adj.shrubs_moderate = r(f.shrubs_moderate);
-      if (f.shrubs_light != null) adj.shrubs_light = f.shrubs_light >= 0 ? r(f.shrubs_light) : -r(Math.abs(f.shrubs_light));
-      if (f.landscape_complex != null) adj.complexity_complex = f.landscape_complex >= 0 ? r(f.landscape_complex) : -r(Math.abs(f.landscape_complex));
-      if (f.landscape_moderate != null) adj.complexity_moderate = f.landscape_moderate >= 0 ? r(f.landscape_moderate) : -r(Math.abs(f.landscape_moderate));
-      if (f.landscape_simple != null) adj.complexity_simple = f.landscape_simple >= 0 ? r(f.landscape_simple) : -r(Math.abs(f.landscape_simple));
-      if (f.near_water != null) adj.nearWater = f.near_water;
-      if (f.indoor != null) adj.indoor = r(f.indoor);
-      if (f.attached_garage != null) adj.attachedGarage = r(f.attached_garage);
+      for (const { field, adjustment, read } of PEST_FEATURE_ROW_FIELDS) {
+        const value = config.pest_features[field];
+        if (value != null) adj[adjustment] = read(value);
+      }
     }
     if (config.pest_footprint?.breakpoints) {
-      constants.PEST.footprintBrackets = config.pest_footprint.breakpoints.map(bp => ({
-        sqft: bp.sqft,
-        adj: bp.adj >= 0 ? r(bp.adj) : -r(Math.abs(bp.adj)),
-      }));
+      constants.PEST.footprintBrackets = config.pest_footprint.breakpoints.map((bp) => Object.fromEntries(
+        PEST_FOOTPRINT_BREAKPOINT_FIELDS.map(({ field, read }) => [field, read(bp[field])])));
     }
     if (config.pest_property_type) {
       for (const [type, val] of Object.entries(config.pest_property_type)) {
@@ -1744,7 +1921,9 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       if (g.complex != null) constants.RODENT.guarantee.complex = r(g.complex);
       if (g.estate != null) constants.RODENT.guarantee.estate = r(g.estate);
       if (Array.isArray(g.eligibility_requires)) {
-        constants.RODENT.guarantee.eligibilityRequires = g.eligibility_requires.map(String);
+        // Drop retired flags (sanitation, owner ruling 2026-11-23) so an old stored list cannot re-impose them.
+        const retired = new Set(constants.RODENT.guarantee.retiredEligibilityFlags || []);
+        constants.RODENT.guarantee.eligibilityRequires = g.eligibility_requires.map(String).filter((f) => !retired.has(f));
       }
     }
 
@@ -1793,8 +1972,9 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     if (config.waveguard_tiers) {
       for (const [tier, val] of Object.entries(config.waveguard_tiers)) {
         if (constants.WAVEGUARD.tiers[tier]) {
-          if (val.discount !== undefined) constants.WAVEGUARD.tiers[tier].discount = val.discount;
-          if (val.min_services !== undefined) constants.WAVEGUARD.tiers[tier].minServices = val.min_services;
+          for (const { field, key } of WAVEGUARD_TIER_ROW_FIELDS) {
+            if (val[field] !== undefined) constants.WAVEGUARD.tiers[tier][key] = val[field];
+          }
         }
       }
     }
@@ -2299,6 +2479,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
 
     assertValidPestPricingConfig(constants);
 
+    _pestPriceRowsComplete = rowsStateRecurringPestPrice(config);
     _lastSync = Date.now();
     console.log(`[pricing-engine] Synced ${Object.keys(config).length} pricing configs from DB`);
     return true;
@@ -2326,6 +2507,73 @@ function needsSync() {
 
 function invalidatePricingConfigCache() {
   _lastSync = 0;
+  _invalidations += 1;
+}
+
+// ── The settings for a price nobody watches ─────────────────────────────
+// (customer-pricing-ai's strictPriceSettings: the plan offer after a
+// one-time job.)
+// The engine prices from this process's constants, and they are shared:
+// callers wait for one refresh, which reads on the handle of whoever asked
+// first, and the constants then stay for a minute. An edit marks them stale
+// only in the process that made it, and a refresh that ends after an edit
+// overwrites that mark. For a card a person reads, that is fine. A caller
+// that prices with nobody watching must know that the constants the engine
+// read are the committed rows, loaded for its own call. This function is
+// that one answer; such a caller asks nothing else of the cache.
+//
+// withSettingsForUnattendedPrice(price) is ONE operation in the queue of
+// refreshes:
+//   1. a refresh of its own. It is never shared with another caller's
+//      refresh, and it reads on the app's connection, never on the caller's
+//      handle: a transaction can hold an edit of the settings that never
+//      commits, and what a refresh reads goes into the constants every
+//      caller prices from. (So the caller must hold no transaction while it
+//      waits here: its connection is one of the pool this read needs.)
+//      The shared settings read stale while it runs;
+//   2. three questions: did the refresh succeed; was an edit of the settings
+//      signaled in this process since the moment before the refresh read
+//      the rows (_invalidations); did the rows carry every input of the
+//      standard pest price (standardPestPriceRowsAreComplete);
+//   3. price(), called at once and synchronously. The next refresh in the
+//      queue starts after this operation ends, so price() reads the
+//      constants of step 1 and nothing else.
+// It answers { priced: true, value } or { priced: false, reason }
+// ('not_loaded', 'edited', 'rows'): "price again", never a price. Callers
+// that overlap wait in the queue; none of them refuses another.
+// On 'edited' it also marks the shared settings stale again: the end of its
+// refresh marked them fresh, and the edit is not in them.
+// price() must not return a promise: the queue would wait for it, and with
+// it every refresh of the process. What price() throws, the caller gets.
+//
+// Not covered, by design: an edit that another process commits after the
+// refresh read the rows. The price is the one that was true at that read.
+function withSettingsForUnattendedPrice(price) {
+  const run = _syncQueue.then(async () => {
+    const invalidations = _invalidations;
+    // While this refresh runs, the shared settings read stale, as they do during any shared refresh. A caller
+    // of the shared refresh then waits in the queue. It does not price from constants that this refresh has
+    // begun to change and may still put back. A refresh that succeeds marks them fresh at its end.
+    _lastSync = 0;
+    const loaded = await _syncConstantsFromDBUnserialized();
+    if (loaded !== true) return { priced: false, reason: 'not_loaded' };
+    if (invalidations !== _invalidations) {
+      // The end of the refresh marked the settings fresh. The edit's mark goes back, so that the next caller
+      // of the shared refresh reads the rows again.
+      _lastSync = 0;
+      return { priced: false, reason: 'edited' };
+    }
+    if (!standardPestPriceRowsAreComplete()) return { priced: false, reason: 'rows' };
+    const value = price();
+    if (value && typeof value.then === 'function') {
+      // The mistake is thrown below. The promise itself may still reject, and nobody else will hear it.
+      value.then(undefined, () => {});
+      throw new Error('withSettingsForUnattendedPrice: price() must be synchronous');
+    }
+    return { priced: true, value };
+  });
+  _syncQueue = run.catch(() => {});
+  return run;
 }
 
 module.exports = {
@@ -2335,6 +2583,8 @@ module.exports = {
   readRodentAdditionalCheckPriceFromCatalog,
   needsSync,
   invalidatePricingConfigCache,
+  standardPestPriceRowsAreComplete,
+  withSettingsForUnattendedPrice,
   validatePestPricingConfig,
   assertValidPestPricingConfig,
 };

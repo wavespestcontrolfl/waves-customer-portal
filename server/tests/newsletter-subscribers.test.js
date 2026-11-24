@@ -323,6 +323,62 @@ describe('public signup on an unsubscribed/inactive row keeps the opt-out until 
   });
 });
 
+// reader_confirmed_at / reader_confirmed_email are the reader's own click and nothing else: the trusted
+// ways a row becomes active (a trusted add of a pending row, a trusted resubscribe, a waitlist promotion)
+// write confirmed_at only, so the Waves Pest Insider tool block (pest-insider/tool-block.js) can tell them apart.
+describe('the reader-confirmed stamps are written by the confirm click only', () => {
+  const PENDING_ROW = { ...UNSUB_ROW, id: 'sub-7', email: 'Mixed.Case@Example.com', status: 'pending', confirmed_at: null, unsubscribed_at: null, confirmation_token: 'pend-tok', confirmation_sent_at: new Date() };
+  const stamps = (payload) => Object.keys(payload).filter((k) => k.startsWith('reader_confirmed'));
+
+  test('confirmByToken on a pending row writes both, with one instant, and takes the address in SQL from the row (no address bound)', async () => {
+    const queries = useRecordingDb({ firsts: [{ ...PENDING_ROW }, { ...PENDING_ROW, status: 'active' }] });
+    expect((await confirmByToken('pend-tok')).action).toBe('confirmed');
+    const flip = queries.find((r) => r.update && r.update.status === 'active');
+    expect(flip.wheres).toContainEqual({ id: 'sub-7', confirmation_token: 'pend-tok', status: 'pending' });
+    expect(flip.update.confirmed_at).toBeInstanceOf(Date);
+    expect(flip.update.reader_confirmed_at).toBe(flip.update.confirmed_at);
+    // db.raw is a passthrough in this suite: the value is the SQL itself.
+    expect(flip.update.reader_confirmed_email).toBe('LOWER(email)');
+    expect(Object.values(flip.update).map((v) => String(v).toLowerCase())).not.toContain('mixed.case@example.com');
+  });
+
+  test('a trusted add of a pending row and a waitlist promotion write neither; a trusted resubscribe after an opt-out clears both', async () => {
+    let queries = useRecordingDb({ firsts: [{ ...PENDING_ROW }, { ...PENDING_ROW, status: 'active' }] });
+    expect((await subscribeOrResubscribe({ email: 'mixed.case@example.com', source: 'admin_add', requireConfirmation: false, linkCustomer: false })).action).toBe('confirmed');
+    let write = queries.find((r) => r.update);
+    expect(write.update.status).toBe('active');
+    expect(write.update.confirmed_at).toBeInstanceOf(Date);
+    expect(stamps(write.update)).toEqual([]);
+
+    queries = useRecordingDb({ firsts: [{ ...UNSUB_ROW }, { ...UNSUB_ROW, status: 'active' }] });
+    expect((await subscribeOrResubscribe({ email: 'reader@example.com', source: 'admin_add', requireConfirmation: false, linkCustomer: false })).action).toBe('resubscribed');
+    write = queries.find((r) => r.update);
+    expect(write.update.status).toBe('active');
+    // The comeback is not the reader's click. It clears unsubscribed_at, and in the same write the
+    // reader's earlier proof when the row is opted out at that instant (SQL reads the status
+    // before the update): a click from before the opt-out is gone, and a click that made the row
+    // active just before this write stays. db.raw is a passthrough here, so the value is the SQL.
+    const clearedUnlessActive = (column) => `CASE WHEN status IN ('unsubscribed', 'inactive') THEN NULL ELSE ${column} END`;
+    expect(write.update.unsubscribed_at).toBeNull();
+    expect(write.update.reader_confirmed_at).toBe(clearedUnlessActive('reader_confirmed_at'));
+    expect(write.update.reader_confirmed_email).toBe(clearedUnlessActive('reader_confirmed_email'));
+
+    // The same for a comeback that waits for a new confirm click (a non-public double-opt-in caller).
+    queries = useRecordingDb({ firsts: [{ ...UNSUB_ROW }, { ...UNSUB_ROW, status: 'pending' }] });
+    expect((await subscribeOrResubscribe({ email: 'reader@example.com', source: 'call_recording', requireConfirmation: true, linkCustomer: false })).action).toBe('confirmation_sent');
+    write = queries.find((r) => r.update);
+    expect(write.update.status).toBe('pending');
+    expect(write.update.reader_confirmed_at).toBe(clearedUnlessActive('reader_confirmed_at'));
+    expect(write.update.reader_confirmed_email).toBe(clearedUnlessActive('reader_confirmed_email'));
+
+    queries = useRecordingDb({ firsts: [{ ...WAITLIST_ROW }, { ...WAITLIST_ROW, status: 'active' }] });
+    expect((await subscribeOrResubscribe({ email: 'pat@example.com', source: 'admin_manual', requireConfirmation: false, linkCustomer: false, promoteWaitlist: true })).action).toBe('resubscribed');
+    write = queries.find((r) => r.update);
+    expect(write.update.status).toBe('active');
+    expect(stamps(write.update)).toEqual([]);
+  });
+});
+
 describe('resend cooldown on a pending row', () => {
   const PENDING = { ...UNSUB_ROW, status: 'pending', confirmed_at: null, unsubscribed_at: null, confirmation_sent_at: new Date() };
 
@@ -391,6 +447,11 @@ describe('lookupByToken / confirmByToken for a public re-signup token', () => {
     });
     expect(flip.update.confirmed_at).toBeInstanceOf(Date);
     expect(flip.update.resubscribed_at).toBeInstanceOf(Date);
+    // The reader's own click: the proof stamp is the same instant as confirmed_at, and the address is the
+    // row's own, taken in SQL (db.raw is a passthrough here), so no address is bound into the query.
+    expect(flip.update.reader_confirmed_at).toBe(flip.update.confirmed_at);
+    expect(flip.update.reader_confirmed_email).toBe('LOWER(email)');
+    expect(Object.values(flip.update)).not.toContain(row.email);
     expect(String(flip.update.tags)).toContain('COALESCE(tags');
     // The live-token ordering is enforced in the same statement.
     expect(flip.raws.join(' ')).toContain('confirmation_sent_at > unsubscribed_at');

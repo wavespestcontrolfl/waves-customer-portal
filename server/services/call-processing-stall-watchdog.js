@@ -51,8 +51,10 @@ const NotificationService = require('./notification-service');
 const { recordingReadyAt } = require('../utils/call-timeline');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 
-// Below this the processor's own eligibility filter skips the row by design.
-const MIN_DURATION_SECONDS = 11;
+// The processor's own length rule (over 10 s; with GATE_SHORT_CALL_RECORDING_SWEEP
+// on, also a shorter first pass of a call under 24 h old, and every stall
+// candidate is a first pass): a row it skips by design is never a stall.
+const { sweepLengthSql, sweepLengthOk } = require('../config/call-extraction-retry');
 // The pipeline legitimately takes minutes (CDN settle + transcription +
 // extraction); the sweep itself only picks fresh rows up after 10. Alert
 // only past the point where every built-in retry lane has had its shot.
@@ -177,12 +179,11 @@ function computeStalledCalls(rows, { now = new Date() } = {}) {
       } catch { return false; }
     })();
     if (!hasRecording && !panQuarantined) continue;
-    // COALESCE semantics, matching processAllPending's own eligibility SQL:
-    // a recorded duration of 0 is AUTHORITATIVE, not absent, so a 0-second
+    // processAllPending's own length rule, with its COALESCE semantics: a
+    // recorded duration of 0 is AUTHORITATIVE, not absent, so a 0-second
     // recording never borrows the longer overall call duration and gets
     // alerted on a call the processor deliberately skips.
-    const seconds = Number(r.recording_duration_seconds ?? r.duration_seconds ?? 0) || 0;
-    if (!panQuarantined && seconds < MIN_DURATION_SECONDS) continue;
+    if (!panQuarantined && !sweepLengthOk(r, now)) continue;
     stalled.push(r);
   }
   return stalled;
@@ -244,9 +245,12 @@ async function runInner({ now = new Date() } = {}) {
     // (codex r4 P1). INVARIANT: these must stay no stricter than the
     // classifier — it, not this prefilter, decides what is stalled, and the
     // time-dependent tests (grace, claim age, ceiling) stay there alone.
-    // Predicates copied from processAllPending's eligibility block.
+    // Predicates copied from processAllPending's eligibility block. The one
+    // exception is the length rule's own 24-hour window for a short call
+    // (gate on): the sweep applies it in SQL, so it is applied here as the
+    // sweep does, and the classifier reads the same rule with this run's now.
     .where(function longEnoughToProcess() {
-      this.whereRaw('COALESCE(recording_duration_seconds, duration_seconds, 0) > ?', [MIN_DURATION_SECONDS - 1])
+      this.whereRaw(sweepLengthSql())
         .orWhere(function panQuarantined() {
           this.whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'")
             .whereNotNull('transcription');
@@ -360,7 +364,6 @@ async function runInner({ now = new Date() } = {}) {
 module.exports = {
   runCallProcessingStallWatchdog,
   computeStalledCalls,
-  MIN_DURATION_SECONDS,
   GRACE_MINUTES,
   CLAIM_STALE_MINUTES,
   PAGE_SIZE,

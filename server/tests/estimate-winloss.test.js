@@ -374,6 +374,8 @@ describe('winLossSlices — audit slices', () => {
       }),
       // CTA mint stamped sent_at with nothing delivered → not a cohort row.
       row({ id: 'mint', status: 'sent', accepted_at: null, sent_at: daysAgo(9), source: 'service_report_cta', estimate_data: {} }),
+      // Portal plan-start mint (GATE_PORTAL_PLAN_START): the same publish-without-delivery shape.
+      row({ id: 'start-mint', status: 'sent', accepted_at: null, sent_at: daysAgo(9), source: 'plan_start', estimate_data: {} }),
       // CTA mint an operator later really delivered → anchored on that
       // handoff; the mint-time self-redirect view (before delivery) must
       // NOT count as an opened send.
@@ -394,6 +396,66 @@ describe('winLossSlices — audit slices', () => {
     // later), and mint-sent (8d) sit in the 7d bucket's shifted window
     // [now-14, now-7]; the undelivered mint never appears.
     expect(bucket).toMatchObject({ sent: 4, won: 1, lost: 0, open: 3 });
+  });
+
+  test('a delivered self-serve quote times its first view from the first open since delivery, not a later reopen (codex pre-push P1)', async () => {
+    const db = require('../models/db');
+    const { countableViewAtSql } = require('../services/self-serve-estimates');
+    const delivered = Date.parse(daysAgo(3));
+    const sent = [row({
+      id: 'start-delivered', status: 'viewed', accepted_at: null, sent_at: daysAgo(3), source: 'plan_start',
+      // A portal look before the send, an open 1 h after it, and a reopen 2.5 days later.
+      viewed_at: daysAgo(4), last_viewed_at: daysAgo(0.5), view_count: 3,
+      countable_view_at: new Date(delivered + 3600000).toISOString(),
+      estimate_data: { deliveryState: { firstDeliveredAt: daysAgo(3) } },
+    })];
+    mockDbHandler = estimatesTable([], sent);
+    const { sentCohorts } = await winLossSlices({ days: 7 });
+    expect(sentCohorts).toMatchObject({ sentTotal: 1, viewedTotal: 1, medianHoursToFirstView: 1 });
+    // The cohort read selects that first open in SQL, as the Intelligence Bar funnel reads it.
+    expect(db.raw).toHaveBeenCalledWith(`${countableViewAtSql('estimates')} AS countable_view_at`);
+  });
+
+  test('a self-serve quote counts as viewed only by the SQL first view since delivery, never by a raw view stamp in the delivery\'s millisecond (codex pre-push P1)', async () => {
+    const delivered = daysAgo(3);
+    mockDbHandler = estimatesTable([], [row({
+      id: 'start-same-ms', status: 'viewed', accepted_at: null, sent_at: delivered, source: 'plan_start',
+      // A portal open microseconds before the send: SQL finds no open since the delivery.
+      viewed_at: delivered, last_viewed_at: delivered, view_count: 1, countable_view_at: null,
+      estimate_data: { deliveryState: { firstDeliveredAt: delivered } },
+    })]);
+    const { sentCohorts } = await winLossSlices({ days: 7 });
+    expect(sentCohorts).toMatchObject({ sentTotal: 1, viewedTotal: 0 });
+  });
+
+  test('a self-serve quote anchors where the Intelligence Bar dates its send: an unreadable stamp on sent_at, none while undelivered (codex pre-push P1)', async () => {
+    const quote = (id, estimateData) => row({
+      id, status: 'sent', accepted_at: null, sent_at: daysAgo(3), source: 'plan_start',
+      viewed_at: null, last_viewed_at: null, view_count: 0, estimate_data: estimateData,
+    });
+    mockDbHandler = estimatesTable([], [
+      // A stamp there but unreadable still records a staff send (sentAtSql dates it by sent_at).
+      quote('start-unreadable', { deliveryState: { firstDeliveredAt: 'not a date' } }),
+      // An empty stamp is no delivery: the mint stamp is no send.
+      quote('start-undelivered', { deliveryState: { firstDeliveredAt: '' } }),
+    ]);
+    const { sentCohorts } = await winLossSlices({ days: 7 });
+    expect(sentCohorts).toMatchObject({ sentTotal: 1, viewedTotal: 0 });
+  });
+
+  test('a staff quote keeps the lenient read of its first-delivery stamp; only a self-serve quote reads it strictly (codex pre-push P1)', () => {
+    const { sentAnchorMs } = _private;
+    // A space-separated stamp with a short offset: JavaScript reads it, the strict ISO rule does not.
+    const stamp = '2026-10-01 12:00:00+00';
+    const anchored = (source) => sentAnchorMs({
+      source, sent_at: '2026-11-05T15:00:00Z', viewed_at: null, accepted_at: null,
+      estimate_data: { deliveryState: { firstDeliveredAt: stamp } },
+    });
+    // A staff quote stays in its October cohort, as on main.
+    expect(anchored(null)).toBe(Date.parse(stamp));
+    expect(anchored('admin')).toBe(Date.parse(stamp));
+    // A self-serve quote dates by sent_at, as the Intelligence Bar's SQL reads it.
+    expect(anchored('plan_start')).toBe(Date.parse('2026-11-05T15:00:00Z'));
   });
 
   test('no sent rows → empty cohorts with null rates', async () => {

@@ -103,6 +103,15 @@ maybeDescribe('portal messages: after-hours Waves AI (live Postgres)', () => {
     }
     throw new Error('the after-hours step did not finish');
   }
+  // The AI answer's notice is written after its outcome (portal-messages-night-ai.js notifyCustomer): wait for it.
+  async function noticeWritten(customerId) {
+    for (let i = 0; i < 150; i += 1) {
+      const [ai] = await aiRows(customerId);
+      if (ai?.metadata?.notice) return ai;
+      await pause(100);
+    }
+    throw new Error('the AI answer notice was not written');
+  }
   async function post(c, body, { hour = NIGHT, clientRequestId = null } = {}) {
     mockHour = hour;
     try {
@@ -206,6 +215,33 @@ maybeDescribe('portal messages: after-hours Waves AI (live Postgres)', () => {
     const handled = await PortalInbox.markMessageHandled(row.id, sent.id, actor);
     expect(handled).toEqual({ handled: true, open: false });
     expect(await openAdminBells('portalConversationId', row.id)).toHaveLength(0);
+  }, 60000);
+
+  test('with GATE_PORTAL_ANSWER_TEXT on, a Waves AI answer gets the in-app bell only: no push, no text, no email', async () => {
+    const SendCustomerMessage = require('../services/messaging/send-customer-message');
+    const sends = jest.spyOn(SendCustomerMessage, 'sendCustomerMessage');
+    process.env.GATE_PORTAL_ANSWER_TEXT = 'true';
+    try {
+      const pat = await customer('Bell');
+      await visit(pat.id);
+      mockCreate
+        .mockResolvedValueOnce(toolUse('get_upcoming_services', {}))
+        .mockResolvedValueOnce(answer('Your next visit is in ten days, between 9:00 and 11:00 AM.'));
+      const sent = await post(pat, 'When is my next visit?');
+      expect(await settled(sent.id)).toBe('answered');
+      const ai = await noticeWritten(pat.id);
+      const bell = await db('notifications').where({ recipient_type: 'customer', recipient_id: pat.id }).whereRaw("metadata->>'portalMessageId' = ?", [ai.id]).first();
+      expect(bell).toMatchObject({ title: 'New message from Waves', link: '/?tab=messages' });
+      expect(PushService.sendToCustomer).not.toHaveBeenCalled();
+      expect(AccountMembershipEmail.sendPortalReply).not.toHaveBeenCalled();
+      expect(sends.mock.calls.filter(([input]) => input?.audience === 'customer' && input?.customerId === pat.id)).toEqual([]);
+      expect((await db('messages').where({ id: ai.id }).first('metadata')).metadata.notice).toEqual({ bell: true, pushAccepted: 0, pending: false });
+      // Nothing is left pending for the sweep to text.
+      expect(await PortalMessages.resumePendingNotices(new Date(Date.now() + 10 * 60 * 1000))).toBe(0);
+    } finally {
+      delete process.env.GATE_PORTAL_ANSWER_TEXT;
+      sends.mockRestore();
+    }
   }, 60000);
 
   test('the late "still waiting" ring still fires after the AI answered, and a staff answer closes the item and its bell', async () => {

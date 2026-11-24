@@ -27,8 +27,11 @@ vi.mock("./PipelineAnalytics", () => ({
   default: () => <div>Pipeline summary</div>,
   isFollowUpOverdueEstimate: () => false,
   isGoingColdEstimate: () => false,
-  isCallTodayEstimate: () => false,
   isPickReasonEstimate: () => false,
+}));
+// The page imports the Call today rule from its shared home; stubbed as the analytics mock stubbed it before.
+vi.mock("@estimate-call-today", () => ({
+  isCallTodayEstimate: () => false,
   lastEngagementMs: () => null,
 }));
 vi.mock("./WinLossSlicesCard", () => ({ default: () => null }));
@@ -94,6 +97,52 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+it("offers no 1× option or invoice mode on a customer's own plan quote, even one already on (codex pre-push r29 on #8132; tenth pre-push audit)", async () => {
+  const rows = [
+    { ...ESTIMATES[0], id: "estimate-own", customerName: "Own Mint", source: "plan_restart" },
+    {
+      ...ESTIMATES[1],
+      id: "estimate-own-on",
+      customerName: "Own Mint On",
+      source: "plan_start",
+      showOneTimeOption: true,
+      billByInvoice: true,
+    },
+    { ...ESTIMATES[2], id: "estimate-staff", customerName: "Staff Quote", source: "admin" },
+  ];
+  fetch.mockImplementation(async (url) => {
+    const parsed = new URL(String(url), "http://fixture.invalid");
+    if (parsed.pathname === "/api/admin/estimates") {
+      return response({
+        estimates: parsed.searchParams.get("sentOnly") === "1" ? rows : [],
+        truncated: false,
+      });
+    }
+    return response({ resolved: 0, drafted: 0, sources: [] });
+  });
+  renderPage("/admin/pipeline?tab=estimates");
+  const menuFor = async (name) => {
+    fireEvent.click(
+      await screen.findByRole("button", { name: `Actions for ${name}` }),
+    );
+  };
+  const closeMenu = () =>
+    fireEvent.click(screen.getByRole("button", { name: "Close actions menu" }));
+
+  await menuFor("Own Mint");
+  expect(screen.queryByRole("button", { name: "1× Option: Off" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Invoice mode: Off" })).not.toBeInTheDocument();
+  closeMenu();
+  // The server refuses turning one back off too, so an option already on is not listed either.
+  await menuFor("Own Mint On");
+  expect(screen.queryByRole("button", { name: "1× Option: On" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Invoice mode: On" })).not.toBeInTheDocument();
+  closeMenu();
+  await menuFor("Staff Quote");
+  expect(screen.getByRole("button", { name: "1× Option: Off" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Invoice mode: Off" })).toBeInTheDocument();
 });
 
 it.each([

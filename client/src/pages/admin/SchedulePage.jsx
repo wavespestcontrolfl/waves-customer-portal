@@ -57,6 +57,7 @@ import CompletionPricingCard from "../../components/schedule/CompletionPricingCa
 import PromiseCheck, { currentMark, promiseMarksPayload, promiseMarksSignature } from "../../components/schedule/PromiseCheck";
 import BlogPostPicker from "../../components/schedule/BlogPostPicker";
 import NoteBoxPhotos from "../../components/schedule/NoteBoxPhotos";
+import LawnPlanTab from "../../components/schedule/LawnPlanTab";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 import RescheduleDialogView from "../../components/schedule/RescheduleDialogView";
@@ -76,6 +77,12 @@ import {
   completionTimeOnSiteBody,
   completionWillReview,
   alreadyReviewedFrom,
+  lateCloseAskKeptFrom,
+  runPreviewReadWithRetry,
+  withAbortTimeout,
+  claimPreviewRecheck,
+  LATE_CLOSE_NOW_KEPT_MESSAGE,
+  backfillCheckboxHint,
   customReviewTimeProblem,
   firstAskReasonsFrom,
   firstReviewAskFrom,
@@ -128,6 +135,7 @@ import {
 } from "../../lib/tree-shrub-pest-check";
 import { AREA_ADDONS_LOOKUP_FAILED_MESSAGE, addOnActualsProblem, addOnRecordMissingProblem, areaAddOnRowServiceType, isAreaAddOnVisit, withGovernedAddOnRate } from "../../lib/areaAddOns";
 import AreaAddOnFields from "../../components/admin/AreaAddOnFields";
+import { holdForRecapUpload } from "../../lib/recapUploads";
 import { productDimension } from "../../lib/fast-complete-products";
 import { DOSE_UNITS, doseText, injectionBasis, injectionLabelRate, injectionLabelText, injectionRecordView, parseDose, quantityOf, pickedBand, recordForProduct, recordWithBand, trunkInchesText, typedDraft } from "../../lib/injection-dose";
 import {
@@ -137,6 +145,11 @@ import {
 import {
   protocolCompletionDefaultSelections,
 } from "../../lib/protocol-completion-defaults";
+import {
+  applyTaurusYearlyLimit,
+  taurusYearlyNote,
+  taurusYearlyOf,
+} from "../../lib/taurus-yearly-limit";
 import { BED_FEED_CAP_LB_PER_1000, bedFeedRatePer1000, bedFeedCountyLimitLine } from "../../lib/bed-feed-rate";
 import {
   exclusiveProtocolProductConflict,
@@ -166,7 +179,7 @@ import termiteTreatmentMethods from "../../../../shared/termite-treatment-method
 import AREA_SCOPES from "../../../../shared/treatment-area-scopes.json";
 import legacyCompletionAreas from "../../../../shared/legacy-completion-areas.json";
 import completionMarkerGrammar from "../../../../shared/completion-marker-grammar.json";
-import { useFeatureFlag, useFeatureFlagReady } from "../../hooks/useFeatureFlag";
+import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import { AskedTimeBoxLegacy, ToldBadgeLegacy } from "../../components/schedule/DayOnlyPromiseLegacy";
 import { usePropertyReminderAnswer } from "../../components/schedule/useHydratedOfficeService";
 import { askedTimeMoveFields } from "../../components/schedule/dayOnlyPromise";
@@ -1280,6 +1293,7 @@ export const COMPLETION_RESUME_OWED_CODES = new Set([
   "deferred_prepay_lookup_failed",       // the deferred annual-prepay hold could not be read; the resume re-reads it
   "membership_dues_coverage_unverified", // the month's dues could not be checked / the dues mint was refused retryably (month busy, rate or lane moved); the resume re-reads coverage and mints
   "proposal_terms_unread",               // an invoice-mode commercial proposal's Net terms could not be read; the resume re-reads them and mints
+  "held_payment_lookup_failed",          // GATE_REPORT_AFTER_PAY: the payment holding the visit could not be read; the resume re-reads it before any invoice is linked
 ]);
 export function completionResumeOwedError(error) {
   // The 503 is part of the contract: a reused code on any other status is
@@ -1956,9 +1970,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // arrival time — admin chooses per save; default matches the drag-and-drop
   // reschedule modal (no text).
   const [notificationType, setNotificationType] = useState("none");
-  // GATE_DAY_ONLY_PROMISE (flag `day_only_promise`): "Customer asked for this time" for a save that moves the visit,
-  // pre-filled from the stored choice (true = checked). Gate off: no box and no field in the request.
-  const dayOnlyPromiseOn = useFeatureFlag("day_only_promise");
+  // "Customer asked for this time" for a save that moves the visit, pre-filled from the stored choice (true = checked).
   const [customerAskedTime, setCustomerAskedTime] = useState(service.customerAskedTime === true);
   // Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE, owner ruling
   // 2026-08-28): a DATE change on a recurring visit moves its later sister
@@ -2088,7 +2100,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [addressState, setAddressState] = useState("loading");
   const [selectedPropertyId, setSelectedPropertyId] = useState("");
   // GATE_DAY_ONLY_PROMISE part E: the 24-hour-reminder answer for the property the save will use (the phone-script hint).
-  const reminder24hOn = usePropertyReminderAnswer(service, selectedPropertyId, dayOnlyPromiseOn);
+  const reminder24hOn = usePropertyReminderAnswer(service, selectedPropertyId);
   // Advisory drive-detour suggestions for the same fixed day — picking a
   // chip only fills the window fields (never saves). A terminal visit's
   // date/window edit is a record correction: there is no route to price,
@@ -2376,7 +2388,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       .then((data) => {
         if (cancelled) return;
         setAddressOptions(data.properties || []);
-        setAddressState(data.canChangeAppointmentAddress === true ? "ready" : "disabled");
+        setAddressState("ready");
       })
       .catch(() => { if (!cancelled) setAddressState("error"); });
     return () => { cancelled = true; };
@@ -3534,8 +3546,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             : undefined,
           ...(selectedPropertyId ? { propertyId: selectedPropertyId } : {}),
           notifyCustomer: notifyOnMove || undefined,
-          // GATE_DAY_ONLY_PROMISE: the office's choice for the new slot; only a moving save with the gate on.
-          ...askedTimeMoveFields(dayOnlyPromiseOn && moveNotifyOffered, customerAskedTime),
+          // The office's choice for the new slot; only a moving save.
+          ...askedTimeMoveFields(moveNotifyOffered, customerAskedTime),
           // Collective-move ack — bound to the previewed occurrence set the
           // modal showed (empty when this save is not a collective move).
           ...(comboTogether ? {} : seriesAckPayload(seriesPreview.preview)),
@@ -4918,9 +4930,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               >
                 {customerName}
               </span>{" "}
-              {dayOnlyPromiseOn && (
-                <ToldBadgeLegacy told={service.told} currentDate={service.scheduledDate} colors={D} />
-              )}{" "}
+              <ToldBadgeLegacy told={service.told} currentDate={service.scheduledDate} colors={D} />{" "}
             </div>{" "}
           </div>{" "}
           <div
@@ -6145,7 +6155,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   </div>{" "}
                 </div>
               )}{" "}
-              {dayOnlyPromiseOn && moveNotifyOffered && (
+              {moveNotifyOffered && (
                 <AskedTimeBoxLegacy id="edit-appt-asked-time" checked={customerAskedTime} onChange={setCustomerAskedTime} disabled={saving} colors={D} style={{ marginBottom: 14 }} slot={{ date: form.scheduledDate, start: form.windowStart, reminder24hOn, originalDate: service.scheduledDate }} />
               )}{" "}
               {moveNotifyOffered && (
@@ -6871,7 +6881,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
 
 const JOB_CARD_CHIP = {
   ok: { label: "OK", bg: "#F4F4F5", fg: "#3F3F46" },
-  // GATE_SPRAY_RAIN_RULES: rain likely but the dose stays on the card; neutral, as red is for a hold.
+  // Rain likely but the dose stays on the card; neutral, as red is for a hold.
   caution: { label: "Caution", bg: "#F4F4F5", fg: "#3F3F46" },
   // Rain very likely (owner 2026-10-29, step 2): the dose still shows. Dark, not red: the admin stays monochrome.
   warning: { label: "Warning", bg: "#18181B", fg: "#FFFFFF" },
@@ -6902,10 +6912,10 @@ function JobCardChip({ tone = "unknown", label, D }) {
   );
 }
 
-function JobCardCollapsible({ title, right = null, defaultOpen = false, children, D, domId = undefined }) {
+// `aside` sits beside the header button, not inside it (a control cannot nest in a button).
+function JobCardCollapsible({ title, right = null, aside = null, defaultOpen = false, children, D, domId = undefined }) {
   const [open, setOpen] = useState(defaultOpen);
-  return (
-    <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, background: D.card, marginBottom: 8 }}>
+  const header = (
       <button
         type="button"
         id={domId}
@@ -6934,6 +6944,10 @@ function JobCardCollapsible({ title, right = null, defaultOpen = false, children
         </span>
         {right && <span style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>{right}</span>}
       </button>
+  );
+  return (
+    <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, background: D.card, marginBottom: 8 }}>
+      {aside ? <div style={{ display: "flex", alignItems: "center" }}>{header}{aside}</div> : header}
       {open && <div style={{ padding: "0 14px 14px", borderTop: `1px solid ${D.border}` }}>{children}</div>}
     </div>
   );
@@ -7108,14 +7122,16 @@ export function JobCardOrderButton({ productId, name, order, serviceId, D, compa
 
 // A chemical area add-on's label text: what the estimate sold, the grass it was priced on, rate, area
 // basis, yearly limit and the one safety line. A spray-check Hold, an unverified label or a missing
-// grass sends the reason in place of the rate.
-export function JobCardGoverned({ governed, D }) {
+// grass sends the reason in place of the rate. `pending`: the card is being read again, so no rate
+// from the old read shows (the card's header says "Checking the amounts…").
+export function JobCardGoverned({ governed, D, pending = false }) {
   if (!governed) return null;
+  const rate = governed.rate ? <div>Rate: {governed.rate}</div> : <div style={{ color: D.muted }}>{governed.rateNote}</div>;
   return (
     <div style={{ fontSize: 14, display: "grid", gap: 4 }}>
       {governed.sold && <div style={{ fontWeight: 500 }}>{governed.sold}</div>}
       {governed.grass && <div>{governed.grass}</div>}
-      {governed.rate ? <div>Rate: {governed.rate}</div> : <div style={{ color: D.muted }}>{governed.rateNote}</div>}
+      {!pending && rate}
       <div>Area: {governed.area}</div>
       <div>Limit: {governed.limit}</div>
       {governed.use && <div>{governed.use}</div>}
@@ -7124,40 +7140,87 @@ export function JobCardGoverned({ governed, D }) {
   );
 }
 
-function JobCardProduct({ p, serviceId, D }) {
-  const amount = fmtAmount(p.planned?.amount, p.planned?.unit);
+// The "Use" tick on an "if needed" lawn product: asks the job card to plan it. Not saved to the visit.
+function JobCardUse({ name, use, D }) {
+  return (
+    <label style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 14px 0 4px", minHeight: 44, fontSize: 14, color: D.text, cursor: use.disabled ? "default" : "pointer", flexShrink: 0 }}>
+      <input type="checkbox" checked={use.checked} disabled={use.disabled} onChange={() => use.onSet(!use.checked)} aria-label={`Use ${name}`} style={{ width: 18, height: 18, accentColor: D.heading }} />
+      Use
+    </label>
+  );
+}
+
+// A numbered mixing order (the plan's own steps: no amounts).
+function JobCardMixingOrder({ title, steps, D }) {
+  if (!steps?.length) return null;
+  return (
+    <JobCardCollapsible title={title} D={D}>
+      <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+        {steps.map((step) => (
+          <div key={`${step.step}-${step.productId}`} style={{ display: "flex", gap: 10, fontSize: 14, color: D.text }}>
+            <span style={{ width: 22, height: 22, borderRadius: 2, background: D.heading, color: D.white, fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{step.step}</span>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontWeight: 500 }}>{step.productName}</div>
+              <div style={{ color: D.muted }}>{step.instruction}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </JobCardCollapsible>
+  );
+}
+
+// A mix's required conditions (the plan's own warnings for its planned products: water setback, storm hold, the Bermuda
+// spot's growth, morning and test-patch rules), open under that mix's order, each once with the products it names.
+function JobCardRequired({ title, notes, D }) {
+  if (!notes?.length) return null;
+  return (
+    <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, background: D.card, padding: "10px 14px", marginBottom: 8, fontSize: 14, color: D.text, display: "grid", gap: 4 }}>
+      <div style={{ fontWeight: 500 }}>{title}</div>
+      {notes.map((note) => (
+        <div key={note.text}>{note.products?.length ? `${note.products.join(", ")}: ` : ""}{note.text}</div>
+      ))}
+    </div>
+  );
+}
+
+// `pending`: a "Use" tick is being read again; the amounts on this card belong to the old selection, so none shows.
+function JobCardProduct({ p, serviceId, D, use = null, pending = false }) {
+  const amount = pending ? null : fmtAmount(p.planned?.amount, p.planned?.unit);
   // The shortage line names the plan's requirement even while the dose is withheld.
-  const demand = fmtAmount(p.demand?.amount, p.demand?.unit) || amount;
+  const demand = pending ? null : fmtAmount(p.demand?.amount, p.demand?.unit) || amount;
+  const short = p.short && !pending;
   const right = (
     <>
       {p.conditional && <span style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>If needed</span>}
-      {p.short && <JobCardChip tone="hold" label="Short" D={D} />}
+      {short && <JobCardChip tone="hold" label="Short" D={D} />}
       <JobCardChip tone={p.verdictLevel === "warning" ? "warning" : p.verdict} D={D} />
       {amount && <span style={{ fontSize: 13, color: D.text, fontVariantNumeric: "tabular-nums" }}>{amount}</span>}
+      {pending && <span style={{ fontSize: 14, color: D.muted }}>Checking the amounts…</span>}
     </>
   );
   return (
-    <JobCardCollapsible title={jobCardProductTitle(p)} right={right} defaultOpen={Boolean(p.governed)} D={D} domId={`job-card-product-${jobCardRowId(p)}`}>
+    <JobCardCollapsible title={jobCardProductTitle(p)} right={right} aside={use && <JobCardUse name={p.name} use={use} D={D} />} defaultOpen={Boolean(p.governed)} D={D} domId={`job-card-product-${jobCardRowId(p)}`}>
       <div style={{ fontSize: 13, color: D.text, marginTop: 10, display: "grid", gap: 8 }}>
         {p.line && <div style={{ color: D.muted }}>{p.line}</div>}
-        <JobCardGoverned governed={p.governed} D={D} />
+        <JobCardGoverned governed={p.governed} D={D} pending={pending} />
         {p.verdict !== "ok" && p.verdictReason && (
           <div style={{ color: p.verdict === "hold" ? "#C8312F" : D.muted }}>Spray check: {p.verdictReason}</div>
         )}
         {p.verdictAction && <div style={{ fontSize: 14, color: D.text }}>{p.verdictAction}</div>}
         {p.precautions && <div>{p.precautions}</div>}
         {p.signalWord && <div style={{ color: D.muted }}>Signal word: {p.signalWord}</div>}
-        {p.short && (
+        {short && (
           <div style={{ color: "#C8312F" }}>
             {demand
               ? `On hand ${fmtAmount(p.onHand, p.onHandUnit)} vs ${demand} planned.`
               : `On hand ${fmtAmount(p.onHand, p.onHandUnit)} — short of the planned amount (withheld).`}
           </div>
         )}
-        {!p.short && p.onHand != null && (
+        {!short && !pending && p.onHand != null && (
           <div style={{ color: D.muted }}>On hand {fmtAmount(p.onHand, p.onHandUnit)}{p.lowStock ? " (low)" : ""}</div>
         )}
-        {p.amountNote && <div style={{ color: D.muted }}>{p.amountNote}</div>}
+        {p.amountNote && !pending && <div style={{ color: D.muted }}>{p.amountNote}</div>}
         {p.stockNote && <div style={{ color: D.muted }}>{p.stockNote}</div>}
         {p.rotation && <div style={{ color: D.muted }}>{p.rotation}</div>}
         {(p.labelUrl || p.sdsUrl) && (
@@ -7166,13 +7229,16 @@ function JobCardProduct({ p, serviceId, D }) {
             {p.sdsUrl && <a href={p.sdsUrl} target="_blank" rel="noreferrer" style={{ color: D.heading }}>SDS</a>}
           </div>
         )}
-        <JobCardOrderButton productId={p.id} name={p.name} order={p.order} serviceId={serviceId} D={D} compact />
+        {/* While a tick is re-read the order is sized for the old selection, so there is no order button; it comes
+            back idle (any open confirmation gone) with the new quantity. */}
+        {!pending && <JobCardOrderButton productId={p.id} name={p.name} order={p.order} serviceId={serviceId} D={D} compact />}
       </div>
     </JobCardCollapsible>
   );
 }
 
-function JobCardTank({ tank, serviceId, D }) {
+// `ticks`: the Use ticks (comma list) the card was read with; the search reads the same plan.
+function JobCardTank({ tank, serviceId, ticks = "", D }) {
   const [gallons, setGallons] = useState(110);
   // A rig row picked in place of the 110 / 1 gal presets: a full tank of
   // that rig, dosed on its own carrier and volume.
@@ -7218,12 +7284,12 @@ function JobCardTank({ tank, serviceId, D }) {
     // Never show the previous product's verdict beside the new one.
     setMix(null);
     const volume = pickedRigId ? `rig=${encodeURIComponent(pickedRigId)}` : `gallons=${gallons}`;
-    adminFetch(`/admin/protocols/job-card/mix?serviceId=${encodeURIComponent(serviceId)}&productId=${encodeURIComponent(picked.id)}&${volume}`)
+    adminFetch(`/admin/protocols/job-card/mix?serviceId=${encodeURIComponent(serviceId)}&productId=${encodeURIComponent(picked.id)}&${volume}${ticks ? `&selectedConditionalProductIds=${encodeURIComponent(ticks)}` : ""}`)
       .then((data) => { if (!cancelled) setMix(data); })
       .catch(() => { if (!cancelled) setMix({ amount: null, reason: "Could not load the mix" }); })
       .finally(() => { if (!cancelled) setBusy(false); });
     return () => { cancelled = true; };
-  }, [picked, gallons, pickedRigId, serviceId]);
+  }, [picked, gallons, pickedRigId, serviceId, ticks]);
 
   const pill = (selected) => ({
     flex: 1,
@@ -7455,7 +7521,11 @@ export function JobCardAwayWatch({ lines, D }) {
   ));
 }
 
-export function JobCardTab({ card, loading, error, D }) {
+// `lawn` (lawn visits): { selectedIds, ticks, pending, onSet(productIds, wanted), onOpenPlan() } from the panel, which
+// holds the "Use" ticks. Only a card the server marks `planOption` (the primary lawn plan's "if needed" line) gets a
+// box; it reads the server's own selection (`!conditional`), or the local tick while a re-read is pending. While
+// `pending` the card's amounts, the mixing orders and the Tank search belong to the old selection, so none shows.
+export function JobCardTab({ card, loading, error, D, lawn = null }) {
   if (loading) {
     return <div style={{ padding: 40, textAlign: "center", color: D.muted }}>Loading job card...</div>;
   }
@@ -7486,11 +7556,28 @@ export function JobCardTab({ card, loading, error, D }) {
         <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 14px" }}>Visit note: {card.notes.visitNotes}</p>
       )}
       <JobCardSprayCheck sprayCheck={card.sprayCheck} products={products} D={D} />
-      <JobCardTank tank={card.tank} serviceId={card.serviceId} D={D} />
-      {card.planBlocks?.length > 0 && (
+      {!lawn?.pending && (
+        <>
+          <JobCardTank key={lawn?.ticks || ""} tank={card.tank} serviceId={card.serviceId} ticks={lawn?.ticks || ""} D={D} />
+          <JobCardMixingOrder title="Mixing order" steps={card.mixingOrder} D={D} />
+          <JobCardRequired title="Required for the mix" notes={card.mixRequired} D={D} />
+          <JobCardMixingOrder title="Bermuda backpack mix" steps={card.bermudaMixingOrder} D={D} />
+          <JobCardRequired title="Required for the Bermuda backpack mix" notes={card.bermudaRequired} D={D} />
+        </>
+      )}
+      {!lawn?.pending && card.planBlocks?.length > 0 && (
         <div style={{ border: "1px solid #C8312F", borderRadius: 2, padding: "10px 12px", margin: "14px 0 0", fontSize: 14, color: D.text }}>
           <div style={{ fontWeight: 500, color: "#C8312F", marginBottom: 4 }}>Lawn plan blocked — amounts withheld</div>
           {card.planBlocks.map((b, i) => <div key={b.code || i}>{b.message}</div>)}
+          {lawn?.onOpenPlan && (
+            <button
+              type="button"
+              onClick={lawn.onOpenPlan}
+              style={{ marginTop: 8, minHeight: 44, padding: "0 12px", border: `1px solid ${D.inputBorder}`, borderRadius: 2, background: D.card, color: D.heading, fontSize: 14, fontWeight: 500, cursor: "pointer" }}
+            >
+              See Plan tab
+            </button>
+          )}
         </div>
       )}
       {products.length > 0 && (
@@ -7501,7 +7588,17 @@ export function JobCardTab({ card, loading, error, D }) {
       {(card.addons || []).filter((a) => a.note).map((a) => (
         <div key={a.name} style={{ fontSize: 13, color: D.muted, marginBottom: 6 }}>{a.name}: {a.note}</div>
       ))}
-      {products.map((p) => <JobCardProduct key={jobCardRowId(p)} p={p} serviceId={card.serviceId} D={D} />)}
+      {products.map((p) => {
+        // The bermuda removal step is one selection: its lines tick together.
+        // A tick is matched by the id the engine selects by (`selectionId`: the original product's when a substitution swaps it).
+        const ids = (p.bermudaStep ? products.filter((c) => c.bermudaStep) : [p]).map((c) => String(c.selectionId || c.id));
+        const use = lawn && p.planOption ? {
+          checked: lawn.pending ? lawn.selectedIds.includes(String(p.selectionId || p.id)) : !p.conditional,
+          disabled: lawn.pending,
+          onSet: (wanted) => lawn.onSet(ids, wanted),
+        } : null;
+        return <JobCardProduct key={jobCardRowId(p)} p={p} serviceId={card.serviceId} D={D} use={use} pending={Boolean(lawn?.pending)} />;
+      })}
       {products.length === 0 && (
         <div style={{ fontSize: 13, color: D.muted }}>{card.lineNote || "No protocol products matched this visit."}</div>
       )}
@@ -7519,7 +7616,10 @@ function protocolMonthForService(service) {
   );
 }
 
-export function ProtocolPanel({ service, onClose }) {
+const NO_TICKS = [];
+
+// `initialSection`: the tab to open on ("lawn_plan" from the Plan entry points); lawn visits only.
+export function ProtocolPanel({ service, onClose, initialSection = null }) {
   // Reactive (rotation-safe) — the module-level snapshot never recomputes.
   const isMobile = useIsMobile(640);
   const panelRef = useModalFocus(true, onClose);
@@ -7564,6 +7664,25 @@ export function ProtocolPanel({ service, onClose }) {
   const [jobCard, setJobCard] = useState(null);
   const [jobCardLoading, setJobCardLoading] = useState(true);
   const [jobCardError, setJobCardError] = useState(false);
+  // The tick query the shown card was read with: a card read with another one is pending its re-read.
+  const [jobCardQuery, setJobCardQuery] = useState("");
+  // "Use" ticks on "if needed" lawn lines: product ids for this visit. Not saved to the visit; a new visit starts clean.
+  const [useTicks, setUseTicks] = useState({ serviceId: null, ids: [] });
+  const selectedConditionalIds = useTicks.serviceId === service?.id ? useTicks.ids : NO_TICKS;
+  const selectedQuery = selectedConditionalIds.length
+    ? `?selectedConditionalProductIds=${encodeURIComponent(selectedConditionalIds.join(","))}`
+    : "";
+  // The lawn plan (GET /admin/treatment-plans), read with the same ticks. It feeds only the Plan tab, so it is read
+  // from the first time that tab opens (the server builds a full plan for it).
+  const [planSeenFor, setPlanSeenFor] = useState(null);
+  const [lawnPlan, setLawnPlan] = useState(null);
+  // The tick query the shown plan was read with: a plan read with other ticks is not shown as current.
+  const [lawnPlanQuery, setLawnPlanQuery] = useState("");
+  const [lawnPlanLoading, setLawnPlanLoading] = useState(false);
+  const [lawnPlanError, setLawnPlanError] = useState("");
+  // The Plan tab's Refresh re-reads the plan AND the job card, so the two tabs never show two reads.
+  const [refreshKey, setRefreshKey] = useState(0);
+  const jobCardShownFor = useRef(null);
   const [loadErrors, setLoadErrors] = useState([]);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const payGrowthAvailable = usePayGrowthAvailable();
@@ -7604,11 +7723,15 @@ export function ProtocolPanel({ service, onClose }) {
   // ask bar. A failed request is shown as a notice under the header instead.
   const jobCardEnabled = Boolean(jobCard?.enabled);
   const protocolEnabled = Boolean(jobCard?.protocol?.enabled);
-  const defaultSection = jobCardEnabled
+  // The shown card was read with other ticks, or a Refresh is out: nothing that card says about amounts, blocks or
+  // mixes shows as current on the Job or Protocol tab until the new read lands.
+  const cardPending = Boolean(jobCard) && jobCardQuery !== selectedQuery;
+  const wantedSection = initialSection === "lawn_plan" && !isLawn ? null : initialSection;
+  const defaultSection = wantedSection || (jobCardEnabled
     ? "job_card"
     : isLawn
       ? "lawn_protocol"
-      : "overview";
+      : "overview");
   const [requestedSection, setActiveSection] = useState(defaultSection);
 
   useEffect(() => {
@@ -7617,24 +7740,32 @@ export function ProtocolPanel({ service, onClose }) {
 
   useEffect(() => {
     let cancelled = false;
-    setJobCard(null);
+    // A "Use" tick re-reads the card in place; only another visit blanks it.
+    const sameVisit = jobCardShownFor.current === service?.id;
+    if (!sameVisit) setJobCard(null);
     setJobCardError(false);
     if (!service?.id) {
       setJobCardLoading(false);
       return undefined;
     }
-    setJobCardLoading(true);
-    setJobCardError(false);
-    adminFetch(`/admin/protocols/job-card/${service.id}`)
+    setJobCardLoading(!sameVisit);
+    adminFetch(`/admin/protocols/job-card/${service.id}${selectedQuery}`)
       .then((data) => {
         if (cancelled) return;
-        setJobCard(data && data.enabled ? data : { enabled: false });
+        // Only the server's literal word opens a path: `enabled: true` with a card, or `enabled: false` (the Job tab is
+        // off, the one answer that shows the legacy Lawn tab's mix amounts). Any other answer fails closed below.
+        if (typeof data?.enabled !== "boolean") throw new Error("Job card answer has no enabled flag");
+        jobCardShownFor.current = service.id;
+        setJobCardQuery(selectedQuery);
+        setJobCard(data.enabled ? data : { enabled: false });
       })
       .catch(() => {
         if (cancelled) return;
-        // A failed request (503 safety-data outage, network) keeps the tab
-        // and shows its unavailable state — never a silent fall-back to
-        // the legacy view. Only a successful { enabled: false } hides it.
+        // A failed request (503 safety-data outage, network, an answer with
+        // no enabled flag) keeps the tab and shows its unavailable state —
+        // never a silent fall-back to the legacy view. Only a successful
+        // { enabled: false } hides it.
+        jobCardShownFor.current = null;
         setJobCard(null);
         setJobCardError(true);
       })
@@ -7644,7 +7775,39 @@ export function ProtocolPanel({ service, onClose }) {
     return () => {
       cancelled = true;
     };
+  }, [service?.id, selectedQuery, refreshKey]);
+
+  useEffect(() => {
+    setLawnPlan(null);
   }, [service?.id]);
+
+  const planTabOpen = isLawn && requestedSection === "lawn_plan";
+  useEffect(() => {
+    if (planTabOpen) setPlanSeenFor(service?.id);
+  }, [planTabOpen, service?.id]);
+
+  const readPlan = planTabOpen || (isLawn && planSeenFor === service?.id);
+  useEffect(() => {
+    if (!readPlan || !service?.id) return undefined;
+    let cancelled = false;
+    setLawnPlanLoading(true);
+    setLawnPlanError("");
+    adminFetch(`/admin/treatment-plans/${service.id}${selectedQuery}`)
+      .then((data) => {
+        if (cancelled) return;
+        setLawnPlanQuery(selectedQuery);
+        setLawnPlan(data?.plan || null);
+      })
+      .catch((err) => {
+        if (!cancelled) setLawnPlanError(err?.message || "Failed to load treatment plan");
+      })
+      .finally(() => {
+        if (!cancelled) setLawnPlanLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [readPlan, service?.id, selectedQuery, refreshKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -7778,6 +7941,7 @@ export function ProtocolPanel({ service, onClose }) {
 
   const SECTIONS = [
     ...(jobCardEnabled ? [{ id: "job_card", label: "Job", count: null }] : []),
+    ...(isLawn ? [{ id: "lawn_plan", label: "Plan", count: null }] : []),
     ...(protocolEnabled ? [{ id: "visit_protocol", label: " Protocol", count: null }] : []),
     ...(!protocolEnabled && isLawn
       ? [
@@ -7972,7 +8136,7 @@ export function ProtocolPanel({ service, onClose }) {
       </div>
       {/* Content */}
       <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
-        {loadErrors.length > 0 && activeSection !== "job_card" && activeSection !== "visit_protocol" && (
+        {loadErrors.length > 0 && activeSection !== "job_card" && activeSection !== "visit_protocol" && activeSection !== "lawn_plan" && (
           <div role="alert" style={{ border: `1px solid ${D.border}`, padding: 12, marginBottom: 16, fontSize: 14, color: D.text }}>
             <div>Could not load: {loadErrors.join(", ")}.</div>
             <div style={{ marginTop: 4 }}>Available guidance is shown below.</div>
@@ -7988,9 +8152,42 @@ export function ProtocolPanel({ service, onClose }) {
         {activeSection === "score" && canScore ? (
           <ServiceScore key={service.id} serviceId={service.id} manage={isAdmin} initialData={participantScore || null} />
         ) : activeSection === "job_card" && jobCardEnabled ? (
-          <JobCardTab card={jobCard} loading={jobCardLoading} error={jobCardError} D={D} />
+          <JobCardTab
+            card={jobCard}
+            loading={jobCardLoading}
+            error={jobCardError}
+            D={D}
+            lawn={isLawn ? {
+              selectedIds: selectedConditionalIds,
+              ticks: selectedConditionalIds.join(","),
+              pending: cardPending,
+              onSet: (productIds, wanted) => setUseTicks({
+                serviceId: service.id,
+                ids: wanted
+                  ? [...new Set([...selectedConditionalIds, ...productIds])]
+                  : selectedConditionalIds.filter((id) => !productIds.includes(id)),
+              }),
+              onOpenPlan: () => setActiveSection("lawn_plan"),
+            } : null}
+          />
+        ) : activeSection === "lawn_plan" && isLawn ? (
+          <LawnPlanTab
+            jobTab={jobCard ? jobCardEnabled : null}
+            plan={lawnPlanQuery === selectedQuery ? lawnPlan : null}
+            loading={lawnPlanLoading || (Boolean(lawnPlan) && lawnPlanQuery !== selectedQuery)}
+            error={lawnPlanError}
+            onRefresh={() => {
+              // Until the card's re-read lands the Job tab is pending: no amount from the old read shows.
+              setJobCardQuery(null);
+              setRefreshKey((k) => k + 1);
+            }}
+          />
         ) : activeSection === "visit_protocol" && protocolEnabled ? (
-          <VisitProtocol key={jobCard.serviceId} card={jobCard} D={D} onJobCard={() => setActiveSection("job_card")} />
+          cardPending ? (
+            <div style={{ padding: 40, textAlign: "center", color: D.muted, fontSize: 14 }}>Checking the amounts…</div>
+          ) : (
+            <VisitProtocol key={jobCard.serviceId} card={jobCard} D={D} onJobCard={() => setActiveSection("job_card")} />
+          )
         ) : loading ? (
           <div style={{ padding: 40, textAlign: "center", color: D.muted }}>
             Loading protocol...
@@ -8095,7 +8292,13 @@ export function ProtocolPanel({ service, onClose }) {
                         lawn sqft before using product amounts.
                       </div>
                     )}
-                    {lawnMix && (
+                    {/* Mix amounts only on the server's current word that the Job tab is off ({ enabled: false }): not
+                        while the card loads, after a failed read (503, a failed tick re-read), or while a Refresh is out. */}
+                    {lawnMix && (jobCard?.enabled !== false || cardPending ? (
+                      <div style={{ fontSize: 14, color: D.muted, marginBottom: 12 }}>
+                        {jobCardEnabled ? "Amounts show on the Job tab." : "Amounts show once the job card loads."}
+                      </div>
+                    ) : (
                       <div
                         style={{
                           background: D.bg,
@@ -8340,7 +8543,7 @@ export function ProtocolPanel({ service, onClose }) {
                           </div>
                         )}
                       </div>
-                    )}
+                    ))}
                     {lawnProtocol && (
                       <>
                         <div
@@ -9306,11 +9509,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   // Immediate reschedule text — admin chooses per move ('none' | 'sms'),
   // matching the drag-and-drop RescheduleConfirmModal's default of no text.
   const [notificationType, setNotificationType] = useState("none");
-  // GATE_DAY_ONLY_PROMISE (flag `day_only_promise`): "Customer asked for this time" for the new slot, pre-filled from the
-  // stored choice. Gate off: no box and no field in the request.
-  const dayOnlyPromiseOn = useFeatureFlag("day_only_promise");
+  // "Customer asked for this time" for the new slot, pre-filled from the stored choice.
   const [customerAskedTime, setCustomerAskedTime] = useState(service.customerAskedTime === true);
-  const askedTimeFields = askedTimeMoveFields(dayOnlyPromiseOn, customerAskedTime);
+  const askedTimeFields = { customerAskedTime: customerAskedTime === true };
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [showManual, setShowManual] = useState(false);
@@ -9581,7 +9782,6 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       setNotes={setNotes}
       notificationType={notificationType}
       setNotificationType={setNotificationType}
-      dayOnlyPromiseOn={dayOnlyPromiseOn}
       customerAskedTime={customerAskedTime}
       setCustomerAskedTime={setCustomerAskedTime}
       sending={sending}
@@ -12099,6 +12299,9 @@ export function StationMarkingStep({
 function RecapCapture({ serviceId, onChange }) {
   const [items, setItems] = useState([]);
   const [pendingFile, setPendingFile] = useState(null);
+  // A picked clip waiting for its tag is only in this page: it holds the
+  // reload until it is tagged (the upload then holds) or closed.
+  useEffect(() => (pendingFile ? holdForRecapUpload() : undefined), [pendingFile]);
   const rolePickerRef = useModalFocus(!!pendingFile, () => setPendingFile(null));
   const [showMore, setShowMore] = useState(false);
   const [uploading, setUploading] = useState(0);
@@ -12124,6 +12327,7 @@ function RecapCapture({ serviceId, onChange }) {
     if (!file) return;
     setUploading((n) => n + 1);
     setErr(null);
+    const uploadEnded = holdForRecapUpload();
     try {
       const mediaType = file.type.startsWith("image/") ? "image" : "video";
       const durationMs = mediaType === "video" ? await readVideoDurationMs(file) : null;
@@ -12141,7 +12345,7 @@ function RecapCapture({ serviceId, onChange }) {
       // Surface the server reason (e.g. unsupported iPhone HEVC/MOV or HEIC) instead of
       // silently dropping the clip; closeout stays unblocked either way.
       setErr(e?.message || "Couldn’t add that clip — use an MP4 video or JPEG photo.");
-    } finally { setUploading((n) => Math.max(0, n - 1)); }
+    } finally { uploadEnded(); setUploading((n) => Math.max(0, n - 1)); }
   };
 
   const remove = async (id) => {
@@ -12344,6 +12548,9 @@ export function PestRecapCard({ serviceId }) {
 // unconfirmed St. Augustine cultivar.
 const BERMUDA_CONDITION_KEYS = ["activelyGrowingOnly", "morningUnderF", "noRainOrIrrigationHours", "noMowDaysBeforeAfter", "skipCelsiusInBermudaArea", "zoysia2eeOnHand", "testPatchFirst"];
 const BERMUDA_TEST_PATCH_LINE = "Test patch first: spray a 3x3 ft patch and watch 3–4 weeks before the full spot";
+
+// A submit-time preview read gives up after this long and counts as a failed read (the unavailable path).
+const SUBMIT_PREVIEW_TIMEOUT_MS = 8000;
 
 export function CompletionPanel({
   service,
@@ -12622,6 +12829,14 @@ export function CompletionPanel({
   // reviewed ({ reviewedOn } or null), and the off reasons a first ask may carry. Kept, like
   // reviewFirstAsk, when the preview is cleared (box off).
   const [reviewAlreadyReviewed, setReviewAlreadyReviewed] = useState(null);
+  // GATE_REVIEW_LATE_CLOSE_ASK: the preview says a backdated closeout made now keeps the review ask. False until a read says so.
+  const [reviewLateCloseAskKept, setReviewLateCloseAskKept] = useState(false);
+  // Whether the preview carries the `lateCloseAskKept` key: only the gate adds it. null = no answer read yet. false = a read
+  // answered without it (gate off): none of the late-close waits, re-checks or notices run, the flow is today's.
+  const lateCloseKeyRef = useRef(null);
+  // Set when the submit-time check failed and the notice promised the review request is off: it holds the box off against the
+  // first-ask effect and a recovered preview. Only the operator re-checking the box clears it.
+  const [lateCloseSuppressedByFailure, setLateCloseSuppressedByFailure] = useState(false);
   const [reviewFirstAskReasons, setReviewFirstAskReasons] = useState(() => firstAskReasonsFrom(null));
   const [reviewTiming, setReviewTiming] = useState(REVIEW_TIMING_DEFAULT);
   const [reviewCustomAt, setReviewCustomAt] = useState("");
@@ -14012,19 +14227,27 @@ export function CompletionPanel({
   // #5049 r3 — a pest-mix row the tech removed must not come back when the
   // outcome goes declined → completed).
   const [protocolCompletionDefaultsRemovedIds, setProtocolCompletionDefaultsRemovedIds] = useState([]);
+  // The server's protocol/default-products answer, read once per visit. It also
+  // carries Taurus SC's yearly label answer for this home: the pest
+  // mix seed waits for the answer to settle (a failure settles it too, with the
+  // count unknown, so Taurus stays off the mix; nothing blocks the close-out).
+  const [protocolCompletionDefaults, setProtocolCompletionDefaults] = useState(null);
+  const [protocolCompletionDefaultsSettled, setProtocolCompletionDefaultsSettled] = useState(false);
+  const taurusYearly = taurusYearlyOf(protocolCompletionDefaults?.taurusYearly);
   const pestDefaultMixSeededRef = useRef(false);
   const pestDefaultMixSnapshotRef = useRef(null);
   useEffect(() => {
     if (pestDefaultMixSeededRef.current) return;
     if (isTypedFindings || isBedBugVisit || !isPestDefaultMixVisit(service)) return;
     if (visitOutcome !== "completed") return;
+    if (!protocolCompletionDefaultsSettled) return;
     if (!Array.isArray(products) || products.length === 0) return;
     if (selectedProducts.length) {
       pestDefaultMixSeededRef.current = true;
       return;
     }
     pestDefaultMixSeededRef.current = true;
-    const rows = pestDefaultMixSelections(products)
+    const rows = applyTaurusYearlyLimit(pestDefaultMixSelections(products), taurusYearly)
       .filter(({ product }) => !protocolCompletionDefaultsRemovedIds.includes(String(product.id)))
       .map(({ product, totalAmount }) => ({
       // A regular pest visit's seeded rows start on their area (owner
@@ -14044,7 +14267,7 @@ export function CompletionPanel({
     if (!rows.length) return;
     pestDefaultMixSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit, isRegularPestVisit, visitOutcome, protocolCompletionDefaultsRemovedIds]);
+  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit, isRegularPestVisit, visitOutcome, protocolCompletionDefaultsRemovedIds, protocolCompletionDefaultsSettled, taurusYearly]);
   // Server-curated protocol/default-products prefill (owner ruling
   // 2026-09-26) for every non-lawn, non-pest program the server has a
   // curated product list for — cockroach today (Alpine WSG + Gentrol IGR +
@@ -14052,16 +14275,20 @@ export function CompletionPanel({
   // completionDefaultProducts entries. Lawn and pest already seed
   // themselves through their own mechanisms; lib/protocol-completion-
   // defaults.js keeps this hook out of their way.
-  const [protocolCompletionDefaults, setProtocolCompletionDefaults] = useState(null);
   useEffect(() => {
     let cancelled = false;
     setProtocolCompletionDefaults(null);
-    if (!service.id) return undefined;
+    setProtocolCompletionDefaultsSettled(false);
+    if (!service.id) {
+      setProtocolCompletionDefaultsSettled(true);
+      return undefined;
+    }
     adminFetch(`/admin/dispatch/${service.id}/default-products`)
       .then((data) => { if (!cancelled) setProtocolCompletionDefaults(data); })
       // Fail-soft on the client too: a failed lookup just means no prefill,
       // never a blocked drawer.
-      .catch(() => { if (!cancelled) setProtocolCompletionDefaults(null); });
+      .catch(() => { if (!cancelled) setProtocolCompletionDefaults(null); })
+      .finally(() => { if (!cancelled) setProtocolCompletionDefaultsSettled(true); });
     return () => { cancelled = true; };
   }, [service.id]);
   const protocolCompletionDefaultsSeededRef = useRef(false);
@@ -14380,10 +14607,14 @@ export function CompletionPanel({
   // false while the backdate checkbox is active, so the review checkbox shows
   // "Review request suppressed", the timing selector hides, and the
   // custom-review-time validation cannot block a submit whose review the
-  // server forces off anyway.
+  // server forces off anyway. Exception (GATE_REVIEW_LATE_CLOSE_ASK): when the
+  // send-time preview says the closeout is within 3 days of the worked day, the
+  // reason lifts and the box follows the operator's toggle like a normal completion.
   const reviewSuppressionReason = completionReviewSuppressionReason({
     isIncompleteVisit,
     backfillQuietCloseout,
+    lateCloseAskKept: reviewLateCloseAskKept,
+    oneTimeRecapOnly,
     visitOutcome,
     customerConcernInteraction:
       isCustomerConcernInteraction(customerInteraction),
@@ -14435,13 +14666,18 @@ export function CompletionPanel({
   reviewSendPreviewRef.current = reviewSendPreview;
   // One failed-preview notice per outage at submit (r13 P2 / r18 P1).
   const previewFailureNoticedRef = useRef(false);
-  const fetchReviewSendPreview = useCallback(() => {
+  // `timeoutMs` (the submit-time reads only) aborts a stalled request; expiry reads as a failed read (null), the unavailable path.
+  const fetchReviewSendPreview = useCallback((timeoutMs = 0) => {
     const qs = new URLSearchParams({ serviceType: service?.serviceType || "", ...(service?.id ? { serviceId: String(service.id) } : {}) });
-    return fetch(`${API_BASE}/admin/reviews/send-time-preview?${qs}`, {
+    return withAbortTimeout((signal) => fetch(`${API_BASE}/admin/reviews/send-time-preview?${qs}`, {
       headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` },
-    })
-      .then((r) => (r.ok ? r.json() : null))
-      .catch(() => null);
+      ...(signal ? { signal } : {}),
+    }).then((r) => (r.ok ? r.json() : null)), timeoutMs)
+      .then((data) => {
+        // Remember whether the answer carried the late-close key (gate on); a failed read leaves it as it was.
+        if (data) lateCloseKeyRef.current = Object.prototype.hasOwnProperty.call(data, "lateCloseAskKept");
+        return data;
+      });
   }, [service?.id, service?.serviceType]);
   useEffect(() => {
     if (!willReview || oneTimeRecapOnly) {
@@ -14453,17 +14689,22 @@ export function CompletionPanel({
       if (oneTimeRecapOnly) return undefined;
       // One read still names the first ask, so a box restored off from a
       // draft knows the server will keep that ask on. No poll, and the timing preview stays unknown.
-      let gone = false;
-      fetchReviewSendPreview().then((data) => {
-        const firstAsk = firstReviewAskFrom(data);
-        if (!gone && firstAsk !== null) setReviewFirstAsk(firstAsk);
-        // GATE_REVIEW_ALREADY_REVIEWED: an answer (not a failed read) also says whether the customer is marked reviewed.
-        if (!gone && data) {
-          setReviewAlreadyReviewed(alreadyReviewedFrom(data));
-          setReviewFirstAskReasons(firstAskReasonsFrom(data));
-        }
+      // A backdated closeout keeps its ask suppressed until an answer lands, so a failed read is read again on the poll's interval.
+      return runPreviewReadWithRetry({
+        read: fetchReviewSendPreview,
+        retry: backfillQuietCloseout && lateCloseKeyRef.current !== false,
+        apply: (data) => {
+          const firstAsk = firstReviewAskFrom(data);
+          if (firstAsk !== null) setReviewFirstAsk(firstAsk);
+          // GATE_REVIEW_ALREADY_REVIEWED: an answer (not a failed read) also says whether the customer is marked reviewed.
+          if (data) {
+            setReviewAlreadyReviewed(alreadyReviewedFrom(data));
+            setReviewFirstAskReasons(firstAskReasonsFrom(data));
+          }
+          // A failed read never keeps the late-close ask: fewer texts.
+          setReviewLateCloseAskKept(lateCloseAskKeptFrom(data));
+        },
       });
-      return () => { gone = true; };
     }
     let cancelled = false;
     const load = () => fetchReviewSendPreview().then((data) => {
@@ -14477,6 +14718,8 @@ export function CompletionPanel({
         setReviewFirstAskReasons(firstAskReasonsFrom(data));
       }
       if (cancelled) return;
+      // Only the active request sets it, and a failed read clears it (null reads false).
+      setReviewLateCloseAskKept(lateCloseAskKeptFrom(data));
       setReviewSendPreview(data);
       if (data) previewFailureNoticedRef.current = false;
     });
@@ -14486,14 +14729,17 @@ export function CompletionPanel({
     // answer (codex #4140 r1).
     const timer = setInterval(load, 60 * 1000);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [service?.id, fetchReviewSendPreview, willReview, oneTimeRecapOnly]);
+  }, [service?.id, fetchReviewSendPreview, willReview, oneTimeRecapOnly, backfillQuietCloseout]);
   // A first ask stays on: a draft restored with the box off, or a verdict that lands late, turns it
   // back on unless the tech already confirmed the one reason.
   useEffect(() => {
-    if (reviewFirstAsk && !requestReview && !reviewOptOutReason) setRequestReview(true);
-  }, [reviewFirstAsk, requestReview, reviewOptOutReason]);
-  const reviewBoxText = reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firstAsk: reviewFirstAsk, reviewedOn: reviewAlreadyReviewed?.reviewedOn });
+    // A failed late-close check that promised the request off keeps it off (lateCloseSuppressedByFailure) until the operator re-checks the box.
+    if (reviewFirstAsk && !requestReview && !reviewOptOutReason && !lateCloseSuppressedByFailure) setRequestReview(true);
+  }, [reviewFirstAsk, requestReview, reviewOptOutReason, lateCloseSuppressedByFailure]);
+  const reviewBoxText = reviewBoxLabel({ reviewSuppressionReason, oneTimeRecapOnly, firstAsk: reviewFirstAsk, reviewedOn: reviewAlreadyReviewed?.reviewedOn, lateCloseAskKept: backfillQuietCloseout && reviewLateCloseAskKept, willReview });
   const handleReviewToggle = (checked) => {
+    // Only the operator re-checking the box clears a failed-check suppression.
+    setLateCloseSuppressedByFailure(false);
     const next = nextReviewChoice({
       checked,
       firstAsk: reviewFirstAsk,
@@ -18489,12 +18735,34 @@ export function CompletionPanel({
     // nothing in that state, and a submit must not silently accept an ask
     // that GATE_CRON_JOBS may never send (codex #4140 r18 P1).
     const schedulerStateKnown = typeof reviewSendPreviewRef.current?.schedulerEnabled === "boolean";
-    if (!sideEffectsCommittedRef.current && !oneTimeRecapOnly && willReview && (reviewTiming === "auto" || !schedulerStateKnown)) {
+    const lateCloseShown = backfillQuietCloseout && reviewLateCloseAskKept === true;
+    // The backdate box is the ONLY thing keeping the review box off (the preview was pending, failed or said no): read once more,
+    // and if it now says the closeout keeps its review request, show that and stop, so the operator confirms the choice.
+    // null or false submits as today: suppressed.
+    // Runs only once a preview answer carried the late-close key (the gate is on); with the gate off the flow is today's.
+    if (!sideEffectsCommittedRef.current && !oneTimeRecapOnly && !willReview && backfillQuietCloseout && lateCloseKeyRef.current === true
+      && visitOutcome === "completed" && reviewSuppressionReason === "backfill") {
+      // A second tap while the read is pending returns, as the review-box branch below does.
+      if (!claimPreviewRecheck(previewRecheckRef)) return;
+      let probe;
+      try {
+        probe = await fetchReviewSendPreview(SUBMIT_PREVIEW_TIMEOUT_MS);
+      } finally {
+        previewRecheckRef.current = false;
+      }
+      if (lateCloseAskKeptFrom(probe)) {
+        setReviewSendPreview(probe);
+        setReviewLateCloseAskKept(true);
+        alert(LATE_CLOSE_NOW_KEPT_MESSAGE);
+        return;
+      }
+    }
+    if (!sideEffectsCommittedRef.current && !oneTimeRecapOnly && willReview && (reviewTiming === "auto" || !schedulerStateKnown || lateCloseShown)) {
       if (previewRecheckRef.current) return;
       previewRecheckRef.current = true;
       let fresh;
       try {
-        fresh = await fetchReviewSendPreview();
+        fresh = await fetchReviewSendPreview(SUBMIT_PREVIEW_TIMEOUT_MS);
       } finally {
         previewRecheckRef.current = false;
       }
@@ -18510,7 +18778,16 @@ export function CompletionPanel({
       // still carry a later tick range after a tick boundary (codex #4140
       // r15 P2); only a bucket change needs the operator's confirmation.
       if (fresh) setReviewSendPreview(fresh);
-      const verdict = reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, failureNoticed: previewFailureNoticedRef.current, reportTextExpected: completionReportTextExpected({ effectiveSendSms, customerPhone: service?.customerPhone }) });
+      // The fresh answer also refreshes the late-close verdict the box shows (a visit can cross its 3rd day before submit).
+      // A failed request is the same as an unknown answer: clear the verdict (fewer texts); the next submit goes suppressed.
+      if (fresh) setReviewLateCloseAskKept(lateCloseAskKeptFrom(fresh));
+      else if (lateCloseShown) setReviewLateCloseAskKept(false);
+      // The notice says the review request is off: set the box itself off, so a later preview recovery never turns it back on.
+      if (lateCloseShown && lateCloseAskKeptFrom(fresh) !== true) {
+        setRequestReview(false);
+        setLateCloseSuppressedByFailure(true);
+      }
+      const verdict = reviewPreviewSubmitVerdict({ reviewTiming, fresh, shown, lateCloseShown: lateCloseShown ? true : null, failureNoticed: previewFailureNoticedRef.current, reportTextExpected: completionReportTextExpected({ effectiveSendSms, customerPhone: service?.customerPhone }) });
       if (verdict) {
         if (verdict.noticed) previewFailureNoticedRef.current = true;
         if (verdict.dropShown) setReviewSendPreview(null);
@@ -19728,6 +20005,8 @@ export function CompletionPanel({
         onReload={() => setLawnPlanReloadKey(key => key + 1)} />
         : null
   );
+  // Taurus SC's yearly label limit at this home, shown in both layouts. Warns only, never blocks the save.
+  const taurusNoteText = taurusYearlyNote(taurusYearly, selectedProducts, { mixVisit: isRegularPestVisit && protocolCompletionDefaultsSettled });
   if (isMobile) {
     const M = {
       page: "#FAFAFA",
@@ -21205,6 +21484,7 @@ export function CompletionPanel({
             {/* Products applied */}
             <Field label="Products applied">
               {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
+              {taurusNoteText ? <p style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{taurusNoteText}</p> : null}
               {quickComplete ? (
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                   {(products || []).slice(0, 8).map((p) => {
@@ -21858,9 +22138,10 @@ export function CompletionPanel({
                         marginTop: 2,
                       }}
                     >
-                      {backfillCloseout
-                        ? "Records to the visit day, sends no customer messages, and skips auto-charge."
-                        : "Unchecked: completes as today with the normal customer messages."}
+                      {backfillCheckboxHint({
+                        backfillCloseout,
+                        reviewAskGoes: reviewLateCloseAskKept && willReview && !oneTimeRecapOnly,
+                      })}
                     </span>
                   </span>{" "}
                 </label>
@@ -23690,6 +23971,7 @@ export function CompletionPanel({
           {/* Products Applied */}
           <label style={labelStyle}>Products Applied</label>
           {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
+          {taurusNoteText ? <p style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{taurusNoteText}</p> : null}
           {quickComplete ? (
             <div
               style={{
@@ -24288,9 +24570,10 @@ export function CompletionPanel({
                     marginTop: 2,
                   }}
                 >
-                  {backfillCloseout
-                    ? "Records to the visit day, sends no customer messages, and skips auto-charge."
-                    : "Unchecked: completes as today with the normal customer messages."}
+                  {backfillCheckboxHint({
+                    backfillCloseout,
+                    reviewAskGoes: reviewLateCloseAskKept && willReview && !oneTimeRecapOnly,
+                  })}
                 </span>
               </span>{" "}
             </label>

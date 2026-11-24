@@ -782,7 +782,7 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
         {showNowLine && <NowLine />}
         {(() => {
           const lanes = computeLanes(services);
-          // Tie-proximity display order (server, GATE_SCHEDULE_TIE_PROXIMITY):
+          // Tie-proximity display order (server):
           // `services` here is already one technician's day, so a present
           // `displayOrder` (a 0-based index the server computed by proximity
           // for ties within 30 minutes) can be compared directly; absent

@@ -187,8 +187,52 @@ describe('performPropertyLookup cache integration', () => {
 
     // Satellite URLs regenerated with the CURRENT key, never stored ones.
     expect(hit.satellite.closeUrl).toContain('current-maps-key');
+    // Port Charlotte is served again (owner "ok do this", 2026-11-23, after a few hours on the hold list):
+    // the cached verdict matches the live one, and both say in area.
+    expect(hit.satellite.inServiceArea).toBe(live.satellite.inServiceArea);
     expect(hit.satellite.inServiceArea).toBe(true);
     expect(hit.satellite._closeB64).toBeUndefined();
+  });
+
+  // Port Charlotte is served, but the held shared ZIPs 33980 / 33981 / 33983 carry the name too: with no usable ZIP
+  // anywhere the verdict is unknown (null), fresh and cached alike (owner ruling 2026-11-23).
+  it('a Port Charlotte address with no ZIP anywhere answers inServiceArea null, live and from the cache', async () => {
+    const NO_ZIP = '2965 Rock Creek Dr, Port Charlotte, FL';
+    global.fetch = jest.fn(async (url) => {
+      const urlText = String(url);
+      if (urlText.includes('geocode')) {
+        return {
+          ok: true,
+          json: async () => ({
+            status: 'OK',
+            results: [{
+              formatted_address: '2965 Rock Creek Dr, Port Charlotte, FL, USA',
+              types: ['street_address'],
+              geometry: { location: { lat: 26.9897, lng: -82.139 }, location_type: 'ROOFTOP' },
+              address_components: [],
+            }],
+          }),
+        };
+      }
+      if (urlText.includes('staticmap')) return { ok: true, arrayBuffer: async () => new ArrayBuffer(8) };
+      throw new Error(`unexpected fetch: ${urlText}`);
+    });
+    mockDbHandler = () => fakeTable({ row: null });
+    // the provider record carries no ZIP either (the default mock record names 33948)
+    const defaultImpl = lookupPropertyFromAITrio.getMockImplementation();
+    lookupPropertyFromAITrio.mockImplementationOnce(async (...args) => ({ ...(await defaultImpl(...args)), formattedAddress: NO_ZIP }));
+    const live = await performPropertyLookup(NO_ZIP);
+    expect(live.satellite.inServiceArea).toBeNull();
+
+    const base = cachedRow();
+    mockDbHandler = () => fakeTable({ row: cachedRow({ property_record: { ...base.property_record, formattedAddress: NO_ZIP } }) });
+    const hit = await performPropertyLookup(NO_ZIP);
+    expect(hit.meta.cache).toBe('hit');
+    expect(hit.satellite.inServiceArea).toBeNull();
+
+    // a ZIP on the typed address (or a malformed fragment that is not one) decides the verdict again
+    mockDbHandler = () => fakeTable({ row: cachedRow({ property_record: { ...base.property_record, formattedAddress: ADDRESS } }) });
+    expect((await performPropertyLookup(ADDRESS)).satellite.inServiceArea).toBe(true);
   });
 
   it('refresh forces a live lookup even with a fresh row', async () => {
@@ -331,5 +375,88 @@ describe('performPropertyLookup cacheOnly', () => {
     const result = await performPropertyLookup(ADDRESS, { cacheOnly: true, refresh: true, persist: false });
     expect(result).toBeNull();
     expect(lookupPropertyFromAITrio).not.toHaveBeenCalled();
+  });
+});
+
+// strictCacheReads: the plan start offer prices a home with nobody watching.
+// The default reads answer a failure as "no corrections" or "no row"; under
+// this option both reads throw, so an outage never becomes a price on sizes
+// staff already corrected, and never a "this home has no saved lookup".
+describe('performPropertyLookup strictCacheReads', () => {
+  const STRICT = { cacheOnly: true, persist: false, strictCacheReads: true };
+  const DEFAULT = { cacheOnly: true, persist: false };
+  // A correction made BEFORE the data was cached: the row is still a hit.
+  const corrected = () => cachedRow({
+    verified_overrides: { lotSize: { value: 7200, verifiedAt: '2026-06-01T12:00:00Z', verifiedBy: 'tech' } },
+  });
+  // The correction read selects one column; the cache read selects the row.
+  // `overrideRow`: what the correction read sees, when it differs from the row the cache read serves.
+  const tableWith = ({ row, overrideRow = row, failOverrides = false, failCache = false }) => {
+    const builder = fakeTable({ row });
+    builder.first = async (...columns) => {
+      const overrideRead = columns.includes('verified_overrides');
+      if (overrideRead ? failOverrides : failCache) {
+        throw Object.assign(new Error(`connection lost near "${ADDRESS}"`), { code: '57P01' });
+      }
+      return overrideRead ? overrideRow : row;
+    };
+    return builder;
+  };
+
+  it('a healthy strict read serves the cached home with its corrections, as the default does', async () => {
+    mockDbHandler = () => tableWith({ row: corrected() });
+    const strict = await performPropertyLookup(ADDRESS, STRICT);
+    const normal = await performPropertyLookup(ADDRESS, DEFAULT);
+    expect(strict.meta.cache).toBe('hit');
+    expect(strict.enriched.lotSqFt).toBe(7200);
+    expect(normal.enriched.lotSqFt).toBe(7200);
+  });
+
+  it('a failed correction read followed by a cache hit: the default serves the UNCORRECTED home, strict throws', async () => {
+    mockDbHandler = () => tableWith({ row: corrected(), failOverrides: true });
+    // The gap this option closes: the stored lot is 10,043 and staff corrected it to 7,200.
+    const normal = await performPropertyLookup(ADDRESS, DEFAULT);
+    expect(normal.meta.cache).toBe('hit');
+    expect(normal.enriched.lotSqFt).toBe(10043);
+
+    const error = await performPropertyLookup(ADDRESS, STRICT).catch((err) => err);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.code).toBe('LOOKUP_CACHE_READ_FAILED');
+    expect(error.message).not.toContain('Rock Creek');
+  });
+
+  it('a failed cache read: the default answers a miss, strict throws', async () => {
+    mockDbHandler = () => tableWith({ row: corrected(), failCache: true });
+    expect(await performPropertyLookup(ADDRESS, DEFAULT)).toBeNull();
+    await expect(performPropertyLookup(ADDRESS, STRICT)).rejects.toMatchObject({ code: 'LOOKUP_CACHE_READ_FAILED' });
+  });
+
+  it('the two reads disagree (a correction and a refresh landed between them): a strict hit applies the corrections of the row it serves', async () => {
+    // The first read saw the older correction (7,200). Then staff corrected the lot again (6,800) and a
+    // refresh saved the row: the row served as the hit carries the newer correction, folded into its record.
+    const earlier = cachedRow({ verified_overrides: { lotSize: { value: 7200, verifiedAt: '2026-06-01T12:00:00Z', verifiedBy: 'tech' } } });
+    const refreshed = cachedRow({ verified_overrides: { lotSize: { value: 6800, verifiedAt: '2026-06-10T12:00:00Z', verifiedBy: 'tech' } } });
+    refreshed.property_record.lotSize = 6800;
+    mockDbHandler = () => tableWith({ row: refreshed, overrideRow: earlier });
+
+    const strict = await performPropertyLookup(ADDRESS, STRICT);
+    expect(strict.meta.cache).toBe('hit');
+    expect(strict.enriched.lotSqFt).toBe(6800);
+    // The default path is not changed here: it still applies the earlier read.
+    const normal = await performPropertyLookup(ADDRESS, DEFAULT);
+    expect(normal.enriched.lotSqFt).toBe(7200);
+  });
+
+  it('a strict hit on a row with no corrections applies none, whatever the earlier read saw', async () => {
+    const earlier = cachedRow({ verified_overrides: { lotSize: { value: 7200, verifiedAt: '2026-06-01T12:00:00Z', verifiedBy: 'tech' } } });
+    mockDbHandler = () => tableWith({ row: cachedRow(), overrideRow: earlier });
+    expect((await performPropertyLookup(ADDRESS, STRICT)).enriched.lotSqFt).toBe(10043);
+  });
+
+  it('a strict miss is still null, and no live provider runs', async () => {
+    mockDbHandler = () => tableWith({ row: null });
+    expect(await performPropertyLookup(ADDRESS, STRICT)).toBeNull();
+    expect(lookupPropertyFromAITrio).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 });

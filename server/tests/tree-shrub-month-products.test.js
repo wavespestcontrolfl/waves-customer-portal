@@ -135,7 +135,7 @@ describe('resolveMonthProducts', () => {
       expect(oil[0]).toMatch(/under 90°F; not on drought-stressed plants/);
     }
     // Every card's oil line carries all the limits: the job card shows this raw
-    // text when GATE_TREE_SHRUB_FIELD_GUIDE is off (Codex r2 #6185).
+    // text beside the field guide (Codex r2 #6185).
     for (const month of ['Jan', 'Feb', 'Apr', 'Jun', 'Jul', 'Aug', 'Sep', 'Nov']) {
       const oil = protocols.tree_shrub.visits.find((v) => v.month === month).secondary.split('\n').find((l) => /^TriTek/.test(l));
       expect(oil).toMatch(/on live scale crawlers, nymphs or mites only; under 90°F; not on drought-stressed plants; not within 7 days of a forecast cold snap/);

@@ -203,15 +203,15 @@ describeDb("the caller's word (PostgreSQL)", () => {
 
   test.each([
     ['no call names a choice', [[null, {}]], { yes: null, noYes: 'no_yes_heard' }],
-    ['the newest word is annual prepay', [['per_application', { created_at: hoursAgo(5) }], ['annual_prepay', { created_at: hoursAgo(2) }]], { skip: 'chose_annual_prepay' }],
-    ['a later call asked to cancel', [['per_application', { created_at: hoursAgo(5) }], [null, { created_at: hoursAgo(2) }, 'cancellation_request']], { skip: 'took_back' }],
-    ['the yes call also asked for a one-time visit', [['per_application', { created_at: hoursAgo(5) }, 'preventative_one_time']], { skip: 'took_back' }],
+    ['the newest word is annual prepay', [['per_application', { created_at: hoursAgo(5) }], ['annual_prepay', { created_at: hoursAgo(2) }]], { yes: null, noYes: 'caller_chose_annual_prepay', callLogId: expect.any(String) }],
+    ['a later call asked to cancel', [['per_application', { created_at: hoursAgo(5) }], [null, { created_at: hoursAgo(2) }, 'cancellation_request']], { yes: null, noYes: 'caller_took_back' }],
+    ['the yes call also asked for a one-time visit', [['per_application', { created_at: hoursAgo(5) }, 'preventative_one_time']], { yes: null, noYes: 'caller_took_back' }],
     ["a later call carries the call reader's cancel flag, whatever its intent", [['per_application', { created_at: hoursAgo(5) }], [null, {
       created_at: hoursAgo(2), ai_extraction_enriched: JSON.stringify({ ...extractionWith(null, 'follow_up_existing_service'), triage_flags: ['cancellation_request'] }),
-    }]], { skip: 'took_back' }],
+    }]], { yes: null, noYes: 'caller_took_back' }],
     ['the yes call itself carries the cancel flag', [['per_application', {
       created_at: hoursAgo(5), ai_extraction_enriched: JSON.stringify({ ...extractionWith('per_application'), triage_flags: ['cancellation_request'] }),
-    }]], { skip: 'took_back' }],
+    }]], { yes: null, noYes: 'caller_took_back' }],
     ['the choice came before the send', [['per_application', { created_at: new Date(Date.now() - 3 * DAY) }]], { yes: null, noYes: 'no_yes_heard' }],
     ['the choice call is a voicemail', [['per_application', { answered_by: 'voicemail' }]], { yes: null, noYes: 'no_yes_heard' }],
     ['the choice call is still being read', [['per_application', { processing_status: 'processing' }]], { yes: null, noYes: 'no_yes_heard' }],
@@ -239,6 +239,14 @@ describeDb("the caller's word (PostgreSQL)", () => {
     }]], { yes: null, noYes: 'caller_not_account_holder' }],
     ["someone else's call with no word is no word", [['per_application', { created_at: hoursAgo(5) }], [null, {
       created_at: hoursAgo(2), ai_extraction_enriched: thirdParty(null),
+    }]], { yes: { callLogId: expect.any(String), at: expect.any(Date), quote: WORDS }, noYes: null }],
+    // The phone linked the call: a caller who says it is not theirs, and does not say they are the owner or spouse,
+    // is not shown to be the holder.
+    ['a caller on a phone that is not theirs, who does not say who they are', [['per_application', {
+      ai_extraction_enriched: thirdParty('per_application', null, { relationship_to_property: 'unknown', on_site_authorization: null, caller_id_disclaimed: true }),
+    }]], { yes: null, noYes: 'caller_not_account_holder' }],
+    ['an owner on a phone that is not theirs speaks for the account', [['per_application', {
+      ai_extraction_enriched: thirdParty('per_application', null, { relationship_to_property: 'owner', caller_id_disclaimed: true }),
     }]], { yes: { callLogId: expect.any(String), at: expect.any(Date), quote: WORDS }, noYes: null }],
     ['a spouse speaks for the account', [['per_application', {
       ai_extraction_enriched: thirdParty('per_application', null, { relationship_to_property: 'spouse_partner' }),
@@ -277,6 +285,34 @@ describeDb("the caller's word (PostgreSQL)", () => {
     });
   });
 
+  // Both storage eras of the extraction: a jsonb object, or a JSON string inside the jsonb column.
+  test('a word stored as a JSON string counts too: a newer cancel in that form takes an older yes back', async () => {
+    const customerId = await customer();
+    await call(customerId, 'per_application', { created_at: hoursAgo(5) });
+    await call(customerId, null, {
+      created_at: hoursAgo(1), ai_extraction_enriched: JSON.stringify(JSON.stringify(extractionWith(null, 'cancellation_request'))),
+    }, 'cancellation_request');
+    const [row] = await trx('call_log').where({ customer_id: customerId }).orderBy('created_at', 'desc').limit(1)
+      .select(trx.raw('jsonb_typeof(ai_extraction_enriched) AS kind'));
+    expect(row.kind).toBe('string');
+    await expect(callerWord(trx, { customerId, since: since() })).resolves.toEqual({ yes: null, noYes: 'caller_took_back' });
+  });
+
+  // `until`: from a newer estimate's send on, a call may be about that estimate (the cards pass it).
+  test('until: only calls that began before it give the word; a later yes or cancel is not this word', async () => {
+    const customerId = await customer();
+    const yesCallId = await call(customerId, 'per_application', { created_at: hoursAgo(5) });
+    const until = (await trx.raw("SELECT (now() - interval '3 hours')::text AS at")).rows[0].at;
+    await call(customerId, null, { created_at: hoursAgo(1) }, 'cancellation_request');
+    await expect(callerWord(trx, { customerId, since: since() })).resolves.toEqual({ yes: null, noYes: 'caller_took_back' });
+    await expect(callerWord(trx, { customerId, since: since(), until })).resolves.toEqual({
+      yes: { callLogId: yesCallId, at: expect.any(Date), quote: WORDS }, noYes: null,
+    });
+    const other = await customer();
+    await call(other, 'per_application', { created_at: hoursAgo(1) });
+    await expect(callerWord(trx, { customerId: other, since: since(), until })).resolves.toEqual({ yes: null, noYes: 'no_yes_heard' });
+  });
+
   test("a condition in the caller's turn stays in front of the office: the yes carries the whole turn", async () => {
     const customerId = await customer();
     const yesCallId = await call(customerId, 'per_application', {
@@ -302,7 +338,7 @@ describeDb("the caller's word (PostgreSQL)", () => {
     await call(customerId, 'per_application', { created_at: hoursAgo(5) });
     await call(customerId, null, { created_at: hoursAgo(4) }, 'cancellation_request');
     for (let n = 0; n < 55; n += 1) await call(customerId, choice, { created_at: new Date(Date.now() - 3 * 3600000 + n * 1000), ...over });
-    await expect(callerWord(trx, { customerId, since: since() })).resolves.toEqual({ skip: 'took_back' });
+    await expect(callerWord(trx, { customerId, since: since() })).resolves.toEqual({ yes: null, noYes: 'caller_took_back' });
   });
 
   test('each page starts after the last row read: calls with one start time, to the microsecond, are never skipped', async () => {
@@ -313,7 +349,7 @@ describeDb("the caller's word (PostgreSQL)", () => {
     for (let n = 0; n < 120; n += 1) await call(customerId, 'per_application', { created_at: at, answered_by: 'voicemail' });
     // The lowest id sorts last among the ties: the third page.
     await call(customerId, null, { id: '00000000-0000-4000-8000-000000000000', created_at: at }, 'cancellation_request');
-    await expect(callerWord(trx, { customerId, since: since() })).resolves.toEqual({ skip: 'took_back' });
+    await expect(callerWord(trx, { customerId, since: since() })).resolves.toEqual({ yes: null, noYes: 'caller_took_back' });
   });
 
   test("an outbound call with swapped labels hears the customer's words", async () => {

@@ -58,7 +58,6 @@ jest.mock('../services/appointment-address', () => ({
 const knex = require('knex');
 const express = require('express');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { gates } = require('../config/feature-gates');
 const router = require('../routes/admin-schedule');
 const { dateOnly } = require('../services/visit-groups');
 const { geocodeAddress } = require('../services/geocoder');
@@ -89,12 +88,10 @@ describeDb('staff series/address arrival checks on PostgreSQL', () => {
   let database;
   let server;
   let baseUrl;
-  const gateNames = ['GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_EDIT_APPT_ADDRESS', 'GATE_DRIVE_TIME_CALIBRATION'];
+  const gateNames = ['GATE_ADMIN_ARRIVAL_WINDOWS'];
   const savedGates = Object.fromEntries(gateNames.map(key => [key, process.env[key]]));
-  const savedAddressGate = gates.editApptAddress;
   beforeAll(async () => {
     gateNames.forEach(key => { process.env[key] = 'true'; });
-    gates.editApptAddress = true;
     database = knex({ client: 'pg', connection, pool: { min: 0, max: 2 } });
     const app = express();
     app.use(express.json());
@@ -107,7 +104,6 @@ describeDb('staff series/address arrival checks on PostgreSQL', () => {
   afterAll(async () => {
     await new Promise(resolve => server.close(resolve));
     await database.destroy();
-    gates.editApptAddress = savedAddressGate;
     gateNames.forEach(key => {
       if (savedGates[key] === undefined) delete process.env[key]; else process.env[key] = savedGates[key];
     });

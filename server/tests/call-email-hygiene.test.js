@@ -192,7 +192,7 @@ describe('applyEmailDisagreementHold', () => {
   });
 });
 
-// GATE_CALL_SPELLED_EMAIL_SETTLES (owner 2026-11-04, "A"): the letters the
+// Owner 2026-11-04, "A": the letters the
 // caller spelled settle a V1/V2 disagreement only when the decoder heard ONE
 // spelling at full confidence, adopted it, and it is exactly one pass value.
 describe('spelledLettersSettleEmailDisagreement', () => {

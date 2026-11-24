@@ -2,10 +2,11 @@
 /**
  * Extra ad-platform match keys beyond email/phone: first/last name, city,
  * state, ZIP, country and our own customer id (Meta external_id). Pure
- * normalization + source-picking helpers for the two CONVERSION lanes (Meta
- * CAPI, Google Data Manager). The audience lanes (Custom Audiences, Customer
- * Match) deliberately stay email+phone only. Hashing stays in each lane —
- * this module only produces the NORMALIZED plaintext.
+ * normalization + source-picking helpers for the CONVERSION lanes (Meta CAPI,
+ * Google Data Manager) and, for first/last name + ZIP only, the audience lanes
+ * (Meta Custom Audiences FN/LN/ZIP/COUNTRY, Google Customer Match addressInfo).
+ * Hashing stays in each lane — this module only produces the NORMALIZED
+ * plaintext.
  *
  * Rules verified against the official docs (checked 2026-09-29):
  *   Meta CAPI customer information parameters — fn/ln: lowercase, no
@@ -163,8 +164,9 @@ function identityForContact(uploaded, preferred, fallback) {
 // Google AddressInfo needs ALL of givenName, familyName, regionCode and
 // postalCode; names are SHA-256 hashed (by the caller's `hash`), regionCode and
 // postalCode are sent as-is. null unless both names and a 5-digit ZIP exist.
-// Used by the Google conversion lane (data-manager.js); kept here so the
-// address format lives next to the other normalizers.
+// Used by the Google conversion lane (data-manager.js) and Customer Match
+// (google-customer-match.js); kept here so the address format lives next to the
+// other normalizers.
 function googleAddressParts(src, hash) {
   const id = normalizeIdentity(src);
   if (!id.fn || !id.ln || !id.zp) return null;

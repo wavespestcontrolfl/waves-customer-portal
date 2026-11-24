@@ -3775,6 +3775,10 @@ async function toggleShowOneTimeOption({ estimate_identifier, enabled, _expected
     return { error: `No estimate found matching "${estimate_identifier}" (try a token, UUID, or phone)` };
   }
 
+  // A customer's own mint takes no staff one-time option change in either direction (the admin PATCH /:id refuses it
+  // too): turning it back OFF would make a quote the page already refused acceptable again.
+  const mintRefusal = require('../admin-estimate-persistence').selfServeMintEditRefusal(estimate);
+  if (mintRefusal) return { error: mintRefusal };
   const next = typeof enabled === 'boolean' ? enabled : !estimate.show_one_time_option;
   if (next) {
     const deliveryError = validateEstimateDeliveryOptions({

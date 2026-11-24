@@ -88,6 +88,17 @@ const GAP_RULE_RANGES = Object.freeze({
   run_at_open: [1, 200],
   stop_below_open: [0, 200],
 });
+/**
+ * The day the ads sell at `now` (ET wall clock): Sunday -> Monday (people plan their week ahead on Sunday; no
+ * time-of-day logic), weekday before 2 PM -> today, from 2 PM -> tomorrow. The budget run checks this day's capacity,
+ * and the rain-day record (ads/rain-mode.js) forecasts it.
+ */
+function soldDay(now) {
+  const { dayOfWeek, hour } = etParts(now);
+  if (dayOfWeek === 0 || hour >= 14) return etDateString(addETDays(now, 1));
+  return etDateString(now);
+}
+
 const GAP_LAST_KEY = 'ads.gap_rule.last';
 const GAP_HISTORY_KEY = 'ads.gap_rule.history';
 const GAP_HISTORY_MAX = 120;
@@ -217,20 +228,7 @@ class BudgetManager {
     // Read ET wall-clock — server is UTC, getDay/getHours would be 4-5h off.
     const { dayOfWeek, hour } = etParts(now);
 
-    let checkDate;
-
-    if (dayOfWeek === 0) {
-      // SUNDAY: Always check Monday's capacity. No time-of-day logic.
-      // People plan their week ahead on Sunday — run ads at full power
-      // if Monday has availability.
-      checkDate = etDateString(addETDays(now, 1));
-    } else if (hour < 14) {
-      // Weekday morning (ET): check today's capacity
-      checkDate = etDateString(now);
-    } else {
-      // Weekday afternoon (ET): check tomorrow's capacity
-      checkDate = etDateString(addETDays(now, 1));
-    }
+    let checkDate = soldDay(now);
 
     // Read once per run, at call time. 'off' (the default) takes today's
     // exact path below: no settings read, no hold read, no extra query.
@@ -1464,3 +1462,4 @@ module.exports.gapBand = gapBand;
 module.exports.decideGapMode = decideGapMode;
 module.exports.activeBudgetHold = activeBudgetHold;
 module.exports.etDateWeekday = etDateWeekday;
+module.exports.soldDay = soldDay;

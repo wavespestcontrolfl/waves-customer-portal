@@ -540,3 +540,29 @@ describe('refuseParkedWrite (what every public write path answers a parked estim
     await expect(refuseParkedWrite(est, 'cust-bob')).resolves.toMatchObject({ code: 'ACCEPT_NEEDS_OFFICE_REVIEW' });
   });
 });
+
+// GATE_ESTIMATE_APPROVE_PREFERRED_TIME: the page's "tell us when suits you" request is offered under the time picker, but a
+// parked estimate is held for the office, so /data omits it there (the existing review state shows instead).
+describe('first-visit request offer on a parked estimate', () => {
+  afterEach(() => { delete process.env.GATE_ESTIMATE_APPROVE_PREFERRED_TIME; });
+  const preferredOf = (res) => JSON.parse(res.text).estimate.acceptance.preferredTime;
+
+  test('control: the gate on, a clean estimate is offered the request', async () => {
+    process.env.GATE_ESTIMATE_APPROVE_PREFERRED_TIME = 'true';
+    const res = await getData(makeEstimate());
+    expect(preferredOf(res)).toEqual({ offered: true });
+  });
+
+  test('the gate on, a contradicted lone phone candidate: the request is NOT offered', async () => {
+    process.env.GATE_ESTIMATE_APPROVE_PREFERRED_TIME = 'true';
+    phoneCandidates = [BOB];
+    const res = await getData(makeEstimate());
+    expect(ctaOf(res)).toMatchObject({ reviewBeforeBooking: true, reviewReason: 'contact_review' });
+    expect(preferredOf(res)).toBeUndefined();
+  });
+
+  test('the gate off: nothing, parked or not', async () => {
+    const res = await getData(makeEstimate());
+    expect(preferredOf(res)).toBeUndefined();
+  });
+});

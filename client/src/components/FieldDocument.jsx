@@ -45,9 +45,9 @@ export const FIELD_DOCUMENT_CLASSES = Object.freeze({
   metaRow: 'field-info-row',
 });
 
-export function FieldDocument({ children, className = '', sheetClassName = '', style }) {
+export function FieldDocument({ children, className = '', sheetClassName = '', style, ...rootAttributes }) {
   return (
-    <div className={`${FIELD_DOCUMENT_CLASSES.root}${className ? ` ${className}` : ''}`} style={{ ...fieldVars(), ...style }}>
+    <div {...rootAttributes} className={`${FIELD_DOCUMENT_CLASSES.root}${className ? ` ${className}` : ''}`} style={{ ...fieldVars(), ...style }}>
       <div className={`${FIELD_DOCUMENT_CLASSES.sheet}${sheetClassName ? ` ${sheetClassName}` : ''}`}>
         {children}
       </div>

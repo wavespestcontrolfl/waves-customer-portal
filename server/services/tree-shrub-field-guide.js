@@ -1,10 +1,9 @@
-const { gateEnvValue } = require('../config/feature-gates');
 const reference = require('../config/tree-shrub-field-guide.json');
 
 // One reference for the admin month browser and the actual scheduled visit.
 // The payload is descriptive; it does not authorize an application or write use.
 function treeShrubFieldGuide(visit) {
-  if (!gateEnvValue('GATE_TREE_SHRUB_FIELD_GUIDE') || !visit?.fieldGuide) return null;
+  if (!visit?.fieldGuide) return null;
   const keys = [...visit.fieldGuide.routine, ...visit.fieldGuide.conditional].map(row => row.key);
   return {
     ...visit.fieldGuide,

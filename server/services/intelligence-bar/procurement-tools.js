@@ -20,6 +20,7 @@ const inventory = require('../inventory-operations');
 const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 const { analysesIn } = require('../../utils/fertilizer-analysis');
 const { isToolFailure } = require('./outcomes');
+const { shippingLabel } = require('../price-scan/shipping-rules');
 
 const PROCUREMENT_TOOLS = [
   {
@@ -350,9 +351,11 @@ async function queryVendors(input) {
 
 // Per-oz comparison basis (codex GH r3 P1): raw pack prices mislead when
 // pack sizes differ — rank vendor rows exactly like recalcBestPrice
-// (landed per-oz when present, else sticker per-oz; unrankable rows last,
-// ties by raw price). Uses the router's exported primitives so the
-// comparison can never drift from the canonical writer.
+// (DELIVERED per-oz: the row's own landed figure, else the sticker per-oz
+// with the vendor's shipping rule added — owner 2026-11-21, "we always
+// should include shipping"; unrankable rows last, ties by raw price). Uses
+// the router's exported primitives so the comparison can never drift from
+// the canonical writer.
 // Eligibility mirror of recalcBestPrice (r3-push P1): recommendations must
 // never surface pending/rejected/inactive/expired or unpriced rows.
 function eligibleVendorRows(qb) {
@@ -378,11 +381,23 @@ function rankVendorRows(rows, product) {
 // The basis a ranking was decided on, in words the model can repeat (Codex
 // #3974 r2 P2): a count-based product's spread is dollars per UNIT, not per oz.
 const BASIS_TEXT = {
-  oz: 'per-oz unit cost (landed when known)',
-  count: 'per-unit cost for a count-based product (landed when shipping/tax are known)',
+  oz: 'delivered per-oz unit cost (shipping counted: the row\'s own landed figure or shipping estimate, else the vendor\'s shipping rule; a row with no delivered_price_per_oz gave none and is ranked on its sticker price)',
+  count: 'delivered per-unit cost for a count-based product (shipping and tax counted: the row\'s own, else the vendor\'s shipping rule)',
   raw: 'raw pack price (no comparable size on the rows)',
 };
 const basisUnit = (mode) => (mode === 'count' ? 'unit' : 'oz');
+const round4 = (n) => Math.round(n * 10000) / 10000;
+// What a ranked row says about its delivered price (owner 2026-11-21: state the
+// price per unit with shipping in it). `delivered_price_per_oz` is a measured
+// row's per-ounce price WITH delivery in it, or null when the row gives no
+// delivered figure and no shipping could be added (never a sticker price
+// under a delivered name). `shipping` names the shipping that was added
+// ("free shipping", "incl. ~$15.00 est. shipping" — an estimate is a labelled
+// guess, not a quote), or null when nothing was added.
+const deliveredFields = (mode, r) => ({
+  delivered_price_per_oz: mode === 'oz' && r.deliveredPerOz != null ? round4(r.deliveredPerOz) : null,
+  shipping: r.shipping ? shippingLabel(r.shipping) : null,
+});
 
 async function compareVendorPricing(input) {
   const { product_name, product_id } = input;
@@ -416,12 +431,13 @@ async function compareVendorPricing(input) {
       current_best_price: product.best_price ? parseFloat(product.best_price) : null,
       current_best_vendor: product.best_vendor,
     },
-    vendor_prices: ranked.map(({ row: p, perOz, perUnit, rankPerUnit }) => ({
+    vendor_prices: ranked.map(({ row: p, perOz, perUnit, rankPerUnit, deliveredPerOz, shipping }) => ({
       vendor: p.vendor_name,
       price: parseFloat(p.price_amount ?? p.price ?? 0),
       quantity: p.quantity,
       price_per_oz: perOz != null ? Math.round(perOz * 10000) / 10000 : null,
       price_per_unit: perUnit != null ? Math.round(perUnit * 10000) / 10000 : null,
+      ...deliveredFields(mode, { deliveredPerOz, shipping }),
       // Landed per-unit (shipping / tax on the current price) is what a
       // count-mode winner was chosen on (Codex #3974 r3 P2).
       landed_price_per_unit: rankPerUnit != null ? Math.round(rankPerUnit * 10000) / 10000 : null,
@@ -478,6 +494,7 @@ async function findCheapestVendor(input) {
       price_per_oz: r.perOz != null ? Math.round(r.perOz * 10000) / 10000 : null,
       price_per_unit: r.perUnit != null ? Math.round(r.perUnit * 10000) / 10000 : null,
       landed_price_per_unit: r.rankPerUnit != null ? Math.round(r.rankPerUnit * 10000) / 10000 : null,
+      ...deliveredFields(scored.mode, r),
     } : null);
     results.push({
       product: p.name,
@@ -485,9 +502,9 @@ async function findCheapestVendor(input) {
       container_size: p.container_size,
       cheapest: asEntry(ranked[0]),
       runner_up: asEntry(ranked[1]),
-      // Savings on the SAME basis the ranking used (r16-push P1): rank is
-      // landed per-oz when known — sticker deltas could go negative under
-      // heavy shipping despite a correct winner.
+      // Savings on the SAME basis the ranking used (r16-push P1): rank is the
+      // delivered per-oz — sticker deltas could go negative under heavy
+      // shipping despite a correct winner.
       comparison_basis: BASIS_TEXT[scored.mode],
       [savingsKey]: ranked.length >= 2 && ranked[0].rank != null && ranked[1].rank != null
         ? Math.round((ranked[1].rank - ranked[0].rank) * 10000) / 10000
@@ -495,7 +512,7 @@ async function findCheapestVendor(input) {
     });
   }
 
-  return { results, total: results.length, comparison_basis: 'per-oz unit cost (landed when known); per-unit for count-based products — see each result' };
+  return { results, total: results.length, comparison_basis: 'delivered per-oz unit cost (shipping counted); delivered per-unit for count-based products — see each result' };
 }
 
 

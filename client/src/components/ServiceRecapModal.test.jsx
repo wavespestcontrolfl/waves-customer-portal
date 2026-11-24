@@ -58,6 +58,8 @@ function makeRequest({ existingProducts = [], products = CATALOG, catalogLoadFai
         service: { id: 'svc-1', customerName: 'Pat Jones', hasPhone: false },
         timeline: [],
         products,
+        // Room under the yearly Taurus label limit, so the house mix keeps Taurus.
+        taurusYearly: { count: 0, high: 0, low: 0, eligible: true, year: 2026 },
         catalogLoadFailed,
         existingRecord: existingProducts.length
           ? { id: 'rec-1', technician_notes: 'prior note', status: 'completed', products: existingProducts }
@@ -234,13 +236,13 @@ describe('ServiceRecapModal default pest tank mix', () => {
     expect(screen.getByRole('button', { name: 'Non-ionic Surfactant' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Non-ionic Surfactant', pressed: true })).toBeNull();
     // Rates seed from the same catalog prefill a manual tap would use —
-    // for Taurus the pest 4-oz house default (it outranks the dilution
+    // for Taurus the house mix's own 1.6 fl oz (it outranks the dilution
     // band's low bound, same precedence the Adjourn SC test pins). The
     // surfactant gets its own real label rate (0.2 fl_oz/gal) — an
     // adjuvant with a genuine catalog rate is never overridden by the
     // insecticide 4-oz house default (isAdjuvantProduct only suppresses
     // that default for a RATELESS adjuvant).
-    expect(screen.getByLabelText('Application rate for Taurus SC').value).toBe('4');
+    expect(screen.getByLabelText('Application rate for Taurus SC').value).toBe('1.6');
     expect(screen.getByLabelText('Application rate for LESCO 90/10 Nonionic Surfactant').value).toBe('0.2');
   });
 

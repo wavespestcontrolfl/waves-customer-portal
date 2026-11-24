@@ -163,7 +163,7 @@ suite('public accept — billing lane of the customer the accept creates', () =>
 
   // Estimate with NO customer_id (phone unmatched → the accept mints the
   // customer) unless `linkedCustomer` is given.
-  async function estimateFixture(trx, { estimateData = RECURRING_DATA, linkedCustomer = null, monthly = 15, annual = 180, onetime = 0, phone: phoneOverride = null } = {}) {
+  async function estimateFixture(trx, { estimateData = RECURRING_DATA, linkedCustomer = null, monthly = 15, annual = 180, onetime = 0, phone: phoneOverride = null, showOneTimeOption = false } = {}) {
     const estimateId = randomUUID();
     const token = randomUUID().replace(/-/g, '');
     const tag = estimateId.slice(0, 8);
@@ -182,7 +182,7 @@ suite('public accept — billing lane of the customer the accept creates', () =>
       annual_total: annual,
       onetime_total: onetime,
       waveguard_tier: 'Bronze',
-      show_one_time_option: false,
+      show_one_time_option: showOneTimeOption,
       bill_by_invoice: false,
       category: 'RESIDENTIAL',
       estimate_data: JSON.stringify(estimateData),
@@ -361,22 +361,20 @@ suite('public accept — billing lane of the customer the accept creates', () =>
     });
   });
 
-  describe('termite-annual sign-before-pay park (bundled estimate)', () => {
-    const TERMITE_BUNDLE = {
+  describe('termite-annual sign-before-pay park', () => {
+    // A solo plan: one recurring unit, the only shape annual prepay (and so the park) accepts. The row still quotes a
+    // monthly total (monthly: 15 below), the figure a minted customer must NOT take as its monthly_rate.
+    const TERMITE_PLAN_ROW = { name: 'Termite Bait Stations', service: 'termite_bait', annual: 250 };
+    const termitePlan = (services) => ({
       commercialEstimatedPricing: true, // bypasses the slot requirement so the accept reaches the park
       result: {
         lineItems: [{ service: 'termite_bait', plan: 'annual_protection', annual: 250 }],
-        recurring: {
-          discount: 0,
-          monthlyTotal: 15,
-          services: [
-            { name: 'Termite Bait Stations', service: 'termite_bait', annual: 250 },
-            { name: 'Pest Control', service: 'pest_control', mo: 15, visitsPerYear: 4, perTreatment: PEST_PER_VISIT },
-          ],
-        },
+        recurring: { discount: 0, monthlyTotal: 15, services },
         oneTime: { items: [], membershipFee: 0 },
       },
-    };
+    });
+    const TERMITE_BUNDLE = termitePlan([TERMITE_PLAN_ROW]);
+    const PEST_ROW = { name: 'Pest Control', service: 'pest_control', mo: 15, visitsPerYear: 4, perTreatment: PEST_PER_VISIT };
     const gates = ['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2'];
     const savedGates = {};
     beforeAll(() => { gates.forEach((g) => { savedGates[g] = process.env[g]; process.env[g] = 'true'; }); });
@@ -413,6 +411,58 @@ suite('public accept — billing lane of the customer the accept creates', () =>
       expect(after.id).toBe(minted.id);
       expect(after.billing_mode).toBe('per_application');
       expect(Number(after.per_application_fee)).toBe(PEST_PER_VISIT);
+    });
+
+    // Bundled with pest it is two recurring units. Activation (convertEstimate with activationRun) refuses a
+    // multi-service prepay, so the plan must be refused here, before a park asks the customer to sign a plan that could
+    // never activate: no prepay offer, a 400 at accept, no stamp and no minted customer.
+    test('a termite annual plan bundled with pest is refused before it parks', async () => {
+      const bundled = await estimateFixture(mockTransaction, {
+        estimateData: termitePlan([TERMITE_PLAN_ROW, PEST_ROW]),
+        monthly: 15,
+        annual: 430,
+      });
+      const res = await putAccept(bundled.token, { paymentMethodPreference: 'prepay_annual' });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe('annual prepay is not available for this estimate');
+      const row = await mockTransaction('estimates').where({ id: bundled.estimateId }).first();
+      expect(row.annual_plan_activation_status == null).toBe(true);
+      expect(row.customer_id == null).toBe(true);
+    });
+
+    // The mapped result (result.results.tmBait) keeps naming the annual plan after a recurring choice's pest-only
+    // filter drops the termite row. With a priced one-time pest choice on the page, termite plus pest is still two
+    // units: refused before a park, or one pest unit would park a termite agreement. No accept fixture here prices a
+    // tier; acceptPrepayAvailable, which this route calls, pins the tier case (estimate-per-service-cadence.test.js).
+    test('a mapped termite annual plan with pest and a priced one-time pest choice is refused before it parks', async () => {
+      const mapped = termitePlan([TERMITE_PLAN_ROW, PEST_ROW]);
+      mapped.result.results = { tmBait: { plan: 'annual_protection', annual: 250 } };
+      mapped.result.oneTime = {
+        total: 250, items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 250 }], membershipFee: 0,
+      };
+      const est = await estimateFixture(mockTransaction, {
+        estimateData: mapped, monthly: 15, annual: 430, onetime: 250, showOneTimeOption: true,
+      });
+      const res = await putAccept(est.token, { paymentMethodPreference: 'prepay_annual' });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe('annual prepay is not available for this estimate');
+      const row = await mockTransaction('estimates').where({ id: est.estimateId }).first();
+      expect(row.annual_plan_activation_status == null).toBe(true);
+      expect(row.customer_id == null).toBe(true);
+    });
+
+    // The plan's one unit must be the termite row: a mapped plan whose only recurring row is pest counts one unit, and
+    // without this check accept would park a termite agreement for pest coverage.
+    test('a mapped termite annual plan whose only recurring row is pest is refused before it parks', async () => {
+      const mapped = termitePlan([PEST_ROW]);
+      mapped.result.results = { tmBait: { plan: 'annual_protection', annual: 250 } };
+      const est = await estimateFixture(mockTransaction, { estimateData: mapped, monthly: 15, annual: 180 });
+      const res = await putAccept(est.token, { paymentMethodPreference: 'prepay_annual' });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe('annual prepay is not available for this estimate');
+      const row = await mockTransaction('estimates').where({ id: est.estimateId }).first();
+      expect(row.annual_plan_activation_status == null).toBe(true);
+      expect(row.customer_id == null).toBe(true);
     });
   });
 });

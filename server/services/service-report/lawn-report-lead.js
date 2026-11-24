@@ -174,7 +174,7 @@ function deriveSinceLast(copy) {
   if (!priorDate) return null;
   const clipped = (list) => (Array.isArray(list) ? list : []).map(clean).filter(Boolean);
   const lines = clipped(copy.lines);
-  // GATE_LAWN_LIGHTING: `budgetLines` is the block gate-off would have printed. The
+  // Lighting: `budgetLines` is the block gate-off would have printed. The
   // word cap runs over IT, so withheld lines still take their room and the lines
   // that survive are exactly gate-off's survivors minus the withheld ones.
   const budget = copy.budgetLines ? clipped(copy.budgetLines) : [...lines];

@@ -4,6 +4,7 @@ import {
   normalizeAdminTableViewCatalog,
   readAdminTableViewCatalog,
 } from "./adminTableViewStorage";
+import { countDeviceWrite } from "./deviceWrites";
 
 const DB_NAME = "waves-admin-table-views";
 const DB_VERSION = 1;
@@ -169,5 +170,6 @@ export function readSavedViewCatalog(options) {
 
 export function mutateSavedViewCatalog(options, mutation) {
   if (typeof mutation !== "function") return Promise.resolve(failure());
-  return runCatalogTransaction(options, mutation);
+  // A reload waits for the write (deviceWrites.js).
+  return countDeviceWrite(runCatalogTransaction(options, mutation));
 }

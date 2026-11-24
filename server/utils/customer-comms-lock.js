@@ -137,6 +137,19 @@ function googleMailboxIdentity(normalized) {
 const GOOGLE_MAILBOX_SQL = {
   isGoogle: (f) => `SPLIT_PART(LOWER(${f}), '@', 2) IN ('gmail.com', 'googlemail.com')`,
   mailbox: (f) => `REPLACE(SPLIT_PART(SPLIT_PART(LOWER(${f}), '@', 1), '+', 1), '.', '')`,
+  // One computed key per address: a Google address's mailbox identity
+  // (dots/+"tag" stripped, always resolved to its @gmail.com spelling), or
+  // the address itself, LOWER(TRIM)'d, for every other domain. Two rows
+  // sharing a mailbox always compute the SAME key regardless of which alias
+  // spelling either one uses, so "same mailbox" is one equality Postgres can
+  // hash-join. The newsletter sender's MAILBOX_KEY_SQL and the Waves Pest
+  // Insider "Your home" mailbox rule both read it here.
+  key: (fieldExpr) => {
+    const trimmed = `TRIM(${fieldExpr})`;
+    return `(CASE WHEN ${GOOGLE_MAILBOX_SQL.isGoogle(trimmed)} AND ${GOOGLE_MAILBOX_SQL.mailbox(trimmed)} <> ''
+    THEN ${GOOGLE_MAILBOX_SQL.mailbox(trimmed)} || '@gmail.com'
+    ELSE LOWER(${trimmed}) END)`;
+  },
 };
 
 // The keys one address takes: its exact key and, for a Google address, its

@@ -9,7 +9,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const {
-  groupInvoiceLinesByProperty, invoicePropertyLabels, propertyAddressLabel,
+  groupInvoiceLinesByProperty, invoiceDiscountRows, invoicePropertyLabels, propertyAddressLabel,
 } = require('@waves/invoice-property-groups');
 const { attachInvoiceLineProperties, techSafeInvoiceLineItems } = require('../services/invoice-property-lines');
 
@@ -254,6 +254,57 @@ describe('groupInvoiceLinesByProperty (documents)', () => {
       expect(outside).toEqual([]);
       expect(content.some((args) => String(args[0]) === 'TOTAL')).toBe(true);
     } finally { written.mockRestore(); addPage.mockRestore(); }
+  });
+
+  test('each discount prints as its own row; one name, or lines that miss the stored total, keep the combined row', () => {
+    const silver = (id, parent, amount) => ({ client_id: id, _kind: 'discount', discount_for: parent, description: 'WaveGuard Silver', quantity: 1, unit_price: amount, amount });
+    const lines = [
+      service('a', PALM, 110), silver('a-s', 'a', -11), service('b', PALM, 80), silver('b-s', 'b', -8),
+      { client_id: 'm', _kind: 'discount', description: 'Military Discount', quantity: 1, unit_price: -4.95, amount: -4.95 },
+      { client_id: 'dep', category: 'deposit_credit', description: 'Deposit paid at acceptance', quantity: 1, unit_price: -50, amount: -50 },
+    ];
+    // Silver on two services shares a row; the deposit credit is a prior payment, not a discount.
+    expect(invoiceDiscountRows(lines, 23.95, 'WaveGuard Silver + Military Discount')).toEqual([
+      { label: 'WaveGuard Silver', amount: 19 },
+      { label: 'Military Discount', amount: 4.95 },
+    ]);
+    expect(invoiceDiscountRows(JSON.stringify(lines), '23.95', 'x')).toHaveLength(2);
+    // One discount name: today's single row under the stored label.
+    expect(invoiceDiscountRows(lines.slice(0, 4), 19, 'WaveGuard Silver')).toEqual([{ label: 'WaveGuard Silver', amount: 19 }]);
+    // A whole-invoice pick has no line, so the lines miss the stored total: one combined row.
+    expect(invoiceDiscountRows(lines, 33.95, 'Referral Credit + WaveGuard Silver + Military Discount'))
+      .toEqual([{ label: 'Referral Credit + WaveGuard Silver + Military Discount', amount: 33.95 }]);
+    expect(invoiceDiscountRows(lines, 0, 'WaveGuard Silver')).toEqual([]);
+    expect(invoiceDiscountRows([], 5, null)).toEqual([{ label: 'Discount', amount: 5 }]);
+  });
+
+  test('the invoice and receipt PDFs and the send card print every discount row', async () => {
+    const PDFDocument = require('pdfkit');
+    const written = jest.spyOn(PDFDocument.prototype, 'text');
+    try {
+      const invoice = {
+        invoice_number: 'QA-TWO-DISCOUNTS', status: 'sent', subtotal: 110, discount_amount: 15.95,
+        discount_label: 'WaveGuard Silver + Military Discount', total: 94.05, created_at: new Date(), due_date: new Date(),
+        line_items: [
+          service('a', null, 110),
+          { client_id: 'a-s', _kind: 'discount', discount_for: 'a', description: 'WaveGuard Silver', quantity: 1, unit_price: -11, amount: -11 },
+          { client_id: 'a-m', _kind: 'discount', discount_for: 'a', description: 'Military Discount', quantity: 1, unit_price: -4.95, amount: -4.95 },
+        ],
+        customer: { first_name: 'Synthetic', last_name: 'Fixture', address_line1: '1842 Palm Harbor Dr', city: 'Bradenton', state: 'FL', zip: '34209' },
+      };
+      const pdf = require('../services/pdf/invoice-pdf');
+      for (const build of [() => pdf.buildInvoicePDFBuffer(invoice), () => pdf.buildReceiptPDFBuffer(invoice, null)]) {
+        written.mockClear();
+        await build();
+        const text = written.mock.calls.map((args) => String(args[0]));
+        expect(text).toEqual(expect.arrayContaining(['WaveGuard Silver', '- $11.00', 'Military Discount', '- $4.95']));
+        expect(text.some((s) => s.includes('\u2212'))).toBe(false); // PDFKit's Helvetica has no U+2212
+        expect(text).not.toContain('WaveGuard Silver + Military Discount');
+      }
+      expect(pdf.invoiceBreakdownRows(invoice)).toEqual([
+        'Subtotal: $110.00', 'WaveGuard Silver: − $11.00', 'Military Discount: − $4.95', 'Total: $94.05',
+      ]);
+    } finally { written.mockRestore(); }
   });
 
   test('the billing email Property row names both properties, outranking the visit link', async () => {

@@ -295,7 +295,7 @@ router.get('/:customerId', async (req, res, next) => {
       }
     } catch { /* ignore */ }
 
-    // GATE_LAWN_LIGHTING (owner 2026-10-04), read at call time: the card's "Color /
+    // Lawn lighting-aware color (owner 2026-10-04; needs the visit assessment, GATE_LAWN_VISIT_ASSESSMENT): the card's "Color /
     // Nutrients: +N from X%" compares the latest visit with the FIRST one, so it is
     // shown only when those two visits were photographed in known, compatible
     // light. Otherwise the initial color is flagged hidden (`initialScores.colorHidden`)
@@ -303,8 +303,7 @@ router.get('/:customerId', async (req, res, next) => {
     // stays. A failed light read is unknown light (the comparison is hidden).
     const initialScores = formatScore(initial);
     const gates = require('../config/feature-gates');
-    // (a partial gates module, as route test doubles use, reads as off)
-    if (typeof gates.lawnLightingLive === 'function' && gates.lawnLightingLive() && initial.id !== latest.id) {
+    if (gates.gateEnvValue('GATE_LAWN_VISIT_ASSESSMENT') && initial.id !== latest.id) {
       let comparable = false;
       try {
         const lighting = require('../services/lawn-lighting');

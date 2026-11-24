@@ -200,6 +200,12 @@ function send(deviceToken, notification, route = {}) {
       const collapseId = apnsCollapseId(notification?.tag);
       if (collapseId) headers['apns-collapse-id'] = collapseId;
       if (notification?.ephemeral) headers['apns-expiration'] = '0';
+      else if (Number.isFinite(Date.parse(notification?.expiresAt || ''))) {
+        // The notification's own expiry (push-notifications.js webPushTtl): APNs stores it for an offline phone only
+        // until this UNIX second. A time already past is deliver once, never stored.
+        const at = Math.floor(Date.parse(notification.expiresAt) / 1000);
+        headers['apns-expiration'] = String(at > Math.floor(Date.now() / 1000) ? at : 0);
+      }
       const req = client.request(headers);
 
       let status = 0;

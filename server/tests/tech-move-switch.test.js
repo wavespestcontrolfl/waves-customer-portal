@@ -261,12 +261,15 @@ describe('the route check is told who is asking (the route-checked day list: Goo
     expect(mockGetOptions.mock.calls[0][1]).toEqual({ caller: { isAdmin: false, technicianId: 'tech-1' }, reasonCode: 'weather_rain' });
   });
 
-  test('Dispatch\'s Quick Move options go in with the admin and his technician id', async () => {
+  // initiatedBy: Dispatch's Quick Move commits as the office (POST /rain-out), so its options are not held
+  // to the technician's shift hours (GATE_TECH_SHIFT_HOURS). The tech app's options above name no initiator:
+  // they commit as the technician and are held to them.
+  test('Dispatch\'s Quick Move options go in with the admin, his technician id, and the office as the one who commits', async () => {
     mockCaller.id = 'admin-1';
     mockCaller.role = 'admin';
     const r = await call('GET', '/api/admin/dispatch/svc-1/rain-out-options');
     expect(r.status).toBe(200);
-    expect(mockGetOptions.mock.calls[0][1]).toEqual({ caller: { isAdmin: true, technicianId: 'admin-1' }, reasonCode: null });
+    expect(mockGetOptions.mock.calls[0][1]).toEqual({ caller: { isAdmin: true, technicianId: 'admin-1' }, reasonCode: null, initiatedBy: 'admin' });
   });
 
   test.each([

@@ -1,5 +1,5 @@
 const { recurringDispatchDuePatch } = require('../services/scheduling/recurring-dispatch-due');
-const { staffEditLockPatch, autoDispatchBoxPatch } = require('../services/auto-dispatch/staff-edit-lock');
+const { autoDispatchBoxPatch } = require('../services/auto-dispatch/staff-edit-lock');
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
@@ -26,6 +26,7 @@ const { completeScheduledServiceInsert } = require('../services/booking/create-s
 const { collectiveMoveGateOn, movesAsSeries, singleMoveStamp } = require('../services/rebooker');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
+const { getZone, ZONE_COLORS, ZONE_LABELS, ZONE_COORDS, stopForecastZone } = require('../services/scheduling/forecast-zones');
 const { chooseWindowSafeOrder, inProgressStartMin, loadTechDayOrigins, assertTechDayOriginsFresh, driveableStop,
   resolveWindowSafeOrderByTechDay, windowSafeFigures,
   ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, routeWriteGuardSignature } = require('../services/route-reorder');
@@ -149,7 +150,7 @@ const { technicianReportCustomerCopy, containsReportAccessCode } = require('../s
 const {
   TECHNICIAN_NOTE_HEADER, CUSTOMER_WORDS_HEADER, withheldProductsLine, observedAndReportedLines, writerRulesRejection,
   noteAbsenceHint, writerRulesRejectionDetail, rejectedDraftRepairNote,
-  activeIngredientsMentioned, bookedReasonBlock, lawnResultTimingViolation, lowercaseGermanRoach,
+  bookedReasonBlock, lawnResultTimingViolation, lowercaseGermanRoach,
 } = require('../services/service-report/report-writer-rules');
 const CompletionRecap = require('../services/completion-recap');
 
@@ -1561,8 +1562,7 @@ function noticeOptions(options = {}, dateStr, startHHMM) {
 }
 
 // GATE_DAY_ONLY_PROMISE part B2: records the office's choice for a visit's NEW slot on the moved row(s): true = "the customer
-// asked for this time" (a set time, never promised as day only), anything else = day only. Gate off: nothing is written, so
-// every UPDATE stays exactly today's. Throws on a failed write (inside a transaction the move fails with it).
+// asked for this time" (a set time, never promised as day only), anything else = day only. Throws on a failed write (inside a transaction the move fails with it).
 async function recordOfficeMoveIntent(conn, ids, body) {
   return require('../services/time-promise').recordCustomerAskedTime(conn, ids, body?.customerAskedTime === true);
 }
@@ -1570,8 +1570,8 @@ async function recordOfficeMoveIntent(conn, ids, body) {
 // GATE_DAY_ONLY_PROMISE part E: stamps each office row with what the customer was told (`told: { level, dayOnly }`, visits of
 // the next 14 days) and the stored "customer asked for this time" choice (`customerAskedTime`), for the visit card and the
 // edit window, plus whether the customer's 24-hour reminder will go out (`reminder24hOn`, for the phone-script hint). ONE bulk read
-// per fact for the whole payload (time-promise.loadOfficeToldFields), never per row. Gate off: no read and
-// no field. A technician's feed is the field view and gets neither. Never throws: a failed read leaves the payload as is.
+// per fact for the whole payload (time-promise.loadOfficeToldFields), never per row.
+// A technician's feed is the field view and gets neither. Never throws: a failed read leaves the payload as is.
 async function attachOfficeToldFields(req, rows) {
   try {
     if (isTechnicianRequest(req) || !Array.isArray(rows) || !rows.length) return;
@@ -1588,12 +1588,11 @@ async function attachOfficeToldFields(req, rows) {
   }
 }
 
-// GATE_DAY_ONLY_PROMISE part E: { office } for ONE visit (the same fields attachOfficeToldFields stamps on a feed row), or {} with
-// the gate off, for a technician, or when the visit is gone. Never throws: a failed read leaves the reply as it was.
+// GATE_DAY_ONLY_PROMISE part E: { office } for ONE visit (the same fields attachOfficeToldFields stamps on a feed row), or {} for a
+// technician, or when the visit is gone. Never throws: a failed read leaves the reply as it was.
 async function officeFieldsForVisit(id) {
   try {
     const timePromise = require('../services/time-promise');
-    if (!timePromise.dayOnlyPromiseOn()) return {};
     const row = await db('scheduled_services').where({ id }).first('id', 'scheduled_date', 'status');
     if (!row) return {};
     const found = (await timePromise.loadOfficeToldFields(db, [row])).get(row.id);
@@ -1691,7 +1690,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
         .catch(() => null);
       const serviceLabel = AppointmentReminders.smsServiceLabelStored(reminderRow?.service_type || svc.service_type) || 'service';
       // GATE_DAY_ONLY_PROMISE part B2: a move to another date more than 24.25 h out promises only the new day, unless the
-      // office marked "customer asked for this time" (options.customerAskedTime). Gate off: false, nothing read.
+      // office marked "customer asked for this time" (options.customerAskedTime).
       const dayMove = require('../services/day-only-move-notice');
       const dayState = { dayOnly: await dayMove.moveNoticeDayOnly({
         serviceId, customerId: customer.id, newStartAt: apptTime, oldDate: options.previousDate, newDate: dateStr,
@@ -2271,6 +2270,7 @@ async function insertRecurringChildAddons(conn, scheduledServiceId, dueAddons, r
 const LINKED_ESTIMATE_COLUMNS = Object.freeze([
   'id', 'customer_id', 'customer_phone', 'customer_email', 'status', 'estimate_data', 'expires_at',
   'monthly_total', 'annual_total', 'onetime_total', 'bill_by_invoice', 'show_one_time_option', 'property_id', 'address', 'pricing_authority',
+  'source',
 ]);
 
 // The add-on decisions of a staff booking made inside its transaction, on the linked estimate row that transaction holds locked:
@@ -5775,6 +5775,13 @@ async function loadProjectCompletionContextByServiceId(services) {
   const linkedProjectsByServiceId = await loadLinkedProjectsByServiceId(rows.map((s) => s.id));
   const linkedProjectLookupFailed = linkedProjectsByServiceId === null;
   const addOnVisits = await areaAddOnVisitIdsForFeed(rows);
+  // GATE_REPORT_AFTER_PAY: the visits a payment holds open for the report (invoice-issued-closeout.js reportAfterPayHeldVisitIds;
+  // empty with the gate off). A failed lookup shows no badge.
+  const heldForReport = await require('../services/invoice-issued-closeout').reportAfterPayHeldVisitIds(db, rows.map((s) => s.id))
+    .catch((e) => {
+      logger.warn(`[schedule] report-after-pay hold lookup failed: ${e.message}`);
+      return new Set();
+    });
   const entries = await Promise.all(rows.map(async (service) => {
     let completionProfileLookupFailed = false;
     const completionProfile = await resolveCompletionProfileForScheduledService(service)
@@ -5870,6 +5877,14 @@ async function loadProjectCompletionContextByServiceId(services) {
       // service with its own typed findings (cockroach, German roach
       // knockdowns): /complete requires them and the report flow has none.
       fastCompleteReportEnabled: fastCompleteReportOffered(completionProfile),
+      // GATE_REPORT_AFTER_PAY (owner 2026-11-19, *report after pay*): a payment holds this visit open for its technician's report.
+      // Dispatch's "Paid, report not sent" badge reads this flag alone. Not the row's newest bill: a bill the office adds after the
+      // payment must not hide the report still owed (pre-push audit round 6). Not the visit's profile: the hold is recorded only
+      // where the completion sends the customer a report (invoice-issued-closeout.js reportAfterPayWouldHold, round 12).
+      reportAfterPayHeld: heldForReport.has(String(service.id)),
+      // A Dispatch bundle loaded before that change shows the badge only when this second flag is true as well. It carries the
+      // same hold, so a tab that has not reloaded keeps its badge. No current client reads it: it goes when the gate is removed.
+      reportAfterPayEnabled: heldForReport.has(String(service.id)),
       // An OUTAGE is not "no profile" (codex P2 r27): the trace verdict
       // fails open on this flag — the write path catches the same
       // failure and fails open, so the feed must not hide the mapper.
@@ -5930,78 +5945,7 @@ function classifyAppointmentTag(serviceType) {
   return require('../services/appointment-tagger').classifyAppointmentType(serviceType).tag;
 }
 
-// `fallback` is the zone for a city and ZIP no rule matches.
-function getZone(city, zip, fallback = 'lakewood_ranch') {
-  const c = (city || '').toLowerCase();
-  const z = zip || '';
-  if (['parrish', 'ellenton'].includes(c) || z === '34219') return 'parrish';
-  if (c === 'palmetto') return 'palmetto';
-  // Myakka City sits east of Lakewood Ranch — the eastern zone (explicit,
-  // not a fallthrough).
-  if (c.includes('lakewood') || c === 'myakka city' || ['34202', '34211', '34212'].includes(z)) return 'lakewood_ranch';
-  if (c.includes('bradenton')) return 'bradenton_north';
-  // Longboat Key + Siesta Key are Sarasota barrier islands.
-  if (['sarasota', 'longboat key', 'siesta key'].includes(c)) return 'sarasota';
-  // Osprey sits between Sarasota and Venice on the 41 corridor, same as
-  // Nokomis; North Venice is Venice. The deep-south corridor (Englewood
-  // through Boca Grande) rides the same Venice route day — before this,
-  // these cities fell through to the lakewood_ranch default and their
-  // appointments carried a mis-stamped zone the south-zone day funnel
-  // (zone-day-funnel.js) would reject as evidence of a Venice-day stop.
-  if ([
-    'venice', 'north venice', 'nokomis', 'osprey', 'north port',
-    'englewood', 'port charlotte', 'punta gorda', 'murdock',
-    'rotonda west', 'placida', 'boca grande',
-  ].includes(c)) return 'venice_north_port';
-  return fallback;
-}
-
-const ZONE_COLORS = {
-  parrish: '#10b981', palmetto: '#34d399', lakewood_ranch: '#0ea5e9',
-  bradenton_north: '#6366f1', bradenton_south: '#8b5cf6',
-  sarasota: '#f59e0b', venice_north_port: '#ef4444', ellenton: '#14b8a6',
-};
-
-const ZONE_LABELS = {
-  parrish: 'Parrish', palmetto: 'Palmetto', lakewood_ranch: 'Lakewood Ranch',
-  bradenton_north: 'Bradenton N', bradenton_south: 'Bradenton S',
-  sarasota: 'Sarasota', venice_north_port: 'Venice/N.Port', ellenton: 'Ellenton',
-};
-
-// City-center coordinates per getZone value, for the day board's per-zone
-// rain outlook. Values come from services/pest-forecast/locations.js
-// (parrish→Parrish, palmetto→Palmetto, lakewood_ranch→Lakewood Ranch,
-// bradenton_north→Bradenton, sarasota→Sarasota, venice_north_port→Venice).
-// The NWS cache keys on 2-decimal-rounded coords, so nearby zones dedupe.
-const ZONE_COORDS = {
-  parrish: { lat: 27.5897, lng: -82.4254 },
-  palmetto: { lat: 27.5214, lng: -82.5723 },
-  lakewood_ranch: { lat: 27.4225, lng: -82.4082 },
-  bradenton_north: { lat: 27.4989, lng: -82.5748 },
-  sarasota: { lat: 27.3364, lng: -82.5307 },
-  venice_north_port: { lat: 27.0998, lng: -82.4543 },
-};
-
-// The forecast zone of a day-board stop, read from its scheduled_services row:
-// the stored zone, never the card's display zone, which defaults to Lakewood
-// Ranch for a city and ZIP no rule places. A stored zone with a forecast point
-// stays; else the row's city and ZIP place the stop, else the stored zone read
-// as a place name by the same rules (self-booking stores the service zone's
-// first name: 'bradenton', 'venice', 'port charlotte'; a board zone key such
-// as 'bradenton_south' is not a place name); a stop none of these place has
-// no forecast zone (owner 2026-11-02, "leave the rain for all";
-// 11-19: 18 of 84 stops, stored 'bradenton', showed no rain). The day query
-// fills each missing stamp field from the primary address, so a stamp for
-// another property reads only its own city and ZIP ("no pin beats a wrong
-// pin", services/stamped-address.js).
-function stopForecastZone(row) {
-  if (ZONE_COORDS[row.zone]) return row.zone;
-  const ownAddress = require('../services/stamped-address').stampedAddressDiverges(row);
-  const city = ownAddress ? row.service_address_city : row.city;
-  // getZone matches 5-digit ZIPs exactly: '34211-1234' reads as '34211'.
-  const zip = require('../services/customer-properties').normalizeZip(ownAddress ? row.service_address_zip : row.zip);
-  return getZone(city, zip, ZONE_COLORS[row.zone] ? null : getZone(row.zone, null, null));
-}
+// The board's forecast areas and the rules that place a stop or an address in one: services/scheduling/forecast-zones.js.
 
 // Completion reuses a non-void invoice already attached to the visit
 // (pre-minted Charge Now / accept-minted first-visit with setup fee / payer
@@ -7256,6 +7200,9 @@ router.get('/', async (req, res, next) => {
         fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
         // GATE_FAST_COMPLETE_INVOICED_VISITS — see loadProjectCompletionContextByServiceId.
         invoicedVisitFastCompleteEnabled: projectCompletionContext.invoicedVisitFastCompleteEnabled === true,
+        // GATE_REPORT_AFTER_PAY — see loadProjectCompletionContextByServiceId.
+        reportAfterPayEnabled: projectCompletionContext.reportAfterPayEnabled === true,
+        reportAfterPayHeld: projectCompletionContext.reportAfterPayHeld === true,
         // GATE_FAST_COMPLETE_RECAP — see loadProjectCompletionContextByServiceId.
         fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
         // GATE_FAST_COMPLETE_REPORT — see loadProjectCompletionContextByServiceId.
@@ -7387,18 +7334,15 @@ router.get('/', async (req, res, next) => {
       byTech[key].zones[s.zone] = (byTech[key].zones[s.zone] || 0) + 1;
     });
 
-    // Schedule tie-proximity display order (owner ruling 2026-09-26, dark by
-    // default): DISPLAY ONLY — attaches a `displayOrder` index to each of a
+    // Schedule tie-proximity display order (owner ruling 2026-09-26): DISPLAY ONLY — attaches a `displayOrder` index to each of a
     // tech's stops so the mobile day list and the desktop day board's route-
     // order badge can break a window-start tie by drive-time proximity to
     // the previous stop, instead of booking order. Nothing is written to the
     // DB and no stop is physically reordered here — `enriched` (and every
     // response field built from it) keeps its DB-query order; only the new
     // `displayOrder` field is added, in place, on the SAME objects `enriched`
-    // holds. Off = no field, byte-identical to before this gate existed.
-    if (require('../config/feature-gates').gateEnvValue('GATE_SCHEDULE_TIE_PROXIMITY')) {
-      Object.values(byTech).forEach((tech) => require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(tech.services));
-    }
+    // holds.
+    Object.values(byTech).forEach((tech) => require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(tech.services));
 
     // Drive legs, the stop each leg comes from, and late risk against the
     // 2-hour arrival window, for the day list (display only). Today's risk
@@ -7606,7 +7550,7 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.weekend_shift',
           'scheduled_services.source_estimate_id',
           'scheduled_services.annual_prepay_term_id',
-          // Tie-proximity display order (GATE_SCHEDULE_TIE_PROXIMITY) needs
+          // Tie-proximity display order needs
           // each stop's point — same stamped-vs-customer rule as the day feed.
           db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as visit_lat`),
           db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as visit_lng`),
@@ -7933,6 +7877,8 @@ router.get('/week', async (req, res, next) => {
           assessmentFastCompleteEnabled: projectCompletionContext.assessmentFastCompleteEnabled === true,
           fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
           invoicedVisitFastCompleteEnabled: projectCompletionContext.invoicedVisitFastCompleteEnabled === true,
+          reportAfterPayEnabled: projectCompletionContext.reportAfterPayEnabled === true,
+          reportAfterPayHeld: projectCompletionContext.reportAfterPayHeld === true,
           fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
           fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,
           noteBoxPhotosEnabled: projectCompletionContext.noteBoxPhotosEnabled === true,
@@ -7973,9 +7919,7 @@ router.get('/week', async (req, res, next) => {
       // Same display-only tie-proximity order as the day feed, per tech per
       // day, so week mode and day mode agree. Coordinates come from the raw
       // rows; only `displayOrder` is added to the payload.
-      if (require('../config/feature-gates').gateEnvValue('GATE_SCHEDULE_TIE_PROXIMITY')) {
-        require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(servicePayloads, services);
-      }
+      require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(servicePayloads, services);
 
       days.push({
         date: dateStr,
@@ -8828,7 +8772,7 @@ async function scheduleCreateHandler(req, res, next) {
     // transaction, so it cannot stop two concurrent creates on its own. The
     // race-safe backstop is the locked re-check inside the transaction below.
     // Explicit service address (New Appointment "Service address" picker).
-    // Same gate as the Edit-appointment address dropdown: both are "the
+    // Same as the Edit-appointment address dropdown: both are "the
     // office chooses which of the customer's properties a visit lands on".
     // Resolved to the scheduled_services stamp up front so the duplicate-
     // series guards, zone, tech matching and the insert all see the chosen
@@ -8837,7 +8781,6 @@ async function scheduleCreateHandler(req, res, next) {
     let bookingProperty = null;
     let bookingSeriesScope = null;
     if (propertyId !== undefined && propertyId !== null && propertyId !== '') {
-      if (!isEnabled('editApptAddress')) throw httpError(409, 'Appointment address changes are not enabled.');
       bookingProperty = await require('../services/customer-properties').bookingPropertyStamp({ customerId, propertyId });
       // Per-property duplicate-series scope (codex #3998 r2 P1): the same
       // shape the estimate converter hands the guards, so an active pest
@@ -8939,6 +8882,11 @@ async function scheduleCreateHandler(req, res, next) {
       if (!BOOKABLE_ESTIMATE_STATUSES.includes(linkedEstimate.status)) {
         return res.status(400).json({ error: `Cannot book from an estimate that is ${linkedEstimate.status}. Only accepted, sent, or viewed estimates can be linked.` });
       }
+      // An open portal plan-start quote books only through the customer's own
+      // accept (codex pre-push P0). Refuse it here, before any rows exist: the
+      // accept-on-book failure handler below keeps the booking.
+      const planStartRefusal = require('../services/estimate-manual-acceptance').planStartManualAcceptRefusal(linkedEstimate);
+      if (planStartRefusal) return res.status(planStartRefusal.statusCode).json({ error: planStartRefusal.message, code: planStartRefusal.code });
       // A Bill-by-invoice proposal's Net term reaches a bill only once the proposal is won, so a visit booked from it
       // earlier would bill due on the visit day (and Auto Pay could charge it). Refuse until Mark won.
       if (billByInvoiceProposalAwaitingWin(linkedEstimate)) {
@@ -9398,13 +9346,12 @@ async function scheduleCreateHandler(req, res, next) {
     const resolvedIsCallback = isCallback
       || isReService({ serviceKey: serviceRecord?.service_key, serviceName: serviceRecord?.name, serviceType });
 
-    // Office "Customer's words" on a pest/lawn re-service (GATE_RESERVICE
-    // _OFFICE_REQUEST): trimmed + capped here, source decided by re-reading
+    // Office "Customer's words" on a pest/lawn re-service:
+    // trimmed + capped here, source decided by re-reading
     // the suggestion the client named — never taken from the client. Only the
-    // primary row below is stamped; null = nothing saved (gate off, not a
+    // primary row below is stamped; null = nothing saved (not a
     // pest/lawn re-service, or empty words).
-    const officeCustomerRequest = (isEnabled('reserviceOfficeRequest')
-      && resolvedIsCallback
+    const officeCustomerRequest = (resolvedIsCallback
       && reserviceOfficeRequest.isOfficeRequestServiceKey(serviceRecord?.service_key)
       && req.body.customerRequest && typeof req.body.customerRequest === 'object')
       ? await reserviceOfficeRequest.resolveCustomerRequest(db, customerId, req.body.customerRequest)
@@ -12468,8 +12415,8 @@ async function comboTargetElapsed(row, changes, newDate, newWindow) {
 }
 
 // 'together': every refusal comes before any write.
-// { customerAskedTime } for a planner body that moves a shared stop, or {} with the gate off (the body stays exactly today's).
-const comboAskedTimeBody = (body) => (require('../services/time-promise').dayOnlyPromiseOn() ? { customerAskedTime: body.customerAskedTime === true } : {});
+// { customerAskedTime } for a planner body that moves a shared stop.
+const comboAskedTimeBody = (body) => ({ customerAskedTime: body.customerAskedTime === true });
 
 async function planComboTogetherMove(req, row, changes, shown) {
   const body = req.body;
@@ -12514,7 +12461,7 @@ async function planComboTogetherMove(req, row, changes, shown) {
       ...(changes.technician ? { technicianId: body.technicianId || null } : {}),
       // GATE_DAY_ONLY_PROMISE part E: the office's "customer asked for this time" for the stop's new slot. The mover writes it in
       // each member's own UPDATE (B3), the only write for this move: the per-row edit below never moves (its date and time keys
-      // are removed), so recordOfficeMoveIntent does not fire a second time. Gate off: the planner body is exactly today's.
+      // are removed), so recordOfficeMoveIntent does not fire a second time.
       ...comboAskedTimeBody(body),
       expectVisit: { id: shown.id, memberIds: shown.memberIds.map(String), liveCount: shown.liveCount, liveMemberIds: shown.liveMemberIds.map(String) },
     },
@@ -12674,6 +12621,9 @@ async function planCollectiveEditDateMove(req) {
         adminWindowRules: true,
         overlapAdvisory: true,
         sourceSurface: 'edit_modal',
+        // GATE_DAY_ONLY_PROMISE: the form's "customer asked for this time" box, when it sent one; the series writer records it
+        // on the anchor (a staff placement alone no longer holds a visit, owner 2026-11-22). No field: no key.
+        ...(typeof req.body?.customerAskedTime === 'boolean' ? { customerAskedTime: req.body.customerAskedTime } : {}),
         // Save road buy: this route is requireAdmin; the anchor's hour
         // buys its road times before the series transaction.
         ...(req.techRole === 'admin' && req.technicianId ? { roadSpender: req.technicianId } : {}),
@@ -14524,7 +14474,6 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
     }
     const propertyId = req.body.propertyId;
     if (propertyId !== undefined) {
-      if (!isEnabled('editApptAddress')) throw httpError(409, 'Appointment address changes are not enabled.');
       if (typeof propertyId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(propertyId)) {
         throw httpError(422, 'Choose a saved customer address.');
       }
@@ -16028,9 +15977,8 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       if (occupancyRouteTouched) {
         const occRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
         Object.assign(updates, recurringDispatchDuePatch(occRow, updates));
-        // A staff date/window choice locks the occurrence from auto-dispatch
-        // (this path writes no reschedule_log row the person-placed guard reads).
-        Object.assign(updates, staffEditLockPatch(occRow, updates));
+        // A staff date/window choice no longer locks the occurrence from
+        // auto-dispatch (owner 2026-11-22); only the box does (staff-edit-lock.js).
         if (occRow && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(occRow.status))) {
           const occDate = updates.scheduled_date !== undefined
             ? dateOnly(updates.scheduled_date)
@@ -24133,7 +24081,6 @@ function optimizeRefusalMessage(reason) {
   if (reason === 'WINDOW_FIT_GATE_OFF') return 'Google\'s route breaks a promised arrival window and the window-fit repair is off — nothing was changed.';
   if (reason === 'LIVE_STOP_IN_PROGRESS') return 'A stop on this route is already in progress — reorder it once that visit is complete.';
   if (reason === 'COORDLESS_STOPS') return 'A stop on this route has no map location, so its arrival window cannot be verified — nothing was changed.';
-  if (reason === 'MODEL_UNCALIBRATED') return 'Drive-time calibration is off, so this route\'s arrival windows cannot be verified without live traffic data — nothing was changed.';
   if (reason === 'PROGRESS_ORIGIN_UNKNOWN') return 'This route is already under way and the last completed stop has no map location, so the remaining drive cannot be verified — nothing was changed.';
   return 'No legal stop order keeps every promised arrival window — nothing was changed.';
 }
@@ -24460,9 +24407,6 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
       RouteOptimizer, googleOrder: result.orderedStops, sourceStops: services, googleSource: result.source, legs: result.legs, startMin,
       origin: techDayOrigins.origins.get(techKey) || null,
       home: homeFromMap(techHomes, techKey),
-      // This button WRITES; it may not certify a promise on the uncalibrated
-      // model when Google's legs were discarded.
-      requireCalibratedModel: true,
     });
     if (!outcome.orderedStops) {
       return res.status(409).json({
@@ -25022,7 +24966,12 @@ const {
   stripPrepaySwitchSupersededMarkers: stripSupersededMarkers,
 } = require('../services/invoice');
 
-async function resolveSupersededInvoices({ visitIds, estimateId, customerId, conn = db }) {
+// `delivered` (the invoice pay page's plan choice, pay-plan-choice.js): the
+// customer is reading this invoice on its own pay link, so having gone out —
+// or carrying the PaymentIntent that page opens — is the normal state, not a
+// refusal. That lane voids nothing at the choice; every money guard below
+// (collected, part-paid, credited, deposit, payer, foreign lines) still holds.
+async function resolveSupersededInvoices({ visitIds, estimateId, customerId, conn = db, delivered = false }) {
   if (!Array.isArray(visitIds) || visitIds.length === 0) {
     return { ok: true, supersedes: [] };
   }
@@ -25098,10 +25047,10 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
     // UNDELIVERED DRAFTS ONLY (Codex P0 r1). A delivered invoice has a live
     // pay link in the customer's hands; one carrying a PaymentIntent has a
     // payment in flight. Voiding either is a deliberate office decision.
-    if (inv.sent_at || inv.stripe_payment_intent_id) {
+    if (!delivered && (inv.sent_at || inv.stripe_payment_intent_id)) {
       return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit has already gone out to the customer. Void it from Invoices first, then switch` };
     }
-    if (status !== 'draft') {
+    if (status !== 'draft' && !(delivered && ['sent', 'viewed', 'overdue'].includes(status))) {
       return { ok: false, blockReason: `can’t be switched here — ${inv.invoice_number || 'the invoice'} for this visit is ${status}, not an unsent draft. Resolve it first, then mint the prepay from Customer 360` };
     }
     if (Number(inv.amount_paid || 0) > 0) {
@@ -25267,37 +25216,35 @@ router.get('/annual-prepay-availability', requireAdmin, async (_req, res, next) 
 
 // GET /api/admin/schedule/reservice-request-suggestion?customerId= — the
 // New Appointment modal's "Customer's words" suggestion for a pest/lawn
-// re-service (GATE_RESERVICE_OFFICE_REQUEST): this customer's latest inbound
+// re-service: this customer's latest inbound
 // text or call note from the last 72 hours, whichever is newer, with its kind
-// and time so the modal can label it ("Text, 3 h ago"). Read-only. Gate off
-// answers {enabled:false, suggestion:null} — the modal renders nothing new.
+// and time so the modal can label it ("Text, 3 h ago"). Read-only.
 // requireAdmin like the booking route the suggestion feeds.
 router.get('/reservice-request-suggestion', requireAdmin, async (req, res, next) => {
   try {
-    if (!isEnabled('reserviceOfficeRequest')) return res.json({ enabled: false, suggestion: null });
     const customerId = String(req.query.customerId || '');
     if (!reserviceOfficeRequest.isUuid(customerId)) {
       return res.status(400).json({ error: 'customerId required' });
     }
     const suggestion = await reserviceOfficeRequest.pickSuggestion(db, customerId);
+    // enabled stays true for Schedule tabs opened before the gate came out (they hide the box without it).
     res.json({ enabled: true, suggestion });
   } catch (err) { next(err); }
 });
 
 // GET /api/admin/schedule/cancel-call-notice?customerId= — the New Appointment
-// modal's "Canceled on a call" notice (GATE_CALL_CANCEL_GUARD): this customer's
+// modal's "Canceled on a call" notice: this customer's
 // latest real conversation from the last 14 days, when that call filed a
 // cancellation card, with its time and the card's summary. Read-only and a
-// warning only: the booking route never reads it. Gate off answers
-// {enabled:false, call:null}, so the modal renders nothing new.
+// warning only: the booking route never reads it.
 router.get('/cancel-call-notice', requireAdmin, async (req, res, next) => {
   try {
-    if (!require('../config/feature-gates').callCancelGuardLive()) return res.json({ enabled: false, call: null });
     const customerId = String(req.query.customerId || '');
     if (!reserviceOfficeRequest.isUuid(customerId)) {
       return res.status(400).json({ error: 'customerId required' });
     }
     const call = await require('../services/call-cancel-guard').latestCancelCall(customerId);
+    // enabled stays true for Schedule tabs opened before the gate came out (they hide the notice without it).
     res.json({ enabled: true, call });
   } catch (err) { next(err); }
 });
@@ -25330,7 +25277,7 @@ router.get('/cancel-call-notice', requireAdmin, async (req, res, next) => {
 //               and persists its own estimated_price, so a draft-shaped
 //               payload replayed after save could invoice a per-visit amount
 //               the committed series never carried.
-async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switchLaneOverride } = {}) {
+async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switchLaneOverride, payPageInvoiceId = null } = {}) {
     // Dark by default (GATE_PREPAY_ON_BOOK): 404 rather than a blockReason —
     // while the lane is off the endpoint is unobservable, exactly like the
     // /secure select-plan route. GATE_ONSITE_PREPAY_SWITCH opens the SAME
@@ -25342,6 +25289,14 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
     // the same committed-mode switch lane by passing switchLane: true.
     const switchLane = switchLaneOverride === true || isEnabled('onsitePrepaySwitch');
     if (!isEnabled('prepayOnBook') && !switchLane) return { httpStatus: 404, httpBody: { error: 'Not found' } };
+    // The invoice pay page's plan choice (GATE_PAY_PLAN_CHOICE, its own gate in
+    // pay-plan-choice.js; it passes switchLane: true): the customer reads the
+    // accept-minted first invoice on its pay link and may prepay the year
+    // instead. Same eligibility and price as the switch, with three
+    // differences, each marked `payPage` below: the invoice has been delivered,
+    // its visit may already be completed (owner 2026-11-19: that visit counts
+    // as visit 1 of the year), and nothing is voided at the choice.
+    const payPage = payPageInvoiceId ? String(payPageInvoiceId) : null;
     const {
       computeSeriesPrepayPricing,
       PLAN_CLASS_BY_SERVICE_KEY,
@@ -25389,6 +25344,11 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
             'booster_months', 'source_estimate_id')
         : visit;
       const anchor = parent || visit;
+      // payPage: only the accept-minted first invoice, which the converter
+      // attaches to the series' first visit, carries the choice.
+      if (payPage && (!anchor.source_estimate_id || String(visit.id) !== String(anchor.id))) {
+        return blocked('isn’t the first invoice of an accepted plan');
+      }
       // An estimate-origin series already made its billing choice at accept —
       // that lane owns its own prepay control.
       //
@@ -25640,6 +25600,12 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
     const firstVisitDate = validScheduleDate(input.firstVisitDateRaw)
       ? String(input.firstVisitDateRaw).split('T')[0]
       : null;
+    // payPage: the first visit may already be done. The year still starts on
+    // that visit's own date, so coverage counts it as visit 1; no first-visit
+    // promise is recorded for a date that has passed.
+    const pastAnchorDate = payPage && !firstVisitDate
+      ? require('../utils/datetime-et').validCalendarDate(input.firstVisitDateRaw, { allowTimeSuffix: true })
+      : null;
     const AnnualPrepayTimes = require('../services/annual-prepay-renewals');
     const normalizedWindowStart = firstVisitDate && input.windowStartRaw
       ? AnnualPrepayTimes.normalizeWindowStart(String(input.windowStartRaw))
@@ -25662,10 +25628,10 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
     // as past. Falling back to today would start the term after the booked
     // visit, so coverage could not adopt it — the visit would bill per
     // application while the seeder scheduled a replacement inside the window.
-    if (input.mode === 'committed' && !firstVisitDate) {
+    if (input.mode === 'committed' && !firstVisitDate && !pastAnchorDate) {
       return blocked('couldn’t anchor the prepaid year on the booked visit — its date is no longer in the future. Refresh, and mint from Customer 360 if this visit still needs prepay');
     }
-    const termStart = firstVisitDate || today;
+    const termStart = firstVisitDate || pastAnchorDate || today;
 
     // Surface an existing term as a block rather than letting the mint 409
     // after the appointment is already booked. Compared against the PROPOSED
@@ -25693,9 +25659,15 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
         estimateId: anchorEstimateId,
         customerId,
         conn,
+        delivered: !!payPage,
       });
       if (!resolved.ok) return blocked(resolved.blockReason);
       supersedes = resolved.supersedes;
+      // payPage: the year replaces exactly the invoice the customer is
+      // reading, or the choice is not offered.
+      if (payPage && !(supersedes.length === 1 && String(supersedes[0].id) === payPage)) {
+        return blocked('isn’t the first invoice of an accepted plan');
+      }
     } else if (switchLane && input.mode === 'committed' && scheduledServiceId) {
       // NON-ESTIMATE committed series under the switch gate: run the SAME
       // resolver the write path runs (estimateId null ⇒ live-attached-
@@ -25744,6 +25716,10 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
       .reduce((sum, li) => sum + (Number(li.amount) || 0), 0) * 100) / 100;
     const unwaivedSetupFee = directSetupFee > 0 ? directSetupFee : supersededRodentSetup;
     const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass, unwaivedSetupFee });
+    // payPage: a bait-station setup is carried onto the prepay, never waived,
+    // which the two-option block does not explain. Those plans switch through
+    // the office.
+    if (payPage && pricing.prepay.setupAmount > 0) return blocked('carries a bait-station setup — switch it from the office');
     const planLabel = `${coverageServiceType} Annual Prepay`;
 
     // The setup fee is only real — and therefore only waivable — when it is
@@ -25816,9 +25792,11 @@ async function computeAnnualPrepayPreview(query, conn = db, { switchLane: switch
         termStart,
         ...(firstVisitDate ? { firstVisitDate } : {}),
         ...(firstVisitWindowStart ? { firstVisitWindowStart } : {}),
-        note: isAcceptedSwitch
-          ? 'Annual prepay sold at the visit — switched from per application.'
-          : 'Annual prepay sold when the visit was booked.',
+        note: payPage
+          ? require('../services/pay-plan-choice').prepayInvoiceNote(supersedes[0].invoiceNumber)
+          : (isAcceptedSwitch
+            ? 'Annual prepay sold at the visit — switched from per application.'
+            : 'Annual prepay sold when the visit was booked.'),
       },
       // Internal: the switch endpoint's supersede context. Stripped from
       // the HTTP payload by the route wrapper.
@@ -25891,13 +25869,17 @@ function prepaySwitchMatchesExpected(live, expected) {
 }
 
 // Every caller passes visitId, acknowledgeNoticedAmount, actor and auditSource;
-// switchLane and expected are the bar's alone.
+// switchLane and expected are the bar's alone. payPageInvoiceId is the invoice
+// pay page's (pay-plan-choice.js): the customer chose the year on that
+// invoice's own page, so it stays payable (owner 2026-11-19: "keep it
+// payable") and nothing is voided here. Paying the prepay closes it
+// (annual-prepay-renewals closeAcceptInvoiceReplacedByPaidTerm).
 async function runPrepaySwitch({
-  visitId, acknowledgeNoticedAmount, actor, switchLane, expected, auditSource,
+  visitId, acknowledgeNoticedAmount, actor, switchLane, expected, auditSource, payPageInvoiceId = null,
 }) {
   // Server-derived eligibility + pricing — the same computation the sheet
   // previewed, re-run fresh so nothing stale or client-shaped is minted.
-  const previewOpts = { switchLane: switchLane === true };
+  const previewOpts = { switchLane: switchLane === true, payPageInvoiceId };
   const p = await computeAnnualPrepayPreview({ scheduledServiceId: visitId }, db, previewOpts);
   if (p.httpStatus) return { httpStatus: p.httpStatus, httpBody: p.httpBody };
   if (!p.eligible) return { httpStatus: 409, httpBody: { error: `This visit ${p.blockReason}` } };
@@ -25937,7 +25919,9 @@ async function runPrepaySwitch({
       // deliberately never stamps completed/skipped rows, so a terminal
       // visit could collect a year that then reports visitCovered:false
       // forever. Only a visit that can still be stamped may switch.
-      const LIVE_SWITCH_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
+      // The pay page admits a completed first visit: paying its prepay
+      // stamps that visit as visit 1 of the year (the closer named above).
+      const LIVE_SWITCH_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site', ...(payPageInvoiceId ? ['completed'] : [])];
       if (!liveVisit || !LIVE_SWITCH_STATUSES.includes(String(liveVisit.status || ''))) {
         const err = new Error(liveVisit && ['completed', 'skipped'].includes(String(liveVisit.status || ''))
           ? 'This visit is already closed out — coverage can’t stamp it. Sell the prepay from Customer 360 instead'
@@ -26078,6 +26062,7 @@ async function runPrepaySwitch({
         estimateId: target.estimateId,
         customerId: target.customerId,
         conn: trx,
+        delivered: !!payPageInvoiceId,
       });
       if (!resolved.ok) {
         const err = new Error(`This visit ${resolved.blockReason}`);
@@ -26102,11 +26087,19 @@ async function runPrepaySwitch({
           .whereIn('status', ['paid', 'processing'])
           .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(inv.id)])
           .first('id');
-        if (recordedPayment) {
+        // The pay page's invoice may also carry an out-of-band part payment
+        // (Charge Now's prepaid credit lowers the total and stamps
+        // payment_recorded_at, leaving amount_paid at 0).
+        const recordedOnRow = payPageInvoiceId
+          ? await trx('invoices').where({ id: inv.id }).whereNotNull('payment_recorded_at').first('id')
+          : null;
+        if (recordedPayment || recordedOnRow) {
           const err = new Error(`${inv.invoiceNumber || 'The per-application invoice'} has a recorded payment — resolve it from Invoices, never a switch`);
           err.switchConflict = true;
           throw err;
         }
+        // The pay page keeps its invoice payable: checked like any other, never voided here.
+        if (payPageInvoiceId) continue;
         const retired = await trx('invoices')
           .where({ id: inv.id, status: 'draft' })
           .whereNull('sent_at')
@@ -26124,7 +26117,7 @@ async function runPrepaySwitch({
         // applied credit, and no deposit line — the states the canonical
         // voidInvoice exists to untangle are all refused upstream.
       }
-      voided = resolved.supersedes.map((inv) => ({ id: inv.id, invoiceNumber: inv.invoiceNumber, total: inv.total }));
+      voided = payPageInvoiceId ? [] : resolved.supersedes.map((inv) => ({ id: inv.id, invoiceNumber: inv.invoiceNumber, total: inv.total }));
 
       // A direct (non-estimate) rodent series' non-member setup rides the
       // recomputed payload as setupFeeAmount — billed as its OWN line
@@ -26150,7 +26143,7 @@ async function runPrepaySwitch({
           unit_price: switchSetupFee,
           category: 'Setup fee',
         }] : [])],
-        notes: `${mintPayload.note} (visit ${target.visit.id})`,
+        notes: payPageInvoiceId ? mintPayload.note : `${mintPayload.note} (visit ${target.visit.id})`,
         dueDate: etDateString(),
       });
       // The sheet displayed a tax-free residential total; anything else
@@ -26193,7 +26186,9 @@ async function runPrepaySwitch({
         await trx('invoices')
           .where({ id: inv.id })
           .update({
-            notes: trx.raw('concat(coalesce(notes, ?), ?)', ['', `\n${supersededByMarker(invoice.id)}`]),
+            // `||`, not concat(): concat() takes "any", so Postgres cannot type
+            // the bound marker and refuses the whole switch (42P18).
+            notes: trx.raw('coalesce(notes, ?) || ?', ['', `\n${supersededByMarker(invoice.id)}`]),
             updated_at: new Date(),
           });
       }
@@ -26286,7 +26281,7 @@ async function runPrepaySwitch({
       annual_prepay_term_id: mintedTerm?.id || null,
       scheduled_service_id: target.visit.id,
       superseded_invoice_ids: voided.map((v) => v.id),
-      charge_in_person: true,
+      charge_in_person: !payPageInvoiceId,
       source: auditSource,
     }),
     created_at: new Date(),
@@ -28617,7 +28612,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         const readRows = await db('products_catalog').select('id', 'name', 'display_name', 'active_ingredient', 'category', 'manufacturer');
         const aliasRows = await db('product_aliases').select('product_id', 'alias_name');
         catalogRows = CompletionRecap.withCatalogAliases(readRows, aliasRows);
-        const mentioned = catalogScreensForPrompt(catalogRows, fullUserMessage);
+        const mentioned = CompletionRecap.catalogScreensForPrompt(catalogRows, fullUserMessage);
         mentionedCatalogNames.push(...mentioned.names);
         mentionedCatalogActives.push(...mentioned.actives);
       } catch (err) {
@@ -30195,47 +30190,12 @@ function blackoutDateString(value) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-// The catalog products, and their actives, a report prompt names: under the
-// writer rules each joins the trade-name and active screens, so a draft never
-// names a product a note mentioned. Supplies (yard signs, stakes, stickers)
-// are no products a report could name: their ordinary words ("yard sign",
-// "Serviced by Waves") once banned "yard" and "Waves" from every draft of a
-// visit whose notes said "yard" (prod 2026-10-02).
-const MENTION_GENERIC_TOKENS = new Set([...CompletionRecap.REPORT_GENERIC_PRODUCT_TOKENS, ...CompletionRecap.REPORT_VOCABULARY_NAME_WORDS]);
-function catalogScreensForPrompt(catalogRows, promptText) {
-  const names = [];
-  const actives = [];
-  const promptWritesAlias = CompletionRecap.promptAliasTest(promptText);
-  for (const row of (Array.isArray(catalogRows) ? catalogRows : []).filter((r) => !CompletionRecap.isSupplyCategory(r?.category))) {
-    // By its name or its short display name. A registered alias the prompt
-    // writes out is screened in the shared builder (mentionedText): aliases
-    // are staff shorthand, matched whole.
-    // Neither the report screen's own generic words (the pests, "station",
-    // "trap", "yard", "care") nor the plain report words inside catalog names
-    // ("high", "contact", "monitoring") mark a product named: a note that says
-    // "cockroach" or "keep monitoring" names no "Advion Cockroach Gel Bait"
-    // or "HexPro Termite Monitoring Baiting System" (audit 2026-10-03).
-    const mentioned = [...new Set([row?.name, row?.display_name].filter(Boolean))]
-      .filter((label) => CompletionRecap.containsProductName(promptText, [{ name: label }], { wholeWord: true, extraGenericTokens: MENTION_GENERIC_TOKENS }));
-    // Its alias written out counts as naming it for its actives.
-    const named = mentioned.length > 0 || (row?.aliases || []).some(promptWritesAlias);
-    names.push(...mentioned);
-    // Its actives too: a draft must not swap the named product for its
-    // active ingredient; and an active the prompt names on its own
-    // ("azoxystrobin" in a note) is screened even with no product name.
-    if (row?.active_ingredient && (named || activeIngredientsMentioned(promptText, row.active_ingredient))) {
-      actives.push(row.active_ingredient);
-    }
-  }
-  return { names, actives };
-}
-
 router._test = {
   makeRecurringWelcomeCandidate, sendMakeRecurringWelcome,
   assertLockedEstimateAddOns, LINKED_ESTIMATE_COLUMNS, postedAreaAddOnLines, assertAreaAddOnEdit, requestedAreaAddOnServiceKeys,
   areaAddOnVisitIdsForFeed, AREA_ADDON_LOOKUP_FAILED, postedAreaAddOnTotals,
   planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange, discloseComboSeparation, assertStillUnsharedForReassign,
-  catalogScreensForPrompt,
+  catalogScreensForPrompt: CompletionRecap.catalogScreensForPrompt,
   siblingCoverageRefusal,
   copyActivityScore,
   // Post-cancel counted-plan reseed (owner ruling 2026-09-24) — the split
@@ -30472,8 +30432,6 @@ module.exports.buildAppointmentPricing = buildAppointmentPricing;
 // The zone the create route stamps for an address — also used by the
 // new-caller booking route (admin-schedule-new-caller.js), which books by
 // address before a customer exists.
-module.exports.getZone = getZone;
-module.exports.stopForecastZone = stopForecastZone;
 module.exports.newCallerRowFields = newCallerRowFields;
 // The percent-discount exclusion predicate (termite bond, rodent bait,
 // bed bug, Bora-Care, pre-slab, ...) — consumed lazily by the IB

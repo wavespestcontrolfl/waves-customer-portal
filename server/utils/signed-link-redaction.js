@@ -121,7 +121,7 @@ function isOwnHost(hostname) {
 // server/tests/ib-admin-read-tools.test.js reads those two files and fails when
 // a public token route there is missing from this list.
 const PUBLIC_TOKEN_ROUTE_SEGMENTS = Object.freeze([
-  'appointment', 'book', 'card', 'careers', 'contract', 'estimate', 'go', 'inspection', 'l', 'lawn-report', 'moving', 'og', 'pay',
+  'appointment', 'book', 'card', 'careers', 'contract', 'estimate', 'go', 'h', 'inspection', 'l', 'lawn-report', 'moving', 'og', 'pay',
   'pest-report', 'prep', 'price-change', 'r', 'rate', 'recap', 'receipt', 'report', 'reschedule', 'reservice', 'review',
   'secure', 'service-outlines', 'track', 'visit',
 ]);

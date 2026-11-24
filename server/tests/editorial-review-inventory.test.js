@@ -65,8 +65,10 @@ test('ignores decorative headings inside fenced examples', () => {
   expect(analysis.claims).toEqual([expect.objectContaining({ passage })]);
 });
 
-test('keeps deterministic factual claims phrased as questions', () => {
-  const passage = 'Did you know termites cause $5 billion in property damage every year?';
+test.each([
+  'Did you know termites cause $5 billion in property damage every year?',
+  'Did you know adults grow to 38mm long?',
+])('keeps deterministic factual claims phrased as questions: %s', (passage) => {
   expect(analyzeDocument(passage, 'Guide').claims).toEqual([expect.objectContaining({ passage })]);
 });
 

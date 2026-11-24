@@ -451,7 +451,7 @@ describe('recurring visit with no arrival time and no due date', () => {
     // (metadata.rungAt), with created_at as the fallback.
     // No category filter: the watchdog rings under 'alert' (r8 P1).
     expect(budgetWhere).toEqual([{ recipient_type: 'admin' }]);
-    expect(bindings()).toEqual(expect.arrayContaining(['unpriced-series:%', 'lawn-email-gap:%', 'prepay-coverage:%', 'accepted-schedule:%', 'churned-live-work:%', 'combined-booking-check:%', 'recurring-dispatch:%']));
+    expect(bindings()).toEqual(expect.arrayContaining(['unpriced-series:%', 'lawn-email-gap:%', 'prepay-coverage:%', 'accepted-schedule:%', 'churned-live-work:%', 'same-start-visits:%', 'combined-booking-check:%', 'recurring-dispatch:%']));
     expect(budgetSql.join(' ')).toContain("COALESCE((metadata->>'rungAt')::timestamptz, created_at) >= now() - interval '24 hours'");
     // An Activity-only row never rings and takes no slot (r10 P2).
     expect(budgetSql.join(' ')).toContain("COALESCE(metadata->>'feed', '') <> 'activity'");
@@ -551,7 +551,8 @@ test('missing-pin upkeep closes a standing notice whose visit now has a pin', as
 
 // A lapsed plan gets no placement, and a locked or excluded recurring child is out of
 // auto-dispatch: neither is skipped for its pin (Codex #6208 r18, r21 P2). A visit that is
-// not a recurring child keeps its notice: its pin serves the route check.
+// not a recurring child keeps its notice: its pin serves the route check. A confirmed visit
+// keeps its notice too (owner 2026-11-22): a confirmation no longer holds it, so the run may move it.
 test('missing-pin upkeep closes a standing notice whose plan lapsed or whose visit staff locked or excluded', async () => {
   const audit = require('../services/auto-dispatch/audit');
   existingNoticeKeys = ['v1', 'v2', 'v3', 'v4', 'v5'].map((id) => `auto-dispatch-missing-geo:${id}:2026-08-20`);
@@ -566,6 +567,7 @@ test('missing-pin upkeep closes a standing notice whose plan lapsed or whose vis
   eligibility.lapsedPlanKeys.mockResolvedValue(new Set(['c1:p1']));
   await audit.maintainMissingGeoNotices(new Date('2026-08-01T16:00:00Z'));
   const retireSql = retireStatements[retireStatements.length - 1];
-  expect(retireSql.bindings).toEqual(expect.arrayContaining(['v1', 'v3', 'v4', 'v5']));
+  expect(retireSql.bindings).toEqual(expect.arrayContaining(['v1', 'v3', 'v4']));
   expect(retireSql.bindings).not.toContain('v2');
+  expect(retireSql.bindings).not.toContain('v5');
 });

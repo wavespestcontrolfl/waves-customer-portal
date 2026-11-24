@@ -141,6 +141,12 @@ payment path).
   including the surcharge split.
 - For prod verification: read the actual rows/Stripe objects; "the code
   looks right" is not a billing verification.
+- When the code reads rows another path writes (the visits an accept books,
+  the invoice a mint writes), create them through that writer — a real
+  accept on a migrated database, as the `estimate-accept-*.postgres.test.js`
+  suites do — not by inserting rows by hand. A hand-inserted visit carried a
+  stamped service address that accept-booked visits never have, so a property
+  check that refused every real visit passed its tests.
 
 ## Failure Modes
 - Ad-hoc surcharge math or a hardcoded rate (or a hardcoded display percent).

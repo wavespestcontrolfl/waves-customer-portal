@@ -1,9 +1,12 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { scrubSentryText } = require('../utils/sentry-scrub');
-const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
+const {
+  etParts, etDateString, addETDays, parseETDateTime, validCalendarDate,
+} = require('../utils/datetime-et');
 const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 const featureGates = require('../config/feature-gates');
+const { STAFF_TIME_ZONE } = require('../utils/staff-time-work-date');
 
 // Looked up on the module at call time: tests load this file under partial
 // feature-gates mocks, and a missing reader must read as "gate off".
@@ -19,6 +22,8 @@ const DEFAULT_POLICY = {
   minRating: 1,
   requireCustomerMatchForGoogle: true,
   programStartsAt: null,
+  // Reviews a technician can be paid for in one ET calendar month (owner 2026-11-20 D4: 15). null = no cap.
+  monthlyCapCount: null,
 };
 
 const PAYOUT_ELIGIBLE_SOURCES = ['google_review'];
@@ -81,6 +86,11 @@ function weekPeriodFor(date) {
   };
 }
 
+// Owner 2026-11-20 D4: a whole number 1..1000 is a cap; 0, a fraction, text or anything else means no cap.
+function normalizeMonthlyCap(value) {
+  return Number.isInteger(value) && value >= 1 && value <= 1000 ? value : null;
+}
+
 function parsePolicy(value) {
   if (!value) return { ...DEFAULT_POLICY };
   try {
@@ -95,6 +105,7 @@ function parsePolicy(value) {
       minRating: Math.max(1, Math.min(5, toInt(parsed.minRating, DEFAULT_POLICY.minRating))),
       eligibleSources: PAYOUT_ELIGIBLE_SOURCES,
       programStartsAt: normalizedIsoDate(parsed.programStartsAt) || null,
+      monthlyCapCount: normalizeMonthlyCap(parsed.monthlyCapCount),
     };
   } catch {
     return { ...DEFAULT_POLICY };
@@ -123,6 +134,48 @@ function operationalError(message, statusCode = 400, code = 'review_incentive_er
   return err;
 }
 
+/**
+ * Ids of the payouts over the monthly cap (owner 2026-11-20 D4), computed on read: no
+ * status or amount column ever changes for the cap. Each technician's payouts are ranked
+ * per ET calendar month, paid rows first, then earned_at, then id, so a late-arriving
+ * earlier-dated review can never push an already-paid row out. A payout ranked past `cap`
+ * is over it. Counts only the payout sources with an amount. `technicianIds` (an array or a
+ * subquery) only narrows the scan; ranks stay whole-month. No cap returns an empty set.
+ */
+async function overCapPayoutIds(conn, { cap, technicianIds = null } = {}) {
+  if (!normalizeMonthlyCap(cap)) return new Set();
+  const ranked = monthRankQuery(conn);
+  if (technicianIds) ranked.whereIn('p.technician_id', technicianIds);
+  const rows = await conn.select('ranked.id').from(ranked.as('ranked')).where('ranked.month_rank', '>', cap);
+  return new Set(rows.map((row) => row.id));
+}
+
+// The ranking behind the cap: one row per counted payout with its rank in its technician's ET month.
+function monthRankQuery(conn) {
+  return conn('review_incentive_payouts as p')
+    .whereIn('p.source', PAYOUT_ELIGIBLE_SOURCES)
+    .where('p.amount_cents', '>', 0)
+    .whereNotNull('p.technician_id')
+    .select('p.id', conn.raw(
+      `row_number() over (partition by p.technician_id, date_trunc('month', p.earned_at AT TIME ZONE ?)
+        order by (p.status = 'paid') desc, p.earned_at, p.id) as month_rank`,
+      [STAFF_TIME_ZONE],
+    ));
+}
+
+/**
+ * Adds each row's cap rank to a query on `review_incentive_payouts as p`, in the SAME statement, so the
+ * rows and their ranks come from one snapshot (owner 2026-11-20 D4). Read it back with isOverMonthlyCap.
+ */
+function withMonthRank(conn, query) {
+  return query.with('ranked', monthRankQuery(conn)).leftJoin('ranked as rk', 'rk.id', 'p.id').select('rk.month_rank');
+}
+
+/** True for an unpaid payout ranked past the cap. No cap, or a row the ranking does not count, is never over. */
+function isOverMonthlyCap(row, cap) {
+  return Boolean(normalizeMonthlyCap(cap)) && row.status !== 'paid' && Number(row.month_rank) > cap;
+}
+
 async function getPolicy(conn = db) {
   try {
     const row = await conn('system_settings').where({ key: POLICY_KEY }).first();
@@ -133,27 +186,195 @@ async function getPolicy(conn = db) {
   }
 }
 
-async function savePolicy(policyPatch = {}, conn = db) {
-  const current = await getPolicy(conn);
-  const policy = parsePolicy({ ...current, ...policyPatch });
-  const now = new Date();
-  await conn('system_settings')
-    .insert({
-      key: POLICY_KEY,
-      value: JSON.stringify(policy),
-      category: 'reviews',
-      description: 'Technician review incentive automation policy',
-      created_at: now,
-      updated_at: now,
-    })
-    .onConflict('key')
-    .merge({
-      value: JSON.stringify(policy),
-      category: 'reviews',
-      description: 'Technician review incentive automation policy',
-      updated_at: now,
-    });
-  return policy;
+// One strict validator for the review bonus policy (owner 2026-11-20 D4). Every known field is checked by
+// type first, then range; no coercion (a numeric string, an object, NaN or "12abc" is refused). Unknown keys
+// pass through as the lenient parser lets them. Used on a save (the patch and the merged result), on the
+// stored row, and so on every payment read.
+// The program cutoff as a SAVE accepts it (owner 2026-11-20 D4): a real calendar date-only value (stored as
+// the instant of that Eastern midnight, via the repo's parseETDateTime) or a timestamp with an explicit offset
+// (Z or +hh:mm). An impossible date or time, or an offset-free timestamp (Railway's UTC would decide it), is
+// refused. Returns the UTC ISO instant to store, or null. Read paths do not use it: a stored value keeps the
+// meaning it always had.
+const CUTOFF_STAMP = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|([+-])(\d{2}):?(\d{2}))$/;
+function parseProgramCutoffForSave(value) {
+  if (typeof value !== 'string') return null;
+  if (validCalendarDate(value)) {
+    const startOfDay = parseETDateTime(`${value}T00:00`);
+    return Number.isNaN(startOfDay.getTime()) ? null : startOfDay.toISOString();
+  }
+  const m = CUTOFF_STAMP.exec(value);
+  if (!m || !validCalendarDate(m[1])) return null;
+  const [, , hh, mm, ss, , oh, om] = m;
+  if (Number(hh) > 23 || Number(mm) > 59 || Number(ss || 0) > 59 || Number(oh || 0) > 23 || Number(om || 0) > 59) return null;
+  const stamp = new Date(value);
+  return Number.isNaN(stamp.getTime()) ? null : stamp.toISOString();
+}
+
+const POLICY_FIELD_CHECKS = {
+  enabled: (v) => typeof v === 'boolean',
+  // Upper bound = the payout amount_cents column (PG integer).
+  amountCents: (v) => typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 2147483647,
+  currency: (v) => typeof v === 'string' && /^[A-Za-z]{3}$/.test(v),
+  eligibleSources: (v) => Array.isArray(v) && v.every((source) => typeof source === 'string'),
+  minRating: (v) => typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 5,
+  requireCustomerMatchForGoogle: (v) => typeof v === 'boolean',
+  programStartsAt: (v) => v === null || (typeof v === 'string' && normalizedIsoDate(v) !== null),
+  monthlyCapCount: (v) => v === null || (typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 1000),
+};
+
+/** Checks the fields present in `fields` and returns them normalized; throws a 422 on any bad one. */
+function checkPolicyFields(fields) {
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+    throw operationalError('The review bonus settings must be an object', 422, 'review_policy_invalid');
+  }
+  const checked = {};
+  for (const [name, value] of Object.entries(fields)) {
+    const check = POLICY_FIELD_CHECKS[name];
+    if (value === undefined) continue;
+    if (check && !check(value)) {
+      throw operationalError(`The review bonus setting "${name}" is not valid`, 422, 'review_policy_invalid');
+    }
+    checked[name] = name === 'programStartsAt' && value !== null ? normalizedIsoDate(value) : value;
+  }
+  return checked;
+}
+
+/** A whole policy: absent fields take the defaults, every present field must be valid. Throws on a bad one. */
+function validatePolicyStrict(fields) {
+  return { ...DEFAULT_POLICY, ...checkPolicyFields(fields), eligibleSources: PAYOUT_ELIGIBLE_SOURCES };
+}
+
+/**
+ * The policy for a payment decision. Unlike getPolicy it THROWS on a database error and on a stored
+ * row that is not a decodable policy object (malformed JSON, an array, a scalar): a failed or garbled
+ * read must stop the payment, never read as "no cap". Only a missing row, or a valid legacy object
+ * without monthlyCapCount, is uncapped.
+ */
+async function getPolicyStrict(conn = db, key = POLICY_KEY) {
+  const row = await conn('system_settings').where({ key }).first();
+  if (!row) return { ...DEFAULT_POLICY };
+  let decoded = row.value;
+  try {
+    if (typeof decoded === 'string') decoded = JSON.parse(decoded);
+  } catch {
+    decoded = null;
+  }
+  if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) {
+    throw operationalError('The review bonus policy is stored in a form that cannot be read', 500, 'review_policy_malformed');
+  }
+  try {
+    return validatePolicyStrict(decoded);
+  } catch (err) {
+    if (err.code !== 'review_policy_invalid') throw err;
+    throw operationalError(`The stored review bonus policy cannot be read (${err.message})`, 500, 'review_policy_malformed');
+  }
+}
+
+/**
+ * The settings lock of a policy key: one advisory lock both sides take (owner 2026-11-20 D4). A save takes
+ * it exclusive; every payment decision takes it SHARED, before it reads the policy, held to commit. So a
+ * save waits for open payments, and a payment that starts after a save sees the saved policy. Lock order
+ * everywhere: this lock first, then the payout rows (lockPayoutRows), then the technician locks.
+ */
+async function lockPolicy(conn, { key = POLICY_KEY, shared = false } = {}) {
+  const fn = shared ? 'pg_advisory_xact_lock_shared' : 'pg_advisory_xact_lock';
+  await conn.raw(`select ${fn}(hashtext(?))`, [`system_settings:${key}`]);
+}
+
+/** The policy for a payment decision: the shared settings lock first, then the strict read. */
+async function getPolicyForPayment(trx, key = POLICY_KEY) {
+  await lockPolicy(trx, { key, shared: true });
+  return getPolicyStrict(trx, key);
+}
+
+/**
+ * Locks the given payout rows FOR UPDATE in ONE statement ordered by id, and returns them. Every path
+ * that pays a review bonus takes its full id set through here before any technician lock, so two paths
+ * can never hold rows the other needs in a different order (owner 2026-11-20 D4).
+ */
+async function lockPayoutRows(conn, ids) {
+  const unique = [...new Set(ids)];
+  if (!unique.length) return [];
+  return conn('review_incentive_payouts')
+    .whereIn('id', unique).orderBy('id').forUpdate()
+    .select('id', 'technician_id', 'source', 'status');
+}
+
+/**
+ * Takes the monthly-cap lock of each technician (a transaction advisory lock, held to commit), in id
+ * order. Every path that pays a review bonus takes it before ranking, so a manual mark-paid and a pay
+ * run serialize per technician (owner 2026-11-20 D4). Call it inside a transaction, after the payout
+ * rows are locked, so every caller locks rows first and the technician lock second.
+ */
+async function lockTechnicianCap(conn, technicianIds) {
+  const ids = [...new Set((technicianIds || []).filter(Boolean))].sort();
+  for (const id of ids) {
+    await conn.raw('select pg_advisory_xact_lock(hashtext(?))', [`review-bonus-cap:${id}`]);
+  }
+}
+
+// Every policy field a full replacement must carry (eligibleSources is fixed by the code).
+const REPLACEMENT_FIELDS = Object.keys(DEFAULT_POLICY).filter((key) => key !== 'eligibleSources');
+
+async function savePolicy(rawPatch = {}, conn = db, { key = POLICY_KEY } = {}) {
+  // Read, merge and upsert in one transaction under a lock per settings key, taken BEFORE the read so
+  // it also works when the row is absent: two PATCHes cannot overwrite each other's fields (owner
+  // 2026-11-20 D4). A failed read must not overwrite a stored cap with the defaults. While the stored
+  // row is unreadable a partial patch is refused: only an explicit full replacement (replace: true
+  // with every field) overwrites it.
+  // The body must be a plain object before anything is read from it (an array or scalar would otherwise
+  // spread into fields); nothing is read or written otherwise.
+  if (!rawPatch || typeof rawPatch !== 'object' || Array.isArray(rawPatch)) {
+    throw operationalError('The review bonus settings must be an object', 422, 'review_policy_invalid');
+  }
+  const { replace = false, ...rawFields } = rawPatch;
+  // A bad field is refused (422) before anything is read or written: the stored row stays as it was.
+  const policyPatch = checkPolicyFields(rawFields);
+  // The cutoff is stricter on a save: what is stored is always an unambiguous instant.
+  if (typeof rawFields.programStartsAt === 'string') {
+    const instant = parseProgramCutoffForSave(rawFields.programStartsAt);
+    if (!instant) throw operationalError('The review bonus setting "programStartsAt" is not valid', 422, 'review_policy_invalid');
+    policyPatch.programStartsAt = instant;
+  }
+  return conn.transaction(async (trx) => {
+    await lockPolicy(trx, { key });
+    let current;
+    try {
+      current = await getPolicyStrict(trx, key);
+    } catch (err) {
+      if (err.code !== 'review_policy_malformed') throw err;
+      if (replace !== true) {
+        throw operationalError('The review bonus settings are unreadable; save the full settings to replace them', 409, 'review_policy_unreadable');
+      }
+      current = { ...DEFAULT_POLICY };
+    }
+    if (replace === true) {
+      const missing = REPLACEMENT_FIELDS.filter((key) => !(key in policyPatch));
+      if (missing.length) {
+        throw operationalError(`A full replacement needs every setting (missing: ${missing.join(', ')})`, 422, 'review_policy_incomplete');
+      }
+      current = {};
+    }
+    const policy = validatePolicyStrict({ ...current, ...policyPatch });
+    const now = new Date();
+    await trx('system_settings')
+      .insert({
+        key,
+        value: JSON.stringify(policy),
+        category: 'reviews',
+        description: 'Technician review incentive automation policy',
+        created_at: now,
+        updated_at: now,
+      })
+      .onConflict('key')
+      .merge({
+        value: JSON.stringify(policy),
+        category: 'reviews',
+        description: 'Technician review incentive automation policy',
+        updated_at: now,
+      });
+    return policy;
+  });
 }
 
 function qualifiesReviewRequest(request, policy) {
@@ -1564,11 +1785,12 @@ async function getDashboard(options = {}) {
     ? asDate(options.periodStart)
     : new Date(Date.now() - days * DAY_MS);
   const periodEnd = options.periodEnd ? asDate(options.periodEnd) : new Date();
-  const policy = options.policy || await getPolicy(conn);
+  // Strict: a failed settings read must never show over-cap bonuses as pending (owner 2026-11-20 D4).
+  const policy = options.policy || await getPolicyStrict(conn);
   const startsAt = programStart(policy);
   const effectivePeriodStart = startsAt && startsAt > periodStart ? startsAt : periodStart;
 
-  const rows = await conn('review_incentive_payouts as p')
+  const payoutQuery = conn('review_incentive_payouts as p')
     .leftJoin('technicians as t', 'p.technician_id', 't.id')
     .leftJoin('customers as c', 'p.customer_id', 'c.id')
     .leftJoin('review_requests as rr', 'p.review_request_id', 'rr.id')
@@ -1587,8 +1809,13 @@ async function getDashboard(options = {}) {
       'gr.star_rating as review_star_rating',
       'gr.review_text as review_text',
     );
-
-  const payouts = rows.map(serializePayout);
+  // Owner 2026-11-20 D4: an unpaid payout over the monthly cap is shown but never counted as pending.
+  // The rows and their ranks come from one statement (one snapshot); no cap, no ranking.
+  const rows = await (normalizeMonthlyCap(policy.monthlyCapCount) ? withMonthRank(conn, payoutQuery) : payoutQuery);
+  const payouts = rows.map((row) => ({
+    ...serializePayout(row),
+    overMonthlyCap: isOverMonthlyCap(row, policy.monthlyCapCount),
+  }));
   const leaderboardByTech = new Map();
   for (const payout of payouts) {
     const key = payout.technicianId;
@@ -1606,7 +1833,7 @@ async function getDashboard(options = {}) {
     row.reviewCount += 1;
     row.earnedCents += payout.amountCents;
     if (payout.status === 'paid') row.paidCents += payout.amountCents;
-    else row.pendingCents += payout.amountCents;
+    else if (!payout.overMonthlyCap) row.pendingCents += payout.amountCents;
   }
 
   const leaderboard = Array.from(leaderboardByTech.values())
@@ -1664,9 +1891,10 @@ async function getDashboard(options = {}) {
     unattributedGoogleReviews = 0;
   }
 
+  const pendingPayouts = payouts.filter(p => p.status !== 'paid' && !p.overMonthlyCap);
   const earnedCents = payouts.reduce((sum, p) => sum + p.amountCents, 0);
   const paidCents = payouts.filter(p => p.status === 'paid').reduce((sum, p) => sum + p.amountCents, 0);
-  const pendingCents = earnedCents - paidCents;
+  const pendingCents = pendingPayouts.reduce((sum, p) => sum + p.amountCents, 0);
 
   return {
     policy,
@@ -1687,7 +1915,7 @@ async function getDashboard(options = {}) {
       paid: dollars(paidCents),
       pendingCents,
       pending: dollars(pendingCents),
-      pendingCount: payouts.filter(p => p.status !== 'paid').length,
+      pendingCount: pendingPayouts.length,
       paidCount: payouts.filter(p => p.status === 'paid').length,
       unattributedGoogleReviews,
       unattributedReviewRequests: 0,
@@ -1699,20 +1927,33 @@ async function getDashboard(options = {}) {
 
 async function markPaid(ids = [], options = {}) {
   const conn = options.conn || db;
-  const cleanIds = ids.filter(Boolean);
-  if (!cleanIds.length) return { updated: 0 };
-  const patch = {
-    status: 'paid',
-    paid_at: new Date(),
-    paid_by: options.paidBy || null,
-    updated_at: new Date(),
-  };
-  const updated = await conn('review_incentive_payouts')
-    .whereIn('id', cleanIds)
-    .where('source', 'google_review')
-    .whereNot('status', 'paid')
-    .update(patch);
-  return { updated: toInt(updated, 0) };
+  const cleanIds = [...new Set(ids.filter(Boolean).map((id) => String(id).toLowerCase()))];
+  if (!cleanIds.length) return { updated: 0, skippedOverCap: 0 };
+  // One transaction (owner 2026-11-20 D4): lock the rows, then each technician's cap lock, rank, and
+  // update only the rows that rank inside the cap under the technician they were ranked under.
+  return conn.transaction(async (trx) => {
+    // Lock order: the settings lock (with the strict policy read), the payout rows, the technician locks.
+    const { monthlyCapCount } = await getPolicyForPayment(trx, options.policyKey);
+    const rows = (await lockPayoutRows(trx, cleanIds))
+      .filter((row) => row.source === 'google_review' && row.status !== 'paid');
+    if (!rows.length) return { updated: 0, skippedOverCap: 0 };
+    const technicianIds = [...new Set(rows.map((row) => row.technician_id).filter(Boolean))];
+    await lockTechnicianCap(trx, technicianIds);
+    const overCap = await overCapPayoutIds(trx, { cap: monthlyCapCount, technicianIds });
+    const patch = {
+      status: 'paid', paid_at: new Date(), paid_by: options.paidBy || null, updated_at: new Date(),
+    };
+    const payableByTech = new Map();
+    for (const row of rows.filter((r) => !overCap.has(r.id))) {
+      payableByTech.set(row.technician_id, [...(payableByTech.get(row.technician_id) || []), row.id]);
+    }
+    let updated = 0;
+    for (const [technicianId, payable] of payableByTech) {
+      const query = trx('review_incentive_payouts').whereIn('id', payable).where('source', 'google_review').whereNot('status', 'paid');
+      updated += toInt(await (technicianId ? query.where('technician_id', technicianId) : query.whereNull('technician_id')).update(patch), 0);
+    }
+    return { updated, skippedOverCap: rows.filter((row) => overCap.has(row.id)).length };
+  });
 }
 
 function toCsv(rows = []) {
@@ -1742,7 +1983,7 @@ function toCsv(rows = []) {
     row.customerName,
     row.source,
     row.amount.toFixed(2),
-    row.status,
+    row.overMonthlyCap ? 'over monthly cap - not paid' : row.status,
     row.earnedAt,
     row.payPeriodStart,
     row.payPeriodEnd,
@@ -1765,9 +2006,19 @@ module.exports = {
   manualAttributeGoogleReview,
   getDashboard,
   markPaid,
+  overCapPayoutIds,
+  withMonthRank,
+  isOverMonthlyCap,
+  getPolicyStrict,
+  validatePolicyStrict,
+  getPolicyForPayment,
+  lockPolicy,
+  lockPayoutRows,
+  lockTechnicianCap,
   toCsv,
   __private: {
     parsePolicy,
+    parseProgramCutoffForSave,
     qualifiesReviewRequest,
     qualifiesGoogleReview,
     weekPeriodFor,

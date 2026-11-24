@@ -4,11 +4,9 @@ import { formatETDateTime } from "../../lib/timezone";
 
 // Ads -> Dashboard: read-only "Ad health" card. Shows whether each Google
 // campaign serves (and why not), ad disapprovals, conversion uploads with
-// Google's own upload check, and a 30-day "who changed what" timeline. The
-// server route ships behind GATE_ADS_HEALTH_CARD; while it is off
-// GET /admin/ads/health answers 404 and this card renders nothing. It also
-// renders nothing until the server answers, so a switched-off card never
-// flashes onto the dashboard.
+// Google's own upload check, and a 30-day "who changed what" timeline. It
+// renders nothing until the server answers, so an empty card never flashes
+// onto the dashboard.
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const TIMELINE_PREVIEW = 10;
@@ -273,7 +271,7 @@ function CardBody({ data }) {
 }
 
 export default function AdsHealthCard() {
-  // state: "loading" | "off" | "error" | "ready"
+  // state: "loading" | "off" (no usable payload) | "error" | "ready"
   const [state, setState] = useState("loading");
   const [data, setData] = useState(null);
   const [message, setMessage] = useState("");
@@ -284,7 +282,6 @@ export default function AdsHealthCard() {
       try {
         const res = await fetch(`${API_BASE}/admin/ads/health`, { headers: authHeaders() });
         if (cancelled) return;
-        if (res.status === 404) return setState("off");
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const body = await res.json();
         // Anything that is not the documented shape counts as off, never a crash.

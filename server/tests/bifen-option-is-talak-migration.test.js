@@ -6,7 +6,6 @@
  */
 const migration = require('../models/migrations/20261025140000_bifen_option_is_talak');
 const talstarMigration = require('../models/migrations/20261025130000_talstar_option_is_talak');
-const constants = require('../services/pricing-engine/constants');
 
 function fakeKnex(db) {
   const knex = (table) => {
@@ -44,31 +43,10 @@ const rowOf = (db, key) => JSON.parse(db.pricing_config.find((r) => r.config_key
 const bifenOf = (db, key) => rowOf(db, key).products.bifen_it;
 
 describe('bifen_it option is Talak migration', () => {
-  test('bifen_it in constants.js carries the same Talak values as talstar_p and as this migration', () => {
-    const pick = (p) => ({
-      label: p.label, catalogProductName: p.catalogProductName, packageLabel: p.packageLabel, positioning: p.positioning,
-      containerCost: p.containerCost, containerOz: p.containerOz, warnings: p.warnings,
-    });
-    const preslab = constants.SPECIALTY.preSlabTermiticide.products;
-    expect(pick(preslab.bifen_it)).toEqual(pick(preslab.talstar_p));
-    expect(TALAK_PRESLAB).toEqual({
-      label: preslab.bifen_it.label,
-      catalog_product_name: preslab.bifen_it.catalogProductName,
-      package_label: preslab.bifen_it.packageLabel,
-      positioning: preslab.bifen_it.positioning,
-      container_cost: preslab.bifen_it.containerCost,
-      container_oz: preslab.bifen_it.containerOz,
-      warnings: preslab.bifen_it.warnings,
-    });
-    const trench = constants.SPECIALTY.trenching.products;
-    expect(pick(trench.bifen_it)).toEqual(pick(trench.talstar_p));
-    expect(TALAK_TRENCH).toEqual({
-      label: trench.bifen_it.label,
-      positioning: trench.bifen_it.positioning,
-      container_cost: trench.bifen_it.containerCost,
-      container_oz: trench.bifen_it.containerOz,
-      warnings: trench.bifen_it.warnings,
-    });
+  test('this migration takes the frozen Talak values from 20261025130000 (constants.js moved to Crosscheck Plus on 2026-11-18)', () => {
+    // The link to constants.js moved to bifenthrin-option-crosscheck-migration.test.js.
+    expect(TALAK_PRESLAB).toMatchObject({ label: 'Talak 7.9 F - Bifenthrin', catalog_product_name: 'Atticus Talak 7.9 F', container_cost: 41.57, container_oz: 96, package_label: '96 fl oz' });
+    expect(TALAK_TRENCH).toMatchObject({ label: 'Talak 7.9 F - Bifenthrin', container_cost: 41.57, container_oz: 96 });
   });
 
   test('rewrites both seeded Bifen rows to Talak, keeps their other keys, records each once', async () => {

@@ -46,9 +46,11 @@ describe('public newsletter quiz landing copy (per-quiz)', () => {
       const r = await fetch(`${baseUrl}/api/public/newsletter/quiz/${TOKEN}/pest-pressure-v1/ants`);
       const html = await r.text();
       expect(r.status).toBe(200);
-      expect(html).toContain('You picked');
-      expect(html).toContain('Ants');
+      expect(html).toContain("<p>You picked <strong>Ants</strong>. Tap confirm and we'll take it from here.</p>");
       expect(html).not.toMatch(/lawn check/i);
+      // An answer the quiz does not have: no label, the same next-step line.
+      const unknown = await (await fetch(`${baseUrl}/api/public/newsletter/quiz/${TOKEN}/pest-pressure-v1/nope`)).text();
+      expect(unknown).toContain("<p>Tap confirm and we'll take it from here.</p>");
     });
   });
 
@@ -91,6 +93,53 @@ describe('public newsletter quiz landing copy (per-quiz)', () => {
       const html = await r.text();
       expect(html).toContain('Book a mosquito visit');
       expect(html).not.toMatch(/lawn check/i);
+    });
+  });
+
+  test.each([
+    ['Waves Newsletter', 'nl-poll-weekend-v1', 'out-to-eat', 'Out to eat', 'Where will you be this weekend?', 'Your vote is in. See you in the next Waves Newsletter.'],
+    ['Waves Pest Insider', 'pi-poll-lizards-v1', 'what-lizards', 'What lizards?', 'Lizards on the lanai: friend or foe?', "Your vote is in. We'll share the top answer in the Waves Pest Insider."],
+    ['Waves Pest Insider', 'pi-poll-worst-guest-v1', 'ants', 'Ants', 'Which pest is the worst house guest?', "Your vote is in. We'll share the top answer in the Waves Pest Insider."],
+  ])('a %s poll vote reads like a poll, writes nothing on the GET, and thanks the reader with no booking pitch (%s)', async (_newsletter, quizId, answer, label, question, thanks) => {
+    await withServer(async (baseUrl) => {
+      const url = `${baseUrl}/api/public/newsletter/quiz/${TOKEN}/${quizId}/${answer}`;
+      db.mockClear();
+      const confirm = await (await fetch(url)).text();
+      // The page asks the poll's own question, counts the vote, and says how to change it.
+      expect(confirm).toContain(`<h1>${question}</h1>`);
+      expect(confirm).toContain(`<p>You picked <strong>${label}</strong>.</p>`);
+      expect(confirm).toContain('>Count my vote</button>');
+      expect(confirm).toContain('Changed your mind? Tap another answer in the email. Your last vote counts.');
+      // Nothing follows a poll vote, so the page does not say "we'll take it from here".
+      expect(confirm).not.toMatch(/take it from here|One tap to confirm|Confirm —|If you didn't tap this/);
+      // A GET never writes: it does not even open the database.
+      expect(db).not.toHaveBeenCalled();
+      // An answer the poll does not have: today's page, the button alone, still no promise.
+      const unknown = await (await fetch(`${baseUrl}/api/public/newsletter/quiz/${TOKEN}/${quizId}/nope`)).text();
+      expect(unknown).toContain('>Confirm</button>');
+      expect(unknown).toContain('<h1>One tap to confirm.</h1>');
+      expect(unknown).toContain("If you didn't tap this, just close this tab — nothing changes until you click the button.");
+      expect(unknown).not.toMatch(/You picked|take it from here|Count my vote|Your last vote counts/);
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: '',
+      });
+      const html = await r.text();
+      expect(r.status).toBe(200);
+      // The page escapes the line, so the apostrophe in "We'll" is an entity in the markup.
+      expect(html).toContain(thanks.replace(/'/g, '&#39;'));
+      expect(html).not.toMatch(/\/book\b|Book a|free check/);
+    });
+  });
+
+  test('a service quiz keeps its confirm page word for word', async () => {
+    await withServer(async (baseUrl) => {
+      const html = await (await fetch(`${baseUrl}/api/public/newsletter/quiz/${TOKEN}/pest-pressure-v1/ants`)).text();
+      expect(html).toContain('<h1>One tap to confirm.</h1>');
+      expect(html).toContain(">Confirm — Ants</button>");
+      expect(html).toContain("If you didn't tap this, just close this tab — nothing changes until you click the button.");
+      expect(html).not.toMatch(/Count my vote|Your last vote counts/);
     });
   });
 

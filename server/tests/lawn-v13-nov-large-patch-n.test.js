@@ -18,8 +18,13 @@ const { TYPES } = jest.requireActual('../services/lawn-trouble-areas');
 const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_TARGET'];
 const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
 const allOn = () => { for (const name of GATES) process.env[name] = 'true'; };
-beforeEach(() => { jest.clearAllMocks(); allOn(); mockLoadActive.mockResolvedValue([{ id: 'a', type: 'fungus' }]); });
-afterEach(() => { for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; } });
+// These tests are about the large patch rule alone: the lawn is never reclaimed (the reclaimed-water rule has its own suites).
+let reclaimedRead;
+beforeEach(() => {
+  jest.clearAllMocks(); allOn(); mockLoadActive.mockResolvedValue([{ id: 'a', type: 'fungus' }]);
+  reclaimedRead = jest.spyOn(require('../services/lawn-reclaimed-water'), 'isReclaimedService').mockResolvedValue(false);
+});
+afterEach(() => { reclaimedRead.mockRestore(); for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; } });
 
 const service = { id: 'svc-1', property_id: '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d' };
 const NOV_VISIT = v13.st_augustine.visits.find((visit) => visit.month === 'Nov');

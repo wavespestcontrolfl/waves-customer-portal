@@ -152,6 +152,26 @@ describe('raising', () => {
     expect(raised()).toHaveLength(1);
   });
 
+  // A plan offer's quote books no visit before its own first day (weeks out by design): its 7 days count from
+  // that day, so every such quote does not ring, and a real gap behind its first days still does.
+  test('a plan offer quote counts its 7 days from its own first visit day', async () => {
+    const offer = (firstVisitFrom) => ({ estimate_data: { planStart: { offer: { jobId: 'job-1', endsAt: '2026-12-01T05:00:00.000Z', firstVisitFrom } } } });
+    estimates = [row(A, offer('2027-01-25'))];
+    // Day 7 from Jan 25 is Feb 1: soon. Day 8 is not.
+    getAvailableSlots.mockResolvedValue(answer('2027-02-01'));
+    await run();
+    expect(raised()).toEqual([]);
+    getAvailableSlots.mockResolvedValue(answer('2027-02-02'));
+    await run();
+    expect(raised()).toHaveLength(1);
+    // A first day already behind today counts from today, as any estimate.
+    jest.clearAllMocks();
+    estimates = [row(A, offer('2026-11-02'))];
+    getAvailableSlots.mockResolvedValue(answer('2026-11-17'));
+    await run();
+    expect(raised()).toHaveLength(1);
+  });
+
   test('firstDayAvailability inside 7 days counts even when the capped list starts later: no bell', async () => {
     getAvailableSlots.mockResolvedValue({ ...answer('2026-11-12', ['2026-11-20']) });
     await run();

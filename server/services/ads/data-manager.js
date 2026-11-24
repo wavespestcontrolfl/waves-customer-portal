@@ -16,6 +16,8 @@ const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { runExclusive } = require('../../utils/cron-lock');
 const { loadMarketingSuppression, normPhone: consentNormPhone } = require('./ad-audience-consent');
 const matchFields = require('./ad-match-fields');
+const { isInternalTestContact } = require('../internal-test-customers');
+const { NON_ENGAGED_LEAD_STATUSES } = require('../lead-statuses');
 
 let _googleapis;
 function getGoogle() {
@@ -52,6 +54,11 @@ const CONVERSIONS = {
     legacyDestinationEnv: 'GOOGLE_ADS_DATA_MANAGER_COMPLETED_JOB_CONVERSION_ACTION_ID',
   },
 };
+
+// Lead statuses that are never a real conversion: the shared non-engaged set
+// (lead-statuses.js: cancelled, spam, duplicate, handled) plus disqualified. A
+// lead later marked one of these must not go out even though is_qualified is sticky.
+const JUNK_LEAD_STATUSES = [...NON_ENGAGED_LEAD_STATUSES, 'disqualified'];
 
 function boolEnv(name, defaultValue = false) {
   const raw = process.env[name];
@@ -240,7 +247,17 @@ function candidateHasUserData(candidate) {
   return !!(normalizeEmail(candidate.email) || normalizePhone(candidate.phone));
 }
 
+// Candidates that must never reach an ad platform, whatever else is true of
+// them. Computed from the source row BEFORE consent stripping, so the flags
+// survive. Shared with the Meta lane.
+function exclusionReason(candidate) {
+  if (candidate.internalTest) return 'internal_test';
+  return null;
+}
+
 function skipReason(candidate) {
+  const excluded = exclusionReason(candidate);
+  if (excluded) return excluded;
   if (!candidate.eventTimestamp) return 'missing_event_timestamp';
   if (!candidateHasClickId(candidate) && !candidateHasUserData(candidate)) {
     // Distinguish "we stripped the identifiers for consent" from "the source
@@ -348,6 +365,11 @@ function mergeClickKeys(into, from) {
   return out;
 }
 
+function mergeExclusions(winner, a, b) {
+  const internalTest = !!(a.internalTest || b.internalTest);
+  return !!winner.internalTest === internalTest ? winner : { ...winner, internalTest };
+}
+
 function dedupeCandidatesByTransaction(candidates = []) {
   const byTransaction = new Map();
   const order = [];
@@ -366,11 +388,12 @@ function dedupeCandidatesByTransaction(candidates = []) {
     }
 
     const existing = byTransaction.get(transactionId);
-    if (candidateMatchScore(candidate) > candidateMatchScore(existing)) {
-      byTransaction.set(transactionId, mergeClickKeys(candidate, existing));
-    } else {
-      byTransaction.set(transactionId, mergeClickKeys(existing, candidate));
-    }
+    const winner = candidateMatchScore(candidate) > candidateMatchScore(existing)
+      ? mergeClickKeys(candidate, existing)
+      : mergeClickKeys(existing, candidate);
+    // An exclusion on ANY sibling excludes the transaction: siblings are one
+    // person's conversion seen through different join rows.
+    byTransaction.set(transactionId, mergeExclusions(winner, existing, candidate));
   }
 
   return order.map((entry) => (
@@ -392,10 +415,23 @@ function leadIdentity(row) {
   return matchFields.identityForContact({ email: row.email, phone: row.phone }, ...leadIdentitySources(row));
 }
 
+function leadIsInternalTest(row) {
+  return isInternalTestContact({
+    customerId: row.customer_id, firstName: row.first_name, lastName: row.last_name, email: row.email, phone: row.phone,
+  }) || isInternalTestContact({
+    customerId: row.customer_id,
+    firstName: row.customer_first_name,
+    lastName: row.customer_last_name,
+    email: row.customer_email,
+    phone: row.customer_phone,
+  });
+}
+
 function mapLeadCandidate(row) {
   const eventTimestamp = toRfc3339(row.converted_at || row.first_contact_at || row.created_at);
   return {
     ...leadIdentity(row),
+    internalTest: leadIsInternalTest(row),
     // Both name/address sources, so consent cleaning can re-pick the identity
     // if it swaps a phone. Stripped before upload; never sent.
     identitySources: leadIdentitySources(row),
@@ -442,6 +478,21 @@ function estimateLeadId(estimateData) {
   return parsed.lead_id ? String(parsed.lead_id) : null;
 }
 
+// Test records never go out. Lead status is NOT checked for a completed job: a
+// paid job is real revenue even if its lead was later merged as a duplicate.
+// The lead joins by estimate, so it can belong to another customer: that
+// customer counts too, by its id and its own contact.
+function jobIsInternalTest(row) {
+  return isInternalTestContact({
+    customerId: row.customer_id, firstName: row.customer_first_name, lastName: row.customer_last_name, email: row.customer_email, phone: row.customer_phone,
+  }) || isInternalTestContact({
+    customerId: row.lead_customer_id, firstName: row.lead_first_name, lastName: row.lead_last_name, email: row.lead_email, phone: row.lead_phone,
+  }) || isInternalTestContact({
+    customerId: row.lead_customer_id, firstName: row.lead_customer_first_name, lastName: row.lead_customer_last_name,
+    email: row.lead_customer_email, phone: row.lead_customer_phone,
+  });
+}
+
 function mapCompletedJobCandidate(row) {
   const invoiceTotal = number(row.invoice_total);
   const eventTimestamp = toRfc3339(row.service_date || row.completed_at || row.updated_at || row.created_at);
@@ -455,6 +506,7 @@ function mapCompletedJobCandidate(row) {
     { email: leadEmail, phone: leadPhone, firstName: row.lead_first_name, lastName: row.lead_last_name, city: row.lead_city, zip: row.lead_zip },
   ];
   return {
+    internalTest: jobIsInternalTest(row),
     // The customer record is canonical for a completed job and the lead the
     // fallback, but only a source that is the same person as the uploaded
     // email/phone below may supply the name/address.
@@ -470,6 +522,9 @@ function mapCompletedJobCandidate(row) {
     leadId,
     estimateId: row.estimate_id || null,
     customerId: row.customer_id || null,
+    // The estimate lead can belong to another customer: consent reads that
+    // customer's merge family contacts too. Never uploaded.
+    leadCustomerId: row.lead_customer_id,
     invoiceId: row.invoice_id || null,
     serviceRecordId: row.service_record_id || null,
     scheduledServiceId: row.scheduled_service_id || null,
@@ -497,6 +552,9 @@ function mapCompletedJobCandidate(row) {
       { email: leadEmail, phone: leadPhone },
       { email: customerEmail, phone: customerPhone },
     ],
+    // The estimate lead's own customer's current contact: an opt-out there opts
+    // the lead's person out. Opt-out check only: never promoted, never uploaded.
+    suppressionIdentifiers: [{ email: row.lead_customer_email, phone: row.lead_customer_phone }],
     metadata: {
       invoiceStatus: row.invoice_status || null,
       serviceLine: row.service_line || null,
@@ -521,6 +579,10 @@ async function collectQualifiedLeadCandidates({ since, endDate, limit = MAX_LIMI
       q.where('l.is_qualified', true)
         .orWhereRaw("LOWER(COALESCE(l.status, '')) IN ('qualified', 'booked', 'converted', 'won')");
     })
+    // is_qualified is sticky, so a lead later marked junk or non-engaged still
+    // matches above. It is dropped here, before the limit, so junk never takes
+    // an upload slot from an older real lead.
+    .whereRaw(`LOWER(TRIM(COALESCE(l.status, ''))) NOT IN (${JUNK_LEAD_STATUSES.map(() => '?').join(', ')})`, JUNK_LEAD_STATUSES)
     .select(
       'l.id',
       'l.estimate_id',
@@ -575,8 +637,17 @@ function invoiceRollupSubquery() {
 
 async function collectCompletedJobCandidates({ since, endDate, limit = MAX_LIMIT } = {}) {
   const cap = Math.min(Math.max(parseInt(limit, 10) || MAX_LIMIT, 1), MAX_LIMIT);
-  const queryLimit = Math.min(cap * 2, MAX_EVENTS_PER_REQUEST);
   const invoiceRollup = invoiceRollupSubquery();
+  // The limit counts jobs, then every lead joined to a picked job is read: a
+  // limit over the joined rows could keep a job's ordinary lead and cut the
+  // lead that marks it a test record (the dedupe excludes on ANY sibling).
+  const jobIds = db('estimate_actuals as ea')
+    .join('estimates as e', 'e.id', 'ea.estimate_id')
+    .where('ea.service_date', '>=', since)
+    .where('ea.service_date', '<', addDateStringDays(endDate, 1))
+    .select('ea.id')
+    .orderBy('ea.service_date', 'desc')
+    .limit(cap);
 
   const rows = await db('estimate_actuals as ea')
     .join('estimates as e', 'e.id', 'ea.estimate_id')
@@ -592,8 +663,10 @@ async function collectCompletedJobCandidates({ since, endDate, limit = MAX_LIMIT
             .orOn(db.raw("e.estimate_data->>'lead_id' = l.id::text"));
         });
     })
-    .where('ea.service_date', '>=', since)
-    .where('ea.service_date', '<', addDateStringDays(endDate, 1))
+    // The lead's own customer (it can differ from the job's): its current contact
+    // joins the opt-out and test-record checks, archived or not.
+    .leftJoin('customers as lc', 'lc.id', 'l.customer_id')
+    .whereIn('ea.id', jobIds)
     .select(
       'ea.id',
       'ea.estimate_id',
@@ -606,6 +679,11 @@ async function collectCompletedJobCandidates({ since, endDate, limit = MAX_LIMIT
       'ea.updated_at',
       'e.estimate_data',
       'l.id as lead_id',
+      'l.customer_id as lead_customer_id',
+      'lc.email as lead_customer_email',
+      'lc.phone as lead_customer_phone',
+      'lc.first_name as lead_customer_first_name',
+      'lc.last_name as lead_customer_last_name',
       'l.email as lead_email',
       'l.phone as lead_phone',
       'l.first_name as lead_first_name',
@@ -630,13 +708,50 @@ async function collectCompletedJobCandidates({ since, endDate, limit = MAX_LIMIT
       'inv.invoice_status',
       'sr.updated_at as completed_at',
     )
-    .orderBy('ea.service_date', 'desc')
-    .limit(queryLimit);
+    .orderBy('ea.service_date', 'desc');
 
   // Consent must run BEFORE this dedupe (see the invariant on collectCandidates).
   return dedupeCandidatesByTransaction(
     await applyMarketingConsent('completed_job_revenue', rows.map(mapCompletedJobCandidate))
-  ).slice(0, cap);
+  );
+}
+
+// `family` = each start id with every customer an active merge joined to it, in
+// either direction (customer_merge_journal keeps the retired id). An undone
+// merge joins nothing, and nor does a lead moved between two live customers.
+const MERGE_FAMILY_CTE = `
+  WITH RECURSIVE family(start_id, id) AS (
+    SELECT x, x FROM unnest(?::uuid[]) AS x
+    UNION
+    SELECT f.start_id, CASE WHEN j.loser_customer_id = f.id THEN j.winner_customer_id ELSE j.loser_customer_id END
+    FROM family f
+    JOIN customer_merge_journal j ON f.id IN (j.loser_customer_id, j.winner_customer_id) AND j.undone_at IS NULL
+  )`;
+
+// Each customer id with the id, name, email and phone of every customer in its
+// merge family: each one's CURRENT row, and each retired one's as the merge
+// left it (loser_snapshot: the merge clears them from the retired row). The
+// person's opt-out, or a test record's mark, may sit on any of them. The
+// current rows also cover a merge that commits after the run read its
+// candidates: a candidate that still names the retired customer reaches the
+// survivor's current contact here.
+async function mergeFamilyContacts(customerIds) {
+  const ids = [...new Set(customerIds.filter(Boolean).map(String))];
+  const contacts = new Map(ids.map((id) => [id, []]));
+  if (!ids.length) return contacts;
+  const { rows } = await db.raw(`${MERGE_FAMILY_CTE}
+    SELECT f.start_id, j.loser_customer_id AS customer_id, j.loser_snapshot->>'first_name' AS first_name,
+      j.loser_snapshot->>'last_name' AS last_name, j.loser_snapshot->>'email' AS email, j.loser_snapshot->>'phone' AS phone
+    FROM family f JOIN customer_merge_journal j ON j.loser_customer_id = f.id AND j.undone_at IS NULL
+    UNION ALL
+    SELECT f.start_id, c.id, c.first_name, c.last_name, c.email, c.phone
+    FROM family f JOIN customers c ON c.id = f.id`, [ids]);
+  for (const r of rows) {
+    contacts.get(String(r.start_id)).push({
+      customerId: String(r.customer_id), firstName: r.first_name, lastName: r.last_name, email: r.email || null, phone: r.phone || null,
+    });
+  }
+  return contacts;
 }
 
 // Consent-clean conversion candidates before either lane (Google Data Manager
@@ -655,15 +770,22 @@ async function collectCompletedJobCandidates({ since, endDate, limit = MAX_LIMIT
 async function applyMarketingConsent(conversionType, candidates) {
   if (!Array.isArray(candidates) || candidates.length === 0) return candidates || [];
   const sup = await loadMarketingSuppression();
+  const family = await mergeFamilyContacts(candidates.flatMap((c) => [c.customerId, c.leadCustomerId]));
+  const familyOf = (candidate) => [family.get(String(candidate.customerId)), family.get(String(candidate.leadCustomerId))]
+    .filter(Array.isArray).flat();
   let suppressed = 0;
   let strippedPhones = 0;
   // Person-level check: the collapsed email/phone pick PLUS every linked
   // identifier the mapper carried (consentIdentifiers) — an opt-out on the
   // customer's current email opts the person out even when a stale lead
-  // email won the collapsed pick.
+  // email won the collapsed pick. suppressionIdentifiers (a completed job's
+  // estimate-lead customer) and the merge family's contacts (of the
+  // candidate's customer and of that estimate-lead customer: every family
+  // customer's current contact and every contact a merge cleared) count here
+  // only: never promoted below, never uploaded.
   const personSuppressed = (candidate) => sup.isSuppressed(candidate)
-    || (Array.isArray(candidate.consentIdentifiers)
-      && candidate.consentIdentifiers.some((id) => sup.isSuppressed(id)));
+    || [candidate.consentIdentifiers, candidate.suppressionIdentifiers, familyOf(candidate)]
+      .some((ids) => Array.isArray(ids) && ids.some((id) => sup.isSuppressed(id)));
   // ...and the opt-out propagates across TRANSACTION SIBLINGS: duplicate join
   // rows of one transaction are the same person seen through different links
   // (lead vs customer). If ANY sibling matches an opt-out, every sibling's
@@ -699,14 +821,21 @@ async function applyMarketingConsent(conversionType, candidates) {
       }
       // The phone changed, so the name/address must be re-picked for the
       // contact actually uploaded (a promoted account-holder phone must not
-      // ride with a different caller's name).
+      // ride with a different caller's name). A wrong number never shows that
+      // two sources are one person, so it is blanked in the sources too.
+      const usable = (src) => (sup.invalidPhones.has(consentNormPhone(src.phone)) ? { ...src, phone: null } : src);
       const reIdentity = Array.isArray(candidate.identitySources)
-        ? matchFields.identityForContact({ email: candidate.email, phone: promoted }, ...candidate.identitySources)
+        ? matchFields.identityForContact({ email: candidate.email, phone: promoted }, ...candidate.identitySources.map(usable))
         : {};
       return { ...candidate, phone: promoted, ...reIdentity };
     }
     return candidate;
-  }).map(({ identitySources, ...rest }) => rest); // raw sources never leave this step
+  })
+    // Raw sources never leave this step. A candidate whose merge family holds a
+    // test record (a family customer's current row, or a retired one's id and
+    // cleared contact, which survive only in the journal) is a test record too.
+    .map(({ identitySources, suppressionIdentifiers, ...rest }) => (
+      familyOf(rest).some((r) => isInternalTestContact(r)) ? { ...rest, internalTest: true } : rest));
   if (suppressed || strippedPhones) {
     logger.info(`[ad-consent] ${conversionType} conversions: stripped identifiers from ${suppressed} opted-out contacts, ${strippedPhones} invalid phones`);
   }
@@ -755,6 +884,7 @@ function summarizeCandidates(candidates, existingByTransaction = new Map()) {
     missingConversionValue: 0,
     missingEventTimestamp: 0,
     consentSuppressed: 0,
+    internalTest: 0,
     skipped: 0,
   };
   const rows = candidates.map((candidate) => {
@@ -767,6 +897,7 @@ function summarizeCandidates(candidates, existingByTransaction = new Map()) {
     if (reason === 'missing_match_keys') counts.missingMatchKeys += 1;
     if (reason === 'missing_conversion_value') counts.missingConversionValue += 1;
     if (reason === 'missing_event_timestamp') counts.missingEventTimestamp += 1;
+    if (reason === 'internal_test') counts.internalTest += 1;
     if (!reason && !priorReason) counts.eligible += 1;
     if (reason || priorReason) counts.skipped += 1;
     return {
@@ -1161,6 +1292,9 @@ module.exports = {
     configurationFor,
     dedupeCandidatesByTransaction,
     destinationFor,
+    exclusionReason,
+    mergeFamilyContacts,
+    JUNK_LEAD_STATUSES,
     googleAddressParts,
     hashedUserData,
     mapCompletedJobCandidate,

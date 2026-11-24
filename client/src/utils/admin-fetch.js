@@ -18,6 +18,8 @@
 // DispatchPageV2. The dozens of other inline copies still work — they just
 // don't get the 429 grace path. Migrate as touched.
 
+import { countRequestWait } from '../lib/portalVersion';
+
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const MAX_RETRIES = 1;
 const DEFAULT_RETRY_MS = 2000;
@@ -87,8 +89,10 @@ export async function adminFetch(path, { redirectOn401 = true, ...options } = {}
       if (attempt < MAX_RETRIES) {
         const wait = parseRetryAfter(r.headers.get('Retry-After'));
         // 0–250ms jitter so 11 dashboard fetches don't synchronously
-        // re-fire on the exact same tick after the wait.
-        await delay(wait + Math.floor(Math.random() * 250));
+        // re-fire on the exact same tick after the wait. The wait counts as
+        // the request still on its way, so an out-of-date tab's reload waits
+        // for the retry (lib/portalVersion.js).
+        await countRequestWait(delay(wait + Math.floor(Math.random() * 250)), `${API_BASE}${path}`, options);
         attempt += 1;
         continue;
       }

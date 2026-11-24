@@ -1,7 +1,8 @@
 /**
- * The Pest Insider writer is grounded in the email fact register: the
- * verified facts are part of its system prompt, the weekly flagship's prompt
- * is unchanged, and a draft that cannot load its facts is never written.
+ * The draft writer and the email fact register: the weekly flagship's prompt
+ * carries the live verified facts and still drafts without them, and the
+ * writer refuses a Waves Pest Insider issue (services/pest-insider builds
+ * those) before any facts load or paid call.
  */
 const mockDispatch = jest.fn();
 const mockFactsBlock = jest.fn();
@@ -15,7 +16,7 @@ jest.mock('../services/email-division/fact-register', () => ({
 }));
 
 const db = require('../models/db');
-const { createNewsletterDraft } = require('../services/newsletter-draft');
+const { createNewsletterDraft, persistNewsletterDraft } = require('../services/newsletter-draft');
 
 const STOP = new Error('stop after the prompt is built');
 
@@ -33,19 +34,7 @@ beforeEach(() => {
   mockFactsBlock.mockResolvedValue('\n\nVERIFIED FACTS — test marker');
 });
 
-describe('Pest Insider draft grounding', () => {
-  test('the verified facts are part of the Pest Insider system prompt', async () => {
-    await expect(createNewsletterDraft({
-      prompt: 'Monthly Pest Insider for September.',
-      newsletterType: 'pest-insider-monthly',
-    })).rejects.toBe(STOP);
-
-    expect(mockFactsBlock).toHaveBeenCalledTimes(1);
-    const [, args] = mockDispatch.mock.calls[0];
-    expect(args.system).toContain('You write "Pest Insider"');
-    expect(args.system.endsWith('VERIFIED FACTS — test marker')).toBe(true);
-  });
-
+describe('draft writer grounding', () => {
   test('the weekly flagship gets the same live facts block (codex round 14 P1)', async () => {
     await expect(createNewsletterDraft({
       prompt: 'Weekend events for Bradenton.',
@@ -68,14 +57,30 @@ describe('Pest Insider draft grounding', () => {
     expect(args.system).toContain('SWFL SEASONAL CONTEXT');
   });
 
-  test('a draft that cannot load its facts is never sent to the writer', async () => {
-    mockFactsBlock.mockRejectedValue(new Error('fact register is empty: no verified facts to ground the draft'));
-
+  test.each([
+    ['saved', {}],
+    ['not saved', { persist: false }],
+  ])('a Waves Pest Insider draft (%s) is refused before any facts load or paid writer call', async (_label, extra) => {
     await expect(createNewsletterDraft({
-      prompt: 'Monthly Pest Insider for September.',
+      prompt: 'Waves Pest Insider for September.',
       newsletterType: 'pest-insider-monthly',
-    })).rejects.toThrow(/fact register is empty/);
+      ...extra,
+    })).rejects.toThrow(/built by its planner/);
 
+    expect(mockFactsBlock).not.toHaveBeenCalled();
     expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test('the draft writer refuses a Waves Pest Insider issue: it saves no planned audience, and the sender sends none without one', async () => {
+    const knex = jest.fn();
+
+    await expect(persistNewsletterDraft({
+      draft: { subject: 'Waves Pest Insider', htmlBody: '<p>Body</p>', textBody: 'Body' },
+      prompt: 'Pest Insider.',
+      newsletterType: 'pest-insider-monthly',
+      knex,
+    })).rejects.toThrow(/planned audience/);
+
+    expect(knex).not.toHaveBeenCalled();
   });
 });

@@ -15,8 +15,9 @@
  *     (+ `r_organization_social` to read/verify). NOT `w_member_social` (that's
  *     personal-profile posting).
  *   - Posts API body shape (`/rest/posts`) — `author`, `commentary`, `visibility`,
- *     `distribution`, `lifecycleState`. Image posts need the separate Images API
- *     (register-upload → asset URN); deferred — text + article-link only for now.
+ *     `distribution`, `lifecycleState`. Pictures go through the Images API
+ *     (initializeUpload → urn:li:image): the article thumbnail on a link post,
+ *     or `content.media` on a post with no link.
  *   - Refresh tokens are only issued to LinkedIn-approved apps. If none is
  *     returned, access tokens last ~60 days and the admin must re-authorize.
  *
@@ -27,6 +28,7 @@
 const logger = require('./logger');
 const db = require('../models/db');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { linkedinArticleCard } = require('./linkedin-article');
 
 const TOKEN_KEY = 'linkedin.oauth_tokens';
 const AUTH_BASE = 'https://www.linkedin.com/oauth/v2/authorization';
@@ -383,6 +385,9 @@ class LinkedInService {
     try {
       const u = new URL(String(imageUrl));
       if (u.protocol !== 'https:') return false;
+      // userinfo never belongs on our image hosts, and Node's fetch rejects it
+      // with an error that quotes the whole URL (credentials included).
+      if (u.username || u.password) return false;
       const host = u.hostname.toLowerCase();
       const cdn = String(process.env.SOCIAL_MEDIA_CDN_DOMAIN || '').toLowerCase();
       return (!!cdn && host === cdn)
@@ -399,9 +404,11 @@ class LinkedInService {
   // renders with no picture at all. Throws on any failure — the createPost
   // call site treats the thumbnail as best-effort and never lets it block the
   // post.
+  // Errors name the failure and status, never the caller-supplied URL: the
+  // callers log err.message, and an admin-supplied URL can carry a token.
   async _uploadImageFromUrl(imageUrl, token) {
     if (!this._isTrustedImageUrl(imageUrl)) {
-      throw new Error(`untrusted thumbnail URL host: ${String(imageUrl).slice(0, 120)}`);
+      throw new Error('untrusted thumbnail URL host');
     }
     const owner = `urn:li:organization:${this.companyId}`;
     const initRes = await fetch(`${IMAGES_URL}?action=initializeUpload`, {
@@ -434,10 +441,10 @@ class LinkedInService {
     let bytes;
     try {
       const imgRes = await fetch(imageUrl, { signal: controller.signal, redirect: 'error' });
-      if (!imgRes.ok) throw new Error(`thumbnail image fetch ${imgRes.status} for ${imageUrl}`);
+      if (!imgRes.ok) throw new Error(`thumbnail image fetch ${imgRes.status}`);
       const declared = Number(imgRes.headers?.get?.('content-length') || 0);
       if (declared > MAX_THUMBNAIL_BYTES) {
-        throw new Error(`thumbnail too large (${declared} bytes declared) for ${imageUrl}`);
+        throw new Error(`thumbnail too large (${declared} bytes declared)`);
       }
       // Enforce the byte cap DURING the read — a body that omits or
       // underreports Content-Length must not buffer past the cap before the
@@ -452,7 +459,7 @@ class LinkedInService {
           total += value.length;
           if (total > MAX_THUMBNAIL_BYTES) {
             controller.abort();
-            throw new Error(`thumbnail exceeds ${MAX_THUMBNAIL_BYTES} bytes mid-read for ${imageUrl}`);
+            throw new Error(`thumbnail exceeds ${MAX_THUMBNAIL_BYTES} bytes mid-read`);
           }
           chunks.push(Buffer.from(value));
         }
@@ -465,9 +472,9 @@ class LinkedInService {
     } finally {
       clearTimeout(timeout);
     }
-    if (!bytes.length) throw new Error(`thumbnail image fetch returned empty body for ${imageUrl}`);
+    if (!bytes.length) throw new Error('thumbnail image fetch returned empty body');
     if (bytes.length > MAX_THUMBNAIL_BYTES) {
-      throw new Error(`thumbnail too large (${bytes.length} bytes) for ${imageUrl}`);
+      throw new Error(`thumbnail too large (${bytes.length} bytes)`);
     }
 
     // ALWAYS re-encode to a clean JPEG before the PUT, for two reasons:
@@ -544,10 +551,8 @@ class LinkedInService {
       lifecycleState: 'PUBLISHED',
       isReshareDisabledByAuthor: false,
     };
-    if (link) {
-      const article = { source: link, title: String(title || '').slice(0, 200) || link };
-      const desc = String(description || '').trim();
-      if (desc) article.description = desc.slice(0, 300);
+    const article = linkedinArticleCard({ link, title, description });
+    if (article) {
       // Best-effort thumbnail: a failed upload logs and posts without a
       // picture rather than dropping the share entirely.
       if (imageUrl) {
@@ -558,6 +563,17 @@ class LinkedInService {
         }
       }
       body.content = { article };
+    } else if (imageUrl) {
+      // No link means no article card, so the picture goes out as a
+      // single-image post (content.media). Before this, every link-less post
+      // (the studio's daily campaign card) reached LinkedIn as bare text
+      // although Google Business got the same picture. Same best-effort rule
+      // as the thumbnail: a failed upload posts the text alone.
+      try {
+        body.content = { media: { id: await this._uploadImageFromUrl(imageUrl, token) } };
+      } catch (err) {
+        logger.warn(`[linkedin] image upload failed (posting text only): ${err.message}`);
+      }
     }
 
     const res = await fetch(POSTS_URL, {
@@ -575,10 +591,12 @@ class LinkedInService {
     }
     const postId = res.headers.get('x-restli-id') || res.headers.get('x-linkedin-id') || null;
     logger.info(`[linkedin] company post created: ${postId}`);
-    // imageUrl is present ONLY when the thumbnail upload succeeded — a
-    // best-effort miss posts without a picture, and consumers (studio
-    // legacy-card alert) must not assume the image shipped.
-    return { platform: 'linkedin', postId, success: true, ...(body.content?.article?.thumbnail ? { imageUrl } : {}) };
+    // imageUrl is present ONLY when the picture upload succeeded (article
+    // thumbnail or single-image media) — a best-effort miss posts without a
+    // picture, and consumers (studio legacy-card alert) must not assume the
+    // image shipped.
+    const pictureShipped = !!(body.content?.article?.thumbnail || body.content?.media?.id);
+    return { platform: 'linkedin', postId, success: true, ...(pictureShipped ? { imageUrl } : {}) };
   }
 }
 

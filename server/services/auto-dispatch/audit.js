@@ -229,7 +229,7 @@ const NEW_NOTICES_PER_RUN = 10;
 // auto-dispatch never adds to a day those jobs already filled. The watchdog
 // itself is not reduced: its pages (unpriced series, prepay cover) outrank a
 // pin notice, and its counter lives in one run of another process.
-const WATCHDOG_BELL_KEYS = ['unpriced-series:', 'lawn-email-gap:', 'prepay-coverage:', 'accepted-schedule:', 'churned-live-work:', 'combined-booking-check:'];
+const WATCHDOG_BELL_KEYS = ['unpriced-series:', 'lawn-email-gap:', 'prepay-coverage:', 'accepted-schedule:', 'churned-live-work:', 'same-start-visits:', 'combined-booking-check:'];
 // The due-date notice ('recurring-dispatch:', flagUnplacedVisits' first loop)
 // is counted and NOT capped: it is for a recurring visit due soon (the cutoff in
 // flagUnplacedVisits) with no time, the time-critical field work the budget rule

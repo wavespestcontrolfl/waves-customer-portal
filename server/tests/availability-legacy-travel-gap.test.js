@@ -56,7 +56,7 @@ let DATE;
 const PALMETTO = { latitude: 27.545, longitude: -82.545 };
 const BRADENTON = { lat: 27.425, lng: -82.41 };
 
-const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SLOT_TRAVEL_BUFFER_MINUTES', 'GATE_DRIVE_TIME_CALIBRATION'];
+const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SLOT_TRAVEL_BUFFER_MINUTES'];
 const saved = {};
 beforeAll(() => {
   for (const k of ENV_KEYS) saved[k] = process.env[k];

@@ -363,6 +363,19 @@ describe('GET /pay/:token visit note', () => {
     expect(records.first).not.toHaveBeenCalled();
   });
 
+  test("a visit that carries the technician's own note shows none: the invoice kept the raw note it was billed with", async () => {
+    const reportNote = { v: 1, text: 'I treated the exterior perimeter and swept the lanai.', source: 'cleaned' };
+    for (const tech_notes of [REVIEWED, 'Gate code 4417. Treated perimeter.']) {
+      const records = chain({ first: { structured_notes: JSON.stringify({ reportNote }), service_data: null, completion_source: null } });
+      const { body } = await getPayPage(
+        invoiceData({ service_record_id: 'sr-1', tech_notes }),
+        { tables: { service_records: records } },
+      );
+      expect(body.service.techNotes).toBeNull();
+      expect(JSON.stringify(body)).not.toMatch(/4417|swept the lanai|knocked down webs/);
+    }
+  });
+
   test('a visit record that is gone, or another customer\'s, shows none', async () => {
     const { body } = await getPayPage(invoiceData({ service_record_id: 'sr-1', tech_notes: REVIEWED }));
     expect(body.service.techNotes).toBeNull();

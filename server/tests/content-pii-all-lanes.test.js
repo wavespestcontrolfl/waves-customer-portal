@@ -1,11 +1,10 @@
 /**
- * GATE_CONTENT_PII_ALL_LANES (security audit run 3, fix E).
+ * Body privacy on every content lane (security audit run 3, fix E).
  *   1. supporting-blog and refresh drafts get the body privacy hard check
  *      (phones, emails, names, street addresses), like city-service and
  *      customer-question; a failure holds the draft via hard_failures.
  *   2. The brief's customer_signal and the get_customer_questions tool stop
  *      passing the customer's own (regex-redacted) words to the agents.
- * Dark = byte-identical to before.
  */
 
 jest.mock('../models/db', () => jest.fn());
@@ -18,13 +17,6 @@ const { ContentBriefBuilder } = require('../services/content/content-brief-build
 const { executeBriefTool } = require('../services/content/agents/brief-driven-tools');
 const { WRITER_AGENT_CONFIG } = require('../services/content/agents/writer-agent-config');
 const { REFRESH_AGENT_CONFIG } = require('../services/content/agents/refresh-agent-config');
-
-const GATE = 'GATE_CONTENT_PII_ALL_LANES';
-const ORIGINAL = process.env[GATE];
-afterEach(() => {
-  if (ORIGINAL === undefined) delete process.env[GATE];
-  else process.env[GATE] = ORIGINAL;
-});
 
 const CLEAN = 'Termite swarmers show up after spring rain in Bradenton. Call Waves at (941) 318-7612 or email info@wavespestcontrol.com for a free inspection.';
 const LANES = [
@@ -41,20 +33,11 @@ const DIRTY = {
 const evalLane = (brief, body) => gate.evaluate({ body, frontmatter: {} }, brief, {});
 
 describe.each(LANES)('%s body privacy check', (_lane, brief) => {
-  test('dark: the check is a no-op, even on a dirty body', () => {
-    delete process.env[GATE];
-    const r = evalLane(brief, DIRTY['a customer street address']);
-    expect(r.checks.redaction_passed).toMatchObject({ ok: true, reason: 'content_pii_all_lanes_gate_dark' });
-    expect(r.hard_failures.map((f) => f.name)).not.toContain('redaction_passed');
-  });
-
-  test('live: a clean body with Waves contact lines passes the check', () => {
-    process.env[GATE] = 'true';
+  test('a clean body with Waves contact lines passes the check', () => {
     expect(evalLane(brief, CLEAN).checks.redaction_passed).toMatchObject({ ok: true });
   });
 
-  test.each(Object.entries(DIRTY))('live: %s holds the draft', (_label, body) => {
-    process.env[GATE] = 'true';
+  test.each(Object.entries(DIRTY))('%s holds the draft', (_label, body) => {
     const r = evalLane(brief, body);
     expect(r.checks.redaction_passed.ok).toBe(false);
     expect(r.hard_failures.map((f) => f.name)).toContain('redaction_passed');
@@ -63,11 +46,6 @@ describe.each(LANES)('%s body privacy check', (_lane, brief) => {
 
   test('the pass threshold does not move (weight 0)', () => {
     expect(gate.MIN_TOTAL_SCORES[brief.page_type]).toBe(brief.page_type === 'refresh' ? 47 : 51);
-  });
-
-  test('only the exact string "true" turns it on', () => {
-    process.env[GATE] = '1';
-    expect(evalLane(brief, DIRTY['a non-Waves email']).checks.redaction_passed.ok).toBe(true);
   });
 });
 
@@ -89,13 +67,7 @@ describe('brief customer_signal keeps the customer topic, not the customer words
     existingBriefVersions: 0,
   });
 
-  test('dark: unchanged, the example still rides along', () => {
-    delete process.env[GATE];
-    expect(compose().customer_signal.example_phrasing_anonymized).toBe('this is jane, is the spray safe for dogs');
-  });
-
-  test('live: no example, the topic and counts stay', () => {
-    process.env[GATE] = 'true';
+  test('no example, the topic and counts stay', () => {
     const cs = compose().customer_signal;
     expect(cs).not.toHaveProperty('example_phrasing_anonymized');
     expect(JSON.stringify(cs)).not.toMatch(/jane/);
@@ -110,15 +82,7 @@ describe('get_customer_questions tool', () => {
     return q;
   }
 
-  test('dark: still selects the example and confidence', async () => {
-    delete process.env[GATE];
-    const q = mockClusters([]);
-    await executeBriefTool('get_customer_questions', { city: 'Bradenton' });
-    expect(q.select.mock.calls[0][0]).toEqual(expect.arrayContaining(['example_phrasing_anonymized', 'redaction_confidence']));
-  });
-
-  test('live: the example and confidence are never selected, topics still are', async () => {
-    process.env[GATE] = 'true';
+  test('the example and confidence are never selected, topics still are', async () => {
     const q = mockClusters([{ topic: 'ants', normalized_question: 'How do I stop ants?', source_counts: '{"sms":2}' }]);
     const out = await executeBriefTool('get_customer_questions', { city: 'Bradenton', service: 'pest' });
     const cols = q.select.mock.calls[0][0];
@@ -154,31 +118,26 @@ describe.each(LANES)('%s public-entity exemptions', (_lane, brief) => {
     'a federal agency citation': 'Homeowners in Venice can read what the Federal Trade Commission said about ultrasonic pest devices.',
   };
 
-  test.each(Object.entries(PUBLIC))('live: %s passes the check', (_label, body) => {
-    process.env[GATE] = 'true';
+  test.each(Object.entries(PUBLIC))('%s passes the check', (_label, body) => {
     expect(evalLane(brief, body).checks.redaction_passed).toMatchObject({ ok: true });
   });
 
-  test('live: a customer name beside a public body still holds the draft', () => {
-    process.env[GATE] = 'true';
+  test('a customer name beside a public body still holds the draft', () => {
     const r = evalLane(brief, 'John Smith at 4867 Maple Street called the Homeowners Association about the ants.');
     expect(r.checks.redaction_passed.ok).toBe(false);
   });
 
-  test('live: a customer name in prose next to an approved competitor still holds the draft', () => {
-    process.env[GATE] = 'true';
+  test('a customer name in prose next to an approved competitor still holds the draft', () => {
     const r = evalLane(brief, 'My name is john smith and Truly Nolen never called me back.');
     expect(r.checks.redaction_passed.ok).toBe(false);
   });
 
-  test('live: a customer name after "and" next to a public body still holds the draft', () => {
-    process.env[GATE] = 'true';
+  test('a customer name after "and" next to a public body still holds the draft', () => {
     const r = evalLane(brief, 'The Homeowners Association and John Smith reported ants in the kitchen.');
     expect(r.checks.redaction_passed.ok).toBe(false);
   });
 
-  test('live: a customer name on the line after an approved public body still holds the draft', () => {
-    process.env[GATE] = 'true';
+  test('a customer name on the line after an approved public body still holds the draft', () => {
     const r = evalLane(brief, 'Data from the National Pest Management Association shows termite damage is common.\nJohn Smith called us about ants in Parrish.');
     expect(r.checks.redaction_passed.ok).toBe(false);
   });
@@ -187,25 +146,21 @@ describe.each(LANES)('%s public-entity exemptions', (_lane, brief) => {
     'Orkin John Smith reported ants in the kitchen last spring.',
     'Last spring John Smith Truly Nolen came out about the ants.',
     'The National Pest Management Association Mary Jones survey found termites in Parrish.',
-  ])('live: a customer name touching an approved name still holds the draft: %s', (body) => {
-    process.env[GATE] = 'true';
+  ])('a customer name touching an approved name still holds the draft: %s', (body) => {
     expect(evalLane(brief, body).checks.redaction_passed.ok).toBe(false);
   });
 
-  test('live: a customer address in a sentence naming an approved competitor still holds the draft', () => {
-    process.env[GATE] = 'true';
+  test('a customer address in a sentence naming an approved competitor still holds the draft', () => {
     const r = evalLane(brief, 'Truly Nolen treated the home at 4867 Maple Street in Bradenton last spring.');
     expect(r.checks.redaction_passed.ok).toBe(false);
   });
 
-  test('live: "The <surname> family" still holds the draft when the surname starts a competitor name', () => {
-    process.env[GATE] = 'true';
+  test('"The <surname> family" still holds the draft when the surname starts a competitor name', () => {
     const r = evalLane(brief, 'The Massey family in Parrish had ants in the kitchen again.');
     expect(r.checks.redaction_passed.ok).toBe(false);
   });
 
-  test('live: "The Penn family" still holds the draft (Penn State is listed only by its full name)', () => {
-    process.env[GATE] = 'true';
+  test('"The Penn family" still holds the draft (Penn State is listed only by its full name)', () => {
     const r = evalLane(brief, 'The Penn family in Parrish had ants in the kitchen again.');
     expect(r.checks.redaction_passed.ok).toBe(false);
   });
@@ -216,25 +171,22 @@ describe.each(LANES)('%s public-entity exemptions', (_lane, brief) => {
   test.each([
     'The Federal family in Venice called about rats.',
     'A homeowner named Carolina State called our Sarasota office.',
-  ])('live: a name that reads like part of a newly cited body still holds the draft: %s', (body) => {
-    process.env[GATE] = 'true';
+  ])('a name that reads like part of a newly cited body still holds the draft: %s', (body) => {
     expect(evalLane(brief, body).checks.redaction_passed.ok).toBe(false);
   });
 
-  test('live: a customer surname that matches a one-word competitor alias still holds the draft', () => {
-    process.env[GATE] = 'true';
+  test('a customer surname that matches a one-word competitor alias still holds the draft', () => {
     const r = evalLane(brief, 'John Massey reported ants in Parrish last spring.');
     expect(r.checks.redaction_passed.ok).toBe(false);
   });
 
-  test('live: the exemption does not reach the city-service lane check', () => {
-    process.env[GATE] = 'true';
+  test('the exemption does not reach the city-service lane check', () => {
     const r = gate.evaluate({ body: 'Truly Nolen offers pest control in Bradenton.', frontmatter: {} }, { page_type: 'city-service', action_type: 'create_or_refresh_city_service_page' }, {});
     expect(r.checks.redaction_passed).toBeDefined();
   });
 });
 
-// Pre-push audit r3 (P1): briefs saved BEFORE the gate flipped still hold the
+// Pre-push audit r3 (P1): briefs saved BEFORE the check shipped still hold the
 // customer's words; every read that hands a saved brief to an agent drops them.
 describe('saved briefs read back by agents', () => {
   const SAVED = {
@@ -250,15 +202,7 @@ describe('saved briefs read back by agents', () => {
     db.mockImplementation(() => q);
   }
 
-  test('dark: get_content_brief returns the saved example as before', async () => {
-    delete process.env[GATE];
-    mockBriefRow({ ...SAVED });
-    const out = await executeBriefTool('get_content_brief', { opportunity_id: 'opp-1' });
-    expect(out.customer_signal.example_phrasing_anonymized).toBe('my name is pat and the ants are back');
-  });
-
-  test('live: get_content_brief drops the saved example and confidence, keeps the topic', async () => {
-    process.env[GATE] = 'true';
+  test('get_content_brief drops the saved example and confidence, keeps the topic', async () => {
     mockBriefRow({ ...SAVED });
     const out = await executeBriefTool('get_content_brief', { opportunity_id: 'opp-1' });
     expect(out.customer_signal).not.toHaveProperty('example_phrasing_anonymized');
@@ -266,7 +210,7 @@ describe('saved briefs read back by agents', () => {
     expect(out.customer_signal).toMatchObject({ topic: 'ants', normalized_question: 'How do I stop ants?', total_count: 4 });
   });
 
-  test('live: the reviewed-run loader uses the same strip', () => {
+  test('the reviewed-run loader uses the same strip', () => {
     const src = require('fs').readFileSync(require.resolve('../services/content/autonomous-runner'), 'utf8');
     const loader = src.slice(src.indexOf('async _loadReviewedBrief(run) {'));
     expect(loader.slice(0, loader.indexOf('\n  }\n'))).toContain("require('./agents/brief-driven-tools').stripCustomerWords(out)");

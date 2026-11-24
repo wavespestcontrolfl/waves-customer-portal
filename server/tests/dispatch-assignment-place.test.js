@@ -7,6 +7,10 @@
  * passes place:true places (the Edit modal, visit-group moves and every other
  * service never do); an unassign is not placed; a throwing placement never
  * fails the assign.
+ *
+ * The same harness holds the `shiftHours` option (GATE_TECH_SHIFT_HOURS, D4): an
+ * automatic assignment asks the locked re-check to judge the row's own block
+ * against the technician's shift, and the write then pins that block.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../sockets', () => ({ getIo: jest.fn(() => null) }));
@@ -25,6 +29,7 @@ const path = require('path');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+const { assertAssignableTechnician } = require('../services/technician-eligibility');
 const arrivalRoute = require('../services/scheduling/arrival-route');
 const { assignDispatchJob } = require('../services/dispatch-assignment');
 
@@ -128,6 +133,52 @@ describe('assignDispatchJob place option', () => {
     expect(out).toMatchObject({ changed: true, job: UPDATED });
     expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('route boom'));
+  });
+});
+
+// The check itself (assertAssignableTechnician `hours`) has its cases in the technician-eligibility
+// suites; real rows and real concurrent edits are in tech-shift-hours-move-postgres.test.js.
+describe('assignDispatchJob shiftHours option', () => {
+  const BLOCK = { day: DAY, window_start: '10:00:00', window_end: '12:00:00', estimated_duration_minutes: 90 };
+  // The day read inside the assign returns the row's block; `modify` runs its callback, as knex does.
+  const withBlock = (block = BLOCK) => {
+    const chain = trx();
+    chain.first.mockImplementation(async (...args) => (args.length ? block : JOB));
+    chain.modify.mockImplementation((fn) => { fn(chain); return chain; });
+    return chain;
+  };
+  const lockedCheck = () => assertAssignableTechnician.mock.calls[1][1];
+  const pins = (chain) => chain.whereRaw.mock.calls.filter((c) => c[0] === '?? IS NOT DISTINCT FROM ?').map((c) => c[1]);
+  afterEach(() => { delete process.env.GATE_TECH_SHIFT_HOURS; });
+
+  test('gate on: the locked re-check gets the row\'s own block, and the write pins the hours and the length it judged', async () => {
+    process.env.GATE_TECH_SHIFT_HOURS = 'true';
+    const chain = withBlock();
+    await assign({ shiftHours: true });
+    // From 10:00 to the later of the stored end (12:00) and the start plus the stored length (11:30).
+    expect(lockedCheck()).toMatchObject({ conn: trx, date: DAY, hours: { startMin: 600, endMin: 720 } });
+    expect(pins(chain)).toEqual([['window_start', '10:00:00'], ['window_end', '12:00:00'], ['estimated_duration_minutes', 90]]);
+    // The first check, before the locks, judges no hours.
+    expect(assertAssignableTechnician.mock.calls[0][1].hours).toBeUndefined();
+  });
+
+  test('a row with no end and no length: the write pins them as empty', async () => {
+    process.env.GATE_TECH_SHIFT_HOURS = 'true';
+    const chain = withBlock({ day: DAY, window_start: '10:00:00', window_end: null });
+    await assign({ shiftHours: true });
+    expect(lockedCheck().hours).toEqual({ startMin: 600, endMin: 660 });
+    expect(pins(chain)).toEqual([['window_start', '10:00:00'], ['window_end', null], ['estimated_duration_minutes', null]]);
+  });
+
+  test.each([
+    ['not asked (the office, every other caller), gate on', {}, 'true'],
+    ['asked, gate off', { shiftHours: true }, null],
+  ])('%s: no hours are judged and nothing more is pinned', async (_label, extra, gate) => {
+    if (gate) process.env.GATE_TECH_SHIFT_HOURS = gate;
+    const chain = withBlock();
+    await assign(extra);
+    expect(lockedCheck().hours).toBeUndefined();
+    expect(pins(chain)).toEqual([]);
   });
 });
 

@@ -534,6 +534,143 @@ describe('POST /api/admin/estimates/:id/unarchive TOCTOU', () => {
     expect(writeBuilder.where).toHaveBeenCalledWith({ disposition: 'archived_unresolved' });
     expect(res.status).toHaveBeenCalledWith(409);
     expect(res.json).toHaveBeenCalledWith({ error: expect.stringContaining('changed while you were unarchiving') });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  // A customer's own plan quote (plan_restart / plan_start) that another quote
+  // of the same lineage replaced stays archived (#8132 pre-push r40): the mint
+  // archives what it replaces and stamps nothing else, so Unarchive put the
+  // older price back beside the live quote. The lineage read and the write
+  // share one transaction under the customer-comms lock, the mint's first lock.
+  describe('a customer plan quote that another quote replaced', () => {
+    const planQuote = (extra = {}) => ({
+      id: 'e1', customer_id: 'cust-1', source: 'plan_start', status: 'expired', archived_at: 'THEN', disposition: null, estimate_data: {}, ...extra,
+    });
+    const REVIVED = { id: 'e1', archived_at: null };
+
+    // owner: the row as the transaction reads it under the lock (default: unmoved).
+    // other: a lineage row that replaces this one. written: the guarded write's rows.
+    // fresh: the route's re-read after a write of zero rows.
+    async function unarchive(estimate, { owner, other = null, written = [REVIVED], fresh = null } = {}) {
+      const order = [];
+      const readBuilder = makeBuilder({ first: estimate });
+      const freshBuilder = makeBuilder({ first: fresh });
+      const writer = (via) => {
+        const builder = makeBuilder({});
+        builder.update = jest.fn(() => ({ returning: jest.fn(async () => { order.push(`write via ${via}`); return written; }) }));
+        return builder;
+      };
+      const dbWrite = writer('db');
+      const trxWrite = writer('trx');
+      const ownerRead = makeBuilder({});
+      ownerRead.first = jest.fn(async () => { order.push('owner read'); return owner === undefined ? { customer_id: estimate.customer_id, source: estimate.source } : owner; });
+      const lineage = makeBuilder({});
+      lineage.join = jest.fn(() => lineage);
+      lineage.first = jest.fn(async () => { order.push('lineage read'); return other; });
+      const trxEstimates = [ownerRead, trxWrite];
+      const trx = jest.fn((table) => (table === 'estimates as other' ? lineage : trxEstimates.shift()));
+      trx.raw = jest.fn(async (sql, bindings) => { order.push(`lock ${bindings[0]}`); });
+      db.transaction.mockImplementation(async (work) => work(trx));
+      const held = estimate.customer_id && ['plan_start', 'plan_restart'].includes(estimate.source) && estimate.status !== 'accepted';
+      db.mockImplementationOnce(() => readBuilder)
+        .mockImplementationOnce(() => (held ? freshBuilder : dbWrite))
+        .mockImplementationOnce(() => freshBuilder);
+      const res = makeRes();
+      const next = jest.fn();
+      await unarchiveHandler({ params: { id: 'e1' }, body: {} }, res, next);
+      expect(next).not.toHaveBeenCalled();
+      return { order, res, lineage, ownerRead, trx, dbWrite, trxWrite };
+    }
+
+    beforeEach(() => { db.transaction.mockReset(); });
+
+    test('is refused with a 409 that says why, and nothing is written', async () => {
+      for (const source of ['plan_start', 'plan_restart']) {
+        for (const status of ['sent', 'viewed', 'expired', 'declined']) {
+          db.mockReset();
+          const { order, res, lineage, ownerRead, trx, dbWrite, trxWrite } = await unarchive(planQuote({ source, status }), { other: { id: 'e2' } });
+          expect([source, status, order]).toEqual([source, status, ['lock customer-comms:cust-1', 'owner read', 'lineage read']]);
+          expect(trx.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['customer-comms:cust-1']);
+          expect(ownerRead.where).toHaveBeenCalledWith({ id: 'e1' });
+          // The lineage is read by the estimate's own id: another row that is newer by the stored
+          // (created_at, id), or still open. The SQL itself is proven in plan-quote-lineage.db.test.js.
+          expect(lineage.join).toHaveBeenCalledWith('estimates as old', expect.any(Function));
+          expect(lineage.where).toHaveBeenCalledWith('old.id', 'e1');
+          expect(lineage.whereRaw).toHaveBeenCalledWith(expect.stringContaining('(other.created_at, other.id) > (old.created_at, old.id)'));
+          expect(lineage.whereRaw).toHaveBeenCalledWith(expect.stringContaining("other.archived_at IS NULL AND other.status <> 'accepted'"));
+          expect(dbWrite.update).not.toHaveBeenCalled();
+          expect(trxWrite.update).not.toHaveBeenCalled();
+          expect(res.status).toHaveBeenCalledWith(409);
+          expect(res.json).toHaveBeenCalledWith({ error: expect.stringContaining('Another plan quote for this customer replaced this one') });
+        }
+      }
+    });
+
+    test('a quote that nothing replaced is unarchived inside that transaction, after the lock and both reads', async () => {
+      const { order, res, trxWrite, dbWrite } = await unarchive(planQuote({ source: 'plan_restart', status: 'viewed', disposition: 'archived_unresolved' }));
+      expect(order).toEqual(['lock customer-comms:cust-1', 'owner read', 'lineage read', 'write via trx']);
+      expect(dbWrite.update).not.toHaveBeenCalled();
+      // The same guarded write as any other estimate's, and it names the owner whose lock is held.
+      expect(trxWrite.where).toHaveBeenCalledWith({ id: 'e1', status: 'viewed', customer_id: 'cust-1' });
+      expect(trxWrite.whereNotNull).toHaveBeenCalledWith('archived_at');
+      expect(trxWrite.where).toHaveBeenCalledWith({ disposition: 'archived_unresolved' });
+      expect(trxWrite.update).toHaveBeenCalledWith(expect.objectContaining({ archived_at: null, disposition: null }));
+      expect(res.status).not.toHaveBeenCalled();
+      expect(res.json).toHaveBeenCalledWith(REVIVED);
+    });
+
+    test('a quote that a customer merge moved gets the retry message: the lock held is not its owner\'s', async () => {
+      const movedRows = [{ customer_id: 'cust-2', source: 'plan_start' }, { customer_id: 'cust-1', source: 'plan_restart' }, null];
+      for (const [at, owner] of movedRows.entries()) {
+        db.mockReset();
+        // Moved before the lock: no lineage read, no write. The answer is the transaction's own
+        // read: the re-read after it can show the first owner again.
+        const { order, res, trxWrite } = await unarchive(planQuote({ status: 'sent' }), { owner, other: null, fresh: { status: 'sent', archived_at: 'THEN', disposition: null, customer_id: at === 0 ? 'cust-1' : 'cust-2' } });
+        expect([at, order]).toEqual([at, ['lock customer-comms:cust-1', 'owner read']]);
+        expect(trxWrite.update).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(409);
+        expect(res.json).toHaveBeenCalledWith({ error: expect.stringContaining('changed while you were unarchiving') });
+      }
+      // Moved after the reads: the write names the owner, so it writes nothing.
+      db.mockReset();
+      const late = await unarchive(planQuote({ status: 'sent' }), { written: [], fresh: { status: 'sent', archived_at: 'THEN', disposition: null, customer_id: 'cust-2' } });
+      expect(late.order).toEqual(['lock customer-comms:cust-1', 'owner read', 'lineage read', 'write via trx']);
+      expect(late.res.status).toHaveBeenCalledWith(409);
+      expect(late.res.json).toHaveBeenCalledWith({ error: expect.stringContaining('changed while you were unarchiving') });
+    });
+
+    test('a row that changed state under the lock still gets the retry message, and a linkage marker its own', async () => {
+      const moved = await unarchive(planQuote({ status: 'sent' }), { written: [], fresh: { status: 'declined', archived_at: 'THEN', disposition: 'declined_price', customer_id: 'cust-1' } });
+      expect(moved.order).toEqual(['lock customer-comms:cust-1', 'owner read', 'lineage read', 'write via trx']);
+      expect(moved.res.status).toHaveBeenCalledWith(409);
+      expect(moved.res.json).toHaveBeenCalledWith({ error: expect.stringContaining('changed while you were unarchiving') });
+      db.mockReset();
+      const marked = await unarchive(planQuote({ status: 'sent' }), { written: [], fresh: { status: 'sent', archived_at: 'THEN', disposition: null, customer_id: 'cust-1' } });
+      expect(marked.res.status).toHaveBeenCalledWith(409);
+      expect(marked.res.json).toHaveBeenCalledWith({ error: expect.stringContaining('invalidated by a call-linkage correction') });
+    });
+
+    test('an accepted plan quote, a staff estimate and a quote with no customer are not held: no lock, no lineage read', async () => {
+      const notHeld = [
+        planQuote({ status: 'accepted' }),
+        planQuote({ source: 'plan_restart', status: 'accepted' }),
+        planQuote({ source: 'admin_estimator' }),
+        planQuote({ source: 'service_report_cta' }),
+        planQuote({ source: null }),
+        planQuote({ customer_id: null }),
+      ];
+      for (const [at, estimate] of notHeld.entries()) {
+        db.mockReset();
+        db.transaction.mockReset();
+        // Another lineage row would refuse it, were the lineage read.
+        const { order, res, dbWrite } = await unarchive(estimate, { other: { id: 'e2' } });
+        expect([at, order]).toEqual([at, ['write via db']]);
+        expect(db.transaction).not.toHaveBeenCalled();
+        // The write as before this check: it names no owner.
+        expect(dbWrite.where).toHaveBeenCalledWith({ id: 'e1', status: estimate.status });
+        expect(res.json).toHaveBeenCalledWith(REVIVED);
+      }
+    });
   });
 });
 

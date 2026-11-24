@@ -2095,6 +2095,54 @@ describe('commercial Auto Pay payment term', () => {
   });
 });
 
+describe('a customer\'s own plan quote takes no staff delivery option (codex pre-push r29 on #8132)', () => {
+  test.each([
+    ['plan_restart', 'showOneTimeOption'], ['plan_restart', 'billByInvoice'],
+    ['plan_start', 'showOneTimeOption'], ['plan_start', 'billByInvoice'],
+  ])('a %s quote refuses %s ON with the revise refusal, before any write', async (source, option) => {
+    row.status = 'sent';
+    row.source = source;
+    const response = await invoke('/:id', 'patch', { [option]: true });
+    expect(response.statusCode).toBe(409);
+    expect(response.body.error).toBe(require('../services/admin-estimate-persistence').selfServeMintEditRefusal({ source }));
+    expect(response.body.error).toMatch(/cannot be edited in place/);
+    expect(mutations).toEqual([]);
+  });
+
+  // Turning one back OFF would make a quote the page already refused acceptable again on the same estimate, where a
+  // card that tab captured and dropped could be replayed (tenth pre-push audit). Such a quote is replaced instead.
+  test.each([
+    ['plan_restart', 'showOneTimeOption', 'show_one_time_option'], ['plan_restart', 'billByInvoice', 'bill_by_invoice'],
+    ['plan_start', 'showOneTimeOption', 'show_one_time_option'], ['plan_start', 'billByInvoice', 'bill_by_invoice'],
+  ])('a %s quote refuses %s OFF too: an option already on stays on, with no write', async (source, option, column) => {
+    row.status = 'sent';
+    row.source = source;
+    row[column] = true;
+    const response = await invoke('/:id', 'patch', { [option]: false });
+    expect(response.statusCode).toBe(409);
+    expect(response.body.error).toBe(require('../services/admin-estimate-persistence').selfServeMintEditRefusal({ source }));
+    expect(mutations).toEqual([]);
+    expect(row[column]).toBe(true);
+  });
+
+  test('a staff estimate still turns an option OFF', async () => {
+    row.status = 'sent';
+    row.source = 'admin';
+    row.bill_by_invoice = true;
+    const response = await invoke('/:id', 'patch', { billByInvoice: false });
+    expect(response.body).toEqual({ success: true });
+    expect(row.bill_by_invoice).toBe(false);
+  });
+
+  test('a staff estimate still turns an option on', async () => {
+    row.status = 'sent';
+    row.source = 'admin';
+    const response = await invoke('/:id', 'patch', { showOneTimeOption: true });
+    expect(response.body).toEqual({ success: true });
+    expect(row.show_one_time_option).toBe(true);
+  });
+});
+
 describe('reviewed multi-property offer revisions', () => {
   test.each(['showOneTimeOption', 'billByInvoice'])('%s cannot change on a sent sibling while another property is being sent', async (option) => {
     row.status = 'sent';
@@ -2774,6 +2822,126 @@ describe('delivery email monthly average', () => {
       const smtp = await router.sendEstimateNow(structuredClone(row), 'email', { reviewedMessages: { sms: null, email: { provider: 'smtp' } } }).catch((e) => e);
       expect(smtp?.code).not.toBe('ESTIMATE_REVIEW_STALE');
     });
+  });
+});
+
+describe('delivery email "no visit needed" line: a reviewed or scheduled send keeps the reviewed line', () => {
+  const featureGates = require('../config/feature-gates');
+  const averageService = require('../services/estimate-monthly-average');
+  const noVisit = require('../services/estimate-no-visit-line');
+  const LINE = noVisit.NO_VISIT_QUOTE_LINE;
+  const reviewed = (record = {}) => ({ sms: null, email: { provider: 'sendgrid', ...record } });
+  const sentPayload = () => email.sendTemplate.mock.calls.at(-1)[0].payload;
+  // The file's template shows nothing of the line (as the updated-estimate email does not). These tests use one
+  // with the paragraph: the line shows when the payload carries it.
+  const plainRender = email.renderTemplate.getMockImplementation();
+  const renderWithParagraph = ({ payload }) => ({
+    subject: 'Synthetic estimate message',
+    text: [payload.price_summary, payload.estimate_no_visit_line, payload.estimate_url].filter(Boolean).join('\n'),
+    html: '<p>Synthetic estimate message</p>',
+  });
+  let current;
+  beforeEach(() => {
+    current = LINE;
+    featureGates.isEnabled.mockImplementation(() => false);
+    email.renderTemplate.mockImplementation(renderWithParagraph);
+    jest.spyOn(noVisit, 'noVisitLineFor').mockImplementation(() => current);
+    jest.spyOn(averageService, 'emailAverageParts').mockResolvedValue(null);
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    email.renderTemplate.mockImplementation(plainRender);
+    featureGates.isEnabled.mockImplementation(() => false);
+  });
+
+  test('the review records the line its email shows, and an email with no line leaves no key', async () => {
+    expect((await invoke('/:id/send-preview', 'get')).body.messages.email.noVisitLine).toBe(LINE);
+    current = '';
+    expect((await invoke('/:id/send-preview', 'get')).body.messages.email).not.toHaveProperty('noVisitLine');
+  });
+
+  test.each([
+    ['the subject', ({ payload }) => ({ subject: `Your estimate. ${payload.estimate_no_visit_line || ''}`, text: payload.estimate_url, html: '<p>Synthetic</p>' })],
+    ['the preview text', ({ payload }) => ({ subject: 'Synthetic', previewText: payload.estimate_no_visit_line || '', text: payload.estimate_url, html: '<p>Synthetic</p>' })],
+    ['the HTML', ({ payload }) => ({ subject: 'Synthetic', text: payload.estimate_url, html: `<p>${payload.estimate_no_visit_line || ''}</p>` })],
+  ])('a template that shows the line only in %s still records it', async (_where, render) => {
+    email.renderTemplate.mockImplementation(render);
+    expect((await invoke('/:id/send-preview', 'get')).body.messages.email.noVisitLine).toBe(LINE);
+  });
+
+  test('an email the line does not change records none, so a later change of the estimate cannot refuse the send', async () => {
+    // The updated-estimate email, a template an admin rewrote, a row the renderer drops: the row gets the line and
+    // the rendered email is the same with it and without it.
+    email.renderTemplate.mockImplementation(plainRender);
+    const preview = await invoke('/:id/send-preview', 'get');
+    expect(preview.body.messages.email).not.toHaveProperty('noVisitLine');
+    current = ''; // the estimate is made commercial before the scheduled send
+    const result = await router.sendEstimateNow(structuredClone(row), 'both', {
+      callerPreClaimed: false, reviewedMessages: { sms: 'x', email: preview.body.messages.email },
+    });
+    expect(result.channels.email.ok).toBe(true);
+    expect(result.channels.sms.ok).toBe(true);
+    expect(sentPayload()).not.toHaveProperty('estimate_no_visit_line');
+  });
+
+  test('a reviewed line that still fits the estimate sends', async () => {
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: false, reviewedMessages: reviewed({ noVisitLine: LINE }) });
+    expect(result.channels.email.ok).toBe(true);
+    expect(sentPayload().estimate_no_visit_line).toBe(LINE);
+  });
+
+  test('the estimate was made commercial after the review: stale, and neither channel sends', async () => {
+    current = '';
+    await expect(router.sendEstimateNow(structuredClone(row), 'both', {
+      callerPreClaimed: false, reviewedMessages: { sms: 'x', email: { provider: 'sendgrid', noVisitLine: LINE } },
+    })).rejects.toMatchObject({ statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a change between the claim and the email build fails the email only, and the message does not say the text was held', async () => {
+    // Call 1 is the check in the claim, call 2 the email build: the estimate changes in between, after the text.
+    noVisit.noVisitLineFor.mockReset();
+    noVisit.noVisitLineFor.mockReturnValueOnce(LINE).mockReturnValue('');
+    let result;
+    let thrown;
+    try {
+      result = await router.sendEstimateNow(structuredClone(row), 'both', {
+        callerPreClaimed: false, reviewedMessages: { sms: 'x', email: { provider: 'sendgrid', noVisitLine: LINE } },
+      });
+    } catch (err) { thrown = err; }
+    expect(noVisit.noVisitLineFor).toHaveBeenCalledTimes(2);
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+    const channels = result?.channels || thrown?.channels || thrown?.result?.channels;
+    expect(channels.sms.ok).toBe(true);
+    expect(channels.email).toMatchObject({ ok: false, error: 'The estimate changed after its email was reviewed, so the email was not sent. Review the current version, then send the email.' });
+    expect(channels.email.error).not.toContain('nothing was sent');
+    expect(channels.email.uncertain).toBeFalsy();
+  });
+
+  test('a review with no recorded line sends without one, though the row would now get it', async () => {
+    // A schedule made before the line existed: its pinned template version has no paragraph for it.
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: false, reviewedMessages: reviewed() });
+    expect(result.channels.email.ok).toBe(true);
+    expect(sentPayload()).not.toHaveProperty('estimate_no_visit_line');
+  });
+
+  test('an unreviewed send carries the line the row reads at the send', async () => {
+    await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(sentPayload().estimate_no_visit_line).toBe(LINE);
+    row.status = 'sending';
+    current = '';
+    await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(sentPayload()).not.toHaveProperty('estimate_no_visit_line');
+  });
+
+  test('a text-only send and an SMTP review are never stale on the line', async () => {
+    current = '';
+    const textOnly = await router.sendEstimateNow(structuredClone(row), 'sms', { reviewedMessages: { sms: 'x', email: { provider: 'sendgrid', noVisitLine: LINE } } });
+    expect(textOnly.channels.sms.ok).toBe(true);
+    row.status = 'sending';
+    const smtp = await router.sendEstimateNow(structuredClone(row), 'email', { reviewedMessages: { sms: null, email: { provider: 'smtp', noVisitLine: LINE } } }).catch((e) => e);
+    expect(smtp?.code).not.toBe('ESTIMATE_REVIEW_STALE');
   });
 });
 

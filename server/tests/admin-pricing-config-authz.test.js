@@ -386,6 +386,41 @@ describe.each(['/estimate', '/quick-quote'])('%s replay authority', (path) => {
   });
 });
 
+describe('POST /estimate with a whole-home exclusion (GATE_EXCLUSION_WHOLE_HOME)', () => {
+  const body = {
+    homeSqFt: 2000, lotSqFt: 8000, stories: 1,
+    services: { exclusion: { pricingVersion: 'v2', standardWireMeshPoints: 2, sealScope: 'whole_home' } },
+  };
+  const post = (extra = {}) => withServer((baseUrl) => call(baseUrl, 'POST', '/estimate', { role: 'admin', body: { ...body, ...extra } }));
+  const withGate = async (value, fn) => {
+    const prior = process.env.GATE_EXCLUSION_WHOLE_HOME;
+    if (value === undefined) delete process.env.GATE_EXCLUSION_WHOLE_HOME; else process.env.GATE_EXCLUSION_WHOLE_HOME = value;
+    try { return await fn(); } finally {
+      if (prior === undefined) delete process.env.GATE_EXCLUSION_WHOLE_HOME; else process.env.GATE_EXCLUSION_WHOLE_HOME = prior;
+    }
+  };
+
+  test('gate off: refused with a 400, even when the body claims a saved-estimate replay', async () => {
+    await withGate(undefined, async () => {
+      for (const extra of [{}, { savedEstimateReplay: true }]) {
+        const res = await post(extra);
+        expect(res.status).toBe(400);
+        expect(res.json.error).toMatch(/Choose Spot seal/);
+      }
+    });
+  });
+
+  test('gate on: priced as a whole-home seal', async () => {
+    await withGate('true', async () => {
+      const res = await post();
+      expect(res.status).toBe(200);
+      const rows = res.json.estimate.lineItems.filter((li) => li.service === 'rodent_exclusion');
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.every((li) => li.includesReentryGuarantee === true)).toBe(true);
+    });
+  });
+});
+
 const BAHIA_REPLAY_CLAIM = {
   homeSqFt: 1800, lotSqFt: 8783, stories: 1, estimatedTurfSf: 4500,
   services: { lawn: { track: 'bahia', tier: 'enhanced' } },
@@ -799,11 +834,12 @@ describe('/margin-check — honors the requested tier, costs are fully allocated
       const res = await call(baseUrl, 'POST', '/margin-check', { role: 'admin', body: { waveguardTier: 'bronze' } });
       const pest = res.json.services.find((s) => /pest/i.test(s.service));
       expect(pest).toBeDefined();
-      // Fallback COGS for quarterly pest: (labor 20min + material 6.67 +
-      // drive 20min) × 4 visits, PLUS the per-service-line admin allocation.
+      // Fallback COGS for quarterly pest: (labor 20min + material 6.34, the
+      // engine's figure on the Crosscheck Plus bottle + drive 20min) × 4 visits,
+      // PLUS the per-service-line admin allocation.
       const laborPerVisit = (GLOBAL.LABOR_RATE * 20) / 60;
       const drivePerVisit = (GLOBAL.LABOR_RATE * GLOBAL.DRIVE_TIME) / 60;
-      const expected = Math.round((laborPerVisit + 6.67 + drivePerVisit) * 4 + GLOBAL.ADMIN_ANNUAL);
+      const expected = Math.round((laborPerVisit + 6.34 + drivePerVisit) * 4 + GLOBAL.ADMIN_ANNUAL);
       expect(pest.estimatedCost).toBe(expected);
     });
   });

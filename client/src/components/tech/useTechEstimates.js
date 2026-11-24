@@ -1,5 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { getAdminAuthToken } from '../../lib/adminAuth';
+import { registerReloadHold } from '../../lib/reloadHolds';
 
 // The client's API base (utils/admin-fetch.js, utils/api.js, FieldLeadModal.jsx): it already ends in /api.
 const API = import.meta.env.VITE_API_URL || '/api';
@@ -26,6 +27,9 @@ export async function techEstimateRequest(path, { method = 'GET', body } = {}) {
 // Each lock keeps the words of the outcome that set it ({ text, ok }), so a view he comes to later can still say why
 // there is no Send button: he may have left the first view while the text was still going out.
 const sendLocks = new Map();
+// A reload would clear the locks and show Send again, so they hold an automatic
+// reload of an out-of-date tab.
+registerReloadHold('estimate-send', () => sendLocks.size > 0);
 const lockListeners = new Set();
 let lockVersion = 0;
 const lockChanged = () => { lockVersion += 1; lockListeners.forEach((listener) => listener()); };

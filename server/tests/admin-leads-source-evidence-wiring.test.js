@@ -18,6 +18,12 @@ describe('admin leads source evidence contract', () => {
     expect(source.slice(orderAt, limitAt)).toContain(".orderBy('leads.id', 'asc')");
   });
 
+  test('list and detail join the initiating call that the website-only-line rule reads', () => {
+    const join = ".leftJoin('call_log as lead_call', 'lead_call.twilio_call_sid', 'leads.twilio_call_sid')";
+    expect(source.split(join)).toHaveLength(3);
+    expect(source.split("'lead_call.to_phone as call_dialed_phone'")).toHaveLength(3);
+  });
+
   test('received aliases preserve the established first_contact_at sort', () => {
     expect(source).toMatch(/received:\s*'leads\.first_contact_at'/);
     expect(source).toMatch(/received_at:\s*'leads\.first_contact_at'/);

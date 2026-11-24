@@ -62,6 +62,11 @@ const { NOT_EXPLICITLY_UNLINKED_SQL } = require('../../utils/call-link-override'
 const SOURCE_TYPE_ATTRIBUTION = {
   google_ads:      { leadSource: 'google_ads',      isPaid: true },
   facebook:        { leadSource: 'facebook',        isPaid: true },
+  // Google Local Services Ads (owner 2026-11-23, "setup google lsa tracking"):
+  // a tracking number used ONLY as the Local Services profile phone. Google
+  // charges each Local Services call as a lead, so it is paid. The channel key
+  // is the one the daily Local Services sync (ads/google-lsa.js) writes cost to.
+  google_lsa:      { leadSource: 'google_lsa',      isPaid: true },
   facebook_organic:{ leadSource: 'facebook_organic',isPaid: false },
   spoke_site:      { leadSource: 'domain_website',  isPaid: false },
   main_site:       { leadSource: 'waves_website',   isPaid: false },
@@ -1798,4 +1803,6 @@ module.exports = {
   reconcileMovedCallAttributionRow,
   sweepPendingAttributionTransfers,
   _private: { resolveCampaignId, SOURCE_TYPE_ATTRIBUTION, callCarriesDurableLeadEvidence },
+  // The LSA relabel (google-lsa-leads.js) re-proves its call with the same check.
+  resolveSourceCallProvenanceLocked,
 };

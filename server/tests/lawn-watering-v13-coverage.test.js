@@ -9,7 +9,11 @@ const v13 = require('../config/lawn-protocol-v13.json');
 const FIXTURE_RULES = require('./fixtures/lawn-watering-rules-v13-2026-10-22.json');
 // LESCO Crosscheck Plus (the house bifenthrin since owner ruling 2026-11-18) got its rule in 20261027190000, after the fixture was cut.
 const crosscheckFill = require('../models/migrations/20261027190000_watering_rule_lawn_label_pass_2').FILL.find((item) => item.name === 'LESCO Crosscheck Plus');
-const RULES = { ...FIXTURE_RULES, 'LESCO Crosscheck Plus': crosscheckFill.rule };
+// LESCO Stonewall 0.37% 18-0-10 (the October bag since owner ruling 2026-11-21) has its rule from 20261022120000; the fixture holds only the
+// products the program named on the day it was cut.
+const BAG = 'LESCO Stonewall 0.37% 18-0-10';
+const bagFill = require('../models/migrations/20261022120000_watering_rule_lawn_label_pass').FILL.find((item) => item.name === BAG);
+const RULES = { ...FIXTURE_RULES, 'LESCO Crosscheck Plus': crosscheckFill.rule, [BAG]: bagFill.rule };
 const { validateRule, rulesForTargets } = require('../services/service-report/lawn-watering-rule');
 const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
 const { V13_TROUBLE_PRODUCT_SWAPS } = require('../config/lawn-v13-trouble-product-swaps');

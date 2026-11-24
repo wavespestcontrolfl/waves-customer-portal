@@ -23,7 +23,8 @@ export const SERVICE_LINES = [
   { key: "general", label: "General pest" },
   { key: "mosquito", label: "Mosquito" },
   { key: "lawn", label: "Lawn / tree & shrub" },
-  { key: "rodent", label: "Rodent" },
+  { key: "rodent", label: "Rodent trapping & bait" },
+  { key: "exclusion", label: "Rodent exclusion & inspection" },
   { key: "termite", label: "Termite / WDO" },
 ];
 

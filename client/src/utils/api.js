@@ -504,8 +504,13 @@ export class ApiClient {
   // shape (an Error with .status/.code/.message) so VisitPrepPhotoForm's
   // onSubmit contract (status 404 -> "gone", 409 -> "full", etc.) works
   // unchanged for this caller too.
-  async sendVisitPrepPhotos(scheduledServiceId, formData) {
-    const response = await this.fetchRaw(`${API_BASE}/schedule/${scheduledServiceId}/prep-photos`, {
+  sendVisitPrepPhotos(scheduledServiceId, formData) {
+    return this.postForm(`/schedule/${scheduledServiceId}/prep-photos`, formData);
+  }
+
+  // A multipart POST with request()'s error shape (.status / .code / .message).
+  async postForm(path, formData) {
+    const response = await this.fetchRaw(`${API_BASE}${path}`, {
       method: 'POST',
       body: formData,
     });
@@ -690,7 +695,15 @@ export class ApiClient {
   }
 
   // requestId is made once per draft; a retry with it returns the same saved message.
-  sendPortalMessage(body, requestId) {
+  // With photos (image Files) the message goes as a multipart form.
+  sendPortalMessage(body, requestId, photos = []) {
+    if (photos.length) {
+      const form = new FormData();
+      form.append('body', body);
+      form.append('requestId', requestId);
+      for (const photo of photos) form.append('photos', photo);
+      return this.postForm('/portal-messages', form);
+    }
     return this.request('/portal-messages', {
       method: 'POST',
       body: JSON.stringify({ body, requestId }),
@@ -753,6 +766,13 @@ export class ApiClient {
   // a normal estimate at today's price and answers { url } to open it.
   restartPlan() {
     return this.request('/requests/restart-plan', { method: 'POST', body: '{}' });
+  }
+
+  // GATE_PORTAL_PLAN_START: a customer with no recurring plan taps the priced option on the
+  // pricing card — the server mints a normal estimate for that option and answers { url }.
+  // `shown` = every amount the card displayed; the server refuses if any changed.
+  startPlan({ serviceKey, optionId, shown }) {
+    return this.request('/requests/start-plan', { method: 'POST', body: JSON.stringify({ serviceKey, optionId, shown }) });
   }
 
   queryCustomerPricing(prompt, targetTier) {

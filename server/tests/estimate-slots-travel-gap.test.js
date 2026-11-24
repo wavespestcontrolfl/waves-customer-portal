@@ -18,7 +18,7 @@ const db = require('../models/db');
 const estimateSlotAvailability = require('../services/estimate-slot-availability');
 const { filterCollidingSlots } = estimateSlotAvailability._internals;
 
-const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SLOT_TRAVEL_BUFFER_MINUTES', 'GATE_DRIVE_TIME_CALIBRATION'];
+const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SLOT_TRAVEL_BUFFER_MINUTES'];
 const saved = {};
 beforeAll(() => { for (const k of ENV_KEYS) saved[k] = process.env[k]; });
 beforeEach(() => {

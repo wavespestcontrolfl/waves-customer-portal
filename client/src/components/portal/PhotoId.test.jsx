@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // Photo ID (GATE_CUSTOMER_PHOTO_ID) — the entry points and the gate hook they
 // share must never disagree about whether the feature is live (the floating
-// pill is PortalPage's Help pill, covered in PortalPage.help-pill.test.jsx); the sheet's picker -> photos -> analyzing -> result flow must send
+// pill is the Waves Chat pill and no longer opens Photo ID, see PortalPage.help-pill.test.jsx); the sheet's picker -> photos -> analyzing -> result flow must send
 // the contract's exact payload shape and render every result type + next
 // step kind the server can hand back.
 import React, { useState } from 'react';

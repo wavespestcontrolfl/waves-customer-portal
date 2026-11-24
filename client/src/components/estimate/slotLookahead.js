@@ -73,8 +73,19 @@ export function slotQueryParams({ serviceMode, selectedFrequency, serviceCadence
   return p;
 }
 
-async function getBody(url) {
+// A 409 the page owns (SlotPicker's onRefusal: its refused plan-quote banner) goes up with its body first (codex
+// pre-push P1): the look-ahead reads the same slot route as the list. When the page takes it, the read ends here.
+class PageTookRefusal extends Error {}
+
+async function getBody(url, onRefusal = null) {
   const res = await fetch(url);
+  if (res.status === 409 && onRefusal) {
+    let body = {};
+    try { body = (await res.json()) || {}; } catch { /* no body */ }
+    let took = false;
+    try { took = onRefusal(409, body) === true; } catch { /* the page's hook never throws into a read */ }
+    if (took) throw new PageTookRefusal('the page took the refusal');
+  }
   if (!res.ok) throw new Error('lookahead fetch failed');
   return res.json();
 }
@@ -83,11 +94,11 @@ async function getBody(url) {
 // the earliest opening can be missing from it; metadata.firstDayAvailability
 // names the true first open day, and one ?date= read adds that day's slots.
 // Returns { slots, firstDay }.
-export async function fetchLookaheadSlots({ apiBase, token, params }) {
+export async function fetchLookaheadSlots({ apiBase, token, params, onRefusal = null }) {
   const base = `${apiBase}/public/estimates/${token}/available-slots`;
   const wide = slotQueryParams(params);
   wide.set('windowDays', String(LOOKAHEAD_DAYS));
-  const body = await getBody(`${base}?${wide.toString()}`);
+  const body = await getBody(`${base}?${wide.toString()}`, onRefusal);
   if (!isBrowsable(body)) return { slots: [], firstDay: null };
   let slots = bodySlots(body);
   const firstDay = body.metadata?.firstDayAvailability?.date;
@@ -96,9 +107,12 @@ export async function fetchLookaheadSlots({ apiBase, token, params }) {
     const day = slotQueryParams(params);
     day.set('date', firstDay);
     try {
-      const dayBody = await getBody(`${base}?${day.toString()}`);
+      const dayBody = await getBody(`${base}?${day.toString()}`, onRefusal);
       if (isBrowsable(dayBody)) slots = [...slots, ...bodySlots(dayBody)];
-    } catch { /* the 90-day list alone still gives the customer times */ }
+    } catch (err) {
+      // A refusal the page took ends the read; any other failure leaves the 90-day list, which still gives times.
+      if (err instanceof PageTookRefusal) throw err;
+    }
   }
   const sorted = sortSlots(slots);
   // firstDay is kept only when the merged list starts on it. Then "the next
@@ -111,24 +125,33 @@ const IDLE = { key: null, status: 'idle', slots: [], firstDay: null };
 
 // One look-ahead read per param set (and refresh), held in component state.
 // A result for an older param set is ignored. A failed or empty read is not
-// retried for the same params. `answer` is the 14-day list body; the read
+// retried for the same params, and neither is one whose 409 the page took
+// ('refused'). `answer` is the 14-day list body; the read
 // starts when it is a bookable answer with no slots (the dead end) and the
 // page is not `blocked` (loading, failed, staff preview).
 function useLookaheadRead({
-  apiBase, token, serviceMode, selectedFrequency, serviceCadences, refreshSignal, answer, blocked,
+  apiBase, token, serviceMode, selectedFrequency, serviceCadences, refreshSignal, answer, blocked, onRefusal = null,
 }) {
   const key = JSON.stringify([token, serviceMode, selectedFrequency, serviceCadences, refreshSignal]);
   const needed = !blocked && isEmptyBrowsable(answer);
   const [state, setState] = useState(IDLE);
   const startedRef = useRef(null);
+  // The page's latest hook, read when a 409 lands: a new function on each render must not start a new read.
+  const onRefusalRef = useRef(onRefusal);
+  onRefusalRef.current = onRefusal;
   useEffect(() => {
     if (!needed || startedRef.current === key) return;
     startedRef.current = key;
     setState({ key, status: 'loading', slots: [], firstDay: null });
-    fetchLookaheadSlots({ apiBase, token, params: { serviceMode, selectedFrequency, serviceCadences } })
+    fetchLookaheadSlots({
+      apiBase,
+      token,
+      params: { serviceMode, selectedFrequency, serviceCadences },
+      onRefusal: (status, body) => onRefusalRef.current?.(status, body) === true,
+    })
       .then(
         ({ slots, firstDay }) => ({ status: slots.length ? 'done' : 'empty', slots, firstDay }),
-        () => ({ status: 'failed', slots: [], firstDay: null }),
+        (err) => ({ status: err instanceof PageTookRefusal ? 'refused' : 'failed', slots: [], firstDay: null }),
       )
       .then((result) => {
         if (startedRef.current === key) setState({ key, ...result });

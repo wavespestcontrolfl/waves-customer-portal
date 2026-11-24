@@ -140,8 +140,9 @@ describe('route wiring', () => {
     expect(existing.slice(0, existing.indexOf('metadata:'))).toMatch(/\(signHostNote \? `\\n\$\{signHostNote\}` : ''\)/);
 
     const created = src.slice(src.indexOf('subject: `New lead from ${leadSource.detail || leadSource.source}`'));
-    // First in the body: Customer 360 previews body[0..200].
-    expect(created.slice(0, created.indexOf('metadata:'))).toMatch(/body: `\$\{signHostNote \? `\$\{signHostNote\}\. ` : ''\}Form: /);
+    // First in the body: Customer 360 previews body[0..200]. A quiz lead's
+    // answers line follows it (lead-webhook-quiz.test.js), then the form facts.
+    expect(created.slice(0, created.indexOf('metadata:'))).toMatch(/body: `\$\{signHostNote \? `\$\{signHostNote\}\. ` : ''\}\$\{quizNote \? `\$\{quizNote\}\. ` : ''\}Form: /);
   });
 
   test('the triage and Lead Response Agent prose never include the sign host', () => {

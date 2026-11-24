@@ -54,7 +54,7 @@ function makeRequest({ fill = read([TAURUS_SIX]) } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options, body: typeof options?.body === 'string' ? JSON.parse(options.body) : null });
-    if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, reportFlow: true, service: REGULAR, products: CATALOG };
+    if (path.split('?')[0].endsWith('/pest-recap/context')) return { ok: true, eligible: true, taurusYearly: { count: 0, high: 0, low: 0, eligible: true, year: 2026 }, reportFlow: true, service: REGULAR, products: CATALOG };
     if (path.endsWith('/tech-rating-allowed')) return { allowed: true, firstVisit: false, scaleLabels: null };
     if (path.endsWith('/tech-tips')) return { available: false };
     if (path.split('?')[0].endsWith('/promises')) return { available: false, promises: [] };
@@ -84,7 +84,7 @@ const SERVICE = {
 
 async function openSheet(request, props = { voiceFillEnabled: true }) {
   render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onCompleted={() => {}} {...props} />);
-  await screen.findByText(/Taurus SC 4 fl oz/);
+  await screen.findByText(/Taurus SC 1.6 fl oz/);
 }
 async function generate(label = 'Generate AI report') {
   if (label === 'Generate AI report') {
@@ -244,7 +244,7 @@ describe('report flow, voice fill on: products from the note', () => {
     expect(completeButton().disabled).toBe(false);
     fireEvent.click(completeButton());
     await screen.findByTestId('fast-complete-sent');
-    expect(sent(request).products.find((p) => p.productId === 'taurus')).toMatchObject({ totalAmount: 4 });
+    expect(sent(request).products.find((p) => p.productId === 'taurus')).toMatchObject({ totalAmount: 1.6 });
   });
 
   test('the gate going off since the sheet opened (404) stops the read, and the report is still written', async () => {

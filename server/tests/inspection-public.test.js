@@ -60,6 +60,21 @@ jest.mock('../services/scheduling/parse-when', () => ({
   summarizeWindow: (...args) => mockSummarizeWindow(...args),
 }));
 
+// The commit's far-south truck re-check (owner rule B per truck): its own behavior is
+// estimate-slots-zone-day-funnel.test.js's; here only what the commit hands it.
+const mockTruckMayTakeDate = jest.fn(async () => true);
+// The two far-south gates the commit's re-check reads (feature-gates is mocked down to two names here).
+const mockFarSouthGates = { perTruck: false, funnel: false };
+jest.mock('../services/scheduling/zone-day-funnel', () => ({
+  ...jest.requireActual('../services/scheduling/zone-day-funnel'),
+  truckMayTakeDate: (...args) => mockTruckMayTakeDate(...args),
+  perTruckLive: () => mockFarSouthGates.perTruck,
+  funnelOn: () => mockFarSouthGates.funnel,
+  // The funnel's own zone check through the gate above: the default funneled zones (Venice, Port Charlotte).
+  isFunnelZone: (zone) => mockFarSouthGates.funnel
+    && ['venice', 'port charlotte'].includes(jest.requireActual('../services/slot-zone').zoneSlugOf(zone)),
+}));
+
 const mockBookingConfig = jest.fn(async () => ({}));
 const mockBuildAvailability = jest.fn(async () => ({ slots: [], days: [] }));
 const mockCreateSelfBooking = jest.fn(async () => ({ ok: true, body: { booking: { id: 'sb-1' } } }));
@@ -123,7 +138,9 @@ jest.mock('../models/db', () => {
     // A list result may be a function of the query's selected columns.
     q.select = (...cols) => { q.selectedColumns = cols; return q; };
     const listFor = () => (typeof listResults[table] === 'function' ? listResults[table](q) : listResults[table]) || [];
-    q.first = async () => {
+    // `first`'s own columns are recorded too (q.firstColumns), so a fixture may answer one read by them.
+    q.first = async (...cols) => {
+      q.firstColumns = cols;
       const v = firstResults[table];
       if (typeof v === 'function') return v(q);
       return v !== undefined ? v : null;
@@ -244,6 +261,8 @@ afterEach(() => {
   insertCalls.length = 0;
   gateState.live = true;
   gateState.reviewLive = false;
+  mockFarSouthGates.perTruck = false;
+  mockFarSouthGates.funnel = false;
   mockLoserBlockers.mockClear();
   mockLoserBlockers.mockImplementation(async () => []);
   mockGeocode.mockClear();
@@ -293,6 +312,13 @@ function seedPhoneHousehold(profile, others = []) {
 }
 
 const LINKED_LEAD = { ...LEAD_ROW, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
+
+// A lead row read as the database holds it: linked once phase 1 writes the link
+// (the query mock's update does not change what later reads return).
+const leadLinkedAfterWrite = (lead) => () => {
+  const link = updateCalls.filter((c) => c.table === 'leads' && c.payload.customer_id).at(-1);
+  return link ? { ...lead, customer_id: link.payload.customer_id } : lead;
+};
 
 describe('gate off', () => {
   test('every route 404s while GATE_LEAD_INSPECTION_LINK is off', async () => {
@@ -483,9 +509,26 @@ describe('Codex #4737 r5 P1: the booking is bound to the validated location', ()
       days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
     });
     await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
-    expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.expectedLocation).toEqual({ lat: 27.4, lng: -82.5 });
+    const { callbackVisit } = mockCreateSelfBooking.mock.calls[0][0];
+    expect(callbackVisit.expectedLocation).toEqual({ lat: 27.4, lng: -82.5 });
     // The lead link carries no estimate re-check (only the estimate-token page passes one).
-    expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit).not.toHaveProperty('estimateGuard');
+    expect(callbackVisit).not.toHaveProperty('estimateGuard');
+    // Its far-south truck re-check runs on the booking transaction for the zone createSelfBooking stamps, the date
+    // and the technician it books.
+    const trx = jest.fn();
+    const zone = { id: 'zone-1', zone_name: 'Bradenton', cities: ['Bradenton'] };
+    await callbackVisit.slotGuard(trx, { zone });
+    expect(mockTruckMayTakeDate).toHaveBeenCalledWith(trx, { estimateZone: zone, date: FUTURE_DATE, technicianId: 'tech-1' });
+    // The commit's rebuild reads the funnel zone from the address's own city (its text only without one), and the booking
+    // resolves its zone from the same address the same way (callbackVisit.zoneAddress), so the two agree.
+    expect(mockBuildAvailability).toHaveBeenCalledWith(expect.objectContaining({
+      rangeFrom: FUTURE_DATE, rangeTo: FUTURE_DATE, zoneFunnelAddress: '123 Palm Ave, Bradenton, FL, 34209', zoneFunnelCity: 'Bradenton',
+    }));
+    // The booking uses the profile's own address, so createSelfBooking resolves it from its own customer row, which
+    // its lock fences (pre-push P1 on 5fc5e4d648): the row it is given decides, never a copy read here.
+    const row = { address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209' };
+    expect(callbackVisit.zoneAddress(row)).toEqual({ address: '123 Palm Ave, Bradenton, FL, 34209', city: 'Bradenton' });
+    expect(callbackVisit.zoneAddress({ ...row, city: 'Venice' })).toEqual({ address: '123 Palm Ave, Venice, FL, 34209', city: 'Venice' });
   });
 
   test('bookAssessmentVisit hands an estimate page\'s guard to the booking transaction unchanged', async () => {
@@ -499,6 +542,10 @@ describe('Codex #4737 r5 P1: the booking is bound to the validated location', ()
       bookingLocation: { lat: 27.4, lng: -82.5 }, source: 'estimate_assessment_link', alertLabel: 'x', estimateGuard,
     });
     expect(createSelfBooking.mock.calls[0][0].callbackVisit.estimateGuard).toBe(estimateGuard);
+    // The estimate page books its signed technician with no far-south re-check (offer-time funnel only), and its
+    // visit's zone stays the customer's city.
+    expect(createSelfBooking.mock.calls[0][0].callbackVisit).not.toHaveProperty('slotGuard');
+    expect(createSelfBooking.mock.calls[0][0].callbackVisit).not.toHaveProperty('zoneAddress');
   });
 
   test('booking.js checks expectedLocation under the customer-comms fence, before any insert', () => {
@@ -1134,7 +1181,15 @@ describe('round-10 P2 :1682: LOCATION_CHANGED_RETRY/CUSTOMER_CHANGED_RETRY carri
     expect(res.body.lead.has_address).toBe(true);
   });
 
-  test('an ordinary slot-taken 409 (no address race) carries neither address_changed nor lead', async () => {
+  // With the funnel off (GATE_SOUTH_ZONE_DAY_FUNNEL) the 409 carries fresh times at the customer's own pin, as before
+  // the far-south rule: the switch restores that answer (pre-push P1 on 7cdf34198a). With it on, the stored pin and
+  // address read again are the ones this booking used, so the next commit books there too and the 409 carries fresh
+  // times there: the page makes no new lookup (pre-push P1 on 419b536e4b: its reload's GET paid for a county lookup).
+  test.each([
+    ['the funnel off: fresh times at the customer\'s pin', false, [[27.4, -82.5], [27.4, -82.5]]],
+    ['the funnel on: fresh times at the customer\'s unchanged pin', true, [[27.4, -82.5], [27.4, -82.5]]],
+  ])('an ordinary slot-taken 409 (no address race) carries neither address_changed nor lead (%s)', async (_label, funnel, builtPins) => {
+    mockFarSouthGates.funnel = funnel;
     firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
     firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
     listResults.scheduled_services = [];
@@ -1151,6 +1206,8 @@ describe('round-10 P2 :1682: LOCATION_CHANGED_RETRY/CUSTOMER_CHANGED_RETRY carri
     expect(res.body.code).toBe('SLOT_TAKEN');
     expect(res.body.address_changed).toBeUndefined();
     expect(res.body.lead).toBeUndefined();
+    expect(mockBuildAvailability.mock.calls.map(([args]) => [args.lat, args.lng])).toEqual(builtPins);
+    expect(res.body.availability).not.toBeNull();
   });
 });
 
@@ -1413,6 +1470,20 @@ describe('POST /:token/availability — address resolution (P1 :219)', () => {
       const res = await callAvailability(token, { address: '123 Palm Ave, Bradenton, FL 34205' });
       expect(res.statusCode).toBe(200);
       expect(res.body.needs_address).toBe(false);
+      expect(mockGeocode).toHaveBeenCalledTimes(1);
+    });
+
+    // The quarantine guards the address on file. A blocked profile with none on file (a verified review whose address
+    // the row no longer carries) still takes a typed address: quarantineRefusesSupplied, which a refused booking's
+    // fresh times also read since 23dfae53de.
+    test('a blocked profile with no address on file still resolves a typed address', async () => {
+      firstResults.customers = { ...firstResults.customers, address_line1: null, city: null, state: null, zip: null };
+      firstResults.customer_geocode_reviews = { ...firstResults.customer_geocode_reviews, status: 'verified' };
+      mockGeocode.mockResolvedValueOnce({ location: { lat: 27.41, lng: -82.51 } });
+      mockBuildAvailability.mockResolvedValueOnce({ slots: [], days: [{ date: '2027-01-10', slots: [] }] });
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const res = await callAvailability(token, { address: '123 Palm Ave, Bradenton, FL' });
+      expect(res.statusCode).toBe(200);
       expect(mockGeocode).toHaveBeenCalledTimes(1);
     });
   });
@@ -1893,7 +1964,7 @@ describe('POST /:token commit', () => {
     // now: a verified unlinked lead reusing an existing property whose own
     // stored coordinates differ from the lead's pre-lock resolution (round
     // 11/13), re-validated AFTER the transaction commits.
-    test('a verified lead reusing a matched profile at a different stored location books the REFRESHED slot\'s own technician, never the pre-lock one', async () => {
+    test('a verified lead reusing a matched profile at a different stored location books the REFRESHED slot\'s own technician and the profile\'s own address, never the pre-lock ones', async () => {
       firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
       firstResults.call_log = { from_phone: '+19415550101' };
       firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
@@ -1904,7 +1975,8 @@ describe('POST /:token commit', () => {
         .mockResolvedValueOnce(slotAtMatched); // post-phase-1 re-validation at the matched row's own location
       const existingCustomer = {
         id: 'cust-9', account_id: 'acct-9', is_primary_profile: true,
-        address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
+        // The match is street + zip, so the profile's city on file can differ from the one the lead typed.
+        address_line1: '123 Palm Ave', city: 'West Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
         latitude: 27.1, longitude: -82.2, // in the service box but far from the default mockGeocode location — matched via zip, not coords
       };
       seedPhoneHousehold(existingCustomer);
@@ -1922,6 +1994,932 @@ describe('POST /:token commit', () => {
       expect(bookingArgs.slot_end).toBe('09:45');
       expect(res.body.visit.window.end).toBe('09:45');
       expect(res.body.endLabel).toBe('9:45 AM');
+      // Owner rule B per truck: the re-validation and the visit's zone read the address of the location they book (the
+      // profile's own city on file), never the typed one, so the far-south check and the zone stamp agree with it.
+      expect(mockBuildAvailability.mock.calls[1][0]).toMatchObject({
+        zoneFunnelAddress: '123 Palm Ave, West Bradenton, FL, 34209', zoneFunnelCity: 'West Bradenton',
+      });
+      expect(bookingArgs.callbackVisit.zoneAddress(existingCustomer)).toEqual({ address: '123 Palm Ave, West Bradenton, FL, 34209', city: 'West Bradenton' });
+      // The booking's own row decides, never phase one's copy of it (pre-push P1 on 5fc5e4d648).
+      expect(bookingArgs.callbackVisit.zoneAddress({ ...existingCustomer, city: 'Venice' })).toEqual({ address: '123 Palm Ave, Venice, FL, 34209', city: 'Venice' });
+    });
+
+    // Owner rule B per truck (pre-push P1s on e81d7ed7c0, 3e6fd14320 and 3b494d3581): at the SAME pin, a matched
+    // profile with another city on file books with the typed address, as the list read it. Its zone address, the
+    // anti-forgery build and a 409's fresh times all read the typed city, so a refreshed time is one the next commit's
+    // own check admits, and no second build runs. createSelfBooking takes its own customer row's city only when that
+    // address resolves to no zone (booking-confirm-signed-offer.test.js).
+    test('a matched profile at the same pin with another city on file: the booking and a 409\'s fresh times use the typed address', async () => {
+      firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      const existingCustomer = {
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true,
+        address_line1: '123 Palm Ave', city: 'West Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
+        latitude: 27.4, longitude: -82.5, // the default mockGeocode pin: the location does not move
+      };
+      seedPhoneHousehold(existingCustomer);
+      listResults.scheduled_services = [];
+      mockBuildAvailability.mockResolvedValueOnce({ days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }] });
+      mockCreateSelfBooking.mockImplementationOnce(async () => ({ ok: false, status: 409, error: 'That time is no longer open.' }));
+
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Bradenton, FL 34209' });
+
+      expect(res.statusCode).toBe(409);
+      expect(res.body.code).toBe('SLOT_TAKEN');
+      const typed = { zoneFunnelAddress: '123 Palm Ave, Bradenton, FL, 34209', zoneFunnelCity: 'Bradenton' };
+      // The anti-forgery build, then the 409's fresh times: both at the typed address.
+      expect(mockBuildAvailability.mock.calls.map(([args]) => args.zoneFunnelCity)).toEqual(['Bradenton', 'Bradenton']);
+      expect(mockBuildAvailability.mock.calls[1][0]).toMatchObject(typed);
+      expect(mockCreateSelfBooking.mock.calls[0][0].technician_id).toBe('tech-1');
+      // A typed address: the booking's own row does not change it.
+      expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress({ city: 'West Bradenton' })).toEqual({ address: typed.zoneFunnelAddress, city: 'Bradenton' });
+    });
+
+    // Pre-push P1s on 23dfae53de and 172712852a: staff sent the profile's pin to a geocode review while this booking ran.
+    // The next commit's resolver answers `address_unresolved` for the same typed address, so the refusal answers that,
+    // not SLOT_TAKEN: the page shows its address message instead of the times it holds, and builds no fresh times.
+    // Pre-push P1 on 756cfc2628: the same when staff also cleared the address on file under a verified review (the row no
+    // longer carries its address): the list's own rule would let the typed address through, but the next commit's phase 1
+    // refuses it (reviewRefusesBooking). Either way the retry gets that same refusal and books nothing: the list's rule
+    // refuses the first case before any build, phase 1 refuses the second after the retry's first build.
+    test.each([
+      ['sent the address to review', 'needs_pin', {}, 1],
+      ['cleared the address on file under a verified review', 'verified', {
+        address_line1: null, address_line2: null, city: null, state: null, zip: null, latitude: null, longitude: null,
+      }, 2],
+    ])('a same-pin booking refused after staff %s: the answer is address_unresolved, and the retry\'s too', async (_label, status, cleared, builds) => {
+      Object.assign(mockFarSouthGates, { funnel: true });
+      gateState.reviewLive = true;
+      let blocked = false;
+      firstResults.customer_geocode_reviews = () => (blocked ? {
+        customer_id: 'cust-9', status, address_snapshot: ['123 Palm Ave', null, 'Bradenton', 'FL', '34209'],
+        latitude: null, longitude: null, updated_at: new Date(),
+      } : null);
+      firstResults.leads = leadLinkedAfterWrite({ ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' });
+      firstResults.call_log = { from_phone: '+19415550101' };
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      const profile = {
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, address_line1: '123 Palm Ave', address_line2: null,
+        city: 'Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
+        latitude: 27.4, longitude: -82.5, // the default mockGeocode pin: the location does not move
+      };
+      seedPhoneHousehold(profile);
+      listResults.scheduled_services = [];
+      const open = { days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }] };
+      mockBuildAvailability.mockResolvedValueOnce(open);
+      mockCreateSelfBooking.mockImplementationOnce(async () => {
+        blocked = true;
+        Object.assign(profile, cleared);
+        return { ok: false, status: 409, error: 'That time is no longer open.' };
+      });
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const typed = { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Bradenton, FL 34209' };
+
+      const res = await callPost(token, typed);
+
+      expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
+      expect(res.statusCode).toBe(422);
+      expect(res.body).toEqual({ error: 'address_unresolved' });
+      expect(mockBuildAvailability).toHaveBeenCalledTimes(1);
+
+      if (builds > 1) mockBuildAvailability.mockResolvedValueOnce(open);
+      const retry = await callPost(token, typed);
+
+      expect(retry.statusCode).toBe(422);
+      expect(retry.body).toEqual({ error: 'address_unresolved' });
+      expect(mockCreateSelfBooking).toHaveBeenCalledTimes(1);
+      expect(mockBuildAvailability).toHaveBeenCalledTimes(builds);
+    });
+
+    // Owner rule B per truck (pre-push P1 on 46fd83d04f): the typed city is in no zone while the matched profile's city
+    // on file is (slot-zone.js leadBookingZone). createSelfBooking checks and stamps the profile city's zone, so the
+    // re-check (per truck only: a one-day build funnels to itself with one truck) and a 409's fresh times build from
+    // the profile's own address: the re-check books the truck that zone allows, and a refreshed time is one the next
+    // commit books. The booking's own zone address stays the typed one; it falls back itself, on its own customer row.
+    // With the funnel off nothing is looked up and the fresh times keep the typed address with no fallback city, as
+    // before (pre-push P1 on 979f0dbec9); a failed lookup keeps it too (logged), and the booking still runs (pre-push P1
+    // on 84c9b2d840). A profile city whose zone the
+    // funnel does not cover has no truck rule to apply, so there is no re-check either: it would only repeat the first
+    // build and its travel lookups (pre-push P1 on 5fc5e4d648). Every build passes the typed address and the trusted
+    // customer, and the builder applies the same fallback (pre-push P1 on 4eb9c11d2a): the lead is unlinked before
+    // phase 1, so the first build has no customer city, and phase 1's profile brings one.
+    const FIRST = ['Laurel', null];
+    const LINKED = ['Laurel', 'Nokomis'];
+    test.each([
+      ['per truck', { perTruck: true, funnel: true }, 'read', [FIRST, LINKED, LINKED], 'tech-2'],
+      ['per truck, a zone the funnel does not cover', { perTruck: true, funnel: true }, 'unfunneled', [FIRST, LINKED], 'tech-1'],
+      ['one truck', { perTruck: false, funnel: true }, 'read', [FIRST, LINKED], 'tech-1'],
+      ['the funnel off: no lookup', { perTruck: true, funnel: false }, 'none', [FIRST, FIRST], 'tech-1'],
+      ['a failed lookup', { perTruck: true, funnel: true }, 'fails', [FIRST, LINKED], 'tech-1'],
+    ])('the typed city in no zone, the profile\'s city in one (%s): the re-check and the fresh times', async (_label, gates, zoneLookup, builds, bookedTech) => {
+      Object.assign(mockFarSouthGates, gates);
+      const zoneReads = jest.fn(() => {
+        if (zoneLookup === 'fails') throw new Error('zones unreadable');
+        return [{ id: 'zone-v', zone_name: zoneLookup === 'unfunneled' ? 'Sarasota / Central' : 'Venice / North Port', cities: ['Nokomis'] }];
+      });
+      listResults.service_zones = zoneReads;
+      // Unlinked until phase 1 links it: the 409's fresh times read the trusted customer again (nextCommitRefresh).
+      firstResults.leads = leadLinkedAfterWrite({ ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' });
+      firstResults.call_log = { from_phone: '+19415550101' };
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      seedPhoneHousehold({
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true,
+        address_line1: '123 Palm Ave', city: 'Nokomis', state: 'FL', zip: '34209', phone: '9415550101',
+        latitude: 27.4, longitude: -82.5, // the default mockGeocode pin: the location does not move
+      });
+      listResults.scheduled_services = [];
+      const nineAm = (tech) => ({ days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: tech }] }] });
+      mockBuildAvailability
+        .mockResolvedValueOnce(nineAm('tech-1')) // the anti-forgery build, at the typed address
+        .mockResolvedValueOnce(nineAm('tech-2')); // the re-check (per truck), else the 409's fresh times
+      mockCreateSelfBooking.mockImplementationOnce(async () => ({ ok: false, status: 409, error: 'That time is no longer open.' }));
+
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Laurel, FL 34209' });
+
+      expect(res.statusCode).toBe(409);
+      expect(res.body.code).toBe('SLOT_TAKEN');
+      expect(mockBuildAvailability.mock.calls.map(([args]) => [args.zoneFunnelCity, args.zoneFunnelCustomerCity ?? null])).toEqual(builds);
+      expect(mockBuildAvailability.mock.calls.at(-1)[0]).toMatchObject({ zoneFunnelAddress: '123 Palm Ave, Laurel, FL, 34209' });
+      expect(zoneReads.mock.calls.length > 0).toBe(zoneLookup !== 'none');
+      expect(mockCreateSelfBooking.mock.calls[0][0].technician_id).toBe(bookedTech);
+      expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress({ city: 'Nokomis' })).toEqual({ address: '123 Palm Ave, Laurel, FL, 34209', city: 'Laurel' });
+    });
+
+    // Pre-push P1 on aa30bd86f1: the page's list for a typed address read its zone from that address alone, while
+    // the booking falls back to the trusted customer's city on file when the address is in no zone (slot-zone.js
+    // leadBookingZone). So the list could offer an hour only another truck had on the zone day, and the commit
+    // refused it with nothing changed. The list passes that city now, so an hour it offers books.
+    test('a typed address in no zone, the trusted profile\'s city in one: the list offers the zone truck\'s hour, and that hour books', async () => {
+      Object.assign(mockFarSouthGates, { perTruck: true, funnel: true });
+      listResults.service_zones = [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis'] }];
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      seedPhoneHousehold({
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true,
+        address_line1: '123 Palm Ave', city: 'Nokomis', state: 'FL', zip: '34209', phone: '9415550101',
+        latitude: 27.4, longitude: -82.5, // the default mockGeocode pin: the location does not move
+      });
+      listResults.scheduled_services = [];
+      const open = (t, tech) => ({ start_time: t, end_time: `${t.slice(0, 2)}:30`, start_label: t, end_label: t, technician_id: tech });
+      // The far-south funnel as the builder runs it per truck: in the Nokomis zone tech-2 drives south that day, so
+      // tech-1's 09:00 goes; in no zone both hours stay.
+      const southZone = (a) => a.zoneFunnelCity === 'Nokomis' || a.zoneFunnelCustomerCity === 'Nokomis';
+      mockBuildAvailability.mockImplementation(async (a) => ({
+        days: [{ date: FUTURE_DATE, slots: southZone(a) ? [open('10:00', 'tech-2')] : [open('09:00', 'tech-1'), open('10:00', 'tech-2')] }],
+      }));
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const typed = '123 Palm Ave, Laurel, FL 34209';
+
+      const list = await callAvailability(token, { address: typed });
+
+      expect(list.body.availability.days[0].slots.map((s) => s.start_time)).toEqual(['10:00']);
+      expect(mockBuildAvailability.mock.calls[0][0]).toMatchObject({ zoneFunnelCity: 'Laurel', zoneFunnelCustomerCity: 'Nokomis' });
+
+      // A time the list never offered: the refusal's own list passes the same city.
+      mockBuildAvailability.mockClear();
+      const refused = await callPost(token, { date: FUTURE_DATE, time: '11:00', address: typed });
+
+      expect(refused.statusCode).toBe(409);
+      expect(refused.body.availability.days[0].slots.map((s) => s.start_time)).toEqual(['10:00']);
+      expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+
+      // The offered hour books, with the zone truck.
+      const booked = await callPost(token, { date: FUTURE_DATE, time: '10:00', address: typed });
+
+      expect(booked.statusCode).toBe(200);
+      expect(mockCreateSelfBooking.mock.calls[0][0]).toMatchObject({ slot_start: '10:00', technician_id: 'tech-2' });
+    });
+
+    // Pre-push P1 on 4eb9c11d2a: the commit's first build read the typed address alone, while the list read the trusted
+    // profile's city too. With both trucks open at the hour, that build could give it to the truck the list dropped.
+    // Phase 1 then wrote the typed city onto the profile (same street and ZIP), so no later check read the city the list
+    // read, and that truck booked. The first build reads the same customer as the list now. In the zone (Nokomis,
+    // Venice) tech-2 drives south that day, so tech-1's 09:00 goes and the hour is tech-2's; in no zone the builder gives
+    // it to tech-1. The one build read the zone the booking checks, so nothing is re-checked: a second build would only
+    // repeat it and its travel lookups. Pre-push P1s on 850a6a79f0 and 7a682696f6: phase 1 wrote the typed city onto the
+    // profile (Laurel, in no zone), so the booking, a refusal's fresh times and the retry lost the zone the list read.
+    // The typed address matches the profile, so phase 1 writes it with the profile's city on file when that city decides
+    // the zone (the typed city is in no zone); a typed city in the zone is written as typed (pre-push P1 on 63e29d5511),
+    // and a staff-verified pin keeps the profile as it is. The booking falls back to its own row's city, the one its lock fences, and its
+    // slot guard asks about the zone the list offered, for the truck that list gave the hour; createSelfBooking stamps
+    // that zone (booking-confirm-signed-offer.test.js).
+    // Pre-push P1 on c49372bb7d: with no ZIP typed, only a pin matches the profile, and the list reads the primary
+    // property's pin (the trusted view) where the customers row has none. Phase 1 reads that same view, so it keeps the
+    // city the list read.
+    test.each([
+      ['in no zone, phase 1 keeps the profile\'s city', 'Laurel', false, ['Nokomis'], false],
+      ['in no zone, a staff-verified pin keeps the profile as it is', 'Laurel', true, [], false],
+      ['in the zone, phase 1 writes the typed city', 'Venice', false, ['Venice'], false],
+      ['in no zone with no ZIP, at the primary property\'s pin only, phase 1 keeps the profile\'s city', 'Laurel', false, ['Nokomis'], true],
+    ])('a typed address %s: one build, and the hour books with the truck its list offered', async (_label, typedCity, reviewed, cityWrites, pinOnProperty) => {
+      Object.assign(mockFarSouthGates, { perTruck: true, funnel: true });
+      listResults.service_zones = [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis', 'Venice'] }];
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      const address = { address_line1: '123 Palm Ave', address_line2: null, city: 'Nokomis', state: 'FL', zip: '34209' };
+      seedPhoneHousehold({
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, ...address, phone: '9415550101',
+        // the default mockGeocode pin: the location does not move (on the primary property only, the row has none)
+        latitude: pinOnProperty ? null : 27.4, longitude: pinOnProperty ? null : -82.5,
+      });
+      if (reviewed || pinOnProperty) {
+        gateState.reviewLive = true;
+        firstResults.customer_properties = { id: 'property-9', customer_id: 'cust-9', active: true, is_primary: true, ...address, latitude: 27.4, longitude: -82.5 };
+      }
+      if (reviewed) {
+        firstResults.customer_geocode_reviews = {
+          customer_id: 'cust-9', status: 'verified', reason: 'staff_verified',
+          address_snapshot: ['123 Palm Ave', null, 'Nokomis', 'FL', '34209'], latitude: 27.4, longitude: -82.5,
+        };
+      }
+      listResults.scheduled_services = [];
+      const inZone = (city) => ['Nokomis', 'Venice'].includes(city);
+      mockBuildAvailability.mockImplementation(async (a) => ({
+        days: [{ date: FUTURE_DATE, slots: [{
+          start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM',
+          technician_id: inZone(a.zoneFunnelCity) || inZone(a.zoneFunnelCustomerCity) ? 'tech-2' : 'tech-1',
+        }] }],
+      }));
+
+      const typedZip = pinOnProperty ? [] : ['34209'];
+      const booked = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: [`123 Palm Ave, ${typedCity}, FL`, ...typedZip].join(' ') });
+
+      expect(booked.statusCode).toBe(200);
+      expect(updateCalls.filter((c) => c.table === 'customers' && 'city' in c.payload).map((c) => c.payload.city)).toEqual(cityWrites);
+      expect(mockBuildAvailability.mock.calls.map(([a]) => [a.zoneFunnelCity, a.zoneFunnelCustomerCity])).toEqual([[typedCity, 'Nokomis']]);
+      const booking = mockCreateSelfBooking.mock.calls[0][0];
+      expect(booking).toMatchObject({ slot_start: '09:00', technician_id: 'tech-2', authedCustomer: { id: 'cust-9', city: cityWrites[0] || 'Nokomis' } });
+      const zoneAddress = booking.callbackVisit.zoneAddress(booking.authedCustomer);
+      expect(zoneAddress).toEqual({ address: ['123 Palm Ave', typedCity, 'FL', ...typedZip].join(', '), city: typedCity });
+      const { zone } = await require('../services/slot-zone').leadBookingZone(db, zoneAddress, booking.authedCustomer.city);
+      expect(zone).toMatchObject({ id: 'zone-v' });
+      const trx = jest.fn();
+      await booking.callbackVisit.slotGuard(trx, { zone });
+      expect(mockTruckMayTakeDate).toHaveBeenCalledWith(trx, { estimateZone: zone, date: FUTURE_DATE, technicianId: 'tech-2' });
+    });
+
+    // A matching profile with no city on file has no name to keep: phase 1 writes the typed city, as main did.
+    test('a typed address that matches a profile with no city on file: phase 1 writes the typed city', async () => {
+      Object.assign(mockFarSouthGates, { perTruck: true, funnel: true });
+      listResults.service_zones = [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis', 'Venice'] }];
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      seedPhoneHousehold({
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, phone: '9415550101',
+        address_line1: '123 Palm Ave', address_line2: null, city: null, state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5,
+      });
+      listResults.scheduled_services = [];
+      mockBuildAvailability.mockResolvedValue({ days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-2' }] }] });
+
+      const booked = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Venice, FL 34209' });
+
+      expect(booked.statusCode).toBe(200);
+      expect(updateCalls.filter((c) => c.table === 'customers' && 'city' in c.payload).map((c) => c.payload.city)).toEqual(['Venice']);
+      expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer).toMatchObject({ id: 'cust-9', city: 'Venice' });
+    });
+
+    // Pre-push P1s on c49372bb7d (its other half) and cebd106404: phase 1 reads the trusted view of the profile, as the
+    // list does, but it keeps the whole profile only when the typed address matches the customers row by its own ZIP or
+    // pin (retainReviewedLocation), and a list asks that row too (listFallbackCity). The review verified the primary
+    // property's pin, and no ZIP is typed. With no pin on the customers row, phase 1 writes the typed address over the
+    // profile and keeps no refused place (Punta Gorda), so the list reads no fallback and offers the only free truck,
+    // tech-1, which books. With that pin on the row too, phase 1 keeps the whole profile, so the list reads Punta
+    // Gorda's zone, where tech-1 is not the truck going south: no time, and the commit refuses the hour before phase 1.
+    test.each([
+      ['only on the primary property: phase 1 writes over the profile, so the list offers the free truck', null, null, ['09:00'], 200, ['Laurel'], [['tech-1', 'Laurel']]],
+      ['on the customers row too: phase 1 keeps the whole profile, so the list reads its zone', 27.4, 'Punta Gorda', [], 409, [], []],
+    ])('a staff-verified pin %s', async (_label, rowLat, listCity, slots, status, cityWrites, bookings) => {
+      Object.assign(mockFarSouthGates, { perTruck: true, funnel: true });
+      listResults.service_zones = [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis', 'Venice', 'Punta Gorda'] }];
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      const address = { address_line1: '123 Palm Ave', address_line2: null, city: 'Punta Gorda', state: 'FL', zip: '33950' };
+      seedPhoneHousehold({
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, ...address, phone: '9415550101',
+        latitude: rowLat, longitude: rowLat === null ? null : -82.5,
+      });
+      gateState.reviewLive = true;
+      firstResults.customer_properties = { id: 'property-9', customer_id: 'cust-9', active: true, is_primary: true, ...address, latitude: 27.4, longitude: -82.5 };
+      firstResults.customer_geocode_reviews = {
+        customer_id: 'cust-9', status: 'verified', reason: 'staff_verified',
+        address_snapshot: ['123 Palm Ave', null, 'Punta Gorda', 'FL', '33950'], latitude: 27.4, longitude: -82.5,
+      };
+      listResults.scheduled_services = [];
+      // Only tech-1 is free at 09:00; in the Venice / North Port zone tech-2 drives south that day, so the funnel drops it.
+      mockBuildAvailability.mockImplementation(async (a) => ({
+        days: [{ date: FUTURE_DATE, slots: a.zoneFunnelCustomerCity === 'Punta Gorda' ? [] : [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      }));
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const typed = '123 Palm Ave, Laurel, FL';
+
+      const list = await callAvailability(token, { address: typed });
+      const booked = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: typed });
+
+      expect(mockBuildAvailability.mock.calls[0][0].zoneFunnelCustomerCity).toBe(listCity);
+      expect(list.body.availability.days.flatMap((d) => d.slots).map((sl) => sl.start_time)).toEqual(slots);
+      expect(booked.statusCode).toBe(status);
+      expect(updateCalls.filter((c) => c.table === 'customers' && 'city' in c.payload).map((c) => c.payload.city)).toEqual(cityWrites);
+      expect(mockCreateSelfBooking.mock.calls.map(([b]) => [b.technician_id, b.authedCustomer.city])).toEqual(bookings);
+    });
+
+    // Pre-push P1 on 979f0dbec9: a failed read of that customers row is no fallback city, so the list is still
+    // offered, unfiltered as the funnel fails open: tech-1's hour. The commit's zone re-check reads the city phase 1
+    // keeps, Punta Gorda, where tech-1 is not the truck going south, so the hour does not book.
+    test('a failed read of the customers row: the list is still offered, and the commit\'s re-check still applies rule B', async () => {
+      Object.assign(mockFarSouthGates, { perTruck: true, funnel: true });
+      listResults.service_zones = [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis', 'Venice', 'Punta Gorda'] }];
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+      const address = { address_line1: '123 Palm Ave', address_line2: null, city: 'Punta Gorda', state: 'FL', zip: '33950' };
+      seedPhoneHousehold({
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, ...address, phone: '9415550101', latitude: 27.4, longitude: -82.5,
+      });
+      const household = firstResults.customers;
+      firstResults.customers = (q) => {
+        if (q.firstColumns.includes('latitude') && !q.firstColumns.includes('city')) throw new Error('connection reset');
+        return household(q);
+      };
+      gateState.reviewLive = true;
+      firstResults.customer_properties = { id: 'property-9', customer_id: 'cust-9', active: true, is_primary: true, ...address, latitude: 27.4, longitude: -82.5 };
+      firstResults.customer_geocode_reviews = {
+        customer_id: 'cust-9', status: 'verified', reason: 'staff_verified',
+        address_snapshot: ['123 Palm Ave', null, 'Punta Gorda', 'FL', '33950'], latitude: 27.4, longitude: -82.5,
+      };
+      listResults.scheduled_services = [];
+      mockBuildAvailability.mockImplementation(async (a) => ({
+        days: [{ date: FUTURE_DATE, slots: a.zoneFunnelCustomerCity === 'Punta Gorda' ? [] : [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      }));
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const typed = '123 Palm Ave, Laurel, FL';
+
+      const list = await callAvailability(token, { address: typed });
+      const booked = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: typed });
+
+      expect(list.statusCode).toBe(200);
+      expect(mockBuildAvailability.mock.calls[0][0].zoneFunnelCustomerCity).toBeNull();
+      expect(list.body.availability.days.flatMap((d) => d.slots).map((sl) => sl.start_time)).toEqual(['09:00']);
+      expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('fallback-city read failed for customer cust-9'));
+      expect(booked.statusCode).toBe(409);
+      expect(mockBuildAvailability.mock.calls.map(([a]) => a.zoneFunnelCustomerCity)).toContain('Punta Gorda');
+      expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+    });
+
+    // Pre-push P1 on 63e29d5511: phase 1 kept the profile's city for any typed address that matched the profile, with
+    // the funnel off too, so it could undo a validated correction. A profile that wrongly says Punta Gorda (a place the
+    // area check refuses) kept that city after a served town typed in its shared ZIP passed the check, and the profile
+    // failed the check on its next read. The city is kept only when the funnel's zone comes from it, never for a
+    // refused place. Pre-push P1 on f344681474: a zone with no truck rule (Sarasota) does not keep it either. With the
+    // funnel off, nothing reads a zone, phase 1 included. Pre-push P1 on f6c3fdc9e9: the list read the refused city's
+    // zone all the same, and with only the other truck free it showed no time; it reads the city phase 1 may keep now
+    // (zoneFallbackCity), so it offers tech-1's hour, and that hour books. Pre-push P1 on c49372bb7d: a typed Wimauma
+    // (a South Hillsborough town) passes the Hillsborough area check by its name alone, here with a Venice ZIP; a
+    // kept Venice would fail the next check at that pin, so phase 1 writes Wimauma and the list reads no fallback.
+    test.each([
+      ['with the funnel off', false, 'Nokomis', 'Laurel', '34209', 'Sarasota'],
+      ['and a profile city the area check refuses', true, 'Punta Gorda', 'Laurel', '34292', 'Sarasota'],
+      ['and a profile city in a zone with no truck rule', true, 'Sarasota', 'Bee Ridge', '34233', 'Sarasota'],
+      ['and a typed South Hillsborough town the area check admits by its name alone', true, 'Venice', 'Wimauma', '34285', 'Hillsborough County'],
+    ])('a typed city in no zone at the profile\'s address, %s: phase 1 writes the typed city', async (_label, funnel, storedCity, typedCity, zip, county) => {
+      Object.assign(mockFarSouthGates, { perTruck: true, funnel });
+      const zoneReads = jest.fn(() => [
+        { id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis', 'Venice', 'Punta Gorda'] },
+        { id: 'zone-s', zone_name: 'Sarasota / Lakewood Ranch', cities: ['Sarasota', 'Lakewood Ranch'] },
+      ]);
+      listResults.service_zones = zoneReads;
+      mockCounty.mockImplementation(async () => county);
+      mockLocality.mockImplementation(async () => ({ city: typedCity, zip }));
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      seedPhoneHousehold({
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, phone: '9415550101',
+        address_line1: '123 Palm Ave', address_line2: null, city: storedCity, state: 'FL', zip, latitude: 27.4, longitude: -82.5,
+      });
+      listResults.scheduled_services = [];
+      // Only tech-1 is free at 09:00. In the Venice / North Port zone tech-2 drives south that day, so the funnel drops
+      // tech-1's opening and nothing is left; anywhere else, or with the funnel off, tech-1 keeps it.
+      const funneled = (a) => mockFarSouthGates.funnel && ['Nokomis', 'Venice', 'Punta Gorda'].includes(a.zoneFunnelCustomerCity);
+      mockBuildAvailability.mockImplementation(async (a) => ({
+        days: [{ date: FUTURE_DATE, slots: funneled(a) ? [] : [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      }));
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const typed = `123 Palm Ave, ${typedCity}, FL ${zip}`;
+
+      const list = await callAvailability(token, { address: typed });
+      const booked = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: typed });
+
+      expect(list.body.availability.days[0].slots.map((s) => s.start_time)).toEqual(['09:00']);
+      expect(booked.statusCode).toBe(200);
+      expect(updateCalls.filter((c) => c.table === 'customers' && 'city' in c.payload).map((c) => c.payload.city)).toEqual([typedCity]);
+      expect(mockCreateSelfBooking.mock.calls[0][0]).toMatchObject({ technician_id: 'tech-1', authedCustomer: { id: 'cust-9', city: typedCity } });
+      expect(zoneReads.mock.calls.length > 0).toBe(funnel);
+    });
+
+    // Pre-push P1 on 7a682696f6: phase 1's write stays when the booking is then refused (owner ruling 2026-09-24), so a
+    // typed city in no zone on the profile made the refusal's fresh times and the retry read no zone: they could offer,
+    // and book, another truck's hour on the zone day. Phase 1 keeps the profile's city for an address that matches it,
+    // so the first attempt's booking, the refusal and the retry read one zone, and the retry books the zone truck.
+    test('a typed city in no zone, refused after phase 1, then the retry: both read the profile\'s zone city', async () => {
+      Object.assign(mockFarSouthGates, { perTruck: true, funnel: true });
+      listResults.service_zones = [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis', 'Venice'] }];
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      const profile = {
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, phone: '9415550101',
+        address_line1: '123 Palm Ave', address_line2: null, city: 'Nokomis', state: 'FL', zip: '34209',
+        latitude: 27.4, longitude: -82.5, // the default mockGeocode pin: the location does not move
+      };
+      seedPhoneHousehold(profile);
+      // The profile as the database holds it after phase 1's write (the query mock's update does not change reads).
+      const seeded = firstResults.customers;
+      firstResults.customers = (q) => {
+        const row = seeded(q);
+        const written = updateCalls.filter((c) => c.table === 'customers').map((c) => c.payload);
+        return row?.id === profile.id ? Object.assign({}, row, ...written) : row;
+      };
+      listResults.scheduled_services = [];
+      const inZone = (a) => [a.zoneFunnelCity, a.zoneFunnelCustomerCity].some((c) => ['Nokomis', 'Venice'].includes(c));
+      mockBuildAvailability.mockImplementation(async (a) => ({
+        days: [{ date: FUTURE_DATE, slots: [{
+          start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: inZone(a) ? 'tech-2' : 'tech-1',
+        }] }],
+      }));
+      // The booking's own check under its date lock refuses the first attempt.
+      mockCreateSelfBooking.mockImplementationOnce(async () => ({ ok: false, status: 409, error: 'That time is no longer open.' }));
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const typed = { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Laurel, FL 34209' };
+      const cities = () => mockBuildAvailability.mock.calls.map(([a]) => [a.zoneFunnelCity, a.zoneFunnelCustomerCity]);
+
+      const first = await callPost(token, typed);
+
+      expect(first.statusCode).toBe(409);
+      expect(first.body.code).toBe('SLOT_TAKEN');
+      expect(updateCalls.filter((c) => c.table === 'customers' && 'city' in c.payload).map((c) => c.payload.city)).toEqual(['Nokomis']);
+      expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer).toMatchObject({ id: 'cust-9', city: 'Nokomis' });
+      // The first build, then the refusal's fresh times: both read the profile's city.
+      expect(cities()).toEqual([['Laurel', 'Nokomis'], ['Laurel', 'Nokomis']]);
+
+      mockBuildAvailability.mockClear();
+      const second = await callPost(token, typed);
+
+      expect(second.statusCode).toBe(200);
+      expect(cities()).toEqual([['Laurel', 'Nokomis']]);
+      const retry = mockCreateSelfBooking.mock.calls[1][0];
+      expect(retry).toMatchObject({ technician_id: 'tech-2', authedCustomer: { id: 'cust-9', city: 'Nokomis' } });
+      const zoneAddress = retry.callbackVisit.zoneAddress(retry.authedCustomer);
+      expect(zoneAddress).toEqual({ address: '123 Palm Ave, Laurel, FL, 34209', city: 'Laurel' });
+      const { zone } = await require('../services/slot-zone').leadBookingZone(db, zoneAddress, retry.authedCustomer.city);
+      expect(zone).toMatchObject({ id: 'zone-v' });
+      const trx = jest.fn();
+      await retry.callbackVisit.slotGuard(trx, { zone });
+      expect(mockTruckMayTakeDate).toHaveBeenCalledWith(trx, { estimateZone: zone, date: FUTURE_DATE, technicianId: 'tech-2' });
+    });
+
+    // Phase 1 corrects the flow's own prospect (no visits yet) in place to a typed address on another street, so it
+    // writes the typed city (Laurel, in no zone). The prospect's city on file (Nokomis) named the old street, so the
+    // list and the commit's first build read no zone from it (pre-push P1 on 1ef6ba1b16: they read Nokomis, whose zone
+    // dropped tech-1's opening, the only one free, though the booking reads no zone there). The booking reads its own
+    // row's city, the one its lock fences (pre-push P1 on af15b468fd), as a refusal's fresh times and the retry do:
+    // the new street is in no zone, so nothing is re-checked. A staff-verified pin for the old street is not kept: the
+    // typed address is another street.
+    test.each([
+      ['', false],
+      [', past a staff-verified pin for its old street', true],
+    ])('phase 1 corrects its own prospect in place to a typed city in no zone%s: the booking reads the corrected city', async (_label, reviewed) => {
+      Object.assign(mockFarSouthGates, { perTruck: true, funnel: true });
+      listResults.service_zones = [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis', 'Venice'] }];
+      firstResults.leads = { ...LEAD_ROW, customer_id: null };
+      firstResults.lead_activities = { metadata: JSON.stringify({ customer_id: 'cust-prospect' }) };
+      listResults.lead_activities = [{ metadata: JSON.stringify({ customer_id: 'cust-prospect' }) }];
+      const old = { address_line1: '1 Typo St', address_line2: null, city: 'Nokomis', state: 'FL', zip: '34275', latitude: 27.4, longitude: -82.5 };
+      firstResults.customers = { id: 'cust-prospect', account_id: 'acct-p', phone: '9415550101', ...old };
+      listResults.customers = [firstResults.customers];
+      if (reviewed) {
+        gateState.reviewLive = true;
+        firstResults.customer_properties = { id: 'property-p', customer_id: 'cust-prospect', active: true, is_primary: true, ...old };
+        firstResults.customer_geocode_reviews = {
+          customer_id: 'cust-prospect', status: 'verified', reason: 'staff_verified',
+          address_snapshot: ['1 Typo St', null, 'Nokomis', 'FL', '34275'], latitude: 27.4, longitude: -82.5,
+        };
+      }
+      firstResults.call_log = null;
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      listResults.scheduled_services = [];
+      // Only tech-1 is free at 09:00. In the Nokomis zone tech-2 drives south that day, so the funnel drops tech-1's
+      // opening and nothing is left; in no zone tech-1 keeps it.
+      mockBuildAvailability.mockImplementation(async (a) => ({
+        days: [{ date: FUTURE_DATE, slots: a.zoneFunnelCustomerCity === 'Nokomis' ? [] : [{
+          start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1',
+        }] }],
+      }));
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const typed = '45 Gulf Dr, Laurel, FL 34272';
+
+      const list = await callAvailability(token, { address: typed });
+
+      expect(list.body.availability.days[0].slots.map((s) => s.start_time)).toEqual(['09:00']);
+
+      mockBuildAvailability.mockClear();
+      const booked = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: typed });
+
+      expect(booked.statusCode).toBe(200);
+      expect(updateCalls.filter((c) => c.table === 'customers' && 'city' in c.payload).map((c) => c.payload))
+        .toEqual([expect.objectContaining({ address_line1: '45 Gulf Dr', city: 'Laurel' })]);
+      expect(mockBuildAvailability.mock.calls.map(([a]) => a.zoneFunnelCustomerCity)).toEqual([null]);
+      const booking = mockCreateSelfBooking.mock.calls[0][0];
+      expect(booking).toMatchObject({ technician_id: 'tech-1', authedCustomer: { id: 'cust-prospect', city: 'Laurel' } });
+      const zoneAddress = booking.callbackVisit.zoneAddress(booking.authedCustomer);
+      expect(zoneAddress).toEqual({ address: '45 Gulf Dr, Laurel, FL, 34272', city: 'Laurel' });
+      expect((await require('../services/slot-zone').leadBookingZone(db, zoneAddress, booking.authedCustomer.city)).zone).toBeNull();
+    });
+
+    // Pre-push P1 on 1ef6ba1b16, its other half: the trusted prospect (with visits, so never corrected in place) is on
+    // another street, so the list and the commit's first build read no city fallback, and the first build gives the hour
+    // to tech-1. Phase 1 books the account's sibling at the typed street, at its own pin, whose city on file (Nokomis,
+    // the prospect's too) decides the far-south zone. The commit compares that city with the one its first build read
+    // (none), so it re-checks per truck and books the zone truck, tech-2. A sibling phase 1 reuses keeps its city on
+    // file, even a place the area check refuses (Punta Gorda, no staff-verified pin): the booking falls back to it, so
+    // the re-check reads it as phase 1 left it, not the city a list predicts phase 1 keeps.
+    test.each([
+      ['its city on file', 'Nokomis'],
+      ['a refused place on file, as phase 1 left it', 'Punta Gorda'],
+    ])('a typed address in no zone on a sibling\'s street, %s: the first build reads no city, the re-check books the zone truck', async (_label, siblingCity) => {
+      Object.assign(mockFarSouthGates, { perTruck: true, funnel: true });
+      listResults.service_zones = [{ id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis', 'Venice', 'Punta Gorda'] }];
+      firstResults.leads = { ...LEAD_ROW, customer_id: null };
+      firstResults.lead_activities = { metadata: JSON.stringify({ customer_id: 'cust-prospect' }) };
+      listResults.lead_activities = [{ metadata: JSON.stringify({ customer_id: 'cust-prospect' }) }];
+      const prospect = { id: 'cust-prospect', account_id: 'acct-p', phone: '9415550101', address_line1: '1 Typo St', address_line2: null, city: 'Nokomis', state: 'FL', zip: '34275', latitude: 27.4, longitude: -82.5 };
+      const sibling = { id: 'cust-sibling', account_id: 'acct-p', phone: '9415550101', address_line1: '5 Sibling St', address_line2: null, city: siblingCity, state: 'FL', zip: '34275', latitude: 27.45, longitude: -82.55 };
+      firstResults.customers = (q) => (q.conds.id === 'cust-sibling' ? sibling : prospect);
+      listResults.customers = [prospect, sibling];
+      listResults.scheduled_services = (q) => (q.selectedColumns?.length === 1 ? [{ id: 'ss-old' }] : []);
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      mockGeocode.mockImplementation(async () => ({ location: { lat: 27.45, lng: -82.55 } })); // the sibling's own pin
+      mockBuildAvailability.mockImplementation(async (a) => ({
+        days: [{ date: FUTURE_DATE, slots: [{
+          start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM',
+          technician_id: a.zoneFunnelCustomerCity === siblingCity ? 'tech-2' : 'tech-1',
+        }] }],
+      }));
+      const smsToken = mintLeadConsultationToken(LEAD_ID, undefined, require('../utils/lead-consultation-token').smsChannelFor(LEAD_ROW.phone));
+
+      const booked = await callPost(smsToken, { date: FUTURE_DATE, time: '09:00', address: '5 Sibling St, Laurel, FL 34275' });
+
+      expect(booked.statusCode).toBe(200);
+      expect(mockBuildAvailability.mock.calls.map(([a]) => a.zoneFunnelCustomerCity)).toEqual([null, siblingCity]);
+      expect(mockCreateSelfBooking.mock.calls[0][0]).toMatchObject({ technician_id: 'tech-2', authedCustomer: { id: 'cust-sibling' } });
+    });
+
+    // Pre-push P1 on e88162fc27: with no address typed, the page's retry sends none again, and the next commit's
+    // resolver (resolveServiceAddress) reads the trusted profile phase 1 linked. The refusal builds no times of its
+    // own: the page reloads its list (GET), which reads that profile and its address, so the times it offers are built
+    // from the zone the retry's own build reads (nextCommitRefresh).
+    test('no typed address: a 409 carries no times, and the page\'s reload builds from the linked profile\'s address, as the retry does', async () => {
+      Object.assign(mockFarSouthGates, { perTruck: true, funnel: true });
+      listResults.service_zones = [
+        { id: 'zone-s', zone_name: 'Sarasota', cities: ['Sarasota'] },
+        { id: 'zone-v', zone_name: 'Venice / North Port', cities: ['Nokomis'] },
+      ];
+      firstResults.leads = leadLinkedAfterWrite({
+        ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test',
+        address: '123 Palm Ave, Sarasota, FL 34209', city: 'Sarasota', zip: '34209',
+      });
+      firstResults.call_log = { from_phone: '+19415550101' };
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      seedPhoneHousehold({
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true,
+        address_line1: '123 Palm Ave', city: 'Nokomis', state: 'FL', zip: '34209', phone: '9415550101',
+        latitude: 27.4, longitude: -82.5, // the default mockGeocode pin: the location does not move
+      });
+      listResults.scheduled_services = [];
+      mockBuildAvailability.mockResolvedValue({ days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }] });
+      mockCreateSelfBooking.mockImplementationOnce(async () => ({ ok: false, status: 409, error: 'That time is no longer open.' }));
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const builds = () => mockBuildAvailability.mock.calls.map(([a]) => [a.lat, a.zoneFunnelCity]);
+
+      const first = await callPost(token, { date: FUTURE_DATE, time: '09:00' });
+
+      expect(first.statusCode).toBe(409);
+      expect(first.body).toMatchObject({ code: 'SLOT_TAKEN', availability: null });
+      expect(first.body).not.toHaveProperty('address_changed'); // the page holds no typed address to drop
+      // The commit's own build reads the lead's address, as its list did; no fresh times are built.
+      expect(builds()).toEqual([[27.4, 'Sarasota']]);
+      expect(mockCreateSelfBooking.mock.calls[0][0].callbackVisit.zoneAddress({ city: 'Nokomis' })).toEqual({ address: '123 Palm Ave, Sarasota, FL, 34209', city: 'Sarasota' });
+
+      // The page's reload: phase 1 linked the lead to that profile, whose city on file it passes too.
+      mockBuildAvailability.mockClear();
+      expect((await callGet(token)).statusCode).toBe(200);
+      expect(builds()).toEqual([[27.4, 'Nokomis']]);
+      expect(mockBuildAvailability.mock.calls[0][0].zoneFunnelCustomerCity).toBe('Nokomis');
+
+      // The retry types nothing again, and its own build reads what the reload read.
+      mockBuildAvailability.mockClear();
+      const second = await callPost(token, { date: FUTURE_DATE, time: '09:00' });
+
+      expect(second.statusCode).toBe(200);
+      expect(builds()).toEqual([[27.4, 'Nokomis']]);
+      const retry = mockCreateSelfBooking.mock.calls[1][0];
+      expect(retry.callbackVisit.zoneAddress(retry.authedCustomer)).toEqual({ address: '123 Palm Ave, Nokomis, FL, 34209', city: 'Nokomis' });
+    });
+
+    // Pre-push P1s on 903ecc5ff0, 910b741125 and 0cdae8374e: with an address typed, a booking that moved to a matched
+    // profile's other stored location goes there. That profile is the trusted customer the next commit loads, so with
+    // the funnel on the refusal says the address changed and builds no times: the page drops the typed address and
+    // reloads its list (GET) from that profile's stored location and address, where the retry's own checks run. A time
+    // open there but not at the typed pin is offered and books (nextCommitRefresh). With the funnel off the refusal
+    // answers fresh times at that location, as before (the coords-mismatch test below).
+    test('a typed address and a profile at another stored location: the 409 drops the typed address, the reload offers the profile\'s times, and the retry books there', async () => {
+      mockFarSouthGates.funnel = true;
+      firstResults.leads = leadLinkedAfterWrite({ ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' });
+      firstResults.call_log = { from_phone: '+19415550101' };
+      firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+      seedPhoneHousehold({
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true,
+        address_line1: '123 Palm Ave', city: 'West Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
+        latitude: 27.1, longitude: -82.2, // another stored location: the booking moves there
+      });
+      listResults.scheduled_services = [];
+      firstResults.scheduled_services = { id: 'ss-refresh', reschedule_token: 'tok-refresh' };
+      const open = (t) => ({ start_time: t, end_time: `${t.slice(0, 2)}:30`, start_label: t, end_label: t, technician_id: 'tech-1' });
+      // The typed location (the default mockGeocode pin) has 09:00 open; the profile's has 09:00 and 10:00.
+      mockBuildAvailability.mockImplementation(async (args) => ({
+        days: [{ date: FUTURE_DATE, slots: (args.lat === 27.1 ? ['09:00', '10:00'] : ['09:00']).map(open) }],
+      }));
+      mockCreateSelfBooking.mockImplementationOnce(async () => ({ ok: false, status: 409, error: 'That time is no longer open.' }));
+      const token = mintLeadConsultationToken(LEAD_ID);
+      const builds = () => mockBuildAvailability.mock.calls.map(([a]) => [a.lat, a.zoneFunnelCity]);
+
+      const first = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Bradenton, FL 34209' });
+
+      expect(first.statusCode).toBe(409);
+      expect(first.body).toMatchObject({ code: 'SLOT_TAKEN', address_changed: true, availability: null });
+      // The anti-forgery build at the typed pin and the re-check at the profile's; no fresh times are built.
+      expect(builds()).toEqual([[27.4, 'Bradenton'], [27.1, 'West Bradenton']]);
+
+      // The page's reload: no typed address now, so the profile phase 1 linked, at its stored location and address.
+      mockBuildAvailability.mockClear();
+      const reload = await callGet(token);
+
+      expect(reload.body.availability.days[0].slots.map((s) => s.start_time)).toEqual(['09:00', '10:00']);
+      expect(builds()).toEqual([[27.1, 'West Bradenton']]);
+
+      // The retry books a time open there but not at the typed pin, with the same build the reload made.
+      mockBuildAvailability.mockClear();
+      const second = await callPost(token, { date: FUTURE_DATE, time: '10:00' });
+
+      expect(second.statusCode).toBe(200);
+      expect(builds()).toEqual([[27.1, 'West Bradenton']]);
+      const retry = mockCreateSelfBooking.mock.calls[1][0];
+      expect(retry.slot_start).toBe('10:00');
+      expect(retry.callbackVisit.zoneAddress(retry.authedCustomer)).toEqual({ address: '123 Palm Ave, West Bradenton, FL, 34209', city: 'West Bradenton' });
+    });
+
+    // A moved booking keeps the typed address when the next commit's trusted customer is another profile: without
+    // it, that commit would book that profile's own property. A failed read keeps it too (logged), and the refusal
+    // still answers. Either way no times are built: the page reloads its list for the address it holds.
+    test.each([
+      ['another trusted profile', () => {
+        firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-0', first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
+        seedPhoneHousehold({ id: 'cust-0', account_id: 'acct-9', is_primary_profile: true, address_line1: '9 Home St', city: 'Bradenton', state: 'FL', zip: '34209', phone: '9415550101' });
+      }],
+      ['a failed read', () => {
+        firstResults.leads = () => { throw new Error('leads unreadable'); };
+      }],
+    ])('a typed address whose booking moved, with %s: the refusal keeps the typed address', async (_label, seed) => {
+      mockFarSouthGates.funnel = true;
+      seed();
+      const { nextCommitRefresh } = inspectionPublicRouter._test;
+      const verified = require('../utils/lead-consultation-token').verifyLeadConsultationToken(mintLeadConsultationToken(LEAD_ID));
+
+      const refresh = await nextCommitRefresh({
+        lead: { id: LEAD_ID }, verified, resolved: { source: 'supplied' }, custRow: { id: 'cust-9' },
+        bookingAddress: { line1: '123 Palm Ave', city: 'Bradenton' }, bookingLocation: { lat: 27.1, lng: -82.2 }, locationMoved: true,
+      });
+
+      expect(refresh).toEqual({ location: null, addressChanged: false });
+    });
+
+    // Pre-push P1 on 756cfc2628: a moved booking drops the typed address only when the next commit, with none typed,
+    // resolves to the property this booking moved to: the same profile, with the stored pin and address phase 1 adopted.
+    // Staff may have moved that profile since; the next commit would then book the new property, so the typed address
+    // stays. Pre-push P1 on 1ef6ba1b16: staff may also have sent that address to review since phase 1. The quarantined
+    // row has no pin to compare, so the refusal answered no change, and the page kept the typed address, which its own
+    // list then refused with a 422 it does not show. The refusal answers the next commit's address refusal there too.
+    test.each([
+      ['its stored pin and address unchanged', { addressChanged: true }, {}, null],
+      ['a new pin since phase 1', { addressChanged: false }, { latitude: 27.5, longitude: -82.6 }, null],
+      ['a new address since phase 1', { addressChanged: false }, { address_line1: '9 Home St' }, null],
+      ['another profile at that pin and address', { addressChanged: false }, { id: 'cust-0', account_id: 'acct-0' }, null],
+      ['that address sent to review since phase 1', { failure: 'address_unresolved' }, {}, 'needs_pin'],
+    ])('a typed address whose booking moved to the trusted profile, %s: %j', async (_label, expected, edit, review) => {
+      mockFarSouthGates.funnel = true;
+      firstResults.leads = { ...LINKED_LEAD, customer_id: edit.id || 'cust-9' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      const adopted = {
+        address_line1: '123 Palm Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.1, longitude: -82.2,
+      };
+      seedPhoneHousehold({ id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, phone: '9415550101', ...adopted, ...edit });
+      if (review) {
+        gateState.reviewLive = true;
+        firstResults.customer_geocode_reviews = {
+          customer_id: 'cust-9', status: review, address_snapshot: ['123 Palm Ave', null, 'Bradenton', 'FL', '34209'],
+          latitude: null, longitude: null, updated_at: new Date(),
+        };
+      }
+      const { nextCommitRefresh } = inspectionPublicRouter._test;
+      const verified = require('../utils/lead-consultation-token').verifyLeadConsultationToken(mintLeadConsultationToken(LEAD_ID));
+      const typed = { line1: '123 Palm Ave', line2: null, city: 'Bradenton', state: 'FL', zip: '34209' };
+
+      const refresh = await nextCommitRefresh({
+        lead: { id: LEAD_ID }, verified, resolved: { source: 'supplied', address: typed }, custRow: { id: 'cust-9', ...adopted },
+        bookingAddress: typed, bookingLocation: { lat: 27.1, lng: -82.2 }, locationMoved: true,
+      });
+
+      expect(refresh).toEqual({ location: null, ...expected });
+    });
+
+    // Pre-push P1 on c08db66cc0: at the same pin, the fresh times are built with the trusted customer the next commit
+    // loads, read again, not phase 1's copy: staff may have changed the profile's city since (Nokomis to Venice here),
+    // and times built from the old city would offer an hour the next commit refuses. A failed read builds none: the page
+    // reloads its list for the address it holds.
+    test.each([
+      ['builds with the trusted customer read again', () => {
+        firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+        firstResults.call_log = { from_phone: '+19415550101' };
+        seedPhoneHousehold({ id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, address_line1: '123 Palm Ave', city: 'Venice', state: 'FL', zip: '34209', phone: '9415550101' });
+      }, { location: { lat: 27.4, lng: -82.5 }, customer: { id: 'cust-9', city: 'Venice' } }],
+      ['carries no times when that read fails', () => {
+        firstResults.leads = () => { throw new Error('leads unreadable'); };
+      }, { location: null }],
+      // Pre-push P1 on 419b536e4b: the next commit's phase 1 decides on the profile it loads. Times are built only on the
+      // profile this booking used; another one carries none, and the page reloads its list.
+      ['carries no times when the next commit loads another profile', () => {
+        firstResults.leads = { ...LEAD_ROW, customer_id: 'cust-0', first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
+        seedPhoneHousehold({ id: 'cust-0', account_id: 'acct-9', is_primary_profile: true, address_line1: '9 Home St', city: 'Bradenton', state: 'FL', zip: '34209', phone: '9415550101' });
+      }, { location: null }],
+      // Pre-push P1s on 23dfae53de and 172712852a: staff sent the profile's pin to review since phase one. The next
+      // commit's resolver answers `address_unresolved` for a typed copy of that address, so the refusal answers that.
+      ['answers the next commit\'s address refusal when a geocode review now quarantines that address', () => {
+        gateState.reviewLive = true;
+        firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+        firstResults.call_log = { from_phone: '+19415550101' };
+        seedPhoneHousehold({
+          id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, address_line1: '123 Palm Ave', address_line2: null,
+          city: 'Venice', state: 'FL', zip: '34209', phone: '9415550101',
+        });
+        firstResults.customer_geocode_reviews = {
+          customer_id: 'cust-9', status: 'needs_pin', address_snapshot: ['123 Palm Ave', null, 'Venice', 'FL', '34209'],
+          latitude: null, longitude: null, updated_at: new Date(),
+        };
+      }, { location: null, failure: 'address_unresolved' }],
+      // Pre-push P1 on 756cfc2628: the next commit's phase 1 refuses a typed address for a blocked profile with no
+      // address on file (reviewRefusesBooking), though the list's own rule lets it through, so the refusal answers that.
+      ['answers the next commit\'s phase 1 refusal for a blocked profile with no address on file', () => {
+        gateState.reviewLive = true;
+        firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+        firstResults.call_log = { from_phone: '+19415550101' };
+        seedPhoneHousehold({
+          id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, address_line1: null, address_line2: null,
+          city: null, state: null, zip: null, phone: '9415550101',
+        });
+        firstResults.customer_geocode_reviews = {
+          customer_id: 'cust-9', status: 'verified', address_snapshot: ['123 Palm Ave', null, 'Venice', 'FL', '34209'],
+          latitude: 27.4, longitude: -82.5, updated_at: new Date(),
+        };
+      }, { location: null, failure: 'address_unresolved' }],
+    ])('a typed address refused at the same pin %s', async (_label, seed, expected) => {
+      mockFarSouthGates.funnel = true;
+      seed();
+      const { nextCommitRefresh } = inspectionPublicRouter._test;
+      const verified = require('../utils/lead-consultation-token').verifyLeadConsultationToken(mintLeadConsultationToken(LEAD_ID));
+      const typed = { line1: '123 Palm Ave', line2: null, city: 'Laurel', state: 'FL', zip: '34209' };
+
+      const refresh = await nextCommitRefresh({
+        lead: { id: LEAD_ID }, verified, resolved: { source: 'supplied', address: typed }, custRow: { id: 'cust-9', city: 'Nokomis' },
+        bookingAddress: typed, bookingLocation: { lat: 27.4, lng: -82.5 }, locationMoved: false,
+      });
+
+      expect(refresh).toMatchObject(expected);
+      if (!expected.customer) expect(refresh).toEqual(expected);
+    });
+
+    // Pre-push P1 on 419b536e4b: a booking from the stored address (none typed) reuses its validated pin when the
+    // profile read again still has that stored pin and address, as the next commit, with none typed, resolves them.
+    // The page then makes no new lookup (its reload's GET paid for a county lookup). A changed pin or address, or a
+    // failed read, carries no times: the page reloads its list.
+    test.each([
+      ['its stored pin and address unchanged: fresh times there, with the profile read again', {}, null, true],
+      ['a new pin since phase 1: no times', { latitude: 27.5, longitude: -82.6 }, null, false],
+      ['a new address since phase 1: no times', { address_line1: '9 Home St' }, null, false],
+      ['a failed read: no times', {}, () => { firstResults.leads = () => { throw new Error('leads unreadable'); }; }, false],
+      // A blocked profile has no stored pin: the next commit answers the address form, which the page's reload shows.
+      ['that address sent to review since phase 1: no times, no address refusal', {}, () => {
+        gateState.reviewLive = true;
+        firstResults.customer_geocode_reviews = {
+          customer_id: 'cust-9', status: 'needs_pin', address_snapshot: ['123 Palm Ave', null, 'Bradenton', 'FL', '34209'],
+          latitude: null, longitude: null, updated_at: new Date(),
+        };
+      }, false],
+    ])('a stored-address booking refused after phase 1, %s', async (_label, edit, seedMore, reused) => {
+      mockFarSouthGates.funnel = true;
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      const stored = { address_line1: '123 Palm Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.1, longitude: -82.2 };
+      seedPhoneHousehold({ id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, phone: '9415550101', ...stored, ...edit });
+      if (seedMore) seedMore();
+      const { nextCommitRefresh } = inspectionPublicRouter._test;
+      const verified = require('../utils/lead-consultation-token').verifyLeadConsultationToken(mintLeadConsultationToken(LEAD_ID));
+      const bookingAddress = { line1: '123 Palm Ave', line2: null, city: 'Bradenton', state: 'FL', zip: '34209' };
+
+      const refresh = await nextCommitRefresh({
+        lead: { id: LEAD_ID }, verified, resolved: { source: 'customer', address: bookingAddress }, custRow: { id: 'cust-9', ...stored },
+        bookingAddress, bookingLocation: { lat: 27.1, lng: -82.2 }, locationMoved: false,
+      });
+
+      if (reused) {
+        expect(refresh).toMatchObject({ location: { lat: 27.1, lng: -82.2 }, address: bookingAddress, customer: { id: 'cust-9' } });
+      } else {
+        expect(refresh).toEqual({ location: null });
+      }
+    });
+
+    // Pre-push P1 on 8fa8005c52: with no address typed, the page shows the address it resolved (the profile's on file,
+    // else the lead's). When phase 1 moves the booking to a matched profile's other stored location, times there would
+    // sit under that old address, and a retry would book the profile's location under it. The refusal answers
+    // `address_changed` with no times, so the page reloads the address and the times together.
+    test('a stored-address booking that phase 1 moved to a matched profile answers address_changed with no times', async () => {
+      mockFarSouthGates.funnel = true;
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      const adopted = { address_line1: '9 Home St', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209', latitude: 27.3, longitude: -82.4 };
+      seedPhoneHousehold({ id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, phone: '9415550101', ...adopted });
+      const { nextCommitRefresh } = inspectionPublicRouter._test;
+      const verified = require('../utils/lead-consultation-token').verifyLeadConsultationToken(mintLeadConsultationToken(LEAD_ID));
+      const leadAddress = { line1: '123 Palm Ave', line2: null, city: 'Bradenton', state: 'FL', zip: '34209' };
+
+      const refresh = await nextCommitRefresh({
+        lead: { id: LEAD_ID }, verified, resolved: { source: 'lead', address: leadAddress, location: { lat: 27.1, lng: -82.2 } },
+        custRow: { id: 'cust-9', ...adopted }, bookingAddress: { line1: '9 Home St', line2: null, city: 'Bradenton', state: 'FL', zip: '34209' },
+        bookingLocation: { lat: 27.3, lng: -82.4 }, locationMoved: true,
+      });
+
+      expect(refresh).toEqual({ location: null, addressChanged: true });
+    });
+
+    // Pre-push P1 on 419b536e4b: at the same pin, the next commit's phase 1 keeps the profile's staff-verified pin for a
+    // typed address the customers row matches (retainReviewedLocation). Staff may verify a pin for that address after
+    // this commit: the next commit then books that pin, so the refusal answers as a moved booking does (the page drops
+    // the typed address, and its reload and retry read that pin). The booking's own pin builds fresh times as before;
+    // a failed read of the row carries none.
+    test.each([
+      ['another pin', { latitude: 27.5, longitude: -82.6 }, null, '34209', { location: null, addressChanged: true }],
+      ['this booking\'s own pin', { latitude: 27.4, longitude: -82.5 }, null, '34209', 'fresh'],
+      ['another pin, and the customers row read fails', { latitude: 27.5, longitude: -82.6 }, 'fails', '34209', { location: null }],
+      // The trusted view can carry the primary property's pin. Phase 1 matches the customers row itself, which has no
+      // pin here, so a typed address with no ZIP does not match it, and phase 1 writes over the profile at the typed pin.
+      ['another pin on the primary property only, for a typed address with no ZIP', { latitude: 27.5, longitude: -82.6 },
+        { latitude: null, longitude: null }, null, 'fresh'],
+    ])('a typed address refused at the same pin, after staff verified %s for that address', async (_label, pin, rawRow, typedZip, expected) => {
+      mockFarSouthGates.funnel = true;
+      gateState.reviewLive = true;
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-9' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      seedPhoneHousehold({
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true, address_line1: '123 Palm Ave', address_line2: null,
+        city: 'Venice', state: 'FL', zip: '34209', phone: '9415550101', latitude: pin.latitude, longitude: pin.longitude,
+      });
+      firstResults.customer_geocode_reviews = {
+        customer_id: 'cust-9', status: 'verified', address_snapshot: ['123 Palm Ave', null, 'Venice', 'FL', '34209'],
+        latitude: pin.latitude, longitude: pin.longitude, updated_at: new Date(),
+      };
+      if (rawRow) {
+        const trustedRead = firstResults.customers;
+        firstResults.customers = (q) => {
+          if (q.firstColumns[0] !== 'address_line1') return trustedRead(q);
+          if (rawRow === 'fails') throw new Error('customers row unreadable');
+          return { ...trustedRead(q), ...rawRow };
+        };
+      }
+      const { nextCommitRefresh } = inspectionPublicRouter._test;
+      const verified = require('../utils/lead-consultation-token').verifyLeadConsultationToken(mintLeadConsultationToken(LEAD_ID));
+      const typed = { line1: '123 Palm Ave', line2: null, city: 'Venice', state: 'FL', zip: typedZip };
+
+      const refresh = await nextCommitRefresh({
+        lead: { id: LEAD_ID }, verified, resolved: { source: 'supplied', address: typed, location: { lat: 27.4, lng: -82.5 } },
+        custRow: { id: 'cust-9' }, bookingAddress: typed, bookingLocation: { lat: 27.4, lng: -82.5 }, locationMoved: false,
+      });
+
+      if (expected === 'fresh') {
+        expect(refresh).toMatchObject({ location: { lat: 27.4, lng: -82.5 }, address: typed, customer: { id: 'cust-9', verified_by_review: true } });
+      } else {
+        expect(refresh).toEqual(expected);
+      }
     });
 
     // Codex #4737 r9 pre-push P1: the matched profile is re-read under its
@@ -2941,8 +3939,16 @@ describe('POST /:token commit', () => {
         });
       });
 
-      test('coords mismatch on the matched row → re-validates the slot against ITS stored location and fails closed (SLOT_TAKEN), never books', async () => {
-        firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
+      // The refusal: with the funnel off (GATE_SOUTH_ZONE_DAY_FUNNEL) fresh times at the matched row's own location,
+      // as before the far-south rule (pre-push P1 on 7cdf34198a). With it on, no times: phase 1 linked the lead to the
+      // matched row, so the page drops the typed address and reloads its own list there, where its next commit books
+      // (nextCommitRefresh).
+      test.each([
+        ['the funnel off: fresh times at ITS location', false, [[27.4, -82.5], [27.1, -82.2], [27.1, -82.2]], undefined],
+        ['the funnel on: no times, the typed address dropped', true, [[27.4, -82.5], [27.1, -82.2]], true],
+      ])('coords mismatch on the matched row → re-validates the slot against ITS stored location and fails closed (SLOT_TAKEN), never books (%s)', async (_label, funnel, builtPins, addressChanged) => {
+        mockFarSouthGates.funnel = funnel;
+        firstResults.leads = leadLinkedAfterWrite({ ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' });
         firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
         mockOneSlot(); // satisfies the pre-lock anti-forgery day check only
         // Matches by full address (street + zip) — the OR branch that never
@@ -2966,10 +3972,11 @@ describe('POST /:token commit', () => {
         expect(insertCalls.some((c) => c.table === 'customers')).toBe(false);
         // buildAvailabilityForLead: [0] the pre-lock day check at the lead's
         // OWN resolved location, [1] phase 1's re-validation at the MATCHED
-        // row's own (far-away) location — not the pre-lock one — and [2]
-        // the SLOT_TAKEN handler's refreshed-availability call.
-        expect(mockBuildAvailability).toHaveBeenCalledTimes(3);
-        expect(mockBuildAvailability.mock.calls[1][0]).toEqual(expect.objectContaining({ lat: 27.1, lng: -82.2 }));
+        // row's own (far-away) location — not the pre-lock one — and, with
+        // the funnel off, [2] the refusal's fresh times there.
+        expect(mockBuildAvailability.mock.calls.map(([args]) => [args.lat, args.lng])).toEqual(builtPins);
+        expect(res.body.address_changed).toBe(addressChanged);
+        expect(res.body.availability === null).toBe(funnel);
       });
     });
 
@@ -3117,6 +4124,105 @@ describe('profileAffirmativelyDiffers unit coverage (Codex P2, PR #5064, :1168 "
   // ('a supplied copy with %s cannot bypass an outside-area review').
   test('an unrecognized community name, no ZIP → NOT proven different (unlike a known distinct city such as Sarasota)', () => {
     expect(profileAffirmativelyDiffers(row, { line1: '5 Palm Ave', city: 'Palma Sola', state: 'FL', zip: null })).toBe(false);
+  });
+});
+
+// The city a list reads as the zone fallback, the one phase 1 may keep (pre-push P1s on 1ef6ba1b16, f6c3fdc9e9,
+// c49372bb7d and cebd106404): the trusted profile's city only for its own property, never a place the area check
+// refuses, and never over a typed South Hillsborough town (by city or ZIP), which the area check may admit by that
+// name, unless phase 1 keeps the whole profile (`retained`; it then writes nothing). A staff-verified flag alone is
+// not that: phase 1 also needs the typed address to match the customers row by its own ZIP or pin, and a list asks
+// that row itself (listFallbackCity).
+describe('zoneFallbackCity (the city a list reads, as phase 1 keeps it)', () => {
+  const property = { address_line1: '123 Palm Ave', address_line2: null, state: 'FL', zip: '34209', latitude: 27.4, longitude: -82.5 };
+  const typed = { line1: '123 Palm Ave', line2: null, city: 'Charlotte Harbor', state: 'FL', zip: '34209' };
+  const wimauma = { ...typed, city: 'Wimauma' };
+  const southZip = { ...typed, city: 'Laurel', zip: '33598' };
+  const verifiedVenice = { ...property, city: 'Venice', verified_by_review: true };
+  test.each([
+    ['the profile\'s own property', 'Nokomis', { ...property, city: 'Nokomis' }, typed, {}],
+    ['another street', null, { ...property, address_line1: '9 Other St', city: 'Nokomis' }, typed, {}],
+    ['no trusted customer', null, null, typed, {}],
+    ['a place the area check refuses', null, { ...property, city: 'Punta Gorda' }, typed, {}],
+    ['a place the area check refuses, on a profile phase 1 keeps whole', 'Punta Gorda', { ...property, city: 'Punta Gorda', verified_by_review: true }, typed, { retained: true }],
+    ['a refused place under a staff-verified flag alone', null, { ...property, city: 'Punta Gorda', verified_by_review: true }, typed, {}],
+    ['a typed South Hillsborough town', null, { ...property, city: 'Venice' }, wimauma, {}],
+    ['a typed South Hillsborough ZIP', null, { ...property, city: 'Venice', zip: '33598' }, southZip, {}],
+    ['a typed South Hillsborough town, on a profile phase 1 keeps whole', 'Venice', verifiedVenice, wimauma, { retained: true }],
+    ['a typed South Hillsborough town under a staff-verified flag alone', null, verifiedVenice, wimauma, {}],
+    ['a profile phase 1 keeps whole, on another street', null, { ...verifiedVenice, address_line1: '9 Other St' }, typed, { retained: true }],
+  ])('%s: %s', (_label, expected, customer, address, opts) => {
+    expect(inspectionPublicRouter._test.zoneFallbackCity(customer, address, { lat: 27.4, lng: -82.5 }, opts)).toBe(expected);
+  });
+});
+
+// A list asks the customers row itself whether phase 1 keeps the whole profile (pre-push P1 on cebd106404): a
+// staff-verified pin, and the typed address matches that row by its own ZIP or pin, as phase 1's
+// retainReviewedLocation reads storedCustRow. The trusted view can carry the primary property's pin instead.
+describe('listFallbackCity (a list\'s fallback city, with phase 1\'s own whole-profile check)', () => {
+  const trusted = {
+    id: 'cust-pg', address_line1: '123 Palm Ave', address_line2: null, city: 'Punta Gorda', state: 'FL', zip: '33950',
+    latitude: 27.4, longitude: -82.5, verified_by_review: true,
+  };
+  const typedNoZip = { line1: '123 Palm Ave', line2: null, city: 'Laurel', state: 'FL', zip: null };
+  const connFor = (row) => {
+    const reads = [];
+    const conn = (table) => ({ where: (w) => ({ first: async (...cols) => { reads.push([table, w, cols]); return row; } }) });
+    return { conn, reads };
+  };
+  beforeEach(() => { mockFarSouthGates.funnel = true; });
+  test.each([
+    ['the customers row has the matching pin: phase 1 keeps the whole profile', 'Punta Gorda', { ...trusted }],
+    ['only the primary property has the pin: phase 1 writes over the profile', null, { ...trusted, latitude: null, longitude: null }],
+    ['the customers row is gone', null, null],
+  ])('%s', async (_label, expected, row) => {
+    const { conn, reads } = connFor(row);
+    await expect(inspectionPublicRouter._test.listFallbackCity(conn, trusted, typedNoZip, { lat: 27.4, lng: -82.5 })).resolves.toBe(expected);
+    expect(reads).toEqual([['customers', { id: 'cust-pg' }, ['address_line1', 'address_line2', 'zip', 'latitude', 'longitude']]]);
+  });
+
+  test('a profile with no staff-verified pin reads no row', async () => {
+    const { conn, reads } = connFor({ ...trusted });
+    await expect(inspectionPublicRouter._test.listFallbackCity(conn, { ...trusted, verified_by_review: undefined, city: 'Nokomis' }, typedNoZip, { lat: 27.4, lng: -82.5 })).resolves.toBe('Nokomis');
+    expect(reads).toEqual([]);
+  });
+
+  // Pre-push P1 on 979f0dbec9: with the funnel off nothing reads the city, so a staff-verified profile reads no row
+  // either; with it on, a failed read is no fallback city (logged), never an error into the list or the commit.
+  test('with the funnel off, a staff-verified profile reads no row', async () => {
+    mockFarSouthGates.funnel = false;
+    const { conn, reads } = connFor({ ...trusted });
+    await expect(inspectionPublicRouter._test.listFallbackCity(conn, trusted, typedNoZip, { lat: 27.4, lng: -82.5 })).resolves.toBeNull();
+    expect(reads).toEqual([]);
+  });
+
+  test('a failed read of the customers row is no fallback city, logged', async () => {
+    const logger = require('../services/logger');
+    const conn = () => ({ where: () => ({ first: async () => { throw new Error('connection reset'); } }) });
+    // Nokomis is a city phase 1 keeps with or without the whole profile, so only the failed read drops it.
+    await expect(inspectionPublicRouter._test.listFallbackCity(conn, { ...trusted, city: 'Nokomis' }, typedNoZip, { lat: 27.4, lng: -82.5 })).resolves.toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('fallback-city read failed for customer cust-pg (no fallback city): connection reset'));
+  });
+});
+
+// Phase 1's review rule (provisionLinkedCustomer), shared since pre-push P1 on 756cfc2628 with a refused booking's
+// refresh (nextCommitRefresh): a blocked profile books only a typed address that is affirmatively another property
+// than the address on file. A profile with no street on file has nothing to differ from, whatever its ZIP; an address
+// the page did not type (the profile's own, or the lead's form address) is never another property.
+describe('reviewRefusesBooking (phase 1\'s review rule)', () => {
+  const { reviewRefusesBooking } = inspectionPublicRouter._test;
+  const onFile = { address_line1: '5 Palm Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209' };
+  const other = { line1: '9 Home St', line2: null, city: 'Bradenton', state: 'FL', zip: '34209' };
+  const same = { line1: '5 Palm Ave', line2: null, city: 'Bradenton', state: 'FL', zip: '34209' };
+  test.each([
+    ['a profile no review blocks', false, false, onFile, { source: 'supplied', address: same }],
+    ['a typed address that is another property', false, true, onFile, { source: 'supplied', address: other }],
+    ['a typed copy of the address on file', true, true, onFile, { source: 'supplied', address: same }],
+    ['a typed address, a ZIP but no street on file', true, true, { address_line1: null, zip: '34205' }, { source: 'supplied', address: other }],
+    ['the lead\'s form address, another property', true, true, onFile, { source: 'lead', address: other }],
+    ['the profile\'s own address', true, true, onFile, { source: 'customer', address: same }],
+  ])('%s: refused %s', (_label, expected, blocked, row, resolved) => {
+    expect(reviewRefusesBooking({ ...row, geocode_review_blocked: blocked }, row, resolved)).toBe(expected);
   });
 });
 
@@ -3332,17 +4438,64 @@ describe('checkServiceArea unit coverage (P1 :355)', () => {
       expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { zip: '33950' })).toEqual({ ok: false, county: null });
     });
 
-    test('33983 + Punta Gorda is refused; 33980 + Port Charlotte is served', async () => {
+    test('33983 + Punta Gorda is refused', async () => {
       mockCounty.mockImplementation(async () => 'Charlotte');
       expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Punta Gorda', zip: '33983' })).toEqual({ ok: false, county: null });
-      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte', zip: '33980' })).toEqual({ ok: true, county: 'Charlotte' });
     });
 
-    test('Port Charlotte 33948, Englewood and ZIP-only 33983 stay served', async () => {
+    // Owner ruling 2026-11-23: Rotonda, Placida, Boca Grande, Babcock Ranch, Gulf Cove, El Jobean, Charlotte Harbor and
+    // Deep Creek are held until a second technician is hired; the address's own city or ZIP refuses them before any
+    // lookup. Englewood and Port Charlotte were held for a few hours and are served again (owner "ok do this").
+    test.each([
+      [{ city: 'Port Charlotte', zip: '33980' }], [{ city: 'Port Charlotte', zip: '33981' }], [{ zip: '33983' }],
+      [{ city: 'Charlotte Harbor' }], [{ city: 'Gulf Cove' }], [{ city: 'El Jobean' }], [{ city: 'Deep Creek' }],
+      [{ city: 'Rotonda West' }], [{ zip: '33947' }], [{ zip: '33927' }],
+      [{ city: 'Placida' }], [{ city: 'Boca Grande' }], [{ city: 'Babcock Ranch', zip: '33982' }],
+    ])('held place %j is refused', async (address) => {
       mockCounty.mockImplementation(async () => 'Charlotte');
-      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte', zip: '33948' })).toEqual({ ok: true, county: 'Charlotte' });
-      expect(await checkServiceArea({ lat: 26.96, lng: -82.35 }, { city: 'Englewood', zip: '34223' })).toEqual({ ok: true, county: 'Charlotte' });
-      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { zip: '33983' })).toEqual({ ok: true, county: 'Charlotte' });
+      mockCounty.mockClear();
+      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, address)).toEqual({ ok: false, county: null });
+      expect(mockCounty).not.toHaveBeenCalled();
+    });
+
+    test('Englewood and Port Charlotte are served again, on either side of the county line', async () => {
+      mockCounty.mockImplementation(async () => 'Sarasota');
+      mockLocality.mockImplementation(async () => ({ city: 'Englewood', zip: '34223' }));
+      mockLocality.mockClear();
+      expect(await checkServiceArea({ lat: 26.96, lng: -82.35 }, { city: 'Englewood', zip: '34223' })).toEqual({ ok: true, county: 'Sarasota' });
+      expect(await checkServiceArea({ lat: 26.96, lng: -82.35 }, { zip: '34224' })).toEqual({ ok: true, county: 'Sarasota' });
+      // a Sarasota pin makes no locality lookup: no held place sits in Sarasota County
+      expect(mockLocality).not.toHaveBeenCalled();
+      mockCounty.mockImplementation(async () => 'Charlotte');
+      for (const [city, zip] of [['Port Charlotte', '33948'], ['Port Charlotte', '33952'], ['Port Charlotte', '33954'], ['Englewood', '34224'], ['Englewood', '34223']]) {
+        expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city, zip })).toEqual({ ok: true, county: 'Charlotte' });
+      }
+      mockLocality.mockImplementation(async () => ({ city: 'Port Charlotte', zip: '33948' }));
+      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St' })).toEqual({ ok: true, county: 'Charlotte' });
+    });
+
+    // Google names some addresses on the held shared ZIPs 33980 / 33981 / 33983 "Port Charlotte": a Port Charlotte
+    // locality with no ZIP cannot be told from one of them, so it is unavailable (recoverable 503), never served.
+    test('a Port Charlotte locality with no ZIP is unavailable; with a held shared ZIP it is refused', async () => {
+      mockCounty.mockImplementation(async () => 'Charlotte');
+      mockLocality.mockImplementation(async () => ({ city: 'Port Charlotte', zip: null }));
+      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St' })).toEqual({ ok: false, county: null, unavailable: true });
+      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St', city: 'Port Charlotte' })).toEqual({ ok: false, county: null, unavailable: true });
+      mockLocality.mockImplementation(async () => ({ city: 'Port Charlotte', zip: '33980' }));
+      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St' })).toEqual({ ok: false, county: null });
+      mockLocality.mockImplementation(async () => ({ city: 'Englewood', zip: null }));
+      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St' })).toEqual({ ok: true, county: 'Charlotte' });
+      // Google names no city and no ZIP, and the address says Port Charlotte: still unknowable
+      mockLocality.mockImplementation(async () => ({ city: null, zip: null }));
+      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St', city: 'Port Charlotte' })).toEqual({ ok: false, county: null, unavailable: true });
+    });
+
+    test('North Port (34286-34291) stays served', async () => {
+      mockCounty.mockImplementation(async () => 'Sarasota');
+      mockLocality.mockImplementation(async () => ({ city: 'North Port', zip: '34287' }));
+      for (const zip of ['34286', '34287', '34288', '34289', '34291']) {
+        expect(await checkServiceArea({ lat: 27.0443, lng: -82.2359 }, { city: 'North Port', zip })).toEqual({ ok: true, county: 'Sarasota' });
+      }
     });
 
     test("Google's own locality refuses a Punta Gorda pin the submitted address does not name (Codex #6424 r1)", async () => {
@@ -3354,20 +4507,23 @@ describe('checkServiceArea unit coverage (P1 :355)', () => {
       expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St' })).toEqual({ ok: false, county: null });
     });
 
+    test("Google's own locality refuses a held place the submitted address does not name (2026-11-23)", async () => {
+      mockCounty.mockImplementation(async () => 'Charlotte');
+      mockLocality.mockImplementation(async () => ({ city: 'Rotonda West', zip: '33947' }));
+      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St', city: 'Venice' })).toEqual({ ok: false, county: null });
+      mockLocality.mockImplementation(async () => ({ city: null, zip: '33983' }));
+      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St' })).toEqual({ ok: false, county: null });
+    });
+
     test('a failed locality lookup in Charlotte is unavailable, never served', async () => {
       mockCounty.mockImplementation(async () => 'Charlotte');
       mockLocality.mockImplementation(async () => null);
-      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St' })).toEqual({ ok: false, county: null, unavailable: true });
-      mockLocality.mockImplementation(async () => ({ city: null, zip: '33983' }));
       expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St' })).toEqual({ ok: false, county: null, unavailable: true });
       mockLocality.mockImplementation(async () => { throw new Error('boom'); });
       expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St' })).toEqual({ ok: false, county: null, unavailable: true });
     });
 
-    test('Babcock Ranch (33982) and other served counties need no locality refusal', async () => {
-      mockCounty.mockImplementation(async () => 'Charlotte');
-      mockLocality.mockImplementation(async () => ({ city: 'Babcock Ranch', zip: '33982' }));
-      expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St', zip: '33982' })).toEqual({ ok: true, county: 'Charlotte' });
+    test('other served counties need no locality lookup', async () => {
       mockCounty.mockImplementation(async () => 'Manatee');
       mockLocality.mockClear();
       expect(await checkServiceArea({ lat: 27.4989, lng: -82.5748 }, { line1: '1 Main St' })).toEqual({ ok: true, county: 'Manatee' });
@@ -3381,7 +4537,14 @@ describe('checkServiceArea unit coverage (P1 :355)', () => {
       delete process.env.GOOGLE_MAPS_API_KEY;
       try {
         expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Punta Gorda' })).toEqual({ ok: false, county: null });
-        expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte', zip: '33980' })).toEqual({ ok: true, county: null });
+        expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte', zip: '33980' })).toEqual({ ok: false, county: null });
+        // no key: a Port Charlotte address with no ZIP cannot be told from a held shared ZIP: unavailable, before the box fallback
+        expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte' })).toEqual({ ok: false, county: null, unavailable: true });
+        expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte', zip: '  ' })).toEqual({ ok: false, county: null, unavailable: true });
+        expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte', zip: '3398' })).toEqual({ ok: false, county: null, unavailable: true });
+        expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte', zip: '33948' })).toEqual({ ok: true, county: null });
+        expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { city: 'Port Charlotte', zip: '33948-1234' })).toEqual({ ok: true, county: null });
+        expect(await checkServiceArea(PORT_CHARLOTTE_PIN, { line1: '1 Main St' })).toEqual({ ok: true, county: null });
       } finally {
         if (savedA !== undefined) process.env.GOOGLE_API_KEY = savedA;
         if (savedB !== undefined) process.env.GOOGLE_MAPS_API_KEY = savedB;

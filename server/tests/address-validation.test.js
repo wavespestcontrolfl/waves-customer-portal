@@ -127,8 +127,8 @@ describe('deriveStatus: Punta Gorda is not served (owner ruling 2026-10-22)', ()
     expect(r.inServiceArea).toBe(false);
   });
 
-  test('33982 is shared with Babcock Ranch: the city decides', () => {
-    expect(deriveStatus(pgResult('Babcock Ranch', '33982'), 'Charlotte County').inServiceArea).toBe(true);
+  test('33982 is Punta Gorda and Babcock Ranch, both held: out either way', () => {
+    expect(deriveStatus(pgResult('Babcock Ranch', '33982'), 'Charlotte County').inServiceArea).toBe(false);
     expect(deriveStatus(pgResult('Punta Gorda', '33982'), 'Charlotte County').inServiceArea).toBe(false);
   });
 
@@ -136,11 +136,71 @@ describe('deriveStatus: Punta Gorda is not served (owner ruling 2026-10-22)', ()
     expect(deriveStatus(pgResult('', '33950'), 'Charlotte County').status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
   });
 
-  test('33983 with Punta Gorda is out; Port Charlotte 33980 / 33948 and Englewood stay served', () => {
+  test('33983 with Punta Gorda is out', () => {
     expect(deriveStatus(pgResult('Punta Gorda', '33983'), 'Charlotte County').status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
-    expect(deriveStatus(pgResult('Port Charlotte', '33980'), 'Charlotte County').status).toBe(STATUSES.VALIDATED_ACCEPT);
-    expect(deriveStatus(pgResult('Port Charlotte', '33948'), 'Charlotte County').status).toBe(STATUSES.VALIDATED_ACCEPT);
-    expect(deriveStatus(pgResult('Englewood', '34223'), 'Charlotte County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+  });
+});
+
+describe('deriveStatus: places held until a second technician is hired (owner ruling 2026-11-23)', () => {
+  function placeResult(city, zip) {
+    const r = result();
+    r.address.addressComponents = r.address.addressComponents.map((c) => {
+      if (c.componentType === 'locality') return { ...c, componentName: { text: city } };
+      if (c.componentType === 'postal_code') return { ...c, componentName: { text: zip } };
+      return c;
+    });
+    return r;
+  }
+
+  test.each([
+    ['Port Charlotte', '33980', 'Charlotte County'], ['Port Charlotte', '33981', 'Charlotte County'],
+    ['Charlotte Harbor', '33980', 'Charlotte County'], ['Deep Creek', '33983', 'Charlotte County'],
+    ['Gulf Cove', '33981', 'Charlotte County'], ['El Jobean', '33981', 'Charlotte County'],
+    ['Rotonda West', '33947', 'Charlotte County'], ['Placida', '33946', 'Charlotte County'], ['Placida', '33927', 'Charlotte County'],
+    ['Boca Grande', '33921', 'Charlotte County'], ['Babcock Ranch', '33982', 'Charlotte County'],
+  ])('%s %s in %s is out_of_service_area', (city, zip, county) => {
+    const r = deriveStatus(placeResult(city, zip), county);
+    expect(r.status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
+    expect(r.inServiceArea).toBe(false);
+  });
+
+  test('a held ZIP with no locality is out; a held city with no ZIP is out', () => {
+    expect(deriveStatus(placeResult('', '33947'), 'Charlotte County').status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
+    expect(deriveStatus(placeResult('Rotonda West', ''), 'Charlotte County').status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
+  });
+
+  test('Englewood and Port Charlotte are served again (owner "ok do this", 2026-11-23)', () => {
+    expect(deriveStatus(placeResult('Port Charlotte', '33948'), 'Charlotte County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+    expect(deriveStatus(placeResult('Port Charlotte', '33952'), 'Charlotte County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+    expect(deriveStatus(placeResult('', '33954'), 'Charlotte County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+    expect(deriveStatus(placeResult('Englewood', '34223'), 'Sarasota County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+    expect(deriveStatus(placeResult('Englewood', '34224'), 'Charlotte County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+    expect(deriveStatus(placeResult('', '34295'), 'Sarasota County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+  });
+
+  // A Port Charlotte address with no ZIP could sit on a held shared ZIP (33980 / 33981 / 33983): the area is unknown,
+  // never validated_accept and never out of area (owner ruling 2026-11-23).
+  test('Port Charlotte with no ZIP is unverified: confirm_needed, area unknown', () => {
+    for (const county of ['Charlotte County', 'Sarasota County']) {
+      const r = deriveStatus(placeResult('Port Charlotte', ''), county);
+      expect(r.status).toBe(STATUSES.CONFIRM_NEEDED);
+      expect(r.inServiceArea).toBeNull();
+    }
+    expect(deriveStatus(placeResult('port charlotte', ''), 'Charlotte County').status).toBe(STATUSES.CONFIRM_NEEDED);
+    // a malformed ZIP fragment is not a ZIP
+    expect(deriveStatus(placeResult('Port Charlotte', '3398'), 'Charlotte County').status).toBe(STATUSES.CONFIRM_NEEDED);
+    // with a served ZIP it is accepted, with a held one it is out, and a county outside the area stays out
+    expect(deriveStatus(placeResult('Port Charlotte', '33948'), 'Charlotte County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+    expect(deriveStatus(placeResult('Port Charlotte', '33981'), 'Charlotte County').status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
+    expect(deriveStatus(placeResult('Port Charlotte', ''), 'Lee County').status).toBe(STATUSES.OUT_OF_SERVICE_AREA);
+    // other towns with no ZIP are unchanged
+    expect(deriveStatus(placeResult('Venice', ''), 'Sarasota County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+  });
+
+  test('North Port and Venice stay served', () => {
+    expect(deriveStatus(placeResult('North Port', '34287'), 'Sarasota County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+    expect(deriveStatus(placeResult('North Port', '34291'), 'Sarasota County').status).toBe(STATUSES.VALIDATED_ACCEPT);
+    expect(deriveStatus(placeResult('Venice', '34285'), 'Sarasota County').status).toBe(STATUSES.VALIDATED_ACCEPT);
   });
 });
 

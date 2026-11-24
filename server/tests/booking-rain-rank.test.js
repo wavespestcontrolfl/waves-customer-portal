@@ -1,12 +1,11 @@
 /**
- * Booking rain rank (owner 2026-10-06, GATE_BOOKING_RAIN_RANK, dark).
+ * Booking rain rank (owner 2026-10-06).
  *
  *  1. rainFitFor: a booking is rain-OK only when every service is
  *     (assessment, estimate, inspection, WDO, rodent, trapping, interior).
  *  2. isWetWindow: 60%+ in any hour from the start through 2 h after the end,
  *     next 3 dates only; no reading = unknown, not dry.
- *  3. The New Appointment rows rank by rain fit before drive with the gate
- *     on; off, the order is drive-only and the forecast is read once.
+ *  3. The New Appointment rows rank by rain fit before drive.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
@@ -149,7 +148,7 @@ describe('catalog identity beats the words in a name', () => {
 });
 
 describe('withCatalogKeys', () => {
-  afterEach(() => { delete process.env.GATE_BOOKING_RAIN_RANK; jest.dontMock('../services/service-completion-profiles'); jest.resetModules(); });
+  afterEach(() => { jest.dontMock('../services/service-completion-profiles'); jest.resetModules(); });
 
   function load(resolver) {
     jest.resetModules();
@@ -158,14 +157,59 @@ describe('withCatalogKeys', () => {
     return require('../services/scheduling/rain-fit').withCatalogKeys;
   }
 
-  test('gate off: names pass through, nothing is read', async () => {
-    const resolver = jest.fn();
-    expect(await load(resolver)(['Bed Bug Treatment'], {})).toEqual(['Bed Bug Treatment']);
-    expect(resolver).not.toHaveBeenCalled();
+  test('gate null (a rule with no gate of its own: the 07:05 fill list): always reads', async () => {
+    const resolver = jest.fn(async ({ service_key_snapshot: key }) => ({ serviceKey: key || null, findingsType: null }));
+    expect(await load(resolver)([{ name: 'Shared Label', serviceKey: 'wdo_inspection' }], {}, { gate: null }))
+      .toEqual([{ name: 'Shared Label', serviceKey: 'wdo_inspection', findingsType: null }]);
+    expect(resolver).toHaveBeenCalledTimes(1);
   });
 
-  test('gate on: each name gets the identity its visit would have', async () => {
-    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+  test('a failed read keeps the name (word rules); with strict it throws, for a caller that keeps the job out of rain', async () => {
+    const resolver = jest.fn(async () => { throw new Error('db down'); });
+    const withKeys = load(resolver);
+    const item = { name: 'Waves Assessment', serviceKey: 'pest_quarterly' };
+    expect(await withKeys([item], {})).toEqual(['Waves Assessment']);
+    await expect(withKeys([item], {}, { strict: true })).rejects.toThrow('db down');
+    // The resolver runs strict too, so its own swallowed reads (the short-name query) throw as well.
+    expect(resolver).toHaveBeenLastCalledWith({ service_type: 'Waves Assessment', service_key_snapshot: 'pest_quarterly' }, {}, { strict: true });
+  });
+
+  test('strict: a key the resolver does not return (gone from the catalog) decides, never the name\'s row', async () => {
+    // No row has the stored key, so the resolver falls back to the name: an assessment.
+    const withKeys = load(jest.fn(async () => ({ serviceKey: 'waves_assessment', findingsType: 'assessment' })));
+    const item = { name: 'Waves Assessment', serviceKey: 'pest_retired' };
+    expect(await withKeys([item], {})).toEqual([{ name: 'Waves Assessment', serviceKey: 'waves_assessment', findingsType: 'assessment' }]);
+    const strict = await withKeys([item], {}, { strict: true });
+    expect(strict).toEqual([{ name: 'Waves Assessment', serviceKey: 'pest_retired', findingsType: null }]);
+    expect(rainFitFor(strict)).toBe('avoid');
+  });
+
+  test('bookingServiceList: deduplicated by key and name, capped at 12 (overflow), the primary added unless named', () => {
+    const { bookingServiceList } = require('../services/scheduling/rain-fit');
+    const pairs = Array.from({ length: 13 }, (_, i) => ({ name: `Bait Check ${i}`, key: 'rodent_bait_quarterly' }));
+    const twelve = bookingServiceList(pairs.slice(0, 12));
+    expect([twelve.services.length, twelve.overflow]).toEqual([12, false]);
+    expect(twelve.services[11]).toEqual({ name: 'Bait Check 11', serviceKey: 'rodent_bait_quarterly' });
+    expect(bookingServiceList(pairs)).toEqual({ services: twelve.services, overflow: true });
+    expect(bookingServiceList([{ name: ' Lawn Care ', key: 'lawn_care_monthly' }, { name: 'lawn care', key: 'lawn_care_monthly' }, { name: 'X', key: 'Bad Key!' }, { name: ' ' }, null], 'LAWN CARE'))
+      .toEqual({ services: [{ name: 'Lawn Care', serviceKey: 'lawn_care_monthly' }, { name: 'X', serviceKey: null }], overflow: false });
+    expect(bookingServiceList([], ' WDO Inspection ')).toEqual({ services: [{ name: 'WDO Inspection', serviceKey: null }], overflow: false });
+    // The primary past the cap overflows too.
+    expect(bookingServiceList(pairs.slice(0, 12), 'WDO Inspection').overflow).toBe(true);
+  });
+
+  test('bookingServices: past 12 services the booking carries the overflow entry (outdoor)', async () => {
+    load(jest.fn(async ({ service_key_snapshot: key }) => ({ serviceKey: key || null, findingsType: null })));
+    const { bookingServices, rainFitFor: fit } = require('../services/scheduling/rain-fit');
+    const names = Array.from({ length: 13 }, (_, i) => `Bait Check ${i}`);
+    const keys = names.map(() => 'rodent_bait_quarterly');
+    const twelve = await bookingServices({ bestRows: true, serviceTypes: names.slice(0, 12), serviceKeys: keys.slice(0, 12) }, {});
+    expect([twelve.length, fit(twelve)]).toEqual([12, 'prefer']);
+    const thirteen = await bookingServices({ bestRows: true, serviceTypes: names, serviceKeys: keys }, {});
+    expect([thirteen.length, thirteen[12], fit(thirteen)]).toEqual([13, { name: 'More services', serviceKey: 'booking_services_over_cap', findingsType: null }, 'avoid']);
+  });
+
+  test('each name gets the identity its visit would have', async () => {
     const resolver = jest.fn(async ({ service_type: name }) => (name === 'Rodent Trapping Service'
       ? { serviceKey: 'rodent_trapping_svc', findingsType: 'rodent_trapping' }
       : { serviceKey: null, findingsType: null, synthesized: true }));
@@ -177,8 +221,7 @@ describe('withCatalogKeys', () => {
     expect(resolver).toHaveBeenCalledWith({ service_type: 'Rodent Trapping Service', service_key_snapshot: undefined }, db);
   });
 
-  test('gate on: a key the screen sent settles the identity ahead of the name', async () => {
-    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+  test('a key the screen sent settles the identity ahead of the name', async () => {
     const resolver = jest.fn(async ({ service_key_snapshot: key }) => ({ serviceKey: key || null, findingsType: null }));
     const out = await load(resolver)([{ name: 'Shared Label', serviceKey: 'wdo_inspection' }], {});
     expect(resolver).toHaveBeenCalledWith({ service_type: 'Shared Label', service_key_snapshot: 'wdo_inspection' }, {});
@@ -186,7 +229,6 @@ describe('withCatalogKeys', () => {
   });
 
   test('bookingServices: only a best-rows request reads; keys ride with names; duplicates dropped', async () => {
-    process.env.GATE_BOOKING_RAIN_RANK = 'true';
     const resolver = jest.fn(async ({ service_key_snapshot: key }) => ({ serviceKey: key || null, findingsType: null }));
     load(resolver);
     const { bookingServices } = require('../services/scheduling/rain-fit');
@@ -250,7 +292,6 @@ describe('withCatalogKeys', () => {
     };
   };
   const visitNames = async (args, db = visitDb()) => {
-    process.env.GATE_BOOKING_RAIN_RANK = 'true';
     load(jest.fn(async ({ service_key_snapshot: key }) => ({ serviceKey: key || null, findingsType: null })));
     const { bookingServices } = require('../services/scheduling/rain-fit');
     return (await bookingServices({ bestRows: true, ...args }, db)).map((item) => [item.name, item.serviceKey]);
@@ -264,7 +305,6 @@ describe('withCatalogKeys', () => {
   });
 
   test('bookingRainPlan: the shared stop\'s reach widens each chip, so rain in a later service counts', async () => {
-    process.env.GATE_BOOKING_RAIN_RANK = 'true';
     load(jest.fn(async ({ service_key_snapshot: key }) => ({ serviceKey: key || null, findingsType: null })));
     const { bookingRainPlan, rainTierOf, widenToSpan } = require('../services/scheduling/rain-fit');
     const plan = await bookingRainPlan({ bestRows: true, serviceId: 'svc-1' }, visitDb());
@@ -297,7 +337,6 @@ describe('withCatalogKeys', () => {
   });
 
   test('bookingServices: a malformed key or a keys list of the wrong length is ignored', async () => {
-    process.env.GATE_BOOKING_RAIN_RANK = 'true';
     const resolver = jest.fn(async ({ service_key_snapshot: key }) => ({ serviceKey: key || null, findingsType: null }));
     load(resolver);
     const { bookingServices } = require('../services/scheduling/rain-fit');
@@ -307,7 +346,6 @@ describe('withCatalogKeys', () => {
   });
 
   test('bookingServices: a huge list is capped at a booking-sized number of lookups', async () => {
-    process.env.GATE_BOOKING_RAIN_RANK = 'true';
     const resolver = jest.fn(async () => ({ serviceKey: null, findingsType: null }));
     load(resolver);
     const { bookingServices } = require('../services/scheduling/rain-fit');
@@ -318,7 +356,6 @@ describe('withCatalogKeys', () => {
   });
 
   test('bookingServices: services past the cap make the booking outdoor, never rain-OK', async () => {
-    process.env.GATE_BOOKING_RAIN_RANK = 'true';
     const resolver = jest.fn(async ({ service_key_snapshot: key }) => ({ serviceKey: key || null, findingsType: null }));
     load(resolver);
     const { bookingServices, rainFitFor: fit } = require('../services/scheduling/rain-fit');
@@ -330,8 +367,7 @@ describe('withCatalogKeys', () => {
     expect(fit(await bookingServices({ bestRows: true, serviceTypes: names.slice(0, 12), serviceKeys: keys.slice(0, 12) }, {}))).toBe('prefer');
   });
 
-  test('gate on, lookup fails: that name stays bare (word rules)', async () => {
-    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+  test('lookup fails: that name stays bare (word rules)', async () => {
     const resolver = jest.fn(async () => { throw new Error('db down'); });
     expect(await load(resolver)(['Lawn Care'], {})).toEqual(['Lawn Care']);
   });
@@ -376,7 +412,7 @@ describe('isWetWindow', () => {
   });
 });
 
-describe('best rows rank by rain fit (GATE_BOOKING_RAIN_RANK)', () => {
+describe('best rows rank by rain fit', () => {
   const h = (date, start, detour) => ({
     date, start_time: start, end_time: `${String(Number(start.slice(0, 2)) + 1).padStart(2, '0')}:00`,
     detour_minutes: detour, drive_in_minutes: detour, technician: { id: 't1', name: 'Tech One' },
@@ -387,17 +423,8 @@ describe('best rows rank by rain fit (GATE_BOOKING_RAIN_RANK)', () => {
     pickedDate: TODAY, today: TODAY, lat: 1, lng: 2, serviceTypes,
     deps: { priceChipsOnRoads: async (chips) => chips, hourlyRain },
   });
-  afterEach(() => { delete process.env.GATE_BOOKING_RAIN_RANK; });
 
-  test('gate off: drive-only order, forecast read once', async () => {
-    const hourlyRain = jest.fn(async () => hourly);
-    const out = await run(['General Pest Control'], hourlyRain);
-    expect(out.rows.day.map((c) => c.start_time)).toEqual(['14:00', '08:00', '09:00']);
-    expect(hourlyRain).toHaveBeenCalledTimes(1);
-  });
-
-  test('gate on, outdoor booking: the wet hour sorts last', async () => {
-    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+  test('outdoor booking: the wet hour sorts last', async () => {
     const hourlyRain = jest.fn(async () => hourly);
     const out = await run(['General Pest Control'], hourlyRain);
     expect(out.rows.day.map((c) => c.start_time)).toEqual(['08:00', '09:00', '14:00']);
@@ -406,14 +433,12 @@ describe('best rows rank by rain fit (GATE_BOOKING_RAIN_RANK)', () => {
     expect(hourlyRain).toHaveBeenCalledTimes(1);
   });
 
-  test('gate on, rain-OK booking: the wet hour sorts first', async () => {
-    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+  test('rain-OK booking: the wet hour sorts first', async () => {
     const out = await run(['WaveGuard Assessment']);
     expect(out.rows.day[0].start_time).toBe('14:00');
   });
 
-  test('gate on, every candidate past the 3-day horizon: rows do not wait for the forecast', async () => {
-    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+  test('every candidate past the 3-day horizon: rows do not wait for the forecast', async () => {
     const far = '2026-10-14';
     const farDays = [{ date: far, status: 'open', hours: [h(far, '14:00', 5), h(far, '08:00', 20)] }];
     let priced = false;
@@ -435,7 +460,6 @@ describe('best rows rank by rain fit (GATE_BOOKING_RAIN_RANK)', () => {
   });
 
   test('a closed day inside the horizon does not trigger the ranking wait', async () => {
-    process.env.GATE_BOOKING_RAIN_RANK = 'true';
     const far = '2026-10-14';
     const hourlyRain = jest.fn(async () => hourly);
     await buildBestRows([
@@ -450,15 +474,13 @@ describe('best rows rank by rain fit (GATE_BOOKING_RAIN_RANK)', () => {
   });
 
   test('a date inside the horizon asks for the ranking wait', async () => {
-    process.env.GATE_BOOKING_RAIN_RANK = 'true';
     const hourlyRain = jest.fn(async () => hourly);
     await run(['General Pest Control'], hourlyRain);
     expect(hourlyRain).toHaveBeenCalledWith(1, 2, true);
   });
 
   // Owner 2026-10-08: a date past the horizon competes on drive alone.
-  test('gate on: a far date with the shorter drive still beats a dry near hour', async () => {
-    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+  test('a far date with the shorter drive still beats a dry near hour', async () => {
     const far = '2026-10-12';
     const mixed = [
       { date: TODAY, status: 'open', hours: [h(TODAY, '08:00', 30), h(TODAY, '14:00', 2)] },
@@ -476,8 +498,7 @@ describe('best rows rank by rain fit (GATE_BOOKING_RAIN_RANK)', () => {
     expect(rainOk.rows.week.map((c) => `${c.date} ${c.start_time}`)).toEqual([`${TODAY} 14:00`, `${far} 09:00`, `${TODAY} 08:00`]);
   });
 
-  test('gate on, no forecast: drive-only order (fail open)', async () => {
-    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+  test('no forecast: drive-only order (fail open)', async () => {
     const out = await run(['General Pest Control'], jest.fn(async () => null));
     expect(out.rows.day.map((c) => c.start_time)).toEqual(['14:00', '08:00', '09:00']);
   });

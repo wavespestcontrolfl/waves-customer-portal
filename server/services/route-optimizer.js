@@ -8,7 +8,6 @@
  */
 
 const logger = require('./logger');
-const { gateEnvValue } = require('../config/feature-gates');
 const driveClock = require('./scheduling/drive-clock');
 
 // Start/end of every modeled day — the van's home base (13649 Luxe Ave,
@@ -94,12 +93,9 @@ function createSchedulingTravel({
   function fallback(leg, reason) {
     if (!validPin(leg.from) || !validPin(leg.to)) return { minutes: Infinity, source: 'unverified', reason: 'missing_coordinates' };
     const miles = haversine(Number(leg.from.lat), Number(leg.from.lng), Number(leg.to.lat), Number(leg.to.lng));
-    // Retain the calibrated park/drive model even if its separate legacy gate
-    // is off; an API outage must not increase the capacity of a new booking.
-    const minutes = miles < SAME_PLACE_MILES ? 0 : Math.ceil(Math.max(
-      fallbackLegMetrics(miles).minutes,
-      calibratedMinutes(miles),
-    ));
+    // The drive clock's model, rounded up: an API outage must not increase the
+    // capacity of a new booking.
+    const minutes = miles < SAME_PLACE_MILES ? 0 : Math.ceil(driveClock.driveClockMinutes(miles));
     return { minutes, source: 'conservative_model', reason };
   }
   // `lookupRaw` = the stored answer; a caller that caches it (the pickers'
@@ -107,8 +103,7 @@ function createSchedulingTravel({
   function lookupRaw(leg) {
     return results.get(keyFor(leg)) || fallback(leg, apiKey ? 'request_budget' : 'provider_unconfigured');
   }
-  // With the drive clock on (drive-time calibration), a Google leg carries the
-  // park minutes, added at read time.
+  // A Google leg carries the drive clock's park minutes, added at read time.
   function lookup(leg) {
     return driveClock.withDriveClockPark(lookupRaw(leg));
   }
@@ -237,23 +232,13 @@ function haversine(lat1, lng1, lat2, lng2) {
  * CANDIDATE placements produced by find-time, so two models means comparing
  * numbers on different scales and "improving" a route that did not improve.
  *
- * Two models, selected by GATE_DRIVE_TIME_CALIBRATION:
- *
- *   legacy      haversine x 1.4 road factor @ 30 mph
- *   calibrated  a fixed per-leg overhead + a per-mile rate
- *
- * The calibrated constants were fitted against 150 real trips reconstructed
- * from Bouncie GPS (first/last fix per trip, with measured duration and
- * odometer distance), fitted on half the sample and scored on the held-out
- * half:
- *
- *   legacy      MAE 4.99 min   59% of legs within 5 min
- *   calibrated  MAE 3.89 min   79% of legs within 5 min
- *
- * The legacy constants were measurably wrong in both terms — the same trips
- * imply a road factor of 1.50 (not 1.40) and an average speed of 20.8 mph (not
- * 30). The speed assumption is the larger error and is why legacy
- * systematically under-estimates.
+ * The model is the GPS-fitted drive clock (scheduling/drive-clock.js): a fixed
+ * per-leg overhead + a per-mile rate over straight-line miles. The original
+ * constants (haversine x 1.4 road factor @ 30 mph) were measurably wrong in
+ * both terms and systematically under-estimated: against 150 real trips
+ * reconstructed from Bouncie GPS, the first calibration cut the mean absolute
+ * error from 4.99 to 3.89 min, and the drive clock is fitted to our own GPS
+ * legs since.
  *
  * The fixed term is measured, not a fudge factor: idle time averages 3.3 min on
  * a 13.2 min trip, and under-estimate correlates with idle at 0.886. It is the
@@ -261,16 +246,9 @@ function haversine(lat1, lng1, lat2, lng2) {
  * consequence is deliberate — detour is computed as
  * d(prev,new) + d(new,next) - d(prev,next), so the fixed terms no longer cancel
  * and inserting a stop costs its overhead even when it sits directly en route.
- * A stop is never free; the legacy model priced it as if it were.
+ * A stop is never free.
  */
 const ROAD_FACTOR = 1.4;
-const AVG_MPH = 30;
-
-// Fitted per-leg overhead (minutes) and per-mile rate over STRAIGHT-LINE miles.
-// The per-mile rate already carries the road-detour factor — it is not applied
-// to road distance, so do not additionally multiply by ROAD_FACTOR.
-const CALIBRATED_FIXED_MINUTES = 4.25;
-const CALIBRATED_MINUTES_PER_MILE = 2.35;
 
 // Only genuinely identical coordinates skip the per-leg overhead — this is a
 // float-comparison epsilon (~6 cm), NOT a "close enough" radius. It exists for
@@ -281,36 +259,23 @@ const CALIBRATED_MINUTES_PER_MILE = 2.35;
 // slots with no parking time at all.
 const SAME_PLACE_MILES = 1e-6;
 
-// The calibrated model's minutes for a leg (unrounded). With drive-time
-// calibration on, the GPS-fitted drive clock pair (scheduling/drive-clock.js)
-// is the model. The constants above are read only with calibration off, by the
-// conservative_model fallback of the scheduling travel provider.
-function calibratedMinutes(miles) {
-  if (driveClock.driveClockLive()) return driveClock.driveClockMinutes(miles);
-  return CALIBRATED_FIXED_MINUTES + (miles * CALIBRATED_MINUTES_PER_MILE);
-}
-
 /**
  * Convert straight-line miles to estimated drive minutes.
  */
 function milesToDriveMinutes(miles) {
   if (!Number.isFinite(miles) || miles <= 0) return 0;
-  // Read at CALL time (not the baked gates map) so a flip needs no redeploy.
-  if (gateEnvValue('GATE_DRIVE_TIME_CALIBRATION')) {
-    if (miles < SAME_PLACE_MILES) return 0;
-    return Math.round(calibratedMinutes(miles));
-  }
-  return Math.round((miles * ROAD_FACTOR / AVG_MPH) * 60);
+  if (miles < SAME_PLACE_MILES) return 0;
+  return Math.round(driveClock.driveClockMinutes(miles));
 }
 
 /**
  * Straight-line miles to estimated ROAD meters.
  *
- * Distance keeps the legacy 1.4 road factor deliberately. The trip sample puts
+ * Distance keeps the 1.4 road factor deliberately. The trip sample puts
  * the real factor nearer 1.50, but distance feeds reported mileage, and the
  * answer there is a real routed distance from the Routes API (already wired
- * here as callGoogleRoutesAPI) rather than a better-tuned straight line. This
- * gate covers TIME only; re-tuning distance is a separate change.
+ * here as callGoogleRoutesAPI) rather than a better-tuned straight line. The
+ * drive clock covers TIME only; re-tuning distance is a separate change.
  */
 function straightMilesToRoadMeters(miles) {
   if (!Number.isFinite(miles) || miles <= 0) return 0;
@@ -321,20 +286,12 @@ function straightMilesToRoadMeters(miles) {
  * Metrics for one fallback leg, from straight-line miles.
  *
  * Used by the nearest-neighbour fallback and its return-to-HQ leg so both sit
- * on the shared model when the gate is on. The legacy branch is NOT re-derived
- * from raw miles: the original computed minutes from the ALREADY-ROUNDED metre
- * figure, and near a rounding boundary that is a different answer. A 0.178572
- * mile leg is the worked example — meter-first gives 0 minutes, mile-first
- * gives 1. Reproducing the original arithmetic is what makes the gate a real
- * kill switch rather than an approximate one.
+ * on the shared model.
  */
 function fallbackLegMetrics(straightMiles) {
   const meters = straightMilesToRoadMeters(straightMiles);
   if (meters <= 0) return { meters: 0, minutes: 0 };
-  if (gateEnvValue('GATE_DRIVE_TIME_CALIBRATION')) {
-    return { meters, minutes: milesToDriveMinutes(straightMiles) };
-  }
-  return { meters, minutes: Math.round((meters / 1609.34 / 30) * 60) };
+  return { meters, minutes: milesToDriveMinutes(straightMiles) };
 }
 
 /**
@@ -608,34 +565,10 @@ async function optimizeRoute(stops, options = {}) {
     const distToStop = haversine(start.lat, start.lng, parseFloat(s.lat) || start.lat, parseFloat(s.lng) || start.lng);
     const stopName = s.customerName || s.customer_name || 'Stop 1';
 
-    // This path is the one fallback leg that never applied the road factor
-    // every other leg applies, so for identical geometry it reported both a
-    // shorter distance and a shorter time than the multi-stop path. Correcting
-    // that rides the gate rather than landing unconditionally: the gate's
-    // contract is that OFF reproduces legacy output exactly, so a revert has to
-    // restore these metrics too. Note this is not a re-tuning of the distance
-    // model — the factor is the same 1.4 used everywhere else; the fix is that
-    // this path starts applying it.
-    let distMeters;
-    let totalDurationSeconds;
-    let legMeters;
-    let legMinutes;
-    if (gateEnvValue('GATE_DRIVE_TIME_CALIBRATION')) {
-      legMeters = straightMilesToRoadMeters(distToStop);
-      legMinutes = milesToDriveMinutes(distToStop);
-      distMeters = legMeters * 2;
-      totalDurationSeconds = legMinutes * 2 * 60;
-    } else {
-      // Reproduced verbatim, including the rounding: the round trip is rounded
-      // once and the legs are halves of THAT, and the total duration is rounded
-      // over the round-trip distance rather than doubling a rounded leg. Those
-      // are not the same number for every input, so neither can be re-derived
-      // from the other without moving output the gate promises not to move.
-      distMeters = Math.round(distToStop * 1609.34 * 2);
-      totalDurationSeconds = Math.round((distMeters / 1609.34 / 30) * 60) * 60;
-      legMeters = Math.round(distMeters / 2);
-      legMinutes = Math.round((distMeters / 2 / 1609.34 / 30) * 60);
-    }
+    const legMeters = straightMilesToRoadMeters(distToStop);
+    const legMinutes = milesToDriveMinutes(distToStop);
+    const distMeters = legMeters * 2;
+    const totalDurationSeconds = legMinutes * 2 * 60;
     return {
       orderedStops: stops,
       totalDistanceMeters: distMeters,

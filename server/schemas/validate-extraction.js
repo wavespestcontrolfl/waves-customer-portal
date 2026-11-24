@@ -208,7 +208,13 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // `required`; prompt v34). Safety facts the CALLER states on the call (children or elderly people
 // at the home, areas not to spray, a chemical sensitivity); call-profile-enrichment files them on
 // the property preferences the technician's visit brief shows. Older payloads still validate.
-const SCHEMA_VERSION = '1.30.0';
+// 1.31.0: additive — service_request.estimate_response (optional nullable enum "accepted" |
+// "accepted_with_condition" | "undecided" | "declined" in both schemas, never `required`; prompt
+// v35). The CALLER's answer to an estimate Waves already sent before the call, judged over the whole
+// call in the caller's own words and pinned with the caller's quote under
+// /service_request/estimate_response. Never consent to be charged. No consumer yet. Older payloads
+// still validate and read as "no answer".
+const SCHEMA_VERSION = '1.31.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

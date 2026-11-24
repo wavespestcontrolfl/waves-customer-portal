@@ -1,5 +1,7 @@
 const {
   parseDbprCsv,
+  eachDbprCsvRow,
+  defaultFetchText,
   normalizeStreetName,
   matchDbprRow,
   seatsToSqft,
@@ -66,6 +68,110 @@ describe('parseDbprCsv', () => {
     const text = csv([{ 'Business Name': 'TEST, BAR & GRILL', 'Location Zip Code': '00000' }]);
     const rows = parseDbprCsv(text);
     expect(rows[0]['Business Name']).toBe('TEST, BAR & GRILL');
+  });
+});
+
+describe('eachDbprCsvRow', () => {
+  // Several 32 KB slices, with a quoted line break in every row, so slices end inside records and quoted fields.
+  const big = csv(Array.from({ length: 900 }, (_, i) => ({
+    'Business Name': `TEST DINER ${i}`, 'Location Street Address': `${i} TEST ST\nSUITE ${i}`, 'Location Zip Code': '00000',
+  })));
+
+  test.each([
+    ['CRLF', big],
+    ['CR only', big.replace(/\r\n/g, '\r')],
+  ])('%s line ends: the same rows as parseDbprCsv, with a turn for the server before the end', async (_, text) => {
+    const rows = [];
+    const done = eachDbprCsvRow(text, (row) => rows.push(row));
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.length).toBeLessThan(900);
+    expect(await done).toEqual(DBPR_HEADER);
+    expect(rows).toEqual(parseDbprCsv(text));
+  }, 30000);
+
+  // One run of characters outside the BMP; with no lead or one, some slice cut falls between a pair's halves.
+  test.each(['', 'x'])('a slice cut never splits a character in two (lead %j)', async (lead) => {
+    const text = csv([{ 'Business Name': `${lead}${'\u{1F41C}'.repeat(40000)}` }]);
+    const rows = [];
+    await eachDbprCsvRow(text, (row) => rows.push(row));
+    expect(rows).toEqual(parseDbprCsv(text));
+  }, 30000);
+
+  test('an async onRow is awaited before the reader resolves, and its rejection rejects the reader', async () => {
+    const seen = [];
+    await eachDbprCsvRow(big, async (row) => { await new Promise((resolve) => { setImmediate(resolve); }); seen.push(row); });
+    expect(seen).toHaveLength(900);
+    await expect(eachDbprCsvRow(big, async () => { throw new Error('store down'); })).rejects.toThrow('store down');
+    await expect(eachDbprCsvRow(big, () => { throw new Error('bad row'); })).rejects.toThrow('bad row');
+  }, 30000);
+
+  test('a slow async onRow holds the slices back: the reader never runs far ahead of it', async () => {
+    const { Transform } = require('stream');
+    // About 14 slices. Each record ends with \r\n (the break inside the address is a bare \n), so a slice's
+    // \r\n count is the rows it completes.
+    const text = csv(Array.from({ length: 3000 }, (_, i) => ({
+      'Business Name': `TEST DINER ${i}`, 'Location Street Address': `${i} TEST ST\nSUITE ${i}`,
+    })));
+    let written = -1; // the header line is not a row
+    let seen = 0;
+    let mostAhead = 0;
+    const original = Transform.prototype.write;
+    const write = jest.spyOn(Transform.prototype, 'write').mockImplementation(function recordWrite(chunk, ...rest) {
+      if (this.constructor.name === 'Parser') {
+        written += (String(chunk).match(/\r\n/g) || []).length;
+        mostAhead = Math.max(mostAhead, written - seen);
+      }
+      return original.call(this, chunk, ...rest);
+    });
+    try {
+      await eachDbprCsvRow(text, async () => {
+        await new Promise((resolve) => { setImmediate(resolve); });
+        seen += 1;
+      });
+    } finally {
+      write.mockRestore();
+    }
+    expect(seen).toBe(3000);
+    // A slice is about 220 rows, and the parser takes one or two before the reader waits. Without that wait
+    // every slice goes in at once, nearly 3,000 rows ahead.
+    expect(mostAhead).toBeLessThan(1000);
+  }, 60000);
+
+  test('onRow also gets the row\'s cell count and the header\'s: csv-parse leaves the cells past the header out', async () => {
+    const seen = [];
+    await eachDbprCsvRow('"A","B","C"\r\n"1","2","3"\r\n"4","5"\r\n"6","7","8","9","10"\r\n', (row, width) => {
+      seen.push([row, width]);
+    });
+    expect(seen).toEqual([
+      [{ A: '1', B: '2', C: '3' }, { cells: 3, columns: 3 }],
+      [{ A: '4', B: '5' }, { cells: 2, columns: 3 }],
+      [{ A: '6', B: '7', C: '8' }, { cells: 5, columns: 3 }],
+    ]);
+  });
+
+  test('an empty file has no header and no rows; an unclosed quote rejects', async () => {
+    const rows = [];
+    await expect(eachDbprCsvRow('', (row) => rows.push(row))).resolves.toEqual([]);
+    expect(rows).toEqual([]);
+    await expect(eachDbprCsvRow(`${csv([])}"OPEN QUOTE,`, () => {})).rejects.toThrow(/quote/i);
+  });
+});
+
+describe('defaultFetchText', () => {
+  const realFetch = global.fetch;
+  afterEach(() => { global.fetch = realFetch; });
+
+  test('reads the body as Latin-1 text, and refuses a body past the byte cap', async () => {
+    global.fetch = jest.fn(async () => new Response(Buffer.from([0x50, 0x45, 0xd1, 0x41]))); // PEÑA in Latin-1
+    await expect(defaultFetchText('https://example.invalid/x.csv', 1000)).resolves.toBe('PEÑA');
+    global.fetch = jest.fn(async () => new Response('x'.repeat(64)));
+    await expect(defaultFetchText('https://example.invalid/x.csv', 1000, 32)).rejects.toThrow('extract too large');
+    global.fetch = jest.fn(async () => new Response('', { status: 503 }));
+    await expect(defaultFetchText('https://example.invalid/x.csv', 1000)).rejects.toThrow('HTTP 503');
+    // A partial file is refused, even a valid CSV prefix that ends on a row.
+    global.fetch = jest.fn(async () => new Response('"License Number","Business Name"\n"SEA0000001","SAMPLE DINER"\n', { status: 206 }));
+    await expect(defaultFetchText('https://example.invalid/x.csv', 1000)).rejects.toThrow('HTTP 206');
   });
 });
 

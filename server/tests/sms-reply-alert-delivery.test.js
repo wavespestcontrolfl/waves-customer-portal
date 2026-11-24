@@ -340,17 +340,14 @@ describe('tracking-line unknown-sender thread bell', () => {
   });
 });
 
-// GATE_RING_NEW_CONTACTS (owner 2026-11-04, "ring new"): an unknown sender's text to a location or Google profile line
+// Owner 2026-11-04, "ring new": an unknown sender's text to a location or Google profile line
 // rings the same one-row-per-sender thread bell as a tracking line. True only when the ring landed.
-describe('unknown-sender text to an office line (GATE_RING_NEW_CONTACTS)', () => {
+describe('unknown-sender text to an office line', () => {
   const numbers = require('../config/twilio-numbers');
   const parrish = { ...numbers.locations.parrish, type: 'location' };
   const gbp = { ...numbers.gbpTracking.sarasota, type: 'gbp_tracking' };
   const base = { numberConfig: parrish, To: parrish.number, ...input, message: 'Do you do termite inspections?', mediaCount: 0 };
   const ring = (args = {}) => delivery.ringUnknownOfficeText({ ...base, ...args });
-  beforeEach(() => { process.env.GATE_RING_NEW_CONTACTS = 'true'; });
-  afterEach(() => { delete process.env.GATE_RING_NEW_CONTACTS; });
-
   test('rings the tracking-line row with the line in plain words, for a location line and a Google profile line', async () => {
     expect(await ring()).toBe(true);
     const [key, payload, options] = triggerNotification.mock.calls.at(-1);
@@ -391,12 +388,6 @@ describe('unknown-sender text to an office line (GATE_RING_NEW_CONTACTS)', () =>
       expect(await ring()).toBe(false);
       expect(triggerNotification).not.toHaveBeenCalled();
     } finally { spy.mockRestore(); }
-  });
-
-  test('does not ring with the gate off', async () => {
-    delete process.env.GATE_RING_NEW_CONTACTS;
-    expect(await ring()).toBe(false);
-    expect(triggerNotification).not.toHaveBeenCalled();
   });
 
   test('false when the ring did not land, or threw, so the caller keeps the quiet row', async () => {

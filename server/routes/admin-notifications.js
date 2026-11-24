@@ -50,9 +50,10 @@ function notificationIssueLimit(value) {
 // exactly. A JS Date would round to the millisecond and skip or repeat rows
 // that share one. Without that field (a row from elsewhere) the ISO string of
 // the Date is the fallback.
-// GATE_ALERT_BELL_ORDER: the bell's cursor is "<rank>~<timestamp>~<id>" (rank 0, 1 or 2, see BELL_RANK_SQL in
-// services/notification-service.js). parseCursor reads both shapes; a two-part cursor has no `rank`. The list route
-// continues only a cursor of the current order; the other shape restarts at page 1 (`restart: true`).
+// The bell's cursor is "<rank>~<timestamp>~<id>" (rank 0, 1 or 2, see BELL_RANK_SQL in
+// services/notification-service.js). parseCursor reads both shapes (the Recently-done list uses the two-part one); a
+// two-part cursor has no `rank`. The bell list continues only a three-part cursor; a two-part one restarts at page 1
+// (`restart: true`).
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // ISO-8601 or Postgres timestamptz text: date, 'T' or space, time, optional
 // fraction (up to microseconds), and a zone (never a naive time: it would be
@@ -80,19 +81,12 @@ function parseCursor(raw) {
   if (rank === null) return { at, id };
   return /^[012]$/.test(rank) ? { at, id, rank: Number(rank) } : null;
 }
-// Served rows carry the cursor text (and, ranked, the rank) only to build `next`; the client never needs them.
+// Served rows carry the cursor text and the rank only to build `next`; the client never needs them.
 function withoutCursorFields({ created_at_cursor, bell_rank, ...row }) {
   return row;
 }
 
-// GATE_ALERT_BELL_ORDER, read at call time. A test that mocks feature-gates without the reader reads it as off.
-function bellOrderOn() {
-  try {
-    const gates = require('../config/feature-gates');
-    return typeof gates.alertBellOrderLive === 'function' && gates.alertBellOrderLive() === true;
-  } catch { return false; }
-}
-// The row's Area when metadata.area is one of the nine Areas; nothing otherwise. Lazy require: only a ranked list needs it.
+// The row's Area when metadata.area is one of the nine Areas; nothing otherwise. Lazy require.
 function withAreaChips(rows) {
   const { AREAS } = require('../services/admin-alert-compose');
   return rows.map((row) => {
@@ -101,12 +95,12 @@ function withAreaChips(rows) {
   });
 }
 
-// Which cursor the list continues from. A cursor made in the other order (a ranked one while the gate is off, a
-// chronological one while it is on) is dropped and `restart` is true: the route serves page 1 of the current order.
-// `page` is the page number to serve and report: 1 on a restart.
-function resolveBellCursor(parsed, ranked, page) {
+// Which cursor the list continues from. A cursor made in the other order (a two-part chronological one) is dropped and
+// `restart` is true: the route serves page 1 of the current order. `page` is the page number to serve and report: 1 on
+// a restart.
+function resolveBellCursor(parsed, page) {
   if (!parsed) return { restart: false, before: null, page };
-  const restart = ranked !== (parsed.rank !== undefined);
+  const restart = parsed.rank === undefined;
   return { restart, before: restart ? null : parsed, page: restart ? 1 : page };
 }
 
@@ -124,17 +118,16 @@ router.get('/', async (req, res, next) => {
     // feed between requests (Done here, another admin's Done, an auto-close),
     // so an offset would skip the rows that moved up; the cursor continues
     // strictly after the last row served. page stays for callers without one.
-    const ranked = bellOrderOn();
     const parsed = parseCursor(req.query.before);
     if (req.query.before && !parsed) return res.status(400).json({ error: 'Invalid cursor' });
-    // A cursor only continues the order it was made in. A three-part (ranked) cursor while the gate is off, or a
-    // two-part (chronological) cursor while it is on, belongs to the other order: continuing from it would skip rows
-    // the panel never got. Serve page 1 of the current order instead and say `restart: true`; the bell replaces its list.
-    const { restart, before, page } = resolveBellCursor(parsed, ranked, requestedPage);
+    // A cursor only continues the order it was made in. A two-part (chronological) cursor belongs to the other order:
+    // continuing from it would skip rows the panel never got. Serve page 1 of the current order instead and say
+    // `restart: true`; the bell replaces its list.
+    const { restart, before, page } = resolveBellCursor(parsed, requestedPage);
     const offset = before || restart ? 0 : (page - 1) * limit;
     // fullAccess: an owner-only row (a Claude plan or copy) is listed for the owner login alone.
     const fullAccess = ibFullAccess(req);
-    const persisted = await NotificationService.getAdminNotifications(limit + 1, offset, { role: req.techRole, technicianId: req.technicianId, before, fullAccess, ...(ranked ? { ranked } : {}) });
+    const persisted = await NotificationService.getAdminNotifications(limit + 1, offset, { role: req.techRole, technicianId: req.technicianId, before, fullAccess });
     // Bell policy on: computed dashboard aggregates stay on the dashboard
     // banner (/admin/dashboard/alerts) but no longer merge into the bell.
     // Live overlay is ADMIN-ONLY regardless of policy: dashboard alerts
@@ -157,18 +150,18 @@ router.get('/', async (req, res, next) => {
     const marked = withSendCopyToClaudeFields(sendable, { role: req.techRole, fullAccess });
     const withSources = await withTextNoteSources(marked, { role: req.techRole });
     // Ranked: one Area chip per row, from the stored label. The row's own metadata is read, never the customer's words.
-    const rows = ranked ? withAreaChips(withSources) : withSources;
+    const rows = withAreaChips(withSources);
     res.json({
       // A row's own buttons ride as `actions`, for the admin role only (docs/admin-notifications.md section 2, part 9).
       // The customer it names and its "What to do" summary ride as `customer`, `explainable` and `explainer`, for the
-      // admin role while GATE_ALERT_EXPLAINER is on. With that gate off, GATE_ALERT_CUSTOMER_LINE alone adds `customer`
+      // admin role while GATE_ALERT_EXPLAINER is on. With that gate off, only `customer` is added
       // (a database read, no AI call). The done list (/done) carries neither. `sendToClaude` marks a row the "Send to Claude" button may move,
       // for the owner login (no explainer needed).
       notifications: [...(page === 1 && !before ? liveCtx.live : []), ...rows],
       page, limit, hasMore: persisted.length > limit,
-      next: persisted.length > limit && lastServed ? (ranked ? formatRankedCursor(lastServed) : formatCursor(lastServed)) : null,
+      next: persisted.length > limit && lastServed ? formatRankedCursor(lastServed) : null,
       // The list is ranked (needs-you first, then newest first inside a rank): the bell keeps this order as served.
-      ...(ranked ? { order: 'needs-you-first' } : {}),
+      order: 'needs-you-first',
       // The cursor sent belonged to the other order: this is page 1 of the current one and replaces the panel's list.
       ...(restart ? { restart: true } : {}),
     });

@@ -89,6 +89,26 @@ describe('Staff login hardening', () => {
     expect(bcrypt.compare.mock.calls[0][1]).toMatch(/^\$2a\$12\$/);
   });
 
+  test.each([
+    ['no password hash', null],
+    ['an empty password hash', ''],
+  ])('never issues a password session for an account with %s, even when the stand-in comparison matches', async (_label, passwordHash) => {
+    // An active account with no password of its own: a hire who has not set one yet, or who signs in with Google.
+    db.mockReturnValueOnce(loginQuery([{ id: 'tech-1', role: 'technician', active: true, password_hash: passwordHash }]));
+    bcrypt.compare.mockResolvedValue(true);
+
+    const res = await invoke({ email: 'hire@example.test', password: 'any-password' });
+
+    expect(res.statusCode).toBe(401);
+    expect(res.body).toEqual({ error: 'Invalid credentials' });
+    // The comparison still ran, against the stand-in hash, so this failure takes the time of any other.
+    expect(bcrypt.compare).toHaveBeenCalledTimes(1);
+    expect(bcrypt.compare.mock.calls[0][1]).toMatch(/^\$2a\$12\$/);
+    expect(res.cookie).not.toHaveBeenCalled();
+    // No session was built: the one database read is the account lookup.
+    expect(db).toHaveBeenCalledTimes(1);
+  });
+
   test('treats a canonical-email collision like invalid credentials after dummy bcrypt work', async () => {
     const query = loginQuery([
       { id: 'tech-1', password_hash: 'hash-1' },

@@ -85,7 +85,7 @@ beforeAll((done) => {
 });
 afterAll((done) => { server.close(done); });
 
-const GATES = ['GATE_BEST_TIME_HINTS', 'GATE_OPEN_TIMES_BOX', 'GATE_BOOKING_RAIN_RANK', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_SCHEDULING_CAPACITY'];
+const GATES = ['GATE_BEST_TIME_HINTS', 'GATE_OPEN_TIMES_BOX', 'GATE_ADMIN_ARRIVAL_WINDOWS', 'GATE_SCHEDULING_CAPACITY'];
 const ORIGINAL = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
 afterAll(() => {
   for (const name of GATES) {
@@ -167,7 +167,6 @@ test('openTimes without summary mode is an ordinary hint', async () => {
 });
 
 test('an outdoor booking carries the rain tier for hours the forecast reads', async () => {
-  process.env.GATE_BOOKING_RAIN_RANK = 'true';
   const wet = (h) => ({ startTime: `2026-09-01T${String(h).padStart(2, '0')}:00:00-04:00`, rainChance: h < 12 ? 80 : 10 });
   const hourly = Array.from({ length: 24 }, (_, h) => wet(h));
   const days = [

@@ -39,7 +39,10 @@
  */
 
 const crypto = require('crypto');
-const db = require('../../models/db');
+// The database module loads on first use (syncFactRegister, listFacts), not
+// here: the text checks need no database, and models/db.js opens Knex and
+// throws for a NODE_ENV the knexfile lacks, so importing the send validator
+// for an offline build must not load it (pest insider pre-push round 21).
 const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
 const { reentrySafetyClaimFinding } = require('../content/content-guardrails');
@@ -398,7 +401,7 @@ async function seededBefore(trx, hasAuditLog, slug) {
  * deactivated is never overwritten — it is reported in `held` and audited
  * once per state. Errors on one fact never stop the others.
  */
-async function syncFactRegister({ conn = db, now = new Date(), facts = FACTS, retireStrays = true } = {}) {
+async function syncFactRegister({ conn = require('../../models/db'), now = new Date(), facts = FACTS, retireStrays = true } = {}) {
   const result = { inserted: [], updated: [], retired: [], held: [], unchanged: [], skipped: [], errors: [] };
   if (!(await conn.schema.hasTable('knowledge_base'))) {
     result.skipped.push({ slug: null, reason: 'knowledge_base table missing' });
@@ -514,7 +517,7 @@ function hasProvenance(row, today) {
  * flagged or archived fact straight into a customer-facing prompt.
  */
 async function listFacts({ tags, limit = 50, now = new Date() } = {}) {
-  const rows = await db('knowledge_base')
+  const rows = await require('../../models/db')('knowledge_base')
     .where({ source: SOURCE, active: true, status: 'active' })
     .orderBy('title', 'asc');
 

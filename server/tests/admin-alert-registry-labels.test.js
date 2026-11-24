@@ -1,6 +1,6 @@
 /**
- * GATE_ALERT_REGISTRY_LABELS (owner 2026-11-05, admin-alert plan S1): every reader of the stored labels, run against every
- * trigger-registry type, with and without the labels. The point is the hard rule: a customer-contact registry row is never
+ * Registry labels on the bell row (owner 2026-11-05, admin-alert plan S1): every reader of the stored labels, run against every
+ * trigger-registry type, with and without the labels (a row written before the labels shipped has none). The point is the hard rule: a customer-contact registry row is never
  * moved off the owner's bell, never closed early and never loses its push because the labels appeared. Pure; no database.
  */
 jest.mock('../models/db', () => jest.fn());
@@ -21,15 +21,8 @@ const UUID = '11111111-2222-4333-8444-555555555555';
 const DAY_MS = 24 * 60 * 60 * 1000;
 const NOW = new Date('2026-11-05T15:00:00Z');
 
-const withGate = (value, fn) => {
-  const before = process.env.GATE_ALERT_REGISTRY_LABELS;
-  if (value) process.env.GATE_ALERT_REGISTRY_LABELS = value; else delete process.env.GATE_ALERT_REGISTRY_LABELS;
-  try { return fn(); } finally {
-    if (before === undefined) delete process.env.GATE_ALERT_REGISTRY_LABELS; else process.env.GATE_ALERT_REGISTRY_LABELS = before;
-  }
-};
-const labelsOf = (trigger) => withGate('true', () => __private.registryLabels(trigger));
-// The metadata a registry bell row is written with (the part these labels touch): today's keys, plus labels when on.
+const labelsOf = (trigger) => __private.registryLabels(trigger);
+// The metadata a registry bell row is written with (the part these labels touch): today's keys, plus labels.
 const metaFor = (key, { labels = true, extra = {} } = {}) => ({
   ...(labels ? labelsOf(TRIGGER_REGISTRY[key]) : {}), triggerKey: key, priority: 'normal', payload: { customerId: UUID }, ...extra,
 });
@@ -60,11 +53,11 @@ describe('a refreshed standing row keeps its labels', () => {
     for (const shouldRing of [true, false]) {
       // Labelled row, labelled emission: unchanged labels.
       expect(mergeRefreshMetadata(labelled, { ...labelled, payload: { n: 2 } }, shouldRing)).toMatchObject(labelsOf(TRIGGER_REGISTRY[key]));
-      // Labelled row, an emission written while the gate was off: the labels stay (a refresh never strips them).
+      // Labelled row, an emission written before labels shipped: the labels stay (a refresh never strips them).
       expect(mergeRefreshMetadata(labelled, { ...plain, payload: { n: 2 } }, shouldRing)).toMatchObject(labelsOf(TRIGGER_REGISTRY[key]));
       // Old unlabelled row, labelled emission: gains the labels.
       expect(mergeRefreshMetadata(plain, { ...labelled, payload: { n: 2 } }, shouldRing)).toMatchObject(labelsOf(TRIGGER_REGISTRY[key]));
-      // Gate off throughout: no label appears.
+      // Old rows throughout: no label appears.
       const off = mergeRefreshMetadata(plain, { ...plain, payload: { n: 2 } }, shouldRing);
       for (const k of ['area', 'severity', 'who', 'doneWhen', 'contact', 'promise']) expect(off).not.toHaveProperty(k);
     }
@@ -110,8 +103,8 @@ describe('the relevance sweep classes are not captured by the labels', () => {
         const dedupeKey = prefix ? `${prefix}x` : undefined;
         const base = { ...extra, ...(dedupeKey ? { dedupeKey } : {}) };
         const row = (meta) => ({ category: trigger.category, link: '/admin/communications?lead=' + UUID, metadata: meta });
-        const before = classify(row(metaFor(key, { labels: false, extra: base })), { anyMode: true });
-        const after = classify(row(metaFor(key, { extra: base })), { anyMode: true });
+        const before = classify(row(metaFor(key, { labels: false, extra: base })));
+        const after = classify(row(metaFor(key, { extra: base })));
         expect({ key, prefix, extra, cls: after?.key ?? null }).toEqual({ key, prefix, extra, cls: before?.key ?? null });
       }
     }
@@ -142,7 +135,7 @@ describe('retention: only an fyi type is shortened, never a customer row', () =>
 
   test('the fyi types that start to expire at 7 days are exactly these', () => {
     const fyi = entries.filter(([key]) => retention.judgeRow(rowFor(key, metaFor(key), 8), NOW).expire).map(([k]) => k).sort();
-    expect(fyi).toEqual(['job_application_withdrawn', 'job_complete', 'job_interview_booked', 'newsletter_proof_approved',
+    expect(fyi).toEqual(['estimate_call_today', 'job_application_withdrawn', 'job_complete', 'job_interview_booked', 'newsletter_proof_approved',
       'one_tap_purchase_completed', 'open_visits_nudge', 'payment_refunded', 'payment_succeeded', 'waiting_summary']);
   });
 

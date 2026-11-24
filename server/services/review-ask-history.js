@@ -58,12 +58,13 @@ function looksLikeReviewAsk(body) {
 // (set only once the provider actually dispatches) for follow-ups delivered
 // before that column existed — correlated back via the review_request_id the
 // followup send stamps into its metadata.
-const FOLLOWUP_DELIVERED_SUBQUERY = `(
+const followupDeliveredSubquery = (scopeSql) => `(
   SELECT metadata->>'review_request_id' AS review_request_id, MAX(sent_at) AS followup_delivered_at
   FROM messaging_audit_log
-  WHERE customer_id = ? AND entry_point = 'review_request_followup' AND sent_at IS NOT NULL
+  WHERE ${scopeSql} AND entry_point = 'review_request_followup' AND sent_at IS NOT NULL
   GROUP BY metadata->>'review_request_id'
 ) followups`;
+const FOLLOWUP_DELIVERED_SUBQUERY = followupDeliveredSubquery('customer_id = ?');
 
 // review_requests columns that hold UNRESOLVED send evidence: stamped before a
 // provider handoff and cleared once the outcome is known (accepted or a
@@ -246,4 +247,30 @@ async function lastUnresolvedAskAt(customerId, { since, excludeReservationId = n
   return smsLogAt && (!requestWithinWindow || smsLogAt > requestWithinWindow) ? smsLogAt : requestWithinWindow;
 }
 
-module.exports = { ASK_SPACING_MS, looksLikeReviewAsk, deliveredAskRows, latestDeliveredAt, lastDeliveredAskAt, lastManualAskAt, lastUnresolvedAskAt };
+/**
+ * How many asks one technician's visits delivered with a send day (in `timeZone`) between `from` and `to` (dates),
+ * counted in PostgreSQL from the same evidence deliveredAskRows reads: the initial ask (sms_sent_at, else sent_at) and
+ * a delivered follow-up (the stamped followup_delivered_at, else the audit log's send time; the two are ONE
+ * follow-up, never two asks) each count on their OWN send time. No spacing or reservation logic. Used by the Tech
+ * Rewards scoreboard's review rate.
+ */
+async function countDeliveredAsksForTechnician(conn, technicianId, { from, to, timeZone }) {
+  const scope = 'customer_id IN (SELECT customer_id FROM review_requests WHERE technician_id = ?)';
+  const row = (await conn.raw(
+    `SELECT COUNT(*)::int AS n FROM (
+       SELECT COALESCE(rr.sms_sent_at, rr.sent_at) AS at
+         FROM review_requests rr
+        WHERE rr.technician_id = ? AND ${ASK_TOUCH_SQL}
+       UNION ALL
+       SELECT COALESCE(rr.followup_delivered_at, followups.followup_delivered_at) AS at
+         FROM review_requests rr
+         LEFT JOIN ${followupDeliveredSubquery(scope)} ON followups.review_request_id = rr.id::text
+        WHERE rr.technician_id = ? AND ${ASK_TOUCH_SQL}
+     ) events
+      WHERE at IS NOT NULL AND (at AT TIME ZONE ?)::date >= ?::date AND (at AT TIME ZONE ?)::date <= ?::date`,
+    [technicianId, technicianId, technicianId, timeZone, from, timeZone, to],
+  )).rows[0];
+  return Number(row?.n) || 0;
+}
+
+module.exports = { ASK_SPACING_MS, countDeliveredAsksForTechnician, looksLikeReviewAsk, deliveredAskRows, latestDeliveredAt, lastDeliveredAskAt, lastManualAskAt, lastUnresolvedAskAt };
