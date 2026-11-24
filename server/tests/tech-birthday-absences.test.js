@@ -58,12 +58,22 @@ describe('date logic (pure)', () => {
 
 // technicians -> `techs`; technician_absences -> the rows already there (any, cleared or not); inserts are recorded;
 // `owned` is what the reconcile read (technician_absences joined to technicians) returns; updates are applied to `absences`.
-function makeConn({ techs = [], absences = [], owned = [] } = {}) {
+function makeConn({ techs = [], absences = [], owned = [], liveTech } = {}) {
   const inserted = [];
   const tableOf = (table) => {
     if (table === 'technicians') {
+      let id;
       const q = {
-        where: jest.fn(() => q), whereNotNull: jest.fn(() => q), whereIn: jest.fn(() => q), select: jest.fn(async () => techs),
+        where: jest.fn((col, val) => { if (col === 'id' || (col && col.id)) id = typeof col === 'object' ? col.id : val; return q; }),
+        whereNotNull: jest.fn(() => q),
+        whereIn: jest.fn(() => q),
+        select: jest.fn(async () => techs),
+        // the locked re-read of one technician: `liveTech` when given, else what the reconcile scan saw for it
+        first: jest.fn(async () => {
+          if (liveTech) return liveTech;
+          const seen = owned.find((o) => o.technician_id === id);
+          return seen && { employment_status: seen.employment_status, field_dispatchable: seen.field_dispatchable, dob: seen.dob };
+        }),
       };
       return q;
     }
@@ -334,13 +344,27 @@ describe('reconcile and reopen: the sync touches only rows with its own source',
     expect(resolveOverflowAlerts).not.toHaveBeenCalled();
   });
 
-  test('a dob removed and then restored reopens the system-cleared row, announced out: true', async () => {
+  test('a dob removed and then restored starts a NEW episode: a fresh row with a new id, the old system-cleared row left as it is, announced out: true', async () => {
     const { conn, absences } = makeConn({ techs: [{ id: 't1', dob: '1990-12-02' }], absences: [systemCleared()] });
     expect(await syncTechDaysOff({ now: NOW, conn })).toMatchObject({ written: 0, reopened: 1, skipped: 0, failed: 0 });
-    expect(absences).toHaveLength(1);
-    expect(absences[0]).toMatchObject({ cleared_at: null, system_cleared_at: null, cleared_by: null });
-    expect(emitAbsenceChange).toHaveBeenCalledWith({ technicianId: 't1', date: '2026-12-02', out: true, absenceId: 'a1' });
+    expect(absences).toHaveLength(2);
+    // the old row is untouched: a manual dismissal keyed to its id (payload.absence_id) cannot cover the new episode
+    expect(absences[0]).toMatchObject({ id: 'a1', cleared_by: null });
+    expect(absences[0].cleared_at).not.toBeNull();
+    expect(absences[0].system_cleared_at).not.toBeNull();
+    expect(absences[1]).toMatchObject({ technician_id: 't1', absence_date: '2026-12-02', reason: 'other', source: SOURCE });
+    expect(absences[1].id).not.toBe('a1');
+    expect(absences[1].cleared_at).toBeUndefined();
+    expect(emitAbsenceChange).toHaveBeenCalledWith({ technicianId: 't1', date: '2026-12-02', out: true, absenceId: absences[1].id });
     expect(logger.info.mock.calls.map(([m]) => m).join('\n')).toMatch(/1 reopened/);
+  });
+
+  test('several earlier system-cleared episodes on the date still allow one new episode, and an open one blocks it', async () => {
+    const earlier = [systemCleared(), systemCleared({ id: 'a0' })];
+    const a = makeConn({ techs: [{ id: 't1', dob: '1990-12-02' }], absences: earlier });
+    expect(await syncTechDaysOff({ now: NOW, conn: a.conn })).toMatchObject({ reopened: 1 });
+    expect(await syncTechDaysOff({ now: NOW, conn: a.conn })).toMatchObject({ reopened: 0, skipped: 1 }); // now one is open
+    expect(a.absences).toHaveLength(3);
   });
 
   test('an office-cleared own row is never reopened (cleared_by set, or no system-clear stamp)', async () => {
@@ -363,6 +387,32 @@ describe('reconcile and reopen: the sync touches only rows with its own source',
     });
     expect(await syncTechDaysOff({ now: NOW, conn })).toMatchObject({ reopened: 0, skipped: 1 });
     expect(absences[0].cleared_at).not.toBeNull();
+  });
+
+  test('the clear rechecks the technician under the lock: a dob restored (or a tech made active) between the scan and the lock keeps the row open', async () => {
+    for (const live of [
+      { employment_status: 'active', field_dispatchable: true, dob: '1990-12-02' }, // dob restored: the day is wanted again
+    ]) {
+      const { conn, absences } = makeConn({ techs: [], absences: [own()], owned: [joined({ dob: null })], liveTech: live });
+      expect(await syncTechDaysOff({ now: NOW, conn })).toMatchObject({ cleared: 0, failed: 0 });
+      expect(absences[0].cleared_at).toBeNull();
+      expect(absences[0].system_cleared_at).toBeNull();
+    }
+    expect(emitAbsenceChange).not.toHaveBeenCalled();
+    expect(resolveOverflowAlerts).not.toHaveBeenCalled();
+  });
+
+  test('the clear goes ahead when the locked re-read still shows the technician unwanted for that date', async () => {
+    for (const live of [
+      { employment_status: 'inactive', field_dispatchable: true, dob: '1990-12-02' },
+      { employment_status: 'active', field_dispatchable: false, dob: '1990-12-02' },
+      { employment_status: 'active', field_dispatchable: true, dob: null },
+      { employment_status: 'active', field_dispatchable: true, dob: '1990-12-05' }, // a different date
+    ]) {
+      const { conn, absences } = makeConn({ techs: [], absences: [own()], owned: [joined({ dob: null })], liveTech: live });
+      expect(await syncTechDaysOff({ now: NOW, conn })).toMatchObject({ cleared: 1, failed: 0 });
+      expect(absences[0].cleared_at).toBe('NOW()');
+    }
   });
 
   test('a failed clear is counted, logged with no date and no error text, and the rest still run', async () => {

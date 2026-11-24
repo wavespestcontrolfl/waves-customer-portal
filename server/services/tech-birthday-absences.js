@@ -25,7 +25,7 @@
  *   - A Feb 29 birthday falls on Feb 28 in a year with no Feb 29.
  *   - Never write a row when the technician already has ANY absence row for that date. An uncleared row is
  *     "already out"; a CLEARED row is an office decision ("tech is back") that the tick never reverses, so a
- *     cleared day is not re-created. The one exception is the sync's own SYSTEM clear (REOPEN below).
+ *     cleared day is not re-created. The one exception is the sync's own SYSTEM clear (REOPEN AS A NEW EPISODE below).
  *   - Rows are written directly, never through markTechOut: no stop is parked or moved by this service, and no
  *     alert or message is created.
  *   - reason is the existing generic 'other' (tech-out's own list: sick, emergency, no_show, other), with no
@@ -34,7 +34,7 @@
  *     nothing.
  *   - OWNERSHIP IS EXPLICIT. Every row the sync writes carries source = 'tech_days_off' (technician_absences.source,
  *     migration 20261124160000); every row the office or tech-out writes has source NULL. The sync reads and changes
- *     ONLY rows with that source: no other row is ever cleared or reopened, whatever its reason, note or author.
+ *     ONLY rows with that source: no other row is ever cleared or followed by a new episode, whatever its reason, note or author.
  *   - RECONCILE. The same pass clears the future rows it owns that are no longer wanted: an uncleared row with the
  *     sync's source, dated today or later inside the horizon, when the technician is no longer active or
  *     field-dispatchable, the dob is now NULL, or the dob no longer gives that date. It is a SYSTEM clear: cleared_at
@@ -43,12 +43,18 @@
  *     the day's open tech_out_overflow alerts in the same transaction through tech-out's resolveOverflowAlerts (the
  *     helper clearTechOut uses), and is announced after its commit with emitAbsenceChange({ out: false }). So a
  *     corrected dob fixes the schedule by the next 03:25 run: the old future row clears and the new one is written.
- *   - REOPEN. When the date is a birthday again (the dob is restored, the technician is active again), the write
- *     pass REOPENS a row it system-cleared: source = 'tech_days_off', system_cleared_at set, cleared_by NULL and no
- *     other row on that date. A row the office cleared (cleared_by set, system_cleared_at empty) is never reopened:
- *     a technician who wants to work their day is cleared by the office in the existing tech-out screen and the sync
- *     never undoes it. Any row of another source on the date blocks the write, as before. A reopen is announced with
- *     emitAbsenceChange({ out: true }).
+ *   - REOPEN AS A NEW EPISODE. When the date is a birthday again (the dob is restored, the technician is active
+ *     again), the write pass writes a FRESH row (a new id) when every row on that date is one it system-cleared
+ *     (source = 'tech_days_off', system_cleared_at set, cleared_by NULL) and none is open. It never sets an old row's
+ *     cleared_at back to NULL: the tech-out sweep keeps a manually dismissed overflow card as covering a stop only for
+ *     the SAME absence id (payload.absence_id), so a new id starts with nothing covered by the old episode's
+ *     dismissals, exactly like a tech marked out again after "Tech is back". A row the office cleared (cleared_by set,
+ *     no system_cleared_at) is never followed by a new one: a technician who wants to work their day is cleared by the
+ *     office in the existing tech-out screen and the sync never undoes it. Any row of another source on the date
+ *     blocks the write, as before. A new episode is announced with emitAbsenceChange({ out: true }).
+ *   - The clear is rechecked under the fence: the technician is read again inside the locked transaction (active,
+ *     field-dispatchable and a dob that no longer gives the date), so a dob restored between the scan and the lock
+ *     leaves the row open.
  *   - Idempotent: a second tick the same day writes nothing and announces nothing.
  * No gate: it sends nothing, charges nothing, writes no pay and deletes nothing.
  */
@@ -93,10 +99,10 @@ function birthdayDatesBetween(dob, fromStr, toStr) {
   return out;
 }
 
-/** A row the sync cleared itself and may reopen: its source, a system clear, no office clearer. Pure. */
+/** A row the sync cleared itself and may follow with a new episode: its source, a system clear, no office clearer. Pure. */
 const isOwnSystemCleared = (row) => row.source === SOURCE && row.cleared_at != null && row.system_cleared_at != null && row.cleared_by == null;
 
-/** One technician-day: write the row, or reopen the sync's own system-cleared one, announced after the commit. Never throws. */
+/** One technician-day: write the row (a new episode when the sync's own system clears are all there is), announced after the commit. Never throws. */
 async function syncOneDay(conn, tech, date, result) {
   try {
     const done = await conn.transaction(async (trx) => {
@@ -109,9 +115,11 @@ async function syncOneDay(conn, tech, date, result) {
           .insert({ technician_id: tech.id, absence_date: date, reason: ABSENCE_REASON, source: SOURCE }).returning('id');
         return { id: (row && row.id) || row || null, kind: 'written' };
       }
-      if (rows.length === 1 && isOwnSystemCleared(rows[0])) {
-        await trx('technician_absences').where({ id: rows[0].id }).update({ cleared_at: null, system_cleared_at: null });
-        return { id: rows[0].id, kind: 'reopened' };
+      // Every row on the day is one the sync cleared itself: a new episode, never a reopened row (see the header).
+      if (rows.every(isOwnSystemCleared)) {
+        const [row] = await trx('technician_absences')
+          .insert({ technician_id: tech.id, absence_date: date, reason: ABSENCE_REASON, source: SOURCE }).returning('id');
+        return { id: (row && row.id) || row || null, kind: 'reopened' };
       }
       return null;
     });
@@ -131,8 +139,8 @@ function rowStillWanted(row, today, horizon) {
   return birthdayDatesBetween(row.dob, today, horizon).includes(row.date);
 }
 
-/** Clear ONE row the sync owns (a system clear), under the tech-day fence, and announce it after the commit. Never throws. */
-async function clearOwnRow(conn, row, result) {
+/** Clear ONE row the sync owns (a system clear), under the tech-day fence, rechecking the technician there, and announce it after the commit. Never throws. */
+async function clearOwnRow(conn, row, { today, horizon, result }) {
   try {
     const tech = require('./tech-out');
     const cleared = await conn.transaction(async (trx) => {
@@ -140,6 +148,11 @@ async function clearOwnRow(conn, row, result) {
       // Read again under the fence: the office may have cleared it meanwhile.
       const live = await trx('technician_absences').where({ id: row.id, source: SOURCE }).whereNull('cleared_at').forUpdate().first('id');
       if (!live) return false;
+      // And the technician again: a dob restored (or a technician made active or dispatchable again) between the scan and
+      // this lock makes the day wanted once more, so it stays. A plain read, not a row lock.
+      const current = await trx('technicians').where({ id: row.technician_id })
+        .first('employment_status', 'field_dispatchable', trx.raw("to_char(dob, 'YYYY-MM-DD') AS dob"));
+      if (current && rowStillWanted({ ...current, date: row.date }, today, horizon)) return false;
       await trx('technician_absences').where({ id: row.id }).update({ cleared_at: trx.fn.now(), system_cleared_at: trx.fn.now() });
       // The day no longer blocks: the parked overflow alerts of a sweep that ran on the stale row go with it, as in clearTechOut.
       await tech.resolveOverflowAlerts(trx, { technicianId: row.technician_id, date: row.date, actorId: null });
@@ -163,7 +176,7 @@ async function reconcileOwnRows(conn, { today, horizon, technicianIds, result })
   const rows = await query.select('a.id', 'a.technician_id', 't.employment_status', 't.field_dispatchable',
     conn.raw("to_char(a.absence_date, 'YYYY-MM-DD') AS date"), conn.raw("to_char(t.dob, 'YYYY-MM-DD') AS dob"));
   for (const row of rows) {
-    if (!rowStillWanted(row, today, horizon)) await clearOwnRow(conn, row, result);
+    if (!rowStillWanted(row, today, horizon)) await clearOwnRow(conn, row, { today, horizon, result });
   }
 }
 

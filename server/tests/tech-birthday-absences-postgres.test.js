@@ -186,7 +186,7 @@ postgres('technician days off (real Postgres, rolled back)', () => {
       for (const id of ids) expect(await open(id)).toEqual([]);
     });
 
-    test('a dob removed and then restored reopens the same row; an unrelated pass leaves it open', async () => {
+    test('a dob removed and then restored starts a new episode (a new id); the old system-cleared row stays as it was', async () => {
       const tech = await makeTech('Synthetic Restored', { dob: '1990-03-05' });
       await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] });
       const [original] = await rowsFor(tech.id);
@@ -196,9 +196,61 @@ postgres('technician days off (real Postgres, rolled back)', () => {
       await trx('technicians').where({ id: tech.id }).update({ dob: '1990-03-05' });
       expect(await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] })).toMatchObject({ written: 0, reopened: 1, failed: 0 });
       const rows = await rowsFor(tech.id);
-      expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({ id: original.id, cleared_at: null, cleared_by: null, system_cleared_at: null, source: 'tech_days_off' });
+      expect(rows).toHaveLength(2);
+      const [oldRow] = rows.filter((r) => r.id === original.id);
+      expect(oldRow.cleared_at).not.toBeNull();
+      expect(oldRow.system_cleared_at).not.toBeNull();
+      const [fresh] = await open(tech.id);
+      expect(fresh).toMatchObject({ cleared_by: null, system_cleared_at: null, source: 'tech_days_off', reason: 'other' });
+      expect(fresh.id).not.toBe(original.id);
+      // a second pass changes nothing, and the unique open-row index holds
       expect(await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] })).toMatchObject({ written: 0, reopened: 0, cleared: 0 });
+      // clear it again and restore again: a third episode, never a reopened row
+      await trx('technicians').where({ id: tech.id }).update({ dob: null });
+      await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] });
+      await trx('technicians').where({ id: tech.id }).update({ dob: '1990-03-05' });
+      expect(await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] })).toMatchObject({ reopened: 1 });
+      expect(await rowsFor(tech.id)).toHaveLength(3);
+    });
+
+    test('a manual overflow dismissal of the old episode does not cover the new one: the sweep parks the stop again', async () => {
+      process.env.GATE_TECH_OUT_REDISTRIBUTE = 'true';
+      try {
+        const tech = await makeTech('Synthetic Dismissed', { dob: '1990-03-05' });
+        const techOut = require('../services/tech-out');
+        await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] });
+        const [episodeOne] = await open(tech.id);
+        const [visit] = await trx('scheduled_services').insert({
+          technician_id: tech.id, scheduled_date: IN_WINDOW, status: 'pending', service_type: 'Synthetic Pest Visit',
+          window_start: '09:00', window_end: '11:00',
+        }).returning('id');
+        const visitId = visit.id || visit;
+        const alertsOf = () => trx('dispatch_alerts').where({ type: 'tech_out_overflow', tech_id: tech.id }).whereRaw("payload->>'date' = ?", [IN_WINDOW]).orderBy('created_at');
+        // episode one: the sweep parks the stop; the dispatcher dismisses the card by hand; the next sweep leaves it dismissed
+        await techOut.sweepAbsentTechDays({ now: NOW });
+        let alerts = await alertsOf();
+        expect(alerts).toHaveLength(1);
+        expect(String(alerts[0].payload.absence_id)).toBe(String(episodeOne.id));
+        await require('../services/dispatch-alerts').resolveAlert({ id: alerts[0].id, resolvedBy: null, trx });
+        await techOut.sweepAbsentTechDays({ now: NOW });
+        expect(await alertsOf()).toHaveLength(1);
+        // the dob is removed and restored: a new episode with a new id
+        await trx('technicians').where({ id: tech.id }).update({ dob: null });
+        await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] });
+        await trx('technicians').where({ id: tech.id }).update({ dob: '1990-03-05' });
+        await svc.syncTechDaysOff({ now: NOW, technicianIds: [tech.id] });
+        const [episodeTwo] = await open(tech.id);
+        expect(episodeTwo.id).not.toBe(episodeOne.id);
+        // the old dismissal (absence_id = episode one) does not cover the stop for the new episode
+        await techOut.sweepAbsentTechDays({ now: NOW });
+        alerts = await alertsOf();
+        expect(alerts).toHaveLength(2);
+        const fresh = alerts.find((a) => a.resolved_at === null);
+        expect(String(fresh.payload.absence_id)).toBe(String(episodeTwo.id));
+        expect(String(fresh.job_id)).toBe(String(visitId));
+      } finally {
+        delete process.env.GATE_TECH_OUT_REDISTRIBUTE;
+      }
     });
 
     test('a row the office cleared through clearTechOut records the office user and is never reopened', async () => {
