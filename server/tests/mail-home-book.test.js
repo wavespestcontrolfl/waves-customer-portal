@@ -16,10 +16,13 @@ const mockDb = jest.fn(() => {
 });
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../routes/admin-customers', () => ({ ensureCustomerAccount: jest.fn() }));
 
 const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
 const realQuote = require('../services/mail/home-quote');
-const { getHomeTimes, bookHome, draftIdFor, validContact, validOffer, offersOf } = require('../services/mail/home-book');
+const {
+  getHomeTimes, bookHome, draftIdFor, validContact, validOffer, offersOf, findOwnCustomer: findOwnCustomerReal, mintCustomer: mintCustomerReal,
+} = require('../services/mail/home-book');
 
 const TOKEN = '0123456789abcdef0123456789abcdef';
 const row = (over) => ({
@@ -42,6 +45,9 @@ let quote;
 let saveEstimate;
 let updates;
 let deps;
+let findOwnCustomer;
+let findExistingCustomer;
+let mintCustomer;
 
 beforeEach(() => {
   mockRow = row();
@@ -71,8 +77,12 @@ beforeEach(() => {
     q.update = jest.fn(async (set) => { updates.push(set); return 1; });
     return q;
   });
+  findOwnCustomer = jest.fn(async () => null);
+  findExistingCustomer = jest.fn(async () => null);
+  mintCustomer = jest.fn(async () => 'cust-1');
   deps = {
     gates, booking, quote, saveEstimate, db: conn, buildEngineInput: jest.fn(() => ({ engine: 'input' })),
+    findOwnCustomer, findExistingCustomer, mintCustomer,
   };
 });
 
@@ -163,6 +173,88 @@ describe('bookHome', () => {
     expect(booking.createSelfBooking).not.toHaveBeenCalled();
   });
 
+  test('a contact that is already a customer is 409 contact_on_file: no row minted, nothing priced, saved or booked', async () => {
+    findExistingCustomer.mockResolvedValue({ id: 'someone' });
+    expect(await bookHome(TOKEN, INPUT(), deps)).toEqual({ status: 409, body: { error: 'contact_on_file' } });
+    expect(findExistingCustomer).toHaveBeenCalledWith(expect.objectContaining({ row: mockRow }), expect.objectContaining({ phone10: '9415550142', email: 'sample@example.com' }), deps);
+    expect(mintCustomer).not.toHaveBeenCalled();
+    expect(quote.priceHome).not.toHaveBeenCalled();
+    expect(saveEstimate).not.toHaveBeenCalled();
+    expect(booking.createSelfBooking).not.toHaveBeenCalled();
+  });
+
+  test('a new contact gets one pre-customer row after the price check, and the estimate is saved with its id', async () => {
+    await bookHome(TOKEN, INPUT(), deps);
+    expect(mintCustomer).toHaveBeenCalledTimes(1);
+    expect(mintCustomer.mock.calls[0][2]).toEqual({ lat: 27.5, lng: -82.5 });
+    expect(quote.priceHome.mock.invocationCallOrder[0]).toBeLessThan(mintCustomer.mock.invocationCallOrder[0]);
+    expect(mintCustomer.mock.invocationCallOrder[0]).toBeLessThan(saveEstimate.mock.invocationCallOrder[0]);
+    expect(saveEstimate.mock.calls[0][0].customerId).toBe('cust-1');
+  });
+
+  test('a repeat tap reuses the row an earlier tap minted: no second row, no existing-customer refusal', async () => {
+    findOwnCustomer.mockResolvedValue('cust-1');
+    findExistingCustomer.mockResolvedValue({ id: 'cust-1' }); // the matcher would find our own row: it must not be asked
+    const res = await bookHome(TOKEN, INPUT(), deps);
+    expect(res.status).toBe(200);
+    expect(findExistingCustomer).not.toHaveBeenCalled();
+    expect(mintCustomer).not.toHaveBeenCalled();
+    expect(saveEstimate.mock.calls[0][0].customerId).toBe('cust-1');
+    expect(booking.createSelfBooking.mock.calls[0][0].customer_id).toBe('cust-1');
+  });
+
+  test('a refused price mints no row', async () => {
+    quote.priceHome.mockResolvedValue({ status: 'not_clean', reason: 'member_address' });
+    await bookHome(TOKEN, INPUT(), deps);
+    expect(mintCustomer).not.toHaveBeenCalled();
+  });
+
+  test('mintCustomer inserts the wizard columns that apply, with no lot or property size', async () => {
+    const admin = require('../routes/admin-customers');
+    admin.ensureCustomerAccount.mockResolvedValue({ accountId: 'acct-1', existingCustomer: null });
+    const inserted = [];
+    const conn = jest.fn(() => ({ insert: jest.fn((r) => { inserted.push(r); return { returning: jest.fn(async () => [{ id: 'cust-9' }]) }; }) }));
+    const id = await mintCustomerReal({ row: mockRow }, validContact(INPUT()), { lat: 27.5, lng: -82.5 }, { db: conn });
+    expect(id).toBe('cust-9');
+    expect(admin.ensureCustomerAccount).toHaveBeenCalledWith(conn, { firstName: 'Sample', lastName: 'Person', phone: '9415550142', email: 'sample@example.com' });
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]).toMatchObject({
+      account_id: 'acct-1', is_primary_profile: true, profile_label: 'Primary', first_name: 'Sample', last_name: 'Person',
+      email: 'sample@example.com', state: 'FL', zip: '34212', latitude: 27.5, longitude: -82.5,
+      pipeline_stage: 'new_lead', lead_source: 'mail_new_home', lead_source_detail: 'new_home_postcard',
+      lead_source_area: expect.any(String), lead_service_interest: 'Pest Control', active: true,
+    });
+    expect(inserted[0].referral_code).toMatch(/^WAVES-[A-Z2-9]{4}$/);
+    expect(inserted[0].pipeline_stage_changed_at).toBeInstanceOf(Date);
+    expect(inserted[0].last_contact_date).toBeInstanceOf(Date);
+    expect(inserted[0].address_line1).toMatch(/example trl/i);
+    expect(inserted[0]).not.toHaveProperty('lot_sqft');
+    expect(inserted[0]).not.toHaveProperty('property_sqft');
+  });
+
+  test('findOwnCustomer matches only a pre-customer mail_new_home row with the same phone and this home address', async () => {
+    const rows = [
+      { id: 'other-home', phone: '+19415550142', address_line1: '9 OTHER ST', zip: '34212' },
+      { id: 'mine', phone: '+19415550142', address_line1: '101 Example Trl', zip: '34212' },
+    ];
+    const calls = [];
+    const q = {};
+    for (const m of ['where', 'whereIn', 'whereRaw', 'whereNull', 'limit']) q[m] = jest.fn((...a) => { calls.push([m, ...a]); return q; });
+    q.select = jest.fn(async () => rows);
+    const matches = jest.fn((customer, line1) => customer.address_line1.toLowerCase() === line1.toLowerCase());
+    const id = await findOwnCustomerReal({ row: mockRow }, validContact(INPUT()), { db: jest.fn(() => q), booking: { addressMatchesCustomer: matches } });
+    expect(id).toBe('mine');
+    expect(calls).toEqual(expect.arrayContaining([
+      ['where', { lead_source: 'mail_new_home' }],
+      ['whereIn', 'pipeline_stage', expect.arrayContaining(['new_lead'])],
+      ['whereNull', 'deleted_at'],
+    ]));
+    expect(calls.find(([m]) => m === 'whereIn')[2]).not.toContain('active_customer');
+    expect(matches).toHaveBeenCalledWith(rows[1], '101 EXAMPLE TRL', '34212', null);
+    rows.pop();
+    expect(await findOwnCustomerReal({ row: mockRow }, validContact(INPUT()), { db: jest.fn(() => q), booking: { addressMatchesCustomer: matches } })).toBeNull();
+  });
+
   test('/book off is not_available', async () => {
     gates.isEnabled.mockImplementation((name) => name !== 'selfBooking');
     expect(await bookHome(TOKEN, INPUT(), deps)).toEqual({ status: 503, body: { error: 'not_available' } });
@@ -188,7 +280,8 @@ describe('bookHome', () => {
       billByInvoice: false,
       showOneTimeOption: false,
     });
-    expect(body.customerId).toBeUndefined();
+    // The draft carries the customer's id (the pre-customer row), as the wizard's draft does.
+    expect(body.customerId).toBe('cust-1');
     expect(body.estimateData.engineInputs).toEqual({ engine: 'input' });
     expect(body.estimateData.inputs).toMatchObject({ homeSqFt: '2400', lotSqFt: '9000', stories: '1', svcPest: true, pestFreq: '4' });
     expect(deps.buildEngineInput).toHaveBeenCalledTimes(1);
@@ -202,7 +295,7 @@ describe('bookHome', () => {
       pricing_estimate_id: 'est-1',
       slot_date: '2026-12-02', slot_start: '09:00', slot_end: '10:00', technician_id: TECH, slot_sig: 'sig-2026-12-02-09:00',
       service_id: 'pest_control', service_type: 'Pest Control', recurring_pattern: 'quarterly', source: 'mail_new_home',
-      payAtVisit: true, customersOnly: true, authedCustomer: null, callbackVisit: null,
+      customer_id: 'cust-1', payAtVisit: true, customersOnly: true, authedCustomer: null, callbackVisit: null,
       new_customer: {
         first_name: 'Sample', last_name: 'Person', phone: '9415550142', email: 'sample@example.com',
         address_line1: '101 EXAMPLE TRL', city: 'SAMPLETON', state: 'FL', zip: '34212', lat: 27.5, lng: -82.5,

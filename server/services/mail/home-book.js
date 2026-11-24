@@ -19,6 +19,11 @@
  *     with pricing_estimate_id + a handoff token minted for that estimate, so every /book check (the signed offer, the
  *     customers-only handoff pass, the customer mint, the visit insert, the confirmation text and email) runs unchanged.
  *
+ * The customer comes first, as in the quote wizard: a contact that is already a customer (the wizard's own matcher,
+ * findExistingCustomerByContact) is not booked here (409 contact_on_file); a new contact gets the wizard's pre-customer
+ * row (new_lead, lead_source mail_new_home), and the estimate is saved with its customer_id so the /book handoff can price
+ * the visit. A repeat tap finds its own row again (same phone, same address, still pre-customer) and reuses it.
+ *
  * The estimate is written as a quote-wizard draft (source 'quote_wizard', status 'draft'): that is the shape the /book
  * handoff accepts (wizardDraftSelfServeBookable). Its lead_source is 'mail_new_home'. The visit's source is
  * 'mail_new_home' too (self_booked_appointments.source and scheduled_services.source are free text).
@@ -208,13 +213,89 @@ async function checkLivePrice(home, deps) {
   return { ok: true };
 }
 
-/** The canonical save of the estimate: the shadow price's body plus the typed contact. */
-async function saveEstimate(home, contact, deps) {
+// ---- the customer ---------------------------------------------------------------------------------------------------
+// The quote wizard always has a customer on its draft before the visitor books (public-quote.js, the customers upsert):
+// the /book handoff prices a visit only when estimate.customer_id belongs to the booking customer
+// (estimateBelongsToCustomerAccount). So this module does the same: a contact that is already a customer is not booked
+// here; a new contact gets the wizard's own pre-customer row (pipeline_stage new_lead) before the estimate is saved.
+
+const phone10Of = (value) => String(value || '').replace(/\D/g, '').slice(-10);
+
+// The row an earlier tap of this page minted for this contact and this home (lead_source mail_new_home, still a
+// pre-customer stage, same phone, same address), so a repeat tap reuses it. Null when there is none.
+async function findOwnCustomer(home, contact, deps) {
+  const conn = deps.db || db;
+  const { PRE_CUSTOMER_PIPELINE_STAGES } = require('../booking-contact-linked-handoff');
+  const booking = deps.booking || REAL.booking();
+  const rows = await conn('customers')
+    .where({ lead_source: LEAD_SOURCE })
+    .whereIn('pipeline_stage', [...PRE_CUSTOMER_PIPELINE_STAGES])
+    .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${contact.phone10}`])
+    .whereNull('deleted_at')
+    .limit(5)
+    .select('id', 'phone', 'address_line1', 'address_line2', 'zip');
+  const own = rows.find((r) => phone10Of(r.phone) === contact.phone10
+    && booking.addressMatchesCustomer(r, home.row.address_line1, home.row.zip, null));
+  return own ? own.id : null;
+}
+
+// Any customer the wizard's own matcher finds by the typed phone or email (a unique phone match, a same-person cluster
+// of several, or a unique email match).
+async function findExistingCustomer(home, contact, deps) {
+  const find = require('../../routes/public-quote')._internals.findExistingCustomerByContact;
+  return find(deps.db || db, { contactPhone: contact.phone10, contactEmail: contact.email }, {
+    first_name: contact.first, last_name: contact.last, address_line1: home.row.address_line1, address_line2: null,
+    city: home.row.city || '', zip: home.row.zip || '',
+  });
+}
+
+// The pre-customer row, with the columns the wizard sets for a new contact that apply here. No lot or property size
+// (measured only), no landing page or UTM (none). Returns the new customer's id.
+async function mintCustomer(home, contact, pin, deps) {
+  const conn = deps.db || db;
+  const { ensureCustomerAccount } = require('../../routes/admin-customers');
+  const { applyContactNormalization } = require('../../utils/intake-normalize');
+  const code = `WAVES-${Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('')}`;
+  const account = await ensureCustomerAccount(conn, {
+    firstName: contact.first, lastName: contact.last, phone: contact.phone10, email: contact.email,
+  });
+  const [created] = await conn('customers').insert(applyContactNormalization({
+    account_id: account.accountId,
+    is_primary_profile: !account.existingCustomer,
+    profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
+    first_name: contact.first,
+    last_name: contact.last,
+    email: contact.email,
+    phone: contact.phone10,
+    address_line1: home.row.address_line1,
+    address_line2: null,
+    city: home.row.city || '',
+    state: home.row.state || 'FL',
+    zip: home.row.zip || '',
+    latitude: pin.lat,
+    longitude: pin.lng,
+    pipeline_stage: 'new_lead',
+    pipeline_stage_changed_at: new Date(),
+    lead_source: LEAD_SOURCE,
+    lead_source_detail: LEAD_SOURCE_DETAIL,
+    lead_source_area: home.row.city ? String(home.row.city).slice(0, 50) : null,
+    lead_service_interest: SERVICE_LABEL,
+    referral_code: code,
+    last_contact_date: new Date(),
+    last_contact_type: LEAD_SOURCE,
+    active: true,
+  })).returning(['id']);
+  return created.id || created;
+}
+
+/** The canonical save of the estimate: the shadow price's body plus the typed contact and the customer's id. */
+async function saveEstimate(home, contact, customerId, deps) {
   const quote = deps.quote || REAL.quote();
   const buildEngineInput = deps.buildEngineInput || REAL.buildEngineInput();
   const save = deps.saveEstimate || REAL.save();
   const body = {
     ...quote.estimateBody(home.row, home.facts, quote.engineInputFor(home.facts, buildEngineInput)),
+    customerId,
     customerName: contact.name,
     customerPhone: contact.phone,
     customerEmail: contact.email,
@@ -255,14 +336,18 @@ function refusalOf(result) {
  * The live price check, the canonical save, the draft's mark and the handoff token. Returns { refuse: { status, body } }
  * or { estimateId, estimateToken }.
  */
-async function prepareEstimate(home, contact, deps) {
+async function prepareEstimate(home, contact, pin, deps) {
   const refuse = (status, error) => ({ refuse: { status, body: { error } } });
+  // Our own earlier mint is reused; any other customer at this phone or email is not booked here.
+  let customerId = await (deps.findOwnCustomer || findOwnCustomer)(home, contact, deps);
+  if (!customerId && await (deps.findExistingCustomer || findExistingCustomer)(home, contact, deps)) return refuse(409, 'contact_on_file');
   const priced = await checkLivePrice(home, deps);
   if (priced.refuse) return refuse(priced.refuse.status, priced.refuse.error);
+  if (!customerId) customerId = await (deps.mintCustomer || mintCustomer)(home, contact, pin, deps);
 
   let saved;
   try {
-    saved = await saveEstimate(home, contact, deps);
+    saved = await saveEstimate(home, contact, customerId, deps);
   } catch (err) {
     const status = httpStatus(err);
     if (status >= 400 && status < 500) return refuse(409, 'not_available');
@@ -273,13 +358,16 @@ async function prepareEstimate(home, contact, deps) {
   await markEstimate(estimateId, deps);
 
   const estimateToken = (deps.handoffToken || REAL.handoffToken())(estimateId);
-  return estimateToken ? { estimateId, estimateToken } : refuse(503, 'not_available');
+  return estimateToken ? { estimateId, estimateToken, customerId } : refuse(503, 'not_available');
 }
 
 // The payload of /book's POST /confirm, with the flags it sets after the body spread: no bearer identity, never a
 // callback visit.
 function bookingPayload({ home, contact, offer, pin, gates, estimate }) {
   return {
+    // The pre-customer row: with customers-only on, the handoff binds it by address; with it off, customer_id plus the
+    // typed phone resolve it (the phone-on-file check accepts the id of the row that owns the phone).
+    customer_id: estimate.customerId,
     pricing_estimate_id: estimate.estimateId,
     estimate_token: estimate.estimateToken,
     slot_date: offer.date,
@@ -333,7 +421,7 @@ async function bookHome(token, input, deps = {}) {
   const pin = await pinOf(home.row, booking);
   if (!pin) return { status: 503, body: { error: 'not_available' } };
 
-  const prepared = await prepareEstimate(home, contact, deps);
+  const prepared = await prepareEstimate(home, contact, pin, deps);
   if (prepared.refuse) return prepared.refuse;
 
   const result = await booking.createSelfBooking(bookingPayload({ home, contact, offer, pin, gates, estimate: prepared }));
@@ -349,4 +437,6 @@ async function bookHome(token, input, deps = {}) {
   return { status: 200, body: { booked: true, date: offer.date, window: { start: offer.start, end: offer.end } } };
 }
 
-module.exports = { getHomeTimes, bookHome, loadHome, draftIdFor, validContact, validOffer, offersOf };
+module.exports = {
+  getHomeTimes, bookHome, loadHome, draftIdFor, validContact, validOffer, offersOf, findOwnCustomer, mintCustomer,
+};
