@@ -21,7 +21,7 @@ const Joi = require('joi');
 const db = require('../models/db');
 const { recordAuditEvent } = require('./audit-log');
 const { etDateString, validCalendarDate } = require('../utils/datetime-et');
-const { payrollTimeOffLive, payrollPayLinesLive, payrollFamilyEmployeeLive, payrollMercuryStatusLive } = require('../config/feature-gates');
+const { payrollTimeOffLive, payrollPayLinesLive, payrollProductionShareLive, payrollFamilyEmployeeLive, payrollMercuryStatusLive } = require('../config/feature-gates');
 const { rollIrs } = require('./payroll-tax-calendar');
 
 const FILING_STATUSES = ['single', 'married_separately', 'married_jointly', 'head_of_household'];
@@ -242,26 +242,35 @@ async function setPayMethod(technicianId, input, actor, conn = db) {
 // bank"), so the panel must still list them.
 // With time off on, a person stays listed while a minimum paid week is set, whatever their status or type now (one
 // who has left, or is no longer W-2), so the owner can clear it: a kept value would come back with a W-2 return.
-const listedEmployees = (query, formerWithBank, withMinimum) => query.where(function listed() {
+// `withOpenRun` (the overtime coverage on): a former W-2 employee with approved hours in a week an open (draft) pay run covers stays listed, so
+// the coverage their check needs can still be set.
+const listedEmployees = (query, formerWithBank, withMinimum, withOpenRun = false) => query.where(function listed() {
   this.where({ employment_type: 'w2' }).where(function current() {
     this.whereIn('employment_status', ['active', 'prospective']);
     if (formerWithBank) this.orWhereNotNull('pto_hours_per_year');
+    if (withOpenRun) {
+      this.orWhereRaw(`EXISTS (SELECT 1 FROM time_weekly_summary w JOIN payroll_runs r ON r.week_start = w.week_start AND r.status = 'draft'
+        WHERE w.technician_id = technicians.id AND w.status = 'approved' AND COALESCE(w.regular_minutes, 0) + COALESCE(w.overtime_minutes, 0) > 0)`);
+    }
   });
   if (withMinimum) this.orWhereNotNull('paid_week_minimum_hours');
 });
+
+// The overtime coverage is shown (and editable) whenever a gate that needs it is on: the pay lines, or the production share.
+const coverageLive = () => [payrollPayLinesLive, payrollProductionShareLive].some((gate) => typeof gate === 'function' && gate());
 
 async function listPayrollTechnicians(conn = db, formerWithBank) {
   const today = etDateString();
   // GATE_PAYROLL_TIME_OFF: the yearly paid time off allowance rides on each row.
   const withTimeOff = typeof payrollTimeOffLive === 'function' && payrollTimeOffLive();
-  // GATE_PAYROLL_PAY_LINES: whether federal overtime law covers the employee rides on each row.
-  const withCoverage = typeof payrollPayLinesLive === 'function' && payrollPayLinesLive();
+  // GATE_PAYROLL_PAY_LINES or GATE_PAYROLL_PRODUCTION_SHARE: whether federal overtime law covers the employee rides on each row.
+  const withCoverage = coverageLive();
   // GATE_PAYROLL_FAMILY_EMPLOYEE: the family employee setting rides on each row (null = not set).
   const withFamily = typeof payrollFamilyEmployeeLive === 'function' && payrollFamilyEmployeeLive();
   // GATE_PAYROLL_MERCURY_STATUS: the Mercury recipient id rides on each row (null = not entered).
   const withMercury = typeof payrollMercuryStatusLive === 'function' && payrollMercuryStatusLive();
   // The settings roster only: the Time off panel (formerWithBank) never offers a person kept for their minimum.
-  const rows = await listedEmployees(conn('technicians'), formerWithBank, withTimeOff && !formerWithBank)
+  const rows = await listedEmployees(conn('technicians'), formerWithBank, withTimeOff && !formerWithBank, withCoverage && !formerWithBank)
     .orderBy('name')
     .select('id', 'name', 'pay_rate', 'pay_method', 'employment_status', 'employment_type',
       ...(withTimeOff ? ['pto_hours_per_year', 'paid_week_minimum_hours', conn.raw("to_char(paid_week_minimum_last_day, 'YYYY-MM-DD') AS paid_week_minimum_last_day")] : []),

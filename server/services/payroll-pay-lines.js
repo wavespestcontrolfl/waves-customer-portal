@@ -353,6 +353,18 @@ async function earlierLinePay(conn, ids, weeks) {
       ...lineSpan({ coversFrom: row.covers_from || null, coversTo: row.covers_to || null, earnedWeekStart: row.earned_week_start }),
     });
   }
+  // A production share a finalized check paid is line pay of its own week too (it is priced as one more line,
+  // payroll-production-share.js), though it is not a pay line row: a later check that pays line pay for that week reads it here.
+  const shares = await conn('payroll_checks as c')
+    .join('payroll_runs as r', 'r.id', 'c.run_id')
+    .whereIn('c.technician_id', ids)
+    .where({ 'c.status': 'finalized', 'r.status': 'finalized' })
+    .whereIn('c.week_start', sorted)
+    .where('c.production_share_cents', '>', 0)
+    .select('c.technician_id', 'c.production_share_cents', conn.raw("to_char(c.week_start, 'YYYY-MM-DD') as week_start"));
+  for (const share of shares) {
+    byTech.get(share.technician_id).lines.push({ amountCents: Number(share.production_share_cents), weekStart: share.week_start });
+  }
   const checks = await conn('payroll_checks as c')
     .join('payroll_runs as r', 'r.id', 'c.run_id')
     .whereIn('c.technician_id', ids)

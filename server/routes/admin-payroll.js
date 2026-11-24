@@ -61,6 +61,8 @@
  * PUT    /technicians/:id/week-minimum           { hours | null } the minimum paid hours of a full workweek (owner account).
  * GET    /production-share/preview?technicianId=&weekStart=   the week's production share credit, stop by stop (owner account; pays nothing).
  * PUT    /production-share/settings              { technicianId | null, fromWeek?, rateBps, barType, barCents, callbackStopValueCents } (owner account).
+ * PUT    /production-share/stop-override         { technicianId, visitId, weekStart, creditCents, reason } the owner's credit for a stop (owner account; 409 once the week is paid).
+ * DELETE /production-share/stop-override         { technicianId, visitId, weekStart } (body or query) the stop goes back to the rules.
  *                                    The allowance only warns; it never blocks an entry.
  * PUT    /technicians/:id/pto-payout-week        { weekStart | null, shownWeekStart | null, shownState }
  *                                    "Pay out the bank": the pay run for that week pays every hour the time-off
@@ -115,7 +117,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { requireFullAccess } = require('../services/intelligence-bar/ib-access');
 const {
   payrollLive, payrollFormFiguresLive, payrollTimeOffLive, payrollPayLinesLive, payrollFamilyEmployeeLive,
-  payrollMercuryStatusLive, payrollMercuryPayLive,
+  payrollMercuryStatusLive, payrollMercuryPayLive, payrollProductionShareLive,
 } = require('../config/feature-gates');
 const payrollW4 = require('../services/payroll-w4');
 const payrollSimple = require('../services/payroll-simple');
@@ -223,6 +225,19 @@ router.put('/production-share/settings', requireFullAccess, async (req, res) => 
   } catch (err) { fail(res, 'save the production share settings', err); }
 });
 
+// The owner sets the credit of a stop the rules cannot credit (a review row of the preview). 409 once the week is paid.
+router.put('/production-share/stop-override', requireFullAccess, async (req, res) => {
+  try {
+    res.json({ override: await productionShare.setStopOverride(req.body, req.technicianId) });
+  } catch (err) { fail(res, 'set the credit of a stop', err); }
+});
+
+router.delete('/production-share/stop-override', requireFullAccess, async (req, res) => {
+  try {
+    res.json({ cleared: await productionShare.clearStopOverride({ ...req.query, ...(req.body || {}) }, req.technicianId) });
+  } catch (err) { fail(res, 'clear the credit of a stop', err); }
+});
+
 // A payout decides an employee's last wages (the handbook's two exceptions need the owner's judgment), so it
 // is the owner account's alone: the predicate every owner-only money action uses (ib-access.js).
 router.put('/technicians/:id/pto-payout-week', timeOffOnly, requireFullAccess, async (req, res) => {
@@ -261,7 +276,15 @@ router.delete('/pay-lines/:id', payLinesOnly, async (req, res) => {
   } catch (err) { fail(res, 'remove pay line', err); }
 });
 
-router.put('/technicians/:id/flsa-coverage', payLinesOnly, async (req, res) => {
+// The overtime coverage of an employee is needed by the pay lines and by the production share (its overtime is qualified only for a
+// covered employee), so either gate opens it.
+const coverageOnly = (req, res, next) => {
+  const live = (gate) => typeof gate === 'function' && gate();
+  if (!(live(payrollPayLinesLive) || live(payrollProductionShareLive))) return res.status(404).json({ enabled: false });
+  return next();
+};
+
+router.put('/technicians/:id/flsa-coverage', coverageOnly, async (req, res) => {
   try {
     res.json({ technician: await payrollPayLines.setFlsaCoverage(req.params.id, req.body, req.technicianId) });
   } catch (err) { fail(res, 'set overtime coverage', err); }
