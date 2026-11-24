@@ -56,6 +56,7 @@ import OfferTierPicker from '../components/estimate/OfferTierPicker';
 import SlotPicker from '../components/estimate/SlotPicker';
 import WebsiteCallbackButton from '../components/estimate/WebsiteCallbackButton';
 import WebsiteEstimateFlow, { WebsiteEstimateFrame } from '../components/estimate/WebsiteEstimateFlow';
+import WhatYouPayBox, { buildWhatYouPay } from '../components/estimate/WhatYouPayBox';
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE, confirmStepFirstVisitAmount, firstVisitTotalPreview, setupFeeBilledWithFirstVisit, standardInvoiceShape } from '../components/estimate/PaymentPreferenceButtons';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
@@ -9859,6 +9860,40 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       ? averageModel.services[0].perApplication
       : null,
   });
+  // "What you pay and when" under the price (owner 2026-11-23). It reads the same per-application figures
+  // as the monthly average, so on the annual-prepay choice (which hides the average) it asks for the
+  // model again as if the plan were pay-per-application. It shows only when the first bill is proven
+  // to be those figures: the same credit and extra-fee checks as the first-visit line, plus the
+  // "Reserve your spot" box's own first application agreeing to the cent.
+  const whatYouPayModel = (paymentPreference === 'prepay_annual'
+    ? resolvePageMonthlyAverage({
+      serviceMode, estimate, billsMonthly, isCommercialEstimate, cta, paymentPreference: null,
+      services, selected, selectedCombo, combinedFrequency, pricing, renderFlags,
+    }, manualDiscountMonthlyAmount)
+    : monthlyAverage)?.model || null;
+  const whatYouPay = invoiceOnlyAccept ? null : buildWhatYouPay({
+    model: whatYouPayModel,
+    fees: (pricing.firstVisitFees?.length ? pricing.firstVisitFees : (setupFeeEffective ? [setupFeeEffective] : [])).map(tierAwareFee),
+    serviceMode,
+    invoiceMode: !!estimate.billByInvoice,
+    siteConfirmationHold: !!estimate.siteConfirmationHold,
+    commercial: isCommercialEstimate,
+    creditApplies: firstBillCreditApplies,
+    oneTimeExtrasTotal: oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode),
+    upFrontRowCount: rodentSetupInvoiceRows.length,
+    invoiceFirstVisit: confirmStepFirstVisitAmount({ serviceMode, paymentPreference: 'pay_at_visit', siteConfirmationHold: !!estimate.siteConfirmationHold, selectedFrequency: combinedFrequency }),
+    paymentPreference,
+    annualPrepayOffered: annualPrepayEligibleEffective && !estimate.billByInvoice,
+    monthlyShown: !!monthlyAverage,
+    due: {
+      prepayInLane: !!data?.recurringCardPolicy?.prepayInLane,
+      prepayAfterVisit,
+      prepayCardCapture: !!data?.recurringCardPolicy?.required,
+      paymentTiming,
+      setupBilledWithFirstVisit: !!setupFeeAfterVisitCopy,
+      hasUpFrontInvoice: afterVisitInvoiceShape.hasSetupInvoice || afterVisitInvoiceShape.hasFirstVisitInvoice,
+    },
+  });
 
   // Service/price cards — shared by the live configurator (below) and the
   // read-only recap on an accepted estimate, so reopening an accepted link
@@ -11204,6 +11239,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
 
           <div id={PRICE_SECTION_ID} style={{ scrollMarginTop: 76 }}>
             {renderQuoteDetailCards()}
+            <WhatYouPayBox box={whatYouPay} />
             <PriceFollowUps
               firstVisit={firstVisitLine}
               // The link exists only where this layout renders the Ask bar at its end.

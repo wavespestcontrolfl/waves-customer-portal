@@ -208,6 +208,23 @@ export function confirmStepFirstVisitAmount({ serviceMode, paymentPreference, si
   return firstVisitAmount(selectedFrequency || {});
 }
 
+// The invoice box's when-money-moves sentence for the pay-per-application choice, one place so the
+// "Reserve your spot" box and the price section's "what you pay and when" box read the same words.
+// For the existing-customer cohort it is read from the one timing answer: held customers are told a
+// pay link follows the visit, a saved method or a fresh card capture is billed after the first
+// application, and a first invoice that goes out at confirm gets no "nothing due" claim ('').
+// Outside the cohort the new-customer card lane keeps its line exactly.
+export function payPerApplicationTimingNote({ setupBilledWithFirstVisit = false, paymentTiming = null, prepayCardCapture = false } = {}) {
+  if (setupBilledWithFirstVisit) return 'Nothing due today — your setup fee is billed with your first visit.';
+  if (!paymentTiming) return prepayCardCapture ? 'Nothing due today — Auto Pay bills your card after your first application.' : '';
+  if (paymentTiming.firstInvoice !== 'after_visit') return '';
+  if (paymentTiming.held === 'paused') return 'Nothing due today. Your Auto Pay is paused, so we send you a pay link after your first visit.';
+  if (paymentTiming.held === 'off') return 'Nothing due today. We send you a link to pay after your first visit.';
+  return prepayCardCapture
+    ? 'Nothing due today — Auto Pay bills your card after your first application.'
+    : 'Nothing due today — your saved payment method is charged after your first application.';
+}
+
 export default function PaymentPreferenceButtons({
   onSelect,
   disabled,
@@ -389,27 +406,9 @@ export default function PaymentPreferenceButtons({
                 : 'Choose pay per application. Nothing is charged today — your saved payment method is billed for your first visit after it is completed.')
               : `Choose pay per application and we will send the ${payPerApplicationInvoiceLabel} after confirmation.`)
             : 'Choose pay per application. Your first service visit will be billed after completion.';
-  // The invoice box's when-money-moves sentence (it also survives the
-  // prepay-offered layout, where the combined fineprint above is hidden). For
-  // the existing-customer cohort it is read from the one timing answer: held
-  // customers are told a pay link follows the visit, a saved method or a fresh
-  // card capture is billed after the first application, and a first invoice
-  // that goes out at confirm gets no "nothing due" claim. Outside the cohort
-  // the new-customer card lane keeps its line exactly.
-  // A setup fee stamped on the first visit (GATE_PAF_SETUP_FEE) says so first.
-  const invoiceBoxNote = setupBilledWithFirstVisit
-    ? 'Nothing due today — your setup fee is billed with your first visit.'
-    : paymentTiming
-    ? (paymentTiming.firstInvoice !== 'after_visit'
-      ? ''
-      : (paymentTiming.held === 'paused'
-        ? 'Nothing due today. Your Auto Pay is paused, so we send you a pay link after your first visit.'
-        : paymentTiming.held === 'off'
-          ? 'Nothing due today. We send you a link to pay after your first visit.'
-          : (prepayCardCapture
-            ? 'Nothing due today — Auto Pay bills your card after your first application.'
-            : 'Nothing due today — your saved payment method is charged after your first application.')))
-    : (prepayCardCapture ? 'Nothing due today — Auto Pay bills your card after your first application.' : '');
+  // The invoice box's when-money-moves sentence; it also survives the prepay-offered layout, where the
+  // combined fineprint above is hidden. A setup fee stamped on the first visit (GATE_PAF_SETUP_FEE) says so first.
+  const invoiceBoxNote = payPerApplicationTimingNote({ setupBilledWithFirstVisit, paymentTiming, prepayCardCapture });
   const payPerApplicationOptionNote = heldRecurring
     ? 'Approve now — no payment today. We confirm your exact price on site before your first invoice.'
     : setupBilledWithFirstVisit
