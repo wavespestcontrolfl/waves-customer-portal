@@ -952,19 +952,19 @@ const PORTAL_HOST_ENV_NAMES = Object.freeze(['PUBLIC_PORTAL_URL', 'PORTAL_URL', 
 function ownedHostKey(host) {
   return String(host).toLowerCase().replace(/\.$/, '');
 }
-// The host an alias value names (a full http(s) URL or a bare host, as typed); null when it is empty or names no host,
-// so one bad alias drops only itself. A scheme with no `//` ('https:', 'mailto:x') is no host, and neither is a value
-// with userinfo.
-const SCHEMED_VALUE_RE = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//;
-const SCHEME_WITHOUT_HOST_RE = /^[A-Za-z][A-Za-z0-9+.-]*:(?!\d)/;
+// The host an alias value names; null when it names none, so one bad alias drops only itself. A full value is
+// http(s):// followed at once by a host; a bare value is a host name alone (labels, an optional terminal dot and
+// port). Anything else names no host: a path ('/links.example/x' would parse as the host links.example), a scheme
+// with no `//` ('https:', 'mailto:x'), another scheme, extra slashes, userinfo.
+const FULL_URL_VALUE_RE = /^https?:\/\/[A-Za-z0-9]/i;
+const BARE_HOST_VALUE_RE = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.?(?::\d+)?$/;
 function portalHostOf(value) {
   const raw = String(value || '').trim();
-  const schemed = SCHEMED_VALUE_RE.test(raw);
-  if (!raw || (!schemed && SCHEME_WITHOUT_HOST_RE.test(raw))) return null;
+  const full = FULL_URL_VALUE_RE.test(raw);
+  if (!full && !BARE_HOST_VALUE_RE.test(raw)) return null;
   try {
-    const url = new URL(schemed ? raw : `https://${raw}`);
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
-    return url.hostname && !url.username && !url.password ? url.host : null;
+    const url = new URL(full ? raw : `https://${raw}`);
+    return url.username || url.password ? null : url.host;
   } catch {
     return null;
   }

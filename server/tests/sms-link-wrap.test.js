@@ -134,10 +134,15 @@ describe('link recognition (ownedPortalLinkSpans)', () => {
       process.env.CLIENT_URL = 'https://';
       process.env.PORTAL_URL = 'https://portal';
       process.env.PORTAL_DOMAIN = 'mailto:office@wavespest.example';
-      process.env.RAILWAY_PUBLIC_DOMAIN = '/links';
-      expect(ownedPortalHosts()).toEqual([HOST]);
-      process.env.RAILWAY_PUBLIC_DOMAIN = `staff@${RAILWAY}`;
-      expect(ownedPortalHosts()).toEqual([HOST]);
+      for (const alias of ['/links', '/links.example/path', '//links.example', 'https:///links.example/path', 'ftp://files.example',
+        'https:links.example', `staff@${RAILWAY}`, `https://staff@${RAILWAY}`, `${RAILWAY}/path`, '']) {
+        process.env.RAILWAY_PUBLIC_DOMAIN = alias;
+        expect(ownedPortalHosts()).toEqual([HOST]);
+      }
+      // The two forms production uses still name their hosts.
+      process.env.RAILWAY_PUBLIC_DOMAIN = RAILWAY;
+      process.env.CLIENT_URL = `https://${RAILWAY}/`;
+      expect(ownedPortalHosts()).toEqual([HOST, RAILWAY]);
     });
 
     // The SMS wrap mints its short links on the short-link base as typed, so a base that is not a full URL must stop
