@@ -2728,6 +2728,7 @@ async function createSelfBooking(payload = {}) {
       customersOnly,
       authedCustomer,
       callbackVisit,
+      commitGuard,
     } = payload;
 
     // callbackVisit is INTERNAL-ONLY (reservice-public.js, inspection-public.js):
@@ -4514,6 +4515,18 @@ async function createSelfBooking(payload = {}) {
           statusCode: 409,
           isOperational: true,
           code: 'SLOT_TAKEN',
+        });
+      }
+
+      // commitGuard (internal caller only: services/mail/home-book.js, the new-home postcard page): the caller's own
+      // re-check on THIS transaction, after the replay and the conflict checks and before the visit is inserted, of what
+      // it decided before it started (its gate, the prospect row it share-locks until commit, the price). A false verdict
+      // refuses the booking. It is a function, so a request body (JSON) can never carry one.
+      if (typeof commitGuard === 'function' && !callbackVisit && !(await commitGuard(trx))) {
+        throw Object.assign(new Error('This offer just changed. Please reload the page.'), {
+          statusCode: 409,
+          isOperational: true,
+          code: 'COMMIT_GUARD_REFUSED',
         });
       }
 

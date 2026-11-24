@@ -48,9 +48,8 @@ const RECURRING_PATTERN = 'quarterly';
 const LEAD_SOURCE = 'mail_new_home';
 const LEAD_SOURCE_DETAIL = 'new_home_postcard';
 const MAX_OFFERS = 30;
-// The page shows a monthly price from the stored annual; anything under this many dollars of annual is rounding.
-const PRICE_TOLERANCE = 0.5;
-const SLOT_CONFLICT_CODES = new Set(['SLOT_TAKEN', 'SLOT_UNAVAILABLE', 'SELF_SERVE_NOTICE']);
+const CONTACT_ON_FILE = 'CONTACT_ON_FILE';
+const SLOT_CONFLICT_CODES =new Set(['SLOT_TAKEN', 'SLOT_UNAVAILABLE', 'SELF_SERVE_NOTICE']);
 
 // Each outside dependency a test did not inject, loaded when used (booking.js is a large router).
 const REAL = {
@@ -174,6 +173,44 @@ function validOffer(offer) {
   return { date, start, end: end || null, technicianId: tech || null, sig };
 }
 
+const timeToMinutes = (hhmm) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5));
+
+/**
+ * The funnel's own signed-offer check (createSelfBooking's verifySlotOfferField call, booking.js), run before anything is
+ * written: the offer must be one the finder minted for this pin, this service and this duration, and not expired. The
+ * booking re-runs it and the commit-time slot checks.
+ */
+async function offerIsSigned(offer, pin, deps) {
+  const booking = deps.booking || REAL.booking();
+  const verify = deps.verifySlotOfferField || require('../../utils/slot-offer-token').verifySlotOfferField;
+  const config = await booking.loadBookingConfig();
+  return !!verify({
+    surface: 'booking',
+    scopeId: '',
+    serviceKey: SERVICE_KEY,
+    locationKey: booking.bookingOfferLocationKey(pin.lat, pin.lng),
+    date: offer.date,
+    startMinutes: timeToMinutes(offer.start),
+    technicianId: offer.technicianId || null,
+    durationMinutes: booking.resolveBookingDuration(SERVICE_MINUTES, config, SERVICE_KEY),
+    policy: booking.bookOfferPolicyLive(offer.sig),
+  }, offer.sig);
+}
+
+// ---- the price the page showed ----------------------------------------------------------------------------------------
+
+const toCents = (dollars) => Math.round(Number(dollars) * 100);
+
+/** The price the page showed ({ annual, setupFee } as GET /:token returned it), in integer cents, or null. */
+function validShownPrice(price) {
+  if (!price || typeof price !== 'object' || Array.isArray(price)) return null;
+  const annual = Number(price.annual);
+  const setupFee = price.setupFee === null || price.setupFee === undefined ? 0 : Number(price.setupFee);
+  if (typeof price.annual === 'boolean' || !Number.isFinite(annual) || annual <= 0 || annual >= 1e7) return null;
+  if (!Number.isFinite(setupFee) || setupFee < 0 || setupFee >= 1e7) return null;
+  return { annualCents: toCents(annual), setupCents: toCents(setupFee) };
+}
+
 // ---- the estimate ---------------------------------------------------------------------------------------------------
 
 // A v4-shaped UUID from the home and the typed contact: the same home and contact reach the same draft id, so a repeat
@@ -194,7 +231,7 @@ const codeOf = (err) => (err && (typeof err.code === 'string' || typeof err.code
  * The price check before anything is written: the shadow price pass's own verdict (home-quote priceHome: the member check,
  * then a dry run of the canonical save). Returns { ok: true } or { refuse: { status, error } }.
  */
-async function checkLivePrice(home, deps) {
+async function checkLivePrice(home, shown, deps) {
   const quote = deps.quote || REAL.quote();
   let result;
   try {
@@ -206,8 +243,8 @@ async function checkLivePrice(home, deps) {
   if (result.status === 'failed') return { refuse: { status: 503, error: 'not_available' } };
   // A member at the address, quote-required, review, or any line the shadow price pass would not call clean.
   if (result.status !== 'priced') return { refuse: { status: 409, error: 'not_available' } };
-  if (Math.abs(result.priceAnnual - home.price.annual) > PRICE_TOLERANCE
-    || Math.abs(result.priceSetupFee - (home.price.setupFee || 0)) > PRICE_TOLERANCE) {
+  // The live price, to the cent, must be the one the page showed (annual and setup fee).
+  if (toCents(result.priceAnnual) !== shown.annualCents || toCents(result.priceSetupFee) !== shown.setupCents) {
     return { refuse: { status: 409, error: 'price_changed' } };
   }
   return { ok: true };
@@ -251,14 +288,34 @@ async function findExistingCustomer(home, contact, deps) {
 
 // The pre-customer row, with the columns the wizard sets for a new contact that apply here. No lot or property size
 // (measured only), no landing page or UTM (none). Returns the new customer's id.
+//
+// One transaction, taken under the phone fence (ensureCustomerAccount lockPhone, the same fence quick-add uses), spans the
+// account, the contact recheck and the profile insert: two taps at once cannot both mint, and a refusal rolls the account
+// back. Fail closed: an account that is not brand new (ensureCustomerAccount attached to one, or refused on a phone or
+// email match), or any customer the wizard's matcher finds once the fence is held, is a CONTACT_ON_FILE refusal.
 async function mintCustomer(home, contact, pin, deps) {
   const conn = deps.db || db;
   const { ensureCustomerAccount } = require('../../routes/admin-customers');
+  const onFile = () => Object.assign(new Error('contact on file'), { code: CONTACT_ON_FILE });
+  try {
+    return await conn.transaction(async (trx) => {
+      const account = await ensureCustomerAccount(trx, {
+        firstName: contact.first, lastName: contact.last, phone: contact.phone10, email: contact.email, lockPhone: true,
+      });
+      if (!account || account.created !== true) throw onFile();
+      if (await (deps.findExistingCustomer || findExistingCustomer)(home, contact, { ...deps, db: trx })) throw onFile();
+      return insertCustomer(trx, account, home, contact, pin);
+    });
+  } catch (err) {
+    // ensureCustomerAccount's own phone or email refusals (409) are the same answer.
+    if (err && (err.code === CONTACT_ON_FILE || (httpStatus(err) === 409 && /^(PHONE_MATCH|EMAIL_MATCH)/.test(String(err.code || ''))))) throw onFile();
+    throw err;
+  }
+}
+
+async function insertCustomer(conn, account, home, contact, pin) {
   const { applyContactNormalization } = require('../../utils/intake-normalize');
   const code = `WAVES-${Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('')}`;
-  const account = await ensureCustomerAccount(conn, {
-    firstName: contact.first, lastName: contact.last, phone: contact.phone10, email: contact.email,
-  });
   const [created] = await conn('customers').insert(applyContactNormalization({
     account_id: account.accountId,
     is_primary_profile: !account.existingCustomer,
@@ -305,19 +362,49 @@ async function saveEstimate(home, contact, customerId, deps) {
 }
 
 // The save's own price must be the one just checked and still a clean server price (the judge the shadow pass uses).
-function savedPriceHolds(saved, home, deps) {
+// Annual and setup fee both, to the cent, against the price the page showed.
+function savedPriceHolds(saved, shown, deps) {
   const quote = deps.quote || REAL.quote();
   const verdict = quote.judge({ estimate: saved.estimate, memberLinkageWarning: saved.memberLinkageWarning });
-  return !!verdict.price && Math.abs(verdict.price.annual - home.price.annual) <= PRICE_TOLERANCE;
+  return !!verdict.price && toCents(verdict.price.annual) === shown.annualCents && toCents(verdict.price.setupFee) === shown.setupCents;
 }
 
-// The quote-wizard draft shape the /book handoff accepts, and the postcard lead source. Only a live draft is touched.
-async function markEstimate(estimateId, deps) {
+// The quote-wizard draft shape the /book handoff accepts, the postcard lead source, and the setup fee the page disclosed,
+// frozen as the wizard freezes it (estimate_data.setupFeeQuote = { amount, kind: 'waveguard_membership' }, public-quote.js
+// decideSetupFeeQuote). booking.js bills a pest setup fee only from that field (stampDisclosedSetupFee reads
+// estimate_data.setupFeeQuote.amount), never from result.oneTime.membershipFee. A zero fee writes no quote, as the wizard
+// writes none. Only a live draft is touched.
+async function markEstimate(estimateId, shown, deps) {
   const conn = deps.db || db;
-  await conn('estimates')
-    .where({ id: estimateId, status: 'draft' })
-    .whereNull('archived_at')
-    .update({ source: 'quote_wizard', lead_source: LEAD_SOURCE, lead_source_detail: LEAD_SOURCE_DETAIL });
+  const set = { source: 'quote_wizard', lead_source: LEAD_SOURCE, lead_source_detail: LEAD_SOURCE_DETAIL };
+  if (shown.setupCents > 0) {
+    const frozen = JSON.stringify({ setupFeeQuote: { amount: shown.setupCents / 100, kind: 'waveguard_membership' } });
+    set.estimate_data = conn.raw("COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb", [frozen]);
+  }
+  await conn('estimates').where({ id: estimateId, status: 'draft' }).whereNull('archived_at').update(set);
+}
+
+// An earlier tap of this booking that COMMITTED (a lost response, then an identical retry): a live mail_new_home booking
+// at this slot whose customer has this phone and this home's address, whatever stage the booking has since moved the
+// customer to. Its customer id, or null. The retry then goes to createSelfBooking unchanged, whose own replay (same
+// customer, same slot, the consumed draft) answers it.
+async function findCommittedBookingCustomer(home, contact, offer, deps) {
+  const conn = deps.db || db;
+  const booking = deps.booking || REAL.booking();
+  const rows = await conn('self_booked_appointments as sba')
+    .join('customers as c', 'c.id', 'sba.customer_id')
+    .where('sba.source', LEAD_SOURCE)
+    .where('sba.date', offer.date)
+    .where('sba.start_time', offer.start)
+    .whereNot('sba.status', 'cancelled')
+    .where('c.lead_source', LEAD_SOURCE)
+    .whereNull('c.deleted_at')
+    .whereRaw("regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${contact.phone10}`])
+    .limit(5)
+    .select('c.id', 'c.phone', 'c.address_line1', 'c.address_line2', 'c.zip');
+  const own = rows.find((r) => phone10Of(r.phone) === contact.phone10
+    && booking.addressMatchesCustomer(r, home.row.address_line1, home.row.zip, null));
+  return own ? own.id : null;
 }
 
 // ---- the booking ----------------------------------------------------------------------------------------------------
@@ -336,14 +423,25 @@ function refusalOf(result) {
  * The live price check, the canonical save, the draft's mark and the handoff token. Returns { refuse: { status, body } }
  * or { estimateId, estimateToken }.
  */
-async function prepareEstimate(home, contact, pin, deps) {
+async function prepareEstimate(home, contact, pin, shown, deps) {
   const refuse = (status, error) => ({ refuse: { status, body: { error } } });
+  // The price the page showed is the one on the row now (annual and setup fee, to the cent).
+  if (toCents(home.price.annual) !== shown.annualCents || toCents(home.price.setupFee || 0) !== shown.setupCents) {
+    return refuse(409, 'price_changed');
+  }
   // Our own earlier mint is reused; any other customer at this phone or email is not booked here.
   let customerId = await (deps.findOwnCustomer || findOwnCustomer)(home, contact, deps);
   if (!customerId && await (deps.findExistingCustomer || findExistingCustomer)(home, contact, deps)) return refuse(409, 'contact_on_file');
-  const priced = await checkLivePrice(home, deps);
+  const priced = await checkLivePrice(home, shown, deps);
   if (priced.refuse) return refuse(priced.refuse.status, priced.refuse.error);
-  if (!customerId) customerId = await (deps.mintCustomer || mintCustomer)(home, contact, pin, deps);
+  if (!customerId) {
+    try {
+      customerId = await (deps.mintCustomer || mintCustomer)(home, contact, pin, deps);
+    } catch (err) {
+      if (err && err.code === CONTACT_ON_FILE) return refuse(409, 'contact_on_file');
+      throw err;
+    }
+  }
 
   let saved;
   try {
@@ -353,12 +451,40 @@ async function prepareEstimate(home, contact, pin, deps) {
     if (status >= 400 && status < 500) return refuse(409, 'not_available');
     throw err;
   }
-  if (!savedPriceHolds(saved, home, deps)) return refuse(409, 'price_changed');
+  if (!savedPriceHolds(saved, shown, deps)) return refuse(409, 'price_changed');
   const estimateId = saved.estimate.id;
-  await markEstimate(estimateId, deps);
+  await markEstimate(estimateId, shown, deps);
 
   const estimateToken = (deps.handoffToken || REAL.handoffToken())(estimateId);
   return estimateToken ? { estimateId, estimateToken, customerId } : refuse(503, 'not_available');
+}
+
+/**
+ * The retry of a booking that committed: the customer, the draft id and a token for it, or null (then the normal path
+ * runs). The draft must still exist.
+ */
+async function recoverCommitted(home, contact, offer, deps) {
+  const customerId = await (deps.findCommittedBookingCustomer || findCommittedBookingCustomer)(home, contact, offer, deps);
+  if (!customerId) return null;
+  const estimateId = draftIdFor(home.row.id, contact);
+  const draft = await (deps.db || db)('estimates').where({ id: estimateId }).first('id');
+  const estimateToken = draft && (deps.handoffToken || REAL.handoffToken())(estimateId);
+  return estimateToken ? { estimateId, estimateToken, customerId } : null;
+}
+
+// The check createSelfBooking runs inside its transaction, after its own replay and conflict checks, before the visit is
+// inserted: the mail gate and /book are still on, and the prospect row, share-locked until the booking commits, is still
+// a live priced home at the price the page showed.
+function commitGuardFor(home, shown, deps) {
+  return async (trx) => {
+    const gates = deps.gates || REAL.gates();
+    if (typeof gates.mailHomePageLive !== 'function' || !gates.mailHomePageLive() || !gates.isEnabled('selfBooking')) return false;
+    const row = await trx('mail_prospects')
+      .where({ id: home.row.id, list_key: LIST_KEY, status: 'eligible', price_status: 'priced' })
+      .forShare()
+      .first('price_annual', 'price_setup_fee');
+    return !!row && toCents(row.price_annual) === shown.annualCents && toCents(row.price_setup_fee || 0) === shown.setupCents;
+  };
 }
 
 // The payload of /book's POST /confirm, with the flags it sets after the body spread: no bearer identity, never a
@@ -416,15 +542,26 @@ async function bookHome(token, input, deps = {}) {
   if (contact.invalid) return { status: 400, body: { error: 'invalid_contact', field: contact.invalid } };
   const offer = validOffer(input && input.offer);
   if (!offer) return { status: 400, body: { error: 'invalid_offer' } };
+  const shown = validShownPrice(input && input.price);
+  if (!shown) return { status: 400, body: { error: 'invalid_price' } };
 
   const booking = deps.booking || REAL.booking();
   const pin = await pinOf(home.row, booking);
   if (!pin) return { status: 503, body: { error: 'not_available' } };
+  // The signed offer is checked before any contact lookup or write (an unsigned or expired one reveals and writes nothing).
+  if (!(await offerIsSigned(offer, pin, deps))) return { status: 400, body: { error: 'invalid_offer' } };
 
-  const prepared = await prepareEstimate(home, contact, pin, deps);
+  // A retry of a booking that already committed goes straight to createSelfBooking's own replay: the customer has since
+  // moved out of the pre-customer stage and is a member at the address, so the contact and price checks below no longer
+  // apply to it.
+  const prepared = await recoverCommitted(home, contact, offer, deps) || await prepareEstimate(home, contact, pin, shown, deps);
   if (prepared.refuse) return prepared.refuse;
 
-  const result = await booking.createSelfBooking(bookingPayload({ home, contact, offer, pin, gates, estimate: prepared }));
+  const result = await booking.createSelfBooking({
+    ...bookingPayload({ home, contact, offer, pin, gates, estimate: prepared }),
+    // Re-read inside the booking transaction: the gate, the prospect row (locked) and the price it still holds.
+    commitGuard: commitGuardFor(home, shown, deps),
+  });
   if (!result.ok) {
     const refusal = refusalOf(result);
     if (refusal.error !== 'slot_taken') return { status: refusal.status, body: { error: refusal.error } };
@@ -438,5 +575,6 @@ async function bookHome(token, input, deps = {}) {
 }
 
 module.exports = {
-  getHomeTimes, bookHome, loadHome, draftIdFor, validContact, validOffer, offersOf, findOwnCustomer, mintCustomer,
+  getHomeTimes, bookHome, loadHome, draftIdFor, validContact, validOffer, validShownPrice, offersOf, findOwnCustomer, mintCustomer,
+  findCommittedBookingCustomer, commitGuardFor, offerIsSigned,
 };
